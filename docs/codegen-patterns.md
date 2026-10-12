@@ -482,19 +482,25 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
 
 ---
 
-## 10. Interrupt priority in compiled code (Verified, mechanism Uncertain)
+## 10. Interrupt priority in compiled code (Verified; mapping to built-ins from the reference)
 
 Compiled Pascal routines contain `ori.w #0x700,SR` … `andi.w #0xF8FF,SR`.
 For example TIME_$SET_TIME_OF_DAY, 0xE167EC → 0xE1686A, and PROC1_$RESUME,
 PROC1_$SUSPEND, PROC1_$SET_PRIORITY, SMD_$LOCK_DISPLAY.
 
-- The exit **forces IPL 0**; it does not restore the previous level.
-- Only `move SR,-(SP)` / `move (SP)+,SR` pairs are a real save and restore.
-- **Uncertain:** how the source expressed this.  It could be a compiler
-  intrinsic, a `%`-directive, or an inline-expanded routine.  The 1990
-  reference does not document one.  The owner decides the spelling before
-  the codegen agent implements it.  Record the decision in
-  `docs/reference-clarifications.md`.
+- **Source spelling:** the reference's systems-programming built-ins
+  (Appendix E, Table E-1; also Table 4-7), all privileged:
+  - `disable;` turns off the interrupt enable: `ori.w #0x700,SR`.
+  - `enable;` turns it back on: `andi.w #0xF8FF,SR`.  This **forces IPL 0**;
+    it does not restore the previous level, exactly as the image shows.
+  - `oldsr := set_sr(newsr);` reads SR and installs a new value.  The
+    reference gives the expansion as `move.w SR,D0; move.w newsr,SR;
+    move.w D0,oldsr`.  Kernel `move SR,-(SP)` / `move (SP)+,SR` pairs
+    are the real save/restore; check each against set_sr before assuming
+    it is compiled (some are hand assembly).
+- The mapping of `disable`/`enable` to these exact instructions is inferred
+  from the image plus the reference's description; confirm the encodings
+  against more sites when the codegen agent implements them.
 
 ---
 

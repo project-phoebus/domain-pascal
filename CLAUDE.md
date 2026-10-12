@@ -249,9 +249,12 @@ it before touching the backend.  The most important points:
     - A `status_$t` out-parameter is cleared on entry (`clr.l (An)`).
     - Error codes are stored with `move.l #imm,(An)`.
     - Names come from `~/src/domainos-archeology/stcodes`.
-14. **Interrupt level.**  Compiled routines contain `ori.w #0x700,SR` …
-    `andi.w #0xF8FF,SR`.  The exit forces IPL 0.  How the source spelled
-    this is **unknown**; the owner decides (codegen-patterns section 10).
+14. **Interrupt level.**  The reference's systems-programming built-ins
+    (Appendix E; Table 4-7): `disable` and `enable` (procedures) and
+    `oldsr := set_sr(newsr)` (function).  Compiled kernel routines contain
+    `ori.w #0x700,SR` … `andi.w #0xF8FF,SR`, i.e. `disable` … `enable`;
+    `enable` forces IPL 0 rather than restoring.  `set_sr` is the
+    save/replace form.  See codegen-patterns section 10.
 15. **Sections.**
     - The reference defaults are `.text`/`.data`.
     - The kernel uses module or section names (WIRED_PROC/WIRED_DATA,
@@ -356,7 +359,10 @@ enough that a reviewer can line it up with the image's instruction order.
   Apollo.  Do not build it now.  Just do not hard-code m68k register names
   in the front end or the IR.
 
-## 5. Implementation language: OWNER TO DECIDE BEFORE AGENTS START CODING
+## 5. Implementation language: DECIDED
+
+**The owner chose (2026-10-11): Rust for the compiler, Python for the test
+and conformance harness.**  The comparison below is kept for the record.
 
 | Option | For | Against |
 |---|---|---|
@@ -422,12 +428,11 @@ typing and the golden tests.
 
 ## 7. Working rules
 
-- **Issues.**  `../source` tracks work with **bd (beads)**, and `bd` is
-  installed.  This repo has **not** been initialised.  **Owner step:** run
-  `bd init` here, choosing the issue prefix.  Until then, agents must not
-  run `bd init` and must not write issue ids anywhere.  Once it exists, use
-  it as `../source` does: `bd ready`, `bd update <id> --status in_progress`,
-  `bd close <id>`; low-priority issues for TODOs.
+- **Issues.**  This repo uses **bd (beads)**; the owner ran `bd init`
+  (2026-10-11).  Use it as `../source` does: `bd ready`,
+  `bd update <id> --status in_progress`, `bd close <id>`; low-priority
+  issues for TODOs.  Create an issue before citing its id; never write an
+  id you have not seen `bd create` print.
 - **Commits.**  Commit locally only.  **Never `git push`.**  Commit only
   when asked or at the end of a work unit, per the owner's instructions,
   and finish with a clean `git status`.
@@ -473,10 +478,9 @@ typing and the golden tests.
 
 ## 8. First milestones
 
-1. **Owner decisions.**
-   - The implementation language (section 5).
-   - `bd init` and the issue prefix.
-   - The spelling of the IPL intrinsics (codegen-patterns section 10).
+1. **Owner decisions** (done 2026-10-11): Rust + Python (section 5);
+   `bd init` run; interrupt control uses the reference's `disable` /
+   `enable` / `set_sr` built-ins (Appendix E).
 2. **Skeleton.**
    - Build system, an empty compiler driver, test runner.
    - `tools/` harness that links an `.s` at an image address and compares
