@@ -23,7 +23,12 @@ AST_$PAGE_ZERO, 0xE00EB0..0xE00F16: calls, constant arguments, a `dbf`
 `for` loop; `handasm/ast_page_zero.s` is the same unit transcribed by
 hand) and `name_convert_acl_status.pas` (NAME_CONVERT_ACL_STATUS,
 0xE5861C..0xE58656: an `if ... else if` chain, a by-address parameter
-held in A0).  Each `.pas` starts with a comment
+held in A0) and `sio_init_dtte.pas` (the module-local routine at
+0xE32B76, `sio/init_dtte.c`, 0xE32B76..0xE32BB8: parameters held across
+calls in A2 and D2 by the register allocator, codegen-patterns 12.4)
+and `proc1_set_asid.pas` (PROC1_$SET_ASID, 0xE148F8..0xE1491E: a
+parameter whose last use is a call's argument, held through the call in
+D2, codegen-patterns 12.4 R4(c)).  Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
 

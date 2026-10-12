@@ -70,6 +70,10 @@ usage:
                                          # adjacent true dependences that
                                          # an independent instruction could
                                          # have separated (N examples)
+    tools/regalloc.py callargs [--min N] [--max N]
+                                         # 12.4 R4(c): values last read by
+                                         # a call's arguments, scratch or
+                                         # callee-saved
     tools/regalloc.py csaved [--min N] [--max N]
                                          # routines that use callee-saved
                                          # registers, with and without calls
@@ -563,7 +567,8 @@ def rule_spec(name):
     i.e. a greedy colouring in address order."""
     base = 'lifo' if name.startswith('lifo') else 'col'
     f = name[len(base):]
-    tail = {'S': 'stmt', 'K': 'block', 'P': 'pdom', 'C': 'cond'}.get(f[-1:]) if f else None
+    tail = {'S': 'stmt', 'K': 'block', 'P': 'pdom', 'C': 'cond', 'A': 'arg',
+            'O': 'argo'}.get(f[-1:]) if f else None
     ent = 'blk' if 'L' in f else ('E' in f)
     return base, ent, 'U' in f, 'B' in f, tail, 'Q' in f
 
@@ -613,7 +618,10 @@ def pts_of(rt, v, ent, stmt=False):
     if stmt:
         key = (id(v), stmt)
         if key not in rt.tails:
-            rt.tails[key] = stmt_tail(rt, max(v.pts), stmt)
+            if stmt in ('arg', 'argo'):
+                rt.tails[key] = arg_tail(rt, v, outer=stmt == 'argo')
+            else:
+                rt.tails[key] = stmt_tail(rt, max(v.pts), stmt)
         pts = pts | rt.tails[key]
     return pts
 
@@ -684,6 +692,66 @@ def stmt_tail(rt, i, tail='stmt'):
                       and not x.mn.startswith(('cmp', 'tst', 'btst', 'pea', 'jmp'))):
             break
     return out
+
+
+def stmt_end(x):
+    """A store to memory that is not a push: the end of a statement."""
+    return bool(x.ops) and is_mem(x.ops[-1]) and '%sp@-' not in x.ops[-1] and \
+        not x.mn.startswith(('cmp', 'tst', 'btst', 'pea', 'jsr', 'jmp'))
+
+
+def arg_call(rt, v):
+    """(call, start) when every last use of v lies in the argument sequence
+    of a call statement and v is not live across that call; else None.
+
+    The argument sequence of a call is the run of instructions before it
+    in its block after the previous statement: back to the last store to
+    memory that is not a push, the last call, or the block start.  M$ARITH
+    calls are arithmetic, not call statements, and do not count."""
+    uses = [i for i in v.pts if v.reg in rt.ins[i].uses and rt.rd_in[i][v.reg] & v.keys]
+    last = [i for i in uses if not (v.reg in rt.lout[i] and live_val_out(rt, v, i))]
+    if not last:
+        return None
+    found = None
+    for u in last:
+        b = rt.block_of[u]
+        blk = [j for j in rt.reach if rt.block_of[j] == b]
+        k = blk.index(u)
+        call = None
+        for j in blk[k:]:
+            x = rt.ins[j]
+            if x.call:
+                call = j
+                break
+            if x.kind or stmt_end(x):
+                break
+        if call is None or rt.ins[call].defs == {'d0', 'a0'}:
+            return None
+        start = blk[0]
+        for j in reversed(blk[:blk.index(call)]):
+            x = rt.ins[j]
+            if x.call or stmt_end(x):
+                start = j + 1
+                break
+        if found is None or found[0] != call:
+            if found is not None:
+                return None
+            found = (call, start)
+    return found
+
+
+def arg_tail(rt, v, outer):
+    """The instructions after v's last use up to and including the call
+    whose arguments read it (arg_call); with `outer', only for values
+    defined before that call statement."""
+    ac = arg_call(rt, v)
+    if not ac:
+        return set()
+    call, start = ac
+    if outer and v.first >= start:
+        return set()
+    return {j for j in rt.reach if rt.block_of[j] == rt.block_of[call]
+            and max(v.pts) < j <= call} | {call}
 
 
 def interferes_any(rt, v, c, blk=False, ent=False, use=False, stmt=False, seq=False):
@@ -1020,6 +1088,37 @@ def main(argv):
         c = sched_survey(done, m, int(argv[1]) if len(argv) > 1 else 0)
         for k in sorted(c):
             print(k, c[k])
+        return 0
+    if cmd == 'callargs':
+        # 12.4 R4(c): values whose every last use is in the arguments of
+        # one call (arg_call) and that do not cross it.  "outer": defined
+        # before that call statement; counted only where liveness alone
+        # (colU's ranges) leaves a scratch register free.  "inner":
+        # temporaries computed inside the argument list.
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            branchy = any(rt.ins[i].kind in ('bcc', 'br', 'db') for i in rt.reach)
+            for v in rt.values:
+                ac = arg_call(rt, v)
+                if not ac or v.crosses_call:
+                    continue
+                where = 'scratch' if v.reg in SCRATCH else 'csaved'
+                if v.first >= ac[1]:
+                    tot['inner', where] += 1
+                    continue
+                if not any(v.reg in rt.ins[i].uses for i in v.pts if ac[1] <= i < ac[0]):
+                    continue
+                cand = [r for r in v.cls if not interferes_any(rt, v, r, use=True)]
+                if not cand or cand[0] not in SCRATCH:
+                    continue
+                k = ('param' if v.param else 'other',
+                     'branchy' if branchy else 'straight', where)
+                tot[k] += 1
+                ex[k].append('%06X' % rt.ins[v.first].addr)
+        print('inner: scratch %d callee-saved %d' % (tot['inner', 'scratch'],
+                                                     tot['inner', 'csaved']))
+        for k in sorted(ex):
+            print('%-6s %-8s %-8s %4d  %s' % (k + (tot[k], ' '.join(ex[k][:12]))))
         return 0
     if cmd == 'csaved':
         c = Counter()

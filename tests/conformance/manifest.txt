@@ -26,9 +26,15 @@ tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .
 tests/conformance/proc2_get_boot_flags.pas   PROC2_$GET_BOOT_FLAGS  --section-addr .bss.moddata.PROC2=0xE7BE84
 # Control flow: an `if ... else if' chain, a by-address slot held in A0.
 tests/conformance/name_convert_acl_status.pas  NAME_CONVERT_ACL_STATUS
+# Register allocation (codegen-patterns 12.4 R1-R3): parameters loaded at
+# entry and held across calls in callee-saved registers (A2, D2).
+tests/conformance/sio_init_dtte.pas          0xE32B76:42
 
 # Harness fixtures.
 
 tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
 tests/conformance/handasm/ast_page_zero.s    0xE00EB0 AST_$PAGE_ZERO
 tests/conformance/handasm/pkt_recently_missing.s  PKT_$RECENTLY_MISSING
+# 12.4 R4(c): a parameter whose last use is a call's argument, held through
+# the call in D2 (a body without branches).
+tests/conformance/proc1_set_asid.pas         PROC1_$SET_ASID

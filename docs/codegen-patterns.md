@@ -259,6 +259,12 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
 - **A by-address parameter passed on by address** is its slot, pushed
   with `move.l (d,A6),-(SP)` (Verified: LOG_$READ 0xE1780C `actual_len`,
   0xE17818 `buffer`, both passed on to the worker 0xE17778).
+- **An object reached through a pointer held in an address register**
+  (a slot or pointer parameter loaded at entry, 12.2) is pushed with `pea
+  (d,An)` / `pea (An)` (Verified: module-local 0xE32B76,
+  `sio/init_dtte.c`, 0xE32B86 `pea (0xc,A2)`, 0xE32B92 `pea (0x18,A2)`,
+  0xE32B9E `pea (A2)`; also `pea (A2)` at 0xE1BEB2, 0xE1D59E, 0xE3DB8C).
+  Implemented; conformance unit `tests/conformance/sio_init_dtte.pas`.
 - **Implemented** (`isel.rs`, `Selector::push`, `push_long_const`): all
   the forms above that are Verified; `addr(x)` (ref "Addr", p. 4-13) in
   `dpc-sema`.  Golden `tests/golden/data/through_worker.pas` (LOG_$READ's
@@ -1218,11 +1224,10 @@ reproduce.
   D0 then D1, pointers A0 (PROC1_$TST_LOCK 0xE148CE..0xE148D8;
   TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A `move.b (8,A6),D0; move.w
   (0xa,A6),D1; movea.l (0xc,A6),A0`).  `dpc` allocates D0, D1, A0, A1 in
-  that order and rejects expressions that need more
-  (`crates/dpc-m68k/src/regs.rs`).  Callee-saved registers are handed out
-  only on explicit request (`Regs::alloc_held`, lowest free first), for
-  values that must survive a call; see 12.1 for what is and is not known
-  about when the original used them.
+  that order when they are free; since bead domain-pascal-g5q.5 every
+  value gets the lowest register of its class free over its live range,
+  D2/A2 and up included, a callee-saved one when it lives across a call
+  (`crates/dpc-m68k/src/regs.rs`; the model is 12.4 R1-R3).
 - **Re-evaluation:** the same expression is reloaded rather than kept in a
   register (0xE135DA/0xE135E2 reload `(8,A2)`, an uplevel variable;
   which values are kept is in 12.4, R7/R8).
@@ -1380,28 +1385,32 @@ kinds from the C in `../source/domain_os`.
 **Implemented** (`crates/dpc-m68k/src/isel.rs`, `select_body`,
 `Selector::entry_loads`): a *procedure* body of two or more statements,
 or of one `if`/`repeat`, loads every by-value parameter it reads and
-every by-address slot it uses more than once, in parameter order, into
-the lowest free scratch register (D for data, A for a dereferenced
-pointer or a slot); its statements then use only those registers.  A
-body of one `if`/`repeat` that reads a by-value parameter is rejected
-(no site seen); a slot used once in such a body is rejected (the
-fresh-register rule above).  A parameter that is only
-pushed as a whole argument is not "read" for this rule: it is pushed from
-the frame at each call (0xE00EBE, 0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).
-A statement right after a call may take scratch registers of its own when
-nothing was loaded at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr`
-at 0xE00EC2; a call leaves no value in a scratch register).  A body that
-loads parameters at entry and also calls is rejected: a scratch register
-does not survive the call, and when the original moved such a value to a
-callee-saved register is not catalogued (PROC1_$SET_TYPE 0xE152F2).  A one-statement body keeps
-its own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
+every by-address slot it uses more than once, in parameter order (D for
+data, A for a dereferenced pointer or a slot).  Since bead
+domain-pascal-g5q.5 these loads are ordinary values for the allocator
+(12.4 R1-R3, `crates/dpc-m68k/src/regs.rs`): each takes the lowest
+register of its class free over its live range, so a third value of a
+class takes D2/A2, a value live across a call a callee-saved register
+(module-local 0xE32B76: A2, D2 around three `jsr`; PROC1_$SET_TYPE
+0xE152F2: D2, D3), and a parameter's register is free after its last
+use.  The statements of such a body take registers of their own the same
+way.  A body of one `if`/`repeat` that reads a by-value parameter is
+rejected (no site seen); a slot or pointer parameter used once in a body
+of several statements is rejected (the fresh-register rule above, 12.4
+R4(b)), except in a simple statement right after a call in a body that
+loaded nothing at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at
+0xE00EC2).  A parameter that is only pushed as a whole argument is not
+"read" for this rule: it is pushed from the frame at each call (0xE00EBE,
+0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).  A one-statement body keeps its
+own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
 TIME_$Q_FLUSH_QUEUE stay byte-identical).  Reported as not supported yet:
-a function body of several statements; a third parameter of a class; a
-pointer parameter also used as data; a statement in a several-statement
-body that needs a register of its own (scheduling and the no-reuse
-pattern above); computing with a held parameter (the copy rule); storing
+a function body of several statements (R5); a pointer parameter also
+used as data; computing with a held parameter (the copy rule); storing
 a parameter that was not loaded at entry (one-statement bodies);
-assigning to a parameter.
+assigning to a parameter; in a body with branches, a parameter whose
+last use is an argument of a call (12.4 R4(c)).  In a body without
+branches such a parameter is held through the call, in a callee-saved
+register (12.4 R4(c): PROC1_$SET_ASID 0xE148FE D2, a conformance unit).
 
 **Uncertain:**
 
@@ -1709,9 +1718,48 @@ of the remaining misses).**  The corpus misses fall into these groups:
     before the `jsr`.
   - PROC1_$SET_ASID 0xE148FE D2.
   - AST_$SET_TROUBLE 0xE071FC A2.
+  - Parameters loaded at entry whose last use is an argument of the
+    routine's last call, seen while looking for step-1 units (bead
+    domain-pascal-g5q.5; not counted separately): TTY_$I_FLUSH_OUTPUT
+    0xE1B80C A2 (`pea (A2); bsr.w` at 0xE1B816); module-local 0xE1D592
+    A2 (0xE1D59E); SIO_$I_INIT 0xE67E5E (`sio/i_init.c`) A2
+    (0xE67E74 `pea (0x68,A2)`).  `dpc` now reproduces these in bodies
+    without branches (below).
   - Survey: 433 values of this kind (callee-saved register, no call
     crossed, a call later in the block of the last use).  Against: 1365
     values in scratch registers whose block also continues to a call.
+  - **Hypothesis tested (review of bead domain-pascal-g5q.5, 2026-10-12):
+    a value defined before a call statement whose last use is in that
+    call's arguments is live through the call.**  `tools/regalloc.py
+    callargs` (whole image, no size bound): the argument sequence of a
+    call is the run before it in its block back to the previous store
+    that is not a push, or the previous call; M$ARITH calls do not count.
+    Values not crossing the call, whose every last use is there, and for
+    which liveness alone leaves a scratch register free:
+    - parameter loads, routines **without branches: 5 callee-saved, 0
+      scratch**: PROC1_$SET_ASID 0xE148FE D2; TTY_$I_OUTPUT_BUFFER_DRAINED
+      0xE1B39A A2; TTY_$I_FLUSH_OUTPUT 0xE1B80C A2; module-local 0xE1D592
+      at 0xE1D598 A2; SIO_$I_INIT 0xE67E64 A2.  Other values: 6
+      callee-saved, 2 scratch (TIME_$RELEASE 0xE58B9C; 0xE5AA84 in the
+      routine at 0xE5AA28, a value reused after its store);
+    - parameter loads, routines **with branches: 26 callee-saved, 49
+      scratch** (the proxy also counts some values last used in a
+      register-variable assignment just before a call, e.g. AREA_$DELETE
+      0xE07C34).  Checked scratch sites: EC2_$ADVANCE 0xE42CB8 D0
+      (`move.l D0,-(SP)` at 0xE42CDA); DIR_$FIND_NET 0xE4FE36 A0 (`pea
+      (A0)` at 0xE4FE76); DIR_$DO_OP 0xE4D00E A0 (0xE4D040); TTY_$I_INIT
+      0xE3325A A0 (0xE332DC); AST_$UPDATE 0xE01B6E A0 (0xE01B82);
+      MAC_$SEND 0xE0BB88 A0 (0xE0BB9C); the routine at 0xE55220 (map:
+      DIR_$OLD_CLEANUP+0x6F6), 0xE5523C A0, `clr.l (A0)` then `pea (A0)`
+      at 0xE5524C, the shape of 0xE1D592;
+    - temporaries computed inside the argument list: 1198 scratch, 276
+      callee-saved.
+
+    So the hypothesis holds without exception only in routines without
+    branches (why is Uncertain).  `dpc` holds such a parameter through
+    the call in a body without branches (`held_through_calls` in
+    `crates/dpc-m68k/src/isel.rs`; conformance unit PROC1_$SET_ASID) and
+    refuses it in a body with branches.
 - **Mechanical proxies tested and refuted as general rules** (each makes
   the original's own choices conflict elsewhere):
   - free only after the next store or call (`colUS`): 66.5% / 69.0%;
@@ -1877,7 +1925,7 @@ earlier:
 
 | # | Step | Image sites | Support |
 |---|---|---|---|
-| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1) |
+| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
 | 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; when a store kills a CSE is open |
 | 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8); bit operators need a survey |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
@@ -1912,7 +1960,13 @@ points need care:
 What must stay green for step 1: `make test` (the `regs.rs` unit tests
 and the golden tests, in particular `tests/golden/stores/entry_loads`,
 `control/*`, `calls/*`, `data/through_worker`) and `make conform` (all
-units of the manifest, the handasm fixtures included).
+units of the manifest, the handasm fixtures included).  Step 1 is done
+(bead domain-pascal-g5q.5): no golden file and no conformance unit
+changed; the units above are reproduced by the allocator as they were by
+the pinned registers.  PROC1_$TST_LOCK's `sne` is in place because the
+set value and its boolean are one virtual register; the move of a value
+into D0 for a function result is not subject to R2 (PROC1_$GET_LOCKS
+0xE148F0 loads the result straight into D0).
 
 ---
 

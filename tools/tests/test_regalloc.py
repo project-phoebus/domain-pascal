@@ -109,6 +109,21 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual((p['colU'], p['colQU']), ('d1', 'd0'))
 
 
+class CallArgsTest(unittest.TestCase):
+    def test_arg_call(self):
+        # PROC1_$SET_ASID 0xE148F8: the parameter's last use is the push
+        # of the call's argument; the call statement starts after the store.
+        rt = routine(['linkw %fp,#0', 'movel %d2,%sp@-', 'movew %fp@(8),%d2',
+                      'moveal 0xe1eac8,%a0', 'movew %d2,%a0@(70)', 'subql #2,%sp',
+                      'movew %d2,%sp@-', 'jsr 0xe24204', 'movel %fp@(-4),%d2',
+                      'unlk %fp', 'rts'])
+        v = next(v for v in rt.values if v.reg == 'd2')
+        self.assertEqual(regalloc.arg_call(rt, v), (7, 5))
+        # A0's last use is the store: not an argument.
+        a = next(v for v in rt.values if v.reg == 'a0')
+        self.assertIsNone(regalloc.arg_call(rt, a))
+
+
 class RuleTest(unittest.TestCase):
     def test_rule_spec(self):
         self.assertEqual(regalloc.rule_spec('colU'), ('col', False, True, False, None, False))

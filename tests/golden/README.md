@@ -63,3 +63,11 @@ Tests:
   popped.
 - `data/through_worker` - codegen-patterns 4, 1.5: LOG_$READ 0xE17800,
   A5 loaded for an internal callee, by-address parameters passed on.
+- `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the
+  allocator (bead domain-pascal-g5q.5): parameters held across calls in
+  A2/D2 with `pea (d,A2)` pushes (module-local 0xE32B76), a third data
+  value in D2 without a call (0xE177A0), registers reused after a
+  parameter's last use, a value dead before a call in a scratch register,
+  a parameter live around a `repeat` with a call in it, and (12.4 R4(c))
+  parameters whose last use is a call's argument held through the call in
+  D2 / A2 (PROC1_$SET_ASID 0xE148FE; module-local 0xE1D592).

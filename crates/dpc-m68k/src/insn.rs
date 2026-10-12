@@ -10,7 +10,7 @@
 use std::fmt;
 
 /// A register.  `A(6)` is the frame pointer, `A(7)` the stack pointer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Reg {
     D(u8),
     A(u8),

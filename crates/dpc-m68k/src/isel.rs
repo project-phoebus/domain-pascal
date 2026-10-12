@@ -1,15 +1,16 @@
 //! Instruction selection: IR → m68k instructions (CLAUDE.md 4.4).
 //!
-//! Two phases per routine:
+//! Three steps per routine:
 //!
-//! 1. **Body.**  Pattern-directed, one IR node at a time, over physical
-//!    registers handed out by [`Regs`] (`regs.rs`).  The default policy is
-//!    scratch only, D0, D1 / A0, A1 in that order (codegen-patterns 2,
-//!    12); an expression that needs more is reported as not supported
-//!    yet.  A pattern that must keep a value across a call asks for a
-//!    callee-saved register with [`Selector::hold`]; one that loads A5
-//!    reports it with [`Regs::clobber`].
-//! 2. **Frame.**  The callee-saved registers the body wrote decide the
+//! 1. **Body.**  Pattern-directed, one IR node at a time, over virtual
+//!    registers (`regs.rs`): every value a pattern computes gets a new
+//!    one.  A pattern that loads A5 records it in the selector's
+//!    `clobbered` set.
+//! 2. **Registers.**  [`crate::regs::allocate`] computes the live ranges
+//!    of the body and gives each value the lowest register of its class
+//!    free over its whole range, a callee-saved one if it lives across a
+//!    call (codegen-patterns 12.4, R1-R3), and rewrites the body.
+//! 3. **Frame.**  The callee-saved registers the body wrote decide the
 //!    save set; [`crate::frame::Frame`] then gives the prologue (`link.w`,
 //!    the save) and the epilogue (the restore from the frame, `unlk`,
 //!    `rts`) around the body.
@@ -18,15 +19,15 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, Scalar, Sign, Stmt,
-    StmtKind, Width,
+    Addr, Arg, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, ResultSpec, Scalar,
+    Sign, Stmt, StmtKind, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{Cond, Ea, Insn, Reg, RegSet, Size};
-use crate::regs::{RegClass, Regs, DATA_BASE};
+use crate::regs::{allocate, RegClass, VRegs, DATA_BASE};
 
 /// A5, the data base register, as an address register number.
 const DATA_BASE_A: u8 = 5;
@@ -102,15 +103,17 @@ pub struct Body {
 /// the expression needs it, after the set's address).  A body of two or
 /// more statements first loads the by-value parameters it reads into
 /// registers ([`Selector::entry_loads`]; TIME_$Q_INIT_QUEUE
-/// 0xE16C62..0xE16C6A), and its statements may then use only those
-/// registers: what the original did with further registers in such a body
-/// (fresh registers per statement, IIC_$RECEIVE 0xE70ABA; scheduling of
-/// entry loads with other work, 0xE758C4) is not modelled yet
-/// (codegen-patterns 12.2).  The one exception is a simple statement right
-/// after a call in a body that loaded nothing at entry: it takes the lowest
-/// free scratch registers (0xE00ECC, after the `jsr` at 0xE00EC2).  A body
-/// that loads parameters at entry may not call (the values would not
-/// survive the call).
+/// 0xE16C62..0xE16C6A).  Those loads, and the values the statements
+/// compute, are ordinary values for the allocator (codegen-patterns 12.4
+/// R1-R3): a parameter's register is free after its last use, a
+/// statement's value takes the lowest register free over its live range,
+/// and a value live across a call a callee-saved one (module-local
+/// 0xE32B76, A2 and D2 around three calls).  Not modelled: registers held
+/// longer than the live range (12.4 R4: to the end of a statement, for a
+/// by-address slot read once, IIC_$RECEIVE 0xE70ABA) other than a
+/// parameter the arguments of a call read last ([`held_through_calls`];
+/// PROC1_$SET_ASID 0xE148FE), and the scheduling of entry loads with other
+/// work (0xE758C4, R9).
 ///
 /// A body that is one `if` or `repeat` statement is treated like a body of
 /// several statements (NAME_CONVERT_ACL_STATUS 0xE58620: one `if ... else
@@ -146,20 +149,11 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             ));
         }
         reject_mergeable_stores(&f.body)?;
+        // A parameter loaded at entry and live across a call is held in a
+        // callee-saved register by the allocator (codegen-patterns 12.4
+        // R3: PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`;
+        // module-local 0xE32B76, 0xE32B7E A2, D2 around three).
         s.entry_loads(f)?;
-        if !s.pinned.is_empty() {
-            if let Some(st) = find_stmt(&f.body, &|st| matches!(st.kind, StmtKind::Call(_))) {
-                // A parameter loaded at entry into a scratch register does
-                // not survive the call; the original then holds it in a
-                // callee-saved register (PROC1_$SET_TYPE 0xE152F2, D2/D3
-                // around a `jsr`), by a rule not catalogued
-                // (codegen-patterns 12.1, 12.2).
-                return Err(unsupported(
-                    st.span,
-                    "a call in a body that loads parameters at entry is",
-                ));
-            }
-        }
     }
     s.seq(f, &f.body, Tail::END)?;
     if let Some(l) = s.epilogue {
@@ -187,12 +181,90 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
              the epilogue; compiled code has no branch to a `bra`, codegen-patterns 7.1) is",
         ));
     }
-    s.out
-        .retain(|i| !matches!(i, Insn::Label(l) if !used.contains(l)));
+    // Phase 1b: physical registers (`regs.rs`, codegen-patterns 12.4).
+    let exit: &[Reg] = match f.result {
+        Some(ResultSpec {
+            class: ResultClass::Data,
+            ..
+        }) => &[Reg::D(0)],
+        _ => &[],
+    };
+    let holds = held_through_calls(&s.out, &s.call_stmts, exit)?;
+    let saves = allocate(&mut s.out, exit, &holds).map_err(|what| unsupported(f.span, what))?;
+    // A result computed in D0 already is not moved (0xE148E0 moves it
+    // only because the `sne` left it in D1).
+    let out: Vec<Insn> = s
+        .out
+        .into_iter()
+        .enumerate()
+        .filter(|(k, i)| {
+            !(s.result_moves.contains(k)
+                && matches!(i, Insn::Move { src: Ea::Reg(a), dst: Ea::Reg(b), .. } if a == b))
+        })
+        .map(|(_, i)| i)
+        .filter(|i| !matches!(i, Insn::Label(l) if !used.contains(l)))
+        .collect();
     Ok(Body {
-        insns: s.out,
-        saves: s.regs.to_save(),
+        insns: out,
+        saves: saves.union(s.clobbered),
     })
+}
+
+/// The values to hold live through a call (codegen-patterns 12.4 R4(c)),
+/// as `(index of the jsr/bsr, register)` for [`allocate`].
+///
+/// A value defined before a call statement (in `dpc`, a parameter loaded at
+/// entry) whose last use is in that statement's arguments:
+///
+/// - in a body without branches it is held through the call, so it takes
+///   a callee-saved register: PROC1_$SET_ASID 0xE148FE D2 (`move.w
+///   D2,-(SP)` at 0xE1490E); TTY_$I_FLUSH_OUTPUT 0xE1B80C A2,
+///   TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39A A2, module-local 0xE1D592 at
+///   0xE1D598 A2, SIO_$I_INIT 0xE67E64 A2.  These are
+///   all five such parameter loads in the image's routines without
+///   branches where liveness alone leaves a scratch register free
+///   (`tools/regalloc.py callargs`);
+/// - in a body with branches the image does both (26 parameter loads
+///   callee-saved, 49 scratch: EC2_$ADVANCE 0xE42CB8 D0, `move.l
+///   D0,-(SP)` at 0xE42CDA; DIR_$FIND_NET 0xE4FE36 A0, `pea (A0)` at
+///   0xE4FE76), by a rule not known: refused.
+fn held_through_calls(
+    out: &[Insn],
+    calls: &[(usize, usize, Span)],
+    exit: &[Reg],
+) -> Res<Vec<(usize, Reg)>> {
+    let straight = !out
+        .iter()
+        .any(|i| matches!(i, Insn::Branch { .. } | Insn::Dbf { .. }));
+    let live_out = crate::regs::liveness(out, exit, &[]);
+    let mut holds = Vec::new();
+    for &(start, call, span) in calls {
+        let defined_before: Vec<Reg> = out[..start]
+            .iter()
+            .flat_map(|i| crate::regs::access(i).defs)
+            .filter(|&r| crate::regs::is_virtual(r))
+            .collect();
+        for i in &out[start..call] {
+            for r in crate::regs::access(i).uses {
+                if !defined_before.contains(&r)
+                    || live_out[call].contains(&crate::regs::RegKey(r))
+                    || holds.contains(&(call, r))
+                {
+                    continue;
+                }
+                if !straight {
+                    return Err(unsupported(
+                        span,
+                        "in a body with branches, a call whose arguments are the last use of a \
+                         parameter loaded at entry (held through the call or not, \
+                         codegen-patterns 12.4 R4(c)) is",
+                    ));
+                }
+                holds.push((call, r));
+            }
+        }
+    }
+    Ok(holds)
 }
 
 /// A statement that is not control flow.
@@ -201,27 +273,6 @@ fn is_simple(st: &Stmt) -> bool {
         st.kind,
         StmtKind::If { .. } | StmtKind::Repeat { .. } | StmtKind::Return
     )
-}
-
-/// The first statement, in body order and depth first, for which `pred`
-/// holds.
-fn find_stmt<'a>(body: &'a [Stmt], pred: &dyn Fn(&Stmt) -> bool) -> Option<&'a Stmt> {
-    for st in body {
-        if pred(st) {
-            return Some(st);
-        }
-        let inner = match &st.kind {
-            StmtKind::If { then_, else_, .. } => {
-                find_stmt(then_, pred).or_else(|| find_stmt(else_, pred))
-            }
-            StmtKind::Repeat { body, .. } => find_stmt(body, pred),
-            _ => None,
-        };
-        if inner.is_some() {
-            return inner;
-        }
-    }
-    None
 }
 
 /// What follows a statement sequence up to the epilogue.
@@ -284,7 +335,10 @@ fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
 /// (0xE5B15E, 0xE5B164), but they are not consecutive in the image
 /// (offsets 12, 0, 13, 4, 8) and the source order is not known.  So two consecutive
 /// stores to adjacent objects of the same base that fit together in a
-/// longword are rejected rather than guessed at.  TIME_$Q_INIT_QUEUE's
+/// word or longword are rejected rather than guessed at; a byte and a word
+/// (3 bytes) cannot be one 68000 reference and are kept apart, as at
+/// module-local 0xE32B76, 0xE32BA6/0xE32BAA (`clr.b (0x36,A2); move.w
+/// D2,(0x34,A2)`, a byte and the word below it).  TIME_$Q_INIT_QUEUE's
 /// stores (0..4, 4..8, 8, 10..12) never fit: 0xE16C6E..0xE16C78.  Each
 /// statement sequence (a body, an `if` arm, a loop body) is checked.
 fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
@@ -306,7 +360,7 @@ fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
         if let Some((pa, pb)) = prev {
             if let (Some((k1, o1)), Some((k2, o2))) = (split_addr(pa), split_addr(addr)) {
                 let adjacent = o1 + pb as i32 == o2 || o2 + bytes as i32 == o1;
-                if k1 == k2 && adjacent && pb + bytes <= 4 {
+                if k1 == k2 && adjacent && matches!(pb + bytes, 2 | 4) {
                     return Err(unsupported(
                         st.span,
                         "a store adjacent to the previous statement's store (the original \
@@ -472,14 +526,25 @@ impl Uses<'_> {
 /// Selection state of one routine body.
 pub struct Selector {
     out: Vec<Insn>,
-    regs: Regs,
+    /// Virtual registers handed out so far (`regs.rs`).
+    vregs: VRegs,
+    /// Callee-saved registers the body writes outside the allocator (A5,
+    /// [`Self::load_data_base`]).
+    clobbered: RegSet,
+    /// Indices in `out` of the moves of a function result into D0
+    /// ([`Self::set_result`]): dropped when the value is already there.
+    result_moves: Vec<usize>,
+    /// Call statements: the index in `out` of their first instruction and
+    /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
+    call_stmts: Vec<(usize, usize, Span)>,
     /// The statement being selected, for diagnostics.
     span: Span,
-    /// By-value parameters loaded at entry: frame offset and the register
-    /// that holds the value for the whole body.
+    /// Parameters loaded at entry: frame offset and the (virtual) register
+    /// the value was loaded into.
     pinned: Vec<(i32, Reg)>,
-    /// The statement being selected may use only the pinned registers
-    /// (see [`select_body`]).
+    /// The statement being selected is in a body of several statements
+    /// and does not directly follow a call there: a pointer parameter or
+    /// slot it uses once is refused ([`Self::eval_a`]; R4(b)).
     multi: bool,
     /// The body has several statements, or is one `if`/`repeat`
     /// ([`select_body`]).
@@ -499,7 +564,10 @@ impl Selector {
     fn new(span: Span) -> Selector {
         Selector {
             out: Vec::new(),
-            regs: Regs::new(),
+            vregs: VRegs::new(),
+            clobbered: RegSet::EMPTY,
+            result_moves: Vec::new(),
+            call_stmts: Vec::new(),
             span,
             pinned: Vec::new(),
             multi: false,
@@ -555,11 +623,12 @@ impl Selector {
         for (i, st) in body.iter().enumerate() {
             self.span = st.span;
             let rest = &body[i + 1..];
-            // In a body of several statements a statement may use only the
-            // registers loaded at entry (see `select_body`), except a
-            // simple statement right after a call: the call leaves no value
-            // in a scratch register, and the next statement takes the
-            // lowest free ones (0xE00ECC..0xE00ED2, A0 and D0 after the
+            // A pointer parameter or slot used once is loaded where it is
+            // needed, into a register no earlier load used (codegen-patterns
+            // 12.4 R4(b), not modelled): refused in a body of several
+            // statements, except in a simple statement right after a call
+            // in a body that loaded nothing at entry, where the lowest free
+            // registers are taken (0xE00ECC..0xE00ED2, A0 and D0 after the
             // `jsr` at 0xE00EC2).
             self.multi =
                 self.multi_body && !(after_call && self.pinned.is_empty() && is_simple(st));
@@ -616,13 +685,6 @@ impl Selector {
                 }
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
-            debug_assert!(
-                self.regs
-                    .live_scratch()
-                    .iter()
-                    .all(|r| self.pinned.iter().any(|&(_, p)| p == r)),
-                "a statement left a register busy"
-            );
         }
         Ok(())
     }
@@ -784,8 +846,7 @@ impl Selector {
 
     /// The effective address of the scalar at `addr` as an operand, without
     /// loading the value: the register a by-value parameter was loaded
-    /// into at entry, else the memory operand (an address register it
-    /// needs stays allocated until [`Self::free_ea`]).
+    /// into at entry, else the memory operand.
     fn operand(&mut self, addr: &Addr) -> Res<Ea> {
         if let Addr::Frame(o) = addr {
             if let Some(r) = self.pinned(*o) {
@@ -822,7 +883,6 @@ impl Selector {
             size,
             dst: ea.clone(),
         });
-        self.free_ea(&ea);
         Ok(())
     }
 
@@ -902,7 +962,6 @@ impl Selector {
                     imm: imm(*value, ty.width),
                     dst: ea.clone(),
                 });
-                self.free_ea(&ea);
                 Ok(rel_cond(op, signed))
             }
             Expr::Load { addr: raddr, .. } => {
@@ -929,7 +988,6 @@ impl Selector {
                     src: src.clone(),
                     dst: d,
                 });
-                self.free_ea(&src);
                 Ok(rel_cond(op, signed))
             }
             _ => Err(unsupported(
@@ -939,20 +997,15 @@ impl Selector {
         }
     }
 
+    /// A new virtual register of `class` (`regs.rs`); [`allocate`] gives
+    /// it a physical one once the body is selected.  Statements of a body
+    /// of several statements may take registers of their own: the value
+    /// gets the lowest register free over its live range (codegen-patterns
+    /// 12.4 R1), not one pinned by the body.
     fn alloc(&mut self, class: RegClass) -> Res<Reg> {
-        if self.multi {
-            return Err(unsupported(
-                self.span,
-                "in a body of more than one statement, a statement that needs a register \
-                 of its own is",
-            ));
-        }
-        self.regs.alloc_scratch(class).ok_or_else(|| {
-            unsupported(
-                self.span,
-                "an expression needing more than two scratch registers of a kind is",
-            )
-        })
+        self.vregs
+            .new_reg(class)
+            .ok_or_else(|| unsupported(self.span, "a routine needing this many registers is"))
     }
 
     fn alloc_d(&mut self) -> Res<u8> {
@@ -969,57 +1022,10 @@ impl Selector {
         }
     }
 
-    /// A callee-saved register of `class` for a value that must survive
-    /// a call (`regs.rs`, [`Regs::alloc_held`]); it joins the prologue's
-    /// save set.  Free it with [`Self::free`].
-    pub fn hold(&mut self, class: RegClass) -> Res<Reg> {
-        self.regs.alloc_held(class).ok_or_else(|| {
-            unsupported(
-                self.span,
-                "holding more values than there are callee-saved registers is",
-            )
-        })
-    }
-
-    /// Release a register from [`Self::hold`] or the scratch pools.
-    pub fn free(&mut self, r: Reg) {
-        self.regs.free(r);
-    }
-
-    fn free_d(&mut self, r: u8) {
-        self.regs.free(Reg::D(r));
-    }
-
-    fn free_a(&mut self, r: u8) {
-        self.regs.free(Reg::A(r));
-    }
-
-    /// Release the register an effective address uses.  A5, A6 and A7
-    /// are bases the allocator never hands out (`regs.rs`), so they are
-    /// not released; nor are registers pinned by [`Self::entry_loads`].
-    fn free_ea(&mut self, ea: &Ea) {
-        match ea {
-            Ea::Ind(a) | Ea::Disp(_, a)
-                if Reg::A(*a) != DATA_BASE
-                    && *a != FP
-                    && *a != SP
-                    && !self.is_pinned(Reg::A(*a)) =>
-            {
-                self.free_a(*a)
-            }
-            Ea::Reg(r) if !self.is_pinned(*r) => self.regs.free(*r),
-            _ => {}
-        }
-    }
-
     /// The register a by-value parameter at frame offset `o` was loaded
     /// into at entry, if it was.
     fn pinned(&self, o: i32) -> Option<Reg> {
         self.pinned.iter().find(|&&(p, _)| p == o).map(|&(_, r)| r)
-    }
-
-    fn is_pinned(&self, r: Reg) -> bool {
-        self.pinned.iter().any(|&(_, p)| p == r)
     }
 
     /// Load the by-value parameters the body reads into registers, in
@@ -1039,17 +1045,19 @@ impl Selector {
     /// 0xE758C4 (RING) at 0xE758C8..0xE758D2, two longwords into D0, D1;
     /// MMAP_$SET_WS_MAX 0xE0CA88..0xE0CA90, SIO6509_$INQ_LINE
     /// 0xE7266C..0xE72674 (codegen-patterns 12.2).  Registers: the lowest
-    /// free scratch register of the class, data values in D registers,
-    /// pointers the body dereferences in A registers.  A pointer also used
-    /// as data, more than two parameters of a class (the original then
-    /// takes callee-saved registers even without calls: MST_$VA_TO_SEGNO
-    /// 0xE0DCD6, ROUTE_$FIND_PORT 0xE15B06) and parameters that must
-    /// survive a call (PROC1_$SET_TYPE 0xE152F2) are not supported yet.
+    /// register of the class free over the value's live range (the
+    /// allocator, codegen-patterns 12.4 R1-R3): data values in D registers,
+    /// pointers the body dereferences in A registers; D2/A2 and up for a
+    /// third value of a class or a value live across a call (module-local
+    /// 0xE32B76; PROC1_$SET_TYPE 0xE152F2).  A known miss of that rule:
+    /// MST_$VA_TO_SEGNO 0xE0DCD6, D2 for the first parameter (12.4 corpus,
+    /// R5); ROUTE_$FIND_PORT 0xE15B06 (D3, 12.2) has not been checked
+    /// against it.  A pointer also used as data is not supported yet.
     ///
     /// **By-address parameters** (the slot holds the argument's address)
     /// that the body reaches through more than once are loaded the same
     /// way, in parameter order with the by-value ones, into an address
-    /// register that holds the address for the whole body (bead
+    /// register that holds the address up to its last use (bead
     /// domain-pascal-b1v; codegen-patterns 12.2):
     ///
     /// - LOG_$READ's worker 0xE17780..0xE17788 `move.w (0xc,A6),D0; move.w
@@ -1104,12 +1112,14 @@ impl Selector {
                 ParamUse::Data => RegClass::Data,
                 ParamUse::Base => RegClass::Addr,
             };
-            let r = self.regs.alloc_scratch(class).ok_or_else(|| {
-                unsupported(
-                    f.span,
-                    "loading more than two parameters of a register class at entry is",
-                )
-            })?;
+            // Each load is a new value; the allocator gives it the lowest
+            // register free over its live range (codegen-patterns 12.4 R1):
+            // D0, D1, A0, A1 for the sites above, D2/A2 and up for a third
+            // value of a class or for one live across a call (R3:
+            // module-local 0xE32B76 (`sio/init_dtte.c`), 0xE32B7E `movea.l
+            // (8,A6),A2` and 0xE32B82 `move.w (0xc,A6),D2` around three
+            // `jsr EC_$INIT`).
+            let r = self.alloc(class)?;
             let src = Ea::Disp(offset, FP);
             self.out.push(match r {
                 Reg::D(_) => Insn::Move {
@@ -1142,7 +1152,7 @@ impl Selector {
             src: Ea::AbsL(DATA_BASE_LABEL.into(), 0),
             dst: DATA_BASE_A,
         });
-        self.regs.clobber(DATA_BASE);
+        self.clobbered.insert(DATA_BASE);
     }
 
     /// `d := s` for a record or array of `bytes` bytes
@@ -1182,8 +1192,8 @@ impl Selector {
     ///   assignments in the source, not one record assignment
     ///   (**Uncertain**: the image cannot tell).
     ///
-    /// Address registers: source first, then destination, the lowest free
-    /// scratch register each (A0, A1).
+    /// Address registers: source first, then destination, each the lowest
+    /// free (A0, A1 at 0xE14BC6..0xE14BC8; codegen-patterns 12.4 R1).
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
         if bytes % 2 != 0 || bytes < 10 {
             return Err(unsupported(
@@ -1229,17 +1239,14 @@ impl Selector {
                 reg: count,
                 label: head,
             });
-            self.free_d(count);
         }
         if bytes % 4 == 2 {
             self.out.push(mv(Size::W));
         }
-        self.free_a(from);
-        self.free_a(to);
         Ok(())
     }
 
-    /// The address of a block in a fresh scratch address register.
+    /// The address of a block in a new address register.
     ///
     /// - in the unit's data area: `lea (d,A5),An`, and `lea (A5),An` for
     ///   offset 0, not `movea.l A5,An` (PROC1_$GET_LOADAV 0xE14BC6;
@@ -1373,10 +1380,6 @@ impl Selector {
                 dst: dst.clone(),
             },
         });
-        if let Src::Ea(ea) = &src {
-            self.free_ea(ea);
-        }
-        self.free_ea(&dst);
         Ok(())
     }
 
@@ -1439,12 +1442,10 @@ impl Selector {
     ///    followed by an `if`).  The remaining 56 unpopped calls branch to
     ///    a pop shared at a join (see [`Self::if_`]).
     fn call(&mut self, c: &Call, no_pop: bool) -> Res<()> {
-        if !self.regs.live_scratch().is_empty() {
-            return Err(unsupported(
-                self.span,
-                "a call while a scratch register holds a value is",
-            ));
-        }
+        // A value live across the call gets a callee-saved register from
+        // the allocator (codegen-patterns 12.4 R3), and so may a value the
+        // arguments read ([`held_through_calls`]).
+        let start = self.out.len();
         match c.pad {
             0 => {}
             2 => self.out.push(Insn::Subq {
@@ -1500,6 +1501,7 @@ impl Selector {
                 short: true,
             },
         });
+        self.call_stmts.push((start, self.out.len() - 1, self.span));
         let n = c.bytes();
         if !no_pop && n > 0 {
             self.out.push(if n <= 8 {
@@ -1614,7 +1616,6 @@ impl Selector {
                             src: src.clone(),
                             dst,
                         });
-                        self.free_ea(&src);
                     }
                     Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => self.out.push(Insn::Move {
                         size: Size::L,
@@ -1660,6 +1661,24 @@ impl Selector {
                         src,
                         dst,
                     });
+                }
+                // An object reached through a pointer held in an address
+                // register since the entry: `pea (d,An)`, `pea (An)`
+                // (module-local 0xE32B76, `sio/init_dtte.c`: 0xE32B86 `pea
+                // (0xc,A2)`, 0xE32B9E `pea (A2)`, the slot held in A2 across
+                // the calls; also 0xE1BEB2, 0xE1D59E, 0xE3DB8C `pea (A2)`).
+                Addr::Indirect { base, offset }
+                    if matches!(
+                        &**base,
+                        Expr::Load { addr: Addr::Frame(o), .. }
+                            if matches!(self.pinned(*o), Some(Reg::A(_)))
+                    ) =>
+                {
+                    let ea = self.ea_of(&Addr::Indirect {
+                        base: base.clone(),
+                        offset: *offset,
+                    })?;
+                    self.out.push(Insn::Pea(ea));
                 }
                 _ => {
                     return Err(unsupported(
@@ -1741,8 +1760,6 @@ impl Selector {
             reg: d,
             label: head,
         });
-        self.free_d(d);
-        self.free_a(a);
         Ok(())
     }
 
@@ -1756,20 +1773,20 @@ impl Selector {
             _ => return Err(unsupported(self.span, "address-register results are")),
         }
         let r = self.eval_d(e)?;
-        if r != 0 {
-            // The value is moved at the result's width; the upper bytes
-            // of D0 are left as they are (codegen-patterns 3: 0xE148E0).
-            self.out.push(Insn::Move {
-                size: size_of(res.ty.width),
-                src: Ea::Reg(Reg::D(r)),
-                dst: Ea::Reg(Reg::D(0)),
-            });
-        }
-        self.free_d(r);
+        // The value is moved at the result's width; the upper bytes of D0
+        // are left as they are (codegen-patterns 3: 0xE148E0).  When the
+        // allocator puts the value in D0 itself the move is dropped
+        // (`select_body`).
+        self.result_moves.push(self.out.len());
+        self.out.push(Insn::Move {
+            size: size_of(res.ty.width),
+            src: Ea::Reg(Reg::D(r)),
+            dst: Ea::Reg(Reg::D(0)),
+        });
         Ok(())
     }
 
-    /// Evaluate `e` into a scratch data register.
+    /// Evaluate `e` into a new data register.
     fn eval_d(&mut self, e: &Expr) -> Res<u8> {
         match e {
             // A value held in a register for the whole body is copied before
@@ -1784,10 +1801,9 @@ impl Selector {
             )),
             // Load a scalar: `move.<w> <ea>,Dn` (0xE148D4 `move.w
             // (8,A6),D0`; 0xE148D8 `move.l (0x40,A0),D1`).  The address is
-            // formed first, its register released, then Dn allocated.
+            // formed first, then the value loaded into a new register.
             Expr::Load { addr, ty } => {
                 let ea = self.ea_of(addr)?;
-                self.free_ea(&ea);
                 let r = self.alloc_d()?;
                 self.out.push(Insn::Move {
                     size: size_of(ty.width),
@@ -1842,7 +1858,6 @@ impl Selector {
         };
         let ea = self.ea_of(addr)?;
         let bit = self.eval_d(elem)?;
-        self.free_ea(&ea);
         let r = self.alloc_d()?;
         self.out.push(Insn::Move {
             size: Size::L,
@@ -1853,7 +1868,6 @@ impl Selector {
             bit,
             dst: Ea::Reg(Reg::D(r)),
         });
-        self.free_d(bit);
         self.out.push(Insn::Scc {
             cond: Cond::Ne,
             dst: Ea::Reg(Reg::D(r)),
@@ -1861,7 +1875,7 @@ impl Selector {
         Ok(r)
     }
 
-    /// Evaluate a pointer into a scratch address register, or give the
+    /// Evaluate a pointer into a new address register, or give the
     /// register a by-value parameter was loaded into at entry.
     fn eval_a(&mut self, e: &Expr) -> Res<u8> {
         if let Expr::Load {
@@ -1898,10 +1912,10 @@ impl Selector {
                 },
             } => {
                 let ea = self.ea_of(addr)?;
-                // TODO(codegen): reusing the base register for a pointer
-                // chain (`movea.l (d,A0),A0`) follows from releasing it
-                // first; no chain has been checked against the image yet.
-                self.free_ea(&ea);
+                // TODO(codegen): the allocator lets a pointer chain reuse a
+                // dying base (`movea.l (d,A0),A0`); when the original did is
+                // not known (codegen-patterns 12.4 R2: 35 such loads into
+                // the same register, 144 into another).
                 let a = self.alloc_a()?;
                 self.out.push(Insn::Movea {
                     size: Size::L,
@@ -1915,7 +1929,7 @@ impl Selector {
     }
 
     /// The effective address of `addr`; any address register it needs is
-    /// loaded now and stays allocated until [`Self::free_ea`].
+    /// loaded now.
     fn ea_of(&mut self, addr: &Addr) -> Res<Ea> {
         match addr {
             // Frame objects and arguments: `(d,A6)` (0xE148D4).
@@ -2111,25 +2125,43 @@ mod tests {
     #[test]
     fn two_phase_frame_around_a_body_with_held_registers() {
         let f = func(16, None, vec![]);
-        // A synthetic body: a value held across a (pretend) call.
-        let mut s = Selector::new(span());
-        let d = s.hold(RegClass::Data).unwrap();
-        let a = s.hold(RegClass::Addr).unwrap();
-        let d2 = s.hold(RegClass::Data).unwrap();
-        assert_eq!((d, a, d2), (Reg::D(2), Reg::A(2), Reg::D(3)));
-        s.out.push(Insn::Move {
-            size: Size::L,
-            src: Ea::Disp(0xc, FP),
-            dst: Ea::Reg(d),
-        });
-        s.free(d);
-        s.free(a);
-        s.free(d2);
-        let body = Body {
-            insns: s.out,
-            saves: s.regs.to_save(),
-        };
-        let text: Vec<String> = wrap(&f, body)
+        // A synthetic body: three values held across a call.
+        let mut v = crate::regs::VRegs::new();
+        let d = v.new_reg(RegClass::Data).unwrap();
+        let a = v.new_reg(RegClass::Addr).unwrap();
+        let d2 = v.new_reg(RegClass::Data).unwrap();
+        let Reg::A(an) = a else { unreachable!() };
+        let mut insns = vec![
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Disp(0xc, FP),
+                dst: Ea::Reg(d),
+            },
+            Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(8, FP),
+                dst: an,
+            },
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Disp(0x10, FP),
+                dst: Ea::Reg(d2),
+            },
+            Insn::Jsr(Ea::AbsL("X".into(), 0)),
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(d),
+                dst: Ea::Ind(an),
+            },
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(d2),
+                dst: Ea::Disp(4, an),
+            },
+        ];
+        let saves = allocate(&mut insns, &[], &[]).unwrap();
+        insns.truncate(1);
+        let text: Vec<String> = wrap(&f, Body { insns, saves })
             .unwrap()
             .iter()
             .map(|i| i.to_string())
@@ -2146,22 +2178,6 @@ mod tests {
                 "rts",
             ]
         );
-    }
-
-    /// Effective addresses based on A5, A6 or A7 release nothing (a
-    /// module-data operand `(d,A5)` must not free a register the
-    /// allocator never gave out).
-    #[test]
-    fn fixed_base_registers_are_not_released() {
-        let mut s = Selector::new(span());
-        for a in [5, FP, SP] {
-            s.free_ea(&Ea::Disp(4, a));
-            s.free_ea(&Ea::Ind(a));
-        }
-        assert!(s.regs.live_scratch().is_empty());
-        let a = s.alloc_a().unwrap();
-        s.free_ea(&Ea::Disp(4, a));
-        assert!(!s.regs.is_busy(Reg::A(a)));
     }
 
     #[test]
@@ -2369,8 +2385,24 @@ mod tests {
             ],
         );
         assert!(err(&f).starts_with("a store adjacent to the previous"));
-        // Not adjacent (a gap), or too big together: accepted.
-        for (o, ty) in [(4, word()), (2, Scalar::signed(Width::Long))] {
+        // Two bytes make a word: rejected too.
+        let mut f = func(
+            0,
+            None,
+            vec![
+                store(through(8, 4), konst(0, Scalar::BOOLEAN)),
+                store(through(8, 5), konst(0, Scalar::BOOLEAN)),
+            ],
+        );
+        vparams(&mut f, &[(8, Scalar::POINTER)]);
+        assert!(err(&f).starts_with("a store adjacent to the previous"));
+        // Not adjacent (a gap), too big together, or 3 bytes (a byte above
+        // a word: module-local 0xE32B76, 0xE32BA6/0xE32BAA): accepted.
+        for (o, ty) in [
+            (4, word()),
+            (2, Scalar::signed(Width::Long)),
+            (2, Scalar::BOOLEAN),
+        ] {
             let mut f = func(
                 0,
                 None,
@@ -2384,8 +2416,11 @@ mod tests {
         }
     }
 
+    /// A third value of a class takes D2, callee-saved, without any call
+    /// (codegen-patterns 12.4 R1: 0xE177A0 `moveq #-2,D2` while D0 and D1
+    /// hold parameters).
     #[test]
-    fn too_many_entry_loads_are_rejected() {
+    fn third_entry_load_of_a_class_takes_d2() {
         let mut f = func(
             0,
             None,
@@ -2405,8 +2440,21 @@ mod tests {
             ],
         );
         assert_eq!(
-            err(&f),
-            "loading more than two parameters of a register class at entry is not supported yet"
+            text(&f),
+            [
+                "link.w\t%fp,#0",
+                "move.l\t%d2,-(%sp)",
+                "movea.l\t(8,%fp),%a0",
+                "move.w\t(0xc,%fp),%d0",
+                "move.w\t(0xe,%fp),%d1",
+                "move.w\t(0x10,%fp),%d2",
+                "move.w\t%d0,(%a0)",
+                "move.w\t%d1,(4,%a0)",
+                "move.w\t%d2,(8,%a0)",
+                "move.l\t(-4,%fp),%d2",
+                "unlk\t%fp",
+                "rts",
+            ]
         );
     }
 
@@ -2433,32 +2481,50 @@ mod tests {
         );
     }
 
-    /// In a body of several statements, a statement may use only the
-    /// registers loaded at entry.
+    /// In a body of several statements, a statement takes registers of its
+    /// own, the lowest free over their live ranges (codegen-patterns 12.4
+    /// R1); a plain variable is read again by each statement (R8:
+    /// PROC1_$AS_ID at FIM_$ACKNOWLEDGE 0xE0A972, 0xE0A980, 0xE0A99A).
     #[test]
-    fn statement_registers_in_multi_statement_bodies_are_rejected() {
-        let ext = load(
-            Addr::Symbol {
-                name: "P".into(),
-                offset: 0,
-            },
-            Scalar::POINTER,
-        );
+    fn statement_registers_in_multi_statement_bodies() {
+        let ext = |name: &str| {
+            Box::new(load(
+                Addr::Symbol {
+                    name: name.into(),
+                    offset: 0,
+                },
+                Scalar::POINTER,
+            ))
+        };
         let f = func(
             0,
             None,
             vec![
                 store(
                     Addr::Indirect {
-                        base: Box::new(ext),
+                        base: ext("P"),
                         offset: 0,
                     },
                     konst(0, word()),
                 ),
-                store(through(8, 4), konst(0, word())),
+                store(
+                    Addr::Indirect {
+                        base: ext("Q"),
+                        offset: 4,
+                    },
+                    konst(0, word()),
+                ),
             ],
         );
-        assert!(err(&f).starts_with("in a body of more than one statement"));
+        assert_eq!(
+            text(&f)[1..5],
+            [
+                "movea.l\t(P).l,%a0",
+                "clr.w\t(%a0)",
+                "movea.l\t(Q).l,%a0",
+                "clr.w\t(4,%a0)",
+            ]
+        );
     }
 
     #[test]
@@ -3055,9 +3121,9 @@ mod tests {
         assert!(err(&f).starts_with("a `for` loop over an array other than"));
     }
 
-    /// In a body of several statements, a statement gets registers of its
-    /// own only right after a call (0xE00ECC after the `jsr` at
-    /// 0xE00EC2); a call is refused where parameters are loaded at entry.
+    /// Registers around calls (codegen-patterns 12.4 R3): a value that dies
+    /// before a call takes a scratch register, one live across a call a
+    /// callee-saved one.
     #[test]
     fn registers_after_calls() {
         let fill = || StmtKind::Fill {
@@ -3066,17 +3132,47 @@ mod tests {
             value: konst(0, long()),
         };
         let f = proc_(0, vec![fill(), ext("P", vec![], 0)]);
-        assert!(err(&f).starts_with("in a body of more than one statement"));
+        assert_eq!(body_text(&f)[..2], ["movea.l\t#BUF,%a0", "moveq\t#3,%d0"]);
         let f = proc_(0, vec![ext("P", vec![], 0), fill()]);
         assert!(select(&f).is_ok());
         let f = proc_(0, vec![ext("P", vec![], 0), fill(), fill()]);
-        assert!(err(&f).starts_with("in a body of more than one statement"));
+        assert!(select(&f).is_ok());
+        // Dead before the call statement: A0 (12.4 R1; R4(c),
+        // [`held_through_calls`], holds only what the arguments read).
         let mut f = proc_(
             0,
             vec![store(through(8, 0), konst(0, long())), ext("P", vec![], 0)],
         );
         vparams(&mut f, &[(8, Scalar::POINTER)]);
-        assert!(err(&f).starts_with("a call in a body that loads parameters at entry"));
+        assert_eq!(
+            body_text(&f),
+            ["movea.l\t(8,%fp),%a0", "clr.l\t(%a0)", "jsr\t(P).l"]
+        );
+        // Live across the call: A2, saved with `pea (A2)` (module-local 0xE32B76,
+        // 0xE32B7E, A2 around `jsr EC_$INIT`).
+        let mut f = proc_(
+            0,
+            vec![
+                store(through(8, 0), konst(0, long())),
+                ext("P", vec![], 0),
+                store(through(8, 4), konst(0, long())),
+            ],
+        );
+        vparams(&mut f, &[(8, Scalar::POINTER)]);
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#0",
+                "pea\t(%a2)",
+                "movea.l\t(8,%fp),%a2",
+                "clr.l\t(%a2)",
+                "jsr\t(P).l",
+                "clr.l\t(4,%a2)",
+                "movea.l\t(-4,%fp),%a2",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
         // A parameter that is only pushed is not loaded at entry.
         let mut f = proc_(
             0,

@@ -2,9 +2,10 @@
 //! gas-syntax emitter.  Output must follow the code patterns of Apollo's
 //! SR10.2 compiler; see `docs/codegen-patterns.md`.
 //!
-//! - [`isel`]: IR -> [`insn::Insn`], pattern by pattern, body first;
-//! - [`regs`]: which registers hold values, which callee-saved ones the
-//!   body writes;
+//! - [`isel`]: IR -> [`insn::Insn`] over virtual registers, pattern by
+//!   pattern, body first;
+//! - [`regs`]: liveness and register assignment (codegen-patterns 12.4
+//!   R1-R3), and so which callee-saved registers the body writes;
 //! - [`frame`]: frame layout, prologue and epilogue around the body;
 //! - [`insn`]: instructions and their gas text;
 //! - [`emit`]: a whole module as an assembly file.

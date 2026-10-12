@@ -313,3 +313,41 @@ fn loop_align_off_from_unknown_routine_is_an_error() {
     assert_eq!(code, Some(2));
     assert!(err.contains("want `on` or `off`"), "{err}");
 }
+
+/// codegen-patterns 12.4 R4(c): in a body with branches, a parameter
+/// loaded at entry whose last use is an argument of a call is refused at
+/// the call (the image holds such values through the call in 26 cases and
+/// not in 49, by a rule not known); the same body without the `if` holds
+/// it in D2 (PROC1_$SET_ASID 0xE148FE).
+#[test]
+fn argument_last_use_in_a_branchy_body_is_refused() {
+    let src = |cond: &str| {
+        format!(
+            "module m;
+type r = record a: integer; b: integer; end;
+  rp = ^r;
+var done: extern boolean;
+procedure tick(n: integer); options(val_param, extern);
+procedure m_$p(p: rp; n: integer); options(val_param);
+begin
+  p^.a := n;
+  {cond}
+  tick(n);
+end;
+"
+        )
+    };
+    let (code, err) = compile_with(
+        "argument_last_use_in_a_branchy_body_is_refused",
+        &src("if done then p^.b := 0;"),
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("m.pas:10:3: error: in a body with branches, a call whose arguments"),
+        "{err}"
+    );
+    let asm = compile_with("argument_last_use_held", &src(""), &[]).unwrap();
+    assert!(asm.contains("\tmove.w\t%d2,-(%sp)\n"), "{asm}");
+}
