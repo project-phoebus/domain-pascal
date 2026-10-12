@@ -233,10 +233,11 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:2:5: error: initialised static variables are not supported yet"]
     );
-    // A 2-byte set.
+    // A 6-byte set (sets of one word or one longword are tested in a
+    // register).
     let e = errs(
         "module m;
-type s16 = set of 0..15;
+type s16 = set of 0..40;
 function f(k: integer; var s: s16): boolean; options(val_param);
 begin
   f := k in s;
@@ -245,7 +246,7 @@ end;
     );
     assert_eq!(
         e,
-        vec!["t.pas:5:8: error: `in` on a 2-byte set is not supported yet"]
+        vec!["t.pas:5:8: error: `in` on a 6-byte set is not supported yet"]
     );
 }
 
@@ -505,11 +506,14 @@ end;
     );
 }
 
+/// Narrowing an integer32 value into an integer16 object is not
+/// catalogued; widening is a conversion (0xE02C28..0xE02C2C `move.w
+/// D2,D0; ext.l D0; move.l D0,(-32,A6)`).
 #[test]
-fn widening_store_is_rejected() {
+fn narrowing_store_is_rejected() {
     let e = errs(
         "module m;
-procedure p(var x: integer32; i: integer); options(val_param);
+procedure p(var x: integer; i: integer32); options(val_param);
 begin
   x := i;
 end;
@@ -517,8 +521,21 @@ end;
     );
     assert_eq!(
         e,
-        vec!["t.pas:4:8: error: assigning a 2-byte value to a 4-byte object is not supported yet"]
+        vec!["t.pas:4:8: error: assigning a 4-byte value to a 2-byte object is not supported yet"]
     );
+    let m = lower_src(
+        "module m;
+procedure p(var x: integer32; i: integer); options(val_param);
+begin
+  x := i;
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    assert!(matches!(value, Expr::Convert { ty, .. } if *ty == Scalar::signed(Width::Long)));
 }
 
 // ---- module data and block copies (codegen-patterns 4, 5.2) ----------
@@ -1182,4 +1199,151 @@ end;
     assert_eq!(f.address_params, [8, 0x12]);
     let values: Vec<i32> = f.value_params.iter().map(|p| p.offset).collect();
     assert_eq!(values, [0xc, 0xe]);
+}
+
+// ---- expressions (codegen-patterns 5.2, 8; beads -5aw.13, -d7i) -------
+
+fn result_expr(src: &str) -> Expr {
+    let m = lower_src(src).unwrap();
+    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind else {
+        panic!("not a result assignment")
+    };
+    e.clone()
+}
+
+/// `a[i]`: the lower bound folded into the offset, the field's offset
+/// added; a constant index folded into the address.
+#[test]
+fn array_elements() {
+    let src = "module m;
+type r = record a: integer32; b: integer; end;
+var rs: array[1..4] of r; i: extern integer;
+function f: integer; internal;
+begin
+  f := rs[i].b;
+end;
+";
+    let w = Scalar::signed(Width::Word);
+    assert_eq!(
+        result_expr(src),
+        Expr::Load {
+            addr: Addr::Index {
+                base: Box::new(Addr::Static(0)),
+                index: Box::new(Expr::Load {
+                    addr: Addr::Symbol {
+                        name: "I".into(),
+                        offset: 0
+                    },
+                    ty: w
+                }),
+                scale: 6,
+                offset: -6 + 4,
+            },
+            ty: w,
+        }
+    );
+    let src = "module m;
+var ws: array[1..4] of integer;
+function f: integer; internal;
+begin
+  f := ws[3];
+end;
+";
+    assert_eq!(
+        result_expr(src),
+        Expr::Load {
+            addr: Addr::Static(4),
+            ty: w
+        }
+    );
+}
+
+/// Integer16 operands of an integer32 operation are converted; an
+/// integer32 expression assigned to a word is computed at word width
+/// (0xE177C4); the sum of two unsigned words is unsigned (0xE177B8).
+#[test]
+fn widths_and_signs_of_operations() {
+    let l = Scalar::signed(Width::Long);
+    let src = "module m;
+var a: extern integer; b: extern integer32;
+function f: integer32; internal;
+begin
+  f := a + b;
+end;
+";
+    let Expr::Binary { op, lhs, ty, .. } = result_expr(src) else {
+        panic!()
+    };
+    assert_eq!((op, ty), (BinOp::Add, l));
+    assert!(matches!(*lhs, Expr::Convert { ty, .. } if ty == l));
+    let src = "module m;
+type pinteger = 0..65535;
+var u: extern pinteger;
+function f: pinteger; internal;
+begin
+  f := 16#400 - u;
+end;
+";
+    let Expr::Binary { op, lhs, rhs, ty } = result_expr(src) else {
+        panic!()
+    };
+    assert_eq!((op, ty), (BinOp::Sub, Scalar::unsigned(Width::Word)));
+    assert_eq!(
+        *lhs,
+        Expr::Const {
+            value: 0x400,
+            ty: Scalar::unsigned(Width::Word)
+        }
+    );
+    assert!(matches!(*rhs, Expr::Load { ty, .. } if ty == Scalar::unsigned(Width::Word)));
+    let src = "module m;
+type pinteger = 0..65535;
+var u, v: extern pinteger;
+function f: boolean; internal;
+begin
+  f := u + v > 16#400;
+end;
+";
+    let Expr::Test(c) = result_expr(src) else {
+        panic!()
+    };
+    let Cond::Compare { lhs, .. } = *c else {
+        panic!()
+    };
+    assert_eq!(lhs.ty(), Scalar::unsigned(Width::Long));
+}
+
+#[test]
+fn unsupported_operations() {
+    let e = errs(
+        "module m;
+var a: extern integer;
+function f: integer; internal;
+begin
+  f := rshft(a, 2);
+end;
+",
+    );
+    assert!(e[0].contains("`rshft` of a signed operand"), "{e:?}");
+    let e = errs(
+        "module m;
+type pinteger = 0..65535;
+var u: extern pinteger;
+function f: integer32; internal;
+begin
+  f := u div 3;
+end;
+",
+    );
+    assert!(e[0].contains("unsigned operand (ref 4.3.3)"), "{e:?}");
+    let e = errs(
+        "module m;
+var c: extern char; s: array[char] of integer;
+function f: integer; internal;
+begin
+  f := s[c];
+end;
+",
+    );
+    assert!(e[0].contains("an array index of one byte"), "{e:?}");
 }

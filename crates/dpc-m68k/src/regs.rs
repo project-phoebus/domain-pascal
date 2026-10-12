@@ -162,6 +162,10 @@ impl Access {
     fn ea_address(&mut self, ea: &Ea) {
         match ea {
             Ea::Ind(a) | Ea::Disp(_, a) => self.use_(Reg::A(*a)),
+            Ea::Idx(_, a, x, _) => {
+                self.use_(Reg::A(*a));
+                self.use_(Reg::D(*x));
+            }
             Ea::PreDec(a) | Ea::PostInc(a) => {
                 self.use_(Reg::A(*a));
                 self.def(Reg::A(*a));
@@ -279,10 +283,25 @@ pub fn access(insn: &Insn) -> Access {
         // `s<cc> Dn` writes the low byte; the selector gives it the
         // register of the value it replaces (in place, 0xE148DE).
         Insn::Scc { dst, .. } => a.dst(dst),
-        Insn::Tst { dst, .. } | Insn::Cmpi { dst, .. } => a.read(dst),
+        Insn::Tst { dst, .. } | Insn::Cmpi { dst, .. } | Insn::BtstImm { dst, .. } => a.read(dst),
         Insn::Cmp { src, dst, .. } => {
             a.read(src);
             a.use_(Reg::D(*dst));
+        }
+        // Two-address operations update their destination in place: the
+        // same value before and after (the selector writes them on a
+        // virtual register it may modify).
+        Insn::Alu { src, dst, .. } | Insn::Mul { src, dst, .. } | Insn::Div { src, dst, .. } => {
+            a.src(src);
+            a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
+        }
+        Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } => a.dst_rmw(dst),
+        Insn::Ext { dst, .. } | Insn::Swap(dst) => a.dst_rmw(&Ea::Reg(Reg::D(*dst))),
+        Insn::Shift { count, dst, .. } => {
+            if let crate::insn::ShiftCount::Reg(r) = count {
+                a.use_(Reg::D(*r));
+            }
+            a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
         }
     }
     a
@@ -303,6 +322,10 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
     let fe = |ea: &mut Ea| match ea {
         Ea::Reg(r) => *r = f(*r),
         Ea::Ind(a) | Ea::Disp(_, a) | Ea::PreDec(a) | Ea::PostInc(a) => fa(a),
+        Ea::Idx(_, a, x, _) => {
+            fa(a);
+            fd(x);
+        }
         _ => {}
     };
     match insn {
@@ -340,8 +363,19 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fd(bit);
             fe(dst);
         }
-        Insn::Cmp { src, dst, .. } => {
+        Insn::Cmp { src, dst, .. }
+        | Insn::Alu { src, dst, .. }
+        | Insn::Mul { src, dst, .. }
+        | Insn::Div { src, dst, .. } => {
             fe(src);
+            fd(dst);
+        }
+        Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BtstImm { dst, .. } => fe(dst),
+        Insn::Ext { dst, .. } | Insn::Swap(dst) => fd(dst),
+        Insn::Shift { count, dst, .. } => {
+            if let crate::insn::ShiftCount::Reg(r) = count {
+                fd(r);
+            }
             fd(dst);
         }
     }

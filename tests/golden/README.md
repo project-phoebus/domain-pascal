@@ -71,3 +71,19 @@ Tests:
   a parameter live around a `repeat` with a call in it, and (12.4 R4(c))
   parameters whose last use is a call's argument held through the call in
   D2 / A2 (PROC1_$SET_ASID 0xE148FE; module-local 0xE1D592).
+- `expr/arith` - codegen-patterns 8, 13, 3: `addq`/`subq`, constant-first
+  `moveq; add`, `addi`/`subi`, `c - x`, constant multiplication with
+  shifts and adds (x6 0xE6886C, x12, x28 0xE5AEF6) or `mulu.w` (x564
+  0xE3BB6A), `ext.l; divs.w` and `swap`, `neg`, `not`, widening, updates
+  in place (`addq`/`subi`/`andi`/`ori` to memory).
+- `expr/bits` - codegen-patterns 8: constant-first `&` (0xE177A0),
+  `andi`/`ori`/`eori` on computed values, shifts split above 8 (0xE02AA6),
+  a shift by a register (0xE02D52).
+- `expr/index` - codegen-patterns 5.2: array elements in the unit's data
+  and the frame, `(d,An,Dn.w)` / `lea (0,An,Dn.w)` (0xE70DA8, 0xE0AA18,
+  0xE3BB6E), scaling, the parameter-index copy (0xE3BB68, 0xE0AA8A), a
+  store to an element, an element by address (0xE6C07A), `.l` indices.
+- `expr/calls_sets` - codegen-patterns 3, 1.1, 5.1, 7.1: function calls in
+  expressions (0xE04700, 0xE01BA4, 0xE0082C), the tail wrapper, `btst #k`
+  on a one-word set (0xE4A412, 0xE013BA), comparisons as results (`seq`,
+  `sgt`, `sne`).

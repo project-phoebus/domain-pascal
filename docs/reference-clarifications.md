@@ -137,6 +137,14 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
     pointer types compatible when they point to the same type, or only
     when they are the same named type (p. 4-207 says the latter for
     pointers to varying strings)?  *Current: same target type.*
+15. **"Lshft", p. 4-109 (printed 4-108/4-109).** The example uses
+    `i : INTEGER16` and shows `LSHFT(i, 7)` giving "2#1110100000000000 =
+    10#-6144", i.e. a 16-bit result.  Unlike "Rshft" (p. 4-171) and
+    "Arshft" (p. 4-29), the entry does not say whether a 16-bit operand
+    is expanded to 32 bits first.  When the result is used as an
+    integer32 (`l := lshft(w, 7)` with `w : integer16`), is it -6144
+    (16-bit shift, then sign-extend) or 256000 (32-bit shift)?
+    *Current: refused (review of domain-pascal-5aw.13).*
 
 ## Reference errata noticed (no ruling needed)
 

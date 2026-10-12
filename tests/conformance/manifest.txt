@@ -30,6 +30,15 @@ tests/conformance/name_convert_acl_status.pas  NAME_CONVERT_ACL_STATUS
 # entry and held across calls in callee-saved registers (A2, D2).
 tests/conformance/sio_init_dtte.pas          0xE32B76:42
 
+# Expressions (codegen-patterns 5.2, 8): constant multiplication with
+# shifts and adds, array elements in the unit's data with the index scaled
+# (`add.w', `lsl.w', `mulu.w') and the lower bound folded in, a comparison
+# as a boolean result.
+tests/conformance/rip_packet_length.pas      0xE68864:16
+tests/conformance/bat_get_bat_step.pas       BAT_$GET_BAT_STEP  --section-addr .bss.moddata.BAT_=0xE79478
+tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .bss.moddata.FIM_=0xE2126C
+tests/conformance/audit_is_process_audited.pas  AUDIT_$IS_PROCESS_AUDITED  --section-addr .bss.moddata.AUDIT=0xE854D8
+
 # Harness fixtures.
 
 tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK

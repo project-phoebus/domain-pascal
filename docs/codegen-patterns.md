@@ -422,6 +422,37 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   from a function.  See `svc-d0-result-trap.md`.
 - **Uncertain:** how results larger than 4 bytes (records, sets, reals) are
   returned.  This is not yet observed in the kernel.
+- **Constant results (Verified at the sites):** `clr.<s> D0` for 0
+  (PARITY_$CHK_IO 0xE0B1AA `clr.w D0`; IO_$ALLOC 0xE1A9CC `clr.l D0`),
+  `moveq` for -128..127 (0xE0B19C `moveq #1,D0`, 0xE0B23A `moveq #-1,D0`,
+  word results), `move.<s> #n` otherwise.  **Implemented**
+  (`isel.rs`, `load_const`).
+- **Comparisons as boolean results (Verified at four sites; the register
+  rule is Uncertain):** the compare, then `s<cc>` into the data register
+  the compare read last: AUDIT_$IS_PROCESS_AUDITED 0xE70DA8..0xE70DAC
+  `tst.w (-2,A5,D0.w); seq D0` (the index register, D0, so no move);
+  ACL_$IN_SUBSYS 0xE470B6..0xE470BA `tst.w (-0x3d5a,A1); sgt D0` (the
+  index register of the `lea` before); module-local 0xE464AA..0xE464B2
+  `cmpi.w #2,(-2,A0,D1.w); sne D1; move.b D1,D0`; PROC1_$TST_LOCK
+  `btst D0,D1; sne D1` (the set's register).  A compare that reads no data
+  register gets a new one.  **Implemented** (`isel.rs`, `test_value`) for
+  comparisons only; `not`, `and then`, `or else` and boolean variables as
+  values, and storing a comparison to memory, are rejected (not
+  catalogued).
+- **Function calls in expressions (Verified):** the call sequence of a
+  procedure call (section 1), then the result read from D0: 0xE04700..
+  0xE04704 `bsr.w; move.l D0,(A3)` (not popped: a `bra` to a join and the
+  epilogue follow, section 1.1); 0xE0082C..0xE00830 `addq.w #8,SP; tst.b
+  D0; bmi.s` (popped, a conditional branch follows); 0xE01BA2..0xE01BA4
+  `addq.w #8,SP; move.w D0,D1; lsl.w #2,D1` (the result copied before
+  arithmetic, 12.4 R2).  Survey of compiled code (calls followed by a use
+  of D0 or A0, ad-hoc script): `move.w D0,...` after the pop ×300, `tst.b
+  D0` ×190, `move.l D0,...` ×155; without a pop `move.w D0` ×35, `move.l
+  D0` ×31.  **Implemented** (`isel.rs`, `expr_call`; the pop by the rule of
+  1.1 for the statement holding the call).  Rejected: a call among another
+  call's arguments (the pops are merged, 0xE69FF6, 0xE748E6), two calls in
+  one statement, results in A0 (pointer results).  The tail wrapper above
+  is the same code (`F := G(args)` with the move to D0 dropped).
 
 ---
 
@@ -562,6 +593,25 @@ their host); no compare or widening of either has been catalogued.
   one" is a general rule of the compiler's binary operators or specific
   to `in`; and the code for one-word sets held in a register (not seen
   yet; `dpc` rejects them).
+- **Constant member of a one-word or one-longword set (Verified;
+  implemented):** the set's value loaded into a data register, then `btst
+  #k` on it: REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0;
+  btst #13,D0; sne D0` (a boolean function, `sne` in the set's register);
+  in conditions 0xE013BA..0xE013C2 `move.w (190,A2),D0; btst #4,D0;
+  beq.w` and 0xE031B2 `btst #14,D5; bne.s`.  Survey of `btst #k` in
+  compiled code (ad-hoc script): on a data register that a `move.w` from
+  memory loaded, k = 8..15 ×192 and k < 8 ×58; after `move.l`, k >= 16 ×6;
+  `btst #k,<memory>` ×422, all with k < 8 (the 68000 takes the bit number
+  mod 8 there).  So a word set is loaded and tested whole whatever k is.
+  The memory form is taken to be the test of a bit of a byte object (a
+  packed field or a byte of a larger set): XPD_$INHERIT_PTRACE_OPTIONS
+  0xE5B17C `btst #3,(13,A0); sne D0`, not catalogued.  `dpc`
+  (`isel.rs`, `set_bit_test`) implements the register form for sets of
+  2 and 4 bytes; a non-constant element on a word set is rejected (`btst
+  Dn,Dm` takes the bit mod 32, not catalogued for words), and so is a
+  constant element beyond the set's bits (`20 in s` for a word set would
+  test a bit of the register above the loaded word; the value is false,
+  ref 3.9.3, p. 3-16, but the original's code for it is not catalogued).
 - **Set constants** sit in data, for example the two 32-byte `set of char`
   tables at the start of the OLD_DIR data segment 0xE7FD24 (Reported:
   `name-dir-subsystems.md`).
@@ -621,17 +671,82 @@ their host); no compare or widening of either has been catalogued.
     through a pointer, statements of bodies with several statements.
     Records and arrays of 1, 2 or 4 bytes are moved as scalars
     (Uncertain: not catalogued).
-- **1-based arrays:** the compiler folds the `-1` into the displacement,
-  `(-2,A0,Dn.w)` (Reported: AUDIT_$SUSPEND 0xE70DC8) or the `lea (2,An)` /
-  `(-2,An)` pair in 0xE17778's word-copy loop (0xE177E0..0xE177F2).
-- **Index scaling:**
-  - Multiply by 2 is done with `add.w Dn,Dn`; by 4 with `lsl.w #2` or
-    `lsl.l #2` (0xE0B26C, 0xE13942).
-  - Other sizes use `mulu.w #size` (`proc2/suspend.c` 0xE412AE
-    `mulu.w #0xE4`).
-  - Or shifts and subtract: `idx*0xF8` = `(idx<<8)-(idx<<3)` (Reported:
-    `vtoc-disk-layouts.md`).
+- **1-based arrays (Verified):** the compiler folds the `-1` into the
+  displacement, `(-2,A0,Dn.w)` (AUDIT_$SUSPEND 0xE70DC8;
+  AUDIT_$IS_PROCESS_AUDITED 0xE70DA8 `tst.w (-2,A5,D0.w)`) or the `lea
+  (2,An)` / `(-2,An)` pair in 0xE17778's word-copy loop
+  (0xE177E0..0xE177F2).
+- **Index scaling (Verified):**
+  - Multiply by 2 is done with `add.w Dn,Dn` (0xE70DA6); by 4 with `lsl.w
+    #2` or `lsl.l #2` (FIM_$GET_FIM_ADDR 0xE0AA16, 0xE0B26C, 0xE13942).
+  - Other sizes: the constant multiplication of section 8 (shifts and adds
+    for 2^s (2^k ± 1), e.g. ×72 at DISK_$REVALIDATE 0xE6C072..0xE6C078;
+    otherwise `mulu.w #size`, BAT_$GET_BAT_STEP 0xE3BB6A `mulu.w #0x234`,
+    `proc2/suspend.c` 0xE412AE `mulu.w #0xE4`).  The `idx*0xF8` =
+    `(idx<<8)-(idx<<3)` of `vtoc-disk-layouts.md` is the ×248 form of
+    section 8 (`lsl #3; move; neg; lsl #5; add`, 0xE38994).
+  - `mulu.w #c` and `muls.w #c` (survey, ad-hoc script: what reads the
+    product): `mulu.w` feeding a `.w` index ×94 (0xE0B2D0), a `.l` index
+    ×43 (0xE39364, after an unsigned compare of the index); `muls.w`
+    feeding a `.l` index ×118 (0xE1D7A2); no `muls.w #c` feeds a `.w`
+    index.  So the product's sign matters only for `.l` indices.
   - There are no 68020 scaled-index modes in compiled code.
+- **Element operand (Verified at the sites; implemented in `isel.rs`,
+  `index_ea`):**
+  - displacement (array offset, field offset and the lower bound folded
+    together) within -128..127: the indexed mode `(d,An,Dn.w)`
+    (FIM_$GET_FIM_ADDR 0xE0AA18 `move.l (0x3c,A5,D0.w),D0`; 0xE70DA8;
+    DISK_$REVALIDATE 0xE6C07A `pea (-0x48,A0,D0.w)`; FIM_$FREE_ASID
+    0xE0AA8E `clr.l (0x3c,A5,D0.w)`);
+  - beyond: `lea (0,An,Dn.w),Am`, then `(d,Am)` (BAT_$GET_BAT_STEP
+    0xE3BB6E..0xE3BB72 `lea (0,A5,D1.w),A0; move.w (-0x220,A0),D0`;
+    ACL_$IN_SUBSYS 0xE470B2; MMAP_$UNAVAIL_REMOV 0xE0CC4C `lea
+    (0,A0,D0.l),A2; ...; pea (-0x2000,A2)`).  Two accesses to one element
+    share the `lea` even with a small displacement (0xE71BCA..0xE71BD2,
+    `(-26,A0)` and `(-25,A0)`): `dpc` has no such CSE.
+  - the index register: an index read from memory (a variable of the
+    unit or of another unit) is scaled in place (0xE0AA10..0xE0AA16
+    `move.w PROC1_$AS_ID,D0; lsl.w #2,D0`; 0xE70DA0..0xE70DA6); a
+    by-value parameter is loaded, **copied**, and the copy scaled, in a
+    one-statement body as well (BAT_$GET_BAT_STEP 0xE3BB64..0xE3BB6A
+    `move.w (8,A6),D0; move.w D0,D1; mulu.w #0x234,D1`; module-local
+    0xE4649C..0xE464A8 `move.w (8,A6),D0; movea.l #abs,A0; move.w D0,D1;
+    add.w D1,D1`) and when it was loaded at entry (FIM_$FREE_ASID
+    0xE0AA8A `move.w D2,D0; lsl.w #2,D0`).  With element size 1 the index
+    register is used as it is.
+  - **Uncertain: `.w` or `.l`.**  Word indices appear as `.w`
+    (all the sites above) and as `.l` after `ext.l` (0xE01D10..0xE01D16
+    `move.w D4,D2; ext.l D2; lsl.l #3,D2; move.l (-56,A6,D2.l),-(SP)`;
+    0xE074E8..0xE074EE; about 177 `ext.l` followed within three
+    instructions by a `.l` index), both on small arrays.  In every `.l` case seen the
+    index is a value held in a register (a register variable); in every
+    `.w` case it was read from memory or is a parameter.  `dpc` holds
+    no local variable in a register, so it uses `.w` for word indices and
+    `.l` for longword ones; the rule is not confirmed.  A `.w` index is
+    sign-extended by the 68000, and a word index is scaled at the word's
+    width, so `dpc` takes a word index only when every index × element
+    size of the array's bounds fits in -32768..32767 (an element of a
+    `0..65535`-indexed array of 40001 chars, or of an `array[0..20000] of
+    integer`, would be addressed wrongly); other word indices are
+    rejected (review of bead domain-pascal-5aw.13).
+  - **Another unit's array (Uncertain; rejected):** the base is loaded
+    with `movea.l #imm,An`, but the immediate is not the array's address:
+    ACL_$IN_SUBSYS 0xE470AA `movea.l #0xe97294,A0`, then `(-0x3d5a,A1)`;
+    module-local 0xE464A0 `movea.l #0xe2622c,A0` (PROC1_$TYPE is
+    0xE2612C), then `(-2,A0,D1.w)`; DISK_$REVALIDATE 0xE6C06A.  How the
+    original split the address between the immediate and the displacement
+    is not known.  `lea abs.l,An` occurs too (12 sites, AUDIT_$SUSPEND
+    0xE70DC0) against 1731 `movea.l #abs,An`.  The base load is scheduled
+    into the index computation (after the index's first instruction:
+    0xE4703E..0xE47058, 0xE470A4..0xE470B2, 0xE4649C..0xE464A6,
+    0xE6C066..0xE6C070), which fits the R11 rule of section 12.4.
+  - **Bounds checks:** none in the image; the C of FIM_$FREE_ASID
+    (`fim/free_asid.c`) notes "the original performs no bounds check".
+    `dpc` emits none.
+  - Arrays through a pointer are supported when the pointer is held in an
+    address register since the entry; others are rejected (where the
+    pointer load goes relative to the index is not catalogued).  A byte
+    index (char, boolean) is rejected (its extension is not catalogued).
 - **Packed records / bit fields:** Uncertain; nothing has been catalogued
   yet.
 
@@ -1019,7 +1134,12 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **Implemented** (`crates/dpc-ir`, `Cond`, `StmtKind::If`/`Return`;
   `crates/dpc-m68k/src/isel.rs`, `Selector::if_`, `branch`, `compare`):
   all of the above that is Verified, with `not`, `and then`, `or else`.
-  Not supported yet: a branch to a `bra` (above); comparing booleans
+  A computed left operand (an expression, a function result, an array
+  element's value) is compared in its register with `cmpi #c,Dn` (0xE1216E
+  `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`);
+  against 0 it is rejected (the flags of the operation, or a `tst`?).  A
+  function's boolean result is tested with `tst.b D0` (section 3); `k in
+  s` for a constant k with `btst #k` (section 5.1).  Not supported yet: a branch to a `bra` (above); comparing booleans
   (`b = true`: compiled code tests booleans with `tst.b`, and has two
   `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
   a constant on the left of a comparison; comparing
@@ -1061,10 +1181,174 @@ Backward branches other than `dbf` in compiled code (same survey):
 
 ## 8. Arithmetic
 
-- **16x16 multiply:** `mulu.w`/`muls.w` inline.
+Survey method for this section: every compiled routine of 0xE00800..
+0xE88834 (split as `tools/loopalign.py` does, cut at the first `rts`),
+disassembled once and searched with ad-hoc scripts (not kept); counts are
+of instruction sequences, re-check sites with `tools/imgdis.sh`.  Beads
+domain-pascal-5aw.13 and -d7i.  **Implemented** in `crates/dpc-m68k/src/
+isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
+`update_in_place`), lowering in `crates/dpc-ir/src/lower.rs` (`binary`,
+`builtin_value`, `narrow`); goldens `tests/golden/expr/*`, tests
+`crates/dpc-m68k/tests/expr.rs`; conformance units
+`rip_packet_length.pas`, `bat_get_bat_step.pas`, `fim_get_fim_addr.pas`,
+`audit_is_process_audited.pas`.
+
+- **Operands (Verified):** a variable is used as a memory operand or
+  loaded into a new data register (`move.<s> ea,Dn`); a value held in a
+  register (a parameter loaded at entry, 12.2; a function result in D0,
+  section 3) is never modified: arithmetic works on a copy
+  (BAT_$GET_BAT_STEP 0xE3BB68 `move.w D0,D1`; 0xE01BA4; FIM_$FREE_ASID
+  0xE0AA8A), which takes another register (12.4 R2).  A computed value is
+  modified in place.
+- **`x + c`, `x - c` (Verified counts):**
+  - 1..8: `addq`/`subq` on the value in a register (after a load: `addq`
+    ×203, `subq` ×223; 0xE00C10, 0xE010D0, RIP_$PACKET_LENGTH 0xE68874
+    `addq.w #2,D0`);
+  - `x + c` for c in 9..127 with `x` in memory: the constant first,
+    `moveq #c,Dn; add.<s> x,Dn` (×23: 0xE008A8 `moveq #30,D0; add.l
+    (-64,A6),D0`; 0xE30BB0 `moveq #64,D2; add.w abs.l,D2`), against 4 loads
+    followed by `addi` of such a constant (0xE30A80; the three at 0xE00920
+    follow a zero-extension, a computed value);
+  - otherwise the value in a register and `addi`/`subi` (×26 `addi` of a
+    word or long constant after a load, 0xE08840; `subi` of 9..127 after a
+    load ×13, 0xE0C462; 0xE0B6E2 `subi.w #0x400,D2`);
+  - `c - x`: the constant first, `sub.<s> x,Dn` (about 20: 0xE08EE4 `moveq
+    #31,D2; sub.w (-26,A6),D2`; 0xE10114 `move.l #0x400,D2; sub.l
+    (-372,A6),D2`; LOG_$READ's worker 0xE177C4);
+  - not catalogued (rejected): a negative constant; `x + c` for 9..127
+    with `x` held in a register (11 `moveq; add.l Dx,Dn`, 11 copies and
+    `addi.l`).
+- **`x + y`, `x - y` (Uncertain operand order):** one operand in a
+  register, the other added to it (0xE177B4 `add.l D1,D2`; `add.w mem,Dn`
+  after a load ×38).  Which source operand the original put in the
+  register cannot be seen; `dpc` takes the left one, or the computed one
+  for `+`.  12.4 R7: the sum goes into the operand that is not reused
+  (0xE177B4), which `dpc` does not model.
+- **`x := x op c` (Verified counts):** `addq`/`subq` to memory ×1076
+  (review recount: 731 `addq`/`subq` with a memory destination in the
+  whole range 0xE00800..0xE88834, hand-written assembly included, so the
+  1076 is an overcount; the order of magnitude stands)
+  (0xE00B3E `addq.w #1,abs.l`; ACL_$ENTER_SUPER 0xE46FA8 `addq.w
+  #1,(0xb76,A0)`), `addi`/`subi` to memory ×20 (0xE010C4 `addi.l
+  #0xc0,(0x3f4,A5)`), `andi`/`ori` to memory ×560 (0xE0086E `andi.l
+  #-0x7f8001,(0x26,A2)`), against 6 plain operands loaded, changed and
+  stored back (0xE025B0).  For an array element both forms occur: 14
+  `addq`/`subq` to an indexed operand (0xE13154 `addq.l
+  #1,(-4,A0,D0.w)`) against 10 load, change, store sequences
+  (AUDIT_$SUSPEND 0xE70DC8..0xE70DCE): rejected.
+- **`&` (ref p. 4-33; Verified counts):** with a constant and a variable
+  (in memory or held in a register): the constant first, then `and.<s>
+  x,Dn` (about 300 with the constant loaded by the instruction just
+  before: 0xE177A0 `moveq #-2,D2; and.w D1,D2`, D1 a parameter held since
+  the entry; 0xE60F4A `move.l #0xfffff,D0; and.l (-28,A6),D0`; 0xE02D44
+  `moveq #15,D1; and.b (157,A3),D1`; 0xE00A14), against about 60 loads
+  followed directly by `andi`, some of them conversions (0xE00868 `andi.l
+  #0xff`, a zero-extension) and some not (0xE05810 `move.l (-188,A6),D1;
+  andi.l #0x7fffffff,D1` before a compare; 0xE03494): Uncertain as a
+  rule, `dpc` uses the majority form.  On a computed value: `andi` in
+  place (0xE11024 after `lsr.w`).
+- **`!`, `xor` (Uncertain):** on a computed value, `ori`/`eori` in place
+  (0xE03498 `andi.w #-0x4001,D1; ori.w #0x2000,D1`); with a variable both
+  orders occur (4 constant-first `or`s, 5 loads and `ori`): rejected.
+  `eor` is rare (7 `eor`, 1 `eori` in compiled code).
+- **`-x`, `~x`:** `neg.<s>`, `not.<s>` on the value in a register (`neg.w`
+  ×97, many from the multiplications below; `not.w` ×13, `not.l` ×46,
+  `not.b` ×43).
+- **Shifts (ref pp. 4-109, 4-171, 4-29; Verified):** `lsl`/`lsr`/`asr` on
+  the value in a register; a constant count above 8 is split into shifts
+  of 8 and the rest (×1024 0xE02AA6 `lsl.l #8,D0; lsl.l #2,D0`, 96 sites;
+  ×32768 0xE00876 `lsl.l #8; lsl.l #7`); a count in a register: `lsl.w
+  D1,D3` (0xE02D52).  Ref p. 4-171: `rshft` of an operand smaller than 32
+  bits expands it to 32 bits first (`rshft(-9, 3)` is -2 in 16 bits); its
+  code for a signed 16-bit operand is not catalogued and `dpc` rejects
+  it.  `arshft` gives the same low word either way (`asr.w`).
+- **Multiplication by a constant (ref p. 6-28; Verified):** with c = 2^s
+  × m, m odd:
+
+  | m | Code (after the value is in Dn) | Constants seen (sites) |
+  |---|---|---|
+  | 1 | `add.w Dn,Dn` for s = 1, else `lsl #s` (split above 8) | 2, 4, 8, 16, 128, 256, 1024 (×96), 4096, 32768 |
+  | 2^k + 1 | the 2^s part; `move Dn,Dm`; `Dm` shifted by k (`add Dm,Dm` for k = 1); `add Dm,Dn` | 3, 5, 6 (RIP_$PACKET_LENGTH 0xE6886C), 9, 10, 12 (×109, 0xE073D4), 17, 18, 20, 24, 36, 48, 72 (DISK_$REVALIDATE 0xE6C072), 96, 144, 192, 257 |
+  | 2^k - 1, k >= 3 | the 2^s part; `move Dn,Dm`; `neg Dn`; `Dm` shifted by k; `add Dm,Dn` | 28 (PEB_$GET_FP 0xE5AEF6), 56, 60, 120, 248 |
+  | other | `mulu.w #c,Dn` (word results) | 92, 150, 153, 204, 228, 244, 250, 268, 300, 336, 363, 564 (BAT_$GET_BAT_STEP 0xE3BB6A), 580, 1083, 1244, 1624, 5240, 12345 |
+
+  The one exception is ×26 at 0xE71BBA (odd part 13, done bit by bit:
+  `add.w D1,D1; move.w D1,D0; lsl.w #2,D0; add.w D0,D1; add.w D0,D0;
+  add.w D0,D1`), while other odd parts of three bits (21, 67, 145) use
+  `mulu.w`: `dpc` rejects odd parts of three bits other than 2^k ± 1.  A
+  68000 cycle count does not separate the two groups (268 and 336 would
+  be cheaper with shifts).  `muls.w #c` occurs where the product is a
+  `.l` index (section 5.2); `dpc` uses `mulu.w` for word results only and
+  rejects a 32-bit multiplication by such a constant.  The `move` that
+  starts the second chain takes a new register (D1 at 0xE68870, 12.4 R8);
+  when the multiplicand is held, it is copied first (0xE073D4 `move.w
+  D1,D3; lsl.w #2,D3; ...`).  **Uncertain:** ×17 at 0xE87974 keeps the
+  product in the copy (`move.l D0,D6; lsl.l #4,D6; add.l D0,D6`), D0
+  being used later; `dpc` copies a held multiplicand and then uses the
+  forms above.
+- **16x16 multiply of two variables:** `mulu.w`/`muls.w` inline (60
+  `mul<s>.w` with a register or memory source in compiled code); operand
+  order not catalogued, rejected by `dpc`.
 - **Word divide or mod** (32/16 → 16) is inline: `divu.w`/`divs.w`, with
   `swap` for the remainder (Verified: PMAP_$PURIFIER_L 0xE13AFC
   `divu.w #50,D2`).  On overflow the register keeps the dividend.
+  - **integer16 `div`/`mod` by a positive constant (Verified;
+    implemented):** `ext.l Dn; divs.w #c,Dn`, then `swap Dn` for `mod`
+    (0xE31154..0xE3115C `move.w D2,D1; ext.l D1; divs.w #31,D1; swap D1`;
+    0xE11BEA..0xE11BF4 `ext.l D1; divs.w #240,D1; swap D1; ext.l D1;
+    divs.w #60,D1`; 0xE2F052..0xE2F058 a quotient).  The remainder has the
+    dividend's sign (MC68000 DIVS).
+  - Unsigned operands (ref 4.3.3, p. 4-6: unsigned `div`/`mod` when both
+    operands are unsigned run-time values, or one is and the other a
+    non-negative constant) are zero-extended first (0xE11816..0xE11822
+    `andi.l #0xffff,D3; divu.w #5,D3; swap D3`): not implemented.
+  - A longword dividend divided by a word constant with `divs.w` (0xE10CAE
+    `divs.w #250,D0` after `sub.l`): the quotient is 16 bits, which is
+    only right when it fits; how the compiler decided that is not known
+    (rejected).
+- **Widening and narrowing (Verified at the sites):** a signed word
+  widened with `ext.l` after the load (0xE02C28..0xE02C2C `move.w D2,D0;
+  ext.l D0; move.l D0,(-32,A6)`, an assignment; 610 `ext.l` in compiled
+  code); an unsigned `0..65535` word with `clr.l Dn; move.w x,Dn`
+  (0xE177A6..0xE177AC), or `andi.l #0xffff` on a value already in a
+  register (0xE11818); a `char` widened to a word with `clr.w Dn; move.b
+  x,Dn` (0xE0E316..0xE0E318).  A byte widened to a longword occurs as
+  `move.b; andi.l #0xff` (0xE00864..0xE00868): rejected.
+  **A word sum, difference, product or negation used as a longword is
+  computed in 32 bits, its operands widened first** (ref 4.3.1, p. 4-5:
+  "The compiler computes operands smaller than 32 bits with 32 bits of
+  precision when necessary to achieve correct arithmetic"): 0xE0863C..
+  0xE08642 `move.w D3,D2; ext.l D3; subq.l #2,D3; move.l D3,(-176,A6)`;
+  0xE69568..0xE6956E `ext.l D5; addq.l #1,D5` for a longword argument;
+  0xE07442..0xE0744A `ext.l D6; lsl.l #2,D6; move.l D6,D7; add.l D7,D7`
+  (×12).  Review survey of 0xE00800..0xE88834: the instruction before an
+  `ext.l Dn` that writes Dn is a `move.w` ×355, `andi.w` ×2, `asr.w`,
+  `subq.w` (before a `divs.w`) and `divs.w` once each, never a word
+  `add`/`sub`/`mul`; `ext.l` followed by a 32-bit `lsl.l`, `add.l`,
+  `addq.l` or `addi.l` and a `move.l` store ×79.  **Implemented**
+  (`lower.rs`, `convert`: the widening is pushed into the operands of
+  `+`, `-`, `*` and unary `-`; the bit operators, `div`, `mod`, `rshft`
+  and `arshft` give the same value either way and are widened after).  A
+  word `lshft` used as a longword is rejected (p. 4-109 does not say
+  whether it is expanded first, as pp. 4-29 and 4-171 say of `arshft` and
+  `rshft`); so is a word product needing `mulu.w`/`muls.w` (`muls.w #c`
+  gives the 32-bit product; not catalogued for this case).  Compares are
+  unchanged: a word sum is compared at the word's width (review survey:
+  `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41 against `move.w; ext.l;
+  add.l/sub.l; cmp.l/cmpi.l` ×7, e.g. 0xE0F9D0..0xE0F9D8; the rule
+  between them is not known).  An integer32
+  expression stored into a word object (or returned as a word result) is
+  computed at word width when the operation allows it (`+`, `-`, `*`,
+  `&`, `!`, `xor`, `lshft`, `-`, `~`): 0xE177C4 `move.w #0x400,D3; sub.w
+  D0,D3; move.w D3,(A0)` stores `16#400 - offset`, `offset` a `0..65535`
+  word (an integer32 expression).  Ref 4.3.1, p. 4-5: "the compiler tries
+  to avoid the extra code produced by data expansion".
+- **Signedness of results (Uncertain, one site):** the sum of two
+  unsigned run-time values (or of one and a non-negative constant) is
+  compared unsigned: 0xE177B4..0xE177B8 `add.l D1,D2; cmp.l D3,D2; bls`
+  for `offset + actual_len^ > 16#400` with two `0..65535` words.  `dpc`
+  makes `+`, `*`, `&`, `!` of such operands unsigned (the analogue of ref
+  4.3.3 for `div`/`mod`); `-` stays signed.
 - **32-bit multiply, divide and mod** call **M$ARITH** (Verified: 0xE07FEE
   `jsr M$OIU$WLW` for `d2 mod 11`, with a word-slot divisor and a pad).
   The routines (map, `../source/domain_os/math/sau2/arith.s`):
@@ -1380,7 +1664,14 @@ kinds from the C in `../source/domain_os`.
   counterexamples).
 - *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
   `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
-  add.w D1,D1`.
+  add.w D1,D1`.  **Implemented** (section 8, operands): a value held in a
+  register is copied into a new one before an operation changes it; in a
+  one-statement body a by-value parameter used as an array index is
+  loaded and copied the same way (both sites above are one-statement
+  functions).  But RIP_$PACKET_LENGTH 0xE68868..0xE6886C, also a
+  one-statement function, loads its parameter into D0 and doubles it in
+  place (`add.w D0,D0`): an operand of arithmetic is not copied.
+  **Uncertain:** why an index is and an operand is not.
 
 **Implemented** (`crates/dpc-m68k/src/isel.rs`, `select_body`,
 `Selector::entry_loads`): a *procedure* body of two or more statements,
@@ -1405,7 +1696,7 @@ loaded nothing at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at
 own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
 TIME_$Q_FLUSH_QUEUE stay byte-identical).  Reported as not supported yet:
 a function body of several statements (R5); a pointer parameter also
-used as data; computing with a held parameter (the copy rule); storing
+used as data; storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
 last use is an argument of a call (12.4 R4(c)).  In a body without
@@ -1441,8 +1732,9 @@ settled, each from this one routine, in image order:
 1. `moveq #-2,D2; and.w D1,D2; move.w D2,(A0)` (0xE177A0): `max_len &
    16#FFFE` with the constant loaded first and the variable ANDed into
    it, in D2: the first callee-saved register, taken without any call
-   while D0/D1 hold parameters.  Bit operators are not implemented; the
-   operand order and the register choice need a survey.
+   while D0/D1 hold parameters.  **Done** (bead domain-pascal-d7i;
+   section 8, `&`): `dpc` produces 0xE17778..0xE177A4 byte for byte in a
+   reconstruction cut after the `if` that ends at 0xE177A4.
 2. `clr.l D1; clr.l D2; move.w D0,D1; move.w (A0),D2` (0xE177A6): the
    zero-extension of two `0..65535` words for a 32-bit sum (implicit
    widening, section 5), both `clr.l` first.  D1, which held `max_len`
@@ -1927,7 +2219,7 @@ earlier:
 |---|---|---|---|
 | 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
 | 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; when a store kills a CSE is open |
-| 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8); bit operators need a survey |
+| 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8).  **Implemented** (section 8, `&`; bead domain-pascal-d7i) |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
 | 5 | D3 at 0xE177C4 and 0xE177D0 | 0xE177C4, 0xE177D0 | Speculative (R6) |
 | 6 | The `for` loop as strength-reduced pointers (12.3 item 6) | 0xE177DC..0xE177F2 | Shape Verified; separate bead |
@@ -1985,6 +2277,15 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   Where gas would pick a different encoding, the emitter must write the
   original one.  The tree's hand-asm files do it with `.short`.
 - `addq`/`subq` are used for 1..8; `moveq` for −128..127 into a D register.
+- `addi`/`subi`/`andi`/`ori`/`eori` (`0640`, `0480`, `0240`, `0040`,
+  `0a40` for words) are written with the explicit `i` mnemonics, which gas
+  encodes as written (no `addq` substitution).  Byte immediates are 0..255
+  (`andi.b #0x80`, the high byte of the extension word zero, as for
+  `move.b`).
+- Indexed operands `(d,An,Dn.w)` / `(d,An,Dn.l)` use the brief extension
+  word (one word: index register, size, 8-bit displacement; no scale on
+  the 68010): 0xE70DA8 `4a75 00fe` `tst.w (-2,A5,D0.w)`.  `lea
+  (0,An,Dn.w),Am` (0xE3BB6E `41f5 1000`) likewise.
 - **Stores of constants** (Verified; implemented in `isel.rs`,
   `Selector::store`):
   - zero: `clr.<s> <ea>` (TIME_$Q_INIT_QUEUE 0xE16C6E `clr.l (A0)`;

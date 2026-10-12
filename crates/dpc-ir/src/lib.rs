@@ -377,14 +377,89 @@ pub enum Expr {
     /// The address of the object at `addr`, as a pointer value (`addr(x)`,
     /// ref p. 4-13).
     AddrOf(Addr),
+    /// `lhs op rhs` on integers of type `ty` (ref 4.3.1, p. 4-5, and the
+    /// bit operators, pp. 4-33, 4-109, 4-171, 4-29, 4-221).  For the
+    /// arithmetic and bit operators both operands have type `ty` (lowering
+    /// inserts [`Expr::Convert`] where the source mixed widths); for the
+    /// shifts `lhs` has type `ty` and `rhs` is the count, of any integer
+    /// type.
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        ty: Scalar,
+    },
+    /// `op operand`, the operand of type `ty`.
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+        ty: Scalar,
+    },
+    /// `value` converted to `ty`: widened (sign- or zero-extended by
+    /// `value`'s sign, ref 4.3.1 p. 4-5) or narrowed to its low bytes.
+    Convert { value: Box<Expr>, ty: Scalar },
+    /// The result of a function call (ref 5.2; the result register,
+    /// codegen-patterns 3), of type `ty`.
+    Call { call: Call, ty: Scalar },
+    /// A condition as a boolean value (0xFF true, 0 false; ref 3.5.3).
+    Test(Box<Cond>),
+}
+
+/// A binary integer operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    /// `div`: truncating division (ref "Div", p. 4-66).
+    Div,
+    /// `mod` (ref "Mod", pp. 4-115..4-116): without -iso the remainder has
+    /// the dividend's sign (`-10 mod 3` is -1), as MC68000 `divs` gives.
+    Mod,
+    /// `&` (ref "Bit operators", p. 4-33).
+    And,
+    /// `!` (p. 4-33).
+    Or,
+    /// `xor(a, b)` (p. 4-221).
+    Xor,
+    /// `lshft(x, n)` (p. 4-109): zeros shifted in on the right.
+    Shl,
+    /// `rshft(x, n)` (p. 4-171): zeros shifted in on the left.
+    Shr,
+    /// `arshft(x, n)` (p. 4-29): the sign bit kept.
+    Ashr,
+}
+
+impl BinOp {
+    /// Whether `a op b` = `b op a`.
+    pub fn commutative(self) -> bool {
+        matches!(
+            self,
+            BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor
+        )
+    }
+}
+
+/// A unary integer operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnOp {
+    /// `-x`.
+    Neg,
+    /// `~x` (ref p. 4-33): the bits complemented.
+    Not,
 }
 
 impl Expr {
     /// The IR type of the value.
     pub fn ty(&self) -> Scalar {
         match self {
-            Expr::Const { ty, .. } | Expr::Load { ty, .. } => *ty,
-            Expr::SetMember { .. } => Scalar::BOOLEAN,
+            Expr::Const { ty, .. }
+            | Expr::Load { ty, .. }
+            | Expr::Binary { ty, .. }
+            | Expr::Unary { ty, .. }
+            | Expr::Convert { ty, .. }
+            | Expr::Call { ty, .. } => *ty,
+            Expr::SetMember { .. } | Expr::Test(_) => Scalar::BOOLEAN,
             Expr::AddrOf(_) => Scalar::POINTER,
         }
     }
@@ -401,6 +476,18 @@ pub enum Addr {
     Static(i32),
     /// The pointer value `base` + offset.
     Indirect { base: Box<Expr>, offset: i32 },
+    /// An array element: the address `base` + `index` × `scale` +
+    /// `offset`.  `offset` holds the lower bound folded in (`-lo ×
+    /// scale`, codegen-patterns 5.2: `(-2,A0,Dn.w)` for a 1-based array of
+    /// words, AUDIT_$IS_PROCESS_AUDITED 0xE70DA8) and the offsets of
+    /// fields selected after the indexing; `base`'s own offset is the
+    /// array's.  `index` is an integer or ordinal value of 2 or 4 bytes.
+    Index {
+        base: Box<Addr>,
+        index: Box<Expr>,
+        scale: u32,
+        offset: i32,
+    },
 }
 
 impl Addr {
@@ -415,6 +502,17 @@ impl Addr {
             },
             Addr::Indirect { base, offset } => Addr::Indirect {
                 base,
+                offset: offset + delta,
+            },
+            Addr::Index {
+                base,
+                index,
+                scale,
+                offset,
+            } => Addr::Index {
+                base,
+                index,
+                scale,
                 offset: offset + delta,
             },
         }

@@ -19,14 +19,14 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, ResultSpec, Scalar,
-    Sign, Stmt, StmtKind, Width,
+    Addr, Arg, BinOp, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, ResultSpec,
+    Scalar, Sign, Stmt, StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
-use crate::insn::{Cond, Ea, Insn, Reg, RegSet, Size};
+use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate, RegClass, VRegs, DATA_BASE};
 
 /// A5, the data base register, as an address register number.
@@ -304,6 +304,10 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
     for st in stmts {
         match &st.kind {
             StmtKind::Return => return true,
+            // A function call inside the value pushes and calls.
+            StmtKind::SetResult(e) | StmtKind::Store { value: e, .. } if expr_has_call(e) => {
+                return false
+            }
             StmtKind::SetResult(_) | StmtKind::Store { .. } => {}
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
             // loop (codegen-patterns 5.2).
@@ -316,6 +320,36 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
         }
     }
     tail_clean
+}
+
+/// Whether evaluating `e` calls a function.
+fn expr_has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Const { .. } | Expr::AddrOf(_) => false,
+        Expr::Load { addr, .. } => addr_has_call(addr),
+        Expr::SetMember { elem, set, .. } => expr_has_call(elem) || expr_has_call(set),
+        Expr::Binary { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_has_call(x),
+        Expr::Call { .. } => true,
+        Expr::Test(c) => cond_has_call(c),
+    }
+}
+
+fn addr_has_call(a: &Addr) -> bool {
+    match a {
+        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+        Addr::Indirect { base, .. } => expr_has_call(base),
+        Addr::Index { base, index, .. } => addr_has_call(base) || expr_has_call(index),
+    }
+}
+
+fn cond_has_call(c: &IrCond) -> bool {
+    match c {
+        IrCond::Compare { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
+        IrCond::Test(e) => expr_has_call(e),
+        IrCond::Not(x) => cond_has_call(x),
+        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => cond_has_call(a) || cond_has_call(b),
+    }
 }
 
 /// The argument bytes the caller pops after `st`, when `st` is a call
@@ -393,6 +427,9 @@ fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
             },
             *offset,
         )),
+        // Two elements of one array at run-time indices: adjacency is not
+        // known at compile time.
+        Addr::Index { .. } => None,
     }
 }
 
@@ -439,18 +476,52 @@ impl Uses<'_> {
                 self.expr(elem);
                 self.expr(set);
             }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => self.expr(x),
+            Expr::Call { call, .. } => self.call_args(call),
+            Expr::Test(c) => self.cond(c),
             Expr::Const { .. } => {}
         }
     }
 
     fn address(&mut self, a: &Addr) {
-        if let Addr::Indirect { base, .. } = a {
-            match &**base {
+        match a {
+            Addr::Indirect { base, .. } => match &**base {
                 Expr::Load {
                     addr: Addr::Frame(o),
                     ..
                 } if self.is_param(*o) || self.is_slot(*o) => self.out.push((*o, ParamUse::Base)),
                 b => self.expr(b),
+            },
+            Addr::Index { base, index, .. } => {
+                self.address(base);
+                self.expr(index);
+            }
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        }
+    }
+
+    fn call_args(&mut self, c: &Call) {
+        for a in &c.args {
+            match a {
+                // A by-value parameter that is only pushed as an argument is
+                // pushed from the frame, not loaded at entry:
+                // AST_$SET_ATTRIBUTE 0xE053DA `move.l (0xe,A6),-(SP)`;
+                // 0xE00EBE and 0xE00EDE push (8,A6) twice (codegen-patterns
+                // 12.2).
+                Arg::Value {
+                    value:
+                        Expr::Load {
+                            addr: Addr::Frame(_),
+                            ..
+                        },
+                    ..
+                } => {}
+                Arg::Value { value, .. } => self.expr(value),
+                Arg::Address { addr, .. } => self.address(addr),
             }
         }
     }
@@ -492,28 +563,7 @@ impl Uses<'_> {
                     self.address(src);
                     self.address(dst);
                 }
-                StmtKind::Call(c) => {
-                    for a in &c.args {
-                        match a {
-                            // A by-value parameter that is only pushed as
-                            // an argument is pushed from the frame, not
-                            // loaded at entry: AST_$SET_ATTRIBUTE 0xE053DA
-                            // `move.l (0xe,A6),-(SP)`; 0xE00EBE and
-                            // 0xE00EDE push (8,A6) twice (codegen-patterns
-                            // 12.2).
-                            Arg::Value {
-                                value:
-                                    Expr::Load {
-                                        addr: Addr::Frame(_),
-                                        ..
-                                    },
-                                ..
-                            } => {}
-                            Arg::Value { value, .. } => self.expr(value),
-                            Arg::Address { addr, .. } => self.address(addr),
-                        }
-                    }
-                }
+                StmtKind::Call(c) => self.call_args(c),
                 StmtKind::Fill { start, value, .. } => {
                     self.address(start);
                     self.expr(value);
@@ -558,6 +608,31 @@ pub struct Selector {
     /// Labels that a `bra` directly follows, with the statement that
     /// emitted the `bra` (see [`Self::jump`]).
     before_bra: Vec<(u32, Span)>,
+    /// A function call inside the statement being selected may skip its
+    /// pop (codegen-patterns 1.1): the statement is a store or result
+    /// assignment whose continuation is clean ([`Tail::clean`]).
+    call_no_pop: bool,
+    /// Arguments of a call are being pushed (a function call there is
+    /// refused: its pop is merged with the outer call's, codegen-patterns
+    /// 1.1, 0xE69FF6).
+    in_args: bool,
+    /// The statement already called a function whose result (in D0) may
+    /// still be needed.
+    called: bool,
+}
+
+/// An operand as [`Selector::eval`] leaves it.
+#[derive(Clone, Debug)]
+enum Val {
+    /// A new virtual data register that the selector may modify in place.
+    Tmp(u8),
+    /// A register that holds a value the selector must not modify: a
+    /// parameter loaded at entry, a function result in D0.
+    Reg(Reg),
+    /// A memory operand (any address register it needs is loaded).
+    Mem(Ea),
+    /// An immediate, as the operation's size reads it ([`imm`]).
+    Imm(i64),
 }
 
 impl Selector {
@@ -576,6 +651,9 @@ impl Selector {
             placed: Vec::new(),
             epilogue: None,
             before_bra: Vec::new(),
+            call_no_pop: false,
+            in_args: false,
+            called: false,
         }
     }
 
@@ -637,6 +715,13 @@ impl Selector {
                 end: rest.is_empty() && tail.end,
                 clean: seq_clean(rest, tail.clean),
             };
+            // A function call in a store's value or a result assignment is
+            // followed only by the move of its result: popped unless the
+            // statement's continuation is clean (codegen-patterns 1.1;
+            // 0xE04700 `bsr.w; move.l D0,(A3); bra.w` with no pop).
+            self.call_no_pop =
+                matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. }) && next.clean;
+            self.called = false;
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => self.store(addr, value)?,
@@ -791,6 +876,8 @@ impl Selector {
             },
         )?;
         (self.span, self.multi) = (span, multi);
+        // A call in the test is followed by the conditional branch: popped.
+        (self.call_no_pop, self.called) = (false, false);
         self.branch(until, false, head)
     }
 
@@ -824,14 +911,35 @@ impl Selector {
                 // A boolean is 0xFF or 0: `tst.b` and the sign
                 // (codegen-patterns 5, 7: after `tst.b` the compiled code
                 // branches with `bpl` 919 times, `bmi` 425, `beq`/`bne`
-                // 37).
-                let Expr::Load { addr, .. } = e else {
-                    return Err(unsupported(
-                        self.span,
-                        "a condition that is a computed boolean value is",
-                    ));
+                // 37).  A function's boolean result is tested in D0 after
+                // the pop (0xE0082C..0xE00830 `addq.w #8,SP; tst.b D0;
+                // bmi.s`).
+                let ea = match e {
+                    Expr::Load { addr, .. } => self.operand(addr)?,
+                    Expr::Call { .. } => match self.eval(e)? {
+                        Val::Reg(r) => Ea::Reg(r),
+                        _ => unreachable!("a call's value is its result register"),
+                    },
+                    // `k in s` for a constant k and a set of one word or one
+                    // longword: `btst #k` on the set in a register, the
+                    // branch on Z (0xE013BA..0xE013C2 `move.w (190,A2),D0;
+                    // btst #4,D0; beq.w`; 0xE031B2 `btst #14,D5; bne.s`).
+                    Expr::SetMember {
+                        elem,
+                        set,
+                        set_width,
+                    } if matches!(**elem, Expr::Const { .. }) => {
+                        self.set_bit_test(elem, set, *set_width, false)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "a condition that is a computed boolean value is",
+                        ))
+                    }
                 };
-                let ea = self.operand(addr)?;
                 self.tst(Size::B, ea)?;
                 self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
                 Ok(())
@@ -919,10 +1027,7 @@ impl Selector {
         let size = size_of(ty.width);
         let signed = ty.sign == Sign::Signed;
         let Expr::Load { addr, .. } = lhs else {
-            return Err(unsupported(
-                self.span,
-                "a comparison whose left operand is not a variable is",
-            ));
+            return self.compare_computed(op, lhs, rhs);
         };
         match rhs {
             Expr::Const { value: 0, .. } => {
@@ -1334,6 +1439,9 @@ impl Selector {
         if matches!(addr, Addr::Frame(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
+        if self.update_in_place(addr, value)? {
+            return Ok(());
+        }
         if self.addr_needs_reg(addr) && self.value_needs_reg(value) {
             return Err(unsupported(
                 self.span,
@@ -1362,7 +1470,21 @@ impl Selector {
                 }
             },
             Expr::Load { addr: a, .. } => Src::Ea(self.ea_of(a)?),
-            e => Src::Ea(Ea::Reg(Reg::D(self.eval_d(e)?))),
+            // A comparison stored as a boolean: whether the original set
+            // the byte in memory with `s<cc>` directly is not catalogued.
+            Expr::Test(_) => {
+                return Err(unsupported(
+                    self.span,
+                    "storing a computed boolean (s<cc> to memory or through a register) is",
+                ))
+            }
+            e => match self.eval(e)? {
+                // A held value or a function's result is stored from its
+                // register (0xE04704 `move.l D0,(A3)` after `bsr.w`;
+                // 0xE16C74 `move.b D0,(8,A0)`).
+                Val::Reg(r) => Src::Ea(Ea::Reg(r)),
+                v => Src::Ea(Ea::Reg(Reg::D(self.in_tmp(v, ty.width)?))),
+            },
         };
         let dst = self.ea_of(addr)?;
         self.out.push(match &src {
@@ -1388,6 +1510,7 @@ impl Selector {
     fn addr_needs_reg(&self, addr: &Addr) -> bool {
         match addr {
             Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+            Addr::Index { .. } => true,
             Addr::Indirect { base, .. } => !matches!(
                 &**base,
                 Expr::Load { addr: Addr::Frame(o), .. } if self.pinned(*o).is_some()
@@ -1400,7 +1523,13 @@ impl Selector {
         match value {
             Expr::Const { .. } => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
-            Expr::SetMember { .. } | Expr::AddrOf(_) => true,
+            Expr::SetMember { .. }
+            | Expr::AddrOf(_)
+            | Expr::Binary { .. }
+            | Expr::Unary { .. }
+            | Expr::Convert { .. }
+            | Expr::Call { .. }
+            | Expr::Test(_) => true,
         }
     }
 
@@ -1622,7 +1751,27 @@ impl Selector {
                         src: Ea::ImmSym(name.clone()),
                         dst,
                     }),
-                    _ => return Err(unsupported(self.span, "this argument value is")),
+                    Expr::AddrOf(_) | Expr::SetMember { .. } | Expr::Test(_) => {
+                        return Err(unsupported(self.span, "this argument value is"))
+                    }
+                    // A computed value: evaluated right before its push, from
+                    // its register (0xE0AA82 `move.w D2,-(SP)`; KBD_$RCV
+                    // 0xE1CE56 `move.b D0,-(SP)`; arguments are evaluated in
+                    // push order, codegen-patterns 12).
+                    e => {
+                        self.in_args = true;
+                        let v = self.eval(e);
+                        self.in_args = false;
+                        let src = match v? {
+                            Val::Reg(r) => Ea::Reg(r),
+                            v => Ea::Reg(Reg::D(self.in_tmp(v, e.ty().width)?)),
+                        };
+                        self.out.push(Insn::Move {
+                            size: size_of(e.ty().width),
+                            src,
+                            dst,
+                        });
+                    }
                 }
             }
             Arg::Address { addr, slot: 4 } => match addr {
@@ -1678,6 +1827,14 @@ impl Selector {
                         base: base.clone(),
                         offset: *offset,
                     })?;
+                    self.out.push(Insn::Pea(ea));
+                }
+                // An array element: `pea (d,An,Dn.w)` (DISK_$REVALIDATE
+                // 0xE6C07A `pea (-0x48,A0,D0.w)`), or `pea (d,Am)` after `lea
+                // (0,An,Dn.l),Am` for a displacement beyond 8 bits
+                // (MMAP_$UNAVAIL_REMOV 0xE0CC4C..0xE0CC52).
+                Addr::Index { .. } => {
+                    let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
                 }
                 _ => {
@@ -1772,7 +1929,13 @@ impl Selector {
             ResultClass::Data => {}
             _ => return Err(unsupported(self.span, "address-register results are")),
         }
-        let r = self.eval_d(e)?;
+        // A function result in D0 already (the tail wrapper `F :=
+        // G(args)`: the call, then the epilogue, codegen-patterns 3,
+        // ACL_$IS_SUSER), a held value or a computed one.
+        let r = match self.eval(e)? {
+            Val::Reg(r) => r,
+            v => Reg::D(self.in_tmp(v, res.ty.width)?),
+        };
         // The value is moved at the result's width; the upper bytes of D0
         // are left as they are (codegen-patterns 3: 0xE148E0).  When the
         // allocator puts the value in D0 itself the move is dropped
@@ -1780,54 +1943,924 @@ impl Selector {
         self.result_moves.push(self.out.len());
         self.out.push(Insn::Move {
             size: size_of(res.ty.width),
-            src: Ea::Reg(Reg::D(r)),
+            src: Ea::Reg(r),
             dst: Ea::Reg(Reg::D(0)),
         });
         Ok(())
     }
 
-    /// Evaluate `e` into a new data register.
+    /// Evaluate `e` into a new data register the caller may modify.
     fn eval_d(&mut self, e: &Expr) -> Res<u8> {
+        let v = self.eval(e)?;
+        self.in_tmp(v, e.ty().width)
+    }
+
+    /// Evaluate `e` as an operand (codegen-patterns 8, 12).
+    ///
+    /// - a constant is an immediate; a variable a memory operand (any
+    ///   address register it needs is loaded now: 0xE148CE before
+    ///   0xE148D4); a by-value parameter loaded at entry its register
+    ///   (12.2), which is never modified: arithmetic works on a copy
+    ///   (BAT_$GET_BAT_STEP 0xE3BB68 `move.w D0,D1; mulu.w #0x234,D1`;
+    ///   FIM_$FREE_ASID 0xE0AA8A `move.w D2,D0; lsl.w #2,D0`);
+    /// - a function call's value is D0 after the call
+    ///   ([`Self::expr_call`]);
+    /// - operators compute into a new data register ([`Self::binary`],
+    ///   [`Self::unary`], [`Self::convert`]), a comparison into a boolean
+    ///   ([`Self::test_value`]).
+    fn eval(&mut self, e: &Expr) -> Res<Val> {
         match e {
-            // A value held in a register for the whole body is copied before
-            // it is used as a temporary (BAT_$GET_BAT_STEP 0xE3BB68 `move.w
-            // D0,D1`); the copy rule has not been settled.
+            Expr::Const { value, ty } => Ok(Val::Imm(imm(*value, ty.width))),
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if self.pinned(*o).is_some() => Err(unsupported(
-                self.span,
-                "computing with a parameter loaded at entry is",
-            )),
-            // Load a scalar: `move.<w> <ea>,Dn` (0xE148D4 `move.w
-            // (8,A6),D0`; 0xE148D8 `move.l (0x40,A0),D1`).  The address is
-            // formed first, then the value loaded into a new register.
-            Expr::Load { addr, ty } => {
-                let ea = self.ea_of(addr)?;
-                let r = self.alloc_d()?;
-                self.out.push(Insn::Move {
+            } if self.pinned(*o).is_some() => Ok(Val::Reg(self.pinned(*o).unwrap())),
+            Expr::Load { addr, .. } => Ok(Val::Mem(self.ea_of(addr)?)),
+            Expr::Binary { op, lhs, rhs, ty } => Ok(Val::Tmp(self.binary(*op, lhs, rhs, *ty)?)),
+            Expr::Unary { op, operand, ty } => {
+                // `neg.<s>` / `not.<s>` on the operand in a register (negw
+                // ×97, notw ×13, notl ×46 in compiled code).
+                let d = self.eval_d(operand)?;
+                self.out.push(Insn::Unary {
+                    op: match op {
+                        UnOp::Neg => UnaryOp::Neg,
+                        UnOp::Not => UnaryOp::Not,
+                    },
                     size: size_of(ty.width),
-                    src: ea,
-                    dst: Ea::Reg(Reg::D(r)),
+                    dst: Ea::Reg(Reg::D(d)),
                 });
-                Ok(r)
+                Ok(Val::Tmp(d))
             }
+            Expr::Convert { value, ty } => self.convert(value, *ty),
+            Expr::Call { call, .. } => self.expr_call(call),
+            Expr::Test(c) => Ok(Val::Tmp(self.test_value(c)?)),
             Expr::SetMember {
                 elem,
                 set,
-                set_width: Width::Long,
-            } => self.set_member_long(elem, set),
-            Expr::SetMember { .. } => Err(unsupported(
-                self.span,
-                "`in` on a set that is not one longword is",
-            )),
-            // `moveq` / `clr` / `move #imm` choice not catalogued yet.
-            Expr::Const { .. } => Err(unsupported(self.span, "loading a constant is")),
+                set_width,
+            } => {
+                if matches!(**elem, Expr::Const { .. }) {
+                    let r = self.set_bit_test(elem, set, *set_width, true)?;
+                    self.out.push(Insn::Scc {
+                        cond: Cond::Ne,
+                        dst: Ea::Reg(Reg::D(r)),
+                    });
+                    return Ok(Val::Tmp(r));
+                }
+                if *set_width != Width::Long {
+                    // `btst Dn,Dm` takes the bit number mod 32: on a word
+                    // set held in a register an element above 15 would test
+                    // a bit outside the set.  What the original did is not
+                    // catalogued.
+                    return Err(unsupported(
+                        self.span,
+                        "`in` on a one-word set with an element that is not constant is",
+                    ));
+                }
+                Ok(Val::Tmp(self.set_member_long(elem, set)?))
+            }
             Expr::AddrOf(_) => Err(unsupported(
                 self.span,
                 "an address (`addr`) as a value other than an argument is",
             )),
         }
+    }
+
+    /// `v` in a new data register the caller may modify, at width `w`:
+    ///
+    /// - already one: itself;
+    /// - a held register: a copy, `move.<w> Dm,Dn` (BAT_$GET_BAT_STEP
+    ///   0xE3BB68; 0xE01BA4 `move.w D0,D1` for a function result);
+    /// - memory: `move.<w> ea,Dn` (0xE148D4);
+    /// - a constant: [`Self::load_const`].
+    fn in_tmp(&mut self, v: Val, w: Width) -> Res<u8> {
+        let src = match v {
+            Val::Tmp(d) => return Ok(d),
+            Val::Imm(c) => return self.load_const(c, w),
+            Val::Reg(r) => Ea::Reg(r),
+            Val::Mem(ea) => ea,
+        };
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: size_of(w),
+            src,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// The operand `v` as an effective address (a constant as an
+    /// immediate, a new register as itself).
+    fn ea_val(v: &Val) -> Ea {
+        match v {
+            Val::Tmp(d) => Ea::Reg(Reg::D(*d)),
+            Val::Reg(r) => Ea::Reg(*r),
+            Val::Mem(ea) => ea.clone(),
+            Val::Imm(c) => Ea::Imm(*c),
+        }
+    }
+
+    /// A constant in a new data register (codegen-patterns 3, 13):
+    ///
+    /// - 0: `clr.<w>` (PARITY_$CHK_IO 0xE0B1AA `clr.w D0`; IO_$ALLOC
+    ///   0xE1A9CC `clr.l D0`);
+    /// - -128..127: `moveq` (PARITY_$CHK_IO 0xE0B19C `moveq #1,D0`, a word
+    ///   result; 0xE0B23A `moveq #-1,D0`; 0xE02D44 `moveq #15,D1` for a
+    ///   byte operation; 0xE177A0 `moveq #-2,D2` for a word one);
+    /// - others: `move.<w> #c` (0xE00A14 `move.l #0xffffff,D0`).
+    fn load_const(&mut self, c: i64, w: Width) -> Res<u8> {
+        let d = self.alloc_d()?;
+        let signed = match w {
+            Width::Byte => c as i8 as i64,
+            Width::Word => c as i16 as i64,
+            Width::Long => c as i32 as i64,
+        };
+        self.out.push(if signed == 0 {
+            Insn::Clr {
+                size: size_of(w),
+                dst: Ea::Reg(Reg::D(d)),
+            }
+        } else if (-128..128).contains(&signed) {
+            Insn::Moveq {
+                value: signed as i8,
+                dst: d,
+            }
+        } else {
+            Insn::Move {
+                size: size_of(w),
+                src: Ea::Imm(c),
+                dst: Ea::Reg(Reg::D(d)),
+            }
+        });
+        Ok(d)
+    }
+
+    /// `x := x op c` for an object `x` that is not an array element:
+    /// `addq`/`subq` for 1..8, `addi`/`subi`, `andi`, `ori` on the object
+    /// in memory (codegen-patterns 8, 13).  Survey of compiled code: 1076
+    /// `addq`/`subq` to memory (0xE00B3E `addq.w #1,abs.l`; ACL_$ENTER_SUPER
+    /// 0xE46FA8 `addq.w #1,(0xb76,A0)`), 20 `addi`/`subi` (0xE010C4 `addi.l
+    /// #0xc0,(0x3f4,A5)`), 560 `andi`/`ori` (0xE0086E `andi.l
+    /// #-0x7f8001,(0x26,A2)`), against 6 loads, operations and stores back
+    /// of the same plain operand (0xE025B0).  For an array element the
+    /// image does both (14 `addq` to an indexed operand, e.g. 0xE13154;
+    /// 10 load, operation and store, AUDIT_$SUSPEND 0xE70DC8..0xE70DCE):
+    /// refused.  Returns whether the statement was this form.
+    fn update_in_place(&mut self, addr: &Addr, value: &Expr) -> Res<bool> {
+        let Expr::Binary { op, lhs, rhs, ty } = value else {
+            return Ok(false);
+        };
+        let Expr::Load { addr: a, .. } = &**lhs else {
+            return Ok(false);
+        };
+        let Expr::Const { value: c, .. } = &**rhs else {
+            return Ok(false);
+        };
+        if a != addr || lhs.ty() != *ty {
+            return Ok(false);
+        }
+        let alu = match op {
+            BinOp::Add => AluOp::Add,
+            BinOp::Sub => AluOp::Sub,
+            BinOp::And => AluOp::And,
+            BinOp::Or => AluOp::Or,
+            _ => return Ok(false),
+        };
+        if matches!(addr, Addr::Index { .. }) {
+            return Err(unsupported(
+                self.span,
+                "updating an array element in place (`addq` to the element or a load, \
+                 operation and store; the image does both, codegen-patterns 8) is",
+            ));
+        }
+        if let Addr::Frame(o) = addr {
+            if self.pinned(*o).is_some() {
+                return Err(unsupported(self.span, "assigning to a parameter is"));
+            }
+        }
+        let size = size_of(ty.width);
+        let dst = self.ea_of(addr)?;
+        let c = imm(*c, ty.width);
+        self.out.push(match alu {
+            AluOp::Add if (1..=8).contains(&c) => Insn::Addq {
+                size,
+                value: c as u8,
+                dst,
+            },
+            AluOp::Sub if (1..=8).contains(&c) => Insn::Subq {
+                size,
+                value: c as u8,
+                dst,
+            },
+            op => Insn::AluImm {
+                op,
+                size,
+                imm: c,
+                dst,
+            },
+        });
+        Ok(true)
+    }
+
+    /// `lhs op rhs` into a new data register (codegen-patterns 8).
+    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+        let w = ty.width;
+        let size = size_of(w);
+        let konst = |e: &Expr| match e {
+            Expr::Const { value, .. } => Some(*value),
+            _ => None,
+        };
+        match op {
+            BinOp::Shl | BinOp::Shr | BinOp::Ashr => return self.shift(op, lhs, rhs, ty),
+            BinOp::Mul => {
+                let (x, c) = match (konst(lhs), konst(rhs)) {
+                    (_, Some(c)) => (lhs, c),
+                    (Some(c), None) => (rhs, c),
+                    (None, None) => {
+                        let widened_word = |e: &Expr| {
+                            matches!(e, Expr::Convert { value, .. }
+                                if value.ty().width != Width::Long)
+                        };
+                        if w != Width::Word && widened_word(lhs) && widened_word(rhs) {
+                            // Two integer16 values multiplied for a
+                            // longword (ref 4.3.1, p. 4-5): `muls.w` gives
+                            // the whole product; not catalogued.
+                            return Err(unsupported(
+                                self.span,
+                                "a product of two word values used as a longword (`muls.w` or \
+                                 M$ARITH, not catalogued) is",
+                            ));
+                        }
+                        if w != Width::Word {
+                            // 32-bit multiplication calls M$ARITH
+                            // (codegen-patterns 8; bead domain-pascal-5aw.5).
+                            return Err(unsupported(
+                                self.span,
+                                "a 32-bit multiplication (M$ARITH) is",
+                            ));
+                        }
+                        return Err(unsupported(
+                            self.span,
+                            "multiplying two variables (operand order of `mul<s>.w` not \
+                             catalogued) is",
+                        ));
+                    }
+                };
+                let d = self.eval_d(x)?;
+                self.mul_const(d, c, w)?;
+                return Ok(d);
+            }
+            BinOp::Div | BinOp::Mod => {
+                // integer16 `div`/`mod` by a positive constant: the dividend
+                // sign-extended to 32 bits, `divs.w #c`, and `swap` for the
+                // remainder (0xE31154..0xE3115C `move.w D2,D1; ext.l D1;
+                // divs.w #31,D1; swap D1`; 0xE11BEA..0xE11BF0 `ext.l D1;
+                // divs.w #240,D1; swap D1`; 0xE2F052..0xE2F058 `ext.l D1;
+                // ...; divs.w #192,D1` for a quotient).  The remainder has the
+                // dividend's sign (MC68000 DIVS).
+                let c = konst(rhs).filter(|&c| c > 0 && w == Width::Word && ty.is_signed());
+                let Some(c) = c else {
+                    return Err(unsupported(
+                        self.span,
+                        "`div`/`mod` other than of an integer16 by a positive constant (M$ARITH, \
+                         codegen-patterns 8) is",
+                    ));
+                };
+                let d = self.eval_d(lhs)?;
+                self.out.push(Insn::Ext {
+                    size: Size::L,
+                    dst: d,
+                });
+                self.out.push(Insn::Div {
+                    signed: true,
+                    src: Ea::Imm(c),
+                    dst: d,
+                });
+                if op == BinOp::Mod {
+                    self.out.push(Insn::Swap(d));
+                }
+                return Ok(d);
+            }
+            _ => {}
+        }
+        let alu = match op {
+            BinOp::Add => AluOp::Add,
+            BinOp::Sub => AluOp::Sub,
+            BinOp::And => AluOp::And,
+            BinOp::Or => AluOp::Or,
+            BinOp::Xor => AluOp::Eor,
+            _ => unreachable!(),
+        };
+        // A constant operand: on the right for `-`; either side otherwise.
+        let (x, c) = match (konst(lhs), konst(rhs)) {
+            (_, Some(c)) => (Some(lhs), Some(c)),
+            (Some(c), None) if op.commutative() => (Some(rhs), Some(c)),
+            _ => (None, None),
+        };
+        if let (Some(x), Some(c)) = (x, c) {
+            let c = imm(c, w);
+            let xv = self.eval(x)?;
+            match alu {
+                // `x + c`, `x - c`: `addq`/`subq` for 1..8 (0xE00C10 `addq.l
+                // #1,D0` after a load; 0xE010D0 `subq.l #1,D1`; 0xE68874
+                // `addq.w #2,D0`).  `x + c` for c in 9..127 with `x` in memory:
+                // the constant first, `moveq #c,Dn; add.<s> x,Dn` (23 sites,
+                // e.g. 0xE008A8 `moveq #30,D0; add.l (-64,A6),D0`, 0xE30BB0
+                // `moveq #64,D2; add.w abs.l,D2`; against 4 `addi` of such a
+                // constant after a load).  Otherwise the value in a register
+                // and `addi`/`subi` (0xE08840 `addi.l`, 0xE0B6E2 `subi.w
+                // #0x400,D2`; `x - c` for c in 9..127: 13 `subi` after a load).
+                AluOp::Add | AluOp::Sub if c < 0 => {
+                    return Err(unsupported(
+                        self.span,
+                        "adding or subtracting a negative constant is",
+                    ))
+                }
+                AluOp::Add | AluOp::Sub if c == 0 => return self.in_tmp(xv, w),
+                AluOp::Add | AluOp::Sub if c <= 8 => {
+                    let d = self.in_tmp(xv, w)?;
+                    let dst = Ea::Reg(Reg::D(d));
+                    self.out.push(if alu == AluOp::Add {
+                        Insn::Addq {
+                            size,
+                            value: c as u8,
+                            dst,
+                        }
+                    } else {
+                        Insn::Subq {
+                            size,
+                            value: c as u8,
+                            dst,
+                        }
+                    });
+                    return Ok(d);
+                }
+                AluOp::Add if c <= 127 && !matches!(xv, Val::Tmp(_)) => {
+                    if let Val::Reg(_) = xv {
+                        return Err(unsupported(
+                            self.span,
+                            "adding a constant of 9..127 to a value held in a register (`moveq` \
+                             and `add`, or a copy and `addi`: 11 sites each) is",
+                        ));
+                    }
+                    let d = self.load_const(c, w)?;
+                    self.out.push(Insn::Alu {
+                        op: alu,
+                        size,
+                        src: Self::ea_val(&xv),
+                        dst: d,
+                    });
+                    return Ok(d);
+                }
+                AluOp::Add | AluOp::Sub => {
+                    let d = self.in_tmp(xv, w)?;
+                    self.out.push(Insn::AluImm {
+                        op: alu,
+                        size,
+                        imm: c,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(d);
+                }
+                // `x & c`: a computed value is masked in place, `andi`
+                // (0xE11024 `lsr.w; andi.w`).  A variable, in memory or held
+                // in a register, is ANDed into the constant loaded first
+                // (0xE177A0 `moveq #-2,D2; and.w D1,D2`, D1 a parameter held
+                // since the entry; 0xE60F4A `move.l #0xfffff,D0; and.l
+                // (-28,A6),D0`; 0xE02D44 `moveq #15,D1; and.b (157,A3),D1`;
+                // survey: 458 such constant-first `and`s against about 50
+                // loads followed by `andi`, some of them conversions such as
+                // 0xE00868 `andi.l #0xff`).
+                AluOp::And => {
+                    if let Val::Tmp(d) = xv {
+                        self.out.push(Insn::AluImm {
+                            op: alu,
+                            size,
+                            imm: c,
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        return Ok(d);
+                    }
+                    let d = self.load_const(c, w)?;
+                    self.out.push(Insn::Alu {
+                        op: alu,
+                        size,
+                        src: Self::ea_val(&xv),
+                        dst: d,
+                    });
+                    return Ok(d);
+                }
+                // `x ! c`, `xor(x, c)` on a computed value: `ori`/`eori` in
+                // place (0xE03498 `andi.w #-0x4001,D1; ori.w #0x2000,D1`).
+                // On a variable the image has both orders (4 constant-first
+                // `or`s, 5 loads and `ori`): not settled.
+                AluOp::Or | AluOp::Eor => {
+                    let Val::Tmp(d) = xv else {
+                        return Err(unsupported(
+                            self.span,
+                            "`!`/`xor` of a variable and a constant (operand order not settled) is",
+                        ));
+                    };
+                    self.out.push(Insn::AluImm {
+                        op: alu,
+                        size,
+                        imm: c,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(d);
+                }
+            }
+        }
+        if let (Some(c), AluOp::Sub) = (konst(lhs), alu) {
+            // `c - x`: the constant first, then `sub.<s> x,Dn` (0xE08EE4
+            // `moveq #31,D2; sub.w (-26,A6),D2`; 0xE10114 `move.l
+            // #0x400,D2; sub.l (-372,A6),D2`; 0xE0E964).
+            let d = self.load_const(imm(c, w), w)?;
+            let xv = self.eval(rhs)?;
+            if let Val::Tmp(_) = xv {
+                return Err(unsupported(
+                    self.span,
+                    "a constant minus a computed value is",
+                ));
+            }
+            self.out.push(Insn::Alu {
+                op: alu,
+                size,
+                src: Self::ea_val(&xv),
+                dst: d,
+            });
+            return Ok(d);
+        }
+        // Two variables or computed values: the left operand in a register
+        // and the right one added, subtracted, ... into it (0xE177B4 `add.l
+        // D1,D2`; 0xE0CDD6 `sub.l mem,Dn` after a load).  When only the
+        // right operand is computed and the operator commutes, the left one
+        // is applied to it.  **Uncertain:** the image cannot show which
+        // source operand went to the register.
+        let lv = self.eval(lhs)?;
+        let rv = self.eval(rhs)?;
+        let (d, src) = match (&lv, &rv) {
+            (Val::Tmp(_), _) | (_, Val::Imm(_)) => (self.in_tmp(lv.clone(), w)?, rv),
+            (_, Val::Tmp(r)) if op.commutative() => (*r, lv),
+            (_, Val::Tmp(_)) => {
+                return Err(unsupported(
+                    self.span,
+                    "a variable minus a computed value (evaluation order not catalogued) is",
+                ))
+            }
+            _ => (self.in_tmp(lv.clone(), w)?, rv),
+        };
+        // `eor` takes only a data register as its source (MC68000 EOR).
+        let src = match (alu, src) {
+            (AluOp::Eor, Val::Mem(ea)) => Ea::Reg(Reg::D(self.in_tmp(Val::Mem(ea), w)?)),
+            (_, v) => Self::ea_val(&v),
+        };
+        if matches!(src, Ea::Reg(Reg::A(_))) && alu != AluOp::Add && alu != AluOp::Sub {
+            return Err(unsupported(
+                self.span,
+                "a logical operation on a pointer is",
+            ));
+        }
+        self.out.push(Insn::Alu {
+            op: alu,
+            size,
+            src,
+            dst: d,
+        });
+        Ok(d)
+    }
+
+    /// `lshft`, `rshft`, `arshft` (ref pp. 4-109, 4-171, 4-29): `lsl`,
+    /// `lsr`, `asr` on the value in a register.  A constant count above 8
+    /// is split into shifts of 8 and the rest (0xE02AA6 `lsl.l #8,D0; lsl.l
+    /// #2,D0`; 0xE00876 `lsl.l #8; lsl.l #7`); a count in a register shifts
+    /// by it (0xE02D52 `lsl.w D1,D3`).
+    fn shift(&mut self, op: BinOp, x: &Expr, count: &Expr, ty: Scalar) -> Res<u8> {
+        let size = size_of(ty.width);
+        let sop = match op {
+            BinOp::Shl => ShiftOp::Lsl,
+            BinOp::Shr => ShiftOp::Lsr,
+            _ => ShiftOp::Asr,
+        };
+        let d = self.eval_d(x)?;
+        match count {
+            Expr::Const { value, .. } => {
+                let bits = (ty.bytes() * 8) as i64;
+                if !(0..bits).contains(value) {
+                    return Err(unsupported(
+                        self.span,
+                        "a shift count outside 0..bits-1 (ref: results unpredictable) is",
+                    ));
+                }
+                let mut n = *value as u8;
+                while n > 0 {
+                    let k = n.min(8);
+                    self.out.push(Insn::Shift {
+                        op: sop,
+                        size,
+                        count: ShiftCount::Imm(k),
+                        dst: d,
+                    });
+                    n -= k;
+                }
+            }
+            c => {
+                let r = match self.eval(c)? {
+                    Val::Reg(Reg::D(r)) | Val::Tmp(r) => r,
+                    v => self.in_tmp(v, c.ty().width)?,
+                };
+                self.out.push(Insn::Shift {
+                    op: sop,
+                    size,
+                    count: ShiftCount::Reg(r),
+                    dst: d,
+                });
+            }
+        }
+        Ok(d)
+    }
+
+    /// Multiply the value in data register `d` by the constant `c`, in
+    /// place, at width `w` (codegen-patterns 5.2, 8, 12.4 R8: ref p. 6-28,
+    /// "Transforms integer multiplication by a constant into shift and add
+    /// instructions").  With `c` = 2^s × m, m odd:
+    ///
+    /// - 2^s: `add.<w> Dn,Dn` for s = 1 (AUDIT_$IS_PROCESS_AUDITED
+    ///   0xE70DA6), `lsl.<w> #s` otherwise, split above 8 (FIM_$GET_FIM_ADDR
+    ///   0xE0AA16 `lsl.w #2`; 0xE02AA6 `lsl.l #8; lsl.l #2`);
+    /// - m = 2^k + 1: the 2^s part, then a copy shifted by k and added
+    ///   (RIP_$PACKET_LENGTH 0xE6886C..0xE68872, ×6: `add.w D0,D0; move.w
+    ///   D0,D1; add.w D1,D1; add.w D1,D0`; ×9 0xE14404; ×72 DISK_$REVALIDATE
+    ///   0xE6C072..0xE6C078; ×257 0xE074CC);
+    /// - m = 2^k - 1 (k >= 3): the 2^s part, a copy, the value negated, the
+    ///   copy shifted by k and added (×28 PEB_$GET_FP 0xE5AEF6..0xE5AF04:
+    ///   `lsl.w #2,D0; move.w D0,D1; neg.w D0; lsl.w #3,D1; add.w D1,D0`;
+    ///   ×56, ×60, ×120, ×248);
+    /// - other odd parts with four or more bits set: `mulu.w #c` (BAT_$GET_BAT_STEP
+    ///   0xE3BB6A `mulu.w #0x234`; survey of compiled code: every constant
+    ///   multiplied with `mulu.w`/`muls.w` (92, 150, 153, 204, 228, 244, 250,
+    ///   268, 300, 336, 363, 564, 580, 1083, 1244, 1624, 5240, 12345) has an
+    ///   odd part that is not 2^k ± 1, and every one done with shifts (3, 5,
+    ///   6, 9, 10, 12, 17, 18, 20, 24, 28, 36, 48, 56, 60, 72, 96, 120, 144,
+    ///   192, 248, 257) has one that is, except ×26 (0xE71BBA, odd part 13
+    ///   done bit by bit).  Odd parts of three bits are done both ways (13
+    ///   with shifts; 21, 67, 145 with `mulu`): refused.  `mulu.w` at
+    ///   a word width only (the low word of the product is the same for
+    ///   both signs; 94 `mulu.w #c` feed a word index, 118 `muls.w #c` a
+    ///   longword one, codegen-patterns 5.2).
+    ///
+    /// The partial product takes a new register (R8: D1 at 0xE68870, D3 at
+    /// 0xE0CAAE).
+    fn mul_const(&mut self, d: u8, c: i64, w: Width) -> Res<()> {
+        let size = size_of(w);
+        let reg = Ea::Reg(Reg::D(d));
+        if !(0..=0xffff).contains(&c) {
+            return Err(unsupported(
+                self.span,
+                "a multiplication by a negative or 32-bit constant is",
+            ));
+        }
+        if c == 0 {
+            return Err(unsupported(self.span, "a multiplication by 0 is"));
+        }
+        let c = c as u32;
+        let s = c.trailing_zeros();
+        let m = c >> s;
+        let plus = m > 1 && (m - 1).is_power_of_two();
+        let minus = m > 3 && (m + 1).is_power_of_two();
+        if m != 1 && !plus && !minus {
+            if m.count_ones() < 4 {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a multiplication by {c} (shifts and adds or `mulu.w`, not settled for an \
+                         odd part of three bits) is"
+                    ),
+                ));
+            }
+            if w != Width::Word {
+                return Err(unsupported(
+                    self.span,
+                    "a 32-bit multiplication by a constant with `mul<s>.w` is",
+                ));
+            }
+            self.out.push(Insn::Mul {
+                signed: false,
+                src: Ea::Imm(c as i64),
+                dst: d,
+            });
+            return Ok(());
+        }
+        self.shift_left(d, s, w);
+        if m == 1 {
+            return Ok(());
+        }
+        let u = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size,
+            src: reg.clone(),
+            dst: Ea::Reg(Reg::D(u)),
+        });
+        let k = if plus {
+            (m - 1).trailing_zeros()
+        } else {
+            self.out.push(Insn::Unary {
+                op: UnaryOp::Neg,
+                size,
+                dst: reg.clone(),
+            });
+            (m + 1).trailing_zeros()
+        };
+        self.shift_left(u, k, w);
+        self.out.push(Insn::Alu {
+            op: AluOp::Add,
+            size,
+            src: Ea::Reg(Reg::D(u)),
+            dst: d,
+        });
+        Ok(())
+    }
+
+    /// `d <<= n`: `add.<w> Dd,Dd` for 1, `lsl.<w>` by at most 8 at a time
+    /// otherwise (see [`Self::mul_const`]).
+    fn shift_left(&mut self, d: u8, n: u32, w: Width) {
+        let size = size_of(w);
+        if n == 1 {
+            self.out.push(Insn::Alu {
+                op: AluOp::Add,
+                size,
+                src: Ea::Reg(Reg::D(d)),
+                dst: d,
+            });
+            return;
+        }
+        let mut n = n;
+        while n > 0 {
+            let k = n.min(8);
+            self.out.push(Insn::Shift {
+                op: ShiftOp::Lsl,
+                size,
+                count: ShiftCount::Imm(k as u8),
+                dst: d,
+            });
+            n -= k;
+        }
+    }
+
+    /// `value` converted to `ty` (ref 4.3.1, p. 4-5):
+    ///
+    /// - a signed word widened: `move.w x,Dn; ext.l Dn` (0xE02C28..0xE02C2A
+    ///   `move.w D2,D0; ext.l D0`, then stored with `move.l`; 610 `ext.l`
+    ///   in compiled code);
+    /// - an unsigned word (`0..65535`): `clr.l Dn; move.w x,Dn`
+    ///   (0xE177A6..0xE177AA, codegen-patterns 5); one already in a
+    ///   register is masked, `andi.l #0xffff` (0xE11818);
+    /// - an unsigned byte (`char`) to a word: `clr.w Dn; move.b x,Dn`
+    ///   (0xE0E316..0xE0E318); a signed byte: `move.b; ext.w`;
+    /// - narrowing (`chr`, an integer32 into a word): the low bytes of the
+    ///   value in a register, no instruction.
+    ///
+    /// A byte widened to a longword is done both as `clr.l; move.b` and
+    /// as `move.b; andi.l #0xff` (0xE00864..0xE00868): refused.
+    fn convert(&mut self, value: &Expr, ty: Scalar) -> Res<Val> {
+        let from = value.ty();
+        if from.width == ty.width {
+            return self.eval(value);
+        }
+        if from.bytes() > ty.bytes() {
+            let v = self.eval(value)?;
+            return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
+        }
+        if let Expr::Binary { op: BinOp::Shl, .. } = value {
+            // A word `lshft` used as a longword: shifted at the word's
+            // width and extended, or extended and shifted in 32 bits (ref
+            // 4.3.1, p. 4-5, and the expansion pp. 4-29 and 4-171 describe
+            // for `arshft` and `rshft`; p. 4-109 says nothing for `lshft`)?
+            // Not settled; the two differ when bits reach the sign.
+            return Err(unsupported(
+                self.span,
+                "an `lshft` of a word operand used as a longword is",
+            ));
+        }
+        let unsigned = from.sign == Sign::Unsigned;
+        match (from.width, ty.width) {
+            (Width::Word, Width::Long) | (Width::Byte, Width::Word) if unsigned => {
+                let v = self.eval(value)?;
+                if let Val::Tmp(d) = v {
+                    let mask = if from.width == Width::Word {
+                        0xffff
+                    } else {
+                        0xff
+                    };
+                    self.out.push(Insn::AluImm {
+                        op: AluOp::And,
+                        size: size_of(ty.width),
+                        imm: mask,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(Val::Tmp(d));
+                }
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Clr {
+                    size: size_of(ty.width),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                self.out.push(Insn::Move {
+                    size: size_of(from.width),
+                    src: Self::ea_val(&v),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(Val::Tmp(d))
+            }
+            (Width::Word, Width::Long) | (Width::Byte, Width::Word) => {
+                let d = self.eval_d(value)?;
+                self.out.push(Insn::Ext {
+                    size: size_of(ty.width),
+                    dst: d,
+                });
+                Ok(Val::Tmp(d))
+            }
+            _ => Err(unsupported(
+                self.span,
+                "widening a byte to a longword (`clr.l; move.b` or `move.b; andi.l #0xff`) is",
+            )),
+        }
+    }
+
+    /// A function call in an expression (ref 5.2; codegen-patterns 1, 3):
+    /// the call sequence of a procedure call ([`Self::call`]), then the
+    /// result in D0, read from there (0xE04704 `move.l D0,(A3)`; 0xE0082E
+    /// `tst.b D0`; 0xE01BA4 `move.w D0,D1` before arithmetic).  The pop
+    /// follows the procedure-call rule ([`Self::call_no_pop`]).  Not
+    /// supported yet: a call among another call's arguments (the two pops
+    /// are merged, 0xE69FF6, 0xE748E6), two calls in one statement (the
+    /// first result would have to be saved), results in A0.
+    fn expr_call(&mut self, c: &Call) -> Res<Val> {
+        if self.in_args {
+            return Err(unsupported(
+                self.span,
+                "a function call among another call's arguments (pops merged, \
+                 codegen-patterns 1.1) is",
+            ));
+        }
+        if self.called {
+            return Err(unsupported(
+                self.span,
+                "two function calls in one statement are",
+            ));
+        }
+        self.call(c, self.call_no_pop)?;
+        self.called = true;
+        Ok(Val::Reg(Reg::D(0)))
+    }
+
+    /// A comparison as a boolean value: the compare, then `s<cc>` into the
+    /// data register the compare read last, or a new one (AUDIT_$IS_PROCESS_AUDITED
+    /// 0xE70DA8..0xE70DAC `tst.w (-2,A5,D0.w); seq D0`, the index register;
+    /// ACL_$IN_SUBSYS 0xE470B6..0xE470BA `tst.w (-0x3d5a,A1); sgt D0`, the
+    /// index register of the `lea` before; module-local 0xE464AA..0xE464B0
+    /// `cmpi.w #2,(-2,A0,D1.w); sne D1`; PROC1_$TST_LOCK 0xE148DC..0xE148DE
+    /// `btst D0,D1; sne D1`, the set's register).  **Uncertain:** the rule
+    /// is read off these four sites.  Only comparisons are supported.
+    fn test_value(&mut self, c: &IrCond) -> Res<u8> {
+        let IrCond::Compare { op, lhs, rhs } = c else {
+            return Err(unsupported(
+                self.span,
+                "a condition other than a comparison as a value (`not`, `and then`, a boolean \
+                 variable) is",
+            ));
+        };
+        let start = self.out.len();
+        let cc = self.compare(*op, lhs, rhs)?;
+        // The data registers the compare's operands used, last allocated
+        // first.
+        let mut used: Vec<u8> = self.out[start..]
+            .iter()
+            .flat_map(|i| crate::regs::access(i).uses)
+            .filter_map(|r| match r {
+                Reg::D(n) if crate::regs::is_virtual(r) => Some(n),
+                _ => None,
+            })
+            .collect();
+        used.sort_unstable();
+        // A register held for the whole body is not overwritten.
+        let held: Vec<u8> = self
+            .pinned
+            .iter()
+            .filter_map(|&(_, r)| match r {
+                Reg::D(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        let d = match used.iter().rev().find(|n| !held.contains(n)) {
+            Some(&n) => n,
+            None => self.alloc_d()?,
+        };
+        self.out.push(Insn::Scc {
+            cond: cc,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// `lhs op rhs` with a left operand that is not a variable: the value
+    /// computed into a data register, then `cmpi #c,Dn` (0xE1216E `add.l
+    /// D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> rhs,Dn`.  Against 0, whether
+    /// the original relied on the flags of the operation or tested again is
+    /// not catalogued: refused.
+    fn compare_computed(&mut self, op: Rel, lhs: &Expr, rhs: &Expr) -> Res<Cond> {
+        let ty = lhs.ty();
+        let size = size_of(ty.width);
+        let signed = ty.sign == Sign::Signed;
+        if let Expr::Const { .. } = lhs {
+            // A constant on the left (`3 < w`): whether the original
+            // swapped the operands is not catalogued.
+            return Err(unsupported(
+                self.span,
+                "a comparison whose left operand is not a variable is",
+            ));
+        }
+        if matches!(rhs, Expr::Const { value: 0, .. }) {
+            return Err(unsupported(
+                self.span,
+                "comparing a computed value with 0 (the flags of the operation or a `tst`) is",
+            ));
+        }
+        let lv = self.eval(lhs)?;
+        let d = match lv {
+            Val::Reg(Reg::D(r)) => r,
+            v => self.in_tmp(v, ty.width)?,
+        };
+        match rhs {
+            Expr::Const { value, .. } => self.out.push(Insn::Cmpi {
+                size,
+                imm: imm(*value, ty.width),
+                dst: Ea::Reg(Reg::D(d)),
+            }),
+            Expr::Load { .. } => {
+                let src = match self.eval(rhs)? {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r) => Ea::Reg(r),
+                    _ => unreachable!(),
+                };
+                self.out.push(Insn::Cmp { size, src, dst: d });
+            }
+            _ => return Err(unsupported(self.span, "comparing two computed values is")),
+        }
+        Ok(rel_cond(op, signed))
+    }
+
+    /// `k in s` for a constant `k` and a set of one word or one longword:
+    /// the set's value in a data register, then `btst #k` on it
+    /// (REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A416 `move.w (22,A0),D0; btst
+    /// #13,D0`; 0xE013BA `move.w (190,A2),D0; btst #4,D0`; 0xE3EF4A
+    /// `move.l (d,An),Dn` then `btst #k` with k >= 16 for a longword).  In
+    /// compiled code a `btst #k` on a register that a `move.w` from memory
+    /// loaded has 0 <= k <= 15 (250 sites, 58 of them with k < 8); `btst
+    /// #k,<memory>` (422 sites) needs k < 8 and is taken to be the test of
+    /// a bit field or a byte set (not catalogued).  Returns the register,
+    /// a new one when `value` (the boolean is then set in it with `sne`,
+    /// 0xE4A41A `sne D0`), else possibly a held one.
+    fn set_bit_test(&mut self, elem: &Expr, set: &Expr, w: Width, value: bool) -> Res<u8> {
+        let Expr::Const { value: k, .. } = elem else {
+            unreachable!()
+        };
+        if !(0..(w.bytes() * 8) as i64).contains(k) {
+            // `btst #k,Dn` takes k mod 32: an element beyond the set's bits
+            // would test a bit outside the set (garbage above a word set,
+            // another element of a longword one).  The value is false (ref
+            // 3.9.3, p. 3-16: one bit per ordinal from 0), but what the
+            // original emitted for it is not catalogued.
+            return Err(unsupported(
+                self.span,
+                "`in` with a constant element outside the set's bits is",
+            ));
+        }
+        let v = self.eval(set)?;
+        let r = match v {
+            Val::Reg(Reg::D(r)) if !value => r,
+            Val::Tmp(r) => r,
+            Val::Mem(ea) => {
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: size_of(w),
+                    src: ea,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                d
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "`in` on a set held in a register, as a value, is",
+                ))
+            }
+        };
+        self.out.push(Insn::BtstImm {
+            bit: *k as u8,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        Ok(r)
     }
 
     /// `elem in set` for a one-longword set in memory, as a boolean in a
@@ -1857,7 +2890,17 @@ impl Selector {
             ));
         };
         let ea = self.ea_of(addr)?;
-        let bit = self.eval_d(elem)?;
+        let bit = match elem {
+            // Not copied: `btst` only reads it.
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if matches!(self.pinned(*o), Some(Reg::D(_))) => match self.pinned(*o) {
+                Some(Reg::D(n)) => n,
+                _ => unreachable!(),
+            },
+            e => self.eval_d(e)?,
+        };
         let r = self.alloc_d()?;
         self.out.push(Insn::Move {
             size: Size::L,
@@ -1873,6 +2916,112 @@ impl Selector {
             dst: Ea::Reg(Reg::D(r)),
         });
         Ok(r)
+    }
+
+    /// The operand of an array element (codegen-patterns 5.2): the element
+    /// is at `base + index × scale + offset`.
+    ///
+    /// - The base: the unit's data area (A5), the frame (A6), or the object
+    ///   a pointer held in an address register since the entry points to.
+    ///   Another unit's array is refused: the image splits its address
+    ///   between a `movea.l #` immediate and the displacement in a way not
+    ///   catalogued (ACL_$IN_SUBSYS 0xE470AA `movea.l #0xe97294,A0` and
+    ///   `(-0x3d5a,A1)`; module-local 0xE464A0 `movea.l #0xe2622c,A0` and
+    ///   `(-2,A0,D1.w)`, PROC1_$TYPE being 0xE2612C), and the base load is
+    ///   scheduled into the index computation (12.4 R11).
+    /// - The index in a data register ([`Self::index_reg`]), `.w` for a word
+    ///   index, `.l` for a longword one.  **Uncertain:** words are also used
+    ///   as `.l` indices after `ext.l` (0xE01D10..0xE01D16, an index held in
+    ///   a register); every word index `dpc` forms is read from memory or a
+    ///   parameter, as at the `.w` sites below.
+    /// - The displacement (lower bound and field offsets folded in): within
+    ///   -128..127, the indexed mode `(d,An,Dn.w)` (AUDIT_$IS_PROCESS_AUDITED
+    ///   0xE70DA8 `tst.w (-2,A5,D0.w)`, a 1-based array; FIM_$GET_FIM_ADDR
+    ///   0xE0AA18 `move.l (0x3c,A5,D0.w),D0`); beyond, `lea (0,An,Dn.w),Am`
+    ///   and `(d,Am)` (BAT_$GET_BAT_STEP 0xE3BB6E..0xE3BB72 `lea
+    ///   (0,A5,D1.w),A0; move.w (-0x220,A0),D0`; ACL_$IN_SUBSYS 0xE470B2).
+    fn index_ea(&mut self, base: &Addr, index: &Expr, scale: u32, offset: i32) -> Res<Ea> {
+        let (areg, disp0) = match base {
+            Addr::Static(o) => (DATA_BASE_A, *o),
+            Addr::Frame(o) => (FP, *o),
+            Addr::Indirect { base: p, offset: o }
+                if matches!(
+                    &**p,
+                    Expr::Load { addr: Addr::Frame(f), .. }
+                        if matches!(self.pinned(*f), Some(Reg::A(_)))
+                ) =>
+            {
+                let a = self.eval_a(p)?;
+                (a, *o)
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "an element of an array other than one in the unit's data, the frame, or \
+                     through a pointer held since the entry (address split and scheduling not \
+                     catalogued, codegen-patterns 5.2) is",
+                ))
+            }
+        };
+        let long = index.ty().width == Width::Long;
+        let x = self.index_reg(index, scale)?;
+        let disp = disp0 + offset;
+        if (-128..128).contains(&disp) {
+            return Ok(Ea::Idx(disp, areg, x, long));
+        }
+        if !(-0x8000..0x8000).contains(&disp) {
+            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+        }
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea {
+            src: Ea::Idx(0, areg, x, long),
+            dst: a,
+        });
+        Ok(if disp == 0 {
+            Ea::Ind(a)
+        } else {
+            Ea::Disp(disp, a)
+        })
+    }
+
+    /// The scaled index of an array element in a data register.
+    ///
+    /// - Element size 1: the index itself, in any data register.
+    /// - Otherwise a register the scaling may modify: an index read from
+    ///   memory is scaled in place (FIM_$GET_FIM_ADDR 0xE0AA10..0xE0AA16
+    ///   `move.w abs.l,D0; lsl.w #2,D0`; AUDIT_$IS_PROCESS_AUDITED
+    ///   0xE70DA0..0xE70DA6); a by-value parameter is loaded, then copied,
+    ///   then scaled, in a one-statement body too (BAT_$GET_BAT_STEP
+    ///   0xE3BB64..0xE3BB6A `move.w (8,A6),D0; move.w D0,D1; mulu.w
+    ///   #0x234,D1`; module-local 0xE4649C..0xE464A8 `move.w (8,A6),D0; ...;
+    ///   move.w D0,D1; add.w D1,D1`), as one loaded at entry is (FIM_$FREE_ASID
+    ///   0xE0AA8A `move.w D2,D0; lsl.w #2,D0`).  The scaling is
+    ///   [`Self::mul_const`].
+    fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<u8> {
+        let w = index.ty().width;
+        let mut v = self.eval(index)?;
+        if scale == 1 {
+            return match v {
+                Val::Tmp(d) | Val::Reg(Reg::D(d)) => Ok(d),
+                v => self.in_tmp(v, w),
+            };
+        }
+        if let (
+            Val::Mem(_),
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            },
+        ) = (&v, index)
+        {
+            if *o > 0 {
+                let r = self.in_tmp(v, w)?;
+                v = Val::Reg(Reg::D(r));
+            }
+        }
+        let d = self.in_tmp(v, w)?;
+        self.mul_const(d, scale as i64, w)?;
+        Ok(d)
     }
 
     /// Evaluate a pointer into a new address register, or give the
@@ -1953,6 +3102,12 @@ impl Selector {
                     Ea::Disp(*o, DATA_BASE_A)
                 })
             }
+            Addr::Index {
+                base,
+                index,
+                scale,
+                offset,
+            } => self.index_ea(base, index, *scale, *offset),
             // Through a pointer: `(d,An)` (0xE148D8), `(An)` when d = 0
             // (LOG_$READ 0xE17814 `move.w (A0),-(SP)`).
             Addr::Indirect { base, offset } => {
@@ -2097,21 +3252,29 @@ mod tests {
         );
     }
 
+    /// A constant result: `clr.w D0` (PARITY_$CHK_IO 0xE0B1AA), `moveq`
+    /// (0xE0B19C `moveq #1,D0`, 0xE0B23A `moveq #-1,D0`, word results),
+    /// `move.<s> #n` otherwise.
     #[test]
-    fn constants_are_rejected() {
-        let f = func(
-            0,
-            Some(ResultSpec {
-                class: ResultClass::Data,
-                ty: Scalar::signed(Width::Word),
-            }),
-            vec![StmtKind::SetResult(Expr::Const {
-                value: 0,
-                ty: Scalar::signed(Width::Word),
-            })],
-        );
-        let d = select(&f).unwrap_err();
-        assert_eq!(d.message, "loading a constant is not supported yet");
+    fn constant_results() {
+        for (ty, v, want) in [
+            (Scalar::signed(Width::Word), 0, "clr.w\t%d0"),
+            (Scalar::signed(Width::Long), 0, "clr.l\t%d0"),
+            (Scalar::signed(Width::Word), 1, "moveq\t#1,%d0"),
+            (Scalar::signed(Width::Word), -1, "moveq\t#-1,%d0"),
+            (Scalar::signed(Width::Word), 300, "move.w\t#0x12c,%d0"),
+            (Scalar::signed(Width::Long), 0x10000, "move.l\t#0x10000,%d0"),
+        ] {
+            let f = func(
+                0,
+                Some(ResultSpec {
+                    class: ResultClass::Data,
+                    ty,
+                }),
+                vec![StmtKind::SetResult(Expr::Const { value: v, ty })],
+            );
+            assert_eq!(text(&f)[1], want);
+        }
     }
 
     #[test]

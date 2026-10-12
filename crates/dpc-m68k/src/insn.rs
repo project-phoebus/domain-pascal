@@ -171,6 +171,11 @@ pub enum Ea {
     Ind(u8),
     /// `(d,An)`, d16.
     Disp(i32, u8),
+    /// `(d,An,Dn.w)` / `(d,An,Dn.l)`: address register indirect with
+    /// index and an 8-bit displacement (brief extension word, no scale:
+    /// 68010; codegen-patterns 5.2, 13).  Fields: displacement, address
+    /// register, index data register, index is a longword.
+    Idx(i32, u8, u8, bool),
     /// `(sym+off).l`: absolute long.
     AbsL(String, i32),
     /// `(n).w`: absolute short, a 16-bit address the CPU sign-extends.
@@ -202,7 +207,7 @@ impl Ea {
             // The selector writes `Ea::Ind` for offset 0 anyway; this keeps
             // `Insn::len_at` equal to what gas emits if one slips through.
             Ea::Disp(0, _) => 0,
-            Ea::Disp(..) | Ea::AbsW(_) => 2,
+            Ea::Disp(..) | Ea::AbsW(_) | Ea::Idx(..) => 2,
             Ea::AbsL(..) | Ea::ImmSym(_) => 4,
             Ea::Imm(_) => match size {
                 Size::B | Size::W => 2,
@@ -229,6 +234,14 @@ impl fmt::Display for Ea {
             Ea::Reg(r) => write!(f, "{r}"),
             Ea::Ind(a) => write!(f, "({})", Reg::A(*a)),
             Ea::Disp(d, a) => write!(f, "({},{})", num(*d as i64), Reg::A(*a)),
+            Ea::Idx(d, a, x, long) => write!(
+                f,
+                "({},{},{}.{})",
+                num(*d as i64),
+                Reg::A(*a),
+                Reg::D(*x),
+                if *long { "l" } else { "w" }
+            ),
             Ea::AbsL(s, 0) => write!(f, "({s}).l"),
             Ea::AbsL(s, o) if *o < 0 => write!(f, "({s}-{}).l", num(-(*o as i64))),
             Ea::AbsL(s, o) => write!(f, "({s}+{}).l", num(*o as i64)),
@@ -426,6 +439,61 @@ pub enum Insn {
         src: Ea,
         dst: u8,
     },
+    /// `<op>.<size> src,%dn` for add, sub, and, or (register destination).
+    Alu {
+        op: AluOp,
+        size: Size,
+        src: Ea,
+        dst: u8,
+    },
+    /// `<op>i.<size> #imm,dst` for addi, subi, andi, ori, eori (the
+    /// immediate as [`Ea::Imm`] gives it).
+    AluImm {
+        op: AluOp,
+        size: Size,
+        imm: i64,
+        dst: Ea,
+    },
+    /// `neg.<size> dst` / `not.<size> dst`.
+    Unary {
+        op: UnaryOp,
+        size: Size,
+        dst: Ea,
+    },
+    /// `ext.<size> %dn`: `ext.w` sign-extends the low byte to a word,
+    /// `ext.l` the low word to a longword.
+    Ext {
+        size: Size,
+        dst: u8,
+    },
+    /// `<op>.<size> #n,%dn` (n = 1..8) or `<op>.<size> %dm,%dn`.
+    Shift {
+        op: ShiftOp,
+        size: Size,
+        count: ShiftCount,
+        dst: u8,
+    },
+    /// `mulu.w src,%dn` / `muls.w src,%dn` (16 x 16 -> 32).
+    Mul {
+        signed: bool,
+        src: Ea,
+        dst: u8,
+    },
+    /// `divu.w src,%dn` / `divs.w src,%dn` (32 / 16 -> 16 quotient in the
+    /// low word, remainder in the high word).
+    Div {
+        signed: bool,
+        src: Ea,
+        dst: u8,
+    },
+    /// `swap %dn`.
+    Swap(u8),
+    /// `btst #bit,dst` (immediate bit number; mod 8 on memory, mod 32 on a
+    /// data register).
+    BtstImm {
+        bit: u8,
+        dst: Ea,
+    },
     /// Pseudo-instruction: pad to a 4-byte boundary with the 2-byte no-op
     /// `movea.l A0,A0` (0x2048), as the compiler does before a loop head
     /// (codegen-patterns 7: 0xE00ED6 before the `dbf` loop at 0xE00ED8;
@@ -434,6 +502,50 @@ pub enum Insn {
     /// the module's code base is 4-aligned, or, for a fragment, because
     /// the emitter shifts the section (`emit::Options::fragment_origin`).
     Align4,
+}
+
+/// The two-operand arithmetic and logic operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AluOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Eor,
+}
+
+impl AluOp {
+    fn name(self) -> &'static str {
+        match self {
+            AluOp::Add => "add",
+            AluOp::Sub => "sub",
+            AluOp::And => "and",
+            AluOp::Or => "or",
+            AluOp::Eor => "eor",
+        }
+    }
+}
+
+/// `neg` / `not`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    Neg,
+    Not,
+}
+
+/// Logical left, logical right, arithmetic right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftOp {
+    Lsl,
+    Lsr,
+    Asr,
+}
+
+/// A shift count: an immediate 1..=8 or a data register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftCount {
+    Imm(u8),
+    Reg(u8),
 }
 
 impl fmt::Display for Insn {
@@ -486,6 +598,52 @@ impl fmt::Display for Insn {
                 write!(f, "cmpi.{size}\t#{},{dst}", num(*imm))
             }
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
+            Insn::Alu { op, size, src, dst } => {
+                write!(f, "{}.{size}\t{src},{}", op.name(), Reg::D(*dst))
+            }
+            Insn::AluImm { op, size, imm, dst } => {
+                write!(f, "{}i.{size}\t#{},{dst}", op.name(), num(*imm))
+            }
+            Insn::Unary { op, size, dst } => {
+                let mn = match op {
+                    UnaryOp::Neg => "neg",
+                    UnaryOp::Not => "not",
+                };
+                write!(f, "{mn}.{size}\t{dst}")
+            }
+            Insn::Ext { size, dst } => write!(f, "ext.{size}\t{}", Reg::D(*dst)),
+            Insn::Shift {
+                op,
+                size,
+                count,
+                dst,
+            } => {
+                let mn = match op {
+                    ShiftOp::Lsl => "lsl",
+                    ShiftOp::Lsr => "lsr",
+                    ShiftOp::Asr => "asr",
+                };
+                match count {
+                    ShiftCount::Imm(n) => write!(f, "{mn}.{size}\t#{n},{}", Reg::D(*dst)),
+                    ShiftCount::Reg(r) => {
+                        write!(f, "{mn}.{size}\t{},{}", Reg::D(*r), Reg::D(*dst))
+                    }
+                }
+            }
+            Insn::Mul { signed, src, dst } => write!(
+                f,
+                "{}.w\t{src},{}",
+                if *signed { "muls" } else { "mulu" },
+                Reg::D(*dst)
+            ),
+            Insn::Div { signed, src, dst } => write!(
+                f,
+                "{}.w\t{src},{}",
+                if *signed { "divs" } else { "divu" },
+                Reg::D(*dst)
+            ),
+            Insn::Swap(d) => write!(f, "swap\t{}", Reg::D(*d)),
+            Insn::BtstImm { bit, dst } => write!(f, "btst\t#{bit},{dst}"),
         }
     }
 }
@@ -524,7 +682,12 @@ impl Insn {
             }
             Insn::Tst { size, dst } => 2 + dst.ext_len(*size),
             Insn::Cmpi { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
-            Insn::Cmp { size, src, .. } => 2 + src.ext_len(*size),
+            Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
+            Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
+            Insn::Unary { size, dst, .. } => 2 + dst.ext_len(*size),
+            Insn::Ext { .. } | Insn::Shift { .. } | Insn::Swap(_) => 2,
+            Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
+            Insn::BtstImm { dst, .. } => 4 + dst.ext_len(Size::B),
         }
     }
 }

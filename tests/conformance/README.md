@@ -28,7 +28,16 @@ held in A0) and `sio_init_dtte.pas` (the module-local routine at
 calls in A2 and D2 by the register allocator, codegen-patterns 12.4)
 and `proc1_set_asid.pas` (PROC1_$SET_ASID, 0xE148F8..0xE1491E: a
 parameter whose last use is a call's argument, held through the call in
-D2, codegen-patterns 12.4 R4(c)).  Each `.pas` starts with a comment
+D2, codegen-patterns 12.4 R4(c)).  Expressions (codegen-patterns 5.2, 8,
+3; beads domain-pascal-5aw.13, -d7i): `rip_packet_length.pas` (the
+module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
+`* 6` with shifts and adds, `+ 2` with `addq`), `bat_get_bat_step.pas`
+(BAT_$GET_BAT_STEP 0xE3BB58: a parameter index copied and scaled with
+`mulu.w`, `lea (0,A5,D1.w)`), `fim_get_fim_addr.pas` (FIM_$GET_FIM_ADDR
+0xE0AA04: `lsl.w #2`, `(0x3c,A5,D0.w)`) and
+`audit_is_process_audited.pas` (AUDIT_$IS_PROCESS_AUDITED 0xE70D94: a
+1-based array, `(-2,A5,D0.w)`, a comparison as the result with `seq`).
+Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
 

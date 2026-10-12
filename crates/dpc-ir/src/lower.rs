@@ -18,8 +18,8 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, Call, Callee, Cond, DataArea, Expr, Function, Module, Rel, ResultClass, ResultSpec,
-    Scalar, Sign, Stmt, StmtKind, ValueParam, Width,
+    Addr, Arg, BinOp as IrBinOp, Call, Callee, Cond, DataArea, Expr, Function, Module, Rel,
+    ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -292,24 +292,109 @@ fn set_loads_data_base(fs: &mut [Function], unit_has_data: bool) -> Result<(), V
     }
 }
 
-/// The symbols of this unit's routines that `s` calls ([`Callee::Local`]).
+/// The symbols of this unit's routines that `s` calls ([`Callee::Local`]),
+/// as statements or inside expressions.
 fn local_callees(s: &Stmt, out: &mut Vec<String>) {
+    let mut calls = Vec::new();
+    stmt_calls(s, &mut calls);
+    for c in calls {
+        if let Callee::Local(sym) = &c.callee {
+            out.push(sym.clone());
+        }
+    }
+}
+
+/// Every call `s` makes, statement calls and function calls in
+/// expressions.
+fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
+    let e = |x: &'a Expr, out: &mut Vec<&'a Call>| expr_calls(x, out);
     match &s.kind {
-        StmtKind::Call(Call {
-            callee: Callee::Local(sym),
-            ..
-        }) => out.push(sym.clone()),
-        StmtKind::If { then_, else_, .. } => {
+        StmtKind::SetResult(x) => e(x, out),
+        StmtKind::Store { addr, value } => {
+            addr_calls(addr, out);
+            e(value, out);
+        }
+        StmtKind::Copy { dst, src, .. } => {
+            addr_calls(dst, out);
+            addr_calls(src, out);
+        }
+        StmtKind::Call(c) => {
+            out.push(c);
+            call_arg_calls(c, out);
+        }
+        StmtKind::Fill { start, value, .. } => {
+            addr_calls(start, out);
+            e(value, out);
+        }
+        StmtKind::If { cond, then_, else_ } => {
+            cond_calls(cond, out);
             for st in then_.iter().chain(else_) {
-                local_callees(st, out);
+                stmt_calls(st, out);
             }
         }
-        StmtKind::Repeat { body, .. } => {
+        StmtKind::Repeat { body, until } => {
             for st in body {
-                local_callees(st, out);
+                stmt_calls(st, out);
             }
+            cond_calls(until, out);
         }
-        _ => {}
+        StmtKind::Return => {}
+    }
+}
+
+fn call_arg_calls<'a>(c: &'a Call, out: &mut Vec<&'a Call>) {
+    for a in &c.args {
+        match a {
+            Arg::Value { value, .. } => expr_calls(value, out),
+            Arg::Address { addr, .. } => addr_calls(addr, out),
+        }
+    }
+}
+
+fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
+    match c {
+        Cond::Compare { lhs, rhs, .. } => {
+            expr_calls(lhs, out);
+            expr_calls(rhs, out);
+        }
+        Cond::Test(e) => expr_calls(e, out),
+        Cond::Not(x) => cond_calls(x, out),
+        Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+            cond_calls(a, out);
+            cond_calls(b, out);
+        }
+    }
+}
+
+fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
+    match e {
+        Expr::Const { .. } => {}
+        Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_calls(addr, out),
+        Expr::SetMember { elem, set, .. } => {
+            expr_calls(elem, out);
+            expr_calls(set, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_calls(lhs, out);
+            expr_calls(rhs, out);
+        }
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_calls(x, out),
+        Expr::Call { call, .. } => {
+            out.push(call);
+            call_arg_calls(call, out);
+        }
+        Expr::Test(c) => cond_calls(c, out),
+    }
+}
+
+fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
+    match a {
+        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Indirect { base, .. } => expr_calls(base, out),
+        Addr::Index { base, index, .. } => {
+            addr_calls(base, out);
+            expr_calls(index, out);
+        }
     }
 }
 
@@ -318,10 +403,7 @@ fn stmt_uses_static(s: &Stmt) -> bool {
         StmtKind::SetResult(e) => expr_uses_static(e),
         StmtKind::Store { addr, value } => addr_uses_static(addr) || expr_uses_static(value),
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
-        StmtKind::Call(c) => c.args.iter().any(|a| match a {
-            Arg::Value { value, .. } => expr_uses_static(value),
-            Arg::Address { addr, .. } => addr_uses_static(addr),
-        }),
+        StmtKind::Call(c) => call_uses_static(c),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
         StmtKind::If { cond, then_, else_ } => {
             cond_uses_static(cond) || then_.iter().chain(else_).any(stmt_uses_static)
@@ -342,11 +424,22 @@ fn cond_uses_static(c: &Cond) -> bool {
     }
 }
 
+fn call_uses_static(c: &Call) -> bool {
+    c.args.iter().any(|a| match a {
+        Arg::Value { value, .. } => expr_uses_static(value),
+        Arg::Address { addr, .. } => addr_uses_static(addr),
+    })
+}
+
 fn expr_uses_static(e: &Expr) -> bool {
     match e {
         Expr::Const { .. } => false,
         Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_uses_static(addr),
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
+        Expr::Binary { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_uses_static(x),
+        Expr::Call { call, .. } => call_uses_static(call),
+        Expr::Test(c) => cond_uses_static(c),
     }
 }
 
@@ -355,6 +448,7 @@ fn addr_uses_static(a: &Addr) -> bool {
         Addr::Static(_) => true,
         Addr::Frame(_) | Addr::Symbol { .. } => false,
         Addr::Indirect { base, .. } => expr_uses_static(base),
+        Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
     }
 }
 
@@ -472,7 +566,7 @@ impl Cx<'_> {
                 }
                 SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
                 SStmtKind::Call(c) => out.push(Stmt {
-                    kind: StmtKind::Call(call(p, self.r, c, s.span)?),
+                    kind: StmtKind::Call(call(p, &self.r.code_section, c, s.span)?),
                     span: s.span,
                 }),
                 SStmtKind::For {
@@ -718,9 +812,21 @@ fn result_assignment(
     }
     let res = result.expect("lower_routine skips the body when the result type failed");
     let vsize = p.types.size(value.ty);
-    if vsize != res.ty.bytes() {
-        // Implicit integer widening (integer16 -> integer32) is not
-        // catalogued yet.
+    if let Some(v) = &value.value {
+        return Ok(Stmt {
+            kind: StmtKind::SetResult(const_of(v, res.ty, value.span)?),
+            span: s.span,
+        });
+    }
+    let v = value_of(p, value)?;
+    let v = if vsize == res.ty.bytes() {
+        v
+    } else if vsize < res.ty.bytes() && p.types.is_integer(value.ty) {
+        // Widening, as for a store (`store`).
+        convert(v, res.ty)
+    } else if let Some(n) = narrow(&v, res.ty) {
+        n
+    } else {
         return Err(unsupported(
             value.span,
             format!(
@@ -728,9 +834,9 @@ fn result_assignment(
                 res.ty.bytes()
             ),
         ));
-    }
+    };
     Ok(Stmt {
-        kind: StmtKind::SetResult(value_of(p, value)?),
+        kind: StmtKind::SetResult(v),
         span: s.span,
     })
 }
@@ -749,21 +855,96 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     } else {
         let v = value_of(p, value)?;
         if v.ty().width != ty.width {
-            return Err(unsupported(
-                value.span,
-                format!(
-                    "assigning a {}-byte value to a {}-byte object is",
-                    v.ty().bytes(),
-                    ty.bytes()
-                ),
-            ));
+            // Widening an integer (ref 4.3.1, p. 4-5) is a conversion of
+            // the value; narrowing (an integer32 value into an integer16
+            // object) has not been catalogued.
+            if v.ty().bytes() < ty.bytes() && p.types.is_integer(value.ty) {
+                convert(v, ty)
+            } else if let Some(n) = narrow(&v, ty) {
+                n
+            } else {
+                return Err(unsupported(
+                    value.span,
+                    format!(
+                        "assigning a {}-byte value to a {}-byte object is",
+                        v.ty().bytes(),
+                        ty.bytes()
+                    ),
+                ));
+            }
+        } else {
+            v
         }
-        v
     };
     Ok(Stmt {
         kind: StmtKind::Store { addr, value },
         span: s.span,
     })
+}
+
+/// `e`, wider than `ty`, computed at `ty`'s width when that gives the
+/// same low bytes: integer `+`, `-`, `*`, `&`, `!`, `xor`, `lshft`, `-x`,
+/// `~x` (arithmetic modulo 2^bits), operands narrowed in turn, widening
+/// conversions of operands already of `ty`'s width dropped, constants
+/// truncated.  Ref 4.3.1, p. 4-5: "the compiler tries to avoid the extra
+/// code produced by data expansion".  Image: LOG_$READ's worker 0xE177C4
+/// `move.w #0x400,D3; sub.w D0,D3; move.w D3,(A0)` stores `16#400 -
+/// offset`, `offset` a `0..65535` word whose expression is integer32, as
+/// a word subtraction.  `None` when a part cannot be narrowed (a load of
+/// a wider object, `div`, `mod`, a right shift, a call).
+fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
+    match e {
+        Expr::Const { value, .. } => {
+            let bits = ty.bytes() * 8;
+            let mask = (1i64 << bits) - 1;
+            let mut v = value & mask;
+            if ty.is_signed() && v >= 1i64 << (bits - 1) {
+                v -= 1i64 << bits;
+            }
+            Some(Expr::Const { value: v, ty })
+        }
+        Expr::Convert { value, .. } if value.ty().width == ty.width => Some(convert(
+            (**value).clone(),
+            Scalar {
+                width: ty.width,
+                sign: value.ty().sign,
+            },
+        )),
+        Expr::Binary {
+            op: op @ (IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or),
+            lhs,
+            rhs,
+            ..
+        }
+        | Expr::Binary {
+            op: op @ IrBinOp::Xor,
+            lhs,
+            rhs,
+            ..
+        } => Some(Expr::Binary {
+            op: *op,
+            lhs: Box::new(narrow(lhs, ty)?),
+            rhs: Box::new(narrow(rhs, ty)?),
+            ty,
+        }),
+        Expr::Binary {
+            op: IrBinOp::Shl,
+            lhs,
+            rhs,
+            ..
+        } => Some(Expr::Binary {
+            op: IrBinOp::Shl,
+            lhs: Box::new(narrow(lhs, ty)?),
+            rhs: rhs.clone(),
+            ty,
+        }),
+        Expr::Unary { op, operand, .. } => Some(Expr::Unary {
+            op: *op,
+            operand: Box::new(narrow(operand, ty)?),
+            ty,
+        }),
+        _ => None,
+    }
 }
 
 /// Whether an assignment to `target` copies a block: a record or an array
@@ -830,34 +1011,260 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             addr: addr_of(p, e)?,
             ty: scalar_of(p, e)?,
         }),
-        ExprKind::Binary {
-            op: BinOp::In,
-            lhs,
-            rhs,
-        } => {
-            // codegen-patterns 5.1: a set that fits in a register is tested
-            // with `btst Dn,Dm` (PROC1_$TST_LOCK 0xE148DC, a 4-byte set).
-            // Other set sizes (byte-addressed `btst`, MST_$ALLOC_ASID
-            // 0xE42D5C) are not implemented yet.
-            let set_size = p.types.size(rhs.ty);
-            if set_size != 4 {
-                return Err(unsupported(
-                    e.span,
-                    format!("`in` on a {set_size}-byte set is"),
-                ));
-            }
-            Ok(Expr::SetMember {
-                elem: Box::new(value_of(p, lhs)?),
-                set: Box::new(value_of(p, rhs)?),
-                set_width: Width::Long,
-            })
-        }
         // `addr(x)` (ref p. 4-13): the address of the variable as a value.
         ExprKind::Builtin {
             builtin: Builtin::Addr,
             args,
         } => Ok(Expr::AddrOf(addr_of(p, &args[0])?)),
+        ExprKind::Index { .. } => Ok(Expr::Load {
+            addr: addr_of(p, e)?,
+            ty: scalar_of(p, e)?,
+        }),
+        ExprKind::Binary { op, lhs, rhs } => binary(p, e, *op, lhs, rhs),
+        ExprKind::Unary { op, operand } => {
+            let ty = scalar_of(p, e)?;
+            let op = match op {
+                UnOp::Neg => IrUnOp::Neg,
+                UnOp::BitNot => IrUnOp::Not,
+                UnOp::Plus => return Ok(convert(value_of(p, operand)?, ty)),
+                // `not b` as a value: a condition materialised.
+                UnOp::Not => return Ok(Expr::Test(Box::new(cond_of(p, e)?))),
+            };
+            Ok(Expr::Unary {
+                op,
+                operand: Box::new(convert(value_of(p, operand)?, ty)),
+                ty,
+            })
+        }
+        ExprKind::Builtin { builtin, args } => builtin_value(p, e, *builtin, args),
+        ExprKind::Call(c) => {
+            let ty = scalar_of(p, e)?;
+            Ok(Expr::Call {
+                call: call(p, ".text", c, e.span)?,
+                ty,
+            })
+        }
         _ => Err(unsupported(e.span, "this expression is")),
+    }
+}
+
+/// `v` as a value of type `ty`: a constant retyped, a value of another
+/// width or sign wrapped in [`Expr::Convert`].
+///
+/// A sum, difference, product or negation widened is computed at the wider
+/// width, its operands widened first (ref 4.3.1, p. 4-5: "The compiler
+/// computes operands smaller than 32 bits with 32 bits of precision when
+/// necessary to achieve correct arithmetic"; widening the word result
+/// would lose the carry).  Image: 0xE0863C..0xE08642 `move.w D3,D2; ext.l
+/// D3; subq.l #2,D3; move.l D3,(-176,A6)`; 0xE69568..0xE6956E `move.w
+/// (-20,A2),D5; ext.l D5; addq.l #1,D5` (a longword argument);
+/// 0xE07442..0xE0744A `ext.l D6; lsl.l #2,D6; move.l D6,D7; add.l D7,D7`
+/// (×12 at the longword width).  No word `add`/`sub`/`mul` result is
+/// widened with `ext.l` in 0xE00800..0xE88834 (review survey: what writes
+/// the register an `ext.l` extends is a `move.w` ×355, `andi.w` ×2,
+/// `asr.w`, `subq.w` before a `divs.w`, `divs.w`).  The bit operators,
+/// `div`, `mod` and the right shifts give the same value either way and
+/// stay as they are; a widened `lshft` is refused by the selector.
+fn convert(v: Expr, ty: Scalar) -> Expr {
+    match v {
+        _ if v.ty() == ty => v,
+        Expr::Const { value, .. } => Expr::Const { value, ty },
+        Expr::Binary {
+            op: op @ (IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul),
+            lhs,
+            rhs,
+            ty: t,
+        } if ty.bytes() > t.bytes() => Expr::Binary {
+            op,
+            lhs: Box::new(convert(*lhs, ty)),
+            rhs: Box::new(convert(*rhs, ty)),
+            ty,
+        },
+        Expr::Unary {
+            op: IrUnOp::Neg,
+            operand,
+            ty: t,
+        } if ty.bytes() > t.bytes() => Expr::Unary {
+            op: IrUnOp::Neg,
+            operand: Box::new(convert(*operand, ty)),
+            ty,
+        },
+        v => Expr::Convert {
+            value: Box::new(v),
+            ty,
+        },
+    }
+}
+
+/// An operand of an integer operator, converted to the operation's type
+/// `ty` (ref 4.3.1, p. 4-5: integer16 operands are expanded to 32 bits
+/// when the operation is done in 32 bits).
+fn operand(p: &Program, x: &SExpr, ty: Scalar) -> Res<Expr> {
+    match &x.value {
+        Some(v) => {
+            let c = const_of(v, ty, x.span)?;
+            let Expr::Const { value, .. } = c else {
+                unreachable!()
+            };
+            if !fits(value, ty) {
+                return Err(unsupported(
+                    x.span,
+                    "a constant operand outside the operation's type is",
+                ));
+            }
+            Ok(c)
+        }
+        None => Ok(convert(value_of(p, x)?, ty)),
+    }
+}
+
+/// `lhs op rhs` as a value.
+fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
+    let op = match op {
+        BinOp::Add => IrBinOp::Add,
+        BinOp::Sub => IrBinOp::Sub,
+        BinOp::Mul => IrBinOp::Mul,
+        BinOp::Div => IrBinOp::Div,
+        BinOp::Mod => IrBinOp::Mod,
+        BinOp::BitAnd => IrBinOp::And,
+        BinOp::BitOr => IrBinOp::Or,
+        BinOp::In => {
+            // codegen-patterns 5.1: a set that fits in a register (one
+            // word or one longword) is tested in a register (PROC1_$TST_LOCK
+            // 0xE148DC `btst D0,D1`; REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A
+            // `move.w (22,A0),D0; btst #13,D0`).  Larger sets (byte-addressed
+            // `btst`, MST_$ALLOC_ASID 0xE42D5C) are not implemented yet.
+            let set_size = p.types.size(rhs.ty);
+            let set_width = match set_size {
+                2 => Width::Word,
+                4 => Width::Long,
+                _ => {
+                    return Err(unsupported(
+                        e.span,
+                        format!("`in` on a {set_size}-byte set is"),
+                    ))
+                }
+            };
+            return Ok(Expr::SetMember {
+                elem: Box::new(value_of(p, lhs)?),
+                set: Box::new(value_of(p, rhs)?),
+                set_width,
+            });
+        }
+        BinOp::Eq
+        | BinOp::Ne
+        | BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::AndThen
+        | BinOp::OrElse
+        | BinOp::And
+        | BinOp::Or => return Ok(Expr::Test(Box::new(cond_of(p, e)?))),
+        BinOp::RealDiv | BinOp::Pow => return Err(unsupported(e.span, "this operator is")),
+    };
+    if !p.types.is_integer(e.ty) {
+        // Set union, intersection and difference (codegen-patterns 5.1:
+        // not catalogued).
+        return Err(unsupported(e.span, "this operator on sets is"));
+    }
+    let mut ty = scalar_of(p, e)?;
+    // The sum, product or bit combination of unsigned run-time values (or
+    // of one and a non-negative constant) is unsigned: LOG_$READ's worker
+    // compares `offset + actual_len^`, two `0..65535` words zero-extended
+    // and added in 32 bits, with `bls` (0xE177B4..0xE177B8), as ref 4.3.3
+    // (p. 4-6) says the compiler does for `div` and `mod` with such
+    // operands.  **Uncertain:** one site; `-` is left signed (no site).
+    let unsigned_operand = |x: &SExpr| match &x.value {
+        Some(v) => v.ordinal().is_some_and(|n| n >= 0),
+        None => sign_of(&p.types, x.ty) == Sign::Unsigned,
+    };
+    if matches!(op, IrBinOp::Add | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or)
+        && (lhs.value.is_none() || rhs.value.is_none())
+        && unsigned_operand(lhs)
+        && unsigned_operand(rhs)
+    {
+        ty.sign = Sign::Unsigned;
+    }
+    if matches!(op, IrBinOp::Div | IrBinOp::Mod) {
+        // Ref 4.3.3, p. 4-6: div and mod are unsigned when both operands
+        // are unsigned run-time values, or one is and the other is a
+        // non-negative constant.  The unsigned forms (`divu.w`) are not
+        // implemented yet.
+        let unsigned = |x: &SExpr| x.value.is_none() && sign_of(&p.types, x.ty) == Sign::Unsigned;
+        if unsigned(lhs) || unsigned(rhs) {
+            return Err(unsupported(
+                e.span,
+                "`div`/`mod` with an unsigned operand (ref 4.3.3) is",
+            ));
+        }
+    }
+    Ok(Expr::Binary {
+        op,
+        lhs: Box::new(operand(p, lhs, ty)?),
+        rhs: Box::new(operand(p, rhs, ty)?),
+        ty,
+    })
+}
+
+/// A predeclared function's value.
+fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr> {
+    let ty = scalar_of(p, e)?;
+    match b {
+        Builtin::Lshft | Builtin::Rshft | Builtin::Arshft => {
+            // Ref pp. 4-29, 4-171: rshft and arshft of an operand smaller
+            // than 32 bits expand it to 32 bits first, shift, and convert
+            // the result back where it is stored; what the original emitted
+            // for a 16-bit signed operand (an `ext.l` and a 32-bit shift?)
+            // is not catalogued, so only operands of the result's width are
+            // taken (lshft keeps its operand's width, p. 4-109).
+            let x = value_of(p, &args[0])?;
+            if x.ty() != ty {
+                return Err(unsupported(
+                    e.span,
+                    "a shift of an operand of another width than its result is",
+                ));
+            }
+            let op = match b {
+                Builtin::Lshft => IrBinOp::Shl,
+                Builtin::Rshft => IrBinOp::Shr,
+                _ => IrBinOp::Ashr,
+            };
+            if op == IrBinOp::Shr && x.ty().width != Width::Long && x.ty().is_signed() {
+                // P. 4-171: "rshft expands num to a 32-bit integer, performs
+                // the shift, and converts it back", so rshft(-9, 3) is -2 in
+                // 16 bits, not what `lsr.w` gives; the original's code for it
+                // is not catalogued.
+                return Err(unsupported(
+                    e.span,
+                    "`rshft` of a signed operand smaller than 32 bits (expanded first, ref \
+                     p. 4-171) is",
+                ));
+            }
+            let count = match &args[1].value {
+                Some(v) => const_of(v, Scalar::signed(Width::Word), args[1].span)?,
+                None => value_of(p, &args[1])?,
+            };
+            Ok(Expr::Binary {
+                op,
+                lhs: Box::new(x),
+                rhs: Box::new(count),
+                ty,
+            })
+        }
+        Builtin::Xor => Ok(Expr::Binary {
+            op: IrBinOp::Xor,
+            lhs: Box::new(operand(p, &args[0], ty)?),
+            rhs: Box::new(operand(p, &args[1], ty)?),
+            ty,
+        }),
+        // `ord(x)` (p. 4-137): the ordinal as an integer.  A char is
+        // zero-extended, an enumeration word or an integer kept; a boolean's
+        // ordinal (1 for its 0xFF byte) is not a plain conversion.
+        Builtin::Ord if !p.types.is_boolean(args[0].ty) => Ok(convert(value_of(p, &args[0])?, ty)),
+        // `chr(n)` (p. 4-39): "number & 16#FF", the low byte.
+        Builtin::Chr => Ok(convert(value_of(p, &args[0])?, ty)),
+        _ => Err(unsupported(e.span, "this predeclared function is")),
     }
 }
 
@@ -921,6 +1328,64 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
             base: Box::new(value_of(p, ptr)?),
             offset: 0,
         }),
+        // `a[i]`: the element at `(i - lo) * size` bytes into the array
+        // (codegen-patterns 5.2).  A constant index is folded into the
+        // displacement; otherwise the lower bound is (`(-2,A5,D0.w)` for
+        // a 1-based word array, AUDIT_$IS_PROCESS_AUDITED 0xE70DA8).  No
+        // range check is emitted: the image has none (FIM_$FREE_ASID's C,
+        // `fim/free_asid.c`, notes "the original performs no bounds check").
+        ExprKind::Index {
+            base,
+            index,
+            lo,
+            elem_size,
+        } => {
+            let b = addr_of(p, base)?;
+            let big = || unsupported(e.span, "an array offset beyond 32 bits is");
+            if let Some(i) = index.value.as_ref().and_then(ConstValue::ordinal) {
+                let d = i32::try_from((i - lo) * *elem_size as i64).map_err(|_| big())?;
+                return Ok(b.offset_by(d));
+            }
+            let ix = value_of(p, index)?;
+            if !matches!(ix.ty().width, Width::Word | Width::Long) {
+                // A byte index (char, boolean, a byte subrange) would need
+                // a zero- or sign-extension first: not catalogued.
+                return Err(unsupported(index.span, "an array index of one byte is"));
+            }
+            if ix.ty().width == Width::Word {
+                // A word index is scaled at the word's width and used as
+                // `(d,An,Dn.w)`, which sign-extends it (MC68000 brief
+                // extension word): right only while every index × size of
+                // the array's bounds fits in -32768..32767.  An index of a
+                // `0..65535` array above 32767, or a scaled index beyond 16
+                // bits, would address the wrong element.  The image scales
+                // with `mulu.w` into a `.l` index too (codegen-patterns 5.2:
+                // 43 sites, 0xE39364); when it did is not catalogued.
+                let fits16 = match p.types.kind(base.ty) {
+                    TypeKind::Array { index: it, .. } => {
+                        p.types.ordinal_range(*it).is_some_and(|(alo, ahi)| {
+                            let s = *elem_size as i64;
+                            alo * s >= -0x8000 && ahi * s <= 0x7fff
+                        })
+                    }
+                    _ => false,
+                };
+                if !fits16 {
+                    return Err(unsupported(
+                        index.span,
+                        "a word index whose scaled value may not fit in 16 bits (a `.w` index \
+                         sign-extends; the `.l` form is not catalogued, codegen-patterns 5.2) is",
+                    ));
+                }
+            }
+            let offset = i32::try_from(-lo * *elem_size as i64).map_err(|_| big())?;
+            Ok(Addr::Index {
+                base: Box::new(b),
+                index: Box::new(ix),
+                scale: *elem_size,
+                offset,
+            })
+        }
         _ => Err(unsupported(e.span, "this designator is")),
     }
 }
@@ -984,7 +1449,7 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 /// - The pad: the callee's `arg_pad` (codegen-patterns 1.4).  A
 ///   `variable` routine called with fewer arguments (ref 5.5.5) is not
 ///   supported yet: its pad and slots are not catalogued.
-fn call(p: &Program, caller: &Routine, c: &SCall, span: Span) -> Res<Call> {
+fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
     let SCallee::Routine(id) = &c.callee else {
         return Err(unsupported(span, "a call through a routine pointer is"));
     };
@@ -1000,7 +1465,7 @@ fn call(p: &Program, caller: &Routine, c: &SCall, span: Span) -> Res<Call> {
     }
     let callee = if r.external || r.body.is_none() {
         Callee::External(r.symbol.clone())
-    } else if r.code_section == caller.code_section {
+    } else if r.code_section == caller_section {
         Callee::Local(r.symbol.clone())
     } else {
         return Err(unsupported(
