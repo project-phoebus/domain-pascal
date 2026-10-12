@@ -17,6 +17,8 @@ name = "dpc-ir"
 version = "0.1.0"
 dependencies = [
  "dpc-sema",
+ "dpc-syntax",
+ "dpc-target",
 ]
 
 [[package]]
@@ -24,6 +26,8 @@ name = "dpc-m68k"
 version = "0.1.0"
 dependencies = [
  "dpc-ir",
+ "dpc-sema",
+ "dpc-syntax",
  "dpc-target",
 ]
 

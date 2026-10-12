@@ -1,8 +1,14 @@
-//! m68k backend: target description, instruction selection (to come) and
-//! the gas-syntax emitter.  Output must follow the code patterns of Apollo's
+//! m68k backend: target description, instruction selection and the
+//! gas-syntax emitter.  Output must follow the code patterns of Apollo's
 //! SR10.2 compiler; see `docs/codegen-patterns.md`.
+//!
+//! - [`isel`]: IR -> [`insn::Insn`], pattern by pattern;
+//! - [`insn`]: instructions and their gas text;
+//! - [`emit`]: a whole module as an assembly file.
 
 pub mod emit;
+pub mod insn;
+pub mod isel;
 
 use dpc_target::Target;
 
@@ -10,6 +16,23 @@ use dpc_target::Target;
 /// CLAUDE.md 3.16).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct M68k;
+
+impl M68k {
+    /// The `link.w A6,#-n` size for a frame of `raw` bytes
+    /// (`dpc_sema::Routine::frame_size`): the total rounded up to a
+    /// multiple of 4.
+    ///
+    /// Evidence (codegen-patterns 2): all 1171 `link.w A6,#d` at routine
+    /// starts named in the map have `d mod 4 = 0`; PROC1_$TST_LOCK
+    /// 0xE148CA has `link #-4` for a 1-byte frame (its boolean result
+    /// variable), and TIME_$Q_INIT_QUEUE 0xE16C5E / LOG_$READ 0xE17800
+    /// have `link #0` with no locals.  **Uncertain:** whether the original
+    /// rounded the total or gave each frame object a 4-byte-aligned slot;
+    /// the two differ once a routine has several small locals.
+    pub fn link_size(raw: u32) -> u32 {
+        raw.div_ceil(4) * 4
+    }
+}
 
 impl Target for M68k {
     fn name(&self) -> &'static str {
@@ -66,5 +89,13 @@ mod tests {
         assert_eq!(t.small_arg_offset_in_slot(1), 0);
         assert_eq!(t.first_arg_offset(), 8);
         assert_eq!(t.val_param_max_size(), 4);
+    }
+
+    #[test]
+    fn link_size_rounds_total_to_4() {
+        assert_eq!(M68k::link_size(0), 0);
+        assert_eq!(M68k::link_size(1), 4);
+        assert_eq!(M68k::link_size(4), 4);
+        assert_eq!(M68k::link_size(6), 8);
     }
 }

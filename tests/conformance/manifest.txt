@@ -10,5 +10,10 @@
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.
 
+# Compiled units.
+tests/conformance/proc1_tst_lock.pas         PROC1_$TST_LOCK
+
+# Harness fixtures.
+
 tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
 tests/conformance/handasm/ast_page_zero.s    0xE00EB0 AST_$PAGE_ZERO

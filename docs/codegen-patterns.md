@@ -206,6 +206,14 @@ last parameter, and the caller's pop includes it.
     rounded or each frame object gets a 4-byte-aligned slot.  `dpc-sema`
     records the raw size (`Routine::frame_size`) and leaves this to the
     backend.
+  - **Empty frame (Verified):** `link.w A6,#0` when there are no locals:
+    TIME_$Q_INIT_QUEUE 0xE16C5E, LOG_$READ 0xE17800.  The `link` is not
+    omitted.
+  - **Implemented:** `dpc-m68k` rounds the *total* up to a multiple of 4
+    (`M68k::link_size`): 1 byte (TST_LOCK's boolean result variable) gives
+    `#-4`, 0 gives `#0`.  This fits every site above, but it is the
+    Uncertain choice just described: a routine with several small locals
+    will tell the two rules apart.
 - **Register save:** `movem.l <regs>,-(SP)` straight after `link`.  It
   saves only the callee-saved registers the routine uses
   (0xE5C698 `movem.l D2-D7/A2-A4,-(SP)`).
@@ -242,6 +250,18 @@ last parameter, and the caller's pop includes it.
   - See `ARCH_RESULT_A0` in `../source/domain_os/arch/m68k/arch.h`.
 - **Procedures** leave D0/A0 as whatever the body left.  Callers never read
   them.
+- **Result assignment as the last statement (Verified, one site):** in
+  PROC1_$TST_LOCK the body is the single statement `f := x in s`.  The
+  value is computed into a scratch register and moved straight into D0
+  (0xE148E0 `move.b D1,D0`), followed by the epilogue.  The frame has
+  room for a result variable (`link #-4`), but the slot is never written
+  or read.  `dpc` implements exactly this case: a result assignment that
+  is the last statement goes to the result register.
+  **Uncertain (rejected by `dpc` for now):** what the compiler does when
+  the result is assigned before the last statement, assigned on several
+  paths, or read back (stored to the frame slot and reloaded before the
+  return?).  Find a function with an early or conditional assignment in
+  the image before implementing it.
 - **Tail wrapper:** a wrapper `F := G(args)` compiles to the call followed
   directly by the epilogue, with no move to D0 (ACL_$IS_SUSER,
   PROC2_$GET_ASID).  So from the wrapper alone you cannot tell a procedure
@@ -318,6 +338,24 @@ variables.  Each module's static data is a data segment, addressed off
   is `k mod 8` (`btst` with a byte destination uses only the low 3 bits).
 - **Set that fits in a register:** `btst Dn,Dm` on a longword
   (PROC1_$TST_LOCK 0xE148DC, `resource_locks_held`).
+- **Evaluation order of `k in p^.f` (Verified, one site):** PROC1_$TST_LOCK
+  0xE148CE..0xE148DE.
+  1. The set operand's *address* first: `movea.l PROC1_$CURRENT_PCB.l,A0`
+     (0xE148CE).
+  2. Then the element into a data register: `move.w (8,A6),D0` (0xE148D4).
+  3. Then the set's value into the next data register: `move.l (0x40,A0),D1`
+     (0xE148D8).
+  4. `btst D0,D1` (0xE148DC), and `sne D1` (0xE148DE): the boolean is
+     materialised in the **set's** register, not in the element's (D0 is
+     free again at that point, but is not used).
+  5. As a function result, `move.b D1,D0` (0xE148E0; section 3).
+
+  `dpc` reproduces this order for any `in` on a one-longword set variable
+  (`crates/dpc-m68k/src/isel.rs`, `set_member_long`).  **Uncertain:**
+  whether "address of the right operand before the value of the left
+  one" is a general rule of the compiler's binary operators or specific
+  to `in`; and the code for one-word sets held in a register (not seen
+  yet; `dpc` rejects them).
 - **Set constants** sit in data, for example the two 32-byte `set of char`
   tables at the start of the OLD_DIR data segment 0xE7FD24 (Reported:
   `name-dir-subsystems.md`).
@@ -564,6 +602,13 @@ reproduce.
   used, `movea.l D6,A0`).
 - **Redundant moves** are kept: `lea (A5),A0` (0xE14BC6); `movea.l A0,A0`
   as filler (section 7).
+- **Indirect operand with no displacement (Verified):** `(An)`, not
+  `(0,An)`: LOG_$READ 0xE17814 `move.w (A0),-(SP)` (`3f10`).
+- **Scratch register order (Verified, small sample):** data values take
+  D0 then D1, pointers A0 (PROC1_$TST_LOCK 0xE148CE..0xE148D8;
+  TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A `move.b (8,A6),D0; move.w
+  (0xa,A6),D1; movea.l (0xc,A6),A0`).  `dpc` allocates D0, D1, A0, A1 in
+  that order and rejects expressions that need more.
 - **Re-evaluation:** the same expression is reloaded rather than kept in a
   register (0xE135DA/0xE135E2 reload `(8,A2)`).
 - **The order of evaluation of arguments** follows the push order (right to
@@ -592,6 +637,11 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
 - `link.w`, `bsr.s`/`bsr.w`, `bra.s`/`bra.w`: the length must match the
   original, so emit explicit sizes and never rely on gas relaxation
   (`jbra`).
+- **Emitter conventions (`dpc-m68k`):** gas syntax as in the hand fixtures
+  (`tests/conformance/handasm/`): `%` register names, `%fp` for A6,
+  `(d,%an)` operands, absolute operands as `(SYM).l` so gas cannot pick
+  abs.w.  The module-end `0x2048` padding (section 7) is emitted as
+  `.balignw 4,0x2048` at the end of each code section.
 - **68010 only.** No 68020-only instruction (bit-field ops, `extb.l`,
   32-bit `mul`/`div`, scaled index, `bra.l`) has been found in compiled
   code.  The linear-sweep hits are all inside data.  The kernel runs on

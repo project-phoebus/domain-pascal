@@ -12,8 +12,10 @@ does.  The harness keeps a table of external symbols and their image
 addresses, taken from the SAU2 link map.
 
 The first candidates are listed in CLAUDE.md section 6 (PROC1_$TST_LOCK,
-TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).  No
-compiled tests yet.
+TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).
+Compiled so far: `proc1_tst_lock.pas` (PROC1_$TST_LOCK).  Each `.pas`
+starts with a comment naming the routine, its address and the
+codegen-patterns sections it exercises.
 
 The harness is `tools/conform.py` (map reader: `tools/sau2map.py`).  Units
 are listed in `manifest.txt` and run with `make conform`; one unit can be

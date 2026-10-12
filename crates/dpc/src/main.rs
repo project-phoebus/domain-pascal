@@ -109,8 +109,8 @@ fn compile(
     if args.stop == Stop::AfterCheck {
         return Ok(());
     }
-    let module = dpc_ir::lower(&program);
-    let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string());
+    let module = dpc_ir::lower(&program)?;
+    let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string())?;
 
     let out = args
         .output

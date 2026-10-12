@@ -127,3 +127,39 @@ fn semantic_errors_have_positions() {
         "{err}"
     );
 }
+
+#[test]
+fn compiles_tst_lock() {
+    let dir = scratch("compiles_tst_lock");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/conformance/proc1_tst_lock.pas");
+    let out = dir.join("tst.s");
+    let run = dpc().arg("-o").arg(&out).arg(&src).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let asm = std::fs::read_to_string(&out).unwrap();
+    assert!(asm.contains("\t.globl\tPROC1_$TST_LOCK\n"), "{asm}");
+    assert!(asm.contains("\tbtst\t%d0,%d1\n"), "{asm}");
+}
+
+#[test]
+fn unsupported_constructs_are_diagnosed_not_compiled() {
+    let dir = scratch("unsupported_constructs_are_diagnosed_not_compiled");
+    let src = dir.join("u.pas");
+    std::fs::write(
+        &src,
+        "module u;\nprocedure p(var x: integer);\nbegin\n  x := 1;\nend;\n",
+    )
+    .unwrap();
+    let out = dpc().arg(&src).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("u.pas:4:3: error: this statement is not supported yet"),
+        "{err}"
+    );
+    assert!(!dir.join("u.s").exists());
+}
