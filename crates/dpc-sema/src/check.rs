@@ -185,6 +185,7 @@ impl<'t> Checker<'t> {
             ("xor", Builtin::Xor),
             ("disable", Builtin::Disable),
             ("enable", Builtin::Enable),
+            ("addr", Builtin::Addr),
         ] {
             put(self, n, Sym::Builtin(bi));
         }
@@ -2719,11 +2720,37 @@ impl<'t> Checker<'t> {
             self.error(span, format!("`{name}` takes {want} argument(s)"));
             return self.error_expr(span);
         }
+        if b == Builtin::Addr {
+            // C.3.5, p. C-7: addr returns "the virtual address of the
+            // specified variable or routine".  Legal, but not handled yet.
+            if let ast::ExprKind::Name(id) = &args[0].kind {
+                if let Some(Sym::Routine(_)) = self.lookup(&id.name) {
+                    self.unsupported(span, "`addr` of a routine (ref C.3.5, p. C-7)");
+                    return self.error_expr(span);
+                }
+            }
+        }
         let xs: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
         if xs.iter().any(|x| self.types.is_error(x.ty)) {
             return self.error_expr(span);
         }
         let ty = match b {
+            // "Addr", p. 4-13: "x Can be a variable declared as any data
+            // type ... x can also be a string constant but it cannot be a
+            // constant of any type other than string."  "The addr function
+            // returns an univ_ptr value."  Of a string constant (p. 4-13)
+            // and of a routine (C.3.5, above): not supported yet.
+            Builtin::Addr => {
+                if matches!(xs[0].value, Some(ConstValue::Str(_) | ConstValue::Char(_))) {
+                    self.unsupported(span, "`addr` of a string constant (ref p. 4-13)");
+                    return self.error_expr(span);
+                }
+                if !xs[0].is_designator() {
+                    self.error(span, "`addr` needs a variable (ref p. 4-13)");
+                    return self.error_expr(span);
+                }
+                bi.univ_ptr
+            }
             Builtin::Ord => {
                 if !self.types.is_ordinal(xs[0].ty) {
                     self.error(span, "`ord` needs an ordinal argument");

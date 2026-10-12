@@ -446,4 +446,7 @@ pub enum Builtin {
     Disable,
     /// `enable` (Appendix E, p. E-4): interrupts on.
     Enable,
+    /// `addr(x)` ("Addr", p. 4-13): the address of variable `x`, a
+    /// `univ_ptr` value.
+    Addr,
 }

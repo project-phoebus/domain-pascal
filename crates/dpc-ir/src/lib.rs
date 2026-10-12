@@ -229,6 +229,68 @@ pub enum StmtKind {
     /// "Assignment", p. 4-25).  The objects do not overlap partially (two
     /// designators of the same type are the same object or disjoint).
     Copy { dst: Addr, src: Addr, bytes: u32 },
+    /// A procedure call (ref 5.2).
+    Call(Call),
+    /// Store `value` (a constant of the element type) into `count`
+    /// consecutive objects of `value`'s type, the first at `start`: a
+    /// `for` loop over an array whose index is used for nothing else
+    /// (`lower.rs`, `fill`).  `count` >= 1.
+    Fill {
+        start: Addr,
+        count: u32,
+        value: Expr,
+    },
+}
+
+/// A call: the callee, the arguments in parameter order (argument 1
+/// first), and the alignment pad the caller pushes before them
+/// (`dpc_sema::Routine::arg_pad`; codegen-patterns 1.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Call {
+    pub callee: Callee,
+    pub args: Vec<Arg>,
+    pub pad: u32,
+}
+
+impl Call {
+    /// Bytes the caller pops after the call: the arguments and the pad.
+    pub fn bytes(&self) -> u32 {
+        self.args.iter().map(Arg::slot).sum::<u32>() + self.pad
+    }
+}
+
+/// Where a call goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callee {
+    /// A routine with a body in this unit, in the same code section,
+    /// named by its symbol: a PC-relative call (m68k `bsr`,
+    /// codegen-patterns 1.6).
+    Local(String),
+    /// A routine of another unit, reached through its symbol (m68k `jsr
+    /// abs.l`).
+    External(String),
+}
+
+/// One argument as the caller pushes it.  `slot` is the bytes it
+/// occupies in the push (`dpc_sema::conv::ParamConv::slot_size`: on m68k
+/// a byte value takes a 2-byte slot, an address 4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Arg {
+    /// The value itself (ref 5.2 Table 5-1: `val_param` / `internal`
+    /// value and `in` parameters of 4 bytes or less).
+    Value { value: Expr, slot: u32 },
+    /// The address of the object at `addr` (the default convention, and
+    /// the `var`-like modes).
+    Address { addr: Addr, slot: u32 },
+}
+
+impl Arg {
+    /// Bytes the argument occupies in the caller's push.
+    pub fn slot(&self) -> u32 {
+        match self {
+            Arg::Value { slot, .. } | Arg::Address { slot, .. } => *slot,
+        }
+    }
 }
 
 /// A value.
@@ -249,6 +311,9 @@ pub enum Expr {
         set: Box<Expr>,
         set_width: Width,
     },
+    /// The address of the object at `addr`, as a pointer value (`addr(x)`,
+    /// ref p. 4-13).
+    AddrOf(Addr),
 }
 
 impl Expr {
@@ -257,6 +322,7 @@ impl Expr {
         match self {
             Expr::Const { ty, .. } | Expr::Load { ty, .. } => *ty,
             Expr::SetMember { .. } => Scalar::BOOLEAN,
+            Expr::AddrOf(_) => Scalar::POINTER,
         }
     }
 }

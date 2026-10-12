@@ -552,6 +552,47 @@ fn builtins() {
     ));
 }
 
+/// `addr(x)` ("Addr", p. 4-13): a univ_ptr value; x must be a variable.
+#[test]
+fn addr_builtin() {
+    let p = module(
+        "var buf: extern array[0..255] of integer32; u: univ_ptr;
+         procedure take(va: univ_ptr); options(val_param, extern);
+         procedure p; begin take(addr(buf)); u := addr(buf[3]) end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    let StmtKind::Call(c) = &stmts[0].kind else {
+        panic!("not a call")
+    };
+    let a = &c.args[0].expr;
+    assert!(matches!(
+        a.kind,
+        ExprKind::Builtin {
+            builtin: crate::program::Builtin::Addr,
+            ..
+        }
+    ));
+    assert_eq!(a.ty, p.types.builtins.univ_ptr);
+    assert_eq!(c.args[0].conv.passing, crate::conv::Passing::ByValue);
+    assert_err(
+        "module m; var u: univ_ptr; procedure p; begin u := addr(3) end;",
+        "`addr` needs a variable",
+    );
+    assert_err(
+        "module m; var u: univ_ptr; i: integer; procedure p; begin u := addr(i, i) end;",
+        "takes 1 argument",
+    );
+    // Legal (p. 4-13; C.3.5, p. C-7) but not handled yet.
+    assert_err(
+        "module m; var u: univ_ptr; procedure p; begin u := addr('abc') end;",
+        "`addr` of a string constant (ref p. 4-13) is not supported yet",
+    );
+    assert_err(
+        "module m; var u: univ_ptr; procedure q; extern; procedure p; begin u := addr(q) end;",
+        "`addr` of a routine (ref C.3.5, p. C-7) is not supported yet",
+    );
+}
+
 #[test]
 fn parameter_types_must_be_named() {
     // ref 5.1 p. 5-2: "Procedure range(small_range : 0..10); {WRONG!}".

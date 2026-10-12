@@ -35,3 +35,10 @@ Tests:
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).
+- `calls/calls` - codegen-patterns 1.1, 1.3, 1.4, 1.5, 1.6, 12.2: pushes
+  of constants (`clr`, `pea (n).w`, `move.l #n`, merged word pairs, `st`),
+  values and addresses, pads, `addq.w`/`lea` pops, no pop when no push
+  follows (0xE41050), `jsr` and `bsr.s`/`bsr.w` (0xE00EB0, AST_$PAGE_ZERO 0xE00EEC).
+- `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
+  index is used for nothing else, as `movea.l #sym,A0`, count, filler,
+  `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).

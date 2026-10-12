@@ -74,6 +74,28 @@ Always find the routine boundaries from the map first.
 - **Push order is not argument order.** A list of operands in the order the
   pushes appear is *reversed* relative to the Pascal parameter list.  Derive
   the order from the callee's frame offsets: `(8,A6)` is argument 1.
+- **Pop size rule (Verified, survey of compiled code 0xE00800..0xE88834
+  with ad-hoc scripts, not kept; re-check with `tools/imgdis.sh`):**
+  `addq.w #4,SP` ×1961, `addq.w #6,SP` ×1 (PROC2_$UPGID_TO_UID 0xE4103C,
+  an unpadded 6-byte list: section 1.4), `addq.w #8,SP` ×962; `lea
+  (n,SP),SP` for n = 12..68 ×1850, never below 12.  No `addq.l` pops.  So
+  `addq.w` up to 8 bytes, `lea` above.  The pad is always `subq.l #2,SP`
+  (×2351).
+- **The pop is skipped** when nothing is pushed again before the
+  epilogue, whose `unlk` discards the arguments.  That covers a call that
+  is the routine's last statement, also when a register restore follows
+  (LOG_$READ: the final `bsr` is followed by the A5 restore,
+  codegen-patterns 12.1), and a call followed only by straight-line code
+  that pushes nothing: PROC2_$UPGID_TO_UID 0xE41050 `jsr ML_$UNLOCK`, then
+  two record copies and a status store, no pop (Verified, same survey: 935
+  calls followed by straight-line code without a push or call up to the
+  epilogue, none popped).  When branches follow, 311 such calls are popped
+  and 100 are not: the rule across branches and join points is
+  **Uncertain** (`dpc` has no branches yet).
+- **Implemented** (`crates/dpc-m68k/src/isel.rs`, `Selector::call`):
+  pad, right-to-left pushes, `jsr`/`bsr`, `addq.w`/`lea` pop, no pop when
+  no later statement calls.  Byte-identical in `make conform`:
+  `tests/conformance/ast_page_zero.pas` (0xE00EB0 + AST_$PAGE_ZERO).
 
 ### 1.2 By reference vs. by value: the routine's options decide (Verified + reference)
 
@@ -156,18 +178,61 @@ last parameter, and the caller's pop includes it.
   the MAC_OS driver "open" call that note describes pushes word + long +
   long.  Function results come back in registers (section 3).  Before
   trusting any "result slot" claim, add up the bytes that are pushed.
+- **Exception (Uncertain):** PROC2_$UPGID_TO_UID 0xE41030..0xE4103C
+  pushes 6 bytes with no pad: `move.w (-0xa,A6),-(SP); pea (-0x14,A6);
+  bsr.w 0xE4232A; addq.w #6,SP`.  The module-local 0xE4232A stores 8
+  bytes through its `(8,A6)` and the caller then copies them from
+  `(-0x14,A6)`: perhaps a function returning a record through a hidden
+  address, which would then not be padded.  `dpc` pads every list of
+  2 mod 4 bytes and has no record-valued functions.
 
 ### 1.5 Constant arguments (Verified / Reported)
 
-- **Long constant, by value:** `pea (n).w`.  0xE00EB4 `pea (0x16).w`
-  pushes 0x00000016.  `clr.l -(SP)` and `clr.w -(SP)` push zeros
-  (0xE135D0, 0xE135D2).
+Counts from a survey of compiled code 0xE00800..0xE88834 (every
+non-`_ASM` `I` segment split at map symbols and `link` words, as
+`tools/loopalign.py` does; ad-hoc scripts, not kept; re-check with
+`tools/imgdis.sh`).
+
+- **Long constant, by value:** `pea (n).w` when n sign-extends from 16
+  bits: 128 sites, values 1..0x7fff and -1 (0xE00EB4 `pea (0x16).w`
+  pushes 0x00000016; `pea (-1).w` ×10, e.g. 0xE0F660; no other negative
+  value is pushed by `pea`, and no `move.l #n,-(SP)` pushes one that
+  sign-extends from 16 bits).  No `move.l #n,-(SP)` of a 16-bit value
+  other than 0.  Others: `move.l #n,-(SP)`.  **Uncertain:** negative
+  values other than -1 are taken to follow the same 16-bit rule.
+- **Zero:** `clr.l -(SP)` (374 sites, 0xE135D0) and `clr.w -(SP)` (472,
+  0xE135D2); no `move.w #0,-(SP)`.  19 `move.l #0,-(SP)` remain
+  unexplained (0xE0F79E, 0xE13B32, ...; perhaps `nil`): Uncertain, `dpc`
+  uses `clr.l` for the integer 0.
+- **Bytes:** `st -(SP)` for true (196 sites, 0xE1365C).  There is no
+  `clr.b -(SP)` and no `move.b #n,-(SP)` at all, so other byte constants
+  (false, characters) are pushed some other way, not yet catalogued; `dpc`
+  rejects them.
 - **Adjacent word constants merged:** two adjacent word constants become
   one longword push.
-  - 0xE00EB4 is the MMU_$INSTALL asid.w/prot.w pair, `pea (0x16).w`.
+  - 0xE00EB4 is the MMU_$INSTALL asid.w/prot.w pair, `pea (0x16).w`
+    (the hand-written MMU_$INSTALL reads asid at (0x31,SP) and prot at
+    (0x33,SP), `../source/domain_os/mmu/sau2/install.s`).
   - ACL/FILE call sites push the rights/option pair as one `move.l #imm`
     (Reported: `file-subsystem.md`).
   - The HIGH half is the *first* (lower-address) parameter.
+  - Survey: no `move.w #n,-(SP)` / `clr.w -(SP)` is directly followed by
+    another one, except 0xE38B42/0xE38B44, where the second is a branch
+    target (two paths, not one argument list).  So every pair was merged.
+    **Uncertain:** which pair merges in a run of three word constants
+    (`dpc` rejects it), and whether a byte next to a word merges.
+- **Address of another unit's variable** (by address under the default
+  convention, or `addr(x)` by value): `move.l #sym,-(SP)`, 374 sites, 362
+  of them a map symbol's own address (UID_$NIL ×36 e.g. 0xE01824,
+  TIME_$CLOCKH_EC ×24, DIR_$MUTEX ×22; 0xE00EB8 `move.l #AST_$ZERO_BUFF`).
+  An address *inside* another unit's object is pushed both ways: 12
+  `move.l #` (0xE32398 DIR_$MUTEX+0x14) and all 24 `pea abs.l` (0xE0F5DC
+  ROUTE_$PORT+0x30, 0xE0A36C DMA+0xC0): Uncertain, rejected by `dpc`.
+  The same address into a register is `movea.l #sym,An` (0xE00ECC;
+  DISK_$GET_ERROR_INFO 0xE6C090).
+- **Implemented** (`isel.rs`, `Selector::push`, `push_long_const`): all
+  the forms above that are Verified; `addr(x)` (ref "Addr", p. 4-13) in
+  `dpc-sema`.
 - **Constant by address:** this is the default convention for a constant
   actual.  The compiler puts the literal in the **code section** and passes
   `pea (d,PC)`.
@@ -184,6 +249,12 @@ last parameter, and the caller's pop includes it.
 ### 1.6 Call instructions (Verified)
 
 - **Same module and section:** `bsr.s` or `bsr.w` (0xE00F02, 0xE1781C).
+  `.s` exactly when the target is in reach: in compiled code all 121
+  `bsr.s` are in reach and none of the 1800 `bsr.w` is (survey as in
+  1.5).  **Implemented:** the emitter lays the section out with the
+  encoded length of every instruction (`Insn::len_at`, the 0x2048 filler
+  included) and picks the size (`crates/dpc-m68k/src/emit.rs`,
+  `size_branches`); gas never chooses.
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
 - All kernel addresses are absolute.  This kernel image has no
@@ -214,6 +285,32 @@ last parameter, and the caller's pop includes it.
     `#-4`, 0 gives `#0`.  This fits every site above, but it is the
     Uncertain choice just described: a routine with several small locals
     will tell the two rules apart.
+  - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
+    Of the compiled routines that end in `rts` (survey as in 1.5), 306
+    without any loop have a `link` area they never address (143 of
+    4 bytes, 104 of 8, 27 of 12, ...), against 469 that use theirs: locals
+    the compiler kept in registers, or never needed, still got frame
+    space.  Routines with `dbf` loops and an untouched frame most often
+    have 12 bytes (35 of 132; 29 have 8, 24 have 16, 13 have 4): the
+    module-local 0xE00EB0 (`link #-12`, one clearing loop),
+    NET_IO_$FREE_ASID 0xE74E84, FLP_$SHUTDOWN 0xE3E228, the KBD
+    module-local 0xE1CA62, and two-loop routines too (MEM_$PARITY_LOG
+    0xE0ADB0, OS_DISK_PROC 0xE3824C, ACL_$SET_PROJ_LIST 0xE480F4).  But
+    PKT_$DUMP_DATA 0xE127E6 has `link #-4` for a loop whose index it
+    keeps in D3, and MMAP_$SET_WS_INDEX 0xE0D1C8 `#-4`.  Two hypotheses
+    remain: (a) the source declared locals that never reached memory
+    (any routine's frame can be unused, above); (b) a `for` loop costs
+    hidden frame slots (a saved limit or count?).  (b) does not fit the
+    two `#-4` routines unless their loops are not `for` loops; both leave
+    their loop early (PKT_$DUMP_DATA 0xE12814 `ble`, MMAP_$SET_WS_INDEX
+    0xE0D212 `bra`), but so does the KBD module-local 0xE1CA62 (0xE1CA78
+    `bra`), which has 12.  The C reconstructions in `../source`
+    (`net_io/free_asid.c`, `flp/shutdown.c`, `pkt/dump_data.c`,
+    `mmap/set_ws_index.c`) declare only register-held locals and cannot
+    tell.  Not settled; `dpc` gives a `for` loop no hidden slot (as
+    (a)), and `tests/conformance/ast_page_zero.pas` declares stand-in
+    locals for 0xE00EB0's 12 bytes (its header and the declaration say
+    so).  If (b) is confirmed, those stand-ins go.
 - **Register save:** straight after `link`, only the callee-saved
   registers the routine uses.  The instruction depends on how many there
   are (Verified, sweep of every `link` at 0xE00800..0xE88834; details and
@@ -531,7 +628,11 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   (PMAP_$FLUSH).  The same holds for module-local workers placed before
   their first user: 0xE17778 comes before LOG_$READ, and 0xE00EB0 before
   AST_$PAGE_ZERO.  **Uncertain** whether this is source order or a
-  compiler rule.
+  compiler rule.  `dpc` emits top-level routines in source order, so the
+  conformance source declares the worker first
+  (`tests/conformance/ast_page_zero.pas`).  Calls *after* the callee are
+  also seen (AST_$TOUCH_AREA 0xE03548 calls 0xE00EB0 with `bsr.w` at
+  0xE03636), so a worker does not have to precede every caller.
 
 ---
 
@@ -543,6 +644,34 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   - 0xE00ED2 `move.w #0xFF,D0; ...; clr.l (A0)+; dbf` clears 1 KB.
   - 0xE42D50 `moveq #57,D0`: an index register counts up separately
     (`clr.w D2` ... `addq.w #1,D2`).
+- **Array indexing in loops is strength-reduced (Verified at the sites
+  given; the general rule is Uncertain).**  The element address lives in
+  an address register that steps by the element size, with the index's
+  offset folded into a displacement: PKT_$DUMP_DATA 0xE12800 `lea
+  (4,A0),A2`, then `move.l (-4,A2),-(SP)` and `addq.l #4,A2`
+  (0xE12816, 0xE12824), with the index itself in D3 because the body also
+  compares it.  An offset-0 access steps with `(An)+`: 0xE00ED8 `clr.l
+  (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l #3,A2` (4-byte elements,
+  byte accessed).  An index used for nothing else gets no register at
+  all (0xE00EB0: only A0 and the `dbf` count D0).
+- **Clearing loops `clr.<s> (An)+; dbf` (Verified; 21 in compiled
+  code):** the address and the count are loaded in either order, with no
+  rule found.  Address first: 0xE00ECC `movea.l #AST_$ZERO_BUFF,A0;
+  move.w #0xFF,D0`; 0xE40A0E `lea (0xc,A2),A0; moveq #5,D0`.  Count
+  first: 0xE0277A `moveq #31,D0; lea (A3),A0`; 0xE09C98; 0xE06B36;
+  ROUTE_ 0xE69D12 `move.w #128,D0; movea.l #abs,A0`; 0xE6200E.  Whether
+  these are source `for` loops or something else (a record or array
+  assignment of zeros?) cannot be told from the image.
+- **Implemented** (`crates/dpc-ir/src/lower.rs`, `fill`;
+  `crates/dpc-m68k/src/isel.rs`, `Selector::fill`): exactly the 0xE00EB0
+  shape: `for i := c1 to c2 do a[i] := 0` with `i` a frame local and
+  `a` another unit's array starting at element `c1`; `i` itself is never
+  stored (0xE00EB0 does not), which is sound because using the index
+  after a loop that ends normally is forbidden (warning "Potential
+  illegal use of FOR index variable", ref 9, p. 9-31);
+  `movea.l #sym,A0`, the count, the filler, `clr.<s> (A0)+`, `dbf`.  Other
+  `for` loops are rejected ("not supported yet").  Byte-identical in
+  `make conform` (`tests/conformance/ast_page_zero.pas`).
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
   loop (0xE177DC..0xE177F2).
 - **Loop-head alignment.**  Some code pads with the 2-byte no-op
@@ -926,8 +1055,8 @@ precedes `unlk`.
 |---|---|---|---|
 | TIME_$Q_INIT_QUEUE 0xE16C5E (`time/q_init_queue.c`) | `link #0` | none | All three parameters loaded at entry, before any store: byte `(8,A6)`→D0, word `(0xa,A6)`→D1, pointer `(0xc,A6)`→A0 (0xE16C62..0xE16C6A); stores through A0 follow. Scratch only. Byte-identical in `make conform` (`tests/conformance/time_q_init_queue.pas`, with TIME_$Q_FLUSH_QUEUE; rule in 12.2). |
 | PROC1_$GET_LOADAV 0xE14BBA (`proc1/get_loadav.c`) | `link #0` | `pea (A5)` 0xE14BBE / `movea.l (-4,A6),A5` 0xE14BD2 | `lea 0xE254E8,A5` right after the save; `lea (A5),A0` (source, offset 0 of the data), `movea.l (8,A6),A1` (destination), three `move.l (A0)+,(A1)+`. Byte-identical in `make conform` (`tests/conformance/proc1_get_loadav.pas`). |
-| module-local 0xE00EB0 (`misc/zero_page.c`) | `link #-0xc` (frame never touched in the body) | none | No register holds a value across the two `jsr`s; the argument `(8,A6)` is re-read for each call (0xE00EBE, 0xE00EDE). Loop: A0 pointer (`movea.l #imm,A0`), D0 `dbf` counter. |
-| AST_$PAGE_ZERO 0xE00EEC (`ast/page_zero.c`) | `link #0` | none | No registers at all: constants pushed, `(8,A6)` pushed, three calls. |
+| module-local 0xE00EB0 (`misc/zero_page.c`) | `link #-0xc` (frame never touched in the body; section 2) | none | No register holds a value across the two `jsr`s; the argument `(8,A6)` is re-read for each call (0xE00EBE, 0xE00EDE). Loop: A0 pointer (`movea.l #imm,A0`), D0 `dbf` counter, the lowest free scratch registers right after the first `jsr`. Byte-identical in `make conform` (`tests/conformance/ast_page_zero.pas`). |
+| AST_$PAGE_ZERO 0xE00EEC (`ast/page_zero.c`) | `link #0` | none | No registers at all: constants pushed, `(8,A6)` pushed, three calls. Byte-identical in `make conform` (same unit). |
 | module-local 0xE17778 (`log/read_internal.c`) | `link #-0x10` | `movem.l D2-D3/A2,-(SP)` (`48e7 3020`) 0xE1777C / `movem.l (-0x1c,A6),D2-D3/A2` (`4cee 040c ffe4`) 0xE177F6 | No calls, yet callee-saved registers are used. Parameters at entry: word `(0xc,A6)`→D0, word `(0xe,A6)`→D1, pointer `(0x10,A6)`→A0, held in these *scratch* registers for most of the routine. Temporaries then take D2, D3 (0xE177A0 `moveq #-2,D2`; 0xE177A8..0xE177AE). The pointer `(8,A6)` is loaded into **A2** only at 0xE177CC, although A1 is free there; A1 is taken next (0xE177DA) and the copy loop uses A0/A1. |
 | LOG_$READ 0xE17800 (`log/read.c`) | `link #0` | `pea (A5)` 0xE17804 / `movea.l (-4,A6),A5` 0xE17820 | `lea 0xE2B280,A5`; A0 scratch to dereference the by-address `max_len` (0xE17810). The final `bsr` is followed by the A5 restore, no pop. |
 | nested 0xE1359C of PMAP_$FLUSH | `link #-4` (frame unused) | `movem.l D2/A2-A3,-(SP)` (`48e7 2030`) 0xE135A0 / `movem.l (-0x10,A6),D2/A2-A3` (`4cee 0c04 fff0`) 0xE13602 | Static link `movea.l A1,A2` at entry (0xE135A4); parameter `(0xc,A6)`→D2 at entry (0xE135A6), **held across** `jsr` 0xE135BC and used after it (0xE135D4, 0xE135FA). Inside one argument list the pointer `(8,A2)` is reloaded into A0 (0xE135DA), then into **A1** (0xE135E2), and a pointer read through it goes to **A3** (0xE135E6): registers are not reused within the statement (A2 is busy). |
@@ -1048,7 +1177,15 @@ kinds from the C in `../source/domain_os`.
 `Selector::entry_loads`): a *procedure* body of two or more statements
 loads every by-value parameter it reads, in parameter order, into the
 lowest free scratch register (D for data, A for a dereferenced pointer);
-its statements then use only those registers.  A one-statement body keeps
+its statements then use only those registers.  A parameter that is only
+pushed as a whole argument is not "read" for this rule: it is pushed from
+the frame at each call (0xE00EBE, 0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).
+A statement right after a call may take scratch registers of its own when
+nothing was loaded at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr`
+at 0xE00EC2; a call leaves no value in a scratch register).  A body that
+loads parameters at entry and also calls is rejected: a scratch register
+does not survive the call, and when the original moved such a value to a
+callee-saved register is not catalogued (PROC1_$SET_TYPE 0xE152F2).  A one-statement body keeps
 its own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
 TIME_$Q_FLUSH_QUEUE stay byte-identical).  Reported as not supported yet:
 a function body of several statements; a third parameter of a class; a

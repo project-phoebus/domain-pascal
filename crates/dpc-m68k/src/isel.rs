@@ -17,7 +17,7 @@
 //! Each pattern cites the image address(es) it reproduces.  Patterns the
 //! image has not shown are rejected, not guessed.
 
-use dpc_ir::{Addr, Expr, Function, ResultClass, Scalar, StmtKind, Width};
+use dpc_ir::{Addr, Arg, Call, Callee, Expr, Function, ResultClass, Scalar, StmtKind, Width};
 use dpc_syntax::{Diagnostic, Span};
 
 use crate::emit::DATA_BASE_LABEL;
@@ -85,7 +85,11 @@ pub struct Body {
 /// its statements may then use only those registers: what the original
 /// did with further registers in such a body (fresh registers per
 /// statement, IIC_$RECEIVE 0xE70ABA; scheduling of entry loads with other
-/// work, 0xE758C4) is not modelled yet (codegen-patterns 12.2).
+/// work, 0xE758C4) is not modelled yet (codegen-patterns 12.2).  The one
+/// exception is a statement right after a call in a body that loaded
+/// nothing at entry: it takes the lowest free scratch registers (0xE00ECC,
+/// after the `jsr` at 0xE00EC2).  A body that loads parameters at entry
+/// may not call (the values would not survive the call).
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     let mut s = Selector {
         out: Vec::new(),
@@ -97,7 +101,8 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     if f.loads_data_base {
         s.load_data_base();
     }
-    if f.body.len() >= 2 {
+    let multi = f.body.len() >= 2;
+    if multi {
         if f.result.is_some() {
             // PARITY_$CHK_IO 0xE0B180..0xE0B18A loads its first parameter
             // into D1 and its second into D0: functions do not follow the
@@ -109,15 +114,50 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         }
         reject_mergeable_stores(f)?;
         s.entry_loads(f)?;
-        s.multi = true;
+        if !s.pinned.is_empty() {
+            if let Some(st) = f
+                .body
+                .iter()
+                .find(|st| matches!(st.kind, StmtKind::Call(_)))
+            {
+                // A parameter loaded at entry into a scratch register does
+                // not survive the call; the original then holds it in a
+                // callee-saved register (PROC1_$SET_TYPE 0xE152F2, D2/D3
+                // around a `jsr`), by a rule not catalogued
+                // (codegen-patterns 12.1, 12.2).
+                return Err(unsupported(
+                    st.span,
+                    "a call in a body that loads parameters at entry is",
+                ));
+            }
+        }
     }
-    for st in &f.body {
+    let mut after_call = false;
+    for (i, st) in f.body.iter().enumerate() {
         s.span = st.span;
+        // In a body of several statements a statement may use only the
+        // registers loaded at entry (see above), except right after a
+        // call: the call leaves no value in a scratch register, and the
+        // next statement takes the lowest free ones (0xE00ECC..0xE00ED2,
+        // A0 and D0 after the `jsr` at 0xE00EC2).
+        s.multi = multi && !(after_call && s.pinned.is_empty());
+        // No push follows before the epilogue: only a call pushes, and the
+        // body is straight-line (codegen-patterns 1.1).
+        let last = !f.body[i + 1..]
+            .iter()
+            .any(|st| matches!(st.kind, StmtKind::Call(_)));
         match &st.kind {
             StmtKind::SetResult(e) => s.set_result(f, e)?,
             StmtKind::Store { addr, value } => s.store(addr, value)?,
             StmtKind::Copy { dst, src, bytes } => s.copy(dst, src, *bytes)?,
+            StmtKind::Call(c) => s.call(c, last)?,
+            StmtKind::Fill {
+                start,
+                count,
+                value,
+            } => s.fill(start, *count, value)?,
         }
+        after_call = matches!(st.kind, StmtKind::Call(_));
         debug_assert!(
             s.regs
                 .live_scratch()
@@ -210,7 +250,7 @@ fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
                 addr: Addr::Frame(o),
                 ..
             } if is_param(f, *o) => out.push((*o, ParamUse::Data)),
-            Expr::Load { addr, .. } => address(f, addr, out),
+            Expr::Load { addr, .. } | Expr::AddrOf(addr) => address(f, addr, out),
             Expr::SetMember { elem, set, .. } => {
                 expr(f, elem, out);
                 expr(f, set, out);
@@ -240,6 +280,31 @@ fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
             StmtKind::Copy { dst, src, .. } => {
                 address(f, src, &mut out);
                 address(f, dst, &mut out);
+            }
+            StmtKind::Call(c) => {
+                for a in &c.args {
+                    match a {
+                        // A by-value parameter that is only pushed as an
+                        // argument is pushed from the frame, not loaded
+                        // at entry: AST_$SET_ATTRIBUTE 0xE053DA `move.l
+                        // (0xe,A6),-(SP)`; 0xE00EBE and 0xE00EDE push
+                        // (8,A6) twice (codegen-patterns 12.2).
+                        Arg::Value {
+                            value:
+                                Expr::Load {
+                                    addr: Addr::Frame(_),
+                                    ..
+                                },
+                            ..
+                        } => {}
+                        Arg::Value { value, .. } => expr(f, value, &mut out),
+                        Arg::Address { addr, .. } => address(f, addr, &mut out),
+                    }
+                }
+            }
+            StmtKind::Fill { start, value, .. } => {
+                address(f, start, &mut out);
+                expr(f, value, &mut out);
             }
         }
     }
@@ -683,8 +748,304 @@ impl Selector {
         match value {
             Expr::Const { .. } => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
-            Expr::SetMember { .. } => true,
+            Expr::SetMember { .. } | Expr::AddrOf(_) => true,
         }
+    }
+
+    /// A procedure call (codegen-patterns 1).
+    ///
+    /// 1. The pad, `subq.l #2,SP`, when the argument bytes are 2 mod 4
+    ///    (codegen-patterns 1.4: AST_$PAGE_ZERO 0xE00EF0, before the
+    ///    one-word argument of ML_$LOCK).
+    /// 2. The arguments, right to left (codegen-patterns 1.1), each with
+    ///    [`Self::push`]; two adjacent word constants are pushed as one
+    ///    longword, the first parameter in the high half (0xE00EB4 `pea
+    ///    (0x16).w` for MMU_$INSTALL's asid 0 and protection 0x16, whose
+    ///    hand-written body reads them at (0x31,SP) and (0x33,SP),
+    ///    `../source/domain_os/mmu/sau2/install.s`).  In the compiled code
+    ///    0xE00800..0xE88834 no `move.w #n,-(SP)` / `clr.w -(SP)` is
+    ///    directly followed by another one, except at a branch target
+    ///    (0xE38B42/0xE38B44): every such pair was merged.  A run of
+    ///    three word constants (which pair is merged?) is not supported
+    ///    yet.
+    /// 3. `jsr (sym).l` to another unit's routine (0xE00EF6), `bsr` to one
+    ///    of this section (0xE00F02 `bsr.s`; the size is the emitter's,
+    ///    `emit.rs`).
+    /// 4. The caller pops the arguments and the pad: `addq.w #n,SP` up to
+    ///    8 bytes, `lea (n,SP),SP` above (0xE00EFC `addq.w #4`, 0xE00EC8
+    ///    `lea (0xc,SP),SP`; survey of compiled code: `addq.w` #4 ×1961, #6
+    ///    ×1, #8 ×962; `lea` 12..68 bytes ×1850, never below 12).  No pop
+    ///    when nothing pushes again before the epilogue, whose `unlk`
+    ///    discards the arguments: after the body's last statement
+    ///    (0xE00F0C `jsr ML_$UNLOCK` then `unlk` at 0xE00F12) and also
+    ///    when straight-line statements without calls follow
+    ///    (PROC2_$UPGID_TO_UID 0xE41050 `jsr ML_$UNLOCK`, then two record
+    ///    copies and a status store, no pop; survey of compiled code: 935
+    ///    calls followed by straight-line code without a push, none
+    ///    popped).  `last` says so.
+    fn call(&mut self, c: &Call, last: bool) -> Res<()> {
+        if !self.regs.live_scratch().is_empty() {
+            return Err(unsupported(
+                self.span,
+                "a call while a scratch register holds a value is",
+            ));
+        }
+        match c.pad {
+            0 => {}
+            2 => self.out.push(Insn::Subq {
+                size: Size::L,
+                value: 2,
+                dst: Ea::Reg(Reg::A(SP)),
+            }),
+            n => {
+                return Err(unsupported(
+                    self.span,
+                    format!("an argument pad of {n} bytes is"),
+                ))
+            }
+        }
+        let word_const = |a: &Arg| match a {
+            Arg::Value {
+                value:
+                    Expr::Const {
+                        value,
+                        ty:
+                            Scalar {
+                                width: Width::Word, ..
+                            },
+                    },
+                slot: 2,
+            } => Some(*value),
+            _ => None,
+        };
+        let mut k = c.args.len();
+        while k > 0 {
+            let a = &c.args[k - 1];
+            if k >= 2 {
+                if let (Some(lo), Some(hi)) = (word_const(a), word_const(&c.args[k - 2])) {
+                    if k >= 3 && word_const(&c.args[k - 3]).is_some() {
+                        return Err(unsupported(
+                            self.span,
+                            "three or more adjacent word constant arguments are",
+                        ));
+                    }
+                    let merged = ((hi & 0xffff) << 16) | (lo & 0xffff);
+                    self.push_long_const(merged as i32 as i64);
+                    k -= 2;
+                    continue;
+                }
+            }
+            self.push(a)?;
+            k -= 1;
+        }
+        self.out.push(match &c.callee {
+            Callee::External(sym) => Insn::Jsr(Ea::AbsL(sym.clone(), 0)),
+            Callee::Local(sym) => Insn::Bsr {
+                target: sym.clone(),
+                short: true,
+            },
+        });
+        let n = c.bytes();
+        if !last && n > 0 {
+            self.out.push(if n <= 8 {
+                Insn::Addq {
+                    size: Size::W,
+                    value: n as u8,
+                    dst: Ea::Reg(Reg::A(SP)),
+                }
+            } else {
+                Insn::Lea {
+                    src: Ea::Disp(n as i32, SP),
+                    dst: SP,
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Push a longword constant (codegen-patterns 1.5): zero with `clr.l
+    /// -(SP)` (374 sites in compiled code, e.g. 0xE135D0; 19 `move.l
+    /// #0,-(SP)` remain unexplained), a value that sign-extends from 16
+    /// bits with `pea (n).w` (128 sites, 0xE00EB4; no `move.l #n,-(SP)` of
+    /// such a value other than 0), others with `move.l #n,-(SP)`.
+    fn push_long_const(&mut self, v: i64) {
+        let dst = Ea::PreDec(SP);
+        self.out.push(if v == 0 {
+            Insn::Clr { size: Size::L, dst }
+        } else if (-0x8000..0x8000).contains(&v) {
+            Insn::Pea(Ea::AbsW(v as i32))
+        } else {
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Imm(v),
+                dst,
+            }
+        });
+    }
+
+    /// Push one argument (codegen-patterns 1.3, 1.5).
+    ///
+    /// By value:
+    /// - a longword constant: [`Self::push_long_const`];
+    /// - a word constant: `clr.w -(SP)` for 0 (472 sites, e.g. 0xE135D2;
+    ///   no `move.w #0,-(SP)`), else `move.w #n,-(SP)` (0xE00EF2);
+    /// - boolean true: `st -(SP)` (0xE1365C; 196 sites).  No `clr.b
+    ///   -(SP)` or `move.b #n,-(SP)` exists in compiled code, so how
+    ///   other byte constants were pushed is not known: not supported yet;
+    /// - a value in memory: `move.<s> <ea>,-(SP)`, a byte with `move.b`
+    ///   into the high half of its slot (0xE00EBE `move.l (8,A6),-(SP)`;
+    ///   LOG_$READ 0xE17814 `move.w (A0),-(SP)`; KBD_$RCV 0xE1CE56 `move.b
+    ///   D0,-(SP)`);
+    /// - `addr(x)` of another unit's variable: `move.l #sym,-(SP)`
+    ///   (0xE00EB8).
+    ///
+    /// By address:
+    /// - a frame object: `pea (d,A6)` (PROC1_$BIND 0xE14DF4, 0xE14DF8);
+    ///   an object in the unit's data area: `pea (d,A5)` (0xE02884);
+    /// - another unit's variable: `move.l #sym,-(SP)` (UID_$NIL ×36,
+    ///   TIME_$CLOCKH_EC ×24, ... : 362 of the 374 `move.l #abs,-(SP)` in
+    ///   compiled code push a map symbol's own address).  An address
+    ///   inside another unit's object is pushed both ways (12 `move.l #`,
+    ///   e.g. 0xE32398 DIR_$MUTEX+0x14; 24 `pea abs.l`, e.g. 0xE0F5DC
+    ///   ROUTE_$PORT+0x30): not supported yet;
+    /// - through a pointer: not catalogued yet.
+    fn push(&mut self, a: &Arg) -> Res<()> {
+        let dst = Ea::PreDec(SP);
+        match a {
+            Arg::Value { value, slot } => {
+                if value.ty().bytes().max(2) != *slot {
+                    return Err(unsupported(self.span, "an argument slot of this size is"));
+                }
+                match value {
+                    Expr::Const { value: v, ty } => match ty.width {
+                        Width::Long => self.push_long_const(*v),
+                        Width::Word if *v == 0 => self.out.push(Insn::Clr { size: Size::W, dst }),
+                        Width::Word => self.out.push(Insn::Move {
+                            size: Size::W,
+                            src: Ea::Imm(imm(*v, Width::Word)),
+                            dst,
+                        }),
+                        Width::Byte if *v == -1 && *ty == Scalar::BOOLEAN => {
+                            self.out.push(Insn::Scc { cond: Cond::T, dst })
+                        }
+                        Width::Byte => {
+                            return Err(unsupported(
+                                self.span,
+                                "a byte constant argument other than `true` is",
+                            ))
+                        }
+                    },
+                    Expr::Load { addr, ty } => {
+                        let src = match addr {
+                            Addr::Frame(o) if self.pinned(*o).is_some() => {
+                                Ea::Reg(self.pinned(*o).unwrap())
+                            }
+                            _ => self.ea_of(addr)?,
+                        };
+                        self.out.push(Insn::Move {
+                            size: size_of(ty.width),
+                            src: src.clone(),
+                            dst,
+                        });
+                        self.free_ea(&src);
+                    }
+                    Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => self.out.push(Insn::Move {
+                        size: Size::L,
+                        src: Ea::ImmSym(name.clone()),
+                        dst,
+                    }),
+                    _ => return Err(unsupported(self.span, "this argument value is")),
+                }
+            }
+            Arg::Address { addr, slot: 4 } => match addr {
+                Addr::Frame(_) | Addr::Static(_) => {
+                    let ea = self.ea_of(addr)?;
+                    self.out.push(Insn::Pea(ea));
+                }
+                Addr::Symbol { name, offset: 0 } => self.out.push(Insn::Move {
+                    size: Size::L,
+                    src: Ea::ImmSym(name.clone()),
+                    dst,
+                }),
+                _ => {
+                    return Err(unsupported(
+                        self.span,
+                        "passing this kind of object by address is",
+                    ))
+                }
+            },
+            Arg::Address { .. } => {
+                return Err(unsupported(self.span, "an address slot of this size is"))
+            }
+        }
+        Ok(())
+    }
+
+    /// Store a constant into `count` consecutive elements from `start`
+    /// ([`dpc_ir::StmtKind::Fill`], a `for` loop over an array).
+    ///
+    /// Module-local 0xE00EB0, 0xE00ECC..0xE00EDA:
+    ///
+    /// ```text
+    /// movea.l #AST_$ZERO_BUFF,A0   ; the first element's address
+    /// move.w  #0xFF,D0             ; then the count less one
+    /// movea.l A0,A0                ; loop-head filler (codegen-patterns 7)
+    /// clr.l   (A0)+
+    /// dbf     D0,*-2
+    /// ```
+    ///
+    /// The count is `moveq` up to 127, else `move.w` (as in the copy
+    /// loops, 0xE01494, 0xE3B97A).  Other clearing loops in the image
+    /// load the count *before* the address (0xE0277A `moveq #31,D0; lea
+    /// (A3),A0`; 0xE09C98; ROUTE_ 0xE69D12 `move.w #128,D0; movea.l
+    /// #abs,A0`), with no rule found; so only this shape is supported:
+    /// another unit's array from its first byte (`movea.l #sym`, as
+    /// DISK_$GET_ERROR_INFO 0xE6C090 loads another unit's object for a
+    /// copy), cleared with `clr`.  Storing other constants, and arrays
+    /// elsewhere, are not supported yet.
+    fn fill(&mut self, start: &Addr, count: u32, value: &Expr) -> Res<()> {
+        let Expr::Const { value: 0, ty } = value else {
+            return Err(unsupported(
+                self.span,
+                "a `for` loop storing a constant other than 0 is",
+            ));
+        };
+        let Addr::Symbol { name, offset: 0 } = start else {
+            return Err(unsupported(
+                self.span,
+                "a `for` loop over an array other than another unit's, from its first byte, is",
+            ));
+        };
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src: Ea::ImmSym(name.clone()),
+            dst: a,
+        });
+        let d = self.alloc_d()?;
+        let n = count as i64 - 1;
+        self.out.push(if n <= 127 {
+            Insn::Moveq {
+                value: n as i8,
+                dst: d,
+            }
+        } else {
+            Insn::Move {
+                size: Size::W,
+                src: Ea::Imm(imm(n, Width::Word)),
+                dst: Ea::Reg(Reg::D(d)),
+            }
+        });
+        self.out.push(Insn::Align4);
+        self.out.push(Insn::Label(1));
+        self.out.push(Insn::Clr {
+            size: size_of(ty.width),
+            dst: Ea::PostInc(a),
+        });
+        self.out.push(Insn::Dbf { reg: d, label: 1 });
+        self.free_d(d);
+        self.free_a(a);
+        Ok(())
     }
 
     /// `f := e` as the last statement: the value goes straight to the
@@ -748,6 +1109,10 @@ impl Selector {
             )),
             // `moveq` / `clr` / `move #imm` choice not catalogued yet.
             Expr::Const { .. } => Err(unsupported(self.span, "loading a constant is")),
+            Expr::AddrOf(_) => Err(unsupported(
+                self.span,
+                "an address (`addr`) as a value other than an argument is",
+            )),
         }
     }
 
@@ -1634,5 +1999,397 @@ mod tests {
             vec![copy(Addr::Frame(-0x10), through(8, 4), 12)],
         );
         assert!(err(&f).starts_with("copying a block at this kind of address"));
+    }
+
+    // ---------------------------------------------------------------
+    // Calls and fill loops (codegen-patterns 1, 7)
+    // ---------------------------------------------------------------
+
+    fn long() -> Scalar {
+        Scalar::signed(Width::Long)
+    }
+
+    fn val(value: Expr) -> Arg {
+        let slot = value.ty().bytes().max(2);
+        Arg::Value { value, slot }
+    }
+
+    fn ext(name: &str, args: Vec<Arg>, pad: u32) -> StmtKind {
+        StmtKind::Call(Call {
+            callee: Callee::External(name.into()),
+            args,
+            pad,
+        })
+    }
+
+    fn sym(name: &str) -> Addr {
+        Addr::Symbol {
+            name: name.into(),
+            offset: 0,
+        }
+    }
+
+    fn proc_(frame: u32, body: Vec<StmtKind>) -> Function {
+        func(frame, None, body)
+    }
+
+    /// Module-local 0xE00EB0 and AST_$PAGE_ZERO 0xE00EEC
+    /// (`tools/imgdis.sh E00EB0 66`).
+    #[test]
+    fn zero_page_shape() {
+        let ppn = || val(param(8, long()));
+        let f = proc_(
+            12,
+            vec![
+                ext(
+                    "MMU_$INSTALL",
+                    vec![
+                        ppn(),
+                        val(Expr::AddrOf(sym("AST_$ZERO_BUFF"))),
+                        val(konst(0, word())),
+                        val(konst(0x16, word())),
+                    ],
+                    0,
+                ),
+                StmtKind::Fill {
+                    start: sym("AST_$ZERO_BUFF"),
+                    count: 256,
+                    value: konst(0, long()),
+                },
+                ext("MMU_$REMOVE", vec![ppn()], 0),
+            ],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-0xc",
+                "pea\t(0x16).w",
+                "move.l\t#AST_$ZERO_BUFF,-(%sp)",
+                "move.l\t(8,%fp),-(%sp)",
+                "jsr\t(MMU_$INSTALL).l",
+                "lea\t(0xc,%sp),%sp",
+                "movea.l\t#AST_$ZERO_BUFF,%a0",
+                "move.w\t#0xff,%d0",
+                ".balignw\t4,0x2048",
+                "1:",
+                "clr.l\t(%a0)+",
+                "dbf\t%d0,1b",
+                "move.l\t(8,%fp),-(%sp)",
+                "jsr\t(MMU_$REMOVE).l",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        let lock = |name: &str| ext(name, vec![val(konst(0x14, word()))], 2);
+        let f = proc_(
+            0,
+            vec![
+                lock("ML_$LOCK"),
+                StmtKind::Call(Call {
+                    callee: Callee::Local("ZERO_PAGE".into()),
+                    args: vec![ppn()],
+                    pad: 0,
+                }),
+                lock("ML_$UNLOCK"),
+            ],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#0",
+                "subq.l\t#2,%sp",
+                "move.w\t#0x14,-(%sp)",
+                "jsr\t(ML_$LOCK).l",
+                "addq.w\t#4,%sp",
+                "move.l\t(8,%fp),-(%sp)",
+                "bsr.s\tZERO_PAGE",
+                "addq.w\t#4,%sp",
+                "subq.l\t#2,%sp",
+                "move.w\t#0x14,-(%sp)",
+                "jsr\t(ML_$UNLOCK).l",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// The body of `f` without `link` and `unlk; rts`.
+    fn body_text(f: &Function) -> Vec<String> {
+        let t = text(f);
+        t[1..t.len() - 2].to_vec()
+    }
+
+    #[test]
+    fn constant_pushes() {
+        let byte_true = konst(-1, Scalar::BOOLEAN);
+        let cases: Vec<(Expr, &str)> = vec![
+            (konst(0, long()), "clr.l\t-(%sp)"),
+            (konst(1, long()), "pea\t(1).w"),
+            (konst(-1, long()), "pea\t(-1).w"),
+            (konst(0x7fff, long()), "pea\t(0x7fff).w"),
+            (konst(-0x8000, long()), "pea\t(-0x8000).w"),
+            (konst(0x8000, long()), "move.l\t#0x8000,-(%sp)"),
+            (konst(0x3a0001, long()), "move.l\t#0x3a0001,-(%sp)"),
+            (konst(0, word()), "clr.w\t-(%sp)"),
+            (konst(-2, word()), "move.w\t#-2,-(%sp)"),
+            (byte_true, "st\t-(%sp)"),
+        ];
+        for (e, want) in cases {
+            // One argument and something after the call, so it is popped.
+            let f = proc_(0, vec![ext("P", vec![val(e)], 0), ext("Q", vec![], 0)]);
+            assert_eq!(body_text(&f)[0], want);
+        }
+        // Bytes other than `true`: not catalogued.
+        let f = proc_(0, vec![ext("P", vec![val(konst(0, Scalar::BOOLEAN))], 2)]);
+        assert!(err(&f).starts_with("a byte constant argument other than `true`"));
+    }
+
+    #[test]
+    fn adjacent_word_constants_merge() {
+        // (a: word; b: word; c: long): c pushed first, then a:b as one
+        // longword with `a' in the high half.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![
+                    val(konst(1, word())),
+                    val(konst(2, word())),
+                    val(param(8, long())),
+                ],
+                0,
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "move.l\t(8,%fp),-(%sp)",
+                "move.l\t#0x10002,-(%sp)",
+                "jsr\t(P).l"
+            ]
+        );
+        // Both zero: one clr.l; a negative low half does not sign into the
+        // high half.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(0, word())), val(konst(0, word()))],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f)[0], "clr.l\t-(%sp)");
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(0, word())), val(konst(-1, word()))],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f)[0], "move.l\t#0xffff,-(%sp)");
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(-1, word())), val(konst(-1, word()))],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f)[0], "pea\t(-1).w");
+        // A word constant next to a word that is not constant: separate.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(3, word())), val(param(8, word()))],
+                0,
+            )],
+        );
+        assert_eq!(
+            body_text(&f)[..2],
+            ["move.w\t(8,%fp),-(%sp)", "move.w\t#3,-(%sp)"]
+        );
+        // Three in a row: which pair merges is not known.
+        let w = || val(konst(1, word()));
+        let f = proc_(0, vec![ext("P", vec![w(), w(), w()], 2)]);
+        assert!(err(&f).starts_with("three or more adjacent word constant"));
+    }
+
+    #[test]
+    fn pops_and_pads() {
+        let l = || val(param(8, long()));
+        let w = || val(param(8, word()));
+        let after = || ext("Q", vec![], 0);
+        // 4 and 8 bytes: addq.w; 12: lea; a pad counts.
+        for (args, pad, pop) in [
+            (vec![l()], 0, "addq.w\t#4,%sp"),
+            (vec![w()], 2, "addq.w\t#4,%sp"),
+            (vec![l(), l()], 0, "addq.w\t#8,%sp"),
+            (vec![l(), w()], 2, "addq.w\t#8,%sp"),
+            (vec![w(), l(), l()], 2, "lea\t(0xc,%sp),%sp"),
+            (vec![l(), l(), l(), l()], 0, "lea\t(0x10,%sp),%sp"),
+        ] {
+            let n = args.len();
+            let f = proc_(0, vec![ext("P", args, pad), after()]);
+            let t = body_text(&f);
+            let first = if pad == 2 { 1 } else { 0 };
+            if pad == 2 {
+                assert_eq!(t[0], "subq.l\t#2,%sp");
+            }
+            assert_eq!(t[first + n], "jsr\t(P).l");
+            assert_eq!(t[first + n + 1], pop);
+        }
+        // No arguments: no pop.
+        let f = proc_(0, vec![ext("P", vec![], 0), after()]);
+        assert_eq!(body_text(&f), ["jsr\t(P).l", "jsr\t(Q).l"]);
+        // The last call is not popped.
+        let f = proc_(0, vec![ext("P", vec![l()], 0)]);
+        assert_eq!(body_text(&f), ["move.l\t(8,%fp),-(%sp)", "jsr\t(P).l"]);
+        // Nor one followed only by statements that push nothing
+        // (PROC2_$UPGID_TO_UID 0xE41050: `jsr ML_$UNLOCK`, record copies,
+        // no pop).
+        let f = proc_(
+            0,
+            vec![ext("P", vec![l()], 0), store(sym("G"), konst(3, word()))],
+        );
+        assert_eq!(
+            body_text(&f),
+            ["move.l\t(8,%fp),-(%sp)", "jsr\t(P).l", "move.w\t#3,(G).l"]
+        );
+    }
+
+    #[test]
+    fn value_and_address_pushes() {
+        let after = || ext("Q", vec![], 0);
+        let addr = |a: Addr| Arg::Address { addr: a, slot: 4 };
+        // After a call, so that the statement may take A0.
+        let f = proc_(
+            4,
+            vec![
+                after(),
+                ext(
+                    "P",
+                    vec![
+                        addr(Addr::Frame(-4)),
+                        addr(sym("UID_$NIL")),
+                        val(load(through(8, 2), word())),
+                        val(load(Addr::Frame(0xc), Scalar::BOOLEAN)),
+                    ],
+                    0,
+                ),
+                after(),
+            ],
+        );
+        assert_eq!(
+            body_text(&f)[1..],
+            [
+                "move.b\t(0xc,%fp),-(%sp)",
+                "movea.l\t(8,%fp),%a0",
+                "move.w\t(2,%a0),-(%sp)",
+                "move.l\t#UID_$NIL,-(%sp)",
+                "pea\t(-4,%fp)",
+                "jsr\t(P).l",
+                "lea\t(0xc,%sp),%sp",
+                "jsr\t(Q).l",
+            ]
+        );
+        // Not catalogued: an address inside another unit's object, the
+        // address of a frame object as a value.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![addr(Addr::Symbol {
+                    name: "X".into(),
+                    offset: 4,
+                })],
+                0,
+            )],
+        );
+        assert!(err(&f).starts_with("passing this kind of object by address"));
+        let f = proc_(
+            4,
+            vec![ext("P", vec![val(Expr::AddrOf(Addr::Frame(-4)))], 0)],
+        );
+        assert!(err(&f).starts_with("this argument value"));
+    }
+
+    #[test]
+    fn fill_forms() {
+        let fill = |count, value| StmtKind::Fill {
+            start: sym("BUF"),
+            count,
+            value,
+        };
+        let f = proc_(0, vec![fill(32, konst(0, word()))]);
+        assert_eq!(
+            body_text(&f),
+            [
+                "movea.l\t#BUF,%a0",
+                "moveq\t#0x1f,%d0",
+                ".balignw\t4,0x2048",
+                "1:",
+                "clr.w\t(%a0)+",
+                "dbf\t%d0,1b",
+            ]
+        );
+        let f = proc_(0, vec![fill(0x10000, konst(0, Scalar::BOOLEAN))]);
+        assert_eq!(body_text(&f)[1], "move.w\t#-1,%d0");
+        assert_eq!(body_text(&f)[4], "clr.b\t(%a0)+");
+        let f = proc_(0, vec![fill(4, konst(1, long()))]);
+        assert!(err(&f).starts_with("a `for` loop storing a constant other than 0"));
+        let f = proc_(
+            0,
+            vec![StmtKind::Fill {
+                start: Addr::Static(4),
+                count: 4,
+                value: konst(0, long()),
+            }],
+        );
+        assert!(err(&f).starts_with("a `for` loop over an array other than"));
+    }
+
+    /// In a body of several statements, a statement gets registers of its
+    /// own only right after a call (0xE00ECC after the `jsr` at
+    /// 0xE00EC2); a call is refused where parameters are loaded at entry.
+    #[test]
+    fn registers_after_calls() {
+        let fill = || StmtKind::Fill {
+            start: sym("BUF"),
+            count: 4,
+            value: konst(0, long()),
+        };
+        let f = proc_(0, vec![fill(), ext("P", vec![], 0)]);
+        assert!(err(&f).starts_with("in a body of more than one statement"));
+        let f = proc_(0, vec![ext("P", vec![], 0), fill()]);
+        assert!(select(&f).is_ok());
+        let f = proc_(0, vec![ext("P", vec![], 0), fill(), fill()]);
+        assert!(err(&f).starts_with("in a body of more than one statement"));
+        let mut f = proc_(
+            0,
+            vec![store(through(8, 0), konst(0, long())), ext("P", vec![], 0)],
+        );
+        vparams(&mut f, &[(8, Scalar::POINTER)]);
+        assert!(err(&f).starts_with("a call in a body that loads parameters at entry"));
+        // A parameter that is only pushed is not loaded at entry.
+        let mut f = proc_(
+            0,
+            vec![
+                ext("P", vec![val(param(8, long()))], 0),
+                ext("Q", vec![val(param(8, long()))], 0),
+            ],
+        );
+        vparams(&mut f, &[(8, long())]);
+        assert_eq!(
+            body_text(&f),
+            [
+                "move.l\t(8,%fp),-(%sp)",
+                "jsr\t(P).l",
+                "addq.w\t#4,%sp",
+                "move.l\t(8,%fp),-(%sp)",
+                "jsr\t(Q).l",
+            ]
+        );
     }
 }

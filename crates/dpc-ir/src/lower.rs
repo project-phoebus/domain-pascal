@@ -7,10 +7,10 @@
 
 use dpc_sema::conv::{Passing, ResultReg};
 use dpc_sema::{
-    Expr as SExpr, ExprKind, Program, Routine, RoutineId, Stmt as SStmt, StmtKind as SStmtKind,
-    Storage, VarId,
+    Builtin, Call as SCall, Callee as SCallee, Expr as SExpr, ExprKind, Program, Routine,
+    RoutineId, Stmt as SStmt, StmtKind as SStmtKind, Storage, VarId,
 };
-use dpc_syntax::ast::BinOp;
+use dpc_syntax::ast::{BinOp, ForDir};
 use dpc_syntax::{Diagnostic, Span};
 
 use dpc_sema::types::{TypeId, TypeKind, TypeTable};
@@ -18,8 +18,8 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, DataArea, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
-    ValueParam, Width,
+    Addr, Arg, Call, Callee, DataArea, Expr, Function, Module, ResultClass, ResultSpec, Scalar,
+    Sign, Stmt, StmtKind, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -249,13 +249,18 @@ fn stmt_uses_static(s: &Stmt) -> bool {
         StmtKind::SetResult(e) => expr_uses_static(e),
         StmtKind::Store { addr, value } => addr_uses_static(addr) || expr_uses_static(value),
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
+        StmtKind::Call(c) => c.args.iter().any(|a| match a {
+            Arg::Value { value, .. } => expr_uses_static(value),
+            Arg::Address { addr, .. } => addr_uses_static(addr),
+        }),
+        StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
     }
 }
 
 fn expr_uses_static(e: &Expr) -> bool {
     match e {
         Expr::Const { .. } => false,
-        Expr::Load { addr, .. } => addr_uses_static(addr),
+        Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_uses_static(addr),
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
     }
 }
@@ -342,6 +347,17 @@ fn lower_body(
                 out.push(copy(p, s, target, value)?)
             }
             SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
+            SStmtKind::Call(c) => out.push(Stmt {
+                kind: StmtKind::Call(call(p, r, c, s.span)?),
+                span: s.span,
+            }),
+            SStmtKind::For {
+                var,
+                from,
+                dir,
+                to,
+                body,
+            } => out.push(fill(p, s, var, from, *dir, to, body)?),
             _ => return Err(unsupported(s.span, "this statement is")),
         }
     }
@@ -518,6 +534,11 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
                 set_width: Width::Long,
             })
         }
+        // `addr(x)` (ref p. 4-13): the address of the variable as a value.
+        ExprKind::Builtin {
+            builtin: Builtin::Addr,
+            args,
+        } => Ok(Expr::AddrOf(addr_of(p, &args[0])?)),
         _ => Err(unsupported(e.span, "this expression is")),
     }
 }
@@ -621,5 +642,222 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
         Storage::Static { offset, .. } => i32::try_from(*offset)
             .map(Addr::Static)
             .map_err(|_| unsupported(span, "a static variable at this offset is")),
+    }
+}
+
+/// A procedure call statement (ref 5.2).
+///
+/// - The callee: a routine of this unit with a body and in the caller's
+///   code section is called PC-relative ([`Callee::Local`], `bsr`), any
+///   other declared routine through its symbol ([`Callee::External`],
+///   `jsr abs.l`): codegen-patterns 1.6 (0xE00F02 `bsr.s` to the
+///   module-local 0xE00EB0; 0xE00EF6 `jsr ML_$LOCK`).  `bsr` never
+///   crosses a map segment in the image (codegen-patterns 7), so a callee
+///   in another code section is not supported yet; nor are nested
+///   routines (static link, codegen-patterns 6) and calls through
+///   routine pointers (`jsr (An)`, 0xE0B3F0).
+/// - The arguments, in parameter order, each with its parameter's
+///   convention from `dpc-sema` (ref 5.2 Table 5-1): by value, the value
+///   at the parameter's width (a constant takes the parameter's type);
+///   by address, the address of a designator.  A non-designator by
+///   address (a constant pooled in the code section, `pea (d,PC)`, or an
+///   expression stored to a frame temporary; codegen-patterns 1.5) is not
+///   supported yet.
+/// - The pad: the callee's `arg_pad` (codegen-patterns 1.4).  A
+///   `variable` routine called with fewer arguments (ref 5.5.5) is not
+///   supported yet: its pad and slots are not catalogued.
+fn call(p: &Program, caller: &Routine, c: &SCall, span: Span) -> Res<Call> {
+    let SCallee::Routine(id) = &c.callee else {
+        return Err(unsupported(span, "a call through a routine pointer is"));
+    };
+    let r = p.routine(*id);
+    if r.parent.is_some() {
+        return Err(unsupported(span, "a call of a nested routine is"));
+    }
+    if c.args.len() != r.params.len() {
+        return Err(unsupported(
+            span,
+            "a call with fewer arguments than parameters (ref 5.5.5) is",
+        ));
+    }
+    let callee = if r.external || r.body.is_none() {
+        Callee::External(r.symbol.clone())
+    } else if r.code_section == caller.code_section {
+        Callee::Local(r.symbol.clone())
+    } else {
+        return Err(unsupported(
+            span,
+            "a call of a routine of this unit in another code section is",
+        ));
+    };
+    let mut args = Vec::new();
+    for (a, prm) in c.args.iter().zip(&r.params) {
+        let slot = a.conv.slot_size;
+        args.push(match a.conv.passing {
+            Passing::ByValue => {
+                let size = p.types.size(prm.ty);
+                let width = Width::of_size(size).ok_or_else(|| {
+                    unsupported(a.expr.span, format!("a {size}-byte value argument is"))
+                })?;
+                let ty = Scalar {
+                    width,
+                    sign: sign_of(&p.types, prm.ty),
+                };
+                let value = match &a.expr.value {
+                    Some(v) => const_of(v, ty, a.expr.span)?,
+                    None => {
+                        let v = value_of(p, &a.expr)?;
+                        if v.ty().width != width {
+                            return Err(unsupported(
+                                a.expr.span,
+                                format!(
+                                    "passing a {}-byte value to a {}-byte parameter is",
+                                    v.ty().bytes(),
+                                    width.bytes()
+                                ),
+                            ));
+                        }
+                        v
+                    }
+                };
+                Arg::Value { value, slot }
+            }
+            Passing::ByAddress => {
+                if a.needs_temp || !a.expr.is_designator() {
+                    return Err(unsupported(
+                        a.expr.span,
+                        "passing a constant or an expression by address (codegen-patterns 1.5) is",
+                    ));
+                }
+                Arg::Address {
+                    addr: addr_of(p, &a.expr)?,
+                    slot,
+                }
+            }
+        });
+    }
+    Ok(Call {
+        callee,
+        args,
+        pad: r.arg_pad,
+    })
+}
+
+/// `for v := lo to hi do a[v] := c` where `v` is a local variable used
+/// for nothing but the index, `lo`, `hi` and `c` are constants and the
+/// element is a scalar: [`StmtKind::Fill`] of `hi - lo + 1` elements
+/// from `a[lo]`.
+///
+/// Image: module-local 0xE00EB0 (`misc/zero_page.c`), 0xE00ECC..0xE00EDA
+/// `movea.l #AST_$ZERO_BUFF,A0; move.w #0xFF,D0; movea.l A0,A0; clr.l
+/// (A0)+; dbf D0`: 256 longwords cleared, no register or frame slot for
+/// an index.  The compiler strength-reduced indexing in loops to a
+/// pointer that steps by the element size, with the index's offset
+/// folded in (PKT_$DUMP_DATA 0xE12800 `lea (4,A0),A2`, then `(-4,A2)`
+/// and `addq.l #4,A2` at 0xE12816/0xE12824, where the index is also used
+/// in a compare and kept in D3); an index used for nothing else is not
+/// kept at all.  The Pascal source of 0xE00EB0 is not known; this
+/// reading of it is ours (codegen-patterns 7, `for` loops).
+///
+/// Everything else about `for` (other bodies, `downto`, bounds known only
+/// at run time: `subq.w #1; bmi` 0xE177DC; an index used in the body) is
+/// not supported yet.
+fn fill(
+    p: &Program,
+    s: &SStmt,
+    var: &SExpr,
+    from: &SExpr,
+    dir: ForDir,
+    to: &SExpr,
+    body: &SStmt,
+) -> Res<Stmt> {
+    let shape = || {
+        unsupported(
+            s.span,
+            "a `for` loop other than `for i := c1 to c2 do a[i] := c` (codegen-patterns 7) is",
+        )
+    };
+    let ExprKind::Var {
+        var: index,
+        uplevel: 0,
+    } = var.kind
+    else {
+        return Err(shape());
+    };
+    if !matches!(p.var(index).storage, Storage::Frame { .. }) || dir != ForDir::To {
+        return Err(shape());
+    }
+    let (Some(lo), Some(hi)) = (
+        from.value.as_ref().and_then(ConstValue::ordinal),
+        to.value.as_ref().and_then(ConstValue::ordinal),
+    ) else {
+        return Err(shape());
+    };
+    let body = match &body.kind {
+        SStmtKind::Compound(b) if b.stmts.len() == 1 => &b.stmts[0],
+        _ => body,
+    };
+    let SStmtKind::Assign { target, value } = &body.kind else {
+        return Err(shape());
+    };
+    let ExprKind::Index {
+        base,
+        index: ix,
+        lo: array_lo,
+        elem_size,
+    } = &target.kind
+    else {
+        return Err(shape());
+    };
+    let is_index = |e: &SExpr| matches!(e.kind, ExprKind::Var { var, .. } if var == index);
+    if !is_index(ix) || mentions_var(base, index) {
+        return Err(shape());
+    }
+    let Some(c) = &value.value else {
+        return Err(shape());
+    };
+    let ty = scalar_of(p, target)?;
+    if ty.bytes() != *elem_size {
+        return Err(shape());
+    }
+    if hi < lo {
+        // The body never runs; what the original emitted is not known.
+        return Err(unsupported(s.span, "a `for` loop that never runs is"));
+    }
+    let count = u32::try_from(hi - lo + 1)
+        .ok()
+        .filter(|&n| n <= 0x10000)
+        .ok_or_else(|| unsupported(s.span, "a `for` loop of more than 65536 iterations is"))?;
+    let first = i32::try_from((lo - array_lo) * *elem_size as i64)
+        .map_err(|_| unsupported(s.span, "an array offset beyond 32 bits is"))?;
+    Ok(Stmt {
+        kind: StmtKind::Fill {
+            start: addr_of(p, base)?.offset_by(first),
+            count,
+            value: const_of(c, ty, value.span)?,
+        },
+        span: s.span,
+    })
+}
+
+/// Whether `e` reads variable `v` anywhere.
+fn mentions_var(e: &SExpr, v: VarId) -> bool {
+    match &e.kind {
+        ExprKind::Var { var, .. } => *var == v,
+        ExprKind::Const | ExprKind::Result { .. } | ExprKind::WithRecord(_) => false,
+        ExprKind::Field { base, .. } => mentions_var(base, v),
+        ExprKind::Index { base, index, .. } => mentions_var(base, v) || mentions_var(index, v),
+        ExprKind::Deref(x) | ExprKind::Unary { operand: x, .. } | ExprKind::Transfer(x) => {
+            mentions_var(x, v)
+        }
+        ExprKind::Binary { lhs, rhs, .. } => mentions_var(lhs, v) || mentions_var(rhs, v),
+        ExprKind::SetCons(items) => items
+            .iter()
+            .any(|(a, b)| mentions_var(a, v) || b.as_ref().is_some_and(|b| mentions_var(b, v))),
+        ExprKind::Call(c) => {
+            c.args.iter().any(|a| mentions_var(&a.expr, v))
+                || matches!(&c.callee, SCallee::Pointer(x) if mentions_var(x, v))
+        }
+        ExprKind::Builtin { args, .. } => args.iter().any(|a| mentions_var(a, v)),
     }
 }

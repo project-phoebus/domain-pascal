@@ -104,14 +104,25 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                 ));
             }
         }
+        let mut routines = Vec::new();
+        let mut failed = false;
         for f in module.functions.iter().filter(|f| f.code_section == sec) {
-            let insns = match isel::select(f) {
-                Ok(i) => i,
+            match isel::select(f) {
+                Ok(i) => routines.push((f, i)),
                 Err(d) => {
                     errors.push(d);
-                    continue;
+                    failed = true;
                 }
-            };
+            }
+        }
+        // Branch sizes need every routine of the section laid out.
+        let base = opts.fragment_origin.map_or(0, |o| o % 4);
+        if !failed {
+            if let Err(d) = size_branches(&mut routines, base) {
+                errors.push(d);
+            }
+        }
+        for (f, insns) in routines {
             if f.global {
                 out.push_str(&format!("\t.globl\t{}\n", f.symbol));
             }
@@ -139,6 +150,63 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         Ok(out)
     } else {
         Err(errors)
+    }
+}
+
+/// Choose `bsr.s` or `bsr.w` for every call between the routines of one
+/// code section: `.s` whenever the target is in reach (a displacement of
+/// -128..=127 other than 0, which would mean `.w`), as the original did
+/// (survey of compiled code: 121 `bsr.s`, all in reach; 1800 `bsr.w`,
+/// none in reach; codegen-patterns 1.6).  The emitter decides, never
+/// gas, so the sizes are explicit (codegen-patterns 13).
+///
+/// `base` is the section's first byte mod 4 (0, or the fragment
+/// origin's: the code's 4-byte alignment is absolute, so a `0x2048`
+/// filler's size depends on the position).  Every branch starts short;
+/// one out of reach becomes long and the layout is redone, until nothing
+/// changes (a branch never shrinks again, so this ends).
+fn size_branches(
+    routines: &mut [(&dpc_ir::Function, Vec<Insn>)],
+    base: u32,
+) -> Result<(), Diagnostic> {
+    loop {
+        let mut at = std::collections::HashMap::new();
+        let mut sites = Vec::new();
+        let mut pos = base;
+        for (ri, (f, insns)) in routines.iter().enumerate() {
+            at.insert(f.symbol.clone(), pos);
+            for (ii, i) in insns.iter().enumerate() {
+                if let Insn::Bsr { target, short } = i {
+                    sites.push((ri, ii, pos, target.clone(), *short));
+                }
+                pos += i.len_at(pos);
+            }
+        }
+        let mut changed = false;
+        for (ri, ii, pos, target, short) in sites {
+            let Some(&t) = at.get(&target) else {
+                return Err(Diagnostic::error(
+                    routines[ri].0.span,
+                    format!("a call of `{target}`, which is not in this code section, is not supported yet"),
+                ));
+            };
+            let disp = t as i64 - (pos as i64 + 2);
+            if short && !((-128..=127).contains(&disp) && disp != 0) {
+                routines[ri].1[ii] = Insn::Bsr {
+                    target,
+                    short: false,
+                };
+                changed = true;
+            } else if !short && !(-0x8000..0x8000).contains(&disp) {
+                return Err(Diagnostic::error(
+                    routines[ri].0.span,
+                    "a call beyond the reach of `bsr.w` is not supported yet",
+                ));
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
     }
 }
 
@@ -320,5 +388,86 @@ mod tests {
             section_directive("wired_proc"),
             "\t.section\t\"wired_proc\",\"ax\",@progbits"
         );
+    }
+
+    /// A routine whose body is `n` calls of `P` with a long constant
+    /// (14 bytes each), then optionally a call of `local`.
+    fn caller(symbol: &str, n: usize, local: Option<&str>) -> dpc_ir::Function {
+        use dpc_ir::{Arg, Call, Callee, Expr, Scalar, Stmt, StmtKind, Width};
+        let mut f = one_routine(".text", symbol);
+        let mut body: Vec<StmtKind> = (0..n)
+            .map(|_| {
+                StmtKind::Call(Call {
+                    callee: Callee::External("P".into()),
+                    args: vec![Arg::Value {
+                        value: Expr::Const {
+                            value: 0x12345,
+                            ty: Scalar::signed(Width::Long),
+                        },
+                        slot: 4,
+                    }],
+                    pad: 0,
+                })
+            })
+            .collect();
+        if let Some(l) = local {
+            body.push(StmtKind::Call(Call {
+                callee: Callee::Local(l.into()),
+                args: vec![],
+                pad: 0,
+            }));
+        }
+        f.body = body
+            .into_iter()
+            .map(|kind| Stmt { kind, span: f.span })
+            .collect();
+        f
+    }
+
+    fn bsr_line(s: &str) -> &str {
+        s.lines().find(|l| l.contains("bsr")).unwrap().trim()
+    }
+
+    /// `bsr.s` when the target is in reach, `bsr.w` otherwise
+    /// (codegen-patterns 1.6), backward and forward.
+    #[test]
+    fn bsr_size_follows_the_distance() {
+        let m = |fs| Module {
+            functions: fs,
+            ..Default::default()
+        };
+        let opts = Options::default();
+        // Backward, near: 0xE00F02 `bsr.s` (61ac).
+        let s = emit(
+            &m(vec![caller("A", 1, None), caller("B", 1, Some("A"))]),
+            "m.pas",
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(bsr_line(&s), "bsr.s\tA");
+        // Backward, 10 calls of 14 bytes in between: out of reach.
+        let s = emit(
+            &m(vec![caller("A", 10, None), caller("B", 0, Some("A"))]),
+            "m.pas",
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(bsr_line(&s), "bsr.w\tA");
+        // Forward: the target follows the caller.
+        let s = emit(
+            &m(vec![caller("B", 0, Some("A")), caller("A", 1, None)]),
+            "m.pas",
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(bsr_line(&s), "bsr.s\tA");
+        // Forward and out of reach: the call first, 10 calls after it.
+        let mut b = caller("B", 10, Some("A"));
+        b.body.rotate_right(1);
+        let s = emit(&m(vec![b, caller("A", 0, None)]), "m.pas", &opts).unwrap();
+        assert_eq!(bsr_line(&s), "bsr.w\tA");
+        // A target not in the section.
+        let e = emit(&m(vec![caller("B", 0, Some("Z"))]), "m.pas", &opts).unwrap_err();
+        assert!(e[0].message.contains("not in this code section"), "{e:?}");
     }
 }

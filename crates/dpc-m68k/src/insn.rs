@@ -173,6 +173,13 @@ pub enum Ea {
     Disp(i32, u8),
     /// `(sym+off).l`: absolute long.
     AbsL(String, i32),
+    /// `(n).w`: absolute short, a 16-bit address the CPU sign-extends.
+    /// As the operand of `pea` it pushes the long constant `n`
+    /// (codegen-patterns 1.5: 0xE00EB4 `pea (0x16).w`, `4878 0016`).
+    AbsW(i32),
+    /// `#sym`: the address of a symbol as a 32-bit immediate (0xE00EB8
+    /// `move.l #AST_$ZERO_BUFF,-(SP)`, `2f3c 00ff 8c00`).
+    ImmSym(String),
     /// `-(An)`.
     PreDec(u8),
     /// `(An)+`.
@@ -183,6 +190,26 @@ pub enum Ea {
     /// #0xff,(A0)` is `10bc 00ff` at 0xE0A33E; gas encodes `#-1` as
     /// `10bc ffff`).
     Imm(i64),
+}
+
+impl Ea {
+    /// Bytes of extension words the operand adds to an instruction whose
+    /// operation size is `size` (MC68000 PRM, effective addressing).
+    pub fn ext_len(&self, size: Size) -> u32 {
+        match self {
+            Ea::Reg(_) | Ea::Ind(_) | Ea::PreDec(_) | Ea::PostInc(_) => 0,
+            // gas assembles `(0,%an)` as `(%an)`, with no extension word.
+            // The selector writes `Ea::Ind` for offset 0 anyway; this keeps
+            // `Insn::len_at` equal to what gas emits if one slips through.
+            Ea::Disp(0, _) => 0,
+            Ea::Disp(..) | Ea::AbsW(_) => 2,
+            Ea::AbsL(..) | Ea::ImmSym(_) => 4,
+            Ea::Imm(_) => match size {
+                Size::B | Size::W => 2,
+                Size::L => 4,
+            },
+        }
+    }
 }
 
 /// A displacement or immediate: small values in decimal, others in hex.
@@ -205,6 +232,8 @@ impl fmt::Display for Ea {
             Ea::AbsL(s, 0) => write!(f, "({s}).l"),
             Ea::AbsL(s, o) if *o < 0 => write!(f, "({s}-{}).l", num(-(*o as i64))),
             Ea::AbsL(s, o) => write!(f, "({s}+{}).l", num(*o as i64)),
+            Ea::AbsW(n) => write!(f, "({}).w", num(*n as i64)),
+            Ea::ImmSym(s) => write!(f, "#{s}"),
             Ea::PreDec(a) => write!(f, "-({})", Reg::A(*a)),
             Ea::PostInc(a) => write!(f, "({})+", Reg::A(*a)),
             Ea::Imm(n) => write!(f, "#{}", num(*n)),
@@ -282,6 +311,29 @@ pub enum Insn {
     /// A numbered local label (`N:`, gas local label; branches name it
     /// `Nb`).  The emitter writes it at the start of the line.
     Label(u32),
+    /// `addq.<size> #value,dst` (1..=8).
+    Addq {
+        size: Size,
+        value: u8,
+        dst: Ea,
+    },
+    /// `subq.<size> #value,dst` (1..=8).
+    Subq {
+        size: Size,
+        value: u8,
+        dst: Ea,
+    },
+    /// `jsr <ea>`.
+    Jsr(Ea),
+    /// `bsr.s` (`short`) or `bsr.w` to a routine of the same section.
+    /// The size is decided by the emitter's layout (`emit.rs`): `.s`
+    /// whenever the target is in reach, as the original (1800 `bsr.w`,
+    /// all out of `.s` reach; 121 `bsr.s`, all in reach; compiled code
+    /// 0xE00800..0xE88834).
+    Bsr {
+        target: String,
+        short: bool,
+    },
     /// `clr.<size> dst`.
     Clr {
         size: Size,
@@ -328,10 +380,45 @@ impl fmt::Display for Insn {
             }
             Insn::Dbf { reg, label } => write!(f, "dbf\t{},{label}b", Reg::D(*reg)),
             Insn::Label(n) => write!(f, "{n}:"),
+            Insn::Addq { size, value, dst } => write!(f, "addq.{size}\t#{value},{dst}"),
+            Insn::Subq { size, value, dst } => write!(f, "subq.{size}\t#{value},{dst}"),
+            Insn::Jsr(ea) => write!(f, "jsr\t{ea}"),
+            Insn::Bsr { target, short } => {
+                write!(f, "bsr.{}\t{target}", if *short { "s" } else { "w" })
+            }
             Insn::Clr { size, dst } => write!(f, "clr.{size}\t{dst}"),
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
             Insn::Align4 => f.write_str(".balignw\t4,0x2048"),
+        }
+    }
+}
+
+impl Insn {
+    /// The encoded length in bytes of the instruction at byte position
+    /// `pos` (only [`Insn::Align4`] depends on it: 2 at 2 mod 4, else 0;
+    /// positions are always even).  MC68000 PRM encodings.
+    pub fn len_at(&self, pos: u32) -> u32 {
+        match self {
+            Insn::Label(_) => 0,
+            Insn::Align4 => (4 - pos % 4) % 4,
+            Insn::Unlk | Insn::Rts | Insn::Moveq { .. } => 2,
+            Insn::Link { .. } | Insn::Dbf { .. } | Insn::MovemSave { .. } => 4,
+            Insn::MovemRestore { .. } => 6,
+            Insn::Bsr { short, .. } => {
+                if *short {
+                    2
+                } else {
+                    4
+                }
+            }
+            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Lea { src: ea, .. } => 2 + ea.ext_len(Size::L),
+            Insn::Move { size, src, dst } => 2 + src.ext_len(*size) + dst.ext_len(*size),
+            Insn::Movea { size, src, .. } => 2 + src.ext_len(*size),
+            Insn::Addq { size, dst, .. }
+            | Insn::Subq { size, dst, .. }
+            | Insn::Clr { size, dst } => 2 + dst.ext_len(*size),
+            Insn::Btst { dst, .. } | Insn::Scc { dst, .. } => 2 + dst.ext_len(Size::B),
         }
     }
 }
@@ -473,10 +560,209 @@ mod tests {
             (Insn::Unlk, "unlk\t%fp"),
             (Insn::Rts, "rts"),
             (Insn::Align4, ".balignw\t4,0x2048"),
+            (Insn::Pea(Ea::AbsW(0x16)), "pea\t(0x16).w"),
+            (Insn::Pea(Ea::AbsW(-1)), "pea\t(-1).w"),
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::ImmSym("AST_$ZERO_BUFF".into()),
+                    dst: Ea::PreDec(7),
+                },
+                "move.l\t#AST_$ZERO_BUFF,-(%sp)",
+            ),
+            (
+                Insn::Subq {
+                    size: Size::L,
+                    value: 2,
+                    dst: Ea::Reg(Reg::A(7)),
+                },
+                "subq.l\t#2,%sp",
+            ),
+            (
+                Insn::Addq {
+                    size: Size::W,
+                    value: 4,
+                    dst: Ea::Reg(Reg::A(7)),
+                },
+                "addq.w\t#4,%sp",
+            ),
+            (
+                Insn::Jsr(Ea::AbsL("ML_$LOCK".into(), 0)),
+                "jsr\t(ML_$LOCK).l",
+            ),
+            (
+                Insn::Bsr {
+                    target: "ZERO_PAGE".into(),
+                    short: true,
+                },
+                "bsr.s\tZERO_PAGE",
+            ),
+            (
+                Insn::Bsr {
+                    target: "W".into(),
+                    short: false,
+                },
+                "bsr.w\tW",
+            ),
         ];
         for (i, want) in cases {
             assert_eq!(i.to_string(), want);
         }
+    }
+}
+
+#[cfg(test)]
+mod len_tests {
+    use super::*;
+
+    /// Lengths of instructions as encoded in the image.
+    #[test]
+    fn lengths_match_the_image() {
+        let sp = 7;
+        let cases: Vec<(Insn, u32)> = vec![
+            (Insn::Link { disp: -12 }, 4),  // 0xE00EB0 4e56 fff4
+            (Insn::Pea(Ea::AbsW(0x16)), 4), // 0xE00EB4 4878 0016
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::ImmSym("S".into()),
+                    dst: Ea::PreDec(sp),
+                },
+                6,
+            ), // 0xE00EB8 2f3c 00ff 8c00
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::Disp(8, 6),
+                    dst: Ea::PreDec(sp),
+                },
+                4,
+            ), // 0xE00EBE 2f2e 0008
+            (Insn::Jsr(Ea::AbsL("S".into(), 0)), 6), // 0xE00EC2 4eb9 ...
+            (
+                Insn::Lea {
+                    src: Ea::Disp(12, sp),
+                    dst: sp,
+                },
+                4,
+            ), // 0xE00EC8 4fef 000c
+            (
+                Insn::Movea {
+                    size: Size::L,
+                    src: Ea::ImmSym("S".into()),
+                    dst: 0,
+                },
+                6,
+            ), // 0xE00ECC 207c 00ff 8c00
+            (
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(0xff),
+                    dst: Ea::Reg(Reg::D(0)),
+                },
+                4,
+            ), // 0xE00ED2 303c 00ff
+            (
+                Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::PostInc(0),
+                },
+                2,
+            ), // 0xE00ED8 4298
+            (Insn::Dbf { reg: 0, label: 1 }, 4), // 0xE00EDA 51c8 fffc
+            (Insn::Unlk, 2),
+            (Insn::Rts, 2),
+            (
+                Insn::Subq {
+                    size: Size::L,
+                    value: 2,
+                    dst: Ea::Reg(Reg::A(sp)),
+                },
+                2,
+            ), // 0xE00EF0 558f
+            (
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(0x14),
+                    dst: Ea::PreDec(sp),
+                },
+                4,
+            ), // 0xE00EF2 3f3c 0014
+            (
+                Insn::Addq {
+                    size: Size::W,
+                    value: 4,
+                    dst: Ea::Reg(Reg::A(sp)),
+                },
+                2,
+            ), // 0xE00EFC 584f
+            (
+                Insn::Bsr {
+                    target: "S".into(),
+                    short: true,
+                },
+                2,
+            ), // 0xE00F02 61ac
+            (
+                Insn::Bsr {
+                    target: "S".into(),
+                    short: false,
+                },
+                4,
+            ), // 0xE03636 6100 d878
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::Imm(0x3a0001),
+                    dst: Ea::Ind(0),
+                },
+                6,
+            ), // 0xE0B28C 20bc 003a 0001
+            (
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Disp(0x1e4, 5),
+                    dst: Ea::Ind(0),
+                },
+                4,
+            ), // 0xE41B66 30ad 01e4
+            (
+                Insn::MovemSave {
+                    regs: RegSet::of(&[Reg::D(2), Reg::D(3), Reg::A(2)]),
+                },
+                4,
+            ), // 0xE1777C 48e7 3020
+            (
+                Insn::MovemRestore {
+                    regs: RegSet::of(&[Reg::D(2), Reg::D(3), Reg::A(2)]),
+                    disp: -0x1c,
+                },
+                6,
+            ), // 0xE177F6 4cee 040c ffe4
+            (
+                Insn::Btst {
+                    bit: 0,
+                    dst: Ea::Reg(Reg::D(1)),
+                },
+                2,
+            ), // 0xE148DC 0101
+            (
+                Insn::Scc {
+                    cond: Cond::T,
+                    dst: Ea::Disp(0xe0, 5),
+                },
+                4,
+            ), // 0xE6E468 50ed 00e0
+            (Insn::Label(1), 0),
+            (Insn::Pea(Ea::Disp(0, 6)), 2), // gas: `pea (0,%fp)` assembles as 4856, `pea (%fp)`
+        ];
+        for (i, n) in cases {
+            assert_eq!(i.len_at(0), n, "{i}");
+            assert_eq!(i.len_at(2), n, "{i}");
+        }
+        // The filler: 2 bytes at 2 mod 4 (0xE00ED6), none at 0 mod 4.
+        assert_eq!(Insn::Align4.len_at(0xE00ED6), 2);
+        assert_eq!(Insn::Align4.len_at(0xE00ED8), 0);
     }
 }
 

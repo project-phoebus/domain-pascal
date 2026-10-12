@@ -16,8 +16,12 @@ TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).
 Compiled so far: `proc1_tst_lock.pas` (PROC1_$TST_LOCK and
 PROC1_$GET_LOCKS, 0xE148CA..0xE148F8), `time_q_init_queue.pas`
 (TIME_$Q_INIT_QUEUE and TIME_$Q_FLUSH_QUEUE, 0xE16C5E..0xE16C8E),
-`proc1_get_loadav.pas` (PROC1_$GET_LOADAV, 0xE14BBA..0xE14BDA) and
-`proc2_get_boot_flags.pas` (PROC2_$GET_BOOT_FLAGS, 0xE41B56..0xE41B72).  Each `.pas` starts with a comment
+`proc1_get_loadav.pas` (PROC1_$GET_LOADAV, 0xE14BBA..0xE14BDA),
+`proc2_get_boot_flags.pas` (PROC2_$GET_BOOT_FLAGS, 0xE41B56..0xE41B72)
+and `ast_page_zero.pas` (the module-local routine at 0xE00EB0 and
+AST_$PAGE_ZERO, 0xE00EB0..0xE00F16: calls, constant arguments, a `dbf`
+`for` loop; `handasm/ast_page_zero.s` is the same unit transcribed by
+hand).  Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
 

@@ -669,3 +669,248 @@ end;
         }
     );
 }
+
+const ZERO_PAGE: &str = "module ast_;
+type page_t = array[0..255] of integer32;
+var ast_$zero_buff: extern page_t;
+procedure ml_$lock(resource_id: integer); options(val_param, extern);
+procedure mmu_$install(ppn: integer32; va: univ_ptr; asid: integer;
+                       prot: integer); options(val_param, extern);
+procedure mmu_$remove(ppn: integer32); options(val_param, extern);
+procedure zero_page(ppn: integer32); internal;
+var i: integer;
+begin
+  mmu_$install(ppn, addr(ast_$zero_buff), 0, 16#16);
+  for i := 0 to 255 do ast_$zero_buff[i] := 0;
+  mmu_$remove(ppn);
+end;
+procedure ast_$page_zero(ppn: integer32); options(val_param);
+begin
+  ml_$lock(16#14);
+  zero_page(ppn);
+end;
+";
+
+/// Module-local 0xE00EB0 and AST_$PAGE_ZERO 0xE00EEC
+/// (tests/conformance/ast_page_zero.pas).
+#[test]
+fn calls_and_fill() {
+    let m = lower_src(ZERO_PAGE).unwrap();
+    let long = Scalar::signed(Width::Long);
+    let word = Scalar::signed(Width::Word);
+    let ppn = || Arg::Value {
+        value: Expr::Load {
+            addr: Addr::Frame(8),
+            ty: long,
+        },
+        slot: 4,
+    };
+    let buf = || Addr::Symbol {
+        name: "AST_$ZERO_BUFF".into(),
+        offset: 0,
+    };
+    let zp = &m.functions[0];
+    assert_eq!(zp.symbol, "ZERO_PAGE");
+    assert!(!zp.global);
+    assert_eq!(zp.frame_size, 2);
+    let kinds: Vec<&StmtKind> = zp.body.iter().map(|s| &s.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            &StmtKind::Call(Call {
+                callee: Callee::External("MMU_$INSTALL".into()),
+                args: vec![
+                    ppn(),
+                    Arg::Value {
+                        value: Expr::AddrOf(buf()),
+                        slot: 4
+                    },
+                    Arg::Value {
+                        value: Expr::Const { value: 0, ty: word },
+                        slot: 2
+                    },
+                    Arg::Value {
+                        value: Expr::Const {
+                            value: 0x16,
+                            ty: word
+                        },
+                        slot: 2
+                    },
+                ],
+                pad: 0,
+            }),
+            &StmtKind::Fill {
+                start: buf(),
+                count: 256,
+                value: Expr::Const { value: 0, ty: long },
+            },
+            &StmtKind::Call(Call {
+                callee: Callee::External("MMU_$REMOVE".into()),
+                args: vec![ppn()],
+                pad: 0,
+            }),
+        ]
+    );
+    let pz = &m.functions[1];
+    assert_eq!(pz.symbol, "AST_$PAGE_ZERO");
+    assert_eq!(
+        pz.body[0].kind,
+        StmtKind::Call(Call {
+            callee: Callee::External("ML_$LOCK".into()),
+            args: vec![Arg::Value {
+                value: Expr::Const {
+                    value: 0x14,
+                    ty: word
+                },
+                slot: 2
+            }],
+            pad: 2,
+        })
+    );
+    assert_eq!(
+        pz.body[1].kind,
+        StmtKind::Call(Call {
+            callee: Callee::Local("ZERO_PAGE".into()),
+            args: vec![ppn()],
+            pad: 0,
+        })
+    );
+}
+
+/// By-address arguments: the designator's address; a byte value in a
+/// 2-byte slot; the first element of a 1-based array.
+#[test]
+fn by_address_arguments_and_one_based_fill() {
+    let m = lower_src(
+        "module m;
+type a_t = array[1..8] of integer;
+var x: extern integer32; tab: extern a_t;
+procedure q(var v: integer32; b: boolean); options(val_param, extern);
+procedure p;
+var i: integer;
+begin
+  for i := 1 to 8 do tab[i] := 0;
+  q(x, true);
+end;
+",
+    )
+    .unwrap();
+    let body = &m.functions[0].body;
+    assert_eq!(
+        body[0].kind,
+        StmtKind::Fill {
+            start: Addr::Symbol {
+                name: "TAB".into(),
+                offset: 0
+            },
+            count: 8,
+            value: Expr::Const {
+                value: 0,
+                ty: Scalar::signed(Width::Word)
+            },
+        }
+    );
+    assert_eq!(
+        body[1].kind,
+        StmtKind::Call(Call {
+            callee: Callee::External("Q".into()),
+            args: vec![
+                Arg::Address {
+                    addr: Addr::Symbol {
+                        name: "X".into(),
+                        offset: 0
+                    },
+                    slot: 4
+                },
+                Arg::Value {
+                    value: Expr::Const {
+                        value: -1,
+                        ty: Scalar::BOOLEAN
+                    },
+                    slot: 2
+                },
+            ],
+            pad: 2,
+        })
+    );
+}
+
+#[test]
+fn unsupported_for_loops() {
+    let pre = "module m;
+var buf: extern array[0..15] of integer32; j: extern integer;
+procedure p;
+var i: integer;
+begin
+";
+    let one = |stmt: &str| errs(&format!("{pre}  {stmt}\nend;\n"));
+    let shape = "error: a `for` loop other than `for i := c1 to c2 do a[i] := c` (codegen-patterns 7) is not supported yet";
+    for stmt in [
+        "for i := 15 downto 0 do buf[i] := 0;",
+        "for i := 0 to j do buf[i] := 0;",
+        "for i := 0 to 15 do buf[i] := i;",
+        "for i := 0 to 14 do buf[i + 1] := 0;",
+        "for i := 0 to 15 do begin buf[i] := 0; buf[i] := 1 end;",
+        "for j := 0 to 15 do buf[j] := 0;",
+    ] {
+        let e = one(stmt);
+        assert_eq!(e.len(), 1, "{stmt}: {e:?}");
+        assert!(e[0].ends_with(shape), "{stmt}: {e:?}");
+    }
+    let e = one("for i := 3 to 2 do buf[i] := 0;");
+    assert!(
+        e[0].ends_with("a `for` loop that never runs is not supported yet"),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn unsupported_calls() {
+    let e = errs(
+        "module m;
+procedure q(var v: integer); options(val_param, extern);
+procedure p;
+begin
+  q(3);
+end;
+",
+    );
+    assert!(e[0].contains("a variable is needed"), "{e:?}");
+    let e = errs(
+        "module m;
+procedure q(in v: integer32); extern;
+procedure p;
+begin
+  q(3);
+end;
+",
+    );
+    assert!(
+        e[0].ends_with("passing a constant or an expression by address (codegen-patterns 1.5) is not supported yet"),
+        "{e:?}"
+    );
+    let e = errs(
+        "module m;
+var w: extern integer;
+procedure q(v: integer32); options(val_param, extern);
+procedure p;
+begin
+  q(w);
+end;
+",
+    );
+    assert!(
+        e[0].ends_with("passing a 2-byte value to a 4-byte parameter is not supported yet"),
+        "{e:?}"
+    );
+    let e = errs(
+        "module m;
+procedure q(a, b: integer); options(val_param, variable, extern);
+procedure p;
+begin
+  q(1);
+end;
+",
+    );
+    assert!(e[0].contains("fewer arguments than parameters"), "{e:?}");
+}
