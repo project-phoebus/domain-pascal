@@ -1,0 +1,14 @@
+# Image-conformance manifest, run by `make conform' (tools/conform.py manifest).
+#
+# One unit per line:  FILE SPEC... [--section-addr SEC=0xADDR]...
+#   FILE  path from the repository root; a .pas file is compiled with
+#         target/debug/dpc into tmp/conform/ first, a .s file is used as is.
+#   SPEC  NAME | NAME:LEN | 0xADDR | 0xADDR:LEN   (LEN hex).  NAME is a map
+#         name; 0xADDR is a module-local routine the map does not name.
+#         The routines of a unit must be contiguous in the image.
+#
+# handasm/ entries are harness fixtures transcribed by hand from the image,
+# not compiler output.
+
+tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
+tests/conformance/handasm/ast_page_zero.s    0xE00EB0 AST_$PAGE_ZERO

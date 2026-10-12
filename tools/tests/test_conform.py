@@ -1,0 +1,199 @@
+"""End-to-end tests for tools/conform.py against the SR10.2 SAU2 image.
+
+The .s files used here are harness fixtures (tests/conformance/handasm/),
+hand-transcribed from the image, not compiler output.  Skipped when the
+image, the map or the m68k-elf toolchain is absent.
+"""
+
+import contextlib
+import io
+import os
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..'))
+import conform  # noqa: E402
+import sau2map  # noqa: E402
+
+HANDASM = os.path.join(conform.REPO, 'tests', 'conformance', 'handasm')
+SCRATCH = os.path.join(conform.REPO, 'tmp', 'conform-tests')
+MISSING = conform.missing_prereqs()
+
+
+@unittest.skipIf(MISSING, 'missing: %s' % ', '.join(MISSING))
+class ConformTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.map = sau2map.load()
+        os.makedirs(SCRATCH, exist_ok=True)
+
+    def run_check(self, path, specs, **kw):
+        out = []
+        ok = conform.check(path, specs, self.map, out=out.append, **kw)
+        return ok, '\n'.join(out)
+
+    def variant(self, src, name, old, new):
+        """A copy of fixture `src' with `old' replaced by `new'."""
+        with open(os.path.join(HANDASM, src)) as f:
+            text = f.read()
+        self.assertIn(old, text)
+        path = os.path.join(SCRATCH, name)
+        with open(path, 'w') as f:
+            f.write(text.replace(old, new))
+        return path
+
+    # -- PROC1_$TST_LOCK 0xE148CA..0xE148E6 ------------------------------
+    def test_tst_lock_passes(self):
+        ok, out = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
+                                 ['PROC1_$TST_LOCK'])
+        self.assertTrue(ok, out)
+        self.assertEqual(out, 'OK PROC1_$TST_LOCK 0xE148CA 0x1C')
+
+    def test_tst_lock_abs_long(self):
+        # gas must emit 2079 00e1 eac8 for the absolute-long movea.l
+        ok, _ = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
+                               ['PROC1_$TST_LOCK'], quiet=True)
+        self.assertTrue(ok)
+        with open(os.path.join(conform.SCRATCH, 'proc1_tst_lock', 'code.bin'), 'rb') as f:
+            self.assertEqual(f.read()[4:10], bytes.fromhex('207900e1eac8'))
+
+    def test_tst_lock_frame_size_fails(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_link8.s',
+                            'link.w\t%fp,#-4', 'link.w\t%fp,#-8')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('bytes differ first at 0xE148CD', out)
+        self.assertIn('* e148ca', out)
+
+    def test_tst_lock_wrong_symbol_fails(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_sym.s',
+                            '(PROC1_$CURRENT_PCB).l', '(PROC1_$READY_COUNT).l')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('R_68K_32 names PROC1_$READY_COUNT', out)
+        self.assertIn('is PROC1_$CURRENT_PCB', out)
+
+    def test_unknown_external_is_an_error(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_unknown.s',
+                            '(PROC1_$CURRENT_PCB).l', '(NOT_IN_THE_MAP).l')
+        with self.assertRaisesRegex(conform.SetupError, 'NOT_IN_THE_MAP'):
+            self.run_check(path, ['PROC1_$TST_LOCK'])
+
+    def test_wrong_length_fails(self):
+        ok, out = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
+                                 ['PROC1_$TST_LOCK:1E'])
+        self.assertFalse(ok)
+        self.assertIn('size:', out)
+
+    def test_missing_last_instruction_fails(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_short.s', '\trts\t', '|')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x1A bytes', out)
+
+    def test_trailing_junk_fails(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_long.s', '\trts\t', '\trts\n\tnop\t')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x1E bytes', out)
+
+    def test_literal_address_fails(self):
+        # right bytes, but the reference is hard-coded, not named
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_literal.s',
+                            '(PROC1_$CURRENT_PCB).l', '(0xE1EAC8).l')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('0xE148D0: literal 0xE1EAC8 (PROC1_$CURRENT_PCB) with no relocation', out)
+
+    def test_lowercase_external_is_an_error(self):
+        # external names are upper-cased; the map lookup must be exact
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_lower.s',
+                            '(PROC1_$CURRENT_PCB).l', '(proc1_$current_pcb).l')
+        with self.assertRaisesRegex(conform.SetupError, r'proc1_\$current_pcb'):
+            self.run_check(path, ['PROC1_$TST_LOCK'])
+
+    def test_local_misplaced_routine_label_fails(self):
+        # same bytes, but PROC1_$TST_LOCK is a local label 4 bytes in
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_local.s',
+                            '\t.globl\tPROC1_$TST_LOCK\nPROC1_$TST_LOCK:\n'
+                            '\tlink.w\t%fp,#-4\t\t\t\t| 4e56 fffc\n',
+                            '\tlink.w\t%fp,#-4\nPROC1_$TST_LOCK:\n')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('routine PROC1_$TST_LOCK is not defined as a global code symbol', out)
+
+    def test_global_not_in_map_fails(self):
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_extra_global.s',
+                            'PROC1_$TST_LOCK:\n', 'PROC1_$TST_LOCK:\n\t.globl\tWORKER\nWORKER:\n')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('global symbol WORKER is not in the map', out)
+
+    def test_data_section_compared(self):
+        # a data section must be placed and is then compared with the image
+        # (0xE148E6 starts PROC1_$GET_LOCKS: 4e56 fffc)
+        good = self.variant('proc1_tst_lock.s', 'tst_lock_data_ok.s',
+                            '\trts\t', '\t.data\n\t.short\t0x4e56\n\t.text\n\trts\t')
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('section .data has contents but no --section-addr', out)
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE148E6})
+        self.assertTrue(ok, out)
+        bad = self.variant('proc1_tst_lock.s', 'tst_lock_data_bad.s',
+                           '\trts\t', '\t.data\n\t.short\t0x4e57\n\t.text\n\trts\t')
+        ok, out = self.run_check(bad, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE148E6})
+        self.assertFalse(ok)
+        self.assertIn('section .data differs first at 0xE148E7: ours 57, image 56', out)
+
+    def test_manifest_setup_error_exits_2(self):
+        path = os.path.join(SCRATCH, 'manifest_unknown.txt')
+        with open(path, 'w') as f:
+            f.write('tests/conformance/handasm/proc1_tst_lock.s  NO_SUCH_ROUTINE\n')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = conform.main(['manifest', path])
+        self.assertEqual(rc, 2)
+        self.assertIn('NO_SUCH_ROUTINE is not in the map', buf.getvalue())
+
+    def test_module_local_spec(self):
+        ok, out = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'), ['0xE148CA:1C'])
+        self.assertTrue(ok, out)
+
+    # -- 0xE00EB0 + AST_$PAGE_ZERO 0xE00EB0..0xE00F16 --------------------
+    def test_two_routines_pass(self):
+        ok, out = self.run_check(os.path.join(HANDASM, 'ast_page_zero.s'),
+                                 ['AST_$PAGE_ZERO', '0xE00EB0'])
+        self.assertTrue(ok, out)
+        self.assertEqual(out.splitlines(), ['OK module-local@0xE00EB0 0xE00EB0 0x3C',
+                                            'OK AST_$PAGE_ZERO 0xE00EEC 0x2A'])
+
+    def test_pc_relative_relocation(self):
+        # worker and caller in separate sections: the bsr.s becomes an
+        # R_68K_PC8 relocation, which must land on 0xE00EB0
+        path = self.variant('ast_page_zero.s', 'apz_sections.s',
+                            '\t.text\n', '\t.section .text.worker,"ax"\n')
+        with open(path) as f:
+            text = f.read().replace('\t.globl\tAST_$PAGE_ZERO',
+                                    '\t.section .text.caller,"ax"\n\t.globl\tAST_$PAGE_ZERO')
+        with open(path, 'w') as f:
+            f.write(text)
+        ok, out = self.run_check(path, ['0xE00EB0', 'AST_$PAGE_ZERO'])
+        self.assertTrue(ok, out)
+        # one more instruction ahead of the caller moves it: placement, size,
+        # bytes and the PC8 target all fail
+        with open(path, 'w') as f:
+            f.write(text.replace('\t.section .text.caller,"ax"\n',
+                                 '\t.section .text.caller,"ax"\n\tnop\n'))
+        ok, out = self.run_check(path, ['0xE00EB0', 'AST_$PAGE_ZERO'])
+        self.assertFalse(ok)
+        self.assertIn('symbol AST_$PAGE_ZERO linked at 0xE00EEE, map has 0xE00EEC', out)
+
+    def test_not_contiguous_is_an_error(self):
+        with self.assertRaisesRegex(conform.SetupError, 'not contiguous'):
+            self.run_check(os.path.join(HANDASM, 'ast_page_zero.s'),
+                           ['0xE00EB0:3A', 'AST_$PAGE_ZERO'])
+
+
+if __name__ == '__main__':
+    unittest.main()

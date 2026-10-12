@@ -12,5 +12,14 @@ does.  The harness keeps a table of external symbols and their image
 addresses, taken from the SAU2 link map.
 
 The first candidates are listed in CLAUDE.md section 6 (PROC1_$TST_LOCK,
-TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).  No tests
-yet.
+TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).  No
+compiled tests yet.
+
+The harness is `tools/conform.py` (map reader: `tools/sau2map.py`).  Units
+are listed in `manifest.txt` and run with `make conform`; one unit can be
+checked with
+
+    python3 tools/conform.py check FILE.s --routine NAME [--addr 0xADDR[:LEN]]
+
+`handasm/` holds harness fixtures transcribed by hand from the image.  They
+test the harness itself and are **not** compiler output.
