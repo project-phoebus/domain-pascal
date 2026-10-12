@@ -6,3 +6,4 @@ publish.workspace = true
 
 [dependencies]
 dpc-syntax = { path = "../dpc-syntax" }
+dpc-target = { path = "../dpc-target" }

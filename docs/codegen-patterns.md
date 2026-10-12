@@ -199,6 +199,13 @@ last parameter, and the caller's pop includes it.
     0xE1A9C2 and PROC1_$TST_LOCK 0xE148CA have `link #-4` and never touch
     the slot.  **Uncertain:** whether that is a function-result variable
     (both are functions).
+  - The displacement is always a multiple of 4: all 1171 `link.w A6,#d`
+    found at routine addresses named in the map have `d mod 4 = 0` (a scan
+    of every `4e56` word in 0xE00800..0xE88834 finds one exception, not at
+    a routine start, possibly data).  **Uncertain:** whether the total is
+    rounded or each frame object gets a 4-byte-aligned slot.  `dpc-sema`
+    records the raw size (`Routine::frame_size`) and leaves this to the
+    backend.
 - **Register save:** `movem.l <regs>,-(SP)` straight after `link`.  It
   saves only the callee-saved registers the routine uses
   (0xE5C698 `movem.l D2-D7/A2-A4,-(SP)`).
@@ -291,13 +298,13 @@ variables.  Each module's static data is a data segment, addressed off
 |---|---|---|
 | `integer`, `integer16` | 2 | signed; **`integer` is 16 bits** (ref 3.2.1) |
 | `integer32` | 4 | |
-| subrange | size of base type (ref 3.8.1) | 0..65535-style unsigned subranges of integer32 etc.; packed records differ |
+| subrange | size of base type (ref 3.8.1) | 2 bytes up to `0..65535` (ref 5.3.4.1 p. 5-13: `0..65535` and integer are "both 16-bit integers"; Table 7-2 p. 7-30: `unsigned short`); 4 bytes once more than 16 bits are needed (3.4 p. 3-10); packed records differ |
 | `boolean` | 1 | true = 0xFF, false = 0x00 (ref 3.5.3); tested with `tst.b`/`bmi`/`bpl`, i.e. **signed** byte |
 | `char` | 1 | |
 | enumeration | 2 | ordinal in a word (ref 3.7.1) |
 | pointer, `univ_ptr` | 4 | |
-| set | ⌈(max ordinal + 1)/16⌉ words | ref 3.9.3; see 5.1 |
-| record | ref 3.10.5 (alignment rules: "natural" vs default word alignment; `aligned`/`unaligned` records) | **Uncertain:** kernel's alignment mode; field offsets in `../source/domain_os/*/*.h` `_Static_assert`s are ground truth |
+| set | ⌈(max ordinal + 1)/16⌉ words | ref 3.9.3; see 5.1.  The high end of the base type decides, whatever the low end: `set of 80..170` is 11 words, `set of 'a'..'z'` 8 words (p. 3-17); checked by `crates/dpc-sema/src/tests/layout.rs` |
+| record | ref 3.10.5 (alignment rules: "natural" vs default word alignment; `aligned`/`unaligned` records) | **Reported: default word alignment** (ref 3.10.5.5: fields longer than a byte on word boundaries, record size even).  `route_$port_stats_t` (`../source/domain_os/route/route.h`) has longwords at 0x2 and 0x6, which natural alignment cannot produce: ROUTE_RTWIRED code `addq.l #1,(0x6,A2)` 0xE87660, `addq.l #1,(0xA,A2,D1.l)` 0xE8765A (seen; that A2 is the record start is the C's claim).  `proc1_t` (`proc1/proc1.h`) also matches word rules.  Field offsets in `_Static_assert`s remain ground truth |
 | arrays | 1-based is common in the kernel; element N at base + (N-lo)*size | |
 
 ### 5.1 Sets (Verified)
@@ -369,6 +376,11 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
 - **Arguments:** nested routines also take ordinary stack arguments
   (0xE1359C reads `(8,A6)`, `(0xC,A6)`, `(0x10,A6)`), with the value
   conventions of `internal` routines.
+  Verified at the call site too: PMAP_$FLUSH 0xE13920..0xE1392A pushes
+  `subq.l #2,SP; move.w D6,-(SP); move.l D5,-(SP); pea (A2)` (a word and a
+  longword by value, one address, pad first) before `movea.l A6,A1; bsr.w
+  0xE1359C`.  The reference does not say that nested routines get the
+  `internal` convention; `dpc-sema` applies it on this evidence.
 - **A5:** nested routines inherit A5 (section 4).
 - **Order:** nested routines are emitted before their enclosing routine
   (PMAP_$FLUSH).  The same holds for module-local workers placed before

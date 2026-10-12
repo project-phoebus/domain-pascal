@@ -1,9 +1,10 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
-//! usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast] file.pas
+//! usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
-//! their positions); `--dump-ast` also prints the AST to stdout.
+//! their positions); `--dump-ast` also prints the AST to stdout;
+//! `--check-only` stops after semantic analysis.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +12,8 @@ use std::process::ExitCode;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
 const PROG: &str = "dpc";
-const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast] file.pas";
+const USAGE: &str =
+    "usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ enum Stop {
     AfterParse,
     /// Stop after parsing and print the AST.
     DumpAst,
+    /// Stop after semantic analysis.
+    AfterCheck,
 }
 
 #[derive(Debug)]
@@ -49,6 +53,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
+            "--check-only" => stop = Stop::AfterCheck,
             s if s.starts_with("-I") && s.len() > 2 => include_dirs.push(s[2..].into()),
             s if s.starts_with('-') && s != "-" => return Err(format!("unknown option `{s}`")),
             _ => {
@@ -92,14 +97,18 @@ fn compile(
     warnings.extend(pp.diagnostics);
     let unit = dpc_syntax::parser::parse(&pp.tokens)?;
     match args.stop {
-        Stop::Never => {}
+        Stop::Never | Stop::AfterCheck => {}
         Stop::AfterParse => return Ok(()),
         Stop::DumpAst => {
             println!("{unit:#?}");
             return Ok(());
         }
     }
-    let program = dpc_sema::analyze(&unit)?;
+    let program = dpc_sema::analyze(&unit, &dpc_m68k::M68k)?;
+    warnings.extend(program.warnings.iter().cloned());
+    if args.stop == Stop::AfterCheck {
+        return Ok(());
+    }
     let module = dpc_ir::lower(&program);
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string());
 
@@ -172,6 +181,10 @@ mod tests {
             Stop::AfterParse
         );
         assert_eq!(args(&["--dump-ast", "m.pas"]).unwrap().stop, Stop::DumpAst);
+        assert_eq!(
+            args(&["--check-only", "m.pas"]).unwrap().stop,
+            Stop::AfterCheck
+        );
     }
 
     #[test]

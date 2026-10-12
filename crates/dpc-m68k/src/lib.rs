@@ -31,6 +31,25 @@ impl Target for M68k {
     fn arg_area_align(&self) -> u32 {
         4
     }
+
+    /// An 8-bit value pushed with `move.b x,-(SP)` lands in the HIGH
+    /// (even-address) byte of its 2-byte slot: TIME_$Q_INIT_QUEUE 0xE16C62
+    /// `move.b (0x8,A6),D0b` (codegen-patterns 1.3).
+    fn small_arg_offset_in_slot(&self, _size: u32) -> u32 {
+        0
+    }
+
+    /// Return address (4) + saved A6 (4): argument 1 is at `(8,A6)`
+    /// (codegen-patterns 1.1; PROC1_$TST_LOCK 0xE148D4 `move.w (0x8,A6),D0w`).
+    fn first_arg_offset(&self) -> i32 {
+        8
+    }
+
+    /// Ref 5.5.7, p. 5-19: "four bytes or less in size (on 680x0
+    /// workstations)".
+    fn val_param_max_size(&self) -> u32 {
+        4
+    }
 }
 
 #[cfg(test)]
@@ -44,5 +63,8 @@ mod tests {
         assert_eq!(t.pointer_size(), 4);
         assert_eq!(t.arg_slot_size(), 2);
         assert_eq!(t.arg_area_align(), 4);
+        assert_eq!(t.small_arg_offset_in_slot(1), 0);
+        assert_eq!(t.first_arg_offset(), 8);
+        assert_eq!(t.val_param_max_size(), 4);
     }
 }

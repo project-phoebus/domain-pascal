@@ -3,21 +3,38 @@
 //! base, ...) are answered here, so the front end and the IR stay
 //! target-neutral.
 //!
-//! Minimal for now; hooks are added as the backend needs them.
+//! Semantic analysis asks these questions when it lays out argument areas
+//! and decides which parameters travel by value (crate `dpc-sema`).
 
 /// What the rest of the compiler may ask about a target.
 pub trait Target {
     /// Short name, e.g. `"m68k"`.
     fn name(&self) -> &'static str;
 
-    /// Size of a data pointer, in bytes.
+    /// Size of a data pointer, in bytes.  Also the size of an argument
+    /// passed by address.
     fn pointer_size(&self) -> u32;
 
-    /// Smallest stack slot an argument occupies, in bytes.
+    /// Smallest stack slot an argument occupies, in bytes.  A by-value
+    /// argument's slot is its size rounded up to a multiple of this.
     fn arg_slot_size(&self) -> u32;
 
     /// The total size of pushed arguments is padded to a multiple of this.
     fn arg_area_align(&self) -> u32;
+
+    /// Where a by-value argument smaller than its slot sits inside the
+    /// slot, as a byte offset from the slot's lowest address.
+    fn small_arg_offset_in_slot(&self, size: u32) -> u32;
+
+    /// Frame offset of the first (leftmost) argument's slot, relative to
+    /// the callee's frame pointer after its prologue.  Later arguments
+    /// follow at increasing offsets (arguments are pushed right to left).
+    fn first_arg_offset(&self) -> i32;
+
+    /// Largest value and `in` parameter that `val_param` / `internal`
+    /// routines receive by value (ref 5.5.7, p. 5-19: "four bytes or less
+    /// in size (on 680x0 workstations)").
+    fn val_param_max_size(&self) -> u32;
 }
 
 #[cfg(test)]
@@ -39,6 +56,15 @@ mod tests {
         fn arg_area_align(&self) -> u32 {
             16
         }
+        fn small_arg_offset_in_slot(&self, _size: u32) -> u32 {
+            0
+        }
+        fn first_arg_offset(&self) -> i32 {
+            16
+        }
+        fn val_param_max_size(&self) -> u32 {
+            8
+        }
     }
 
     #[test]
@@ -46,5 +72,6 @@ mod tests {
         let t: &dyn Target = &Dummy;
         assert_eq!(t.name(), "dummy");
         assert_eq!(t.pointer_size(), 8);
+        assert_eq!(t.first_arg_offset(), 16);
     }
 }

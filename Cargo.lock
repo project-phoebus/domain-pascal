@@ -32,6 +32,7 @@ name = "dpc-sema"
 version = "0.1.0"
 dependencies = [
  "dpc-syntax",
+ "dpc-target",
 ]
 
 [[package]]

@@ -79,3 +79,51 @@ fn refuses_to_overwrite_input() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(std::fs::read_to_string(&src).unwrap(), "module m;\n");
 }
+
+#[test]
+fn check_only_accepts_tst_lock() {
+    let dir = scratch("check_only_accepts_tst_lock");
+    let src = dir.join("tst.pas");
+    std::fs::write(
+        &src,
+        "module proc1_tst;
+type
+  proc1_$pcb_t = record
+    pad: array[1..16] of integer32;
+    resource_locks_held: set of 0..31;
+  end;
+var
+  proc1_$current_pcb: extern ^proc1_$pcb_t;
+function proc1_$tst_lock(lock_id: integer): boolean; options(val_param);
+begin
+  proc1_$tst_lock := lock_id in proc1_$current_pcb^.resource_locks_held;
+end;
+",
+    )
+    .unwrap();
+    let out = dpc().arg("--check-only").arg(&src).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.join("tst.s").exists());
+}
+
+#[test]
+fn semantic_errors_have_positions() {
+    let dir = scratch("semantic_errors_have_positions");
+    let src = dir.join("bad.pas");
+    std::fs::write(
+        &src,
+        "module bad;\nprocedure p;\nbegin\n  nosuch := 1;\nend;\n",
+    )
+    .unwrap();
+    let out = dpc().arg(&src).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("bad.pas:4:3: error: undefined identifier `nosuch`"),
+        "{err}"
+    );
+}

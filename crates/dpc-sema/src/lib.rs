@@ -1,31 +1,32 @@
 //! Semantic analysis: symbol tables, types, data layout and
 //! parameter-passing conventions (CLAUDE.md section 4.2).  This phase owns
 //! every ABI-relevant decision that comes from the *language*; the backend
-//! only executes them.
+//! only executes them.  Numbers that come from the ABI rather than the
+//! language are asked of [`dpc_target::Target`] (CLAUDE.md 4.5).
 //!
-//! Stub: filled in by the semantics work.
+//! - [`types`]: types and their layout (ref chapter 3);
+//! - [`conv`]: parameter and result conventions (ref 5.2 Table 5-1, 5.5);
+//! - [`program`]: the annotated program handed to IR lowering;
+//! - `check`: the checker that builds it.
+
+mod check;
+pub mod consts;
+pub mod conv;
+pub mod program;
+pub mod types;
+
+#[cfg(test)]
+mod tests;
 
 use dpc_syntax::ast::CompilationUnit;
 use dpc_syntax::Diagnostic;
+use dpc_target::Target;
 
-/// The checked program handed to IR lowering.
-#[derive(Debug, Default)]
-pub struct Program {}
+pub use program::*;
 
-/// Check a parsed compilation unit.  Stub: accepts everything.
-pub fn analyze(_unit: &CompilationUnit) -> Result<Program, Vec<Diagnostic>> {
-    Ok(Program::default())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn analyze_empty_unit() {
-        use dpc_syntax::{preprocess, SourceMap};
-        let mut sm = SourceMap::new();
-        let f = sm.add("m.pas", "module m;".to_string());
-        let pp = preprocess::preprocess(&mut sm, f, &Default::default());
-        let unit = dpc_syntax::parser::parse(&pp.tokens).unwrap();
-        assert!(super::analyze(&unit).is_ok());
-    }
+/// Check a parsed compilation unit for `target`.  On success the program
+/// carries any warnings; on failure every error is returned, with its
+/// source position.
+pub fn analyze(unit: &CompilationUnit, target: &dyn Target) -> Result<Program, Vec<Diagnostic>> {
+    check::Checker::new(target).unit(unit)
 }

@@ -81,6 +81,63 @@ Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
    is shown for programs (2.2.1, p. 2-10) but not for modules.  *Current:
    accepted for programs only.*
 
+Raised by the semantics work (domain-pascal-0sp.5; no bead filed yet).
+Conservative choices are implemented and marked `TODO(ref-question)` in
+`crates/dpc-sema/src/`.
+
+9. **5.2 NOTE, p. 5-4 vs. 5.5.7, p. 5-19.** p. 5-4: "All character arrays
+   are treated like arguments with fewer than four bytes, regardless of
+   their size."  p. 5-19: "all arguments four bytes or less in size (on
+   680x0 workstations) ... (except for character arrays) are passed by
+   value".  Under `val_param`, does a character array go by value or by
+   address?  *Current: by address (5.5.7; codegen-patterns 1.2).*
+10. **5.5.7, p. 5-19.** "all arguments four bytes or less in size ... are
+    passed by value".  Does this include records and non-character arrays
+    of 4 bytes or less, or are records passed by value only under
+    `c_param` (5.5.12, p. 5-21: "In addition, the c_param option tells the
+    compiler to pass all record data types by value")?  *Current: the
+    literal reading; small records and arrays go by value under
+    `val_param`.*  Image evidence so far does not settle it: the
+    module-local worker the C calls `smd_$cursor_op` (0xE6DFFA, a by-value
+    convention routine) receives a 4-byte position by value from
+    SMD_$DISPLAY_CURSOR (`movea.l (0xc,A6),A0; move.l (A0),-(SP)` at
+    0xE6E092..0xE6E096, call 0xE6E09E), but its Pascal type (record or
+    integer32) cannot be seen: the worker only passes `pea (0xa,A6)` on
+    (0xE6E05E).  No `../source` prototype passes a `_Static_assert`ed
+    2- or 4-byte struct by value.
+11. *Settled by the reference (no owner ruling needed).*  An unsigned
+    subrange whose upper bound is in 32768..65535 is 16 bits.  5.3.4.1,
+    p. 5-13 (PDF p. 368): "pinteger = 0...65535; ... The type pinteger is
+    defined as a subrange of base type integer. ... Even though pinteger
+    and integer are both 16-bit integers".  Also Table 7-2, p. 7-30 (PDF
+    p. 455): "0..65335 [sic] | unsigned short"; and the varying-string
+    record, p. 3-44, "length : 0..65535", which p. 3-46 calls "a 2-byte
+    length field".  3.4, p. 3-10 ("large enough to require 31 bits, the
+    compiler allocates 32 bits") covers only the 32-bit case.
+    *Implemented: such a subrange has an integer32 host in the checker
+    (its values do not fit integer16) and 2-byte storage
+    (`crates/dpc-sema/src/types.rs`, `layout_of`; test
+    `unsigned_16_bit_subranges_are_words`).*
+12. **5.6.4, p. 5-22.** default_routine_options apply to "every subsequent
+    routine in that module that does not specify a routine option".  Does a
+    routine that specifies only `extern`, `forward` or `internal` (which
+    5.6.1, p. 5-22, bars from routine_option parts) still get the
+    defaults?  *Current: yes; only interface options cancel the defaults.*
+13. **7.2, p. 7-3.** Is a module-level variable declared with no
+    allocation clause (and no section) exported, like `define`, or local,
+    like `static`?  *Current: allocated in the module's data section,
+    local symbol.*  7.2 (p. 7-3) lists `define` as the clause that makes a
+    name "externally accessible", and Method 4 (7.2.4, p. 7-7) shares plain
+    `var (my_sec)` variables between modules by section, not by name
+    ("There's no requirement that the variables in Sub2 have the same
+    names"), which fits "local" but is not stated for the default `.data`
+    section.
+14. **"Pointer Operations", p. 4-144.** "Compare or assign the value of one
+    pointer variable to another compatible pointer variable": are two
+    pointer types compatible when they point to the same type, or only
+    when they are the same named type (p. 4-207 says the latter for
+    pointers to varying strings)?  *Current: same target type.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and
@@ -97,3 +154,14 @@ Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
 - **5.7.1, p. 5-26**: the main program of the section example ends with
   `END;` (checked in the PDF); a main program ends with `END.` (2.2,
   Figure 2-1, p. 2-8).  The parser requires `.`.
+- **Table 5-1, p. 5-5** (PDF p. 360): the IN row says "UNIV: Cancels the
+  effect of var_param and internal"; the no-mode row says "val_param".
+  `var_param` is read as `val_param`.
+- **3.11.4.1, p. 3-46**: "The compiler adds 2 or 3 bytes of padding to make
+  the total size of the string an even number of longwords" contradicts the
+  examples on the same page (`varying[8]` is 14 bytes).  The summary rule
+  and the examples ("add either 5 or 6 bytes ... such that the total number
+  of bytes is an even number") are followed.
+- **3.10.5.7, p. 3-29**: "there are 4 bytes of gaps" in record FOO, but
+  Figure 3-12 (PDF p. 85) shows two 1-byte gaps.  The figure's offsets are
+  followed.
