@@ -1,6 +1,6 @@
 # Image-conformance manifest, run by `make conform' (tools/conform.py manifest).
 #
-# One unit per line:  FILE SPEC... [--section-addr SEC=0xADDR]...
+# One unit per line:  FILE SPEC... [--section-addr SEC=0xADDR]... [ALIGN]
 #   FILE  path from the repository root; a .pas file is compiled with
 #         target/debug/dpc into tmp/conform/FILE/ first (with
 #         --fragment-origin unless the unit is a whole map module), a .s
@@ -8,6 +8,9 @@
 #   SPEC  NAME | NAME:LEN | 0xADDR | 0xADDR:LEN   (LEN hex).  NAME is a map
 #         name; 0xADDR is a module-local routine the map does not name.
 #         The routines of a unit must be contiguous in the image.
+#   ALIGN loop-align=on | loop-align=off | loop-align-off-from=ROUTINE,
+#         forwarded to dpc (.pas units only; README.md, "Loop alignment
+#         on and off"; tools/loopalign.py switch SEG).
 #
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.

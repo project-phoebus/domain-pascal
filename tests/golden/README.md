@@ -14,8 +14,10 @@ See CLAUDE.md section 6, item 2.
 The runner is `crates/dpc/tests/golden.rs` (part of `cargo test` /
 `make test`).  It compiles each `.pas` with the `dpc` binary and compares
 the normalised output: `|` comments removed, lines trimmed, runs of blanks
-collapsed to one space, empty lines dropped.  `DPC_BLESS=1 cargo test
---test golden` rewrites the expected files from the compiler's output.
+collapsed to one space, empty lines dropped.  A `<name>.args` file next
+to a `.pas` holds extra `dpc` options, separated by white space.
+`DPC_BLESS=1 cargo test --test golden` rewrites the expected files from
+the compiler's output.
 
 Tests:
 
@@ -39,6 +41,10 @@ Tests:
   of constants (`clr`, `pea (n).w`, `move.l #n`, merged word pairs, `st`),
   values and addresses, pads, `addq.w`/`lea` pops, no pop when no push
   follows (0xE41050), `jsr` and `bsr.s`/`bsr.w` (0xE00EB0, AST_$PAGE_ZERO 0xE00EEC).
+- `loops/align_off_from` - codegen-patterns 7: `dpc
+  --loop-align-off-from` (options in `align_off_from.args`); fillers
+  before the named routine, none from it on, the module end padded
+  with zero words (VTOC_$MOUNT 0xE3871E / VTOC_$DISMOUNT 0xE387CE).
 - `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
   index is used for nothing else, as `movea.l #sym,A0`, count, filler,
   `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).

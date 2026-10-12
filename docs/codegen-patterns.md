@@ -803,6 +803,13 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
       RING, ACL_, OLD_DIR, VTOC_ .TEXT, ...);
     - 2 `0x0000` segments end in aligning code (NET_IO, HINT_), but their
       last few routines have no loop to tell.
+    - 4 of the 21 final `0x0000` words are not padding but a pooled
+      word constant that the segment's code passes by address with
+      `pea (d,PC)` (section 1.5): NET_IO 0xE0E8C2 (from
+      0xE0E848), OS_TERM 0xE1AB26 (0xE1AB0C), WIN_ 0xE303D6 (0xE30358,
+      0xE303BE), DIR_SERVER 0xE5839E (0xE58374).  So NET_IO is not an
+      exception; HINT_ still is (Verified: a scan of every routine of the
+      21 segments for a PC-relative operand naming the last word).
 
     So non-aligning code does not pad the segment end; whether the
     compiler or the binder wrote the `0x0000` is Uncertain.  The cause of
@@ -819,6 +826,20 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
     `%push_alignment`/`%pop_alignment` (4.7, Table 4-11, p. 4-44).  The
     reference ties them to data layout only.  Whether one of them also
     turns loop alignment off is untested (a lead, not a finding).
+  - **Implemented** (bead domain-pascal-vp7): since the cause is not
+    known, the switch is a `dpc` option, not a source directive:
+    `--loop-align=on|off` (default on) and
+    `--loop-align-off-from=ROUTINE` (on before ROUTINE in emission
+    order, off from it on).  dpc's emission order is code section by
+    code section, and the unit's routine order within one; a routine
+    declared `forward` is placed at its declaration, not at its body
+    (whether the original compiler did the same is unverified).  A routine that does not align gets no
+    filler (`crates/dpc-m68k/src/emit.rs` drops its `Align4`s before the
+    branches are sized); the module end, or a module-tail fragment's, is
+    padded with `0x2048` after an aligning last routine and with zero
+    words otherwise.  The conformance manifest passes the option per unit
+    (`tests/conformance/README.md`); `tools/loopalign.py switch SEG`
+    shows the interval in which a segment's switch lies.
   - **Hypotheses refuted:**
     - *Another alignment base.*  All 210 `I` segments start at 0 mod 4
       and have a size that is a multiple of 4.  Aligning code aligns to

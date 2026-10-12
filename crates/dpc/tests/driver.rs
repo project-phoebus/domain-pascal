@@ -191,3 +191,125 @@ fn fragment_origin_shifts_and_drops_end_padding() {
     assert!(asm.contains("\t.text\n\t.space\t2\t|"), "{asm}");
     assert!(!asm.contains(".balignw"), "{asm}");
 }
+
+/// Compile `src` (written to a scratch file) with `opts`; the output
+/// text, or the exit code and stderr.
+fn compile_with(name: &str, src: &str, opts: &[&str]) -> Result<String, (Option<i32>, String)> {
+    let dir = scratch(name);
+    let path = dir.join("m.pas");
+    std::fs::write(&path, src).unwrap();
+    let out = dir.join("m.s");
+    let run = dpc()
+        .args(opts)
+        .arg("-o")
+        .arg(&out)
+        .arg(&path)
+        .output()
+        .unwrap();
+    if run.status.success() {
+        Ok(std::fs::read_to_string(&out).unwrap())
+    } else {
+        Err((
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr).into_owned(),
+        ))
+    }
+}
+
+/// Two routines with a `for` fill loop each (codegen-patterns 7).
+const TWO_FILLS: &str = "module m;
+var
+  a: extern array[0..255] of integer32;
+procedure m_$first;
+var i: integer;
+begin
+  for i := 0 to 255 do a[i] := 0;
+end;
+procedure m_$second;
+var i: integer;
+begin
+  for i := 0 to 255 do a[i] := 0;
+end;
+";
+
+const FILLER: &str = "\t.balignw\t4,0x2048";
+const ZERO_PAD: &str = "\t.balignw\t4,0x0000";
+
+#[test]
+fn loop_align_on_by_default() {
+    let asm = compile_with("loop_align_on_by_default", TWO_FILLS, &[]).unwrap();
+    // two loop heads and the module end
+    assert_eq!(asm.matches(FILLER).count(), 3, "{asm}");
+    assert!(!asm.contains(ZERO_PAD), "{asm}");
+    let on = compile_with("loop_align_on", TWO_FILLS, &["--loop-align=on"]).unwrap();
+    // the same code (the header line names the source file)
+    assert_eq!(
+        asm.split_once('\n').unwrap().1,
+        on.split_once('\n').unwrap().1
+    );
+}
+
+#[test]
+fn loop_align_off() {
+    let asm = compile_with("loop_align_off", TWO_FILLS, &["--loop-align=off"]).unwrap();
+    assert!(!asm.contains("0x2048"), "{asm}");
+    assert!(
+        asm.trim_end()
+            .ends_with("rts\n\t.balignw\t4,0x0000\t| zero words: the last routine does not align"),
+        "{asm}"
+    );
+}
+
+#[test]
+fn loop_align_off_from_a_routine() {
+    // the Pascal name in any case, or the external symbol
+    for name in ["m_$second", "M_$SECOND", "M_$Second"] {
+        let asm = compile_with(
+            "loop_align_off_from_a_routine",
+            TWO_FILLS,
+            &[&format!("--loop-align-off-from={name}")],
+        )
+        .unwrap();
+        let (first, second) = asm.split_once("M_$SECOND:").unwrap();
+        assert_eq!(first.matches(FILLER).count(), 1, "{asm}");
+        assert!(!second.contains("0x2048"), "{asm}");
+        assert!(second.contains(ZERO_PAD), "{asm}");
+    }
+    // a fragment that ends its module whose last routine aligns
+    let asm = compile_with(
+        "loop_align_off_from_a_routine",
+        TWO_FILLS,
+        &[
+            "--fragment-origin",
+            "0x1000",
+            "--fragment-ends-module",
+            "--loop-align-off-from=m_$first",
+        ],
+    )
+    .unwrap();
+    assert!(!asm.contains("0x2048"), "{asm}");
+    assert!(asm.contains(ZERO_PAD), "{asm}");
+}
+
+#[test]
+fn loop_align_off_from_unknown_routine_is_an_error() {
+    let (code, err) = compile_with(
+        "loop_align_off_from_unknown_routine",
+        TWO_FILLS,
+        &["--loop-align-off-from=m_$third"],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("--loop-align-off-from: no routine `m_$third` in this unit"),
+        "{err}"
+    );
+    let (code, err) = compile_with(
+        "loop_align_bad_value",
+        TWO_FILLS,
+        &["--loop-align=sometimes"],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(2));
+    assert!(err.contains("want `on` or `off`"), "{err}");
+}

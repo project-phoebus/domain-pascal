@@ -5,6 +5,9 @@
 //! Normalisation: `|` comments are removed, each line is trimmed, runs of
 //! blanks become one space, empty lines are dropped.
 //!
+//! A `<name>.args` file next to the `.pas` holds extra `dpc` options,
+//! separated by white space (`loops/align_off_from.args`).
+//!
 //! `DPC_BLESS=1 cargo test --test golden` rewrites the expected files from
 //! the compiler's output; a golden change needs a reason in the commit
 //! message.
@@ -75,7 +78,9 @@ fn golden() {
         let out_path = scratch
             .join(name.replace(['/', '\\'], "_"))
             .with_extension("s");
+        let extra = std::fs::read_to_string(src.with_extension("args")).unwrap_or_default();
         let run = Command::new(env!("CARGO_BIN_EXE_dpc"))
+            .args(extra.split_whitespace())
             .arg("-o")
             .arg(&out_path)
             .arg(src)

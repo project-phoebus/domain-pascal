@@ -8,6 +8,13 @@ reproduces, and compare the bytes with the SR10.2 SAU2 kernel image.
     conform.py check FILE.s --addr 0xADDR[:LEN] --routine NAME
     conform.py manifest tests/conformance/manifest.txt [--dpc target/debug/dpc]
 
+A manifest line is `FILE SPEC... [--section-addr SEC=0xADDR]... [OPTION]...'
+where OPTION is `loop-align=on', `loop-align=off' or
+`loop-align-off-from=NAME' (.pas units only), forwarded to dpc as
+`--loop-align=...' / `--loop-align-off-from=NAME' (codegen-patterns 7:
+loop alignment is on for a leading run of a segment's routines and off for
+the rest; `tools/loopalign.py switch SEG' shows where).
+
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
 module-local routine the map does not list ("module-local at 0xADDR").
@@ -538,10 +545,32 @@ def compile_pas(src, dpc, work, fragment=()):
     return out
 
 
+LOOP_ALIGN_TOKENS = ('loop-align=', 'loop-align-off-from=')
+
+
+def loop_align_args(tokens):
+    """The dpc options for manifest tokens `loop-align=on|off' and
+    `loop-align-off-from=NAME' (at most one of them)."""
+    if len(tokens) > 1:
+        raise SetupError('more than one of loop-align= / loop-align-off-from=: %s'
+                         % ' '.join(tokens))
+    out = []
+    for t in tokens:
+        key, _, val = t.partition('=')
+        if key == 'loop-align' and val not in ('on', 'off'):
+            raise SetupError('%s: want loop-align=on or loop-align=off' % t)
+        if not val:
+            raise SetupError('%s: needs a routine name' % t)
+        out.append('--' + t)
+    return out
+
+
 def run_manifest(path, linkmap, dpc):
     """Each non-comment line: FILE SPEC... [--section-addr SEC=0xADDR]...
-    FILE is relative to the repository root; .pas files are compiled with
-    dpc first.  Returns (failing entries, entries with setup errors)."""
+    [loop-align=on|off | loop-align-off-from=NAME].  FILE is relative to
+    the repository root; .pas files are compiled with dpc first, with the
+    loop-align token forwarded as a dpc option.  Returns (failing
+    entries, entries with setup errors)."""
     failures = errors = 0
     with open(path) as f:
         lines = [(i, l.split('#', 1)[0].split()) for i, l in enumerate(f, 1)]
@@ -549,20 +578,25 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect = [], {}
+        specs, sect, align = [], {}, []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
                 k, v = parse_section_addr(next(rest, ''))
                 sect[k] = v
+            elif t.startswith(LOOP_ALIGN_TOKENS):
+                align.append(t)
             else:
                 specs.append(t)
         try:
             work = scratch_dir(src)
             asm = src
+            opts = loop_align_args(align)
+            if opts and not src.endswith('.pas'):
+                raise SetupError('%s: loop-align options apply to .pas units only' % toks[0])
             if src.endswith('.pas'):
                 frag = fragment_args(unit_routines(specs, linkmap), linkmap)
-                asm = compile_pas(src, dpc, work, frag)
+                asm = compile_pas(src, dpc, work, frag + opts)
             ok = check(asm, specs, linkmap, sect, work=work, name=toks[0])
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))

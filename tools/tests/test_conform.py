@@ -305,6 +305,57 @@ class ConformTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('reference into section %s, which has no --section-addr' % sec, out)
 
+    # -- loop alignment on/off per unit (codegen-patterns 7) --------------
+    def manifest(self, name, line):
+        path = os.path.join(SCRATCH, name)
+        with open(path, 'w') as f:
+            f.write(line + '\n')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = conform.main(['manifest', path, '--dpc', DPC])
+        return rc, buf.getvalue()
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_forwards_loop_align(self):
+        unit = 'tests/conformance/ast_page_zero.pas  0xE00EB0 AST_$PAGE_ZERO'
+        # the worker 0xE00EB0 comes first and aligns (filler 0xE00ED6);
+        # AST_$PAGE_ZERO has no loop
+        rc, out = self.manifest('ma_from.txt', unit + '  loop-align-off-from=ast_$page_zero')
+        self.assertEqual(rc, 0, out)
+        rc, out = self.manifest('ma_on.txt', unit + '  loop-align=on')
+        self.assertEqual(rc, 0, out)
+        # off: the filler is missing, so everything after it moves
+        rc, out = self.manifest('ma_off.txt', unit + '  loop-align=off')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('size: ours 0x64 bytes', out)
+        self.assertIn('bytes differ first at 0xE00ED6', out)
+        # an unknown routine is dpc's error, so a setup error
+        rc, out = self.manifest('ma_bad.txt', unit + '  loop-align-off-from=no_such')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('no routine `no_such`', out)
+
+    def test_manifest_loop_align_errors(self):
+        rc, out = self.manifest('ma_s.txt', 'tests/conformance/handasm/proc1_tst_lock.s  '
+                                'PROC1_$TST_LOCK  loop-align=off')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('loop-align options apply to .pas units only', out)
+        rc, out = self.manifest('ma_two.txt', 'tests/conformance/proc1_tst_lock.pas  '
+                                'PROC1_$TST_LOCK  loop-align=off  loop-align=on')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('more than one', out)
+
+
+class LoopAlignArgsTest(unittest.TestCase):
+    def test_tokens(self):
+        self.assertEqual(conform.loop_align_args([]), [])
+        self.assertEqual(conform.loop_align_args(['loop-align=off']), ['--loop-align=off'])
+        self.assertEqual(conform.loop_align_args(['loop-align-off-from=VTOC_$DISMOUNT']),
+                         ['--loop-align-off-from=VTOC_$DISMOUNT'])
+        for bad in (['loop-align=maybe'], ['loop-align-off-from='],
+                    ['loop-align=on', 'loop-align=off']):
+            with self.assertRaises(conform.SetupError):
+                conform.loop_align_args(bad)
+
 
 if __name__ == '__main__':
     unittest.main()

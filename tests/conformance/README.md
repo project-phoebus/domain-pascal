@@ -71,6 +71,41 @@ of a module, and may start at 2 mod 4 (PROC1_$TST_LOCK 0xE148CA).  So:
 - A fragment may have only one code section (dpc rejects more): where a
   second one would start in the module is not known.
 
+## Loop alignment on and off
+
+In the image, loop alignment is on for a leading run of the routines of a
+map segment and off for the rest (codegen-patterns 7): PMAP_ and PROC1_
+never align, AST_ stops after the module-local routine at 0xE01502,
+VTOC_ at VTOC_$DISMOUNT, RING at RING_$SVC_CLOSE, XNS_IDP at
+XNS_IDP_$OS_OPEN.  dpc reproduces this with options, which a manifest
+line passes as tokens after its specs (`.pas` units only):
+
+- `loop-align=on` (the default) / `loop-align=off`: `dpc --loop-align=...`;
+- `loop-align-off-from=NAME`: `dpc --loop-align-off-from=NAME`, on for
+  the unit's routines before routine NAME (its Pascal name or symbol, any
+  case) and off from it on.  A name that is not a routine of the unit is
+  an error.
+
+A routine that does not align gets no `0x2048` before its loop heads.
+The end of a module, or of a unit compiled with `--fragment-ends-module`,
+is padded with `0x2048` if its last routine aligns and with zero words if
+not (`rts; 0x0000`, e.g. AST_ 0xE0736E).
+
+    python3 tools/loopalign.py switch SEG...
+
+prints, for map segment SEG, the class of each routine (`F` filler, `u`
+loop head at 2 mod 4 without one, `X` both, `a` only 4-aligned heads,
+`.` no loop), the last aligning routine, the first non-aligning one after
+it, and the routines between them, which cannot be classed (a routine
+the map does not name is shown as `module-local`).  An entry's
+option must put the switch in that interval.  A segment where a
+non-aligning routine comes before an aligning one is reported as an
+error (exit status 1); the only one is MMAP_ (MMAP_$WS_SCAN 0xE0D364
+before MMAP_$GET_IMPURE 0xE0D5EA; codegen-patterns 7 explains it).  A
+unit with no loop and no module end needs no option.  No conformance
+unit uses these options yet: the non-aligning loops and module tails in
+the image all need constructs dpc does not compile yet.
+
 `handasm/pkt_recently_missing.s` (PKT_$RECENTLY_MISSING 0xE128BA, a loop
 with its filler at 0xE128DA) tests this on a routine that starts at
 2 mod 4.

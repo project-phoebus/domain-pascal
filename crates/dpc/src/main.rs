@@ -1,6 +1,7 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
 //! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
+//!            [--loop-align=on|off | --loop-align-off-from=ROUTINE]
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -17,11 +18,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use dpc_m68k::emit::LoopAlign;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
 const PROG: &str = "dpc";
 const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
+                     [--loop-align=on|off | --loop-align-off-from=ROUTINE] \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
@@ -45,6 +48,7 @@ struct Args {
     stop: Stop,
     fragment_origin: Option<u32>,
     fragment_ends_module: bool,
+    loop_align: LoopAlign,
 }
 
 /// A number in C notation: `0x` hex or decimal.
@@ -62,6 +66,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut stop = Stop::Never;
     let mut fragment_origin = None;
     let mut fragment_ends_module = false;
+    let mut loop_align = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -82,6 +87,21 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 fragment_origin = Some(a);
             }
             "--fragment-ends-module" => fragment_ends_module = true,
+            s if s.starts_with("--loop-align=") || s.starts_with("--loop-align-off-from=") => {
+                if loop_align.is_some() {
+                    return Err("--loop-align / --loop-align-off-from given more than once".into());
+                }
+                let (opt, v) = s.split_once('=').unwrap();
+                loop_align = Some(match (opt, v) {
+                    ("--loop-align", "on") => LoopAlign::On,
+                    ("--loop-align", "off") => LoopAlign::Off,
+                    ("--loop-align", _) => {
+                        return Err(format!("--loop-align: want `on` or `off`, got `{v}`"))
+                    }
+                    (_, "") => return Err("--loop-align-off-from needs a routine name".into()),
+                    _ => LoopAlign::OffFrom(v.to_string()),
+                });
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -107,6 +127,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         stop,
         fragment_origin,
         fragment_ends_module,
+        loop_align: loop_align.unwrap_or_default(),
     })
 }
 
@@ -150,6 +171,7 @@ fn compile(
     let opts = dpc_m68k::emit::Options {
         fragment_origin: args.fragment_origin,
         fragment_ends_module: args.fragment_ends_module,
+        loop_align: args.loop_align.clone(),
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -230,6 +252,21 @@ mod tests {
             "m.pas",
         ]);
         assert!(a.unwrap().fragment_ends_module);
+        assert_eq!(args(&["m.pas"]).unwrap().loop_align, LoopAlign::On);
+        assert_eq!(
+            args(&["--loop-align=on", "m.pas"]).unwrap().loop_align,
+            LoopAlign::On
+        );
+        assert_eq!(
+            args(&["--loop-align=off", "m.pas"]).unwrap().loop_align,
+            LoopAlign::Off
+        );
+        assert_eq!(
+            args(&["--loop-align-off-from=vtoc_$dismount", "m.pas"])
+                .unwrap()
+                .loop_align,
+            LoopAlign::OffFrom("vtoc_$dismount".into())
+        );
         assert_eq!(
             args(&["--parse-only", "m.pas"]).unwrap().stop,
             Stop::AfterParse
@@ -252,5 +289,9 @@ mod tests {
         assert!(args(&["m.pas", "--fragment-origin"]).is_err());
         assert!(args(&["--fragment-origin", "0xE148CB", "m.pas"]).is_err());
         assert!(args(&["--fragment-ends-module", "m.pas"]).is_err());
+        assert!(args(&["--loop-align=maybe", "m.pas"]).is_err());
+        assert!(args(&["--loop-align", "off", "m.pas"]).is_err());
+        assert!(args(&["--loop-align-off-from=", "m.pas"]).is_err());
+        assert!(args(&["--loop-align=off", "--loop-align-off-from=P", "m.pas"]).is_err());
     }
 }

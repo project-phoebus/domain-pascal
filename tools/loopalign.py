@@ -32,6 +32,10 @@ usage:
     tools/loopalign.py routines [SEG...]  # per-routine class of loop heads:
                                           # F filler, u unaligned, X both,
                                           # a only 4-aligned, . no loop
+    tools/loopalign.py switch SEG...      # where alignment switches off in
+                                          # a segment (for dpc's
+                                          # --loop-align-off-from and the
+                                          # conformance manifest)
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -209,6 +213,29 @@ def rclass(c):
     return 'F' if c['F'] else 'u' if c['U'] else 'a' if c['A'] else '.'
 
 
+def switch(pr, seg):
+    """Where loop alignment switches off in map segment `seg'
+    (codegen-patterns 7: on for a leading run of routines, off for the
+    rest).  `pr' is per_routine()'s list.  Returns (last, first): the start
+    of the last routine with a filler (class F or X) and of the first
+    later routine with a head at 2 mod 4 and no filler (class u), each None
+    if there is none.  The switch is after `last' and at or before
+    `first'; routines between them (classes a and .) cannot be classed.
+    Raises ValueError if a u routine comes before an F or X one (the
+    switch would go back on, which the survey never saw)."""
+    rs = [(r0, rclass(c)) for sg, r0, _, c in pr if sg is seg]
+    last = None
+    for r0, cl in rs:
+        if cl in 'FX':
+            last = r0
+    first = next((r0 for r0, cl in rs if cl == 'u' and (last is None or r0 > last)), None)
+    early = [r0 for r0, cl in rs if cl == 'u' and last is not None and r0 < last]
+    if early:
+        raise ValueError('%s: routine 0x%X does not align but 0x%X, later, does'
+                         % (seg.name, early[0], last))
+    return last, first
+
+
 def summary(m, sites, fillers, routines):
     """The counts quoted in codegen-patterns section 7."""
     import bisect
@@ -294,6 +321,39 @@ def main(argv):
                 line += rclass(c)
             if line.strip('.'):
                 print('%06X %-16s %s' % (cur.addr, cur.name, line))
+    elif argv[0] == 'switch':
+        if len(argv) < 2:
+            print(__doc__)
+            return 2
+        pr = per_routine(sites, routines)
+        # the map name, which dpc --loop-align-off-from takes; a routine
+        # the map does not name is module-local (CLAUDE.md 7)
+        names = {r0: (m.names_at(r0) or ['module-local'])[0] for _, r0, _, _ in pr}
+        rc = 0
+        for seg in m.segments:
+            if seg.name not in argv[1:] or not any(sg is seg for sg, _, _, _ in pr):
+                continue
+            line = ''.join(rclass(c) for sg, _, _, c in pr if sg is seg)
+            print('%06X..%06X %s  %s' % (seg.addr, seg.end, seg.name, line))
+            try:
+                last, first = switch(pr, seg)
+            except ValueError as e:
+                print('  error: %s' % e)
+                rc = 1
+                continue
+            print('  last aligning:      %s' % ('0x%X %s' % (last, names[last])
+                                               if last is not None else 'none seen'))
+            print('  first non-aligning: %s' % ('0x%X %s' % (first, names[first])
+                                                if first is not None else 'none seen'))
+            # routines that cannot be classed lie between the two
+            lo = last if last is not None else seg.addr - 1
+            hi = first if first is not None else seg.end
+            open_ = [r0 for sg, r0, _, _ in pr if sg is seg and lo < r0 < hi]
+            if open_:
+                print('  unclassed between: %s' % ', '.join(
+                    '0x%X %s' % (r0, names[r0]) for r0 in open_[:6])
+                    + (', ... (%d)' % len(open_) if len(open_) > 6 else ''))
+        return rc
     elif argv[0] == 'ends':
         # last word of each code segment that ends after an rts, with the
         # classes of the segment's routines (as in `routines')

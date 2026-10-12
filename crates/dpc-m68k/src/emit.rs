@@ -23,6 +23,19 @@
 //!   [`Options::fragment_ends_module`] says that the unit is the tail of
 //!   its module (then the padding, absolute like the rest, is part of the
 //!   unit's last routine in the image).
+//!
+//! **Loop alignment on and off.**  In the image, alignment is on for a
+//! leading run of the routines of a map segment and off for the rest;
+//! the switch goes one way only and its cause is not recorded
+//! (codegen-patterns 7: AST_ after the module-local routine at 0xE01502,
+//! VTOC_ from VTOC_$DISMOUNT 0xE38764, RING from RING_$SVC_CLOSE
+//! 0xE76E22; PMAP_ and PROC1_ never align).  [`Options::loop_align`]
+//! reproduces that from outside the source: a routine that does not align
+//! has no filler before its loop heads, and the end of the module (or of
+//! a module-tail fragment) is padded with 0x2048 only if its last routine
+//! aligns, else with zero words (`rts; 0x0000`: AST_ 0xE0736E, RING,
+//! ACL_, VTOC_ .TEXT; whether the compiler or the binder wrote the
+//! `0x0000` is Uncertain).
 
 use dpc_ir::Module;
 use dpc_syntax::Diagnostic;
@@ -40,8 +53,24 @@ pub const DATA_BASE_LABEL: &str = ".Ldata";
 /// a fragment's first byte (`tools/conform.py` reads it).
 pub const FRAGMENT_ORIGIN_SYMBOL: &str = "__dpc_fragment_origin";
 
+/// Which routines align their loop heads (codegen-patterns 7; `dpc
+/// --loop-align`, `--loop-align-off-from`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum LoopAlign {
+    /// Every routine aligns (the default).
+    #[default]
+    On,
+    /// No routine aligns.
+    Off,
+    /// The routines before the named one, in emission order, align; it
+    /// and every later one do not.  The name is matched case-insensitively
+    /// against each routine's symbol, which is its Pascal name upper-cased
+    /// (codegen-patterns 11), so either spelling works.
+    OffFrom(String),
+}
+
 /// Emitter options.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The output is a fragment of a module whose first byte belongs at
     /// this absolute address (test-oriented: `dpc --fragment-origin`).
@@ -51,6 +80,36 @@ pub struct Options {
     /// the module-end padding (`dpc --fragment-ends-module`).  Ignored
     /// for a whole module, which always gets it.
     pub fragment_ends_module: bool,
+    /// Which routines align their loop heads.
+    pub loop_align: LoopAlign,
+}
+
+/// For each routine of `module` (indexed as `module.functions`): does it
+/// align its loop heads?  "Before" in [`LoopAlign::OffFrom`] is emission
+/// order: code section by code section, in `sections` order, and the
+/// unit's order within each.  Fails if [`LoopAlign::OffFrom`] names no
+/// routine of the module.
+fn aligning(module: &Module, sections: &[&str], la: &LoopAlign) -> Result<Vec<bool>, Diagnostic> {
+    let n = module.functions.len();
+    match la {
+        LoopAlign::On => Ok(vec![true; n]),
+        LoopAlign::Off => Ok(vec![false; n]),
+        LoopAlign::OffFrom(name) => {
+            let order = sections
+                .iter()
+                .flat_map(|&sec| (0..n).filter(move |&i| module.functions[i].code_section == sec));
+            let mut aligns = vec![false; n];
+            for i in order {
+                if module.functions[i].symbol.eq_ignore_ascii_case(name) {
+                    return Ok(aligns);
+                }
+                aligns[i] = true;
+            }
+            Err(Diagnostic::error_nopos(format!(
+                "--loop-align-off-from: no routine `{name}` in this unit"
+            )))
+        }
+    }
 }
 
 /// The section directive for Pascal code section `name`.
@@ -78,6 +137,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             sections.push(&f.code_section);
         }
     }
+    let aligns = aligning(module, &sections, &opts.loop_align).map_err(|d| vec![d])?;
     if let Some(origin) = opts.fragment_origin {
         // Where a second code section of a fragment would start in its
         // module is not known, so its alignment could not be placed.
@@ -106,9 +166,27 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
         let mut routines = Vec::new();
         let mut failed = false;
-        for f in module.functions.iter().filter(|f| f.code_section == sec) {
+        let mut last_aligns = true;
+        for (f, &al) in module
+            .functions
+            .iter()
+            .zip(&aligns)
+            .filter(|(f, _)| f.code_section == sec)
+        {
+            last_aligns = al;
             match isel::select(f) {
-                Ok(i) => routines.push((f, i)),
+                Ok(mut i) => {
+                    // Every `Align4` the selector emits is a loop head's
+                    // (fill loops, block-copy loops, `repeat` heads); a
+                    // routine that does not align has none (codegen-
+                    // patterns 7: VTOC_$DISMOUNT's copy loop at 0xE387CE,
+                    // 2 mod 4, no filler).  Removed before the branches
+                    // are sized, so their sizes see the final layout.
+                    if !al {
+                        i.retain(|i| !matches!(i, Insn::Align4));
+                    }
+                    routines.push((f, i))
+                }
                 Err(d) => {
                     errors.push(d);
                     failed = true;
@@ -138,9 +216,17 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         // Each module's code contribution is padded to a multiple of 4
         // with the no-op `movea.l A0,A0` (0x2048): 0xE1A9D2 before OS_TERM
         // 0xE1A9D4, 0xE1AD16 before BITPAD 0xE1AD18 (codegen-patterns 7).
-        // A fragment that does not end its module gets none.
+        // A fragment that does not end its module gets none.  When the
+        // last routine does not align, the padding is zero words instead
+        // (`rts; 0x0000`: AST_ 0xE0736E; see the module comment).
         if opts.fragment_origin.is_none() || opts.fragment_ends_module {
-            out.push_str(&format!("\t{}\t| movea.l %a0,%a0 filler\n", Insn::Align4));
+            if last_aligns {
+                out.push_str(&format!("\t{}\t| movea.l %a0,%a0 filler\n", Insn::Align4));
+            } else {
+                out.push_str(
+                    "\t.balignw\t4,0x0000\t| zero words: the last routine does not align\n",
+                );
+            }
         }
     }
     if let Some(data) = &module.data {
@@ -372,6 +458,7 @@ mod tests {
         let opts = Options {
             fragment_origin: Some(0xE148CA),
             fragment_ends_module: true,
+            ..Default::default()
         };
         let s = emit(&module(&[".text"]), "m.pas", &opts).unwrap();
         assert!(s.contains("\t.text\n\t.space\t2\t|"), "{s}");
@@ -502,6 +589,160 @@ mod tests {
             .filter(|l| l.starts_with("bpl"))
             .collect();
         assert_eq!(branches, ["bpl.s\t1b", "bpl.w\t1b"], "{s}");
+    }
+
+    /// A routine whose body is `repeat X := 0x12345 until B`: one loop
+    /// head, aligned when the routine aligns.
+    fn one_loop(symbol: &str) -> dpc_ir::Function {
+        use dpc_ir::{Addr, Cond, Expr, Scalar, Stmt, StmtKind, Width};
+        let mut f = one_routine(".text", symbol);
+        let store = Stmt {
+            kind: StmtKind::Store {
+                addr: Addr::Symbol {
+                    name: "X".into(),
+                    offset: 0,
+                },
+                value: Expr::Const {
+                    value: 0x12345,
+                    ty: Scalar::signed(Width::Long),
+                },
+            },
+            span: f.span,
+        };
+        f.body = vec![Stmt {
+            kind: StmtKind::Repeat {
+                body: vec![store],
+                until: Cond::Test(Expr::Load {
+                    addr: Addr::Symbol {
+                        name: "B".into(),
+                        offset: 0,
+                    },
+                    ty: Scalar::BOOLEAN,
+                }),
+            },
+            span: f.span,
+        }];
+        f
+    }
+
+    fn loop_align(la: LoopAlign) -> Options {
+        Options {
+            loop_align: la,
+            ..Default::default()
+        }
+    }
+
+    /// The text of each routine of `s`, by symbol.
+    fn routine_text<'a>(s: &'a str, sym: &str) -> &'a str {
+        let start = s.find(&format!("\n{sym}:\n")).unwrap();
+        let rest = &s[start + 1..];
+        let end = rest.find("\trts\n").unwrap();
+        &rest[..end]
+    }
+
+    const FILLER_END: &str = "\trts\n\t.balignw\t4,0x2048\t| movea.l %a0,%a0 filler\n";
+    const ZERO_END: &str =
+        "\trts\n\t.balignw\t4,0x0000\t| zero words: the last routine does not align\n";
+
+    /// codegen-patterns 7: `--loop-align=off` drops every loop-head
+    /// filler, and the module end is padded with zero words.
+    #[test]
+    fn loop_align_off() {
+        let m = Module {
+            functions: vec![one_loop("A"), one_loop("B")],
+            ..Default::default()
+        };
+        let on = emit(&m, "m.pas", &Options::default()).unwrap();
+        assert_eq!(on.matches(".balignw\t4,0x2048").count(), 3, "{on}");
+        assert!(on.ends_with(FILLER_END), "{on}");
+        let off = emit(&m, "m.pas", &loop_align(LoopAlign::Off)).unwrap();
+        assert!(!off.contains("0x2048"), "{off}");
+        assert!(off.ends_with(ZERO_END), "{off}");
+    }
+
+    /// `--loop-align-off-from`: on before the named routine, off from it
+    /// (in either spelling) on; the end padding follows the last routine.
+    #[test]
+    fn loop_align_off_from() {
+        let m = Module {
+            functions: vec![one_loop("P_$A"), one_loop("P_$B"), one_loop("P_$C")],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("p_$b".into()))).unwrap();
+        assert!(routine_text(&s, "P_$A").contains("0x2048"), "{s}");
+        assert!(!routine_text(&s, "P_$B").contains("0x2048"), "{s}");
+        assert!(!routine_text(&s, "P_$C").contains("0x2048"), "{s}");
+        assert!(s.ends_with(ZERO_END), "{s}");
+        // from the first routine: the same as off
+        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("P_$A".into()))).unwrap();
+        assert_eq!(s, emit(&m, "m.pas", &loop_align(LoopAlign::Off)).unwrap());
+        // a fragment that ends its module: the padding follows the last
+        // routine too; one that does not end it has none
+        let tail = Options {
+            fragment_origin: Some(0x1000),
+            fragment_ends_module: true,
+            loop_align: LoopAlign::OffFrom("P_$C".into()),
+        };
+        let s = emit(&m, "m.pas", &tail).unwrap();
+        assert!(routine_text(&s, "P_$B").contains("0x2048"), "{s}");
+        assert!(s.ends_with(ZERO_END), "{s}");
+        let mid = Options {
+            fragment_ends_module: false,
+            ..tail
+        };
+        let s = emit(&m, "m.pas", &mid).unwrap();
+        assert!(s.ends_with("\trts\n"), "{s}");
+        let e = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("P_$D".into()))).unwrap_err();
+        assert!(e[0].message.contains("no routine `P_$D`"), "{e:?}");
+    }
+
+    /// `--loop-align-off-from` counts in emission order, where a whole
+    /// module's routines are grouped by code section: with `A` (.text),
+    /// `B` (S2), `C` (.text), off from `B`, `C` is emitted before `B` and
+    /// aligns.  Each section's end padding follows its own last routine.
+    #[test]
+    fn loop_align_off_from_follows_emission_order() {
+        let mut b = one_loop("B");
+        b.code_section = "S2".into();
+        let m = Module {
+            functions: vec![one_loop("A"), b, one_loop("C")],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("B".into()))).unwrap();
+        assert!(routine_text(&s, "A").contains("0x2048"), "{s}");
+        assert!(routine_text(&s, "C").contains("0x2048"), "{s}");
+        assert!(!routine_text(&s, "B").contains("0x2048"), "{s}");
+        let (text, s2) = s.split_once("\n\t.section\t\"S2\"").unwrap();
+        assert!(text.ends_with(FILLER_END), "{s}");
+        assert!(s2.ends_with(ZERO_END), "{s}");
+    }
+
+    /// Without its filler a routine is 2 bytes shorter, which can bring
+    /// a call over it into `bsr.s` reach: branch sizes are chosen after
+    /// the fillers are dropped.  In a fragment at 0x1002, `T` is 8 bytes,
+    /// `A`'s loop head is at 2 mod 4, then 11 8-byte routines, then `B`
+    /// calls `T` backward: a displacement of -128 without the filler,
+    /// -130 with it.
+    #[test]
+    fn branch_sizes_see_dropped_fillers() {
+        let probe = |la: LoopAlign| {
+            let mut functions = vec![one_routine(".text", "T"), one_loop("A")];
+            functions.extend((0..11).map(|i| one_routine(".text", &format!("E{i}"))));
+            functions.push(caller("B", 0, Some("T")));
+            let m = Module {
+                functions,
+                ..Default::default()
+            };
+            let opts = Options {
+                fragment_origin: Some(0x1002),
+                loop_align: la,
+                ..Default::default()
+            };
+            let s = emit(&m, "m.pas", &opts).unwrap();
+            bsr_line(&s).to_string()
+        };
+        assert_eq!(probe(LoopAlign::On), "bsr.w\tT");
+        assert_eq!(probe(LoopAlign::Off), "bsr.s\tT");
     }
 
     fn bsr_line(s: &str) -> &str {
