@@ -57,6 +57,30 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
    `(* *)` and `" "`.  Is `/* */` a comment form?  *Current: rejected,
    per 2.1.4.*
 
+Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
+
+5. **4.7, p. 4-43.** Directives may appear "anywhere a comment is valid".
+   What does an alignment directive in the middle of a declaration mean
+   (e.g. `%natural_alignment;` between two fields of a record)?  *Current:
+   a directive inside a declaration item or routine heading is an error;
+   between declarations it is kept in order; inside a statement part it
+   takes effect after the routine.*
+6. **Table 4-3, p. 4-4.** The precedence table lists `not` but not `~`
+   (bit not, p. 4-33), nor unary `-`/`+`.  *Current: `~` binds like `not`;
+   a sign applies to the first term of a simple expression (standard
+   Pascal).*  Partly settled by "Expressions", p. 4-82 (checked in the
+   PDF): "You cannot follow a binary operator with a unary operator of
+   lower precedence", with `9 DIV -3` and `5 * -100` marked improper, so
+   `a * -b` is rejected as implemented.  Still open: whether a sign may
+   follow an operator of the *same* level (`a + -b`; currently rejected),
+   and where `~` sits.
+7. **Case, p. 4-36.** A constantlist is "One or more values (separated by
+   commas)".  Are ranges (`1..3:`) allowed in case labels?  *Current:
+   rejected.*
+8. **7.1.1, p. 7-2.** The empty-code-section form `name, , data_section`
+   is shown for programs (2.2.1, p. 2-10) but not for modules.  *Current:
+   accepted for programs only.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and
@@ -64,3 +88,12 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
   restores.
 - **pp. 4-50/4-51**: the OCR of the `%warning` example is garbled.
   `%warning` takes a plain `'string'`, as Table 4-11 shows.
+- **3.11.1.4, p. 3-41**: the example `[3..4 := 2, 7 := -1 1 := 3]` (checked
+  in the PDF) lacks a comma after `-1`.  The parser requires commas between
+  initialiser items, as every other example does.
+- **3.11.1.6, p. 3-43**: the example declares `array_example ; ARRAY
+  [subr] OF integer := ...` (checked in the PDF) with `;` where a var
+  declaration needs `:`.  The parser requires `:`.
+- **5.7.1, p. 5-26**: the main program of the section example ends with
+  `END;` (checked in the PDF); a main program ends with `END.` (2.2,
+  Figure 2-1, p. 2-8).  The parser requires `.`.

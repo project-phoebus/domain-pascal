@@ -1,6 +1,9 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
-//! usage: dpc [-I dir]... [-o out.s] file.pas
+//! usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast] file.pas
+//!
+//! `--parse-only` stops after parsing (syntax errors are reported with
+//! their positions); `--dump-ast` also prints the AST to stdout.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,19 +11,32 @@ use std::process::ExitCode;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
 const PROG: &str = "dpc";
-const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] file.pas";
+const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast] file.pas";
+
+/// Where to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Run the whole pipeline.
+    Never,
+    /// Stop after parsing.
+    AfterParse,
+    /// Stop after parsing and print the AST.
+    DumpAst,
+}
 
 #[derive(Debug)]
 struct Args {
     include_dirs: Vec<PathBuf>,
     output: Option<PathBuf>,
     input: PathBuf,
+    stop: Stop,
 }
 
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut include_dirs = Vec::new();
     let mut output = None;
     let mut input = None;
+    let mut stop = Stop::Never;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -31,6 +47,8 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 output = Some(argv.next().ok_or("-o needs a file name")?.into());
             }
             "-h" | "--help" => return Err(String::new()),
+            "--parse-only" => stop = Stop::AfterParse,
+            "--dump-ast" => stop = Stop::DumpAst,
             s if s.starts_with("-I") && s.len() > 2 => include_dirs.push(s[2..].into()),
             s if s.starts_with('-') && s != "-" => return Err(format!("unknown option `{s}`")),
             _ => {
@@ -46,6 +64,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         include_dirs,
         output,
         input,
+        stop,
     })
 }
 
@@ -72,6 +91,14 @@ fn compile(
     }
     warnings.extend(pp.diagnostics);
     let unit = dpc_syntax::parser::parse(&pp.tokens)?;
+    match args.stop {
+        Stop::Never => {}
+        Stop::AfterParse => return Ok(()),
+        Stop::DumpAst => {
+            println!("{unit:#?}");
+            return Ok(());
+        }
+    }
     let program = dpc_sema::analyze(&unit)?;
     let module = dpc_ir::lower(&program);
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string());
@@ -139,6 +166,12 @@ mod tests {
         assert_eq!(a.include_dirs, vec![PathBuf::from("a"), PathBuf::from("b")]);
         assert_eq!(a.output, Some(PathBuf::from("x.s")));
         assert_eq!(a.input, PathBuf::from("m.pas"));
+        assert_eq!(a.stop, Stop::Never);
+        assert_eq!(
+            args(&["--parse-only", "m.pas"]).unwrap().stop,
+            Stop::AfterParse
+        );
+        assert_eq!(args(&["--dump-ast", "m.pas"]).unwrap().stop, Stop::DumpAst);
     }
 
     #[test]

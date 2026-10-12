@@ -21,7 +21,11 @@ pub fn analyze(_unit: &CompilationUnit) -> Result<Program, Vec<Diagnostic>> {
 mod tests {
     #[test]
     fn analyze_empty_unit() {
-        let unit = dpc_syntax::ast::CompilationUnit::default();
+        use dpc_syntax::{preprocess, SourceMap};
+        let mut sm = SourceMap::new();
+        let f = sm.add("m.pas", "module m;".to_string());
+        let pp = preprocess::preprocess(&mut sm, f, &Default::default());
+        let unit = dpc_syntax::parser::parse(&pp.tokens).unwrap();
         assert!(super::analyze(&unit).is_ok());
     }
 }
