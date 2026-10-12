@@ -10,7 +10,7 @@ use dpc_sema::{
     Builtin, Call as SCall, Callee as SCallee, Expr as SExpr, ExprKind, Program, Routine,
     RoutineId, Stmt as SStmt, StmtKind as SStmtKind, Storage, VarId,
 };
-use dpc_syntax::ast::{BinOp, ForDir};
+use dpc_syntax::ast::{BinOp, ForDir, UnOp};
 use dpc_syntax::{Diagnostic, Span};
 
 use dpc_sema::types::{TypeId, TypeKind, TypeTable};
@@ -18,8 +18,8 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, Call, Callee, DataArea, Expr, Function, Module, ResultClass, ResultSpec, Scalar,
-    Sign, Stmt, StmtKind, ValueParam, Width,
+    Addr, Arg, Call, Callee, Cond, DataArea, Expr, Function, Module, Rel, ResultClass, ResultSpec,
+    Scalar, Sign, Stmt, StmtKind, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -54,9 +54,14 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
         if r.external || r.body.is_none() {
             continue;
         }
-        match lower_routine(program, id, data.is_some()) {
+        match lower_routine(program, id) {
             Ok(f) => functions.push(f),
             Err(d) => errors.extend(d),
+        }
+    }
+    if errors.is_empty() {
+        if let Err(d) = set_loads_data_base(&mut functions, data.is_some()) {
+            errors.extend(d);
         }
     }
     if errors.is_empty() {
@@ -127,11 +132,7 @@ fn data_area(p: &Program) -> Result<Option<DataArea>, Vec<Diagnostic>> {
 /// `data_section` when the module heading names none.
 const DEFAULT_DATA_SECTION: &str = ".data";
 
-fn lower_routine(
-    p: &Program,
-    id: RoutineId,
-    unit_has_data: bool,
-) -> Result<Function, Vec<Diagnostic>> {
+fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>> {
     let r = p.routine(id);
     let mut errors = Vec::new();
     if let Some(&n) = r.nested.first() {
@@ -189,59 +190,127 @@ fn lower_routine(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let loads_data_base = loads_data_base(r, &body, unit_has_data).map_err(|d| vec![d])?;
     Ok(Function {
         symbol: r.symbol.clone(),
         global: r.global,
         code_section: r.code_section.clone(),
         frame_size: r.frame_size,
         result,
-        loads_data_base,
+        // Decided once every routine is lowered (`set_loads_data_base`).
+        loads_data_base: false,
         value_params: value_params(p, r),
+        address_params: r
+            .params
+            .iter()
+            .filter(|prm| prm.passing() == Passing::ByAddress)
+            .map(|prm| prm.slot_offset)
+            .collect(),
         body,
         span: r.span,
     })
 }
 
-/// Whether routine `r` makes the unit's data area addressable on entry
+/// Decide [`Function::loads_data_base`] for every routine of the unit
 /// (codegen-patterns 4; on m68k `lea <area>.l,A5` after saving A5).
 ///
 /// Survey of the image (compiled code: every `link` in the map's `I`
-/// segments other than `*_ASM`, modules with a `D` segment):
+/// segments other than `*_ASM`, modules with a `D` segment), where a
+/// routine "uses" the data when it has an `(..,A5..)` operand or passes A5
+/// on, *directly or through a module-local callee that does not set A5
+/// itself*:
 ///
-/// - An exported routine that addresses its unit's data loads A5 (585
-///   map-named routines, e.g. PROC1_$GET_LOADAV 0xE14BC0, LOG_$READ
-///   0xE17806, XNS_IDP_$GET_STATS 0xE18FDC).  None was found addressing
-///   it off A5 without loading A5.
+/// - An exported routine that uses its unit's data loads A5 (585
+///   map-named routines, e.g. PROC1_$GET_LOADAV 0xE14BC0,
+///   XNS_IDP_$GET_STATS 0xE18FDC).  None was found using it without
+///   loading A5.  Through a callee: LOG_$READ 0xE17806 loads A5 although
+///   it has no A5 operand of its own; its module-local worker 0xE17778,
+///   which does not load A5, reads `(0x14,A5)` (0xE1778C).
 /// - A module-local routine called only from its module inherits A5 from
-///   its caller: 0xE17778, LOG_$READ's worker, reads `(0x14,A5)` without
-///   loading it.  `internal` routines (ref 5.5.4) are taken to be such
-///   workers.  **Uncertain:** 23 routines the map does not name do load
-///   A5, but nearly all of them are also called with `jsr` from other
+///   its caller (0xE17778).  `internal` routines (ref 5.5.4) are taken to
+///   be such workers.  **Uncertain:** 23 routines the map does not name do
+///   load A5, but nearly all of them are also called with `jsr` from other
 ///   modules (exported routines the map omits, e.g. 0xE14B12), and a few
 ///   RING ones (0xE76048, 0xE7667C) are reached only with `bsr` from
 ///   their module.
-/// - An exported routine that does not address the data is the open
-///   case: 204 map-named routines load A5 without any A5 operand (e.g.
+/// - An exported routine that does not use the data is the open case: 204
+///   map-named routines load A5 without any A5 operand (e.g.
 ///   XNS_IDP_$GET_PORT_INFO 0xE18FBE, SMD_$BUSY_WAIT 0xE1D8A4), 251 do
 ///   not load it (e.g. TIME_$WAIT 0xE1650A).  Map segments seem to merge
 ///   several compilation units (one segment's routines run in blocks that
 ///   load A5 and blocks that do not), so "every exported routine of a
 ///   unit with static data" fits the image too, but the unit boundaries
 ///   are not known.  Rejected.
-fn loads_data_base(r: &Routine, body: &[Stmt], unit_has_data: bool) -> Res<bool> {
-    let uses = body.iter().any(stmt_uses_static);
-    if !r.global {
-        return Ok(false);
+fn set_loads_data_base(fs: &mut [Function], unit_has_data: bool) -> Result<(), Vec<Diagnostic>> {
+    // Which routines use the data, directly or through internal callees
+    // of this unit (which inherit A5); a fixpoint over the call graph.
+    let mut uses: Vec<bool> = fs
+        .iter()
+        .map(|f| f.body.iter().any(stmt_uses_static))
+        .collect();
+    loop {
+        let mut changed = false;
+        for i in 0..fs.len() {
+            if uses[i] {
+                continue;
+            }
+            let mut callees = Vec::new();
+            for st in &fs[i].body {
+                local_callees(st, &mut callees);
+            }
+            let through = callees.iter().any(|sym| {
+                fs.iter()
+                    .position(|g| &g.symbol == sym)
+                    .is_some_and(|j| !fs[j].global && uses[j])
+            });
+            if through {
+                uses[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
     }
-    if !uses && unit_has_data {
-        return Err(unsupported(
-            r.span,
-            "an exported routine that does not use its unit's static data, in a unit that has \
-             some (whether it loads the data base is not settled, codegen-patterns 4), is",
-        ));
+    let mut errors = Vec::new();
+    for (f, uses) in fs.iter_mut().zip(uses) {
+        if !f.global {
+            continue;
+        }
+        if !uses && unit_has_data {
+            errors.push(unsupported(
+                f.span,
+                "an exported routine that does not use its unit's static data, in a unit that has \
+                 some (whether it loads the data base is not settled, codegen-patterns 4), is",
+            ));
+        }
+        f.loads_data_base = uses;
     }
-    Ok(uses)
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// The symbols of this unit's routines that `s` calls ([`Callee::Local`]).
+fn local_callees(s: &Stmt, out: &mut Vec<String>) {
+    match &s.kind {
+        StmtKind::Call(Call {
+            callee: Callee::Local(sym),
+            ..
+        }) => out.push(sym.clone()),
+        StmtKind::If { then_, else_, .. } => {
+            for st in then_.iter().chain(else_) {
+                local_callees(st, out);
+            }
+        }
+        StmtKind::Repeat { body, .. } => {
+            for st in body {
+                local_callees(st, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn stmt_uses_static(s: &Stmt) -> bool {
@@ -254,6 +323,22 @@ fn stmt_uses_static(s: &Stmt) -> bool {
             Arg::Address { addr, .. } => addr_uses_static(addr),
         }),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
+        StmtKind::If { cond, then_, else_ } => {
+            cond_uses_static(cond) || then_.iter().chain(else_).any(stmt_uses_static)
+        }
+        StmtKind::Repeat { body, until } => {
+            body.iter().any(stmt_uses_static) || cond_uses_static(until)
+        }
+        StmtKind::Return => false,
+    }
+}
+
+fn cond_uses_static(c: &Cond) -> bool {
+    match c {
+        Cond::Compare { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
+        Cond::Test(e) => expr_uses_static(e),
+        Cond::Not(x) => cond_uses_static(x),
+        Cond::AndThen(a, b) | Cond::OrElse(a, b) => cond_uses_static(a) || cond_uses_static(b),
     }
 }
 
@@ -324,43 +409,8 @@ fn lower_body(
     result: Option<ResultSpec>,
 ) -> Res<Vec<Stmt>> {
     let block = r.body.as_ref().expect("routine with a body");
-    let stmts: Vec<&SStmt> = block
-        .stmts
-        .iter()
-        .filter(|s| !matches!(s.kind, SStmtKind::Empty))
-        .collect();
-    let mut out = Vec::new();
-    for (i, s) in stmts.iter().enumerate() {
-        let last = i + 1 == stmts.len();
-        match &s.kind {
-            SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == id) =>
-            {
-                out.push(result_assignment(p, s, value, last, result)?);
-            }
-            SStmtKind::Assign { target, .. } if matches!(target.kind, ExprKind::Result { .. }) => {
-                return Err(unsupported(
-                    target.span,
-                    "assignment to an enclosing function's result is",
-                ));
-            }
-            SStmtKind::Assign { target, value } if is_block(p, target) => {
-                out.push(copy(p, s, target, value)?)
-            }
-            SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
-            SStmtKind::Call(c) => out.push(Stmt {
-                kind: StmtKind::Call(call(p, r, c, s.span)?),
-                span: s.span,
-            }),
-            SStmtKind::For {
-                var,
-                from,
-                dir,
-                to,
-                body,
-            } => out.push(fill(p, s, var, from, *dir, to, body)?),
-            _ => return Err(unsupported(s.span, "this statement is")),
-        }
-    }
+    let cx = Cx { p, id, r, result };
+    let out = cx.seq(&block.stmts, true)?;
     if r.result.is_some() {
         let assigned = out.iter().any(|s| matches!(s.kind, StmtKind::SetResult(_)));
         if !assigned {
@@ -371,6 +421,274 @@ fn lower_body(
         }
     }
     Ok(out)
+}
+
+/// What statement lowering needs to know about the routine.
+struct Cx<'a> {
+    p: &'a Program,
+    id: RoutineId,
+    r: &'a Routine,
+    result: Option<ResultSpec>,
+}
+
+/// The statements of a statement sequence, with `begin ... end` blocks
+/// flattened into it (a compound statement only groups, ref "Begin",
+/// p. 4-31) and empty statements dropped.
+fn flatten<'s>(stmts: &'s [SStmt], out: &mut Vec<&'s SStmt>) {
+    for s in stmts {
+        match &s.kind {
+            SStmtKind::Empty => {}
+            SStmtKind::Compound(b) => flatten(&b.stmts, out),
+            _ => out.push(s),
+        }
+    }
+}
+
+impl Cx<'_> {
+    /// A statement sequence.  `top`: the routine's own statement part
+    /// (a function's result assignment must be its last statement).
+    fn seq(&self, stmts: &[SStmt], top: bool) -> Res<Vec<Stmt>> {
+        let p = self.p;
+        let mut flat = Vec::new();
+        flatten(stmts, &mut flat);
+        let mut out = Vec::new();
+        for (i, s) in flat.iter().enumerate() {
+            let last = top && i + 1 == flat.len();
+            match &s.kind {
+                SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) =>
+                {
+                    out.push(result_assignment(p, s, value, last, self.result)?);
+                }
+                SStmtKind::Assign { target, .. }
+                    if matches!(target.kind, ExprKind::Result { .. }) =>
+                {
+                    return Err(unsupported(
+                        target.span,
+                        "assignment to an enclosing function's result is",
+                    ));
+                }
+                SStmtKind::Assign { target, value } if is_block(p, target) => {
+                    out.push(copy(p, s, target, value)?)
+                }
+                SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
+                SStmtKind::Call(c) => out.push(Stmt {
+                    kind: StmtKind::Call(call(p, self.r, c, s.span)?),
+                    span: s.span,
+                }),
+                SStmtKind::For {
+                    var,
+                    from,
+                    dir,
+                    to,
+                    body,
+                } => out.push(fill(p, s, var, from, *dir, to, body)?),
+                SStmtKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => {
+                    let then_ = self.seq(std::slice::from_ref(then_branch), false)?;
+                    if then_.is_empty() {
+                        // What the original emitted for an empty `then`
+                        // part (a branch on the negated condition?) is not
+                        // known.
+                        return Err(unsupported(s.span, "an `if` with an empty `then` part is"));
+                    }
+                    let else_ = match else_branch {
+                        Some(e) => self.seq(std::slice::from_ref(e), false)?,
+                        None => Vec::new(),
+                    };
+                    out.push(Stmt {
+                        kind: StmtKind::If {
+                            cond: cond_of(p, cond)?,
+                            then_,
+                            else_,
+                        },
+                        span: s.span,
+                    });
+                }
+                SStmtKind::Repeat { body, cond } => out.push(Stmt {
+                    kind: StmtKind::Repeat {
+                        body: self.seq(body, false)?,
+                        until: cond_of(p, cond)?,
+                    },
+                    span: s.span,
+                }),
+                SStmtKind::Return => out.push(Stmt {
+                    kind: StmtKind::Return,
+                    span: s.span,
+                }),
+                // codegen-patterns 7: a `while` loop is compiled with its
+                // test at the bottom, entered by a `bra` to the test
+                // (0xE01A8E..0xE01A98; 213 such loops in compiled code).
+                // Whether the head after that `bra` gets the 0x2048
+                // filler is not settled: in aligning routines 3 such heads
+                // have it, 2 are 4-aligned and 3 are at 2 mod 4.
+                SStmtKind::While { .. } => {
+                    return Err(unsupported(
+                        s.span,
+                        "a `while` loop (head alignment after the entry `bra` not settled, \
+                         codegen-patterns 7) is",
+                    ))
+                }
+                _ => return Err(unsupported(s.span, "this statement is")),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The condition `e` (a boolean expression) as a [`Cond`]: comparisons,
+/// boolean values, `not`, `and then`, `or else`.
+///
+/// - A comparison takes the type of its operands; a constant operand
+///   takes the other operand's type and must fit it (LOG_$READ's worker
+///   0xE1779A compares its `0..65535` word with `cmpi.w #0x400`, not at
+///   the 32 bits of the subrange's host).  Operands of different widths
+///   or signs (implicit widening, codegen-patterns 5) are not supported
+///   yet; nor are sets and strings.
+/// - `nil` is the pointer 0 (`tst.l (0x14,A5)` at 0xE1778C tests a
+///   pointer against nil).
+/// - `and`/`or` without `then`/`else` may evaluate both operands in any
+///   order (ref pp. 4-18..4-19); what the original did is not catalogued:
+///   not supported yet.
+fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
+    if e.value.is_some() {
+        return Err(unsupported(e.span, "a constant condition is"));
+    }
+    match &e.kind {
+        ExprKind::Unary {
+            op: UnOp::Not,
+            operand,
+        } => Ok(Cond::Not(Box::new(cond_of(p, operand)?))),
+        ExprKind::Binary { op, lhs, rhs } => {
+            let rel = match op {
+                BinOp::AndThen => {
+                    return Ok(Cond::AndThen(
+                        Box::new(cond_of(p, lhs)?),
+                        Box::new(cond_of(p, rhs)?),
+                    ))
+                }
+                BinOp::OrElse => {
+                    return Ok(Cond::OrElse(
+                        Box::new(cond_of(p, lhs)?),
+                        Box::new(cond_of(p, rhs)?),
+                    ))
+                }
+                BinOp::And | BinOp::Or => {
+                    return Err(unsupported(
+                        e.span,
+                        "`and`/`or` in a condition (evaluation not catalogued; `and then`/`or \
+                         else` are supported) is",
+                    ))
+                }
+                BinOp::Eq => Rel::Eq,
+                BinOp::Ne => Rel::Ne,
+                BinOp::Lt => Rel::Lt,
+                BinOp::Le => Rel::Le,
+                BinOp::Gt => Rel::Gt,
+                BinOp::Ge => Rel::Ge,
+                _ => return Ok(Cond::Test(bool_value(p, e)?)),
+            };
+            compare(p, e, rel, lhs, rhs)
+        }
+        _ => Ok(Cond::Test(bool_value(p, e)?)),
+    }
+}
+
+/// A boolean value used as a condition.
+fn bool_value(p: &Program, e: &SExpr) -> Res<Expr> {
+    if !p.types.is_boolean(e.ty) {
+        return Err(unsupported(e.span, "this condition is"));
+    }
+    value_of(p, e)
+}
+
+/// `lhs rel rhs` (see [`cond_of`]).
+fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    let comparable = |x: &SExpr| p.types.is_ordinal(x.ty) || p.types.is_pointer(x.ty);
+    if !comparable(lhs) || !comparable(rhs) {
+        return Err(unsupported(
+            e.span,
+            "comparing values other than ordinals and pointers is",
+        ));
+    }
+    if p.types.is_boolean(lhs.ty) || p.types.is_boolean(rhs.ty) {
+        // `b = true`, `b1 <> b2`: compiled code tests booleans with
+        // `tst.b` and the sign (codegen-patterns 7); a compare of a byte
+        // with 0xFF occurs twice (0xE1B96C, 0xE53FDE, not shown to be
+        // booleans), so what the original did here is not catalogued.
+        return Err(unsupported(e.span, "comparing boolean values is"));
+    }
+    let operand = |x: &SExpr, other: Option<Scalar>| -> Res<Expr> {
+        match (&x.value, other) {
+            (Some(ConstValue::Nil), _) => Ok(Expr::Const {
+                value: 0,
+                ty: Scalar::POINTER,
+            }),
+            (Some(v), Some(ty)) => {
+                let c = const_of(v, ty, x.span)?;
+                let Expr::Const { value, .. } = c else {
+                    unreachable!()
+                };
+                if !fits(value, ty) {
+                    return Err(unsupported(
+                        x.span,
+                        "comparing with a constant outside the other operand's type is",
+                    ));
+                }
+                Ok(c)
+            }
+            (Some(_), None) => Err(unsupported(e.span, "comparing two constants is")),
+            (None, _) => value_of(p, x),
+        }
+    };
+    let (l, r) = match (&lhs.value, &rhs.value) {
+        (None, Some(_)) => {
+            let l = operand(lhs, None)?;
+            let r = operand(rhs, Some(l.ty()))?;
+            (l, r)
+        }
+        (Some(_), None) => {
+            let r = operand(rhs, None)?;
+            let l = operand(lhs, Some(r.ty()))?;
+            (l, r)
+        }
+        _ => (operand(lhs, None)?, operand(rhs, None)?),
+    };
+    if l.ty() != r.ty() {
+        return Err(unsupported(
+            e.span,
+            format!(
+                "comparing a {}-byte {} value with a {}-byte {} one (implicit widening) is",
+                l.ty().bytes(),
+                sign_name(l.ty()),
+                r.ty().bytes(),
+                sign_name(r.ty())
+            ),
+        ));
+    }
+    Ok(Cond::Compare {
+        op: rel,
+        lhs: l,
+        rhs: r,
+    })
+}
+
+fn sign_name(t: Scalar) -> &'static str {
+    match t.sign {
+        Sign::Signed => "signed",
+        Sign::Unsigned => "unsigned",
+    }
+}
+
+/// Whether `v` is a value of IR type `ty`.
+fn fits(v: i64, ty: Scalar) -> bool {
+    let bits = ty.bytes() * 8;
+    match ty.sign {
+        Sign::Signed => (-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&v),
+        Sign::Unsigned => (0..(1i64 << bits)).contains(&v),
+    }
 }
 
 /// `f := e` inside `f`.
@@ -723,6 +1041,13 @@ fn call(p: &Program, caller: &Routine, c: &SCall, span: Span) -> Res<Call> {
                 Arg::Value { value, slot }
             }
             Passing::ByAddress => {
+                if a.needs_temp && a.expr.is_designator() {
+                    return Err(unsupported(
+                        a.expr.span,
+                        "passing a variable of another size to a value or `in` parameter (a \
+                         converted copy, codegen-patterns 1.5) is",
+                    ));
+                }
                 if a.needs_temp || !a.expr.is_designator() {
                     return Err(unsupported(
                         a.expr.span,

@@ -82,19 +82,41 @@ Always find the routine boundaries from the map first.
   `addq.w` up to 8 bytes, `lea` above.  The pad is always `subq.l #2,SP`
   (×2351).
 - **The pop is skipped** when nothing is pushed again before the
-  epilogue, whose `unlk` discards the arguments.  That covers a call that
-  is the routine's last statement, also when a register restore follows
-  (LOG_$READ: the final `bsr` is followed by the A5 restore,
-  codegen-patterns 12.1), and a call followed only by straight-line code
-  that pushes nothing: PROC2_$UPGID_TO_UID 0xE41050 `jsr ML_$UNLOCK`, then
-  two record copies and a status store, no pop (Verified, same survey: 935
-  calls followed by straight-line code without a push or call up to the
-  epilogue, none popped).  When branches follow, 311 such calls are popped
-  and 100 are not: the rule across branches and join points is
-  **Uncertain** (`dpc` has no branches yet).
+  epilogue, whose `unlk` discards the arguments (Verified; survey of
+  every statement-level call with arguments in compiled code,
+  0xE00800..0xE88834, with a control-flow walk from the call to the
+  epilogue; ad-hoc scripts, not kept; re-check sites with
+  `tools/imgdis.sh`):
+  - **Not popped** exactly when every path from the call to the epilogue
+    is free of pushes, calls and *conditional* branches (a `dbf`
+    counts as one); unconditional `bra`s to joins may occur.  1135
+    calls, none popped: AST_$PAGE_ZERO 0xE00F0C `jsr ML_$UNLOCK` then
+    `unlk`; PROC2_$UPGID_TO_UID 0xE41050, then two record copies and a
+    status store; 0xE01166 `jsr ML_$UNLOCK; bra.s 0xE01176`, a join
+    followed by stores and the epilogue; LOG_$READ, whose final `bsr` is
+    followed by the A5 restore (codegen-patterns 12.1); 0xE01432 `jsr;
+    bra.w` to the register restore (a `return`).
+  - **Popped** whenever a push, a call or a conditional branch follows on
+    some path: 2729 calls with both, 1742 with a push only, 240 with a
+    conditional branch only (0xE00BCA `jsr; addq.w #8,SP`, then an `if`
+    and the epilogue).  No call is popped with neither.
+  - **Shared pop at a join (cross-jumping):** 56 unpopped calls branch
+    to a pop at a join instead: when both parts of an `if` end in a call
+    with the same argument bytes and a pop is needed, the `then` part's
+    call is followed by `bra` to the `else` part's pop (0xE06156 `bsr.w;
+    bra.s 0xE06194`, with `addq.w #4,SP` at 0xE06194 after the other
+    call).  The 45 such pairs with *different* sizes pop separately
+    (0xE01A38); none of the same size does.
+  - Two calls inside the argument list of another call (0xE69FF6,
+    0xE748E6) have their pops merged with the outer call's: not
+    statement-level, outside this rule.
+  - **Implemented** (bead domain-pascal-bzl; `crates/dpc-m68k/src/isel.rs`,
+    `Selector::call` with `Tail` / `seq_clean`): the no-pop rule.  The
+    shared pop is rejected ("not supported yet").  Goldens
+    `tests/golden/calls/pop_branches.pas`, `calls/calls.pas`.
 - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `Selector::call`):
-  pad, right-to-left pushes, `jsr`/`bsr`, `addq.w`/`lea` pop, no pop when
-  no later statement calls.  Byte-identical in `make conform`:
+  pad, right-to-left pushes, `jsr`/`bsr`, `addq.w`/`lea` pop, the no-pop
+  rule above.  Byte-identical in `make conform`:
   `tests/conformance/ast_page_zero.pas` (0xE00EB0 + AST_$PAGE_ZERO).
 
 ### 1.2 By reference vs. by value: the routine's options decide (Verified + reference)
@@ -204,10 +226,14 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   0xE135D2); no `move.w #0,-(SP)`.  19 `move.l #0,-(SP)` remain
   unexplained (0xE0F79E, 0xE13B32, ...; perhaps `nil`): Uncertain, `dpc`
   uses `clr.l` for the integer 0.
-- **Bytes:** `st -(SP)` for true (196 sites, 0xE1365C).  There is no
-  `clr.b -(SP)` and no `move.b #n,-(SP)` at all, so other byte constants
-  (false, characters) are pushed some other way, not yet catalogued; `dpc`
-  rejects them.
+- **Bytes:** `st -(SP)` for true (196 sites, 0xE1365C).  `false` (a
+  byte 0) clears the whole slot with `clr.w -(SP)`: RIP_$SEND_UPDATES
+  pushes `st -(SP)` on one path (0xE6889E) and `clr.w -(SP)` on the other
+  (0xE688BC) for the same byte parameter of RIP_$BROADCAST, which reads
+  it with `move.b (8,A6),D2` (0xE872A6) (Verified at this site;
+  implemented).  There is no `clr.b -(SP)` and no `move.b #n,-(SP)` at
+  all, so other byte constants (characters) are pushed some other way,
+  not yet catalogued; `dpc` rejects them.
 - **Adjacent word constants merged:** two adjacent word constants become
   one longword push.
   - 0xE00EB4 is the MMU_$INSTALL asid.w/prot.w pair, `pea (0x16).w`
@@ -230,9 +256,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   ROUTE_$PORT+0x30, 0xE0A36C DMA+0xC0): Uncertain, rejected by `dpc`.
   The same address into a register is `movea.l #sym,An` (0xE00ECC;
   DISK_$GET_ERROR_INFO 0xE6C090).
+- **A by-address parameter passed on by address** is its slot, pushed
+  with `move.l (d,A6),-(SP)` (Verified: LOG_$READ 0xE1780C `actual_len`,
+  0xE17818 `buffer`, both passed on to the worker 0xE17778).
 - **Implemented** (`isel.rs`, `Selector::push`, `push_long_const`): all
   the forms above that are Verified; `addr(x)` (ref "Addr", p. 4-13) in
-  `dpc-sema`.
+  `dpc-sema`.  Golden `tests/golden/data/through_worker.pas` (LOG_$READ's
+  instruction sequence).
 - **Constant by address:** this is the default convention for a constant
   actual.  The compiler puts the literal in the **code section** and passes
   `pea (d,PC)`.
@@ -245,6 +275,12 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
 - **Expression by address:** a non-variable actual passed by address is
   first stored in a frame temporary, and that temporary's address is
   pushed.  TONE_$ENABLE 0xE1ACFC: `lea (0x1268,A5),A0; move.l A0,(-8,A6); pea (-8,A6)`.
+- **Variable of another size by address:** an `integer32` variable for a
+  value or `in` `integer` parameter (assignment compatible, ref 5.3.2)
+  cannot be passed as its own address (the callee would read its high
+  word); presumably a converted copy is passed like an expression, not
+  catalogued.  `dpc-sema` marks such an argument `needs_temp` and
+  `dpc-ir` rejects it ("not supported yet").
 
 ### 1.6 Call instructions (Verified)
 
@@ -445,9 +481,11 @@ variables.  Each module's static data is a data segment, addressed off
     0xE4194C from 0xE7295A, ...), i.e. exported routines the map omits.
     A few set it although only `bsr` reaches them (RING 0xE76048,
     0xE7667C): Uncertain.
-  - **Implemented** (`crates/dpc-ir/src/lower.rs`, `loads_data_base`;
+  - **Implemented** (`crates/dpc-ir/src/lower.rs`, `set_loads_data_base`;
     `crates/dpc-m68k/src/isel.rs`, `load_data_base`): an exported routine
-    that addresses the unit's static data sets A5, as the first
+    that addresses the unit's static data, directly or through `internal`
+    routines of the unit it calls (transitively; LOG_$READ 0xE17806,
+    whose worker 0xE17778 reads `(0x14,A5)`), sets A5, as the first
     instruction after the register save; an `internal` routine never
     does (it inherits A5).  An exported routine that does not address the
     data, in a unit that has some, is rejected ("not settled").  A5 is
@@ -860,10 +898,137 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   chain instead.  Verified: the module-local key translator at 0xE1CC64
   (sparse labels 0x91..0xC0) is a `cmpi.w #k,D0; beq` chain, with labels
   tested in what looks like source order, not sorted order.
-- **Branch sizes:** `.s` when the target is in reach, otherwise `.w`.  No
-  `.l` branches appear (68010).
+- **Branch sizes (Verified):** `.s` when the target is in reach,
+  otherwise `.w`; no `.l` branches (68010).  Compiled code has 11515 `.s`
+  branches, all in reach, and 2793 `.w`, all out of reach but two
+  (0xE7065C `bra.w`, 0xE706DE `bne.w`).  Both are in SMD_UTILS
+  (0xE702F4), which the survey counts as compiled code but which is hand
+  assembly: `movem.l` before `link` and A5 taken from A0 (0xE706C0..
+  0xE706C4), the `movem.l` restore after `unlk` (0xE7075A), a frameless
+  routine addressing its arguments off SP (0xE70760), `bne.w` on the
+  flags of a store (0xE706DA..0xE706DE).  **Implemented:**
+  the emitter sizes every `b<cc>` and `bsr` from its layout
+  (`crates/dpc-m68k/src/emit.rs`, `size_branches`) and writes the size
+  explicitly; gas refuses an out-of-range `.s` rather than relaxing it.
 - **Boolean tests:** `tst.b` then `bmi`/`bpl` (signed byte: 0xFF is
-  negative); `sne`/`seq` to materialise a value.
+  negative); `sne`/`seq` to materialise a value.  After `tst.b` the
+  compiled code branches with `bpl` 919 times, `bmi` 425, `beq`/`bne` 37
+  (Verified counts).
+
+### 7.1 Conditions and `if` (Verified at the sites given; implemented)
+
+Counts from the survey of compiled code (every non-`_ASM` `I` segment,
+split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
+
+- **Against 0 or `nil`: `tst.<s>`**; there is no `cmpi #0` in compiled
+  code.  `=`/`<>` branch with `beq`/`bne`.  For a signed value `<` and
+  `>=` use `bmi`/`bpl` (after `tst.w`: `bmi`/`bpl` 144 times, `blt`/`bge`
+  4 times, 0xE0EB86, 0xE38A94, 0xE38D5A, 0xE6BA12, source construct not
+  identified; after `tst.l`: `bmi`/`bpl` 11 times, `blt`/`bge` never);
+  `<=`/`>` use `ble`/`bgt` (42 and 17
+  times after `tst.w`).  0xE1778C `tst.l (0x14,A5); bne.s` is `if ptr =
+  nil then`.  A pointer in an address register is tested with `cmpa.w
+  #0,An` (151 sites, 0xE0243C; `tst An` is not a 68010 instruction).
+- **Against another constant: `cmpi.<s> #n,<ea>`**, on a register
+  (0xE1779A `cmpi.w #0x400,D1`, a parameter loaded at entry) or on memory
+  (0xE4FE90 `cmpi.w #4,(0x12,A6)`; 0xE58624 `cmpi.l #0x230001,(A0)`;
+  0xE4BAE0 `cmpi.l #0x400,(0x10,A3)`).  The compare has the width of the
+  operand's storage, not of its host type: the `0..65535` parameter at
+  0xE1779A is compared with `cmpi.w`.
+- **Signed or unsigned:** `blt`/`ble`/`bgt`/`bge` for signed values,
+  `bcs`/`bls`/`bhi`/`bcc` for unsigned ones (0xE1779E `bcc` skips the
+  `then` part of an unsigned `<`; 0xE177BE `bls` of an unsigned `>`).
+- **Two variables:** `cmp.<s> <ea>,Dn` with one of them in a register
+  (0xE6A9B4 `move.w (A1),D5; cmp.w (0x14,A6),D5`).  Which operand of the
+  source went to the register cannot be seen in the image.
+- **A long constant held in a register (Uncertain):** 0xE177AE..0xE177B6
+  `move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2`, where 15 of the 28 `add.l
+  Dm,Dn` directly followed by a compare use `cmpi.l` instead, among them
+  the same zero-extended word sum (0xE12164..0xE12174 `clr.l D7; clr.l
+  D6; move.w D2,D7; move.w D3,D6; add.l D6,D7; cmpi.l #0x500,D7; bls`).
+  The other register-held constants found are the left operand of a
+  subtraction (0xE10002 `move.l #0x400,D1; ...; sub.l D0,D1`; 0xE0E964).
+  Not explained.
+- **Flags of a load (Uncertain):** the `tst` is sometimes left out after
+  a move into the tested register (RIP_$SEND_UPDATES 0xE6887E `move.b
+  (8,A6),D0; bpl`; 0xE014DC `move.l (A3),D0; beq`) and sometimes not
+  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).  After a store
+  to memory the memory is tested again (0xE02806 `move.w D0,(0x412,A0);
+  tst.w (0x412,A0)`; 53 such pairs).
+- **`if c then T else E`:** a branch on the negated condition to `E`
+  (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
+  `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.
+  `else if` chains branch to the end of the chain from every `then`
+  part, and the joins coincide (NAME_CONVERT_ACL_STATUS
+  0xE5861C..0xE58652).  Joins are not aligned (section 7, other branch
+  targets).
+- **`return`** (ref "Return", p. 4-166) is a `bra` to the epilogue's
+  first instruction, the register restore: 0xE17794 `bra.s 0xE177F6`.
+  Compiled code never has two `bra`s in a row, so a `then` part ending in
+  `return` has no `bra` to the join after it (Verified by absence; dpc
+  leaves it out).
+- **No branch to a `bra` (Verified by absence):** of the 3324 forward
+  `bra`s in compiled code none targets a `bra`, and no `b<cc>` does
+  (0xE34BC8, the one hit, is data).  So where the plain layout above
+  would branch to a `bra` (`if a then begin if b then ... else ... end
+  else ...`: the inner join is followed by the outer `bra`; `if a then
+  begin if b then ... end else ...`; `if a then begin if b then ...;
+  return end`; `if a or else b then return`), the original threaded the
+  branch or laid the code out otherwise; which is not known.  dpc rejects
+  these (`select_body`, `Selector::jump`).
+- **Identical ends of the two parts (Uncertain):** the pop is shared at
+  the join (section 1.1), and RIP_$SEND_UPDATES shares a `jsr`: one part
+  is `subq.l #2,SP; st -(SP); bra.s 0xE688BE`, the other `subq.l #2,SP;
+  clr.w -(SP)` falling into the `jsr RIP_$BROADCAST` at 0xE688BE.  But
+  0xE381A8 and 0xE381D2 are two `jsr 0xE825E4` ending the two parts of
+  one `if`, not shared, and 0xE1A9F0/0xE1AA00 two identical `move.w
+  0xE2E00E,D0` (of the 3324 forward `bra`s to a join reached by falling
+  through, 4 have the same instruction before the `bra` and before the
+  join).  dpc never shares anything but rejects the shared-pop case.
+- **`and then` / `or else`** (ref pp. 4-18..4-19, 4-134): jumping code,
+  each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
+  bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
+  btst #14,D5; bne.s <head>` (a loop test `c1 or else ... or else c4`).
+- **Implemented** (`crates/dpc-ir`, `Cond`, `StmtKind::If`/`Return`;
+  `crates/dpc-m68k/src/isel.rs`, `Selector::if_`, `branch`, `compare`):
+  all of the above that is Verified, with `not`, `and then`, `or else`.
+  Not supported yet: a branch to a `bra` (above); comparing booleans
+  (`b = true`: compiled code tests booleans with `tst.b`, and has two
+  `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
+  a constant on the left of a comparison; comparing
+  two variables unless the left one is held in a data register (a
+  parameter loaded at entry); operands of different widths or signs
+  (implicit widening); unsigned ordering against 0; `cmpa.w #0,An` (no
+  pattern yet produces a held pointer that is compared); a test right
+  after the load of its register (above); `and`/`or` without
+  `then`/`else`; an `if` with an empty `then` part; a `return` at the
+  end of a nested part that ends the routine (a `bra` to the next
+  instruction, or nothing?); the shared pop (section 1.1).  Goldens
+  `tests/golden/control/if_else.pas`, `control/compares.pas`;
+  byte-identical in `make conform`:
+  `tests/conformance/name_convert_acl_status.pas`.
+
+### 7.2 Loops with a test (Verified shapes; alignment partly Uncertain)
+
+Backward branches other than `dbf` in compiled code (same survey):
+
+| Branch back | Head entered by | Count | Shape |
+|---|---|---|---|
+| `b<cc>` | a `bra` (to the test) | 213 | `while`: `bra test; head: body; test: <cond>; b<cc> head` (0xE01A8E..0xE01A98) |
+| `b<cc>` | falling through | 190 | test at the bottom, entered from the top: `repeat ... until` (0xE03192..0xE031B6, 0xE03208..0xE03224) |
+| `bra` | falling through | 131 | test at the top, exits forward (0xE00E68); source construct not identified |
+| `bra` | a `bra` | 7 | |
+
+- **`repeat body until c`:** the head is entered by falling through and
+  aligned like every such head in aligning code (section 7: 312 with
+  the filler, 158 4-aligned, 25 at 2 mod 4); the test branches back on
+  the negated condition.  **Implemented** (`Selector::repeat`, the
+  0x2048 filler as for every loop head dpc emits); golden
+  `tests/golden/control/repeat.pas`.
+- **`while c do body`:** compiled with the test at the bottom, entered by
+  a `bra` to the test.  Whether the head after that `bra` gets the
+  filler is not settled (in aligning routines: 3 with the filler, 2
+  4-aligned, 3 at 2 mod 4).  Not supported yet.
 
 ---
 
@@ -1057,7 +1222,7 @@ precedes `unlk`.
 | PROC1_$GET_LOADAV 0xE14BBA (`proc1/get_loadav.c`) | `link #0` | `pea (A5)` 0xE14BBE / `movea.l (-4,A6),A5` 0xE14BD2 | `lea 0xE254E8,A5` right after the save; `lea (A5),A0` (source, offset 0 of the data), `movea.l (8,A6),A1` (destination), three `move.l (A0)+,(A1)+`. Byte-identical in `make conform` (`tests/conformance/proc1_get_loadav.pas`). |
 | module-local 0xE00EB0 (`misc/zero_page.c`) | `link #-0xc` (frame never touched in the body; section 2) | none | No register holds a value across the two `jsr`s; the argument `(8,A6)` is re-read for each call (0xE00EBE, 0xE00EDE). Loop: A0 pointer (`movea.l #imm,A0`), D0 `dbf` counter, the lowest free scratch registers right after the first `jsr`. Byte-identical in `make conform` (`tests/conformance/ast_page_zero.pas`). |
 | AST_$PAGE_ZERO 0xE00EEC (`ast/page_zero.c`) | `link #0` | none | No registers at all: constants pushed, `(8,A6)` pushed, three calls. Byte-identical in `make conform` (same unit). |
-| module-local 0xE17778 (`log/read_internal.c`) | `link #-0x10` | `movem.l D2-D3/A2,-(SP)` (`48e7 3020`) 0xE1777C / `movem.l (-0x1c,A6),D2-D3/A2` (`4cee 040c ffe4`) 0xE177F6 | No calls, yet callee-saved registers are used. Parameters at entry: word `(0xc,A6)`→D0, word `(0xe,A6)`→D1, pointer `(0x10,A6)`→A0, held in these *scratch* registers for most of the routine. Temporaries then take D2, D3 (0xE177A0 `moveq #-2,D2`; 0xE177A8..0xE177AE). The pointer `(8,A6)` is loaded into **A2** only at 0xE177CC, although A1 is free there; A1 is taken next (0xE177DA) and the copy loop uses A0/A1. |
+| module-local 0xE17778 (`log/read_internal.c`) | `link #-0x10` | `movem.l D2-D3/A2,-(SP)` (`48e7 3020`) 0xE1777C / `movem.l (-0x1c,A6),D2-D3/A2` (`4cee 040c ffe4`) 0xE177F6 | No calls, yet callee-saved registers are used. Parameters at entry: word `(0xc,A6)`→D0, word `(0xe,A6)`→D1, pointer `(0x10,A6)`→A0, held in these *scratch* registers for most of the routine. Temporaries then take D2, D3 (0xE177A0 `moveq #-2,D2`; 0xE177A8..0xE177AE). The pointer `(8,A6)` is loaded into **A2** only at 0xE177CC, although A1 is free there; A1 is taken next (0xE177DA) and the copy loop uses A0/A1. Registers are reused after the last use of what they held: D1 (`max_len`, last read 0xE177A2) holds the zero-extended `offset` from 0xE177A6; D0 (`offset`, last read 0xE177C8) the word count from 0xE177D2; A0 (`actual_len`, last used 0xE177D2) the source pointer from 0xE177E0. The zero-extended `offset` in D1 is reused by a later statement (0xE177D0 `move.l D1,D3`, CSE across an `if`). 0xE177CC..0xE177DC interleaves two independent computations (`movea.l (8,A6),A2; move.l D1,D3; move.w (A0),D0; add.l (0x14,A5),D3; lsr.w #1,D0; movea.l D3,A1`): an instruction scheduler. D3 is taken at 0xE177C4 although D2 is free. See section 12.3. |
 | LOG_$READ 0xE17800 (`log/read.c`) | `link #0` | `pea (A5)` 0xE17804 / `movea.l (-4,A6),A5` 0xE17820 | `lea 0xE2B280,A5`; A0 scratch to dereference the by-address `max_len` (0xE17810). The final `bsr` is followed by the A5 restore, no pop. |
 | nested 0xE1359C of PMAP_$FLUSH | `link #-4` (frame unused) | `movem.l D2/A2-A3,-(SP)` (`48e7 2030`) 0xE135A0 / `movem.l (-0x10,A6),D2/A2-A3` (`4cee 0c04 fff0`) 0xE13602 | Static link `movea.l A1,A2` at entry (0xE135A4); parameter `(0xc,A6)`→D2 at entry (0xE135A6), **held across** `jsr` 0xE135BC and used after it (0xE135D4, 0xE135FA). Inside one argument list the pointer `(8,A2)` is reloaded into A0 (0xE135DA), then into **A1** (0xE135E2), and a pointer read through it goes to **A3** (0xE135E6): registers are not reused within the statement (A2 is busy). |
 | PROC1_$SET_ASID 0xE148F8 | `link #0` | `move.l D2,-(SP)` 0xE148FC / `move.l (-4,A6),D2` 0xE14916 | Parameter `(8,A6)` → D2 at entry, used twice (a store and a push) before the one `jsr`, not after it. |
@@ -1161,23 +1326,40 @@ kinds from the C in `../source/domain_os`.
   argument is pushed from the frame (AST_$SET_ATTRIBUTE 0xE053DA `move.l
   (0xe,A6),-(SP)`); a byte read once after a call is read there
   (TTY_$I_ERR 0xE1BE28).
-- *By-address (`var`) slots behave differently* and are not settled:
-  reloaded for every statement (module-local 0xE0A328: `movea.l (8,A6),A0`
-  five times, if its first parameter is the device block by address, as
-  its C suggests); loaded where first needed, each into a fresh register
-  with no reuse within the body (IIC_$RECEIVE 0xE70AC0..0xE70AD0: A0, A1,
-  A2, the last one callee-saved; PROC2_$ALIGN_CTL 0xE41D82..0xE41D8E;
-  XNS_IDP_$GET_STATS 0xE18FF4 A1); or loaded at entry when read more than
-  once (PEB_$TEST_PARITY_ERR 0xE12000; MMAP_$GET_WS_INDEX 0xE0CA4C).
+- *By-address (`var`) slots* (bead domain-pascal-b1v):
+  - **used more than once: loaded at entry**, in parameter order with
+    the by-value parameters, into an address register that holds the
+    address for the whole body (Verified at four sites): LOG_$READ's
+    worker 0xE17780..0xE17788 `move.w (0xc,A6),D0; move.w (0xe,A6),D1;
+    movea.l (0x10,A6),A0` (`actual_len`, nine uses); MMAP_$GET_WS_INDEX
+    0xE0CA48..0xE0CA4C `move.w (8,A6),D0; movea.l (0xe,A6),A0` (two
+    uses); NAME_CONVERT_ACL_STATUS 0xE58620 (six uses, a body of one
+    `if ... else if` chain); PEB_$TEST_PARITY_ERR 0xE12000.  The one
+    exception found, module-local 0xE0A328 (DMA_$INIT_M68450_CHANNEL in
+    `dma/init_m68450_channel.c`), reloads `movea.l (8,A6),A0` before each
+    of five stores, which are device-register stores (`device`, ref
+    3.15.3; rejected by `dpc-sema`).
+  - **used once: loaded where needed**, into a register no earlier load
+    of the body used: IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2 (the
+    last one callee-saved, although A0 and A1 are free again);
+    PROC2_$ALIGN_CTL 0xE41D82..0xE41D8E likewise; XNS_IDP_$GET_STATS
+    0xE18FF4 A1; LOG_$READ's worker 0xE177CC `movea.l (8,A6),A2` while
+    A1 is free (A1 is taken next, for another pointer);
+    MMAP_$GET_WS_INDEX 0xE0CA62 `movea.l (0xa,A6),A2`, A1 taken next.
+    The allocation rule is not settled.
 - *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
   `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
   add.w D1,D1`.
 
 **Implemented** (`crates/dpc-m68k/src/isel.rs`, `select_body`,
-`Selector::entry_loads`): a *procedure* body of two or more statements
-loads every by-value parameter it reads, in parameter order, into the
-lowest free scratch register (D for data, A for a dereferenced pointer);
-its statements then use only those registers.  A parameter that is only
+`Selector::entry_loads`): a *procedure* body of two or more statements,
+or of one `if`/`repeat`, loads every by-value parameter it reads and
+every by-address slot it uses more than once, in parameter order, into
+the lowest free scratch register (D for data, A for a dereferenced
+pointer or a slot); its statements then use only those registers.  A
+body of one `if`/`repeat` that reads a by-value parameter is rejected
+(no site seen); a slot used once in such a body is rejected (the
+fresh-register rule above).  A parameter that is only
 pushed as a whole argument is not "read" for this rule: it is pushed from
 the frame at each call (0xE00EBE, 0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).
 A statement right after a call may take scratch registers of its own when
@@ -1207,6 +1389,52 @@ assigning to a parameter.
   D0,D1`.
 - The rule for by-address slots (above), and when the original chose
   callee-saved registers without calls.
+
+
+### 12.3 What LOG_$READ's worker 0xE17778 still needs (bead domain-pascal-g5q.4)
+
+`tests/conformance/pending/log_read.pas` is a reconstruction of the
+worker and LOG_$READ (0xE17778..0xE17828); it is not in the manifest
+because `dpc` cannot compile the worker yet.  What dpc now produces
+byte for byte in its shape: the entry loads (0xE17780..0xE17788, with
+the by-address `actual_len` held in A0, section 12.2), the `if ... nil
+... return` (0xE1778C..0xE17794), the constant store and the unsigned
+compares and branches (0xE17796..0xE1779E, 0xE177BA..0xE177C2), and
+LOG_$READ itself (golden `tests/golden/data/through_worker.pas`).  Not
+settled, each from this one routine, in image order:
+
+1. `moveq #-2,D2; and.w D1,D2; move.w D2,(A0)` (0xE177A0): `max_len &
+   16#FFFE` with the constant loaded first and the variable ANDed into
+   it, in D2: the first callee-saved register, taken without any call
+   while D0/D1 hold parameters.  Bit operators are not implemented; the
+   operand order and the register choice need a survey.
+2. `clr.l D1; clr.l D2; move.w D0,D1; move.w (A0),D2` (0xE177A6): the
+   zero-extension of two `0..65535` words for a 32-bit sum (implicit
+   widening, section 5), both `clr.l` first.  D1, which held `max_len`
+   (last read at 0xE177A2), is reused: registers are freed after the
+   last use of a parameter, which dpc's pinned registers never are.
+   0xE0102C..0xE01034 orders a zero- and a sign-extension the same way
+   (`clr.l D0; move.w D2,D1; move.w (0x46e,A5),D0; ext.l D1`).
+3. `move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2; bls` (0xE177AE): the
+   register-held constant (section 7.1, Uncertain).
+4. `move.w #0x400,D3; sub.w D0,D3; move.w D3,(A0)` (0xE177C4): `0x400 -
+   offset` in D3 although D2 is free.
+5. `move.l D1,D3; ...; add.l (0x14,A5),D3; ...; movea.l D3,A1`
+   (0xE177D0..0xE177DA): `univ_ptr(integer32(ptr) + offset)` (ref "Type
+   Transfer Functions", p. 4-197, the example `UNIV_PTR(INTEGER32(p) +
+   2)`), reusing the zero-extended `offset` from item 2 across the `if`
+   (common subexpression), interleaved with the word count `move.w
+   (A0),D0; lsr.w #1,D0` (an instruction scheduler), and `buffer` loaded
+   into A2 first (0xE177CC) while A1 is free (section 12.2).
+6. `subq.w #1,D0; bmi.s <end>; lea (2,A1),A0; lea (2,A2),A1; <head:>
+   move.w (-2,A0),(-2,A1); addq.l #2,A1; addq.l #2,A0; dbf D0,<head>`
+   (0xE177DC..0xE177F2): a `for` loop over 1-based arrays with a run-time
+   count, the index strength-reduced into two pointers that start one
+   element in (the `-1` of the lower bound folded into the
+   displacement, section 5.2), the destination stepped first.  The head
+   0xE177E8 is 4-aligned with no filler (LOG_ aligns, section 7).
+7. The frame: `link #-0x10` with nothing in it addressed (section 2,
+   untouched frames); the reconstruction declares stand-ins.
 
 ---
 

@@ -211,7 +211,8 @@ fn unsupported_constructs_have_positions() {
         vec!["t.pas:2:13: error: value parameters passed by address (callee-made local copy) are not supported yet"]
     );
     // An ordinary statement.
-    let e = errs("module m;\nprocedure p(var x: integer);\nbegin\n  if x = 1 then x := 2;\nend;\n");
+    let e =
+        errs("module m;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n");
     assert_eq!(
         e,
         vec!["t.pas:4:3: error: this statement is not supported yet"]
@@ -913,4 +914,272 @@ end;
 ",
     );
     assert!(e[0].contains("fewer arguments than parameters"), "{e:?}");
+}
+
+// ---- control flow (codegen-patterns 7) -------------------------------
+
+const CTL: &str = "module ctl;
+type
+  pinteger = 0..65535;
+var
+  w: extern integer;
+  l: extern integer32;
+  u: extern pinteger;
+  p: extern ^integer;
+  b, b2: extern boolean;
+";
+
+/// The statement part of `body` in procedure `t` of a unit with `CTL`'s
+/// declarations, lowered.
+fn ctl_body(body: &str) -> Vec<Stmt> {
+    let m = lower_src(&format!(
+        "{CTL}procedure t; internal;\nbegin\n{body}\nend;\n"
+    ))
+    .unwrap();
+    m.functions[0].body.clone()
+}
+
+fn ctl_errs(body: &str) -> Vec<String> {
+    errs(&format!(
+        "{CTL}procedure t; internal;\nbegin\n{body}\nend;\n"
+    ))
+}
+
+fn sym(name: &str, ty: Scalar) -> Expr {
+    Expr::Load {
+        addr: Addr::Symbol {
+            name: name.into(),
+            offset: 0,
+        },
+        ty,
+    }
+}
+
+const W: Scalar = Scalar::signed(Width::Word);
+const UW: Scalar = Scalar::unsigned(Width::Word);
+
+/// `if` with and without `else`, nested; `begin ... end` is flattened.
+#[test]
+fn if_statements() {
+    let b = ctl_body(
+        "if w = 1 then w := 2 else begin w := 3; return end;
+         if u < 16#8000 then begin begin w := 4 end end;",
+    );
+    assert_eq!(b.len(), 2);
+    let StmtKind::If { cond, then_, else_ } = &b[0].kind else {
+        panic!("{:?}", b[0].kind)
+    };
+    assert_eq!(
+        *cond,
+        Cond::Compare {
+            op: Rel::Eq,
+            lhs: sym("W", W),
+            rhs: Expr::Const { value: 1, ty: W }
+        }
+    );
+    assert_eq!(then_.len(), 1);
+    assert_eq!(else_.len(), 2);
+    assert_eq!(else_[1].kind, StmtKind::Return);
+    let StmtKind::If { cond, then_, else_ } = &b[1].kind else {
+        panic!()
+    };
+    // The constant takes the unsigned word type of the other operand
+    // (0xE1779A `cmpi.w #0x400,D1`).
+    assert_eq!(
+        *cond,
+        Cond::Compare {
+            op: Rel::Lt,
+            lhs: sym("U", UW),
+            rhs: Expr::Const {
+                value: 0x8000,
+                ty: UW
+            }
+        }
+    );
+    assert_eq!(then_.len(), 1);
+    assert!(else_.is_empty());
+}
+
+#[test]
+fn conditions() {
+    let cond = |c: &str| {
+        let b = ctl_body(&format!("if {c} then w := 0;"));
+        let StmtKind::If { cond, .. } = &b[0].kind else {
+            panic!()
+        };
+        cond.clone()
+    };
+    let bool_b = sym("B", Scalar::BOOLEAN);
+    let bool_b2 = sym("B2", Scalar::BOOLEAN);
+    assert_eq!(cond("b"), Cond::Test(bool_b.clone()));
+    assert_eq!(
+        cond("not b"),
+        Cond::Not(Box::new(Cond::Test(bool_b.clone())))
+    );
+    assert_eq!(
+        cond("b and then b2"),
+        Cond::AndThen(
+            Box::new(Cond::Test(bool_b.clone())),
+            Box::new(Cond::Test(bool_b2.clone()))
+        )
+    );
+    assert_eq!(
+        cond("b or else b2"),
+        Cond::OrElse(Box::new(Cond::Test(bool_b)), Box::new(Cond::Test(bool_b2)))
+    );
+    // nil is the pointer 0.
+    assert_eq!(
+        cond("p = nil"),
+        Cond::Compare {
+            op: Rel::Eq,
+            lhs: sym("P", Scalar::POINTER),
+            rhs: Expr::Const {
+                value: 0,
+                ty: Scalar::POINTER
+            }
+        }
+    );
+    // A constant on the left takes the right operand's type.
+    assert_eq!(
+        cond("3 < w"),
+        Cond::Compare {
+            op: Rel::Lt,
+            lhs: Expr::Const { value: 3, ty: W },
+            rhs: sym("W", W)
+        }
+    );
+    // Two variables of one type.
+    assert_eq!(
+        cond("l >= l"),
+        Cond::Compare {
+            op: Rel::Ge,
+            lhs: sym("L", Scalar::signed(Width::Long)),
+            rhs: sym("L", Scalar::signed(Width::Long))
+        }
+    );
+}
+
+#[test]
+fn unsupported_conditions_and_loops() {
+    let one = |body: &str| {
+        let e = ctl_errs(body);
+        assert_eq!(e.len(), 1, "{e:?}");
+        e[0].clone()
+    };
+    assert!(one("if b and b2 then w := 0;").contains("`and`/`or` in a condition"));
+    assert!(one("if w < l then w := 0;")
+        .ends_with("comparing a 2-byte signed value with a 4-byte signed one (implicit widening) is not supported yet"));
+    assert!(one("if w < u then w := 0;").contains("implicit widening"));
+    assert!(one("if u < 70000 then w := 0;").ends_with(
+        "comparing with a constant outside the other operand's type is not supported yet"
+    ));
+    assert!(one("if u > -1 then w := 0;").contains("outside the other operand's type"));
+    assert!(one("while w = 0 do w := 1;").contains("a `while` loop"));
+    assert!(one("if w = 0 then ;").contains("an `if` with an empty `then` part"));
+    assert!(one("if true then w := 0;").contains("a constant condition"));
+    assert!(one("if b = true then w := 0;").contains("comparing boolean values"));
+    assert!(one("if b <> b2 then w := 0;").contains("comparing boolean values"));
+}
+
+#[test]
+fn repeat_and_return() {
+    let b = ctl_body("repeat w := 1; w := 2 until b; return;");
+    assert_eq!(b.len(), 2);
+    let StmtKind::Repeat { body, until } = &b[0].kind else {
+        panic!()
+    };
+    assert_eq!(body.len(), 2);
+    assert_eq!(*until, Cond::Test(sym("B", Scalar::BOOLEAN)));
+    assert_eq!(b[1].kind, StmtKind::Return);
+}
+
+/// A function's result assignment inside an `if` is not its last
+/// statement (codegen-patterns 3).
+#[test]
+fn result_assignment_in_an_if_is_rejected() {
+    let e = errs(&format!(
+        "{CTL}function f: integer; internal;\nbegin\n  if b then f := 1;\nend;\n"
+    ));
+    assert!(
+        e.iter()
+            .any(|m| m.contains("not the routine's last statement")),
+        "{e:?}"
+    );
+}
+
+/// codegen-patterns 4: an exported routine loads the data base when it
+/// uses the unit's data through an internal callee that inherits A5
+/// (LOG_$READ 0xE17806, worker 0xE17778); a global callee loads its own.
+#[test]
+fn data_base_through_internal_callees() {
+    let m = lower_src(
+        "module log_;
+var
+  x: integer;
+procedure worker; internal;
+begin
+  x := 0;
+end;
+procedure middle; internal;
+begin
+  worker;
+end;
+procedure log_$read;
+begin
+  if x = 1 then middle;
+end;
+procedure log_$other;
+begin
+  log_$read;
+end;
+",
+    );
+    let e = match m {
+        Ok(m) => panic!("{m:#?}"),
+        Err(e) => e,
+    };
+    // LOG_$OTHER calls only a global routine, which sets A5 itself.
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].starts_with("t.pas:16:1: error: an exported routine that does not use"));
+    let m = lower_src(
+        "module log_;
+var
+  x: integer;
+procedure worker; internal;
+begin
+  x := 0;
+end;
+procedure middle; internal;
+begin
+  worker;
+end;
+procedure log_$read;
+begin
+  middle;
+end;
+",
+    )
+    .unwrap();
+    let loads: Vec<bool> = m.functions.iter().map(|f| f.loads_data_base).collect();
+    assert_eq!(loads, [false, false, true]);
+}
+
+/// By-address parameter slots are listed for the selector
+/// (codegen-patterns 12.2).
+#[test]
+fn address_params_are_listed() {
+    let m = lower_src(
+        "module m;
+procedure p(var a: integer; b: integer; in c: integer32; out d: integer); options(val_param);
+begin
+  a := 0;
+end;
+",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    // `in c` of 4 bytes goes by value under val_param (ref 5.5.7, p. 5-19).
+    assert_eq!(f.address_params, [8, 0x12]);
+    let values: Vec<i32> = f.value_params.iter().map(|p| p.offset).collect();
+    assert_eq!(values, [0xc, 0xe]);
 }

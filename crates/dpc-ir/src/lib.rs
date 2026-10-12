@@ -94,6 +94,12 @@ pub struct Function {
     /// selector recognise those reads (the original loaded parameters
     /// into registers at entry in some routines, codegen-patterns 12.2).
     pub value_params: Vec<ValueParam>,
+    /// The frame offsets of the slots of the parameters passed by address
+    /// (each slot holds the argument's address), in parameter order.  The
+    /// body reaches such a parameter as `Addr::Indirect` on
+    /// `Expr::Load { addr: Addr::Frame(offset), .. }`; the list lets the
+    /// selector recognise those slots (codegen-patterns 12.2).
+    pub address_params: Vec<i32>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -240,6 +246,63 @@ pub enum StmtKind {
         count: u32,
         value: Expr,
     },
+    /// `if cond then then_ else else_` (ref "If", p. 4-99).  An empty
+    /// `else_` is an `if` without `else`; `then_` is never empty.
+    If {
+        cond: Cond,
+        then_: Vec<Stmt>,
+        else_: Vec<Stmt>,
+    },
+    /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body runs
+    /// at least once, and again while `until` is false.
+    Repeat { body: Vec<Stmt>, until: Cond },
+    /// `return` (ref "Return", p. 4-166): leave the routine.
+    Return,
+}
+
+/// A condition that decides a branch (the test of an `if` or a loop).
+/// Conditions are compiled to compares and conditional branches, never
+/// materialised as a boolean value (codegen-patterns 7).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cond {
+    /// `lhs op rhs`.  Both operands have the same width and sign; the
+    /// sign decides a signed or unsigned compare.
+    Compare { op: Rel, lhs: Expr, rhs: Expr },
+    /// A boolean value is true (its byte is 0xFF, ref 3.5.3 p. 3-11).
+    Test(Expr),
+    /// `not c` (ref "Not", p. 4-126).
+    Not(Box<Cond>),
+    /// `a and then b`: `b` is evaluated only when `a` is true (ref "And
+    /// Then", pp. 4-18..4-19).
+    AndThen(Box<Cond>, Box<Cond>),
+    /// `a or else b`: `b` is evaluated only when `a` is false (ref "Or
+    /// Else", p. 4-134).
+    OrElse(Box<Cond>, Box<Cond>),
+}
+
+/// A relational operator (ref Table 4-1, p. 4-3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rel {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Rel {
+    /// The relation that holds exactly when `self` does not.
+    pub fn negate(self) -> Rel {
+        match self {
+            Rel::Eq => Rel::Ne,
+            Rel::Ne => Rel::Eq,
+            Rel::Lt => Rel::Ge,
+            Rel::Ge => Rel::Lt,
+            Rel::Le => Rel::Gt,
+            Rel::Gt => Rel::Le,
+        }
+    }
 }
 
 /// A call: the callee, the arguments in parameter order (argument 1

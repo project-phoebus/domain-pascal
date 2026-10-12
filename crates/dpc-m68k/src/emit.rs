@@ -153,54 +153,81 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
     }
 }
 
-/// Choose `bsr.s` or `bsr.w` for every call between the routines of one
-/// code section: `.s` whenever the target is in reach (a displacement of
-/// -128..=127 other than 0, which would mean `.w`), as the original did
-/// (survey of compiled code: 121 `bsr.s`, all in reach; 1800 `bsr.w`,
-/// none in reach; codegen-patterns 1.6).  The emitter decides, never
-/// gas, so the sizes are explicit (codegen-patterns 13).
+/// Choose the size of every `bsr` and `b<cc>` of one code section: `.s`
+/// whenever the target is in reach (a displacement of -128..=127 other
+/// than 0, which would mean `.w`), as the original did.  Calls: 121
+/// `bsr.s`, all in reach, 1800 `bsr.w`, none in reach (codegen-patterns
+/// 1.6).  Branches: 11515 `.s`, all in reach, 2793 `.w`, all but two out
+/// of reach (0xE7065C, 0xE706DE, both hand assembly in SMD_UTILS;
+/// codegen-patterns 7).  Survey of compiled
+/// code 0xE00800..0xE88834.  The emitter decides, never gas, so the sizes
+/// are explicit (codegen-patterns 13).
 ///
 /// `base` is the section's first byte mod 4 (0, or the fragment
 /// origin's: the code's 4-byte alignment is absolute, so a `0x2048`
-/// filler's size depends on the position).  Every branch starts short;
-/// one out of reach becomes long and the layout is redone, until nothing
-/// changes (a branch never shrinks again, so this ends).
+/// filler's size depends on the position).  Every call and branch starts
+/// short; one out of reach becomes long and the layout is redone, until
+/// nothing changes (nothing ever shrinks again, so this ends).
 fn size_branches(
     routines: &mut [(&dpc_ir::Function, Vec<Insn>)],
     base: u32,
 ) -> Result<(), Diagnostic> {
+    use std::collections::HashMap;
+    enum Target {
+        Routine(String),
+        Label(u32),
+    }
     loop {
-        let mut at = std::collections::HashMap::new();
+        let mut at = HashMap::new();
+        // (routine, label) -> position
+        let mut labels = HashMap::new();
         let mut sites = Vec::new();
         let mut pos = base;
         for (ri, (f, insns)) in routines.iter().enumerate() {
             at.insert(f.symbol.clone(), pos);
             for (ii, i) in insns.iter().enumerate() {
-                if let Insn::Bsr { target, short } = i {
-                    sites.push((ri, ii, pos, target.clone(), *short));
+                match i {
+                    Insn::Bsr { target, short } => {
+                        sites.push((ri, ii, pos, Target::Routine(target.clone()), *short))
+                    }
+                    Insn::Branch { label, short, .. } => {
+                        sites.push((ri, ii, pos, Target::Label(*label), *short))
+                    }
+                    Insn::Label(l) => {
+                        labels.insert((ri, *l), pos);
+                    }
+                    _ => {}
                 }
                 pos += i.len_at(pos);
             }
         }
         let mut changed = false;
         for (ri, ii, pos, target, short) in sites {
-            let Some(&t) = at.get(&target) else {
-                return Err(Diagnostic::error(
-                    routines[ri].0.span,
-                    format!("a call of `{target}`, which is not in this code section, is not supported yet"),
-                ));
+            let t = match &target {
+                Target::Routine(sym) => match at.get(sym) {
+                    Some(&t) => t,
+                    None => {
+                        return Err(Diagnostic::error(
+                            routines[ri].0.span,
+                            format!("a call of `{sym}`, which is not in this code section, is not supported yet"),
+                        ))
+                    }
+                },
+                Target::Label(l) => *labels
+                    .get(&(ri, *l))
+                    .expect("a branch to a label of its own routine"),
             };
             let disp = t as i64 - (pos as i64 + 2);
             if short && !((-128..=127).contains(&disp) && disp != 0) {
-                routines[ri].1[ii] = Insn::Bsr {
-                    target,
-                    short: false,
-                };
+                match &mut routines[ri].1[ii] {
+                    Insn::Bsr { short, .. } | Insn::Branch { short, .. } => *short = false,
+                    _ => unreachable!(),
+                }
                 changed = true;
             } else if !short && !(-0x8000..0x8000).contains(&disp) {
                 return Err(Diagnostic::error(
                     routines[ri].0.span,
-                    "a call beyond the reach of `bsr.w` is not supported yet",
+                    "a call or branch beyond the reach of a 16-bit displacement is not supported yet",
                 ));
             }
         }
@@ -279,6 +306,7 @@ mod tests {
             result: None,
             loads_data_base: false,
             value_params: Vec::new(),
+            address_params: Vec::new(),
             body: Vec::new(),
             span,
         }
@@ -422,6 +450,58 @@ mod tests {
             .map(|kind| Stmt { kind, span: f.span })
             .collect();
         f
+    }
+
+    /// `b<cc>` sizes follow the distance to the label of the branch's own
+    /// routine (two routines here use the same label numbers), forward
+    /// and backward (codegen-patterns 7).
+    #[test]
+    fn branch_size_follows_the_distance() {
+        use dpc_ir::{Addr, Cond, Expr, Scalar, Stmt, StmtKind, Width};
+        let store = |f: &dpc_ir::Function| Stmt {
+            kind: StmtKind::Store {
+                addr: Addr::Symbol {
+                    name: "X".into(),
+                    offset: 0,
+                },
+                value: Expr::Const {
+                    value: 0x12345,
+                    ty: Scalar::signed(Width::Long),
+                },
+            },
+            span: f.span,
+        };
+        let test = Cond::Test(Expr::Load {
+            addr: Addr::Symbol {
+                name: "B".into(),
+                offset: 0,
+            },
+            ty: Scalar::BOOLEAN,
+        });
+        // A `repeat` whose body is `n` 10-byte stores.
+        let looping = |sym: &str, n: usize| {
+            let mut f = one_routine(".text", sym);
+            let body = (0..n).map(|_| store(&f)).collect();
+            f.body = vec![Stmt {
+                kind: StmtKind::Repeat {
+                    body,
+                    until: test.clone(),
+                },
+                span: f.span,
+            }];
+            f
+        };
+        let m = Module {
+            functions: vec![looping("NEAR", 2), looping("FAR", 13)],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        let branches: Vec<&str> = s
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("bpl"))
+            .collect();
+        assert_eq!(branches, ["bpl.s\t1b", "bpl.w\t1b"], "{s}");
     }
 
     fn bsr_line(s: &str) -> &str {

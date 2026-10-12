@@ -17,7 +17,10 @@
 //! Each pattern cites the image address(es) it reproduces.  Patterns the
 //! image has not shown are rejected, not guessed.
 
-use dpc_ir::{Addr, Arg, Call, Callee, Expr, Function, ResultClass, Scalar, StmtKind, Width};
+use dpc_ir::{
+    Addr, Arg, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, Scalar, Sign, Stmt,
+    StmtKind, Width,
+};
 use dpc_syntax::{Diagnostic, Span};
 
 use crate::emit::DATA_BASE_LABEL;
@@ -41,6 +44,23 @@ fn imm(value: i64, w: Width) -> i64 {
         Width::Byte => value & 0xff,
         Width::Word => value as i16 as i64,
         Width::Long => value as i32 as i64,
+    }
+}
+
+/// The condition code under which `a op b` holds after `cmp b,a` (or
+/// `cmpi #b,a`): signed or unsigned (MC68000 PRM, Table 3-19).
+fn rel_cond(op: Rel, signed: bool) -> Cond {
+    match (op, signed) {
+        (Rel::Eq, _) => Cond::Eq,
+        (Rel::Ne, _) => Cond::Ne,
+        (Rel::Lt, true) => Cond::Lt,
+        (Rel::Le, true) => Cond::Le,
+        (Rel::Gt, true) => Cond::Gt,
+        (Rel::Ge, true) => Cond::Ge,
+        (Rel::Lt, false) => Cond::Cs,
+        (Rel::Le, false) => Cond::Ls,
+        (Rel::Gt, false) => Cond::Hi,
+        (Rel::Ge, false) => Cond::Cc,
     }
 }
 
@@ -77,32 +97,35 @@ pub struct Body {
 
 /// Phase 1: the body of `f`, without prologue and epilogue.
 ///
-/// A body of one statement is selected in the statement's own evaluation
-/// order (PROC1_$TST_LOCK 0xE148CA: the parameter is read where the
-/// expression needs it, after the set's address).  A body of two or more
-/// statements first loads the by-value parameters it reads into registers
-/// ([`Selector::entry_loads`]; TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A), and
-/// its statements may then use only those registers: what the original
-/// did with further registers in such a body (fresh registers per
-/// statement, IIC_$RECEIVE 0xE70ABA; scheduling of entry loads with other
-/// work, 0xE758C4) is not modelled yet (codegen-patterns 12.2).  The one
-/// exception is a statement right after a call in a body that loaded
-/// nothing at entry: it takes the lowest free scratch registers (0xE00ECC,
-/// after the `jsr` at 0xE00EC2).  A body that loads parameters at entry
-/// may not call (the values would not survive the call).
+/// A body of one simple statement is selected in the statement's own
+/// evaluation order (PROC1_$TST_LOCK 0xE148CA: the parameter is read where
+/// the expression needs it, after the set's address).  A body of two or
+/// more statements first loads the by-value parameters it reads into
+/// registers ([`Selector::entry_loads`]; TIME_$Q_INIT_QUEUE
+/// 0xE16C62..0xE16C6A), and its statements may then use only those
+/// registers: what the original did with further registers in such a body
+/// (fresh registers per statement, IIC_$RECEIVE 0xE70ABA; scheduling of
+/// entry loads with other work, 0xE758C4) is not modelled yet
+/// (codegen-patterns 12.2).  The one exception is a simple statement right
+/// after a call in a body that loaded nothing at entry: it takes the lowest
+/// free scratch registers (0xE00ECC, after the `jsr` at 0xE00EC2).  A body
+/// that loads parameters at entry may not call (the values would not
+/// survive the call).
+///
+/// A body that is one `if` or `repeat` statement is treated like a body of
+/// several statements (NAME_CONVERT_ACL_STATUS 0xE58620: one `if ... else
+/// if` chain, its by-address status loaded into A0 once, at the top), but
+/// may not read by-value parameters: whether the original loaded them at
+/// entry there is not known (codegen-patterns 12.2; the sites that load
+/// them at entry have several statements).
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
-    let mut s = Selector {
-        out: Vec::new(),
-        regs: Regs::new(),
-        span: f.span,
-        pinned: Vec::new(),
-        multi: false,
-    };
+    let mut s = Selector::new(f.span);
     if f.loads_data_base {
         s.load_data_base();
     }
-    let multi = f.body.len() >= 2;
-    if multi {
+    let control_only = f.body.len() == 1 && !is_simple(&f.body[0]);
+    s.multi_body = f.body.len() >= 2 || control_only;
+    if s.multi_body {
         if f.result.is_some() {
             // PARITY_$CHK_IO 0xE0B180..0xE0B18A loads its first parameter
             // into D1 and its second into D0: functions do not follow the
@@ -112,14 +135,20 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
                 "a function body of more than one statement is",
             ));
         }
-        reject_mergeable_stores(f)?;
+        let reads_value_param = param_uses(f)
+            .iter()
+            .any(|(o, _)| f.value_params.iter().any(|p| p.offset == *o));
+        if control_only && reads_value_param {
+            return Err(unsupported(
+                f.body[0].span,
+                "a body of one `if` or `repeat` statement that reads by-value parameters \
+                 (whether they are loaded at entry is not settled, codegen-patterns 12.2) is",
+            ));
+        }
+        reject_mergeable_stores(&f.body)?;
         s.entry_loads(f)?;
         if !s.pinned.is_empty() {
-            if let Some(st) = f
-                .body
-                .iter()
-                .find(|st| matches!(st.kind, StmtKind::Call(_)))
-            {
+            if let Some(st) = find_stmt(&f.body, &|st| matches!(st.kind, StmtKind::Call(_))) {
                 // A parameter loaded at entry into a scratch register does
                 // not survive the call; the original then holds it in a
                 // callee-saved register (PROC1_$SET_TYPE 0xE152F2, D2/D3
@@ -132,44 +161,119 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             }
         }
     }
-    let mut after_call = false;
-    for (i, st) in f.body.iter().enumerate() {
-        s.span = st.span;
-        // In a body of several statements a statement may use only the
-        // registers loaded at entry (see above), except right after a
-        // call: the call leaves no value in a scratch register, and the
-        // next statement takes the lowest free ones (0xE00ECC..0xE00ED2,
-        // A0 and D0 after the `jsr` at 0xE00EC2).
-        s.multi = multi && !(after_call && s.pinned.is_empty());
-        // No push follows before the epilogue: only a call pushes, and the
-        // body is straight-line (codegen-patterns 1.1).
-        let last = !f.body[i + 1..]
-            .iter()
-            .any(|st| matches!(st.kind, StmtKind::Call(_)));
-        match &st.kind {
-            StmtKind::SetResult(e) => s.set_result(f, e)?,
-            StmtKind::Store { addr, value } => s.store(addr, value)?,
-            StmtKind::Copy { dst, src, bytes } => s.copy(dst, src, *bytes)?,
-            StmtKind::Call(c) => s.call(c, last)?,
-            StmtKind::Fill {
-                start,
-                count,
-                value,
-            } => s.fill(start, *count, value)?,
-        }
-        after_call = matches!(st.kind, StmtKind::Call(_));
-        debug_assert!(
-            s.regs
-                .live_scratch()
-                .iter()
-                .all(|r| s.pinned.iter().any(|&(_, p)| p == r)),
-            "a statement left a register busy"
-        );
+    s.seq(f, &f.body, Tail::END)?;
+    if let Some(l) = s.epilogue {
+        s.place(l);
     }
+    // Labels nothing branches to (the join after a `then` part that ends
+    // in `return`, ...) are dropped; they emit no bytes either way.
+    let used: Vec<u32> = s
+        .out
+        .iter()
+        .filter_map(|i| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => Some(*label),
+            _ => None,
+        })
+        .collect();
+    if let Some(&(_, span)) = s.before_bra.iter().find(|(l, _)| used.contains(l)) {
+        // `if a then begin if b then ... else ... end else ...`: the inner
+        // `then` part's `bra` to its join reaches the outer `bra`; `if a
+        // then begin if b then ... end else ...` and `if a then begin if b
+        // then ...; return end` likewise with the inner test's `b<cc>`;
+        // `if a or else b then return` with the `bmi` past the test of `b`.
+        return Err(unsupported(
+            span,
+            "a branch to a `bra` (an `if` part ending in an `if`, then a `bra` to a join or \
+             the epilogue; compiled code has no branch to a `bra`, codegen-patterns 7.1) is",
+        ));
+    }
+    s.out
+        .retain(|i| !matches!(i, Insn::Label(l) if !used.contains(l)));
     Ok(Body {
         insns: s.out,
         saves: s.regs.to_save(),
     })
+}
+
+/// A statement that is not control flow.
+fn is_simple(st: &Stmt) -> bool {
+    !matches!(
+        st.kind,
+        StmtKind::If { .. } | StmtKind::Repeat { .. } | StmtKind::Return
+    )
+}
+
+/// The first statement, in body order and depth first, for which `pred`
+/// holds.
+fn find_stmt<'a>(body: &'a [Stmt], pred: &dyn Fn(&Stmt) -> bool) -> Option<&'a Stmt> {
+    for st in body {
+        if pred(st) {
+            return Some(st);
+        }
+        let inner = match &st.kind {
+            StmtKind::If { then_, else_, .. } => {
+                find_stmt(then_, pred).or_else(|| find_stmt(else_, pred))
+            }
+            StmtKind::Repeat { body, .. } => find_stmt(body, pred),
+            _ => None,
+        };
+        if inner.is_some() {
+            return inner;
+        }
+    }
+    None
+}
+
+/// What follows a statement sequence up to the epilogue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tail {
+    /// Nothing is emitted between the end of the sequence and the
+    /// epilogue (the routine's own statement part, or an `if` arm that
+    /// falls through to the end of the routine).
+    end: bool,
+    /// Every path from the end of the sequence to the epilogue is free of
+    /// pushes, calls and conditional branches (`dbf` included); an
+    /// unconditional `bra` to a join may occur.  The pop rule depends on it
+    /// ([`Selector::call`]).
+    clean: bool,
+}
+
+impl Tail {
+    const END: Tail = Tail {
+        end: true,
+        clean: true,
+    };
+}
+
+/// Whether the code of `stmts` and then a continuation that is clean when
+/// `tail_clean` is free of pushes, calls and conditional branches up to the
+/// epilogue (see [`Tail::clean`]).  A `return` ends the path: what follows
+/// it, the continuation included, is not reached.
+fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
+    for st in stmts {
+        match &st.kind {
+            StmtKind::Return => return true,
+            StmtKind::SetResult(_) | StmtKind::Store { .. } => {}
+            // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
+            // loop (codegen-patterns 5.2).
+            StmtKind::Copy { bytes, .. } if *bytes <= 18 => {}
+            StmtKind::Copy { .. }
+            | StmtKind::Fill { .. }
+            | StmtKind::Call(_)
+            | StmtKind::If { .. }
+            | StmtKind::Repeat { .. } => return false,
+        }
+    }
+    tail_clean
+}
+
+/// The argument bytes the caller pops after `st`, when `st` is a call
+/// that pushes any.
+fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
+    match st.map(|s| &s.kind) {
+        Some(StmtKind::Call(c)) if c.bytes() > 0 => Some(c.bytes()),
+        _ => None,
+    }
 }
 
 /// Ref 3.15.3, p. 3-57 ("Device"): "By default, the compiler optimizes
@@ -181,10 +285,19 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 /// (offsets 12, 0, 13, 4, 8) and the source order is not known.  So two consecutive
 /// stores to adjacent objects of the same base that fit together in a
 /// longword are rejected rather than guessed at.  TIME_$Q_INIT_QUEUE's
-/// stores (0..4, 4..8, 8, 10..12) never fit: 0xE16C6E..0xE16C78.
-fn reject_mergeable_stores(f: &Function) -> Res<()> {
+/// stores (0..4, 4..8, 8, 10..12) never fit: 0xE16C6E..0xE16C78.  Each
+/// statement sequence (a body, an `if` arm, a loop body) is checked.
+fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
     let mut prev: Option<(&Addr, u32)> = None;
-    for st in &f.body {
+    for st in body {
+        match &st.kind {
+            StmtKind::If { then_, else_, .. } => {
+                reject_mergeable_stores(then_)?;
+                reject_mergeable_stores(else_)?;
+            }
+            StmtKind::Repeat { body, .. } => reject_mergeable_stores(body)?,
+            _ => {}
+        }
         let StmtKind::Store { addr, value } = &st.kind else {
             prev = None;
             continue;
@@ -241,74 +354,119 @@ enum ParamUse {
 /// Every use of a by-value parameter in `f`'s body, as (frame offset,
 /// use), in body order.
 fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
-    fn is_param(f: &Function, o: i32) -> bool {
-        f.value_params.iter().any(|p| p.offset == o)
+    let mut u = Uses { f, out: Vec::new() };
+    u.stmts(&f.body);
+    u.out
+}
+
+/// The walk of [`param_uses`].
+struct Uses<'a> {
+    f: &'a Function,
+    out: Vec<(i32, ParamUse)>,
+}
+
+impl Uses<'_> {
+    fn is_param(&self, o: i32) -> bool {
+        self.f.value_params.iter().any(|p| p.offset == o)
     }
-    fn expr(f: &Function, e: &Expr, out: &mut Vec<(i32, ParamUse)>) {
+
+    fn is_slot(&self, o: i32) -> bool {
+        self.f.address_params.contains(&o)
+    }
+
+    fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if is_param(f, *o) => out.push((*o, ParamUse::Data)),
-            Expr::Load { addr, .. } | Expr::AddrOf(addr) => address(f, addr, out),
+            } if self.is_param(*o) => self.out.push((*o, ParamUse::Data)),
+            Expr::Load { addr, .. } | Expr::AddrOf(addr) => self.address(addr),
             Expr::SetMember { elem, set, .. } => {
-                expr(f, elem, out);
-                expr(f, set, out);
+                self.expr(elem);
+                self.expr(set);
             }
             Expr::Const { .. } => {}
         }
     }
-    fn address(f: &Function, a: &Addr, out: &mut Vec<(i32, ParamUse)>) {
+
+    fn address(&mut self, a: &Addr) {
         if let Addr::Indirect { base, .. } = a {
             match &**base {
                 Expr::Load {
                     addr: Addr::Frame(o),
                     ..
-                } if is_param(f, *o) => out.push((*o, ParamUse::Base)),
-                b => expr(f, b, out),
+                } if self.is_param(*o) || self.is_slot(*o) => self.out.push((*o, ParamUse::Base)),
+                b => self.expr(b),
             }
         }
     }
-    let mut out = Vec::new();
-    for st in &f.body {
-        match &st.kind {
-            StmtKind::SetResult(e) => expr(f, e, &mut out),
-            StmtKind::Store { addr, value } => {
-                address(f, addr, &mut out);
-                expr(f, value, &mut out);
+
+    fn cond(&mut self, c: &IrCond) {
+        match c {
+            IrCond::Compare { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
             }
-            StmtKind::Copy { dst, src, .. } => {
-                address(f, src, &mut out);
-                address(f, dst, &mut out);
+            IrCond::Test(e) => self.expr(e),
+            IrCond::Not(x) => self.cond(x),
+            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+                self.cond(a);
+                self.cond(b);
             }
-            StmtKind::Call(c) => {
-                for a in &c.args {
-                    match a {
-                        // A by-value parameter that is only pushed as an
-                        // argument is pushed from the frame, not loaded
-                        // at entry: AST_$SET_ATTRIBUTE 0xE053DA `move.l
-                        // (0xe,A6),-(SP)`; 0xE00EBE and 0xE00EDE push
-                        // (8,A6) twice (codegen-patterns 12.2).
-                        Arg::Value {
-                            value:
-                                Expr::Load {
-                                    addr: Addr::Frame(_),
-                                    ..
-                                },
-                            ..
-                        } => {}
-                        Arg::Value { value, .. } => expr(f, value, &mut out),
-                        Arg::Address { addr, .. } => address(f, addr, &mut out),
+        }
+    }
+
+    fn stmts(&mut self, body: &[Stmt]) {
+        for st in body {
+            match &st.kind {
+                StmtKind::If { cond, then_, else_ } => {
+                    self.cond(cond);
+                    self.stmts(then_);
+                    self.stmts(else_);
+                }
+                StmtKind::Repeat { body, until } => {
+                    self.stmts(body);
+                    self.cond(until);
+                }
+                StmtKind::Return => {}
+                StmtKind::SetResult(e) => self.expr(e),
+                StmtKind::Store { addr, value } => {
+                    self.address(addr);
+                    self.expr(value);
+                }
+                StmtKind::Copy { dst, src, .. } => {
+                    self.address(src);
+                    self.address(dst);
+                }
+                StmtKind::Call(c) => {
+                    for a in &c.args {
+                        match a {
+                            // A by-value parameter that is only pushed as
+                            // an argument is pushed from the frame, not
+                            // loaded at entry: AST_$SET_ATTRIBUTE 0xE053DA
+                            // `move.l (0xe,A6),-(SP)`; 0xE00EBE and
+                            // 0xE00EDE push (8,A6) twice (codegen-patterns
+                            // 12.2).
+                            Arg::Value {
+                                value:
+                                    Expr::Load {
+                                        addr: Addr::Frame(_),
+                                        ..
+                                    },
+                                ..
+                            } => {}
+                            Arg::Value { value, .. } => self.expr(value),
+                            Arg::Address { addr, .. } => self.address(addr),
+                        }
                     }
                 }
-            }
-            StmtKind::Fill { start, value, .. } => {
-                address(f, start, &mut out);
-                expr(f, value, &mut out);
+                StmtKind::Fill { start, value, .. } => {
+                    self.address(start);
+                    self.expr(value);
+                }
             }
         }
     }
-    out
 }
 
 /// Selection state of one routine body.
@@ -320,12 +478,467 @@ pub struct Selector {
     /// By-value parameters loaded at entry: frame offset and the register
     /// that holds the value for the whole body.
     pinned: Vec<(i32, Reg)>,
-    /// The body has more than one statement: statements may use only the
-    /// pinned registers (see [`select_body`]).
+    /// The statement being selected may use only the pinned registers
+    /// (see [`select_body`]).
     multi: bool,
+    /// The body has several statements, or is one `if`/`repeat`
+    /// ([`select_body`]).
+    multi_body: bool,
+    /// The next local label number (unique within the routine).
+    next_label: u32,
+    /// Labels already defined (a branch to one of them goes backward).
+    placed: Vec<u32>,
+    /// The label at the start of the epilogue, once a `return` needs it.
+    epilogue: Option<u32>,
+    /// Labels that a `bra` directly follows, with the statement that
+    /// emitted the `bra` (see [`Self::jump`]).
+    before_bra: Vec<(u32, Span)>,
 }
 
 impl Selector {
+    fn new(span: Span) -> Selector {
+        Selector {
+            out: Vec::new(),
+            regs: Regs::new(),
+            span,
+            pinned: Vec::new(),
+            multi: false,
+            multi_body: false,
+            next_label: 1,
+            placed: Vec::new(),
+            epilogue: None,
+            before_bra: Vec::new(),
+        }
+    }
+
+    fn new_label(&mut self) -> u32 {
+        let l = self.next_label;
+        self.next_label += 1;
+        l
+    }
+
+    /// Define local label `l` here.
+    fn place(&mut self, l: u32) {
+        self.out.push(Insn::Label(l));
+        self.placed.push(l);
+    }
+
+    /// Branch to label `l` when `cond` holds (`bra` for [`Cond::T`]).  The
+    /// size is the emitter's (`emit.rs`, `size_branches`).
+    ///
+    /// A `bra` placed right after labels is recorded: a branch to one of
+    /// them would be a branch to a `bra`, which compiled code never has
+    /// (survey of 0xE00800..0xE88834: of the forward `bra`s none targets a
+    /// `bra`, nor does any `b<cc>`), so the original threaded such branches
+    /// or laid the code out otherwise; which, is not known.  [`select_body`]
+    /// rejects them.
+    fn jump(&mut self, cond: Cond, l: u32) {
+        if cond == Cond::T {
+            for i in self.out.iter().rev() {
+                match i {
+                    Insn::Label(m) => self.before_bra.push((*m, self.span)),
+                    _ => break,
+                }
+            }
+        }
+        self.out.push(Insn::Branch {
+            cond,
+            label: l,
+            short: true,
+            back: self.placed.contains(&l),
+        });
+    }
+
+    /// A statement sequence whose continuation is `tail`.
+    fn seq(&mut self, f: &Function, body: &[Stmt], tail: Tail) -> Res<()> {
+        let mut after_call = false;
+        for (i, st) in body.iter().enumerate() {
+            self.span = st.span;
+            let rest = &body[i + 1..];
+            // In a body of several statements a statement may use only the
+            // registers loaded at entry (see `select_body`), except a
+            // simple statement right after a call: the call leaves no value
+            // in a scratch register, and the next statement takes the
+            // lowest free ones (0xE00ECC..0xE00ED2, A0 and D0 after the
+            // `jsr` at 0xE00EC2).
+            self.multi =
+                self.multi_body && !(after_call && self.pinned.is_empty() && is_simple(st));
+            // What follows this statement up to the epilogue.
+            let next = Tail {
+                end: rest.is_empty() && tail.end,
+                clean: seq_clean(rest, tail.clean),
+            };
+            match &st.kind {
+                StmtKind::SetResult(e) => self.set_result(f, e)?,
+                StmtKind::Store { addr, value } => self.store(addr, value)?,
+                StmtKind::Copy { dst, src, bytes } => self.copy(dst, src, *bytes)?,
+                StmtKind::Call(c) => self.call(c, next.clean)?,
+                StmtKind::Fill {
+                    start,
+                    count,
+                    value,
+                } => self.fill(start, *count, value)?,
+                StmtKind::If { cond, then_, else_ } => self.if_(f, cond, then_, else_, next)?,
+                StmtKind::Repeat { body, until } => self.repeat(f, body, until)?,
+                StmtKind::Return => {
+                    if !rest.is_empty() {
+                        return Err(unsupported(
+                            rest[0].span,
+                            "a statement after `return` (not reached) is",
+                        ));
+                    }
+                    if tail.end {
+                        // The routine's last statement: the epilogue follows
+                        // anyway.  In a nested sequence that ends the
+                        // routine the original's choice (a `bra` to the
+                        // next instruction, or nothing) is not known.
+                        if !std::ptr::eq(body, f.body.as_slice()) {
+                            return Err(unsupported(
+                                st.span,
+                                "a `return` at the end of an `if` part that ends the routine is",
+                            ));
+                        }
+                    } else {
+                        // LOG_$READ's worker 0xE17794: `bra.s` to the
+                        // register restore that starts the epilogue
+                        // (0xE177F6), as the error exits of codegen-patterns
+                        // 9 branch to a shared epilogue.
+                        let l = match self.epilogue {
+                            Some(l) => l,
+                            None => {
+                                let l = self.new_label();
+                                self.epilogue = Some(l);
+                                l
+                            }
+                        };
+                        self.jump(Cond::T, l);
+                    }
+                }
+            }
+            after_call = matches!(st.kind, StmtKind::Call(_));
+            debug_assert!(
+                self.regs
+                    .live_scratch()
+                    .iter()
+                    .all(|r| self.pinned.iter().any(|&(_, p)| p == r)),
+                "a statement left a register busy"
+            );
+        }
+        Ok(())
+    }
+
+    /// `if cond then then_ else else_` (ref "If", p. 4-99).
+    ///
+    /// ```text
+    ///         <branch to ELSE when cond is false>
+    ///         then_
+    ///         bra     JOIN            ; only with an else part
+    /// ELSE:   else_
+    /// JOIN:
+    /// ```
+    ///
+    /// LOG_$READ's worker: 0xE1778C..0xE17796 `tst.l (0x14,A5); bne.s
+    /// 0xE17796; clr.w (A0); bra.s 0xE177F6` (`if ptr = nil then begin
+    /// actual_len^ := 0; return end`, the `then` part ending in a
+    /// `return`, so no `bra` to a join); 0xE177BA..0xE177CC `cmpi.w
+    /// #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <else part>`.
+    /// Nested: the outer `if` at 0xE177B8 (`bls.s 0xE177CC`) and the inner
+    /// `if ... else` share the join 0xE177CC.  Joins are not aligned
+    /// (codegen-patterns 7: forward branch targets).
+    ///
+    /// When both parts end in a call that pushes the same number of bytes
+    /// and the caller must pop them, the original pops once, at the join
+    /// (survey of compiled code: 56 such pairs share the pop, e.g. 0xE06156
+    /// `bsr.w; bra.s 0xE06194` with `addq.w #4,SP` at 0xE06194; 45 pairs
+    /// of different sizes pop separately, none of the same size does): not
+    /// supported yet.
+    fn if_(
+        &mut self,
+        f: &Function,
+        cond: &IrCond,
+        then_: &[Stmt],
+        else_: &[Stmt],
+        next: Tail,
+    ) -> Res<()> {
+        let span = self.span;
+        if !else_.is_empty() && !next.clean {
+            if let (Some(a), Some(b)) = (call_bytes(then_.last()), call_bytes(else_.last())) {
+                if a == b {
+                    return Err(unsupported(
+                        self.span,
+                        "an `if` whose two parts end in calls with the same argument bytes \
+                         (the original shares the pop at the join, codegen-patterns 1.1) is",
+                    ));
+                }
+            }
+        }
+        let l_else = self.new_label();
+        self.branch(cond, false, l_else)?;
+        if else_.is_empty() {
+            self.seq(f, then_, next)?;
+            self.place(l_else);
+            return Ok(());
+        }
+        // The `then` part continues with the `bra` to the join, then
+        // whatever follows the `if`.
+        self.seq(
+            f,
+            then_,
+            Tail {
+                end: false,
+                clean: next.clean,
+            },
+        )?;
+        let l_join = self.new_label();
+        if !matches!(then_.last().map(|s| &s.kind), Some(StmtKind::Return)) {
+            self.span = span;
+            self.jump(Cond::T, l_join);
+        }
+        self.place(l_else);
+        self.seq(f, else_, next)?;
+        self.place(l_join);
+        Ok(())
+    }
+
+    /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body,
+    /// then the test, branching back to the head while it is false.  The
+    /// head is entered by falling through, and aligned to 4 bytes with the
+    /// 0x2048 filler (codegen-patterns 7: in aligning routines, loop heads
+    /// entered by fall-through have the filler 312 times, are 4-aligned
+    /// already 158 times and at 2 mod 4 25 times).  A loop with the test at
+    /// the bottom entered by falling through: 0xE03192..0xE031B6 (an `or
+    /// else` chain, the last test branching back), 0xE03208..0xE03224.
+    fn repeat(&mut self, f: &Function, body: &[Stmt], until: &IrCond) -> Res<()> {
+        if body.is_empty() {
+            return Err(unsupported(self.span, "an empty `repeat` loop is"));
+        }
+        // The test is selected under the `repeat` statement's own rules
+        // (span, register policy), not those of the body's last statement.
+        let (span, multi) = (self.span, self.multi);
+        let head = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        // The test follows the body: a conditional branch, so a call in
+        // the body is popped (codegen-patterns 1.1).
+        self.seq(
+            f,
+            body,
+            Tail {
+                end: false,
+                clean: false,
+            },
+        )?;
+        (self.span, self.multi) = (span, multi);
+        self.branch(until, false, head)
+    }
+
+    /// Branch to `l` when condition `c` is `when`; fall through otherwise.
+    ///
+    /// Jumping code: `not` swaps `when`; `a and then b` / `a or else b`
+    /// test `a` first and `b` only when needed (ref pp. 4-18..4-19,
+    /// 4-134), each with its own branch.  Image: 0xE031A2..0xE031B6, a
+    /// loop test `c1 or else c2 or else c3 or else c4` as `cmp.w D4,D2;
+    /// bcc.s <exit>; ...; bne.s <exit>; tst.w D5; bmi.s <exit>; btst
+    /// #14,D5; bne.s <head>`: every operand but the last branches out when
+    /// it is true, the last one back to the head.
+    fn branch(&mut self, c: &IrCond, when: bool, l: u32) -> Res<()> {
+        match c {
+            IrCond::Not(x) => self.branch(x, !when, l),
+            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+                // `and then` short-circuits on false, `or else` on true.
+                let short = matches!(c, IrCond::OrElse(..));
+                if when == short {
+                    self.branch(a, when, l)?;
+                    self.branch(b, when, l)
+                } else {
+                    let skip = self.new_label();
+                    self.branch(a, short, skip)?;
+                    self.branch(b, when, l)?;
+                    self.place(skip);
+                    Ok(())
+                }
+            }
+            IrCond::Test(e) => {
+                // A boolean is 0xFF or 0: `tst.b` and the sign
+                // (codegen-patterns 5, 7: after `tst.b` the compiled code
+                // branches with `bpl` 919 times, `bmi` 425, `beq`/`bne`
+                // 37).
+                let Expr::Load { addr, .. } = e else {
+                    return Err(unsupported(
+                        self.span,
+                        "a condition that is a computed boolean value is",
+                    ));
+                };
+                let ea = self.operand(addr)?;
+                self.tst(Size::B, ea)?;
+                self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+                Ok(())
+            }
+            IrCond::Compare { op, lhs, rhs } => {
+                let cc = self.compare(*op, lhs, rhs)?;
+                self.jump(if when { cc } else { cc.negate() }, l);
+                Ok(())
+            }
+        }
+    }
+
+    /// The effective address of the scalar at `addr` as an operand, without
+    /// loading the value: the register a by-value parameter was loaded
+    /// into at entry, else the memory operand (an address register it
+    /// needs stays allocated until [`Self::free_ea`]).
+    fn operand(&mut self, addr: &Addr) -> Res<Ea> {
+        if let Addr::Frame(o) = addr {
+            if let Some(r) = self.pinned(*o) {
+                return Ok(Ea::Reg(r));
+            }
+        }
+        self.ea_of(addr)
+    }
+
+    /// `tst.<size> ea`, unless `ea` is a register the previous instruction
+    /// loaded: whether the original then relies on the flags of the load
+    /// is not settled (RIP_$SEND_UPDATES 0xE6887E `move.b (8,A6),D0; bpl`
+    /// and 0xE014DC `move.l (A3),D0; beq` do; 0xE0B640 `move.l (A1),D0;
+    /// tst.l D0; bmi` and 0xE0BEAE do not).  After a store to memory the
+    /// memory is tested again (0xE02806 `move.w D0,(0x412,A0); tst.w
+    /// (0x412,A0)`).
+    fn tst(&mut self, size: Size, ea: Ea) -> Res<()> {
+        if let (
+            Ea::Reg(r),
+            Some(Insn::Move {
+                dst: Ea::Reg(d), ..
+            }),
+        ) = (&ea, self.out.last())
+        {
+            if d == r {
+                return Err(unsupported(
+                    self.span,
+                    "testing a register the previous instruction loaded (whether the load's \
+                     flags are used is not settled, codegen-patterns 7) is",
+                ));
+            }
+        }
+        self.out.push(Insn::Tst {
+            size,
+            dst: ea.clone(),
+        });
+        self.free_ea(&ea);
+        Ok(())
+    }
+
+    /// Set the condition codes for `lhs op rhs` and give the condition
+    /// that holds when the relation does.
+    ///
+    /// - Against 0 (or `nil`): `tst.<s> <lhs>`; there is no `cmpi #0` in
+    ///   compiled code.  `=`/`<>` give `eq`/`ne`; for a signed value `<`
+    ///   and `>=` give `mi`/`pl` (after `tst.w`, `bmi`/`bpl` 144 times and
+    ///   `blt`/`bge` 4 times, unexplained), `<=` and `>` `le`/`gt` (`ble`/`bgt` 42 and 17
+    ///   times after `tst.w`).  0xE1778C `tst.l (0x14,A5); bne.s`.
+    ///   Unsigned `<`, `<=`, `>`, `>=` against 0 are not catalogued.
+    /// - Against another constant: `cmpi.<s> #n,<lhs>`, the operand in a
+    ///   register (0xE1779A `cmpi.w #0x400,D1`, a parameter loaded at
+    ///   entry) or in memory (0xE4FE90 `cmpi.w #4,(0x12,A6)`; 0xE4BAE0
+    ///   `cmpi.l #0x400,(0x10,A3)`).
+    /// - Two variables: `cmp.<s> <rhs>,Dn` when `lhs` is held in data
+    ///   register Dn.  Which operand the original put in a register when
+    ///   neither is (0xE6A9B4 `move.w (A1),D5; cmp.w (0x14,A6),D5`: the
+    ///   source order cannot be seen), or when both are, is not known.
+    /// - A constant on the left: not supported yet.
+    ///
+    /// Signed values use `lt`/`le`/`gt`/`ge`, unsigned ones
+    /// `cs`/`ls`/`hi`/`cc` (0xE1779E `bcc` for an unsigned `<`, 0xE177BE
+    /// `bls` for an unsigned `>`; IR signedness, codegen-patterns 5).
+    ///
+    /// **Uncertain:** a register-held long constant is compared at
+    /// 0xE177AE..0xE177B6 (`move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2`),
+    /// against 28 `add.l Dm,Dn` + `cmp` sites of which 15 compare with
+    /// `cmpi.l` (0xE1216E `cmpi.l #0x500,D7` after the same zero-extended
+    /// word sum).  Not explained; `cmpi` is used here.
+    fn compare(&mut self, op: Rel, lhs: &Expr, rhs: &Expr) -> Res<Cond> {
+        let ty = lhs.ty();
+        let size = size_of(ty.width);
+        let signed = ty.sign == Sign::Signed;
+        let Expr::Load { addr, .. } = lhs else {
+            return Err(unsupported(
+                self.span,
+                "a comparison whose left operand is not a variable is",
+            ));
+        };
+        match rhs {
+            Expr::Const { value: 0, .. } => {
+                let cc = match (op, signed) {
+                    (Rel::Eq, _) => Cond::Eq,
+                    (Rel::Ne, _) => Cond::Ne,
+                    (Rel::Lt, true) => Cond::Mi,
+                    (Rel::Ge, true) => Cond::Pl,
+                    (Rel::Le, true) => Cond::Le,
+                    (Rel::Gt, true) => Cond::Gt,
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "an unsigned ordering comparison with 0 is",
+                        ))
+                    }
+                };
+                let ea = self.operand(addr)?;
+                if let Ea::Reg(Reg::A(_)) = ea {
+                    // `cmpa.w #0,An` (151 sites, e.g. 0xE0243C); `entry_loads`
+                    // never pins a value that is compared.
+                    return Err(unsupported(self.span, "testing an address register is"));
+                }
+                self.tst(size, ea)?;
+                Ok(cc)
+            }
+            Expr::Const { value, .. } => {
+                let ea = self.operand(addr)?;
+                if let Ea::Reg(Reg::A(_)) = ea {
+                    return Err(unsupported(
+                        self.span,
+                        "comparing an address register with a constant is",
+                    ));
+                }
+                self.out.push(Insn::Cmpi {
+                    size,
+                    imm: imm(*value, ty.width),
+                    dst: ea.clone(),
+                });
+                self.free_ea(&ea);
+                Ok(rel_cond(op, signed))
+            }
+            Expr::Load { addr: raddr, .. } => {
+                let held = match addr {
+                    Addr::Frame(o) => self.pinned(*o),
+                    _ => None,
+                };
+                let Some(Reg::D(d)) = held else {
+                    return Err(unsupported(
+                        self.span,
+                        "comparing two variables when the left one is not held in a data \
+                         register is",
+                    ));
+                };
+                let src = self.operand(raddr)?;
+                if matches!(src, Ea::Reg(_)) {
+                    return Err(unsupported(
+                        self.span,
+                        "comparing two values held in registers (operand order not known) is",
+                    ));
+                }
+                self.out.push(Insn::Cmp {
+                    size,
+                    src: src.clone(),
+                    dst: d,
+                });
+                self.free_ea(&src);
+                Ok(rel_cond(op, signed))
+            }
+            _ => Err(unsupported(
+                self.span,
+                "a comparison with this kind of value is",
+            )),
+        }
+    }
+
     fn alloc(&mut self, class: RegClass) -> Res<Reg> {
         if self.multi {
             return Err(unsupported(
@@ -432,17 +1045,52 @@ impl Selector {
     /// takes callee-saved registers even without calls: MST_$VA_TO_SEGNO
     /// 0xE0DCD6, ROUTE_$FIND_PORT 0xE15B06) and parameters that must
     /// survive a call (PROC1_$SET_TYPE 0xE152F2) are not supported yet.
+    ///
+    /// **By-address parameters** (the slot holds the argument's address)
+    /// that the body reaches through more than once are loaded the same
+    /// way, in parameter order with the by-value ones, into an address
+    /// register that holds the address for the whole body (bead
+    /// domain-pascal-b1v; codegen-patterns 12.2):
+    ///
+    /// - LOG_$READ's worker 0xE17780..0xE17788 `move.w (0xc,A6),D0; move.w
+    ///   (0xe,A6),D1; movea.l (0x10,A6),A0`: `actual_len`, by address and
+    ///   used nine times, after the two words; `buffer` (8,A6), used once,
+    ///   is not loaded at entry (0xE177CC);
+    /// - MMAP_$GET_WS_INDEX 0xE0CA48..0xE0CA4C `move.w (8,A6),D0; movea.l
+    ///   (0xe,A6),A0` (used twice); (0xa,A6), used once, is loaded late
+    ///   (0xE0CA62);
+    /// - NAME_CONVERT_ACL_STATUS 0xE58620 (six uses), PEB_$TEST_PARITY_ERR
+    ///   0xE12000.
+    ///
+    /// Not so DMA_$INIT_M68450_CHANNEL 0xE0A328, which reloads its slot
+    /// before each of five stores; they are device-register stores
+    /// (`dma/init_m68450_channel.c`), and `dpc-sema` rejects the `device`
+    /// attribute (codegen-patterns 13).  A slot used once is loaded where
+    /// it is needed, into a register no earlier load used (IIC_$RECEIVE
+    /// 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL 0xE41D82): not
+    /// supported yet in a body of several statements.
     fn entry_loads(&mut self, f: &Function) -> Res<()> {
         let uses = param_uses(f);
-        for p in &f.value_params {
+        // (offset, IR type when by value), in parameter order.
+        let mut params: Vec<(i32, Option<Scalar>)> = f
+            .value_params
+            .iter()
+            .map(|p| (p.offset, Some(p.ty)))
+            .chain(f.address_params.iter().map(|&o| (o, None)))
+            .collect();
+        params.sort_by_key(|&(o, _)| o);
+        for (offset, ty) in params {
             let mine: Vec<ParamUse> = uses
                 .iter()
-                .filter(|(o, _)| *o == p.offset)
+                .filter(|(o, _)| *o == offset)
                 .map(|&(_, u)| u)
                 .collect();
             let Some(&first) = mine.first() else {
                 continue;
             };
+            if ty.is_none() && mine.len() < 2 {
+                continue;
+            }
             if mine.iter().any(|&u| u != first) {
                 // ACL_$ADD_PROJ 0xE47EC0 / EC2_$INIT 0xE42C64: a pointer
                 // that is also data is kept in a D register and copied to
@@ -462,10 +1110,10 @@ impl Selector {
                     "loading more than two parameters of a register class at entry is",
                 )
             })?;
-            let src = Ea::Disp(p.offset, FP);
+            let src = Ea::Disp(offset, FP);
             self.out.push(match r {
                 Reg::D(_) => Insn::Move {
-                    size: size_of(p.ty.width),
+                    size: size_of(ty.expect("only by-value parameters are data").width),
                     src,
                     dst: Ea::Reg(r),
                 },
@@ -475,7 +1123,7 @@ impl Selector {
                     dst: a,
                 },
             });
-            self.pinned.push((p.offset, r));
+            self.pinned.push((offset, r));
         }
         Ok(())
     }
@@ -573,12 +1221,13 @@ impl Selector {
                     dst: Ea::Reg(Reg::D(count)),
                 }
             });
+            let head = self.new_label();
             self.out.push(Insn::Align4);
-            self.out.push(Insn::Label(1));
+            self.place(head);
             self.out.push(mv(Size::L));
             self.out.push(Insn::Dbf {
                 reg: count,
-                label: 1,
+                label: head,
             });
             self.free_d(count);
         }
@@ -774,16 +1423,22 @@ impl Selector {
     /// 4. The caller pops the arguments and the pad: `addq.w #n,SP` up to
     ///    8 bytes, `lea (n,SP),SP` above (0xE00EFC `addq.w #4`, 0xE00EC8
     ///    `lea (0xc,SP),SP`; survey of compiled code: `addq.w` #4 ×1961, #6
-    ///    ×1, #8 ×962; `lea` 12..68 bytes ×1850, never below 12).  No pop
-    ///    when nothing pushes again before the epilogue, whose `unlk`
-    ///    discards the arguments: after the body's last statement
-    ///    (0xE00F0C `jsr ML_$UNLOCK` then `unlk` at 0xE00F12) and also
-    ///    when straight-line statements without calls follow
-    ///    (PROC2_$UPGID_TO_UID 0xE41050 `jsr ML_$UNLOCK`, then two record
-    ///    copies and a status store, no pop; survey of compiled code: 935
-    ///    calls followed by straight-line code without a push, none
-    ///    popped).  `last` says so.
-    fn call(&mut self, c: &Call, last: bool) -> Res<()> {
+    ///    ×1, #8 ×962; `lea` 12..68 bytes ×1850, never below 12).
+    ///
+    ///    **No pop** (`no_pop`) when every path from the call to the
+    ///    epilogue, whose `unlk` discards the arguments, is free of
+    ///    pushes, calls and conditional branches (`dbf` included); an
+    ///    unconditional `bra` to a join may occur.  Survey of the
+    ///    statement-level calls with arguments in compiled code
+    ///    (codegen-patterns 1.1): 1135 such calls, none popped (0xE00F0C
+    ///    `jsr ML_$UNLOCK` then `unlk` at 0xE00F12; PROC2_$UPGID_TO_UID
+    ///    0xE41050, then two record copies and a status store; 0xE01166
+    ///    `jsr ML_$UNLOCK; bra.s 0xE01176`, a join followed by stores);
+    ///    every call with a push or a conditional branch on some path to the
+    ///    epilogue is popped (2729 + 1742 + 240 calls, e.g. 0xE00BCA,
+    ///    followed by an `if`).  The remaining 56 unpopped calls branch to
+    ///    a pop shared at a join (see [`Self::if_`]).
+    fn call(&mut self, c: &Call, no_pop: bool) -> Res<()> {
         if !self.regs.live_scratch().is_empty() {
             return Err(unsupported(
                 self.span,
@@ -846,7 +1501,7 @@ impl Selector {
             },
         });
         let n = c.bytes();
-        if !last && n > 0 {
+        if !no_pop && n > 0 {
             self.out.push(if n <= 8 {
                 Insn::Addq {
                     size: Size::W,
@@ -889,9 +1544,12 @@ impl Selector {
     /// - a longword constant: [`Self::push_long_const`];
     /// - a word constant: `clr.w -(SP)` for 0 (472 sites, e.g. 0xE135D2;
     ///   no `move.w #0,-(SP)`), else `move.w #n,-(SP)` (0xE00EF2);
-    /// - boolean true: `st -(SP)` (0xE1365C; 196 sites).  No `clr.b
-    ///   -(SP)` or `move.b #n,-(SP)` exists in compiled code, so how
-    ///   other byte constants were pushed is not known: not supported yet;
+    /// - boolean true: `st -(SP)` (0xE1365C; 196 sites); a byte 0
+    ///   (`false`) clears its whole slot, `clr.w -(SP)` (RIP_$SEND_UPDATES
+    ///   0xE688BC; the callee RIP_$BROADCAST reads the byte, 0xE872A6).
+    ///   No `clr.b -(SP)` or `move.b #n,-(SP)` exists in compiled code, so
+    ///   how other byte constants were pushed is not known: not supported
+    ///   yet;
     /// - a value in memory: `move.<s> <ea>,-(SP)`, a byte with `move.b`
     ///   into the high half of its slot (0xE00EBE `move.l (8,A6),-(SP)`;
     ///   LOG_$READ 0xE17814 `move.w (A0),-(SP)`; KBD_$RCV 0xE1CE56 `move.b
@@ -908,7 +1566,10 @@ impl Selector {
     ///   inside another unit's object is pushed both ways (12 `move.l #`,
     ///   e.g. 0xE32398 DIR_$MUTEX+0x14; 24 `pea abs.l`, e.g. 0xE0F5DC
     ///   ROUTE_$PORT+0x30): not supported yet;
-    /// - through a pointer: not catalogued yet.
+    /// - the object a pointer in the frame points to (a by-address
+    ///   parameter passed on): the pointer, `move.l (d,A6),-(SP)`
+    ///   (LOG_$READ 0xE1780C); other objects reached through a pointer are
+    ///   not catalogued yet.
     fn push(&mut self, a: &Arg) -> Res<()> {
         let dst = Ea::PreDec(SP);
         match a {
@@ -928,10 +1589,16 @@ impl Selector {
                         Width::Byte if *v == -1 && *ty == Scalar::BOOLEAN => {
                             self.out.push(Insn::Scc { cond: Cond::T, dst })
                         }
+                        // The whole slot cleared: RIP_$SEND_UPDATES
+                        // 0xE688BC `clr.w -(SP)` for the byte parameter
+                        // RIP_$BROADCAST reads with `move.b (8,A6),D2`
+                        // (0xE872A6); the other path pushes `st -(SP)`
+                        // (0xE6889E), so this is `false`.
+                        Width::Byte if *v == 0 => self.out.push(Insn::Clr { size: Size::W, dst }),
                         Width::Byte => {
                             return Err(unsupported(
                                 self.span,
-                                "a byte constant argument other than `true` is",
+                                "a byte constant argument other than `true` and 0 is",
                             ))
                         }
                     },
@@ -967,6 +1634,33 @@ impl Selector {
                     src: Ea::ImmSym(name.clone()),
                     dst,
                 }),
+                // The object a pointer in the frame points to, e.g. a
+                // by-address parameter passed on by address: the pointer
+                // itself, `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C and
+                // 0xE17818 pass its `actual_len` and `buffer` slots on to
+                // the worker 0xE17778).
+                Addr::Indirect { base, offset: 0 }
+                    if matches!(
+                        &**base,
+                        Expr::Load {
+                            addr: Addr::Frame(o),
+                            ty: Scalar {
+                                width: Width::Long,
+                                ..
+                            },
+                        } if self.pinned(*o).is_none()
+                    ) =>
+                {
+                    let Expr::Load { addr, .. } = &**base else {
+                        unreachable!()
+                    };
+                    let src = self.ea_of(addr)?;
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src,
+                        dst,
+                    });
+                }
                 _ => {
                     return Err(unsupported(
                         self.span,
@@ -1036,13 +1730,17 @@ impl Selector {
                 dst: Ea::Reg(Reg::D(d)),
             }
         });
+        let head = self.new_label();
         self.out.push(Insn::Align4);
-        self.out.push(Insn::Label(1));
+        self.place(head);
         self.out.push(Insn::Clr {
             size: size_of(ty.width),
             dst: Ea::PostInc(a),
         });
-        self.out.push(Insn::Dbf { reg: d, label: 1 });
+        self.out.push(Insn::Dbf {
+            reg: d,
+            label: head,
+        });
         self.free_d(d);
         self.free_a(a);
         Ok(())
@@ -1185,6 +1883,15 @@ impl Selector {
             // pointer variable); LOG_$READ 0xE17810 `movea.l (0xc,A6),A0`
             // (a by-address parameter).
             Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if self.multi && *o > 0 => Err(unsupported(
+                self.span,
+                "in a body of several statements, a pointer parameter or by-address parameter \
+                 that is used once (loaded where needed into a fresh register: IIC_$RECEIVE \
+                 0xE70AC0, codegen-patterns 12.2) is",
+            )),
+            Expr::Load {
                 addr,
                 ty: Scalar {
                     width: Width::Long, ..
@@ -1269,6 +1976,7 @@ mod tests {
             result,
             loads_data_base: false,
             value_params: Vec::new(),
+            address_params: Vec::new(),
             body: body
                 .into_iter()
                 .map(|kind| Stmt { kind, span: span() })
@@ -1404,13 +2112,7 @@ mod tests {
     fn two_phase_frame_around_a_body_with_held_registers() {
         let f = func(16, None, vec![]);
         // A synthetic body: a value held across a (pretend) call.
-        let mut s = Selector {
-            out: Vec::new(),
-            regs: Regs::new(),
-            span: span(),
-            pinned: Vec::new(),
-            multi: false,
-        };
+        let mut s = Selector::new(span());
         let d = s.hold(RegClass::Data).unwrap();
         let a = s.hold(RegClass::Addr).unwrap();
         let d2 = s.hold(RegClass::Data).unwrap();
@@ -1451,13 +2153,7 @@ mod tests {
     /// allocator never gave out).
     #[test]
     fn fixed_base_registers_are_not_released() {
-        let mut s = Selector {
-            out: Vec::new(),
-            regs: Regs::new(),
-            span: span(),
-            pinned: Vec::new(),
-            multi: false,
-        };
+        let mut s = Selector::new(span());
         for a in [5, FP, SP] {
             s.free_ea(&Ea::Disp(4, a));
             s.free_ea(&Ea::Ind(a));
@@ -2133,15 +2829,24 @@ mod tests {
             (konst(0, word()), "clr.w\t-(%sp)"),
             (konst(-2, word()), "move.w\t#-2,-(%sp)"),
             (byte_true, "st\t-(%sp)"),
+            // false: 0xE688BC
+            (konst(0, Scalar::BOOLEAN), "clr.w\t-(%sp)"),
         ];
         for (e, want) in cases {
             // One argument and something after the call, so it is popped.
             let f = proc_(0, vec![ext("P", vec![val(e)], 0), ext("Q", vec![], 0)]);
             assert_eq!(body_text(&f)[0], want);
         }
-        // Bytes other than `true`: not catalogued.
-        let f = proc_(0, vec![ext("P", vec![val(konst(0, Scalar::BOOLEAN))], 2)]);
-        assert!(err(&f).starts_with("a byte constant argument other than `true`"));
+        // Other bytes: not catalogued.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(0x41, Scalar::unsigned(Width::Byte)))],
+                2,
+            )],
+        );
+        assert!(err(&f).starts_with("a byte constant argument other than `true` and 0"));
     }
 
     #[test]

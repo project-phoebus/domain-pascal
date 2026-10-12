@@ -367,6 +367,24 @@ fn constants_passed_by_address_need_temps() {
 }
 
 #[test]
+fn variables_of_another_size_passed_by_address_need_temps() {
+    let p = module(
+        "var l: integer32; w: integer; b: 0..100;
+         procedure q(in x: integer); extern;
+         procedure p; begin q(l); q(w); q(b) end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    let arg = |i: usize| match &stmts[i].kind {
+        StmtKind::Call(c) => c.args[0].clone(),
+        k => panic!("{k:?}"),
+    };
+    // The callee would read the high word of `l`.
+    assert!(arg(0).needs_temp);
+    assert!(!arg(1).needs_temp);
+    assert!(!arg(2).needs_temp);
+}
+
+#[test]
 fn argument_count() {
     assert_err(
         "module m; procedure q(a, b: integer); extern; procedure p; begin q(1) end;",

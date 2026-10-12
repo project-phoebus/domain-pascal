@@ -332,7 +332,8 @@ pub struct Arg {
     pub expr: Expr,
     pub conv: ParamConv,
     /// The argument is passed by address but is not a designator (a
-    /// constant or expression): the caller must materialise it (pooled
+    /// constant or expression), or is a variable of another size than the
+    /// value or `in` parameter: the caller must materialise it (pooled
     /// constant in the code section, or a frame temporary; codegen-patterns
     /// 1.5).
     pub needs_temp: bool,

@@ -21,6 +21,8 @@ tests/conformance/ast_page_zero.pas          0xE00EB0 AST_$PAGE_ZERO
 # emit.rs) placed at the module's D segment of the map.
 tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .bss.moddata.PROC1_=0xE254E8
 tests/conformance/proc2_get_boot_flags.pas   PROC2_$GET_BOOT_FLAGS  --section-addr .bss.moddata.PROC2=0xE7BE84
+# Control flow: an `if ... else if' chain, a by-address slot held in A0.
+tests/conformance/name_convert_acl_status.pas  NAME_CONVERT_ACL_STATUS
 
 # Harness fixtures.
 

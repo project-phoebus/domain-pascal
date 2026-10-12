@@ -2661,7 +2661,16 @@ impl<'t> Checker<'t> {
             {
                 self.error(a.span, "a variable is needed for this parameter");
             }
-            let needs_temp = c.passing == Passing::ByAddress && !x.is_designator();
+            // A value or `in` argument of another size than the parameter
+            // (an `integer32` variable for an `integer` parameter, ref 5.3.2
+            // p. 5-7: assignment compatible) cannot be passed by its own
+            // address: the callee would read the wrong bytes; the caller
+            // must pass a converted copy.
+            let other_size = !univ
+                && matches!(mode, ParamMode::Value | ParamMode::In)
+                && !self.types.is_error(x.ty)
+                && self.types.size(x.ty) != self.types.size(ty);
+            let needs_temp = c.passing == Passing::ByAddress && (!x.is_designator() || other_size);
             out.push(Arg {
                 expr: x,
                 conv: c,

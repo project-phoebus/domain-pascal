@@ -24,9 +24,9 @@ jsr (EXT_$P).l
 movea.l #FLAGS,%a0
 moveq #2,%d0
 .balignw 4,0x2048
-1:
+2:
 clr.b (%a0)+
-dbf %d0,1b
+dbf %d0,2b
 unlk %fp
 rts
 .balignw 4,0x2048

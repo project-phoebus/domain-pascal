@@ -10,7 +10,8 @@
   - 1.5 long constants: `clr.l' for 0, `pea (n).w' within 16 bits
     (0xE00EB4), `move.l #n' beyond; word constants `clr.w' / `move.w #n'
     (0xE135D2, 0xE00EF2); two adjacent word constants merged into one
-    longword (0xE00EB4); `true' as `st -(SP)' (0xE1365C); another unit's
+    longword (0xE00EB4); `true' as `st -(SP)' (0xE1365C), `false' as
+    `clr.w -(SP)' (0xE688BC); another unit's
     variable by address and `addr' of it as `move.l #sym,-(SP)'
     (0xE01824, 0xE00EB8); a frame object by address `pea (d,A6)'
     (0xE14DF4);
@@ -55,6 +56,7 @@ begin
   ext_$word(-5);
   ext_$pair(1, 16#20, x);
   ext_$flag(true, addr(buf));
+  ext_$flag(false, addr(buf));
   ext_$flag(b, addr(buf));
   ext_$word(w);
   ext_$uid(uid_$nil);

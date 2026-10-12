@@ -21,9 +21,15 @@ PROC1_$GET_LOCKS, 0xE148CA..0xE148F8), `time_q_init_queue.pas`
 and `ast_page_zero.pas` (the module-local routine at 0xE00EB0 and
 AST_$PAGE_ZERO, 0xE00EB0..0xE00F16: calls, constant arguments, a `dbf`
 `for` loop; `handasm/ast_page_zero.s` is the same unit transcribed by
-hand).  Each `.pas` starts with a comment
+hand) and `name_convert_acl_status.pas` (NAME_CONVERT_ACL_STATUS,
+0xE5861C..0xE58656: an `if ... else if` chain, a by-address parameter
+held in A0).  Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
+
+`pending/` holds reconstructions that `dpc` cannot compile yet and that
+are therefore not in the manifest: `pending/log_read.pas` (LOG_$READ
+and its worker 0xE17778; what is missing is in codegen-patterns 12.3).
 
 ## Module data
 

@@ -42,3 +42,18 @@ Tests:
 - `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
   index is used for nothing else, as `movea.l #sym,A0`, count, filler,
   `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).
+- `calls/pop_branches` - codegen-patterns 1.1: the pop rule with
+  branches (no pop when every path to the epilogue is free of pushes,
+  calls and conditional branches; 0xE01166, 0xE00BCA).
+- `control/if_else` - codegen-patterns 7, 7.1, 12.2: `if`/`else`,
+  nested `if`s sharing a join, `return` as a `bra` to the epilogue,
+  `.s`/`.w` branches (LOG_$READ's worker 0xE1778C..0xE177CC).
+- `control/compares` - codegen-patterns 7.1, 5, 13: `tst` against 0 and
+  `nil`, `cmpi` against constants, `cmp` with a held left operand,
+  signed and unsigned branches, booleans with `tst.b` and `bpl`/`bmi`,
+  `not`, `and then`, `or else`.
+- `control/repeat` - codegen-patterns 7.2: `repeat ... until`, the head
+  aligned, an `or else` test (0xE031A2..0xE031B6), a call in the body
+  popped.
+- `data/through_worker` - codegen-patterns 4, 1.5: LOG_$READ 0xE17800,
+  A5 loaded for an internal callee, by-address parameters passed on.

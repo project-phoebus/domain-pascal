@@ -151,7 +151,7 @@ fn unsupported_constructs_are_diagnosed_not_compiled() {
     let src = dir.join("u.pas");
     std::fs::write(
         &src,
-        "module u;\nprocedure p(var x: integer);\nbegin\n  if x = 1 then x := 2;\nend;\n",
+        "module u;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n",
     )
     .unwrap();
     let out = dpc().arg(&src).output().unwrap();

@@ -46,6 +46,11 @@ jsr (EXT_$FLAG).l
 addq.w #8,%sp
 subq.l #2,%sp
 move.l #BUF,-(%sp)
+clr.w -(%sp)
+jsr (EXT_$FLAG).l
+addq.w #8,%sp
+subq.l #2,%sp
+move.l #BUF,-(%sp)
 move.b (0xe,%fp),-(%sp)
 jsr (EXT_$FLAG).l
 addq.w #8,%sp

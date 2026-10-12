@@ -241,21 +241,68 @@ impl fmt::Display for Ea {
     }
 }
 
-/// A condition for `Scc` (and, later, `Bcc`).
+/// A condition code, for `Scc` and `Bcc` (MC68000 PRM, condition tests).
+/// [`Cond::T`] is "always": `st`, and `bra` as a branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cond {
-    /// Always (`st`).
+    /// Always (`st`, `bra`).
     T,
+    /// Unsigned higher.
+    Hi,
+    /// Unsigned lower or same.
+    Ls,
+    /// Carry clear: unsigned higher or same (gas also spells it `hs`).
+    Cc,
+    /// Carry set: unsigned lower (`lo`).
+    Cs,
     Ne,
     Eq,
+    Pl,
+    Mi,
+    Ge,
+    Lt,
+    Gt,
+    Le,
+}
+
+impl Cond {
+    /// The condition that holds exactly when `self` does not.  [`Cond::T`]
+    /// has none (no "never" branch is emitted).
+    pub fn negate(self) -> Cond {
+        match self {
+            Cond::T => panic!("no negation of `always`"),
+            Cond::Hi => Cond::Ls,
+            Cond::Ls => Cond::Hi,
+            Cond::Cc => Cond::Cs,
+            Cond::Cs => Cond::Cc,
+            Cond::Ne => Cond::Eq,
+            Cond::Eq => Cond::Ne,
+            Cond::Pl => Cond::Mi,
+            Cond::Mi => Cond::Pl,
+            Cond::Ge => Cond::Lt,
+            Cond::Lt => Cond::Ge,
+            Cond::Gt => Cond::Le,
+            Cond::Le => Cond::Gt,
+        }
+    }
 }
 
 impl fmt::Display for Cond {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Cond::T => "t",
+            Cond::Hi => "hi",
+            Cond::Ls => "ls",
+            Cond::Cc => "cc",
+            Cond::Cs => "cs",
             Cond::Ne => "ne",
             Cond::Eq => "eq",
+            Cond::Pl => "pl",
+            Cond::Mi => "mi",
+            Cond::Ge => "ge",
+            Cond::Lt => "lt",
+            Cond::Gt => "gt",
+            Cond::Le => "le",
         })
     }
 }
@@ -349,6 +396,36 @@ pub enum Insn {
         cond: Cond,
         dst: Ea,
     },
+    /// `b<cc>.s` / `b<cc>.w` (`bra` for [`Cond::T`]) to the numbered local
+    /// label `label` of the same routine.  `back`: the label is defined
+    /// before the branch (gas `Nb`, else `Nf`).  The size is decided by
+    /// the emitter's layout (`emit.rs`, `size_branches`): `.s` whenever
+    /// the target is in reach, as the original (compiled code
+    /// 0xE00800..0xE88834: 11515 `.s` branches, all in reach; 2793 `.w`,
+    /// all but 2 out of reach, 0xE7065C and 0xE706DE).
+    Branch {
+        cond: Cond,
+        label: u32,
+        short: bool,
+        back: bool,
+    },
+    /// `tst.<size> dst`.
+    Tst {
+        size: Size,
+        dst: Ea,
+    },
+    /// `cmpi.<size> #imm,dst` (the immediate as [`Ea::Imm`] gives it).
+    Cmpi {
+        size: Size,
+        imm: i64,
+        dst: Ea,
+    },
+    /// `cmp.<size> src,%dn`.
+    Cmp {
+        size: Size,
+        src: Ea,
+        dst: u8,
+    },
     /// Pseudo-instruction: pad to a 4-byte boundary with the 2-byte no-op
     /// `movea.l A0,A0` (0x2048), as the compiler does before a loop head
     /// (codegen-patterns 7: 0xE00ED6 before the `dbf` loop at 0xE00ED8;
@@ -390,6 +467,25 @@ impl fmt::Display for Insn {
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
             Insn::Align4 => f.write_str(".balignw\t4,0x2048"),
+            Insn::Branch {
+                cond,
+                label,
+                short,
+                back,
+            } => {
+                let mn = match cond {
+                    Cond::T => "bra".to_string(),
+                    c => format!("b{c}"),
+                };
+                let size = if *short { "s" } else { "w" };
+                let dir = if *back { "b" } else { "f" };
+                write!(f, "{mn}.{size}\t{label}{dir}")
+            }
+            Insn::Tst { size, dst } => write!(f, "tst.{size}\t{dst}"),
+            Insn::Cmpi { size, imm, dst } => {
+                write!(f, "cmpi.{size}\t#{},{dst}", num(*imm))
+            }
+            Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
         }
     }
 }
@@ -419,6 +515,16 @@ impl Insn {
             | Insn::Subq { size, dst, .. }
             | Insn::Clr { size, dst } => 2 + dst.ext_len(*size),
             Insn::Btst { dst, .. } | Insn::Scc { dst, .. } => 2 + dst.ext_len(Size::B),
+            Insn::Branch { short, .. } => {
+                if *short {
+                    2
+                } else {
+                    4
+                }
+            }
+            Insn::Tst { size, dst } => 2 + dst.ext_len(*size),
+            Insn::Cmpi { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
+            Insn::Cmp { size, src, .. } => 2 + src.ext_len(*size),
         }
     }
 }
@@ -604,6 +710,47 @@ mod tests {
                 },
                 "bsr.w\tW",
             ),
+            (
+                Insn::Branch {
+                    cond: Cond::Cc,
+                    label: 3,
+                    short: true,
+                    back: false,
+                },
+                "bcc.s\t3f",
+            ),
+            (
+                Insn::Branch {
+                    cond: Cond::T,
+                    label: 12,
+                    short: false,
+                    back: true,
+                },
+                "bra.w\t12b",
+            ),
+            (
+                Insn::Tst {
+                    size: Size::B,
+                    dst: Ea::AbsL("B".into(), 0),
+                },
+                "tst.b\t(B).l",
+            ),
+            (
+                Insn::Cmpi {
+                    size: Size::W,
+                    imm: 0x400,
+                    dst: Ea::Reg(Reg::D(1)),
+                },
+                "cmpi.w\t#0x400,%d1",
+            ),
+            (
+                Insn::Cmp {
+                    size: Size::L,
+                    src: Ea::Ind(0),
+                    dst: 2,
+                },
+                "cmp.l\t(%a0),%d2",
+            ),
         ];
         for (i, want) in cases {
             assert_eq!(i.to_string(), want);
@@ -755,6 +902,63 @@ mod len_tests {
             ), // 0xE6E468 50ed 00e0
             (Insn::Label(1), 0),
             (Insn::Pea(Ea::Disp(0, 6)), 2), // gas: `pea (0,%fp)` assembles as 4856, `pea (%fp)`
+            (
+                Insn::Tst {
+                    size: Size::L,
+                    dst: Ea::Disp(0x14, 5),
+                },
+                4,
+            ), // 0xE1778C 4aad 0014
+            (
+                Insn::Branch {
+                    cond: Cond::Ne,
+                    label: 1,
+                    short: true,
+                    back: false,
+                },
+                2,
+            ), // 0xE17790 6604
+            (
+                Insn::Branch {
+                    cond: Cond::T,
+                    label: 1,
+                    short: false,
+                    back: false,
+                },
+                4,
+            ), // 0xE00E68 6000 ff02
+            (
+                Insn::Cmpi {
+                    size: Size::W,
+                    imm: 0x400,
+                    dst: Ea::Reg(Reg::D(1)),
+                },
+                4,
+            ), // 0xE1779A 0c41 0400
+            (
+                Insn::Cmpi {
+                    size: Size::L,
+                    imm: 0x230001,
+                    dst: Ea::Ind(0),
+                },
+                6,
+            ), // 0xE58624 0c90 0023 0001
+            (
+                Insn::Cmpi {
+                    size: Size::L,
+                    imm: 0x400,
+                    dst: Ea::Disp(0x10, 3),
+                },
+                8,
+            ), // 0xE4BAE0 0cab 0000 0400 0010
+            (
+                Insn::Cmp {
+                    size: Size::W,
+                    src: Ea::Disp(0x14, 6),
+                    dst: 5,
+                },
+                4,
+            ), // 0xE6A9B6 ba6e 0014
         ];
         for (i, n) in cases {
             assert_eq!(i.len_at(0), n, "{i}");
@@ -763,6 +967,38 @@ mod len_tests {
         // The filler: 2 bytes at 2 mod 4 (0xE00ED6), none at 0 mod 4.
         assert_eq!(Insn::Align4.len_at(0xE00ED6), 2);
         assert_eq!(Insn::Align4.len_at(0xE00ED8), 0);
+    }
+}
+
+#[cfg(test)]
+mod cond_tests {
+    use super::*;
+
+    /// Every condition but `always` has its opposite, and negating twice
+    /// gives the condition back.
+    #[test]
+    fn negation_pairs() {
+        let all = [
+            Cond::Hi,
+            Cond::Ls,
+            Cond::Cc,
+            Cond::Cs,
+            Cond::Ne,
+            Cond::Eq,
+            Cond::Pl,
+            Cond::Mi,
+            Cond::Ge,
+            Cond::Lt,
+            Cond::Gt,
+            Cond::Le,
+        ];
+        for c in all {
+            assert_ne!(c.negate(), c);
+            assert_eq!(c.negate().negate(), c);
+        }
+        assert_eq!(Cond::Cc.negate(), Cond::Cs);
+        assert_eq!(Cond::Hi.negate(), Cond::Ls);
+        assert_eq!(Cond::Pl.negate(), Cond::Mi);
     }
 }
 
