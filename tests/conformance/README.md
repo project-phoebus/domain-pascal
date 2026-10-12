@@ -14,10 +14,24 @@ addresses, taken from the SAU2 link map.
 The first candidates are listed in CLAUDE.md section 6 (PROC1_$TST_LOCK,
 TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).
 Compiled so far: `proc1_tst_lock.pas` (PROC1_$TST_LOCK and
-PROC1_$GET_LOCKS, 0xE148CA..0xE148F8) and `time_q_init_queue.pas`
-(TIME_$Q_INIT_QUEUE and TIME_$Q_FLUSH_QUEUE, 0xE16C5E..0xE16C8E).  Each `.pas` starts with a comment
+PROC1_$GET_LOCKS, 0xE148CA..0xE148F8), `time_q_init_queue.pas`
+(TIME_$Q_INIT_QUEUE and TIME_$Q_FLUSH_QUEUE, 0xE16C5E..0xE16C8E),
+`proc1_get_loadav.pas` (PROC1_$GET_LOADAV, 0xE14BBA..0xE14BDA) and
+`proc2_get_boot_flags.pas` (PROC2_$GET_BOOT_FLAGS, 0xE41B56..0xE41B72).  Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
+
+## Module data
+
+A unit with static variables gets one zero-filled data area, the NOBITS
+section `.bss.moddata.<UNIT>` (codegen-patterns 4, 11).  Its routines
+load A5 with a relocated `lea (.Ldata).l,%a5`.  The manifest places the
+section at the module's `D` segment of the map with
+`--section-addr .bss.moddata.<UNIT>=0xADDR`; `tools/conform.py` then
+checks that relocation against that address like any other.  A NOBITS
+section has no bytes to compare; a reference into a data section with no
+`--section-addr` is a failure.  Only the variables a unit needs are
+declared, at the offsets the image uses (each `.pas` header says so).
 
 ## Fragments and 0x2048 alignment
 

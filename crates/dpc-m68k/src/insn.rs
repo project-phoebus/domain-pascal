@@ -175,6 +175,8 @@ pub enum Ea {
     AbsL(String, i32),
     /// `-(An)`.
     PreDec(u8),
+    /// `(An)+`.
+    PostInc(u8),
     /// `#n`: an immediate.  The selector gives the number as the
     /// instruction size reads it: a byte immediate is 0..=255, so that gas
     /// writes the extension word the way the original did (`move.b
@@ -204,6 +206,7 @@ impl fmt::Display for Ea {
             Ea::AbsL(s, o) if *o < 0 => write!(f, "({s}-{}).l", num(-(*o as i64))),
             Ea::AbsL(s, o) => write!(f, "({s}+{}).l", num(*o as i64)),
             Ea::PreDec(a) => write!(f, "-({})", Reg::A(*a)),
+            Ea::PostInc(a) => write!(f, "({})+", Reg::A(*a)),
             Ea::Imm(n) => write!(f, "#{}", num(*n)),
         }
     }
@@ -260,6 +263,25 @@ pub enum Insn {
         src: Ea,
         dst: u8,
     },
+    /// `lea <src>,%an`.
+    Lea {
+        src: Ea,
+        dst: u8,
+    },
+    /// `moveq #value,%dn` (-128..=127).
+    Moveq {
+        value: i8,
+        dst: u8,
+    },
+    /// `dbf %dn,<label>b`: decrement the word in Dn, branch back to the
+    /// numbered local label while it is not -1.
+    Dbf {
+        reg: u8,
+        label: u32,
+    },
+    /// A numbered local label (`N:`, gas local label; branches name it
+    /// `Nb`).  The emitter writes it at the start of the line.
+    Label(u32),
     /// `clr.<size> dst`.
     Clr {
         size: Size,
@@ -300,6 +322,12 @@ impl fmt::Display for Insn {
             Insn::Movea { size, src, dst } => {
                 write!(f, "movea.{size}\t{src},{}", Reg::A(*dst))
             }
+            Insn::Lea { src, dst } => write!(f, "lea\t{src},{}", Reg::A(*dst)),
+            Insn::Moveq { value, dst } => {
+                write!(f, "moveq\t#{},{}", num(*value as i64), Reg::D(*dst))
+            }
+            Insn::Dbf { reg, label } => write!(f, "dbf\t{},{label}b", Reg::D(*reg)),
+            Insn::Label(n) => write!(f, "{n}:"),
             Insn::Clr { size, dst } => write!(f, "clr.{size}\t{dst}"),
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
@@ -311,6 +339,8 @@ impl fmt::Display for Insn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FP_FOR_TEST: u8 = 6;
 
     #[test]
     fn renders_gas_syntax() {
@@ -415,6 +445,31 @@ mod tests {
                 },
                 "move.l\t%d2,-(%sp)",
             ),
+            (
+                Insn::Lea {
+                    src: Ea::Ind(5),
+                    dst: 0,
+                },
+                "lea\t(%a5),%a0",
+            ),
+            (
+                Insn::Lea {
+                    src: Ea::Disp(-0x98, FP_FOR_TEST),
+                    dst: 1,
+                },
+                "lea\t(-0x98,%fp),%a1",
+            ),
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::PostInc(0),
+                    dst: Ea::PostInc(1),
+                },
+                "move.l\t(%a0)+,(%a1)+",
+            ),
+            (Insn::Moveq { value: 35, dst: 0 }, "moveq\t#0x23,%d0"),
+            (Insn::Dbf { reg: 0, label: 1 }, "dbf\t%d0,1b"),
+            (Insn::Label(1), "1:"),
             (Insn::Unlk, "unlk\t%fp"),
             (Insn::Rts, "rts"),
             (Insn::Align4, ".balignw\t4,0x2048"),

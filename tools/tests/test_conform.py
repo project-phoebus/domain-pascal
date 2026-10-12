@@ -286,6 +286,25 @@ class ConformTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('size: ours 0x30 bytes', out)
 
+    # -- module data: a NOBITS data area placed at the map's D segment -----
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_data_area_reference_is_checked_against_its_placement(self):
+        src = os.path.join(conform.REPO, 'tests', 'conformance', 'proc1_get_loadav.pas')
+        specs = ['PROC1_$GET_LOADAV']
+        work = os.path.join(SCRATCH, 'data_area')
+        os.makedirs(work, exist_ok=True)
+        asm = conform.compile_pas(src, DPC, work, ['--fragment-origin', '0xE14BBA'])
+        sec = '.bss.moddata.PROC1_'
+        ok, out = self.run_check(asm, specs, work=work, section_addrs={sec: 0xE254E8})
+        self.assertTrue(ok, out)
+        # `lea <data>.l,A5' at 0xE14BC0: its operand must be the D segment
+        ok, out = self.run_check(asm, specs, work=work, section_addrs={sec: 0xE254EC})
+        self.assertFalse(ok)
+        self.assertIn('0xE14BC2: R_68K_32 names %s (0xE254EC)' % sec, out)
+        ok, out = self.run_check(asm, specs, work=work)
+        self.assertFalse(ok)
+        self.assertIn('reference into section %s, which has no --section-addr' % sec, out)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,7 +18,7 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
+    Addr, DataArea, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
     ValueParam, Width,
 };
 
@@ -41,24 +41,20 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
         };
         errors.push(d);
     }
-    // Module data needs the A5 data-base convention (codegen-patterns 4),
-    // which is not implemented yet.
-    for &v in &program.unit_vars {
-        let var = program.var(v);
-        if matches!(var.storage, Storage::Static { .. }) {
-            errors.push(unsupported(
-                var.span,
-                "variables allocated in this unit's data sections are",
-            ));
+    let data = match data_area(program) {
+        Ok(d) => d,
+        Err(d) => {
+            errors.extend(d);
+            None
         }
-    }
+    };
     let mut functions = Vec::new();
     for &id in &program.top_routines {
         let r = program.routine(id);
         if r.external || r.body.is_none() {
             continue;
         }
-        match lower_routine(program, id) {
+        match lower_routine(program, id, data.is_some()) {
             Ok(f) => functions.push(f),
             Err(d) => errors.extend(d),
         }
@@ -67,13 +63,75 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
         Ok(Module {
             name: program.name.clone(),
             functions,
+            data,
         })
     } else {
         Err(errors)
     }
 }
 
-fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>> {
+/// The unit's static data area (codegen-patterns 4): every variable with
+/// [`Storage::Static`] storage, unit-level or a routine's `static` one,
+/// lives in the unit's default data section at the offset `dpc-sema`
+/// gave it.
+///
+/// Rejected for now: a data section named in the module heading (ref
+/// 7.1.1, p. 7-2) or in a `var (name)` part (ref 3.14), whose placement
+/// and addressing (shared by name between units, ref 7.2.4 p. 7-7) have
+/// not been catalogued; and initial values (ref 3.2.2), whose section
+/// contents the emitter does not write yet.
+fn data_area(p: &Program) -> Result<Option<DataArea>, Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    let mut any = false;
+    let mut globals = Vec::new();
+    for v in &p.vars {
+        let Storage::Static {
+            symbol,
+            global,
+            section,
+            offset,
+        } = &v.storage
+        else {
+            continue;
+        };
+        any = true;
+        if section != DEFAULT_DATA_SECTION || p.data_section != DEFAULT_DATA_SECTION {
+            errors.push(unsupported(
+                v.span,
+                "variables in a named data section (ref 3.14, 7.1.1) are",
+            ));
+        }
+        if v.init.is_some() {
+            errors.push(unsupported(v.span, "initialised static variables are"));
+        }
+        if *global {
+            globals.push((symbol.clone(), *offset));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    if !any {
+        return Ok(None);
+    }
+    globals.sort_by_key(|&(_, o)| o);
+    let size = p
+        .data_sections
+        .iter()
+        .find(|(n, _)| n == DEFAULT_DATA_SECTION)
+        .map_or(0, |&(_, n)| n);
+    Ok(Some(DataArea { size, globals }))
+}
+
+/// The default data section (ref 5.7.1, p. 5-24): `dpc_sema::Program`'s
+/// `data_section` when the module heading names none.
+const DEFAULT_DATA_SECTION: &str = ".data";
+
+fn lower_routine(
+    p: &Program,
+    id: RoutineId,
+    unit_has_data: bool,
+) -> Result<Function, Vec<Diagnostic>> {
     let r = p.routine(id);
     let mut errors = Vec::new();
     if let Some(&n) = r.nested.first() {
@@ -131,16 +189,83 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
     if !errors.is_empty() {
         return Err(errors);
     }
+    let loads_data_base = loads_data_base(r, &body, unit_has_data).map_err(|d| vec![d])?;
     Ok(Function {
         symbol: r.symbol.clone(),
         global: r.global,
         code_section: r.code_section.clone(),
         frame_size: r.frame_size,
         result,
+        loads_data_base,
         value_params: value_params(p, r),
         body,
         span: r.span,
     })
+}
+
+/// Whether routine `r` makes the unit's data area addressable on entry
+/// (codegen-patterns 4; on m68k `lea <area>.l,A5` after saving A5).
+///
+/// Survey of the image (compiled code: every `link` in the map's `I`
+/// segments other than `*_ASM`, modules with a `D` segment):
+///
+/// - An exported routine that addresses its unit's data loads A5 (585
+///   map-named routines, e.g. PROC1_$GET_LOADAV 0xE14BC0, LOG_$READ
+///   0xE17806, XNS_IDP_$GET_STATS 0xE18FDC).  None was found addressing
+///   it off A5 without loading A5.
+/// - A module-local routine called only from its module inherits A5 from
+///   its caller: 0xE17778, LOG_$READ's worker, reads `(0x14,A5)` without
+///   loading it.  `internal` routines (ref 5.5.4) are taken to be such
+///   workers.  **Uncertain:** 23 routines the map does not name do load
+///   A5, but nearly all of them are also called with `jsr` from other
+///   modules (exported routines the map omits, e.g. 0xE14B12), and a few
+///   RING ones (0xE76048, 0xE7667C) are reached only with `bsr` from
+///   their module.
+/// - An exported routine that does not address the data is the open
+///   case: 204 map-named routines load A5 without any A5 operand (e.g.
+///   XNS_IDP_$GET_PORT_INFO 0xE18FBE, SMD_$BUSY_WAIT 0xE1D8A4), 251 do
+///   not load it (e.g. TIME_$WAIT 0xE1650A).  Map segments seem to merge
+///   several compilation units (one segment's routines run in blocks that
+///   load A5 and blocks that do not), so "every exported routine of a
+///   unit with static data" fits the image too, but the unit boundaries
+///   are not known.  Rejected.
+fn loads_data_base(r: &Routine, body: &[Stmt], unit_has_data: bool) -> Res<bool> {
+    let uses = body.iter().any(stmt_uses_static);
+    if !r.global {
+        return Ok(false);
+    }
+    if !uses && unit_has_data {
+        return Err(unsupported(
+            r.span,
+            "an exported routine that does not use its unit's static data, in a unit that has \
+             some (whether it loads the data base is not settled, codegen-patterns 4), is",
+        ));
+    }
+    Ok(uses)
+}
+
+fn stmt_uses_static(s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::SetResult(e) => expr_uses_static(e),
+        StmtKind::Store { addr, value } => addr_uses_static(addr) || expr_uses_static(value),
+        StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
+    }
+}
+
+fn expr_uses_static(e: &Expr) -> bool {
+    match e {
+        Expr::Const { .. } => false,
+        Expr::Load { addr, .. } => addr_uses_static(addr),
+        Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
+    }
+}
+
+fn addr_uses_static(a: &Addr) -> bool {
+    match a {
+        Addr::Static(_) => true,
+        Addr::Frame(_) | Addr::Symbol { .. } => false,
+        Addr::Indirect { base, .. } => expr_uses_static(base),
+    }
 }
 
 /// The parameters passed by value, in parameter order (ref 5.2 Table 5-1,
@@ -212,6 +337,9 @@ fn lower_body(
                     target.span,
                     "assignment to an enclosing function's result is",
                 ));
+            }
+            SStmtKind::Assign { target, value } if is_block(p, target) => {
+                out.push(copy(p, s, target, value)?)
             }
             SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
             _ => return Err(unsupported(s.span, "this statement is")),
@@ -300,6 +428,46 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     };
     Ok(Stmt {
         kind: StmtKind::Store { addr, value },
+        span: s.span,
+    })
+}
+
+/// Whether an assignment to `target` copies a block: a record or an array
+/// whose size is not a scalar width.  A record or array of 1, 2 or 4
+/// bytes is moved like a scalar of that size.  **Uncertain:** no such
+/// assignment has been catalogued.
+fn is_block(p: &Program, target: &SExpr) -> bool {
+    matches!(
+        p.types.kind(target.ty),
+        TypeKind::Record(_) | TypeKind::Array { .. }
+    ) && Width::of_size(p.types.size(target.ty)).is_none()
+}
+
+/// `d := s` for a record or array `d` that is not scalar-sized (ref
+/// "Assignment", p. 4-25): a block copy of the type's size.  The value
+/// must be a designator; how the original assigned a constant or a
+/// function result to a record has not been catalogued.  The selector
+/// decides the instructions (codegen-patterns 5.2).
+fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
+    if !value.is_designator() || value.value.is_some() {
+        return Err(unsupported(
+            value.span,
+            "assigning a record or array that is not a variable is",
+        ));
+    }
+    let bytes = p.types.size(target.ty);
+    if p.types.size(value.ty) != bytes {
+        return Err(unsupported(
+            value.span,
+            "assigning a record or array of another size is",
+        ));
+    }
+    Ok(Stmt {
+        kind: StmtKind::Copy {
+            dst: addr_of(p, target)?,
+            src: addr_of(p, value)?,
+            bytes,
+        },
         span: s.span,
     })
 }
@@ -448,9 +616,10 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
                 }
             }
         }
-        Storage::Static { .. } => Err(unsupported(
-            span,
-            "variables in this unit's data sections (A5-relative) are",
-        )),
+        // The unit's data area (codegen-patterns 4): `(d,A5)` on m68k.
+        // Named data sections were rejected by `data_area`.
+        Storage::Static { offset, .. } => i32::try_from(*offset)
+            .map(Addr::Static)
+            .map_err(|_| unsupported(span, "a static variable at this offset is")),
     }
 }

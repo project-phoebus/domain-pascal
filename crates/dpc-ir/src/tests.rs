@@ -216,11 +216,21 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:4:3: error: this statement is not supported yet"]
     );
-    // Module data.
-    let e = errs("module m;\nvar v: integer;\n");
+    // Module data in a named data section, or with an initial value.
+    let e = errs("module m, code, mydata;\nvar v: integer;\n");
     assert_eq!(
         e,
-        vec!["t.pas:2:5: error: variables allocated in this unit's data sections are not supported yet"]
+        vec!["t.pas:2:5: error: variables in a named data section (ref 3.14, 7.1.1) are not supported yet"]
+    );
+    let e = errs("module m;\nvar (sect) v: integer;\n");
+    assert_eq!(
+        e,
+        vec!["t.pas:2:12: error: variables in a named data section (ref 3.14, 7.1.1) are not supported yet"]
+    );
+    let e = errs("module m;\nvar v: integer := 3;\n");
+    assert_eq!(
+        e,
+        vec!["t.pas:2:5: error: initialised static variables are not supported yet"]
     );
     // A 2-byte set.
     let e = errs(
@@ -507,5 +517,155 @@ end;
     assert_eq!(
         e,
         vec!["t.pas:4:8: error: assigning a 2-byte value to a 4-byte object is not supported yet"]
+    );
+}
+
+// ---- module data and block copies (codegen-patterns 4, 5.2) ----------
+
+const LOADAV: &str = "module proc1_;
+type
+  proc1_$loadav_t = array[1..3] of integer32;
+var
+  loadav: proc1_$loadav_t;
+";
+
+/// PROC1_$GET_LOADAV 0xE14BBA: an exported routine that uses the unit's
+/// data loads the data base; the record assignment is a block copy from
+/// the data area into the object the by-address parameter points to.
+#[test]
+fn get_loadav() {
+    let m = lower_src(&format!(
+        "{LOADAV}procedure proc1_$get_loadav(out l: proc1_$loadav_t);
+begin
+  l := loadav;
+end;
+"
+    ))
+    .unwrap();
+    assert_eq!(
+        m.data,
+        Some(DataArea {
+            size: 12,
+            globals: vec![]
+        })
+    );
+    let f = &m.functions[0];
+    assert!(f.loads_data_base);
+    assert_eq!(
+        f.body[0].kind,
+        StmtKind::Copy {
+            dst: Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Frame(8),
+                    ty: Scalar::POINTER
+                }),
+                offset: 0
+            },
+            src: Addr::Static(0),
+            bytes: 12
+        }
+    );
+}
+
+#[test]
+fn static_scalars_and_defined_variables() {
+    let m = lower_src(
+        "module m;
+var
+  a: integer;
+  b: integer32;
+  c: integer;
+define b;
+procedure p; options(val_param);
+begin
+  c := 1;
+end;
+procedure q; internal;
+begin
+  b := 0;
+end;
+",
+    )
+    .unwrap();
+    // a at 0, b at 4, c at 8: dpc-sema's layout of statics (declaration
+    // order, freestanding alignment; Uncertain against the image).
+    assert_eq!(
+        m.data,
+        Some(DataArea {
+            size: 10,
+            globals: vec![("B".into(), 4)]
+        })
+    );
+    let p = &m.functions[0];
+    assert!(p.loads_data_base);
+    assert_eq!(
+        p.body[0].kind,
+        StmtKind::Store {
+            addr: Addr::Static(8),
+            value: Expr::Const {
+                value: 1,
+                ty: Scalar::signed(Width::Word)
+            }
+        }
+    );
+    // An internal routine inherits the data base (0xE17778).
+    assert!(!m.functions[1].loads_data_base);
+}
+
+/// The open case of codegen-patterns 4.
+#[test]
+fn exported_routine_not_using_unit_data_is_rejected() {
+    let e = errs(&format!(
+        "{LOADAV}procedure p(out x: integer32);\nbegin\n  x := 0;\nend;\n"
+    ));
+    assert_eq!(e.len(), 1);
+    assert!(
+        e[0].starts_with(
+            "t.pas:6:1: error: an exported routine that does not use its unit's static data"
+        ),
+        "{e:?}"
+    );
+    // Without unit data it is fine.
+    lower_src("module m;\nprocedure p(out x: integer32);\nbegin\n  x := 0;\nend;\n").unwrap();
+}
+
+/// Records and arrays of a scalar size are moved as scalars; others are
+/// block copies whatever their size (the selector decides the form).
+#[test]
+fn block_assignments() {
+    let m = lower_src(
+        "module m;
+type
+  r6 = record a: integer32; b: integer; end;
+  r4 = record a: integer; b: integer; end;
+var
+  x6, y6: r6;
+  x4, y4: r4;
+procedure p; options(val_param);
+begin
+  x6 := y6;
+  x4 := y4;
+end;
+",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(
+        f.body[0].kind,
+        StmtKind::Copy {
+            dst: Addr::Static(0),
+            src: Addr::Static(8),
+            bytes: 6
+        }
+    );
+    assert_eq!(
+        f.body[1].kind,
+        StmtKind::Store {
+            addr: Addr::Static(14),
+            value: Expr::Load {
+                addr: Addr::Static(18),
+                ty: Scalar::unsigned(Width::Long)
+            }
+        }
     );
 }

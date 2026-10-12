@@ -27,3 +27,11 @@ Tests:
   immediates 0..255), 12.2.
 - `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
   one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
+- `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
+  restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
+  0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS
+  0xE18FE6, PROC2_$GET_BOOT_FLAGS 0xE41B66), an internal routine that
+  inherits A5 (0xE17778), the `.bss.moddata.<UNIT>` block.
+- `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
+  bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
+  loops (0xE01494, 0xE19DA2).

@@ -7,6 +7,10 @@
 //!   at positive offsets, locals at negative ones (the offsets come from
 //!   `dpc-sema`, which asked the target where argument 1 lives);
 //! - objects of other units are symbols ([`Addr::Symbol`]);
+//! - objects in the unit's own static data area are offsets into it
+//!   ([`Addr::Static`]; the target reaches the area through a base
+//!   register, A5 on m68k, which the routines marked
+//!   [`Function::loads_data_base`] load on entry);
 //! - data reached through a pointer is [`Addr::Indirect`];
 //! - every value has an explicit [`Scalar`] type: a [`Width`] and a
 //!   [`Sign`], so the selector can choose sign- or zero-extension, signed
@@ -45,6 +49,22 @@ pub struct Module {
     /// in an included `.ins.pas`) is emitted at its declaration, not at
     /// its body; the original presumably emitted in body order.
     pub functions: Vec<Function>,
+    /// The unit's static data area, if it allocates any static data
+    /// (unit-level `var`, `static`, `define`; ref 7.2).
+    pub data: Option<DataArea>,
+}
+
+/// A unit's static data area: one block, zero-filled (initialised static
+/// data is not supported yet), reached as [`Addr::Static`] offsets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DataArea {
+    /// Bytes allocated by the unit (`dpc_sema::Program::data_sections`),
+    /// raw: rounding the block is the target's decision.
+    pub size: u32,
+    /// Exported (`define`d, ref 7.2.2) variables: symbol and offset, in
+    /// offset order.  Other static variables are local (ref 7.2) and get
+    /// no symbol.
+    pub globals: Vec<(String, u32)>,
 }
 
 /// One routine with a body.
@@ -62,6 +82,12 @@ pub struct Function {
     pub frame_size: u32,
     /// The function result, if this is a function.
     pub result: Option<ResultSpec>,
+    /// The routine makes the unit's data area addressable on entry (m68k:
+    /// saves A5 and loads it with the area's address, codegen-patterns 4).
+    /// False for a routine that inherits it from its caller (module-local
+    /// worker 0xE17778 reads `(0x14,A5)` without loading A5) or does not
+    /// need it.  The rule is in `lower.rs` (`loads_data_base`).
+    pub loads_data_base: bool,
     /// The parameters passed by value (ref 5.2 Table 5-1: `val_param` /
     /// `internal`), in parameter order.  The body reads one as
     /// `Expr::Load { addr: Addr::Frame(offset), .. }`; the list lets the
@@ -198,6 +224,11 @@ pub enum StmtKind {
     /// designator `d` other than a function result.  `value` has the
     /// object's width (a constant is given the object's type).
     Store { addr: Addr, value: Expr },
+    /// Copy `bytes` bytes from the object at `src` to the object at `dst`:
+    /// `d := s` for a record or array that is not scalar-sized (ref
+    /// "Assignment", p. 4-25).  The objects do not overlap partially (two
+    /// designators of the same type are the same object or disjoint).
+    Copy { dst: Addr, src: Addr, bytes: u32 },
 }
 
 /// A value.
@@ -237,6 +268,8 @@ pub enum Addr {
     Frame(i32),
     /// An absolute symbol + offset (another unit's object).
     Symbol { name: String, offset: i32 },
+    /// The unit's own static data area ([`Module::data`]) + offset.
+    Static(i32),
     /// The pointer value `base` + offset.
     Indirect { base: Box<Expr>, offset: i32 },
 }
@@ -246,6 +279,7 @@ impl Addr {
     pub fn offset_by(self, delta: i32) -> Addr {
         match self {
             Addr::Frame(o) => Addr::Frame(o + delta),
+            Addr::Static(o) => Addr::Static(o + delta),
             Addr::Symbol { name, offset } => Addr::Symbol {
                 name,
                 offset: offset + delta,

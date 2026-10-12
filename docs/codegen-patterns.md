@@ -286,7 +286,7 @@ last parameter, and the caller's pop includes it.
 
 ---
 
-## 4. Module static data and A5 (Verified)
+## 4. Module static data and A5 (Verified; when A5 is set: partly Uncertain)
 
 Static data includes module-level `var`, `static` variables and `define`d
 variables.  Each module's static data is a data segment, addressed off
@@ -313,12 +313,51 @@ variables.  Each module's static data is a data segment, addressed off
 - **Other modules' data** is reached with absolute addresses
   (`movea.l 0x00E1EAC8,A0` in PROC1_$TST_LOCK; `move.l 0x00E23C98,D2` in
   PMAP_$PURIFIER_L 0xE13AF6).
-- **Uncertain:** the exact rule for when an entry point sets A5.  Several
-  PROC2 routines set A5 and never use it (C comments in
-  `../source/domain_os/proc2/*.c`, "A5 = 0xE7BE84 ... not otherwise used").
-  OSINFO_$GET_MMAP addresses PMAP's data absolutely and never sets A5.  A
-  working hypothesis: every exported routine of a module that *has* a data
-  segment sets A5.  Test it against the image before coding it.
+- **When a routine sets A5 (survey, Verified counts; rule partly
+  Uncertain).**  Every `link` in the map's `I` segments other than
+  `*_ASM`, split at `link`s, in modules that have a `D` segment of the
+  same name; "uses" means an `(..,A5..)` operand or A5 passed as an
+  argument, directly or through a module-local callee that does not set
+  A5 itself.  The scripts were ad hoc and not kept (re-check sites with
+  `tools/imgdis.sh`).
+  - 585 map-named routines set A5 and use it.  No map-named routine was
+    found using A5 without setting it (the 18 apparent cases are
+    artefacts of the split: FILE_$MK_IMMUTABLE 0xE5DBC0 and PROC1_$SET_VT
+    0xE1495C have no A5 operand of their own).
+  - 204 map-named routines set A5 and never use it: XNS_IDP_$GET_PORT_INFO
+    0xE18FB8 (one status store), SMD_$BUSY_WAIT 0xE1D89E, SMD_$LITES
+    0xE1D8B8, AST_$SET_TROUBLE 0xE071EA.  251 neither set nor use it:
+    TIME_$WAIT 0xE1650A, PROC1_$TST_LOCK 0xE148CA.  So the rule is not
+    "only routines that use the data", and not "every exported routine of
+    a map module with a data segment" either.
+  - Within one map segment the routines that set A5 come in runs
+    (PROC1_ 0xE1471C: ten that do not, then ten that do, then two that
+    do not, ...), and every segment loads one A5 value only.  This fits "every exported
+    routine of a *compilation unit* that has static data sets A5", if a
+    map segment merges several compilation units that share one data
+    block; the unit boundaries are not known, so this stays Uncertain.
+    Supporting: the routines that do not set A5 never address their
+    segment's data off A5; four address it absolutely
+    (AUDIT_$SUSPEND 0xE70DB6, AUDIT_$RESUME 0xE70DD6, REM_NAME_$REGISTER_SERVER
+    0xE4A4AE, DISK_$DIAG_IO 0xE6BC18), and LOG_$INIT 0xE30054 pushes the
+    LOG_ data address as `move.l #0xE2B280,-(SP)`, as other units do
+    with an `extern`.
+  - Routines the map does not name: 363 do not set A5 (183 of them use
+    it, inherited, like 0xE17778); 23 set it, but nearly all of those are
+    also called with `jsr` from other modules (0xE14B12 from 0xE2F9EC,
+    0xE4194C from 0xE7295A, ...), i.e. exported routines the map omits.
+    A few set it although only `bsr` reaches them (RING 0xE76048,
+    0xE7667C): Uncertain.
+  - **Implemented** (`crates/dpc-ir/src/lower.rs`, `loads_data_base`;
+    `crates/dpc-m68k/src/isel.rs`, `load_data_base`): an exported routine
+    that addresses the unit's static data sets A5, as the first
+    instruction after the register save; an `internal` routine never
+    does (it inherits A5).  An exported routine that does not address the
+    data, in a unit that has some, is rejected ("not settled").  A5 is
+    saved like any callee-saved register (section 12.1): `pea (A5)` alone,
+    in the `movem` otherwise.  Byte-identical in `make conform`:
+    PROC1_$GET_LOADAV (`tests/conformance/proc1_get_loadav.pas`) and
+    PROC2_$GET_BOOT_FLAGS 0xE41B56 (`proc2_get_boot_flags.pas`).
 - **Reference oddity:** the OCR of section 5.5.8 says A5 "holds the pointer
   to the current stack area" and A6 "the address of the current data area".
   In the image, A6 is the frame pointer and A5 the data base.  Treat the
@@ -390,15 +429,55 @@ their host); no compare or widening of either has been catalogued.
 
 ### 5.2 Records and arrays (Verified / Reported)
 
-- **Record assignment:**
-  - 12 bytes as three `move.l (A0)+,(A1)+` (PROC1_$GET_LOADAV 0xE14BCC).
-  - Or as three displacement moves `move.l (d,A5),(d,A0)` (XNS_IDP_$GET_STATS
-    0xE18FE6).
-  - Larger blocks use a `dbf` loop: AST_$GET_DISM_SEQN 0xE0149C
-    `moveq #35,D0; movea.l A0,A0; move.l (A0)+,(A1)+; dbf`, which copies
-    36 longwords.
-  - **Uncertain:** the size threshold and the rule that chooses between the
-    two unrolled forms.
+- **Record assignment (survey of `(Am)+,(An)+` copies in compiled code,
+  0xE00800..0xE88834; Verified counts).**  The source address goes into
+  one address register, then the destination address into another (`lea
+  (d,An)`, `lea (d,A6)`, `lea (A5)` for offset 0 of the data area rather
+  than `movea.l A5,An`; a by-address parameter's slot with `movea.l
+  (d,A6),An`), then:
+  - **10 to 18 bytes: unrolled.**  One `move.l (A0)+,(A1)+` per longword,
+    a `move.w` for a final word.  Runs of 2, 3 and 4 `move.l`: 15, 59 and
+    42 sites; every run of 2 is followed by a `move.w` (10 bytes,
+    0xE307F8..0xE30802).  12 bytes: PROC1_$GET_LOADAV 0xE14BC6..0xE14BD0
+    `lea (A5),A0; movea.l (8,A6),A1; move.l (A0)+,(A1)+` ×3; 14 bytes:
+    0xE419B0..0xE419BE.
+  - **20 bytes and more: a `dbf` loop.**  237 loops of one `move.l
+    (Am)+,(An)+`; the smallest constant count is `moveq #4` (5
+    longwords).  AST_ 0xE01494..0xE014A2: `lea (0xc,A2),A0; lea
+    (-0x98,A6),A1; moveq #35,D0; movea.l A0,A0; move.l (A0)+,(A1)+;
+    dbf` (36 longwords).  The count is loaded after both addresses in 118
+    loops (26 load it earlier, mostly run-time counts); a count above 127 is
+    `move.w #n,Dn` (0xE3B97A `move.w #130,D0`); a final word follows the
+    loop as `move.w (Am)+,(An)+` (37 loops, e.g. 0xE19DA2..0xE19DAA, 22
+    bytes).
+  - **Loop-head alignment: Uncertain.**  Of the 240 one-`move.l` `dbf`
+    copy loops in a linear sweep of 0xE00800..0xE88834, 63 have the 0x2048
+    filler (all then 4-aligned), 127 are 4-aligned without it and 50 start
+    at 2 mod 4 with no filler, in compiled code too: 0xE1155E (routine
+    0xE11548, `link`, `movem`, `lea 0xE248FC,A5`; `moveq #6,D0` at
+    0xE1155C), 0xE496C2, AST_ 0xE02482 (the same routine's loop
+    at 0xE023D4 is 4-aligned).  Same modules, same register shapes; no
+    rule found.
+    `dpc` always aligns (the AST_ 0xE0149E form).
+  - **6 and 8 bytes: displacement moves.**  No `(An)+` copy of exactly 6
+    or 8 bytes exists; pairs such as `move.l (0x30,A5),(-8,A6); move.l
+    (0x34,A5),(-4,A6)` (0xE4AD5C) and many `move.l`/`move.w` pairs of
+    6-byte objects are found instead.
+  - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
+    0xE18FE6 `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l
+    (8,A5),(8,A0)` and 0xE1ABEA (16 bytes) against 59 + 42 `(An)+`
+    copies.  Taken to be field-by-field assignments in the source
+    (Uncertain: the image cannot tell; the C of XNS_IDP_$GET_STATS
+    assigns three named fields).
+  - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `copy`): records and
+    arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1;
+    the source or destination in the data area, in the frame, or the
+    object a pointer in the frame points to.  Rejected: 6 and 8 bytes
+    (which operand the original formed first is not catalogued), another
+    unit's object (`movea.l #abs,A1` at 0xE336E2, one site), a field
+    through a pointer, statements of bodies with several statements.
+    Records and arrays of 1, 2 or 4 bytes are moved as scalars
+    (Uncertain: not catalogued).
 - **1-based arrays:** the compiler folds the `-1` into the displacement,
   `(-2,A0,Dn.w)` (Reported: AUDIT_$SUSPEND 0xE70DC8) or the `lea (2,An)` /
   `(-2,An)` pair in 0xE17778's word-copy loop (0xE177E0..0xE177F2).
@@ -464,7 +543,7 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
     (`clr.w D2` ... `addq.w #1,D2`).
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
   loop (0xE177DC..0xE177F2).
-- **Loop-head alignment (Verified):** the compiler pads with the 2-byte
+- **Loop-head alignment (Verified where the filler is; which loops: Uncertain):** the compiler pads with the 2-byte
   no-op `movea.l A0,A0` (0x2048) so that a loop head starts on a 4-byte
   boundary.  479 of the 481 `0x2048` words in the image's kernel text are
   followed by a 4-aligned instruction.
@@ -478,8 +557,11 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   - At a branch target: 0xE1CE42.
   - At the end of a module's code, so the next module starts 4-aligned:
     0xE1A9D2 before OS_TERM 0xE1A9D4, and 0xE1AD16 before BITPAD 0xE1AD18.
-  - **Uncertain:** exactly which labels get aligned.  Loop heads certainly;
-    the other branch targets are not yet characterised.
+  - **Uncertain:** exactly which labels get aligned.  Not every loop
+    head: of the `dbf` loops a linear sweep finds (hand assembly
+    included), 196 have the filler, 423 are 4-aligned without it and 198
+    start at 2 mod 4 with none, compiled code among them (0xE1155E,
+    section 5.2).  The other branch targets are not yet characterised.
 - **`case` statements** become a bounds check plus a jump table of word
   offsets (Verified: OSINFO_$GET_MMAP 0xE5C6C0..0xE5C6D6):
   `cmpi.w #n,D0; bcc default; add.w D0,D0; move.w (tbl,PC,D0.w),D0; jmp (tbl,PC,D0.w)`
@@ -619,6 +701,28 @@ PROC1_$SUSPEND, PROC1_$SET_PRIORITY, SMD_$LOCK_DISPLAY.
 - `internal` routines and `static` variables are local symbols (ref 5.5.4,
   7.2).  The map does not list them.  That is why 0xE00EB0 and 0xE17778
   have no map name.
+- **Module data blocks (Verified from the map):** all 161 `D` segments
+  start at a multiple of 4 and have a size that is a multiple of 4
+  (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the binder
+  rounded is not known.
+- **What `dpc` emits for a unit's static data (our convention):** one
+  zero-filled block in the NOBITS section `.bss.moddata.<UNIT>` (unit
+  name upper-cased), `.balign 4`, size rounded up to 4, starting at the
+  local label `.Ldata`; `lea (.Ldata).l,%a5` is relocated against that
+  section.  For a kernel unit the upper-cased unit name is the map's `D`
+  segment name (`PROC1_`, `PROC2`).  Only the `.bss.moddata.` prefix is
+  `../source`'s: there `<name>` is the C object of a `MODULE_DATA_DEFINE`
+  site (`.bss.moddata.PROC1_$DATA`; PROC2's `D` segment 0xE7BE84 is
+  `PROC2_$UNWIRED_DATA`, with initial contents, so `.moddata.`), and
+  `tools/gen_layout_ld.py` keys a block by that C site's address
+  literal, not by section or segment name.  A dpc unit's section would
+  get no key in `../source`'s link; how a Pascal unit's block replaces
+  (or becomes) the C block in a link test is not designed yet.  `define`d
+  variables are global symbols inside the block; other statics have no
+  symbol.  `tools/conform.py` places the section with the manifest's
+  `--section-addr .bss.moddata.<UNIT>=0x<D segment>`.  Not supported
+  yet: initial values (a progbits block), data sections named in the
+  module heading or in `var (name)`.
 
 ---
 
@@ -664,7 +768,7 @@ precedes `unlk`.
 | Routine | Frame | Save / restore | Registers |
 |---|---|---|---|
 | TIME_$Q_INIT_QUEUE 0xE16C5E (`time/q_init_queue.c`) | `link #0` | none | All three parameters loaded at entry, before any store: byte `(8,A6)`→D0, word `(0xa,A6)`→D1, pointer `(0xc,A6)`→A0 (0xE16C62..0xE16C6A); stores through A0 follow. Scratch only. Byte-identical in `make conform` (`tests/conformance/time_q_init_queue.pas`, with TIME_$Q_FLUSH_QUEUE; rule in 12.2). |
-| PROC1_$GET_LOADAV 0xE14BBA (`proc1/get_loadav.c`) | `link #0` | `pea (A5)` 0xE14BBE / `movea.l (-4,A6),A5` 0xE14BD2 | `lea 0xE254E8,A5` right after the save; `lea (A5),A0` (source, offset 0 of the data), `movea.l (8,A6),A1` (destination), three `move.l (A0)+,(A1)+`. |
+| PROC1_$GET_LOADAV 0xE14BBA (`proc1/get_loadav.c`) | `link #0` | `pea (A5)` 0xE14BBE / `movea.l (-4,A6),A5` 0xE14BD2 | `lea 0xE254E8,A5` right after the save; `lea (A5),A0` (source, offset 0 of the data), `movea.l (8,A6),A1` (destination), three `move.l (A0)+,(A1)+`. Byte-identical in `make conform` (`tests/conformance/proc1_get_loadav.pas`). |
 | module-local 0xE00EB0 (`misc/zero_page.c`) | `link #-0xc` (frame never touched in the body) | none | No register holds a value across the two `jsr`s; the argument `(8,A6)` is re-read for each call (0xE00EBE, 0xE00EDE). Loop: A0 pointer (`movea.l #imm,A0`), D0 `dbf` counter. |
 | AST_$PAGE_ZERO 0xE00EEC (`ast/page_zero.c`) | `link #0` | none | No registers at all: constants pushed, `(8,A6)` pushed, three calls. |
 | module-local 0xE17778 (`log/read_internal.c`) | `link #-0x10` | `movem.l D2-D3/A2,-(SP)` (`48e7 3020`) 0xE1777C / `movem.l (-0x1c,A6),D2-D3/A2` (`4cee 040c ffe4`) 0xE177F6 | No calls, yet callee-saved registers are used. Parameters at entry: word `(0xc,A6)`→D0, word `(0xe,A6)`→D1, pointer `(0x10,A6)`→A0, held in these *scratch* registers for most of the routine. Temporaries then take D2, D3 (0xE177A0 `moveq #-2,D2`; 0xE177A8..0xE177AE). The pointer `(8,A6)` is loaded into **A2** only at 0xE177CC, although A1 is free there; A1 is taken next (0xE177DA) and the copy loop uses A0/A1. |
@@ -868,7 +972,8 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   (`tests/conformance/handasm/`): `%` register names, `%fp` for A6,
   `(d,%an)` operands, absolute operands as `(SYM).l` so gas cannot pick
   abs.w.  The module-end `0x2048` padding (section 7) is emitted as
-  `.balignw 4,0x2048` at the end of each code section.
+  `.balignw 4,0x2048` at the end of each code section.  Loop labels are
+  gas numeric local labels (`1:`, `dbf %d0,1b`).
 - **68010 only.** No 68020-only instruction (bit-field ops, `extb.l`,
   32-bit `mul`/`div`, scaled index, `bra.l`) has been found in compiled
   code.  The linear-sweep hits are all inside data.  The kernel runs on

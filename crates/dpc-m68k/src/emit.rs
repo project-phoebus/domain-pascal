@@ -30,6 +30,12 @@ use dpc_syntax::Diagnostic;
 use crate::insn::Insn;
 use crate::isel;
 
+/// The local label at the start of the unit's static data area: what
+/// `lea <label>.l,A5` loads (codegen-patterns 4).  A `.L` label is not
+/// kept in the object's symbol table: the relocation names the data
+/// section, at the area's offset in it.
+pub const DATA_BASE_LABEL: &str = ".Ldata";
+
 /// Name of the absolute local symbol that records the image address of
 /// a fragment's first byte (`tools/conform.py` reads it).
 pub const FRAGMENT_ORIGIN_SYMBOL: &str = "__dpc_fragment_origin";
@@ -111,7 +117,9 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             }
             out.push_str(&format!("{}:\n", f.symbol));
             for i in insns {
-                out.push('\t');
+                if !matches!(i, Insn::Label(_)) {
+                    out.push('\t');
+                }
                 out.push_str(&i.to_string());
                 out.push('\n');
             }
@@ -124,11 +132,59 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             out.push_str(&format!("\t{}\t| movea.l %a0,%a0 filler\n", Insn::Align4));
         }
     }
+    if let Some(data) = &module.data {
+        out.push_str(&data_area(&module.name, data));
+    }
     if errors.is_empty() {
         Ok(out)
     } else {
         Err(errors)
     }
+}
+
+/// The output section of unit `unit`'s static data area: the NOBITS
+/// section `.bss.moddata.<UNIT>`, the unit name upper-cased like every
+/// external name (codegen-patterns 11); for the kernel's units that is
+/// the map's `D` segment name (`PROC1_`, `PROC2`).
+///
+/// Only the prefix is `../source`'s: there a block is the input section
+/// `.bss.moddata.<name>` / `.moddata.<name>` where `<name>` is the C
+/// object of a `MODULE_DATA_DEFINE` site (`PROC1_$DATA`,
+/// `PROC2_$UNWIRED_DATA`; `../source/domain_os/arch/m68k/arch.h`), and
+/// `tools/gen_layout_ld.py` orders a block by the address literal of that
+/// C site, never by the map's segment name.  A section of ours would get
+/// no ordering key there; linking a dpc unit into `../source` needs a
+/// mapping that does not exist yet (codegen-patterns 11).
+pub fn data_section_name(unit: &str) -> String {
+    format!(".bss.moddata.{}", unit.to_uppercase())
+}
+
+/// The unit's data area: one zero-filled block starting at
+/// [`DATA_BASE_LABEL`], `define`d variables as global symbols at their
+/// offsets.
+///
+/// The block is 4-aligned and its size a multiple of 4: all 161 `D`
+/// segments of the SAU2 map start at a multiple of 4 and have such a
+/// size (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the
+/// binder rounded is not known.
+fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
+    let mut out = format!(
+        "\n\t.section\t\"{}\",\"aw\",@nobits\n\t.balign\t4\n{DATA_BASE_LABEL}:\n",
+        data_section_name(unit)
+    );
+    let size = data.size.div_ceil(4) * 4;
+    let mut at = 0;
+    for (sym, off) in &data.globals {
+        if *off > at {
+            out.push_str(&format!("\t.space\t{}\n", off - at));
+            at = *off;
+        }
+        out.push_str(&format!("\t.globl\t{sym}\n{sym}:\n"));
+    }
+    if size > at {
+        out.push_str(&format!("\t.space\t{}\n", size - at));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -153,6 +209,7 @@ mod tests {
             code_section: section.into(),
             frame_size: 0,
             result: None,
+            loads_data_base: false,
             value_params: Vec::new(),
             body: Vec::new(),
             span,
@@ -235,6 +292,25 @@ mod tests {
             ..Default::default()
         };
         assert!(emit(&module(&[".text", "wired_proc"]), "m.pas", &opts).is_err());
+    }
+
+    #[test]
+    fn data_area_is_a_zero_block_after_the_code() {
+        let mut m = module(&[".text"]);
+        m.name = "proc1_".into();
+        m.data = Some(dpc_ir::DataArea {
+            size: 14,
+            globals: vec![("PROC1_$X".into(), 2), ("PROC1_$Y".into(), 8)],
+        });
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        let tail = s.split("filler\n").nth(1).unwrap();
+        assert_eq!(
+            tail,
+            "\n\t.section\t\".bss.moddata.PROC1_\",\"aw\",@nobits\n\t.balign\t4\n.Ldata:\n\
+             \t.space\t2\n\t.globl\tPROC1_$X\nPROC1_$X:\n\
+             \t.space\t6\n\t.globl\tPROC1_$Y\nPROC1_$Y:\n\
+             \t.space\t8\n"
+        );
     }
 
     #[test]

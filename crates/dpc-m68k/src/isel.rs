@@ -20,9 +20,13 @@
 use dpc_ir::{Addr, Expr, Function, ResultClass, Scalar, StmtKind, Width};
 use dpc_syntax::{Diagnostic, Span};
 
+use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{Cond, Ea, Insn, Reg, RegSet, Size};
 use crate::regs::{RegClass, Regs, DATA_BASE};
+
+/// A5, the data base register, as an address register number.
+const DATA_BASE_A: u8 = 5;
 
 type Res<T> = Result<T, Diagnostic>;
 
@@ -90,6 +94,9 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         pinned: Vec::new(),
         multi: false,
     };
+    if f.loads_data_base {
+        s.load_data_base();
+    }
     if f.body.len() >= 2 {
         if f.result.is_some() {
             // PARITY_$CHK_IO 0xE0B180..0xE0B18A loads its first parameter
@@ -109,6 +116,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         match &st.kind {
             StmtKind::SetResult(e) => s.set_result(f, e)?,
             StmtKind::Store { addr, value } => s.store(addr, value)?,
+            StmtKind::Copy { dst, src, bytes } => s.copy(dst, src, *bytes)?,
         }
         debug_assert!(
             s.regs
@@ -163,6 +171,7 @@ fn reject_mergeable_stores(f: &Function) -> Res<()> {
 fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
     match addr {
         Addr::Frame(o) => Some((Addr::Frame(0), *o)),
+        Addr::Static(o) => Some((Addr::Static(0), *o)),
         Addr::Symbol { name, offset } => Some((
             Addr::Symbol {
                 name: name.clone(),
@@ -227,6 +236,10 @@ fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
             StmtKind::Store { addr, value } => {
                 address(f, addr, &mut out);
                 expr(f, value, &mut out);
+            }
+            StmtKind::Copy { dst, src, .. } => {
+                address(f, src, &mut out);
+                address(f, dst, &mut out);
             }
         }
     }
@@ -402,6 +415,168 @@ impl Selector {
         Ok(())
     }
 
+    /// Make the unit's data area addressable: `lea <area>.l,A5` as the
+    /// first instruction of the body, right after the register save
+    /// (codegen-patterns 4: PROC1_$GET_LOADAV 0xE14BBE..0xE14BC0 `pea (A5);
+    /// lea 0x00E254E8,A5`; MAC_OS_$OPEN 0xE0B24A `movem.l
+    /// D2-D7/A2-A5,-(SP); lea 0x00E22990,A5`, before the parameter loads;
+    /// XNS_IDP_$REGISTER_ADDR 0xE19006..0xE19010 likewise).  The address
+    /// is a relocated reference to the start of the area
+    /// ([`DATA_BASE_LABEL`]).  A5 joins the save set, so the frame saves
+    /// it with `pea (A5)` or inside the `movem` (`frame.rs`).
+    fn load_data_base(&mut self) {
+        self.out.push(Insn::Lea {
+            src: Ea::AbsL(DATA_BASE_LABEL.into(), 0),
+            dst: DATA_BASE_A,
+        });
+        self.regs.clobber(DATA_BASE);
+    }
+
+    /// `d := s` for a record or array of `bytes` bytes
+    /// (codegen-patterns 5.2).
+    ///
+    /// Survey (compiled code, 0xE00800..0xE88834): block copies with
+    /// `move.<s> (Am)+,(An)+`, after the source address is put in one
+    /// address register and the destination address in another.  By size:
+    ///
+    /// - 10 to 18 bytes: unrolled, one `move.l` per longword and a
+    ///   `move.w` for a final word: runs of 2, 3 and 4 `move.l` (15, 59
+    ///   and 42 sites), every run of 2 followed by a `move.w`.
+    ///   PROC1_$GET_LOADAV 0xE14BC6..0xE14BD0 (12 bytes): `lea (A5),A0;
+    ///   movea.l (8,A6),A1; move.l (A0)+,(A1)+` ×3.  10 bytes: 0xE307FE;
+    ///   14: 0xE419B8; 18: `move.l` ×4 then `move.w`, 3 sites with A0/A1.
+    /// - 20 bytes and more: a `dbf` loop of `move.l` with a count of the
+    ///   longwords less one (`moveq #4` the smallest of 237 loops), then a
+    ///   `move.w` for a final word (37 loops, e.g. 0xE19DA2..0xE19DAA,
+    ///   `moveq #4`: 22 bytes).
+    ///   AST_ 0xE01494..0xE014A2: `lea (0xc,A2),A0; lea (-0x98,A6),A1;
+    ///   moveq #35,D0; movea.l A0,A0; move.l (A0)+,(A1)+; dbf D0`.  The
+    ///   count is loaded after both addresses (118 loops; 26 load it
+    ///   earlier, mostly run-time counts), and a count above 127 is
+    ///   `move.w #n` (0xE3B97A `move.w #130,D0`).  The loop head is
+    ///   4-aligned with the 0x2048 filler (codegen-patterns 7), as at
+    ///   0xE0149E.  **Uncertain:** 50 of 240 such loops start at 2 mod 4
+    ///   with no filler, in compiled code too (0xE1155E, 0xE496C2); which
+    ///   loops the original aligned is not known (codegen-patterns 5.2).
+    /// - 6 and 8 bytes: no `(An)+` copy of exactly 8 bytes, nor of 6, was
+    ///   found; such blocks are copied with displacement moves, `move.l
+    ///   (0x30,A5),(-8,A6); move.l (0x34,A5),(-4,A6)` (0xE4AD5C) and many
+    ///   `move.l`/`move.w` pairs.  Not supported yet: which operands the
+    ///   original formed first has not been catalogued.
+    /// - 12 bytes as displacement moves, XNS_IDP_$GET_STATS 0xE18FE6
+    ///   `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l (8,A5),(8,A0)`:
+    ///   2 sites against 59 `(An)+` copies.  Taken to be three field
+    ///   assignments in the source, not one record assignment
+    ///   (**Uncertain**: the image cannot tell).
+    ///
+    /// Address registers: source first, then destination, the lowest free
+    /// scratch register each (A0, A1).
+    fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
+        if bytes % 2 != 0 || bytes < 10 {
+            return Err(unsupported(
+                self.span,
+                format!("a {bytes}-byte record or array assignment is"),
+            ));
+        }
+        let longs = bytes / 4;
+        if longs - 1 > 0x7fff {
+            return Err(unsupported(self.span, "a block copy this large is"));
+        }
+        let from = self.block_address(src)?;
+        let to = self.block_address(dst)?;
+        let mv = |size| Insn::Move {
+            size,
+            src: Ea::PostInc(from),
+            dst: Ea::PostInc(to),
+        };
+        if bytes <= 18 {
+            for _ in 0..longs {
+                self.out.push(mv(Size::L));
+            }
+        } else {
+            let count = self.alloc_d()?;
+            let n = longs - 1;
+            self.out.push(if n <= 127 {
+                Insn::Moveq {
+                    value: n as i8,
+                    dst: count,
+                }
+            } else {
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(n as i64),
+                    dst: Ea::Reg(Reg::D(count)),
+                }
+            });
+            self.out.push(Insn::Align4);
+            self.out.push(Insn::Label(1));
+            self.out.push(mv(Size::L));
+            self.out.push(Insn::Dbf {
+                reg: count,
+                label: 1,
+            });
+            self.free_d(count);
+        }
+        if bytes % 4 == 2 {
+            self.out.push(mv(Size::W));
+        }
+        self.free_a(from);
+        self.free_a(to);
+        Ok(())
+    }
+
+    /// The address of a block in a fresh scratch address register.
+    ///
+    /// - in the unit's data area: `lea (d,A5),An`, and `lea (A5),An` for
+    ///   offset 0, not `movea.l A5,An` (PROC1_$GET_LOADAV 0xE14BC6;
+    ///   0xE1AD52 `lea (0x14,A5),A0`; 0xE3E5CA `lea (A5),A0`);
+    /// - in the frame: `lea (d,A6),An` (0xE01498 `lea (-0x98,A6),A1`);
+    /// - the object a pointer in the frame points to (a by-address
+    ///   parameter, a pointer variable): the pointer itself, `movea.l
+    ///   (d,A6),An` (0xE14BC8 `movea.l (8,A6),A1`; 0xE2F148 `movea.l
+    ///   (8,A6),A0` as a source).
+    ///
+    /// Other places (another unit's object, `movea.l #abs,A1` at 0xE336E2
+    /// once; a field at a nonzero offset through a pointer) are not
+    /// supported yet.
+    fn block_address(&mut self, addr: &Addr) -> Res<u8> {
+        let src = match addr {
+            Addr::Static(_) | Addr::Frame(_) => self.ea_of(addr)?,
+            Addr::Indirect { base, offset: 0 } => match &**base {
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ty:
+                        Scalar {
+                            width: Width::Long, ..
+                        },
+                } if self.pinned(*o).is_none() => {
+                    let a = self.alloc_a()?;
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Disp(*o, FP),
+                        dst: a,
+                    });
+                    return Ok(a);
+                }
+                _ => {
+                    return Err(unsupported(
+                        self.span,
+                        "copying a block through this pointer expression is",
+                    ))
+                }
+            },
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "copying a block at this kind of address is",
+                ))
+            }
+        };
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        Ok(a)
+    }
+
     /// `d := e`: one move into the destination's effective address.
     ///
     /// The value, by kind:
@@ -495,7 +670,7 @@ impl Selector {
     /// holding the base.
     fn addr_needs_reg(&self, addr: &Addr) -> bool {
         match addr {
-            Addr::Frame(_) | Addr::Symbol { .. } => false,
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
             Addr::Indirect { base, .. } => !matches!(
                 &**base,
                 Expr::Load { addr: Addr::Frame(o), .. } if self.pinned(*o).is_some()
@@ -675,6 +850,23 @@ impl Selector {
             Addr::Frame(o) => Ok(Ea::Disp(*o, FP)),
             // Other units' objects: absolute long (0xE148CE).
             Addr::Symbol { name, offset } => Ok(Ea::AbsL(name.clone(), *offset)),
+            // The unit's own data: `(d,A5)` (PROC2_$GET_BOOT_FLAGS 0xE41B66
+            // `move.w (0x1e4,A5),(A0)`; XNS_IDP_$GET_STATS 0xE18FE8
+            // `move.l (4,A5),(4,A0)`), `(A5)` for offset 0 (0xE18FE6
+            // `move.l (A5),(A0)`).
+            Addr::Static(o) => {
+                if !(0..0x8000).contains(o) {
+                    return Err(unsupported(
+                        self.span,
+                        "a static variable beyond 32K into the data area is",
+                    ));
+                }
+                Ok(if *o == 0 {
+                    Ea::Ind(DATA_BASE_A)
+                } else {
+                    Ea::Disp(*o, DATA_BASE_A)
+                })
+            }
             // Through a pointer: `(d,An)` (0xE148D8), `(An)` when d = 0
             // (LOG_$READ 0xE17814 `move.w (A0),-(SP)`).
             Addr::Indirect { base, offset } => {
@@ -710,6 +902,7 @@ mod tests {
             code_section: ".text".into(),
             frame_size,
             result,
+            loads_data_base: false,
             value_params: Vec::new(),
             body: body
                 .into_iter()
@@ -1247,5 +1440,199 @@ mod tests {
             &text(&f)[1..3],
             ["movea.l\t(0x10,%fp),%a0", "move.l\t(-4,%fp),(%a0)"]
         );
+    }
+
+    // ---- module data and block copies (codegen-patterns 4, 5.2) ----
+
+    fn copy(dst: Addr, src: Addr, bytes: u32) -> StmtKind {
+        StmtKind::Copy { dst, src, bytes }
+    }
+
+    fn with_data(mut f: Function) -> Function {
+        f.loads_data_base = true;
+        f
+    }
+
+    /// PROC1_$GET_LOADAV 0xE14BBA..0xE14BD8.
+    #[test]
+    fn get_loadav_shape() {
+        let f = with_data(func(
+            0,
+            None,
+            vec![copy(through(8, 0), Addr::Static(0), 12)],
+        ));
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#0",
+                "pea\t(%a5)",
+                "lea\t(.Ldata).l,%a5",
+                "lea\t(%a5),%a0",
+                "movea.l\t(8,%fp),%a1",
+                "move.l\t(%a0)+,(%a1)+",
+                "move.l\t(%a0)+,(%a1)+",
+                "move.l\t(%a0)+,(%a1)+",
+                "movea.l\t(-4,%fp),%a5",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// The data base load joins a `movem` when other registers are
+    /// saved (MAC_OS_$OPEN 0xE0B24A), and a routine that does not load it
+    /// (an inheriting worker, 0xE17778) saves nothing for it.
+    #[test]
+    fn data_base_save_and_inheritance() {
+        let st = vec![store(Addr::Static(0x1e4), konst(0, word()))];
+        let f = func(0, None, st.clone());
+        assert_eq!(
+            text(&f),
+            ["link.w\t%fp,#0", "clr.w\t(0x1e4,%a5)", "unlk\t%fp", "rts"]
+        );
+        let body = select_body(&with_data(func(0, None, st))).unwrap();
+        assert_eq!(body.saves, RegSet::of(&[DATA_BASE]));
+    }
+
+    /// Offset 0 of the data area is `(A5)` (XNS_IDP_$GET_STATS 0xE18FE6
+    /// `move.l (A5),(A0)`), others `(d,A5)`; memory to memory from the
+    /// data area (PROC2_$GET_BOOT_FLAGS 0xE41B62..0xE41B66).
+    #[test]
+    fn data_area_operands() {
+        let f = with_data(func(
+            0,
+            None,
+            vec![store(through(8, 0), load(Addr::Static(0x1e4), word()))],
+        ));
+        assert_eq!(
+            &text(&f)[2..5],
+            [
+                "lea\t(.Ldata).l,%a5",
+                "movea.l\t(8,%fp),%a0",
+                "move.w\t(0x1e4,%a5),(%a0)"
+            ]
+        );
+        let f = with_data(func(
+            0,
+            None,
+            vec![store(
+                through(8, 0),
+                load(Addr::Static(0), Scalar::signed(Width::Long)),
+            )],
+        ));
+        assert_eq!(text(&f)[4], "move.l\t(%a5),(%a0)");
+        let f = with_data(func(
+            0,
+            None,
+            vec![store(Addr::Static(0x8000), konst(0, word()))],
+        ));
+        assert!(err(&f).starts_with("a static variable beyond 32K"));
+    }
+
+    /// 10 to 18 bytes unrolled, a final word with `move.w`; frame blocks
+    /// with `lea (d,A6)` (0xE307F8..0xE30802: `lea (A2),A0; lea
+    /// (-0x18,A6),A1`, two `move.l` and a `move.w`).
+    #[test]
+    fn unrolled_block_copies() {
+        for (bytes, longs, word) in [
+            (10, 2, true),
+            (12, 3, false),
+            (14, 3, true),
+            (16, 4, false),
+            (18, 4, true),
+        ] {
+            let f = with_data(func(
+                0x20,
+                None,
+                vec![copy(Addr::Frame(-0x18), Addr::Static(0x14), bytes)],
+            ));
+            let t = text(&f);
+            assert_eq!(
+                &t[3..5],
+                ["lea\t(0x14,%a5),%a0", "lea\t(-0x18,%fp),%a1"],
+                "{bytes}"
+            );
+            let l = t.iter().filter(|i| *i == "move.l\t(%a0)+,(%a1)+").count();
+            let w = t.iter().any(|i| i == "move.w\t(%a0)+,(%a1)+");
+            assert_eq!((l, w), (longs, word), "{bytes}");
+        }
+    }
+
+    /// 20 bytes and more: a `dbf` loop (AST_ 0xE01494..0xE014A2), the
+    /// count after both addresses, the loop head aligned, a final word
+    /// after the loop (0xE19DA2..0xE19DAA), `move.w #n` above 127
+    /// (0xE3B97A `move.w #130,D0`).
+    #[test]
+    fn block_copy_loops() {
+        let f = func(
+            0x98,
+            None,
+            vec![copy(Addr::Frame(-0x98), through(8, 0), 144)],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-0x98",
+                "movea.l\t(8,%fp),%a0",
+                "lea\t(-0x98,%fp),%a1",
+                "moveq\t#0x23,%d0",
+                ".balignw\t4,0x2048",
+                "1:",
+                "move.l\t(%a0)+,(%a1)+",
+                "dbf\t%d0,1b",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        let f = func(
+            0x18,
+            None,
+            vec![copy(Addr::Frame(-0x18), through(8, 0), 22)],
+        );
+        assert_eq!(
+            &text(&f)[3..9],
+            [
+                "moveq\t#4,%d0",
+                ".balignw\t4,0x2048",
+                "1:",
+                "move.l\t(%a0)+,(%a1)+",
+                "dbf\t%d0,1b",
+                "move.w\t(%a0)+,(%a1)+",
+            ]
+        );
+        let f = func(
+            0x20c,
+            None,
+            vec![copy(Addr::Frame(-0x20c), through(8, 0), 0x20c)],
+        );
+        assert_eq!(text(&f)[3], "move.w\t#0x82,%d0");
+    }
+
+    #[test]
+    fn unsettled_block_copies_are_rejected() {
+        for bytes in [6, 8, 11] {
+            let f = func(
+                0x10,
+                None,
+                vec![copy(Addr::Frame(-0x10), through(8, 0), bytes)],
+            );
+            assert_eq!(
+                err(&f),
+                format!("a {bytes}-byte record or array assignment is not supported yet")
+            );
+        }
+        // Another unit's object; a field through a pointer.
+        let sym = Addr::Symbol {
+            name: "X".into(),
+            offset: 0,
+        };
+        let f = func(0x10, None, vec![copy(Addr::Frame(-0x10), sym, 12)]);
+        assert!(err(&f).starts_with("copying a block at this kind of address"));
+        let f = func(
+            0x10,
+            None,
+            vec![copy(Addr::Frame(-0x10), through(8, 4), 12)],
+        );
+        assert!(err(&f).starts_with("copying a block at this kind of address"));
     }
 }
