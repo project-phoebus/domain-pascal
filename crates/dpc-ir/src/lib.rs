@@ -62,8 +62,23 @@ pub struct Function {
     pub frame_size: u32,
     /// The function result, if this is a function.
     pub result: Option<ResultSpec>,
+    /// The parameters passed by value (ref 5.2 Table 5-1: `val_param` /
+    /// `internal`), in parameter order.  The body reads one as
+    /// `Expr::Load { addr: Addr::Frame(offset), .. }`; the list lets the
+    /// selector recognise those reads (the original loaded parameters
+    /// into registers at entry in some routines, codegen-patterns 12.2).
+    pub value_params: Vec<ValueParam>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+/// A parameter passed by value: where its value is in the frame and its
+/// IR type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValueParam {
+    /// Frame-pointer offset of the value (`dpc_sema::Param::value_offset`).
+    pub offset: i32,
+    pub ty: Scalar,
 }
 
 /// Where a function leaves its result: a register class and the type of
@@ -179,12 +194,18 @@ pub enum StmtKind {
     /// for `f := e` when it is the last statement of `f` (see
     /// `lower.rs`, `result_assignment`).
     SetResult(Expr),
+    /// Store `value` into the scalar object at `addr`: `d := e` for a
+    /// designator `d` other than a function result.  `value` has the
+    /// object's width (a constant is given the object's type).
+    Store { addr: Addr, value: Expr },
 }
 
 /// A value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    /// A constant of the given type.
+    /// A constant of the given type.  `value` is the number the bits
+    /// stand for under `ty` (a boolean is -1 for true, its 0xFF byte, and
+    /// 0 for false: ref 3.5.3, p. 3-11).
     Const { value: i64, ty: Scalar },
     /// The scalar object at `addr`, read as `ty`.
     Load { addr: Addr, ty: Scalar },

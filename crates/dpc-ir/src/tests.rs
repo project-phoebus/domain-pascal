@@ -92,7 +92,9 @@ end;
         })
     );
     assert_eq!(f.body.len(), 1);
-    let StmtKind::SetResult(e) = &f.body[0].kind;
+    let StmtKind::SetResult(e) = &f.body[0].kind else {
+        panic!("not a result assignment")
+    };
     assert_eq!(
         *e,
         Expr::SetMember {
@@ -129,7 +131,9 @@ end;
 ",
     )
     .unwrap();
-    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind;
+    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind else {
+        panic!("not a result assignment")
+    };
     assert_eq!(
         *e,
         Expr::Load {
@@ -148,7 +152,9 @@ end;
 #[test]
 fn constants_lower() {
     let m = lower_src("module m;\nfunction f: integer;\nbegin\n  f := 7;\nend;\n").unwrap();
-    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind;
+    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind else {
+        panic!("not a result assignment")
+    };
     assert_eq!(
         *e,
         Expr::Const {
@@ -205,7 +211,7 @@ fn unsupported_constructs_have_positions() {
         vec!["t.pas:2:13: error: value parameters passed by address (callee-made local copy) are not supported yet"]
     );
     // An ordinary statement.
-    let e = errs("module m;\nprocedure p(var x: integer);\nbegin\n  x := 1;\nend;\n");
+    let e = errs("module m;\nprocedure p(var x: integer);\nbegin\n  if x = 1 then x := 2;\nend;\n");
     assert_eq!(
         e,
         vec!["t.pas:4:3: error: this statement is not supported yet"]
@@ -254,7 +260,9 @@ end;
 /// The first `SetResult` value of the module's only function.
 fn result_value(src: &str) -> Expr {
     let m = lower_src(src).unwrap();
-    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind;
+    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind else {
+        panic!("not a result assignment")
+    };
     e.clone()
 }
 
@@ -293,7 +301,9 @@ end;
         let m = lower_src(&src).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
         let f = &m.functions[0];
         assert_eq!(f.result.map(|r| r.ty), Some(*want), "{ty} result");
-        let StmtKind::SetResult(e) = &f.body[0].kind;
+        let StmtKind::SetResult(e) = &f.body[0].kind else {
+            panic!("not a result assignment")
+        };
         assert_eq!(e.ty(), *want, "{ty} value");
     }
 }
@@ -374,5 +384,128 @@ fn signedness_of_a_by_address_unsigned_word() {
             },
             ty: Scalar::unsigned(Width::Word)
         }
+    );
+}
+
+/// TIME_$Q_INIT_QUEUE 0xE16C5E: stores through a by-value pointer, the
+/// by-value parameters listed in parameter order.
+#[test]
+fn q_init_queue_stores() {
+    let m = lower_src(
+        "module time_q;
+type
+  q = record head: integer32; lock: integer32; is_vt: boolean; id: integer; end;
+  qp = ^q;
+procedure init(is_vt: boolean; id: integer; queue: qp); options(val_param);
+begin
+  queue^.head := 0;
+  queue^.is_vt := is_vt;
+  queue^.id := id;
+end;
+",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(
+        f.value_params,
+        vec![
+            ValueParam {
+                offset: 8,
+                ty: Scalar::BOOLEAN
+            },
+            ValueParam {
+                offset: 10,
+                ty: Scalar::signed(Width::Word)
+            },
+            ValueParam {
+                offset: 12,
+                ty: Scalar::POINTER
+            },
+        ]
+    );
+    let queue = |offset| Addr::Indirect {
+        base: Box::new(Expr::Load {
+            addr: Addr::Frame(12),
+            ty: Scalar::POINTER,
+        }),
+        offset,
+    };
+    let kinds: Vec<StmtKind> = f.body.iter().map(|s| s.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            // The literal 0 takes the field's type.
+            StmtKind::Store {
+                addr: queue(0),
+                value: Expr::Const {
+                    value: 0,
+                    ty: Scalar::signed(Width::Long)
+                }
+            },
+            StmtKind::Store {
+                addr: queue(8),
+                value: Expr::Load {
+                    addr: Addr::Frame(8),
+                    ty: Scalar::BOOLEAN
+                }
+            },
+            StmtKind::Store {
+                addr: queue(10),
+                value: Expr::Load {
+                    addr: Addr::Frame(10),
+                    ty: Scalar::signed(Width::Word)
+                }
+            },
+        ]
+    );
+}
+
+/// Ref 3.5.3, p. 3-11: true is the byte 0xFF (-1 as a signed byte),
+/// false 0.
+#[test]
+fn boolean_constants_are_their_bytes() {
+    let m = lower_src(
+        "module m;
+var b: extern boolean;
+procedure p;
+begin
+  b := true;
+  b := false;
+end;
+",
+    )
+    .unwrap();
+    let values: Vec<Expr> = m.functions[0]
+        .body
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Store { value, .. } => value.clone(),
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    let c = |value| Expr::Const {
+        value,
+        ty: Scalar::BOOLEAN,
+    };
+    assert_eq!(values, vec![c(-1), c(0)]);
+    assert_eq!(
+        result_value("module m;\nfunction f: boolean;\nbegin\n  f := true;\nend;\n"),
+        c(-1)
+    );
+}
+
+#[test]
+fn widening_store_is_rejected() {
+    let e = errs(
+        "module m;
+procedure p(var x: integer32; i: integer); options(val_param);
+begin
+  x := i;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec!["t.pas:4:8: error: assigning a 2-byte value to a 4-byte object is not supported yet"]
     );
 }

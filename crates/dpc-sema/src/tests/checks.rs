@@ -639,3 +639,21 @@ end;
     assert_eq!(size(&p, "q_elem_t"), 14);
     assert_eq!(p.types.size(var(&p, "queue").ty), 14 * 32);
 }
+
+/// Ref 3.15.1-3.15.3 (pp. 3-56..3-57): `volatile`, `atomic` and `device`
+/// change the code (no `clr` on a device register: WIN_ 0xE19112,
+/// codegen-patterns 13), so they are rejected rather than dropped.
+#[test]
+fn optimisation_attributes_are_rejected() {
+    for a in ["volatile", "atomic", "device"] {
+        let e = errs(&format!(
+            "module m;\nvar x: extern [{a}] integer;\nprocedure p;\nbegin\n  x := 0;\nend;\n"
+        ));
+        assert_eq!(
+            e,
+            vec![format!(
+                "t.pas:2:16: error: the `{a}` attribute (ref 3.15) is not supported yet"
+            )],
+        );
+    }
+}

@@ -175,6 +175,12 @@ pub enum Ea {
     AbsL(String, i32),
     /// `-(An)`.
     PreDec(u8),
+    /// `#n`: an immediate.  The selector gives the number as the
+    /// instruction size reads it: a byte immediate is 0..=255, so that gas
+    /// writes the extension word the way the original did (`move.b
+    /// #0xff,(A0)` is `10bc 00ff` at 0xE0A33E; gas encodes `#-1` as
+    /// `10bc ffff`).
+    Imm(i64),
 }
 
 /// A displacement or immediate: small values in decimal, others in hex.
@@ -198,6 +204,7 @@ impl fmt::Display for Ea {
             Ea::AbsL(s, o) if *o < 0 => write!(f, "({s}-{}).l", num(-(*o as i64))),
             Ea::AbsL(s, o) => write!(f, "({s}+{}).l", num(*o as i64)),
             Ea::PreDec(a) => write!(f, "-({})", Reg::A(*a)),
+            Ea::Imm(n) => write!(f, "#{}", num(*n)),
         }
     }
 }
@@ -205,6 +212,8 @@ impl fmt::Display for Ea {
 /// A condition for `Scc` (and, later, `Bcc`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cond {
+    /// Always (`st`).
+    T,
     Ne,
     Eq,
 }
@@ -212,6 +221,7 @@ pub enum Cond {
 impl fmt::Display for Cond {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Cond::T => "t",
             Cond::Ne => "ne",
             Cond::Eq => "eq",
         })
@@ -250,6 +260,11 @@ pub enum Insn {
         src: Ea,
         dst: u8,
     },
+    /// `clr.<size> dst`.
+    Clr {
+        size: Size,
+        dst: Ea,
+    },
     /// `btst %dn,<dst>` (register form: long, bit mod 32).
     Btst {
         bit: u8,
@@ -285,6 +300,7 @@ impl fmt::Display for Insn {
             Insn::Movea { size, src, dst } => {
                 write!(f, "movea.{size}\t{src},{}", Reg::A(*dst))
             }
+            Insn::Clr { size, dst } => write!(f, "clr.{size}\t{dst}"),
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
             Insn::Align4 => f.write_str(".balignw\t4,0x2048"),
@@ -361,6 +377,36 @@ mod tests {
                 "movem.l\t(-0x1c,%fp),%d2-%d3/%a2",
             ),
             (Insn::Pea(Ea::Ind(5)), "pea\t(%a5)"),
+            (
+                Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::Disp(4, 0),
+                },
+                "clr.l\t(4,%a0)",
+            ),
+            (
+                Insn::Move {
+                    size: Size::B,
+                    src: Ea::Imm(0xff),
+                    dst: Ea::Ind(0),
+                },
+                "move.b\t#0xff,(%a0)",
+            ),
+            (
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(-1),
+                    dst: Ea::Disp(0x14, 2),
+                },
+                "move.w\t#-1,(0x14,%a2)",
+            ),
+            (
+                Insn::Scc {
+                    cond: Cond::T,
+                    dst: Ea::Disp(0xe0, 5),
+                },
+                "st\t(0xe0,%a5)",
+            ),
             (
                 Insn::Move {
                     size: Size::L,

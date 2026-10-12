@@ -689,17 +689,17 @@ impl<'t> Checker<'t> {
                 self.new_type(TypeKind::RoutinePointer(Box::new(s)))
             }
             T::Attributed { attrs, ty } => {
+                // Every attribute is rejected for now, `volatile` and
+                // `atomic` included.  They do not change layout, but they
+                // change code: ref 3.15.1-3.15.3 (pp. 3-56..3-57) says they
+                // prevent optimisations, `atomic` assignments are handled
+                // "in a special way", and the image clears device
+                // registers with `move.b #0` rather than `clr` (WIN_
+                // 0xE19112, codegen-patterns 13).  Accepting them and
+                // dropping them would emit the plain code silently.
                 for a in attrs {
-                    match a.name.name.as_str() {
-                        // ref 3.15.1 / 3.15.2: volatile and atomic restrict
-                        // optimisation; they do not change layout, and this
-                        // compiler does not optimise.
-                        "volatile" | "atomic" if a.args.is_none() => {}
-                        n => {
-                            let what = format!("the `{n}` attribute (ref 3.15)");
-                            self.unsupported(a.span, &what);
-                        }
-                    }
+                    let what = format!("the `{}` attribute (ref 3.15)", a.name.name);
+                    self.unsupported(a.span, &what);
                 }
                 self.type_expr(ty)
             }

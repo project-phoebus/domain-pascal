@@ -631,7 +631,9 @@ reproduce.
   parameters are loaded into callee-saved registers right after the
   `movem` (OSINFO_$GET_MMAP 0xE5C69C..0xE5C6AC: `move.l (8,A6),D3`, ...,
   pointers kept in **D** registers and moved to an A register only when
-  used, `movea.l D6,A0`).
+  used, `movea.l D6,A0`).  In routines without calls, into scratch
+  registers (TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A).  When this happens
+  and when it does not: section 12.2.
 - **Redundant moves** are kept: `lea (A5),A0` (0xE14BC6); `movea.l A0,A0`
   as filler (section 7).
 - **Indirect operand with no displacement (Verified):** `(An)`, not
@@ -661,7 +663,7 @@ precedes `unlk`.
 
 | Routine | Frame | Save / restore | Registers |
 |---|---|---|---|
-| TIME_$Q_INIT_QUEUE 0xE16C5E (`time/q_init_queue.c`) | `link #0` | none | All three parameters loaded at entry, before any store: byte `(8,A6)`→D0, word `(0xa,A6)`→D1, pointer `(0xc,A6)`→A0 (0xE16C62..0xE16C6A); stores through A0 follow. Scratch only. |
+| TIME_$Q_INIT_QUEUE 0xE16C5E (`time/q_init_queue.c`) | `link #0` | none | All three parameters loaded at entry, before any store: byte `(8,A6)`→D0, word `(0xa,A6)`→D1, pointer `(0xc,A6)`→A0 (0xE16C62..0xE16C6A); stores through A0 follow. Scratch only. Byte-identical in `make conform` (`tests/conformance/time_q_init_queue.pas`, with TIME_$Q_FLUSH_QUEUE; rule in 12.2). |
 | PROC1_$GET_LOADAV 0xE14BBA (`proc1/get_loadav.c`) | `link #0` | `pea (A5)` 0xE14BBE / `movea.l (-4,A6),A5` 0xE14BD2 | `lea 0xE254E8,A5` right after the save; `lea (A5),A0` (source, offset 0 of the data), `movea.l (8,A6),A1` (destination), three `move.l (A0)+,(A1)+`. |
 | module-local 0xE00EB0 (`misc/zero_page.c`) | `link #-0xc` (frame never touched in the body) | none | No register holds a value across the two `jsr`s; the argument `(8,A6)` is re-read for each call (0xE00EBE, 0xE00EDE). Loop: A0 pointer (`movea.l #imm,A0`), D0 `dbf` counter. |
 | AST_$PAGE_ZERO 0xE00EEC (`ast/page_zero.c`) | `link #0` | none | No registers at all: constants pushed, `(8,A6)` pushed, three calls. |
@@ -704,7 +706,8 @@ the save instruction by register count, the save area directly below the
 **What it does not settle (Uncertain; the "calls" and "loops" beads must
 look before coding):**
 
-- *When* the compiler puts a value in a callee-saved register.  It is not
+- *When* the compiler puts a value in a callee-saved register (more
+  data in section 12.2).  It is not
   "only across calls": 0xE17778 has no call and uses D2/D3/A2.  It is
   not "scratch first, then callee-saved" either: at 0xE177CC A2 is chosen
   while A1 is free.  Parameters go to registers at entry in some routines
@@ -718,6 +721,94 @@ look before coding):**
   successive loads in one argument list (no reuse); PROC1_$TST_LOCK
   frees the address register of `(0x40,A0)` before allocating the next
   data register, but that is consistent with either rule.
+
+### 12.2 When by-value parameters are loaded at entry (survey; partly Verified)
+
+Method: every `link` in the map's `I` segments other than `*_ASM`
+(0xE00800..0xE88834, map-named and module-local routines), disassembled to
+the first `rts`; the parameter reads `(d,A6)`, d >= 8, listed with their
+position.  The survey used ad-hoc scripts that were not kept; re-check sites with `tools/imgdis.sh`.  Semantics and parameter
+kinds from the C in `../source/domain_os`.
+
+**What the image shows.**
+
+- *By-value parameters read by a body of several statements are loaded
+  at entry, in parameter order, even when each is read only once and
+  only by a late statement* (Verified):
+  - TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A: byte `(8)`→D0, word
+    `(0xa)`→D1, pointer `(0xc)`→A0; four stores follow, the byte and the
+    word are each read once, by the third and fourth statements.
+  - module-local 0xE0A328 (DMA_, `dma/init_m68450_channel.c`): word
+    `(0xc)`→D0 at 0xE0A32C, read once, by the last of five statements.
+  - module-local 0xE758C4 (RING, `ring/helpers.c`): longwords `(8)`→D0,
+    `(0xc)`→D1 at 0xE758C8/0xE758D2, each read once.
+  - MMAP_$SET_WS_MAX 0xE0CA88..0xE0CA90: `(8)`→D0, `(0xa)`→D1 (read once,
+    by the last statement), `(0xe)`→A0; SIO6509_$INQ_LINE
+    0xE7266C..0xE72674: `(0xc)`→A0, `(0x10)`→D0, `(0x14)`→A1, each read
+    once (both bodies have an `if`).
+- *Register choice:* the lowest free scratch register of the class, in
+  parameter order: data in D0, D1, pointers that are dereferenced in A0,
+  A1 (the five sites above).  Under register pressure, or when the value
+  must survive a call, callee-saved registers are used, also without
+  calls (MST_$VA_TO_SEGNO 0xE0DCD6 D2; ROUTE_$FIND_PORT 0xE15B06 D3;
+  PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`).  A pointer that is
+  also used as data is kept in a D register and copied to an A register
+  for each dereference (EC2_$INIT 0xE42C64, `movea.l D0,A0` at
+  0xE42C70; ACL_$ADD_PROJ 0xE47EC0, `movea.l D4,A0` at 0xE47ED4).
+- *Functions differ:* PARITY_$CHK_IO 0xE0B180..0xE0B18A loads `(8)` into
+  **D1** and `(0xc)` into D0.
+- *One-statement bodies:* PROC1_$TST_LOCK reads its parameter inside the
+  expression, after the set's address (0xE148CE..0xE148D4, section 5.1);
+  TIME_$Q_FLUSH_QUEUE 0xE16C84 loads its pointer right before the store.
+- *Entry loads are interleaved with other code* (an instruction
+  scheduler; Verified that it happens, rule unknown): `movea.l #imm,A0`
+  between two parameter loads (PARITY_$CHK_IO 0xE0B184; NET_IO_$BOOT_DEVICE
+  0xE31C1E; 0xE758CC); the call pad `subq.l #2,SP` before a parameter
+  load (AREA_$FREE_ASID 0xE07E8E; PMAP_$PURGE_WS 0xE146C6); stores to
+  one record in non-source order (XPD_$RESET_PTRACE_OPTS 0xE5B15E..
+  0xE5B16C: offsets 12, 0, 13, 4, 8).
+- *Not loaded at entry:* a by-value parameter that is only pushed as an
+  argument is pushed from the frame (AST_$SET_ATTRIBUTE 0xE053DA `move.l
+  (0xe,A6),-(SP)`); a byte read once after a call is read there
+  (TTY_$I_ERR 0xE1BE28).
+- *By-address (`var`) slots behave differently* and are not settled:
+  reloaded for every statement (module-local 0xE0A328: `movea.l (8,A6),A0`
+  five times, if its first parameter is the device block by address, as
+  its C suggests); loaded where first needed, each into a fresh register
+  with no reuse within the body (IIC_$RECEIVE 0xE70AC0..0xE70AD0: A0, A1,
+  A2, the last one callee-saved; PROC2_$ALIGN_CTL 0xE41D82..0xE41D8E;
+  XNS_IDP_$GET_STATS 0xE18FF4 A1); or loaded at entry when read more than
+  once (PEB_$TEST_PARITY_ERR 0xE12000; MMAP_$GET_WS_INDEX 0xE0CA4C).
+- *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
+  `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
+  add.w D1,D1`.
+
+**Implemented** (`crates/dpc-m68k/src/isel.rs`, `select_body`,
+`Selector::entry_loads`): a *procedure* body of two or more statements
+loads every by-value parameter it reads, in parameter order, into the
+lowest free scratch register (D for data, A for a dereferenced pointer);
+its statements then use only those registers.  A one-statement body keeps
+its own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
+TIME_$Q_FLUSH_QUEUE stay byte-identical).  Reported as not supported yet:
+a function body of several statements; a third parameter of a class; a
+pointer parameter also used as data; a statement in a several-statement
+body that needs a register of its own (scheduling and the no-reuse
+pattern above); computing with a held parameter (the copy rule); storing
+a parameter that was not loaded at entry (one-statement bodies);
+assigning to a parameter.
+
+**Uncertain:**
+
+- Whether PROC1_$TST_LOCK's parameter is "not loaded at entry" or "loaded
+  at entry, then moved after the address load by the scheduler".  The
+  scheduler's rule would decide it; TIME_$Q_INIT_QUEUE shows no such
+  move (`movea.l (0xc,A6),A0` stays next to its first use).  Against a
+  simple "one-statement bodies are not preloaded" rule: module-local
+  0xE46498 (ACL_), a one-statement boolean function, reads `(8,A6)` into
+  D0 first (0xE4649C), before `movea.l #imm,A0` and the copy `move.w
+  D0,D1`.
+- The rule for by-address slots (above), and when the original chose
+  callee-saved registers without calls.
 
 ---
 
@@ -736,6 +827,40 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   Where gas would pick a different encoding, the emitter must write the
   original one.  The tree's hand-asm files do it with `.short`.
 - `addq`/`subq` are used for 1..8; `moveq` for −128..127 into a D register.
+- **Stores of constants** (Verified; implemented in `isel.rs`,
+  `Selector::store`):
+  - zero: `clr.<s> <ea>` (TIME_$Q_INIT_QUEUE 0xE16C6E `clr.l (A0)`;
+    `clr.w` IIC_$RECEIVE 0xE70ACE; `clr.b` XPD_$RESET_PTRACE_OPTS
+    0xE5B15E);
+  - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
+    a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the
+    image);
+  - others: `move.<s> #n,<ea>`, also for small longwords (`move.l #1`,
+    `move.l #7,(A0)` 0xE311C8; never `moveq` + `move` seen for a store):
+    module-local 0xE0A328 at 0xE0A334 `move.b #0x10,(7,A0)`,
+    MMAP_$ALLOC_CONTIG 0xE0D906 `move.l #0x6000e,(A1)`, 0xE758D8
+    `move.w #0x200,(0xa,A0)`;
+  - **a byte immediate's extension word has a zero high byte**:
+    0xE0A33E `10bc 00ff` for `move.b #0xff,(A0)`; gas encodes `#-1` as
+    `ffff`, so the emitter writes byte immediates as 0..255 (`Ea::Imm`).
+    Of the 235 `move/and/or/cmp.b` with a negative immediate in the
+    survey of section 12.2, 229 have a `00` high byte and none `ff` (the
+    other 6 are linear-sweep decodes of data).
+  - **device registers**: `move.b #0` instead of `clr` (WIN_ module
+    0xE19112, a controller register per `win/wait_for_controller.c`;
+    RING 0xE758E2; a few dozen `move.<s> #0` in the survey, pushes
+    included).  Ref 3.15.3 (p. 3-57): the
+    `device` attribute stops "gratuitous read-modify-write references";
+    `clr` reads its operand on the 68000.  How the objects were declared
+    is not known.  `dpc-sema` rejects `device`, `volatile` and `atomic`
+    ("not supported yet") so that such stores are never compiled to `clr`.
+- **Store merging (reference; Uncertain in the image):** ref 3.15.3,
+  p. 3-57: "By default, the compiler optimizes certain adjacent references
+  by merging them into one large reference" (`a := 0; b := 0` on two
+  `integer16`s becomes one 32-bit store).  Not yet found in the image;
+  the two adjacent `clr.b` of XPD_$RESET_PTRACE_OPTS (0xE5B15E, 0xE5B164)
+  are not merged.  `dpc` rejects two consecutive stores to adjacent
+  objects of one base that fit in a longword.
 - `link.w`, `bsr.s`/`bsr.w`, `bra.s`/`bra.w`: the length must match the
   original, so emit explicit sizes and never rely on gas relaxation
   (`jbra`).

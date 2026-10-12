@@ -15,8 +15,11 @@ use dpc_syntax::{Diagnostic, Span};
 
 use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 
+use dpc_sema::consts::ConstValue;
+
 use crate::{
-    Addr, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, Width,
+    Addr, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
+    ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -134,9 +137,29 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
         code_section: r.code_section.clone(),
         frame_size: r.frame_size,
         result,
+        value_params: value_params(p, r),
         body,
         span: r.span,
     })
+}
+
+/// The parameters passed by value, in parameter order (ref 5.2 Table 5-1,
+/// p. 5-5).  Only scalar-sized ones: a by-value parameter of another size
+/// cannot be read as one value anyway.
+fn value_params(p: &Program, r: &Routine) -> Vec<ValueParam> {
+    r.params
+        .iter()
+        .filter(|prm| prm.passing() == Passing::ByValue && !prm.conv.local_copy)
+        .filter_map(|prm| {
+            Width::of_size(p.types.size(prm.ty)).map(|width| ValueParam {
+                offset: prm.value_offset,
+                ty: Scalar {
+                    width,
+                    sign: sign_of(&p.types, prm.ty),
+                },
+            })
+        })
+        .collect()
 }
 
 fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<ResultSpec> {
@@ -190,6 +213,7 @@ fn lower_body(
                     "assignment to an enclosing function's result is",
                 ));
             }
+            SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
             _ => return Err(unsupported(s.span, "this statement is")),
         }
     }
@@ -249,16 +273,55 @@ fn result_assignment(
     })
 }
 
+/// `d := e` for a scalar designator `d` (ref "Assignment", p. 4-25).
+///
+/// A constant value takes the designator's type (the checker has made
+/// sure it fits); any other value must have the designator's width, since
+/// implicit integer widening (`integer16` to `integer32`) has not been
+/// catalogued yet.
+fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
+    let ty = scalar_of(p, target)?;
+    let addr = addr_of(p, target)?;
+    let value = if let Some(v) = &value.value {
+        const_of(v, ty, value.span)?
+    } else {
+        let v = value_of(p, value)?;
+        if v.ty().width != ty.width {
+            return Err(unsupported(
+                value.span,
+                format!(
+                    "assigning a {}-byte value to a {}-byte object is",
+                    v.ty().bytes(),
+                    ty.bytes()
+                ),
+            ));
+        }
+        v
+    };
+    Ok(Stmt {
+        kind: StmtKind::Store { addr, value },
+        span: s.span,
+    })
+}
+
+/// The constant `v` as a value of IR type `ty`.  A boolean is its byte:
+/// 0xFF for true, read as the signed byte -1 (ref 3.5.3, p. 3-11: "The
+/// system sets all eight bits to 1 for true and sets all eight bits to 0
+/// for false").
+fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
+    let value = match v {
+        ConstValue::Bool(b) => -(*b as i64),
+        _ => v
+            .ordinal()
+            .ok_or_else(|| unsupported(span, "this kind of constant is"))?,
+    };
+    Ok(Expr::Const { value, ty })
+}
+
 /// The value of `e`.
 fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if let Some(v) = &e.value {
-        let ord = v
-            .ordinal()
-            .ok_or_else(|| unsupported(e.span, "this kind of constant is"))?;
-        return Ok(Expr::Const {
-            value: ord,
-            ty: scalar_of(p, e)?,
-        });
+        return const_of(v, scalar_of(p, e)?, e.span);
     }
     match &e.kind {
         ExprKind::Var { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => Ok(Expr::Load {

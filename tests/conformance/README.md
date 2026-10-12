@@ -14,7 +14,8 @@ addresses, taken from the SAU2 link map.
 The first candidates are listed in CLAUDE.md section 6 (PROC1_$TST_LOCK,
 TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).
 Compiled so far: `proc1_tst_lock.pas` (PROC1_$TST_LOCK and
-PROC1_$GET_LOCKS, 0xE148CA..0xE148F8).  Each `.pas` starts with a comment
+PROC1_$GET_LOCKS, 0xE148CA..0xE148F8) and `time_q_init_queue.pas`
+(TIME_$Q_INIT_QUEUE and TIME_$Q_FLUSH_QUEUE, 0xE16C5E..0xE16C8E).  Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
 

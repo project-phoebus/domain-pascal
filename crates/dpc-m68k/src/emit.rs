@@ -153,6 +153,7 @@ mod tests {
             code_section: section.into(),
             frame_size: 0,
             result: None,
+            value_params: Vec::new(),
             body: Vec::new(),
             span,
         }

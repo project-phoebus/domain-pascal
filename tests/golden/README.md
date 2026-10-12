@@ -21,3 +21,9 @@ Tests:
 
 - `sets/in_long_set` - codegen-patterns 5.1, 3, 2: PROC1_$TST_LOCK
   0xE148CA.
+- `stores/entry_loads` - codegen-patterns 12.2, 13, 1.3, 2:
+  TIME_$Q_INIT_QUEUE 0xE16C5E.
+- `stores/const_stores` - codegen-patterns 13 (clr, st, move #n, byte
+  immediates 0..255), 12.2.
+- `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
+  one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
