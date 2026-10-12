@@ -1,0 +1,22 @@
+# scratch space for agents and tools (never committed)
+tmp/
+
+# build outputs
+build/
+out/
+*.o
+*.elf
+*.bin
+*.lst
+*.map.out
+
+# language-specific build dirs (whichever implementation language is chosen)
+target/
+_build/
+__pycache__/
+*.pyc
+
+# editor / OS noise
+.DS_Store
+*.swp
+*~
