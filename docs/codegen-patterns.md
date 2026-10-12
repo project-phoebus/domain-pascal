@@ -450,15 +450,17 @@ their host); no compare or widening of either has been catalogued.
     `move.w #n,Dn` (0xE3B97A `move.w #130,D0`); a final word follows the
     loop as `move.w (Am)+,(An)+` (37 loops, e.g. 0xE19DA2..0xE19DAA, 22
     bytes).
-  - **Loop-head alignment: Uncertain.**  Of the 240 one-`move.l` `dbf`
-    copy loops in a linear sweep of 0xE00800..0xE88834, 63 have the 0x2048
-    filler (all then 4-aligned), 127 are 4-aligned without it and 50 start
-    at 2 mod 4 with no filler, in compiled code too: 0xE1155E (routine
-    0xE11548, `link`, `movem`, `lea 0xE248FC,A5`; `moveq #6,D0` at
-    0xE1155C), 0xE496C2, AST_ 0xE02482 (the same routine's loop
-    at 0xE023D4 is 4-aligned).  Same modules, same register shapes; no
-    rule found.
-    `dpc` always aligns (the AST_ 0xE0149E form).
+  - **Loop-head alignment: the copy loop is an ordinary loop head
+    (Verified, see section 7).**  Whether the filler appears depends on
+    where the routine sits (section 7), not on the loop being a copy.  In
+    aligning routines, 63 copy loops have the filler, 32 are 4-aligned
+    already and 2 are at 2 mod 4 (0xE6CBBE, 0xE74766).  In the other
+    routines, none of the 140 copy loops has a filler: 93 are 4-aligned
+    and 47 are at 2 mod 4.  The cases in question all sit in
+    non-aligning code: 0xE1155E (NETWORK_$PAGE_SERVER), 0xE496C2 (ACL_),
+    and AST_$LOAD_AOTE.  In AST_$LOAD_AOTE, 0xE023D4 is at 0 mod 4 by
+    accident and 0xE02482 is at 2 mod 4.  `dpc` currently always aligns
+    (the AST_ 0xE0149E form).  That is right only for aligning routines.
   - **6 and 8 bytes: displacement moves.**  No `(An)+` copy of exactly 6
     or 8 bytes exists; pairs such as `move.l (0x30,A5),(-8,A6); move.l
     (0x34,A5),(-4,A6)` (0xE4AD5C) and many `move.l`/`move.w` pairs of
@@ -543,25 +545,179 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
     (`clr.w D2` ... `addq.w #1,D2`).
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
   loop (0xE177DC..0xE177F2).
-- **Loop-head alignment (Verified where the filler is; which loops: Uncertain):** the compiler pads with the 2-byte
-  no-op `movea.l A0,A0` (0x2048) so that a loop head starts on a 4-byte
-  boundary.  479 of the 481 `0x2048` words in the image's kernel text are
-  followed by a 4-aligned instruction.
-  - Before a `dbf` loop: 0xE00ED6, 0xE0149E.
-  - The boundary is **absolute** (relative to the 4-aligned module code
-    base), not relative to the routine: PKT_$RECENTLY_MISSING starts at
-    0xE128BA (2 mod 4) in module PKT (code 0xE1202C), and its filler at
-    0xE128DA puts the loop head on 0xE128DC.  `dpc --fragment-origin`
-    reproduces this for conformance units that start mid-module
-    (tests/conformance/README.md).
-  - At a branch target: 0xE1CE42.
-  - At the end of a module's code, so the next module starts 4-aligned:
-    0xE1A9D2 before OS_TERM 0xE1A9D4, and 0xE1AD16 before BITPAD 0xE1AD18.
-  - **Uncertain:** exactly which labels get aligned.  Not every loop
-    head: of the `dbf` loops a linear sweep finds (hand assembly
-    included), 196 have the filler, 423 are 4-aligned without it and 198
-    start at 2 mod 4 with none, compiled code among them (0xE1155E,
-    section 5.2).  The other branch targets are not yet characterised.
+- **Loop-head alignment.**  Some code pads with the 2-byte no-op
+  `movea.l A0,A0` (0x2048) so that a loop head starts on a 4-byte
+  boundary.  Other code never does.  The survey tool is
+  `tools/loopalign.py`:
+  - `summary` gives the counts below;
+  - `routines [SEG]` gives the per-routine classes;
+  - `ends` gives the segment-end padding.
+
+  The survey disassembles every `I` segment in 0xE00800..0xE88834 that
+  is not hand assembly (`_ASM` segments, plus M$ARITH, PAS_$SET_BUILD,
+  SMD_WIRED, UID_$HASH, UID_LIST and VFMT_$WRITEN), one routine at a time.  It splits routines at map
+  symbols and at `link.w A6` words.  A loop head is any target of a
+  `dbf` or of a backward `bra`/`bcc`.
+  - **The filler (Verified).**  There are 482 `0x2048` words, and 480 of
+    them are followed by a 4-aligned instruction.  The other two are
+    taken to be real degenerate register copies, not fillers:
+    - 0xE332FC is followed by a second `0x2048`, the actual filler at
+      0xE332FE, before the loop head 0xE33300 (TTY_$I_INIT);
+    - 0xE4DC90 (DIR_$READ_LINKU, non-aligning code) is followed by
+      `moveq #18,D1` at 2 mod 4.
+  - **What the filler precedes:**
+    - 315 loop heads.  Examples: 0xE00ED6, 0xE0149E, 0xE128DA, and
+      0xE1CE42 before KBD_$RCV's loop at 0xE1CE44.
+    - The end of a segment's code, 61 times: 0xE1A9D2 before OS_TERM
+      0xE1A9D4, 0xE1AD16 before BITPAD 0xE1AD18.
+    - 34 4-aligned constant cells after a routine's code
+      (MMAP_$AVAIL 0xE0CCB6, MMAP_$WIRE 0xE0CD16, PKT 0xE12D32).
+    - 64 forward-only branch targets (see below).
+    - 6 other instructions.  Some of them are labels reached only
+      through a jump table (ASKNODE_$INTERNET_INFO 0xE649E6 before
+      `bra.w`), which the survey cannot see as branch targets.
+  - **The rule: alignment is on for a leading run of routines in a map
+    segment and off for the rest (Verified as a split; its cause is
+    Uncertain).**  Each routine was classed by its loop heads:
+    - 206 routines have a filler and no head at 2 mod 4;
+    - 219 have heads at 2 mod 4 and no filler at all;
+    - 20 have both;
+    - 237 have only heads that happen to be 4-aligned;
+    - 1000 have no loop.
+
+    Loop heads split as follows:
+
+    | Routines | With filler | 4-aligned, no filler | 2 mod 4 |
+    |---|---|---|---|
+    | 226 that align at least one head | 315 | 160 | 28 |
+    | All others | 0 (by definition) | 560 | 358 |
+
+    The classes form **runs of adjacent routines** inside a map segment,
+    and the switch goes one way only.  In all 24 segments that hold both
+    classes, the aligning routines come first and the non-aligning ones
+    after; none switches back.  (MMAP_ counts if the 2 mod 4 head of
+    MMAP_$WS_SCAN, 0xE0D3C2, a 0x1AA-byte loop, is read as one of the
+    large loops below; the switch is then at MMAP_$ALLOC_PURE 0xE0D78E.)
+    - AST_: the last filler is in the module-local routine at 0xE01502
+      (in AST_$GET_DISM_SEQN's extent).  The first head at 2 mod 4 is in
+      the routine at 0xE01872.  AST_$UPDATE 0xE016D0 lies between and
+      has only 4-aligned heads, so it cannot be classed.
+    - .TEXT VTOC_: VTOC_$MOUNT has a filler (0xE3871E).  The next
+      routine, VTOC_$DISMOUNT 0xE38764, has a copy loop at 2 mod 4 with
+      none (0xE387CE).
+    - RING: aligning up to RING_$IOCTL; RING_$SVC_CLOSE 0xE76E22 is not
+      (head 0xE76EAE).
+    - XNS_IDP and NETWORK switch the same way.
+    - PMAP_ and PROC1_ never align.
+    - OS_INIT_PROC is almost entirely aligning.
+
+    **Both sides of a switch are one object module.**  Non-aligning
+    routines and aligning ones call each other's unnamed (module-local)
+    routines with `bsr`: 62 such calls in 16 segments.
+    For example, AST_$TOUCH_AREA 0xE03548 has dbf heads at 2 mod 4
+    without a filler (0xE037EA, 0xE0386E).  It calls the module-local
+    routine at 0xE00EB0 (`bsr.w` at 0xE03636), whose filler is 0xE00ED6.
+    XNS_IDP_$OS_OPEN calls the module-local 0xE17D12 (`bsr.w` at
+    0xE17F36).  `bsr` never crosses a segment in the image (the 10
+    apparent cases are data decoded as `bsr.s`).  So a
+    single compilation can contain both kinds of code; the switch is not
+    "one source file per class".  (This assumes the binder cannot
+    resolve calls to routines that have no global symbol, which is not
+    checked.)
+
+    The **end padding of a segment** agrees with the class of its last
+    routines.  `ends` lists the 61 segments that end in `0x2048` and the
+    21 that end `rts; 0x0000`.  (Most other segments end in an `unlk;
+    rts` or a constant that is already at 0 mod 4.)  Taking the last
+    routine that has a filler or a 2 mod 4 head:
+    - 24 `0x2048` segments end in aligning code and none in non-aligning
+      code;
+    - 15 `0x0000` segments end in non-aligning code (AST_ 0xE0736E,
+      RING, ACL_, OLD_DIR, VTOC_ .TEXT, ...);
+    - 2 `0x0000` segments end in aligning code (NET_IO, HINT_), but their
+      last few routines have no loop to tell.
+
+    So non-aligning code does not pad the segment end; whether the
+    compiler or the binder wrote the `0x0000` is Uncertain.  The cause of
+    the switch is not recorded in the image.  Because it happens inside
+    one object module and only from aligning to non-aligning, a
+    per-file compiler option or compiler version does not explain it
+    alone.  Something in the compilation that turns alignment off for
+    the rest of the unit fits better; no candidate has been confirmed.
+    The reference documents no option or directive for code or loop
+    alignment: the `-opt` and `-cpu` descriptions (6.4.24, p. 6-26;
+    6.4.9, p. 6-14) do not mention it.  The only directives that stay in
+    force for the rest of a unit and concern alignment are
+    `%natural_alignment`, `%word_alignment` and
+    `%push_alignment`/`%pop_alignment` (4.7, Table 4-11, p. 4-44).  The
+    reference ties them to data layout only.  Whether one of them also
+    turns loop alignment off is untested (a lead, not a finding).
+  - **Hypotheses refuted:**
+    - *Another alignment base.*  All 210 `I` segments start at 0 mod 4
+      and have a size that is a multiple of 4.  Aligning code aligns to
+      absolute addresses: PKT_$RECENTLY_MISSING starts at 0xE128BA (2
+      mod 4), and its filler at 0xE128DA puts the head on 0xE128DC.
+      Non-aligning code has no filler at all, so no other base would
+      account for it.
+    - *Copy loops vs. source loops.*  See section 5.2: copy loops behave
+      like any other head.
+    - *Entry by fall-through vs. by `bra` to the test.*  In aligning
+      routines, heads entered by fall-through split 312/158/25
+      (filler/aligned/2 mod 4); heads entered by a branch split 3/2/3.
+    - *Calls in the body.*  Heads of loops with a call split 95/44/18;
+      loops without one split 220/116/10.
+    - *Section.*  The split runs inside sections.  `dpc
+      --fragment-origin` reproduces the absolute base for conformance
+      units that start mid-module (tests/conformance/README.md).
+  - **Inside aligning routines, which heads (Uncertain).**  Nearly all
+    small loops are aligned.  The size here is the head-to-branch
+    distance:
+
+    | Body size | With filler | 4-aligned | 2 mod 4 |
+    |---|---|---|---|
+    | 0x40 bytes or less | 235 | 126 | 6 |
+    | Up to 0x100 | 74 | 29 | 4 |
+    | Over 0x100 | 6 | 5 | 18 |
+
+    Of the 28 unaligned heads in aligning routines, 15 are outer loops,
+    mostly large: 0xE0124A, 0xE0738A, 0xE0FDE2, 0xE34426, 0xE423C6,
+    0xE4240A, 0xE44F02, 0xE4B072, 0xE64F86, 0xE6657E, 0xE6AB5A,
+    0xE6CAE2, 0xE6DAEE, 0xE71F66, 0xE75A22.  The other 13 are innermost
+    loops, with no rule found: 0xE2F45E, 0xE319DE, 0xE33FE6, 0xE3443E,
+    0xE427DE, 0xE5515A, 0xE666EE, 0xE6A73A, 0xE6CBBE, 0xE74556,
+    0xE7469E, 0xE74766, 0xE76CB2.  Large loops
+    above 0x100 bytes are aligned by the filler only 6 times: 0xE0FDA0,
+    0xE12C28, 0xE1CF18, 0xE61130, 0xE611E0, 0xE71FE8.
+  - **Other branch targets (Verified: not aligned as a rule).**
+    Forward-only targets in aligning routines: 47 have the filler, 991
+    are 4-aligned and 971 are at 2 mod 4.  In the other routines the
+    split is 17/3367/3452.  So `if`/`else` joins are not aligned.  The
+    few that are cluster in a handful of routines, for reasons not yet
+    understood:
+    - MST_$INIT 0xE30C9C..0xE30D30, at the joins of `max`/`min`-like
+      and shift-for-divide sequences;
+    - ACL_ 0xE4519C..0xE45850;
+    - ASKNODE_$INTERNET_INFO;
+    - NETWORK_$READ_AHEAD.
+  - **What `dpc` should do:** an alignment switch that can change
+    between routines, not just once per unit.  The conformance manifest
+    records, for each unit, whether it starts aligning and the first
+    routine that does not align.
+    - **Aligning routines:** put the filler before every loop head (the
+      `dbf` target, or the target of the backward `bra`/`bcc`) that
+      would start at 2 mod 4.  If the last routine aligns, pad the end
+      of the code section with `0x2048`.  Do not align forward labels.
+    - **Non-aligning routines:** no filler; if the last routine does not
+      align, the end padding is `0x0000`.
+    - Large outer loops in aligning routines, which the original often left
+      unaligned, need an issue before a conformance target hits one.
+    - Classes of current and next targets:
+      - Aligning: AST_ up to AST_$GET_DISM_SEQN (0xE00EB0,
+        AST_$PAGE_ZERO), LOG_ (LOG_$ADD 0xE1763E has two fillers), PKT,
+        OSINFO.
+      - Non-aligning: PMAP_ (PMAP_$FLUSH's two heads are 4-aligned by
+        accident), PROC1_, XNS_IDP from XNS_IDP_$OS_OPEN on
+        (XNS_IDP_$GET_STATS).
 - **`case` statements** become a bounds check plus a jump table of word
   offsets (Verified: OSINFO_$GET_MMAP 0xE5C6C0..0xE5C6D6):
   `cmpi.w #n,D0; bcc default; add.w D0,D0; move.w (tbl,PC,D0.w),D0; jmp (tbl,PC,D0.w)`
@@ -685,8 +841,9 @@ PROC1_$SUSPEND, PROC1_$SET_PRIORITY, SMD_$LOCK_DISPLAY.
   Inside each, there is one contribution per module, in link order, named
   after the module (`I E00BE8 AST_`, `D E1DC80 AST_`).  So a module's code
   and its data land in **different** output sections, each in module
-  order.  The per-module **code** contribution is 4-byte aligned and padded
-  with `0x2048` (section 7).
+  order.  The per-module **code** contribution is 4-byte aligned.  It is
+  padded with `0x2048` when its last routines align loops, and with
+  `0x0000` when they do not (section 7).
 - **Uncertain:** which source construct produced `WIRED_PROC`/`WIRED_DATA`
   (module heading section names are the likely candidate), and why
   `PROCEDURE$`/`DATA$` exist besides `.TEXT`/`.DATA`.  They may be another
@@ -972,7 +1129,9 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   (`tests/conformance/handasm/`): `%` register names, `%fp` for A6,
   `(d,%an)` operands, absolute operands as `(SYM).l` so gas cannot pick
   abs.w.  The module-end `0x2048` padding (section 7) is emitted as
-  `.balignw 4,0x2048` at the end of each code section.  Loop labels are
+  `.balignw 4,0x2048` at the end of each code section.  That is right
+  only when the last routines align; otherwise the end is `0x0000`
+  (section 7).  Loop labels are
   gas numeric local labels (`1:`, `dbf %d0,1b`).
 - **68010 only.** No 68020-only instruction (bit-field ops, `extb.l`,
   32-bit `mul`/`div`, scaled index, `bra.l`) has been found in compiled

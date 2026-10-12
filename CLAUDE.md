@@ -228,9 +228,12 @@ it before touching the backend.  The most important points:
 9. **Loops.**
    - Counted loops use `dbf`, with the counter loaded with N−1.  A count
      only known at run time is guarded with `subq.w #1; bmi`.
-   - **Loop heads are 4-byte aligned with the no-op `movea.l A0,A0`
-     (0x2048).**  The same filler pads each module's code to a multiple
-     of 4.
+   - **Loop heads may be 4-byte aligned with the no-op `movea.l A0,A0`
+     (0x2048), but only in "aligning" code.**  Within a map segment,
+     alignment is on for a leading run of routines and off for the rest
+     (cause unknown).  Aligning code also pads the segment end with
+     0x2048; non-aligning code ends `rts; 0x0000`.  See
+     codegen-patterns section 7 and `tools/loopalign.py`.
 10. **`case`.**
     - Dense label sets use a word-offset jump table (`add.w D0,D0;
       move.w (tbl,PC,D0.w),D0; jmp (tbl,PC,D0.w)`).
