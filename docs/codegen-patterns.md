@@ -1224,12 +1224,14 @@ reproduce.
   values that must survive a call; see 12.1 for what is and is not known
   about when the original used them.
 - **Re-evaluation:** the same expression is reloaded rather than kept in a
-  register (0xE135DA/0xE135E2 reload `(8,A2)`).
+  register (0xE135DA/0xE135E2 reload `(8,A2)`, an uplevel variable;
+  which values are kept is in 12.4, R7/R8).
 - **The order of evaluation of arguments** follows the push order (right to
   left), with address temporaries computed in between (0xE135D0..0xE135EE).
 - The kernel's `.TEXT` shows strength reduction (shifts for constant
   multiplies), constant folding and common-address reuse.  The compiler
   *did* optimise a little.  Reproduce what is seen; invent nothing.
+  The model of register choice, CSE and scheduling is in 12.4.
 
 ### 12.1 Register usage in the next conformance targets (Verified at the addresses given)
 
@@ -1280,7 +1282,9 @@ the save instruction by register count, the save area directly below the
 `link` area, restore offsets, and A5 as one more register of the save set.
 
 **What it does not settle (Uncertain; the "calls" and "loops" beads must
-look before coding):**
+look before coding).**  Section 12.4 now models these points: R1 and R3
+for the first two bullets, R4(a) for the third.  The bullets are kept
+for their sites.
 
 - *When* the compiler puts a value in a callee-saved register (more
   data in section 12.2).  It is not
@@ -1337,7 +1341,7 @@ kinds from the C in `../source/domain_os`.
   expression, after the set's address (0xE148CE..0xE148D4, section 5.1);
   TIME_$Q_FLUSH_QUEUE 0xE16C84 loads its pointer right before the store.
 - *Entry loads are interleaved with other code* (an instruction
-  scheduler; Verified that it happens, rule unknown): `movea.l #imm,A0`
+  scheduler; Verified that it happens, rule unknown; 12.4 R9–R12): `movea.l #imm,A0`
   between two parameter loads (PARITY_$CHK_IO 0xE0B184; NET_IO_$BOOT_DEVICE
   0xE31C1E; 0xE758CC); the call pad `subq.l #2,SP` before a parameter
   load (AREA_$FREE_ASID 0xE07E8E; PMAP_$PURGE_WS 0xE146C6); stores to
@@ -1367,7 +1371,8 @@ kinds from the C in `../source/domain_os`.
     0xE18FF4 A1; LOG_$READ's worker 0xE177CC `movea.l (8,A6),A2` while
     A1 is free (A1 is taken next, for another pointer);
     MMAP_$GET_WS_INDEX 0xE0CA62 `movea.l (0xa,A6),A2`, A1 taken next.
-    The allocation rule is not settled.
+    The allocation rule is not settled (12.4 R4(b): Uncertain, with
+  counterexamples).
 - *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
   `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
   add.w D1,D1`.
@@ -1456,6 +1461,458 @@ settled, each from this one routine, in image order:
    0xE177E8 is 4-aligned with no filler (LOG_ aligns, section 7).
 7. The frame: `link #-0x10` with nothing in it addressed (section 2,
    untouched frames); the reconstruction declares stand-ins.
+
+Items 2–5 are taken up by the model in 12.4.
+
+### 12.4 Register allocation and optimisation model (beads domain-pascal-hy0, -6tn, -5cx)
+
+**What the reference says** (6.4.24 "-opt: Optimized Code"; we do not
+know which level the kernel was compiled at, and none of this is
+evidence about the image):
+
+- `-dba` and up (p. 6-27): "Rearranges expressions to minimize the
+  number of registers needed to compute them"; "Computes multiple
+  occurrences of the same expression within a statement only one time".
+- `-opt 0` (p. 6-27): "Permits values to remain in registers across
+  statements"; "Merges identical sequences of instructions".
+- `-opt 1` (pp. 6-27, 6-28): "Eliminates some global common
+  subexpressions"; "Transforms integer multiplication by a constant into
+  shift and add instructions"; "Merges assignment statements where
+  possible".
+- `-opt 3`, the default (pp. 6-28..6-32): "Global register allocation
+  allows local variables to have their values placed in machine
+  registers" (p. 6-29); "Instruction reordering" (p. 6-29); "Removal of
+  invariant expressions from loops" (p. 6-29); "Strength reduction"
+  (pp. 6-30, 6-31, with the array-pointer example of section 12.3 item
+  6);
+  "Live analysis on local variables" ("allocate a local variable to a
+  machine register for exactly as long as the variable's value is
+  needed", p. 6-32); "Extensive searches ... for global common
+  subexpressions" (p. 6-32).
+
+The image shows global register allocation, global CSE, strength
+reduction and instruction reordering (sites below).  In the reference
+that combination needs `-opt 3` or higher.  The level actually used is
+not recorded (Uncertain).
+
+**Method.** `tools/regalloc.py` (docstring) splits every compiled routine
+as `tools/loopalign.py` does, builds a def/use model of each instruction,
+and forms *values* (webs: the definitions of one register that reach
+common uses; a two-address update extends its value).  For each value it
+asks whether a rule, given the registers of all other values, picks the
+register the compiler chose.  A rule also fails when the chosen register
+would conflict under it.  `summary` gives the rates; `misses RULE` lists
+sites; `routine ADDR` shows one routine; `corpus` prints the table below.
+Survey: 1099 routines of 0x30–0x150 bytes (14 skipped for `case` jump
+tables), 4978 data and 5158 address values; also the whole image (1588
+routines).
+
+*What a "hit" means.*  The lifetimes come from the machine code, and each
+value is tested against the registers the original gave all the *other*
+values (leave one out).  Any allocator that colours values one at a
+time, each with the lowest register its already-coloured neighbours
+leave free, scores 100% on this test whatever order it colours in.  So
+the `col`/`colU` rates measure how often the original's choice is
+*locally minimal*.  They do not say in which order the compiler
+allocated.  `colQU` counts only values defined earlier in address
+order, i.e. an allocator that works through the routine from the top;
+it is the rate a one-pass allocator in `dpc` could expect (R1, below).
+
+*Review fixes (2026-10-12).*  Two model bugs were fixed and the numbers
+below re-run.  (1) Every instruction that read and wrote one register
+was treated as a two-address update.  That merged a load through a dying
+base into the same register (`movea.l (4,A0),A0`) with the base's value,
+which hid R2's counterexamples.  Such loads are now new values; `lea
+(d,An),An` (an `adda`) is still an update.  (2) The dead last `(A0)+` of
+a block copy, or a dead `dbf` counter, made A0/D0 a "function result",
+live up to every `rts`, in 170 of the 1099 routines.
+
+**Corpus** (studied against the C; `tools/regalloc.py corpus`): 44
+routines, 329 values, 268 predicted by rule R1 below (`colU`), 61 not.
+
+| Routine | Size | C in `../source/domain_os` | Values | R1 misses |
+|---|---|---|---|---|
+| module-local 0xE17778 | 0x88 | `log/read_internal.c` | 14 | 0xE177C4 D3, 0xE177D0 D3 (R1: D2) |
+| LOG_$READ 0xE17800 | 0x28 | `log/read.c` | 1 | |
+| MST_$VA_TO_SEGNO 0xE0DCC8 | 0x78 | `mst/va_to_segno.c` | 10 | 0xE0DCD6 D2, 0xE0DCE6 D3 |
+| AST_$LOCATE_ASTE 0xE07050 | 0x9C | `ast/locate_aste.c` | 13 | 0xE0707E, 0xE0708E, 0xE07098, 0xE070B8 (D), 0xE070B6, 0xE070CA (A) |
+| AST_$INVALIDATE_PAGE 0xE00F16 | 0x66 | `ast/invalidate_page.c` | 9 | 0xE00F34, 0xE00F4E A1 |
+| FIM_$ACKNOWLEDGE 0xE0A96C | 0x56 | `fim/acknowledge.c` | 8 | 0xE0A972 D2, 0xE0A9A0, 0xE0A9AA A1 |
+| FIM_$INSTALL 0xE0A9C2 | 0x42 | `fim/install.c` | 6 | 0xE0A9EA D2, 0xE0A9F0 A1 |
+| FIM_$INIT_ASID 0xE0AA24 | 0x48 | `fim/init_asid.c` | 8 | 0xE0AA5A A1 |
+| AST_$SET_TROUBLE 0xE071EA | 0x36 | `ast/set_trouble.c` | 2 | 0xE071FC A2 |
+| module-local 0xE0B1BC | 0x46 | `mac_os/check_range_overlap.c` | 10 | 0xE0B1E2 D2 |
+| module-local 0xE0B202 | 0x44 | `mac_os/find_packet_type.c` | 9 | |
+| MMAP_$GET_WS_INDEX 0xE0CA3A | 0x40 | `mmap/get_ws_index.c` | 5 | 0xE0CA62 A2, 0xE0CA68 A1 |
+| MMAP_$SET_WS_MAX 0xE0CA7A | 0x48 | `mmap/set_ws_max.c` | 5 | 0xE0CAAE D3 |
+| module-local 0xE01BEE | 0x64 | `vtoc/search_volumes.c` | 6 | 0xE01C10 D1 |
+| module-local 0xE0283C | 0x5C | `ast/clear_transition_bits.c` | 6 | 0xE02852 D1, 0xE0285A D3, 0xE0286A D1 |
+| AREA_$DELETE 0xE07C22 | 0xE4 | `area/delete.c` | 10 | 0xE07C86, 0xE07CA0 D1 |
+| PROC2_$SET_SERVER 0xE41468 | 0x74 | `proc2/set_server.c` | 7 | 0xE414A0 D3 |
+| module-local 0xE15830 | 0x58 | `rip/update_int.c` | 10 | 0xE1584A, 0xE15854, 0xE1585E, 0xE15868 D2, 0xE1586E D3 |
+| PROC1_$SUSPENDP 0xE14876 | 0x54 | `proc1/suspendp.c` | 7 | |
+| PKT_$DUMP_DATA 0xE127E6 | 0x4E | `pkt/dump_data.c` | 7 | 0xE12808 D1 |
+| NETWORK_$REMOVE_NET 0xE0F27C | 0x50 | `network/network.h` (declaration only) | 4 | 0xE0F2A4 D2 |
+| TIME_$Q_INIT_QUEUE 0xE16C5E | 0x22 | `time/q_init_queue.c` | 3 | |
+| PROC1_$TST_LOCK 0xE148CA | 0x1C | `proc1/tst_lock.c` | 5 | |
+| PROC1_$SET_ASID 0xE148F8 | 0x26 | `proc1/set_asid.c` | 2 | 0xE148FE D2 |
+| AREA_$FREE_ASID 0xE07E80 | 0x8E | `area/free.c` | 5 | |
+| PMAP_$PURGE_WS 0xE146B4 | 0x68 | `pmap/purge_ws.c` | 4 | |
+| PARITY_$CHK_IO 0xE0B174 | 0x48 | `parity/chk_io.c` | 6 | |
+| IIC_$RECEIVE 0xE70ABA | 0x24 | `iic/receive.c` | 3 | 0xE70ACA A1, 0xE70AD0 A2 |
+| module-local 0xE1359C (nested, PMAP_$FLUSH) | 0x70 | `pmap/update_seg_map.c` | 5 | 0xE135E2 A1, 0xE135E6 A3 |
+| FIND_VOLX 0xE6B0BC | 0x5C | `volx/find_volx.c` | 10 | |
+| module-local 0xE7630C | 0x46 | `ring/find_pkt_type.c` | 9 | |
+| module-local 0xE1C9FC | 0x66 | `kbd/state_lookup.c` | 12 | 0xE1CA04 D4, 0xE1CA20 D5, 0xE1CA32 D5, 0xE1CA4A D2 |
+| module-local 0xE54E10 | 0x52 | `dir/old_alloc_block.c` | 10 | |
+| ACL_$GET_RE_SIDS 0xE488B6 | 0x56 | `acl/get_re_sids.c` | 10 | 0xE488F0 A2, 0xE488F4 D1, 0xE488FC A1 |
+| MSG_$TEST_FOR_MESSAGE 0xE59FB2 | 0x7A | `msg/test_for_message.c` | 12 | 0xE59FFE D1 |
+| module-local 0xE3EF38 | 0x68 | `proc2/deliver_pending_internal.c` | 10 | 0xE3EF90 D3 |
+| module-local 0xE190BC | 0x6C | `win/wait_for_controller.c` | 11 | 0xE190D6, 0xE19106 D3; 0xE190DC A0 (the next value, `movea.l (4,A0),A0` at 0xE190E0, reuses it: against R2) |
+| TERM_$P2_CLEANUP 0xE751F0 | 0x60 | `term/p2_cleanup.c` | 12 | |
+| module-local 0xE65904 | 0x76 | `route/validate_port.c` | 11 | |
+| ACL_$INHERIT_SUBSYS 0xE49138 | 0x5E | `acl/inherit_subsys.c` | 10 | 0xE49166 D2, 0xE49174 D3, 0xE49186 A2 |
+| module-local 0xE0C6E2 | 0x7E | `mmap/internal.c` | 14 | 0xE0C714 D3, 0xE0C742 D2 |
+| XNS_IDP_$GET_STATS 0xE18FD6 | 0x2C | `xns/idp_misc.c` | 2 | 0xE18FF4 A1 |
+| PROC1_$SET_TYPE 0xE152E4 | 0x40 | `proc1/set_type.c` | 4 | |
+| MMAP_$ALLOC_CONTIG 0xE0D8F0 | 0x24 | `mmap/alloc_contig.c` | 2 | 0xE0D902 A1 |
+
+#### Register choice
+
+**R1. One register per value, the lowest-numbered one that does not
+conflict (Verified as a property of about 81% of values; the order in
+which values are given registers is Uncertain).**  The order is D0, D1,
+..., D7 and A0, ..., A4.  The register must not hold another value at any
+point of this value's live range (Chaitin interference: one is defined
+where the other is live).  There is no separate "scratch first" policy:
+D2 and A2 are simply the next registers in the order.  In 0xE17778 there
+is no call, yet `moveq #-2,D2` (0xE177A0) takes D2 because D0 and D1 hold
+parameters.
+- Parameters loaded at entry are ordinary values.  Their registers are
+  reused after their last use: D1 (`max_len`, last read 0xE177A2) gets
+  the zero-extended `offset` at 0xE177A6; D0 (last read 0xE177C8) gets
+  the word count at 0xE177D2; A0 (last read 0xE177D2) gets the source
+  pointer at 0xE177E0.
+- Rates of rule `colU` (R1 + R2 + R3), and of `colQU` (the same, with
+  values coloured in address order):
+
+  | Values | Data `colU` | Address `colU` | Data `colQU` | Address `colQU` |
+  |---|---|---|---|---|
+  | all, size 0x30–0x150 | 81.1% of 4978 | 81.5% of 5158 | 72.8% | 73.1% |
+  | live in more than one block | 93.2% of 2292 | 91.0% of 2253 | 77.1% | 76.5% |
+  | parameter loads | 95.1% of 698 | 83.2% of 1891 | 69.8% | 71.0% |
+  | whole image | 75.0% of 11517 | 76.5% of 11112 | 65.1% | 68.8% |
+
+- **The order is not settled.**  `colU` is order-free (see "What a hit
+  means"); colouring in address order loses 8–9 points.  The typical
+  loss: parameters loaded at entry and held across calls take D3/A3 or
+  higher while later temporaries take D2/A2 (module-local 0xE01C52,
+  `ast/lookup_with_hints.c`, 0xE01C5A..0xE01C66: A3, D5, D6, A4;
+  AST_$ASSOC 0xE0445C..0xE04464: D3, D4, A3).
+  Also PARITY_$CHK_IO 0xE0B180 (`(8)`→D1, R5) and PROC1_$TST_LOCK
+  0xE148DE (`sne D1` while D0 is free; the result is then copied to D0).
+  Other orders scored no better (by survey, data / address): reverse
+  address order 58.6% / 65.0%; shortest live range first 59.3% / 65.5%;
+  single-block values first 67.1% / 70.1%; longest first 71.9% / 72.8%.
+- Linear scans that look only at the definition point do worse: "lowest
+  free at the definition in address order" (`lo`) scores 60.1% / 57.0%;
+  "most recently freed" (`lifo`) 58.6% / 50.2%.  Unlike `colQU`, they
+  ignore later conflicts and calls inside the range.
+- **The misses go mostly one way.**  In 893 of the 939 data misses and
+  909 of the 955 address misses, the original took a *higher* register
+  than `colU`.  The original keeps some registers busy *longer* than the
+  value's liveness (R4).  Most of the 46 + 46 others are loads that
+  reuse their dying base register (R2) or call results.
+
+**R2. A value does not take a register read by an instruction that
+defines it while the other value dies there (Verified for copies and
+operator results as an improvement: R1 alone scores 78.2% / 78.0%,
+R1+R2 81.1% / 81.5%; it gains 386 values and loses 61).**  In other
+words, no copy coalescing:
+- 0xE177D0 `move.l D1,D3; ...; add.l (0x14,A5),D3`: D1's last use, but
+  the sum is not computed in D1.
+- 0xE177DA `movea.l D3,A1`: A0 is free, but the next A0 value is defined
+  from this one (`lea (2,A1),A0`, 0xE177E0).
+- PROC1_$SUSPENDP 0xE1489A A2: A1 is free, but A1 is defined from it
+  (`movea.l (A2,D2.w),A1`).
+- 12.2's "held value copied before arithmetic": BAT_$GET_BAT_STEP
+  0xE3BB68; 0xE46498.
+- **Not for loads through a dying register (Uncertain).**  Routines of
+  0x30–0x150 bytes, loads whose base or index register dies at the load:
+  `movea.l` into the same A register 35 times (0xE01BBC `movea.l
+  (A0),A0`; 0xE190E0 `movea.l (4,A0),A0`), into another one 144 times;
+  `move.w`/`move.l` into the index register 28 times (0xE176C4
+  `move.w (2,A0,D1.w),D1`), into another 41 times.  `lea (d,An),An` is
+  counted as an update (`adda`), not a new value: 337 such, against 378
+  `lea` into another register while the base dies.  When the compiler
+  reuses the base is not known.
+
+**R3. Calls (Verified).**
+- A value live across a call is in D2–D7/A2–A4.  1834 such values in
+  the survey; `colU` places 99.2% of them right (lowest non-conflicting
+  callee-saved register), `colQU` 80.2%.  That they are callee-saved is
+  built into the model (a call writes the scratch registers); the
+  evidence is that, in the whole image, no D1/A1 read is reached by a
+  non-M$ARITH call except on one path at 0xE47442 and 0xE47624.
+- No value lives in D0/D1/A0/A1 across a call, **except across M$ARITH
+  calls**, which the compiler treats as writing only D0 and A0.  Example:
+  A1 is read before `jsr M$OIU$WLW` (0xE3CB8E, call at 0xE3CB94) and
+  after it (0xE3CB9E).  In the 1588 analysed routines, D1 or A1 is live
+  across 31 of the 83 M$ARITH calls (42 register/call pairs).  This is
+  what M$ARITH does: every one of its twelve entry points writes only D0
+  and A0 (and the flags); those that use D1–D3 save them with `movem`
+  (`../source/domain_os/math/sau2/arith.s`; M$DIS$LLW also writes its
+  divisor argument slot).
+
+**R4. Registers are held longer than liveness (Uncertain; this is most
+of the remaining misses).**  The corpus misses fall into these groups:
+
+- **(a) Held to the end of the enclosing statement.**  A value whose
+  last use lies in the condition or in an arm of a structured statement
+  (`if`/`else if` chain, an `and then` condition, a `for`/`while` with
+  its body) keeps its register until the end of that statement:
+  - 0xE15830 (`rip/update_int.c`): the flag parameter in D1, tested at
+    0xE15846, is not reused anywhere in the `if`; D2 is used three times
+    (0xE1584A, 0xE15854, 0xE1585E), then D2 and D3.
+  - AST_$LOCATE_ASTE: `hint_index` in D0 (last read 0xE0707A); the
+    nested `if` inside the outer `if` uses D1 (0xE0708E, 0xE07098,
+    0xE070B8).
+  - AREA_$DELETE 0xE07C86, 0xE07CA0.
+  - 0xE0B1E2: the D1 temporary of the first `and then` term is not
+    reused by the second.
+  - 0xE0283C 0xE02852, 0xE0285A, 0xE0286A (the count stays in D0
+    through the loop).
+  - MMAP_$SET_WS_MAX 0xE0CAAE.
+  - MMAP_$GET_WS_INDEX 0xE0CA62/0xE0CA68: the status pointer A0 is held
+    through the `if`.
+  - FIM_$INSTALL 0xE0A9EA (`old_addr` in D1 is held through the `if` it
+    is tested in).
+  - 0xE01C10, 0xE0F2A4, 0xE12808.
+  - Inside one argument list: 0xE1359C (A0, A1, A3; section 12.1).
+  - Against it, registers *are* reused inside one statement:
+    `movea.l (8,A2),A0` twice in `p^.f := p^.f - n` (0xE03FEE,
+    0xE03FF8).  FIM_$ACKNOWLEDGE reuses A1 for each statement
+    (0xE0A98E, 0xE0A9A0, 0xE0A9AA).
+- **(b) By-address parameter slots read once take a register no earlier
+  slot load used** (12.2):
+  - IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2; XNS_IDP_$GET_STATS
+    0xE18FF4 A1; MMAP_$ALLOC_CONTIG 0xE0D902 A1; AST_$INVALIDATE_PAGE
+    0xE00F34/0xE00F4E A1, the same register again after the call;
+    0xE177CC A2.
+  - Against it: DIR_$ADD_MOUNT loads three slots into A0 (0xE534CA,
+    0xE534DC, 0xE53508; the first two feed `move.l (A0)+` block copies);
+    PROC2_$GET_PID 0xE40D06; 0xE19158.
+- **(c) A call in the statement.**  A value that does not live across a
+  call, but belongs to a statement that ends in one, gets a callee-saved
+  register:
+  - FIM_$ACKNOWLEDGE 0xE0A972 `asid*12` → D2; its last use is the `pea`
+    before the `jsr`.
+  - PROC1_$SET_ASID 0xE148FE D2.
+  - AST_$SET_TROUBLE 0xE071FC A2.
+  - Survey: 433 values of this kind (callee-saved register, no call
+    crossed, a call later in the block of the last use).  Against: 1365
+    values in scratch registers whose block also continues to a call.
+- **Mechanical proxies tested and refuted as general rules** (each makes
+  the original's own choices conflict elsewhere):
+  - free only after the next store or call (`colUS`): 66.5% / 69.0%;
+  - free only at the post-dominator of a conditional block (`colUC`):
+    52.4% / 55.1%;
+  - parameter values live from the entry (`colEU`): 80.9% / 70.6%;
+  - parameter values live from the start of their block (`colLU`):
+    81.1% / 80.6%.
+
+  The rule needs the source's statement structure.  `dpc` has it, so (a)
+  must be implemented and tested in `dpc` against the sites above.
+
+**R5. Function results (Uncertain).**
+- MST_$VA_TO_SEGNO loads the parameter it returns straight into D0
+  (0xE0DCE0), and the first parameter goes to D2 (0xE0DCD6), not D0/D1.
+- PARITY_$CHK_IO loads `(8)` into D1 and `(0xc)` into D0 (0xE0B180,
+  0xE0B18A; section 12.2).
+- The rule that ties a parameter or temporary to the result register is
+  not known.
+
+**R6. Not explained (Uncertain).**
+- 0xE177C4 `move.w #0x400,D3` and 0xE177D0 `move.l D1,D3`: D3 although
+  D2 is free under R1–R3.  The (a) rule does not help:
+  - at 0xE177C4 it would also hold D3 (the `0x400` of the condition),
+    giving D4;
+  - at 0xE177D0 nothing holds D2 any more.
+- FIM_$ACKNOWLEDGE 0xE0A9A0/0xE0A9AA, FIM_$INIT_ASID 0xE0AA5A and
+  FIM_$INSTALL 0xE0A9F0 load an array base into A1 while A0 is free.
+- Candidate explanations, none verified:
+  - **LIFO free list** (last freed first; ties go to the value allocated
+    later).  It gets 0xE177C4 (D2 and D3 die together at 0xE177B6, D3
+    was allocated later), 0xE177D0 (D3 freed last, 0xE177CA) and the
+    FIM_$ACKNOWLEDGE/FIM_$INIT_ASID A1s.  But it fails FIM_$INSTALL,
+    and over the survey it explains only 352 of 939 data misses and 216
+    of 955 address misses while breaking 450 / 529 hits (`lifoU`:
+    79.2% / 75.4%).
+  - 0xE177C4 only: the register of the `0x400` CSE (R8) is reused for
+    `0x400 - offset`, and the constant is reloaded into it.
+  - 0xE177D0 only: D2 belonged to the `for` variable `i`, which
+    strength reduction removed (ref p. 6-30: "the optimizer may eliminate
+    all assignments to i"), and `ord4(ptr) + offset` is a loop invariant
+    hoisted into the preheader while `i` is allocated (ref p. 6-29).
+
+#### Common subexpressions
+
+**R7. Operator results are reused across statements, across an `if` and
+its join, and past stores to other objects (Verified at the sites).**
+- 0xE177A6 `clr.l D1; move.w D0,D1`, the zero-extended `offset`, is
+  reused at 0xE177D0 after the `if` (0xE177A6..0xE177CA) and after the
+  stores through `actual_len`.
+- FIM_$ACKNOWLEDGE: `PROC1_$AS_ID * 12` (0xE0A972..0xE0A97E, D2) is used
+  at 0xE0A994 and again at 0xE0A9B0, past the stores at 0xE0A994 and
+  0xE0A9A6 (other static arrays).
+- Two-address arithmetic goes into the operand that is not reused:
+  0xE177B4 `add.l D1,D2` keeps D1 (the CSE).
+
+**R8. Plain variable reads are not kept across statements (Verified at
+the sites).**
+- PROC1_$AS_ID is re-read for each use: FIM_$ACKNOWLEDGE 0xE0A972,
+  0xE0A980, 0xE0A99A; FIM_$INSTALL 0xE0A9D0, 0xE0A9EA (the C comments
+  this).
+- Within one statement it varies:
+  - 0xE0283C reads `(2,A2)` once for the two compares of one condition
+    (0xE0285A..0xE02868), then again in the next statement (0xE0286C).
+  - FIM_$ACKNOWLEDGE reads PROC1_$AS_ID twice for its first statement
+    (0xE0A972 for ×12, 0xE0A980 for ×4).
+- Uplevel variables (through the static link) are re-read even within
+  one statement: 0xE03FEE/0xE03FF8; 0xE135DA/0xE135E2.
+- Uncertain against: AREA_$DELETE reads the flags word once
+  (0xE07C78) for the `while` test and for the next `if` (0xE07C80).
+- **Constants in registers** (Verified, rare).  In the whole image there
+  are only 11 `move #imm,Dn` followed within three instructions by
+  `cmp Dn,..`; `.TEXT` alone has 996 `cmpi.w` and 355 `cmpi.l`
+  (section 13).
+  - Five have the `x := min(x, c)` shape, where the constant is used
+    twice: `move #c,Dn; cmp Dn,Dx; b..; move Dn,x` at 0xE19ED0,
+    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6.
+  - Two are the same shape for `c - y`: `move.l #c,Dn; sub.l Dy,Dn`
+    (0xE0E964, 0xE637B6).
+  - Two are a constant assigned to a variable's register: 0xE6DAF2 in
+    one arm of an `if`; 0xE43228 after `cmpi.l`.
+  - 0xE60F52 (and 0xE60F4A) load the mask 16#FFFFF and AND memory into
+    it, constant first.  0xE177A0 `moveq #-2,D2; and.w D1,D2` has the
+    same order.
+  - 0xE177AE is the eleventh: `move.l #0x400,D3; ...; cmp.l D3,D2`.
+    - Its only other long use would be `0x400 - offset` at 0xE177C4,
+      done as `move.w #0x400,D3` in the same register.
+    - The word compares 0xE1779A and 0xE177BA use `cmpi.w`.
+    - Why this compare holds its constant in a register is Uncertain.
+- Multiplication by a constant becomes shifts and adds (ref p. 6-28;
+  Verified):
+  - ×12: 0xE0A972..0xE0A97E;
+  - ×20: AST_$LOCATE_ASTE 0xE0707A..0xE07082;
+  - ×36: MMAP_$SET_WS_MAX 0xE0CAAA..0xE0CAB2;
+  - ×48: 0xE07C52..0xE07C5C.
+
+  The product stays in the first register, and the partial product takes
+  another free one (D0 at 0xE0A97A, D2 at 0xE0707E, D3 at 0xE0CAAE).
+
+#### Instruction order (scheduling)
+
+**R9. Instructions are reordered inside a basic block (Verified that it
+happens).**
+- 0xE177A6..0xE177B8: both `clr.l` first, then both word moves, the
+  constant load between the second move and the `add` that uses it.
+- 0xE177CC..0xE177DE: three chains interleaved, `buffer` (A2), the
+  source pointer (D3 → A1) and the word count (D0).
+- FIM_$ACKNOWLEDGE 0xE0A980..0xE0A994: the two `movea.l #` bases between
+  the index load, its shift and the move.
+- MST_$VA_TO_SEGNO 0xE0DCD6..0xE0DCEA: the third parameter load
+  between the copy and the first shift, and `clr.l D3` between the two
+  shifts.
+- `movea.l #imm` or a pad between two parameter loads: PARITY_$CHK_IO
+  0xE0B184; module-local 0xE758C4 at 0xE758CC; PMAP_$PURGE_WS
+  0xE146C6.
+- The pad before the parameter load: AREA_$FREE_ASID 0xE07E8E.
+
+**R10. Barriers (Verified at the sites).**
+- Nothing moves across a call.
+- A call's pad is not hoisted above the previous statement's store
+  (0xE00C12/0xE00C16; 0xE0774C/0xE07750), although nothing in the
+  registers stops it.
+- Shift-and-add multiplications and `(An)+` block copies are never
+  interleaved with other code:
+  - ×12: 0xE0A972..0xE0A97E (an independent `movea.l #` was ready);
+  - 0xE190D2..0xE190DC;
+  - 0xE14A2E..0xE14A3A;
+  - 0xE04ADA..0xE04AE2.
+
+  They are probably expanded after scheduling (Uncertain).
+
+**R11. The ordering policy (Uncertain).**
+- In the survey (`sched --strict`), 367 of 2752 load→use adjacent pairs
+  and 881 of 4737 other def→use pairs could have been separated by an
+  independent instruction of the same block.  Many of these are in the
+  R10 units.  So there is no strict "never use the previous result
+  next" rule.
+- One candidate list rule reproduces the blocks 0xE177A6..0xE177B8 and
+  0xE177CC..0xE177DE exactly: top-down, take the first instruction in
+  generation order whose inputs are ready and that does not read a
+  register written by the instruction just placed; otherwise the first
+  ready one.
+  - For 0xE177CC it needs `movea.l (8,A6),A2` first in generation
+    order.  This is plausible if loop invariants are hoisted to the head
+    of the block before the loop (ref p. 6-29), but Uncertain.
+  - MST_$VA_TO_SEGNO needs the load of `(0x10,A6)` after the whole
+    shift chain in generation order.
+- A second candidate, alternating memory loads and other instructions,
+  fits PARITY_$CHK_IO, module-local 0xE758C4 and PMAP_$PURGE_WS, but
+  not AREA_$FREE_ASID.
+
+**R12. Registers are chosen before scheduling (Uncertain; supported).**
+The final order sometimes shows a register taken while a lower one is
+free.  It is free only because the scheduler later moved its last use
+earlier:
+- 0xE177CC: `buffer` is in A2 while A1 is free.  In generation order the
+  source pointer (A1) comes first.
+- MMAP_$GET_WS_INDEX: the destination slot (A2, 0xE0CA62) is loaded
+  before the source temporary (A1, 0xE0CA68).  With R4(a) holding A0,
+  this fits only if A1 was allocated first.
+
+#### What dpc must implement to reproduce 0xE17778, in order
+
+| # | Step | Image sites | Support |
+|---|---|---|---|
+| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1) |
+| 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; when a store kills a CSE is open |
+| 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8); bit operators need a survey |
+| 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
+| 5 | D3 at 0xE177C4 and 0xE177D0 | 0xE177C4, 0xE177D0 | Speculative (R6) |
+| 6 | The `for` loop as strength-reduced pointers (12.3 item 6) | 0xE177DC..0xE177F2 | Shape Verified; separate bead |
+| 7 | A block scheduler run after register choice, with the barriers of R10 | 0xE177A6..0xE177B8, 0xE177CC..0xE177DE | Exists: Verified; policy Uncertain (R11) |
+
+**Consistency with the units `dpc` already reproduces** (review,
+2026-10-12; `tests/conformance/manifest.txt`).  Every value in
+PROC1_$GET_LOCKS, TIME_$Q_INIT_QUEUE, TIME_$Q_FLUSH_QUEUE, module-local
+0xE00EB0, AST_$PAGE_ZERO, PROC1_$GET_LOADAV, PROC2_$GET_BOOT_FLAGS and
+NAME_CONVERT_ACL_STATUS is predicted by both `colU` and `colQU`.  Two
+points need care:
+
+- PROC1_$TST_LOCK 0xE148DE `sne D1`: D0 (the element, dead after the
+  `btst`) is free.  Address-order allocation of a fresh value gives D0.
+  `dpc` puts the `sne` in the tested operand's register
+  (`set_member_long`), which is what the image shows; keep that as an
+  in-place result, not a new allocation.  The order of 0xE148CE..
+  0xE148D8 (set address, element, set value) is the generation order
+  that `dpc` already uses.  With it, the candidate scheduler of R11
+  changes nothing.  Generating the set's load before the element and
+  allocating in that order would give the set D0 and the element D1,
+  which is wrong.
+- TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A: R1 gives D0, D1, A0, in either
+  order.  The model does *not* explain why the parameters are loaded at
+  entry, in parameter order, with the pointer (needed first) last.  Loaded
+  where used, they would be memory-to-memory moves with no register at
+  all.  The entry-load rule of 12.2 is still needed; R1–R3 replace only
+  the pinning.
+
+What must stay green for step 1: `make test` (the `regs.rs` unit tests
+and the golden tests, in particular `tests/golden/stores/entry_loads`,
+`control/*`, `calls/*`, `data/through_worker`) and `make conform` (all
+units of the manifest, the handasm fixtures included).
 
 ---
 
