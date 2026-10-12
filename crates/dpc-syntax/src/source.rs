@@ -2,6 +2,7 @@
 //! so diagnostics can point at the source (CLAUDE.md 4.1).
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Index of a file in a [`SourceMap`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,7 +34,9 @@ pub struct LineCol {
 #[derive(Debug)]
 pub struct SourceFile {
     pub path: PathBuf,
-    pub text: String,
+    /// The file's text.  Shared so a lexer can hold it while the
+    /// [`SourceMap`] grows (the preprocessor loads `%include`s mid-lex).
+    pub text: Rc<str>,
     /// Byte offset of the start of each line.
     line_starts: Vec<u32>,
 }
@@ -49,7 +52,7 @@ impl SourceFile {
         );
         SourceFile {
             path,
-            text,
+            text: text.into(),
             line_starts,
         }
     }
@@ -89,6 +92,17 @@ impl SourceMap {
 
     pub fn file(&self, id: FileId) -> &SourceFile {
         &self.files[id.0 as usize]
+    }
+
+    /// The source text a span covers (e.g. an identifier's original
+    /// spelling).
+    pub fn span_text(&self, span: Span) -> &str {
+        &self.file(span.file).text[span.lo as usize..span.hi as usize]
+    }
+
+    /// 1-based line of a span's start.
+    pub fn line_of(&self, span: Span) -> u32 {
+        self.file(span.file).line_col(span.lo).line
     }
 }
 

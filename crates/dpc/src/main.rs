@@ -50,8 +50,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 /// Run the pipeline.  Diagnostics are returned for the caller to render
-/// against `sm`.
-fn compile(args: &Args, sm: &mut SourceMap) -> Result<(), Vec<Diagnostic>> {
+/// against `sm`; warnings from a successful run go into `warnings`.
+fn compile(
+    args: &Args,
+    sm: &mut SourceMap,
+    warnings: &mut Vec<Diagnostic>,
+) -> Result<(), Vec<Diagnostic>> {
     let file = sm.load(&args.input).map_err(|e| {
         vec![Diagnostic::error_nopos(format!(
             "cannot read {}: {e}",
@@ -60,9 +64,14 @@ fn compile(args: &Args, sm: &mut SourceMap) -> Result<(), Vec<Diagnostic>> {
     })?;
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
+        ..Default::default()
     };
-    let text = preprocess::preprocess(sm, file, &opts)?;
-    let unit = dpc_syntax::parser::parse(file, &text)?;
+    let pp = preprocess::preprocess(sm, file, &opts);
+    if pp.has_errors() {
+        return Err(pp.diagnostics);
+    }
+    warnings.extend(pp.diagnostics);
+    let unit = dpc_syntax::parser::parse(&pp.tokens)?;
     let program = dpc_sema::analyze(&unit)?;
     let module = dpc_ir::lower(&program);
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string());
@@ -100,7 +109,12 @@ fn main() -> ExitCode {
         }
     };
     let mut sm = SourceMap::new();
-    match compile(&args, &mut sm) {
+    let mut warnings = Vec::new();
+    let result = compile(&args, &mut sm, &mut warnings);
+    for d in &warnings {
+        eprintln!("{}", d.render(&sm, PROG));
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(diags) => {
             for d in &diags {

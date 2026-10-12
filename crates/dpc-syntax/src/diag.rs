@@ -38,6 +38,14 @@ impl Diagnostic {
         }
     }
 
+    pub fn warning(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            severity: Severity::Warning,
+            span: Some(span),
+            message: message.into(),
+        }
+    }
+
     /// An error with no source location (e.g. a file that cannot be read).
     pub fn error_nopos(message: impl Into<String>) -> Self {
         Diagnostic {

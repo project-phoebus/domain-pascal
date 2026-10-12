@@ -2,8 +2,10 @@
 
 use crate::ast::CompilationUnit;
 use crate::diag::Diagnostic;
-use crate::source::FileId;
+use crate::lexer::Token;
 
-pub fn parse(_file: FileId, _text: &str) -> Result<CompilationUnit, Vec<Diagnostic>> {
+/// Parse the preprocessor's output ([`crate::preprocess::Output::tokens`],
+/// which ends with `Eof`).
+pub fn parse(_tokens: &[Token]) -> Result<CompilationUnit, Vec<Diagnostic>> {
     Ok(CompilationUnit::default())
 }

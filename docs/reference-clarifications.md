@@ -37,3 +37,30 @@ Check the PDF before you rely on text from these pages.
 ## Clarifications
 
 (none yet)
+
+## Open questions (awaiting the owner; tracked in domain-pascal-vui)
+
+Conservative choices are implemented and marked `TODO(ref-question)` in
+`crates/dpc-syntax/src/`.
+
+1. **4.7, p. 4-45.** "Unlike the other compiler directives, conditional
+   directives cannot be used as comments."  Is `{%if ...}` an error or an
+   ordinary comment?  *Current: error.*
+2. **4.7, p. 4-50, `%var` / `%enable`.** "`%VAR code.old code.new`": the
+   reference never says how the name list ends.  `module` is not reserved,
+   so `%var color` followed by `module m;` is ambiguous.  *Current: names
+   on the directive's own line, then an optional `;`.*
+3. **4.7, p. 4-46, predicates.** "Optional Boolean keywords not, and, or
+   or": no precedence is given.  *Current: Table 4-3 order, not > and > or.*
+4. **2.1.2, p. 2-2 (PDF p. 35).** The integer example uses
+   `/* default (base 10) */` comments, but 2.1.4 lists only `{ }`,
+   `(* *)` and `" "`.  Is `/* */` a comment form?  *Current: rejected,
+   per 2.1.4.*
+
+## Reference errata noticed (no ruling needed)
+
+- **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and
+  `%pop_alignment`.  The prose on p. 4-58 is followed: push saves, pop
+  restores.
+- **pp. 4-50/4-51**: the OCR of the `%warning` example is garbled.
+  `%warning` takes a plain `'string'`, as Table 4-11 shows.
