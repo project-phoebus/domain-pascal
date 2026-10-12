@@ -13,7 +13,11 @@ use dpc_sema::{
 use dpc_syntax::ast::BinOp;
 use dpc_syntax::{Diagnostic, Span};
 
-use crate::{Addr, Expr, Function, Module, ResultClass, ResultSpec, Stmt, StmtKind, Width};
+use dpc_sema::types::{TypeId, TypeKind, TypeTable};
+
+use crate::{
+    Addr, Expr, Function, Module, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, Width,
+};
 
 type Res<T> = Result<T, Diagnostic>;
 
@@ -150,7 +154,13 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
     let size = p.types.size(res.ty);
     let width = Width::of_size(size)
         .ok_or_else(|| unsupported(r.span, format!("a {size}-byte function result is")))?;
-    Ok(ResultSpec { class, width })
+    Ok(ResultSpec {
+        class,
+        ty: Scalar {
+            width,
+            sign: sign_of(&p.types, res.ty),
+        },
+    })
 }
 
 /// The statements of `r`'s body.
@@ -222,14 +232,14 @@ fn result_assignment(
     }
     let res = result.expect("lower_routine skips the body when the result type failed");
     let vsize = p.types.size(value.ty);
-    if vsize != res.width.bytes() {
+    if vsize != res.ty.bytes() {
         // Implicit integer widening (integer16 -> integer32) is not
         // catalogued yet.
         return Err(unsupported(
             value.span,
             format!(
                 "assigning a {vsize}-byte value to a {}-byte function result is",
-                res.width.bytes()
+                res.ty.bytes()
             ),
         ));
     }
@@ -247,13 +257,13 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             .ok_or_else(|| unsupported(e.span, "this kind of constant is"))?;
         return Ok(Expr::Const {
             value: ord,
-            width: width_of(p, e)?,
+            ty: scalar_of(p, e)?,
         });
     }
     match &e.kind {
         ExprKind::Var { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => Ok(Expr::Load {
             addr: addr_of(p, e)?,
-            width: width_of(p, e)?,
+            ty: scalar_of(p, e)?,
         }),
         ExprKind::Binary {
             op: BinOp::In,
@@ -281,10 +291,50 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     }
 }
 
-/// The scalar width of `e`'s type.
-fn width_of(p: &Program, e: &SExpr) -> Res<Width> {
+/// The IR scalar type of `e`'s type.
+fn scalar_of(p: &Program, e: &SExpr) -> Res<Scalar> {
     let size = p.types.size(e.ty);
-    Width::of_size(size).ok_or_else(|| unsupported(e.span, format!("a {size}-byte value is")))
+    let width = Width::of_size(size)
+        .ok_or_else(|| unsupported(e.span, format!("a {size}-byte value is")))?;
+    Ok(Scalar {
+        width,
+        sign: sign_of(&p.types, e.ty),
+    })
+}
+
+/// Whether values of type `ty` are read as signed or unsigned numbers.
+///
+/// - `integer`/`integer16` and `integer32`: signed (ref 3.2.1, p. 3-4).
+/// - A subrange stored in 2 bytes although its host is `integer32`, i.e.
+///   `lo >= 0` and `hi` in 32768..=65535 (`dpc-sema` `types.rs`, after
+///   ref 5.3.4.1 p. 5-13 and Table 7-2 p. 7-30, "unsigned short"):
+///   unsigned.  Image: LOG_$READ's worker 0xE17778 zero-extends such
+///   words (`clr.l D1; move.w D0,D1` at 0xE177A6..0xE177AA) and compares
+///   them unsigned (`cmpi.w #0x400,D1; bcc` at 0xE1779A; `bls` at
+///   0xE177BA).  Its C (`log/read_internal.c`) has `uint16_t`; the
+///   Pascal type is our inference.
+/// - Any other subrange: its host's sign.  **Uncertain:** whether the
+///   original treated a non-negative `integer16` subrange (`0..100`) as
+///   unsigned in compares; not observed yet.
+/// - `char`: unsigned (ordinals 0..255, ref 3.6.4 p. 3-13).
+/// - `boolean`: signed ([`Scalar::BOOLEAN`]).
+/// - Enumerations: unsigned (ordinals 0..n-1, ref 3.7.1 p. 3-13).
+///   **Uncertain:** enumeration compares have not been catalogued.
+/// - Pointers, sets and everything else (bit patterns): unsigned.
+pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
+    match types.kind(ty) {
+        TypeKind::Integer16 | TypeKind::Integer32 => Sign::Signed,
+        TypeKind::Boolean => Scalar::BOOLEAN.sign,
+        TypeKind::Subrange { base, .. } => {
+            let widened_host = matches!(types.kind(*base), TypeKind::Integer32);
+            if widened_host && types.size(ty) < types.size(*base) {
+                Sign::Unsigned
+            } else {
+                sign_of(types, *base)
+            }
+        }
+        _ => Sign::Unsigned,
+    }
 }
 
 /// The address of designator `e`.
@@ -328,7 +378,7 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
                     Ok(Addr::Indirect {
                         base: Box::new(Expr::Load {
                             addr: Addr::Frame(prm.slot_offset),
-                            width,
+                            ty: Scalar::unsigned(width),
                         }),
                         offset: 0,
                     })

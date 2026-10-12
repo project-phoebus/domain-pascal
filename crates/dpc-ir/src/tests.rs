@@ -88,7 +88,7 @@ end;
         f.result,
         Some(ResultSpec {
             class: ResultClass::Data,
-            width: Width::Byte
+            ty: Scalar::BOOLEAN
         })
     );
     assert_eq!(f.body.len(), 1);
@@ -98,7 +98,7 @@ end;
         Expr::SetMember {
             elem: Box::new(Expr::Load {
                 addr: Addr::Frame(8),
-                width: Width::Word
+                ty: Scalar::signed(Width::Word)
             }),
             set: Box::new(Expr::Load {
                 addr: Addr::Indirect {
@@ -107,11 +107,11 @@ end;
                             name: "PROC1_$CURRENT_PCB".into(),
                             offset: 0
                         },
-                        width: Width::Long
+                        ty: Scalar::POINTER
                     }),
                     offset: 0x40
                 },
-                width: Width::Long
+                ty: Scalar::unsigned(Width::Long)
             }),
             set_width: Width::Long,
         }
@@ -136,11 +136,11 @@ end;
             addr: Addr::Indirect {
                 base: Box::new(Expr::Load {
                     addr: Addr::Frame(8),
-                    width: Width::Long
+                    ty: Scalar::POINTER
                 }),
                 offset: 0
             },
-            width: Width::Long
+            ty: Scalar::signed(Width::Long)
         }
     );
 }
@@ -153,7 +153,7 @@ fn constants_lower() {
         *e,
         Expr::Const {
             value: 7,
-            width: Width::Word
+            ty: Scalar::signed(Width::Word)
         }
     );
 }
@@ -248,5 +248,131 @@ end;
     assert_eq!(
         e,
         vec!["t.pas:3:1: error: pointer (address-register) results are not supported yet"]
+    );
+}
+
+/// The first `SetResult` value of the module's only function.
+fn result_value(src: &str) -> Expr {
+    let m = lower_src(src).unwrap();
+    let StmtKind::SetResult(e) = &m.functions[0].body[0].kind;
+    e.clone()
+}
+
+/// codegen-patterns 5 / `lower.rs` `sign_of`: the IR type of a value
+/// parameter of each kind of source type, read by value (val_param).
+#[test]
+fn signedness_from_source_types() {
+    let cases: &[(&str, Scalar)] = &[
+        ("integer", Scalar::signed(Width::Word)),
+        ("integer16", Scalar::signed(Width::Word)),
+        ("integer32", Scalar::signed(Width::Long)),
+        // 2-byte storage with an integer32 host: unsigned.
+        ("0..65535", Scalar::unsigned(Width::Word)),
+        ("0..40000", Scalar::unsigned(Width::Word)),
+        // Fits integer16: the host's sign.
+        ("0..100", Scalar::signed(Width::Word)),
+        ("-5..5", Scalar::signed(Width::Word)),
+        // Needs 32 bits: integer32 host, 4 bytes, signed.
+        ("0..65536", Scalar::signed(Width::Long)),
+        ("boolean", Scalar::BOOLEAN),
+        ("char", Scalar::unsigned(Width::Byte)),
+        ("color", Scalar::unsigned(Width::Word)),
+        // Pointers: `signedness_through_designators` (pointer results are
+        // not lowered yet).
+    ];
+    for (ty, want) in cases {
+        let src = format!(
+            "module m;
+type color = (red, green, blue); ip = ^integer; t = {ty};
+function f(x: t): t; options(val_param);
+begin
+  f := x;
+end;
+"
+        );
+        let m = lower_src(&src).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+        let f = &m.functions[0];
+        assert_eq!(f.result.map(|r| r.ty), Some(*want), "{ty} result");
+        let StmtKind::SetResult(e) = &f.body[0].kind;
+        assert_eq!(e.ty(), *want, "{ty} value");
+    }
+}
+
+/// Signedness follows the type through fields, pointers and by-address
+/// parameters; the pointer itself is unsigned.
+#[test]
+fn signedness_through_designators() {
+    let e = result_value(
+        "module m;
+type r = record a: integer32; w: 0..65535; end; rp = ^r;
+function f(var p: rp): 0..65535;
+begin
+  f := p^.w;
+end;
+",
+    );
+    let Expr::Load { addr, ty } = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(ty, Scalar::unsigned(Width::Word));
+    let Addr::Indirect { base, offset: 4 } = addr else {
+        panic!("{addr:?}")
+    };
+    // p^: the pointer read through the by-address slot.
+    let Expr::Load { addr, ty } = *base else {
+        panic!()
+    };
+    assert_eq!(ty, Scalar::POINTER);
+    let Addr::Indirect { base, offset: 0 } = addr else {
+        panic!("{addr:?}")
+    };
+    assert_eq!(
+        *base,
+        Expr::Load {
+            addr: Addr::Frame(8),
+            ty: Scalar::POINTER
+        }
+    );
+}
+
+#[test]
+fn constant_signedness_follows_its_type() {
+    let e = result_value("module m;\nfunction f: char;\nbegin\n  f := 'a';\nend;\n");
+    assert_eq!(
+        e,
+        Expr::Const {
+            value: 97,
+            ty: Scalar::unsigned(Width::Byte)
+        }
+    );
+    let e = result_value("module m;\nfunction f: integer32;\nbegin\n  f := -100000;\nend;\n");
+    assert_eq!(
+        e,
+        Expr::Const {
+            value: -100000,
+            ty: Scalar::signed(Width::Long)
+        }
+    );
+}
+
+/// A `var` (by-address) parameter of a `0..65535` type: the slot holds a
+/// pointer (unsigned), the value read through it is unsigned too.
+#[test]
+fn signedness_of_a_by_address_unsigned_word() {
+    let e = result_value(
+        "module m;\ntype w = 0..65535;\nfunction f(var x: w): w;\nbegin\n  f := x;\nend;\n",
+    );
+    assert_eq!(
+        e,
+        Expr::Load {
+            addr: Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Frame(8),
+                    ty: Scalar::POINTER
+                }),
+                offset: 0
+            },
+            ty: Scalar::unsigned(Width::Word)
+        }
     );
 }

@@ -8,7 +8,9 @@
 //!   `dpc-sema`, which asked the target where argument 1 lives);
 //! - objects of other units are symbols ([`Addr::Symbol`]);
 //! - data reached through a pointer is [`Addr::Indirect`];
-//! - every load has an explicit [`Width`].
+//! - every value has an explicit [`Scalar`] type: a [`Width`] and a
+//!   [`Sign`], so the selector can choose sign- or zero-extension, signed
+//!   or unsigned compares and branches, `divs`/`divu`, `muls`/`mulu`.
 //!
 //! The tree keeps the source's operand structure, so the selector can
 //! reproduce the original compiler's evaluation order pattern by pattern
@@ -64,13 +66,13 @@ pub struct Function {
     pub span: Span,
 }
 
-/// Where a function leaves its result: a register class and the width of
+/// Where a function leaves its result: a register class and the type of
 /// the value.  The target maps the class to a register (m68k: Data = D0,
 /// Address = A0; codegen-patterns 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultSpec {
     pub class: ResultClass,
-    pub width: Width,
+    pub ty: Scalar,
 }
 
 /// The result register class (mirrors `dpc_sema::conv::ResultReg`).
@@ -112,6 +114,59 @@ impl Width {
     }
 }
 
+/// Whether a scalar's bits are read as two's complement or as an unsigned
+/// number.  The rule from source types is in `lower.rs` (`sign_of`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sign {
+    Signed,
+    Unsigned,
+}
+
+/// The IR type of a scalar value: how many bytes, and how to read them.
+///
+/// The width alone decides memory accesses and register moves; the sign
+/// matters only to operations that widen, compare, divide, multiply or
+/// shift right (codegen-patterns 8; e.g. 0xE177A6..0xE177B8 `clr.l D1;
+/// move.w D0,D1` zero-extends a `0..65535` word, `cmpi.w #0x400,D1; bcc`
+/// compares it unsigned).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scalar {
+    pub width: Width,
+    pub sign: Sign,
+}
+
+impl Scalar {
+    pub const fn signed(width: Width) -> Scalar {
+        Scalar {
+            width,
+            sign: Sign::Signed,
+        }
+    }
+
+    pub const fn unsigned(width: Width) -> Scalar {
+        Scalar {
+            width,
+            sign: Sign::Unsigned,
+        }
+    }
+
+    /// A pointer value (4 bytes, unsigned).
+    pub const POINTER: Scalar = Scalar::unsigned(Width::Long);
+
+    /// A Pascal boolean (1 byte, 0xFF true, 0 false; ref 3.5.3 p. 3-11).
+    /// Signed: the image tests booleans with `tst.b` and `bmi`/`bpl`
+    /// (codegen-patterns 5, 7).
+    pub const BOOLEAN: Scalar = Scalar::signed(Width::Byte);
+
+    pub fn is_signed(self) -> bool {
+        self.sign == Sign::Signed
+    }
+
+    pub fn bytes(self) -> u32 {
+        self.width.bytes()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stmt {
     pub kind: StmtKind,
@@ -129,10 +184,10 @@ pub enum StmtKind {
 /// A value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    /// A constant of the given width.
-    Const { value: i64, width: Width },
-    /// The `width`-byte object at `addr`.
-    Load { addr: Addr, width: Width },
+    /// A constant of the given type.
+    Const { value: i64, ty: Scalar },
+    /// The scalar object at `addr`, read as `ty`.
+    Load { addr: Addr, ty: Scalar },
     /// Membership of element `elem` in the set value `set` (ref "In",
     /// p. 4-102; layout ref 3.9.3): true when bit `elem` of `set`, read as
     /// one big-endian integer, is 1.  `set` is a register-sized set value
@@ -142,6 +197,16 @@ pub enum Expr {
         set: Box<Expr>,
         set_width: Width,
     },
+}
+
+impl Expr {
+    /// The IR type of the value.
+    pub fn ty(&self) -> Scalar {
+        match self {
+            Expr::Const { ty, .. } | Expr::Load { ty, .. } => *ty,
+            Expr::SetMember { .. } => Scalar::BOOLEAN,
+        }
+    }
 }
 
 /// An address.

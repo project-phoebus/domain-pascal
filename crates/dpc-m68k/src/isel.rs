@@ -1,21 +1,28 @@
 //! Instruction selection: IR → m68k instructions (CLAUDE.md 4.4).
 //!
-//! Pattern-directed, one IR node at a time, with a fixed register policy:
+//! Two phases per routine:
 //!
-//! - only the scratch registers D0, D1, A0, A1 are allocated
-//!   (codegen-patterns 2), each pool in ascending order, so no
-//!   callee-saved register is ever used and no `movem` is emitted;
-//! - an expression that needs more registers than that is reported as not
-//!   supported yet.
+//! 1. **Body.**  Pattern-directed, one IR node at a time, over physical
+//!    registers handed out by [`Regs`] (`regs.rs`).  The default policy is
+//!    scratch only, D0, D1 / A0, A1 in that order (codegen-patterns 2,
+//!    12); an expression that needs more is reported as not supported
+//!    yet.  A pattern that must keep a value across a call asks for a
+//!    callee-saved register with [`Selector::hold`]; one that loads A5
+//!    reports it with [`Regs::clobber`].
+//! 2. **Frame.**  The callee-saved registers the body wrote decide the
+//!    save set; [`crate::frame::Frame`] then gives the prologue (`link.w`,
+//!    the save) and the epilogue (the restore from the frame, `unlk`,
+//!    `rts`) around the body.
 //!
 //! Each pattern cites the image address(es) it reproduces.  Patterns the
 //! image has not shown are rejected, not guessed.
 
-use dpc_ir::{Addr, Expr, Function, ResultClass, StmtKind, Width};
+use dpc_ir::{Addr, Expr, Function, ResultClass, Scalar, StmtKind, Width};
 use dpc_syntax::{Diagnostic, Span};
 
-use crate::insn::{Cond, Ea, Insn, Reg, Size};
-use crate::M68k;
+use crate::frame::{frame_for, FP, SP};
+use crate::insn::{Cond, Ea, Insn, Reg, RegSet, Size};
+use crate::regs::{RegClass, Regs, DATA_BASE};
 
 type Res<T> = Result<T, Diagnostic>;
 
@@ -31,93 +38,114 @@ fn size_of(w: Width) -> Size {
     }
 }
 
-/// The frame pointer, A6.
-const FP: u8 = 6;
-/// Scratch data and address registers, in allocation order.
-const SCRATCH_D: [u8; 2] = [0, 1];
-const SCRATCH_A: [u8; 2] = [0, 1];
-
 /// Select the instructions of one routine, prologue to `rts`.
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
+    let body = select_body(f)?;
+    wrap(f, body)
+}
+
+/// Phase 2: the frame of `f` around `body`.
+pub fn wrap(f: &Function, body: Body) -> Result<Vec<Insn>, Diagnostic> {
+    let frame = frame_for(f.frame_size, body.saves, f.span)?;
+    let mut out = frame.prologue();
+    out.extend(body.insns);
+    out.extend(frame.epilogue());
+    Ok(out)
+}
+
+/// Phase 1's result: the body's instructions and the callee-saved
+/// registers they write.
+#[derive(Debug)]
+pub struct Body {
+    pub insns: Vec<Insn>,
+    pub saves: RegSet,
+}
+
+/// Phase 1: the body of `f`, without prologue and epilogue.
+pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     let mut s = Selector {
         out: Vec::new(),
-        d_busy: [false; 2],
-        a_busy: [false; 2],
+        regs: Regs::new(),
         span: f.span,
     };
-    // Prologue (codegen-patterns 2): `link.w A6,#-n`; no `movem`, since
-    // only scratch registers are used (TIME_$Q_INIT_QUEUE 0xE16C5E,
-    // PROC1_$TST_LOCK 0xE148CA).
-    let link = M68k::link_size(f.frame_size);
-    if link > 0x8000 {
-        return Err(unsupported(
-            f.span,
-            format!("a {link}-byte frame (beyond `link.w`) is"),
-        ));
-    }
-    s.out.push(Insn::Link {
-        disp: -(link as i32),
-    });
     for st in &f.body {
         s.span = st.span;
         match &st.kind {
             StmtKind::SetResult(e) => s.set_result(f, e)?,
         }
     }
-    // Epilogue: `unlk A6; rts` (0xE148E2, 0xE16C7C).
-    s.out.push(Insn::Unlk);
-    s.out.push(Insn::Rts);
-    Ok(s.out)
+    Ok(Body {
+        insns: s.out,
+        saves: s.regs.to_save(),
+    })
 }
 
-struct Selector {
+/// Selection state of one routine body.
+pub struct Selector {
     out: Vec<Insn>,
-    d_busy: [bool; 2],
-    a_busy: [bool; 2],
+    regs: Regs,
     /// The statement being selected, for diagnostics.
     span: Span,
 }
 
 impl Selector {
-    fn alloc(busy: &mut [bool; 2], pool: &[u8; 2], span: Span) -> Res<u8> {
-        for (i, b) in busy.iter_mut().enumerate() {
-            if !*b {
-                *b = true;
-                return Ok(pool[i]);
-            }
-        }
-        Err(unsupported(
-            span,
-            "an expression needing more than two scratch registers of a kind is",
-        ))
+    fn alloc(&mut self, class: RegClass) -> Res<Reg> {
+        self.regs.alloc_scratch(class).ok_or_else(|| {
+            unsupported(
+                self.span,
+                "an expression needing more than two scratch registers of a kind is",
+            )
+        })
     }
 
     fn alloc_d(&mut self) -> Res<u8> {
-        Self::alloc(&mut self.d_busy, &SCRATCH_D, self.span)
+        match self.alloc(RegClass::Data)? {
+            Reg::D(n) => Ok(n),
+            Reg::A(_) => unreachable!(),
+        }
     }
 
     fn alloc_a(&mut self) -> Res<u8> {
-        Self::alloc(&mut self.a_busy, &SCRATCH_A, self.span)
+        match self.alloc(RegClass::Addr)? {
+            Reg::A(n) => Ok(n),
+            Reg::D(_) => unreachable!(),
+        }
+    }
+
+    /// A callee-saved register of `class` for a value that must survive
+    /// a call (`regs.rs`, [`Regs::alloc_held`]); it joins the prologue's
+    /// save set.  Free it with [`Self::free`].
+    pub fn hold(&mut self, class: RegClass) -> Res<Reg> {
+        self.regs.alloc_held(class).ok_or_else(|| {
+            unsupported(
+                self.span,
+                "holding more values than there are callee-saved registers is",
+            )
+        })
+    }
+
+    /// Release a register from [`Self::hold`] or the scratch pools.
+    pub fn free(&mut self, r: Reg) {
+        self.regs.free(r);
     }
 
     fn free_d(&mut self, r: u8) {
-        let i = SCRATCH_D.iter().position(|&x| x == r).expect("scratch D");
-        debug_assert!(self.d_busy[i]);
-        self.d_busy[i] = false;
+        self.regs.free(Reg::D(r));
     }
 
     fn free_a(&mut self, r: u8) {
-        let i = SCRATCH_A.iter().position(|&x| x == r).expect("scratch A");
-        debug_assert!(self.a_busy[i]);
-        self.a_busy[i] = false;
+        self.regs.free(Reg::A(r));
     }
 
-    /// Release the scratch address register an effective address uses.
+    /// Release the register an effective address uses.  A5, A6 and A7
+    /// are bases the allocator never hands out (`regs.rs`), so they are
+    /// not released.
     fn free_ea(&mut self, ea: &Ea) {
         match ea {
-            Ea::Ind(a) | Ea::Disp(_, a) if *a != FP => self.free_a(*a),
-            Ea::Reg(Reg::A(a)) => self.free_a(*a),
-            Ea::Reg(Reg::D(d)) => self.free_d(*d),
+            Ea::Ind(a) | Ea::Disp(_, a) if Reg::A(*a) != DATA_BASE && *a != FP && *a != SP => {
+                self.free_a(*a)
+            }
+            Ea::Reg(r) => self.regs.free(*r),
             _ => {}
         }
     }
@@ -136,7 +164,7 @@ impl Selector {
             // The value is moved at the result's width; the upper bytes
             // of D0 are left as they are (codegen-patterns 3: 0xE148E0).
             self.out.push(Insn::Move {
-                size: size_of(res.width),
+                size: size_of(res.ty.width),
                 src: Ea::Reg(Reg::D(r)),
                 dst: Ea::Reg(Reg::D(0)),
             });
@@ -151,12 +179,12 @@ impl Selector {
             // Load a scalar: `move.<w> <ea>,Dn` (0xE148D4 `move.w
             // (8,A6),D0`; 0xE148D8 `move.l (0x40,A0),D1`).  The address is
             // formed first, its register released, then Dn allocated.
-            Expr::Load { addr, width } => {
+            Expr::Load { addr, ty } => {
                 let ea = self.ea_of(addr)?;
                 self.free_ea(&ea);
                 let r = self.alloc_d()?;
                 self.out.push(Insn::Move {
-                    size: size_of(*width),
+                    size: size_of(ty.width),
                     src: ea,
                     dst: Ea::Reg(Reg::D(r)),
                 });
@@ -192,7 +220,9 @@ impl Selector {
     fn set_member_long(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
         let Expr::Load {
             addr,
-            width: Width::Long,
+            ty: Scalar {
+                width: Width::Long, ..
+            },
         } = set
         else {
             return Err(unsupported(
@@ -229,7 +259,9 @@ impl Selector {
             // (a by-address parameter).
             Expr::Load {
                 addr,
-                width: Width::Long,
+                ty: Scalar {
+                    width: Width::Long, ..
+                },
             } => {
                 let ea = self.ea_of(addr)?;
                 // TODO(codegen): reusing the base register for a pointer
@@ -303,8 +335,8 @@ mod tests {
         select(f).unwrap().iter().map(|i| i.to_string()).collect()
     }
 
-    fn load(addr: Addr, width: Width) -> Expr {
-        Expr::Load { addr, width }
+    fn load(addr: Addr, ty: Scalar) -> Expr {
+        Expr::Load { addr, ty }
     }
 
     #[test]
@@ -332,16 +364,16 @@ mod tests {
                 name: "PROC1_$CURRENT_PCB".into(),
                 offset: 0,
             },
-            Width::Long,
+            Scalar::POINTER,
         );
         let e = Expr::SetMember {
-            elem: Box::new(load(Addr::Frame(8), Width::Word)),
+            elem: Box::new(load(Addr::Frame(8), Scalar::signed(Width::Word))),
             set: Box::new(load(
                 Addr::Indirect {
                     base: Box::new(pcb),
                     offset: 0x40,
                 },
-                Width::Long,
+                Scalar::unsigned(Width::Long),
             )),
             set_width: Width::Long,
         };
@@ -349,7 +381,7 @@ mod tests {
             1,
             Some(ResultSpec {
                 class: ResultClass::Data,
-                width: Width::Byte,
+                ty: Scalar::BOOLEAN,
             }),
             vec![StmtKind::SetResult(e)],
         );
@@ -375,14 +407,14 @@ mod tests {
             0,
             Some(ResultSpec {
                 class: ResultClass::Data,
-                width: Width::Long,
+                ty: Scalar::signed(Width::Long),
             }),
             vec![StmtKind::SetResult(load(
                 Addr::Indirect {
-                    base: Box::new(load(Addr::Frame(8), Width::Long)),
+                    base: Box::new(load(Addr::Frame(8), Scalar::POINTER)),
                     offset: 0,
                 },
-                Width::Long,
+                Scalar::signed(Width::Long),
             ))],
         );
         assert_eq!(
@@ -403,11 +435,11 @@ mod tests {
             0,
             Some(ResultSpec {
                 class: ResultClass::Data,
-                width: Width::Word,
+                ty: Scalar::signed(Width::Word),
             }),
             vec![StmtKind::SetResult(Expr::Const {
                 value: 0,
-                width: Width::Word,
+                ty: Scalar::signed(Width::Word),
             })],
         );
         let d = select(&f).unwrap_err();
@@ -418,5 +450,89 @@ mod tests {
     fn oversized_frame_is_rejected() {
         let d = select(&func(0x8001, None, vec![])).unwrap_err();
         assert!(d.message.ends_with("not supported yet"), "{}", d.message);
+    }
+
+    /// Phase 2 puts the save the body needs between `link` and the body,
+    /// and the restore from the frame before `unlk`.
+    #[test]
+    fn two_phase_frame_around_a_body_with_held_registers() {
+        let f = func(16, None, vec![]);
+        // A synthetic body: a value held across a (pretend) call.
+        let mut s = Selector {
+            out: Vec::new(),
+            regs: Regs::new(),
+            span: span(),
+        };
+        let d = s.hold(RegClass::Data).unwrap();
+        let a = s.hold(RegClass::Addr).unwrap();
+        let d2 = s.hold(RegClass::Data).unwrap();
+        assert_eq!((d, a, d2), (Reg::D(2), Reg::A(2), Reg::D(3)));
+        s.out.push(Insn::Move {
+            size: Size::L,
+            src: Ea::Disp(0xc, FP),
+            dst: Ea::Reg(d),
+        });
+        s.free(d);
+        s.free(a);
+        s.free(d2);
+        let body = Body {
+            insns: s.out,
+            saves: s.regs.to_save(),
+        };
+        let text: Vec<String> = wrap(&f, body)
+            .unwrap()
+            .iter()
+            .map(|i| i.to_string())
+            .collect();
+        // 0xE17778..0xE17780, 0xE177F6..0xE177FE.
+        assert_eq!(
+            text,
+            [
+                "link.w\t%fp,#-0x10",
+                "movem.l\t%d2-%d3/%a2,-(%sp)",
+                "move.l\t(0xc,%fp),%d2",
+                "movem.l\t(-0x1c,%fp),%d2-%d3/%a2",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// Effective addresses based on A5, A6 or A7 release nothing (a
+    /// module-data operand `(d,A5)` must not free a register the
+    /// allocator never gave out).
+    #[test]
+    fn fixed_base_registers_are_not_released() {
+        let mut s = Selector {
+            out: Vec::new(),
+            regs: Regs::new(),
+            span: span(),
+        };
+        for a in [5, FP, SP] {
+            s.free_ea(&Ea::Disp(4, a));
+            s.free_ea(&Ea::Ind(a));
+        }
+        assert!(s.regs.live_scratch().is_empty());
+        let a = s.alloc_a().unwrap();
+        s.free_ea(&Ea::Disp(4, a));
+        assert!(!s.regs.is_busy(Reg::A(a)));
+    }
+
+    #[test]
+    fn scratch_only_bodies_save_nothing() {
+        let f = func(
+            0,
+            Some(ResultSpec {
+                class: ResultClass::Data,
+                ty: Scalar::signed(Width::Word),
+            }),
+            vec![StmtKind::SetResult(load(
+                Addr::Frame(8),
+                Scalar::signed(Width::Word),
+            ))],
+        );
+        let body = select_body(&f).unwrap();
+        assert!(body.saves.is_empty());
+        assert_eq!(body.insns.len(), 1);
     }
 }
