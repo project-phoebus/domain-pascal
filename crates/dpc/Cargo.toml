@@ -1,0 +1,15 @@
+[package]
+name = "dpc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dpc"
+path = "src/main.rs"
+
+[dependencies]
+dpc-syntax = { path = "../dpc-syntax" }
+dpc-sema = { path = "../dpc-sema" }
+dpc-ir = { path = "../dpc-ir" }
+dpc-m68k = { path = "../dpc-m68k" }

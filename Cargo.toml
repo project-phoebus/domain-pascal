@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dpc-syntax",
+    "crates/dpc-sema",
+    "crates/dpc-ir",
+    "crates/dpc-target",
+    "crates/dpc-m68k",
+    "crates/dpc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

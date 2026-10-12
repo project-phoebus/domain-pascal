@@ -1,0 +1,9 @@
+[package]
+name = "dpc-m68k"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+dpc-ir = { path = "../dpc-ir" }
+dpc-target = { path = "../dpc-target" }
