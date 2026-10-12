@@ -443,6 +443,12 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   boundary.  479 of the 481 `0x2048` words in the image's kernel text are
   followed by a 4-aligned instruction.
   - Before a `dbf` loop: 0xE00ED6, 0xE0149E.
+  - The boundary is **absolute** (relative to the 4-aligned module code
+    base), not relative to the routine: PKT_$RECENTLY_MISSING starts at
+    0xE128BA (2 mod 4) in module PKT (code 0xE1202C), and its filler at
+    0xE128DA puts the loop head on 0xE128DC.  `dpc --fragment-origin`
+    reproduces this for conformance units that start mid-module
+    (tests/conformance/README.md).
   - At a branch target: 0xE1CE42.
   - At the end of a module's code, so the next module starts 4-aligned:
     0xE1A9D2 before OS_TERM 0xE1A9D4, and 0xE1AD16 before BITPAD 0xE1AD18.

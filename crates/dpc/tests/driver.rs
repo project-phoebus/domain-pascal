@@ -163,3 +163,31 @@ fn unsupported_constructs_are_diagnosed_not_compiled() {
     );
     assert!(!dir.join("u.s").exists());
 }
+
+#[test]
+fn fragment_origin_shifts_and_drops_end_padding() {
+    let dir = scratch("fragment_origin_shifts_and_drops_end_padding");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/conformance/proc1_tst_lock.pas");
+    let out = dir.join("tst.s");
+    let run = dpc()
+        .arg("--fragment-origin")
+        .arg("0xE148CA")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let asm = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        asm.contains("\t.set\t__dpc_fragment_origin,0xe148ca\n"),
+        "{asm}"
+    );
+    assert!(asm.contains("\t.text\n\t.space\t2\t|"), "{asm}");
+    assert!(!asm.contains(".balignw"), "{asm}");
+}

@@ -19,6 +19,7 @@ import sau2map  # noqa: E402
 HANDASM = os.path.join(conform.REPO, 'tests', 'conformance', 'handasm')
 SCRATCH = os.path.join(conform.REPO, 'tmp', 'conform-tests')
 MISSING = conform.missing_prereqs()
+DPC = os.path.join(conform.REPO, 'target', 'debug', 'dpc')
 
 
 @unittest.skipIf(MISSING, 'missing: %s' % ', '.join(MISSING))
@@ -48,14 +49,16 @@ class ConformTest(unittest.TestCase):
         ok, out = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
                                  ['PROC1_$TST_LOCK'])
         self.assertTrue(ok, out)
-        self.assertEqual(out, 'OK PROC1_$TST_LOCK 0xE148CA 0x1C')
+        self.assertEqual(out, 'OK PROC1_$TST_LOCK 0xE148CA 0x1C  '
+                              'tests/conformance/handasm/proc1_tst_lock.s')
 
     def test_tst_lock_abs_long(self):
         # gas must emit 2079 00e1 eac8 for the absolute-long movea.l
         ok, _ = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
                                ['PROC1_$TST_LOCK'], quiet=True)
         self.assertTrue(ok)
-        with open(os.path.join(conform.SCRATCH, 'proc1_tst_lock', 'code.bin'), 'rb') as f:
+        work = conform.scratch_dir(os.path.join(HANDASM, 'proc1_tst_lock.s'))
+        with open(os.path.join(work, 'code.bin'), 'rb') as f:
             self.assertEqual(f.read()[4:10], bytes.fromhex('207900e1eac8'))
 
     def test_tst_lock_frame_size_fails(self):
@@ -165,8 +168,9 @@ class ConformTest(unittest.TestCase):
         ok, out = self.run_check(os.path.join(HANDASM, 'ast_page_zero.s'),
                                  ['AST_$PAGE_ZERO', '0xE00EB0'])
         self.assertTrue(ok, out)
-        self.assertEqual(out.splitlines(), ['OK module-local@0xE00EB0 0xE00EB0 0x3C',
-                                            'OK AST_$PAGE_ZERO 0xE00EEC 0x2A'])
+        self.assertEqual([l.split('  ')[0] for l in out.splitlines()],
+                         ['OK module-local@0xE00EB0 0xE00EB0 0x3C',
+                          'OK AST_$PAGE_ZERO 0xE00EEC 0x2A'])
 
     def test_pc_relative_relocation(self):
         # worker and caller in separate sections: the bsr.s becomes an
@@ -193,6 +197,94 @@ class ConformTest(unittest.TestCase):
         with self.assertRaisesRegex(conform.SetupError, 'not contiguous'):
             self.run_check(os.path.join(HANDASM, 'ast_page_zero.s'),
                            ['0xE00EB0:3A', 'AST_$PAGE_ZERO'])
+
+    def test_scratch_dir_per_unit_path(self):
+        a = conform.scratch_dir(os.path.join(HANDASM, 'proc1_tst_lock.s'))
+        b = conform.scratch_dir(os.path.join(conform.REPO, 'tests', 'conformance',
+                                             'proc1_tst_lock.pas'))
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith(conform.SCRATCH + os.sep))
+
+    # -- fragments: PKT_$RECENTLY_MISSING 0xE128BA (2 mod 4) ---------------
+    # A compiled routine starting at 2 mod 4 whose loop head 0xE128DC is
+    # 4-aligned by the filler at 0xE128DA: alignment is absolute.
+    def test_fragment_filler_lands_on_absolute_alignment(self):
+        path = os.path.join(HANDASM, 'pkt_recently_missing.s')
+        ok, out = self.run_check(path, ['PKT_$RECENTLY_MISSING'])
+        self.assertTrue(ok, out)
+        self.assertEqual(out, 'OK PKT_$RECENTLY_MISSING 0xE128BA 0x3C  '
+                              'tests/conformance/handasm/pkt_recently_missing.s')
+        # code.bin keeps the 2 pad bytes, linked at 0xE128B8
+        with open(os.path.join(conform.scratch_dir(path), 'code.bin'), 'rb') as f:
+            code = f.read()
+        self.assertEqual(len(code), 2 + 0x3C)
+        self.assertEqual(code[2 + 0xE128DA - 0xE128BA:][:2], bytes.fromhex('2048'))
+
+    def test_fragment_without_origin_misplaces_filler(self):
+        # the same .balignw, relative to a section that starts at 2 mod 4:
+        # offset 0x20 is already aligned, so the filler is left out
+        path = self.variant('pkt_recently_missing.s', 'pkt_no_origin.s',
+                            '\t.set\t__dpc_fragment_origin,0xe128ba\n', '')
+        with open(path) as f:
+            text = f.read()
+        with open(path, 'w') as f:
+            f.write(text.replace('\t.space\t2', '|'))
+        ok, out = self.run_check(path, ['PKT_$RECENTLY_MISSING'])
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x3A bytes', out)
+        # (the bmi.s over the loop is 2 shorter, so the bytes differ first at
+        # its displacement 0xE128D5); the filler's place now holds the loop
+        self.assertIn('bytes differ first at 0xE128D5', out)
+        self.assertRegex(out, r'\* e128da  b2a8 fff8 .*\| 2048 ')
+
+    def test_fragment_origin_must_match_unit(self):
+        path = self.variant('pkt_recently_missing.s', 'pkt_wrong_origin.s',
+                            '__dpc_fragment_origin,0xe128ba', '__dpc_fragment_origin,0xe128bc')
+        with self.assertRaisesRegex(conform.SetupError, 'fragment at 0xE128BC'):
+            self.run_check(path, ['PKT_$RECENTLY_MISSING'])
+
+    def test_fragment_pad_must_be_zero(self):
+        # code in the pad is linked below the unit and would escape the
+        # byte comparison
+        path = self.variant('pkt_recently_missing.s', 'pkt_code_in_pad.s',
+                            '\t.space\t2', '\tnop')
+        ok, out = self.run_check(path, ['PKT_$RECENTLY_MISSING'])
+        self.assertFalse(ok)
+        self.assertIn('fragment pad 0xE128B8..0xE128BA is not zero: 4e71', out)
+
+    def test_fragment_args(self):
+        r = conform.unit_routines(['PROC1_$TST_LOCK', 'PROC1_$GET_LOCKS'], self.map)
+        self.assertEqual(conform.fragment_args(r, self.map),
+                         ['--fragment-origin', '0xE148CA'])
+        seg = self.map.segment_containing(0xE128BA)            # PKT, 0xE1202C..
+        self.assertEqual((seg.name, seg.addr, seg.end), ('PKT', 0xE1202C, 0xE12D38))
+        whole = [conform.Routine(None, seg.addr, seg.size)]
+        self.assertEqual(conform.fragment_args(whole, self.map), [])
+        # the tail of the module keeps the module-end padding
+        tail = conform.unit_routines(['PKT_$PING_SERVER'], self.map)
+        self.assertEqual(tail[-1].end, seg.end)
+        self.assertEqual(conform.fragment_args(tail, self.map),
+                         ['--fragment-origin', '0xE12BB8', '--fragment-ends-module'])
+        # one .pas is one module
+        past = [conform.Routine(None, seg.addr + 4, seg.size)]
+        with self.assertRaisesRegex(conform.SetupError, 'runs past the end of module PKT'):
+            conform.fragment_args(past, self.map)
+
+    # -- a compiled multi-routine fragment of length 0x2E ------------------
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_compiled_fragment_has_no_module_end_padding(self):
+        src = os.path.join(conform.REPO, 'tests', 'conformance', 'proc1_tst_lock.pas')
+        specs = ['PROC1_$TST_LOCK', 'PROC1_$GET_LOCKS']
+        work = os.path.join(SCRATCH, 'compiled_fragment')
+        os.makedirs(work, exist_ok=True)
+        asm = conform.compile_pas(src, DPC, work, ['--fragment-origin', '0xE148CA'])
+        ok, out = self.run_check(asm, specs, work=work)
+        self.assertTrue(ok, out)
+        # compiled as a whole module, it gets the module-end filler: 0x30
+        asm = conform.compile_pas(src, DPC, work)
+        ok, out = self.run_check(asm, specs, work=work)
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x30 bytes', out)
 
 
 if __name__ == '__main__':

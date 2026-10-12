@@ -19,6 +19,21 @@ The routines of one unit must be contiguous in the image (e.g. a
 module-local worker, then its caller).  All code sections of the object are
 concatenated in object order and linked at the lowest routine address.
 
+Fragments.  The compiler's 4-byte alignment (loop heads, module-end
+padding with 0x2048; codegen-patterns 7) is relative to the module's
+4-aligned code base, i.e. absolute.  A unit that is only part of a module
+is compiled with `dpc --fragment-origin LO' (LO = its first routine's
+address): dpc then records LO in the absolute local symbol
+`__dpc_fragment_origin', starts the code with LO mod 4 bytes of padding
+so that section-relative `.balignw 4' is absolute alignment, and emits no
+module-end padding (unless also given --fragment-ends-module).  When the
+object has that symbol (it must equal LO), the first code section is
+linked at LO & ~3 and its leading LO mod 4 bytes, which must be zero, are
+left out of every other comparison.  The manifest passes the option for
+every .pas unit except one that is a whole map module (starts at its
+start, ends at its end), adding --fragment-ends-module when the unit ends
+its module; a unit that runs past the end of its module is refused.
+
 Steps:
   1. m68k-elf-as -m68010.
   2. Every undefined symbol is resolved from the map (`--defsym', exact
@@ -36,7 +51,7 @@ Steps:
      a symbol at the right address.  Each named routine must be a global
      code symbol; every global code symbol must be a map name (exact
      spelling) linked at its map address.
-  5. Result: one line `OK NAME 0xVA LEN' per routine (exit 0), or the
+  5. Result: one line `OK NAME 0xVA LEN  FILE' per routine (exit 0), or the
      problems and a side-by-side disassembly, ours | image, with differing
      lines marked `*' (exit 1).  Setup errors exit 2.
 
@@ -44,7 +59,8 @@ Relocation matching follows the idea of ../source/domain_os/tools/
 asm_compare.py (step 3 there: R_68K_32/16/8 must equal S + A, R_68K_PC*
 S + A - P); no code is shared with it.
 
-Python 3 standard library only.  Scratch files go to tmp/conform/.
+Python 3 standard library only.  Scratch files go to tmp/conform/<path of
+the unit>/, so units with the same file name do not share one.
 """
 
 import argparse
@@ -77,6 +93,7 @@ TOOLS = (AS, LD, OBJDUMP, OBJCOPY)
 SCRATCH = os.path.join(REPO, 'tmp', 'conform')
 UNPLACED_BASE = 0x40000000      # non-code sections without --section-addr
 CODE_OUT = '.conform_code'
+FRAGMENT_ORIGIN = '__dpc_fragment_origin'   # dpc_m68k::emit::FRAGMENT_ORIGIN_SYMBOL
 
 RELOC_SIZE = {'R_68K_32': 4, 'R_68K_16': 2, 'R_68K_8': 1,
               'R_68K_PC32': 4, 'R_68K_PC16': 2, 'R_68K_PC8': 1}
@@ -101,6 +118,21 @@ def run(cmd, cwd=None):
     if p.returncode:
         raise SetupError('%s failed:\n%s%s' % (' '.join(cmd), p.stdout, p.stderr))
     return p.stdout
+
+
+def display_path(path):
+    """`path' relative to the repository when it lies inside it."""
+    rel = os.path.relpath(os.path.abspath(path), REPO)
+    return path if rel.startswith('..') else rel
+
+
+def scratch_dir(path):
+    """tmp/conform/<path>/ for unit file `path' (relative to the repository
+    when inside it), created if needed."""
+    rel = display_path(path).lstrip(os.sep)
+    work = os.path.join(SCRATCH, rel)
+    os.makedirs(work, exist_ok=True)
+    return work
 
 
 def read_image(va, n):
@@ -250,9 +282,8 @@ def side_by_side(ours, image, context=4):
 
 # ---- the check -----------------------------------------------------------
 
-def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print):
-    """Check one assembly unit.  Returns True on a match.  Raises SetupError
-    on bad input."""
+def unit_routines(specs, linkmap, length=None):
+    """The routines of a unit, sorted and checked to be contiguous."""
     routines = sorted((parse_spec(s, linkmap) for s in specs), key=lambda r: r.addr)
     if not routines:
         raise SetupError('no routine given')
@@ -264,14 +295,33 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if r0.end != r1.addr:
             raise SetupError('routines are not contiguous: %s ends at 0x%X, %s starts at 0x%X'
                              % (r0.label, r0.end, r1.label, r1.addr))
+    return routines
+
+
+def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
+          work=None, name=None):
+    """Check one assembly unit.  Returns True on a match.  Raises SetupError
+    on bad input.  `work' is the scratch directory (default: from `src'),
+    `name' the unit's name in the result lines (default: `src')."""
+    routines = unit_routines(specs, linkmap, length)
     lo, hi = routines[0].addr, routines[-1].end
     section_addrs = dict(section_addrs or {})
+    name = name or display_path(src)
 
-    stem = os.path.splitext(os.path.basename(src))[0]
-    work = os.path.join(SCRATCH, stem)
-    os.makedirs(work, exist_ok=True)
+    work = work or scratch_dir(src)
     obj = os.path.join(work, 'unit.o')
     run([AS, '-m68010', '-o', obj, os.path.abspath(src)])
+
+    # a fragment compiled with dpc --fragment-origin: `pad' leading bytes
+    # put section-relative alignment on absolute boundaries; they are linked
+    # below lo and not compared
+    origin = [v for n, v, sec, _ in symbols_of(obj) if n == FRAGMENT_ORIGIN and sec == '*ABS*']
+    pad = 0
+    if origin:
+        if origin[0] != lo:
+            raise SetupError('%s was compiled as a fragment at 0x%X, but the unit starts at 0x%X'
+                             % (src, origin[0], lo))
+        pad = lo % 4
 
     # 2. place sections, resolve externals from the map
     secs = sections_of(obj)
@@ -283,7 +333,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if s not in other:
             raise SetupError('--section-addr %s: no such non-code section with contents' % s)
     markers = {}                # input section -> marker symbol
-    script = ['SECTIONS {', '  %s 0x%X : SUBALIGN(2) {' % (CODE_OUT, lo)]
+    script = ['SECTIONS {', '  %s 0x%X : SUBALIGN(2) {' % (CODE_OUT, lo - pad)]
     for i, s in enumerate(code):
         markers[s] = '__conform_%d' % i
         script.append('    %s = .; unit.o(%s)' % (markers[s], s))
@@ -320,17 +370,23 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if fl[5] != 'd':
             linked.setdefault(n, v)
     base = {s: linked[m] for s, m in markers.items() if m in linked}
-    if base.get(code[0]) != lo:
+    if base.get(code[0]) != lo - pad:
         raise SetupError('first code section linked at 0x%X, not 0x%X'
-                         % (base.get(code[0], -1), lo))
+                         % (base.get(code[0], -1), lo - pad))
 
     binpath = os.path.join(work, 'code.bin')
     run([OBJCOPY, '-O', 'binary', '-j', CODE_OUT, elf, binpath])
     with open(binpath, 'rb') as f:
         ours = f.read()
+    # code.bin keeps the fragment pad; dpc fills it with .space, so anything
+    # else there is code that would otherwise escape the comparison
+    ours, padbytes = ours[pad:], ours[:pad]
 
     # 3. bytes
     problems = []
+    if padbytes.strip(b'\0'):
+        problems.append('fragment pad 0x%X..0x%X is not zero: %s'
+                        % (lo - pad, lo, padbytes.hex()))
     img = read_image(lo, hi - lo)
     if len(ours) != len(img):
         problems.append('size: ours 0x%X bytes, image range 0x%X..0x%X is 0x%X'
@@ -433,11 +489,11 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     if not problems:
         if not quiet:
             for r in routines:
-                out('OK %s 0x%X 0x%X' % (r.label, r.addr, r.length))
+                out('OK %s 0x%X 0x%X  %s' % (r.label, r.addr, r.length, name))
         return True
 
     out('FAIL %s (%s, 0x%X..0x%X, %d relocation(s))'
-        % (src, ' '.join(r.label for r in routines), lo, hi, nrel))
+        % (name, ' '.join(r.label for r in routines), lo, hi, nrel))
     for p in problems:
         out('  ' + p)
     n = max(len(ours), hi - lo)
@@ -451,14 +507,34 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
 
 # ---- manifest ------------------------------------------------------------
 
-def compile_pas(src, dpc):
+def fragment_args(routines, linkmap):
+    """The dpc fragment options for a .pas unit made of `routines': none
+    for a whole map module (which dpc compiles as a module, module-end
+    padding included), `--fragment-origin LO', plus
+    `--fragment-ends-module' when the unit is the tail of its module (the
+    module-end padding is then part of its last routine in the image)."""
+    lo, hi = routines[0].addr, routines[-1].end
+    seg = linkmap.segment_containing(lo)
+    if seg is None or seg.is_section:
+        return ['--fragment-origin', '0x%X' % lo]
+    if hi > seg.end:
+        raise SetupError('the unit 0x%X..0x%X runs past the end of module %s (0x%X..0x%X); '
+                         'one .pas unit is one module'
+                         % (lo, hi, seg.name, seg.addr, seg.end))
+    if seg.addr == lo and seg.end == hi:
+        return []
+    args = ['--fragment-origin', '0x%X' % lo]
+    if hi == seg.end:
+        args.append('--fragment-ends-module')
+    return args
+
+
+def compile_pas(src, dpc, work, fragment=()):
     if not os.path.exists(dpc):
         raise SetupError('%s not found (run `make build`)' % dpc)
     stem = os.path.splitext(os.path.basename(src))[0]
-    work = os.path.join(SCRATCH, stem)
-    os.makedirs(work, exist_ok=True)
     out = os.path.join(work, stem + '.s')
-    run([dpc, '-o', out, src])
+    run([dpc, '-o', out] + list(fragment) + [src])
     return out
 
 
@@ -482,9 +558,12 @@ def run_manifest(path, linkmap, dpc):
             else:
                 specs.append(t)
         try:
+            work = scratch_dir(src)
+            asm = src
             if src.endswith('.pas'):
-                src = compile_pas(src, dpc)
-            ok = check(src, specs, linkmap, sect)
+                frag = fragment_args(unit_routines(specs, linkmap), linkmap)
+                asm = compile_pas(src, dpc, work, frag)
+            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0])
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
             errors += 1

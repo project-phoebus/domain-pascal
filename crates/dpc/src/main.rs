@@ -1,10 +1,18 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
-//! usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast | --check-only] file.pas
+//! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
+//!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
 //! their positions); `--dump-ast` also prints the AST to stdout;
 //! `--check-only` stops after semantic analysis.
+//!
+//! `--fragment-origin 0xADDR` (for image-conformance tests) says that the
+//! output is a fragment of a module whose first byte belongs at image
+//! address ADDR (even): 4-byte alignment is made absolute and no
+//! module-end padding is emitted (`dpc_m68k::emit::Options`).  With
+//! `--fragment-ends-module` the fragment is the tail of its module and
+//! does get the module-end padding.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,8 +20,9 @@ use std::process::ExitCode;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
 const PROG: &str = "dpc";
-const USAGE: &str =
-    "usage: dpc [-I dir]... [-o out.s] [--parse-only | --dump-ast | --check-only] file.pas";
+const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
+                     [--fragment-origin 0xADDR [--fragment-ends-module]] \
+                     [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +43,16 @@ struct Args {
     output: Option<PathBuf>,
     input: PathBuf,
     stop: Stop,
+    fragment_origin: Option<u32>,
+    fragment_ends_module: bool,
+}
+
+/// A number in C notation: `0x` hex or decimal.
+fn parse_number(s: &str) -> Option<u32> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16).ok(),
+        None => s.parse().ok(),
+    }
 }
 
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -41,6 +60,8 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut output = None;
     let mut input = None;
     let mut stop = Stop::Never;
+    let mut fragment_origin = None;
+    let mut fragment_ends_module = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -50,6 +71,17 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 output = Some(argv.next().ok_or("-o needs a file name")?.into());
             }
+            "--fragment-origin" => {
+                let v = argv.next().ok_or("--fragment-origin needs an address")?;
+                let a = parse_number(&v)
+                    .ok_or_else(|| format!("--fragment-origin: bad address `{v}`"))?;
+                // code is at even addresses
+                if a % 2 != 0 {
+                    return Err(format!("--fragment-origin: odd address `{v}`"));
+                }
+                fragment_origin = Some(a);
+            }
+            "--fragment-ends-module" => fragment_ends_module = true,
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -65,11 +97,16 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         }
     }
     let input = input.ok_or("no input file")?;
+    if fragment_ends_module && fragment_origin.is_none() {
+        return Err("--fragment-ends-module needs --fragment-origin".into());
+    }
     Ok(Args {
         include_dirs,
         output,
         input,
         stop,
+        fragment_origin,
+        fragment_ends_module,
     })
 }
 
@@ -110,7 +147,11 @@ fn compile(
         return Ok(());
     }
     let module = dpc_ir::lower(&program)?;
-    let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string())?;
+    let opts = dpc_m68k::emit::Options {
+        fragment_origin: args.fragment_origin,
+        fragment_ends_module: args.fragment_ends_module,
+    };
+    let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
     let out = args
         .output
@@ -176,6 +217,19 @@ mod tests {
         assert_eq!(a.output, Some(PathBuf::from("x.s")));
         assert_eq!(a.input, PathBuf::from("m.pas"));
         assert_eq!(a.stop, Stop::Never);
+        assert_eq!(a.fragment_origin, None);
+        let a = args(&["--fragment-origin", "0xE148CA", "m.pas"]).unwrap();
+        assert_eq!(a.fragment_origin, Some(0xE148CA));
+        let a = args(&["--fragment-origin", "16", "m.pas"]).unwrap();
+        assert_eq!(a.fragment_origin, Some(16));
+        assert!(!a.fragment_ends_module);
+        let a = args(&[
+            "--fragment-origin",
+            "0xE128F6",
+            "--fragment-ends-module",
+            "m.pas",
+        ]);
+        assert!(a.unwrap().fragment_ends_module);
         assert_eq!(
             args(&["--parse-only", "m.pas"]).unwrap().stop,
             Stop::AfterParse
@@ -193,5 +247,10 @@ mod tests {
         assert!(args(&["-o"]).is_err());
         assert!(args(&["-x", "m.pas"]).is_err());
         assert!(args(&["a.pas", "b.pas"]).is_err());
+        assert!(args(&["--fragment-origin", "m.pas"]).is_err());
+        assert!(args(&["--fragment-origin", "0xZZ", "m.pas"]).is_err());
+        assert!(args(&["m.pas", "--fragment-origin"]).is_err());
+        assert!(args(&["--fragment-origin", "0xE148CB", "m.pas"]).is_err());
+        assert!(args(&["--fragment-ends-module", "m.pas"]).is_err());
     }
 }

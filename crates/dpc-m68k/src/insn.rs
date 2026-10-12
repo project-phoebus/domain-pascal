@@ -129,6 +129,14 @@ pub enum Insn {
         cond: Cond,
         dst: Ea,
     },
+    /// Pseudo-instruction: pad to a 4-byte boundary with the 2-byte no-op
+    /// `movea.l A0,A0` (0x2048), as the compiler does before a loop head
+    /// (codegen-patterns 7: 0xE00ED6 before the `dbf` loop at 0xE00ED8;
+    /// PKT_$RECENTLY_MISSING 0xE128DA, a routine starting at 2 mod 4).
+    /// Emitted as `.balignw 4,0x2048`; the boundary is absolute because
+    /// the module's code base is 4-aligned, or, for a fragment, because
+    /// the emitter shifts the section (`emit::Options::fragment_origin`).
+    Align4,
 }
 
 impl fmt::Display for Insn {
@@ -143,6 +151,7 @@ impl fmt::Display for Insn {
             }
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
+            Insn::Align4 => f.write_str(".balignw\t4,0x2048"),
         }
     }
 }
@@ -204,6 +213,7 @@ mod tests {
             ),
             (Insn::Unlk, "unlk\t%fp"),
             (Insn::Rts, "rts"),
+            (Insn::Align4, ".balignw\t4,0x2048"),
         ];
         for (i, want) in cases {
             assert_eq!(i.to_string(), want);
