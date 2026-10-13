@@ -2487,6 +2487,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             })
         }
         ExprKind::Builtin { builtin, args } => builtin_value(p, e, *builtin, args),
+        ExprKind::Transfer(x) => transfer(p, e, x),
         ExprKind::Call(c) => {
             // A pointer result comes back in A0 (ref 5.5.10, p. 5-20;
             // codegen-patterns 3, "Pointer results"); the caller reads it
@@ -2511,6 +2512,61 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
         }
         _ => Err(unsupported(e.span, "this expression is")),
     }
+}
+
+/// A type transfer `T(x)` as a value (ref "Type Transfer Functions",
+/// p. 4-197: "the type transfer function does not change any bits in the
+/// argument.  Domain Pascal just 'sees' the argument as a value of the new
+/// type.  The one exception is that integer subranges are always
+/// compatible regardless of their sizes").
+///
+/// - Between integer types (subranges included) the value is converted as
+///   in an assignment: widened by its own sign ([`convert`]), or computed
+///   at the narrower width where [`narrow`] can (p. 4-198, `INTEGER16(x +
+///   y) > 5` "ignores the possibility of integer overflow"); other
+///   narrowings are refused, as in an assignment (not catalogued).
+/// - Otherwise the sizes are equal (`dpc-sema` checks it) and no code is
+///   emitted: a load or a constant is retyped, any other value wrapped in
+///   a [`Expr::Convert`] of the same width, which the selector evaluates
+///   as its operand.  The register class follows the use: a pointer
+///   computed in a data register is moved to an address register where it
+///   is used as one (LOG_$READ's worker 0xE177D0..0xE177DA `move.l D1,D3;
+///   add.l (0x14,A5),D3; movea.l D3,A1` for `univ_ptr(integer32(p) +
+///   offset)`, p. 4-199's `UNIV_PTR(INTEGER32(namepointer) + 2)`;
+///   codegen-patterns 5.2, "Pointer arithmetic").
+fn transfer(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
+    let ty = scalar_of(p, e)?;
+    let v = value_of(p, x)?;
+    if v.ty().width != ty.width {
+        // Only between integers (dpc-sema checks the sizes otherwise).
+        if v.ty().bytes() < ty.bytes() {
+            return Ok(convert(v, ty));
+        }
+        return narrow(&v, ty).ok_or_else(|| {
+            unsupported(
+                e.span,
+                format!(
+                    "a type transfer of a {}-byte integer to a {}-byte one (narrowing, as in an \
+                     assignment) is",
+                    v.ty().bytes(),
+                    ty.bytes()
+                ),
+            )
+        });
+    }
+    Ok(match v {
+        Expr::Const { value, .. } => Expr::Const { value, ty },
+        Expr::Load { addr, .. } => Expr::Load { addr, ty },
+        v if v.ty() == ty => v,
+        Expr::Convert { value, .. } if value.ty() == ty => *value,
+        v => {
+            debug_assert_eq!(v.ty().width, ty.width, "sema checks equal sizes");
+            Expr::Convert {
+                value: Box::new(v),
+                ty,
+            }
+        }
+    })
 }
 
 /// `v` as a value of type `ty`: a constant retyped, a value of another

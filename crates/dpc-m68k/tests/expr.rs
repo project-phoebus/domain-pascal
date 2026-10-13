@@ -135,8 +135,8 @@ fn unsupported_expressions() {
         ),
         // Two M$ARITH results in one expression.
         ("t := l * l + l * l;", "two function calls in one statement"),
-        // An unsigned `div` by a power of two: shift or mask?
-        ("t := u div 4;", "unsigned `div`/`mod` by a power of two"),
+        // An unsigned `mod` by a power of two: mask or division?
+        ("t := u mod 4;", "unsigned `mod` by a power of two"),
         // A signed `M$OIS$WLW' remainder used as a longword: no site.
         (
             "t := l mod w;",
@@ -424,6 +424,19 @@ fn division_forms() {
             "1:",
             "asr.l\t#8,%d0",
             "asr.l\t#2,%d0"
+        ]
+    );
+    // Unsigned by a power of two: `lsr.w` (LOG_$READ's worker 0xE177D8;
+    // no `divu.w #2^k` in compiled code), the word result zero-extended
+    // as below.
+    assert_eq!(
+        fl("u div 4"),
+        [
+            "move.w\t(U).l,%d0",
+            "clr.l\t%d1",
+            "lsr.w\t#2,%d0",
+            "move.w\t%d0,%d1",
+            "move.l\t%d1,%d0",
         ]
     );
     // `mod` by a power of two is a division (CAL_$DECODE_TIME 0xE68800).

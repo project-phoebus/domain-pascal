@@ -377,3 +377,63 @@ end;
     );
     assert!(e.contains("a `return` at the end of an `if` part"), "{e}");
 }
+
+/// A stepped pointer (codegen-patterns 7.4) formed once from a pointer
+/// local is right only while nothing assigns the local in the body: a
+/// nested routine called in the body may (ref 2.4), so a local it reaches
+/// is refused there; without the call the loop compiles.
+#[test]
+fn stepped_pointer_local_a_nested_routine_assigns() {
+    let src = |call: &str| {
+        format!(
+            "type ls = array[1..8] of integer32; lp = ^ls;
+var other: lp;
+procedure t(n: integer32); options(val_param);
+var i: integer; la: lp;
+  procedure inner;
+  begin
+    la := other;
+  end;
+begin
+  la := other;
+  inner;
+  for i := 1 to 4 do begin
+    la^[i] := n;
+    {call}
+  end;
+end;
+"
+        )
+    };
+    let e = error(&src("inner;"));
+    assert!(
+        e.contains("whose pointer is not a variable the body leaves unchanged"),
+        "{e}"
+    );
+    assert!(body(&src("")).iter().any(|l| l == "lea\t(4,%a0),%a1"));
+}
+
+/// The same with the pointer a field of a record the body assigns as a
+/// whole (a block copy over it).
+#[test]
+fn stepped_pointer_in_a_record_the_body_copies() {
+    let e = error(
+        "type ls = array[1..8] of integer32; lp = ^ls;
+  hr = record a, b: integer32; p: lp; end;
+var h, h2: hr;
+procedure t;
+var i: integer;
+begin
+  h.a := 0;
+  for i := 1 to 4 do begin
+    h.p^[i] := 0;
+    h := h2;
+  end;
+end;
+",
+    );
+    assert!(
+        e.contains("whose pointer is not a variable the body leaves unchanged"),
+        "{e}"
+    );
+}

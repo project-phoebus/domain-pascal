@@ -169,6 +169,13 @@ Tests:
   (DISK_$UNASSIGN_ALL 0xE6BE24), a run-time upper bound with its `subq.w
   #1; bmi` guard and the count copied (DTTY_$WRITE_STRING 0xE1D6AA), a
   count above 127 as `move.w #n`, `exit` and `next`.
+- `loops/stepped` - codegen-patterns 7.4, 5.2: `for` loops over arrays of
+  elements wider than a byte through pointers stepped by the element size:
+  formed with `lea (from*size,An),Ap` after the count and the index, the
+  source of a copy first, stepped in the reverse order (LOG_$READ's worker
+  0xE177E0..0xE177F2), `subq.l` for `downto`, `lea (s,An),An` above 8
+  (0xE313F4), a pointer loaded at entry, an index register and a call
+  besides (PKT_$DUMP_DATA 0xE12800..0xE12826).
 - `results/pointer_callers` - codegen-patterns 3 ("Callers of pointer
   functions", "Pointer results"), 12.4 R4(a), 12.5: a pointer function's
   A0 stored to memory, a frame slot, a wrapper's result slot (MST_$MAPS
@@ -192,6 +199,12 @@ Tests:
 - `expr/builtins` - codegen-patterns 10.1, 13, 8: `sizeof`, `firstof`,
   `lastof`, `succ`, `pred`, `max`, `min`, `in_range` folded to constants;
   `succ`/`pred` of a variable as `addq`/`subq` in place (0xE00B3E).
+- `expr/transfer` - ref pp. 4-197..4-199, codegen-patterns 5.2 ("Pointer
+  arithmetic"): type transfers with no code of their own, pointer sums
+  computed in a data register (LOG_$READ's worker 0xE177A6..0xE177D4; a
+  constant first, 0xE00AB4; `addq`/`subq`, 0xE4D5A2, 0xE028DE) and moved
+  to an address register where used as one (0xE4EFCA..0xE4EFD2), integer
+  transfers converting like assignments.
 - `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
   shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
   the static link passed in A1 to a routine a sibling also calls

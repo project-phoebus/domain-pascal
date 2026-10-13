@@ -1463,6 +1463,50 @@ their host); no compare or widening of either has been catalogued.
     address register since the entry; others are rejected (where the
     pointer load goes relative to the index is not catalogued).  A byte
     index (char, boolean) is rejected (its extension is not catalogued).
+- **Pointer arithmetic through type transfers (Verified shapes by survey;
+  implemented, bead domain-pascal-5aw.17).**  Ref "Type Transfer
+  Functions", p. 4-197: a transfer "does not change any bits in the
+  argument"; p. 4-199 gives the idiom, `namepointer :=
+  UNIV_PTR(INTEGER32(namepointer) + 2)` ("It is illegal to perform
+  mathematical operations on a pointer variable.  However, by using type
+  transfer functions you can temporarily make a pointer variable into an
+  integer variable").  In the image a pointer sum is computed in a data
+  register like any integer sum (section 8) and moved to an address
+  register, `movea.l Dn,An`, where it is used as one.  Survey (ad-hoc
+  script, not kept, over the compiled routines `tools/loopalign.py`
+  splits; the last definition of a `movea.l Dn,An` source within six
+  instructions, no branch or call between): after `add.l` 42, `addi.l` 8
+  (six of them `addi.l #0` on a relocated `move.l #abs`: symbol
+  arithmetic, 0xE2F3D2, 0xE32EE2), `addq.l` 6, `subq.l` 5, `subi.l` 1,
+  `sub.l` 1; against `adda.l Dn,An` 7, `adda.w Dn,An` 5, `adda.l #imm` 7,
+  `adda` from memory 4 (most `adda`s are in 0xE70308..0xE7067A).  The
+  shapes:
+  - a word offset first, the pointer added: `move.w (14,A3),D4; ext.l D4;
+    add.l A3,D4; movea.l D4,A0` (0xE4EFCA..0xE4EFD2; 0xE538B8..0xE538BE
+    and 16 more `ext.l; add.l An`); LOG_$READ's worker 0xE177D0..0xE177DA
+    `move.l D1,D3; ...; add.l (0x14,A5),D3; ...; movea.l D3,A1`, the
+    zero-extended `offset` held since 0xE177A6 (12.4 R7);
+  - a constant of 9..127 first, the pointer added, the pointer in memory
+    (0xE00AB4 `moveq #30,D0; add.l (-64,A6),D0`, as section 8 says for
+    `x + c`) or held in an address register (0xE196DE `moveq #28,D5; add.l
+    A1,D5`; 0xE1CF10 `#12`; 0xE4D87C `#18`; 0xE67FEA `#104`; 0xE7140E
+    `#16`; also 0xE1CF0A `#8` and 0xE3DCAE `#5`);
+  - 1..8 on a copy of the pointer: 0xE4D5A2, 0xE4EA1E, 0xE51ACA `move.l
+    A0,D0; addq.l #1,D0`; 0xE028DE `move.l A2,D0; subq.l #4,D0`; 0xE33876,
+    0xE532AA `move.l A5,D1; addq.l #4/#8,D1`.
+
+  `dpc` (`dpc-ir` `lower.rs`, `transfer`): a transfer between types of
+  one size emits no code (a load or a constant retyped, any other value
+  in a same-width `Expr::Convert` the selector evaluates as its operand);
+  between integers it converts as an assignment does: widened by the
+  operand's sign, or computed at the narrower width where `narrow` can
+  (p. 4-198, `INTEGER16(x + y) > 5`), other narrowings refused like the
+  assignment.  The arithmetic is section 8's; the `movea.l` comes from the
+  use.  Not modelled: a constant of 9..127 added to a pointer held in a
+  register (section 8 refuses `x + c` with `x` in a register; the
+  address-register sites above all put the constant first, as do two with
+  5 and 8).  Golden `tests/golden/expr/transfer`; test `dpc-ir`
+  `type_transfers`.
 - **Packed records / bit fields:** Uncertain; nothing has been catalogued
   yet.
 
@@ -2456,9 +2500,26 @@ scripts besides, not kept, are named as such below; re-check sites with
   A2, A1, A0 and steps A0, A1, A2.  The exception, 0xE17730, steps in the
   reverse order of first use instead.  A `with a[i] do` body copies the
   pointer at the head (`movea.l A0,A1`: DISK_$REGISTER 0xE3D9EC,
-  RING_$KICK_DRIVER 0xE768BC, 0xE42244).  `dpc` does not implement the
-  stepped pointer yet and refuses a `for` index used to index elements
-  wider than a byte.
+  RING_$KICK_DRIVER 0xE768BC, 0xE42244).  **Forming** (bead
+  domain-pascal-5aw.17; the preheaders of the guarded loops below and of
+  the sites above): after the count and the index; a pointer reached
+  through a pointer variable is loaded into an address register (or is
+  the one loaded at entry), all such bases first, then each stepping
+  pointer formed with `lea (from × size,An),Ap` into a new register
+  (0xE4F010 `movea.l D6,A4; lea (2,A3),A1; lea (2,A4),A0`; 0xE6FCC6 loads
+  its second base before forming the first pointer; 0xE037EA `movea.l
+  (18,A6),A3; lea (4,A3),A0`; 0xE7707A; `lea (A3),A2` for 0, 0xE3E4C6).
+  In place instead, the base register becoming the pointer: 0xE7632C,
+  0xE76378, 0xE76448 `movea.l (d,A6),A0; ...; lea (12,A0),A0`; 0xE6FCC6
+  `movea.l (32,A6),A1; ...; addq.l #2,A1` (not reproduced; R2 gives a new
+  register, as at 0xE177E0 where A1 dies).  Arrays of the unit's data or
+  of the frame: `lea (8,A5),A0` (PKT_$RECENTLY_MISSING 0xE128D6) against
+  `movea.l A5,An; addq.l #d,An` (0xE4296E, 0xE5142E, 0xE4E478, 0xE519EA,
+  0xE527DE, 0xE6E2E8), `lea (d,A6)` (0xE0BC90, 0xE4EB06) against
+  `movea.l A6,An; addq.l #d,An` (0xE427DE), both in one preheader at
+  0xE134DE: no rule found.  Where the array's own offset from A5 goes
+  (pointer or displacement) is not settled either: 0xE4296E forms
+  `A5 + 4` and reaches the elements at `(2700,A0)`.
 - **Run-time bounds.**  The count `hi - lo` is computed into a register
   and guarded before the loop: `subq.w #1,T; bmi EXIT` for `lo = 1`
   (LOG_$READ's worker 0xE177DC; DTTY_$WRITE_STRING 0xE1D6AC), `sub.w
@@ -2476,7 +2537,21 @@ scripts besides, not kept, are named as such below; re-check sites with
   times, whether `T` was loaded from memory or copied from a register,
   with no rule found (LOG_$READ's worker and PKT_$RECENTLY_MISSING keep
   it; 0xE0B1D8 `move.w D0,D1; subq.w #1,D1; bmi; move.w D1,D0` copies it
-  back).
+  back).  By the loop's shape (bead domain-pascal-5aw.17; ad-hoc script
+  over the same guards, not kept): without a call, an index register and
+  no stepped pointer, in place 27, copied 22; an index register and
+  stepped pointers 4 / 7; no index register and stepped pointers (LOG_$READ's
+  worker's shape) 29 / 11; neither 4 / 5.  So the worker's shape does not
+  decide: 0xE4F010 copies the count (`addq.w #1,D4; asr.w #1,D4; subq.w
+  #1,D4; bmi; move.w D4,D0`) for a two-pointer word copy like the
+  worker's, and one routine has both forms from the same `move.w D3,D0`
+  (0xE02898: 0xE02980 copied, 0xE02A46 in place).  In 35 of the 45
+  copies without a call `T`'s register is read in the body, usually as
+  the index (`move.w D0,D1; moveq #1,D0`, 0xE3EB3C, 0xE4084C): the copied
+  counter is a value of its own (12.4 R2), and keeping the count in place
+  a choice made before allocation.  Without a call `T` is live after the
+  loop in 5 copies and 2 in-place loops (approximated by a linear scan
+  from the exit), so liveness does not decide either.
 - **Hidden frame cost of a `for` loop** (bead domain-pascal-nda; evidence
   only, nothing implemented): five routines with one `for` loop have no
   frame bytes beyond their locals: DTTY_$WRITE_STRING `link #-4` (the
@@ -2505,7 +2580,7 @@ scripts besides, not kept, are named as such below; re-check sites with
 
 **Implemented** (`crates/dpc-ir/src/lower.rs`, `for_loop`,
 `check_for_indices`; `crates/dpc-m68k/src/isel.rs`, `while_`, `for_`,
-`loop_pointer_locals`, `CmpaZero`):
+`stepped_arrays`, `stepped_pointers`, `loop_pointer_locals`, `CmpaZero`):
 
 - `while` as above, with the 0x2048 filler in aligning routines;
   `cmpa.w #0,An` for `=`/`<>` `nil` on a pointer held in an address
@@ -2519,7 +2594,25 @@ scripts besides, not kept, are named as such below; re-check sites with
   - a run-time upper bound of an ascending loop from 1 with a signed
     index, in a body that calls: `move.w hi,T; subq.w #1,T; bmi EXIT;
     move.w T,Dc; moveq #1,Di`;
-  - a `for` loop of the `Fill` shape stays as in section 7.
+  - a `for` loop of the `Fill` shape stays as in section 7;
+  - arrays of elements wider than a byte indexed by the index itself
+    and reached through a pointer variable the body leaves unchanged
+    (a by-address parameter, a pointer parameter or local, a pointer
+    in the unit's data or another unit's when the body makes no call; a
+    local a nested routine reaches only when the body makes no call; an
+    assignment, block copy or address of a record holding the pointer
+    counts as changing it),
+    the array at offset 0 from the pointer: one stepped pointer per
+    array and element size (bead domain-pascal-5aw.17), formed after
+    the count and the index as above (`lea (from × size,An),Ap`, the
+    bases loaded first), in the order of first use in evaluation order
+    (the value of an assignment before its destination), the elements
+    at `(d,Ap)` with the lower bound and field offsets in `d`, stepped
+    after the index in the reverse order (`addq.l`/`subq.l #s` up to 8,
+    `lea (±s,Ap),Ap` above); the index register only when the body
+    reads the index otherwise.  The pointer's base load counts as one
+    use before the loop for the entry loads of 12.2 (LOG_$READ's
+    worker loads `buffer` at 0xE177CC, not at entry).
 - `exit`, `next`, and `if c then exit|next` as one conditional branch.
 - A slot used inside a loop body is loaded at entry like one used more
   than once (12.2: 0xE3CCD6; NAME_$VALIDATE's module-local 0xE4A004 loads
@@ -2530,8 +2623,12 @@ scripts besides, not kept, are named as such below; re-check sites with
 
 **Not supported yet** (positioned errors): run-time bounds other than
 the case above (no rule for the copy without calls; `tst.w; beq` for
-unsigned counts; run-time `lo`; `downto`); a `for` index indexing
-elements wider than a byte (stepped pointers); an index initial value
+unsigned counts; run-time `lo`; `downto`); stepped pointers through
+arrays of the unit's data, the frame or another unit (no rule for `lea`
+against `movea.l; addq.l`), at an offset from their pointer, through a
+pointer the body may change, at an index computed from the loop index
+(`a[i + 1]`), or reached at displacement 0 (`(An)+`, 0xE00ED8, 0xE0287A);
+the in-place forming (0xE7632C, 0xE6FCC6); an index initial value
 outside -128..127 or equal to the count; byte or longword indices; an
 index of another scope (0xE721F8, a nested routine's loop over its
 parent's variable) or one a nested routine reaches (RINGLOG_$CNTL
@@ -2541,8 +2638,9 @@ loop (MST_$ALLOC_ASID
 never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
 
-Goldens `tests/golden/loops/while.pas`, `loops/for.pas`; tests
-`crates/dpc-m68k/src/isel.rs` (`for_with_index_and_call`, `for_forms`,
+Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
+`loops/stepped.pas`; tests `crates/dpc-m68k/src/isel.rs`
+(`for_with_index_and_call`, `for_forms`, `stepped_pointer_loops`,
 `unsettled_for_loops`, `while_shape`, `loop_pointer_local_rule`),
 `crates/dpc-ir/src/tests.rs` (`for_loops`, `while_exit_next`).
 Conformance (`make conform`): `tests/conformance/disk_unassign_all.pas`
@@ -2790,8 +2888,12 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     `mod` by 2^k is a division like any other (0xE68804 above; 0xE30D3E
     `M$OIS$WLW` for `mod 32`).  The join is not aligned (section 7:
     forward targets; MST_$INIT 0xE30D2E has a filler, one of the
-    exceptions listed there).  Refused: unsigned word `div`/`mod` and
-    unsigned `mod` by 2^k (no site: shift, mask or division?).
+    exceptions listed there).  Unsigned word `div` by 2^k: `lsr.w`, as
+    `lsr.l` for longwords (no `divu.w #2^k` anywhere in compiled code,
+    against 234 `lsr.w #k,Dn`; LOG_$READ's worker 0xE177D2..0xE177D8
+    `move.w (A0),D0; lsr.w #1,D0` halves a `0..65535` word, C `>> 1`, our
+    reconstruction `div 2`); implemented (bead domain-pascal-5aw.17).
+    Refused: unsigned `mod` by 2^k (no site: mask or division?).
   - **A longword `div` whose quotient is used as a word, by a word (or a
     constant that fits one): `div<s>.w` in place on the longword, no
     call** (about 30 sites: of the 70 inline `div<s>.w`, 23 `divs.w` and
@@ -3552,8 +3654,9 @@ settled, each from this one routine, in image order:
    and `move.l D1,Dn; add.l (0x14,A5),Dn` are **done** (bead
    domain-pascal-g5q.7, 12.4 R7; golden `regalloc/cse` with an integer
    variable); the type transfers `integer32(ptr)` and `univ_ptr(...)` are
-   not lowered (`dpc-ir` refuses the expression: the worker's first
-   diagnostic), and the register (D3, item 4/R6) and the order are not.
+   lowered since bead domain-pascal-5aw.17 (no code; section 5.2,
+   "Pointer arithmetic"); the register (D3, item 4/R6) and the order are
+   not.
 6. `subq.w #1,D0; bmi.s <end>; lea (2,A1),A0; lea (2,A2),A1; <head:>
    move.w (-2,A0),(-2,A1); addq.l #2,A1; addq.l #2,A0; dbf D0,<head>`
    (0xE177DC..0xE177F2): a `for` loop over 1-based arrays with a run-time
@@ -3564,17 +3667,46 @@ settled, each from this one routine, in image order:
    Section 7.4 (bead domain-pascal-96r) now describes the shape in
    general: pointers start at `base + from × size`, are formed in the
    order of first use and stepped in the reverse order (29 of 30 loops).
-   `dpc` compiles `for` loops since bead domain-pascal-5aw.15, but not
-   this one: it refuses (i) a `for` index indexing elements wider than a
-   byte (the stepped pointers are not implemented; this is the worker's
-   first diagnostic once item 5's type transfer is lowered) and (ii) a
-   run-time count in a loop without calls, where the count is copied into
-   a counter of its own 45 times and, as here, kept in place 64 times,
-   with no rule found.
+   `dpc` compiles `for` loops since bead domain-pascal-5aw.15 and the
+   stepped pointers since bead domain-pascal-5aw.17 (section 7.4; the
+   `lea`/`move.w (-2,A0),(-2,A1)`/`addq.l` part in golden
+   `loops/stepped`), and `actual_len div 2` as `lsr.w #1` (section 8).
+   It still refuses a run-time count in a loop without calls: kept in
+   place 64 times, copied 45 times, and the worker's own shape (no
+   index register, stepped pointers) 29 against 11 (section 7.4), with
+   0xE4F010, a word copy like this one, copying: no rule.
 7. The frame: `link #-0x10` with nothing in it addressed (section 2,
    untouched frames); the reconstruction declares stand-ins.
 
 Items 2–5 are taken up by the model in 12.4.
+
+**Status after bead domain-pascal-5aw.17** (`dpc` on
+`tests/conformance/pending/log_read.pas`).  The first diagnostic is now
+item 6's run-time count without a call (line 81).  With that and the
+next refusal forced in a scratch build (count in place; the fresh load
+of `buffer` allowed in a body with branches), the worker compiles to the
+image's shape except for, in image order:
+
+- 0xE177AE: `cmpi.l #0x400,D2` where the image holds the constant,
+  `move.l #0x400,D3; ...; cmp.l D3,D2` (item 3; R8, one site);
+- 0xE177C4: `move.w #0x400,D2` where the image has D3, and 0xE177D0
+  the sum in D0 (`move.l D1,D0; add.l (0x14,A5),D0`) where the image has
+  D3 (item 4; R6);
+- 0xE177CC..0xE177DE: the reconstruction's `src` local is not held in a
+  register (12.5: a dereferenced pointer local stays in the frame), so
+  dpc stores the sum to `(-8,A6)` and reloads it after the guard where
+  the image has `movea.l D3,A1` before it; `buffer`'s fresh load (12.4
+  R4(b): refused in bodies with branches, fresh_slot_loads) comes after
+  the guard in dpc (section 7.4, forming: the other sites load bases
+  there; the worker hoists it to 0xE177CC), so the registers differ too
+  (dpc: A0 source base, A1 `buffer`, A2/A0 pointers; image: A1, A2,
+  A0/A1), and the interleaving of R11 cannot happen across the `bmi`;
+- the frame: `link #-0x10` and `movem.l D2/A2` against the image's
+  `D2-D3/A2` (follows from 0xE177AE/0xE177C4).
+
+Each needs evidence beyond this routine (R8's constant, R6, a rule for
+register-held pointer locals that are dereferenced, R4(b) with branches,
+the hoisting of the base load); the unit stays pending.
 
 ### 12.4 Register allocation and optimisation model (beads domain-pascal-hy0, -6tn, -5cx)
 
@@ -4303,7 +4435,7 @@ earlier:
 | 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8).  **Implemented** (section 8, `&`; bead domain-pascal-d7i) |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
 | 5 | D3 at 0xE177C4 and 0xE177D0 | 0xE177C4, 0xE177D0 | Speculative (R6) |
-| 6 | The `for` loop as strength-reduced pointers (12.3 item 6) | 0xE177DC..0xE177F2 | Shape Verified; separate bead |
+| 6 | The `for` loop as strength-reduced pointers (12.3 item 6) | 0xE177DC..0xE177F2 | Shape Verified.  **Implemented** (bead domain-pascal-5aw.17, section 7.4) except the run-time count kept in place without a call (no rule) |
 | 7 | A block scheduler run after register choice, with the barriers of R10 | 0xE177A6..0xE177B8, 0xE177CC..0xE177DE | Exists: Verified; policy Uncertain (R11).  **Implemented** (bead domain-pascal-g5q.8, `crates/dpc-m68k/src/sched.rs`): R11 with a window of 3, default on; 0xE177A6..0xE177AC reproduced (golden `regalloc/cse`); 0xE177CC needs `buffer`'s load first in the selector's order |
 
 **Consistency with the units `dpc` already reproduces** (review,

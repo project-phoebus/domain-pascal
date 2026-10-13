@@ -2875,13 +2875,42 @@ impl<'t> Checker<'t> {
             );
             return self.error_expr(span);
         }
-        let value = if ints { x.value.clone() } else { None };
+        let value = match &x.value {
+            Some(ConstValue::Int(v)) if ints => Some(ConstValue::Int(self.reinterpret(*v, t))),
+            _ => None,
+        };
         Expr {
             kind: ExprKind::Transfer(Box::new(x)),
             ty: t,
             value,
             span,
         }
+    }
+
+    /// Integer constant `v` transferred to integer type `t` (ref p. 4-197:
+    /// "the type transfer function does not change any bits"): its low
+    /// `size(t)` bytes read as `t` reads them, as the code computes it at
+    /// run time (`dpc-ir`'s `sign_of`: a subrange stored in fewer bytes
+    /// than its integer32 host, e.g. `0..65535`, is unsigned, any other
+    /// integer type signed), so `0..65535(-1)` is 65535 and
+    /// `integer16(16#18000)` is -32768 (a narrowing truncates, as
+    /// p. 4-198's `INTEGER16(x + y)` "ignores the possibility of integer
+    /// overflow").
+    fn reinterpret(&self, v: i64, t: TypeId) -> i64 {
+        let size = self.types.size(t);
+        let bits = size * 8;
+        if !(1..64).contains(&bits) {
+            return v;
+        }
+        let mut w = v & ((1i64 << bits) - 1);
+        let unsigned = self
+            .types
+            .ordinal_base(t)
+            .is_some_and(|host| size < self.types.size(host));
+        if !unsigned && w >= 1i64 << (bits - 1) {
+            w -= 1i64 << bits;
+        }
+        w
     }
 
     fn builtin_fn(&mut self, b: Builtin, name: &str, args: &[ast::Expr], span: Span) -> Expr {

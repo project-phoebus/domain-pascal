@@ -1115,17 +1115,6 @@ fn expr_reads_frame(e: &Expr, off: i32) -> bool {
     hit
 }
 
-/// Whether `body` reads the frame object at `off` as a value.
-fn stmts_read_frame(body: &[Stmt], off: i32) -> bool {
-    let mut hit = false;
-    walk(body, &mut |n| {
-        if let Node::Expr(e @ Expr::Load { .. }) = n {
-            hit |= expr_reads_frame(e, off);
-        }
-    });
-    hit
-}
-
 /// Whether `body` calls a routine (a statement or a function call, or an
 /// M$ARITH entry: a `jsr` either way).
 fn stmts_call(body: &[Stmt]) -> bool {
@@ -1138,22 +1127,248 @@ fn stmts_call(body: &[Stmt]) -> bool {
     hit
 }
 
-/// Whether `body` indexes an array with an expression involving the frame
-/// object at `off` (a `for` index) other than as the plain index of an
-/// array of bytes: the original reached such elements through a pointer
-/// stepped by the element size (codegen-patterns 7.4), which `dpc` does
-/// not do yet.  Byte arrays are indexed with the index register itself
-/// (83 loops: `move.b`, `cmpi.b`, `lea` with `(d,An,Di.w)`; KBD's
-/// module-local 0xE1CA70 `cmp.b (0,A5,D1.w),D2`).
-fn strength_reduced_index(body: &[Stmt], off: i32) -> bool {
+/// An array a `for` loop reaches through a pointer stepped by the element
+/// size (codegen-patterns 7.4, "Array indexing by the index"): the
+/// array's address (`base`, an [`Addr::Indirect`] at offset 0) and the
+/// element size.
+#[derive(Clone, Debug, PartialEq)]
+struct SteppedArray {
+    base: Addr,
+    scale: u32,
+}
+
+/// Visit the expressions, addresses and calls of `body` in evaluation
+/// order: an assignment's value before its destination, a copy's source
+/// before its destination ([`walk`] visits destinations first).
+fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
+    for st in body {
+        match &st.kind {
+            StmtKind::Store { addr, value } => {
+                walk_expr(value, v);
+                walk_addr(addr, v);
+            }
+            StmtKind::Copy { dst, src, .. } => {
+                walk_addr(src, v);
+                walk_addr(dst, v);
+            }
+            StmtKind::If { cond, then_, else_ } => {
+                walk_cond(cond, v);
+                walk_eval(then_, v);
+                walk_eval(else_, v);
+            }
+            StmtKind::Repeat { body, until } => {
+                walk_eval(body, v);
+                walk_cond(until, v);
+            }
+            StmtKind::While { cond, body } => {
+                walk_cond(cond, v);
+                walk_eval(body, v);
+            }
+            StmtKind::For(l) => {
+                walk_expr(&l.from, v);
+                walk_expr(&l.to, v);
+                walk_eval(&l.body, v);
+            }
+            StmtKind::Case {
+                selector,
+                arms,
+                otherwise,
+            } => {
+                walk_expr(selector, v);
+                for a in arms {
+                    walk_eval(&a.body, v);
+                }
+                if let Some(o) = otherwise {
+                    walk_eval(o, v);
+                }
+            }
+            _ => walk(std::slice::from_ref(st), v),
+        }
+    }
+}
+
+/// Whether `index` is the plain `for` index at frame offset `off`.
+fn is_index(index: &Expr, off: i32) -> bool {
+    matches!(index, Expr::Load { addr: Addr::Frame(o), ty } if *o == off && ty.width == Width::Word)
+}
+
+/// The arrays of elements wider than a byte that `body` indexes by the
+/// `for` index at frame offset `off`, in the order the pointers are formed
+/// (codegen-patterns 7.4): the order of first use in evaluation order, so
+/// the source of `a[i] := b[i]` first (LOG_$READ's worker 0xE177E0 `lea
+/// (2,A1),A0` for the source, then `lea (2,A2),A1`; 0xE4F010).  Byte
+/// arrays are indexed with the index register itself (83 loops: `move.b`,
+/// `cmpi.b`, `lea` with `(d,An,Di.w)`; KBD's module-local 0xE1CA70 `cmp.b
+/// (0,A5,D1.w),D2`) and are not listed.
+///
+/// `Err` (a message for "... is not supported yet") when an element is
+/// reached in a way not implemented:
+///
+/// - an index that is an expression of the loop index (`a[i + 1]`), or an
+///   array whose address depends on it;
+/// - an array in the unit's data or in the frame: the pointer is formed
+///   with `lea (d,A5)` (PKT_$RECENTLY_MISSING 0xE128D6 `lea (8,A5),A0`)
+///   or `movea.l A5,An; addq.l #d,An` (0xE4296E, 0xE5142E, 0xE4E478), with
+///   `lea (d,A6)` (0xE4EB06) or `movea.l A6,An; addq.l #d,An` (0xE427DE),
+///   both in one preheader at 0xE134DE: no rule found; another unit's
+///   array: `movea.l #abs,A0; lea (12,A0),A0` (HINT_$INIT_CACHE 0xE313DA),
+///   the address split between the immediate and the displacements not
+///   catalogued (section 5.2);
+/// - an array at a non-zero offset from its pointer (`p^.f[i]`: whether
+///   the offset goes into the pointer or the displacements is not seen;
+///   the sites looked at all have offset 0);
+/// - an array whose pointer is not a variable that the body leaves
+///   unchanged (a frame object never assigned or addressed in the body;
+///   a variable of the unit or of another unit when the body neither
+///   calls nor assigns it; a frame object a nested routine reaches,
+///   `uplevel` ([`Function::uplevel_refs`]), only when the body makes no
+///   call: a nested routine called in the body may assign it).
+fn stepped_arrays(
+    body: &[Stmt],
+    off: i32,
+    uplevel: &[(i32, u32)],
+) -> Result<Vec<SteppedArray>, &'static str> {
+    let mut out: Vec<SteppedArray> = Vec::new();
+    let mut err = None;
+    walk_eval(body, &mut |n| {
+        let Node::Addr(Addr::Index {
+            base, index, scale, ..
+        }) = n
+        else {
+            return;
+        };
+        if !expr_reads_frame(index, off) && !addr_reads_frame(base, off) {
+            return;
+        }
+        if !is_index(index, off) || addr_reads_frame(base, off) {
+            err.get_or_insert(
+                "an element at an index computed from a `for` index (strength reduction, \
+                 codegen-patterns 7.4) is",
+            );
+            return;
+        }
+        if *scale == 1 {
+            return;
+        }
+        let a = SteppedArray {
+            base: (**base).clone(),
+            scale: *scale,
+        };
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    for a in &out {
+        let Addr::Indirect { base: p, offset } = &a.base else {
+            return Err(
+                "a `for` loop stepping a pointer through an array not reached through a \
+                 pointer (in the unit's data or the frame: `lea (d,A5)` or `movea.l A5,An; \
+                 addq.l #d,An`, no rule found; another unit's: `movea.l #abs,An`, address \
+                 split not catalogued; codegen-patterns 7.4) is",
+            );
+        };
+        if *offset != 0 {
+            return Err(
+                "a `for` loop stepping a pointer through an array at an offset from its \
+                 pointer (codegen-patterns 7.4) is",
+            );
+        }
+        if !loop_invariant_pointer(p, body, uplevel) {
+            return Err(
+                "a `for` loop stepping a pointer through an array whose pointer is not a \
+                 variable the body leaves unchanged (codegen-patterns 7.4) is",
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `a` reads the frame object at `off` as a value.
+fn addr_reads_frame(a: &Addr, off: i32) -> bool {
     let mut hit = false;
-    walk(body, &mut |n| {
-        if let Node::Addr(Addr::Index { index, scale, .. }) = n {
-            let plain = matches!(&**index, Expr::Load { addr: Addr::Frame(o), .. } if *o == off);
-            hit |= expr_reads_frame(index, off) && !(plain && *scale == 1);
+    walk_addr(a, &mut |n| {
+        if let Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) = n
+        {
+            hit |= *o == off;
         }
     });
     hit
+}
+
+/// Whether pointer `p` is a variable `body` leaves unchanged
+/// ([`stepped_arrays`]).
+fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bool {
+    let Expr::Load { addr, ty } = p else {
+        return false;
+    };
+    let size = ty.bytes() as i32;
+    // Whether an object at `a` of `len` bytes (`None`: not known, an
+    // address taken) may overlap the pointer: a record holding it assigned
+    // or addressed as a whole counts.
+    let hits = |a: &Addr, len: Option<i32>| match (a, addr) {
+        (Addr::Frame(x), Addr::Frame(o)) | (Addr::Static(x), Addr::Static(o)) => {
+            *x < o + size && len.is_none_or(|n| *o < x + n)
+        }
+        (Addr::Symbol { name: n, .. }, Addr::Symbol { name, .. }) => n == name,
+        _ => false,
+    };
+    if !matches!(addr, Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. }) {
+        return false;
+    }
+    let reached = |o: i32| {
+        uplevel
+            .iter()
+            .any(|&(u, n)| u < o + size && o < u + n as i32)
+    };
+    if !matches!(addr, Addr::Frame(o) if !reached(*o)) && stmts_call(body) {
+        return false;
+    }
+    let mut ok = true;
+    walk(body, &mut |n| match n {
+        Node::Expr(Expr::AddrOf(a)) => ok &= !hits(a, None),
+        Node::Call(c) => {
+            for a in &c.args {
+                if let Arg::Address { addr: a, .. } = a {
+                    ok &= !hits(a, None);
+                }
+            }
+        }
+        _ => {}
+    });
+    dpc_ir::visit_stmts(body, &mut |st| match &st.kind {
+        StmtKind::Store { addr: a, value } => ok &= !hits(a, Some(value.ty().bytes() as i32)),
+        StmtKind::Copy { dst: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
+        StmtKind::Fill {
+            start: a,
+            count,
+            value,
+        } => ok &= !hits(a, Some((*count * value.ty().bytes()) as i32)),
+        _ => {}
+    });
+    ok
+}
+
+/// Whether `body` reads the `for` index at `off` other than as the index
+/// of the arrays its loop steps pointers through ([`stepped_arrays`]).
+fn index_read_unstepped(body: &[Stmt], off: i32) -> bool {
+    let (mut reads, mut stepped) = (0, 0);
+    walk(body, &mut |n| match n {
+        Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) if *o == off => reads += 1,
+        Node::Addr(Addr::Index { index, scale, .. }) if *scale > 1 && is_index(index, off) => {
+            stepped += 1
+        }
+        _ => {}
+    });
+    reads > stepped
 }
 
 /// The pointer locals of `f` held in an address register for the whole
@@ -1600,7 +1815,11 @@ enum ParamUse {
 /// Every use of a by-value parameter in `f`'s body, as (frame offset,
 /// use), in body order.
 fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
-    let mut u = Uses { f, out: Vec::new() };
+    let mut u = Uses {
+        f,
+        out: Vec::new(),
+        stepped: Vec::new(),
+    };
     u.stmts(&f.body);
     u.out
 }
@@ -1609,6 +1828,9 @@ fn param_uses(f: &Function) -> Vec<(i32, ParamUse)> {
 struct Uses<'a> {
     f: &'a Function,
     out: Vec<(i32, ParamUse)>,
+    /// The indices of the `for` loops being walked that step pointers
+    /// through their arrays ([`stepped_arrays`]).
+    stepped: Vec<i32>,
 }
 
 impl Uses<'_> {
@@ -1653,6 +1875,10 @@ impl Uses<'_> {
                 } if self.is_param(*o) || self.is_slot(*o) => self.out.push((*o, ParamUse::Base)),
                 b => self.expr(b),
             },
+            // An element reached through a stepped pointer: the array's
+            // pointer is used once, before the loop (below, `For`).
+            Addr::Index { index, scale, .. }
+                if *scale > 1 && self.stepped.iter().any(|&o| is_index(index, o)) => {}
             Addr::Index { base, index, .. } => {
                 self.address(base);
                 self.expr(index);
@@ -1730,11 +1956,25 @@ impl Uses<'_> {
                         self.stmts(body);
                     }
                 }
+                // The pointers of the arrays a `for` loop steps through
+                // are loaded once, before it (codegen-patterns 7.4;
+                // LOG_$READ's worker loads `buffer`, a by-address slot,
+                // at 0xE177CC, not at entry).
                 StmtKind::For(l) => {
                     self.expr(&l.from);
                     self.expr(&l.to);
+                    let arrays = stepped_arrays(&l.body, l.index.offset, &self.f.uplevel_refs);
+                    if let Ok(arrays) = &arrays {
+                        for a in arrays {
+                            self.address(&a.base);
+                        }
+                        self.stepped.push(l.index.offset);
+                    }
                     for _ in 0..2 {
                         self.stmts(&l.body);
+                    }
+                    if arrays.is_ok() {
+                        self.stepped.pop();
                     }
                 }
                 StmtKind::Case {
@@ -1853,6 +2093,10 @@ pub struct Selector {
     /// (a `while`'s or `repeat`'s test, a `for`'s step) and the label
     /// `exit` goes to (after the loop), once made ([`Self::loop_target`]).
     loops: Vec<(Option<u32>, Option<u32>)>,
+    /// The pointers of the `for` loops being selected, stepped through
+    /// arrays by the element size ([`Self::for_`]): the index's frame
+    /// offset, the array, and the (virtual) address register.
+    stepped: Vec<(i32, SteppedArray, u8)>,
     /// The indices in `out` of the branches `exit` and `next` emitted
     /// ([`select_body`] refuses one to the very next instruction).
     loop_jumps: Vec<(usize, Span)>,
@@ -1980,6 +2224,7 @@ impl Selector {
             data_absolute: false,
             abs_base: None,
             loops: Vec::new(),
+            stepped: Vec::new(),
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
             link: None,
@@ -2537,14 +2782,9 @@ impl Selector {
     fn for_(&mut self, f: &Function, l: &ForLoop) -> Res<()> {
         let span = self.span;
         let off = l.index.offset;
-        let uses_index = stmts_read_frame(&l.body, off);
-        if strength_reduced_index(&l.body, off) {
-            return Err(unsupported(
-                span,
-                "indexing an array of elements wider than a byte by a `for` index (strength \
-                 reduction to a stepping pointer, codegen-patterns 7.4) is",
-            ));
-        }
+        let arrays =
+            stepped_arrays(&l.body, off, &f.uplevel_refs).map_err(|m| unsupported(span, m))?;
+        let uses_index = index_read_unstepped(&l.body, off);
         let konst = |e: &Expr| match e {
             Expr::Const { value, .. } => Some(*value),
             _ => None,
@@ -2644,6 +2884,10 @@ impl Selector {
         } else {
             None
         };
+        let ptrs = self.stepped_pointers(&arrays, init)?;
+        let depth = self.stepped.len();
+        self.stepped
+            .extend(arrays.iter().zip(&ptrs).map(|(a, &r)| (off, a.clone(), r)));
         let multi = self.multi;
         let head = self.new_label();
         let step = self.new_label();
@@ -2679,12 +2923,86 @@ impl Selector {
             });
             self.pinned.retain(|&(o, _)| o != off);
         }
+        // The pointers after the index, in the reverse order of their
+        // forming (codegen-patterns 7.4: 29 of 30 loops; 0xE177EE `addq.l
+        // #2,A1`, the destination, before `addq.l #2,A0`; 0xE2F3F8 forms
+        // A2, A1, A0 and steps A0, A1, A2): `addq.l #s` (`subq.l` for
+        // `downto`, 0xE3C99A `subq.l #4,A1`) up to 8, `lea (s,An),An` above
+        // (HINT_$INIT_CACHE 0xE313F4 `lea (12,A0),A0`).
+        for (a, &r) in arrays.iter().zip(&ptrs).rev() {
+            let s = a.scale;
+            self.out.push(match (s, l.down) {
+                (1..=8, false) => Insn::Addq {
+                    size: Size::L,
+                    value: s as u8,
+                    dst: Ea::Reg(Reg::A(r)),
+                },
+                (1..=8, true) => Insn::Subq {
+                    size: Size::L,
+                    value: s as u8,
+                    dst: Ea::Reg(Reg::A(r)),
+                },
+                _ => Insn::Lea {
+                    src: Ea::Disp(if l.down { -(s as i32) } else { s as i32 }, r),
+                    dst: r,
+                },
+            });
+        }
+        self.stepped.truncate(depth);
         self.out.push(Insn::Dbf {
             reg: count,
             label: head,
         });
         self.place(exit);
         Ok(())
+    }
+
+    /// Form the pointers of a `for` loop's stepped arrays
+    /// ([`stepped_arrays`], codegen-patterns 7.4) after its count and
+    /// index: each array's pointer is loaded into an address register (or
+    /// taken from the one it was loaded into at entry), all of them first,
+    /// then each stepping pointer is formed from it with `lea (from ×
+    /// size,An),Ap`, `lea (An),Ap` for 0, in the order of first use
+    /// (0xE4F010 `movea.l D6,A4; lea (2,A3),A1; lea (2,A4),A0`; 0xE6FCC6
+    /// loads its second base before forming the first pointer; LOG_$READ's
+    /// worker 0xE177E0 `lea (2,A1),A0; lea (2,A2),A1`; PKT_$DUMP_DATA
+    /// 0xE12800 `lea (4,A0),A2` from a pointer loaded at entry; 0xE3E4C6
+    /// `lea (A3),A2`).  The pointer is the address of the element at the
+    /// index *plus the lower bound times the size*, so the elements are
+    /// reached at the displacements the selector forms anyway (the lower
+    /// bound and field offsets folded in, section 5.2): 0xE177E8 `move.w
+    /// (-2,A0),(-2,A1)`.  A new register for each pointer (R2, no copy
+    /// coalescing; 0xE177E0 although A1 dies there).  **Not reproduced:**
+    /// the forms in place (`lea (12,A0),A0` after `movea.l (12,A6),A0`,
+    /// 0xE7632C, 0xE76378, 0xE76448; `movea.l (32,A6),A1; ...; addq.l
+    /// #2,A1`, 0xE6FCC6), and LOG_$READ's worker's `movea.l (8,A6),A2`
+    /// hoisted above the count (0xE177CC; 12.4 R11/R12).
+    fn stepped_pointers(&mut self, arrays: &[SteppedArray], from: i64) -> Res<Vec<u8>> {
+        let mut bases = Vec::new();
+        for a in arrays {
+            let Addr::Indirect { base, .. } = &a.base else {
+                unreachable!("stepped_arrays takes arrays through pointers only")
+            };
+            bases.push(self.eval_a(base)?);
+        }
+        let mut ptrs = Vec::new();
+        for (a, &b) in arrays.iter().zip(&bases) {
+            let d = from * a.scale as i64;
+            if !(-0x8000..0x8000).contains(&d) {
+                return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+            }
+            let r = self.alloc_a()?;
+            self.out.push(Insn::Lea {
+                src: if d == 0 {
+                    Ea::Ind(b)
+                } else {
+                    Ea::Disp(d as i32, b)
+                },
+                dst: r,
+            });
+            ptrs.push(r);
+        }
+        Ok(ptrs)
     }
 
     /// `case selector of ... otherwise ... end` (ref "Case", pp.
@@ -4020,7 +4338,9 @@ impl Selector {
             | Addr::Static(_)
             | Addr::Symbol { .. }
             | Addr::Const(_) => false,
-            Addr::Index { .. } => true,
+            Addr::Index {
+                base, index, scale, ..
+            } => self.stepped_pointer(base, index, *scale).is_none(),
             Addr::Indirect { base, .. } => !matches!(
                 &**base,
                 Expr::Load { addr: Addr::Frame(o), .. } if self.pinned(*o).is_some()
@@ -5534,10 +5854,21 @@ impl Selector {
                     ));
                 }
                 if let Some(c) = pow2 {
+                    if !signed && op == BinOp::Div {
+                        // `lsr.w`, as `lsr.l` for longwords (0xE14086
+                        // `lsr.l #1,D0`; 0xE06E2E): LOG_$READ's worker
+                        // 0xE177D2..0xE177D8 `move.w (A0),D0; lsr.w #1,D0`
+                        // halves a `0..65535` word (`log/read_internal.c`
+                        // `*actual_len >> 1`; `div 2` in our
+                        // reconstruction, Uncertain).
+                        let d = self.eval_d(lhs)?;
+                        self.shift_by(ShiftOp::Lsr, d, c.trailing_zeros(), Width::Word);
+                        return Ok(Val::Tmp(d));
+                    }
                     if !signed {
                         return Err(unsupported(
                             self.span,
-                            "an unsigned `div`/`mod` by a power of two (shift or mask?) is",
+                            "an unsigned `mod` by a power of two (mask or division?) is",
                         ));
                     }
                     if op == BinOp::Div {
@@ -6564,6 +6895,26 @@ impl Selector {
     ///   and `(d,Am)` (BAT_$GET_BAT_STEP 0xE3BB6E..0xE3BB72 `lea
     ///   (0,A5,D1.w),A0; move.w (-0x220,A0),D0`; ACL_$IN_SUBSYS 0xE470B2).
     fn index_ea(&mut self, base: &Addr, index: &Expr, scale: u32, offset: i32) -> Res<Ea> {
+        if let Some(p) = self.stepped_pointer(base, index, scale) {
+            // Through the `for` loop's stepped pointer ([`Self::for_`]):
+            // `(d,Ap)`, the lower bound and field offsets in `d` (0xE177E8
+            // `move.w (-2,A0),(-2,A1)`; PKT_$RECENTLY_MISSING 0xE128DC
+            // `cmp.l (-8,A0),D1`).  An access at displacement 0 is made
+            // with `(An)+` where it is the pointer's last use (0xE00ED8
+            // `clr.l (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l #3,A2`),
+            // which `dpc` does not do.
+            if offset == 0 {
+                return Err(unsupported(
+                    self.span,
+                    "an element of a stepped array at displacement 0 (`(An)+`, \
+                     codegen-patterns 7.4) is",
+                ));
+            }
+            if !(-0x8000..0x8000).contains(&offset) {
+                return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+            }
+            return Ok(Ea::Disp(offset, p));
+        }
         let (areg, disp0) = match base {
             // AUDIT_$SUSPEND 0xE70DBA..0xE70DC6 loads the base between
             // the index load and its scaling: not modelled.
@@ -6615,6 +6966,16 @@ impl Selector {
         } else {
             Ea::Disp(disp, a)
         })
+    }
+
+    /// The pointer a `for` loop steps through the array at `base` for
+    /// elements of `scale` bytes, when `index` is that loop's index.
+    fn stepped_pointer(&self, base: &Addr, index: &Expr, scale: u32) -> Option<u8> {
+        self.stepped
+            .iter()
+            .rev()
+            .find(|(o, a, _)| is_index(index, *o) && a.scale == scale && a.base == *base)
+            .map(|&(_, _, r)| r)
     }
 
     /// The scaled index of an array element in a data register.
@@ -8608,6 +8969,101 @@ mod tests {
         assert_eq!(body_text(&f)[1], "clr.w\t%d1");
     }
 
+    /// Stepped pointers (codegen-patterns 7.4): LOG_$READ's worker
+    /// 0xE177E0..0xE177F2 `lea (2,A1),A0; lea (2,A2),A1; move.w
+    /// (-2,A0),(-2,A1); addq.l #2,A1; addq.l #2,A0; dbf`; the source formed
+    /// first, stepped last; `subq.l` for `downto`; `lea (s,An),An` above 8.
+    #[test]
+    fn stepped_pointer_loops() {
+        let through = |name: &str| Addr::Indirect {
+            base: Box::new(load(sym(name), Scalar::POINTER)),
+            offset: 0,
+        };
+        let elem = |name: &str, scale: u32, offset: i32| Addr::Index {
+            base: Box::new(through(name)),
+            index: Box::new(index()),
+            scale,
+            offset,
+        };
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(1, word()),
+                konst(16, word()),
+                false,
+                vec![store(elem("DST", 2, -2), load(elem("SRC", 2, -2), word()))],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "pea\t(%a2)",
+                "moveq\t#0xf,%d0",
+                "movea.l\t(SRC).l,%a0",
+                "movea.l\t(DST).l,%a1",
+                "lea\t(2,%a0),%a2",
+                "lea\t(2,%a1),%a0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t(-2,%a2),(-2,%a0)",
+                "addq.l\t#2,%a0",
+                "addq.l\t#2,%a2",
+                "dbf\t%d0,2b",
+                "movea.l\t(-8,%fp),%a2",
+            ]
+        );
+        // Downward, 12-byte elements of a 0-based array, a field at 4, and
+        // the index read besides.
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(4, word()),
+                konst(1, word()),
+                true,
+                vec![store(elem("TAB", 12, 4), index())],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "moveq\t#3,%d0",
+                "moveq\t#4,%d1",
+                "movea.l\t(TAB).l,%a0",
+                "lea\t(0x30,%a0),%a1",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t%d1,(4,%a1)",
+                "subq.w\t#1,%d1",
+                "lea\t(-0xc,%a1),%a1",
+                "dbf\t%d0,2b",
+            ]
+        );
+        // From 0: the pointer is the array's address, `lea (An),Ap`
+        // (0xE3E4C6 `lea (A3),A2`); no index register.
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                konst(3, word()),
+                false,
+                vec![store(elem("TAB", 12, 4), konst(0, word()))],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "moveq\t#3,%d0",
+                "movea.l\t(TAB).l,%a0",
+                "lea\t(%a0),%a1",
+                ".balignw\t4,0x2048",
+                "2:",
+                "clr.w\t(4,%a1)",
+                "lea\t(0xc,%a1),%a1",
+                "dbf\t%d0,2b",
+            ]
+        );
+    }
+
     /// Refused `for` loops (codegen-patterns 7.4).
     #[test]
     fn unsettled_for_loops() {
@@ -8633,10 +9089,11 @@ mod tests {
             one(konst(0, word()), load(sym("N"), word()), false, vec![w()])
                 .contains("with these bounds")
         );
-        // An array of words indexed by the index: strength-reduced.
-        let elem = Addr::Index {
-            base: Box::new(sym("TAB")),
-            index: Box::new(index()),
+        // An array of words indexed by the index: stepped pointers, only
+        // through a pointer variable.
+        let elem = |base: Addr, index: Expr| Addr::Index {
+            base: Box::new(base),
+            index: Box::new(index),
             scale: 2,
             offset: -2,
         };
@@ -8644,9 +9101,60 @@ mod tests {
             konst(1, word()),
             konst(4, word()),
             false,
-            vec![store(elem, konst(0, word()))]
+            vec![store(elem(sym("TAB"), index()), konst(0, word()))]
         )
-        .contains("strength reduction"));
+        .contains("not reached through a pointer"));
+        let through = |offset| Addr::Indirect {
+            base: Box::new(load(sym("P"), Scalar::POINTER)),
+            offset,
+        };
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![store(elem(through(4), index()), konst(0, word()))]
+        )
+        .contains("at an offset from its pointer"));
+        // `a[i + 1]`: the displacement folding of an index expression is
+        // not implemented.
+        let plus = Expr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(index()),
+            rhs: Box::new(konst(1, word())),
+            ty: word(),
+        };
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![store(elem(through(0), plus), konst(0, word()))]
+        )
+        .contains("index computed from a `for` index"));
+        // Displacement 0 (`(An)+`): a 0-based array from 0... from 1.
+        let elem0 = Addr::Index {
+            base: Box::new(through(0)),
+            index: Box::new(index()),
+            scale: 2,
+            offset: 0,
+        };
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![store(elem0, konst(0, word()))]
+        )
+        .contains("at displacement 0"));
+        // The pointer assigned in the body.
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![
+                store(elem(through(0), index()), konst(0, word())),
+                store(sym("P"), konst(0, Scalar::POINTER)),
+            ]
+        )
+        .contains("leaves unchanged"));
         // `next` as the last statement: a branch to the next instruction.
         assert!(one(
             konst(1, word()),

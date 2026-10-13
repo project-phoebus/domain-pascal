@@ -1,10 +1,13 @@
 { PENDING: not in manifest.txt.  dpc cannot compile the worker yet; the
-  first diagnostic is the type transfer `univ_ptr(integer32(...) +
-  offset)'; past it, the `for' loop's (an index of an array of words:
-  the stepped pointers of codegen-patterns 7.4 are not implemented; then
-  its run-time count without a call in the body).  What is missing is
-  listed in docs/codegen-patterns.md section 12.3 (bead
-  domain-pascal-g5q.4).  When it compiles, move it to
+  type transfers and the `for' loop's stepped pointers are implemented
+  (bead domain-pascal-5aw.17); the first diagnostic is now the loop's
+  run-time count without a call in the body (kept in place or copied:
+  no rule, codegen-patterns 7.4), then the fresh load of `buffer' in a
+  body with branches (12.4 R4(b)).  What else differs from the image
+  (R8, R6, `src' held in a register, the base load hoisted) is listed
+  in docs/codegen-patterns.md section 12.3, "Status after bead
+  domain-pascal-5aw.17" (bead domain-pascal-g5q.4).  When it compiles,
+  move it to
   tests/conformance/log_read.pas and add to the manifest
 
     tests/conformance/log_read.pas  0xE17778 LOG_$READ

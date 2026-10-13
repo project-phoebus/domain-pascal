@@ -2550,3 +2550,106 @@ end;
         assert!(e[0].ends_with("not supported yet"), "{e:?}");
     }
 }
+
+/// Type transfers (ref "Type Transfer Functions", pp. 4-197..4-199): no
+/// code between types of one size (a load or a constant retyped, anything
+/// else in a same-width [`Expr::Convert`]); between integers a conversion
+/// as in an assignment (widening by the operand's sign; narrowing only
+/// where the value can be computed at the narrower width).
+#[test]
+fn type_transfers() {
+    let src = "module m;
+type
+  pint = 0..65535;
+  colour = (red, green, blue);
+  wptr = ^integer;
+var
+  p: wptr;
+  q: univ_ptr;
+  l: integer32;
+  w, x: integer;
+  u: pint;
+  c: colour;
+procedure s(offset: pint); internal;
+begin
+  q := univ_ptr(integer32(p) + offset);
+  l := integer32(p);
+  p := wptr(l);
+  l := integer32(u);
+  w := integer(u);
+  c := colour(w);
+  w := integer16(u + x);
+  p := univ_ptr(16#10000);
+end;";
+    let m = lower_src(src).unwrap();
+    let body = &m.functions[0].body;
+    let value = |i: usize| match &body[i].kind {
+        StmtKind::Store { value, .. } => value.clone(),
+        k => panic!("not a store: {k:?}"),
+    };
+    let long = Scalar::signed(Width::Long);
+    // integer32(p) + offset: the pointer's load retyped, the offset
+    // zero-extended, the sum seen as a pointer through a same-width
+    // conversion (no code).
+    let Expr::Convert { value: sum, ty } = value(0) else {
+        panic!("not a retyped sum")
+    };
+    assert_eq!(ty, Scalar::POINTER);
+    let Expr::Binary {
+        op: BinOp::Add,
+        lhs,
+        rhs,
+        ty,
+    } = *sum
+    else {
+        panic!("not a sum")
+    };
+    assert_eq!(ty, long);
+    assert!(matches!(*lhs, Expr::Load { ty, .. } if ty == long));
+    assert!(matches!(*rhs, Expr::Convert { ref value, ty }
+        if ty == long && value.ty() == Scalar::unsigned(Width::Word)));
+    assert!(matches!(value(1), Expr::Load { ty, .. } if ty == long));
+    assert!(matches!(value(2), Expr::Load { ty, .. } if ty == Scalar::POINTER));
+    assert!(matches!(value(3), Expr::Convert { ty, .. } if ty == long));
+    assert!(matches!(value(4), Expr::Load { ty, .. } if ty == Scalar::signed(Width::Word)));
+    assert!(matches!(value(5), Expr::Load { ty, .. } if ty == Scalar::unsigned(Width::Word)));
+    // integer16(u + x), a longword sum (u is a `0..65535` word): computed
+    // at the word's width (p. 4-198).
+    assert!(matches!(value(6), Expr::Binary { ty, .. } if ty == Scalar::signed(Width::Word)));
+    assert!(matches!(value(7), Expr::Const { value: 0x10000, ty } if ty == Scalar::POINTER));
+    // A constant transferred keeps its bits, read as the new type (sema's
+    // fold, as the code computes it at run time): `0..65535(-1)` is 65535,
+    // `integer16(0..65535(65535))` -1, `integer16(16#18000)` truncated.
+    let m = lower_src(
+        "module m; type pint = 0..65535; var l: integer32;
+         procedure s; begin
+           l := integer32(pint(-1));
+           l := integer32(integer16(pint(65535)));
+           l := integer32(integer16(16#18000));
+           l := integer32(integer16(-1));
+         end;",
+    )
+    .unwrap();
+    let consts: Vec<i64> = m.functions[0]
+        .body
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Store {
+                value: Expr::Const { value, .. },
+                ..
+            } => *value,
+            k => panic!("not a constant store: {k:?}"),
+        })
+        .collect();
+    assert_eq!(consts, [0xffff, -1, -0x8000, -1]);
+    // Narrowing a plain longword load is not catalogued, as in an
+    // assignment.
+    let e = errs(
+        "module m; var l: integer32; w: integer;
+         procedure s; begin w := integer(l) end;",
+    );
+    assert!(
+        e[0].contains("type transfer of a 4-byte integer to a 2-byte one"),
+        "{e:?}"
+    );
+}
