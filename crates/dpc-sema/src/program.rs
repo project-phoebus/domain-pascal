@@ -178,6 +178,12 @@ pub struct Routine {
     pub frame_size: u32,
     /// Nested routines in source order.
     pub nested: Vec<RoutineId>,
+    /// The unit-level and `static` variables (no owner routine) that the
+    /// body names, first reference each, in source order.  IR lowering
+    /// checks them against the routine's data section (codegen-patterns
+    /// 4, 11: the data base reaches only the block of the routine's own
+    /// data section).
+    pub static_refs: Vec<(VarId, Span)>,
     /// The action part; `None` for an `extern` / `forward`-only routine.
     pub body: Option<Block>,
     pub span: Span,

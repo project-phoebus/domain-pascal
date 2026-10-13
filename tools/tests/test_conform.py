@@ -180,6 +180,49 @@ class ConformTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('section .data differs first at 0xE148E7: ours 57, image 56', out)
 
+    def test_extra_code_section(self):
+        # a second code section with --section-addr is linked there and
+        # compared whole; its globals must be map names at their address
+        # (SCSI_ 0xE34F04 in OS_INIT_PROC, 0xE88800 in SCSI_WIRED_PROC)
+        def unit(name, wired):
+            path = os.path.join(SCRATCH, name)
+            with open(path, 'w') as f:
+                f.write('\t.section\t".text.SCSI_.OS_INIT_PROC","ax",@progbits\n'
+                        '\t.globl\tSCSI_$CINIT\nSCSI_$CINIT:\n'
+                        '\tlink.w\t%fp,#-4\n\tmove.l\t#0x100002,%d0\n'
+                        '\tunlk\t%fp\n\trts\n\t.balignw\t4,0x2048\n'
+                        '\t.section\t".text.SCSI_.SCSI_WIRED_PROC","ax",@progbits\n'
+                        + wired)
+            return path
+        sec = '.text.SCSI_.SCSI_WIRED_PROC'
+        good = unit('scsi_ok.s', '\t.globl\tSCSI_$FREE_ASID\nSCSI_$FREE_ASID:\n\trts\n'
+                                 '\t.balignw\t4,0x2048\n')
+        ok, out = self.run_check(good, ['SCSI_$CINIT'])
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x14 bytes', out)
+        ok, out = self.run_check(good, ['SCSI_$CINIT'], section_addrs={sec: 0xE88800})
+        self.assertTrue(ok, out)
+        self.assertIn('OK section %s 0xE88800 0x4' % sec, out)
+        ok, out = self.run_check(good, ['SCSI_$CINIT'], section_addrs={sec: 0xE88802})
+        self.assertFalse(ok)
+        self.assertIn('code section %s differs first at 0xE88802' % sec, out)
+        self.assertIn('symbol SCSI_$FREE_ASID linked at 0xE88802, map has 0xE88800', out)
+        bad = unit('scsi_bad.s', '\t.globl\tSCSI_$FREE_ASID\nSCSI_$FREE_ASID:\n\trte\n'
+                                 '\t.balignw\t4,0x2048\n')
+        ok, out = self.run_check(bad, ['SCSI_$CINIT'], section_addrs={sec: 0xE88800})
+        self.assertFalse(ok)
+        self.assertIn('code section %s differs first at 0xE88801' % sec, out)
+        self.assertIn('code section %s at 0xE88802: not the start of a code segment' % sec,
+                      self.run_check(good, ['SCSI_$CINIT'], section_addrs={sec: 0xE88802})[1])
+        # a prefix of a longer segment: the bytes match (PROC1_ in
+        # WIRED_PROC starts `link.w A6,#0; pea (A2)', 0xE1471C), the size
+        # does not
+        prefix = unit('scsi_prefix.s', '\t.short\t0x4e56,0x0000,0x4852\n')
+        ok, out = self.run_check(prefix, ['SCSI_$CINIT'], section_addrs={sec: 0xE1471C})
+        self.assertFalse(ok)
+        self.assertNotIn('differs first', out)
+        self.assertIn('code section %s: ours 0x6 bytes, map segment PROC1_ 0xE1471C' % sec, out)
+
     def test_manifest_setup_error_exits_2(self):
         path = os.path.join(SCRATCH, 'manifest_unknown.txt')
         with open(path, 'w') as f:
@@ -349,7 +392,7 @@ class ConformTest(unittest.TestCase):
         work = os.path.join(SCRATCH, 'data_area')
         os.makedirs(work, exist_ok=True)
         asm = conform.compile_pas(src, DPC, work, ['--fragment-origin', '0xE14BBA'])
-        sec = '.bss.moddata.PROC1_'
+        sec = '.bss.moddata.PROC1_.WIRED_DATA'
         ok, out = self.run_check(asm, specs, work=work, section_addrs={sec: 0xE254E8})
         self.assertTrue(ok, out)
         # `lea <data>.l,A5' at 0xE14BC0: its operand must be the D segment
@@ -403,7 +446,7 @@ class ConformTest(unittest.TestCase):
     @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
     def test_manifest_forwards_a5(self):
         smd = ('tests/conformance/smd_busy_wait.pas  SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  '
-               '--section-addr .bss.moddata.SMD=0xE2E060')
+               '--section-addr .bss.moddata.SMD.WIRED_DATA=0xE2E060')
         rc, out = self.manifest('a5_from.txt', smd + '  a5-always-from=smd_$busy_wait')
         self.assertEqual(rc, 0, out)
         # the per-routine list does the same
@@ -540,8 +583,10 @@ class A5ArgsTest(unittest.TestCase):
             conform.a5_args(['a5-always-from=SMD_$BUSY_WAIT', 'a5-always=A,B',
                              'a5-absolute=C']),
             ['--a5-always-from=SMD_$BUSY_WAIT', '--a5-always=A,B', '--a5-absolute=C'])
+        # one routine per code section (codegen-patterns 11)
+        self.assertEqual(conform.a5_args(['a5-always-from=A,B']), ['--a5-always-from=A,B'])
         for bad in (['a5-always-from='], ['a5-always='], ['a5-always=A,'],
-                    ['a5-absolute=,A'], ['a5-always-from=A,B'],
+                    ['a5-absolute=,A'], ['a5-always-from=A,'],
                     ['a5-always=A', 'a5-always=B']):
             with self.assertRaises(conform.SetupError):
                 conform.a5_args(bad)
@@ -553,8 +598,10 @@ class LoopAlignArgsTest(unittest.TestCase):
         self.assertEqual(conform.loop_align_args(['loop-align=off']), ['--loop-align=off'])
         self.assertEqual(conform.loop_align_args(['loop-align-off-from=VTOC_$DISMOUNT']),
                          ['--loop-align-off-from=VTOC_$DISMOUNT'])
+        self.assertEqual(conform.loop_align_args(['loop-align-off-from=A,B']),
+                         ['--loop-align-off-from=A,B'])
         for bad in (['loop-align=maybe'], ['loop-align-off-from='],
-                    ['loop-align=on', 'loop-align=off']):
+                    ['loop-align-off-from=A,'], ['loop-align=on', 'loop-align=off']):
             with self.assertRaises(conform.SetupError):
                 conform.loop_align_args(bad)
 

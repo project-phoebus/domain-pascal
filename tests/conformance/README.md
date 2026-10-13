@@ -237,8 +237,9 @@ inherit A5); in "always mode" every exported routine with a frame does.
 A manifest line passes dpc's options as tokens after its specs (`.pas`
 units only, each at most once):
 
-- `a5-always-from=NAME`: `dpc --a5-always-from=NAME`, always mode from
-  routine NAME on (emission order), as `loop-align-off-from=`;
+- `a5-always-from=NAME,...`: `dpc --a5-always-from=NAME,...`, always
+  mode from routine NAME on within its code section, one NAME per code
+  section, as `loop-align-off-from=`;
 - `a5-always=NAME,...`: `dpc --a5-always=...`, these routines load A5
   whatever their body (`internal` ones too);
 - `a5-absolute=NAME,...`: `dpc --a5-absolute=...`, these exported
@@ -284,6 +285,29 @@ of a module, and may start at 2 mod 4 (PROC1_$TST_LOCK 0xE148CA).  So:
 - A fragment may have only one code section (dpc rejects more): where a
   second one would start in the module is not known.
 
+## Named sections
+
+A unit whose module heading or routines name sections (codegen-patterns
+11; ref 7.1.1, 5.7.1) gets one output section per Pascal section:
+`.text.<UNIT>.<SECTION>` for code, `.bss.moddata.<UNIT>.<SECTION>` for
+its data areas (the defaults stay `.text` and `.bss.moddata.<UNIT>`).
+The manifest places a data area as before, with `--section-addr`.  A
+code section named in `--section-addr` is another code section of the
+unit's module, a segment of another output section of the map: the
+harness links it at that address in an output section of its own and
+compares it whole (bytes, relocations, its globals at their map
+addresses, literal addresses; the address must start a code segment of
+the map and the section be exactly its length), and prints `OK section
+NAME 0xADDR LEN`.
+The unit's routine specs are in the code section without
+`--section-addr`.  Each code section is a whole map segment (a fragment
+has one code section).  `scsi.pas` is the whole SCSI_ module:
+SCSI_$CINIT in OS_INIT_PROC (0xE34F04), SCSI_$FREE_ASID in
+SCSI_WIRED_PROC (0xE88800), SCSI_$PRESENT in SCSI_WIRED_DATA (0xE88804).
+`proc1_get_loadav.pas` and `smd_busy_wait.pas` name their real sections
+(WIRED_PROC, WIRED_DATA); their bytes are those of the default
+sections.
+
 ## Loop alignment on and off
 
 In the image, loop alignment is on for a leading run of the routines of a
@@ -294,10 +318,11 @@ XNS_IDP_$OS_OPEN.  dpc reproduces this with options, which a manifest
 line passes as tokens after its specs (`.pas` units only):
 
 - `loop-align=on` (the default) / `loop-align=off`: `dpc --loop-align=...`;
-- `loop-align-off-from=NAME`: `dpc --loop-align-off-from=NAME`, on for
-  the unit's routines before routine NAME (its Pascal name or symbol, any
-  case) and off from it on.  A name that is not a routine of the unit is
-  an error.
+- `loop-align-off-from=NAME,...`: `dpc --loop-align-off-from=NAME,...`,
+  on for the routines of NAME's code section before routine NAME (its
+  Pascal name or symbol, any case) and off from it on; one NAME per code
+  section, as each map segment has its own switch.  A name that is not a
+  routine of the unit, or two in one code section, is an error.
 
 A routine that does not align gets no `0x2048` before its loop heads.
 The end of a module, or of a unit compiled with `--fragment-ends-module`,

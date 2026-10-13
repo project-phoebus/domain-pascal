@@ -95,6 +95,12 @@ Tests:
   longword chain; TTY_$I_SIGNAL 0xE1B82C's copied selector).
 - `data/through_worker` - codegen-patterns 4, 1.5: LOG_$READ 0xE17800,
   A5 loaded for an internal callee, by-address parameters passed on.
+- `sections/named_sections` - codegen-patterns 11, 4, 1.6: sections
+  named in the module heading and in `[section(c,d)]`, one output
+  section per Pascal section with its own module-end padding, A5 per
+  data section, `jsr abs.l` into another code section from a statement
+  and from an expression (PROC1_$INIT 0xE2F9EC), an internal routine so
+  called loading its own A5 (0xE14B12).
 - `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the
   allocator (bead domain-pascal-g5q.5): parameters held across calls in
   A2/D2 with `pea (d,A2)` pushes (module-local 0xE32B76), a third data

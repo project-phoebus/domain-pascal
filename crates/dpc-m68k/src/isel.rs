@@ -213,6 +213,7 @@ fn select_body_with(
 ) -> Result<(Body, Vec<(u32, u32)>), Diagnostic> {
     let mut s = Selector::new(f.span);
     s.cse_plan = plan;
+    s.data_label = crate::emit::data_base_label(&f.data_section);
     if f.loads_data_base {
         s.load_data_base();
     }
@@ -2442,6 +2443,9 @@ pub struct Selector {
     /// With `data_absolute`: the address register the area's address was
     /// loaded into, once the first static operand needed it.
     abs_base: Option<u8>,
+    /// The label of the routine's data area, the block of its data
+    /// section ([`crate::emit::data_base_label`]).
+    data_label: String,
     /// The loops being selected, innermost last: the label `next` goes to
     /// (a `while`'s or `repeat`'s test, a `for`'s step) and the label
     /// `exit` goes to (after the loop), once made ([`Self::loop_target`]).
@@ -2559,6 +2563,7 @@ enum Val {
 impl Selector {
     fn new(span: Span) -> Selector {
         Selector {
+            data_label: DATA_BASE_LABEL.into(),
             out: Vec::new(),
             vregs: VRegs::new(),
             clobbered: RegSet::EMPTY,
@@ -2679,7 +2684,7 @@ impl Selector {
         }
         let a = self.alloc_a()?;
         self.out.push(Insn::Lea {
-            src: Ea::AbsL(DATA_BASE_LABEL.into(), 0),
+            src: Ea::AbsL(self.data_label.clone(), 0),
             dst: a,
         });
         self.abs_base = Some(a);
@@ -4280,7 +4285,7 @@ impl Selector {
     /// it with `pea (A5)` or inside the `movem` (`frame.rs`).
     fn load_data_base(&mut self) {
         self.out.push(Insn::Lea {
-            src: Ea::AbsL(DATA_BASE_LABEL.into(), 0),
+            src: Ea::AbsL(self.data_label.clone(), 0),
             dst: DATA_BASE_A,
         });
         self.clobbered.insert(DATA_BASE);
@@ -5146,7 +5151,10 @@ impl Selector {
             }
         }
         let insn = match &c.callee {
-            Callee::External(sym) => Insn::Jsr(Ea::AbsL(sym.clone(), 0)),
+            // codegen-patterns 1.6: another unit's routine, or one of
+            // this unit in another code section (PROC1_$INIT 0xE2F9EC
+            // `jsr 0xE14B12`).
+            Callee::External(sym) | Callee::Section(sym) => Insn::Jsr(Ea::AbsL(sym.clone(), 0)),
             Callee::Local(sym) => Insn::Bsr {
                 target: sym.clone(),
                 short: true,
@@ -7947,6 +7955,7 @@ mod tests {
             symbol: "F".into(),
             global: true,
             code_section: ".text".into(),
+            data_section: ".data".into(),
             frame_size,
             result,
             loads_data_base: false,

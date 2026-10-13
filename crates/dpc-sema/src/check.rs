@@ -1549,6 +1549,7 @@ impl<'t> Checker<'t> {
             frame_vars: Vec::new(),
             frame_size: 0,
             nested: Vec::new(),
+            static_refs: Vec::new(),
             body: None,
             span: r.span,
         });
@@ -2367,6 +2368,14 @@ impl<'t> Checker<'t> {
             Some(o) => self.cur_level() - self.routines[o.0 as usize].level,
             None => 0,
         };
+        if var.owner.is_none() {
+            if let Some(c) = self.ctx.last() {
+                let refs = &mut self.routines[c.id.0 as usize].static_refs;
+                if !refs.iter().any(|&(x, _)| x == v) {
+                    refs.push((v, span));
+                }
+            }
+        }
         Expr {
             kind: ExprKind::Var { var: v, uplevel },
             ty: var.ty,

@@ -8,8 +8,11 @@
   A fragment compiled with `dpc --fragment-origin 0xE1D89C
   --fragment-ends-module'; the module-end 0x2048 at 0xE1D8DA belongs to
   SMD_$LITES (the unit has no loop; alignment is on by default).  The
-  data area, `.bss.moddata.SMD', is placed at the map's `D E2E060 SMD'
-  (manifest --section-addr).
+  module heading names the map's sections (codegen-patterns 11), so the
+  code is `.text.SMD.WIRED_PROC' and the data area
+  `.bss.moddata.SMD.WIRED_DATA', placed at the map's `D E2E060 SMD'
+  (manifest --section-addr); with the default sections the bytes are
+  the same.
 
   The segment switches to always mode at SMD_$BUSY_WAIT (codegen-patterns
   4; `tools/a5survey.py switch SMD', segment 0xE1D750:
@@ -37,7 +40,7 @@
   a variable only so that the unit has a data area for A5 to point at
   (none of these routines reads the SMD data; dpc requires data for
   always mode). }
-module smd;
+module smd, wired_proc, wired_data;
 const
   status_$ok = 0;
 type

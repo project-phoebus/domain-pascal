@@ -294,16 +294,11 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:5:3: error: this statement is not supported yet"]
     );
-    // Module data in a named data section, or with an initial value.
-    let e = errs("module m, code, mydata;\nvar v: integer;\n");
-    assert_eq!(
-        e,
-        vec!["t.pas:2:5: error: variables in a named data section (ref 3.14, 7.1.1) are not supported yet"]
-    );
+    // Module data in an overlay section, or with an initial value.
     let e = errs("module m;\nvar (sect) v: integer;\n");
     assert_eq!(
         e,
-        vec!["t.pas:2:12: error: variables in a named data section (ref 3.14, 7.1.1) are not supported yet"]
+        vec!["t.pas:2:12: error: variables in an overlay section (`var (name)`, ref 3.14 p. 3-52) are not supported yet"]
     );
     let e = errs("module m;\nvar v: integer := 3;\n");
     assert_eq!(
@@ -640,10 +635,11 @@ end;
     .unwrap();
     assert_eq!(
         m.data,
-        Some(DataArea {
+        [DataArea {
+            section: ".data".into(),
             size: 12,
             globals: vec![]
-        })
+        }]
     );
     let f = &m.functions[0];
     assert!(f.loads_data_base);
@@ -687,10 +683,11 @@ end;
     // order, freestanding alignment; Uncertain against the image).
     assert_eq!(
         m.data,
-        Some(DataArea {
+        [DataArea {
+            section: ".data".into(),
             size: 10,
             globals: vec![("B".into(), 4)]
-        })
+        }]
     );
     let p = &m.functions[0];
     assert!(p.loads_data_base);
@@ -753,7 +750,7 @@ fn loads(m: &Module) -> Vec<bool> {
 
 fn db(always_from: Option<&str>, always: &[&str], absolute: &[&str]) -> DataBaseOptions {
     DataBaseOptions {
-        always_from: always_from.map(str::to_string),
+        always_from: always_from.map(str::to_string).into_iter().collect(),
         always: always.iter().map(|s| s.to_string()).collect(),
         absolute: absolute.iter().map(|s| s.to_string()).collect(),
     }
@@ -2859,4 +2856,223 @@ end;";
         e[0].contains("type transfer of a 4-byte integer to a 2-byte one"),
         "{e:?}"
     );
+}
+
+// ---- named sections (codegen-patterns 11; ref 5.7.1, 7.1.1) ----
+
+const SECTIONS: &str = "module s, wired_proc, wired_data;
+var
+  hits: integer32;
+procedure s_$count; internal;
+begin
+  hits := 1;
+end;
+function s_$hits: integer32; internal;
+begin
+  s_$hits := hits;
+end;
+procedure s_$tick;
+begin
+  s_$count;
+end;
+[section(init_proc, init_data)]
+procedure s_$init;
+var
+  boots: static integer32;
+begin
+  s_$count;
+  boots := s_$hits;
+end;
+procedure s_$late;
+begin
+  hits := 2;
+end;
+";
+
+fn callees(f: &Function) -> Vec<Callee> {
+    let mut out = Vec::new();
+    for s in &f.body {
+        let mut calls = Vec::new();
+        crate::lower::stmt_calls(s, &mut calls);
+        out.extend(calls.into_iter().map(|c| c.callee.clone()));
+    }
+    out
+}
+
+/// One data area per data section, each routine with its code and data
+/// section; calls into another code section, from a statement and from
+/// an expression, are absolute (bead domain-pascal-86o); the internal
+/// routine called from another data section loads its own base (0xE14B12
+/// from PROC1_$INIT 0xE2F9EC), the caller of the same section that only
+/// calls it does not.
+#[test]
+fn named_sections() {
+    let m = lower_src(SECTIONS).unwrap();
+    assert_eq!(
+        m.data,
+        [
+            DataArea {
+                section: "wired_data".into(),
+                size: 4,
+                globals: vec![]
+            },
+            DataArea {
+                section: "init_data".into(),
+                size: 4,
+                globals: vec![]
+            }
+        ]
+    );
+    let secs: Vec<(&str, &str, &str)> = m
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.symbol.as_str(),
+                f.code_section.as_str(),
+                f.data_section.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        secs,
+        [
+            ("S_$COUNT", "wired_proc", "wired_data"),
+            ("S_$HITS", "wired_proc", "wired_data"),
+            ("S_$TICK", "wired_proc", "wired_data"),
+            ("S_$INIT", "init_proc", "init_data"),
+            ("S_$LATE", "wired_proc", "wired_data"),
+        ]
+    );
+    assert_eq!(callees(&m.functions[2]), [Callee::Local("S_$COUNT".into())]);
+    assert_eq!(
+        callees(&m.functions[3]),
+        [
+            Callee::Section("S_$COUNT".into()),
+            Callee::Section("S_$HITS".into())
+        ]
+    );
+    assert_eq!(loads(&m), [true, true, false, true, true]);
+    assert_eq!(m.functions[3].body.len(), 2);
+}
+
+/// A routine reaches only its own data section's block through the data
+/// base; another section's data is addressed absolutely in the image
+/// (PROC1_$INIT 0xE2F95C `movea.l #0xE254E8,A0`), not supported.
+#[test]
+fn static_of_another_data_section() {
+    let e = errs(
+        "module s, wired_proc, wired_data;
+var
+  hits: integer32;
+[section(init_proc, init_data)]
+procedure s_$init;
+begin
+  hits := 0;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec![
+            "t.pas:7:3: error: a static variable of data section `wired_data` in a routine whose \
+              data section is `init_data` is not supported yet"
+        ]
+    );
+    // A nested routine has its top-level routine's data base.
+    let e = errs(
+        "module s;
+var
+  hits: integer32;
+procedure s_$p;
+  [section(, other_data)] procedure q;
+  var
+    n: static integer;
+  begin
+    n := 1;
+  end;
+begin
+  q;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec![
+            "t.pas:9:5: error: a static variable of data section `other_data` in a routine \
+              whose data section is `.data` is not supported yet"
+        ]
+    );
+}
+
+#[test]
+fn nested_routine_in_another_code_section() {
+    let e = errs(
+        "module s;
+procedure s_$p;
+  [section(other_proc)] procedure q;
+  begin
+  end;
+begin
+  q;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec![
+            "t.pas:3:3: error: a nested routine in another code section than its enclosing \
+              routine is not supported yet"
+        ]
+    );
+}
+
+/// `--a5-always-from` switches each named routine's code section, from
+/// it on in the unit's order within the section (one switch per map
+/// segment); two names in one section are an error.
+#[test]
+fn data_base_always_from_per_section() {
+    let src = "module s, wired_proc, wired_data;
+var
+  x: integer;
+procedure s_$a(out y: integer);
+begin
+  y := 0;
+end;
+[section(init_proc, init_data)]
+procedure s_$b(out y: integer);
+var
+  z: static integer;
+begin
+  y := 0;
+end;
+procedure s_$c(out y: integer);
+begin
+  y := 0;
+end;
+";
+    let o = |names: &[&str]| DataBaseOptions {
+        always_from: names.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
+    let m = lower_src_with(src, &o(&["s_$c"])).unwrap();
+    assert_eq!(loads(&m), [false, false, true]);
+    let m = lower_src_with(src, &o(&["s_$a"])).unwrap();
+    assert_eq!(loads(&m), [true, false, true]);
+    let m = lower_src_with(src, &o(&["s_$c", "s_$b"])).unwrap();
+    assert_eq!(loads(&m), [false, true, true]);
+    let e = lower_src_with(src, &o(&["s_$a", "s_$c"])).unwrap_err();
+    assert!(
+        e[0].contains("two routines of code section `wired_proc`"),
+        "{e:?}"
+    );
+}
+
+/// A quoted overlay section name (ref 3.14, p. 3-52) is refused twice
+/// over: as an overlay and for its characters.
+#[test]
+fn overlay_section_name() {
+    let e = errs("module m;\nvar ('a b') v: integer;\n");
+    assert!(e.iter().any(|x| x.contains("overlay section")), "{e:?}");
+    assert!(e.iter().any(|x| x.contains("section name `a b`")), "{e:?}");
 }

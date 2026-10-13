@@ -1,6 +1,8 @@
 //! Assembly emitter: gas syntax for `m68k-elf-as -m68010` (CLAUDE.md 4.4).
 //!
-//! One output section per Pascal code section, in order of first use.
+//! One output section per Pascal code section, in order of first use
+//! ([`code_section_name`]: `.text`, or `.text.<UNIT>.<SECTION>`), and one
+//! NOBITS data area per Pascal data section ([`data_section_name`]).
 //! Global routines get `.globl` with their upper-cased, `$`-keeping symbol
 //! (codegen-patterns 11); `internal` routines are plain (local) labels.
 //!
@@ -62,11 +64,14 @@ pub enum LoopAlign {
     On,
     /// No routine aligns.
     Off,
-    /// The routines before the named one, in emission order, align; it
-    /// and every later one do not.  The name is matched case-insensitively
-    /// against each routine's symbol, which is its Pascal name upper-cased
-    /// (codegen-patterns 11), so either spelling works.
-    OffFrom(String),
+    /// In the code section of each named routine, the routines before it
+    /// align and it and every later one do not; the routines of a code
+    /// section no name is in align.  At most one name per code section
+    /// (each map segment has its own switch, codegen-patterns 7).  Names
+    /// are matched case-insensitively against each routine's symbol,
+    /// which is its Pascal name upper-cased (codegen-patterns 11), so
+    /// either spelling works.
+    OffFrom(Vec<String>),
 }
 
 /// Emitter options.
@@ -100,43 +105,82 @@ pub struct Options {
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
-/// align its loop heads?  "Before" in [`LoopAlign::OffFrom`] is emission
-/// order: code section by code section, in `sections` order, and the
-/// unit's order within each.  Fails if [`LoopAlign::OffFrom`] names no
-/// routine of the module.
-fn aligning(module: &Module, sections: &[&str], la: &LoopAlign) -> Result<Vec<bool>, Diagnostic> {
-    let n = module.functions.len();
+/// align its loop heads?  [`LoopAlign::OffFrom`] switches each named
+/// routine's code section off from it on, in the unit's order within the
+/// section (its emission order): each map segment has its own switch
+/// (codegen-patterns 7), and a code section of a unit is one segment.
+/// Fails if a name is no routine of the module, or if two names are in
+/// one code section.
+fn aligning(module: &Module, la: &LoopAlign) -> Result<Vec<bool>, Diagnostic> {
+    let fs = &module.functions;
     match la {
-        LoopAlign::On => Ok(vec![true; n]),
-        LoopAlign::Off => Ok(vec![false; n]),
-        LoopAlign::OffFrom(name) => {
-            let order = sections
-                .iter()
-                .flat_map(|&sec| (0..n).filter(move |&i| module.functions[i].code_section == sec));
-            let mut aligns = vec![false; n];
-            for i in order {
-                if module.functions[i].symbol.eq_ignore_ascii_case(name) {
-                    return Ok(aligns);
+        LoopAlign::On => Ok(vec![true; fs.len()]),
+        LoopAlign::Off => Ok(vec![false; fs.len()]),
+        LoopAlign::OffFrom(names) => {
+            let mut aligns = vec![true; fs.len()];
+            let mut switched: Vec<&str> = Vec::new();
+            for name in names {
+                let Some(k) = fs.iter().position(|f| f.symbol.eq_ignore_ascii_case(name)) else {
+                    return Err(Diagnostic::error_nopos(format!(
+                        "--loop-align-off-from: no routine `{name}` in this unit"
+                    )));
+                };
+                let sec = fs[k].code_section.as_str();
+                if switched.contains(&sec) {
+                    return Err(Diagnostic::error_nopos(format!(
+                        "--loop-align-off-from: two routines of code section `{sec}`; each \
+                         code section switches at most once"
+                    )));
                 }
-                aligns[i] = true;
+                switched.push(sec);
+                for (f, a) in fs.iter().zip(aligns.iter_mut()).skip(k) {
+                    if f.code_section == sec {
+                        *a = false;
+                    }
+                }
             }
-            Err(Diagnostic::error_nopos(format!(
-                "--loop-align-off-from: no routine `{name}` in this unit"
-            )))
+            Ok(aligns)
         }
     }
 }
 
-/// The section directive for Pascal code section `name`.
-fn section_directive(name: &str) -> String {
-    if name == ".text" {
-        // ref 5.7.1 p. 5-24: the default code section.
+/// The Pascal default sections (ref 5.7.1, p. 5-24), as `dpc_sema` names
+/// them when nothing names another.
+const DEFAULT_CODE_SECTION: &str = ".text";
+const DEFAULT_DATA_SECTION: &str = ".data";
+
+/// The output section of unit `unit`'s code in Pascal code section
+/// `sect`: `.text` for the default section, else
+/// `.text.<UNIT>.<SECT>`, both names upper-cased like every external name
+/// (codegen-patterns 11; the map's sections and segments are upper case:
+/// `I E1471C PROC1_` in WIRED_PROC).
+///
+/// The `.text.` prefix is what `../source`'s link takes for code
+/// (`tools/gen_layout_ld.py`, `section_kind`), which orders a code input
+/// section by the earliest map symbol it defines, whatever its name, and
+/// fails a section whose symbols straddle another's: one input section
+/// per unit and code section is exactly the image's one segment per
+/// module and section.  The unit name keeps two units' sections of the
+/// same Pascal section apart, and the `.` between the two names keeps
+/// them apart from every `.text.<symbol>` of `-ffunction-sections` and
+/// of the hand-written assembly there.
+pub fn code_section_name(unit: &str, sect: &str) -> String {
+    if sect == DEFAULT_CODE_SECTION {
+        DEFAULT_CODE_SECTION.into()
+    } else {
+        format!(".text.{}.{}", unit.to_uppercase(), sect.to_uppercase())
+    }
+}
+
+/// The section directive for unit `unit`'s Pascal code section `sect`.
+fn section_directive(unit: &str, sect: &str) -> String {
+    if sect == DEFAULT_CODE_SECTION {
         "\t.text".into()
     } else {
-        // Named sections are rejected by IR lowering for now: how they map
-        // to `../source`'s `.text.<name>` link sections is not settled
-        // (codegen-patterns 11).
-        format!("\t.section\t\"{name}\",\"ax\",@progbits")
+        format!(
+            "\t.section\t\"{}\",\"ax\",@progbits",
+            code_section_name(unit, sect)
+        )
     }
 }
 
@@ -152,7 +196,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             sections.push(&f.code_section);
         }
     }
-    let aligns = aligning(module, &sections, &opts.loop_align).map_err(|d| vec![d])?;
+    let aligns = aligning(module, &opts.loop_align).map_err(|d| vec![d])?;
     if let Some((name, _)) = opts.module_routines.iter().find(|(n, _)| {
         module
             .functions
@@ -210,7 +254,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
     let mut pool_labels = 0;
     for sec in sections {
         out.push('\n');
-        out.push_str(&section_directive(sec));
+        out.push_str(&section_directive(&module.name, sec));
         out.push('\n');
         if let Some(origin) = opts.fragment_origin {
             if origin % 4 != 0 {
@@ -321,7 +365,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             }
         }
     }
-    if let Some(data) = &module.data {
+    for data in &module.data {
         out.push_str(&data_area(&module.name, data));
     }
     if errors.is_empty() {
@@ -565,10 +609,12 @@ fn size_branches(
     }
 }
 
-/// The output section of unit `unit`'s static data area: the NOBITS
-/// section `.bss.moddata.<UNIT>`, the unit name upper-cased like every
-/// external name (codegen-patterns 11); for the kernel's units that is
-/// the map's `D` segment name (`PROC1_`, `PROC2`).
+/// The output section of unit `unit`'s static data area in Pascal data
+/// section `sect`: the NOBITS section `.bss.moddata.<UNIT>` for the
+/// default section, `.bss.moddata.<UNIT>.<SECT>` for another, upper-cased
+/// like every external name (codegen-patterns 11); for the kernel's units
+/// `<UNIT>` is the map's `D` segment name (`PROC1_`, `PROC2`) and
+/// `<SECT>` its section (WIRED_DATA, OS_INIT_DATA).
 ///
 /// Only the prefix is `../source`'s: there a block is the input section
 /// `.bss.moddata.<name>` / `.moddata.<name>` where `<name>` is the C
@@ -578,13 +624,34 @@ fn size_branches(
 /// C site, never by the map's segment name.  A section of ours would get
 /// no ordering key there; linking a dpc unit into `../source` needs a
 /// mapping that does not exist yet (codegen-patterns 11).
-pub fn data_section_name(unit: &str) -> String {
-    format!(".bss.moddata.{}", unit.to_uppercase())
+pub fn data_section_name(unit: &str, sect: &str) -> String {
+    if sect == DEFAULT_DATA_SECTION {
+        format!(".bss.moddata.{}", unit.to_uppercase())
+    } else {
+        format!(
+            ".bss.moddata.{}.{}",
+            unit.to_uppercase(),
+            sect.to_uppercase()
+        )
+    }
 }
 
-/// The unit's data area: one zero-filled block starting at
-/// [`DATA_BASE_LABEL`], `define`d variables as global symbols at their
-/// offsets.
+/// The local label at the start of the unit's data area in Pascal data
+/// section `sect`: what `lea <label>.l,A5` loads in the routines of that
+/// data section (codegen-patterns 4: one A5 value per segment, the block
+/// of the data section paired with the code section).
+/// [`DATA_BASE_LABEL`] for the default section.
+pub fn data_base_label(sect: &str) -> String {
+    if sect == DEFAULT_DATA_SECTION {
+        DATA_BASE_LABEL.into()
+    } else {
+        format!("{DATA_BASE_LABEL}.{}", sect.to_uppercase())
+    }
+}
+
+/// The unit's data area in one data section: one zero-filled block
+/// starting at its [`data_base_label`], `define`d variables as global
+/// symbols at their offsets.
 ///
 /// The block is 4-aligned and its size a multiple of 4: all 161 `D`
 /// segments of the SAU2 map start at a multiple of 4 and have such a
@@ -592,8 +659,9 @@ pub fn data_section_name(unit: &str) -> String {
 /// binder rounded is not known.
 fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
     let mut out = format!(
-        "\n\t.section\t\"{}\",\"aw\",@nobits\n\t.balign\t4\n{DATA_BASE_LABEL}:\n",
-        data_section_name(unit)
+        "\n\t.section\t\"{}\",\"aw\",@nobits\n\t.balign\t4\n{}:\n",
+        data_section_name(unit, &data.section),
+        data_base_label(&data.section)
     );
     let size = data.size.div_ceil(4) * 4;
     let mut at = 0;
@@ -630,6 +698,7 @@ mod tests {
             symbol: symbol.into(),
             global: true,
             code_section: section.into(),
+            data_section: ".data".into(),
             frame_size: 0,
             result: None,
             loads_data_base: false,
@@ -741,10 +810,11 @@ mod tests {
     fn data_area_is_a_zero_block_after_the_code() {
         let mut m = module(&[".text"]);
         m.name = "proc1_".into();
-        m.data = Some(dpc_ir::DataArea {
+        m.data = vec![dpc_ir::DataArea {
+            section: ".data".into(),
             size: 14,
             globals: vec![("PROC1_$X".into(), 2), ("PROC1_$Y".into(), 8)],
-        });
+        }];
         let s = emit(&m, "m.pas", &Options::default()).unwrap();
         let tail = s.split("filler\n").nth(1).unwrap();
         assert_eq!(
@@ -758,11 +828,18 @@ mod tests {
 
     #[test]
     fn section_directives() {
-        assert_eq!(section_directive(".text"), "\t.text");
+        assert_eq!(section_directive("proc1_", ".text"), "\t.text");
         assert_eq!(
-            section_directive("wired_proc"),
-            "\t.section\t\"wired_proc\",\"ax\",@progbits"
+            section_directive("proc1_", "wired_proc"),
+            "\t.section\t\".text.PROC1_.WIRED_PROC\",\"ax\",@progbits"
         );
+        assert_eq!(data_section_name("proc1_", ".data"), ".bss.moddata.PROC1_");
+        assert_eq!(
+            data_section_name("proc1_", "wired_data"),
+            ".bss.moddata.PROC1_.WIRED_DATA"
+        );
+        assert_eq!(data_base_label(".data"), ".Ldata");
+        assert_eq!(data_base_label("wired_data"), ".Ldata.WIRED_DATA");
     }
 
     /// A routine whose body is `n` calls of `P` with a long constant
@@ -930,20 +1007,30 @@ mod tests {
             functions: vec![one_loop("P_$A"), one_loop("P_$B"), one_loop("P_$C")],
             ..Default::default()
         };
-        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("p_$b".into()))).unwrap();
+        let s = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["p_$b".into()])),
+        )
+        .unwrap();
         assert!(routine_text(&s, "P_$A").contains("0x2048"), "{s}");
         assert!(!routine_text(&s, "P_$B").contains("0x2048"), "{s}");
         assert!(!routine_text(&s, "P_$C").contains("0x2048"), "{s}");
         assert!(s.ends_with(ZERO_END), "{s}");
         // from the first routine: the same as off
-        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("P_$A".into()))).unwrap();
+        let s = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["P_$A".into()])),
+        )
+        .unwrap();
         assert_eq!(s, emit(&m, "m.pas", &loop_align(LoopAlign::Off)).unwrap());
         // a fragment that ends its module: the padding follows the last
         // routine too; one that does not end it has none
         let tail = Options {
             fragment_origin: Some(0x1000),
             fragment_ends_module: true,
-            loop_align: LoopAlign::OffFrom("P_$C".into()),
+            loop_align: LoopAlign::OffFrom(vec!["P_$C".into()]),
             ..Default::default()
         };
         let s = emit(&m, "m.pas", &tail).unwrap();
@@ -955,29 +1042,73 @@ mod tests {
         };
         let s = emit(&m, "m.pas", &mid).unwrap();
         assert!(s.ends_with("\trts\n"), "{s}");
-        let e = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("P_$D".into()))).unwrap_err();
+        let e = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["P_$D".into()])),
+        )
+        .unwrap_err();
         assert!(e[0].message.contains("no routine `P_$D`"), "{e:?}");
     }
 
-    /// `--loop-align-off-from` counts in emission order, where a whole
-    /// module's routines are grouped by code section: with `A` (.text),
-    /// `B` (S2), `C` (.text), off from `B`, `C` is emitted before `B` and
-    /// aligns.  Each section's end padding follows its own last routine.
+    /// `--loop-align-off-from` switches only the named routine's code
+    /// section (one switch per map segment, codegen-patterns 7): with `A`
+    /// (.text), `B` (S2), `C` (.text), off from `B`, `A` and `C` align.
+    /// Each section's end padding follows its own last routine.
     #[test]
     fn loop_align_off_from_follows_emission_order() {
         let mut b = one_loop("B");
         b.code_section = "S2".into();
         let m = Module {
+            name: "m".into(),
             functions: vec![one_loop("A"), b, one_loop("C")],
             ..Default::default()
         };
-        let s = emit(&m, "m.pas", &loop_align(LoopAlign::OffFrom("B".into()))).unwrap();
+        let s = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["B".into()])),
+        )
+        .unwrap();
         assert!(routine_text(&s, "A").contains("0x2048"), "{s}");
         assert!(routine_text(&s, "C").contains("0x2048"), "{s}");
         assert!(!routine_text(&s, "B").contains("0x2048"), "{s}");
-        let (text, s2) = s.split_once("\n\t.section\t\"S2\"").unwrap();
+        let (text, s2) = s.split_once("\n\t.section\t\".text.M.S2\"").unwrap();
         assert!(text.ends_with(FILLER_END), "{s}");
         assert!(s2.ends_with(ZERO_END), "{s}");
+    }
+
+    /// One switch per code section: off from `C` in .text and from `B` in
+    /// S2; `A` aligns.  Two names in one section are an error.
+    #[test]
+    fn loop_align_off_from_per_section() {
+        let mut b = one_loop("B");
+        b.code_section = "S2".into();
+        let m = Module {
+            name: "m".into(),
+            functions: vec![one_loop("A"), b, one_loop("C")],
+            ..Default::default()
+        };
+        let s = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["c".into(), "b".into()])),
+        )
+        .unwrap();
+        assert!(routine_text(&s, "A").contains("0x2048"), "{s}");
+        assert!(!routine_text(&s, "B").contains("0x2048"), "{s}");
+        assert!(!routine_text(&s, "C").contains("0x2048"), "{s}");
+        let e = emit(
+            &m,
+            "m.pas",
+            &loop_align(LoopAlign::OffFrom(vec!["A".into(), "C".into()])),
+        )
+        .unwrap_err();
+        assert!(
+            e[0].message
+                .contains("two routines of code section `.text`"),
+            "{e:?}"
+        );
     }
 
     /// Without its filler a routine is 2 bytes shorter, which can bring

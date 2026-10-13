@@ -53,7 +53,7 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         Ok(d) => d,
         Err(d) => {
             errors.extend(d);
-            None
+            Vec::new()
         }
     };
     let mut functions = Vec::new();
@@ -70,7 +70,7 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         }
     }
     if errors.is_empty() {
-        if let Err(d) = set_loads_data_base(&mut functions, data.is_some(), db) {
+        if let Err(d) = set_loads_data_base(&mut functions, &data, db) {
             errors.extend(d);
         }
     }
@@ -87,20 +87,32 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
     }
 }
 
-/// The unit's static data area (codegen-patterns 4): every variable with
+/// The unit's static data areas (codegen-patterns 4): every variable with
 /// [`Storage::Static`] storage, unit-level or a routine's `static` one,
-/// lives in the unit's default data section at the offset `dpc-sema`
-/// gave it.
+/// lives in a data section of the unit at the offset `dpc-sema` gave it.
+/// One area per data section, in order of first allocation
+/// (`Program::data_sections`): the module heading's (ref 7.1.1, p. 7-2;
+/// `.data` by default, ref 5.7.1 p. 5-24) and the ones routines name in
+/// `[section(c,d)]` (ref 5.7.1: such a routine's static data goes to
+/// `d`).  The image has one block per data section for such a module
+/// (PROC2: 0xE7BE84 in .DATA, 0xE35030 in OS_INIT_DATA, 0xE86050 in
+/// PROC2_CREATE_DAT; codegen-patterns 11).
 ///
-/// Rejected for now: a data section named in the module heading (ref
-/// 7.1.1, p. 7-2) or in a `var (name)` part (ref 3.14), whose placement
-/// and addressing (shared by name between units, ref 7.2.4 p. 7-7) have
-/// not been catalogued; and initial values (ref 3.2.2), whose section
-/// contents the emitter does not write yet.
-fn data_area(p: &Program) -> Result<Option<DataArea>, Vec<Diagnostic>> {
+/// Rejected for now: variables of an overlay section, `var (name)` with a
+/// name no routine and no module heading of the unit gives as its data
+/// section (ref 3.14, p. 3-52: "just like a named common block in
+/// FORTRAN", shared by name between units, ref 7.2.4 p. 7-7), whose
+/// addressing has not been catalogued (codegen-patterns 11: the image's
+/// sections with no per-module segment, such as PROC2_$DATA 0xEA551C,
+/// are reached with `movea.l #<section>,An`, PROC2_$INIT 0xE30466); and
+/// initial values (ref 3.2.2), whose section contents the emitter does
+/// not write yet.
+fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let mut any = false;
-    let mut globals = Vec::new();
+    let module_section =
+        |name: &str| name == p.data_section || p.routines.iter().any(|r| r.data_section == name);
+    let mut used: Vec<&str> = Vec::new();
+    let mut globals: Vec<(&str, String, u32)> = Vec::new();
     for v in &p.vars {
         let Storage::Static {
             symbol,
@@ -111,38 +123,70 @@ fn data_area(p: &Program) -> Result<Option<DataArea>, Vec<Diagnostic>> {
         else {
             continue;
         };
-        any = true;
-        if section != DEFAULT_DATA_SECTION || p.data_section != DEFAULT_DATA_SECTION {
+        if !module_section(section) {
             errors.push(unsupported(
                 v.span,
-                "variables in a named data section (ref 3.14, 7.1.1) are",
+                "variables in an overlay section (`var (name)`, ref 3.14 p. 3-52) are",
             ));
+        }
+        if let Err(d) = check_section_name(section, v.span) {
+            errors.push(d);
         }
         if v.init.is_some() {
             errors.push(unsupported(v.span, "initialised static variables are"));
         }
+        if !used.contains(&section.as_str()) {
+            used.push(section);
+        }
         if *global {
-            globals.push((symbol.clone(), *offset));
+            globals.push((section, symbol.clone(), *offset));
         }
     }
     if !errors.is_empty() {
+        errors.dedup();
         return Err(errors);
     }
-    if !any {
-        return Ok(None);
-    }
-    globals.sort_by_key(|&(_, o)| o);
-    let size = p
-        .data_sections
+    Ok(p.data_sections
         .iter()
-        .find(|(n, _)| n == DEFAULT_DATA_SECTION)
-        .map_or(0, |&(_, n)| n);
-    Ok(Some(DataArea { size, globals }))
+        .filter(|(n, _)| used.contains(&n.as_str()))
+        .map(|(n, size)| {
+            let mut g: Vec<(String, u32)> = globals
+                .iter()
+                .filter(|(s, _, _)| s == n)
+                .map(|(_, sym, o)| (sym.clone(), *o))
+                .collect();
+            g.sort_by_key(|&(_, o)| o);
+            DataArea {
+                section: n.clone(),
+                size: *size,
+                globals: g,
+            }
+        })
+        .collect())
 }
 
-/// The default data section (ref 5.7.1, p. 5-24): `dpc_sema::Program`'s
-/// `data_section` when the module heading names none.
-const DEFAULT_DATA_SECTION: &str = ".data";
+/// A section name the output can carry: letters, digits, `_`, `$` and
+/// `.` (every section name of the SAU2 map is such: WIRED_PROC, .TEXT,
+/// PROCEDURE$, PROC2_CREATE_PRO).  A quoted name may hold anything (ref
+/// 3.14, p. 3-52: `"this is a section name"`); how such a name reached
+/// the object is not known.
+fn check_section_name(name: &str, span: Span) -> Res<()> {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
+    {
+        Ok(())
+    } else {
+        Err(unsupported(
+            span,
+            format!(
+                "section name `{name}` (only letters, digits, `_`, `$` and `.` are \
+                 supported) is"
+            ),
+        ))
+    }
+}
 
 /// Lower top-level routine `id` and the routines nested in it (ref 2.4,
 /// pp. 2-19..2-21), into `out`
@@ -723,10 +767,49 @@ fn lower_routine(
 ) -> Result<Function, Vec<Diagnostic>> {
     let r = p.routine(id);
     let mut errors = Vec::new();
-    if r.code_section != ".text" {
-        // ref 5.7.1 / 7.1.1; how named sections map to the output sections
-        // `../source` links (codegen-patterns 11) is not settled.
-        errors.push(unsupported(r.span, "named code sections are"));
+    for name in [&r.code_section, &r.data_section] {
+        if let Err(d) = check_section_name(name, r.span) {
+            errors.push(d);
+        }
+    }
+    // The data section whose block the routine's data base points at: a
+    // nested routine inherits its enclosing routine's base (codegen-
+    // patterns 4), so its top-level routine's.
+    let mut top = r;
+    while let Some(pid) = top.parent {
+        top = p.routine(pid);
+    }
+    if let Some(pid) = r.parent {
+        // ref 5.7.1, p. 5-25: nested routines inherit their outer
+        // routine's sections unless they name their own.  One in another
+        // code section would be reached by `jsr` with its static link,
+        // which the image does not show.
+        if p.routine(pid).code_section != r.code_section {
+            errors.push(unsupported(
+                r.span,
+                "a nested routine in another code section than its enclosing routine is",
+            ));
+        }
+    }
+    let data_section = top.data_section.clone();
+    for &(v, span) in &r.static_refs {
+        if let Storage::Static { section, .. } = &p.var(v).storage {
+            if *section != data_section {
+                // codegen-patterns 4, 11: such data is reached from its
+                // block's absolute address (PROC1_$INIT 0xE2F95C in
+                // OS_INIT_PROC: `movea.l #0xE254E8,A0`, PROC1_'s WIRED_DATA
+                // block, then `(0xc40,A0)`, ...; PROC2_$INIT 0xE3048E:
+                // `movea.l #0xE7BE84,A1`, PROC2's .DATA block); when that
+                // register is loaded and reloaded is not settled.
+                errors.push(unsupported(
+                    span,
+                    format!(
+                        "a static variable of data section `{section}` in a routine whose \
+                         data section is `{data_section}` is"
+                    ),
+                ));
+            }
+        }
     }
     let o = &r.options;
     for (on, name) in [
@@ -762,6 +845,7 @@ fn lower_routine(
         }
     };
     let frame_size = assign_temps(&mut body, r.frame_size);
+    set_call_sections(p, &r.code_section, &mut body);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -769,6 +853,7 @@ fn lower_routine(
         symbol: r.symbol.clone(),
         global: r.global,
         code_section: r.code_section.clone(),
+        data_section,
         frame_size,
         result,
         result_slot: r.result.as_ref().and_then(|res| res.var).and_then(|v| {
@@ -798,6 +883,31 @@ fn lower_routine(
         body,
         span: r.span,
     })
+}
+
+/// Turn every call in `body` of a routine of this unit in another code
+/// section than `caller_section` into [`Callee::Section`] (`jsr abs.l`):
+/// `bsr` never crosses a map segment in the image, and all 191 calls
+/// between the segments of one module are `jsr abs.l` (codegen-patterns
+/// 1.6, 11; PROC1_$INIT 0xE2F9EC, AST_$ACTIVATE_ASTE_CANNED 0xE2F350).
+/// Statement calls and calls in expressions alike (bead
+/// domain-pascal-86o).
+fn set_call_sections(p: &Program, caller_section: &str, body: &mut [Stmt]) {
+    for s in body.iter_mut() {
+        stmt_calls_mut(s, &mut |c| {
+            if let Callee::Local(sym) = &c.callee {
+                let other = p.routines.iter().any(|r| {
+                    &r.symbol == sym
+                        && !r.external
+                        && r.body.is_some()
+                        && r.code_section != caller_section
+                });
+                if other {
+                    c.callee = Callee::Section(sym.clone());
+                }
+            }
+        });
+    }
 }
 
 /// Decide [`Function::loads_data_base`] and [`Function::data_absolute`]
@@ -830,12 +940,14 @@ fn lower_routine(
 /// inherits A5 (which would see the caller's A5).
 fn set_loads_data_base(
     fs: &mut [Function],
-    unit_has_data: bool,
+    data: &[DataArea],
     db: &DataBaseOptions,
 ) -> Result<(), Vec<Diagnostic>> {
     let fsr: &[Function] = fs;
     let mut errors = Vec::new();
     let find = |name: &str| fsr.iter().position(|f| f.symbol.eq_ignore_ascii_case(name));
+    // Whether routine `i`'s data section has a block of this unit.
+    let has_data = |i: usize| data.iter().any(|a| a.section == fsr[i].data_section);
     let mut always = vec![false; fsr.len()];
     let mut absolute = vec![false; fsr.len()];
     for (opt, names, set) in [
@@ -851,45 +963,52 @@ fn set_loads_data_base(
             }
         }
     }
-    // Emission order: code section by code section, in order of first
-    // use, the unit's order within each (as `dpc_m68k::emit` lays out).
-    let mut sections: Vec<&str> = Vec::new();
-    for f in fsr.iter() {
-        if !sections.contains(&f.code_section.as_str()) {
-            sections.push(&f.code_section);
-        }
-    }
-    let order: Vec<usize> = sections
-        .iter()
-        .flat_map(|&sec| (0..fsr.len()).filter(move |&i| fsr[i].code_section == sec))
-        .collect();
+    // "Always mode" from each named routine on, in the unit's order within
+    // its code section: one switch per map segment (codegen-patterns 4),
+    // and a code section of a unit is one segment.
     let mut always_mode = vec![false; fsr.len()];
-    if let Some(name) = &db.always_from {
-        match order
-            .iter()
-            .position(|&i| fsr[i].symbol.eq_ignore_ascii_case(name))
-        {
-            Some(k) => {
-                for &i in &order[k..] {
-                    always_mode[i] = true;
-                }
-            }
-            None => errors.push(Diagnostic::error_nopos(format!(
+    let mut switched: Vec<&str> = Vec::new();
+    for name in &db.always_from {
+        let Some(k) = find(name) else {
+            errors.push(Diagnostic::error_nopos(format!(
                 "--a5-always-from: no routine `{name}` in this unit"
-            ))),
+            )));
+            continue;
+        };
+        let sec = fsr[k].code_section.as_str();
+        if switched.contains(&sec) {
+            errors.push(Diagnostic::error_nopos(format!(
+                "--a5-always-from: two routines of code section `{sec}`; each code section \
+                 switches at most once"
+            )));
         }
-    }
-    if !unit_has_data && (db.always_from.is_some() || always.contains(&true)) {
-        // In the image such a unit's A5 is the end of a 4-byte block no
-        // code reads (OS_INIT_DATA AST_ 0xE35000 -> 0xE35004); dpc does
-        // not lay out that block.
-        errors.push(Diagnostic::error_nopos(
-            "--a5-always / --a5-always-from: the unit has no static data, so there is no data \
-             area to load (a unit without data that loads A5 points it past a 4-byte block, \
-             codegen-patterns 4; not supported)",
-        ));
+        switched.push(sec);
+        if !has_data(k) {
+            // In the image such a unit's A5 is the end of a 4-byte block
+            // no code reads (OS_INIT_DATA AST_ 0xE35000 -> 0xE35004); dpc
+            // does not lay out that block.
+            errors.push(Diagnostic::error_nopos(format!(
+                "--a5-always-from: the unit has no static data in the data section of `{}`, so \
+                 there is no data area to load (a unit without data that loads A5 points it past a 4-byte \
+                 block, codegen-patterns 4; not supported)",
+                fsr[k].symbol
+            )));
+        }
+        for i in k..fsr.len() {
+            if fsr[i].code_section == sec {
+                always_mode[i] = true;
+            }
+        }
     }
     for (i, f) in fsr.iter().enumerate() {
+        if always[i] && !has_data(i) {
+            errors.push(Diagnostic::error_nopos(format!(
+                "--a5-always: the unit has no static data in the data section of `{}`, so there \
+                 is no data area to load (a unit without data that loads A5 points it past a 4-byte block, \
+                 codegen-patterns 4; not supported)",
+                f.symbol
+            )));
+        }
         if always[i] && absolute[i] {
             errors.push(Diagnostic::error_nopos(format!(
                 "`{}` is in both --a5-always and --a5-absolute",
@@ -941,9 +1060,29 @@ fn set_loads_data_base(
             c
         })
         .collect();
-    // A callee inherits the data base unless it is exported or in the
-    // `always` list (it loads its own; a call to it is not a use).
-    let inherits = |j: usize| !fsr[j].global && !always[j];
+    let index = |sym: &str| fsr.iter().position(|g| g.symbol == sym);
+    // An `internal` top-level routine that a routine of another data
+    // section calls cannot inherit the caller's base, which points at
+    // another block (or at none): it sets up its own like an exported
+    // routine.  The image's unnamed routines that load A5 are called with
+    // `jsr abs.l` from another code section of their module (21 of 26,
+    // codegen-patterns 4: 0xE14B12 in WIRED_PROC, from PROC1_$INIT
+    // 0xE2F9EC in OS_INIT_PROC, loads PROC1_'s WIRED_DATA block 0xE254E8;
+    // 0xE0250C, from AST_$ACTIVATE_ASTE_CANNED, loads AST_'s 0xE1DC80).
+    let mut entry = vec![false; fsr.len()];
+    for (i, cs) in callees.iter().enumerate() {
+        for sym in cs {
+            if let Some(j) = index(sym) {
+                if fsr[j].nesting.is_none() && fsr[j].data_section != fsr[i].data_section {
+                    entry[j] = true;
+                }
+            }
+        }
+    }
+    // A callee inherits the data base unless it is exported, in the
+    // `always` list or such an entry (it loads its own; a call to it is
+    // not a use).
+    let inherits = |j: usize| !fsr[j].global && !always[j] && !entry[j];
     let mut uses = direct.clone();
     loop {
         let mut changed = false;
@@ -951,11 +1090,9 @@ fn set_loads_data_base(
             if uses[i] {
                 continue;
             }
-            let through = callees[i].iter().any(|sym| {
-                fsr.iter()
-                    .position(|g| &g.symbol == sym)
-                    .is_some_and(|j| inherits(j) && uses[j])
-            });
+            let through = callees[i]
+                .iter()
+                .any(|sym| index(sym).is_some_and(|j| inherits(j) && uses[j]));
             if through {
                 uses[i] = true;
                 changed = true;
@@ -970,11 +1107,9 @@ fn set_loads_data_base(
             continue;
         }
         let f = &fsr[i];
-        let through = callees[i].iter().any(|sym| {
-            fsr.iter()
-                .position(|g| &g.symbol == sym)
-                .is_some_and(|j| inherits(j) && uses[j])
-        });
+        let through = callees[i]
+            .iter()
+            .any(|sym| index(sym).is_some_and(|j| inherits(j) && uses[j]));
         if through {
             errors.push(Diagnostic::error(
                 f.span,
@@ -997,16 +1132,17 @@ fn set_loads_data_base(
     if !errors.is_empty() {
         return Err(errors);
     }
+    let has: Vec<bool> = (0..fsr.len()).map(has_data).collect();
     for (i, f) in fs.iter_mut().enumerate() {
         f.data_absolute = absolute[i];
         f.loads_data_base = if f.is_empty_procedure() || absolute[i] {
             false
         } else if always[i] {
             true
-        } else if !f.global {
+        } else if !f.global && !entry[i] {
             false
         } else {
-            uses[i] || (always_mode[i] && unit_has_data)
+            uses[i] || (always_mode[i] && has[i])
         };
     }
     Ok(())
@@ -1064,7 +1200,7 @@ fn local_callees(s: &Stmt, out: &mut Vec<String>) {
     let mut calls = Vec::new();
     stmt_calls(s, &mut calls);
     for c in calls {
-        if let Callee::Local(sym) = &c.callee {
+        if let Callee::Local(sym) | Callee::Section(sym) = &c.callee {
             out.push(sym.clone());
         }
     }
@@ -1072,7 +1208,7 @@ fn local_callees(s: &Stmt, out: &mut Vec<String>) {
 
 /// Every call `s` makes, statement calls and function calls in
 /// expressions.
-fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
+pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
     let e = |x: &'a Expr, out: &mut Vec<&'a Call>| expr_calls(x, out);
     match &s.kind {
         StmtKind::SetResult(x) => e(x, out),
@@ -1717,7 +1853,7 @@ impl Cx<'_> {
                 }
                 SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
                 SStmtKind::Call(c) => out.push(Stmt {
-                    kind: StmtKind::Call(call(p, &self.r.code_section, c, s.span)?),
+                    kind: StmtKind::Call(call(p, c, s.span)?),
                     span: s.span,
                 }),
                 SStmtKind::For {
@@ -1931,9 +2067,7 @@ impl Cx<'_> {
     ///   evaluation) is not known.
     fn discard(&self, s: &SStmt, x: &SExpr) -> Res<Stmt> {
         let kind = match &x.kind {
-            ExprKind::Call(c) if x.value.is_none() => {
-                StmtKind::Call(call(self.p, &self.r.code_section, c, x.span)?)
-            }
+            ExprKind::Call(c) if x.value.is_none() => StmtKind::Call(call(self.p, c, x.span)?),
             ExprKind::Builtin {
                 builtin: Builtin::SetSr,
                 ..
@@ -2556,7 +2690,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             };
             let ty = scalar_of(p, e)?;
             Ok(Expr::Call {
-                call: call(p, ".text", c, e.span)?,
+                call: call(p, c, e.span)?,
                 ty,
                 reg,
             })
@@ -3135,13 +3269,15 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 
 /// A procedure call statement (ref 5.2).
 ///
-/// - The callee: a routine of this unit with a body and in the caller's
-///   code section is called PC-relative ([`Callee::Local`], `bsr`), any
-///   other declared routine through its symbol ([`Callee::External`],
-///   `jsr abs.l`): codegen-patterns 1.6 (0xE00F02 `bsr.s` to the
-///   module-local 0xE00EB0; 0xE00EF6 `jsr ML_$LOCK`).  `bsr` never
-///   crosses a map segment in the image (codegen-patterns 7), so a callee
-///   in another code section is not supported yet.  Through a routine
+/// - The callee: a routine of this unit with a body is called
+///   PC-relative ([`Callee::Local`], `bsr`), any other declared routine
+///   through its symbol ([`Callee::External`], `jsr abs.l`):
+///   codegen-patterns 1.6 (0xE00F02 `bsr.s` to the module-local
+///   0xE00EB0; 0xE00EF6 `jsr ML_$LOCK`).  A routine of this unit in
+///   another code section than the caller's becomes [`Callee::Section`]
+///   once the caller is lowered ([`set_call_sections`]), so that calls
+///   in statements and in expressions see the caller's section alike
+///   (bead domain-pascal-86o).  Through a routine
 ///   pointer ([`Callee::Pointer`], `jsr (An)`, 0xE0B3F0): the conventions,
 ///   modes and pad of the pointer type's signature (`val_param` on the
 ///   type, ref p. 4-146; [`routine_pointer`]).
@@ -3158,20 +3294,15 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 /// - The pad: the callee's `arg_pad` (codegen-patterns 1.4).  A
 ///   `variable` routine called with fewer arguments (ref 5.5.5) is not
 ///   supported yet: its pad and slots are not catalogued.
-fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
+fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
     // The parameters as (mode, univ, type), and the pad.
     let (callee, params, pad): (Callee, Vec<(ParamMode, bool, TypeId)>, u32) = match &c.callee {
         SCallee::Routine(id) => {
             let r = p.routine(*id);
             let callee = if r.external || r.body.is_none() {
                 Callee::External(r.symbol.clone())
-            } else if r.code_section == caller_section {
-                Callee::Local(r.symbol.clone())
             } else {
-                return Err(unsupported(
-                    span,
-                    "a call of a routine of this unit in another code section is",
-                ));
+                Callee::Local(r.symbol.clone())
             };
             let params = r.params.iter().map(|q| (q.mode, q.univ, q.ty)).collect();
             (callee, params, r.arg_pad)

@@ -8,10 +8,13 @@
 #   SPEC  NAME | NAME:LEN | 0xADDR | 0xADDR:LEN   (LEN hex).  NAME is a map
 #         name; 0xADDR is a module-local routine the map does not name.
 #         The routines of a unit must be contiguous in the image.
-#   ALIGN loop-align=on | loop-align=off | loop-align-off-from=ROUTINE,
+#   SEC   a data section, or a code section of the unit other than its
+#         routines' (named sections, README.md), placed at 0xADDR.
+#   ALIGN loop-align=on | loop-align=off | loop-align-off-from=ROUTINE,...
+#         (one ROUTINE per code section),
 #         forwarded to dpc (.pas units only; README.md, "Loop alignment
 #         on and off"; tools/loopalign.py switch SEG).
-#   A5    a5-always-from=ROUTINE, a5-always=ROUTINE,..., a5-absolute=
+#   A5    a5-always-from=ROUTINE,..., a5-always=ROUTINE,..., a5-absolute=
 #         ROUTINE,..., each at most once, forwarded to dpc as --a5-...
 #         (.pas units only; README.md, "Module data"; tools/a5survey.py
 #         switch SEG).
@@ -37,8 +40,12 @@ tests/conformance/time_q_init_queue.pas      TIME_$Q_INIT TIME_$Q_INIT_QUEUE TIM
 tests/conformance/ast_page_zero.pas          0xE00EB0 AST_$PAGE_ZERO
 # Module data: the unit's NOBITS data area (.bss.moddata.<UNIT>, dpc
 # emit.rs) placed at the module's D segment of the map.
-tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .bss.moddata.PROC1_=0xE254E8
+tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .bss.moddata.PROC1_.WIRED_DATA=0xE254E8
 tests/conformance/proc2_get_boot_flags.pas   PROC2_$GET_BOOT_FLAGS  --section-addr .bss.moddata.PROC2=0xE7BE84
+# Named sections (codegen-patterns 11): a whole module in two code
+# sections and a data section, each placed at its map segment; the unit's
+# routine is in the code section without --section-addr.
+tests/conformance/scsi.pas                   SCSI_$CINIT  --section-addr .text.SCSI_.SCSI_WIRED_PROC=0xE88800  --section-addr .bss.moddata.SCSI_.SCSI_WIRED_DATA=0xE88804
 # Control flow: an `if ... else if' chain, a by-address slot held in A0.
 tests/conformance/name_convert_acl_status.pas  NAME_CONVERT_ACL_STATUS
 # Register allocation (codegen-patterns 12.4 R1-R3): parameters loaded at
@@ -66,7 +73,7 @@ tests/conformance/io_alloc.pas               IO_$ALLOC
 # Which routines load A5 (codegen-patterns 4): always mode from a routine
 # on, per routine, and the unit's data addressed absolutely; empty
 # procedures as a bare `rts' (codegen-patterns 2).
-tests/conformance/smd_busy_wait.pas          SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  --section-addr .bss.moddata.SMD=0xE2E060  a5-always-from=SMD_$BUSY_WAIT
+tests/conformance/smd_busy_wait.pas          SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  --section-addr .bss.moddata.SMD.WIRED_DATA=0xE2E060  a5-always-from=SMD_$BUSY_WAIT
 tests/conformance/mmap_alloc_contig.pas      MMAP_$ALLOC_CONTIG  --section-addr .bss.moddata.MMAP_=0xE23284  a5-always=MMAP_$ALLOC_CONTIG
 tests/conformance/xns_idp_get_port_info.pas  XNS_IDP_$GET_PORT_INFO  --section-addr .bss.moddata.XNS_IDP=0xE2B314  a5-always=XNS_IDP_$GET_PORT_INFO
 tests/conformance/rem_name_register_server.pas  REM_NAME_$REGISTER_SERVER:1A  --section-addr .bss.moddata.REM_NAME=0xE7DBB8  a5-absolute=REM_NAME_$REGISTER_SERVER

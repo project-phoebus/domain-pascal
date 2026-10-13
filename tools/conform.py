@@ -45,8 +45,15 @@ segment, whichever comes first.  `--len LEN' overrides the length when
 exactly one routine is given.
 
 The routines of one unit must be contiguous in the image (e.g. a
-module-local worker, then its caller).  All code sections of the object are
-concatenated in object order and linked at the lowest routine address.
+module-local worker, then its caller).  All code sections of the object
+without a `--section-addr' are concatenated in object order and linked at
+the lowest routine address.  A code section with `--section-addr SEC=0xADDR'
+is another code section of the unit's module (a Pascal code section of its
+own, dpc's `.text.<UNIT>.<SECTION>', a segment of another output section in
+the map: SCSI_ in OS_INIT_PROC and SCSI_WIRED_PROC): it is linked at ADDR and
+compared whole, bytes and relocations, ADDR must start a code segment of the
+map and the section must be exactly as long, and its global symbols are
+checked like the unit's.  Such a unit cannot be a fragment.
 
 Fragments.  The compiler's 4-byte alignment (loop heads, module-end
 padding with 0x2048; codegen-patterns 7) is relative to the module's
@@ -375,14 +382,29 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     if not code:
         raise SetupError('%s has no code' % src)
     for s in section_addrs:
-        if s not in other:
-            raise SetupError('--section-addr %s: no such non-code section with contents' % s)
+        if s not in other and s not in code:
+            raise SetupError('--section-addr %s: no such section with contents' % s)
+    # code sections with --section-addr: a unit's other code sections
+    # (a module with routines in several Pascal code sections, which the
+    # map has as segments of different output sections), each linked at
+    # its own address and compared whole
+    extra = [s for s in code if s in section_addrs]
+    code = [s for s in code if s not in section_addrs]
+    if not code:
+        raise SetupError('%s: every code section has a --section-addr; the unit\'s '
+                         'routines must be in one without' % src)
+    if extra and pad:
+        raise SetupError('%s: a fragment has one code section (dpc --fragment-origin)' % src)
     markers = {}                # input section -> marker symbol
     script = ['SECTIONS {', '  %s 0x%X : SUBALIGN(2) {' % (CODE_OUT, lo - pad)]
     for i, s in enumerate(code):
         markers[s] = '__conform_%d' % i
         script.append('    %s = .; unit.o(%s)' % (markers[s], s))
     script.append('  }')
+    for i, s in enumerate(extra):
+        markers[s] = '__conform_c%d' % i
+        script.append('  .conform_c%d 0x%X : SUBALIGN(2) { %s = .; unit.o(%s) }'
+                      % (i, section_addrs[s], markers[s], s))
     unplaced = UNPLACED_BASE
     for i, s in enumerate(other):
         markers[s] = '__conform_d%d' % i
@@ -463,10 +485,40 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                             % (lo + i, i, x, y))
             break
 
+    # the other code sections: each compared whole at its --section-addr
+    regions = {sec: (lo, hi, img) for sec in code}
+    extra_bytes = {}
+    for i, sec in enumerate(extra):
+        cpath = os.path.join(work, 'code_c%d.bin' % i)
+        run([OBJCOPY, '-O', 'binary', '-j', '.conform_c%d' % i, elf, cpath])
+        with open(cpath, 'rb') as f:
+            data = f.read()
+        a = section_addrs[sec]
+        if a < IMAGE_LO or a + len(data) > IMAGE_HI:
+            raise SetupError('--section-addr %s=0x%X: outside the image' % (sec, a))
+        cimg = read_image(a, len(data))
+        regions[sec] = (a, a + len(data), cimg)
+        extra_bytes[sec] = data
+        # compared whole: the section must be exactly one map segment, or
+        # a section shorter than its segment would pass on a prefix
+        seg = linkmap.segment_containing(a)
+        if seg is None or seg.is_section or seg.kind != 'I' or seg.addr != a:
+            problems.append('code section %s at 0x%X: not the start of a code segment of '
+                            'the map' % (sec, a))
+        elif len(data) != seg.size:
+            problems.append('code section %s: ours 0x%X bytes, map segment %s 0x%X..0x%X '
+                            'is 0x%X' % (sec, len(data), seg.name, seg.addr, seg.end,
+                                         seg.size))
+        bad = [j for j, (x, y) in enumerate(zip(data, cimg)) if x != y]
+        if bad:
+            problems.append('code section %s differs first at 0x%X: ours %02x, image %02x'
+                            % (sec, a + bad[0], data[bad[0]], cimg[bad[0]]))
+
     # 4. relocations, symbolically
     relocs = relocs_of(obj)
     nrel = 0
-    for sec in code:
+    for sec in code + extra:
+        rlo, rhi, rimg = regions[sec]
         for off, typ, sym, add in relocs.get(sec, []):
             p = base[sec] + off
             if enclosing is not None and p >= hi:
@@ -485,11 +537,11 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                 continue
             want = s + add - (p if '_PC' in typ else 0)
             mask = (1 << (8 * size)) - 1
-            if p < lo or p + size > hi:
+            if p < rlo or p + size > rhi:
                 problems.append('0x%X: %s %s%+#x lies outside the compared range'
                                 % (p, typ, what, add))
                 continue
-            have = int.from_bytes(img[p - lo:p - lo + size], 'big')
+            have = int.from_bytes(rimg[p - rlo:p - rlo + size], 'big')
             if (want & mask) != have:
                 if '_PC' in typ:
                     sign = 1 << (8 * size - 1)
@@ -506,17 +558,19 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     # literal addresses: a 32-bit field with no relocation whose value is a
     # map address (>= 0x10000) means a reference was hard-coded instead of
     # named; it would match here but not survive a relink in ../source
-    covered = set()
-    for sec in code:
-        for off, typ, _, _ in relocs.get(sec, []):
-            p = base[sec] + off - lo
-            covered.update(range(p, p + RELOC_SIZE.get(typ, 0)))
     map_addrs = {s.addr for s in linkmap.symbols if s.addr >= 0x10000}
-    for i in range(0, len(ours) - 3, 2):
-        v = int.from_bytes(ours[i:i + 4], 'big')
-        if v in map_addrs and not covered & set(range(i, i + 4)):
-            problems.append('0x%X: literal 0x%X (%s) with no relocation; reference '
-                            'it by name' % (lo + i, v, linkmap.describe(v)))
+    for secs_, rlo, data in [(code, lo, ours)] + [([s_], section_addrs[s_], extra_bytes[s_])
+                                                  for s_ in extra]:
+        covered = set()
+        for sec in secs_:
+            for off, typ, _, _ in relocs.get(sec, []):
+                p = base[sec] + off - rlo
+                covered.update(range(p, p + RELOC_SIZE.get(typ, 0)))
+        for i in range(0, len(data) - 3, 2):
+            v = int.from_bytes(data[i:i + 4], 'big')
+            if v in map_addrs and not covered & set(range(i, i + 4)):
+                problems.append('0x%X: literal 0x%X (%s) with no relocation; reference '
+                                'it by name' % (rlo + i, v, linkmap.describe(v)))
 
     # non-code sections with contents: compared byte for byte at their
     # --section-addr; without one they cannot be checked, which is a failure
@@ -542,7 +596,8 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     # placement of named routines and other global code symbols: a map name
     # must be global and at its map address; a global the map does not name
     # would be a module-local routine exported by mistake (CLAUDE.md 3.15)
-    globals_ = {n for n, _, sec, fl in symbols_of(obj) if fl[0] == 'g' and sec in code}
+    globals_ = {n for n, _, sec, fl in symbols_of(obj)
+                if fl[0] == 'g' and (sec in code or sec in extra)}
     for r in routines:
         if r.name and r.name not in globals_:
             problems.append('routine %s is not defined as a global code symbol in %s'
@@ -558,6 +613,9 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if not quiet:
             for r in routines:
                 out('OK %s 0x%X 0x%X  %s' % (r.label, r.addr, r.length, name))
+            for sec in extra:
+                out('OK section %s 0x%X 0x%X  %s'
+                    % (sec, section_addrs[sec], len(extra_bytes[sec]), name))
         return True
 
     out('FAIL %s (%s, 0x%X..0x%X, %d relocation(s))'
@@ -570,6 +628,12 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     for line in side_by_side(disassemble(ours, lo, work, 'ours'),
                              disassemble(img_show, lo, work, 'image')):
         out(line)
+    for sec in extra:
+        a, _, cimg = regions[sec]
+        out('section %s:' % sec)
+        for line in side_by_side(disassemble(extra_bytes[sec], a, work, 'ours_' + sec),
+                                 disassemble(cimg, a, work, 'image_' + sec)):
+            out(line)
     return False
 
 
@@ -611,7 +675,8 @@ LOOP_ALIGN_TOKENS = ('loop-align=', 'loop-align-off-from=')
 
 def loop_align_args(tokens):
     """The dpc options for manifest tokens `loop-align=on|off' and
-    `loop-align-off-from=NAME' (at most one of them)."""
+    `loop-align-off-from=NAME,...' (one routine per code section; at most
+    one of the tokens)."""
     if len(tokens) > 1:
         raise SetupError('more than one of loop-align= / loop-align-off-from=: %s'
                          % ' '.join(tokens))
@@ -620,7 +685,7 @@ def loop_align_args(tokens):
         key, _, val = t.partition('=')
         if key == 'loop-align' and val not in ('on', 'off'):
             raise SetupError('%s: want loop-align=on or loop-align=off' % t)
-        if not val:
+        if not val or '' in val.split(','):
             raise SetupError('%s: needs a routine name' % t)
         out.append('--' + t)
     return out
@@ -630,9 +695,9 @@ A5_TOKENS = ('a5-always-from=', 'a5-always=', 'a5-absolute=')
 
 
 def a5_args(tokens):
-    """The dpc options for manifest tokens `a5-always-from=NAME',
-    `a5-always=NAME,...' and `a5-absolute=NAME,...' (each at most
-    once)."""
+    """The dpc options for manifest tokens `a5-always-from=NAME,...' (one
+    routine per code section), `a5-always=NAME,...' and
+    `a5-absolute=NAME,...' (each at most once)."""
     out, seen = [], set()
     for t in tokens:
         key, _, val = t.partition('=')
@@ -640,10 +705,7 @@ def a5_args(tokens):
             raise SetupError('%s= given more than once' % key)
         seen.add(key)
         if not val or '' in val.split(','):
-            raise SetupError('%s: needs a routine name%s'
-                             % (t, '' if key == 'a5-always-from' else ' list'))
-        if key == 'a5-always-from' and ',' in val:
-            raise SetupError('%s: names one routine' % t)
+            raise SetupError('%s: needs a routine name list' % t)
         out.append('--' + t)
     return out
 

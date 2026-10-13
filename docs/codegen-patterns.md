@@ -548,6 +548,12 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   the statement holding the call (driver test
   `module_routine_unnamed_by_the_map`).
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
+- **Another code section of the same module:** `jsr abs.l` too, never
+  `bsr` (191 sites, none by `bsr`; PROC1_$INIT 0xE2F9EC `jsr 0xE14B12`,
+  an unnamed routine of PROC1_ in WIRED_PROC called from OS_INIT_PROC).
+  **Implemented** (`dpc_ir::Callee::Section`; section 11).  Inside one
+  segment, `jsr abs.l` only where `bsr.w` cannot reach (DIR 0xE535FE,
+  0x82BE bytes back; not implemented).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
   **Survey (Verified; `tools/indcallsurvey.py summary|list|addr`; bead
   domain-pascal-5aw.8).**  84 `jsr (An)` in 0xE00800..0xE88834, 3 in hand
@@ -1487,9 +1493,11 @@ variables.  Each module's static data is a data segment, addressed off
       is set as the first instruction after the register save and saved
       like any callee-saved register (section 12.1): `pea (A5)` alone,
       in the `movem` otherwise.
-    - `--a5-always-from=ROUTINE`: from ROUTINE on, in emission order (as
-      `--loop-align-off-from`, section 7), every exported routine with a
-      frame loads A5.  A bare-`rts` routine never does (section 2).
+    - `--a5-always-from=ROUTINE,...`: from ROUTINE on, within its code
+      section (one routine per section, as `--loop-align-off-from`,
+      section 7), every exported routine with a frame loads A5.  A
+      bare-`rts` routine never does (section 2).  A routine's A5 is the
+      block of its data section (section 11).
     - `--a5-always=ROUTINE,...`: these routines load A5 whatever their
       body, `internal` ones included (the 26 unnamed routines above; the
       switch-backs of PKT, XPD, FILE_ 0xE5D050).
@@ -2290,12 +2298,13 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   - **Implemented** (bead domain-pascal-vp7): since the cause is not
     known, the switch is a `dpc` option, not a source directive:
     `--loop-align=on|off` (default on) and
-    `--loop-align-off-from=ROUTINE` (on before ROUTINE in emission
-    order, off from it on).  dpc's emission order is code section by
-    code section, and the unit's routine order within one, which is the
-    order of the routines' bodies: a routine declared `forward` (or
-    `extern`) earlier is placed at its body (section 6, "Order",
-    Verified).  A routine that does not align gets no
+    `--loop-align-off-from=ROUTINE,...` (on before ROUTINE, off from it
+    on, within ROUTINE's code section; at most one routine per code
+    section, since each map segment has its own switch: bead
+    domain-pascal-lco, section 11).  The order is the unit's routine
+    order within a code section, which is the order of the routines'
+    bodies: a routine declared `forward` (or `extern`) earlier is placed
+    at its body (section 6, "Order", Verified).  A routine that does not align gets no
     filler (`crates/dpc-m68k/src/emit.rs` drops its `Align4`s before the
     branches are sized); the module end, or a module-tail fragment's, is
     padded with `0x2048` after an aligning last routine and with zero
@@ -3644,7 +3653,119 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
 - **Uncertain:** which source construct produced `WIRED_PROC`/`WIRED_DATA`
   (module heading section names are the likely candidate), and why
   `PROCEDURE$`/`DATA$` exist besides `.TEXT`/`.DATA`.  They may be another
-  compiler's defaults or older defaults.
+  compiler's defaults or older defaults.  Section names are at most 16
+  characters in the map (`PROC2_CREATE_PRO` beside `PROC2_CREATE_DAT`,
+  `COLOR4_$WIRED_DA`): truncated, by the binder or the object format
+  (Uncertain); `dpc` does not truncate.
+- **Modules in several sections (Verified from the map:
+  `tools/sectsurvey.py modules`; bead domain-pascal-5aw.10).**
+  52 module names have code segments in more than one output section,
+  and all but DISK_ at most one data segment per data section: e.g. PROC1_
+  (`I E1471C` WIRED_PROC, `I E2F958` OS_INIT_PROC; `D E254E8`
+  WIRED_DATA only), PROC2 (OS_INIT_PROC, .TEXT, PROC2_CREATE_PRO,
+  PROC2_DELETE_PRO; `D` in OS_INIT_DATA, .DATA, PROC2_CREATE_DAT,
+  PROC2_DELETE_DAT), PKT (WIRED_PROC, OS_INIT_PROC, PROCEDURE$), SMD
+  (WIRED_PROC, OS_INIT_PROC, .TEXT, PROCEDURE$, PROC2_DELETE_PRO; four
+  `D`), SCSI_ (`I E34F04` OS_INIT_PROC, `I E88800` SCSI_WIRED_PROC, `D
+  E88804` SCSI_WIRED_DATA).  The code sections pair with data sections
+  by name (WIRED_PROC/WIRED_DATA, OS_INIT_PROC/OS_INIT_DATA,
+  .TEXT/.DATA, PROCEDURE$/DATA$, PROC2_CREATE_PRO/PROC2_CREATE_DAT,
+  RING_PROC/RING_DATA, SCSI_WIRED_PROC/SCSI_WIRED_DATA).  A few names
+  have two segments in one section: DISK_ (three in .TEXT, three `D` in
+  .DATA), AUDIT and NETLOG (a second 4-byte .TEXT segment), i.e. several
+  compilation units of one name (section 4, "Hypotheses refuted").
+- **Calls between a module's sections (Verified: `tools/sectsurvey.py
+  calls [-v]`, over `tools/a5survey.py`'s routines).**  No `bsr` crosses a segment: of the
+  calls between routines of one module name, every one into another
+  segment of it is `jsr abs.l` (191: 103 to map-named routines, 88 to
+  unnamed ones; PROC1_$INIT 0xE2F9EC `jsr 0xE14B12`, WIRED_PROC;
+  AST_$ACTIVATE_ASTE_CANNED 0xE2F350 `jsr 0xE0250C`; TTY_$K_RESET
+  0xE6730E `jsr 0xE1AED0`), and every `bsr` stays in its segment (1879).
+  The unnamed callees are module-local routines reached by absolute
+  address.  23 more `jsr abs.l` stay inside one segment, all in DIR
+  (0xE535FE `jsr 0xE4B340`, 0x82BE bytes back): the segment is 0x8FD0
+  bytes, beyond `bsr.w`'s reach (not implemented: no unit is that
+  large).
+- **Data per section (Verified at the sites).**  A routine's A5 is its
+  module's block in the data section paired with its code section
+  (section 4, "What A5 points at"); an unnamed routine called from
+  another section loads its own (0xE14B12 `lea 0xE254E8,A5`, PROC1_'s
+  WIRED_DATA block, although its caller PROC1_$INIT is in OS_INIT_PROC,
+  where PROC1_ has no block; 0xE0250C `lea 0xE1DC80,A5`, called from
+  AST_$ACTIVATE_ASTE_CANNED, whose A5 is 0xE35004).  A routine reaches
+  its module's block of *another* data section by its absolute address
+  in a register, `movea.l #block,An` then `(d,An)`: PROC1_$INIT 0xE2F95C
+  `movea.l #0xE254E8,A0; move.l #..,(0xc40,A0)` (three more stores off
+  A0), PROC2_$INIT 0xE3048E `movea.l #0xE7BE84,A1; move.w #2,(0x1e2,A1)`
+  (PROC2's .DATA block, from OS_INIT_PROC), KBD_$INIT 0xE3336A (KBD's
+  WIRED_DATA 0xE2DDE4, twice: 0xE3336A and 0xE3339E, after a call).
+  The encoding is `movea.l #imm` (`207c`), not the `lea abs.l` of the
+  `--a5-absolute` sites (section 4).  When the register is reloaded is
+  not settled (Uncertain).
+- **Overlay sections (Verified from the map; addressing at the sites).**
+  Sections with no per-module segment, named like variables (ACL_$DATA
+  0xE88834, FILE_$LOT_DATA, RINGLOG_$DATA, XPD_$DATA, PROC2_$DATA
+  0xEA551C; NET_PORT_TABLE, REM_FILE_$DATA 0xE2E380, SMD_$WIRED_DATA),
+  fit `var (name)` overlays (ref 3.14, p. 3-52: "just like a named common
+  block in FORTRAN").  Code reaches them by absolute address:
+  PROC2_$INIT 0xE30466 `movea.l #0xEA551C,A0; ... clr.w (0x3eb6,A0)`,
+  REM_FILE 0xE61178 `move.l #0xE2E380,-(SP)` (an address argument).
+- **What `dpc` emits for named sections (implemented, bead
+  domain-pascal-5aw.10).**  The module heading's sections (ref 7.1.1,
+  p. 7-2) and `[section(c,d)]` (ref 5.7.1, p. 5-24; a nested routine
+  inherits its outer routine's) are kept per routine (`dpc_ir::Function`
+  `code_section`, `data_section`).
+  - *Output sections.*  The default code section stays `.text`; a named
+    code section `S` of unit `U` is `.text.<U>.<S>`, upper-cased
+    (`crates/dpc-m68k/src/emit.rs`, `code_section_name`).  Routines are
+    grouped by code section, in body order within each; each section has
+    its own constant pool and module-end padding.  The data area of a
+    named data section `D` is the NOBITS `.bss.moddata.<U>.<D>`, labelled
+    `.Ldata.<D>` (`.bss.moddata.<U>` and `.Ldata` for `.data`, as
+    before).  Evidence for the scheme, `../source`'s link
+    (`domain_os/tools/gen_layout_ld.py`, read only): a code input section
+    is any `.text` or `.text.*` section, keyed by the earliest map symbol
+    it defines (its name is not looked at), and a section whose map
+    symbols straddle another placed section is an error, so one input
+    section per unit and code section, like the image's one segment per
+    module and section, is what that link can order.  The unit name
+    keeps two units' `S` apart (the generator also qualifies duplicate
+    names by object), and the `.` between the names keeps them apart
+    from every `.text.<symbol>` there (`-ffunction-sections`, the
+    hand-written `.section ".text.<symbol>"`).  The data blocks are not
+    linkable into `../source` yet (above: its blocks are keyed by C
+    `MODULE_DATA_DEFINE` sites).
+  - *Calls.*  A call of a routine of the unit in another code section is
+    `jsr (SYM).l` (`dpc_ir::Callee::Section`), a local symbol for an
+    `internal` routine (gas relocates it against the section); within a
+    section it stays `bsr`.  Calls in statements and in expressions
+    alike (bead domain-pascal-86o: the code section is applied after
+    lowering, `set_call_sections`).
+  - *A5.*  A routine's data base is its data section's block
+    (`lea (.Ldata.<D>).l,A5`); a nested routine's is its top-level
+    routine's.  An `internal` top-level routine that a routine of another
+    data section calls loads its own like an exported routine (the
+    0xE14B12 shape; whether the original's rule is "called from another
+    data section" or "called from another code section" cannot be told
+    apart, the pairs always coincide).
+  - *Refused:* a static variable of another data section than the
+    routine's (the `movea.l #block,An` form above), overlay sections
+    (`var (name)` with a name that is no data section of the unit), a
+    nested routine in another code section than its parent, section
+    names with characters other than letters, digits, `_`, `$`, `.`,
+    and a fragment (`--fragment-origin`) with more than one code
+    section.
+  - *Options per section* (bead domain-pascal-lco): `--loop-align-off-
+    from=R,...` and `--a5-always-from=R,...` take one routine per code
+    section and switch only that section, from R on (each map segment
+    has its own switch, sections 4 and 7).
+  - Conformance: `tests/conformance/scsi.pas`, the whole SCSI_ module
+    in two code sections and a data section, byte-identical, each
+    section at its map segment (`tools/conform.py` links a code section
+    named in `--section-addr` there and compares it whole);
+    `proc1_get_loadav.pas` and `smd_busy_wait.pas` name their real
+    sections (WIRED_PROC, WIRED_DATA) and are unchanged in bytes.
+    Golden `tests/golden/sections/named_sections`.
 - **Constants (Verified by survey; section 1.5):** constants passed by
   address sit in the code section, in cells right after the code of the
   routine that first uses them (`rts`, then the cells; 733 + 305 sites,
@@ -3679,9 +3800,9 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   (or becomes) the C block in a link test is not designed yet.  `define`d
   variables are global symbols inside the block; other statics have no
   symbol.  `tools/conform.py` places the section with the manifest's
-  `--section-addr .bss.moddata.<UNIT>=0x<D segment>`.  Not supported
-  yet: initial values (a progbits block), data sections named in the
-  module heading or in `var (name)`.
+  `--section-addr .bss.moddata.<UNIT>=0x<D segment>`.  Named data
+  sections: above.  Not supported yet: initial values (a progbits
+  block), overlay sections (`var (name)`).
 
 ---
 

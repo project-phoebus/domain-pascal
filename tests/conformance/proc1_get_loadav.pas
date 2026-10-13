@@ -5,10 +5,13 @@
   map `D E254E8 PROC1_ size = CC4').
 
   The unit is a fragment of the PROC1_ module (code segment 0xE1471C), so
-  tools/conform.py compiles it with `dpc --fragment-origin 0xE14BBA'.  Its
-  data area, the NOBITS section `.bss.moddata.PROC1_', is placed at the
-  PROC1_ data segment by the manifest (`--section-addr'); the `lea' of the
-  data base is then checked symbolically against 0xE254E8.
+  tools/conform.py compiles it with `dpc --fragment-origin 0xE14BBA'.  The
+  module heading names the map's sections, WIRED_PROC and WIRED_DATA
+  (codegen-patterns 11; the bytes are the same with the default
+  sections): the code is `.text.PROC1_.WIRED_PROC', the data area the
+  NOBITS section `.bss.moddata.PROC1_.WIRED_DATA', placed at the PROC1_
+  data segment by the manifest (`--section-addr'); the `lea' of the data
+  base is then checked symbolically against 0xE254E8.
 
   Patterns exercised (docs/codegen-patterns.md):
   - 1.2  default convention: the out parameter is passed by address,
@@ -30,7 +33,7 @@
   routine only writes the parameter, which is what `out' says, ref
   5.3.2).  Only `loadav' of the 0xCC4-byte PROC1_ data block is declared:
   it is at offset 0, and nothing else is needed here. }
-module proc1_;
+module proc1_, wired_proc, wired_data;
 type
   proc1_$loadav_t = array[1..3] of integer32;
 var

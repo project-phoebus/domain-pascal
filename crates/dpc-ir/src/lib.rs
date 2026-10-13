@@ -50,9 +50,15 @@ pub struct Module {
     /// `bsr`s to module-local routines, e.g. AUDIT_$SHUTDOWN 0xE70D2E).
     /// Routines with no body in the unit are not emitted.
     pub functions: Vec<Function>,
-    /// The unit's static data area, if it allocates any static data
-    /// (unit-level `var`, `static`, `define`; ref 7.2).
-    pub data: Option<DataArea>,
+    /// The unit's static data areas, one per data section it allocates
+    /// static data in (unit-level `var`, `static`, `define`; ref 7.2), in
+    /// order of first allocation.  A section is the module heading's data
+    /// section (ref 7.1.1, p. 7-2; `.data` by default, ref 5.7.1 p. 5-24)
+    /// or a routine's (`[section(c,d)]`, ref 5.7.1): the image has one
+    /// block per data section for a module whose routines are in several
+    /// (PROC2: 0xE7BE84 in .DATA, 0xE35030 in OS_INIT_DATA, 0xE86050 in
+    /// PROC2_CREATE_DAT; codegen-patterns 4, 11).
+    pub data: Vec<DataArea>,
     /// Calls of `internal` routines with no body in the unit (declared
     /// `internal; extern`): symbol and the innermost statement holding
     /// the first such call, per symbol.  The reference allows calls of an
@@ -63,10 +69,15 @@ pub struct Module {
     pub outside_internal_calls: Vec<(String, Span)>,
 }
 
-/// A unit's static data area: one block, zero-filled (initialised static
-/// data is not supported yet), reached as [`Addr::Static`] offsets.
+/// A unit's static data area in one data section: one block,
+/// zero-filled (initialised static data is not supported yet), reached as
+/// [`Addr::Static`] offsets by the routines whose data section it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataArea {
+    /// The Pascal data section, as `dpc_sema` names it (`.data` when
+    /// nothing names one; otherwise the name folded as the source gives
+    /// it).  The output section is the target's decision.
+    pub section: String,
     /// Bytes allocated by the unit (`dpc_sema::Program::data_sections`),
     /// raw: rounding the block is the target's decision.
     pub size: u32,
@@ -86,6 +97,12 @@ pub struct Function {
     /// The code section the routine goes to (ref 5.7.1; `.text` by
     /// default).
     pub code_section: String,
+    /// The data section of the routine's static data (ref 5.7.1; `.data`
+    /// by default): the [`DataArea`] its [`Addr::Static`] operands are
+    /// offsets into and whose base it loads ([`Self::loads_data_base`]).
+    /// A nested routine has its top-level routine's, whose base it
+    /// inherits.
+    pub data_section: String,
     /// Bytes of frame used below the frame pointer, raw (not rounded):
     /// `dpc_sema::Routine::frame_size`.
     pub frame_size: u32,
@@ -213,11 +230,13 @@ impl Function {
 /// matched case-insensitively against routine symbols.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataBaseOptions {
-    /// "Always mode" from this routine on, in emission order: it and every
-    /// later exported routine load the data base whatever their body
-    /// (SMD 0xE1D750: SMD_$COPY_FONT_TO_MD_HDM does not, SMD_$BUSY_WAIT
-    /// 0xE1D8A4 and SMD_$LITES do).
-    pub always_from: Option<String>,
+    /// "Always mode" from each of these routines on, within its code
+    /// section (one switch per map segment, and a unit's code section is
+    /// one segment; at most one name per section): it and every later
+    /// exported routine of its section load the data base whatever their
+    /// body (SMD 0xE1D750: SMD_$COPY_FONT_TO_MD_HDM does not,
+    /// SMD_$BUSY_WAIT 0xE1D8A4 and SMD_$LITES do).
+    pub always_from: Vec<String>,
     /// These routines load the data base whatever their body, `internal`
     /// ones included (the switch-backs of PKT 0xE1202C, XPD 0xE5AF38,
     /// FILE_ 0xE5D050; the unnamed routines that load it, e.g. 0xE14B12,
@@ -594,6 +613,14 @@ pub enum Callee {
     /// A routine of another unit, reached through its symbol (m68k `jsr
     /// abs.l`).
     External(String),
+    /// A routine with a body in this unit but in another code section,
+    /// named by its symbol (local for an `internal` routine): an absolute
+    /// call (m68k `jsr abs.l`), as for another unit's routine.  In the
+    /// image no `bsr` crosses a map segment; every call between two code
+    /// sections of one module is `jsr abs.l` (codegen-patterns 1.6, 11:
+    /// PROC1_$INIT 0xE2F9EC in OS_INIT_PROC to the module-local 0xE14B12
+    /// in WIRED_PROC).
+    Section(String),
     /// Through a routine pointer: the pointer value (a 4-byte load), read
     /// after the arguments are pushed (m68k `movea.l <ea>,An; jsr (An)`,
     /// codegen-patterns 1.6: KBD_$RCV 0xE1CE5C, RING_INTERRUPT 0xE0AB1C).

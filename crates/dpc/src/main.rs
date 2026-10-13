@@ -1,8 +1,8 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
 //! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
-//!            [--loop-align=on|off | --loop-align-off-from=ROUTINE]
-//!            [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...]
+//!            [--loop-align=on|off | --loop-align-off-from=ROUTINE,...]
+//!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N]
 //!            [--parse-only | --dump-ast | --check-only] file.pas
@@ -22,8 +22,9 @@
 //! (codegen-patterns 4; `dpc_ir::DataBaseOptions`).  By default ("used
 //! mode") an exported routine loads it iff it addresses the unit's data,
 //! directly or through `internal` callees that inherit it.
-//! `--a5-always-from=R`: from routine R on, in emission order, every
-//! exported routine with a frame loads it.  `--a5-always=R,...`: these
+//! `--a5-always-from=R,...`: from routine R on, within R's code section
+//! (one switch per section, as per map segment), every exported routine
+//! with a frame loads it.  `--a5-always=R,...`: these
 //! routines (`internal` ones too) load it.  `--a5-absolute=R,...`: these
 //! exported routines do not load it and address the data with `lea
 //! <area>.l,An`.  Names are matched case-insensitively.
@@ -60,8 +61,8 @@ use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 const PROG: &str = "dpc";
 const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
-                     [--loop-align=on|off | --loop-align-off-from=ROUTINE] \
-                     [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...] \
+                     [--loop-align=on|off | --loop-align-off-from=ROUTINE,...] \
+                     [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] \
                      [--parse-only | --dump-ast | --check-only] file.pas";
@@ -93,8 +94,9 @@ struct Args {
     schedule: Schedule,
 }
 
-/// The routine names of `--a5-always=` / `--a5-absolute=`: a comma list
-/// without empty items.
+/// The routine names of `--a5-always=`, `--a5-absolute=`,
+/// `--a5-always-from=` and `--loop-align-off-from=`: a comma list without
+/// empty items.
 fn routine_list(opt: &str, v: &str) -> Result<Vec<String>, String> {
     let names: Vec<String> = v.split(',').map(str::to_string).collect();
     if names.iter().any(String::is_empty) {
@@ -157,19 +159,17 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     ("--loop-align", _) => {
                         return Err(format!("--loop-align: want `on` or `off`, got `{v}`"))
                     }
-                    (_, "") => return Err("--loop-align-off-from needs a routine name".into()),
-                    _ => LoopAlign::OffFrom(v.to_string()),
+                    _ => LoopAlign::OffFrom(routine_list("--loop-align-off-from", v)?),
                 });
             }
             s if s.starts_with("--a5-always-from=") => {
-                let v = &s["--a5-always-from=".len()..];
                 if always_from.is_some() {
                     return Err("--a5-always-from given more than once".into());
                 }
-                if v.is_empty() {
-                    return Err("--a5-always-from needs a routine name".into());
-                }
-                always_from = Some(v.to_string());
+                always_from = Some(routine_list(
+                    "--a5-always-from",
+                    &s["--a5-always-from=".len()..],
+                )?);
             }
             s if s.starts_with("--a5-always=") => {
                 if always.is_some() {
@@ -244,7 +244,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         fragment_ends_module,
         loop_align: loop_align.unwrap_or_default(),
         data_base: DataBaseOptions {
-            always_from,
+            always_from: always_from.unwrap_or_default(),
             always: always.unwrap_or_default(),
             absolute: absolute.unwrap_or_default(),
         },
@@ -389,8 +389,23 @@ mod tests {
             args(&["--loop-align-off-from=vtoc_$dismount", "m.pas"])
                 .unwrap()
                 .loop_align,
-            LoopAlign::OffFrom("vtoc_$dismount".into())
+            LoopAlign::OffFrom(vec!["vtoc_$dismount".into()])
         );
+        // one routine per code section (codegen-patterns 7, 11)
+        assert_eq!(
+            args(&["--loop-align-off-from=a,b", "m.pas"])
+                .unwrap()
+                .loop_align,
+            LoopAlign::OffFrom(vec!["a".into(), "b".into()])
+        );
+        assert_eq!(
+            args(&["--a5-always-from=a,b", "m.pas"])
+                .unwrap()
+                .data_base
+                .always_from,
+            ["a", "b"]
+        );
+        assert!(args(&["--a5-always-from=a,", "m.pas"]).is_err());
         assert_eq!(
             args(&["m.pas"]).unwrap().data_base,
             DataBaseOptions::default()
@@ -405,7 +420,7 @@ mod tests {
         assert_eq!(
             a.data_base,
             DataBaseOptions {
-                always_from: Some("smd_$busy_wait".into()),
+                always_from: vec!["smd_$busy_wait".into()],
                 always: vec!["P".into(), "q_$x".into()],
                 absolute: vec!["AUDIT_$SUSPEND".into()],
             }
