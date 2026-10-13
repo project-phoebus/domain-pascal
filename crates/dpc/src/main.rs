@@ -33,6 +33,13 @@
 //! the whole module and reached it with `bsr` (codegen-patterns 1.6:
 //! DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w DISK_$UNASSIGN`); the fragment does
 //! too, sized from ADDR (`dpc_m68k::emit::Options::module_routines`).
+//! A module-local routine the map does not name is declared `internal;
+//! extern` and named by its symbol (MST_$MAPS 0xE439C4 `bsr.w` to
+//! 0xE43182, the fragment's `ALLOC_SEGS`): the `bsr` goes to that local
+//! symbol, which the conformance harness defines at link time (bead
+//! domain-pascal-3h9; test scaffolding, `tests/conformance/README.md`).
+//! Without the option such a call is an error: internal routines can be
+//! called only within the unit that defines them (ref 5.2, p. 5-4).
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -72,7 +72,15 @@ pointer held in A1; loop alignment off).  Function results
 before a call, held in D2 and moved to D0 at the end; the spin-lock token
 stored to its slot and pushed from D0) and `vfmt_get_next_arg.pas` (the
 VFMT module-local 0xE6AA38: a pointer result read from memory, stored
-into the result variable's slot and loaded into A0).
+into the result variable's slot and loaded into A0).  Callers of
+pointer functions (codegen-patterns 3, 12.4 R4(a); beads
+domain-pascal-ae9, -3h9): `mst_maps.pas` (MST_$MAP, MST_$MAP_TOP,
+MST_$MAP_GLOBAL, MST_$MAPS, 0xE4386C..0xE439D4: each a call of the
+unnamed module-local 0xE43182 whose A0 is stored into the result slot
+and left in A0; by-address slots read once in one argument list in A0,
+A1, A2, A3, A4) and `disk_get_block.pas` (DISK_$GET_BLOCK 0xE3BB80: a
+pointer result variable held in A2 across ML_$UNLOCK, `movea.l A0,A2`
+/ `movea.l A2,A0`).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
@@ -96,8 +104,31 @@ must lie in the unit's map module and outside the unit) and passes `dpc
 --module-routine=NAME=0xADDR`.  dpc then calls it with `bsr`, sized from
 the address as for a routine of the unit, and the reference is resolved
 to the map name at link time like any other (DISK_$UNASSIGN_ALL 0xE6BE34
-`bsr.w DISK_$UNASSIGN`, `disk_unassign_all.pas`).  A routine the map does
-not name cannot be given this way.
+`bsr.w DISK_$UNASSIGN`, `disk_unassign_all.pas`).
+
+A module-local routine the map does not name (bead domain-pascal-3h9)
+has no symbol to look up.  The unit declares it under a reconstructed
+name with `internal; extern` (`internal` gives the by-value convention
+of a routine of the same module, ref 5.2 p. 5-4, and a local symbol;
+`extern`, that its body is elsewhere), and the manifest item is
+`NAME=0xADDR`, NAME being dpc's symbol for it (the Pascal name
+upper-cased):
+
+    tests/conformance/mst_maps.pas  ...  module-routines=ALLOC_SEGS=0xE43182
+
+`tools/conform.py` checks that ADDR lies in the unit's map module and
+outside the unit, that the map has no name at ADDR (give that name
+instead) and that NAME is not a map name; passes `dpc
+--module-routine=NAME=0xADDR`; and links the unit with `--defsym
+NAME=0xADDR`, so the `bsr` displacement is checked against the image
+like any relocation (a wrong address fails).  A NAME the object does
+not reference is a setup error.  `conform.py check` takes the same as
+`--local-sym NAME=0xADDR`.  This is test scaffolding only: the reference allows
+calls of an `internal` routine only within its compilation unit (5.2
+p. 5-4), so dpc rejects a call of an `internal` routine with no body in
+the unit unless `--module-routine` names it; in a whole-module
+translation the body is in the unit.  NAME is upper-cased (dpc's
+symbols are).
 
 ## Module data
 

@@ -147,6 +147,14 @@ Tests:
   (DISK_$UNASSIGN_ALL 0xE6BE24), a run-time upper bound with its `subq.w
   #1; bmi` guard and the count copied (DTTY_$WRITE_STRING 0xE1D6AA), a
   count above 127 as `move.w #n`, `exit` and `next`.
+- `results/pointer_callers` - codegen-patterns 3 ("Callers of pointer
+  functions", "Pointer results"), 12.4 R4(a), 12.5: a pointer function's
+  A0 stored to memory, a frame slot, a wrapper's result slot (MST_$MAPS
+  0xE439C8), copied into a register-held local (`move.l A0,D0`,
+  0xE6763C), compared with `nil` (`cmpa.w #0,A0`), used as a base; a
+  pointer result variable held in A2 across a call (DISK_$GET_BLOCK
+  0xE3BBBC); slot loads of one argument list in A0, A1, A2 (MST_$MAP
+  0xE43886).
 - `results/result_variable` - codegen-patterns 3, 12.4 R5, 12.5: the
   result variable of a body of several statements held in one register
   (D2 across a call, PKT_$NEXT_ID 0xE1248E; D0 without, on three paths,

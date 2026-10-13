@@ -922,10 +922,10 @@ end;
 }
 
 #[test]
-fn value_of_a_pointer_function_is_refused() {
-    // A pointer result comes back in A0 (ref 5.5.10, p. 5-20); a call's
-    // value is read from D0, so using it is refused rather than read from
-    // the wrong register.
+fn value_of_a_pointer_function_is_read_from_a0() {
+    // A pointer result comes back in A0 (ref 5.5.10, p. 5-20); the caller
+    // reads it there (codegen-patterns 3, "Callers of pointer functions":
+    // TIME_$GET_EC 0xE16734 `move.l A0,(0x1620,A5)`).
     let src = "module m;
 type intp = ^integer;
 var gp: intp;
@@ -935,6 +935,92 @@ begin
   gp := second;
 end;
 ";
-    let (_, e) = compile_with("pointer_call_value", src, &[]).unwrap_err();
+    let s = compile_with("pointer_call_value", src, &[]).unwrap();
+    assert!(s.contains("jsr\t(SECOND).l\n\tmove.l\t%a0,(%a5)\n"), "{s}");
+    // Passed as an argument: no compiled site.
+    let src = "module m;
+type intp = ^integer;
+function second: intp; extern;
+procedure take(p: intp); val_param; extern;
+procedure user;
+begin
+  take(second);
+end;
+";
+    let (_, e) = compile_with("pointer_call_argument", src, &[]).unwrap_err();
     assert!(e.contains("whose result is in A0"), "{e}");
+}
+
+#[test]
+fn module_routine_unnamed_by_the_map() {
+    // A module-local routine outside a fragment, which the map does not
+    // name (bead domain-pascal-3h9): declared `internal; extern', named
+    // with --module-routine, called with `bsr' to its local symbol, which
+    // the harness resolves at link time (MST_$MAPS 0xE439C4 `bsr.w` to
+    // 0xE43182).
+    let src = "module m;
+procedure worker(n: integer); internal; extern;
+procedure m_$caller;
+begin
+  worker(3);
+end;
+";
+    let opts = [
+        "--fragment-origin",
+        "0x1000",
+        "--module-routine=WORKER=0x800",
+    ];
+    let s = compile_with("module_routine_local", src, &opts).unwrap();
+    assert!(s.contains("\tbsr.w\tWORKER\n"), "{s}");
+    assert!(!s.contains(".globl\tWORKER"), "{s}");
+    // `internal' takes a word by value (ref 5.2 Table 5-1).
+    assert!(s.contains("move.w\t#3,-(%sp)"), "{s}");
+    // Without the option the call is rejected at the statement that holds
+    // it: ref 5.2 p. 5-4, "Internal routines can be called only within the
+    // same compilation unit in which they are defined" (a `jsr` would name
+    // a local symbol nothing defines).
+    let src = "module m;
+procedure worker(n: integer); internal; extern;
+procedure m_$caller;
+var k: integer;
+begin
+  k := 0;
+  while k < 2 do
+    worker(3);
+end;
+";
+    for opts in [&["--fragment-origin", "0x1000"][..], &[]] {
+        let (_, e) = compile_with("module_routine_local_off", src, opts).unwrap_err();
+        assert!(
+            e.contains(":8:5: error: call of internal routine `WORKER`"),
+            "{e}"
+        );
+    }
+    // Another routine of the unit named by the option does not excuse it.
+    let opts = [
+        "--fragment-origin",
+        "0x1000",
+        "--module-routine=OTHER=0x800",
+    ];
+    let (_, e) = compile_with("module_routine_local_other", src, &opts).unwrap_err();
+    assert!(e.contains("call of internal routine `WORKER`"), "{e}");
+}
+
+#[test]
+fn too_many_address_values_in_one_argument_list() {
+    // codegen-patterns 12.4 R4(a): each slot load of an argument list
+    // takes a new address register; with more than A0-A4 the original
+    // reuses one (MST_$MAP_AT 0xE42F9C), which is not modelled.
+    let src = "module m;
+procedure take(a, b, c, d, e, f: integer); val_param; extern;
+procedure m_$six(var a, b, c, d, e, f: integer);
+begin
+  take(a, b, c, d, e, f);
+end;
+";
+    let (_, e) = compile_with("six_slot_loads", src, &[]).unwrap_err();
+    assert!(
+        e.contains("more address values in one argument list"),
+        "{e}"
+    );
 }

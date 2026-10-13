@@ -75,10 +75,12 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         }
     }
     if errors.is_empty() {
+        let outside_internal_calls = outside_internal_calls(program, &functions);
         Ok(Module {
             name: program.name.clone(),
             functions,
             data,
+            outside_internal_calls,
         })
     } else {
         Err(errors)
@@ -914,6 +916,52 @@ fn set_loads_data_base(
         };
     }
     Ok(())
+}
+
+/// [`Module::outside_internal_calls`]: the calls of top-level `internal`
+/// routines with no body in the unit (ref 5.2, p. 5-4: "Internal routines
+/// can be called only within the same compilation unit in which they are
+/// defined"), the first per symbol, with the innermost statement that
+/// holds it.
+fn outside_internal_calls(p: &Program, functions: &[Function]) -> Vec<(String, Span)> {
+    let names: Vec<&str> = p
+        .routines
+        .iter()
+        .filter(|r| r.parent.is_none() && r.options.internal && r.body.is_none())
+        .map(|r| r.symbol.as_str())
+        .collect();
+    fn walk(body: &[Stmt], names: &[&str], out: &mut Vec<(String, Span)>) {
+        for s in body {
+            let mut all = Vec::new();
+            stmt_calls(s, &mut all);
+            let mut inner = Vec::new();
+            for b in s.kind.bodies() {
+                for st in b {
+                    stmt_calls(st, &mut inner);
+                }
+            }
+            for c in all {
+                if inner.iter().any(|i| std::ptr::eq(*i, c)) {
+                    continue;
+                }
+                if let Callee::External(sym) = &c.callee {
+                    if names.contains(&sym.as_str()) && !out.iter().any(|(n, _)| n == sym) {
+                        out.push((sym.clone(), s.span));
+                    }
+                }
+            }
+            for b in s.kind.bodies() {
+                walk(b, names, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if !names.is_empty() {
+        for f in functions {
+            walk(&f.body, &names, &mut out);
+        }
+    }
+    out
 }
 
 /// The symbols of this unit's routines that `s` calls ([`Callee::Local`]),
@@ -2269,27 +2317,25 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
         }
         ExprKind::Builtin { builtin, args } => builtin_value(p, e, *builtin, args),
         ExprKind::Call(c) => {
-            // A pointer result comes back in A0 only (ref 5.5.10, p. 5-20;
-            // codegen-patterns 3, "Pointer results"); the selector reads a
-            // call's value from D0, so such a call is refused (how the
-            // original uses the A0 it returns, MST_$MAPS 0xE439C8 `move.l
-            // A0,(-4,A6)`, is not modelled).  `d0_return` puts it in D0
-            // too.
-            if let SCallee::Routine(id) = &c.callee {
-                if matches!(
-                    p.routine(*id).result.as_ref().map(|r| r.reg),
-                    Some(ResultReg::Address)
-                ) {
-                    return Err(unsupported(
-                        e.span,
-                        "using the value of a function whose result is in A0 is",
-                    ));
-                }
-            }
+            // A pointer result comes back in A0 (ref 5.5.10, p. 5-20;
+            // codegen-patterns 3, "Pointer results"); the caller reads it
+            // there (codegen-patterns 3, "Callers of pointer functions":
+            // MST_$MAPS 0xE439C8 `move.l A0,(-4,A6)`).  `d0_return` puts
+            // it in D0 too, where the caller reads it like a data result
+            // (no compiled site; ref 5.5.10).
+            let reg = match &c.callee {
+                SCallee::Routine(id) => match p.routine(*id).result.as_ref().map(|r| r.reg) {
+                    Some(ResultReg::Address) => ResultClass::Address,
+                    Some(ResultReg::AddressAndData) => ResultClass::AddressAndData,
+                    _ => ResultClass::Data,
+                },
+                _ => ResultClass::Data,
+            };
             let ty = scalar_of(p, e)?;
             Ok(Expr::Call {
                 call: call(p, ".text", c, e.span)?,
                 ty,
+                reg,
             })
         }
         _ => Err(unsupported(e.span, "this expression is")),

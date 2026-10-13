@@ -248,6 +248,17 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             dst: Ea::Reg(Reg::D(0)),
         });
     }
+    if let Some(web) = s.web_a {
+        // A pointer result variable into A0 at the start of the epilogue
+        // (DISK_$GET_BLOCK 0xE3BBCA `movea.l A2,A0`; codegen-patterns 3,
+        // "Pointer results": 12 of the 16 such moves are from A2).
+        s.result_moves.push(s.out.len());
+        s.out.push(Insn::Movea {
+            size: Size::L,
+            src: Ea::Reg(Reg::A(web)),
+            dst: 0,
+        });
+    }
     // Labels nothing branches to (the join after a `then` part that ends
     // in `return`, ...) are dropped; they emit no bytes either way.
     // A `case` table's entries name their targets like branches (a
@@ -306,7 +317,8 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         _ => &[],
     };
     let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A))?;
-    let apart = fresh_slot_loads(&s.out, &s.fresh)?;
+    let mut apart = fresh_slot_loads(&s.out, &s.fresh)?;
+    apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     let saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
         .map_err(|what| unsupported(f.span, what))?;
@@ -318,7 +330,8 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         .enumerate()
         .filter(|(k, i)| {
             !(s.result_moves.contains(k)
-                && matches!(i, Insn::Move { src: Ea::Reg(a), dst: Ea::Reg(b), .. } if a == b))
+                && (matches!(i, Insn::Move { src: Ea::Reg(a), dst: Ea::Reg(b), .. } if a == b)
+                    || matches!(i, Insn::Movea { src: Ea::Reg(Reg::A(a)), dst, .. } if a == dst)))
         })
         .map(|(_, i)| i)
         .filter(|i| !matches!(i, Insn::Label(l) if !used.contains(l)))
@@ -480,6 +493,47 @@ fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg,
                         apart.push((v, d));
                     }
                 }
+            }
+        }
+    }
+    Ok(apart)
+}
+
+/// Address values loaded inside one call's argument list are kept apart
+/// (codegen-patterns 12.4 R4(a), "Inside one argument list"): each takes a
+/// register no earlier load of the list took, although the earlier one
+/// is dead.  MST_$MAP 0xE43886..0xE438AA `movea.l (0x1c,A6),A0; move.b
+/// (A0),-(SP)`, then A1, A2, A3, A4 for four more slots read once (A2-A4
+/// saved by the `movem` for this alone); the same at MST_$MAP_TOP
+/// 0xE438E6 and MST_$MAP_GLOBAL 0xE43946; the nested 0xE1359C (A0, A1,
+/// A3).  Survey (ad-hoc script over `tools/nestsurvey.py`'s routines, not
+/// kept): of the argument lists with two or more slot loads read once by
+/// the next push, 39 use a new register for each and 4 reuse one, all four
+/// when the address registers run out (MST_$MAP_AT 0xE42F9C reuses A0
+/// for the sixth slot after A0-A4; 0xE59AB6, 0xE59B50, 0xE59E4E with A2-A4
+/// or A3 busy).  Such a list is refused here: which register the original
+/// reused then is not modelled.
+fn argument_list_loads(out: &[Insn], calls: &[(usize, usize, Span)]) -> Res<Vec<(Reg, Reg)>> {
+    let mut apart = Vec::new();
+    for &(start, jsr, span) in calls {
+        let mut loads: Vec<Reg> = Vec::new();
+        for i in &out[start..jsr] {
+            for d in crate::regs::access(i).defs {
+                if matches!(d, Reg::A(_)) && crate::regs::is_virtual(d) && !loads.contains(&d) {
+                    loads.push(d);
+                }
+            }
+        }
+        if loads.len() > crate::regs::ALLOC_A.len() {
+            return Err(unsupported(
+                span,
+                "more address values in one argument list than address registers (the \
+                 original reuses one, MST_$MAP_AT 0xE42F9C; codegen-patterns 12.4 R4(a)) is",
+            ));
+        }
+        for (k, &a) in loads.iter().enumerate() {
+            for &b in &loads[k + 1..] {
+                apart.push((a, b));
             }
         }
     }
@@ -832,6 +886,19 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
 }
 
 /// The memory operand an instruction writes, if any.
+/// The call of `e` when `e` is the value of a function whose result is in
+/// A0 (codegen-patterns 3, "Callers of pointer functions").
+fn a0_call(e: &Expr) -> Option<&Call> {
+    match e {
+        Expr::Call {
+            call,
+            reg: ResultClass::Address,
+            ..
+        } => Some(call),
+        _ => None,
+    }
+}
+
 fn mem_dst(i: &Insn) -> Option<&Ea> {
     let dst = match i {
         Insn::Move { dst, .. }
@@ -1671,6 +1738,9 @@ pub struct Selector {
     result_web: bool,
     /// That register, once the first assignment to the result defined it.
     web: Option<u8>,
+    /// The same for a pointer result, in an address register
+    /// ([`Self::set_pointer_result_web`]).
+    web_a: Option<u8>,
     /// Stores of a register into a local's frame slot: offset, size,
     /// register, and the index in `out` after the store
     /// ([`Self::forwarded`]).
@@ -1732,6 +1802,7 @@ impl Selector {
             uplevel: Vec::new(),
             result_web: false,
             web: None,
+            web_a: None,
             entry_regs: Vec::new(),
             stored: Vec::new(),
             escaped: Vec::new(),
@@ -2862,6 +2933,23 @@ impl Selector {
         let ty = lhs.ty();
         let size = size_of(ty.width);
         let signed = ty.sign == Sign::Signed;
+        if let Some(c) = a0_call(lhs) {
+            // A pointer function's result against `nil`: `cmpa.w #0,A0`
+            // after the call and its pop (codegen-patterns 3, "Callers of
+            // pointer functions": 12 sites, e.g. the NET module-local 0xE5A128
+            // at 0xE5A150 after ROUTE_$FIND_PORTP, AST_$LOAD_AOTE 0xE023BA).
+            // Only `=`/`<>` with `nil` are seen.
+            if !matches!(rhs, Expr::Const { value: 0, .. }) || !matches!(op, Rel::Eq | Rel::Ne) {
+                return Err(unsupported(
+                    self.span,
+                    "comparing the value of a function whose result is in A0 other than `= nil` \
+                     / `<> nil` is",
+                ));
+            }
+            let a = self.call_a0(c)?;
+            self.out.push(Insn::CmpaZero(a));
+            return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+        }
         let Expr::Load { addr, .. } = lhs else {
             return self.compare_computed(op, lhs, rhs);
         };
@@ -3329,6 +3417,12 @@ impl Selector {
                 };
                 let src = match value {
                     Expr::Load { addr: src, .. } => self.operand(src)?,
+                    // A pointer function's result: `movea.l A0,An`
+                    // (codegen-patterns 3, "Callers of pointer functions":
+                    // KBD_$SET_KBD_TYPE 0xE7253E `movea.l A0,A2`).
+                    v if a0_call(v).is_some() => {
+                        Ea::Reg(Reg::A(self.call_a0(a0_call(v).unwrap())?))
+                    }
                     v => match self.eval(v)? {
                         Val::Reg(r) => Ea::Reg(r),
                         Val::Tmp(d) => Ea::Reg(Reg::D(d)),
@@ -3357,7 +3451,14 @@ impl Selector {
                 // register, which then stands for the variable
                 // (TIME_$GET_ADJUST 0xE16AB4 `move.l (0xe2b0fc).l,D1`;
                 // PROC1_$SET_VT 0xE149B6 `move.w SR,D3`).
-                let d = match self.eval(value)? {
+                // A pointer function's result: `move.l A0,Dn` (TTY_$K_*
+                // after TTY_$I_GET_DESC, e.g. 0xE6763C `move.l A0,D0`;
+                // codegen-patterns 3, "Callers of pointer functions").
+                let v = match a0_call(value) {
+                    Some(c) => Val::Reg(Reg::A(self.call_a0(c)?)),
+                    None => self.eval(value)?,
+                };
+                let d = match v {
                     Val::Tmp(d) => d,
                     v => self.in_tmp(v, ty.width)?,
                 };
@@ -3404,6 +3505,13 @@ impl Selector {
                     "storing a computed boolean (s<cc> to memory or through a register) is",
                 ))
             }
+            // A pointer function's result, from A0 (codegen-patterns 3,
+            // "Callers of pointer functions": TIME_$GET_EC 0xE16734
+            // `move.l A0,(0x1620,A5)`; AST_$INVALIDATE 0xE06664 `move.l
+            // A0,(-20,A6)`; PEB_$LOAD_WCS 0xE32072 `move.l A0,abs.l`).
+            e if a0_call(e).is_some() => {
+                Src::Ea(Ea::Reg(Reg::A(self.call_a0(a0_call(e).unwrap())?)))
+            }
             e => match self.eval(e)? {
                 // A held value or a function's result is stored from its
                 // register (0xE04704 `move.l D0,(A3)` after `bsr.w`;
@@ -3429,7 +3537,10 @@ impl Selector {
             },
         });
         if let (Addr::Frame(o), Src::Ea(Ea::Reg(r))) = (addr, &src) {
-            if *o < 0 && self.loops.is_empty() && !self.escaped.contains(o) {
+            // Not a pointer function's A0: whether a later push of the
+            // local is made from A0 is not catalogued (12.5 counts data
+            // registers only).
+            if *o < 0 && self.loops.is_empty() && !self.escaped.contains(o) && *r != Reg::A(0) {
                 self.stored.push((*o, size, *r, self.out.len()));
             }
         }
@@ -3994,14 +4105,17 @@ impl Selector {
     /// 0xE1AA92 and 0xE5A180 (5 of 5 pointer functions whose last
     /// statement stores memory into the frame).
     ///
-    /// Refused: other values (a call's A0 is stored and kept, MST_$MAPS
-    /// 0xE439C8 `move.l A0,(-4,A6)`; a computed one is stored and moved,
+    /// A call of another pointer function: its A0 is stored into the slot
+    /// and left in A0, `move.l A0,(-4,A6)` then the epilogue (MST_$MAPS
+    /// 0xE439C8, MST_$MAP 0xE438BE, MST_$MAP_TOP 0xE4391E, MST_$MAP_GLOBAL
+    /// 0xE43974, MST_$REMAP 0xE439FE: the five map-named wrappers of
+    /// `tools/resultsurvey.py callers` whose call is not popped).
+    ///
+    /// Refused: other values (a computed one is stored and moved,
     /// 0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`; `nil` as `suba.l
-    /// A0,A0` at five sites, ROUTE_$FIND_PORTP 0xE15B84), a result
-    /// assigned in a body of several statements (held in an address
-    /// register across calls, DISK_$GET_BLOCK 0xE3BBBC `movea.l A0,A2`
-    /// ... 0xE3BBCA `movea.l A2,A0`), and a non-pointer result in A0
-    /// (`a0_return`, ref 5.5.11; no site known).
+    /// A0,A0` at five sites, ROUTE_$FIND_PORTP 0xE15B84) and a
+    /// non-pointer result in A0 (`a0_return`, ref 5.5.11; no site known).
+    /// In a body of several statements: [`Self::set_pointer_result_web`].
     fn set_pointer_result(&mut self, f: &Function, e: &Expr) -> Res<()> {
         let res = f.result.expect("SetResult in a function");
         if res.ty != Scalar::POINTER {
@@ -4011,11 +4125,7 @@ impl Selector {
             ));
         }
         if self.result_web {
-            return Err(unsupported(
-                self.span,
-                "a pointer result in a body of several statements (held in an address \
-                 register, DISK_$GET_BLOCK 0xE3BBBC; codegen-patterns 3) is",
-            ));
+            return self.set_pointer_result_web(e);
         }
         let Some(slot) = f.result_slot else {
             return Err(unsupported(
@@ -4023,6 +4133,15 @@ impl Selector {
                 "a pointer result without a frame slot is",
             ));
         };
+        if let Some(c) = a0_call(e) {
+            let a = self.call_a0(c)?;
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(Reg::A(a)),
+                dst: Ea::Disp(slot, FP),
+            });
+            return Ok(());
+        }
         let src = match e {
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -4034,8 +4153,8 @@ impl Selector {
         let Some(src) = src else {
             return Err(unsupported(
                 self.span,
-                "a pointer result other than one read from memory (a call's A0, a computed \
-                 value, `nil`: codegen-patterns 3, \"Pointer results\") is",
+                "a pointer result other than one read from memory or a pointer function's \
+                 result (a computed value, `nil`: codegen-patterns 3, \"Pointer results\") is",
             ));
         };
         self.out.push(Insn::Move {
@@ -4047,6 +4166,54 @@ impl Selector {
             size: Size::L,
             src: Ea::Disp(slot, FP),
             dst: 0,
+        });
+        Ok(())
+    }
+
+    /// `f := e` for a pointer result in a function body of several
+    /// statements: the result variable is held in one address register,
+    /// moved to A0 at the start of the epilogue ([`select_body`]), the
+    /// counterpart of [`Self::set_result_web`] (codegen-patterns 3,
+    /// "Pointer results": `movea.l Rn,A0` falls into 16 of the 40
+    /// epilogues, from A2 in 12, `tools/resultsurvey.py pointer`).  Like
+    /// any value it gets the lowest address register free over its live
+    /// range, a callee-saved one when a call follows (DISK_$GET_BLOCK
+    /// 0xE3BBBC `movea.l A0,A2` after DBUF_$GET_BLOCK, ML_$UNLOCK at
+    /// 0xE3BBC4, `movea.l A2,A0` at 0xE3BBCA).  Assigned from a pointer
+    /// function's result (copied from A0) or from memory (`movea.l`,
+    /// EC2_$GET_EC1_ADDR 0xE42AC4 `movea.l (0xa8c,A1),A2`); other values
+    /// (`nil`, `suba.l A2,A2` at 0xE42AAA; a computed address, `lea` at
+    /// 0xE42B0A) are refused.
+    fn set_pointer_result_web(&mut self, e: &Expr) -> Res<()> {
+        let web = match self.web_a {
+            Some(a) => a,
+            None => {
+                let a = self.alloc_a()?;
+                self.web_a = Some(a);
+                a
+            }
+        };
+        let src = match e {
+            e if a0_call(e).is_some() => Ea::Reg(Reg::A(self.call_a0(a0_call(e).unwrap())?)),
+            Expr::Load { addr, .. } if !matches!(addr, Addr::Frame(o) if *o > 0) => {
+                self.operand(addr)?
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "a pointer result in a body of several statements assigned other than a \
+                     pointer function's result or a variable (`nil`, a computed address: \
+                     codegen-patterns 3) is",
+                ))
+            }
+        };
+        if matches!(src, Ea::Reg(_)) {
+            self.result_moves.push(self.out.len());
+        }
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src,
+            dst: web,
         });
         Ok(())
     }
@@ -4196,6 +4363,18 @@ impl Selector {
                 Ok(Val::Tmp(d))
             }
             Expr::Convert { value, ty } => self.convert(value, *ty),
+            // A pointer function's A0 is read only where the image reads
+            // it (codegen-patterns 3, "Callers of pointer functions";
+            // [`a0_call`]): a store, a copy into a register-held local, a
+            // base, a test against `nil`, the caller's own pointer result.
+            Expr::Call {
+                reg: ResultClass::Address,
+                ..
+            } => Err(unsupported(
+                self.span,
+                "this use of the value of a function whose result is in A0 (passed as an \
+                 argument, or in an expression: no compiled site, codegen-patterns 3) is",
+            )),
             Expr::Call { call, .. } => self.expr_call(call),
             Expr::Test(c) => Ok(Val::Tmp(self.test_value(c)?)),
             Expr::SetMember {
@@ -5578,6 +5757,25 @@ impl Selector {
     /// are merged, 0xE69FF6, 0xE748E6), two calls in one statement (the
     /// first result would have to be saved), results in A0.
     fn expr_call(&mut self, c: &Call) -> Res<Val> {
+        self.call_value(c)?;
+        Ok(Val::Reg(Reg::D(0)))
+    }
+
+    /// A call of a function whose result is in A0 (a pointer, ref 5.5.10,
+    /// p. 5-20), read there: returns A0 (physical).  The caller reads it
+    /// in the instruction after the call and its pop (`tools/resultsurvey.py
+    /// callers`, 234 calls; codegen-patterns 3, "Callers of pointer
+    /// functions"): `move.l A0,<mem>` (a frame slot 34, other memory 21),
+    /// `move.l A0,Dn` or `movea.l A0,An` into a register-held local (48
+    /// and 108), A0 as a base (8), `cmpa.w #0,A0` (12); never pushed as an
+    /// argument.
+    fn call_a0(&mut self, c: &Call) -> Res<u8> {
+        self.call_value(c)?;
+        Ok(0)
+    }
+
+    /// The call of [`Self::expr_call`] / [`Self::call_a0`].
+    fn call_value(&mut self, c: &Call) -> Res<()> {
         if self.in_args {
             return Err(unsupported(
                 self.span,
@@ -5597,7 +5795,7 @@ impl Selector {
         self.call(c, no_pop)?;
         self.unpopped |= no_pop;
         self.called = true;
-        Ok(Val::Reg(Reg::D(0)))
+        Ok(())
     }
 
     /// A comparison as a boolean value: the compare, then `s<cc>` into the
@@ -5981,6 +6179,12 @@ impl Selector {
                 });
                 Ok(a)
             }
+            // A pointer function's result as the base, A0 itself
+            // (codegen-patterns 3, "Callers of pointer functions": 0xE4E990
+            // `tst.w (A0)`, 0xE4EA0E `clr.w (A0)` after a `bsr.w` to the
+            // DIR module-local 0xE4B340; VFMT_$MAIN 0xE6AD10 `move.w
+            // (2,A0),D7` after the module-local 0xE6AA38).
+            e if a0_call(e).is_some() => self.call_a0(a0_call(e).unwrap()),
             _ => Err(unsupported(self.span, "this pointer expression is")),
         }
     }
@@ -6616,7 +6820,28 @@ mod tests {
             ],
         );
         h.result_slot = Some(-8);
-        assert!(err(&h).starts_with("a pointer result in a body of several statements"));
+        // In a body of several statements the result variable is a
+        // register, A0 itself when no call follows (`set_pointer_result_web`).
+        assert_eq!(
+            text(&h),
+            [
+                "link.w\t%fp,#-8",
+                "clr.w\t(%a5)",
+                "movea.l\t(4,%a5),%a0",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        let mut k = func(
+            8,
+            res,
+            vec![
+                store(Addr::Static(0), konst(0, word())),
+                StmtKind::SetResult(konst(0, Scalar::POINTER)),
+            ],
+        );
+        k.result_slot = Some(-8);
+        assert!(err(&k).starts_with("a pointer result in a body of several statements"));
     }
 
     /// IO_$ALLOC 0xE1A9C2..0xE1A9D0: a status store, then a constant
@@ -7680,6 +7905,7 @@ mod tests {
                                 link: None,
                             },
                             ty: w,
+                            reg: ResultClass::Data,
                         },
                     ),
                 ],

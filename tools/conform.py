@@ -6,6 +6,7 @@ reproduces, and compare the bytes with the SR10.2 SAU2 kernel image.
 
     conform.py check FILE.s --routine NAME [--routine NAME ...]
     conform.py check FILE.s --addr 0xADDR[:LEN] --routine NAME
+    conform.py check FILE.s ... --local-sym NAME=0xADDR
     conform.py manifest tests/conformance/manifest.txt [--dpc target/debug/dpc]
 
 A manifest line is `FILE SPEC... [--section-addr SEC=0xADDR]... [OPTION]...'
@@ -21,7 +22,13 @@ switch SEG' shows a segment's modes), or `module-routines=NAME,...' (.pas
 fragments only, at most once): routines of the unit's map module outside
 the unit, which the unit declares `extern' and the original reached with
 `bsr'; each is forwarded as `--module-routine=NAME=0xADDR' with its map
-address (codegen-patterns 1.6, 7.4: DISK_$UNASSIGN_ALL 0xE6BE34).
+address (codegen-patterns 1.6, 7.4: DISK_$UNASSIGN_ALL 0xE6BE34).  An
+item `NAME=0xADDR' names a module-local routine the map does not name
+(test-only, bead domain-pascal-3h9): NAME is the symbol dpc gives the
+routine the unit declares `internal; extern' (its Pascal name upper-cased,
+a local symbol), and ADDR must lie in the unit's map module, outside the
+unit, with no map name; it is forwarded the same way, and the reference is
+resolved with `--defsym NAME=0xADDR' at link time (`check --local-sym').
 
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
@@ -52,7 +59,9 @@ its module; a unit that runs past the end of its module is refused.
 Steps:
   1. m68k-elf-as -m68010.
   2. Every undefined symbol is resolved from the map (`--defsym', exact
-     spelling); a symbol the map does not name is an error.  Non-code
+     spelling), or from `--local-sym NAME=0xADDR' (a module-local routine
+     outside the unit, which the map does not name); any other symbol is
+     an error, and so is a `--local-sym' the object does not reference.  Non-code
      sections are placed with `--section-addr SEC=0xADDR', or else at an
      address outside the image (references to them then fail step 4).
   3. The linked code is compared byte for byte with the image, and so is
@@ -314,10 +323,13 @@ def unit_routines(specs, linkmap, length=None):
 
 
 def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
-          work=None, name=None):
+          work=None, name=None, local_syms=None):
     """Check one assembly unit.  Returns True on a match.  Raises SetupError
     on bad input.  `work' is the scratch directory (default: from `src'),
-    `name' the unit's name in the result lines (default: `src')."""
+    `name' the unit's name in the result lines (default: `src').
+    `local_syms' maps the symbols of module-local routines outside the
+    unit, which the map does not name, to their image addresses
+    (`module-routines=NAME=0xADDR')."""
     routines = unit_routines(specs, linkmap, length)
     lo, hi = routines[0].addr, routines[-1].end
     section_addrs = dict(section_addrs or {})
@@ -365,18 +377,25 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         f.write('\n'.join(script) + '\n')
 
     undefined = sorted(n for n, _, sec, _ in symbols_of(obj) if sec == '*UND*')
+    local_syms = dict(local_syms or {})
     defsyms, unknown = [], []
     for n in undefined:
         # exact spelling: external names are upper-cased (CLAUDE.md 3.15),
         # and a link against ../source is case-sensitive
         sym = linkmap.by_name.get(n)
-        if sym is None:
+        if n in local_syms:
+            defsyms += ['--defsym', '%s=0x%X' % (n, local_syms[n])]
+        elif sym is None:
             unknown.append(n)
         else:
             defsyms += ['--defsym', '%s=0x%X' % (n, sym.addr)]
     if unknown:
         raise SetupError('%s: external symbol(s) not in the SAU2 map: %s'
                          % (src, ', '.join(unknown)))
+    unused = sorted(set(local_syms) - set(undefined))
+    if unused:
+        raise SetupError('%s: module-local symbol(s) given but not referenced: %s'
+                         % (src, ', '.join(unused)))
     elf = os.path.join(work, 'unit.elf')
     run([LD, '--no-warn-rwx-segments', '-T', 'unit.ld', '-o', 'unit.elf', 'unit.o'] + defsyms,
         cwd=work)
@@ -599,27 +618,57 @@ MODULE_ROUTINES_TOKEN = 'module-routines='
 
 
 def module_routine_args(tokens, routines, linkmap):
-    """The dpc options for the manifest token `module-routines=NAME,...'
-    (at most once): `--module-routine=NAME=0xADDR' for each map routine,
-    which must lie in the unit's map module and outside the unit."""
+    """The dpc options for the manifest token `module-routines=ITEM,...'
+    (at most once), and the local symbols to resolve at link time:
+    (options, {symbol: address}).  An ITEM `NAME' is a map routine;
+    `NAME=0xADDR' a module-local routine the map does not name, NAME being
+    dpc's symbol for the unit's `internal; extern' declaration of it
+    (test-only, bead domain-pascal-3h9; README.md, "Routines outside the
+    unit").  Each must lie in the unit's map module and outside the unit;
+    an address must name no map symbol (use the map name) and NAME must
+    not be a map name.  Each is forwarded as
+    `--module-routine=NAME=0xADDR'."""
     if len(tokens) > 1:
         raise SetupError('module-routines= given more than once')
-    out = []
+    out, local = [], {}
     for t in tokens:
-        names = t[len(MODULE_ROUTINES_TOKEN):].split(',')
-        if '' in names:
+        items = t[len(MODULE_ROUTINES_TOKEN):].split(',')
+        if '' in items:
             raise SetupError('%s: needs a routine name list' % t)
         seg = linkmap.segment_containing(routines[0].addr)
-        for n in names:
-            sym = linkmap.lookup(n)
-            if sym is None:
-                raise SetupError('%s: routine %s is not in the map' % (t, n))
-            if seg is None or linkmap.segment_containing(sym.addr) is not seg:
+        for item in items:
+            n, eq, a = item.partition('=')
+            if eq:
+                if not n or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', n):
+                    raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
+                try:
+                    addr = parse_hex(a)
+                except ValueError:
+                    raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
+                if not a.lower().startswith('0x'):
+                    raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
+                if linkmap.lookup(n) is not None:
+                    raise SetupError('%s: %s is a map name; give it without an address' % (t, n))
+                named = [x for x in linkmap.names_at(addr)]
+                if named:
+                    raise SetupError('%s: 0x%X is %s in the map; give that name'
+                                     % (t, addr, named[0]))
+                # dpc's symbols are upper-cased (CLAUDE.md 3.15)
+                n = n.upper()
+                if n in local:
+                    raise SetupError('%s: %s given more than once' % (t, n))
+                local[n] = addr
+            else:
+                sym = linkmap.lookup(n)
+                if sym is None:
+                    raise SetupError('%s: routine %s is not in the map' % (t, n))
+                n, addr = sym.name, sym.addr
+            if seg is None or linkmap.segment_containing(addr) is not seg:
                 raise SetupError('%s: %s is not in the module of the unit' % (t, n))
-            if any(r.addr <= sym.addr < r.end for r in routines):
+            if any(r.addr <= addr < r.end for r in routines):
                 raise SetupError('%s: %s is part of the unit' % (t, n))
-            out.append('--module-routine=%s=0x%X' % (sym.name, sym.addr))
-    return out
+            out.append('--module-routine=%s=0x%X' % (n, addr))
+    return out, local
 
 
 def run_manifest(path, linkmap, dpc):
@@ -665,11 +714,13 @@ def run_manifest(path, linkmap, dpc):
             if src.endswith('.pas'):
                 routines = unit_routines(specs, linkmap)
                 frag = fragment_args(routines, linkmap)
-                mopts = module_routine_args(mods, routines, linkmap)
+                mopts, local = module_routine_args(mods, routines, linkmap)
                 if mopts and not frag:
                     raise SetupError('%s: module-routines applies to fragments only' % toks[0])
                 asm = compile_pas(src, dpc, work, frag + opts + mopts)
-            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0])
+            else:
+                local = {}
+            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0], local_syms=local)
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
             errors += 1
@@ -678,10 +729,10 @@ def run_manifest(path, linkmap, dpc):
     return failures, errors
 
 
-def parse_section_addr(s):
+def parse_section_addr(s, what='--section-addr wants SEC=0xADDR'):
     name, eq, addr = s.partition('=')
     if not eq or not name:
-        raise SetupError('--section-addr wants SEC=0xADDR, got %r' % s)
+        raise SetupError('%s, got %r' % (what, s))
     return name, parse_hex(addr)
 
 
@@ -695,6 +746,8 @@ def main(argv=None):
     c.add_argument('--len', type=parse_hex, help='length override (one routine)')
     c.add_argument('--section-addr', action='append', default=[], metavar='SEC=0xADDR',
                    help='place a non-code section')
+    c.add_argument('--local-sym', action='append', default=[], metavar='NAME=0xADDR',
+                   help='resolve module-local symbol NAME (not in the map) to ADDR')
     c.add_argument('--map', default=None)
     m = sub.add_parser('manifest', help='check every entry of a manifest')
     m.add_argument('file')
@@ -710,7 +763,10 @@ def main(argv=None):
     try:
         if args.cmd == 'check':
             sect = dict(parse_section_addr(s) for s in args.section_addr)
-            return 0 if check(args.file, args.specs, linkmap, sect, args.len) else 1
+            local = dict(parse_section_addr(s, '--local-sym wants NAME=0xADDR')
+                         for s in args.local_sym)
+            return 0 if check(args.file, args.specs, linkmap, sect, args.len,
+                              local_syms=local) else 1
         bad, errors = run_manifest(args.file, linkmap, args.dpc)
         return 2 if errors else 1 if bad else 0
     except SetupError as e:

@@ -53,6 +53,14 @@ pub struct Module {
     /// The unit's static data area, if it allocates any static data
     /// (unit-level `var`, `static`, `define`; ref 7.2).
     pub data: Option<DataArea>,
+    /// Calls of `internal` routines with no body in the unit (declared
+    /// `internal; extern`): symbol and the innermost statement holding
+    /// the first such call, per symbol.  The reference allows calls of an
+    /// `internal` routine only within the compilation unit that defines
+    /// it (ref 5.2, p. 5-4), so the target rejects each one unless it is
+    /// told where the routine is (`--module-routine`, test scaffolding
+    /// for a fragment of a module; bead domain-pascal-3h9).
+    pub outside_internal_calls: Vec<(String, Span)>,
 }
 
 /// A unit's static data area: one block, zero-filled (initialised static
@@ -629,8 +637,15 @@ pub enum Expr {
     /// `value`'s sign, ref 4.3.1 p. 4-5) or narrowed to its low bytes.
     Convert { value: Box<Expr>, ty: Scalar },
     /// The result of a function call (ref 5.2; the result register,
-    /// codegen-patterns 3), of type `ty`.
-    Call { call: Call, ty: Scalar },
+    /// codegen-patterns 3), of type `ty`.  `reg` is the callee's result
+    /// register class: [`ResultClass::Address`] for a pointer result in
+    /// A0 (ref 5.5.10, p. 5-20), which the caller reads there
+    /// (codegen-patterns 3, "Callers of pointer functions").
+    Call {
+        call: Call,
+        ty: Scalar,
+        reg: ResultClass,
+    },
     /// A condition as a boolean value (0xFF true, 0 false; ref 3.5.3).
     Test(Box<Cond>),
     /// `set_sr(newsr)` (ref Appendix E, p. E-5): the processor status

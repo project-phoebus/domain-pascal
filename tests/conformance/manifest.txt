@@ -15,10 +15,13 @@
 #         ROUTINE,..., each at most once, forwarded to dpc as --a5-...
 #         (.pas units only; README.md, "Module data"; tools/a5survey.py
 #         switch SEG).
-#   MODS  module-routines=ROUTINE,... (.pas fragments only): routines of
+#   MODS  module-routines=ITEM,... (.pas fragments only): routines of
 #         the unit's map module outside the unit, declared `extern' in it
 #         and called with `bsr' as the original did; forwarded to dpc as
-#         --module-routine=ROUTINE=0xADDR with the map address.
+#         --module-routine=ROUTINE=0xADDR with the map address.  An ITEM
+#         NAME=0xADDR is a module-local routine the map does not name,
+#         declared `internal; extern' as NAME in the unit (test-only;
+#         README.md, "Routines outside the unit").
 #
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.
@@ -94,3 +97,10 @@ tests/conformance/disk_set_chain_status.pas  0xE3CCCE:20  loop-align=off
 tests/conformance/pkt_next_id.pas            PKT_$NEXT_ID  --section-addr .bss.moddata.PKT=0xE24C9C
 # A pointer result in A0, through the result variable's frame slot.
 tests/conformance/vfmt_get_next_arg.pas      0xE6AA38:14
+# Callers of pointer functions (codegen-patterns 3, bead domain-pascal-ae9):
+# the A0 of a call stored into the wrapper's result slot and left in A0
+# (`move.l A0,(-4,A6)'); a pointer result variable held in A2 across a call
+# and moved to A0 at the end.  ALLOC_SEGS=0xE43182: a module-local routine
+# outside the unit that the map does not name (bead domain-pascal-3h9).
+tests/conformance/mst_maps.pas               MST_$MAP MST_$MAP_TOP MST_$MAP_GLOBAL MST_$MAPS  --section-addr .bss.moddata.MST_=0xE7CF0C  a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS  module-routines=ALLOC_SEGS=0xE43182
+tests/conformance/disk_get_block.pas         DISK_$GET_BLOCK

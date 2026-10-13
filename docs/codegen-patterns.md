@@ -304,7 +304,20 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   --module-routine=NAME=0xADDR` (the manifest's `module-routines=` token
   looks the address up in the map): the call is a `bsr` sized from that
   address (DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w` to DISK_$UNASSIGN
-  0xE6BDA8; bead domain-pascal-5aw.15).
+  0xE6BDA8; bead domain-pascal-5aw.15).  A module-local routine the map
+  does not name is declared `internal; extern` under a reconstructed
+  name (`internal` for the by-value convention of a routine of the same
+  module, ref 5.2 p. 5-4), and the manifest gives that name with the
+  address, `module-routines=NAME=0xADDR`; the harness resolves the
+  local symbol with `--defsym` (MST_$MAPS 0xE439C4 `bsr.w` to the
+  module-local 0xE43182; bead domain-pascal-3h9;
+  `tests/conformance/README.md`, "Routines outside the unit").  This is
+  test scaffolding: the reference allows calls of an `internal` routine
+  only within its compilation unit (5.2, p. 5-4), so a whole-module
+  translation has the body; without `--module-routine` naming it, `dpc`
+  rejects a call of an `internal` routine with no body in the unit, at
+  the statement holding the call (driver test
+  `module_routine_unnamed_by_the_map`).
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
 - All kernel addresses are absolute.  This kernel image has no
@@ -493,10 +506,21 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     boolean result variable is now at `(-2,A6)` (still `link #-4`).  Test
     `frame_objects_word_aligned` (`crates/dpc-sema/src/tests/
     table5_1.rs`); golden `frame/byte_locals`.  No conformance unit has
-    a byte local in memory yet: FILE_$REMOVE_WHEN_UNLOCKED, the smallest
+    a byte local in memory yet.  FILE_$REMOVE_WHEN_UNLOCKED, the smallest
     (0x34 bytes), calls the unnamed module-local 0xE5E8E0, which a
-    fragment unit cannot declare (the harness resolves externals from
-    map names only); the ACL_ ones need bit-array stores.
+    fragment can now name (`module-routines=NAME=0xADDR`, bead
+    domain-pascal-3h9), and `dpc` reproduces it up to its last
+    statement: the image copies the byte through D0, `move.b
+    (-2,A6),D0; movea.l (0xc,A6),A0; move.b D0,(A0)` (0xE5FCB0), where
+    `dpc` stores memory to memory, `movea.l (0xc,A6),A0; move.b
+    (-2,A6),(A0)`.  Of the frame locals stored through a parameter's
+    pointer right after it is loaded, 129 are memory to memory
+    (TIME_$Q_REMOVE_ELEM 0xE16E88; longwords 106, words 22, bytes 1,
+    0xE6FA68) and 7 go through a data register first (0xE5FCB0; 0xE42E20,
+    0xE43590, 0xE443E8, 0xE0BC20, 0xE18B5C, 0xE64CA8); at 0xE42E20,
+    0xE43590 and 0xE443E8 a `bne` on the flags of the store follows (the
+    value tested as well as stored), elsewhere the reason is not seen
+    (ad-hoc survey, not kept).  The ACL_ ones need bit-array stores.
   - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
     Of the compiled routines that end in `rts` (survey as in 1.5), 306
     without any loop have a `link` area they never address (143 of
@@ -702,16 +726,69 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   (-k,A6),A0` reload a slot written before a call (BAT_$ALLOC_VTOCE
   0xE3AEC0, MST_$REMAP_PRIVI 0xE43A0C, 0xE43182).  `d0_return` (both registers,
   ref 5.5.10 p. 5-20) is seen at no compiled routine.
-  **Implemented** (`isel.rs`, `set_pointer_result`): the memory form, as
-  the only statement of the body (conformance
-  `tests/conformance/vfmt_get_next_arg.pas`, 0xE6AA38).  Refused: the
-  other forms above, a pointer result in a body of several statements,
-  `d0_return`/`c_param` pointer results, and `a0_return` on a
-  non-pointer result (no site).  On the caller's side the selector reads
-  a call's value from D0 only, so `dpc-ir` refuses using the value of a
-  function whose result is in A0 (driver test
-  `value_of_a_pointer_function_is_refused`); before, such a call was
-  read from D0.
+  **Implemented** (`isel.rs`, `set_pointer_result`,
+  `set_pointer_result_web`): as the only statement of the body, the
+  memory form (conformance `tests/conformance/vfmt_get_next_arg.pas`,
+  0xE6AA38) and the call form, `move.l A0,(-k,A6)` with A0 left as the
+  call set it (MST_$MAP, MST_$MAP_TOP, MST_$MAP_GLOBAL, MST_$MAPS:
+  conformance `tests/conformance/mst_maps.pas`; bead domain-pascal-ae9);
+  in a body of several statements, the result variable held in an
+  address register like the data result variable above, assigned from
+  a pointer function's A0 (`movea.l A0,An`) or from memory (`movea.l`),
+  moved to A0 at the start of the epilogue, dropped when it is A0
+  itself (DISK_$GET_BLOCK: conformance
+  `tests/conformance/disk_get_block.pas`; golden
+  `results/pointer_callers`).  Refused: a computed value, `nil`
+  (`suba.l`) and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
+  as pointer results, `d0_return`/`c_param` pointer results, and
+  `a0_return` on a non-pointer result (no site).
+- **Callers of pointer functions (Verified by survey; implemented; bead
+  domain-pascal-ae9).**  `tools/resultsurvey.py callers` takes the 234
+  calls of A0 functions after which the caller reads A0, and classes the
+  first instruction that reads it (after the pop, when there is one; 20
+  are not popped):
+  - `movea.l A0,An` 108, in A2 57 (e.g. KBD_$SET_KBD_TYPE 0xE7253E,
+    DISK_$GET_BLOCK 0xE3BBBC), A3 41, A4 7, A1 3: a register-held local
+    or result variable; in 106 a call follows before An is written again;
+  - `move.l A0,Dn` 48, D0 in 34 (the TTY_$K_* routines after
+    TTY_$I_GET_DESC, e.g. TTY_$K_INQ_FUNC_ENABLED 0xE6763C; the pointer
+    is moved back with `movea.l D0,A0` where it is dereferenced,
+    0xE67642), D2..D6 in the others (AREA_$REMOVE_SEG 0xE099AC `move.l
+    A0,D3`);
+  - `move.l A0,(-k,A6)` 34: a local's slot (AST_$INVALIDATE 0xE06664,
+    VTOC_$LOOKUP 0xE3904C) or a wrapper's result variable (above);
+  - `move.l A0,<memory>` 21: the unit's data (TIME_$GET_EC 0xE16734
+    `move.l A0,(0x1620,A5)`), another unit's variable (PEB_$LOAD_WCS
+    0xE32072 `move.l A0,abs.l`), through a pointer held in a register
+    from before the call (MAC_$OPEN 0xE0BA56 `move.l A0,(A2)`);
+  - `cmpa.w #0,A0` 12: `= nil` / `<> nil` (AST_$LOAD_AOTE 0xE023BA; the
+    NET module-local 0xE5A128 at 0xE5A150 after ROUTE_$FIND_PORTP);
+  - A0 as a base 8: `tst.w (A0)` (the DIR module-local 0xE4E960 at
+    0xE4E990), `clr.w (A0)` (0xE4EA0E), `move.w (2,A0),D7` (VFMT_$MAIN
+    0xE6AD10), `move.l (A0),(28,A2)` (OS_PROC_WIRED 0xE008F8);
+  - never pushed as an argument (no `move.l A0,-(SP)` or `pea (A0)`);
+  - 3 others are false positives (a `movea.l A0,A0` filler, 0xE649E6,
+    0xE101AA; a `suba.l A0,A0` after a procedure, 0xE0236C).
+  **Implemented** (`dpc-ir`: `Expr::Call`'s `reg`; `isel.rs`, `call_a0`
+  and its uses): the call's value is A0; a store moves it to memory, to
+  a register-held local (`move.l A0,Dn`, 12.5) or to a loop pointer
+  local (`movea.l A0,An`, 7.4), a comparison with `nil` is `cmpa.w
+  #0,A0`, a dereference uses A0 as the base, `f := g(...)` is the call
+  form above.  A store whose destination needs a register of its own is
+  refused as for any call value (whether the original loads it before
+  or after the call is not catalogued; MAC_$OPEN's A2 is held from
+  before).  Other uses (an argument, an operand of an expression,
+  a comparison other than with `nil`) are refused (`dpc-m68k`
+  `Selector::eval`; driver test `value_of_a_pointer_function_is_read_from_a0`).
+  A0 is consumed in the statement; a value that must live across a later
+  call is copied to a callee-saved register by the allocator (12.4 R3,
+  DISK_$GET_BLOCK's A2).  `d0_return` callees are read from D0 (ref
+  5.5.10; no compiled site).  Not reproduced: the `movea.l A0,A2` of a
+  pointer local held in an address register across calls outside loops
+  (KBD_$SET_KBD_TYPE; dpc keeps such a local in its frame, 12.5); the
+  reuse of A0 after the first store (SMD_$MAP_DISPLAY_U 0xE6F94E `move.l
+  A0,(A4)`, then `move.l A0,(-232,A1)` at 0xE6F964, a common
+  subexpression, 12.4 R7).
 - **Tail wrapper:** a wrapper `F := G(args)` compiles to the call followed
   directly by the epilogue, with no move to D0 (ACL_$IS_SUSER,
   PROC2_$GET_ASID).  So from the wrapper alone you cannot tell a procedure
@@ -747,7 +824,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   D0` ×31.  **Implemented** (`isel.rs`, `expr_call`; the pop by the rule of
   1.1 for the statement holding the call).  Rejected: a call among another
   call's arguments (the pops are merged, 0xE69FF6, 0xE748E6), two calls in
-  one statement, results in A0 (pointer results).  The tail wrapper above
+  one statement.  Results in A0: "Callers of pointer functions" above.  The tail wrapper above
   is the same code (`F := G(args)` with the move to D0 dropped).
 
 ---
@@ -3585,7 +3662,22 @@ of the remaining misses).**  The corpus misses fall into these groups:
   - FIM_$INSTALL 0xE0A9EA (`old_addr` in D1 is held through the `if` it
     is tested in).
   - 0xE01C10, 0xE0F2A4, 0xE12808.
-  - Inside one argument list: 0xE1359C (A0, A1, A3; section 12.1).
+  - Inside one argument list: 0xE1359C (A0, A1, A3; section 12.1);
+    MST_$MAP 0xE43886..0xE438AA, five by-address slots read once by the
+    next push, in A0, A1, A2, A3, A4 (A2-A4 saved by the `movem` for
+    this alone; also MST_$MAP_TOP 0xE438E6, MST_$MAP_GLOBAL 0xE43946).
+    **Survey (bead domain-pascal-ae9; ad-hoc script over
+    `tools/nestsurvey.py`'s routines, not kept):** of the argument
+    lists with two or more `movea.l (d,A6),An` read once by the next
+    push, 39 take a new register for each and 4 reuse one, each when
+    the address registers run out (MST_$MAP_AT 0xE42F9C reuses A0 for
+    the sixth after A0-A4; 0xE59AB6, 0xE59B50, 0xE59E4E with A2-A4 or
+    A3 busy).  **Implemented for address registers** (`isel.rs`,
+    `argument_list_loads`: the address values defined in a call's
+    argument list are kept apart, `regs::allocate_apart`; more than
+    A0-A4 is refused; golden `results/pointer_callers`, conformance
+    `mst_maps.pas`).  Data values in an argument list are not covered
+    (not surveyed).
   - Against it, registers *are* reused inside one statement:
     `movea.l (8,A2),A0` twice in `p^.f := p^.f - n` (0xE03FEE,
     0xE03FF8).  FIM_$ACKNOWLEDGE reuses A1 for each statement

@@ -52,6 +52,11 @@ class ConformTest(unittest.TestCase):
         self.assertEqual(out, 'OK PROC1_$TST_LOCK 0xE148CA 0x1C  '
                               'tests/conformance/handasm/proc1_tst_lock.s')
 
+    def test_unreferenced_local_sym_is_an_error(self):
+        with self.assertRaisesRegex(conform.SetupError, 'given but not referenced: W'):
+            self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'), ['PROC1_$TST_LOCK'],
+                           local_syms={'W': 0xE148F8})
+
     def test_tst_lock_abs_long(self):
         # gas must emit 2079 00e1 eac8 for the absolute-long movea.l
         ok, _ = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
@@ -390,10 +395,10 @@ class ConformTest(unittest.TestCase):
     # -- routines of the module outside the unit (codegen-patterns 7.4) ----
     def test_module_routine_args(self):
         r = conform.unit_routines(['DISK_$UNASSIGN_ALL'], self.map)
-        self.assertEqual(conform.module_routine_args([], r, self.map), [])
+        self.assertEqual(conform.module_routine_args([], r, self.map), ([], {}))
         self.assertEqual(
             conform.module_routine_args(['module-routines=DISK_$UNASSIGN'], r, self.map),
-            ['--module-routine=DISK_$UNASSIGN=0xE6BDA8'])
+            (['--module-routine=DISK_$UNASSIGN=0xE6BDA8'], {}))
         for bad, why in ((['module-routines='], 'needs a routine name list'),
                          (['module-routines=NO_SUCH'], 'not in the map'),
                          (['module-routines=PROC1_$TST_LOCK'], 'not in the module'),
@@ -401,6 +406,44 @@ class ConformTest(unittest.TestCase):
                          (['module-routines=DISK_$UNASSIGN'] * 2, 'more than once')):
             with self.assertRaisesRegex(conform.SetupError, why):
                 conform.module_routine_args(bad, r, self.map)
+
+    def test_module_routine_args_unnamed(self):
+        # a module-local routine the map does not name (bead
+        # domain-pascal-3h9): MST_$MAPS calls 0xE43182
+        r = conform.unit_routines(['MST_$MAPS'], self.map)
+        self.assertEqual(
+            conform.module_routine_args(['module-routines=ALLOC_SEGS=0xE43182'], r, self.map),
+            (['--module-routine=ALLOC_SEGS=0xE43182'], {'ALLOC_SEGS': 0xE43182}))
+        # dpc's symbol is upper-cased whatever the spelling
+        self.assertEqual(
+            conform.module_routine_args(['module-routines=alloc_segs=0xE43182'], r, self.map),
+            (['--module-routine=ALLOC_SEGS=0xE43182'], {'ALLOC_SEGS': 0xE43182}))
+        for bad, why in ((['module-routines=W=0xE4386C'], 'is MST_\\$MAP in the map'),
+                         (['module-routines=MST_$MAP=0xE43182'], 'is a map name'),
+                         (['module-routines=W=0xE148CC'], 'not in the module'),
+                         (['module-routines=W=0xE439A0'], 'part of the unit'),
+                         (['module-routines=W=E43182'], 'want NAME=0xADDR'),
+                         (['module-routines==0xE43182'], 'want NAME=0xADDR'),
+                         (['module-routines=W=0xE43182,W=0xE43182'], 'more than once')):
+            with self.assertRaisesRegex(conform.SetupError, why):
+                conform.module_routine_args(bad, r, self.map)
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_forwards_unnamed_module_routines(self):
+        unit = ('tests/conformance/mst_maps.pas  MST_$MAP MST_$MAP_TOP MST_$MAP_GLOBAL '
+                'MST_$MAPS  --section-addr .bss.moddata.MST_=0xE7CF0C  '
+                'a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS')
+        rc, out = self.manifest('mr_local_on.txt', unit + '  module-routines=ALLOC_SEGS=0xE43182')
+        self.assertEqual(rc, 0, out)
+        # the address is checked through the `bsr' displacement
+        rc, out = self.manifest('mr_local_bad.txt', unit + '  module-routines=ALLOC_SEGS=0xE43184')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('ALLOC_SEGS', out)
+        # without it, dpc rejects the call of an `internal' routine with
+        # no body in the unit (ref 5.2 p. 5-4)
+        rc, out = self.manifest('mr_local_off.txt', unit)
+        self.assertEqual(rc, 2, out)
+        self.assertIn('call of internal routine `ALLOC_SEGS`', out)
 
     @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
     def test_manifest_forwards_module_routines(self):

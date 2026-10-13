@@ -90,7 +90,9 @@ pub struct Options {
     /// the routine before it); the fragment declares it `extern`, and its
     /// `jsr` becomes a `bsr` sized from the address, as for a routine of
     /// the fragment.  The reference resolves to the map name when the
-    /// fragment is linked.
+    /// fragment is linked.  An unnamed module-local routine is declared
+    /// `internal; extern` and named by its local symbol, which the
+    /// conformance harness defines (`--defsym`; bead domain-pascal-3h9).
     pub module_routines: Vec<(String, u32)>,
 }
 
@@ -157,6 +159,34 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         return Err(vec![Diagnostic::error_nopos(format!(
             "--module-routine: `{name}` has its body in this unit"
         ))]);
+    }
+    // ref 5.2, p. 5-4: "Internal routines can be called only within the
+    // same compilation unit in which they are defined".  An `internal;
+    // extern` routine is accepted only as `--module-routine` scaffolding
+    // (a module-local routine outside a fragment; bead domain-pascal-3h9);
+    // otherwise its `jsr` would name a local symbol nothing defines.
+    let outside: Vec<Diagnostic> = module
+        .outside_internal_calls
+        .iter()
+        .filter(|(sym, _)| {
+            !opts
+                .module_routines
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case(sym))
+        })
+        .map(|(sym, span)| {
+            Diagnostic::error(
+                *span,
+                format!(
+                    "call of internal routine `{sym}`, which has no body in this unit \
+                     (internal routines can be called only within the compilation unit \
+                     that defines them, ref 5.2 p. 5-4; name it with --module-routine)"
+                ),
+            )
+        })
+        .collect();
+    if !outside.is_empty() {
+        return Err(outside);
     }
     if let Some(origin) = opts.fragment_origin {
         // Where a second code section of a fragment would start in its

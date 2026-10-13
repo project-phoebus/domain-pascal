@@ -38,6 +38,9 @@ usage:
     tools/resultsurvey.py pushes          # a local stored from Dn and later
                                           # pushed by value: from Dn or from
                                           # its slot (codegen-patterns 12.5)
+    tools/resultsurvey.py callers [-v]    # calls of A0 functions whose
+                                          # caller reads A0 next: what that
+                                          # first read is (-v: every site)
 
 `pushes' looks at every `move.<s> Dn,(-k,A6)' into the `link' area and
 follows the instructions after it in address order up to a push `move.<s>
@@ -45,6 +48,15 @@ X,-(SP)' of that local, noting calls on the way and giving up at a write
 of Dn or of the slot, its address taken, a backward branch, or a label
 some branch from before the store targets.  The store is a call result when a `jsr'/`bsr'
 (and its pop) comes right before it.
+
+`callers' (bead domain-pascal-ae9) takes every call of an A0 function
+after which the caller reads A0 (`reads_after') and classes that first
+read: `copy An' (`movea.l A0,An'; `held' when a call follows before An is
+next written or the routine ends), `copy Dn', `store frame' (`move.l
+A0,(-k,A6)'), `store' (another memory destination), `push' (`move.l
+A0,-(SP)' or `pea (A0)'), `nil test' (`cmpa.w #0,A0' / `tst.l'), `base'
+(A0 as the base of another operand: `(d,A0)', `(A0)'), `other'; and
+whether the call was popped before it.
 
 Python 3 standard library + m68k-elf-objdump (through nestsurvey).
 Read-only.
@@ -332,6 +344,63 @@ def pushes(rs):
         print('%-12s %-13s %-18s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
 
 
+def a0_use(t):
+    """Class of instruction t, the first to read A0 after a call."""
+    mn, ops = operands(t)
+    if mn == 'moveal' and ops[0] == '%a0' and re.fullmatch(r'%a[1-7]', ops[1]):
+        return 'copy An'
+    if mn == 'movel' and ops[0] == '%a0' and re.fullmatch(r'%d[0-7]', ops[1]):
+        return 'copy Dn'
+    if mn == 'movel' and ops[0] == '%a0' and ops[1] == '%sp@-':
+        return 'push'
+    if mn == 'pea' and ops[0] == '%a0@':
+        return 'push'
+    if mn == 'movel' and ops[0] == '%a0' and _FP.match(ops[1]):
+        return 'store frame'
+    if mn == 'movel' and ops[0] == '%a0':
+        return 'store'
+    if (mn.startswith('cmpa') and ops == ['#0', '%a0']) or (mn == 'tstl' and ops == ['%a0']):
+        return 'nil test'
+    if any(o.startswith('%a0@') for o in ops):
+        return 'base'
+    return 'other'
+
+
+def callers(rs, by_start, verbose):
+    a0 = a0_functions(rs, by_start)
+    c = Counter()
+    ex = {}
+    for r in rs:
+        ins = r.insns
+        for i, (a, n, t) in enumerate(ins):
+            m = nestsurvey._BSR.match(t) or nestsurvey._JSR.match(t)
+            if not m or int(m.group(1), 16) not in a0 or not reads_after(ins, i, '%a0'):
+                continue
+            j = i + 1
+            popped = j < len(ins) and bool(_POP.match(ins[j][2]))
+            j += popped
+            use = a0_use(ins[j][2])
+            if use == 'copy An':
+                reg = operands(ins[j][2])[1][1]
+                held = False
+                for ak, nk, tk in ins[j + 1:]:
+                    if _CALL.match(tk):
+                        held = True
+                        break
+                    if nestsurvey.writes(tk, reg) or tk.startswith(('rts', 'unlk')):
+                        break
+                use += ' %s%s' % (reg[1:], ' held' if held else '')
+            key = (use, 'popped' if popped else 'no pop')
+            c[key] += 1
+            callee = by_start[int(m.group(1), 16)]
+            ex.setdefault(key, []).append('0x%06X' % ins[j][0])
+            if verbose:
+                print('%-40s 0x%06X -> %-28s %-16s %-7s %s' % (
+                    name(r), a, name(callee), use, 'popped' if popped else '', ins[j][2]))
+    for k, v in sorted(c.items()):
+        print('%-16s %-7s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -349,6 +418,8 @@ def main(argv):
         entry(rs, by_start)
     elif cmd == 'pushes':
         pushes(rs)
+    elif cmd == 'callers':
+        callers(rs, by_start, '-v' in argv[1:])
     else:
         print(__doc__)
         return 2
