@@ -17,6 +17,7 @@ __pycache__/
 *.pyc
 
 # editor / OS noise
+.vscode/
 .DS_Store
 *.swp
 *~
