@@ -298,7 +298,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   included) and picks the size (`crates/dpc-m68k/src/emit.rs`,
   `size_branches`); gas never chooses.  The same holds for forward
   `bsr`s to a routine whose body comes later (section 6, "Order": 54
-  `bsr.s` all in reach, 158 `bsr.w` none in reach).
+  `bsr.s` all in reach, 158 `bsr.w` none in reach).  A conformance
+  fragment whose routine calls one of its module outside the fragment
+  declares the callee `extern` and names it with `dpc
+  --module-routine=NAME=0xADDR` (the manifest's `module-routines=` token
+  looks the address up in the map): the call is a `bsr` sized from that
+  address (DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w` to DISK_$UNASSIGN
+  0xE6BDA8; bead domain-pascal-5aw.15).
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
 - All kernel addresses are absolute.  This kernel image has no
@@ -354,7 +360,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     tell.  Not settled; `dpc` gives a `for` loop no hidden slot (as
     (a)), and `tests/conformance/ast_page_zero.pas` declares stand-in
     locals for 0xE00EB0's 12 bytes (its header and the declaration say
-    so).  If (b) is confirmed, those stand-ins go.
+    so).  If (b) is confirmed, those stand-ins go.  Evidence gathered for
+    bead domain-pascal-nda in section 7.4 ("Hidden frame cost"): five
+    one-loop routines have no frame bytes beyond their locals, and three
+    routines of one loop shape have `link #-8`, `#-12` and `#-16`, so a
+    `for` loop costs no hidden slot of 4 bytes or more; (a) is favoured.
 - **Register save:** straight after `link`, only the callee-saved
   registers the routine uses.  The instruction depends on how many there
   are (Verified, sweep of every `link` at 0xE00800..0xE88834; details and
@@ -928,7 +938,9 @@ their host); no compare or widening of either has been catalogued.
   displacement, `(-2,A0,Dn.w)` (AUDIT_$SUSPEND 0xE70DC8;
   AUDIT_$IS_PROCESS_AUDITED 0xE70DA8 `tst.w (-2,A5,D0.w)`) or the `lea
   (2,An)` / `(-2,An)` pair in 0xE17778's word-copy loop
-  (0xE177E0..0xE177F2).
+  (0xE177E0..0xE177F2): a loop pointer starts at `base + from × size`
+  and the accesses fold `-lo × size` (section 7.4; PKT_$RECENTLY_MISSING
+  0xE128D6 `lea (8,A5),A0`, `(-8,A0)`).
 - **Index scaling (Verified):**
   - Multiply by 2 is done with `add.w Dn,Dn` (0xE70DA6); by 4 with `lsl.w
     #2` or `lsl.l #2` (FIM_$GET_FIM_ADDR 0xE0AA16, 0xE0B26C, 0xE13942).
@@ -1121,7 +1133,10 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   compares it.  An offset-0 access steps with `(An)+`: 0xE00ED8 `clr.l
   (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l #3,A2` (4-byte elements,
   byte accessed).  An index used for nothing else gets no register at
-  all (0xE00EB0: only A0 and the `dbf` count D0).
+  all (0xE00EB0: only A0 and the `dbf` count D0).  Survey and the
+  pointer's start (`base + from × size`, the `-lo × size` folded into the
+  displacement): section 7.4 (wider elements stepped, 104 loops; byte
+  arrays indexed with the index register, 84).
 - **Clearing loops `clr.<s> (An)+; dbf` (Verified; 21 in compiled
   code):** the address and the count are loaded in either order, with no
   rule found.  Address first: 0xE00ECC `movea.l #AST_$ZERO_BUFF,A0;
@@ -1138,10 +1153,11 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   after a loop that ends normally is forbidden (warning "Potential
   illegal use of FOR index variable", ref 9, p. 9-31);
   `movea.l #sym,A0`, the count, the filler, `clr.<s> (A0)+`, `dbf`.  Other
-  `for` loops are rejected ("not supported yet").  Byte-identical in
+  `for` loops: section 7.4.  Byte-identical in
   `make conform` (`tests/conformance/ast_page_zero.pas`).
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
-  loop (0xE177DC..0xE177F2).
+  loop (0xE177DC..0xE177F2); the other guards, and when the count is
+  copied into a counter of its own: section 7.4.
 - **Loop-head alignment.**  Some code pads with the 2-byte no-op
   `movea.l A0,A0` (0x2048) so that a loop head starts on a 4-byte
   boundary.  Other code never does.  The survey tool is
@@ -1281,8 +1297,12 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
     - *Copy loops vs. source loops.*  See section 5.2: copy loops behave
       like any other head.
     - *Entry by fall-through vs. by `bra` to the test.*  In aligning
-      routines, heads entered by fall-through split 312/158/25
-      (filler/aligned/2 mod 4); heads entered by a branch split 3/2/3.
+      routines, `while` heads (entered by a `bra` to the bottom test)
+      split 29/27/2 (filler/aligned/2 mod 4), the two unaligned ones heads
+      of loops over 0x100 bytes; `dbf` heads entered by fall-through
+      229/188/15 (section 7.4, `tools/loopalign.py heads`).  (An earlier
+      count, 3/2/3 against 312/158/25, took a head preceded by the filler
+      for one entered by fall-through.)
     - *Calls in the body.*  Heads of loops with a call split 95/44/18;
       loops without one split 220/116/10.
     - *Section.*  The split runs inside sections.  `dpc
@@ -1336,7 +1356,10 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
         OSINFO.
       - Non-aligning: PMAP_ (PMAP_$FLUSH's two heads are 4-aligned by
         accident), PROC1_, XNS_IDP from XNS_IDP_$OS_OPEN on
-        (XNS_IDP_$GET_STATS).
+        (XNS_IDP_$GET_STATS), the DISK_ segment 0xE3BB80 from 0xE3BC40 on
+        (the module-local 0xE3CCCE).
+      - Aligning: the DISK_ segment 0xE6B6DC up to DISK_$LV_MOUNT
+        0xE6CA3A (DISK_$UNASSIGN_ALL).
 - **`case` statements:** a jump table of word offsets or a compare
   chain; section 7.3.
 - **Branch sizes (Verified):** `.s` when the target is in reach,
@@ -1470,7 +1493,7 @@ Backward branches other than `dbf` in compiled code (same survey):
 
 | Branch back | Head entered by | Count | Shape |
 |---|---|---|---|
-| `b<cc>` | a `bra` (to the test) | 213 | `while`: `bra test; head: body; test: <cond>; b<cc> head` (0xE01A8E..0xE01A98) |
+| `b<cc>` | a `bra` (to the test) | 213 | `while`: `bra test; head: body; test: <cond>; b<cc> head` (0xE01A8E..0xE01A98; section 7.4) |
 | `b<cc>` | falling through | 190 | test at the bottom, entered from the top: `repeat ... until` (0xE03192..0xE031B6, 0xE03208..0xE03224) |
 | `bra` | falling through | 131 | test at the top, exits forward (0xE00E68); source construct not identified |
 | `bra` | a `bra` | 7 | |
@@ -1482,9 +1505,9 @@ Backward branches other than `dbf` in compiled code (same survey):
   0x2048 filler as for every loop head dpc emits); golden
   `tests/golden/control/repeat.pas`.
 - **`while c do body`:** compiled with the test at the bottom, entered by
-  a `bra` to the test.  Whether the head after that `bra` gets the
-  filler is not settled (in aligning routines: 3 with the filler, 2
-  4-aligned, 3 at 2 mod 4).  Not supported yet.
+  a `bra` to the test; the head after the `bra` is aligned like any loop
+  head (in aligning routines 29 with the filler, 27 4-aligned, 2 at 2 mod
+  4, both large; bead domain-pascal-ju5).  **Implemented**: section 7.4.
 
 
 ### 7.3 `case` statements (Verified at the sites given; the choice of form Verified by survey; implemented)
@@ -1696,6 +1719,228 @@ does not do (12.2: a pointer kept in a D register); then `btst #5,(1,A1)`
 on a byte in memory (5.1, not catalogued), `while` loops (7.2), local
 variables in registers (12.4), and the `asid` selection repeated in
 three arms with `cmpi.w #0x40; bls` joins.
+
+### 7.4 Loops: `while`, `for`, `exit`/`next` (Verified shapes and counts; implemented in part)
+
+Beads domain-pascal-5aw.15, -ju5, -96r.  Survey: `tools/loopalign.py
+heads` and `tools/loopalign.py fors` (every compiled routine split as in
+section 7; a loop head is the target of a `dbf` or of a backward branch;
+a routine's class comes from `switch`: **al** at or before the last
+routine of its segment with a filler, **na** at or after the first later
+one with a head at 2 mod 4 and no filler, **?** in between).  Ad-hoc
+scripts besides, not kept, are named as such below; re-check sites with
+`tools/imgdis.sh`.
+
+**Loop heads by shape** (`heads`; F filler, A 4-aligned, U 2 mod 4):
+
+| Back branch | Entry | al F/A/U | na F/A/U | ? F/A/U |
+|---|---|---|---|---|
+| `dbf` | fall-through | 229/188/15 | 0/237/224 | 0/69/0 |
+| `b<cc>` | fall-through (`repeat`) | 36/21/5 | 0/42/37 | 0/9/0 |
+| `b<cc>` | a `bra` to the bottom test (`while`) | **29/27/2** | 0/58/68 | 0/8/0 |
+| `b<cc>` | a `bra` elsewhere | 2/1/1 | 0/4/6 | |
+| `bra` | fall-through | 18/19/5 | 0/30/21 | 0/4/0 |
+
+- **`while` heads are aligned like every loop head (Verified; settles
+  bead domain-pascal-ju5).**  The earlier "3/2/3" for heads entered by a
+  branch counted only heads whose *preceding* instruction is the `bra`,
+  so every head with a filler between the `bra` and the head was counted
+  as entered by fall-through.  With the filler skipped, aligning routines
+  have 29 `while` heads with the filler (MAC_OS_$CLOSE 0xE0B4CC `bra.s
+  0xE0B4FC; movea.l A0,A0`, head 0xE0B4D0), 27 4-aligned and 2 at 2 mod 4,
+  both heads of loops over 0x100 bytes (0xE6657E, 0x192 bytes;
+  0xE6AB5A, 0x460), like the large-loop exceptions of section 7.  Non-
+  aligning routines never have the filler (58 aligned, 68 not).
+- **`while c do body`** (Verified: 213 such loops):
+
+  ```text
+          bra     TEST
+          <filler>                ; aligning routines, head at 2 mod 4
+  HEAD:   body
+  TEST:   <branch to HEAD when c holds>
+  EXIT:
+  ```
+
+  The DISK_ module-local 0xE3CCCE (`disk/write_multi.c`,
+  `disk_$set_chain_status`): `movea.l D0,A1; bra.s 0xE3CCE4; move.l
+  (A0),(0xc,A1); movea.l (A1),A1; cmpa.w #0,A1; bne.s 0xE3CCDE`.  The test
+  is the condition's jumping code (7.1) with the last branch taken on
+  success: `and then` leaves on its first operand's failure and branches
+  back on the second's success (NAME_$VALIDATE's module-local
+  0xE4A028..0xE4A034 `cmp.w (A1),D0; bcs.s <exit>; move.w (A1),D1;
+  cmpi.b #47,(-1,A0,D1.w); beq.s <head>`).
+- **`while p <> nil` on a pointer variable** (ad-hoc script over the
+  bottom tests): 45 loops test an address register (`cmpa.w #0,An`), 12 a
+  frame slot (`tst.l (d,A6)`), a few a D register or the flags of a
+  `move.l`.  So a list walk's pointer local is usually in an address
+  register (12.5).
+- **`repeat`**: fall-through heads, aligned (section 7.2).  The `bra`
+  rows (a test at the top, a `bra` back; 7.2): source construct not
+  identified; `dpc` never emits it.
+
+**`for` loops** (`fors`; 963 `dbf` loops):
+
+- **A counted loop is a `dbf` loop with a count of N-1** (section 7).
+  With **constant bounds** the count is `moveq #N-1` (558 loops) or
+  `move.w #N-1` above 127 (47; ad-hoc script: the last definition of the
+  `dbf` register before the head).
+- **The index lives in a register when the body uses it** (Verified):
+  307 `dbf` loops step an index register at the bottom (`addq.w #1,Dn`;
+  `subq.w #1,Dn` for `downto`: 0xE3C99A `subq.w #1,D1; subq.l #4,A1`,
+  0xE6CAAC, 0xE6CF56), 13 an index in memory (`addq.w #1,(d,A6)`, or
+  through a static link in nested routines: 0xE721F8 `move.w
+  #1,(-2,A2)` ... `addq.w #1,(-2,A2)`; SOCK_$INIT 0xE2FE54 in its own
+  frame, not explained).  The register is separate from the `dbf`
+  counter: MST_$ALLOC_ASID 0xE42D50 `moveq #57,D0; movea.l #abs,A1; clr.w
+  D2`, the body, `addq.w #1,D2; dbf D0`.  The index's frame slot is not
+  written in the register case.
+- **Preheader order: the count first, then the index** (Verified: 116 of
+  118 loops with a constant count and the index's initial value in the
+  preheader; `clr.w Di` for 0, `moveq #k,Di` otherwise).  Invariant
+  address loads may come between (0xE42D52; PROC2's 0xE42238
+  `moveq #69,D0; movea.l #abs,A0; moveq #1,D1; addq.l #8,A0`; MAC_$NET_
+  TO_PORT_NUM 0xE0C372 `moveq #7,D0; clr.w D1; movea.l #abs,A2`): their
+  place is not settled.  An index whose initial value equals the count is
+  *copied* from the count's register: 0xE6A8BC `moveq #19,D2; move.w
+  D2,D1` (the loop at 0xE6A8BC, 20 iterations, the index stepped down);
+  FLP_$SHUTDOWN 0xE3E24A copies a register-held 0 likewise (`move.w
+  D0,D2`; constant CSE, 12.4 R7).
+- **The step**: the index first, then the pointers (below), then `dbf`
+  (PKT_$DUMP_DATA 0xE12822 `addq.w #1,D3; addq.l #4,A2; dbf D2`; 0xE0C388;
+  0xE4225E; 0xE75298).
+- **Calls in the body**: the count and the index are values live across
+  the call, so callee-saved (12.4 R3): DISK_$UNASSIGN_ALL 0xE6BE24
+  `moveq #9,D2; moveq #1,D3`, the body `move.w D3,(-6,A6); pea (-4,A6);
+  pea (-6,A6); bsr.w DISK_$UNASSIGN; addq.w #8,SP`, then `addq.w #1,D3;
+  dbf D2` (Verified; reproduced, `tests/conformance/disk_unassign_all.pas`).
+  SMD_$FREE_ASID 0xE75278 and MSG_$FREE_ASID 0xE74E5C store their index
+  register to a frame word the same way before passing it by address.
+  Whether that word is the index's own slot or another local (`vol :=
+  i`) cannot be seen; `dpc` takes the second reading (the C of
+  DISK_$UNASSIGN_ALL has a separate `vol_idx`).
+- **Array indexing by the index** (`fors`, index use of the register-index
+  loops): byte arrays are indexed with the index register itself, `(d,
+  An,Di.w)` (84 loops whose direct uses are all byte operations or `lea`:
+  `move.b` 73, `lea` 34, `cmpi.b` 9, ...; KBD's module-local 0xE1CA70
+  `cmp.b (0,A5,D1.w),D2`; KBD_$INQ_KBD_TYPE 0xE72590 `move.b
+  (40,A0,D0.w),(0,A2,D0.w)`; DTTY_$WRITE_STRING 0xE1D6B4 `pea
+  (-1,A2,D2.w)`).  Wider elements are reached through **a pointer
+  stepped by the element size** (104 loops with a stepped pointer and no
+  direct use; only 9 scale a copy of the index without a pointer).  The
+  pointer is the address of element `i` *plus `lo × size`*: it starts at
+  `base + from × size` and the accesses fold `-lo × size` (and the field
+  offset) into the displacement, so a 1-based array is reached with a
+  pointer "one element in": LOG_$READ's worker 0xE177E0 `lea (2,A1),A0;
+  lea (2,A2),A1`, then `move.w (-2,A0),(-2,A1)`; PKT_$RECENTLY_MISSING
+  0xE128D6 `lea (8,A5),A0`, `cmp.l (-8,A0),D1`; PKT_$DUMP_DATA 0xE12800
+  `lea (4,A0),A2`, `(-4,A2)`; HINT_$INIT_CACHE 0xE313E2 `lea (12,A0),A0`
+  then `(-4,A0)`, `(-8,A0)`, `(-12,A0)`; PROC2's 0xE42240, MSG_$FREE_ASID
+  0xE74E44 `addq.l #8`.  With `lo = from = 0` the pointer is the array's
+  address (DIR_$OLD_INIT 0xE31502 `movea.l #OLD_DIR,A0; clr.l
+  (0x2b8,A0)`; NET_IO_$FREE_ASID 0xE74E8E).  An access at displacement 0
+  that is the pointer's last use steps with `(An)+` (0xE00ED8 `clr.l
+  (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l #3,A2`).  Steps: `addq.l
+  #s` up to 8, `lea (s,An),An` above (0xE3150C `addq.l #8`; HINT 0xE313F4
+  `lea (12,A0),A0`).  **Several pointers** (ad-hoc script over the `dbf`
+  loops with two or more pointer steps and bodies of at most eight
+  instructions, 30 loops): in the copies looked at they are formed in the
+  order of their first use, the source of `a[i] := b[i]` first
+  (0xE177E0, 0xE0A790, 0xE0E384, 0xE4F010, 0xE5C98C; not 0xE7487C), and
+  29 of the 30 step them in the reverse order of their forming (the last
+  definition before the loop, a pre-advance `addq` aside): 0xE177EE
+  `addq.l #2,A1`, the destination, before `addq.l #2,A0`; 0xE2F3F8 forms
+  A2, A1, A0 and steps A0, A1, A2.  The exception, 0xE17730, steps in the
+  reverse order of first use instead.  A `with a[i] do` body copies the
+  pointer at the head (`movea.l A0,A1`: DISK_$REGISTER 0xE3D9EC,
+  RING_$KICK_DRIVER 0xE768BC, 0xE42244).  `dpc` does not implement the
+  stepped pointer yet and refuses a `for` index used to index elements
+  wider than a byte.
+- **Run-time bounds.**  The count `hi - lo` is computed into a register
+  and guarded before the loop: `subq.w #1,T; bmi EXIT` for `lo = 1`
+  (LOG_$READ's worker 0xE177DC; DTTY_$WRITE_STRING 0xE1D6AC), `sub.w
+  lo,T; bmi` for a run-time `lo` (0xE010B6, 0xE02C04), `tst.w T; bmi`
+  for `lo = 0` (0xE17EBE and 0xE19024, the count then copied *to itself*:
+  0xE17EC2 `move.w D2,D2`, 0xE19028 `move.w D0,D0`).  An unsigned
+  (`0..65535`) count is guarded with `tst.w; beq` *before* `subq.w #1`
+  (module-local 0xE54B6E..0xE54B72; 0xE0D01A..0xE0D028 and
+  0xE0D942..0xE0D952, where the `subq.w` comes after the copy into the
+  counter), since `bmi` would be wrong above 32768.  Whether the count
+  stays in `T` or is copied into a counter of its own (`fors`, guards):
+  with a call in the body it is copied 45 times and kept in place once
+  (DTTY_$WRITE_STRING 0xE1D6B0 `move.w D0,D3`, the counter callee-saved,
+  the scratch `T` not); without one, copied 45 times and kept in place 64
+  times, whether `T` was loaded from memory or copied from a register,
+  with no rule found (LOG_$READ's worker and PKT_$RECENTLY_MISSING keep
+  it; 0xE0B1D8 `move.w D0,D1; subq.w #1,D1; bmi; move.w D1,D0` copies it
+  back).
+- **Hidden frame cost of a `for` loop** (bead domain-pascal-nda; evidence
+  only, nothing implemented): five routines with one `for` loop have no
+  frame bytes beyond their locals: DTTY_$WRITE_STRING `link #-4` (the
+  index), PKT_$DUMP_DATA `link #-4` (the index), HINT_$INIT_CACHE and
+  DIR_$OLD_INIT `link #-4`, DISK_$UNASSIGN_ALL `link #-8` (a 4-byte status
+  at -4, a word at -6, the index).  So a loop costs no hidden slot of 4
+  bytes or more; a 2-byte one would still round away in all five except
+  DISK_$UNASSIGN_ALL read with a separate `vol` local.  Routines of the
+  same loop shape differ: DISK_$UNASSIGN_ALL `#-8`, MSG_$FREE_ASID
+  0xE74E2C `#-12`, SMD_$FREE_ASID 0xE75250 `#-16`, each with a status at
+  -4 and the index stored to -6.  And loops are not needed for unused
+  frame space: the DISK_ module-local 0xE3CCCE (`while`, one 4-byte
+  local held in A1) has `link #-8`.  This favours hypothesis (a) of
+  section 2 (declared locals the compiler kept out of memory) over (b).
+- **`exit` and `next`** (ref pp. 4-77, 4-123): a jump to the loop's exit
+  (after `dbf` or after the bottom test) or to its continuation (the
+  `for` step, the `while`/`repeat` test).  The image cannot tell them
+  from `goto`/`return`/`if` structure, but the shapes are the usual ones:
+  KBD's module-local 0xE1CA74 `bne.s` to the step `addq.w #1,D1`
+  (0xE1CA7A) over a `then` part that leaves with `bra.s` to the
+  epilogue; PKT_$DUMP_DATA 0xE12814 `ble.s` out of the loop.  `if c then
+  exit` is one conditional branch on `c` (no conditional branch over a
+  `bra` in compiled code, 7.1).
+
+**Implemented** (`crates/dpc-ir/src/lower.rs`, `for_loop`,
+`check_for_indices`; `crates/dpc-m68k/src/isel.rs`, `while_`, `for_`,
+`loop_pointer_locals`, `CmpaZero`):
+
+- `while` as above, with the 0x2048 filler in aligning routines;
+  `cmpa.w #0,An` for `=`/`<>` `nil` on a pointer held in an address
+  register.
+- `for` with a word index variable of the routine itself, never read
+  outside loops over it nor assigned or addressed in them (ref p. 4-89;
+  `dpc` keeps it in a register for the loop only):
+  - constant bounds, N in 1..=65536: count first, index (only when the
+    body reads it) `clr.w`/`moveq` (initial value in -128..127 and not
+    the count's), step `addq.w`/`subq.w #1`, `dbf`;
+  - a run-time upper bound of an ascending loop from 1 with a signed
+    index, in a body that calls: `move.w hi,T; subq.w #1,T; bmi EXIT;
+    move.w T,Dc; moveq #1,Di`;
+  - a `for` loop of the `Fill` shape stays as in section 7.
+- `exit`, `next`, and `if c then exit|next` as one conditional branch.
+- A slot used inside a loop body is loaded at entry like one used more
+  than once (12.2: 0xE3CCD6; NAME_$VALIDATE's module-local 0xE4A004 loads
+  the slots its loops use at entry, 0xE4A018/0xE4A01C, and the one used
+  once outside them where it is needed, 0xE4A03C).
+- A pointer local assigned in a loop is held in an address register
+  (12.5, `loop_pointer_locals`).
+
+**Not supported yet** (positioned errors): run-time bounds other than
+the case above (no rule for the copy without calls; `tst.w; beq` for
+unsigned counts; run-time `lo`; `downto`); a `for` index indexing
+elements wider than a byte (stepped pointers); an index initial value
+outside -128..127 or equal to the count; byte or longword indices; an
+index of another scope (0xE721F8) or read after its loop (MST_$ALLOC_ASID
+0xE42D7C pushes D2 after leaving the loop with a `goto`); a loop that
+never runs; an empty loop body; an `exit`/`next` that would branch to the
+next instruction.
+
+Goldens `tests/golden/loops/while.pas`, `loops/for.pas`; tests
+`crates/dpc-m68k/src/isel.rs` (`for_with_index_and_call`, `for_forms`,
+`unsettled_for_loops`, `while_shape`, `loop_pointer_local_rule`),
+`crates/dpc-ir/src/tests.rs` (`for_loops`, `while_exit_next`).
+Conformance (`make conform`): `tests/conformance/disk_unassign_all.pas`
+(DISK_$UNASSIGN_ALL 0xE6BE1C; its `bsr.w` to DISK_$UNASSIGN, outside the
+unit, through the manifest's `module-routines=` token and `dpc
+--module-routine`), `tests/conformance/disk_set_chain_status.pas` (the
+DISK_ module-local 0xE3CCCE).
 
 ---
 
@@ -2558,8 +2803,14 @@ class takes D2/A2, a value live across a call a callee-saved register
 (module-local 0xE32B76: A2, D2 around three `jsr`; PROC1_$SET_TYPE
 0xE152F2: D2, D3), and a parameter's register is free after its last
 use.  The statements of such a body take registers of their own the same
-way.  A body of one `if`/`repeat` that reads a by-value parameter is
-rejected (no site seen); a slot used once in a body of several
+way.  A body of one `if`/`repeat` (or `while`/`for`) that reads a by-value
+parameter is rejected (no site seen).  A slot used inside a loop body
+counts as used more than once and is loaded at entry (bead
+domain-pascal-5aw.15; the DISK_ module-local 0xE3CCD6 `movea.l
+(0xc,A6),A0`, the status slot of its `while` loop's one store;
+NAME_$VALIDATE's module-local 0xE4A004 loads the slots its loops use at
+0xE4A018/0xE4A01C and the one used once outside them where it is
+needed, 0xE4A03C; section 7.4).  A slot used once in a body of several
 statements takes a register no earlier statement left a value in (12.4
 R4(b), bead domain-pascal-5aw.2; IIC_$RECEIVE 0xE70AC0..0xE70AD0) when
 the body has no branches and no calls, and is rejected otherwise, except
@@ -2638,6 +2889,16 @@ settled, each from this one routine, in image order:
    element in (the `-1` of the lower bound folded into the
    displacement, section 5.2), the destination stepped first.  The head
    0xE177E8 is 4-aligned with no filler (LOG_ aligns, section 7).
+   Section 7.4 (bead domain-pascal-96r) now describes the shape in
+   general: pointers start at `base + from × size`, are formed in the
+   order of first use and stepped in the reverse order (29 of 30 loops).
+   `dpc` compiles `for` loops since bead domain-pascal-5aw.15, but not
+   this one: it refuses (i) a `for` index indexing elements wider than a
+   byte (the stepped pointers are not implemented; this is the worker's
+   first diagnostic once item 5's type transfer is lowered) and (ii) a
+   run-time count in a loop without calls, where the count is copied into
+   a counter of its own 45 times and, as here, kept in place 64 times,
+   with no rule found.
 7. The frame: `link #-0x10` with nothing in it addressed (section 2,
    untouched frames); the reconstruction declares stand-ins.
 
@@ -3264,6 +3525,24 @@ the one register-variable constant seen, 0xE149A4, is `move.w #-1,D2`,
 not the `moveq` `dpc` uses for constants in registers (section 13).
 Unit test `register_local_rule`; golden `tests/golden/sysprog/interrupts`
 (`held_sr`); conformance `tests/conformance/time_get_adjust.pas`.
+
+**Pointer locals of loops in address registers (implemented narrowly;
+bead domain-pascal-5aw.15).**  A list walk keeps its pointer in an
+address register: the DISK_ module-local 0xE3CCCE `movea.l D0,A1` (the
+pointer from the parameter loaded at entry), then in its `while` loop
+`movea.l (A1),A1` (`r := r^.next`) and the test `cmpa.w #0,A1`; its
+`link #-8` area is never addressed.  Of the `while` loops that test a
+pointer against `nil` at the bottom, 45 test an address register and 12
+a frame slot (section 7.4).  `dpc` (`isel.rs`, `loop_pointer_locals`)
+holds a 4-byte pointer local in one virtual address register for the
+whole body when its only references are whole reads, dereferences and
+whole assignments, the first of them an assignment of a non-constant
+value by a statement of the routine's own statement part, another
+assignment inside a loop, and the body makes no call (fitted to
+0xE3CCCE; **Uncertain**).  Every assignment writes that register, a load
+straight into it.  Other pointer locals stay in the frame.  Unit test
+`loop_pointer_local_rule`; golden `tests/golden/loops/while` (`whl_$walk`);
+conformance `tests/conformance/disk_set_chain_status.pas`.
 
 ---
 

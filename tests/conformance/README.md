@@ -59,7 +59,14 @@ and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
 D0`).  Interrupt built-ins (codegen-patterns 10, 12.5; beads
 domain-pascal-5aw.7, -0wc): `time_get_adjust.pas` (TIME_$GET_ADJUST
 0xE16AA8, the last routine of TIME_: `disable`/`enable` around a read
-into a local held in D1 across two M$ARITH calls, `link #-4`).
+into a local held in D1 across two M$ARITH calls, `link #-4`).  Loops
+(codegen-patterns 7.4; bead domain-pascal-5aw.15): `disk_unassign_all.pas`
+(DISK_$UNASSIGN_ALL 0xE6BE1C: a `for` loop with constant bounds, its
+index in D3 beside the `dbf` count in D2 across a `bsr.w` to
+DISK_$UNASSIGN, a routine of the module outside the unit; "Routines
+outside the unit" below) and `disk_set_chain_status.pas` (the DISK_
+module-local 0xE3CCCE: a `while` loop, its test at the bottom, the walk
+pointer held in A1; loop alignment off).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
@@ -67,6 +74,24 @@ they exercise.
 `pending/` holds reconstructions that `dpc` cannot compile yet and that
 are therefore not in the manifest: `pending/log_read.pas` (LOG_$READ
 and its worker 0xE17778; what is missing is in codegen-patterns 12.3).
+
+## Routines outside the unit
+
+A unit is usually part of a module, and its routines may call a routine
+of the module that the unit does not contain.  The original compiled
+the whole module and called it with `bsr` (codegen-patterns 1.6); the
+unit declares it `extern`, which alone would give `jsr abs.l`.  The
+manifest token
+
+- `module-routines=NAME,...` (`.pas` fragments only, at most once)
+
+names such routines; `tools/conform.py` looks each up in the map (it
+must lie in the unit's map module and outside the unit) and passes `dpc
+--module-routine=NAME=0xADDR`.  dpc then calls it with `bsr`, sized from
+the address as for a routine of the unit, and the reference is resolved
+to the map name at link time like any other (DISK_$UNASSIGN_ALL 0xE6BE34
+`bsr.w DISK_$UNASSIGN`, `disk_unassign_all.pas`).  A routine the map does
+not name cannot be given this way.
 
 ## Module data
 
@@ -165,9 +190,9 @@ option must put the switch in that interval.  A segment where a
 non-aligning routine comes before an aligning one is reported as an
 error (exit status 1); the only one is MMAP_ (MMAP_$WS_SCAN 0xE0D364
 before MMAP_$GET_IMPURE 0xE0D5EA; codegen-patterns 7 explains it).  A
-unit with no loop and no module end needs no option.  No conformance
-unit uses these options yet: the non-aligning loops and module tails in
-the image all need constructs dpc does not compile yet.
+unit with no loop and no module end needs no option.
+`disk_set_chain_status.pas` (the DISK_ module-local 0xE3CCCE, a `while`
+head at 2 mod 4 without the filler) uses `loop-align=off`.
 
 `handasm/pkt_recently_missing.s` (PKT_$RECENTLY_MISSING 0xE128BA, a loop
 with its filler at 0xE128DA) tests this on a routine that starts at

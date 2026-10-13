@@ -1137,32 +1137,80 @@ end;
 }
 
 #[test]
-fn unsupported_for_loops() {
+fn for_loops() {
     let pre = "module m;
 var buf: extern array[0..15] of integer32; j: extern integer;
 procedure p;
-var i: integer;
+var i: integer; b: char;
 begin
 ";
-    let one = |stmt: &str| errs(&format!("{pre}  {stmt}\nend;\n"));
-    let shape = "error: a `for` loop other than `for i := c1 to c2 do a[i] := c` (codegen-patterns 7) is not supported yet";
-    for stmt in [
-        "for i := 15 downto 0 do buf[i] := 0;",
-        "for i := 0 to j do buf[i] := 0;",
-        "for i := 0 to 15 do buf[i] := i;",
-        "for i := 0 to 14 do buf[i + 1] := 0;",
-        "for i := 0 to 15 do begin buf[i] := 0; buf[i] := 1 end;",
-        "for j := 0 to 15 do buf[j] := 0;",
+    let one = |stmt: &str| lower_src(&format!("{pre}  {stmt}\nend;\n"));
+    // Not the `Fill` shape: a general `for` loop (codegen-patterns 7.4).
+    for (stmt, down) in [
+        ("for i := 15 downto 0 do buf[i] := 0;", true),
+        ("for i := 0 to j do buf[i] := 0;", false),
+        ("for i := 0 to 15 do buf[i] := i;", false),
+        ("for i := 0 to 14 do buf[i + 1] := 0;", false),
+        (
+            "for i := 0 to 15 do begin buf[i] := 0; buf[i] := 1 end;",
+            false,
+        ),
     ] {
-        let e = one(stmt);
-        assert_eq!(e.len(), 1, "{stmt}: {e:?}");
-        assert!(e[0].ends_with(shape), "{stmt}: {e:?}");
+        let m = one(stmt).unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+        let StmtKind::For(l) = &m.functions[0].body[0].kind else {
+            panic!("{stmt}: {:?}", m.functions[0].body)
+        };
+        assert_eq!(l.down, down, "{stmt}");
+        assert_eq!(l.index.ty, Scalar::signed(Width::Word), "{stmt}");
+        assert!(!l.body.is_empty(), "{stmt}");
     }
-    let e = one("for i := 3 to 2 do buf[i] := 0;");
+    let e = one("for j := 0 to 15 do buf[j] := 0;").unwrap_err();
+    assert!(
+        e[0].ends_with(
+            "a `for` index variable that is not a local of the routine (ref p. 4-89) is not \
+             supported yet"
+        ),
+        "{e:?}"
+    );
+    let e = one("for b := 'a' to 'z' do j := 0;").unwrap_err();
+    assert!(e[0].contains("that is not a word"), "{e:?}");
+    // The index is the loop's register only (ref p. 4-89): no reads
+    // outside its loops, no assignments or addresses inside them.
+    for stmt in [
+        "for i := 0 to 15 do j := 0; j := i;",
+        "for i := 0 to 15 do i := 3;",
+        "for i := 0 to 15 do for i := 1 to 2 do j := 0;",
+    ] {
+        let e = one(stmt).unwrap_err();
+        assert!(
+            e[0].contains("the index variable of a `for` loop read outside the loop"),
+            "{stmt}: {e:?}"
+        );
+    }
+    let e = one("for i := 3 to 2 do buf[i] := 0;").unwrap_err();
     assert!(
         e[0].ends_with("a `for` loop that never runs is not supported yet"),
         "{e:?}"
     );
+}
+
+/// `while`, `exit` and `next` (ref pp. 4-208, 4-77, 4-123).
+#[test]
+fn while_exit_next() {
+    let b = ctl_body("while w = 0 do begin if b then exit; if b2 then next; w := 1 end;");
+    let StmtKind::While { cond, body } = &b[0].kind else {
+        panic!("{b:?}")
+    };
+    assert!(matches!(cond, Cond::Compare { op: Rel::Eq, .. }));
+    assert_eq!(body.len(), 3);
+    let StmtKind::If { then_, .. } = &body[0].kind else {
+        panic!()
+    };
+    assert_eq!(then_[0].kind, StmtKind::Exit);
+    let StmtKind::If { then_, .. } = &body[1].kind else {
+        panic!()
+    };
+    assert_eq!(then_[0].kind, StmtKind::Next);
 }
 
 #[test]
@@ -1374,7 +1422,7 @@ fn unsupported_conditions_and_loops() {
         "comparing with a constant outside the other operand's type is not supported yet"
     ));
     assert!(one("if u > -1 then w := 0;").contains("outside the other operand's type"));
-    assert!(one("while w = 0 do w := 1;").contains("a `while` loop"));
+    assert!(one("while w = 0 do ;").contains("a `while` loop with an empty body"));
     assert!(one("if w = 0 then ;").contains("an `if` with an empty `then` part"));
     assert!(one("if true then w := 0;").contains("a constant condition"));
     assert!(one("if b = true then w := 0;").contains("comparing boolean values"));

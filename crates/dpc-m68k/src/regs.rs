@@ -290,6 +290,7 @@ pub fn access(insn: &Insn) -> Access {
             a.read(src);
             a.use_(Reg::D(*dst));
         }
+        Insn::CmpaZero(r) => a.use_(Reg::A(*r)),
         // Two-address operations update their destination in place: the
         // same value before and after (the selector writes them on a
         // virtual register it may modify).
@@ -364,6 +365,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fa(dst);
         }
         Insn::Moveq { dst, .. } => fd(dst),
+        Insn::CmpaZero(a) => fa(a),
         Insn::Dbf { reg, .. } => fd(reg),
         Insn::Addq { dst, .. }
         | Insn::Subq { dst, .. }

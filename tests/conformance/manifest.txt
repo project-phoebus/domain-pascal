@@ -15,6 +15,10 @@
 #         ROUTINE,..., each at most once, forwarded to dpc as --a5-...
 #         (.pas units only; README.md, "Module data"; tools/a5survey.py
 #         switch SEG).
+#   MODS  module-routines=ROUTINE,... (.pas fragments only): routines of
+#         the unit's map module outside the unit, declared `extern' in it
+#         and called with `bsr' as the original did; forwarded to dpc as
+#         --module-routine=ROUTINE=0xADDR with the map address.
 #
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.
@@ -74,3 +78,12 @@ tests/conformance/proc1_set_asid.pas         PROC1_$SET_ASID
 # `ori.w #0x700,SR' / `andi.w #0xF8FF,SR'; a local held in a register
 # (12.5) across two M$ARITH calls (8).
 tests/conformance/time_get_adjust.pas        TIME_$GET_ADJUST
+
+# Loops (codegen-patterns 7.4): a `for' loop with constant bounds whose
+# index the body uses, in a register (D3) next to the `dbf' count (D2),
+# both callee-saved across the `bsr.w' to DISK_$UNASSIGN, a routine of the
+# same module outside the unit (`module-routines=', dpc --module-routine);
+# a `while' loop with its test at the bottom and the walk pointer held in
+# A1 (`cmpa.w #0,A1').
+tests/conformance/disk_unassign_all.pas      DISK_$UNASSIGN_ALL  module-routines=DISK_$UNASSIGN
+tests/conformance/disk_set_chain_status.pas  0xE3CCCE:20  loop-align=off

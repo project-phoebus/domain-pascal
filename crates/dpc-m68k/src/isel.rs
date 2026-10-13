@@ -19,8 +19,8 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, Function, Rel, ResultClass,
-    ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp, Width,
+    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function, Rel,
+    ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
@@ -186,7 +186,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         if control_only && reads_value_param {
             return Err(unsupported(
                 f.body[0].span,
-                "a body of one `if`, `repeat` or `case` statement that reads by-value parameters \
+                "a body of one `if`, `case` or loop statement that reads by-value parameters \
                  (whether they are loaded at entry is not settled, codegen-patterns 12.2) is",
             ));
         }
@@ -207,6 +207,10 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         }
     }
     s.reg_locals = register_locals(f);
+    s.ptr_locals = loop_pointer_locals(f, &s.reg_locals)
+        .into_iter()
+        .map(|o| (o, None))
+        .collect();
     s.seq(f, &f.body, Tail::END)?;
     if f.data_absolute
         && s.out.iter().any(|i| {
@@ -278,6 +282,24 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             "a branch to a `bra` (an `if` part ending in an `if`, then a `bra` to a join or \
              the epilogue; compiled code has no branch to a `bra`, codegen-patterns 7.1) is",
         ));
+    }
+    // An `exit` or `next` whose target is the very next instruction (a
+    // `next` ending a loop body, an `exit` before an inner loop's end):
+    // whether the original emitted the branch is not known.
+    for &(at, span) in &s.loop_jumps {
+        let Insn::Branch { label, .. } = s.out[at] else {
+            unreachable!("loop_jumps records branches")
+        };
+        let next = s.out[at + 1..]
+            .iter()
+            .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
+            .any(|i| matches!(i, Insn::Label(l) if *l == label));
+        if next {
+            return Err(unsupported(
+                span,
+                "an `exit` or `next` that would branch to the next instruction is",
+            ));
+        }
     }
     // Phase 1b: physical registers (`regs.rs`, codegen-patterns 12.4).
     let exit: &[Reg] = match f.result {
@@ -619,6 +641,18 @@ fn register_locals(f: &Function) -> Vec<i32> {
                         self.stmts(body, true);
                         self.cond(until);
                     }
+                    StmtKind::While { cond, body } => {
+                        self.cond(cond);
+                        self.stmts(body, true);
+                    }
+                    // The index is the loop's own register (`Selector::for_`);
+                    // its reads count as reads of a local with no store, so
+                    // it is never a register local of this rule.
+                    StmtKind::For(l) => {
+                        self.expr(&l.from);
+                        self.expr(&l.to);
+                        self.stmts(&l.body, true);
+                    }
                     StmtKind::Case {
                         selector,
                         arms,
@@ -632,7 +666,11 @@ fn register_locals(f: &Function) -> Vec<i32> {
                             self.stmts(o, true);
                         }
                     }
-                    StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
+                    StmtKind::Return
+                    | StmtKind::Disable
+                    | StmtKind::Enable
+                    | StmtKind::Exit
+                    | StmtKind::Next => {}
                 }
             }
         }
@@ -656,11 +694,372 @@ fn register_locals(f: &Function) -> Vec<i32> {
         .collect()
 }
 
+/// A node [`walk`] visits.
+#[derive(Clone, Copy)]
+enum Node<'a> {
+    Expr(&'a Expr),
+    Addr(&'a Addr),
+    Call,
+}
+
+/// Visit `e` and every expression, address and call inside it.
+fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
+    v(Node::Expr(e));
+    match e {
+        Expr::Const { .. } => {}
+        Expr::Load { addr, .. } | Expr::AddrOf(addr) => walk_addr(addr, v),
+        Expr::SetMember { elem, set, .. } => {
+            walk_expr(elem, v);
+            walk_expr(set, v);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            walk_expr(lhs, v);
+            walk_expr(rhs, v);
+        }
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+            walk_expr(x, v)
+        }
+        Expr::Call { call, .. } => walk_call(call, v),
+        Expr::Test(c) => walk_cond(c, v),
+    }
+}
+
+fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
+    v(Node::Addr(a));
+    match a {
+        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Indirect { base, .. } => walk_expr(base, v),
+        Addr::Index { base, index, .. } => {
+            walk_addr(base, v);
+            walk_expr(index, v);
+        }
+    }
+}
+
+fn walk_call<'a>(c: &'a Call, v: &mut dyn FnMut(Node<'a>)) {
+    v(Node::Call);
+    for a in &c.args {
+        match a {
+            Arg::Value { value, .. } => walk_expr(value, v),
+            Arg::Address { addr, .. } => walk_addr(addr, v),
+        }
+    }
+}
+
+fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
+    match c {
+        IrCond::Compare { lhs, rhs, .. } => {
+            walk_expr(lhs, v);
+            walk_expr(rhs, v);
+        }
+        IrCond::Test(e) => walk_expr(e, v),
+        IrCond::Not(x) => walk_cond(x, v),
+        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+            walk_cond(a, v);
+            walk_cond(b, v);
+        }
+    }
+}
+
+/// Visit every expression, address and call of `body`, nested statements
+/// included.
+fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
+    for st in body {
+        match &st.kind {
+            StmtKind::SetResult(e) | StmtKind::Discard(e) => walk_expr(e, v),
+            StmtKind::Store { addr, value } => {
+                walk_addr(addr, v);
+                walk_expr(value, v);
+            }
+            StmtKind::Copy { dst, src, .. } => {
+                walk_addr(dst, v);
+                walk_addr(src, v);
+            }
+            StmtKind::Call(c) => walk_call(c, v),
+            StmtKind::Fill { start, value, .. } => {
+                walk_addr(start, v);
+                walk_expr(value, v);
+            }
+            StmtKind::If { cond, then_, else_ } => {
+                walk_cond(cond, v);
+                walk(then_, v);
+                walk(else_, v);
+            }
+            StmtKind::Repeat { body, until } => {
+                walk(body, v);
+                walk_cond(until, v);
+            }
+            StmtKind::While { cond, body } => {
+                walk_cond(cond, v);
+                walk(body, v);
+            }
+            StmtKind::For(l) => {
+                walk_expr(&l.from, v);
+                walk_expr(&l.to, v);
+                walk(&l.body, v);
+            }
+            StmtKind::Case {
+                selector,
+                arms,
+                otherwise,
+            } => {
+                walk_expr(selector, v);
+                for a in arms {
+                    walk(&a.body, v);
+                }
+                if let Some(o) = otherwise {
+                    walk(o, v);
+                }
+            }
+            StmtKind::Return
+            | StmtKind::Disable
+            | StmtKind::Enable
+            | StmtKind::Exit
+            | StmtKind::Next => {}
+        }
+    }
+}
+
+/// Whether `e` reads the frame object at `off` as a value.
+fn expr_reads_frame(e: &Expr, off: i32) -> bool {
+    let mut hit = false;
+    walk_expr(e, &mut |n| {
+        if let Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) = n
+        {
+            hit |= *o == off;
+        }
+    });
+    hit
+}
+
+/// Whether `body` reads the frame object at `off` as a value.
+fn stmts_read_frame(body: &[Stmt], off: i32) -> bool {
+    let mut hit = false;
+    walk(body, &mut |n| {
+        if let Node::Expr(e @ Expr::Load { .. }) = n {
+            hit |= expr_reads_frame(e, off);
+        }
+    });
+    hit
+}
+
+/// Whether `body` calls a routine (a statement or a function call, or an
+/// M$ARITH entry: a `jsr` either way).
+fn stmts_call(body: &[Stmt]) -> bool {
+    let mut hit = false;
+    walk(body, &mut |n| match n {
+        Node::Call => hit = true,
+        Node::Expr(e) => hit |= expr_has_call(e),
+        Node::Addr(_) => {}
+    });
+    hit
+}
+
+/// Whether `body` indexes an array with an expression involving the frame
+/// object at `off` (a `for` index) other than as the plain index of an
+/// array of bytes: the original reached such elements through a pointer
+/// stepped by the element size (codegen-patterns 7.4), which `dpc` does
+/// not do yet.  Byte arrays are indexed with the index register itself
+/// (83 loops: `move.b`, `cmpi.b`, `lea` with `(d,An,Di.w)`; KBD's
+/// module-local 0xE1CA70 `cmp.b (0,A5,D1.w),D2`).
+fn strength_reduced_index(body: &[Stmt], off: i32) -> bool {
+    let mut hit = false;
+    walk(body, &mut |n| {
+        if let Node::Addr(Addr::Index { index, scale, .. }) = n {
+            let plain = matches!(&**index, Expr::Load { addr: Addr::Frame(o), .. } if *o == off);
+            hit |= expr_reads_frame(index, off) && !(plain && *scale == 1);
+        }
+    });
+    hit
+}
+
+/// The pointer locals of `f` held in an address register for the whole
+/// body, assigned inside a loop (codegen-patterns 7.4, 12.5): a list walk's
+/// pointer.
+///
+/// The DISK_ module-local 0xE3CCCE (`disk/write_multi.c`,
+/// `disk_$set_chain_status`): `movea.l D0,A1` (the walk pointer from the
+/// parameter loaded at entry), then in the loop `move.l (A0),(0xc,A1);
+/// movea.l (A1),A1` and the test `cmpa.w #0,A1; bne.s`; its frame
+/// (`link #-8`) is never addressed.  Of the `while` loops that test a
+/// pointer against `nil` at the bottom, 45 test an address register
+/// (`cmpa.w #0,An`) and 12 a frame slot (`tst.l (d,A6)`; survey 7.4).
+///
+/// The rule (**Uncertain**, fitted to 0xE3CCCE): a 4-byte unsigned local
+/// (`Scalar::POINTER`) that the body dereferences, whose only references
+/// are whole reads, dereferences and whole assignments, whose first
+/// reference is an assignment of a non-constant value by a statement of
+/// the routine's own statement part, and which is assigned again inside a
+/// loop, in a body without calls (where it would have to live in A2..A4
+/// is not looked at).  `exclude`: locals already held by the other rule.
+fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
+    if stmts_call(&f.body) {
+        return Vec::new();
+    }
+    #[derive(Default)]
+    struct St {
+        /// The first reference was a suitable assignment (`Some(true)`),
+        /// or something else.
+        first: Option<bool>,
+        deref: bool,
+        loop_store: bool,
+        bad: bool,
+    }
+    fn exprs(e: &Expr, off: i32, st: &mut St) {
+        let (mut loads, mut addrs) = (0, 0);
+        walk_expr(e, &mut |n| match n {
+            Node::Expr(Expr::Load {
+                addr: Addr::Frame(o),
+                ty,
+            }) if *o == off => {
+                loads += 1;
+                if *ty != Scalar::POINTER {
+                    st.bad = true;
+                }
+            }
+            Node::Addr(Addr::Indirect { base, .. }) => {
+                if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. } if *o == off) {
+                    st.deref = true;
+                }
+            }
+            Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+            _ => {}
+        });
+        if addrs != loads {
+            // Addressed, or read in part.
+            st.bad = true;
+        }
+        if loads > 0 && st.first.is_none() {
+            st.first = Some(false);
+        }
+    }
+    fn cond(c: &IrCond, off: i32, st: &mut St) {
+        match c {
+            IrCond::Compare { lhs, rhs, .. } => {
+                exprs(lhs, off, st);
+                exprs(rhs, off, st);
+            }
+            IrCond::Test(e) => exprs(e, off, st),
+            IrCond::Not(x) => cond(x, off, st),
+            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+                cond(a, off, st);
+                cond(b, off, st);
+            }
+        }
+    }
+    fn addr(a: &Addr, off: i32, st: &mut St) {
+        exprs(&Expr::AddrOf(a.clone()), off, st);
+    }
+    fn stmts(body: &[Stmt], off: i32, top: bool, in_loop: bool, st: &mut St) {
+        for s in body {
+            match &s.kind {
+                StmtKind::Store {
+                    addr: Addr::Frame(o),
+                    value,
+                } if *o == off => {
+                    exprs(value, off, st);
+                    if value.ty() != Scalar::POINTER {
+                        st.bad = true;
+                    }
+                    if st.first.is_none() {
+                        st.first = Some(top && !matches!(value, Expr::Const { .. }));
+                    }
+                    st.loop_store |= in_loop;
+                }
+                StmtKind::Store { addr: a, value } => {
+                    addr(a, off, st);
+                    exprs(value, off, st);
+                }
+                StmtKind::SetResult(e) | StmtKind::Discard(e) => exprs(e, off, st),
+                StmtKind::Copy { dst, src, .. } => {
+                    addr(src, off, st);
+                    addr(dst, off, st);
+                }
+                StmtKind::Call(_) => st.bad = true,
+                StmtKind::Fill { start, value, .. } => {
+                    addr(start, off, st);
+                    exprs(value, off, st);
+                }
+                StmtKind::If {
+                    cond: c,
+                    then_,
+                    else_,
+                } => {
+                    cond(c, off, st);
+                    stmts(then_, off, false, in_loop, st);
+                    stmts(else_, off, false, in_loop, st);
+                }
+                StmtKind::Repeat { body, until } => {
+                    stmts(body, off, false, true, st);
+                    cond(until, off, st);
+                }
+                StmtKind::While { cond: c, body } => {
+                    cond(c, off, st);
+                    stmts(body, off, false, true, st);
+                }
+                StmtKind::For(l) => {
+                    exprs(&l.from, off, st);
+                    exprs(&l.to, off, st);
+                    stmts(&l.body, off, false, true, st);
+                }
+                StmtKind::Case {
+                    selector,
+                    arms,
+                    otherwise,
+                } => {
+                    exprs(selector, off, st);
+                    for a in arms {
+                        stmts(&a.body, off, false, in_loop, st);
+                    }
+                    if let Some(o) = otherwise {
+                        stmts(o, off, false, in_loop, st);
+                    }
+                }
+                StmtKind::Return
+                | StmtKind::Disable
+                | StmtKind::Enable
+                | StmtKind::Exit
+                | StmtKind::Next => {}
+            }
+        }
+    }
+    f.scalar_locals
+        .iter()
+        .filter(|l| l.ty == Scalar::POINTER && !exclude.contains(&l.offset))
+        .filter(|l| {
+            let mut st = St::default();
+            stmts(&f.body, l.offset, true, false, &mut st);
+            !st.bad && st.first == Some(true) && st.deref && st.loop_store
+        })
+        .map(|l| l.offset)
+        .collect()
+}
+
+/// Whether `stmts` ends in an unconditional jump (`return`, `exit`,
+/// `next`), so that no `bra` to a join follows it: the `bra` would never
+/// be reached.
+fn ends_in_jump(stmts: &[Stmt]) -> bool {
+    matches!(
+        stmts.last().map(|s| &s.kind),
+        Some(StmtKind::Return | StmtKind::Exit | StmtKind::Next)
+    )
+}
+
 /// A statement that is not control flow.
 fn is_simple(st: &Stmt) -> bool {
     !matches!(
         st.kind,
-        StmtKind::If { .. } | StmtKind::Repeat { .. } | StmtKind::Case { .. } | StmtKind::Return
+        StmtKind::If { .. }
+            | StmtKind::Repeat { .. }
+            | StmtKind::While { .. }
+            | StmtKind::For(_)
+            | StmtKind::Case { .. }
+            | StmtKind::Return
+            | StmtKind::Exit
+            | StmtKind::Next
     )
 }
 
@@ -703,11 +1102,17 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
             // loop (codegen-patterns 5.2).
             StmtKind::Copy { bytes, .. } if *bytes <= 18 => {}
+            // `exit` and `next` go on inside or after a loop, whose test
+            // or `dbf` branches conditionally (conservatively not clean).
             StmtKind::Copy { .. }
             | StmtKind::Fill { .. }
             | StmtKind::Call(_)
             | StmtKind::If { .. }
             | StmtKind::Repeat { .. }
+            | StmtKind::While { .. }
+            | StmtKind::For(_)
+            | StmtKind::Exit
+            | StmtKind::Next
             | StmtKind::Case { .. } => return false,
         }
     }
@@ -834,7 +1239,10 @@ fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
                 reject_mergeable_stores(then_)?;
                 reject_mergeable_stores(else_)?;
             }
-            StmtKind::Repeat { body, .. } => reject_mergeable_stores(body)?,
+            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
+                reject_mergeable_stores(body)?
+            }
+            StmtKind::For(l) => reject_mergeable_stores(&l.body)?,
             StmtKind::Case {
                 arms, otherwise, ..
             } => {
@@ -1012,9 +1420,32 @@ impl Uses<'_> {
                     self.stmts(then_);
                     self.stmts(else_);
                 }
+                // A use inside a loop body is a use on every iteration: a
+                // by-address slot used once there is loaded at entry like
+                // one used more than once (0xE3CCD6 `movea.l (0xc,A6),A0`,
+                // the status slot of a `while` loop's one store;
+                // NAME_$VALIDATE's module-local 0xE4A004: the slots (0x10)
+                // and (0x18), used in its loops, at 0xE4A018/0xE4A01C, but
+                // (0x14), used once outside them, at 0xE4A03C; 0xE49E5C,
+                // 0xE49E60), so the body is walked twice.
                 StmtKind::Repeat { body, until } => {
-                    self.stmts(body);
-                    self.cond(until);
+                    for _ in 0..2 {
+                        self.stmts(body);
+                        self.cond(until);
+                    }
+                }
+                StmtKind::While { cond, body } => {
+                    for _ in 0..2 {
+                        self.cond(cond);
+                        self.stmts(body);
+                    }
+                }
+                StmtKind::For(l) => {
+                    self.expr(&l.from);
+                    self.expr(&l.to);
+                    for _ in 0..2 {
+                        self.stmts(&l.body);
+                    }
                 }
                 StmtKind::Case {
                     selector,
@@ -1029,7 +1460,11 @@ impl Uses<'_> {
                         self.stmts(o);
                     }
                 }
-                StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
+                StmtKind::Return
+                | StmtKind::Disable
+                | StmtKind::Enable
+                | StmtKind::Exit
+                | StmtKind::Next => {}
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Store { addr, value } => {
                     self.address(addr);
@@ -1121,6 +1556,17 @@ pub struct Selector {
     /// With `data_absolute`: the address register the area's address was
     /// loaded into, once the first static operand needed it.
     abs_base: Option<u8>,
+    /// The loops being selected, innermost last: the label `next` goes to
+    /// (a `while`'s or `repeat`'s test, a `for`'s step) and the label
+    /// `exit` goes to (after the loop), once made ([`Self::loop_target`]).
+    loops: Vec<(Option<u32>, Option<u32>)>,
+    /// The indices in `out` of the branches `exit` and `next` emitted
+    /// ([`select_body`] refuses one to the very next instruction).
+    loop_jumps: Vec<(usize, Span)>,
+    /// Pointer locals held in an address register for the whole body
+    /// ([`loop_pointer_locals`]): frame offset, and the virtual register
+    /// once the first assignment has defined it.
+    ptr_locals: Vec<(i32, Option<u8>)>,
 }
 
 /// An operand as [`Selector::eval`] leaves it.
@@ -1163,6 +1609,9 @@ impl Selector {
             unpopped: false,
             data_absolute: false,
             abs_base: None,
+            loops: Vec::new(),
+            loop_jumps: Vec::new(),
+            ptr_locals: Vec::new(),
         }
     }
 
@@ -1270,6 +1719,21 @@ impl Selector {
                 } => self.fill(start, *count, value)?,
                 StmtKind::If { cond, then_, else_ } => self.if_(f, cond, then_, else_, next)?,
                 StmtKind::Repeat { body, until } => self.repeat(f, body, until)?,
+                StmtKind::While { cond, body } => self.while_(f, cond, body)?,
+                StmtKind::For(l) => self.for_(f, l)?,
+                StmtKind::Exit | StmtKind::Next => {
+                    let exit = matches!(st.kind, StmtKind::Exit);
+                    if !rest.is_empty() {
+                        return Err(unsupported(
+                            rest[0].span,
+                            "a statement after `exit` or `next` (not reached) is",
+                        ));
+                    }
+                    let l = self.loop_target(exit);
+                    let at = self.out.len();
+                    self.jump(Cond::T, l);
+                    self.loop_jumps.push((at, st.span));
+                }
                 StmtKind::Case {
                     selector,
                     arms,
@@ -1409,6 +1873,25 @@ impl Selector {
             self.branch(cond, true, l)?;
             return self.seq(f, else_, next);
         }
+        // `if c then exit` / `if c then next` likewise: one conditional
+        // branch on `c` to the loop's exit or continuation (no conditional
+        // branch over a `bra` in compiled code, above; PKT_$DUMP_DATA
+        // 0xE12814 `ble.s` out of its `dbf` loop).
+        if let [Stmt {
+            kind: k @ (StmtKind::Exit | StmtKind::Next),
+            span: jspan,
+        }] = then_
+        {
+            let l = self.loop_target(matches!(k, StmtKind::Exit));
+            let at = self.out.len();
+            self.branch(cond, true, l)?;
+            for i in at..self.out.len() {
+                if matches!(self.out[i], Insn::Branch { label, .. } if label == l) {
+                    self.loop_jumps.push((i, *jspan));
+                }
+            }
+            return self.seq(f, else_, next);
+        }
         let l_else = self.new_label();
         self.branch(cond, false, l_else)?;
         if else_.is_empty() {
@@ -1427,7 +1910,7 @@ impl Selector {
             },
         )?;
         let l_join = self.new_label();
-        if !matches!(then_.last().map(|s| &s.kind), Some(StmtKind::Return)) {
+        if !ends_in_jump(then_) {
             self.span = span;
             self.jump(Cond::T, l_join);
         }
@@ -1456,7 +1939,10 @@ impl Selector {
         self.out.push(Insn::Align4);
         self.place(head);
         // The test follows the body: a conditional branch, so a call in
-        // the body is popped (codegen-patterns 1.1).
+        // the body is popped (codegen-patterns 1.1).  `next` goes to the
+        // test, `exit` past it (codegen-patterns 7.4); their labels are
+        // made when one is used.
+        self.loops.push((None, None));
         self.seq(
             f,
             body,
@@ -1465,10 +1951,294 @@ impl Selector {
                 clean: false,
             },
         )?;
+        let (test, exit) = self.loops.pop().expect("pushed above");
         (self.span, self.multi) = (span, multi);
         // A call in the test is followed by the conditional branch: popped.
         (self.call_no_pop, self.called) = (false, false);
-        self.branch(until, false, head)
+        if let Some(t) = test {
+            self.place(t);
+        }
+        self.branch(until, false, head)?;
+        if let Some(x) = exit {
+            self.place(x);
+        }
+        Ok(())
+    }
+
+    /// The label `exit` (`true`) or `next` goes to in the innermost loop,
+    /// made on first use.
+    fn loop_target(&mut self, exit: bool) -> u32 {
+        let fresh = self.next_label;
+        let l = self
+            .loops
+            .last_mut()
+            .expect("`exit` and `next` only inside loops (dpc-sema)");
+        let slot = if exit { &mut l.1 } else { &mut l.0 };
+        match *slot {
+            Some(x) => x,
+            None => {
+                *slot = Some(fresh);
+                self.next_label += 1;
+                fresh
+            }
+        }
+    }
+
+    /// `while cond do body` (ref "While", p. 4-208): the test at the
+    /// bottom, entered by a `bra` to it, branching back to the head while
+    /// the condition holds (codegen-patterns 7.2, 7.4: 213 such loops;
+    /// 0xE01A8E..0xE01A98; the DISK_ module-local 0xE3CCCE `bra.s
+    /// 0xE3CCE4; ...; cmpa.w #0,A1; bne.s 0xE3CCDE`):
+    ///
+    /// ```text
+    ///         bra     TEST
+    ///         <filler>        ; aligning routines, head at 2 mod 4
+    /// HEAD:   body
+    /// TEST:   <branch to HEAD when cond holds>
+    /// EXIT:
+    /// ```
+    ///
+    /// The head after the `bra` is aligned like every loop head (7.4: in
+    /// aligning routines 29 such heads have the filler, 27 are 4-aligned
+    /// already and 2, of loops over 0x100 bytes, are at 2 mod 4;
+    /// MAC_OS_$CLOSE 0xE0B4CC `bra.s; movea.l A0,A0` before the head
+    /// 0xE0B4D0).  The test is a condition's jumping code with the sense
+    /// of the last branch reversed: `and then` leaves the loop on its
+    /// first operand's failure and branches back on its second's success
+    /// (NAME_$VALIDATE's module-local 0xE4A028..0xE4A034 `cmp.w (A1),D0;
+    /// bcs.s <exit>; ...; cmpi.b #47,(-1,A0,D1.w); beq.s <head>`).
+    /// `next` branches to the test, `exit` past it.
+    fn while_(&mut self, f: &Function, cond: &IrCond, body: &[Stmt]) -> Res<()> {
+        let (span, multi) = (self.span, self.multi);
+        let head = self.new_label();
+        let test = self.new_label();
+        let exit = self.new_label();
+        self.jump(Cond::T, test);
+        self.out.push(Insn::Align4);
+        self.place(head);
+        self.loops.push((Some(test), Some(exit)));
+        // The test follows the body: a call in it is popped.
+        self.seq(
+            f,
+            body,
+            Tail {
+                end: false,
+                clean: false,
+            },
+        )?;
+        self.loops.pop();
+        (self.span, self.multi) = (span, multi);
+        (self.call_no_pop, self.called) = (false, false);
+        self.place(test);
+        self.branch(cond, true, head)?;
+        self.place(exit);
+        Ok(())
+    }
+
+    /// A `for` loop ([`ForLoop`]; ref "For", pp. 4-88..4-90) as a `dbf`
+    /// loop (codegen-patterns 7, 7.4).
+    ///
+    /// **Constant bounds** (`n` iterations, 1..=65536):
+    ///
+    /// ```text
+    ///         moveq   #n-1,Dc         ; move.w #n-1,Dc above 127
+    ///         moveq   #from,Di        ; clr.w Di for 0; only when the
+    ///                                 ;   body reads the index
+    ///         <filler>
+    /// HEAD:   body
+    /// STEP:   addq.w  #1,Di           ; subq.w for downto
+    ///         dbf     Dc,HEAD
+    /// EXIT:
+    /// ```
+    ///
+    /// The count is loaded before the index (survey 7.4: 116 of 118 such
+    /// loops with the index's initial value in the preheader; MST_$ALLOC_ASID
+    /// 0xE42D50 `moveq #57,D0; ...; clr.w D2`; DISK_$UNASSIGN_ALL 0xE6BE24
+    /// `moveq #9,D2; moveq #1,D3`), the index stepped at the bottom, before
+    /// `dbf` (0xE6BE3A; `subq.w #1` for `downto`, 0xE3C99A, 0xE6CAAC).  The
+    /// index lives in a register for the loop only: its frame slot is never
+    /// written (DISK_$UNASSIGN_ALL, `link #-8` for its two other locals'
+    /// 6 bytes and the index's 2; 307 of 320 `dbf` loops with an index step
+    /// it in a register).  A body that does not read the index gets no
+    /// index register (0xE00EB0; 7, `fill`).  The count and the index are
+    /// ordinary values for the allocator: across a call in the body they
+    /// take callee-saved registers (DISK_$UNASSIGN_ALL D2, D3).
+    ///
+    /// **A run-time upper bound** (`to`, from 1, ascending, a signed
+    /// index), in a body that calls:
+    ///
+    /// ```text
+    ///         move.w  to,T            ; the bound into a scratch value
+    ///         subq.w  #1,T
+    ///         bmi     EXIT
+    ///         move.w  T,Dc            ; the counter, callee-saved
+    ///         moveq   #1,Di
+    /// ```
+    ///
+    /// (7.4: 45 of the 46 such guarded loops whose body calls copy the
+    /// count into a counter of its own; DTTY_$WRITE_STRING 0xE1D6AA..0xE1D6B2
+    /// `move.w (A0),D0; subq.w #1,D0; bmi.s; move.w D0,D3; moveq #1,D2`.)
+    /// Without a call in the body the count is copied 45 times and counted
+    /// down in place 64 times, with no rule found: refused, as are other
+    /// lower bounds and run-time `downto`.
+    ///
+    /// Refused besides: a loop that never runs (no site looked at); an
+    /// index read as the index of an array of elements wider than a byte
+    /// (the original strength-reduced those into a stepping pointer: 7.4,
+    /// PKT_$DUMP_DATA 0xE12800, LOG_$READ's worker 0xE177E0); an index
+    /// whose initial value is the count's (0xE6A8BC `moveq #19,D2; move.w
+    /// D2,D1`: the constant is copied, not reloaded).
+    fn for_(&mut self, f: &Function, l: &ForLoop) -> Res<()> {
+        let span = self.span;
+        let off = l.index.offset;
+        let uses_index = stmts_read_frame(&l.body, off);
+        if strength_reduced_index(&l.body, off) {
+            return Err(unsupported(
+                span,
+                "indexing an array of elements wider than a byte by a `for` index (strength \
+                 reduction to a stepping pointer, codegen-patterns 7.4) is",
+            ));
+        }
+        let konst = |e: &Expr| match e {
+            Expr::Const { value, .. } => Some(*value),
+            _ => None,
+        };
+        let exit = self.new_label();
+        let (count, init) = match (konst(&l.from), konst(&l.to)) {
+            (Some(a), Some(b)) => {
+                let n = if l.down { a - b + 1 } else { b - a + 1 };
+                if n < 1 {
+                    return Err(unsupported(span, "a `for` loop that never runs is"));
+                }
+                if n > 0x10000 {
+                    return Err(unsupported(
+                        span,
+                        "a `for` loop of more than 65536 iterations is",
+                    ));
+                }
+                if uses_index && a == n - 1 {
+                    return Err(unsupported(
+                        span,
+                        "a `for` index whose initial value equals the `dbf` count (the original \
+                         copies the count's register, 0xE6A8BC; codegen-patterns 7.4) is",
+                    ));
+                }
+                let c = self.alloc_d()?;
+                let n = n - 1;
+                self.out.push(if n <= 127 {
+                    Insn::Moveq {
+                        value: n as i8,
+                        dst: c,
+                    }
+                } else {
+                    Insn::Move {
+                        size: Size::W,
+                        src: Ea::Imm(imm(n, Width::Word)),
+                        dst: Ea::Reg(Reg::D(c)),
+                    }
+                });
+                (c, a)
+            }
+            (Some(1), None) if !l.down && l.index.ty.is_signed() => {
+                if !stmts_call(&l.body) {
+                    return Err(unsupported(
+                        span,
+                        "a `for` loop with a run-time bound and no call in its body (the count \
+                         is copied into a counter of its own or not, no rule found, \
+                         codegen-patterns 7.4) is",
+                    ));
+                }
+                let t = match self.eval(&l.to)? {
+                    Val::Tmp(d) => d,
+                    v => self.in_tmp(v, Width::Word)?,
+                };
+                self.out.push(Insn::Subq {
+                    size: Size::W,
+                    value: 1,
+                    dst: Ea::Reg(Reg::D(t)),
+                });
+                self.jump(Cond::Mi, exit);
+                let c = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(Reg::D(t)),
+                    dst: Ea::Reg(Reg::D(c)),
+                });
+                (c, 1)
+            }
+            _ => {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop with these bounds (a run-time bound other than an ascending \
+                     loop's upper bound from 1, codegen-patterns 7.4) is",
+                ))
+            }
+        };
+        let index = if uses_index {
+            let d = self.alloc_d()?;
+            self.out.push(match init {
+                0 => Insn::Clr {
+                    size: Size::W,
+                    dst: Ea::Reg(Reg::D(d)),
+                },
+                -128..=127 => Insn::Moveq {
+                    value: init as i8,
+                    dst: d,
+                },
+                _ => {
+                    return Err(unsupported(
+                        span,
+                        "a `for` index whose initial value is outside -128..127 (not \
+                         catalogued, codegen-patterns 7.4) is",
+                    ))
+                }
+            });
+            self.pinned.push((off, Reg::D(d)));
+            Some(d)
+        } else {
+            None
+        };
+        let multi = self.multi;
+        let head = self.new_label();
+        let step = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        self.loops.push((Some(step), Some(exit)));
+        self.seq(
+            f,
+            &l.body,
+            Tail {
+                end: false,
+                clean: false,
+            },
+        )?;
+        self.loops.pop();
+        (self.span, self.multi) = (span, multi);
+        (self.call_no_pop, self.called) = (false, false);
+        self.place(step);
+        if let Some(d) = index {
+            let step = Insn::Addq {
+                size: Size::W,
+                value: 1,
+                dst: Ea::Reg(Reg::D(d)),
+            };
+            self.out.push(if l.down {
+                Insn::Subq {
+                    size: Size::W,
+                    value: 1,
+                    dst: Ea::Reg(Reg::D(d)),
+                }
+            } else {
+                step
+            });
+            self.pinned.retain(|&(o, _)| o != off);
+        }
+        self.out.push(Insn::Dbf {
+            reg: count,
+            label: head,
+        });
+        self.place(exit);
+        Ok(())
     }
 
     /// `case selector of ... otherwise ... end` (ref "Case", pp.
@@ -1758,7 +2528,7 @@ impl Selector {
                 }
             };
             self.seq(f, body, tail)?;
-            if !falls && !matches!(body.last().map(|s| &s.kind), Some(StmtKind::Return)) {
+            if !falls && !ends_in_jump(body) {
                 self.span = span;
                 self.jump(Cond::T, l_join);
             }
@@ -1936,10 +2706,19 @@ impl Selector {
                     }
                 };
                 let ea = self.operand(addr)?;
-                if let Ea::Reg(Reg::A(_)) = ea {
-                    // `cmpa.w #0,An` (151 sites, e.g. 0xE0243C); `entry_loads`
-                    // never pins a value that is compared.
-                    return Err(unsupported(self.span, "testing an address register is"));
+                if let Ea::Reg(Reg::A(a)) = ea {
+                    // A pointer in an address register against `nil`:
+                    // `cmpa.w #0,An` (codegen-patterns 7.1: 151 sites,
+                    // 0xE0243C; 7.4: 45 `while p <> nil` loops test their
+                    // pointer so, e.g. 0xE3CCE4).  Only `=`/`<>` are seen.
+                    if !matches!(op, Rel::Eq | Rel::Ne) {
+                        return Err(unsupported(
+                            self.span,
+                            "an ordering comparison of a pointer with nil is",
+                        ));
+                    }
+                    self.out.push(Insn::CmpaZero(a));
+                    return Ok(cc);
                 }
                 self.tst(size, ea)?;
                 Ok(cc)
@@ -2331,6 +3110,44 @@ impl Selector {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
         if let Addr::Frame(o) = addr {
+            if let Some(k) = self.ptr_locals.iter().position(|&(p, _)| p == *o) {
+                // A pointer local held in an address register for the whole
+                // body ([`loop_pointer_locals`]): every assignment writes
+                // that register, a load straight into it (0xE3CCDA
+                // `movea.l D0,A1`; 0xE3CCE2 `movea.l (A1),A1`, `r :=
+                // r^.next`).
+                let a = match self.ptr_locals[k].1 {
+                    Some(a) => a,
+                    None => {
+                        let a = self.alloc_a()?;
+                        self.ptr_locals[k].1 = Some(a);
+                        a
+                    }
+                };
+                let src = match value {
+                    Expr::Load { addr: src, .. } => self.operand(src)?,
+                    v => match self.eval(v)? {
+                        Val::Reg(r) => Ea::Reg(r),
+                        Val::Tmp(d) => Ea::Reg(Reg::D(d)),
+                        Val::Mem(ea) => ea,
+                        Val::Imm(_) => {
+                            return Err(unsupported(
+                                self.span,
+                                "a constant assigned to a pointer held in a register is",
+                            ))
+                        }
+                    },
+                };
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src,
+                    dst: a,
+                });
+                if self.pinned(*o).is_none() {
+                    self.pinned.push((*o, Reg::A(a)));
+                }
+                return Ok(());
+            }
             if self.reg_locals.contains(o) {
                 // A local held in a register (codegen-patterns 12.5): its
                 // value is computed into, or loaded into, a new data
@@ -6267,5 +7084,304 @@ mod tests {
             locals(&mut f, &[(-2, w)]);
             assert_eq!(register_locals(&f) == [-2], held, "{what}");
         }
+    }
+
+    fn for_loop(from: Expr, to: Expr, down: bool, body: Vec<StmtKind>) -> StmtKind {
+        StmtKind::For(ForLoop {
+            index: dpc_ir::ValueParam {
+                offset: -2,
+                ty: word(),
+            },
+            from,
+            to,
+            down,
+            body: body
+                .into_iter()
+                .map(|kind| Stmt { kind, span: span() })
+                .collect(),
+        })
+    }
+
+    fn index() -> Expr {
+        load(Addr::Frame(-2), word())
+    }
+
+    /// codegen-patterns 7.4: DISK_$UNASSIGN_ALL 0xE6BE24..0xE6BE3C, the
+    /// count, then the index, both callee-saved across the call; the index
+    /// stepped before `dbf`.
+    #[test]
+    fn for_with_index_and_call() {
+        let body = vec![
+            store(Addr::Frame(-6), index()),
+            ext(
+                "DISK_$UNASSIGN",
+                vec![
+                    Arg::Address {
+                        addr: Addr::Frame(-4),
+                        slot: 4,
+                    },
+                    Arg::Address {
+                        addr: Addr::Frame(-6),
+                        slot: 4,
+                    },
+                ],
+                0,
+            ),
+        ];
+        let f = proc_(
+            8,
+            vec![for_loop(konst(1, word()), konst(10, word()), false, body)],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-8",
+                "movem.l\t%d2-%d3,-(%sp)",
+                "moveq\t#9,%d2",
+                "moveq\t#1,%d3",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t%d3,(-6,%fp)",
+                "pea\t(-6,%fp)",
+                "pea\t(-4,%fp)",
+                "jsr\t(DISK_$UNASSIGN).l",
+                "addq.w\t#8,%sp",
+                "addq.w\t#1,%d3",
+                "dbf\t%d2,2b",
+                "movem.l\t(-0x10,%fp),%d2-%d3",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// No index register when the body does not read the index; `clr.w`
+    /// for an index from 0, `move.w #n` for a count above 127, `subq.w`
+    /// for `downto`.
+    #[test]
+    fn for_forms() {
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                konst(299, word()),
+                false,
+                vec![store(sym("W"), konst(1, word()))],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "move.w\t#0x12b,%d0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t#1,(W).l",
+                "dbf\t%d0,2b",
+            ]
+        );
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(9, word()),
+                konst(1, word()),
+                true,
+                vec![store(sym("W"), index())],
+            )],
+        );
+        let t = body_text(&f);
+        assert_eq!(t[..2], ["moveq\t#8,%d0", "moveq\t#9,%d1"]);
+        assert_eq!(t[t.len() - 2..], ["subq.w\t#1,%d1", "dbf\t%d0,2b"]);
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                konst(3, word()),
+                false,
+                vec![store(sym("W"), index())],
+            )],
+        );
+        assert_eq!(body_text(&f)[1], "clr.w\t%d1");
+    }
+
+    /// Refused `for` loops (codegen-patterns 7.4).
+    #[test]
+    fn unsettled_for_loops() {
+        let one = |from: Expr, to: Expr, down: bool, body: Vec<StmtKind>| {
+            err(&proc_(4, vec![for_loop(from, to, down, body)]))
+        };
+        let w = || store(sym("W"), index());
+        assert!(one(konst(3, word()), konst(2, word()), false, vec![w()])
+            .starts_with("a `for` loop that never runs"));
+        // The initial value equals the count: 0xE6A8BC copies the count.
+        assert!(one(konst(19, word()), konst(0, word()), true, vec![w()])
+            .contains("initial value equals the `dbf` count"));
+        assert!(
+            one(konst(200, word()), konst(300, word()), false, vec![w()])
+                .contains("outside -128..127")
+        );
+        // A run-time bound without a call in the body.
+        assert!(
+            one(konst(1, word()), load(sym("N"), word()), false, vec![w()])
+                .contains("no call in its body")
+        );
+        assert!(
+            one(konst(0, word()), load(sym("N"), word()), false, vec![w()])
+                .contains("with these bounds")
+        );
+        // An array of words indexed by the index: strength-reduced.
+        let elem = Addr::Index {
+            base: Box::new(sym("TAB")),
+            index: Box::new(index()),
+            scale: 2,
+            offset: -2,
+        };
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![store(elem, konst(0, word()))]
+        )
+        .contains("strength reduction"));
+        // `next` as the last statement: a branch to the next instruction.
+        assert!(one(
+            konst(1, word()),
+            konst(4, word()),
+            false,
+            vec![w(), StmtKind::Next]
+        )
+        .contains("branch to the next instruction"));
+    }
+
+    /// `while` (codegen-patterns 7.4): `bra` to the test, the head aligned
+    /// like any loop head, the test branching back when it holds.
+    #[test]
+    fn while_shape() {
+        let f = proc_(
+            0,
+            vec![StmtKind::While {
+                cond: IrCond::Compare {
+                    op: Rel::Lt,
+                    lhs: load(sym("W"), word()),
+                    rhs: konst(10, word()),
+                },
+                body: vec![Stmt {
+                    kind: store(sym("N"), konst(0, word())),
+                    span: span(),
+                }],
+            }],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "bra.s\t2f",
+                ".balignw\t4,0x2048",
+                "1:",
+                "clr.w\t(N).l",
+                "2:",
+                "cmpi.w\t#0xa,(W).l",
+                "blt.s\t1b",
+            ]
+        );
+    }
+
+    /// An `if` part ending in `exit` is followed by no `bra` to the join
+    /// (it would never be reached), as for `return`.
+    #[test]
+    fn exit_ends_an_if_part() {
+        let st = |kind| Stmt { kind, span: span() };
+        let f = proc_(
+            0,
+            vec![StmtKind::While {
+                cond: IrCond::Compare {
+                    op: Rel::Lt,
+                    lhs: load(sym("W"), word()),
+                    rhs: konst(10, word()),
+                },
+                body: vec![
+                    st(StmtKind::If {
+                        cond: IrCond::Compare {
+                            op: Rel::Eq,
+                            lhs: load(sym("W"), word()),
+                            rhs: konst(3, word()),
+                        },
+                        then_: vec![st(store(sym("N"), konst(1, word()))), st(StmtKind::Exit)],
+                        else_: vec![st(store(sym("N"), konst(2, word())))],
+                    }),
+                    st(store(sym("W"), konst(0, word()))),
+                ],
+            }],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "bra.s\t2f",
+                ".balignw\t4,0x2048",
+                "1:",
+                "cmpi.w\t#3,(W).l",
+                "bne.s\t4f",
+                "move.w\t#1,(N).l",
+                "bra.s\t3f",
+                "4:",
+                "move.w\t#2,(N).l",
+                "clr.w\t(W).l",
+                "2:",
+                "cmpi.w\t#0xa,(W).l",
+                "blt.s\t1b",
+                "3:",
+            ]
+        );
+    }
+
+    /// A pointer local assigned in a loop is held in an address register
+    /// (the DISK_ module-local 0xE3CCCE); not in a body that calls.
+    #[test]
+    fn loop_pointer_local_rule() {
+        let p = || load(Addr::Frame(-4), Scalar::POINTER);
+        let walk = |extra: Option<StmtKind>| {
+            let mut body = vec![
+                store(Addr::Frame(-4), load(sym("HEAD"), Scalar::POINTER)),
+                StmtKind::While {
+                    cond: IrCond::Compare {
+                        op: Rel::Ne,
+                        lhs: p(),
+                        rhs: konst(0, Scalar::POINTER),
+                    },
+                    body: vec![Stmt {
+                        kind: store(
+                            Addr::Frame(-4),
+                            load(
+                                Addr::Indirect {
+                                    base: Box::new(p()),
+                                    offset: 0,
+                                },
+                                Scalar::POINTER,
+                            ),
+                        ),
+                        span: span(),
+                    }],
+                },
+            ];
+            body.extend(extra);
+            let mut f = proc_(4, body);
+            locals(&mut f, &[(-4, Scalar::POINTER)]);
+            f
+        };
+        let f = walk(None);
+        assert_eq!(loop_pointer_locals(&f, &[]), [-4]);
+        assert_eq!(
+            body_text(&f),
+            [
+                "movea.l\t(HEAD).l,%a0",
+                "bra.s\t2f",
+                ".balignw\t4,0x2048",
+                "1:",
+                "movea.l\t(%a0),%a0",
+                "2:",
+                "cmpa.w\t#0,%a0",
+                "bne.s\t1b",
+            ]
+        );
+        let f = walk(Some(ext("X", vec![], 0)));
+        assert!(loop_pointer_locals(&f, &[]).is_empty());
     }
 }

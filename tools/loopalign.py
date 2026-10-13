@@ -36,6 +36,18 @@ usage:
                                           # a segment (for dpc's
                                           # --loop-align-off-from and the
                                           # conformance manifest)
+    tools/loopalign.py heads              # loop heads by back branch (dbf,
+                                          # bcc, bra), entry (fall, bra-in:
+                                          # a `bra' to the bottom test, i.e.
+                                          # `while'; bra-out), routine class
+                                          # (al aligning, na not, ? unknown,
+                                          # from `switch') and F/A/U
+                                          # (codegen-patterns 7.4)
+    tools/loopalign.py fors [-v]          # `dbf' loops: preheader order of
+                                          # count and index, index in a
+                                          # register or memory, index use
+                                          # (byte index vs stepped pointer),
+                                          # run-time guards (7.4)
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -143,6 +155,10 @@ def routine_starts(m, seg):
     return sorted(st)
 
 
+# routine start -> [(addr, len, text)], filled by scan()
+INSNS = {}
+
+
 def scan(include_asm=False):
     """(map, sites, fillers, routines).  Each routine (see routine_starts)
     is disassembled on its own so that data between routines cannot
@@ -162,6 +178,7 @@ def scan(include_asm=False):
                 continue
             routines.append((seg, r0, r1))
             insns = disasm(r0, r1 - r0)
+            INSNS[r0] = insns
             ends = {a + n: t for a, n, t in insns}
             starts = {a for a, n, t in insns}
             for i, (a, n, t) in enumerate(insns):
@@ -234,6 +251,146 @@ def switch(pr, seg):
         raise ValueError('%s: routine 0x%X does not align but 0x%X, later, does'
                          % (seg.name, early[0], last))
     return last, first
+
+
+def align_classes(m, pr):
+    """{routine start: 'al' | 'na' | '?'}: aligning (at or before the last
+    routine of its segment with a filler), not aligning (at or after the
+    first later one with a head at 2 mod 4 and none), or not known."""
+    out = {}
+    for seg in m.segments:
+        rs = [(r0, rclass(c)) for sg, r0, _, c in pr if sg is seg]
+        if not rs:
+            continue
+        try:
+            last, first = switch(pr, seg)
+        except ValueError:
+            last, first = None, None
+        for r0, cl in rs:
+            if cl in 'FX' or (last is not None and r0 <= last):
+                out[r0] = 'al'
+            elif cl == 'u' or (first is not None and r0 >= first):
+                out[r0] = 'na'
+            else:
+                out[r0] = '?'
+    return out
+
+
+def head_rows(m, sites, routines):
+    """[(head, class F/A/U, back kind, entry, routine class, routine start,
+    address of the last back branch)] for every loop head.  The entry is
+    `fall' (the instruction before the head, a filler skipped, does not
+    jump), `bra-in' (a `bra' to the loop's own bottom: a `while') or
+    `bra-out'."""
+    import bisect
+    pr = per_routine(sites, routines)
+    acls = align_classes(m, pr)
+    starts = [r0 for _, r0, _, _ in pr]
+    rows = []
+    for t, (cls, ss) in sorted(loops(sites).items()):
+        r0 = starts[bisect.bisect_right(starts, t) - 1]
+        ins = INSNS[r0]
+        idx = {a: i for i, (a, n, x) in enumerate(ins)}
+        if t not in idx:
+            continue
+        j = idx[t] - 1
+        if j >= 0 and ins[j][2].startswith('moveal %a0,%a0'):
+            j -= 1
+        prev = ins[j][2] if j >= 0 else ''
+        last = max((x for x in ss if x.src >= t), key=lambda x: x.src)
+        back = 'dbf' if last.kind == 'dbf' else 'bra' if last.text.startswith('bra') else 'bcc'
+        entry = 'fall'
+        if prev.startswith('bra'):
+            mm = re.match(r'bra[sw]?\s+0x([0-9a-f]+)', prev)
+            entry = 'bra-in' if mm and t < int(mm.group(1), 16) <= last.src else 'bra-out'
+        rows.append((t, cls, back, entry, acls.get(r0, '?'), r0, last.src))
+    return rows
+
+
+def heads(m, sites, routines):
+    """The table of codegen-patterns 7.4 (loop heads by shape and class)."""
+    rows = head_rows(m, sites, routines)
+    c = Counter((b, e, a, cl) for _, cl, b, e, a, _, _ in rows)
+    for b in ('dbf', 'bcc', 'bra'):
+        for e in ('fall', 'bra-in', 'bra-out'):
+            for a in ('al', 'na', '?'):
+                n = [c[b, e, a, k] for k in 'FAU']
+                if sum(n):
+                    print('%-4s %-8s %-3s F=%-4d A=%-4d U=%-4d' % (b, e, a, *n))
+    big = [(t, src) for t, cl, b, e, a, _, src in rows
+           if e == 'bra-in' and a == 'al' and cl == 'U']
+    print('while heads at 2 mod 4 in aligning routines: %s' % ', '.join(
+        '0x%X (loop 0x%X bytes)' % (t, src - t) for t, src in big))
+
+
+_STEP = re.compile(r'(addq|subq)w #1,(%d\d)$')
+
+
+def fors(m, sites, routines, verbose=False):
+    """`dbf' loop statistics of codegen-patterns 7.4."""
+    rows = [r for r in head_rows(m, sites, routines) if r[2] == 'dbf']
+    order, where, use, guard = Counter(), Counter(), Counter(), Counter()
+    for t, cls, back, entry, al, r0, src in rows:
+        ins = INSNS[r0]
+        idx = {a: i for i, (a, n, x) in enumerate(ins)}
+        i, j = idx[t], idx[src]
+        body = [x for _, _, x in ins[i:j]]
+        tail = body[-6:]
+        calls = any(x.startswith(('jsr', 'bsr')) for x in body)
+        creg = re.search(r'(%d\d)', ins[j][2]).group(1)
+        # preheader: back to a branch, call or label
+        pre, k = [], i - 1
+        while k >= 0 and len(pre) < 12:
+            x = ins[k][2]
+            if re.match(r'(b[a-z]{2}[sw]? |bra|db|jsr|bsr|rts|jmp)', x):
+                break
+            pre.insert(0, x)
+            k -= 1
+        # index in memory or in a register
+        if any(re.match(r'addqw #1,%(fp|a\d)@\(-\d+\)$', x) for x in tail):
+            where['memory'] += 1
+        steps = [x for x in tail if _STEP.match(x)]
+        if steps:
+            where['register'] += 1
+            ireg = _STEP.match(steps[-1]).group(2)
+            cdef = [n for n, x in enumerate(pre) if x.endswith(',' + creg)
+                    and re.match(r'(moveq|movew) #', x)]
+            idef = [n for n, x in enumerate(pre)
+                    if re.search(r'(,|clrw )' + re.escape(ireg) + '$', x)]
+            if cdef and idef:
+                order['count first' if cdef[-1] < idef[-1] else 'index first'] += 1
+            used = [x for x in body if re.search(r'\(-?[0-9a-fx]*,' + re.escape(ireg) + r':[wl]\)', x)]
+            copies = [x.split(',')[1] for x in body
+                      if re.match(r'movew ' + re.escape(ireg) + r',%d\d$', x)]
+            scaled = any(re.match(r'(addw (%d\d),\2|ls[lr][wl] #\d,(%d\d)|mul[us]w #\d+,(%d\d))$', y)
+                         and y.split(',')[-1] in copies for y in body)
+            ptr = any(re.match(r'(addql #\d,%a\d|lea %a(\d)@\(\d+\),%a\2)$', y)
+                      for y in body[-5:])
+            use[('direct ' if used else '') + ('scaled ' if scaled else '')
+                + ('pointer' if ptr else '')] += 1
+            if used:
+                for x in used:
+                    use['  direct op ' + x.split()[0]] += 1
+        # run-time guard `subq.w #1,T; bmi' just before the preheader
+        g = k
+        if g >= 1 and ins[g][2].startswith('bmi') and ins[g - 1][2].startswith('subqw #1,%d'):
+            tgt = int(re.search(r'0x([0-9a-f]+)', ins[g][2]).group(1), 16)
+            if src < tgt <= src + 8:
+                T = ins[g - 1][2].split(',')[1]
+                moved = any(x == 'movew %s,%s' % (T, creg) for x in pre)
+                kind = 'in place' if T == creg else 'copied' if moved else 'other'
+                guard['%s, %s' % (kind, 'calls' if calls else 'no calls')] += 1
+                if verbose:
+                    print('guard %06X %s %s' % (t, kind, 'calls' if calls else ''))
+    print('dbf loops:', len(rows))
+    print('index:', dict(where))
+    print('preheader (constant count, register index):', dict(order))
+    print('index use:')
+    for k, v in sorted(use.items()):
+        print('  %4d %r' % (v, k))
+    print('subq.w #1; bmi guards:')
+    for k, v in sorted(guard.items()):
+        print('  %4d %s' % (v, k))
 
 
 def summary(m, sites, fillers, routines):
@@ -354,6 +511,10 @@ def main(argv):
                     '0x%X %s' % (r0, names[r0]) for r0 in open_[:6])
                     + (', ... (%d)' % len(open_) if len(open_) > 6 else ''))
         return rc
+    elif argv[0] == 'heads':
+        heads(m, sites, routines)
+    elif argv[0] == 'fors':
+        fors(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'ends':
         # last word of each code segment that ends after an rts, with the
         # classes of the segment's routines (as in `routines')

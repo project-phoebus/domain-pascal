@@ -3,7 +3,7 @@
 //! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE]
 //!            [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...]
-//!            [--a5-absolute=ROUTINE,...]
+//!            [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]...
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -26,6 +26,13 @@
 //! routines (`internal` ones too) load it.  `--a5-absolute=R,...`: these
 //! exported routines do not load it and address the data with `lea
 //! <area>.l,An`.  Names are matched case-insensitively.
+//!
+//! `--module-routine=R=0xADDR` (with `--fragment-origin`; repeatable): R,
+//! declared `extern` in the fragment, is a routine of the same module
+//! outside the fragment, at image address ADDR.  The original compiled
+//! the whole module and reached it with `bsr` (codegen-patterns 1.6:
+//! DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w DISK_$UNASSIGN`); the fragment does
+//! too, sized from ADDR (`dpc_m68k::emit::Options::module_routines`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,7 +46,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE] \
                      [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...] \
-                     [--a5-absolute=ROUTINE,...] \
+                     [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]... \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
@@ -65,6 +72,7 @@ struct Args {
     fragment_ends_module: bool,
     loop_align: LoopAlign,
     data_base: DataBaseOptions,
+    module_routines: Vec<(String, u32)>,
 }
 
 /// The routine names of `--a5-always=` / `--a5-absolute=`: a comma list
@@ -98,6 +106,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut always_from = None;
     let mut always = None;
     let mut absolute = None;
+    let mut module_routines: Vec<(String, u32)> = Vec::new();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -155,6 +164,22 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 absolute = Some(routine_list("--a5-absolute", &s["--a5-absolute=".len()..])?);
             }
+            s if s.starts_with("--module-routine=") => {
+                let v = &s["--module-routine=".len()..];
+                let bad = || format!("--module-routine: want ROUTINE=0xADDR, got `{v}`");
+                let (name, a) = v.split_once('=').ok_or_else(bad)?;
+                let a = parse_number(a).ok_or_else(bad)?;
+                if name.is_empty() || a % 2 != 0 {
+                    return Err(bad());
+                }
+                if module_routines
+                    .iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case(name))
+                {
+                    return Err(format!("--module-routine: `{name}` given more than once"));
+                }
+                module_routines.push((name.to_string(), a));
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -173,6 +198,9 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     if fragment_ends_module && fragment_origin.is_none() {
         return Err("--fragment-ends-module needs --fragment-origin".into());
     }
+    if !module_routines.is_empty() && fragment_origin.is_none() {
+        return Err("--module-routine needs --fragment-origin".into());
+    }
     Ok(Args {
         include_dirs,
         output,
@@ -186,6 +214,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             always: always.unwrap_or_default(),
             absolute: absolute.unwrap_or_default(),
         },
+        module_routines,
     })
 }
 
@@ -230,6 +259,7 @@ fn compile(
         fragment_origin: args.fragment_origin,
         fragment_ends_module: args.fragment_ends_module,
         loop_align: args.loop_align.clone(),
+        module_routines: args.module_routines.clone(),
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -344,6 +374,38 @@ mod tests {
                 absolute: vec!["AUDIT_$SUSPEND".into()],
             }
         );
+        let a = args(&[
+            "--fragment-origin",
+            "0xE6BE1C",
+            "--module-routine=DISK_$UNASSIGN=0xE6BDA8",
+            "--module-routine=X=16",
+            "m.pas",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.module_routines,
+            vec![("DISK_$UNASSIGN".into(), 0xE6BDA8), ("X".into(), 16)]
+        );
+        for bad in [
+            &["--module-routine=X=0x10", "m.pas"][..],
+            &["--fragment-origin", "16", "--module-routine=X", "m.pas"],
+            &["--fragment-origin", "16", "--module-routine==0x10", "m.pas"],
+            &[
+                "--fragment-origin",
+                "16",
+                "--module-routine=X=0x11",
+                "m.pas",
+            ],
+            &[
+                "--fragment-origin",
+                "16",
+                "--module-routine=X=16",
+                "--module-routine=x=18",
+                "m.pas",
+            ],
+        ] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
         assert_eq!(
             args(&["--parse-only", "m.pas"]).unwrap().stop,
             Stop::AfterParse

@@ -387,6 +387,31 @@ class ConformTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn('given more than once', out)
 
+    # -- routines of the module outside the unit (codegen-patterns 7.4) ----
+    def test_module_routine_args(self):
+        r = conform.unit_routines(['DISK_$UNASSIGN_ALL'], self.map)
+        self.assertEqual(conform.module_routine_args([], r, self.map), [])
+        self.assertEqual(
+            conform.module_routine_args(['module-routines=DISK_$UNASSIGN'], r, self.map),
+            ['--module-routine=DISK_$UNASSIGN=0xE6BDA8'])
+        for bad, why in ((['module-routines='], 'needs a routine name list'),
+                         (['module-routines=NO_SUCH'], 'not in the map'),
+                         (['module-routines=PROC1_$TST_LOCK'], 'not in the module'),
+                         (['module-routines=DISK_$UNASSIGN_ALL'], 'part of the unit'),
+                         (['module-routines=DISK_$UNASSIGN'] * 2, 'more than once')):
+            with self.assertRaisesRegex(conform.SetupError, why):
+                conform.module_routine_args(bad, r, self.map)
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_forwards_module_routines(self):
+        unit = 'tests/conformance/disk_unassign_all.pas  DISK_$UNASSIGN_ALL'
+        rc, out = self.manifest('mr_on.txt', unit + '  module-routines=DISK_$UNASSIGN')
+        self.assertEqual(rc, 0, out)
+        # without it the call is a `jsr' (6 bytes, not 4)
+        rc, out = self.manifest('mr_off.txt', unit)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('bytes differ first at 0xE6BE34', out)
+
 
 class A5ArgsTest(unittest.TestCase):
     def test_tokens(self):

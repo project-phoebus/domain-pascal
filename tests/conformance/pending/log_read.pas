@@ -1,6 +1,9 @@
 { PENDING: not in manifest.txt.  dpc cannot compile the worker yet; the
-  first diagnostic is the `&' of its third statement.  What is missing
-  is listed in docs/codegen-patterns.md section 12.3 (bead
+  first diagnostic is the type transfer `univ_ptr(integer32(...) +
+  offset)'; past it, the `for' loop's (an index of an array of words:
+  the stepped pointers of codegen-patterns 7.4 are not implemented; then
+  its run-time count without a call in the body).  What is missing is
+  listed in docs/codegen-patterns.md section 12.3 (bead
   domain-pascal-g5q.4).  When it compiles, move it to
   tests/conformance/log_read.pas and add to the manifest
 

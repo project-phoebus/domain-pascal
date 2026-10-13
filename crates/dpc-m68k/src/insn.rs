@@ -433,6 +433,11 @@ pub enum Insn {
         imm: i64,
         dst: Ea,
     },
+    /// `cmpa.w #0,%an`: a pointer held in an address register against
+    /// `nil` (the 68010 has no `tst An`; codegen-patterns 7.1, 13: 151
+    /// sites, `b6fc 0000` at 0xE38EC0 for A3; 0xE3CCE4 `b2fc 0000` for A1,
+    /// a `while p <> nil` test).
+    CmpaZero(u8),
     /// `cmp.<size> src,%dn`.
     Cmp {
         size: Size,
@@ -639,6 +644,7 @@ impl fmt::Display for Insn {
             Insn::Cmpi { size, imm, dst } => {
                 write!(f, "cmpi.{size}\t#{},{dst}", num(*imm))
             }
+            Insn::CmpaZero(a) => write!(f, "cmpa.w\t#0,{}", Reg::A(*a)),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
             Insn::Alu { op, size, src, dst } => {
                 write!(f, "{}.{size}\t{src},{}", op.name(), Reg::D(*dst))
@@ -742,6 +748,7 @@ impl Insn {
             }
             Insn::Tst { size, dst } => 2 + dst.ext_len(*size),
             Insn::Cmpi { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
+            Insn::CmpaZero(_) => 4,
             Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
             Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::Unary { size, dst, .. } => 2 + dst.ext_len(*size),

@@ -19,8 +19,8 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
-    Function, Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp,
-    ValueParam, Width,
+    ForLoop, Function, Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
+    UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -478,6 +478,19 @@ fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             }
             cond_calls(until, out);
         }
+        StmtKind::While { cond, body } => {
+            cond_calls(cond, out);
+            for st in body {
+                stmt_calls(st, out);
+            }
+        }
+        StmtKind::For(l) => {
+            e(&l.from, out);
+            e(&l.to, out);
+            for st in &l.body {
+                stmt_calls(st, out);
+            }
+        }
         StmtKind::Case {
             selector,
             arms,
@@ -493,7 +506,11 @@ fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             }
         }
         StmtKind::Discard(x) => e(x, out),
-        StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
+        StmtKind::Return
+        | StmtKind::Disable
+        | StmtKind::Enable
+        | StmtKind::Exit
+        | StmtKind::Next => {}
     }
 }
 
@@ -568,6 +585,14 @@ fn stmt_uses_static(s: &Stmt) -> bool {
         StmtKind::Repeat { body, until } => {
             body.iter().any(stmt_uses_static) || cond_uses_static(until)
         }
+        StmtKind::While { cond, body } => {
+            cond_uses_static(cond) || body.iter().any(stmt_uses_static)
+        }
+        StmtKind::For(l) => {
+            expr_uses_static(&l.from)
+                || expr_uses_static(&l.to)
+                || l.body.iter().any(stmt_uses_static)
+        }
         StmtKind::Case {
             selector,
             arms,
@@ -581,7 +606,11 @@ fn stmt_uses_static(s: &Stmt) -> bool {
                     .any(stmt_uses_static)
         }
         StmtKind::Discard(e) => expr_uses_static(e),
-        StmtKind::Return | StmtKind::Disable | StmtKind::Enable => false,
+        StmtKind::Return
+        | StmtKind::Disable
+        | StmtKind::Enable
+        | StmtKind::Exit
+        | StmtKind::Next => false,
     }
 }
 
@@ -709,6 +738,7 @@ fn lower_body(
     let block = r.body.as_ref().expect("routine with a body");
     let cx = Cx { p, id, r, result };
     let out = cx.seq(&block.stmts, true)?;
+    check_for_indices(&out)?;
     if r.result.is_some() {
         let assigned = out.iter().any(|s| matches!(s.kind, StmtKind::SetResult(_)));
         if !assigned {
@@ -719,6 +749,199 @@ fn lower_body(
         }
     }
     Ok(out)
+}
+
+/// The index variables of the [`StmtKind::For`] loops of `body` are read
+/// only inside loops over them, whole, and never assigned or addressed
+/// there (ref p. 4-89: "You may not assign a value to index_variable
+/// within the body of the for loop").  The selector keeps an index in a
+/// register for its loop only (codegen-patterns 7.4); reading it after
+/// the loop (legal after `exit`, ref p. 4-90; MST_$ALLOC_ASID 0xE42D7C
+/// pushes D2 after leaving its loop) is not supported yet.
+fn check_for_indices(body: &[Stmt]) -> Res<()> {
+    struct Check {
+        /// Every `for` index of the body.
+        all: Vec<ValueParam>,
+        /// The indices of the loops being walked.
+        active: Vec<i32>,
+        span: Span,
+    }
+    impl Check {
+        fn hit(&self, o: i32, size: u32) -> bool {
+            self.all
+                .iter()
+                .any(|l| o < l.offset + 2 && l.offset < o + size as i32)
+        }
+        fn bad(&self) -> Diagnostic {
+            unsupported(
+                self.span,
+                "the index variable of a `for` loop read outside the loop, assigned or \
+                 addressed (it is kept in a register for the loop only, codegen-patterns 7.4) \
+                 is",
+            )
+        }
+        fn addr(&self, a: &Addr, size: u32) -> Res<()> {
+            match a {
+                Addr::Frame(o) if self.hit(*o, size) => Err(self.bad()),
+                Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => Ok(()),
+                // The whole object is reached through the base.
+                Addr::Indirect { base, .. } => self.expr(base),
+                Addr::Index { base, index, .. } => {
+                    self.addr(base, 1)?;
+                    self.expr(index)
+                }
+            }
+        }
+        fn expr(&self, e: &Expr) -> Res<()> {
+            match e {
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ty,
+                } if self.active.contains(o) && ty.width == Width::Word => Ok(()),
+                Expr::Load { addr, ty } => self.addr(addr, ty.bytes()),
+                Expr::AddrOf(a) => self.addr(a, 1),
+                Expr::Const { .. } => Ok(()),
+                Expr::SetMember { elem, set, .. } => {
+                    self.expr(elem)?;
+                    self.expr(set)
+                }
+                Expr::Binary { lhs, rhs, .. } => {
+                    self.expr(lhs)?;
+                    self.expr(rhs)
+                }
+                Expr::Unary { operand: x, .. }
+                | Expr::Convert { value: x, .. }
+                | Expr::SetSr(x) => self.expr(x),
+                Expr::Call { call, .. } => self.call(call),
+                Expr::Test(c) => self.cond(c),
+            }
+        }
+        fn call(&self, c: &Call) -> Res<()> {
+            for a in &c.args {
+                match a {
+                    Arg::Value { value, .. } => self.expr(value)?,
+                    Arg::Address { addr, .. } => self.addr(addr, 1)?,
+                }
+            }
+            Ok(())
+        }
+        fn cond(&self, c: &Cond) -> Res<()> {
+            match c {
+                Cond::Compare { lhs, rhs, .. } => {
+                    self.expr(lhs)?;
+                    self.expr(rhs)
+                }
+                Cond::Test(e) => self.expr(e),
+                Cond::Not(x) => self.cond(x),
+                Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                    self.cond(a)?;
+                    self.cond(b)
+                }
+            }
+        }
+        fn stmts(&mut self, body: &[Stmt]) -> Res<()> {
+            for st in body {
+                self.span = st.span;
+                match &st.kind {
+                    StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e)?,
+                    StmtKind::Store { addr, value } => {
+                        self.addr(addr, value.ty().bytes())?;
+                        self.expr(value)?;
+                    }
+                    StmtKind::Copy { dst, src, bytes } => {
+                        self.addr(dst, *bytes)?;
+                        self.addr(src, *bytes)?;
+                    }
+                    StmtKind::Call(c) => self.call(c)?,
+                    StmtKind::Fill { start, value, .. } => {
+                        self.addr(start, 1)?;
+                        self.expr(value)?;
+                    }
+                    StmtKind::If { cond, then_, else_ } => {
+                        self.cond(cond)?;
+                        self.stmts(then_)?;
+                        self.stmts(else_)?;
+                    }
+                    StmtKind::Repeat { body, until } => {
+                        self.stmts(body)?;
+                        self.cond(until)?;
+                    }
+                    StmtKind::While { cond, body } => {
+                        self.cond(cond)?;
+                        self.stmts(body)?;
+                    }
+                    StmtKind::For(l) => {
+                        self.expr(&l.from)?;
+                        self.expr(&l.to)?;
+                        if self.active.contains(&l.index.offset) {
+                            // A loop over the index of an enclosing loop
+                            // assigns it.
+                            return Err(self.bad());
+                        }
+                        self.active.push(l.index.offset);
+                        self.stmts(&l.body)?;
+                        self.active.pop();
+                    }
+                    StmtKind::Case {
+                        selector,
+                        arms,
+                        otherwise,
+                    } => {
+                        self.expr(selector)?;
+                        for a in arms {
+                            self.stmts(&a.body)?;
+                        }
+                        if let Some(o) = otherwise {
+                            self.stmts(o)?;
+                        }
+                    }
+                    StmtKind::Return
+                    | StmtKind::Disable
+                    | StmtKind::Enable
+                    | StmtKind::Exit
+                    | StmtKind::Next => {}
+                }
+            }
+            Ok(())
+        }
+    }
+    fn collect(body: &[Stmt], out: &mut Vec<ValueParam>) {
+        for st in body {
+            match &st.kind {
+                StmtKind::For(l) => {
+                    out.push(l.index);
+                    collect(&l.body, out);
+                }
+                StmtKind::If { then_, else_, .. } => {
+                    collect(then_, out);
+                    collect(else_, out);
+                }
+                StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => collect(body, out),
+                StmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    for a in arms {
+                        collect(&a.body, out);
+                    }
+                    if let Some(o) = otherwise {
+                        collect(o, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut all = Vec::new();
+    collect(body, &mut all);
+    if all.is_empty() {
+        return Ok(());
+    }
+    Check {
+        all,
+        active: Vec::new(),
+        span: body[0].span,
+    }
+    .stmts(body)
 }
 
 /// What statement lowering needs to know about the routine.
@@ -779,7 +1002,7 @@ impl Cx<'_> {
                     dir,
                     to,
                     body,
-                } => out.push(fill(p, s, var, from, *dir, to, body)?),
+                } => out.push(self.for_loop(s, var, from, *dir, to, body)?),
                 SStmtKind::If {
                     cond,
                     then_branch,
@@ -821,19 +1044,32 @@ impl Cx<'_> {
                     arms,
                     otherwise,
                 } => out.push(self.case(s, expr, arms, otherwise.as_deref())?),
-                // codegen-patterns 7: a `while` loop is compiled with its
-                // test at the bottom, entered by a `bra` to the test
-                // (0xE01A8E..0xE01A98; 213 such loops in compiled code).
-                // Whether the head after that `bra` gets the 0x2048
-                // filler is not settled: in aligning routines 3 such heads
-                // have it, 2 are 4-aligned and 3 are at 2 mod 4.
-                SStmtKind::While { .. } => {
-                    return Err(unsupported(
-                        s.span,
-                        "a `while` loop (head alignment after the entry `bra` not settled, \
-                         codegen-patterns 7) is",
-                    ))
+                // codegen-patterns 7.4: test at the bottom, entered by a
+                // `bra` to the test.
+                SStmtKind::While { cond, body } => {
+                    let body = self.seq(std::slice::from_ref(body), false)?;
+                    if body.is_empty() {
+                        // No such loop has been looked for in the image.
+                        return Err(unsupported(s.span, "a `while` loop with an empty body is"));
+                    }
+                    out.push(Stmt {
+                        kind: StmtKind::While {
+                            cond: cond_of(p, cond)?,
+                            body,
+                        },
+                        span: s.span,
+                    });
                 }
+                // Ref pp. 4-77, 4-123; `dpc-sema` rejects them outside a
+                // loop.
+                SStmtKind::Exit => out.push(Stmt {
+                    kind: StmtKind::Exit,
+                    span: s.span,
+                }),
+                SStmtKind::Next => out.push(Stmt {
+                    kind: StmtKind::Next,
+                    span: s.span,
+                }),
                 // Appendix E, pp. E-3, E-4.
                 SStmtKind::Builtin {
                     builtin: b @ (Builtin::Disable | Builtin::Enable),
@@ -854,6 +1090,107 @@ impl Cx<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// A `for` statement (ref "For", pp. 4-88..4-90): the
+    /// [`StmtKind::Fill`] shape when it is one (`fill`), else a
+    /// [`StmtKind::For`].
+    ///
+    /// The index variable must be a word-sized local of this routine,
+    /// other than the function result variable: the selector keeps it in
+    /// a register for the loop and never stores it (codegen-patterns 7.4:
+    /// 307 of 320 `dbf` loops with an index step it in a register; the
+    /// other 13, `addq.w #1,(d,A6)` or through a static link, are not
+    /// reproduced).  Ref p. 4-89 lets the index be declared in another
+    /// scope; such loops (0xE721F8, through the parent's frame) are not
+    /// supported yet.  Whether the index is read outside its loops, or
+    /// assigned or addressed inside them, is checked over the whole body
+    /// afterwards ([`check_for_indices`]).
+    fn for_loop(
+        &self,
+        s: &SStmt,
+        var: &SExpr,
+        from: &SExpr,
+        dir: ForDir,
+        to: &SExpr,
+        body: &SStmt,
+    ) -> Res<Stmt> {
+        let p = self.p;
+        if let Some(st) = fill(p, s, var, from, dir, to, body)? {
+            return Ok(st);
+        }
+        let ExprKind::Var {
+            var: index,
+            uplevel: 0,
+        } = var.kind
+        else {
+            return Err(unsupported(
+                var.span,
+                "a `for` index variable that is not a local of the routine (ref p. 4-89) is",
+            ));
+        };
+        let result = self.r.result.as_ref().and_then(|res| res.var);
+        let offset =
+            match p.var(index).storage {
+                Storage::Frame { offset }
+                    if self.r.frame_vars.contains(&index) && Some(index) != result =>
+                {
+                    offset
+                }
+                _ => return Err(unsupported(
+                    var.span,
+                    "a `for` index variable that is not a local of the routine (ref p. 4-89) is",
+                )),
+            };
+        let vty = p.var(index).ty;
+        if p.types.size(vty) != 2 {
+            // `dbf` counts a word; byte and longword indices are not
+            // catalogued.
+            return Err(unsupported(
+                var.span,
+                "a `for` index variable that is not a word (integer16 or a subrange stored \
+                 in a word) is",
+            ));
+        }
+        let ty = Scalar {
+            width: Width::Word,
+            sign: sign_of(&p.types, vty),
+        };
+        let bound = |e: &SExpr| -> Res<Expr> {
+            match &e.value {
+                Some(c) => const_of(c, ty, e.span),
+                // The bound is converted to the index's type as in an
+                // assignment (`store`).
+                None => {
+                    let v = value_of(p, e)?;
+                    if v.ty().width == Width::Word {
+                        Ok(v)
+                    } else if v.ty().bytes() < 2 && p.types.is_integer(e.ty) {
+                        Ok(convert(v, ty))
+                    } else {
+                        narrow(&v, ty).ok_or_else(|| {
+                            unsupported(e.span, "a `for` bound of another width than the index is")
+                        })
+                    }
+                }
+            }
+        };
+        let from = bound(from)?;
+        let to = bound(to)?;
+        let body = self.seq(std::slice::from_ref(body), false)?;
+        if body.is_empty() {
+            return Err(unsupported(s.span, "a `for` loop with an empty body is"));
+        }
+        Ok(Stmt {
+            kind: StmtKind::For(ForLoop {
+                index: ValueParam { offset, ty },
+                from,
+                to,
+                down: dir == ForDir::Downto,
+                body,
+            }),
+            span: s.span,
+        })
     }
 
     /// `discard(x)` ("Discard", p. 4-62): "explicitly throws away the
@@ -1986,9 +2323,8 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
 /// kept at all.  The Pascal source of 0xE00EB0 is not known; this
 /// reading of it is ours (codegen-patterns 7, `for` loops).
 ///
-/// Everything else about `for` (other bodies, `downto`, bounds known only
-/// at run time: `subq.w #1; bmi` 0xE177DC; an index used in the body) is
-/// not supported yet.
+/// `None` when the loop is not of this shape (it is then a
+/// [`StmtKind::For`], `Cx::for_loop`).
 fn fill(
     p: &Program,
     s: &SStmt,
@@ -1997,35 +2333,29 @@ fn fill(
     dir: ForDir,
     to: &SExpr,
     body: &SStmt,
-) -> Res<Stmt> {
-    let shape = || {
-        unsupported(
-            s.span,
-            "a `for` loop other than `for i := c1 to c2 do a[i] := c` (codegen-patterns 7) is",
-        )
-    };
+) -> Res<Option<Stmt>> {
     let ExprKind::Var {
         var: index,
         uplevel: 0,
     } = var.kind
     else {
-        return Err(shape());
+        return Ok(None);
     };
     if !matches!(p.var(index).storage, Storage::Frame { .. }) || dir != ForDir::To {
-        return Err(shape());
+        return Ok(None);
     }
     let (Some(lo), Some(hi)) = (
         from.value.as_ref().and_then(ConstValue::ordinal),
         to.value.as_ref().and_then(ConstValue::ordinal),
     ) else {
-        return Err(shape());
+        return Ok(None);
     };
     let body = match &body.kind {
         SStmtKind::Compound(b) if b.stmts.len() == 1 => &b.stmts[0],
         _ => body,
     };
     let SStmtKind::Assign { target, value } = &body.kind else {
-        return Err(shape());
+        return Ok(None);
     };
     let ExprKind::Index {
         base,
@@ -2034,18 +2364,18 @@ fn fill(
         elem_size,
     } = &target.kind
     else {
-        return Err(shape());
+        return Ok(None);
     };
     let is_index = |e: &SExpr| matches!(e.kind, ExprKind::Var { var, .. } if var == index);
     if !is_index(ix) || mentions_var(base, index) {
-        return Err(shape());
+        return Ok(None);
     }
     let Some(c) = &value.value else {
-        return Err(shape());
+        return Ok(None);
     };
     let ty = scalar_of(p, target)?;
     if ty.bytes() != *elem_size {
-        return Err(shape());
+        return Ok(None);
     }
     if hi < lo {
         // The body never runs; what the original emitted is not known.
@@ -2057,14 +2387,14 @@ fn fill(
         .ok_or_else(|| unsupported(s.span, "a `for` loop of more than 65536 iterations is"))?;
     let first = i32::try_from((lo - array_lo) * *elem_size as i64)
         .map_err(|_| unsupported(s.span, "an array offset beyond 32 bits is"))?;
-    Ok(Stmt {
+    Ok(Some(Stmt {
         kind: StmtKind::Fill {
             start: addr_of(p, base)?.offset_by(first),
             count,
             value: const_of(c, ty, value.span)?,
         },
         span: s.span,
-    })
+    }))
 }
 
 /// Whether `e` reads variable `v` anywhere.

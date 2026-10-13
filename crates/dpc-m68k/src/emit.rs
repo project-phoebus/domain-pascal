@@ -82,6 +82,16 @@ pub struct Options {
     pub fragment_ends_module: bool,
     /// Which routines align their loop heads.
     pub loop_align: LoopAlign,
+    /// With `fragment_origin`: routines of the same module that lie
+    /// outside the fragment, by symbol and image address (`dpc
+    /// --module-routine`).  The original compiled whole modules and
+    /// called such a routine with `bsr` (codegen-patterns 1.6:
+    /// DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w` to DISK_$UNASSIGN 0xE6BDA8,
+    /// the routine before it); the fragment declares it `extern`, and its
+    /// `jsr` becomes a `bsr` sized from the address, as for a routine of
+    /// the fragment.  The reference resolves to the map name when the
+    /// fragment is linked.
+    pub module_routines: Vec<(String, u32)>,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -138,6 +148,16 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
     }
     let aligns = aligning(module, &sections, &opts.loop_align).map_err(|d| vec![d])?;
+    if let Some((name, _)) = opts.module_routines.iter().find(|(n, _)| {
+        module
+            .functions
+            .iter()
+            .any(|f| f.symbol.eq_ignore_ascii_case(n))
+    }) {
+        return Err(vec![Diagnostic::error_nopos(format!(
+            "--module-routine: `{name}` has its body in this unit"
+        ))]);
+    }
     if let Some(origin) = opts.fragment_origin {
         // Where a second code section of a fragment would start in its
         // module is not known, so its alignment could not be placed.
@@ -176,6 +196,22 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             last_aligns = al;
             match isel::select(f) {
                 Ok(mut i) => {
+                    for insn in i.iter_mut() {
+                        if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {
+                            // The IR's symbol (upper-cased), not the
+                            // option's spelling.
+                            if opts
+                                .module_routines
+                                .iter()
+                                .any(|(n, _)| n.eq_ignore_ascii_case(sym))
+                            {
+                                *insn = Insn::Bsr {
+                                    target: sym.clone(),
+                                    short: true,
+                                };
+                            }
+                        }
+                    }
                     // Every `Align4` the selector emits is a loop head's
                     // (fill loops, block-copy loops, `repeat` heads); a
                     // routine that does not align has none (codegen-
@@ -195,8 +231,18 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
         // Branch sizes need every routine of the section laid out.
         let base = opts.fragment_origin.map_or(0, |o| o % 4);
+        // The outside routines in the layout's coordinates (the section
+        // starts at `origin & !3`).
+        let outside: Vec<(String, i64)> = opts
+            .module_routines
+            .iter()
+            .map(|(n, a)| {
+                let o = opts.fragment_origin.unwrap_or(0) & !3;
+                (n.clone(), *a as i64 - o as i64)
+            })
+            .collect();
         if !failed {
-            if let Err(d) = size_branches(&mut routines, base) {
+            if let Err(d) = size_branches(&mut routines, base, &outside) {
                 errors.push(d);
             }
         }
@@ -257,6 +303,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
 fn size_branches(
     routines: &mut [(&dpc_ir::Function, Vec<Insn>)],
     base: u32,
+    outside: &[(String, i64)],
 ) -> Result<(), Diagnostic> {
     use std::collections::HashMap;
     enum Target {
@@ -294,7 +341,14 @@ fn size_branches(
         for (ri, ii, pos, target, short) in sites {
             let t = match &target {
                 Target::Routine(sym) => match at.get(sym) {
-                    Some(&t) => t,
+                    Some(&t) => t as i64,
+                    None if outside.iter().any(|(n, _)| n.eq_ignore_ascii_case(sym)) => {
+                        outside
+                            .iter()
+                            .find(|(n, _)| n.eq_ignore_ascii_case(sym))
+                            .unwrap()
+                            .1
+                    }
                     None => {
                         return Err(Diagnostic::error(
                             routines[ri].0.span,
@@ -304,9 +358,10 @@ fn size_branches(
                 },
                 Target::Label(l) => *labels
                     .get(&(ri, *l))
-                    .expect("a branch to a label of its own routine"),
+                    .expect("a branch to a label of its own routine")
+                    as i64,
             };
-            let disp = t as i64 - (pos as i64 + 2);
+            let disp = t - (pos as i64 + 2);
             if short && !((-128..=127).contains(&disp) && disp != 0) {
                 match &mut routines[ri].1[ii] {
                     Insn::Bsr { short, .. } | Insn::Branch { short, .. } => *short = false,
@@ -710,6 +765,7 @@ mod tests {
             fragment_origin: Some(0x1000),
             fragment_ends_module: true,
             loop_align: LoopAlign::OffFrom("P_$C".into()),
+            ..Default::default()
         };
         let s = emit(&m, "m.pas", &tail).unwrap();
         assert!(routine_text(&s, "P_$B").contains("0x2048"), "{s}");
@@ -818,5 +874,51 @@ mod tests {
         // A target not in the section.
         let e = emit(&m(vec![caller("B", 0, Some("Z"))]), "m.pas", &opts).unwrap_err();
         assert!(e[0].message.contains("not in this code section"), "{e:?}");
+    }
+
+    /// `--module-routine`: a call of a routine of the module outside the
+    /// fragment is a `bsr`, sized from its address (DISK_$UNASSIGN_ALL
+    /// 0xE6BE34 `bsr.w` back 0x8E bytes to DISK_$UNASSIGN 0xE6BDA8).
+    #[test]
+    fn calls_of_module_routines_outside_a_fragment() {
+        use dpc_ir::{Call, Callee, Stmt, StmtKind};
+        let mut f = one_routine(".text", "P");
+        let call = Stmt {
+            kind: StmtKind::Call(Call {
+                callee: Callee::External("Q".into()),
+                args: Vec::new(),
+                pad: 0,
+            }),
+            span: f.span,
+        };
+        f.body = vec![call.clone(), call];
+        let m = Module {
+            name: "M".into(),
+            functions: vec![f],
+            ..Default::default()
+        };
+        let frag = |at: u32| Options {
+            fragment_origin: Some(0x1000),
+            module_routines: vec![("Q".into(), at)],
+            ..Default::default()
+        };
+        // P: link at 0x1000, the calls at 0x1004 and 0x1006 (short).
+        let s = emit(&m, "m.pas", &frag(0x1080)).unwrap();
+        assert!(s.contains("\tbsr.s\tQ\n\tbsr.s\tQ\n"), "{s}");
+        // 0x1100 is out of `.s` reach from 0x1004.
+        let s = emit(&m, "m.pas", &frag(0x1100)).unwrap();
+        assert!(s.contains("\tbsr.w\tQ\n\tbsr.w\tQ\n"), "{s}");
+        // The option's spelling does not matter: the symbol is the IR's.
+        let mut lower = frag(0x1080);
+        lower.module_routines[0].0 = "q".into();
+        let s = emit(&m, "m.pas", &lower).unwrap();
+        assert!(s.contains("\tbsr.s\tQ\n\tbsr.s\tQ\n"), "{s}");
+        // without the option: `jsr`
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        assert!(s.contains("\tjsr\t(Q).l\n"), "{s}");
+        let mut opts = frag(0x1100);
+        opts.module_routines[0].0 = "p".into();
+        let e = emit(&m, "m.pas", &opts).unwrap_err();
+        assert!(e[0].message.contains("has its body in this unit"), "{e:?}");
     }
 }

@@ -306,6 +306,20 @@ pub enum StmtKind {
     /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body runs
     /// at least once, and again while `until` is false.
     Repeat { body: Vec<Stmt>, until: Cond },
+    /// `while cond do body` (ref "While", p. 4-208): the body runs while
+    /// `cond` is true, tested before each iteration.  `body` is never
+    /// empty.
+    While { cond: Cond, body: Vec<Stmt> },
+    /// A `for` loop (ref "For", pp. 4-88..4-90) that is not a
+    /// [`StmtKind::Fill`]; see [`ForLoop`].
+    For(ForLoop),
+    /// `exit` (ref "Exit", p. 4-77): leave the innermost enclosing loop
+    /// (`for`, `while`, `repeat`) for the statement after it.
+    Exit,
+    /// `next` (ref "Next", p. 4-123): skip the rest of the innermost
+    /// enclosing loop's body and go on with its next iteration (the test
+    /// of a `while` or `repeat`, the step of a `for`).
+    Next,
     /// `case selector of ... otherwise ... end` (ref "Case", pp.
     /// 4-36..4-37).  `selector` is a word or a longword (a byte selector
     /// is widened by lowering); every label fits its type and no label
@@ -334,6 +348,31 @@ pub enum StmtKind {
     /// [`Expr::SetSr`] is produced (`lower.rs`); a discarded function call
     /// is a [`StmtKind::Call`].
     Discard(Expr),
+}
+
+/// `for index := from to|downto to do body` (ref "For", pp. 4-88..4-90).
+///
+/// The index variable is a local of the routine (a word in its frame,
+/// [`Self::index`]) that nothing outside the bodies of `for` loops over it
+/// reads, that the body does not assign, and whose address is never taken
+/// (`lower.rs`, `for_loop`): the target may keep it in a register only
+/// (codegen-patterns 7.4: the frame slot stays allocated and is never
+/// written).  The body reads it as `Expr::Load { addr: Addr::Frame(..) }`.
+/// `from` and `to` have the index's type.  Ref p. 4-90: "If you set up a
+/// meaningless relationship between the start_exp and the stop_exp ...
+/// Pascal does not execute the loop even once"; the value of the index
+/// after a loop that ends normally is not defined (warning "Potential
+/// illegal use of FOR index variable", ref p. 9-31).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForLoop {
+    /// The index variable: its frame offset and IR type (a word).
+    pub index: ValueParam,
+    pub from: Expr,
+    pub to: Expr,
+    /// `downto`: the index decreases.
+    pub down: bool,
+    /// Never empty.
+    pub body: Vec<Stmt>,
 }
 
 /// One arm of a [`StmtKind::Case`]: its labels (ordinal values of the

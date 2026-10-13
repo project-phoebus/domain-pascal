@@ -131,6 +131,18 @@ Tests:
 - `frame/empty` - codegen-patterns 2: empty procedures as a bare `rts`,
   with and without parameters (TIME_$Q_INIT 0xE16C5C, MT_$RELEASE
   0xE70A4C), in a unit with data, the module end padded with 0x2048.
+- `loops/while` - codegen-patterns 7.4, 12.5: `while` loops as `bra` to
+  the bottom test, the head aligned like any loop head (MAC_OS_$CLOSE
+  0xE0B4CC), an `and then` test (0xE4A028), a walk pointer held in an
+  address register and tested with `cmpa.w #0,An` (0xE3CCCE), `exit` and
+  `next` as branches past or to the test.
+- `loops/for` - codegen-patterns 7.4: `for` loops with an index the body
+  uses: the `dbf` count, then the index (`clr.w` / `moveq`), the step
+  before `dbf` (`subq.w` for `downto`), a byte array indexed with the
+  index register (0xE1CA70), count and index callee-saved across calls
+  (DISK_$UNASSIGN_ALL 0xE6BE24), a run-time upper bound with its `subq.w
+  #1; bmi` guard and the count copied (DTTY_$WRITE_STRING 0xE1D6AA), a
+  count above 127 as `move.w #n`, `exit` and `next`.
 - `sysprog/interrupts` - codegen-patterns 10, 12.5, 1.1: `disable` /
   `enable` as `ori.w #0x700,SR` / `andi.w #0xF8FF,SR` (TIME_$GET_ADJUST
   0xE16AB0, 0xE16ABA), `set_sr` as `move.w SR,Dn; move.w newsr,SR`

@@ -17,7 +17,11 @@ the rest; `tools/loopalign.py switch SEG' shows where), or one of
 `a5-always-from=NAME', `a5-always=NAME,...', `a5-absolute=NAME,...'
 (.pas units only, each at most once), forwarded as `--a5-...' (which
 routines load the data base A5, codegen-patterns 4; `tools/a5survey.py
-switch SEG' shows a segment's modes).
+switch SEG' shows a segment's modes), or `module-routines=NAME,...' (.pas
+fragments only, at most once): routines of the unit's map module outside
+the unit, which the unit declares `extern' and the original reached with
+`bsr'; each is forwarded as `--module-routine=NAME=0xADDR' with its map
+address (codegen-patterns 1.6, 7.4: DISK_$UNASSIGN_ALL 0xE6BE34).
 
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
@@ -591,6 +595,33 @@ def a5_args(tokens):
     return out
 
 
+MODULE_ROUTINES_TOKEN = 'module-routines='
+
+
+def module_routine_args(tokens, routines, linkmap):
+    """The dpc options for the manifest token `module-routines=NAME,...'
+    (at most once): `--module-routine=NAME=0xADDR' for each map routine,
+    which must lie in the unit's map module and outside the unit."""
+    if len(tokens) > 1:
+        raise SetupError('module-routines= given more than once')
+    out = []
+    for t in tokens:
+        names = t[len(MODULE_ROUTINES_TOKEN):].split(',')
+        if '' in names:
+            raise SetupError('%s: needs a routine name list' % t)
+        seg = linkmap.segment_containing(routines[0].addr)
+        for n in names:
+            sym = linkmap.lookup(n)
+            if sym is None:
+                raise SetupError('%s: routine %s is not in the map' % (t, n))
+            if seg is None or linkmap.segment_containing(sym.addr) is not seg:
+                raise SetupError('%s: %s is not in the module of the unit' % (t, n))
+            if any(r.addr <= sym.addr < r.end for r in routines):
+                raise SetupError('%s: %s is part of the unit' % (t, n))
+            out.append('--module-routine=%s=0x%X' % (sym.name, sym.addr))
+    return out
+
+
 def run_manifest(path, linkmap, dpc):
     """Each non-comment line: FILE SPEC... [--section-addr SEC=0xADDR]...
     [loop-align=on|off | loop-align-off-from=NAME] [a5-...=NAME,...]...
@@ -605,7 +636,7 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect, align, a5 = [], {}, [], []
+        specs, sect, align, a5, mods = [], {}, [], [], []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -615,6 +646,8 @@ def run_manifest(path, linkmap, dpc):
                 align.append(t)
             elif t.startswith(A5_TOKENS):
                 a5.append(t)
+            elif t.startswith(MODULE_ROUTINES_TOKEN):
+                mods.append(t)
             else:
                 specs.append(t)
         try:
@@ -627,9 +660,15 @@ def run_manifest(path, linkmap, dpc):
             if a5opts and not src.endswith('.pas'):
                 raise SetupError('%s: a5 options apply to .pas units only' % toks[0])
             opts += a5opts
+            if mods and not src.endswith('.pas'):
+                raise SetupError('%s: module-routines applies to .pas units only' % toks[0])
             if src.endswith('.pas'):
-                frag = fragment_args(unit_routines(specs, linkmap), linkmap)
-                asm = compile_pas(src, dpc, work, frag + opts)
+                routines = unit_routines(specs, linkmap)
+                frag = fragment_args(routines, linkmap)
+                mopts = module_routine_args(mods, routines, linkmap)
+                if mopts and not frag:
+                    raise SetupError('%s: module-routines applies to fragments only' % toks[0])
+                asm = compile_pas(src, dpc, work, frag + opts + mopts)
             ok = check(asm, specs, linkmap, sect, work=work, name=toks[0])
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
