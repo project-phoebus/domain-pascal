@@ -161,3 +161,4 @@ tests/conformance/ct_release.pas             CT_$RELEASE
 tests/conformance/tape_boot.pas              TAPE_$BOOT
 tests/conformance/ethernet_init.pas          ETHERNET_$INIT
 tests/conformance/pkt_init.pas               PKT_$INIT
+tests/conformance/xpd_inherit_ptrace_options.pas  XPD_$INHERIT_PTRACE_OPTIONS:14

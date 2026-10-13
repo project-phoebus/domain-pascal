@@ -293,6 +293,31 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     take the pre-SR10 branches, and `%IFDEF obj_$coff` is false.  No
     `.ins.pas` of `../source` tests these names.*
 
+22. **3.10.7, Table 3-3, p. 3-36 (PDF p. 91, read in the page image; the
+    OCR scrambles the table), with 3.9.3, p. 3-16.**  Table 3-3, row
+    "Set": "If fewer than 32 elements, then exactly one bit per element;
+    if more then 32 elements, then same size as set.  Bit aligned."
+    3.9.3: "Sets are stored as bit masks, with one bit representing one
+    element of the set. ... The one exception to this is small sets within
+    a packed records.  See Section 3.10.7 for a technique that packs small
+    sets within a packed record."  Unpacked, a set is a bit string indexed
+    by ordinal from 0, and its high bound decides its size (`set of
+    80..170` is 11 words, p. 3-17; codegen-patterns 5).
+    Question: how many bits does a packed record field of `set of lo..hi`
+    with lo > 0 take, and where is element k: `hi - lo + 1` bits (one per
+    element, k at position k - lo), or `hi + 1` bits (ordinals 0..hi, as
+    unpacked)?  Is "fewer than 32 elements" counted the same way, and what
+    does a set of exactly 32 elements take (the table covers "fewer than
+    32" and "more then 32")?  *Current: a set whose base type starts at
+    ordinal 0 takes `hi + 1` bits when that is under 32 (Apollo's
+    `streams.ins.pas` `unused6 : set of 0..21; { nxt field needs word
+    alignment }` needs 22 bits, and `streams.ins.c` declares the same
+    bits as `unused6: 6` plus a `short`), else its unpacked size; exactly
+    32 gives 32 bits either way.  A set whose base type does not start at
+    ordinal 0 is refused (`crates/dpc-sema/src/types.rs`,
+    `packed_field_bits`; test `packed_sets_not_from_zero_are_refused`).
+    No such field has been found in the SR10.2 inserts.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and

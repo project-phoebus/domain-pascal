@@ -17,8 +17,9 @@
 //!
 //! Only the default word-alignment environment is implemented.  Natural
 //! alignment (`%natural_alignment`, `aligned record`, the `natural` /
-//! `aligned(n)` attributes, ref 3.10.6 and 3.15.6) and packed records are
-//! rejected by the checker for now.
+//! `aligned(n)` attributes, ref 3.10.6 and 3.15.6) is rejected by the
+//! checker for now.  Packed records follow ref 3.10.7 (see
+//! [`TypeTable::packed_field_bits`] and [`TypeTable::layout_packed_fields`]).
 
 use std::fmt;
 
@@ -127,21 +128,74 @@ pub struct SigParam {
     pub conv: crate::conv::ParamConv,
 }
 
-/// An unpacked record (ref 3.10).
+/// A record (ref 3.10), unpacked or packed (3.10.7).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordType {
     /// The fixed part, in declaration order.
     pub fields: Vec<Field>,
     pub variant: Option<Box<VariantPart>>,
+    /// `packed record` (ref 3.10.3, 3.10.7): every field has [`Field::bits`].
+    pub packed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub name: String,
     pub ty: TypeId,
-    /// Byte offset from the start of the record.
+    /// Byte offset from the start of the record (of a packed record's
+    /// field: of the byte its first bit is in).
     pub offset: u32,
     pub span: Span,
+    /// The bits a field of a packed record occupies (ref 3.10.7); `None`
+    /// in an unpacked record.
+    pub bits: Option<BitPos>,
+}
+
+/// The bits of a packed record's field (ref 3.10.7, p. 3-35: "Pascal
+/// allocates fields left to right within bytes and then by increasing
+/// byte address"): `width` bits starting at bit `bit` of the record,
+/// counted from the most significant bit of its first byte.  So bit `b`
+/// is bit `7 - b % 8` (0 = least significant) of byte `b / 8`: the record
+/// is a big-endian bit string (Figure 3-17, p. 3-37, checked in the PDF;
+/// image: `status_$t.fail`, bit 0, is `bset #7` on the record's first
+/// byte at PROC2_$RESUME 0xE41444).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BitPos {
+    pub bit: u32,
+    pub width: u32,
+}
+
+impl BitPos {
+    /// The field fills whole bytes from a byte boundary: `Some(bytes)`.
+    pub fn whole_bytes(self) -> Option<u32> {
+        (self.bit % 8 == 0 && self.width % 8 == 0).then_some(self.width / 8)
+    }
+
+    /// The field is a whole object of `size` bytes at an address an
+    /// object of that size can be accessed at: a byte anywhere, anything
+    /// longer at an even address (MC68000/68010: word and longword
+    /// accesses need an even address).  A packed record is word aligned
+    /// (ref 3.10.7: "always starts the first field of a packed record on a
+    /// word boundary"), so the parity of the field's byte offset is that
+    /// of its address.  Such a field is accessed like an unpacked one; any
+    /// other is a bit field.
+    pub fn is_whole_object(self, size: u32) -> bool {
+        self.whole_bytes() == Some(size) && (size == 1 || (self.bit / 8) % 2 == 0)
+    }
+}
+
+/// How a packed record's field is aligned (ref 3.10.7 Table 3-3,
+/// p. 3-36).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackAlign {
+    /// "bit aligned": at the next free bit, unless the field would cross
+    /// two or more 16-bit boundaries (p. 3-35).
+    Bit,
+    /// "byte aligned" (char, subrange of char).
+    Byte,
+    /// "word aligned" (integer, integer32, reals, pointers, structured
+    /// types other than sets).
+    Word,
 }
 
 /// `case [tag:] type of ...` (ref 3.10.2).  Every arm starts at the offset
@@ -474,6 +528,9 @@ impl TypeTable {
     /// Size and alignments of a record whose field offsets are already
     /// set (see [`TypeTable::layout_fields`]).
     fn record_layout(&self, r: &RecordType) -> (u32, u32, u32, u32) {
+        if r.packed {
+            return self.packed_record_layout(r);
+        }
         let mut end = 0u32;
         // ref 3.10.5.6 p. 3-27: "Domain Pascal always allocates a record on
         // at least a word boundary.  It allocates a record on a larger
@@ -495,6 +552,173 @@ impl TypeTable {
         // A record field is word aligned: "The default alignment of the
         // beginning of a record is at least word aligned" (p. 3-26).
         (size, alloc, 2, alloc)
+    }
+
+    /// Size and alignments of a packed record whose fields' bits are set
+    /// ([`TypeTable::layout_packed_fields`]).
+    ///
+    /// - Size: the bits used, rounded up to whole 16-bit words; "The
+    ///   minimum size of a packed record is 16 bits" (ref 3.10.7, p.
+    ///   3-35).  Figure 3-17 (p. 3-37): 56 bits used, "The whole record
+    ///   takes up only eight bytes".
+    /// - Alignment: the allocation algorithm of ref 3.10.5.6 (p. 3-27)
+    ///   applied to the fields that are whole objects of their type at a
+    ///   byte offset (a field narrower than its type cannot be naturally
+    ///   aligned).  The reference states the algorithm for records in
+    ///   general and gives no other for packed ones: Uncertain.  For
+    ///   `status_$t` (its `all`, an integer32 at 0) and `uid_$t` it gives
+    ///   longword alignment, the alignment of the unpacked records
+    ///   `../source` declared them as before (codegen-patterns 5).  As a
+    ///   field of an unpacked record a packed record is word aligned like
+    ///   any record (ref 3.10.5.5 p. 3-26).
+    fn packed_record_layout(&self, r: &RecordType) -> (u32, u32, u32, u32) {
+        let mut end = 0u32;
+        let mut alloc = 2u32;
+        for f in r.all_fields() {
+            let Some(b) = f.bits else { continue };
+            end = end.max(b.bit.saturating_add(b.width));
+            let fi = self.get(f.ty);
+            if b.whole_bytes() == Some(fi.size)
+                && fi.natural_align > 0
+                && (b.bit / 8) % fi.natural_align == 0
+            {
+                alloc = alloc.max(fi.natural_align);
+            }
+        }
+        let size = (round_up(end, 16) / 8).max(2);
+        (size, alloc, 2, alloc)
+    }
+
+    /// The bits a field of type `ty` takes in a packed record and how it
+    /// is aligned, ref 3.10.7 Table 3-3 (p. 3-36, read in the PDF) and the
+    /// text above it (p. 3-35):
+    ///
+    /// | type | bits | aligned |
+    /// |---|---|---|
+    /// | integer, integer16 | 16 | word |
+    /// | integer32, real, single | 32 | word |
+    /// | double | 64 | word |
+    /// | boolean | 1 | bit |
+    /// | char | 8 | byte |
+    /// | enumerated | "Number of bits required for largest ordinal value" | bit |
+    /// | subrange of char | 8 | byte |
+    /// | other subranges | "the number of bits required for their extreme values" | bit |
+    /// | set | "If fewer than 32 elements, then exactly one bit per element; if more then 32 elements, then same size as set" | bit |
+    /// | array | "the same space as an array outside of a packed record" | word ("Structured types, except for sets, are aligned on word boundaries") |
+    /// | pointer | 32 | word |
+    ///
+    /// - Subranges: a negative low bound needs a sign bit (`-100..40`
+    ///   takes 8 bits, p. 3-37: "seven bits can represent only 128
+    ///   values").  An unsigned subrange that needs 31 bits takes 32 (ref
+    ///   3.4, p. 3-10: "When you have an unsigned subrange that is large
+    ///   enough to require 31 bits, the compiler allocates 32 bits"):
+    ///   Apollo's `linteger = 0..2147483647` is 32 bits in the packed
+    ///   records of the SR10.2 inserts (`fontn_$table_tver1`, whose
+    ///   lintegers sit at the longword offsets 0x28, 0x2C, 0x34, 0x38 that
+    ///   `../source`'s `smd_font_v3_t` asserts; `stream_$IR_rec_t`, whose
+    ///   `unused6 : set of 0..21; { nxt field needs word alignment }` is
+    ///   right only so).  A subrange of boolean takes 1 bit, of an
+    ///   enumeration the bits of its high bound.
+    /// - Sets: "exactly one bit per element" for the ordinals 0..hi (a set
+    ///   is a bit string indexed by ordinal, 3.9.3; `stream_$IR_rec_t`'s
+    ///   `set of 0..21` must be 22 bits).  A set whose base type does not
+    ///   start at ordinal 0 is not handled (how many bits "one bit per
+    ///   element" gives it is not settled).  32 elements: both rules give
+    ///   32 bits.
+    /// - Records (packed or not) and varying strings are structured:
+    ///   their size, word aligned.
+    pub fn packed_field_bits(&self, ty: TypeId) -> Result<(u32, PackAlign), String> {
+        fn bits_for(v: u64) -> u32 {
+            (64 - v.leading_zeros()).max(1)
+        }
+        let info = self.get(ty);
+        Ok(match &info.kind {
+            TypeKind::Error | TypeKind::Forward { .. } => (8 * info.size, PackAlign::Word),
+            TypeKind::Integer16 => (16, PackAlign::Word),
+            TypeKind::Integer32 => (32, PackAlign::Word),
+            TypeKind::Real { size } => (8 * size, PackAlign::Word),
+            TypeKind::Boolean => (1, PackAlign::Bit),
+            TypeKind::Char => (8, PackAlign::Byte),
+            TypeKind::Enum { consts } => (
+                bits_for(consts.len().saturating_sub(1) as u64),
+                PackAlign::Bit,
+            ),
+            TypeKind::Subrange { base, lo, hi } => match self.kind(*base) {
+                TypeKind::Char => (8, PackAlign::Byte),
+                TypeKind::Boolean | TypeKind::Enum { .. } => {
+                    (bits_for((*hi).max(0) as u64), PackAlign::Bit)
+                }
+                _ => {
+                    let n = if *lo >= 0 {
+                        bits_for(*hi as u64)
+                    } else {
+                        1 + bits_for((*hi).max(-*lo - 1).max(0) as u64)
+                    };
+                    let n = if n == 31 && *lo >= 0 { 32 } else { n };
+                    (n.min(32), PackAlign::Bit)
+                }
+            },
+            TypeKind::Set { elem } => {
+                let (lo, hi) = self.ordinal_range(*elem).unwrap_or((0, 0));
+                if lo != 0 {
+                    return Err(
+                        "a set whose base type does not start at ordinal 0 in a packed record \
+                         (ref 3.10.7 Table 3-3: the bits of \"one bit per element\" not settled)"
+                            .into(),
+                    );
+                }
+                let n = (hi + 1) as u32;
+                if n < 32 {
+                    (n, PackAlign::Bit)
+                } else {
+                    (8 * info.size, PackAlign::Bit)
+                }
+            }
+            TypeKind::Array { .. } | TypeKind::Record(_) | TypeKind::Varying { .. } => {
+                (8 * info.size, PackAlign::Word)
+            }
+            TypeKind::Pointer { .. }
+            | TypeKind::UnivPtr
+            | TypeKind::Nil
+            | TypeKind::RoutinePointer(_) => (8 * info.size, PackAlign::Word),
+            TypeKind::StringLit { .. } => {
+                return Err("a string constant type as a packed record field".into())
+            }
+        })
+    }
+
+    /// Give a packed record's fields their bits, from bit `start` (ref
+    /// 3.10.7, p. 3-35): "Domain Pascal always starts the first field of a
+    /// packed record on a word boundary.  After the first field, if the
+    /// exact number of bits required for the next field crosses zero or
+    /// one 16-bit boundary, the field starts in the next free bit.  If the
+    /// field would cross two or more 16-bit boundaries, it starts at the
+    /// next 16-bit boundary."  A boundary is crossed when it lies strictly
+    /// inside the field (Figure 3-17: `Mass`, 32 bits at bit 0, ends on a
+    /// boundary and does not cross it).  Byte- and word-aligned types
+    /// start at the next byte or word.  Returns the end bit, or the index
+    /// of a field whose type cannot be packed and why.
+    pub fn layout_packed_fields(
+        &self,
+        fields: &mut [Field],
+        start: u32,
+    ) -> Result<u32, (usize, String)> {
+        let mut at = start;
+        for (i, f) in fields.iter_mut().enumerate() {
+            let (n, al) = self.packed_field_bits(f.ty).map_err(|e| (i, e))?;
+            let mut pos = match al {
+                PackAlign::Bit => at,
+                PackAlign::Byte => round_up(at, 8),
+                PackAlign::Word => round_up(at, 16),
+            };
+            if n > 0 && (pos + n - 1) / 16 - pos / 16 >= 2 {
+                pos = round_up(pos, 16);
+            }
+            f.offset = pos / 8;
+            f.bits = Some(BitPos { bit: pos, width: n });
+            at = pos.saturating_add(n);
+        }
+        Ok(at)
     }
 
     /// Assign offsets to a list of fields starting at `start`, in the

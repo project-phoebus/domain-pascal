@@ -303,7 +303,13 @@ pub fn access(insn: &Insn) -> Access {
             a.src(src);
             a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
         }
-        Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } => a.dst_rmw(dst),
+        Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BitImm { dst, .. } => {
+            a.dst_rmw(dst)
+        }
+        Insn::AluToMem { src, dst, .. } => {
+            a.use_(Reg::D(*src));
+            a.dst_rmw(dst);
+        }
         Insn::Ext { dst, .. } | Insn::Swap(dst) => a.dst_rmw(&Ea::Reg(Reg::D(*dst))),
         Insn::Shift { count, dst, .. } => {
             if let crate::insn::ShiftCount::Reg(r) = count {
@@ -392,7 +398,14 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fe(src);
             fd(dst);
         }
-        Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BtstImm { dst, .. } => fe(dst),
+        Insn::AluImm { dst, .. }
+        | Insn::Unary { dst, .. }
+        | Insn::BtstImm { dst, .. }
+        | Insn::BitImm { dst, .. } => fe(dst),
+        Insn::AluToMem { src, dst, .. } => {
+            fd(src);
+            fe(dst);
+        }
         Insn::Ext { dst, .. } | Insn::Swap(dst) => fd(dst),
         Insn::Shift { count, dst, .. } => {
             if let crate::insn::ShiftCount::Reg(r) = count {

@@ -138,6 +138,12 @@ domain-pascal-g5q.8): every unit is compiled with the scheduler on (`dpc
 (XPD_$RESET_PTRACE_OPTS 0xE5B156: five stores through A0 in the image's
 field order, which the scheduler does not change).
 
+Packed records (codegen-patterns 5.3; bead domain-pascal-xlm):
+`xpd_inherit_ptrace_options.pas` (XPD_$INHERIT_PTRACE_OPTIONS 0xE5B174:
+a boolean field of a packed record as the function result, `btst
+#3,(13,A0); sne D0`).  The map gives the routine up to 0xE5B1EE (a
+module-local routine follows), so the manifest gives its length, `:14`.
+
 ## Routines outside the unit
 
 A unit is usually part of a module, and its routines may call a routine

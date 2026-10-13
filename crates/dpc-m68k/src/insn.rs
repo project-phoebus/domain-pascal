@@ -508,6 +508,23 @@ pub enum Insn {
         bit: u8,
         dst: Ea,
     },
+    /// `bset #bit,<dst>` / `bclr #bit,<dst>` (on memory a byte, bit
+    /// 0..7): a boolean field of a packed record set or cleared
+    /// (codegen-patterns 5.3: PROC2_$RESUME 0xE41444 `bset #7,(-0x4,A6)`).
+    BitImm {
+        op: BitOp,
+        bit: u8,
+        dst: Ea,
+    },
+    /// `<op>.<size> Dn,<dst>`, an operation into memory: a bit field
+    /// merged into its unit (codegen-patterns 5.3: 0xE008A4 `or.b
+    /// D0,(39,A2)`).
+    AluToMem {
+        op: AluOp,
+        size: Size,
+        src: u8,
+        dst: Ea,
+    },
     /// `move.w (T,%pc,%dn.w),%dn`: load the word of `case` jump table
     /// `T` (a numbered local label placed right after the
     /// [`Insn::TableJump`] that follows) at the doubled index in Dn.
@@ -603,6 +620,12 @@ impl AluOp {
 }
 
 /// `neg` / `not`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOp {
+    Set,
+    Clr,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     Neg,
@@ -745,6 +768,16 @@ impl fmt::Display for Insn {
             Insn::MoveFromSr { dst } => write!(f, "move.w\t%sr,{}", Reg::D(*dst)),
             Insn::MoveToSr { src } => write!(f, "move.w\t{src},%sr"),
             Insn::BtstImm { bit, dst } => write!(f, "btst\t#{bit},{dst}"),
+            Insn::BitImm { op, bit, dst } => {
+                let mn = match op {
+                    BitOp::Set => "bset",
+                    BitOp::Clr => "bclr",
+                };
+                write!(f, "{mn}\t#{bit},{dst}")
+            }
+            Insn::AluToMem { op, size, src, dst } => {
+                write!(f, "{}.{size}\t{},{dst}", op.name(), Reg::D(*src))
+            }
             Insn::TableIndex { reg, table } => {
                 write!(f, "move.w\t({table}f,%pc,{r}.w),{r}", r = Reg::D(*reg))
             }
@@ -808,7 +841,8 @@ impl Insn {
             Insn::SrImm { .. } => 4,
             Insn::MoveToSr { src } => 2 + src.ext_len(Size::W),
             Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
-            Insn::BtstImm { dst, .. } => 4 + dst.ext_len(Size::B),
+            Insn::BtstImm { dst, .. } | Insn::BitImm { dst, .. } => 4 + dst.ext_len(Size::B),
+            Insn::AluToMem { size, dst, .. } => 2 + dst.ext_len(*size),
             // One opcode word and the brief extension word.
             Insn::TableIndex { .. } | Insn::TableJump { .. } => 4,
             Insn::TableEntry { .. } => 2,

@@ -369,10 +369,6 @@ fn route_port_stats_matches_source_static_asserts() {
 #[test]
 fn unsupported_layouts_are_diagnosed() {
     assert_err(
-        "module m; type r = packed record a: boolean end;",
-        "packed record",
-    );
-    assert_err(
         "module m; type r = aligned record a: integer end;",
         "aligned record",
     );

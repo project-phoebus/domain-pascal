@@ -270,3 +270,12 @@ Tests:
   an assignment to a value parameter stored to the copy (`addq.w
   #1,(-2,A6)`), never through the caller's address; `addr` of it and
   passing it to a `var` parameter name the copy (0xE4D55E `pea (-8,A6)`).
+- `packed/fields` - codegen-patterns 5.3, 9 (bead domain-pascal-xlm):
+  fields of packed records (ref 3.10.7): `status_$t` as Apollo's
+  base.ins.pas declares it, `bset #7` for `fail` after `tst.w (2,A0)` of
+  `code` (PROC2_$FORK 0xE72CC2), a computed boolean merged into bit 7
+  (OS_$GET_EC 0xE6D6DE), a boolean field as a result with `btst; sne`
+  (XPD_$INHERIT_PTRACE_OPTIONS 0xE5B17C), an enumeration field read with
+  the mask, `and.b`, `lsr.w` and set with `andi`/`ori` (RIP 0xE158B6),
+  a word variable's low byte merged into a longword unit (APP_$RECEIVE
+  0xE00864).

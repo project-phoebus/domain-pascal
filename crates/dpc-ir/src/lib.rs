@@ -275,6 +275,23 @@ pub enum ResultClass {
 }
 
 /// Width of a scalar value or memory access.
+/// Where a bit field lies in the unit that holds it (ref 3.10.7;
+/// `lower.rs`, `bit_field`): `width` bits whose least significant is bit
+/// `shift` (0 = least significant) of the byte, word or longword `unit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BitField {
+    pub unit: Width,
+    pub shift: u32,
+    pub width: u32,
+}
+
+impl BitField {
+    /// The field's bits within the unit.
+    pub fn mask(self) -> i64 {
+        ((1i64 << self.width) - 1) << self.shift
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Width {
     /// 1 byte.
@@ -374,6 +391,18 @@ pub enum StmtKind {
     /// designator `d` other than a function result.  `value` has the
     /// object's width (a constant is given the object's type).
     Store { addr: Addr, value: Expr },
+    /// Store `value` into a bit field of a packed record (ref 3.10.7):
+    /// the bits `field` names of the byte, word or longword at `addr`;
+    /// the other bits of that unit are kept.  `value` has the field's
+    /// type (a constant is given it).  `mask`: the value's type admits
+    /// values outside the field's, so the value is masked to the field's
+    /// bits before it is merged (codegen-patterns 5.3).
+    StoreBits {
+        addr: Addr,
+        field: BitField,
+        value: Expr,
+        mask: bool,
+    },
     /// Copy `bytes` bytes from the object at `src` to the object at `dst`:
     /// `d := s` for a record or array that is not scalar-sized (ref
     /// "Assignment", p. 4-25).  The objects do not overlap partially (two
@@ -700,6 +729,15 @@ pub enum Expr {
     Const { value: i64, ty: Scalar },
     /// The scalar object at `addr`, read as `ty`.
     Load { addr: Addr, ty: Scalar },
+    /// A bit field of a packed record (ref 3.10.7): the bits `field`
+    /// names of the byte, word or longword at `addr`, as a value of type
+    /// `ty` (zero-extended; a boolean field of one bit is read as a
+    /// boolean, 0xFF or 0).
+    Bits {
+        addr: Addr,
+        field: BitField,
+        ty: Scalar,
+    },
     /// Membership of element `elem` in the set value `set` (ref "In",
     /// p. 4-102; layout ref 3.9.3): true when bit `elem` of `set`, read as
     /// one big-endian integer, is 1.  `set` is a register-sized set value
@@ -800,6 +838,7 @@ impl Expr {
         match self {
             Expr::Const { ty, .. }
             | Expr::Load { ty, .. }
+            | Expr::Bits { ty, .. }
             | Expr::Binary { ty, .. }
             | Expr::Unary { ty, .. }
             | Expr::Convert { ty, .. }

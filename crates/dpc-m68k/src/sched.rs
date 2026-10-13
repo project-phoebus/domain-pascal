@@ -341,6 +341,17 @@ fn fx(insn: &Insn) -> Fx {
             f.rmw(dst, *size);
             f.cc_set = true;
         }
+        // `bset`/`bclr` set Z only, like `btst`.
+        Insn::BitImm { dst, .. } => {
+            f.rmw(dst, Size::B);
+            f.cc_set = true;
+            f.cc_use = true;
+        }
+        Insn::AluToMem { size, src, dst, .. } => {
+            f.use_(Reg::D(*src));
+            f.rmw(dst, *size);
+            f.cc_set = true;
+        }
         Insn::Ext { dst, .. } | Insn::Swap(dst) => {
             f.rmw(&Ea::Reg(Reg::D(*dst)), Size::L);
             f.cc_set = true;

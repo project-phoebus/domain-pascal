@@ -627,9 +627,11 @@ impl<'t> Checker<'t> {
                 variant,
             } => {
                 match form {
+                    // ref 3.10.7: the packing rules do not depend on the
+                    // alignment environment (Table 3-3 states no other).
                     ast::RecordForm::Packed => {
-                        self.unsupported(t.span, "a packed record (ref 3.10.7)");
-                        return err;
+                        let r = self.record(fields, variant.as_deref(), true);
+                        return self.check_size(r, t.span);
                     }
                     ast::RecordForm::Aligned => {
                         self.unsupported(
@@ -646,7 +648,7 @@ impl<'t> Checker<'t> {
                     self.unsupported(t.span, "a record under %natural_alignment (ref 3.15.6)");
                     return err;
                 }
-                let r = self.record(fields, variant.as_deref());
+                let r = self.record(fields, variant.as_deref(), false);
                 self.check_size(r, t.span)
             }
             T::Set { elem, .. } => {
@@ -823,16 +825,42 @@ impl<'t> Checker<'t> {
     }
 
     /// Lay out a record in the default word-alignment environment (ref
-    /// 3.10.5.5 p. 3-26).
-    fn record(&mut self, fields: &[ast::FieldDecl], variant: Option<&ast::VariantPart>) -> TypeId {
+    /// 3.10.5.5 p. 3-26), or a packed record (ref 3.10.7; offsets in bits,
+    /// see [`TypeTable::layout_packed_fields`]).
+    fn record(
+        &mut self,
+        fields: &[ast::FieldDecl],
+        variant: Option<&ast::VariantPart>,
+        packed: bool,
+    ) -> TypeId {
         let mut seen = HashSet::new();
         let mut fixed = self.field_list(fields, &mut seen);
-        let end = self.types.layout_fields(&mut fixed, 0);
-        let variant = variant.map(|v| Box::new(self.variant_part(v, end, &mut seen)));
+        let end = self.lay_out(&mut fixed, 0, packed);
+        let variant = variant.map(|v| Box::new(self.variant_part(v, end, &mut seen, packed)));
         self.new_type(TypeKind::Record(RecordType {
             fields: fixed,
             variant,
+            packed,
         }))
+    }
+
+    /// Lay out `fields` from `start`: a byte offset, or for a packed
+    /// record a bit offset.  Returns the end in the same unit.
+    fn lay_out(&mut self, fields: &mut [Field], start: u32, packed: bool) -> u32 {
+        if !packed {
+            return self.types.layout_fields(fields, start);
+        }
+        match self.types.layout_packed_fields(fields, start) {
+            Ok(end) => end,
+            Err((i, what)) => {
+                let span = fields[i].span;
+                self.unsupported(span, &what);
+                for f in fields.iter_mut() {
+                    f.ty = self.types.builtins.error;
+                }
+                start
+            }
+        }
     }
 
     fn field_list(&mut self, fields: &[ast::FieldDecl], seen: &mut HashSet<String>) -> Vec<Field> {
@@ -848,6 +876,7 @@ impl<'t> Checker<'t> {
                     ty,
                     offset: 0,
                     span: n.span,
+                    bits: None,
                 });
             }
         }
@@ -861,6 +890,7 @@ impl<'t> Checker<'t> {
         v: &ast::VariantPart,
         start: u32,
         seen: &mut HashSet<String>,
+        packed: bool,
     ) -> VariantPart {
         let tag_type = self.named_type(&v.tag_type);
         if !self.types.is_ordinal(tag_type) && !self.types.is_error(tag_type) {
@@ -879,8 +909,9 @@ impl<'t> Checker<'t> {
                 ty: tag_type,
                 offset: 0,
                 span: t.span,
+                bits: None,
             }];
-            arm_start = self.types.layout_fields(&mut f, start);
+            arm_start = self.lay_out(&mut f, start, packed);
             f.pop().unwrap()
         });
         let mut arms = Vec::new();
@@ -903,11 +934,11 @@ impl<'t> Checker<'t> {
                 }
             }
             let mut fields = self.field_list(&arm.fields, seen);
-            let end = self.types.layout_fields(&mut fields, arm_start);
+            let end = self.lay_out(&mut fields, arm_start, packed);
             let variant = arm
                 .variant
                 .as_deref()
-                .map(|sub| Box::new(self.variant_part(sub, end, seen)));
+                .map(|sub| Box::new(self.variant_part(sub, end, seen, packed)));
             arms.push(VariantArm {
                 labels,
                 fields,
@@ -2384,6 +2415,19 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// A field of a packed record that is not a whole object of its type
+    /// at an address the type can be accessed at (ref 3.10.7): its bits
+    /// are part of a byte, word or longword and it has no address of its
+    /// own.  See [`crate::types::BitPos::is_whole_object`].
+    pub(crate) fn is_bit_field(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Field { bits: Some(b), .. } => {
+                !self.types.is_error(e.ty) && !b.is_whole_object(self.types.size(e.ty))
+            }
+            _ => false,
+        }
+    }
+
     fn field(&mut self, base: Expr, field: &ast::Ident, span: Span) -> Expr {
         let rec = match self.types.kind(base.ty) {
             TypeKind::Record(r) => r,
@@ -2395,12 +2439,13 @@ impl<'t> Checker<'t> {
         };
         match rec.field(&field.name) {
             Some(f) => {
-                let (ty, offset) = (f.ty, f.offset);
+                let (ty, offset, bits) = (f.ty, f.offset, f.bits);
                 Expr {
                     kind: ExprKind::Field {
                         base: Box::new(base),
                         name: field.name.clone(),
                         offset,
+                        bits,
                     },
                     ty,
                     value: None,
@@ -2950,6 +2995,27 @@ impl<'t> Checker<'t> {
                      parameter",
                 );
             }
+            if self.is_bit_field(&x) {
+                // ref 3.10.3 p. 3-21: "you cannot pass a field from a packed
+                // record as an argument to a procedure (including
+                // predeclared procedures like read)".  A field that is a
+                // whole object at a byte (or, longer, word) address has an
+                // address and is passed as usual: the reference itself
+                // passes `err_stat.all` of the packed status_$t (9.1.1).
+                if matches!(mode, ParamMode::Var | ParamMode::Out | ParamMode::InOut) {
+                    self.error(
+                        a.span,
+                        "a field of a packed record that is not a whole byte, word or longword \
+                         cannot be passed to a `var`, `out` or `in out` parameter (ref 3.10.3)",
+                    );
+                } else {
+                    self.unsupported(
+                        a.span,
+                        "passing a field of a packed record that is not a whole byte, word or \
+                         longword (ref 3.10.3)",
+                    );
+                }
+            }
             if !univ {
                 match mode {
                     // ref 5.3.1 p. 5-6: "You must pass a variable as an
@@ -3147,6 +3213,14 @@ impl<'t> Checker<'t> {
                 if self.in_param_part(&xs[0]) {
                     // ref 5.3.2 p. 5-7; see [`Checker::in_param_part`].
                     self.unsupported(span, "`addr` of an `in` parameter (or a part of one)");
+                    return self.error_expr(span);
+                }
+                if self.is_bit_field(&xs[0]) {
+                    self.error(
+                        span,
+                        "a field of a packed record that is not a whole byte, word or longword \
+                         has no address (ref 3.10.3, 3.10.7)",
+                    );
                     return self.error_expr(span);
                 }
                 bi.univ_ptr

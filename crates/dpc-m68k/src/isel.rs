@@ -22,14 +22,14 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function, LinkArg, Rel,
-    ResultClass, ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp, Width,
+    Addr, Arg, BinOp, BitField, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function,
+    LinkArg, Rel, ResultClass, ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
-use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
+use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate_apart, RegClass, VRegs, DATA_BASE};
 use crate::sched::Schedule;
 
@@ -853,7 +853,10 @@ fn register_locals(f: &Function) -> Vec<i32> {
                     }
                     None => self.other(&Addr::Frame(*o)),
                 },
-                Expr::Load { addr, .. } | Expr::AddrOf(addr) => self.other(addr),
+                // A bit field is read in memory, never in a register.
+                Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
+                    self.other(addr)
+                }
                 Expr::Const { .. } => {}
                 Expr::SetMember { elem, set, .. } => {
                     self.expr(elem);
@@ -914,7 +917,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
                         let konst = matches!(value, Expr::Const { .. });
                         self.refs[k].stores.push((self.top, nested, konst));
                     }
-                    StmtKind::Store { addr, value } => {
+                    StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
                         self.other(addr);
                         self.expr(value);
                     }
@@ -1003,7 +1006,9 @@ fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
     v(Node::Expr(e));
     match e {
         Expr::Const { .. } => {}
-        Expr::Load { addr, .. } | Expr::AddrOf(addr) => walk_addr(addr, v),
+        Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
+            walk_addr(addr, v)
+        }
         Expr::SetMember { elem, set, .. } => {
             walk_expr(elem, v);
             walk_expr(set, v);
@@ -1070,7 +1075,7 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     for st in body {
         match &st.kind {
             StmtKind::SetResult(e) | StmtKind::Discard(e) => walk_expr(e, v),
-            StmtKind::Store { addr, value } => {
+            StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
                 walk_addr(addr, v);
                 walk_expr(value, v);
             }
@@ -1145,7 +1150,9 @@ fn mem_dst(i: &Insn) -> Option<&Ea> {
         | Insn::Unary { dst, .. }
         | Insn::Addq { dst, .. }
         | Insn::Subq { dst, .. }
-        | Insn::AluImm { dst, .. } => dst,
+        | Insn::AluImm { dst, .. }
+        | Insn::BitImm { dst, .. }
+        | Insn::AluToMem { dst, .. } => dst,
         // `Alu` writes a register; `Tst`, `Cmpi`, `Btst`, `BtstImm` read.
         _ => return None,
     };
@@ -1269,14 +1276,18 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
 /// Whether `e` reads the frame object at `off` as a value.
 fn expr_reads_frame(e: &Expr, off: i32) -> bool {
     let mut hit = false;
-    walk_expr(e, &mut |n| {
-        if let Node::Expr(Expr::Load {
+    walk_expr(e, &mut |n| match n {
+        Node::Expr(Expr::Load {
             addr: Addr::Frame(o),
             ..
-        }) = n
-        {
-            hit |= *o == off;
-        }
+        }) => hit |= *o == off,
+        // A bit field's unit may start inside the object at `off`.
+        Node::Expr(Expr::Bits {
+            addr: Addr::Frame(o),
+            field,
+            ..
+        }) => hit |= off < *o + field.unit.bytes() as i32 && *o < off + 4,
+        _ => {}
     });
     hit
 }
@@ -1509,6 +1520,9 @@ fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bo
     });
     dpc_ir::visit_stmts(body, &mut |st| match &st.kind {
         StmtKind::Store { addr: a, value } => ok &= !hits(a, Some(value.ty().bytes() as i32)),
+        StmtKind::StoreBits { addr: a, field, .. } => {
+            ok &= !hits(a, Some(field.unit.bytes() as i32))
+        }
         StmtKind::Copy { dst: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Fill {
             start: a,
@@ -1630,7 +1644,7 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     }
                     st.loop_store |= in_loop;
                 }
-                StmtKind::Store { addr: a, value } => {
+                StmtKind::Store { addr: a, value } | StmtKind::StoreBits { addr: a, value, .. } => {
                     addr(a, off, st);
                     exprs(value, off, st);
                 }
@@ -1920,10 +1934,14 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
         match &st.kind {
             StmtKind::Return => return true,
             // A function call inside the value pushes and calls.
-            StmtKind::SetResult(e) | StmtKind::Store { value: e, .. } if expr_has_call(e) => {
+            StmtKind::SetResult(e)
+            | StmtKind::Store { value: e, .. }
+            | StmtKind::StoreBits { value: e, .. }
+                if expr_has_call(e) =>
+            {
                 return false
             }
-            StmtKind::SetResult(_) | StmtKind::Store { .. } => {}
+            StmtKind::SetResult(_) | StmtKind::Store { .. } | StmtKind::StoreBits { .. } => {}
             StmtKind::Discard(e) if expr_has_call(e) => return false,
             StmtKind::Discard(_) | StmtKind::Disable | StmtKind::Enable => {}
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
@@ -1952,7 +1970,7 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
 fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Const { .. } | Expr::AddrOf(_) => false,
-        Expr::Load { addr, .. } => addr_has_call(addr),
+        Expr::Load { addr, .. } | Expr::Bits { addr, .. } => addr_has_call(addr),
         Expr::SetMember { elem, set, .. } => expr_has_call(elem) || expr_has_call(set),
         Expr::Binary { op, lhs, rhs, ty } => {
             arith_calls(*op, lhs, rhs, *ty, false) || expr_has_call(lhs) || expr_has_call(rhs)
@@ -2180,7 +2198,10 @@ impl Uses<'_> {
                 addr: Addr::Frame(o),
                 ..
             } if self.is_param(*o) => self.out.push((*o, ParamUse::Data)),
-            Expr::Load { addr, .. } | Expr::AddrOf(addr) => self.address(addr),
+            // A bit field is read in memory (a parameter's in its slot).
+            Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
+                self.address(addr)
+            }
             Expr::SetMember { elem, set, .. } => {
                 self.expr(elem);
                 self.expr(set);
@@ -2346,6 +2367,12 @@ impl Uses<'_> {
                 StmtKind::Store { addr, value } => {
                     self.address(addr);
                     self.expr(value);
+                }
+                // The value is evaluated before the destination's address
+                // when it is not a plain load ([`Selector::store_bits`]).
+                StmtKind::StoreBits { addr, value, .. } => {
+                    self.expr(value);
+                    self.address(addr);
                 }
                 StmtKind::Copy { dst, src, .. } => {
                     self.address(src);
@@ -2768,6 +2795,15 @@ impl Selector {
                 StmtKind::Store { addr, value } => {
                     self.store(addr, value)?;
                     self.wrote(addr, value.ty().bytes());
+                }
+                StmtKind::StoreBits {
+                    addr,
+                    field,
+                    value,
+                    mask,
+                } => {
+                    self.store_bits(addr, *field, value, *mask)?;
+                    self.wrote(addr, field.unit.bytes());
                 }
                 StmtKind::Copy { dst, src, bytes } => {
                     self.copy(dst, src, *bytes)?;
@@ -3730,6 +3766,24 @@ impl Selector {
                         self.set_bit_test(elem, set, *set_width, false)?;
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
+                    }
+                    // A boolean field of a packed record (codegen-patterns
+                    // 5.3): `btst #k` and the branch on Z (0xE0088A `btst
+                    // #1,(-47,A6); beq.s`); the field in bit 7 is the sign
+                    // of its byte, tested like a whole boolean
+                    // (`tst.b`/`bpl`, below; no `btst #7` on memory exists
+                    // in compiled code).
+                    Expr::Bits { addr, field, ty } if *ty == Scalar::BOOLEAN => {
+                        let ea = self.ea_of(addr)?;
+                        if field.shift != 7 {
+                            self.out.push(Insn::BtstImm {
+                                bit: field.shift as u8,
+                                dst: ea,
+                            });
+                            self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                            return Ok(());
+                        }
+                        ea
                     }
                     _ => {
                         return Err(unsupported(
@@ -5002,6 +5056,7 @@ impl Selector {
             Expr::Const { .. } | Expr::AddrOf(Addr::Symbol { offset: 0, .. }) => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
             Expr::SetMember { .. }
+            | Expr::Bits { .. }
             | Expr::AddrOf(_)
             | Expr::Binary { .. }
             | Expr::Unary { .. }
@@ -5905,6 +5960,7 @@ impl Selector {
                 ..
             } if self.pinned(*o).is_some() => Ok(Val::Reg(self.pinned(*o).unwrap())),
             Expr::Load { addr, .. } => Ok(Val::Mem(self.ea_of(addr)?)),
+            Expr::Bits { addr, field, ty } => Ok(Val::Tmp(self.bits_value(addr, *field, *ty)?)),
             Expr::Binary {
                 op: BinOp::Mul,
                 lhs,
@@ -7490,6 +7546,17 @@ impl Selector {
             ));
         }
         if matches!(rhs, Expr::Const { value: 0, .. }) {
+            if let (Expr::Bits { ty, .. }, Rel::Eq | Rel::Ne) = (lhs, op) {
+                if *ty != Scalar::BOOLEAN {
+                    // A bit field against 0: the branch reads the flags of
+                    // the `and` or the shift that formed it (0xE1BFFE
+                    // `moveq #7,D1; and.w (8,A2),D1; beq.s`; 0xE5BFBE
+                    // `move.w #480,D1; and.w (16,A0),D1; lsr.w #5,D1;
+                    // beq.s`).
+                    self.eval(lhs)?;
+                    return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+                }
+            }
             return Err(unsupported(
                 self.span,
                 "comparing a computed value with 0 (the flags of the operation or a `tst`) is",
@@ -7517,6 +7584,446 @@ impl Selector {
             _ => return Err(unsupported(self.span, "comparing two computed values is")),
         }
         Ok(rel_cond(op, signed))
+    }
+
+    /// A bit field that fills its unit: an 8-bit field of a word type
+    /// (`0..255`) on a byte boundary.  The general forms would read it with
+    /// `move.w #255,Dn; and.b M,Dn` and clear it with `andi.b #0,M`; the
+    /// image has no `andi #0` on memory at all, and how the original read
+    /// and wrote such a field (`move.b` with a zero-extension?) is not
+    /// catalogued.
+    const FILLS_UNIT: &'static str =
+        "a packed field of 8 bits on a byte boundary whose type is wider than a byte (its \
+         access is not catalogued) is";
+
+    /// The value of a bit field of a packed record in a new data register
+    /// (ref 3.10.7; codegen-patterns 5.3).  `M` is the field's unit
+    /// (`field.unit`, the byte, word or longword that holds it):
+    ///
+    /// - a boolean field (one bit): `btst #k,M; sne Dn` (0xE16F0C `btst
+    ///   #4,(19,A2); sne D0`; 0xE03368); in bit 7 `tst.b M; smi Dn`
+    ///   (0xE066B2 `tst.b (185,A0); smi D0`): no `btst #7` on memory
+    ///   exists in compiled code;
+    /// - a field that fills the top of a unit as wide as its value: the
+    ///   unit, shifted down, the zeros shifted in clearing the rest
+    ///   (0xE08434 `move.l (8,A3),D6; lsr.l #4,D6`; 0xE0A232);
+    /// - any other: the field's mask in the register at the value's width
+    ///   or the unit's, whichever is wider, `and` of the unit, and the
+    ///   shift down (0xE158B6 `move.w #192,D0; and.b (16,A0),D0; lsr.w
+    ///   #6,D0`, a 2-bit enumeration field of a byte; 0xE5BFBE `move.w
+    ///   #480,D1; and.w (16,A0),D1; lsr.w #5,D1`; 0xE15868 `move.l
+    ///   #0xfffff,D2; ... and.l (6,A1),D2`, the low 20 bits of a longword,
+    ///   no shift; 0xE106A0 `move.l #0x7f8000,D0; and.l (-10,A2),D0; lsr.l
+    ///   #8,D0; lsr.l #7,D0`).  A mask of -128..127 is a `moveq`
+    ///   (0xE0E00A `moveq #124,D1; and.b (-1012,A4),D1; lsr.w #2,D1`;
+    ///   0xE4CBD6 `moveq #7,D0; and.b (A0),D0`), the shift split at 8
+    ///   (0xE106A0).
+    ///
+    /// A field narrower than its value's width leaves the rest of the
+    /// register zero: the value is zero-extended (an unsigned field; a
+    /// field of negative values is refused when the IR is built).
+    fn bits_value(&mut self, addr: &Addr, field: BitField, ty: Scalar) -> Res<u8> {
+        let ea = self.ea_of(addr)?;
+        let d = self.alloc_d()?;
+        if ty == Scalar::BOOLEAN && field.width == 1 {
+            if field.shift == 7 {
+                self.out.push(Insn::Tst {
+                    size: Size::B,
+                    dst: ea,
+                });
+                self.out.push(Insn::Scc {
+                    cond: Cond::Mi,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+            } else {
+                self.out.push(Insn::BtstImm {
+                    bit: field.shift as u8,
+                    dst: ea,
+                });
+                self.out.push(Insn::Scc {
+                    cond: Cond::Ne,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+            }
+            return Ok(d);
+        }
+        if ty == Scalar::BOOLEAN {
+            return Err(unsupported(
+                self.span,
+                "a boolean packed field of more than one bit is",
+            ));
+        }
+        let unit = field.unit;
+        if field.width == 8 * unit.bytes() {
+            return Err(unsupported(self.span, Self::FILLS_UNIT));
+        }
+        let top = field.shift + field.width == 8 * unit.bytes();
+        if top && ty.width == unit {
+            self.out.push(Insn::Move {
+                size: size_of(unit),
+                src: ea,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            self.shift_by(ShiftOp::Lsr, d, field.shift, unit);
+            return Ok(d);
+        }
+        let w = if ty.bytes() > unit.bytes() {
+            ty.width
+        } else {
+            unit
+        };
+        self.const_into(field.mask(), w, d);
+        self.out.push(Insn::Alu {
+            op: AluOp::And,
+            size: size_of(unit),
+            src: ea,
+            dst: d,
+        });
+        self.shift_by(ShiftOp::Lsr, d, field.shift, w);
+        Ok(d)
+    }
+
+    /// `d := v` for a bit field `d` of a packed record (ref 3.10.7;
+    /// codegen-patterns 5.3), `M` its unit.  Image forms:
+    ///
+    /// - A boolean constant: `bset #k,M` / `bclr #k,M` (PROC2_$RESUME
+    ///   0xE41444 `bset #7,(-0x4,A6)`; 0xE00E02 `bclr #6,(-128,A2)`).
+    /// - Another constant: the field cleared, `andi #~mask,M`, then its
+    ///   bits set, `ori #c<<k,M` (0xE158CE..0xE158D4 `andi.b #63,(16,A0);
+    ///   ori.b #-128,(16,A0)`); only the `andi` for 0 (0xE1565E `andi.b
+    ///   #63,(16,A2)`), only the `ori` when every bit of the field is set
+    ///   (0xE15656 `ori.b #-64,(16,A2)`).  The `ori` is as wide as the unit
+    ///   (0xE0A1DE `ori.l #16,(8,A0)`, 0xE33E96 `ori.l #1,(-444,A6)`),
+    ///   except that a word's `ori` whose low byte is 0 is an `ori.b` of
+    ///   its high byte (0xE008CE `ori.b #1,(40,A2)` after `andi.w
+    ///   #-0x7f81,(40,A2)`); a longword's with a low byte of 0 is not
+    ///   catalogued.
+    /// - A boolean value in Dn (computed: `s<cc>`, or loaded; a held one
+    ///   copied): for bit 7, `andi.b #0x7f,M; andi.b #0x80,Dn; or.b Dn,M`
+    ///   (0xE00892..0xE008A4 `btst #2,(-47,A6); sne D0; andi.b
+    ///   #127,(39,A2); andi.b #-128,D0; or.b D0,(39,A2)`), a boolean
+    ///   variable loaded after the `andi` (0xE5BFA2 `andi.b #127,(16,A0);
+    ///   move.b (A2),D1; andi.b #-128,D1; or.b D1,(16,A0)`); for bit k <
+    ///   7, made 0 or 1 first, `lsr.b #7,Dn`, then `andi.b #~(1<<k),M`,
+    ///   `lsl.b #k,Dn` (`add.b Dn,Dn` for 1, nothing for 0), `or.b Dn,M`
+    ///   (0xE04D0E `sne D1; lsr.b #7,D1; andi.b #-17,(14,A2); lsl.b
+    ///   #4,D1; or.b D1,(14,A2)`; 0xE1D4B2 `add.b D1,D1`; 0xE04A96 bit 0;
+    ///   a variable 0xE04C5C `move.b (A1),D1; lsr.b #7,D1; ...`).
+    /// - Another value: `andi #~mask,M`, the value shifted up to the field
+    ///   (`lsl` split at 8, `add` for 1), masked when its type admits
+    ///   values outside the field's (`mask`, decided by `lower.rs`), and
+    ///   `or Dn,M`, at the unit's width.  A variable of the unit's width,
+    ///   or a value held in a register, is read after the `andi` (0xE0DFB0
+    ///   `andi.w #-512,(-1014,A4); move.w (14,A3),D0; or.w D0,(-1014,A4)`;
+    ///   0xE0B372 `andi.b #3,(1970,A0); move.b 0xe2060b,D1; lsl.b #2,D1;
+    ///   or.b D1,(1970,A0)`; 0xE04F34 `andi.b #-65,(113,A2); move.b
+    ///   D0,D6; lsl.b #6,D6; or.b D6,(113,A2)`; masked, 0xE38C72 `andi.b
+    ///   #-16,(-9,A6); move.b (-53,A6),D0; andi.b #15,D0; or.b
+    ///   D0,(-9,A6)`); a narrower variable is zero-extended to the unit
+    ///   first (0xE00994 `clr.w D0; move.b (12,A1),D0; andi.w
+    ///   #-0x7f81,(40,A2); lsl.w #7,D0; or.w D0,(40,A2)`; 0xE0086E
+    ///   `move.b (21,A4),D0; andi.l #255,D0; andi.l #-0x7f8001,(38,A2);
+    ///   lsl.l #8,D0; lsl.l #7,D0; or.l D0,(38,A2)`; 0xE0E346 `clr.l D0;
+    ///   move.w (-80,A6),D0; andi.l #-0xffff01,(4,A2); lsl.l #8,D0; or.l
+    ///   D0,(4,A2)`), and so is any computed value, at its own width or
+    ///   wider (0xE106A0..0xE106B6: a longword value merged into a byte,
+    ///   `andi.b #15,(-223,A6); lsl.b #4,D0; or.b D0,(-223,A6)`).
+    fn store_bits(&mut self, addr: &Addr, field: BitField, value: &Expr, mask: bool) -> Res<()> {
+        if matches!(addr, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
+            return Err(unsupported(self.span, "assigning to a parameter is"));
+        }
+        if self.addr_needs_reg(addr) && self.value_needs_reg(value) {
+            return Err(unsupported(
+                self.span,
+                "a store whose destination and value both need a register is",
+            ));
+        }
+        let unit = field.unit;
+        let usize_ = size_of(unit);
+        let m = field.mask();
+        let boolean = value.ty() == Scalar::BOOLEAN;
+        if boolean && field.width != 1 {
+            return Err(unsupported(
+                self.span,
+                "a boolean packed field of more than one bit is",
+            ));
+        }
+        if !boolean && field.width == 8 * unit.bytes() {
+            return Err(unsupported(self.span, Self::FILLS_UNIT));
+        }
+        let and_mem = |s: &mut Self, dst: &Ea, keep: i64| {
+            s.out.push(Insn::AluImm {
+                op: AluOp::And,
+                size: usize_,
+                imm: imm(keep, unit),
+                dst: dst.clone(),
+            });
+        };
+        if let Expr::Const { value: c, .. } = value {
+            let dst = self.ea_of(addr)?;
+            if boolean {
+                self.out.push(Insn::BitImm {
+                    op: if *c != 0 { BitOp::Set } else { BitOp::Clr },
+                    bit: field.shift as u8,
+                    dst,
+                });
+                return Ok(());
+            }
+            if field.width == 1 {
+                // A one-bit field of another type: `bset`/`bclr` or
+                // `andi`/`ori`, not catalogued.
+                return Err(unsupported(
+                    self.span,
+                    "a constant stored into a one-bit packed field that is not a boolean is",
+                ));
+            }
+            let v = (c << field.shift) & m;
+            if v != m {
+                and_mem(self, &dst, !m);
+            }
+            if v != 0 {
+                let (size, imm_v, dst) = match unit {
+                    Width::Byte => (Size::B, imm(v, Width::Byte), dst),
+                    Width::Word if v & 0xff == 0 => (Size::B, v >> 8, dst),
+                    Width::Word => (Size::W, imm(v, Width::Word), dst),
+                    Width::Long if v & 0xff != 0 => (Size::L, imm(v, Width::Long), dst),
+                    // Low byte 0, but bits in both halves: no narrower `ori`
+                    // could set them, and the image has the `ori.l`
+                    // (0xE4A834 `andi.l #255,(50,A0)`, 0xE4A83C `ori.l
+                    // #0x8001e00,(50,A0)`).
+                    Width::Long if v & 0xffff != 0 && v >> 16 != 0 => {
+                        (Size::L, imm(v, Width::Long), dst)
+                    }
+                    Width::Long => {
+                        return Err(unsupported(
+                            self.span,
+                            "a constant stored into a packed field of a longword whose low \
+                             byte it leaves 0 and whose bits lie in one half of it (the width \
+                             of its `ori` is not catalogued) is",
+                        ))
+                    }
+                };
+                self.out.push(Insn::AluImm {
+                    op: AluOp::Or,
+                    size,
+                    imm: imm_v,
+                    dst,
+                });
+            }
+            return Ok(());
+        }
+        // A variable (in memory or held in a register), possibly widened
+        // from an unsigned narrower one: (its address, its width, the
+        // sign of the widening).
+        let var = |e: &Expr| -> Option<(Addr, Width, bool)> {
+            match e {
+                Expr::Load { addr: a, ty } => Some((a.clone(), ty.width, false)),
+                Expr::Convert { value: x, ty } if ty.width.bytes() > x.ty().width.bytes() => {
+                    match &**x {
+                        Expr::Load { addr: a, ty: xt } => {
+                            Some((a.clone(), xt.width, xt.sign == Sign::Signed))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        let src = if boolean { None } else { var(value) };
+        let held = |s: &Self, a: &Addr| matches!(a, Addr::Frame(o) if s.pinned(*o).is_some());
+        let d;
+        let dst;
+        if boolean {
+            if field.shift == 7 {
+                // Masked in place, no shift: the value as it is; a boolean
+                // variable is read after the `andi` (0xE5BFA2), a held one
+                // copied then (0xE1D1EE `andi.b #127,(4,A1); move.b D0,D1`).
+                match value {
+                    Expr::Load { addr: a, .. } => {
+                        dst = self.ea_of(addr)?;
+                        and_mem(self, &dst, 0x7f);
+                        let v = if held(self, a) {
+                            Val::Reg(self.pinned_of(a))
+                        } else {
+                            Val::Mem(self.ea_of(a)?)
+                        };
+                        d = self.in_tmp(v, Width::Byte)?;
+                    }
+                    _ => {
+                        d = self.eval_d(value)?;
+                        dst = self.ea_of(addr)?;
+                        and_mem(self, &dst, 0x7f);
+                    }
+                }
+                self.out.push(Insn::AluImm {
+                    op: AluOp::And,
+                    size: Size::B,
+                    imm: 0x80,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+            } else {
+                d = self.eval_d(value)?;
+                self.out.push(Insn::Shift {
+                    op: ShiftOp::Lsr,
+                    size: Size::B,
+                    count: ShiftCount::Imm(7),
+                    dst: d,
+                });
+                dst = self.ea_of(addr)?;
+                and_mem(self, &dst, !m);
+                self.shift_up(d, field.shift, Width::Byte);
+            }
+        } else {
+            // A variable is read only as wide as the field needs: a byte
+            // for up to 8 bits, a word up to 16, at the variable's low end
+            // (big-endian: its last bytes).  0xE18192 `clr.w D1; move.b
+            // 0xe2060b,D1` reads the low byte of the word 0xE2060A (compared
+            // as a word at 0xE18A0C `cmp.w 0xe2060a,D1`) for a 6-bit field;
+            // the sources of the byte merges above are all at odd
+            // addresses (0xE1D220 `move.b (133,A3),D1`; 0xE38C72 `move.b
+            // (-53,A6),D0`).  Read at the unit's width it is read after
+            // the `andi`; narrower, it is zero-extended to the unit first.
+            let need = match field.width {
+                0..=8 => Width::Byte,
+                9..=16 => Width::Word,
+                _ => Width::Long,
+            };
+            match src {
+                Some((a, w, signed)) if !(signed && w.bytes() < need.bytes()) => {
+                    let k = if w.bytes() < need.bytes() { w } else { need };
+                    let reg = held(self, &a);
+                    let read = |s: &mut Self| -> Res<Ea> {
+                        Ok(if reg {
+                            Ea::Reg(s.pinned_of(&a))
+                        } else {
+                            let a = match &a {
+                                Addr::Const(_) => a.clone(),
+                                _ => a.clone().offset_by((w.bytes() - k.bytes()) as i32),
+                            };
+                            s.ea_of(&a)?
+                        })
+                    };
+                    if k == unit {
+                        dst = self.ea_of(addr)?;
+                        and_mem(self, &dst, !m);
+                        let ea = read(self)?;
+                        d = self.alloc_d()?;
+                        self.out.push(Insn::Move {
+                            size: size_of(k),
+                            src: ea,
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                    } else {
+                        let ea = read(self)?;
+                        d = self.alloc_d()?;
+                        let r = Ea::Reg(Reg::D(d));
+                        match (k, unit) {
+                            // 0xE0086E `move.b (21,A4),D0; andi.l #255,D0`.
+                            (Width::Byte, Width::Long) => {
+                                self.out.push(Insn::Move {
+                                    size: Size::B,
+                                    src: ea,
+                                    dst: r.clone(),
+                                });
+                                self.out.push(Insn::AluImm {
+                                    op: AluOp::And,
+                                    size: Size::L,
+                                    imm: 0xff,
+                                    dst: r,
+                                });
+                            }
+                            // 0xE00994 `clr.w D0; move.b (12,A1),D0`;
+                            // 0xE0F216 `clr.w D4; move.b D3,D4` from a
+                            // register; 0xE0E346 `clr.l D0; move.w
+                            // (-80,A6),D0`.
+                            _ => {
+                                self.out.push(Insn::Clr {
+                                    size: usize_,
+                                    dst: r.clone(),
+                                });
+                                self.out.push(Insn::Move {
+                                    size: size_of(k),
+                                    src: ea,
+                                    dst: r,
+                                });
+                            }
+                        }
+                        dst = self.ea_of(addr)?;
+                        and_mem(self, &dst, !m);
+                    }
+                }
+                Some(_) => {
+                    return Err(unsupported(
+                        self.span,
+                        "storing a signed variable narrower than the field into a packed field \
+                         (its widening is not catalogued) is",
+                    ))
+                }
+                None => {
+                    if matches!(value, Expr::Bits { .. }) {
+                        // The image copies a field into one at the same
+                        // place through the unit, masked in place
+                        // (0xE19DE6 `andi.b #-97,(2,A1); move.b (2,A0),D0;
+                        // andi.b #96,D0; or.b D0,(2,A1)`); the general
+                        // form of a copy is not catalogued.
+                        return Err(unsupported(
+                            self.span,
+                            "copying a packed field that is not a boolean into another is",
+                        ));
+                    }
+                    if value.ty().bytes() < unit.bytes() {
+                        return Err(unsupported(
+                            self.span,
+                            "storing a computed value narrower than the field's unit into a \
+                             packed field (its zero-extension is not catalogued) is",
+                        ));
+                    }
+                    d = self.eval_d(value)?;
+                    dst = self.ea_of(addr)?;
+                    and_mem(self, &dst, !m);
+                }
+            }
+            self.shift_up(d, field.shift, unit);
+            if mask {
+                self.out.push(Insn::AluImm {
+                    op: AluOp::And,
+                    size: usize_,
+                    imm: imm(m, unit),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+            }
+        }
+        self.out.push(Insn::AluToMem {
+            op: AluOp::Or,
+            size: if boolean { Size::B } else { usize_ },
+            src: d,
+            dst,
+        });
+        Ok(())
+    }
+
+    /// The register a held frame object is in ([`Self::pinned`]).
+    fn pinned_of(&self, a: &Addr) -> Reg {
+        match a {
+            Addr::Frame(o) => self.pinned(*o).expect("a held frame object"),
+            _ => unreachable!("only frame objects are held"),
+        }
+    }
+
+    /// Dd shifted left by `n` for a bit field: `add.<w> Dd,Dd` for 1
+    /// (0xE1D4B2 `add.b D1,D1`; 0xE5BD6E), else `lsl` split at 8
+    /// (0xE0086E `lsl.l #8,D0; lsl.l #7,D0`).
+    fn shift_up(&mut self, d: u8, n: u32, w: Width) {
+        if n == 1 {
+            self.out.push(Insn::Alu {
+                op: AluOp::Add,
+                size: size_of(w),
+                src: Ea::Reg(Reg::D(d)),
+                dst: d,
+            });
+        } else {
+            self.shift_by(ShiftOp::Lsl, d, n, w);
+        }
     }
 
     /// `k in s` for a constant `k` and a set of one word or one longword:

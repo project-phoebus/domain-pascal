@@ -204,50 +204,28 @@ class WorkaroundTest(unittest.TestCase):
                 return srcsurvey.apply_workaround(pat, rep, text)[0]
         raise KeyError(name)
 
-    def test_packed_overlay(self):
-        src = ("status_$t = packed record\n case integer of\n"
-               "  1: (fail: boolean;  { bit 15 }\n      code: integer);\n"
-               "  2: (all: integer32);   { 0x00 }\n end;\n")
-        self.assertEqual(self.apply('packed-overlay', src),
-                         'status_$t = record case integer of 2: (all: integer32); end;\n')
-
-    def test_packed_and_field_aligned(self):
-        self.assertEqual(self.apply('packed-record', 'u = PACKED  RECORD a: integer32; end;'),
-                         'u =   RECORD a: integer32; end;')
+    def test_field_aligned(self):
         self.assertEqual(self.apply('field-aligned', 'timer: [aligned(1)] linteger;'),
                          'timer: linteger;')
 
+    def test_packed_records_are_not_rewritten(self):
+        # dpc takes packed records (ref 3.10.7, bead domain-pascal-xlm)
+        names = [n for n, *_ in srcsurvey.WORKAROUNDS]
+        self.assertNotIn('packed-record', names)
+        self.assertNotIn('packed-overlay', names)
 
     def test_comments_and_strings_untouched(self):
-        # ../source's base.ins.pas quotes the customer declarations in
-        # comments; only the real declaration is rewritten and counted
-        src = ("{ customer: uid_$t = PACKED RECORD high: integer32; END }\n"
-               "(* a packed record's fields *) \"packed record\" s = 'packed record';\n"
-               "uid_$t = packed record high: integer32; low: integer32; end;\n")
+        # only the real declaration is rewritten and counted, not the
+        # same text in a comment or a string
+        src = ("{ customer: timer: [aligned(1)] linteger }\n"
+               "(* timer: [aligned(1)] linteger *) \"timer: [aligned(1)]\" s = ': [aligned(1)] ';\n"
+               "timer: [aligned(1)] linteger;\n")
         for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
-            if n == 'packed-record':
+            if n == 'field-aligned':
                 text, k = srcsurvey.apply_workaround(pat, rep, src)
         self.assertEqual(k, 1)
-        self.assertEqual(text, src.replace('uid_$t = packed record high',
-                                           'uid_$t =  record high'))
-
-    def test_packed_overlay_keeps_status_size(self):
-        # status_$t of ../source base.ins.pas: the overlay keeps `all',
-        # 4 bytes at 0, the size and offset of the packed record (fail 1
-        # + subsys 7 + modc 8 bits, code 16 bits: 32 bits)
-        src = ("{ status_$t = PACKED RECORD CASE integer OF 1: (fail: boolean); "
-               "2: (all: integer32); END; }\n"
-               "status_$t = packed record\n case integer of\n"
-               "  1: (fail: boolean;\n subsys: 0..127;\n modc: 0..255;\n code: integer);\n"
-               "  2: (all: integer32);\n end;\n")
-        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
-            if n == 'packed-overlay':
-                text, k = srcsurvey.apply_workaround(pat, rep, src)
-        self.assertEqual(k, 1)
-        self.assertTrue(text.startswith('{ status_$t = PACKED RECORD CASE'))
-        self.assertTrue(text.endswith('status_$t = record case integer of '
-                                      '2: (all: integer32); end;\n'))
-
+        self.assertEqual(text, src.replace('timer: [aligned(1)] linteger;\n',
+                                           'timer: linteger;\n'))
 
 if __name__ == '__main__':
     unittest.main()

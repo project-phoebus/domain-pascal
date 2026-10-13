@@ -24,9 +24,8 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      looks at any routine (each one named, see WORKAROUNDS; --no-workaround
      NAME skips one).  Only declarations are rewritten, never text in a
      comment, and none changes a size or an offset the surviving routines
-     use (status_$t keeps `all', 4 bytes at 0; uid_$t's two longwords and
-     the word-aligned `timer' are where the packed or aligned declaration
-     puts them), so a routine reported OK compiles to the image's bytes.
+     use (the word-aligned `timer' is where the aligned declaration puts
+     it), so a routine reported OK compiles to the image's bytes.
   3. Stage "check" and "codegen", repeated: `dpc --check-only', then full
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
@@ -72,25 +71,14 @@ DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
 ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(\d+)\s*bytes')
 
 # Workarounds for refusals in declarations (stage 2).  Each: (name, what
-# dpc refuses, files it applies to, pattern, replacement).  They are the
-# same rewrites as ../source's tools/pascal_check.sh gaps 5 and 6.
-def _packed_overlay(m):
-    """A packed variant record reduced to its overlay variants (one field
-    each, e.g. status_$t's `2: (all: integer32)'), comments dropped."""
-    body = strip_comments(m.group(3))
-    keep = re.findall(r'[\w$]+(?:\s*,\s*[\w$]+)*\s*:\s*\(\s*[\w$]+\s*:\s*[\w$]+\s*\)', body)
-    if not keep:
-        return m.group(0)
-    return '%srecord case %s of %s; end;' % (m.group(1), m.group(2), '; '.join(keep))
-
-
+# dpc refuses, files it applies to, pattern, replacement, a string or a
+# function of the match).  They are the same rewrites as ../source's
+# tools/pascal_check.sh gaps.  Gap 5, `packed record' (status_$t, uid_$t
+# in base/base.ins.pas), is no longer one: dpc lays packed records out by
+# ref 3.10.7 (bead domain-pascal-xlm), and the `packed-overlay' and
+# `packed-record' rewrites that reduced them to unpacked records were
+# removed.
 WORKAROUNDS = [
-    ('packed-overlay', 'packed variant record (ref 3.10.7): only its one-field overlay variants '
-     'kept, so that its size is right unpacked', '.ins.pas',
-     re.compile(r'(=\s*)packed\s+record\s+case\s+([\w$]+)\s+of\b(.*?)\bend\s*;', re.I | re.S),
-     _packed_overlay),
-    ('packed-record', 'packed record (ref 3.10.7): `packed\' dropped', '.ins.pas',
-     re.compile(r'\bpacked(\s+record)\b', re.I), r'\1'),
     ('field-aligned', 'attribute on a record field (ref 3.15): `[aligned(n)]\' dropped',
      '.ins.pas', re.compile(r'(:\s*)\[\s*aligned(?:\s*\(\s*\d+\s*\))?\s*\]\s*', re.I), r'\1'),
 ]

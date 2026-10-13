@@ -3076,3 +3076,100 @@ fn overlay_section_name() {
     assert!(e.iter().any(|x| x.contains("overlay section")), "{e:?}");
     assert!(e.iter().any(|x| x.contains("section name `a b`")), "{e:?}");
 }
+
+/// Bit fields of packed records (ref 3.10.7): the unit that holds each
+/// (`lower.rs`, `bit_field`; codegen-patterns 5.3), and fields that are
+/// whole objects read as plain loads.
+#[test]
+fn packed_field_units() {
+    let m = lower_src(
+        "module m;
+         type
+           status_$t = packed record case integer of
+             1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+             2: (all: integer32);
+           end;
+           r = packed record
+             x: 0..255; b: boolean; depth: 0..255; low: 0..32767;
+           end;
+         var g: extern integer;
+         procedure t(var s: status_$t; var q: r);
+         begin
+           if s.fail then g := s.code;
+           g := q.depth;
+           g := s.subsys;
+         end;",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    let StmtKind::If { cond, then_, .. } = &f.body[0].kind else {
+        panic!("{:?}", f.body[0].kind)
+    };
+    // `fail`: bit 7 of the first byte.
+    assert!(matches!(
+        cond,
+        Cond::Test(Expr::Bits {
+            field: BitField {
+                unit: Width::Byte,
+                shift: 7,
+                width: 1
+            },
+            ty: Scalar::BOOLEAN,
+            ..
+        })
+    ));
+    // `code`: a whole word at 2, a plain load.
+    let StmtKind::Store { value, .. } = &then_[0].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        value,
+        Expr::Load {
+            addr: Addr::Indirect { offset: 2, .. },
+            ..
+        }
+    ));
+    // `depth`, bits 9..16: the longword at 0, bits 22..15 (APP_$RECEIVE
+    // 0xE0086E `andi.l #-0x7f8001,(38,A2)`).
+    let StmtKind::Store { value, .. } = &f.body[1].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        value,
+        Expr::Bits {
+            addr: Addr::Indirect { offset: 0, .. },
+            field: BitField {
+                unit: Width::Long,
+                shift: 15,
+                width: 8
+            },
+            ..
+        }
+    ));
+    // `subsys`, bits 1..7: the first byte, bits 6..0.
+    let StmtKind::Store { value, .. } = &f.body[2].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        value,
+        Expr::Bits {
+            field: BitField {
+                unit: Width::Byte,
+                shift: 0,
+                width: 7
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn packed_fields_refused() {
+    let e = errs(
+        "module m;
+         type r = packed record a: boolean; s: -8..7 end;
+         var g: extern integer;
+         procedure t(var q: r); begin g := q.s end;",
+    );
+    assert!(e[0].contains("negative values"), "{e:?}");
+}

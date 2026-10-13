@@ -8,6 +8,7 @@
 
 mod checks;
 mod layout;
+mod packed;
 mod table5_1;
 mod tst_lock;
 

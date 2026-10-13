@@ -18,8 +18,8 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
-    ForLoop, Function, LinkArg, Module, Nesting, ParamCopy, PoolConst, Rel, ResultClass,
+    Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions,
+    Expr, ForLoop, Function, LinkArg, Module, Nesting, ParamCopy, PoolConst, Rel, ResultClass,
     ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
@@ -421,6 +421,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
         match e {
             Expr::Const { .. } => {}
             Expr::Load { addr: a, ty } => addr(a, ty.bytes(), out),
+            Expr::Bits { addr: a, field, .. } => addr(a, field.unit.bytes(), out),
             Expr::AddrOf(a) => addr(a, 1, out),
             Expr::SetMember { elem, set, .. } => {
                 expr(elem, out);
@@ -466,6 +467,15 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
         StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, out),
         StmtKind::Store { addr: a, value } => {
             addr(a, value.ty().bytes(), out);
+            expr(value, out);
+        }
+        StmtKind::StoreBits {
+            addr: a,
+            field,
+            value,
+            ..
+        } => {
+            addr(a, field.unit.bytes(), out);
             expr(value, out);
         }
         StmtKind::Copy { dst, src, bytes } => {
@@ -555,7 +565,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     fn expr(e: &mut Expr, f: &mut dyn FnMut(&mut Call)) {
         match e {
             Expr::Const { .. } => {}
-            Expr::Load { addr: a, .. } | Expr::AddrOf(a) => addr(a, f),
+            Expr::Load { addr: a, .. } | Expr::Bits { addr: a, .. } | Expr::AddrOf(a) => addr(a, f),
             Expr::SetMember { elem, set, .. } => {
                 expr(elem, f);
                 expr(set, f);
@@ -599,7 +609,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     }
     match &mut s.kind {
         StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, f),
-        StmtKind::Store { addr: a, value } => {
+        StmtKind::Store { addr: a, value } | StmtKind::StoreBits { addr: a, value, .. } => {
             addr(a, f);
             expr(value, f);
         }
@@ -719,7 +729,9 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
     fn expr(e: &mut Expr, size: u32, max: &mut u32) {
         match e {
             Expr::Const { .. } => {}
-            Expr::Load { addr: a, .. } | Expr::AddrOf(a) => addr(a, size, max),
+            Expr::Load { addr: a, .. } | Expr::Bits { addr: a, .. } | Expr::AddrOf(a) => {
+                addr(a, size, max)
+            }
             Expr::SetMember {
                 elem: x, set: y, ..
             }
@@ -1212,7 +1224,7 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
     let e = |x: &'a Expr, out: &mut Vec<&'a Call>| expr_calls(x, out);
     match &s.kind {
         StmtKind::SetResult(x) => e(x, out),
-        StmtKind::Store { addr, value } => {
+        StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
             addr_calls(addr, out);
             e(value, out);
         }
@@ -1306,7 +1318,9 @@ fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
 fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
     match e {
         Expr::Const { .. } => {}
-        Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_calls(addr, out),
+        Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
+            addr_calls(addr, out)
+        }
         Expr::SetMember { elem, set, .. } => {
             expr_calls(elem, out);
             expr_calls(set, out);
@@ -1344,7 +1358,9 @@ fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
 fn stmt_uses_static(s: &Stmt) -> bool {
     match &s.kind {
         StmtKind::SetResult(e) => expr_uses_static(e),
-        StmtKind::Store { addr, value } => addr_uses_static(addr) || expr_uses_static(value),
+        StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+            addr_uses_static(addr) || expr_uses_static(value)
+        }
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
         StmtKind::Call(c) => call_uses_static(c),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
@@ -1406,7 +1422,9 @@ fn call_uses_static(c: &Call) -> bool {
 fn expr_uses_static(e: &Expr) -> bool {
     match e {
         Expr::Const { .. } => false,
-        Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_uses_static(addr),
+        Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
+            addr_uses_static(addr)
+        }
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
         Expr::Binary { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
         Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
@@ -1658,6 +1676,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     ty,
                 } if self.active.contains(o) && ty.width == Width::Word => Ok(()),
                 Expr::Load { addr, ty } => self.addr(addr, ty.bytes()),
+                Expr::Bits { addr, field, .. } => self.addr(addr, field.unit.bytes()),
                 Expr::AddrOf(a) => self.addr(a, 1),
                 Expr::Const { .. } => Ok(()),
                 Expr::SetMember { elem, set, .. } => {
@@ -1708,6 +1727,12 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e)?,
                     StmtKind::Store { addr, value } => {
                         self.addr(addr, value.ty().bytes())?;
+                        self.expr(value)?;
+                    }
+                    StmtKind::StoreBits {
+                        addr, field, value, ..
+                    } => {
+                        self.addr(addr, field.unit.bytes())?;
                         self.expr(value)?;
                     }
                     StmtKind::Copy { dst, src, bytes } => {
@@ -2376,6 +2401,9 @@ fn result_assignment(
 /// implicit integer widening (`integer16` to `integer32`) has not been
 /// catalogued yet.
 fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
+    if let Some((addr, field)) = bit_field(p, target)? {
+        return store_bits(p, s, target, value, addr, field);
+    }
     let ty = scalar_of(p, target)?;
     let addr = addr_of(p, target)?;
     let value = if let Some(v) = &value.value {
@@ -2618,6 +2646,13 @@ fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
 fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if let Some(v) = &e.value {
         return const_of(v, scalar_of(p, e)?, e.span);
+    }
+    if let Some((addr, field)) = bit_field(p, e)? {
+        return Ok(Expr::Bits {
+            addr,
+            field,
+            ty: bit_field_type(p, e)?,
+        });
     }
     match &e.kind {
         ExprKind::Var { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => Ok(Expr::Load {
@@ -3109,8 +3144,153 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
     }
 }
 
+/// A bit field of a packed record, `e` (ref 3.10.7): a field that is
+/// not a whole object of its type at a byte or word address
+/// ([`dpc_sema::types::BitPos::is_whole_object`]; whole ones are read and
+/// written like unpacked fields).  Gives the byte, word or longword that
+/// holds it, the smallest of the three the field fits in that the 68010
+/// can access (a word or longword at an even address), and where the
+/// field lies in it.  Image (codegen-patterns 5.3): a byte for a field
+/// within one byte (0xE0089A `andi.b #127,(39,A2)`, 0xE158BA `and.b
+/// (16,A0),D0`), a word for one in the two bytes of an even word (0xE00994
+/// `andi.w #-0x7f81,(40,A2)`, 0xE5BFBE `and.w (16,A0),D1`), a longword
+/// for one across an odd byte boundary (0xE0086E `andi.l #-0x7f8001,
+/// (38,A2)`, an 8-bit field in bytes 39..40; 0xE0E346 `andi.l
+/// #-0xffff01,(4,A2)`, a 16-bit one in bytes 5..6).
+fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
+    let ExprKind::Field {
+        base,
+        bits: Some(b),
+        ..
+    } = &e.kind
+    else {
+        return Ok(None);
+    };
+    if b.is_whole_object(p.types.size(e.ty)) {
+        return Ok(None);
+    }
+    let (first, last) = (b.bit / 8, (b.bit + b.width - 1) / 8);
+    let (unit, start) = if first == last {
+        (Width::Byte, first)
+    } else if first % 2 == 0 && last == first + 1 {
+        (Width::Word, first)
+    } else if last < (first & !1) + 4 {
+        (Width::Long, first & !1)
+    } else {
+        return Err(unsupported(
+            e.span,
+            "a packed field wider than a longword is",
+        ));
+    };
+    let shift = 8 * (start + unit.bytes()) - (b.bit + b.width);
+    let addr = addr_of(p, base)?.offset_by(start as i32);
+    Ok(Some((
+        addr,
+        BitField {
+            unit,
+            shift,
+            width: b.width,
+        },
+    )))
+}
+
+/// The value type of bit field `e` ([`bit_field`]): a boolean of one bit,
+/// or an ordinal of non-negative values (an enumeration, a subrange with a
+/// low bound of 0 or more), zero-extended.  A subrange with negative
+/// values (`-100..40`, ref Figure 3-17) would need its sign extended
+/// (not catalogued), a set field is not an operand yet.
+fn bit_field_type(p: &Program, e: &SExpr) -> Res<Scalar> {
+    let t = &p.types;
+    if t.is_boolean(e.ty) {
+        return Ok(Scalar::BOOLEAN);
+    }
+    match t.ordinal_range(e.ty) {
+        Some((lo, _)) if lo >= 0 => scalar_of(p, e),
+        Some(_) => Err(unsupported(
+            e.span,
+            "a packed field of a subrange with negative values (its sign extension is not \
+             catalogued) is",
+        )),
+        None => Err(unsupported(
+            e.span,
+            format!(
+                "a packed field of type {} that is not a whole byte, word or longword is",
+                t.display(e.ty)
+            ),
+        )),
+    }
+}
+
+/// `d := e` for a bit field `d` ([`bit_field`]; codegen-patterns 5.3).
+///
+/// A value wider than the field's type is kept at its width: the
+/// selector reads, or uses, only its low bytes (PACCT's module-local
+/// 0xE5A9CA merges a longword held in D0 into a 13-bit field with `move.w
+/// D0,D3; or.w D3,(-8,A6)`).  A narrower one is widened like any
+/// assignment's value.
+///
+/// `mask`: the value is masked to the field's bits before it is merged
+/// when its type admits negative values (0xE31DF2..0xE31E00: a value
+/// sign-extended with `ext.w`, then `lsl.w #4,D1; andi.w #0x3f0,D1; or.w
+/// D1,(-6,A6)`), not when its type is non-negative, however wide
+/// (0xE5A9CA: an unsigned longword, compared with `bcc`, merged into 13
+/// bits unmasked; 0xE1817A `move.b (3,A1),D1; lsl.b #3,D1; or.b
+/// D1,(218,A0)`).  **Uncertain:** fitted to these sites; the masked byte
+/// merges 0xE38C72 and 0xE5BD6E have values of unknown type.
+fn store_bits(
+    p: &Program,
+    s: &SStmt,
+    target: &SExpr,
+    value: &SExpr,
+    addr: Addr,
+    field: BitField,
+) -> Res<Stmt> {
+    let ty = bit_field_type(p, target)?;
+    let (v, mask) = if let Some(c) = &value.value {
+        (const_of(c, ty, value.span)?, false)
+    } else {
+        let v = value_of(p, value)?;
+        let v = if v.ty().bytes() < ty.bytes() {
+            if !p.types.is_integer(value.ty) {
+                return Err(unsupported(
+                    value.span,
+                    format!(
+                        "assigning a {}-byte value to a packed field of a {}-byte type is",
+                        v.ty().bytes(),
+                        ty.bytes()
+                    ),
+                ));
+            }
+            convert(v, ty)
+        } else {
+            v
+        };
+        let negative =
+            ty != Scalar::BOOLEAN && p.types.ordinal_range(value.ty).is_none_or(|(lo, _)| lo < 0);
+        (v, negative)
+    };
+    Ok(Stmt {
+        kind: StmtKind::StoreBits {
+            addr,
+            field,
+            value: v,
+            mask,
+        },
+        span: s.span,
+    })
+}
+
 /// The address of designator `e`.
 fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
+    if bit_field(p, e)?.is_some() {
+        // The checker refuses such a field where an address is needed
+        // (ref 3.10.3); any other use that would need one is refused here.
+        return Err(unsupported(
+            e.span,
+            "the address of a field of a packed record that is not a whole byte, word or \
+             longword is",
+        ));
+    }
     match &e.kind {
         // A variable of the enclosing routine (ref 2.4), through the static
         // link: its frame objects as [`Addr::Enclosing`] (codegen-patterns

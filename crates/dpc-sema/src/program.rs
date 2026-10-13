@@ -379,11 +379,14 @@ pub enum ExprKind {
     },
     /// The record designator bound by an enclosing `with`.
     WithRecord(WithId),
-    /// `base.field`; `offset` is the field's byte offset.
+    /// `base.field`; `offset` is the field's byte offset (of a packed
+    /// record's field, the byte its first bit is in), `bits` the bits of
+    /// a packed record's field (ref 3.10.7).
     Field {
         base: Box<Expr>,
         name: String,
         offset: u32,
+        bits: Option<crate::types::BitPos>,
     },
     /// `base[index]` (one dimension; `a[i, j]` is `a[i][j]`).  The element
     /// is at `(index - lo) * elem_size` bytes into the array.

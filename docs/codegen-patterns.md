@@ -1586,7 +1586,7 @@ variables.  Each module's static data is a data segment, addressed off
 |---|---|---|
 | `integer`, `integer16` | 2 | signed; **`integer` is 16 bits** (ref 3.2.1) |
 | `integer32` | 4 | |
-| subrange | size of base type (ref 3.8.1) | 2 bytes up to `0..65535` (ref 5.3.4.1 p. 5-13: `0..65535` and integer are "both 16-bit integers"; Table 7-2 p. 7-30: `unsigned short`); 4 bytes once more than 16 bits are needed (3.4 p. 3-10); packed records differ |
+| subrange | size of base type (ref 3.8.1) | 2 bytes up to `0..65535` (ref 5.3.4.1 p. 5-13: `0..65535` and integer are "both 16-bit integers"; Table 7-2 p. 7-30: `unsigned short`); 4 bytes once more than 16 bits are needed (3.4 p. 3-10); in packed records the bits of the extreme values (5.3) |
 | `boolean` | 1 | true = 0xFF, false = 0x00 (ref 3.5.3); tested with `tst.b`/`bmi`/`bpl`, i.e. **signed** byte |
 | `char` | 1 | |
 | enumeration | 2 | ordinal in a word (ref 3.7.1) |
@@ -1846,8 +1846,170 @@ their host); no compare or widening of either has been catalogued.
   address-register sites above all put the constant first, as do two with
   5 and 8).  Golden `tests/golden/expr/transfer`; test `dpc-ir`
   `type_transfers`.
-- **Packed records / bit fields:** Uncertain; nothing has been catalogued
-  yet.
+- **Packed records / bit fields:** see 5.3.
+
+### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)
+
+**Layout** (`crates/dpc-sema/src/types.rs`, `packed_field_bits`,
+`layout_packed_fields`, `packed_record_layout`; ref 3.10.7 pp. 3-35..3-37
+and Table 3-3 read in the PDF, the OCR scrambles the table):
+
+- The record is a big-endian bit string: "Pascal allocates fields left to
+  right within bytes and then by increasing byte address" (p. 3-35), so
+  the first field takes the most significant bits of the first byte.
+  Figure 3-17 (p. 3-37) and the image agree: `status_$t.fail`, the first
+  bit, is `bset #7` on the record's first byte (PROC2_$RESUME 0xE41444).
+- Bits per field (Table 3-3, p. 3-36): integer 16, word aligned;
+  integer32, real 32 and double 64, word aligned; boolean 1; char and
+  subranges of char 8, byte aligned; an enumeration the bits of its
+  largest ordinal; another subrange "the number of bits required for
+  their extreme values" (a negative low bound adds a sign bit:
+  `-100..40` is 8 bits, p. 3-37), bit aligned; a set of fewer than 32
+  elements one bit per element, else its size, bit aligned; arrays,
+  records and pointers their ordinary size, word aligned ("Structured
+  types, except for sets, are aligned on word boundaries", p. 3-35).
+  The list under Table 3-3 (p. 3-37) annotates `Class : 'A'..'Z'` "8
+  bits (word aligned)" against the table's "byte aligned"; in the
+  example both put it at bit 48, so it does not decide.  The table is
+  followed (Uncertain: no image or insert case found that separates the
+  two).
+- **A subrange needing 31 bits takes 32** (ref 3.4 p. 3-10: "When you have
+  an unsigned subrange that is large enough to require 31 bits, the
+  compiler allocates 32 bits").  Apollo's `linteger = 0..2147483647` is
+  32 bits in its packed records; the alternative, 31 bits, breaks the
+  checks below.
+- Placement (p. 3-35): the first field at bit 0; then a field starts at
+  the next free bit unless it would cross two or more 16-bit boundaries
+  (a boundary strictly inside the field), then at the next 16-bit
+  boundary.  Byte- and word-aligned types round up to the byte or word.
+  Variant arms all start where the fixed part (and tag) ends.
+- Size: the bits used rounded up to whole words, at least 16 bits (p.
+  3-35; Figure 3-17: 56 bits used, "eight bytes").  Alignment of a packed
+  record as a variable: the allocation algorithm of 3.10.5.6 applied to
+  the fields that are whole objects of their type (Uncertain: stated for
+  records in general); as a field, a word.
+- A set whose base type does not start at ordinal 0 is refused: how many
+  bits "one bit per element" gives it is not settled (an open question
+  for the owner, not yet asked).
+
+Cross-checks (`crates/dpc-sema/src/tests/packed.rs`; declarations copied
+from the SR10.2 customer inserts, section 0.1):
+
+| Declaration (insert) | Check | Source of the check |
+|---|---|---|
+| `status_$t` (base) | `fail` bit 0, `subsys` 1..7, `modc` 8..15, `code` the word at 2, `all` the longword; 4 bytes, longword aligned | image 0xE41444 `bset #7,(-0x4,A6)`, 0xE4142A `tst.w (-0x2,A6)`, PROC2_$FORK 0xE72CC2/0xE72CC8 (section 9) |
+| `uid_$t` (base) | `high` 0, `low` 4, 8 bytes | `../source` base/base.h `_Static_assert`s |
+| `time_$clock_t` (base, the `%ELSE` form) | `high` 0 (32 bits), `low` 4; `high16` 0, `low32` 2 (32 bits); 6 bytes | base/base.h size 6; tty/tty.h 0x2C4/0x2C8; image TTY_$I_WAIT 0xE1C2AA `clr.w (-0x60,A6)`, 0xE1C2C0 `move.l D0,(-0x5e,A6)` |
+| `cal_$timezone_rec_t`, `cal_$timedate_rec_t` (cal) | 0, 2, 6; 12 bytes | cal/cal.h `_Static_assert`s |
+| `fontn_$table_tver1` (fontn) | `image_offset` 0x28, `image_size` 0x2C, `index_table_offset` 0x34, `desc_table_offset` 0x38, `inter_space_dflt` 0x5A, `space_size` 0x6E; `old_proportional` (1 bit) and `space_type` (`0..16#7FFF`, 15 bits) one word; 128 bytes | smd/smd_internal.h `smd_font_v3_t` `_Static_assert`s; the insert's "8-byte multiple" |
+| `smd_$font_table_t`, `smd_$v1_fdte_t` (smdu), `fontn_$desc` (fontn) | 13 words, `index_table` 0x1A, `desc_table` 0x9A; entries of 8 bytes, bytes 0..5, word at 6 | smd/smd_internal.h `smd_font_v1_t`, `smd_glyph_metrics_t` |
+| `smd_$display_modereg_t` (smdu) | masks 8000, 7E00, 100, 80, ..., 1 | the insert's own comments |
+| `stream_$IR_rec_t` (streams) | `hdr_lgth` at bit 112 | the insert's `unused6 : set of 0..21; { nxt field needs word alignment }` (needs 32-bit `linteger` and n+1 bits for `set of 0..n`) |
+| `num_var_t` (prf) | `int16` at bit 16, `int8` at bit 24 (`pad_byte: 0..16777215` is 24 bits) | the insert's padding variants |
+| `Characteristics` (ref Figure 3-17) | Mass 0, Shape 32, B 35, Purpose 36, Low_temp 40, Class 48; 8 bytes | the figure |
+
+**Code** (`crates/dpc-ir/src/lower.rs` `bit_field`, `store_bits`;
+`crates/dpc-m68k/src/isel.rs` `bits_value`, `store_bits`; 68010: no
+`bfext`/`bfins`).  A field that is a whole object of its type at a byte
+(byte) or even (word, longword) address is read and written like an
+unpacked field (`status.all`, `status.code`, `uid.high`, a char).  Any
+other is a **bit field**, reached through a *unit*: the byte it lies in;
+else the word at an even address; else the longword at the even address
+at or below its first byte.  Survey (ad-hoc scripts over the compiled
+routines `tools/regalloc.py` splits, not kept): `andi #~mask,<mem>` with a
+contiguous field mask followed within four instructions by `or` into
+the same operand: byte units 93 one-bit and 50 wider merges of a
+register, 31 of a constant; word units 10 (and one `ori.b`, below);
+longword units 57 of a register, 4 of a constant.  Byte units: 0xE0089A, 0xE158BA; word: 0xE00994 `andi.w #-0x7f81,(40,A2)`,
+0xE5BFBE; longword across an odd byte: 0xE0086E `andi.l
+#-0x7f8001,(38,A2)` (bits 9..16 of 0x26), 0xE0E346 (a 16-bit field in
+bytes 5..6).  Many `bset`/`bclr`/`btst #k,<mem>` are set operations on
+sets in memory rather than packed fields (SIO's `state` at 0x74, a word
+set: 0xE1C6BE `bclr #0,(0x75,A2)`; TTY's flags); the forms coincide for
+a constant member.
+
+- **Boolean field, test:** `btst #k,M` and `beq`/`bne` (0xE0088A); bit 7
+  as the sign, `tst.b M` and `bpl`/`bmi` (no `btst #7` on memory in
+  compiled code: k = 0..6 only, 422 sites).
+- **Boolean field, value:** `btst #k,M; sne Dn` (0xE16F0C; XPD_$INHERIT_
+  PTRACE_OPTIONS 0xE5B17C, conformance unit
+  `tests/conformance/xpd_inherit_ptrace_options.pas`); bit 7 `tst.b M;
+  smi Dn` (0xE066B2, 0xE025E4).
+- **Boolean field, constant:** `bset #k,M` / `bclr #k,M` (0xE41444,
+  0xE00E02, 0xE5DF08 in FILE_$SET_PROT).
+- **Boolean field, value:** bit 7: `andi.b #0x7f,M; andi.b #0x80,Dn; or.b
+  Dn,M` with the value computed first (0xE00892..0xE008A4 `btst; sne D0;
+  andi.b #127,(39,A2); andi.b #-128,D0; or.b`; OS_$GET_EC 0xE6D6DE `tst.l
+  (A2); sne D0; ...`), a variable read after the `andi` (0xE5BFA2), a held
+  one copied then (0xE1D1EE).  Bit k < 7: the value made 0/1 first,
+  `lsr.b #7,Dn`, then `andi.b #~(1<<k),M`, `lsl.b #k,Dn` (`add.b Dn,Dn`
+  for 1, none for 0), `or.b Dn,M` (e.g. 0xE04D0E, 0xE1D4B2 `add.b`,
+  0xE04A96 bit 0; from a variable 0xE04C5C `move.b (A1),D1; lsr.b #7,D1`; from
+  a bit-7 field 0xE025E4 `tst.b; smi; lsr.b #7`).
+- **Wider field, value:** `move.W #mask,Dn; and.U M,Dn; lsr.W #s,Dn`, W the
+  wider of the unit and the value, the mask a `moveq` when it fits, the
+  shift split at 8: RIP 0xE158B6 `move.w #192,D0; and.b (16,A0),D0; lsr.w
+  #6,D0`, 0xE0E00A `moveq #124,D1; and.b (-1012,A4),D1; lsr.w #2,D1`,
+  0xE5BFBE (word), 0xE15868 (`move.l #0xfffff`, no shift), 0xE106A0
+  (`lsr.l #8; lsr.l #7`).  A field at the top of a unit as wide as the
+  value: `move.U M,Dn; lsr.U #s,Dn` (0xE08434, 0xE0A232).  Against 0, the
+  branch reads the flags of the `and` or the shift (0xE1BFFE, 0xE5BFBE).
+  Fields of negative values (sign extension) are refused: not catalogued.
+- **Wider field, constant:** `andi.U #~mask,M; ori #c<<s,M` (0xE158CE);
+  the `andi` alone for 0 (0xE1565E), the `ori` alone when every bit is set
+  (0xE15656).  The `ori` is unit-wide (0xE0A1DE `ori.l #16,(8,A0)`;
+  0xE33E96; 0xE6605A; 0xE4A834), except a word's whose low byte is 0, an
+  `ori.b` of the high byte (0xE008CE `ori.b #1,(40,A2)`; one site).  A
+  longword's with a zero low byte stays an `ori.l` when it has bits in
+  both halves, which no narrower `ori` could set (0xE4A83C `ori.l
+  #0x8001e00,(50,A0)` after 0xE4A834 `andi.l #255,(50,A0)`; one site);
+  with bits in one half only it is refused (not catalogued); so is a
+  constant into a one-bit field that is not a boolean.  An 8-bit field
+  of a wider type on a byte boundary (`0..255`) is refused: the general
+  forms would give `andi.b #0,M`, which the image never has, and how
+  the original read and wrote it is not catalogued (a lead:
+  0xE15894..0xE15898 `clr.w D0; move.b (15,A0),D0; cmp.w`, a byte of
+  unknown type next to RIP's packed `state` byte).
+- **Wider field, value:** `andi.U #~mask,M`, the value shifted up (`lsl`
+  split at 8, `add` for 1), `or.U Dn,M`.  A variable is read only as wide
+  as the field needs (a byte up to 8 bits, a word up to 16), at its low
+  end: 0xE18192 `clr.w D1; move.b 0xe2060b,D1` for the word 0xE2060A
+  (compared as a word at 0xE18A0C); all the byte-merge sources read from
+  memory are at odd addresses (0xE1D220 `move.b (133,A3),D1`).  Read at
+  the unit's width it comes after the `andi` (0xE0DFB0 `andi.w
+  #-512,(-1014,A4); move.w (14,A3),D0; or.w`; 0xE0B372; a held register
+  copied, PACCT 0xE5AA00..0xE5AA16 `andi.b #31,(-8,A6); move.b D1,D3;
+  lsl.b #5,D3; or.b D3,(-8,A6); andi.w #-8192,(-8,A6); move.w D0,D3; or.w
+  D3,(-8,A6)`); narrower, it is zero-extended before (byte to word `clr.w;
+  move.b`, 0xE00994, 0xE0F216; byte to longword `move.b; andi.l #255`,
+  0xE0086E; word to longword `clr.l; move.w`, 0xE0E346).  A computed value
+  is used at its own width or wider (0xE106A0: a longword merged into a
+  byte); narrower ones are refused.  **Masking (Uncertain):** the shifted
+  value is and-ed with the field mask when its type admits negative
+  values (0xE31DF2: `ext.w`, then `lsl.w #4; andi.w #0x3f0`), not when it
+  is non-negative however wide (PACCT 0xE5AA14: an unsigned longword,
+  compared with `bcc`, merged into 13 bits unmasked); the masked byte
+  merges 0xE38C72 and 0xE5BD6E have sources of unknown type.  So an
+  unmasked value outside the field's range spills into the neighbouring
+  bits, in dpc as in the image: PACCT's 0xE5A9CA keeps its longword
+  below 8192 by a loop (0xE5A9E6 `cmpi.l #8192,D0; bcc`), not by a mask
+  (an out-of-range value is an error in Pascal anyway).  Not settled:
+  the same routine merges its exponent, a word counter (`clr.w D1`,
+  `addq.w #1,D1`) of unknown type, into 3 bits unmasked (0xE5AA06
+  `move.b D1,D3; lsl.b #5,D3; or.b`); if that counter is an `integer`,
+  the rule is wrong.
+- **Refused:** a packed field passed to `var`/`out`/`in out` or to
+  `addr` (ref 3.10.3 p. 3-21: "you cannot pass a field from a packed
+  record as an argument"; an error), passed by value (not seen), copied
+  into another field (the image copies at the same position through the
+  unit, masked in place: 0xE19DE6 `move.b (2,A0),D0; andi.b #96,D0; or.b
+  D0,(2,A1)`; the general form is not catalogued), a destination and a
+  value that both need a register (order not seen), set fields as
+  operands, packed arrays of bit elements (ref 3.11.4.2, Table 3-5).
+- Tests: `crates/dpc-m68k/tests/packed.rs` (the forms, the refusals, and
+  a model of the instructions run over random records: stores keep the
+  neighbouring bits, loads give the value), `crates/dpc-ir/src/tests.rs`
+  (`packed_field_units`), golden `tests/golden/packed/fields`.
 
 ---
 
@@ -2043,7 +2205,7 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
     `case` table and a 4604-byte copy loop.
   - FILE_$SET_PROT with 0xE5DEF4 (0x176; 0xE5DEF4 alone is 0x46): a
     packed record field cleared with `bclr #6,(-0xb,A6)` (0xE5DF08;
-    `dpc` refuses packed records, ref 3.10.7), 8-byte copies into frame
+    section 5.3), 8-byte copies into frame
     displacements; the parent a `case` table whose arms share code.
   - RIP_$UPDATE_INT with 0xE15888 (0x1A4): two-bit fields extracted with
     `move.w #0xc0,D0; and.b (d,An),D0; lsr.w #6,D0` and stored with
@@ -3478,14 +3640,14 @@ stored.
   is the integer32 view (`OPEN(f, pathname1, 'NEW', err_stat.all)`; "Improper
   status argument", p. 9-21) and that `code` "contains a number that
   corresponds to a particular error" (p. 9-3).  `status_$ok` is 0 (9.1,
-  p. 9-1; "Open", pp. 4-132..4-133).  `dpc` refuses packed records
-  (ref 3.10.7), so the conformance sources still declare `status_$t =
-  record all: integer32 end` (only `all`, at offset 0, 4 bytes: the size
-  and offset of the packed record's `all`);
-  `tests/conformance/name_convert_acl_status.pas`, older, uses a plain
-  integer32, which compiles to the same code.  `tools/srcsurvey.py`'s
-  `packed-overlay` workaround makes the same reduction of `../source`'s
-  copy of the declaration.  Status codes in sources
+  p. 9-1; "Open", pp. 4-132..4-133).  `dpc` takes the packed
+  declaration as it is (section 5.3; bead domain-pascal-xlm): `all` and
+  `code` are plain longword and word accesses, `fail` a bit field
+  (`tests/golden/packed/fields.pas`).  Older conformance sources declare
+  `status_$t = record all: integer32 end` (only `all`, at offset 0, 4
+  bytes: the size, offset and alignment of the packed record's `all`, so
+  the code is the same); `tests/conformance/name_convert_acl_status.pas`
+  uses a plain integer32.  Status codes in sources
   carry `../source`'s names or are written in hex with the database text
   in a comment.  Never invent a `status_$` name.
 - **Clear on entry** (`status.all := status_$ok` as the first
