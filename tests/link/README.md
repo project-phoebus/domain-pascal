@@ -85,7 +85,24 @@ Read from `../source/domain_os/Makefile`, `sau2.ld` and `tools/` (2026-10-13).
    that the dpc object defines must be defined only by C objects that
    define nothing else global.  Hand-written assembly is never dropped.
    Those objects are dropped.  The C sources stay, so host tests are
-   unaffected.  A global that no object defines is linked in addition
+   unaffected.
+   **Whole-module units** (bead domain-pascal-xdh.2): a unit whose
+   routines span a whole map code segment (`tools/conform.py` gives it no
+   fragment option: gpu.pas, pbu.pas, iic.pas, ...) replaces all of the
+   module's C code there, so C globals that `../source` invented (no map
+   name: a C name for a module-local routine, a shared helper) may go
+   with it.  `m68k-elf-nm -u` over every object of the link decides:
+   - a definer of the unit's globals may also define such helpers;
+   - an object in the same directory as a definer whose globals are all
+     such helpers, referenced only by dropped objects, is dropped too
+     (repeated until nothing changes);
+   - a helper still referenced by an object that stays refuses the unit,
+     and so does a definer with a map name outside the unit (that routine
+     lives elsewhere in the image).
+   For any other unit the refusal of an object with a global the unit
+   does not define stands.
+   `tools/modsurvey.py` ranks the map's code segments as candidates for
+   such units (C objects, blockers, helpers, module data).  A global that no object defines is linked in addition
    (IO_$ALLOC: `../source` has no such routine), with a note.  A unit
    with module data is mapped onto `../source`'s C data first (below,
    "Module data") and compiled again with `dpc --data-base`.
@@ -187,19 +204,20 @@ lost; the unit's block is only a prefix of the module's.
 ## Results (2026-10-13)
 
 `linktest.py run --rev HEAD tests/link/manifest.txt` (`../source`
-b219e6ff): **OK**.  `make linktest` now passes `--rev $(LINKTEST_REV)`
+b219e6ff; again with the whole-module units below at 778ae3a5): **OK**.  `make linktest` now passes `--rev $(LINKTEST_REV)`
 (default HEAD); a run on `../source`'s working tree, with other agents'
 uncommitted edits, passed too.
 
-- 22 units are linked in place of 34 C objects (IO_$ALLOC is an addition: it replaces nothing).
+- 28 units are linked in place of 42 C objects (IO_$ALLOC and
+  ETHERNET_$INIT are additions: they replace nothing).
 - `../source`'s `make check` passes:
-  - 1586 map symbols are placed in map order, one more than the baseline
-    (IO_$ALLOC);
+  - 1587 map symbols are placed in map order, two more than the baseline
+    (IO_$ALLOC, ETHERNET_$INIT);
   - 0 order inversions and 0 sections in the catch-all;
   - `check-asm`, the guards, `check-iodefs` and `check-libgcc` pass;
   - `check-rfc` passes: full link, fixup table, dry-run loader.
-- `asm_compare.py` over the 22 dpc objects: 22 sections identical modulo
-  relocations, 39 relocations resolved to the image operand, 0 unverified.
+- `asm_compare.py` over the 28 dpc objects: 28 sections identical modulo
+  relocations, 42 relocations resolved to the image operand, 0 unverified.
 
 | Unit | Replaces (scratch build) |
 |---|---|
@@ -225,6 +243,12 @@ uncommitted edits, passed too.
 | mmap_alloc_contig.pas; data: MMAP_$DATA | mmap/alloc_contig.o |
 | pkt_next_id.pas; data: PKT_$DATA (0x5E of 0xA8) | pkt/next_id.o |
 | tone_enable.pas; data: TERM_$DATA (DATA_ANCHORS, 0x126C of 0x1398) | tone/enable.o |
+| gpu.pas (whole GPU module: GPU_$INIT, GPU_$TERM) | gpu/init.o, gpu/term.o |
+| pbu.pas (whole PBU module: PBU_$FREE_ASID, _$FAULTED_UNITS, _$INIT) | pbu/{free_asid,faulted_units,init}.o |
+| ct_release.pas (whole CT module) | ct/release.o |
+| tape_boot.pas (whole TAPE_BOOT module) | tape/boot.o |
+| pkt_init.pas (PKT's whole OS_INIT_PROC segment) | pkt/init.o |
+| ethernet_init.pas (whole ETHERNET module) | nothing: added |
 
 No unit of these `define`s a variable, so the step 7 check of `define`d
 names has had nothing to check yet (it has unit tests).

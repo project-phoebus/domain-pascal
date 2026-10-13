@@ -24,9 +24,18 @@ tests/conformance/proc1_set_asid.pas         PROC1_$SET_ASID
 tests/conformance/time_get_adjust.pas        TIME_$GET_ADJUST
 tests/conformance/disk_get_block.pas         DISK_$GET_BLOCK
 tests/conformance/sysbus_define_int.pas      SYSBUS_$DEFINE_INT
+# Whole map modules (bead domain-pascal-xdh.2): every routine of the
+# module's code segment, so every C object of it is replaced.
+tests/conformance/gpu.pas                    GPU_$INIT GPU_$TERM
+tests/conformance/pbu.pas                    PBU_$FREE_ASID PBU_$FAULTED_UNITS PBU_$INIT
+tests/conformance/ct_release.pas             CT_$RELEASE
+tests/conformance/tape_boot.pas              TAPE_$BOOT
+tests/conformance/pkt_init.pas               PKT_$INIT
 
 # Added: ../source has no IO_$ALLOC; the map routine joins the link.
 tests/conformance/io_alloc.pas               IO_$ALLOC
+# ../source has no ETHERNET_$INIT either (mac_os/mac_os.h describes the stub).
+tests/conformance/ethernet_init.pas          ETHERNET_$INIT
 
 # A `bsr.w' to a routine of the module outside the unit (module-routines=):
 # a PC16 relocation the link resolves to ../source's C routine.

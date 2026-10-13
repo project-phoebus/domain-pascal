@@ -150,3 +150,14 @@ tests/conformance/atbus_ring_interrupt.pas   RING_INTERRUPT  --section-addr .bss
 # in (12.4 R4(b)); the copies passed on by address or pushed by value.
 tests/conformance/tone_time.pas              TONE_$TIME
 tests/conformance/smd_set_tp_cursor.pas      SMD_$SET_TP_CURSOR  --section-addr .bss.moddata.SMD=0xE82B8C  a5-always=SMD_$SET_TP_CURSOR  module-routines=SMD_$LOC_EVENT
+# Whole map modules (bead domain-pascal-xdh.2): every routine of a map code
+# segment, compiled without --fragment-origin, the module-end filler
+# included; empty procedures as a bare `rts', status stores and constant
+# results (codegen-patterns 2, 3, 9); a `val_param' call with a routine's
+# address and a longword constant pushed by value (1.6).
+tests/conformance/gpu.pas                    GPU_$INIT GPU_$TERM
+tests/conformance/pbu.pas                    PBU_$FREE_ASID PBU_$FAULTED_UNITS PBU_$INIT
+tests/conformance/ct_release.pas             CT_$RELEASE
+tests/conformance/tape_boot.pas              TAPE_$BOOT
+tests/conformance/ethernet_init.pas          ETHERNET_$INIT
+tests/conformance/pkt_init.pas               PKT_$INIT

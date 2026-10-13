@@ -31,6 +31,10 @@ Steps (tests/link/README.md has the why of each):
      hold no module data block (`.moddata.*' / `.bss.moddata.*').  Those
      objects are dropped; their C sources stay, so ../source's host tests
      (which #include the .c) are unaffected.
+     A unit that is a whole map code segment (no fragment option) may
+     also take ../source's C helpers with it: globals that are no map
+     name, defined beside its routines or alone in an object of the same
+     directory, that no object left in the link references (plan_drops).
      A unit with module data (bead domain-pascal-3bp): each of its
      `.bss.moddata.*' blocks is mapped, by the image address its manifest
      `--section-addr' gives, onto the C object of ../source that starts
@@ -119,6 +123,9 @@ class Unit:
         self.mods = list(mods)      # module-routines= tokens (map names only)
         # dpc data block section -> its image address (`--section-addr')
         self.data_addrs = dict(data_addrs or {})
+        # a whole map code segment (no dpc fragment option): set by
+        # compile_unit; plan_drops may then drop C helpers too
+        self.whole = False
 
     @property
     def stem(self):
@@ -199,14 +206,42 @@ def parse_nm(text):
     return defs
 
 
-def plan_drops(unit_globals, defs, asm_objs=()):
+def parse_nm_undefined(text):
+    """`m68k-elf-nm -A -u' output -> {object: {undefined symbol}} (only
+    objects that reference something)."""
+    refs = {}
+    for line in text.splitlines():
+        m = re.match(r'^(.*?):\s+[Uw]\s+(\S+)$', line)
+        if m:
+            refs.setdefault(m.group(1), set()).add(m.group(2))
+    return refs
+
+
+def plan_drops(unit_globals, defs, asm_objs=(), whole=None):
     """The objects to drop for one unit: every object defining one of
     `unit_globals' (from parse_nm's `defs').  Errors (a list of strings)
     when a definer is hand-written assembly, or defines a global the unit
     does not, or when a global of the unit is defined nowhere (a name the
     C tree does not have: the dpc object would add a symbol rather than
-    replace one; reported, not fatal)."""
+    replace one; reported, not fatal).
+
+    `whole' is (refs, is_map_name) for a unit that is a whole map code
+    segment (every routine of it: conform.fragment_args gives no option),
+    with `refs' from parse_nm_undefined over every object of the link and
+    `is_map_name' a predicate.  Such a unit replaces the module's C code
+    entirely, so a C global that is no map name (a helper ../source made
+    up: a C name for a module-local routine, a shared tail) may go with
+    it, when nothing that stays references it:
+      - a definer of the unit's globals may also define such helpers;
+      - an object of the same directory as a definer whose globals are all
+        such helpers, referenced by dropped objects only, is dropped too
+        (repeated until nothing changes).
+    A definer that also defines a map name outside the unit is still
+    refused: that routine lives elsewhere in the image and would be lost.
+    -> (drops, errors, notes)."""
     drops, errors, notes = [], [], []
+    helpers = {}            # helper global -> the definer that has it
+    refs, is_map_name = whole if whole else ({}, None)
     for sym in sorted(unit_globals):
         definers = sorted(o for o, d in defs.items() if sym in d)
         if not definers:
@@ -216,12 +251,44 @@ def plan_drops(unit_globals, defs, asm_objs=()):
                 errors.append('%s is defined by hand-written assembly %s' % (sym, o))
                 continue
             extra = sorted(set(defs[o]) - set(unit_globals))
-            if extra:
+            if extra and whole:
+                named = [x for x in extra if is_map_name(x)]
+                if named:
+                    errors.append('%s defines %s besides %s: map names outside the unit, '
+                                  'whose code would be lost' % (o, ', '.join(named), sym))
+                    continue
+                for x in extra:
+                    helpers.setdefault(x, o)
+            elif extra:
                 errors.append('%s defines %s besides %s, which the unit does not'
                               % (o, ', '.join(extra), sym))
                 continue
             if o not in drops:
                 drops.append(o)
+    if not whole:
+        return drops, errors, notes
+    dirs = {os.path.dirname(o) for o in drops}
+    changed = True
+    while changed:
+        changed = False
+        for o in sorted(defs):
+            gl = set(defs[o])
+            if (o in drops or o in asm_objs or not gl or os.path.dirname(o) not in dirs
+                    or any(is_map_name(g) for g in gl)):
+                continue
+            users = {u for u, r in refs.items() if r & gl}
+            if users and users <= set(drops):
+                drops.append(o)
+                notes.append('%s: module-local C helper(s) %s, referenced only by replaced '
+                             'objects: dropped' % (o, ', '.join(sorted(gl))))
+                changed = True
+    for h, o in sorted(helpers.items()):
+        users = sorted(u for u, r in refs.items() if h in r and u not in drops)
+        if users:
+            errors.append('%s defines %s (no map name) besides the unit\'s globals, and %s '
+                          'still references it' % (o, h, ', '.join(users)))
+        else:
+            notes.append('%s: C helper %s (no map name) goes with it' % (o, h))
     return drops, errors, notes
 
 
@@ -539,6 +606,7 @@ def compile_unit(unit, linkmap, dpc, root, data_bases=()):
     src = os.path.join(REPO, unit.path)
     routines = conform.unit_routines(unit.specs, linkmap)
     frag = conform.fragment_args(routines, linkmap)
+    unit.whole = not frag
     mopts, _ = conform.module_routine_args(unit.mods, routines, linkmap)
     dopts = ['--data-base=%s=%s' % kv for kv in data_bases]
     odir = os.path.join(root, OBJDIR)
@@ -604,6 +672,13 @@ def nm_all(root, objs):
         defs.update(parse_nm(must([NM, '-A', '--defined-only'] + objs[i:i + 400],
                                   cwd=root)))
     return defs
+
+
+def nm_undefined(root, objs):
+    refs = {}
+    for i in range(0, len(objs), 400):
+        refs.update(parse_nm_undefined(must([NM, '-A', '-u'] + objs[i:i + 400], cwd=root)))
+    return refs
 
 
 def make_var(root, name):
@@ -797,12 +872,19 @@ def run_all(args):
     allobjs = make_var(root, 'LINKTEST_ALL_OBJS')
     asm_objs = {o for o in allobjs if '/sau2/' in o[len('build/sau2/'):]}
     defs = nm_all(root, allobjs)
+    refs = None             # nm -u of every object, for whole-module units
 
     drops, adds = [], []
     ctx = {}
     data_plans = {}         # unit path -> [(section, addr, owner, defines)]
     for u, obj, globs, _, blocks, symtab in compiled:
-        d, errs, notes = plan_drops(globs, defs, asm_objs)
+        whole = None
+        if u.whole:
+            if refs is None:
+                refs = nm_undefined(root, allobjs)
+            whole = (refs, lambda n: (lambda m: m is not None and m.name == n)(
+                linkmap.lookup(n)))
+        d, errs, notes = plan_drops(globs, defs, asm_objs, whole)
         if blocks:
             if not ctx:
                 ctx['blocks'], ctx['anchors'] = c_layout(root)

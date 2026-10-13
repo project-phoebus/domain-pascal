@@ -56,7 +56,14 @@ a bare `rts`, then status stubs with by-address slots used once in A0,
 A1, A2, a status store then a constant boolean result), `xns_idp_get_stats.pas`
 (XNS_IDP_$GET_STATS 0xE18FD6: the status slot in A1 after the dead A0)
 and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
-D0`).  Interrupt built-ins (codegen-patterns 10, 12.5; beads
+D0`).  Whole map modules for the link test (bead domain-pascal-xdh.2;
+every routine of a map code segment, no fragment option, the module-end
+filler included): `gpu.pas` (GPU 0xE707FC..0xE70810), `pbu.pas` (PBU
+0xE590F8..0xE59110), `ct_release.pas` (CT 0xE70AF4..0xE70AF8),
+`tape_boot.pas` (TAPE_BOOT 0xE32734..0xE32744), `ethernet_init.pas`
+(ETHERNET 0xE78004..0xE78014) and `pkt_init.pas` (PKT's OS_INIT_PROC
+segment 0xE2F84C..0xE2F880: a `val_param` call with a routine's address
+and a longword constant pushed by value).  Interrupt built-ins (codegen-patterns 10, 12.5; beads
 domain-pascal-5aw.7, -0wc): `time_get_adjust.pas` (TIME_$GET_ADJUST
 0xE16AA8, the last routine of TIME_: `disable`/`enable` around a read
 into a local held in D1 across two M$ARITH calls, `link #-4`).  Loops

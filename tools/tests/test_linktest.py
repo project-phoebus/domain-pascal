@@ -150,6 +150,89 @@ class DropTest(unittest.TestCase):
         self.assertIn('IO_$ALLOC', notes[0])
 
 
+# A made-up module M with map routines M_$A, M_$B (the unit) and C helpers
+# without map names: m_$tail (in a definer), m_$shared (its own object,
+# used only by the module), m_$util (its own object, also used outside).
+NM_WHOLE = """\
+build/sau2/m/a.o:00000000 T M_$A
+build/sau2/m/a.o:00000020 T m_$tail
+build/sau2/m/b.o:00000000 T M_$B
+build/sau2/m/shared.o:00000000 T m_$shared
+build/sau2/m/util.o:00000000 T m_$util
+build/sau2/m/other.o:00000000 T M_$ELSEWHERE
+build/sau2/m/other.o:00000010 T m_$other_helper
+build/sau2/n/user.o:00000000 T N_$USER
+build/sau2/n/nhelp.o:00000000 T n_$help
+"""
+NM_U = """\
+build/sau2/m/a.o:         U m_$shared
+build/sau2/m/a.o:         U m_$util
+build/sau2/m/b.o:         U m_$tail
+build/sau2/m/b.o:         U CRASH_SYSTEM
+build/sau2/n/user.o:         U m_$util
+build/sau2/n/user.o:         U n_$help
+"""
+MAP_NAMES = {'M_$A', 'M_$B', 'M_$ELSEWHERE', 'N_$USER', 'CRASH_SYSTEM'}
+
+
+class WholeModuleDropTest(unittest.TestCase):
+    def setUp(self):
+        self.defs = linktest.parse_nm(NM_WHOLE)
+        self.refs = linktest.parse_nm_undefined(NM_U)
+        self.whole = (self.refs, MAP_NAMES.__contains__)
+
+    def test_parse_nm_undefined(self):
+        self.assertEqual(self.refs['build/sau2/m/b.o'], {'m_$tail', 'CRASH_SYSTEM'})
+        self.assertNotIn('build/sau2/m/shared.o', self.refs)
+
+    def test_fragment_keeps_refusal(self):
+        _, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, self.defs)
+        self.assertEqual(len(errs), 1)
+        self.assertIn('m_$tail', errs[0])
+
+    def test_helpers_dropped(self):
+        drops, errs, notes = linktest.plan_drops(
+            {'M_$A': 'T', 'M_$B': 'T'}, self.defs, (), self.whole)
+        self.assertEqual(errs, [])
+        # a.o with its helper, b.o, and shared.o (used only by a.o); not
+        # util.o (n/user.o uses it), nor other.o (a map name), nor
+        # n/nhelp.o (another directory)
+        self.assertEqual(sorted(drops), ['build/sau2/m/a.o', 'build/sau2/m/b.o',
+                                         'build/sau2/m/shared.o'])
+        self.assertTrue(any('m_$tail' in n for n in notes))
+        self.assertTrue(any('m_$shared' in n for n in notes))
+
+    def test_helper_still_referenced(self):
+        defs = dict(self.defs)
+        refs = dict(self.refs)
+        refs['build/sau2/n/user.o'] = refs['build/sau2/n/user.o'] | {'m_$tail'}
+        _, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, defs, (),
+                                         (refs, MAP_NAMES.__contains__))
+        self.assertEqual(len(errs), 1)
+        self.assertIn('build/sau2/n/user.o still references', errs[0])
+
+    def test_map_name_outside_unit_refused(self):
+        drops, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T',
+                                              'm_$other_helper': 'T'},
+                                             self.defs, (), self.whole)
+        self.assertNotIn('build/sau2/m/other.o', drops)
+        self.assertTrue(any('M_$ELSEWHERE' in e and 'map names' in e for e in errs))
+
+    def test_hand_assembly_never_dropped(self):
+        drops, _, _ = linktest.plan_drops(
+            {'M_$A': 'T', 'M_$B': 'T'}, self.defs, {'build/sau2/m/shared.o'}, self.whole)
+        self.assertNotIn('build/sau2/m/shared.o', drops)
+
+    def test_chain_of_helpers(self):
+        # shared.o's own helper, in a fourth object, goes too
+        defs = linktest.parse_nm(NM_WHOLE + 'build/sau2/m/deep.o:00000000 T m_$deep\n')
+        refs = linktest.parse_nm_undefined(NM_U + 'build/sau2/m/shared.o:   U m_$deep\n')
+        drops, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, defs, (),
+                                             (refs, MAP_NAMES.__contains__))
+        self.assertEqual(errs, [])
+        self.assertIn('build/sau2/m/deep.o', drops)
+
+
 NM_S = """\
 build/sau2/proc1/proc1_data.o:00000000 00000cc4 B PROC1_$DATA
 build/sau2/cal/cal_data.o:00000000 0000000c B CAL_$TIMEZONE
