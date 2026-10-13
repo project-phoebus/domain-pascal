@@ -464,6 +464,8 @@ mod tests {
             value_params: Vec::new(),
             address_params: Vec::new(),
             scalar_locals: Vec::new(),
+            nesting: None,
+            uplevel_refs: Vec::new(),
             body: Vec::new(),
             span,
         }
@@ -605,6 +607,7 @@ mod tests {
                         slot: 4,
                     }],
                     pad: 0,
+                    link: None,
                 })
             })
             .collect();
@@ -613,6 +616,7 @@ mod tests {
                 callee: Callee::Local(l.into()),
                 args: vec![],
                 pad: 0,
+                link: None,
             }));
         }
         f.body = body
@@ -888,6 +892,7 @@ mod tests {
                 callee: Callee::External("Q".into()),
                 args: Vec::new(),
                 pad: 0,
+                link: None,
             }),
             span: f.span,
         };

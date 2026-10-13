@@ -19,8 +19,8 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function, Rel,
-    ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp, Width,
+    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function, LinkArg, Rel,
+    ResultClass, ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
@@ -28,6 +28,10 @@ use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate_apart, RegClass, VRegs, DATA_BASE};
+
+/// The register a nested routine's static link is passed in
+/// (codegen-patterns 6: 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
+const STATIC_LINK_A: u8 = 1;
 
 /// A5, the data base register, as an address register number.
 const DATA_BASE_A: u8 = 5;
@@ -177,6 +181,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         }
         s.data_absolute = true;
     }
+    s.uplevel = f.uplevel_refs.clone();
     let control_only = f.body.len() == 1 && !is_simple(&f.body[0]);
     s.multi_body = f.body.len() >= 2 || control_only;
     if s.multi_body {
@@ -206,6 +211,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             ));
         }
     }
+    s.load_link(f)?;
     s.reg_locals = register_locals(f);
     s.ptr_locals = loop_pointer_locals(f, &s.reg_locals)
         .into_iter()
@@ -309,7 +315,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         }) => &[Reg::D(0)],
         _ => &[],
     };
-    let holds = held_through_calls(&s.out, &s.call_stmts, exit)?;
+    let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A))?;
     let apart = fresh_slot_loads(&s.out, &s.fresh)?;
     let saves = allocate_apart(&mut s.out, exit, &holds, &apart)
         .map_err(|what| unsupported(f.span, what))?;
@@ -350,10 +356,16 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 ///   callee-saved, 49 scratch: EC2_$ADVANCE 0xE42CB8 D0, `move.l
 ///   D0,-(SP)` at 0xE42CDA; DIR_$FIND_NET 0xE4FE36 A0, `pea (A0)` at
 ///   0xE4FE76), by a rule not known: refused.
+///
+/// `link`: the register of a nested routine's static link (codegen-patterns
+/// 6), loaded at entry like a parameter; whether the original held it
+/// through a call whose arguments use it last (reaching the enclosing
+/// frame, or passing it on to a sibling) is not seen either.
 fn held_through_calls(
     out: &[Insn],
     calls: &[(usize, usize, Span)],
     exit: &[Reg],
+    link: Option<Reg>,
 ) -> Res<Vec<(usize, Reg)>> {
     let straight = !out
         .iter()
@@ -373,6 +385,14 @@ fn held_through_calls(
                     || holds.contains(&(call, r))
                 {
                     continue;
+                }
+                if !straight && Some(r) == link {
+                    return Err(unsupported(
+                        span,
+                        "in a body with branches, a call whose arguments are the last use of the \
+                         static link (held through the call or not, codegen-patterns 6, 12.4 \
+                         R4(c)) is",
+                    ));
                 }
                 if !straight {
                     return Err(unsupported(
@@ -537,7 +557,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
                         self.refs[k].other = true;
                     }
                 }
-                Addr::Static(_) | Addr::Symbol { .. } => {}
+                Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
                 Addr::Indirect { base, .. } => match &**base {
                     // A local dereferenced as a pointer: not a data value.
                     Expr::Load { addr, .. } => self.other(addr),
@@ -699,7 +719,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
 enum Node<'a> {
     Expr(&'a Expr),
     Addr(&'a Addr),
-    Call,
+    Call(&'a Call),
 }
 
 /// Visit `e` and every expression, address and call inside it.
@@ -727,7 +747,7 @@ fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
 fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
     v(Node::Addr(a));
     match a {
-        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
         Addr::Indirect { base, .. } => walk_expr(base, v),
         Addr::Index { base, index, .. } => {
             walk_addr(base, v);
@@ -737,7 +757,7 @@ fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
 }
 
 fn walk_call<'a>(c: &'a Call, v: &mut dyn FnMut(Node<'a>)) {
-    v(Node::Call);
+    v(Node::Call(c));
     for a in &c.args {
         match a {
             Arg::Value { value, .. } => walk_expr(value, v),
@@ -851,7 +871,7 @@ fn stmts_read_frame(body: &[Stmt], off: i32) -> bool {
 fn stmts_call(body: &[Stmt]) -> bool {
     let mut hit = false;
     walk(body, &mut |n| match n {
-        Node::Call => hit = true,
+        Node::Call(_) => hit = true,
         Node::Expr(e) => hit |= expr_has_call(e),
         Node::Addr(_) => {}
     });
@@ -1193,7 +1213,7 @@ fn arith_calls(op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar, narrowed: bool) ->
 
 fn addr_has_call(a: &Addr) -> bool {
     match a {
-        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
         Addr::Indirect { base, .. } => expr_has_call(base),
         Addr::Index { base, index, .. } => addr_has_call(base) || expr_has_call(index),
     }
@@ -1281,6 +1301,7 @@ fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
 fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
     match addr {
         Addr::Frame(o) => Some((Addr::Frame(0), *o)),
+        Addr::Enclosing(o) => Some((Addr::Enclosing(0), *o)),
         Addr::Static(o) => Some((Addr::Static(0), *o)),
         Addr::Symbol { name, offset } => Some((
             Addr::Symbol {
@@ -1371,7 +1392,7 @@ impl Uses<'_> {
                 self.address(base);
                 self.expr(index);
             }
-            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
         }
     }
 
@@ -1567,6 +1588,12 @@ pub struct Selector {
     /// ([`loop_pointer_locals`]): frame offset, and the virtual register
     /// once the first assignment has defined it.
     ptr_locals: Vec<(i32, Option<u8>)>,
+    /// The register holding the static link of a nested routine, loaded
+    /// at entry when the body needs it ([`Selector::load_link`]).
+    link: Option<u8>,
+    /// The frame objects nested routines reach
+    /// ([`Function::uplevel_refs`]): never held in a register.
+    uplevel: Vec<(i32, u32)>,
 }
 
 /// An operand as [`Selector::eval`] leaves it.
@@ -1612,7 +1639,62 @@ impl Selector {
             loops: Vec::new(),
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
+            link: None,
+            uplevel: Vec::new(),
         }
+    }
+
+    /// Whether frame offset `o` lies in an object a nested routine reaches.
+    fn is_uplevel(&self, o: i32) -> bool {
+        self.uplevel
+            .iter()
+            .any(|&(p, n)| p <= o && o < p + n as i32)
+    }
+
+    /// Load the static link of nested routine `f` into a register for the
+    /// body (codegen-patterns 6), when the body reaches the enclosing
+    /// frame or passes the link on.
+    ///
+    /// - [`StaticLink::Passed`]: copied from A1, 0xE135A4 `movea.l
+    ///   A1,A2`;
+    /// - [`StaticLink::CallerFrame`]: the dynamic link, 0xE13616 `movea.l
+    ///   (A6),A4`.
+    ///
+    /// Placed after the parameters loaded at entry (`tools/nestsurvey.py`:
+    /// every nested routine that loads parameters at entry loads them
+    /// first, e.g. 0xE00CAC, 0xE0305C, 0xE082A8 `move.l (8,A6),D7; move.w
+    /// (0xc,A6),D3; movea.l (A6),A4`, 0xE397D0, 0xE62CEA; the one exception
+    /// is 0xE1359C, `movea.l A1,A2; move.l (0xc,A6),D2`, where the first
+    /// statement reads the link: a scheduler's choice, not modelled).  The
+    /// register is a virtual one: the allocator gives it A2..A4 when it
+    /// lives across a call (0xE1359C A2; 0xE1360C A4, the order rule of
+    /// codegen-patterns 12.4 not settled there), else the lowest free
+    /// (0xE15888 `movea.l (A6),A1` beside the parameter in A0).
+    fn load_link(&mut self, f: &Function) -> Res<()> {
+        let Some(n) = &f.nesting else {
+            return Ok(());
+        };
+        let mut needed = false;
+        walk(&f.body, &mut |node| match node {
+            Node::Addr(Addr::Enclosing(_)) => needed = true,
+            Node::Call(c) if c.link == Some(LinkArg::OwnLink) => needed = true,
+            _ => {}
+        });
+        if !needed {
+            return Ok(());
+        }
+        let a = self.alloc_a()?;
+        let src = match n.link {
+            StaticLink::Passed => Ea::Reg(Reg::A(STATIC_LINK_A)),
+            StaticLink::CallerFrame => Ea::Ind(FP),
+        };
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src,
+            dst: a,
+        });
+        self.link = Some(a);
+        Ok(())
     }
 
     /// The address register that holds the unit's data area: A5
@@ -2862,6 +2944,16 @@ impl Selector {
             .chain(f.address_params.iter().map(|&o| (o, None)))
             .collect();
         params.sort_by_key(|&(o, _)| o);
+        // A parameter a nested routine reaches is read from the frame at
+        // each use (PMAP_$FLUSH 0xE1376C: its `(8,A6)` slot, read by
+        // 0xE1359C as `(8,A2)`, reloaded at 0xE1378A, 0xE1379C, 0xE139AE,
+        // 0xE139CA; `(0x16,A6)`, read by 0xE1360C, at 0xE1377E, 0xE1385A,
+        // 0xE13916, ...; while `(0x12,A6)`, which no nested routine reads,
+        // is loaded into D5 at entry, 0xE1377A.  RIP_$UPDATE_INT 0xE15922
+        // likewise loads `(8)`, `(0x10)` and `(0x16)` but tests its byte
+        // `(0x14,A6)`, read by its nested 0xE15888 as `(0x14,A1)`, in the
+        // frame, 0xE15962 and 0xE159C4).
+        params.retain(|&(o, _)| !self.is_uplevel(o));
         for (offset, ty) in params {
             let mine: Vec<ParamUse> = uses
                 .iter()
@@ -3106,7 +3198,7 @@ impl Selector {
     fn store(&mut self, addr: &Addr, value: &Expr) -> Res<()> {
         let ty = value.ty();
         let size = size_of(ty.width);
-        if matches!(addr, Addr::Frame(o) if *o > 0) {
+        if matches!(addr, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
         if let Addr::Frame(o) = addr {
@@ -3232,7 +3324,8 @@ impl Selector {
     /// holding the base.
     fn addr_needs_reg(&self, addr: &Addr) -> bool {
         match addr {
-            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+            // The static link is held in a register (codegen-patterns 6).
+            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
             Addr::Index { .. } => true,
             Addr::Indirect { base, .. } => !matches!(
                 &**base,
@@ -3346,6 +3439,28 @@ impl Selector {
             }
             self.push(a)?;
             k -= 1;
+        }
+        // The static link of a nested callee, last before the `bsr`
+        // (codegen-patterns 6): the caller's frame, 0xE13928 `movea.l
+        // A6,A1` (PMAP_$FLUSH calling 0xE1359C); or the caller's own link,
+        // 0xE13718 `movea.l A4,A1` (the sibling 0xE1360C).
+        match c.link {
+            None => {}
+            Some(LinkArg::OwnFrame) => self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Reg(Reg::A(FP)),
+                dst: STATIC_LINK_A,
+            }),
+            Some(LinkArg::OwnLink) => {
+                let l = self
+                    .link
+                    .expect("the static link is loaded for a call passing it");
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(l)),
+                    dst: STATIC_LINK_A,
+                });
+            }
         }
         self.out.push(match &c.callee {
             Callee::External(sym) => Insn::Jsr(Ea::AbsL(sym.clone(), 0)),
@@ -3499,7 +3614,9 @@ impl Selector {
                 }
             }
             Arg::Address { addr, slot: 4 } => match addr {
-                Addr::Frame(_) | Addr::Static(_) => {
+                // An enclosing routine's object: `pea (d,An)` off the
+                // static link (0xE13648 `pea (-0x40,A4)` in 0xE1360C).
+                Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) => {
                     let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
                 }
@@ -3513,6 +3630,9 @@ impl Selector {
                 // itself, `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C and
                 // 0xE17818 pass its `actual_len` and `buffer` slots on to
                 // the worker 0xE17778).
+                // The enclosing routine's by-address parameter passed on:
+                // its slot through the static link, 0xE135B8 `move.l
+                // (8,A2),-(SP)` in 0xE1359C.
                 Addr::Indirect { base, offset: 0 }
                     if matches!(
                         &**base,
@@ -3523,6 +3643,15 @@ impl Selector {
                                 ..
                             },
                         } if self.pinned(*o).is_none()
+                    ) || matches!(
+                        &**base,
+                        Expr::Load {
+                            addr: Addr::Enclosing(_),
+                            ty: Scalar {
+                                width: Width::Long,
+                                ..
+                            },
+                        }
                     ) =>
                 {
                     let Expr::Load { addr, .. } = &**base else {
@@ -5460,10 +5589,14 @@ impl Selector {
             // no earlier statement left a value in ([`fresh_slot_loads`];
             // IIC_$RECEIVE 0xE70AC0..0xE70AD0).  By-value pointers are
             // loaded at entry there ([`Self::entry_loads`]).
+            // A slot a nested routine reaches is reloaded like any memory
+            // operand, into the lowest free register (PMAP_$FLUSH: `movea.l
+            // (8,A6),A0` at 0xE1378A and again at 0xE1379C, in the next
+            // statement).
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if self.multi && *o > 0 => {
+            } if self.multi && *o > 0 && !self.is_uplevel(*o) => {
                 let a = self.alloc_a()?;
                 self.out.push(Insn::Movea {
                     size: Size::L,
@@ -5506,6 +5639,20 @@ impl Selector {
             }
             // Frame objects and arguments: `(d,A6)` (0xE148D4).
             Addr::Frame(o) => Ok(Ea::Disp(*o, FP)),
+            // The enclosing routine's frame objects, through the static
+            // link held in a register since the entry (codegen-patterns 6:
+            // 0xE135AA `btst #0,(0x15,A2)`, 0xE1362E `(-0x50,A4)`).
+            Addr::Enclosing(o) => {
+                let Some(l) = self.link else {
+                    unreachable!(
+                        "the static link is loaded when the body reaches the enclosing frame"
+                    )
+                };
+                if !(-0x8000..0x8000).contains(o) {
+                    return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+                }
+                Ok(Ea::Disp(*o, l))
+            }
             // Other units' objects: absolute long (0xE148CE).
             Addr::Symbol { name, offset } => Ok(Ea::AbsL(name.clone(), *offset)),
             // The unit's own data: `(d,A5)` (PROC2_$GET_BOOT_FLAGS 0xE41B66
@@ -5572,6 +5719,8 @@ mod tests {
             value_params: Vec::new(),
             address_params: Vec::new(),
             scalar_locals: Vec::new(),
+            nesting: None,
+            uplevel_refs: Vec::new(),
             body: body
                 .into_iter()
                 .map(|kind| Stmt { kind, span: span() })
@@ -6449,6 +6598,7 @@ mod tests {
             callee: Callee::External(name.into()),
             args,
             pad,
+            link: None,
         })
     }
 
@@ -6519,6 +6669,7 @@ mod tests {
                     callee: Callee::Local("ZERO_PAGE".into()),
                     args: vec![ppn()],
                     pad: 0,
+                    link: None,
                 }),
                 lock("ML_$UNLOCK"),
             ],
@@ -7022,6 +7173,7 @@ mod tests {
                             slot: 4,
                         }],
                         pad: 0,
+                        link: None,
                     }),
                 ],
                 false,
@@ -7037,6 +7189,7 @@ mod tests {
                             slot: 2,
                         }],
                         pad: 2,
+                        link: None,
                     }),
                 ],
                 false,
@@ -7060,6 +7213,7 @@ mod tests {
                                     slot: 2,
                                 }],
                                 pad: 2,
+                                link: None,
                             },
                             ty: w,
                         },
@@ -7383,5 +7537,234 @@ mod tests {
         );
         let f = walk(Some(ext("X", vec![], 0)));
         assert!(loop_pointer_locals(&f, &[]).is_empty());
+    }
+
+    // ---- nested routines (codegen-patterns 6) ----------------------------
+
+    fn nested(link: StaticLink, frame: u32, body: Vec<StmtKind>) -> Function {
+        let mut f = proc_(frame, body);
+        f.symbol = "N".into();
+        f.global = false;
+        f.nesting = Some(dpc_ir::Nesting {
+            parent: "P".into(),
+            link,
+        });
+        f
+    }
+
+    fn local_call(name: &str, args: Vec<Arg>, pad: u32, link: Option<LinkArg>) -> StmtKind {
+        StmtKind::Call(Call {
+            callee: Callee::Local(name.into()),
+            args,
+            pad,
+            link,
+        })
+    }
+
+    /// 0xE1359C: the link copied from A1 at entry into a callee-saved
+    /// register (it lives across the call), the enclosing routine's slot
+    /// passed on through it (0xE135B8 `move.l (8,A2),-(SP)`) and its object
+    /// reached through the slot (0xE135DA `movea.l (8,A2),A0; move.w
+    /// (0xc,A0),-(SP)`); `link #-4` for the link slot.
+    #[test]
+    fn static_link_passed() {
+        let slot = || load(Addr::Enclosing(8), Scalar::POINTER);
+        let f = nested(
+            StaticLink::Passed,
+            4,
+            vec![
+                ext(
+                    "AST_$INVALIDATE_PAGE",
+                    vec![Arg::Address {
+                        addr: Addr::Indirect {
+                            base: Box::new(slot()),
+                            offset: 0,
+                        },
+                        slot: 4,
+                    }],
+                    0,
+                ),
+                ext(
+                    "NETLOG",
+                    vec![val(load(
+                        Addr::Indirect {
+                            base: Box::new(slot()),
+                            offset: 0xc,
+                        },
+                        word(),
+                    ))],
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-4",
+                "pea\t(%a2)",
+                "movea.l\t%a1,%a2",
+                "move.l\t(8,%a2),-(%sp)",
+                "jsr\t(AST_$INVALIDATE_PAGE).l",
+                "addq.w\t#4,%sp",
+                "subq.l\t#2,%sp",
+                "movea.l\t(8,%a2),%a0",
+                "move.w\t(0xc,%a0),-(%sp)",
+                "jsr\t(NETLOG).l",
+                "movea.l\t(-8,%fp),%a2",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// 0xE1360C: the dynamic link as the static link, `movea.l (A6),An`;
+    /// in a body without calls the lowest free register (0xE15888
+    /// `movea.l (A6),A1` beside a parameter in A0).  The enclosing
+    /// routine's local stored through it (0xE1375E `clr.w (-0x50,A4)`) and
+    /// its parameter read (0xE158A2 `tst.b (0x14,A1)`).
+    #[test]
+    fn static_link_caller_frame() {
+        let f = nested(
+            StaticLink::CallerFrame,
+            4,
+            vec![
+                store(Addr::Enclosing(-2), konst(0, word())),
+                store(sym("W"), load(Addr::Enclosing(0x14), word())),
+            ],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-4",
+                "movea.l\t(%fp),%a0",
+                "clr.w\t(-2,%a0)",
+                "move.w\t(0x14,%a0),(W).l",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        // No reference to the enclosing frame: no link load.
+        let f = nested(
+            StaticLink::Passed,
+            4,
+            vec![store(sym("W"), konst(0, word()))],
+        );
+        assert!(!text(&f).iter().any(|l| l.contains("%a1")));
+        // A nested routine does not assign the enclosing routine's
+        // parameters either.
+        let f = nested(
+            StaticLink::CallerFrame,
+            4,
+            vec![store(Addr::Enclosing(8), konst(0, word()))],
+        );
+        assert!(
+            err(&f).starts_with("assigning to a parameter"),
+            "{}",
+            err(&f)
+        );
+    }
+
+    /// The caller side: the parent passes its own frame (0xE13928
+    /// `movea.l A6,A1; bsr.w`), a sibling its own link (0xE13718 `movea.l
+    /// A4,A1; bsr.w`), last before the `bsr`, after the pushes.
+    #[test]
+    fn calls_pass_the_static_link() {
+        let mut f = proc_(
+            0,
+            vec![local_call(
+                "N",
+                vec![val(konst(5, long()))],
+                0,
+                Some(LinkArg::OwnFrame),
+            )],
+        );
+        f.symbol = "P".into();
+        assert_eq!(
+            body_text(&f),
+            ["pea\t(5).w", "movea.l\t%fp,%a1", "bsr.s\tN"]
+        );
+        let f = nested(
+            StaticLink::CallerFrame,
+            4,
+            vec![
+                local_call("M", vec![], 0, Some(LinkArg::OwnLink)),
+                store(Addr::Enclosing(-2), konst(0, word())),
+            ],
+        );
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-4",
+                "pea\t(%a2)",
+                "movea.l\t(%fp),%a2",
+                "movea.l\t%a2,%a1",
+                "bsr.s\tM",
+                "clr.w\t(-2,%a2)",
+                "movea.l\t(-8,%fp),%a2",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// The link is loaded after the parameters loaded at entry (0xE082A8
+    /// `move.l (8,A6),D7; move.w (0xc,A6),D3; movea.l (A6),A4`).
+    #[test]
+    fn static_link_after_entry_loads() {
+        let mut f = nested(
+            StaticLink::CallerFrame,
+            4,
+            vec![
+                store(Addr::Enclosing(-2), load(Addr::Frame(8), word())),
+                store(sym("W"), load(Addr::Frame(8), word())),
+            ],
+        );
+        vparams(&mut f, &[(8, word())]);
+        assert_eq!(
+            body_text(&f),
+            [
+                "move.w\t(8,%fp),%d0",
+                "movea.l\t(%fp),%a0",
+                "move.w\t%d0,(-2,%a0)",
+                "move.w\t%d0,(W).l",
+            ]
+        );
+    }
+
+    /// The enclosing routine's side (bead domain-pascal-thc): a parameter
+    /// its nested routines reach is not loaded at entry but read in the
+    /// frame at each use (PMAP_$FLUSH 0xE13788 and 0xE1379C reload
+    /// `(8,A6)`, read by 0xE1359C; `(0x12,A6)` into D5 at entry).
+    #[test]
+    fn uplevel_parameters_stay_in_the_frame() {
+        let body = || {
+            vec![
+                store(sym("W"), load(Addr::Frame(10), word())),
+                StmtKind::If {
+                    cond: IrCond::Compare {
+                        op: Rel::Eq,
+                        lhs: load(Addr::Frame(8), word()),
+                        rhs: konst(3, word()),
+                    },
+                    then_: vec![Stmt {
+                        kind: store(sym("X"), konst(0, word())),
+                        span: span(),
+                    }],
+                    else_: vec![],
+                },
+                store(sym("W"), load(Addr::Frame(10), word())),
+            ]
+        };
+        let mut f = proc_(0, body());
+        vparams(&mut f, &[(8, word()), (10, word())]);
+        let t = body_text(&f);
+        assert_eq!(t[..2], ["move.w\t(8,%fp),%d0", "move.w\t(0xa,%fp),%d1"]);
+        assert!(t.contains(&"cmpi.w\t#3,%d0".to_string()), "{t:?}");
+        let mut f = proc_(0, body());
+        vparams(&mut f, &[(8, word()), (10, word())]);
+        f.uplevel_refs = vec![(8, 2)];
+        let t = body_text(&f);
+        assert_eq!(t[..2], ["move.w\t(0xa,%fp),%d0", "move.w\t%d0,(W).l"]);
+        assert!(t.contains(&"cmpi.w\t#3,(8,%fp)".to_string()), "{t:?}");
     }
 }

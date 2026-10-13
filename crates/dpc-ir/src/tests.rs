@@ -1039,6 +1039,7 @@ fn calls_and_fill() {
                     },
                 ],
                 pad: 0,
+                link: None,
             }),
             &StmtKind::Fill {
                 start: buf(),
@@ -1049,6 +1050,7 @@ fn calls_and_fill() {
                 callee: Callee::External("MMU_$REMOVE".into()),
                 args: vec![ppn()],
                 pad: 0,
+                link: None,
             }),
         ]
     );
@@ -1066,6 +1068,7 @@ fn calls_and_fill() {
                 slot: 2
             }],
             pad: 2,
+            link: None,
         })
     );
     assert_eq!(
@@ -1074,6 +1077,7 @@ fn calls_and_fill() {
             callee: Callee::Local("ZERO_PAGE".into()),
             args: vec![ppn()],
             pad: 0,
+            link: None,
         })
     );
 }
@@ -1132,6 +1136,7 @@ end;
                 },
             ],
             pad: 2,
+            link: None,
         })
     );
 }
@@ -1908,4 +1913,386 @@ procedure p; begin {src} end;"
         ));
         assert!(e.iter().any(|m| m.contains(needle)), "{src}: {e:?}");
     }
+}
+
+// ---- nested routines (codegen-patterns 6) ----------------------------
+
+/// The PMAP_$FLUSH shape (0xE1376C): two nested routines, the first
+/// called by the parent and by its sibling (static link passed), the
+/// second by the parent only (the caller's frame).
+const NEST: &str = "module nst;
+type
+  rec_t = record
+    a: integer32;
+    seg: integer;
+  end;
+procedure ext_$p(var r: rec_t; v: integer32); options(val_param); extern;
+procedure ext_$w(w: integer); options(val_param); extern;
+procedure par(var r: rec_t; flags: integer; count: integer); options(val_param);
+var
+  n: integer;
+  done: integer;
+
+  procedure first(v: integer32);
+  begin
+    ext_$p(r, v);
+    ext_$w(flags);
+  end;
+
+  procedure second;
+  begin
+    ext_$w(n);
+    first(5);
+    n := 0;
+  end;
+
+begin
+  n := count;
+  done := count;
+  second;
+  first(7);
+  ext_$w(done);
+end;
+";
+
+fn func<'a>(m: &'a Module, sym: &str) -> &'a Function {
+    m.functions.iter().find(|f| f.symbol == sym).unwrap()
+}
+
+fn calls_of(f: &Function) -> Vec<(String, Option<LinkArg>)> {
+    let mut out = Vec::new();
+    for st in &f.body {
+        if let StmtKind::Call(c) = &st.kind {
+            let (Callee::Local(s) | Callee::External(s)) = &c.callee;
+            out.push((s.clone(), c.link));
+        }
+    }
+    out
+}
+
+#[test]
+fn nested_routines_order_and_static_links() {
+    let m = lower_src(NEST).unwrap();
+    // Nested routines first, in source order, then the parent (0xE1359C,
+    // 0xE1360C, PMAP_$FLUSH 0xE1376C).
+    let order: Vec<&str> = m.functions.iter().map(|f| f.symbol.as_str()).collect();
+    assert_eq!(order, ["FIRST", "SECOND", "PAR"]);
+    let first = func(&m, "FIRST");
+    let second = func(&m, "SECOND");
+    assert!(!first.global && !second.global);
+    // Called by its sibling too: the link is passed (0xE1359C, A1).
+    assert_eq!(
+        first.nesting,
+        Some(Nesting {
+            parent: "PAR".into(),
+            link: StaticLink::Passed
+        })
+    );
+    // Called by the parent only: the caller's frame (0xE1360C, `(A6)`).
+    assert_eq!(
+        second.nesting.as_ref().unwrap().link,
+        StaticLink::CallerFrame
+    );
+    assert_eq!(func(&m, "PAR").nesting, None);
+    // The parent passes its frame, the sibling its own link (0xE13928,
+    // 0xE13718); a call of a routine whose link is not passed has none.
+    assert_eq!(
+        calls_of(func(&m, "PAR")),
+        [
+            ("SECOND".to_string(), None),
+            ("FIRST".to_string(), Some(LinkArg::OwnFrame)),
+            ("EXT_$W".to_string(), None)
+        ]
+    );
+    assert_eq!(
+        calls_of(second),
+        [
+            ("EXT_$W".to_string(), None),
+            ("FIRST".to_string(), Some(LinkArg::OwnLink))
+        ]
+    );
+}
+
+#[test]
+fn uplevel_references() {
+    let m = lower_src(NEST).unwrap();
+    let first = func(&m, "FIRST");
+    // `r`, the parent's by-address parameter, passed on: its slot through
+    // the static link (0xE135B8 `move.l (8,A2),-(SP)`); `flags`, a value
+    // parameter, read in the enclosing frame (0xE135AA).
+    let StmtKind::Call(c) = &first.body[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        c.args[0],
+        Arg::Address {
+            addr: Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Enclosing(8),
+                    ty: Scalar::unsigned(Width::Long)
+                }),
+                offset: 0
+            },
+            slot: 4
+        }
+    );
+    let StmtKind::Call(c) = &first.body[1].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        &c.args[0],
+        Arg::Value {
+            value: Expr::Load {
+                addr: Addr::Enclosing(12),
+                ..
+            },
+            ..
+        }
+    ));
+    // The parent's local `n` read and written by `second` (0xE1362E).
+    let second = func(&m, "SECOND");
+    assert!(matches!(
+        &second.body[2].kind,
+        StmtKind::Store {
+            addr: Addr::Enclosing(-2),
+            ..
+        }
+    ));
+    // The parent lists what its nested routines reach; `n` is not a
+    // register candidate, `done` is (bead domain-pascal-thc).
+    let par = func(&m, "PAR");
+    assert_eq!(par.uplevel_refs, [(-2, 2), (8, 4), (12, 2)]);
+    let locals: Vec<i32> = par.scalar_locals.iter().map(|l| l.offset).collect();
+    assert_eq!(locals, [-4]);
+}
+
+#[test]
+fn nested_frames_reserve_the_link_slot() {
+    // codegen-patterns 6: a nested routine's locals start below a 4-byte
+    // slot at -4 (0xE1359C `link #-4`, no locals).
+    let m = lower_src(
+        "module m;
+procedure p; options(val_param);
+var a: integer;
+  procedure q;
+  var b: integer;
+  begin
+    b := 1;
+    a := b;
+  end;
+  procedure e;
+  begin
+    a := 0;
+  end;
+begin
+  q;
+  e;
+end;
+",
+    )
+    .unwrap();
+    assert_eq!(func(&m, "Q").frame_size, 6);
+    assert_eq!(func(&m, "Q").scalar_locals[0].offset, -6);
+    assert_eq!(func(&m, "E").frame_size, 4);
+    assert_eq!(func(&m, "P").frame_size, 2);
+}
+
+#[test]
+fn recursive_nested_routine_passes_its_link() {
+    // 0xE397D0, 0xE39BC2, 0xE4F3BA, 0xE50D5E call themselves with
+    // `movea.l An,A1`, An copied from A1 at entry.
+    let m = lower_src(
+        "module m;
+procedure p; options(val_param);
+var k: integer;
+  procedure r;
+  begin
+    k := k - 1;
+    if k > 0 then r;
+  end;
+begin
+  k := 3;
+  r;
+end;
+",
+    )
+    .unwrap();
+    assert_eq!(
+        func(&m, "R").nesting.as_ref().unwrap().link,
+        StaticLink::Passed
+    );
+    assert_eq!(
+        calls_of(func(&m, "P")),
+        [("R".to_string(), Some(LinkArg::OwnFrame))]
+    );
+    let StmtKind::If { then_, .. } = &func(&m, "R").body[1].kind else {
+        panic!()
+    };
+    assert!(matches!(&then_[0].kind, StmtKind::Call(c) if c.link == Some(LinkArg::OwnLink)));
+}
+
+#[test]
+fn link_passed_only_to_routines_that_need_it() {
+    // A nested routine that reaches no enclosing frame gets no link even
+    // when a sibling or itself calls it: ROUTE_$SERVICE's nested 0xE69E40,
+    // called by its sibling 0xE69EC2 at 0xE69F3C with no A1 load.  `mid'
+    // needs its link only to pass it on to `leaf' (transitively).
+    let m = lower_src(
+        "module m;
+var g: integer;
+procedure p; options(val_param);
+var k: integer;
+  procedure free(x: integer);
+  begin
+    g := x;
+    if x > 0 then free(x - 1);
+  end;
+  procedure leaf;
+  begin
+    k := 0;
+  end;
+  procedure mid;
+  begin
+    free(1);
+    leaf;
+  end;
+  procedure top;
+  begin
+    mid;
+  end;
+begin
+  k := 3;
+  free(2);
+  leaf;
+  mid;
+  top;
+end;
+",
+    )
+    .unwrap();
+    let link = |s: &str| func(&m, s).nesting.as_ref().unwrap().link;
+    assert_eq!(link("FREE"), StaticLink::CallerFrame);
+    assert_eq!(link("LEAF"), StaticLink::Passed);
+    assert_eq!(link("MID"), StaticLink::Passed);
+    assert_eq!(link("TOP"), StaticLink::CallerFrame);
+    assert_eq!(
+        calls_of(func(&m, "P")),
+        [
+            ("FREE".to_string(), None),
+            ("LEAF".to_string(), Some(LinkArg::OwnFrame)),
+            ("MID".to_string(), Some(LinkArg::OwnFrame)),
+            ("TOP".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        calls_of(func(&m, "MID")),
+        [
+            ("FREE".to_string(), None),
+            ("LEAF".to_string(), Some(LinkArg::OwnLink))
+        ]
+    );
+    assert_eq!(
+        calls_of(func(&m, "TOP")),
+        [("MID".to_string(), Some(LinkArg::OwnLink))]
+    );
+}
+
+#[test]
+fn unsupported_nesting() {
+    // Two levels: outer frames through a chain of links (DIR 0xE4F034).
+    let e = errs(
+        "module m;
+procedure p;
+  procedure q;
+    procedure r;
+    begin
+    end;
+  begin
+  end;
+begin
+end;
+",
+    );
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(
+        e[0].starts_with("t.pas:4:5: error: a routine nested in a nested routine"),
+        "{e:?}"
+    );
+    // A nested routine declared `forward`.
+    let e = errs(
+        "module m;
+procedure p;
+  procedure q; forward;
+  procedure q;
+  begin
+  end;
+begin
+  q;
+end;
+",
+    );
+    assert!(
+        e[0].contains("a nested routine declared `forward`"),
+        "{e:?}"
+    );
+    // Two nested routines of one name: the local symbols collide.
+    let e = errs(
+        "module m;
+procedure p;
+  procedure h;
+  begin
+  end;
+begin
+  h;
+end;
+procedure q;
+  procedure h;
+  begin
+  end;
+begin
+  h;
+end;
+",
+    );
+    assert!(e[0].contains("two routines named `H` in one unit"), "{e:?}");
+    // A `for` index a nested routine reaches (RINGLOG_$CNTL 0xE72296: kept
+    // in the frame, not implemented).
+    let e = errs(
+        "module m;
+var w: extern integer;
+procedure p;
+var i: integer;
+  procedure q;
+  begin
+    w := i;
+  end;
+begin
+  for i := 1 to 5 do q;
+end;
+",
+    );
+    assert!(
+        e[0].starts_with("t.pas:10:3: error: a `for` loop whose index a nested routine reaches"),
+        "{e:?}"
+    );
+    // A nested routine's loop over the enclosing routine's variable
+    // (0xE721F0, through the static link).
+    let e = errs(
+        "module m;
+var w: extern integer;
+procedure p;
+var i: integer;
+  procedure q;
+  begin
+    for i := 1 to 5 do w := i;
+  end;
+begin
+  q;
+end;
+",
+    );
+    assert!(
+        e[0].contains("a `for` index variable that is not a local"),
+        "{e:?}"
+    );
 }

@@ -1537,11 +1537,12 @@ impl<'t> Checker<'t> {
             });
         }
         if let Some(p) = parent {
-            // Heading order.  TODO(codegen): a nested routine declared
+            // Heading order: the emission order of nested routines
+            // (codegen-patterns 6, "Order").  A nested routine declared
             // `forward` is listed at its heading; top-level routines are
-            // placed at their bodies (`decls`, codegen-patterns 6,
-            // "Order").  Whether nested ones follow body order too is not
-            // checked against the image (dpc refuses nested routines).
+            // placed at their bodies (`decls`).  Whether nested ones follow
+            // body order too is not seen in the image (`dpc-ir` refuses a
+            // `forward` nested routine).
             self.routines[p.0 as usize].nested.push(id);
         }
         id
@@ -1549,11 +1550,19 @@ impl<'t> Checker<'t> {
 
     fn routine_body(&mut self, id: RoutineId, body: &ast::RoutineBody) {
         let level = self.routines[id.0 as usize].level;
-        self.ctx.push(RoutineCtx {
-            id,
-            level,
-            frame: 0,
-        });
+        // A nested routine's frame starts with a pointer-sized slot for
+        // its static link (codegen-patterns 6, `tools/nestsurvey.py`): of
+        // the image's 86 nested routines none has `link #0` and none
+        // addresses `(-4..-1,A6)` except three that store a link there
+        // (0xE4F3BA `move.l A1,(-4,A6)`, read by its own nested routines
+        // as `(-4,A0)`; 0xE4EB40, 0xE4DFFE); 0xE1359C has `link #-4` and
+        // no locals.  Locals follow below it.
+        let frame = if self.routines[id.0 as usize].parent.is_some() {
+            self.target.pointer_size()
+        } else {
+            0
+        };
+        self.ctx.push(RoutineCtx { id, level, frame });
         self.scopes.push(Scope::default());
 
         // Frame order (Uncertain, codegen-patterns 2): the function result

@@ -151,3 +151,13 @@ Tests:
 - `expr/builtins` - codegen-patterns 10.1, 13, 8: `sizeof`, `firstof`,
   `lastof`, `succ`, `pred`, `max`, `min`, `in_range` folded to constants;
   `succ`/`pred` of a variable as `addq`/`subq` in place (0xE00B3E).
+- `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
+  shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
+  the static link passed in A1 to a routine a sibling also calls
+  (0xE13928, 0xE13718, 0xE135A4), the dynamic link `(A6)` used by one
+  only its parent calls (0xE13616); uplevel slots, objects and locals
+  through the link register (0xE135B8, 0xE135DA, 0xE1362E); the 4-byte
+  link slot of nested frames; the parent's uplevel local in its frame.
+- `nested/recursion` - codegen-patterns 6, 4: a recursive nested routine
+  passing its own link (0xE397D0), a nested function reading the
+  enclosing local through `(A6)`, A5 inherited by nested routines.

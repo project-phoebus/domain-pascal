@@ -365,6 +365,17 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     one-loop routines have no frame bytes beyond their locals, and three
     routines of one loop shape have `link #-8`, `#-12` and `#-16`, so a
     `for` loop costs no hidden slot of 4 bytes or more; (a) is favoured.
+    A third fact bears on the unnamed routines among these (0xE00EB0,
+    the KBD module-local 0xE1CA62, ...): unnamed routines, nested or
+    not, have no `link #0` and do not address `(-4..-1,A6)` except to
+    store a static link there (section 6, "Frame"; `tools/nestsurvey.py
+    slots`: 2 exceptions among the 355 that are not nested, 0xE6B074
+    `link #0` and 0xE70396, neither called by a `bsr`), so 4 of their
+    bytes are a reserved slot.  The 130 unnamed routines called by two
+    or more map-named routines, which cannot be nested in either, have
+    no exception.  Not applied to `internal` routines
+    yet (owner decision: the stand-in locals of the conformance units
+    would shrink by 4 bytes).
 - **Register save:** straight after `link`, only the callee-saved
   registers the routine uses.  The instruction depends on how many there
   are (Verified, sweep of every `link` at 0xE00800..0xE88834; details and
@@ -1018,28 +1029,174 @@ their host); no compare or widening of either has been catalogued.
 
 ---
 
-## 6. Nested routines (Verified at PMAP_$FLUSH)
+## 6. Nested routines (Verified by survey; implemented for one level)
 
 PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
 0xE1360C, and they come **before** their parent in the code.
+
+**Survey** (bead domain-pascal-5aw.3; `tools/nestsurvey.py`, routines split
+as `tools/a5survey.py` does, reachable instructions only).  A routine is
+taken as nested when it is not map-named (a nested routine is a local
+symbol, ref 5.5.4 p. 5-17) and either reads A1 before writing it on its
+straight-line entry path, or moves from `(A6)` (a `lea (A6)` is not a
+read of the link: 0xE4C02C, 0xE7649E were false hits).  Every `bsr` is
+classified by what its caller last wrote to A1 before it.  86 nested
+routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
 
 - **Static link in A1.** The caller loads the enclosing routine's frame
   pointer into **A1** before the `bsr`:
   - From the parent: `movea.l A6,A1; bsr.w 0xE1359C` (0xE13928, 0xE13978).
   - From a sibling nested routine: `movea.l A4,A1; bsr.w 0xE1359C`
     (0xE13718), where A4 = that sibling's `(A6)` = the parent's frame.
+  - From the routine itself (recursion): 0xE397D0, 0xE39BC2, 0xE4F3BA,
+    0xE50D5E each call themselves passing their own copy of A1.
   - The callee copies it: 0xE135A4 `movea.l A1,A2`, then reaches the
     parent's locals as `(d,A2)`.
 - **Dynamic link used as the static link.** 0xE1360C is called only from its
   parent, and the parent does not load A1 (0xE13856, 0xE13950, 0xE13992).
   The callee does `movea.l (A6),A4` (0xE13616): the saved caller frame
-  pointer, which here *is* the parent frame.  Also seen in
-  PROC2_$SUSPEND's nested routine at 0xE41214 and in VFMT_$MAIN, RIP_$SEND
-  and KBD_$RCV (C comments in `../source/domain_os`).
-- **Uncertain:** the compiler's rule for choosing A1 or `(A6)`.  The
-  hypothesis consistent with PMAP_$FLUSH: A1 is passed when the routine is
-  reachable from anything other than its direct parent, for example a
-  sibling.  The deeper-nesting chain walk has not been observed.
+  pointer, which here *is* the parent frame.  Also PROC2_$SUSPEND's
+  0xE4120C (`movea.l (A6),A2` at 0xE41214), RIP_$SEND's 0xE870DC,
+  KBD_$RCV's 0xE1CC10, RIP_$UPDATE_INT's 0xE15888 and 71 more.
+- **The rule (Verified, 86 of 86):** the link is passed in A1 exactly when
+  some call of the routine comes from a routine other than its enclosing
+  one.  All 11 A1 routines have such a caller (4 themselves, 7 a sibling
+  or a deeper routine: 0xE10510 from 0xE10628, 0xE5CD02 from 0xE5CD66,
+  0xE62CEA from 0xE62D4A and 0xE63096, ...; 3 are called by siblings
+  only: 0xE4CB6A, 0xE4EA9C, 0xE62D4A); all 75 `(A6)` routines have exactly
+  one caller, their parent.  (The rule could equally be stated "A1 when
+  the routine is called from inside a nested routine": at one level of
+  nesting these coincide.)  The survey only sees routines that read
+  their link.  A nested routine that reaches no enclosing frame looks
+  like an ordinary internal routine, and the image passes it nothing:
+  no `bsr` anywhere follows a load of A1 (`movea.l A6,A1` or `movea.l
+  An,A1`) when the callee does not read A1 (0 sites).  Two such routines
+  lie inside a family, so they are nested, and are called by siblings
+  without A1.  ROUTE_$SERVICE's 0xE69E40 lies between its nested
+  0xE69CCC and 0xE69EC2, has `link #-4` and no frame or link access,
+  and is called by 0xE69EC2 at 0xE69F3C (`subq.l #2,SP; clr.w -(SP);
+  move.w D2,-(SP); st -(SP); bsr.w`).  DIR's 0xE4EF42 lies inside
+  0xE4F3BA's family and is called by 0xE4EF7C and 0xE4F2DA.  So the
+  link is passed only to a routine that needs it: one that reaches the
+  enclosing frame, or that passes the link on to a sibling (or itself)
+  that takes it.  `dpc` computes this as a fixpoint.  **Implemented**
+  (`dpc-ir` `set_static_links`: `Nesting`, `StaticLink::{Passed,
+  CallerFrame}`, `Call::link` with `LinkArg::{OwnFrame, OwnLink}`;
+  `dpc-m68k` `isel.rs` `load_link`, `call`).
+- **Where the callee loads the link** (`entry`): after its parameter
+  loads at entry (12.2) in 41 routines (0xE082A8 `move.l (8,A6),D7;
+  move.w (0xc,A6),D3; movea.l (A6),A4`; 0xE397D0, 0xE62CEA with A1),
+  first in the 45 that load no parameter before it.  Of these, 3 load a
+  parameter only after it: 0xE1359C `movea.l A1,A2; move.l
+  (0xc,A6),D2`, whose first statement reads the link (a scheduler's
+  choice? not modelled), 0xE5B188, and 0xE4F3BA (which stores its link,
+  below).  4 of the 41 load one more parameter after the link (0xE0B522,
+  0xE0BD2C, 0xE18C5E `movea.l (8,A6),A0`, probably a slot loaded where
+  needed, 12.2; 0xE4F034, interleaved with its chain walk).  `dpc` loads it after the entry loads, only when the body
+  reaches the enclosing frame or passes the link on.
+- **Which register** (`entry`): a callee-saved one when the link lives
+  across a call, like any value (12.4 R3): A2 in 44 routines with calls,
+  A3 in 7, A4 in 4 (0xE1360C: the allocation order of 12.4 is not
+  settled there, A2/A3 go to later values); in routines without calls A0
+  (8) or A1 (4: 0xE15888 `movea.l (A6),A1` beside a parameter in A0).  A
+  few keep it in a D register (0xE01872 D3, 0xE62D4A `move.l A1,D2`; a
+  pointer also used as data, 12.2) or in a frame slot (0xE064B0); 7
+  routines with calls hold it in A0 (0xE1A4DC, 0xE1CC10: its last use
+  comes before the first call).  `dpc`: a virtual address register for the
+  allocator.  Where the link's last use is in a call's arguments (an
+  uplevel operand, or the link passed on), in a body with branches,
+  `dpc` refuses (12.4 R4(c), not settled; 0xE1359C has this shape, its
+  link A2 being callee-saved anyway because it lives across the first
+  `jsr`).  In a body without branches it is held through the call like a
+  parameter (12.4 R4(c)), which fits FILE_$SET_PROT's 0xE5DEF4: `movea.l
+  (A6),A2` (0xE5DEFA, saved with `pea (A2)`), last used by `pea
+  (-0x44,A2)` among the arguments of the `jsr` at 0xE5DF20.
+- **Uplevel accesses.**  The parent's by-value parameters and locals as
+  `(d,An)` (0xE135AA `btst #0,(0x15,A2)`, the low byte of a word set; the
+  local `(-0x50,A4)` read at 0xE1362E and cleared at 0xE1375E); a
+  by-address parameter's slot read through the link, then dereferenced
+  (0xE135DA `movea.l (8,A2),A0; move.w (0xc,A0),-(SP)`) or passed on
+  (0xE135B8 `move.l (8,A2),-(SP)`); the address of a parent's local
+  (0xE13648 `pea (-0x40,A4)`).  **Implemented** (`dpc-ir`
+  `Addr::Enclosing`, `enclosing`; `isel.rs` `ea_of`, `push`); a nested
+  routine assigning the enclosing routine's parameters is refused, as
+  for a routine's own.
+- **The parent's side** (bead domain-pascal-thc).  What its nested
+  routines reach stays in memory: PMAP_$FLUSH keeps its word
+  `(-0x50,A6)` in the frame (0xE13784 `clr.w`, 0xE13938 `addq.w #1`,
+  0xE1398C `tst.w`) and re-reads its parameters `(8,A6)` (a slot read by
+  0xE1359C; reloaded at 0xE1378A, 0xE1379C, 0xE139AE, 0xE139CA) and
+  `(0x16,A6)` (read by 0xE1360C; 0xE1377E, 0xE1385A, 0xE13916, ...) at
+  each use, into the lowest free register (A0 each time), while its
+  `(0x12,A6)`, which no nested routine reads, is loaded into D5 at entry
+  (0xE1377A) and its boolean in D3 (0xE137A8 `sne D3`) is a register
+  local.  RIP_$UPDATE_INT 0xE15922 likewise loads `(8)`, `(0x10)` and
+  `(0x16)` at entry but tests its byte `(0x14,A6)`, read by its nested
+  0xE15888 as `(0x14,A1)`, in the frame (0xE15962, 0xE159C4).
+  RINGLOG_$CNTL 0xE72226 steps the `for` index its nested 0xE721CC also
+  uses (0xE721F0 `move.w #1,(-2,A2)`, 0xE7220A `addq.w #1,(-2,A2)`) in
+  its frame, 0xE72296..0xE722B0 `clr.w (-2,A6)` ... `muls.w (-2,A6),D1`
+  ... `addq.w #1,(-2,A6)`, beside the `dbf` count in D0.
+  **Implemented:** `Function::uplevel_refs` lists the parent's frame
+  objects its nested routines reach (from their IR); `entry_loads` skips
+  such parameters and `eval_a` reloads such slots like any memory load;
+  `scalar_locals` leaves such locals out, so `register_locals` and
+  `loop_pointer_locals` never hold them; a `for` loop whose index a
+  nested routine reaches is refused (the memory-index form above is not
+  implemented, `check_uplevel_indices`).
+- **Frame: a 4-byte static-link slot** (`slots`).  No nested routine has
+  `link #0`, and none addresses `(-4..-1,A6)` except three that store a
+  link there: 0xE4F3BA `move.l A1,(-4,A6)` (twice, 0xE4F3C2/0xE4F3C6),
+  read by its own nested routines as `(-4,A0)`; 0xE4EB40 and 0xE4DFFE,
+  level-2 routines that store the outermost frame there.  0xE1359C has
+  `link #-4` and no locals.  So a nested frame starts with a slot for the
+  link, locals below it.  **Implemented** (`dpc-sema` `routine_body`:
+  a nested routine's frame allocation starts at 4).
+  The same holds for the unnamed (internal) routines that are not
+  nested: of 355, one has `link #0` (0xE6B074, a VFMT segment start) and
+  one addresses `(-4..-1,A6)` (0xE70396), against 190 `link #0` and 320
+  such routines among the 1194 map-named ones.  Not implemented for
+  `internal` routines: it would change the frames of the units that
+  declare stand-in locals for unexplained frame space (section 2:
+  0xE00EB0 `link #-12`, 0xE17778 `#-0x10`; the DISK_ module-local
+  0xE3CCCE `link #-8` holds its one 4-byte local in A1, which this slot
+  would explain); an owner decision.
+- **Deeper nesting** (observed, not implemented; refused): 6 level-2
+  routines and 1 level-3 routine, all in DIR (`summary`, levels).  An
+  A1-linked level-1 routine with nested routines stores its link at
+  `(-4,A6)` (0xE4F3BA); its children (all `(A6)`-linked) reach the
+  outermost frame with `movea.l (A6),A0; movea.l (-4,A0),A2` (0xE4EF8C;
+  0xE4F2E2 through D5); the level-3 0xE4F034 walks `movea.l (A6),A0; movea.l
+  (A0),A0; movea.l (-4,A0),A2`; a child of an `(A6)`-linked level-1
+  routine uses that routine's dynamic link, `move.l (A6),(-0x1a4,A6);
+  movea.l (-0x1a4,A6),A0; move.l (A0),(-4,A6)` (0xE4DFFE).  `dpc`
+  refuses a routine nested in a nested routine and a reference more than
+  one routine out.
+- **Conformance: blocked** (bead domain-pascal-5aw.3).  A unit must hold
+  the parent with its nested routines (they are contiguous before it),
+  and every family in the image is large.  PMAP_$FLUSH (0xE1359C..
+  0xE13A14) needs, in 0xE1359C alone: a run of three word constants
+  (0xE135D0 `clr.l -(SP); clr.w -(SP)` for three zero words: the
+  rightmost pair merged, one site; 1.5 rejects such runs); `pea (d,An)`
+  of an object through a pointer loaded from memory (0xE135E2..0xE135EA
+  `movea.l (8,A2),A1; movea.l (4,A1),A3; pea (0x10,A3)`); an inner `if`
+  whose false branch goes to the epilogue (0xE135CC `bpl.s 0xE13602`,
+  7.1); the link's last use in a call's arguments in a body with
+  branches (above); the link copy before the parameter load (0xE135A4);
+  no register reuse within an argument list (0xE135DA..0xE135E6 A0, A1,
+  A3; 12.4 R4(a)).  0xE1360C and PMAP_$FLUSH add loop-invariant
+  constants held in registers (0xE13696..0xE136A2), a strength-reduced
+  pointer kept in a frame temporary (0xE137E4..0xE137F0 `move.l
+  A1,(-0x78,A6); movea.l (-0x78,A6),A1`), a function body of many
+  statements (12.4 R5), and more.  The smallest families
+  (`tools/nestsurvey.py`, nested routine to the end of its parent) are
+  no easier: DIR_$GET_ENTRYU 0xE4D500 with 0xE4D460 (0x112 bytes: a
+  byte-copy `dbf` loop, 8-byte `(A0)+` copies into frame displacements),
+  the PROC2 module-local 0xE420B8 with 0xE42028 (0x146: `muls.w #228`
+  indexing in `while` loops), RINGLOG_$CNTL with 0xE721CC (0x168: a
+  `case` table and the frame-held `for` index above), FILE_$SET_PROT
+  with 0xE5DEF4 (0x176: a `case` table, 8-byte copies).  Nested routines
+  are covered by goldens (`tests/golden/nested/`) instead.
 - **Arguments:** nested routines also take ordinary stack arguments
   (0xE1359C reads `(8,A6)`, `(0xC,A6)`, `(0x10,A6)`), with the value
   conventions of `internal` routines.
@@ -1050,8 +1207,16 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   `internal` convention; `dpc-sema` applies it on this evidence.
 - **A5:** nested routines inherit A5 (section 4).
 - **Order:** nested routines are emitted before their enclosing routine
-  (PMAP_$FLUSH).  The same holds for module-local workers placed before
-  their first user: 0xE17778 comes before LOG_$READ, and 0xE00EB0 before
+  (PMAP_$FLUSH; `summary`: 83 of the 83 nested routines whose parent is
+  seen lie before it), in source order: the 19 calls between nested
+  routines of one parent (other than parent to child) all go to an
+  earlier routine, as declaration order requires (0xE1360C calls
+  0xE1359C).  Children of a level-1 routine come before it too (DIR
+  0xE4F034 before its parent 0xE4F100, both before 0xE4F3BA).
+  **Implemented** (`dpc-ir` `lower_family`); a nested routine declared
+  `forward` is refused (heading or body order not seen).
+  The same holds for module-local workers placed before their first
+  user: 0xE17778 comes before LOG_$READ, and 0xE00EB0 before
   AST_$PAGE_ZERO.  Given body order (next item), this is source order:
   the conformance source defines the worker first
   (`tests/conformance/ast_page_zero.pas`).  Calls *after* the callee are also seen
@@ -1112,7 +1277,7 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
   `dpc-ir`'s `Module::functions` (the emission order) follows it; a
   routine with no body in the unit is not emitted
   (`tests/golden/calls/body_order`).  Nested routines keep their heading
-  order in `Routine::nested` (dpc refuses nested routines for now).
+  order in `Routine::nested`.
 
 ---
 
@@ -1927,7 +2092,10 @@ the case above (no rule for the copy without calls; `tst.w; beq` for
 unsigned counts; run-time `lo`; `downto`); a `for` index indexing
 elements wider than a byte (stepped pointers); an index initial value
 outside -128..127 or equal to the count; byte or longword indices; an
-index of another scope (0xE721F8) or read after its loop (MST_$ALLOC_ASID
+index of another scope (0xE721F8, a nested routine's loop over its
+parent's variable) or one a nested routine reaches (RINGLOG_$CNTL
+0xE72296, the index stepped in the frame; section 6) or read after its
+loop (MST_$ALLOC_ASID
 0xE42D7C pushes D2 after leaving the loop with a `goto`); a loop that
 never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
@@ -3517,9 +3685,13 @@ register (`move.l (abs).l,Dn`, or the `move.w SR,Dn` of `set_sr`), its
 reads use that register, and the allocator gives it a register like any
 other value (12.4 R1-R3; D1 at 0xE16AB4).  Its frame slot stays
 allocated (`dpc-sema` frame size, `link #-4`).  Every other local stays
-in its frame slot, as before, and so does every local of a routine with
-nested routines (they reach its locals through the frame, which the
-per-body analysis does not see; `dpc-ir` `scalar_locals`).  A value held
+in its frame slot, as before, and so does every local a nested routine
+reaches (it reads and writes them through the frame, which the per-body
+analysis does not see; `dpc-ir` `scalar_locals` with
+`Function::uplevel_refs`, bead domain-pascal-thc; PMAP_$FLUSH keeps such
+a word in its frame and the boolean no nested routine reads in D3,
+section 6).  Other locals of a routine with nested routines follow the
+rule like any routine's.  A value held
 across a call goes to a callee-saved register (12.4).  A constant assignment is excluded because
 the one register-variable constant seen, 0xE149A4, is `move.w #-1,D2`,
 not the `moveq` `dpc` uses for constants in registers (section 13).

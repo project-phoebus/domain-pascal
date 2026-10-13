@@ -114,8 +114,49 @@ pub struct Function {
     /// register instead of its frame slot (codegen-patterns 12.5); the
     /// slot stays allocated either way.
     pub scalar_locals: Vec<ValueParam>,
+    /// For a routine nested in another (ref 2.4): its enclosing routine
+    /// and how it reaches the enclosing frame (codegen-patterns 6).
+    pub nesting: Option<Nesting>,
+    /// The objects of this routine's frame that its nested routines reach
+    /// ([`Addr::Enclosing`]): frame offset and size in bytes, in offset
+    /// order.  Parameter values and slots among them are read from the
+    /// frame at each use, never held in a register (PMAP_$FLUSH 0xE1376C
+    /// reloads its `(8,A6)` slot at 0xE1378A, 0xE1379C, 0xE139AE and
+    /// 0xE139CA, which 0xE1359C reads as `(8,A2)`); such locals are not in
+    /// [`Self::scalar_locals`] (its `(-0x50,A6)`, `(-0x50,A4)` in
+    /// 0xE1360C, is only addressed in memory).
+    pub uplevel_refs: Vec<(i32, u32)>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+/// How a nested routine finds its enclosing routine's frame (ref 2.4
+/// "Nested Routines"; codegen-patterns 6, `tools/nestsurvey.py`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nesting {
+    /// The enclosing routine's symbol.
+    pub parent: String,
+    pub link: StaticLink,
+}
+
+/// Where a nested routine's static link (the enclosing routine's frame
+/// pointer) comes from.  The rule (codegen-patterns 6, Verified by survey:
+/// 11 of 11 and 75 of 75 nested routines of the image): passed by the
+/// caller exactly when the routine needs it (reaches the enclosing frame or
+/// passes the link on; ROUTE_$SERVICE's nested 0xE69E40, which does not,
+/// is called by its sibling with no A1 load, 0xE69F3C) and some call of
+/// the routine comes from a routine other than its enclosing one (a
+/// sibling, the routine itself, a deeper one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticLink {
+    /// The caller passes it (m68k: in A1, `movea.l A6,A1` / `movea.l
+    /// An,A1` before the `bsr`; the callee copies it, 0xE135A4 `movea.l
+    /// A1,A2`).
+    Passed,
+    /// Only the enclosing routine calls it, so the enclosing frame is the
+    /// caller's: the dynamic link the routine's own frame saved (m68k:
+    /// `movea.l (A6),An`, 0xE13616).
+    CallerFrame,
 }
 
 impl Function {
@@ -436,6 +477,22 @@ pub struct Call {
     pub callee: Callee,
     pub args: Vec<Arg>,
     pub pad: u32,
+    /// The static link the caller passes, for a callee whose link is
+    /// [`StaticLink::Passed`]; `None` for any other callee.
+    pub link: Option<LinkArg>,
+}
+
+/// The static link passed to a nested routine ([`StaticLink::Passed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkArg {
+    /// The caller's own frame: the callee is nested in the caller
+    /// (PMAP_$FLUSH 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
+    OwnFrame,
+    /// The caller's own static link: the callee is nested in the same
+    /// routine as the caller (a sibling: 0xE13718 `movea.l A4,A1; bsr.w
+    /// 0xE1359C` in 0xE1360C, A4 from `(A6)`), or is the caller itself
+    /// (0xE397D0, recursive).
+    OwnLink,
 }
 
 impl Call {
@@ -597,6 +654,11 @@ impl Expr {
 pub enum Addr {
     /// Frame pointer + offset.
     Frame(i32),
+    /// The enclosing routine's frame + offset, for a routine nested one
+    /// level in it (ref 2.4): a variable or parameter of the enclosing
+    /// routine, reached through the static link (m68k: `(d,An)` with An
+    /// the link, codegen-patterns 6: 0xE135AA `btst #0,(0x15,A2)`).
+    Enclosing(i32),
     /// An absolute symbol + offset (another unit's object).
     Symbol { name: String, offset: i32 },
     /// The unit's own static data area ([`Module::data`]) + offset.
@@ -622,6 +684,7 @@ impl Addr {
     pub fn offset_by(self, delta: i32) -> Addr {
         match self {
             Addr::Frame(o) => Addr::Frame(o + delta),
+            Addr::Enclosing(o) => Addr::Enclosing(o + delta),
             Addr::Static(o) => Addr::Static(o + delta),
             Addr::Symbol { name, offset } => Addr::Symbol {
                 name,

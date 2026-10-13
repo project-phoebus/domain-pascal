@@ -19,8 +19,8 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
-    ForLoop, Function, Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind,
-    UnOp as IrUnOp, ValueParam, Width,
+    ForLoop, Function, LinkArg, Module, Nesting, Rel, ResultClass, ResultSpec, Scalar, Sign,
+    StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -62,9 +62,11 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         if r.external || r.body.is_none() {
             continue;
         }
-        match lower_routine(program, id) {
-            Ok(f) => functions.push(f),
-            Err(d) => errors.extend(d),
+        lower_family(program, id, &mut functions, &mut errors);
+    }
+    if errors.is_empty() {
+        if let Err(d) = set_static_links(&mut functions) {
+            errors.extend(d);
         }
     }
     if errors.is_empty() {
@@ -140,13 +142,483 @@ fn data_area(p: &Program) -> Result<Option<DataArea>, Vec<Diagnostic>> {
 /// `data_section` when the module heading names none.
 const DEFAULT_DATA_SECTION: &str = ".data";
 
-fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>> {
+/// Lower top-level routine `id` and the routines nested in it (ref 2.4,
+/// pp. 2-19..2-21), into `out`
+/// in emission order: each nested routine before its enclosing routine,
+/// in source order (codegen-patterns 6, "Order": `tools/nestsurvey.py
+/// summary`, 83 of 83 nested routines lie before their parent; the 19
+/// calls between nested routines of one parent all go to an earlier
+/// one, as declaration order requires: PMAP_$FLUSH's 0xE1359C, then
+/// 0xE1360C, which calls it).
+///
+/// Only one level of nesting is supported: the image's deeper routines
+/// reach outer frames through chains (DIR 0xE4F034 `movea.l (A6),A0;
+/// movea.l (A0),A0; movea.l (-4,A0),A2`; the level-1 routine 0xE4F3BA
+/// stores its static link at `(-4,A6)` for them, 0xE4F3C2), not
+/// implemented.  A nested routine declared `forward` is refused: whether
+/// it is emitted at its heading or at its body is not seen.
+fn lower_family(p: &Program, id: RoutineId, out: &mut Vec<Function>, errors: &mut Vec<Diagnostic>) {
+    let r = p.routine(id);
+    let mut uplevel: Vec<(i32, u32)> = Vec::new();
+    for &n in &r.nested {
+        let nr = p.routine(n);
+        if let Some(&g) = nr.nested.first() {
+            errors.push(unsupported(
+                p.routine(g).span,
+                "a routine nested in a nested routine (outer frames reached through a chain of \
+                 links, DIR 0xE4F034, codegen-patterns 6) is",
+            ));
+            continue;
+        }
+        if nr.body.is_none() {
+            errors.push(unsupported(nr.span, "a nested routine without a body is"));
+            continue;
+        }
+        if nr.options.forward {
+            errors.push(unsupported(
+                nr.span,
+                "a nested routine declared `forward` (emitted at its heading or its body: not \
+                 seen) is",
+            ));
+            continue;
+        }
+        match lower_routine(p, n, &[]) {
+            Ok(f) => {
+                for st in &f.body {
+                    stmt_enclosing(st, &mut uplevel);
+                }
+                out.push(f);
+            }
+            Err(d) => errors.extend(d),
+        }
+    }
+    uplevel.sort_unstable();
+    uplevel.dedup();
+    match lower_routine(p, id, &uplevel) {
+        Ok(f) => out.push(f),
+        Err(d) => errors.extend(d),
+    }
+}
+
+/// Decide each nested routine's [`StaticLink`] and the [`LinkArg`] of
+/// every call of one (codegen-patterns 6).
+///
+/// The rule, from every nested routine of the image (`tools/nestsurvey.py
+/// summary`; a nested routine is one that is not map-named and reads A1
+/// before writing it or moves from `(A6)`): the 11 that take the static
+/// link in A1 are each called from a routine other than their enclosing
+/// one (4 by themselves: 0xE397D0, 0xE39BC2, 0xE4F3BA, 0xE50D5E; 7 by a
+/// sibling: PMAP_$FLUSH's 0xE1359C from 0xE1360C at 0xE13718), and the 75
+/// that read `(A6)` each have exactly one caller, their enclosing routine
+/// (PMAP_$FLUSH's 0xE1360C; PROC2_$SUSPEND's 0xE4120C).  So the link is
+/// passed exactly when the routine needs it (reaches the enclosing frame
+/// or passes the link on) and some call comes from elsewhere than the
+/// enclosing routine's own body; then the enclosing routine passes its own frame
+/// (0xE13928 `movea.l A6,A1`) and a sibling, or the routine itself, its
+/// own link (0xE13718 `movea.l A4,A1`; 0xE397D0 recursive).
+///
+/// Nested routines are local symbols (ref 5.5.4 p. 5-17), so two routines
+/// of one name in a unit (nested in different routines) would collide:
+/// refused.
+fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    for (j, f) in fs.iter().enumerate() {
+        if fs[..j].iter().any(|g| g.symbol == f.symbol) {
+            errors.push(unsupported(
+                f.span,
+                format!(
+                    "two routines named `{}` in one unit (nested routines are local symbols) are",
+                    f.symbol
+                ),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let index = |sym: &str| fs.iter().position(|g| g.symbol == sym);
+    let parent_of = |j: usize| fs[j].nesting.as_ref().map(|n| n.parent.as_str());
+    // other_caller[j]: some call of nested routine j comes from a routine
+    // other than its enclosing one; callees[i]: the unit's routines that
+    // routine i calls.
+    let mut other_caller = vec![false; fs.len()];
+    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); fs.len()];
+    for (i, f) in fs.iter().enumerate() {
+        let mut calls = Vec::new();
+        for st in &f.body {
+            stmt_calls(st, &mut calls);
+        }
+        for c in calls {
+            let Callee::Local(sym) = &c.callee else {
+                continue;
+            };
+            if let Some(j) = index(sym) {
+                callees[i].push(j);
+                if parent_of(j).is_some_and(|p| p != f.symbol) {
+                    other_caller[j] = true;
+                }
+            }
+        }
+    }
+    // A nested routine needs its link when it reaches the enclosing frame
+    // or calls a sibling (or itself) that takes the link from it; only
+    // then is the link passed, even when a sibling calls it.  The image
+    // never loads A1 before a `bsr` to a routine that does not read it
+    // (`tools/nestsurvey.py`): ROUTE_$SERVICE's nested 0xE69E40 (between
+    // its nested 0xE69CCC and 0xE69EC2, `link #-4`, no frame or link
+    // access) is called by the sibling 0xE69EC2 at 0xE69F3C with no A1
+    // load; likewise DIR's 0xE4EF42 inside 0xE4F3BA's family, called by
+    // 0xE4EF7C and 0xE4F2DA.
+    let mut needs: Vec<bool> = fs
+        .iter()
+        .map(|f| {
+            let mut up = Vec::new();
+            for st in &f.body {
+                stmt_enclosing(st, &mut up);
+            }
+            f.nesting.is_some() && !up.is_empty()
+        })
+        .collect();
+    let mut passed = vec![false; fs.len()];
+    loop {
+        for j in 0..fs.len() {
+            passed[j] = needs[j] && other_caller[j];
+        }
+        let mut changed = false;
+        for i in 0..fs.len() {
+            if needs[i] || parent_of(i).is_none() {
+                continue;
+            }
+            if callees[i]
+                .iter()
+                .any(|&j| passed[j] && parent_of(j) == parent_of(i))
+            {
+                needs[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // (symbol, parent, link passed) of the nested routines.
+    let nested: Vec<(String, String, bool)> = fs
+        .iter()
+        .enumerate()
+        .filter_map(|(j, f)| {
+            f.nesting
+                .as_ref()
+                .map(|n| (f.symbol.clone(), n.parent.clone(), passed[j]))
+        })
+        .collect();
+    for (j, f) in fs.iter_mut().enumerate() {
+        if let Some(n) = &mut f.nesting {
+            n.link = if passed[j] {
+                StaticLink::Passed
+            } else {
+                StaticLink::CallerFrame
+            };
+        }
+        let me = f.symbol.clone();
+        let my_parent = f.nesting.as_ref().map(|n| n.parent.clone());
+        let span = f.span;
+        let mut bad = false;
+        for st in &mut f.body {
+            stmt_calls_mut(st, &mut |c: &mut Call| {
+                let Callee::Local(sym) = &c.callee else {
+                    return;
+                };
+                let Some((_, parent, true)) = nested.iter().find(|(s, _, _)| s == sym) else {
+                    return;
+                };
+                c.link = if *parent == me {
+                    Some(LinkArg::OwnFrame)
+                } else if my_parent.as_ref() == Some(parent) {
+                    Some(LinkArg::OwnLink)
+                } else {
+                    bad = true;
+                    None
+                };
+            });
+        }
+        if bad {
+            errors.push(unsupported(
+                span,
+                "a call of a nested routine from outside its enclosing routine and its siblings is",
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// The objects of the enclosing frame that `s` reaches
+/// ([`Addr::Enclosing`]), as (offset, size): a scalar access its width, a
+/// block copy its length, an address taken or an indexed array 1 byte at
+/// the object's start.
+fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
+    fn addr(a: &Addr, size: u32, out: &mut Vec<(i32, u32)>) {
+        match a {
+            Addr::Enclosing(o) => out.push((*o, size)),
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Indirect { base, .. } => expr(base, out),
+            Addr::Index { base, index, .. } => {
+                addr(base, 1, out);
+                expr(index, out);
+            }
+        }
+    }
+    fn expr(e: &Expr, out: &mut Vec<(i32, u32)>) {
+        match e {
+            Expr::Const { .. } => {}
+            Expr::Load { addr: a, ty } => addr(a, ty.bytes(), out),
+            Expr::AddrOf(a) => addr(a, 1, out),
+            Expr::SetMember { elem, set, .. } => {
+                expr(elem, out);
+                expr(set, out);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                expr(lhs, out);
+                expr(rhs, out);
+            }
+            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+                expr(x, out)
+            }
+            Expr::Call { call: c, .. } => call(c, out),
+            Expr::Test(c) => cond(c, out),
+        }
+    }
+    fn call(c: &Call, out: &mut Vec<(i32, u32)>) {
+        for a in &c.args {
+            match a {
+                Arg::Value { value, .. } => expr(value, out),
+                Arg::Address { addr: a, .. } => addr(a, 1, out),
+            }
+        }
+    }
+    fn cond(c: &Cond, out: &mut Vec<(i32, u32)>) {
+        match c {
+            Cond::Compare { lhs, rhs, .. } => {
+                expr(lhs, out);
+                expr(rhs, out);
+            }
+            Cond::Test(e) => expr(e, out),
+            Cond::Not(x) => cond(x, out),
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                cond(a, out);
+                cond(b, out);
+            }
+        }
+    }
+    match &s.kind {
+        StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, out),
+        StmtKind::Store { addr: a, value } => {
+            addr(a, value.ty().bytes(), out);
+            expr(value, out);
+        }
+        StmtKind::Copy { dst, src, bytes } => {
+            addr(dst, *bytes, out);
+            addr(src, *bytes, out);
+        }
+        StmtKind::Call(c) => call(c, out),
+        StmtKind::Fill { start, value, .. } => {
+            addr(start, 1, out);
+            expr(value, out);
+        }
+        StmtKind::If {
+            cond: c,
+            then_,
+            else_,
+        } => {
+            cond(c, out);
+            for st in then_.iter().chain(else_) {
+                stmt_enclosing(st, out);
+            }
+        }
+        StmtKind::Repeat { body, until } => {
+            for st in body {
+                stmt_enclosing(st, out);
+            }
+            cond(until, out);
+        }
+        StmtKind::While { cond: c, body } => {
+            cond(c, out);
+            for st in body {
+                stmt_enclosing(st, out);
+            }
+        }
+        StmtKind::For(l) => {
+            expr(&l.from, out);
+            expr(&l.to, out);
+            for st in &l.body {
+                stmt_enclosing(st, out);
+            }
+        }
+        StmtKind::Case {
+            selector,
+            arms,
+            otherwise,
+        } => {
+            expr(selector, out);
+            for st in arms
+                .iter()
+                .flat_map(|a| &a.body)
+                .chain(otherwise.iter().flatten())
+            {
+                stmt_enclosing(st, out);
+            }
+        }
+        StmtKind::Return
+        | StmtKind::Disable
+        | StmtKind::Enable
+        | StmtKind::Exit
+        | StmtKind::Next => {}
+    }
+}
+
+/// Whether the object of `size` bytes at frame offset `o` overlaps one of
+/// `objs` ([`Function::uplevel_refs`]).
+fn overlaps(objs: &[(i32, u32)], o: i32, size: u32) -> bool {
+    objs.iter()
+        .any(|&(p, n)| p < o + size as i32 && o < p + n as i32)
+}
+
+/// Apply `f` to every call of `s`, statement calls and function calls in
+/// expressions (the mutable twin of [`stmt_calls`]).
+fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
+    fn addr(a: &mut Addr, f: &mut dyn FnMut(&mut Call)) {
+        match a {
+            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Indirect { base, .. } => expr(base, f),
+            Addr::Index { base, index, .. } => {
+                addr(base, f);
+                expr(index, f);
+            }
+        }
+    }
+    fn expr(e: &mut Expr, f: &mut dyn FnMut(&mut Call)) {
+        match e {
+            Expr::Const { .. } => {}
+            Expr::Load { addr: a, .. } | Expr::AddrOf(a) => addr(a, f),
+            Expr::SetMember { elem, set, .. } => {
+                expr(elem, f);
+                expr(set, f);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+                expr(x, f)
+            }
+            Expr::Call { call: c, .. } => call(c, f),
+            Expr::Test(c) => cond(c, f),
+        }
+    }
+    fn call(c: &mut Call, f: &mut dyn FnMut(&mut Call)) {
+        for a in &mut c.args {
+            match a {
+                Arg::Value { value, .. } => expr(value, f),
+                Arg::Address { addr: a, .. } => addr(a, f),
+            }
+        }
+        f(c);
+    }
+    fn cond(c: &mut Cond, f: &mut dyn FnMut(&mut Call)) {
+        match c {
+            Cond::Compare { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Cond::Test(e) => expr(e, f),
+            Cond::Not(x) => cond(x, f),
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                cond(a, f);
+                cond(b, f);
+            }
+        }
+    }
+    match &mut s.kind {
+        StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, f),
+        StmtKind::Store { addr: a, value } => {
+            addr(a, f);
+            expr(value, f);
+        }
+        StmtKind::Copy { dst, src, .. } => {
+            addr(dst, f);
+            addr(src, f);
+        }
+        StmtKind::Call(c) => call(c, f),
+        StmtKind::Fill { start, value, .. } => {
+            addr(start, f);
+            expr(value, f);
+        }
+        StmtKind::If {
+            cond: c,
+            then_,
+            else_,
+        } => {
+            cond(c, f);
+            for st in then_.iter_mut().chain(else_.iter_mut()) {
+                stmt_calls_mut(st, f);
+            }
+        }
+        StmtKind::Repeat { body, until } => {
+            for st in body.iter_mut() {
+                stmt_calls_mut(st, f);
+            }
+            cond(until, f);
+        }
+        StmtKind::While { cond: c, body } => {
+            cond(c, f);
+            for st in body.iter_mut() {
+                stmt_calls_mut(st, f);
+            }
+        }
+        StmtKind::For(l) => {
+            expr(&mut l.from, f);
+            expr(&mut l.to, f);
+            for st in l.body.iter_mut() {
+                stmt_calls_mut(st, f);
+            }
+        }
+        StmtKind::Case {
+            selector,
+            arms,
+            otherwise,
+        } => {
+            expr(selector, f);
+            for a in arms.iter_mut() {
+                for st in a.body.iter_mut() {
+                    stmt_calls_mut(st, f);
+                }
+            }
+            if let Some(o) = otherwise {
+                for st in o.iter_mut() {
+                    stmt_calls_mut(st, f);
+                }
+            }
+        }
+        StmtKind::Return
+        | StmtKind::Disable
+        | StmtKind::Enable
+        | StmtKind::Exit
+        | StmtKind::Next => {}
+    }
+}
+
+/// Lower one routine.  `uplevel`: the objects of its frame that its nested
+/// routines reach ([`Function::uplevel_refs`]).
+fn lower_routine(
+    p: &Program,
+    id: RoutineId,
+    uplevel: &[(i32, u32)],
+) -> Result<Function, Vec<Diagnostic>> {
     let r = p.routine(id);
     let mut errors = Vec::new();
-    if let Some(&n) = r.nested.first() {
-        // codegen-patterns 6 (static link in A1 or the dynamic link).
-        errors.push(unsupported(p.routine(n).span, "nested routines are"));
-    }
     if r.code_section != ".text" {
         // ref 5.7.1 / 7.1.1; how named sections map to the output sections
         // `../source` links (codegen-patterns 11) is not settled.
@@ -187,7 +659,7 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
     let body = if r.result.is_some() && result.is_none() {
         Vec::new()
     } else {
-        match lower_body(p, id, r, result) {
+        match lower_body(p, id, r, result, uplevel) {
             Ok(b) => b,
             Err(d) => {
                 errors.push(d);
@@ -214,7 +686,13 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
             .filter(|prm| prm.passing() == Passing::ByAddress)
             .map(|prm| prm.slot_offset)
             .collect(),
-        scalar_locals: scalar_locals(p, r),
+        scalar_locals: scalar_locals(p, r, uplevel),
+        nesting: r.parent.map(|pid| Nesting {
+            parent: p.routine(pid).symbol.clone(),
+            // Decided once every routine is lowered (`set_static_links`).
+            link: StaticLink::CallerFrame,
+        }),
+        uplevel_refs: uplevel.to_vec(),
         body,
         span: r.span,
     })
@@ -563,7 +1041,7 @@ fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
 
 fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
     match a {
-        Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
         Addr::Indirect { base, .. } => expr_calls(base, out),
         Addr::Index { base, index, .. } => {
             addr_calls(base, out);
@@ -647,7 +1125,7 @@ fn expr_uses_static(e: &Expr) -> bool {
 fn addr_uses_static(a: &Addr) -> bool {
     match a {
         Addr::Static(_) => true,
-        Addr::Frame(_) | Addr::Symbol { .. } => false,
+        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Symbol { .. } => false,
         Addr::Indirect { base, .. } => expr_uses_static(base),
         Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
     }
@@ -657,13 +1135,15 @@ fn addr_uses_static(a: &Addr) -> bool {
 /// the frame variables other than the function result variable (parameter
 /// copies are not frame variables), of 1, 2 or 4 bytes.
 ///
-/// None for a routine with nested routines: they may read or write its
-/// locals through the frame (ref 2.4), which the selector's per-body
-/// analysis (codegen-patterns 12.5) does not see.
-fn scalar_locals(p: &Program, r: &Routine) -> Vec<ValueParam> {
-    if !r.nested.is_empty() {
-        return Vec::new();
-    }
+/// Not the locals its nested routines reach (`uplevel`): they read and
+/// write them through the frame (ref 2.4), which the selector's per-body
+/// analysis (codegen-patterns 12.5) does not see.  The image keeps such
+/// locals in memory: PMAP_$FLUSH's word at `(-0x50,A6)` (0xE13784 `clr.w`,
+/// 0xE13938 `addq.w #1`, 0xE1398C `tst.w`), which its nested 0xE1360C reads
+/// as `(-0x50,A4)` (0xE1362E), while its boolean in D3 (0xE137A8 `sne D3`,
+/// read at 0xE138F8 and 0xE139C0), which no nested routine reads, is held
+/// in a register (bead domain-pascal-thc).
+fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueParam> {
     let result = r.result.as_ref().and_then(|res| res.var);
     r.frame_vars
         .iter()
@@ -674,6 +1154,9 @@ fn scalar_locals(p: &Program, r: &Routine) -> Vec<ValueParam> {
                 return None;
             };
             let width = Width::of_size(p.types.size(var.ty))?;
+            if overlaps(uplevel, offset, width.bytes()) {
+                return None;
+            }
             Some(ValueParam {
                 offset,
                 ty: Scalar {
@@ -734,10 +1217,12 @@ fn lower_body(
     id: RoutineId,
     r: &Routine,
     result: Option<ResultSpec>,
+    uplevel: &[(i32, u32)],
 ) -> Res<Vec<Stmt>> {
     let block = r.body.as_ref().expect("routine with a body");
     let cx = Cx { p, id, r, result };
     let out = cx.seq(&block.stmts, true)?;
+    check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
     if r.result.is_some() {
         let assigned = out.iter().any(|s| matches!(s.kind, StmtKind::SetResult(_)));
@@ -749,6 +1234,50 @@ fn lower_body(
         }
     }
     Ok(out)
+}
+
+/// No `for` loop of `body` has an index that a nested routine reaches
+/// (bead domain-pascal-thc).  The selector keeps an index in a register
+/// for its loop (codegen-patterns 7.4), where a nested routine called from
+/// the body would not see it.  The image keeps such an index in the frame:
+/// RINGLOG_$CNTL 0xE72226, whose nested 0xE721CC runs its own loop over
+/// the same variable through the static link (0xE721F0 `move.w
+/// #1,(-2,A2)`, 0xE7220A `addq.w #1,(-2,A2)`), steps its loop at
+/// 0xE72296..0xE722B0 in memory (`clr.w (-2,A6)`, `muls.w (-2,A6),D1`,
+/// `addq.w #1,(-2,A6)`, beside the `dbf` count in D0): that form is not
+/// implemented.
+fn check_uplevel_indices(body: &[Stmt], uplevel: &[(i32, u32)]) -> Res<()> {
+    if uplevel.is_empty() {
+        return Ok(());
+    }
+    for st in body {
+        let inner: Vec<&[Stmt]> = match &st.kind {
+            StmtKind::For(l) => {
+                if overlaps(uplevel, l.index.offset, 2) {
+                    return Err(unsupported(
+                        st.span,
+                        "a `for` loop whose index a nested routine reaches (kept in the frame, \
+                         RINGLOG_$CNTL 0xE72296..0xE722B0, codegen-patterns 7.4) is",
+                    ));
+                }
+                vec![&l.body]
+            }
+            StmtKind::If { then_, else_, .. } => vec![then_, else_],
+            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => vec![body],
+            StmtKind::Case {
+                arms, otherwise, ..
+            } => arms
+                .iter()
+                .map(|a| a.body.as_slice())
+                .chain(otherwise.as_deref())
+                .collect(),
+            _ => vec![],
+        };
+        for b in inner {
+            check_uplevel_indices(b, uplevel)?;
+        }
+    }
+    Ok(())
 }
 
 /// The index variables of the [`StmtKind::For`] loops of `body` are read
@@ -783,7 +1312,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         fn addr(&self, a: &Addr, size: u32) -> Res<()> {
             match a {
                 Addr::Frame(o) if self.hit(*o, size) => Err(self.bad()),
-                Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => Ok(()),
+                Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {
+                    Ok(())
+                }
                 // The whole object is reached through the base.
                 Addr::Indirect { base, .. } => self.expr(base),
                 Addr::Index { base, index, .. } => {
@@ -2091,11 +2622,22 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
 /// The address of designator `e`.
 fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
     match &e.kind {
+        // A variable of the enclosing routine (ref 2.4), through the static
+        // link: its frame objects as [`Addr::Enclosing`] (codegen-patterns
+        // 6: 0xE135AA `btst #0,(0x15,A2)`, a by-value parameter of
+        // PMAP_$FLUSH; 0xE135B8 `move.l (8,A2),-(SP)`, its by-address slot
+        // passed on; 0xE1362E `move.w (-0x50,A4),-(SP)`, its local).
         ExprKind::Var { var, uplevel } => {
-            if *uplevel != 0 {
-                return Err(unsupported(e.span, "up-level variable references are"));
+            let a = var_addr(p, *var, e.span)?;
+            match uplevel {
+                0 => Ok(a),
+                1 => Ok(enclosing(a)),
+                _ => Err(unsupported(
+                    e.span,
+                    "a reference to a variable more than one routine out (a chain of links, \
+                     DIR 0xE4F034, codegen-patterns 6) is",
+                )),
             }
-            var_addr(p, *var, e.span)
         }
         ExprKind::Field { base, offset, .. } => Ok(addr_of(p, base)?.offset_by(*offset as i32)),
         ExprKind::Deref(ptr) => Ok(Addr::Indirect {
@@ -2164,6 +2706,31 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
     }
 }
 
+/// `a`, an address in the enclosing routine's terms, as seen from a
+/// routine nested in it: its frame objects through the static link.
+fn enclosing(a: Addr) -> Addr {
+    match a {
+        Addr::Frame(o) => Addr::Enclosing(o),
+        Addr::Indirect { base, offset } => match *base {
+            Expr::Load {
+                addr: Addr::Frame(s),
+                ty,
+            } => Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Enclosing(s),
+                    ty,
+                }),
+                offset,
+            },
+            b => Addr::Indirect {
+                base: Box::new(b),
+                offset,
+            },
+        },
+        other => other,
+    }
+}
+
 fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
     let v = p.var(id);
     match &v.storage {
@@ -2228,9 +2795,6 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
         return Err(unsupported(span, "a call through a routine pointer is"));
     };
     let r = p.routine(*id);
-    if r.parent.is_some() {
-        return Err(unsupported(span, "a call of a nested routine is"));
-    }
     if c.args.len() != r.params.len() {
         return Err(unsupported(
             span,
@@ -2304,6 +2868,8 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
         callee,
         args,
         pad: r.arg_pad,
+        // Set for a nested callee by `set_static_links`.
+        link: None,
     })
 }
 
