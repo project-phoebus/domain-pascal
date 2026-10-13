@@ -139,7 +139,28 @@ pub struct Function {
     /// [`Self::scalar_locals`] (its `(-0x50,A6)`, `(-0x50,A4)` in
     /// 0xE1360C, is only addressed in memory).
     pub uplevel_refs: Vec<(i32, u32)>,
+    /// The value parameters passed by address that the routine copies into
+    /// its frame on entry (ref 5.2 Table 5-1, p. 5-5, "no mode", default
+    /// convention: "Creates local copies of arguments and makes direct
+    /// references to them"), in parameter order.  The body reads and writes
+    /// the copy, an ordinary frame object at [`ParamCopy::copy`]; the
+    /// selector emits the copies after the entry loads and before the
+    /// body (codegen-patterns 1.2, "Value parameters passed by address").
+    pub param_copies: Vec<ParamCopy>,
     pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// One value parameter the callee copies on entry ([`Function::param_copies`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamCopy {
+    /// Frame offset of the argument slot, which holds the argument's
+    /// address (`dpc_sema::Param::slot_offset`).
+    pub slot: i32,
+    /// Frame offset of the copy (`dpc_sema::Param::copy_offset`).
+    pub copy: i32,
+    /// The parameter type's size in bytes.
+    pub bytes: u32,
     pub span: Span,
 }
 

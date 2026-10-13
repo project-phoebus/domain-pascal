@@ -19,8 +19,8 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
-    ForLoop, Function, LinkArg, Module, Nesting, PoolConst, Rel, ResultClass, ResultSpec, Scalar,
-    Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    ForLoop, Function, LinkArg, Module, Nesting, ParamCopy, PoolConst, Rel, ResultClass,
+    ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -738,16 +738,6 @@ fn lower_routine(
             errors.push(unsupported(r.span, format!("{name} is")));
         }
     }
-    for prm in &r.params {
-        if prm.conv.local_copy {
-            // Table 5-1, no mode, default: the callee copies the argument
-            // on entry.  The copy code has not been catalogued.
-            errors.push(unsupported(
-                p.var(prm.var).span,
-                "value parameters passed by address (callee-made local copy) are",
-            ));
-        }
-    }
     let result = match &r.result {
         None => None,
         Some(res) => match result_spec(p, r, res) {
@@ -804,6 +794,7 @@ fn lower_routine(
             link: StaticLink::CallerFrame,
         }),
         uplevel_refs: uplevel.to_vec(),
+        param_copies: param_copies(p, r),
         body,
         span: r.span,
     })
@@ -1331,6 +1322,25 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
                     width,
                     sign: sign_of(&p.types, var.ty),
                 },
+            })
+        })
+        .collect()
+}
+
+/// The value parameters the callee copies on entry, in parameter order
+/// (ref 5.2 Table 5-1, p. 5-5, "no mode", default convention; 5.2 p. 5-4
+/// "by making a local copy of the argument").  `dpc-sema` gave each copy
+/// its frame slot (`Param::copy_offset`); the body refers to the copy
+/// ([`var_addr`]).
+fn param_copies(p: &Program, r: &Routine) -> Vec<ParamCopy> {
+    r.params
+        .iter()
+        .filter_map(|prm| {
+            prm.copy_offset.map(|copy| ParamCopy {
+                slot: prm.slot_offset,
+                copy,
+                bytes: p.types.size(prm.ty),
+                span: p.var(prm.var).span,
             })
         })
         .collect()
@@ -3091,9 +3101,17 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
             match prm.passing() {
                 // val_param word at (8,A6): PROC1_$TST_LOCK 0xE148D4.
                 Passing::ByValue => Ok(Addr::Frame(prm.value_offset)),
+                // A value parameter passed by address: the body refers to
+                // the callee's copy (ref 5.2 Table 5-1, p. 5-5, "makes
+                // direct references to them"), so an assignment never
+                // reaches the caller's object, and `addr` or passing it on
+                // by address names the copy (DIR_$GET_ENTRYU 0xE4D55E `pea
+                // (-8,A6)`, its UID copied at 0xE4D512..0xE4D51A).
+                Passing::ByAddress if prm.copy_offset.is_some() => {
+                    Ok(Addr::Frame(prm.copy_offset.unwrap()))
+                }
                 // By address: the slot holds a pointer (LOG_$READ 0xE17810
-                // `movea.l (0xc,A6),A0; move.w (A0),...`).  A value
-                // parameter with a local copy was rejected earlier.
+                // `movea.l (0xc,A6),A0; move.w (A0),...`).
                 Passing::ByAddress => {
                     let width = Width::of_size(prm.conv.slot_size)
                         .ok_or_else(|| unsupported(span, "an address slot of this size is"))?;

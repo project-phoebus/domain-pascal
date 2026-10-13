@@ -117,6 +117,14 @@ domain-pascal-5aw.8): `atbus_ring_interrupt.pas` (RING_INTERRUPT
 pushed by value from `(4,A5)`, then `movea.l (A5),A0; jsr (A0)`, not
 popped before `unlk`).
 
+Value parameters under the default convention (codegen-patterns 1.2,
+"Value parameters passed by address"; bead domain-pascal-5aw.12):
+`tone_time.pas` (TONE_$TIME 0xE172FC, the whole TONE module: a 6-byte
+clock copied on entry with `move.l (A0); move.w (4,A0)` and passed on as
+the copy, `pea (-8,A6)`) and `smd_set_tp_cursor.pas` (SMD_$SET_TP_CURSOR
+0xE6E964: two copies through A0 and A1 pushed by value from the frame,
+the `in` slot then in A2).
+
 Instruction order (codegen-patterns 12.4 R9-R11; bead
 domain-pascal-g5q.8): every unit is compiled with the scheduler on (`dpc
 --schedule`, default `r11:3`) and none changed.  `xpd_reset_ptrace_opts.pas`

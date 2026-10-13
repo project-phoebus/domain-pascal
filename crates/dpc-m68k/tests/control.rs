@@ -254,17 +254,19 @@ begin
   r := 1;
   if w = 3 then x := 0;
 end;",
-            "used once (loaded where needed",
+            "used once after a branch or a call (loaded where needed",
         ),
-        // The same in a body with a call (12.4 R4(b) is known only for
-        // bodies without branches and calls).
+        // The same after a call (12.4 R4(b) is known only before a body's
+        // first branch or call; before it, the slot is loaded as without
+        // them, golden `params/value_copies`).
         (
             "(var x: integer); internal;
 begin
-  x := 0;
   ext_$p(1);
+  r := 1;
+  x := 0;
 end;",
-            "with branches or calls, a pointer parameter or by-address parameter that is used once",
+            "by-address parameter that is used once after a branch or a call",
         ),
     ];
     for (b, want) in with_param {

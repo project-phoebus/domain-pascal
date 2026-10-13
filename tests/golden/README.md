@@ -254,3 +254,13 @@ Tests:
     copy of A1 (0xE397D0), parameter and link in D2/A2 across the call,
     the result variable in D0, the unpopped call before the join
     (0xE04700).
+- `params/value_copies` - codegen-patterns 1.2 ("Value parameters passed
+  by address"), 2, 5.2, 12.4 R4(b) (bead domain-pascal-5aw.12): value
+  parameters under the default convention copied on entry, in parameter
+  order, at the top of the frame: byte, word and longword copies through
+  A0, A1, A2 (FILE_$INVALIDATE 0xE75166..0xE75186), 6 bytes (TONE_$TIME
+  0xE17300), 8 bytes with `(A0)+` after the entry load of the status slot
+  (DIR_$GET_ENTRYU 0xE4D50E..0xE4D51A), 14 and 24 bytes as block copies;
+  an assignment to a value parameter stored to the copy (`addq.w
+  #1,(-2,A6)`), never through the caller's address; `addr` of it and
+  passing it to a `var` parameter name the copy (0xE4D55E `pea (-8,A6)`).

@@ -106,6 +106,16 @@ pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
 /// [`select`] with the body scheduled under `sched` (`sched.rs`).
 pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
+        if let Some(pc) = f.param_copies.first() {
+            // A bare `rts` has no frame for the copy; whether the original
+            // copied an unused parameter is not visible (codegen-patterns
+            // 1.2, 2).
+            return Err(unsupported(
+                pc.span,
+                "an empty procedure with a value parameter passed by address (a bare `rts` \
+                 in the image, so not copied; codegen-patterns 1.2, 2) is",
+            ));
+        }
         if f.frame_size > 0 {
             return Err(unsupported(
                 f.span,
@@ -251,6 +261,7 @@ fn select_body_with(
         s.result_web = f.result.is_some();
     }
     s.load_link(f)?;
+    s.param_copies(f)?;
     s.reg_locals = register_locals(f);
     s.ptr_locals = loop_pointer_locals(f, &s.reg_locals)
         .into_iter()
@@ -398,6 +409,25 @@ fn select_body_with(
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     let saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
         .map_err(|what| unsupported(f.span, what))?;
+    for &(k, span) in &s.copy_blocks {
+        // A block copy of a value parameter is seen from A0 into A1 only
+        // (`tools/framesurvey.py`-style search of `movea.l (d,A6),An; lea
+        // (k,A6),Am; move (An)+,(Am)+`: 31 slot copies A0 to A1,
+        // XPD_$SET_PTRACE_OPTS 0xE5AFB0, OS_$INIT 0xE33808; the three
+        // others in nested routines or after a branch).  Where an earlier
+        // copy or an entry load holds A0 or A1, which registers the
+        // original takes is not known (codegen-patterns 1.2).
+        let from_a0 = matches!(s.out.get(k), Some(Insn::Movea { dst: 0, .. }));
+        let into_a1 = matches!(s.out.get(k + 1), Some(Insn::Lea { dst: 1, .. }));
+        if !(from_a0 && into_a1) {
+            return Err(unsupported(
+                span,
+                "a block copy of a value parameter passed by address while an earlier copy or \
+                 an entry load holds A0 or A1 (only `A0` to `A1` is seen, codegen-patterns 1.2) \
+                 is",
+            ));
+        }
+    }
     for &(o, k, span) in &s.ptr_defs {
         // A pointer local assigned from calls that no call follows: the
         // image keeps such locals in D0 (`move.l A0,D0` after the call,
@@ -617,23 +647,48 @@ fn held_through_calls(
 /// before the load the original's register fits this rule only, or
 /// lowest-free only, 85/28 times (branches) and 102/81 (branches and
 /// calls), a reload of the same slot counted as the same value: the rule
-/// there is not known, and such bodies are refused.
+/// there is not known, and such loads are refused.  Before the first
+/// branch or call of a routine that has some, the rule holds as without
+/// them (bead domain-pascal-5aw.12; ad-hoc script over
+/// `tools/nestsurvey.py`'s routines, not kept: of the slot loads in that
+/// straight-line prefix whose register is dead after it, 496 of 553 fit
+/// this rule, the others mostly argument lists, R4(a), or values held
+/// through a call, R4(c); the value-parameter copies there, 133 of 135,
+/// [`Selector::param_copies`]); DIR_$GET_ENTRYU 0xE4D51E `movea.l
+/// (0x10,A6),A0` in its `if` condition, after the copy's `(A0)+`.
 fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg, Reg)>> {
-    let Some(&(_, _, span)) = fresh.first() else {
+    if fresh.is_empty() {
         return Ok(Vec::new());
-    };
-    if out.iter().any(|i| {
-        matches!(
-            i,
-            Insn::Branch { .. } | Insn::Dbf { .. } | Insn::Jsr(_) | Insn::Bsr { .. }
-        )
-    }) {
-        return Err(unsupported(
-            span,
-            "in a body of several statements with branches or calls, a pointer parameter or \
-             by-address parameter that is used once (loaded where needed into a fresh register: \
-             IIC_$RECEIVE 0xE70AC0, codegen-patterns 12.4 R4(b)) is",
-        ));
+    }
+    // The first instruction after which the rule is not known: a branch,
+    // a call, or a label (a loop head, a join).
+    let first_flow = out
+        .iter()
+        .position(|i| {
+            matches!(
+                i,
+                Insn::Branch { .. }
+                    | Insn::Dbf { .. }
+                    | Insn::Jsr(_)
+                    | Insn::Bsr { .. }
+                    | Insn::Label(_)
+                    | Insn::TableIndex { .. }
+            )
+        })
+        .unwrap_or(out.len());
+    for &(v, _, span) in fresh {
+        let load = out
+            .iter()
+            .position(|i| crate::regs::access(i).defs.contains(&v))
+            .unwrap_or(out.len());
+        if load > first_flow {
+            return Err(unsupported(
+                span,
+                "in a body of several statements, a pointer parameter or by-address parameter \
+                 that is used once after a branch or a call (loaded where needed into a fresh \
+                 register: IIC_$RECEIVE 0xE70AC0, codegen-patterns 12.4 R4(b)) is",
+            ));
+        }
     }
     // Registers used up by `(An)+` / `-(An)`.
     let consumed: Vec<u8> = out
@@ -2346,6 +2401,13 @@ pub struct Selector {
     /// The body has several statements, or is one `if`/`repeat`
     /// ([`select_body`]).
     multi_body: bool,
+    /// The routine copied value parameters on entry
+    /// ([`Self::param_copies`]).
+    copied: bool,
+    /// The index of each block copy of a value parameter (its slot's
+    /// `movea.l`, then the `lea` of the copy) and its span, checked after
+    /// allocation ([`Self::param_copies`]).
+    copy_blocks: Vec<(usize, Span)>,
     /// The next local label number (unique within the routine).
     next_label: u32,
     /// Labels already defined (a branch to one of them goes backward).
@@ -2510,6 +2572,8 @@ impl Selector {
             reg_locals: Vec::new(),
             multi: false,
             multi_body: false,
+            copied: false,
+            copy_blocks: Vec::new(),
             next_label: 1,
             placed: Vec::new(),
             epilogue: None,
@@ -2674,8 +2738,13 @@ impl Selector {
             // in a body that loaded nothing at entry, where the lowest free
             // registers are taken (0xE00ECC..0xE00ED2, A0 and D0 after the
             // `jsr` at 0xE00EC2).
-            self.multi =
-                self.multi_body && !(after_call && self.pinned.is_empty() && is_simple(st));
+            // The entry copies of value parameters count as earlier
+            // statements: after them a one-statement body's slot loads
+            // are fresh too (SMD_$SET_TP_CURSOR 0xE6E98C `movea.l
+            // (8,A6),A2` after the copies through A0 and A1;
+            // [`Self::param_copies`]).
+            self.multi = (self.multi_body || self.copied)
+                && !(after_call && self.pinned.is_empty() && is_simple(st));
             // What follows this statement up to the epilogue.
             let next = Tail {
                 end: rest.is_empty() && tail.end,
@@ -4063,6 +4132,140 @@ impl Selector {
             });
             self.pinned.push((offset, r));
         }
+        Ok(())
+    }
+
+    /// Copy the value parameters passed by address into their frame slots
+    /// (ref 5.2 Table 5-1, p. 5-5: under the default convention the callee
+    /// "Creates local copies of arguments and makes direct references to
+    /// them"; codegen-patterns 1.2, "Value parameters passed by address").
+    ///
+    /// Survey (`tools/framesurvey.py copies`; compiled code,
+    /// 0xE00800..0xE88834): the copies are made after the data base and
+    /// the entry loads of the other parameters (DIR_$GET_ENTRYU
+    /// 0xE4D508..0xE4D51A: `lea abs.l,A5; movea.l (0x18,A6),A2; movea.l
+    /// (8,A6),A0; move.l (A0)+,(-8,A6); move.l (A0)+,(-4,A6)`; AST_$SET_DTS
+    /// 0xE05540 likewise after a word and a pointer), in parameter order
+    /// (FILE_$INVALIDATE 0xE75166..0xE75186), each from its slot loaded into
+    /// a register no earlier copy left a value in unless `(An)+` used it up
+    /// (12.4 R4(b): A0, A0, A1, A2 at FILE_$INVALIDATE; 133 of the 135
+    /// copy loads before a routine's first branch or call, the other two
+    /// through a register loaded at entry).  By size:
+    ///
+    /// - 1, 2, 4 bytes: `move.<s> (An),(d,A6)` (SMD_$SET_TP_CURSOR 0xE6E976
+    ///   `move.l`, 0xE6E97E `move.w`; FILE_$INVALIDATE 0xE75186 `move.b`);
+    /// - 6 bytes: `move.l (An),(d,A6); move.w (4,An),(d+4,A6)` (all 6
+    ///   sites: TONE_$TIME 0xE17304, FILE_$SET_DTM_F 0xE5E208);
+    /// - 8 bytes: `move.l (An)+,(d,A6); move.l (An)+,(d+4,A6)` (all 124
+    ///   sites: DIR_$GET_ENTRYU 0xE4D516);
+    /// - 10 bytes and more: the block copy of codegen-patterns 5.2
+    ///   ([`Self::copy`]; XPD_$SET_PTRACE_OPTS 0xE5AFB0..0xE5AFBE, 14
+    ///   bytes; OS_$INIT 0xE33808, a `dbf` loop).
+    ///
+    /// Refused: other sizes (not seen); a copy the routine never refers
+    /// to, nor any nested routine (whether the original copied it is not
+    /// visible: an empty procedure is a bare `rts`, codegen-patterns 2);
+    /// a block copy not from A0 into A1 (checked after allocation, in
+    /// [`select_body_with`]: the only form seen); copies in a nested
+    /// routine (none catalogued).
+    fn param_copies(&mut self, f: &Function) -> Res<()> {
+        if f.param_copies.is_empty() {
+            return Ok(());
+        }
+        if f.nesting.is_some() {
+            return Err(unsupported(
+                f.param_copies[0].span,
+                "a value parameter passed by address to a nested routine (its copy is not \
+                 catalogued, codegen-patterns 1.2) is",
+            ));
+        }
+        let mut refs: Vec<i32> = Vec::new();
+        walk(&f.body, &mut |n| {
+            if let Node::Addr(Addr::Frame(o)) = n {
+                refs.push(*o);
+            }
+        });
+        let multi = self.multi;
+        self.multi = true;
+        for pc in &f.param_copies {
+            self.span = pc.span;
+            let (lo, hi) = (pc.copy, pc.copy + pc.bytes as i32);
+            let used = refs.iter().any(|&o| lo <= o && o < hi)
+                || f.uplevel_refs
+                    .iter()
+                    .any(|&(o, n)| o < hi && lo < o + n as i32);
+            if !used {
+                return Err(unsupported(
+                    pc.span,
+                    "a value parameter passed by address that the routine never uses (whether \
+                     the original copied it is not visible, codegen-patterns 1.2) is",
+                ));
+            }
+            self.stmt_start = self.out.len();
+            let from = Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Frame(pc.slot),
+                    ty: Scalar::unsigned(Width::Long),
+                }),
+                offset: 0,
+            };
+            let to = Addr::Frame(pc.copy);
+            match pc.bytes {
+                1 | 2 | 4 | 6 | 8 => {
+                    let a = self.alloc_a()?;
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Disp(pc.slot, FP),
+                        dst: a,
+                    });
+                    self.fresh.push((Reg::A(a), self.stmt_start, self.span));
+                    let start = self.out.len();
+                    let mv = |size, src, d| Insn::Move {
+                        size,
+                        src,
+                        dst: Ea::Disp(pc.copy + d, FP),
+                    };
+                    match pc.bytes {
+                        1 => self.out.push(mv(Size::B, Ea::Ind(a), 0)),
+                        2 => self.out.push(mv(Size::W, Ea::Ind(a), 0)),
+                        4 => self.out.push(mv(Size::L, Ea::Ind(a), 0)),
+                        6 => {
+                            self.out.push(mv(Size::L, Ea::Ind(a), 0));
+                            self.out.push(mv(Size::W, Ea::Disp(4, a), 4));
+                        }
+                        _ => {
+                            self.out.push(mv(Size::L, Ea::PostInc(a), 0));
+                            self.out.push(mv(Size::L, Ea::PostInc(a), 4));
+                        }
+                    }
+                    if self.out.len() - start > 1 {
+                        // Like an unrolled block copy (12.4 R10).
+                        self.units.push((start, self.out.len()));
+                    }
+                }
+                n if n >= 10 && n % 2 == 0 => {
+                    let before = self.out.len();
+                    self.copy(&to, &from, n)?;
+                    // The slot's register is the source, loaded first.
+                    if let Some(Insn::Movea { dst, .. }) = self.out.get(before) {
+                        self.fresh.push((Reg::A(*dst), self.stmt_start, self.span));
+                    }
+                    self.copy_blocks.push((before, pc.span));
+                }
+                n => {
+                    return Err(unsupported(
+                        pc.span,
+                        format!(
+                            "a {n}-byte value parameter passed by address (its copy is not \
+                             catalogued, codegen-patterns 1.2) is"
+                        ),
+                    ))
+                }
+            }
+            self.wrote(&to, pc.bytes);
+        }
+        self.multi = multi;
+        self.copied = true;
         Ok(())
     }
 
@@ -7753,6 +7956,7 @@ mod tests {
             scalar_locals: Vec::new(),
             nesting: None,
             uplevel_refs: Vec::new(),
+            param_copies: Vec::new(),
             result_slot: None,
             body: body
                 .into_iter()

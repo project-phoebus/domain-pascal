@@ -53,6 +53,30 @@ class FrameSurveyTest(unittest.TestCase):
         self.assertEqual(framesurvey.size_order(r, -8), 'longs-above')
         self.assertIsNone(framesurvey.size_order(ins('movew %d0,%fp@(-2)'), -4))
 
+    def test_entry_copies(self):
+        # FILE_$INVALIDATE 0xE75158: A0 used up by (A0)+, then A0, A1, A2
+        r = ins('linkw %fp,#-24', 'moveml %a2/%a5,%sp@-', 'lea 0xe86068,%a5',
+                'moveal %fp@(8),%a0', 'movel %a0@+,%fp@(-8)', 'movel %a0@+,%fp@(-4)',
+                'moveal %fp@(12),%a0', 'movel %a0@,%fp@(-20)',
+                'moveal %fp@(16),%a1', 'movel %a1@,%fp@(-16)',
+                'moveal %fp@(20),%a2', 'moveb %a2@,%fp@(-22)',
+                'pea %fp@(-12)', 'jsr 0xe46a00')
+        got = framesurvey.entry_copies(r)
+        self.assertEqual([(s, a, ok) for s, a, _, ok in got],
+                         [(8, 0, True), (12, 0, True), (16, 1, True), (20, 2, True)])
+        self.assertEqual(got[0][2], [('l', '+', -8), ('l', '+', -4)])
+        # DIR_$GET_ENTRYU 0xE4D500: the status slot loaded at entry first
+        r = ins('linkw %fp,#-8', 'moveml %a2/%a5,%sp@-', 'lea 0xe7dc00,%a5',
+                'moveal %fp@(24),%a2', 'moveal %fp@(8),%a0',
+                'movel %a0@+,%fp@(-8)', 'movel %a0@+,%fp@(-4)', 'bras 0x0')
+        self.assertEqual([(s, a, ok) for s, a, _, ok in framesurvey.entry_copies(r)],
+                         [(8, 0, True)])
+        # TONE_$TIME 0xE17300: 6 bytes, a longword and a displaced word
+        r = ins('linkw %fp,#-12', 'moveal %fp@(8),%a0', 'movel %a0@,%fp@(-8)',
+                'movew %a0@(4),%fp@(-4)')
+        self.assertEqual(framesurvey.slot_copy(r, 1)[2],
+                         [('l', '0', -8), ('w', 'd', -4)])
+
     def test_outside_the_link_area(self):
         r = ins('linkw %fp,#-4', 'movew %fp@(-6),%d0', 'movew %fp@(8),%d1')
         self.assertEqual(framesurvey.accesses(r, -4), [])

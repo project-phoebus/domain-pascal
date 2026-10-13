@@ -159,6 +159,116 @@ What the image shows:
   C tree's prototypes (`../source/domain_os/*/*.h`) tell you, routine by
   routine, which convention the image uses.
 
+#### Value parameters passed by address: the callee's copy (survey Verified; frame position Uncertain; implemented; bead domain-pascal-5aw.12)
+
+Ref 5.2 Table 5-1 (p. 5-5), "no mode", default convention: the caller
+"Passes address", the callee "Creates local copies of arguments and makes
+direct references to them"; `in` parameters are not copied ("Makes
+indirect references", and the callee may not assign them, 5.3.2 p. 5-7).
+
+Survey (`tools/framesurvey.py copies`: every compiled routine of
+`tools/nestsurvey.py`'s split; a "slot copy" is `movea.l (d,A6),An`, d >=
+8, followed by moves from `(An)` into the frame):
+
+- **The copy sequences, by size** (all slot copies anywhere in a
+  routine, Verified counts):
+  - 1, 2, 4 bytes: one `move.<s> (An),(k,A6)` (3, 40 and 30 sites;
+    FILE_$INVALIDATE 0xE75186 `move.b`, SMD_$SET_TP_CURSOR 0xE6E97E
+    `move.w`, 0xE6E976 `move.l`).  A few take a field, `(d,An)` (1, 5,
+    3 sites): statements reading a record field, not copies.
+  - 6 bytes: `move.l (An),(k,A6); move.w (4,An),(k+4,A6)` (all 6 sites:
+    TONE_$TIME 0xE17304, FILE_$SET_DTM_F 0xE5E208, FILE_$SET_DTU_F,
+    0xE05220, 0xE1652E, 0xE5AA2C).
+  - 8 bytes: `move.l (An)+,(k,A6); move.l (An)+,(k+4,A6)` (all 124 sites,
+    none with displacements; DIR_$GET_ENTRYU 0xE4D512..0xE4D51A, the
+    PROC2_, XPD_, FILE_, ACL_ UID parameters).
+  - 10 bytes and more: the block copy of 5.2 from the slot, `movea.l
+    (d,A6),A0; lea (k,A6),A1; move.l (A0)+,(A1)+ ...` (XPD_$SET_PTRACE_OPTS
+    0xE5AFB0..0xE5AFBE, 14 bytes), a `dbf` loop from 20 bytes (OS_$INIT
+    0xE33808, 36 bytes).
+- **When (Verified at the sites):** at entry, after the register save,
+  the A5 load and the entry loads of the other parameters (12.2):
+  DIR_$GET_ENTRYU 0xE4D508..0xE4D51A `lea abs.l,A5; movea.l (0x18,A6),A2;
+  movea.l (8,A6),A0; move.l (A0)+,(-8,A6); move.l (A0)+,(-4,A6)`;
+  AST_$SET_DTS 0xE05540 (`move.w (8,A6),D3; movea.l (0x12,A6),A3`, then
+  the copy of `(0xa,A6)`, the second parameter, after the third);
+  DIR_$OLD_GET_ENTRYU 0xE58064..0xE5807C (four entry loads, then the
+  copy of the first parameter).  Then **in parameter order**
+  (FILE_$INVALIDATE 0xE75166..0xE75186, four copies; SMD_$SET_TP_CURSOR).
+- **Registers (Verified by survey):** each copy's slot goes to the lowest
+  address register that no entry load holds and no earlier copy left a
+  value in; one used up by `(An)+` counts as free (12.4 R4(b)):
+  FILE_$INVALIDATE A0, A0 (after the 8-byte `(A0)+`), A1, A2 (saved for
+  this alone).  133 of the 135 copies before a routine's first branch or
+  call fit; the other two (DISK_$SORT 0xE3C3F0, PROC2_$SIGNAL_OS
+  0xE3F0B8) copy through a register loaded at entry, the slot used again
+  later.  The next statement's slot loads continue the rule:
+  SMD_$SET_TP_CURSOR 0xE6E98C `movea.l (8,A6),A2` after copies through
+  A0 and A1, in a one-statement body; DIR_$GET_ENTRYU 0xE4D51E `movea.l
+  (0x10,A6),A0` after the copy's `(A0)+`.
+- **Unmodified parameters are copied** (Verified, as far as the source
+  can be inferred): the UID parameters above are never assigned (the C
+  reconstructions only read them), yet copied and then passed on as the
+  copy (DIR_$GET_ENTRYU 0xE4D55E `pea (-8,A6)` to DIR_$OLD_GET_ENTRYU;
+  TONE_$TIME 0xE1732C `pea (-8,A6)` to TIME_$WAIT), or pushed by value
+  from the copy (SMD_$SET_TP_CURSOR 0xE6E984, 0xE6E988; FILE_$INVALIDATE
+  0xE751B4..0xE751BC).  A parameter read through its slot without a copy
+  (SMD_$SET_TP_CURSOR's first, 0xE6E98C; DIR_$GET_ENTRYU's name and
+  length, passed on with `move.l (d,A6),-(SP)`) is taken to be `in`.
+  Whether an *unused* value parameter is copied cannot be seen (an empty
+  procedure is a bare `rts`, section 2).
+- **Held in a register instead (Uncertain):** 189 by-address slots are
+  dereferenced into a data register before the first branch or call
+  (`movea.l (8,A6),A0; move.w (A0),D2`: FIM_$FREE_ASID 0xE0AA6C,
+  VOLX_$MOUNT 0xE6B118 four words into D4..D7), with no frame copy.
+  These may be `in` parameters read once at entry, or value parameters
+  whose copy lives in a register (as a local can, 12.5); the image cannot
+  tell.  `dpc` copies every value parameter into the frame.
+- **Frame position (Uncertain):** of the 8-byte entry copies in
+  map-named routines, 29 sit at the top of the frame (`(-8,A6)`, nothing
+  above: DIR_$GET_ENTRYU `link #-8`; PROC2_$DEBUG, XPD_$READ_PROC with
+  their status local at -12 below), 34 below other frame objects
+  (FILE_$LOCATE 0xE60620 at -40, FILE_$READ_LOCK_ENTRY 0xE608EC at the
+  bottom, -48, below a 26-byte local), 1 below nothing it addresses
+  (MST_$UNMAP_PRIVI).  Several copies are not in parameter order in the
+  frame: FILE_$INVALIDATE has the UID at -8, its status local at -12,
+  then the third parameter at -16, the second at -20, the fourth (a
+  byte) at -22; MST_$GET_UID_ASID 0xE44010 copies its word to -4 with
+  locals at -2, -6 and -8; XPD_$SET_DEBUGGER 0xE5BBD8 puts its first
+  parameter's copy (-16) below its second's (-8).  No order fits every
+  site (as for the result variable, section 2).  `dpc` allocates the
+  copies first, from the top, in parameter order, before the locals;
+  this fits the top sites and SMD_$SET_TP_CURSOR (-4 then -6), not the
+  others.
+
+**Implemented** (`dpc-sema` `Param::copy_offset`; `dpc-ir`
+`Function::param_copies`, `var_addr`; `dpc-m68k` `isel.rs`,
+`Selector::param_copies`): the body reads, writes and passes on the copy
+(an assignment to a value parameter never reaches the caller's object;
+`addr` and passing it by address name the copy); the copies are emitted
+after the entry loads in the forms above, each slot register kept apart
+from the earlier ones by 12.4 R4(b), and a body after copies takes fresh
+registers for its slot loads as a body of several statements does.
+Refused: a value parameter the body never uses (nor any nested routine),
+in an empty procedure too; sizes other than 1, 2, 4, 6, 8 or an even 10
+and more (a 3-byte character array); a block copy whose registers come
+out other than A0 to A1, i.e. after a copy that left its register or with
+an entry load in A0 or A1 (the 31 slot block copies seen are A0 to A1
+where nothing holds them, XPD_$SET_PTRACE_OPTS 0xE5AFB0, OS_$INIT
+0xE33808; the three others are in nested routines or after a branch,
+0xE4626E, 0xE5B192, FILE_$OLD_AP 0xE5E132); copies in a nested routine
+(none catalogued).  Golden `tests/golden/params/value_copies`; driver tests
+`crates/dpc-m68k/tests/params.rs`; byte-identical in `make conform`:
+TONE_$TIME (`tone_time.pas`, the whole TONE module, a 6-byte copy) and
+SMD_$SET_TP_CURSOR (`smd_set_tp_cursor.pas`, two copies and A2 for the
+`in` slot).  Blocked: DIR_$GET_ENTRYU (section 6), MST_$GET_UID_ASID (its
+frame order), PROC2_$PGUID_TO_UPGID 0xE41072 (`movea.l (0xc,A6),A0`,
+`movea.l (0x10,A6),A1` after a call, 12.4 R4(b) after a call is refused),
+SET_LITES_LOC 0xE0C4DC (its copy reloaded into A1 for a `nil` test and
+reused, `movea.l (-4,A6),A1; cmpa.w #0,A1; ...; move.l A1,(A5)`: a
+pointer local's register and reuse not modelled), TERM_$WRITE 0xE668D8
+(a constant cell of an earlier routine, `pea (-0x5e,PC)` to 0xE66898).
+
 ### 1.3 Stack slots for small values: the "word-slot" ABI (Verified)
 
 From `../source/docs/pascal-abi.md`:
@@ -576,9 +686,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
        (nested, or `internal`: unnamed in the map), never addressed except
        by nested routines that store a static link there (section 6,
        "Frame");
-    2. local copies of value parameters (place Uncertain) and the locals,
-       whether or not the code ever keeps them in memory ("Untouched
-       frames" below);
+    2. local copies of value parameters (place Uncertain: at the top in
+       29 routines, below other objects in 34, not always in parameter
+       order; section 1.2, "Value parameters passed by address"; `dpc`
+       puts them first, in parameter order) and the locals, whether or
+       not the code ever keeps them in memory ("Untouched frames" below);
     3. a function's **result variable**, below the locals (its place is
        Uncertain: sites both ways, see below);
     4. the **temporaries** of expressions passed by address (section
@@ -833,7 +945,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     `dpc_ir::Function::is_empty_procedure`): a procedure whose body has
     no statements is a bare `rts`, with any parameters (by address, or
     by value under `val_param`; a value parameter the callee would copy
-    is still refused, as everywhere), and never loads A5 (section 4).
+    is refused: a bare `rts` has no frame for the copy, section 1.2), and
+    never loads A5 (section 4).
     One with locals is refused: no `link; unlk; rts` is seen, and
     whether such a procedure keeps its frame is not known.  An empty
     *function* keeps its frame.  Byte-identical in `make conform`:
@@ -1555,6 +1668,10 @@ their host); no compare or widening of either has been catalogued.
     copies.  Taken to be field-by-field assignments in the source
     (Uncertain: the image cannot tell; the C of XNS_IDP_$GET_STATS
     assigns three named fields).
+  - **Copies of value parameters from their slot** (section 1.2): 6
+    bytes `move.l (An),(k,A6); move.w (4,An),(k+4,A6)` (6 sites), 8 bytes
+    `move.l (An)+,(k,A6)` twice (124 sites, the DIR_$ADD_MOUNT form
+    above); implemented for those copies only (`Selector::param_copies`).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `copy`): records and
     arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1;
     the source or destination in the data area, in the frame, or the
@@ -1856,9 +1973,17 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   What blocks the other candidates (reconstructions from `../source`'s C
   compiled with `dpc`, or read with `tools/imgdis.sh`; smallest first):
   - DIR_$GET_ENTRYU 0xE4D500 with 0xE4D460 (family 0x112, the smallest):
-    the parent copies its 8-byte by-value UID into its frame
-    (0xE4D512..0xE4D51A; `dpc-sema` refuses value parameters the callee
-    copies); the nested routine has a byte-copy `for` loop with a
+    the parent's copy of its 8-byte by-value UID (0xE4D512..0xE4D51A) is
+    reproduced since bead domain-pascal-5aw.12 (section 1.2), but the
+    parent still differs: it reads its `in` length through the slot once
+    into D0 and tests it twice (`movea.l (0x10,A6),A0; move.w (A0),D0;
+    tst.w D0; ...; cmpi.w #0xff,D0`, 0xE4D51E..0xE4D528) and its status
+    likewise (`move.l (A2),D0; cmpi.l; beq; cmpi.l`, 0xE4D53E..0xE4D548):
+    a reuse of a value read through a by-address slot, which 12.4 R7 does
+    not model (`dpc` compares in memory twice, and loads the length's
+    slot into A2 at entry as a slot used more than once, where the
+    original passes the slot on with `move.l (0x10,A6),-(SP)`); the
+    nested routine has a byte-copy `for` loop with a
     run-time count, `lea (0,A6,D1.w),A0; move.b (-1,A1,D1.w),(-0x129,A0)`
     (0xE4D480..0xE4D488), a byte store at an odd frame offset (0xE4D494
     `move.b #0x44,(-0x1b5,A6)`, a record field), 8-byte copies into frame
@@ -3760,8 +3885,9 @@ kinds from the C in `../source/domain_os`.
     `move.w D5,(0xc,A6)`) and then passes `pea (0xc,A6)` to
     REM_FILE_$PURIFY (which only reads it, `rem_file/purify.c`), and
     keeps using D5 after (0xE05B70).  This relies on the callee: a
-    `dpc`-compiled callee does not take value parameters by address yet
-    (refused), and `dpc-sema` refuses any write to an `in` parameter or a
+    `dpc`-compiled callee copies a value parameter passed by address on
+    entry and writes only the copy (section 1.2, bead
+    domain-pascal-5aw.12), and `dpc-sema` refuses any write to an `in` parameter or a
     field or element of one: assignment (whole: "Assignment to IN
     argument", ref 5.3.2 p. 5-7; part, `with` included: not supported),
     passing it to a `var`, `out` or `in out` parameter, and `addr`
@@ -3808,9 +3934,17 @@ NAME_$VALIDATE's module-local 0xE4A004 loads the slots its loops use at
 needed, 0xE4A03C; section 7.4).  A slot used once in a body of several
 statements takes a register no earlier statement left a value in (12.4
 R4(b), bead domain-pascal-5aw.2; IIC_$RECEIVE 0xE70AC0..0xE70AD0) when
-the body has no branches and no calls, and is rejected otherwise, except
+no branch, call or label comes before the load (bead domain-pascal-5aw.12:
+in routines that do branch or call, 496 of the 553 slot loads before the
+first branch or call whose register is dead after it fit R4(b), the
+others mostly argument lists, 12.4 R4(a), or values held through a call,
+R4(c); ad-hoc script over `tools/nestsurvey.py`'s routines, not kept;
+DIR_$GET_ENTRYU 0xE4D51E), and is rejected after one, except
 in a simple statement right after a call in a body that loaded nothing
-at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2).  A parameter that is only pushed as a whole argument is not
+at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2).
+The entry copies of value parameters count as earlier statements
+(section 1.2): after them a one-statement body's slot loads are fresh
+too (SMD_$SET_TP_CURSOR 0xE6E98C, A2 after the copies' A0 and A1).  A parameter that is only pushed as a whole argument is not
 "read" for this rule: it is pushed from the frame at each call (0xE00EBE,
 0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).  A parameter whose slot the body
 passes to a `var`, `out` or `in out` parameter, or takes with `addr`,
@@ -4238,7 +4372,11 @@ of the remaining misses).**  The corpus misses fall into these groups:
     (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`; the allocator
     keeps each such slot apart from the address values of earlier
     statements that no `(An)+` used up, `regs::allocate_apart`).  Bodies
-    with branches or calls are refused.  The slot loads of block copies
+    with branches or calls are refused when such a load comes after a
+    branch, call or label; before the first one the rule is applied
+    (bead domain-pascal-5aw.12: 496 of 553 such loads in routines with
+    branches or calls fit it, 12.2; the value-parameter copies, 133 of
+    135, section 1.2).  The slot loads of block copies
     (`block_address`) still take the lowest free register (ACL_
     0xE47944 suggests the same rule applies there: A2 after an `(A2)+`
     copy while the dead A0 of an earlier statement is passed over; not

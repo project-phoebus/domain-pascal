@@ -639,6 +639,7 @@ mod tests {
             scalar_locals: Vec::new(),
             nesting: None,
             uplevel_refs: Vec::new(),
+            param_copies: Vec::new(),
             result_slot: None,
             body: Vec::new(),
             span,

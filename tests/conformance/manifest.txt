@@ -136,3 +136,10 @@ tests/conformance/cal_shutdown.pas           CAL_$SHUTDOWN  --section-addr .bss.
 # domain-pascal-5aw.8): a `val_param' pointer type, the argument pushed by
 # value, then `movea.l (A5),A0; jsr (A0)', not popped before `unlk'.
 tests/conformance/atbus_ring_interrupt.pas   RING_INTERRUPT  --section-addr .bss.moddata.ATBUS_=0xE22904
+# Value parameters under the default convention (codegen-patterns 1.2;
+# bead domain-pascal-5aw.12): passed by address and copied by the callee
+# on entry, 6 bytes as `move.l (A0); move.w (4,A0)', scalars as one move,
+# in parameter order, the slots in registers no earlier copy left a value
+# in (12.4 R4(b)); the copies passed on by address or pushed by value.
+tests/conformance/tone_time.pas              TONE_$TIME
+tests/conformance/smd_set_tp_cursor.pas      SMD_$SET_TP_CURSOR  --section-addr .bss.moddata.SMD=0xE82B8C  a5-always=SMD_$SET_TP_CURSOR  module-routines=SMD_$LOC_EVENT

@@ -32,6 +32,13 @@ usage:
                                       # object above a lone longword, and
                                       # with every longword above them
                                       # (frames are not sorted by size)
+    tools/framesurvey.py copies       # copies from a by-address slot into
+                                      # the frame (value parameters passed
+                                      # by address, bead
+                                      # domain-pascal-5aw.12): the move
+                                      # forms by size, the register rule of
+                                      # the copies before the first branch
+                                      # or call, where 8-byte copies sit
 
 Python 3 standard library + m68k-elf-objdump (through nestsurvey).
 Read-only.
@@ -135,8 +142,90 @@ def size_order(insns, link):
     return 'small-above-long' if max(small) > min(longs) else 'longs-above'
 
 
+_SLOT_LOAD = re.compile(r'moveal %fp@\((\d+)\),%a(\d)$')
+_CTL = re.compile(r'(bsr|jsr|bra|b(hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le)[sw]?|db\w+|jmp|rts)$')
+_SAVE = re.compile(r'(moveml \S+,%sp@-|movel %d\d,%sp@-|pea %a\d@|lea 0x[0-9a-f]+,%a5)$')
+
+
+def slot_copy(insns, i):
+    """When insns[i] is `movea.l (d,A6),An' (d >= 8) followed by moves
+    from (An) into the frame: (slot d, register n, [(size letter, source
+    form '0' | '+' | 'd', frame offset)]) and the index after them; else
+    None.  Source forms: `(An)', `(An)+', `(k,An)'."""
+    m = _SLOT_LOAD.match(insns[i][2])
+    if not m:
+        return None
+    a = m.group(2)
+    mv = re.compile(r'move([bwl]) %%a%s@(\+|\((\d+)\))?,%%fp@\((-\d+)\)$' % a)
+    seq = []
+    j = i + 1
+    while j < len(insns):
+        mm = mv.match(insns[j][2])
+        if not mm:
+            break
+        form = '+' if mm.group(2) == '+' else ('d' if mm.group(2) else '0')
+        seq.append((mm.group(1), form, int(mm.group(4))))
+        j += 1
+    if not seq:
+        return None
+    return int(m.group(1)), int(a), seq, j
+
+
+def copy_forms(rs):
+    """Counter of (bytes, form) over every slot copy, and an example
+    address per key; form e.g. `l+ l+' (`move.l (An)+,..' twice)."""
+    c, ex = Counter(), {}
+    for r in rs:
+        for i in range(len(r.insns)):
+            got = slot_copy(r.insns, i)
+            if got:
+                _, _, seq, _ = got
+                k = (sum(SIZE[x[0]] for x in seq), ' '.join(x[0] + x[1] for x in seq))
+                c[k] += 1
+                ex.setdefault(k, r.insns[i][0])
+    return c, ex
+
+
+def entry_copies(insns):
+    """The slot copies before a routine's first branch or call, after the
+    register save, the A5 load and the entry loads: [(slot, register,
+    seq, fits)], `fits' whether the register is the lowest address
+    register that no entry load holds and no earlier copy left a value in
+    (one used up by `(An)+' counts as free; codegen-patterns 12.4
+    R4(b))."""
+    out = []
+    held, used = set(), set()
+    i = 1
+    while i < len(insns) and _SAVE.match(insns[i][2]):
+        i += 1
+    while i < len(insns):
+        t = insns[i][2]
+        if _CTL.match(t.split()[0]):
+            break
+        got = slot_copy(insns, i)
+        if got:
+            slot, a, seq, j = got
+            free = [x for x in range(5) if x not in held and x not in used]
+            out.append((slot, a, seq, bool(free) and a == free[0]))
+            if seq[-1][1] == '+':
+                used.discard(a)
+            else:
+                used.add(a)
+            i = j
+            continue
+        m = _SLOT_LOAD.match(t)
+        if m and not out:
+            held.add(int(m.group(2)))
+        elif not out and re.match(r'move[bwl] %fp@\(\d+\),%d\d$', t):
+            pass
+        else:
+            break
+        i += 1
+    return out
+
+
 def main(argv):
-    if not argv or argv[0] not in ('align', 'byte-pairs', 'order'):
+    if not argv or argv[0] not in ('align', 'byte-pairs', 'order', 'copies'):
         print(__doc__)
         return 2
     import nestsurvey
@@ -148,6 +237,27 @@ def main(argv):
             for cls in ('-', 'lowpea'):
                 row = {m: c[(k, cls, m)] for m in range(4)}
                 print('  %-7s %s' % (cls, '  '.join('%d:%d' % kv for kv in row.items())))
+    elif argv[0] == 'copies':
+        c, ex = copy_forms(rs)
+        print('slot copies by bytes and form (count, first site):')
+        for k in sorted(c):
+            print('  %2d %-12s %4d  0x%06X' % (k[0], k[1], c[k], ex[k]))
+        fit, pos = Counter(), Counter()
+        for r in rs:
+            for slot, a, seq, ok in entry_copies(r.insns):
+                fit[ok] += 1
+                if not ok:
+                    print('  not R4(b): 0x%06X %s slot %d A%d' % (r.r0, r.name or '-', slot, a))
+                n = sum(SIZE[x[0]] for x in seq)
+                if n == 8 and r.name:
+                    lo = min(x[2] for x in seq)
+                    above = [o for o in offsets(r.insns, r.link) if o >= lo + 8]
+                    pos[('top' if lo == -8 else 'deep',
+                         'objects above' if above else 'nothing above')] += 1
+        print('entry copies, register by 12.4 R4(b): %d fit, %d not' % (fit[True], fit[False]))
+        print('8-byte entry copies of map-named routines:')
+        for k, v in sorted(pos.items()):
+            print('  %-4s %-14s %d' % (k[0], k[1], v))
     elif argv[0] == 'order':
         c = Counter()
         for r in rs:

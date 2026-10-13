@@ -213,14 +213,79 @@ fn function_without_result_assignment() {
     );
 }
 
+/// Value parameters under the default convention are passed by address
+/// and copied by the callee (ref 5.2 Table 5-1, p. 5-5): the function
+/// lists the copies in parameter order, and the body reads, writes and
+/// passes on the copy, never the caller's object (bead domain-pascal-5aw.12;
+/// DIR_$GET_ENTRYU 0xE4D500).
+#[test]
+fn value_parameter_copies() {
+    let m = lower_src(
+        "module m;
+type uid_$t = record high, low: integer32; end;
+procedure q(var u: uid_$t; var n: integer); extern;
+procedure p(u: uid_$t; in k: integer; n: integer);
+var l: integer;
+begin
+  n := n + 1;
+  l := n;
+  q(u, n);
+end;
+",
+    )
+    .expect("lowers");
+    let f = &m.functions[0];
+    let copies: Vec<(i32, i32, u32)> = f
+        .param_copies
+        .iter()
+        .map(|c| (c.slot, c.copy, c.bytes))
+        .collect();
+    // `u` at (8,A6) copied to -8..-1, `n` at (0x10,A6) to -10; the `in`
+    // parameter `k` is not copied; the local `l` comes after the copies.
+    assert_eq!(copies, vec![(8, -8, 8), (16, -10, 2)]);
+    assert_eq!(f.address_params, vec![8, 12, 16]);
+    let w = Scalar::signed(Width::Word);
+    let ld = |o| Expr::Load {
+        addr: Addr::Frame(o),
+        ty: w,
+    };
+    // The assignment goes to the copy, not through the slot.
+    assert_eq!(
+        f.body[0].kind,
+        StmtKind::Store {
+            addr: Addr::Frame(-10),
+            value: Expr::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(ld(-10)),
+                rhs: Box::new(Expr::Const { value: 1, ty: w }),
+                ty: w,
+            },
+        }
+    );
+    assert_eq!(
+        f.body[1].kind,
+        StmtKind::Store {
+            addr: Addr::Frame(-12),
+            value: ld(-10),
+        }
+    );
+    // Passed on by address: the copy's address.
+    let StmtKind::Call(c) = &f.body[2].kind else {
+        panic!("a call")
+    };
+    let addrs: Vec<&Addr> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address { addr, .. } => addr,
+            _ => panic!("by address"),
+        })
+        .collect();
+    assert_eq!(addrs, vec![&Addr::Frame(-8), &Addr::Frame(-10)]);
+}
+
 #[test]
 fn unsupported_constructs_have_positions() {
-    // A callee-copied value parameter (default convention).
-    let e = errs("module m;\nprocedure p(x: integer);\nbegin\nend;\n");
-    assert_eq!(
-        e,
-        vec!["t.pas:2:13: error: value parameters passed by address (callee-made local copy) are not supported yet"]
-    );
     // An ordinary statement.
     let e = errs(
         "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  with x do a := 2;\nend;\n",
