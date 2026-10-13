@@ -102,11 +102,19 @@ pub enum TypeKind {
 }
 
 /// A routine pointer's signature (ref 3.13.3).  Parameter conventions of a
-/// call through a pointer are decided like those of a routine heading.
+/// call through a pointer are decided like those of a routine heading,
+/// from the options written after the type (`val_param`; ref p. 4-146,
+/// Appendix B messages 181, 182).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Signature {
     pub params: Vec<SigParam>,
     pub result: Option<TypeId>,
+    /// The options given with the type (only `val_param` is accepted).
+    pub options: crate::conv::RoutineOptions,
+    /// Pad the caller pushes before the arguments, as
+    /// [`crate::Routine::arg_pad`] (codegen-patterns 1.4: MAC_OS_$OPEN
+    /// 0xE0B3DC `subq.l #2,SP` before a call through a pointer).
+    pub arg_pad: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +122,9 @@ pub struct SigParam {
     pub mode: dpc_syntax::ast::ParamMode,
     pub univ: bool,
     pub ty: TypeId,
+    /// The convention, from the mode, the type and the signature's options
+    /// (ref 5.2 Table 5-1).
+    pub conv: crate::conv::ParamConv,
 }
 
 /// An unpacked record (ref 3.10).

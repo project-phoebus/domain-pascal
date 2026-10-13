@@ -544,10 +544,27 @@ impl Call {
     pub fn bytes(&self) -> u32 {
         self.args.iter().map(Arg::slot).sum::<u32>() + self.pad
     }
+
+    /// The routine pointer value of a call through a pointer
+    /// ([`Callee::Pointer`]); evaluated after the arguments.
+    pub fn pointer(&self) -> Option<&Expr> {
+        match &self.callee {
+            Callee::Pointer(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    /// [`Call::pointer`], mutable.
+    pub fn pointer_mut(&mut self) -> Option<&mut Expr> {
+        match &mut self.callee {
+            Callee::Pointer(x) => Some(x),
+            _ => None,
+        }
+    }
 }
 
 /// Where a call goes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Callee {
     /// A routine with a body in this unit, in the same code section,
     /// named by its symbol: a PC-relative call (m68k `bsr`,
@@ -556,6 +573,13 @@ pub enum Callee {
     /// A routine of another unit, reached through its symbol (m68k `jsr
     /// abs.l`).
     External(String),
+    /// Through a routine pointer: the pointer value (a 4-byte load), read
+    /// after the arguments are pushed (m68k `movea.l <ea>,An; jsr (An)`,
+    /// codegen-patterns 1.6: KBD_$RCV 0xE1CE5C, RING_INTERRUPT 0xE0AB1C).
+    /// The callee is a top-level routine (ref 3.13.3, p. 3-50), which
+    /// sets up its own data base: the call is not a use of the caller's
+    /// (codegen-patterns 4).
+    Pointer(Box<Expr>),
 }
 
 /// One argument as the caller pushes it.  `slot` is the bytes it

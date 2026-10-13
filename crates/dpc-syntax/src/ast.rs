@@ -460,6 +460,16 @@ pub struct RoutineSig {
     /// `None` when no parenthesised list was written.
     pub params: Option<Vec<Param>>,
     pub result: Option<TypeExpr>,
+    /// Routine options written after a routine pointer type, in source
+    /// order (`^procedure (x: integer); val_param;`).  The reference shows
+    /// the short form after the type, `pptr : ^Procedure(...); EXTERN;`
+    /// ("Addressing Procedure and Function Pointers", p. 4-146, checked in
+    /// the PDF), and Appendix B messages 181 ("INTERNAL option is illegal
+    /// for PROCEDURE^ or FUNCTION^ types") and 182 ("Incompatible VAL_PARAM
+    /// options": "The type declaration did not specify val_param")
+    /// presuppose options on such types.  Always empty for a routine
+    /// parameter (5.4).
+    pub options: Vec<Ident>,
     pub span: Span,
 }
 

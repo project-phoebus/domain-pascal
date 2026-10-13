@@ -1987,7 +1987,9 @@ fn calls_of(f: &Function) -> Vec<(String, Option<LinkArg>)> {
     let mut out = Vec::new();
     for st in &f.body {
         if let StmtKind::Call(c) = &st.kind {
-            let (Callee::Local(s) | Callee::External(s)) = &c.callee;
+            let (Callee::Local(s) | Callee::External(s)) = &c.callee else {
+                panic!("a call through a routine pointer")
+            };
             out.push((s.clone(), c.link));
         }
     }
@@ -2445,6 +2447,146 @@ end;
         })
         .collect();
     assert_eq!(w, [true, true, true, false, false]);
+}
+
+/// Calls through routine pointers (bead domain-pascal-5aw.8;
+/// codegen-patterns 1.6): the callee is the pointer's value, the
+/// conventions and the pad come from the pointer type (`val_param` on the
+/// type, ref p. 4-146), and `writable` from its parameter modes (bead
+/// domain-pascal-5aw.16).
+#[test]
+fn calls_through_routine_pointers() {
+    let m = lower_src(
+        "module m;
+type t = ^procedure (var a: integer; out b: integer; in out c: integer; in d: integer;
+  e: integer);
+  v = ^procedure (in w: integer; l: integer32); val_param;
+  f = ^function (b: boolean): integer32; val_param;
+  pf = ^function: univ_ptr; val_param;
+var x: extern integer; pt: t; pv: v; fv: f; r: integer32; pp: pf; u: univ_ptr;
+procedure p;
+begin
+  pt^(x, x, x, x, x);
+  pv^(3, r);
+  r := fv^(true);
+end;
+procedure q;
+begin
+  u := pp^;
+end;
+",
+    );
+    let errs = m.as_ref().map(|_| Vec::new()).unwrap_or_else(|e| e.clone());
+    // A pointer result: no compiled call through a pointer reads A0.
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("a pointer result of a call through a routine pointer")),
+        "{errs:?}"
+    );
+    let m = lower_src(
+        "module m;
+type t = ^procedure (var a: integer; out b: integer; in out c: integer; in d: integer;
+  e: integer);
+  v = ^procedure (in w: integer; l: integer32); val_param;
+  f = ^function (b: boolean): integer32; val_param;
+var x: extern integer; pt: t; pv: v; fv: f; r: integer32;
+procedure p;
+begin
+  pt^(x, x, x, x, x);
+  pv^(3, r);
+  r := fv^(true);
+end;
+",
+    )
+    .unwrap();
+    let body = &func(&m, "P").body;
+    let StmtKind::Call(c) = &body[0].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        c.pointer(),
+        Some(Expr::Load {
+            addr: Addr::Static(0),
+            ..
+        })
+    ));
+    let w: Vec<bool> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address { writable, .. } => *writable,
+            Arg::Value { .. } | Arg::Temp { .. } => panic!("{a:?}"),
+        })
+        .collect();
+    assert_eq!(w, [true, true, true, false, false]);
+    assert_eq!(c.pad, 0);
+    // val_param: both by value, 2 + 4 bytes and a pad.
+    let StmtKind::Call(c) = &body[1].kind else {
+        panic!()
+    };
+    assert!(
+        c.args.iter().all(|a| matches!(a, Arg::Value { .. })),
+        "{c:?}"
+    );
+    assert_eq!(c.pad, 2);
+    let StmtKind::Store {
+        value: Expr::Call { call, reg, .. },
+        ..
+    } = &body[2].kind
+    else {
+        panic!("{:?}", body[2])
+    };
+    assert_eq!(*reg, ResultClass::Data);
+    assert!(matches!(call.callee, Callee::Pointer(_)));
+    // The address of a routine is its symbol's.
+    let m = lower_src(
+        "module m;
+type v = ^procedure (in w: integer); val_param;
+var pv: v;
+procedure h (in w: integer); val_param; extern;
+procedure p;
+begin
+  pv := addr(h);
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        *value,
+        Expr::AddrOf(Addr::Symbol {
+            name: "H".into(),
+            offset: 0
+        })
+    );
+    // A function call inside the pointer's address would run after the
+    // pushes (not seen in compiled code): refused.
+    for stmt in ["tbl[h]^(5)", "gp^.f^(5)"] {
+        let e = lower_src(&format!(
+            "module m;
+type v = ^procedure (in w: integer32); val_param;
+     rec = record f: v; end;
+     rp = ^rec;
+var tbl: array[1..4] of v;
+function h: integer32; extern;
+function gp: rp; extern;
+procedure p;
+begin
+  {stmt};
+end;
+"
+        ))
+        .unwrap_err();
+        assert!(
+            e.iter().any(|m| m.contains(
+                "a function call in the routine pointer of a call through a pointer is not \
+                 supported yet"
+            )),
+            "{e:?}"
+        );
+    }
 }
 
 /// A constant passed by address to a `univ` parameter (bead

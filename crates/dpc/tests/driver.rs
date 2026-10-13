@@ -745,6 +745,90 @@ end;
 }
 
 #[test]
+fn parameter_passed_through_a_routine_pointer_to_var_stays_in_the_frame() {
+    // Bead domain-pascal-5aw.16 (review of pe9): whether the callee may
+    // write an argument passed by address comes from the routine pointer
+    // type's parameter modes (ref 5.3.1 p. 5-6, 5.3.2 p. 5-7).  Through
+    // `var`, the by-value parameter stays in its slot and is read there
+    // after the call; through `in`, it is loaded at entry and held in a
+    // callee-saved register across the call (codegen-patterns 12.2).
+    let src = "module m;
+type setter = ^procedure (var v: integer);
+     reader = ^procedure (in v: integer);
+var s: setter; r: reader; w, x: integer;
+procedure ps(a, b: integer); val_param;
+begin
+  w := b;
+  if a = 3 then x := 0;
+  s^(a);
+  if a = 4 then x := 0;
+  w := b;
+end;
+procedure pr(a, b: integer); val_param;
+begin
+  w := b;
+  if a = 3 then x := 0;
+  r^(a);
+  if a = 4 then x := 0;
+  w := b;
+end;
+";
+    let asm = compile_with("pe9_pointer", src, &[]).unwrap();
+    let ps = routine(&asm, "PS");
+    let after = &ps[ps.find("\tjsr\t(%a0)").unwrap()..];
+    assert!(after.contains("\tcmpi.w\t#4,(8,%fp)\n"), "{ps}");
+    let pr = routine(&asm, "PR");
+    assert!(pr.contains("\tmove.w\t(8,%fp),%d2\n"), "{pr}");
+    let after = &pr[pr.find("\tjsr\t(%a0)").unwrap()..];
+    assert!(after.contains("\tcmpi.w\t#4,%d2\n"), "{pr}");
+}
+
+#[test]
+fn unevidenced_routine_pointer_calls_are_refused() {
+    // codegen-patterns 1.6: shapes the image does not show, or shows
+    // done otherwise, are refused (bead domain-pascal-5aw.8).
+    let refused = |name: &str, body: &str, needle: &str| {
+        let src = format!(
+            "module m;
+type h = ^procedure (in w: integer32); val_param;
+     d_t = record line: integer32; f: h; end;
+function get: h; extern;
+procedure advance(var l: integer32); extern;
+{body}"
+        );
+        let (_, err) = compile_with(name, &src, &[]).unwrap_err();
+        assert!(err.contains(needle), "{name}: {err}");
+    };
+    // The pointer as a call result: ref p. 4-145, "you cannot
+    // de-reference the return value of a function call" (an error).
+    refused(
+        "rp_result",
+        "procedure p; begin get^(1) end;",
+        "the return value of a function call cannot be dereferenced (ref p. 4-145)",
+    );
+    // A pointer that is not a load (a type transfer of a computed value).
+    refused(
+        "rp_transfer",
+        "var x: integer32; procedure p; begin h(x + 4)^(1) end;",
+        "a call through a routine pointer that is not a variable, field or element is not \
+         supported yet",
+    );
+    // TTY_$I_ERR 0xE1BE14 loads the slot once for the argument and the
+    // pointer; dpc would load it twice.
+    refused(
+        "rp_shared_slot",
+        "procedure p(in d: d_t); begin d.f^(d.line) end;",
+        "reached through a parameter slot the arguments also read",
+    );
+    // Appendix B message 181.
+    refused(
+        "rp_internal",
+        "type g = ^procedure; internal;",
+        "INTERNAL option is illegal for PROCEDURE^ or FUNCTION^ types",
+    );
+}
+
+#[test]
 fn stored_local_is_pushed_from_its_register_only_while_valid() {
     // codegen-patterns 12.5, "Stored locals pushed from the register": the
     // token is pushed from D0 when nothing wrote D0 since the store

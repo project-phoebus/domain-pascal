@@ -489,6 +489,25 @@ pub fn schedule(body: &mut Vec<Insn>, units: &[Unit], policy: Schedule) {
         {
             fxs[k].barrier = true;
         }
+        // A routine pointer copied into the register a `jsr (An)` goes
+        // through, `movea.l Dn,An`, stays right before the call, after the
+        // pushes: every such copy in compiled code (12 sites: DISK_$REVALID
+        // 0xE3DB8E `pea (A2); movea.l D2,A1; jsr (A1)`, DISK_$DO_IO
+        // 0xE3DAC6, IO_$INIT 0xE329D0; codegen-patterns 1.6).  A load from
+        // memory is ordered after the pushes by the memory rule.
+        if let (
+            Insn::Movea {
+                src: Ea::Reg(_),
+                dst,
+                ..
+            },
+            Insn::Jsr(Ea::Ind(t)),
+        ) = (&body[k], &body[k + 1])
+        {
+            if dst == t {
+                fxs[k].barrier = true;
+            }
+        }
         let pop = match &body[k + 1] {
             Insn::Addq { dst, .. } => is_reg_a(dst, SP),
             Insn::Lea {

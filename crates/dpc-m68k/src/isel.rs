@@ -824,6 +824,10 @@ fn register_locals(f: &Function) -> Vec<i32> {
                 }
             }
             self.in_arg = outer;
+            // The routine pointer is read by the call, not as an argument.
+            if let Some(x) = c.pointer() {
+                self.expr(x);
+            }
         }
         fn cond(&mut self, c: &IrCond) {
             match c {
@@ -983,6 +987,9 @@ fn walk_call<'a>(c: &'a Call, v: &mut dyn FnMut(Node<'a>)) {
             Arg::Value { value, .. } | Arg::Temp { value, .. } => walk_expr(value, v),
             Arg::Address { addr, .. } => walk_addr(addr, v),
         }
+    }
+    if let Some(x) = c.pointer() {
+        walk_expr(x, v);
     }
 }
 
@@ -2179,6 +2186,21 @@ impl Uses<'_> {
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value),
                 Arg::Address { addr, .. } => self.address(addr),
             }
+        }
+        // A routine pointer that is a by-value parameter itself is read
+        // from its slot right before the call, like a parameter that is
+        // only pushed (no compiled call goes through a pointer loaded at
+        // entry: codegen-patterns 1.6); one reached through a parameter
+        // (`p^.f`) makes that parameter a base like any dereference
+        // (SIO_$I_CTS_CHANGE 0xE1C6E0 `movea.l (8,A6),A2`, then 0xE1C724
+        // `movea.l (0x38,A2),A0; jsr (A0)`).
+        match c.pointer() {
+            None
+            | Some(Expr::Load {
+                addr: Addr::Frame(_),
+                ..
+            }) => {}
+            Some(x) => self.expr(x),
         }
     }
 
@@ -4344,6 +4366,12 @@ impl Selector {
                 }
             },
             Expr::Load { addr: a, .. } => Src::Ea(self.ea_of(a)?),
+            // The address of another unit's object or of a routine, as an
+            // immediate: `move.l #sym,<dst>` (ACL_ 0xE465C6 `move.l
+            // #UID_$NIL,(-136,A6)`; MAC_OS 0xE0B9A8 `move.l
+            // #MAC_$DEMUX,(-8,A6)`; PROC1_ 0xE14B7A `move.l
+            // #PROC1_$TS_END_CALLBACK,(24,A2)`; codegen-patterns 1.6).
+            Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => Src::Ea(Ea::ImmSym(name.clone())),
             // A comparison stored as a boolean: whether the original set
             // the byte in memory with `s<cc>` directly is not catalogued.
             Expr::Test(_) => {
@@ -4763,7 +4791,7 @@ impl Selector {
     /// Whether `value` as a store's source takes a register of its own.
     fn value_needs_reg(&self, value: &Expr) -> bool {
         match value {
-            Expr::Const { .. } => false,
+            Expr::Const { .. } | Expr::AddrOf(Addr::Symbol { offset: 0, .. }) => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
             Expr::SetMember { .. }
             | Expr::AddrOf(_)
@@ -4914,13 +4942,15 @@ impl Selector {
                 });
             }
         }
-        self.out.push(match &c.callee {
+        let insn = match &c.callee {
             Callee::External(sym) => Insn::Jsr(Ea::AbsL(sym.clone(), 0)),
             Callee::Local(sym) => Insn::Bsr {
                 target: sym.clone(),
                 short: true,
             },
-        });
+            Callee::Pointer(x) => Insn::Jsr(Ea::Ind(self.call_target(c, x)?)),
+        };
+        self.out.push(insn);
         self.call_stmts.push((start, self.out.len() - 1, self.span));
         let n = c.bytes();
         if !no_pop && n > 0 {
@@ -4938,6 +4968,108 @@ impl Selector {
             });
         }
         Ok(())
+    }
+
+    /// The address register a call through a routine pointer jumps through
+    /// (codegen-patterns 1.6, survey of the 74 `jsr (An)` sites in
+    /// compiled code with compiler frames, `tools/indcallsurvey.py`): the
+    /// pointer is read into a new address register right after the pushes,
+    /// in all 69 sites whose register is defined in the straight-line code
+    /// before the call:
+    /// - from memory, `movea.l <ea>,An` (KBD_$RCV 0xE1CE5C `movea.l
+    ///   (A2),A0`; RING_INTERRUPT 0xE0AB1C `movea.l (A5),A0`; TTY_$I_ERR
+    ///   0xE1BE1A `movea.l (0x2c0,A0),A1`, A0 being the base the
+    ///   arguments use);
+    /// - from a data register holding it, `movea.l Dn,An` (DISK_$REVALID
+    ///   0xE3DB8E `movea.l D2,A1`, IO_$INIT 0xE329D0 `movea.l D3,A0`).
+    ///
+    /// The register is the allocator's (codegen-patterns 12.4), kept apart
+    /// from the values of the argument list like theirs
+    /// ([`argument_list_loads`]): A0 at 35 sites, A1 at 33, A2-A4 at 6.
+    /// Uncertain: the image's A1 where A0 looks free (DISK_$REVALID,
+    /// MAC_OS_$OPEN 0xE0B3EC).  A pointer held in an address register
+    /// (a pinned parameter or local, a pointer function's A0) is refused:
+    /// the only such sites are the 5 NET_ calls through the A0 a pointer
+    /// function returned in an earlier statement (NET_$OPEN 0xE5A1D8 ..
+    /// 0xE5A1F4), which `dpc` does not model.
+    ///
+    /// Refused too: a pointer reached through a slot (a by-address or
+    /// pointer parameter not loaded at entry) that the arguments also
+    /// read.  The original loads the slot once for both (TTY_$I_ERR
+    /// 0xE1BE14..0xE1BE1A `movea.l (8,A6),A0; move.l (A0),-(SP); movea.l
+    /// (0x2c0,A0),A1`; also 0xE1B368, SIO_$I_TSTART 0xE1C932), which
+    /// `dpc` does not do.
+    fn call_target(&mut self, c: &Call, x: &Expr) -> Res<u8> {
+        if let Expr::Load {
+            addr: Addr::Indirect { base, .. },
+            ..
+        } = x
+        {
+            if let Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } = &**base
+            {
+                let mut shared = false;
+                if self.pinned(*o).is_none() {
+                    let mut v = |n: Node| {
+                        if let Node::Expr(Expr::Load {
+                            addr: Addr::Frame(p),
+                            ..
+                        }) = n
+                        {
+                            shared |= p == o;
+                        }
+                    };
+                    for a in &c.args {
+                        match a {
+                            Arg::Value { value, .. } | Arg::Temp { value, .. } => {
+                                walk_expr(value, &mut v)
+                            }
+                            Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                        }
+                    }
+                }
+                if shared {
+                    return Err(unsupported(
+                        self.span,
+                        "a call through a routine pointer reached through a parameter slot the \
+                         arguments also read (one load for both, TTY_$I_ERR 0xE1BE14) is",
+                    ));
+                }
+            }
+        }
+        if let Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        } = x
+        {
+            match self.pinned(*o) {
+                Some(Reg::D(d)) => {
+                    let a = self.alloc_a()?;
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Reg(Reg::D(d)),
+                        dst: a,
+                    });
+                    return Ok(a);
+                }
+                Some(Reg::A(_)) => {
+                    return Err(unsupported(
+                        self.span,
+                        "a call through a routine pointer held in an address register is",
+                    ))
+                }
+                None if *o < 0 && self.a0_holds(*o) => {
+                    return Err(unsupported(
+                        self.span,
+                        "a call through a routine pointer still held in A0 is",
+                    ))
+                }
+                None => {}
+            }
+        }
+        self.eval_a(x)
     }
 
     /// Push a longword constant (codegen-patterns 1.5): zero with `clr.l

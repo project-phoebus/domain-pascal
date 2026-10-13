@@ -178,6 +178,34 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`.
     assignment is the error; the other forms are refused as "not
     supported yet" (review of domain-pascal-pe9).*
 
+Raised by the routine pointer work (bead domain-pascal-5aw.8; no bead
+filed for the questions yet).  Conservative choices are implemented and
+marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
+(`signature_options`).
+
+19. **"Addressing Procedure and Function Pointers", p. 4-146 (PDF
+    p. 279, checked); Appendix B messages 181, 182.**  The example
+    declares `pptr : ^Procedure(IN i, j : integer; OUT a : char; VAR r :
+    real); EXTERN;`, and messages 181 ("INTERNAL option is illegal for
+    PROCEDURE^ or FUNCTION^ types") and 182 ("The type declaration did
+    not specify val_param, but the function heading did") imply routine
+    options on routine pointer types, but no section gives their syntax
+    or meaning.  (a) Is the long form `options(val_param)` allowed after
+    the type as well as the short form?  (b) What does `extern` (or
+    `forward`) mean on a type?  (c) Which other options (`d0_return`,
+    `a0_return`, `c_param`, `abnormal`, ...) may be given?  *Current: both
+    forms are parsed after the type's `;` in `type`, `var` and record
+    field declarations (5.5.1's two forms; `../source`'s
+    `tty/tty.ins.pas`, an agent-written reconstruction rather than an
+    Apollo file, uses `options(val_param)`); `val_param` sets the
+    convention; `internal` is message 181; every other option is refused
+    as "not supported yet".*
+20. **5.6.4, p. 5-22.**  default_routine_options apply to "every
+    subsequent routine in that module that does not specify a routine
+    option".  Do they apply to a routine pointer type declared without
+    options (its calls' conventions depend on it)?  *Current: such a
+    type is refused while default_routine_options are in effect.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and

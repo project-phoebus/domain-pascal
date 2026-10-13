@@ -439,6 +439,108 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `module_routine_unnamed_by_the_map`).
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
+  **Survey (Verified; `tools/indcallsurvey.py summary|list|addr`; bead
+  domain-pascal-5aw.8).**  84 `jsr (An)` in 0xE00800..0xE88834, 3 in hand
+  assembly; no `jsr (d,An)` at all.  Of the 81 in compiled segments, 7 are
+  in three routines whose frames are not the compiler's (module-local
+  0xE6B074 in VFMT: `movea.l A0,A5`, `adda.l #20,SP`; 0xE70396 and
+  0xE706C6 in SMD_UTILS: `unlk` before `movem`) and are left out.  The
+  other **74 sites in 61 routines** (the tool's `summary` counts all 81:
+  the 7 left out are A0 sites loaded after the pushes, 2 of them reading
+  D0, and VFMT's `movea.l A0,A5` is its one "A5 written after the call"):
+  - **Where the pointer comes from.**  A field of a record reached through
+    an address register (54 `movea.l (d,An),Am`, 5 `movea.l (An),Am`):
+    driver and handler tables (MAC_OS_$OPEN 0xE0B3EC `movea.l
+    (0x3c,A4),A1`; IO_$ACQUIRE 0xE1A65A, an element of a table in the
+    unit's data, `lea (0,A5,D0.w),A0; movea.l (0x6c,A0),A4`;
+    TTY/SIO descriptors held in A2 since the entry, SIO_$I_CTS_CHANGE
+    0xE1C724 `movea.l (0x38,A2),A0`); the unit's data (RING_INTERRUPT
+    0xE0AB1C `movea.l (A5),A0`); a data register holding the pointer (10
+    `movea.l Dn,Am`: a local or a value tested against `nil` first,
+    DISK_$REVALID 0xE3DB86 `move.l (0xc,A0),D2; beq` then 0xE3DB8E
+    `movea.l D2,A1`; IO_$INIT 0xE329CC `move.l A0,D3; pea (A3); movea.l
+    D3,A0`); and in 5 sites the A0 a pointer function returned, kept
+    from an earlier statement (NET_$OPEN 0xE5A1D8 `move.l A0,(-4,A6)`
+    after `bsr.w 0xE5A128`, then a test and the pushes, 0xE5A1F4 `jsr
+    (A0)`; NET_$CLOSE, NET_$IOCTL, NET_$RCV, NET_$SEND).  No call goes
+    through a by-value routine pointer parameter or a register loaded at
+    the entry.
+  - **When it is loaded.**  In all 69 sites whose register is defined in
+    the straight-line code before the call, the definition (the whole
+    chain of loads and index arithmetic) comes **after the last push**
+    and the pad: MAC_OS_$OPEN 0xE0B3DC `subq.l #2,SP; move.l
+    (0x10,A6),-(SP); move.l D7,-(SP); move.w (0x30,A3),-(SP); movea.l
+    (-4,A6),A4; movea.l (0x3c,A4),A1; jsr (A1)`; IO_$MAP_CSR
+    0xE1A8B0..0xE1A8C8.  The other 5 are the NET_ sites above.  (In the
+    DISK_ sites the pointer is fetched into D2 before the pushes, 0xE3DAB4
+    `move.l (0x10,A0),D2`, but only copied into the call register after
+    them, 0xE3DAC6 `movea.l D2,A1`: a register local, section 12.5.)
+  - **Which register.**  A0 at 35 sites, A1 at 33, A4 3, A3 2, A2 1.  A1
+    where the argument list uses A0 (TTY_$I_ERR 0xE1BE14..0xE1BE1A
+    `movea.l (8,A6),A0; move.l (A0),-(SP); movea.l (0x2c0,A0),A1`), and
+    also where A0 looks free (DISK_$REVALID 0xE3DB8E, MAC_OS_$OPEN):
+    the allocator's choice (section 12.4), Uncertain.  A callee-saved
+    register only where the chain goes through one (MAC_OS_$CLOSE
+    0xE0B4B2 `movea.l (0x40,A1),A4`; IO_$XLATE_IOVA 0xE1A9B2).
+  - **Pushes, pad, pops** as for any call (1.1-1.4): 36 calls not popped
+    (the `unlk` follows, RING_INTERRUPT 0xE0AB1E, or a branch to a pop),
+    `addq.w #4/#8`, `lea (n,SP)` for 12..36 bytes.  Values are pushed by
+    value in word slots (MAC_OS_$OPEN 0xE0B3E4 `move.w (0x30,A3),-(SP)`,
+    KBD_$RCV 0xE1CE56 `move.b D0,-(SP)`, TTY_$I_RCV 0xE1BA52 `st
+    -(SP)`): the pointer types were `val_param`.
+  - **Results.**  7 calls read D0 after the call (TTY_$I_ERR 0xE1BE22
+    `move.l D0,(-4,A6)`; IO_$MAP_CSR 0xE1A8CC `move.l D0,D4`;
+    DISK_$SPIN_DOWN 0xE3DB34 `cmp.w D0,D2`); none reads A0.
+  - **A5.**  No caller saves, reloads or restores A5 around the call
+    (0 writes of A5 after a call other than the epilogue restore): the
+    callee is a top-level routine (ref 3.13.3, p. 3-50: only their
+    addresses can be taken) and sets its own A5 (section 4).  A pointer
+    read off A5 is an ordinary use of the unit's data (RING_INTERRUPT).
+  - **Routine addresses** (44 operands naming a routine start, `link` or
+    `rts` there): `move.l #sym,-(SP)` 17 (ATBUS_ 0xE0AB36
+    `#DISK_INTERRUPT`, SIO 0xE1C8D0 `#SIO_DELAY_RESTART` of the same
+    module), `move.l #sym,(d,A6)` 8 (MAC_OS 0xE0B9A8 `#MAC_$DEMUX`),
+    `move.l #sym,(d,An)` / `(An)` 7 (PROC1_ 0xE14B7A
+    `#PROC1_$TS_END_CALLBACK,(0x18,A2)`; OS_TERM_INIT 0xE32BCA), `move.l
+    #sym,Dn` 3 (OS 0xE339B4), and `pea (d,PC)` 9, all of the DIR
+    module-local 0xE4C9E4 (0xE4C310: a routine passed as a routine
+    parameter, ref 5.4, not `addr`).  So `addr(r)` (ref p. 4-145, C.3.5)
+    is the absolute symbol as an immediate.
+  - **Reference.**  Routine options may follow a routine pointer type:
+    p. 4-146 (checked in the PDF) declares `pptr : ^Procedure(IN i, j :
+    integer; OUT a : char; VAR r : real); EXTERN;`, and Appendix B
+    message 181 ("INTERNAL option is illegal for PROCEDURE^ or FUNCTION^
+    types") and 182 ("Incompatible VAL_PARAM options ... The type
+    declaration did not specify val_param, but the function heading
+    did") presuppose them; `../source`'s TTY translation writes
+    `^procedure(...); options(val_param);` (`tty/tty.ins.pas`, an
+    agent-written reconstruction for the planned Pascal tree, not an
+    Apollo include file: not evidence for the syntax).  The
+    meaning of `extern` there, and whether `default_routine_options`
+    (5.6.4) apply to such a type, are not stated.
+  - **Implemented** (beads domain-pascal-5aw.8, -5aw.16): routine pointer
+    types with `val_param` (short or `options(...)` form) after the type
+    in `type`, `var` and record field declarations (`dpc-syntax`
+    `routine_pointer_options`); the type's conventions and pad from
+    Table 5-1 (`dpc-sema` `Checker::signature`); calls `p^(...)`,
+    `p^` (a function with no arguments, ref p. 4-145), with
+    `Arg::Address::writable` from the type's parameter modes (`dpc-ir`
+    `call`); the pointer read after the pushes into a new address
+    register, `movea.l <ea>,An` or `movea.l Dn,An`, kept apart from the
+    argument list's registers, the copy pinned before the `jsr` by the
+    scheduler (`dpc-m68k` `Selector::call_target`, `sched.rs`); data
+    results in D0; `addr(r)` of a top-level, non-`internal` routine,
+    checked against the pointer type it is assigned to (parameter
+    modes, name-compatible types, result, `val_param`), pushed or stored
+    as `move.l #sym,<ea>`.  Refused: `internal` on the type (message 181,
+    an error), every other option on it, a type without options under
+    `default_routine_options`, a pointer that is not a variable, field or
+    element (`get^(...)`), a pointer held in an address register (the
+    NET_ sites' A0: not modelled), a pointer reached through a parameter
+    slot the arguments also read (TTY_$I_ERR loads the slot once for
+    both; `dpc` would load it twice), pointer results, routine parameters
+    (5.4).  Conformance: `tests/conformance/atbus_ring_interrupt.pas`
+    (RING_INTERRUPT 0xE0AB0C); golden `tests/golden/calls/routine_pointers`.
 - All kernel addresses are absolute.  This kernel image has no
   PC-relative inter-module calls.
 
@@ -1264,7 +1366,9 @@ variables.  Each module's static data is a data segment, addressed off
       routines of the unit it calls (transitively) that do not load A5
       themselves (LOG_$READ 0xE17806, whose worker 0xE17778 reads
       `(0x14,A5)`); a call to an exported routine or to one in the
-      `--a5-always` list is not a use.  An exported routine that does not
+      `--a5-always` list is not a use, nor is a call through a routine
+      pointer (section 1.6: the callee sets its own A5; a pointer read
+      off A5 is a use).  An exported routine that does not
       use the data loads nothing (PROC1_$TST_LOCK), instead of the old
       "not settled" rejection.  `internal` routines never load A5.  A5
       is set as the first instruction after the register save and saved

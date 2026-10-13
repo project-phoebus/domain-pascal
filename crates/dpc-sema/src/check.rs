@@ -922,7 +922,9 @@ impl<'t> Checker<'t> {
     }
 
     fn signature(&mut self, sig: &ast::RoutineSig) -> Signature {
+        let options = self.signature_options(sig);
         let mut params = Vec::new();
+        let mut arg_bytes = 0u32;
         for p in sig.params.iter().flatten() {
             match p {
                 ast::Param::Data {
@@ -934,10 +936,23 @@ impl<'t> Checker<'t> {
                 } => {
                     let t = self.param_type(ty);
                     for _ in names {
+                        // ref 5.2 Table 5-1, with the type's options, as for
+                        // a routine heading.
+                        let conv = conv::param_conv(
+                            *mode,
+                            *univ,
+                            t,
+                            options.small_by_value(),
+                            options.c_param,
+                            &self.types,
+                            self.target,
+                        );
+                        arg_bytes = arg_bytes.saturating_add(conv.slot_size);
                         params.push(SigParam {
                             mode: *mode,
                             univ: *univ,
                             ty: t,
+                            conv,
                         });
                     }
                 }
@@ -947,7 +962,82 @@ impl<'t> Checker<'t> {
             }
         }
         let result = sig.result.as_ref().map(|r| self.type_expr(r));
-        Signature { params, result }
+        let arg_pad = round_up(arg_bytes, self.target.arg_area_align()) - arg_bytes;
+        Signature {
+            params,
+            result,
+            options,
+            arg_pad,
+        }
+    }
+
+    /// The options of a routine pointer type (ref p. 4-146, checked in the
+    /// PDF: `pptr : ^Procedure(...); EXTERN;`).  The reference documents
+    /// two rules for them, both in Appendix B: message 181, "INTERNAL
+    /// option is illegal for PROCEDURE^ or FUNCTION^ types", and message
+    /// 182, "Incompatible VAL_PARAM options ... The type declaration did
+    /// not specify val_param, but the function heading did".  So
+    /// `val_param` on the type decides the convention of calls through it
+    /// (Table 5-1), which the image needs: its driver dispatches push
+    /// small values by value (MAC_OS_$OPEN 0xE0B3E4 `move.w (0x30,A3),-(SP)`
+    /// before `jsr (A1)`; KBD_$RCV 0xE1CE56 `move.b D0,-(SP)` before `jsr
+    /// (A0)`; codegen-patterns 1.6).  The other options are refused: what
+    /// `extern` (the p. 4-146 example) or `forward` mean on a type is not
+    /// stated, and no call through a pointer shows the effect of
+    /// `d0_return`, `a0_return`, `c_param`, `variable`, `abnormal`,
+    /// `nosave` or `noreturn`.
+    fn signature_options(&mut self, sig: &ast::RoutineSig) -> RoutineOptions {
+        let mut opts = RoutineOptions::default();
+        for o in &sig.options {
+            let mut one = RoutineOptions::default();
+            if !self.apply_option(&mut one, o) {
+                continue;
+            }
+            if one.internal {
+                self.error(
+                    o.span,
+                    "INTERNAL option is illegal for PROCEDURE^ or FUNCTION^ types (ref \
+                     Appendix B, message 181)",
+                );
+                continue;
+            }
+            let only_val_param = RoutineOptions {
+                val_param: true,
+                ..RoutineOptions::default()
+            };
+            if one != only_val_param {
+                // TODO(ref-question): what other options mean on a type
+                // (docs/reference-clarifications.md, open question 19).
+                self.unsupported(
+                    o.span,
+                    &format!(
+                        "the routine option `{}` on a routine pointer type (only `val_param` \
+                         is)",
+                        o.name
+                    ),
+                );
+                continue;
+            }
+            opts.val_param = true;
+        }
+        // TODO(ref-question) (open question 20): 5.6.4 (p. 5-22) applies
+        // default_routine_options to "every subsequent routine in that
+        // module that does not specify a routine option"; whether a
+        // routine pointer type counts as a routine is not stated.  The
+        // convention of every call through such a type would depend on
+        // it, so it is refused rather than guessed.
+        if sig.options.is_empty() {
+            if let Some(Sym::Options(d)) = self.lookup("default_routine_options") {
+                if *d != RoutineOptions::default() {
+                    self.unsupported(
+                        sig.span,
+                        "a routine pointer type without options under default_routine_options \
+                         (whether the defaults apply to it, ref 5.6.4 p. 5-22, is not stated)",
+                    );
+                }
+            }
+        }
+        opts
     }
 
     /// A parameter's type must be a type name (ref 5.1 p. 5-2: "you cannot
@@ -1939,6 +2029,9 @@ impl<'t> Checker<'t> {
         if let ast::ExprKind::Deref(inner) = &callee.kind {
             let p = self.expr(inner);
             if let TypeKind::RoutinePointer(sig) = self.types.kind(p.ty).clone() {
+                if self.call_result_deref(&p, callee.span) {
+                    return StmtKind::Empty;
+                }
                 if sig.result.is_some() {
                     self.error(callee.span, "function pointer called as a procedure");
                 }
@@ -2140,6 +2233,26 @@ impl<'t> Checker<'t> {
             }
             E::Deref(inner) => {
                 let p = self.expr(inner);
+                // `xp^` of a function pointer with no argument list calls
+                // it (ref "Invoking Procedure and Function Pointers",
+                // p. 4-145: `flag := xp^`).
+                if let TypeKind::RoutinePointer(sig) = self.types.kind(p.ty).clone() {
+                    if self.call_result_deref(&p, span) {
+                        return self.error_expr(span);
+                    }
+                    let Some(res) = sig.result else {
+                        self.error(span, "procedure pointer used as a value");
+                        return self.error_expr(span);
+                    };
+                    let params = self.sig_params(&sig);
+                    let call = self.call_args(Callee::Pointer(Box::new(p)), params, &[], span);
+                    return Expr {
+                        kind: ExprKind::Call(call),
+                        ty: res,
+                        value: None,
+                        span,
+                    };
+                }
                 let ty = match self.types.kind(p.ty) {
                     TypeKind::Pointer { target } => *target,
                     TypeKind::Error => p.ty,
@@ -2681,6 +2794,9 @@ impl<'t> Checker<'t> {
         if let ast::ExprKind::Deref(inner) = &callee.kind {
             let p = self.expr(inner);
             if let TypeKind::RoutinePointer(sig) = self.types.kind(p.ty).clone() {
+                if self.call_result_deref(&p, span) {
+                    return self.error_expr(span);
+                }
                 let Some(res) = sig.result else {
                     self.error(span, "procedure pointer used as a value");
                     return self.error_expr(span);
@@ -2697,6 +2813,69 @@ impl<'t> Checker<'t> {
         }
         self.error(span, "function call expected");
         self.error_expr(span)
+    }
+
+    /// `addr(r)` (ref p. 4-145): "Although the addr function has been
+    /// declared to return a univ_ptr, the compiler adds extra type checking
+    /// whenever you try to pass a procedure or function address to a
+    /// specific procedure or function pointer" ([`Checker::check_assignable`]).
+    /// 3.13.3 (p. 3-50): "You may obtain the addresses only of top-level
+    /// procedures and functions; you cannot obtain the addresses of nested
+    /// or explicitly declared internal procedures and functions."
+    fn routine_addr(&mut self, r: RoutineId, span: Span) -> Expr {
+        let rt = &self.routines[r.0 as usize];
+        if rt.parent.is_some() {
+            self.error(
+                span,
+                "the address of a nested routine cannot be taken (ref 3.13.3, p. 3-50)",
+            );
+            return self.error_expr(span);
+        }
+        if rt.options.internal {
+            self.error(
+                span,
+                "the address of an internal routine cannot be taken (ref 3.13.3, p. 3-50)",
+            );
+            return self.error_expr(span);
+        }
+        Expr {
+            kind: ExprKind::RoutineAddr(r),
+            ty: self.types.builtins.univ_ptr,
+            value: None,
+            span,
+        }
+    }
+
+    /// `rf^^` or `getfp^(...)`: a routine pointer returned by a function
+    /// call, dereferenced to call it.  Ref "Invoking Procedure and Function
+    /// Pointers", p. 4-145: "You cannot use the following assignment
+    /// `flag := rf^^;` because you cannot de-reference the return value of
+    /// a function call."  Reports the error and returns true.
+    fn call_result_deref(&mut self, p: &Expr, span: Span) -> bool {
+        if !matches!(p.kind, ExprKind::Call(_)) {
+            return false;
+        }
+        self.error(
+            span,
+            "the return value of a function call cannot be dereferenced (ref p. 4-145)",
+        );
+        true
+    }
+
+    /// Whether routine `r` matches routine pointer signature `sig` exactly
+    /// (ref p. 4-146: "the declaration for proc2 must exactly match the
+    /// template for the procedure type of pptr"; 5.3.4.1 p. 5-13: the
+    /// parameter types must be name compatible, `pinteger` is not
+    /// `integer`; Appendix B messages 180 and 182: the parameter-passing
+    /// conventions and `val_param` must agree).
+    fn routine_matches(&self, r: RoutineId, sig: &Signature) -> bool {
+        let rt = &self.routines[r.0 as usize];
+        rt.params.len() == sig.params.len()
+            && rt.params.iter().zip(&sig.params).all(|(a, b)| {
+                a.mode == b.mode && a.univ == b.univ && a.ty == b.ty && a.conv == b.conv
+            })
+            && rt.result.as_ref().map(|x| x.ty) == sig.result
+            && rt.options.small_by_value() == sig.options.small_by_value()
     }
 
     fn call_expr_routine(&mut self, r: RoutineId, args: &[ast::Expr], span: Span) -> Expr {
@@ -2716,15 +2895,11 @@ impl<'t> Checker<'t> {
     }
 
     /// Parameters of a routine-pointer signature, with their conventions
-    /// decided as for a routine heading without options.
-    fn sig_params(&mut self, sig: &Signature) -> Vec<(ParamMode, bool, TypeId, conv::ParamConv)> {
+    /// (decided from the type's options, [`Checker::signature`]).
+    fn sig_params(&self, sig: &Signature) -> Vec<(ParamMode, bool, TypeId, conv::ParamConv)> {
         sig.params
             .iter()
-            .map(|p| {
-                let c =
-                    conv::param_conv(p.mode, p.univ, p.ty, false, false, &self.types, self.target);
-                (p.mode, p.univ, p.ty, c)
-            })
+            .map(|p| (p.mode, p.univ, p.ty, p.conv))
             .collect()
     }
 
@@ -2933,11 +3108,11 @@ impl<'t> Checker<'t> {
         }
         if b == Builtin::Addr {
             // C.3.5, p. C-7: addr returns "the virtual address of the
-            // specified variable or routine".  Legal, but not handled yet.
+            // specified variable or routine".
             if let ast::ExprKind::Name(id) = &args[0].kind {
-                if let Some(Sym::Routine(_)) = self.lookup(&id.name) {
-                    self.unsupported(span, "`addr` of a routine (ref C.3.5, p. C-7)");
-                    return self.error_expr(span);
+                if let Some(Sym::Routine(r)) = self.lookup(&id.name) {
+                    let r = *r;
+                    return self.routine_addr(r, span);
                 }
             }
         }
@@ -3343,6 +3518,24 @@ impl<'t> Checker<'t> {
     /// error 79 (p. 9-32) if not.  Returns whether it may.
     fn check_assignable(&mut self, dst: TypeId, x: &Expr, span: Span) -> bool {
         let src = x.ty;
+        if let (ExprKind::RoutineAddr(r), TypeKind::RoutinePointer(sig)) =
+            (&x.kind, self.types.kind(dst))
+        {
+            // ref p. 4-146: the extra check of a routine's address against
+            // a routine pointer type.
+            if !self.routine_matches(*r, sig) {
+                self.error(
+                    span,
+                    format!(
+                        "`{}` does not match the routine pointer type {} (ref p. 4-146)",
+                        self.routines[r.0 as usize].name,
+                        self.types.display(dst)
+                    ),
+                );
+                return false;
+            }
+            return true;
+        }
         if self.types.is_error(dst) || self.types.is_error(src) || dst == src {
             return true;
         }

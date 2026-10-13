@@ -111,6 +111,12 @@ routines" below): `ring_discard_packet.pas` (the RING nested routine at
 0xE76470, nested in the module-local 0xE7649E: the dynamic link in A2
 across a call, an uplevel by-address parameter dereferenced).
 
+Calls through routine pointers (codegen-patterns 1.6; bead
+domain-pascal-5aw.8): `atbus_ring_interrupt.pas` (RING_INTERRUPT
+0xE0AB0C: a `val_param` routine pointer in the unit's data, its argument
+pushed by value from `(4,A5)`, then `movea.l (A5),A0; jsr (A0)`, not
+popped before `unlk`).
+
 Instruction order (codegen-patterns 12.4 R9-R11; bead
 domain-pascal-g5q.8): every unit is compiled with the scheduler on (`dpc
 --schedule`, default `r11:3`) and none changed.  `xpd_reset_ptrace_opts.pas`

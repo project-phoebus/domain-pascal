@@ -720,10 +720,130 @@ fn addr_builtin() {
         "module m; var u: univ_ptr; procedure p; begin u := addr('abc') end;",
         "`addr` of a string constant (ref p. 4-13) is not supported yet",
     );
-    assert_err(
-        "module m; var u: univ_ptr; procedure q; extern; procedure p; begin u := addr(q) end;",
-        "`addr` of a routine (ref C.3.5, p. C-7) is not supported yet",
+}
+
+#[test]
+fn routine_pointer_conventions() {
+    // ref p. 4-146 (options after the type), Appendix B 181/182; Table
+    // 5-1: `val_param` on the type passes small value and `in` parameters
+    // by value, the default passes everything by address.
+    let p = module(
+        "type vp = ^procedure (in w: integer; b: boolean; var x: integer32); val_param;
+              dp = ^procedure (in w: integer; b: boolean; var x: integer32);
+         var v: vp; d: dp; l: integer32;
+         procedure q; begin v^(1, true, l); d^(1, true, l) end;",
     );
+    let stmts = &routine(&p, "q").body.as_ref().unwrap().stmts;
+    let passing = |i: usize| -> Vec<crate::conv::Passing> {
+        let StmtKind::Call(c) = &stmts[i].kind else {
+            panic!("not a call")
+        };
+        assert!(matches!(c.callee, crate::program::Callee::Pointer(_)));
+        c.args.iter().map(|a| a.conv.passing).collect()
+    };
+    use crate::conv::Passing::{ByAddress, ByValue};
+    assert_eq!(passing(0), vec![ByValue, ByValue, ByAddress]);
+    assert_eq!(passing(1), vec![ByAddress, ByAddress, ByAddress]);
+    let TypeKind::RoutinePointer(sig) = p.types.kind(ty(&p, "vp")) else {
+        panic!()
+    };
+    // 2 + 2 + 4 bytes: no pad.  Default: 12 bytes, no pad.
+    assert_eq!(sig.arg_pad, 0);
+    let p = module("type t = ^procedure (in w: integer; x: integer32); val_param;");
+    let TypeKind::RoutinePointer(sig) = p.types.kind(ty(&p, "t")) else {
+        panic!()
+    };
+    assert_eq!(sig.arg_pad, 2);
+    assert_err(
+        "module m; type t = ^procedure (x: integer); internal;",
+        "INTERNAL option is illegal for PROCEDURE^ or FUNCTION^ types",
+    );
+    assert_err(
+        "module m; type t = ^procedure (x: integer); extern;",
+        "the routine option `extern` on a routine pointer type (only `val_param` is) is not \
+         supported yet",
+    );
+    assert_err(
+        "module m; routine_option default_routine_options = val_param;
+         type t = ^procedure (x: integer);",
+        "whether the defaults apply to it",
+    );
+    // Two types with different options are different types (ref
+    // Appendix B 182).
+    assert_err(
+        "module m; type a = ^procedure (x: integer); val_param;
+              b = ^procedure (x: integer);
+         var va: a; vb: b; procedure p; begin va := vb end;",
+        "not compatible",
+    );
+}
+
+#[test]
+fn addr_of_routines() {
+    // ref p. 4-145/4-146: addr of a routine is a univ_ptr, checked
+    // against a routine pointer type it is assigned to.
+    let p = module(
+        "type pinteger = 0..65535;
+              t = ^procedure (x: integer); val_param;
+         var u: univ_ptr; v: t;
+         procedure q (x: integer); val_param; extern;
+         procedure p; begin u := addr(q); v := addr(q) end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    let StmtKind::Assign { value, .. } = &stmts[1].kind else {
+        panic!("not an assignment")
+    };
+    assert!(matches!(value.kind, ExprKind::RoutineAddr(_)));
+    assert_eq!(value.ty, p.types.builtins.univ_ptr);
+    // val_param on the heading but not on the type (Appendix B 182).
+    assert_err(
+        "module m; type t = ^procedure (x: integer);
+         var v: t; procedure q (x: integer); val_param; extern;
+         procedure p; begin v := addr(q) end;",
+        "does not match the routine pointer type",
+    );
+    // Name compatibility of the parameter types (5.3.4.1, p. 5-13).
+    assert_err(
+        "module m; type pinteger = 0..65535; t = ^procedure (r: pinteger);
+         var v: t; procedure foo (r: integer); extern;
+         procedure p; begin v := addr(foo) end;",
+        "does not match the routine pointer type",
+    );
+    // 3.13.3, p. 3-50: no address of nested or internal routines.
+    assert_err(
+        "module m; var u: univ_ptr;
+         procedure p; procedure n; begin end; begin u := addr(n) end;",
+        "the address of a nested routine cannot be taken",
+    );
+    assert_err(
+        "module m; var u: univ_ptr; procedure i; internal; begin end;
+         procedure p; begin u := addr(i) end;",
+        "the address of an internal routine cannot be taken",
+    );
+    // p. 4-145: "you cannot de-reference the return value of a function
+    // call" (`flag := rf^^`), as a value, a call with arguments, or a
+    // statement.
+    for body in [
+        "flag := rf^^",
+        "flag := getfp^",
+        "flag := getfn^(1)",
+        "getpr^(1)",
+    ] {
+        assert_err(
+            &format!(
+                "module m; type retbool = ^function: boolean;
+                      retfunptr = ^function: retbool;
+                      fn = ^function (in i: integer32): boolean;
+                      pr = ^procedure (in i: integer32);
+                 var rf: retfunptr; flag: boolean;
+                 function getfp: retbool; extern;
+                 function getfn: fn; extern;
+                 function getpr: pr; extern;
+                 procedure p; begin {body} end;"
+            ),
+            "the return value of a function call cannot be dereferenced (ref p. 4-145)",
+        );
+    }
 }
 
 #[test]

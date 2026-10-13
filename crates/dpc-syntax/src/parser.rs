@@ -751,8 +751,9 @@ impl<'a> Parser<'a> {
             |p| {
                 let name = p.ident()?;
                 p.expect(&T::Eq)?;
-                let ty = p.ty(false)?;
+                let mut ty = p.ty(false)?;
                 p.expect(&T::Semi)?;
+                p.routine_pointer_options(&mut ty)?;
                 let span = p.since(name.span);
                 Ok(TypeDef { name, ty, span })
             },
@@ -830,13 +831,14 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let ty = self.ty(false)?;
+        let mut ty = self.ty(false)?;
         let init = if self.eat(&T::Assign) {
             Some(self.init()?)
         } else {
             None
         };
         self.expect(&T::Semi)?;
+        self.routine_pointer_options(&mut ty)?;
         Ok(VarDecl {
             names,
             alloc,
@@ -1238,15 +1240,14 @@ impl<'a> Parser<'a> {
             let start = self.span();
             let names = self.ident_list()?;
             self.expect(&T::Colon)?;
-            let ty = self.ty(false)?;
-            fields.push(FieldDecl {
-                names,
-                ty,
-                span: self.since(start),
-            });
+            let mut ty = self.ty(false)?;
+            let span = self.since(start);
             if !self.eat(&T::Semi) {
+                fields.push(FieldDecl { names, ty, span });
                 break;
             }
+            self.routine_pointer_options(&mut ty)?;
+            fields.push(FieldDecl { names, ty, span });
         }
         Ok((fields, variant))
     }
@@ -1316,6 +1317,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             result,
+            options: Vec::new(),
             span: self.since(start),
         })
     }
@@ -1526,6 +1528,18 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(v)
+    }
+
+    /// Routine options after a routine pointer type and its `;` (ref
+    /// p. 4-146, `pptr : ^Procedure(...); EXTERN;`, checked in the PDF;
+    /// Appendix B messages 181, 182): the same forms as after a heading
+    /// ([`Self::routine_options`], 5.5.1 p. 5-15).  Nothing for other
+    /// types.
+    fn routine_pointer_options(&mut self, ty: &mut TypeExpr) -> PResult<()> {
+        if let TypeKind::RoutinePointer(sig) = &mut ty.kind {
+            sig.options = self.routine_options()?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

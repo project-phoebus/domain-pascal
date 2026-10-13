@@ -58,6 +58,14 @@ Tests:
 - `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
   index is used for nothing else, as `movea.l #sym,A0`, count, filler,
   `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).
+- `calls/routine_pointers` - codegen-patterns 1.6, 1.4, 3: calls through
+  routine pointers (`val_param` on the type, ref p. 4-146), the pointer
+  read into an address register after the pushes (SIO_$I_CTS_CHANGE
+  0xE1C71C..0xE1C728; IO_$INIT 0xE329CC `movea.l D3,A0`), a function
+  pointer's result in D0 (TTY_$I_ERR 0xE1BE22), a local passed to a
+  `var` parameter of the type re-read after the call (bead
+  domain-pascal-5aw.16), `addr` of a routine stored as `move.l #sym`
+  (MAC_OS 0xE0B9A8).
 - `calls/pop_branches` - codegen-patterns 1.1: the pop rule with
   branches (no pop when every path to the epilogue is free of pushes,
   calls and conditional branches; 0xE01166, 0xE00BCA).

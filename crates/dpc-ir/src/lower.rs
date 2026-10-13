@@ -400,6 +400,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 Arg::Address { addr: a, .. } => addr(a, 1, out),
             }
         }
+        if let Some(x) = c.pointer() {
+            expr(x, out);
+        }
     }
     fn cond(c: &Cond, out: &mut Vec<(i32, u32)>) {
         match c {
@@ -531,6 +534,9 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
                 Arg::Address { addr: a, .. } => addr(a, f),
             }
         }
+        if let Some(x) = c.pointer_mut() {
+            expr(x, f);
+        }
         f(c);
     }
     fn cond(c: &mut Cond, f: &mut dyn FnMut(&mut Call)) {
@@ -647,6 +653,9 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, size, max),
                 Arg::Address { addr: a, .. } => addr(a, size, max),
             }
+        }
+        if let Some(x) = c.pointer_mut() {
+            expr(x, size, max);
         }
     }
     fn addr(a: &mut Addr, size: u32, max: &mut u32) {
@@ -1147,6 +1156,9 @@ fn call_arg_calls<'a>(c: &'a Call, out: &mut Vec<&'a Call>) {
             Arg::Address { addr, .. } => addr_calls(addr, out),
         }
     }
+    if let Some(x) = c.pointer() {
+        expr_calls(x, out);
+    }
 }
 
 fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
@@ -1253,11 +1265,15 @@ fn cond_uses_static(c: &Cond) -> bool {
     }
 }
 
+/// The pointer of a call through a routine pointer is a use when it is
+/// read off A5 (RING_INTERRUPT 0xE0AB1C `movea.l (A5),A0`); the call
+/// itself is not (the callee is a top-level routine and sets its own A5,
+/// codegen-patterns 4).
 fn call_uses_static(c: &Call) -> bool {
     c.args.iter().any(|a| match a {
         Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_uses_static(value),
         Arg::Address { addr, .. } => addr_uses_static(addr),
-    })
+    }) || c.pointer().is_some_and(expr_uses_static)
 }
 
 fn expr_uses_static(e: &Expr) -> bool {
@@ -1519,6 +1535,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value)?,
                     Arg::Address { addr, .. } => self.addr(addr, 1)?,
                 }
+            }
+            if let Some(x) = c.pointer() {
+                self.expr(x)?;
             }
             Ok(())
         }
@@ -2487,6 +2506,15 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             })
         }
         ExprKind::Builtin { builtin, args } => builtin_value(p, e, *builtin, args),
+        // `addr(r)` of a routine (ref p. 4-145): its symbol's address, an
+        // absolute operand like another unit's variable (codegen-patterns
+        // 1.6: ATBUS_ 0xE0AB36 `move.l #DISK_INTERRUPT,-(SP)`, MAC_OS
+        // 0xE0B9A8 `move.l #MAC_$DEMUX,(-8,A6)`, PROC1_ 0xE14B7A `move.l
+        // #PROC1_$TS_END_CALLBACK,(24,A2)`).
+        ExprKind::RoutineAddr(r) => Ok(Expr::AddrOf(Addr::Symbol {
+            name: p.routine(*r).symbol.clone(),
+            offset: 0,
+        })),
         ExprKind::Transfer(x) => transfer(p, e, x),
         ExprKind::Call(c) => {
             // A pointer result comes back in A0 (ref 5.5.10, p. 5-20;
@@ -2501,7 +2529,20 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
                     Some(ResultReg::AddressAndData) => ResultClass::AddressAndData,
                     _ => ResultClass::Data,
                 },
-                _ => ResultClass::Data,
+                // Through a routine pointer: data results come back in D0
+                // like a routine's (TTY_$I_ERR 0xE1BE22 `move.l D0,(-4,A6)`
+                // after `jsr (A1)`; IO_$MAP_CSR 0xE1A8CC `move.l D0,D4`).
+                // No compiled call through a pointer reads a pointer
+                // result, so A0 (ref 5.5.10) is not assumed.
+                SCallee::Pointer(_) => {
+                    if p.types.is_pointer(e.ty) {
+                        return Err(unsupported(
+                            e.span,
+                            "a pointer result of a call through a routine pointer is",
+                        ));
+                    }
+                    ResultClass::Data
+                }
             };
             let ty = scalar_of(p, e)?;
             Ok(Expr::Call {
@@ -3082,9 +3123,10 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   `jsr abs.l`): codegen-patterns 1.6 (0xE00F02 `bsr.s` to the
 ///   module-local 0xE00EB0; 0xE00EF6 `jsr ML_$LOCK`).  `bsr` never
 ///   crosses a map segment in the image (codegen-patterns 7), so a callee
-///   in another code section is not supported yet; nor are nested
-///   routines (static link, codegen-patterns 6) and calls through
-///   routine pointers (`jsr (An)`, 0xE0B3F0).
+///   in another code section is not supported yet.  Through a routine
+///   pointer ([`Callee::Pointer`], `jsr (An)`, 0xE0B3F0): the conventions,
+///   modes and pad of the pointer type's signature (`val_param` on the
+///   type, ref p. 4-146; [`routine_pointer`]).
 /// - The arguments, in parameter order, each with its parameter's
 ///   convention from `dpc-sema` (ref 5.2 Table 5-1): by value, the value
 ///   at the parameter's width (a constant takes the parameter's type);
@@ -3099,38 +3141,53 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   `variable` routine called with fewer arguments (ref 5.5.5) is not
 ///   supported yet: its pad and slots are not catalogued.
 fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
-    let SCallee::Routine(id) = &c.callee else {
-        return Err(unsupported(span, "a call through a routine pointer is"));
+    // The parameters as (mode, univ, type), and the pad.
+    let (callee, params, pad): (Callee, Vec<(ParamMode, bool, TypeId)>, u32) = match &c.callee {
+        SCallee::Routine(id) => {
+            let r = p.routine(*id);
+            let callee = if r.external || r.body.is_none() {
+                Callee::External(r.symbol.clone())
+            } else if r.code_section == caller_section {
+                Callee::Local(r.symbol.clone())
+            } else {
+                return Err(unsupported(
+                    span,
+                    "a call of a routine of this unit in another code section is",
+                ));
+            };
+            let params = r.params.iter().map(|q| (q.mode, q.univ, q.ty)).collect();
+            (callee, params, r.arg_pad)
+        }
+        SCallee::Pointer(x) => {
+            let TypeKind::RoutinePointer(sig) = p.types.kind(x.ty) else {
+                unreachable!("a call through a value that is not a routine pointer")
+            };
+            let params = sig.params.iter().map(|q| (q.mode, q.univ, q.ty)).collect();
+            (
+                Callee::Pointer(Box::new(routine_pointer(p, x)?)),
+                params,
+                sig.arg_pad,
+            )
+        }
     };
-    let r = p.routine(*id);
-    if c.args.len() != r.params.len() {
+    if c.args.len() != params.len() {
         return Err(unsupported(
             span,
             "a call with fewer arguments than parameters (ref 5.5.5) is",
         ));
     }
-    let callee = if r.external || r.body.is_none() {
-        Callee::External(r.symbol.clone())
-    } else if r.code_section == caller_section {
-        Callee::Local(r.symbol.clone())
-    } else {
-        return Err(unsupported(
-            span,
-            "a call of a routine of this unit in another code section is",
-        ));
-    };
     let mut args = Vec::new();
-    for (a, prm) in c.args.iter().zip(&r.params) {
+    for (a, &(mode, univ, prm_ty)) in c.args.iter().zip(&params) {
         let slot = a.conv.slot_size;
         args.push(match a.conv.passing {
             Passing::ByValue => {
-                let size = p.types.size(prm.ty);
+                let size = p.types.size(prm_ty);
                 let width = Width::of_size(size).ok_or_else(|| {
                     unsupported(a.expr.span, format!("a {size}-byte value argument is"))
                 })?;
                 let ty = Scalar {
                     width,
-                    sign: sign_of(&p.types, prm.ty),
+                    sign: sign_of(&p.types, prm_ty),
                 };
                 let value = match &a.expr.value {
                     Some(v) => const_of(v, ty, a.expr.span)?,
@@ -3164,10 +3221,10 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                     // patterns 1.5, "Constant by address"), holding the
                     // value as the parameter's type (a `univ` one: see
                     // `univ_const_type`).
-                    let ty = if prm.univ {
-                        univ_const_type(p, a.expr.ty, prm.ty, a.expr.span)?
+                    let ty = if univ {
+                        univ_const_type(p, a.expr.ty, prm_ty, a.expr.span)?
                     } else {
-                        prm.ty
+                        prm_ty
                     };
                     args.push(Arg::Address {
                         addr: Addr::Const(pool_const(p, v, ty, a.expr.span)?),
@@ -3181,12 +3238,12 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                     // address is passed (codegen-patterns 1.5, TONE_$ENABLE
                     // 0xE1ACFC); the offset is assigned once the body is
                     // lowered (`assign_temps`).
-                    let width = Width::of_size(p.types.size(prm.ty)).ok_or_else(|| {
+                    let width = Width::of_size(p.types.size(prm_ty)).ok_or_else(|| {
                         unsupported(
                             a.expr.span,
                             format!(
                                 "a {}-byte expression passed by address is",
-                                p.types.size(prm.ty)
+                                p.types.size(prm_ty)
                             ),
                         )
                     })?;
@@ -3217,11 +3274,10 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                 Arg::Address {
                     addr: addr_of(p, &a.expr)?,
                     slot,
-                    // ref 5.3.1 p. 5-6; 5.3.2 p. 5-7 (bead domain-pascal-pe9).
-                    writable: matches!(
-                        prm.mode,
-                        ParamMode::Var | ParamMode::Out | ParamMode::InOut
-                    ),
+                    // ref 5.3.1 p. 5-6; 5.3.2 p. 5-7 (bead domain-pascal-pe9);
+                    // through a routine pointer, the mode of the pointer
+                    // type's parameter (bead domain-pascal-5aw.16).
+                    writable: matches!(mode, ParamMode::Var | ParamMode::Out | ParamMode::InOut),
                 }
             }
         });
@@ -3229,10 +3285,47 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
     Ok(Call {
         callee,
         args,
-        pad: r.arg_pad,
+        pad,
         // Set for a nested callee by `set_static_links`.
         link: None,
     })
+}
+
+/// The routine pointer a call goes through, as a value (codegen-patterns
+/// 1.6).  Every compiled `jsr (An)` whose register is defined in the
+/// straight-line code before it reads a pointer loaded from memory or
+/// copied from a register right after the pushes: 69 sites, e.g. KBD_$RCV
+/// 0xE1CE5C `movea.l (A2),A0`, RING_INTERRUPT 0xE0AB1C `movea.l (A5),A0`,
+/// TTY_$I_ERR 0xE1BE1A `movea.l (0x2c0,A0),A1`.  So the pointer must be a
+/// variable, parameter, field or element (a load); a function result as
+/// the pointer (`rf^^`, which the reference forbids, p. 4-145) or any
+/// other value is refused.
+fn routine_pointer(p: &Program, x: &SExpr) -> Res<Expr> {
+    let v = value_of(p, x)?;
+    // A function call inside the pointer's address (`tbl[f(i)]^(...)`)
+    // would run after the pushes, where no compiled call is seen: every
+    // load chain after the last push is moves and index arithmetic
+    // (codegen-patterns 1.6).  Refused rather than guessed.
+    let mut calls = Vec::new();
+    expr_calls(&v, &mut calls);
+    if !calls.is_empty() {
+        return Err(unsupported(
+            x.span,
+            "a function call in the routine pointer of a call through a pointer is",
+        ));
+    }
+    match &v {
+        Expr::Load {
+            ty: Scalar {
+                width: Width::Long, ..
+            },
+            ..
+        } => Ok(v),
+        _ => Err(unsupported(
+            x.span,
+            "a call through a routine pointer that is not a variable, field or element is",
+        )),
+    }
 }
 
 /// `for v := lo to hi do a[v] := c` where `v` is a local variable used
@@ -3329,7 +3422,10 @@ fn fill(
 fn mentions_var(e: &SExpr, v: VarId) -> bool {
     match &e.kind {
         ExprKind::Var { var, .. } => *var == v,
-        ExprKind::Const | ExprKind::Result { .. } | ExprKind::WithRecord(_) => false,
+        ExprKind::Const
+        | ExprKind::Result { .. }
+        | ExprKind::WithRecord(_)
+        | ExprKind::RoutineAddr(_) => false,
         ExprKind::Field { base, .. } => mentions_var(base, v),
         ExprKind::Index { base, index, .. } => mentions_var(base, v) || mentions_var(index, v),
         ExprKind::Deref(x) | ExprKind::Unary { operand: x, .. } | ExprKind::Transfer(x) => {

@@ -192,7 +192,12 @@ fn ssig(s: &RoutineSig) -> String {
         .as_ref()
         .map(|r| format!(":{}", sty(r)))
         .unwrap_or_default();
-    format!("{k} {name}({params}){res}")
+    let opts: String = s
+        .options
+        .iter()
+        .map(|o| "; ".to_string() + &o.name)
+        .collect();
+    format!("{k} {name}({params}){res}{opts}")
 }
 
 fn sparams(ps: &[Param]) -> String {
@@ -751,6 +756,36 @@ fn pointer_types() {
         "^function (x,y:real):real"
     );
     assert_eq!(ty("^procedure"), "^procedure ()");
+}
+
+#[test]
+fn routine_pointer_options() {
+    // Options after the type and its `;` (ref p. 4-146, `pptr :
+    // ^Procedure(...); EXTERN;`; Appendix B messages 181, 182).
+    assert_eq!(
+        ty("^procedure (x : integer); val_param"),
+        "^procedure (x:integer); val_param"
+    );
+    assert_eq!(
+        ty("^function : integer; options(val_param)"),
+        "^function ():integer; val_param"
+    );
+    let d = decls(
+        "var pptr : ^procedure (in i, j : integer; out a : char); extern;\n\
+         q : integer;",
+    );
+    let Decl::Var(v) = &d[0] else { panic!("{d:?}") };
+    assert_eq!(v.decls.len(), 2);
+    assert_eq!(
+        sty(&v.decls[0].ty),
+        "^procedure (in i,j:integer; out a:char); extern"
+    );
+    assert_eq!(
+        ty("record f : ^procedure (x : integer); val_param; g : integer; end"),
+        "record {f:^procedure (x:integer); val_param; g:integer}"
+    );
+    // Other types take no options: `val_param` is then the next item.
+    assert!(!errs("module m; type t = integer; val_param;").is_empty());
 }
 
 #[test]

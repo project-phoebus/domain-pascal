@@ -413,6 +413,10 @@ pub enum ExprKind {
     /// A type transfer function `T(x)` (ref p. 4-197): the bits of `x`
     /// seen as type `T` (the expression's type).
     Transfer(Box<Expr>),
+    /// `addr(r)` of a top-level, non-`internal` routine (ref "Addressing
+    /// Procedure and Function Pointers", p. 4-145; 3.13.3 p. 3-50; C.3.5):
+    /// the routine's address, a `univ_ptr`.
+    RoutineAddr(RoutineId),
 }
 
 impl Expr {
