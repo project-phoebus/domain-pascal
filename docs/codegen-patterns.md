@@ -379,10 +379,27 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   restores paired with a `link` + save in the sweep of section 12.1).
 - **Procedures without callee-saved registers:** just `unlk A6; rts`
   (0xE16C7C).
-- **Uncertain:** whether the compiler ever omits `link`.  Every compiled
-  routine sampled has one, including empty ones.  The KBD_$PUT comment in
-  `../source/domain_os/kbd/put.c` says "no link frame".  That needs
-  checking: it may be hand assembly, or a degenerate case.
+- **Empty procedures: a bare `rts`, no `link` (Reported; strong image
+  evidence, not implemented).**  The image (0xE00800..0xE88834) has no
+  `link; unlk; rts` sequence at all, nor `link; pea (A5); lea ...,A5;
+  movea.l (-4,A6),A5; unlk; rts`, while some 30 map entries in non-`_ASM`
+  `I` segments are a bare 2-byte `rts` (byte scan, bead
+  domain-pascal-5aw.2 review; ad-hoc script): TIME_$Q_INIT 0xE16C5C
+  (right before TIME_$Q_INIT_QUEUE), DMA_$FREE_ASID 0xE0A454,
+  PROC2_$SET_STACK_TRUNC_SIZE 0xE414DC, SMD_$PUTC 0xE1D89C (between
+  SMD_$COPY_FONT_TO_MD_HDM and SMD_$BUSY_WAIT), IIC_$INIT 0xE70A54
+  (first in the IIC module of `link`-framed stubs;
+  `tests/conformance/iic.pas` starts after it), RING_$SEND_NULL
+  0xE75914.  The one-routine modules MT 0xE70A4C, CT 0xE70AF4, COLOR5
+  0xE752E0, COLOR7 0xE752E8 and SCSI_ 0xE88800 are `rts` followed by the
+  0x2048 module-end filler of compiled code (section 7), whereas the
+  hand-written LPR_ASM 0xE70A40 is `rts` padded with zeros.  So these are
+  compiled empty procedures, not hand stubs.  Whether such a procedure
+  had parameters is not visible.  An empty *function* is not seen (a
+  constant result keeps its frame: IIC_$EXISTS 0xE70AB0 `link #-4; clr.b
+  D0`).  The KBD_$PUT comment in `../source/domain_os/kbd/put.c` ("no
+  link frame") is not re-checked here.  `dpc` still gives every routine a
+  `link`.
 
 ---
 
@@ -410,7 +427,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   (0xE148E0 `move.b D1,D0`), followed by the epilogue.  The frame has
   room for a result variable (`link #-4`), but the slot is never written
   or read.  `dpc` implements exactly this case: a result assignment that
-  is the last statement goes to the result register.
+  is the last statement goes to the result register.  After other
+  statements too, when they only store and nothing is loaded at entry
+  (Verified at two sites: IO_$ALLOC 0xE1A9C6..0xE1A9CC, a status store
+  then `clr.l D0`; IIC_$RECEIVE_CHECK 0xE70AE2..0xE70AEC, then `clr.b
+  D0`; section 9).
   **Uncertain (rejected by `dpc` for now):** what the compiler does when
   the result is assigned before the last statement, assigned on several
   paths, or read back (stored to the frame slot and reloaded before the
@@ -655,7 +676,12 @@ their host); no compare or widening of either has been catalogued.
   - **6 and 8 bytes: displacement moves.**  No `(An)+` copy of exactly 6
     or 8 bytes exists; pairs such as `move.l (0x30,A5),(-8,A6); move.l
     (0x34,A5),(-4,A6)` (0xE4AD5C) and many `move.l`/`move.w` pairs of
-    6-byte objects are found instead.
+    6-byte objects are found instead.  But an 8-byte copy *from* a slot
+    with only the source post-incremented exists: DIR_$ADD_MOUNT
+    0xE534CA..0xE534D2 `movea.l (8,A6),A0; move.l (A0)+,(-0xb4,A6);
+    move.l (A0)+,(-0xb0,A6)`, again at 0xE534DC (noticed in passing,
+    bead domain-pascal-5aw.2; not counted by the survey above, which
+    looked for `(Am)+,(An)+`; Uncertain).
   - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
     0xE18FE6 `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l
     (8,A5),(8,A0)` and 0xE1ABEA (16 bytes) against 59 + 42 `(An)+`
@@ -1115,9 +1141,19 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   would branch to a `bra` (`if a then begin if b then ... else ... end
   else ...`: the inner join is followed by the outer `bra`; `if a then
   begin if b then ... end else ...`; `if a then begin if b then ...;
-  return end`; `if a or else b then return`), the original threaded the
-  branch or laid the code out otherwise; which is not known.  dpc rejects
-  these (`select_body`, `Selector::jump`).
+  return end`), the original threaded the branch or laid the code out
+  otherwise; which is not known.  dpc rejects these (`select_body`,
+  `Selector::jump`).
+- **`if c then return` (Verified; implemented):** one conditional branch
+  on `c` itself to the epilogue, not a branch past a `bra`: TERM_$CONTROL
+  0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78`, 0xE62E88, 0xE68C08
+  (section 9).  No conditional branch over a `bra` exists in compiled
+  code (survey of every routine `tools/regalloc.py` splits; ad-hoc
+  script), against 888 conditional branches to an epilogue.  `dpc`
+  (`Selector::if_`) branches to the epilogue on the condition, each
+  operand of an `or else` on its own (`if a or else b then return`:
+  `b<a> epi; b<b> epi`), and an `else` part follows the branch.  A `then
+  return` that ends the routine stays refused (below).
 - **Identical ends of the two parts (Uncertain):** the pop is shared at
   the join (section 1.1), and RIP_$SEND_UPDATES shares a `jsr`: one part
   is `subq.l #2,SP; st -(SP); bra.s 0xE688BE`, the other `subq.l #2,SP;
@@ -1384,19 +1420,124 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
 
 ---
 
-## 9. Status returns and error exits (Reported)
+## 9. Status returns and error exits (Verified at the sites given; implemented in part)
 
-- Kernel routines take a `status_$t` (32-bit) `out` parameter by address
-  and clear it on entry:
-  - IO_$ALLOC 0xE1A9C6 `movea.l (0x14,A6),A0; clr.l (A0)`
-  - SMD_$BUSY_WAIT 0xE1D8AA
-  - MMAP_$ALLOC_CONTIG 0xE0D8FC
-- Error codes are stored with `move.l #imm,(An)`, for example
-  `move.l #0x003A0001,(A0)` at 0xE0B28C.  Error paths branch to a shared
-  epilogue (`bra.w`).
-- Status code names come from the real text tables
-  (`~/src/domainos-archeology/stcodes`, `node stcode.js stcode.db.10.2 <hex>`).
-  Never invent a `status_$` name.
+Bead domain-pascal-5aw.2.  Counts come from surveys of the routines
+`tools/regalloc.py` splits (0xE00800..0xE88834, compiled code), with
+ad-hoc scripts that were not kept; re-check sites with `tools/imgdis.sh`.
+A "status slot" there is a parameter slot whose address is loaded with
+`movea.l (d,A6),An` and through which a status-shaped constant (a
+subsystem number in the high word, a small code in the low word) is
+stored.
+
+- **The type (reference; layout partly Uncertain).**  Ref 9.1.1-9.1.2
+  (pp. 9-1..9-3): `status_$t` is declared in `/sys/ins/base.ins.pas`,
+  which we do not have.  It is not itself an integer32: its `all` field
+  is (`OPEN(f, pathname1, 'NEW', err_stat.all)`; the error "Improper
+  status argument", p. 9-21: "a data type other than integer32 ...
+  `OPEN(f1, 'anger1', 'NEW', st); {wrong}` / `OPEN(f2, 'anger2', 'NEW',
+  st.all); {right}`").  It also has a `code` field that "contains a
+  number that corresponds to a particular error" (p. 9-3), at an offset
+  the reference does not give.  `status_$ok` is 0 (9.1, p. 9-1: a successful call returns 0;
+  "Open", pp. 4-132..4-133, tests `statrec.all = 0` and `statrec.all =
+  status_$ok` alike).
+  `../source` types it `int32_t` (`base/base.h`) and sets bit 31 on
+  failure paths (`proc2/resume.c`, 0xE41444 `bset.b #7`), which fits a
+  fail flag in the top bit of `all` but does not place `code`.  The
+  conformance sources therefore declare `status_$t = record all:
+  integer32 end` (only `all`, at offset 0, 4 bytes);
+  `tests/conformance/name_convert_acl_status.pas`, older, uses a plain
+  integer32, which compiles to the same code.  Status codes in sources
+  carry `../source`'s names or are written in hex with the database text
+  in a comment.  Never invent a `status_$` name.
+- **Clear on entry** (`status.all := status_$ok` as the first
+  statement): `movea.l (d,A6),An; clr.l (An)`, an ordinary store of 0
+  through a slot (section 13): SMD_$BUSY_WAIT 0xE1D8AA; IO_$ALLOC
+  0xE1A9C6; MAC_OS_$OPEN 0xE0B25C..0xE0B260, after the entry loads of
+  `(8)` and `(0xc)`, in parameter order (12.2); module-local 0xE1A4A4
+  0xE1A4AC..0xE1A4B0.  Not every clear through a slot is a status:
+  MMAP_$ALLOC_CONTIG 0xE0D8FC clears `pages_alloced` and stores its
+  status afterwards (0xE0D906 `move.l #0x6000e,(A1)`,
+  `mmap/alloc_contig.c`), and XNS_IDP_$GET_STATS clears its status last
+  (0xE18FF8 `clr.l (A1)`).
+- **Error stores:** `move.l #imm,(An)` through the status register
+  (0xE0B28C `move.l #0x3a0001,(A0)`; XNS_IDP_$GET_PORT_INFO 0xE18FC8;
+  the IIC stubs 0xE70A56..0xE70AF2, `#0x2c000a`), never `moveq` +
+  `move` (section 13).
+- **Where the status pointer lives.**  A status slot used more than once
+  is loaded once, at entry, in parameter order (12.2), into the
+  register the allocator gives it; live across calls it is callee-saved
+  (12.4 R3) and held for the whole body: 251 routines load their status
+  slot into A2-A4 (239 of them exactly once), e.g. module-local 0xE01950
+  (`movea.l (0x10,A6),A2` at 0xE01960, error store `move.l
+  #0x30004,(A2)` at 0xE019A6), TERM_$CONTROL (A3, 0xE66B3A).  115 others
+  keep it in scratch registers: 60 with one load (no call while it is
+  live, e.g. MMAP_$GET_WS_INDEX 0xE0CA4C), 55 reloading it into A0 after
+  calls (MAC_OS_$OPEN 0xE0B25C, then 0xE0B2AE, 0xE0B2EA, 0xE0B320,
+  0xE0B3D0, 0xE0B3F6; that routine saves all of D2-D7/A2-A5, so register
+  pressure is a candidate cause).  **Uncertain:** when the original
+  reloads instead of holding.  `dpc` does the majority form (entry load,
+  allocator register).
+- **Passing the status on:** held in An, it is pushed with `pea (An)`
+  (survey of every slot held in A2-A4, not only status slots: `pea (An)`
+  1447 times, `move.l (d,A6),-(SP)` 80 times while the register holds the
+  same slot; 0xE019FE `pea (A2)`); not held, the slot itself, `move.l
+  (d,A6),-(SP)` (MAC_OS_$OPEN 0xE0B3DE; LOG_$READ 0xE1780C).  Both are
+  section 1.5, implemented.
+- **Testing it:** `tst.l (An)` (section 7.1, against 0), then `bne` (499
+  times after `tst.l (An)`, 173 of them straight to the epilogue) or
+  `beq` (125).  TERM_$CONTROL 0xE66B3A `tst.l (A3)` right after the pop
+  of the call that set it.
+- **Early exits.**  `return` is a `bra` to the register restore that
+  starts the epilogue (section 7.1): MAC_OS_$OPEN 0xE0B292 `bra.w
+  0xE0B452`; 0xE019AC `bra.w 0xE01AC8`.  **`if c then return`** is one
+  conditional branch on `c` to the epilogue, not a branch past a `bra`:
+  TERM_$CONTROL 0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78` (`if
+  status.all <> status_$ok then return`, `term/control.c`; 0xE66D78 is
+  the `movem.l` restore), 0xE62E88 `bne.w`, 0xE68C08 `beq.w`.  Compiled
+  code has no conditional branch over a `bra` at all, against 888
+  conditional branches to an epilogue (Verified by survey).
+- **Slots used once** take a register no earlier statement left a value
+  in (12.4 R4(b); IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2;
+  XNS_IDP_$GET_STATS 0xE18FF4 A1; MMAP_$ALLOC_CONTIG 0xE0D902 A1).
+- **A status store, then a constant result:** IO_$ALLOC 0xE1A9C6..
+  0xE1A9CC `clr.l (A0); clr.l D0`; IIC_$RECEIVE_CHECK 0xE70AE6..0xE70AEC
+  `move.l #0x2c000a,(A0); clr.b D0`.  **Uncertain:** module-local
+  0xE1A4A4 returns `status.all = status_$ok` as a boolean, and its error
+  path branches past the `tst.l (A0)` straight to the `seq D0`
+  (0xE1A4BE `bra.s 0xE1A4D6`), using the flags of the store `move.l
+  #0x100008,(A0)`: not supported.
+- **Implemented** (`crates/dpc-m68k/src/isel.rs`): the stores, tests and
+  pushes above through the existing patterns; `if c then return` as one
+  branch to the epilogue (`Selector::if_`; an `else` part follows the
+  branch; a `then return` that ends the routine is still refused);
+  slots used once in bodies without branches and calls
+  (`fresh_slot_loads`, `regs::allocate_apart`); function bodies of
+  several statements when nothing is loaded at entry and the statements
+  before the result only store, without calls or branches.  Golden
+  `tests/golden/stores/status.pas`; tests in
+  `crates/dpc-m68k/tests/control.rs`; byte-identical in `make conform`:
+  `tests/conformance/iic.pas` (IIC_$ACQUIRE..IIC_$RECEIVE_CHECK),
+  `xns_idp_get_stats.pas`, `io_alloc.pas`.
+- **Not supported yet:**
+  - SMD_$BUSY_WAIT 0xE1D89E, MMAP_$ALLOC_CONTIG 0xE0D8F0 and
+    XNS_IDP_$GET_PORT_INFO 0xE18FB8 load A5 and never use it (section 4,
+    the open case: `dpc` refuses such a routine in a unit with data and
+    loads no A5 in a unit without).  Their bodies are reproduced in the
+    golden without the A5 load.
+  - A status whose last use is a call argument in a body with branches
+    (12.4 R4(c)), e.g. `status.all := status_$ok; if ... then begin
+    status.all := ...; return end; p(..., status)`.
+  - A slot used once in a body with branches or calls (12.4 R4(b)).
+  - IIC_$INIT 0xE70A54 and SMD_$PUTC 0xE1D89C, a bare `rts` each:
+    empty procedures, which the compiler emits without a frame
+    (section 2, Reported); `dpc` gives every routine a `link`.
+- **Status code names** come from the real text tables
+  (`~/src/domainos-archeology/stcodes`: `node stcode.js stcode.db.10.2`
+  prints the whole 10.2 table, subsystem headings and `(hex)` codes;
+  find a code by its `(hex)`, e.g. `(2c000a)` "device not in system"
+  under "OS / internet interface controller").  The table gives texts,
+  not symbols: the `status_$...` symbols are `../source`'s.
 - **`abnormal`, `noreturn`, cleanup handlers:** the kernel has cleanup
   handlers (`../source/domain_os/proc2/cleanup_handlers_internal.c`,
   FIM_$CLEANUP).  How the compiler treats `options(abnormal)` around them
@@ -1660,8 +1801,12 @@ kinds from the C in `../source/domain_os`.
     0xE18FF4 A1; LOG_$READ's worker 0xE177CC `movea.l (8,A6),A2` while
     A1 is free (A1 is taken next, for another pointer);
     MMAP_$GET_WS_INDEX 0xE0CA62 `movea.l (0xa,A6),A2`, A1 taken next.
-    The allocation rule is not settled (12.4 R4(b): Uncertain, with
-  counterexamples).
+    In bodies without branches and calls the rule is "the lowest
+    register no earlier statement left a value in, unless an `(An)+`
+    used that value up" (12.4 R4(b), Verified there by survey and
+    implemented); elsewhere it is not settled.
+  - The same register is also kept for a slot used more than once when
+    calls intervene: the status pointer, 9.
 - *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
   `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
   add.w D1,D1`.  **Implemented** (section 8, operands): a value held in a
@@ -1686,16 +1831,21 @@ class takes D2/A2, a value live across a call a callee-saved register
 0xE152F2: D2, D3), and a parameter's register is free after its last
 use.  The statements of such a body take registers of their own the same
 way.  A body of one `if`/`repeat` that reads a by-value parameter is
-rejected (no site seen); a slot or pointer parameter used once in a body
-of several statements is rejected (the fresh-register rule above, 12.4
-R4(b)), except in a simple statement right after a call in a body that
-loaded nothing at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at
-0xE00EC2).  A parameter that is only pushed as a whole argument is not
+rejected (no site seen); a slot used once in a body of several
+statements takes a register no earlier statement left a value in (12.4
+R4(b), bead domain-pascal-5aw.2; IIC_$RECEIVE 0xE70AC0..0xE70AD0) when
+the body has no branches and no calls, and is rejected otherwise, except
+in a simple statement right after a call in a body that loaded nothing
+at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2).  A parameter that is only pushed as a whole argument is not
 "read" for this rule: it is pushed from the frame at each call (0xE00EBE,
 0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).  A one-statement body keeps its
 own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
-TIME_$Q_FLUSH_QUEUE stay byte-identical).  Reported as not supported yet:
-a function body of several statements (R5); a pointer parameter also
+TIME_$Q_FLUSH_QUEUE stay byte-identical).  A function body of several
+statements is compiled only when it loads nothing at entry and its
+statements before the result assignment only store, without calls or
+branches (IO_$ALLOC 0xE1A9C2, IIC_$RECEIVE_CHECK 0xE70ADE; section 9).
+Reported as not supported yet: other function bodies of several
+statements (R5); a pointer parameter also
 used as data; storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
@@ -2003,6 +2153,38 @@ of the remaining misses).**  The corpus misses fall into these groups:
   - Against it: DIR_$ADD_MOUNT loads three slots into A0 (0xE534CA,
     0xE534DC, 0xE53508; the first two feed `move.l (A0)+` block copies);
     PROC2_$GET_PID 0xE40D06; 0xE19158.
+  - **Survey (bead domain-pascal-5aw.2; ad-hoc script on top of
+    `tools/regalloc.py`'s model, not kept).**  For every `movea.l
+    (d,A6),An` of a slot that starts a value, two rules were compared:
+    `colU` (lowest register free over the range) and "fresh": the lowest
+    of those whose content at the load is not a value an earlier
+    instruction left there, a value used up by `(An)+`/`-(An)` and a
+    register a call wrote counting as free, a reload of the same slot
+    into the register that already holds it allowed, `colU` when no
+    register qualifies.  In routines **without any branch or call**: 105
+    loads, both rules agree on 86, "fresh" alone is right 17 times
+    (all the IIC_$RECEIVE, PROC2_$ALIGN_CTL, XNS_IDP_$GET_STATS,
+    MMAP_$ALLOC_CONTIG sites; module-local 0xE32BB8 `(0x14,A6)`→A2 with
+    A0 and A1 dead; TERM_$PCHIST_ENABLE 0xE7245C A1 after the status
+    cleared through A0), `colU`
+    alone once (0xE41C2E: A0 reused for a slot right after its last use
+    as a base in the same statement) and neither once (0xE3353A).  With
+    branches before the load, "fresh" alone 85, `colU` alone 28,
+    neither 14; with branches and calls, 102 / 81 / 30 (e.g. module-local
+    0xE030C0, 0xE030E0 `movea.l (8,A6),A0` right after `clr.l (A0)` of the
+    status in A0).  So the rule holds in straight-line, call-free code
+    as "a register no earlier *statement* left a value in" (the 0xE41C2E
+    reuse is within a statement); elsewhere something else decides.
+  - **Implemented** for bodies without branches and calls
+    (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`; the allocator
+    keeps each such slot apart from the address values of earlier
+    statements that no `(An)+` used up, `regs::allocate_apart`).  Bodies
+    with branches or calls are refused.  The slot loads of block copies
+    (`block_address`) still take the lowest free register (ACL_
+    0xE47944 suggests the same rule applies there: A2 after an `(A2)+`
+    copy while the dead A0 of an earlier statement is passed over; not
+    implemented).  Conformance: `tests/conformance/iic.pas`,
+    `xns_idp_get_stats.pas`.
 - **(c) A call in the statement.**  A value that does not live across a
   call, but belongs to a statement that ends in one, gets a callee-saved
   register:

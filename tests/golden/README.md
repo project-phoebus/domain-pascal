@@ -87,3 +87,13 @@ Tests:
   expressions (0xE04700, 0xE01BA4, 0xE0082C), the tail wrapper, `btst #k`
   on a one-word set (0xE4A412, 0xE013BA), comparisons as results (`seq`,
   `sgt`, `sne`).
+- `stores/status` - codegen-patterns 9, 12.4 R4(b), 7.1, 3, 1.5: status
+  out-parameters: `status.all := ...` through the slot (SMD_$BUSY_WAIT
+  0xE1D8AA, MMAP_$ALLOC_CONTIG 0xE0D8FC, without their A5 loads), slots
+  used once in registers no earlier statement left a value in
+  (IIC_$RECEIVE 0xE70AC0, XNS_IDP_$GET_STATS 0xE18FF4), registers used up
+  by `(An)+` counting as free (DIR_$ADD_MOUNT 0xE534DC), error stores and
+  `return`, a held status passed on with `pea (A2)` and tested with
+  `tst.l`, `if status.all <> status_$ok then return` as one `bne` to the
+  epilogue (TERM_$CONTROL 0xE66B3A), a status store then a constant
+  result (IIC_$RECEIVE_CHECK 0xE70ADE).

@@ -256,6 +256,16 @@ begin
 end;",
             "used once (loaded where needed",
         ),
+        // The same in a body with a call (12.4 R4(b) is known only for
+        // bodies without branches and calls).
+        (
+            "(var x: integer); internal;
+begin
+  x := 0;
+  ext_$p(1);
+end;",
+            "with branches or calls, a pointer parameter or by-address parameter that is used once",
+        ),
     ];
     for (b, want) in with_param {
         let e = error(&format!("procedure t{b}\n"));
@@ -288,12 +298,6 @@ end;",
   end;
   r := 3;
 end;",
-        // `or else`: the first operand's `bmi` past the second, onto the
-        // `bra` of the `return`.
-        "begin
-  if b or else (w = 2) then return;
-  r := 3;
-end;",
     ];
     for b in cases {
         let e = error(&format!("procedure t; internal;\n{b}\n"));
@@ -324,4 +328,52 @@ end;
             "1:",
         ]
     );
+}
+
+/// codegen-patterns 9: `if c then return` is one branch on `c` to the
+/// epilogue (TERM_$CONTROL 0xE66B3A `tst.l (A3); bne.w 0xE66D78`, the
+/// register restore); with `or else`, each operand branches there
+/// (compiled code has no conditional branch over a `bra`).  A call before
+/// it is popped: a conditional branch follows (codegen-patterns 1.1).
+#[test]
+fn if_then_return_branches_to_the_epilogue() {
+    let b = body(
+        "procedure t; internal;
+begin
+  ext_$p(1);
+  if w <> 0 then return;
+  if b or else (w = 2) then return else r := 2;
+  r := 3;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "addq.w\t#4,%sp",
+            "tst.w\t(W).l",
+            "bne.s\t1f",
+            "tst.b\t(B).l",
+            "bmi.s\t1f",
+            "cmpi.w\t#2,(W).l",
+            "beq.s\t1f",
+            "move.w\t#2,(R).l",
+            "move.w\t#3,(R).l",
+            "1:",
+        ]
+    );
+    // At the end of the routine it would branch to the next instruction
+    // (or be left out): not known.
+    let e = error(
+        "procedure t; internal;
+begin
+  r := 1;
+  if w <> 0 then return;
+end;
+",
+    );
+    assert!(e.contains("a `return` at the end of an `if` part"), "{e}");
 }

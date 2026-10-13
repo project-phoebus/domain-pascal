@@ -37,6 +37,14 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 0xE0AA04: `lsl.w #2`, `(0x3c,A5,D0.w)`) and
 `audit_is_process_audited.pas` (AUDIT_$IS_PROCESS_AUDITED 0xE70D94: a
 1-based array, `(-2,A5,D0.w)`, a comparison as the result with `seq`).
+Status out-parameters (codegen-patterns 9, 12.4 R4(b); bead
+domain-pascal-5aw.2): `iic.pas` (IIC_$ACQUIRE..IIC_$RECEIVE_CHECK,
+0xE70A56..0xE70AF4, the IIC module's status stubs without IIC_$INIT, a
+bare `rts`: by-address slots used once in A0, A1, A2, a status store
+then a constant boolean result), `xns_idp_get_stats.pas`
+(XNS_IDP_$GET_STATS 0xE18FD6: the status slot in A1 after the dead A0)
+and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
+D0`).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.

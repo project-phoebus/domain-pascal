@@ -27,7 +27,7 @@ use dpc_syntax::{Diagnostic, Span};
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
-use crate::regs::{allocate, RegClass, VRegs, DATA_BASE};
+use crate::regs::{allocate_apart, RegClass, VRegs, DATA_BASE};
 
 /// A5, the data base register, as an address register number.
 const DATA_BASE_A: u8 = 5;
@@ -108,12 +108,19 @@ pub struct Body {
 /// R1-R3): a parameter's register is free after its last use, a
 /// statement's value takes the lowest register free over its live range,
 /// and a value live across a call a callee-saved one (module-local
-/// 0xE32B76, A2 and D2 around three calls).  Not modelled: registers held
-/// longer than the live range (12.4 R4: to the end of a statement, for a
-/// by-address slot read once, IIC_$RECEIVE 0xE70ABA) other than a
-/// parameter the arguments of a call read last ([`held_through_calls`];
-/// PROC1_$SET_ASID 0xE148FE), and the scheduling of entry loads with other
-/// work (0xE758C4, R9).
+/// 0xE32B76, A2 and D2 around three calls).  Registers held longer than
+/// the live range (12.4 R4) are modelled for a parameter the arguments of
+/// a call read last ([`held_through_calls`]; PROC1_$SET_ASID 0xE148FE)
+/// and for by-address slots read once, which avoid the registers of
+/// earlier statements ([`fresh_slot_loads`]; IIC_$RECEIVE 0xE70ABA), in
+/// bodies without branches or calls; not to the end of a statement
+/// (R4(a)), nor the scheduling of entry loads with other work (0xE758C4,
+/// R9).
+///
+/// A function body of several statements is selected the same way when
+/// nothing is loaded at entry and the statements before the result
+/// assignment only store, without calls or branches (IO_$ALLOC 0xE1A9C2,
+/// IIC_$RECEIVE_CHECK 0xE70ADE); otherwise it is refused (12.4 R5).
 ///
 /// A body that is one `if` or `repeat` statement is treated like a body of
 /// several statements (NAME_CONVERT_ACL_STATUS 0xE58620: one `if ... else
@@ -129,15 +136,6 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     let control_only = f.body.len() == 1 && !is_simple(&f.body[0]);
     s.multi_body = f.body.len() >= 2 || control_only;
     if s.multi_body {
-        if f.result.is_some() {
-            // PARITY_$CHK_IO 0xE0B180..0xE0B18A loads its first parameter
-            // into D1 and its second into D0: functions do not follow the
-            // procedure order, and the rule is not known.
-            return Err(unsupported(
-                f.body[0].span,
-                "a function body of more than one statement is",
-            ));
-        }
         let reads_value_param = param_uses(f)
             .iter()
             .any(|(o, _)| f.value_params.iter().any(|p| p.offset == *o));
@@ -154,8 +152,42 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         // R3: PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`;
         // module-local 0xE32B76, 0xE32B7E A2, D2 around three).
         s.entry_loads(f)?;
+        if f.result.is_some() && !s.pinned.is_empty() {
+            // PARITY_$CHK_IO 0xE0B180..0xE0B18A loads its first parameter
+            // into D1 and its second into D0: functions do not follow the
+            // procedure order, and the rule is not known (12.4 R5).
+            return Err(unsupported(
+                f.body[0].span,
+                "a function body of more than one statement that loads parameters at entry is",
+            ));
+        }
     }
     s.seq(f, &f.body, Tail::END)?;
+    if f.result.is_some() && s.multi_body {
+        // The result assignment is the last statement (`dpc-ir`).  The
+        // statements before it may only store, through slots, without
+        // calls or branches: IO_$ALLOC 0xE1A9C6..0xE1A9CC `movea.l
+        // (0x14,A6),A0; clr.l (A0); clr.l D0` and IIC_$RECEIVE_CHECK
+        // 0xE70AE2..0xE70AEC `movea.l (0xc,A6),A0; move.l #0x2c000a,(A0);
+        // clr.b D0` (a status store, then a constant result).  Which
+        // register a data value of an earlier statement takes beside the
+        // result register is not known (12.4 R5).
+        if s.out[..s.stmt_start].iter().any(|i| {
+            matches!(
+                i,
+                Insn::Branch { .. } | Insn::Dbf { .. } | Insn::Jsr(_) | Insn::Bsr { .. }
+            ) || crate::regs::access(i)
+                .defs
+                .iter()
+                .any(|&r| matches!(r, Reg::D(_)) && crate::regs::is_virtual(r))
+        }) {
+            return Err(unsupported(
+                f.body[0].span,
+                "a function body of several statements whose statements before the result \
+                 assignment compute data values, call or branch (codegen-patterns 12.4 R5) is",
+            ));
+        }
+    }
     if let Some(l) = s.epilogue {
         s.place(l);
     }
@@ -190,7 +222,9 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         _ => &[],
     };
     let holds = held_through_calls(&s.out, &s.call_stmts, exit)?;
-    let saves = allocate(&mut s.out, exit, &holds).map_err(|what| unsupported(f.span, what))?;
+    let apart = fresh_slot_loads(&s.out, &s.fresh)?;
+    let saves = allocate_apart(&mut s.out, exit, &holds, &apart)
+        .map_err(|what| unsupported(f.span, what))?;
     // A result computed in D0 already is not moved (0xE148E0 moves it
     // only because the `sne` left it in D1).
     let out: Vec<Insn> = s
@@ -265,6 +299,92 @@ fn held_through_calls(
         }
     }
     Ok(holds)
+}
+
+/// The register pairs to keep apart for by-address slots loaded for one
+/// use in a body of several statements (codegen-patterns 12.4 R4(b)), as
+/// `(slot value, earlier value)` for [`allocate_apart`].
+///
+/// Such a slot is loaded where its statement needs it, into the lowest
+/// address register that is free over its range *and* does not hold a
+/// value an earlier statement left there, even when that value is dead:
+///
+/// - IIC_$RECEIVE 0xE70AC0..0xE70AD0: three slots, each read once, in
+///   A0, A1 and A2 (callee-saved, so saved with `pea (A2)`) although A0
+///   and A1 are dead by then;
+/// - PROC2_$ALIGN_CTL 0xE41D82..0xE41D8E likewise (A0, A1, A2);
+/// - XNS_IDP_$GET_STATS 0xE18FF4: the status slot in A1 after the stats
+///   slot, held in A0 for three stores and dead (12.2);
+/// - MMAP_$ALLOC_CONTIG 0xE0D902 A1 after A0; module-local 0xE32BB8 A2
+///   after A0 and A1.
+///
+/// A register whose value was used up by `(An)+` / `-(An)` (a block copy)
+/// does count as free: DIR_$ADD_MOUNT 0xE534DC loads its second slot
+/// into A0 after the first one's `(A0)+` copy; ACL_ 0xE47944 into A2 after
+/// a `(A2)+` copy, while the dead A0 of an earlier statement is passed
+/// over.  Within one statement a dead register is reused (0xE41C2E
+/// `movea.l (8,A6),A0` after A0's base was last read by the `lea` before).
+///
+/// Survey (ad-hoc script over the routines `tools/regalloc.py` analyses,
+/// `movea.l (d,A6),An` loads of a slot): in the 105 such loads in
+/// routines without branches and calls, this rule and plain lowest-free
+/// (12.4 R1) agree 86 times; of the other 19 this rule picks the
+/// original's register 17 times, lowest-free once (0xE41C2E, the same
+/// statement), neither once (0xE3353A).  Where a branch or a call comes
+/// before the load the original's register fits this rule only, or
+/// lowest-free only, 85/28 times (branches) and 102/81 (branches and
+/// calls), a reload of the same slot counted as the same value: the rule
+/// there is not known, and such bodies are refused.
+fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg, Reg)>> {
+    let Some(&(_, _, span)) = fresh.first() else {
+        return Ok(Vec::new());
+    };
+    if out.iter().any(|i| {
+        matches!(
+            i,
+            Insn::Branch { .. } | Insn::Dbf { .. } | Insn::Jsr(_) | Insn::Bsr { .. }
+        )
+    }) {
+        return Err(unsupported(
+            span,
+            "in a body of several statements with branches or calls, a pointer parameter or \
+             by-address parameter that is used once (loaded where needed into a fresh register: \
+             IIC_$RECEIVE 0xE70AC0, codegen-patterns 12.4 R4(b)) is",
+        ));
+    }
+    // Registers used up by `(An)+` / `-(An)`.
+    let consumed: Vec<u8> = out
+        .iter()
+        .flat_map(|i| {
+            let mut v = Vec::new();
+            let mut note = |ea: &Ea| {
+                if let Ea::PostInc(a) | Ea::PreDec(a) = ea {
+                    v.push(*a);
+                }
+            };
+            if let Insn::Move { src, dst, .. } = i {
+                note(src);
+                note(dst);
+            }
+            if let Insn::Clr { dst, .. } = i {
+                note(dst);
+            }
+            v
+        })
+        .collect();
+    let mut apart = Vec::new();
+    for &(v, start, _) in fresh {
+        for i in &out[..start] {
+            for d in crate::regs::access(i).defs {
+                if let Reg::A(n) = d {
+                    if crate::regs::is_virtual(d) && !consumed.contains(&n) {
+                        apart.push((v, d));
+                    }
+                }
+            }
+        }
+    }
+    Ok(apart)
 }
 
 /// A statement that is not control flow.
@@ -589,12 +709,20 @@ pub struct Selector {
     call_stmts: Vec<(usize, usize, Span)>,
     /// The statement being selected, for diagnostics.
     span: Span,
+    /// The index in `out` of the first instruction of the statement being
+    /// selected.
+    stmt_start: usize,
+    /// By-address slots loaded for one use in a body of several
+    /// statements: the register, the start of its statement in `out`, and
+    /// the statement ([`fresh_slot_loads`]).
+    fresh: Vec<(Reg, usize, Span)>,
     /// Parameters loaded at entry: frame offset and the (virtual) register
     /// the value was loaded into.
     pinned: Vec<(i32, Reg)>,
     /// The statement being selected is in a body of several statements
-    /// and does not directly follow a call there: a pointer parameter or
-    /// slot it uses once is refused ([`Self::eval_a`]; R4(b)).
+    /// and does not directly follow a call there: a slot it uses once is
+    /// loaded into a fresh register ([`Self::eval_a`],
+    /// [`fresh_slot_loads`]; R4(b)).
     multi: bool,
     /// The body has several statements, or is one `if`/`repeat`
     /// ([`select_body`]).
@@ -644,6 +772,8 @@ impl Selector {
             result_moves: Vec::new(),
             call_stmts: Vec::new(),
             span,
+            stmt_start: 0,
+            fresh: Vec::new(),
             pinned: Vec::new(),
             multi: false,
             multi_body: false,
@@ -700,10 +830,11 @@ impl Selector {
         let mut after_call = false;
         for (i, st) in body.iter().enumerate() {
             self.span = st.span;
+            self.stmt_start = self.out.len();
             let rest = &body[i + 1..];
-            // A pointer parameter or slot used once is loaded where it is
-            // needed, into a register no earlier load used (codegen-patterns
-            // 12.4 R4(b), not modelled): refused in a body of several
+            // A slot used once is loaded where it is needed, into a
+            // register no earlier statement left a value in (codegen-patterns
+            // 12.4 R4(b), [`fresh_slot_loads`]) in a body of several
             // statements, except in a simple statement right after a call
             // in a body that loaded nothing at entry, where the lowest free
             // registers are taken (0xE00ECC..0xE00ED2, A0 and D0 after the
@@ -757,14 +888,7 @@ impl Selector {
                         // register restore that starts the epilogue
                         // (0xE177F6), as the error exits of codegen-patterns
                         // 9 branch to a shared epilogue.
-                        let l = match self.epilogue {
-                            Some(l) => l,
-                            None => {
-                                let l = self.new_label();
-                                self.epilogue = Some(l);
-                                l
-                            }
-                        };
+                        let l = self.epilogue_label();
                         self.jump(Cond::T, l);
                     }
                 }
@@ -772,6 +896,19 @@ impl Selector {
             after_call = matches!(st.kind, StmtKind::Call(_));
         }
         Ok(())
+    }
+
+    /// The label at the start of the epilogue (the register restore, or
+    /// `unlk`), placed after the body.
+    fn epilogue_label(&mut self) -> u32 {
+        match self.epilogue {
+            Some(l) => l,
+            None => {
+                let l = self.new_label();
+                self.epilogue = Some(l);
+                l
+            }
+        }
     }
 
     /// `if cond then then_ else else_` (ref "If", p. 4-99).
@@ -818,6 +955,28 @@ impl Selector {
                     ));
                 }
             }
+        }
+        // `if c then return`: one branch to the epilogue on `c` itself, not
+        // a branch past a `bra` (codegen-patterns 9).  TERM_$CONTROL
+        // 0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78` (`if
+        // status.all <> status_$ok then return`, the status held in A3,
+        // per `term/control.c`; 0xE66D78 is the register restore); 0xE62E88
+        // `bne.w`, 0xE68C08 `beq.w` likewise.  Compiled code has no
+        // conditional branch over a `bra` at all (survey of every routine
+        // `tools/regalloc.py` splits, ad-hoc script), against 888
+        // conditional branches to an epilogue.  A `return` that ends the
+        // routine anyway is refused below (in [`Self::seq`]).
+        if matches!(
+            then_,
+            [Stmt {
+                kind: StmtKind::Return,
+                ..
+            }]
+        ) && (!next.end || !else_.is_empty())
+        {
+            let l = self.epilogue_label();
+            self.branch(cond, true, l)?;
+            return self.seq(f, else_, next);
         }
         let l_else = self.new_label();
         self.branch(cond, false, l_else)?;
@@ -1179,9 +1338,10 @@ impl Selector {
     /// before each of five stores; they are device-register stores
     /// (`dma/init_m68450_channel.c`), and `dpc-sema` rejects the `device`
     /// attribute (codegen-patterns 13).  A slot used once is loaded where
-    /// it is needed, into a register no earlier load used (IIC_$RECEIVE
-    /// 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL 0xE41D82): not
-    /// supported yet in a body of several statements.
+    /// it is needed, into a register no earlier statement left a value in
+    /// (IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL
+    /// 0xE41D82; [`fresh_slot_loads`]), in bodies without branches and
+    /// calls only.
     fn entry_loads(&mut self, f: &Function) -> Res<()> {
         let uses = param_uses(f);
         // (offset, IR type when by value), in parameter order.
@@ -3045,15 +3205,23 @@ impl Selector {
             // `movea.l <ea>,An`: 0xE148CE `movea.l abs.l,A0` (an extern
             // pointer variable); LOG_$READ 0xE17810 `movea.l (0xc,A6),A0`
             // (a by-address parameter).
+            // A slot used once in a body of several statements: a register
+            // no earlier statement left a value in ([`fresh_slot_loads`];
+            // IIC_$RECEIVE 0xE70AC0..0xE70AD0).  By-value pointers are
+            // loaded at entry there ([`Self::entry_loads`]).
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if self.multi && *o > 0 => Err(unsupported(
-                self.span,
-                "in a body of several statements, a pointer parameter or by-address parameter \
-                 that is used once (loaded where needed into a fresh register: IIC_$RECEIVE \
-                 0xE70AC0, codegen-patterns 12.2) is",
-            )),
+            } if self.multi && *o > 0 => {
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Disp(*o, FP),
+                    dst: a,
+                });
+                self.fresh.push((Reg::A(a), self.stmt_start, self.span));
+                Ok(a)
+            }
             Expr::Load {
                 addr,
                 ty: Scalar {
@@ -3322,7 +3490,7 @@ mod tests {
                 dst: Ea::Disp(4, an),
             },
         ];
-        let saves = allocate(&mut insns, &[], &[]).unwrap();
+        let saves = crate::regs::allocate(&mut insns, &[], &[]).unwrap();
         insns.truncate(1);
         let text: Vec<String> = wrap(&f, Body { insns, saves })
             .unwrap()
@@ -3519,20 +3687,76 @@ mod tests {
 
     #[test]
     fn multi_statement_functions_are_rejected() {
-        let f = func(
+        let res = Some(ResultSpec {
+            class: ResultClass::Data,
+            ty: word(),
+        });
+        // Parameters loaded at entry (PARITY_$CHK_IO 0xE0B180: the order is
+        // not the procedures').
+        let mut f = func(
             0,
-            Some(ResultSpec {
-                class: ResultClass::Data,
-                ty: word(),
-            }),
+            res,
             vec![
                 store(through(8, 0), konst(0, word())),
                 StmtKind::SetResult(param(12, word())),
             ],
         );
+        vparams(&mut f, &[(8, Scalar::POINTER), (12, word())]);
         assert_eq!(
             err(&f),
-            "a function body of more than one statement is not supported yet"
+            "a function body of more than one statement that loads parameters at entry is \
+             not supported yet"
+        );
+        // A data value computed before the result (12.4 R5).
+        let f = func(
+            0,
+            res,
+            vec![
+                store(
+                    Addr::Static(2),
+                    Expr::Unary {
+                        op: UnOp::Neg,
+                        operand: Box::new(load(Addr::Static(0), word())),
+                        ty: word(),
+                    },
+                ),
+                StmtKind::SetResult(konst(0, word())),
+            ],
+        );
+        let e = err(&f);
+        assert!(
+            e.starts_with("a function body of several statements whose statements"),
+            "{e}"
+        );
+    }
+
+    /// IO_$ALLOC 0xE1A9C2..0xE1A9D0: a status store, then a constant
+    /// result; IIC_$RECEIVE_CHECK 0xE70ADE likewise with a boolean.
+    #[test]
+    fn status_store_then_constant_result() {
+        let long = Scalar::signed(Width::Long);
+        let mut f = func(
+            4,
+            Some(ResultSpec {
+                class: ResultClass::Data,
+                ty: long,
+            }),
+            vec![
+                store(through(0x14, 0), konst(0, long)),
+                StmtKind::SetResult(konst(0, long)),
+            ],
+        );
+        f.address_params = vec![8, 0xc, 0x10, 0x14];
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-4",
+                "movea.l\t(0x14,%fp),%a0",
+                "clr.l\t(%a0)",
+                "clr.l\t%d0",
+                "unlk\t%fp",
+                "rts",
+            ]
         );
     }
 

@@ -39,6 +39,15 @@ tests/conformance/bat_get_bat_step.pas       BAT_$GET_BAT_STEP  --section-addr .
 tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .bss.moddata.FIM_=0xE2126C
 tests/conformance/audit_is_process_audited.pas  AUDIT_$IS_PROCESS_AUDITED  --section-addr .bss.moddata.AUDIT=0xE854D8
 
+# Status out-parameters (codegen-patterns 9): `status.all := ...' through
+# the status slot; by-address slots used once each in a register no
+# earlier statement left a value in (12.4 R4(b): A0, A1, A2 at 0xE70AC0..
+# 0xE70AD0; A1 after the dead A0 at 0xE18FF4); a function body of a
+# status store and a constant result (0xE1A9C6, 0xE70AE2).
+tests/conformance/iic.pas                    IIC_$ACQUIRE IIC_$RELEASE IIC_$STATISTICS IIC_$SELF_TEST IIC_$SEND IIC_$EXISTS IIC_$RECEIVE IIC_$RECEIVE_CHECK
+tests/conformance/xns_idp_get_stats.pas      XNS_IDP_$GET_STATS  --section-addr .bss.moddata.XNS_IDP=0xE2B314
+tests/conformance/io_alloc.pas               IO_$ALLOC
+
 # Harness fixtures.
 
 tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK

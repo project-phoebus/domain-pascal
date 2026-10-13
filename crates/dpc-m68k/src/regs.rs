@@ -49,10 +49,12 @@
 //! survey).  Known misses of this order: parameters held across calls
 //! take D3/A3 in the image while later temporaries take D2/A2 (module-local
 //! 0xE01C52; AST_$ASSOC 0xE0445C); R4 (registers held longer than
-//! liveness: to the end of the statement, for by-address slots read once)
-//! and R5 (function results) are not modelled, except R4(c) for a value
-//! that a call's arguments read last, which the selector passes in as
-//! `holds` (PROC1_$SET_ASID 0xE148FE D2; `crate::isel`).
+//! liveness: to the end of the statement) and R5 (function results) are
+//! not modelled, except R4(c) for a value that a call's arguments read
+//! last, which the selector passes in as `holds` (PROC1_$SET_ASID
+//! 0xE148FE D2; `crate::isel`), and R4(b) for by-address slots read once,
+//! which the selector keeps apart from the values of earlier statements
+//! ([`allocate_apart`]; IIC_$RECEIVE 0xE70AC0..0xE70AD0).
 //!
 //! The callee-saved registers the assignment uses are what the prologue
 //! saves ([`crate::frame::Frame`]), with A5 when the body loads it.
@@ -489,6 +491,20 @@ pub fn allocate(
     exit: &[Reg],
     holds: &[(usize, Reg)],
 ) -> Result<RegSet, String> {
+    allocate_apart(insns, exit, holds, &[])
+}
+
+/// [`allocate`], with each pair of `apart` kept in different registers
+/// although their live ranges need not overlap (12.4 R4(b): a by-address
+/// slot loaded for one use does not take the register of a value an
+/// earlier statement left in it, IIC_$RECEIVE 0xE70AC0..0xE70AD0;
+/// [`crate::isel`]).
+pub fn allocate_apart(
+    insns: &mut [Insn],
+    exit: &[Reg],
+    holds: &[(usize, Reg)],
+    apart: &[(Reg, Reg)],
+) -> Result<RegSet, String> {
     let live_out = liveness(insns, exit, holds);
     // Interference edges: a definition against what is live after it
     // (Chaitin), and against the register operands of its own instruction
@@ -500,6 +516,9 @@ pub fn allocate(
             adj.entry(RegKey(b)).or_default().insert(RegKey(a));
         }
     };
+    for &(a, b) in apart {
+        edge(a, b);
+    }
     // Virtual registers in the order of their first definition.
     let mut order: Vec<Reg> = Vec::new();
     for (i, insn) in insns.iter().enumerate() {
@@ -748,6 +767,42 @@ mod tests {
                 "movea.l\t(0xc,%fp),%a0"
             ]
         );
+    }
+
+    /// IIC_$RECEIVE 0xE70AC0..0xE70AD0: values kept apart (12.4 R4(b)) take
+    /// new registers although the earlier ones are dead, A2 included.
+    #[test]
+    fn values_kept_apart() {
+        let clr = |a: Reg| Insn::Clr {
+            size: Size::W,
+            dst: Ea::Ind(an(a)),
+        };
+        let body = vec![
+            load(0x1c, va(0)),
+            clr(va(0)),
+            load(0x18, va(1)),
+            clr(va(1)),
+            load(0x10, va(2)),
+            clr(va(2)),
+        ];
+        let mut plain = body.clone();
+        allocate(&mut plain, &[], &[]).unwrap();
+        assert!(text(&plain).iter().all(|l| !l.contains("%a1")));
+        let mut insns = body;
+        let apart = [(va(1), va(0)), (va(2), va(0)), (va(2), va(1))];
+        let saves = allocate_apart(&mut insns, &[], &[], &apart).unwrap();
+        assert_eq!(
+            text(&insns),
+            [
+                "movea.l\t(0x1c,%fp),%a0",
+                "clr.w\t(%a0)",
+                "movea.l\t(0x18,%fp),%a1",
+                "clr.w\t(%a1)",
+                "movea.l\t(0x10,%fp),%a2",
+                "clr.w\t(%a2)",
+            ]
+        );
+        assert!(saves.contains(a(2)));
     }
 
     /// 0xE17778: a parameter's register is reused after its last use, and
