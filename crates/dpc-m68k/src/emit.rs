@@ -202,6 +202,9 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
              \t.set\t{FRAGMENT_ORIGIN_SYMBOL},0x{origin:x}\n"
         ));
     }
+    // Cell labels are numbered across the code sections: each section has
+    // its own cells, but all share the one assembly file.
+    let mut pool_labels = 0;
     for sec in sections {
         out.push('\n');
         out.push_str(&section_directive(sec));
@@ -217,6 +220,12 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         let mut routines = Vec::new();
         let mut failed = false;
         let mut last_aligns = true;
+        // The section's constant pool: cells placed so far and the next
+        // label number (`Pool::place`).
+        let mut pool = Pool {
+            next: pool_labels,
+            ..Default::default()
+        };
         for (f, &al) in module
             .functions
             .iter()
@@ -251,6 +260,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                     if !al {
                         i.retain(|i| !matches!(i, Insn::Align4));
                     }
+                    pool.place(&mut i, al);
                     routines.push((f, i))
                 }
                 Err(d) => {
@@ -271,9 +281,12 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                 (n.clone(), *a as i64 - o as i64)
             })
             .collect();
+        pool_labels = pool.next;
         if !failed {
             if let Err(d) = size_branches(&mut routines, base, &outside) {
                 errors.push(d);
+            } else {
+                encode_outside_short_calls(&mut routines, base, &outside);
             }
         }
         for (f, insns) in routines {
@@ -282,7 +295,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             }
             out.push_str(&format!("{}:\n", f.symbol));
             for i in insns {
-                if !matches!(i, Insn::Label(_)) {
+                if !matches!(i, Insn::Label(_) | Insn::PoolLabel(_)) {
                     out.push('\t');
                 }
                 out.push_str(&i.to_string());
@@ -312,6 +325,133 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         Ok(out)
     } else {
         Err(errors)
+    }
+}
+
+/// Write each `bsr.s` to a routine outside the fragment
+/// ([`Options::module_routines`]) as its encoding, `.short 0x61dd`: gas
+/// cannot relocate an 8-bit displacement to a symbol it does not define
+/// ("value too large for field of 1 byte").  The original's `bsr.s` to
+/// the next routine (MST_$REMAP 0xE439FC `610e` to MST_$REMAP_PRIVI
+/// 0xE43A0C) then links as the original.  `base` and `outside` as for
+/// [`size_branches`], whose sizes this keeps.
+fn encode_outside_short_calls(
+    routines: &mut [(&dpc_ir::Function, Vec<Insn>)],
+    base: u32,
+    outside: &[(String, i64)],
+) {
+    let mut pos = base;
+    for (_, insns) in routines.iter_mut() {
+        for i in insns.iter_mut() {
+            let n = i.len_at(pos);
+            if let Insn::Bsr {
+                target,
+                short: true,
+            } = i
+            {
+                if let Some((_, t)) = outside.iter().find(|(o, _)| o.eq_ignore_ascii_case(target)) {
+                    let disp = t - (pos as i64 + 2);
+                    *i = Insn::Encoded {
+                        words: vec![0x6100 | (disp as u8 as u16)],
+                        text: format!("bsr.s {target}"),
+                    };
+                }
+            }
+            pos += n;
+        }
+    }
+}
+
+/// The constant pool of one code section (codegen-patterns 1.5,
+/// "Constant by address"; `tools/pcsurvey.py`): the cells placed so far,
+/// by their constant, and the next label number.
+#[derive(Default)]
+struct Pool {
+    cells: std::collections::HashMap<dpc_ir::PoolConst, u32>,
+    next: u32,
+}
+
+impl Pool {
+    /// Resolve the constant operands of one routine's instructions
+    /// (`Ea::Pool`, from the selector) to cell labels, and append after
+    /// the routine the cells it is the first to use.
+    ///
+    /// The layout follows the survey of compiled code 0xE00800..0xE88834
+    /// (`tools/pcsurvey.py`, codegen-patterns 1.5 and 11):
+    ///
+    /// - A cell sits right after the code of the routine that uses it
+    ///   first: 733 of the 1038 `(d,PC)` sites naming a constant address a
+    ///   cell after their own routine's code, before the next routine; the
+    ///   other 305 one after an earlier routine, none a later one.  So the
+    ///   last routine's cells come before the module-end padding (OS_TERM
+    ///   0xE1AB26, TERM_$INIT 0xE3321E `0002 0001 2048`).
+    /// - A later routine names the earlier cell of an equal constant
+    ///   (SMD_$INVERT_S 0xE6DDE4 naming SMD_$ASSOC's cell 0xE6D92C).  Equal
+    ///   means equal bytes and type ([`dpc_ir::PoolConst::key`]);
+    ///   Uncertain: 25 cells repeat an earlier one's bytes (MST_$REMAP
+    ///   0xE43A0A and MST_$SET_TOUCH_AHEAD_CNT 0xE4472C, both `0000`),
+    ///   which a difference of type would explain.
+    /// - A routine's new cells form two groups, cells whose size is 2 mod
+    ///   4 first, then those of a multiple of 4; in each, the cell used
+    ///   first comes first and the others follow in reverse order of first
+    ///   use (TIMER_$INIT 0xE1639C: used in the order 9C, A4, A2, A0, 9E,
+    ///   laid out 9C, 9E, A0, A2, A4).  All 110 routines with two or more
+    ///   new cells fit (157 have one).
+    /// - In a routine that aligns its loop heads, the second group starts
+    ///   4-aligned, after a `0x2048` filler when needed (LOG_$SHUTDN
+    ///   0xE17606; 45 fillers, none in a routine the loop survey classes
+    ///   non-aligning); in one that does not, it is not aligned
+    ///   (ACL_$SET_ACL_CHECK 0xE4787A; 13 of the 15 cells at 2 mod 4 are
+    ///   in routines classed non-aligning, one in an unclassed one, one,
+    ///   0xE74A6A, in the routine at 0xE743CE (in PROC2_$DELETE's map
+    ///   extent), the last of its module, which ends with a zero-word
+    ///   pad as non-aligning code does).
+    fn place(&mut self, insns: &mut Vec<Insn>, aligns: bool) {
+        let mut new: Vec<(dpc_ir::PoolConst, u32)> = Vec::new();
+        for i in insns.iter_mut() {
+            let ea = match i {
+                Insn::Pea(ea) | Insn::Lea { src: ea, .. } => ea,
+                Insn::Move { src, .. } | Insn::Movea { src, .. } => src,
+                _ => continue,
+            };
+            let crate::insn::Ea::Pool(c) = ea else {
+                continue;
+            };
+            let n = match self.cells.get(c) {
+                Some(&n) => n,
+                None => {
+                    let n = self.next;
+                    self.next += 1;
+                    self.cells.insert(c.clone(), n);
+                    new.push((c.clone(), n));
+                    n
+                }
+            };
+            *ea = crate::insn::Ea::PoolLabel(n);
+        }
+        let (two, four): (Vec<_>, Vec<_>) =
+            new.into_iter().partition(|(c, _)| c.bytes.len() % 4 != 0);
+        for (g, group) in [two, four].into_iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            if g == 1 && aligns {
+                insns.push(Insn::Align4);
+            }
+            // The first used first, the others in reverse order of use.
+            let mut rest = group;
+            let first = rest.remove(0);
+            rest.reverse();
+            for (c, n) in std::iter::once(first).chain(rest) {
+                insns.push(Insn::PoolLabel(n));
+                insns.push(Insn::Words(
+                    c.bytes
+                        .chunks(2)
+                        .map(|w| u16::from_be_bytes([w[0], w[1]]))
+                        .collect(),
+                ));
+            }
+        }
     }
 }
 
@@ -914,6 +1054,177 @@ mod tests {
     /// `--module-routine`: a call of a routine of the module outside the
     /// fragment is a `bsr`, sized from its address (DISK_$UNASSIGN_ALL
     /// 0xE6BE34 `bsr.w` back 0x8E bytes to DISK_$UNASSIGN 0xE6BDA8).
+    /// The constant pool (codegen-patterns 1.5): a routine's new cells
+    /// after its code, those of 2 mod 4 bytes first, then the others
+    /// (4-aligned with the filler in an aligning routine); in each group
+    /// the first used first, the rest in reverse order of use (TIMER_$INIT
+    /// 0xE1639C); cells already placed are named again, not repeated.
+    #[test]
+    fn pool_cells_after_the_routine() {
+        use crate::insn::Ea;
+        use dpc_ir::PoolConst;
+        let w = |v: u8| PoolConst {
+            bytes: vec![0, v],
+            key: 1,
+        };
+        let l = |v: u8| PoolConst {
+            bytes: vec![0, 0, 0, v],
+            key: 2,
+        };
+        let pea = |c: PoolConst| Insn::Pea(Ea::Pool(c));
+        let mut pool = Pool::default();
+        let mut a = vec![
+            pea(w(1)),
+            pea(l(9)),
+            pea(w(2)),
+            pea(w(3)),
+            pea(w(1)),
+            Insn::Rts,
+        ];
+        pool.place(&mut a, true);
+        let text: Vec<String> = a.iter().map(|i| i.to_string()).collect();
+        assert_eq!(
+            text,
+            [
+                "pea\t(.Lc0,%pc)",
+                "pea\t(.Lc1,%pc)",
+                "pea\t(.Lc2,%pc)",
+                "pea\t(.Lc3,%pc)",
+                "pea\t(.Lc0,%pc)",
+                "rts",
+                ".Lc0:",
+                ".short\t0x0001",
+                ".Lc3:",
+                ".short\t0x0003",
+                ".Lc2:",
+                ".short\t0x0002",
+                ".balignw\t4,0x2048",
+                ".Lc1:",
+                ".short\t0x0000,0x0009",
+            ]
+        );
+        // a later routine: the placed cells by label, a new one (same
+        // bytes, another type) after it; no filler when not aligning
+        let mut b = vec![
+            pea(w(2)),
+            pea(PoolConst {
+                bytes: vec![0, 2],
+                key: 7,
+            }),
+            pea(l(4)),
+            Insn::Rts,
+        ];
+        pool.place(&mut b, false);
+        let text: Vec<String> = b.iter().map(|i| i.to_string()).collect();
+        assert_eq!(
+            text,
+            [
+                "pea\t(.Lc2,%pc)",
+                "pea\t(.Lc4,%pc)",
+                "pea\t(.Lc5,%pc)",
+                "rts",
+                ".Lc4:",
+                ".short\t0x0002",
+                ".Lc5:",
+                ".short\t0x0000,0x0004",
+            ]
+        );
+    }
+
+    /// Branch sizes see the cells: a `bsr` over a routine with a pool.
+    #[test]
+    fn branch_sizes_count_pool_cells() {
+        use dpc_ir::{Addr, Arg, Call, Callee, PoolConst, Stmt, StmtKind};
+        // P calls R over Q; Q: n calls with a constant, then its cell.
+        let q0 = one_routine(".text", "Q");
+        let span = q0.span;
+        let call = |c: PoolConst| Stmt {
+            kind: StmtKind::Call(Call {
+                callee: Callee::External("X".into()),
+                args: vec![Arg::Address {
+                    addr: Addr::Const(c),
+                    slot: 4,
+                    writable: false,
+                }],
+                pad: 0,
+                link: None,
+            }),
+            span,
+        };
+        let mut p = one_routine(".text", "P");
+        p.body = vec![Stmt {
+            kind: StmtKind::Call(Call {
+                callee: Callee::Local("R".into()),
+                args: vec![],
+                pad: 0,
+                link: None,
+            }),
+            span,
+        }];
+        let r = one_routine(".text", "R");
+        let module = |n: usize, cell: usize| {
+            let mut q = q0.clone();
+            q.body = (0..n)
+                .map(|_| {
+                    call(PoolConst {
+                        bytes: vec![0; cell],
+                        key: 0,
+                    })
+                })
+                .collect();
+            Module {
+                name: "M".into(),
+                functions: vec![p.clone(), q, r.clone()],
+                ..Default::default()
+            }
+        };
+        // P: link, `bsr` at 4, unlk, rts; Q at 10: link, 9 calls of 12
+        // bytes less the last pop, unlk, rts, the cell; R at 124 + cell.
+        let reach = |s: &str| s.lines().find(|l| l.contains("bsr")).unwrap().to_string();
+        let s = emit(&module(9, 2), "m.pas", &Options::default()).unwrap();
+        let short = reach(&s);
+        let s = emit(&module(9, 16), "m.pas", &Options::default()).unwrap();
+        let long = reach(&s);
+        assert!(short.contains("bsr.s"), "{short}");
+        assert!(long.contains("bsr.w"), "{long}");
+    }
+
+    /// Each code section has its own cells, but their labels are numbered
+    /// across the file: two sections' cells never share a label.
+    #[test]
+    fn pool_labels_unique_across_sections() {
+        use dpc_ir::{Addr, Arg, Call, Callee, PoolConst, Stmt, StmtKind};
+        let with_const = |section: &str, symbol: &str| {
+            let mut f = one_routine(section, symbol);
+            let span = f.span;
+            f.body = vec![Stmt {
+                kind: StmtKind::Call(Call {
+                    callee: Callee::External("X".into()),
+                    args: vec![Arg::Address {
+                        addr: Addr::Const(PoolConst {
+                            bytes: vec![0, 1],
+                            key: 0,
+                        }),
+                        slot: 4,
+                        writable: false,
+                    }],
+                    pad: 0,
+                    link: None,
+                }),
+                span,
+            }];
+            f
+        };
+        let m = Module {
+            name: "M".into(),
+            functions: vec![with_const(".text", "P"), with_const("OTHER", "Q")],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        assert_eq!(s.matches(".Lc0:").count(), 1, "{s}");
+        assert_eq!(s.matches(".Lc1:").count(), 1, "{s}");
+    }
+
     #[test]
     fn calls_of_module_routines_outside_a_fragment() {
         use dpc_ir::{Call, Callee, Stmt, StmtKind};
@@ -938,9 +1249,12 @@ mod tests {
             module_routines: vec![("Q".into(), at)],
             ..Default::default()
         };
-        // P: link at 0x1000, the calls at 0x1004 and 0x1006 (short).
+        // P: link at 0x1000, the calls at 0x1004 and 0x1006 (short),
+        // written as their encodings: gas cannot relocate an 8-bit
+        // displacement to a symbol it does not define.
+        let shorts = ".short\t0x617a\t| bsr.s Q\n\t.short\t0x6178\t| bsr.s Q\n";
         let s = emit(&m, "m.pas", &frag(0x1080)).unwrap();
-        assert!(s.contains("\tbsr.s\tQ\n\tbsr.s\tQ\n"), "{s}");
+        assert!(s.contains(shorts), "{s}");
         // 0x1100 is out of `.s` reach from 0x1004.
         let s = emit(&m, "m.pas", &frag(0x1100)).unwrap();
         assert!(s.contains("\tbsr.w\tQ\n\tbsr.w\tQ\n"), "{s}");
@@ -948,7 +1262,7 @@ mod tests {
         let mut lower = frag(0x1080);
         lower.module_routines[0].0 = "q".into();
         let s = emit(&m, "m.pas", &lower).unwrap();
-        assert!(s.contains("\tbsr.s\tQ\n\tbsr.s\tQ\n"), "{s}");
+        assert!(s.contains(shorts), "{s}");
         // without the option: `jsr`
         let s = emit(&m, "m.pas", &Options::default()).unwrap();
         assert!(s.contains("\tjsr\t(Q).l\n"), "{s}");

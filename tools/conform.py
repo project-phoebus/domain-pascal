@@ -392,7 +392,11 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     if unknown:
         raise SetupError('%s: external symbol(s) not in the SAU2 map: %s'
                          % (src, ', '.join(unknown)))
-    unused = sorted(set(local_syms) - set(undefined))
+    # dpc writes a `bsr.s' to a routine outside a fragment as its encoding
+    # (`.short 0x61dd | bsr.s NAME', dpc-m68k emit.rs): gas cannot relocate
+    # an 8-bit displacement to an undefined symbol.  Such a call names its
+    # routine only in the comment, and the byte comparison checks it.
+    unused = sorted(set(local_syms) - set(undefined) - encoded_calls(src))
     if unused:
         raise SetupError('%s: module-local symbol(s) given but not referenced: %s'
                          % (src, ', '.join(unused)))
@@ -612,6 +616,16 @@ def a5_args(tokens):
             raise SetupError('%s: names one routine' % t)
         out.append('--' + t)
     return out
+
+
+_ENCODED_BSR = re.compile(r'^\s*\.short\s+0x61[0-9a-fA-F]{2}\s*\|\s*bsr\.s\s+(\S+)\s*$')
+
+
+def encoded_calls(src):
+    """The routines that `src' (assembly) calls with a `bsr.s' written as
+    its encoding, `.short 0x61dd | bsr.s NAME'."""
+    with open(src) as f:
+        return {m.group(1) for m in map(_ENCODED_BSR.match, f) if m}
 
 
 MODULE_ROUTINES_TOKEN = 'module-routines='

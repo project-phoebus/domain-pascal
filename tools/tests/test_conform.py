@@ -431,12 +431,14 @@ class ConformTest(unittest.TestCase):
     @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
     def test_manifest_forwards_unnamed_module_routines(self):
         unit = ('tests/conformance/mst_maps.pas  MST_$MAP MST_$MAP_TOP MST_$MAP_GLOBAL '
-                'MST_$MAPS  --section-addr .bss.moddata.MST_=0xE7CF0C  '
-                'a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS')
-        rc, out = self.manifest('mr_local_on.txt', unit + '  module-routines=ALLOC_SEGS=0xE43182')
+                'MST_$MAPS MST_$REMAP  --section-addr .bss.moddata.MST_=0xE7CF0C  '
+                'a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS,MST_$REMAP')
+        rc, out = self.manifest('mr_local_on.txt', unit + '  module-routines=ALLOC_SEGS=0xE43182,'
+                                'MST_$REMAP_PRIVI')
         self.assertEqual(rc, 0, out)
         # the address is checked through the `bsr' displacement
-        rc, out = self.manifest('mr_local_bad.txt', unit + '  module-routines=ALLOC_SEGS=0xE43184')
+        rc, out = self.manifest('mr_local_bad.txt', unit + '  module-routines=ALLOC_SEGS=0xE43184,'
+                                'MST_$REMAP_PRIVI')
         self.assertEqual(rc, 1, out)
         self.assertIn('ALLOC_SEGS', out)
         # without it, dpc rejects the call of an `internal' routine with
@@ -480,6 +482,24 @@ class LoopAlignArgsTest(unittest.TestCase):
                     ['loop-align=on', 'loop-align=off']):
             with self.assertRaises(conform.SetupError):
                 conform.loop_align_args(bad)
+
+
+class EncodedCallsTest(unittest.TestCase):
+    def test_encoded_bsr_s(self):
+        # dpc writes a `bsr.s' to a routine outside a fragment as its
+        # encoding (emit.rs); the routine is then named only in the comment
+        import tempfile
+        tmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tmp')
+        os.makedirs(tmp, exist_ok=True)
+        with tempfile.NamedTemporaryFile('w', suffix='.s', dir=tmp, delete=False) as f:
+            f.write('\tpea\t(-4,%fp)\n'
+                    '\t.short\t0x6186\t| bsr.s STATUS_CONVERT\n'
+                    '\t.short\t0x0000\n'
+                    '\tbsr.s\tOTHER\n')
+        try:
+            self.assertEqual(conform.encoded_calls(f.name), {'STATUS_CONVERT'})
+        finally:
+            os.unlink(f.name)
 
 
 if __name__ == '__main__':

@@ -19,8 +19,8 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
-    ForLoop, Function, LinkArg, Module, Nesting, Rel, ResultClass, ResultSpec, Scalar, Sign,
-    StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    ForLoop, Function, LinkArg, Module, Nesting, PoolConst, Rel, ResultClass, ResultSpec, Scalar,
+    Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -365,7 +365,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
     fn addr(a: &Addr, size: u32, out: &mut Vec<(i32, u32)>) {
         match a {
             Addr::Enclosing(o) => out.push((*o, size)),
-            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
             Addr::Indirect { base, .. } => expr(base, out),
             Addr::Index { base, index, .. } => {
                 addr(base, 1, out);
@@ -396,7 +396,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
     fn call(c: &Call, out: &mut Vec<(i32, u32)>) {
         for a in &c.args {
             match a {
-                Arg::Value { value, .. } => expr(value, out),
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, out),
                 Arg::Address { addr: a, .. } => addr(a, 1, out),
             }
         }
@@ -493,7 +493,11 @@ fn overlaps(objs: &[(i32, u32)], o: i32, size: u32) -> bool {
 fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     fn addr(a: &mut Addr, f: &mut dyn FnMut(&mut Call)) {
         match a {
-            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Frame(_)
+            | Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => {}
             Addr::Indirect { base, .. } => expr(base, f),
             Addr::Index { base, index, .. } => {
                 addr(base, f);
@@ -523,7 +527,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     fn call(c: &mut Call, f: &mut dyn FnMut(&mut Call)) {
         for a in &mut c.args {
             match a {
-                Arg::Value { value, .. } => expr(value, f),
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, f),
                 Arg::Address { addr: a, .. } => addr(a, f),
             }
         }
@@ -612,6 +616,95 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     }
 }
 
+/// Give every expression passed by address ([`Arg::Temp`]) its frame
+/// temporary, and return the frame size with them (`frame` without).
+///
+/// The temporaries lie below every other frame object ("locals, result,
+/// then temporaries", codegen-patterns 2: TONE_$ENABLE 0xE1ACE8 `link
+/// #-8`, its status local at -4 and the temporary at -8).  A call's
+/// temporaries are allocated in push order, downward (SIO_$INIT
+/// 0xE32C28/0xE32C42 `-8` then `-12`; PCHIST_$CNTL 0xE5CF0A/0xE5CF16
+/// `-40` then `-44`), each word aligned, a longword longword aligned (the
+/// frame alignment rule, codegen-patterns 2); calls reuse the same
+/// slots (GET_BUILD_TIME 0xE38052: `(-6,A6)` for five calls;
+/// `tools/pcsurvey.py temps`).  The temporaries of a call made inside
+/// another call's arguments go below the outer call's.  Uncertain: where
+/// temporaries go when the frame has a gap; whether a call nested in the
+/// arguments reuses the outer call's slots.
+fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
+    fn call(c: &mut Call, mut size: u32, max: &mut u32) {
+        for a in c.args.iter_mut().rev() {
+            if let Arg::Temp { value, offset, .. } = a {
+                let n = value.ty().bytes();
+                let align = if n >= 4 { 4 } else { 2 };
+                size = (size + n).div_ceil(align) * align;
+                *offset = -(size as i32);
+                *max = (*max).max(size);
+            }
+        }
+        for a in c.args.iter_mut() {
+            match a {
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, size, max),
+                Arg::Address { addr: a, .. } => addr(a, size, max),
+            }
+        }
+    }
+    fn addr(a: &mut Addr, size: u32, max: &mut u32) {
+        match a {
+            Addr::Indirect { base, .. } => expr(base, size, max),
+            Addr::Index { base, index, .. } => {
+                addr(base, size, max);
+                expr(index, size, max);
+            }
+            Addr::Frame(_)
+            | Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => {}
+        }
+    }
+    fn expr(e: &mut Expr, size: u32, max: &mut u32) {
+        match e {
+            Expr::Const { .. } => {}
+            Expr::Load { addr: a, .. } | Expr::AddrOf(a) => addr(a, size, max),
+            Expr::SetMember {
+                elem: x, set: y, ..
+            }
+            | Expr::Binary { lhs: x, rhs: y, .. } => {
+                expr(x, size, max);
+                expr(y, size, max);
+            }
+            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+                expr(x, size, max)
+            }
+            Expr::Call { call: c, .. } => call(c, size, max),
+            Expr::Test(c) => cond(c, size, max),
+        }
+    }
+    fn cond(c: &mut Cond, size: u32, max: &mut u32) {
+        match c {
+            Cond::Compare { lhs, rhs, .. } => {
+                expr(lhs, size, max);
+                expr(rhs, size, max);
+            }
+            Cond::Test(e) => expr(e, size, max),
+            Cond::Not(x) => cond(x, size, max),
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                cond(a, size, max);
+                cond(b, size, max);
+            }
+        }
+    }
+    let mut max = frame;
+    for s in body.iter_mut() {
+        // `stmt_calls_mut` visits a call nested in another's arguments
+        // before the outer one, which then places it again, below its own
+        // temporaries: the last placement stands.
+        stmt_calls_mut(s, &mut |c| call(c, frame, &mut max));
+    }
+    max
+}
+
 /// Lower one routine.  `uplevel`: the objects of its frame that its nested
 /// routines reach ([`Function::uplevel_refs`]).
 fn lower_routine(
@@ -658,7 +751,7 @@ fn lower_routine(
     };
     // A function whose result type was just reported is not lowered
     // further: its result assignment would only repeat that error.
-    let body = if r.result.is_some() && result.is_none() {
+    let mut body = if r.result.is_some() && result.is_none() {
         Vec::new()
     } else {
         match lower_body(p, id, r, result, uplevel) {
@@ -669,6 +762,7 @@ fn lower_routine(
             }
         }
     };
+    let frame_size = assign_temps(&mut body, r.frame_size);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -676,7 +770,7 @@ fn lower_routine(
         symbol: r.symbol.clone(),
         global: r.global,
         code_section: r.code_section.clone(),
-        frame_size: r.frame_size,
+        frame_size,
         result,
         result_slot: r.result.as_ref().and_then(|res| res.var).and_then(|v| {
             match p.var(v).storage {
@@ -1049,7 +1143,7 @@ fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
 fn call_arg_calls<'a>(c: &'a Call, out: &mut Vec<&'a Call>) {
     for a in &c.args {
         match a {
-            Arg::Value { value, .. } => expr_calls(value, out),
+            Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_calls(value, out),
             Arg::Address { addr, .. } => addr_calls(addr, out),
         }
     }
@@ -1095,7 +1189,11 @@ fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
 
 fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
     match a {
-        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Frame(_)
+        | Addr::Enclosing(_)
+        | Addr::Static(_)
+        | Addr::Symbol { .. }
+        | Addr::Const(_) => {}
         Addr::Indirect { base, .. } => expr_calls(base, out),
         Addr::Index { base, index, .. } => {
             addr_calls(base, out);
@@ -1157,7 +1255,7 @@ fn cond_uses_static(c: &Cond) -> bool {
 
 fn call_uses_static(c: &Call) -> bool {
     c.args.iter().any(|a| match a {
-        Arg::Value { value, .. } => expr_uses_static(value),
+        Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_uses_static(value),
         Arg::Address { addr, .. } => addr_uses_static(addr),
     })
 }
@@ -1179,7 +1277,7 @@ fn expr_uses_static(e: &Expr) -> bool {
 fn addr_uses_static(a: &Addr) -> bool {
     match a {
         Addr::Static(_) => true,
-        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Symbol { .. } => false,
+        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Symbol { .. } | Addr::Const(_) => false,
         Addr::Indirect { base, .. } => expr_uses_static(base),
         Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
     }
@@ -1378,9 +1476,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         fn addr(&self, a: &Addr, size: u32) -> Res<()> {
             match a {
                 Addr::Frame(o) if self.hit(*o, size) => Err(self.bad()),
-                Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {
-                    Ok(())
-                }
+                Addr::Frame(_)
+                | Addr::Enclosing(_)
+                | Addr::Static(_)
+                | Addr::Symbol { .. }
+                | Addr::Const(_) => Ok(()),
                 // The whole object is reached through the base.
                 Addr::Indirect { base, .. } => self.expr(base),
                 Addr::Index { base, index, .. } => {
@@ -1416,7 +1516,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         fn call(&self, c: &Call) -> Res<()> {
             for a in &c.args {
                 match a {
-                    Arg::Value { value, .. } => self.expr(value)?,
+                    Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value)?,
                     Arg::Address { addr, .. } => self.addr(addr, 1)?,
                 }
             }
@@ -2270,6 +2370,35 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
 /// 0xFF for true, read as the signed byte -1 (ref 3.5.3, p. 3-11: "The
 /// system sets all eight bits to 1 for true and sets all eight bits to 0
 /// for false").
+/// The code-section cell of constant `v` passed by address as type `ty`
+/// (codegen-patterns 1.5): the value big-endian in the type's size, a
+/// byte in the high byte of a word (`ff00` for `true`: 17 sites name an
+/// earlier `ff00` cell, e.g. PROC2_$COMPLETE_VFORK's 0xE735F0; ref 3.5.3
+/// p. 3-11).  Scalars of 1, 2 or 4 bytes only; strings, sets, records and
+/// `nil` are not supported yet.
+fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
+    let size = p.types.size(ty);
+    let width = match Width::of_size(size) {
+        Some(w) if v.ordinal().is_some() => w,
+        _ => {
+            return Err(unsupported(
+                span,
+                format!("a constant of {size} bytes or of this kind passed by address is"),
+            ))
+        }
+    };
+    let Expr::Const { value, .. } = const_of(v, Scalar::signed(width), span)? else {
+        unreachable!("const_of gives a constant")
+    };
+    let be = (value as i32).to_be_bytes();
+    let bytes = match width {
+        Width::Byte => vec![be[3], 0],
+        Width::Word => be[2..].to_vec(),
+        Width::Long => be.to_vec(),
+    };
+    Ok(PoolConst { bytes, key: ty.0 })
+}
+
 fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     let value = match v {
         ConstValue::Bool(b) => -(*b as i64),
@@ -2861,10 +2990,12 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 /// - The arguments, in parameter order, each with its parameter's
 ///   convention from `dpc-sema` (ref 5.2 Table 5-1): by value, the value
 ///   at the parameter's width (a constant takes the parameter's type);
-///   by address, the address of a designator.  A non-designator by
-///   address (a constant pooled in the code section, `pea (d,PC)`, or an
-///   expression stored to a frame temporary; codegen-patterns 1.5) is not
-///   supported yet.
+///   by address, the address of a designator; a constant by address is
+///   its cell in the code section ([`Addr::Const`], `pea (d,PC)`), an
+///   expression by address its frame temporary ([`Arg::Temp`]):
+///   codegen-patterns 1.5 (TERM_$SEND_KBD_STRING 0xE1AB0C, TONE_$ENABLE
+///   0xE1ACFC).  A variable of another size than its value or `in`
+///   parameter (a converted copy) is not supported yet.
 /// - The pad: the callee's `arg_pad` (codegen-patterns 1.4).  A
 ///   `variable` routine called with fewer arguments (ref 5.5.5) is not
 ///   supported yet: its pad and slots are not catalogued.
@@ -2929,11 +3060,50 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                          converted copy, codegen-patterns 1.5) is",
                     ));
                 }
-                if a.needs_temp || !a.expr.is_designator() {
-                    return Err(unsupported(
-                        a.expr.span,
-                        "passing a constant or an expression by address (codegen-patterns 1.5) is",
-                    ));
+                if let Some(v) = &a.expr.value {
+                    // A constant: its cell in the code section (codegen-
+                    // patterns 1.5, "Constant by address"), holding the
+                    // value as the parameter's type (a `univ` one: as the
+                    // constant's own type).
+                    let ty = if prm.univ { a.expr.ty } else { prm.ty };
+                    args.push(Arg::Address {
+                        addr: Addr::Const(pool_const(p, v, ty, a.expr.span)?),
+                        slot,
+                        writable: false,
+                    });
+                    continue;
+                }
+                if !a.expr.is_designator() {
+                    // An expression: stored into a frame temporary, whose
+                    // address is passed (codegen-patterns 1.5, TONE_$ENABLE
+                    // 0xE1ACFC); the offset is assigned once the body is
+                    // lowered (`assign_temps`).
+                    let width = Width::of_size(p.types.size(prm.ty)).ok_or_else(|| {
+                        unsupported(
+                            a.expr.span,
+                            format!(
+                                "a {}-byte expression passed by address is",
+                                p.types.size(prm.ty)
+                            ),
+                        )
+                    })?;
+                    let value = value_of(p, &a.expr)?;
+                    if value.ty().width != width {
+                        return Err(unsupported(
+                            a.expr.span,
+                            format!(
+                                "passing a {}-byte expression by address to a {}-byte parameter is",
+                                value.ty().bytes(),
+                                width.bytes()
+                            ),
+                        ));
+                    }
+                    args.push(Arg::Temp {
+                        value,
+                        offset: 0,
+                        slot,
+                    });
+                    continue;
                 }
                 Arg::Address {
                     addr: addr_of(p, &a.expr)?,

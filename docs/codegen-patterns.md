@@ -269,18 +269,114 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   the forms above that are Verified; `addr(x)` (ref "Addr", p. 4-13) in
   `dpc-sema`.  Golden `tests/golden/data/through_worker.pas` (LOG_$READ's
   instruction sequence).
-- **Constant by address:** this is the default convention for a constant
-  actual.  The compiler puts the literal in the **code section** and passes
-  `pea (d,PC)`.
-  - TERM_$SEND_KBD_STRING 0xE1AB0C: `pea (0x18,PC)` → 0xE1AB26.
-  - The next instruction, `move.l (SP),-(SP)`, passes the **same** address
-    again for a second parameter.
-  - Pooled constants are shared between unrelated uses (Reported: NAME_$
-    0xE5472E word 0; see `name-dir-subsystems.md`, and the
-    `domain-pascal-codegen-conventions` owner memory note, OS_$INIT).
-- **Expression by address:** a non-variable actual passed by address is
-  first stored in a frame temporary, and that temporary's address is
-  pushed.  TONE_$ENABLE 0xE1ACFC: `lea (0x1268,A5),A0; move.l A0,(-8,A6); pea (-8,A6)`.
+- **Constant by address (Verified by survey; implemented; bead
+  domain-pascal-5aw.9).**  This is the default convention for a constant
+  actual (ref 5.2 Table 5-1: value and `in` parameters are passed by
+  address unless `val_param`/`internal`).  The compiler puts the constant
+  in a **cell in the code section** and passes `pea (d,PC)` (`487a dddd`).
+  Survey: `tools/pcsurvey.py` (compiled code 0xE00800..0xE88834, routines
+  split and followed as in `tools/a5survey.py`).
+  - **Forms.**  1047 `(d,PC)` operands outside `case` tables: 1025 `pea`,
+    22 `lea (d,PC),An` (13 + 6 + 2 + 1 for A3/A0/A1/A2: set constants
+    tested with `btst Dn,(0,An,Dm.w)`, OLD_DIR UNMAP_CASE 0xE54170, and
+    record copies, PROC1_$BIND 0xE14DAE; not implemented).  9 `pea`
+    name a routine's address, not a constant (DIR 0xE4C310 `pea` of the
+    routine at 0xE4C9E4: a procedure parameter).
+  - **Placement: after the routine that uses the constant first.**  Of
+    the 1038 constant sites, 733 name a cell right after their own
+    routine's code (before the next routine starts), 305 a cell after an
+    *earlier* routine's code, none a later one.  So the cells are laid
+    out per routine, in routine (emission) order, after the routine's
+    `rts`; the last routine's cells end the module's code and the
+    module-end padding follows them (TERM_$INIT 0xE3321E `0002 0001
+    2048`; MMAP_$RECLAIM 0xE0D9E6 `0006 000d 0000` in non-aligning code).
+    The four "final `0x0000` words" of section 7 that are cells (NET_IO
+    0xE0E8C2, OS_TERM 0xE1AB26, WIN_ 0xE303D6, DIR_SERVER 0xE5839E) are
+    such last cells.  A map routine's extent therefore includes its
+    cells (MST_$REMAP 0xE439D4, size 0x38 = 0x36 of code + the cell
+    0xE43A0A).
+  - **Sharing.**  A later routine names an earlier routine's cell for an
+    equal constant (305 sites; SMD_$INVERT_S 0xE6DDE4, SMD_$INQ_KBD_TYPE
+    0xE6E142 and ten more name SMD_$ASSOC's `0000` at 0xE6D92C; CRASH_SYSTEM
+    status cells, e.g. AST_ 0xE00EAC from five routines).  Sharing is
+    module-wide (no distance limit seen: DIR 0xE52F3E names a cell 0x7C02
+    bytes back).  But 25 cells repeat the bytes of an earlier cell of
+    their module: 11 inside one routine's own cells, all `0000`
+    (TONE_$TIME 0xE1735C/0xE1735E), 14 across routines (MST_$REMAP
+    0xE43A0A and MST_$SET_TOUCH_AHEAD_CNT 0xE4472C; SMD `0001` at
+    0xE6D92A and 0xE6DFF8, each named again by later routines).  A cell's
+    identity is therefore more than its bytes; the type of the constant is
+    the natural candidate (a word `0000` can be an `integer` 0, `false`
+    as a byte in its word, an enumeration's first value) but is
+    **Uncertain**.  `dpc` shares a cell when the bytes and the type agree
+    (the parameter's type, the constant's own for a `univ` parameter).
+  - **Order within a routine's new cells (Verified by survey: 110 of 110
+    routines with two or more; 157 have one).**  Two groups: cells whose
+    size is 2 mod 4 first, then cells of a multiple of 4.  In each group
+    the cell used first (in code order) comes first, then the others in
+    *reverse* order of first use.  TIMER_$INIT 0xE16340 uses five word
+    cells in the order 0xE1639C, A4, A2, A0, 9E and lays them out 9C, 9E,
+    A0, A2, A4; LOG_$SHUTDN 0xE17590 uses the longword 0 (0xE17608)
+    before the word 4 (0xE17604); DIR_$OLD_FIX_DIR 0xE56094 has three
+    words then three longwords, each group in this order.  Strings fall in
+    the group of their size (OS_$INIT 0xE347CA: 31 cells).  (A cell's
+    size is read off the spacing of the targets: `tools/pcsurvey.py
+    order`; one fit needs the last cell's size guessed.)
+  - **Alignment.**  A byte constant takes the high byte of a word (`ff00`,
+    17 sites naming an earlier `ff00` cell).  The second group (sizes a
+    multiple of 4) starts 4-aligned in routines that align their loop
+    heads (section 7), after a `0x2048` filler when needed: 45 fillers,
+    all in routines the loop survey classes aligning or cannot class
+    (LOG_$SHUTDN 0xE17606, PROC2_$QUIT 0xE3F15A, SYSBUS_$DEFINE_INT
+    0xE0ABCE); 102 such groups are 4-aligned by themselves.  15 start at
+    2 mod 4: 13 in routines classed non-aligning (ACL_$SET_ACL_CHECK
+    0xE4787A, the OLD_DIR and DIR ones), one unclassed (0xE13272), one
+    (0xE74A6A) in the routine at 0xE743CE, the last of PROC2, whose
+    module ends with the zero-word pad of non-aligning code.  So the
+    loop-alignment switch also governs the cells (`tools/pcsurvey.py
+    align`).
+  - **The same cell twice in a row** is pushed the second time with
+    `move.l (SP),-(SP)` (`2f17`): TERM_$SEND_KBD_STRING 0xE1AB0C `pea
+    (0x18,PC)`, 0xE1AB10 `move.l (SP),-(SP)`; all 33 `pea (d,PC)`
+    followed by an argument naming the same cell, none pushed with a
+    second `pea` (`tools/pcsurvey.py dups`).  Other addresses repeated
+    are pushed both ways (`pea (An)` twice ×10, `pea (d,A6)` then `move.l
+    (SP),-(SP)` ×7), not implemented.
+  - **Implemented** (`dpc-ir` `pool_const`, `Addr::Const`; `dpc-m68k`
+    `Selector::push`, `Selector::call`, `emit.rs` `Pool::place`):
+    scalar constants of 1, 2 or 4 bytes (integers, enumerations,
+    booleans, characters) by address; cells laid out as above, labels
+    `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
+    Not yet: strings, sets, records, `nil`; `lea (d,PC)`.  Conformance
+    units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
+    (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
+    `pchist_interrupt.pas`, `file_set_len.pas`, `asknode_info.pas`,
+    `proc2_quit.pas`; goldens `calls/const_pool`,
+    `calls/const_pool_noalign`.  A unit that is a fragment of a module
+    must not name a cell placed after a routine outside it (305 sites
+    do); such units are not supported by the harness.
+- **Expression by address (Verified at the sites; implemented).**  A
+  non-variable, non-constant actual passed by address is first stored in a
+  frame temporary, and that temporary's address is pushed, right where
+  the argument is pushed (after the arguments to its right).  TONE_$ENABLE
+  0xE1ACFC: `lea (0x1268,A5),A0; move.l A0,(-8,A6); pea (-8,A6)`.
+  - The temporaries lie below the other frame objects ("locals, result,
+    then temporaries", section 2; TONE_$ENABLE `link #-8`, status local
+    at -4).  Two in one call are allocated downward in push order and
+    use A0 then A1 for `addr`: SIO_$INIT 0xE32C28/0xE32C42 (-8 then
+    -12), PCHIST_$CNTL 0xE5CF06..0xE5CF1A (-40 in A0, then -44 in A1).
+  - Calls reuse the same slots: 80 routines store a value into a frame
+    slot and push its address right away (`move.<s> X,(d,A6); pea
+    (d,A6)`), 18 of them with one offset for two or more calls
+    (GET_BUILD_TIME 0xE38052: `(-6,A6)` for five calls; `tools/pcsurvey.py
+    temps`; some of these may be declared locals).
+  - **Implemented** (`dpc-ir` `Arg::Temp`, `assign_temps`; `dpc-m68k`
+    `Selector::push`): `addr(x)` of a frame or static object as `lea;
+    move.l An,(d,A6); pea (d,A6)`, other values computed and stored;
+    each word aligned, longwords longword aligned.  Uncertain: the
+    order of temporaries for a call nested in another call's arguments
+    (dpc puts them below the outer call's).  Conformance:
+    `tone_enable.pas`.
 - **Variable of another size by address:** an `integer32` variable for a
   value or `in` `integer` parameter (assignment compatible, ref 5.3.2)
   cannot be passed as its own address (the callee would read its high
@@ -360,6 +456,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
        frames" below);
     3. a function's **result variable**, below the locals (its place is
        Uncertain: sites both ways, see below);
+    4. the **temporaries** of expressions passed by address (section
+       1.5: TONE_$ENABLE 0xE1ACE8, the temporary at -8 below the status
+       at -4), shared by the calls of the routine (implemented, bead
+       domain-pascal-5aw.9);
 
     and the total is rounded up to 4.  Evidence (`tools/nestsurvey.py
     slots` and `frames`; routines split as in section 4, a *function*
@@ -1661,7 +1761,10 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
     - The end of a segment's code, 61 times: 0xE1A9D2 before OS_TERM
       0xE1A9D4, 0xE1AD16 before BITPAD 0xE1AD18.
     - 34 4-aligned constant cells after a routine's code
-      (MMAP_$AVAIL 0xE0CCB6, MMAP_$WIRE 0xE0CD16, PKT 0xE12D32).
+      (MMAP_$AVAIL 0xE0CCB6, MMAP_$WIRE 0xE0CD16, PKT 0xE12D32): the
+      filler before a routine's longword cells in aligning code
+      (section 1.5, "Alignment"; `tools/pcsurvey.py align` counts 45
+      such fillers, some of them after the routine's word cells).
     - 64 forward-only branch targets (see below).
     - 6 other instructions.  Some of them are labels reached only
       through a jump table (ASKNODE_$INTERNET_INFO 0xE649E6 before
@@ -1728,7 +1831,7 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
       last few routines have no loop to tell.
     - 4 of the 21 final `0x0000` words are not padding but a pooled
       word constant that the segment's code passes by address with
-      `pea (d,PC)` (section 1.5): NET_IO 0xE0E8C2 (from
+      `pea (d,PC)` (section 1.5, the cells after the last routine): NET_IO 0xE0E8C2 (from
       0xE0E848), OS_TERM 0xE1AB26 (0xE1AB0C), WIN_ 0xE303D6 (0xE30358,
       0xE303BE), DIR_SERVER 0xE5839E (0xE58374).  So NET_IO is not an
       exception; HINT_ still is (Verified: a scan of every routine of the
@@ -3049,9 +3152,14 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   (module heading section names are the likely candidate), and why
   `PROCEDURE$`/`DATA$` exist besides `.TEXT`/`.DATA`.  They may be another
   compiler's defaults or older defaults.
-- **Constants:** literals passed by address sit in the code section, next
-  to the routine (section 1.5).  Constant UIDs are 8-byte cells in the code
-  section (`UID_$NIL` 0xE1737C, … in `I E1737C UID_LIST`).
+- **Constants (Verified by survey; section 1.5):** constants passed by
+  address sit in the code section, in cells right after the code of the
+  routine that first uses them (`rts`, then the cells; 733 + 305 sites,
+  none naming a later routine's cell), so a map routine's extent
+  includes its cells and a module's last cells precede its end padding.
+  `UID_$NIL` (0xE1737C) and the other constant UIDs are not such cells:
+  they are 8-byte cells of a separate code segment, `I E1737C UID_LIST`,
+  named by absolute address (`move.l #UID_$NIL,-(SP)`, section 1.5).
 - **External names** keep `$` (`AST_$PAGE_ZERO`, `M$OIU$WLW`) and are
   upper-case in the map.  Domain Pascal is case-insensitive (ref 2.1.6), so
   the emitter must upper-case global symbols.  **Uncertain:** whether the

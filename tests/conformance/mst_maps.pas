@@ -1,8 +1,9 @@
-{ MST_$MAP, MST_$MAP_TOP, MST_$MAP_GLOBAL and MST_$MAPS,
-  0xE4386C..0xE439D4 (0x60 + 0x60 + 0x56 + 0x52 bytes; tools/imgdis.sh
-  E4386C 168), a fragment of the MST_UNWIRED code segment (0xE42CEC;
+{ MST_$MAP, MST_$MAP_TOP, MST_$MAP_GLOBAL, MST_$MAPS and MST_$REMAP,
+  0xE4386C..0xE43A0C (0x60 + 0x60 + 0x56 + 0x52 + 0x38 bytes;
+  tools/imgdis.sh E4386C 1A0), a fragment of the MST_UNWIRED code segment (0xE42CEC;
   `dpc --fragment-origin 0xE4386C').  Semantics: ../source/domain_os/mst/
-  maps.c and the declarations in mst/mst.h; each is one call of the
+  maps.c, mst/remap.c and the declarations in mst/mst.h; each of the
+  first four is one call of the
   module-local routine at 0xE43182 (`mst_$alloc_segs' in ../source),
   which the map does not name and which lies outside the unit: the
   manifest gives it as `module-routines=ALLOC_SEGS=0xE43182' (bead
@@ -25,6 +26,12 @@
   - 4    A5 loaded although nothing uses it (stand-in variable below;
          `a5-always=' in the manifest), saved in the `movem' with A2-A4
          or alone with `pea (A5)' (MST_$MAPS 0xE43986);
+  - 1.5  MST_$REMAP (bead domain-pascal-5aw.9): the constant 0 passed by
+         address to MST_$REMAP_PRIVI's value parameter, `pea (0x10,PC)'
+         at 0xE439F8, its word cell 0xE43A0A right after the routine's
+         `rts' (the code-section constant pool); MST_$REMAP_PRIVI, the
+         routine after the unit, called with `bsr.s' (module-routines=);
+         its six by-address parameters passed on, `move.l (d,A6),-(SP)';
   - 1.3-1.5  word and byte value slots (the byte in the high half,
          MST_$MAPS 0xE43998 `move.b (0xa,A6),-(SP)'), `clr.w -(SP)' for
          `false', `clr.l -(SP)' for 0, `move.l #0x7fffffff', the
@@ -38,7 +45,9 @@
   parameter list read off the pushes (12 parameters, 38 bytes); the
   modes (`var' for what is pushed as the slot's address, values for
   what is dereferenced first); `standin', the unit's data area (the
-  routines load A5 but do not address it). }
+  routines load A5 but do not address it); MST_$REMAP_PRIVI's parameter
+  types (`var' for the slots MST_$REMAP passes on, a word value parameter
+  for the flags, per mst/mst.h). }
 module mst_;
 type
   status_$t = integer32;
@@ -92,4 +101,15 @@ begin
   mst_$maps := alloc_segs(16#7fffffff, uid, start_va, length, area_size, asid,
                           area_id, mst_$touch_count, access, direction,
                           map_info, status);
+end;
+
+function mst_$remap_privi(flags: integer; var va: integer32; var unmap_len: integer32;
+                          var offset: integer32; var length: integer32;
+                          var map_info: integer32; var status: status_$t): univ_ptr; extern;
+
+function mst_$remap(var va: integer32; var unmap_len: integer32; var offset: integer32;
+                    var length: integer32; var map_info: integer32;
+                    var status: status_$t): univ_ptr;
+begin
+  mst_$remap := mst_$remap_privi(0, va, unmap_len, offset, length, map_info, status);
 end;

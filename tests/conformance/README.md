@@ -89,6 +89,19 @@ they exercise.
 are therefore not in the manifest: `pending/log_read.pas` (LOG_$READ
 and its worker 0xE17778; what is missing is in codegen-patterns 12.3).
 
+Constants and expressions passed by address (codegen-patterns 1.5; bead
+domain-pascal-5aw.9; "Constants in the code section" below):
+`term_send_kbd_string.pas` (TERM_$SEND_KBD_STRING 0xE1AAFC: one word
+cell for two arguments, `pea (d,PC)` then `move.l (SP),-(SP)`),
+`mst_maps.pas` (now with MST_$REMAP 0xE439D4), `mst_set_touch_ahead_cnt.pas`
+(MST_$SET_TOUCH_AHEAD_CNT 0xE446FC), `sysbus_define_int.pas`
+(SYSBUS_$DEFINE_INT 0xE0ABBC: a longword cell after a 0x2048 filler),
+`pchist_interrupt.pas` (PCHIST_$INTERRUPT 0xE1A1F6), `file_set_len.pas`
+(FILE_$SET_LEN 0xE73F90), `asknode_info.pas` (ASKNODE_$INFO 0xE64598:
+word cell before longword cell), `proc2_quit.pas` (PROC2_$QUIT
+0xE3F130: word, filler, longword) and `tone_enable.pas` (TONE_$ENABLE
+0xE1ACE8: `addr(...)` through a frame temporary).
+
 ## Routines outside the unit
 
 A unit is usually part of a module, and its routines may call a routine
@@ -129,6 +142,29 @@ p. 5-4), so dpc rejects a call of an `internal` routine with no body in
 the unit unless `--module-routine` names it; in a whole-module
 translation the body is in the unit.  NAME is upper-cased (dpc's
 symbols are).
+
+A `bsr.s` to a routine outside the unit is written by dpc as its
+encoding, `.short 0x61dd | bsr.s NAME` (the displacement from the
+address `--module-routine` gives): gas cannot relocate an 8-bit
+displacement to a symbol it does not define (MST_$REMAP 0xE439FC `610e`
+to MST_$REMAP_PRIVI, TERM_$SEND_KBD_STRING 0xE1AB20 `6186` to the
+module-local 0xE1AAA8).  The call then names its routine only in that
+comment; `tools/conform.py` counts it as a reference of a module-local
+NAME, and the byte comparison checks the address.
+
+## Constants in the code section
+
+A constant passed by address is a cell in the code section after the
+routine that uses it first (codegen-patterns 1.5; bead
+domain-pascal-5aw.9), inside that routine's map extent (MST_$REMAP's
+0x38 bytes end with its cell 0xE43A0A), so a unit's last routine
+carries its cells and nothing extra is needed: the module-end padding,
+for a module-tail unit, follows them (`term_send_kbd_string.pas`,
+`sysbus_define_int.pas`).  A routine that names a cell placed after an
+earlier routine of its module (305 sites in the image, e.g.
+SMD_$INVERT_S 0xE6DDE4) cannot be a unit without that routine: dpc
+would place a cell of its own.  There is no harness support for that
+yet; such routines are left out.
 
 ## Module data
 

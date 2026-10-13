@@ -102,5 +102,19 @@ tests/conformance/vfmt_get_next_arg.pas      0xE6AA38:14
 # (`move.l A0,(-4,A6)'); a pointer result variable held in A2 across a call
 # and moved to A0 at the end.  ALLOC_SEGS=0xE43182: a module-local routine
 # outside the unit that the map does not name (bead domain-pascal-3h9).
-tests/conformance/mst_maps.pas               MST_$MAP MST_$MAP_TOP MST_$MAP_GLOBAL MST_$MAPS  --section-addr .bss.moddata.MST_=0xE7CF0C  a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS  module-routines=ALLOC_SEGS=0xE43182
+# MST_$REMAP: a constant passed by address, `pea (d,PC)' and its cell
+# after the routine (codegen-patterns 1.5; bead domain-pascal-5aw.9).
+tests/conformance/mst_maps.pas               MST_$MAP MST_$MAP_TOP MST_$MAP_GLOBAL MST_$MAPS MST_$REMAP  --section-addr .bss.moddata.MST_=0xE7CF0C  a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS,MST_$REMAP  module-routines=ALLOC_SEGS=0xE43182,MST_$REMAP_PRIVI
 tests/conformance/disk_get_block.pas         DISK_$GET_BLOCK
+# Constants and expressions passed by address (codegen-patterns 1.5; bead
+# domain-pascal-5aw.9): a constant's cell after the routine, `pea (d,PC)'
+# and `move.l (SP),-(SP)' for the same cell twice; an `addr(...)' stored
+# into a frame temporary and the temporary's address pushed.
+tests/conformance/term_send_kbd_string.pas   TERM_$SEND_KBD_STRING  module-routines=STATUS_CONVERT=0xE1AAA8
+tests/conformance/tone_enable.pas            TONE_$ENABLE  --section-addr .bss.moddata.OS_TERM_INIT=0xE2C9F0
+tests/conformance/sysbus_define_int.pas      SYSBUS_$DEFINE_INT
+tests/conformance/pchist_interrupt.pas       PCHIST_$INTERRUPT  module-routines=PCHIST_$COUNT
+tests/conformance/file_set_len.pas           FILE_$SET_LEN  module-routines=FILE_$TRUNCATE_D
+tests/conformance/asknode_info.pas           ASKNODE_$INFO  module-routines=ASKNODE_$INTERNET_INFO
+tests/conformance/proc2_quit.pas             PROC2_$QUIT:30  --section-addr .bss.moddata.PROC2=0xE7BE84  a5-always=PROC2_$QUIT  module-routines=PROC2_$SIGNAL
+tests/conformance/mst_set_touch_ahead_cnt.pas  MST_$SET_TOUCH_AHEAD_CNT  --section-addr .bss.moddata.MST_=0xE7CF0C  a5-always=MST_$SET_TOUCH_AHEAD_CNT  module-routines=MST_$PRIV_SET_TOUCH_AHEAD_CNT

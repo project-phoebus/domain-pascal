@@ -236,6 +236,9 @@ pub fn access(insn: &Insn) -> Access {
         | Insn::MovemRestore { .. }
         | Insn::Label(_)
         | Insn::Align4
+        | Insn::PoolLabel(_)
+        | Insn::Words(_)
+        | Insn::Encoded { .. }
         | Insn::Branch { .. } => {}
         Insn::Pea(ea) => a.ea_address(ea),
         Insn::Move { src, dst, .. } => {
@@ -346,6 +349,9 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::MovemRestore { .. }
         | Insn::Label(_)
         | Insn::Align4
+        | Insn::PoolLabel(_)
+        | Insn::Words(_)
+        | Insn::Encoded { .. }
         | Insn::Branch { .. }
         | Insn::Bsr { .. }
         | Insn::TableEntry { .. }

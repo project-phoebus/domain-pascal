@@ -37,6 +37,16 @@ Tests:
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).
+- `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
+  address as cells after the routine that first uses them, `pea (d,PC)`,
+  `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING
+  0xE1AB0C), cells shared by later routines when bytes and type agree,
+  the order of a routine's new cells (TIMER_$INIT 0xE1639C), word cells
+  before longword cells after a 0x2048 filler (LOG_$SHUTDN 0xE17604); an
+  `addr(...)` through a frame temporary (TONE_$ENABLE 0xE1ACFC).
+- `calls/const_pool_noalign` - codegen-patterns 1.5, 7: with
+  `--loop-align=off` the longword cell follows the word cell at 2 mod 4,
+  no filler (ACL_$SET_ACL_CHECK 0xE4787A).
 - `calls/calls` - codegen-patterns 1.1, 1.3, 1.4, 1.5, 1.6, 12.2: pushes
   of constants (`clr`, `pea (n).w`, `move.l #n`, merged word pairs, `st`),
   values and addresses, pads, `addq.w`/`lea` pops, no pop when no push

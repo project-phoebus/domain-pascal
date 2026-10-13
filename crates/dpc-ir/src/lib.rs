@@ -583,15 +583,40 @@ pub enum Arg {
         slot: u32,
         writable: bool,
     },
+    /// The address of a frame temporary holding `value`: an expression
+    /// (not a variable, not a constant) passed by address to a value or
+    /// `in` parameter (ref 5.2 Table 5-1, default convention).  The value
+    /// is stored at `Addr::Frame(offset)` right before the argument is
+    /// pushed, then that address is pushed (codegen-patterns 1.5:
+    /// TONE_$ENABLE 0xE1ACFC `lea (0x1268,A5),A0; move.l A0,(-8,A6);
+    /// pea (-8,A6)`).  The temporary lies below the routine's other frame
+    /// objects (`lower.rs`, `assign_temps`).
+    Temp { value: Expr, offset: i32, slot: u32 },
 }
 
 impl Arg {
     /// Bytes the argument occupies in the caller's push.
     pub fn slot(&self) -> u32 {
         match self {
-            Arg::Value { slot, .. } | Arg::Address { slot, .. } => *slot,
+            Arg::Value { slot, .. } | Arg::Address { slot, .. } | Arg::Temp { slot, .. } => *slot,
         }
     }
+}
+
+/// A constant passed by address: the bytes of its cell in the code
+/// section's constant pool (big-endian, an even count: a byte constant
+/// takes the high byte of a word, `ff00` for `true`), and the identity of
+/// its type.  Two uses share one cell when both agree (codegen-patterns
+/// 1.5, "Constant by address": the pool is the target's, laid out after
+/// the routine that first uses a cell; `tools/pcsurvey.py`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PoolConst {
+    pub bytes: Vec<u8>,
+    /// The type the cell holds (`dpc_sema::TypeId` index): cells of equal
+    /// bytes but different types are not shared (codegen-patterns 1.5,
+    /// Uncertain: SMD has two `0001` cells, 0xE6D92A and 0xE6DFF8, both
+    /// used by later routines).
+    pub key: u32,
 }
 
 /// A value.
@@ -726,6 +751,10 @@ pub enum Addr {
     Enclosing(i32),
     /// An absolute symbol + offset (another unit's object).
     Symbol { name: String, offset: i32 },
+    /// A constant's cell in the code section (codegen-patterns 1.5: m68k
+    /// `pea (d,PC)`, TERM_$SEND_KBD_STRING 0xE1AB0C).  Only ever passed by
+    /// address.
+    Const(PoolConst),
     /// The unit's own static data area ([`Module::data`]) + offset.
     Static(i32),
     /// The pointer value `base` + offset.
@@ -755,6 +784,10 @@ impl Addr {
                 name,
                 offset: offset + delta,
             },
+            Addr::Const(c) => {
+                assert_eq!(delta, 0, "a constant's cell is addressed as a whole");
+                Addr::Const(c)
+            }
             Addr::Indirect { base, offset } => Addr::Indirect {
                 base,
                 offset: offset + delta,

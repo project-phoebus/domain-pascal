@@ -602,7 +602,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
                         self.refs[k].other = true;
                     }
                 }
-                Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+                Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
                 Addr::Indirect { base, .. } => match &**base {
                     // A local dereferenced as a pointer: not a data value.
                     Expr::Load { addr, .. } => self.other(addr),
@@ -648,7 +648,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
             self.in_arg = true;
             for a in &c.args {
                 match a {
-                    Arg::Value { value, .. } => self.expr(value),
+                    Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value),
                     Arg::Address { addr, .. } => self.other(addr),
                 }
             }
@@ -792,7 +792,11 @@ fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
 fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
     v(Node::Addr(a));
     match a {
-        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+        Addr::Frame(_)
+        | Addr::Enclosing(_)
+        | Addr::Static(_)
+        | Addr::Symbol { .. }
+        | Addr::Const(_) => {}
         Addr::Indirect { base, .. } => walk_expr(base, v),
         Addr::Index { base, index, .. } => {
             walk_addr(base, v);
@@ -805,7 +809,7 @@ fn walk_call<'a>(c: &'a Call, v: &mut dyn FnMut(Node<'a>)) {
     v(Node::Call(c));
     for a in &c.args {
         match a {
-            Arg::Value { value, .. } => walk_expr(value, v),
+            Arg::Value { value, .. } | Arg::Temp { value, .. } => walk_expr(value, v),
             Arg::Address { addr, .. } => walk_addr(addr, v),
         }
     }
@@ -957,9 +961,11 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
             // Another frame (the enclosing routine's objects are never
             // held in a register, [`Function::uplevel_refs`]), the unit's
             // data, or the object a pointer points to.
-            Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Indirect { .. } => {
-                None
-            }
+            Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::Symbol { .. }
+            | Addr::Indirect { .. }
+            | Addr::Const(_) => None,
         }
     }
     let mut out = Vec::new();
@@ -1355,7 +1361,11 @@ fn arith_calls(op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar, narrowed: bool) ->
 
 fn addr_has_call(a: &Addr) -> bool {
     match a {
-        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+        Addr::Frame(_)
+        | Addr::Enclosing(_)
+        | Addr::Static(_)
+        | Addr::Symbol { .. }
+        | Addr::Const(_) => false,
         Addr::Indirect { base, .. } => expr_has_call(base),
         Addr::Index { base, index, .. } => addr_has_call(base) || expr_has_call(index),
     }
@@ -1459,6 +1469,7 @@ fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
             },
             *offset,
         )),
+        Addr::Const(_) => None,
         // Two elements of one array at run-time indices: adjacency is not
         // known at compile time.
         Addr::Index { .. } => None,
@@ -1534,7 +1545,11 @@ impl Uses<'_> {
                 self.address(base);
                 self.expr(index);
             }
-            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => {}
+            Addr::Frame(_)
+            | Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => {}
         }
     }
 
@@ -1554,7 +1569,7 @@ impl Uses<'_> {
                         },
                     ..
                 } => {}
-                Arg::Value { value, .. } => self.expr(value),
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value),
                 Arg::Address { addr, .. } => self.address(addr),
             }
         }
@@ -3607,7 +3622,11 @@ impl Selector {
     fn addr_needs_reg(&self, addr: &Addr) -> bool {
         match addr {
             // The static link is held in a register (codegen-patterns 6).
-            Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } => false,
+            Addr::Frame(_)
+            | Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => false,
             Addr::Index { .. } => true,
             Addr::Indirect { base, .. } => !matches!(
                 &**base,
@@ -3716,6 +3735,32 @@ impl Selector {
                     let merged = ((hi & 0xffff) << 16) | (lo & 0xffff);
                     self.push_long_const(merged as i32 as i64);
                     k -= 2;
+                    continue;
+                }
+            }
+            // The same constant cell as the argument just pushed: its
+            // address again with `move.l (SP),-(SP)` (TERM_$SEND_KBD_STRING
+            // 0xE1AB10 after `pea (0x18,PC)`; all 33 `pea (d,PC)` followed
+            // by an argument naming the same cell in compiled code,
+            // codegen-patterns 1.5, `tools/pcsurvey.py dups`).
+            if let (
+                Arg::Address {
+                    addr: Addr::Const(c),
+                    ..
+                },
+                Some(Arg::Address {
+                    addr: Addr::Const(prev),
+                    ..
+                }),
+            ) = (a, c.args.get(k))
+            {
+                if c == prev {
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src: Ea::Ind(SP),
+                        dst: Ea::PreDec(SP),
+                    });
+                    k -= 1;
                     continue;
                 }
             }
@@ -3905,6 +3950,12 @@ impl Selector {
                     let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
                 }
+                // A constant: its cell in the code section, `pea (d,PC)`
+                // (codegen-patterns 1.5: TERM_$SEND_KBD_STRING 0xE1AB0C
+                // `pea (0x18,PC)`, MST_$REMAP 0xE439F8 `pea (0x10,PC)`; 1025
+                // `pea (d,PC)` in compiled code).  The emitter places the
+                // cell and resolves the label (`emit.rs`, `Pool::place`).
+                Addr::Const(c) => self.out.push(Insn::Pea(Ea::Pool(c.clone()))),
                 Addr::Symbol { name, offset: 0 } => self.out.push(Insn::Move {
                     size: Size::L,
                     src: Ea::ImmSym(name.clone()),
@@ -3983,6 +4034,45 @@ impl Selector {
                 }
             },
             Arg::Address { .. } => {
+                return Err(unsupported(self.span, "an address slot of this size is"))
+            }
+            Arg::Temp {
+                value,
+                offset,
+                slot: 4,
+            } => {
+                // An expression passed by address: stored into its frame
+                // temporary right before the push, then the temporary's
+                // address pushed (codegen-patterns 1.5).  `addr(x)`:
+                // TONE_$ENABLE 0xE1ACFC `lea (0x1268,A5),A0; move.l
+                // A0,(-8,A6); pea (-8,A6)`, PCHIST_$CNTL 0xE5CF06..0xE5CF1A
+                // (two in one call, A0 then A1).  Other values computed
+                // into a register and stored, `move.<s> Dn,(d,A6); pea
+                // (d,A6)` (GET_BUILD_TIME 0xE380F4, TERM_$CONTROL
+                // 0xE66A08; `tools/pcsurvey.py temps`).
+                let tmp = Ea::Disp(*offset, FP);
+                match value {
+                    Expr::AddrOf(a) if !matches!(a, Addr::Symbol { .. } | Addr::Const(_)) => {
+                        let src = self.ea_of(a)?;
+                        let r = self.alloc_a()?;
+                        self.out.push(Insn::Lea { src, dst: r });
+                        self.out.push(Insn::Move {
+                            size: Size::L,
+                            src: Ea::Reg(Reg::A(r)),
+                            dst: tmp.clone(),
+                        });
+                    }
+                    Expr::AddrOf(_) => {
+                        return Err(unsupported(
+                            self.span,
+                            "`addr` of another unit's or a constant's object passed by address is",
+                        ))
+                    }
+                    v => self.store(&Addr::Frame(*offset), v)?,
+                }
+                self.out.push(Insn::Pea(tmp));
+            }
+            Arg::Temp { .. } => {
                 return Err(unsupported(self.span, "an address slot of this size is"))
             }
         }
@@ -6199,6 +6289,9 @@ impl Selector {
             }
             // Frame objects and arguments: `(d,A6)` (0xE148D4).
             Addr::Frame(o) => Ok(Ea::Disp(*o, FP)),
+            // A constant's cell in the code section, `(d,PC)`
+            // (codegen-patterns 1.5).
+            Addr::Const(c) => Ok(Ea::Pool(c.clone())),
             // The enclosing routine's frame objects, through the static
             // link held in a register since the entry (codegen-patterns 6:
             // 0xE135AA `btst #0,(0x15,A2)`, 0xE1362E `(-0x50,A4)`).

@@ -1242,15 +1242,18 @@ end;
     assert!(e[0].contains("a variable is needed"), "{e:?}");
     let e = errs(
         "module m;
-procedure q(in v: integer32); extern;
+type s = set of 0..15;
+procedure q(in v: s); extern;
 procedure p;
 begin
-  q(3);
+  q([1]);
 end;
 ",
     );
     assert!(
-        e[0].ends_with("passing a constant or an expression by address (codegen-patterns 1.5) is not supported yet"),
+        e[0].ends_with(
+            "a constant of 2 bytes or of this kind passed by address is not supported yet"
+        ),
         "{e:?}"
     );
     let e = errs(
@@ -2319,6 +2322,100 @@ end;
     );
 }
 
+/// Constants passed by address (codegen-patterns 1.5, bead
+/// domain-pascal-5aw.9): a cell of the parameter's type and size, a byte
+/// in the high byte of a word, the type's identity as the key.
+#[test]
+fn constants_by_address_are_pool_cells() {
+    let m = lower_src(
+        "module m;
+type e = (e0, e1, e2);
+procedure q(a: integer; in b: integer32; c: boolean; d: e; f: char); extern;
+procedure p;
+begin
+  q(0, -2, true, e2, 'A');
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let cells: Vec<Vec<u8>> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                slot: 4,
+                writable: false,
+            } => k.bytes.clone(),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            vec![0, 0],
+            vec![0xff, 0xff, 0xff, 0xfe],
+            vec![0xff, 0],
+            vec![0, 2],
+            vec![0x41, 0]
+        ]
+    );
+    // The key is the type: two parameter types, two keys.
+    let keys: Vec<u32> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                ..
+            } => k.key,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_ne!(keys[0], keys[1]);
+}
+
+/// Expressions passed by address (codegen-patterns 1.5, TONE_$ENABLE
+/// 0xE1ACE8): a frame temporary below the locals, per call in push order
+/// (the last argument's highest), reused by the next call.
+#[test]
+fn expressions_by_address_get_frame_temporaries() {
+    let m = lower_src(
+        "module m;
+var x: integer32; w: integer;
+procedure q(a: univ_ptr; b: integer; c: univ_ptr); extern;
+procedure p;
+var s: integer;
+begin
+  q(addr(x), w + 1, addr(w));
+  q(addr(x), 2, addr(w));
+end;
+",
+    )
+    .unwrap();
+    let f = func(&m, "P");
+    let temps = |k: usize| -> Vec<i32> {
+        let StmtKind::Call(c) = &f.body[k].kind else {
+            panic!()
+        };
+        c.args
+            .iter()
+            .filter_map(|a| match a {
+                Arg::Temp { offset, .. } => Some(*offset),
+                _ => None,
+            })
+            .collect()
+    };
+    // s at -2 (map-named routine: no reserved slot); c's temporary first,
+    // longword aligned, then b's word, then a's.
+    assert_eq!(temps(0), [-16, -10, -8]);
+    assert_eq!(temps(1), [-12, -8]);
+    assert_eq!(f.frame_size, 16);
+}
+
 /// `Arg::Address::writable` (bead domain-pascal-pe9): set for `var`,
 /// `out` and `in out` parameters (ref 5.3.1 p. 5-6, 5.3.2 p. 5-7), clear
 /// for value and `in` parameters passed by address (ref 5.2 p. 5-4).
@@ -2344,7 +2441,7 @@ end;
         .iter()
         .map(|a| match a {
             Arg::Address { writable, .. } => *writable,
-            Arg::Value { .. } => panic!("{a:?}"),
+            Arg::Value { .. } | Arg::Temp { .. } => panic!("{a:?}"),
         })
         .collect();
     assert_eq!(w, [true, true, true, false, false]);

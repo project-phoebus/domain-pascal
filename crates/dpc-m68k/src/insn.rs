@@ -189,6 +189,13 @@ pub enum Ea {
     PreDec(u8),
     /// `(An)+`.
     PostInc(u8),
+    /// `(c,%pc)`: a constant's cell in the code section, before the
+    /// emitter has placed it (`emit.rs`, `Pool::place`); never printed.
+    Pool(dpc_ir::PoolConst),
+    /// `(.Lc<n>,%pc)`: the placed cell `n` of the constant pool, PC
+    /// relative with a 16-bit displacement (`487a dddd` for `pea`,
+    /// TERM_$SEND_KBD_STRING 0xE1AB0C; codegen-patterns 1.5).
+    PoolLabel(u32),
     /// `#n`: an immediate.  The selector gives the number as the
     /// instruction size reads it: a byte immediate is 0..=255, so that gas
     /// writes the extension word the way the original did (`move.b
@@ -207,7 +214,7 @@ impl Ea {
             // The selector writes `Ea::Ind` for offset 0 anyway; this keeps
             // `Insn::len_at` equal to what gas emits if one slips through.
             Ea::Disp(0, _) => 0,
-            Ea::Disp(..) | Ea::AbsW(_) | Ea::Idx(..) => 2,
+            Ea::Disp(..) | Ea::AbsW(_) | Ea::Idx(..) | Ea::Pool(_) | Ea::PoolLabel(_) => 2,
             Ea::AbsL(..) | Ea::ImmSym(_) => 4,
             Ea::Imm(_) => match size {
                 Size::B | Size::W => 2,
@@ -250,6 +257,8 @@ impl fmt::Display for Ea {
             Ea::PreDec(a) => write!(f, "-({})", Reg::A(*a)),
             Ea::PostInc(a) => write!(f, "({})+", Reg::A(*a)),
             Ea::Imm(n) => write!(f, "#{}", num(*n)),
+            Ea::Pool(c) => write!(f, "(<unplaced constant {:02x?}>,%pc)", c.bytes),
+            Ea::PoolLabel(n) => write!(f, "({},%pc)", pool_label(*n)),
         }
     }
 }
@@ -549,6 +558,26 @@ pub enum Insn {
     /// the module's code base is 4-aligned, or, for a fragment, because
     /// the emitter shifts the section (`emit::Options::fragment_origin`).
     Align4,
+    /// Pseudo-instruction: the label of constant-pool cell `n`
+    /// ([`pool_label`]), at the start of the line.
+    PoolLabel(u32),
+    /// Pseudo-instruction: words of data, `.short` (a constant-pool
+    /// cell, codegen-patterns 1.5: `0000` at 0xE1AB26).
+    Words(Vec<u16>),
+    /// An instruction written as its encoding, `.short` with the mnemonic
+    /// in a comment, where gas cannot produce it (CLAUDE.md 4.4): a
+    /// `bsr.s` to a routine outside a fragment, whose 8-bit displacement
+    /// gas does not relocate (`emit.rs`, `encode_outside_short_calls`).
+    Encoded {
+        words: Vec<u16>,
+        text: String,
+    },
+}
+
+/// The assembler label of constant-pool cell `n`: a `.L` local label,
+/// not kept in the object's symbol table.
+pub fn pool_label(n: u32) -> String {
+    format!(".Lc{n}")
 }
 
 /// The two-operand arithmetic and logic operations.
@@ -626,6 +655,27 @@ impl fmt::Display for Insn {
             Insn::Btst { bit, dst } => write!(f, "btst\t{},{dst}", Reg::D(*bit)),
             Insn::Scc { cond, dst } => write!(f, "s{cond}\t{dst}"),
             Insn::Align4 => f.write_str(".balignw\t4,0x2048"),
+            Insn::PoolLabel(n) => write!(f, "{}:", pool_label(*n)),
+            Insn::Encoded { words, text } => {
+                f.write_str(".short\t")?;
+                for (i, x) in words.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "0x{x:04x}")?;
+                }
+                write!(f, "\t| {text}")
+            }
+            Insn::Words(w) => {
+                f.write_str(".short\t")?;
+                for (i, x) in w.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "0x{x:04x}")?;
+                }
+                Ok(())
+            }
             Insn::Branch {
                 cond,
                 label,
@@ -722,6 +772,8 @@ impl Insn {
         match self {
             Insn::Label(_) => 0,
             Insn::Align4 => (4 - pos % 4) % 4,
+            Insn::PoolLabel(_) => 0,
+            Insn::Words(w) | Insn::Encoded { words: w, .. } => 2 * w.len() as u32,
             Insn::Unlk | Insn::Rts | Insn::Moveq { .. } => 2,
             Insn::Link { .. } | Insn::Dbf { .. } | Insn::MovemSave { .. } => 4,
             Insn::MovemRestore { .. } => 6,
