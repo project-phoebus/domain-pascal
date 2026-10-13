@@ -974,7 +974,8 @@ their host); no compare or widening of either has been catalogued.
     instructions by a `.l` index), both on small arrays.  In every `.l` case seen the
     index is a value held in a register (a register variable); in every
     `.w` case it was read from memory or is a parameter.  `dpc` holds
-    no local variable in a register, so it uses `.w` for word indices and
+    few local variables in registers (section 12.5) and none as an index
+    so far, so it uses `.w` for word indices and
     `.l` for longword ones; the rule is not confirmed.  A `.w` index is
     sign-extended by the 68000, and a word index is scaled at the word's
     width, so `dpc` takes a word index only when every index × element
@@ -2002,10 +2003,12 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     constant inline; byte operands; an M$ARITH call among another call's
     arguments; a second call while an M$ARITH or function result in D0 is
     still needed (e.g. `l * l + l * l`).
-- **Conformance:** no compiled routine that calls M$ARITH or uses the
-  new inline forms is reachable yet.  The small ones need what `dpc`
-  lacks: TIME_$GET_ADJUST 0xE16AA8 (0x40 bytes: `disable`/`enable`, a
-  local held in D1 across both calls, `link #-4`), TERM_$ENQUEUE_TPAD
+- **Conformance:** TIME_$GET_ADJUST 0xE16AA8 (0x40 bytes: `disable`/
+  `enable`, section 10; a local held in D1 across both calls, `link #-4`,
+  section 12.5) is byte-identical (`tests/conformance/time_get_adjust.pas`,
+  beads domain-pascal-5aw.7, -0wc): `M$DIS$LLL`/`M$OIS$LLL` by a
+  longword constant, the second call not popped, `lsl.l #2,D0`.  The
+  other small M$ARITH callers need what `dpc` lacks: TERM_$ENQUEUE_TPAD
   0xE72472 (a `while` loop), module-local 0xE5AA28 (record copies and a
   computed operand with a pad), module-local 0xE5D134 and 0xE54B58
   (`divu.w` after register-held computations and a `for` loop).
@@ -2186,25 +2189,112 @@ stored.
 
 ---
 
-## 10. Interrupt priority in compiled code (Verified; mapping to built-ins from the reference)
+## 10. Interrupt priority in compiled code (Verified; implemented)
 
-Compiled Pascal routines contain `ori.w #0x700,SR` … `andi.w #0xF8FF,SR`.
-For example TIME_$SET_TIME_OF_DAY, 0xE167EC → 0xE1686A, and PROC1_$RESUME,
-PROC1_$SUSPEND, PROC1_$SET_PRIORITY, SMD_$LOCK_DISPLAY.
+**Survey (Verified; beads domain-pascal-5aw.7, -0wc).**  Every compiled
+routine, split and disassembled as `tools/loopalign.py` does (map `I`
+segments, `_ASM` and HAND_ASM segments left out, codegen-patterns 0), was
+searched for instructions naming SR.  There are only these 27, all listed
+here (re-check with `tools/imgdis.sh`):
 
-- **Source spelling:** the reference's systems-programming built-ins
-  (Appendix E, Table E-1; also Table 4-7), all privileged:
-  - `disable;` turns off the interrupt enable: `ori.w #0x700,SR`.
-  - `enable;` turns it back on: `andi.w #0xF8FF,SR`.  This **forces IPL 0**;
-    it does not restore the previous level, exactly as the image shows.
-  - `oldsr := set_sr(newsr);` reads SR and installs a new value.  The
-    reference gives the expansion as `move.w SR,D0; move.w newsr,SR;
-    move.w D0,oldsr`.  Kernel `move SR,-(SP)` / `move (SP)+,SR` pairs
-    are the real save/restore; check each against set_sr before assuming
-    it is compiled (some are hand assembly).
-- The mapping of `disable`/`enable` to these exact instructions is inferred
-  from the image plus the reference's description; confirm the encodings
-  against more sites when the codegen agent implements them.
+| Instruction | Count | Sites |
+|---|---|---|
+| `ori.w #0x700,SR` (`007c 0700`) | 10 | PROC1_$RESUME 0xE147AC; PROC1_$SUSPEND 0xE14850; PROC1_$UNBIND 0xE14E80, 0xE14F00; PROC1_$SET_PRIORITY 0xE15294; TIME_$SET_TIME_OF_DAY 0xE167EC; TIME_$ADJUST_TIME_OF_DAY 0xE16992; TIME_$GET_ADJUST 0xE16AB0; PROC1_$INIT 0xE2F9A4; module-local 0xE70954 (PEB_WIRED) 0xE70968 |
+| `andi.w #0xF8FF,SR` (`027c f8ff`) | 7 | 0xE147EE; 0xE152C8; 0xE1686A; 0xE169AE; 0xE16ABA; 0xE70998, 0xE709B8 |
+| `move.w SR,Dn` (`40c0+n`) | 5 | PROC1_$SET_VT 0xE149B6 (D3), 0xE149F2 (D1); PROC1_$TS_END_CALLBACK 0xE14A90 (D3), 0xE14AF8 (D0); WIN_$INT 0xE19C36 (D1) |
+| `move.w <ea>,SR` (`46c0+ea`) | 5 | 0xE149B8 `#0x2700`, 0xE149F4 `D3`; 0xE14A92 `#0x2700`, 0xE14AFA `D3`; 0xE19C38 `#0x2500` |
+
+No `move SR,-(SP)`, `move (SP)+,SR`, `move SR,<memory>` or other SR form
+occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
+0xE20BBE `move.w (0x8,SP),SR`, section 0).
+
+- **Source spelling** (ref Appendix E, Table E-1, p. E-1; Table 4-7,
+  p. 4-10).  E.2 (p. E-2): the routines "generate privileged instructions
+  and may only be executed from supervisor mode"; that is a run-time
+  matter, `dpc` puts no compile-time restriction on them.
+  - `disable;` (p. E-3) is `ori.w #0x700,SR`; `enable;` (p. E-4) is
+    `andi.w #0xF8FF,SR`, which **forces IPL 0** and does not restore the
+    previous level.  The pairing is the image's: every `andi` follows an
+    `ori` of the same routine; four `ori`s have no `andi` in their routine
+    (PROC1_$SUSPEND 0xE14850 and PROC1_$UNBIND 0xE14E80 call
+    PROC1_$TRY_TO_SUSPEND 0xE1471C with `bsr` right after them;
+    PROC1_$UNBIND 0xE14F00 and PROC1_$INIT 0xE2F9A4 do not).  Encodings checked
+    against `m68k-elf-as -m68010` (`ori.w #0x700,%sr`, `andi.w
+    #0xf8ff,%sr`): identical.
+  - `oldsr := set_sr(newsr);` (p. E-5, checked in the PDF, p. 568) is
+    expanded "something like" `move.w SR,d0; move.w newsr,SR; move.w
+    d0,oldsr`.  The image matches the first two instructions at all
+    five sites: the old word is read into a data register, then the new
+    one written, a constant (`#0x2700`, `#0x2500`) or a register (`D3`,
+    the word an earlier `set_sr` saved).  At 0xE149B6 and 0xE14A90 the old
+    word goes straight into the register of a local variable (D3, held
+    across calls: section 12.5).  At 0xE149F2, 0xE14AF8 and 0xE19C36 it
+    is never read: `discard(set_sr(old))` (ref "Discard", p. 4-62), or an
+    assignment to a dead variable; the register is D1, D0, D1 although D0
+    and D1 are both free at all three (Uncertain: `dpc` takes the lowest
+    free register, which fits 0xE14AF8 only).  No site stores the old
+    word to memory; `dpc` does it with `move.w Dn,oldsr` as the reference
+    shows (reference only).
+  - **Types (TODO(ref-question), reference-clarifications Q16):** the
+    entry gives none.  `dpc` takes a 16-bit integer argument (or a
+    constant in -32768..65535) and gives an `integer16` result, the
+    `move.w`s of the expansion.
+- **Implemented** (`dpc-ir` `StmtKind::Disable`/`Enable`/`Discard`,
+  `Expr::SetSr`; `dpc-m68k` `Insn::SrImm`/`MoveFromSr`/`MoveToSr`).  A
+  `set_sr` argument that must be computed, or read through an address
+  register, is refused: whether that code comes before or after the
+  `move.w SR` is not seen.  Golden `tests/golden/sysprog/interrupts`;
+  conformance `tests/conformance/time_get_adjust.pas` (TIME_$GET_ADJUST
+  0xE16AA8, byte-identical).
+- **Barriers.**  Instructions of neighbouring statements are not moved
+  across `ori`/`andi` at any site: the entry load 0xE16AAC stays before
+  0xE16AB0; at TIME_$SET_TIME_OF_DAY the last store 0xE16864, a branch
+  target, directly precedes the `andi` at 0xE1686A, and the pushes of the
+  next call follow it.  Register *values* do cross: PROC1_$SET_PRIORITY
+  stores D0 at 0xE15290 and compares it again after the `ori` at
+  0xE15298 (section 12.4 R7).  `dpc` selects statements in order and has
+  no scheduler, so it does the same; the register allocator treats the
+  SR instructions as using no register.
+
+### 10.1 The other predeclared routines (bead domain-pascal-0wc)
+
+- **Folded in `dpc-sema`** (no code; the constant is then stored or used
+  like any other, sections 1.5, 13):
+  - `sizeof(x)` ("Sizeof", p. 4-181): x a type name, a variable, a
+    constant or a string; the bytes of its type, a string constant's
+    length ("SIZEOF('wildebeest')" is 10, p. 4-182).  An integer constant
+    (`integer16` when it fits).  The second form with variant tags
+    (p. 4-182) is not supported: how one variant's size is rounded is not
+    stated.
+  - `firstof(x)`/`lastof(x)` ("Firstof", p. 4-87; "Lastof", p. 4-106;
+    both checked in the PDF, pp. 220, 239): the tables' rows for
+    integer32/integer16 (`lastof` only), char, boolean, enumerations,
+    arrays (the index type's bound) and varying arrays; a subrange
+    (not in the tables) gives its bound, after "returns the first [final]
+    possible value of x".  **`firstof` of integer, integer16 or integer32
+    is refused**: p. 4-87 gives -32767 and -2147483647, one above the
+    types' least values (TODO(ref-question), reference-clarifications
+    Q17).
+  - `succ`, `pred`, `max`, `min`, `in_range` of constants.
+- **Code:**
+  - `succ(x)`/`pred(x)` ("Succ", p. 4-191; "Pred", p. 4-147) of integers,
+    chars and enumerations are `x + 1`/`x - 1` at x's type, with no range
+    check (Appendix D, p. D-5), so they get the patterns of section 8
+    (`addq.w #1` in place for `w := succ(w)`).  Of a boolean the result is
+    `true`/`false` whatever x is; a non-constant boolean argument is
+    refused (whether x is still evaluated is not known).  The image
+    cannot tell `succ(x)` from `x + 1`.
+  - `discard(f(...))`: a call statement, the result register unread
+    (ref 5.2; section 3).  `discard(set_sr(x))`: above.  `discard` of any
+    other expression is refused.
+  - `max`, `min`, `in_range` of run-time values: **refused**.  The only
+    candidates in the image are the five `x := min(x, c)`-shaped sites of
+    12.4 R8 (`move.w #c,Dn; cmp.w Dn,Dx; ble.s; move.w Dn,Dx`: 0xE19ED0,
+    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6), which an `if x > c then x
+    := c` would give too (0xE66372 even skips the store to memory when
+    the value is in range).  No site that must be one of these built-ins
+    is known.
+- `addr` is section 1.5 and 5.2.
 
 ---
 
@@ -2757,7 +2847,7 @@ words, no copy coalescing:
   below applies to M$ARITH calls is not settled: `dpc` does not hold for
   them; TIME_$GET_ADJUST 0xE16AD6 pushes D1 for its last use and D1 stays
   a scratch register, but D1 holds a local variable there, not a
-  parameter loaded at entry (section 8).
+  parameter loaded at entry (section 8; reproduced, section 12.5).
 
 **R4. Registers are held longer than liveness (Uncertain; this is most
 of the remaining misses).**  The corpus misses fall into these groups:
@@ -3085,6 +3175,95 @@ the pinned registers.  PROC1_$TST_LOCK's `sne` is in place because the
 set value and its boolean are one virtual register; the move of a value
 into D0 for a function result is not subject to R2 (PROC1_$GET_LOCKS
 0xE148F0 loads the result straight into D0).
+
+### 12.5 Local variables held in registers (Verified at the sites; rule Uncertain; implemented narrowly)
+
+Ref 6.4.24, p. 6-29 (`-opt 3`): "Global register allocation allows local
+variables to have their values placed in machine registers"; p. 6-32,
+"allocate a local variable to a machine register for exactly as long as
+the variable's value is needed".  The image shows both kinds of local:
+
+- **In a register, frame slot still allocated:** TIME_$GET_ADJUST
+  0xE16AA8, `link.w A6,#-4` and the frame never addressed; the C's one
+  local (`time/get_adjust.c`, `current_delta`) is loaded into D1 at
+  0xE16AB4 and read from D1 at 0xE16AC4 and 0xE16AD6, across two M$ARITH
+  calls (12.4 R3).  PROC1_$SET_VT 0xE149B6 and PROC1_$TS_END_CALLBACK
+  0xE14A90: the status word `set_sr` saves is in D3 across calls
+  (section 10), and PROC1_$SET_VT's word at 0xE149A4/0xE149AA (`move.w
+  #-1,D2` in one arm of an `if`, `move.w (4,A0),D2` in the other) in D2.
+  Section 2's untouched frames (306 routines) fit this too.
+- **In the frame:** PROC1_$TS_END_CALLBACK's `timeslice`
+  (`proc1/ts_end_callback.c`), assigned in both arms of an `if`
+  (0xE14AA0 `move.w #-1,(-8,A6)`, 0xE14AF2) and pushed by value from
+  memory (0xE14AFE `move.w (-8,A6),-(SP)`), although its address is never
+  taken; PROC1_$SET_VT's record at `(-8,A6)` (0xE149BC `clr.l`, 0xE149CC
+  `move.w D1,(-4,A6)`), whose address is passed (0xE149D0 `pea`).
+
+Which locals the compiler kept in registers is therefore not just "those
+whose address is not taken" (TS_END_CALLBACK's `timeslice` is not, and
+D2 at PROC1_$SET_VT is assigned in an `if` too).  Not settled.
+
+**Survey (review of beads domain-pascal-5aw.7, -0wc).**  Every compiled
+routine with a `link` (1635, split as `tools/loopalign.py` does) was
+scanned for frame slots inside the `link` area with exactly one store,
+from a non-constant, outside every backward-branch range, read only after
+the store, never `lea`/`pea`'d: 409 slots.  Many are value-parameter
+copies, expression temporaries or record fields, so sites were checked
+against the C in `../source`:
+
+- **Frame: assigned once at the top level, read as a by-value call
+  argument** (each checked in the C): MMAP_$FREE 0xE0CAEC (the spin-lock
+  token from ML_$SPIN_LOCK, pushed at 0xE0CB0A), TTY_$K_FLUSH_INPUT
+  0xE1C0BE and SIO2681_$SET_BREAK 0xE1D134 (tokens),
+  PROC2_$DELIVER_PENDING 0xE3F53E (`current_idx`, a memory load, pushed
+  at 0xE3F564), LOG_$SHUTDN 0xE175AE (`saved_ptr`, a memory load, pushed
+  at 0xE175CE).  At the instruction level 44 frame slots hold a call
+  result (D0/A0 stored right after a `jsr`/`bsr`) and are later pushed
+  (MMAP_$FREE_LIST, MMAP_$FREE_REMOVE, MMAP_$ALLOC_FREE, NETBUF_$GETVA,
+  NETBUF_$RTNVA, TIME_$Q_ENTER_ELEM, TIME_$Q_REMOVE_ELEM,
+  TTY_$K_FLUSH_OUTPUT, ...; not all checked in the C, some may be
+  assigned inside an `if`).  NETBUF_$GETVA reuses the value from D0 after
+  the store (0xE0EC9A, 0xE0ECAC), as for any frame variable (12.4).
+- **Register:** TIME_$GET_ADJUST (D1, read only as M$ARITH operands);
+  PROC1_$SET_VT D2/D3 (read by `move.w D2,(72,A2)`, `move.w D3,SR`).
+  UID_$GEN 0xE1A018 keeps the C's `token` in D3 (0xE1A040, 0xE1A0B2: two
+  assignments, one inside a loop) and pushes it by value (0xE1A07A,
+  0xE1A0D6), so "passed by value means frame" is not absolute either (a
+  loop-weighted priority would fit; not settled).  Pointer locals are
+  often in address registers (MMAP_$FREE's `page` in A2 from 0xE0CADE;
+  KBD_$PUT's descriptor in A2 from 0xE1CEC6), which `dpc` does not model:
+  a pointer local that is dereferenced stays in the frame.
+- Expression temporaries live across a call are spilled to the frame
+  (SMD_$BLT_U 0xE6FB1E; module-local 0xE5AA28 at 0xE5AA6C, across an
+  M$ARITH call); not this rule's business.
+
+So `dpc` also requires that the local is **never read inside a call
+argument**: every checked local assigned once at the top level and
+passed by value is in the frame, and that covers PROC1_$TS_END_CALLBACK's
+`timeslice` too.  No checked site contradicts the narrowed rule, but it
+is still fitted to two routines (Uncertain).  Locals outside it stay in
+the frame, which UID_$GEN shows is not always the original's choice.
+
+**Implemented** (`dpc-m68k` `isel.rs`, `register_locals`; bead
+domain-pascal-0wc): the narrowest rule that fits TIME_$GET_ADJUST.  A
+scalar local (1, 2 or 4 bytes) whose only references are whole reads and
+assignments of the variable, assigned exactly once, by a statement of
+the routine's own statement part (not inside an `if`, loop or `case`),
+with a value that is not a constant, read only by later statements, and
+never read inside an argument of a call (survey above),
+is a data value: the assignment computes or loads it into a new virtual
+register (`move.l (abs).l,Dn`, or the `move.w SR,Dn` of `set_sr`), its
+reads use that register, and the allocator gives it a register like any
+other value (12.4 R1-R3; D1 at 0xE16AB4).  Its frame slot stays
+allocated (`dpc-sema` frame size, `link #-4`).  Every other local stays
+in its frame slot, as before, and so does every local of a routine with
+nested routines (they reach its locals through the frame, which the
+per-body analysis does not see; `dpc-ir` `scalar_locals`).  A value held
+across a call goes to a callee-saved register (12.4).  A constant assignment is excluded because
+the one register-variable constant seen, 0xE149A4, is `move.w #-1,D2`,
+not the `moveq` `dpc` uses for constants in registers (section 13).
+Unit test `register_local_rule`; golden `tests/golden/sysprog/interrupts`
+(`held_sr`); conformance `tests/conformance/time_get_adjust.pas`.
 
 ---
 

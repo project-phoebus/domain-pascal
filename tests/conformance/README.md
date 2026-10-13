@@ -56,7 +56,10 @@ a bare `rts`, then status stubs with by-address slots used once in A0,
 A1, A2, a status store then a constant boolean result), `xns_idp_get_stats.pas`
 (XNS_IDP_$GET_STATS 0xE18FD6: the status slot in A1 after the dead A0)
 and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
-D0`).
+D0`).  Interrupt built-ins (codegen-patterns 10, 12.5; beads
+domain-pascal-5aw.7, -0wc): `time_get_adjust.pas` (TIME_$GET_ADJUST
+0xE16AA8, the last routine of TIME_: `disable`/`enable` around a read
+into a local held in D1 across two M$ARITH calls, `link #-4`).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.

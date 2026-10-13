@@ -756,3 +756,163 @@ fn optimisation_attributes_are_rejected() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// Predeclared routines of chapter 4 and Appendix E (bead domain-pascal-0wc)
+// ---------------------------------------------------------------------
+
+/// The value of the last statement's assigned expression in routine `p`.
+fn assigned_value(prog: &Program, name: &str, k: usize) -> Option<ConstValue> {
+    let stmts = &routine(prog, name).body.as_ref().unwrap().stmts;
+    match &stmts[k].kind {
+        StmtKind::Assign { value, .. } => value.value.clone(),
+        s => panic!("not an assignment: {s:?}"),
+    }
+}
+
+/// "Sizeof" (p. 4-181), "Firstof" (p. 4-87), "Lastof" (p. 4-106) fold to
+/// constants, of types and of variables; "Succ"/"Pred" (pp. 4-191, 4-147),
+/// "Max"/"Min" (pp. 4-111, 4-113) and "In_range" (p. 4-104) fold on
+/// constant arguments.
+#[test]
+fn inquiry_builtins_fold() {
+    let p = module(
+        "type color = (red, green, blue); small = -7..7;
+              rec = record a: integer32; b: integer; c: char; end;
+              vec = array[2..9] of integer;
+         const n = sizeof(rec) + 1;
+         var w: integer; l: integer32; c: color; ch: char; b: boolean; v: vec;
+         procedure p; begin
+           w := sizeof(v); w := sizeof('wildebeest'); w := n; l := sizeof(integer32);
+           c := lastof(color); c := succ(red); c := pred(blue);
+           w := firstof(small); w := lastof(small); w := firstof(v); w := lastof(vec);
+           w := lastof(integer); l := lastof(integer32); ch := lastof(char);
+           b := firstof(boolean); b := succ(false); b := pred(true);
+           w := max(3, 9); w := min(-3, 9); b := in_range(small(5)); b := in_range(small(8));
+           ch := succ('a');
+         end;",
+    );
+    let c = ty(&p, "color");
+    let want = [
+        ConstValue::Int(16),
+        ConstValue::Int(10),
+        ConstValue::Int(9),
+        ConstValue::Int(4),
+        ConstValue::Enum { ty: c, ord: 2 },
+        ConstValue::Enum { ty: c, ord: 1 },
+        ConstValue::Enum { ty: c, ord: 1 },
+        ConstValue::Int(-7),
+        ConstValue::Int(7),
+        ConstValue::Int(2),
+        ConstValue::Int(9),
+        ConstValue::Int(32767),
+        ConstValue::Int(2147483647),
+        ConstValue::Char(255),
+        ConstValue::Bool(false),
+        ConstValue::Bool(true),
+        ConstValue::Bool(false),
+        ConstValue::Int(9),
+        ConstValue::Int(-3),
+        ConstValue::Bool(true),
+        ConstValue::Bool(false),
+        ConstValue::Char(b'b'),
+    ];
+    for (k, w) in want.iter().enumerate() {
+        assert_eq!(
+            assigned_value(&p, "p", k).as_ref(),
+            Some(w),
+            "statement {k}"
+        );
+    }
+}
+
+#[test]
+fn run_time_builtins_are_typed() {
+    let p = module(
+        "type small = -7..7;
+         var w: integer; l: integer32; s: small; b: boolean; sr: integer;
+         procedure p; begin
+           w := succ(w); l := pred(l); l := max(w, l); b := in_range(s);
+           sr := set_sr(16#2700); sr := set_sr(16#F8FF); sr := set_sr(sr);
+           discard(set_sr(sr));
+         end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    assert!(matches!(
+        &stmts[7].kind,
+        StmtKind::Builtin {
+            builtin: crate::program::Builtin::Discard,
+            args,
+        } if args.len() == 1
+    ));
+    // max of a word and a longword is a longword.
+    let StmtKind::Assign { value, .. } = &stmts[2].kind else {
+        panic!()
+    };
+    assert_eq!(value.ty, p.types.builtins.integer32);
+}
+
+#[test]
+fn builtin_misuse() {
+    // TODO(ref-question) Q17: p. 4-87 gives -32767 for integer.
+    assert_err(
+        "module m; var w: integer; procedure p; begin w := firstof(integer) end;",
+        "`firstof` of integer",
+    );
+    assert_err(
+        "module m; type r = record case k: integer of 1: (a: integer); 2: (b: integer32); end;
+         var w: integer; procedure p; begin w := sizeof(r, 1) end;",
+        "`sizeof` of a variant record with tags",
+    );
+    assert_err(
+        "module m; type r = record a: integer; end; var x: r; w: integer;
+         procedure p; begin w := lastof(x) end;",
+        "`lastof` of",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin w := lastof(w + 1) end;",
+        "needs a type name or a variable",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin discard end;",
+        "`discard` takes 1 argument",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin w := discard(w) end;",
+        "`discard` is a procedure",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin set_sr(w) end;",
+        "`set_sr` is a function",
+    );
+    assert_err(
+        "module m; var l: integer32; procedure p; begin l := set_sr(l) end;",
+        "16-bit integer argument",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin w := set_sr(16#10000) end;",
+        "16-bit integer argument",
+    );
+    assert_err(
+        "module m; var w: integer; c: char; procedure p; begin w := max(w, c) end;",
+        "`max` needs two ordinal or pointer arguments",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin w := min(w) end;",
+        "`min` takes 2 argument(s)",
+    );
+    assert_err(
+        "module m; var w: integer; procedure p; begin disable(w) end;",
+        "`disable` takes no arguments",
+    );
+}
+
+/// The predeclared names are in the outermost scope: a unit may declare
+/// its own `min` or `max`.
+#[test]
+fn builtins_can_be_redeclared() {
+    module(
+        "var max: integer; procedure p; begin max := 1 end;
+         function min(a, b: integer): integer; begin min := a end;",
+    );
+}

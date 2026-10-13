@@ -257,7 +257,7 @@ pub enum StmtKind {
     },
     /// A procedure call (or a function called for effect is rejected).
     Call(Call),
-    /// A predeclared procedure (`disable`, `enable`).
+    /// A predeclared procedure (`disable`, `enable`, `discard`).
     Builtin {
         builtin: Builtin,
         args: Vec<Expr>,
@@ -453,4 +453,26 @@ pub enum Builtin {
     /// `addr(x)` ("Addr", p. 4-13): the address of variable `x`, a
     /// `univ_ptr` value.
     Addr,
+    /// `set_sr(newsr)` (Appendix E, p. E-5): read the status register,
+    /// install `newsr`, return the old value (a word).
+    SetSr,
+    /// `discard(exp)` ("Discard", p. 4-62): evaluate `exp`, drop its value.
+    /// A procedure.
+    Discard,
+    /// `succ(x)` ("Succ", p. 4-191).
+    Succ,
+    /// `pred(x)` ("Pred", p. 4-147).
+    Pred,
+    /// `max(a, b)` ("Max", p. 4-111).
+    Max,
+    /// `min(a, b)` ("Min", p. 4-113).
+    Min,
+    /// `in_range(x)` ("In_range", p. 4-104): `x` lies in its type's range.
+    InRange,
+    /// `sizeof(x)` ("Sizeof", p. 4-181); always folded to a constant.
+    Sizeof,
+    /// `firstof(x)` ("Firstof", p. 4-87); always folded to a constant.
+    Firstof,
+    /// `lastof(x)` ("Lastof", p. 4-106); always folded to a constant.
+    Lastof,
 }

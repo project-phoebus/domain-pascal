@@ -408,6 +408,7 @@ mod tests {
             data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),
+            scalar_locals: Vec::new(),
             body: Vec::new(),
             span,
         }

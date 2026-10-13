@@ -206,6 +206,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
             ));
         }
     }
+    s.reg_locals = register_locals(f);
     s.seq(f, &f.body, Tail::END)?;
     if f.data_absolute
         && s.out.iter().any(|i| {
@@ -452,6 +453,209 @@ fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg,
     Ok(apart)
 }
 
+/// The scalar locals of `f` held in a data register rather than in their
+/// frame slot (codegen-patterns 12.5; ref 6.4.24, p. 6-29: at `-opt 3`
+/// "Global register allocation allows local variables to have their values
+/// placed in machine registers").  The slot stays allocated: TIME_$GET_ADJUST
+/// 0xE16AA8 `link.w A6,#-4` never touches its frame, its local is in D1
+/// (0xE16AB4..0xE16AD6).
+///
+/// The rule (**Uncertain**, the narrowest one that fits the sites):
+/// a local whose only references are whole reads and assignments of the
+/// variable, assigned exactly once, by a statement of the routine's own
+/// statement part (not inside an `if`, loop or `case`), with a value that
+/// is not a constant, read only by later statements of that part, and
+/// never read inside an argument of a call.
+/// Fits TIME_$GET_ADJUST (D1) and PROC1_$SET_VT 0xE149B6 / PROC1_$TS_END_CALLBACK
+/// 0xE14A90 (the saved status word in D3; those assignments are inside an
+/// `if` there, which `dpc` does not yet take).  Locals that do not fit
+/// stay in the frame, as before.  The image keeps a local passed by value
+/// in its frame even when it is assigned once at the top level
+/// (codegen-patterns 12.5 survey: MMAP_$FREE 0xE0CAEC, PROC2_$DELIVER_PENDING
+/// 0xE3F53E, LOG_$SHUTDN 0xE175AE, TTY_$K_FLUSH_INPUT 0xE1C0BE,
+/// SIO2681_$SET_BREAK 0xE1D134), and PROC1_$TS_END_CALLBACK's
+/// `timeslice` (0xE14AFE `move.w (-8,A6),-(SP)`).  A constant assigned to a register variable is
+/// `move.w #-1,D2` at 0xE149A4, not the `moveq` of [`Selector::load_const`]:
+/// such locals stay in the frame too.
+fn register_locals(f: &Function) -> Vec<i32> {
+    #[derive(Default)]
+    struct Refs {
+        /// (top-level statement index, nested, value is a constant)
+        stores: Vec<(usize, bool, bool)>,
+        loads: Vec<usize>,
+        other: bool,
+        /// Read inside an argument of a call.
+        arg: bool,
+    }
+    struct Walk<'a> {
+        f: &'a Function,
+        refs: Vec<Refs>,
+        top: usize,
+        /// Walking an argument of a call.
+        in_arg: bool,
+    }
+    impl Walk<'_> {
+        /// The local whose object covers frame offset `o`.
+        fn local(&self, o: i32) -> Option<usize> {
+            self.f
+                .scalar_locals
+                .iter()
+                .position(|l| o >= l.offset && o < l.offset + l.ty.bytes() as i32)
+        }
+        fn exact(&self, o: i32, w: Width) -> Option<usize> {
+            self.f
+                .scalar_locals
+                .iter()
+                .position(|l| l.offset == o && l.ty.width == w)
+        }
+        fn other(&mut self, a: &Addr) {
+            match a {
+                Addr::Frame(o) => {
+                    if let Some(k) = self.local(*o) {
+                        self.refs[k].other = true;
+                    }
+                }
+                Addr::Static(_) | Addr::Symbol { .. } => {}
+                Addr::Indirect { base, .. } => match &**base {
+                    // A local dereferenced as a pointer: not a data value.
+                    Expr::Load { addr, .. } => self.other(addr),
+                    b => self.expr(b),
+                },
+                Addr::Index { base, index, .. } => {
+                    self.other(base);
+                    self.expr(index);
+                }
+            }
+        }
+        fn expr(&mut self, e: &Expr) {
+            match e {
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ty,
+                } if self.local(*o).is_some() => match self.exact(*o, ty.width) {
+                    Some(k) => {
+                        self.refs[k].loads.push(self.top);
+                        self.refs[k].arg |= self.in_arg;
+                    }
+                    None => self.other(&Addr::Frame(*o)),
+                },
+                Expr::Load { addr, .. } | Expr::AddrOf(addr) => self.other(addr),
+                Expr::Const { .. } => {}
+                Expr::SetMember { elem, set, .. } => {
+                    self.expr(elem);
+                    self.expr(set);
+                }
+                Expr::Binary { lhs, rhs, .. } => {
+                    self.expr(lhs);
+                    self.expr(rhs);
+                }
+                Expr::Unary { operand: x, .. }
+                | Expr::Convert { value: x, .. }
+                | Expr::SetSr(x) => self.expr(x),
+                Expr::Call { call, .. } => self.call(call),
+                Expr::Test(c) => self.cond(c),
+            }
+        }
+        fn call(&mut self, c: &Call) {
+            let outer = self.in_arg;
+            self.in_arg = true;
+            for a in &c.args {
+                match a {
+                    Arg::Value { value, .. } => self.expr(value),
+                    Arg::Address { addr, .. } => self.other(addr),
+                }
+            }
+            self.in_arg = outer;
+        }
+        fn cond(&mut self, c: &IrCond) {
+            match c {
+                IrCond::Compare { lhs, rhs, .. } => {
+                    self.expr(lhs);
+                    self.expr(rhs);
+                }
+                IrCond::Test(e) => self.expr(e),
+                IrCond::Not(x) => self.cond(x),
+                IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+                    self.cond(a);
+                    self.cond(b);
+                }
+            }
+        }
+        fn stmts(&mut self, body: &[Stmt], nested: bool) {
+            for (i, st) in body.iter().enumerate() {
+                if !nested {
+                    self.top = i;
+                }
+                match &st.kind {
+                    StmtKind::Store {
+                        addr: Addr::Frame(o),
+                        value,
+                    } if self.exact(*o, value.ty().width).is_some() => {
+                        self.expr(value);
+                        let k = self.exact(*o, value.ty().width).unwrap();
+                        let konst = matches!(value, Expr::Const { .. });
+                        self.refs[k].stores.push((self.top, nested, konst));
+                    }
+                    StmtKind::Store { addr, value } => {
+                        self.other(addr);
+                        self.expr(value);
+                    }
+                    StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
+                    StmtKind::Copy { dst, src, .. } => {
+                        self.other(src);
+                        self.other(dst);
+                    }
+                    StmtKind::Call(c) => self.call(c),
+                    StmtKind::Fill { start, value, .. } => {
+                        self.other(start);
+                        self.expr(value);
+                    }
+                    StmtKind::If { cond, then_, else_ } => {
+                        self.cond(cond);
+                        self.stmts(then_, true);
+                        self.stmts(else_, true);
+                    }
+                    StmtKind::Repeat { body, until } => {
+                        self.stmts(body, true);
+                        self.cond(until);
+                    }
+                    StmtKind::Case {
+                        selector,
+                        arms,
+                        otherwise,
+                    } => {
+                        self.expr(selector);
+                        for a in arms {
+                            self.stmts(&a.body, true);
+                        }
+                        if let Some(o) = otherwise {
+                            self.stmts(o, true);
+                        }
+                    }
+                    StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
+                }
+            }
+        }
+    }
+    let mut w = Walk {
+        f,
+        refs: f.scalar_locals.iter().map(|_| Refs::default()).collect(),
+        top: 0,
+        in_arg: false,
+    };
+    w.stmts(&f.body, false);
+    f.scalar_locals
+        .iter()
+        .zip(&w.refs)
+        .filter(|(_, r)| {
+            !r.other
+                && !r.arg
+                && matches!(r.stores[..], [(at, false, false)] if r.loads.iter().all(|&l| l > at))
+        })
+        .map(|(l, _)| l.offset)
+        .collect()
+}
+
 /// A statement that is not control flow.
 fn is_simple(st: &Stmt) -> bool {
     !matches!(
@@ -494,6 +698,8 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
                 return false
             }
             StmtKind::SetResult(_) | StmtKind::Store { .. } => {}
+            StmtKind::Discard(e) if expr_has_call(e) => return false,
+            StmtKind::Discard(_) | StmtKind::Disable | StmtKind::Enable => {}
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
             // loop (codegen-patterns 5.2).
             StmtKind::Copy { bytes, .. } if *bytes <= 18 => {}
@@ -541,7 +747,9 @@ fn expr_has_call(e: &Expr) -> bool {
             };
             arith_calls(*op, lhs, rhs, *ty, true) || expr_has_call(lhs) || expr_has_call(rhs)
         }
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_has_call(x),
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+            expr_has_call(x)
+        }
         Expr::Call { .. } => true,
         Expr::Test(c) => cond_has_call(c),
     }
@@ -733,7 +941,9 @@ impl Uses<'_> {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => self.expr(x),
+            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+                self.expr(x)
+            }
             Expr::Call { call, .. } => self.call_args(call),
             Expr::Test(c) => self.cond(c),
             Expr::Const { .. } => {}
@@ -819,8 +1029,8 @@ impl Uses<'_> {
                         self.stmts(o);
                     }
                 }
-                StmtKind::Return => {}
-                StmtKind::SetResult(e) => self.expr(e),
+                StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
+                StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Store { addr, value } => {
                     self.address(addr);
                     self.expr(value);
@@ -862,9 +1072,13 @@ pub struct Selector {
     /// statements: the register, the start of its statement in `out`, and
     /// the statement ([`fresh_slot_loads`]).
     fresh: Vec<(Reg, usize, Span)>,
-    /// Parameters loaded at entry: frame offset and the (virtual) register
-    /// the value was loaded into.
+    /// Parameters loaded at entry, and locals held in a register once
+    /// assigned ([`register_locals`]): frame offset and the (virtual)
+    /// register the value is in.
     pinned: Vec<(i32, Reg)>,
+    /// The frame offsets of the locals held in a register
+    /// ([`register_locals`]).
+    reg_locals: Vec<i32>,
     /// The statement being selected is in a body of several statements
     /// and does not directly follow a call there: a slot it uses once is
     /// loaded into a fresh register ([`Self::eval_a`],
@@ -935,6 +1149,7 @@ impl Selector {
             stmt_start: 0,
             fresh: Vec::new(),
             pinned: Vec::new(),
+            reg_locals: Vec::new(),
             multi: false,
             multi_body: false,
             next_label: 1,
@@ -1060,6 +1275,27 @@ impl Selector {
                     arms,
                     otherwise,
                 } => self.case(f, selector, arms, otherwise.as_deref(), next)?,
+                // codegen-patterns 10: `disable` is `ori.w #0x700,SR`,
+                // `enable` `andi.w #0xF8FF,SR` (TIME_$GET_ADJUST 0xE16AB0,
+                // 0xE16ABA; PEB 0xE70968, 0xE70998; 10 and 7 sites in
+                // compiled code).  Statements around them keep their order:
+                // no instruction of a neighbouring statement is moved across
+                // one at the sites (the entry load 0xE16AAC stays before
+                // 0xE16AB0; TIME_$SET_TIME_OF_DAY 0xE16864 before 0xE1686A).
+                StmtKind::Disable => self.out.push(Insn::SrImm {
+                    op: AluOp::Or,
+                    imm: 0x700,
+                }),
+                StmtKind::Enable => self.out.push(Insn::SrImm {
+                    op: AluOp::And,
+                    imm: 0xf8ff,
+                }),
+                // `discard(set_sr(x))`: the old status word is read into a
+                // register nothing reads (PROC1_$TS_END_CALLBACK 0xE14AF8
+                // `move.w SR,D0; move.w D3,SR`).
+                StmtKind::Discard(e) => {
+                    self.eval(e)?;
+                }
                 StmtKind::Return => {
                     if !rest.is_empty() {
                         return Err(unsupported(
@@ -2094,6 +2330,21 @@ impl Selector {
         if matches!(addr, Addr::Frame(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
+        if let Addr::Frame(o) = addr {
+            if self.reg_locals.contains(o) {
+                // A local held in a register (codegen-patterns 12.5): its
+                // value is computed into, or loaded into, a new data
+                // register, which then stands for the variable
+                // (TIME_$GET_ADJUST 0xE16AB4 `move.l (0xe2b0fc).l,D1`;
+                // PROC1_$SET_VT 0xE149B6 `move.w SR,D3`).
+                let d = match self.eval(value)? {
+                    Val::Tmp(d) => d,
+                    v => self.in_tmp(v, ty.width)?,
+                };
+                self.pinned.push((*o, Reg::D(d)));
+                return Ok(());
+            }
+        }
         if self.update_in_place(addr, value)? {
             return Ok(());
         }
@@ -2115,7 +2366,7 @@ impl Selector {
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if *o > 0 => match self.pinned(*o) {
+            } if *o > 0 || self.pinned(*o).is_some() => match self.pinned(*o) {
                 Some(r) => Src::Ea(Ea::Reg(r)),
                 None => {
                     return Err(unsupported(
@@ -2184,6 +2435,7 @@ impl Selector {
             | Expr::Unary { .. }
             | Expr::Convert { .. }
             | Expr::Call { .. }
+            | Expr::SetSr(_)
             | Expr::Test(_) => true,
         }
     }
@@ -2678,7 +2930,50 @@ impl Selector {
                 self.span,
                 "an address (`addr`) as a value other than an argument is",
             )),
+            Expr::SetSr(x) => Ok(Val::Tmp(self.set_sr(x)?)),
         }
+    }
+
+    /// `set_sr(x)` (ref Appendix E, p. E-5): "move.w SR,d0 / move.w
+    /// newsr,SR / move.w d0,oldsr".  The image (compiled code, 5 `move.w
+    /// SR,Dn`, each followed by the write): PROC1_$SET_VT 0xE149B6..0xE149B8
+    /// `move.w SR,D3; move.w #0x2700,SR` and 0xE149F2..0xE149F4 `move.w
+    /// SR,D1; move.w D3,SR`; PROC1_$TS_END_CALLBACK 0xE14A90..0xE14A92,
+    /// 0xE14AF8..0xE14AFA; WIN_ 0xE19C36..0xE19C38 `move.w #0x2500,SR`.
+    /// The old word goes to a new data register (the lowest free, D0 at
+    /// 0xE14AF8; D1 at 0xE149F2 although D0 looks free there: Uncertain).
+    /// The new word is a constant or a value already in a register at
+    /// every site: a computed argument, or one in memory that needs an
+    /// address register, is refused (whether it is formed before or after
+    /// the `move.w SR` is not seen); one in memory that needs none is
+    /// read in place (reference only, no image site).
+    fn set_sr(&mut self, x: &Expr) -> Res<u8> {
+        let src =
+            match x {
+                Expr::Const { value, .. } => Ea::Imm(imm(*value, Width::Word)),
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } if self.pinned(*o).is_some() => Ea::Reg(self.pinned(*o).unwrap()),
+                Expr::Load { addr, .. } if !self.addr_needs_reg(addr) => {
+                    if matches!(addr, Addr::Frame(o) if *o > 0) {
+                        return Err(unsupported(
+                            self.span,
+                            "a `set_sr` argument that is a parameter not loaded at entry is",
+                        ));
+                    }
+                    self.ea_of(addr)?
+                }
+                _ => return Err(unsupported(
+                    self.span,
+                    "a computed `set_sr` argument (ordered before or after `move.w SR`: not seen, \
+                     codegen-patterns 10) is",
+                )),
+            };
+        let d = self.alloc_d()?;
+        self.out.push(Insn::MoveFromSr { dst: d });
+        self.out.push(Insn::MoveToSr { src });
+        Ok(d)
     }
 
     /// `v` in a new data register the caller may modify, at width `w`:
@@ -4388,6 +4683,10 @@ impl Selector {
     /// loaded now.
     fn ea_of(&mut self, addr: &Addr) -> Res<Ea> {
         match addr {
+            // A local held in a register (codegen-patterns 12.5).
+            Addr::Frame(o) if *o < 0 && self.pinned(*o).is_some() => {
+                Ok(Ea::Reg(self.pinned(*o).unwrap()))
+            }
             // Frame objects and arguments: `(d,A6)` (0xE148D4).
             Addr::Frame(o) => Ok(Ea::Disp(*o, FP)),
             // Other units' objects: absolute long (0xE148CE).
@@ -4455,6 +4754,7 @@ mod tests {
             data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),
+            scalar_locals: Vec::new(),
             body: body
                 .into_iter()
                 .map(|kind| Stmt { kind, span: span() })
@@ -5743,5 +6043,229 @@ mod tests {
                 "jsr\t(Q).l",
             ]
         );
+    }
+
+    fn locals(f: &mut Function, ls: &[(i32, Scalar)]) {
+        f.scalar_locals = ls
+            .iter()
+            .map(|&(offset, ty)| dpc_ir::ValueParam { offset, ty })
+            .collect();
+    }
+
+    /// codegen-patterns 10: `disable` / `enable` (TIME_$GET_ADJUST
+    /// 0xE16AB0, 0xE16ABA), `set_sr` (PROC1_$SET_VT 0xE149B6..0xE149B8),
+    /// its result stored through a register (ref p. E-5) or discarded.
+    #[test]
+    fn interrupt_builtins() {
+        let w = word();
+        let sr = |x: Expr| Expr::SetSr(Box::new(x));
+        let f = proc_(
+            0,
+            vec![
+                StmtKind::Disable,
+                store(sym("W"), sr(konst(0x2700, w))),
+                StmtKind::Enable,
+                StmtKind::Discard(sr(load(sym("W"), w))),
+            ],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "ori.w\t#0x700,%sr",
+                "move.w\t%sr,%d0",
+                "move.w\t#0x2700,%sr",
+                "move.w\t%d0,(W).l",
+                "andi.w\t#0xf8ff,%sr",
+                "move.w\t%sr,%d0",
+                "move.w\t(W).l,%sr",
+            ]
+        );
+        // A computed argument, or one that needs an address register.
+        let f = proc_(
+            0,
+            vec![StmtKind::Discard(sr(Expr::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(load(sym("W"), w)),
+                rhs: Box::new(konst(1, w)),
+                ty: w,
+            }))],
+        );
+        assert!(
+            err(&f).starts_with("a computed `set_sr` argument"),
+            "{}",
+            err(&f)
+        );
+        let mut f = proc_(0, vec![StmtKind::Discard(sr(param(8, w)))]);
+        vparams(&mut f, &[(8, w)]);
+        assert!(err(&f).starts_with("a `set_sr` argument that is a parameter"));
+    }
+
+    /// codegen-patterns 12.5: TIME_$GET_ADJUST 0xE16AA8..0xE16AE6, the
+    /// local `current_delta` (-4) in D1 across both M$ARITH calls, the
+    /// by-address slot (8) in A1, `link #-4` with the slot untouched.
+    #[test]
+    fn get_adjust_shape() {
+        let l = long();
+        let cur = || load(Addr::Frame(-4), l);
+        let div = |op| Expr::Binary {
+            op,
+            lhs: Box::new(cur()),
+            rhs: Box::new(konst(250000, l)),
+            ty: l,
+        };
+        let mut f = proc_(
+            4,
+            vec![
+                StmtKind::Disable,
+                store(Addr::Frame(-4), load(sym("TIME_$CURRENT_DELTA"), l)),
+                StmtKind::Enable,
+                store(through(8, 0), div(BinOp::Div)),
+                store(
+                    through(8, 4),
+                    Expr::Binary {
+                        op: BinOp::Mul,
+                        lhs: Box::new(div(BinOp::Mod)),
+                        rhs: Box::new(konst(4, l)),
+                        ty: l,
+                    },
+                ),
+            ],
+        );
+        f.address_params = vec![8];
+        locals(&mut f, &[(-4, l)]);
+        assert_eq!(
+            text(&f),
+            [
+                "link.w\t%fp,#-4",
+                "movea.l\t(8,%fp),%a1",
+                "ori.w\t#0x700,%sr",
+                "move.l\t(TIME_$CURRENT_DELTA).l,%d1",
+                "andi.w\t#0xf8ff,%sr",
+                "move.l\t#0x3d090,-(%sp)",
+                "move.l\t%d1,-(%sp)",
+                "jsr\t(M$DIS$LLL).l",
+                "addq.w\t#8,%sp",
+                "move.l\t%d0,(%a1)",
+                "move.l\t#0x3d090,-(%sp)",
+                "move.l\t%d1,-(%sp)",
+                "jsr\t(M$OIS$LLL).l",
+                "lsl.l\t#2,%d0",
+                "move.l\t%d0,(4,%a1)",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// Which locals [`register_locals`] holds in a register: one
+    /// assignment of a non-constant at the top level, reads after it, no
+    /// other reference.
+    #[test]
+    fn register_local_rule() {
+        let w = word();
+        let x = || load(Addr::Frame(-2), w);
+        let set = |v: Expr| store(Addr::Frame(-2), v);
+        let use_ = || store(sym("W"), x());
+        let cases: Vec<(&str, Vec<StmtKind>, bool)> = vec![
+            (
+                "one store, then reads",
+                vec![set(load(sym("V"), w)), use_(), use_()],
+                true,
+            ),
+            ("a constant", vec![set(konst(5, w)), use_()], false),
+            (
+                "two stores",
+                vec![set(load(sym("V"), w)), set(load(sym("U"), w)), use_()],
+                false,
+            ),
+            ("a read first", vec![use_(), set(load(sym("V"), w))], false),
+            (
+                "a store in an `if`",
+                vec![
+                    StmtKind::If {
+                        cond: IrCond::Test(load(sym("B"), Scalar::BOOLEAN)),
+                        then_: vec![Stmt {
+                            kind: set(load(sym("V"), w)),
+                            span: span(),
+                        }],
+                        else_: vec![],
+                    },
+                    use_(),
+                ],
+                false,
+            ),
+            (
+                "its address passed",
+                vec![
+                    set(load(sym("V"), w)),
+                    StmtKind::Call(Call {
+                        callee: Callee::External("Q".into()),
+                        args: vec![Arg::Address {
+                            addr: Addr::Frame(-2),
+                            slot: 4,
+                        }],
+                        pad: 0,
+                    }),
+                ],
+                false,
+            ),
+            (
+                "passed by value",
+                vec![
+                    set(load(sym("V"), w)),
+                    StmtKind::Call(Call {
+                        callee: Callee::External("Q".into()),
+                        args: vec![Arg::Value {
+                            value: x(),
+                            slot: 2,
+                        }],
+                        pad: 2,
+                    }),
+                ],
+                false,
+            ),
+            (
+                "read inside a function call's argument",
+                vec![
+                    set(load(sym("V"), w)),
+                    store(
+                        sym("W"),
+                        Expr::Call {
+                            call: Call {
+                                callee: Callee::External("F".into()),
+                                args: vec![Arg::Value {
+                                    value: Expr::Binary {
+                                        op: BinOp::Add,
+                                        lhs: Box::new(x()),
+                                        rhs: Box::new(konst(1, w)),
+                                        ty: w,
+                                    },
+                                    slot: 2,
+                                }],
+                                pad: 2,
+                            },
+                            ty: w,
+                        },
+                    ),
+                ],
+                false,
+            ),
+            (
+                "a byte of it read",
+                vec![
+                    set(load(sym("V"), w)),
+                    store(
+                        sym("C"),
+                        load(Addr::Frame(-1), Scalar::unsigned(Width::Byte)),
+                    ),
+                ],
+                false,
+            ),
+        ];
+        for (what, body, held) in cases {
+            let mut f = proc_(2, body);
+            locals(&mut f, &[(-2, w)]);
+            assert_eq!(register_locals(&f) == [-2], held, "{what}");
+        }
     }
 }

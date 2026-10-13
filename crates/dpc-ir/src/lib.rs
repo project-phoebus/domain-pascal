@@ -108,6 +108,12 @@ pub struct Function {
     /// `Expr::Load { addr: Addr::Frame(offset), .. }`; the list lets the
     /// selector recognise those slots (codegen-patterns 12.2).
     pub address_params: Vec<i32>,
+    /// The routine's own local variables of 1, 2 or 4 bytes (not the
+    /// function result variable, not parameter copies): frame offset and
+    /// IR type, in allocation order.  The selector may hold one in a
+    /// register instead of its frame slot (codegen-patterns 12.5); the
+    /// slot stays allocated either way.
+    pub scalar_locals: Vec<ValueParam>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -317,6 +323,17 @@ pub enum StmtKind {
     },
     /// `return` (ref "Return", p. 4-166): leave the routine.
     Return,
+    /// `disable` (ref Appendix E, p. E-3): turn the interrupt enable off
+    /// (m68k: raise the priority mask to 7, codegen-patterns 10).
+    Disable,
+    /// `enable` (ref Appendix E, p. E-4): turn the interrupt enable on
+    /// (m68k: priority mask 0, codegen-patterns 10).
+    Enable,
+    /// `discard(e)` (ref "Discard", p. 4-62) of a value that is not a
+    /// call: evaluate `e` for its effect, drop the value.  Only
+    /// [`Expr::SetSr`] is produced (`lower.rs`); a discarded function call
+    /// is a [`StmtKind::Call`].
+    Discard(Expr),
 }
 
 /// One arm of a [`StmtKind::Case`]: its labels (ordinal values of the
@@ -470,6 +487,9 @@ pub enum Expr {
     Call { call: Call, ty: Scalar },
     /// A condition as a boolean value (0xFF true, 0 false; ref 3.5.3).
     Test(Box<Cond>),
+    /// `set_sr(newsr)` (ref Appendix E, p. E-5): the processor status
+    /// word before `newsr` (a word) is installed; a signed word.
+    SetSr(Box<Expr>),
 }
 
 /// A binary integer operator.
@@ -527,6 +547,7 @@ impl Expr {
             | Expr::Convert { ty, .. }
             | Expr::Call { ty, .. } => *ty,
             Expr::SetMember { .. } | Expr::Test(_) => Scalar::BOOLEAN,
+            Expr::SetSr(_) => Scalar::signed(Width::Word),
             Expr::AddrOf(_) => Scalar::POINTER,
         }
     }

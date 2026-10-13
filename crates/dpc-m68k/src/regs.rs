@@ -307,7 +307,9 @@ pub fn access(insn: &Insn) -> Access {
         }
         Insn::TableIndex { reg, .. } => a.dst_rmw(&Ea::Reg(Reg::D(*reg))),
         Insn::TableJump { reg, .. } => a.use_(Reg::D(*reg)),
-        Insn::TableEntry { .. } => {}
+        Insn::TableEntry { .. } | Insn::SrImm { .. } => {}
+        Insn::MoveFromSr { dst } => a.def(Reg::D(*dst)),
+        Insn::MoveToSr { src } => a.read(src),
     }
     a
 }
@@ -343,7 +345,10 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::Align4
         | Insn::Branch { .. }
         | Insn::Bsr { .. }
-        | Insn::TableEntry { .. } => {}
+        | Insn::TableEntry { .. }
+        | Insn::SrImm { .. } => {}
+        Insn::MoveFromSr { dst } => fd(dst),
+        Insn::MoveToSr { src } => fe(src),
         Insn::TableIndex { reg, .. } | Insn::TableJump { reg, .. } => fd(reg),
         Insn::Pea(ea) | Insn::Jsr(ea) => fe(ea),
         Insn::Move { src, dst, .. } => {

@@ -186,6 +186,17 @@ impl<'t> Checker<'t> {
             ("disable", Builtin::Disable),
             ("enable", Builtin::Enable),
             ("addr", Builtin::Addr),
+            // Appendix E, Table E-1 (p. E-1); Table 4-7 (p. 4-10).
+            ("set_sr", Builtin::SetSr),
+            ("discard", Builtin::Discard),
+            ("succ", Builtin::Succ),
+            ("pred", Builtin::Pred),
+            ("max", Builtin::Max),
+            ("min", Builtin::Min),
+            ("in_range", Builtin::InRange),
+            ("sizeof", Builtin::Sizeof),
+            ("firstof", Builtin::Firstof),
+            ("lastof", Builtin::Lastof),
         ] {
             put(self, n, Sym::Builtin(bi));
         }
@@ -1799,6 +1810,10 @@ impl<'t> Checker<'t> {
         };
         if let ast::ExprKind::Name(id) = &callee.kind {
             match self.lookup(&id.name).cloned() {
+                // Appendix E (pp. E-3, E-4): procedures without arguments.
+                // E.2 (p. E-2): they "generate privileged instructions and
+                // may only be executed from supervisor mode"; that is a
+                // run-time matter, not a compile-time restriction.
                 Some(Sym::Builtin(b @ (Builtin::Disable | Builtin::Enable))) => {
                     if !args.is_empty() {
                         self.error(e.span, format!("`{}` takes no arguments", id.name));
@@ -1806,6 +1821,20 @@ impl<'t> Checker<'t> {
                     return StmtKind::Builtin {
                         builtin: b,
                         args: Vec::new(),
+                    };
+                }
+                // "Discard", p. 4-62: "discard (exp) {discard is a
+                // procedure.}"; exp is "Any expression, including a function
+                // call".
+                Some(Sym::Builtin(Builtin::Discard)) => {
+                    if args.len() != 1 {
+                        self.error(e.span, "`discard` takes 1 argument");
+                        return StmtKind::Empty;
+                    }
+                    let x = self.expr(&args[0]);
+                    return StmtKind::Builtin {
+                        builtin: Builtin::Discard,
+                        args: vec![x],
                     };
                 }
                 Some(Sym::Routine(r)) => {
@@ -2733,11 +2762,15 @@ impl<'t> Checker<'t> {
     fn builtin_fn(&mut self, b: Builtin, name: &str, args: &[ast::Expr], span: Span) -> Expr {
         let bi = self.types.builtins;
         let want = match b {
-            Builtin::Disable | Builtin::Enable => {
+            Builtin::Disable | Builtin::Enable | Builtin::Discard => {
                 self.error(span, format!("`{name}` is a procedure"));
                 return self.error_expr(span);
             }
+            Builtin::Sizeof | Builtin::Firstof | Builtin::Lastof => {
+                return self.type_inquiry(b, name, args, span);
+            }
             Builtin::Lshft | Builtin::Rshft | Builtin::Arshft | Builtin::Xor => 2,
+            Builtin::Max | Builtin::Min => 2,
             _ => 1,
         };
         if args.len() != want {
@@ -2833,7 +2866,113 @@ impl<'t> Checker<'t> {
                     self.int_result(xs[0].ty, bi.integer16)
                 }
             }
-            Builtin::Disable | Builtin::Enable => unreachable!(),
+            // Appendix E, p. E-5: "oldsr := set_sr(newsr); {set_sr is a
+            // function.}", expanded as "move.w SR,d0 / move.w newsr,SR /
+            // move.w d0,oldsr": a word.  TODO(ref-question): the entry
+            // gives no types for newsr and oldsr; a 2-byte integer
+            // argument and an integer16 result are the conservative
+            // reading of the `move.w`s (reference-clarifications Q16).
+            Builtin::SetSr => {
+                let word = match xs[0].value.as_ref().and_then(|v| v.ordinal()) {
+                    Some(k) => (-32768..=65535).contains(&k),
+                    None => self.types.size(xs[0].ty) == 2,
+                };
+                if !self.types.is_integer(xs[0].ty) || !word {
+                    self.error(
+                        span,
+                        "`set_sr` needs a 16-bit integer argument (ref Appendix E, p. E-5)",
+                    );
+                    return self.error_expr(span);
+                }
+                bi.integer16
+            }
+            // "Succ", p. 4-191 / "Pred", p. 4-147: x "must be an integer,
+            // Boolean, char, or enumerated expression"; the result has
+            // "the same data type as x"; "Domain Pascal does not report an
+            // error" out of range (also Appendix D, p. D-5: "Succ, pred,
+            // and chr do not detect overflow").
+            Builtin::Succ | Builtin::Pred => {
+                if !self.types.is_ordinal(xs[0].ty) {
+                    self.error(span, format!("`{name}` needs an ordinal argument"));
+                    return self.error_expr(span);
+                }
+                let up = b == Builtin::Succ;
+                if self.types.is_boolean(xs[0].ty) {
+                    // "True--even if x already equals true" (p. 4-191);
+                    // "False--even if x already equals false" (p. 4-147).
+                    if xs[0].value.is_some() {
+                        return self.konst(ConstValue::Bool(up), xs[0].ty, span);
+                    }
+                } else if let Some(k) = xs[0].value.as_ref().and_then(|v| v.ordinal()) {
+                    let k = if up { k + 1 } else { k - 1 };
+                    let v = match xs[0].value.as_ref().unwrap() {
+                        ConstValue::Int(_) => ConstValue::Int(k),
+                        ConstValue::Char(_) => ConstValue::Char(k as u8),
+                        ConstValue::Enum { ty, .. } => ConstValue::Enum { ty: *ty, ord: k },
+                        _ => unreachable!(),
+                    };
+                    return self.konst(v, xs[0].ty, span);
+                }
+                xs[0].ty
+            }
+            // "Max", p. 4-111 / "Min", p. 4-113: the arguments "must be the
+            // same type or must be convertible to the same type"; unsigned
+            // scalars and pointers compare unsigned, signed integers
+            // signed.  Reals are out of scope (CLAUDE.md 1).
+            Builtin::Max | Builtin::Min => {
+                let (a, c) = (&xs[0], &xs[1]);
+                let ty = if self.types.is_integer(a.ty) && self.types.is_integer(c.ty) {
+                    self.int_result(a.ty, c.ty)
+                } else if self.types.is_ordinal(a.ty) && self.ordinal_compatible(a.ty, c.ty) {
+                    self.types.ordinal_base(a.ty).unwrap()
+                } else if self.types.is_pointer(a.ty)
+                    && self.types.is_pointer(c.ty)
+                    && self.pointers_compatible(a.ty, c.ty)
+                {
+                    a.ty
+                } else {
+                    self.error(
+                        span,
+                        format!("`{name}` needs two ordinal or pointer arguments of one type"),
+                    );
+                    return self.error_expr(span);
+                };
+                if let (Some(x), Some(y)) = (
+                    a.value.as_ref().and_then(|v| v.ordinal()),
+                    c.value.as_ref().and_then(|v| v.ordinal()),
+                ) {
+                    let pick = if (b == Builtin::Max) == (x >= y) {
+                        a.value.clone().unwrap()
+                    } else {
+                        c.value.clone().unwrap()
+                    };
+                    if self.types.is_integer(ty) {
+                        let k = pick.ordinal().unwrap();
+                        return self.int_const(k, span);
+                    }
+                    return self.konst(pick, ty, span);
+                }
+                ty
+            }
+            // "In_range", p. 4-104: x has "a scalar (i.e., integer, Boolean,
+            // char, enumerated, or subrange) data type"; "returns true if
+            // the value of x is within its defined range".
+            Builtin::InRange => {
+                let Some((lo, hi)) = self.types.ordinal_range(xs[0].ty) else {
+                    self.error(span, "`in_range` needs a scalar argument (ref p. 4-104)");
+                    return self.error_expr(span);
+                };
+                if let Some(k) = xs[0].value.as_ref().and_then(|v| v.ordinal()) {
+                    return self.konst(ConstValue::Bool(lo <= k && k <= hi), bi.boolean, span);
+                }
+                bi.boolean
+            }
+            Builtin::Disable
+            | Builtin::Enable
+            | Builtin::Discard
+            | Builtin::Sizeof
+            | Builtin::Firstof
+            | Builtin::Lastof => unreachable!(),
         };
         Expr {
             kind: ExprKind::Builtin {
@@ -2844,6 +2983,146 @@ impl<'t> Checker<'t> {
             value: None,
             span,
         }
+    }
+
+    /// `sizeof(x)`, `firstof(x)`, `lastof(x)`: `x` is a type name or a
+    /// variable (and for `sizeof` also a constant or a string); the value
+    /// is always a compile-time constant.
+    fn type_inquiry(&mut self, b: Builtin, name: &str, args: &[ast::Expr], span: Span) -> Expr {
+        if args.is_empty() {
+            self.error(span, format!("`{name}` takes 1 argument"));
+            return self.error_expr(span);
+        }
+        if args.len() > 1 {
+            if b == Builtin::Sizeof {
+                // "Sizeof", p. 4-181: "sizeof(x, tag1, ... tagN)" gives the
+                // size of a variant record for the given tags.  How the
+                // size of one variant is rounded is not stated.
+                self.unsupported(
+                    span,
+                    "`sizeof` of a variant record with tags (ref p. 4-182)",
+                );
+            } else {
+                self.error(span, format!("`{name}` takes 1 argument"));
+            }
+            return self.error_expr(span);
+        }
+        // A type name, or an expression.
+        let (ty, value) = match &args[0].kind {
+            ast::ExprKind::Name(id) if matches!(self.lookup(&id.name), Some(Sym::Type(_))) => {
+                let Some(Sym::Type(t)) = self.lookup(&id.name).cloned() else {
+                    unreachable!()
+                };
+                (t, None)
+            }
+            _ => {
+                let x = self.expr(&args[0]);
+                if self.types.is_error(x.ty) {
+                    return self.error_expr(span);
+                }
+                // "Firstof", p. 4-87 / "Lastof", p. 4-106: "x Is either a
+                // variable or the name of a data type"; "Sizeof", p. 4-181:
+                // "a type ..., a variable, a constant, or a string".
+                let sizeof_const = b == Builtin::Sizeof && x.value.is_some();
+                if !(x.is_designator() || sizeof_const) {
+                    self.error(span, format!("`{name}` needs a type name or a variable"));
+                    return self.error_expr(span);
+                }
+                (x.ty, x.value)
+            }
+        };
+        if self.types.is_error(ty) {
+            return self.error_expr(span);
+        }
+        if b == Builtin::Sizeof {
+            // "Sizeof returns an integer equal to the number of bytes that
+            // the program uses to store x" (p. 4-181); of a string
+            // constant, its length ("SIZEOF('wildebeest')" is 10, p. 4-182).
+            let n = match (&value, self.types.kind(ty)) {
+                (Some(ConstValue::Str(s)), _) => s.len() as u32,
+                _ => self.types.size(ty),
+            };
+            return self.int_const(n as i64, span);
+        }
+        let first = b == Builtin::Firstof;
+        // The tables of "Firstof" (p. 4-87) and "Lastof" (p. 4-106).
+        let (v, vty) = match self.types.kind(ty).clone() {
+            TypeKind::Integer16 | TypeKind::Integer32 if first => {
+                // TODO(ref-question): p. 4-87 (checked in the PDF, p. 220)
+                // gives -32767 for integer/integer16 and -2147483647 for
+                // integer32, one more than the types' least values
+                // (reference-clarifications Q17).  Refused until settled.
+                self.unsupported(
+                    span,
+                    "`firstof` of integer, integer16 or integer32 (ref p. 4-87 gives -32767 and \
+                     -2147483647; open question)",
+                );
+                return self.error_expr(span);
+            }
+            TypeKind::Integer16 => (ConstValue::Int(32767), ty),
+            TypeKind::Integer32 => (ConstValue::Int(2147483647), ty),
+            TypeKind::Char => (ConstValue::Char(if first { 0 } else { 255 }), ty),
+            TypeKind::Boolean => (ConstValue::Bool(!first), ty),
+            TypeKind::Enum { consts } => (
+                ConstValue::Enum {
+                    ty,
+                    ord: if first { 0 } else { consts.len() as i64 - 1 },
+                },
+                ty,
+            ),
+            // Not in the tables; "returns the first [final] possible value
+            // of x" (pp. 4-87, 4-106): the bound of the subrange.
+            TypeKind::Subrange { base, lo, hi } => {
+                let k = if first { lo } else { hi };
+                let v = match self.types.kind(base) {
+                    TypeKind::Char => ConstValue::Char(k as u8),
+                    TypeKind::Boolean => ConstValue::Bool(k != 0),
+                    TypeKind::Enum { .. } => ConstValue::Enum { ty: base, ord: k },
+                    _ => ConstValue::Int(k),
+                };
+                (v, ty)
+            }
+            // "The lower [upper] bound of the subrange that defines the
+            // array's size": a value of the index type.
+            TypeKind::Array { index, .. } => {
+                let Some((lo, hi)) = self.types.ordinal_range(index) else {
+                    return self.error_expr(span);
+                };
+                let k = if first { lo } else { hi };
+                let base = self.types.ordinal_base(index).unwrap();
+                let v = match self.types.kind(base) {
+                    TypeKind::Char => ConstValue::Char(k as u8),
+                    TypeKind::Boolean => ConstValue::Bool(k != 0),
+                    TypeKind::Enum { .. } => ConstValue::Enum { ty: base, ord: k },
+                    _ => ConstValue::Int(k),
+                };
+                (v, index)
+            }
+            // "varying array: 1" (p. 4-87); "The maximum length of the
+            // array" (p. 4-106).
+            TypeKind::Varying { max, .. } => {
+                return self.int_const(if first { 1 } else { max as i64 }, span);
+            }
+            _ => {
+                self.error(
+                    span,
+                    format!(
+                        "`{name}` of {} (ref pp. 4-87, 4-106: not a record, file, set, \
+                         floating-point or pointer type)",
+                        self.types.display(ty)
+                    ),
+                );
+                return self.error_expr(span);
+            }
+        };
+        if let ConstValue::Int(k) = v {
+            if self.types.kind(vty) == &TypeKind::Integer16
+                || self.types.kind(vty) == &TypeKind::Integer32
+            {
+                return self.int_const(k, span);
+            }
+        }
+        self.konst(v, vty, span)
     }
 
     // -----------------------------------------------------------------

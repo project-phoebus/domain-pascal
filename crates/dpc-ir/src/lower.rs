@@ -214,6 +214,7 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
             .filter(|prm| prm.passing() == Passing::ByAddress)
             .map(|prm| prm.slot_offset)
             .collect(),
+        scalar_locals: scalar_locals(p, r),
         body,
         span: r.span,
     })
@@ -491,7 +492,8 @@ fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
                 stmt_calls(st, out);
             }
         }
-        StmtKind::Return => {}
+        StmtKind::Discard(x) => e(x, out),
+        StmtKind::Return | StmtKind::Disable | StmtKind::Enable => {}
     }
 }
 
@@ -531,7 +533,9 @@ fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
             expr_calls(lhs, out);
             expr_calls(rhs, out);
         }
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_calls(x, out),
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+            expr_calls(x, out)
+        }
         Expr::Call { call, .. } => {
             out.push(call);
             call_arg_calls(call, out);
@@ -576,7 +580,8 @@ fn stmt_uses_static(s: &Stmt) -> bool {
                     .chain(otherwise.iter().flatten())
                     .any(stmt_uses_static)
         }
-        StmtKind::Return => false,
+        StmtKind::Discard(e) => expr_uses_static(e),
+        StmtKind::Return | StmtKind::Disable | StmtKind::Enable => false,
     }
 }
 
@@ -602,7 +607,9 @@ fn expr_uses_static(e: &Expr) -> bool {
         Expr::Load { addr, .. } | Expr::AddrOf(addr) => addr_uses_static(addr),
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
         Expr::Binary { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_uses_static(x),
+        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
+            expr_uses_static(x)
+        }
         Expr::Call { call, .. } => call_uses_static(call),
         Expr::Test(c) => cond_uses_static(c),
     }
@@ -615,6 +622,38 @@ fn addr_uses_static(a: &Addr) -> bool {
         Addr::Indirect { base, .. } => expr_uses_static(base),
         Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
     }
+}
+
+/// The routine's own scalar local variables ([`Function::scalar_locals`]):
+/// the frame variables other than the function result variable (parameter
+/// copies are not frame variables), of 1, 2 or 4 bytes.
+///
+/// None for a routine with nested routines: they may read or write its
+/// locals through the frame (ref 2.4), which the selector's per-body
+/// analysis (codegen-patterns 12.5) does not see.
+fn scalar_locals(p: &Program, r: &Routine) -> Vec<ValueParam> {
+    if !r.nested.is_empty() {
+        return Vec::new();
+    }
+    let result = r.result.as_ref().and_then(|res| res.var);
+    r.frame_vars
+        .iter()
+        .filter(|&&v| Some(v) != result)
+        .filter_map(|&v| {
+            let var = p.var(v);
+            let dpc_sema::Storage::Frame { offset } = var.storage else {
+                return None;
+            };
+            let width = Width::of_size(p.types.size(var.ty))?;
+            Some(ValueParam {
+                offset,
+                ty: Scalar {
+                    width,
+                    sign: sign_of(&p.types, var.ty),
+                },
+            })
+        })
+        .collect()
 }
 
 /// The parameters passed by value, in parameter order (ref 5.2 Table 5-1,
@@ -795,10 +834,57 @@ impl Cx<'_> {
                          codegen-patterns 7) is",
                     ))
                 }
+                // Appendix E, pp. E-3, E-4.
+                SStmtKind::Builtin {
+                    builtin: b @ (Builtin::Disable | Builtin::Enable),
+                    ..
+                } => out.push(Stmt {
+                    kind: if *b == Builtin::Disable {
+                        StmtKind::Disable
+                    } else {
+                        StmtKind::Enable
+                    },
+                    span: s.span,
+                }),
+                SStmtKind::Builtin {
+                    builtin: Builtin::Discard,
+                    args,
+                } => out.push(self.discard(s, &args[0])?),
                 _ => return Err(unsupported(s.span, "this statement is")),
             }
         }
         Ok(out)
+    }
+
+    /// `discard(x)` ("Discard", p. 4-62): "explicitly throws away the
+    /// value of its exp".
+    ///
+    /// - A function call is called like a procedure, its result register
+    ///   left unread: a call statement (ref 5.2; the result register,
+    ///   codegen-patterns 3).
+    /// - `set_sr(x)` (Appendix E, p. E-5) installs `x`; the old status word
+    ///   is read into a register that is not used (PROC1_$SET_VT 0xE149F2
+    ///   `move.w SR,D1; move.w D3,SR`; PROC1_$TS_END_CALLBACK 0xE14AF8
+    ///   `move.w SR,D0; move.w D3,SR`).
+    /// - Any other expression: what the original emitted (nothing, or the
+    ///   evaluation) is not known.
+    fn discard(&self, s: &SStmt, x: &SExpr) -> Res<Stmt> {
+        let kind = match &x.kind {
+            ExprKind::Call(c) if x.value.is_none() => {
+                StmtKind::Call(call(self.p, &self.r.code_section, c, x.span)?)
+            }
+            ExprKind::Builtin {
+                builtin: Builtin::SetSr,
+                ..
+            } => StmtKind::Discard(value_of(self.p, x)?),
+            _ => {
+                return Err(unsupported(
+                    x.span,
+                    "`discard` of an expression that is not a function call or `set_sr` is",
+                ))
+            }
+        };
+        Ok(Stmt { kind, span: s.span })
     }
 
     /// `case expr of ... otherwise ... end` (ref "Case", pp. 4-36..4-37).
@@ -1575,6 +1661,46 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
         Builtin::Ord if !p.types.is_boolean(args[0].ty) => Ok(convert(value_of(p, &args[0])?, ty)),
         // `chr(n)` (p. 4-39): "number & 16#FF", the low byte.
         Builtin::Chr => Ok(convert(value_of(p, &args[0])?, ty)),
+        // Appendix E, p. E-5: the new status word, a word.
+        Builtin::SetSr => {
+            let w = Scalar::signed(Width::Word);
+            let x = match args[0].value.as_ref().and_then(|v| v.ordinal()) {
+                // A constant as the 16 bits it puts in SR (16#2700,
+                // 0xE149B8; up to 16#FFFF).
+                Some(k) => Expr::Const {
+                    value: k as u16 as i16 as i64,
+                    ty: w,
+                },
+                None => operand(p, &args[0], w)?,
+            };
+            Ok(Expr::SetSr(Box::new(x)))
+        }
+        // "Succ", p. 4-191 / "Pred", p. 4-147: "The numerical value equal to
+        // x + 1" ("x-1"), the next (previous) character or identifier, with
+        // no range check (Appendix D, p. D-5); the result has x's type.
+        // Booleans: true (false) whatever x is; a constant x is folded by
+        // `dpc-sema`, a computed one is not supported (whether x is
+        // evaluated is not known).
+        Builtin::Succ | Builtin::Pred if !p.types.is_boolean(args[0].ty) => Ok(Expr::Binary {
+            op: if b == Builtin::Succ {
+                IrBinOp::Add
+            } else {
+                IrBinOp::Sub
+            },
+            lhs: Box::new(convert(value_of(p, &args[0])?, ty)),
+            rhs: Box::new(Expr::Const { value: 1, ty }),
+            ty,
+        }),
+        // "Max", p. 4-111 / "Min", p. 4-113 / "In_range", p. 4-104: the
+        // image's `x := min(x, c)`-shaped sites (codegen-patterns 12.4 R8,
+        // 0xE2F08A `move.w #504,D0; cmp.w D0,D2; ble.s; move.w D0,D2`) are
+        // indistinguishable from an `if`; no site that must be `max`,
+        // `min` or `in_range` is known (codegen-patterns 10.1).
+        Builtin::Max | Builtin::Min | Builtin::InRange => Err(unsupported(
+            e.span,
+            "a run-time `max`, `min` or `in_range` (no image pattern known, codegen-patterns \
+             10.1) is",
+        )),
         _ => Err(unsupported(e.span, "this predeclared function is")),
     }
 }

@@ -131,3 +131,11 @@ Tests:
 - `frame/empty` - codegen-patterns 2: empty procedures as a bare `rts`,
   with and without parameters (TIME_$Q_INIT 0xE16C5C, MT_$RELEASE
   0xE70A4C), in a unit with data, the module end padded with 0x2048.
+- `sysprog/interrupts` - codegen-patterns 10, 12.5, 1.1: `disable` /
+  `enable` as `ori.w #0x700,SR` / `andi.w #0xF8FF,SR` (TIME_$GET_ADJUST
+  0xE16AB0, 0xE16ABA), `set_sr` as `move.w SR,Dn; move.w newsr,SR`
+  (PROC1_$SET_VT 0xE149B6), its result stored, held in a local's register
+  or discarded (0xE149F2), `discard` of a function call.
+- `expr/builtins` - codegen-patterns 10.1, 13, 8: `sizeof`, `firstof`,
+  `lastof`, `succ`, `pred`, `max`, `min`, `in_range` folded to constants;
+  `succ`/`pred` of a variable as `addq`/`subq` in place (0xE00B3E).

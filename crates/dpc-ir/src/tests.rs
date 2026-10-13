@@ -1779,3 +1779,85 @@ end;
         "{lhs:?}"
     );
 }
+
+/// Appendix E (pp. E-3..E-5) and "Discard" (p. 4-62): `disable`/`enable`
+/// statements, `set_sr` values, `discard` of a call or of `set_sr`
+/// (codegen-patterns 10; bead domain-pascal-5aw.7).
+#[test]
+fn interrupt_builtins_lower() {
+    let m = lower_src(
+        "module m;
+var w: extern integer; d: extern integer32;
+function ext_$f(x: integer): integer; options(val_param, extern);
+procedure p;
+var old: integer;
+begin
+  disable;
+  old := set_sr(16#F8FF);
+  enable;
+  discard(set_sr(old));
+  discard(ext_$f(w));
+end;
+",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    let k: Vec<&StmtKind> = f.body.iter().map(|s| &s.kind).collect();
+    assert_eq!(k[0], &StmtKind::Disable);
+    let w = Scalar::signed(Width::Word);
+    assert_eq!(
+        k[1],
+        &StmtKind::Store {
+            addr: Addr::Frame(-2),
+            value: Expr::SetSr(Box::new(Expr::Const {
+                value: -0x701,
+                ty: w
+            })),
+        }
+    );
+    assert_eq!(k[2], &StmtKind::Enable);
+    assert_eq!(
+        k[3],
+        &StmtKind::Discard(Expr::SetSr(Box::new(Expr::Load {
+            addr: Addr::Frame(-2),
+            ty: w
+        })))
+    );
+    assert!(matches!(k[4], StmtKind::Call(_)));
+    assert_eq!(f.scalar_locals, vec![ValueParam { offset: -2, ty: w }]);
+}
+
+/// "Succ"/"Pred" (pp. 4-191, 4-147) of a run-time value: `x + 1` / `x -
+/// 1` at x's type; `max`, `min`, `in_range` of run-time values and
+/// `discard` of other expressions are refused (no image pattern).
+#[test]
+fn ordinal_builtins_lower() {
+    let e = result_value(
+        "module m; var w: extern integer;
+function f: integer; begin f := succ(w) end;",
+    );
+    assert!(matches!(
+        e,
+        Expr::Binary {
+            op: BinOp::Add,
+            ty: Scalar {
+                width: Width::Word,
+                ..
+            },
+            ..
+        }
+    ));
+    for (src, needle) in [
+        ("w := max(w, 3)", "`max`, `min` or `in_range`"),
+        ("b := in_range(s)", "`max`, `min` or `in_range`"),
+        ("b := succ(b)", "this predeclared function is"),
+        ("discard(w + 1)", "`discard` of an expression"),
+    ] {
+        let e = errs(&format!(
+            "module m; type small = 1..5; var w: extern integer; b: extern boolean;
+             s: extern small;
+procedure p; begin {src} end;"
+        ));
+        assert!(e.iter().any(|m| m.contains(needle)), "{src}: {e:?}");
+    }
+}

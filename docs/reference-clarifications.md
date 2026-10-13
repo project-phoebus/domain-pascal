@@ -146,6 +146,29 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
     (16-bit shift, then sign-extend) or 256000 (32-bit shift)?
     *Current: refused (review of domain-pascal-5aw.13).*
 
+Raised by the built-ins work (beads domain-pascal-5aw.7, -0wc; no bead
+filed for the questions yet).  Conservative choices are implemented and
+marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`.
+
+16. **Appendix E, "Set_sr", p. E-5 (PDF p. 568, checked).** "oldsr :=
+    set_sr(newsr); {set_sr is a function.}  ... oldsr The old value of the
+    hardware status register.  newsr The new value of the hardware status
+    register."  The entry names no types for `newsr` and `oldsr`.  Is the
+    argument any 16-bit integer (`integer`, `0..65535`)?  Is the result
+    `integer` (signed) or unsigned, and what happens when it is widened?
+    *Current: a 16-bit integer argument, or a constant in -32768..65535
+    taken as its 16 bits; an `integer16` result (the `move.w`s of the
+    expansion).*
+17. **"Firstof", p. 4-87 (PDF p. 220, checked).** The table gives
+    "integer or integer16 | -32767" and "integer32 | -2147483647", one
+    above the least values of the types (3.2.1, p. 3-4: integer16 is
+    -32768..32767; `ordinal_range` in `dpc-sema`).  Is `firstof(integer)`
+    really -32767, or -32768?  *Current: `firstof` of integer, integer16
+    and integer32 is refused; subranges, enumerations, char, boolean and
+    arrays are supported.*  Related, not a question: neither table lists
+    subranges; `dpc` gives a subrange's bound, after "returns the first
+    [final] possible value of x" (pp. 4-87, 4-106).
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and

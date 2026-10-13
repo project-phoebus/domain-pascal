@@ -519,6 +519,23 @@ pub enum Insn {
         target: u32,
         back: bool,
     },
+    /// `ori.w #imm,%sr` / `andi.w #imm,%sr` (`op` Or or And): the
+    /// interrupt built-ins `disable` (`007c 0700`) and `enable` (`027c
+    /// f8ff`), TIME_$GET_ADJUST 0xE16AB0 / 0xE16ABA (codegen-patterns 10).
+    SrImm {
+        op: AluOp,
+        imm: i64,
+    },
+    /// `move.w %sr,%dn` (`40c0+n`): `set_sr` reads the old status word
+    /// (PROC1_$SET_VT 0xE149B6 `40c3`).
+    MoveFromSr {
+        dst: u8,
+    },
+    /// `move.w src,%sr` (`46c0+ea`): `set_sr` installs the new one
+    /// (0xE149B8 `46fc 2700`, 0xE149F4 `46c3`).
+    MoveToSr {
+        src: Ea,
+    },
     /// Pseudo-instruction: pad to a 4-byte boundary with the 2-byte no-op
     /// `movea.l A0,A0` (0x2048), as the compiler does before a loop head
     /// (codegen-patterns 7: 0xE00ED6 before the `dbf` loop at 0xE00ED8;
@@ -668,6 +685,9 @@ impl fmt::Display for Insn {
                 Reg::D(*dst)
             ),
             Insn::Swap(d) => write!(f, "swap\t{}", Reg::D(*d)),
+            Insn::SrImm { op, imm } => write!(f, "{}i.w\t#{},%sr", op.name(), num(*imm)),
+            Insn::MoveFromSr { dst } => write!(f, "move.w\t%sr,{}", Reg::D(*dst)),
+            Insn::MoveToSr { src } => write!(f, "move.w\t{src},%sr"),
             Insn::BtstImm { bit, dst } => write!(f, "btst\t#{bit},{dst}"),
             Insn::TableIndex { reg, table } => {
                 write!(f, "move.w\t({table}f,%pc,{r}.w),{r}", r = Reg::D(*reg))
@@ -725,7 +745,9 @@ impl Insn {
             Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
             Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::Unary { size, dst, .. } => 2 + dst.ext_len(*size),
-            Insn::Ext { .. } | Insn::Shift { .. } | Insn::Swap(_) => 2,
+            Insn::Ext { .. } | Insn::Shift { .. } | Insn::Swap(_) | Insn::MoveFromSr { .. } => 2,
+            Insn::SrImm { .. } => 4,
+            Insn::MoveToSr { src } => 2 + src.ext_len(Size::W),
             Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
             Insn::BtstImm { dst, .. } => 4 + dst.ext_len(Size::B),
             // One opcode word and the brief extension word.
@@ -1203,6 +1225,26 @@ mod len_tests {
                 },
                 2,
             ), // 0xE5C6D6 000a
+            (
+                Insn::SrImm {
+                    op: AluOp::Or,
+                    imm: 0x700,
+                },
+                4,
+            ), // 0xE16AB0 007c 0700
+            (Insn::MoveFromSr { dst: 3 }, 2), // 0xE149B6 40c3
+            (
+                Insn::MoveToSr {
+                    src: Ea::Imm(0x2700),
+                },
+                4,
+            ), // 0xE149B8 46fc 2700
+            (
+                Insn::MoveToSr {
+                    src: Ea::Reg(Reg::D(3)),
+                },
+                2,
+            ), // 0xE149F4 46c3
         ];
         for (i, n) in cases {
             assert_eq!(i.len_at(0), n, "{i}");
