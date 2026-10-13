@@ -1125,7 +1125,8 @@ end;
                         name: "X".into(),
                         offset: 0
                     },
-                    slot: 4
+                    slot: 4,
+                    writable: true
                 },
                 Arg::Value {
                     value: Expr::Const {
@@ -2033,7 +2034,8 @@ fn uplevel_references() {
                 }),
                 offset: 0
             },
-            slot: 4
+            slot: 4,
+            writable: true
         }
     );
     let StmtKind::Call(c) = &first.body[1].kind else {
@@ -2295,4 +2297,35 @@ end;
         e[0].contains("a `for` index variable that is not a local"),
         "{e:?}"
     );
+}
+
+/// `Arg::Address::writable` (bead domain-pascal-pe9): set for `var`,
+/// `out` and `in out` parameters (ref 5.3.1 p. 5-6, 5.3.2 p. 5-7), clear
+/// for value and `in` parameters passed by address (ref 5.2 p. 5-4).
+#[test]
+fn by_address_arguments_writable_by_mode() {
+    let m = lower_src(
+        "module m;
+var x: extern integer;
+procedure q(var a: integer; out b: integer; in out c: integer; in d: integer; e: integer);
+  extern;
+procedure p;
+begin
+  q(x, x, x, x, x);
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let w: Vec<bool> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address { writable, .. } => *writable,
+            Arg::Value { .. } => panic!("{a:?}"),
+        })
+        .collect();
+    assert_eq!(w, [true, true, true, false, false]);
 }

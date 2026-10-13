@@ -84,6 +84,9 @@ pub(crate) struct Checker<'t> {
     /// 7.2.3 Method 3, p. 7-6).
     pre_defined: HashSet<String>,
     next_with: u32,
+    /// The `with` records ([`WithId`]) that are, or are part of, an `in`
+    /// parameter ([`Checker::in_param_part`]).
+    in_withs: HashSet<u32>,
     loop_depth: u32,
     /// `%natural_alignment` in effect (ref 4.7 p. 4-57); push stack.
     natural: bool,
@@ -114,6 +117,7 @@ impl<'t> Checker<'t> {
             pending_pointers: Vec::new(),
             pre_defined: HashSet::new(),
             next_with: 0,
+            in_withs: HashSet::new(),
             loop_depth: 0,
             natural: false,
             align_stack: Vec::new(),
@@ -1808,8 +1812,36 @@ impl<'t> Checker<'t> {
                     self.error(target.span, "Assignment to IN argument (ref 5.3.2)");
                 }
             }
+        } else if self.in_param_part(&t) {
+            self.unsupported(
+                target.span,
+                "assigning to a field or element of an `in` parameter (ref 5.3.2 p. 5-7: the \
+                 routine \"is not allowed to alter its value\")",
+            );
         }
         t
+    }
+
+    /// Whether designator `e` is an `in` parameter or a field or element of
+    /// one (not an object it points to).  ref 5.3.2 p. 5-7: the routine
+    /// "is not allowed to alter its value".  Callers rely on that: the
+    /// original holds a parameter in a register across a call that takes
+    /// its address for an `in` or value parameter (codegen-patterns 12.2,
+    /// MST_$TOUCH 0xE0DEFC), and so does `dpc` (bead domain-pascal-pe9);
+    /// such a callee must not write the caller's object through any path.
+    fn in_param_part(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var { var, .. } => match self.vars[var.0 as usize].storage {
+                Storage::Param { index } => {
+                    let owner = self.vars[var.0 as usize].owner.unwrap();
+                    self.routines[owner.0 as usize].params[index].mode == ParamMode::In
+                }
+                _ => false,
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.in_param_part(base),
+            ExprKind::WithRecord(w) => self.in_withs.contains(&w.0),
+            _ => false,
+        }
     }
 
     fn call_stmt(&mut self, e: &ast::Expr) -> StmtKind {
@@ -1942,6 +1974,9 @@ impl<'t> Checker<'t> {
             let r = self.expr(&it.record);
             let wid = WithId(self.next_with);
             self.next_with += 1;
+            if self.in_param_part(&r) {
+                self.in_withs.insert(wid.0);
+            }
             let rec = match self.types.kind(r.ty) {
                 TypeKind::Record(rec) => Some(rec.clone()),
                 TypeKind::Error => None,
@@ -2687,6 +2722,16 @@ impl<'t> Checker<'t> {
         let mut out = Vec::new();
         for (a, (mode, univ, ty, c)) in args.iter().zip(params) {
             let x = self.expr(a);
+            if matches!(mode, ParamMode::Var | ParamMode::Out | ParamMode::InOut)
+                && self.in_param_part(&x)
+            {
+                // ref 5.3.2 p. 5-7; see [`Checker::in_param_part`].
+                self.unsupported(
+                    a.span,
+                    "passing an `in` parameter (or a part of one) to a `var`, `out` or `in out` \
+                     parameter",
+                );
+            }
             if !univ {
                 match mode {
                     // ref 5.3.1 p. 5-6: "You must pass a variable as an
@@ -2813,6 +2858,11 @@ impl<'t> Checker<'t> {
                 }
                 if !xs[0].is_designator() {
                     self.error(span, "`addr` needs a variable (ref p. 4-13)");
+                    return self.error_expr(span);
+                }
+                if self.in_param_part(&xs[0]) {
+                    // ref 5.3.2 p. 5-7; see [`Checker::in_param_part`].
+                    self.unsupported(span, "`addr` of an `in` parameter (or a part of one)");
                     return self.error_expr(span);
                 }
                 bi.univ_ptr

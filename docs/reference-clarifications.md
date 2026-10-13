@@ -168,6 +168,15 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`.
     arrays are supported.*  Related, not a question: neither table lists
     subranges; `dpc` gives a subrange's bound, after "returns the first
     [final] possible value of x" (pp. 4-87, 4-106).
+18. **5.3.2, p. 5-7, `in` parameters.** "the routine is not allowed to
+    alter its value. If the called routine does attempt to change its
+    value (that is, use the parameter on the left side of an assignment
+    statement), the compiler issues an 'Assignment to IN argument'
+    error."  Is assigning to a *field or element* of an `in` parameter,
+    a `with` on it, passing it to a `var`/`out`/`in out` parameter, or
+    `addr` of it also that error (or allowed)?  *Current: whole
+    assignment is the error; the other forms are refused as "not
+    supported yet" (review of domain-pascal-pe9).*
 
 ## Reference errata noticed (no ruling needed)
 

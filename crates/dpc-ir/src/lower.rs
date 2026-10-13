@@ -10,7 +10,7 @@ use dpc_sema::{
     Builtin, Call as SCall, Callee as SCallee, Expr as SExpr, ExprKind, Program, Routine,
     RoutineId, Stmt as SStmt, StmtKind as SStmtKind, Storage, VarId,
 };
-use dpc_syntax::ast::{BinOp, ForDir, UnOp};
+use dpc_syntax::ast::{BinOp, ForDir, ParamMode, UnOp};
 use dpc_syntax::{Diagnostic, Span};
 
 use dpc_sema::types::{TypeId, TypeKind, TypeTable};
@@ -2860,6 +2860,11 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                 Arg::Address {
                     addr: addr_of(p, &a.expr)?,
                     slot,
+                    // ref 5.3.1 p. 5-6; 5.3.2 p. 5-7 (bead domain-pascal-pe9).
+                    writable: matches!(
+                        prm.mode,
+                        ParamMode::Var | ParamMode::Out | ParamMode::InOut
+                    ),
                 }
             }
         });

@@ -613,3 +613,133 @@ end;
     assert!(asm.contains("\tbsr.s\tM_$LATE\n"), "{asm}");
     assert!(asm.contains("\t.globl\tM_$LATE\n"), "{asm}");
 }
+
+/// Bead domain-pascal-pe9: a by-value parameter whose address is passed
+/// to a `var`, `out` or `in out` parameter may change in the call; it is
+/// not held in a register from the entry (codegen-patterns 12.2,
+/// AREA_$TOUCH 0xE094FE / 0xE095BA), so every use reads its slot.
+const ESCAPE: &str = "module m;
+var g, h: integer;
+procedure ext_$var(var v: integer); extern;
+procedure ext_$out(out v: integer); extern;
+procedure ext_$io(in out v: integer); extern;
+procedure ext_$in(in v: integer); extern;
+procedure ext_$val(v: integer); extern;
+procedure ext_$CALL(x: integer); options(val_param);
+begin
+  h := x + 1;
+  ext_$CALL(x);
+  g := x + 2;
+end;
+";
+
+/// The routine `name`'s text in `asm`.
+fn routine<'a>(asm: &'a str, name: &str) -> &'a str {
+    let start = asm.find(&format!("\n{name}:\n")).unwrap();
+    let end = asm[start..].find("\trts\n").unwrap();
+    &asm[start..start + end]
+}
+
+#[test]
+fn parameter_passed_to_var_out_in_out_is_reread() {
+    for callee in ["ext_$var", "ext_$out", "ext_$io"] {
+        let src = ESCAPE.replace("ext_$CALL(x)", &format!("{callee}(x)"));
+        let asm = compile_with("pe9_var", &src, &[]).unwrap();
+        let r = routine(&asm, "EXT_$CALL");
+        let after = &r[r.find("\tjsr\t").unwrap()..];
+        // The value after the call comes from the slot, not a register
+        // loaded before it.
+        assert!(after.contains("\tmove.w\t(8,%fp),%d0\n"), "{callee}: {r}");
+        assert!(!r.contains("%d2"), "{callee}: {r}");
+    }
+}
+
+#[test]
+fn parameter_passed_to_value_or_in_is_held() {
+    // A value or `in` parameter passed by address (the default
+    // convention) is not written by the callee (ref 5.2 p. 5-4, 5.3.2 p.
+    // 5-7); the original holds the parameter in its register across such
+    // calls (MST_$TOUCH 0xE0DD4E, 0xE0DEFC, 0xE0E07A).
+    for callee in ["ext_$in", "ext_$val"] {
+        let src = ESCAPE.replace("ext_$CALL(x)", &format!("{callee}(x)"));
+        let asm = compile_with("pe9_in", &src, &[]).unwrap();
+        let r = routine(&asm, "EXT_$CALL");
+        assert!(r.contains("\tmove.w\t(8,%fp),%d2\n"), "{callee}: {r}");
+        let after = &r[r.find("\tjsr\t").unwrap()..];
+        assert!(!after.contains("(8,%fp)"), "{callee}: {r}");
+    }
+}
+
+#[test]
+fn stale_parameter_store_is_not_compiled() {
+    // The exact shape of the bead: `h := x; ext_$set(x); g := x` stored
+    // the register loaded at entry after the call.  Storing a parameter
+    // read from its slot is not supported yet; it must not compile to
+    // the stale store.
+    let src = "module m;
+var g, h: integer;
+procedure ext_$set(var v: integer); extern;
+procedure p(x: integer); options(val_param);
+begin
+  h := x;
+  ext_$set(x);
+  g := x;
+end;
+";
+    let (code, err) = compile_with("pe9_stale", src, &[]).unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("storing a parameter that was not loaded at entry"),
+        "{err}"
+    );
+}
+
+#[test]
+fn pointer_parameter_passed_to_var_is_reread() {
+    let src = "module m;
+type ip = ^integer;
+var g, h: integer;
+procedure ext_$p(var p: ip); extern;
+procedure p(q: ip); options(val_param);
+begin
+  h := q^;
+  ext_$p(q);
+  g := q^;
+end;
+";
+    // Read from its slot at each use, the pointer is a slot used once
+    // per statement in a body with calls, which is not supported yet; it
+    // used to be held in A2 across the call.
+    match compile_with("pe9_ptr", src, &[]) {
+        Ok(asm) => {
+            let r = routine(&asm, "P");
+            let after = &r[r.find("\tjsr\t").unwrap()..];
+            assert!(after.contains("(8,%fp),%a0\n"), "{r}");
+        }
+        Err((code, err)) => {
+            assert_eq!(code, Some(1));
+            assert!(err.contains("used once"), "{err}");
+        }
+    }
+}
+
+#[test]
+fn local_passed_to_var_is_reread() {
+    // Locals whose address is passed are never register locals
+    // (codegen-patterns 12.5; `register_locals`).
+    let src = "module m;
+var g: integer;
+procedure ext_$set(var v: integer); extern;
+procedure p(n: integer); options(val_param);
+var t: integer;
+begin
+  t := n + 1;
+  ext_$set(t);
+  g := t;
+end;
+";
+    let asm = compile_with("pe9_local", src, &[]).unwrap();
+    let r = routine(&asm, "P");
+    let after = &r[r.find("\tjsr\t").unwrap()..];
+    assert!(after.contains("\tmove.w\t(-2,%fp),(%a5)\n"), "{r}");
+}

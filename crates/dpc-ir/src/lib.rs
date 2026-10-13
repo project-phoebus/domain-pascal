@@ -524,7 +524,21 @@ pub enum Arg {
     Value { value: Expr, slot: u32 },
     /// The address of the object at `addr` (the default convention, and
     /// the `var`-like modes).
-    Address { addr: Addr, slot: u32 },
+    ///
+    /// `writable`: the parameter is `var`, `out` or `in out`, so the callee
+    /// may change the object behind the caller's back (ref 5.3.1, p. 5-6:
+    /// "whatever happens to y in addc happens also to x"; 5.3.2, p. 5-7).
+    /// False for a value or `in` parameter passed by address: the callee
+    /// copies a value parameter (ref 5.2, p. 5-4, "by making a local copy
+    /// of the argument") and may not assign an `in` one (5.3.2, p. 5-7,
+    /// "Assignment to IN argument").  The selector never holds an object
+    /// passed this way in a register across the call (bead
+    /// domain-pascal-pe9; codegen-patterns 12.2).
+    Address {
+        addr: Addr,
+        slot: u32,
+        writable: bool,
+    },
 }
 
 impl Arg {

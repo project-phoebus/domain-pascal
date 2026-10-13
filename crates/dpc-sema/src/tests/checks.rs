@@ -376,6 +376,50 @@ fn assignment_to_in_parameter() {
     );
 }
 
+/// Bead domain-pascal-pe9: a caller holds a parameter in a register
+/// across a call that passes its address to an `in` parameter
+/// (codegen-patterns 12.2), so no path in the callee may write it (ref
+/// 5.3.2 p. 5-7).  Writing what an `in` pointer points to is allowed.
+#[test]
+fn in_parameter_parts_are_not_written() {
+    let rec = "type r = record a, b, c: integer; end; ip = ^integer;";
+    for (body, msg) in [
+        (
+            "x.a := 1",
+            "assigning to a field or element of an `in` parameter",
+        ),
+        (
+            "with x do a := 1",
+            "assigning to a field or element of an `in` parameter",
+        ),
+        ("s(x.a)", "passing an `in` parameter"),
+        ("s(y)", "passing an `in` parameter"),
+        ("t(x)", "passing an `in` parameter"),
+        ("discard(addr(y))", "`addr` of an `in` parameter"),
+    ] {
+        assert_err(
+            &format!(
+                "module m; {rec} procedure s(var v: integer); extern; \
+                 procedure t(out v: univ r); extern; \
+                 procedure p(in x: r; in y: integer); begin {body} end;"
+            ),
+            msg,
+        );
+    }
+    // Nested: the enclosing routine's `in` parameter.
+    assert_err(
+        &format!(
+            "module m; {rec} procedure s(var v: integer); extern; \
+             procedure p(in y: integer); procedure q; begin s(y) end; begin q end;"
+        ),
+        "passing an `in` parameter",
+    );
+    module(&format!(
+        "{rec} procedure s(var v: integer); extern; \
+         procedure p(in q: ip; in y: integer); var z: integer; begin q^ := y; s(q^); z := y end;"
+    ));
+}
+
 #[test]
 fn var_parameter_needs_variable_of_same_type() {
     assert_err(

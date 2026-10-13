@@ -2948,6 +2948,41 @@ kinds from the C in `../source/domain_os`.
     implemented); elsewhere it is not settled.
   - The same register is also kept for a slot used more than once when
     calls intervene: the status pointer, 9.
+- *A by-value parameter whose own slot is passed by address* (bead
+  domain-pascal-pe9; survey of every compiled routine that both `pea`s a
+  `(d,A6)` slot, d >= 8, and reads that slot into a D register: 22
+  pairs; scratch script, not kept):
+  - **to a value or `in` parameter (the default convention): held in its
+    register across the call** (Verified at the sites; the callee copies
+    a value parameter, ref 5.2 p. 5-4, and may not assign an `in` one,
+    5.3.2 p. 5-7).  MST_$TOUCH 0xE0DD40: `(8)`→D3 at 0xE0DD4E, `pea
+    (8,A6)` to PEB_$TOUCH at 0xE0DEFC, D3 pushed at 0xE0E07A;
+    AST_$PMAP_ASSOC 0xE042B0 (`pea (0xe,A6)` to MMAP_$INSTALL_LIST at
+    0xE0440A, D3 stored at 0xE04414); AST_$ASSOC_AREA 0xE04672 likewise
+    (D2); 0xE4094C (`pea (0xa,A6)` to PROC1_$GET_INFO at 0xE40972, D3
+    pushed at 0xE40990); 0xE3366C (to ASKNODE_$INTERNET_INFO, 0xE3368C;
+    D2 at 0xE336A8); ROUTE_$SEND_USER_PORT 0xE87CBC (to
+    NET_IO_$COPY_PACKET; D2 at 0xE87CD0).  AST_$PURIFY 0xE0567A, whose
+    parameter `(0xc)` lives in D5 and is changed there (`andi.w
+    #0x7fff,D5` at 0xE05AA8), first writes D5 back to the slot (0xE05B28
+    `move.w D5,(0xc,A6)`) and then passes `pea (0xc,A6)` to
+    REM_FILE_$PURIFY (which only reads it, `rem_file/purify.c`), and
+    keeps using D5 after (0xE05B70).  This relies on the callee: a
+    `dpc`-compiled callee does not take value parameters by address yet
+    (refused), and `dpc-sema` refuses any write to an `in` parameter or a
+    field or element of one: assignment (whole: "Assignment to IN
+    argument", ref 5.3.2 p. 5-7; part, `with` included: not supported),
+    passing it to a `var`, `out` or `in out` parameter, and `addr`
+    (`Checker::in_param_part`).
+  - **to a `var` parameter: not loaded at entry; read from the slot after
+    the call** (one site): AREA_$TOUCH 0xE094FE loads `(8)`, `(0xe)`,
+    `(0x16)` at entry (0xE0950C..0xE09514) but not `(0xc)`, passes `pea
+    (0xc,A6)` to the module-local 0xE0939C (`area_$find_entry_by_uid`,
+    whose `bste_ptr` is a `var` word it rewrites,
+    `area/area_internal.h`) at 0xE095A6, and loads `move.w (0xc,A6),D4`
+    right after that call (0xE095BA), holding D4 to the end.  No site was
+    found that holds such a parameter in a register across a call that
+    may write it.
 - *A held value is copied before arithmetic:* BAT_$GET_BAT_STEP 0xE3BB68
   `move.w D0,D1; mulu.w #0x234,D1`; module-local 0xE46498 `move.w D0,D1;
   add.w D1,D1`.  **Implemented** (section 8, operands): a value held in a
@@ -2985,7 +3020,16 @@ the body has no branches and no calls, and is rejected otherwise, except
 in a simple statement right after a call in a body that loaded nothing
 at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2).  A parameter that is only pushed as a whole argument is not
 "read" for this rule: it is pushed from the frame at each call (0xE00EBE,
-0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).  A one-statement body keeps its
+0xE00EDE; AST_$SET_ATTRIBUTE 0xE053DA).  A parameter whose slot the body
+passes to a `var`, `out` or `in out` parameter, or takes with `addr`,
+anywhere in the routine is never loaded at entry and is read from its
+slot at each use (bead domain-pascal-pe9: it used to be held in a
+register that went stale across the call; `escaped_frame_objects`,
+`dpc_ir::Arg::Address::writable`); passed to a value or `in` parameter
+it is held as before (MST_$TOUCH above).  **Not reproduced:**
+AREA_$TOUCH's load of the parameter into a register right after the
+last such call (0xE095BA); and storing it (`g := x`) is refused like
+any parameter not loaded at entry.  A one-statement body keeps its
 own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
 TIME_$Q_FLUSH_QUEUE stay byte-identical).  A function body of several
 statements is compiled only when it loads nothing at entry and its
@@ -3715,6 +3759,15 @@ assignment inside a loop, and the body makes no call (fitted to
 straight into it.  Other pointer locals stay in the frame.  Unit test
 `loop_pointer_local_rule`; golden `tests/golden/loops/while` (`whl_$walk`);
 conformance `tests/conformance/disk_set_chain_status.pas`.
+
+**Address-taken locals (audit, bead domain-pascal-pe9).**  Neither rule
+holds a local whose address the body passes or takes: an argument passed
+by address (any mode) or `addr` makes the reference "other" than a whole
+read or assignment (`register_locals`), or an addressed reference
+(`loop_pointer_locals`, which also excludes bodies with calls); a `for`
+index that is addressed is refused (`dpc-ir` `check_for_indices`).  So
+such a local is read from its slot after the call (driver test
+`local_passed_to_var_is_reread`).  For parameters see 12.2.
 
 ---
 

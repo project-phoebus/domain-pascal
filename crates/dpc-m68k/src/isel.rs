@@ -840,6 +840,56 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
+/// The frame offsets at which `f`'s body lets an object's address escape
+/// so that it may be written behind the selector's back (bead
+/// domain-pascal-pe9; codegen-patterns 12.2): passed by address to a
+/// `var`, `out` or `in out` parameter ([`Arg::Address::writable`]), or
+/// taken with `addr` ([`Expr::AddrOf`], ref p. 4-13: the pointer may be
+/// stored and written through at any later point).  The offset is that of
+/// the addressed object's frame root (a field or element of a frame
+/// object counts as its object's base offset plus the displacement).
+///
+/// A value or `in` argument passed by address (the default convention)
+/// does not escape: the callee copies a value parameter (ref 5.2, p.
+/// 5-4) and may not assign an `in` one (5.3.2, p. 5-7), and the original
+/// holds such a parameter in its register across the call (MST_$TOUCH
+/// 0xE0DD40: `(8,A6)` in D3 from 0xE0DD4E, `pea (8,A6)` to PEB_$TOUCH at
+/// 0xE0DEFC, D3 pushed at 0xE0E07A; AST_$PMAP_ASSOC 0xE0440A `pea
+/// (0xe,A6)` to MMAP_$INSTALL_LIST, D3 stored at 0xE04414; PROC1_$GET_INFO
+/// from 0xE40972, ASKNODE_$INTERNET_INFO from 0xE33688, ...).
+fn escaped_frame_objects(f: &Function) -> Vec<i32> {
+    fn root(a: &Addr) -> Option<i32> {
+        match a {
+            Addr::Frame(o) => Some(*o),
+            Addr::Index { base, .. } => root(base),
+            // Another frame (the enclosing routine's objects are never
+            // held in a register, [`Function::uplevel_refs`]), the unit's
+            // data, or the object a pointer points to.
+            Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Indirect { .. } => {
+                None
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&f.body, &mut |n| match n {
+        Node::Call(c) => {
+            for a in &c.args {
+                if let Arg::Address {
+                    addr,
+                    writable: true,
+                    ..
+                } = a
+                {
+                    out.extend(root(addr));
+                }
+            }
+        }
+        Node::Expr(Expr::AddrOf(a)) => out.extend(root(a)),
+        Node::Expr(_) | Node::Addr(_) => {}
+    });
+    out
+}
+
 /// Whether `e` reads the frame object at `off` as a value.
 fn expr_reads_frame(e: &Expr, off: i32) -> bool {
     let mut hit = false;
@@ -2954,6 +3004,23 @@ impl Selector {
         // `(0x14,A6)`, read by its nested 0xE15888 as `(0x14,A1)`, in the
         // frame, 0xE15962 and 0xE159C4).
         params.retain(|&(o, _)| !self.is_uplevel(o));
+        // A parameter whose address the body passes to a `var`, `out` or
+        // `in out` parameter, or takes with `addr`, may change behind a
+        // register: it is read from the frame at each use (bead
+        // domain-pascal-pe9).  AREA_$TOUCH 0xE094FE loads its `(8)`,
+        // `(0xe)` and `(0x16)` slots at entry (0xE0950C..0xE09514) but not
+        // `(0xc,A6)`, which it passes by address to the module-local
+        // 0xE0939C (`area_$find_entry_by_uid`, a `var` word it rewrites)
+        // at 0xE095A6 and reads after that call, 0xE095BA `move.w
+        // (0xc,A6),D4`.  That the original then held it in D4 (a load
+        // after the last such call) is not reproduced: `dpc` reads it
+        // from the frame at every use, or refuses where that code is not
+        // known (codegen-patterns 12.2).
+        let escaped = escaped_frame_objects(f);
+        params.retain(|&(o, ty)| {
+            let n = ty.map_or(4, |t| t.bytes() as i32);
+            !escaped.iter().any(|&e| o <= e && e < o + n)
+        });
         for (offset, ty) in params {
             let mine: Vec<ParamUse> = uses
                 .iter()
@@ -3613,7 +3680,7 @@ impl Selector {
                     }
                 }
             }
-            Arg::Address { addr, slot: 4 } => match addr {
+            Arg::Address { addr, slot: 4, .. } => match addr {
                 // An enclosing routine's object: `pea (d,An)` off the
                 // static link (0xE13648 `pea (-0x40,A4)` in 0xE1360C).
                 Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) => {
@@ -6852,7 +6919,11 @@ mod tests {
     #[test]
     fn value_and_address_pushes() {
         let after = || ext("Q", vec![], 0);
-        let addr = |a: Addr| Arg::Address { addr: a, slot: 4 };
+        let addr = |a: Addr| Arg::Address {
+            addr: a,
+            slot: 4,
+            writable: true,
+        };
         // After a call, so that the statement may take A0.
         let f = proc_(
             4,
@@ -7171,6 +7242,7 @@ mod tests {
                         args: vec![Arg::Address {
                             addr: Addr::Frame(-2),
                             slot: 4,
+                            writable: true,
                         }],
                         pad: 0,
                         link: None,
@@ -7273,10 +7345,12 @@ mod tests {
                     Arg::Address {
                         addr: Addr::Frame(-4),
                         slot: 4,
+                        writable: true,
                     },
                     Arg::Address {
                         addr: Addr::Frame(-6),
                         slot: 4,
+                        writable: true,
                     },
                 ],
                 0,
@@ -7581,6 +7655,7 @@ mod tests {
                             offset: 0,
                         },
                         slot: 4,
+                        writable: true,
                     }],
                     0,
                 ),
@@ -7766,5 +7841,109 @@ mod tests {
         let t = body_text(&f);
         assert_eq!(t[..2], ["move.w\t(0xa,%fp),%d0", "move.w\t%d0,(W).l"]);
         assert!(t.contains(&"cmpi.w\t#3,(8,%fp)".to_string()), "{t:?}");
+    }
+
+    /// Bead domain-pascal-pe9: a by-value parameter whose address is
+    /// passed to a `var`, `out` or `in out` parameter is read from its
+    /// slot at each use, not held from the entry (AREA_$TOUCH 0xE094FE,
+    /// 0xE095A6 / 0xE095BA); passed to a value or `in` parameter, it is
+    /// held (MST_$TOUCH 0xE0DD4E, 0xE0DEFC, 0xE0E07A).
+    #[test]
+    fn parameters_passed_by_address_for_writing_stay_in_the_frame() {
+        let body = |writable| {
+            vec![
+                store(sym("W"), load(Addr::Frame(10), word())),
+                StmtKind::If {
+                    cond: IrCond::Compare {
+                        op: Rel::Eq,
+                        lhs: load(Addr::Frame(8), word()),
+                        rhs: konst(3, word()),
+                    },
+                    then_: vec![Stmt {
+                        kind: store(sym("X"), konst(0, word())),
+                        span: span(),
+                    }],
+                    else_: vec![],
+                },
+                ext(
+                    "P",
+                    vec![Arg::Address {
+                        addr: Addr::Frame(8),
+                        slot: 4,
+                        writable,
+                    }],
+                    0,
+                ),
+                StmtKind::If {
+                    cond: IrCond::Compare {
+                        op: Rel::Eq,
+                        lhs: load(Addr::Frame(8), word()),
+                        rhs: konst(4, word()),
+                    },
+                    then_: vec![Stmt {
+                        kind: store(sym("X"), konst(0, word())),
+                        span: span(),
+                    }],
+                    else_: vec![],
+                },
+                store(sym("W"), load(Addr::Frame(10), word())),
+            ]
+        };
+        let mut f = proc_(0, body(false));
+        vparams(&mut f, &[(8, word()), (10, word())]);
+        let t = body_text(&f);
+        assert_eq!(
+            t[..3],
+            [
+                "movem.l\t%d2-%d3,-(%sp)",
+                "move.w\t(8,%fp),%d2",
+                "move.w\t(0xa,%fp),%d3"
+            ]
+        );
+        assert!(t.contains(&"cmpi.w\t#4,%d2".to_string()), "{t:?}");
+        let mut f = proc_(0, body(true));
+        vparams(&mut f, &[(8, word()), (10, word())]);
+        let t = body_text(&f);
+        assert_eq!(t[1..3], ["move.w\t(0xa,%fp),%d2", "move.w\t%d2,(W).l"]);
+        assert!(t.contains(&"cmpi.w\t#3,(8,%fp)".to_string()), "{t:?}");
+        assert!(t.contains(&"cmpi.w\t#4,(8,%fp)".to_string()), "{t:?}");
+        assert!(!t.iter().any(|l| l.contains("%d3")), "{t:?}");
+    }
+
+    /// What lets a frame object's address escape for writing (bead
+    /// domain-pascal-pe9): `var`-like arguments and `addr`, through
+    /// fields and elements; not value or `in` arguments, other frames or
+    /// the objects pointers point to.
+    #[test]
+    fn escaped_frame_objects_cases() {
+        let arg = |addr, writable| Arg::Address {
+            addr,
+            slot: 4,
+            writable,
+        };
+        let f = proc_(
+            0,
+            vec![
+                ext("P", vec![arg(Addr::Frame(8), true)], 0),
+                ext("P", vec![arg(Addr::Frame(10), false)], 0),
+                ext("P", vec![val(Expr::AddrOf(Addr::Frame(-4)))], 0),
+                ext(
+                    "P",
+                    vec![arg(
+                        Addr::Index {
+                            base: Box::new(Addr::Frame(-20)),
+                            index: Box::new(load(Addr::Frame(12), word())),
+                            scale: 2,
+                            offset: 0,
+                        },
+                        true,
+                    )],
+                    0,
+                ),
+                ext("P", vec![arg(Addr::Enclosing(8), true)], 0),
+                ext("P", vec![arg(through(14, 0), true)], 0),
+            ],
+        );
+        assert_eq!(escaped_frame_objects(&f), [8, -4, -20]);
     }
 }
