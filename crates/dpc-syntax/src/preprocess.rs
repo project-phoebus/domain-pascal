@@ -466,6 +466,7 @@ impl Pp<'_> {
         }
         match self.sm.load(path) {
             Ok(id) => {
+                self.sm.set_included_from(id, span);
                 let lexer = Lexer::new(self.sm, id);
                 self.files.push(FileState { lexer, key });
             }
@@ -1048,6 +1049,12 @@ mod tests {
         let a1 = &r.out.tokens[1];
         assert!(r.sm.file(a1.span.file).path.ends_with("ins/a.ins.pas"));
         assert_eq!(r.sm.span_text(a1.span), "a1");
+        // ... and the file records the %include that loaded it.
+        let b1 = &r.out.tokens[2];
+        let chain = r.sm.include_chain(b1.span.file);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].file, a1.span.file);
+        assert_eq!(r.sm.file(chain[1].file).path, PathBuf::from("t.pas"));
         // Eof belongs to the main file.
         let eof = r.out.tokens.last().unwrap();
         assert_eq!(r.sm.file(eof.span.file).path, PathBuf::from("t.pas"));

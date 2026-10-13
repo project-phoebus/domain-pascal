@@ -122,8 +122,45 @@ fn semantic_errors_have_positions() {
     let out = dpc().arg(&src).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        err,
+        format!(
+            "{}:4:3: error: undefined identifier `nosuch`\n\
+             4 |   nosuch := 1;\n\
+             \x20 |   ^~~~~~\n",
+            src.display()
+        )
+    );
+}
+
+#[test]
+fn diagnostics_in_include_files_show_the_include_chain() {
+    let dir = scratch("diagnostics_in_include_files_show_the_include_chain");
+    std::fs::write(dir.join("a.ins.pas"), "const\n\tk = nosuch;\n").unwrap();
+    let src = dir.join("m.pas");
+    std::fs::write(&src, "module m;\n%include 'a.ins.pas';\n").unwrap();
+    let out = dpc()
+        .arg("-I")
+        .arg(&dir)
+        .arg("--check-only")
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    let first = err.lines().next().unwrap();
     assert!(
-        err.contains("bad.pas:4:3: error: undefined identifier `nosuch`"),
+        first.ends_with("a.ins.pas:2:6: error: undefined identifier `nosuch`"),
+        "{err}"
+    );
+    let rest: Vec<&str> = err.lines().skip(1).collect();
+    assert_eq!(
+        rest,
+        [
+            "2 |         k = nosuch;",
+            "  |             ^~~~~~",
+            &format!("note: in file included from {}:2:1", src.display()),
+        ],
         "{err}"
     );
 }

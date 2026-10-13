@@ -218,7 +218,9 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     .filter(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('='))
                     .ok_or_else(|| format!("--data-base: want SECTION=SYMBOL, got `{v}`"))?;
                 if data_bases.iter().any(|(s, _)| s.eq_ignore_ascii_case(sect)) {
-                    return Err(format!("--data-base: section `{sect}` given more than once"));
+                    return Err(format!(
+                        "--data-base: section `{sect}` given more than once"
+                    ));
                 }
                 data_bases.push((sect.to_string(), sym.to_string()));
             }
@@ -360,13 +362,13 @@ fn main() -> ExitCode {
     let mut warnings = Vec::new();
     let result = compile(&args, &mut sm, &mut warnings);
     for d in &warnings {
-        eprintln!("{}", d.render(&sm, PROG));
+        eprintln!("{}", d.render_with_source(&sm, PROG));
     }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(diags) => {
             for d in &diags {
-                eprintln!("{}", d.render(&sm, PROG));
+                eprintln!("{}", d.render_with_source(&sm, PROG));
             }
             ExitCode::FAILURE
         }

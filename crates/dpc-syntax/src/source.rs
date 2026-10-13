@@ -39,6 +39,9 @@ pub struct SourceFile {
     pub text: Rc<str>,
     /// Byte offset of the start of each line.
     line_starts: Vec<u32>,
+    /// The `%include` directive that loaded this file, `None` for the main
+    /// file (for "in file included from" notes).
+    pub included_from: Option<Span>,
 }
 
 impl SourceFile {
@@ -54,6 +57,7 @@ impl SourceFile {
             path,
             text: text.into(),
             line_starts,
+            included_from: None,
         }
     }
 
@@ -64,6 +68,21 @@ impl SourceFile {
             line: line as u32 + 1,
             col: offset - self.line_starts[line] + 1,
         }
+    }
+
+    /// Byte range `[start, end)` of 1-based line `line`, without its line
+    /// terminator (`\n` or `\r\n`).
+    pub fn line_range(&self, line: u32) -> (usize, usize) {
+        let i = line as usize - 1;
+        let start = self.line_starts[i] as usize;
+        let mut end = self
+            .line_starts
+            .get(i + 1)
+            .map_or(self.text.len(), |&s| s as usize - 1);
+        if end > start && self.text.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
+        (start, end)
     }
 }
 
@@ -88,6 +107,24 @@ impl SourceMap {
     pub fn load(&mut self, path: &Path) -> std::io::Result<FileId> {
         let text = std::fs::read_to_string(path)?;
         Ok(self.add(path, text))
+    }
+
+    /// Record that file `id` was loaded by the `%include` directive at
+    /// `from`.
+    pub fn set_included_from(&mut self, id: FileId, from: Span) {
+        self.files[id.0 as usize].included_from = Some(from);
+    }
+
+    /// The `%include` directives that led to file `id`, innermost first
+    /// (empty for the main file).
+    pub fn include_chain(&self, id: FileId) -> Vec<Span> {
+        let mut chain = Vec::new();
+        let mut cur = self.file(id).included_from;
+        while let Some(span) = cur {
+            chain.push(span);
+            cur = self.file(span.file).included_from;
+        }
+        chain
     }
 
     pub fn file(&self, id: FileId) -> &SourceFile {
@@ -120,5 +157,31 @@ mod tests {
         assert_eq!(f.line_col(3), LineCol { line: 2, col: 1 });
         assert_eq!(f.line_col(6), LineCol { line: 3, col: 1 });
         assert_eq!(f.line_col(7), LineCol { line: 4, col: 1 });
+    }
+
+    #[test]
+    fn line_ranges() {
+        let mut sm = SourceMap::new();
+        let id = sm.add("t.pas", "ab\r\ncd\n\nx".to_string());
+        let f = sm.file(id);
+        assert_eq!(f.line_range(1), (0, 2));
+        assert_eq!(f.line_range(2), (4, 6));
+        assert_eq!(f.line_range(3), (7, 7));
+        assert_eq!(f.line_range(4), (8, 9));
+    }
+
+    #[test]
+    fn include_chain_innermost_first() {
+        let mut sm = SourceMap::new();
+        let m = sm.add("m.pas", "%include 'a';".to_string());
+        let a = sm.add("a", "%include 'b';".to_string());
+        let b = sm.add("b", String::new());
+        sm.set_included_from(a, Span::new(m, 0, 8));
+        sm.set_included_from(b, Span::new(a, 0, 8));
+        assert!(sm.include_chain(m).is_empty());
+        assert_eq!(
+            sm.include_chain(b),
+            [Span::new(a, 0, 8), Span::new(m, 0, 8)]
+        );
     }
 }

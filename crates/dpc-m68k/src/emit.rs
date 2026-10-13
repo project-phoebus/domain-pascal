@@ -924,10 +924,7 @@ mod tests {
         let s = with(&[("WIRED_DATA", "PROC1_$DATA")]).unwrap();
         let plain = with(&[]).unwrap();
         // the code is the same; no block, no define'd global
-        assert_eq!(
-            s.split("filler\n").next(),
-            plain.split("filler\n").next()
-        );
+        assert_eq!(s.split("filler\n").next(), plain.split("filler\n").next());
         let tail = s.split("filler\n").nth(1).unwrap();
         assert_eq!(
             tail,
