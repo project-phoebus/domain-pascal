@@ -3530,6 +3530,10 @@ settled, each from this one routine, in image order:
    last use of a parameter, which dpc's pinned registers never are.
    0xE0102C..0xE01034 orders a zero- and a sign-extension the same way
    (`clr.l D0; move.w D2,D1; move.w (0x46e,A5),D0; ext.l D1`).
+   **Done but for the order** (beads domain-pascal-g5q.5, -g5q.7): `dpc`
+   gives `clr.l D1; move.w D0,D1; clr.l D2; move.w (A0),D2; add.l D1,D2`,
+   the sum in the operand that is not reused (golden `regalloc/cse`); the
+   order of the four is the scheduler's (12.4 R9, bead domain-pascal-g5q.8).
 3. `move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2; bls` (0xE177AE): the
    register-held constant (section 7.1, Uncertain).
 4. `move.w #0x400,D3; sub.w D0,D3; move.w D3,(A0)` (0xE177C4): `0x400 -
@@ -3540,7 +3544,12 @@ settled, each from this one routine, in image order:
    2)`), reusing the zero-extended `offset` from item 2 across the `if`
    (common subexpression), interleaved with the word count `move.w
    (A0),D0; lsr.w #1,D0` (an instruction scheduler), and `buffer` loaded
-   into A2 first (0xE177CC) while A1 is free (section 12.2).
+   into A2 first (0xE177CC) while A1 is free (section 12.2).  The reuse
+   and `move.l D1,Dn; add.l (0x14,A5),Dn` are **done** (bead
+   domain-pascal-g5q.7, 12.4 R7; golden `regalloc/cse` with an integer
+   variable); the type transfers `integer32(ptr)` and `univ_ptr(...)` are
+   not lowered (`dpc-ir` refuses the expression: the worker's first
+   diagnostic), and the register (D3, item 4/R6) and the order are not.
 6. `subq.w #1,D0; bmi.s <end>; lea (2,A1),A0; lea (2,A2),A1; <head:>
    move.w (-2,A0),(-2,A1); addq.l #2,A1; addq.l #2,A0; dbf D0,<head>`
    (0xE177DC..0xE177F2): a `for` loop over 1-based arrays with a run-time
@@ -3979,7 +3988,9 @@ implemented; beads domain-pascal-5aw.11, -8aj).**
 #### Common subexpressions
 
 **R7. Operator results are reused across statements, across an `if` and
-its join, and past stores to other objects (Verified at the sites).**
+its join, and past stores to other objects (Verified at the sites; the
+kill rules Verified by survey with the limits below; implemented, bead
+domain-pascal-g5q.7).**
 - 0xE177A6 `clr.l D1; move.w D0,D1`, the zero-extended `offset`, is
   reused at 0xE177D0 after the `if` (0xE177A6..0xE177CA) and after the
   stores through `actual_len`.
@@ -3987,7 +3998,99 @@ its join, and past stores to other objects (Verified at the sites).**
   at 0xE0A994 and again at 0xE0A9B0, past the stores at 0xE0A994 and
   0xE0A9A6 (other static arrays).
 - Two-address arithmetic goes into the operand that is not reused:
-  0xE177B4 `add.l D1,D2` keeps D1 (the CSE).
+  0xE177B4 `add.l D1,D2` keeps D1 (the CSE).  A sum of the held value and
+  a variable copies the held value and adds the variable to the copy:
+  0xE177D0..0xE177D4 `move.l D1,D3; ...; add.l (0x14,A5),D3`.
+
+*Survey* (`tools/csesurvey.py`; routines of 0x30..0x150 bytes, 1099
+analysed).  Each routine is evaluated symbolically: a register holds an
+expression over memory reads, constants and operators, with the events
+since it got it (stores, stores through a pointer, stores to one of its
+operands, calls, branches, joins, back edges).  A *reuse* is a read of a
+register holding a computed expression after such an event; *lost* is a
+computation of an expression computed before on every path but no longer
+in a register.  `agg` (the strongest event between; "sto" = the
+register's value was itself stored, i.e. a variable forwarded as in 12.5,
+not a CSE; set apart):
+
+| kind | no call: reuse / lost | after a call: reuse / lost |
+|---|---|---|
+| zero-extension (`clr.l; move.w`) | 25 / 2 (6 / 1 after a store to the operand: register-held locals, e.g. 0xE0C6AC) | 3 / 3 |
+| sign-extension (`ext.l`) | 5 / 3 | 11 / 6 |
+| product by shifts and adds | 8 / 4 (the 4: HINT_$ADD_CACHE 0xE49E12, 0xE49E24, after stores into the unit's data at a run-time index) | 8 / 8 (and 5 computed again while still held) |
+| shift (`lsl`, a scaled index) | 32 / 15 | 8 / 24 |
+| sum, difference | 23 / 13 | 25 / 162 |
+
+The model cannot tell a CSE from a register-held local (12.5) or a
+strength-reduced pointer; the sites behind the rules below were checked
+by hand.
+
+- **What is reused** (Verified at the sites): zero- and
+  sign-extensions of a variable, constant products and scaled indices of
+  a variable (FIM_$ACKNOWLEDGE 0xE0A9B0; NETWORK_$REMOVE_NET's `idx * 8`
+  in D1 at 0xE0F29C, read at 0xE0F2A4, 0xE0F2AE, 0xE0F2B4 across its
+  stores).  Sums and other operators: not checked (many hits are locals).
+- **Stores to other objects do not end a reuse**: stores to other named
+  arrays (0xE0A994, 0xE0A9A6), to an element at the same run-time index
+  (0xE0F2AA), through a pointer parameter when the operand is a parameter
+  (0xE177C0, 0xE177CA).
+- **What ends it** (the "lost" sites with no call, checked): a store to
+  the operand itself (0xE4B388, after `bchg #0,(31,A0)` writes the low
+  byte of the word `(30,A0)`); a store into the unit's data at a run-time
+  index or through a pointer when the operand is in the unit's data
+  (0xE53462: `(5464,A5)` scaled again after stores through `lea
+  (0,A5,D3.l),A0`; 0xE6E924, 0xE6E932, 0xE6E940; NETLOG_$LOG_IT
+  0xE71C0E; HINT_$ADD_CACHE 0xE49E0C..0xE49E14); a variable of the enclosing routine is read again anyway
+  (R8; MST_ 0xE30B5C).  The other "lost" sites are the first `lsl` of a
+  ×12 that a ×4 of the same variable shared (TIME_$WAIT 0xE165D8,
+  MSG_$WAITI 0xE59C66, SIO_$K_TIMED_BREAK 0xE67F5C: a product is not
+  built from another product's partial result, R10), or are inside
+  expressions the model splits.
+- **Calls** (Uncertain): after a call most values are computed again
+  (sums 25 / 162), some are held in a callee-saved register (sign
+  extensions 11 / 6; TIME_$WAIT 0xE1662C computes `AS_ID * 12` again
+  while D3 still holds it from before a call).  No rule found.
+- **Loops**: values defined before a loop are reused past its back edge
+  (shifts 4 / 2 with a back edge).  Module-local 0xE1C9FC: `n * 4` in D1
+  (0xE1CA0C) is read at 0xE1CA4A after the `dbf` loop
+  0xE1CA2C..0xE1CA46 (and from the `bmi` that skips it), which `dpc`
+  also does.  Whether a value is reused inside a loop: not studied.
+- Within one statement (ref 6.4.24, p. 6-27, `-dba`): TIME_$WAIT
+  0xE16610 reads `PROC1_$AS_ID` once for its ×4 and ×12 (`move.w D0,D1`)
+  where FIM_$ACKNOWLEDGE reads it twice (0xE0A972, 0xE0A980): R8.
+
+**Implemented** (`crates/dpc-m68k/src/isel.rs`, `cse_value`,
+`cse_valid`, `store_may_write`): the widening of a plain variable (a
+by-value parameter, a frame local, a variable of the unit's data or
+another unit's; not the enclosing routine's, not a register-held
+local), its scaled index and its product by a constant (one key: a
+scaled index and a product are the same value).  The body is selected
+twice: a probe records which computations a later one may reuse, the
+second selection holds exactly those in their register (`Val::Reg`, so
+users copy it or work on the other operand) and the later ones read it.
+A reuse is valid when, between the two, there is no call, no label a
+branch from before the first targets (so the first dominates: one in an
+`if`'s condition reaches after the `if`, one in a `then` part does not),
+no loop around either, and no store that may write the variable: the
+variable itself (overlapping bytes), an element at a run-time index of
+the same frame, unit data or named array, a store through a pointer when
+the variable is in the unit's data or another unit's, or in the frame
+once some frame object's address escaped (the `forwarded` rule of 12.5);
+any memory write outside a recorded store statement counts as one, and
+so does a recorded store that may write the variable whatever it
+emitted (a store to a register-held variable writes no memory).
+Stores to other variables do not count (FIM_$ACKNOWLEDGE).  Everything
+else is computed again, as before (where the image reuses after a call
+or into a loop, `dpc` diverges: not refused, since no rule is known).
+Golden `tests/golden/regalloc/cse` (FIM_$ACKNOWLEDGE's ×12 with unit
+data, LOG_$READ's worker to 0xE177CA plus a sum with the held value);
+driver test `computed_values_are_reused_only_while_valid` (operand
+written on one path, computed in one arm, stores through pointers to the
+unit's data and to a pointer parameter, an escaped local, a call, a loop,
+a scaled index with and without its variable written); unit test
+`store_may_write_cases`.  No conformance unit yet: FIM_$ACKNOWLEDGE needs
+other units' arrays as bases (`movea.l #sym,An`) and the order of R9;
+the LOG_$READ worker the rest of 12.3.
 
 **R8. Plain variable reads are not kept across statements (Verified at
 the sites).**
@@ -4099,7 +4202,7 @@ earlier:
 | # | Step | Image sites | Support |
 |---|---|---|---|
 | 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
-| 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; when a store kills a CSE is open |
+| 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; kills by survey (R7).  **Implemented** (bead domain-pascal-g5q.7): widenings, scaled indices and constant products of plain variables, no reuse across calls nor into or out of a loop (past one: yes); golden `regalloc/cse` |
 | 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8).  **Implemented** (section 8, `&`; bead domain-pascal-d7i) |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
 | 5 | D3 at 0xE177C4 and 0xE177D0 | 0xE177C4, 0xE177D0 | Speculative (R6) |

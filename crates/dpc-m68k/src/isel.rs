@@ -158,8 +158,32 @@ pub struct Body {
 /// may not read by-value parameters: whether the original loaded them at
 /// entry there is not known (codegen-patterns 12.2; the sites that load
 /// them at entry have several statements).
+///
+/// Computed values used again later are reused from their register
+/// (codegen-patterns 12.4 R7, [`Cse`]): the body is selected once to find
+/// which computations a later one can reuse ([`Selector::cse_value`]),
+/// then again holding exactly those.
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
+    let (body, hits) = select_body_with(f, CsePlan::Probe)?;
+    if hits.is_empty() {
+        return Ok(body);
+    }
+    let (body, again) = select_body_with(f, CsePlan::Hold(hits.clone()))?;
+    if again != hits {
+        // The second selection must find the reuses the first one did:
+        // the validity of a reuse depends only on labels, calls and
+        // stores, which holding a value does not change.
+        return Err(unsupported(
+            f.span,
+            "a body whose reusable computed values change when they are held (codegen-patterns              12.4 R7) is",
+        ));
+    }
+    Ok(body)
+}
+
+fn select_body_with(f: &Function, plan: CsePlan) -> Result<(Body, Vec<(u32, u32)>), Diagnostic> {
     let mut s = Selector::new(f.span);
+    s.cse_plan = plan;
     if f.loads_data_base {
         s.load_data_base();
     }
@@ -336,10 +360,13 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         .map(|(_, i)| i)
         .filter(|i| !matches!(i, Insn::Label(l) if !used.contains(l)))
         .collect();
-    Ok(Body {
-        insns: out,
-        saves: saves.union(s.clobbered),
-    })
+    Ok((
+        Body {
+            insns: out,
+            saves: saves.union(s.clobbered),
+        },
+        s.cse_hits,
+    ))
 }
 
 /// The values to hold live through a call (codegen-patterns 12.4 R4(c)),
@@ -934,6 +961,50 @@ fn may_write_frame(i: &Insn, o: i32, escaped: bool) -> bool {
         _ => return false,
     };
     base == FP || (escaped && base != 5 && base != 7)
+}
+
+/// Whether a store of `wbytes` bytes at `w` may write the plain variable
+/// `l` of `lbytes` bytes ([`Selector::cse_valid`]; codegen-patterns 12.4
+/// R7).  `escaped`: some frame object's address escaped
+/// ([`escaped_frame_objects`]).
+fn store_may_write(w: &Addr, wbytes: u32, l: &Addr, lbytes: u32, escaped: bool) -> bool {
+    /// What a write's address is rooted at, and whether its offset is
+    /// exact (not an element at a run-time index).
+    enum Root<'a> {
+        Frame(i32),
+        Static(i32),
+        Symbol(&'a str, i32),
+        Enclosing,
+        Pointer,
+        Const,
+    }
+    fn root(a: &Addr) -> (Root<'_>, bool) {
+        match a {
+            Addr::Frame(o) => (Root::Frame(*o), true),
+            Addr::Static(o) => (Root::Static(*o), true),
+            Addr::Symbol { name, offset } => (Root::Symbol(name, *offset), true),
+            Addr::Enclosing(_) => (Root::Enclosing, true),
+            Addr::Indirect { .. } => (Root::Pointer, true),
+            Addr::Const(_) => (Root::Const, true),
+            Addr::Index { base, .. } => (root(base).0, false),
+        }
+    }
+    let overlap = |a: i32, b: i32| a < b + lbytes as i32 && b < a + wbytes as i32;
+    match (root(w), l) {
+        ((Root::Frame(p), exact), Addr::Frame(o)) => !exact || overlap(p, *o),
+        ((Root::Static(p), exact), Addr::Static(o)) => !exact || overlap(p, *o),
+        ((Root::Symbol(n, p), exact), Addr::Symbol { name, offset }) => {
+            n == name && (!exact || overlap(p, *offset))
+        }
+        // Distinct variables: the unit's own data and another unit's
+        // object (`extern`, ref 7.2, p. 7-3: allocated elsewhere) do not
+        // overlap; nor do two named objects of other units (0xE0A9A6, a
+        // store to FIM_$QUIT_INH, does not end the reuse of `PROC1_$AS_ID
+        // * 12` at 0xE0A9B0).
+        ((Root::Pointer, _), Addr::Frame(_)) => escaped,
+        ((Root::Pointer, _), _) => true,
+        _ => false,
+    }
 }
 
 /// The frame offsets at which `f`'s body lets an object's address escape
@@ -1768,6 +1839,59 @@ pub struct Selector {
     /// The frame objects nested routines reach
     /// ([`Function::uplevel_refs`]): never held in a register.
     uplevel: Vec<(i32, u32)>,
+    /// Which computed values to hold for reuse ([`select_body`]).
+    cse_plan: CsePlan,
+    /// The computed values that may be reused ([`Self::cse_value`]).
+    cse: Vec<Cse>,
+    /// The number of the next computation [`Self::cse_value`] sees.
+    cse_next: u32,
+    /// Reuses found: (the reusing computation, the computation reused).
+    cse_hits: Vec<(u32, u32)>,
+    /// The (virtual) data registers of held computed values.
+    cse_regs: Vec<u8>,
+    /// The statements' memory writes: the range of `out` they emitted,
+    /// the object written and its size in bytes ([`Self::cse_valid`]).
+    writes: Vec<(usize, usize, Addr, u32)>,
+}
+
+/// Which computed values a selection holds for reuse (codegen-patterns
+/// 12.4 R7; [`select_body`]).
+#[derive(Clone, Debug)]
+enum CsePlan {
+    /// None: every computation is made as before, and the reuses that
+    /// would be valid are recorded.
+    Probe,
+    /// The reuses found by the probe, (reusing, reused) by number: the
+    /// reused computations are held in their register, the reusing ones
+    /// read it.
+    Hold(Vec<(u32, u32)>),
+}
+
+/// What a reusable computation computes: always of a plain variable
+/// ([`Selector::cse_leaf`]).
+#[derive(Clone, Debug, PartialEq)]
+enum CseKey {
+    /// The variable widened to the width (zero- or sign-extended by its
+    /// own sign; the result's sign does not change the bits).
+    Widen(Expr, Width),
+    /// The variable times a constant, at its own width: a scaled array
+    /// index ([`Selector::index_reg`]) or a product by a constant
+    /// ([`Selector::mul_const`]).
+    Scaled(Expr, i64),
+}
+
+/// A computation that may be reused (codegen-patterns 12.4 R7).
+#[derive(Clone, Debug)]
+struct Cse {
+    key: CseKey,
+    /// The variable it reads, and the variable's size.
+    leaf: (Addr, u32),
+    /// Its number ([`Selector::cse_next`]).
+    id: u32,
+    /// The data register holding the value.
+    reg: u8,
+    /// The index in `out` after the computation.
+    at: usize,
 }
 
 /// An operand as [`Selector::eval`] leaves it.
@@ -1821,6 +1945,12 @@ impl Selector {
             entry_regs: Vec::new(),
             stored: Vec::new(),
             escaped: Vec::new(),
+            cse_plan: CsePlan::Probe,
+            cse: Vec::new(),
+            cse_next: 0,
+            cse_hits: Vec::new(),
+            cse_regs: Vec::new(),
+            writes: Vec::new(),
         }
     }
 
@@ -1971,14 +2101,23 @@ impl Selector {
             self.unpopped = false;
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
-                StmtKind::Store { addr, value } => self.store(addr, value)?,
-                StmtKind::Copy { dst, src, bytes } => self.copy(dst, src, *bytes)?,
+                StmtKind::Store { addr, value } => {
+                    self.store(addr, value)?;
+                    self.wrote(addr, value.ty().bytes());
+                }
+                StmtKind::Copy { dst, src, bytes } => {
+                    self.copy(dst, src, *bytes)?;
+                    self.wrote(dst, *bytes);
+                }
                 StmtKind::Call(c) => self.call(c, next.clean)?,
                 StmtKind::Fill {
                     start,
                     count,
                     value,
-                } => self.fill(start, *count, value)?,
+                } => {
+                    self.fill(start, *count, value)?;
+                    self.wrote(start, count * value.ty().bytes());
+                }
                 StmtKind::If { cond, then_, else_ } => self.if_(f, cond, then_, else_, next)?,
                 StmtKind::Repeat { body, until } => self.repeat(f, body, until)?,
                 StmtKind::While { cond, body } => self.while_(f, cond, body)?,
@@ -3617,6 +3756,209 @@ impl Selector {
         (!from_before && !clobbered).then_some(r)
     }
 
+    /// Record that the statement just selected (from `stmt_start`) wrote
+    /// `bytes` bytes at `addr` ([`Self::cse_valid`]).
+    fn wrote(&mut self, addr: &Addr, bytes: u32) {
+        self.writes
+            .push((self.stmt_start, self.out.len(), addr.clone(), bytes));
+    }
+
+    /// The plain variable `e` reads, and its size, when a computation of
+    /// it may be reused (codegen-patterns 12.4 R7): a by-value parameter
+    /// (loaded at entry or read from its slot), a local in the frame, a
+    /// variable of the unit's data or another unit's.  Not a variable of
+    /// the enclosing routine (re-read even within one statement, R8:
+    /// 0xE03FEE/0xE03FF8, 0xE135DA/0xE135E2, MST_ 0xE30B5C), nor a local
+    /// held in a register (12.5) or reached by a nested routine, nor an
+    /// element or a field reached through a pointer (not surveyed).
+    fn cse_leaf(&self, e: &Expr) -> Option<(Addr, u32)> {
+        let Expr::Load { addr, ty } = e else {
+            return None;
+        };
+        match addr {
+            Addr::Frame(o) if *o < 0 && self.pinned(*o).is_some() => None,
+            Addr::Frame(o)
+                if self.reg_locals.contains(o)
+                    || self.ptr_locals.iter().any(|&(p, _)| p == *o)
+                    || self.is_uplevel(*o) =>
+            {
+                None
+            }
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } => {
+                Some((addr.clone(), ty.bytes()))
+            }
+            _ => None,
+        }
+    }
+
+    /// A computation `key` of the plain variable `leaf`, reusable
+    /// (codegen-patterns 12.4 R7): `compute` makes it into a new data
+    /// register.
+    ///
+    /// The image reuses such values across statements, across an `if` and
+    /// its join and past stores to other objects (`tools/csesurvey.py`):
+    /// the zero-extended `offset` of 0xE177A6 at 0xE177D0, after the `if`
+    /// and the stores through `actual_len`; FIM_$ACKNOWLEDGE's
+    /// `PROC1_$AS_ID * 12` (0xE0A972..0xE0A97E) at 0xE0A9B0, past the
+    /// stores to two other arrays at 0xE0A994 and 0xE0A9A6.  When a later
+    /// computation of the same value finds an earlier one valid
+    /// ([`Self::cse_valid`]), the earlier one is held in its register (the
+    /// two-address operations of its users then work on the other operand
+    /// or a copy, 0xE177B4 `add.l D1,D2`, 0xE177D0 `move.l D1,D3`) and the
+    /// later one reads it.  Everything else is computed again, as before.
+    fn cse_value(
+        &mut self,
+        key: CseKey,
+        leaf: (Addr, u32),
+        compute: impl FnOnce(&mut Self) -> Res<u8>,
+    ) -> Res<Val> {
+        let id = self.cse_next;
+        self.cse_next += 1;
+        let (reuse, hold) = match &self.cse_plan {
+            CsePlan::Probe => (None, false),
+            CsePlan::Hold(hits) => (
+                hits.iter().find(|h| h.0 == id).map(|h| h.1),
+                hits.iter().any(|h| h.1 == id),
+            ),
+        };
+        if let Some(def) = reuse {
+            let c = self
+                .cse
+                .iter()
+                .find(|c| c.id == def)
+                .cloned()
+                .filter(|c| c.key == key && self.cse_valid(c));
+            let Some(c) = c else {
+                return Err(unsupported(
+                    self.span,
+                    "a reuse of a computed value that is no longer valid when held                      (codegen-patterns 12.4 R7) is",
+                ));
+            };
+            self.cse_hits.push((id, def));
+            return Ok(Val::Reg(Reg::D(c.reg)));
+        }
+        if let CsePlan::Probe = self.cse_plan {
+            let found = self
+                .cse
+                .iter()
+                .rev()
+                .find(|c| c.key == key && self.cse_valid(c))
+                .map(|c| c.id);
+            if let Some(def) = found {
+                // Computed again here, as before, but the hold selection
+                // reuses it.  Not itself a computation to reuse: a later
+                // one reuses the first, as the hold selection does.
+                self.cse_hits.push((id, def));
+                return Ok(Val::Tmp(compute(self)?));
+            }
+        }
+        let d = compute(self)?;
+        if self.loops.is_empty() {
+            self.cse.push(Cse {
+                key,
+                leaf,
+                id,
+                reg: d,
+                at: self.out.len(),
+            });
+        }
+        if hold {
+            self.cse_regs.push(d);
+            return Ok(Val::Reg(Reg::D(d)));
+        }
+        Ok(Val::Tmp(d))
+    }
+
+    /// Whether the computation `c` still holds its value here, for every
+    /// path that reaches here (codegen-patterns 12.4 R7):
+    ///
+    /// - neither it nor this point is inside a loop (a value computed
+    ///   before a loop is reused after it, past its back edge, as in the
+    ///   image: module-local 0xE1C9FC's `n * 4`, D1 from 0xE1CA0C, read
+    ///   at 0xE1CA4A after the `dbf` loop 0xE1CA2C..0xE1CA46; whether the
+    ///   image reuses one inside a loop is not checked), and no label
+    ///   between them is the target of a
+    ///   branch or `case` table from before it (so it dominates this
+    ///   point: a value computed in an `if`'s condition is valid after
+    ///   the `if`, one computed in a `then` part is not);
+    /// - no call between (the image mostly computes again after a call:
+    ///   by `tools/csesurvey.py agg`, sums 16 reused and 74 computed
+    ///   again, differences 9 and 88, shifts 8 and 24; when it keeps one
+    ///   in a callee-saved register is not known);
+    /// - no store between that may write the variable it reads: one to
+    ///   the variable itself (or to an element of the same array, frame
+    ///   or unit data at a run-time index), or through a pointer when the
+    ///   variable is in the unit's data or another unit's (the image
+    ///   computes again after such stores: 0xE53462, 0xE6E924, 0xE71C0E,
+    ///   and 0xE4B388 after a `bchg` of the variable's low byte) or in the
+    ///   frame and some frame object's address escaped (as for
+    ///   [`Self::forwarded`]).  Stores to other named objects do not
+    ///   count (0xE0A9A6 before 0xE0A9B0), nor stores through a pointer
+    ///   parameter when the variable is a parameter or a local (0xE177C0,
+    ///   0xE177CA before 0xE177D0).  An instruction that writes memory
+    ///   outside a recorded store statement counts as a possible write;
+    /// - when it is held, its register not written since (an internal
+    ///   check; in the probe its users modify it in place).
+    fn cse_valid(&self, c: &Cse) -> bool {
+        if !self.loops.is_empty() || c.at > self.out.len() {
+            return false;
+        }
+        let region = &self.out[c.at..];
+        let inside: Vec<u32> = region
+            .iter()
+            .filter_map(|i| match i {
+                Insn::Label(l) => Some(*l),
+                _ => None,
+            })
+            .collect();
+        let from_before = self.out[..c.at].iter().any(|i| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => inside.contains(label),
+            Insn::TableJump { targets, .. } => targets.iter().any(|l| inside.contains(l)),
+            Insn::TableEntry { target, .. } => inside.contains(target),
+            _ => false,
+        });
+        if from_before {
+            return false;
+        }
+        let escaped = !self.escaped.is_empty();
+        // A store statement since the computation that may write the
+        // variable, whatever it emitted: one to a variable held in a
+        // register writes no memory (no such store reaches here today:
+        // register-held locals are not leaves, and [`Self::store`]
+        // refuses assignments to parameters, which may be loaded at
+        // entry).
+        if self
+            .writes
+            .iter()
+            .any(|w| w.1 > c.at && store_may_write(&w.2, w.3, &c.leaf.0, c.leaf.1, escaped))
+        {
+            return false;
+        }
+        region.iter().enumerate().all(|(k, i)| {
+            let k = c.at + k;
+            if matches!(
+                i,
+                Insn::Jsr(_) | Insn::Bsr { .. } | Insn::Words(_) | Insn::Encoded { .. }
+            ) {
+                return false;
+            }
+            // In the probe its users may still modify it in place.
+            if self.cse_regs.contains(&c.reg)
+                && crate::regs::access(i).defs.contains(&Reg::D(c.reg))
+            {
+                return false;
+            }
+            match mem_dst(i) {
+                None | Some(Ea::PreDec(SP)) => true,
+                Some(_) => self
+                    .writes
+                    .iter()
+                    .find(|w| w.0 <= k && k < w.1)
+                    .is_some_and(|w| !store_may_write(&w.2, w.3, &c.leaf.0, c.leaf.1, escaped)),
+            }
+        })
+    }
+
     /// Whether forming `addr` takes a register that is not already
     /// holding the base.
     fn addr_needs_reg(&self, addr: &Addr) -> bool {
@@ -4437,6 +4779,16 @@ impl Selector {
                 ..
             } if self.pinned(*o).is_some() => Ok(Val::Reg(self.pinned(*o).unwrap())),
             Expr::Load { addr, .. } => Ok(Val::Mem(self.ea_of(addr)?)),
+            Expr::Binary {
+                op: BinOp::Mul,
+                lhs,
+                rhs,
+                ty,
+            } if self.const_product(lhs, rhs, *ty).is_some() => {
+                let (x, c, leaf) = self.const_product(lhs, rhs, *ty).unwrap();
+                let key = CseKey::Scaled(x.clone(), c);
+                self.cse_value(key, leaf, |s| s.binary(BinOp::Mul, lhs, rhs, *ty))
+            }
             Expr::Binary { op, lhs, rhs, ty } => Ok(Val::Tmp(self.binary(*op, lhs, rhs, *ty)?)),
             Expr::Unary { op, operand, ty } => {
                 // `neg.<s>` / `not.<s>` on the operand in a register (negw
@@ -4861,6 +5213,14 @@ impl Selector {
         let (d, src) = match (&lv, &rv) {
             (Val::Tmp(_), _) | (_, Val::Imm(_)) => (self.in_tmp(lv.clone(), w)?, rv),
             (_, Val::Tmp(r)) if op.commutative() => (*r, lv),
+            // A variable and a held computed value (codegen-patterns 12.4
+            // R7): the held value copied, the variable the source
+            // (0xE177D0..0xE177D4 `move.l D1,D3; ...; add.l (0x14,A5),D3`,
+            // `integer32(logfile_ptr) + offset` with `offset` zero-extended
+            // at 0xE177A6).
+            (Val::Mem(_), Val::Reg(Reg::D(r))) if op.commutative() && self.cse_regs.contains(r) => {
+                (self.in_tmp(rv.clone(), w)?, lv)
+            }
             (_, Val::Tmp(_)) => {
                 return Err(unsupported(
                     self.span,
@@ -5005,6 +5365,27 @@ impl Selector {
                 Ok(0)
             }
         }
+    }
+
+    /// A product of a plain variable ([`Self::cse_leaf`]) and a constant
+    /// that [`Self::mul`] makes in a register with [`Self::mul_const`]
+    /// (shifts and adds, or `mul<s>.w` for a word), a reusable computation
+    /// like a scaled index (codegen-patterns 12.4 R7): the variable, the
+    /// constant and the variable's size.
+    fn const_product<'e>(
+        &self,
+        lhs: &'e Expr,
+        rhs: &'e Expr,
+        ty: Scalar,
+    ) -> Option<(&'e Expr, i64, (Addr, u32))> {
+        let (x, c) = match (lhs, rhs) {
+            (x, Expr::Const { value, .. }) | (Expr::Const { value, .. }, x) => (x, *value),
+            _ => return None,
+        };
+        if x.ty() != ty || !(ty.width == Width::Word || by_shifts(c)) {
+            return None;
+        }
+        Some((x, c, self.cse_leaf(x)?))
     }
 
     /// Two word values multiplied with `muls.w`/`mulu.w`: the left one (or
@@ -5793,6 +6174,23 @@ impl Selector {
                 "an `lshft` of a word operand used as a longword is",
             ));
         }
+        let widening = matches!(
+            (from.width, ty.width),
+            (Width::Word, Width::Long) | (Width::Byte, Width::Word)
+        );
+        if let (Some(leaf), true) = (self.cse_leaf(value), widening) {
+            let key = CseKey::Widen(value.clone(), ty.width);
+            return self.cse_value(key, leaf, |s| match s.widen(value, ty)? {
+                Val::Tmp(d) => Ok(d),
+                _ => unreachable!("a widening computes into a new register"),
+            });
+        }
+        self.widen(value, ty)
+    }
+
+    /// The widening of [`Self::convert`].
+    fn widen(&mut self, value: &Expr, ty: Scalar) -> Res<Val> {
+        let from = value.ty();
         let unsigned = from.sign == Sign::Unsigned;
         match (from.width, ty.width) {
             (Width::Word, Width::Long) | (Width::Byte, Width::Word) if unsigned => {
@@ -6183,13 +6581,30 @@ impl Selector {
     ///   [`Self::mul_const`].
     fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<u8> {
         let w = index.ty().width;
-        let mut v = self.eval(index)?;
         if scale == 1 {
+            let v = self.eval(index)?;
             return match v {
                 Val::Tmp(d) | Val::Reg(Reg::D(d)) => Ok(d),
                 v => self.in_tmp(v, w),
             };
         }
+        // A scaled index is a reusable computation (codegen-patterns 12.4
+        // R7: FIM_$ACKNOWLEDGE's `PROC1_$AS_ID * 12`, 0xE0A972..0xE0A97E,
+        // indexes FIM_$QUIT_EC at 0xE0A994 and FIM_$DELIV_EC at 0xE0A9B0).
+        if let Some(leaf) = self.cse_leaf(index) {
+            let key = CseKey::Scaled(index.clone(), scale as i64);
+            return match self.cse_value(key, leaf, |s| s.scaled_index(index, scale))? {
+                Val::Tmp(d) | Val::Reg(Reg::D(d)) => Ok(d),
+                _ => unreachable!("a scaled index is in a data register"),
+            };
+        }
+        self.scaled_index(index, scale)
+    }
+
+    /// The scaling of [`Self::index_reg`].
+    fn scaled_index(&mut self, index: &Expr, scale: u32) -> Res<u8> {
+        let w = index.ty().width;
+        let mut v = self.eval(index)?;
         if let (
             Val::Mem(_),
             Expr::Load {
@@ -8656,5 +9071,51 @@ mod tests {
             ],
         );
         assert_eq!(escaped_frame_objects(&f), [8, -4, -20]);
+    }
+
+    #[test]
+    fn store_may_write_cases() {
+        // codegen-patterns 12.4 R7: which stores end the reuse of a
+        // computation of a plain variable.
+        let sym = |name: &str, offset| Addr::Symbol {
+            name: name.into(),
+            offset,
+        };
+        let elem = |base: Addr| Addr::Index {
+            base: Box::new(base),
+            index: Box::new(load(Addr::Frame(8), word())),
+            scale: 4,
+            offset: 0,
+        };
+        let w = |a: &Addr, l: &Addr, escaped| store_may_write(a, 2, l, 2, escaped);
+        // The variable itself, or an overlapping part of it.
+        assert!(w(&Addr::Frame(-4), &Addr::Frame(-4), false));
+        assert!(store_may_write(
+            &Addr::Static(5),
+            1,
+            &Addr::Static(4),
+            2,
+            false
+        ));
+        assert!(w(&sym("X", 0), &sym("X", 0), false));
+        // Another variable.
+        assert!(!w(&Addr::Frame(-6), &Addr::Frame(-4), false));
+        assert!(!w(&Addr::Static(0), &Addr::Static(2), false));
+        assert!(!w(&sym("Y", 0), &sym("X", 0), false));
+        assert!(!w(&Addr::Static(0), &sym("X", 0), false));
+        assert!(!w(&elem(sym("Y", 0)), &sym("X", 0), false));
+        assert!(!w(&Addr::Enclosing(-4), &Addr::Frame(-4), false));
+        // An element at a run-time index of the same area or array.
+        assert!(w(&elem(Addr::Frame(-20)), &Addr::Frame(-4), false));
+        assert!(w(&elem(Addr::Static(100)), &Addr::Static(2), false));
+        assert!(w(&elem(sym("X", 0)), &sym("X", 8), false));
+        // Through a pointer: the unit's data and other units' objects
+        // always, the frame once some frame object's address escaped.
+        let p = through(14, 0);
+        assert!(w(&p, &Addr::Static(2), false));
+        assert!(w(&p, &sym("X", 0), false));
+        assert!(!w(&p, &Addr::Frame(-4), false));
+        assert!(!w(&p, &Addr::Frame(12), false));
+        assert!(w(&p, &Addr::Frame(-4), true));
     }
 }

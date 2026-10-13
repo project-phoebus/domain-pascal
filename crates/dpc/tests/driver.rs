@@ -1024,3 +1024,109 @@ end;
         "{e}"
     );
 }
+
+#[test]
+fn computed_values_are_reused_only_while_valid() {
+    // codegen-patterns 12.4 R7: a zero-extension or a scaled index of a
+    // plain variable is reused by a later statement (one computation),
+    // and computed again (two) when the variable may have been written in
+    // between (on one path, through a pointer, by a call, around a loop
+    // back edge) or when the first computation does not reach the second
+    // on every path.
+    let src = "module m;
+type pinteger = 0..65535;
+var
+  g, h: integer32;
+  gw: pinteger;
+  ext: extern integer;
+  arr: array[1..10] of integer32;
+  gp: extern ^integer;
+  done: extern boolean;
+procedure tick; extern;
+procedure keep(var w: pinteger); extern;
+procedure reused(n: pinteger; c: boolean); options(val_param);
+begin
+  g := gw;
+  if c then h := 5;
+  h := gw;
+end;
+procedure written_on_one_path(c: boolean); options(val_param);
+begin
+  g := gw;
+  if c then gw := 3;
+  h := gw;
+end;
+procedure computed_in_one_arm(c: boolean); options(val_param);
+begin
+  h := 0;
+  if c then g := gw;
+  h := gw;
+end;
+procedure through_pointer_static;
+begin
+  g := gw;
+  gp^ := 3;
+  h := gw;
+end;
+procedure through_pointer_param(n: pinteger; var r: integer); options(val_param);
+begin
+  g := n;
+  r := 3;
+  h := n;
+end;
+procedure escaped_local;
+var w: pinteger;
+begin
+  w := gw;
+  keep(w);
+  g := w;
+  gp^ := 1;
+  h := w;
+end;
+procedure across_call;
+begin
+  g := gw;
+  tick;
+  h := gw;
+end;
+procedure in_loop;
+begin
+  g := gw;
+  repeat
+    h := gw;
+  until done;
+end;
+procedure index_reused;
+begin
+  arr[ext] := 1;
+  gw := 0;
+  g := arr[ext];
+end;
+procedure index_written;
+begin
+  arr[ext] := 1;
+  ext := 3;
+  g := arr[ext];
+end;
+";
+    let asm = compile_with("cse_valid", src, &[]).unwrap();
+    for (r, op, n) in [
+        ("REUSED", "\tclr.l\t%d", 1),
+        ("WRITTEN_ON_ONE_PATH", "\tclr.l\t%d", 2),
+        ("COMPUTED_IN_ONE_ARM", "\tclr.l\t%d", 2),
+        ("THROUGH_POINTER_STATIC", "\tclr.l\t%d", 2),
+        ("THROUGH_POINTER_PARAM", "\tclr.l\t%d", 1),
+        ("ESCAPED_LOCAL", "\tclr.l\t%d", 2),
+        ("ACROSS_CALL", "\tclr.l\t%d", 2),
+        ("IN_LOOP", "\tclr.l\t%d", 2),
+        ("INDEX_REUSED", "\tlsl.w\t#2,", 1),
+        ("INDEX_WRITTEN", "\tlsl.w\t#2,", 2),
+    ] {
+        let text = routine(&asm, r);
+        assert_eq!(text.matches(op).count(), n, "{r}: {text}");
+    }
+    // The held value is stored from its register, and the two-address
+    // operation of a later statement leaves it intact.
+    let text = routine(&asm, "THROUGH_POINTER_PARAM");
+    assert!(text.contains("\tmove.l\t%d1,(4,%a5)\n"), "{text}");
+}
