@@ -87,8 +87,9 @@ end;
     assert_eq!(f.symbol, "PROC1_$TST_LOCK");
     assert!(f.global);
     assert_eq!(f.code_section, ".text");
-    // Raw: the 1-byte result variable.  The target rounds it.
-    assert_eq!(f.frame_size, 1);
+    // Raw: the 1-byte result variable in a word of its own (frame objects
+    // are word aligned, codegen-patterns 2).  The target rounds it.
+    assert_eq!(f.frame_size, 2);
     assert_eq!(
         f.result,
         Some(ResultSpec {

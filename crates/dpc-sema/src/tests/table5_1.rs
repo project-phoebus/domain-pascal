@@ -307,6 +307,81 @@ fn frame_size_model() {
     assert_eq!(routine(&p, "internal_fn_local").frame_size, 10);
 }
 
+/// Frame objects are at least word aligned (codegen-patterns 2, "Frame
+/// layout"; bead domain-pascal-ek7): a lone byte local at (-2,A6)
+/// (FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E, `link #-4`), byte locals one to
+/// a word (PROC2_$WAIT 0xE3FDD0), longwords longword aligned, a byte
+/// result variable in a word of its own below the locals.
+#[test]
+fn frame_objects_word_aligned() {
+    let p = module(
+        "procedure one_byte; var lone: boolean; begin lone := true end;
+         procedure bytes; var b1: boolean; c1: char; b2: boolean; l1: integer32;
+         begin b1 := true end;
+         function byte_fn: boolean; var w1: integer; begin byte_fn := true end;
+         procedure internal_byte; internal; var ib: char; begin ib := 'a' end;",
+    );
+    let frame = |off| crate::program::Storage::Frame { offset: off };
+    assert_eq!(var(&p, "lone").storage, frame(-2));
+    assert_eq!(routine(&p, "one_byte").frame_size, 2);
+    assert_eq!(var(&p, "b1").storage, frame(-2));
+    assert_eq!(var(&p, "c1").storage, frame(-4));
+    assert_eq!(var(&p, "b2").storage, frame(-6));
+    assert_eq!(var(&p, "l1").storage, frame(-12));
+    assert_eq!(routine(&p, "bytes").frame_size, 12);
+    let r = routine(&p, "byte_fn");
+    assert_eq!(var(&p, "w1").storage, frame(-2));
+    assert_eq!(
+        p.var(r.result.as_ref().unwrap().var.unwrap()).storage,
+        frame(-4)
+    );
+    assert_eq!(r.frame_size, 4);
+    // Below the reserved slot of a routine that is not global.
+    assert_eq!(var(&p, "ib").storage, frame(-6));
+    assert_eq!(routine(&p, "internal_byte").frame_size, 6);
+}
+
+/// FRAME_MIN_ALIGN only lifts 1-byte objects: odd-sized arrays, records
+/// and varying strings already have word alignment from their own type
+/// (ref 3.10.5.5 p. 3-26) and keep their own size (the frame does not
+/// round an object: a 3-char array takes 3 bytes), and a byte value parameter's local copy is word aligned like a local,
+/// while its argument slot (high byte of a word, codegen-patterns 1.3)
+/// is not a frame object and does not move.
+#[test]
+fn frame_min_align_composites_and_copies() {
+    let p = module(
+        "type c3 = array[1..3] of char;
+              r3 = record a, b, c: char end;
+         procedure comp; var a3: c3; r: r3; v: varying[3] of char; b: boolean;
+         begin b := true end;
+         procedure copy(ch: char; flag: boolean); val_param;
+         var x: char; begin x := ch end;
+         procedure dflt(ch: char); var y: char; begin y := ch end;",
+    );
+    let frame = |off| crate::program::Storage::Frame { offset: off };
+    let sz = |n| p.types.size(var(&p, n).ty);
+    // A record's size is a whole number of words (its own rule).
+    assert_eq!((sz("a3"), sz("r")), (3, 4));
+    assert_eq!(var(&p, "a3").storage, frame(-4));
+    assert_eq!(var(&p, "r").storage, frame(-8));
+    assert_eq!(var(&p, "v").storage.clone(), frame(-8 - sz("v") as i32));
+    assert_eq!(var(&p, "b").storage, frame(-8 - sz("v") as i32 - 2));
+    // val_param: bytes by value in the high byte of a word slot, no copy.
+    let r = routine(&p, "copy");
+    let slots: Vec<(i32, u32, Option<i32>)> = r
+        .params
+        .iter()
+        .map(|q| (q.slot_offset, q.conv.slot_size, q.copy_offset))
+        .collect();
+    assert_eq!(slots, vec![(8, 2, None), (10, 2, None)]);
+    assert_eq!(var(&p, "x").storage, frame(-2));
+    // Default convention: by address, the callee's copy word aligned.
+    let r = routine(&p, "dflt");
+    assert_eq!(r.params[0].copy_offset, Some(-2));
+    assert_eq!(var(&p, "y").storage, frame(-4));
+    assert_eq!(r.frame_size, 4);
+}
+
 /// The frame objects of one routine never overlap and stay inside its
 /// frame: the reserved slot, a value parameter's local copy, locals
 /// declared before and after a nested routine, and the result variable

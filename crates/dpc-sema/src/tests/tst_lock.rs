@@ -83,10 +83,11 @@ fn tst_lock_analyses() {
     assert_eq!(p.types.size(res.ty), 1);
     // The result variable has a frame slot, the routine's only frame
     // object (codegen-patterns 2, "Frame size": the image has `link #-4`
-    // and never touches it).
+    // and never touches it), word aligned like every frame object (a lone
+    // byte local sits at (-2,A6): FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E).
     let rv = p.var(res.var.unwrap());
-    assert_eq!(rv.storage, Storage::Frame { offset: -1 });
-    assert_eq!(r.frame_size, 1);
+    assert_eq!(rv.storage, Storage::Frame { offset: -2 });
+    assert_eq!(r.frame_size, 2);
 
     // The body: result := lock_id in pcb^.resource_locks_held.
     let body = r.body.as_ref().unwrap();

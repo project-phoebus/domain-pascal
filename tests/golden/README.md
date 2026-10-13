@@ -131,6 +131,10 @@ Tests:
 - `frame/empty` - codegen-patterns 2: empty procedures as a bare `rts`,
   with and without parameters (TIME_$Q_INIT 0xE16C5C, MT_$RELEASE
   0xE70A4C), in a unit with data, the module end padded with 0x2048.
+- `frame/byte_locals` - codegen-patterns 2, "Frame layout": byte locals
+  word aligned, one to a word, a longword after them longword aligned
+  (FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E `pea (-2,A6)` in `link #-4`;
+  PROC2_$WAIT 0xE3FDD0).
 - `loops/while` - codegen-patterns 7.4, 12.5: `while` loops as `bra` to
   the bottom test, the head aligned like any loop head (MAC_OS_$CLOSE
   0xE0B4CC), an `and then` test (0xE4A028), a walk pointer held in an

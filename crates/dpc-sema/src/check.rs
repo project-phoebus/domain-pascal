@@ -20,6 +20,11 @@ use crate::types::{
     VariantPart, MAX_OBJECT_SIZE,
 };
 
+/// Smallest alignment of an object in a routine's frame, in bytes: the
+/// original compiler word-aligns byte locals (codegen-patterns 2, "Frame
+/// layout"; Verified by survey, bead domain-pascal-ek7).
+const FRAME_MIN_ALIGN: u32 = 2;
+
 /// What a name means.
 #[derive(Clone, Debug)]
 enum Sym {
@@ -250,13 +255,19 @@ impl<'t> Checker<'t> {
     /// pointer, at the type's freestanding alignment.  Returns the frame
     /// offset of the object's first byte.
     ///
-    /// The order and packing of the original compiler's frame slots are
-    /// not known yet (codegen-patterns 2, Uncertain); this allocates in
-    /// declaration order, downward.
+    /// Objects are allocated in declaration order, downward (the order
+    /// is not verified, codegen-patterns 2, "Frame layout").  Every frame
+    /// object is at least word aligned: a byte variable takes the high
+    /// byte of a word of its own, and two of them are never packed into
+    /// one word (codegen-patterns 2, "Frame layout": 121 lone byte
+    /// objects in the image's frames, all at even offsets, e.g.
+    /// FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E `pea (-2,A6)` in `link #-4`;
+    /// 4-byte scalars keep their longword alignment, 659 lone longwords
+    /// all at 0 mod 4; `tools/framesurvey.py align`).
     fn alloc_frame(&mut self, ty: TypeId) -> i32 {
         let (size, align) = {
             let i = self.types.get(ty);
-            (i.size.max(1), i.align)
+            (i.size.max(1), i.align.max(FRAME_MIN_ALIGN))
         };
         let ctx = self
             .ctx
@@ -1577,11 +1588,12 @@ impl<'t> Checker<'t> {
         // Frame order (codegen-patterns 2, "Frame size"): the slot above,
         // then local copies of value parameters (their place is
         // Uncertain), then locals, and the function result variable last,
-        // below the locals (Uncertain, sites both ways: PKT_$NEXT_ID
-        // 0xE1248E keeps a word local at (-2,A6) in its `link #-4', the
-        // result in D2; PEB_$GET_STATUS 0xE5ADCA stores its result at
-        // (-16,A6), the bottom of `link #-16', and reloads it into D0; but
-        // FLP_$CINIT 0xE3E002 returns (-4,A6) with locals below it).  The
+        // below the locals (Uncertain, bead domain-pascal-67c: six sites
+        // whose link size forces it below a local, e.g. PKT_$NEXT_ID
+        // 0xE1248E, a word local at (-2,A6) in `link #-4', the result in
+        // D2, and PROC2_$GET_PID 0xE40CBA; against it NETBUF_$RTNVA
+        // 0xE0ED26, a token at (-6,A6) under a 4-byte result in `link
+        // #-8', and SIO_$I_ERR 0xE67D9C, the result in the middle).  The
         // variable is created here, so that nested routines can name it,
         // and placed after the declarations.
         let result_var = if let Some(res) = self.routines[id.0 as usize].result.clone() {

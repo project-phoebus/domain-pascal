@@ -322,10 +322,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   - The displacement is always a multiple of 4: all 1171 `link.w A6,#d`
     found at routine addresses named in the map have `d mod 4 = 0` (a scan
     of every `4e56` word in 0xE00800..0xE88834 finds one exception, not at
-    a routine start, possibly data).  **Uncertain:** whether the total is
-    rounded or each frame object gets a 4-byte-aligned slot.  `dpc-sema`
-    records the raw size (`Routine::frame_size`) and leaves this to the
-    backend.
+    a routine start, possibly data).  The total is rounded, objects do
+    not get 4-byte slots each: 282 lone word objects sit at 2 mod 4
+    ("Frame layout" below).  `dpc-sema` records the raw size
+    (`Routine::frame_size`) and leaves the rounding to the backend.
   - **Empty frame (Verified):** `link.w A6,#0` when there are no locals:
     TIME_$Q_INIT_QUEUE 0xE16C5E, LOG_$READ 0xE17800.  The `link` is not
     omitted.
@@ -373,29 +373,54 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       may well be a procedure).  The 72 unnamed, not nested functions
       and the 11 nested ones all have `link #-8` or more (slot + result),
       while 31 and 10 of the others have just `#-4` (the slot).
-    - Where the result variable goes is **Uncertain**: the image has
-      sites both ways.  Below the locals (what `dpc` does): PKT_$NEXT_ID's
-      local is at `(-2,A6)` with the result in D2 (a result at the top
-      would put the local at -4, if the result has a slot at all);
-      SMD_$N_DEVICES 0xE70024 and PROC2_$GET_PID 0xE40CBA (functions,
-      `link #-8`) address `(-4,A6)`; PEB_$GET_STATUS 0xE5ADCA assigns its
-      result at the bottom of its `link #-16`, `move.l (-8,A6),(-16,A6);
-      move.l (-16,A6),D0` (0xE5AE52); the nested 0xE5DEF4 returns the
-      byte at `(-64,A6)`, the bottom of `link #-64` (but it passes that
-      byte by address first, 0xE5DF14 `pea`, so it may be a local).
-      Against: FLP_$CINIT 0xE3E002 (`link #-28`) assigns its status result
-      at `(-4,A6)` on every path (`clr.l`, `move.l #imm`, `move.l D0`) and
-      returns `move.l (-4,A6),D0` with no copy, while a 10-byte buffer at
-      `(-14,A6)` and words at -16, -20 sit below it (C:
-      `flp/cinit.c`); BAT_$ALLOC_FM 0xE3AD20 (`link #-40`) returns
-      `(-4,A6)` with a word local at `(-22,A6)` below it; SIO_$I_ERR
-      0xE67D9C (`link #-12`) returns `(-8,A6)`, assigned on every path,
-      with the spin-lock token at `(-10,A6)` below it.  An ad-hoc scan
-      (`move.<s> (-n,A6),D0` just before the epilogue) puts that offset at
-      the bottom of the addressed frame in 19 routines and above some
-      other addressed offset in 25; the latter include compiler
-      temporaries, so it settles nothing.  The rule that orders the frame
-      is not known.
+    - Where the result variable goes is **Uncertain** (bead
+      domain-pascal-67c): no fixed place in declaration order fits every
+      site, and `dpc` keeps the majority, below the locals.  Sites where
+      the link size and the C's locals force the order (the result held
+      in a register, its slot never addressed; a byte takes a word,
+      "Frame layout" below):
+      - *Result below a local* (a local at the top of the frame, so the
+        result is not first): PKT_$NEXT_ID 0xE1248E (token `move.w
+        D0,(-2,A6)`, word result in D2, `link #-4` = 2 + 2);
+        PROC2_$GET_PID 0xE40CBA (status at `(-4,A6)` by address, the
+        index word in D0, the word result in D2: `link #-8` = 4 + 2 + 2);
+        KBD_$GET_CHAR_AND_MODE 0xE724C4 (a pointer in A2, a word at
+        `(-6,A6)` by address, the byte result in D2: `#-8` = 4 + 2 + 2);
+        SOCK_$PUT 0xE1614E (a pointer at `(-4,A6)` by address, a byte
+        result: `#-8`); NETBUF_$GET_HDR_COND 0xE0ED6C and MMAP_$ALLOC_FREE
+        0xE0D870 (the spin-lock token at `(-2,A6)`, a byte and a word
+        result).
+      - *Result above a local*: NETBUF_$RTNVA 0xE0ED26 (`link #-8`, the
+        token at `(-6,A6)`, a 4-byte result `move.l D2,D0`): 4 + 2 fits 8
+        only with the result at -4 above the token (with the result last,
+        the token would be at -2; with a 4-byte local first as well, the
+        frame would need 12).  SIO_$I_ERR 0xE67D9C (`link #-12`): its
+        result, assigned on every path at `(-8,A6)` and returned from
+        there, lies below an untouched longword (the C's `taken`, a
+        4-byte set held in D2, whose slot 12.5 says stays allocated) and
+        above the token at `(-10,A6)`: in the middle.
+      - *Not decisive*: a slot written on every path and returned with
+        `move.l (-n,A6),D0` can be a local copied by a final `f :=
+        local`, which goes straight to D0 (section 3).  So FLP_$CINIT
+        0xE3E002 (`(-4,A6)`, `link #-28`; its early exit is `move.l
+        #imm,D0; bra` to the epilogue, the result assigned directly),
+        PEB_$GET_STATUS 0xE5ADCA (`move.l (-8,A6),(-16,A6); move.l
+        (-16,A6),D0` in `link #-16`), the PACCT module-local 0xE5A9CA
+        (a packed word built at `(-8,A6)` and returned, `link #-12`),
+        BAT_$ALLOC_FM 0xE3AD20 and SMD_$N_DEVICES 0xE70024 fit either
+        place.  FLP_$CINIT fits "locals, result, then temporaries" if
+        `(-4,A6)` is a local status: the gap at -24..-21 for the result
+        and the `addr(...)` temporary at `(-28,A6)` passed by address.
+      Six forced sites put the result below, one above and one in the
+      middle.  Possible causes not settled: declarations the C does not
+      show; a result variable without a slot of its own (it would fit
+      NETBUF_$RTNVA with a 4-byte local first, but not the functions with
+      no locals and `link #-4`, TST_LOCK, nor the 0 of 83 unnamed
+      functions with only the reserved slot); an order the compiler does
+      not take from the source (a symbol-table walk).  Allocating upward
+      from the bottom (hypothesis b) is the same as allocating downward
+      in reverse declaration order, except for where the rounding pad
+      goes, and fits these sites no better.
     - Image sites the model explains with no stand-in locals: 0xE32B76
       `link #-4` (internal, no locals), 0xE68864 `#-8` (internal, word
       result), 0xE3CCCE `#-8` (internal, one pointer local held in A1),
@@ -412,6 +437,66 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     declared stand-in locals for 0xE32B76, 0xE68864 and 0xE3CCCE no longer
     do; `ast_page_zero.pas` and `pending/log_read.pas` keep 4 stand-in
     bytes each, `rem_name_register_server.pas` its 8.
+  - **Frame layout: alignment (Verified by survey; implemented; bead
+    domain-pascal-ek7).**  Every frame object is at least word aligned,
+    and 4-byte scalars are longword aligned.  `tools/framesurvey.py
+    align` classes the plain `(d,A6)` operands of the 1635 routines with
+    a `link`.  Among the *lone* objects (accessed at one size only,
+    nothing else addressed in their word or extent) of frames where no
+    frame address is taken below them (an address taken below may make
+    them fields of a record or array there):
+    - bytes: 121 at even offsets (53 at 0 mod 4, 68 at 2 mod 4), none at
+      odd ones;
+    - words: 450 at even offsets (168 at 0 mod 4, 282 at 2 mod 4), none
+      at odd ones;
+    - longwords: 659 at 0 mod 4, none at 2 mod 4.
+    (In frames with an address taken below them, 85 lone longwords sit
+    at 2 mod 4 and 34 lone bytes at odd offsets: fields of word-aligned
+    records or arrays, not counted above.)  The 13 odd byte offsets
+    accessed in the other frames all lie in another object's word or
+    extent, the low byte of a word or longword: SMD_$VIDEO_CTL 0xE6F838
+    `(-1,A6)` of the word at -2, VTOCE_$READ 0xE394EC `andi.b`/`or.b` on
+    `(-1,A6)`, the low byte of the longword at -4.  A lone byte local
+    sits at `(-2,A6)` in `link #-4`: FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E
+    (`pea (-2,A6)`, then `move.b (-2,A6),D0`).  ACL_$INHERIT_SUBSYS
+    0xE49138 and ACL_$OVERRIDE_LOCAL_LOCKSMITH 0xE49254 also have a byte
+    at `(-2,A6)` in `link #-4`, but store it and reload it at once
+    (`move.b D0,(-2,A6); ...; move.b (-2,A6),D2`, a bit index `& 7`),
+    so it may be a compiler temporary rather than a declared local.
+    Limits of the survey: bytes sharing a word with another accessed
+    offset are not lone by construction, so packing would show only as
+    odd lone bytes (none) and is ruled out by the pairs below; accesses
+    by nested routines through the static link are not seen in the
+    parent (28 of the 121 lone bytes are in the 59 parents of nested
+    routines; without them 93, still none odd); `btst`/`bset`/`bclr`
+    and `movem` operands are not classed (an offset with a `btst` is
+    never lone); indexed `(d,A6,Xn)` operands are not counted, but none
+    lies below a lone object.  Byte locals are not packed two to a
+    word: `tools/framesurvey.py byte-pairs` finds 17 routines with lone bytes in adjacent words, e.g.
+    PROC2_$WAIT 0xE3FDD0 (booleans at -150, -148, -146 and -144, set
+    with `clr.b`/`st` and tested with `tst.b`; by-address bytes at -142
+    and -140) and PMAP_$FLUSH 0xE1376C (-86/-88, -94/-96; its nested routines
+    0xE1359C and 0xE1360C address only -80 and -64 of its frame).  So a byte
+    takes the high byte of a word, as in an argument slot (1.3).  For
+    objects longer than a byte this is the record rule of ref 3.10.5.5
+    p. 3-26 ("all objects longer than a byte are aligned on word
+    boundaries"), but records pack bytes and frames do not.
+    **Order: not sorted by size** (`tools/framesurvey.py order`): 200
+    map-named routines have a lone byte or word object above a lone
+    longword, 105 have every longword above them.  Declaration order is
+    the natural reading but cannot be checked without the sources;
+    `dpc` allocates downward in declaration order.
+    **Implemented** (`dpc-sema` `alloc_frame`, `FRAME_MIN_ALIGN`): each
+    object at `round_up(frame + size, max(align, 2))`, longword
+    alignment from the freestanding alignment of 4-byte scalars and
+    pointers (ref 3.2.4 p. 3-5, 3.13.5 p. 3-52).  PROC1_$TST_LOCK's
+    boolean result variable is now at `(-2,A6)` (still `link #-4`).  Test
+    `frame_objects_word_aligned` (`crates/dpc-sema/src/tests/
+    table5_1.rs`); golden `frame/byte_locals`.  No conformance unit has
+    a byte local in memory yet: FILE_$REMOVE_WHEN_UNLOCKED, the smallest
+    (0x34 bytes), calls the unnamed module-local 0xE5E8E0, which a
+    fragment unit cannot declare (the harness resolves externals from
+    map names only); the ACL_ ones need bit-array stores.
   - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
     Of the compiled routines that end in `rts` (survey as in 1.5), 306
     without any loop have a `link` area they never address (143 of
