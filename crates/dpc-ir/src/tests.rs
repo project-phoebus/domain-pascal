@@ -1666,17 +1666,6 @@ end;
     assert!(e[0].contains("`rshft` of a signed operand"), "{e:?}");
     let e = errs(
         "module m;
-type pinteger = 0..65535;
-var u: extern pinteger;
-function f: integer32; internal;
-begin
-  f := u div 3;
-end;
-",
-    );
-    assert!(e[0].contains("unsigned operand (ref 4.3.3)"), "{e:?}");
-    let e = errs(
-        "module m;
 var c: extern char; s: array[char] of integer;
 function f: integer; internal;
 begin
@@ -1685,4 +1674,108 @@ end;
 ",
     );
     assert!(e[0].contains("an array index of one byte"), "{e:?}");
+}
+
+/// Ref 4.3.3, pp. 4-6..4-7: `div` and `mod` are unsigned when both
+/// operands are unsigned run-time values, or one is and the other a
+/// constant in 0..2147483647; signed otherwise.
+#[test]
+fn div_mod_signedness() {
+    let src = |e: &str| {
+        format!(
+            "module m;
+type pinteger = 0..65535;
+var u, v: extern pinteger; w: extern integer;
+function f: integer32; internal;
+begin
+  f := {e};
+end;
+"
+        )
+    };
+    let op_ty = |e: &str| match result_value(&src(e)) {
+        Expr::Convert { value, .. } => value.ty(),
+        v => v.ty(),
+    };
+    // A `0..65535` word has an integer32 host: the operation is a
+    // longword one, its operands zero-extended words.
+    assert_eq!(op_ty("u div 3"), Scalar::unsigned(Width::Long));
+    assert_eq!(op_ty("u mod v"), Scalar::unsigned(Width::Long));
+    assert_eq!(op_ty("u div w"), Scalar::signed(Width::Long));
+    assert_eq!(op_ty("w mod 3"), Scalar::signed(Width::Word));
+}
+
+/// codegen-patterns 8: a word sum, difference or product as the dividend
+/// of `div`/`mod` is divided in 32 bits (CAL_$WEEKDAY 0xE686AE, RIP_$SERVER
+/// 0xE68AE2, TPAD_$DATA 0xE69396), the result narrowed back to a word.
+#[test]
+fn word_sum_dividend_is_divided_in_32_bits() {
+    let e = result_value(
+        "module m;
+var w: extern integer;
+function f: integer; internal;
+begin
+  f := (w + 9) mod 12;
+end;
+",
+    );
+    let Expr::Convert { value, ty } = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(ty, Scalar::signed(Width::Word));
+    let Expr::Binary { op, lhs, rhs, ty } = *value else {
+        panic!()
+    };
+    assert_eq!((op, ty), (BinOp::Mod, Scalar::signed(Width::Long)));
+    // The sum's operands are widened, not the word sum.
+    assert!(
+        matches!(*lhs, Expr::Binary { op: BinOp::Add, ty, .. } if ty == Scalar::signed(Width::Long))
+    );
+    assert_eq!(
+        *rhs,
+        Expr::Const {
+            value: 12,
+            ty: Scalar::signed(Width::Long)
+        }
+    );
+    // A variable dividend stays a word division.
+    let e = result_value(
+        "module m;
+var w: extern integer;
+function f: integer; internal;
+begin
+  f := w div 12;
+end;
+",
+    );
+    assert!(
+        matches!(e, Expr::Binary { op: BinOp::Div, ty, .. } if ty == Scalar::signed(Width::Word))
+    );
+}
+
+/// codegen-patterns 8: a longword `div` narrowed to a word also as an
+/// operand of a narrowed sum: module-local 0xE077DA at 0xE078CC..0xE078D6
+/// `move.l A3,D0; sub.l #0xd94c00,D0; divu.w #48,D0; addq.w #1,D0`;
+/// PROC2_$GET_CR_REC 0xE40186..0xE40190 (`divs.w #24`, `addq.w #1`).  The
+/// quotient is right only when it fits in 16 bits, as at those sites.
+#[test]
+fn longword_div_narrowed_inside_a_sum() {
+    let e = result_value(
+        "module m;
+var l: extern integer32;
+function f: integer; internal;
+begin
+  f := (l div 48) + 1;
+end;
+",
+    );
+    let Expr::Binary { op, lhs, ty, .. } = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!((op, ty), (BinOp::Add, Scalar::signed(Width::Word)));
+    assert!(
+        matches!(&*lhs, Expr::Convert { value, ty } if *ty == Scalar::signed(Width::Word)
+            && matches!(**value, Expr::Binary { op: BinOp::Div, .. })),
+        "{lhs:?}"
+    );
 }

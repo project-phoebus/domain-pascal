@@ -65,6 +65,17 @@ fn rel_cond(op: Rel, signed: bool) -> Cond {
     }
 }
 
+/// Whether a multiplication by the constant `c` is done with shifts and
+/// adds ([`Selector::mul_const`]): `c` = 2^s × m with m = 1 or 2^k ± 1
+/// (2^k - 1 for k >= 3), `c` in 1..=0xffff.
+fn by_shifts(c: i64) -> bool {
+    if !(1..=0xffff).contains(&c) {
+        return false;
+    }
+    let m = (c >> c.trailing_zeros()) as u32;
+    m == 1 || (m - 1).is_power_of_two() || (m > 3 && (m + 1).is_power_of_two())
+}
+
 fn size_of(w: Width) -> Size {
     match w {
         Width::Byte => Size::B,
@@ -497,16 +508,73 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
     tail_clean
 }
 
-/// Whether evaluating `e` calls a function.
+/// Whether evaluating `e` calls a function, an M$ARITH entry included, or
+/// branches conditionally (a signed `div` by a power of two,
+/// [`Selector::div_pow2`]).
 fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Const { .. } | Expr::AddrOf(_) => false,
         Expr::Load { addr, .. } => addr_has_call(addr),
         Expr::SetMember { elem, set, .. } => expr_has_call(elem) || expr_has_call(set),
-        Expr::Binary { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
+        Expr::Binary { op, lhs, rhs, ty } => {
+            arith_calls(*op, lhs, rhs, *ty, false) || expr_has_call(lhs) || expr_has_call(rhs)
+        }
+        Expr::Convert {
+            value: x,
+            ty: Scalar {
+                width: Width::Word, ..
+            },
+        } if matches!(
+            **x,
+            Expr::Binary {
+                op: BinOp::Div | BinOp::Mod,
+                ty: Scalar {
+                    width: Width::Long,
+                    ..
+                },
+                ..
+            }
+        ) =>
+        {
+            let Expr::Binary { op, lhs, rhs, ty } = &**x else {
+                unreachable!()
+            };
+            arith_calls(*op, lhs, rhs, *ty, true) || expr_has_call(lhs) || expr_has_call(rhs)
+        }
         Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } => expr_has_call(x),
         Expr::Call { .. } => true,
         Expr::Test(c) => cond_has_call(c),
+    }
+}
+
+/// Whether the selector computes `lhs op rhs` of type `ty` with an
+/// M$ARITH call or a conditional branch (the choices of [`Selector::mul`]
+/// and [`Selector::div`]); `narrowed`: a longword quotient used as a word.
+fn arith_calls(op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar, narrowed: bool) -> bool {
+    let konst = |e: &Expr| match e {
+        Expr::Const { value, .. } => Some(*value),
+        _ => None,
+    };
+    let word = |e: &Expr| Selector::word_part(e, ty.sign).is_some();
+    let long = ty.width == Width::Long;
+    match op {
+        BinOp::Mul if long => match (konst(lhs), konst(rhs)) {
+            (_, Some(c)) | (Some(c), None) => {
+                let x = if konst(rhs).is_some() { lhs } else { rhs };
+                !(by_shifts(c) || (word(x) && word(&Expr::Const { value: c, ty })))
+            }
+            (None, None) => !(word(lhs) && word(rhs)),
+        },
+        BinOp::Div => {
+            let pow2 = konst(rhs).is_some_and(|c| c > 1 && c & (c - 1) == 0);
+            if pow2 {
+                // `bpl` when signed; `lsr.l` (or refused) when not.
+                return ty.is_signed();
+            }
+            long && !(word(lhs) && word(rhs)) && !(narrowed && word(rhs))
+        }
+        BinOp::Mod => long && !(word(lhs) && word(rhs)),
+        _ => false,
     }
 }
 
@@ -825,6 +893,14 @@ pub struct Selector {
     /// The statement already called a function whose result (in D0) may
     /// still be needed.
     called: bool,
+    /// The operands of an M$ARITH call are being evaluated
+    /// ([`Self::marith`]): a call there is followed by the outer one's
+    /// pushes, so it is popped.
+    marith_depth: u32,
+    /// A call of the statement being selected skipped its pop
+    /// (codegen-patterns 1.1): nothing after it in the statement may
+    /// branch conditionally.
+    unpopped: bool,
     /// The routine addresses the unit's data from its absolute address
     /// ([`Function::data_absolute`]; [`Self::static_base`]).
     data_absolute: bool,
@@ -868,6 +944,8 @@ impl Selector {
             call_no_pop: false,
             in_args: false,
             called: false,
+            marith_depth: 0,
+            unpopped: false,
             data_absolute: false,
             abs_base: None,
         }
@@ -964,6 +1042,7 @@ impl Selector {
             self.call_no_pop =
                 matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. }) && next.clean;
             self.called = false;
+            self.unpopped = false;
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => self.store(addr, value)?,
@@ -2748,74 +2827,12 @@ impl Selector {
         };
         match op {
             BinOp::Shl | BinOp::Shr | BinOp::Ashr => return self.shift(op, lhs, rhs, ty),
-            BinOp::Mul => {
-                let (x, c) = match (konst(lhs), konst(rhs)) {
-                    (_, Some(c)) => (lhs, c),
-                    (Some(c), None) => (rhs, c),
-                    (None, None) => {
-                        let widened_word = |e: &Expr| {
-                            matches!(e, Expr::Convert { value, .. }
-                                if value.ty().width != Width::Long)
-                        };
-                        if w != Width::Word && widened_word(lhs) && widened_word(rhs) {
-                            // Two integer16 values multiplied for a
-                            // longword (ref 4.3.1, p. 4-5): `muls.w` gives
-                            // the whole product; not catalogued.
-                            return Err(unsupported(
-                                self.span,
-                                "a product of two word values used as a longword (`muls.w` or \
-                                 M$ARITH, not catalogued) is",
-                            ));
-                        }
-                        if w != Width::Word {
-                            // 32-bit multiplication calls M$ARITH
-                            // (codegen-patterns 8; bead domain-pascal-5aw.5).
-                            return Err(unsupported(
-                                self.span,
-                                "a 32-bit multiplication (M$ARITH) is",
-                            ));
-                        }
-                        return Err(unsupported(
-                            self.span,
-                            "multiplying two variables (operand order of `mul<s>.w` not \
-                             catalogued) is",
-                        ));
-                    }
-                };
-                let d = self.eval_d(x)?;
-                self.mul_const(d, c, w)?;
-                return Ok(d);
-            }
+            BinOp::Mul => return self.mul(lhs, rhs, ty),
             BinOp::Div | BinOp::Mod => {
-                // integer16 `div`/`mod` by a positive constant: the dividend
-                // sign-extended to 32 bits, `divs.w #c`, and `swap` for the
-                // remainder (0xE31154..0xE3115C `move.w D2,D1; ext.l D1;
-                // divs.w #31,D1; swap D1`; 0xE11BEA..0xE11BF0 `ext.l D1;
-                // divs.w #240,D1; swap D1`; 0xE2F052..0xE2F058 `ext.l D1;
-                // ...; divs.w #192,D1` for a quotient).  The remainder has the
-                // dividend's sign (MC68000 DIVS).
-                let c = konst(rhs).filter(|&c| c > 0 && w == Width::Word && ty.is_signed());
-                let Some(c) = c else {
-                    return Err(unsupported(
-                        self.span,
-                        "`div`/`mod` other than of an integer16 by a positive constant (M$ARITH, \
-                         codegen-patterns 8) is",
-                    ));
-                };
-                let d = self.eval_d(lhs)?;
-                self.out.push(Insn::Ext {
-                    size: Size::L,
-                    dst: d,
-                });
-                self.out.push(Insn::Div {
-                    signed: true,
-                    src: Ea::Imm(c),
-                    dst: d,
-                });
-                if op == BinOp::Mod {
-                    self.out.push(Insn::Swap(d));
+                return match self.div(op, lhs, rhs, ty, false)? {
+                    Val::Tmp(d) => Ok(d),
+                    v => self.in_tmp(v, w),
                 }
-                return Ok(d);
             }
             _ => {}
         }
@@ -3004,6 +3021,663 @@ impl Selector {
             dst: d,
         });
         Ok(d)
+    }
+
+    /// The word that a 32-bit operand of sign `sign` stands for: the operand
+    /// of a widening from a word of that sign, or a constant that fits a word
+    /// of that sign.  These are the "W" operands of M$ARITH and the operands
+    /// of `mul<s>.w` with a longword product (codegen-patterns 8).
+    fn word_part(e: &Expr, sign: Sign) -> Option<Expr> {
+        let wty = Scalar {
+            width: Width::Word,
+            sign,
+        };
+        match e {
+            Expr::Const { value, .. } => {
+                let fits = match sign {
+                    Sign::Signed => (-0x8000..0x8000).contains(value),
+                    Sign::Unsigned => (0..0x10000).contains(value),
+                };
+                fits.then_some(Expr::Const {
+                    value: *value,
+                    ty: wty,
+                })
+            }
+            Expr::Convert { value, .. } if value.ty() == wty => Some((**value).clone()),
+            _ => None,
+        }
+    }
+
+    /// `lhs * rhs` into a new data register (codegen-patterns 8,
+    /// "Multiplication"; beads domain-pascal-5aw.5, -1x1).
+    ///
+    /// - A constant factor done with shifts and adds ([`Self::mul_const`];
+    ///   at a word's width also `mulu.w #c`), at either width; at a
+    ///   longword width a word operand is extended first (0xE07442 `ext.l
+    ///   D6; lsl.l #2,D6; ...` ×12).
+    /// - A word times a word (or a constant that fits a word) used as a
+    ///   longword: one `muls.w`/`mulu.w`, whose 32-bit product is the
+    ///   value (PROC1_$LOADAV_CALLBACK 0xE14C14..0xE14C1C `move.w D1,D2;
+    ///   muls.w #5240,D2; add.l D2,D0`, also 0xE14C4C; 0xE10A7E..0xE10A84
+    ///   `move.w D2,D4; muls.w (-866,A2),D4; sub.l D0,D4`; TPAD_$DATA
+    ///   0xE69230..0xE69236; SIO_$K_TIMED_BREAK 0xE67F28..0xE67F2E `move.w
+    ///   (A0),D0; mulu.w #250,D0; move.l D0,(-10,A6)` for a `0..65535`
+    ///   word; 0xE554AC, 0xE3C1BE).  `muls` for signed operands, `mulu`
+    ///   for unsigned ones (the IR type's sign).
+    /// - A word times a word for a word: `mul<s>.w` with the sign of the
+    ///   type (0xE30A9A `muls.w D3,D0; move.w D0,(A0)+`; VTOC_$GET_UID
+    ///   0xE3925A `mulu.w D4,D6`; **Uncertain:** the mnemonic of a word
+    ///   product is the same either way).
+    /// - Otherwise M$ARITH ([`Self::marith`]): `M$MI<s>$LLW` when one
+    ///   operand is a word (or a constant that fits one), which is argument
+    ///   2; `M$MI<s>$LLL` otherwise, a constant as argument 2 (0xE14BFA
+    ///   `move.l #60296,-(SP); move.l D0,-(SP); jsr M$MIS$LLL`; 0xE1690C
+    ///   `#250000`); 21 `M$MI*$LLW` and 11 `M$MI*$LLL` calls in compiled
+    ///   code.  `S`/`U` from the type's sign (0xE1C2B0 `M$MIU$LLW` by
+    ///   `#25000`).
+    ///
+    /// **Uncertain:** which of two variables goes to the register (as for
+    /// `+`: the left one, or the computed one); which operand of `M$MI*$LLL`
+    /// is argument 1 (the left one; 0xE3B220..0xE3B226 pushes a quotient
+    /// as argument 1 for `(x div y) * y`).
+    fn mul(&mut self, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+        let w = ty.width;
+        let signed = ty.is_signed();
+        if w == Width::Byte {
+            return Err(unsupported(self.span, "a byte multiplication is"));
+        }
+        let konst = |e: &Expr| match e {
+            Expr::Const { value, .. } => Some(*value),
+            _ => None,
+        };
+        let factor = match (konst(lhs), konst(rhs)) {
+            (_, Some(c)) => Some((lhs, c)),
+            (Some(c), None) => Some((rhs, c)),
+            (None, None) => None,
+        };
+        if let Some((x, c)) = factor {
+            if w == Width::Word || by_shifts(c) {
+                let d = self.eval_d(x)?;
+                self.mul_const(d, c, w)?;
+                return Ok(d);
+            }
+            if (1..=0xffff).contains(&c) && (c >> c.trailing_zeros()).count_ones() < 4 {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a multiplication by {c} (shifts and adds or `mulu.w`, not settled for an \
+                         odd part of three bits) is"
+                    ),
+                ));
+            }
+            let b = Expr::Const { value: c, ty };
+            if let (Some(xw), Some(_)) = (Self::word_part(x, ty.sign), Self::word_part(&b, ty.sign))
+            {
+                let d = self.eval_d(&xw)?;
+                self.out.push(Insn::Mul {
+                    signed,
+                    src: Ea::Imm(c),
+                    dst: d,
+                });
+                return Ok(d);
+            }
+            self.marith_op("MI", ty, x, &b)?;
+            return Ok(0);
+        }
+        if w == Width::Word {
+            return self.mul_words(lhs, rhs, signed);
+        }
+        match (Self::word_part(lhs, ty.sign), Self::word_part(rhs, ty.sign)) {
+            (Some(l), Some(r)) => self.mul_words(&l, &r, signed),
+            (Some(_), None) => {
+                // The word is argument 2 of `M$MI*$LLW`.
+                self.marith_op("MI", ty, rhs, lhs)?;
+                Ok(0)
+            }
+            _ => {
+                self.marith_op("MI", ty, lhs, rhs)?;
+                Ok(0)
+            }
+        }
+    }
+
+    /// Two word values multiplied with `muls.w`/`mulu.w`: the left one (or
+    /// the computed one) in a register, the other the source operand
+    /// (0xE10A7E `move.w D2,D4; muls.w (-866,A2),D4`, a held value copied).
+    fn mul_words(&mut self, lhs: &Expr, rhs: &Expr, signed: bool) -> Res<u8> {
+        let lv = self.eval(lhs)?;
+        let rv = self.eval(rhs)?;
+        let (d, src) = match (&lv, &rv) {
+            (Val::Tmp(_), _) => (self.in_tmp(lv.clone(), Width::Word)?, rv),
+            (_, Val::Tmp(r)) => (*r, lv),
+            _ => (self.in_tmp(lv.clone(), Width::Word)?, rv),
+        };
+        let src = Self::ea_val(&src);
+        if matches!(src, Ea::Reg(Reg::A(_))) {
+            return Err(unsupported(self.span, "multiplying a pointer is"));
+        }
+        self.out.push(Insn::Mul {
+            signed,
+            src,
+            dst: d,
+        });
+        Ok(d)
+    }
+
+    /// `lhs div rhs` or `lhs mod rhs` of type `ty` (ref "Div", p. 4-66:
+    /// the quotient truncated toward zero; "Mod", pp. 4-115..4-116: without
+    /// -iso the remainder has the dividend's sign; ref 4.3.3: unsigned
+    /// forms; codegen-patterns 8).  `narrow`: a longword quotient or
+    /// remainder used as a word.
+    ///
+    /// Words (both operands words of `ty`'s sign):
+    /// - signed: the dividend extended, `ext.l`, then `divs.w`; `swap` for
+    ///   the remainder (0xE31154..0xE3115C `move.w D2,D1; ext.l D1; divs.w
+    ///   #31,D1; swap D1`; 0xE11BEA; CAL_$DECODE_TIME 0xE68800..0xE68808
+    ///   `ext.l D0; divs.w #4,D0; swap D0` for `mod 4`; TPAD_$INIT
+    ///   0xE335F4..0xE335FA `move.w (-34,A3),D0; ext.l D0; divs.w
+    ///   (-38,A3),D0` by a variable);
+    /// - unsigned: the dividend zero-extended, `clr.l Dn; move.w x,Dn`
+    ///   (0xE382B4..0xE382C0 `clr.l D0; ...; move.w (2,A1),D0; ...; divu.w
+    ///   #101,D0`; 0xE4CE1A..0xE4CE22 `clr.l D2; move.w D1,D2; divu.w
+    ///   #111,D2; swap D2`; 0xE54B8C..0xE54B92 by a register), or `andi.l
+    ///   #0xffff` on a computed one (0xE11818..0xE11822), then `divu.w`;
+    /// - signed `div` by 2^k: [`Self::div_pow2`].
+    ///
+    /// Longwords:
+    /// - `div` used as a word by a word (or a constant that fits one): the
+    ///   longword dividend divided in place, `div<s>.w`, no extension; the
+    ///   quotient is right only when it fits in 16 bits, which the image
+    ///   accepts (0xE10CA6..0xE10CB2 ×8 `move.l (-786,A2),D0; sub.l
+    ///   (-794,A2),D0; divs.w #250,D0; move.w D0,-(SP)`; PMAP_$PURIFIER_L
+    ///   0xE13AF6..0xE13B00 `move.l abs,D2; divu.w #50,D2; move.w
+    ///   D2,(1932,A5)`; 0xE3CB82..0xE3CB88 `divu.w (160,A1),D5`; RIP_$SERVER
+    ///   0xE68AE8 and TPAD_$DATA 0xE6939A after a widened word sum and a
+    ///   product);
+    /// - signed `div` by 2^k: [`Self::div_pow2`]; unsigned: `lsr.l`
+    ///   (0xE14086 `lsr.l #1,D0`; 0xE06E2E `lsr.l #8,D0; lsr.l #2,D0`);
+    /// - other `div`: `M$DI<s>$LLW` (the divisor a word) or `M$DI<s>$LLL`
+    ///   (0xE1405E `M$DIU$LLW` by `#12`; TIME_$GET_ADJUST 0xE16AC6
+    ///   `M$DIS$LLL` by `#250000`);
+    /// - `mod` by a word: `M$OI<s>$WLW`, a word result (AREA_$FREE_FROM
+    ///   0xE07FEE `M$OIU$WLW` for `mod 11`; 0xE30D3E `M$OIS$WLW` for `mod
+    ///   32`); used as a longword, an unsigned one is zero-extended into a
+    ///   new register (0xE07FF6 `clr.l D1; move.w D0,D1`; 0xE07A3A,
+    ///   0xE07DD2, 0xE5AA4C), a signed one is refused (all 16 `M$OIS$WLW`
+    ///   results are used as words);
+    /// - other `mod`: `M$OIS$LLL` / `M$OIU$LLL` (one entry, 0xE0AD7C;
+    ///   TIME_$GET_ADJUST 0xE16AD8).
+    fn div(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar, narrow: bool) -> Res<Val> {
+        let signed = ty.is_signed();
+        let c = match rhs {
+            Expr::Const { value, .. } => Some(*value),
+            _ => None,
+        };
+        if c == Some(0) {
+            return Err(unsupported(self.span, "a division by 0 is"));
+        }
+        let pow2 = c.filter(|&c| c > 1 && c & (c - 1) == 0);
+        match ty.width {
+            Width::Byte => Err(unsupported(self.span, "a byte `div`/`mod` is")),
+            Width::Word => {
+                if [lhs, rhs].iter().any(|e| {
+                    matches!(e, Expr::Convert { value, .. }
+                        if value.ty().width == ty.width && value.ty().sign != ty.sign)
+                }) {
+                    return Err(unsupported(
+                        self.span,
+                        "a word `div`/`mod` mixing signed and unsigned operands is",
+                    ));
+                }
+                if c.is_some_and(|c| c < 1) || c == Some(1) {
+                    return Err(unsupported(
+                        self.span,
+                        "a word `div`/`mod` by a constant below 2 is",
+                    ));
+                }
+                if let Some(c) = pow2 {
+                    if !signed {
+                        return Err(unsupported(
+                            self.span,
+                            "an unsigned `div`/`mod` by a power of two (shift or mask?) is",
+                        ));
+                    }
+                    if op == BinOp::Div {
+                        return self.div_pow2(lhs, c, Width::Word);
+                    }
+                }
+                let d = if signed {
+                    let d = self.eval_d(lhs)?;
+                    self.out.push(Insn::Ext {
+                        size: Size::L,
+                        dst: d,
+                    });
+                    d
+                } else {
+                    self.zero_extend(lhs)?
+                };
+                let src = match c {
+                    Some(c) => Ea::Imm(c),
+                    None => self.divisor(rhs)?,
+                };
+                self.out.push(Insn::Div {
+                    signed,
+                    src,
+                    dst: d,
+                });
+                if op == BinOp::Mod {
+                    self.out.push(Insn::Swap(d));
+                }
+                Ok(Val::Tmp(d))
+            }
+            Width::Long => {
+                if let (Some(l), Some(r)) =
+                    (Self::word_part(lhs, ty.sign), Self::word_part(rhs, ty.sign))
+                {
+                    // Two words (a `0..65535` subrange has an integer32
+                    // host): the word division; used as a longword, an
+                    // unsigned result is zero-extended into a new register
+                    // (0xE382B4..0xE382CC `clr.l D0; move.w (2,A1),D0; clr.l
+                    // D2; divu.w #101,D0; swap D0; move.w D0,D2; ... lsl.l
+                    // #6,D2`).
+                    let wty = Scalar {
+                        width: Width::Word,
+                        sign: ty.sign,
+                    };
+                    let v = self.div(op, &l, &r, wty, false)?;
+                    if narrow {
+                        return Ok(v);
+                    }
+                    if signed {
+                        return Err(unsupported(
+                            self.span,
+                            "a signed word quotient or remainder used as a longword is",
+                        ));
+                    }
+                    let d = self.alloc_d()?;
+                    self.out.push(Insn::Clr {
+                        size: Size::L,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    self.out.push(Insn::Move {
+                        size: Size::W,
+                        src: Self::ea_val(&v),
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(Val::Tmp(d));
+                }
+                let bw = Self::word_part(rhs, ty.sign);
+                if pow2.is_some() && !signed && op == BinOp::Mod {
+                    return Err(unsupported(
+                        self.span,
+                        "an unsigned `div`/`mod` by a power of two (shift or mask?) is",
+                    ));
+                }
+                if op == BinOp::Div {
+                    // A power of two is shifted even when the quotient is
+                    // used as a word (0xE30D26..0xE30D32 `asr.l #5`, then
+                    // `move.w D0,(-18,A6)`).
+                    if let Some(c) = pow2 {
+                        if signed {
+                            return self.div_pow2(lhs, c, Width::Long);
+                        }
+                        let d = self.eval_d(lhs)?;
+                        self.shift_by(ShiftOp::Lsr, d, c.trailing_zeros(), Width::Long);
+                        return Ok(Val::Tmp(d));
+                    }
+                    if let (true, Some(b)) = (narrow, &bw) {
+                        if c.is_some_and(|c| c < 0) {
+                            return Err(unsupported(
+                                self.span,
+                                "a division by a negative constant is",
+                            ));
+                        }
+                        let d = self.eval_d(lhs)?;
+                        let src = match c {
+                            Some(c) => Ea::Imm(c),
+                            None => self.divisor(b)?,
+                        };
+                        self.out.push(Insn::Div {
+                            signed,
+                            src,
+                            dst: d,
+                        });
+                        return Ok(Val::Tmp(d));
+                    }
+                    self.marith_op("DI", ty, lhs, rhs)?;
+                    return Ok(Val::Tmp(0));
+                }
+                let s = if signed { 'S' } else { 'U' };
+                if let Some(b) = bw {
+                    self.marith(&format!("M$OI{s}$WLW"), lhs, &b)?;
+                    if narrow {
+                        return Ok(Val::Tmp(0));
+                    }
+                    if signed {
+                        return Err(unsupported(
+                            self.span,
+                            "a signed `mod` by a word used as a longword (the 16 `M$OIS$WLW` \
+                             results in the image are all used as words) is",
+                        ));
+                    }
+                    let d = self.alloc_d()?;
+                    self.out.push(Insn::Clr {
+                        size: Size::L,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    self.out.push(Insn::Move {
+                        size: Size::W,
+                        src: Ea::Reg(Reg::D(0)),
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(Val::Tmp(d));
+                }
+                if signed && Self::word_part(lhs, ty.sign).is_some() {
+                    return Err(unsupported(
+                        self.span,
+                        "a word `mod` a longword (`M$OIS$WWL`, which no compiled code calls, or \
+                         `M$OIS$LLL`) is",
+                    ));
+                }
+                self.marith(&format!("M$OI{s}$LLL"), lhs, rhs)?;
+                Ok(Val::Tmp(0))
+            }
+        }
+    }
+
+    /// A word divisor as the source operand of `div<s>.w`: a variable in
+    /// memory or held in a data register.  A computed divisor (whose
+    /// evaluation order against the dividend is not catalogued) is refused.
+    fn divisor(&mut self, e: &Expr) -> Res<Ea> {
+        let start = self.out.len();
+        let v = self.eval(e)?;
+        if self.out.len() > start {
+            return Err(unsupported(
+                self.span,
+                "a divisor of `div<s>.w` that takes instructions (computed, or reached through a \
+                 register loaded for it: before or after the dividend?) is",
+            ));
+        }
+        match v {
+            Val::Imm(c) => Ok(Ea::Imm(c)),
+            Val::Mem(ea) => Ok(ea),
+            Val::Reg(r @ Reg::D(_)) => Ok(Ea::Reg(r)),
+            _ => Err(unsupported(self.span, "this divisor is")),
+        }
+    }
+
+    /// The unsigned word `e` zero-extended in a new data register:
+    /// `clr.l Dn; move.w x,Dn` (0xE4CE1A..0xE4CE1C), `andi.l #0xffff` on a
+    /// computed value (0xE11818).
+    fn zero_extend(&mut self, e: &Expr) -> Res<u8> {
+        let v = self.eval(e)?;
+        if let Val::Tmp(d) = v {
+            self.out.push(Insn::AluImm {
+                op: AluOp::And,
+                size: Size::L,
+                imm: 0xffff,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            return Ok(d);
+        }
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Clr {
+            size: Size::L,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Self::ea_val(&v),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// Signed `x div 2^k` at width `w` (codegen-patterns 8): the value in a
+    /// register, rounded toward zero by adding 2^k - 1 when it is negative,
+    /// then shifted right arithmetically:
+    ///
+    /// ```text
+    ///         bpl.s   L               ; on the flags of the instruction
+    ///         addq/addi #2^k-1,Dn     ; that put x in Dn, or after tst
+    /// L:      asr     #k,Dn           ; split above 8
+    /// ```
+    ///
+    /// CAL_$WEEKDAY 0xE68698..0xE6869E `move.w D1,D3; bpl.s; addq.w #3,D3;
+    /// asr.w #2,D3` (`y div 4`); PROC1_$LOADAV_CALLBACK 0xE14BEE..0xE14BF8
+    /// `move.l (A5),D0; bpl.s; addi.l #255,D0; asr.l #8,D0`, and after a
+    /// call 0xE14C0A `tst.l D0; bpl.s; ...`; `div 1024` as `addi.l #1023;
+    /// asr.l #8; asr.l #2` (0xE06D5C, 0xE0896E); `tools/arithsurvey.py`
+    /// finds no `div` by a power of two done with `divs.w` (63 such
+    /// sequences, e.g. by 2 at 0xE17662, by 8 at 0xE3A3A8; the one `divs.w
+    /// #4`, CAL_$DECODE_TIME 0xE68804, is a `mod`).  The join is not aligned (forward
+    /// targets, codegen-patterns 7; the `movea.l A0,A0` before it at
+    /// 0xE30D2E is one of MST_$INIT's exceptions).
+    fn div_pow2(&mut self, x: &Expr, c: i64, w: Width) -> Res<Val> {
+        let size = size_of(w);
+        let d = self.eval_d(x)?;
+        if !self.sets_flags(d, w) {
+            self.out.push(Insn::Tst {
+                size,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+        }
+        if self.unpopped {
+            return Err(unsupported(
+                self.span,
+                "a conditional branch after a call whose pop was skipped (codegen-patterns 1.1) is",
+            ));
+        }
+        let l = self.new_label();
+        self.jump(Cond::Pl, l);
+        let bias = c - 1;
+        let dst = Ea::Reg(Reg::D(d));
+        self.out.push(if bias <= 8 {
+            Insn::Addq {
+                size,
+                value: bias as u8,
+                dst,
+            }
+        } else {
+            Insn::AluImm {
+                op: AluOp::Add,
+                size,
+                imm: bias,
+                dst,
+            }
+        });
+        self.place(l);
+        self.shift_by(ShiftOp::Asr, d, c.trailing_zeros(), w);
+        Ok(Val::Tmp(d))
+    }
+
+    /// Whether the instruction just selected wrote data register `d` at
+    /// width `w` and set N from that value (a `move`, an extension, an
+    /// arithmetic or logical operation, a shift into `d`).
+    fn sets_flags(&self, d: u8, w: Width) -> bool {
+        let size = size_of(w);
+        let reg = Ea::Reg(Reg::D(d));
+        match self.out.last() {
+            Some(Insn::Move { size: s, dst, .. }) => *s == size && *dst == reg,
+            Some(Insn::Ext { size: s, dst }) => *s == size && *dst == d,
+            Some(Insn::Alu { size: s, dst, .. }) => *s == size && *dst == d,
+            Some(Insn::Shift { size: s, dst, .. }) => *s == size && *dst == d,
+            Some(
+                Insn::AluImm { size: s, dst, .. }
+                | Insn::Addq { size: s, dst, .. }
+                | Insn::Subq { size: s, dst, .. }
+                | Insn::Unary { size: s, dst, .. },
+            ) => *s == size && *dst == reg,
+            _ => false,
+        }
+    }
+
+    /// `op` by `n` bits on Dd, at most 8 at a time (0xE02AA6).
+    fn shift_by(&mut self, op: ShiftOp, d: u8, n: u32, w: Width) {
+        let mut n = n;
+        while n > 0 {
+            let k = n.min(8);
+            self.out.push(Insn::Shift {
+                op,
+                size: size_of(w),
+                count: ShiftCount::Imm(k as u8),
+                dst: d,
+            });
+            n -= k;
+        }
+    }
+
+    /// An M$ARITH call `M$<kind><s>$LL<W|L>(a, b)` of type `ty`: `W` when
+    /// `b` is a word (or a constant that fits one, [`Self::word_part`]).
+    fn marith_op(&mut self, kind: &str, ty: Scalar, a: &Expr, b: &Expr) -> Res<()> {
+        let s = if ty.is_signed() { 'S' } else { 'U' };
+        match Self::word_part(b, ty.sign) {
+            Some(bw) => self.marith(&format!("M${kind}{s}$LLW"), a, &bw),
+            None => self.marith(&format!("M${kind}{s}$LLL"), a, b),
+        }
+    }
+
+    /// A call of the M$ARITH entry `name` with argument 1 `a` (a longword)
+    /// and argument 2 `b` (a word or a longword); the result is in D0, a
+    /// longword or (`M$OI*$WLW`) a word (codegen-patterns 8; the frames in
+    /// `../source/domain_os/math/sau2/arith.s`: `(4,SP)` a, `(8,SP)` b).
+    /// Survey of the 92 calls in compiled code (`tools/arithsurvey.py`):
+    ///
+    /// 1. The operands are evaluated first, like any operator's
+    ///    (0xE14BEE..0xE14C00: `x div 256` computed, then both pushes).
+    /// 2. The pad `subq.l #2,SP` when `b` is a word (64 of 64 calls with a
+    ///    word argument; none of the 28 others).
+    /// 3. `b`, then `a`: a word by `move.w #c,-(SP)` (37), `move.w
+    ///    ea,-(SP)` (27); a longword by `move.l` (0xE16ABE `move.l
+    ///    #250000,-(SP)`), 0 by `clr.l -(SP)` (0xE10A74).
+    /// 4. `jsr`, then `addq.w #8,SP` (89 of 92), except where the
+    ///    procedure-call rule skips the pop (0xE16A92, 0xE16AD8, 0xE19BA6;
+    ///    codegen-patterns 1.1).
+    /// 5. The result is used in D0, modified in place (0xE39C3E `add.l
+    ///    (14,A6),D0`; CAL_$WEEKDAY 0xE686C8 `muls.w #153,D0`; 0xE6929C
+    ///    `divs.w #10,D0`).
+    ///
+    /// The call writes only D0 and A0 (`regs.rs`; 12.4 R3: D1/A1 live
+    /// across 31 of 83 modelled calls).  It is not recorded for
+    /// [`held_through_calls`] (R4(c)): a value whose last use is in its
+    /// pushes stays in a scratch register at TIME_$GET_ADJUST 0xE16AD6
+    /// (`move.l D1,-(SP)`, a local variable); **Uncertain** for a
+    /// parameter loaded at entry.
+    ///
+    /// The same operand as `a` and `b` is pushed once and copied, `move.l
+    /// (SP),-(SP)` (OS_$SHUTDOWN 0xE6D604, one site).
+    ///
+    /// Refused: both operands computed (the order differs, 0xE10A86..0xE10A98
+    /// against 0xE69560..0xE69572); a computed operand with a pad (the
+    /// pad is scheduled into the computation, 22 calls, e.g. CAL_$WEEKDAY
+    /// 0xE686B0, or after it, 0xE0920C: codegen-patterns 12.4 R9), except
+    /// another M$ARITH call's result as `a` (0xE16962..0xE16970: the inner
+    /// call and its pop, then the outer pad); a second call while a
+    /// result in D0 is still needed; a call among another call's
+    /// arguments.
+    fn marith(&mut self, name: &str, a: &Expr, b: &Expr) -> Res<()> {
+        if self.in_args {
+            return Err(unsupported(
+                self.span,
+                "an M$ARITH call among another call's arguments is",
+            ));
+        }
+        let pre_called = self.called;
+        let start = self.out.len();
+        // (An error ends the routine's selection: the depth need not be
+        // restored then.)
+        self.marith_depth += 1;
+        let av = self.eval(a)?;
+        let mid = self.out.len();
+        let bv = self.eval(b)?;
+        self.marith_depth -= 1;
+        let (a_code, b_code) = (mid > start, self.out.len() > mid);
+        if a_code && b_code {
+            return Err(unsupported(
+                self.span,
+                "an M$ARITH call with both operands computed (evaluation order not settled) is",
+            ));
+        }
+        let is_d0 = |v: &Val| matches!(v, Val::Tmp(0) | Val::Reg(Reg::D(0)));
+        let pad = b.ty().width == Width::Word;
+        if pad && (a_code || b_code) {
+            let ends_in_call = match &self.out[start..mid] {
+                [.., Insn::Jsr(Ea::AbsL(s, _)), Insn::Addq { .. }]
+                | [.., Insn::Jsr(Ea::AbsL(s, _))] => s.starts_with("M$"),
+                _ => false,
+            };
+            if b_code || !ends_in_call || !is_d0(&av) {
+                return Err(unsupported(
+                    self.span,
+                    "an M$ARITH call with a word argument and a computed operand (the pad is \
+                     scheduled into the computation, codegen-patterns 8, 12.4 R9) is",
+                ));
+            }
+        }
+        if (pre_called || self.called) && !is_d0(&av) && !is_d0(&bv) {
+            return Err(unsupported(
+                self.span,
+                "two function calls in one statement are",
+            ));
+        }
+        if pad {
+            self.out.push(Insn::Subq {
+                size: Size::L,
+                value: 2,
+                dst: Ea::Reg(Reg::A(SP)),
+            });
+        }
+        self.push_val(bv, b.ty().width)?;
+        if a == b && !a_code && !b_code {
+            // The same operand twice: the second copy from the stack
+            // (OS_$SHUTDOWN 0xE6D600..0xE6D606 `move.l (-596,A6),-(SP);
+            // move.l (SP),-(SP); jsr M$MIS$LLL`, `x * x`; codegen-patterns
+            // 1.5 has the same for a constant passed twice by address).
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Ind(SP),
+                dst: Ea::PreDec(SP),
+            });
+        } else {
+            self.push_val(av, Width::Long)?;
+        }
+        self.out.push(Insn::Jsr(Ea::AbsL(name.to_string(), 0)));
+        if self.call_no_pop && self.marith_depth == 0 {
+            self.unpopped = true;
+        } else {
+            self.out.push(Insn::Addq {
+                size: Size::W,
+                value: 8,
+                dst: Ea::Reg(Reg::A(SP)),
+            });
+        }
+        self.called = true;
+        Ok(())
+    }
+
+    /// Push an operand at width `w` (codegen-patterns 1.5): a longword
+    /// constant by [`Self::push_long_const`], a word constant by `move.w
+    /// #c,-(SP)` (`clr.w` for 0), anything else by `move.<w> ea,-(SP)`.
+    fn push_val(&mut self, v: Val, w: Width) -> Res<()> {
+        let dst = Ea::PreDec(SP);
+        match (v, w) {
+            (_, Width::Byte) => {
+                return Err(unsupported(self.span, "a byte M$ARITH operand is"));
+            }
+            (Val::Imm(c), Width::Long) => self.push_long_const(c),
+            (Val::Imm(0), Width::Word) => self.out.push(Insn::Clr { size: Size::W, dst }),
+            (Val::Imm(c), Width::Word) => self.out.push(Insn::Move {
+                size: Size::W,
+                src: Ea::Imm(imm(c, Width::Word)),
+                dst,
+            }),
+            (v, w) => self.out.push(Insn::Move {
+                size: size_of(w),
+                src: Self::ea_val(&v),
+                dst,
+            }),
+        }
+        Ok(())
     }
 
     /// `lshft`, `rshft`, `arshft` (ref pp. 4-109, 4-171, 4-29): `lsl`,
@@ -3204,8 +3878,43 @@ impl Selector {
             return self.eval(value);
         }
         if from.bytes() > ty.bytes() {
+            // A longword quotient or remainder used as a word: `div<s>.w`
+            // in place, or `M$OI*$WLW` ([`Self::div`]).  A word one
+            // narrowed to a byte (`chr(w mod 10)`) is the word operation,
+            // below.
+            if let Expr::Binary {
+                op: op @ (BinOp::Div | BinOp::Mod),
+                lhs,
+                rhs,
+                ty: t,
+            } = value
+            {
+                if from.width != Width::Long {
+                    let v = self.eval(value)?;
+                    return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
+                }
+                if ty.width != Width::Word {
+                    return Err(unsupported(
+                        self.span,
+                        "a longword `div`/`mod` used as a byte is",
+                    ));
+                }
+                let v = self.div(*op, lhs, rhs, *t, true)?;
+                return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
+            }
             let v = self.eval(value)?;
             return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
+        }
+        if matches!(value, Expr::Convert { value: inner, .. }
+            if matches!(**inner, Expr::Binary { op: BinOp::Div | BinOp::Mod, .. }))
+        {
+            // `dpc-ir` divides a word sum in 32 bits and narrows the result
+            // (codegen-patterns 8); widened again, would the original have
+            // used the longword quotient (M$ARITH) or the word one?
+            return Err(unsupported(
+                self.span,
+                "a word `div`/`mod` of a sum, difference or product used as a longword is",
+            ));
         }
         if let Expr::Binary { op: BinOp::Shl, .. } = value {
             // A word `lshft` used as a longword: shifted at the word's
@@ -3285,7 +3994,11 @@ impl Selector {
                 "two function calls in one statement are",
             ));
         }
-        self.call(c, self.call_no_pop)?;
+        // Inside an M$ARITH call's operands the outer call's pushes follow:
+        // popped.
+        let no_pop = self.call_no_pop && self.marith_depth == 0;
+        self.call(c, no_pop)?;
+        self.unpopped |= no_pop;
         self.called = true;
         Ok(Val::Reg(Reg::D(0)))
     }

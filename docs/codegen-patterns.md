@@ -1797,34 +1797,220 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   `mulu.w`: `dpc` rejects odd parts of three bits other than 2^k ± 1.  A
   68000 cycle count does not separate the two groups (268 and 336 would
   be cheaper with shifts).  `muls.w #c` occurs where the product is a
-  `.l` index (section 5.2); `dpc` uses `mulu.w` for word results only and
-  rejects a 32-bit multiplication by such a constant.  The `move` that
+  `.l` index (section 5.2); for a word result `dpc` uses `mulu.w`, for a
+  longword product of a word see "Products of words used as longwords"
+  below.  The `move` that
   starts the second chain takes a new register (D1 at 0xE68870, 12.4 R8);
   when the multiplicand is held, it is copied first (0xE073D4 `move.w
   D1,D3; lsl.w #2,D3; ...`).  **Uncertain:** ×17 at 0xE87974 keeps the
   product in the copy (`move.l D0,D6; lsl.l #4,D6; add.l D0,D6`), D0
   being used later; `dpc` copies a held multiplicand and then uses the
   forms above.
-- **16x16 multiply of two variables:** `mulu.w`/`muls.w` inline (60
-  `mul<s>.w` with a register or memory source in compiled code); operand
-  order not catalogued, rejected by `dpc`.
-- **Word divide or mod** (32/16 → 16) is inline: `divu.w`/`divs.w`, with
-  `swap` for the remainder (Verified: PMAP_$PURIFIER_L 0xE13AFC
-  `divu.w #50,D2`).  On overflow the register keeps the dividend.
-  - **integer16 `div`/`mod` by a positive constant (Verified;
-    implemented):** `ext.l Dn; divs.w #c,Dn`, then `swap Dn` for `mod`
-    (0xE31154..0xE3115C `move.w D2,D1; ext.l D1; divs.w #31,D1; swap D1`;
-    0xE11BEA..0xE11BF4 `ext.l D1; divs.w #240,D1; swap D1; ext.l D1;
-    divs.w #60,D1`; 0xE2F052..0xE2F058 a quotient).  The remainder has the
-    dividend's sign (MC68000 DIVS).
-  - Unsigned operands (ref 4.3.3, p. 4-6: unsigned `div`/`mod` when both
-    operands are unsigned run-time values, or one is and the other a
-    non-negative constant) are zero-extended first (0xE11816..0xE11822
-    `andi.l #0xffff,D3; divu.w #5,D3; swap D3`): not implemented.
-  - A longword dividend divided by a word constant with `divs.w` (0xE10CAE
-    `divs.w #250,D0` after `sub.l`): the quotient is 16 bits, which is
-    only right when it fits; how the compiler decided that is not known
-    (rejected).
+- **Multiplication, division and mod: the survey (beads
+  domain-pascal-5aw.5, -1x1).**  `tools/arithsurvey.py` (`summary`,
+  `calls`, `inline`; routines split and followed as in
+  `tools/casesurvey.py`) lists every `jsr` to an M$ARITH entry and every
+  inline `mul<s>.w`/`div<s>.w` of compiled code.  **Implemented** in
+  `crates/dpc-m68k/src/isel.rs` (`mul`, `mul_words`, `div`, `div_pow2`,
+  `marith`, `marith_op`, `word_part`; the narrowing hook in `convert`;
+  `arith_calls` for the pop rule) and `crates/dpc-ir/src/lower.rs`
+  (`binary`: the sign of `div`/`mod`, the widened dividend; `narrow`);
+  golden `tests/golden/expr/marith`, tests `crates/dpc-m68k/tests/expr.rs`
+  (`marith_calls`, `word_products_used_as_longwords`, `division_forms`,
+  `values_live_in_d1_across_marith`), `crates/dpc-ir/src/tests.rs`.
+  Semantics were checked in a scratch 68000 evaluator (not kept): the
+  M$ARITH entries of `../source/domain_os/math/sau2/arith.s` and the
+  generated sequences against ref "Div" p. 4-66 (truncation toward zero)
+  and "Mod" pp. 4-115..4-116 (the dividend's sign), over random and edge
+  operands; the entries preserve D1-D3/A1 (12.4 R3).
+- **The M$ARITH entries (Verified: frames in arith.s, call sites).**
+  Name: MI = `*`, DI = `div`, OI = `mod`; S/U = signed/unsigned; then the
+  sizes of the result, argument 1 (`a`, at `(4,SP)` in the callee) and
+  argument 2 (`b`, after it): `M$MIS$LLW` is a longword `a` times a word
+  `b`, longword result; `M$OIU$WLW` is an unsigned longword `a` mod a word
+  `b`, word result; `M$OIS$WWL` a word `a` mod a longword `b`.  The
+  results: D0, sized by the name (an `M$OI*$WLW` remainder in D0.w).
+  `M$OIS$LLL` and `M$OIU$LLL` are one entry (0xE0AD7C).  Calls in compiled
+  code (92):
+
+  | Entry | Address | Calls | Example |
+  |---|---|---|---|
+  | M$MIS$LLL | E0ABD4 | 9 | 0xE14C02 (`x * 60296`), 0xE6D606 |
+  | M$MIU$LLW | E0AC02 | 10 | 0xE1C2B8 (`#25000`), 0xE30BC8 |
+  | M$MIU$LLL | E0AC1C | 2 | 0xE5D008 |
+  | M$MIS$LLW | E0AC44 | 12 | 0xE16970, 0xE3B1E2 |
+  | M$DIU$LLW | E0AC68 | 14 | 0xE1405E (`#12`), CAL_$DECODE_TIME 0xE68794 (`#60`) |
+  | M$DIS$LLW | E0AC84 | 1 | 0xE16962 (by a word variable) |
+  | M$OIU$WLW | E0ACC0 | 11 | AREA_$FREE_FROM 0xE07FEE (`#11`), 0xE3CB94 |
+  | M$DIS$LLL | E0ACD8 | 10 | TIME_$GET_ADJUST 0xE16AC6 (`#250000`), 0xE3AE7C |
+  | M$DIU$LLL | E0AD0C | 2 | AST_$GET_SEG_MAP 0xE06E16 |
+  | M$OIS$WLW | E0AD54 | 16 | 0xE30D3E (`mod 32`), CAL_$WEEKDAY 0xE686C0 |
+  | M$OIS$WWL | E0AD68 | 0 | |
+  | M$OIS$LLL = M$OIU$LLL | E0AD7C | 5 | TIME_$GET_ADJUST 0xE16AD8 |
+
+- **The call sequence (Verified, counts of the 92 calls):**
+  - the pad `subq.l #2,SP` when `b` is a word: 64 of the 64 calls with a
+    word argument, none of the 28 others (section 1.4: 6 bytes);
+  - `b` pushed first, then `a` (section 1.1): a word `b` by `move.w
+    #c,-(SP)` (37) or `move.w ea,-(SP)` (27); a longword `b` by `move.l
+    #c,-(SP)` (8, all constants beyond a word: 60296, 64453, 65173,
+    250000) or `move.l ea,-(SP)` (20); `a` by `move.l` (91) or `clr.l
+    -(SP)` (0xE10A74); the same variable as both, once and then `move.l
+    (SP),-(SP)` (OS_$SHUTDOWN 0xE6D600..0xE6D606, `x * x`; one site,
+    implemented);
+  - `jsr (M$...).l`, then `addq.w #8,SP` (89), not popped where the
+    procedure-call rule of section 1.1 skips the pop (0xE16A92, 0xE16AD8,
+    0xE19BA6: only the result move and the epilogue follow);
+  - the operands are computed before the pushes, like any operator's
+    (0xE14BEE..0xE14C00: `x div 256` into D0, then `move.l #60296,-(SP);
+    move.l D0,-(SP)`).  **Uncertain:** with a pad, a computed operand has
+    the pad scheduled into its computation (22 calls, e.g. CAL_$WEEKDAY
+    0xE686AE..0xE686BE `move.w (A1),D0; subq.l #2,SP; ext.l D0; addi.l
+    #9,D0`) or after it (0xE0920C, 0xE094A2, 0xE09F86): `dpc` refuses a
+    computed operand with a pad, except an M$ARITH result as `a`, whose
+    call and pop come first (0xE1695C..0xE16970: `M$DIS$LLW`, `addq.w`,
+    then the pad and `move.l D0,-(SP)` for `M$MIS$LLW`).  Two computed
+    operands are refused: the order differs (0xE10A86..0xE10A98 `b` first,
+    0xE69560..0xE69572 `a` first);
+  - the result is used in D0 and modified there (0xE39C3E `add.l
+    (14,A6),D0`; 0xE14C0A `tst.l D0; bpl; addi.l #255,D0`; CAL_$WEEKDAY
+    0xE686C8 `muls.w #153,D0`); an unsigned `M$OIU$WLW` remainder used as a
+    longword is zero-extended into a new register (0xE07FF6 `clr.l D1;
+    move.w D0,D1`; 0xE07A3A, 0xE07DD2, 0xE5AA4C); the 16 `M$OIS$WLW`
+    results are all used as words (`dpc` refuses one used as a longword);
+  - **registers (Verified; 12.4 R3):** D1 or A1 is live across 31 of the
+    83 calls `tools/regalloc.py` models (42 register/call pairs; the
+    entries write only D0/A0, and preserve D1-D3 with `movem`).  A value
+    whose last use is in the pushes stays in a scratch register at
+    TIME_$GET_ADJUST 0xE16AD6 (`move.l D1,-(SP)`, D1 dead after; a local
+    variable).  **Uncertain:** whether a parameter loaded at entry would be
+    held (12.4 R4(c)); `dpc` does not hold for M$ARITH calls.
+- **Which form (rule, counts; implemented):**
+  - **`*`:** a constant factor whose odd part is 1 or 2^k ± 1: shifts
+    and adds at the product's width (above).  **A word times a word, or a
+    word times a constant that fits one, used as a longword: one
+    `muls.w`/`mulu.w`, its 32-bit product** (bead domain-pascal-1x1;
+    `muls` for signed words, `mulu` for `0..65535` ones): 15 sites, `muls`
+    0xE10A80 (`sub.l` after), PROC1_$LOADAV_CALLBACK 0xE14C18 and
+    0xE14C4C (`move.w D1,D2; muls.w #5240,D2; add.l D2,D0`), TPAD_$DATA
+    0xE69232, 0xE692B4, 0xE69396, 0xE693A6 (the product divided, `divs.w
+    #2200`); `mulu` 0xE13EE0, 0xE3995A, 0xE3C1BE, 0xE3C1D0, 0xE554AC,
+    0xE5552E (`mulu.w #150,D0; move.l D0,D3`), SIO_$K_TIMED_BREAK
+    0xE67F2A (`mulu.w #250`, a `uint16_t` in the C), 0xE6C752.  No M$ARITH
+    call multiplies two words of one sign (the one call with two word
+    operands, DISK_INIT 0xE19B8A..0xE19B94, zero-extends a `0..65535` word
+    for `M$MIS$LLW` by a signed word: refused by `dpc` as a computed
+    operand with a pad).  Otherwise M$ARITH: `M$MI<s>$LLW` when one operand
+    is a word (or a constant that fits a word of the operation's sign),
+    passed as `b` whichever side it is on; `M$MI<s>$LLL` otherwise, a
+    constant as `b` (all 5 constant sites).  A word times a word for a word:
+    `mul<s>.w` by the sign of the type (0xE30A9A `muls.w D3,D0; move.w
+    D0,(A0)+`; VTOC_$GET_UID 0xE3925A `mulu.w D4,D6`; Uncertain: either
+    gives the low word).  **Uncertain:** which of two variables goes to the
+    register (`dpc`: the left one or the computed one, as for `+`;
+    0xE10A7E copies a held D2 and multiplies by memory); which operand of
+    `M$MI*$LLL` is `a` (`dpc`: the left one).
+  - **Word `div`/`mod` (both operands words of one sign):** signed,
+    `ext.l; divs.w` and `swap` (0xE31154..0xE3115C; CAL_$DECODE_TIME
+    0xE68800..0xE68808 `ext.l D0; divs.w #4,D0; swap D0` for `mod 4`;
+    TPAD_$INIT 0xE335F4..0xE335FA `ext.l D0; divs.w (-38,A3),D0` by a
+    variable); unsigned, `clr.l Dn; move.w x,Dn` or `andi.l #0xffff` on a
+    computed value, then `divu.w` (0xE382B4..0xE382CA, 0xE4CE1A..0xE4CE22,
+    0xE54B8C..0xE54B92 by a register, 0xE39942..0xE39948 by memory,
+    0xE11816..0xE11822).  `0..65535` words have an integer32 host, so
+    their quotient or remainder is a longword operation on two words in
+    the IR: divided as words; used as a longword, the result is
+    zero-extended into a new register (0xE382BE/0xE382CC `clr.l D2; ...;
+    move.w D0,D2` before `lsl.l #6,D2`).
+  - **Signed `div` by 2^k, either width (Verified; 63 sequences):**
+    `bpl.s L; addq/addi #2^k-1,Dn; L: asr #k,Dn` on the flags of the
+    instruction that loaded or computed Dn, or after `tst` (0xE14C0A
+    after a call): CAL_$WEEKDAY 0xE68698..0xE6869E `move.w D1,D3; bpl.s;
+    addq.w #3,D3; asr.w #2,D3`; PROC1_$LOADAV_CALLBACK 0xE14BEE `addi.l
+    #255; asr.l #8`; `div 1024` as `addi.l #1023; asr.l #8; asr.l #2`
+    (0xE06D5C, 0xE0896E).  No `div` by a power of two uses `divs.w` (the
+    one `divs.w #4`, CAL_$DECODE_TIME 0xE68804, is a `mod`).  Also
+    when the quotient is used as a word (0xE30D26..0xE30D32 `asr.l #5`,
+    then `move.w`).  Unsigned longword by 2^k: `lsr.l` (0xE14086, 0xE06E2E).
+    `mod` by 2^k is a division like any other (0xE68804 above; 0xE30D3E
+    `M$OIS$WLW` for `mod 32`).  The join is not aligned (section 7:
+    forward targets; MST_$INIT 0xE30D2E has a filler, one of the
+    exceptions listed there).  Refused: unsigned word `div`/`mod` and
+    unsigned `mod` by 2^k (no site: shift, mask or division?).
+  - **A longword `div` whose quotient is used as a word, by a word (or a
+    constant that fits one): `div<s>.w` in place on the longword, no
+    call** (about 30 sites: of the 70 inline `div<s>.w`, 23 `divs.w` and
+    7 `divu.w` divide a longword the instruction before computed or
+    loaded, the others an extended word; ad-hoc classification of the
+    `inline` listing): 0xE10CAE..0xE114D8 ×8 `move.l (-786,A2),D0; sub.l
+    (-794,A2),D0; divs.w #250,D0; move.w D0,-(SP)`; REM_FILE_$SERVER
+    0xE644FC, 0xE6450A; PMAP_$PURIFIER_L 0xE13AFC `move.l abs,D2; divu.w
+    #50,D2; move.w D2,(1932,A5)`, 0xE13B0A; 0xE3CB84 `divu.w (160,A1),D5`
+    (by a word variable); RIP_$SERVER 0xE68AE8; TPAD_$DATA 0xE6939A,
+    0xE693AA; 0xE6929C, 0xE69328 (an `M$MIS$LLW` result divided);
+    0xE2F052..0xE2F058 `ext.l D1; lsl.l #8,D1; lsl.l #2,D1; divs.w
+    #192,D1` (a word times 1024, divided).  Every one whose use was
+    checked uses the quotient as a word (`move.w`, a word push, `tst.w`,
+    `cmpi.w`), also as an operand of word arithmetic: module-local
+    0xE077DA at 0xE078CC..0xE078D6 `move.l A3,D0; sub.l #0xd94c00,D0;
+    divu.w #48,D0; addq.w #1,D0`; PROC2_$GET_CR_REC 0xE40186..0xE40190
+    (`divs.w #24`, `addq.w #1`); TPAD_$DATA 0xE6954A (an `M$MIS$LLW`
+    product, `divs.w (-34,A2)`, `sub.w`).  `dpc-ir` narrows the operands
+    of a narrowed sum the same way (`narrow`).  The
+    quotient is right only when it fits in 16 bits (otherwise DIVS/DIVU
+    set V and leave the dividend): the original accepts that, `dpc` does
+    the same.  The same quotient used as a longword calls M$ARITH
+    (0xE14076 `M$DIU$LLW` of the same 0xE23C98 by 50, then `add.l`).
+  - **Other longword `div`:** `M$DI<s>$LLW` when the divisor is a word or a
+    constant that fits one, `M$DI<s>$LLL` otherwise (also when the
+    quotient is used as a word: 0xE39C26, 0xE3AE7C `M$DIS$LLL`, then
+    `move.w D0,...`).
+  - **Longword `mod`:** `M$OI<s>$WLW` by a word or a word constant (27
+    calls), whatever the use of the result (0xE3CB94 calls `M$OIU$WLW` for
+    the remainder right after `divu.w` gave the quotient of the same
+    operands at 0xE3CB84: a word remainder needs no overflow check, but
+    `divu.w` would lose it when the quotient overflows); `M$OI<s>$LLL`
+    otherwise.  `M$OIS$WWL` (a word mod a longword) is never called:
+    refused.
+  - **The sign:** ref 4.3.3, pp. 4-6..4-7: `div` and `mod` (and the
+    relational operators, `max`) are unsigned when both operands are
+    unsigned run-time values, or one is and the other a constant in
+    0..2147483647.  The image's unsigned entries (`M$DIU`, `M$OIU`,
+    `M$MIU`) take zero-extended `0..65535` words, their sums, and
+    longwords whose type the image does not show (0xE1C2B4); `dpc` gives
+    `*` the same rule (Uncertain, above).  **Open:** ref 3.4 (p. 3-9) calls the
+    subranges 0..2^30 to 0..2^31-1 "unsigned ranges" and 4.3.3's example
+    divides a `0..2147483647` value unsigned, but `dpc-ir`'s `sign_of`
+    treats such 4-byte subranges as signed (only 2-byte ones with an
+    integer32 host are unsigned): the unsigned longword forms are not
+    reachable from such types yet.
+  - **A word sum, difference or product as the dividend is divided in 32
+    bits** (ref 4.3.1, p. 4-5): CAL_$WEEKDAY 0xE686AE..0xE686C0 `move.w
+    (A1),D0; ext.l D0; addi.l #9,D0` then `M$OIS$WLW` for `(month + 9) mod
+    12`; 0xE686D0..0xE686D4 `ext.l D0; addq.l #2,D0; divs.w #5,D0`;
+    0xE686DA..0xE686EE (a sum of two words + 1, `mod 7`); RIP_$SERVER
+    0xE68AE2..0xE68AE8 `move.w D2,D5; ext.l D5; subq.l #2,D5; divs.w
+    #6,D5`; TPAD_$DATA 0xE69392..0xE6939A (a `muls.w` product).  `dpc-ir`
+    lowers such a `div`/`mod` as a longword operation narrowed back to
+    the word.  **Exception (Uncertain):** ACL_$INIT 0xE31150..0xE3116E
+    computes `(i + 1) mod 31` and `(31 + i - 1) mod 31` in 16 bits, `i`
+    the index of a `for` loop over 0..30 (`acl/init.c`), whose range the
+    compiler may have used; `dpc` has no such loops.  Such a narrowed
+    word quotient used as a longword again is refused.
+  - **Refused (not catalogued):** a computed divisor of `div<s>.w`, or
+    one whose address takes an instruction; a division by a negative
+    constant inline; byte operands; an M$ARITH call among another call's
+    arguments; a second call while an M$ARITH or function result in D0 is
+    still needed (e.g. `l * l + l * l`).
+- **Conformance:** no compiled routine that calls M$ARITH or uses the
+  new inline forms is reachable yet.  The small ones need what `dpc`
+  lacks: TIME_$GET_ADJUST 0xE16AA8 (0x40 bytes: `disable`/`enable`, a
+  local held in D1 across both calls, `link #-4`), TERM_$ENQUEUE_TPAD
+  0xE72472 (a `while` loop), module-local 0xE5AA28 (record copies and a
+  computed operand with a pad), module-local 0xE5D134 and 0xE54B58
+  (`divu.w` after register-held computations and a `for` loop).
+  `tests/golden/expr/marith` reproduces TIME_$GET_ADJUST's call
+  sequence with the local replaced by a variable of another unit.
 - **Widening and narrowing (Verified at the sites):** a signed word
   widened with `ext.l` after the load (0xE02C28..0xE02C2C `move.w D2,D0;
   ext.l D0; move.l D0,(-32,A6)`, an assignment; 610 `ext.l` in compiled
@@ -1850,8 +2036,9 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   and `arshft` give the same value either way and are widened after).  A
   word `lshft` used as a longword is rejected (p. 4-109 does not say
   whether it is expanded first, as pp. 4-29 and 4-171 say of `arshft` and
-  `rshft`); so is a word product needing `mulu.w`/`muls.w` (`muls.w #c`
-  gives the 32-bit product; not catalogued for this case).  Compares are
+  `rshft`).  A word product whose constant is not done with shifts, or of
+  two words, is one `muls.w`/`mulu.w` instead (32-bit product, see the
+  rule for `*` below).  Compares are
   unchanged: a word sum is compared at the word's width (review survey:
   `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41 against `move.w; ext.l;
   add.l/sub.l; cmp.l/cmpi.l` ×7, e.g. 0xE0F9D0..0xE0F9D8; the rule
@@ -1868,33 +2055,6 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   for `offset + actual_len^ > 16#400` with two `0..65535` words.  `dpc`
   makes `+`, `*`, `&`, `!` of such operands unsigned (the analogue of ref
   4.3.3 for `div`/`mod`); `-` stays signed.
-- **32-bit multiply, divide and mod** call **M$ARITH** (Verified: 0xE07FEE
-  `jsr M$OIU$WLW` for `d2 mod 11`, with a word-slot divisor and a pad).
-  The routines (map, `../source/domain_os/math/sau2/arith.s`):
-
-  | Routine | Address |
-  |---|---|
-  | M$MIS$LLL | E0ABD4 |
-  | M$MIU$LLW | E0AC02 |
-  | M$MIU$LLL | E0AC1C |
-  | M$MIS$LLW | E0AC44 |
-  | M$DIU$LLW | E0AC68 |
-  | M$DIS$LLW | E0AC84 |
-  | M$OIU$WLW | E0ACC0 |
-  | M$DIS$LLL | E0ACD8 |
-  | M$DIU$LLL | E0AD0C |
-  | M$OIS$WLW | E0AD54 |
-  | M$OIS$WWL | E0AD68 |
-  | M$OIS$LLL = M$OIU$LLL | E0AD7C |
-
-  Name decoding (inferred from the frames in arith.s, **not documented**):
-  MI = multiply, DI = div, OI = mod; S/U = signed/unsigned; then result,
-  left operand and right operand sizes (L/W).  Arguments use the word-slot
-  ABI; the result is in D0; the caller pops.
-- **Uncertain:** the rule that picks inline `divu.w` or an M$ call.  It
-  probably depends on the static operand types, for example
-  integer32 div integer16 constant → `divu.w`.  Catalogue more call sites
-  before coding it.
 - **No libgcc-style helpers.** M$ARITH is the whole integer runtime seen so
   far.
 - **Floating point:** not used in the kernel as far as is known.  The
@@ -2591,7 +2751,13 @@ words, no copy coalescing:
   what M$ARITH does: every one of its twelve entry points writes only D0
   and A0 (and the flags); those that use D1–D3 save them with `movem`
   (`../source/domain_os/math/sau2/arith.s`; M$DIS$LLW also writes its
-  divisor argument slot).
+  divisor argument slot).  Re-counted by `tools/arithsurvey.py summary` (bead
+  domain-pascal-5aw.5): 31 of 83, 42 pairs; the preservation of D1-D3/A1
+  checked by running the entries in a scratch evaluator.  Whether R4(c)
+  below applies to M$ARITH calls is not settled: `dpc` does not hold for
+  them; TIME_$GET_ADJUST 0xE16AD6 pushes D1 for its last use and D1 stays
+  a scratch register, but D1 holds a local variable there, not a
+  parameter loaded at entry (section 8).
 
 **R4. Registers are held longer than liveness (Uncertain; this is most
 of the remaining misses).**  The corpus misses fall into these groups:

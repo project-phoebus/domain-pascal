@@ -122,14 +122,28 @@ fn unsupported_expressions() {
     let cases: &[(&str, &str)] = &[
         // Odd part of three bits: shifts (x26, 0xE71BBA) or `mulu' (x21).
         ("t := w * 21;", "not settled for an odd part of three bits"),
-        // 32-bit multiplication and division call M$ARITH.
-        ("t := l * l;", "a 32-bit multiplication (M$ARITH)"),
-        ("t := l div 3;", "`div`/`mod` other than of an integer16"),
-        // Two words multiplied for a longword (ref 4.3.1): `muls.w`?
+        // M$ARITH with a word argument and a computed operand: the pad is
+        // scheduled into the computation (CAL_$WEEKDAY 0xE686B0).
         (
-            "t := w * w;",
-            "a product of two word values used as a longword",
+            "t := (l + 9) div 12;",
+            "a word argument and a computed operand",
         ),
+        // A word sum divided in 32 bits and narrowed, used as a longword.
+        (
+            "t := (w + 9) mod 12;",
+            "a word `div`/`mod` of a sum, difference or product used as a longword",
+        ),
+        // Two M$ARITH results in one expression.
+        ("t := l * l + l * l;", "two function calls in one statement"),
+        // An unsigned `div` by a power of two: shift or mask?
+        ("t := u div 4;", "unsigned `div`/`mod` by a power of two"),
+        // A signed `M$OIS$WLW' remainder used as a longword: no site.
+        (
+            "t := l mod w;",
+            "a signed `mod` by a word used as a longword",
+        ),
+        // Both operands of an M$ARITH call computed: order not settled.
+        ("t := (l + 1) * (l - 1);", "both operands computed"),
         // Another unit's array: address split not catalogued.
         ("t := xs[w];", "an element of an array other than"),
         // Two calls in one statement.
@@ -150,9 +164,6 @@ fn unsupported_expressions() {
     // rshft of a signed word (ref p. 4-171).
     let e = error("function t: integer; internal;\nbegin\n  t := rshft(w, 2);\nend;\n");
     assert!(e.contains("`rshft` of a signed operand"), "{e}");
-    // Two words multiplied for a word.
-    let e = error("function t: integer; internal;\nbegin\n  t := w * w;\nend;\n");
-    assert!(e.contains("multiplying two variables"), "{e}");
     // `in' on a one-word set with a variable element.
     let e = error("function t: boolean; internal;\nbegin\n  t := w in ss;\nend;\n");
     assert!(
@@ -198,9 +209,16 @@ fn word_arithmetic_widened_is_done_in_32_bits() {
             "move.l\t%d0,(L).l",
         ]
     );
-    // `mulu.w #c' gives the low word only for a longword: refused.
-    let e = error("procedure t; internal;\nbegin\n  l := w * 564;\nend;\n");
-    assert!(e.contains("32-bit multiplication by a constant"), "{e}");
+    // A word times a constant that is not done with shifts: `muls.w`, its
+    // 32-bit product (PROC1_$LOADAV_CALLBACK 0xE14C14..0xE14C1C).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  l := w * 564;\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "muls.w\t#0x234,%d0",
+            "move.l\t%d0,(L).l",
+        ]
+    );
     // A word `lshft' used as a longword: not settled (p. 4-109).
     let e = error("procedure t; internal;\nbegin\n  l := lshft(w, 8);\nend;\n");
     assert!(
@@ -243,4 +261,243 @@ var bs: big; ws2: wide;
 fn set_element_outside_the_set_is_refused() {
     let e = error("function t: boolean; internal;\nbegin\n  t := 20 in ss;\nend;\n");
     assert!(e.contains("constant element outside the set's bits"), "{e}");
+}
+
+/// codegen-patterns 8: products of words used as longwords are one
+/// `muls.w`/`mulu.w` (bead domain-pascal-1x1): PROC1_$LOADAV_CALLBACK
+/// 0xE14C14 `muls.w #5240`; 0xE10A7E `move.w D2,D4; muls.w (-866,A2),D4`;
+/// SIO_$K_TIMED_BREAK 0xE67F28 `mulu.w #250` of a `0..65535` word.
+#[test]
+fn word_products_used_as_longwords() {
+    let f = |e: &str| {
+        body(&format!(
+            "function t: integer32; internal;\nbegin\n  t := {e};\nend;\n"
+        ))
+    };
+    assert_eq!(f("w * 5240"), ["move.w\t(W).l,%d0", "muls.w\t#0x1478,%d0"]);
+    assert_eq!(f("w * w"), ["move.w\t(W).l,%d0", "muls.w\t(W).l,%d0"]);
+    assert_eq!(f("u * 250"), ["move.w\t(U).l,%d0", "mulu.w\t#0xfa,%d0"]);
+    // A constant done with shifts: extended first (0xE07442, x12).
+    assert_eq!(f("w * 12")[..2], ["move.w\t(W).l,%d0", "ext.l\t%d0"]);
+    // A word times a word for a word: `mul<s>.w` (0xE30A9A).
+    assert_eq!(
+        body("function t: integer; internal;\nbegin\n  t := w * w;\nend;\n"),
+        ["move.w\t(W).l,%d0", "muls.w\t(W).l,%d0"]
+    );
+}
+
+/// codegen-patterns 8: M$ARITH calls (bead domain-pascal-5aw.5).  The pad
+/// before a word argument, argument 2 pushed first, `addq.w #8,SP` unless
+/// the procedure-call rule skips it, the result in D0.
+#[test]
+fn marith_calls() {
+    let f = |e: &str| {
+        body(&format!(
+            "function t: integer32; internal;\nbegin\n  t := {e};\nend;\n"
+        ))
+    };
+    // M$MIS$LLL, a constant beyond a word as argument 2 (0xE14BFA); the
+    // last call of the routine is not popped (0xE16AD8).
+    assert_eq!(
+        f("l * 60296"),
+        [
+            "move.l\t#0xeb88,-(%sp)",
+            "move.l\t(L).l,-(%sp)",
+            "jsr\t(M$MIS$LLL).l",
+        ]
+    );
+    // M$MIS$LLW: the word is argument 2 whichever side it is on.
+    for e in ["l * w", "w * l"] {
+        assert_eq!(
+            f(e),
+            [
+                "subq.l\t#2,%sp",
+                "move.w\t(W).l,-(%sp)",
+                "move.l\t(L).l,-(%sp)",
+                "jsr\t(M$MIS$LLW).l",
+            ],
+            "{e}"
+        );
+    }
+    assert_eq!(f("l * 564")[3], "jsr\t(M$MIS$LLW).l");
+    assert_eq!(f("l div 12")[3], "jsr\t(M$DIS$LLW).l");
+    assert_eq!(f("l div l")[2], "jsr\t(M$DIS$LLL).l");
+    assert_eq!(f("l mod l")[2], "jsr\t(M$OIS$LLL).l");
+    // An M$ARITH result as argument 1 of another: the inner call popped,
+    // then the outer pad (0xE1695C..0xE16970).
+    assert_eq!(
+        f("(l div w) * w"),
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t(W).l,-(%sp)",
+            "move.l\t(L).l,-(%sp)",
+            "jsr\t(M$DIS$LLW).l",
+            "addq.w\t#8,%sp",
+            "subq.l\t#2,%sp",
+            "move.w\t(W).l,-(%sp)",
+            "move.l\t%d0,-(%sp)",
+            "jsr\t(M$MIS$LLW).l",
+        ]
+    );
+    // The same operand twice: copied on the stack (OS_$SHUTDOWN
+    // 0xE6D604); the result modified in place in D0 (0xE39C3E `add.l
+    // (14,A6),D0`).
+    assert_eq!(
+        f("l * l + l"),
+        [
+            "move.l\t(L).l,-(%sp)",
+            "move.l\t(%sp),-(%sp)",
+            "jsr\t(M$MIS$LLL).l",
+            "add.l\t(L).l,%d0",
+        ]
+    );
+    // Popped when a statement with pushes follows.
+    let b = body("procedure t; internal;\nbegin\n  l := l div l;\n  l := l * l;\nend;\n");
+    assert_eq!(b[3], "addq.w\t#8,%sp");
+    assert_eq!(b.last().unwrap(), "move.l\t%d0,(L).l");
+}
+
+/// codegen-patterns 12.4 R3: an M$ARITH call writes only D0 and A0, so a
+/// value lives in D1 across it (31 of 83 calls in the survey; 0xE3CB8E
+/// A1).
+#[test]
+fn values_live_in_d1_across_marith() {
+    let b = body(
+        "procedure t(x: integer32; y: integer); internal;\nbegin\n  l := x div 1000;\n  w := y;\nend;\n",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.l\t(8,%fp),%d0",
+            "move.w\t(0xc,%fp),%d1",
+            "subq.l\t#2,%sp",
+            "move.w\t#0x3e8,-(%sp)",
+            "move.l\t%d0,-(%sp)",
+            "jsr\t(M$DIS$LLW).l",
+            "move.l\t%d0,(L).l",
+            "move.w\t%d1,(W).l",
+        ]
+    );
+}
+
+/// codegen-patterns 8: division and mod forms.
+#[test]
+fn division_forms() {
+    let fw = |e: &str| {
+        body(&format!(
+            "function t: integer; internal;\nbegin\n  t := {e};\nend;\n"
+        ))
+    };
+    let sw = |e: &str| {
+        body(&format!(
+            "procedure t; internal;\nbegin\n  w := {e};\nend;\n"
+        ))
+    };
+    let fl = |e: &str| {
+        body(&format!(
+            "function t: integer32; internal;\nbegin\n  t := {e};\nend;\n"
+        ))
+    };
+    // integer16 by a variable (TPAD_$INIT 0xE335F4).
+    assert_eq!(
+        fw("w div w"),
+        ["move.w\t(W).l,%d0", "ext.l\t%d0", "divs.w\t(W).l,%d0"]
+    );
+    // Signed by a power of two: bias and `asr` (CAL_$WEEKDAY 0xE68698;
+    // PROC1_$LOADAV_CALLBACK 0xE14BEE).
+    assert_eq!(
+        fw("w div 4"),
+        [
+            "move.w\t(W).l,%d0",
+            "bpl.s\t1f",
+            "addq.w\t#3,%d0",
+            "1:",
+            "asr.w\t#2,%d0"
+        ]
+    );
+    assert_eq!(
+        fl("l div 1024"),
+        [
+            "move.l\t(L).l,%d0",
+            "bpl.s\t1f",
+            "addi.l\t#0x3ff,%d0",
+            "1:",
+            "asr.l\t#8,%d0",
+            "asr.l\t#2,%d0"
+        ]
+    );
+    // `mod` by a power of two is a division (CAL_$DECODE_TIME 0xE68800).
+    assert_eq!(fw("w mod 4")[2], "divs.w\t#4,%d0");
+    // Unsigned words: zero-extended, `divu.w` (0xE4CE1A..0xE4CE22); used as
+    // a longword, the word result zero-extended into a new register
+    // (0xE382CC).
+    assert_eq!(
+        fl("u mod 101"),
+        [
+            "clr.l\t%d0",
+            "move.w\t(U).l,%d0",
+            "divu.w\t#0x65,%d0",
+            "swap\t%d0",
+            "clr.l\t%d1",
+            "move.w\t%d0,%d1",
+            "move.l\t%d1,%d0",
+        ]
+    );
+    // A longword quotient used as a word: `divs.w` in place (0xE10CAE).
+    assert_eq!(
+        sw("l div 250"),
+        [
+            "move.l\t(L).l,%d0",
+            "divs.w\t#0xfa,%d0",
+            "move.w\t%d0,(W).l"
+        ]
+    );
+    // A longword remainder by a word: `M$OIS$WLW`, a word result (0xE30D3E).
+    assert_eq!(
+        sw("l mod 32"),
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t#0x20,-(%sp)",
+            "move.l\t(L).l,-(%sp)",
+            "jsr\t(M$OIS$WLW).l",
+            "move.w\t%d0,(W).l",
+        ]
+    );
+    // A word difference divided in 32 bits (RIP_$SERVER 0xE68AE2).
+    assert_eq!(
+        fw("(w - 2) div 6"),
+        [
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "subq.l\t#2,%d0",
+            "divs.w\t#6,%d0"
+        ]
+    );
+    // A word product divided (TPAD_$DATA 0xE69392..0xE6939A).
+    assert_eq!(
+        fw("(w * w) div 2200"),
+        [
+            "move.w\t(W).l,%d0",
+            "muls.w\t(W).l,%d0",
+            "divs.w\t#0x898,%d0"
+        ]
+    );
+}
+
+/// A word `div`/`mod` narrowed to a byte (`chr`) is the word operation,
+/// its low byte used; only a longword one goes through the narrowing of
+/// codegen-patterns 8 (`div<s>.w` in place, `M$OI*$WLW`).
+#[test]
+fn word_div_mod_narrowed_to_a_byte() {
+    assert_eq!(
+        body("function t: char; internal;\nbegin\n  t := chr(w mod 10);\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "divs.w\t#0xa,%d0",
+            "swap\t%d0",
+        ]
+    );
+    let e = error("function t: char; internal;\nbegin\n  t := chr(l mod 10);\nend;\n");
+    assert!(e.contains("a longword `div`/`mod` used as a byte"), "{e}");
 }

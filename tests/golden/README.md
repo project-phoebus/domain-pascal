@@ -90,6 +90,14 @@ Tests:
   shifts and adds (x6 0xE6886C, x12, x28 0xE5AEF6) or `mulu.w` (x564
   0xE3BB6A), `ext.l; divs.w` and `swap`, `neg`, `not`, widening, updates
   in place (`addq`/`subi`/`andi`/`ori` to memory).
+- `expr/marith` - codegen-patterns 8, 12.4 R3, 1.1, 1.4: M$ARITH calls
+  (pad, argument 2 first, `addq.w #8`, the last one unpopped:
+  TIME_$GET_ADJUST 0xE16ABE..0xE16AE0), a result passed on to another
+  call (0xE1695C), D1/A1 held across them, `muls.w`/`mulu.w` products of
+  words used as longwords (0xE14C14, 0xE67F2A), `divs.w` for a longword
+  quotient used as a word (0xE10CAE), `M$OIS$WLW` (0xE30D3E), `bpl; addi;
+  asr` for a signed `div` by a power of two (0xE14BEE, 0xE68698), `divu.w`
+  on unsigned words (0xE4CE1A).
 - `expr/bits` - codegen-patterns 8: constant-first `&` (0xE177A0),
   `andi`/`ori`/`eori` on computed values, shifts split above 8 (0xE02AA6),
   a shift by a register (0xE02D52).

@@ -1138,8 +1138,10 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
 /// code produced by data expansion".  Image: LOG_$READ's worker 0xE177C4
 /// `move.w #0x400,D3; sub.w D0,D3; move.w D3,(A0)` stores `16#400 -
 /// offset`, `offset` a `0..65535` word whose expression is integer32, as
-/// a word subtraction.  `None` when a part cannot be narrowed (a load of
-/// a wider object, `div`, `mod`, a right shift, a call).
+/// a word subtraction.  A longword `div`/`mod` is kept as it is, inside a
+/// narrowing [`Expr::Convert`] (to a word only), for the selector.  `None`
+/// when a part cannot be narrowed (a load of a wider object, a right
+/// shift, a call).
 fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
     match e {
         Expr::Const { value, .. } => {
@@ -1189,6 +1191,18 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         Expr::Unary { op, operand, .. } => Some(Expr::Unary {
             op: *op,
             operand: Box::new(narrow(operand, ty)?),
+            ty,
+        }),
+        // A longword `div`/`mod` stored into a word: divided in 32 bits and
+        // the low word used (codegen-patterns 8: 0xE10CAE `divs.w #250` on a
+        // longword difference passed as a word; PMAP_$PURIFIER_L 0xE13AFC
+        // `divu.w #50` stored with `move.w`; 0xE39C2E `move.w D0,D1` after
+        // `M$DIS$LLL`).  The selector decides the instructions.
+        Expr::Binary {
+            op: IrBinOp::Div | IrBinOp::Mod,
+            ..
+        } if ty.width == Width::Word => Some(Expr::Convert {
+            value: Box::new(e.clone()),
             ty,
         }),
         _ => None,
@@ -1435,16 +1449,65 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
         ty.sign = Sign::Unsigned;
     }
     if matches!(op, IrBinOp::Div | IrBinOp::Mod) {
-        // Ref 4.3.3, p. 4-6: div and mod are unsigned when both operands
-        // are unsigned run-time values, or one is and the other is a
-        // non-negative constant.  The unsigned forms (`divu.w`) are not
-        // implemented yet.
-        let unsigned = |x: &SExpr| x.value.is_none() && sign_of(&p.types, x.ty) == Sign::Unsigned;
-        if unsigned(lhs) || unsigned(rhs) {
-            return Err(unsupported(
-                e.span,
-                "`div`/`mod` with an unsigned operand (ref 4.3.3) is",
-            ));
+        // Ref 4.3.3, pp. 4-6..4-7: div and mod are unsigned when both
+        // operands are unsigned run-time values, or one is and the other
+        // is a constant in 0..2147483647; signed otherwise (image:
+        // `divu.w` and M$DIU/M$OIU on `0..65535` words, codegen-patterns
+        // 8).
+        let runtime_unsigned =
+            |x: &SExpr| x.value.is_none() && sign_of(&p.types, x.ty) == Sign::Unsigned;
+        let non_negative = |x: &SExpr| {
+            x.value
+                .as_ref()
+                .and_then(|v| v.ordinal())
+                .is_some_and(|n| (0..=0x7fff_ffff).contains(&n))
+        };
+        let unsigned = (runtime_unsigned(lhs) || non_negative(lhs))
+            && (runtime_unsigned(rhs) || non_negative(rhs))
+            && (lhs.value.is_none() || rhs.value.is_none());
+        ty.sign = if unsigned {
+            Sign::Unsigned
+        } else {
+            Sign::Signed
+        };
+        // A word sum, difference or product as the dividend is computed
+        // in 32 bits (ref 4.3.1, p. 4-5), and the division with it:
+        // CAL_$WEEKDAY 0xE686AE..0xE686C0 `move.w (A1),D0; ext.l D0;
+        // addi.l #9,D0; ... jsr M$OIS$WLW` for `(month + 9) mod 12`,
+        // 0xE686CC..0xE686D4 `ext.l D0; addq.l #2,D0; divs.w #5,D0`,
+        // 0xE686DA..0xE686EE (a sum of two words + 1, `mod 7`, M$OIS$WLW);
+        // RIP_$SERVER 0xE68AE2..0xE68AE8 `move.w D2,D5; ext.l D5; subq.l
+        // #2,D5; divs.w #6,D5`; TPAD_$DATA 0xE69392..0xE6939A `muls.w`
+        // then `divs.w #2200` (the 32-bit product divided).  The
+        // quotient or remainder is narrowed back to the word (the
+        // selector divides in place, `divs.w`, or calls M$ARITH,
+        // codegen-patterns 8).  **Exception (Uncertain):** ACL_$INIT
+        // 0xE31150..0xE3116E computes `(i + 1) mod 31` and `(31 + i - 1)
+        // mod 31` in 16 bits (`addq.w`, then `ext.l; divs.w #31`), `i` the
+        // index of a `for` loop over 0..30 whose range the compiler may
+        // have known; `dpc` has no such `for` loops.
+        let widened = matches!(
+            &lhs.kind,
+            ExprKind::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul,
+                ..
+            }
+        ) && lhs.value.is_none()
+            && ty.width == Width::Word;
+        if widened {
+            let lty = Scalar {
+                width: Width::Long,
+                sign: ty.sign,
+            };
+            return Ok(Expr::Convert {
+                value: Box::new(Expr::Binary {
+                    op,
+                    lhs: Box::new(operand(p, lhs, lty)?),
+                    rhs: Box::new(operand(p, rhs, lty)?),
+                    ty: lty,
+                }),
+                ty,
+            });
         }
     }
     Ok(Expr::Binary {
