@@ -1,0 +1,34 @@
+# Link-test manifest, run by `make linktest' (tools/linktest.py run).
+#
+# One unit per line, as in tests/conformance/manifest.txt:
+#   FILE SPEC... [ALIGN] [A5]...
+# The unit is compiled as the conformance harness compiles it; the C
+# objects of ../source that define its globals are dropped from a scratch
+# copy of the kernel build and the dpc object is linked in their place
+# (tests/link/README.md, which also lists the units that cannot link yet
+# and why).
+
+# Whole C objects replaced.
+tests/conformance/proc1_tst_lock.pas         PROC1_$TST_LOCK PROC1_$GET_LOCKS
+tests/conformance/time_q_init_queue.pas      TIME_$Q_INIT TIME_$Q_INIT_QUEUE TIME_$Q_FLUSH_QUEUE
+# The module-local 0xE00EB0 is a local symbol of the unit; ../source's
+# ZERO_PAGE (misc/zero_page.c) stays for its other C callers.  The unit
+# names AST_$ZERO_BUFF, an absolute map address (absdefs.o).
+tests/conformance/ast_page_zero.pas          0xE00EB0 AST_$PAGE_ZERO
+tests/conformance/iic.pas                    IIC_$INIT IIC_$ACQUIRE IIC_$RELEASE IIC_$STATISTICS IIC_$SELF_TEST IIC_$SEND IIC_$EXISTS IIC_$RECEIVE IIC_$RECEIVE_CHECK
+tests/conformance/mt_release.pas             MT_$RELEASE
+tests/conformance/tone_time.pas              TONE_$TIME
+tests/conformance/name_convert_acl_status.pas  NAME_CONVERT_ACL_STATUS
+tests/conformance/proc1_set_asid.pas         PROC1_$SET_ASID
+# Calls M$ARITH (math/sau2/arith.s).
+tests/conformance/time_get_adjust.pas        TIME_$GET_ADJUST
+tests/conformance/disk_get_block.pas         DISK_$GET_BLOCK
+tests/conformance/sysbus_define_int.pas      SYSBUS_$DEFINE_INT
+
+# Added: ../source has no IO_$ALLOC; the map routine joins the link.
+tests/conformance/io_alloc.pas               IO_$ALLOC
+
+# A `bsr.w' to a routine of the module outside the unit (module-routines=):
+# a PC16 relocation the link resolves to ../source's C routine.
+tests/conformance/disk_unassign_all.pas      DISK_$UNASSIGN_ALL  module-routines=DISK_$UNASSIGN
+tests/conformance/pchist_interrupt.pas       PCHIST_$INTERRUPT  module-routines=PCHIST_$COUNT
