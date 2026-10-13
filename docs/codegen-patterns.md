@@ -309,7 +309,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     the natural candidate (a word `0000` can be an `integer` 0, `false`
     as a byte in its word, an enumeration's first value) but is
     **Uncertain**.  `dpc` shares a cell when the bytes and the type agree
-    (the parameter's type, the constant's own for a `univ` parameter).
+    (the parameter's type; for a `univ` parameter, below).
   - **Order within a routine's new cells (Verified by survey: 110 of 110
     routines with two or more; 157 have one).**  Two groups: cells whose
     size is 2 mod 4 first, then cells of a multiple of 4.  In each group
@@ -355,6 +355,26 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     `calls/const_pool_noalign`.  A unit that is a fragment of a module
     must not name a cell placed after a routine outside it (305 sites
     do); such units are not supported by the harness.
+  - **To a `univ` parameter (reference; bead domain-pascal-4be).**  Ref
+    5.3.3 p. 5-11: "When you pass an expression argument (as opposed to
+    a variable argument) to a univ parameter, Domain Pascal extends the
+    expression to be the same size as the univ parameter" (message
+    "Expression passed to UNIV formal NAME was converted to NEWTYPE").
+    `dpc`: a constant of the parameter's size keeps its own type; an
+    integer constant for a larger integer parameter gets a cell of the
+    parameter's type (`0` for `univ integer32`: `0000 0000`); any other
+    size mismatch (a larger constant, a non-integer constant or
+    parameter) is "not supported yet".  The cell holds the value (a
+    2-byte `0..65535` constant 65535 becomes `0000 ffff`, -2 becomes
+    `ffff fffe`).  `dpc-sema` gives the reference's warning (Appendix B
+    message 246) for an expression smaller than its `univ` formal.  Image: no site settles it.  A
+    survey of the `pea (d,PC)` sites against the callee's C prototype in
+    `../source` (ad-hoc script, not kept) cannot tell `univ` formals
+    (`../source` never says `univ`; `void *` stands for many types);
+    the nearest site, LOG_$SHUTDN 0xE175A0,
+    passes a longword `0000 0000` cell as LOG_$ADD's data (C `void
+    *data`, length 0), consistent with both an `integer32` constant and
+    the extension.  Uncertain.
 - **Expression by address (Verified at the sites; implemented).**  A
   non-variable, non-constant actual passed by address is first stored in a
   frame temporary, and that temporary's address is pushed, right where
@@ -375,7 +395,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     move.l An,(d,A6); pea (d,A6)`, other values computed and stored;
     each word aligned, longwords longword aligned.  Uncertain: the
     order of temporaries for a call nested in another call's arguments
-    (dpc puts them below the outer call's).  Conformance:
+    (dpc puts them below the outer call's).  An expression of another
+    size than the parameter (to a `univ` one: extended, ref 5.3.3 p.
+    5-11) is rejected: its conversion code is not catalogued (bead
+    domain-pascal-4be).  Conformance:
     `tone_enable.pas`.
 - **Variable of another size by address:** an `integer32` variable for a
   value or `in` `integer` parameter (assignment compatible, ref 5.3.2)

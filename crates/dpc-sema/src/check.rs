@@ -2751,8 +2751,11 @@ impl<'t> Checker<'t> {
             );
         }
         let mut out = Vec::new();
-        for (a, (mode, univ, ty, c)) in args.iter().zip(params) {
+        for (i, (a, (mode, univ, ty, c))) in args.iter().zip(params).enumerate() {
             let x = self.expr(a);
+            if univ {
+                self.univ_conversion_warning(&callee, i, &x, ty, a.span);
+            }
             if matches!(mode, ParamMode::Var | ParamMode::Out | ParamMode::InOut)
                 && self.in_param_part(&x)
             {
@@ -2807,6 +2810,43 @@ impl<'t> Checker<'t> {
             });
         }
         Call { callee, args: out }
+    }
+
+    /// Ref 5.3.3 p. 5-11 (checked in the PDF): "When you pass an
+    /// expression argument (as opposed to a variable argument) to a univ
+    /// parameter, Domain Pascal extends the expression to be the same size
+    /// as the univ parameter.  In addition, the compiler issues the
+    /// following message: Expression passed to UNIV formal NAME was
+    /// converted to NEWTYPE." (Appendix B, message 246, a WARNING.)  Given
+    /// for an expression smaller than the parameter; whether the original
+    /// also warned for an expression of equal size and another type is not
+    /// known.  A formal of a routine-pointer type has no name in its
+    /// signature: dpc names it by its position (`#2`).
+    fn univ_conversion_warning(
+        &mut self,
+        callee: &Callee,
+        index: usize,
+        x: &Expr,
+        ty: TypeId,
+        span: Span,
+    ) {
+        if x.is_designator()
+            || self.types.is_error(x.ty)
+            || self.types.size(x.ty) >= self.types.size(ty)
+        {
+            return;
+        }
+        let name = match callee {
+            Callee::Routine(r) => self.routines[r.0 as usize].params[index].name.clone(),
+            Callee::Pointer(_) => format!("#{}", index + 1),
+        };
+        self.warnings.push(Diagnostic::warning(
+            span,
+            format!(
+                "Expression passed to UNIV formal {name} was converted to {}.",
+                self.types.display(ty)
+            ),
+        ));
     }
 
     /// `T(x)` (ref "Type Transfer Functions", p. 4-197): "the size of the

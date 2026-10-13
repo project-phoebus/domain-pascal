@@ -2399,6 +2399,48 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
     Ok(PoolConst { bytes, key: ty.0 })
 }
 
+/// The type of the cell of a constant of type `cty` passed by address to
+/// a `univ` parameter of type `fty` (bead domain-pascal-4be).  Ref 5.3.3
+/// p. 5-11 (checked in the PDF): "When you pass an expression argument
+/// (as opposed to a variable argument) to a univ parameter, Domain Pascal
+/// extends the expression to be the same size as the univ parameter",
+/// with the message "Expression passed to UNIV formal NAME was converted
+/// to NEWTYPE" (also diagnostic 246, Appendix B).
+///
+/// - Equal sizes: the constant's own type (the bytes are the same either
+///   way; the cell's key stays the constant's type).
+/// - An integer constant for a larger integer parameter: the value as the
+///   parameter's type, i.e. sign-extended to its size ("converted to
+///   NEWTYPE").  A cell of the constant's size would leave the callee
+///   reading past it.
+/// - Anything else is not supported yet: a constant larger than the
+///   parameter (the reference only speaks of extending; p. 5-10/5-11
+///   warns against passing an argument larger than the parameter), and
+///   the extension of a non-integer constant (boolean, character,
+///   enumeration) or to a non-integer parameter (array, record, ...),
+///   whose converted bytes the reference does not give.
+///
+/// Image: no site settles the cell's size against a `univ` formal; the
+/// nearest, LOG_$SHUTDN's `pea (0x66,PC)` at 0xE175A0 of a longword
+/// `0000 0000` cell for LOG_$ADD's data (C `void *data`, length 0), fits
+/// both an `integer32` constant and an extension to a 4-byte formal.
+fn univ_const_type(p: &Program, cty: TypeId, fty: TypeId, span: Span) -> Res<TypeId> {
+    let (cs, fs) = (p.types.size(cty), p.types.size(fty));
+    if cs == fs {
+        Ok(cty)
+    } else if cs < fs && p.types.is_integer(cty) && p.types.is_integer(fty) {
+        Ok(fty)
+    } else {
+        Err(unsupported(
+            span,
+            format!(
+                "passing a {cs}-byte constant of this type to a {fs}-byte `univ` parameter \
+                 (ref 5.3.3 p. 5-11) is"
+            ),
+        ))
+    }
+}
+
 fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     let value = match v {
         ConstValue::Bool(b) => -(*b as i64),
@@ -2991,7 +3033,8 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   convention from `dpc-sema` (ref 5.2 Table 5-1): by value, the value
 ///   at the parameter's width (a constant takes the parameter's type);
 ///   by address, the address of a designator; a constant by address is
-///   its cell in the code section ([`Addr::Const`], `pea (d,PC)`), an
+///   its cell in the code section ([`Addr::Const`], `pea (d,PC)`; for a
+///   `univ` parameter see `univ_const_type`), an
 ///   expression by address its frame temporary ([`Arg::Temp`]):
 ///   codegen-patterns 1.5 (TERM_$SEND_KBD_STRING 0xE1AB0C, TONE_$ENABLE
 ///   0xE1ACFC).  A variable of another size than its value or `in`
@@ -3063,9 +3106,13 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                 if let Some(v) = &a.expr.value {
                     // A constant: its cell in the code section (codegen-
                     // patterns 1.5, "Constant by address"), holding the
-                    // value as the parameter's type (a `univ` one: as the
-                    // constant's own type).
-                    let ty = if prm.univ { a.expr.ty } else { prm.ty };
+                    // value as the parameter's type (a `univ` one: see
+                    // `univ_const_type`).
+                    let ty = if prm.univ {
+                        univ_const_type(p, a.expr.ty, prm.ty, a.expr.span)?
+                    } else {
+                        prm.ty
+                    };
                     args.push(Arg::Address {
                         addr: Addr::Const(pool_const(p, v, ty, a.expr.span)?),
                         slot,
@@ -3088,6 +3135,12 @@ fn call(p: &Program, caller_section: &str, c: &SCall, span: Span) -> Res<Call> {
                         )
                     })?;
                     let value = value_of(p, &a.expr)?;
+                    // The temporary has the parameter's size.  An
+                    // expression of another size (to a `univ` parameter:
+                    // extended to its size, ref 5.3.3 p. 5-11; to a
+                    // larger value or `in` one: assignment compatible,
+                    // ref 5.3.2 p. 5-7) needs a conversion whose code is
+                    // not catalogued (bead domain-pascal-4be).
                     if value.ty().width != width {
                         return Err(unsupported(
                             a.expr.span,

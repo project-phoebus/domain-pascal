@@ -2446,3 +2446,107 @@ end;
         .collect();
     assert_eq!(w, [true, true, true, false, false]);
 }
+
+/// A constant passed by address to a `univ` parameter (bead
+/// domain-pascal-4be; ref 5.3.3 p. 5-11: an expression argument is
+/// extended to the size of the `univ` parameter): an integer constant for
+/// a larger integer parameter gets a cell of the parameter's type and
+/// size, holding the constant's value; equal sizes keep the constant's
+/// own type.
+#[test]
+fn univ_constants_take_the_parameter_size() {
+    let m = lower_src(
+        "module m;
+type r = record a, b: integer; end;
+  u = 0..65535;
+procedure q(in a: univ integer32; in b: univ integer; in c: univ integer32; in d: univ r;
+  in e: univ integer32);
+  extern;
+procedure p;
+begin
+  q(0, 7, -2, 65536, lastof(u));
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let cells: Vec<(Vec<u8>, u32)> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                slot: 4,
+                writable: false,
+            } => (k.bytes.clone(), k.key),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    let bytes: Vec<&[u8]> = cells.iter().map(|(b, _)| b.as_slice()).collect();
+    assert_eq!(
+        bytes,
+        [
+            &[0, 0, 0, 0][..],
+            &[0, 7],
+            &[0xff, 0xff, 0xff, 0xfe],
+            &[0, 1, 0, 0],
+            &[0, 0, 0xff, 0xff]
+        ]
+    );
+    // 0 and -2 are both converted to integer32: one key, not integer16's.
+    assert_eq!(cells[0].1, cells[2].1);
+    assert_ne!(cells[0].1, cells[1].1);
+    // 65536 is an integer32 constant for a 4-byte record: its own type.
+    assert_eq!(cells[3].1, cells[0].1);
+    // The conversion keeps the value: `lastof` of a 2-byte 0..65535 is
+    // 65535, extended as `0000 ffff`, not sign-extended from `ffff`.
+    assert_eq!(cells[4].1, cells[0].1);
+}
+
+/// What `univ` extension is not supported yet (bead domain-pascal-4be):
+/// a constant larger than the parameter, a non-integer constant or a
+/// non-integer parameter of another size, and an expression temporary of
+/// another size than the parameter.
+#[test]
+fn univ_size_mismatches_are_refused() {
+    let cases = [
+        (
+            "in a: univ integer",
+            "100000",
+            "4-byte constant of this type to a 2-byte `univ` parameter",
+        ),
+        (
+            "in a: univ integer32",
+            "true",
+            "1-byte constant of this type to a 4-byte `univ` parameter",
+        ),
+        (
+            "in a: univ r",
+            "0",
+            "2-byte constant of this type to a 4-byte `univ` parameter",
+        ),
+        (
+            "in a: univ integer32",
+            "w + 1",
+            "passing a 2-byte expression by address to a 4-byte parameter",
+        ),
+    ];
+    for (param, arg, msg) in cases {
+        let e = errs(&format!(
+            "module m;
+type r = record a, b: integer; end;
+var w: extern integer;
+procedure q({param}); extern;
+procedure p;
+begin
+  q({arg});
+end;
+"
+        ));
+        assert!(e[0].starts_with("t.pas:7:5: error: "), "{e:?}");
+        assert!(e[0].contains(msg), "{e:?}");
+        assert!(e[0].ends_with("not supported yet"), "{e:?}");
+    }
+}

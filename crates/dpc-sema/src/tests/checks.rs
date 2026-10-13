@@ -434,6 +434,37 @@ fn var_parameter_needs_variable_of_same_type() {
     module("var c: char; procedure q(var x: univ integer); extern; procedure p; begin q(c) end;");
 }
 
+/// Ref 5.3.3 p. 5-11 and Appendix B message 246 (WARNING): an
+/// expression (not a variable) smaller than its `univ` formal is extended
+/// to the formal's size, with "Expression passed to UNIV formal NAME was
+/// converted to NEWTYPE."  Variables, equal sizes and non-`univ` formals
+/// give no warning.
+#[test]
+fn univ_expression_conversion_warns() {
+    let p = module(
+        "type r = record a, b: integer; end;
+         var w: integer; l: integer32;
+         procedure q(in a: univ integer32; in b: univ integer; in c: univ r; in d: integer32);
+           extern;
+         procedure p;
+         begin
+           q(0, 7, 65536, 1);
+           q(w + 1, w, l, w);
+           q(w, true, w, l);
+         end;",
+    );
+    let w: Vec<&str> = p.warnings.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        w,
+        [
+            "Expression passed to UNIV formal a was converted to integer32.",
+            "Expression passed to UNIV formal a was converted to integer32.",
+            "Expression passed to UNIV formal b was converted to integer16.",
+        ]
+    );
+    assert!(p.warnings.iter().all(|d| !d.is_error()));
+}
+
 #[test]
 fn constants_passed_by_address_need_temps() {
     let p = module(
