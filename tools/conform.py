@@ -29,6 +29,7 @@ routine the unit declares `internal; extern' (its Pascal name upper-cased,
 a local symbol), and ADDR must lie in the unit's map module, outside the
 unit, with no map name; it is forwarded the same way, and the reference is
 resolved with `--defsym NAME=0xADDR' at link time (`check --local-sym').
+`check --local-sym NAME=0xADDR' is checked the same way.
 `enclosing=NAME' (.pas fragments only, at most once; `check --enclosing
 NAME'): the unit's routines are nested in routine NAME, dpc's symbol for
 it, which follows them; it is compiled with them (their code reaches its
@@ -679,7 +680,6 @@ def module_routine_args(tokens, routines, linkmap):
         items = t[len(MODULE_ROUTINES_TOKEN):].split(',')
         if '' in items:
             raise SetupError('%s: needs a routine name list' % t)
-        seg = linkmap.segment_containing(routines[0].addr)
         for item in items:
             n, eq, a = item.partition('=')
             if eq:
@@ -691,12 +691,7 @@ def module_routine_args(tokens, routines, linkmap):
                     raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
                 if not a.lower().startswith('0x'):
                     raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
-                if linkmap.lookup(n) is not None:
-                    raise SetupError('%s: %s is a map name; give it without an address' % (t, n))
-                named = [x for x in linkmap.names_at(addr)]
-                if named:
-                    raise SetupError('%s: 0x%X is %s in the map; give that name'
-                                     % (t, addr, named[0]))
+                check_local_sym(n, addr, routines, linkmap, t)
                 # dpc's symbols are upper-cased (CLAUDE.md 3.15)
                 n = n.upper()
                 if n in local:
@@ -707,12 +702,34 @@ def module_routine_args(tokens, routines, linkmap):
                 if sym is None:
                     raise SetupError('%s: routine %s is not in the map' % (t, n))
                 n, addr = sym.name, sym.addr
-            if seg is None or linkmap.segment_containing(addr) is not seg:
-                raise SetupError('%s: %s is not in the module of the unit' % (t, n))
-            if any(r.addr <= addr < r.end for r in routines):
-                raise SetupError('%s: %s is part of the unit' % (t, n))
+                check_in_module(n, addr, routines, linkmap, t)
             out.append('--module-routine=%s=0x%X' % (n, addr))
     return out, local
+
+
+def check_in_module(n, addr, routines, linkmap, what):
+    """Routine `n' at `addr' must lie in the map module of the unit made
+    of `routines', outside the unit.  `what' prefixes the error."""
+    seg = linkmap.segment_containing(routines[0].addr)
+    if seg is None or linkmap.segment_containing(addr) is not seg:
+        raise SetupError('%s: %s is not in the module of the unit' % (what, n))
+    if any(r.addr <= addr < r.end for r in routines):
+        raise SetupError('%s: %s is part of the unit' % (what, n))
+
+
+def check_local_sym(n, addr, routines, linkmap, what):
+    """A module-local routine the map does not name, `n' at `addr'
+    (`module-routines=NAME=0xADDR', `check --local-sym NAME=0xADDR'):
+    `n' is not a map name, the map names nothing at `addr', which lies in
+    the unit's map module outside the unit (bead domain-pascal-3h9;
+    README.md, "Routines outside the unit")."""
+    if linkmap.lookup(n) is not None:
+        raise SetupError('%s: %s is a map name; give it without an address' % (what, n))
+    named = [x for x in linkmap.names_at(addr)]
+    if named:
+        raise SetupError('%s: 0x%X is %s in the map; give that name'
+                         % (what, addr, named[0]))
+    check_in_module(n, addr, routines, linkmap, what)
 
 
 def run_manifest(path, linkmap, dpc):
@@ -821,8 +838,19 @@ def main(argv=None):
     try:
         if args.cmd == 'check':
             sect = dict(parse_section_addr(s) for s in args.section_addr)
-            local = dict(parse_section_addr(s, '--local-sym wants NAME=0xADDR')
-                         for s in args.local_sym)
+            local = {}
+            if args.local_sym:
+                # the checks of `module-routines=NAME=0xADDR' (bead
+                # domain-pascal-500)
+                routines = unit_routines(args.specs, linkmap, args.len)
+                for s in args.local_sym:
+                    n, addr = parse_section_addr(s, '--local-sym wants NAME=0xADDR')
+                    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', n):
+                        raise SetupError('--local-sym %s: want NAME=0xADDR' % s)
+                    if n in local:
+                        raise SetupError('--local-sym %s: %s given more than once' % (s, n))
+                    check_local_sym(n, addr, routines, linkmap, '--local-sym ' + s)
+                    local[n] = addr
             return 0 if check(args.file, args.specs, linkmap, sect, args.len,
                               local_syms=local, enclosing=args.enclosing) else 1
         bad, errors = run_manifest(args.file, linkmap, args.dpc)

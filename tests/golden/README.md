@@ -178,12 +178,22 @@ Tests:
   besides (PKT_$DUMP_DATA 0xE12800..0xE12826).
 - `results/pointer_callers` - codegen-patterns 3 ("Callers of pointer
   functions", "Pointer results"), 12.4 R4(a), 12.5: a pointer function's
-  A0 stored to memory, a frame slot, a wrapper's result slot (MST_$MAPS
-  0xE439C8), copied into a register-held local (`move.l A0,D0`,
-  0xE6763C), compared with `nil` (`cmpa.w #0,A0`), used as a base; a
+  A0 stored to memory, a wrapper's result slot (MST_$MAPS 0xE439C8),
+  copied into a register-held local (`move.l A0,D0`, 0xE6763C; `movea.l
+  A0,A2` with `pea (A2)`, KBD_$SET_KBD_TYPE 0xE7253E), compared with
+  `nil` (`cmpa.w #0,A0`), used as a base; a
   pointer result variable held in A2 across a call (DISK_$GET_BLOCK
   0xE3BBBC); slot loads of one argument list in A0, A1, A2 (MST_$MAP
   0xE43886).
+- `results/pointer_locals` - codegen-patterns 3, 12.4 R4(c), 12.5
+  (bead domain-pascal-500): a pointer local assigned from pointer
+  functions held in an address register (`movea.l A0,A2`, `cmpa.w
+  #0,A2`, `pea (A2)` held through the last call: KBD_$SET_KBD_TYPE
+  0xE7253E); kept in its frame slot when
+  pushed by value (`= nil` on the store's flags, A0 as the base on the
+  branch's path and after the join: AST_$RESERVE 0xE067BA..0xE067E8),
+  reached by a nested routine (`cmpa.w #0,A0`, reloaded at the join:
+  AST_$INVALIDATE 0xE0666A..0xE066AE), or passed by address.
 - `results/result_variable` - codegen-patterns 3, 12.4 R5, 12.5: the
   result variable of a body of several statements held in one register
   (D2 across a call, PKT_$NEXT_ID 0xE1248E; D0 without, on three paths,

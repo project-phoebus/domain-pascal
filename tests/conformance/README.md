@@ -80,7 +80,11 @@ unnamed module-local 0xE43182 whose A0 is stored into the result slot
 and left in A0; by-address slots read once in one argument list in A0,
 A1, A2, A3, A4) and `disk_get_block.pas` (DISK_$GET_BLOCK 0xE3BB80: a
 pointer result variable held in A2 across ML_$UNLOCK, `movea.l A0,A2`
-/ `movea.l A2,A0`).
+/ `movea.l A2,A0`).  Pointer locals assigned from pointer functions
+(codegen-patterns 3, 12.5; bead domain-pascal-500): `cal_shutdown.pas`
+(CAL_$SHUTDOWN 0xE3E6E4: `movea.l A0,A3`, fields through A3, `pea
+(A3)` as DBUF_$SET_BUFF's last argument, held through it with the
+status address in A2 in a body with a branch).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.

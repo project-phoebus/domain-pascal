@@ -41,6 +41,13 @@ usage:
     tools/resultsurvey.py callers [-v]    # calls of A0 functions whose
                                           # caller reads A0 next: what that
                                           # first read is (-v: every site)
+    tools/resultsurvey.py ptrlocals [-v]  # those copied to An or stored to
+                                          # a frame slot: later pushed by
+                                          # value? what follows the copy?
+    tools/resultsurvey.py storetest       # a register stored to memory,
+                                          # then the value tested: on the
+                                          # store's flags, the register or
+                                          # the memory
 
 `pushes' looks at every `move.<s> Dn,(-k,A6)' into the `link' area and
 follows the instructions after it in address order up to a push `move.<s>
@@ -401,6 +408,88 @@ def callers(rs, by_start, verbose):
         print('%-16s %-7s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
 
 
+def a0_reads(rs, by_start):
+    """(routine, index of the first instruction reading A0) after each
+    call of an A0 function whose caller reads A0 next (`callers')."""
+    a0 = a0_functions(rs, by_start)
+    for r in rs:
+        ins = r.insns
+        for i, (a, n, t) in enumerate(ins):
+            m = nestsurvey._BSR.match(t) or nestsurvey._JSR.match(t)
+            if not m or int(m.group(1), 16) not in a0 or not reads_after(ins, i, '%a0'):
+                continue
+            j = i + 1
+            if j < len(ins) and _POP.match(ins[j][2]):
+                j += 1
+            yield r, j
+
+
+def ptrlocals(rs, by_start, verbose):
+    """Bead domain-pascal-500 (codegen-patterns 3, "Pointer locals"): for
+    each `movea.l A0,An' / `move.l A0,(-k,A6)' after such a call, whether
+    the routine's code after it pushes that register or slot by value
+    (`move.l X,-(SP)'; not limited to the value's lifetime), and for the
+    copies what the next instruction does with it."""
+    c, ex = Counter(), {}
+    for r, j in a0_reads(rs, by_start):
+        t = r.insns[j][2]
+        use = a0_use(t)
+        if use not in ('copy An', 'store frame'):
+            continue
+        loc = operands(t)[1][1]
+        pushed = any(operands(tk)[0] == 'movel' and operands(tk)[1] == [loc, '%sp@-']
+                     for _, _, tk in r.insns[j + 1:])
+        nxt = ''
+        if use == 'copy An':
+            mn, ops = operands(r.insns[j + 1][2])
+            if mn.startswith('cmpa') and ops[:1] == ['#0']:
+                nxt = 'then cmpa #0,%s' % ('An' if ops[1] == loc else ops[1])
+            elif any(o.startswith(loc + '@') for o in ops):
+                nxt = 'then deref An'
+            elif any(o.startswith('%a0@') for o in ops):
+                nxt = 'then deref A0'
+        for key in ((use, 'pushed' if pushed else 'not pushed'), (use, nxt)):
+            if key[1]:
+                c[key] += 1
+                ex.setdefault(key, []).append('0x%06X' % r.insns[j][0])
+        if verbose:
+            print('%-30s 0x%06X %-12s %-10s %s %s' % (name(r), r.insns[j][0], use, loc,
+                                                       'pushed' if pushed else '', nxt))
+    for k, v in sorted(c.items()):
+        print('%-12s %-22s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
+
+
+def storetest(rs):
+    """A register stored to memory (`move.<s> Rn,<mem>', not a push),
+    then a test of the value by the next instruction: a conditional
+    branch on the store's own flags, `tst'/`cmpa #0' of the register, or
+    `tst' of the memory (bead domain-pascal-500)."""
+    c, ex = Counter(), {}
+    for r in rs:
+        ins = r.insns
+        for i, (a, n, t) in enumerate(ins[:-1]):
+            mn, ops = operands(t)
+            if mn not in ('movel', 'movew', 'moveb') or len(ops) != 2:
+                continue
+            src, dst = ops
+            if not re.fullmatch(r'%[ad]\d', src) or re.fullmatch(r'%[ad]\d|%sp@-', dst):
+                continue
+            m2, o2 = operands(ins[i + 1][2])
+            if re.match(r'b(eq|ne|mi|pl)', m2):
+                k = 'flags'
+            elif (m2.startswith('cmpa') and o2 == ['#0', src]) or (m2.startswith('tst') and o2 == [src]):
+                k = 'register'
+            elif m2.startswith('tst') and o2 == [dst]:
+                k = 'memory'
+            else:
+                continue
+            key = (src[1].upper() + 'n', 'frame' if _FP.match(dst) else 'memory', k)
+            c[key] += 1
+            ex.setdefault(key, []).append('0x%06X' % a)
+    for k, v in sorted(c.items()):
+        print('%-3s %-7s %-9s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -420,6 +509,10 @@ def main(argv):
         pushes(rs)
     elif cmd == 'callers':
         callers(rs, by_start, '-v' in argv[1:])
+    elif cmd == 'ptrlocals':
+        ptrlocals(rs, by_start, '-v' in argv[1:])
+    elif cmd == 'storetest':
+        storetest(rs)
     else:
         print(__doc__)
         return 2

@@ -53,10 +53,10 @@ pea (%a2)
 move.w (8,%fp),-(%sp)
 jsr (LOOKUP).l
 addq.w #8,%sp
-move.l %a0,(-4,%fp)
-move.l (-4,%fp),-(%sp)
-move.l (-4,%fp),-(%sp)
-move.l (-4,%fp),-(%sp)
+movea.l %a0,%a2
+pea (%a2)
+pea (%a2)
+pea (%a2)
 jsr (TAKE).l
 movem.l (-0xc,%fp),%a2/%a5
 unlk %fp

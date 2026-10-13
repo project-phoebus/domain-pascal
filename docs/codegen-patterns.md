@@ -864,7 +864,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `results/pointer_callers`).  Refused: a computed value, `nil`
   (`suba.l`) and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
   as pointer results, `d0_return`/`c_param` pointer results, and
-  `a0_return` on a non-pointer result (no site).
+  `a0_return` on a non-pointer result (no site).  Also refused: a
+  register-held pointer result variable that the allocator would put in
+  A1 (assigned a call's A0, no call after; bead domain-pascal-500): the
+  12 in A2 and the one in A3 all have a call after their first
+  assignment, the one with none is in D0 (0xE6C21A: `move.l A0,D0` at
+  0xE6C244, `clr.l D0` on another path, `movea.l D0,A0` at 0xE6C2AA),
+  others are in their frame slot (TTY_$I_GET_DESC 0xE667BA).
 - **Callers of pointer functions (Verified by survey; implemented; bead
   domain-pascal-ae9).**  `tools/resultsurvey.py callers` takes the 234
   calls of A0 functions after which the caller reads A0, and classes the
@@ -906,12 +912,83 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   A0 is consumed in the statement; a value that must live across a later
   call is copied to a callee-saved register by the allocator (12.4 R3,
   DISK_$GET_BLOCK's A2).  `d0_return` callees are read from D0 (ref
-  5.5.10; no compiled site).  Not reproduced: the `movea.l A0,A2` of a
-  pointer local held in an address register across calls outside loops
-  (KBD_$SET_KBD_TYPE; dpc keeps such a local in its frame, 12.5); the
-  reuse of A0 after the first store (SMD_$MAP_DISPLAY_U 0xE6F94E `move.l
-  A0,(A4)`, then `move.l A0,(-232,A1)` at 0xE6F964, a common
-  subexpression, 12.4 R7).
+  5.5.10; no compiled site).  Not reproduced: the reuse of A0 after the
+  first store to memory other than the local's slot (SMD_$MAP_DISPLAY_U
+  0xE6F94E `move.l A0,(A4)`, then `move.l A0,(-232,A1)` at 0xE6F964, a
+  common subexpression, 12.4 R7).
+
+  **Pointer locals (Verified by survey; implemented; bead
+  domain-pascal-500).**  Who keeps a pointer local assigned from a call
+  in a register (`tools/resultsurvey.py ptrlocals`; the frame-slot and
+  `move.l A0,Dn` sites checked by hand):
+  - the 108 `movea.l A0,An` copies are never pushed by value (`move.l
+    An,-(SP)`: none), while `pea (An)` follows 65 of them in their
+    routine (KBD_$SET_KBD_TYPE 0xE7253E `movea.l A0,A2`, `pea (A2)` at
+    0xE72550: the object passed by address); a later `nil` test is on the register (`movea.l A0,An;
+    cmpa.w #0,An` 30 times, e.g. 0xE02F56 `movea.l A0,A3; cmpa.w
+    #0,A3`), a dereference too (12 right after, none through A0);
+  - of the 28 locals stored to their frame slot instead (`move.l
+    A0,(-k,A6)`, 34 stores; wrappers' result slots left out), 8 (12
+    stores) are pushed by value later (AST_$RESERVE 0xE067BA, `aote` passed to
+    ast_$lookup_aste; AST_$TRUNCATE 0xE05CC8; AST_$PURIFY 0xE056D8;
+    VTOC_$LOOKUP 0xE39056; VTOCE_$TRUNCATE 0xE39F3A), 2 (4 stores) are
+    reached by a nested routine (AST_$INVALIDATE 0xE0666A and the AST_ module-local
+    0xE05214 at 0xE0528C, `ast/invalidate.c`,
+    `ast/set_attribute_internal.c`), 5 hold a routine pointer that is
+    called (NET_$OPEN 0xE5A1D8 and its siblings), the rest are not
+    explained (DIR_ module-locals 0xE4DC74, 0xE53B02, 0xE53E12;
+    0xE511B0);
+  - the 48 `move.l A0,Dn` copies (34 into D0: the TTY_$K_* routines
+    after TTY_$I_GET_DESC; 0xE1C3FE moves the D0 copy to A2 before the
+    next call, 0xE52418 `move.l A0,D0; movea.l D0,A0`) are not
+    explained and not reproduced beyond 12.5's register locals.
+  `dpc` (`isel.rs`, `call_pointer_locals`) holds a pointer local in one
+  virtual address register for the whole body when every assignment to
+  it is a pointer function's value, the first reference is an
+  assignment, and it is otherwise only dereferenced or read whole
+  outside call arguments: never pushed by value, never addressed (bead
+  domain-pascal-pe9), never reached by a nested routine (**Uncertain**
+  beyond these sites).  Each assignment is `movea.l A0,An`; the
+  allocator gives An, A2 and up when the local lives across a call
+  (R3); a call whose arguments use it last holds it through that call
+  in a body with branches too (12.4 R4(c): the 13 such copies are all
+  callee-saved).  A local that no call follows is refused: the image
+  has it in D0 (28 sites, `move.l A0,D0` after the call and `movea.l
+  D0,A0` where it is dereferenced: TTY_$K_* and SIO_$K_* after
+  TTY_$I_GET_DESC / SIO_$I_GET_DESC, e.g. TTY_$K_INQ_FUNC_ENABLED
+  0xE6763C / 0xE67642) or in A1 (0xE4D7FC `movea.l A0,A1; tst.w
+  (10,A1)`, 0xE528CE), by a rule not known.  Conformance `tests/conformance/cal_shutdown.pas`
+  (CAL_$SHUTDOWN 0xE3E714 `movea.l A0,A3`, `pea (A3)` at 0xE3E730);
+  golden `results/pointer_locals`.
+  A local kept in its frame slot (pushed by value, addressed, reached by
+  a nested routine, or assigned something other than a call) is stored
+  with `move.l A0,(-k,A6)`, and then:
+  - `= nil` / `<> nil` right after the store branches on the store's
+    flags (AST_$RESERVE 0xE067BA `move.l A0,(-28,A6); bne.s`, 0xE067DA;
+    AST_$TRUNCATE 0xE05CC8, 0xE05CEA; AST_$PURIFY 0xE056D8 `beq.w`),
+    except for a local a nested routine reaches, which is tested again
+    with `cmpa.w #0,A0` (AST_$INVALIDATE 0xE0666A, 0xE0668C; 0xE05214 at
+    0xE0528C, 0xE052B0).  Over all stores of a register into memory
+    followed by a test of the same value (`tools/resultsurvey.py
+    storetest`): 50 branch on the store's flags
+    (9 of them stores of A0), 9 test the register again (those 4; also
+    0xE554A8 `tst.w D0` at a join), 11 test the memory (none of A0).
+    Not seen, refused: such a test while A0 still holds the local but
+    not right after its store;
+  - a dereference while A0 still holds the local on every path uses A0
+    as the base: right after the store (DIR_ 0xE4DC78 `tst.w (A0)`,
+    0xE53B06, 0xE53E16), on the `nil` test's branch path (0xE067E2,
+    0xE066A8 `bset #6,(191,A0)`), after the join of `p := f; if p = nil
+    then p := g` (AST_$RESERVE 0xE067E8 `tst.b (185,A0)`, AST_$TRUNCATE
+    0xE05D1E), but for a local a nested routine reaches the slot is
+    reloaded at such a join (AST_$INVALIDATE 0xE066AE `movea.l
+    (-20,A6),A0`; 0xE05214 at 0xE052C4 into A1).  `dpc`
+    (`Selector::a0_holds`, a must-analysis over the instructions so far:
+    a store or reload of the slot via A0 makes it, a call, a write of A0,
+    a possible write of the slot or a frame address taken ends it, and
+    for a nested-reached local any join) uses A0 there, outside loops.
+    Pushes of the local still read the slot (no site seen either way;
+    A0 is never pushed, above).
 - **Tail wrapper:** a wrapper `F := G(args)` compiles to the call followed
   directly by the epilogue, with no move to D0 (ACL_$IS_SUSER,
   PROC2_$GET_ASID).  So from the wrapper alone you cannot tell a procedure
@@ -2186,8 +2263,7 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   a constant on the left of a comparison; comparing
   two variables unless the left one is held in a data register (a
   parameter loaded at entry); operands of different widths or signs
-  (implicit widening); unsigned ordering against 0; `cmpa.w #0,An` (no
-  pattern yet produces a held pointer that is compared); a test right
+  (implicit widening); unsigned ordering against 0; a test right
   after the load of its register (above); `and`/`or` without
   `then`/`else`; an `if` with an empty `then` part; a `return` at the
   end of a nested part that ends the routine (a `bra` to the next
@@ -3653,7 +3729,11 @@ in D0.  Reported as not supported yet: a pointer parameter also
 used as data; storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
-last use is an argument of a call (12.4 R4(c)).  In a body without
+last use is an argument of a call (12.4 R4(c)), unless it is live
+across an earlier call (then callee-saved anyway, and held: CAL_$SHUTDOWN
+0xE3E6E4 keeps `status` in A2 across DBUF_$GET_BLOCK and passes it last
+with `pea (A2)` at 0xE3E72A; `tools/regalloc.py callargs` counts only
+values that cross no call; bead domain-pascal-500).  In a body without
 branches such a parameter is held through the call, in a callee-saved
 register (12.4 R4(c): PROC1_$SET_ASID 0xE148FE D2, a conformance unit).
 
@@ -4589,8 +4669,10 @@ against the C in `../source`:
   0xE1A0D6), so "passed by value means frame" is not absolute either (a
   loop-weighted priority would fit; not settled).  Pointer locals are
   often in address registers (MMAP_$FREE's `page` in A2 from 0xE0CADE;
-  KBD_$PUT's descriptor in A2 from 0xE1CEC6), which `dpc` does not model:
-  a pointer local that is dereferenced stays in the frame.
+  KBD_$PUT's descriptor in A2 from 0xE1CEC6); `dpc` holds those
+  assigned from pointer functions in an address register (section 3,
+  "Pointer locals"; bead domain-pascal-500) and those of loops (below);
+  any other pointer local that is dereferenced stays in the frame.
 - Expression temporaries live across a call are spilled to the frame
   (SMD_$BLT_U 0xE6FB1E; module-local 0xE5AA28 at 0xE5AA6C, across an
   M$ARITH call); not this rule's business.

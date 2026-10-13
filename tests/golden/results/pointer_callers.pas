@@ -11,8 +11,11 @@
     (DISK_$GET_BLOCK 0xE3BBBC / 0xE3BBCA, also a conformance unit);
   - stores: A0 stored to the unit's data (TIME_$GET_EC 0xE16734 `move.l
     A0,(0x1620,A5)'), to another unit's variable (PEB_$LOAD_WCS 0xE32072
-    `move.l A0,abs.l'), to a local's frame slot (AST_$INVALIDATE 0xE06664
-    `move.l A0,(-20,A6)');
+    `move.l A0,abs.l'); a pointer local that is only dereferenced is
+    held in an address register, `movea.l A0,A2', and its object passed
+    by address with `pea (A2)' (KBD_$SET_KBD_TYPE 0xE7253E, 0xE72550;
+    bead domain-pascal-500; locals kept in their frame slot are in
+    pointer_locals);
   - tests: A0 against `nil', `cmpa.w #0,A0' (AST_$LOAD_AOTE 0xE023BA);
     A0 as the base of a load (0xE4E990 `tst.w (A0)'; VFMT_$MAIN 0xE6AD10
     `move.w (2,A0),D7');

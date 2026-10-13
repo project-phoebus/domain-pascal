@@ -256,6 +256,10 @@ fn select_body_with(
         .into_iter()
         .map(|o| (o, None))
         .collect();
+    let mut taken = s.reg_locals.clone();
+    taken.extend(s.ptr_locals.iter().map(|&(o, _)| o));
+    let call_ptrs = call_pointer_locals(f, &taken);
+    s.ptr_locals.extend(call_ptrs.iter().map(|&o| (o, None)));
     s.seq(f, &f.body, Tail::END)?;
     if f.data_absolute
         && s.out.iter().any(|i| {
@@ -272,6 +276,24 @@ fn select_body_with(
             "a routine that addresses its unit's data absolutely (--a5-absolute) and calls or \
              branches is",
         ));
+    }
+    // A0 given as a pointer local's base must reach its use: nothing of
+    // the statement may write A0 first (an M$ARITH call among the
+    // operands, say).
+    for &(at, span) in &s.a0_bases {
+        let a0 = Reg::A(0);
+        let used = s.out[at..]
+            .iter()
+            .position(|i| crate::regs::access(i).uses.contains(&a0));
+        let written = s.out[at..]
+            .iter()
+            .position(|i| crate::regs::access(i).defs.contains(&a0));
+        if used.is_none() || matches!((used, written), (Some(u), Some(w)) if w < u) {
+            return Err(unsupported(
+                span,
+                "an expression that writes A0 after reading a pointer local through it is",
+            ));
+        }
     }
     if let Some(l) = s.epilogue {
         s.place(l);
@@ -291,7 +313,9 @@ fn select_body_with(
             dst: Ea::Reg(Reg::D(0)),
         });
     }
+    let mut web_a_move = None;
     if let Some(web) = s.web_a {
+        web_a_move = Some(s.out.len());
         // A pointer result variable into A0 at the start of the epilogue
         // (DISK_$GET_BLOCK 0xE3BBCA `movea.l A2,A0`; codegen-patterns 3,
         // "Pointer results": 12 of the 16 such moves are from A2).
@@ -359,12 +383,66 @@ fn select_body_with(
         }) => &[Reg::A(0)],
         _ => &[],
     };
-    let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A))?;
+    // The registers of the pointer locals assigned from calls: held
+    // through a call whose arguments use them last, in a body with
+    // branches too ([`call_pointer_locals`]).
+    let held_ptrs: Vec<Reg> = s
+        .ptr_locals
+        .iter()
+        .filter(|(o, _)| call_ptrs.contains(o))
+        .filter_map(|&(_, a)| a.map(Reg::A))
+        .collect();
+    let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
     let mut apart = fresh_slot_loads(&s.out, &s.fresh)?;
     apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     let saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
         .map_err(|what| unsupported(f.span, what))?;
+    for &(o, k, span) in &s.ptr_defs {
+        // A pointer local assigned from calls that no call follows: the
+        // image keeps such locals in D0 (`move.l A0,D0` after the call,
+        // `movea.l D0,A0` where it is dereferenced: 28 sites, TTY_$K_*
+        // and SIO_$K_* after TTY_$I_GET_DESC / SIO_$I_GET_DESC, e.g.
+        // TTY_$K_INQ_FUNC_ENABLED 0xE6763C / 0xE67642) or in A1
+        // (0xE4D7FC, 0xE528CE); which, is not known (bead
+        // domain-pascal-500).  Only one in a callee-saved register (live
+        // across a call, or held through one) is kept.
+        if let Insn::Movea { dst, .. } = s.out[k] {
+            if call_ptrs.contains(&o) && dst < 2 {
+                return Err(unsupported(
+                    span,
+                    "a pointer local assigned from a call that no call follows (D0, A1 or a \
+                     callee-saved register in the image; not settled) is",
+                ));
+            }
+        }
+    }
+    if let Some(Insn::Movea {
+        src: Ea::Reg(Reg::A(a)),
+        ..
+    }) = web_a_move.map(|k| &s.out[k])
+    {
+        // A pointer result variable that no call follows: of the 16
+        // register-held ones (`tools/resultsurvey.py pointer`), the 12 in
+        // A2 and the one in A3 all have a call after their first
+        // assignment (codegen-patterns 3, "Pointer results";
+        // DISK_$GET_BLOCK 0xE3BBBC); the one that none follows is in D0
+        // (0xE6C21A: `move.l
+        // A0,D0` after DISK_$GET_BLOCK at 0xE6C244, `clr.l D0` on another
+        // path, `movea.l D0,A0` at 0xE6C2AA), others in their frame slot
+        // (TTY_$I_GET_DESC 0xE667BA, the NET_ module-local 0xE5A188):
+        // never in A1, which the allocator gives it when it is assigned a
+        // call's A0 (R2 keeps it out of A0) or A0 is busy (bead
+        // domain-pascal-500).  A0 itself (only memory loads assigned, no
+        // call after) is kept as before.
+        if *a == 1 {
+            return Err(unsupported(
+                f.span,
+                "a pointer result variable held in a register that no call follows (D0 at \
+                 0xE6C21A, the frame elsewhere; not settled) is",
+            ));
+        }
+    }
     // A result computed in D0 already is not moved (0xE148E0 moves it
     // only because the `sne` left it in D1).
     let keep: Vec<bool> = s
@@ -429,6 +507,22 @@ fn select_body_with(
 ///   D0,-(SP)` at 0xE42CDA; DIR_$FIND_NET 0xE4FE36 A0, `pea (A0)` at
 ///   0xE4FE76), by a rule not known: refused.
 ///
+/// A value already live across an earlier call (so in a callee-saved
+/// register by R3) is held with branches too: CAL_$SHUTDOWN 0xE3E6E4
+/// keeps `status` in A2 across DBUF_$GET_BLOCK and passes it last to
+/// DBUF_$SET_BUFF (`pea (A2)` at 0xE3E72A); `tools/regalloc.py callargs`
+/// counts only values that cross no call.
+///
+/// `ptrs`: the registers of pointer locals assigned from calls
+/// ([`call_pointer_locals`]), held through such a call with branches too:
+/// of the 108 `movea.l A0,An` copies of a call's result, the 13 whose
+/// register is next read only inside a later call's arguments, all in
+/// bodies with branches, are all in callee-saved registers (AST_
+/// module-local 0xE070CA `movea.l A0,A3`, `pea (A3)` at 0xE070DC;
+/// VTOC_$ALLOCATE 0xE38BB6; KBD_$SET_KBD_TYPE 0xE7253E A2, `pea (A2)`
+/// at 0xE72550), against none in A1 or D0/D1 (bead domain-pascal-500,
+/// ad-hoc script over `tools/resultsurvey.py`'s `a0_reads`).
+///
 /// `link`: the register of a nested routine's static link (codegen-patterns
 /// 6), loaded at entry like a parameter; whether the original held it
 /// through a call whose arguments use it last (reaching the enclosing
@@ -438,6 +532,7 @@ fn held_through_calls(
     calls: &[(usize, usize, Span)],
     exit: &[Reg],
     link: Option<Reg>,
+    ptrs: &[Reg],
 ) -> Res<Vec<(usize, Reg)>> {
     let straight = !out
         .iter()
@@ -466,7 +561,15 @@ fn held_through_calls(
                          R4(c)) is",
                     ));
                 }
-                if !straight {
+                // A value live across an earlier call is in a callee-saved
+                // register whatever this call does (12.4 R3); the survey
+                // of R4(c) leaves such values out (`tools/regalloc.py
+                // callargs`, `crosses_call`): held, as in a body without
+                // branches.
+                let crossed = calls
+                    .iter()
+                    .any(|&(_, c, _)| c < start && live_out[c].contains(&crate::regs::RegKey(r)));
+                if !straight && !ptrs.contains(&r) && !crossed {
                     return Err(unsupported(
                         span,
                         "in a body with branches, a call whose arguments are the last use of a \
@@ -1533,6 +1636,172 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
         .collect()
 }
 
+/// The pointer locals of `f` assigned from pointer functions' results and
+/// held in an address register for the whole body, like the loop pointer
+/// locals of [`loop_pointer_locals`] (codegen-patterns 3, "Callers of
+/// pointer functions", and 12.5, "Pointer locals assigned from calls";
+/// bead domain-pascal-500).
+///
+/// Of the 234 calls of A0 functions whose caller reads A0 next
+/// (`tools/resultsurvey.py callers`, `ptrlocals`), 108 copy it to an address register
+/// with `movea.l A0,An` (A2 57, A3 41, A4 7, A1 3): KBD_$SET_KBD_TYPE
+/// 0xE7253E `movea.l A0,A2`, then `pea (A2)` for the descriptor passed by
+/// address (0xE72550); AST_$LOAD_AOTE's family 0xE02F56 `movea.l A0,A3;
+/// cmpa.w #0,A3`.  None of those registers is ever pushed by value
+/// (`move.l An,-(SP)`), while 8 of the 28 locals stored to a frame slot
+/// instead (12 of the 34 stores) are pushed by value later (AST_$RESERVE
+/// 0xE067BA, whose `aote` is passed to `ast_$lookup_aste`; AST_$TRUNCATE
+/// 0xE05CC8, AST_$PURIFY 0xE056D8, VTOC_$LOOKUP 0xE39056), 2 (4 stores)
+/// are reached by a nested routine (AST_$INVALIDATE 0xE0666A, the AST_
+/// module-local 0xE05214 at 0xE0528C; `ast/invalidate.c`,
+/// `ast/set_attribute_internal.c`), 5 hold a routine pointer that is
+/// called (NET_$OPEN 0xE5A1D8 and its siblings), the rest
+/// are result variables (MST_$MAPS 0xE439C8) or not explained (DIR_
+/// module-locals 0xE4DC74, 0xE53B02).
+///
+/// The rule (**Uncertain** beyond those sites; the narrowest that fits
+/// them): a 4-byte pointer local whose only references are whole reads,
+/// dereferences (a field read or written, the object passed by address:
+/// `pea (An)`) and whole assignments; every assignment's value a call of a
+/// pointer function; the first reference an assignment; never read whole
+/// inside an argument of a call (pushed by value), never addressed (passed
+/// by address, `addr`), never reached by a nested routine
+/// ([`Function::uplevel_refs`]; bead domain-pascal-pe9).  Every assignment
+/// writes the register (`movea.l A0,An`), the allocator gives it a
+/// callee-saved register when it lives across a call (12.4 R3), and a
+/// call whose arguments use it last holds it through the call
+/// ([`held_through_calls`]).  One that no call follows is refused after
+/// allocation (D0 or A1 in the image, [`select_body_with`]).  Pointer
+/// locals assigned otherwise (`nil`, a memory load) stay in the frame as
+/// before (not surveyed).
+fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
+    #[derive(Default)]
+    struct St {
+        /// The first reference was an assignment (`Some(true)`), or
+        /// something else.
+        first: Option<bool>,
+        bad: bool,
+    }
+    /// Whether `e` reads the local at `off` whole (not as a pointer it
+    /// dereferences).
+    fn whole_read(e: &Expr, off: i32) -> bool {
+        let (mut loads, mut derefs) = (0, 0);
+        walk_expr(e, &mut |n| match n {
+            Node::Expr(Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            }) if *o == off => loads += 1,
+            Node::Addr(Addr::Indirect { base, .. }) if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. } if *o == off) => {
+                derefs += 1
+            }
+            _ => {}
+        });
+        loads > derefs
+    }
+    /// The references to the local at `off` among the nodes `go` visits.
+    fn scan<'a>(off: i32, st: &mut St, go: impl FnOnce(&mut dyn FnMut(Node<'a>))) {
+        let (mut loads, mut addrs) = (0, 0);
+        let mut bad = false;
+        go(&mut |n| match n {
+            Node::Expr(Expr::Load {
+                addr: Addr::Frame(o),
+                ty,
+            }) if *o == off => {
+                loads += 1;
+                bad |= *ty != Scalar::POINTER;
+            }
+            Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+            Node::Call(c) => {
+                for a in &c.args {
+                    if let Arg::Value { value, .. } | Arg::Temp { value, .. } = a {
+                        bad |= whole_read(value, off);
+                    }
+                }
+            }
+            _ => {}
+        });
+        // Addressed, or read in part.
+        st.bad |= bad || addrs != loads;
+        if loads > 0 && st.first.is_none() {
+            st.first = Some(false);
+        }
+    }
+    fn cond(c: &IrCond, off: i32, st: &mut St) {
+        scan(off, st, |v| walk_cond(c, v));
+    }
+    fn stmts(body: &[Stmt], off: i32, st: &mut St) {
+        for s in body {
+            match &s.kind {
+                StmtKind::Store {
+                    addr: Addr::Frame(o),
+                    value,
+                } if *o == off => {
+                    scan(off, st, |v| walk_expr(value, v));
+                    if value.ty() != Scalar::POINTER || a0_call(value).is_none() {
+                        st.bad = true;
+                    }
+                    if st.first.is_none() {
+                        st.first = Some(true);
+                    }
+                }
+                StmtKind::If {
+                    cond: c,
+                    then_,
+                    else_,
+                } => {
+                    cond(c, off, st);
+                    stmts(then_, off, st);
+                    stmts(else_, off, st);
+                }
+                StmtKind::Repeat { body, until } => {
+                    stmts(body, off, st);
+                    cond(until, off, st);
+                }
+                StmtKind::While { cond: c, body } => {
+                    cond(c, off, st);
+                    stmts(body, off, st);
+                }
+                StmtKind::For(l) => {
+                    scan(off, st, |v| {
+                        walk_expr(&l.from, v);
+                        walk_expr(&l.to, v);
+                    });
+                    stmts(&l.body, off, st);
+                }
+                StmtKind::Case {
+                    selector,
+                    arms,
+                    otherwise,
+                } => {
+                    scan(off, st, |v| walk_expr(selector, v));
+                    for a in arms {
+                        stmts(&a.body, off, st);
+                    }
+                    if let Some(o) = otherwise {
+                        stmts(o, off, st);
+                    }
+                }
+                _ => scan(off, st, |v| walk(std::slice::from_ref(s), v)),
+            }
+        }
+    }
+    f.scalar_locals
+        .iter()
+        .filter(|l| l.ty == Scalar::POINTER && !exclude.contains(&l.offset))
+        .filter(|l| {
+            !f.uplevel_refs
+                .iter()
+                .any(|&(p, n)| p < l.offset + 4 && l.offset < p + n as i32)
+        })
+        .filter(|l| {
+            let mut st = St::default();
+            stmts(&f.body, l.offset, &mut st);
+            !st.bad && st.first == Some(true)
+        })
+        .map(|l| l.offset)
+        .collect()
+}
+
 /// Whether `stmts` ends in an unconditional jump (`return`, `exit`,
 /// `next`), so that no `bra` to a join follows it: the `bra` would never
 /// be reached.
@@ -2104,6 +2373,9 @@ pub struct Selector {
     /// ([`loop_pointer_locals`]): frame offset, and the virtual register
     /// once the first assignment has defined it.
     ptr_locals: Vec<(i32, Option<u8>)>,
+    /// The assignments to those locals: frame offset, index in `out` of
+    /// the `movea.l` and its statement's span.
+    ptr_defs: Vec<(i32, usize, Span)>,
     /// The register holding the static link of a nested routine, loaded
     /// at entry when the body needs it ([`Selector::load_link`]).
     link: Option<u8>,
@@ -2121,6 +2393,10 @@ pub struct Selector {
     stored: Vec<(i32, Size, Reg, usize)>,
     /// [`escaped_frame_objects`] of the routine.
     escaped: Vec<i32>,
+    /// Where [`Self::eval_a`] gave A0 as the base of a pointer local
+    /// ([`Self::a0_holds`]): the index in `out` then, checked once the
+    /// body is selected (no write of A0 before the base's use).
+    a0_bases: Vec<(usize, Span)>,
     /// The registers of the parameters loaded at entry
     /// ([`Self::entry_loads`]), in load order.
     entry_regs: Vec<Reg>,
@@ -2227,6 +2503,7 @@ impl Selector {
             stepped: Vec::new(),
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
+            ptr_defs: Vec::new(),
             link: None,
             uplevel: Vec::new(),
             result_web: false,
@@ -2235,6 +2512,7 @@ impl Selector {
             entry_regs: Vec::new(),
             stored: Vec::new(),
             escaped: Vec::new(),
+            a0_bases: Vec::new(),
             cse_plan: CsePlan::Probe,
             cse: Vec::new(),
             cse_next: 0,
@@ -3470,6 +3748,51 @@ impl Selector {
         let Expr::Load { addr, .. } = lhs else {
             return self.compare_computed(op, lhs, rhs);
         };
+        if let (Addr::Frame(o), Expr::Const { value: 0, .. }, Scalar::POINTER) = (addr, rhs, ty) {
+            if *o < 0 && self.pinned(*o).is_none() && matches!(op, Rel::Eq | Rel::Ne) {
+                let cc = if op == Rel::Eq { Cond::Eq } else { Cond::Ne };
+                let stored = matches!(
+                    self.out.last(),
+                    Some(Insn::Move {
+                        size: Size::L,
+                        src: Ea::Reg(Reg::A(0)),
+                        dst: Ea::Disp(d, FP),
+                    }) if d == o
+                );
+                if stored && self.is_uplevel(*o) {
+                    // A local a nested routine reaches, tested right after
+                    // a pointer function's A0 was stored into it: A0 is
+                    // tested (AST_$INVALIDATE 0xE0666A `move.l
+                    // A0,(-20,A6); cmpa.w #0,A0`, again at 0xE0668C; the
+                    // AST_ module-local 0xE05214 at 0xE0528C, 0xE052B0;
+                    // bead domain-pascal-500).
+                    self.out.push(Insn::CmpaZero(0));
+                    return Ok(cc);
+                }
+                if stored {
+                    // Any other local: the branch reads the flags of the
+                    // store itself (AST_$RESERVE 0xE067BA `move.l
+                    // A0,(-28,A6); bne.s`, again at 0xE067DA;
+                    // AST_$TRUNCATE 0xE05CC8, 0xE05CEA; AST_$PURIFY
+                    // 0xE056D8 `beq.w`).  Of the stores of a register
+                    // into memory followed by a test of the same value,
+                    // 50 branch on the store's flags (9 of them stores
+                    // of A0), 9 test the register again (the 4 of the two
+                    // routines above; 0xE554A8 `tst.w D0` at a join), 11
+                    // test the memory, none of A0 (bead
+                    // domain-pascal-500, `tools/resultsurvey.py
+                    // storetest`).
+                    return Ok(cc);
+                }
+                if self.a0_holds(*o) {
+                    return Err(unsupported(
+                        self.span,
+                        "testing a pointer local against nil while A0 still holds it, not right \
+                         after the store (A0 or the slot: not seen) is",
+                    ));
+                }
+            }
+        }
         match rhs {
             Expr::Const { value: 0, .. } => {
                 let cc = match (op, signed) {
@@ -3958,6 +4281,7 @@ impl Selector {
                         }
                     },
                 };
+                self.ptr_defs.push((*o, self.out.len(), self.span));
                 self.out.push(Insn::Movea {
                     size: Size::L,
                     src,
@@ -4123,6 +4447,94 @@ impl Selector {
                 || may_write_frame(i, o, !self.escaped.is_empty())
         });
         (!from_before && !clobbered).then_some(r)
+    }
+
+    /// Whether A0 still holds the pointer local at frame offset `o` at the
+    /// end of the instructions selected so far, on every path there: a
+    /// pointer function's result stored into the slot (`move.l
+    /// A0,(-k,A6)`), or the slot loaded into A0, with no call, write of A0,
+    /// possible write of the slot ([`may_write_frame`]) or frame address
+    /// taken after it (bead domain-pascal-500; codegen-patterns 3,
+    /// "Callers of pointer functions").
+    ///
+    /// The image dereferences such a local through A0 right after the
+    /// store (the DIR_ module-locals 0xE4DC78 `tst.w (A0)`, 0xE53B06 `and.b
+    /// (A0),D0`, 0xE53E16 `andi.b #-64,(1,A0)`), on the path of the `nil`
+    /// test's branch (AST_$RESERVE 0xE067E2 and AST_$INVALIDATE 0xE066A8
+    /// `bset #6,(191,A0)`), and after the join of the two assignments of
+    /// `p := f; if p = nil then p := g` (AST_$RESERVE 0xE067E8 `tst.b
+    /// (185,A0)`; AST_$TRUNCATE 0xE05D1E), except for a local a nested
+    /// routine reaches, which is reloaded at that join (AST_$INVALIDATE
+    /// 0xE066AE `movea.l (-20,A6),A0`; the AST_ module-local 0xE05214 at
+    /// 0xE052C4 into A1): for such a local a label with more than one
+    /// predecessor ends it.  Not inside a loop (its back edge is not
+    /// selected yet).
+    fn a0_holds(&self, o: i32) -> bool {
+        if !self.loops.is_empty() {
+            return false;
+        }
+        let uplevel = self.is_uplevel(o);
+        let escaped = !self.escaped.is_empty();
+        // The instructions so far and a point after them.
+        let mut code = self.out.clone();
+        code.push(Insn::Label(u32::MAX));
+        let n = code.len();
+        let succ = crate::regs::successors(&code);
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, ss) in succ.iter().enumerate() {
+            for j in ss.iter().flatten() {
+                preds[*j].push(i);
+            }
+        }
+        let transfer = |i: usize, inn: bool| -> bool {
+            match &code[i] {
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(0)),
+                    dst: Ea::Disp(d, FP),
+                } if *d == o => true,
+                Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Disp(d, FP),
+                    dst: 0,
+                } if *d == o => true,
+                x if matches!(
+                    x,
+                    Insn::Jsr(_)
+                        | Insn::Bsr { .. }
+                        | Insn::Pea(Ea::Disp(_, FP))
+                        | Insn::Lea {
+                            src: Ea::Disp(_, FP),
+                            ..
+                        }
+                ) || crate::regs::access(x).defs.contains(&Reg::A(0))
+                    || may_write_frame(x, o, escaped) =>
+                {
+                    false
+                }
+                _ => inn,
+            }
+        };
+        // Must-analysis: every path from the entry.
+        let mut out = vec![true; n];
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                // The entry, and for a nested-reached local any join.
+                let cut =
+                    i == 0 || uplevel && matches!(code[i], Insn::Label(_)) && preds[i].len() > 1;
+                let inn = !cut && preds[i].iter().all(|&p| out[p]);
+                let v = transfer(i, inn);
+                if v != out[i] {
+                    out[i] = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        out[n - 1]
     }
 
     /// Record that the statement just selected (from `stmt_start`) wrote
@@ -7050,6 +7462,14 @@ impl Selector {
                     // registers.
                     Reg::D(_) => unreachable!("pointer parameter pinned in a data register"),
                 };
+            }
+            if *o < 0 && self.a0_holds(*o) {
+                // A pointer local stored from a pointer function's A0 and
+                // dereferenced while A0 still holds it: A0 is the base
+                // (0xE4DC78 `tst.w (A0)` after `move.l A0,(-248,A6)`;
+                // [`Self::a0_holds`]).
+                self.a0_bases.push((self.out.len(), self.span));
+                return Ok(0);
             }
         }
         match e {

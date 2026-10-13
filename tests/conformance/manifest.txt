@@ -131,3 +131,4 @@ tests/conformance/xpd_reset_ptrace_opts.pas  XPD_$RESET_PTRACE_OPTS
 # `(A6)' in A2 across a call, an uplevel by-address parameter dereferenced,
 # its own by-value parameter passed by address with `pea (8,A6)'.
 tests/conformance/ring_discard_packet.pas  0xE76470:2E  enclosing=RECEIVE_PACKET
+tests/conformance/cal_shutdown.pas           CAL_$SHUTDOWN  --section-addr .bss.moddata.OS_CAL_WIRED=0xE7B030

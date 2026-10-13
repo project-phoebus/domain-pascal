@@ -1177,3 +1177,214 @@ fn schedule_option() {
     assert_eq!(code, Some(2));
     assert!(err.contains("given more than once"), "{err}");
 }
+
+/// A pointer local assigned from pointer functions (bead
+/// domain-pascal-500; codegen-patterns 3, "Callers of pointer functions",
+/// 12.5): held in an address register unless its value is pushed, its
+/// address escapes, or a nested routine reaches it.
+#[test]
+fn pointer_local_from_a_call_is_held_in_an_address_register() {
+    let head = "module m;
+type rec = record n: integer; f: integer; end; recp = ^rec;
+var seen: integer;
+function get(k: integer): recp; val_param; extern;
+procedure poke; extern;
+procedure take(p: recp); val_param; extern;
+procedure setp(var p: recp); extern;
+procedure touch(var r: rec); extern;
+";
+    // Across a call: a callee-saved register (KBD_$SET_KBD_TYPE 0xE7253E
+    // `movea.l A0,A2`), the `nil` test on it, `pea (A2)`.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  if p <> nil then begin poke; seen := p^.n; touch(p^) end;
+end;
+"
+    );
+    let s = compile_with("ptr_local_held", &src, &[]).unwrap();
+    assert!(
+        s.contains("\tmovea.l\t%a0,%a2\n\tcmpa.w\t#0,%a2\n\tbeq."),
+        "{s}"
+    );
+    assert!(s.contains("\tmove.w\t(%a2),(%a5)\n\tpea\t(%a2)\n"), "{s}");
+    assert!(!s.contains("(-4,%fp)"), "{s}");
+
+    // Pushed by value: in the frame (AST_$RESERVE 0xE067BA); `= nil` right
+    // after the store branches on the store's flags; A0 is the base while
+    // it holds the local; the push reads the slot.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  if p = nil then return;
+  seen := p^.f;
+  take(p);
+end;
+"
+    );
+    let s = compile_with("ptr_local_pushed", &src, &[]).unwrap();
+    assert!(s.contains("\tmove.l\t%a0,(-4,%fp)\n\tbeq."), "{s}");
+    assert!(
+        s.contains("\tmove.w\t(2,%a0),(%a5)\n\tmove.l\t(-4,%fp),-(%sp)\n"),
+        "{s}"
+    );
+
+    // Its address passed (bead domain-pascal-pe9): in the frame, and
+    // reloaded after the call that may change it.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  setp(p);
+  seen := p^.n;
+end;
+"
+    );
+    let s = compile_with("ptr_local_escaped", &src, &[]).unwrap();
+    assert!(
+        s.contains("\tpea\t(-4,%fp)\n\tjsr\t(SETP).l\n\tmovea.l\t(-4,%fp),%a0\n"),
+        "{s}"
+    );
+
+    // A nested routine writes it: in the frame; `= nil` tests A0 again
+    // (AST_$INVALIDATE 0xE0666A), and after the call of the nested
+    // routine it is reloaded.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+  procedure clear; begin p := get(2); end;
+begin
+  p := get(1);
+  if p = nil then return;
+  clear;
+  seen := p^.n;
+end;
+"
+    );
+    let s = compile_with("ptr_local_uplevel", &src, &[]).unwrap();
+    assert!(
+        s.contains("\tmove.l\t%a0,(-4,%fp)\n\tcmpa.w\t#0,%a0\n\tbeq."),
+        "{s}"
+    );
+    assert!(
+        s.contains("\tbsr.s\tCLEAR\n\tmovea.l\t(-4,%fp),%a0\n"),
+        "{s}"
+    );
+
+    // A call between the store and a dereference of a frame-held local:
+    // reloaded, not read from A0.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  poke;
+  seen := p^.n;
+  take(p);
+end;
+"
+    );
+    let s = compile_with("ptr_local_call_between", &src, &[]).unwrap();
+    assert!(
+        s.contains("\tjsr\t(POKE).l\n\tmovea.l\t(-4,%fp),%a0\n\tmove.w\t(%a0),(%a5)\n"),
+        "{s}"
+    );
+
+    // No call after it: D0 or A1 in the image (TTY_$K_INQ_FUNC_ENABLED
+    // 0xE6763C `move.l A0,D0`; 0xE4D7FC `movea.l A0,A1`): refused.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  seen := p^.n;
+end;
+"
+    );
+    let (_, e) = compile_with("ptr_local_no_call_after", &src, &[]).unwrap_err();
+    assert!(e.contains("that no call follows"), "{e}");
+
+    // `= nil` when A0 still holds the local but not right after the store:
+    // not seen, refused.
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  seen := p^.n;
+  if p = nil then return;
+  take(p);
+end;
+"
+    );
+    let (_, e) = compile_with("ptr_local_late_test", &src, &[]).unwrap_err();
+    assert!(e.contains("while A0 still holds it"), "{e}");
+}
+
+/// A framed pointer local is dereferenced through A0 only while A0 holds
+/// it on every path (`a0_holds`, bead domain-pascal-500): a call, an
+/// M$ARITH call inside the statement, a `case` dispatch reached after a
+/// call, or a path that writes the slot all make the slot be reloaded.
+#[test]
+fn pointer_local_in_a0_is_reloaded_once_a0_may_be_stale() {
+    let head = "module m;
+type rec = record n: integer; f: integer; l: integer32; end; recp = ^rec;
+var seen: integer; big: integer32; gp: recp;
+function get(k: integer): recp; val_param; extern;
+function other(k: integer): integer; val_param; extern;
+procedure take(p: recp); val_param; extern;
+";
+    let reload = "\tmovea.l\t(-4,%fp),%a0\n";
+    for (name, body) in [
+        ("a0_call", "p := get(1);\n  seen := other(1);\n  seen := p^.n;"),
+        ("a0_arith", "p := get(1);\n  big := big * big;\n  seen := p^.n;"),
+        ("a0_slot", "p := get(1);\n  if seen = 3 then p := gp;\n  seen := p^.n;"),
+        (
+            "a0_case",
+            "p := get(1);\n  seen := other(1);\n  case seen of\n  1: seen := p^.n;\n  2: seen := p^.f;\n  3: seen := 9;\n  4: seen := 7;\n  end;",
+        ),
+    ] {
+        let src = format!("{head}procedure user;\nvar p: recp;\nbegin\n  {body}\n  take(p);\nend;\n");
+        let s = compile_with(name, &src, &[]).unwrap();
+        let after = &s[s.find("\tmove.l\t%a0,(-4,%fp)\n").expect(&s)..];
+        let deref = after.find("(%a0),(%a5)").or(after.find("(2,%a0),(%a5)"));
+        let first = after.find(reload);
+        assert!(matches!((first, deref), (Some(r), Some(d)) if r < d), "{name}:\n{s}");
+    }
+    // M$ARITH among the operands: the base is loaded after the call.
+    let src = format!(
+        "{head}procedure user;\nvar p: recp;\nbegin\n  p := get(1);\n  big := p^.l div big + p^.l;\n  take(p);\nend;\n"
+    );
+    let s = compile_with("a0_arith_operands", &src, &[]).unwrap();
+    assert!(
+        s.contains("\tjsr\t(M$DIS$LLL).l\n\taddq.w\t#8,%sp\n\tmovea.l\t(-4,%fp),%a0\n"),
+        "{s}"
+    );
+}
+
+/// A pointer result variable assigned a call's A0 that no call follows
+/// would be in A1, which the image never shows (bead domain-pascal-500;
+/// 0xE6C21A holds such a variable in D0): refused.
+#[test]
+fn pointer_result_variable_without_a_later_call_is_refused() {
+    let src = "module m;
+type recp = ^integer;
+var cached: recp; seen: integer;
+function get(k: integer): recp; val_param; extern;
+function user(k: integer): recp; val_param;
+begin
+  user := get(k);
+  if seen = 0 then user := cached;
+end;
+";
+    let (_, e) = compile_with("ptr_result_a1", src, &[]).unwrap_err();
+    assert!(
+        e.contains("a pointer result variable held in a register that no call follows"),
+        "{e}"
+    );
+}

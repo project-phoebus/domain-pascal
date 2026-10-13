@@ -57,6 +57,32 @@ class ConformTest(unittest.TestCase):
             self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'), ['PROC1_$TST_LOCK'],
                            local_syms={'W': 0xE148F8})
 
+    def test_check_local_sym_is_checked_like_the_manifest(self):
+        # `check --local-sym' applies the checks of `module-routines=
+        # NAME=0xADDR' (bead domain-pascal-500)
+        src = os.path.join(HANDASM, 'proc1_tst_lock.s')
+
+        def main(*extra):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                rc = conform.main(['check', src, '--routine', 'PROC1_$TST_LOCK'] + list(extra))
+            return rc, err.getvalue()
+        for sym, why in (('W=0xE148F8', 'is PROC1_\\$SET_ASID in the map'),
+                         ('PROC1_$SET_ASID=0xE148F0', 'is a map name'),
+                         ('W=0xE00EB0', 'not in the module'),
+                         ('W=0xE148D0', 'part of the unit'),
+                         ('W-1=0xE148F0', 'want NAME=0xADDR')):
+            rc, err = main('--local-sym', sym)
+            self.assertEqual(rc, 2, err)
+            self.assertRegex(err, why)
+        rc, err = main('--local-sym', 'W=0xE148F0', '--local-sym', 'W=0xE148F2')
+        self.assertEqual(rc, 2, err)
+        self.assertIn('more than once', err)
+        # an acceptable symbol reaches the link, which wants it referenced
+        rc, err = main('--local-sym', 'W=0xE148F0')
+        self.assertEqual(rc, 2, err)
+        self.assertIn('given but not referenced: W', err)
+
     def test_tst_lock_abs_long(self):
         # gas must emit 2079 00e1 eac8 for the absolute-long movea.l
         ok, _ = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'),
