@@ -216,11 +216,12 @@ fn unsupported_constructs_have_positions() {
         vec!["t.pas:2:13: error: value parameters passed by address (callee-made local copy) are not supported yet"]
     );
     // An ordinary statement.
-    let e =
-        errs("module m;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n");
+    let e = errs(
+        "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  with x do a := 2;\nend;\n",
+    );
     assert_eq!(
         e,
-        vec!["t.pas:4:3: error: this statement is not supported yet"]
+        vec!["t.pas:5:3: error: this statement is not supported yet"]
     );
     // Module data in a named data section, or with an initial value.
     let e = errs("module m, code, mydata;\nvar v: integer;\n");
@@ -1390,6 +1391,65 @@ fn repeat_and_return() {
     assert_eq!(body.len(), 2);
     assert_eq!(*until, Cond::Test(sym("B", Scalar::BOOLEAN)));
     assert_eq!(b[1].kind, StmtKind::Return);
+}
+
+/// `case` (ref "Case", pp. 4-36..4-37): arms and labels in source order,
+/// an empty arm kept with no statements, a `char` selector widened to an
+/// unsigned word (codegen-patterns 7.3: `clr.w Dn; move.b x,Dn` at
+/// module-local 0xE1CC6C).
+#[test]
+fn case_statements() {
+    let b = ctl_body("case w of 3, 1: w := 0; 2: ; otherwise begin w := 1; w := 2 end end;");
+    assert_eq!(b.len(), 1);
+    let StmtKind::Case {
+        selector,
+        arms,
+        otherwise,
+    } = &b[0].kind
+    else {
+        panic!()
+    };
+    assert_eq!(*selector, sym("W", Scalar::signed(Width::Word)));
+    assert_eq!(arms.len(), 2);
+    assert_eq!(arms[0].labels, vec![3, 1]);
+    assert_eq!(arms[0].body.len(), 1);
+    assert_eq!(arms[1].labels, vec![2]);
+    assert!(arms[1].body.is_empty());
+    assert_eq!(otherwise.as_ref().map(Vec::len), Some(2));
+
+    let pre = "module m;\nvar c: extern char; w: extern integer;\nprocedure t; internal;\nbegin\n";
+    let m = lower_src(&format!(
+        "{pre}case c of 'a': w := 1; 'b': w := 2; end;\nend;\n"
+    ))
+    .unwrap();
+    let StmtKind::Case { selector, arms, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        *selector,
+        Expr::Convert {
+            value: Box::new(sym("C", Scalar::unsigned(Width::Byte))),
+            ty: Scalar::unsigned(Width::Word),
+        }
+    );
+    assert_eq!(arms[0].labels, vec![97]);
+}
+
+#[test]
+fn unsettled_case_statements_are_rejected() {
+    let one = |body: &str| {
+        let e = ctl_errs(body);
+        assert_eq!(e.len(), 1, "{e:?}");
+        e[0].clone()
+    };
+    assert!(one("case b of true: w := 1; false: w := 2; end;")
+        .contains("a signed byte (boolean, `-128..127`) `case` selector"));
+    assert!(one("case 3 of 1: w := 1; 3: w := 2; end;").contains("a constant `case` selector"));
+    assert!(
+        one("case w of 1: w := 1; 2: w := 2; otherwise end;").contains("an empty `otherwise` part")
+    );
+    assert!(one("case u of 1: w := 1; -1: w := 2; end;")
+        .contains("case label -1 is outside the selector's range"));
 }
 
 /// A function's result assignment inside an `if` is not its last

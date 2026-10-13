@@ -300,8 +300,31 @@ pub enum StmtKind {
     /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body runs
     /// at least once, and again while `until` is false.
     Repeat { body: Vec<Stmt>, until: Cond },
+    /// `case selector of ... otherwise ... end` (ref "Case", pp.
+    /// 4-36..4-37).  `selector` is a word or a longword (a byte selector
+    /// is widened by lowering); every label fits its type and no label
+    /// occurs twice.  `arms` are in source order, an arm's labels in source
+    /// order; an arm's `body` may be empty (an empty statement).  When no
+    /// label matches and there is no `otherwise`, execution continues
+    /// after the statement: Domain Pascal "does not detect the lack of a
+    /// case statement constant corresponding to a run-time case value"
+    /// (ref Appendix D, ISO 6.8.3.5, p. D-4).  `otherwise`, when present,
+    /// is not empty.
+    Case {
+        selector: Expr,
+        arms: Vec<CaseArm>,
+        otherwise: Option<Vec<Stmt>>,
+    },
     /// `return` (ref "Return", p. 4-166): leave the routine.
     Return,
+}
+
+/// One arm of a [`StmtKind::Case`]: its labels (ordinal values of the
+/// selector's type) and its statements.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseArm {
+    pub labels: Vec<i64>,
+    pub body: Vec<Stmt>,
 }
 
 /// A condition that decides a branch (the test of an `if` or a loop).

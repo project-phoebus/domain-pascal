@@ -1336,19 +1336,8 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
       - Non-aligning: PMAP_ (PMAP_$FLUSH's two heads are 4-aligned by
         accident), PROC1_, XNS_IDP from XNS_IDP_$OS_OPEN on
         (XNS_IDP_$GET_STATS).
-- **`case` statements** become a bounds check plus a jump table of word
-  offsets (Verified: OSINFO_$GET_MMAP 0xE5C6C0..0xE5C6D6):
-  `cmpi.w #n,D0; bcc default; add.w D0,D0; move.w (tbl,PC,D0.w),D0; jmp (tbl,PC,D0.w)`
-  (encoded `303b 0006` / `4efb 0002`), with the table of word offsets
-  (relative to the table start) directly after the `jmp`.  More examples:
-  - MAC_OS_$OPEN 0xE0B3AE
-  - KBD_$RCV 0xE1CCFE
-  - TTY_$I_RCV (19 entries)
-  
-  **Uncertain:** the threshold below which the compiler emits a compare
-  chain instead.  Verified: the module-local key translator at 0xE1CC64
-  (sparse labels 0x91..0xC0) is a `cmpi.w #k,D0; beq` chain, with labels
-  tested in what looks like source order, not sorted order.
+- **`case` statements:** a jump table of word offsets or a compare
+  chain; section 7.3.
 - **Branch sizes (Verified):** `.s` when the target is in reach,
   otherwise `.w`; no `.l` branches (68010).  Compiled code has 11515 `.s`
   branches, all in reach, and 2793 `.w`, all out of reach but two
@@ -1495,6 +1484,217 @@ Backward branches other than `dbf` in compiled code (same survey):
   a `bra` to the test.  Whether the head after that `bra` gets the
   filler is not settled (in aligning routines: 3 with the filler, 2
   4-aligned, 3 at 2 mod 4).  Not supported yet.
+
+
+### 7.3 `case` statements (Verified at the sites given; the choice of form Verified by survey; implemented)
+
+Survey: `tools/casesurvey.py` (bead domain-pascal-5aw.4) follows every
+compiled routine as `tools/a5survey.py` does (jump tables through
+`a5survey.table_entries`) and finds **50 jump tables** and **61 compare
+chains** (`summary`; `list` gives one line per site with the number of
+labels n, their range r = max - min + 1, and the arms).  A chain is two
+or more `cmpi #k,Dn; beq` / `tst Dn; beq` on one register followed by a
+`bra`, with at least two distinct targets (runs of `beq`s to one target
+are conditions, `x in [a, b]`-like, and not counted).  For a table, n
+counts the entries that do not go to the default target: a lower bound,
+since an empty arm (or an arm merged with the `otherwise` code) shares
+it.
+
+**Jump table** (Verified, all 50):
+
+```text
+        move.w  <selector>,D0           ; OSINFO_$GET_MMAP 0xE5C6C0
+        subq.w  #lo,D0                  ; when the labels start at lo != 0
+        cmpi.w  #r,D0                   ; 0xE5C6C4: r = number of entries
+        bcc     <otherwise or join>     ; unsigned: below lo is caught too
+        add.w   D0,D0
+        move.w  (T,PC,D0.w),D0          ; 303b 0006
+        jmp     (T,PC,D0.w)             ; 4efb 0002
+T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
+```
+
+- **The bound** is always `cmpi #r` with r the number of entries and
+  `bcc` (49 `cmpi.w`; one `cmpi.l` on a longword selector,
+  ASKNODE_$INTERNET_INFO 0xE64F92, still `add.w`).  The index is a word.
+- **The lower bound** is subtracted first: `subq.w #k` for 1..8
+  (PROC1_$CREATE_P 0xE15178 `subq.w #3`; DMA_$CHECK 0xE0A3D2 `subq.w
+  #1`), `subi.w #k` above (ACL_$SERVER 0xE495CE `subi.w #100`; DIR_$DO_OP
+  0xE4C266 `subi.w #42`; UNMAP_CASE 0xE541E8 `subi.w #48`), `addq.w #4`
+  for -4 (MST_$PRIV_SET_TOUCH_AHEAD_CNT 0xE44534).  Nothing lower than -4
+  is seen.
+- **The table** follows the `jmp` directly, not aligned (tables at 0 and
+  at 2 mod 4: 0xE5C6D6, 0xE0A3E4), and the first arm follows the table
+  (49 of 50; ASKNODE_$INTERNET_INFO 0xE64FA6's entries go back to the
+  arms of an earlier chain, shared code).
+- **Gaps:** a value with no label goes to the `otherwise` part, or to the
+  join without one, like the `bcc` (MAC_OS_$OPEN 0xE0B3AE: labels 1 and
+  2 to 0xE0B3D0; KBD_$RCV 0xE1CCFE: 0, 7, 8, 9 to the join 0xE1CE1E).
+
+**Compare chain** (Verified, all 61):
+
+```text
+        move.w  (4,A0),D0               ; SYSBUS_$INIT 0xE0AB64
+        beq.s   ARM0                    ; label 0 first: the load's flags
+        cmpi.w  #1,D0
+        beq.s   ARM1
+        cmpi.w  #2,D0
+        beq.s   ARM2
+        bra.s   <otherwise or join>     ; 0xE0AB76
+```
+
+- **Order:** the labels are tested in source order, not sorted: the
+  module-local 0xE1CC70 tests 0xC0, 0x91, 0x92, 0x95, 0x96, 0x99, 0x98,
+  0x97 (the last three for one arm); TTY_$I_SIGNAL 0xE1B832 3, 2, 21, 1,
+  26, 22.  In 59 of the 61 chains the arms lie in memory in the order of
+  their first test; the 2 others share code between arms (0xE556E6,
+  0xE657DA).
+- **Label 0** is `tst.<s> Dn; beq` (TIME_$GET_EC 0xE16762, after a
+  compare; 3 chains start so, all right after a `clr.w Dn; move.b x,Dn`
+  zero-extension: 0xE556E6, DIR_$OLD_READ_LINKU 0xE57890,
+  REM_FILE_$SERVER 0xE6429A), but first right after a word or longword
+  move into Dn it is the `beq` alone, on the flags of the move (17
+  chains: SYSBUS_$INIT 0xE0AB64, XPD_$PUT_REGISTERS 0xE5C3A0,
+  TERM_$GET_EC 0xE723F6 `move.w (A2),D0; beq.s`; copies too, MSG_$WAITI
+  0xE59C84 `move.w D0,D2; beq.s`, DISK_$WRITE_PROTECT 0xE3D980; 0xE01B58
+  `move.l (A2),D0; beq`).  After a copy the compares go on in the copy
+  (0xE59C84 `cmpi.w #1,D2`) or, twice, in its source (MSG_$SARI 0xE59EF6
+  and module-local 0xE75656 `move.w D0,D1; beq.s; cmpi.w #1,D0`, both
+  right after a call: a function result kept in D1 and dispatched from
+  D0?  Not explained; cf. CAL_$WEEKDAY below).
+- **Widths:** 58 chains `cmpi.w`, 3 `cmpi.l` (status values, 0xE5D2FE
+  FILE_$SET_ATTRIBUTE).
+- **An empty arm's labels** go to the join (ASKNODE_$INTERNET_INFO
+  0xE65614 `cmpi.w #81,D0; beq.s 0xE6568A`, the target of the chain's
+  final `bra`).
+
+**Which form (Verified by survey, one exception).**
+
+- **n <= 3: always a chain.**  All 49 chains of 2 or 3 labels, 32 of them
+  dense (r = n: SYSBUS_$INIT 0..2, DISK_INIT 0xE19B24 3..5, RIP_$SERVER
+  0xE68B62 1..3); no table has fewer than 4 labels (the 4 tables that
+  count fewer have labels hidden in the default: SMD_$INIT 0xE34D5E
+  dispatches a constant 0 over 4 entries; 0xE5197C, 0xE4DDB2, 0xE4DE7A
+  subtract a lower bound whose label goes to the default).
+- **n >= 4:** tables have r/n <= 2.71 (module-local 0xE63376 19/7,
+  module-local 0xE6A766 59/22, 0xE1077A 15/6; most are near 1); chains
+  have r/n >= 4.33 (TTY_$I_SIGNAL 26/6, REM_FILE_$SERVER 0xE6429A 139/29,
+  0xE63A02 139/26, module-local 0xE1CC70 48/8, ASKNODE_$INTERNET_INFO
+  0xE655D8 72/12, 0xE657DA 25/4, ...) **except one:** the 41-label chain
+  of ASKNODE_$INTERNET_INFO 0xE6463E over 2..91 (r/n 2.20) where a table
+  is predicted (ASKNODE_$SERVER 0xE65A5C, 44 labels over 92, and
+  DIR_$DO_OP, 26 over 51, are tables).  Not explained: the size of the
+  table (180 bytes) does not separate it from ASKNODE_$SERVER's (184);
+  the selector is in D2 there (`move.w (A2),D2`, 0xE6463C), not D0.
+  **Uncertain:** the threshold between 2.71 and 4.33; no site lies there.
+
+**Arms and the join (Verified).**
+
+- Arms follow the dispatch (the table, or the chain's `bra`) in source
+  order as far as can be seen (the chains above; for tables the source is
+  not known: OSINFO_$GET_MMAP's arm for label 4 precedes label 3's,
+  0xE5C742/0xE5C77A, and the C reconstruction has them sorted).
+- Each arm ends with a `bra` to the join, but **the last arm falls
+  through** when there is no `otherwise` (CAL_$WEEKDAY 0xE6872E `moveq
+  #6,D0` into the epilogue at 0xE68730; OSINFO_$GET_MMAP 0xE5C796;
+  SYSBUS_$INIT 0xE0AB9C..0xE0ABAA).
+- **The `otherwise` part comes after all the arms** and falls through to
+  the join; the last arm branches over it (MAC_OS_$OPEN 0xE0B3C8 `bra.s
+  0xE0B3DC` over 0xE0B3D0..0xE0B3DA; PROC1_$CREATE_P 0xE151AA `clr.w
+  (-6,A6)` then the join 0xE151AE; module-local 0xE1CCBA `move.b D1,D0`
+  after the arms, reached by the chain's `bra.s 0xE1CCBA`).  In all 21
+  tables with an `otherwise` part it follows the last arm (at 0xE6A766
+  one entry points past it: the jump arm of the next item).
+- An arm that is only a jump goes to the jump's target directly: the
+  table of module-local 0xE6A766 sends `' '` to 0xE6A852, the first
+  instruction after the enclosing `dbf` loop (an `exit`).  `return`
+  arms are not seen.
+- A `return` at the end of an arm is its `bra` to the epilogue
+  (TERM_$CONTROL 0xE66CEA..0xE66CF0, an `otherwise` part).
+- **No match and no `otherwise`:** execution continues at the join
+  (every table's `bcc` and every chain's `bra`): Domain Pascal "does not
+  detect the lack of a case statement constant corresponding to a
+  run-time case value" (ref Appendix D, ISO 6.8.3.5, p. D-4).
+- **The join is not aligned**, except TERM_$CONTROL 0xE66D6E (a 0x2048
+  before the join 0xE66D70, also the target of labels 9 and 24, empty
+  arms); TERM_$CONTROL also has fillers at 0xE66C7E and 0xE66C86 before
+  joins of its inner chains.  Not explained, not modelled.
+- **Shared code (Verified that it happens, not modelled):** identical
+  arm tails are merged ("Merges identical sequences of instructions",
+  ref 6.4.24 p. 6-27): AS_$GET_ADDR 0xE5842A `bra.s 0xE58470` into
+  another arm's tail; SMD_$GET_EC 0xE6FDF2..0xE6FE12 and ROUTE_$GET_EC
+  0xE69C8E..0xE69CAE share the `jsr EC2_$REGISTER_EC1` of all arms;
+  TERM_$CONTROL's two chains share one `otherwise` part (0xE66C72 and
+  0xE66CDC both `bra.s 0xE66CEA`).
+
+**The selector (Verified).**
+
+- It is evaluated into a fresh data register, the lowest free (D0 at
+  most sites; D1 at SUMA_$RCV 0xE1AD2A, where D0 holds a parameter
+  loaded at entry, and at TTY_$I_RCV 0xE1B9AC), which the dispatch
+  destroys.  A value already in a register is copied first, for tables
+  (NETWORK_$SET_SERVICE 0xE0F48E `move.w D2,D0`; NETWORK_$PAGE_SERVER
+  0xE116E2) and chains (TTY_$I_SIGNAL 0xE1B82C..0xE1B830 `move.w
+  (0xc,A6),D0; move.w D0,D1`, the parameter loaded at entry and copied).
+- A `char` (unsigned byte) selector is widened with `clr.w Dn; move.b
+  x,Dn` (module-local 0xE1CC6C, ACL_$SERVER 0xE495C8, REM_FILE_$SERVER
+  0xE6429A), then compared at word size.
+- Computed selectors are seen (`move.w #0xf0,D0; and.b (1,A3),D0; lsr.w
+  #4,D0` at KBD_$RCV 0xE1CCE2; `moveq #7,D0; and.b (A2),D0` at 0xE4F17C).
+
+**Register use in the arms (Uncertain).**  The selector's register is
+dead in the arms and is reused there in most chains (TERM_$CONTROL
+0xE66C74, DTTY_$INIT 0xE34C16, XPD_$PUT_REGISTERS 0xE5C3B2; ad-hoc scan
+of the arms of every site, not kept), but in the module-local 0xE1AAA8 (TERM_$STATUS_CONVERT in
+`../source/domain_os/term/status_convert.c`) the first arm computes in
+D0 and the two others in D1 (0xE1AAD2, 0xE1AADE, 0xE1AAEA), and in
+TERM_$GET_EC the second arm uses D1/D3 (0xE72420) where the first used
+D0/D1.  dpc takes the lowest free register (12.4 R1), D0 in every arm;
+those two units do not compile to the image's bytes (see 12.4 R6).
+
+**Single labels:** a `case` with one label is not told apart from an
+`if` in the image.  A chain whose last test's arm is the first code after
+the `bra` would be a conditional branch over a `bra`, which compiled code
+does not have (7.1): not seen.
+
+**Implemented** (bead domain-pascal-5aw.4; `crates/dpc-ir`
+`StmtKind::Case`, lowering in `lower.rs` `Cx::case`;
+`crates/dpc-m68k/src/isel.rs` `Selector::case`; `Insn::TableIndex`,
+`TableJump`, `TableEntry` in `insn.rs`, the table's targets as the
+dispatch's successors in `regs.rs`, entry reach checked in `emit.rs`
+`size_branches`): a table when n >= 4 and 7r <= 19n (r/n <= 2.71), a
+chain when n <= 3 or 3r >= 13n (r/n >= 4.33); the forms, bounds, label-0
+tests, arm order, fall-through and `otherwise` placement above; `char`
+selectors widened.  Refused ("not supported yet"): r/n between 2.71 and
+4.33 with n >= 4; one label; a chain whose last label's arm comes first;
+a chain whose arms are all empty (its `bra` would go to the `otherwise`
+part right after it);
+label 0 tested first on a computed selector (other than a `char`
+widening); a constant selector (SMD_$INIT's, one site); a signed byte
+selector (boolean); a function call in the selector (CAL_$WEEKDAY
+0xE686F6 compares D0 after `move.w D0,D1`, not explained); a table on a
+longword selector not starting at 0, or whose lowest label is below -8;
+an empty `otherwise` part; parts ending in calls of the same argument
+bytes when a pop is needed (shared pop, 1.1); arms that are only a jump
+(`return`: refused by the branch-to-`bra` rule of 7.1, as is a `case` at
+the end of an `if` part followed by a `bra`); label ranges
+(`1..3:`, reference-clarifications Q7, open).  Goldens
+`tests/golden/control/case_table.pas`, `control/case_chain.pas`; tests
+`crates/dpc-m68k/tests/case.rs`.  **No conformance unit yet:** every
+small compiled routine with a `case` needs something else first
+(`tools/casesurvey.py list`, routines of up to 0xC0 bytes): shared arm
+tails (AS_$GET_ADDR, SMD_$GET_EC, ROUTE_$GET_EC), pointer results in A0
+(TIME_$GET_EC 0xE1670A: EC2_$REGISTER_EC1), the D1 arms of 0xE1AAA8
+(above), function results assigned in arms (CAL_$WEEKDAY, module-local
+0xE1CC64), nested routines (IO_ 0xE1A4DC, `movea.l (A6),A0`), loops
+(module-local 0xE33778), an `in`-style chain and bit operations on memory
+(DISK_$WRITE_PROTECT 0xE3D956 `bset #0,(165,A1)`).  OSINFO_$GET_MMAP
+(0xE5C694, 0x36C bytes) is blocked at its first instructions: its seven
+by-address slots are loaded at entry into D3, D4, A2, D5, D6 and moved to
+A0/A1 for each use (`movea.l D6,A0; clr.l (A0)` at 0xE5C6B0), which dpc
+does not do (12.2: a pointer kept in a D register); then `btst #5,(1,A1)`
+on a byte in memory (5.1, not catalogued), `while` loops (7.2), local
+variables in registers (12.4), and the `asid` selection repeated in
+three arms with `cmpi.w #0x40; bls` joins.
 
 ---
 

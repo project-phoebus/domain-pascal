@@ -18,9 +18,9 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, BinOp as IrBinOp, Call, Callee, Cond, DataArea, DataBaseOptions, Expr, Function,
-    Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp, ValueParam,
-    Width,
+    Addr, Arg, BinOp as IrBinOp, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions, Expr,
+    Function, Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp,
+    ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -477,6 +477,20 @@ fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             }
             cond_calls(until, out);
         }
+        StmtKind::Case {
+            selector,
+            arms,
+            otherwise,
+        } => {
+            e(selector, out);
+            for st in arms
+                .iter()
+                .flat_map(|a| &a.body)
+                .chain(otherwise.iter().flatten())
+            {
+                stmt_calls(st, out);
+            }
+        }
         StmtKind::Return => {}
     }
 }
@@ -549,6 +563,18 @@ fn stmt_uses_static(s: &Stmt) -> bool {
         }
         StmtKind::Repeat { body, until } => {
             body.iter().any(stmt_uses_static) || cond_uses_static(until)
+        }
+        StmtKind::Case {
+            selector,
+            arms,
+            otherwise,
+        } => {
+            expr_uses_static(selector)
+                || arms
+                    .iter()
+                    .flat_map(|a| &a.body)
+                    .chain(otherwise.iter().flatten())
+                    .any(stmt_uses_static)
         }
         StmtKind::Return => false,
     }
@@ -751,6 +777,11 @@ impl Cx<'_> {
                     kind: StmtKind::Return,
                     span: s.span,
                 }),
+                SStmtKind::Case {
+                    expr,
+                    arms,
+                    otherwise,
+                } => out.push(self.case(s, expr, arms, otherwise.as_deref())?),
                 // codegen-patterns 7: a `while` loop is compiled with its
                 // test at the bottom, entered by a `bra` to the test
                 // (0xE01A8E..0xE01A98; 213 such loops in compiled code).
@@ -768,6 +799,84 @@ impl Cx<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// `case expr of ... otherwise ... end` (ref "Case", pp. 4-36..4-37).
+    ///
+    /// The selector is a word or longword value; a `char` (or other
+    /// unsigned byte) selector is widened to a word first, `clr.w Dn;
+    /// move.b x,Dn` (codegen-patterns 7.3: module-local 0xE1CC6C,
+    /// ACL_$SERVER 0xE495C8, REM_FILE_$SERVER 0xE6429A).  A signed byte
+    /// (a boolean, a `-128..127` subrange) is not seen as a selector.
+    /// Label ranges are rejected by the parser (reference-clarifications
+    /// Q7, open).
+    fn case(
+        &self,
+        s: &SStmt,
+        expr: &SExpr,
+        arms: &[dpc_sema::CaseArm],
+        otherwise: Option<&[SStmt]>,
+    ) -> Res<Stmt> {
+        let p = self.p;
+        if expr.value.is_some() {
+            // SMD_$INIT 0xE34D50 `clr.w D0; cmpi.w #4,D0`: a constant
+            // selector is dispatched at run time there, but one site.
+            return Err(unsupported(expr.span, "a constant `case` selector is"));
+        }
+        let mut selector = value_of(p, expr)?;
+        let ty = selector.ty();
+        match (ty.width, ty.sign) {
+            (Width::Byte, Sign::Unsigned) => {
+                selector = Expr::Convert {
+                    value: Box::new(selector),
+                    ty: Scalar::unsigned(Width::Word),
+                }
+            }
+            (Width::Byte, Sign::Signed) => {
+                return Err(unsupported(
+                    expr.span,
+                    "a signed byte (boolean, `-128..127`) `case` selector is",
+                ))
+            }
+            _ => {}
+        }
+        let mut out = Vec::new();
+        for arm in arms {
+            for &l in &arm.labels {
+                if !fits(l, ty) {
+                    // ref 9, error 45 (p. 9-11): "(Constant) is outside the
+                    // subrange of the CASE".
+                    return Err(Diagnostic::error(
+                        arm.stmt.span,
+                        format!("case label {l} is outside the selector's range"),
+                    ));
+                }
+            }
+            out.push(CaseArm {
+                labels: arm.labels.clone(),
+                body: self.seq(std::slice::from_ref(&arm.stmt), false)?,
+            });
+        }
+        let otherwise = match otherwise {
+            Some(ss) => {
+                let o = self.seq(ss, false)?;
+                if o.is_empty() {
+                    // Whether the original dispatched to the end, and how
+                    // the last arm ended, is not seen.
+                    return Err(unsupported(s.span, "an empty `otherwise` part is"));
+                }
+                Some(o)
+            }
+            None => None,
+        };
+        Ok(Stmt {
+            kind: StmtKind::Case {
+                selector,
+                arms: out,
+                otherwise,
+            },
+            span: s.span,
+        })
     }
 }
 

@@ -66,6 +66,15 @@ Tests:
 - `control/repeat` - codegen-patterns 7.2: `repeat ... until`, the head
   aligned, an `or else` test (0xE031A2..0xE031B6), a call in the body
   popped.
+- `control/case_table` - codegen-patterns 7.3: `case` as a jump table
+  (OSINFO_$GET_MMAP 0xE5C6C0..0xE5C6D6), the lower bound with `subq.w`
+  (PROC1_$CREATE_P 0xE15178), `subi.w` and a widened `char` (ACL_$SERVER
+  0xE495C8), `addq.w` (MST_$PRIV_SET_TOUCH_AHEAD_CNT 0xE44534); gaps,
+  empty arms and the `otherwise` part (MAC_OS_$OPEN 0xE0B3AE).
+- `control/case_chain` - codegen-patterns 7.3: `case` as a compare chain
+  in source label order (SYSBUS_$INIT 0xE0AB64, label 0 on the load's
+  flags; TIME_$GET_EC 0xE16762 `tst.w`; module-local 0xE1CC64; a
+  longword chain; TTY_$I_SIGNAL 0xE1B82C's copied selector).
 - `data/through_worker` - codegen-patterns 4, 1.5: LOG_$READ 0xE17800,
   A5 loaded for an internal callee, by-address parameters passed on.
 - `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the

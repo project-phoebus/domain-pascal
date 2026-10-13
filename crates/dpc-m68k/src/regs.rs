@@ -305,6 +305,9 @@ pub fn access(insn: &Insn) -> Access {
             }
             a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
         }
+        Insn::TableIndex { reg, .. } => a.dst_rmw(&Ea::Reg(Reg::D(*reg))),
+        Insn::TableJump { reg, .. } => a.use_(Reg::D(*reg)),
+        Insn::TableEntry { .. } => {}
     }
     a
 }
@@ -339,7 +342,9 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::Label(_)
         | Insn::Align4
         | Insn::Branch { .. }
-        | Insn::Bsr { .. } => {}
+        | Insn::Bsr { .. }
+        | Insn::TableEntry { .. } => {}
+        Insn::TableIndex { reg, .. } | Insn::TableJump { reg, .. } => fd(reg),
         Insn::Pea(ea) | Insn::Jsr(ea) => fe(ea),
         Insn::Move { src, dst, .. } => {
             fe(src);
@@ -409,7 +414,12 @@ pub fn successors(insns: &[Insn]) -> Vec<Vec<Option<usize>>> {
                 }
             }
             Insn::Dbf { label, .. } => vec![next(i), labels.get(label).copied()],
-            Insn::Rts => vec![],
+            // A `case` dispatch goes to its table's targets only; the
+            // table's words are not executed.
+            Insn::TableJump { targets, .. } => {
+                targets.iter().map(|l| labels.get(l).copied()).collect()
+            }
+            Insn::Rts | Insn::TableEntry { .. } => vec![],
             _ => vec![next(i)],
         })
         .collect()
@@ -742,6 +752,44 @@ mod tests {
         ];
         let live = liveness(&lp, &[], &[]);
         assert!(live[3].contains(&RegKey(vd(0))));
+        // A `case` dispatch: live into every table target, not into the
+        // table's words.
+        let tbl = vec![
+            load(8, vd(0)),
+            load(10, vd(1)),
+            Insn::TableIndex {
+                reg: dn(vd(1)),
+                table: 9,
+            },
+            Insn::TableJump {
+                reg: dn(vd(1)),
+                table: 9,
+                targets: vec![1, 2],
+            },
+            Insn::Label(9),
+            Insn::TableEntry {
+                table: 9,
+                target: 1,
+                back: false,
+            },
+            Insn::Label(1),
+            Insn::Clr {
+                size: Size::W,
+                dst: Ea::Disp(12, FP),
+            },
+            Insn::Label(2),
+            Insn::Move {
+                size: Size::W,
+                src: Ea::Reg(vd(0)),
+                dst: Ea::Disp(-2, FP),
+            },
+        ];
+        let live = liveness(&tbl, &[], &[]);
+        assert!(live[2].contains(&RegKey(vd(1))));
+        assert!(live[3].contains(&RegKey(vd(0))));
+        assert!(!live[3].contains(&RegKey(vd(1))));
+        assert!(live[4].is_empty() && live[5].is_empty());
+        assert_eq!(successors(&tbl)[3], vec![Some(6), Some(8)]);
         // The result register is live at the end.
         let live = liveness(&[load(8, d(0))], &[d(0)], &[]);
         assert!(live[0].contains(&RegKey(d(0))));

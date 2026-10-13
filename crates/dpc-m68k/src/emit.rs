@@ -268,6 +268,8 @@ fn size_branches(
         // (routine, label) -> position
         let mut labels = HashMap::new();
         let mut sites = Vec::new();
+        // `case` table entries: (routine, table label, target label).
+        let mut entries = Vec::new();
         let mut pos = base;
         for (ri, (f, insns)) in routines.iter().enumerate() {
             at.insert(f.symbol.clone(), pos);
@@ -282,6 +284,7 @@ fn size_branches(
                     Insn::Label(l) => {
                         labels.insert((ri, *l), pos);
                     }
+                    Insn::TableEntry { table, target, .. } => entries.push((ri, *table, *target)),
                     _ => {}
                 }
                 pos += i.len_at(pos);
@@ -318,6 +321,17 @@ fn size_branches(
             }
         }
         if !changed {
+            // A table entry is a word offset from the table's start
+            // (codegen-patterns 7.3: 0xE5C6D6).
+            for (ri, table, target) in entries {
+                let d = labels[&(ri, target)] as i64 - labels[&(ri, table)] as i64;
+                if !(-0x8000..0x8000).contains(&d) {
+                    return Err(Diagnostic::error(
+                        routines[ri].0.span,
+                        "a `case` arm beyond the reach of a 16-bit table offset is not supported yet",
+                    ));
+                }
+            }
             return Ok(());
         }
     }

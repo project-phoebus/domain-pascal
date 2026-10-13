@@ -158,7 +158,7 @@ fn unsupported_constructs_are_diagnosed_not_compiled() {
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.contains("u.pas:4:3: error: this statement is not supported yet"),
+        err.contains("u.pas:4:3: error: a `case` with one label is not supported yet"),
         "{err}"
     );
     assert!(!dir.join("u.s").exists());

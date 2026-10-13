@@ -245,7 +245,7 @@ end;",
 begin
   if x = 3 then r := 0;
 end;",
-            "a body of one `if` or `repeat` statement",
+            "a body of one `if`, `repeat` or `case` statement",
         ),
         // A by-address slot used once in a body of several statements.
         (

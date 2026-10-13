@@ -494,6 +494,31 @@ pub enum Insn {
         bit: u8,
         dst: Ea,
     },
+    /// `move.w (T,%pc,%dn.w),%dn`: load the word of `case` jump table
+    /// `T` (a numbered local label placed right after the
+    /// [`Insn::TableJump`] that follows) at the doubled index in Dn.
+    /// Image: OSINFO_$GET_MMAP 0xE5C6CE `303b 0006` (codegen-patterns 7.3).
+    TableIndex {
+        reg: u8,
+        table: u32,
+    },
+    /// `jmp (T,%pc,%dn.w)`: jump to table `T` plus the offset in Dn.
+    /// `targets` are the labels the table's entries name (the successors
+    /// of the jump; [`crate::regs::successors`]).  Image: 0xE5C6D2
+    /// `4efb 0002`.
+    TableJump {
+        reg: u8,
+        table: u32,
+        targets: Vec<u32>,
+    },
+    /// `.short L-T`: one entry of `case` table `T`, the offset of label
+    /// `target` from the table's start (0xE5C6D6: `000a 0026 0032 00a4
+    /// 006c`).  `back`: `target` is defined before the entry.
+    TableEntry {
+        table: u32,
+        target: u32,
+        back: bool,
+    },
     /// Pseudo-instruction: pad to a 4-byte boundary with the 2-byte no-op
     /// `movea.l A0,A0` (0x2048), as the compiler does before a loop head
     /// (codegen-patterns 7: 0xE00ED6 before the `dbf` loop at 0xE00ED8;
@@ -644,6 +669,21 @@ impl fmt::Display for Insn {
             ),
             Insn::Swap(d) => write!(f, "swap\t{}", Reg::D(*d)),
             Insn::BtstImm { bit, dst } => write!(f, "btst\t#{bit},{dst}"),
+            Insn::TableIndex { reg, table } => {
+                write!(f, "move.w\t({table}f,%pc,{r}.w),{r}", r = Reg::D(*reg))
+            }
+            Insn::TableJump { reg, table, .. } => {
+                write!(f, "jmp\t({table}f,%pc,{}.w)", Reg::D(*reg))
+            }
+            Insn::TableEntry {
+                table,
+                target,
+                back,
+            } => write!(
+                f,
+                ".short\t{target}{}-{table}b",
+                if *back { "b" } else { "f" }
+            ),
         }
     }
 }
@@ -688,6 +728,9 @@ impl Insn {
             Insn::Ext { .. } | Insn::Shift { .. } | Insn::Swap(_) => 2,
             Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
             Insn::BtstImm { dst, .. } => 4 + dst.ext_len(Size::B),
+            // One opcode word and the brief extension word.
+            Insn::TableIndex { .. } | Insn::TableJump { .. } => 4,
+            Insn::TableEntry { .. } => 2,
         }
     }
 }
@@ -829,6 +872,27 @@ mod tests {
             (Insn::Unlk, "unlk\t%fp"),
             (Insn::Rts, "rts"),
             (Insn::Align4, ".balignw\t4,0x2048"),
+            // A `case` dispatch (OSINFO_$GET_MMAP 0xE5C6CE..0xE5C6D8).
+            (
+                Insn::TableIndex { reg: 0, table: 7 },
+                "move.w\t(7f,%pc,%d0.w),%d0",
+            ),
+            (
+                Insn::TableJump {
+                    reg: 1,
+                    table: 7,
+                    targets: vec![2],
+                },
+                "jmp\t(7f,%pc,%d1.w)",
+            ),
+            (
+                Insn::TableEntry {
+                    table: 7,
+                    target: 2,
+                    back: false,
+                },
+                ".short\t2f-7b",
+            ),
             (Insn::Pea(Ea::AbsW(0x16)), "pea\t(0x16).w"),
             (Insn::Pea(Ea::AbsW(-1)), "pea\t(-1).w"),
             (
@@ -1122,6 +1186,23 @@ mod len_tests {
                 },
                 4,
             ), // 0xE6A9B6 ba6e 0014
+            (Insn::TableIndex { reg: 0, table: 1 }, 4), // 0xE5C6CE 303b 0006
+            (
+                Insn::TableJump {
+                    reg: 0,
+                    table: 1,
+                    targets: vec![],
+                },
+                4,
+            ), // 0xE5C6D2 4efb 0002
+            (
+                Insn::TableEntry {
+                    table: 1,
+                    target: 2,
+                    back: false,
+                },
+                2,
+            ), // 0xE5C6D6 000a
         ];
         for (i, n) in cases {
             assert_eq!(i.len_at(0), n, "{i}");

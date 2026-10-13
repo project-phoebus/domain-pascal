@@ -19,8 +19,8 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, BinOp, Call, Callee, Cond as IrCond, Expr, Function, Rel, ResultClass, ResultSpec,
-    Scalar, Sign, Stmt, StmtKind, UnOp, Width,
+    Addr, Arg, BinOp, Call, Callee, CaseArm, Cond as IrCond, Expr, Function, Rel, ResultClass,
+    ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
@@ -175,7 +175,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         if control_only && reads_value_param {
             return Err(unsupported(
                 f.body[0].span,
-                "a body of one `if` or `repeat` statement that reads by-value parameters \
+                "a body of one `if`, `repeat` or `case` statement that reads by-value parameters \
                  (whether they are loaded at entry is not settled, codegen-patterns 12.2) is",
             ));
         }
@@ -242,12 +242,17 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     }
     // Labels nothing branches to (the join after a `then` part that ends
     // in `return`, ...) are dropped; they emit no bytes either way.
+    // A `case` table's entries name their targets like branches (a
+    // target before a `bra` is refused as for a branch); its own label is
+    // named by the dispatch.
     let used: Vec<u32> = s
         .out
         .iter()
-        .filter_map(|i| match i {
-            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => Some(*label),
-            _ => None,
+        .flat_map(|i| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => vec![*label],
+            Insn::TableIndex { table, .. } => vec![*table],
+            Insn::TableEntry { target, .. } => vec![*target],
+            _ => vec![],
         })
         .collect();
     if let Some(&(_, span)) = s.before_bra.iter().find(|(l, _)| used.contains(l)) {
@@ -440,7 +445,7 @@ fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg,
 fn is_simple(st: &Stmt) -> bool {
     !matches!(
         st.kind,
-        StmtKind::If { .. } | StmtKind::Repeat { .. } | StmtKind::Return
+        StmtKind::If { .. } | StmtKind::Repeat { .. } | StmtKind::Case { .. } | StmtKind::Return
     )
 }
 
@@ -485,7 +490,8 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
             | StmtKind::Fill { .. }
             | StmtKind::Call(_)
             | StmtKind::If { .. }
-            | StmtKind::Repeat { .. } => return false,
+            | StmtKind::Repeat { .. }
+            | StmtKind::Case { .. } => return false,
         }
     }
     tail_clean
@@ -553,6 +559,16 @@ fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
                 reject_mergeable_stores(else_)?;
             }
             StmtKind::Repeat { body, .. } => reject_mergeable_stores(body)?,
+            StmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                for a in arms {
+                    reject_mergeable_stores(&a.body)?;
+                }
+                if let Some(o) = otherwise {
+                    reject_mergeable_stores(o)?;
+                }
+            }
             _ => {}
         }
         let StmtKind::Store { addr, value } = &st.kind else {
@@ -721,6 +737,19 @@ impl Uses<'_> {
                 StmtKind::Repeat { body, until } => {
                     self.stmts(body);
                     self.cond(until);
+                }
+                StmtKind::Case {
+                    selector,
+                    arms,
+                    otherwise,
+                } => {
+                    self.expr(selector);
+                    for a in arms {
+                        self.stmts(&a.body);
+                    }
+                    if let Some(o) = otherwise {
+                        self.stmts(o);
+                    }
                 }
                 StmtKind::Return => {}
                 StmtKind::SetResult(e) => self.expr(e),
@@ -947,6 +976,11 @@ impl Selector {
                 } => self.fill(start, *count, value)?,
                 StmtKind::If { cond, then_, else_ } => self.if_(f, cond, then_, else_, next)?,
                 StmtKind::Repeat { body, until } => self.repeat(f, body, until)?,
+                StmtKind::Case {
+                    selector,
+                    arms,
+                    otherwise,
+                } => self.case(f, selector, arms, otherwise.as_deref(), next)?,
                 StmtKind::Return => {
                     if !rest.is_empty() {
                         return Err(unsupported(
@@ -1120,6 +1154,306 @@ impl Selector {
         // A call in the test is followed by the conditional branch: popped.
         (self.call_no_pop, self.called) = (false, false);
         self.branch(until, false, head)
+    }
+
+    /// `case selector of ... otherwise ... end` (ref "Case", pp.
+    /// 4-36..4-37; codegen-patterns 7.3).
+    ///
+    /// The selector is evaluated into a new data register (a value held
+    /// in a register is copied: NETWORK_$SET_SERVICE 0xE0F48E `move.w
+    /// D2,D0`; TTY_$I_SIGNAL 0xE1B830 `move.w D0,D1`), then dispatched by
+    /// one of two forms, chosen from the number of labels `n` and their
+    /// range `r` (`max - min + 1`; survey of compiled code, 50 tables and
+    /// 61 compare chains, `tools/casesurvey.py`, codegen-patterns 7.3):
+    ///
+    /// - **compare chain** when `n <= 3` (all 49 chains of 2 or 3 labels,
+    ///   32 of them dense, e.g. SYSBUS_$INIT 0xE0AB64 labels 0..2; no
+    ///   table has fewer than 4 labels), or when `3r >= 13n` (every chain
+    ///   of 4 or more labels but one has `r/n >= 4.33`: TTY_$I_SIGNAL
+    ///   0xE1B832 26/6, module-local 0xE1CC70 48/8):
+    ///
+    ///   ```text
+    ///           cmpi.w  #k1,Dn          ; label 0: tst.w Dn, or nothing
+    ///           beq     ARM(k1)         ;   right after the load of Dn
+    ///           ...                     ; labels in source order
+    ///           bra     OTHERWISE       ; or JOIN
+    ///   ```
+    ///
+    /// - **jump table** when `n >= 4` and `7r <= 19n` (every table has
+    ///   `r/n <= 2.71`, module-local 0xE63376 19/7, 0xE6A766 59/22):
+    ///
+    ///   ```text
+    ///           subq.w  #min,Dn         ; subi.w for min > 8, addq.w
+    ///           cmpi.w  #r,Dn           ;   for min < 0; none for 0
+    ///           bcc     OTHERWISE       ; or JOIN; unsigned, so below
+    ///           add.w   Dn,Dn           ;   min is caught too
+    ///           move.w  (T,PC,Dn.w),Dn
+    ///           jmp     (T,PC,Dn.w)
+    ///   T:      .short  ARM(min)-T      ; a missing label: OTHERWISE
+    ///           ...                     ;   or JOIN
+    ///   ```
+    ///
+    ///   OSINFO_$GET_MMAP 0xE5C6C0..0xE5C6D6; PROC1_$CREATE_P 0xE15176
+    ///   (`subq.w #3`); ACL_$SERVER 0xE495CE (`subi.w #100`);
+    ///   MST_$PRIV_SET_TOUCH_AHEAD_CNT 0xE44534 (`addq.w #4`).
+    ///
+    /// Between the two (2.71 < r/n < 4.33 with `n >= 4`) nothing decides;
+    /// refused.  The one exception, the 41-label chain of
+    /// ASKNODE_$INTERNET_INFO 0xE6463E (r/n 2.20, where a table is
+    /// predicted), is not explained (`tools/casesurvey.py`).  The arms follow in source order; each but the last ends
+    /// with a `bra` to the join, the last falls through to it when there is
+    /// no `otherwise` (CAL_$WEEKDAY 0xE68716..0xE68730); an `otherwise`
+    /// part comes after all the arms and falls through to the join, the
+    /// last arm branching over it (MAC_OS_$OPEN 0xE0B3BA..0xE0B3DC;
+    /// module-local 0xE1CCA2..0xE1CCBC).  An empty arm's labels go to the
+    /// join directly (KBD_$RCV 0xE1CCFE; ASKNODE_$INTERNET_INFO 0xE65614).
+    /// No label matching and no `otherwise`: on to the join (ref Appendix
+    /// D, ISO 6.8.3.5, p. D-4: not detected).
+    fn case(
+        &mut self,
+        f: &Function,
+        selector: &Expr,
+        arms: &[CaseArm],
+        otherwise: Option<&[Stmt]>,
+        next: Tail,
+    ) -> Res<()> {
+        let span = self.span;
+        if expr_has_call(selector) {
+            // CAL_$WEEKDAY 0xE686F6 dispatches on D0 after `move.w D0,D1`:
+            // what the copy is for is not known.
+            return Err(unsupported(span, "a function call in a `case` selector is"));
+        }
+        let labels: Vec<(i64, usize)> = arms
+            .iter()
+            .enumerate()
+            .flat_map(|(i, a)| a.labels.iter().map(move |&l| (l, i)))
+            .collect();
+        let n = labels.len() as i64;
+        if n < 2 {
+            // A single label is not told apart from an `if` in the image.
+            return Err(unsupported(span, "a `case` with one label is"));
+        }
+        let nonempty: Vec<usize> = (0..arms.len())
+            .filter(|&i| !arms[i].body.is_empty())
+            .collect();
+        if nonempty.is_empty() && otherwise.is_none() {
+            return Err(unsupported(span, "a `case` without statements is"));
+        }
+        let lo = labels.iter().map(|l| l.0).min().unwrap();
+        let hi = labels.iter().map(|l| l.0).max().unwrap();
+        let range = hi - lo + 1;
+        let table = if n <= 3 {
+            false
+        } else if 7 * range <= 19 * n {
+            true
+        } else if 3 * range >= 13 * n {
+            false
+        } else {
+            return Err(unsupported(
+                span,
+                format!(
+                    "a `case` of {n} labels over a range of {range} (between the sparsest jump \
+                     table and the densest compare chain seen, codegen-patterns 7.3) is"
+                ),
+            ));
+        };
+        if !next.clean {
+            // The original shares a pop at the join when both parts of an
+            // `if` end in calls of the same argument bytes (codegen-patterns
+            // 1.1); arms are taken to behave alike.
+            let ends: Vec<u32> = nonempty
+                .iter()
+                .map(|&i| arms[i].body.as_slice())
+                .chain(otherwise)
+                .filter_map(|b| call_bytes(b.last()))
+                .collect();
+            if (1..ends.len()).any(|k| ends[..k].contains(&ends[k])) {
+                return Err(unsupported(
+                    span,
+                    "a `case` whose parts end in calls with the same argument bytes (the \
+                     original may share the pop at the join, codegen-patterns 1.1) is",
+                ));
+            }
+        }
+        let w = selector.ty().width;
+        let size = size_of(w);
+        // A `char` selector widened with `clr.w Dn; move.b x,Dn`
+        // (module-local 0xE1CC6C, ACL_$SERVER 0xE495C8).
+        let zext =
+            matches!(selector, Expr::Convert { value, .. } if value.ty().width == Width::Byte);
+        let start = self.out.len();
+        let v = self.eval(selector)?;
+        let d = self.in_tmp(v, w)?;
+        let moved = self.out.len() > start
+            && matches!(self.out.last(), Some(Insn::Move { size: s, dst: Ea::Reg(Reg::D(x)), .. }) if *x == d && *s == size);
+        let l_join = self.new_label();
+        let arm_label: Vec<u32> = arms
+            .iter()
+            .map(|a| {
+                if a.body.is_empty() {
+                    l_join
+                } else {
+                    self.new_label()
+                }
+            })
+            .collect();
+        let l_other = otherwise.map(|_| self.new_label());
+        let l_default = l_other.unwrap_or(l_join);
+        let dreg = Ea::Reg(Reg::D(d));
+        if table {
+            if w == Width::Long && lo != 0 {
+                return Err(unsupported(
+                    span,
+                    "a jump table on a longword selector whose labels do not start at 0 is",
+                ));
+            }
+            match lo {
+                0 => {}
+                1..=8 => self.out.push(Insn::Subq {
+                    size: Size::W,
+                    value: lo as u8,
+                    dst: dreg.clone(),
+                }),
+                -8..=-1 => self.out.push(Insn::Addq {
+                    size: Size::W,
+                    value: (-lo) as u8,
+                    dst: dreg.clone(),
+                }),
+                9.. => self.out.push(Insn::AluImm {
+                    op: AluOp::Sub,
+                    size: Size::W,
+                    imm: lo,
+                    dst: dreg.clone(),
+                }),
+                _ => {
+                    return Err(unsupported(
+                        span,
+                        "a jump table whose lowest label is below -8 (`addi.w`? not seen) is",
+                    ))
+                }
+            }
+            self.out.push(Insn::Cmpi {
+                size,
+                imm: range,
+                dst: dreg.clone(),
+            });
+            self.jump(Cond::Cc, l_default);
+            self.out.push(Insn::Alu {
+                op: AluOp::Add,
+                size: Size::W,
+                src: dreg,
+                dst: d,
+            });
+            let tbl = self.new_label();
+            let entries: Vec<u32> = (lo..=hi)
+                .map(|v| {
+                    labels
+                        .iter()
+                        .find(|l| l.0 == v)
+                        .map_or(l_default, |l| arm_label[l.1])
+                })
+                .collect();
+            let mut targets = Vec::new();
+            for &t in &entries {
+                if !targets.contains(&t) {
+                    targets.push(t);
+                }
+            }
+            self.out.push(Insn::TableIndex { reg: d, table: tbl });
+            self.out.push(Insn::TableJump {
+                reg: d,
+                table: tbl,
+                targets,
+            });
+            self.place(tbl);
+            for t in entries {
+                let back = self.placed.contains(&t);
+                self.out.push(Insn::TableEntry {
+                    table: tbl,
+                    target: t,
+                    back,
+                });
+            }
+        } else {
+            // A conditional branch over a `bra` does not occur in compiled
+            // code (codegen-patterns 7.1): the last test would skip the
+            // final `bra` when its arm is the first code after it.
+            if nonempty.is_empty() {
+                // Every label to the join and the final `bra` to the
+                // `otherwise` part right after it (a `bra.w` of
+                // displacement 2): not seen.
+                return Err(unsupported(
+                    span,
+                    "a compare-chain `case` whose arms are all empty (its `bra` to the \
+                     `otherwise` part right after it, not seen) is",
+                ));
+            }
+            let first_code = nonempty.first().map(|&i| arm_label[i]).or(l_other);
+            if Some(arm_label[labels[labels.len() - 1].1]) == first_code {
+                return Err(unsupported(
+                    span,
+                    "a compare-chain `case` whose last label belongs to its first arm (a `beq` \
+                     over the `bra`, not seen) is",
+                ));
+            }
+            for (k, &(l, i)) in labels.iter().enumerate() {
+                if l == 0 {
+                    // Label 0 is a test: none right after the load of the
+                    // selector, whose flags it uses (SYSBUS_$INIT 0xE0AB64
+                    // `move.w (4,A0),D0; beq.s`; XPD_$PUT_REGISTERS
+                    // 0xE5C3A0; TERM_$GET_EC 0xE723F6; 0xE01B58 `move.l
+                    // (A2),D0; beq`), `tst` otherwise (TIME_$GET_EC 0xE16762
+                    // after a compare; 0xE556E6 `clr.w D0; move.b
+                    // (39,A0),D0; tst.w D0`).
+                    if k > 0 || !moved {
+                        if k == 0 && !zext {
+                            return Err(unsupported(
+                                span,
+                                "label 0 tested first on a computed `case` selector (`tst` or \
+                                 the flags of the computation?) is",
+                            ));
+                        }
+                        self.out.push(Insn::Tst {
+                            size,
+                            dst: dreg.clone(),
+                        });
+                    }
+                } else {
+                    self.out.push(Insn::Cmpi {
+                        size,
+                        imm: imm(l, w),
+                        dst: dreg.clone(),
+                    });
+                }
+                self.jump(Cond::Eq, arm_label[i]);
+            }
+            self.jump(Cond::T, l_default);
+        }
+        let last = nonempty.last().copied();
+        for &i in &nonempty {
+            self.place(arm_label[i]);
+            let body = &arms[i].body;
+            let falls = otherwise.is_none() && Some(i) == last;
+            let tail = if falls {
+                next
+            } else {
+                Tail {
+                    end: false,
+                    clean: next.clean,
+                }
+            };
+            self.seq(f, body, tail)?;
+            if !falls && !matches!(body.last().map(|s| &s.kind), Some(StmtKind::Return)) {
+                self.span = span;
+                self.jump(Cond::T, l_join);
+            }
+        }
+        if let (Some(o), Some(l)) = (otherwise, l_other) {
+            self.place(l);
+            self.seq(f, o, next)?;
+        }
+        self.place(l_join);
+        Ok(())
     }
 
     /// Branch to `l` when condition `c` is `when`; fall through otherwise.
