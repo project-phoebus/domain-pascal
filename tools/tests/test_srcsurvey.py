@@ -1,0 +1,253 @@
+"""Tests for tools/srcsurvey.py (no image, dpc or ../source needed)."""
+
+import os
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..'))
+import srcsurvey  # noqa: E402
+
+MODULE = """\
+{ a module file }
+module m;
+
+%include 'base.ins.pas';
+
+define
+  m_$glob;
+  m_$other;
+
+var
+  x: extern integer32;
+
+{ body: m/late.pas }
+procedure late(var t: integer); forward; internal;
+
+%include 'm/frag.pas';                { two routines }
+%include 'm/missing.pas';             { routine 0xE00000,
+                                        nested 0xE00010 }
+%include 'm/late.pas';
+"""
+
+FRAG = """\
+{ m_$glob - a global.
+
+  Original address: 0x00E1C084, 98 bytes, m.pas, section WIRED_PROC.
+
+  A heading in a comment does not count:
+  procedure fake;
+}
+
+[section(wired_proc, wired_data)]
+procedure m_$glob(in line: integer; out status: status_$t);
+var
+  p: ^procedure(i: integer); options(val_param);
+  r: record
+    case integer of
+      1: (a: integer);
+      2: (b: integer32);
+  end;
+
+  { nested }
+  procedure helper;
+  begin
+    if line = 1 then begin
+      case line of
+        1: x := 2;
+      end;
+    end;
+  end;
+
+begin
+  helper;
+  late(line);
+end;
+
+{ second.
+
+  Original address: 0x00E1C0E6, 30 bytes, m.pas.
+}
+[section(wired_proc, wired_data)]
+function m_$local(c: char): integer;
+  internal;
+begin
+  m_$local := 0;
+end;
+"""
+
+
+class PrepareTest(unittest.TestCase):
+    def test_missing_fragments_and_forward(self):
+        have = {'base.ins.pas', 'm/frag.pas'}
+        text, dropped = srcsurvey.prepare_text(MODULE, lambda p: p in have)
+        self.assertEqual(dropped, ['m/missing.pas', 'm/late.pas'])
+        self.assertNotIn('missing.pas', text)
+        self.assertNotIn('nested 0xE00010', text)          # the comment's tail
+        self.assertNotIn('{ body:', text)
+        self.assertIn('procedure late(var t: integer); extern; internal;', text)
+        self.assertIn("%include 'm/frag.pas';", text)
+
+    def test_complete_module_unchanged(self):
+        text, dropped = srcsurvey.prepare_text(MODULE, lambda p: True)
+        self.assertEqual((text, dropped), (MODULE, []))
+
+    def test_module_includes(self):
+        self.assertEqual(srcsurvey.module_includes(MODULE),
+                         ['base.ins.pas', 'm/frag.pas', 'm/missing.pas', 'm/late.pas'])
+
+
+class RoutineTest(unittest.TestCase):
+    def test_parse(self):
+        rs = srcsurvey.parse_routines(FRAG)
+        self.assertEqual([r.name for r in rs], ['m_$glob', 'm_$local'])
+        g, l = rs
+        self.assertEqual([n.name for n in g.nested], ['helper'])
+        self.assertEqual((g.addr, g.size), (0xE1C084, 98))
+        self.assertEqual((l.addr, l.size), (0xE1C0E6, 30))
+        self.assertFalse(g.internal)
+        self.assertTrue(l.internal)
+        self.assertTrue(FRAG[g.start:].startswith('[section'))
+        self.assertTrue(FRAG[:g.end].endswith('late(line);\nend;'))
+        self.assertTrue(FRAG[:l.end].endswith('m_$local := 0;\nend;'))
+
+    def test_spans(self):
+        spans = srcsurvey.routine_spans(FRAG)
+        self.assertEqual([n for _a, _b, n in spans], ['m_$glob', 'm_$local'])
+        a, b, _n = spans[0]
+        self.assertEqual(FRAG.splitlines()[a - 1], '[section(wired_proc, wired_data)]')
+        self.assertEqual(FRAG.splitlines()[b - 1], 'end;')
+
+    def test_extern_heading_has_no_body(self):
+        rs = srcsurvey.parse_routines('procedure a(x: integer); internal; extern;\n'
+                                      'procedure b; begin end;\n')
+        self.assertEqual([(r.name, r.has_body) for r in rs], [('a', False), ('b', True)])
+
+    def test_stub(self):
+        text, deleted = srcsurvey.stub_text(FRAG, {'m_$glob', 'm_$local'})
+        self.assertEqual(deleted, ['m_$glob'])
+        self.assertNotIn('helper', text)
+        self.assertIn('function m_$local(c: char): integer;\n  internal; extern;', text)
+        self.assertEqual(text.count('[section'), 0)
+        self.assertIn('Original address: 0x00E1C0E6', text)    # header kept
+        rs = srcsurvey.parse_routines(text)
+        self.assertEqual([(r.name, r.has_body, r.addr) for r in rs],
+                         [('m_$local', False, 0xE1C0E6)])
+
+    def test_stub_with_forward_heading(self):
+        # the module file has `forward; internal;', the fragment repeats
+        # the heading with the body: stubbing must not redeclare it
+        mod = "{ body: m/f.pas }\nprocedure f(x: integer); forward; internal;\n"
+        frag = "procedure f(x: integer);\n  internal;\nbegin\nend;\n"
+        text, deleted = srcsurvey.stub_text(frag, {'f'}, {'f'})
+        self.assertEqual((text.strip(), deleted), ('', []))
+        m2 = srcsurvey.extern_forwards(mod, {'f'})
+        self.assertIn('procedure f(x: integer); extern; internal;', m2)
+        self.assertEqual(srcsurvey.extern_forwards(mod, {'g'}), mod)
+
+    def test_drop_defines(self):
+        t = srcsurvey.drop_defines(MODULE, ['M_$GLOB'])
+        self.assertIn('define\n  m_$other;\n\nvar', t)
+        t = srcsurvey.drop_defines(t, ['m_$other'])
+        self.assertNotIn('define', t)
+        self.assertIn('\nvar\n  x: extern integer32;', t)
+
+
+class DiagTest(unittest.TestCase):
+    ERR = """\
+m/frag.pas:27:3: error: this operator on sets is not supported yet
+27 |   ...
+note: in file included from m.pas:3:1
+m/frag.pas:40:3: error: the `aligned` attribute (ref 3.15) is not supported yet
+m/frag.pas:28:3: error: call of internal routine `M_$X`, which has no body (ref 5.2 p. 5-4)
+m/frag.pas:29:3: error: call of internal routine `M_$Y`, which has no body (ref 5.2 p. 5-4)
+base.ins.pas:12:1: warning: something 16#10 happened 3 times
+dpc: error: not a diagnostic line
+"""
+
+    def test_parse_and_kinds(self):
+        ds = srcsurvey.parse_diags(self.ERR)
+        self.assertEqual(len(ds), 5)
+        self.assertEqual((ds[0]['file'], ds[0]['line'], ds[0]['col'], ds[0]['sev']),
+                         ('m/frag.pas', 27, 3, 'error'))
+        self.assertEqual(srcsurvey.kind_of(ds[1]['msg']),
+                         'the `aligned` attribute (ref 3.15) is not supported yet')
+        self.assertEqual(srcsurvey.kind_of(ds[2]['msg']),
+                         'call of internal routine `X`, which has no body (ref 5.2 p. 5-4)')
+        self.assertEqual(srcsurvey.kind_of(ds[4]['msg']), 'something N happened N times')
+        self.assertEqual([srcsurvey.classify(d) for d in ds],
+                         ['refusal', 'refusal', 'error', 'error', 'warning'])
+
+    def test_summarise_with_locator(self):
+        with tempfile.TemporaryDirectory() as tree:
+            os.makedirs(os.path.join(tree, 'm'))
+            with open(os.path.join(tree, 'm', 'frag.pas'), 'w') as f:
+                f.write(FRAG)
+            loc = srcsurvey.Locator(tree)
+            ds = srcsurvey.parse_diags(self.ERR)
+            entries = [(d, loc(d['file'], d['line'])) for d in ds]
+        self.assertEqual([w for _d, w in entries],
+                         ['m_$glob', 'm_$local', 'm_$glob', 'm_$glob', None])
+        refusals, errors, warnings = srcsurvey.summarise(entries)
+        self.assertEqual([(k, n) for k, n, _a, _e in refusals],
+                         [('the `aligned` attribute (ref 3.15) is not supported yet', 1),
+                          ('this operator on sets is not supported yet', 1)])
+        self.assertEqual(errors[0][1:3], (2, [('m_$glob', 2)]))
+        self.assertEqual(warnings[0][2], [('base.ins.pas', 1)])
+
+
+class WorkaroundTest(unittest.TestCase):
+    def apply(self, name, text):
+        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
+            if n == name:
+                return srcsurvey.apply_workaround(pat, rep, text)[0]
+        raise KeyError(name)
+
+    def test_packed_overlay(self):
+        src = ("status_$t = packed record\n case integer of\n"
+               "  1: (fail: boolean;  { bit 15 }\n      code: integer);\n"
+               "  2: (all: integer32);   { 0x00 }\n end;\n")
+        self.assertEqual(self.apply('packed-overlay', src),
+                         'status_$t = record case integer of 2: (all: integer32); end;\n')
+
+    def test_packed_and_field_aligned(self):
+        self.assertEqual(self.apply('packed-record', 'u = PACKED  RECORD a: integer32; end;'),
+                         'u =   RECORD a: integer32; end;')
+        self.assertEqual(self.apply('field-aligned', 'timer: [aligned(1)] linteger;'),
+                         'timer: linteger;')
+
+
+    def test_comments_and_strings_untouched(self):
+        # ../source's base.ins.pas quotes the customer declarations in
+        # comments; only the real declaration is rewritten and counted
+        src = ("{ customer: uid_$t = PACKED RECORD high: integer32; END }\n"
+               "(* a packed record's fields *) \"packed record\" s = 'packed record';\n"
+               "uid_$t = packed record high: integer32; low: integer32; end;\n")
+        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
+            if n == 'packed-record':
+                text, k = srcsurvey.apply_workaround(pat, rep, src)
+        self.assertEqual(k, 1)
+        self.assertEqual(text, src.replace('uid_$t = packed record high',
+                                           'uid_$t =  record high'))
+
+    def test_packed_overlay_keeps_status_size(self):
+        # status_$t of ../source base.ins.pas: the overlay keeps `all',
+        # 4 bytes at 0, the size and offset of the packed record (fail 1
+        # + subsys 7 + modc 8 bits, code 16 bits: 32 bits)
+        src = ("{ status_$t = PACKED RECORD CASE integer OF 1: (fail: boolean); "
+               "2: (all: integer32); END; }\n"
+               "status_$t = packed record\n case integer of\n"
+               "  1: (fail: boolean;\n subsys: 0..127;\n modc: 0..255;\n code: integer);\n"
+               "  2: (all: integer32);\n end;\n")
+        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
+            if n == 'packed-overlay':
+                text, k = srcsurvey.apply_workaround(pat, rep, src)
+        self.assertEqual(k, 1)
+        self.assertTrue(text.startswith('{ status_$t = PACKED RECORD CASE'))
+        self.assertTrue(text.endswith('status_$t = record case integer of '
+                                      '2: (all: integer32); end;\n'))
+
+
+if __name__ == '__main__':
+    unittest.main()

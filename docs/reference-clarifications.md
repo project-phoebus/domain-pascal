@@ -50,12 +50,30 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
    reference never says how the name list ends.  `module` is not reserved,
    so `%var color` followed by `module m;` is ambiguous.  *Current: names
    on the directive's own line, then an optional `;`.*
+   *Evidence note (Apollo's SR10.2 customer inserts, `~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sys/ins/`;
+   not an owner ruling):* two of them guard against double inclusion
+   with the whole conditional on one line, the `%var` list ended by the
+   next directive and no `;`: `gpr.ins.pas` "`%IFDEF gpr_$gpr_ins_pas
+   %THEN %EXIT %ELSE %VAR gpr_$gpr_ins_pas %ENDIF`", and
+   `gsr_types.ins.pas` "`%IFDEF gsr_$$gsr_types %THEN %EXIT %ELSE %VAR
+   gsr_$$gsr_types %ENDIF`", which also has an empty `%THEN` part:
+   "`%IFDEF ISP_$M68K %THEN %ELSE %VAR ISP_$M68K %ENDIF`".  Others use
+   one directive per line (`prsvr.ins.pas`: "`%IFDEF prsvr_ins_pas
+   %THEN` / `%EXIT` / `%ELSE` / `%VAR prsvr_ins_pas` / `%ENDIF`").
+   `dpc --check-only` accepts all three forms (checked).  This shows
+   that a directive ends a `%var` list on the same line; it does not
+   settle how a list ends before an ordinary token such as `module`.
 3. **4.7, p. 4-46, predicates.** "Optional Boolean keywords not, and, or
    or": no precedence is given.  *Current: Table 4-3 order, not > and > or.*
 4. **2.1.2, p. 2-2 (PDF p. 35).** The integer example uses
    `/* default (base 10) */` comments, but 2.1.4 lists only `{ }`,
    `(* *)` and `" "`.  Is `/* */` a comment form?  *Current: rejected,
    per 2.1.4.*
+   *Evidence note (not an owner ruling):* none of the 56 `.ins.pas`
+   files of Apollo's SR10.2 customer inserts (`~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sys/ins/`) contains `/*`;
+   they use `{ }`, and `(* *)` in 3 files (e.g. the header of
+   `prsvr.ins.pas`).  Consistent with 2.1.4; it does not rule `/* */`
+   out.
 
 Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
 
@@ -200,11 +218,80 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     Apollo file, uses `options(val_param)`); `val_param` sets the
     convention; `internal` is message 181; every other option is refused
     as "not supported yet".*
+    *Evidence note (Apollo's SR10.2 customer insert `~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sys/ins/prsvr.ins.pas`;
+    not an owner ruling):* Apollo's own declarations use the long form,
+    after the closing parenthesis (or result type) and a `;`, with
+    `extern` among the options, on `TYPE` declarations and on record
+    fields:
+
+    ```
+    pr_$init_t =  ^FUNCTION (
+                   IN interface_db : db_ptr;
+                   OUT status : status_$t
+                   ) : db_ptr ;options(d0_return,val_param,extern);
+
+    pr_$monitor_t = ^PROCEDURE (
+                       IN interface_db : db_ptr;
+                       OUT status : status_$t
+                       ) ;options(val_param,extern);
+    ...
+        prsvr_filter_$epv_t = RECORD
+           process : ^FUNCTION(
+                IN  obj_id : UNIV_PTR;
+                IN  obj_db : db_ptr;
+                OUT status: status_$t
+                ) : int32_ptr;options(d0_return,val_param,extern);
+    ```
+
+    (also `pr_$render_t`, `pr_$end_job_t`, `pr_$close_t`, `inquire`).
+    So (a) the long form is used, and (c) `d0_return` and `val_param`
+    occur on pointer types.  Still open: (b) what `extern` means on a
+    type (every routine pointer type in the file has it, so it may be
+    required, or a no-op), whether `forward` or other options are
+    allowed, and what `d0_return` changes for a call through the
+    pointer (5.5.10: a pointer result in D0 instead of A0, presumably).
 20. **5.6.4, p. 5-22.**  default_routine_options apply to "every
     subsequent routine in that module that does not specify a routine
     option".  Do they apply to a routine pointer type declared without
     options (its calls' conventions depend on it)?  *Current: such a
     type is refused while default_routine_options are in effect.*
+21. **4.7, p. 4-46 (predicates).**  The reference names the predeclared
+    conditional variables "`_BFMT__COFF` ... set to true whenever the
+    compiler is generating COFF ... Beginning with $R10 [OCR for SR10], the
+    Domain Pascal compiler generates COFF files" and "`_ISP__M68K` (for 68000
+    code generation) / `_ISP__A88K` (for Series 10000 code generation)",
+    and "Since `_ISP__M68K` and `_ISP__A88K` are predeclared, you cannot
+    use the %enable directive or the -config option with them" (p. 4-48).
+    Apollo's SR10.2 customer inserts (`~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sys/ins/`) test other names:
+    - `base.ins.pas` (01/02/89): "`%ifdef not isp_$m68k %then` / `%var
+      isp_$m68k` / `%endif`" (and the same for `isp_$a88k`), then
+      "`%IF ISP_$A88K or ISP_$M68k %THEN  { SR10 or later }`" around
+      `%PUSH_ALIGNMENT; %WORD_ALIGNMENT;` and `time_$clock_t =
+      [aligned(1)] PACKED RECORD ...`, "`%ELSEIF ISP_$M68K %THEN  { SR10
+      or later 68k }`" for `ec2_$eventcount_t`, and "`%IFDEF obj_$coff
+      %THEN                  { If sr10 or later }`" for `ios_$errout = 2`
+      (never `%var`ed in the file).  Its history: "09/17/87 gms define
+      isp_$?* if necessary" and "10/09/87 gms removed default enable of
+      isp_$m68k".
+    - `cal.ins.pas`, `ms.ins.pas`, `mutex.ins.pas`, `trait.ins.pas` and
+      others: "`%if isp_$m68k or isp_$a88k %then`" (`trait.ins.pas`
+      history: "09/17/87 gms s/m68k/isp_$m68k/.").
+    - `gsr_types.ins.pas` (May 1989) defaults both spellings: "`%IFDEF
+      ISP_$M68K %THEN %ELSE %VAR ISP_$M68K %ENDIF`" ... "`%IFDEF
+      _ISP__M68K %THEN %ELSE %VAR _ISP__M68K %ENDIF`", then tests
+      "`%IF _ISP__M68K OR _ISP__A88K %THEN`".
+
+    Question: do the SR10 compilers (the kernel's included) also
+    predeclare `isp_$m68k` / `isp_$a88k` (true for the target) and
+    `obj_$coff`, besides the documented `_ISP__M68K` / `_BFMT__COFF`?
+    If not, `base.ins.pas` would take its pre-SR10 branches
+    (`time_$clock_t` without `[aligned(1)]` and word alignment, `ios_$errout
+    = 3`) unless the user enables `isp_$m68k`.  *Current: `dpc`
+    predeclares only `_BFMT__COFF`, `_ISP__M68K` (true) and `_ISP__A88K`
+    (false) (`crates/dpc-syntax/src/preprocess.rs`); `isp_$m68k` is undeclared,
+    so Apollo's `base.ins.pas` would declare it with `%var` (false) and
+    take the pre-SR10 branches, and `%IFDEF obj_$coff` is false.  No
+    `.ins.pas` of `../source` tests these names.*
 
 ## Reference errata noticed (no ruling needed)
 

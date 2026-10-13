@@ -55,6 +55,39 @@ Linear-sweep caveat: `m68k-elf-objdump -D` decodes data as instructions.
 Jump tables and constant cells will look like `orib`, `bfexts` and so on.
 Always find the routine boundaries from the map first.
 
+### 0.1 Apollo insert files (primary evidence for declarations, not for codegen)
+
+The SR10.2 install tree has Apollo's **customer** insert files:
+`~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sys/ins/*.ins.pas`
+(56 Pascal inserts; read-only, like the image).  They are genuine
+Apollo files: dated change histories (`base.ins.pas`: "BASE.INS.PAS,
+/sys/ins, ceb-jrw, 01/02/89", changes from 06/30/81 to 01/02/89;
+`prsvr.ins.pas`: "THE FOLLOWING PROGRAMS ARE THE SOLE PROPERTY OF APOLLO
+COMPUTER INC.").
+
+- **Use them for declarations:** type layouts, field names, constant
+  values and routine headings of the public interfaces, e.g. in
+  `base.ins.pas` `status_$t` (section 9), `uid_$t = PACKED RECORD high:
+  integer32; low: integer32; END`, `binteger = 0..255`, `pinteger =
+  0..65535`, `linteger = 0..2147483647`, `time_$clock_t` (a `[aligned(1)]
+  PACKED RECORD` with variants `high`/`low` and `high16`/`low32`, under
+  `%PUSH_ALIGNMENT; %WORD_ALIGNMENT;` for SR10), and `ec2_$eventcount_t`
+  (`[volatile] RECORD value: [aligned(1)] integer32; awaiters:
+  pinteger; END` for SR10 68k).  They also show Apollo's own use of the
+  language: routine options on routine pointer types
+  (`prsvr.ins.pas`, `^FUNCTION (...) : db_ptr ;options(d0_return,val_param,extern);`),
+  the conditional variables `isp_$m68k` / `obj_$coff`, include guards
+  (`docs/reference-clarifications.md` Q2, Q4, Q19, Q21).
+- **They are not the kernel's own inserts.**  The kernel was compiled
+  against Apollo's internal `.ins.pas` files, which may differ, and the
+  customer files declare only the public interfaces.  An image
+  observation overrides an insert file.
+- **They say nothing about code generation.**  Codegen claims still need
+  image addresses.
+- `../source`'s reconstructed inserts (`domain_os/**/*.ins.pas`) follow
+  the customer files where they say so in their comments; they are
+  agent-written, not Apollo files.
+
 ---
 
 ## 1. Calling sequence
@@ -3407,24 +3440,52 @@ A "status slot" there is a parameter slot whose address is loaded with
 subsystem number in the high word, a small code in the low word) is
 stored.
 
-- **The type (reference; layout partly Uncertain).**  Ref 9.1.1-9.1.2
-  (pp. 9-1..9-3): `status_$t` is declared in `/sys/ins/base.ins.pas`,
-  which we do not have.  It is not itself an integer32: its `all` field
-  is (`OPEN(f, pathname1, 'NEW', err_stat.all)`; the error "Improper
-  status argument", p. 9-21: "a data type other than integer32 ...
-  `OPEN(f1, 'anger1', 'NEW', st); {wrong}` / `OPEN(f2, 'anger2', 'NEW',
-  st.all); {right}`").  It also has a `code` field that "contains a
-  number that corresponds to a particular error" (p. 9-3), at an offset
-  the reference does not give.  `status_$ok` is 0 (9.1, p. 9-1: a successful call returns 0;
-  "Open", pp. 4-132..4-133, tests `statrec.all = 0` and `statrec.all =
-  status_$ok` alike).
-  `../source` types it `int32_t` (`base/base.h`) and sets bit 31 on
-  failure paths (`proc2/resume.c`, 0xE41444 `bset.b #7`), which fits a
-  fail flag in the top bit of `all` but does not place `code`.  The
-  conformance sources therefore declare `status_$t = record all:
-  integer32 end` (only `all`, at offset 0, 4 bytes);
+- **The type (declaration: Apollo insert file; layout Verified for
+  `fail` and `code`).**  Ref 9.1.1-9.1.2 (pp. 9-1..9-3) says
+  `status_$t` is declared in `/sys/ins/base.ins.pas`.  The SR10.2
+  customer copy of that file is now available (section 0.1:
+  `sys/ins/base.ins.pas`, header "BASE.INS.PAS, /sys/ins, ceb-jrw,
+  01/02/89"); it declares
+
+  ```
+  status_$t = PACKED RECORD CASE integer OF
+      1:  (fail:  boolean;            { true if module couldn't handle error }
+           subsys: 0..127;            { subsystem code }
+           modc: 0..255;              { module code }
+           code: integer);            { module specific error }
+      2:  (all: integer32);           { used for testing for specific value }
+      END;
+  ...
+  status_$ok = 0;                     { returned if called proc successful }
+  ```
+
+  (its history: "04/28/83 jrw removed async bit from status_$t").  With
+  the packing rules of ref 3.10.7 and Table 3-3 (p. 3-35: first field
+  on a word boundary; fields "left to right within bytes and then by
+  increasing byte address"; boolean 1 bit, subranges the bits of their
+  extreme values, integer 16 bits word aligned) the record is 4 bytes:
+
+  | field | bits of `all` | byte offset | evidence |
+  |---|---|---|---|
+  | `fail` | 31 | 0, bit 7 | **Verified:** PROC2_$RESUME 0xE41444 `bset #7,(-0x4,A6)` on its local status; PROC2_$FORK 0xE72CC8 `bset #7,(A1)` |
+  | `subsys` | 30..24 | 0, bits 6..0 | packing rule; stcode db: the codes with a zero top byte are headed "OS / ..." |
+  | `modc` | 23..16 | 1 | packing rule; stcode db: (b000e) is under "OS / terminal manager", (350005) under "OS / terminal handler" |
+  | `code` | 15..0 | 2, a word | **Verified:** PROC2_$RESUME 0xE4142A `tst.w (-0x2,A6)`, the low word of the status at -4; PROC2_$FORK 0xE72CC2 `tst.w (0x2,A1)` then 0xE72CC8 `bset #7,(A1)` (i.e. `if status.code <> 0 then status.fail := true`) |
+  | `all` | 31..0 | 0, a longword | the stores and tests below |
+
+  `../source` types it `int32_t` (`base/base.h`); bit 31 is the `fail`
+  bit (`proc2/resume.c`, `proc2/fork.c`).  Ref 9.1.1 already said `all`
+  is the integer32 view (`OPEN(f, pathname1, 'NEW', err_stat.all)`; "Improper
+  status argument", p. 9-21) and that `code` "contains a number that
+  corresponds to a particular error" (p. 9-3).  `status_$ok` is 0 (9.1,
+  p. 9-1; "Open", pp. 4-132..4-133).  `dpc` refuses packed records
+  (ref 3.10.7), so the conformance sources still declare `status_$t =
+  record all: integer32 end` (only `all`, at offset 0, 4 bytes: the size
+  and offset of the packed record's `all`);
   `tests/conformance/name_convert_acl_status.pas`, older, uses a plain
-  integer32, which compiles to the same code.  Status codes in sources
+  integer32, which compiles to the same code.  `tools/srcsurvey.py`'s
+  `packed-overlay` workaround makes the same reduction of `../source`'s
+  copy of the declaration.  Status codes in sources
   carry `../source`'s names or are written in hex with the database text
   in a comment.  Never invent a `status_$` name.
 - **Clear on entry** (`status.all := status_$ok` as the first
