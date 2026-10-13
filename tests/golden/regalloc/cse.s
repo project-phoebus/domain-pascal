@@ -33,8 +33,8 @@ and.w %d1,%d2
 move.w %d2,(%a0)
 1:
 clr.l %d1
-move.w %d0,%d1
 clr.l %d2
+move.w %d0,%d1
 move.w (%a0),%d2
 add.l %d1,%d2
 cmpi.l #0x400,%d2

@@ -1454,7 +1454,8 @@ their host); no compare or widening of either has been catalogued.
     0xE70DC0) against 1731 `movea.l #abs,An`.  The base load is scheduled
     into the index computation (after the index's first instruction:
     0xE4703E..0xE47058, 0xE470A4..0xE470B2, 0xE4649C..0xE464A6,
-    0xE6C066..0xE6C070), which fits the R11 rule of section 12.4.
+    0xE6C066..0xE6C070), which fits the R11 rule of section 12.4 when
+    the base is generated within the rule's window.
   - **Bounds checks:** none in the image; the C of FIM_$FREE_ASID
     (`fim/free_asid.c`) notes "the original performs no bounds check".
     `dpc` emits none.
@@ -3105,9 +3106,10 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   target, directly precedes the `andi` at 0xE1686A, and the pushes of the
   next call follow it.  Register *values* do cross: PROC1_$SET_PRIORITY
   stores D0 at 0xE15290 and compares it again after the `ori` at
-  0xE15298 (section 12.4 R7).  `dpc` selects statements in order and has
-  no scheduler, so it does the same; the register allocator treats the
-  SR instructions as using no register.
+  0xE15298 (section 12.4 R7).  `dpc` selects statements in order, and
+  its scheduler (12.4 R10/R11, `crates/dpc-m68k/src/sched.rs`) treats
+  every SR instruction as a barrier, so it does the same; the register
+  allocator treats the SR instructions as using no register.
 
 ### 10.1 The other predeclared routines (bead domain-pascal-0wc)
 
@@ -3358,7 +3360,8 @@ kinds from the C in `../source/domain_os`.
   expression, after the set's address (0xE148CE..0xE148D4, section 5.1);
   TIME_$Q_FLUSH_QUEUE 0xE16C84 loads its pointer right before the store.
 - *Entry loads are interleaved with other code* (an instruction
-  scheduler; Verified that it happens, rule unknown; 12.4 R9–R12): `movea.l #imm,A0`
+  scheduler; Verified that it happens, rule unknown; 12.4 R9–R12; `dpc`'s
+  scheduler does not reproduce these, 12.4 R11 "Not explained"): `movea.l #imm,A0`
   between two parameter loads (PARITY_$CHK_IO 0xE0B184; NET_IO_$BOOT_DEVICE
   0xE31C1E; 0xE758CC); the call pad `subq.l #2,SP` before a parameter
   load (AREA_$FREE_ASID 0xE07E8E; PMAP_$PURGE_WS 0xE146C6); stores to
@@ -3530,10 +3533,11 @@ settled, each from this one routine, in image order:
    last use of a parameter, which dpc's pinned registers never are.
    0xE0102C..0xE01034 orders a zero- and a sign-extension the same way
    (`clr.l D0; move.w D2,D1; move.w (0x46e,A5),D0; ext.l D1`).
-   **Done but for the order** (beads domain-pascal-g5q.5, -g5q.7): `dpc`
+   **Done** (beads domain-pascal-g5q.5, -g5q.7, -g5q.8): the selector
    gives `clr.l D1; move.w D0,D1; clr.l D2; move.w (A0),D2; add.l D1,D2`,
-   the sum in the operand that is not reused (golden `regalloc/cse`); the
-   order of the four is the scheduler's (12.4 R9, bead domain-pascal-g5q.8).
+   the sum in the operand that is not reused, and the scheduler (12.4
+   R11) moves the second `clr.l` up, as in the image (golden
+   `regalloc/cse`).
 3. `move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2; bls` (0xE177AE): the
    register-held constant (section 7.1, Uncertain).
 4. `move.w #0x400,D3; sub.w D0,D3; move.w D3,(A0)` (0xE177C4): `0x400 -
@@ -4151,43 +4155,136 @@ happens).**
 - `movea.l #imm` or a pad between two parameter loads: PARITY_$CHK_IO
   0xE0B184; module-local 0xE758C4 at 0xE758CC; PMAP_$PURGE_WS
   0xE146C6.
-- The pad before the parameter load: AREA_$FREE_ASID 0xE07E8E.
+- The pad before the parameter load: AREA_$FREE_ASID 0xE07E8E; before
+  the static link's load, 0xE13614.
+- A zero-extension's `clr.l` in a load's stall: 0xE382BE.
+- A base `movea.l #` inside a ×56: 0xE1AA5A (R10).
 
-**R10. Barriers (Verified at the sites).**
+**R10. Barriers (Verified at the sites; the store rule supported by
+survey).**
 - Nothing moves across a call.
 - A call's pad is not hoisted above the previous statement's store
   (0xE00C12/0xE00C16; 0xE0774C/0xE07750), although nothing in the
   registers stops it.
-- Shift-and-add multiplications and `(An)+` block copies are never
-  interleaved with other code:
-  - ×12: 0xE0A972..0xE0A97E (an independent `movea.l #` was ready);
-  - 0xE190D2..0xE190DC;
-  - 0xE14A2E..0xE14A3A;
-  - 0xE04ADA..0xE04AE2.
+- **Stores** (bead domain-pascal-g5q.8): a load through a pointer is not
+  hoisted above the store before it (0xE3F2DE `move.w (A0),(-0x12,A6)`,
+  then 0xE3F2E2 `movea.l (0x10,A6),A1`, which nothing but the stores
+  orders; 0xE16B26 `movea.l (0xc,A6),A0` after the two stores from
+  0xE16B1A, although the `move.l (0xc,A3),...` right after `movea.l
+  A0,A3` stalls).  The model "a store, other than a
+  push, is ordered against every instruction of its block" covers these
+  and the pad rule above, and halves the contradictions of every
+  top-down rule in the survey of R11 (`tools/schedsurvey.py summary`,
+  model `stores` against `alias`: 748 against 1592 for the rule `raw`).
+  No site was found where an instruction crosses a store; the source
+  order of the stores of XPD_$RESET_PTRACE_OPTS (0xE5B15E..0xE5B16C,
+  offsets 0xC, 0, 0xD, 4, 8) is then the source's own (conformance unit
+  `xpd_reset_ptrace_opts.pas`, Uncertain).
+- Pushes are not interleaved with the loads of later arguments
+  (0xE00D26 `move.w (-8,A4),-(SP)` before 0xE00D2A `movea.l
+  (-0x10,A4),A0`, which nothing else orders).
+- A call's pop stays right after it and the next call's pad right after
+  the pop: `addq.w #8,SP; subq.l #2,SP; movea.l (8,A2),A0` at 0xE1AFC8,
+  0xE1AFDA, 0xE1AFEE, 0xE1BD24, 0xE1BD36 (11 `pop; pad; non-push` in
+  the image, 311 `pop; pad; push`).
+- A nested routine's static link is loaded into A1 right before its
+  `bsr` at all 34 calls of the 11 nested routines that take it in A1
+  (`tools/nestsurvey.py list`; section 6): 33 `movea.l An,A1`, one
+  `movea.l (-0x80,A6),A1` (0xE4EE94).  The other `movea.l A6,A1` of
+  the image (e.g. 0xE133A6, 0xE6B992) form addresses and are scheduled
+  like any instruction.
+- Shift-and-add multiplications and `(An)+` block copies: the ×12 at
+  0xE0A972..0xE0A97E is not interleaved although an independent
+  `movea.l #` was ready; nor 0xE190D2..0xE190DC, 0xE14A2E..0xE14A3A
+  (inside an argument list) and the copy 0xE04ADA..0xE04AE2 (stores).
+  **But** the ×56 of 0xE1AA50..0xE1AA60 has a `movea.l #,A1` before its
+  last `add.w` (`move.w D2,D3; lsl.w #3,D3; move.w D3,D0; neg.w D3;
+  lsl.w #3,D0; movea.l #0xE2DC90,A1; add.w D0,D3`).  Both are what R11
+  with a window of 3 gives (below); a multiplication is not a unit.
+- The SR instructions (`disable`, `enable`, `set_sr`): section 10.
 
-  They are probably expanded after scheduling (Uncertain).
+**R11. The ordering policy (Uncertain; a candidate implemented).**
+- *The rule.*  Top-down list scheduling: take the first instruction, in
+  the order the compiler generated them, whose predecessors are placed
+  and that does not read a register written by the instruction just
+  placed; if there is none, the first whose predecessors are placed.
+  Only the first *W* instructions not yet placed are candidates (a
+  window).
+- *Survey* (`tools/schedsurvey.py summary`, 1099 routines of
+  0x30..0x150 bytes): for each adjacent pair where the second reads a
+  register the first writes, is there another instruction that was ready
+  there and would not have?  If so the unwindowed rule is contradicted
+  whatever the generation order.  Model `stores` (R10): 748 of 11586
+  pairs (A7 counted; 581 of 7045 without it).  Bottom-up (from the end,
+  the same test mirrored): 1381.  Other "interlocks" (an address
+  register used to form an address: 256 of 5833; two memory accesses in
+  a row: 677 top-down, 308 bottom-up of 9600) are contradicted too.  So
+  no rule of this family without a window explains the whole image.  Most
+  contradictions have a `movea.l #`, `lea` or `moveq` far ahead (e.g.
+  0xE74C82, 0xE5C0C8, 0xE0CA0A: an array base loaded only right before
+  its use, after a scaled index, while it was ready from the start).
+- *The window.*  With W = 3 (or 4), R11 reproduces, from the generation
+  orders given:
+  - 0xE177A6..0xE177B8 from `dpc`'s own order (golden
+    `regalloc/cse`), and with the register-held constant generated after
+    the `add`;
+  - 0xE177CC..0xE177DE with `movea.l (8,A6),A2` (`buffer`) first (a
+    loop invariant hoisted to the block before the loop, ref p. 6-29;
+    Uncertain).  Needs W >= 3;
+  - FIM_$ACKNOWLEDGE 0xE0A972..0xE0A994 with each array reference's
+    index before both bases (`×12`, the second index load and shift,
+    `movea.l #` ×2, the move): the window keeps the first base out of the
+    ×12, which the unwindowed rule pulls in.  Needs W <= 4;
+  - the ×56 of 0xE1AA50..0xE1AA60 (R10), with its base generated after
+    it;
+  - 0xE0102C..0xE01034 with the zero-extended operand first;
+  - 0xE382B4..0xE382C4: the `clr.l D2` of a zero-extension in the stall
+    after the load, before `divu.w` (dpc's order; `crates/dpc-m68k/
+    tests/expr.rs`, `division_forms`);
+  - MST_$VA_TO_SEGNO 0xE0DCD6..0xE0DCEA, but only if `(0x10,A6)` is
+    generated after the shift statement (`va_to_segno := default_result`
+    second), not with the entry loads in parameter order.
+- *Not explained: entry loads interleaved with the first statement*
+  (12.2).  PARITY_$CHK_IO 0xE0B180 (load, `movea.l #`, load),
+  module-local 0xE758C4, NET_IO_$BOOT_DEVICE 0xE31C1A likewise;
+  PMAP_$PURGE_WS 0xE146C2 `move.w (8,A6),D2; subq.l #2,SP; move.b
+  (0xa,A6),D3; move.w #20,-(SP)`; AREA_$FREE_ASID 0xE07E8E `subq.l
+  #2,SP; move.w (8,A6),D2; move.w #14,-(SP)`; 0xE13614 `subq.l #2,SP;
+  movea.l (A6),A4; move.w #20,-(SP)`.  PMAP_$PURGE_WS and
+  AREA_$FREE_ASID have the same first block (entry loads, then
+  `ML_$LOCK(const)`, the same prologue shape) with two and one loads;
+  with the loads generated first, in parameter order, no rule that looks
+  only at the instruction just placed and at the generation order, top-
+  down or bottom-up, gives both.  Bottom-up R11 (latest generated first)
+  gives PARITY_$CHK_IO, PMAP_$PURGE_WS, AREA_$FREE_ASID and 0xE13614, but
+  not MST_$VA_TO_SEGNO, and is contradicted more often in the survey.  A
+  scratch experiment over the 924 first blocks that load parameters
+  (loads first in parameter order, the rest in image order; top-down and
+  bottom-up; interlocks `raw`, `mem`, `rawmem`; W = 2, 3, all) found no
+  variant that reproduces more than 15 of the 263 blocks the order needs
+  to change.
+- *Alternating memory accesses* (a candidate of the earlier review) fits
+  PARITY_$CHK_IO, 0xE758C4 and PMAP_$PURGE_WS, but not AREA_$FREE_ASID.
+- *What `dpc`'s units say* (bead domain-pascal-g5q.8): little.  Under
+  R11, the selector's order of all goldens and conformance units has two
+  places where an instruction is moved (both in golden `regalloc/cse`,
+  0xE177A6 order, toward the image); variants that pick the ready
+  instruction with the longest path to the end, or loads first, or
+  non-memory instructions first, change no conformance unit either;
+  picking the last ready instruction breaks 13 routines.
+- **Implemented** (`crates/dpc-m68k/src/sched.rs`; `dpc
+  --schedule=off|r11|r11:N`, default `r11:3`): R11 with a window of 3,
+  after allocation, over runs between labels, branches and barriers, with
+  the dependences of R10 (registers; memory, a store ordered against
+  everything, pushes against all memory; the flags, with their liveness
+  over the body's control flow; calls, SR instructions, writes of A5;
+  pops; static links).  The default changes no conformance unit; it
+  changes golden `regalloc/cse` (0xE177A6) and `division_forms`
+  (0xE382BE), both toward the image.  Unrolled `(An)+` copies are units
+  of the scheduler (stores anyway); multiplications are not (0xE1AA5A).
 
-**R11. The ordering policy (Uncertain).**
-- In the survey (`sched --strict`), 367 of 2752 load→use adjacent pairs
-  and 881 of 4737 other def→use pairs could have been separated by an
-  independent instruction of the same block.  Many of these are in the
-  R10 units.  So there is no strict "never use the previous result
-  next" rule.
-- One candidate list rule reproduces the blocks 0xE177A6..0xE177B8 and
-  0xE177CC..0xE177DE exactly: top-down, take the first instruction in
-  generation order whose inputs are ready and that does not read a
-  register written by the instruction just placed; otherwise the first
-  ready one.
-  - For 0xE177CC it needs `movea.l (8,A6),A2` first in generation
-    order.  This is plausible if loop invariants are hoisted to the head
-    of the block before the loop (ref p. 6-29), but Uncertain.
-  - MST_$VA_TO_SEGNO needs the load of `(0x10,A6)` after the whole
-    shift chain in generation order.
-- A second candidate, alternating memory loads and other instructions,
-  fits PARITY_$CHK_IO, module-local 0xE758C4 and PMAP_$PURGE_WS, but
-  not AREA_$FREE_ASID.
-
-**R12. Registers are chosen before scheduling (Uncertain; supported).**
+**R12. Registers are chosen before scheduling (Uncertain; supported;
+implemented: the scheduler runs after allocation).**
 The final order sometimes shows a register taken while a lower one is
 free.  It is free only because the scheduler later moved its last use
 earlier:
@@ -4207,7 +4304,7 @@ earlier:
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |
 | 5 | D3 at 0xE177C4 and 0xE177D0 | 0xE177C4, 0xE177D0 | Speculative (R6) |
 | 6 | The `for` loop as strength-reduced pointers (12.3 item 6) | 0xE177DC..0xE177F2 | Shape Verified; separate bead |
-| 7 | A block scheduler run after register choice, with the barriers of R10 | 0xE177A6..0xE177B8, 0xE177CC..0xE177DE | Exists: Verified; policy Uncertain (R11) |
+| 7 | A block scheduler run after register choice, with the barriers of R10 | 0xE177A6..0xE177B8, 0xE177CC..0xE177DE | Exists: Verified; policy Uncertain (R11).  **Implemented** (bead domain-pascal-g5q.8, `crates/dpc-m68k/src/sched.rs`): R11 with a window of 3, default on; 0xE177A6..0xE177AC reproduced (golden `regalloc/cse`); 0xE177CC needs `buffer`'s load first in the selector's order |
 
 **Consistency with the units `dpc` already reproduces** (review,
 2026-10-12; `tests/conformance/manifest.txt`).  Every value in

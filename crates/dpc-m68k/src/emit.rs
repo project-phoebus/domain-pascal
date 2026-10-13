@@ -94,6 +94,9 @@ pub struct Options {
     /// `internal; extern` and named by its local symbol, which the
     /// conformance harness defines (`--defsym`; bead domain-pascal-3h9).
     pub module_routines: Vec<(String, u32)>,
+    /// The scheduling policy for the bodies (`dpc --schedule`;
+    /// `sched.rs`, codegen-patterns 12.4 R9-R12).
+    pub schedule: crate::sched::Schedule,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -233,7 +236,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .filter(|(f, _)| f.code_section == sec)
         {
             last_aligns = al;
-            match isel::select(f) {
+            match isel::select_with(f, opts.schedule) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {

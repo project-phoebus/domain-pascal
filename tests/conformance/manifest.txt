@@ -118,3 +118,6 @@ tests/conformance/file_set_len.pas           FILE_$SET_LEN  module-routines=FILE
 tests/conformance/asknode_info.pas           ASKNODE_$INFO  module-routines=ASKNODE_$INTERNET_INFO
 tests/conformance/proc2_quit.pas             PROC2_$QUIT:30  --section-addr .bss.moddata.PROC2=0xE7BE84  a5-always=PROC2_$QUIT  module-routines=PROC2_$SIGNAL
 tests/conformance/mst_set_touch_ahead_cnt.pas  MST_$SET_TOUCH_AHEAD_CNT  --section-addr .bss.moddata.MST_=0xE7CF0C  a5-always=MST_$SET_TOUCH_AHEAD_CNT  module-routines=MST_$PRIV_SET_TOUCH_AHEAD_CNT
+# Stores in source order (codegen-patterns 12.4 R10, bead
+# domain-pascal-g5q.8): a store is not moved by the scheduler.
+tests/conformance/xpd_reset_ptrace_opts.pas  XPD_$RESET_PTRACE_OPTS

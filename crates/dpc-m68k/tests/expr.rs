@@ -430,15 +430,17 @@ fn division_forms() {
     assert_eq!(fw("w mod 4")[2], "divs.w\t#4,%d0");
     // Unsigned words: zero-extended, `divu.w` (0xE4CE1A..0xE4CE22); used as
     // a longword, the word result zero-extended into a new register
-    // (0xE382CC).
+    // (0xE382CC), whose `clr.l` the scheduler moves into the stall after
+    // the load (0xE382BE `clr.l D2` before the `divu.w`; codegen-patterns
+    // 12.4 R11).
     assert_eq!(
         fl("u mod 101"),
         [
             "clr.l\t%d0",
             "move.w\t(U).l,%d0",
+            "clr.l\t%d1",
             "divu.w\t#0x65,%d0",
             "swap\t%d0",
-            "clr.l\t%d1",
             "move.w\t%d0,%d1",
             "move.l\t%d1,%d0",
         ]

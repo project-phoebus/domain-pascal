@@ -17,9 +17,10 @@
     with `actual_len' goes into the other operand (0xE177B4 `add.l
     D1,D2'), and the sum with the variable copies the held value and
     adds the variable to it (0xE177D0..0xE177D4 `move.l D1,D3; add.l
-    (0x14,A5),D3').  Not reproduced: the order 0xE177A6..0xE177AE (R9),
-    the constant held in D3 (0xE177AE, R8) and D3 for `0x400 - offset'
-    (0xE177C4, R6). }
+    (0x14,A5),D3').  Both `clr.l' first, then both moves, as at
+    0xE177A6..0xE177AC: the scheduler (R11, bead domain-pascal-g5q.8).
+    Not reproduced: the constant held in D3 (0xE177AE, R8) and D3 for
+    `0x400 - offset' (0xE177C4, R6). }
 module cse;
 const
   log_buffer_size = 16#400;

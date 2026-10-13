@@ -100,7 +100,13 @@ Tests:
   `PROC1_$AS_ID * 12` in D2 (0xE0A972..0xE0A97E, reused at 0xE0A9B0)
   with the tables in the unit's data; LOG_$READ's worker to 0xE177CA, the
   zero-extended `offset` reused after the `if` (0xE177D0), the sum in the
-  operand not reused (0xE177B4 `add.l D1,D2`).
+  operand not reused (0xE177B4 `add.l D1,D2`), both `clr.l` first
+  (0xE177A6..0xE177AC, the scheduler, 12.4 R11).
+- `regalloc/schedule` - codegen-patterns 12.4 R9-R11 (bead
+  domain-pascal-g5q.8, `crates/dpc-m68k/src/sched.rs`): a zero-extension's
+  `clr.l` moved into a load's stall (0xE382BE), a store ordered against
+  the next statement's code, a call's pop and the next pad kept together
+  (0xE1AFC8).
 - `expr/arith` - codegen-patterns 8, 13, 3: `addq`/`subq`, constant-first
   `moveq; add`, `addi`/`subi`, `c - x`, constant multiplication with
   shifts and adds (x6 0xE6886C, x12, x28 0xE5AEF6) or `mulu.w` (x564

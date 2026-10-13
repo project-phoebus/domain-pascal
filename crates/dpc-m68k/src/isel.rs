@@ -10,6 +10,9 @@
 //!    of the body and gives each value the lowest register of its class
 //!    free over its whole range, a callee-saved one if it lives across a
 //!    call (codegen-patterns 12.4, R1-R3), and rewrites the body.
+//!    [`crate::sched::schedule`] then orders the instructions inside
+//!    each basic block (codegen-patterns 12.4 R9-R12; R11 with a window
+//!    of 3 by default).
 //! 3. **Frame.**  The callee-saved registers the body wrote decide the
 //!    save set; [`crate::frame::Frame`] then gives the prologue (`link.w`,
 //!    the save) and the epilogue (the restore from the frame, `unlk`,
@@ -28,6 +31,7 @@ use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate_apart, RegClass, VRegs, DATA_BASE};
+use crate::sched::Schedule;
 
 /// The register a nested routine's static link is passed in
 /// (codegen-patterns 6: 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
@@ -96,6 +100,11 @@ fn size_of(w: Width) -> Size {
 /// has no `link; unlk; rts` at all).  One with locals is refused: no such
 /// frame is seen, and whether it would be kept is not known.
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
+    select_with(f, Schedule::default())
+}
+
+/// [`select`] with the body scheduled under `sched` (`sched.rs`).
+pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
         if f.frame_size > 0 {
             return Err(unsupported(
@@ -106,7 +115,7 @@ pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body(f)?;
+    let body = select_body_scheduled(f, sched)?;
     wrap(f, body)
 }
 
@@ -164,11 +173,17 @@ pub struct Body {
 /// which computations a later one can reuse ([`Selector::cse_value`]),
 /// then again holding exactly those.
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
-    let (body, hits) = select_body_with(f, CsePlan::Probe)?;
+    select_body_scheduled(f, Schedule::default())
+}
+
+/// [`select_body`] with the body scheduled under `sched` after register
+/// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12).
+pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
+    let (body, hits) = select_body_with(f, CsePlan::Probe, sched)?;
     if hits.is_empty() {
         return Ok(body);
     }
-    let (body, again) = select_body_with(f, CsePlan::Hold(hits.clone()))?;
+    let (body, again) = select_body_with(f, CsePlan::Hold(hits.clone()), sched)?;
     if again != hits {
         // The second selection must find the reuses the first one did:
         // the validity of a reuse depends only on labels, calls and
@@ -181,7 +196,11 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     Ok(body)
 }
 
-fn select_body_with(f: &Function, plan: CsePlan) -> Result<(Body, Vec<(u32, u32)>), Diagnostic> {
+fn select_body_with(
+    f: &Function,
+    plan: CsePlan,
+    sched: Schedule,
+) -> Result<(Body, Vec<(u32, u32)>), Diagnostic> {
     let mut s = Selector::new(f.span);
     s.cse_plan = plan;
     if f.loads_data_base {
@@ -348,18 +367,40 @@ fn select_body_with(f: &Function, plan: CsePlan) -> Result<(Body, Vec<(u32, u32)
         .map_err(|what| unsupported(f.span, what))?;
     // A result computed in D0 already is not moved (0xE148E0 moves it
     // only because the `sne` left it in D1).
-    let out: Vec<Insn> = s
+    let keep: Vec<bool> = s
         .out
-        .into_iter()
+        .iter()
         .enumerate()
-        .filter(|(k, i)| {
-            !(s.result_moves.contains(k)
+        .map(|(k, i)| {
+            !(s.result_moves.contains(&k)
                 && (matches!(i, Insn::Move { src: Ea::Reg(a), dst: Ea::Reg(b), .. } if a == b)
                     || matches!(i, Insn::Movea { src: Ea::Reg(Reg::A(a)), dst, .. } if a == dst)))
+                && !matches!(i, Insn::Label(l) if !used.contains(l))
         })
-        .map(|(_, i)| i)
-        .filter(|i| !matches!(i, Insn::Label(l) if !used.contains(l)))
         .collect();
+    // The units in the kept instructions' indices.
+    let mut new_index = Vec::with_capacity(keep.len() + 1);
+    let mut n = 0;
+    for &k in &keep {
+        new_index.push(n);
+        n += usize::from(k);
+    }
+    new_index.push(n);
+    let units: Vec<crate::sched::Unit> = s
+        .units
+        .iter()
+        .map(|&(a, b)| (new_index[a], new_index[b]))
+        .filter(|(a, b)| b - a > 1)
+        .collect();
+    let mut out: Vec<Insn> = s
+        .out
+        .into_iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(i, _)| i)
+        .collect();
+    // Phase 1c: the order inside basic blocks (`sched.rs`).
+    crate::sched::schedule(&mut out, &units, sched);
     Ok((
         Body {
             insns: out,
@@ -1744,6 +1785,9 @@ pub struct Selector {
     /// Indices in `out` of the moves of a function result into D0
     /// ([`Self::set_result`]): dropped when the value is already there.
     result_moves: Vec<usize>,
+    /// Ranges of `out` the scheduler moves as one node (`sched.rs`,
+    /// codegen-patterns 12.4 R10): unrolled `(An)+` block copies.
+    units: Vec<crate::sched::Unit>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -1915,6 +1959,7 @@ impl Selector {
             vregs: VRegs::new(),
             clobbered: RegSet::EMPTY,
             result_moves: Vec::new(),
+            units: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -3432,6 +3477,7 @@ impl Selector {
             src: Ea::PostInc(from),
             dst: Ea::PostInc(to),
         };
+        let start = self.out.len();
         if bytes <= 18 {
             for _ in 0..longs {
                 self.out.push(mv(Size::L));
@@ -3462,6 +3508,11 @@ impl Selector {
         }
         if bytes % 4 == 2 {
             self.out.push(mv(Size::W));
+        }
+        if bytes <= 18 {
+            // An unrolled copy is never interleaved with other code
+            // (codegen-patterns 12.4 R10: 0xE04ADA..0xE04AE2).
+            self.units.push((start, self.out.len()));
         }
         Ok(())
     }

@@ -4,6 +4,7 @@
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE]
 //!            [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]...
+//!            [--schedule=off|r11|r11:N]
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -40,12 +41,20 @@
 //! domain-pascal-3h9; test scaffolding, `tests/conformance/README.md`).
 //! Without the option such a call is an error: internal routines can be
 //! called only within the unit that defines them (ref 5.2, p. 5-4).
+//!
+//! `--schedule=off|r11|r11:N` chooses how instructions are ordered inside
+//! basic blocks after register allocation (`dpc_m68k::sched`;
+//! codegen-patterns 12.4 R9-R11): `off` keeps the selector's order, `r11`
+//! applies the candidate list rule R11 over the whole block, `r11:N` with
+//! a window of the next N instructions.  The default is `r11:3`; the
+//! policy is not settled (12.4 R11).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use dpc_ir::DataBaseOptions;
 use dpc_m68k::emit::LoopAlign;
+use dpc_m68k::sched::Schedule;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
 const PROG: &str = "dpc";
@@ -54,6 +63,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE] \
                      [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]... \
+                     [--schedule=off|r11|r11:N] \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
@@ -80,6 +90,7 @@ struct Args {
     loop_align: LoopAlign,
     data_base: DataBaseOptions,
     module_routines: Vec<(String, u32)>,
+    schedule: Schedule,
 }
 
 /// The routine names of `--a5-always=` / `--a5-absolute=`: a comma list
@@ -114,6 +125,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut always = None;
     let mut absolute = None;
     let mut module_routines: Vec<(String, u32)> = Vec::new();
+    let mut schedule = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -187,6 +199,21 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 module_routines.push((name.to_string(), a));
             }
+            s if s.starts_with("--schedule=") => {
+                if schedule.is_some() {
+                    return Err("--schedule given more than once".into());
+                }
+                let v = &s["--schedule=".len()..];
+                let bad = || format!("--schedule: want `off`, `r11` or `r11:N`, got `{v}`");
+                schedule = Some(match v {
+                    "off" => Schedule::Off,
+                    "r11" => Schedule::R11 { window: 0 },
+                    _ => match v.strip_prefix("r11:").map(str::parse::<u8>) {
+                        Some(Ok(w)) if w > 0 => Schedule::R11 { window: w },
+                        _ => return Err(bad()),
+                    },
+                });
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -222,6 +249,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             absolute: absolute.unwrap_or_default(),
         },
         module_routines,
+        schedule: schedule.unwrap_or_default(),
     })
 }
 
@@ -267,6 +295,7 @@ fn compile(
         fragment_ends_module: args.fragment_ends_module,
         loop_align: args.loop_align.clone(),
         module_routines: args.module_routines.clone(),
+        schedule: args.schedule,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 

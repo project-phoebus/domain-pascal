@@ -1130,3 +1130,50 @@ end;
     let text = routine(&asm, "THROUGH_POINTER_PARAM");
     assert!(text.contains("\tmove.l\t%d1,(4,%a5)\n"), "{text}");
 }
+
+/// `u mod 101` used as a longword: the zero-extension's `clr.l` is moved
+/// into the stall after the load by the scheduler (codegen-patterns 12.4
+/// R11, 0xE382BE).
+const SCHED: &str = "module m;
+type pinteger = 0..65535;
+var u: pinteger;
+function m_$r: integer32;
+begin
+  m_$r := u mod 101;
+end;
+";
+
+#[test]
+fn schedule_option() {
+    let body = |asm: &str| -> Vec<String> {
+        asm.lines()
+            .skip_while(|l| !l.starts_with("M_$R:"))
+            .map(|l| l.trim().to_string())
+            .take(8)
+            .collect()
+    };
+    let def = compile_with("schedule_default", SCHED, &[]).unwrap();
+    let r11 = compile_with("schedule_r11_3", SCHED, &["--schedule=r11:3"]).unwrap();
+    let off = compile_with("schedule_off", SCHED, &["--schedule=off"]).unwrap();
+    assert_eq!(body(&def), body(&r11));
+    // M_$R:, link, pea, lea, clr.l, move.w, then the third instruction.
+    assert_eq!(body(&def)[6], "clr.l\t%d1", "{def}");
+    assert_eq!(body(&off)[6], "divu.w\t#0x65,%d0", "{off}");
+    for bad in [
+        "--schedule=sometimes",
+        "--schedule=r11:0",
+        "--schedule=r11:x",
+    ] {
+        let (code, err) = compile_with("schedule_bad", SCHED, &[bad]).unwrap_err();
+        assert_eq!(code, Some(2), "{bad}");
+        assert!(err.contains("want `off`, `r11` or `r11:N`"), "{err}");
+    }
+    let (code, err) = compile_with(
+        "schedule_twice",
+        SCHED,
+        &["--schedule=off", "--schedule=r11"],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(2));
+    assert!(err.contains("given more than once"), "{err}");
+}

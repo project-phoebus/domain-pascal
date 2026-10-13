@@ -102,6 +102,12 @@ word cell before longword cell), `proc2_quit.pas` (PROC2_$QUIT
 0xE3F130: word, filler, longword) and `tone_enable.pas` (TONE_$ENABLE
 0xE1ACE8: `addr(...)` through a frame temporary).
 
+Instruction order (codegen-patterns 12.4 R9-R11; bead
+domain-pascal-g5q.8): every unit is compiled with the scheduler on (`dpc
+--schedule`, default `r11:3`) and none changed.  `xpd_reset_ptrace_opts.pas`
+(XPD_$RESET_PTRACE_OPTS 0xE5B156: five stores through A0 in the image's
+field order, which the scheduler does not change).
+
 ## Routines outside the unit
 
 A unit is usually part of a module, and its routines may call a routine
