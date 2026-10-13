@@ -1652,10 +1652,76 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   movea.l (-0x1a4,A6),A0; move.l (A0),(-4,A6)` (0xE4DFFE).  `dpc`
   refuses a routine nested in a nested routine and a reference more than
   one routine out.
-- **Conformance: blocked** (bead domain-pascal-5aw.3).  A unit must hold
-  the parent with its nested routines (they are contiguous before it),
-  and every family in the image is large.  PMAP_$FLUSH (0xE1359C..
-  0xE13A14) needs, in 0xE1359C alone: a run of three word constants
+- **Conformance: one nested routine alone; no whole family** (beads
+  domain-pascal-5aw.3, -5aw.18).  A family (its nested routines, then the
+  parent, contiguous) is the natural unit, and every family in the image
+  is large: `tools/nestsurvey.py families` lists them by extent (first
+  nested routine to the parent's end), smallest 0x112.  The nested code
+  reaches the parent's frame, so a reconstruction must reproduce the
+  parent's heading and the frame offsets the nested code uses; the
+  parent's *body* need not be compared.  The manifest token
+  `enclosing=NAME` (`tests/conformance/README.md`, "Nested routines")
+  compiles the parent after the nested routines and leaves it out of the
+  comparison; it works when the unit's last nested routine ends where the
+  parent starts (`families`, column `adj`: 50 of the 56 families
+  with a single top-level parent).
+  **Byte-identical:** `tests/conformance/ring_discard_packet.pas`, the RING
+  nested routine at 0xE76470 (0x2E, `ring/receive_packet.c`), nested in
+  the module-local 0xE7649E: `movea.l (A6),A2` (the dynamic link, live
+  across the first call), `pea (8,A6)` (its own by-value pointer passed
+  by address), `movea.l (0x16,A2),A0; move.w (A0),-(SP)` (the parent's
+  by-address parameter), one stand-in local for 4 frame bytes the model
+  of section 2 does not explain (`link #-8`, never addressed).
+  What blocks the other candidates (reconstructions from `../source`'s C
+  compiled with `dpc`, or read with `tools/imgdis.sh`; smallest first):
+  - DIR_$GET_ENTRYU 0xE4D500 with 0xE4D460 (family 0x112, the smallest):
+    the parent copies its 8-byte by-value UID into its frame
+    (0xE4D512..0xE4D51A; `dpc-sema` refuses value parameters the callee
+    copies); the nested routine has a byte-copy `for` loop with a
+    run-time count, `lea (0,A6,D1.w),A0; move.b (-1,A1,D1.w),(-0x129,A0)`
+    (0xE4D480..0xE4D488), a byte store at an odd frame offset (0xE4D494
+    `move.b #0x44,(-0x1b5,A6)`, a record field), 8-byte copies into frame
+    displacements `lea (-8,A3),A0; move.l (A0)+,(d,A6)` (0xE4D49A), a
+    status stored from memory and its flags tested (0xE4D4CE `move.l
+    (-0x24,A6),(A2); bne.s`).
+  - The PROC2 module-local 0xE420B8 with 0xE42028 (0x146): three zero
+    words pushed as `clr.w; clr.l` (0xE42088, the run of 1.5), another
+    unit's table indexed through `movea.l #sym,A0` with `ext.l; lsl.l #3`
+    and `muls.w #228` (0xE4203A..0xE42044, 0xE42060), `while` loops over
+    it, `subq.w #1,(d,A0)` with its flags tested (0xE42048).
+  - RINGLOG_$CNTL with 0xE721CC (0x168): 0xE721CC's `for` index is the
+    parent's local (`move.w #1,(-2,A2)` ... `addq.w #1,(-2,A2)`, the
+    memory-index form, refused in `check_uplevel_indices`) and it holds
+    another unit's data base from `movea.l #sym,A0`; the parent adds a
+    `case` table and a 4604-byte copy loop.
+  - FILE_$SET_PROT with 0xE5DEF4 (0x176; 0xE5DEF4 alone is 0x46): a
+    packed record field cleared with `bclr #6,(-0xb,A6)` (0xE5DF08;
+    `dpc` refuses packed records, ref 3.10.7), 8-byte copies into frame
+    displacements; the parent a `case` table whose arms share code.
+  - RIP_$UPDATE_INT with 0xE15888 (0x1A4): two-bit fields extracted with
+    `move.w #0xc0,D0; and.b (d,An),D0; lsr.w #6,D0` and stored with
+    `andi.b; ori.b` (0xE158B6, 0xE158CE), a 10-byte copy `(A2)+,(A3)+`
+    in longwords and a word (0xE158EC).
+  - Nested routines alone, adjacent to their parent: PROC2_$SUSPEND's
+    0xE4120C (0x5E) reads an element of another unit's array, `movea.l
+    #sym,A0; mulu.w #0xe4,D0; move.w (-0x4a,A0,D0.w),-(SP)` (0xE41222..
+    0xE4122C; `dpc` refuses arrays outside the unit's data and the frame,
+    5.2) and sets bit 31 of a status with `bset #7,(-8,A2)` after testing
+    its low word, `tst.w (-6,A2)` (the layout of `status_$t` is Uncertain,
+    9); AST_$FREE_PAGES's 0xE03FBC (0x50) updates a byte field
+    `move.b (0x10,A0),D1; sub.b D0,D1; movea.l (8,A2),A0; move.b
+    D1,(0x10,A0)` (0xE03FF2..0xE03FFC, the pointer reloaded; `dpc`
+    refuses a store whose destination and value both need a register);
+    PCHIST_$CNTL's 0xE5CD66 (0x50, the sibling call `movea.l A2,A1; bsr.w
+    0xE5CD02` at 0xE5CDA2) needs 0xE5CD02 before it, whose `for` index is
+    the parent's local `(-0x18,A2)` with an unsigned count guarded by
+    `tst.w; beq` (7.4, not supported either); IO_$ACQUIRE's 0xE1A4DC
+    (0x4C) is a `case` whose four labels share one arm, a comparison as
+    the result; the ACL_ 0xE45154 (0x48) compares 8-byte records with
+    `cmpm.l (A3)+,(A2)+`.  The AUDIT 0xE7128A (0x30) and FLOP_BOOT
+    0xE323A8 are not adjacent to their parents (routines lie between).
+  PMAP_$FLUSH (0xE1359C..0xE13A14) needs, in 0xE1359C alone: a run of
+  three word constants
   (0xE135D0 `clr.l -(SP); clr.w -(SP)` for three zero words: the
   rightmost pair merged, one site; 1.5 rejects such runs); `pea (d,An)`
   of an object through a pointer loaded from memory (0xE135E2..0xE135EA
@@ -1668,15 +1734,10 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   constants held in registers (0xE13696..0xE136A2), a strength-reduced
   pointer kept in a frame temporary (0xE137E4..0xE137F0 `move.l
   A1,(-0x78,A6); movea.l (-0x78,A6),A1`), a function body of many
-  statements (12.4 R5), and more.  The smallest families
-  (`tools/nestsurvey.py`, nested routine to the end of its parent) are
-  no easier: DIR_$GET_ENTRYU 0xE4D500 with 0xE4D460 (0x112 bytes: a
-  byte-copy `dbf` loop, 8-byte `(A0)+` copies into frame displacements),
-  the PROC2 module-local 0xE420B8 with 0xE42028 (0x146: `muls.w #228`
-  indexing in `while` loops), RINGLOG_$CNTL with 0xE721CC (0x168: a
-  `case` table and the frame-held `for` index above), FILE_$SET_PROT
-  with 0xE5DEF4 (0x176: a `case` table, 8-byte copies).  Nested routines
-  are covered by goldens (`tests/golden/nested/`) instead.
+  statements (12.4 R5), and more.  The rest of the nesting rules are
+  covered by goldens (`tests/golden/nested/`; nested functions called by
+  a sibling, in expressions, held across a call, returning a pointer,
+  reading the parent's parameters and locals, recursive: `fn_*`).
 - **Arguments:** nested routines also take ordinary stack arguments
   (0xE1359C reads `(8,A6)`, `(0xC,A6)`, `(0x10,A6)`), with the value
   conventions of `internal` routines.

@@ -29,6 +29,12 @@ routine the unit declares `internal; extern' (its Pascal name upper-cased,
 a local symbol), and ADDR must lie in the unit's map module, outside the
 unit, with no map name; it is forwarded the same way, and the reference is
 resolved with `--defsym NAME=0xADDR' at link time (`check --local-sym').
+`enclosing=NAME' (.pas fragments only, at most once; `check --enclosing
+NAME'): the unit's routines are nested in routine NAME, dpc's symbol for
+it, which follows them; it is compiled with them (their code reaches its
+frame), must be linked at the unit's end, where the map has NAME (or no
+name, when NAME is not a map name), and is left out of every comparison
+(codegen-patterns 6; tests/conformance/README.md, "Nested routines").
 
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
@@ -323,15 +329,26 @@ def unit_routines(specs, linkmap, length=None):
 
 
 def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
-          work=None, name=None, local_syms=None):
+          work=None, name=None, local_syms=None, enclosing=None):
     """Check one assembly unit.  Returns True on a match.  Raises SetupError
     on bad input.  `work' is the scratch directory (default: from `src'),
     `name' the unit's name in the result lines (default: `src').
     `local_syms' maps the symbols of module-local routines outside the
     unit, which the map does not name, to their image addresses
-    (`module-routines=NAME=0xADDR')."""
+    (`module-routines=NAME=0xADDR').
+    `enclosing' is the symbol of the routine the unit's nested routines
+    belong to, whose code follows them in `src' and in the image and is
+    not compared (`enclosing=NAME'; README.md, "Nested routines")."""
     routines = unit_routines(specs, linkmap, length)
     lo, hi = routines[0].addr, routines[-1].end
+    if enclosing is not None:
+        named = linkmap.names_at(hi)
+        if named and enclosing not in named:
+            raise SetupError('enclosing=%s: the map has %s at the end of the unit, 0x%X'
+                             % (enclosing, named[0], hi))
+        if not named and linkmap.lookup(enclosing) is not None:
+            raise SetupError('enclosing=%s: a map name, but not at the end of the unit, 0x%X'
+                             % (enclosing, hi))
     section_addrs = dict(section_addrs or {})
     name = name or display_path(src)
 
@@ -422,6 +439,16 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
 
     # 3. bytes
     problems = []
+    # the enclosing routine of nested routines: compiled after them, at
+    # the end of the unit, and left out of every comparison
+    if enclosing is not None:
+        at = linked.get(enclosing)
+        if at is None:
+            raise SetupError('enclosing=%s: no such symbol in %s' % (enclosing, src))
+        if at != hi:
+            problems.append('enclosing routine %s linked at 0x%X, not at the end of the '
+                            'unit, 0x%X' % (enclosing, at, hi))
+        ours = ours[:hi - lo]
     if padbytes.strip(b'\0'):
         problems.append('fragment pad 0x%X..0x%X is not zero: %s'
                         % (lo - pad, lo, padbytes.hex()))
@@ -440,8 +467,10 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     nrel = 0
     for sec in code:
         for off, typ, sym, add in relocs.get(sec, []):
-            nrel += 1
             p = base[sec] + off
+            if enclosing is not None and p >= hi:
+                continue
+            nrel += 1
             size = RELOC_SIZE.get(typ)
             if size is None:
                 problems.append('0x%X: relocation type %s not handled' % (p, typ))
@@ -629,6 +658,7 @@ def encoded_calls(src):
 
 
 MODULE_ROUTINES_TOKEN = 'module-routines='
+ENCLOSING_TOKEN = 'enclosing='
 
 
 def module_routine_args(tokens, routines, linkmap):
@@ -699,7 +729,7 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect, align, a5, mods = [], {}, [], [], []
+        specs, sect, align, a5, mods, encl = [], {}, [], [], [], []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -711,6 +741,8 @@ def run_manifest(path, linkmap, dpc):
                 a5.append(t)
             elif t.startswith(MODULE_ROUTINES_TOKEN):
                 mods.append(t)
+            elif t.startswith(ENCLOSING_TOKEN):
+                encl.append(t[len(ENCLOSING_TOKEN):])
             else:
                 specs.append(t)
         try:
@@ -725,16 +757,25 @@ def run_manifest(path, linkmap, dpc):
             opts += a5opts
             if mods and not src.endswith('.pas'):
                 raise SetupError('%s: module-routines applies to .pas units only' % toks[0])
+            if len(encl) > 1 or encl and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', encl[0]):
+                raise SetupError('%s: want one enclosing=NAME' % toks[0])
+            if encl and not src.endswith('.pas'):
+                raise SetupError('%s: enclosing applies to .pas units only' % toks[0])
+            # dpc's symbols are upper-cased (CLAUDE.md 3.15)
+            enclosing = encl[0].upper() if encl else None
             if src.endswith('.pas'):
                 routines = unit_routines(specs, linkmap)
                 frag = fragment_args(routines, linkmap)
                 mopts, local = module_routine_args(mods, routines, linkmap)
                 if mopts and not frag:
                     raise SetupError('%s: module-routines applies to fragments only' % toks[0])
+                if enclosing and not frag:
+                    raise SetupError('%s: enclosing applies to fragments only' % toks[0])
                 asm = compile_pas(src, dpc, work, frag + opts + mopts)
             else:
                 local = {}
-            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0], local_syms=local)
+            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0], local_syms=local,
+                       enclosing=enclosing)
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
             errors += 1
@@ -762,6 +803,9 @@ def main(argv=None):
                    help='place a non-code section')
     c.add_argument('--local-sym', action='append', default=[], metavar='NAME=0xADDR',
                    help='resolve module-local symbol NAME (not in the map) to ADDR')
+    c.add_argument('--enclosing', default=None, metavar='NAME',
+                   help="the routine after the unit that its nested routines belong to; "
+                        "compiled, not compared")
     c.add_argument('--map', default=None)
     m = sub.add_parser('manifest', help='check every entry of a manifest')
     m.add_argument('file')
@@ -780,7 +824,7 @@ def main(argv=None):
             local = dict(parse_section_addr(s, '--local-sym wants NAME=0xADDR')
                          for s in args.local_sym)
             return 0 if check(args.file, args.specs, linkmap, sect, args.len,
-                              local_syms=local) else 1
+                              local_syms=local, enclosing=args.enclosing) else 1
         bad, errors = run_manifest(args.file, linkmap, args.dpc)
         return 2 if errors else 1 if bad else 0
     except SetupError as e:

@@ -22,6 +22,10 @@
 #         NAME=0xADDR is a module-local routine the map does not name,
 #         declared `internal; extern' as NAME in the unit (test-only;
 #         README.md, "Routines outside the unit").
+#   ENCL  enclosing=NAME (.pas fragments only): the unit's routines are
+#         nested in routine NAME (dpc's symbol), whose code follows them
+#         at the unit's end; it is compiled with them and not compared
+#         (README.md, "Nested routines").
 #
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.
@@ -121,3 +125,9 @@ tests/conformance/mst_set_touch_ahead_cnt.pas  MST_$SET_TOUCH_AHEAD_CNT  --secti
 # Stores in source order (codegen-patterns 12.4 R10, bead
 # domain-pascal-g5q.8): a store is not moved by the scheduler.
 tests/conformance/xpd_reset_ptrace_opts.pas  XPD_$RESET_PTRACE_OPTS
+# Nested routines (codegen-patterns 6; bead domain-pascal-5aw.18): a nested
+# procedure alone, its enclosing routine compiled after it with the heading
+# the nested code reaches and not compared (`enclosing='): the dynamic link
+# `(A6)' in A2 across a call, an uplevel by-address parameter dereferenced,
+# its own by-value parameter passed by address with `pea (8,A6)'.
+tests/conformance/ring_discard_packet.pas  0xE76470:2E  enclosing=RECEIVE_PACKET

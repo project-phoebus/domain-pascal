@@ -71,5 +71,30 @@ class FunctionTest(unittest.TestCase):
             ins('jsr 0xe20b12', 'movew %d2,%d0'), 0))
 
 
+class FamilyTest(unittest.TestCase):
+    def routine(self, r0, calls=(), a1=None, dyn=()):
+        r = nestsurvey.R('DIR', r0, r0 + 0x10, None, [], -4)
+        r.calls, r.a1, r.dyn = list(calls), a1, list(dyn)
+        return r
+
+    def test_top_parent_through_nested_parents(self):
+        # DIR 0xE4F034 is nested in 0xE4F100, itself nested in 0xE4F3BA,
+        # which an A1 call from the top-level 0xE4FE0A makes nested too
+        top = self.routine(0xE4FE0A)
+        lvl1 = self.routine(0xE4F3BA, a1=0xE4F3C2)
+        lvl2 = self.routine(0xE4F100, dyn=[(0xE4F108, 'moveal %fp@,%a2')])
+        lvl3 = self.routine(0xE4F034, dyn=[(0xE4F03C, 'moveal %fp@,%a0')])
+        lvl1.calls = [nestsurvey.Call(top, 0xE4FE40, lvl1.r0, 'fp', '', None)]
+        lvl2.calls = [nestsurvey.Call(lvl1, 0xE4F400, lvl2.r0, '-', '', None)]
+        lvl3.calls = [nestsurvey.Call(lvl2, 0xE4F200, lvl3.r0, '-', '', None)]
+        by_start = {r.r0: r for r in (top, lvl1, lvl2, lvl3)}
+        nss = {lvl1.r0, lvl2.r0, lvl3.r0}
+        for r in (lvl1, lvl2, lvl3):
+            self.assertEqual(nestsurvey.top_parent(r, by_start, nss), top.r0)
+        # two callers of a `(A6)' routine: no single parent
+        lvl3.calls.append(nestsurvey.Call(top, 0xE4FE50, lvl3.r0, '-', '', None))
+        self.assertIsNone(nestsurvey.top_parent(lvl3, by_start, nss))
+
+
 if __name__ == '__main__':
     unittest.main()

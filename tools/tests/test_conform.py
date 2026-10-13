@@ -198,6 +198,30 @@ class ConformTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('symbol AST_$PAGE_ZERO linked at 0xE00EEE, map has 0xE00EEC', out)
 
+    def test_enclosing_routine_not_compared(self):
+        # `enclosing=': the routine after the unit is compiled with it and
+        # left out (nested routines and their parent, README.md "Nested
+        # routines"); exercised here on 0xE00EB0 and the routine after it
+        path = os.path.join(HANDASM, 'ast_page_zero.s')
+        ok, out = self.run_check(path, ['0xE00EB0'], enclosing='AST_$PAGE_ZERO')
+        self.assertTrue(ok, out)
+        self.assertEqual(out.split('  ')[0], 'OK module-local@0xE00EB0 0xE00EB0 0x3C')
+        # without it, the routine after the unit is extra code
+        ok, out = self.run_check(path, ['0xE00EB0'])
+        self.assertFalse(ok)
+        self.assertIn('size: ours 0x66 bytes', out)
+        # it must be the map's routine at the end of the unit
+        with self.assertRaisesRegex(conform.SetupError, 'the map has AST_\\$PAGE_ZERO'):
+            self.run_check(path, ['0xE00EB0'], enclosing='ZERO_PAGE')
+        with self.assertRaisesRegex(conform.SetupError, 'not at the end of the unit'):
+            self.run_check(path, ['0xE00EB0:3A'], enclosing='AST_$PAGE_ZERO')
+        # a change in the unit is still seen
+        bad = self.variant('ast_page_zero.s', 'apz_enclosing_bad.s',
+                           '\tlink.w\t%fp,#-12', '\tlink.w\t%fp,#-16')
+        ok, out = self.run_check(bad, ['0xE00EB0'], enclosing='AST_$PAGE_ZERO')
+        self.assertFalse(ok)
+        self.assertIn('bytes differ first at 0xE00EB3', out)
+
     def test_not_contiguous_is_an_error(self):
         with self.assertRaisesRegex(conform.SetupError, 'not contiguous'):
             self.run_check(os.path.join(HANDASM, 'ast_page_zero.s'),
@@ -446,6 +470,31 @@ class ConformTest(unittest.TestCase):
         rc, out = self.manifest('mr_local_off.txt', unit)
         self.assertEqual(rc, 2, out)
         self.assertIn('call of internal routine `ALLOC_SEGS`', out)
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_enclosing(self):
+        # the RING nested routine 0xE76470 before its parent 0xE7649E
+        unit = 'tests/conformance/ring_discard_packet.pas  0xE76470:2E'
+        rc, out = self.manifest('encl_on.txt', unit + '  enclosing=receive_packet')
+        self.assertEqual(rc, 0, out)
+        # without it, the parent is extra code
+        rc, out = self.manifest('encl_off.txt', unit)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('size: ours', out)
+        # a unit that ends before the parent's symbol
+        rc, out = self.manifest('encl_short.txt', 'tests/conformance/ring_discard_packet.pas  '
+                                '0xE76470:2C  enclosing=RECEIVE_PACKET')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('enclosing routine RECEIVE_PACKET linked at 0xE7649E, not at the end '
+                      'of the unit, 0xE7649C', out)
+        for line, why in ((unit + '  enclosing=A  enclosing=B', 'want one enclosing=NAME'),
+                          (unit + '  enclosing=NO_SUCH', 'no such symbol'),
+                          (unit + '  enclosing=NETBUF_$RTN_HDR', 'a map name, but not at'),
+                          ('tests/conformance/handasm/proc1_tst_lock.s  PROC1_$TST_LOCK  '
+                           'enclosing=X', 'applies to .pas units only')):
+            rc, out = self.manifest('encl_bad.txt', line)
+            self.assertEqual(rc, 2, out)
+            self.assertIn(why, out)
 
     @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
     def test_manifest_forwards_module_routines(self):

@@ -215,3 +215,24 @@ Tests:
 - `nested/recursion` - codegen-patterns 6, 4: a recursive nested routine
   passing its own link (0xE397D0), a nested function reading the
   enclosing local through `(A6)`, A5 inherited by nested routines.
+- Nested functions (codegen-patterns 6, 3, 12.4; bead
+  domain-pascal-5aw.18):
+  - `nested/fn_sibling` - a nested function called by a sibling
+    (`movea.l An,A1`, 0xE13718 `movea.l A4,A1`) and by its parent (`movea.l A6,A1`,
+    0xE13928), its link copied to A2 across its call (0xE135A4), the
+    result computed in a scratch register and moved to D0 (0xE148E0);
+  - `nested/fn_expr` - a nested function's D0 in its parent's arithmetic
+    (copied first, 0xE01BA2) and in a comparison (0xE0082C);
+  - `nested/fn_held` - a nested function's result variable held in D2
+    across a call and moved to D0 (NETBUF_$RTNVA 0xE0ED4E, PKT_$NEXT_ID
+    0xE124D0), the link in A2;
+  - `nested/fn_pointer` - a nested pointer function, the memory form
+    through its result slot into A0 (0xE6AA38), its A0 dereferenced by
+    the parent (0xE4EA0E);
+  - `nested/fn_uplevel` - the parent's by-value parameter, by-address
+    parameter (slot, then object: 0xE135DA) and local read through the
+    link;
+  - `nested/fn_recursion` - a recursive nested function passing its own
+    copy of A1 (0xE397D0), parameter and link in D2/A2 across the call,
+    the result variable in D0, the unpopped call before the join
+    (0xE04700).

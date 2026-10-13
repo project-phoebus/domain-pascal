@@ -102,6 +102,11 @@ word cell before longword cell), `proc2_quit.pas` (PROC2_$QUIT
 0xE3F130: word, filler, longword) and `tone_enable.pas` (TONE_$ENABLE
 0xE1ACE8: `addr(...)` through a frame temporary).
 
+Nested routines (codegen-patterns 6; bead domain-pascal-5aw.18; "Nested
+routines" below): `ring_discard_packet.pas` (the RING nested routine at
+0xE76470, nested in the module-local 0xE7649E: the dynamic link in A2
+across a call, an uplevel by-address parameter dereferenced).
+
 Instruction order (codegen-patterns 12.4 R9-R11; bead
 domain-pascal-g5q.8): every unit is compiled with the scheduler on (`dpc
 --schedule`, default `r11:3`) and none changed.  `xpd_reset_ptrace_opts.pas`
@@ -157,6 +162,29 @@ to MST_$REMAP_PRIVI, TERM_$SEND_KBD_STRING 0xE1AB20 `6186` to the
 module-local 0xE1AAA8).  The call then names its routine only in that
 comment; `tools/conform.py` counts it as a reference of a module-local
 NAME, and the byte comparison checks the address.
+
+## Nested routines
+
+A nested routine comes before its enclosing routine (codegen-patterns 6,
+"Order"), so a family is contiguous: its nested routines, then the parent.
+Every family in the image is large (`python3 tools/nestsurvey.py
+families`, smallest extent 0x112), and every parent needs more than `dpc`
+has (codegen-patterns 6, "Conformance").  A unit may therefore be the
+nested routines of a parent without the parent, with the manifest token
+
+- `enclosing=NAME` (`.pas` fragments only, at most once):
+
+NAME is `dpc`'s symbol for the enclosing routine (its Pascal name
+upper-cased; the map name if it has one).  The `.pas` holds the
+enclosing routine with the heading and the locals the nested code reaches
+(their frame offsets are visible in it, so they must be reproduced) and a
+stand-in body (its header says so).  `dpc` emits it after the nested
+routines; `tools/conform.py` checks that the symbol NAME lands at the
+unit's end, which must be where the map has NAME (or no name, for a
+routine the map does not name), and leaves its bytes and relocations out
+of every comparison.  `conform.py check` takes the same as `--enclosing
+NAME`.  `ring_discard_packet.pas` (the RING nested routine at 0xE76470,
+before the module-local 0xE7649E) is such a unit.
 
 ## Constants in the code section
 

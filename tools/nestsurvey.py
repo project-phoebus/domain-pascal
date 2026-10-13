@@ -38,6 +38,14 @@ usage:
                                     # split into functions (a caller reads
                                     # D0 after a call) and the rest, and
                                     # their smallest `link' sizes
+    tools/nestsurvey.py families    # per top-level parent, smallest first:
+                                    # the family's extent (first nested
+                                    # routine to the parent's end), the
+                                    # parent's size, its nested routines
+                                    # with their sizes, and whether the
+                                    # last one ends where the parent starts
+                                    # (conformance candidates, bead
+                                    # domain-pascal-5aw.18)
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.  The per-routine
 instructions are cached in tmp/nestsurvey.cache.
@@ -463,6 +471,50 @@ def frames(rs, by_start):
                     '0x%06X%s link #%d' % (r.r0, ' ' + r.name if r.name else '', r.link) for r in small))
 
 
+def top_parent(r, by_start, nss):
+    """The top-level routine `r' is nested in (through nested parents), or
+    None when some level has no single parent."""
+    seen = set()
+    while True:
+        ps = parents(r)
+        if len(ps) != 1:
+            return None
+        p = next(iter(ps))
+        if p not in nss:
+            return p
+        if p in seen:
+            return None
+        seen.add(p)
+        r = by_start[p]
+
+
+def families(rs, by_start):
+    ns = nested(rs)
+    nss = {r.r0 for r in ns}
+    fams = defaultdict(list)
+    for r in ns:
+        fams[top_parent(r, by_start, nss)].append(r)
+    rows = []
+    for top, kids in fams.items():
+        if top is None:
+            continue
+        p = by_start[top]
+        lo = min(k.r0 for k in kids)
+        last = max(kids, key=lambda k: k.r0)
+        rows.append((p.r1 - lo, lo, p, sorted(kids, key=lambda k: k.r0), last.r1 == top))
+    print('extent  range            seg          parent                    size  '
+          'adj  nested (size)')
+    for ext, lo, p, kids, adj in sorted(rows, key=lambda x: (x[0], x[1])):
+        print('%6X  %06X..%06X  %-12s %06X %-18s %4X  %-3s  %s' % (
+            ext, lo, p.r1, p.seg, p.r0, p.name or 'module-local', p.r1 - p.r0,
+            'yes' if adj else 'no',
+            ' '.join('%06X(%X)' % (k.r0, k.r1 - k.r0) for k in kids)))
+    loose = fams.get(None, [])
+    if loose:
+        print('no single top-level parent: %s'
+              % ' '.join('%06X' % k.r0 for k in sorted(loose, key=lambda k: k.r0)))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -482,6 +534,8 @@ def main(argv):
         slots(rs)
     elif cmd == 'frames':
         frames(rs, by_start)
+    elif cmd == 'families':
+        families(rs, by_start)
     else:
         print(__doc__)
         return 2
