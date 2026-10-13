@@ -1,10 +1,10 @@
 .text
 WORKER:
-link.w %fp,#0
+link.w %fp,#-4
 pea (%a5)
 lea (.Ldata).l,%a5
 clr.w (%a5)
-movea.l (-4,%fp),%a5
+movea.l (-8,%fp),%a5
 unlk %fp
 rts
 .globl M_$USES

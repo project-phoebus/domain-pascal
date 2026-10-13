@@ -81,8 +81,9 @@ fn tst_lock_analyses() {
     let res = r.result.as_ref().unwrap();
     assert_eq!(res.reg, ResultReg::Data);
     assert_eq!(p.types.size(res.ty), 1);
-    // The result variable has a frame slot (open question, see
-    // codegen-patterns 2: the image has `link #-4`).
+    // The result variable has a frame slot, the routine's only frame
+    // object (codegen-patterns 2, "Frame size": the image has `link #-4`
+    // and never touches it).
     let rv = p.var(res.var.unwrap());
     assert_eq!(rv.storage, Storage::Frame { offset: -1 });
     assert_eq!(r.frame_size, 1);

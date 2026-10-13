@@ -1,6 +1,6 @@
 .text
 READ_INTERNAL:
-link.w %fp,#0
+link.w %fp,#-4
 movea.l (0x10,%fp),%a0
 move.w (0x14,%a5),(%a0)
 unlk %fp

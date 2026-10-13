@@ -41,15 +41,19 @@
   value; val_param for the rest: every caller pushes values
   (NETWORK_$PAGE_SERVER 0xE115F0 `move.l D2,-(SP); jsr AST_$PAGE_ZERO').
 
-  The frame: 0xE00EB0 has `link #-12' and never touches it.  Unused
-  frames are ordinary in the image (306 compiled routines without a loop
-  never touch theirs, mostly 4 or 8 bytes), so locals kept in registers
-  or optimised away still get their slots; routines whose only visible
-  work is one or two `dbf' loops have 12 bytes more often than any other
-  size (35 of 132 with an untouched frame: NET_IO_$FREE_ASID 0xE74E84,
-  FLP_$SHUTDOWN 0xE3E228, ...), but PKT_$DUMP_DATA 0xE127E6 has 4 for a
-  loop whose index it keeps in D3.  What the original declared is not
-  known; `i' plus `unknown' stand in for the 12 bytes. }
+  The frame: 0xE00EB0 has `link #-12' and never touches it.  The
+  frame-size model of codegen-patterns 2 ("Frame size") explains 8 of the
+  12 bytes: the 4-byte slot at the top that every routine that is not a
+  global symbol reserves, then `i' (2 bytes, held in D0 by the `dbf'
+  loop), rounded up.  The other 4 bytes are not explained: unused frames
+  are ordinary in the image (locals kept in registers or never needed
+  still get their slots), and routines whose only visible work is one or
+  two `dbf' loops have 12 bytes more often than any other size (35 of 132
+  with an untouched frame: NET_IO_$FREE_ASID 0xE74E84, FLP_$SHUTDOWN
+  0xE3E228, ...), but PKT_$DUMP_DATA 0xE127E6 has 4 for a loop whose
+  index it keeps in D3, and a `for' loop costs no hidden slot (section
+  7.4, "Hidden frame cost").  What the original declared is not known;
+  `unknown' stands in for the 4 bytes. }
 module ast_;
 const
   pmap_lock_id = 16#14;     { the ML_ lock of the PMAP; PMAP_LOCK_ID in ../source }
@@ -68,9 +72,9 @@ procedure mmu_$remove(ppn: integer32); options(val_param, extern);
 procedure zero_page(ppn: integer32); internal;
 var
   i: integer;
-  { Stand-in, not from the original: fills the frame to 0xE00EB0's
-    `link #-12' (codegen-patterns 2, "Untouched frames"). }
-  unknown: array[1..5] of integer;
+  { Stand-in, not from the original: the 4 bytes of 0xE00EB0's
+    `link #-12' the frame-size model leaves unexplained (see above). }
+  unknown: integer32;
 begin
   mmu_$install(ppn, addr(ast_$zero_buff), 0, 16#16);
   for i := 0 to 255 do ast_$zero_buff[i] := 0;

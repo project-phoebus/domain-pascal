@@ -14,7 +14,7 @@ move.w #1,(X).l
 unlk %fp
 rts
 WORKER:
-link.w %fp,#0
+link.w %fp,#-4
 move.w #2,(X).l
 unlk %fp
 rts

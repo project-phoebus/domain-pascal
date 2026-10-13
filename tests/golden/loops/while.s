@@ -1,6 +1,6 @@
 .text
 WHL_$COUNT:
-link.w %fp,#0
+link.w %fp,#-4
 clr.w (W).l
 bra.s 2f
 .balignw 4,0x2048
@@ -12,7 +12,7 @@ blt.s 1b
 unlk %fp
 rts
 WHL_$SCAN:
-link.w %fp,#0
+link.w %fp,#-4
 move.w #1,(N).l
 bra.s 2f
 .balignw 4,0x2048
@@ -28,7 +28,7 @@ beq.s 1b
 unlk %fp
 rts
 WHL_$WALK:
-link.w %fp,#-4
+link.w %fp,#-8
 move.l (8,%fp),%d0
 movea.l (0xc,%fp),%a0
 movea.l %d0,%a1
@@ -43,7 +43,7 @@ bne.s 1b
 unlk %fp
 rts
 WHL_$EXITS:
-link.w %fp,#0
+link.w %fp,#-4
 bra.s 2f
 .balignw 4,0x2048
 1:
@@ -60,7 +60,7 @@ clr.w (N).l
 unlk %fp
 rts
 WHL_$REPEAT:
-link.w %fp,#0
+link.w %fp,#-4
 .balignw 4,0x2048
 1:
 tst.b (B).l

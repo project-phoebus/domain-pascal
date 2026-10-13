@@ -30,9 +30,10 @@
   by value (its callers push `move.w #2' / `clr.w', 0xE32D86 and
   0xE32E56 per the C header).
 
-  The frame: `link #-4', never touched (codegen-patterns 2, "Untouched
-  frames").  What the original declared is not known; `unknown' stands in
-  for the 4 bytes. }
+  The frame: `link #-4', never touched.  It is the 4-byte slot every
+  routine that is not a global symbol reserves at the top of its frame
+  (codegen-patterns 2, "Frame size"; dpc gives it to `internal' and
+  nested routines), so the routine needs no locals. }
 module sio_dtte;
 type
   ec_$eventcount_t = record
@@ -52,9 +53,6 @@ type
 procedure ec_$init(var ec: ec_$eventcount_t); extern;
 
 procedure init_dtte(var dtte: dtte_t; discipline: integer); internal;
-var
-  { Stand-in, not from the original: fills the frame to `link #-4'. }
-  unknown: integer32;
 begin
   ec_$init(dtte.input_ec);
   ec_$init(dtte.output_ec);

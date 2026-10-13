@@ -1013,7 +1013,9 @@ fn calls_and_fill() {
     let zp = &m.functions[0];
     assert_eq!(zp.symbol, "ZERO_PAGE");
     assert!(!zp.global);
-    assert_eq!(zp.frame_size, 2);
+    // The 4-byte slot of a routine that is not a global symbol, then `i`
+    // (codegen-patterns 2, "Frame size").
+    assert_eq!(zp.frame_size, 6);
     let kinds: Vec<&StmtKind> = zp.body.iter().map(|s| &s.kind).collect();
     assert_eq!(
         kinds,

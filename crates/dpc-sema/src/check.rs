@@ -1554,31 +1554,43 @@ impl<'t> Checker<'t> {
 
     fn routine_body(&mut self, id: RoutineId, body: &ast::RoutineBody) {
         let level = self.routines[id.0 as usize].level;
-        // A nested routine's frame starts with a pointer-sized slot for
-        // its static link (codegen-patterns 6, `tools/nestsurvey.py`): of
-        // the image's 86 nested routines none has `link #0` and none
-        // addresses `(-4..-1,A6)` except three that store a link there
+        // A routine that is not a global symbol (a nested routine, or an
+        // `internal` one, ref 5.5.4 p. 5-17) starts its frame with a
+        // pointer-sized slot; locals follow below it (codegen-patterns 2,
+        // "Frame size", and 6, "Frame"; `tools/nestsurvey.py slots`).
+        // Nested: none of the image's 86 has `link #0`, none addresses
+        // `(-4..-1,A6)` except three that store a static link there
         // (0xE4F3BA `move.l A1,(-4,A6)`, read by its own nested routines
         // as `(-4,A0)`; 0xE4EB40, 0xE4DFFE); 0xE1359C has `link #-4` and
-        // no locals.  Locals follow below it.
-        let frame = if self.routines[id.0 as usize].parent.is_some() {
-            self.target.pointer_size()
-        } else {
+        // no locals.  Unnamed, not nested: 353 of 355 have a frame and
+        // leave `(-4..-1,A6)` alone (exceptions 0xE6B074 `link #0`,
+        // 0xE70396), against 190 `link #0` and 320 that address it among
+        // the 1194 map-named routines.
+        let frame = if self.routines[id.0 as usize].global {
             0
+        } else {
+            self.target.pointer_size()
         };
         self.ctx.push(RoutineCtx { id, level, frame });
         self.scopes.push(Scope::default());
 
-        // Frame order (Uncertain, codegen-patterns 2): the function result
-        // variable, then local copies of value parameters, then locals.
-        if let Some(res) = self.routines[id.0 as usize].result.clone() {
-            let offset = self.alloc_frame(res.ty);
+        // Frame order (codegen-patterns 2, "Frame size"): the slot above,
+        // then local copies of value parameters (their place is
+        // Uncertain), then locals, and the function result variable last,
+        // below the locals (Uncertain, sites both ways: PKT_$NEXT_ID
+        // 0xE1248E keeps a word local at (-2,A6) in its `link #-4', the
+        // result in D2; PEB_$GET_STATUS 0xE5ADCA stores its result at
+        // (-16,A6), the bottom of `link #-16', and reloads it into D0; but
+        // FLP_$CINIT 0xE3E002 returns (-4,A6) with locals below it).  The
+        // variable is created here, so that nested routines can name it,
+        // and placed after the declarations.
+        let result_var = if let Some(res) = self.routines[id.0 as usize].result.clone() {
             let name = self.routines[id.0 as usize].name.clone();
             let span = self.routines[id.0 as usize].span;
             let var = self.add_var(Var {
                 name,
                 ty: res.ty,
-                storage: Storage::Frame { offset },
+                storage: Storage::Frame { offset: 0 },
                 owner: Some(id),
                 init: None,
                 span,
@@ -1586,7 +1598,10 @@ impl<'t> Checker<'t> {
             let rt = &mut self.routines[id.0 as usize];
             rt.result.as_mut().unwrap().var = Some(var);
             rt.frame_vars.push(var);
-        }
+            Some((var, res.ty))
+        } else {
+            None
+        };
         let nparams = self.routines[id.0 as usize].params.len();
         for i in 0..nparams {
             let (var, ty, copy) = {
@@ -1607,6 +1622,10 @@ impl<'t> Checker<'t> {
         let mut locals = Vec::new();
         // Nested routines are recorded in Routine::nested by heading().
         self.decls(&body.decls, Some(id), &mut locals);
+        if let Some((var, ty)) = result_var {
+            let offset = self.alloc_frame(ty);
+            self.vars[var.0 as usize].storage = Storage::Frame { offset };
+        }
         let block = self.block(&body.block);
 
         self.scopes.pop();

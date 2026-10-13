@@ -36,8 +36,11 @@
   C has uint16_t, here 0..65535; the buffer as words, the worker copies
   words); `& 16#fffe' (the C's `& 0xFFFE'; `moveq #-2'); the pointer sum
   spelled with type transfers (ref p. 4-197); the copy as a `for' loop
-  over two 1-based arrays; `unknown', a stand-in for the rest of the
-  worker's untouched 16-byte frame (codegen-patterns 2). }
+  over two 1-based arrays; `unknown', a stand-in for the 4 bytes of the
+  worker's untouched 16-byte frame that the frame-size model of
+  codegen-patterns 2 ("Frame size") leaves unexplained: the 4-byte slot
+  of a routine that is not a global symbol, `src' (4) and `i' (2) make
+  10, rounded to 12. }
 module log_;
 const
   log_buffer_size = 16#400;
@@ -59,7 +62,7 @@ procedure read_internal(var buffer: log_$buf_t; offset: pinteger;
 var
   src: log_$buf_ptr_t;
   i: integer;
-  unknown: array[1..5] of integer;
+  unknown: integer32;
 begin
   if logfile_ptr = nil then begin
     actual_len := 0;

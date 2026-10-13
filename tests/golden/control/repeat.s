@@ -1,6 +1,6 @@
 .text
 RPT_$ONE:
-link.w %fp,#0
+link.w %fp,#-4
 clr.w (W).l
 .balignw 4,0x2048
 1:
@@ -10,7 +10,7 @@ bne.s 1b
 unlk %fp
 rts
 RPT_$OR_ELSE:
-link.w %fp,#0
+link.w %fp,#-4
 clr.w (R).l
 .balignw 4,0x2048
 1:

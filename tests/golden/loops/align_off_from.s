@@ -11,7 +11,7 @@ dbf %d0,1b
 unlk %fp
 rts
 ALO_$WAIT:
-link.w %fp,#0
+link.w %fp,#-4
 .balignw 4,0x2048
 1:
 move.w #1,(W).l
@@ -30,7 +30,7 @@ dbf %d0,1b
 unlk %fp
 rts
 ALO_$IDLE:
-link.w %fp,#0
+link.w %fp,#-4
 1:
 move.w #1,(W).l
 cmpi.w #3,(W).l

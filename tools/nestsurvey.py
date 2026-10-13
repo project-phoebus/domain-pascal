@@ -34,6 +34,10 @@ usage:
                                     # link's register by whether it calls
     tools/nestsurvey.py slots       # who addresses (-4..-1,A6): map-named,
                                     # unnamed, nested routines
+    tools/nestsurvey.py frames      # the frame-size model: the same classes
+                                    # split into functions (a caller reads
+                                    # D0 after a call) and the rest, and
+                                    # their smallest `link' sizes
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.  The per-routine
 instructions are cached in tmp/nestsurvey.cache.
@@ -405,6 +409,60 @@ def slots(rs):
             print('    -4 slot addressed: %s' % ', '.join('0x%06X' % a for a in odd))
 
 
+_JSR = re.compile(r'^jsr\s+0x([0-9a-f]+)')
+_POP = re.compile(r'^(addq[wl]\s+#\d+,%sp|lea %sp@\(\d+\),%sp)$')
+
+
+def reads_d0_after(insns, i):
+    """Whether the instruction after the call at insns[i] (after its pop,
+    if any) reads D0: a test or compare of it, or D0 as a source operand
+    (codegen-patterns 3, "Function calls in expressions")."""
+    j = i + 1
+    if j < len(insns) and _POP.match(insns[j][2]):
+        j += 1
+    if j >= len(insns):
+        return False
+    op, args = operands(insns[j][2])
+    if not args:
+        return False
+    if op.startswith(('tst', 'cmp')):
+        return any(re.search(r'%d0\b', a) for a in args)
+    return bool(re.search(r'%d0\b', args[0])) and not op.startswith(('moveq', 'clr', 'lea'))
+
+
+def functions(rs, by_start):
+    """The starts of the routines some caller reads D0 after calling."""
+    fs = set()
+    for r in rs:
+        for i, (a, n, t) in enumerate(r.insns):
+            m = _BSR.match(t) or _JSR.match(t)
+            if m and int(m.group(1), 16) in by_start and reads_d0_after(r.insns, i):
+                fs.add(int(m.group(1), 16))
+    return fs
+
+
+def frames(rs, by_start):
+    """Frame sizes by class: a routine that is not a global symbol
+    (unnamed: internal or nested) reserves a 4-byte slot at the top of its
+    frame, a function a slot for its result variable."""
+    nss = {r.r0 for r in nested(rs)}
+    fs = functions(rs, by_start)
+    for label, sel in (('map-named', lambda r: r.name),
+                       ('unnamed, not nested', lambda r: not r.name and r.r0 not in nss),
+                       ('nested', lambda r: r.r0 in nss)):
+        for fl, fsel in (('functions', lambda r: r.r0 in fs), ('others', lambda r: r.r0 not in fs)):
+            sel_rs = [r for r in rs if sel(r) and fsel(r)]
+            sizes = Counter(-r.link for r in sel_rs)
+            print('%-20s %-9s %4d  link sizes: %s' % (
+                label, fl, len(sel_rs),
+                ', '.join('%d:%d' % kv for kv in sorted(sizes.items())[:5])))
+            small = [r for r in sel_rs if -r.link < (4 if label == 'map-named' else 8 if fl == 'functions' else 4)
+                     and not (label == 'map-named' and fl == 'others')]
+            if small:
+                print('    below the model: %s' % ', '.join(
+                    '0x%06X%s link #%d' % (r.r0, ' ' + r.name if r.name else '', r.link) for r in small))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -422,6 +480,8 @@ def main(argv):
         entries(rs)
     elif cmd == 'slots':
         slots(rs)
+    elif cmd == 'frames':
+        frames(rs, by_start)
     else:
         print(__doc__)
         return 2

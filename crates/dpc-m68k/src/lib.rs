@@ -35,6 +35,9 @@ impl M68k {
     /// have `link #0` with no locals.  **Uncertain:** whether the original
     /// rounded the total or gave each frame object a 4-byte-aligned slot;
     /// the two differ once a routine has several small locals.
+    /// PKT_$NEXT_ID 0xE1248E favours the total: a word local at
+    /// `(-2,A6)` and its word result variable in `link #-4` (codegen-
+    /// patterns 2, "Frame size").
     pub fn link_size(raw: u32) -> u32 {
         raw.div_ceil(4) * 4
     }

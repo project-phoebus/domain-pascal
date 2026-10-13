@@ -56,5 +56,20 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(after, [])
 
 
+class FunctionTest(unittest.TestCase):
+    def test_d0_read_after_call(self):
+        # 0xE0082C..0xE00830: popped, then the result tested
+        self.assertTrue(nestsurvey.reads_d0_after(
+            ins('bsrw 0xe00800', 'addqw #8,%sp', 'tstb %d0'), 0))
+        # 0xE04700..0xE04704: not popped, the result stored
+        self.assertTrue(nestsurvey.reads_d0_after(
+            ins('bsrw 0xe04600', 'movel %d0,%a3@'), 0))
+        # D0 written, not read: a procedure as far as this call shows
+        self.assertFalse(nestsurvey.reads_d0_after(
+            ins('jsr 0xe20b12', 'addqw #4,%sp', 'moveq #1,%d0'), 0))
+        self.assertFalse(nestsurvey.reads_d0_after(
+            ins('jsr 0xe20b12', 'movew %d2,%d0'), 0))
+
+
 if __name__ == '__main__':
     unittest.main()

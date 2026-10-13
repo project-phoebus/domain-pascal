@@ -1,6 +1,6 @@
 .text
 WORKER:
-link.w %fp,#0
+link.w %fp,#-4
 move.l (8,%fp),-(%sp)
 jsr (EXT_$LONG).l
 unlk %fp

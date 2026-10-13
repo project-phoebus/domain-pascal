@@ -20,8 +20,11 @@
   link at 0 and the status at 0xC (the C's disk_io_req_t); the walk
   pointer as a local `r' rather than the parameter itself (the parameter
   is loaded into D0 and copied once, to A1, which is then updated: two
-  values); `unknown', a stand-in for the other 4 bytes of the untouched
-  8-byte frame (codegen-patterns 2). }
+  values).
+
+  The frame, `link #-8', is never addressed: the 4-byte slot of a routine
+  that is not a global symbol, at the top, then `r' (held in A1)
+  (codegen-patterns 2, "Frame size"). }
 module disk_;
 type
   status_$t = integer32;
@@ -36,7 +39,6 @@ procedure set_chain_status(req: disk_$req_ptr_t; var status: status_$t);
   internal;
 var
   r: disk_$req_ptr_t;
-  unknown: integer32;
 begin
   r := req;
   while r <> nil do begin

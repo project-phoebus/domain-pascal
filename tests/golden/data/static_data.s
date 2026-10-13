@@ -19,7 +19,7 @@ movea.l (-4,%fp),%a5
 unlk %fp
 rts
 STAT_$BUMP:
-link.w %fp,#0
+link.w %fp,#-4
 move.w #3,(6,%a5)
 unlk %fp
 rts

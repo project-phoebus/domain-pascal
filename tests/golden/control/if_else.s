@@ -1,6 +1,6 @@
 .text
 IF_HEAD:
-link.w %fp,#0
+link.w %fp,#-4
 move.w (8,%fp),%d0
 move.w (0xa,%fp),%d1
 movea.l (0xc,%fp),%a0
@@ -35,7 +35,7 @@ move.w #1,(%a0)
 unlk %fp
 rts
 IF_FAR:
-link.w %fp,#0
+link.w %fp,#-4
 tst.l (0x14,%a5)
 bne.w 1f
 move.l #0x12345,(B1).l

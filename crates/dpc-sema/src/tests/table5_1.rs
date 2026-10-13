@@ -252,6 +252,110 @@ fn local_copies_get_frame_slots() {
     assert_eq!(r.frame_size, 16);
 }
 
+/// The frame-size model of codegen-patterns 2 ("Frame size"): a 4-byte
+/// slot at the top for a routine that is not a global symbol, then the
+/// locals, then the function result variable; the backend rounds the
+/// total up to 4 (`M68k::link_size`, the `link` in each comment).
+#[test]
+fn frame_size_model() {
+    let p = module(
+        "type ptr = ^rec; rec = record next: ptr end;
+         procedure exported_proc; begin end;
+         procedure internal_proc; internal; begin end;
+         function internal_fn(n: integer): integer; internal;
+         begin internal_fn := n end;
+         procedure internal_local(q: ptr); internal;
+         var walk: ptr;
+         begin walk := q end;
+         function exported_fn: integer;
+         var token: integer;
+         begin token := 1; exported_fn := token end;
+         function internal_fn_local: integer; internal;
+         var packed_word: integer32;
+         begin internal_fn_local := 0 end;",
+    );
+    let res_offset = |name: &str| {
+        let r = routine(&p, name);
+        p.var(r.result.as_ref().unwrap().var.unwrap())
+            .storage
+            .clone()
+    };
+    let frame = |off| crate::program::Storage::Frame { offset: off };
+    // A map-named procedure without locals: `link #0` (TIME_$Q_INIT_QUEUE
+    // 0xE16C5E, LOG_$READ 0xE17800).
+    assert_eq!(routine(&p, "exported_proc").frame_size, 0);
+    // An internal one: the slot alone, `link #-4`, never addressed
+    // (0xE32B76).
+    assert_eq!(routine(&p, "internal_proc").frame_size, 4);
+    // Slot + a word result: `link #-8` (0xE68864).
+    assert_eq!(routine(&p, "internal_fn").frame_size, 6);
+    assert_eq!(res_offset("internal_fn"), frame(-6));
+    // Slot + a pointer local, held in A1 in the image: `link #-8`
+    // (0xE3CCCE).
+    assert_eq!(var(&p, "walk").storage, frame(-8));
+    assert_eq!(routine(&p, "internal_local").frame_size, 8);
+    // A map-named function: its first local at the top, the result below
+    // it, `link #-4` (PKT_$NEXT_ID 0xE1248E: a word at (-2,A6), the
+    // result in D2).
+    assert_eq!(var(&p, "token").storage, frame(-2));
+    assert_eq!(res_offset("exported_fn"), frame(-4));
+    assert_eq!(routine(&p, "exported_fn").frame_size, 4);
+    // Slot + a 4-byte local + a word result: `link #-12` (0xE5A9CA, whose
+    // local at (-8,A6) is read as a word and returned).
+    assert_eq!(var(&p, "packed_word").storage, frame(-8));
+    assert_eq!(res_offset("internal_fn_local"), frame(-10));
+    assert_eq!(routine(&p, "internal_fn_local").frame_size, 10);
+}
+
+/// The frame objects of one routine never overlap and stay inside its
+/// frame: the reserved slot, a value parameter's local copy, locals
+/// declared before and after a nested routine, and the result variable
+/// (placed after all the declarations, so after the nested routine's own
+/// frame has been laid out).
+#[test]
+fn frame_objects_do_not_overlap() {
+    let p = module(
+        "type big = record a, b: integer32 end;
+         function outer(y: big): integer; internal;
+         var before: integer32;
+           procedure inner;
+           var deep: integer;
+           begin deep := 0; before := 0 end;
+         var after: char;
+         begin outer := 0 end;",
+    );
+    let r = routine(&p, "outer");
+    let frame = |v: crate::program::VarId| match p.var(v).storage {
+        crate::program::Storage::Frame { offset } => offset,
+        ref s => panic!("not in the frame: {s:?}"),
+    };
+    let mut objs: Vec<(i32, u32)> = r
+        .frame_vars
+        .iter()
+        .map(|&v| (frame(v), p.types.size(p.var(v).ty)))
+        .collect();
+    objs.extend(
+        r.params
+            .iter()
+            .filter_map(|q| q.copy_offset.map(|o| (o, p.types.size(q.ty)))),
+    );
+    // The slot of a routine that is not a global symbol: (-4..-1).
+    objs.push((-4, 4));
+    objs.sort();
+    for w in objs.windows(2) {
+        assert!(w[0].0 + w[0].1 as i32 <= w[1].0, "overlap: {objs:?}");
+    }
+    assert!(objs[0].0 >= -(r.frame_size as i32), "{objs:?}");
+    // The result variable is the lowest object.
+    let res = r.result.as_ref().unwrap().var.unwrap();
+    assert_eq!(objs[0].0, frame(res));
+    // The nested routine's own frame starts with its static-link slot.
+    assert_eq!(
+        var(&p, "deep").storage,
+        crate::program::Storage::Frame { offset: -6 }
+    );
+}
+
 // --- Function results (codegen-patterns 3; ref 5.5.10, 5.5.11) ----------
 
 fn result_reg(decl: &str) -> ResultReg {

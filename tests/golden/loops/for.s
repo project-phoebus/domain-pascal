@@ -1,6 +1,6 @@
 .text
 FL_$FIND:
-link.w %fp,#-4
+link.w %fp,#-8
 moveq #7,%d0
 clr.w %d1
 .balignw 4,0x2048
@@ -16,7 +16,7 @@ dbf %d0,2b
 unlk %fp
 rts
 FL_$DOWN:
-link.w %fp,#-4
+link.w %fp,#-8
 moveq #0x61,%d0
 moveq #0x64,%d1
 .balignw 4,0x2048
@@ -30,7 +30,7 @@ dbf %d0,2b
 unlk %fp
 rts
 FL_$CALLS:
-link.w %fp,#-4
+link.w %fp,#-8
 movem.l %d2-%d3,-(%sp)
 move.w (LEN).l,%d0
 subq.w #1,%d0
@@ -46,11 +46,11 @@ addq.w #4,%sp
 addq.w #1,%d3
 dbf %d2,2b
 1:
-movem.l (-0xc,%fp),%d2-%d3
+movem.l (-0x10,%fp),%d2-%d3
 unlk %fp
 rts
 FL_$COUNT:
-link.w %fp,#-4
+link.w %fp,#-8
 move.l %d2,-(%sp)
 move.w #0x12d,%d2
 .balignw 4,0x2048
@@ -60,7 +60,7 @@ move.w #5,-(%sp)
 jsr (EXT_$PUT).l
 addq.w #4,%sp
 dbf %d2,2b
-move.l (-8,%fp),%d2
+move.l (-0xc,%fp),%d2
 unlk %fp
 rts
 .balignw 4,0x2048

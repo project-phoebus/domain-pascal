@@ -1,6 +1,6 @@
 .text
 ZEROS:
-link.w %fp,#0
+link.w %fp,#-4
 tst.w (W).l
 bne.s 1f
 move.w #1,(R).l
@@ -36,7 +36,7 @@ move.w #8,(R).l
 unlk %fp
 rts
 CONSTANTS:
-link.w %fp,#0
+link.w %fp,#-4
 cmpi.w #5,(W).l
 bne.s 1f
 move.w #1,(R).l
@@ -68,7 +68,7 @@ move.w #7,(R).l
 unlk %fp
 rts
 HELD:
-link.w %fp,#0
+link.w %fp,#-4
 move.w (8,%fp),%d0
 move.w (0xa,%fp),%d1
 cmp.w (W).l,%d0
@@ -86,7 +86,7 @@ move.w #3,(R).l
 unlk %fp
 rts
 BOOLEANS:
-link.w %fp,#0
+link.w %fp,#-4
 tst.b (B).l
 bpl.s 1f
 move.w #1,(R).l

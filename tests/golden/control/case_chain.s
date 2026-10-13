@@ -110,7 +110,7 @@ move.w #3,(X1).l
 unlk %fp
 rts
 SIGNAL:
-link.w %fp,#0
+link.w %fp,#-4
 move.w (8,%fp),%d0
 move.w %d0,(X1).l
 move.w %d0,%d1

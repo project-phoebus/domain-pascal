@@ -318,8 +318,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   - `link.w` is always used.  No `link.l` appears in the kernel image.
   - The size is sometimes larger than the locals that are used.  IO_$ALLOC
     0xE1A9C2 and PROC1_$TST_LOCK 0xE148CA have `link #-4` and never touch
-    the slot.  **Uncertain:** whether that is a function-result variable
-    (both are functions).
+    the slot: their function result variables ("Frame size" below).
   - The displacement is always a multiple of 4: all 1171 `link.w A6,#d`
     found at routine addresses named in the map have `d mod 4 = 0` (a scan
     of every `4e56` word in 0xE00800..0xE88834 finds one exception, not at
@@ -332,9 +331,87 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     omitted.
   - **Implemented:** `dpc-m68k` rounds the *total* up to a multiple of 4
     (`M68k::link_size`): 1 byte (TST_LOCK's boolean result variable) gives
-    `#-4`, 0 gives `#0`.  This fits every site above, but it is the
-    Uncertain choice just described: a routine with several small locals
-    will tell the two rules apart.
+    `#-4`, 0 gives `#0`.  This fits every site above.  PKT_$NEXT_ID
+    0xE1248E favours it over 4-byte slots per object: a word local at
+    `(-2,A6)` (0xE124A8) and its word result variable share `link #-4`
+    (one site; the Uncertain point stays open).
+  - **Frame size (model; items 1 and 3's slot Verified by survey, the
+    result's position Uncertain; bead domain-pascal-9mr):**
+    the frame holds, from the top down,
+    1. a **4-byte slot for a routine that is not a global symbol**
+       (nested, or `internal`: unnamed in the map), never addressed except
+       by nested routines that store a static link there (section 6,
+       "Frame");
+    2. local copies of value parameters (place Uncertain) and the locals,
+       whether or not the code ever keeps them in memory ("Untouched
+       frames" below);
+    3. a function's **result variable**, below the locals (its place is
+       Uncertain: sites both ways, see below);
+
+    and the total is rounded up to 4.  Evidence (`tools/nestsurvey.py
+    slots` and `frames`; routines split as in section 4, a *function*
+    being one some caller reads D0 after calling, section 3):
+    - Unnamed routines that are not nested: 1 of 355 has `link #0`
+      (0xE6B074, a VFMT segment start, not called by a `bsr`) and 1
+      addresses `(-4..-1,A6)` (0xE70396, not called by a `bsr` either),
+      against 190 `link #0` and 320 that address it among the 1194
+      map-named routines.  The 130 unnamed routines called by two or more
+      map-named routines, which cannot be nested in any, have no
+      exception.  Nested routines: 0 `link #0`, and `(-4,A6)` only as the
+      static-link store (3 of 86).
+    - Map-named routines reserve nothing: their first locals sit at the
+      top (PKT_$NEXT_ID's word at `(-2,A6)`; FILE_$REMOVE_WHEN_UNLOCKED
+      0xE5FC8E passes a byte at `(-2,A6)` by address in `link #-4`;
+      REM_NAME_$REGISTER_SERVER `link #-8` is not explained by this, see
+      `tests/conformance/rem_name_register_server.pas`).
+    - Functions: none of the 109 map-named functions has `link #0` (21
+      have `#-4`, like TST_LOCK and IO_$ALLOC with no locals), against 190
+      of the 1085 other map-named routines; cross-checked with the C
+      reconstructions in `../source` (map names whose C definition is not
+      `void`: 1 `link #0` among 195, MST_$MAP_AT 0xE42F54, a wrapper
+      whose A0 is the callee's left over; both callers ignore it, so it
+      may well be a procedure).  The 72 unnamed, not nested functions
+      and the 11 nested ones all have `link #-8` or more (slot + result),
+      while 31 and 10 of the others have just `#-4` (the slot).
+    - Where the result variable goes is **Uncertain**: the image has
+      sites both ways.  Below the locals (what `dpc` does): PKT_$NEXT_ID's
+      local is at `(-2,A6)` with the result in D2 (a result at the top
+      would put the local at -4, if the result has a slot at all);
+      SMD_$N_DEVICES 0xE70024 and PROC2_$GET_PID 0xE40CBA (functions,
+      `link #-8`) address `(-4,A6)`; PEB_$GET_STATUS 0xE5ADCA assigns its
+      result at the bottom of its `link #-16`, `move.l (-8,A6),(-16,A6);
+      move.l (-16,A6),D0` (0xE5AE52); the nested 0xE5DEF4 returns the
+      byte at `(-64,A6)`, the bottom of `link #-64` (but it passes that
+      byte by address first, 0xE5DF14 `pea`, so it may be a local).
+      Against: FLP_$CINIT 0xE3E002 (`link #-28`) assigns its status result
+      at `(-4,A6)` on every path (`clr.l`, `move.l #imm`, `move.l D0`) and
+      returns `move.l (-4,A6),D0` with no copy, while a 10-byte buffer at
+      `(-14,A6)` and words at -16, -20 sit below it (C:
+      `flp/cinit.c`); BAT_$ALLOC_FM 0xE3AD20 (`link #-40`) returns
+      `(-4,A6)` with a word local at `(-22,A6)` below it; SIO_$I_ERR
+      0xE67D9C (`link #-12`) returns `(-8,A6)`, assigned on every path,
+      with the spin-lock token at `(-10,A6)` below it.  An ad-hoc scan
+      (`move.<s> (-n,A6),D0` just before the epilogue) puts that offset at
+      the bottom of the addressed frame in 19 routines and above some
+      other addressed offset in 25; the latter include compiler
+      temporaries, so it settles nothing.  The rule that orders the frame
+      is not known.
+    - Image sites the model explains with no stand-in locals: 0xE32B76
+      `link #-4` (internal, no locals), 0xE68864 `#-8` (internal, word
+      result), 0xE3CCCE `#-8` (internal, one pointer local held in A1),
+      PROC1_$TST_LOCK / PROC1_$GET_LOCKS `#-4` (result only), 0xE1359C
+      `#-4` (nested, no locals), 0xE5A9CA `#-12` (internal, a 4-byte local
+      at `(-8,A6)` read back as a word, a word result).  Partly: 0xE00EB0
+      `#-12` (slot + `for` index = 8; 4 bytes unexplained), 0xE17778
+      `#-16` (slot + pointer + index = 12; 4 unexplained).
+
+    **Implemented** (`dpc-sema` `routine_body`: the frame of a routine that
+    is not `global` starts at 4; the result variable is allocated after
+    the declarations; test `frame_size_model` in
+    `crates/dpc-sema/src/tests/table5_1.rs`).  The conformance units that
+    declared stand-in locals for 0xE32B76, 0xE68864 and 0xE3CCCE no longer
+    do; `ast_page_zero.pas` and `pending/log_read.pas` keep 4 stand-in
+    bytes each, `rem_name_register_server.pas` its 8.
   - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
     Of the compiled routines that end in `rts` (survey as in 1.5), 306
     without any loop have a `link` area they never address (143 of
@@ -358,24 +435,17 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     (`net_io/free_asid.c`, `flp/shutdown.c`, `pkt/dump_data.c`,
     `mmap/set_ws_index.c`) declare only register-held locals and cannot
     tell.  Not settled; `dpc` gives a `for` loop no hidden slot (as
-    (a)), and `tests/conformance/ast_page_zero.pas` declares stand-in
-    locals for 0xE00EB0's 12 bytes (its header and the declaration say
-    so).  If (b) is confirmed, those stand-ins go.  Evidence gathered for
+    (a)), and `tests/conformance/ast_page_zero.pas` declares a 4-byte
+    stand-in local for the part of 0xE00EB0's 12 bytes that the frame-size
+    model leaves unexplained (its header and the declaration say so).  If
+    (b) is confirmed, that stand-in goes.  Evidence gathered for
     bead domain-pascal-nda in section 7.4 ("Hidden frame cost"): five
     one-loop routines have no frame bytes beyond their locals, and three
     routines of one loop shape have `link #-8`, `#-12` and `#-16`, so a
     `for` loop costs no hidden slot of 4 bytes or more; (a) is favoured.
-    A third fact bears on the unnamed routines among these (0xE00EB0,
-    the KBD module-local 0xE1CA62, ...): unnamed routines, nested or
-    not, have no `link #0` and do not address `(-4..-1,A6)` except to
-    store a static link there (section 6, "Frame"; `tools/nestsurvey.py
-    slots`: 2 exceptions among the 355 that are not nested, 0xE6B074
-    `link #0` and 0xE70396, neither called by a `bsr`), so 4 of their
-    bytes are a reserved slot.  The 130 unnamed routines called by two
-    or more map-named routines, which cannot be nested in either, have
-    no exception.  Not applied to `internal` routines
-    yet (owner decision: the stand-in locals of the conformance units
-    would shrink by 4 bytes).
+    The unnamed routines among these (0xE00EB0, the KBD module-local
+    0xE1CA62, ...) have 4 bytes fewer to explain: their frames start
+    with the reserved slot ("Frame size" above).
 - **Register save:** straight after `link`, only the callee-saved
   registers the routine uses.  The instruction depends on how many there
   are (Verified, sweep of every `link` at 0xE00800..0xE88834; details and
@@ -1155,12 +1225,9 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   The same holds for the unnamed (internal) routines that are not
   nested: of 355, one has `link #0` (0xE6B074, a VFMT segment start) and
   one addresses `(-4..-1,A6)` (0xE70396), against 190 `link #0` and 320
-  such routines among the 1194 map-named ones.  Not implemented for
-  `internal` routines: it would change the frames of the units that
-  declare stand-in locals for unexplained frame space (section 2:
-  0xE00EB0 `link #-12`, 0xE17778 `#-0x10`; the DISK_ module-local
-  0xE3CCCE `link #-8` holds its one 4-byte local in A1, which this slot
-  would explain); an owner decision.
+  such routines among the 1194 map-named ones.  **Implemented** for
+  `internal` routines too (bead domain-pascal-9mr; section 2, "Frame
+  size").
 - **Deeper nesting** (observed, not implemented; refused): 6 level-2
   routines and 1 level-3 routine, all in DIR (`summary`, levels).  An
   A1-linked level-1 routine with nested routines stores its link at
@@ -2048,10 +2115,12 @@ scripts besides, not kept, are named as such below; re-check sites with
   DISK_$UNASSIGN_ALL read with a separate `vol` local.  Routines of the
   same loop shape differ: DISK_$UNASSIGN_ALL `#-8`, MSG_$FREE_ASID
   0xE74E2C `#-12`, SMD_$FREE_ASID 0xE75250 `#-16`, each with a status at
-  -4 and the index stored to -6.  And loops are not needed for unused
-  frame space: the DISK_ module-local 0xE3CCCE (`while`, one 4-byte
-  local held in A1) has `link #-8`.  This favours hypothesis (a) of
+  -4 and the index stored to -6.  This favours hypothesis (a) of
   section 2 (declared locals the compiler kept out of memory) over (b).
+  (The DISK_ module-local 0xE3CCCE, `while`, one 4-byte local held in
+  A1, `link #-8`, once counted here as unused space, is explained by the
+  reserved slot of a routine that is not a global symbol: section 2,
+  "Frame size".)
 - **`exit` and `next`** (ref pp. 4-77, 4-123): a jump to the loop's exit
   (after `dbf` or after the bottom test) or to its continuation (the
   `for` step, the `while`/`repeat` test).  The image cannot tell them

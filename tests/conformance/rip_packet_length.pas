@@ -20,13 +20,12 @@
 
   Reconstruction notes: the routine is `internal' here because the map does
   not name it and every call reaches it with `bsr' (RIP_$PROCESS_REQUEST,
-  RIP_$SERVER).  The frame is 8 bytes and nothing in it is addressed
-  (codegen-patterns 2, untouched frames): `stand_in' stands for whatever
-  the original declared (the result variable takes 2 bytes, rounded to 4). }
+  RIP_$SERVER).  The frame, `link #-8', is never addressed; it is the
+  frame-size model of codegen-patterns 2 ("Frame size") with no locals:
+  the 4-byte slot of a routine that is not a global symbol, then the
+  2-byte result variable, rounded up to 8. }
 module rip_unwired;
 function rip_$packet_length(entry_count: integer): integer; internal;
-var
-  stand_in: integer32;
 begin
   rip_$packet_length := entry_count * 6 + 2;
 end;
