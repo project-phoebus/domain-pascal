@@ -1,20 +1,18 @@
-{ IIC_$ACQUIRE .. IIC_$RECEIVE_CHECK, 0xE70A56..0xE70AF4: the IIC module
-  (map `I E70A54 IIC size = A0') without IIC_$INIT (tools/imgdis.sh
-  E70A54 A0).  Semantics: ../source/domain_os/iic/iic.h and iic/receive.c:
-  in this image every entry point is a stub that stores
-  status_$iic_device_not_in_system (0x2C000A; 10.2 status-code database,
-  "OS / internet interface controller": "device not in system") through
-  its status argument.
+{ IIC_$INIT .. IIC_$RECEIVE_CHECK, 0xE70A54..0xE70AF4: the whole IIC
+  module (map `I E70A54 IIC size = A0'; tools/imgdis.sh E70A54 A0).
+  Semantics: ../source/domain_os/iic/iic.h, iic/init.c and iic/receive.c:
+  in this image IIC_$INIT does nothing and every other entry point is a
+  stub that stores status_$iic_device_not_in_system (0x2C000A; 10.2
+  status-code database, "OS / internet interface controller": "device
+  not in system") through its status argument.
 
-  IIC_$INIT (0xE70A54) is a bare `rts' with no `link': an empty
-  procedure, which the compiler emits without a frame (codegen-patterns
-  2, Reported).  dpc gives every routine a frame, so the unit starts
-  after it: a fragment compiled
-  with `dpc --fragment-origin 0xE70A56 --fragment-ends-module'.  The
-  module ends with the 0x2048 filler at 0xE70AF2 (the IIC code aligns,
-  codegen-patterns 7; it has no loop).
+  The unit is a whole map module, so tools/conform.py compiles it without
+  --fragment-origin.  The module ends with the 0x2048 filler at 0xE70AF2
+  (the IIC code aligns, codegen-patterns 7; it has no loop).
 
   Patterns exercised (docs/codegen-patterns.md):
+  - 2     IIC_$INIT, an empty procedure: a bare `rts', no `link'
+          (0xE70A54);
   - 1.2   default convention: every parameter by address, one 4-byte slot
           each; the status slot is the last one;
   - 9     error stores `move.l #0x2c000a,(A0)' through the status slot
@@ -30,7 +28,9 @@
           slot of the result variable (`link #-4') never touched;
   - 13    `clr.w' through a slot.
 
-  Reconstructed (not known from the original): the parameters the stubs
+  Reconstructed (not known from the original): IIC_$INIT without
+  parameters (an empty procedure's parameters are not visible; the C has
+  none); the parameters the stubs
   never read (their number and slot size are known, their types and
   modes are not: `in ... integer32' stands for each 4-byte slot, and the
   names are ../source's placeholders); `out' as the mode of the status
@@ -48,6 +48,10 @@ type
   status_$t = record
     all: integer32;
   end;
+
+procedure iic_$init;
+begin
+end;
 
 procedure iic_$acquire(in arg1: integer32; out status: status_$t);
 begin

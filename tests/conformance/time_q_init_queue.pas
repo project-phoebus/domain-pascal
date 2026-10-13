@@ -1,15 +1,17 @@
-{ TIME_$Q_INIT_QUEUE, 0xE16C5E, 0x22 bytes, and TIME_$Q_FLUSH_QUEUE,
-  0xE16C80, 0xE bytes: 0xE16C5E..0xE16C8E (tools/imgdis.sh E16C5E 30).
-  Semantics: ../source/domain_os/time/q_init_queue.c, q_flush_queue.c;
-  layout: time_queue_t in ../source/domain_os/time/time.h (its
-  _Static_asserts: head 0, lock 4, flags 8, pad 9, queue_id 0xA, size
-  0xC).
+{ TIME_$Q_INIT, 0xE16C5C, 2 bytes, TIME_$Q_INIT_QUEUE, 0xE16C5E, 0x22
+  bytes, and TIME_$Q_FLUSH_QUEUE, 0xE16C80, 0xE bytes: 0xE16C5C..0xE16C8E
+  (tools/imgdis.sh E16C5C 32).  Semantics: ../source/domain_os/time/
+  q_init.c, q_init_queue.c, q_flush_queue.c; layout: time_queue_t in
+  ../source/domain_os/time/time.h (its _Static_asserts: head 0, lock 4,
+  flags 8, pad 9, queue_id 0xA, size 0xC).
 
-  The unit is a fragment of the TIME_Q_ module (segment 0xE16AE8) that
-  starts at 2 mod 4, so tools/conform.py compiles it with
-  `dpc --fragment-origin 0xE16C5E' (codegen-patterns 7, 11).
+  The unit is a fragment of the TIME_Q_ module (segment 0xE16AE8), so
+  tools/conform.py compiles it with `dpc --fragment-origin 0xE16C5C'
+  (codegen-patterns 7, 11).
 
   Patterns exercised (docs/codegen-patterns.md):
+  - 2    TIME_$Q_INIT, an empty procedure: a bare `rts', no `link'
+         (0xE16C5C), so TIME_$Q_INIT_QUEUE starts at 2 mod 4;
   - 1.2/1.3 val_param: a boolean by value in the high byte of a word slot
          at (8,A6), a word at (0xa,A6), a pointer at (0xc,A6);
   - 2    link.w A6,#0 with no locals, no register save, unlk; rts;
@@ -21,7 +23,9 @@
   - Q_FLUSH_QUEUE: a one-statement body evaluates in its own order
          (movea.l, then clr.l).
 
-  Reconstructed (not known from the original): the type and field names;
+  Reconstructed (not known from the original): TIME_$Q_INIT without
+  parameters (an empty procedure's are not visible; the C has none); the
+  type and field names;
   `head' as integer32 (the C has a uint32_t "32-bit VA, 0 = empty"; a
   pointer with `nil' would need nil's representation, which the reference
   does not give); `queue_id' as integer (the C has uint16_t; only its
@@ -39,6 +43,10 @@ type
     queue_id: integer;        { 0xA }
   end;
   time_$queue_ptr_t = ^time_$queue_t;
+
+procedure time_$q_init;
+begin
+end;
 
 procedure time_$q_init_queue(is_vt: boolean; queue_id: integer;
                              queue: time_$queue_ptr_t); options(val_param);

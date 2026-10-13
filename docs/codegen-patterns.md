@@ -380,7 +380,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
 - **Procedures without callee-saved registers:** just `unlk A6; rts`
   (0xE16C7C).
 - **Empty procedures: a bare `rts`, no `link` (Reported; strong image
-  evidence, not implemented).**  The image (0xE00800..0xE88834) has no
+  evidence; implemented).**  The image (0xE00800..0xE88834) has no
   `link; unlk; rts` sequence at all, nor `link; pea (A5); lea ...,A5;
   movea.l (-4,A6),A5; unlk; rts`, while some 30 map entries in non-`_ASM`
   `I` segments are a bare 2-byte `rts` (byte scan, bead
@@ -388,18 +388,32 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   (right before TIME_$Q_INIT_QUEUE), DMA_$FREE_ASID 0xE0A454,
   PROC2_$SET_STACK_TRUNC_SIZE 0xE414DC, SMD_$PUTC 0xE1D89C (between
   SMD_$COPY_FONT_TO_MD_HDM and SMD_$BUSY_WAIT), IIC_$INIT 0xE70A54
-  (first in the IIC module of `link`-framed stubs;
-  `tests/conformance/iic.pas` starts after it), RING_$SEND_NULL
+  (first in the IIC module of `link`-framed stubs), RING_$SEND_NULL
   0xE75914.  The one-routine modules MT 0xE70A4C, CT 0xE70AF4, COLOR5
   0xE752E0, COLOR7 0xE752E8 and SCSI_ 0xE88800 are `rts` followed by the
   0x2048 module-end filler of compiled code (section 7), whereas the
   hand-written LPR_ASM 0xE70A40 is `rts` padded with zeros.  So these are
   compiled empty procedures, not hand stubs.  Whether such a procedure
-  had parameters is not visible.  An empty *function* is not seen (a
+  had parameters is not visible in its code, but its callers show some
+  did: MT_$RELEASE and CT_$RELEASE are called with three by-address
+  arguments (unit, mode, status; `../source/domain_os/mt/release.c`,
+  `ct/release.c`, PROC2's cleanup), SMD_$PUTC and DMA_$FREE_ASID with
+  one (`smd/putc.c`, `dma/free_asid.c`).  An empty *function* is not seen (a
   constant result keeps its frame: IIC_$EXISTS 0xE70AB0 `link #-4; clr.b
   D0`).  The KBD_$PUT comment in `../source/domain_os/kbd/put.c` ("no
-  link frame") is not re-checked here.  `dpc` still gives every routine a
-  `link`.
+  link frame") is not re-checked here.
+  - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `select`;
+    `dpc_ir::Function::is_empty_procedure`): a procedure whose body has
+    no statements is a bare `rts`, with any parameters (by address, or
+    by value under `val_param`; a value parameter the callee would copy
+    is still refused, as everywhere), and never loads A5 (section 4).
+    One with locals is refused: no `link; unlk; rts` is seen, and
+    whether such a procedure keeps its frame is not known.  An empty
+    *function* keeps its frame.  Byte-identical in `make conform`:
+    TIME_$Q_INIT (`time_q_init_queue.pas`), IIC_$INIT (`iic.pas`, now
+    the whole IIC module), SMD_$PUTC (`smd_busy_wait.pas`), and
+    MT_$RELEASE as a whole one-routine module (`mt_release.pas`: `rts`
+    and the 0x2048 module-end filler).
 
 ---
 
@@ -688,7 +702,7 @@ variables.  Each module's static data is a data segment, addressed off
       static data loads nothing in used mode.
     - In used mode an exported routine that does not use the data does
       **not** load A5 (PROC1_$TST_LOCK 0xE148CA, 196 `n`), instead of
-      the current rejection.
+      the former rejection.
     - For the open targets: SMD_$BUSY_WAIT needs always mode from
       SMD_$BUSY_WAIT (the routine before it is `n`);
       MMAP_$ALLOC_CONTIG and XNS_IDP_$GET_PORT_INFO need always mode
@@ -701,19 +715,67 @@ variables.  Each module's static data is a data segment, addressed off
       loading A5 (they would need the opposite override, e.g. a
       per-routine "absolute, no A5" list, or a source construct not yet
       identified).
-  - **Implemented** (`crates/dpc-ir/src/lower.rs`, `set_loads_data_base`;
-    `crates/dpc-m68k/src/isel.rs`, `load_data_base`): used mode only.
-    An exported routine that addresses the unit's static data, directly
-    or through `internal` routines of the unit it calls (transitively;
-    LOG_$READ 0xE17806, whose worker 0xE17778 reads `(0x14,A5)`), sets
-    A5, as the first instruction after the register save; an `internal`
-    routine never does (it inherits A5).  An exported routine that does
-    not address the data, in a unit that has some, is rejected ("not
-    settled"; see the recommendation above).  A5 is saved like any
-    callee-saved register (section 12.1): `pea (A5)` alone, in the
-    `movem` otherwise.  Byte-identical in `make conform`:
-    PROC1_$GET_LOADAV (`tests/conformance/proc1_get_loadav.pas`) and
-    PROC2_$GET_BOOT_FLAGS 0xE41B56 (`proc2_get_boot_flags.pas`).
+  - **Implemented** (`crates/dpc-ir/src/lower.rs`, `set_loads_data_base`
+    with `dpc_ir::DataBaseOptions`; `crates/dpc-m68k/src/isel.rs`,
+    `load_data_base`, `static_base`; `dpc --a5-*`; bead
+    domain-pascal-5aw.14), the recommendation above, without
+    `--a5=used|always` (`--a5-always-from=` the first routine is
+    always mode):
+    - *Used mode* (the default): an exported routine loads A5 iff it
+      addresses the unit's static data, directly or through `internal`
+      routines of the unit it calls (transitively) that do not load A5
+      themselves (LOG_$READ 0xE17806, whose worker 0xE17778 reads
+      `(0x14,A5)`); a call to an exported routine or to one in the
+      `--a5-always` list is not a use.  An exported routine that does not
+      use the data loads nothing (PROC1_$TST_LOCK), instead of the old
+      "not settled" rejection.  `internal` routines never load A5.  A5
+      is set as the first instruction after the register save and saved
+      like any callee-saved register (section 12.1): `pea (A5)` alone,
+      in the `movem` otherwise.
+    - `--a5-always-from=ROUTINE`: from ROUTINE on, in emission order (as
+      `--loop-align-off-from`, section 7), every exported routine with a
+      frame loads A5.  A bare-`rts` routine never does (section 2).
+    - `--a5-always=ROUTINE,...`: these routines load A5 whatever their
+      body, `internal` ones included (the 26 unnamed routines above; the
+      switch-backs of PKT, XPD, FILE_ 0xE5D050).
+    - `--a5-absolute=ROUTINE,...`: these exported routines do not load
+      A5; the unit's data is addressed through `lea <block>.l,An`, placed
+      where the first static operand needs it, the register (a virtual
+      one, so the lowest free: A0 at both sites) kept for the rest of the
+      body: REM_NAME_$REGISTER_SERVER 0xE4A4B2..0xE4A4C0 `lea
+      0xE7DBB8,A0; move.l 0xE2B0D4,(0x28,A0); st (0x3c,A0)`, two
+      statements, one `lea`.  AUDIT_$SUSPEND 0xE70DBA..0xE70DCE places
+      the `lea` *between* the index load and its scaling (`move.w
+      0xE20608,D0; lea 0xE854D8,A0; add.w D0,D0; move.w
+      (-2,A0,D0.w),D1`); that scheduling is not modelled, so an array
+      element of the unit's data is refused in such a routine
+      (AUDIT_$SUSPEND and AUDIT_$RESUME also need an in-place element
+      update, not supported yet).  Only bodies of assignments without
+      calls or branches are accepted, the only shapes seen (where the
+      base register would live across a call, or where a branch would
+      put the `lea`, is not known).  No site addresses its own block with
+      absolute operands `(sym+off).l`, so `dpc` has no such form.
+    - Errors: a name that is not a routine of the unit; a routine in both
+      `--a5-always` and `--a5-absolute`; an empty procedure in either;
+      an `internal` routine in `--a5-absolute`; an absolute routine that
+      does not address the data, or calls an `internal` routine that uses
+      it through the inherited A5; `--a5-always` / `--a5-always-from` in
+      a unit without static data (in the image such a unit's A5 points
+      past a 4-byte block no code reads, which `dpc` does not lay out:
+      not covered, nor are the DIR negative offsets).
+    - The conformance manifest records the options per unit as tokens
+      (`a5-always-from=`, `a5-always=`, `a5-absolute=`), as it does
+      `loop-align-off-from=`.  Byte-identical in `make conform`:
+      PROC1_$GET_LOADAV, PROC2_$GET_BOOT_FLAGS, XNS_IDP_$GET_STATS,
+      AUDIT_$IS_PROCESS_AUDITED, BAT_$GET_BAT_STEP, FIM_$GET_FIM_ADDR
+      (used mode); SMD_$PUTC, SMD_$BUSY_WAIT, SMD_$LITES
+      (`smd_busy_wait.pas`, `a5-always-from=SMD_$BUSY_WAIT`);
+      MMAP_$ALLOC_CONTIG (`a5-always=MMAP_$ALLOC_CONTIG`);
+      XNS_IDP_$GET_PORT_INFO (`a5-always=XNS_IDP_$GET_PORT_INFO`);
+      REM_NAME_$REGISTER_SERVER
+      (`a5-absolute=REM_NAME_$REGISTER_SERVER`).  The always-mode units
+      declare a stand-in variable so that the unit has a data area (each
+      `.pas` header says so).
 - **Reference oddity:** the OCR of section 5.5.8 says A5 "holds the pointer
   to the current stack area" and A6 "the address of the current data area".
   In the image, A6 is the frame pointer and A5 the data base.  Treat the
@@ -1680,22 +1742,16 @@ stored.
   before the result only store, without calls or branches.  Golden
   `tests/golden/stores/status.pas`; tests in
   `crates/dpc-m68k/tests/control.rs`; byte-identical in `make conform`:
-  `tests/conformance/iic.pas` (IIC_$ACQUIRE..IIC_$RECEIVE_CHECK),
-  `xns_idp_get_stats.pas`, `io_alloc.pas`.
+  `tests/conformance/iic.pas` (the IIC module),
+  `xns_idp_get_stats.pas`, `io_alloc.pas`, and, with the A5 options of
+  section 4 (always mode), `smd_busy_wait.pas` (SMD_$BUSY_WAIT
+  0xE1D89E), `mmap_alloc_contig.pas` (MMAP_$ALLOC_CONTIG 0xE0D8F0),
+  `xns_idp_get_port_info.pas` (XNS_IDP_$GET_PORT_INFO 0xE18FB8).
 - **Not supported yet:**
-  - SMD_$BUSY_WAIT 0xE1D89E, MMAP_$ALLOC_CONTIG 0xE0D8F0 and
-    XNS_IDP_$GET_PORT_INFO 0xE18FB8 load A5 and never use it (section 4,
-    always mode; recommended option `--a5-always-from`, not implemented:
-    `dpc` refuses such a routine in a unit with data and loads no A5 in
-    a unit without).  Their bodies are reproduced in the
-    golden without the A5 load.
   - A status whose last use is a call argument in a body with branches
     (12.4 R4(c)), e.g. `status.all := status_$ok; if ... then begin
     status.all := ...; return end; p(..., status)`.
   - A slot used once in a body with branches or calls (12.4 R4(b)).
-  - IIC_$INIT 0xE70A54 and SMD_$PUTC 0xE1D89C, a bare `rts` each:
-    empty procedures, which the compiler emits without a frame
-    (section 2, Reported); `dpc` gives every routine a `link`.
 - **Status code names** come from the real text tables
   (`~/src/domainos-archeology/stcodes`: `node stcode.js stcode.db.10.2`
   prints the whole 10.2 table, subsystem headings and `(hex)` codes;

@@ -34,7 +34,7 @@ mod lower;
 #[cfg(test)]
 mod tests;
 
-pub use lower::lower;
+pub use lower::{lower, lower_with};
 
 use dpc_syntax::Span;
 
@@ -86,8 +86,15 @@ pub struct Function {
     /// saves A5 and loads it with the area's address, codegen-patterns 4).
     /// False for a routine that inherits it from its caller (module-local
     /// worker 0xE17778 reads `(0x14,A5)` without loading A5) or does not
-    /// need it.  The rule is in `lower.rs` (`loads_data_base`).
+    /// need it.  The rule is in `lower.rs` (`set_loads_data_base`), with
+    /// [`DataBaseOptions`].
     pub loads_data_base: bool,
+    /// The routine does not load the data base but addresses the unit's
+    /// data area from its absolute address (codegen-patterns 4:
+    /// AUDIT_$SUSPEND 0xE70DC0, REM_NAME_$REGISTER_SERVER 0xE4A4B2 `lea
+    /// <area>.l,A0`); [`DataBaseOptions::absolute`].  Never set together
+    /// with [`Self::loads_data_base`].
+    pub data_absolute: bool,
     /// The parameters passed by value (ref 5.2 Table 5-1: `val_param` /
     /// `internal`), in parameter order.  The body reads one as
     /// `Expr::Load { addr: Addr::Frame(offset), .. }`; the list lets the
@@ -102,6 +109,42 @@ pub struct Function {
     pub address_params: Vec<i32>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+impl Function {
+    /// A procedure with an empty body (codegen-patterns 2: compiled to a
+    /// bare `rts`, TIME_$Q_INIT 0xE16C5C, MT_$RELEASE 0xE70A4C).  It
+    /// never loads the data base.
+    pub fn is_empty_procedure(&self) -> bool {
+        self.result.is_none() && self.body.is_empty()
+    }
+}
+
+/// Which routines make the unit's data area addressable on entry, beyond
+/// the default rule (codegen-patterns 4, "Two modes"; `dpc --a5-*`).
+///
+/// The default ("used mode"): an exported routine loads the data base iff
+/// it addresses the unit's data, directly or through `internal` routines
+/// of the unit it calls that do not load it themselves; an `internal`
+/// routine never loads it (it inherits it).  A routine compiled to a bare
+/// `rts` ([`Function::is_empty_procedure`]) never loads it.  Names are
+/// matched case-insensitively against routine symbols.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DataBaseOptions {
+    /// "Always mode" from this routine on, in emission order: it and every
+    /// later exported routine load the data base whatever their body
+    /// (SMD 0xE1D750: SMD_$COPY_FONT_TO_MD_HDM does not, SMD_$BUSY_WAIT
+    /// 0xE1D8A4 and SMD_$LITES do).
+    pub always_from: Option<String>,
+    /// These routines load the data base whatever their body, `internal`
+    /// ones included (the switch-backs of PKT 0xE1202C, XPD 0xE5AF38,
+    /// FILE_ 0xE5D050; the unnamed routines that load it, e.g. 0xE14B12,
+    /// RING 0xE76048).
+    pub always: Vec<String>,
+    /// These exported routines do not load the data base and address the
+    /// unit's data absolutely (AUDIT_$SUSPEND 0xE70DB6, AUDIT_$RESUME
+    /// 0xE70DD6, REM_NAME_$REGISTER_SERVER 0xE4A4AE).
+    pub absolute: Vec<String>,
 }
 
 /// A parameter passed by value: where its value is in the frame and its

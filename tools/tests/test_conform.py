@@ -344,6 +344,63 @@ class ConformTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn('more than one', out)
 
+    # -- which routines load A5 (codegen-patterns 4) ----------------------
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_forwards_a5(self):
+        smd = ('tests/conformance/smd_busy_wait.pas  SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  '
+               '--section-addr .bss.moddata.SMD=0xE2E060')
+        rc, out = self.manifest('a5_from.txt', smd + '  a5-always-from=smd_$busy_wait')
+        self.assertEqual(rc, 0, out)
+        # the per-routine list does the same
+        rc, out = self.manifest('a5_list.txt', smd + '  a5-always=SMD_$BUSY_WAIT,SMD_$LITES')
+        self.assertEqual(rc, 0, out)
+        # used mode (the default): neither loads A5, so `pea (A5)' is missing
+        rc, out = self.manifest('a5_used.txt', smd)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('bytes differ first at 0xE1D8A2', out)
+        # only SMD_$LITES: SMD_$BUSY_WAIT differs
+        rc, out = self.manifest('a5_one.txt', smd + '  a5-always=SMD_$LITES')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('bytes differ first at 0xE1D8A2', out)
+        rem = ('tests/conformance/rem_name_register_server.pas  REM_NAME_$REGISTER_SERVER:1A  '
+               '--section-addr .bss.moddata.REM_NAME=0xE7DBB8')
+        rc, out = self.manifest('a5_abs.txt', rem + '  a5-absolute=REM_NAME_$REGISTER_SERVER')
+        self.assertEqual(rc, 0, out)
+        rc, out = self.manifest('a5_noabs.txt', rem)
+        self.assertEqual(rc, 1, out)
+        # unknown routines and conflicts are dpc's errors, so setup errors
+        rc, out = self.manifest('a5_bad.txt', smd + '  a5-always=no_such')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('--a5-always: no routine `no_such`', out)
+        rc, out = self.manifest('a5_conflict.txt', rem + '  a5-always=REM_NAME_$REGISTER_SERVER'
+                                '  a5-absolute=REM_NAME_$REGISTER_SERVER')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('in both --a5-always and --a5-absolute', out)
+
+    def test_manifest_a5_errors(self):
+        rc, out = self.manifest('a5_s.txt', 'tests/conformance/handasm/proc1_tst_lock.s  '
+                                'PROC1_$TST_LOCK  a5-always=PROC1_$TST_LOCK')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('a5 options apply to .pas units only', out)
+        rc, out = self.manifest('a5_two.txt', 'tests/conformance/proc1_tst_lock.pas  '
+                                'PROC1_$TST_LOCK  a5-always=A  a5-always=B')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('given more than once', out)
+
+
+class A5ArgsTest(unittest.TestCase):
+    def test_tokens(self):
+        self.assertEqual(conform.a5_args([]), [])
+        self.assertEqual(
+            conform.a5_args(['a5-always-from=SMD_$BUSY_WAIT', 'a5-always=A,B',
+                             'a5-absolute=C']),
+            ['--a5-always-from=SMD_$BUSY_WAIT', '--a5-always=A,B', '--a5-absolute=C'])
+        for bad in (['a5-always-from='], ['a5-always='], ['a5-always=A,'],
+                    ['a5-absolute=,A'], ['a5-always-from=A,B'],
+                    ['a5-always=A', 'a5-always=B']):
+            with self.assertRaises(conform.SetupError):
+                conform.a5_args(bad)
+
 
 class LoopAlignArgsTest(unittest.TestCase):
     def test_tokens(self):

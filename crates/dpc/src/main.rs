@@ -2,6 +2,8 @@
 //!
 //! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE]
+//!            [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...]
+//!            [--a5-absolute=ROUTINE,...]
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -14,10 +16,21 @@
 //! module-end padding is emitted (`dpc_m68k::emit::Options`).  With
 //! `--fragment-ends-module` the fragment is the tail of its module and
 //! does get the module-end padding.
+//!
+//! `--a5-*` choose which routines load the unit's data base, A5
+//! (codegen-patterns 4; `dpc_ir::DataBaseOptions`).  By default ("used
+//! mode") an exported routine loads it iff it addresses the unit's data,
+//! directly or through `internal` callees that inherit it.
+//! `--a5-always-from=R`: from routine R on, in emission order, every
+//! exported routine with a frame loads it.  `--a5-always=R,...`: these
+//! routines (`internal` ones too) load it.  `--a5-absolute=R,...`: these
+//! exported routines do not load it and address the data with `lea
+//! <area>.l,An`.  Names are matched case-insensitively.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use dpc_ir::DataBaseOptions;
 use dpc_m68k::emit::LoopAlign;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 
@@ -25,6 +38,8 @@ const PROG: &str = "dpc";
 const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE] \
+                     [--a5-always-from=ROUTINE] [--a5-always=ROUTINE,...] \
+                     [--a5-absolute=ROUTINE,...] \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
@@ -49,6 +64,19 @@ struct Args {
     fragment_origin: Option<u32>,
     fragment_ends_module: bool,
     loop_align: LoopAlign,
+    data_base: DataBaseOptions,
+}
+
+/// The routine names of `--a5-always=` / `--a5-absolute=`: a comma list
+/// without empty items.
+fn routine_list(opt: &str, v: &str) -> Result<Vec<String>, String> {
+    let names: Vec<String> = v.split(',').map(str::to_string).collect();
+    if names.iter().any(String::is_empty) {
+        return Err(format!(
+            "{opt} needs a comma-separated list of routine names"
+        ));
+    }
+    Ok(names)
 }
 
 /// A number in C notation: `0x` hex or decimal.
@@ -67,6 +95,9 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut fragment_origin = None;
     let mut fragment_ends_module = false;
     let mut loop_align = None;
+    let mut always_from = None;
+    let mut always = None;
+    let mut absolute = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -102,6 +133,28 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     _ => LoopAlign::OffFrom(v.to_string()),
                 });
             }
+            s if s.starts_with("--a5-always-from=") => {
+                let v = &s["--a5-always-from=".len()..];
+                if always_from.is_some() {
+                    return Err("--a5-always-from given more than once".into());
+                }
+                if v.is_empty() {
+                    return Err("--a5-always-from needs a routine name".into());
+                }
+                always_from = Some(v.to_string());
+            }
+            s if s.starts_with("--a5-always=") => {
+                if always.is_some() {
+                    return Err("--a5-always given more than once".into());
+                }
+                always = Some(routine_list("--a5-always", &s["--a5-always=".len()..])?);
+            }
+            s if s.starts_with("--a5-absolute=") => {
+                if absolute.is_some() {
+                    return Err("--a5-absolute given more than once".into());
+                }
+                absolute = Some(routine_list("--a5-absolute", &s["--a5-absolute=".len()..])?);
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -128,6 +181,11 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         fragment_origin,
         fragment_ends_module,
         loop_align: loop_align.unwrap_or_default(),
+        data_base: DataBaseOptions {
+            always_from,
+            always: always.unwrap_or_default(),
+            absolute: absolute.unwrap_or_default(),
+        },
     })
 }
 
@@ -167,7 +225,7 @@ fn compile(
     if args.stop == Stop::AfterCheck {
         return Ok(());
     }
-    let module = dpc_ir::lower(&program)?;
+    let module = dpc_ir::lower_with(&program, &args.data_base)?;
     let opts = dpc_m68k::emit::Options {
         fragment_origin: args.fragment_origin,
         fragment_ends_module: args.fragment_ends_module,
@@ -268,6 +326,25 @@ mod tests {
             LoopAlign::OffFrom("vtoc_$dismount".into())
         );
         assert_eq!(
+            args(&["m.pas"]).unwrap().data_base,
+            DataBaseOptions::default()
+        );
+        let a = args(&[
+            "--a5-always-from=smd_$busy_wait",
+            "--a5-always=P,q_$x",
+            "--a5-absolute=AUDIT_$SUSPEND",
+            "m.pas",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.data_base,
+            DataBaseOptions {
+                always_from: Some("smd_$busy_wait".into()),
+                always: vec!["P".into(), "q_$x".into()],
+                absolute: vec!["AUDIT_$SUSPEND".into()],
+            }
+        );
+        assert_eq!(
             args(&["--parse-only", "m.pas"]).unwrap().stop,
             Stop::AfterParse
         );
@@ -293,5 +370,13 @@ mod tests {
         assert!(args(&["--loop-align", "off", "m.pas"]).is_err());
         assert!(args(&["--loop-align-off-from=", "m.pas"]).is_err());
         assert!(args(&["--loop-align=off", "--loop-align-off-from=P", "m.pas"]).is_err());
+        assert!(args(&["--a5-always-from=", "m.pas"]).is_err());
+        assert!(args(&["--a5-always-from=P", "--a5-always-from=Q", "m.pas"]).is_err());
+        assert!(args(&["--a5-always=", "m.pas"]).is_err());
+        assert!(args(&["--a5-always=P,", "m.pas"]).is_err());
+        assert!(args(&["--a5-always=P", "--a5-always=Q", "m.pas"]).is_err());
+        assert!(args(&["--a5-absolute=,P", "m.pas"]).is_err());
+        assert!(args(&["--a5-absolute=P", "--a5-absolute=Q", "m.pas"]).is_err());
+        assert!(args(&["--a5-always-from", "P", "m.pas"]).is_err());
     }
 }

@@ -351,3 +351,170 @@ end;
     let asm = compile_with("argument_last_use_held", &src(""), &[]).unwrap();
     assert!(asm.contains("\tmove.w\t%d2,-(%sp)\n"), "{asm}");
 }
+
+/// codegen-patterns 4: `--a5-always-from`, `--a5-always`, `--a5-absolute`.
+const A5_UNIT: &str = "module m;
+var
+  x: integer;
+  t: array[1..4] of integer;
+  i: extern integer;
+procedure m_$uses;
+begin
+  x := 1;
+end;
+procedure m_$not(out v: integer);
+begin
+  v := 0;
+end;
+procedure m_$call;
+begin
+  m_$not(x);
+end;
+procedure m_$index;
+begin
+  t[i] := 0;
+end;
+procedure m_$branch;
+begin
+  if i = 0 then x := 1;
+end;
+function m_$f: integer;
+begin
+  m_$f := 1;
+end;
+procedure m_$fcall;
+begin
+  x := m_$f;
+end;
+";
+
+const LOAD_A5: &str = "\tlea\t(.Ldata).l,%a5";
+
+#[test]
+fn a5_used_mode_by_default() {
+    let asm = compile_with("a5_used_mode", A5_UNIT, &[]).unwrap();
+    let (_, not) = asm.split_once("M_$NOT:").unwrap();
+    let (not, _) = not.split_once("M_$CALL:").unwrap();
+    assert!(!not.contains("%a5"), "{asm}");
+    let asm = compile_with("a5_always_from", A5_UNIT, &["--a5-always-from=M_$not"]).unwrap();
+    // every exported routine from M_$NOT on loads A5 (M_$F, a function
+    // that does not use the data, too)
+    assert_eq!(asm.matches(LOAD_A5).count(), 7, "{asm}");
+    let used = compile_with("a5_used", A5_UNIT, &[]).unwrap();
+    assert_eq!(used.matches(LOAD_A5).count(), 5, "{used}");
+    let asm = compile_with("a5_always", A5_UNIT, &["--a5-always=m_$not"]).unwrap();
+    assert_eq!(asm.matches(LOAD_A5).count(), 6, "{asm}");
+}
+
+#[test]
+fn a5_absolute() {
+    let asm = compile_with("a5_absolute", A5_UNIT, &["--a5-absolute=m_$uses"]).unwrap();
+    let (_, uses) = asm.split_once("M_$USES:").unwrap();
+    let (uses, _) = uses.split_once("M_$NOT:").unwrap();
+    assert!(
+        uses.contains("\tlea\t(.Ldata).l,%a0\n\tmove.w\t#1,(%a0)"),
+        "{asm}"
+    );
+    assert!(!uses.contains("%a5"), "{asm}");
+    // The base register stays live to its last use: a by-address slot
+    // loaded between two stores into the data takes another register.
+    let src = "module m;
+var
+  x: integer;
+  y: integer32;
+procedure m_$abs(out a: integer);
+begin
+  x := 1;
+  a := 2;
+  y := 3;
+end;
+";
+    let asm = compile_with("a5_absolute_live", src, &["--a5-absolute=m_$abs"]).unwrap();
+    assert!(
+        asm.contains(
+            "\tlea\t(.Ldata).l,%a0\n\tmove.w\t#1,(%a0)\n\tmovea.l\t(8,%fp),%a1\n\
+             \tmove.w\t#2,(%a1)\n\tmove.l\t#3,(4,%a0)\n"
+        ),
+        "{asm}"
+    );
+    assert_eq!(asm.matches("\tlea\t(.Ldata).l,").count(), 1, "{asm}");
+    assert!(!asm.contains("%a5"), "{asm}");
+    // only straight-line stores without calls or element indexing
+    for (r, what) in [
+        ("m_$call", "a statement other than an assignment"),
+        ("m_$fcall", "calls or branches"),
+        ("m_$branch", "a statement other than an assignment"),
+        (
+            "m_$index",
+            "an array element in the unit's data addressed absolutely",
+        ),
+    ] {
+        let (code, err) = compile_with(
+            "a5_absolute_refused",
+            A5_UNIT,
+            &[&format!("--a5-absolute={r}")],
+        )
+        .unwrap_err();
+        assert_eq!(code, Some(1));
+        assert!(err.contains(what), "{r}: {err}");
+    }
+}
+
+#[test]
+fn a5_option_errors() {
+    for (opts, what) in [
+        (
+            &["--a5-always=m_$nope"][..],
+            "--a5-always: no routine `m_$nope`",
+        ),
+        (
+            &["--a5-always-from=m_$nope"][..],
+            "--a5-always-from: no routine `m_$nope`",
+        ),
+        (
+            &["--a5-absolute=m_$not"][..],
+            "does not address the unit's static data",
+        ),
+        (
+            &["--a5-always=m_$uses", "--a5-absolute=m_$uses"][..],
+            "in both --a5-always and --a5-absolute",
+        ),
+    ] {
+        let (code, err) = compile_with("a5_option_errors", A5_UNIT, opts).unwrap_err();
+        assert_eq!(code, Some(1), "{opts:?}");
+        assert!(err.contains(what), "{opts:?}: {err}");
+    }
+    let (code, err) = compile_with(
+        "a5_no_data",
+        "module m;\nprocedure m_$p(out v: integer);\nbegin\n  v := 0;\nend;\n",
+        &["--a5-always-from=m_$p"],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(err.contains("the unit has no static data"), "{err}");
+    let (code, err) = compile_with("a5_bad_list", A5_UNIT, &["--a5-always=a,,b"]).unwrap_err();
+    assert_eq!(code, Some(2));
+    assert!(err.contains("comma-separated list"), "{err}");
+}
+
+/// codegen-patterns 2: an empty procedure is a bare `rts`; one with
+/// locals is refused (no such frame is seen).
+#[test]
+fn empty_procedures() {
+    let asm = compile_with(
+        "empty_procedure",
+        "module m;\nprocedure m_$p(in a: integer32);\nbegin\nend;\n",
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("M_$P:\n\trts\n"), "{asm}");
+    assert!(!asm.contains("link"), "{asm}");
+    let (code, err) = compile_with(
+        "empty_procedure_locals",
+        "module m;\nprocedure m_$p;\nvar i: integer;\nbegin\nend;\n",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(err.contains("an empty procedure with locals"), "{err}");
+}

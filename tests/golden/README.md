@@ -89,7 +89,8 @@ Tests:
   `sgt`, `sne`).
 - `stores/status` - codegen-patterns 9, 12.4 R4(b), 7.1, 3, 1.5: status
   out-parameters: `status.all := ...` through the slot (SMD_$BUSY_WAIT
-  0xE1D8AA, MMAP_$ALLOC_CONTIG 0xE0D8FC, without their A5 loads), slots
+  0xE1D8AA, MMAP_$ALLOC_CONTIG 0xE0D8FC, without their A5 loads, which
+  need the always-mode options of `data/a5_modes`), slots
   used once in registers no earlier statement left a value in
   (IIC_$RECEIVE 0xE70AC0, XNS_IDP_$GET_STATS 0xE18FF4), registers used up
   by `(An)+` counting as free (DIR_$ADD_MOUNT 0xE534DC), error stores and
@@ -97,3 +98,14 @@ Tests:
   `tst.l`, `if status.all <> status_$ok then return` as one `bne` to the
   epilogue (TERM_$CONTROL 0xE66B3A), a status store then a constant
   result (IIC_$RECEIVE_CHECK 0xE70ADE).
+- `data/a5_modes` - codegen-patterns 4, 2: which routines load A5
+  (options in `a5_modes.args`): used mode (PROC1_$GET_LOADAV 0xE14BBE;
+  PROC1_$TST_LOCK 0xE148CA loads nothing), `--a5-always` for an
+  `internal` routine (0xE14B12), so its caller loads nothing, and for a
+  used-mode routine (the PKT/XPD switch-backs), `--a5-always-from`
+  (SMD_$BUSY_WAIT 0xE1D8A2), `--a5-absolute` (`lea <area>.l,A0`,
+  REM_NAME_$REGISTER_SERVER 0xE4A4B2), bare `rts` routines that never
+  load A5 (SMD_$PUTC 0xE1D89C).
+- `frame/empty` - codegen-patterns 2: empty procedures as a bare `rts`,
+  with and without parameters (TIME_$Q_INIT 0xE16C5C, MT_$RELEASE
+  0xE70A4C), in a unit with data, the module end padded with 0x2048.

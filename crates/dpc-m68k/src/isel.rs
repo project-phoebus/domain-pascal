@@ -74,7 +74,23 @@ fn size_of(w: Width) -> Size {
 }
 
 /// Select the instructions of one routine, prologue to `rts`.
+///
+/// An empty procedure is a bare `rts`, without `link` (codegen-patterns
+/// 2): TIME_$Q_INIT 0xE16C5C, IIC_$INIT 0xE70A54, SMD_$PUTC 0xE1D89C, and
+/// MT_$RELEASE 0xE70A4C with its three by-address parameters (the image
+/// has no `link; unlk; rts` at all).  One with locals is refused: no such
+/// frame is seen, and whether it would be kept is not known.
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
+    if f.is_empty_procedure() {
+        if f.frame_size > 0 {
+            return Err(unsupported(
+                f.span,
+                "an empty procedure with locals (a bare `rts` or a frame: not seen, \
+                 codegen-patterns 2) is",
+            ));
+        }
+        return Ok(vec![Insn::Rts]);
+    }
     let body = select_body(f)?;
     wrap(f, body)
 }
@@ -133,6 +149,23 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     if f.loads_data_base {
         s.load_data_base();
     }
+    if f.data_absolute {
+        // codegen-patterns 4: the only sites are straight-line stores
+        // (REM_NAME_$REGISTER_SERVER 0xE4A4AE, AUDIT_$SUSPEND 0xE70DB6).
+        if let Some(st) = f
+            .body
+            .iter()
+            .find(|st| !matches!(st.kind, StmtKind::Store { .. }))
+        {
+            return Err(unsupported(
+                st.span,
+                "in a routine that addresses its unit's data absolutely (--a5-absolute), a \
+                 statement other than an assignment (only straight-line stores are seen, \
+                 codegen-patterns 4) is",
+            ));
+        }
+        s.data_absolute = true;
+    }
     let control_only = f.body.len() == 1 && !is_simple(&f.body[0]);
     s.multi_body = f.body.len() >= 2 || control_only;
     if s.multi_body {
@@ -163,6 +196,22 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
         }
     }
     s.seq(f, &f.body, Tail::END)?;
+    if f.data_absolute
+        && s.out.iter().any(|i| {
+            matches!(
+                i,
+                Insn::Branch { .. } | Insn::Dbf { .. } | Insn::Jsr(_) | Insn::Bsr { .. }
+            )
+        })
+    {
+        // Where the base register would live across a call, and how a
+        // branch would place its `lea`, is not seen (codegen-patterns 4).
+        return Err(unsupported(
+            f.span,
+            "a routine that addresses its unit's data absolutely (--a5-absolute) and calls or \
+             branches is",
+        ));
+    }
     if f.result.is_some() && s.multi_body {
         // The result assignment is the last statement (`dpc-ir`).  The
         // statements before it may only store, through slots, without
@@ -747,6 +796,12 @@ pub struct Selector {
     /// The statement already called a function whose result (in D0) may
     /// still be needed.
     called: bool,
+    /// The routine addresses the unit's data from its absolute address
+    /// ([`Function::data_absolute`]; [`Self::static_base`]).
+    data_absolute: bool,
+    /// With `data_absolute`: the address register the area's address was
+    /// loaded into, once the first static operand needed it.
+    abs_base: Option<u8>,
 }
 
 /// An operand as [`Selector::eval`] leaves it.
@@ -784,7 +839,34 @@ impl Selector {
             call_no_pop: false,
             in_args: false,
             called: false,
+            data_absolute: false,
+            abs_base: None,
         }
+    }
+
+    /// The address register that holds the unit's data area: A5
+    /// (codegen-patterns 4), or for a routine that addresses it
+    /// absolutely (`--a5-absolute`) a register loaded with `lea
+    /// <area>.l,An` where the first static operand needs it and kept for
+    /// the rest of the body (REM_NAME_$REGISTER_SERVER 0xE4A4B2 `lea
+    /// 0xE7DBB8,A0`, then `(0x28,A0)` and `(0x3c,A0)` in two statements;
+    /// AUDIT_$SUSPEND 0xE70DC0, after the index load, once for the read
+    /// and the write of one element).  The register is a virtual one, so
+    /// the allocator gives it the lowest free (A0 at both sites).
+    fn static_base(&mut self) -> Res<u8> {
+        if !self.data_absolute {
+            return Ok(DATA_BASE_A);
+        }
+        if let Some(a) = self.abs_base {
+            return Ok(a);
+        }
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea {
+            src: Ea::AbsL(DATA_BASE_LABEL.into(), 0),
+            dst: a,
+        });
+        self.abs_base = Some(a);
+        Ok(a)
     }
 
     fn new_label(&mut self) -> u32 {
@@ -3102,6 +3184,16 @@ impl Selector {
     ///   (0,A5,D1.w),A0; move.w (-0x220,A0),D0`; ACL_$IN_SUBSYS 0xE470B2).
     fn index_ea(&mut self, base: &Addr, index: &Expr, scale: u32, offset: i32) -> Res<Ea> {
         let (areg, disp0) = match base {
+            // AUDIT_$SUSPEND 0xE70DBA..0xE70DC6 loads the base between
+            // the index load and its scaling: not modelled.
+            Addr::Static(_) if self.data_absolute => {
+                return Err(unsupported(
+                    self.span,
+                    "an array element in the unit's data addressed absolutely (--a5-absolute; \
+                     the `lea` is scheduled into the index computation, AUDIT_$SUSPEND \
+                     0xE70DC0) is",
+                ))
+            }
             Addr::Static(o) => (DATA_BASE_A, *o),
             Addr::Frame(o) => (FP, *o),
             Addr::Indirect { base: p, offset: o }
@@ -3264,10 +3356,11 @@ impl Selector {
                         "a static variable beyond 32K into the data area is",
                     ));
                 }
+                let base = self.static_base()?;
                 Ok(if *o == 0 {
-                    Ea::Ind(DATA_BASE_A)
+                    Ea::Ind(base)
                 } else {
-                    Ea::Disp(*o, DATA_BASE_A)
+                    Ea::Disp(*o, base)
                 })
             }
             Addr::Index {
@@ -3312,6 +3405,7 @@ mod tests {
             frame_size,
             result,
             loads_data_base: false,
+            data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),
             body: body
@@ -3330,19 +3424,38 @@ mod tests {
         Expr::Load { addr, ty }
     }
 
+    /// codegen-patterns 2: an empty procedure is a bare `rts` (TIME_$Q_INIT
+    /// 0xE16C5C), even if it would load the data base; one with locals
+    /// is refused.  An empty function keeps its frame.
     #[test]
     fn empty_procedure() {
+        assert_eq!(text(&func(0, None, vec![])), ["rts"]);
+        assert_eq!(text(&with_data(func(0, None, vec![]))), ["rts"]);
+        let d = select(&func(4, None, vec![])).unwrap_err();
+        assert!(
+            d.message.starts_with("an empty procedure with locals"),
+            "{}",
+            d.message
+        );
+        let word = ResultSpec {
+            class: ResultClass::Data,
+            ty: Scalar::signed(Width::Word),
+        };
         assert_eq!(
-            text(&func(0, None, vec![])),
+            text(&func(0, Some(word), vec![])),
             ["link.w\t%fp,#0", "unlk\t%fp", "rts"]
         );
     }
 
     #[test]
     fn link_rounds_frame_up_to_4() {
+        let word = ResultSpec {
+            class: ResultClass::Data,
+            ty: Scalar::signed(Width::Word),
+        };
         for (raw, disp) in [(1, "#-4"), (4, "#-4"), (5, "#-8"), (12, "#-0xc")] {
             assert_eq!(
-                text(&func(raw, None, vec![]))[0],
+                text(&func(raw, Some(word), vec![]))[0],
                 format!("link.w\t%fp,{disp}")
             );
         }
@@ -3447,7 +3560,11 @@ mod tests {
 
     #[test]
     fn oversized_frame_is_rejected() {
-        let d = select(&func(0x8001, None, vec![])).unwrap_err();
+        let word = ResultSpec {
+            class: ResultClass::Data,
+            ty: Scalar::signed(Width::Word),
+        };
+        let d = select(&func(0x8001, Some(word), vec![])).unwrap_err();
         assert!(d.message.ends_with("not supported yet"), "{}", d.message);
     }
 

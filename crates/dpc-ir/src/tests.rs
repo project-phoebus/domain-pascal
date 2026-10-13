@@ -36,6 +36,11 @@ impl Target for M68kAbi {
 
 /// Lower `src`; errors are rendered `t.pas:line:col: error: msg`.
 fn lower_src(src: &str) -> Result<Module, Vec<String>> {
+    lower_src_with(src, &DataBaseOptions::default())
+}
+
+/// [`lower_src`] with data-base options.
+fn lower_src_with(src: &str, db: &DataBaseOptions) -> Result<Module, Vec<String>> {
     let mut sm = SourceMap::new();
     let f = sm.add("t.pas", src.to_string());
     let pp = preprocess(&mut sm, f, &Options::default());
@@ -45,7 +50,7 @@ fn lower_src(src: &str) -> Result<Module, Vec<String>> {
         ds.iter().map(|d| d.render(&sm, "dpc")).collect()
     };
     let program = dpc_sema::analyze(&unit, &M68kAbi).map_err(render)?;
-    lower(&program).map_err(render)
+    lower_with(&program, db).map_err(render)
 }
 
 fn errs(src: &str) -> Vec<String> {
@@ -630,21 +635,262 @@ end;
     assert!(!m.functions[1].loads_data_base);
 }
 
-/// The open case of codegen-patterns 4.
+/// codegen-patterns 4, used mode (the default): an exported routine that
+/// does not use its unit's data does not load the data base
+/// (PROC1_$TST_LOCK 0xE148CA, in a unit with data).
 #[test]
-fn exported_routine_not_using_unit_data_is_rejected() {
-    let e = errs(&format!(
+fn exported_routine_not_using_unit_data_does_not_load() {
+    let m = lower_src(&format!(
         "{LOADAV}procedure p(out x: integer32);\nbegin\n  x := 0;\nend;\n"
-    ));
-    assert_eq!(e.len(), 1);
+    ))
+    .unwrap();
+    assert!(!m.functions[0].loads_data_base);
+    assert!(!m.functions[0].data_absolute);
+}
+
+/// A unit for the data-base options: data, an exported user, two
+/// exported non-users, an internal user, an empty procedure.
+const MODES: &str = "module m;
+var
+  x: integer;
+procedure a_$uses;
+begin
+  x := 1;
+end;
+procedure b_$not(out y: integer);
+begin
+  y := 0;
+end;
+procedure worker; internal;
+begin
+  x := 0;
+end;
+procedure c_$empty;
+begin
+end;
+procedure d_$not(out y: integer);
+begin
+  y := 1;
+end;
+";
+
+fn loads(m: &Module) -> Vec<bool> {
+    m.functions.iter().map(|f| f.loads_data_base).collect()
+}
+
+fn db(always_from: Option<&str>, always: &[&str], absolute: &[&str]) -> DataBaseOptions {
+    DataBaseOptions {
+        always_from: always_from.map(str::to_string),
+        always: always.iter().map(|s| s.to_string()).collect(),
+        absolute: absolute.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// `--a5-always-from`: always mode from the named routine on, in
+/// emission order, for exported routines with a frame (SMD 0xE1D750:
+/// SMD_$PUTC a bare `rts`, SMD_$BUSY_WAIT 0xE1D8A4 loads A5).
+#[test]
+fn data_base_always_from() {
+    let m = lower_src(MODES).unwrap();
+    assert_eq!(loads(&m), [true, false, false, false, false]);
+    let m = lower_src_with(MODES, &db(Some("B_$NOT"), &[], &[])).unwrap();
+    // the internal worker inherits; the empty procedure is a bare `rts`
+    assert_eq!(loads(&m), [true, true, false, false, true]);
+    let m = lower_src_with(MODES, &db(Some("worker"), &[], &[])).unwrap();
+    assert_eq!(loads(&m), [true, false, false, false, true]);
+    let m = lower_src_with(MODES, &db(Some("a_$uses"), &[], &[])).unwrap();
+    assert_eq!(loads(&m), [true, true, false, false, true]);
+}
+
+/// `--a5-always`: per routine, `internal` ones too (0xE14B12, RING
+/// 0xE76048); a call to a routine that loads A5 itself is not a use.
+#[test]
+fn data_base_always_list() {
+    let m = lower_src_with(MODES, &db(None, &["d_$not", "WORKER"], &[])).unwrap();
+    assert_eq!(loads(&m), [true, false, true, false, true]);
+    let src = "module m;
+var
+  x: integer;
+procedure worker; internal;
+begin
+  x := 0;
+end;
+procedure p_$caller;
+begin
+  worker;
+end;
+";
+    let m = lower_src(src).unwrap();
+    assert_eq!(loads(&m), [false, true]);
+    let m = lower_src_with(src, &db(None, &["worker"], &[])).unwrap();
+    assert_eq!(loads(&m), [true, false]);
+}
+
+/// Used mode through chains of `internal` routines (codegen-patterns 4:
+/// 117 `S` routines use A5 only through a `bsr` callee, 25 through deeper
+/// chains, LOG_$READ 0xE17800): a use reached through an `internal`
+/// routine declared `forward` makes every caller up to the exported one
+/// load A5; a recursive `internal` routine that uses nothing does not;
+/// an `internal` routine that only calls an exported one (which loads A5
+/// itself) is not a use.
+#[test]
+fn data_base_through_internal_chains() {
+    let src = "module m;
+var
+  x: integer;
+procedure leaf; forward; internal;
+procedure mid; internal;
+begin
+  leaf;
+end;
+procedure leaf;
+begin
+  x := 1;
+end;
+procedure rec; internal;
+begin
+  rec;
+end;
+procedure m_$e2;
+begin
+  x := 2;
+end;
+procedure calls_e2; internal;
+begin
+  m_$e2;
+end;
+procedure m_$a;
+begin
+  mid;
+end;
+procedure m_$b;
+begin
+  rec;
+end;
+procedure m_$c;
+begin
+  calls_e2;
+end;
+";
+    let m = lower_src(src).unwrap();
+    let by_name = |n: &str| {
+        m.functions
+            .iter()
+            .find(|f| f.symbol == n)
+            .unwrap_or_else(|| panic!("{n}"))
+            .loads_data_base
+    };
+    // Internal routines never load; the exported ones by what they reach.
+    for (n, l) in [
+        ("LEAF", false),
+        ("MID", false),
+        ("REC", false),
+        ("CALLS_E2", false),
+        ("M_$E2", true),
+        ("M_$A", true),
+        ("M_$B", false),
+        ("M_$C", false),
+    ] {
+        assert_eq!(by_name(n), l, "{n}");
+    }
+    // An absolute routine may not reach the data through the chain either.
+    let e = lower_src_with(src, &db(None, &[], &["m_$a"])).unwrap_err();
     assert!(
-        e[0].starts_with(
-            "t.pas:6:1: error: an exported routine that does not use its unit's static data"
-        ),
+        e.iter()
+            .any(|x| x.contains("calls an internal routine that uses the unit's data")),
         "{e:?}"
     );
-    // Without unit data it is fine.
-    lower_src("module m;\nprocedure p(out x: integer32);\nbegin\n  x := 0;\nend;\n").unwrap();
+}
+
+/// `--a5-absolute`: no load, the data addressed absolutely
+/// (REM_NAME_$REGISTER_SERVER 0xE4A4AE); it overrides always mode.
+#[test]
+fn data_base_absolute() {
+    let m = lower_src_with(MODES, &db(Some("a_$uses"), &[], &["A_$USES"])).unwrap();
+    assert_eq!(loads(&m), [false, true, false, false, true]);
+    assert!(m.functions[0].data_absolute);
+    assert!(!m.functions[1].data_absolute);
+}
+
+#[test]
+fn data_base_option_errors() {
+    let e = |o: DataBaseOptions| -> Vec<String> {
+        match lower_src_with(MODES, &o) {
+            Ok(m) => panic!("expected errors, got {m:#?}"),
+            Err(e) => e,
+        }
+    };
+    let has = |e: &[String], what: &str| assert!(e.iter().any(|x| x.contains(what)), "{e:?}");
+    has(
+        &e(db(Some("nope"), &[], &[])),
+        "--a5-always-from: no routine `nope`",
+    );
+    has(
+        &e(db(None, &["nope"], &[])),
+        "--a5-always: no routine `nope`",
+    );
+    has(
+        &e(db(None, &[], &["nope"])),
+        "--a5-absolute: no routine `nope`",
+    );
+    has(
+        &e(db(None, &["a_$uses"], &["a_$uses"])),
+        "`A_$USES` is in both --a5-always and --a5-absolute",
+    );
+    has(
+        &e(db(None, &["c_$empty"], &[])),
+        "`C_$EMPTY` is an empty procedure",
+    );
+    has(
+        &e(db(None, &[], &["c_$empty"])),
+        "`C_$EMPTY` is an empty procedure",
+    );
+    has(
+        &e(db(None, &[], &["worker"])),
+        "`WORKER` is an internal routine",
+    );
+    has(
+        &e(db(None, &[], &["b_$not"])),
+        "--a5-absolute: `B_$NOT` does not address the unit's static data",
+    );
+    // A unit without data has no area to load (the 4-byte blocks with A5
+    // at their end are not covered).
+    let nodata = "module m;\nprocedure p(out y: integer);\nbegin\n  y := 0;\nend;\n";
+    for o in [db(Some("p"), &[], &[]), db(None, &["p"], &[])] {
+        let e = lower_src_with(nodata, &o).unwrap_err();
+        has(&e, "the unit has no static data");
+    }
+    let e = lower_src_with(nodata, &db(None, &[], &["p"])).unwrap_err();
+    has(&e, "does not address the unit's static data");
+    // An absolute routine may not rely on an inheriting callee.
+    let src = "module m;
+var
+  x: integer;
+procedure worker; internal;
+begin
+  x := 0;
+end;
+procedure p_$caller;
+begin
+  x := 1;
+  worker;
+end;
+";
+    let e = lower_src_with(src, &db(None, &[], &["p_$caller"])).unwrap_err();
+    has(&e, "calls an internal routine that uses the unit's data");
+    // ... unless that callee loads the data base itself.
+    let m = lower_src_with(src, &db(None, &["worker"], &["p_$caller"])).unwrap();
+    assert_eq!(loads(&m), [true, false]);
+}
+
+/// codegen-patterns 2: an empty procedure (a bare `rts`) never loads the
+/// data base.
+#[test]
+fn empty_procedure() {
+    let m = lower_src(MODES).unwrap();
+    let f = &m.functions[3];
+    assert!(f.is_empty_procedure());
+    assert!(!m.functions[0].is_empty_procedure());
 }
 
 /// Records and arrays of a scalar size are moved as scalars; others are
@@ -1151,13 +1397,10 @@ begin
 end;
 ",
     );
-    let e = match m {
-        Ok(m) => panic!("{m:#?}"),
-        Err(e) => e,
-    };
-    // LOG_$OTHER calls only a global routine, which sets A5 itself.
-    assert_eq!(e.len(), 1, "{e:?}");
-    assert!(e[0].starts_with("t.pas:16:1: error: an exported routine that does not use"));
+    // LOG_$OTHER calls only a global routine, which sets A5 itself: in
+    // used mode it loads nothing.
+    let m = m.unwrap();
+    assert_eq!(loads(&m), [false, false, true, false]);
     let m = lower_src(
         "module log_;
 var

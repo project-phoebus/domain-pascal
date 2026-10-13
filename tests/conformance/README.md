@@ -37,11 +37,23 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 0xE0AA04: `lsl.w #2`, `(0x3c,A5,D0.w)`) and
 `audit_is_process_audited.pas` (AUDIT_$IS_PROCESS_AUDITED 0xE70D94: a
 1-based array, `(-2,A5,D0.w)`, a comparison as the result with `seq`).
+`time_q_init_queue.pas` starts at TIME_$Q_INIT 0xE16C5C, an empty
+procedure (codegen-patterns 2, bead domain-pascal-lkr), and
+`mt_release.pas` is the whole one-routine MT module (MT_$RELEASE
+0xE70A4C: `rts` and the module-end 0x2048).  Which routines load A5
+(codegen-patterns 4, bead domain-pascal-5aw.14; "Module data" below):
+`smd_busy_wait.pas` (SMD_$PUTC, SMD_$BUSY_WAIT, SMD_$LITES,
+0xE1D89C..0xE1D8DC, the tail of the SMD module: always mode from
+SMD_$BUSY_WAIT, a val_param call), `mmap_alloc_contig.pas`
+(MMAP_$ALLOC_CONTIG 0xE0D8F0) and `xns_idp_get_port_info.pas`
+(XNS_IDP_$GET_PORT_INFO 0xE18FB8), each always mode for itself, and
+`rem_name_register_server.pas` (REM_NAME_$REGISTER_SERVER 0xE4A4AE: its
+data addressed with `lea <block>.l,A0`, no A5).
 Status out-parameters (codegen-patterns 9, 12.4 R4(b); bead
-domain-pascal-5aw.2): `iic.pas` (IIC_$ACQUIRE..IIC_$RECEIVE_CHECK,
-0xE70A56..0xE70AF4, the IIC module's status stubs without IIC_$INIT, a
-bare `rts`: by-address slots used once in A0, A1, A2, a status store
-then a constant boolean result), `xns_idp_get_stats.pas`
+domain-pascal-5aw.2): `iic.pas` (IIC_$INIT..IIC_$RECEIVE_CHECK,
+0xE70A54..0xE70AF4, the whole IIC module: IIC_$INIT an empty procedure,
+a bare `rts`, then status stubs with by-address slots used once in A0,
+A1, A2, a status store then a constant boolean result), `xns_idp_get_stats.pas`
 (XNS_IDP_$GET_STATS 0xE18FD6: the status slot in A1 after the dead A0)
 and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
 D0`).
@@ -64,6 +76,32 @@ checks that relocation against that address like any other.  A NOBITS
 section has no bytes to compare; a reference into a data section with no
 `--section-addr` is a failure.  Only the variables a unit needs are
 declared, at the offsets the image uses (each `.pas` header says so).
+
+Which routines load A5 is not recorded in the source (codegen-patterns
+4): in "used mode", dpc's default, an exported routine loads it iff it
+uses the unit's data (directly or through `internal` callees that
+inherit A5); in "always mode" every exported routine with a frame does.
+A manifest line passes dpc's options as tokens after its specs (`.pas`
+units only, each at most once):
+
+- `a5-always-from=NAME`: `dpc --a5-always-from=NAME`, always mode from
+  routine NAME on (emission order), as `loop-align-off-from=`;
+- `a5-always=NAME,...`: `dpc --a5-always=...`, these routines load A5
+  whatever their body (`internal` ones too);
+- `a5-absolute=NAME,...`: `dpc --a5-absolute=...`, these exported
+  routines load no A5 and address the unit's data with `lea
+  <block>.l,A0` (REM_NAME_$REGISTER_SERVER 0xE4A4B2).
+
+A name that is not a routine of the unit, or a routine in both lists, is
+dpc's error (a setup error here).  Always mode needs a data area: a unit
+that has no variables of its own but loads A5 in the image declares a
+stand-in variable (its header says so); the image's 4-byte blocks with
+A5 at their end are not covered.
+
+    python3 tools/a5survey.py switch SEG...
+
+prints a segment's routines by mode (`S` loads and uses A5, `s` loads it
+without using it, `n` neither) and where the switch to always mode lies.
 
 ## Fragments and 0x2048 alignment
 

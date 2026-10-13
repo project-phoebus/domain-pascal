@@ -13,7 +13,11 @@ where OPTION is `loop-align=on', `loop-align=off' or
 `loop-align-off-from=NAME' (.pas units only), forwarded to dpc as
 `--loop-align=...' / `--loop-align-off-from=NAME' (codegen-patterns 7:
 loop alignment is on for a leading run of a segment's routines and off for
-the rest; `tools/loopalign.py switch SEG' shows where).
+the rest; `tools/loopalign.py switch SEG' shows where), or one of
+`a5-always-from=NAME', `a5-always=NAME,...', `a5-absolute=NAME,...'
+(.pas units only, each at most once), forwarded as `--a5-...' (which
+routines load the data base A5, codegen-patterns 4; `tools/a5survey.py
+switch SEG' shows a segment's modes).
 
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
@@ -565,11 +569,34 @@ def loop_align_args(tokens):
     return out
 
 
+A5_TOKENS = ('a5-always-from=', 'a5-always=', 'a5-absolute=')
+
+
+def a5_args(tokens):
+    """The dpc options for manifest tokens `a5-always-from=NAME',
+    `a5-always=NAME,...' and `a5-absolute=NAME,...' (each at most
+    once)."""
+    out, seen = [], set()
+    for t in tokens:
+        key, _, val = t.partition('=')
+        if key in seen:
+            raise SetupError('%s= given more than once' % key)
+        seen.add(key)
+        if not val or '' in val.split(','):
+            raise SetupError('%s: needs a routine name%s'
+                             % (t, '' if key == 'a5-always-from' else ' list'))
+        if key == 'a5-always-from' and ',' in val:
+            raise SetupError('%s: names one routine' % t)
+        out.append('--' + t)
+    return out
+
+
 def run_manifest(path, linkmap, dpc):
     """Each non-comment line: FILE SPEC... [--section-addr SEC=0xADDR]...
-    [loop-align=on|off | loop-align-off-from=NAME].  FILE is relative to
-    the repository root; .pas files are compiled with dpc first, with the
-    loop-align token forwarded as a dpc option.  Returns (failing
+    [loop-align=on|off | loop-align-off-from=NAME] [a5-...=NAME,...]...
+    FILE is relative to the repository root; .pas files are compiled with
+    dpc first, with the loop-align and a5 tokens forwarded as dpc
+    options.  Returns (failing
     entries, entries with setup errors)."""
     failures = errors = 0
     with open(path) as f:
@@ -578,7 +605,7 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect, align = [], {}, []
+        specs, sect, align, a5 = [], {}, [], []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -586,6 +613,8 @@ def run_manifest(path, linkmap, dpc):
                 sect[k] = v
             elif t.startswith(LOOP_ALIGN_TOKENS):
                 align.append(t)
+            elif t.startswith(A5_TOKENS):
+                a5.append(t)
             else:
                 specs.append(t)
         try:
@@ -594,6 +623,10 @@ def run_manifest(path, linkmap, dpc):
             opts = loop_align_args(align)
             if opts and not src.endswith('.pas'):
                 raise SetupError('%s: loop-align options apply to .pas units only' % toks[0])
+            a5opts = a5_args(a5)
+            if a5opts and not src.endswith('.pas'):
+                raise SetupError('%s: a5 options apply to .pas units only' % toks[0])
+            opts += a5opts
             if src.endswith('.pas'):
                 frag = fragment_args(unit_routines(specs, linkmap), linkmap)
                 asm = compile_pas(src, dpc, work, frag + opts)

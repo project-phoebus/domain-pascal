@@ -391,10 +391,23 @@ mod tests {
             frame_size: 0,
             result: None,
             loads_data_base: false,
+            data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),
             body: Vec::new(),
             span,
+        }
+    }
+
+    /// An 8-byte routine, `link.w; unlk; rts`: a function with an empty
+    /// body (an empty procedure is a bare `rts`, codegen-patterns 2).
+    fn framed(symbol: &str) -> dpc_ir::Function {
+        dpc_ir::Function {
+            result: Some(dpc_ir::ResultSpec {
+                class: dpc_ir::ResultClass::Data,
+                ty: dpc_ir::Scalar::signed(dpc_ir::Width::Word),
+            }),
+            ..one_routine(".text", symbol)
         }
     }
 
@@ -726,8 +739,8 @@ mod tests {
     #[test]
     fn branch_sizes_see_dropped_fillers() {
         let probe = |la: LoopAlign| {
-            let mut functions = vec![one_routine(".text", "T"), one_loop("A")];
-            functions.extend((0..11).map(|i| one_routine(".text", &format!("E{i}"))));
+            let mut functions = vec![framed("T"), one_loop("A")];
+            functions.extend((0..11).map(|i| framed(&format!("E{i}"))));
             functions.push(caller("B", 0, Some("T")));
             let m = Module {
                 functions,

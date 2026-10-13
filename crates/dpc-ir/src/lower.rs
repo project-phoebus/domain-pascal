@@ -18,8 +18,9 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, BinOp as IrBinOp, Call, Callee, Cond, DataArea, Expr, Function, Module, Rel,
-    ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    Addr, Arg, BinOp as IrBinOp, Call, Callee, Cond, DataArea, DataBaseOptions, Expr, Function,
+    Module, Rel, ResultClass, ResultSpec, Scalar, Sign, Stmt, StmtKind, UnOp as IrUnOp, ValueParam,
+    Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -28,9 +29,16 @@ fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
 }
 
-/// Lower `program` to IR.  Every construct that cannot be lowered yet is
-/// reported; the module is returned only when there is none.
+/// Lower `program` to IR with the default data-base policy
+/// ([`DataBaseOptions`]).
 pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
+    lower_with(program, &DataBaseOptions::default())
+}
+
+/// Lower `program` to IR.  Every construct that cannot be lowered yet is
+/// reported; the module is returned only when there is none.  `db` says
+/// which routines load the data base (codegen-patterns 4).
+pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     if program.is_program {
         let d = match program.main.as_ref().and_then(|b| b.stmts.first()) {
@@ -60,7 +68,7 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
         }
     }
     if errors.is_empty() {
-        if let Err(d) = set_loads_data_base(&mut functions, data.is_some()) {
+        if let Err(d) = set_loads_data_base(&mut functions, data.is_some(), db) {
             errors.extend(d);
         }
     }
@@ -198,6 +206,7 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
         result,
         // Decided once every routine is lowered (`set_loads_data_base`).
         loads_data_base: false,
+        data_absolute: false,
         value_params: value_params(p, r),
         address_params: r
             .params
@@ -210,57 +219,161 @@ fn lower_routine(p: &Program, id: RoutineId) -> Result<Function, Vec<Diagnostic>
     })
 }
 
-/// Decide [`Function::loads_data_base`] for every routine of the unit
-/// (codegen-patterns 4; on m68k `lea <area>.l,A5` after saving A5).
+/// Decide [`Function::loads_data_base`] and [`Function::data_absolute`]
+/// for every routine of the unit (codegen-patterns 4; on m68k `lea
+/// <area>.l,A5` after saving A5).
 ///
-/// Survey of the image (compiled code: every `link` in the map's `I`
-/// segments other than `*_ASM`, modules with a `D` segment), where a
-/// routine "uses" the data when it has an `(..,A5..)` operand or passes A5
-/// on, *directly or through a module-local callee that does not set A5
-/// itself*:
+/// Survey of the image (`tools/a5survey.py`; compiled code only), where a
+/// routine "uses" the data when it has an `(..,A5..)` operand, directly or
+/// through a module-local callee that does not load A5 itself (a call to
+/// a routine that loads A5 itself is not a use):
 ///
-/// - An exported routine that uses its unit's data loads A5 (585
-///   map-named routines, e.g. PROC1_$GET_LOADAV 0xE14BC0,
-///   XNS_IDP_$GET_STATS 0xE18FDC).  None was found using it without
-///   loading A5.  Through a callee: LOG_$READ 0xE17806 loads A5 although
-///   it has no A5 operand of its own; its module-local worker 0xE17778,
-///   which does not load A5, reads `(0x14,A5)` (0xE1778C).
-/// - A module-local routine called only from its module inherits A5 from
-///   its caller (0xE17778).  `internal` routines (ref 5.5.4) are taken to
-///   be such workers.  **Uncertain:** 23 routines the map does not name do
-///   load A5, but nearly all of them are also called with `jsr` from other
-///   modules (exported routines the map omits, e.g. 0xE14B12), and a few
-///   RING ones (0xE76048, 0xE7667C) are reached only with `bsr` from
-///   their module.
-/// - An exported routine that does not use the data is the open case: 204
-///   map-named routines load A5 without any A5 operand (e.g.
-///   XNS_IDP_$GET_PORT_INFO 0xE18FBE, SMD_$BUSY_WAIT 0xE1D8A4), 251 do
-///   not load it (e.g. TIME_$WAIT 0xE1650A).  Map segments seem to merge
-///   several compilation units (one segment's routines run in blocks that
-///   load A5 and blocks that do not), so "every exported routine of a
-///   unit with static data" fits the image too, but the unit boundaries
-///   are not known.  Rejected.
-fn set_loads_data_base(fs: &mut [Function], unit_has_data: bool) -> Result<(), Vec<Diagnostic>> {
+/// - An exported routine that uses its unit's data loads A5 (628 `S`
+///   routines, e.g. PROC1_$GET_LOADAV 0xE14BC0); through a callee:
+///   LOG_$READ 0xE17806, whose worker 0xE17778 reads `(0x14,A5)`.
+/// - Module-local routines inherit A5 (0xE17778); `internal` routines
+///   (ref 5.5.4) are taken to be such workers.
+/// - An exported routine that does not use the data: in "used mode" it
+///   does not load A5 (196 `n`, PROC1_$TST_LOCK 0xE148CA), in "always
+///   mode" it does (213 `s`, SMD_$BUSY_WAIT 0xE1D8A4).  The mode runs
+///   over stretches of a segment and is not recorded in the source, so
+///   it is an option ([`DataBaseOptions`]): used mode by default.
+/// - A bare-`rts` routine never loads A5 (SMD_$PUTC 0xE1D89C).
+///
+/// Errors: a name that is not a routine of the unit; always mode in a
+/// unit without static data (A5 would point at a 4-byte block with A5 at
+/// its end, which is not covered); a routine in both the `always` and
+/// the `absolute` list; an empty procedure in either; an `internal`
+/// routine in the `absolute` list (not seen); an absolute routine that
+/// does not address the data, or reaches it through a callee that
+/// inherits A5 (which would see the caller's A5).
+fn set_loads_data_base(
+    fs: &mut [Function],
+    unit_has_data: bool,
+    db: &DataBaseOptions,
+) -> Result<(), Vec<Diagnostic>> {
+    let fsr: &[Function] = fs;
+    let mut errors = Vec::new();
+    let find = |name: &str| fsr.iter().position(|f| f.symbol.eq_ignore_ascii_case(name));
+    let mut always = vec![false; fsr.len()];
+    let mut absolute = vec![false; fsr.len()];
+    for (opt, names, set) in [
+        ("--a5-always", &db.always, &mut always),
+        ("--a5-absolute", &db.absolute, &mut absolute),
+    ] {
+        for name in names {
+            match find(name) {
+                Some(i) => set[i] = true,
+                None => errors.push(Diagnostic::error_nopos(format!(
+                    "{opt}: no routine `{name}` in this unit"
+                ))),
+            }
+        }
+    }
+    // Emission order: code section by code section, in order of first
+    // use, the unit's order within each (as `dpc_m68k::emit` lays out).
+    let mut sections: Vec<&str> = Vec::new();
+    for f in fsr.iter() {
+        if !sections.contains(&f.code_section.as_str()) {
+            sections.push(&f.code_section);
+        }
+    }
+    let order: Vec<usize> = sections
+        .iter()
+        .flat_map(|&sec| (0..fsr.len()).filter(move |&i| fsr[i].code_section == sec))
+        .collect();
+    let mut always_mode = vec![false; fsr.len()];
+    if let Some(name) = &db.always_from {
+        match order
+            .iter()
+            .position(|&i| fsr[i].symbol.eq_ignore_ascii_case(name))
+        {
+            Some(k) => {
+                for &i in &order[k..] {
+                    always_mode[i] = true;
+                }
+            }
+            None => errors.push(Diagnostic::error_nopos(format!(
+                "--a5-always-from: no routine `{name}` in this unit"
+            ))),
+        }
+    }
+    if !unit_has_data && (db.always_from.is_some() || always.contains(&true)) {
+        // In the image such a unit's A5 is the end of a 4-byte block no
+        // code reads (OS_INIT_DATA AST_ 0xE35000 -> 0xE35004); dpc does
+        // not lay out that block.
+        errors.push(Diagnostic::error_nopos(
+            "--a5-always / --a5-always-from: the unit has no static data, so there is no data \
+             area to load (a unit without data that loads A5 points it past a 4-byte block, \
+             codegen-patterns 4; not supported)",
+        ));
+    }
+    for (i, f) in fsr.iter().enumerate() {
+        if always[i] && absolute[i] {
+            errors.push(Diagnostic::error_nopos(format!(
+                "`{}` is in both --a5-always and --a5-absolute",
+                f.symbol
+            )));
+        }
+        if (always[i] || absolute[i]) && f.is_empty_procedure() {
+            errors.push(Diagnostic::error(
+                f.span,
+                format!(
+                    "{}: `{}` is an empty procedure, compiled to a bare `rts`, which never loads \
+                     or addresses the data base (codegen-patterns 2)",
+                    if always[i] {
+                        "--a5-always"
+                    } else {
+                        "--a5-absolute"
+                    },
+                    f.symbol
+                ),
+            ));
+        }
+        if absolute[i] && !f.global {
+            errors.push(Diagnostic::error(
+                f.span,
+                format!(
+                    "--a5-absolute: `{}` is an internal routine (it inherits the data base; \
+                     absolute addressing is seen only in exported routines, codegen-patterns 4)",
+                    f.symbol
+                ),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     // Which routines use the data, directly or through internal callees
-    // of this unit (which inherit A5); a fixpoint over the call graph.
-    let mut uses: Vec<bool> = fs
+    // that inherit it; a fixpoint over the call graph.
+    let direct: Vec<bool> = fs
         .iter()
         .map(|f| f.body.iter().any(stmt_uses_static))
         .collect();
+    let callees: Vec<Vec<String>> = fs
+        .iter()
+        .map(|f| {
+            let mut c = Vec::new();
+            for st in &f.body {
+                local_callees(st, &mut c);
+            }
+            c
+        })
+        .collect();
+    // A callee inherits the data base unless it is exported or in the
+    // `always` list (it loads its own; a call to it is not a use).
+    let inherits = |j: usize| !fsr[j].global && !always[j];
+    let mut uses = direct.clone();
     loop {
         let mut changed = false;
-        for i in 0..fs.len() {
+        for i in 0..fsr.len() {
             if uses[i] {
                 continue;
             }
-            let mut callees = Vec::new();
-            for st in &fs[i].body {
-                local_callees(st, &mut callees);
-            }
-            let through = callees.iter().any(|sym| {
-                fs.iter()
+            let through = callees[i].iter().any(|sym| {
+                fsr.iter()
                     .position(|g| &g.symbol == sym)
-                    .is_some_and(|j| !fs[j].global && uses[j])
+                    .is_some_and(|j| inherits(j) && uses[j])
             });
             if through {
                 uses[i] = true;
@@ -271,25 +384,51 @@ fn set_loads_data_base(fs: &mut [Function], unit_has_data: bool) -> Result<(), V
             break;
         }
     }
-    let mut errors = Vec::new();
-    for (f, uses) in fs.iter_mut().zip(uses) {
-        if !f.global {
+    for i in 0..fsr.len() {
+        if !absolute[i] {
             continue;
         }
-        if !uses && unit_has_data {
-            errors.push(unsupported(
+        let f = &fsr[i];
+        let through = callees[i].iter().any(|sym| {
+            fsr.iter()
+                .position(|g| &g.symbol == sym)
+                .is_some_and(|j| inherits(j) && uses[j])
+        });
+        if through {
+            errors.push(Diagnostic::error(
                 f.span,
-                "an exported routine that does not use its unit's static data, in a unit that has \
-                 some (whether it loads the data base is not settled, codegen-patterns 4), is",
+                format!(
+                    "--a5-absolute: `{}` calls an internal routine that uses the unit's data \
+                     through the inherited data base, which it would not have loaded",
+                    f.symbol
+                ),
+            ));
+        } else if !direct[i] {
+            errors.push(Diagnostic::error(
+                f.span,
+                format!(
+                    "--a5-absolute: `{}` does not address the unit's static data",
+                    f.symbol
+                ),
             ));
         }
-        f.loads_data_base = uses;
     }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
+    if !errors.is_empty() {
+        return Err(errors);
     }
+    for (i, f) in fs.iter_mut().enumerate() {
+        f.data_absolute = absolute[i];
+        f.loads_data_base = if f.is_empty_procedure() || absolute[i] {
+            false
+        } else if always[i] {
+            true
+        } else if !f.global {
+            false
+        } else {
+            uses[i] || (always_mode[i] && unit_has_data)
+        };
+    }
+    Ok(())
 }
 
 /// The symbols of this unit's routines that `s` calls ([`Callee::Local`]),
