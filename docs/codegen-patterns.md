@@ -477,7 +477,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
 
 ---
 
-## 4. Module static data and A5 (Verified; when A5 is set: partly Uncertain)
+## 4. Module static data and A5 (Verified; when A5 is set: survey Verified, cause Uncertain)
 
 Static data includes module-level `var`, `static` variables and `define`d
 variables.  Each module's static data is a data segment, addressed off
@@ -504,51 +504,214 @@ variables.  Each module's static data is a data segment, addressed off
 - **Other modules' data** is reached with absolute addresses
   (`movea.l 0x00E1EAC8,A0` in PROC1_$TST_LOCK; `move.l 0x00E23C98,D2` in
   PMAP_$PURIFIER_L 0xE13AF6).
-- **When a routine sets A5 (survey, Verified counts; rule partly
-  Uncertain).**  Every `link` in the map's `I` segments other than
-  `*_ASM`, split at `link`s, in modules that have a `D` segment of the
-  same name; "uses" means an `(..,A5..)` operand or A5 passed as an
-  argument, directly or through a module-local callee that does not set
-  A5 itself.  The scripts were ad hoc and not kept (re-check sites with
-  `tools/imgdis.sh`).
-  - 585 map-named routines set A5 and use it.  No map-named routine was
-    found using A5 without setting it (the 18 apparent cases are
-    artefacts of the split: FILE_$MK_IMMUTABLE 0xE5DBC0 and PROC1_$SET_VT
-    0xE1495C have no A5 operand of their own).
-  - 204 map-named routines set A5 and never use it: XNS_IDP_$GET_PORT_INFO
-    0xE18FB8 (one status store), SMD_$BUSY_WAIT 0xE1D89E, SMD_$LITES
-    0xE1D8B8, AST_$SET_TROUBLE 0xE071EA.  251 neither set nor use it:
-    TIME_$WAIT 0xE1650A, PROC1_$TST_LOCK 0xE148CA.  So the rule is not
-    "only routines that use the data", and not "every exported routine of
-    a map module with a data segment" either.
-  - Within one map segment the routines that set A5 come in runs
-    (PROC1_ 0xE1471C: ten that do not, then ten that do, then two that
-    do not, ...), and every segment loads one A5 value only.  This fits "every exported
-    routine of a *compilation unit* that has static data sets A5", if a
-    map segment merges several compilation units that share one data
-    block; the unit boundaries are not known, so this stays Uncertain.
-    Supporting: the routines that do not set A5 never address their
-    segment's data off A5; four address it absolutely
-    (AUDIT_$SUSPEND 0xE70DB6, AUDIT_$RESUME 0xE70DD6, REM_NAME_$REGISTER_SERVER
-    0xE4A4AE, DISK_$DIAG_IO 0xE6BC18), and LOG_$INIT 0xE30054 pushes the
-    LOG_ data address as `move.l #0xE2B280,-(SP)`, as other units do
-    with an `extern`.
-  - Routines the map does not name: 363 do not set A5 (183 of them use
-    it, inherited, like 0xE17778); 23 set it, but nearly all of those are
-    also called with `jsr` from other modules (0xE14B12 from 0xE2F9EC,
-    0xE4194C from 0xE7295A, ...), i.e. exported routines the map omits.
-    A few set it although only `bsr` reaches them (RING 0xE76048,
-    0xE7667C): Uncertain.
+- **When a routine sets A5 (survey, Verified counts; cause Uncertain).**
+  `tools/a5survey.py` (bead domain-pascal-acw) splits every compiled map
+  `I` segment as `tools/loopalign.py` does (map symbols and `link`
+  words, hand assembly excluded) and looks only at the instructions
+  reachable from each routine's start, so constants after the code are
+  not read as A5 operands.  "Uses" means an A5 operand other than the
+  save, the `lea` and the restore, directly or through `bsr` callees
+  that do not set A5 themselves (a `bsr` to a routine that sets A5 is
+  not a use: 37 `n` routines, e.g. MST_$FIND 0xE0E11E, call such a
+  routine and load nothing).  `case` jump tables are followed with the
+  `cmpi #N` bound as entry count (targets can precede the table:
+  ASKNODE_$INTERNET_INFO 0xE64FA6).  Letters: `S` sets and uses, `s` sets
+  and never uses, `n` neither, `i` uses without setting.  (The older
+  counts, 585/204/251, came from ad hoc scripts over a narrower set and
+  a linear sweep; the numbers below replace them.)
+  - 1682 routines in 199 compiled segments; 109 segments load A5.
+    Map-named routines in those 109: 628 `S`, 213 `s`, 196 `n`, 10
+    frameless (a bare `rts`: SMD_$PUTC 0xE1D89C, SMD_$COLD_INIT
+    0xE34F00, PROC2_$SET_STACK_TRUNC_SIZE 0xE414DC, ...), and 1 `i`
+    (RTWIRED_PROC_START 0xE87000: the label of the RTWIRED_CODE section's
+    start, on a module-local routine that only RIP_$SEND 0xE871B6
+    reaches, by `bsr`; it inherits A5 like any internal routine).  A few
+    other map names are section labels too (OS_PROC_SHUTWIRED on FILE_
+    0xE5D050, reached by `bsr`), so "map-named" slightly overcounts
+    exported routines.  Of the 628 `S`, 486 use
+    A5 directly, 117 only through a `bsr` callee (LOG_$READ 0xE17800),
+    25 through deeper chains.  The 90 other segments' 184 named routines
+    never load A5.
+  - **What A5 points at.**  Every load in a segment is the same value,
+    a `D` block named like the segment, in the data section paired with
+    the code section (WIRED_PROC/WIRED_DATA, .TEXT/.DATA,
+    OS_INIT_PROC/OS_INIT_DATA, PROC2_CREATE_PRO/PROC2_CREATE_DAT, ...;
+    MST_UNWIRED and SMD in the PROC2_* code sections load blocks in
+    DATA$).  A module with routines in several code sections has one
+    block per data section (PROC2: 0xE7BE84 in .DATA, 0xE35030 in
+    OS_INIT_DATA, 0xE86050, 0xE8605C), as the `section` routine
+    attribute implies (ref 5.7.1, p. 5-24: "static data from every
+    routine ... is assigned to .data", a routine with `[section(c,d)]`
+    puts its static data in `d`).
+    - 90 segments: A5 = the block's start (PROC1_ 0xE254E8).
+    - 18 segments: the block is **4 zero bytes and A5 = its end**
+      (OS_INIT_DATA AST_ 0xE35000 -> `lea 0xE35004`; PROC2_CREATE_DAT
+      PROC2 0xE86050 -> 0xE86054; XPD .DATA 0xE81810 -> 0xE81814; ...).
+      No code addresses those 4 bytes, and every routine of these
+      segments that loads A5 is `s`.  The end of the block is the start
+      of the next module's block (FIM_WIRED 0xE35004, ACL_ 0xE86054).
+    - DIR .TEXT 0xE4AF28: A5 = 0xE7DC00 = block 0xE7DBF8 + 8.
+      `(-8,A5)` and `(-4,A5)` hold the addresses of two constants in
+      DIR's code (0xE4B33C: a zero long; 0xE4B230: 0x000E0025) and are
+      pushed as by-address arguments (`move.l (-4,A5),-(SP)` for
+      CRASH_SYSTEM at 0xE5365A).  DIR's code is 0x8FD0 bytes,
+      more than `pea (d16,PC)` reaches, which may be why (Uncertain).
+    - Why the 4-byte blocks exist and why A5 sits after them is
+      Uncertain.  In DIR, too, A5 sits after a header reached at negative
+      offsets; whether the 4-byte blocks are an empty such header is a
+      lead only.  Three segments have such a block and never load A5
+      (TAPE_BOOT 0xE32734, DMA_ 0xE0A328, PEB_UNWIRED 0xE5AD38).
+  - **No block, no A5.**  No segment loads A5 without a `D` block of its
+    name.  Of the 85 compiled segments with no such block in their
+    paired data section, 81 never load A5; the other 4 load their
+    module's block in another data section (MST_UNWIRED 0xE739F8 and
+    0xE74A74, SMD 0xE75250: DATA$; PCHIST .TEXT 0xE5CA00: WIRED_DATA
+    0xE2C204).
+  - **`internal` and frameless routines.**  Unnamed routines do not set
+    A5 (424 of 450), except 21 that are also called with `jsr abs.l`
+    from the same-named module's code in *another code section*
+    (0xE14B12 from PROC1_$INIT 0xE2F9EC in OS_INIT_PROC, besides `bsr`
+    from PROC1_$BIND; 0xE4194C from PROC2_$CREATE 0xE7295A; 0xE0250C
+    from AST_$ACTIVATE_ASTE_CANNED, whose A5 is 0xE35004), and 5 in RING
+    that only `bsr` reaches, from routines with the same A5 (0xE76048,
+    0xE7667C, 0xE7671C, 0xE767CC, 0xE76B7C; Uncertain).  14 more
+    unnamed routines are called across sections and load nothing; all
+    35 fit the two modes below like exported routines (counted as
+    exported, the switch shapes become 70/21/18 and the 11
+    counterexamples are unchanged).  Whether they are global routines
+    the map omits or module-local routines that load A5 because a caller
+    in another section has another A5 (or none) is Uncertain.  A
+    bare-`rts` routine never loads A5.
+  - **Two modes, one switch per segment (best supported rule).**  For
+    the exported routines with a frame in a segment that loads A5:
+    - *used mode:* A5 is loaded iff the routine uses the data (`S` or
+      `n`);
+    - *always mode:* A5 is loaded whatever the body (`S` or `s`).
+    In each segment the routines start in used mode and may switch to
+    always mode once; nothing switches back except in the three
+    segments below.  (`tools/a5survey.py switch SEG` prints, per
+    segment, the last `n` before the first `s` and the first `s`; the
+    switch lies between them.  `S` fits both modes.)
+    - 70 segments have no `s`: used mode throughout (PROC1_ 0xE1471C
+      `nnnnnnnnnSnSSSSSSSSSnnnSSSnn`, MSG_UNWIRED 0xE5911C, TIME_).
+    - 20 have `n` then `s`: SMD 0xE1D750 `n.ss` (SMD_$COPY_FONT_TO_MD_HDM
+      `n`, then SMD_$BUSY_WAIT and SMD_$LITES `s`); AST_ 0xE00BE8
+      (last `n` AST_$INVALIDATE_PAGE 0xE00F16, first `s` AST_$ASSOC
+      0xE0444E; AST_$SET_TROUBLE 0xE071EA is after it); PROC2 0xE726EC
+      (6 named `n` and a module-local, then PROC2_$WHO_AM_I `s`); FILE_ 0xE73F90; TTY 0xE671DC;
+      DISK_ 0xE6B6DC; SMD 0xE6D700; RING 0xE75400; ...
+    - 19 have an `s` and no `n` before it (MMAP_ 0xE0C514, first `s`
+      MMAP_$ALLOC_CONTIG 0xE0D8F0; XNS_IDP 0xE17BF8, first `s`
+      XNS_IDP_$GET_PORT_INFO 0xE18FB8; the 4-byte-block segments).
+    - **Counterexamples:** 11 `n` routines after an `s`, in 3 segments:
+      PKT 0xE1202C `nnSSsSnnSSSS` (PKT_$COPY_TO_PA 0xE1251C `s`, then
+      PKT_$DUMP_DATA 0xE127E6, PKT_$DAT_COPY 0xE12834 `n`); XPD 0xE5AF38
+      `nnnnnnnsssssnnnnssss` (XPD_$SET_DEBUGGER 0xE5BBD8 ..
+      XPD_$CONTINUE_PROC 0xE5BED8); FILE_ 0xE5D050 (FILE_$SET_PROT_INT
+      0xE5DD08 `s`, then FILE_$SET_PROT 0xE5DF3A .. FILE_$SET_DIRPTR
+      0xE5E1B2 `n`).  So the mode can switch back; it is a property of
+      runs of routines, not strictly once per segment.
+    - In used mode, 3 routines address their own block absolutely
+      instead of loading A5: AUDIT_$SUSPEND 0xE70DB6 and AUDIT_$RESUME
+      0xE70DD6 (`lea 0xE854D8,A0`), REM_NAME_$REGISTER_SERVER 0xE4A4AE
+      (`lea 0xE7DBB8,A0`).  Not explained; size is not it, as the
+      neighbouring AUDIT_$IS_PROCESS_AUDITED 0xE70D94 reaches the same
+      array (`(-2,A5,D0.w)`) after loading A5.  (DISK_$DIAG_IO 0xE6BC18,
+      listed here before, reaches 0xE7ACCA in the *other* DISK_ unit's
+      block 0xE7A1CC; its own segment loads 0xE826C4.  LOG_$INIT
+      0xE30054 pushes the LOG_ address from the OS_INIT unit, which has
+      no LOG_ block.  Both are the `extern` case.)
+  - **Hypotheses refuted** (counts from `tools/a5survey.py summary`):
+    - *Several compilation units per map segment, each "all or
+      nothing".*  The routines on both sides of a switch share the same
+      data offsets, directly off A5 (AST_: 1012, 1028, 1032, 1056, 1064
+      before and after AST_$ASSOC; MMAP_: 0 and 28; XNS_IDP: 4, 8 and
+      1336; PMAP_ 0xE12D38, ACL_ 0xE44C3C, DIR 0xE4AF28, SMD 0xE6D700
+      likewise), and 267 `bsr` calls to
+      unnamed routines cross the first `s` (AST_ 0xE04542 ->
+      0xE00C08, ...); `bsr` never crosses an object module (section 7).
+      The map does not merge same-named objects either: DISK_ 0xE3BB80
+      and DISK_ 0xE3D9AC are adjacent in .TEXT and listed apart, each
+      with its own block (0xE7A1CC, 0xE7AD5C).  Splitting at every
+      change would also need one-routine units (PKT_$COPY_TO_PA).
+    - *The loop-alignment switch (section 7) marks the same point.*  No.
+      Of the 33 segments where both switches can be placed, the A5
+      switch is strictly earlier in 17, i.e. always-mode routines still
+      align loops (RING 0xE75400: A5 in
+      (0xE762CA, 0xE76642], loops in (0xE76B7C, 0xE76E22]; DISK_
+      0xE6B6DC; SMD 0xE6D700), strictly later in 4 (MAC_OS 0xE0B1BC: A5
+      in (0xE0C0CE, 0xE0C350], loops in (0xE0B5A8, 0xE0BB12]; TTY
+      0xE1AED0; XPD 0xE5AF38; FILE_ 0xE5D050), and could coincide in
+      12.  The two are independent.
+    - *Padding at unit ends.*  Only 6 zero words precede a routine
+      inside the switch intervals (RING 0xE2FAE0, OLD_DIR 0xE54414,
+      ...); nothing systematic.
+    - *Data reached only through a callee* (hypothesis 3) accounts for
+      142 of the setters (117 + 25 above), which the older survey
+      already counted as users; it explains none of the 213 `s`.
+      Following `jsr` to the unit's other exported routines adds
+      nothing, since those set A5 themselves.
+    - *A per-routine feature.*  `s` and `n` routines (named, with a
+      frame, in segments that have a data block) do not differ in
+      absolute data references (117 of 213 vs 130 of 285),
+      or in making calls (171/213 vs 226/285).
+      SMD_$BUSY_WAIT, XNS_IDP_$GET_PORT_INFO and TTY_$K_RESET 0xE672DE
+      are `s` stubs and wrappers.  Only position predicts the mode.
+  - **Reference:** no option or directive is documented for A5 or for
+    loading the data base.  The routine options (5.5, pp. 5-15..5-21)
+    concern the interface; `nosave` (5.5.8, p. 5-19) is about callee
+    saves in assembly routines (its register names are garbled, below);
+    `-opt` (6.4.24, pp. 6-26..6-30) lists no such optimisation.  A lead,
+    not a finding: with `default_routine_options` (5.6.4, p. 5-22) "the
+    options that you define in your list are used as the default routine
+    options for every subsequent routine in that module that does not
+    specify a routine option", which would give exactly this shape (runs, with
+    single routines that keep the other behaviour, as in PKT and
+    FILE_ 0xE5D050), but no documented option loads A5.  The cause is
+    not recorded in the image.
+  - **What `dpc` should do (recommendation, bead domain-pascal-acw).**
+    Like loop alignment, make the mode a `dpc` option, since the source
+    does not decide it:
+    - `--a5=used|always` (default `used`) and
+      `--a5-always-from=ROUTINE` (used before ROUTINE in emission order,
+      always from it on), plus a per-routine `--a5-always=ROUTINE,...`
+      for the three segments whose mode switches back (PKT, XPD, FILE_
+      0xE5D050).  The conformance manifest records the switch per unit,
+      as it does `--loop-align-off-from`.  Used mode plus the
+      per-routine list alone reproduces every observed shape, including
+      the switch-backs; `--a5-always-from` only saves listing the runs.
+    - In both modes: `internal` routines inherit A5 and never load it
+      (exceptions: the 26 unnamed routines above that load A5, which
+      would need the per-routine list to apply to `internal` routines
+      too);
+      a routine compiled to a bare `rts` loads nothing; a unit without
+      static data loads nothing in used mode.
+    - In used mode an exported routine that does not use the data does
+      **not** load A5 (PROC1_$TST_LOCK 0xE148CA, 196 `n`), instead of
+      the current rejection.
+    - For the open targets: SMD_$BUSY_WAIT needs always mode from
+      SMD_$BUSY_WAIT (the routine before it is `n`);
+      MMAP_$ALLOC_CONTIG and XNS_IDP_$GET_PORT_INFO need always mode
+      for themselves (any switch point up to them reproduces the
+      image, as every earlier routine of their segments is `S`).  All
+      three blocks are ordinary (A5 = block start).
+    - Not covered: the 4-byte blocks with A5 at their end (a unit with
+      no static data in always mode); the DIR negative offsets; the 3
+      used-mode routines that address their block absolutely instead of
+      loading A5 (they would need the opposite override, e.g. a
+      per-routine "absolute, no A5" list, or a source construct not yet
+      identified).
   - **Implemented** (`crates/dpc-ir/src/lower.rs`, `set_loads_data_base`;
-    `crates/dpc-m68k/src/isel.rs`, `load_data_base`): an exported routine
-    that addresses the unit's static data, directly or through `internal`
-    routines of the unit it calls (transitively; LOG_$READ 0xE17806,
-    whose worker 0xE17778 reads `(0x14,A5)`), sets A5, as the first
-    instruction after the register save; an `internal` routine never
-    does (it inherits A5).  An exported routine that does not address the
-    data, in a unit that has some, is rejected ("not settled").  A5 is
-    saved like any callee-saved register (section 12.1): `pea (A5)` alone,
-    in the `movem` otherwise.  Byte-identical in `make conform`:
+    `crates/dpc-m68k/src/isel.rs`, `load_data_base`): used mode only.
+    An exported routine that addresses the unit's static data, directly
+    or through `internal` routines of the unit it calls (transitively;
+    LOG_$READ 0xE17806, whose worker 0xE17778 reads `(0x14,A5)`), sets
+    A5, as the first instruction after the register save; an `internal`
+    routine never does (it inherits A5).  An exported routine that does
+    not address the data, in a unit that has some, is rejected ("not
+    settled"; see the recommendation above).  A5 is saved like any
+    callee-saved register (section 12.1): `pea (A5)` alone, in the
+    `movem` otherwise.  Byte-identical in `make conform`:
     PROC1_$GET_LOADAV (`tests/conformance/proc1_get_loadav.pas`) and
     PROC2_$GET_BOOT_FLAGS 0xE41B56 (`proc2_get_boot_flags.pas`).
 - **Reference oddity:** the OCR of section 5.5.8 says A5 "holds the pointer
@@ -1522,8 +1685,9 @@ stored.
 - **Not supported yet:**
   - SMD_$BUSY_WAIT 0xE1D89E, MMAP_$ALLOC_CONTIG 0xE0D8F0 and
     XNS_IDP_$GET_PORT_INFO 0xE18FB8 load A5 and never use it (section 4,
-    the open case: `dpc` refuses such a routine in a unit with data and
-    loads no A5 in a unit without).  Their bodies are reproduced in the
+    always mode; recommended option `--a5-always-from`, not implemented:
+    `dpc` refuses such a routine in a unit with data and loads no A5 in
+    a unit without).  Their bodies are reproduced in the
     golden without the A5 load.
   - A status whose last use is a call argument in a body with branches
     (12.4 R4(c)), e.g. `status.all := status_$ok; if ... then begin
