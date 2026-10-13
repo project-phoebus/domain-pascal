@@ -743,3 +743,198 @@ end;
     let after = &r[r.find("\tjsr\t").unwrap()..];
     assert!(after.contains("\tmove.w\t(-2,%fp),(%a5)\n"), "{r}");
 }
+
+#[test]
+fn stored_local_is_pushed_from_its_register_only_while_valid() {
+    // codegen-patterns 12.5, "Stored locals pushed from the register": the
+    // token is pushed from D0 when nothing wrote D0 since the store
+    // (PKT_$NEXT_ID 0xE124C4), from its slot after a call (NETBUF_$RTNVA
+    // 0xE0ED52), after a store inside an `if' part (the other path does
+    // not store), after its address was passed (it may have changed), and
+    // inside a loop.
+    let src = "module m;
+var lk: integer32; g: integer;
+function lock(var l: integer32): integer; extern;
+procedure unlock(var l: integer32; t: integer); options(extern, val_param);
+procedure touch(var t: integer); extern;
+procedure tick; extern;
+procedure a;
+var t: integer;
+begin
+  t := lock(lk);
+  if g > 3 then g := 1;
+  unlock(lk, t);
+end;
+procedure b;
+var t: integer;
+begin
+  t := lock(lk);
+  tick;
+  unlock(lk, t);
+end;
+procedure c;
+var t: integer;
+begin
+  t := 0;
+  if g > 3 then t := lock(lk);
+  unlock(lk, t);
+end;
+procedure d;
+var t: integer;
+begin
+  t := lock(lk);
+  touch(t);
+  unlock(lk, t);
+end;
+";
+    let asm = compile_with("forward_local", src, &[]).unwrap();
+    assert!(
+        routine(&asm, "A").contains("\tmove.w\t%d0,-(%sp)\n"),
+        "{asm}"
+    );
+    for r in ["B", "C", "D"] {
+        let text = routine(&asm, r);
+        assert!(text.contains("\tmove.w\t(-2,%fp),-(%sp)\n"), "{r}: {text}");
+    }
+}
+
+#[test]
+fn function_results_held_in_a_register() {
+    // codegen-patterns 3, "Result variable": several assignments, an
+    // early `return', a call after the assignment (callee-saved register
+    // and a final move into D0).
+    let src = "module m;
+var g: integer;
+procedure tick; extern;
+function f(n: integer): integer; options(val_param);
+begin
+  f := 0;
+  if n = g then begin f := 1; return end;
+  if n > 7 then f := 2;
+  tick;
+end;
+";
+    let asm = compile_with("result_web", src, &[]).unwrap();
+    let r = routine(&asm, "F");
+    for want in [
+        "\tclr.w\t%d2\n",
+        "\tmoveq\t#1,%d2\n",
+        "\tmoveq\t#2,%d2\n",
+        "\tjsr\t(TICK).l\n2:\n\tmove.w\t%d2,%d0\n",
+    ] {
+        assert!(r.contains(want), "{want:?} in {r}");
+    }
+    // Without a call after the assignments the variable is D0 itself,
+    // and a value assigned before a later assignment on every path is
+    // not kept across the call.
+    let src = src.replace("  if n > 7 then f := 2;\n  tick;\n", "  tick;\n  f := 2;\n");
+    let asm = compile_with("result_web_d0", &src, &[]).unwrap();
+    let r = routine(&asm, "F");
+    assert!(r.contains("\tmoveq\t#1,%d0\n") && !r.contains("%d2"), "{r}");
+    // A final `f := g(x)' after other statements is the tail wrapper: the
+    // call, then the epilogue (codegen-patterns 3).
+    let src = "module m;
+var g: integer;
+function h(x: integer): integer; options(extern, val_param);
+function f(x: integer): integer; options(val_param);
+begin
+  g := 0;
+  f := h(x);
+end;
+";
+    let asm = compile_with("result_web_tail", src, &[]).unwrap();
+    let r = routine(&asm, "F");
+    assert!(r.contains("\tjsr\t(H).l\n\tmovea.l\t(-8,%fp),%a5\n"), "{r}");
+}
+
+#[test]
+fn stored_local_not_forwarded_past_a_possible_overwrite() {
+    // codegen-patterns 12.5: the token is reloaded from its slot when an
+    // instruction in between may have written it without naming its
+    // offset: a store to an element of the same frame array at a run-time
+    // index, or a store through a pointer once a frame object's address
+    // was passed to a `var' parameter (the callee may have kept it).
+    let src = "module m;
+type rec = record a, b: integer; end;
+var lk: integer32; g: integer; gp: ^integer;
+function lock(var l: integer32): integer; extern;
+procedure unlock(var l: integer32; t: integer); options(extern, val_param);
+procedure keep(var r: rec); extern;
+procedure a;
+var arr: array[1..4] of integer;
+begin
+  arr[2] := lock(lk);
+  arr[g] := 7;
+  unlock(lk, arr[2]);
+end;
+procedure b;
+var r: rec;
+begin
+  keep(r);
+  r.b := lock(lk);
+  gp^ := 3;
+  unlock(lk, r.b);
+end;
+";
+    let asm = compile_with("forward_overwrite", src, &[]).unwrap();
+    for (r, slot) in [("A", "-6"), ("B", "-2")] {
+        let text = routine(&asm, r);
+        assert!(
+            text.contains(&format!("\tmove.w\t({slot},%fp),-(%sp)\n")),
+            "{r}: {text}"
+        );
+    }
+}
+
+#[test]
+fn result_variable_from_a_call_result_in_d0() {
+    // codegen-patterns 3, "Result variable": a value an M$ARITH call
+    // returns in D0 is copied into the variable's register (the pushes of
+    // the operands are not renamed); and a call's D0 used in the value
+    // computed into the variable's own D0 is not copied onto itself (no
+    // `move Dn,Dn' is in the image).
+    let src = "module m;
+var gl, gm: integer32; g: integer;
+function getl: integer32; extern;
+procedure tick; extern;
+function r1: integer32;
+begin
+  g := 1;
+  r1 := getl * gm;
+  tick;
+end;
+function r2(n: integer): integer; options(val_param);
+begin
+  g := 1;
+  r2 := r2(n - 1) + n;
+end;
+";
+    let asm = compile_with("result_web_d0_value", src, &[]).unwrap();
+    let r = routine(&asm, "R1");
+    assert!(
+        r.contains(
+            "\tmove.l\t%d0,-(%sp)\n\tjsr\t(M$MIS$LLL).l\n\taddq.w\t#8,%sp\n\tmove.l\t%d0,%d2\n"
+        ),
+        "{r}"
+    );
+    let r = routine(&asm, "R2");
+    assert!(!r.contains("\tmove.w\t%d0,%d0\n"), "{r}");
+}
+
+#[test]
+fn value_of_a_pointer_function_is_refused() {
+    // A pointer result comes back in A0 (ref 5.5.10, p. 5-20); a call's
+    // value is read from D0, so using it is refused rather than read from
+    // the wrong register.
+    let src = "module m;
+type intp = ^integer;
+var gp: intp;
+function second: intp; extern;
+procedure user;
+begin
+  gp := second;
+end;
+";
+    let (_, e) = compile_with("pointer_call_value", src, &[]).unwrap_err();
+    assert!(e.contains("whose result is in A0"), "{e}");
+}

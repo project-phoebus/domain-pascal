@@ -49,12 +49,14 @@
 //! survey).  Known misses of this order: parameters held across calls
 //! take D3/A3 in the image while later temporaries take D2/A2 (module-local
 //! 0xE01C52; AST_$ASSOC 0xE0445C); R4 (registers held longer than
-//! liveness: to the end of the statement) and R5 (function results) are
-//! not modelled, except R4(c) for a value that a call's arguments read
-//! last, which the selector passes in as `holds` (PROC1_$SET_ASID
-//! 0xE148FE D2; `crate::isel`), and R4(b) for by-address slots read once,
-//! which the selector keeps apart from the values of earlier statements
-//! ([`allocate_apart`]; IIC_$RECEIVE 0xE70AC0..0xE70AD0).
+//! liveness: to the end of the statement) is not modelled, except R4(c)
+//! for a value that a call's arguments read last, which the selector
+//! passes in as `holds` (PROC1_$SET_ASID 0xE148FE D2; `crate::isel`), and
+//! R4(b) for by-address slots read once, which the selector keeps apart
+//! from the values of earlier statements ([`allocate_apart`]; IIC_$RECEIVE
+//! 0xE70AC0..0xE70AD0).  R5: a function's result variable and the
+//! parameters loaded at entry are coloured first ([`allocate_apart`]'s
+//! `first`; PARITY_$CHK_IO 0xE0B180..0xE0B18A).
 //!
 //! The callee-saved registers the assignment uses are what the prologue
 //! saves ([`crate::frame::Frame`]), with A5 when the body loads it.
@@ -508,7 +510,7 @@ pub fn allocate(
     exit: &[Reg],
     holds: &[(usize, Reg)],
 ) -> Result<RegSet, String> {
-    allocate_apart(insns, exit, holds, &[])
+    allocate_apart(insns, exit, holds, &[], None)
 }
 
 /// [`allocate`], with each pair of `apart` kept in different registers
@@ -516,12 +518,27 @@ pub fn allocate(
 /// slot loaded for one use does not take the register of a value an
 /// earlier statement left in it, IIC_$RECEIVE 0xE70AC0..0xE70AD0;
 /// [`crate::isel`]).
+///
+/// `first`: a function's result variable (a data value every assignment to
+/// the result writes, [`crate::isel`]) and the values of the parameters
+/// loaded at entry.  The result variable is coloured before every other
+/// value, so it gets D0 when no call follows an assignment to it, and
+/// then the entry loads of data parameters that do not interfere with it,
+/// the one used last first, so that the parameter whose last use comes
+/// latest before the result is assigned shares D0 with it (codegen-patterns
+/// 12.4 R5; Uncertain, fitted to the eight sites there: PARITY_$CHK_IO
+/// 0xE0B180..0xE0B18A `(8)`->D1, `(0xc)`->D0; 0xE65904, 0xE76352 and
+/// 0xE76422 likewise; 0xE0B202, 0xE7630C, 0xE54B58 in parameter order;
+/// PROC1_$SUSPENDP 0xE1487E `(8)`->D1 beside the result in D0).  The other
+/// values follow in the usual order.
 pub fn allocate_apart(
     insns: &mut [Insn],
     exit: &[Reg],
     holds: &[(usize, Reg)],
     apart: &[(Reg, Reg)],
+    first: Option<(Reg, Vec<Reg>)>,
 ) -> Result<RegSet, String> {
+    let web = first.as_ref().map(|(w, _)| *w);
     let live_out = liveness(insns, exit, holds);
     // Interference edges: a definition against what is live after it
     // (Chaitin), and against the register operands of its own instruction
@@ -547,7 +564,12 @@ pub fn allocate_apart(
             // Not for a move into a physical register (the function
             // result into D0): a value already in D0 is not copied
             // (PROC1_$GET_LOCKS 0xE148F0 loads the result into D0 itself).
-            if is_virtual(d) {
+            // Nor for a function's result variable (`first`): a value it
+            // is assigned from may share its register when it dies there
+            // (0xE15222 returns its parameter from the D0 it was loaded
+            // into, 0xE15226; the tail wrapper's call result stays in D0,
+            // section 3).
+            if is_virtual(d) && Some(d) != web {
                 for &u in &acc.reg_operands {
                     edge(d, u);
                 }
@@ -560,6 +582,30 @@ pub fn allocate_apart(
             if is_virtual(u) && !order.contains(&u) {
                 return Err(format!("internal: {u} used before it is defined"));
             }
+        }
+    }
+    if let Some((web, entry)) = first {
+        if order.contains(&web) {
+            let near = adj.get(&RegKey(web)).cloned().unwrap_or_default();
+            let last_use = |r: Reg| {
+                insns
+                    .iter()
+                    .rposition(|i| access(i).uses.contains(&r))
+                    .unwrap_or(0)
+            };
+            let mut loads: Vec<(usize, Reg)> = entry
+                .iter()
+                .filter(|&&r| {
+                    matches!(r, Reg::D(_)) && order.contains(&r) && !near.contains(&RegKey(r))
+                })
+                .map(|&r| (last_use(r), r))
+                .collect();
+            loads.sort_by(|a, b| b.0.cmp(&a.0));
+            let mut lead = vec![web];
+            lead.extend(loads.into_iter().map(|(_, r)| r));
+            order.retain(|r| !lead.contains(r));
+            lead.extend(order);
+            order = lead;
         }
     }
     let mut assigned: HashMap<RegKey, Reg> = HashMap::new();
@@ -845,7 +891,7 @@ mod tests {
         assert!(text(&plain).iter().all(|l| !l.contains("%a1")));
         let mut insns = body;
         let apart = [(va(1), va(0)), (va(2), va(0)), (va(2), va(1))];
-        let saves = allocate_apart(&mut insns, &[], &[], &apart).unwrap();
+        let saves = allocate_apart(&mut insns, &[], &[], &apart, None).unwrap();
         assert_eq!(
             text(&insns),
             [

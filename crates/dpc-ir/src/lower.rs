@@ -676,6 +676,12 @@ fn lower_routine(
         code_section: r.code_section.clone(),
         frame_size: r.frame_size,
         result,
+        result_slot: r.result.as_ref().and_then(|res| res.var).and_then(|v| {
+            match p.var(v).storage {
+                dpc_sema::Storage::Frame { offset } => Some(offset),
+                _ => None,
+            }
+        }),
         // Decided once every routine is lowered (`set_loads_data_base`).
         loads_data_base: false,
         data_absolute: false,
@@ -1190,12 +1196,18 @@ fn value_params(p: &Program, r: &Routine) -> Vec<ValueParam> {
 fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<ResultSpec> {
     let class = match res.reg {
         ResultReg::Data => ResultClass::Data,
-        // codegen-patterns 3: pointer results in A0 (MST_$MAPS, ...); the
-        // code that moves a computed pointer there is not catalogued yet.
-        ResultReg::Address | ResultReg::AddressAndData => {
+        // codegen-patterns 3, "Pointer results": in A0 by default (ref
+        // 5.5.10, p. 5-20); which forms are compiled is the selector's
+        // business.
+        ResultReg::Address => ResultClass::Address,
+        // `d0_return` (ref 5.5.10, p. 5-20: "Puts the value of the
+        // returned pointer in A0 and also in data register D0"): no
+        // compiled routine of the image is known to have it, so how the
+        // value reaches both registers is not seen.
+        ResultReg::AddressAndData => {
             return Err(unsupported(
                 r.span,
-                "pointer (address-register) results are",
+                "a pointer result in A0 and D0 (`d0_return`, `c_param`) is",
             ))
         }
     };
@@ -1221,15 +1233,21 @@ fn lower_body(
 ) -> Res<Vec<Stmt>> {
     let block = r.body.as_ref().expect("routine with a body");
     let cx = Cx { p, id, r, result };
-    let out = cx.seq(&block.stmts, true)?;
+    let out = cx.seq(&block.stmts)?;
     check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
     if r.result.is_some() {
-        let assigned = out.iter().any(|s| matches!(s.kind, StmtKind::SetResult(_)));
+        // ISO requires an assignment to the function variable (the
+        // reference's error "No assignment to function variable"); a body
+        // with none is not compiled.
+        let mut assigned = false;
+        crate::visit_stmts(&out, &mut |s| {
+            assigned |= matches!(s.kind, StmtKind::SetResult(_));
+        });
         if !assigned {
             return Err(unsupported(
                 r.span,
-                "a function whose last statement is not the result assignment is",
+                "a function with no assignment to its result is",
             ));
         }
     }
@@ -1497,19 +1515,17 @@ fn flatten<'s>(stmts: &'s [SStmt], out: &mut Vec<&'s SStmt>) {
 }
 
 impl Cx<'_> {
-    /// A statement sequence.  `top`: the routine's own statement part
-    /// (a function's result assignment must be its last statement).
-    fn seq(&self, stmts: &[SStmt], top: bool) -> Res<Vec<Stmt>> {
+    /// A statement sequence.
+    fn seq(&self, stmts: &[SStmt]) -> Res<Vec<Stmt>> {
         let p = self.p;
         let mut flat = Vec::new();
         flatten(stmts, &mut flat);
         let mut out = Vec::new();
-        for (i, s) in flat.iter().enumerate() {
-            let last = top && i + 1 == flat.len();
+        for s in &flat {
             match &s.kind {
                 SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) =>
                 {
-                    out.push(result_assignment(p, s, value, last, self.result)?);
+                    out.push(result_assignment(p, s, value, self.result)?);
                 }
                 SStmtKind::Assign { target, .. }
                     if matches!(target.kind, ExprKind::Result { .. }) =>
@@ -1539,7 +1555,7 @@ impl Cx<'_> {
                     then_branch,
                     else_branch,
                 } => {
-                    let then_ = self.seq(std::slice::from_ref(then_branch), false)?;
+                    let then_ = self.seq(std::slice::from_ref(then_branch))?;
                     if then_.is_empty() {
                         // What the original emitted for an empty `then`
                         // part (a branch on the negated condition?) is not
@@ -1547,7 +1563,7 @@ impl Cx<'_> {
                         return Err(unsupported(s.span, "an `if` with an empty `then` part is"));
                     }
                     let else_ = match else_branch {
-                        Some(e) => self.seq(std::slice::from_ref(e), false)?,
+                        Some(e) => self.seq(std::slice::from_ref(e))?,
                         None => Vec::new(),
                     };
                     out.push(Stmt {
@@ -1561,7 +1577,7 @@ impl Cx<'_> {
                 }
                 SStmtKind::Repeat { body, cond } => out.push(Stmt {
                     kind: StmtKind::Repeat {
-                        body: self.seq(body, false)?,
+                        body: self.seq(body)?,
                         until: cond_of(p, cond)?,
                     },
                     span: s.span,
@@ -1578,7 +1594,7 @@ impl Cx<'_> {
                 // codegen-patterns 7.4: test at the bottom, entered by a
                 // `bra` to the test.
                 SStmtKind::While { cond, body } => {
-                    let body = self.seq(std::slice::from_ref(body), false)?;
+                    let body = self.seq(std::slice::from_ref(body))?;
                     if body.is_empty() {
                         // No such loop has been looked for in the image.
                         return Err(unsupported(s.span, "a `while` loop with an empty body is"));
@@ -1708,7 +1724,7 @@ impl Cx<'_> {
         };
         let from = bound(from)?;
         let to = bound(to)?;
-        let body = self.seq(std::slice::from_ref(body), false)?;
+        let body = self.seq(std::slice::from_ref(body))?;
         if body.is_empty() {
             return Err(unsupported(s.span, "a `for` loop with an empty body is"));
         }
@@ -1808,12 +1824,12 @@ impl Cx<'_> {
             }
             out.push(CaseArm {
                 labels: arm.labels.clone(),
-                body: self.seq(std::slice::from_ref(&arm.stmt), false)?,
+                body: self.seq(std::slice::from_ref(&arm.stmt))?,
             });
         }
         let otherwise = match otherwise {
             Some(ss) => {
-                let o = self.seq(ss, false)?;
+                let o = self.seq(ss)?;
                 if o.is_empty() {
                     // Whether the original dispatched to the end, and how
                     // the last arm ended, is not seen.
@@ -1987,31 +2003,30 @@ fn fits(v: i64, ty: Scalar) -> bool {
     }
 }
 
-/// `f := e` inside `f`.
+/// `f := e` inside `f`, anywhere in its body.
 ///
-/// Image (PROC1_$TST_LOCK 0xE148CA..0xE148E4): the assignment is the last
-/// statement; the value is computed straight into the result register
-/// (`move.b D1,D0` at 0xE148E0) and the frame slot `dpc-sema` reserves for
-/// the result variable is never touched, although the frame has room for
-/// it (`link #-4`, codegen-patterns 2).
+/// The value goes to the result register, or to the register the result
+/// variable is held in (codegen-patterns 3, "Result variable"):
 ///
-/// TODO(codegen): what the original does when the result is assigned
-/// before the last statement, assigned more than once, or read back, is
-/// not known (store to the frame slot and reload before the return, or
-/// keep it in D0?).  Those cases are rejected.
+/// - as the last statement, straight to the result register (PROC1_$TST_LOCK
+///   0xE148CA..0xE148E4, `move.b D1,D0` at 0xE148E0); the frame slot
+///   `dpc-sema` reserves for the result variable is never touched,
+///   although the frame has room for it (`link #-4`, codegen-patterns 2);
+/// - before other statements, on several paths, or before a `return`: into
+///   one register that holds the variable up to the epilogue, a
+///   callee-saved one when a call follows (PKT_$NEXT_ID 0xE124AC `move.w
+///   (0x5c,A5),D2` ... 0xE124D0 `move.w D2,D0`).  The selector decides.
+///
+/// Reading the result variable is not a thing of the language: the
+/// function's name in an expression calls it (ref 5.8, p. 5-26,
+/// `factorial(n-1)`; `dpc-sema`).  Assigning an enclosing function's
+/// result from a nested routine is refused (`Cx::seq`).
 fn result_assignment(
     p: &Program,
     s: &SStmt,
     value: &SExpr,
-    last: bool,
     result: Option<ResultSpec>,
 ) -> Res<Stmt> {
-    if !last {
-        return Err(unsupported(
-            s.span,
-            "a function result assignment that is not the routine's last statement is",
-        ));
-    }
     let res = result.expect("lower_routine skips the body when the result type failed");
     let vsize = p.types.size(value.ty);
     if let Some(v) = &value.value {
@@ -2254,6 +2269,23 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
         }
         ExprKind::Builtin { builtin, args } => builtin_value(p, e, *builtin, args),
         ExprKind::Call(c) => {
+            // A pointer result comes back in A0 only (ref 5.5.10, p. 5-20;
+            // codegen-patterns 3, "Pointer results"); the selector reads a
+            // call's value from D0, so such a call is refused (how the
+            // original uses the A0 it returns, MST_$MAPS 0xE439C8 `move.l
+            // A0,(-4,A6)`, is not modelled).  `d0_return` puts it in D0
+            // too.
+            if let SCallee::Routine(id) = &c.callee {
+                if matches!(
+                    p.routine(*id).result.as_ref().map(|r| r.reg),
+                    Some(ResultReg::Address)
+                ) {
+                    return Err(unsupported(
+                        e.span,
+                        "using the value of a function whose result is in A0 is",
+                    ));
+                }
+            }
             let ty = scalar_of(p, e)?;
             Ok(Expr::Call {
                 call: call(p, ".text", c, e.span)?,

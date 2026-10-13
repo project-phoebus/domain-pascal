@@ -147,6 +147,13 @@ Tests:
   (DISK_$UNASSIGN_ALL 0xE6BE24), a run-time upper bound with its `subq.w
   #1; bmi` guard and the count copied (DTTY_$WRITE_STRING 0xE1D6AA), a
   count above 127 as `move.w #n`, `exit` and `next`.
+- `results/result_variable` - codegen-patterns 3, 12.4 R5, 12.5: the
+  result variable of a body of several statements held in one register
+  (D2 across a call, PKT_$NEXT_ID 0xE1248E; D0 without, on three paths,
+  with the entry loads of PARITY_$CHK_IO 0xE0B180..0xE0B18A), `st`/`clr.b`
+  for booleans, a call's result copied into it (NETBUF_$RTNVA 0xE0ED4E),
+  a stored local pushed from D0 or reloaded after a call, a pointer result
+  through its frame slot into A0 (0xE6AA38).
 - `sysprog/interrupts` - codegen-patterns 10, 12.5, 1.1: `disable` /
   `enable` as `ori.w #0x700,SR` / `andi.w #0xF8FF,SR` (TIME_$GET_ADJUST
   0xE16AB0, 0xE16ABA), `set_sr` as `move.w SR,Dn; move.w newsr,SR`

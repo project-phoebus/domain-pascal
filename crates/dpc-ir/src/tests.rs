@@ -180,21 +180,26 @@ fn empty_procedure_and_extern_routines() {
     assert_eq!(m.functions[0].result, None);
 }
 
+/// codegen-patterns 3, "Result variable": a result assignment anywhere
+/// in the body is lowered to `SetResult`, in nested statements too.
 #[test]
-fn result_assignment_must_be_last() {
-    let e = errs(
+fn result_assignments_anywhere() {
+    let m = lower_src(
         "module m;
-function f: integer;
+function f(b: boolean): integer; options(val_param);
 begin
   f := 1;
-  f := 2;
+  if b then begin f := 2; return end;
+  f := 3;
 end;
 ",
-    );
-    assert_eq!(
-        e,
-        vec!["t.pas:4:3: error: a function result assignment that is not the routine's last statement is not supported yet"]
-    );
+    )
+    .expect("lowers");
+    let mut n = 0;
+    crate::visit_stmts(&m.functions[0].body, &mut |s| {
+        n += matches!(s.kind, StmtKind::SetResult(_)) as u32;
+    });
+    assert_eq!(n, 3);
 }
 
 #[test]
@@ -202,7 +207,7 @@ fn function_without_result_assignment() {
     let e = errs("module m;\nfunction f: integer;\nbegin\nend;\n");
     assert_eq!(e.len(), 1);
     assert!(
-        e[0].starts_with("t.pas:2:1: error: a function whose last statement")
+        e[0].starts_with("t.pas:2:1: error: a function with no assignment to its result")
             && e[0].ends_with("not supported yet"),
         "{e:?}"
     );
@@ -259,12 +264,13 @@ end;
 
 #[test]
 fn unsupported_result_type_is_reported_once() {
-    // A pointer result (A0, codegen-patterns 3) is not lowered yet; the
-    // assignment to it must not add a second diagnostic.
+    // A pointer result in A0 and D0 (`d0_return`, ref 5.5.10; no image
+    // site, codegen-patterns 3) is not lowered; the assignment to it must
+    // not add a second diagnostic.
     let e = errs(
         "module m;
 type ip = ^integer;
-function f(in p: ip): ip;
+function f(in p: ip): ip; options(d0_return);
 begin
   f := p;
 end;
@@ -272,7 +278,7 @@ end;
     );
     assert_eq!(
         e,
-        vec!["t.pas:3:1: error: pointer (address-register) results are not supported yet"]
+        vec!["t.pas:3:1: error: a pointer result in A0 and D0 (`d0_return`, `c_param`) is not supported yet"]
     );
 }
 
@@ -1509,16 +1515,27 @@ fn unsettled_case_statements_are_rejected() {
         .contains("case label -1 is outside the selector's range"));
 }
 
-/// A function's result assignment inside an `if` is not its last
-/// statement (codegen-patterns 3).
+/// An assignment to an enclosing function's result from a nested
+/// routine is refused (the result variable is held in a register,
+/// codegen-patterns 3).
 #[test]
-fn result_assignment_in_an_if_is_rejected() {
-    let e = errs(&format!(
-        "{CTL}function f: integer; internal;\nbegin\n  if b then f := 1;\nend;\n"
-    ));
+fn enclosing_result_assignment_is_rejected() {
+    let e = errs(
+        "module m;
+function f: integer;
+  procedure g;
+  begin
+    f := 1;
+  end;
+begin
+  g;
+  f := 2;
+end;
+",
+    );
     assert!(
         e.iter()
-            .any(|m| m.contains("not the routine's last statement")),
+            .any(|m| m.contains("assignment to an enclosing function's result")),
         "{e:?}"
     );
 }

@@ -466,6 +466,7 @@ mod tests {
             scalar_locals: Vec::new(),
             nesting: None,
             uplevel_refs: Vec::new(),
+            result_slot: None,
             body: Vec::new(),
             span,
         }

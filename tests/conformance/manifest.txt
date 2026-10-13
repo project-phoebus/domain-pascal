@@ -87,3 +87,10 @@ tests/conformance/time_get_adjust.pas        TIME_$GET_ADJUST
 # A1 (`cmpa.w #0,A1').
 tests/conformance/disk_unassign_all.pas      DISK_$UNASSIGN_ALL  module-routines=DISK_$UNASSIGN
 tests/conformance/disk_set_chain_status.pas  0xE3CCCE:20  loop-align=off
+
+# Function results (codegen-patterns 3): the result variable held in a
+# callee-saved register across a call and moved to D0 at the end; a
+# stored local pushed from the register that still holds it (12.5).
+tests/conformance/pkt_next_id.pas            PKT_$NEXT_ID  --section-addr .bss.moddata.PKT=0xE24C9C
+# A pointer result in A0, through the result variable's frame slot.
+tests/conformance/vfmt_get_next_arg.pas      0xE6AA38:14

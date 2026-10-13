@@ -606,11 +606,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   garbage.
 - `clr.l D0` for a zero result: IO_$ALLOC 0xE1A9CC.
 - **Pointer results** come back in **A0** by default (reference 5.5.10
-  `d0_return`, 5.5.11 `a0_return`).  The image does this:
-  - MST_$MAPS
-  - NET_$FIND_HANDLER
-  - TIME_$RTE_INT / TIME_$VT_INT end with `movea.l #0,A0`
-  - See `ARCH_RESULT_A0` in `../source/domain_os/arch/m68k/arch.h`.
+  `d0_return`, 5.5.11 `a0_return`; `ARCH_RESULT_A0` in
+  `../source/domain_os/arch/m68k/arch.h`).  "Pointer results" below has
+  the survey.  (TIME_$RTE_INT / TIME_$VT_INT, cited here before, end
+  with `movea.l #0,A0` at 0xE163D6 / 0xE16426, but no compiled caller
+  reads their A0 and `../source` has them as procedures: not evidence.)
 - **Procedures** leave D0/A0 as whatever the body left.  Callers never read
   them.
 - **Result assignment as the last statement (Verified, one site):** in
@@ -618,17 +618,100 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   value is computed into a scratch register and moved straight into D0
   (0xE148E0 `move.b D1,D0`), followed by the epilogue.  The frame has
   room for a result variable (`link #-4`), but the slot is never written
-  or read.  `dpc` implements exactly this case: a result assignment that
-  is the last statement goes to the result register.  After other
-  statements too, when they only store and nothing is loaded at entry
-  (Verified at two sites: IO_$ALLOC 0xE1A9C6..0xE1A9CC, a status store
-  then `clr.l D0`; IIC_$RECEIVE_CHECK 0xE70AE2..0xE70AEC, then `clr.b
-  D0`; section 9).
-  **Uncertain (rejected by `dpc` for now):** what the compiler does when
-  the result is assigned before the last statement, assigned on several
-  paths, or read back (stored to the frame slot and reloaded before the
-  return?).  Find a function with an early or conditional assignment in
-  the image before implementing it.
+  or read.  `dpc` compiles a function body of one simple statement this
+  way.
+- **Result variable (Verified by survey; implemented; beads
+  domain-pascal-5aw.11, -8aj).**  `tools/resultsurvey.py` classes the
+  epilogue of every *D0 function* (a routine some compiled caller reads
+  D0 right after calling: 192, each with one epilogue) by the instruction
+  that falls into it: `move.<s> Dn,D0` 73, a constant into D0 37, another
+  instruction writing D0 31, D0 set earlier 24, `move.<s> (-k,A6),D0` 18,
+  a call (the tail wrapper below) 8.
+  - *Held in a register up to the epilogue* (the 73): 67 from a
+    callee-saved register, 66 of them with a call between the register's
+    first write and the end (`list reg`): PKT_$NEXT_ID 0xE1248E (`move.w
+    (0x5c,A5),D2` at 0xE124AC, then `addq`, an `if`, the call
+    ML_$SPIN_UNLOCK, `move.w D2,D0` at 0xE124D0); PROC2_$GET_PID
+    0xE40CBA (assigned only inside an `if`, 0xE40CF6, then a call;
+    `move.w D2,D0` at 0xE40D0E; on the other path D2 is what it was);
+    NETBUF_$RTNVA 0xE0ED26 (a call's result, `move.l D0,D2` at 0xE0ED4E,
+    across the next call); SMD_$N_DEVICES 0xE70024 (`clr.w D2`, then
+    `move.w D4,D2` in a loop).  6 from D1, with no call after: the
+    value could not be built in D0 (PROC1_$TST_LOCK's `sne D1`;
+    0xE6FAA8, `seq D1` while the parameter holds D0).  Boolean constants
+    are `clr.b`/`st` (0xE41216 `st D2`, 0xE4125C `clr.b D2`; no `moveq`
+    writes the register of any of the 31 byte results of `list reg`).
+  - *In D0 all along* when no call follows: PARITY_$CHK_IO 0xE0B174
+    (`moveq #1,D0`, `moveq #2,D0`, `clr.w D0` on three paths, then a
+    `beq` on the last one's flags at 0xE0B1AC); PROC1_$SUSPENDP 0xE14876
+    (`st D0` at 0xE14886, `sne D0` at 0xE148BC, status stores after it);
+    the early exits of 0xE0B202, 0xE7630C, 0xE76352, 0xE76422 (`move.w
+    D2,D0` or `st D0`, then a `bra` to the epilogue from inside a loop).
+  - *From a frame slot* (the 18): a local returned by a final `f :=
+    local` fits every one (see section 2, "Not decisive"): its address is
+    taken at BAT_$ALLOC_FM 0xE3AD20 and 0xE062FA, only callees write it
+    at PROC2_$INIT 0xE303D8 and REM_FILE_$CREATE_AREA 0xE62622, and most
+    others are status codes stored on several paths (0xE2FA86, 0xE43F40;
+    SIO_$I_ERR 0xE67D9C, which no compiled caller reads, likewise) or a
+    packed record built in place (0xE5A9CA).  None of them shows that
+    the slot is the result variable's.
+  - *Reading the result variable* is not part of the language: inside
+    `f`, the name `f` in an expression calls `f` (ref 5.8, p. 5-26,
+    `factorial(n-1)`; `dpc-sema` reports a missing argument).  Sites that
+    read a returned value back read a variable that shares its register
+    (PARITY_$CHK_IO's `beq` at 0xE0B1AC).
+
+  **Implemented** (`dpc-ir` `result_assignment`; `dpc-m68k` `isel.rs`
+  `set_result_web`, `select_body`; `regs.rs` `allocate_apart`): in a
+  function body of several statements (or of one `if`, `case` or loop),
+  every `f := e` writes one virtual data register: a constant with
+  `clr`/`moveq`/`move #`, `true` with `st`; a value in a register (a
+  call's D0, a parameter loaded at entry) with a `move`; memory with a
+  load; a computed value is computed in it.  At the start of the
+  epilogue, where `return` branches to, `move.<s> Rn,D0`, dropped when the
+  allocator gives the variable D0.  The variable is coloured before every
+  other value, so it is D0 unless a call follows an assignment whose
+  value is still needed (then the lowest free callee-saved register,
+  12.4 R3).  Golden `tests/golden/results/result_variable`; conformance
+  `tests/conformance/pkt_next_id.pas`.  A register value the variable is
+  assigned from may share its register where that value dies (12.4 R2
+  does not apply to it), so a final `f := g(x)` is the tail wrapper below
+  in a body of several statements too.  Not reproduced: a parameter
+  assigned to the result and still used after shares its register with
+  it (0xE15222, `(8,A6)` into D0 at 0xE15226, compared after, returned
+  from there; MST_$VA_TO_SEGNO 0xE0DCE0); dpc copies it.  Refused: assigning an enclosing function's result
+  from a nested routine (no site seen).  ISO's "No assignment to function
+  variable" case (a body with no `f := e`) is refused too.
+- **Pointer results (Verified at the sites; implemented narrowly).**  40
+  *A0 functions* (some compiled caller reads A0 right after calling;
+  none of them also a D0 function), by the instruction falling into the
+  epilogue (`tools/resultsurvey.py pointer`): `movea.l Rn,A0` 16 (A2 in
+  12, A3 in 1, held across calls: DISK_$GET_BLOCK 0xE3BB80, `movea.l
+  A0,A2` at 0xE3BBBC after the call, `movea.l A2,A0` at 0xE3BBCA; a D
+  register in 3), `movea.l (-k,A6),A0` 8, A0 set directly 7 (`suba.l
+  A0,A0` for `nil` 4, e.g. ROUTE_$FIND_PORTP 0xE15B84; `lea` 3), other
+  7, a call 1.
+  Unlike a data result, a pointer assigned by the last statement goes
+  through the result variable's frame slot: from memory `move.l
+  <src>,(-k,A6); movea.l (-k,A6),A0` (the module-local 0xE6AA38, `link
+  #-8`, the slot below the reserved 4 bytes; SIO_$I_GET_DESC 0xE66808,
+  TTY_$I_GET_DESC 0xE667B0, KBD_$GET_DESC 0xE1AA92, 0xE5A180); a computed
+  value is stored and moved, `move.l D0,(-12,A6); movea.l D0,A0`
+  (0xE4D5A6); a call's A0 is stored and left in A0, `move.l A0,(-4,A6)`
+  (MST_$MAP 0xE438BE, MST_$MAPS 0xE439C8).  The three other `movea.l
+  (-k,A6),A0` reload a slot written before a call (BAT_$ALLOC_VTOCE
+  0xE3AEC0, MST_$REMAP_PRIVI 0xE43A0C, 0xE43182).  `d0_return` (both registers,
+  ref 5.5.10 p. 5-20) is seen at no compiled routine.
+  **Implemented** (`isel.rs`, `set_pointer_result`): the memory form, as
+  the only statement of the body (conformance
+  `tests/conformance/vfmt_get_next_arg.pas`, 0xE6AA38).  Refused: the
+  other forms above, a pointer result in a body of several statements,
+  `d0_return`/`c_param` pointer results, and `a0_return` on a
+  non-pointer result (no site).  On the caller's side the selector reads
+  a call's value from D0 only, so `dpc-ir` refuses using the value of a
+  function whose result is in A0 (driver test
+  `value_of_a_pointer_function_is_refused`); before, such a call was
+  read from D0.
 - **Tail wrapper:** a wrapper `F := G(args)` compiles to the call followed
   directly by the epilogue, with no move to D0 (ACL_$IS_SUSER,
   PROC2_$GET_ASID).  So from the wrapper alone you cannot tell a procedure
@@ -3061,7 +3144,8 @@ kinds from the C in `../source/domain_os`.
   for each dereference (EC2_$INIT 0xE42C64, `movea.l D0,A0` at
   0xE42C70; ACL_$ADD_PROJ 0xE47EC0, `movea.l D4,A0` at 0xE47ED4).
 - *Functions differ:* PARITY_$CHK_IO 0xE0B180..0xE0B18A loads `(8)` into
-  **D1** and `(0xc)` into D0.
+  **D1** and `(0xc)` into D0: the result variable takes D0, and the
+  parameter used later shares it (12.4 R5; implemented).
 - *One-statement bodies:* PROC1_$TST_LOCK reads its parameter inside the
   expression, after the set's address (0xE148CE..0xE148D4, section 5.1);
   TIME_$Q_FLUSH_QUEUE 0xE16C84 loads its pointer right before the store.
@@ -3186,11 +3270,12 @@ last such call (0xE095BA); and storing it (`g := x`) is refused like
 any parameter not loaded at entry.  A one-statement body keeps its
 own evaluation order (PROC1_$TST_LOCK, PROC1_$GET_LOCKS,
 TIME_$Q_FLUSH_QUEUE stay byte-identical).  A function body of several
-statements is compiled only when it loads nothing at entry and its
-statements before the result assignment only store, without calls or
-branches (IO_$ALLOC 0xE1A9C2, IIC_$RECEIVE_CHECK 0xE70ADE; section 9).
-Reported as not supported yet: other function bodies of several
-statements (R5); a pointer parameter also
+statements loads its parameters the same way and holds its result
+variable in a register (section 3, "Result variable"; beads
+domain-pascal-5aw.11, -8aj); the order in which the allocator colours
+the result and the entry loads is R5 (12.4).  IO_$ALLOC 0xE1A9C2 and
+IIC_$RECEIVE_CHECK 0xE70ADE (section 9) are such bodies, with the result
+in D0.  Reported as not supported yet: a pointer parameter also
 used as data; storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
@@ -3607,13 +3692,43 @@ of the remaining misses).**  The corpus misses fall into these groups:
   The rule needs the source's statement structure.  `dpc` has it, so (a)
   must be implemented and tested in `dpc` against the sites above.
 
-**R5. Function results (Uncertain).**
-- MST_$VA_TO_SEGNO loads the parameter it returns straight into D0
-  (0xE0DCE0), and the first parameter goes to D2 (0xE0DCD6), not D0/D1.
-- PARITY_$CHK_IO loads `(8)` into D1 and `(0xc)` into D0 (0xE0B180,
-  0xE0B18A; section 12.2).
-- The rule that ties a parameter or temporary to the result register is
-  not known.
+**R5. Function results (rule Uncertain, fitted to eight sites;
+implemented; beads domain-pascal-5aw.11, -8aj).**
+- The result variable of a body of several statements is one value
+  (section 3, "Result variable"): D0 when no call follows an assignment
+  whose value is still needed, else a callee-saved register moved to D0
+  at the end (66 of 67 such moves, `tools/resultsurvey.py list reg`).
+- Parameters loaded at entry beside it, in functions without a call
+  (`tools/resultsurvey.py entry`, the D0 functions loading two or more
+  data parameters into scratch registers):
+  - PARITY_$CHK_IO 0xE0B180/0xE0B18A `(8)`->D1, `(0xc)`->D0: both die
+    before the result is first written; `(0xc)` is used later
+    (0xE0B1A0) than `(8)` (0xE0B196);
+  - 0xE65904 `(8)`->D1, `(0xc)`->D0 (`(8)` compared at 0xE65940, `(0xc)`,
+    a byte, tested at 0xE65956); 0xE76352 and 0xE76422 `(8)`->D1,
+    `(0xc)`->D0, `(0x14)`->D2 (`(0xc)` compared after `(8)` inside the
+    loop, 0xE76380 / 0xE76450);
+  - 0xE0B202 and 0xE7630C `(8)`->D0, `(0x10)`->D1 (`(0x10)` copied into
+    the loop count at entry, `(8)` compared in the loop): parameter order
+    and "used later" agree;
+  - 0xE54B58 `(0xc)`->D0, `(0xe)`->D1: `(0xe)` is read by the `divu`
+    that computes the result in D0, so it cannot have D0;
+  - PROC1_$SUSPENDP 0xE1487E `(8)`->D1: live while the result is in D0
+    (`st D0` at 0xE14886).
+  Procedures keep parameter order (12.2), so these orders are not the
+  colouring order of R1.  A rule that fits all eight: colour the result
+  variable first, then the data parameters loaded at entry that do not
+  interfere with it, the one whose last use comes latest first; then the
+  other values in address order.  **Implemented** that way (`regs.rs`,
+  `allocate_apart`'s `first`; unit test `result_variable_on_several_paths`;
+  golden `results/result_variable`, `chk_io`).  A function body of one
+  statement keeps the evaluation order of PROC1_$TST_LOCK (no result
+  variable).
+- Not explained: MST_$VA_TO_SEGNO loads the parameter it returns straight
+  into D0 (0xE0DCE0) and the first parameter into D2 (0xE0DCD6), not D1;
+  0xE15222 returns its parameter from the D0 it was loaded into
+  (0xE15226), the result and the parameter sharing one register (no copy
+  coalescing elsewhere, R2).
 
 **R6. Not explained (Uncertain).**
 - 0xE177C4 `move.w #0x400,D3` and 0xE177D0 `move.l D1,D3`: D3 although
@@ -3913,6 +4028,38 @@ assignment inside a loop, and the body makes no call (fitted to
 straight into it.  Other pointer locals stay in the frame.  Unit test
 `loop_pointer_local_rule`; golden `tests/golden/loops/while` (`whl_$walk`);
 conformance `tests/conformance/disk_set_chain_status.pas`.
+
+**Stored locals pushed from the register (Verified by survey;
+implemented narrowly; bead domain-pascal-5aw.11).**  A local stored from
+a data register and later pushed by value as an argument is pushed from
+that register when no call came between (`tools/resultsurvey.py
+pushes`; the tool gives up at a write of the register or the slot, the
+slot's address taken, a backward branch, or a label a branch from before
+the store targets): from the register 86 times (50 stores of a call
+result, e.g. the spin-lock token of PKT_$NEXT_ID, `move.w D0,(-2,A6)` at
+0xE124A8 and `move.w D0,-(SP)` at 0xE124C4 across an `if`; NETBUF_$GETVA
+0xE0ECAC), from the slot 5 times (0xE02D6E, 0xE141CA, 0xE611E2,
+0xE6B828, 0xE771F4; not explained).  With a call between, from the slot
+38 times (NETBUF_$RTNVA: stored at 0xE0ED40, pushed at 0xE0ED52 after
+the `bsr`), from the register 10 times (a callee-saved one).  A reload
+into a register to compute with is another matter: `move.w
+(-0xa6,A6),D3` at 0xE085E8 after `move.w D1,(-0xa6,A6)` at 0xE085DA,
+D1 unchanged, then `lsr.w #3,D3` (also 0xE30D5A, 0xE871DE).
+**Implemented** (`isel.rs`, `Selector::forwarded`, used by `push`): a
+by-value argument that is a local of the routine (not held in a register
+by the rules above) is pushed from the register a store of the body put
+into it, when no instruction between the store and the push is a call,
+writes that register or the slot, writes the frame at a run-time
+index (another element of the same array), writes through a pointer
+while some frame object's address has escaped, or takes a frame
+address, no label
+between them is the target of a branch or `case` table from before the
+store, neither is inside a loop, and the local's address is never passed
+or taken (`escaped_frame_objects`).  Driver test
+`stored_local_is_pushed_from_its_register_only_while_valid`,
+`stored_local_not_forwarded_past_a_possible_overwrite`; conformance
+`tests/conformance/pkt_next_id.pas`.  Other reads of a stored local load
+it from its slot, as before.
 
 **Address-taken locals (audit, bead domain-pascal-pe9).**  Neither rule
 holds a local whose address the body passes or takes: an argument passed

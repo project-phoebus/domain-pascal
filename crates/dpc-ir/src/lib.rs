@@ -83,6 +83,11 @@ pub struct Function {
     pub frame_size: u32,
     /// The function result, if this is a function.
     pub result: Option<ResultSpec>,
+    /// The frame offset of the function's result variable
+    /// (`dpc_sema::FnResult::var`), if this is a function.  A pointer
+    /// result assigned by the last statement goes through it
+    /// (codegen-patterns 3, "Pointer results").
+    pub result_slot: Option<i32>,
     /// The routine makes the unit's data area addressable on entry (m68k:
     /// saves A5 and loads it with the area's address, codegen-patterns 4).
     /// False for a routine that inherits it from its caller (module-local
@@ -389,6 +394,37 @@ pub enum StmtKind {
     /// [`Expr::SetSr`] is produced (`lower.rs`); a discarded function call
     /// is a [`StmtKind::Call`].
     Discard(Expr),
+}
+
+impl StmtKind {
+    /// The statement sequences nested in this statement: an `if`'s two
+    /// parts, a loop's body, a `case`'s arms and `otherwise` part.
+    pub fn bodies(&self) -> Vec<&[Stmt]> {
+        match self {
+            StmtKind::If { then_, else_, .. } => vec![then_, else_],
+            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => vec![body],
+            StmtKind::For(l) => vec![&l.body],
+            StmtKind::Case {
+                arms, otherwise, ..
+            } => arms
+                .iter()
+                .map(|a| a.body.as_slice())
+                .chain(otherwise.as_deref())
+                .collect(),
+            _ => vec![],
+        }
+    }
+}
+
+/// Visit every statement of `body` and of the sequences nested in it, each
+/// statement before the ones inside it.
+pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
+    for s in body {
+        f(s);
+        for b in s.kind.bodies() {
+            visit_stmts(b, f);
+        }
+    }
 }
 
 /// `for index := from to|downto to do body` (ref "For", pp. 4-88..4-90).

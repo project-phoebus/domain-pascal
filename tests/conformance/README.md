@@ -66,7 +66,13 @@ index in D3 beside the `dbf` count in D2 across a `bsr.w` to
 DISK_$UNASSIGN, a routine of the module outside the unit; "Routines
 outside the unit" below) and `disk_set_chain_status.pas` (the DISK_
 module-local 0xE3CCCE: a `while` loop, its test at the bottom, the walk
-pointer held in A1; loop alignment off).
+pointer held in A1; loop alignment off).  Function results
+(codegen-patterns 3, 12.5; beads domain-pascal-5aw.11, -8aj):
+`pkt_next_id.pas` (PKT_$NEXT_ID 0xE1248E: the result variable assigned
+before a call, held in D2 and moved to D0 at the end; the spin-lock token
+stored to its slot and pushed from D0) and `vfmt_get_next_arg.pas` (the
+VFMT module-local 0xE6AA38: a pointer result read from memory, stored
+into the result variable's slot and loaded into A0).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
