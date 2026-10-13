@@ -28,16 +28,25 @@ Steps (tests/link/README.md has the why of each):
      then m68k-elf-nm over them: each global the dpc object defines must
      be defined by C objects only (no hand assembly), each of those
      objects must define no global that the unit does not define, and must
-     hold no module data block (`.moddata.*' / `.bss.moddata.*': bead
-     domain-pascal-3bp).  Those objects are dropped; their C sources stay,
-     so ../source's host tests (which #include the .c) are unaffected.
+     hold no module data block (`.moddata.*' / `.bss.moddata.*').  Those
+     objects are dropped; their C sources stay, so ../source's host tests
+     (which #include the .c) are unaffected.
+     A unit with module data (bead domain-pascal-3bp): each of its
+     `.bss.moddata.*' blocks is mapped, by the image address its manifest
+     `--section-addr' gives, onto the C object of ../source that starts
+     there (a MODULE_DATA_DEFINE block, a C data object with a map name, or
+     a gen_layout_ld.py DATA_ANCHORS entry); the declared bytes
+     (`__dpc_data_size') must fit in that one object; and the unit is
+     compiled again with `dpc --data-base=SECTION=SYMBOL', so it allocates
+     no block and its `lea' names the C object.
   5. `make check' in the scratch copy with linktest.mk filled in: the
      layout checks (map order of every placed symbol, scratch link), the
      hand-written assembly gate, the guards, the iodefs check, the RFC
      image check (full link with --emit-relocs, fixup table, dry-run
      loader) and the libgcc check.
   6. The linked ELF must define every global of every dpc unit once, at
-     an address inside .text.
+     an address inside .text; a `define'd variable of a block now owned by
+     C, if ../source names it too, must be at the owner + its offset.
   7. ../source's tools/asm_compare.py is run over the dpc objects: their
      bytes against the image bytes (taken from the image file into
      tmp/linktest/asm_ref.txt), every relocation resolved to the image
@@ -45,13 +54,17 @@ Steps (tests/link/README.md has the why of each):
      to it as LOCAL_SYMBOLS under dpc's symbol for them, and its
      KNOWN_DEVIATIONS (entries for hand-written files, which it reports
      as stale when their object is not given) are emptied; both in the
-     running script only, nothing in ../source changes.
+     running script only, nothing in ../source changes.  The C data owners
+     are added to LOCAL_SYMBOLS at their image addresses too (a
+     DATA_ANCHORS name is no map name or block to it), and no relocation
+     may stay unverified: the data base's is proved against the image's
+     `lea' operand.
 
 Manifest lines (tests/link/manifest.txt): `FILE SPEC... [OPTION]...' as in
 tests/conformance/manifest.txt; `--section-addr SEC=0xADDR' is accepted
 and ignored for code sections (the link orders sections by their map
-symbols, not by address) and refused for data sections (bead
-domain-pascal-3bp); module-routines= is accepted for map names (the `bsr.w'
+symbols, not by address); for a dpc data block it is the block's image
+address, which selects the C owner (step 4); module-routines= is accepted for map names (the `bsr.w'
 is a relocation the link resolves to ../source's routine) and refused for
 NAME=0xADDR items; enclosing= is refused (a stand-in parent).  A unit whose
 assembly has a `bsr.s' written as its encoding (`.short 0x61dd | bsr.s
@@ -98,12 +111,14 @@ class SetupError(Exception):
 # ---------------------------------------------------------------------------
 
 class Unit:
-    def __init__(self, path, specs, dpc_opts, lineno=0, mods=()):
+    def __init__(self, path, specs, dpc_opts, lineno=0, mods=(), data_addrs=None):
         self.path = path            # relative to the repository
         self.specs = specs
         self.dpc_opts = dpc_opts    # loop-align / a5 tokens, as dpc options
         self.lineno = lineno
         self.mods = list(mods)      # module-routines= tokens (map names only)
+        # dpc data block section -> its image address (`--section-addr')
+        self.data_addrs = dict(data_addrs or {})
 
     @property
     def stem(self):
@@ -112,17 +127,21 @@ class Unit:
 
 def parse_manifest_line(toks, lineno=0):
     """A Unit from manifest tokens (FILE SPEC... [OPTION]...)."""
-    path, specs, align, a5, mods = toks[0], [], [], [], []
+    path, specs, align, a5, mods, data = toks[0], [], [], [], [], {}
     if not path.endswith('.pas'):
         raise SetupError('%s: link tests take .pas units' % path)
     rest = iter(toks[1:])
     for t in rest:
         if t == '--section-addr':
-            sec, _ = conform.parse_section_addr(next(rest, ''))
-            if not sec.startswith('.text'):
-                raise SetupError('%s: %s is a data section: module data blocks '
-                                 'cannot be linked into ../source yet (bead '
-                                 'domain-pascal-3bp)' % (path, sec))
+            sec, addr = conform.parse_section_addr(next(rest, ''))
+            if sec.startswith(DATA_PREFIX):
+                # the block's image address: which C object owns it
+                if sec in data:
+                    raise SetupError('%s: %s given twice' % (path, sec))
+                data[sec] = addr
+            elif not sec.startswith('.text'):
+                raise SetupError('%s: %s is neither a code section nor a dpc '
+                                 'data block (%s...)' % (path, sec, DATA_PREFIX))
         elif t.startswith(conform.LOOP_ALIGN_TOKENS):
             align.append(t)
         elif t.startswith(conform.A5_TOKENS):
@@ -143,7 +162,7 @@ def parse_manifest_line(toks, lineno=0):
         opts = conform.loop_align_args(align) + conform.a5_args(a5)
     except conform.SetupError as e:
         raise SetupError('%s: %s' % (path, e))
-    return Unit(path, specs, opts, lineno, mods)
+    return Unit(path, specs, opts, lineno, mods, data)
 
 
 def read_manifest(path, refused=None):
@@ -204,6 +223,145 @@ def plan_drops(unit_globals, defs, asm_objs=()):
             if o not in drops:
                 drops.append(o)
     return drops, errors, notes
+
+
+# dpc's data blocks: `.bss.moddata.<UNIT>' for the Pascal default data
+# section, `.bss.moddata.<UNIT>.<SECTION>' for a named one
+# (crates/dpc-m68k/src/emit.rs, data_section_name).
+DATA_PREFIX = '.bss.moddata.'
+# what dpc --data-base records for a section (emit.rs, data_size_symbol)
+DATA_SIZE_SYMBOL = '__dpc_data_size'
+
+
+def pascal_data_section(sec):
+    """The Pascal data section of dpc block section `sec', as dpc
+    --data-base takes it (`.data' for the default section)."""
+    if not sec.startswith(DATA_PREFIX):
+        raise SetupError('%s is not a dpc data block' % sec)
+    _, dot, name = sec[len(DATA_PREFIX):].partition('.')
+    return name if dot else '.data'
+
+
+def data_size_symbol(psec):
+    return DATA_SIZE_SYMBOL if psec == '.data' else '%s.%s' % (DATA_SIZE_SYMBOL, psec.upper())
+
+
+def parse_nm_sizes(text):
+    """`m68k-elf-nm -A -S --defined-only -g' output -> {global data
+    symbol: (object, size)} (D, B, R, G, S types; the first definer)."""
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r'^(.*?):[0-9a-fA-F]+\s+([0-9a-fA-F]+)\s+([A-Za-z])\s+(\S+)$', line)
+        if m and m.group(3) in 'DBRGS':
+            out.setdefault(m.group(4), (m.group(1), int(m.group(2), 16)))
+    return out
+
+
+def anchor_symbols(anchors):
+    """gen_layout_ld.DATA_ANCHORS ({C section: image address}) ->
+    {symbol: address}: with -fdata-sections, `.data.X' / `.bss.X' /
+    `.rodata.X' holds the object X."""
+    out = {}
+    for sec, addr in anchors.items():
+        for pre in ('.data.', '.bss.', '.rodata.'):
+            if sec.startswith(pre):
+                out[sec[len(pre):]] = addr
+    return out
+
+
+def data_owner(addr, blocks, anchors, map_names, c_data):
+    """The C data object of ../source whose first byte is image address
+    `addr': a MODULE_DATA_DEFINE block declared there (`blocks', {name:
+    addr}), a C object with a map name there (`map_names'), or one
+    gen_layout_ld's DATA_ANCHORS keys there (`anchors', {symbol: addr});
+    only names a link input defines as data (`c_data', parse_nm_sizes).
+    -> (symbol, how), or (None, why) when there is none or more than one."""
+    found = []
+    for n in sorted(blocks):
+        if blocks[n] == addr and n in c_data:
+            found.append((n, 'MODULE_DATA_DEFINE'))
+    for n in map_names:
+        if n in c_data:
+            found.append((n, 'map name'))
+    for n in sorted(anchors):
+        if anchors[n] == addr and n in c_data:
+            found.append((n, 'DATA_ANCHORS'))
+    names = sorted({n for n, _ in found})
+    if not names:
+        return None, ('no C object of ../source starts at 0x%X (no MODULE_DATA_DEFINE '
+                      'block, map name or DATA_ANCHORS entry there)' % addr)
+    if len(names) > 1:
+        return None, 'several C objects start at 0x%X: %s' % (addr, ', '.join(names))
+    return found[0]
+
+
+def extent_error(sec, addr, declared, owner, obj, size):
+    """Why the unit's data cannot use C object `owner' as its base, or
+    None: every A5 offset of the unit (below `declared') must fall in that
+    one C object (past its end lie other C objects, laid out by the link).
+    This bounds the offsets only: that they hit the same fields rests on
+    ../source's struct layout (tests/link/README.md, "Offsets")."""
+    if declared > size:
+        return ('%s (0x%X): the unit declares 0x%X bytes, ../source\'s %s (%s) is '
+                '0x%X: the rest of the image block is other C objects'
+                % (sec, addr, declared, owner, obj, size))
+    return None
+
+
+_A5_EA = re.compile(r'\((?:(-?(?:0x[0-9a-fA-F]+|\d+)),)?%a5(?:,[^)]*)?\)')
+
+
+def a5_offsets(asm):
+    """The displacements of the A5-relative operands of dpc assembly
+    `asm' (`(d,%a5)', `(d,%a5,Xn)', `(%a5)' as 0): the offsets in the data
+    block the unit touches.  The A5 save, `pea (%a5)' right before a `lea
+    (.Ldata...).l,%a5', is not a data operand."""
+    lines = [l.split('|', 1)[0].strip() for l in asm.splitlines()]
+    lines = [l for l in lines if l and not l.endswith(':') and not l.startswith('.')]
+    out = set()
+    for i, l in enumerate(lines):
+        if (l.replace('\t', ' ') == 'pea (%a5)' and i + 1 < len(lines) and
+                re.match(r'lea\s+\(\.Ldata[^)]*\)\.l,%a5$', lines[i + 1])):
+            continue
+        for m in _A5_EA.finditer(l):
+            out.add(int(m.group(1), 0) if m.group(1) else 0)
+    return out
+
+
+def reloc_addends(objdump_r, sym):
+    """The addends of the relocations against `sym' in `objdump -dr'
+    output (`R_68K_32 SYM+0x1e4' -> 0x1E4)."""
+    out = set()
+    for m in re.finditer(r'R_68K_\w+\s+(\S+?)(?:([+-])0x([0-9a-fA-F]+))?\s*$',
+                         objdump_r, re.M):
+        if m.group(1) == sym:
+            v = int(m.group(3), 16) if m.group(3) else 0
+            out.add(-v if m.group(2) == '-' else v)
+    return out
+
+
+def offset_evidence(used, c_addends):
+    """(confirmed, unconfirmed): the unit's A5 offsets that the replaced C
+    objects also reach as OWNER+offset, and the rest (whose agreement with
+    the C struct rests on ../source's layout and _Static_asserts alone)."""
+    return sorted(used & c_addends), sorted(used - c_addends)
+
+
+def define_mismatches(defines, base_addr, elf_where):
+    """The unit's `define'd variables of a block now owned by C
+    ({name: offset}) against the linked ELF: a name ../source also defines
+    must be at the owner's address + offset.  -> ([error], [name ../source
+    does not define])."""
+    errs, unnamed = [], []
+    for name, off in sorted(defines.items()):
+        hits = elf_where.get(name)
+        if not hits:
+            unnamed.append(name)
+        elif len(hits) != 1 or hits[0][0] != base_addr + off:
+            errs.append('%s: expected at 0x%X (block + 0x%X), the ELF has %s'
+                        % (name, base_addr + off, off,
+                           ', '.join('0x%X' % a for a, _ in hits)))
+    return errs, unnamed
 
 
 # The end of the kernel's wired VAs (map `D52 F4FC00 IODEFS_GUARD'): map
@@ -338,16 +496,54 @@ def refresh(source, work, rev=None):
     return dst
 
 
-def compile_unit(unit, linkmap, dpc, root):
+def parse_symtab(text):
+    """`objdump -t' output -> [(name, value, binding, section)], binding
+    'g' or 'l' (section `*ABS*' for an absolute symbol)."""
+    out = []
+    for line in text.splitlines():
+        left, tab, right = line.partition('\t')
+        f = left.split()
+        r = right.split()
+        if not tab or len(f) < 2 or len(r) != 2:
+            continue
+        try:
+            value = int(f[0], 16)
+        except ValueError:
+            continue
+        out.append((r[1], value, f[1] if f[1] in 'gl' else '', f[-1]))
+    return out
+
+
+def unit_data(symtab, blocks):
+    """The data side of a dpc object: its `define'd globals per block
+    section ({section: {name: offset}}; a block is its own section, so
+    the value is the offset) and the sizes --data-base recorded ({Pascal
+    section: bytes}, data_size_symbol)."""
+    defines = {s: {} for s in blocks}
+    declared = {}
+    for name, value, bind, sec in symtab:
+        if bind == 'g' and sec in defines:
+            defines[sec][name] = value
+        if sec == '*ABS*' and name.startswith(DATA_SIZE_SYMBOL):
+            declared[name] = value
+    return defines, declared
+
+
+def compile_unit(unit, linkmap, dpc, root, data_bases=()):
     """dpc + m68k-elf-as for one unit -> (object path relative to root,
-    {global: section}, {local symbol: image address} for 0xADDR specs)."""
+    {code global: type}, {local symbol: image address} for 0xADDR specs,
+    {block section: size} of the module data blocks it allocates, the
+    object's symbol table, parse_symtab).
+    `data_bases': (Pascal data section, C symbol) pairs for dpc
+    --data-base."""
     src = os.path.join(REPO, unit.path)
     routines = conform.unit_routines(unit.specs, linkmap)
     frag = conform.fragment_args(routines, linkmap)
     mopts, _ = conform.module_routine_args(unit.mods, routines, linkmap)
+    dopts = ['--data-base=%s=%s' % kv for kv in data_bases]
     odir = os.path.join(root, OBJDIR)
     os.makedirs(odir, exist_ok=True)
-    asm = conform.compile_pas(src, dpc, odir, frag + unit.dpc_opts + mopts)
+    asm = conform.compile_pas(src, dpc, odir, frag + unit.dpc_opts + mopts + dopts)
     enc = conform.encoded_calls(asm)
     if enc:
         # `.short 0x61dd | bsr.s NAME': a displacement fixed from the image
@@ -359,7 +555,11 @@ def compile_unit(unit, linkmap, dpc, root):
                          % (unit.path, ', '.join(sorted(enc))))
     obj = os.path.join(odir, unit.stem + '.o')
     must([conform.AS, '-m68010', '-o', obj, asm])
-    globs = object_globals(obj)
+    blocks = {s: n for s, n in block_sizes(root, obj).items() if n}
+    symtab = parse_symtab(must(['m68k-elf-objdump', '-t', obj]))
+    # code globals: what the unit replaces (its `define'd variables are
+    # data, handled with its blocks)
+    globs = {g: ty for g, ty in object_globals(obj).items() if ty == 'T'}
     local = {}
     for r in routines:
         if r.name is None:
@@ -378,7 +578,7 @@ def compile_unit(unit, linkmap, dpc, root):
         if missing:
             raise SetupError('%s: no local symbol for %s' % (
                 unit.path, ', '.join('0x%X' % a for a in sorted(missing))))
-    return os.path.relpath(obj, root), globs, locals_
+    return os.path.relpath(obj, root), globs, locals_, blocks, symtab
 
 
 def object_globals(obj):
@@ -426,14 +626,45 @@ def check_swap(objs, drops, adds):
             ['%s is still linked' % o for o in drops if o in have])
 
 
+def block_sizes(root, obj):
+    """{section: size} of the module data block sections of `obj'."""
+    out = must(['m68k-elf-objdump', '-h', obj], cwd=root)
+    return {f[1]: int(f[2], 16) for f in (l.split() for l in out.splitlines())
+            if len(f) >= 7 and f[0].isdigit() and
+            f[1].startswith(('.moddata.', '.bss.moddata.'))}
+
+
 def has_block(root, obj, nonempty=False):
     """The module data block sections of `obj' (non-empty ones only with
     `nonempty')."""
-    out = must(['m68k-elf-objdump', '-h', obj], cwd=root)
-    return [f[1] for f in (l.split() for l in out.splitlines())
-            if len(f) >= 7 and f[0].isdigit() and
-            f[1].startswith(('.moddata.', '.bss.moddata.')) and
-            (int(f[2], 16) or not nonempty)]
+    return [s for s, n in block_sizes(root, obj).items() if n or not nonempty]
+
+
+def c_layout(root):
+    """../source's own placement facts, read from the scratch copy's
+    tools/gen_layout_ld.py: ({MODULE_DATA_DEFINE block: declared image
+    address}, {DATA_ANCHORS symbol: image address})."""
+    tools = os.path.join(root, 'tools')
+    sys.path.insert(0, tools)
+    try:
+        import importlib
+        gl = importlib.import_module('gen_layout_ld')
+        blocks, errors = gl.scan_sources(root)
+        anchors = getattr(gl, 'DATA_ANCHORS', {})
+    finally:
+        sys.path.remove(tools)
+    if errors:
+        raise SetupError('gen_layout_ld.scan_sources: ' + '; '.join(errors))
+    return {b.name: b.addr for b in blocks}, anchor_symbols(anchors)
+
+
+def nm_sizes(root, objs):
+    out = {}
+    for i in range(0, len(objs), 400):
+        for k, v in parse_nm_sizes(must([NM, '-A', '-S', '--defined-only', '-g'] +
+                                        objs[i:i + 400], cwd=root)).items():
+            out.setdefault(k, v)
+    return out
 
 
 def elf_check(root, units_globals):
@@ -473,6 +704,57 @@ def asm_compare(root, objs, local_syms, work):
                log=os.path.join(work, 'asm_compare.log'))
 
 
+def unverified_count(text):
+    """asm_compare.py's count of relocations it could not resolve to an
+    image address (None if its summary is missing)."""
+    m = re.search(r'(\d+) unverified;', text)
+    return int(m.group(1)) if m else None
+
+
+def plan_data(u, root, obj, blocks, symtab, ctx, linkmap, dpc):
+    """Map each module data block of unit `u''s object onto the C object
+    of ../source that owns the same image address, and recompile the unit
+    with dpc --data-base so that it allocates none of them.  -> ([(block
+    section, image address, C symbol, how found, {define'd name: offset},
+    bytes declared)], [error])."""
+    errs, plan, bases = [], [], []
+    defines, _ = unit_data(symtab, blocks)
+    for sec in sorted(blocks):
+        addr = u.data_addrs.get(sec)
+        if addr is None:
+            errs.append('the dpc object has module data %s with no image address '
+                        '(manifest: --section-addr %s=0xADDR)' % (sec, sec))
+            continue
+        owner, how = data_owner(addr, ctx['blocks'], ctx['anchors'],
+                                linkmap.names_at(addr), ctx['c_data'])
+        if owner is None:
+            errs.append('%s: %s' % (sec, how))
+            continue
+        plan.append([sec, addr, owner, how, defines[sec], None])
+        bases.append((pascal_data_section(sec), owner))
+    for sec in sorted(set(u.data_addrs) - set(blocks)):
+        errs.append('%s: --section-addr names a block the dpc object does not have' % sec)
+    if errs:
+        return [], errs
+    obj2, _, _, left, symtab2 = compile_unit(u, linkmap, dpc, root, bases)
+    assert obj2 == obj
+    if left:
+        errs.append('dpc --data-base left module data %s' % ', '.join(sorted(left)))
+    _, declared = unit_data(symtab2, {})
+    for p in plan:
+        sec, addr, owner = p[0], p[1], p[2]
+        sym = data_size_symbol(pascal_data_section(sec))
+        if sym not in declared:
+            errs.append('%s: dpc recorded no %s' % (sec, sym))
+            continue
+        p[5] = declared[sym]
+        cobj, size = ctx['c_data'][owner]
+        e = extent_error(sec, addr, p[5], owner, cobj, size)
+        if e:
+            errs.append(e)
+    return [tuple(p) for p in plan], errs
+
+
 def run_all(args):
     linkmap = sau2map.load()
     refused = [] if args.keep_going else None
@@ -498,14 +780,14 @@ def run_all(args):
         failed.append(Unit(path, [], []))
     for u in units:
         try:
-            obj, globs, locals_ = compile_unit(u, linkmap, args.dpc, root)
+            obj, globs, locals_, blocks, symtab = compile_unit(u, linkmap, args.dpc, root)
         except (SetupError, conform.SetupError) as e:
             print('linktest: FAIL %s' % e)
             if not args.keep_going:
                 return 1
             failed.append(u)
             continue
-        compiled.append((u, obj, globs, locals_))
+        compiled.append((u, obj, globs, locals_, blocks, symtab))
         print('linktest: compiled %s -> %s (%s)' % (u.path, obj, ', '.join(sorted(globs))))
 
     print('linktest: building every object of the scratch tree (make -j%d linktest-objs)'
@@ -517,17 +799,54 @@ def run_all(args):
     defs = nm_all(root, allobjs)
 
     drops, adds = [], []
-    for u, obj, globs, _ in compiled:
+    ctx = {}
+    data_plans = {}         # unit path -> [(section, addr, owner, defines)]
+    for u, obj, globs, _, blocks, symtab in compiled:
         d, errs, notes = plan_drops(globs, defs, asm_objs)
+        if blocks:
+            if not ctx:
+                ctx['blocks'], ctx['anchors'] = c_layout(root)
+                ctx['c_data'] = nm_sizes(root, allobjs)
+            try:
+                plan, derrs = plan_data(u, root, obj, blocks, symtab, ctx, linkmap,
+                                        args.dpc)
+            except (SetupError, conform.SetupError) as e:
+                plan, derrs = [], [str(e)]
+            errs = derrs + errs
+            data_plans[u.path] = plan
+            for sec, addr, owner, how, defines, declared in plan:
+                print('linktest: %s: %s (0x%X, 0x%X bytes declared) -> %s (%s, %s), '
+                      'dpc --data-base=%s=%s' % (u.path, sec, addr, declared, owner, how,
+                                                 ctx['c_data'][owner][0],
+                                                 pascal_data_section(sec), owner))
+            if len(plan) == 1:
+                # evidence that the unit's offsets mean the C struct's
+                # fields: the C routines it replaces reach OWNER+offset
+                # (README "Module data", "Offsets"); informational
+                owner = plan[0][2]
+                with open(os.path.join(root, OBJDIR, u.stem + '.s')) as f:
+                    used = a5_offsets(f.read())
+                c_add = set()
+                for o in d:
+                    c_add |= reloc_addends(must(['m68k-elf-objdump', '-dr', o], cwd=root),
+                                           owner)
+                ok, unk = offset_evidence(used, c_add)
+                fmt = lambda xs: ', '.join('0x%X' % x for x in xs) or 'none'
+                print('linktest: %s: A5 offsets used: %s; also reached as %s+offset by '
+                      'the replaced C: %s; resting on ../source\'s struct layout '
+                      'only: %s' % (u.path, fmt(sorted(used)), owner, fmt(ok), fmt(unk)))
+            elif plan:
+                print('linktest: note: %s: several data blocks, A5 offsets not '
+                      'attributed to one' % u.path)
         if not globs:
             errs.insert(0, 'the unit defines no global symbol: its routines are '
                         'module-local, local symbols in the dpc object, while the C '
                         'callers name the C functions; it would add unreachable code '
                         'and replace nothing')
         blk = has_block(root, obj, nonempty=True)
-        if blk:
-            errs.insert(0, 'the dpc object has module data %s, which this link cannot '
-                        'place yet (bead domain-pascal-3bp)' % ', '.join(blk))
+        if blk and not errs:
+            errs.insert(0, 'the dpc object still has module data %s after --data-base'
+                        % ', '.join(blk))
         for o in d:
             blk = has_block(root, o)
             if blk:
@@ -599,7 +918,7 @@ def run_all(args):
         return 1
     print('linktest: make check passed')
 
-    linked = [(u, g) for u, o, g, _ in compiled if o in adds]
+    linked = [(u, g) for u, o, g, *_ in compiled if o in adds]
     bad, where = elf_check(root, linked)
     for b in bad:
         print('linktest: FAIL ' + b)
@@ -610,14 +929,46 @@ def run_all(args):
             '%s 0x%X' % (n, where[n][0][0]) for n in sorted(g, key=lambda n: where[n][0][0]))))
 
     local_syms = {}
-    for u, o, g, l in compiled:
+    for u, o, g, l, *_ in compiled:
         if o in adds:
             local_syms.update(l)
+    bad = []
+    for u, o, *_ in compiled:
+        if o not in adds:
+            continue
+        for sec, addr, owner, how, defines, _ in data_plans.get(u.path, []):
+            # the owner at its image address for asm_compare: a block or a
+            # map name it resolves itself; a DATA_ANCHORS name it does not
+            local_syms.setdefault(owner, addr)
+            base = where.get(owner, [])
+            if len(base) != 1:
+                bad.append('%s: %s in the ELF: %s' % (u.path, owner, base or 'missing'))
+                continue
+            errs, unnamed = define_mismatches(defines, base[0][0], where)
+            bad += ['%s: %s' % (u.path, e) for e in errs]
+            for n in unnamed:
+                print('linktest: note: %s: define\'d %s (%s + 0x%X) is not a name in '
+                      '../source; nothing there refers to it'
+                      % (u.path, n, owner, defines[n]))
+            if not errs:
+                print('linktest: %s: %s at 0x%X in the ELF; %d define\'d name(s) checked'
+                      % (u.path, owner, base[0][0], len(defines) - len(unnamed)))
+    for b in bad:
+        print('linktest: FAIL ' + b)
+    if bad:
+        return 1
     p = asm_compare(root, adds, local_syms, work)
     for l in (p.stdout + p.stderr).splitlines():
         print('    ' + l)
     if p.returncode:
         print('linktest: FAIL asm_compare over the dpc objects')
+        return 1
+    unv = unverified_count(p.stdout + p.stderr)
+    if unv != 0:
+        # every relocation, the data base's included, must be proved
+        # against the image operand
+        print('linktest: FAIL asm_compare: %s relocation(s) unverified'
+              % ('?' if unv is None else unv))
         return 1
     if failed:
         print('linktest: %d unit(s) not linked: %s'

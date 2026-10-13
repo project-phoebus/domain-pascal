@@ -23,9 +23,13 @@ conform: build
 # Link test (CLAUDE.md section 6.4; tests/link/README.md): the units of
 # tests/link/manifest.txt swapped for their C objects in a scratch copy of
 # ../source (tmp/linktest/), whose `make check' must pass.  About 20 s, so
-# not part of `make test'.
+# not part of `make test'.  It exports a committed ../source revision
+# (LINKTEST_REV, default HEAD) so other agents' uncommitted edits there
+# cannot affect it; for the working tree run tools/linktest.py without --rev.
+LINKTEST_REV ?= HEAD
+
 linktest: build
-	$(PYTHON) tools/linktest.py run tests/link/manifest.txt
+	$(PYTHON) tools/linktest.py run --rev $(LINKTEST_REV) tests/link/manifest.txt
 
 clean:
 	$(CARGO) clean

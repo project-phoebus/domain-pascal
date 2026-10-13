@@ -42,10 +42,19 @@ class ManifestTest(unittest.TestCase):
             ['scsi.pas', 'SCSI_$CINIT', '--section-addr', '.text.SCSI_.SCSI_WIRED_PROC=0xE88800'])
         self.assertEqual(u.specs, ['SCSI_$CINIT'])
 
+    def test_data_section_addr_kept(self):
+        u = linktest.parse_manifest_line(
+            ['x.pas', 'PROC1_$GET_LOADAV', '--section-addr',
+             '.bss.moddata.PROC1_.WIRED_DATA=0xE254E8'])
+        self.assertEqual(u.specs, ['PROC1_$GET_LOADAV'])
+        self.assertEqual(u.data_addrs, {'.bss.moddata.PROC1_.WIRED_DATA': 0xE254E8})
+
     def test_refused(self):
         for toks in (['x.s', 'FOO'],
                      ['x.pas'],
-                     ['x.pas', 'FOO', '--section-addr', '.bss.moddata.PROC2=0xE7BE84'],
+                     ['x.pas', 'FOO', '--section-addr', '.data.X=0xE7BE84'],
+                     ['x.pas', 'FOO', '--section-addr', '.bss.moddata.P=0xE7BE84',
+                      '--section-addr', '.bss.moddata.P=0xE7BE84'],
                      ['x.pas', 'FOO', 'module-routines=BAR,LOCAL=0xE43182'],
                      ['x.pas', '0xE76470:2E', 'enclosing=RECEIVE_PACKET']):
             with self.assertRaises(linktest.SetupError, msg=toks):
@@ -75,6 +84,21 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue(units)
         for u in units:
             self.assertTrue(os.path.exists(os.path.join(linktest.REPO, u.path)), u.path)
+
+    def test_data_addresses_agree_with_conformance(self):
+        # a block's image address is the one the conformance gate proves
+        conf = {}
+        with open(os.path.join(linktest.REPO, 'tests', 'conformance', 'manifest.txt')) as f:
+            for line in f:
+                toks = line.split('#', 1)[0].split()
+                for i, tok in enumerate(toks[:-1]):
+                    if tok == '--section-addr':
+                        conf.setdefault(toks[0], {})[toks[i + 1]] = True
+        units = linktest.read_manifest(linktest.MANIFEST)
+        self.assertTrue(any(u.data_addrs for u in units))
+        for u in units:
+            for sec, addr in u.data_addrs.items():
+                self.assertIn('%s=0x%X' % (sec, addr), conf.get(u.path, {}), u.path)
 
 
 NM = """\
@@ -124,6 +148,138 @@ class DropTest(unittest.TestCase):
         drops, errs, notes = linktest.plan_drops({'IO_$ALLOC': 'T'}, self.defs)
         self.assertEqual((drops, errs), ([], []))
         self.assertIn('IO_$ALLOC', notes[0])
+
+
+NM_S = """\
+build/sau2/proc1/proc1_data.o:00000000 00000cc4 B PROC1_$DATA
+build/sau2/cal/cal_data.o:00000000 0000000c B CAL_$TIMEZONE
+build/sau2/term/term_data.o:00000000 00001398 D TERM_$DATA
+build/sau2/proc1/tst_lock.o:00000000 0000001c T PROC1_$TST_LOCK
+build/sau2/mst/mst_data.o:00000000 00000030 D MST_$PAGE_AVAIL_BITMAP
+"""
+
+SYMTAB = """\
+
+linktest/scsi.o:     file format elf32-m68k
+
+SYMBOL TABLE:
+00000000 l    df *ABS*\t00000000 scsi.pas
+00000000 l    d  .bss.moddata.SCSI_.SCSI_WIRED_DATA\t00000000 .bss.moddata.SCSI_.SCSI_WIRED_DATA
+00000012 l       *ABS*\t00000000 __dpc_data_size.SCSI_WIRED_DATA
+00000000 g       .text.SCSI_.OS_INIT_PROC\t00000000 SCSI_$CINIT
+00000004 g       .bss.moddata.SCSI_.SCSI_WIRED_DATA\t00000000 SCSI_$PRESENT
+00000000         *UND*\t00000000 PROC1_$DATA
+"""
+
+
+class DataTest(unittest.TestCase):
+    def setUp(self):
+        self.c_data = linktest.parse_nm_sizes(NM_S)
+
+    def test_pascal_data_section(self):
+        self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC2'), '.data')
+        self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC1_.WIRED_DATA'),
+                         'WIRED_DATA')
+        with self.assertRaises(linktest.SetupError):
+            linktest.pascal_data_section('.data.X')
+        self.assertEqual(linktest.data_size_symbol('.data'), '__dpc_data_size')
+        self.assertEqual(linktest.data_size_symbol('wired_data'),
+                         '__dpc_data_size.WIRED_DATA')
+
+    def test_parse_nm_sizes(self):
+        self.assertEqual(self.c_data['PROC1_$DATA'],
+                         ('build/sau2/proc1/proc1_data.o', 0xCC4))
+        self.assertEqual(self.c_data['TERM_$DATA'][1], 0x1398)
+        self.assertNotIn('PROC1_$TST_LOCK', self.c_data)     # code
+
+    def test_anchor_symbols(self):
+        self.assertEqual(linktest.anchor_symbols({'.data.TERM_$DATA': 0xE2C9F0,
+                                                  '.bss.NAME_$DATA': 0xE80264,
+                                                  '.text.FOO': 1}),
+                         {'TERM_$DATA': 0xE2C9F0, 'NAME_$DATA': 0xE80264})
+
+    def test_owner_block(self):
+        self.assertEqual(linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
+                                             [], self.c_data),
+                         ('PROC1_$DATA', 'MODULE_DATA_DEFINE'))
+
+    def test_owner_map_name(self):
+        self.assertEqual(linktest.data_owner(0xE7B030, {}, {}, ['CAL_$TIMEZONE'],
+                                             self.c_data),
+                         ('CAL_$TIMEZONE', 'map name'))
+
+    def test_owner_anchor(self):
+        self.assertEqual(linktest.data_owner(0xE2C9F0, {}, {'TERM_$DATA': 0xE2C9F0},
+                                             [], self.c_data),
+                         ('TERM_$DATA', 'DATA_ANCHORS'))
+
+    def test_owner_none(self):
+        # a map name no C object defines (SCSI_$DATA_START is a link mark),
+        # a block whose C object is not linked, a C object with no image
+        # address (MST_$PAGE_AVAIL_BITMAP: placed by its users)
+        owner, why = linktest.data_owner(0xE88804, {'GONE': 0xE88804}, {},
+                                         ['SCSI_$DATA_START'], self.c_data)
+        self.assertIsNone(owner)
+        self.assertIn('0xE88804', why)
+
+    def test_owner_ambiguous(self):
+        owner, why = linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
+                                         ['CAL_$TIMEZONE'], self.c_data)
+        self.assertIsNone(owner)
+        self.assertIn('CAL_$TIMEZONE', why)
+
+    def test_same_owner_found_twice(self):
+        self.assertEqual(linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
+                                             ['PROC1_$DATA'], self.c_data)[0],
+                         'PROC1_$DATA')
+
+    def test_extent(self):
+        self.assertIsNone(linktest.extent_error('s', 0xE254E8, 0xC, 'PROC1_$DATA', 'o', 0xCC4))
+        self.assertIsNone(linktest.extent_error('s', 0xE254E8, 0xCC4, 'PROC1_$DATA', 'o', 0xCC4))
+        e = linktest.extent_error('s', 0xE7B030, 0x12, 'CAL_$TIMEZONE', 'o', 0xC)
+        self.assertIn('0x12', e)
+
+    def test_symtab(self):
+        st = linktest.parse_symtab(SYMTAB)
+        self.assertIn(('SCSI_$PRESENT', 4, 'g', '.bss.moddata.SCSI_.SCSI_WIRED_DATA'), st)
+        self.assertIn(('PROC1_$DATA', 0, '', '*UND*'), st)
+        defines, declared = linktest.unit_data(st, {'.bss.moddata.SCSI_.SCSI_WIRED_DATA': 4})
+        self.assertEqual(defines, {'.bss.moddata.SCSI_.SCSI_WIRED_DATA': {'SCSI_$PRESENT': 4}})
+        self.assertEqual(declared, {'__dpc_data_size.SCSI_WIRED_DATA': 0x12})
+
+    def test_define_mismatches(self):
+        where = {'A': [(0x1004, 'B')], 'B': [(0x1010, 'B')]}
+        errs, unnamed = linktest.define_mismatches({'A': 4, 'B': 8, 'C': 2}, 0x1000, where)
+        self.assertEqual(unnamed, ['C'])
+        self.assertEqual(len(errs), 1)
+        self.assertIn('B', errs[0])
+
+    def test_a5_offsets(self):
+        asm = ("PKT_$NEXT_ID:\n\tlink.w\t%fp,#-4\n\tpea\t(%a5)\n"
+               "\tlea\t(.Ldata).l,%a5\n\tpea\t(0x50,%a5)\n"
+               "\tmove.w\t(0x5c,%a5),%d2\n\tmove.l\t(0x3c,%a5,%d0.w),%d0\n"
+               "\tlea\t(%a5),%a0\t| var at 0\n\tmovem.l\t(-0xc,%fp),%d2/%a5\n"
+               "\tmovea.l\t(-4,%fp),%a5\n")
+        self.assertEqual(linktest.a5_offsets(asm), {0x50, 0x5C, 0x3C, 0})
+        # the save alone is no data operand
+        self.assertEqual(linktest.a5_offsets(
+            "\tpea\t(%a5)\n\tlea\t(.Ldata.WIRED_DATA).l,%a5\n"), set())
+        # but a `pea (%a5)' that passes the variable at offset 0 is
+        self.assertEqual(linktest.a5_offsets("\tpea\t(%a5)\n\tjsr\tX\n"), {0})
+
+    def test_reloc_addends(self):
+        text = ("\t\t\t4: R_68K_32\tPKT_$DATA+0x50\n\t\t\ta: R_68K_32\tML_$SPIN_LOCK\n"
+                "\t\t\t10: R_68K_32\tPKT_$DATA+0x5c\n\t\t\t12: R_68K_32\tPKT_$DATA\n"
+                "\t\t\t14: R_68K_32\tPKT_$DATA_X+0x4\n")
+        self.assertEqual(linktest.reloc_addends(text, 'PKT_$DATA'), {0x50, 0x5C, 0})
+        self.assertEqual(linktest.offset_evidence({0x3C, 0x50}, {0, 0x50}),
+                         ([0x50], [0x3C]))
+
+    def test_unverified_count(self):
+        self.assertEqual(linktest.unverified_count(
+            'asm_compare: 3 object(s) ... 7 resolved to the image operand, 0 unverified; 1'), 0)
+        self.assertEqual(linktest.unverified_count('x, 2 unverified; y'), 2)
+        self.assertIsNone(linktest.unverified_count('crashed'))
 
 
 class FakeMap:

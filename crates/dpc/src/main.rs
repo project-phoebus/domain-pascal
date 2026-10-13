@@ -4,7 +4,7 @@
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE,...]
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]...
-//!            [--schedule=off|r11|r11:N]
+//!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -49,6 +49,16 @@
 //! applies the candidate list rule R11 over the whole block, `r11:N` with
 //! a window of the next N instructions.  The default is `r11:3`; the
 //! policy is not settled (12.4 R11).
+//!
+//! `--data-base=SECTION=SYMBOL` (repeatable; link-test scaffolding, bead
+//! domain-pascal-3bp, `tests/link/README.md`): the data area of Pascal
+//! data section SECTION (`.data` for the default) belongs to another
+//! object, whose global SYMBOL is its first byte.  The unit allocates no
+//! block there and does not define its `define`d variables; its routines
+//! address the area through SYMBOL (`lea SYMBOL.l,A5`), with the same
+//! bytes as without the option (`dpc_m68k::emit::Options::data_bases`).
+//! Used to link a unit into `../source`, where a C `MODULE_DATA_DEFINE`
+//! block owns the module's data.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -64,7 +74,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE,...] \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]... \
-                     [--schedule=off|r11|r11:N] \
+                     [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
 /// Where to stop.
@@ -92,6 +102,7 @@ struct Args {
     data_base: DataBaseOptions,
     module_routines: Vec<(String, u32)>,
     schedule: Schedule,
+    data_bases: Vec<(String, String)>,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
@@ -128,6 +139,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut absolute = None;
     let mut module_routines: Vec<(String, u32)> = Vec::new();
     let mut schedule = None;
+    let mut data_bases: Vec<(String, String)> = Vec::new();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -199,6 +211,17 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 module_routines.push((name.to_string(), a));
             }
+            s if s.starts_with("--data-base=") => {
+                let v = &s["--data-base=".len()..];
+                let (sect, sym) = v
+                    .split_once('=')
+                    .filter(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('='))
+                    .ok_or_else(|| format!("--data-base: want SECTION=SYMBOL, got `{v}`"))?;
+                if data_bases.iter().any(|(s, _)| s.eq_ignore_ascii_case(sect)) {
+                    return Err(format!("--data-base: section `{sect}` given more than once"));
+                }
+                data_bases.push((sect.to_string(), sym.to_string()));
+            }
             s if s.starts_with("--schedule=") => {
                 if schedule.is_some() {
                     return Err("--schedule given more than once".into());
@@ -250,6 +273,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         },
         module_routines,
         schedule: schedule.unwrap_or_default(),
+        data_bases,
     })
 }
 
@@ -296,6 +320,7 @@ fn compile(
         loop_align: args.loop_align.clone(),
         module_routines: args.module_routines.clone(),
         schedule: args.schedule,
+        data_bases: args.data_bases.clone(),
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -491,5 +516,29 @@ mod tests {
         assert!(args(&["--a5-absolute=,P", "m.pas"]).is_err());
         assert!(args(&["--a5-absolute=P", "--a5-absolute=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-always-from", "P", "m.pas"]).is_err());
+        assert!(args(&["--data-base=", "m.pas"]).is_err());
+        assert!(args(&["--data-base=WIRED_DATA", "m.pas"]).is_err());
+        assert!(args(&["--data-base==PROC1_$DATA", "m.pas"]).is_err());
+        assert!(args(&["--data-base=W=", "m.pas"]).is_err());
+        assert!(args(&["--data-base=W=A=B", "m.pas"]).is_err());
+        assert!(args(&["--data-base=w=A", "--data-base=W=B", "m.pas"]).is_err());
+    }
+
+    #[test]
+    fn parses_data_base() {
+        assert!(args(&["m.pas"]).unwrap().data_bases.is_empty());
+        let a = args(&[
+            "--data-base=wired_data=PROC1_$DATA",
+            "--data-base=.data=X",
+            "m.pas",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.data_bases,
+            vec![
+                ("wired_data".to_string(), "PROC1_$DATA".to_string()),
+                (".data".to_string(), "X".to_string())
+            ]
+        );
     }
 }

@@ -102,6 +102,19 @@ pub struct Options {
     /// The scheduling policy for the bodies (`dpc --schedule`;
     /// `sched.rs`, codegen-patterns 12.4 R9-R12).
     pub schedule: crate::sched::Schedule,
+    /// Pascal data sections (as the source names them, `.data` for the
+    /// default; matched case-insensitively) whose data area another object
+    /// owns, with the global symbol of its first byte (`dpc --data-base`;
+    /// link-test scaffolding, bead domain-pascal-3bp,
+    /// `tests/link/README.md`).  For such a section the unit allocates
+    /// nothing: its [`data_base_label`] is set to the symbol, so `lea
+    /// <label>.l,A5` (and `--a5-absolute`'s `lea`) is a relocation against
+    /// it; its `define`d variables are not defined by the unit (the
+    /// owner's to define); and the absolute local symbol
+    /// [`data_size_symbol`] records the bytes the unit declares there, so
+    /// a harness can check they fit in the owner's object.  The code is
+    /// byte for byte the same as without the option.
+    pub data_bases: Vec<(String, String)>,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -197,6 +210,29 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
     }
     let aligns = aligning(module, &opts.loop_align).map_err(|d| vec![d])?;
+    for (i, (sect, _)) in opts.data_bases.iter().enumerate() {
+        if opts.data_bases[..i]
+            .iter()
+            .any(|(s, _)| s.eq_ignore_ascii_case(sect))
+        {
+            return Err(vec![Diagnostic::error_nopos(format!(
+                "--data-base: data section `{sect}` given more than once"
+            ))]);
+        }
+        if !module
+            .data
+            .iter()
+            .any(|d| d.section.eq_ignore_ascii_case(sect))
+            && !module
+                .functions
+                .iter()
+                .any(|f| f.data_section.eq_ignore_ascii_case(sect))
+        {
+            return Err(vec![Diagnostic::error_nopos(format!(
+                "--data-base: no variable or routine of this unit is in data section `{sect}`"
+            ))]);
+        }
+    }
     if let Some((name, _)) = opts.module_routines.iter().find(|(n, _)| {
         module
             .functions
@@ -366,7 +402,21 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
     }
     for data in &module.data {
-        out.push_str(&data_area(&module.name, data));
+        if !opts
+            .data_bases
+            .iter()
+            .any(|(s, _)| s.eq_ignore_ascii_case(&data.section))
+        {
+            out.push_str(&data_area(&module.name, data));
+        }
+    }
+    for (sect, sym) in &opts.data_bases {
+        let size = module
+            .data
+            .iter()
+            .find(|d| d.section.eq_ignore_ascii_case(sect))
+            .map_or(0, |d| d.size);
+        out.push_str(&external_data_area(sect, sym, size));
     }
     if errors.is_empty() {
         Ok(out)
@@ -622,8 +672,9 @@ fn size_branches(
 /// `PROC2_$UNWIRED_DATA`; `../source/domain_os/arch/m68k/arch.h`), and
 /// `tools/gen_layout_ld.py` orders a block by the address literal of that
 /// C site, never by the map's segment name.  A section of ours would get
-/// no ordering key there; linking a dpc unit into `../source` needs a
-/// mapping that does not exist yet (codegen-patterns 11).
+/// no ordering key there.  To link a unit into `../source`, the C object
+/// owns the bytes and the unit refers to it ([`Options::data_bases`],
+/// `dpc --data-base`; `tests/link/README.md`).
 pub fn data_section_name(unit: &str, sect: &str) -> String {
     if sect == DEFAULT_DATA_SECTION {
         format!(".bss.moddata.{}", unit.to_uppercase())
@@ -676,6 +727,31 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
         out.push_str(&format!("\t.space\t{}\n", size - at));
     }
     out
+}
+
+/// The absolute local symbol that records, under `--data-base`, how many
+/// bytes the unit declares in Pascal data section `sect` (raw, not
+/// rounded): `__dpc_data_size` for the default section,
+/// `__dpc_data_size.<SECT>` for another.
+pub fn data_size_symbol(sect: &str) -> String {
+    if sect == DEFAULT_DATA_SECTION {
+        "__dpc_data_size".into()
+    } else {
+        format!("__dpc_data_size.{}", sect.to_uppercase())
+    }
+}
+
+/// A data area that another object owns ([`Options::data_bases`]): the
+/// unit's label for it is an alias of `sym` (gas relocates references to
+/// an alias of an undefined symbol against that symbol), and nothing is
+/// allocated.
+fn external_data_area(sect: &str, sym: &str, size: u32) -> String {
+    format!(
+        "\n| data section {sect}: owned by {sym} (dpc --data-base)\n\
+         \t.set\t{},{sym}\n\t.set\t{},{size}\n",
+        data_base_label(sect),
+        data_size_symbol(sect)
+    )
 }
 
 #[cfg(test)]
@@ -823,6 +899,61 @@ mod tests {
              \t.space\t2\n\t.globl\tPROC1_$X\nPROC1_$X:\n\
              \t.space\t6\n\t.globl\tPROC1_$Y\nPROC1_$Y:\n\
              \t.space\t8\n"
+        );
+    }
+
+    #[test]
+    fn data_base_aliases_an_external_block() {
+        let mut m = module(&[".text"]);
+        m.name = "proc1_".into();
+        m.data = vec![dpc_ir::DataArea {
+            section: "wired_data".into(),
+            size: 14,
+            globals: vec![("PROC1_$X".into(), 2)],
+        }];
+        let with = |bases: &[(&str, &str)]| {
+            let opts = Options {
+                data_bases: bases
+                    .iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect(),
+                ..Default::default()
+            };
+            emit(&m, "m.pas", &opts)
+        };
+        let s = with(&[("WIRED_DATA", "PROC1_$DATA")]).unwrap();
+        let plain = with(&[]).unwrap();
+        // the code is the same; no block, no define'd global
+        assert_eq!(
+            s.split("filler\n").next(),
+            plain.split("filler\n").next()
+        );
+        let tail = s.split("filler\n").nth(1).unwrap();
+        assert_eq!(
+            tail,
+            "\n| data section WIRED_DATA: owned by PROC1_$DATA (dpc --data-base)\n\
+             \t.set\t.Ldata.WIRED_DATA,PROC1_$DATA\n\
+             \t.set\t__dpc_data_size.WIRED_DATA,14\n"
+        );
+        assert!(!s.contains("moddata") && !s.contains("PROC1_$X"), "{s}");
+        // a section of nothing in the unit, or one given twice
+        assert!(with(&[("other_data", "X")]).is_err());
+        assert!(with(&[("wired_data", "X"), ("WIRED_DATA", "Y")]).is_err());
+        assert_eq!(data_size_symbol(".data"), "__dpc_data_size");
+    }
+
+    #[test]
+    fn data_base_for_a_routine_section_without_variables() {
+        let mut m = module(&[".text"]);
+        m.functions[0].data_section = "os_init_data".into();
+        let opts = Options {
+            data_bases: vec![("os_init_data".into(), "B".into())],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &opts).unwrap();
+        assert!(
+            s.ends_with("\t.set\t.Ldata.OS_INIT_DATA,B\n\t.set\t__dpc_data_size.OS_INIT_DATA,0\n"),
+            "{s}"
         );
     }
 

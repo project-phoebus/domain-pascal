@@ -6,6 +6,7 @@ A dpc object takes the place of the C objects of the same routines in a
 `make check` must pass.  `../source` is only read.
 
     make linktest                                   # build dpc, run the manifest
+                                                    # against ../source HEAD (LINKTEST_REV)
     python3 tools/linktest.py run [MANIFEST] [--only FILE] [--keep-going] [-j N]
                                   [--rev REV]
 
@@ -85,7 +86,9 @@ Read from `../source/domain_os/Makefile`, `sau2.ld` and `tools/` (2026-10-13).
    define nothing else global.  Hand-written assembly is never dropped.
    Those objects are dropped.  The C sources stay, so host tests are
    unaffected.  A global that no object defines is linked in addition
-   (IO_$ALLOC: `../source` has no such routine), with a note.
+   (IO_$ALLOC: `../source` has no such routine), with a note.  A unit
+   with module data is mapped onto `../source`'s C data first (below,
+   "Module data") and compiled again with `dpc --data-base`.
 5. Undefined symbols of the dpc objects that nothing in the link defines
    must be map names at or above IODEFS_GUARD 0xF4FC00, i.e. absolute
    addresses in the I/O region.  They are defined in `linktest/absdefs.o`
@@ -96,7 +99,9 @@ Read from `../source/domain_os/Makefile`, `sau2.ld` and `tools/` (2026-10-13).
    `domain_os.elf`, `layout.ld` and `layout-check.elf`, so the kernel is
    always relinked from the current object list.
 7. Each global of each dpc unit must appear once in the linked
-   `build/sau2/domain_os.elf`, in code.
+   `build/sau2/domain_os.elf`, in code.  A `define`d variable of a block
+   now owned by C must, if `../source` also names it, be at the owner's
+   address plus its offset in the unit.
 8. `../source`'s `tools/asm_compare.py` is run over the dpc objects.
    - Reference bytes are appended from the image file (window `VA =
      offset + 0xDFFC00`) to a copy of its reference file,
@@ -107,7 +112,12 @@ Read from `../source/domain_os/Makefile`, `sau2.ld` and `tools/` (2026-10-13).
        (ZERO_PAGE = 0xE00EB0), so that the worker's run is compared;
      - its `KNOWN_DEVIATIONS` table is emptied.  Those entries are about
        hand-written files, and the script reports them as stale when their
-       objects are not given.
+       objects are not given;
+     - each C data owner (below) is added to `LOCAL_SYMBOLS` at its image
+       address.  asm_compare resolves a block or a map name itself, but
+       not a `DATA_ANCHORS` name (TERM_$DATA).
+   - Any relocation it leaves unverified fails the run, so the `lea
+     OWNER.l,A5` of every data unit is proved against the image's operand.
    - Result: every byte of every dpc object equals the image, and every
      relocation resolves to the image's operand.  This is the same claim
      that `make conform` makes, re-proved by `../source`'s independent
@@ -119,19 +129,77 @@ dpc's section names needed no change.  `.text` and `.text.<UNIT>.<SECTION>`
 are both code sections to `gen_layout_ld.py`, which keys them by their map
 symbols, not by name.  `objcopy --rename-section` is not used.
 
+### Module data (bead domain-pascal-3bp)
+
+A unit's static data is the NOBITS block `.bss.moddata.<UNIT>[.<SECTION>]`
+labelled `.Ldata[.<SECTION>]` (codegen-patterns 4 and 11).  In `../source`
+the same image bytes already belong to a C object that the module's other
+C routines use: a `MODULE_DATA_DEFINE` block (PROC1_$DATA), a C object
+with a map name (CAL_$TIMEZONE) or one `gen_layout_ld.py` keys by
+`DATA_ANCHORS` (TERM_$DATA).  A second block would be an orphan section
+(SCSI, when tried: `sau2.ld`'s AST_PMAPS_END assertion failed), and two
+copies of the data would not be one module anyway.  So **C owns the bytes,
+and the dpc unit refers to them**:
+
+- `dpc --data-base=SECTION=SYMBOL` (repeatable; link-test scaffolding,
+  `crates/dpc/src/main.rs`): for Pascal data section SECTION (`.data` for
+  the default), dpc allocates no block, does not define its `define`d
+  variables, and writes `.set .Ldata[.SECTION],SYMBOL`.  gas makes every
+  reference to the label a relocation against SYMBOL, so the code is byte
+  for byte the code `make conform` checks: only the `lea` relocation's
+  symbol changes.  dpc also writes the absolute local symbol
+  `__dpc_data_size[.SECTION]`, the bytes the unit declares there.
+- The harness takes the block's image address from the manifest's
+  `--section-addr .bss.moddata...=0xADDR` (the address the conformance
+  gate proves; a unit test checks the two manifests agree) and finds the
+  one C data object of the link that starts there, from `../source`'s own
+  placement facts only: `MODULE_DATA_DEFINE` address literals
+  (`gen_layout_ld.scan_sources`), map names, `DATA_ANCHORS`.  None, or
+  more than one, refuses the unit.
+- **Offsets.**  A5-relative accesses carry no relocation, so the unit's
+  offsets must mean the same bytes in the C object.  The conformance gate
+  ties the unit's offsets to the image.  The C object's offset for the
+  same datum is tied to the image only where `../source` says so: a
+  `_Static_assert` on the field, or a raw offset written from the image
+  (TONE_$CHANNEL is `&TERM_$DATA + 0x1268`).  Neither is checked by the
+  harness, so it requires and reports what it can:
+  - `__dpc_data_size` ≤ the C object's size (`nm -S`), so that no offset
+    of the unit leaves the object.  Past its end lie other C objects that
+    the link lays out on its own (CAL_$TIMEZONE is 0xC bytes;
+    cal_shutdown.pas reaches offset 0x10).  This bounds the offsets; it
+    does not show that they hit the same fields.
+  - For a unit with one data block it prints the A5 offsets the unit uses
+    (from its assembly) and which of them the C objects it replaces also
+    reach as `OWNER+offset` relocations; the rest rest on `../source`'s
+    struct layout alone (FIM_$GET_FIM_ADDR's 0x3C: the C indexes
+    `FIM_$DATA` with `(as_id + 15) * 4`; `fim/fim.h` asserts the offset).
+    Informational: an offset the C reaches some other way is not a
+    mismatch.
+- **Proof.**  `asm_compare.py` resolves the `lea` relocation to the
+  owner's image address and checks it against the image's operand
+  (`lea 0x00E254E8,A5` at PROC1_$GET_LOADAV 0xE14BC0).
+
+Rejected: renaming dpc's block into the C block's section with `objcopy`
+and dropping the C definition.  The other C routines of the module use
+the C object; its initial contents (`MODULE_DATA_DEFINE_INIT`) would be
+lost; the unit's block is only a prefix of the module's.
+
 ## Results (2026-10-13)
 
-`make linktest`: **OK**.
+`linktest.py run --rev HEAD tests/link/manifest.txt` (`../source`
+b219e6ff): **OK**.  `make linktest` now passes `--rev $(LINKTEST_REV)`
+(default HEAD); a run on `../source`'s working tree, with other agents'
+uncommitted edits, passed too.
 
-- 14 units are linked in place of 24 C objects (IO_$ALLOC is an addition: it replaces nothing).
+- 22 units are linked in place of 34 C objects (IO_$ALLOC is an addition: it replaces nothing).
 - `../source`'s `make check` passes:
   - 1586 map symbols are placed in map order, one more than the baseline
     (IO_$ALLOC);
   - 0 order inversions and 0 sections in the catch-all;
   - `check-asm`, the guards, `check-iodefs` and `check-libgcc` pass;
   - `check-rfc` passes: full link, fixup table, dry-run loader.
-- `asm_compare.py` over the 14 dpc objects: 14 sections identical modulo
-  relocations, 24 relocations resolved to the image operand, 0 unverified.
+- `asm_compare.py` over the 22 dpc objects: 22 sections identical modulo
+  relocations, 39 relocations resolved to the image operand, 0 unverified.
 
 | Unit | Replaces (scratch build) |
 |---|---|
@@ -149,6 +217,17 @@ symbols, not by name.  `objcopy --rename-section` is not used.
 | disk_unassign_all.pas (`bsr.w DISK_$UNASSIGN`, module-routines=) | disk/unassign_all.o |
 | pchist_interrupt.pas (`bsr.w PCHIST_$COUNT`, module-routines=) | pchist/interrupt.o |
 | io_alloc.pas (IO_$ALLOC) | nothing: added |
+| proc1_get_loadav.pas; data: PROC1_$DATA (0xC of 0xCC4 bytes) | proc1/get_loadav.o |
+| proc2_get_boot_flags.pas; data: PROC2_$UNWIRED_DATA (0x1E6 of 0x1E8) | proc2/get_boot_flags.o |
+| proc2_quit.pas (`bsr.w PROC2_$SIGNAL`); data: PROC2_$UNWIRED_DATA | proc2/quit.o |
+| fim_get_fim_addr.pas; data: FIM_$DATA (0x124 of 0x134) | fim/get_fim_addr.o |
+| smd_busy_wait.pas (SMD_$PUTC, _$BUSY_WAIT, _$LITES); data: SMD_$BLINK_TIMER_DATA | smd/{putc,busy_wait,lites}.o |
+| mmap_alloc_contig.pas; data: MMAP_$DATA | mmap/alloc_contig.o |
+| pkt_next_id.pas; data: PKT_$DATA (0x5E of 0xA8) | pkt/next_id.o |
+| tone_enable.pas; data: TERM_$DATA (DATA_ANCHORS, 0x126C of 0x1398) | tone/enable.o |
+
+No unit of these `define`s a variable, so the step 7 check of `define`d
+names has had nothing to check yet (it has unit tests).
 
 ### A difference from ../source that the link showed
 
@@ -176,18 +255,33 @@ It is `../source`'s to change, not ours.
 
 `--keep-going` leaves such units out and links the rest.  The run still
 exits 1.  The harness refuses each case with a reason.  Manifest options
-(a data `--section-addr`, `module-routines=NAME=0xADDR`, `enclosing=`) are
-refused when the manifest is read.  The other cases are refused after
-compiling or after `nm`:
+(`module-routines=NAME=0xADDR`, `enclosing=`) are refused when the
+manifest is read.  The other cases are refused after compiling or after
+`nm`:
 
-- **Module data** (bead domain-pascal-3bp).  These dpc objects carry a
-  `.bss.moddata.<UNIT>[.<SECTION>]` block: scsi.pas (SCSI_$PRESENT),
-  cal_shutdown.pas, proc2_get_boot_flags.pas, proc1_get_loadav.pas,
-  pkt_next_id.pas, mst_*.pas, ...  `../source` has no `MODULE_DATA_DEFINE`
-  site for such a section.  When tried, the section became an orphan after
-  `.bss`, and `sau2.ld`'s assertion `AST_PMAPS_END ... must be
-  AREA_$RPMAP_CACHE` failed the link.  The block has to map onto (or
-  replace) the C block keyed at the same image address.
+- **Module data with no single C owner** (tried 2026-10-13, `../source`
+  b219e6ff).  Each needs a change in `../source` (a `MODULE_DATA_DEFINE`
+  block or a `DATA_ANCHORS` entry at the block's address), which is not
+  ours to make:
+  - no C object there that the link can place at an image address:
+    scsi.pas (0xE88804: `../source` has no SCSI_ data), bat_get_bat_step.pas
+    (0xE79478: the C array `bat_$volumes`, with a phantom element 0, keyed
+    by no image address), audit_is_process_audited.pas
+    (0xE854D8: AUDIT_$DATA, not a map name, not anchored),
+    rem_name_register_server.pas (0xE7DBB8), mst_set_touch_ahead_cnt.pas
+    (0xE7CF0C: MST_$PAGE_AVAIL_BITMAP and the other fields are separate C
+    objects, placed by their users), atbus_ring_interrupt.pas (0xE22904);
+  - the C object there is smaller than the unit's data:
+    cal_shutdown.pas declares 0x12 bytes from 0xE7B030, CAL_$TIMEZONE is
+    0xC.  `../source` is not short of the image here: the image block
+    (OS_CAL_WIRED, size 0x14) holds three map names, CAL_$TIMEZONE
+    (0xC), CAL_$LAST_VALID_TIME and CAL_$BOOT_VOLX, and `cal/cal_data.c`
+    defines exactly those three objects; the unit reads CAL_$BOOT_VOLX
+    at (0x10,A5), which is a separate C object that the link places on
+    its own.
+  xns_idp_get_stats.pas and xns_idp_get_port_info.pas do map
+  (XNS_IDP_$DATA) but are refused for their code: `xns/idp_misc.o` holds
+  four routines.
 - **Only module-local routines** (sio_init_dtte.pas, rip_packet_length.pas,
   disk_set_chain_status.pas, vfmt_get_next_arg.pas).  dpc gives them local
   symbols, while the C callers name C functions (e.g. a C name for

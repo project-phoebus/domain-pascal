@@ -3733,8 +3733,12 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     names by object), and the `.` between the names keeps them apart
     from every `.text.<symbol>` there (`-ffunction-sections`, the
     hand-written `.section ".text.<symbol>"`).  The data blocks are not
-    linkable into `../source` yet (above: its blocks are keyed by C
-    `MODULE_DATA_DEFINE` sites).
+    linked into `../source` as such (its blocks are keyed by C
+    `MODULE_DATA_DEFINE` sites): for a link test the C object at the
+    block's image address owns the bytes, and the unit, compiled with
+    `dpc --data-base=SECTION=SYMBOL` (test scaffolding), allocates
+    nothing and loads A5 from that symbol, with unchanged bytes (bead
+    domain-pascal-3bp, `tests/link/README.md`, "Module data").
   - *Calls.*  A call of a routine of the unit in another code section is
     `jsr (SYM).l` (`dpc_ir::Callee::Section`), a local symbol for an
     `internal` routine (gas relocates it against the section); within a

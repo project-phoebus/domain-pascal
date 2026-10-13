@@ -6,8 +6,9 @@
   the time and write it back).  Externals (SAU2 map): DBUF_$GET_BLOCK
   0xE3A5B0, DBUF_$SET_BUFF 0xE3A8B6, LV_LABEL_$UID 0xE17394, TIME_$CLOCKH
   0xE2B0D4.  Unit data: the OS_CAL_WIRED data segment 0xE7B030 (A5),
-  CAL_$BOOT_VOLX at (0x10,A5) (map 0xE7B040); CAL_$TIMEZONE, at offset 0,
-  is declared as a stand-in of its 16 bytes.
+  CAL_$BOOT_VOLX at (0x10,A5) (map 0xE7B040); the 16 bytes before it,
+  CAL_$TIMEZONE (12 bytes, map 0xE7B030) and CAL_$LAST_VALID_TIME (map
+  0xE7B03C), are declared as one stand-in array `cal_$timezone'.
 
   Patterns exercised (docs/codegen-patterns.md):
   - 3, 12.5  a pointer local assigned from a pointer function and only

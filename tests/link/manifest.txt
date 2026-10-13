@@ -32,3 +32,19 @@ tests/conformance/io_alloc.pas               IO_$ALLOC
 # a PC16 relocation the link resolves to ../source's C routine.
 tests/conformance/disk_unassign_all.pas      DISK_$UNASSIGN_ALL  module-routines=DISK_$UNASSIGN
 tests/conformance/pchist_interrupt.pas       PCHIST_$INTERRUPT  module-routines=PCHIST_$COUNT
+
+# Module data (bead domain-pascal-3bp): the `--section-addr' of a data
+# block gives its image address; the harness finds the C object of
+# ../source that starts there (a MODULE_DATA_DEFINE block, a C object
+# with a map name, or a DATA_ANCHORS entry of gen_layout_ld.py) and
+# compiles the unit with `dpc --data-base=SECTION=SYMBOL': no block of
+# its own, `lea SYMBOL.l,A5'.
+tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .bss.moddata.PROC1_.WIRED_DATA=0xE254E8
+tests/conformance/proc2_get_boot_flags.pas   PROC2_$GET_BOOT_FLAGS  --section-addr .bss.moddata.PROC2=0xE7BE84
+tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .bss.moddata.FIM_=0xE2126C
+tests/conformance/smd_busy_wait.pas          SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  --section-addr .bss.moddata.SMD.WIRED_DATA=0xE2E060  a5-always-from=SMD_$BUSY_WAIT
+tests/conformance/mmap_alloc_contig.pas      MMAP_$ALLOC_CONTIG  --section-addr .bss.moddata.MMAP_=0xE23284  a5-always=MMAP_$ALLOC_CONTIG
+tests/conformance/pkt_next_id.pas            PKT_$NEXT_ID  --section-addr .bss.moddata.PKT=0xE24C9C
+# TERM_$DATA: a DATA_ANCHORS entry (term/term_data.c), not a map name.
+tests/conformance/tone_enable.pas            TONE_$ENABLE  --section-addr .bss.moddata.OS_TERM_INIT=0xE2C9F0
+tests/conformance/proc2_quit.pas             PROC2_$QUIT:30  --section-addr .bss.moddata.PROC2=0xE7BE84  a5-always=PROC2_$QUIT  module-routines=PROC2_$SIGNAL
