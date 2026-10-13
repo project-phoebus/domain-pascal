@@ -43,11 +43,12 @@ use dpc_syntax::Span;
 pub struct Module {
     /// Unit name, folded.
     pub name: String,
-    /// Routines with bodies, in emission order: for now the order of each
-    /// routine's *first declaration* (`dpc_sema::Program::top_routines`).
-    /// TODO(codegen): a routine declared `forward`/`extern` earlier (e.g.
-    /// in an included `.ins.pas`) is emitted at its declaration, not at
-    /// its body; the original presumably emitted in body order.
+    /// Routines with bodies, in emission order: the source order of their
+    /// *bodies* (`dpc_sema::Program::top_routines`), so a routine declared
+    /// `forward`/`extern` earlier (e.g. in an included `.ins.pas`) is
+    /// emitted where its body is (codegen-patterns 6, "Order": forward
+    /// `bsr`s to module-local routines, e.g. AUDIT_$SHUTDOWN 0xE70D2E).
+    /// Routines with no body in the unit are not emitted.
     pub functions: Vec<Function>,
     /// The unit's static data area, if it allocates any static data
     /// (unit-level `var`, `static`, `define`; ref 7.2).

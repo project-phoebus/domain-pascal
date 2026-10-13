@@ -36,6 +36,10 @@ usage:
                                        # (for dpc's --a5-always-from)
     tools/a5survey.py list CLASS       # routines of a class: set-unused,
                                        # none, unnamed-set, abs-only
+    tools/a5survey.py order [-v]       # forward vs backward bsr to routines
+                                       # of the same segment, by caller and
+                                       # callee kind (codegen-patterns 6,
+                                       # "Order"); -v lists forward pairs
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.  The scan is
 cached in tmp/a5survey.cache (delete it after changing the scan).
@@ -368,6 +372,43 @@ def summary(m, rs, by_start):
     print('bsr calls to unnamed routines across the first s: %d' % cross)
 
 
+def bsr_kind(caller, target, callee):
+    """Classify one bsr from Routine `caller' to `target' (`callee' the
+    Routine starting there, or None): None when it is not a call to
+    another routine of the same segment, else (direction, caller kind,
+    callee kind) with direction 'fwd' (the callee's body is after the
+    caller's) or 'back', kinds 'named' (map symbol) or 'local'."""
+    if callee is None or callee.segaddr != caller.segaddr:
+        return None
+    if caller.r0 <= target < caller.r1:
+        return None
+    return ('fwd' if target > caller.r0 else 'back',
+            'named' if caller.name else 'local',
+            'named' if callee.name else 'local')
+
+
+def order(rs, by_start, verbose):
+    sites, pairs = Counter(), defaultdict(set)
+    for r in rs:
+        for t in r.bsrs:
+            k = bsr_kind(r, t, by_start.get(t))
+            if k is not None:
+                sites[k] += 1
+                pairs[k].add((r.r0, t))
+    print('direction caller callee     sites pairs segments')
+    for k in sorted(sites):
+        segs = {by_start[a].seg for a, _ in pairs[k]}
+        print('%-9s %-6s %-10s %5d %5d %4d' % (k + (sites[k], len(pairs[k]), len(segs))))
+    if verbose:
+        for k in sorted(pairs):
+            if k[0] != 'fwd':
+                continue
+            for a, t in sorted(pairs[k]):
+                print('%s %s->%s  %06X %-30s -> %06X %s' % (
+                    k[0], k[1], k[2], a, by_start[a].name or 'module-local',
+                    t, by_start[t].name or 'module-local'))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -413,6 +454,8 @@ def main(argv):
                 print('%06X %-14s %-32s %s save=%s ext=%d bsr-callers=%d' % (
                     r.r0, r.seg, r.name or 'module-local', l, r.save,
                     len(r.ext_refs), len(r.callers_bsr)))
+    elif cmd == 'order':
+        order(rs, by_start, '-v' in argv[1:])
     else:
         print(__doc__)
         return 2

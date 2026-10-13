@@ -278,6 +278,46 @@ fn forward_and_body() {
     );
 }
 
+fn top_names(p: &Program) -> Vec<&str> {
+    p.top_routines
+        .iter()
+        .map(|&id| p.routine(id).name.as_str())
+        .collect()
+}
+
+/// Body order (codegen-patterns 6, "Order"): a routine declared `forward`
+/// is placed at its body, not at its heading.
+#[test]
+fn forward_routine_is_placed_at_its_body() {
+    let p = module(
+        "procedure a; forward; internal;
+         procedure b; begin a end;
+         procedure c; begin end;
+         procedure a; begin end;
+         procedure d; begin a end;",
+    );
+    assert_eq!(top_names(&p), ["b", "c", "a", "d"]);
+}
+
+/// Ref 7.3.4 p. 7-11 (Method 2): `extern` heading (normally from an
+/// %include'd file), then the body under a bare re-heading.  The routine
+/// sits at its body; a routine that stays `extern` sits at its heading.
+#[test]
+fn extern_then_defined_is_placed_at_its_body() {
+    let p = module(
+        "define exponent;
+         function exponent(number, power: integer): integer32; extern;
+         procedure other(x: integer); extern;
+         procedure first; begin other(1) end;
+         function exponent; begin exponent := number + power end;
+         procedure last; begin end;",
+    );
+    assert_eq!(top_names(&p), ["other", "first", "exponent", "last"]);
+    let e = routine(&p, "exponent");
+    assert!(!e.external && e.body.is_some() && e.global);
+    assert!(routine(&p, "other").external);
+}
+
 // ---------------------------------------------------------------------
 // Expressions and statements
 // ---------------------------------------------------------------------

@@ -42,8 +42,11 @@ pub struct Program {
     pub types: TypeTable,
     pub vars: Vec<Var>,
     pub routines: Vec<Routine>,
-    /// Top-level routines in source order (nested ones hang off
-    /// [`Routine::nested`]).
+    /// Top-level routines in source order of their bodies, which is the
+    /// emission order: a routine declared `forward` or `extern` and
+    /// defined later in the unit is placed at its body (codegen-patterns
+    /// 6, "Order").  A routine with no body here is at its declaration.
+    /// Nested ones hang off [`Routine::nested`].
     pub top_routines: Vec<RoutineId>,
     /// Unit-level variables in source order.
     pub unit_vars: Vec<VarId>,

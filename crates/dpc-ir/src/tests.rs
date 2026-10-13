@@ -702,6 +702,42 @@ fn data_base_always_from() {
     assert_eq!(loads(&m), [true, true, false, false, true]);
 }
 
+/// Emission order is body order (codegen-patterns 6, "Order": forward
+/// `bsr`s such as AUDIT_$SHUTDOWN 0xE70D2E -> 0xE70D38): a routine
+/// declared `forward` or `extern` (ref 7.3.4 p. 7-11) and defined later is
+/// emitted at its body; one left `extern` is not emitted.  "From ROUTINE
+/// on" in `--a5-always-from` follows the same order.
+#[test]
+fn functions_in_body_order() {
+    let src = "module m;
+var
+  x: integer;
+define m_$late;
+procedure m_$late(out y: integer); extern;
+procedure m_$ext; extern;
+procedure m_$fwd(out y: integer); forward;
+procedure m_$first(out y: integer);
+begin
+  m_$fwd(y);
+  m_$late(y);
+  m_$ext;
+end;
+procedure m_$late;
+begin
+  y := 2;
+end;
+procedure m_$fwd;
+begin
+  y := 1;
+end;
+";
+    let m = lower_src(src).unwrap();
+    let names: Vec<_> = m.functions.iter().map(|f| f.symbol.as_str()).collect();
+    assert_eq!(names, ["M_$FIRST", "M_$LATE", "M_$FWD"]);
+    let m = lower_src_with(src, &db(Some("m_$late"), &[], &[])).unwrap();
+    assert_eq!(loads(&m), [false, true, true]);
+}
+
 /// `--a5-always`: per routine, `internal` ones too (0xE14B12, RING
 /// 0xE76048); a call to a routine that loads A5 itself is not a use.
 #[test]

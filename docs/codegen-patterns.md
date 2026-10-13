@@ -296,7 +296,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   1.5).  **Implemented:** the emitter lays the section out with the
   encoded length of every instruction (`Insn::len_at`, the 0x2048 filler
   included) and picks the size (`crates/dpc-m68k/src/emit.rs`,
-  `size_branches`); gas never chooses.
+  `size_branches`); gas never chooses.  The same holds for forward
+  `bsr`s to a routine whose body comes later (section 6, "Order": 54
+  `bsr.s` all in reach, 158 `bsr.w` none in reach).
 - **Other modules:** `jsr abs.l` (0xE00EF6 `jsr 0x00E20B12`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
 - All kernel addresses are absolute.  This kernel image has no
@@ -1037,12 +1039,67 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
 - **Order:** nested routines are emitted before their enclosing routine
   (PMAP_$FLUSH).  The same holds for module-local workers placed before
   their first user: 0xE17778 comes before LOG_$READ, and 0xE00EB0 before
-  AST_$PAGE_ZERO.  **Uncertain** whether this is source order or a
-  compiler rule.  `dpc` emits top-level routines in source order, so the
-  conformance source declares the worker first
-  (`tests/conformance/ast_page_zero.pas`).  Calls *after* the callee are
-  also seen (AST_$TOUCH_AREA 0xE03548 calls 0xE00EB0 with `bsr.w` at
-  0xE03636), so a worker does not have to precede every caller.
+  AST_$PAGE_ZERO.  Given body order (next item), this is source order:
+  the conformance source defines the worker first
+  (`tests/conformance/ast_page_zero.pas`).  Calls *after* the callee are also seen
+  (AST_$TOUCH_AREA 0xE03548 calls 0xE00EB0 with `bsr.w` at 0xE03636), so
+  a worker does not have to precede every caller.
+- **Top-level routines are emitted in body order (Verified).**  Pascal
+  needs a routine declared before it is called, so a `bsr` to a *later*
+  address in the same module means the callee's body follows its
+  caller's while its declaration (`forward`, or an `extern` heading from
+  an included `.ins.pas`, ref 5.5.2 p. 5-16, 7.3.4 p. 7-11) came earlier:
+  the routine is emitted at its body, not at its declaration.  Survey
+  (`tools/a5survey.py order`; compiled segments only, routines split as
+  in section 4), `bsr`s to another routine of the same segment:
+
+  | direction | caller | callee | sites | caller/callee pairs | segments |
+  |---|---|---|---|---|---|
+  | backward | map-named | map-named | 306 | 273 | 48 |
+  | backward | map-named | module-local | 781 | 607 | 57 |
+  | backward | module-local | map-named | 47 | 39 | 13 |
+  | backward | module-local | module-local | 466 | 330 | 26 |
+  | **forward** | map-named | map-named | 122 | 112 | 30 |
+  | **forward** | map-named | module-local | 90 | 81 | 7 |
+  | forward | module-local | map-named | 19 | 16 | 10 |
+  | forward | module-local | module-local | 40 | 38 | 8 |
+
+  The two bold rows are the evidence: a map-named caller is a top-level
+  routine (the map lists global symbols only, and a nested routine is
+  always a local symbol: ref 5.5.4 p. 5-17; "internal routine", p.
+  9-26), and its callee cannot be a routine nested in it (those come
+  before it), so the callee was declared ahead of the call and defined
+  after it.  The map-named -> module-local row is the cleanest, since an
+  unexported callee is necessarily in the same unit.  (The map-named ->
+  map-named row could also hold calls between two units bound into one
+  map segment, if the binder resolved a `bsr` to a global symbol: no
+  `bsr` crosses a map segment, section 7, but whether one crosses units
+  inside a segment is not checked.)  The map-named -> module-local row
+  does not rest on the nested-before-parent rule either: 21 of its 53
+  callees are called by two or more map-named routines, so are nested in
+  none of them (0xE70D38 by AUDIT_$SHUTDOWN and AUDIT_$CONTROL; 0xE3EB8C
+  by PROC2_$AWAKEN_GUARDIAN, PROC2_$SIGNAL, PROC2_$SIGNAL_OS and
+  PROC2_$ACKNOWLEDGE; 0xE5E8E0 by 12 FILE_ routines, forward from
+  FILE_$DELETE 0xE5DB6E `bsr.w`).  Sites: AUDIT_$SHUTDOWN 0xE70D1E
+  `bsr.s 0xE70D38` at 0xE70D2E (the module-local routine follows directly, `link.w A6,#-12` at 0xE70D38);
+  PROC2_$AWAKEN_GUARDIAN 0xE3E960 `bsr.w 0xE3EB8C` at 0xE3E9AC, while
+  0xE3F0F2 and 0xE3F428 call the same module-local 0xE3EB8C backward;
+  AREA_$TRANSFER 0xE08098 `bsr.w 0xE08816` at 0xE08164 and 0xE081D6
+  (checked with `tools/imgdis.sh`).  Rows with a module-local caller are
+  not counted as evidence: that caller may be a nested routine, which
+  can call its enclosing routine (emitted after it) without any forward
+  declaration.  Forward `bsr`s are sized like backward ones (section
+  1.6): of the 212 from map-named callers, all 54 `bsr.s` are in reach
+  and none of the 158 `bsr.w` is.  Nothing in the image could show
+  emission at declaration position: a routine with no forward declaration
+  has its declaration and body in one place, and a backward call fits
+  either order.
+  **Implemented:** `dpc-sema`'s `Program::top_routines` places a routine
+  completed after a `forward`/`extern` heading at its body, and
+  `dpc-ir`'s `Module::functions` (the emission order) follows it; a
+  routine with no body in the unit is not emitted
+  (`tests/golden/calls/body_order`).  Nested routines keep their heading
+  order in `Routine::nested` (dpc refuses nested routines for now).
 
 ---
 
@@ -1203,9 +1260,10 @@ PMAP_$FLUSH is at 0xE1376C.  Its nested routines are at 0xE1359C and
     `--loop-align=on|off` (default on) and
     `--loop-align-off-from=ROUTINE` (on before ROUTINE in emission
     order, off from it on).  dpc's emission order is code section by
-    code section, and the unit's routine order within one; a routine
-    declared `forward` is placed at its declaration, not at its body
-    (whether the original compiler did the same is unverified).  A routine that does not align gets no
+    code section, and the unit's routine order within one, which is the
+    order of the routines' bodies: a routine declared `forward` (or
+    `extern`) earlier is placed at its body (section 6, "Order",
+    Verified).  A routine that does not align gets no
     filler (`crates/dpc-m68k/src/emit.rs` drops its `Align4`s before the
     branches are sized); the module end, or a module-tail fragment's, is
     padded with `0x2048` after an aligning last routine and with zero

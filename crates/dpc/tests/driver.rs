@@ -518,3 +518,98 @@ fn empty_procedures() {
     assert_eq!(code, Some(1));
     assert!(err.contains("an empty procedure with locals"), "{err}");
 }
+
+/// A forward-declared routine with `between` statements of filler
+/// between its caller and its body (codegen-patterns 6, "Order").
+fn forward_unit(between: usize) -> String {
+    format!(
+        "module m;
+var
+  x: extern integer;
+procedure worker; forward; internal;
+procedure m_$caller;
+begin
+  worker;
+  x := 3;
+end;
+procedure m_$between;
+begin
+{}end;
+procedure worker;
+begin
+  x := 2;
+end;
+",
+        "  x := 1;\n".repeat(between)
+    )
+}
+
+/// Emission is in body order (codegen-patterns 6, "Order": AUDIT_$SHUTDOWN
+/// 0xE70D2E `bsr.s` forward to the module-local 0xE70D38), and a `bsr` to
+/// a routine whose body comes later is sized like any other (1.6:
+/// 0xE70D2E `bsr.s`, PROC2_$AWAKEN_GUARDIAN 0xE3E9AC `bsr.w`).
+#[test]
+fn forward_call_to_later_body() {
+    let asm = compile_with("forward_near", &forward_unit(1), &[]).unwrap();
+    let caller = asm.find("M_$CALLER:").unwrap();
+    let between = asm.find("M_$BETWEEN:").unwrap();
+    let worker = asm.find("\nWORKER:").unwrap();
+    assert!(caller < between && between < worker, "{asm}");
+    assert!(asm.contains("\tbsr.s\tWORKER\n"), "{asm}");
+    // the body at displacement 20 + 8 * stores: 124 in reach, 132 not
+    let asm = compile_with("forward_far", &forward_unit(14), &[]).unwrap();
+    assert!(asm.contains("\tbsr.w\tWORKER\n"), "{asm}");
+    let asm = compile_with("forward_edge", &forward_unit(13), &[]).unwrap();
+    assert!(asm.contains("\tbsr.s\tWORKER\n"), "{asm}");
+}
+
+/// The usual source shape of body order (ref 7.3.4 p. 7-11, Method 2):
+/// the `extern` heading comes from an `%include`d `.ins.pas` ahead of
+/// every body, and the routine is still emitted where its body is
+/// (codegen-patterns 6, "Order").
+#[test]
+fn included_extern_heading_placed_at_body() {
+    let dir = scratch("included_extern_heading_placed_at_body");
+    std::fs::write(
+        dir.join("m.ins.pas"),
+        "procedure m_$late(out y: integer); extern;\n",
+    )
+    .unwrap();
+    let src = dir.join("m.pas");
+    std::fs::write(
+        &src,
+        "module m;
+%include 'm.ins.pas';
+define m_$late;
+procedure m_$first(out y: integer);
+begin
+  m_$late(y);
+end;
+procedure m_$late;
+begin
+  y := 2;
+end;
+",
+    )
+    .unwrap();
+    let out = dir.join("m.s");
+    let run = dpc()
+        .arg("-I")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let asm = std::fs::read_to_string(&out).unwrap();
+    let first = asm.find("\nM_$FIRST:").unwrap();
+    let late = asm.find("\nM_$LATE:").unwrap();
+    assert!(first < late, "{asm}");
+    assert!(asm.contains("\tbsr.s\tM_$LATE\n"), "{asm}");
+    assert!(asm.contains("\t.globl\tM_$LATE\n"), "{asm}");
+}

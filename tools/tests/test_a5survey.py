@@ -81,5 +81,28 @@ class TableTest(unittest.TestCase):
                          [0x1006, 0x1004])
 
 
+def routine(r0, r1, name, segaddr=0x1000):
+    r = a5survey.Routine('S', r0, r1, name)
+    r.segaddr = segaddr
+    return r
+
+
+class BsrKindTest(unittest.TestCase):
+    def test_directions_and_kinds(self):
+        # AUDIT_$SHUTDOWN 0xE70D1E bsr.s to the module-local 0xE70D38
+        caller = routine(0xE70D1E, 0xE70D38, 'AUDIT_$SHUTDOWN')
+        callee = routine(0xE70D38, 0xE70D94, None)
+        self.assertEqual(a5survey.bsr_kind(caller, 0xE70D38, callee),
+                         ('fwd', 'named', 'local'))
+        self.assertEqual(a5survey.bsr_kind(callee, 0xE70D1E, caller),
+                         ('back', 'local', 'named'))
+
+    def test_other_segment_and_self_are_not_counted(self):
+        caller = routine(0x100, 0x200, 'A')
+        self.assertIsNone(a5survey.bsr_kind(caller, 0x300, routine(0x300, 0x400, 'B', 0x2000)))
+        self.assertIsNone(a5survey.bsr_kind(caller, 0x300, None))
+        self.assertIsNone(a5survey.bsr_kind(caller, 0x100, caller))
+
+
 if __name__ == '__main__':
     unittest.main()

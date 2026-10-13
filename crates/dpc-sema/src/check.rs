@@ -413,8 +413,18 @@ impl<'t> Checker<'t> {
                     }
                 }
                 Decl::Routine(r) => {
+                    // Body order: a routine whose body follows an earlier
+                    // `forward`/`extern` heading (ref 5.5.2 p. 5-16; 7.3.4
+                    // p. 7-11) moves to its body's position, as the
+                    // original emitted it (codegen-patterns 6, "Order":
+                    // forward `bsr`s, e.g. AUDIT_$SHUTDOWN 0xE70D2E).
                     if let Some(id) = self.routine(r, owner) {
-                        if !routines.contains(&id) {
+                        if let Some(i) = routines.iter().position(|&x| x == id) {
+                            if r.body.is_some() {
+                                routines.remove(i);
+                                routines.push(id);
+                            }
+                        } else {
                             routines.push(id);
                         }
                     }
@@ -1516,6 +1526,11 @@ impl<'t> Checker<'t> {
             });
         }
         if let Some(p) = parent {
+            // Heading order.  TODO(codegen): a nested routine declared
+            // `forward` is listed at its heading; top-level routines are
+            // placed at their bodies (`decls`, codegen-patterns 6,
+            // "Order").  Whether nested ones follow body order too is not
+            // checked against the image (dpc refuses nested routines).
             self.routines[p.0 as usize].nested.push(id);
         }
         id

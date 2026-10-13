@@ -51,6 +51,11 @@ Tests:
 - `calls/pop_branches` - codegen-patterns 1.1: the pop rule with
   branches (no pop when every path to the epilogue is free of pushes,
   calls and conditional branches; 0xE01166, 0xE00BCA).
+- `calls/body_order` - codegen-patterns 6 ("Order"), 1.6: routines
+  emitted in body order, a `forward` routine and an `extern` one defined
+  later (ref 7.3.4) placed at their bodies and reached by forward `bsr`s
+  (AUDIT_$SHUTDOWN 0xE70D2E); a routine left `extern` is called with
+  `jsr`.
 - `control/if_else` - codegen-patterns 7, 7.1, 12.2: `if`/`else`,
   nested `if`s sharing a join, `return` as a `bra` to the epilogue,
   `.s`/`.w` branches (LOG_$READ's worker 0xE1778C..0xE177CC).
