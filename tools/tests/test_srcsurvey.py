@@ -1,10 +1,12 @@
 """Tests for tools/srcsurvey.py (no image, dpc or ../source needed)."""
 
+import io
 import os
 import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
@@ -300,6 +302,299 @@ class ModuleRoutineOptsTest(unittest.TestCase):
             ['--fragment-origin=.TEXT=0xE672DE', '--fragment-origin=WIRED_PROC=0xE1AF0A',
              '--module-routine=WIRED_PROC:LOCK=0xE1AED0',
              '--module-routine=.TEXT:DFL=0xE6726E'])
+
+
+STATICS = """\
+[section(wired_proc, wired_data)]
+procedure a(x: integer);
+var
+  f: integer;                            { frame }
+  seps: static set of char := [' ', chr(9)];
+  r: static record
+    case integer of
+      1: (w: integer);
+  end;
+  g, h: static integer32 := 0;
+
+  procedure inner;
+  var
+    k: static array[1..2] of integer := [1, 2];
+    j: integer;
+  begin
+  end;
+
+var
+  e: extern integer;
+  d: define integer;
+begin
+  inner;
+end;
+
+procedure b; internal;
+var
+  { .DATA +0x00 }
+  tbl: static array[0..1] of integer := [
+    3,                                   { a; b }
+    4];
+begin
+end;
+"""
+
+
+class StaticsTest(unittest.TestCase):
+    """Stubbing keeps a routine's static data (bead domain-pascal-xdh.7)."""
+
+    def test_routine_statics(self):
+        a, b = srcsurvey.parse_routines(STATICS)
+        sts = srcsurvey.routine_statics(STATICS, a)
+        self.assertEqual([(s.routine, s.names, s.section, s.kind) for s in sts],
+                         [('a', ['seps'], 'wired_data', 'static'),
+                          ('a', ['r'], 'wired_data', 'static'),
+                          ('a', ['g', 'h'], 'wired_data', 'static'),
+                          ('a_inner', ['k'], 'wired_data', 'static'),
+                          ('a', ['d'], 'wired_data', 'define')])
+        self.assertEqual(sts[0].rest, ": static set of char := [' ', chr(9)];")
+        self.assertTrue(sts[1].rest.endswith('end;'))
+        (t,) = srcsurvey.routine_statics(STATICS, b)
+        self.assertEqual((t.names, t.section), (['tbl'], None))
+        self.assertIn('4];', t.rest)
+
+    def test_hoisted_text(self):
+        a, b = srcsurvey.parse_routines(STATICS)
+        h = srcsurvey.hoisted_text(srcsurvey.routine_statics(STATICS, a))
+        self.assertIn("\nvar (wired_data)\n  a_seps: static set of char := [' ', chr(9)];\n", h)
+        self.assertIn('a_g, a_h: static integer32 := 0;', h)
+        self.assertIn('a_inner_k: static array', h)   # the enclosing routine's too
+        self.assertIn('\n  d: define integer;', h)          # exported: its name
+        self.assertNotIn(' f:', h)
+        self.assertNotIn(' e:', h)
+        # a section no routine compiled has is left out; the module's stays
+        self.assertEqual(srcsurvey.hoisted_text(srcsurvey.routine_statics(STATICS, a),
+                                                set()), '')
+        self.assertTrue(srcsurvey.hoisted_text(srcsurvey.routine_statics(STATICS, b),
+                                               set()).startswith('\nvar\n  b_tbl: static'))
+
+    def test_stub_keeps_statics_in_place(self):
+        text, deleted = srcsurvey.stub_text(STATICS, {'a', 'b'}, keep_sections={'wired_data'})
+        self.assertEqual(deleted, ['a'])
+        self.assertEqual(srcsurvey.parse_routines(text)[0].name, 'b')
+        self.assertLess(text.index('a_seps'), text.index('a_r'))
+        self.assertLess(text.index('inner_k'), text.index('procedure b'))
+        self.assertLess(text.index('procedure b'), text.index('b_tbl'))
+        self.assertNotIn('begin', text)
+
+    def test_procedure_type_var_parameter(self):
+        # a `var' parameter of a procedure type is no `var' part
+        text = ('procedure p;\ntype\n  f_t = ^procedure(var x: integer);\n'
+                'var\n  s: static integer := 1;\nbegin\nend;\n')
+        (p,) = srcsurvey.parse_routines(text)
+        self.assertEqual([st.names for st in srcsurvey.routine_statics(text, p)], [['s']])
+
+    def test_same_nested_names(self):
+        # two routines' nested routines of one name: distinct prefixes
+        text = ''.join('procedure %s;\n  procedure inner;\n  var k: static integer;\n'
+                       '  begin\n  end;\nbegin\nend;\n' % n for n in 'pq')
+        p, q = srcsurvey.parse_routines(text)
+        h = (srcsurvey.hoisted_text(srcsurvey.routine_statics(text, p))
+             + srcsurvey.hoisted_text(srcsurvey.routine_statics(text, q)))
+        self.assertIn('p_inner_k', h)
+        self.assertIn('q_inner_k', h)
+
+    def test_hoisted_owner_and_no_hoist(self):
+        text, _d = srcsurvey.stub_text(STATICS, {'a', 'b'}, keep_sections={'wired_data'})
+        lines = text.splitlines()
+        at = {n: lines.index(next(x for x in lines if n in x)) + 1
+              for n in ('a_seps', 'a_inner_k', 'b_tbl', 'procedure b')}
+        self.assertEqual(srcsurvey.hoisted_owner(text, at['a_seps']), 'a')
+        self.assertEqual(srcsurvey.hoisted_owner(text, at['a_inner_k']), 'a')
+        self.assertEqual(srcsurvey.hoisted_owner(text, at['b_tbl']), 'b')
+        self.assertIsNone(srcsurvey.hoisted_owner(text, at['procedure b']))
+        text, _d = srcsurvey.stub_text(STATICS, {'a', 'b'}, keep_sections={'wired_data'},
+                                       no_hoist={'a'})
+        self.assertNotIn('a_seps', text)
+        self.assertIn('b_tbl', text)
+
+    def test_survey_stage_drops_statics_that_fail_hoisted(self):
+        # a static whose type is the routine's own: refused at unit level,
+        # so the routine's statics are dropped (not the module's survey)
+        fake = ('#!%s\nimport sys\nsrc = sys.argv[-1]\ntext = open("m/f.pas").read()\n'
+                'if "p_a" in text:\n'
+                '    n = text.splitlines().index("  p_a: static t := [n, 1];") + 1\n'
+                '    sys.stderr.write("m/f.pas:%%d:15: error: undefined type `t`\\n" %% n)\n'
+                '    sys.exit(1)\n' % sys.executable)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm.pas'), 'w') as fh:
+                fh.write("module m;\n%include 'm/f.pas';\n")
+            with open(os.path.join(d, 'm/f.pas'), 'w') as fh:
+                fh.write('procedure p;\ntype t = array[1..2] of integer;\nconst n = 5;\n'
+                         'var\n  a: static t := [n, 1];\nbegin\nend;\n'
+                         'procedure q;\nbegin\nend;\n')
+            dpc = os.path.join(d, 'dpc')
+            with open(dpc, 'w') as fh:
+                fh.write(fake)
+            os.chmod(dpc, 0o755)
+            mod = srcsurvey.Module(d, 'm.pas')
+            mod.stub({'p'})
+            out = io.StringIO()
+            with unittest.mock.patch('sys.stdout', out):
+                entries, stubbed, ok = srcsurvey.survey_stage(dpc, mod, True, [], io.StringIO())
+            self.assertEqual((stubbed, ok, mod.no_hoist), ([], True, {'p'}))
+            self.assertIn('static data of p does not compile', out.getvalue())
+            with open(os.path.join(d, 'm/f.pas')) as fh:
+                self.assertNotIn('p_a', fh.read())
+            self.assertNotIn('p_a', mod.unit_text('q'))
+
+    def test_module_unit_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm.pas'), 'w') as fh:
+                fh.write("module m;\n%include 'm/f.pas';\n%include 'm/g.pas';\n")
+            with open(os.path.join(d, 'm/f.pas'), 'w') as fh:
+                fh.write(STATICS)
+            with open(os.path.join(d, 'm/g.pas'), 'w') as fh:
+                fh.write('procedure c; internal;\nbegin\nend;\n')
+            mod = srcsurvey.Module(d, 'm.pas')
+            self.assertEqual(mod.dsect, {'a': 'wired_data', 'b': None, 'c': None})
+            u = mod.unit_text('c')       # c's data is the module's: wired_data goes
+            self.assertNotIn('a_seps', u)
+            self.assertIn('b_tbl', u)
+            self.assertIn('procedure c; internal;\nbegin', u)
+            u = mod.unit_text('b')
+            self.assertNotIn('a_seps', u)
+            mod.stub({'c'})               # a keeps its body: its statics are its own
+            with open(os.path.join(d, 'm/f.pas')) as fh:
+                self.assertEqual(fh.read(), STATICS)
+            mod.stub({'a'})               # no wired_data routine left
+            with open(os.path.join(d, 'm/f.pas')) as fh:
+                f = fh.read()
+            self.assertNotIn('seps', f)
+            self.assertIn('procedure b; internal;\nvar', f)
+            self.assertEqual(mod.stubbed, {'a', 'c'})
+
+
+class SettingsTest(unittest.TestCase):
+    """A5 mode and loop alignment from the image surveys (bead
+    domain-pascal-xdh.7)."""
+
+    def test_a5_always_from(self):
+        # TTY .TEXT 0xE671DC: n (i) (S) n s s S s
+        rows = [(0x10, 'A', 'n', True, False), (0x20, 'L', 'i', False, False),
+                (0x30, 'DFL', 'S', False, False), (0x40, 'B', 'n', True, False),
+                (0x50, 'C', 's', True, False), (0x60, 'D', 's', True, False),
+                (0x70, 'E', 'S', True, False), (0x80, 'F', 's', True, False)]
+        r = srcsurvey.a5_settings(rows)
+        self.assertEqual(r['always_from'], (0x50, 'C'))
+        self.assertEqual(r['interval'], (0x40, 0x50))
+        self.assertEqual(r['always'], [(0x30, 'DFL')])
+        self.assertEqual(r['absolute'], [])
+
+    def test_a5_switch_back_and_absolute(self):
+        # PKT-like: an n after the first s; an n with an absolute operand
+        rows = [(0x10, 'A', 'n', True, True), (0x20, 'B', 's', True, False),
+                (0x30, 'C', 'S', True, False), (0x40, 'D', 'n', True, False),
+                (0x50, 'E', 's', True, False), (0x60, None, 's', False, False)]
+        r = srcsurvey.a5_settings(rows)
+        self.assertIsNone(r['always_from'])
+        self.assertEqual(r['always'], [(0x20, 'B'), (0x50, 'E'), (0x60, None)])
+        self.assertEqual(r['absolute'], [(0x10, 'A')])
+
+    def test_a5_used_mode(self):
+        r = srcsurvey.a5_settings([(0x10, 'A', 'n', True, False), (0x20, 'B', 'S', True, False),
+                                   (0x30, 'C', '.', True, False)])
+        self.assertEqual((r['always_from'], r['always'], r['absolute']), (None, [], []))
+
+    def pr(self, classes):
+        """A fake loopalign.per_routine list for one segment."""
+        import collections
+        seg = type('Seg', (), {'name': 'S'})()
+        cnt = {'F': {'F': 1}, 'u': {'U': 1}, 'a': {'A': 1}, '.': {}, 'X': {'F': 1, 'U': 1}}
+        return seg, [(seg, 0x100 + 0x10 * i, 0x110 + 0x10 * i, collections.Counter(cnt[c]))
+                     for i, c in enumerate(classes)]
+
+    def test_loop_off_from(self):
+        seg, pr = self.pr('.F.a.u.u')
+        names = {0x100 + 0x10 * i: 'R%d' % i for i in range(8)}
+        r = srcsurvey.loop_settings(pr, seg, names)
+        self.assertEqual((r['off_from'], r['interval'], r['error']),
+                         ((0x150, 'R5'), (0x110, 0x150), None))
+        seg, pr = self.pr('..u.')                     # no aligning routine
+        self.assertEqual(srcsurvey.loop_settings(pr, seg, names)['off_from'], (0x120, 'R2'))
+
+    def test_loop_on_and_end_padding(self):
+        names = {0x100 + 0x10 * i: 'R%d' % i for i in range(4)}
+        seg, pr = self.pr('.F..')
+        self.assertIsNone(srcsurvey.loop_settings(pr, seg, names)['off_from'])
+        self.assertIsNone(srcsurvey.loop_settings(pr, seg, names, True)['off_from'])
+        r = srcsurvey.loop_settings(pr, seg, names, False)   # zero word at the end
+        self.assertEqual((r['off_from'], r['interval']), ((0x130, 'R3'), (0x110, 0x130)))
+        seg, pr = self.pr('..F')
+        self.assertIn('ends in a zero word', srcsurvey.loop_settings(pr, seg, names, False)['error'])
+        seg, pr = self.pr('uF')
+        self.assertIn('does not align', srcsurvey.loop_settings(pr, seg, names)['error'])
+
+    class Seg:
+        def __init__(self, a, b):
+            self.addr, self.end = a, b
+
+        def contains(self, x):
+            return self.addr <= x < self.end
+
+    def settings(self):
+        a5w = {'always_from': (0x150, 'K_FLUSH'), 'interval': (0x140, 0x150),
+               'always': [(0x130, 'SET_RAW_MODE')], 'absolute': []}
+        lw = {'off_from': (0x110, 'PUT_CHARS'), 'interval': (None, 0x110), 'error': None}
+        a5t = {'always_from': None, 'interval': (None, None), 'always': [(0x320, None)],
+               'absolute': [(0x310, 'ABS')]}
+        lt = {'off_from': None, 'interval': (None, None), 'error': 'aligns again'}
+        return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw),
+                ('.TEXT', self.Seg(0x300, 0x400), a5t, lt)]
+
+    def test_settings_opts(self):
+        opts, problems = srcsurvey.settings_opts(self.settings())
+        self.assertEqual(opts, ['--a5-always-from=K_FLUSH', '--a5-always=SET_RAW_MODE',
+                                '--a5-absolute=ABS', '--loop-align-off-from=PUT_CHARS'])
+        self.assertEqual(problems, [
+            '.TEXT: --a5-always needs module-local at 0x320, which has no name',
+            '.TEXT: loop alignment: aligns again'])
+        out = io.StringIO()
+        srcsurvey.report_settings('m.pas', self.settings(), out)
+        self.assertIn('  dpc --a5-always-from=K_FLUSH --a5-always=SET_RAW_MODE', out.getvalue())
+
+    def test_unit_build_opts(self):
+        def r(name, addr, internal=False):
+            x = srcsurvey.Routine(name)
+            x.addr = addr
+            if internal:
+                x.options.add('internal')
+            return x
+        st = self.settings()
+        f = srcsurvey.unit_build_opts
+        self.assertEqual(f(st, r('a', 0x100, True), 0x100), [])
+        self.assertEqual(f(st, r('put_chars', 0x110, True), 0x110), ['--loop-align=off'])
+        self.assertEqual(f(st, r('set_raw_mode', 0x130, True), 0x120),
+                         ['--a5-always=SET_RAW_MODE', '--loop-align=off'])
+        self.assertEqual(f(st, r('k_flush', 0x150), 0x150),
+                         ['--a5-always-from=K_FLUSH', '--loop-align=off'])
+        self.assertEqual(f(st, r('local', 0x160, True), 0x160), ['--loop-align=off'])
+        self.assertEqual(f(st, r('abs', 0x310), 0x310), ['--a5-absolute=ABS'])
+        self.assertEqual(f(st, r('elsewhere', 0x500), 0x500), [])
+        # nested routines before the switch, the routine after it
+        st[0][3]['off_from'] = (0x118, 'PARENT')
+        self.assertEqual(f(st, r('parent', 0x118), 0x110)[-1], '--loop-align-off-from=PARENT')
+        # the first routine that does not align is a nested one (no name):
+        # off for the whole unit when none of the nested routines aligns
+        st[0][3]['off_from'] = (0x114, None)
+        self.assertEqual(f(st, r('parent', 0x118), 0x110)[-1], '--loop-align=off')
+        st[0][3]['interval'] = (0x112, 0x114)            # one does: the nearest option
+        self.assertEqual(f(st, r('parent', 0x118), 0x110)[-1], '--loop-align-off-from=PARENT')
+
+    def test_report_quotes_for_a_shell(self):
+        st = self.settings()
+        st[0][2]['always_from'] = (0x150, 'TTY_$K_FLUSH_INPUT')
+        out = io.StringIO()
+        srcsurvey.report_settings('m.pas', st, out)
+        self.assertIn("  dpc '--a5-always-from=TTY_$K_FLUSH_INPUT' ", out.getvalue())
 
 
 if __name__ == '__main__':

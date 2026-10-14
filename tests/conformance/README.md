@@ -397,7 +397,13 @@ is such a unit.
 `../source`'s TTY Pascal in its module context: the stubbed internal
 routines it calls, in any of the module's sections, are named with
 `--module-routine=SECTION:NAME=0xADDR` instead of stubbing their
-callers.
+callers.  It keeps the stubbed routines' static data (hoisted to unit
+level, so the data areas keep their offsets) and gives each routine the
+A5 mode and loop alignment of its code section, derived from
+`tools/a5survey.py` and `tools/loopalign.py` (bead domain-pascal-xdh.7);
+its "build settings" section lists, per module, the dpc options
+(`--a5-always-from=`, `--a5-always=`, `--a5-absolute=`,
+`--loop-align-off-from=`) a build of the whole module needs.
 
 ## Loop alignment on and off
 

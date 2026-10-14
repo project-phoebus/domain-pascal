@@ -4,8 +4,8 @@ the diagnostics by kind, and check the routines that compile against the
 image (bead domain-pascal-xdh.3).
 
     srcsurvey.py run [--rev REV] [--source DIR] [--work DIR] [--dpc DPC]
-                     [--no-workaround NAME]... [--no-conform] [-v]
-                     [MODULE.pas ...]
+                     [--no-workaround NAME]... [--no-conform]
+                     [--no-build-settings] [-v] [MODULE.pas ...]
     srcsurvey.py summarise DIAGNOSTICS.txt [--tree DIR] [-v]
 
 `run' exports ../source's domain_os/ at REV (default HEAD) with `git
@@ -43,6 +43,19 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      section that still has a routine (`--fragment-origin=SECTION=0xADDR')
      and each stubbed routine named with its section
      (`--module-routine=SECTION:NAME=0xADDR'; SECTION from the map).
+     A stubbed routine's `static' and `define' variables (its nested
+     routines' too) stay, hoisted to unit level where its body was, in
+     declaration order (`var (DATA_SECTION)' for a routine of a named
+     data section, the static names prefixed with the routine's and its
+     enclosing routines'; `define' names kept, they are exported): dpc
+     allocates them in the same order, so every data area keeps the
+     image's layout and offsets (TTY .DATA 0xE8242C and WIRED_DATA
+     0xE2DDB4 byte-identical, tty_$i_set_dfl_funcs' `(0x24,A5)').  A
+     static of a data section no compiled routine has is left out (dpc
+     would take it for an overlay section).  So are a routine's statics
+     when dpc rejects them at unit level (a type or constant declared in
+     the routine, a refused declaration): said, and the data after them
+     in their section moves.
   4. Conformance (unless --no-conform): every top-level routine that
      compiled, with its nested routines, is compiled alone (all the other
      routines stubbed, `dpc --fragment-origin' and `--module-routine' for
@@ -51,7 +64,24 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      image by tools/conform.py.  A routine's address and size come from its header
      comment, "Original address: 0xADDR, N bytes" (../source's fragment
      format); nested routines lie between the previous top-level routine's
-     end and the routine's address.
+     end and the routine's address.  Unless --no-build-settings, each is
+     given the A5 mode and loop alignment it has in the image (step 5:
+     `--a5-always', `--a5-always-from', `--a5-absolute' for the routine,
+     `--loop-align=off' or `--loop-align-off-from').
+  5. Build settings: for each code section of the module (each map code
+     segment holding one of its routines), the A5 mode from
+     tools/a5survey.py (`switch': always mode from the first exported
+     routine that loads A5 without using it, when no exported routine
+     after it goes without; else a per-routine `--a5-always' list; the
+     module-local routines that load A5 listed too; exported routines
+     that address their block absolutely as `--a5-absolute') and the
+     loop-alignment switch from tools/loopalign.py (`switch': off from
+     the first routine with a loop head at 2 mod 4 and no filler; or from
+     the last routine when the segment ends in a zero word), as the dpc
+     options a build of the whole module needs (codegen-patterns 4, 7),
+     printed at the end ("build settings").  The `-from' routine is the
+     first one the image proves; the interval printed with it is where
+     the switch could be put as well.
 
 Diagnostics are grouped by kind, most frequent first, with the routines
 each kind occurs in.  A kind is the message with identifiers in backquotes
@@ -63,6 +93,7 @@ import argparse
 import collections
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -70,6 +101,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import a5survey  # noqa: E402
+import loopalign  # noqa: E402
 
 DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
                      r'(?P<sev>error|warning): (?P<msg>.*)$')
@@ -215,6 +248,7 @@ class Routine:
         self.head = None         # offset of `procedure'/`function'
         self.head_end = None     # offset after the heading's options
         self.end = None          # offset after the body's `end;'
+        self.body = None         # offset of the body's `begin'
         self.options = set()
         self.nested = []
         self.addr = None         # from the header comment
@@ -300,6 +334,7 @@ class _Parser:
             if self.at_routine():
                 r.nested.append(self.routine())
             elif self.peek() == 'begin':
+                r.body = self.t[self.i][2]
                 self.block()
                 if self.peek() == ';':
                     self.i += 1
@@ -370,11 +405,155 @@ def routine_spans(text):
     return out
 
 
-def stub_text(text, names, forwards=()):
+SECTION_ATTR_RE = re.compile(r'\bsection\s*\(\s*([A-Za-z_$.][\w$.]*)\s*(?:,\s*([A-Za-z_$.][\w$.]*)\s*)?\)',
+                             re.I)
+
+
+def data_section_of(text, r, inherited=None):
+    """The data section routine R of TEXT names in its attribute list
+    `[section(code, data)]' (ref 5.7.1, p. 5-24), as written, or
+    INHERITED (a nested routine's parent's; None: the module's)."""
+    m = SECTION_ATTR_RE.search(strip_comments(text[r.start:r.head]))
+    return m.group(2) if m and m.group(2) else inherited
+
+
+class Static:
+    """A `static' (or `define') variable item of a routine's `var' part:
+    `NAMES: static TYPE [:= INIT];' (ref 7.2, p. 7-3), kept as text."""
+
+    def __init__(self, routine, section, names, rest, kind):
+        self.routine = routine     # the routine (nested one included) declaring it,
+                                   # with its enclosing routines: `outer_inner'
+        self.section = section     # its data section, None: the module's
+        self.names = names         # the names as written
+        self.rest = rest           # from the `:' to the `;', as written
+        self.kind = kind           # 'static' or 'define'
+
+    def __repr__(self):
+        return 'Static(%s %s %s)' % (self.routine, self.names, self.section)
+
+
+def routine_statics(text, r, section=None, outer=None):
+    """The `static' and `define' variables of routine R of TEXT and of
+    its nested routines, in declaration order (the order dpc allocates
+    them in their data section, as the image's blocks are laid out:
+    tty/tty.pas, "Data").  SECTION: the data section R inherits; OUTER:
+    the name path of R's enclosing routines (`outer_inner')."""
+    sect = data_section_of(text, r, section)
+    path = '%s_%s' % (outer, r.name) if outer else r.name
+    out = []
+    if r.body is None:
+        return out
+    toks = [t for t in tokenize(text) if r.head_end <= t[2] < r.body]
+    i = 0
+    nested = list(r.nested)
+    while i < len(toks):
+        s = toks[i][2]
+        n = next((x for x in nested if x.start <= s < x.end), None)
+        if n is not None:
+            out += routine_statics(text, n, sect, path)
+            nested.remove(n)
+            while i < len(toks) and toks[i][2] < n.end:
+                i += 1
+            continue
+        if toks[i][1] != 'var':
+            i += 1
+            continue
+        i += 1
+        if i < len(toks) and toks[i][1] == '(':        # var (overlay): not hoisted
+            while i < len(toks) and toks[i][1] != ')':
+                i += 1
+            i += 1
+            continue
+        # items: NAME {, NAME} : [alloc] TYPE [:= INIT] ;
+        while (i + 1 < len(toks) and toks[i][0] == 'word'
+               and toks[i][1] not in DECL_WORDS | {'begin', 'procedure', 'function'}
+               and toks[i + 1][1] in (',', ':')):
+            names = []
+            while i < len(toks) and toks[i][1] != ':':
+                if toks[i][0] == 'word':
+                    names.append(text[toks[i][2]:toks[i][3]])
+                i += 1
+            colon = toks[i][2]
+            kind = toks[i + 1][1] if i + 1 < len(toks) else ''
+            depth = 0
+            while i < len(toks):
+                v = toks[i][1]
+                if v in ('(', '[', 'record'):
+                    depth += 1
+                elif v in (')', ']', 'end'):
+                    depth -= 1
+                    if depth < 0:
+                        # a `var' parameter of a procedure type in a
+                        # `type' part (ref 3.13.3), not a `var' part
+                        break
+                elif v == ';' and depth == 0:
+                    break
+                i += 1
+            if i >= len(toks) or depth < 0:
+                break
+            if kind in ('static', 'define'):
+                out.append(Static(path, sect, names, text[colon:toks[i][3]], kind))
+            i += 1
+    return out
+
+
+HOISTED_BEGIN = '{ srcsurvey: the static data of %s }'
+HOISTED_BEGIN_RE = re.compile(r'^\{ srcsurvey: the static data of (\S+) \}')
+HOISTED_END = '{ srcsurvey: end of the static data }'
+
+
+def hoisted_text(statics, keep_sections=None, owner=None):
+    """Unit-level `var' parts for STATICS of a stubbed routine, so that
+    the data sections keep their layout (each variable at its offset):
+    `var (SECTION)' for a routine's named data section (dpc puts a
+    unit-level `var (name)' variable of a section a routine of the unit
+    names in that section, codegen-patterns 11), a plain `var' for the
+    module's.  A static of a named section that is not in KEEP_SECTIONS
+    (lower case; None: all) is left out: no routine compiled has that
+    data section, and dpc would take the name for an overlay section
+    (ref 3.14, refused).  OWNER: the stubbed top-level routine, named
+    in the comments that bracket the parts (hoisted_owner; None: no
+    comments).  The names of `static' variables (local
+    symbols) are prefixed with their routine's (and its enclosing
+    routines'), so that they cannot clash with the unit's other names;
+    `define' ones (exported) keep theirs."""
+    out = []
+    for st in statics:
+        if st.section is not None and keep_sections is not None \
+                and st.section.lower() not in keep_sections:
+            continue
+        names = st.names if st.kind == 'define' else [
+            '%s_%s' % (st.routine, n) for n in st.names]
+        out.append('\nvar%s\n  %s%s\n' % (' (%s)' % st.section if st.section else '',
+                                           ', '.join(names), st.rest))
+    if not out or owner is None:
+        return ''.join(out)
+    return '\n' + HOISTED_BEGIN % owner + ''.join(out) + HOISTED_END + '\n'
+
+
+def hoisted_owner(text, line):
+    """The routine whose statics hoisted_text put on 1-based LINE of
+    TEXT (between its HOISTED_BEGIN and HOISTED_END), or None."""
+    lines = text.splitlines()
+    for k in range(min(line, len(lines)) - 1, -1, -1):
+        if lines[k].startswith(HOISTED_END):
+            return None
+        m = HOISTED_BEGIN_RE.match(lines[k])
+        if m:
+            return m.group(1)
+    return None
+
+
+def stub_text(text, names, forwards=(), keep_sections=None, no_hoist=()):
     """TEXT with the top-level routines NAMES stubbed: a global one
     deleted, an internal one reduced to `<heading> extern;' (without its
     attribute list), or deleted too when it is in FORWARDS (its `forward'
     heading elsewhere becomes the `extern' one, see extern_forwards).
+    A stubbed routine's static variables stay, hoisted to unit level in
+    its place (hoisted_text; KEEP_SECTIONS: the data sections to keep),
+    except those of the routines in NO_HOIST (dropped: their declarations
+    do not compile at unit level, see survey_stage).
     -> (new text, the global names deleted)."""
     out, pos, deleted = [], 0, []
     for r in parse_routines(text):
@@ -385,6 +564,8 @@ def stub_text(text, names, forwards=()):
             out.append(text[r.head:r.head_end] + ' extern;')
         elif not r.internal:
             deleted.append(r.name)
+        if r.name not in no_hoist:
+            out.append(hoisted_text(routine_statics(text, r), keep_sections, r.name))
         pos = r.end
     out.append(text[pos:])
     return ''.join(out), deleted
@@ -457,6 +638,15 @@ def kind_of(msg):
 
 def is_refusal(msg):
     return 'not supported yet' in msg
+
+
+def hoisted_owner_at(tree, path, line):
+    """hoisted_owner for LINE of file PATH of TREE."""
+    try:
+        with open(os.path.join(tree, path), errors='replace') as fh:
+            return hoisted_owner(fh.read(), line)
+    except OSError:
+        return None
 
 
 class Locator:
@@ -533,56 +723,67 @@ def run_dpc(dpc, tree, src, check_only=False, out=None, opts=()):
 
 
 class Module:
-    """A module file of the exported tree and its fragments."""
+    """A module file of the exported tree and its fragments.  The texts
+    are read once (`pristine', after the preparation); stubbing rewrites
+    the tree's files from them, with every routine stubbed so far."""
 
     def __init__(self, tree, path):
         self.tree, self.path = tree, path
         with open(os.path.join(tree, path)) as fh:
             self.text = fh.read()
         self.fragments = []                 # include paths holding routine bodies
+        self.frag_text = {}                 # include path -> its text
         # routines with a `forward' heading in the module file
         self.forwards = {r.name for r in parse_routines(self.text) if 'forward' in r.options}
         self.routines = {}                  # name -> (fragment, Routine)
+        self.dsect = {}                     # name -> data section (lower case) or None
+        self.stubbed = set()
+        self.no_hoist = set()               # stubbed routines whose statics are dropped
         for inc in module_includes(self.text):
             if inc.endswith('.ins.pas'):
                 continue
             with open(os.path.join(tree, inc)) as fh:
-                rs = parse_routines(fh.read())
+                self.frag_text[inc] = fh.read()
+            rs = parse_routines(self.frag_text[inc])
             self.fragments.append(inc)
             for r in rs:
                 self.routines[r.name] = (inc, r)
+                d = data_section_of(self.frag_text[inc], r)
+                self.dsect[r.name] = d.lower() if d else None
+
+    def keep_sections(self, bodies):
+        """The named data sections of the routines BODIES (lower case)."""
+        return {self.dsect[n] for n in bodies if self.dsect.get(n)}
+
+    def stubbed_texts(self, names):
+        """{path: text} of the module file and its fragments with NAMES
+        stubbed (stub_text; the statics of a stubbed routine are kept
+        for the data sections of the routines left)."""
+        bodies = {n for n, (_i, r) in self.routines.items() if r.has_body} - set(names)
+        keep = self.keep_sections(bodies)
+        out, deleted = {}, []
+        for inc in self.fragments:
+            out[inc], d = stub_text(self.frag_text[inc], names, self.forwards, keep,
+                                    self.no_hoist)
+            deleted += d
+        out[self.path] = extern_forwards(drop_defines(self.text, deleted), names)
+        return out, deleted
 
     def stub(self, names):
-        """Stub NAMES in the tree's files (the survey's copy)."""
-        deleted = []
-        for inc in self.fragments:
-            p = os.path.join(self.tree, inc)
-            with open(p) as fh:
-                s, d = stub_text(fh.read(), names, self.forwards)
-            deleted += d
-            with open(p, 'w') as fh:
+        """Stub NAMES too in the tree's files (the survey's copy)."""
+        self.stubbed |= set(names)
+        texts, _d = self.stubbed_texts(self.stubbed)
+        for p, s in texts.items():
+            with open(os.path.join(self.tree, p), 'w') as fh:
                 fh.write(s)
-        with open(os.path.join(self.tree, self.path)) as fh:
-            s = extern_forwards(drop_defines(fh.read(), deleted), names)
-        with open(os.path.join(self.tree, self.path), 'w') as fh:
-            fh.write(s)
 
     def unit_text(self, keep):
         """The module with every fragment inlined and every top-level
         routine except KEEP stubbed."""
-        others = set(self.routines) - {keep}
-        deleted = []
-
-        def inline(m):
-            with open(os.path.join(self.tree, m.group(1))) as fh:
-                s, d = stub_text(fh.read(), others, self.forwards)
-            deleted.extend(d)
-            return s
-
+        texts, deleted = self.stubbed_texts(set(self.routines) - {keep})
         frag = '|'.join(re.escape(f) for f in self.fragments) or '(?!)'
-        s = re.sub(r"(?m)^\s*%include\s+'(" + frag + r")'\s*;", inline,
-                   extern_forwards(self.text, others))
-        return drop_defines(s, deleted)
+        return re.sub(r"(?m)^\s*%include\s+'(" + frag + r")'\s*;",
+                      lambda m: texts[m.group(1)], texts[self.path])
 
 
 def code_section(addr, linkmap):
@@ -652,15 +853,27 @@ def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None):
             continue
         diags = parse_diags(err)
         loc = Locator(mod.tree)
-        names = []
+        names, unhoist = [], set()
         for d in diags:
             r = loc(d['file'], d['line'])
+            if d['sev'] == 'error' and r is None:
+                # in the statics hoisted from a stubbed routine (a type or
+                # constant of the routine's, a refused declaration): drop
+                # them, the data after them in their section moves
+                h = hoisted_owner_at(mod.tree, d['file'], d['line'])
+                if h and h not in mod.no_hoist:
+                    unhoist.add(h)
+                    continue
             entries.append((d, r))
             if d['sev'] == 'error' and r and r not in names and r not in stubbed:
                 names.append(r)
         if rc == 0:
             return entries, stubbed, True
-        if not names:
+        if unhoist:
+            print('srcsurvey: %s: the static data of %s does not compile at unit level; '
+                  'left out (the data after it moves)' % (mod.path, ', '.join(sorted(unhoist))))
+            mod.no_hoist |= unhoist
+        if not names and not unhoist:
             return entries, stubbed, False
         mod.stub(set(names))
         stubbed += names
@@ -701,12 +914,13 @@ def data_sections(asm_text, linkmap, module):
     return out
 
 
-def conform_routine(mod, name, dpc, linkmap, work, out, table=None):
+def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=None):
     """Compile top-level routine NAME alone and compare it with the
-    image.  MOD reads the files as they are now; TABLE (default
-    MOD.routines) is the module's routines before any was stubbed, for
-    the addresses of the routines NAME calls.  -> 'OK', 'MISMATCH', or
-    'SETUP: ...'."""
+    image.  MOD's texts are the module's before any routine was stubbed;
+    TABLE (default MOD.routines) gives the addresses of the routines NAME
+    calls.  SETTINGS (module_settings) give the routine the A5 mode and
+    loop alignment it has in the image (unit_build_opts).  -> 'OK',
+    'MISMATCH', or 'SETUP: ...'."""
     import conform
     table = table or mod.routines
     specs = unit_specs(mod, name, linkmap, table)
@@ -719,8 +933,7 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None):
     try:
         routines = conform.unit_routines(specs, linkmap)
         opts = conform.fragment_args(routines, linkmap)
-        with open(os.path.join(mod.tree, _inc)) as fh:
-            body = fh.read()[r.start:r.end]
+        body = mod.frag_text[_inc][r.start:r.end]
         called = set(re.findall(r'[A-Za-z_$][\w$]*', strip_comments(body).lower()))
         items = []
         # the module: the code segments of the routine's segment's name,
@@ -738,7 +951,10 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None):
         mopts, local = conform.module_routine_args(
             ['module-routines=' + ','.join(items)] if items else [], routines, linkmap)
         asm = os.path.join(work, os.path.basename(unit)[:-4] + '.s')
-        rc, err = run_dpc(dpc, mod.tree, os.path.basename(unit), out=asm, opts=opts + mopts)
+        lo = routines[0].addr
+        bopts = unit_build_opts(settings, r, lo) if settings else []
+        rc, err = run_dpc(dpc, mod.tree, os.path.basename(unit), out=asm,
+                          opts=opts + mopts + bopts)
         if rc:
             return 'SETUP: dpc failed alone: ' + (err.strip().splitlines() or ['?'])[0]
         with open(asm) as fh:
@@ -750,11 +966,223 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None):
         return 'SETUP: %s' % e
 
 
+# ------------------------------------------------------ build settings
+
+def a5_settings(rows):
+    """The A5 options for one code section (map segment) from
+    tools/a5survey.py's classification (codegen-patterns 4).  ROWS:
+    [(addr, name, letter, exported, abs_own)] in address order, LETTER
+    from a5survey.letter, EXPORTED: map-named, NAME the routine's name
+    (None if not known).  -> dict:
+
+      always_from  (addr, name) of the routine from which the section is
+                   in always mode (a5survey.switch: the first `s'
+                   routine), when no `n' routine follows it; else None
+      interval     (last n, first s) addresses: the switch may be put at
+                   any exported routine after the first and up to the
+                   second
+      always       [(addr, name)] that load A5 by themselves: the module-
+                   local routines that load it, and, when an `n' routine
+                   follows the first `s' (the mode switches back: PKT,
+                   XPD, FILE_), every exported `s' routine instead of
+                   always_from
+      absolute     [(addr, name)]: exported routines that load no A5 and
+                   address their own block absolutely (`n' with an
+                   absolute operand into it, REM_NAME_$REGISTER_SERVER)"""
+    ex = [(a, l) for a, _n, l, e, _b in rows if e and l != '.']
+    last, first, late = a5survey.switch(ex)
+    names = {a: n for a, n, _l, _e, _b in rows}
+    out = {'always_from': None, 'interval': (last, first), 'always': [], 'absolute': []}
+    if first is not None and not late:
+        out['always_from'] = (first, names[first])
+    elif first is not None:
+        out['always'] += [(a, names[a]) for a, _n, l, e, _b in rows if e and l == 's']
+    out['always'] += [(a, names[a]) for a, _n, l, e, _b in rows if not e and l in 'sS']
+    out['always'].sort()
+    out['absolute'] = [(a, names[a]) for a, _n, l, e, b in rows if e and l == 'n' and b]
+    return out
+
+
+def loop_settings(pr, seg, names, end_aligns=None):
+    """The loop-alignment option for code section SEG (a map segment)
+    from tools/loopalign.py's classes (codegen-patterns 7).  PR:
+    loopalign.per_routine's list; NAMES: {routine start: name or None};
+    END_ALIGNS: whether the segment ends in the 0x2048 filler (True),
+    in a zero word after `rts' (False: the last routine does not align),
+    or not known (None).  -> dict:
+
+      off_from   (addr, name) of the routine from which loops are not
+                 aligned: the first routine with a head at 2 mod 4 and no
+                 filler (loopalign.switch); with none, the last routine
+                 when the segment ends in a zero word; else None (on)
+      interval   (last aligning, first non-aligning) addresses
+      error      loopalign.switch's complaint when the section aligns
+                 again after a routine that does not (no option says it)"""
+    try:
+        last, first = loopalign.switch(pr, seg)
+    except ValueError as e:
+        return {'off_from': None, 'interval': (None, None), 'error': str(e)}
+    starts = [r0 for sg, r0, _r1, _c in pr if sg is seg]
+    out = {'off_from': None, 'interval': (last, first), 'error': None}
+    if first is not None:
+        out['off_from'] = (first, names.get(first))
+    elif end_aligns is False and starts:
+        if last is not None and starts[-1] == last:
+            out['error'] = ('the last routine 0x%X aligns, but the segment ends in a zero word'
+                            % last)
+        else:
+            out['off_from'] = (starts[-1], names.get(starts[-1]))
+            out['interval'] = (last, starts[-1])
+    return out
+
+
+def segment_end_aligns(seg):
+    """True when map segment SEG ends in the 0x2048 filler, False in a
+    zero word after `rts' (loopalign.py `ends'), else None."""
+    w = loopalign.word(seg.end - 2)
+    if w == 0x2048:
+        return True
+    if w == 0 and loopalign.word(seg.end - 4) == 0x4E75:
+        return False
+    return None
+
+
+_SURVEYS = {}
+
+
+def image_surveys():
+    """(map, a5survey routines by start, loopalign per_routine list),
+    computed once."""
+    if not _SURVEYS:
+        m, _sites, _f, routines = loopalign.scan()
+        _SURVEYS['pr'] = loopalign.per_routine(_sites, routines)
+        rs, ah = a5survey.load()
+        _SURVEYS['a5'] = a5survey.analyse(rs, ah, m)
+        _SURVEYS['map'] = m
+    return _SURVEYS['map'], _SURVEYS['a5'], _SURVEYS['pr']
+
+
+def module_settings(mod, linkmap):
+    """[(code section name, map segment, a5 dict, loop dict)] for MOD's
+    code sections (the map code segments holding its routines' header
+    addresses), in address order.  Names are the source's (upper case)
+    where it has a routine at the address, else the map's."""
+    m, by_start, pr = image_surveys()
+    src = {r.addr: n.upper() for n, (_i, r) in mod.routines.items() if r.addr is not None}
+    segs = {}
+    for _n, (_i, r) in mod.routines.items():
+        if r.addr is None:
+            continue
+        s = m.segment_containing(r.addr)
+        if s is not None and s.kind == 'I' and not s.is_section:
+            segs[s.addr] = s
+    out = []
+    for sa in sorted(segs):
+        seg = segs[sa]
+        rows = []
+        for r in sorted((r for r in by_start.values() if r.segaddr == sa), key=lambda r: r.r0):
+            nm = src.get(r.r0) or (r.name.upper() if r.name else None)
+            rows.append((r.r0, nm, a5survey.letter(r), bool(r.name), r.abs_own))
+        names = {r0: src.get(r0) or ((m.names_at(r0) or [None])[0])
+                 for sg, r0, _r1, _c in pr if sg is seg}
+        out.append((code_section(sa, linkmap) or seg.name, seg, a5_settings(rows),
+                    loop_settings(pr, seg, names, segment_end_aligns(seg))))
+    return out
+
+
+def _nm(an):
+    a, n = an
+    return n if n else 'module-local at 0x%X' % a
+
+
+def settings_opts(settings):
+    """The dpc options for MODULE_SETTINGS' list (comma lists, one
+    `-from' routine per code section), and what no option can say (a
+    routine without a name).  -> (options, problems)."""
+    lists = {'--a5-always-from': [], '--a5-always': [], '--a5-absolute': [],
+             '--loop-align-off-from': []}
+    problems = []
+
+    def add(flag, sect, an):
+        if an[1]:
+            lists[flag].append(an[1])
+        else:
+            problems.append('%s: %s needs %s, which has no name' % (sect, flag, _nm(an)))
+    for sect, _seg, a5, lp in settings:
+        if a5['always_from']:
+            add('--a5-always-from', sect, a5['always_from'])
+        for an in a5['always']:
+            add('--a5-always', sect, an)
+        for an in a5['absolute']:
+            add('--a5-absolute', sect, an)
+        if lp['error']:
+            problems.append('%s: loop alignment: %s' % (sect, lp['error']))
+        elif lp['off_from']:
+            add('--loop-align-off-from', sect, lp['off_from'])
+    return ['%s=%s' % (f, ','.join(v)) for f, v in lists.items() if v], problems
+
+
+def report_settings(path, settings, out=sys.stdout):
+    """The `build settings' section for one module."""
+    opts, problems = settings_opts(settings)
+    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7)' % path,
+          file=out)
+
+    def iv(lo, hi):
+        return '(%s, %s]' % ('0x%X' % lo if lo is not None else 'start',
+                             '0x%X' % hi if hi is not None else 'end')
+    for sect, seg, a5, lp in settings:
+        a = a5['always_from']
+        print('  %-14s 0x%X..0x%X  A5: %s%s%s;  loops: %s' % (
+            sect, seg.addr, seg.end,
+            'always from %s, switch in %s' % (_nm(a), iv(*a5['interval'])) if a
+            else 'used mode' if not a5['always'] or a5['interval'][1] is None
+            else 'used mode, always-mode routines listed (the mode switches back)',
+            (', always: ' + ', '.join(map(_nm, a5['always']))) if a5['always'] else '',
+            (', absolute: ' + ', '.join(map(_nm, a5['absolute']))) if a5['absolute'] else '',
+            ('not expressible: ' + lp['error']) if lp['error']
+            else 'off from %s, switch in %s' % (_nm(lp['off_from']), iv(*lp['interval']))
+            if lp['off_from'] else 'aligned (default)'), file=out)
+    # quoted for a shell: the names have `$'
+    print('  dpc %s' % (' '.join(map(shlex.quote, opts)) or '(no options)'), file=out)
+    for p in problems:
+        print('  not expressible: %s' % p, file=out)
+
+
+def unit_build_opts(settings, r, lo):
+    """dpc options that give top-level routine R (with nested routines
+    from address LO) the A5 mode and loop alignment it has in a build of
+    the whole module with SETTINGS' options."""
+    name = r.name.upper()
+    for _sect, seg, a5, lp in settings:
+        if not seg.contains(r.addr):
+            continue
+        opts = []
+        if any(n == name for _a, n in a5['always']):
+            opts.append('--a5-always=' + name)
+        elif any(n == name for _a, n in a5['absolute']):
+            opts.append('--a5-absolute=' + name)
+        elif a5['always_from'] and not r.internal and r.addr >= a5['always_from'][0]:
+            opts.append('--a5-always-from=' + name)
+        off = lp['off_from']
+        if off and not lp['error']:
+            last = lp['interval'][0]
+            if off[0] <= lo or (off[0] < r.addr and (last is None or last < lo)):
+                # off from the first routine, or from a nested routine
+                # (no name to give) with none before it that aligns
+                opts.append('--loop-align=off')
+            elif off[0] <= r.addr:
+                opts.append('--loop-align-off-from=' + name)
+        return opts
+    return []
+
+
 def cmd_run(a):
     work = os.path.abspath(a.work)
     tree, commit = export_rev(os.path.abspath(a.source), a.rev, work)
     print('srcsurvey: %s at %s (%s)' % (os.path.normpath(a.source), a.rev, commit[:12]))
     mods = a.modules or find_modules(tree)
+    settings_out = []
     for k, path in enumerate(mods):
         if k:
             # a fresh copy: the previous module's workarounds and stubs
@@ -767,7 +1195,6 @@ def cmd_run(a):
             fh.write(text)
         print('srcsurvey: %s: %d missing fragment(s) left out%s' %
               (path, len(dropped), (': ' + ' '.join(dropped)) if dropped and a.verbose else ''))
-        mod = Module(tree, path)
         logp = os.path.join(work, path.replace('/', '_') + '.log')
         with open(logp, 'w') as log:
             rc, err = run_dpc(a.dpc, tree, path, check_only=True)
@@ -792,6 +1219,7 @@ def cmd_run(a):
                                 with open(q, 'w') as fh:
                                     fh.write(s2)
                 print('srcsurvey: workaround %s: %s (%d place(s))' % (name, what, n))
+            mod = Module(tree, path)
             ok = True
             all_stubbed = []
             import sau2map
@@ -806,20 +1234,25 @@ def cmd_run(a):
                           % (path, stage))
                     break
         print('srcsurvey: log %s' % os.path.relpath(logp, ROOT))
+        settings = module_settings(mod, linkmap)
+        settings_out.append((path, settings))
         if not ok or a.no_conform:
             continue
-        compiled = [n for n, (_i, r) in Module(tree, path).routines.items() if r.has_body]
+        compiled = [n for n, (_i, r) in mod.routines.items()
+                    if r.has_body and n not in mod.stubbed]
         print('== %s: conformance of the %d routine(s) that compile' % (path, len(compiled)))
         cwork = os.path.join(work, 'conform')
         os.makedirs(cwork, exist_ok=True)
-        fresh = Module(tree, path)
         for name in compiled:
-            res = conform_routine(fresh, name, a.dpc, linkmap, cwork,
-                                  print if a.verbose else None, mod.routines)
-            _i, r = fresh.routines[name]
+            res = conform_routine(mod, name, a.dpc, linkmap, cwork,
+                                  print if a.verbose else None, mod.routines,
+                                  None if a.no_build_settings else settings)
+            _i, r = mod.routines[name]
             print('  %-9s %-36s %s' % (res.split(':')[0], name,
                                        ('0x%X' % r.addr) if r.addr else '?')
                   + (('  ' + res[7:]) if res.startswith('SETUP') else ''))
+    for path, settings in settings_out:
+        report_settings(path, settings)
     return 0
 
 
@@ -843,6 +1276,7 @@ def main(argv=None):
     r.add_argument('--no-workaround', action='append', default=[],
                    choices=[w[0] for w in WORKAROUNDS])
     r.add_argument('--no-conform', action='store_true')
+    r.add_argument('--no-build-settings', action='store_true')
     r.add_argument('-v', '--verbose', action='store_true')
     r.add_argument('modules', nargs='*')
     s = sub.add_parser('summarise')
