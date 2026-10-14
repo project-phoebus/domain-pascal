@@ -578,6 +578,16 @@ pub enum Cond {
     /// `a or else b`: `b` is evaluated only when `a` is false (ref "Or
     /// Else", p. 4-134).
     OrElse(Box<Cond>, Box<Cond>),
+    /// `lhs = rhs` or `lhs <> rhs` (`op` is [`Rel::Eq`] or [`Rel::Ne`])
+    /// of two records or arrays of `size` bytes, compared in memory (ref
+    /// Table 4-1, p. 4-2: `=` and `<>` apply to "All types";
+    /// codegen-patterns 7.1, "Records").
+    Block {
+        op: Rel,
+        lhs: Addr,
+        rhs: Addr,
+        size: u32,
+    },
 }
 
 /// A relational operator (ref Table 4-1, p. 4-3).

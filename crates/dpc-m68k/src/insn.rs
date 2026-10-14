@@ -372,10 +372,20 @@ pub enum Insn {
         dst: u8,
     },
     /// `dbf %dn,<label>b`: decrement the word in Dn, branch back to the
-    /// numbered local label while it is not -1.
+    /// numbered local label while it is not -1.  With `until`, `db<cc>`:
+    /// leave the loop when the condition holds first (`dbne`, the record
+    /// compare loop, codegen-patterns 7.1).
     Dbf {
         reg: u8,
         label: u32,
+        until: Option<Cond>,
+    },
+    /// `cmpm.<size> (%ay)+,(%ax)+`: compare the destination's element
+    /// with the source's (`(Ax) - (Ay)`), both registers advanced.
+    Cmpm {
+        size: Size,
+        src: u8,
+        dst: u8,
     },
     /// A numbered local label (`N:`, gas local label; branches name it
     /// `Nb`).  The emitter writes it at the start of the line.
@@ -676,7 +686,22 @@ impl fmt::Display for Insn {
             Insn::Moveq { value, dst } => {
                 write!(f, "moveq\t#{},{}", num(*value as i64), Reg::D(*dst))
             }
-            Insn::Dbf { reg, label } => write!(f, "dbf\t{},{label}b", Reg::D(*reg)),
+            Insn::Dbf {
+                reg,
+                label,
+                until: None,
+            } => write!(f, "dbf\t{},{label}b", Reg::D(*reg)),
+            Insn::Dbf {
+                reg,
+                label,
+                until: Some(c),
+            } => write!(f, "db{c}\t{},{label}b", Reg::D(*reg)),
+            Insn::Cmpm { size, src, dst } => write!(
+                f,
+                "cmpm.{size}\t{},{}",
+                Ea::PostInc(*src),
+                Ea::PostInc(*dst)
+            ),
             Insn::Label(n) => write!(f, "{n}:"),
             Insn::Addq { size, value, dst } => write!(f, "addq.{size}\t#{value},{dst}"),
             Insn::Subq { size, value, dst } => write!(f, "subq.{size}\t#{value},{dst}"),
@@ -824,7 +849,7 @@ impl Insn {
             Insn::Align4 => (4 - pos % 4) % 4,
             Insn::PoolLabel(_) => 0,
             Insn::Words(w) | Insn::Encoded { words: w, .. } => 2 * w.len() as u32,
-            Insn::Unlk | Insn::Rts | Insn::Moveq { .. } => 2,
+            Insn::Unlk | Insn::Rts | Insn::Moveq { .. } | Insn::Cmpm { .. } => 2,
             Insn::Link { .. } | Insn::Dbf { .. } | Insn::MovemSave { .. } => 4,
             Insn::MovemRestore { .. } => 6,
             Insn::Bsr { short, .. } => {
@@ -1001,7 +1026,30 @@ mod tests {
                 "move.l\t(%a0)+,(%a1)+",
             ),
             (Insn::Moveq { value: 35, dst: 0 }, "moveq\t#0x23,%d0"),
-            (Insn::Dbf { reg: 0, label: 1 }, "dbf\t%d0,1b"),
+            (
+                Insn::Dbf {
+                    reg: 0,
+                    label: 1,
+                    until: None,
+                },
+                "dbf\t%d0,1b",
+            ),
+            (
+                Insn::Dbf {
+                    reg: 1,
+                    label: 2,
+                    until: Some(Cond::Ne),
+                },
+                "dbne\t%d1,2b",
+            ),
+            (
+                Insn::Cmpm {
+                    size: Size::L,
+                    src: 1,
+                    dst: 0,
+                },
+                "cmpm.l\t(%a1)+,(%a0)+",
+            ),
             (Insn::Label(1), "1:"),
             (Insn::Unlk, "unlk\t%fp"),
             (Insn::Rts, "rts"),
@@ -1177,7 +1225,30 @@ mod len_tests {
                 },
                 2,
             ), // 0xE00ED8 4298
-            (Insn::Dbf { reg: 0, label: 1 }, 4), // 0xE00EDA 51c8 fffc
+            (
+                Insn::Dbf {
+                    reg: 0,
+                    label: 1,
+                    until: None,
+                },
+                4,
+            ), // 0xE00EDA 51c8 fffc
+            (
+                Insn::Dbf {
+                    reg: 1,
+                    label: 1,
+                    until: Some(Cond::Ne),
+                },
+                4,
+            ), // 0xE3D852 56c9 fffc
+            (
+                Insn::Cmpm {
+                    size: Size::L,
+                    src: 1,
+                    dst: 0,
+                },
+                2,
+            ), // 0xE1C1B6 b189
             (Insn::Unlk, 2),
             (Insn::Rts, 2),
             (

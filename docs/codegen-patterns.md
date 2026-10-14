@@ -1951,10 +1951,15 @@ model run against the bit model of Figure 3-6).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `copy`): records and
     arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1;
     the source or destination in the data area, in the frame, or the
-    object a pointer in the frame points to.  Rejected: 6 and 8 bytes
+    object a pointer in the frame points to, or a field of the object a
+    pointer held in an address register points to (`lea (d,An),Am`, the
+    form above; added with the record comparisons of 7.1, bead
+    domain-pascal-aaj).  Rejected: 6 and 8 bytes
     (which operand the original formed first is not catalogued), another
-    unit's object (`movea.l #abs,A1` at 0xE336E2, one site), a field
-    through a pointer, statements of bodies with several statements.
+    unit's object (`movea.l #abs,A1` at 0xE336E2, one site; the record
+    comparisons of 7.1 load such addresses so 201 times, a copy only
+    once), a field through a pointer not held in a register, statements
+    of bodies with several statements.
     Records and arrays of 1, 2 or 4 bytes are moved as scalars
     (Uncertain: not catalogued).
 - **1-based arrays (Verified):** the compiler folds the `-1` into the
@@ -2035,8 +2040,29 @@ model run against the bit model of Figure 3-6).
     `dpc` emits none.
   - Arrays through a pointer are supported when the pointer is held in an
     address register since the entry; others are rejected (where the
-    pointer load goes relative to the index is not catalogued).  A byte
-    index (char, boolean) is rejected (its extension is not catalogued).
+    pointer load goes relative to the index is not catalogued).
+  - **Byte indices (survey; implemented, bead domain-pascal-ji9).**
+    `tools/cmpsurvey.py summary` (kind `bidx`): of the 27 indexed
+    operands of compiled code whose index register was last written by a
+    `move.b`, 21 have `clr.w Dn` right before the `move.b`, 5 have it
+    earlier (scheduled: 0xE1CB8A `clr.w D0; movea.l (52,A4),A1; move.b
+    (A2),D0`; SIO2681_$SET_LINE 0xE1D2F6), one has `clr.l` (0xE7062E);
+    all use a `.w` index; none `andi.w #255` or `ext.w`.  Scales 1
+    (VTOC_$LOOKUP 0xE38FD2..0xE38FD8 `clr.w D0; move.b (28,A3),D0; lea
+    (0,A5,D0.w),A0`), 2 (tty_$i_enable_crash_func 0xE672AA..0xE672B4
+    `clr.w D2; move.b D0,D2; add.w D2,D2; lea (0,A0,D2.w),A1; move.w
+    #0x11,(0xa4,A1)`, ch a parameter held in D0; TTY_$K_SET_INPUT_BREAK_MODE
+    0xE67874 from memory; tty_$i_set_funcs 0xE67238 the byte an array
+    element itself), 4 (0xE00DD2).  **Implemented** (`dpc-ir`, `addr_of`):
+    an index of an unsigned byte type (`char`, a char subrange) is
+    zero-extended to an unsigned word (`clr.w Dn; move.b x,Dn`, the
+    widening of section 8), then scaled and used as a word index under
+    the 16-bit rule above (a 0..255 index times the element size).  A
+    signed byte index (a boolean) is refused (`ext.w` is not seen).
+    Golden `tests/golden/data/byte_index`.  The six TTY routines with
+    such indices (k_get, set_funcs, set_raw_mode, rcv,
+    k_set_input_break_mode, enable_crash_func) get past the index now
+    and stop at other refusals (bead domain-pascal-ji9's report).
 - **Pointer arithmetic through type transfers (Verified shapes by survey;
   implemented, bead domain-pascal-5aw.17).**  Ref "Type Transfer
   Functions", p. 4-197: a transfer "does not change any bits in the
@@ -3039,7 +3065,97 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `then` part of an unsigned `<`; 0xE177BE `bls` of an unsigned `>`).
 - **Two variables:** `cmp.<s> <ea>,Dn` with one of them in a register
   (0xE6A9B4 `move.w (A1),D5; cmp.w (0x14,A6),D5`).  Which operand of the
-  source went to the register cannot be seen in the image.
+  source went to the register cannot be seen in the image.  Survey
+  (`tools/cmpsurvey.py summary`, kinds `mem2`/`both`; bead
+  domain-pascal-aaj): 358 `move.<s> M1,Dn; cmp.<s> M2,Dn` with both
+  operands in memory (`.w` 217, `.l` 132, `.b` 9; e.g. TTY_$K_SET_FLAG
+  0xE67462 `move.w (0x2cc,A2),D0; cmp.w (0x2ca,A2),D0; beq.b`,
+  ACL_$CLEAR_SUPER 0xE4701A `move.w PROC1_$CURRENT,D0; cmp.w
+  (0xb72,A5),D0; bne.s`; char compares `move.b; cmp.b; bls`, 0xE01E22),
+  against 4 with both loaded (`move; move; cmp Dm,Dn`, 0xE54D80).
+  **Implemented** (bead domain-pascal-aaj; `isel.rs`, `compare` and
+  `compare_computed`): the left operand loaded into a new data register
+  (Uncertain: the image cannot say which source operand that was), the
+  right one the `cmp` operand.  Refused: a variable in memory against one
+  held in a register (load the left one, or `cmp` against the held one
+  with the relation reversed?); two pointer variables (20 `movea.l M1,An;
+  cmpa.l M2,An` in compiled code, e.g. 0xE01A7E, against `move.l; cmp.l`
+  pairs that may be integers or pointers: not told apart).  Conformance
+  unit `acl_clear_super.pas` (byte-identical).
+- **Mixed widths and signs (Verified at the sites; survey; implemented,
+  bead domain-pascal-aaj).**  Ref 4.3.1 p. 4-5 ("computes operands smaller
+  than 32 bits with 32 bits of precision when necessary to achieve correct
+  arithmetic") and p. 9-32, message 250 (a negative constant against an
+  unsigned subrange is folded away, as it can never match): comparisons
+  have their mathematical meaning.  A signed word against an unsigned one
+  (`integer` against `0..65535`) is done in 32 bits, both widened, `ext.l`
+  and `clr.l; move.w`, then `cmp.l Dr,Dl` and a signed branch: TTY_$K_PUT
+  0xE67C42..0xE67C4A `move.w D2,D0; clr.l D1; ext.l D0; move.w (A4),D1;
+  cmp.l D1,D0; bge.b` (avail_space < count); tty_$i_put_chars
+  0xE1B050..0xE1B058 `clr.l D2; move.w D1,D4; move.w D3,D2; ext.l D4;
+  cmp.l D4,D2; ble.b` (count > free_space, the unsigned one on the
+  left); tty_$i_err 0xE1BD7C..0xE1BD8A; the PROC2 module-local 0xE42224
+  at 0xE4224C (`=`, `bne`).  The survey (kind `widen`) finds 26 `cmp.l`
+  of two widened words (sign/zero in either order); every ordered one
+  branches signed (`blt`/`ble`/`bge`/`bgt`).  In each TTY site the
+  register compared into is the left operand's.  A word against a
+  longword: the word widened by its own sign, `cmp.l <ea>,Dn` (kind
+  `widen1`, 38: `ext.l` with `ble`/`bge`/`blt`, 0xE179BC; `clr.l; move.w`
+  with an unsigned branch, 0xE0D7CE).  **Implemented** (`dpc-ir`
+  `widen_operands`; `isel.rs`, `compare_computed`): both words widened to
+  signed longwords, the left one first; dpc's scheduler (12.4 R11)
+  interleaves the two widenings exactly as at 0xE67C42 and 0xE1B050
+  (not as at 0xE1BD7C, where the right operand's pointer load comes
+  after the left's `ext.l`).  A word against a longword when the word
+  is on the left (the longword on the left would be `cmp.l Dw,Dl`, not
+  catalogued: refused).  Other mixes (bytes against wider values, a
+  signed and an unsigned longword) are refused; Pascal's typing leaves
+  few of them (`0..255` is a word, ref 3.8).  Golden
+  `tests/golden/control/compares_mixed`.
+- **Records (Verified at the sites; survey; implemented, bead
+  domain-pascal-aaj).**  Ref Table 4-1 p. 4-2: `=` and `<>` apply to
+  "All types".  The image compares records in memory with `cmpm`
+  (`tools/cmpsurvey.py`, kind `cmpm`, 393 runs): the two addresses in
+  address registers (another unit's object with `movea.l #abs,An`, 201
+  of the address loads before a `cmpm`, e.g. `movea.l #UID_$NIL,A1`), a
+  count `moveq #n-1,Dn`, then:
+  - 8 bytes (UIDs): two `cmpm.l (Ay)+,(Ax)+` with a `bne` after the
+    first, the count loaded but unused (all 383 runs of two have the
+    `moveq #1`): TTY_$K_SIMULATE_TERMINAL_INPUT 0xE1C1AC..0xE1C1BC `lea
+    (-8,A6),A0; lea (0x4c,A2),A1; moveq #1,D0; cmpm.l (A1)+,(A0)+;
+    bne.b; cmpm.l (A1)+,(A0)+; beq.b`; the ACL_ routine 0xE45154;
+  - 6 bytes (48-bit clock values): a `cmpm.w` loop, `moveq #2; cmpm.w;
+    dbne; beq` (TIME_$Q_SCAN_QUEUE 0xE16EC2; 0xE4CEAA);
+  - 32 and 36 bytes: a `cmpm.l` loop with `dbne` (DISK_IO 0xE3D84E,
+    `moveq #7`; ACL_$SET_RE_ALL_SIDS 0xE48462, `moveq #8`, 6 sites);
+  - a 6-character array: a `cmpm.b` loop (0xE6C278, `moveq #5`), so the
+    unit is not the size's alone;
+  - as a value: the last `cmpm` (or the `bne` of the first, to it)
+    followed by `sne`/`seq` (PACCT_$ON 0xE5A9C0 `sne D0`, the count's
+    register; 0xE57786 `seq D0`, 0xE56C20 `seq D1`, 0xE60F76 `seq D4`;
+    0xE31652 and 0xE4E564 into D2, a register variable).
+  Which operand is the destination of `cmpm` varies (0xE412BE the first
+  address loaded, 0xE48096 the second): Uncertain, and immaterial to the
+  result.  **Implemented** (`dpc-ir` `record_compare`, `Cond::Block`;
+  `isel.rs` `block_compare`, `block_flags`, `compared_block`,
+  `test_value`; `Insn::Cmpm`, `Insn::Dbf { until }`): records of 8 bytes
+  (unrolled), 6 bytes (`cmpm.w` loop), multiples of 4 from 32 (`cmpm.l`
+  loop, an ordinary loop head, section 7), the left operand's address
+  first and the `cmpm` destination, then the right one's, then the count;
+  as a value `s<cc>` into the count's register.  The addresses: the
+  unit's data or the frame (`lea`), the object a pointer slot points to
+  (`movea.l (d,A6),An`), a field through a pointer held in an address
+  register (`lea (d,An),Am`, 0xE1C1B0), another unit's object (`movea.l
+  #sym,An`).  Refused: other sizes (12..28 bytes not seen), arrays and
+  strings (the `cmpm.b` site), records with bytes no field covers
+  (padding: the image compares every byte, and the reference gives no
+  rule for padding; packed records count their fields' bits), ordering
+  records.  Conformance unit `pacct_on.pas` (byte-identical); golden
+  `control/compares_mixed`.
+- **Booleans compared (`b = true`, `b1 = b2`; Uncertain, refused):** the
+  survey (kind `cmpb`) finds 2 `cmpi.b #-1` (0xE1B96C, 0xE53FDE, not
+  shown to be booleans), 134 other `cmpi.b` and 16 `cmp.b`, which chars
+  explain as well.  Still not catalogued.
 - **A long constant held in a register (Uncertain):** 0xE177AE..0xE177B6
   `move.l #0x400,D3; add.l D1,D2; cmp.l D3,D2`, where 15 of the 28 `add.l
   Dm,Dn` directly followed by a compare use `cmpi.l` instead, among them
@@ -3145,10 +3261,9 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   s` for a constant k with `btst #k` (section 5.1).  Not supported yet: a branch to a `bra` (above); comparing booleans
   (`b = true`: compiled code tests booleans with `tst.b`, and has two
   `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
-  a constant on the left of a comparison; comparing
-  two variables unless the left one is held in a data register (a
-  parameter loaded at entry); operands of different widths or signs
-  (implicit widening); unsigned ordering against 0; a test right
+  a constant on the left of a comparison; the refusals of "Two
+  variables", "Mixed widths and signs" and "Records" above; unsigned
+  ordering against 0; a test right
   after the load of its register (above); `and`/`or` without
   `then`/`else`; an `if` with an empty `then` part; a `return` at the
   end of a nested part that ends the routine (a `bra` to the next

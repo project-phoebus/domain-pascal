@@ -330,6 +330,11 @@ fn fx(insn: &Insn) -> Fx {
             f.use_(Reg::A(*a));
             f.cc_set = true;
         }
+        Insn::Cmpm { size, src, dst } => {
+            f.src(&Ea::PostInc(*src), *size);
+            f.src(&Ea::PostInc(*dst), *size);
+            f.cc_set = true;
+        }
         Insn::Cmp { size, src, dst } => {
             f.src(src, *size);
             f.use_(Reg::D(*dst));
@@ -456,6 +461,7 @@ fn depends(i: &Fx, j: &Fx, between_defs: RegSet) -> bool {
 fn cc_effect(insn: &Insn) -> (bool, bool) {
     match insn {
         Insn::Branch { cond, .. } => (*cond != Cond::T, false),
+        Insn::Dbf { until, .. } => (until.is_some(), false),
         Insn::Jsr(_) | Insn::Bsr { .. } | Insn::MoveToSr { .. } => (false, true),
         Insn::SrImm { .. } => (true, true),
         Insn::MoveFromSr { .. } => (true, false),
@@ -1644,7 +1650,11 @@ mod tests {
                 words: vec![0x6100],
                 text: "bsr.s X".into(),
             },
-            Insn::Dbf { reg: 2, label: 1 },
+            Insn::Dbf {
+                reg: 2,
+                label: 1,
+                until: None,
+            },
             Insn::TableIndex { reg: 3, table: 9 },
             Insn::TableJump {
                 reg: 3,
@@ -1686,7 +1696,11 @@ mod tests {
             ld(),
             inc(),
             free(),
-            Insn::Dbf { reg: 2, label: 1 },
+            Insn::Dbf {
+                reg: 2,
+                label: 1,
+                until: None,
+            },
             br(Cond::Eq, 2, false),
             Insn::Label(2),
         ];

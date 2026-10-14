@@ -1301,6 +1301,10 @@ fn register_locals(f: &Function) -> Vec<i32> {
                     self.cond(a);
                     self.cond(b);
                 }
+                IrCond::Block { lhs, rhs, .. } => {
+                    self.other(lhs);
+                    self.other(rhs);
+                }
             }
         }
         fn stmts(&mut self, body: &[Stmt], nested: bool) {
@@ -1472,6 +1476,10 @@ fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
         IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
             walk_cond(a, v);
             walk_cond(b, v);
+        }
+        IrCond::Block { lhs, rhs, .. } => {
+            walk_addr(lhs, v);
+            walk_addr(rhs, v);
         }
     }
 }
@@ -2044,6 +2052,10 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 cond(a, off, st);
                 cond(b, off, st);
             }
+            IrCond::Block { lhs, rhs, .. } => {
+                addr(lhs, off, st);
+                addr(rhs, off, st);
+            }
         }
     }
     fn addr(a: &Addr, off: i32, st: &mut St) {
@@ -2520,6 +2532,7 @@ fn cond_has_call(c: &IrCond) -> bool {
         IrCond::Test(e) => expr_has_call(e),
         IrCond::Not(x) => cond_has_call(x),
         IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => cond_has_call(a) || cond_has_call(b),
+        IrCond::Block { lhs, rhs, .. } => addr_has_call(lhs) || addr_has_call(rhs),
     }
 }
 
@@ -2812,6 +2825,10 @@ impl Uses<'_> {
             IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
                 self.cond(a);
                 self.cond(b);
+            }
+            IrCond::Block { lhs, rhs, .. } => {
+                self.address(lhs);
+                self.address(rhs);
             }
         }
     }
@@ -4016,6 +4033,7 @@ impl Selector {
         self.out.push(Insn::Dbf {
             reg: count,
             label: head,
+            until: None,
         });
         self.place(exit);
         Ok(())
@@ -4483,7 +4501,119 @@ impl Selector {
                 self.jump(if when { cc } else { cc.negate() }, l);
                 Ok(())
             }
+            IrCond::Block { op, lhs, rhs, size } => {
+                self.block_compare(*op, lhs, rhs, *size, when, l)
+            }
         }
+    }
+
+    /// `lhs = rhs` / `lhs <> rhs` of two records or arrays in memory (ref
+    /// Table 4-1, p. 4-2), branching to `l` when the relation is `when`
+    /// (codegen-patterns 7.1, "Records"; `tools/cmpsurvey.py`, cmpm).
+    /// The left operand's address first, the destination of `cmpm`, then
+    /// the right one's, then the count, `moveq #n-1,Dc`:
+    ///
+    /// - 8 bytes: two `cmpm.l` unrolled, the count loaded but not used,
+    ///   the first `bne` leaving as soon as a longword differs
+    ///   (TTY_$K_SIMULATE_TERMINAL_INPUT 0xE1C1AC..0xE1C1BC `lea
+    ///   (-8,A6),A0; lea (0x4c,A2),A1; moveq #1,D0; cmpm.l (A1)+,(A0)+;
+    ///   bne.b; cmpm.l (A1)+,(A0)+; beq.b`; the ACL_ routine 0xE45154;
+    ///   all 383 runs of two `cmpm.l` in compiled code have the `moveq #1`);
+    /// - 6 bytes: a `cmpm.w` loop of three (TIME_$Q_SCAN_QUEUE 0xE16EC2
+    ///   `moveq #2,D0; cmpm.w (A1)+,(A0)+; dbne D0,*-2; beq.s`; 0xE4CEAA);
+    /// - 32 bytes and more, a multiple of 4: a `cmpm.l` loop (DISK_IO
+    ///   0xE3D84E `moveq #7,D1`, 32 bytes; ACL_$SET_RE_ALL_SIDS 0xE48462
+    ///   `moveq #8,D0`, 36 bytes), its head an ordinary loop head
+    ///   (codegen-patterns 7).
+    ///
+    /// Other sizes (12..28 bytes, odd ones) are not seen.
+    fn block_compare(
+        &mut self,
+        op: Rel,
+        lhs: &Addr,
+        rhs: &Addr,
+        size: u32,
+        when: bool,
+        l: u32,
+    ) -> Res<()> {
+        // Whether `l` is taken when the two are equal.
+        let on_equal = (op == Rel::Eq) == when;
+        let cc = if on_equal { Cond::Eq } else { Cond::Ne };
+        let skip = self.new_label();
+        let (_, unrolled) = self.block_flags(lhs, rhs, size, if on_equal { skip } else { l })?;
+        self.jump(cc, l);
+        if unrolled && on_equal {
+            self.place(skip);
+        }
+        Ok(())
+    }
+
+    /// The comparison of [`Self::block_compare`] up to the flags of its
+    /// last `cmpm` (or its `dbne`): Z set when the blocks are equal.  In
+    /// the unrolled form the first `bne` goes to `differ`; gives the count
+    /// register and whether the form is unrolled.
+    fn block_flags(&mut self, lhs: &Addr, rhs: &Addr, size: u32, differ: u32) -> Res<(u8, bool)> {
+        let (unit, n) = match size {
+            8 => (Size::L, 2),
+            6 => (Size::W, 3),
+            s if s % 4 == 0 && (32..=512).contains(&s) => (Size::L, s / 4),
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "comparing records of {size} bytes (only 6, 8 and multiples of 4 from \
+                         32 are catalogued, codegen-patterns 7.1) is"
+                    ),
+                ))
+            }
+        };
+        let dst = self.compared_block(lhs)?;
+        let src = self.compared_block(rhs)?;
+        let count = self.alloc_d()?;
+        self.out.push(Insn::Moveq {
+            value: (n - 1) as i8,
+            dst: count,
+        });
+        let cmpm = Insn::Cmpm {
+            size: unit,
+            src,
+            dst,
+        };
+        if n == 2 {
+            self.out.push(cmpm.clone());
+            self.jump(Cond::Ne, differ);
+            self.out.push(cmpm);
+            Ok((count, true))
+        } else {
+            let head = self.new_label();
+            self.out.push(Insn::Align4);
+            self.place(head);
+            self.out.push(cmpm);
+            self.out.push(Insn::Dbf {
+                reg: count,
+                label: head,
+                until: Some(Cond::Ne),
+            });
+            Ok((count, false))
+        }
+    }
+
+    /// The address of a compared block ([`Self::block_address`]), or of
+    /// another unit's object: `movea.l #sym,An` (201 of the address loads
+    /// before a `cmpm` in compiled code, e.g. PACCT_$ON 0xE5A9B2 `movea.l
+    /// #UID_$NIL,A1`; `tools/cmpsurvey.py`; no `lea abs.l` of an
+    /// operand).
+    fn compared_block(&mut self, addr: &Addr) -> Res<u8> {
+        if let Addr::Symbol { name, offset: 0 } = addr {
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::ImmSym(name.clone()),
+                dst: a,
+            });
+            return Ok(a);
+        }
+        self.block_address(addr)
     }
 
     /// The effective address of the scalar at `addr` as an operand, without
@@ -4731,11 +4861,44 @@ impl Selector {
                     _ => None,
                 };
                 let Some(Reg::D(d)) = held else {
-                    return Err(unsupported(
-                        self.span,
-                        "comparing two variables when the left one is not held in a data \
-                         register is",
-                    ));
+                    if held.is_some() {
+                        return Err(unsupported(
+                            self.span,
+                            "comparing two variables when the left one is held in an address \
+                             register is",
+                        ));
+                    }
+                    let rheld = match raddr {
+                        Addr::Frame(o) => self.pinned(*o),
+                        _ => None,
+                    };
+                    if rheld.is_some() {
+                        // `move.<s> lhs,Dn; cmp.<s> Dr,Dn`, or `cmp.<s>
+                        // lhs,Dr` with the relation reversed?  Not seen.
+                        return Err(unsupported(
+                            self.span,
+                            "comparing a variable in memory with one held in a register (which \
+                             one the original loaded is not known) is",
+                        ));
+                    }
+                    if ty == Scalar::POINTER {
+                        // `movea.l p,An; cmpa.l q,An` (20 sites, 0xE01A7E)
+                        // or `move.l p,Dn; cmp.l q,Dn`: an integer32 and a
+                        // pointer look alike in the image.
+                        return Err(unsupported(
+                            self.span,
+                            "comparing two pointer variables (`cmpa.l` or `cmp.l`: not \
+                             catalogued) is",
+                        ));
+                    }
+                    // Two variables in memory: the left one loaded into a
+                    // new data register, the right one its operand
+                    // (codegen-patterns 7.1: 358 `move.<s> M1,Dn; cmp.<s>
+                    // M2,Dn` in compiled code against 4 with both loaded;
+                    // TTY_$K_SET_FLAG 0xE67462 `move.w (0x2cc,A2),D0; cmp.w
+                    // (0x2ca,A2),D0; beq.b`).  Which operand of the source
+                    // was loaded cannot be seen; the left one is.
+                    return self.compare_computed(op, lhs, rhs);
                 };
                 let src = self.operand(raddr)?;
                 if matches!(src, Ea::Reg(_)) {
@@ -5163,6 +5326,7 @@ impl Selector {
             self.out.push(Insn::Dbf {
                 reg: count,
                 label: head,
+                until: None,
             });
         }
         if bytes % 4 == 2 {
@@ -5212,14 +5376,32 @@ impl Selector {
                 _ => {
                     return Err(unsupported(
                         self.span,
-                        "copying a block through this pointer expression is",
+                        "a block through this pointer expression is",
                     ))
                 }
             },
+            // A field of the object a pointer held in an address register
+            // points to: `lea (d,An),Am` (TTY_$K_SIMULATE_TERMINAL_INPUT
+            // 0xE1C1B0 `lea (0x4c,A2),A1`, `tty^.pgroup_uid` with `tty` in
+            // A2; codegen-patterns 5.2 lists `lea (d,An)` among the
+            // source address forms of copies).  Only when forming the
+            // operand needs no instruction: where the original loaded a
+            // pointer that is not held is not catalogued.
+            Addr::Indirect { .. } => {
+                let mark = self.out.len();
+                let ea = self.ea_of(addr)?;
+                if self.out.len() != mark || !matches!(ea, Ea::Disp(..)) {
+                    return Err(unsupported(
+                        self.span,
+                        "a block through a pointer not held in an address register is",
+                    ));
+                }
+                ea
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
-                    "copying a block at this kind of address is",
+                    "a block (record or array copy or comparison) at this kind of address is",
                 ))
             }
         };
@@ -6536,6 +6718,7 @@ impl Selector {
         self.out.push(Insn::Dbf {
             reg: d,
             label: head,
+            until: None,
         });
         Ok(())
     }
@@ -8395,6 +8578,23 @@ impl Selector {
     /// `btst D0,D1; sne D1`, the set's register).  **Uncertain:** the rule
     /// is read off these four sites.  Only comparisons are supported.
     fn test_value(&mut self, c: &IrCond) -> Res<u8> {
+        if let IrCond::Block { op, lhs, rhs, size } = c {
+            // `sne`/`seq` into the count register, the first `bne` of the
+            // unrolled form going to it (PACCT_$ON 0xE5A9B8..0xE5A9C0
+            // `moveq #1,D0; cmpm.l; bne.b *+4; cmpm.l; sne D0`; 0xE57786
+            // `seq D0`, 0xE56C20 `seq D1`, 0xE60F76 `seq D4`, each the
+            // count's register).
+            let differ = self.new_label();
+            let (count, unrolled) = self.block_flags(lhs, rhs, *size, differ)?;
+            if unrolled {
+                self.place(differ);
+            }
+            self.out.push(Insn::Scc {
+                cond: if *op == Rel::Eq { Cond::Eq } else { Cond::Ne },
+                dst: Ea::Reg(Reg::D(count)),
+            });
+            return Ok(count);
+        }
         let IrCond::Compare { op, lhs, rhs } = c else {
             return Err(unsupported(
                 self.span,
@@ -8505,6 +8705,25 @@ impl Selector {
                     _ => unreachable!(),
                 };
                 self.out.push(Insn::Cmp { size, src, dst: d });
+            }
+            // Two widened words (a signed and an unsigned one, `dpc-ir`
+            // `widen_operands`): the right one widened into a register of
+            // its own after the left one, `cmp.l Dr,Dl` (TTY_$K_PUT
+            // 0xE67C42..0xE67C4A `move.w D2,D0; clr.l D1; ext.l D0; move.w
+            // (A4),D1; cmp.l D1,D0`, the two widenings interleaved by the
+            // scheduler, 12.4 R11; tty_$i_put_chars 0xE1B050..0xE1B058).
+            Expr::Convert { value, ty: t }
+                if t.width == Width::Long && value.ty().width == Width::Word =>
+            {
+                let r = match self.eval(rhs)? {
+                    Val::Tmp(r) | Val::Reg(Reg::D(r)) => r,
+                    _ => unreachable!("a widening is in a data register"),
+                };
+                self.out.push(Insn::Cmp {
+                    size,
+                    src: Ea::Reg(Reg::D(r)),
+                    dst: d,
+                });
             }
             _ => return Err(unsupported(self.span, "comparing two computed values is")),
         }
@@ -10828,13 +11047,13 @@ mod tests {
             offset: 0,
         };
         let f = func(0x10, None, vec![copy(Addr::Frame(-0x10), sym, 12)]);
-        assert!(err(&f).starts_with("copying a block at this kind of address"));
+        assert!(err(&f).starts_with("a block (record or array copy or comparison) at this kind"));
         let f = func(
             0x10,
             None,
             vec![copy(Addr::Frame(-0x10), through(8, 4), 12)],
         );
-        assert!(err(&f).starts_with("copying a block at this kind of address"));
+        assert!(err(&f).starts_with("a block through a pointer not held in an address register"));
     }
 
     // ---------------------------------------------------------------

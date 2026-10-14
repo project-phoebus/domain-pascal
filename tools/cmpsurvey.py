@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""cmpsurvey.py - comparisons and byte indices in the compiled code of the
+SR10.2 image.
+
+Evidence tool for docs/codegen-patterns.md sections 7.1 and 5.2 (beads
+domain-pascal-aaj, -ji9).  Compiled routines are split and followed as
+tools/casesurvey.py does (map symbols and `link.w A6' words, hand assembly
+excluded, only the instructions reachable from the routine's start, in
+address order).  Kinds:
+
+    bidx    an indexed operand `(d,An,Dx.w|l)' whose index register was
+            last written by a byte load `move.b X,Dx' (scaling `add.w
+            Dx,Dx', `lsl #k', `mulu.w #c' in between skipped): how the
+            byte was widened (`clr.w Dx' / `clr.l Dx' before the load,
+            adjacent or with instructions between; `andi.w #255' after;
+            `ext.w' after; none), the index size, the scale, and whether
+            the byte came from a data register or from memory.
+    mem2    `move.<s> M1,Dn; cmp.<s> M2,Dn' with M1, M2 memory: two
+            variables compared, the first one loaded; the branch after.
+            `both' counts `move M1,Dn; move M2,Dm; cmp Dm,Dn' (both
+            loaded) for comparison.
+    widen   `cmp.l Dm,Dn' where both registers were widened from words
+            in the preceding instructions (`ext.l' after a word move:
+            sign; `clr.l' then a word move: zero; `andi.l #0xffff':
+            zero): the kinds of the two sides (destination first) and
+            the branch.  `widen1' is `cmp.l <ea>,Dn' with only Dn widened
+            (a word against a longword).
+    cmpm    runs of `cmpm.<s> (Ay)+,(Ax)+' (records compared in memory):
+            the size, the length of the run, the count (`moveq #k,Dn'
+            among the four instructions before it), whether a `db<cc>'
+            closes a loop, and the branches after each.
+    cmpb    `cmp.b' and `cmpi.b' compares (char and byte values): the
+            source kind; `cmpi.b #-1' (0xFF) separately.
+
+usage:
+    tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
+    tools/cmpsurvey.py list KIND        # one line per site of KIND
+
+Python 3 standard library + m68k-elf-objdump.  Read-only.
+"""
+
+import os
+import re
+import sys
+from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import a5survey  # noqa: E402
+import arithsurvey  # noqa: E402
+
+KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb')
+
+_IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
+_SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
+                    r'|mul[su]w #(\d+),%(d\d))$')
+_MEM = r'(?:%a\d@[^,]*|%fp@\([^)]*\)|%a\d@\([^)]*\)|0x[0-9a-f]+|%pc@\([^)]*\))'
+_BCC = re.compile(r'^(b[a-z]{2})[sw]? ')
+
+
+def writes(t, d):
+    """Whether instruction text `t' writes register `d' (approximately:
+    `d' is its last operand, or it is a one-operand instruction on it)."""
+    if re.search(r',%' + d + r'$', t) or re.match(r'^\w+ %' + d + r'$', t):
+        return not t.startswith(('cmp', 'tst', 'btst'))
+    return False
+
+
+def bidx_sites(ins):
+    """[(addr, widening, index size, scale, source)] for byte indices."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _IDX.search(t)
+        if not m:
+            continue
+        dx, isz = m.group(2), m.group(3)
+        scale = 1
+        j = i - 1
+        while j >= 0 and i - j <= 8:
+            tj = ins[j][2]
+            s = _SCALE.match(tj)
+            if s and (s.group(2) == dx == s.group(3) or s.group(6) == dx or s.group(8) == dx):
+                if s.group(1):
+                    scale *= 2
+                elif s.group(5):
+                    scale <<= int(s.group(5))
+                else:
+                    scale *= int(s.group(7))
+                j -= 1
+                continue
+            if writes(tj, dx) or tj.startswith(('ext', 'andi')) and tj.endswith('%' + dx):
+                break
+            j -= 1
+        if j < 0 or i - j > 8:
+            continue
+        tj = ins[j][2]
+        wid = None
+        k = j
+        if re.match(r'^andiw #255,%' + dx + '$', tj):
+            wid, k = 'andi.w', j - 1
+        elif re.match(r'^extw %' + dx + '$', tj):
+            wid, k = 'ext.w', j - 1
+        if k < 0:
+            continue
+        mb = re.match(r'^moveb (.*),%' + dx + '$', ins[k][2])
+        if not mb:
+            continue
+        src = 'reg' if re.match(r'^%d\d$', mb.group(1)) else 'mem'
+        if wid is None:
+            wid = 'none'
+            for q in range(k - 1, max(k - 6, -1), -1):
+                tq = ins[q][2]
+                c = re.match(r'^clr([wl]) %' + dx + '$', tq)
+                if c:
+                    wid = 'clr.%s%s' % (c.group(1), '' if q == k - 1 else '(gap)')
+                    break
+                if writes(tq, dx) or _BCC.match(tq) or tq.startswith(('bra', 'jsr', 'bsr')):
+                    break
+        out.append((a, wid, isz, scale, src))
+    return out
+
+
+def mem2_sites(ins):
+    """([(addr, size, branch)] of `move M1,Dn; cmp M2,Dn',
+        [(addr, size, branch)] of `move M1,Dn; move M2,Dm; cmp Dm,Dn')."""
+    one, both = [], []
+    for i in range(1, len(ins)):
+        t = ins[i][2]
+        m = re.match(r'^cmp([bwl]) (' + _MEM + r'),%(d\d)$', t)
+        br = _BCC.match(ins[i + 1][2]).group(1) if i + 1 < len(ins) and _BCC.match(
+            ins[i + 1][2]) else '-'
+        if m:
+            s, dn = m.group(1), m.group(3)
+            p = re.match(r'^move' + s + r' (' + _MEM + r'),%' + dn + '$', ins[i - 1][2])
+            if p:
+                one.append((ins[i - 1][0], s, br))
+            continue
+        m = re.match(r'^cmp([bwl]) %(d\d),%(d\d)$', t)
+        if m and i >= 2:
+            s, dm, dn = m.groups()
+            l1 = re.match(r'^move' + s + r' (' + _MEM + r'),%(d\d)$', ins[i - 2][2])
+            l2 = re.match(r'^move' + s + r' (' + _MEM + r'),%(d\d)$', ins[i - 1][2])
+            if l1 and l2 and {l1.group(2), l2.group(2)} == {dm, dn}:
+                both.append((ins[i - 2][0], s, br))
+    return one, both
+
+
+def widened(ins, i, d):
+    """How register `d' was last written before ins[i], within 6
+    instructions: 'sign', 'zero', 'long' (another write) or None."""
+    for j in range(i - 1, max(i - 7, -1), -1):
+        t = ins[j][2]
+        if t == 'extl %' + d:
+            return 'sign'
+        if t == 'andil #65535,%' + d:
+            return 'zero'
+        if re.match(r'^movew .*,%' + d + '$', t):
+            for q in range(j - 1, max(j - 5, -1), -1):
+                if ins[q][2] == 'clrl %' + d:
+                    return 'zero'
+                if writes(ins[q][2], d):
+                    break
+            return None
+        if writes(t, d):
+            return 'long'
+    return None
+
+
+def widen_sites(ins):
+    """([(addr, dst kind, src kind, branch)] of `cmp.l Dm,Dn' with both
+    widened, [(addr, dst kind, src, branch)] of `cmp.l <ea>,Dn' with Dn
+    widened only)."""
+    two, one = [], []
+    for i, (a, _, t) in enumerate(ins):
+        br = _BCC.match(ins[i + 1][2]).group(1) if i + 1 < len(ins) and _BCC.match(
+            ins[i + 1][2]) else '-'
+        m = re.match(r'^cmpl %(d\d),%(d\d)$', t)
+        if m:
+            ks, kd = widened(ins, i, m.group(1)), widened(ins, i, m.group(2))
+            if ks in ('sign', 'zero') and kd in ('sign', 'zero'):
+                two.append((a, kd, ks, br))
+                continue
+            if kd in ('sign', 'zero') and ks == 'long':
+                one.append((a, kd, 'reg', br))
+            continue
+        m = re.match(r'^cmpl (' + _MEM + r'),%(d\d)$', t)
+        if m:
+            kd = widened(ins, i, m.group(2))
+            if kd in ('sign', 'zero'):
+                one.append((a, kd, 'mem', br))
+    return two, one
+
+
+def cmpm_sites(ins):
+    """[(addr, size, run length, count, loop, branches)] of cmpm runs;
+    count is the `moveq #k' among the four instructions before the run
+    (`k', the register left out), or '-'."""
+    out = []
+    i = 0
+    while i < len(ins):
+        m = re.match(r'^cmpm([bwl]) ', ins[i][2])
+        if not m:
+            i += 1
+            continue
+        a, s, n, brs = ins[i][0], m.group(1), 0, []
+        count = '-'
+        for j in range(i - 1, max(i - 5, -1), -1):
+            q = re.match(r'^moveq #(-?\d+),%d\d$', ins[j][2])
+            if q:
+                count = '#' + q.group(1)
+                break
+        loop = False
+        while i < len(ins) and re.match(r'^cmpm' + s + ' ', ins[i][2]):
+            n += 1
+            i += 1
+            if i < len(ins):
+                b = re.match(r'^(b[a-z]{2}|db[a-z]{1,2})[sw]? ', ins[i][2])
+                if b:
+                    brs.append(b.group(1))
+                    loop = loop or b.group(1).startswith('db')
+                    i += 1
+        out.append((a, s, n, count, loop, '/'.join(brs)))
+    return out
+
+
+def cmpb_sites(ins):
+    """[(addr, form)] of byte compares."""
+    out = []
+    for a, _, t in ins:
+        if re.match(r'^cmpib #-1,', t):
+            out.append((a, 'cmpi.b #-1'))
+        elif re.match(r'^cmpib ', t):
+            out.append((a, 'cmpi.b'))
+        elif re.match(r'^cmpb %d\d,', t):
+            out.append((a, 'cmp.b reg'))
+        elif re.match(r'^cmpb ', t):
+            out.append((a, 'cmp.b mem'))
+    return out
+
+
+def scan():
+    res = {k: [] for k in KINDS}
+    for r0, r1, name in arithsurvey.routines():
+        ins = a5survey.reached(r0, r1)
+        res['bidx'] += [(r0, name) + s for s in bidx_sites(ins)]
+        one, both = mem2_sites(ins)
+        res['mem2'] += [(r0, name) + s for s in one]
+        res['both'] += [(r0, name) + s for s in both]
+        two, one = widen_sites(ins)
+        res['widen'] += [(r0, name) + s for s in two]
+        res['widen1'] += [(r0, name) + s for s in one]
+        res['cmpm'] += [(r0, name) + s for s in cmpm_sites(ins)]
+        res['cmpb'] += [(r0, name) + s for s in cmpb_sites(ins)]
+    return res
+
+
+def first(sites, n=4):
+    return ', '.join('0x%X' % s[2] for s in sites[:n])
+
+
+def counts(title, sites, key):
+    print('%s: %d' % (title, len(sites)))
+    for k, v in sorted(Counter(key(s) for s in sites).items(), key=lambda kv: -kv[1]):
+        print('  %-40s %4d  e.g. %s' % (' '.join(str(x) for x in k), v,
+                                        first([s for s in sites if key(s) == k])))
+
+
+def summary(res):
+    counts('byte indices (widening, index size, scale, source)', res['bidx'],
+           lambda s: (s[3], s[4], s[5], s[6]))
+    counts('`move M1,Dn; cmp M2,Dn\' (size, branch)', res['mem2'], lambda s: (s[3], s[4]))
+    counts('`move M1,Dn; move M2,Dm; cmp Dm,Dn\' (size, branch)', res['both'],
+           lambda s: (s[3], s[4]))
+    counts('`cmp.l Dm,Dn\' both widened (Dn, Dm, branch)', res['widen'],
+           lambda s: (s[3], s[4], s[5]))
+    counts('`cmp.l <ea>,Dn\' Dn widened only (Dn, ea, branch)', res['widen1'],
+           lambda s: (s[3], s[4], s[5]))
+    counts('cmpm runs (size, run, count, loop, branches)', res['cmpm'],
+           lambda s: (s[3], s[4], s[5], s[6], s[7]))
+    counts('byte compares', res['cmpb'], lambda s: (s[3],))
+
+
+def main(argv):
+    if not argv or argv[0] not in ('summary', 'list') or (
+            argv[0] == 'list' and (len(argv) < 2 or argv[1] not in KINDS)):
+        print(__doc__)
+        return 2
+    res = scan()
+    if argv[0] == 'summary':
+        summary(res)
+    else:
+        for s in res[argv[1]]:
+            print('0x%06X %-28s %s' % (s[2], '%06X %s' % (s[0], s[1]),
+                                      ' '.join(str(x) for x in s[3:])))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

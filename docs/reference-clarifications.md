@@ -356,6 +356,14 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     `%natural_alignment`?  *Current: such fields without an attribute are
     refused under the natural rules.*
 
+29. **Table 4-1, p. 4-2 (= / <> on records).**  The table allows `=` and
+    `<>` on "All types".  For a record with variant arms of different
+    sizes, the bytes past the active arm are as undefined as padding.  Is
+    such a compare a whole-record byte compare, an error, or undefined?
+    And for records with padding between fields?  *Current: records with
+    padding are refused; variant records whose arms together cover every
+    byte are compared bytewise (review of domain-pascal-aaj).*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and

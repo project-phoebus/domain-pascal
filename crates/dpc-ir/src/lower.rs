@@ -546,6 +546,10 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 cond(a, out);
                 cond(b, out);
             }
+            Cond::Block { lhs, rhs, size, .. } => {
+                addr(lhs, *size, out);
+                addr(rhs, *size, out);
+            }
         }
     }
     match &s.kind {
@@ -695,6 +699,10 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
                 cond(a, f);
                 cond(b, f);
+            }
+            Cond::Block { lhs, rhs, .. } => {
+                addr(lhs, f);
+                addr(rhs, f);
             }
         }
     }
@@ -855,6 +863,10 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
             Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
                 cond(a, size, max);
                 cond(b, size, max);
+            }
+            Cond::Block { lhs, rhs, .. } => {
+                addr(lhs, size, max);
+                addr(rhs, size, max);
             }
         }
     }
@@ -1414,6 +1426,10 @@ fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
             cond_calls(a, out);
             cond_calls(b, out);
         }
+        Cond::Block { lhs, rhs, .. } => {
+            addr_calls(lhs, out);
+            addr_calls(rhs, out);
+        }
     }
 }
 
@@ -1513,6 +1529,7 @@ fn cond_uses_static(c: &Cond) -> bool {
         Cond::Test(e) => expr_uses_static(e),
         Cond::Not(x) => cond_uses_static(x),
         Cond::AndThen(a, b) | Cond::OrElse(a, b) => cond_uses_static(a) || cond_uses_static(b),
+        Cond::Block { lhs, rhs, .. } => addr_uses_static(lhs) || addr_uses_static(rhs),
     }
 }
 
@@ -1861,6 +1878,10 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                 Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
                     self.cond(a)?;
                     self.cond(b)
+                }
+                Cond::Block { lhs, rhs, size, .. } => {
+                    self.addr(lhs, *size)?;
+                    self.addr(rhs, *size)
                 }
             }
         }
@@ -2405,6 +2426,9 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
     if is_set(p, lhs.ty) && is_set(p, rhs.ty) {
         return set_compare(p, e, rel, lhs, rhs);
     }
+    if matches!(p.types.kind(lhs.ty), TypeKind::Record(_)) {
+        return record_compare(p, e, rel, lhs, rhs);
+    }
     let comparable = |x: &SExpr| p.types.is_ordinal(x.ty) || p.types.is_pointer(x.ty);
     if !comparable(lhs) || !comparable(rhs) {
         return Err(unsupported(
@@ -2455,23 +2479,155 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         }
         _ => (operand(lhs, None)?, operand(rhs, None)?),
     };
-    if l.ty() != r.ty() {
-        return Err(unsupported(
-            e.span,
-            format!(
-                "comparing a {}-byte {} value with a {}-byte {} one (implicit widening) is",
-                l.ty().bytes(),
-                sign_name(l.ty()),
-                r.ty().bytes(),
-                sign_name(r.ty())
-            ),
-        ));
-    }
+    let (l, r) = widen_operands(e, l, r)?;
     Ok(Cond::Compare {
         op: rel,
         lhs: l,
         rhs: r,
     })
+}
+
+/// The operands of a comparison brought to one type (ref 4.3.1 p. 4-5:
+/// operands smaller than 32 bits are computed "with 32 bits of precision
+/// when necessary to achieve correct arithmetic"; p. 9-32, message 250:
+/// the compiler knows a negative number never equals an unsigned subrange
+/// value, so comparisons have their mathematical meaning).
+///
+/// - A signed word and an unsigned one (`integer` against `0..65535`):
+///   both widened to longwords, compared signed (codegen-patterns 7.1,
+///   "Mixed widths and signs": TTY_$K_PUT 0xE67C42..0xE67C4A `move.w
+///   D2,D0; clr.l D1; ext.l D0; move.w (A4),D1; cmp.l D1,D0; bge.b`;
+///   tty_$i_put_chars 0xE1B050..0xE1B058; tty_$i_err 0xE1BD7C..0xE1BD8A;
+///   26 `cmp.l` of two widened words in compiled code, every ordered
+///   one with a signed branch; `tools/cmpsurvey.py`, widen).
+/// - A word against a longword: the word widened by its own sign, when
+///   the longword is signed or both are unsigned (`ext.l Dn; cmp.l
+///   <ea>,Dn`, 0xE179BC; `clr.l Dn; move.w; cmp.l <ea>,Dn; bls`,
+///   0xE0D7CE; 38 sites, `tools/cmpsurvey.py`, widen1).
+///
+/// Anything else that mixes widths or signs (a byte against a word, a
+/// signed and an unsigned longword, a signed word against an unsigned
+/// longword) is not supported yet.
+fn widen_operands(e: &SExpr, l: Expr, r: Expr) -> Res<(Expr, Expr)> {
+    let (lt, rt) = (l.ty(), r.ty());
+    if lt == rt {
+        return Ok((l, r));
+    }
+    let long = Scalar::signed(Width::Long);
+    match (lt.width, rt.width) {
+        (Width::Word, Width::Word) => return Ok((convert(l, long), convert(r, long))),
+        (Width::Word, Width::Long) if rt.sign == Sign::Signed || lt.sign == rt.sign => {
+            return Ok((convert(l, rt), r))
+        }
+        (Width::Long, Width::Word) if lt.sign == Sign::Signed || lt.sign == rt.sign => {
+            return Ok((l, convert(r, lt)))
+        }
+        _ => {}
+    }
+    Err(unsupported(
+        e.span,
+        format!(
+            "comparing a {}-byte {} value with a {}-byte {} one (implicit widening) is",
+            lt.bytes(),
+            sign_name(lt),
+            rt.bytes(),
+            sign_name(rt)
+        ),
+    ))
+}
+
+/// `lhs = rhs` / `lhs <> rhs` of two records (ref Table 4-1, p. 4-2:
+/// `=` and `<>` for "All types"), compared in memory ([`Cond::Block`];
+/// codegen-patterns 7.1, "Records").  The image compares every byte
+/// (`cmpm`), so bytes no field covers (alignment padding) would take part;
+/// the reference does not say what equality of records with such bytes
+/// means, and the kernel sites found compare UIDs and clock values, which
+/// have none: a record with uncovered bytes is not supported yet.  Arrays
+/// and strings are not supported yet (the byte loop at 0xE6C278 compares
+/// a 6-character array with `cmpm.b`, not `cmpm.w` as the 6-byte records
+/// are, so the unit depends on more than the size).
+fn record_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    if !matches!(rel, Rel::Eq | Rel::Ne) {
+        return Err(unsupported(e.span, "ordering records is"));
+    }
+    if lhs.value.is_some() || rhs.value.is_some() {
+        return Err(unsupported(e.span, "comparing a record constant is"));
+    }
+    let size = p.types.size(lhs.ty);
+    if !covers(p, lhs.ty, size) {
+        return Err(unsupported(
+            e.span,
+            "comparing records with bytes no field covers (padding; the reference gives no \
+             rule, codegen-patterns 7.1) is",
+        ));
+    }
+    Ok(Cond::Block {
+        op: rel,
+        lhs: addr_of(p, lhs)?,
+        rhs: addr_of(p, rhs)?,
+        size,
+    })
+}
+
+/// Whether every byte of an object of type `ty` (`size` bytes) belongs to
+/// some field or element: a record whose fields (all variants included)
+/// leave no gap, in bytes or, in a packed record (ref 3.10.7), in bits,
+/// and are covered themselves; an array of such elements with no room
+/// between them; or a scalar that fills its size.  Sets (whose unused
+/// bits are not values) are not taken to be covered.
+fn covers(p: &Program, ty: TypeId, size: u32) -> bool {
+    fn arms<'a>(v: &'a dpc_sema::types::VariantPart, out: &mut Vec<&'a dpc_sema::types::Field>) {
+        out.extend(v.tag.iter());
+        for arm in &v.arms {
+            out.extend(arm.fields.iter());
+            if let Some(w) = arm.variant.as_deref() {
+                arms(w, out);
+            }
+        }
+    }
+    match p.types.kind(ty) {
+        TypeKind::Record(r) => {
+            let mut fs: Vec<&dpc_sema::types::Field> = r.fields.iter().collect();
+            if let Some(v) = r.variant.as_deref() {
+                arms(v, &mut fs);
+            }
+            // Bit spans: a field of an unpacked record, or a whole object
+            // in a packed one, is covered when its type is; a bit field
+            // covers its bits.
+            let mut spans: Vec<(u32, u32)> = Vec::new();
+            for f in fs {
+                let n = p.types.size(f.ty);
+                let (bit, width) = match f.bits {
+                    Some(b) if !b.is_whole_object(n) => (b.bit, b.width),
+                    Some(b) => (b.bit, n * 8),
+                    None => (f.offset * 8, n * 8),
+                };
+                if (f.bits.is_none() || width == n * 8) && !covers(p, f.ty, n) {
+                    return false;
+                }
+                spans.push((bit, bit + width));
+            }
+            spans.sort();
+            let mut end = 0;
+            for (a, b) in spans {
+                if a > end {
+                    return false;
+                }
+                end = end.max(b);
+            }
+            end >= size * 8
+        }
+        TypeKind::Array { elem, index, .. } => {
+            let n = p.types.size(*elem);
+            let count = p
+                .types
+                .ordinal_range(*index)
+                .map_or(0, |(lo, hi)| (hi - lo + 1) as u32);
+            count * n == size && covers(p, *elem, n)
+        }
+        TypeKind::Set { .. } | TypeKind::Varying { .. } | TypeKind::Error => false,
+        _ => true,
+    }
 }
 
 /// `s = []` and `s <> []` (ref "Set Operations", p. 4-176) for a
@@ -3887,11 +4043,25 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 let d = i32::try_from((i - lo) * *elem_size as i64).map_err(|_| big())?;
                 return Ok(b.offset_by(d));
             }
-            let ix = value_of(p, index)?;
-            if !matches!(ix.ty().width, Width::Word | Width::Long) {
-                // A byte index (char, boolean, a byte subrange) would need
-                // a zero- or sign-extension first: not catalogued.
-                return Err(unsupported(index.span, "an array index of one byte is"));
+            let mut ix = value_of(p, index)?;
+            if ix.ty().width == Width::Byte {
+                // A byte index of an unsigned type (`char`, a char
+                // subrange) is zero-extended to a word, `clr.w Dn; move.b
+                // x,Dn`, then scaled and used as a `.w` index (codegen-
+                // patterns 5.2, "Byte indices": 21 of the 27 byte indices
+                // of compiled code, e.g. tty_$i_enable_crash_func 0xE672AA..
+                // 0xE672B4, TTY_$K_SET_INPUT_BREAK_MODE 0xE67874; 5 more
+                // with the `clr.w` earlier, one with `clr.l`).  A signed one
+                // (a boolean) would need `ext.w`, which no byte index of the
+                // image has.
+                if ix.ty().sign != Sign::Unsigned {
+                    return Err(unsupported(
+                        index.span,
+                        "an array index of a signed byte type (no `ext.w` index in the image, \
+                         codegen-patterns 5.2) is",
+                    ));
+                }
+                ix = convert(ix, Scalar::unsigned(Width::Word));
             }
             if ix.ty().width == Width::Word {
                 // A word index is scaled at the word's width and used as

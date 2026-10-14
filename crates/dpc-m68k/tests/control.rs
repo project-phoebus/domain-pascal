@@ -212,13 +212,6 @@ end;",
         ),
         (
             "begin
-  if w = r then r := 0;
-  r := 1;
-end;",
-            "the left one is not held in a data register",
-        ),
-        (
-            "begin
   if u > 0 then r := 0;
   r := 1;
 end;",
@@ -270,6 +263,16 @@ begin
   y := 2;
 end;",
             "whose lowest free register an earlier statement left a value in",
+        ),
+        // A variable in memory against a parameter held in a register:
+        // which one the original loaded is not known.
+        (
+            "(x: integer); internal;
+begin
+  r := x;
+  if w < x then r := 0;
+end;",
+            "comparing a variable in memory with one held in a register",
         ),
         // A0 after a call, A1 written before (A0 or A1 in the image).
         (
@@ -547,4 +550,62 @@ end;
         e.contains("whose pointer is not a variable the body leaves unchanged"),
         "{e}"
     );
+}
+
+/// Two variables in memory: the left one loaded, the right one the
+/// operand (TTY_$K_SET_FLAG 0xE67462 `move.w (0x2cc,A2),D0; cmp.w
+/// (0x2ca,A2),D0; beq.b`; codegen-patterns 7.1).  A signed and an
+/// unsigned word: both widened, the scheduler interleaving the two
+/// widenings (TTY_$K_PUT 0xE67C42..0xE67C4A).
+#[test]
+fn two_variables_in_memory() {
+    let b = body(
+        "procedure t; internal;
+begin
+  if w <> r then r := 0;
+  if w < u then r := 1;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.w\t(W).l,%d0",
+            "cmp.w\t(R).l,%d0",
+            "beq.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.w\t(W).l,%d0",
+            "clr.l\t%d1",
+            "ext.l\t%d0",
+            "move.w\t(U).l,%d1",
+            "cmp.l\t%d1,%d0",
+            "bge.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+        ]
+    );
+}
+
+/// Records of a size whose `cmpm` form the image does not show (12..28
+/// bytes; codegen-patterns 7.1, "Records") are refused, not compared
+/// with a guessed loop.
+#[test]
+fn record_compare_of_an_uncatalogued_size_is_refused() {
+    let e = compile(
+        "module m;
+type
+  t3 = record a, b, c: integer32; end;
+var
+  x, y: extern t3;
+  r: extern integer;
+procedure t; internal;
+begin
+  if x = y then r := 0;
+end;
+",
+    )
+    .unwrap_err();
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("comparing records of 12 bytes"), "{e:?}");
 }

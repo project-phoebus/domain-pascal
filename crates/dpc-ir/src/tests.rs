@@ -1607,6 +1607,101 @@ fn conditions() {
             rhs: sym("L", Scalar::signed(Width::Long))
         }
     );
+    // A signed and an unsigned word: both widened, compared as signed
+    // longwords (TTY_$K_PUT 0xE67C42; ref 4.3.1 p. 4-5), so that -1 <
+    // 40000 holds.
+    let long = Scalar::signed(Width::Long);
+    let widened = |name: &str, ty: Scalar| Expr::Convert {
+        value: Box::new(sym(name, ty)),
+        ty: long,
+    };
+    assert_eq!(
+        cond("w < u"),
+        Cond::Compare {
+            op: Rel::Lt,
+            lhs: widened("W", W),
+            rhs: widened("U", UW)
+        }
+    );
+    assert_eq!(
+        cond("u > w"),
+        Cond::Compare {
+            op: Rel::Gt,
+            lhs: widened("U", UW),
+            rhs: widened("W", W)
+        }
+    );
+    // A word against a longword: the word widened by its sign.
+    assert_eq!(
+        cond("w < l"),
+        Cond::Compare {
+            op: Rel::Lt,
+            lhs: widened("W", W),
+            rhs: sym("L", long)
+        }
+    );
+    assert_eq!(
+        cond("l = u"),
+        Cond::Compare {
+            op: Rel::Eq,
+            lhs: sym("L", long),
+            rhs: widened("U", UW)
+        }
+    );
+}
+
+/// `=` and `<>` of records (ref Table 4-1, p. 4-2): [`Cond::Block`] over
+/// the record's bytes; records with padding are refused.
+#[test]
+fn record_comparisons() {
+    let src = |body: &str| {
+        format!(
+            "module m;
+type
+  uid_t = record high, low: integer32; end;
+  pad_t = record c: char; w: integer; end;
+  arr_t = array[1..4] of integer;
+var
+  a, b: extern uid_t;
+  x, y: extern pad_t;
+  v1, v2: extern arr_t;
+  w: extern integer;
+procedure t; internal;
+begin
+{body}
+end;
+"
+        )
+    };
+    let m = lower_src(&src("if a <> b then w := 0;")).unwrap();
+    let StmtKind::If { cond, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    let at = |n: &str| Addr::Symbol {
+        name: n.into(),
+        offset: 0,
+    };
+    assert_eq!(
+        *cond,
+        Cond::Block {
+            op: Rel::Ne,
+            lhs: at("A"),
+            rhs: at("B"),
+            size: 8
+        }
+    );
+    let e = errs(&src("if x = y then w := 0;"));
+    assert!(e[0].contains("bytes no field covers"), "{e:?}");
+    let e = errs(&src("if a < b then w := 0;"));
+    assert!(e[0].contains("ordering records"), "{e:?}");
+    // Arrays: accepted by the checker (Table 4-1, "All types"), refused
+    // here (the unit of the image's array loops is not settled, 0xE6C278
+    // `cmpm.b`).
+    let e = errs(&src("if v1 = v2 then w := 0;"));
+    assert!(
+        e[0].contains("comparing values other than ordinals and pointers"),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -1617,9 +1712,6 @@ fn unsupported_conditions_and_loops() {
         e[0].clone()
     };
     assert!(one("if b and b2 then w := 0;").contains("`and`/`or` in a condition"));
-    assert!(one("if w < l then w := 0;")
-        .ends_with("comparing a 2-byte signed value with a 4-byte signed one (implicit widening) is not supported yet"));
-    assert!(one("if w < u then w := 0;").contains("implicit widening"));
     assert!(one("if u < 70000 then w := 0;").ends_with(
         "comparing with a constant outside the other operand's type is not supported yet"
     ));
@@ -1927,14 +2019,47 @@ end;
     assert!(e[0].contains("`rshft` of a signed operand"), "{e:?}");
     let e = errs(
         "module m;
-var c: extern char; s: array[char] of integer;
+var c: extern boolean; s: array[boolean] of integer;
 function f: integer; internal;
 begin
   f := s[c];
 end;
 ",
     );
-    assert!(e[0].contains("an array index of one byte"), "{e:?}");
+    assert!(
+        e[0].contains("an array index of a signed byte type"),
+        "{e:?}"
+    );
+    // A `char` index is zero-extended to a word (codegen-patterns 5.2,
+    // "Byte indices").
+    let m = lower_src(
+        "module m;
+var c: extern char; s: extern array[char] of integer; w: extern integer;
+procedure t; internal;
+begin
+  w := s[c];
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    let Expr::Load {
+        addr: Addr::Index { index, scale, .. },
+        ..
+    } = value
+    else {
+        panic!("{value:?}")
+    };
+    assert_eq!(*scale, 2);
+    assert_eq!(
+        **index,
+        Expr::Convert {
+            value: Box::new(sym("C", Scalar::unsigned(Width::Byte))),
+            ty: Scalar::unsigned(Width::Word)
+        }
+    );
 }
 
 /// Ref 4.3.3, pp. 4-6..4-7: `div` and `mod` are unsigned when both

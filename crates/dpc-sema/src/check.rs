@@ -3092,8 +3092,20 @@ impl<'t> Checker<'t> {
                 } else if self.types.is_pointer(l.ty) && self.types.is_pointer(r.ty) {
                     // Table 4-1: < > etc. are for "Non-pointer types".
                     !ordered && self.pointers_compatible(l.ty, r.ty)
+                } else if self.strings_compatible(l.ty, r.ty) {
+                    true
+                } else if self.is_structured(l.ty) && self.same_type(l.ty, r.ty) {
+                    // Table 4-1 p. 4-2: `=` and `<>` apply to "All types",
+                    // records and arrays among them.  Ordering them (the
+                    // table's "Non-pointer types" row) has no meaning the
+                    // reference gives: not supported.
+                    if ordered {
+                        self.unsupported(span, "ordering records or arrays (`<`, `>`, ...)");
+                        return self.error_expr(span);
+                    }
+                    true
                 } else {
-                    self.strings_compatible(l.ty, r.ty)
+                    false
                 };
                 if !ok {
                     self.error(span, "operands of the comparison are not compatible");
@@ -3916,6 +3928,14 @@ impl<'t> Checker<'t> {
             (K::RoutinePointer(x), K::RoutinePointer(y)) => a == b || x == y,
             _ => false,
         }
+    }
+
+    /// A record or an array (not a string literal).
+    fn is_structured(&self, t: TypeId) -> bool {
+        matches!(
+            self.types.kind(self.types.canon(t)),
+            TypeKind::Record(_) | TypeKind::Array { .. }
+        )
     }
 
     /// Strings and char arrays of equal length (ref "Array Operations",

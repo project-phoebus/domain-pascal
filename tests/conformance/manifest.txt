@@ -183,3 +183,10 @@ tests/conformance/proc2_pguid_to_upgid.pas  PROC2_$PGUID_TO_UPGID  --section-add
 # set of char, a routine's static between unit-level variables.
 tests/conformance/tty_set_dfl_funcs.pas      0xE6726E  --section-addr .moddata.TTY=0xE8242C  a5-always=TTY_$I_SET_DFL_FUNCS  module-routines=TTY_$I_SET_FUNCS=0xE6720E
 tests/conformance/tty_wired_data.pas         0xE1AED0:14 0xE1AEE4:14  --section-addr .moddata.TTY.WIRED_DATA=0xE2DDB4
+# Two variables in memory compared, the left one loaded (codegen-patterns
+# 7.1; bead domain-pascal-aaj).
+tests/conformance/acl_clear_super.pas        ACL_$CLEAR_SUPER  --section-addr .bss.moddata.ACL_=0xE7CF54
+# Record comparisons (codegen-patterns 7.1, "Records"; bead
+# domain-pascal-aaj): `<>' of two UIDs with `cmpm.l', another unit's
+# object by `movea.l #abs', the result by `sne'.
+tests/conformance/pacct_on.pas               PACCT_$ON:26  --section-addr .bss.moddata.PACCT=0xE817EC

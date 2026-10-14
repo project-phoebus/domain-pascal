@@ -38,6 +38,10 @@ Tests:
   registers: `move.<s> #0`, `move.b #0xff`, WIN_ 0xE19112, RING
   0xE758E2), 12.4 R7 (no reuse of a volatile variable's computed
   value), 12.5 (a volatile local stays in its frame slot).
+- `data/byte_index` - codegen-patterns 5.2 ("Byte indices"): `char`
+  indices zero-extended with `clr.w; move.b`, scaled, `.w` indices
+  (tty_$i_enable_crash_func 0xE672AA, TTY_$K_SET_INPUT_BREAK_MODE
+  0xE67874, VTOC_$LOOKUP 0xE38FD2).
 - `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
   restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS
@@ -96,6 +100,15 @@ Tests:
   `nil`, `cmpi` against constants, `cmp` with a held left operand,
   signed and unsigned branches, booleans with `tst.b` and `bpl`/`bmi`,
   `not`, `and then`, `or else`.
+- `control/compares_mixed` - codegen-patterns 7.1, 8, 12.4 R11: two
+  variables in memory (the left one loaded, TTY_$K_SET_FLAG 0xE67462),
+  a signed and an unsigned word widened to longwords (TTY_$K_PUT
+  0xE67C42, tty_$i_put_chars 0xE1B050), a word against a longword
+  (0xE179BC), records compared with `cmpm` (8 bytes unrolled,
+  TTY_$K_SIMULATE_TERMINAL_INPUT 0xE1C1AC; 6 bytes `cmpm.w`/`dbne`,
+  0xE16EC2; 32 bytes `cmpm.l`/`dbne`, 0xE3D84E; another unit's record
+  by `movea.l #abs`) and as a boolean value with `sne`/`seq` (PACCT_$ON
+  0xE5A9C0).
 - `control/repeat` - codegen-patterns 7.2: `repeat ... until`, the head
   aligned, an `or else` test (0xE031A2..0xE031B6), a call in the body
   popped.
