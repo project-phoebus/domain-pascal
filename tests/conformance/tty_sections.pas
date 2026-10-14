@@ -29,7 +29,7 @@
   and avail_hint by value, `internal'); the call as `discard' of the
   function; the descriptor record up to session_id at 0x54 (../source
   domain_os/tty/tty.h), the bytes before it as one stand-in array;
-  `unused_8' and `standin' as in tty_k_flags.pas. }
+  `unused_8' and `standin' as in tty_k_flags_int.pas. }
 module tty;
 type
   status_$t = record case integer of 1: (all: integer32); end;
@@ -46,7 +46,7 @@ var
   standin: integer32;
 
 function tty_$i_get_desc(line: integer; out status: status_$t):
-  tty_$desc_ptr_t; options(extern, val_param);
+  integer32; options(extern, val_param, a0_return);
 
 { WIRED_PROC 0xE1B00A, outside the unit }
 function tty_$i_put_chars(var tty: tty_$desc_t; in buf: univ tty_$chars_t;
@@ -63,23 +63,23 @@ end;
 procedure tty_$k_set_session_id(in line: integer; in sid: integer;
                                 out status: status_$t);
 var
-  tty: tty_$desc_ptr_t;
+  tty: integer32;
   unused_8: integer32;
 begin
   tty := tty_$i_get_desc(line, status);
   if status.all <> status_$ok then
     return;
-  tty^.session_id := sid;
+  tty_$desc_ptr_t(tty)^.session_id := sid;
 end;
 
 procedure tty_$k_inq_session_id(in line: integer; out sid: integer;
                                 out status: status_$t);
 var
-  tty: tty_$desc_ptr_t;
+  tty: integer32;
   unused_8: integer32;
 begin
   tty := tty_$i_get_desc(line, status);
   if status.all <> status_$ok then
     return;
-  sid := tty^.session_id;
+  sid := tty_$desc_ptr_t(tty)^.session_id;
 end;

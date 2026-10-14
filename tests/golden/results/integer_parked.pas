@@ -13,7 +13,7 @@
   - setraw: a pointer local assigned the transferred value, a call after:
     `movea.l A0,A2' right after the call (TTY_$I_SET_RAW 0xE673CC);
   - inqraw: a pointer local assigned the transferred value, no call
-    after, with `--no-park-pointer-locals': left in A0, the `out'
+    after: left in A0, the `out'
     parameter's slot in A1 (TTY_$I_INQ_RAW 0xE67410..0xE67414). }
 module iparked;
 type

@@ -6,7 +6,7 @@ image (bead domain-pascal-xdh.3).
     srcsurvey.py run [--rev REV] [--source DIR] [--work DIR] [--dpc DPC]
                      [--no-workaround NAME]... [--no-conform]
                      [--no-build-settings] [--baseline [FILE] | --update]
-                     [--dpc-opt OPT]... [--no-park-d0]
+                     [--dpc-opt OPT]...
                      [-v] [MODULE.pas ...]
     srcsurvey.py summarise DIAGNOSTICS.txt [--tree DIR] [-v]
 
@@ -33,8 +33,9 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
   3. Stage "check" and "codegen", repeated: `dpc --check-only', then full
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
-     `extern' heading is in an insert file, and dropped from the `define'
-     list; an `internal' one becomes an `internal; extern' heading, or,
+     `extern' heading is in an insert file, and dropped from every `define'
+     part, lists included (bead domain-pascal-g6ky); an `internal' one
+     becomes an `internal; extern' heading, or,
      when the module file has its `forward' heading, that heading becomes
      `extern') and
      the stage is run again, until the module compiles.  So each routine
@@ -88,11 +89,11 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      the switch could be put as well.
 
 Experiments (not for the baseline): `--dpc-opt OPT' gives OPT to every
-dpc run, `--no-park-d0' leaves out step 5's `--park-d0' setting.  With a
-REV of a scratch clone of ../source (--source) whose TTY Pascal declares
-TTY_$I_GET_DESC `integer32; options(a0_return)', `--no-park-d0
---dpc-opt=--no-park-pointer-locals' checks bead domain-pascal-yzxr's
-reading (codegen-patterns 3, "Pointer locals held in D0").
+dpc run (with a REV of a scratch clone of ../source, --source, to try a
+changed translation).  The D0 parking of pointer locals (`dpc --park-d0',
+a step 5 setting taken from tools/resultsurvey.py's `parkd0' list) was
+retired with the integer reading of TTY_$I_GET_DESC (codegen-patterns 3,
+"Pointer locals held in D0"; bead domain-pascal-78n2).
 
 The run ends with a summary of the top-level routines by status (OK,
 CODE-OK, MISMATCH, SETUP, STUB: stubbed for a diagnostic, BLOCKED: the
@@ -310,6 +311,7 @@ TOKEN_RE = re.compile(r"""
 OPTION_WORDS = {'internal', 'extern', 'forward', 'val_param', 'nosave', 'noreturn',
                 'abnormal', 'variable', 'd0_return', 'a0_return', 'c_param', 'options'}
 DECL_WORDS = {'var', 'const', 'type', 'label', 'define'}
+TOKEN_COMMENT_RE = re.compile(r'\{[^}]*\}|\(\*.*?\*\)|"[^"\n]*"', re.S)
 
 
 def tokenize(text):
@@ -667,26 +669,93 @@ def extern_forwards(text, names):
     return ''.join(out)
 
 
+def define_items(text):
+    """The `define' parts of TEXT (ref 7.2.2, p. 7-5): [(define token,
+    [item])], an item (start, end, [(name, start, end)], initialised)
+    from its first name to its `;'.  Items are `name;', `name := init;'
+    and the list form `a, b, c;' (docs/reference-clarifications.md
+    "7.2.2 Lists in the define statement"); comments and strings are
+    skipped (tokenize).  A part is the word `define' at a declaration's
+    start (after `;' or at the top) and the items that follow it."""
+    toks = tokenize(text)
+    parts = []
+    k = 0
+    while k < len(toks):
+        t = toks[k]
+        if not (t[0] == 'word' and t[1] == 'define' and (k == 0 or toks[k - 1][1] == ';')):
+            k += 1
+            continue
+        items = []
+        k += 1
+        while k + 1 < len(toks) and toks[k][0] == 'word' and toks[k][1] not in DECL_WORDS \
+                and toks[k + 1][1] in (',', ';', ':='):
+            start = toks[k][2]
+            names = []
+            while True:
+                names.append((text[toks[k][2]:toks[k][3]], toks[k][2], toks[k][3]))
+                if k + 2 < len(toks) and toks[k + 1][1] == ',' and toks[k + 2][0] == 'word':
+                    k += 2
+                    continue
+                break
+            k += 1
+            init = toks[k][1] == ':='
+            depth = 0
+            while k < len(toks) and not (toks[k][1] == ';' and depth == 0):
+                depth += {'(': 1, '[': 1, ')': -1, ']': -1}.get(toks[k][1], 0)
+                k += 1
+            if k == len(toks):
+                break
+            items.append((start, toks[k][3], names, init))
+            k += 1
+        parts.append((t, items))
+    return parts
+
+
+def _cut_line(text, a, b):
+    """The span A..B of TEXT widened to whole lines when only blanks are
+    around it on its first and last line (so a removed item takes its line
+    with it)."""
+    ls = text.rfind('\n', 0, a) + 1
+    le = text.find('\n', b)
+    le = len(text) if le < 0 else le
+    if not text[ls:a].strip() and not text[b:le].strip():
+        return ls, min(le + 1, len(text))
+    return a, b
+
+
 def drop_defines(text, names):
-    """Remove NAMES from the `define' part of a module's TEXT (one name
-    per item, `define a; b;'); the word `define' goes when none is left."""
-    m = re.search(r'(?im)^define\b', text)
-    if not m or not names:
+    """Remove NAMES from the `define' parts of a module's TEXT (define_items:
+    one name per item, `define a; b := 1;', or a list, `define a, b, c;'):
+    an item whose names all go is removed (its line too when nothing else
+    is on it), a list keeps the others (`b, c;', with any comment inside
+    it after the `;'); a part left empty goes whole, the word `define'
+    and the comments between its items too."""
+    if not names:
         return text
     lower = {n.lower() for n in names}
-    i = m.end()
-    items = []
-    tok = re.compile(r'\s*(\{[^}]*\})|\s*([A-Za-z_$][\w$]*)\s*;')
-    while True:
-        t = tok.match(text, i)
-        if not t:
-            break
-        items.append((t.start(), t.end(), t.group(2)))
-        i = t.end()
-    kept = [text[s:e] for s, e, n in items if n is None or n.lower() not in lower]
-    if not any(n and n.lower() not in lower for _s, _e, n in items):
-        return text[:m.start()] + ''.join(kept).lstrip('\n') + text[i:]
-    return text[:m.end()] + ''.join(kept) + text[i:]
+    edits = []                      # (start, end, replacement)
+    for d, items in define_items(text):
+        left = 0
+        mark = len(edits)
+        for start, end, nms, _init in items:
+            kept = [n for n, _a, _b in nms if n.lower() not in lower]
+            if len(kept) == len(nms):
+                left += 1
+                continue
+            if kept:
+                left += 1
+                notes = TOKEN_COMMENT_RE.findall(text[start:end])
+                edits.append((start, end, ', '.join(kept) + ';' +
+                              ''.join(' ' + c for c in notes)))
+            else:
+                edits.append(_cut_line(text, start, end) + ('',))
+        if not left and items:
+            # the whole part, `define' to its last item's `;'
+            del edits[mark:]
+            edits.append(_cut_line(text, d[2], items[-1][1]) + ('',))
+    for a, b, r in sorted(edits, reverse=True):
+        text = text[:a] + r + text[b:]
+    return text
 
 
 # ----------------------------------------------------------- diagnostics
@@ -793,11 +862,9 @@ def report(title, summary, out=sys.stdout, verbose=False):
 
 # --------------------------------------------------------------- driver
 
-# `run --dpc-opt': options given to every dpc run; `run --no-park-d0':
-# no `--park-d0' build setting (module_settings).  For experiments with a
-# changed translation (bead domain-pascal-yzxr), not for the baseline.
+# `run --dpc-opt': options given to every dpc run.  For experiments with
+# a changed translation (bead domain-pascal-yzxr), not for the baseline.
 EXTRA_DPC_OPTS = []
-NO_PARK_D0 = False
 
 
 def run_dpc(dpc, tree, src, check_only=False, out=None, opts=()):
@@ -1158,19 +1225,6 @@ def segment_end_aligns(seg):
 _SURVEYS = {}
 
 
-def park_d0_starts():
-    """The image routines that hold a call's pointer result in D0 where a
-    call follows (resultsurvey.park_d0_routines; `dpc --park-d0'),
-    computed once."""
-    if 'park' not in _SURVEYS:
-        import nestsurvey
-        import resultsurvey
-        rs = nestsurvey.load()
-        by_start, _ = nestsurvey.analyse(rs)
-        _SURVEYS['park'] = resultsurvey.park_d0_routines(rs, by_start)
-    return _SURVEYS['park']
-
-
 def image_surveys():
     """(map, a5survey routines by start, loopalign per_routine list),
     computed once."""
@@ -1184,12 +1238,10 @@ def image_surveys():
 
 
 def module_settings(mod, linkmap):
-    """[(code section name, map segment, a5 dict, loop dict, park list)]
+    """[(code section name, map segment, a5 dict, loop dict)]
     for MOD's code sections (the map code segments holding its routines'
     header addresses), in address order.  Names are the source's (upper
-    case) where it has a routine at the address, else the map's.  PARK:
-    [(addr, name)], the source's routines of the section that the image
-    compiles as `dpc --park-d0' does (park_d0_starts)."""
+    case) where it has a routine at the address, else the map's."""
     m, by_start, pr = image_surveys()
     src = {r.addr: n.upper() for n, (_i, r) in mod.routines.items() if r.addr is not None}
     segs = {}
@@ -1217,10 +1269,8 @@ def module_settings(mod, linkmap):
                              for r in sorted(by_start.values(), key=lambda r: r.r0)
                              if r.segaddr == sa and r.has_link and r.sets
                              and not r.uses and r.uses_t]
-        park = [] if NO_PARK_D0 else \
-            [(a, src[a]) for a in sorted(park_d0_starts()) if seg.contains(a) and a in src]
         out.append((code_section(sa, linkmap) or seg.name, seg, a5,
-                    loop_settings(pr, seg, names, segment_end_aligns(seg)), park))
+                    loop_settings(pr, seg, names, segment_end_aligns(seg))))
     return out
 
 
@@ -1234,7 +1284,7 @@ def settings_opts(settings):
     `-from' routine per code section), and what no option can say (a
     routine without a name).  -> (options, problems)."""
     lists = {'--a5-always-from': [], '--a5-always': [], '--a5-absolute': [],
-             '--loop-align-off-from': [], '--park-d0': []}
+             '--loop-align-off-from': []}
     problems = []
 
     def add(flag, sect, an):
@@ -1242,7 +1292,7 @@ def settings_opts(settings):
             lists[flag].append(an[1])
         else:
             problems.append('%s: %s needs %s, which has no name' % (sect, flag, _nm(an)))
-    for sect, _seg, a5, lp, park in settings:
+    for sect, _seg, a5, lp in settings:
         if a5['always_from']:
             add('--a5-always-from', sect, a5['always_from'])
         for an in a5['always']:
@@ -1253,21 +1303,19 @@ def settings_opts(settings):
             problems.append('%s: loop alignment: %s' % (sect, lp['error']))
         elif lp['off_from']:
             add('--loop-align-off-from', sect, lp['off_from'])
-        for an in park:
-            add('--park-d0', sect, an)
     return ['%s=%s' % (f, ','.join(v)) for f, v in lists.items() if v], problems
 
 
 def report_settings(path, settings, out=sys.stdout):
     """The `build settings' section for one module."""
     opts, problems = settings_opts(settings)
-    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7; '
-          'D0 parking, 3)' % path, file=out)
+    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7)'
+          % path, file=out)
 
     def iv(lo, hi):
         return '(%s, %s]' % ('0x%X' % lo if lo is not None else 'start',
                              '0x%X' % hi if hi is not None else 'end')
-    for sect, seg, a5, lp, park in settings:
+    for sect, seg, a5, lp in settings:
         a = a5['always_from']
         print('  %-14s 0x%X..0x%X  A5: %s%s%s;  loops: %s' % (
             sect, seg.addr, seg.end,
@@ -1279,9 +1327,6 @@ def report_settings(path, settings, out=sys.stdout):
             ('not expressible: ' + lp['error']) if lp['error']
             else 'off from %s, switch in %s' % (_nm(lp['off_from']), iv(*lp['interval']))
             if lp['off_from'] else 'aligned (default)'), file=out)
-        if park:
-            print('  %-14s D0 parking where a call follows: %s'
-                  % ('', ', '.join(map(_nm, park))), file=out)
     # quoted for a shell: the names have `$'
     print('  dpc %s' % (' '.join(map(shlex.quote, opts)) or '(no options)'), file=out)
     for p in problems:
@@ -1293,10 +1338,9 @@ def unit_build_opts(settings, r, lo):
     from address LO) the A5 mode and loop alignment it has in a build of
     the whole module with SETTINGS' options.  A routine that loads A5
     only for its `bsr' callees (used mode, which the fragment cannot see
-    with the callees stubbed) is given `--a5-always'.  A routine the
-    image compiles as `--park-d0' does is given it."""
+    with the callees stubbed) is given `--a5-always'."""
     name = r.name.upper()
-    for _sect, seg, a5, lp, park in settings:
+    for _sect, seg, a5, lp in settings:
         if not seg.contains(r.addr):
             continue
         opts = []
@@ -1318,8 +1362,6 @@ def unit_build_opts(settings, r, lo):
                 opts.append('--loop-align=off')
             elif off[0] <= r.addr:
                 opts.append('--loop-align-off-from=' + name)
-        if any(n == name for _a, n in park):
-            opts.append('--park-d0=' + name)
         return opts
     return []
 
@@ -1402,9 +1444,7 @@ def routine_results(path, mod, ok, conformed):
 
 
 def cmd_run(a):
-    global NO_PARK_D0
     EXTRA_DPC_OPTS[:] = a.dpc_opt
-    NO_PARK_D0 = a.no_park_d0
     work = os.path.abspath(a.work)
     # dpc runs with the exported tree as its directory
     a.dpc = os.path.abspath(a.dpc)
@@ -1551,8 +1591,6 @@ def main(argv=None):
     r.add_argument('-v', '--verbose', action='store_true')
     r.add_argument('--dpc-opt', action='append', default=[],
                    help='an option for every dpc run (experiments)')
-    r.add_argument('--no-park-d0', action='store_true',
-                   help='no --park-d0 build setting (experiments)')
     r.add_argument('modules', nargs='*')
     s = sub.add_parser('summarise')
     s.add_argument('diagnostics')

@@ -98,14 +98,20 @@ pointer result variable held in A2 across ML_$UNLOCK, `movea.l A0,A2`
 (codegen-patterns 3, 12.5; bead domain-pascal-500): `cal_shutdown.pas`
 (CAL_$SHUTDOWN 0xE3E6E4: `movea.l A0,A3`, fields through A3, `pea
 (A3)` as DBUF_$SET_BUFF's last argument, held through it with the
-status address in A2 in a body with a branch).  Pointer locals held in
-D0 where no call follows (codegen-patterns 3; bead domain-pascal-dgb),
-reconstructed from ../source's TTY Pascal: `tty_k_flags.pas`
+status address in A2 in a body with a branch).  Integer locals
+assigned TTY_$I_GET_DESC's `a0_return` result held in D0 (codegen-patterns
+3, "Pointer locals held in D0"; beads domain-pascal-dgb, -yzxr, -78n2),
+reconstructed from ../source's TTY Pascal: `tty_k_flags_int.pas`
 (TTY_$K_INQ_FUNC_ENABLED .. TTY_$K_INQ_ECHO_FLAGS, 0xE67618..0xE6781E:
 `move.l A0,D0` after TTY_$I_GET_DESC, `movea.l D0,A0` where first
-dereferenced, before an `if`'s branch when both parts dereference it)
-and `tty_k_session_id.pas` (TTY_$K_SET_SESSION_ID,
-TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).  A pointer local assigned a
+dereferenced, before an `if`'s branch when both parts dereference it),
+`tty_k_session_id.pas` (TTY_$K_SET_SESSION_ID,
+TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02) and `tty_k_flush_int.pas`
+(where a call follows); pointer locals converted at the assignment in
+`tty_i_raw_int.pas` (TTY_$I_SET_RAW, TTY_$I_INQ_RAW, A0 kept where no
+call follows).  The units with pointer locals held in D0
+(`tty_k_flags.pas`, and the D0 form of `tty_k_session_id.pas`) were
+retired with that parking (bead domain-pascal-78n2).  A pointer local assigned a
 call's result before the status parameter that dies in its block
 (codegen-patterns 12.4 R1b; bead domain-pascal-ue7): `tty_i_set_raw.pas`
 (TTY_$I_SET_RAW 0xE673AA, the local in A2, the status in A3).  A fragment of two code

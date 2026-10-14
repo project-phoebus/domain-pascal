@@ -1,7 +1,15 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 6859c43072d0c08087d570d5f55493ef241a48cb
+# source: c8f980f8ea0344071b4146a3473a7698da54a9e2
+STUB	dxm/dxm.pas	dxm_$add_callback
+STUB	dxm/dxm.pas	dxm_$scan_queue
+STUB	dxm/dxm.pas	dxm_$helper_common
+SETUP	dxm/dxm.pas	dxm_$helper_wired
+SETUP	dxm/dxm.pas	dxm_$helper_unwired
+STUB	dxm/dxm.pas	dxm_$add_signal
+STUB	dxm/dxm.pas	dxm_$init
+STUB	dxm/dxm.pas	dxm_$add_signal_callback
 STUB	kbd/kbd.pas	kbd_$state_lookup
 STUB	kbd/kbd.pas	kbd_$get_mode
 STUB	kbd/kbd.pas	kbd_$put_line
@@ -23,6 +31,8 @@ STUB	log/log.pas	log_$read_internal
 OK	log/log.pas	log_$read
 OK	log/log.pas	log_$read2
 STUB	log/log.pas	log_$init
+STUB	suma/suma.pas	suma_$rcv
+STUB	suma/suma.pas	suma_$init
 STUB	tpad/tpad.pas	tpad_$init
 STUB	tpad/tpad.pas	tpad_$data
 OK	tpad/tpad.pas	tpad_$set_mode
@@ -73,9 +83,9 @@ OK	tty/tty.pas	tty_$i_set_dfl_funcs
 STUB	tty/tty.pas	tty_$i_enable_crash_func
 STUB	tty/tty.pas	tty_$k_reset
 OK	tty/tty.pas	tty_$i_set_raw
-MISMATCH	tty/tty.pas	tty_$i_inq_raw
+OK	tty/tty.pas	tty_$i_inq_raw
 STUB	tty/tty.pas	tty_$k_set_flag
-STUB	tty/tty.pas	tty_$k_inq_flags
+MISMATCH	tty/tty.pas	tty_$k_inq_flags
 STUB	tty/tty.pas	tty_$k_set_func_char
 STUB	tty/tty.pas	tty_$k_inq_func_char
 MISMATCH	tty/tty.pas	tty_$k_enable_func

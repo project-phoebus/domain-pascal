@@ -101,52 +101,19 @@ fn size_of(w: Width) -> Size {
 /// has no `link; unlk; rts` at all).  One with locals is refused: no such
 /// frame is seen, and whether it would be kept is not known.
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
-    select_with(f, Schedule::default(), Parking::default())
+    select_with(f, Schedule::default())
 }
 
-/// Which locals assigned from a call [`select_body_scheduled`] holds in D0
-/// ([`Park`]; codegen-patterns 3, "Pointer locals held in D0").  4-byte
-/// integer locals of [`integer_call_local`] are parked whatever these say.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Parking {
-    /// `dpc --park-d0`: pointer locals where a call follows the
-    /// assignment too (bead domain-pascal-bks).
-    pub calls: bool,
-    /// Pointer locals that no call follows (bead domain-pascal-dgb; the
-    /// default).  Off (`dpc --no-park-pointer-locals`), such a local stays
-    /// in the address register allocation gives it, A0 (TTY_$I_INQ_RAW
-    /// 0xE67414; bead domain-pascal-yzxr).
-    pub pointers: bool,
-}
-
-impl Default for Parking {
-    fn default() -> Self {
-        Parking {
-            calls: false,
-            pointers: true,
-        }
-    }
-}
-
-/// [`select`] with the body scheduled under `sched` (`sched.rs`), and with
-/// `parking` ([`select_body_scheduled`]).
-pub fn select_with(
-    f: &Function,
-    sched: Schedule,
-    parking: Parking,
-) -> Result<Vec<Insn>, Diagnostic> {
+/// [`select`] with the body scheduled under `sched` (`sched.rs`).
+pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
     // For the driver's internal-error backstop (`diag::set_context`).
     let outer = dpc_syntax::diag::set_context(Some(f.span));
-    let insns = select_in_context(f, sched, parking);
+    let insns = select_in_context(f, sched);
     dpc_syntax::diag::set_context(outer);
     insns
 }
 
-fn select_in_context(
-    f: &Function,
-    sched: Schedule,
-    parking: Parking,
-) -> Result<Vec<Insn>, Diagnostic> {
+fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
             // A bare `rts` has no frame for the copy; whether the original
@@ -167,7 +134,7 @@ fn select_in_context(
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_scheduled(f, sched, parking)?;
+    let body = select_body_scheduled(f, sched)?;
     wrap(f, body)
 }
 
@@ -227,45 +194,28 @@ pub struct Body {
 /// which computations a later one can reuse ([`Selector::cse_value`]),
 /// then again holding exactly those.
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
-    select_body_scheduled(f, Schedule::default(), Parking::default())
+    select_body_scheduled(f, Schedule::default())
 }
 
 /// [`select_body`] with the body scheduled under `sched` after register
 /// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12).
-///
-/// `parking` ([`Parking`]): which pointer locals assigned from a call are
-/// held in D0 ([`Park`]): where a call follows the assignment too
-/// (`--park-d0`), where none does (the default).
-pub fn select_body_scheduled(
-    f: &Function,
-    sched: Schedule,
-    parking: Parking,
-) -> Result<Body, Diagnostic> {
+pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
     // A pointer local that no call follows is found by allocation; the
-    // body is selected again with it held in D0 ([`Park`]).
-    let (body, hits, parked, in_a0) =
-        match select_body_with(f, CsePlan::Probe, sched, parking, &[], &[])? {
-            Selected::Body(b, h) => (b, h, Vec::new(), Vec::new()),
-            Selected::Park(parked, in_a0) => {
-                match select_body_with(f, CsePlan::Probe, sched, parking, &parked, &in_a0)? {
-                    Selected::Body(b, h) => (b, h, parked, in_a0),
-                    Selected::Park(..) => unreachable!("a parked local is not parked again"),
-                }
-            }
-        };
+    // body is selected again with it held in A0 ([`Selector::a0_locals`]).
+    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[])? {
+        Selected::Body(b, h) => (b, h, Vec::new()),
+        Selected::InA0(in_a0) => match select_body_with(f, CsePlan::Probe, sched, &in_a0)? {
+            Selected::Body(b, h) => (b, h, in_a0),
+            Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
+        },
+    };
     if hits.is_empty() {
         return Ok(body);
     }
-    let Selected::Body(body, again) = select_body_with(
-        f,
-        CsePlan::Hold(hits.clone()),
-        sched,
-        parking,
-        &parked,
-        &in_a0,
-    )?
+    let Selected::Body(body, again) =
+        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0)?
     else {
-        unreachable!("a parked local is not parked again")
+        unreachable!("an A0-held local is not found again")
     };
     if again != hits {
         // The second selection must find the reuses the first one did:
@@ -281,19 +231,16 @@ pub fn select_body_scheduled(
 }
 
 /// What [`select_body_with`] gives: the body and the reuses found, or the
-/// pointer locals to select again held in D0 ([`Park`]) and those to
-/// select again held in A0 ([`Selector::a0_locals`]).
+/// pointer locals to select again held in A0 ([`Selector::a0_locals`]).
 enum Selected {
     Body(Body, Vec<(u32, u32)>),
-    Park(Vec<i32>, Vec<i32>),
+    InA0(Vec<i32>),
 }
 
 fn select_body_with(
     f: &Function,
     plan: CsePlan,
     sched: Schedule,
-    parking: Parking,
-    parked: &[i32],
     in_a0: &[i32],
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
@@ -391,21 +338,20 @@ fn select_body_with(
     taken.extend(s.ptr_locals.iter().map(|&(o, _)| o));
     let call_ptrs = call_pointer_locals(f, &taken);
     for &o in &call_ptrs {
-        // An integer local of [`integer_call_local`] is parked in every
-        // routine, where a call follows too; a pointer local when
-        // allocation finds that no call follows, or with `--park-d0`.
+        // An integer local of [`integer_call_local`] is parked, where a
+        // call follows too; a pointer local that no call follows is held
+        // in A0 itself when allocation finds it there.
         let integer = f
             .scalar_locals
             .iter()
             .any(|l| l.offset == o && l.ty != Scalar::POINTER);
         if in_a0.contains(&o) {
             s.a0_locals.push(o);
-        } else if integer || parked.contains(&o) {
+        } else if integer {
             s.parked.push(Park {
                 off: o,
                 d: None,
                 home: None,
-                calls: integer || parking.calls,
             });
         } else {
             s.ptr_locals.push((o, None));
@@ -582,7 +528,7 @@ fn select_body_with(
     for p in &s.parked {
         if let (Some((d, _)), Some((a, at))) = (p.d, p.home) {
             for (i, insn) in s.out.iter().enumerate().skip(at + 1) {
-                if p.calls && matches!(insn, Insn::Jsr(_) | Insn::Bsr { .. }) {
+                if matches!(insn, Insn::Jsr(_) | Insn::Bsr { .. }) {
                     // Parked where a call follows: the call clobbers D0, which is free
                     // from there (TTY_$K_FLUSH_INPUT 0xE1C0BE `move.w
                     // D0,(-6,A6)`, the spin lock's token).
@@ -632,7 +578,7 @@ fn select_body_with(
         .collect();
     let after = call_results_first(&s.out, exit, &holds, &results, &s.entry_regs);
     // The pointer locals of `call_pointer_locals` that could stay in A0
-    // itself (`Parking::pointers` off): nothing writes the physical A0
+    // itself: nothing writes the physical A0
     // from the copy `movea.l A0,An` to the copy's last use.
     let a0_free: Vec<i32> = s
         .ptr_defs
@@ -690,25 +636,22 @@ fn select_body_with(
             ));
         }
     }
-    let mut to_park = Vec::new();
     let mut to_a0 = Vec::new();
     for &(o, k, span) in &s.ptr_defs {
-        // A pointer local assigned from calls that no call follows: the
-        // image keeps such locals in D0 (`move.l A0,D0` after the call,
-        // `movea.l D0,A0` where it is dereferenced: 17 sites, TTY_$K_*
-        // and SIO_$K_* after TTY_$I_GET_DESC / SIO_$I_GET_DESC, e.g.
-        // TTY_$K_INQ_FUNC_ENABLED 0xE6763C / 0xE67642), in A1 where D0
-        // is busy (0xE4D7FC, 0xE528CE) or in A0 (TTY_$I_INQ_RAW 0xE67414;
-        // beads domain-pascal-500, -dgb).  One assigned once and only
-        // dereferenced is selected again in D0 ([`Park`]); others are
-        // refused.  Only one in a callee-saved register (live across a
-        // call, or held through one) is kept.
+        // A pointer local assigned from calls that no call follows, in A0
+        // or A1 by allocation: kept in A0 itself, the copy dropped
+        // (TTY_$I_INQ_RAW 0xE67414 `move.b (1241,A0),(A1)`, the out
+        // parameter's slot in A1; TTY_$K_INQ_FLAGS 0xE674BA; beads
+        // domain-pascal-yzxr, -78n2).  The image's D0 form of such locals
+        // (`move.l A0,D0` after the call, `movea.l D0,A0` where it is
+        // dereferenced: TTY_$K_INQ_FUNC_ENABLED 0xE6763C / 0xE67642) is
+        // that of a 4-byte integer local ([`Park`]); a pointer local is
+        // no longer held so (codegen-patterns 3, "Pointer locals held in
+        // D0").  The copies to A1 where D0 is busy (0xE4D7FC, 0xE528CE)
+        // are not modelled.  One in a callee-saved register (live across
+        // a call, or held through one) is kept.
         if let Insn::Movea { dst, .. } = s.out[k] {
-            if call_ptrs.contains(&o) && dst < 2 && !parking.pointers && !parking.calls {
-                // `--no-park-pointer-locals`: kept in A0 itself, the
-                // copy dropped (TTY_$I_INQ_RAW 0xE67414 `move.b
-                // (1241,A0),(A1)`, the out parameter's slot in A1;
-                // TTY_$K_INQ_FLAGS 0xE674BA; bead domain-pascal-yzxr).
+            if call_ptrs.contains(&o) && dst < 2 {
                 if !parkable_pointer_local(f, o) || !a0_free.contains(&o) {
                     return Err(unsupported(
                         span,
@@ -721,25 +664,11 @@ fn select_body_with(
                 if !to_a0.contains(&o) {
                     to_a0.push(o);
                 }
-                continue;
-            }
-            if call_ptrs.contains(&o) && (dst < 2 && parking.pointers || parking.calls) {
-                if !parkable_pointer_local(f, o) {
-                    return Err(unsupported(
-                        span,
-                        "a pointer local assigned from a call that no call follows, assigned \
-                         more than once, inside a statement, or read other than dereferenced \
-                         (D0, A1 or A0 in the image; not settled) is",
-                    ));
-                }
-                if !to_park.contains(&o) {
-                    to_park.push(o);
-                }
             }
         }
     }
-    if !to_park.is_empty() || !to_a0.is_empty() {
-        return Ok(Selected::Park(to_park, to_a0));
+    if !to_a0.is_empty() {
+        return Ok(Selected::InA0(to_a0));
     }
     for p in &s.parked {
         // The image's D0 sites all have D0 and A0; where D0 is busy it
@@ -748,7 +677,7 @@ fn select_body_with(
         let (Some((_, d_at)), Some((_, a_at))) = (p.d, p.home) else {
             return Err(unsupported(
                 f.span,
-                "a pointer local assigned from a call and never dereferenced is",
+                "a local assigned an `a0_return` result, held in D0 and never dereferenced, is",
             ));
         };
         let in_d0 = matches!(
@@ -777,8 +706,8 @@ fn select_body_with(
         if !(in_d0 && (in_a0 || callee_saved)) {
             return Err(unsupported(
                 f.span,
-                "a pointer local assigned from a call that no call follows, where D0 or A0 is \
-                 busy (A1 in the image, 0xE4D7FC; not settled) is",
+                "a local assigned an `a0_return` result held in D0, where D0 or A0 is busy \
+                 (A1 in the image, 0xE4D7FC; not settled) is",
             ));
         }
     }
@@ -2399,8 +2328,9 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
 /// callee-saved register when it lives across a call (12.4 R3), and a
 /// call whose arguments use it last holds it through the call
 /// ([`held_through_calls`]).  One that no call follows is found by
-/// allocation (A0 or A1) and selected again held in D0 ([`Park`],
-/// [`select_body_with`]) when [`parkable_pointer_local`], else refused.
+/// allocation (A0 or A1) and selected again held in A0 itself
+/// ([`Selector::a0_locals`], [`select_body_with`]) when
+/// [`parkable_pointer_local`], else refused.
 /// Pointer locals assigned otherwise (`nil`, a memory load) stay in the
 /// frame as before (codegen-patterns 12.5: often in a register in the
 /// image, AST_$ADD_AOTES 0xE010C0; not settled).
@@ -2576,9 +2506,11 @@ fn integer_call_local(f: &Function, off: i32) -> bool {
     derefs > 0 && parkable_pointer_local(f, off)
 }
 
-/// Whether the pointer local at `off`, one of [`call_pointer_locals`], may be
-/// held in D0 when no call follows its assignment ([`Park`]; bead
-/// domain-pascal-dgb): assigned exactly once, by a statement of the
+/// Whether the local at `off`, one of [`call_pointer_locals`], has the
+/// shape of the image's held locals: a pointer local kept in A0 when no
+/// call follows its assignment ([`Selector::a0_locals`]), an integer local
+/// held in D0 ([`integer_call_local`], [`Park`]; beads domain-pascal-dgb,
+/// -78n2): assigned exactly once, by a statement of the
 /// routine's own statement part, and otherwise only dereferenced (the
 /// sites: TTY_$K_* and SIO_$K_*, `tty := tty_$i_get_desc(line, status)`
 /// and then `tty^...`; no site reads such a local whole, but RIP_$UPDATE_INT
@@ -3490,7 +3422,7 @@ pub struct Selector {
     parked: Vec<Park>,
     /// Pointer locals assigned once from a call that no call follows,
     /// held in A0 itself from the call to their last dereference
-    /// (`dpc --no-park-pointer-locals`, [`Parking::pointers`]).
+    /// (bead domain-pascal-78n2; [`select_body_with`]).
     a0_locals: Vec<i32>,
     /// The index in `out` of a parked local's `movea.l D0,An` that moves
     /// down to the branch of the `if` being selected ([`Self::park_home`]).
@@ -3559,9 +3491,11 @@ pub struct Selector {
     goto_jumps: Vec<(usize, Span)>,
 }
 
-/// A pointer local held in D0 from its assignment to the statement that
-/// first dereferences it, then in an address register (bead
-/// domain-pascal-dgb; codegen-patterns 3, "Pointer locals").
+/// A 4-byte integer local assigned an `a0_return` result
+/// ([`integer_call_local`]) held in D0 from its assignment to the statement
+/// that first dereferences it or calls a routine, then in an address
+/// register (beads domain-pascal-dgb, -yzxr, -78n2; codegen-patterns 3,
+/// "Pointer locals held in D0").
 ///
 /// `tools/resultsurvey.py ptrhold` (the first read of A0 after a call of
 /// an A0 function, on its fall-through path): of the 34 `move.l A0,D0`
@@ -3569,25 +3503,21 @@ pub struct Selector {
 /// the value (`movea.l D0,A0`), which later dereferences share: 15
 /// TTY_$K_* routines after TTY_$I_GET_DESC (TTY_$K_INQ_FUNC_ENABLED
 /// 0xE6763C / 0xE67642), RIP_$UPDATE_INT 0xE159B6, the DIR_ module-local
-/// 0xE52394 at 0xE52418.  3 locals that no call follows are copied to A1
-/// where D0 and D1 are busy over their range (0xE4D7FC, 0xE528CE,
-/// 0xE09C5E): refused.  3 stay in A0 (TTY_$I_INQ_RAW 0xE67414,
-/// TTY_$K_INQ_FLAGS 0xE674BA, KBD_$INQ_KBD_TYPE 0xE72584, the last with
-/// D0 busy): TTY_$I_INQ_RAW has the code around it of the D0 sites
-/// instruction for instruction (it is `val_param` with `link #-4`, which
-/// alone decides nothing: the DIR_ module-local takes its arguments by
-/// value), so what decides is not seen (**Uncertain**; dpc gives it D0,
-/// the form of the 15 TTY_$K_* sites).  TTY_$K_INQ_FLAGS first
-/// dereferences the local in an `if`'s condition after a statement that
-/// does not, which [`Selector::park_home`] refuses.  14 more D0 copies move
-/// to a callee-saved register where a call follows (TTY_$K_FLUSH_INPUT
-/// 0xE1C0AE), against 105 `movea.l A0,An` right after the call, by a rule
-/// not known for pointer locals: parked too in the routines `dpc
-/// --park-d0` names ([`Park::calls`], bead domain-pascal-bks), else such a
-/// local is [`call_pointer_locals`]'s.  The same form comes from a 4-byte
-/// integer local assigned an `a0_return` result and dereferenced through
-/// a type transfer ([`integer_call_local`], bead domain-pascal-yzxr),
-/// which is always parked.
+/// 0xE52394 at 0xE52418; 14 more move to a callee-saved register where a
+/// call follows (TTY_$K_FLUSH_INPUT 0xE1C0AE), against 105 `movea.l
+/// A0,An` right after the call.  3 locals that no call follows are copied
+/// to A1 where D0 and D1 are busy over their range (0xE4D7FC, 0xE528CE,
+/// 0xE09C5E): not modelled.  3 stay in A0 (TTY_$I_INQ_RAW 0xE67414,
+/// TTY_$K_INQ_FLAGS 0xE674BA, KBD_$INQ_KBD_TYPE 0xE72584), code around
+/// which is instruction for instruction that of the D0 sites.  What
+/// decides is read from the source's types: the D0 form is an integer
+/// local assigned the result and dereferenced through a type transfer,
+/// the A0 (or callee-saved) form a pointer local (the integer reading;
+/// ../source declares TTY_$I_GET_DESC `integer32; options(a0_return)`
+/// and its D0 callers with integer locals).  The D0 holding of pointer
+/// locals, by default where no call follows and with `dpc --park-d0`
+/// where one does, was retired with that reading (bead
+/// domain-pascal-78n2).
 #[derive(Clone, Debug)]
 struct Park {
     /// The local's frame offset.
@@ -3596,11 +3526,6 @@ struct Park {
     d: Option<(u8, usize)>,
     /// The address register of `movea.l Dn,An` and its index in `out`.
     home: Option<(u8, usize)>,
-    /// Parked where a call follows its assignment too: moved to An before
-    /// the first statement after the assignment that refers to it or
-    /// calls a routine ([`Selector::park_home`]).  An integer local
-    /// ([`integer_call_local`]), or a pointer local with `--park-d0`.
-    calls: bool,
 }
 
 /// Which computed values a selection holds for reuse (codegen-patterns
@@ -4080,10 +4005,7 @@ impl Selector {
     fn park_home(&mut self, f: &Function, body: &[Stmt], st: &Stmt) -> Res<()> {
         for k in 0..self.parked.len() {
             let p = &self.parked[k];
-            if p.d.is_none()
-                || p.home.is_some()
-                || !(refers_to(st, p.off) || p.calls && has_call(st))
-            {
+            if p.d.is_none() || p.home.is_some() || !(refers_to(st, p.off) || has_call(st)) {
                 continue;
             }
             let (off, (d, _)) = (p.off, p.d.unwrap());
@@ -4115,11 +4037,10 @@ impl Selector {
             let Some(hoist) = hoist else {
                 return Err(unsupported(
                     st.span,
-                    "the first dereference of a pointer local held in D0 (with `--park-d0`, \
-                     also the first call after its assignment) inside a statement, a \
-                     loop or `case`, or an `if` other than one test with both parts \
-                     dereferencing it (where the original moves it to an address register is \
-                     not seen) is",
+                    "the first dereference of a local held in D0 (or the first call after its \
+                     assignment) inside a statement, a loop or `case`, or an `if` other than \
+                     one test with both parts dereferencing it (where the original moves it to \
+                     an address register is not seen) is",
                 ));
             };
             let a = self.alloc_a()?;

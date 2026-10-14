@@ -2,14 +2,18 @@
   bytes; tools/imgdis.sh E67986 7C), a fragment of the TTY module's
   default code section (.TEXT).  Reconstructed from ../source's Domain
   Pascal translation (domain_os/tty/k_pgroup.pas at ../source 3898a2ce,
-  by Claude Opus 5.5), reduced to what the routines touch.  Semantics:
+  by Claude Opus 5.5; TTY_$I_GET_DESC and the locals as at ../source
+  c8f980f8), reduced to what the routines touch.  Semantics:
   ../source domain_os/tty/k_pgroup.c.  TTY_$I_GET_DESC 0xE66738 is
   external; A5 is loaded and not used (`a5-always=', codegen-patterns 4),
   the data area placed at .DATA 0xE8242C.
 
   Patterns exercised (docs/codegen-patterns.md):
-  - 3, 12.4  a pointer local held in D0 (bead domain-pascal-dgb),
-         `move.l A0,D0' after the call (0xE679AA), `movea.l D0,A0' first
+  - 3, 12.4  an integer local assigned TTY_$I_GET_DESC's `a0_return'
+         result and dereferenced through a type transfer, held in D0
+         (beads domain-pascal-dgb, -yzxr, -78n2: formerly a pointer
+         local, whose D0 holding is retired), `move.l A0,D0' after the
+         call (0xE679AA), `movea.l D0,A0' first
          in the statement that dereferences it, as the destination's base
          (`movea.l D0,A0; movea.l (0xc,A6),A1; move.w (A1),(0x54,A0)',
          0xE679B0) and as the source's (0xE679EE);
@@ -18,7 +22,7 @@
   Reconstructed (not known from the original): the names; the
   descriptor record up to session_id at 0x54 (../source
   domain_os/tty/tty.h), the bytes before it as one stand-in array;
-  `unused_8' and `standin' as in tty_k_flags.pas. }
+  `unused_8' and `standin' as in tty_k_flags_int.pas. }
 module tty;
 type
   status_$t = record case integer of 1: (all: integer32); end;
@@ -33,28 +37,28 @@ var
   standin: integer32;
 
 function tty_$i_get_desc(line: integer; out status: status_$t):
-  tty_$desc_ptr_t; options(extern, val_param);
+  integer32; options(extern, val_param, a0_return);
 
 procedure tty_$k_set_session_id(in line: integer; in sid: integer;
                                 out status: status_$t);
 var
-  tty: tty_$desc_ptr_t;
+  tty: integer32;
   unused_8: integer32;
 begin
   tty := tty_$i_get_desc(line, status);
   if status.all <> status_$ok then
     return;
-  tty^.session_id := sid;
+  tty_$desc_ptr_t(tty)^.session_id := sid;
 end;
 
 procedure tty_$k_inq_session_id(in line: integer; out sid: integer;
                                 out status: status_$t);
 var
-  tty: tty_$desc_ptr_t;
+  tty: integer32;
   unused_8: integer32;
 begin
   tty := tty_$i_get_desc(line, status);
   if status.all <> status_$ok then
     return;
-  sid := tty^.session_id;
+  sid := tty_$desc_ptr_t(tty)^.session_id;
 end;

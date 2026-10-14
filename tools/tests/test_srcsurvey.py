@@ -156,6 +156,94 @@ class RoutineTest(unittest.TestCase):
         self.assertNotIn('define', t)
         self.assertIn('\nvar\n  x: extern integer32;', t)
 
+    def test_drop_defines_lists_inits_comments(self):
+        # bead domain-pascal-g6ky: comma lists (bead domain-pascal-hsb),
+        # initialised items (DXM's queues at ../source c8f980f8), comments,
+        # several define parts (LOG)
+        text = """module m;
+define
+  a, M_$F, b;                       { a list }
+  m_$g;
+  q := [mask := 16#3F,              { +0x604; a `;' in a comment }
+        entries := addr(ring)];
+  m_$h;                               { trailing }
+  c, (* inner *) m_$i;
+  m_$j, m_$k;
+
+var
+  ring: array[0..1] of integer32;
+
+define
+  m_$l;
+
+define m_$f2;
+var x: integer;
+"""
+        t = srcsurvey.drop_defines(text, ['m_$f', 'M_$G', 'm_$h', 'm_$i', 'm_$j', 'm_$k',
+                                          'm_$l', 'm_$f2'])
+        self.assertEqual(t, """module m;
+define
+  a, b;                       { a list }
+  q := [mask := 16#3F,              { +0x604; a `;' in a comment }
+        entries := addr(ring)];
+                                 { trailing }
+  c; (* inner *)
+
+var
+  ring: array[0..1] of integer32;
+
+
+var x: integer;
+""")
+        # what is left parses as define items again, and nothing else is
+        # taken for one
+        names = [[n for n, _a, _b in nms] for _d, items in srcsurvey.define_items(t)
+                 for _s, _e, nms, _i in items]
+        self.assertEqual(names, [['a', 'b'], ['q'], ['c']])
+        self.assertEqual(srcsurvey.drop_defines(text, []), text)
+        self.assertEqual(srcsurvey.drop_defines(text, ['nothere']), text)
+        # an initialised item named goes with its initialiser
+        t = srcsurvey.drop_defines(text, ['Q'])
+        self.assertNotIn('mask', t)
+        self.assertIn('  m_$g;\n  m_$h;', t)
+        # `define' as an allocation clause is not a define part
+        self.assertEqual(srcsurvey.define_items('var x: define integer32;\n'), [])
+
+    def test_drop_defines_case_strings_prefixes(self):
+        # review of bead domain-pascal-g6ky: `DEFINE' in upper case (the
+        # language is case-insensitive, ref 2.1.6); strings holding `;' and
+        # `,' (a quote doubled, ref 2.1.5) and brackets nested in an
+        # initialiser; a name that is a prefix of others; the three comment
+        # forms (ref 2.1.4) mentioning `define' and the names
+        text = """module m;
+{ define a; }
+DEFINE
+  S := 'it''s; a, b';                 " define ab; "
+  R := [x := [1, 2], y := 'c;d'];     (* a; *)
+  AB;
+  a;
+  abc, a2;
+var z: integer;
+"""
+        t = srcsurvey.drop_defines(text, ['a', 's', 'r'])
+        self.assertEqual(t, """module m;
+{ define a; }
+DEFINE
+                   " define ab; "
+       (* a; *)
+  AB;
+  abc, a2;
+var z: integer;
+""")
+        names = [[n for n, _a, _b in nms] for _d, items in srcsurvey.define_items(t)
+                 for _s, _e, nms, _i in items]
+        self.assertEqual(names, [['AB'], ['abc', 'a2']])
+        t = srcsurvey.drop_defines(text, ['A2', 'ABC', 'ab', 'A', 'S', 'R'])
+        self.assertNotIn('DEFINE', t)
+        self.assertNotIn(':=', t)
+        self.assertEqual(srcsurvey.define_items(t), [])
+        self.assertIn('{ define a; }\nvar z: integer;\n', t)
+
 
 class DiagTest(unittest.TestCase):
     ERR = """\
@@ -618,21 +706,20 @@ class SettingsTest(unittest.TestCase):
         a5t = {'always_from': None, 'interval': (None, None), 'always': [(0x320, None)],
                'absolute': [(0x310, 'ABS')], 'for_callees': [(0x330, 'READ')]}
         lt = {'off_from': None, 'interval': (None, None), 'error': 'aligns again'}
-        return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw, [(0x150, 'K_FLUSH')]),
-                ('.TEXT', self.Seg(0x300, 0x400), a5t, lt, [])]
+        return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw),
+                ('.TEXT', self.Seg(0x300, 0x400), a5t, lt)]
 
     def test_settings_opts(self):
         opts, problems = srcsurvey.settings_opts(self.settings())
         self.assertEqual(opts, ['--a5-always-from=K_FLUSH', '--a5-always=SET_RAW_MODE',
-                                '--a5-absolute=ABS', '--loop-align-off-from=PUT_CHARS',
-                                '--park-d0=K_FLUSH'])
+                                '--a5-absolute=ABS', '--loop-align-off-from=PUT_CHARS'])
         self.assertEqual(problems, [
             '.TEXT: --a5-always needs module-local at 0x320, which has no name',
             '.TEXT: loop alignment: aligns again'])
         out = io.StringIO()
         srcsurvey.report_settings('m.pas', self.settings(), out)
         self.assertIn('  dpc --a5-always-from=K_FLUSH --a5-always=SET_RAW_MODE', out.getvalue())
-        self.assertIn('D0 parking where a call follows: K_FLUSH', out.getvalue())
+        self.assertNotIn('park', out.getvalue())
 
     def test_unit_build_opts(self):
         def r(name, addr, internal=False):
@@ -648,7 +735,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(f(st, r('set_raw_mode', 0x130, True), 0x120),
                          ['--a5-always=SET_RAW_MODE', '--loop-align=off'])
         self.assertEqual(f(st, r('k_flush', 0x150), 0x150),
-                         ['--a5-always-from=K_FLUSH', '--loop-align=off', '--park-d0=K_FLUSH'])
+                         ['--a5-always-from=K_FLUSH', '--loop-align=off'])
         self.assertEqual(f(st, r('local', 0x160, True), 0x160), ['--loop-align=off'])
         self.assertEqual(f(st, r('abs', 0x310), 0x310), ['--a5-absolute=ABS'])
         # loads A5 only for its callees (LOG_$READ): said for the fragment

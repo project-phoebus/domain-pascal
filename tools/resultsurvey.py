@@ -44,7 +44,9 @@ usage:
     tools/resultsurvey.py ptrlocals [-v]  # those copied to An or stored to
                                           # a frame slot: later pushed by
                                           # value? what follows the copy?
-    tools/resultsurvey.py parkd0          # routines `dpc --park-d0' fits
+    tools/resultsurvey.py parkd0          # routines that hold an A0 result
+                                          # in D0 where a call follows
+                                          # (evidence; no dpc option)
     tools/resultsurvey.py ptrhold [-v]    # every A0-function call: the first
                                           # read of A0 on its fall-through
                                           # path (D0 parking, A1, kept)
@@ -541,9 +543,11 @@ def park_d0_routines(rs, by_start):
     """The starts of the routines that hold a call's pointer result in D0
     and then move it to a callee-saved register (`move.l A0,D0' right
     after the call, D0 next read by `movea.l D0,An', n 2..5, with no call
-    between): what `dpc --park-d0' reproduces (bead domain-pascal-bks;
-    codegen-patterns 3, "Pointer locals held in D0").  14 routines, the
-    TTY_$K_* and SIO_$K_* ones (TTY_$K_FLUSH_INPUT 0xE1C0A8)."""
+    between; bead domain-pascal-bks; codegen-patterns 3, "Pointer locals
+    held in D0").  14 routines, the TTY_$K_* and SIO_$K_* ones
+    (TTY_$K_FLUSH_INPUT 0xE1C0A8).  Evidence only: `dpc --park-d0', which
+    these sites once selected, was retired with the integer reading
+    (bead domain-pascal-78n2), under which they are integer locals."""
     return {r.r0 for r, _a, k, how, tail, _t in ptrhold_sites(rs, by_start)
             if k == 'D0' and how == 'next' and re.fullmatch(r'->A[2-5]', tail)}
 

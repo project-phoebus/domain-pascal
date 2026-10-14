@@ -27,7 +27,7 @@
   would compile the same) and its 65 elements (to the flag at 0xBF8);
   `and then' (the C's `&&'); `unused_4', a stand-in for the 4 frame bytes
   no instruction addresses (`link #-4', as ../source's TTY_$K_ routines'
-  `unused_8', tests/conformance/tty_k_flags.pas).  PROC1_$CURRENT is read
+  `unused_8', tests/conformance/tty_k_flags_int.pas).  PROC1_$CURRENT is read
   twice: no common subexpression across the statements, as dpc does. }
 module acl_;
 type

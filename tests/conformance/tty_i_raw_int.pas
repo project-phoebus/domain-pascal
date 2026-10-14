@@ -13,8 +13,8 @@
   routine outside the unit (`module-routines=', called with `jsr abs.l'
   from .TEXT, codegen-patterns 1.6).  A5 is loaded and not used
   (`a5-always=', codegen-patterns 4); the data area is placed at the
-  .DATA block 0xE8242C.  Compiled with `no-park-pointer-locals'
-  (`dpc --no-park-pointer-locals').
+  .DATA block 0xE8242C.  The pointer local left in A0 is dpc's default
+  (formerly `dpc --no-park-pointer-locals'; bead domain-pascal-78n2).
 
   Patterns exercised (docs/codegen-patterns.md):
   - 3 "Pointer locals held in D0"  a type transfer of an `a0_return'

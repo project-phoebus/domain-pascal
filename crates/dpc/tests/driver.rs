@@ -1633,9 +1633,9 @@ end;
         "{s}"
     );
 
-    // No call after it: held in D0 and moved to A0 where dereferenced
-    // (TTY_$K_INQ_FUNC_ENABLED 0xE6763C `move.l A0,D0`, 0xE67642
-    // `movea.l D0,A0`; bead domain-pascal-dgb).
+    // No call after it: left in A0 where dereferenced (TTY_$I_INQ_RAW
+    // 0xE67414; the D0 form of TTY_$K_INQ_FUNC_ENABLED 0xE6763C is an
+    // integer local's; beads domain-pascal-dgb, -78n2).
     let src = format!(
         "{head}procedure user;
 var p: recp;
@@ -1646,7 +1646,7 @@ end;
 "
     );
     let s = compile_with("ptr_local_no_call_after", &src, &[]).unwrap();
-    assert!(s.contains("\tmove.l\t%a0,%d0\n\tmovea.l\t%d0,%a0\n"), "{s}");
+    assert!(s.contains("\tjsr\t(GET).l\n\tmove.w\t(%a0),(%a5)\n"), "{s}");
 
     // `= nil` when A0 still holds the local but not right after the store:
     // not seen, refused.
@@ -1728,8 +1728,8 @@ end;
     );
 }
 
-/// A pointer local and its descriptor type for the D0 tests (bead
-/// domain-pascal-dgb).
+/// A pointer local and its descriptor type, the descriptor function
+/// returning a pointer (bead domain-pascal-dgb).
 const PARKED: &str = "module m;
 type
   status_$t = record case integer of 1: (all: integer32); end;
@@ -1741,39 +1741,46 @@ function get_desc(line: integer; out status: status_$t): desc_ptr_t;
 procedure tick; extern;
 ";
 
+/// A pointer local assigned a call's A0 that no call follows stays in A0
+/// itself, never copied to D0 (TTY_$I_INQ_RAW 0xE67414; TTY_$K_INQ_FLAGS
+/// 0xE674B8..0xE674BA `clr.w (A1)`, then the first dereference in an
+/// `if`'s condition; beads domain-pascal-yzxr, -78n2): the D0 holding of
+/// pointer locals is retired, the D0 form being an integer local's
+/// ([`integer_a0_result_local_is_parked`]).
 #[test]
-fn parked_pointer_local_moves_to_a0_where_dereferenced() {
-    // codegen-patterns 3, "Pointer locals": `move.l A0,D0' after the call,
-    // `movea.l D0,A0' where it is first dereferenced (TTY_$K_INQ_INPUT_FLAGS
-    // 0xE676D4, 0xE676DA), A0 shared by the later dereferences, and D0
-    // left alone until the last of them (the sum is built in D1).
-    let src = format!(
-        "{PARKED}procedure p(in line: integer; out status: status_$t);
-var d: desc_ptr_t;
-begin
-  d := get_desc(line, status);
+fn pointer_local_that_no_call_follows_stays_in_a0() {
+    for (k, body) in [
+        "d := get_desc(line, status);
   if status.all <> 0 then return;
   g := d^.b;
-  d^.c := g + d^.b;
+  d^.c := g + d^.b;",
+        "d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g := 0;
+  if d^.b = 3 then g := 1;",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let src = format!(
+            "{PARKED}procedure p(in line: integer; out status: status_$t);
+var d: desc_ptr_t;
+begin
+  {body}
 end;
 "
-    );
-    let asm = compile_with("parked_moves", &src, &[]).unwrap();
-    let r = routine(&asm, "P");
-    let after = &r[r.find("\tjsr\t").unwrap()..];
-    assert!(after.contains("\tmove.l\t%a0,%d0\n"), "{r}");
-    assert_eq!(after.matches("\tmovea.l\t%d0,%a0\n").count(), 1, "{r}");
-    let home = after.find("\tmovea.l\t%d0,%a0\n").unwrap() + "\tmovea.l\t%d0,%a0\n".len();
-    assert!(!after[home..].contains("%d0"), "{r}");
-}
-
-#[test]
-fn parked_pointer_local_refusals() {
-    // Where the image's choice is not seen, refused: an assignment inside
+        );
+        let asm = compile_with(&format!("ptr_in_a0_{k}"), &src, &[]).unwrap();
+        let r = routine(&asm, "P");
+        let after = &r[r.find("\tjsr\t").unwrap()..];
+        assert!(!after.contains("%a0,%d0"), "{k}: {r}");
+        assert!(!after.contains("movea.l\t%a0,%a"), "{k}: {r}");
+        assert!(after.contains("(4,%a0)"), "{k}: {r}");
+    }
+    // Refused where the image's choice is not seen: an assignment inside
     // an `if' (or a second one), a `nil' test of the local (RIP_$UPDATE_INT
-    // 0xE159B6 tests D0's flags: not modelled), the first dereference in
-    // one part of an `if' only, or inside a loop.
-    let cases = [
+    // 0xE159B6 tests D0's flags: not modelled).
+    for (k, (body, want)) in [
         (
             "d := get_desc(line, status);
   if status.all = 0 then d := get_desc(line, status);
@@ -1786,27 +1793,10 @@ fn parked_pointer_local_refusals() {
   g := d^.b;",
             "read other than dereferenced",
         ),
-        (
-            "d := get_desc(line, status);
-  if status.all <> 0 then g := 1 else g := d^.b;",
-            "first dereference of a pointer local held in D0",
-        ),
-        (
-            "d := get_desc(line, status);
-  while g > 0 do g := g - d^.b;",
-            "first dereference of a pointer local held in D0",
-        ),
-        (
-            // TTY_$K_INQ_FLAGS 0xE674B8..0xE674BA keeps A0: `clr.w (A1)',
-            // then the first dereference in an `if''s condition.
-            "d := get_desc(line, status);
-  if status.all <> 0 then return;
-  g := 0;
-  if d^.b = 3 then g := 1;",
-            "first dereference of a pointer local held in D0",
-        ),
-    ];
-    for (k, (body, want)) in cases.iter().enumerate() {
+    ]
+    .iter()
+    .enumerate()
+    {
         let src = format!(
             "{PARKED}procedure p(in line: integer; out status: status_$t);
 var d: desc_ptr_t;
@@ -1815,53 +1805,11 @@ begin
 end;
 "
         );
-        let (_, err) = compile_with(&format!("parked_refused_{k}"), &src, &[]).unwrap_err();
+        let (_, err) = compile_with(&format!("ptr_in_a0_refused_{k}"), &src, &[]).unwrap_err();
         assert!(err.contains(want), "{k}: {err}");
     }
-    // D0 taken by a function's result variable over the local's range
-    // (the image has A1 where D0 is busy, 0xE4D7FC: not modelled).
-    let src = format!(
-        "{PARKED}function f(in line: integer; out status: status_$t): integer;
-var d: desc_ptr_t;
-begin
-  d := get_desc(line, status);
-  f := 0;
-  if status.all <> 0 then return;
-  f := d^.b;
-end;
-"
-    );
-    let (_, err) = compile_with("parked_d0_busy", &src, &[]).unwrap_err();
-    assert!(err.contains("where D0 or A0 is busy"), "{err}");
-    // M$ARITH (a `jsr' that is not a call of the IR) clobbers D0, A0 and
-    // A1: between the assignment and the first dereference, or between
-    // two dereferences, the local cannot be held in D0 and A0.
-    for (k, body) in [
-        "d := get_desc(line, status);
-  g32 := g32 * h32;
-  g := d^.b;",
-        "d := get_desc(line, status);
-  g := d^.b;
-  g32 := g32 * h32;
-  d^.c := 1;",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let src = format!(
-            "{PARKED}var g32, h32: integer32;
-procedure p(in line: integer; out status: status_$t);
-var d: desc_ptr_t;
-begin
-  {body}
-end;
-"
-        );
-        let (_, err) = compile_with(&format!("parked_marith_{k}"), &src, &[]).unwrap_err();
-        assert!(err.contains("where D0 or A0 is busy"), "{k}: {err}");
-    }
     // A call between the assignment and a dereference keeps the local in
-    // a callee-saved register as before (`movea.l A0,A2'), never in D0.
+    // a callee-saved register (`movea.l A0,A2'), never in D0.
     let src = format!(
         "{PARKED}procedure q(in line: integer; out status: status_$t);
 var d: desc_ptr_t;
@@ -1872,22 +1820,15 @@ begin
 end;
 "
     );
-    let asm = compile_with("parked_not_across_calls", &src, &[]).unwrap();
+    let asm = compile_with("ptr_not_across_calls", &src, &[]).unwrap();
     let r = routine(&asm, "Q");
     assert!(
         r.contains("\tmovea.l\t%a0,%a2\n") && !r.contains("%d0"),
         "{r}"
     );
-}
-
-/// `--park-d0` (bead domain-pascal-bks; codegen-patterns 3, "Pointer
-/// locals held in D0"): the local is held in D0 where a call follows too,
-/// moved to a callee-saved register by the first statement that refers
-/// to it or calls (TTY_$K_FLUSH_INPUT 0xE1C0A8 `move.l A0,D0`, 0xE1C0AE
-/// `movea.l D0,A2` before the spin lock's call, the status's A2 reused),
-/// D0 free after that call (0xE1C0BE `move.w D0,(-6,A6)`).
-#[test]
-fn park_d0_where_a_call_follows() {
+    // Where a call follows after the dereference too: `movea.l A0,An`
+    // right after the call (TTY_$K_SET_FLAG 0xE67446; the D0 form of
+    // TTY_$K_FLUSH_INPUT 0xE1C0A8 is an integer local's).
     let src = format!(
         "{PARKED}function lock: integer; extern;
 procedure use(in out d: desc_t); extern;
@@ -1902,36 +1843,10 @@ begin
 end;
 "
     );
-    let asm = compile_with("park_d0", &src, &["--park-d0=K"]).unwrap();
-    let r = routine(&asm, "K");
-    let want = "	move.l	%a0,%d0
-	tst.l	(%a2)
-	bne.s	1f
-	movea.l	%d0,%a2
-	jsr	(LOCK).l
-";
-    assert!(r.contains(want), "{r}");
-    assert!(
-        r.contains(
-            "	pea	(%a2)
-	jsr	(USE).l
-"
-        ),
-        "{r}"
-    );
-    // Without the option: `movea.l A0,An` right after the call.
-    let asm = compile_with("park_d0_off", &src, &[]).unwrap();
+    let asm = compile_with("ptr_call_follows", &src, &[]).unwrap();
     let r = routine(&asm, "K");
     assert!(!r.contains("%d0,%a"), "{r}");
-    assert!(
-        r.contains(
-            "	addq.w	#8,%sp
-	movea.l	%a0,%a"
-        ),
-        "{r}"
-    );
-    let (_, err) = compile_with("park_d0_unknown", &src, &["--park-d0=nope"]).unwrap_err();
-    assert!(err.contains("--park-d0: no routine `nope`"), "{err}");
+    assert!(r.contains("\taddq.w\t#8,%sp\n\tmovea.l\t%a0,%a"), "{r}");
 }
 
 /// The descriptor function as an integer `a0_return` function (bead
@@ -1946,6 +1861,7 @@ function get_desc(line: integer; out status: status_$t): integer32;
   options(extern, val_param, a0_return);
 function lock: integer; extern;
 procedure use(in out d: desc_t); extern;
+procedure tick; extern;
 ";
 
 /// An integer local assigned an `a0_return` result and read only through
@@ -1990,11 +1906,107 @@ end;
         r.contains("\tmove.l\t%a0,%d0\n") && r.contains("\tmovea.l\t%d0,%a0\n"),
         "{r}"
     );
-    // The same with `--no-park-pointer-locals` (which only concerns
-    // pointer-typed locals).
-    let np = compile_with("park_int_np", &src, &["--no-park-pointer-locals"]).unwrap();
-    assert_eq!(routine(&np, "K"), routine(&asm, "K"));
-    assert_eq!(routine(&np, "Q"), routine(&asm, "Q"));
+}
+
+#[test]
+fn parked_integer_local_moves_to_a0_where_dereferenced() {
+    // codegen-patterns 3, "Pointer locals held in D0": `move.l A0,D0' after
+    // the call, `movea.l D0,A0' where it is first dereferenced
+    // (TTY_$K_INQ_INPUT_FLAGS 0xE676D4, 0xE676DA), A0 shared by the later
+    // dereferences, and D0 left alone until the last of them (the sum is
+    // built in D1).
+    let src = format!(
+        "{PARKED_INT}procedure p(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g := desc_ptr_t(d)^.b;
+  desc_ptr_t(d)^.c := g + desc_ptr_t(d)^.b;
+end;
+"
+    );
+    let asm = compile_with("parked_moves", &src, &[]).unwrap();
+    let r = routine(&asm, "P");
+    let after = &r[r.find("\tjsr\t").unwrap()..];
+    assert!(after.contains("\tmove.l\t%a0,%d0\n"), "{r}");
+    assert_eq!(after.matches("\tmovea.l\t%d0,%a0\n").count(), 1, "{r}");
+    let home = after.find("\tmovea.l\t%d0,%a0\n").unwrap() + "\tmovea.l\t%d0,%a0\n".len();
+    assert!(!after[home..].contains("%d0"), "{r}");
+}
+
+#[test]
+fn parked_integer_local_refusals() {
+    // Where the image's choice is not seen, refused: the first dereference
+    // in one part of an `if' only, inside a loop, or in an `if''s
+    // condition after a statement that does not dereference it.
+    let cases = [
+        "d := get_desc(line, status);
+  if status.all <> 0 then g := 1 else g := desc_ptr_t(d)^.b;",
+        "d := get_desc(line, status);
+  while g > 0 do g := g - desc_ptr_t(d)^.b;",
+        "d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g := 0;
+  if desc_ptr_t(d)^.b = 3 then g := 1;",
+    ];
+    for (k, body) in cases.iter().enumerate() {
+        let src = format!(
+            "{PARKED_INT}procedure p(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  {body}
+end;
+"
+        );
+        let (_, err) = compile_with(&format!("parked_refused_{k}"), &src, &[]).unwrap_err();
+        assert!(
+            err.contains("first dereference of a local held in D0"),
+            "{k}: {err}"
+        );
+    }
+    // D0 taken by a function's result variable over the local's range
+    // (the image has A1 where D0 is busy, 0xE4D7FC: not modelled).
+    let src = format!(
+        "{PARKED_INT}function f(in line: integer; out status: status_$t): integer;
+var d: integer32;
+begin
+  d := get_desc(line, status);
+  f := 0;
+  if status.all <> 0 then return;
+  f := desc_ptr_t(d)^.b;
+end;
+"
+    );
+    let (_, err) = compile_with("parked_d0_busy", &src, &[]).unwrap_err();
+    assert!(err.contains("where D0 or A0 is busy"), "{err}");
+    // M$ARITH (a `jsr' that is not a call of the IR) clobbers D0, A0 and
+    // A1: between the assignment and the first dereference, or between
+    // two dereferences, the local cannot be held in D0 and A0.
+    for (k, body) in [
+        "d := get_desc(line, status);
+  g32 := g32 * h32;
+  g := desc_ptr_t(d)^.b;",
+        "d := get_desc(line, status);
+  g := desc_ptr_t(d)^.b;
+  g32 := g32 * h32;
+  desc_ptr_t(d)^.c := 1;",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let src = format!(
+            "{PARKED_INT}var h32: integer32;
+procedure p(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  {body}
+end;
+"
+        );
+        let (_, err) = compile_with(&format!("parked_marith_{k}"), &src, &[]).unwrap_err();
+        assert!(err.contains("where D0 or A0 is busy"), "{k}: {err}");
+    }
 }
 
 /// Integer locals assigned an `a0_return` result that are also read whole
@@ -2042,11 +2054,10 @@ end;
 
 /// A type transfer of an A0 result is still that call's A0: assigned to
 /// a pointer local it is copied with `movea.l A0,An` where a call follows
-/// (TTY_$I_SET_RAW 0xE673CC `movea.l A0,A2`); with
-/// `--no-park-pointer-locals`, a pointer local that no call follows stays
-/// in A0 itself and the slot of the `out` parameter takes A1
+/// (TTY_$I_SET_RAW 0xE673CC `movea.l A0,A2`); a pointer local that no
+/// call follows stays in A0 itself and the slot of the `out` parameter takes A1
 /// (TTY_$I_INQ_RAW 0xE67410..0xE67414 `movea.l (0xa,A6),A1; move.b
-/// (0x4d9,A0),(A1)`); bead domain-pascal-yzxr.
+/// (0x4d9,A0),(A1)`); beads domain-pascal-yzxr, -78n2.
 #[test]
 fn transferred_a0_result_in_pointer_locals() {
     let src = format!(
@@ -2067,7 +2078,7 @@ begin
 end;
 "
     );
-    let asm = compile_with("xfer_a0", &src, &["--no-park-pointer-locals"]).unwrap();
+    let asm = compile_with("xfer_a0", &src, &[]).unwrap();
     let r = routine(&asm, "S");
     assert!(r.contains("\taddq.w\t#8,%sp\n\tmovea.l\t%a0,%a2\n"), "{r}");
     let r = routine(&asm, "I");
@@ -2083,10 +2094,6 @@ end;
         "{r}"
     );
     assert!(!r.contains("%d0"), "{r}");
-    // By default (dgb) such a local is held in D0 instead.
-    let asm = compile_with("xfer_a0_dflt", &src, &[]).unwrap();
-    let r = routine(&asm, "I");
-    assert!(r.contains("\tmove.l\t%a0,%d0\n"), "{r}");
     // Kept in A0 only while nothing writes A0: M$ARITH between the call
     // and the dereference is refused.
     let src = format!(
@@ -2100,7 +2107,7 @@ begin
 end;
 "
     );
-    let (_, err) = compile_with("xfer_a0_marith", &src, &["--no-park-pointer-locals"]).unwrap_err();
+    let (_, err) = compile_with("xfer_a0_marith", &src, &[]).unwrap_err();
     assert!(err.contains("with A0 written before its last use"), "{err}");
 }
 

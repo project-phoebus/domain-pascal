@@ -1,14 +1,16 @@
 { TTY_$K_INQ_FUNC_ENABLED .. TTY_$K_INQ_ECHO_FLAGS, 0xE67618..0xE6781E
-  (seven routines, 0x206 bytes; tools/imgdis.sh E67618 206), as
-  tests/conformance/tty_k_flags.pas, with TTY_$I_GET_DESC declared the
-  way bead domain-pascal-yzxr's reading has it: a 4-byte integer result
-  in A0 (`integer32; options(a0_return)', ref 5.5.11, p. 5-20), held by
-  each caller in an integer local and converted to the descriptor's
-  pointer type where dereferenced (`tty_$desc_ptr_t(tty)^', ref 4 "Type
-  Transfer Functions", p. 4-197).  Compiled with `no-park-pointer-locals'
-  (`dpc --no-park-pointer-locals'): the D0 form comes from the integer
-  type alone (tests/conformance/tty_i_raw_int.pas has the pointer-typed
-  callers that keep A0).  Reconstructed from ../source's Domain Pascal
+  (seven routines, 0x206 bytes; tools/imgdis.sh E67618 206), a fragment
+  of the TTY module's default code section (.TEXT), with TTY_$I_GET_DESC
+  declared the way bead domain-pascal-yzxr's reading has it (and
+  ../source since c8f980f8): a 4-byte integer result in A0 (`integer32;
+  options(a0_return)', ref 5.5.11, p. 5-20), held by each caller in an
+  integer local and converted to the descriptor's pointer type where
+  dereferenced (`tty_$desc_ptr_t(tty)^', ref 4 "Type Transfer Functions",
+  p. 4-197).  The D0 form comes from the integer type alone
+  (tests/conformance/tty_i_raw_int.pas has the pointer-typed callers
+  that keep A0).  This unit replaces tty_k_flags.pas, the same routines
+  with pointer locals held in D0, retired with that parking (bead
+  domain-pascal-78n2).  Reconstructed from ../source's Domain Pascal
   translation (domain_os/tty/k_func.pas and k_set_input_flag.pas, by
   Claude Opus 5.5), reduced to what the routines touch.  Semantics:
   ../source domain_os/tty/k_func.c, k_flags.c.  TTY_$I_GET_DESC 0xE66738
@@ -29,8 +31,14 @@
   - 5.1  `+ [flag]' / `- [flag]' on a longword set in place;
   - 1.2, 12.2  `in'/`out' parameters by address.
 
-  Reconstructed (not known from the original): as tty_k_flags.pas, and
-  the integer declarations (the reading under test). }
+  Reconstructed (not known from the original): the names (the C tree's
+  and ../source's); the descriptor record up to func_enabled (offsets
+  from ../source domain_os/tty/tty.h), its flag sets as `set of 0..31'
+  and the flags as `0..31' in place of ../source's enumerated flag
+  types (Apollo's, tty.ins.pas); `unused_8', ../source's stand-in
+  for the 4 frame bytes no instruction addresses (`link #-8');
+  `standin', the unit's data area; the integer declarations (the
+  reading under test). }
 module tty;
 type
   status_$t = record case integer of 1: (all: integer32); end;

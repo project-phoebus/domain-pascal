@@ -194,3 +194,4 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `pointers` | routine pointers (`jsr (An)`), a linked list |
 | `initdata` | initialised data, repeat counts, variants, strings, a `static` local across calls |
 | `volatile` | a volatile variable re-read in a loop and in one expression |
+| `ptr_a0` | bead domain-pascal-78n2: pointer locals assigned a call that no call follows, held in A0 itself, around out and var parameters, other pointers, `with`, `case`, `while`, sets, block copies, nested calls, `and then`, results |

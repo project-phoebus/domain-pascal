@@ -273,20 +273,27 @@ Tests:
   branch's path and after the join: AST_$RESERVE 0xE067BA..0xE067E8),
   reached by a nested routine (`cmpa.w #0,A0`, reloaded at the join:
   AST_$INVALIDATE 0xE0666A..0xE066AE), or passed by address.
-- `results/pointer_parked` - codegen-patterns 3 ("Pointer locals"), 12.4
-  (bead domain-pascal-dgb): a pointer local live across no call, held in
-  D0 (`move.l A0,D0`) and moved to A0 where first dereferenced, before an
-  `if`'s branch when both parts dereference it, D0 left alone to its
-  last dereference (TTY_$K_INQ_INPUT_FLAGS 0xE676D4, TTY_$K_SET_INPUT_FLAG
-  0xE6767E..0xE676A2, TTY_$K_SET_SESSION_ID 0xE679AA).
 - `results/integer_parked` - codegen-patterns 3 ("Pointer locals held in
-  D0"; bead domain-pascal-yzxr; `--no-park-pointer-locals`): an integer
+  D0"; beads domain-pascal-yzxr, -78n2): an integer
   local assigned an `a0_return` function's value and dereferenced through
   a type transfer, held in D0 and moved to An where first dereferenced,
   where a call follows too (TTY_$K_FLUSH_INPUT 0xE1C0A8 / 0xE1C0AE) or
   not (TTY_$K_INQ_INPUT_FLAGS 0xE676DA); pointer locals assigned the
   transferred value copied to A2 (TTY_$I_SET_RAW 0xE673CC) or left in A0
-  (TTY_$I_INQ_RAW 0xE67414).
+  (TTY_$I_INQ_RAW 0xE67414).  Its `.args` file (`--no-park-pointer-locals`)
+  was removed when that behaviour became the default (bead
+  domain-pascal-78n2); the expected output did not change.
+- `results/integer_parked_forms` - codegen-patterns 3 ("Pointer locals
+  held in D0"), 12.4 (beads domain-pascal-dgb, -78n2): an integer local
+  under the integer reading, live across no call, held in D0 (`move.l
+  A0,D0`) and moved to A0 where first dereferenced, before an `if`'s
+  branch when both parts dereference it, D0 left alone to its last
+  dereference (TTY_$K_INQ_INPUT_FLAGS 0xE676D4, TTY_$K_SET_INPUT_FLAG
+  0xE6767E..0xE676A2, TTY_$K_SET_SESSION_ID 0xE679AA).  Formerly
+  `results/pointer_parked` with pointer locals; renamed and its Pascal
+  rewritten to integer locals with type transfers when pointer locals
+  stopped being held in D0 (bead domain-pascal-78n2); the expected output
+  is unchanged.
 - `control/store_flags` - codegen-patterns 7.1 (bead domain-pascal-dgb):
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a

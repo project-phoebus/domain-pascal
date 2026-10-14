@@ -1,6 +1,6 @@
 { Execution test: edge shapes around bead domain-pascal-yzxr's integer
-  locals held in D0 (codegen-patterns 3, "Pointer locals held in D0"),
-  with `--no-park-pointer-locals'.  The descriptor function is declared
+  locals held in D0 (codegen-patterns 3, "Pointer locals held in D0").
+  The descriptor function is declared
   with a 4-byte integer result in A0 (`a0_return', ref 5.5.11, p. 5-20),
   as in park_int.pas.  Each routine must compute what its Pascal says
   whatever register holds the local; the stubs clobber D0, D1, A0 and A1.
@@ -16,7 +16,6 @@
   - a0loop: a pointer local left in A0, dereferenced in a loop whose
     body loads other pointers (A1).
 
-  dpc: --no-park-pointer-locals
   link: park_int_desc.mod.pas
   call: PARK_INT_EDGE_$LOOP l:1 @l:99!
   call: PARK_INT_EDGE_$TWO l:1 @l:99!

@@ -5,12 +5,11 @@
   first statement that refers to it or calls a routine, where a call
   follows (callee-saved, TTY_$K_FLUSH_INPUT 0xE1C0A8 / 0xE1C0AE) or not
   (A0, TTY_$K_INQ_INPUT_FLAGS 0xE676DA); a pointer local assigned the
-  transferred value that no call follows stays in A0 with
-  `--no-park-pointer-locals' (TTY_$I_INQ_RAW 0xE67414).  The value must
+  transferred value that no call follows stays in A0 (TTY_$I_INQ_RAW
+  0xE67414; the default since bead domain-pascal-78n2).  The value must
   survive the status test and the calls that follow (the stubs clobber
   D0, D1, A0 and A1).
 
-  dpc: --no-park-pointer-locals
   link: park_int_desc.mod.pas
   call: PARK_INT_$AFTER_CALL l:3 @l:99!
   call: PARK_INT_$AFTER_CALL l:-1 @l:99!

@@ -7,7 +7,6 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
-//!            [--park-d0=ROUTINE,...] [--no-park-pointer-locals]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -71,25 +70,16 @@
 //! a window of the next N instructions.  The default is `r11:3`; the
 //! policy is not settled (12.4 R11).
 //!
-//! `--park-d0=R,...`: in these routines a pointer local assigned once from
-//! a call and otherwise only dereferenced is held in D0 after the call
-//! (`move.l A0,D0`) and moved to an address register by the first
-//! statement that refers to it or calls a routine, also where a call
-//! follows the assignment (`dpc_m68k::emit::Options::park_d0`;
-//! codegen-patterns 3, "Pointer locals held in D0").  Without it only a
-//! local that no call follows is (the image does both by a rule not known:
-//! 14 routines park where a call follows, TTY_$K_FLUSH_INPUT 0xE1C0A8,
-//! against about 105 sites of the same shape that do not; the option is
-//! taken from the image, `tools/srcsurvey.py`).  Names are matched
-//! case-insensitively.  A 4-byte integer local assigned an `a0_return`
-//! function's result and read only as a type-transferred pointer it
-//! dereferences is held so in every routine, with or without the option
-//! (bead domain-pascal-yzxr).
-//!
-//! `--no-park-pointer-locals`: a pointer local that no call follows stays
-//! in A0 instead of D0 (`dpc_m68k::emit::Options::no_park_pointers`): for
-//! a translation whose D0 locals are such integers (TTY_$I_INQ_RAW
-//! 0xE67414 keeps its pointer in A0; codegen-patterns 3).
+//! A pointer local assigned once from a call and only dereferenced stays in
+//! the address register allocation gives it (A0 where no call follows,
+//! TTY_$I_INQ_RAW 0xE67414); a 4-byte integer local assigned an
+//! `a0_return` function's result and read only as a type-transferred
+//! pointer it dereferences is held in D0 (`move.l A0,D0`) and moved to an
+//! address register where first dereferenced (codegen-patterns 3, "Pointer
+//! locals held in D0"; bead domain-pascal-yzxr).  The options that held
+//! pointer locals in D0 (`--park-d0`, and the default that
+//! `--no-park-pointer-locals` turned off) were retired with that reading
+//! (bead domain-pascal-78n2).
 //!
 //! `dpc --print-runtime` or `dpc --print-runtime=TARGET` (alone, like
 //! `gcc -print-libgcc-file-name`) prints the path of the target's prebuilt
@@ -131,7 +121,6 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
-                     [--park-d0=ROUTINE,...] [--no-park-pointer-locals] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
@@ -162,12 +151,10 @@ struct Args {
     module_routines: Vec<ModuleRoutine>,
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
-    park_d0: Vec<String>,
-    no_park_pointers: bool,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
-/// `--a5-always-from=`, `--loop-align-off-from=` and `--park-d0=`: a comma list without
+/// `--a5-always-from=` and `--loop-align-off-from=`: a comma list without
 /// empty items.
 fn routine_list(opt: &str, v: &str) -> Result<Vec<String>, String> {
     let names: Vec<String> = v.split(',').map(str::to_string).collect();
@@ -279,8 +266,6 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut module_routines: Vec<ModuleRoutine> = Vec::new();
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
-    let mut park_d0 = None;
-    let mut no_park_pointers = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -356,13 +341,6 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     return Err("--a5-absolute given more than once".into());
                 }
                 absolute = Some(routine_list("--a5-absolute", &s["--a5-absolute=".len()..])?);
-            }
-            "--no-park-pointer-locals" => no_park_pointers = true,
-            s if s.starts_with("--park-d0=") => {
-                if park_d0.is_some() {
-                    return Err("--park-d0 given more than once".into());
-                }
-                park_d0 = Some(routine_list("--park-d0", &s["--park-d0=".len()..])?);
             }
             s if s.starts_with("--module-routine=") => {
                 let v = &s["--module-routine=".len()..];
@@ -453,8 +431,6 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         module_routines,
         schedule: schedule.unwrap_or_default(),
         data_bases,
-        park_d0: park_d0.unwrap_or_default(),
-        no_park_pointers,
     })
 }
 
@@ -521,8 +497,6 @@ fn compile(
         module_routines: args.module_routines.clone(),
         schedule: args.schedule,
         data_bases: args.data_bases.clone(),
-        park_d0: args.park_d0.clone(),
-        no_park_pointers: args.no_park_pointers,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -1068,20 +1042,10 @@ mod tests {
         assert!(args(&["--a5-always=P,", "m.pas"]).is_err());
         assert!(args(&["--a5-always=P", "--a5-always=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-absolute=,P", "m.pas"]).is_err());
-        assert_eq!(
-            args(&["--park-d0=TTY_$K_FLUSH_INPUT,b", "m.pas"])
-                .unwrap()
-                .park_d0,
-            vec!["TTY_$K_FLUSH_INPUT".to_string(), "b".to_string()]
-        );
-        assert!(args(&["--park-d0=", "m.pas"]).is_err());
-        assert!(args(&["--park-d0=a", "--park-d0=b", "m.pas"]).is_err());
-        assert!(
-            args(&["--no-park-pointer-locals", "m.pas"])
-                .unwrap()
-                .no_park_pointers
-        );
-        assert!(!args(&["m.pas"]).unwrap().no_park_pointers);
+        // Retired with the integer reading of D0 parking (bead
+        // domain-pascal-78n2): unknown options now.
+        assert!(args(&["--park-d0=TTY_$K_FLUSH_INPUT", "m.pas"]).is_err());
+        assert!(args(&["--no-park-pointer-locals", "m.pas"]).is_err());
         assert!(args(&["--a5-absolute=P", "--a5-absolute=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-always-from", "P", "m.pas"]).is_err());
         assert!(args(&["--data-base=", "m.pas"]).is_err());

@@ -1289,8 +1289,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   held in D0" below.  Conformance `tests/conformance/cal_shutdown.pas`
   (CAL_$SHUTDOWN 0xE3E714 `movea.l A0,A3`, `pea (A3)` at 0xE3E730);
   golden `results/pointer_locals`.
-  **Pointer locals held in D0 (Verified at the sites; the choice
-  against A0 Uncertain; implemented; bead domain-pascal-dgb).**
+  **Pointer locals held in D0 (Verified at the sites; implemented as
+  integer locals, "The integer reading" below, the default since bead
+  domain-pascal-78n2; the D0 holding of pointer-typed locals retired;
+  beads domain-pascal-dgb, -yzxr).**
   `tools/resultsurvey.py ptrhold` follows every call of an A0 function
   along its fall-through path to the first instruction that reads A0
   (not only the next one, as `callers` does): `movea.l A0,An` next 105
@@ -1389,27 +1391,23 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   SIO_$K_SET_PARAM with A2 and A3 live); D0 is the local's up to its last
   use before the next call (TTY_$K_ENABLE_FUNC builds its masks in D1/D2)
   and free after it (TTY_$K_FLUSH_INPUT 0xE1C0BE `move.w D0,(-6,A6)`).
-  **Implemented as an option** (`dpc --park-d0=R,...`,
-  `emit::Options::park_d0`; `isel.rs`, `Selector::park_calls`): in the
-  named routines a local assigned once and only dereferenced (`parkable_pointer_local`, below) is parked whether a call
-  follows or not, `movea.l D0,An` placed before the first statement after
-  the assignment that refers to it or calls a routine (the image's
-  placement up to the scheduler's order within that statement), An a
-  virtual register (callee-saved where a call follows, held through a
-  call whose arguments use it last as for 12.4 R4(c)'s pointer locals),
-  D0 held up to the last use of An before the next `jsr`/`bsr`.  Without
-  the option dpc keeps the 105-site form.  As with the A5 options, the
-  choice comes from the image: `tools/srcsurvey.py` gives `--park-d0` to
-  the routines `resultsurvey.park_d0_routines` lists (TTY_$K_FLUSH_INPUT
-  and _OUTPUT now conform; TTY_$K_ENABLE_FUNC differs only in A2/A3, the
-  image putting the status and the local in A2 and `func` in A3, bead
-  domain-pascal-80rr).  Driver test `park_d0_where_a_call_follows`;
-  exec test `tests/exec/park_d0.pas`.
+  **Retired** (bead domain-pascal-78n2): `dpc --park-d0=R,...` held a
+  pointer local in D0 where a call follows too in the routines it named,
+  `tools/srcsurvey.py` giving it to the routines
+  `resultsurvey.park_d0_routines` lists (TTY_$K_FLUSH_INPUT and _OUTPUT
+  conformed so).  The same code now comes from an integer local with no
+  option ("The integer reading" below; conformance
+  `tests/conformance/tty_k_flush_int.pas`, exec test
+  `tests/exec/park_int_calls.pas`, formerly `park_d0.pas` with pointer
+  locals and the option).  `tools/resultsurvey.py parkd0` is kept as
+  evidence; nothing gives dpc options from it.
   (Also fixed with it: a pointer local was taken as addressed when a
   smaller local lay just below its slot, `t: integer` at -6 under the
   pointer at -4, so TTY_$K_FLUSH_INPUT's `tty` stayed in its frame slot.)
   **The integer reading (bead domain-pascal-yzxr; fits every site
-  compiled, Reported: the original declarations are not known).**  If
+  compiled, Reported: the original declarations are not known; dpc's
+  only D0 form since bead domain-pascal-78n2, and ../source's
+  translation since its c8f980f8).**  If
   TTY_$I_GET_DESC is declared `integer32; options(a0_return)` (ref
   5.5.11, p. 5-20: "allowed on any function signature", the result in
   A0), the D0 form and the A0 forms of its 33 callers follow from the
@@ -1425,7 +1423,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   The run 0xE673AA..0xE674D2 is then the four routines whose author
   used a pointer local, and the "no rule found" above dissolves for
   OS_TERM's callers.
-  - *dpc* (`isel.rs`, `integer_call_local`, `Park::calls`; no option): a
+  - *dpc* (`isel.rs`, `integer_call_local`, `Park`; no option): a
     4-byte integer local whose every assignment is a call with its result
     in A0, assigned once by a statement of the routine's own statement
     part, and whose every read is a type transfer to a pointer that is
@@ -1437,14 +1435,15 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     (`move.l A0,(-4,A6)`).  So data-register integer locals in general
     are not changed.  A same-width type transfer of a call whose result
     is in A0 is that call retyped (`dpc-ir` `reinterpret`), so
-    `p := ptr_t(f(...))` is `movea.l A0,An`.  `--no-park-pointer-locals`
-    (`isel::Parking::pointers`, manifest token `no-park-pointer-locals`)
-    turns off the D0 parking of pointer-typed locals that no call follows
-    (the default above, for ../source's present translation): such a
-    local stays in A0 itself, the copy dropped (TTY_$I_INQ_RAW's
-    `out` slot then in A1), refused when anything writes A0 before its
-    last use.  `--park-d0` is left as it was.
-  - *Test* (`tools/srcsurvey.py --source <clone> --no-park-d0
+    `p := ptr_t(f(...))` is `movea.l A0,An`.  A pointer-typed local
+    that no call follows stays in A0 itself, the copy dropped
+    (TTY_$I_INQ_RAW's `out` slot then in A1), refused when anything
+    writes A0 before its last use (`Selector::a0_locals`).  This was
+    `dpc --no-park-pointer-locals` (manifest token
+    `no-park-pointer-locals`) until bead domain-pascal-78n2 made it the
+    default and removed the option, `--park-d0` and the D0 holding of
+    pointer locals with it (the owner's decision).
+  - *Test* (options of the time, since removed: `tools/srcsurvey.py --source <clone> --no-park-d0
     --dpc-opt=--no-park-pointer-locals`, on a scratch clone of
     ../source c871dbaa with TTY_$I_GET_DESC so declared in tty.ins.pas,
     the D0 routines' `tty` locals `integer32` with `tty_$desc_ptr_t(tty)^`
@@ -1474,7 +1473,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       _INQ_INPUT_BREAK_MODE, _SET_PGROUP, _INQ_PGROUP, _SET_DELAY,
       _INQ_DELAY stubbed as before;
     - not parked: TTY_$I_SET_RAW OK; TTY_$I_INQ_RAW OK (MISMATCH with
-      the present translation, the known divergence above);
+      the translation of the time, the known divergence above);
       TTY_$K_INQ_FLAGS compiles (refused before) and differs only
       elsewhere: the `out` slot loaded at entry into A2 where the image
       loads it after the status test into A1 (0xE674B4, bead
@@ -1520,35 +1519,55 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     domain-pascal-avry; the DIR_ callers 0xE518BC and 0xE52394 of the
     module-local 0xE4B340, which has 35 callers; the 3 A1 copies,
     0xE4D7FC, 0xE528CE, 0xE09C5E) fit the same reading but are not
-    tested.  Whether to make it the default (dropping the D0 parking of
-    pointer locals and `--park-d0`) depends on ../source's translation
-    changing its declarations: the owner's decision (bead
-    domain-pascal-78n2).
+    tested.
+  - *Default (bead domain-pascal-78n2, the owner's decision).*  ../source
+    c8f980f8 adopted the reading: TTY_$I_GET_DESC `integer32;
+    options(extern, val_param, a0_return)` in tty.ins.pas, the parking
+    callers with `integer32` locals and `tty_$desc_ptr_t(tty)^` at each
+    dereference, the four routines 0xE673AA..0xE674D2 with pointer
+    locals converted at the assignment.  `tools/srcsurvey.py` at
+    c8f980f8 with `--no-park-d0 --dpc-opt=--no-park-pointer-locals`
+    (the behaviour now the default) gave no regression against the
+    baseline (OK 31, CODE-OK 4, MISMATCH 4, STUB 57, BLOCKED 8;
+    TTY_$I_INQ_RAW MISMATCH to OK, TTY_$K_INQ_FLAGS STUB to MISMATCH).
+    So the A0 form for pointer locals is the default and the D0 holding
+    of pointer locals (by default where no call follows, with
+    `--park-d0` where one does) is retired, the options removed.  The
+    conformance unit `tty_k_flags.pas` (pointer locals held in D0) was
+    dropped for `tty_k_flags_int.pas`, the same routines in the integer
+    form; `tty_k_session_id.pas` and `tty_sections.pas` were rewritten
+    to the integer form, as ../source c8f980f8 has them
+    (domain_os/tty/k_pgroup.pas).
   **Implemented** (`isel.rs`, `Park`, `Selector::park_home`,
-  `parkable_pointer_local`): a pointer local of `call_pointer_locals`
-  that allocation puts in A0 or A1 (live across no call), assigned
-  exactly once by a statement of the routine's own statement part and
-  otherwise only dereferenced, is selected again held in a data
-  register: `move.l A0,Dn` at the assignment, `movea.l Dn,An` before
-  the first statement that refers to it after it (first in a simple
-  statement; for an `if` whose condition is one test not reading it and
-  whose two parts both dereference it, moved down to the branch after
-  allocation), An the base of every later dereference, Dn held to the
-  last of them.  Dn must come out D0 and An A0, else refused (A1 in the
-  image where D0 is busy, not modelled).  Refused: a second assignment
-  or one inside a statement, a whole read (`nil` test: RIP_$UPDATE_INT
-  branches on the `move.l A0,D0` flags), the first dereference inside a
-  loop, `case` or nested statement, or in one part of an `if` only, or
-  in an `if`'s condition (so a TTY_$K_INQ_FLAGS-like routine is
-  refused).  A TTY_$I_INQ_RAW-like routine is compiled the D0 way, the
-  form of the 15 TTY_$K_* sites (known divergence, above), unless
-  `--no-park-pointer-locals` (A0; "The integer reading" above).
-  Golden `results/pointer_parked`; conformance
-  `tests/conformance/tty_k_flags.pas` (TTY_$K_INQ_FUNC_ENABLED ..
+  `integer_call_local`, `parkable_pointer_local`): an integer local of
+  the reading's shape (assigned exactly once from a call whose result is
+  in A0, by a statement of the routine's own statement part, and
+  otherwise only dereferenced through a type transfer) is held in a data
+  register: `move.l A0,Dn` at the assignment, `movea.l Dn,An` before the
+  first statement that refers to it or calls a routine after it (first
+  in a simple statement; for an `if` whose condition is one test not
+  reading it and whose two parts both dereference it, moved down to the
+  branch after allocation), An the base of every later dereference, Dn
+  held to the last of them or to the next call.  Where no call follows,
+  Dn must come out D0 and An A0, else refused (A1 in the image where D0
+  is busy, not modelled).  Refused: the first dereference inside a
+  loop, `case` or nested statement, in one part of an `if` only, or in
+  an `if`'s condition.  A pointer local of `call_pointer_locals` that
+  allocation puts in A0 or A1 (live across no call) stays in A0 (the
+  TTY_$I_INQ_RAW / TTY_$K_INQ_FLAGS form), refused when assigned twice,
+  inside a statement, read whole (a `nil` test: RIP_$UPDATE_INT
+  branches on the `move.l A0,D0` flags) or with A0 written before its
+  last use.  Until bead domain-pascal-78n2 such a pointer local was
+  held in D0 in the integer form's place (retired, above).  Goldens
+  `results/integer_parked_forms` (formerly `results/pointer_parked`, its
+  Pascal rewritten to integer locals with the expected output unchanged)
+  and `results/integer_parked`; conformance
+  `tests/conformance/tty_k_flags_int.pas` (TTY_$K_INQ_FUNC_ENABLED ..
   TTY_$K_INQ_ECHO_FLAGS 0xE67618..0xE6781E) and `tty_k_session_id.pas`
   (0xE67986..0xE67A02); driver tests
-  `parked_pointer_local_moves_to_a0_where_dereferenced`,
-  `parked_pointer_local_refusals`.
+  `parked_integer_local_moves_to_a0_where_dereferenced`,
+  `parked_integer_local_refusals`,
+  `pointer_local_that_no_call_follows_stays_in_a0`.
 
   A local kept in its frame slot (pushed by value, addressed, reached by
   a nested routine, or assigned something other than a call) is stored

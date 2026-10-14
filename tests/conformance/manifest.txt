@@ -152,11 +152,12 @@ tests/conformance/xpd_reset_ptrace_opts.pas  XPD_$RESET_PTRACE_OPTS
 # its own by-value parameter passed by address with `pea (8,A6)'.
 tests/conformance/ring_discard_packet.pas  0xE76470:2E  enclosing=RECEIVE_PACKET
 tests/conformance/cal_shutdown.pas           CAL_$SHUTDOWN  --section-addr .bss.moddata.OS_CAL_WIRED=0xE7B030
-# Pointer locals held in D0 where no call follows (codegen-patterns 3;
-# bead domain-pascal-dgb): `move.l A0,D0' after the call, `movea.l D0,A0'
-# where first dereferenced, before an `if''s branch when both parts
-# dereference it.  Reconstructed from ../source's TTY Pascal.
-tests/conformance/tty_k_flags.pas            TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS
+# Integer locals held in D0 where no call follows (codegen-patterns 3,
+# "Pointer locals held in D0"; beads domain-pascal-dgb, -yzxr, -78n2):
+# `move.l A0,D0' after the call, `movea.l D0,A0' where first dereferenced
+# through a type transfer.  Reconstructed from ../source's TTY Pascal
+# (the integer reading, ../source c8f980f8); the seven TTY_$K_ flag
+# routines are tty_k_flags_int.pas, below.
 tests/conformance/tty_k_session_id.pas       TTY_$K_SET_SESSION_ID TTY_$K_INQ_SESSION_ID  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID
 # A pointer local assigned a pointer function's result before the status
 # parameter that dies in the same block (codegen-patterns 12.4 R1b; bead
@@ -209,11 +210,11 @@ tests/conformance/tty_buf.pas                0xE1AF0A:38 0xE1AF42:60
 # TTY_$I_GET_DESC declared `integer32; options(a0_return)' (bead
 # domain-pascal-yzxr; codegen-patterns 3, "Pointer locals held in D0"):
 # integer locals held in D0 and moved to An where dereferenced through a
-# type transfer, where a call follows too (no --park-d0); pointer locals
+# type transfer, where a call follows too; pointer locals
 # assigned the transferred value copied to An or kept in A0.
-tests/conformance/tty_k_flags_int.pas        TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS  no-park-pointer-locals
-tests/conformance/tty_i_raw_int.pas          TTY_$I_SET_RAW TTY_$I_INQ_RAW  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$I_SET_RAW,TTY_$I_INQ_RAW  module-routines=TTY_$I_SET_RAW_MODE=0xE1BF70  no-park-pointer-locals
-tests/conformance/tty_k_flush_int.pas        TTY_$K_FLUSH_INPUT TTY_$K_FLUSH_OUTPUT  --section-addr .bss.moddata.TTY.WIRED_DATA=0xE2DDB4  a5-always=TTY_$K_FLUSH_INPUT,TTY_$K_FLUSH_OUTPUT  module-routines=TTY_$I_FLUSH_INPUT,TTY_$I_FLUSH_OUTPUT  no-park-pointer-locals
+tests/conformance/tty_k_flags_int.pas        TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS
+tests/conformance/tty_i_raw_int.pas          TTY_$I_SET_RAW TTY_$I_INQ_RAW  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$I_SET_RAW,TTY_$I_INQ_RAW  module-routines=TTY_$I_SET_RAW_MODE=0xE1BF70
+tests/conformance/tty_k_flush_int.pas        TTY_$K_FLUSH_INPUT TTY_$K_FLUSH_OUTPUT  --section-addr .bss.moddata.TTY.WIRED_DATA=0xE2DDB4  a5-always=TTY_$K_FLUSH_INPUT,TTY_$K_FLUSH_OUTPUT  module-routines=TTY_$I_FLUSH_INPUT,TTY_$I_FLUSH_OUTPUT
 # Two variables in memory compared, the left one loaded (codegen-patterns
 # 7.1; bead domain-pascal-aaj).
 tests/conformance/acl_clear_super.pas        ACL_$CLEAR_SUPER  --section-addr .bss.moddata.ACL_=0xE7CF54

@@ -1,8 +1,12 @@
-{ codegen-patterns 3 ("Pointer locals"), 12.4; bead domain-pascal-dgb.  A
-  pointer local assigned once from a pointer function, only dereferenced,
-  and live across no call: held in D0 from the call (`move.l A0,D0') and
-  moved to A0 by the first statement that dereferences it (`movea.l
-  D0,A0'), D0 staying the local's up to its last dereference:
+{ codegen-patterns 3 ("Pointer locals held in D0"), 12.4; beads
+  domain-pascal-dgb, -78n2.  Under the integer reading (the descriptor
+  function `integer32; options(a0_return)', ref 5.5.11, p. 5-20), an
+  integer local assigned once from it, only dereferenced through a type
+  transfer, and live across no call: held in D0 from the call (`move.l
+  A0,D0') and moved to A0 by the first statement that dereferences it
+  (`movea.l D0,A0'), D0 staying the local's up to its last dereference
+  (the same Pascal with pointer locals leaves them in A0 instead,
+  TTY_$I_INQ_RAW 0xE67414; integer_parked's inqraw):
 
   - inq: the move first in the statement (TTY_$K_INQ_INPUT_FLAGS
     0xE676D4..0xE676E0 `move.l A0,D0; tst.l (A2); bne.b; movea.l D0,A0;
@@ -24,39 +28,39 @@ type
   end;
   desc_ptr_t = ^desc_t;
 
-function get_desc(line: integer; out status: status_$t): desc_ptr_t;
-  options(extern, val_param);
+function get_desc(line: integer; out status: status_$t): integer32;
+  options(extern, val_param, a0_return);
 
 procedure inq(in line: integer; out flags: flags_t; out status: status_$t);
 var
-  d: desc_ptr_t;
+  d: integer32;
 begin
   d := get_desc(line, status);
   if status.all <> 0 then
     return;
-  flags := d^.flags;
+  flags := desc_ptr_t(d)^.flags;
 end;
 
 procedure setf(in line: integer; in flag: integer; in value: boolean;
                out status: status_$t);
 var
-  d: desc_ptr_t;
+  d: integer32;
 begin
   d := get_desc(line, status);
   if status.all <> 0 then
     return;
   if value then
-    d^.flags := d^.flags + [flag]
+    desc_ptr_t(d)^.flags := desc_ptr_t(d)^.flags + [flag]
   else
-    d^.flags := d^.flags - [flag];
+    desc_ptr_t(d)^.flags := desc_ptr_t(d)^.flags - [flag];
 end;
 
 procedure put(in line: integer; in sid: integer; out status: status_$t);
 var
-  d: desc_ptr_t;
+  d: integer32;
 begin
   d := get_desc(line, status);
   if status.all <> 0 then
     return;
-  d^.sid := sid;
+  desc_ptr_t(d)^.sid := sid;
 end;

@@ -7,7 +7,8 @@
   descriptor's pointer type where dereferenced (ref 4 "Type Transfer
   Functions", p. 4-197).  Two of the 14 routines that hold the result in
   D0 where a call follows (codegen-patterns 3, `tools/resultsurvey.py
-  parkd0'), compiled without `dpc --park-d0'.  Reconstructed from
+  parkd0'), compiled with no option (`dpc --park-d0', since retired, is
+  not needed; bead domain-pascal-78n2).  Reconstructed from
   ../source's Domain Pascal translation (domain_os/tty/k_flush.pas, by
   Claude Opus 5.5), reduced to what the routines touch.  Semantics:
   ../source domain_os/tty/k_flush.c.  TTY_$I_GET_DESC 0xE66738 (OS_TERM),
@@ -16,7 +17,7 @@
   are routines of the module outside the unit (`module-routines=',
   `bsr.w').  Each routine loads A5 without using it (`a5-always=',
   codegen-patterns 4); the data area is placed at the WIRED_DATA block
-  0xE2DDB4.  Compiled with `no-park-pointer-locals'.
+  0xE2DDB4.
 
   Patterns exercised (docs/codegen-patterns.md):
   - 3 "Pointer locals held in D0"  the integer local held in D0 from the
