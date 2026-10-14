@@ -6152,11 +6152,41 @@ impl Selector {
                 });
                 return Ok(());
             }
-            Expr::Test(_) => {
-                return Err(unsupported(
-                    self.span,
-                    "storing a computed boolean (s<cc> to memory or through a register) is",
-                ))
+            // A comparison: `s<cc>` into the local's register when the
+            // compare computes nothing into a data register (TTY_$K_GET
+            // 0xE1C42E `tst.w (0x38,A2); seq D5`, break_mode_flag held in
+            // D5, ../source tty/k_get.pas).  When the compare computes a
+            // value into a data register first (an index, a loaded word),
+            // whether the `s<cc>` goes into that register and is moved, or
+            // the whole computation into the local's register, is not
+            // seen: refused.
+            Expr::Test(c) => {
+                let start = self.out.len();
+                let d = self.test_value(c)?;
+                let last = self.out.len() - 1;
+                let computes = self.out[start..last]
+                    .iter()
+                    .flat_map(|i| crate::regs::access(i).defs)
+                    .any(|r| matches!(r, Reg::D(_)));
+                if computes
+                    || !crate::regs::is_virtual(Reg::D(d))
+                    || !matches!(self.out[last], Insn::Scc { .. })
+                {
+                    return Err(unsupported(
+                        self.span,
+                        "storing a computed boolean whose compare computes into a data register \
+                         to a register-held local (the `s<cc>` register not seen, \
+                         codegen-patterns 3) is",
+                    ));
+                }
+                crate::regs::rename(&mut self.out[last], &|r| {
+                    if r == Reg::D(d) {
+                        Reg::D(web)
+                    } else {
+                        r
+                    }
+                });
+                return Ok(());
             }
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => {
                 self.out.push(Insn::Scc { cond: Cond::T, dst });
@@ -6456,12 +6486,28 @@ impl Selector {
         if !device && self.update_in_place(addr, value)? {
             return Ok(());
         }
-        if self.addr_needs_reg(addr) && self.value_needs_reg(value) {
+        // A destination and a value that both need a register: the side
+        // with more instructions first, the value on a tie (`tools/
+        // storesurvey.py summary`: of 210 such stores in compiled code, the
+        // side with more set-up instructions first at 116 of 126, the
+        // value first at 71 of the 84 ties; codegen-patterns 12.4,
+        // "Stores whose destination and value both need a register").
+        // TTY_$K_SET_DELAY 0xE67A40 `movea.l D0,A0; move.w (A2),D1;
+        // movea.l (0x10,A6),A1; add.w D1,D1; move.w (A1),(0x40,A0,D1.w)`
+        // (the element first, interleaved by the scheduler, R11);
+        // TTY_$K_INQ_DELAY 0xE67A96 the same with the element as the value;
+        // TTY_$K_GET 0xE1C4D6 `lea (0,A2,D2.w),A0; movea.l (-4,A6),A1;
+        // move.b (0x2d1,A0),(A1)` (a tie).  A call on either side is not
+        // seen (the survey leaves calls out): refused.
+        let both = self.addr_needs_reg(addr) && self.value_needs_reg(value);
+        if both && (expr_has_call(value) || addr_has_call(addr)) {
             return Err(unsupported(
                 self.span,
-                "a store whose destination and value both need a register is",
+                "a store whose destination and value both need a register, with a call on \
+                 either side, is",
             ));
         }
+        let start = self.out.len();
         enum Src {
             Zero,
             True,
@@ -6530,14 +6576,17 @@ impl Selector {
             Expr::Test(c) if matches!(**c, IrCond::And(..) | IrCond::Or(..)) => {
                 Src::Ea(Ea::Reg(Reg::D(self.logic_value(c)?)))
             }
-            // A comparison stored as a boolean: whether the original set
-            // the byte in memory with `s<cc>` directly is not catalogued.
-            Expr::Test(_) => {
-                return Err(unsupported(
-                    self.span,
-                    "storing a computed boolean (s<cc> to memory or through a register) is",
-                ))
-            }
+            // A comparison stored as a boolean: `s<cc>` into a data
+            // register by the rule of a boolean value ([`Self::test_value`]),
+            // then `move.b Dn,<dst>`.  Compiled code never sets a byte in
+            // memory with `s<cc>` other than `st`/`sf` (`tools/boolsurvey.py
+            // scc`: of the `s<cc>` writes, none to memory; 56 into a data
+            // register followed by `move.b Dn,<mem>`): TTY_$K_GET 0xE1C506
+            // `cmp.w (A3),D3; seq D1; move.b D1,(-0x1e,A6)`; 0xE5CF30
+            // `cmpi.w #3,(A0); seq D1; move.b D1,(294,A5)`; 0xE650CC
+            // `cmpi.w #1,abs.l; sgt D3; move.b D3,(10,A1)` (codegen-patterns
+            // 3, "Comparisons as boolean results").
+            Expr::Test(c) => Src::Ea(Ea::Reg(Reg::D(self.test_value(c)?))),
             // A pointer function's result, from A0 (codegen-patterns 3,
             // "Callers of pointer functions": TIME_$GET_EC 0xE16734
             // `move.l A0,(0x1620,A5)`; AST_$INVALIDATE 0xE06664 `move.l
@@ -6553,7 +6602,45 @@ impl Selector {
                 v => Src::Ea(Ea::Reg(Reg::D(self.in_tmp(v, ty.width)?))),
             },
         };
+        let mid = self.out.len();
         let dst = self.ea_of(addr)?;
+        if both && self.out.len() - mid > mid - start {
+            // The destination's instructions first, unless they read what
+            // the value's wrote (a shared base: not seen).
+            let defs: Vec<Reg> = self.out[start..mid]
+                .iter()
+                .flat_map(|i| crate::regs::access(i).defs)
+                .collect();
+            if self.out[mid..]
+                .iter()
+                .flat_map(|i| crate::regs::access(i).uses)
+                .any(|r| defs.contains(&r))
+            {
+                return Err(unsupported(
+                    self.span,
+                    "a store whose destination, set up by more instructions than the value, \
+                     reads a register the value's instructions wrote is",
+                ));
+            }
+            let (n_src, end) = (mid - start, self.out.len());
+            self.out[start..].rotate_left(n_src);
+            // The indices into `out` recorded while the two sides were
+            // selected move with their instructions (an index equal to
+            // `mid` is taken as the destination's first instruction: for
+            // a position after the value's last one, [`Cse::at`], that
+            // is earlier than it now is, which only makes
+            // [`Self::cse_valid`] check more).
+            let moved = |p: &mut usize| {
+                if (start..mid).contains(p) {
+                    *p += end - mid;
+                } else if (mid..end).contains(p) {
+                    *p -= n_src;
+                }
+            };
+            self.ptr_copies.iter_mut().for_each(moved);
+            self.a0_bases.iter_mut().for_each(|(p, _)| moved(p));
+            self.cse.iter_mut().for_each(|c| moved(&mut c.at));
+        }
         self.out.push(match &src {
             Src::Zero => Insn::Clr {
                 size,
@@ -7403,12 +7490,19 @@ impl Selector {
                         let ea = self.ea_of(a)?;
                         self.out.push(Insn::Pea(ea));
                     }
-                    Expr::AddrOf(_)
-                    | Expr::SetMember { .. }
-                    | Expr::SetMemberAt { .. }
-                    | Expr::Test(_) => {
+                    Expr::AddrOf(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
                     }
+                    // A boolean computed for the argument (a comparison, a
+                    // set member) is formed as a value ([`Self::test_value`])
+                    // right before its push and pushed from its register,
+                    // as below: all 35 `s<cc> Dn; move.b Dn,-(SP)` of
+                    // compiled code have the test right before the `s<cc>`
+                    // (`tools/boolsurvey.py scc`; TTY_$K_GET 0xE1C54E
+                    // `btst.b #1,(0x17,A2); sne D1; move.b D1,-(SP)`;
+                    // AREA_$DEACTIVATE_ASTE 0xE0A196 `tst.l D0; seq D1;
+                    // move.b D1,-(SP)`; VTOCE_$TRUNCATE 0xE3A246 `cmpi.l
+                    // #32,(-52,A6); sls D0; move.b D0,-(SP)`).
                     // A computed value: evaluated right before its push, from
                     // its register (0xE0AA82 `move.w D2,-(SP)`; KBD_$RCV
                     // 0xE1CE56 `move.b D0,-(SP)`; arguments are evaluated in
@@ -12260,16 +12354,21 @@ mod tests {
             err(&f),
             "storing a parameter that was not loaded at entry is not supported yet"
         );
-        // Both sides need an address register.
+        // Both sides need an address register: one instruction each, the
+        // value first (codegen-patterns 12.4, "Stores whose destination
+        // and value both need a register"; bead domain-pascal-k1sv).
         let f = func(
             0,
             None,
             vec![store(through(8, 0), load(through(12, 0), word()))],
         );
-        assert_eq!(
-            err(&f),
-            "a store whose destination and value both need a register is not supported yet"
+        let t = text(&f);
+        let i = |s: &str| t.iter().position(|l| l == s).expect(s);
+        assert!(
+            i("movea.l\t(0xc,%fp),%a0") < i("movea.l\t(8,%fp),%a1"),
+            "{t:?}"
         );
+        assert!(t.contains(&"move.w\t(%a0),(%a1)".to_string()), "{t:?}");
         // Assigning to a parameter.
         let f = func(0, None, vec![store(Addr::Frame(8), konst(1, word()))]);
         assert_eq!(err(&f), "assigning to a parameter is not supported yet");

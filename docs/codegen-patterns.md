@@ -1463,8 +1463,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       `movea.l D0,A2` at 0xE1C40A the then part's first instruction;
       before, at a computed boolean store), until bead
       domain-pascal-1j61 placed the move there ("Placement inside an
-      `if`" below): it stops at the computed boolean store again
-      (k_get.pas `wait_flag := 0 in options`).  Cut down to the statements
+      `if`" below): it stopped at the computed boolean store again
+      (k_get.pas `break_mode_flag := ... = tty_$break_on_eol`), then,
+      after bead domain-pascal-k1sv, at a branch to a `bra` (7.1).  Cut down to the statements
       up to the first call after the status test, TTY_$K_RESET and
       TTY_$K_SIMULATE_TERMINAL_INPUT give the image's `move.l A0,D0;
       tst.l (An); bne; movea.l D0,A2` (0xE67302..0xE6730A,
@@ -1686,8 +1687,30 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `btst D0,D1; sne D1` (the set's register).  A compare that reads no data
   register gets a new one.  **Implemented** (`isel.rs`, `test_value`) for
   comparisons only; `not`, `and then`, `or else` and boolean variables as
-  values, and storing a comparison to memory, are rejected (not
-  catalogued).
+  values are rejected (not catalogued).
+- **Computed booleans stored and pushed (survey Verified; implemented,
+  bead domain-pascal-k1sv).**  `tools/boolsurvey.py summary`, kind
+  `scc`: of the 462 `s<cc>` other than `st`/`sf` in compiled code, none
+  writes memory; 56 go into a data register followed by `move.b
+  Dn,<mem>`, 35 by `move.b Dn,-(SP)` (all 35 with the compare or test
+  right before the `s<cc>`), 4 by `move.b Dn,Dm`.  So a comparison, `odd`
+  or a set member stored is formed by the rule above and stored with
+  `move.b`: TTY_$K_GET 0xE1C506 `cmp.w (A3),D3; seq D1; move.b
+  D1,(-0x1e,A6)`; TTY_$K_RESET 0xE67316 `btst.b #1,(0x17,A2); sne D0;
+  move.b D0,(-8,A6)`; PCHIST_$CNTL 0xE5CF30 `cmpi.w #3,(A0); seq D1;
+  move.b D1,(294,A5)`; ASKNODE_$INTERNET_INFO 0xE650CC `cmpi.w
+  #1,abs.l; sgt D3; move.b D3,(10,A1)`.  Passed by value, it is formed
+  right before its push, in push order (TTY_$K_GET 0xE1C54E `btst.b
+  #1,(0x17,A2); sne D1; move.b D1,-(SP)`; AREA_$DEACTIVATE_ASTE
+  0xE0A196 `tst.l D0; seq D1; move.b D1,-(SP)`; VTOCE_$TRUNCATE
+  0xE3A246).  Assigned to a register-held local (12.5), the `s<cc>` goes
+  into the local's register when the compare computes nothing into a
+  data register (TTY_$K_GET 0xE1C42E `tst.w (0x38,A2); seq D5`,
+  break_mode_flag; a set member, 0xE1C41E `btst.b #1,(1,A4); sne D4`);
+  when it does (a loaded word, an index), whether the `s<cc>` goes into
+  that register and is moved, or everything into the local's register,
+  is not seen: refused.  Tests: `tests/golden/stores/bool_stores`,
+  `tests/exec/bool_stores.pas`.
 - **Function calls in expressions (Verified):** the call sequence of a
   procedure call (section 1), then the result read from D0: 0xE04700..
   0xE04704 `bsr.w; move.l D0,(A3)` (not popped: a `bra` to a join and the
@@ -2810,7 +2833,9 @@ same `bset #c mod 8` on the member's byte).
   into another field (the image copies at the same position through the
   unit, masked in place: 0xE19DE6 `move.b (2,A0),D0; andi.b #96,D0; or.b
   D0,(2,A1)`; the general form is not catalogued), a destination and a
-  value that both need a register (order not seen), set fields as
+  value that both need a register (the order of 12.4 "Stores whose
+  destination and value both need a register" is not applied to bit
+  fields: not seen), set fields as
   operands, packed arrays of bit elements (ref 3.11.4.2, Table 3-5).
 - Tests: `crates/dpc-m68k/tests/packed.rs` (the forms, the refusals, and
   a model of the instructions run over random records: stores keep the
@@ -3216,8 +3241,9 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
     its low word, `tst.w (-6,A2)` (the layout of `status_$t` is Uncertain,
     9); AST_$FREE_PAGES's 0xE03FBC (0x50) updates a byte field
     `move.b (0x10,A0),D1; sub.b D0,D1; movea.l (8,A2),A0; move.b
-    D1,(0x10,A0)` (0xE03FF2..0xE03FFC, the pointer reloaded; `dpc`
-    refuses a store whose destination and value both need a register);
+    D1,(0x10,A0)` (0xE03FF2..0xE03FFC, the pointer reloaded; the value
+    set up first, 12.4 "Stores whose destination and value both need a
+    register");
     PCHIST_$CNTL's 0xE5CD66 (0x50, the sibling call `movea.l A2,A1; bsr.w
     0xE5CD02` at 0xE5CDA2) needs 0xE5CD02 before it, whose `for` index is
     the parent's local `(-0x18,A2)` with an unsigned count guarded by
@@ -5361,7 +5387,20 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   - `discard(f(...))`: a call statement, the result register unread
     (ref 5.2; section 3).  `discard(set_sr(x))`: above.  `discard` of any
     other expression is refused.
-  - `max`, `min`, `in_range` of run-time values: **refused**.  The only
+  - `in_range(x)` of an enumeration (ordinals 0..n-1, an unsigned word):
+    `x <= n-1`, one unsigned compare with the last ordinal (**Reported,
+    implemented**, bead domain-pascal-k1sv): TTY_$K_SET_FUNC_CHAR
+    0xE67502 and TTY_$K_INQ_FUNC_CHAR 0xE67588 `cmpi.w #0x1f,D1; bhi`
+    under ../source's reading `not in_range(func) or else ...`
+    (tty/k_func.pas; tty_$func_t's last ordinal is 31).  The image
+    cannot tell it from `func > <last enumerator>` (below); the reading
+    is the one the routine's source has.  As a value it is the
+    comparison's `s<cc>` (`sls`, section 3), not seen.  Of other types
+    (a subrange, an integer, a char) it stays refused.  Tests:
+    `tests/golden/control/in_range`, `tests/exec/bool_stores.pas`,
+    `tests/exec/store_order.pas`.
+  - `max`, `min`, and `in_range` of other run-time values:
+    **refused**.  The only
     candidates in the image are the five `x := min(x, c)`-shaped sites of
     12.4 R8 (`move.w #c,Dn; cmp.w Dn,Dx; ble.s; move.w Dn,Dx`: 0xE19ED0,
     0xE2F08A, 0xE66008, 0xE66372, 0xE874D6; and unsigned with `moveq`,
@@ -7272,6 +7311,43 @@ survey).**
   changes golden `regalloc/cse` (0xE177A6) and `division_forms`
   (0xE382BE), both toward the image.  Unrolled `(An)+` copies are units
   of the scheduler (stores anyway); multiplications are not (0xE1AA5A).
+
+**Stores whose destination and value both need a register (survey
+supported, rule Uncertain; implemented, bead domain-pascal-k1sv).**
+- *Survey* (`tools/storesurvey.py summary`): stores `move.<s>
+  SRC,DST` to memory (not pushes) where both sides read registers set up
+  in the store's statement (its block, back to the previous store or
+  call, R10; A5/A6/A7 and registers held from earlier statements set
+  nothing up), the two setups disjoint, no call between: 210.  The side
+  with more set-up instructions comes first at 116 of the 126 where they
+  differ; of the 84 ties the value (SRC) comes first at 71.  The rule
+  "more instructions first, the value on a tie" fits 187 of 210.  Most
+  of the 13 ties set up destination first are a destination that is a
+  copy of a held pointer or a D0-parked one (`movea.l D0,A0`, TTY_$K_
+  SET_SESSION_ID 0xE679B0; `movea.l A2,A0`, XNS_ERROR_$SEND 0xE17B90) or
+  an entry load of a callee-saved register (TIME_$Q_ADD_CALLBACK
+  0xE16DF0, 0xE32A68): dpc places those outside the statement (the park
+  move at the statement's start, entry loads in the prologue), so they
+  do not count there.  Of the 10 the size predicts wrongly, two are a
+  zero-extension's `clr.l` scheduled up (MMAP_$FREE_PAGES 0xE0CEF4,
+  MMAP_$GET_IMPURE 0xE0D696, R9); the rest (0xE02B6C, 0xE334F0,
+  0xE3BDD6, 0xE3DD66, 0xE508B4, 0xE55558, 0xE6AA2A, 0xE716B8) are not
+  explained (bead domain-pascal-z4gy).  Where the destination's set-up
+  is the larger, the only case `dpc` reorders, the rule fits 22 of 29.
+- *The TTY sites*: TTY_$K_SET_DELAY 0xE67A40 `movea.l D0,A0; move.w
+  (A2),D1; movea.l (0x10,A6),A1; add.w D1,D1; move.w (A1),(0x40,A0,D1.w)`
+  (the element, the destination, first; the value's slot load scheduled
+  into the index's stall, R11); TTY_$K_INQ_DELAY 0xE67A96 the same with
+  the element as the value; TTY_$K_GET 0xE1C4D6 `lea (0,A2,D2.w),A0;
+  movea.l (-4,A6),A1; move.b (0x2d1,A0),(A1)` (a tie, the value first).
+- *Implemented* (`isel.rs`, `store`): the value's instructions are
+  generated, then the destination's; when the destination's are more,
+  they are moved before the value's (refused if they read a register the
+  value's wrote).  A call on either side is refused (the survey leaves
+  calls out).  Bit fields of packed records (5.3) stay refused.  Tests:
+  `tests/golden/stores/both_regs`, `tests/exec/store_order.pas`.
+  TTY_$K_SET_DELAY and TTY_$K_INQ_DELAY compile byte-identical in
+  `make srcsurvey`.
 
 **R12. Registers are chosen before scheduling (Uncertain; supported;
 implemented: the scheduler runs after allocation).**

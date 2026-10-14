@@ -26,6 +26,14 @@ reachable from the routine's start, in address order).  Kinds:
             displacement).  Bit 0 of a register is `odd(x)' or member 0
             of a set held in it (ref 3.9.3: member k is bit k): the image
             cannot tell them apart without the source.
+    scc     every `s<cc>' other than `st'/`sf' (a computed boolean): into
+            memory or into a data register, and for a register what reads
+            it next (`move.b Dn,<mem>' store, `move.b Dn,-(SP)' push,
+            `move.b Dn,Dm', a branch, `tst.b', `and.b'/`or.b', other),
+            and whether the instruction right before it sets the flags it
+            reads (a compare or a test: `cmp', `tst', `btst'; bead
+            domain-pascal-k1sv, codegen-patterns 3, "Comparisons as
+            boolean results").
     elem    `lea (0,An,Dx.<s>),Am' that forms an element address, and how
             many memory operands `(d,Am)' use Am before it is written
             again or a branch, call or label intervenes; the displacements
@@ -47,7 +55,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-KINDS = ('andor', 'bit0', 'elem')
+KINDS = ('andor', 'bit0', 'scc', 'elem')
 
 _LOGIC = re.compile(r'^(and|or)b (\S+),%(d\d)$')
 _SCC = re.compile(r'^s(?:t|f|hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le) %(d\d)$')
@@ -159,6 +167,41 @@ def bit0_sites(ins):
     return out
 
 
+_SCC_ANY = re.compile(r'^s(hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le) (\S+)$')
+
+
+def scc_sites(ins):
+    """[(addr, destination, follower, compare before)] of the `s<cc>'
+    other than `st'/`sf'."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _SCC_ANY.match(t)
+        if not m:
+            continue
+        dst = m.group(2)
+        prev = ins[i - 1][2] if i > 0 else ''
+        cmp_before = 'cmp' if re.match(r'^(cmp|tst|btst)', prev) else 'other'
+        if not re.match(r'^%d\d$', dst):
+            out.append((a, 'mem', '-', cmp_before))
+            continue
+        nxt = ins[i + 1][2] if i + 1 < len(ins) else ''
+        mv = re.match(r'^moveb ' + dst + r',(\S+)$', nxt)
+        if mv:
+            d2 = mv.group(1)
+            fol = ('push' if d2 == '%sp@-' else 'move' if re.match(r'^%d\d$', d2)
+                   else 'store')
+        elif _BR.match(nxt):
+            fol = 'branch'
+        elif nxt == 'tstb ' + dst:
+            fol = 'tst'
+        elif _LOGIC.match(nxt):
+            fol = 'andor'
+        else:
+            fol = 'other'
+        out.append((a, 'reg', fol, cmp_before))
+    return out
+
+
 def elem_sites(ins, labels=frozenset()):
     """[(addr, index size, uses, displacements)] of element addresses
     formed by `lea (0,An,Dx),Am' and used through Am."""
@@ -197,6 +240,7 @@ def scan():
         ins = a5survey.reached(r0, r1)
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
         res['bit0'] += [(r0, name) + s for s in bit0_sites(ins)]
+        res['scc'] += [(r0, name) + s for s in scc_sites(ins)]
         res['elem'] += [(r0, name) + s for s in elem_sites(ins, branch_targets(ins))]
     return res
 
@@ -218,6 +262,8 @@ def summary(res):
     counts('and.b/or.b of booleans: what reads the result', res['andor'],
            lambda s: (s[6],))
     counts('btst #0 (operand, follower)', res['bit0'], lambda s: (s[3], s[4]))
+    counts('s<cc> other than st/sf (destination, follower, flags set by the insn before)',
+           res['scc'], lambda s: (s[3], s[4], s[5]))
     counts('element addresses lea (0,An,Dx),Am (index size, uses through Am)',
            res['elem'], lambda s: (s[3], min(s[4], 3) if s[4] < 3 else '3+'))
 

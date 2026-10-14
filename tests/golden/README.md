@@ -32,6 +32,18 @@ Tests:
   TIME_$Q_INIT_QUEUE 0xE16C5E.
 - `stores/const_stores` - codegen-patterns 13 (clr, st, move #n, byte
   immediates 0..255), 12.2.
+- `stores/bool_stores` - codegen-patterns 3 ("Computed booleans stored
+  and pushed"; bead domain-pascal-k1sv): a comparison stored with `s<cc>`
+  into a data register and `move.b` (TTY_$K_GET 0xE1C506), into a
+  register-held local's register (0xE1C42E), to a frame local, and passed
+  by value right before its push (0xE1C54E).
+- `stores/both_regs` - codegen-patterns 12.4 ("Stores whose destination
+  and value both need a register"), 10.1 (bead domain-pascal-k1sv): the
+  side with more instructions first, the value on a tie (TTY_$K_SET_DELAY
+  0xE67A40, TTY_$K_INQ_DELAY 0xE67A96, TTY_$K_GET 0xE1C4D6).
+- `control/in_range` - codegen-patterns 10.1 (bead domain-pascal-k1sv):
+  `in_range` of an enumeration, `cmpi.w #31; bhi` (TTY_$K_SET_FUNC_CHAR
+  0xE67502), and as a value.
 - `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
   one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
 - `stores/volatile` - ref 3.15.1-3.15.3; codegen-patterns 13 (device

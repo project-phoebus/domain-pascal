@@ -1,7 +1,8 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: c8f980f8ea0344071b4146a3473a7698da54a9e2
+# source: 7abcec233ca334fad2e50337889dc0ab6dad710f
+OK	ct/ct.pas	ct_$release
 STUB	dxm/dxm.pas	dxm_$add_callback
 STUB	dxm/dxm.pas	dxm_$scan_queue
 STUB	dxm/dxm.pas	dxm_$helper_common
@@ -10,6 +11,8 @@ SETUP	dxm/dxm.pas	dxm_$helper_unwired
 STUB	dxm/dxm.pas	dxm_$add_signal
 STUB	dxm/dxm.pas	dxm_$init
 STUB	dxm/dxm.pas	dxm_$add_signal_callback
+OK	gpu/gpu.pas	gpu_$init
+OK	gpu/gpu.pas	gpu_$term
 STUB	kbd/kbd.pas	kbd_$state_lookup
 STUB	kbd/kbd.pas	kbd_$get_mode
 STUB	kbd/kbd.pas	kbd_$put_line
@@ -31,8 +34,14 @@ STUB	log/log.pas	log_$read_internal
 OK	log/log.pas	log_$read
 OK	log/log.pas	log_$read2
 STUB	log/log.pas	log_$init
+STUB	mem/mem.pas	mem_$parity_log
+OK	mt/mt.pas	mt_$release
+OK	scsi/scsi.pas	scsi_$cinit
+OK	scsi/scsi.pas	scsi_$free_asid
 STUB	suma/suma.pas	suma_$rcv
 STUB	suma/suma.pas	suma_$init
+OK	tape/tape.pas	tape_$boot
+SETUP	tone/tone.pas	tone_$time
 STUB	tpad/tpad.pas	tpad_$init
 STUB	tpad/tpad.pas	tpad_$data
 OK	tpad/tpad.pas	tpad_$set_mode
@@ -87,7 +96,7 @@ OK	tty/tty.pas	tty_$i_inq_raw
 STUB	tty/tty.pas	tty_$k_set_flag
 MISMATCH	tty/tty.pas	tty_$k_inq_flags
 STUB	tty/tty.pas	tty_$k_set_func_char
-STUB	tty/tty.pas	tty_$k_inq_func_char
+MISMATCH	tty/tty.pas	tty_$k_inq_func_char
 MISMATCH	tty/tty.pas	tty_$k_enable_func
 OK	tty/tty.pas	tty_$k_inq_func_enabled
 OK	tty/tty.pas	tty_$k_set_input_flag
@@ -102,7 +111,7 @@ STUB	tty/tty.pas	tty_$k_set_pgroup
 STUB	tty/tty.pas	tty_$k_inq_pgroup
 OK	tty/tty.pas	tty_$k_set_session_id
 OK	tty/tty.pas	tty_$k_inq_session_id
-STUB	tty/tty.pas	tty_$k_set_delay
-STUB	tty/tty.pas	tty_$k_inq_delay
+OK	tty/tty.pas	tty_$k_set_delay
+OK	tty/tty.pas	tty_$k_inq_delay
 STUB	tty/tty.pas	tty_$k_drain_output
 STUB	tty/tty.pas	tty_$k_put

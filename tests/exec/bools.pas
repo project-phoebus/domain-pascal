@@ -12,8 +12,8 @@
   operands in the order in which they appear"), so the only operand with
   a side effect here (`probe', a mark) is one that is evaluated either
   way: the left operand of an `or' whose right operand has none.
-  Not expressible yet: `odd' of a variable in memory, storing a
-  comparison or `odd' as a value (refused, not catalogued).
+  Not expressible yet: `odd' of a variable in memory (refused, not
+  catalogued).  A comparison or `odd' stored as a value: bool_stores.pas.
 
   call: BOOLS_$SET w:1 w:2
   call: BOOLS_$TEST

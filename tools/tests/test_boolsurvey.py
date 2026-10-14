@@ -56,6 +56,26 @@ class AndOrTest(unittest.TestCase):
         self.assertEqual(boolsurvey.andor_sites(ins), [])
 
 
+class SccTest(unittest.TestCase):
+    def test_store_push_and_web(self):
+        # TTY_$K_GET 0xE1C506 (store), 0xE1C54E (push), 0xE1C42E (web)
+        ins = insns(['cmpw %a3@,%d3', 'seq %d1', 'moveb %d1,%fp@(-30)',
+                     'btst #1,%a2@(23)', 'sne %d1', 'moveb %d1,%sp@-',
+                     'tstw %a2@(56)', 'seq %d5', 'movel %fp@(16),%a0'])
+        self.assertEqual(boolsurvey.scc_sites(ins),
+                         [(0x102, 'reg', 'store', 'cmp'),
+                          (0x108, 'reg', 'push', 'cmp'),
+                          (0x10e, 'reg', 'other', 'cmp')])
+
+    def test_memory_and_constants(self):
+        # `st'/`sf' are constants, not counted; an `s<cc>' to memory is
+        ins = insns(['st %a5@(292)', 'sf %d0', 'cmpiw #3,%a0@', 'seq %fp@(-2)',
+                     'sne %d1', 'tstb %d1'])
+        self.assertEqual(boolsurvey.scc_sites(ins),
+                         [(0x106, 'mem', '-', 'cmp'),
+                          (0x108, 'reg', 'tst', 'other')])
+
+
 class Bit0Test(unittest.TestCase):
     def test_forms(self):
         # FIM_$BUILD_DF 0xE0A6F6; AST_$GET_LOCATION 0xE0472E; a byte in memory

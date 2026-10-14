@@ -2317,8 +2317,10 @@ end;
 }
 
 /// "Succ"/"Pred" (pp. 4-191, 4-147) of a run-time value: `x + 1` / `x -
-/// 1` at x's type; `max`, `min`, `in_range` of run-time values and
-/// `discard` of other expressions are refused (no image pattern).
+/// 1` at x's type; `max`, `min` of run-time values, `in_range` of
+/// anything but an enumeration and `discard` of other expressions are
+/// refused (no image pattern).  `in_range` of an enumeration is the
+/// unsigned `x <= last` (codegen-patterns 10.1, bead domain-pascal-k1sv).
 #[test]
 fn ordinal_builtins_lower() {
     let e = result_value(
@@ -2337,8 +2339,11 @@ function f: integer; begin f := succ(w) end;",
         }
     ));
     for (src, needle) in [
-        ("w := max(w, 3)", "`max`, `min` or `in_range`"),
-        ("b := in_range(s)", "`max`, `min` or `in_range`"),
+        ("w := max(w, 3)", "a run-time `max` or `min`"),
+        (
+            "b := in_range(s)",
+            "`in_range` of a value other than an enumeration",
+        ),
         ("b := succ(b)", "this predeclared function is"),
         ("discard(w + 1)", "`discard` of an expression"),
     ] {
@@ -2349,6 +2354,21 @@ procedure p; begin {src} end;"
         ));
         assert!(e.iter().any(|m| m.contains(needle)), "{src}: {e:?}");
     }
+    let e = result_value(
+        "module m; type c_t = (c0, c1, c2, c3); var c: extern c_t;
+function f: boolean; begin f := in_range(c) end;",
+    );
+    assert!(
+        matches!(
+            &e,
+            Expr::Test(c) if matches!(&**c, Cond::Compare {
+                op: Rel::Le,
+                rhs: Expr::Const { value: 3, .. },
+                ..
+            })
+        ),
+        "{e:?}"
+    );
 }
 
 // ---- nested routines (codegen-patterns 6) ----------------------------

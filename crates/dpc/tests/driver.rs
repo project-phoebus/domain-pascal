@@ -2497,6 +2497,77 @@ end;
     );
 }
 
+/// Bead domain-pascal-k1sv: computed booleans stored, `in_range` of an
+/// enumeration and stores whose destination and value both need a
+/// register; what stays refused around them (codegen-patterns 3, 10.1,
+/// 12.4).
+#[test]
+fn k1sv_forms_and_refusals() {
+    let ok = "module m;
+type e_t = (e0, e1, e2);
+  r_t = record a: array[0..3] of integer; end;
+  rp_t = ^r_t;
+var g: integer; b: boolean; e: e_t;
+procedure p(in q: rp_t; in i: integer; in v: integer);
+begin
+  b := odd(g + 1);
+  if in_range(e) then g := 1;
+end;
+";
+    let asm = compile_with("k1sv_ok", ok, &[]).unwrap();
+    // `odd` stored: `btst #0; sne` into a register, then `move.b`.
+    assert!(asm.contains("sne\t%d0\n\tmove.b\t%d0,(2,%a5)"), "{asm}");
+    // `in_range` of an enumeration: one unsigned compare with the last
+    // ordinal.
+    assert!(asm.contains("cmpi.w\t#2,(4,%a5)\n\tbhi.s"), "{asm}");
+    let cases = [
+        // `in_range` of a subrange or an integer, `max`, `min`.
+        (
+            "b := in_range(s);",
+            "`in_range` of a value other than an enumeration",
+        ),
+        (
+            "b := in_range(g);",
+            "`in_range` of a value other than an enumeration",
+        ),
+        ("g := max(g, 3);", "a run-time `max` or `min`"),
+        // A comparison that computes into a data register, assigned to a
+        // register-held local.
+        (
+            "i := 0; repeat c := i + 1 = 3; if c then g := 1; if not c then g := 2; \
+             i := i + 1 until i > 5;",
+            "storing a computed boolean whose compare computes into a data register",
+        ),
+        // A destination and a value that both need a register, with a call.
+        (
+            "q^.a[g] := f(g);",
+            "both need a register, with a call on either side",
+        ),
+    ];
+    for (body, msg) in cases {
+        let src = format!(
+            "module m;
+type s_t = 1..10;
+  r_t = record a: array[0..3] of integer; end;
+  rp_t = ^r_t;
+var g: integer; b: boolean; s: s_t;
+function f(in x: integer): integer; extern;
+procedure p(in q: rp_t; n: integer); options(val_param);
+var c: boolean; i: integer;
+begin
+  {body}
+end;
+"
+        );
+        let (code, err) = compile_with("k1sv_refusals", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(msg) && err.contains("not supported yet"),
+            "{body}: {err}"
+        );
+    }
+}
+
 #[test]
 fn with_and_or_odd_refusals() {
     // Bead domain-pascal-5aw.19: what stays refused around `with`, plain
@@ -2505,8 +2576,6 @@ fn with_and_or_odd_refusals() {
         // `odd` of a variable in memory: `btst #0` on its low byte or the
         // value loaded first, not settled.
         ("if odd(g) then g := 1;", "`odd` of a variable in memory"),
-        // `odd` stored as a value, like a comparison.
-        ("b := odd(g + 1);", "storing a computed boolean"),
         // An `and then` inside a plain `and`.
         (
             "if b and ((g = 1) and then (g = 2)) then g := 1;",

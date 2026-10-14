@@ -4393,15 +4393,40 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
             rhs: Box::new(Expr::Const { value: 1, ty }),
             ty,
         }),
+        // "In_range", p. 4-104: "true if the value of x is within its
+        // defined range".  Of an enumeration (ordinals 0..n-1, a word
+        // compared unsigned, ref 3.7.1): `x <= n-1`, one unsigned compare
+        // against the last ordinal, the lower bound 0 needing none.
+        // TTY_$K_SET_FUNC_CHAR 0xE67502 and TTY_$K_INQ_FUNC_CHAR 0xE67588
+        // `cmpi.w #0x1f,D1; bhi` (`not in_range(func)`, tty_$func_t's
+        // last ordinal 31; ../source tty/k_func.pas).  **Reported:** an
+        // `ord(x) > 31` gives the same code (codegen-patterns 10.1).
+        // Other types (a subrange, an integer, a char) are not seen.
+        Builtin::InRange
+            if matches!(
+                p.types.kind(p.types.canon(args[0].ty)),
+                TypeKind::Enum { .. }
+            ) =>
+        {
+            let x = value_of(p, &args[0])?;
+            let (_, hi) = p.types.ordinal_range(args[0].ty).expect("an enumeration");
+            let xty = x.ty();
+            Ok(Expr::Test(Box::new(Cond::Compare {
+                op: Rel::Le,
+                lhs: x,
+                rhs: Expr::Const { value: hi, ty: xty },
+            })))
+        }
         // "Max", p. 4-111 / "Min", p. 4-113 / "In_range", p. 4-104: the
         // image's `x := min(x, c)`-shaped sites (codegen-patterns 12.4 R8,
         // 0xE2F08A `move.w #504,D0; cmp.w D0,D2; ble.s; move.w D0,D2`) are
-        // indistinguishable from an `if`; no site that must be `max`,
-        // `min` or `in_range` is known (codegen-patterns 10.1).
+        // indistinguishable from an `if`; no site that must be `max` or
+        // `min` is known, nor an `in_range` of anything but an
+        // enumeration (above; codegen-patterns 10.1).
         Builtin::Max | Builtin::Min | Builtin::InRange => Err(unsupported(
             e.span,
-            "a run-time `max`, `min` or `in_range` (no image pattern known, codegen-patterns \
-             10.1) is",
+            "a run-time `max` or `min`, or `in_range` of a value other than an enumeration \
+             (no image pattern known, codegen-patterns 10.1) is",
         )),
         // "Odd", p. 4-128: "true if i is an odd integer": bit 0 of the
         // integer (codegen-patterns 8, "odd").
