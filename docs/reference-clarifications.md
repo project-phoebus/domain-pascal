@@ -73,6 +73,13 @@ Question: is a comma-separated list accepted, and may listed names carry `:= ini
 Owner's answer (2026-10-14; the owner notes not every case was checked): `DEFINE var1, var2, ..., varN;` is allowed; it defines the names and leaves them uninitialised.  A name with an initialiser needs its own `;`: `DEFINE var1 := init1; var2 := init2; ... varN := initN;`.  So `:=` is not allowed inside a comma list.
 Consequence: implemented under bead domain-pascal-hsb.
 
+## 5.1 Empty argument lists (p. 5-3; PDF page 358)
+Asked: 2026-10-14, by the corpus agent (open question 34; bead domain-pascal-9iq)
+Passage: "To call a routine, simply specify its name. If the procedure has a parameter list, you must also specify arguments."  Apollo writes `pgm_$exit( );` (usr/X11/examples/pascal/xhw1.pas) and `ext_db := alloc_db();` (hardcopy driver_ex.pas).
+Question: is `name()` a valid call of a routine with no parameters?
+Owner's answer (2026-10-14): both `simple;` and `simple();` call the procedure `simple` with no arguments and are valid syntax; leaving out the `()` is just an (arguable) ergonomic convenience.
+Consequence: implemented under bead domain-pascal-9iq; the lead applies the same reading to function calls such as `alloc_db()` (Apollo's own example), pending the owner's confirmation.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -467,7 +474,7 @@ records the files it stops.
     a comma-separated list accepted in a define statement, meaning one
     item per name?  May listed names carry `:= initial_value`?  *Current:
     a parse error (bead domain-pascal-hsb).*
-34. **5.1, p. 5-3 (PDF p. 358, checked).**  "To call a routine, simply
+34. **Answered 2026-10-14; see Clarifications, "5.1 Empty argument lists".**  **5.1, p. 5-3 (PDF p. 358, checked).**  "To call a routine, simply
     specify its name. If the procedure has a parameter list, you must also
     specify arguments."  Apollo's examples call parameterless routines
     with empty parentheses: `usr/X11/examples/pascal/xhw1.pas`
