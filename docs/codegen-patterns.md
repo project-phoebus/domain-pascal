@@ -6007,7 +6007,7 @@ set value and its boolean are one virtual register; the move of a value
 into D0 for a function result is not subject to R2 (PROC1_$GET_LOCKS
 0xE148F0 loads the result straight into D0).
 
-### 12.5 Local variables held in registers (Verified at the sites; rule Uncertain; implemented narrowly)
+### 12.5 Local variables held in registers (rule Verified on the TTY Pascal, 41 of 43 locals; supported by the C corpus; implemented)
 
 Ref 6.4.24, p. 6-29 (`-opt 3`): "Global register allocation allows local
 variables to have their values placed in machine registers"; p. 6-32,
@@ -6032,7 +6032,8 @@ the variable's value is needed".  The image shows both kinds of local:
 
 Which locals the compiler kept in registers is therefore not just "those
 whose address is not taken" (TS_END_CALLBACK's `timeslice` is not, and
-D2 at PROC1_$SET_VT is assigned in an `if` too).  Not settled.
+D2 at PROC1_$SET_VT is assigned in an `if` too).  The rule is in "The
+rule" below (bead domain-pascal-iyd); the first survey follows.
 
 **Survey (review of beads domain-pascal-5aw.7, -0wc).**  Every compiled
 routine with a `link` (1635, split as `tools/loopalign.py` does) was
@@ -6059,8 +6060,8 @@ against the C in `../source`:
   PROC1_$SET_VT D2/D3 (read by `move.w D2,(72,A2)`, `move.w D3,SR`).
   UID_$GEN 0xE1A018 keeps the C's `token` in D3 (0xE1A040, 0xE1A0B2: two
   assignments, one inside a loop) and pushes it by value (0xE1A07A,
-  0xE1A0D6), so "passed by value means frame" is not absolute either (a
-  loop-weighted priority would fit; not settled).  Pointer locals are
+  0xE1A0D6), so "passed by value means frame" is not absolute either
+  (the one such exception of the corpus below).  Pointer locals are
   often in address registers (MMAP_$FREE's `page` in A2 from 0xE0CADE;
   KBD_$PUT's descriptor in A2 from 0xE1CEC6); `dpc` holds those
   assigned from pointer functions in an address register (section 3,
@@ -6081,37 +6082,154 @@ against the C in `../source`:
   (SMD_$BLT_U 0xE6FB1E; module-local 0xE5AA28 at 0xE5AA6C, across an
   M$ARITH call); not this rule's business.
 
-So `dpc` also requires that the local is **never read inside a call
-argument**: every checked local assigned once at the top level and
-passed by value is in the frame, and that covers PROC1_$TS_END_CALLBACK's
-`timeslice` too.  No checked site contradicts the narrowed rule, but it
-is still fitted to two routines (Uncertain).  Locals outside it stay in
-the frame, which UID_$GEN shows is not always the original's choice.
+That first survey led to the narrow rule of bead domain-pascal-0wc
+(assigned once, at the top level, never read inside a call argument),
+fitted to two routines.  The corpus below replaces it.
 
-**Implemented** (`dpc-m68k` `isel.rs`, `register_locals`; bead
-domain-pascal-0wc): the narrowest rule that fits TIME_$GET_ADJUST.  A
-scalar local (1, 2 or 4 bytes) whose only references are whole reads and
-assignments of the variable, assigned exactly once, by a statement of
-the routine's own statement part (not inside an `if`, loop or `case`),
-with a value that is not a constant, read only by later statements, and
-never read inside an argument of a call (survey above),
-is a data value: the assignment computes or loads it into a new virtual
-register (`move.l (abs).l,Dn`, or the `move.w SR,Dn` of `set_sr`), its
-reads use that register, and the allocator gives it a register like any
-other value (12.4 R1-R3; D1 at 0xE16AB4).  Its frame slot stays
-allocated (`dpc-sema` frame size, `link #-4`).  Every other local stays
-in its frame slot, as before, and so does every local a nested routine
-reaches (it reads and writes them through the frame, which the per-body
-analysis does not see; `dpc-ir` `scalar_locals` with
-`Function::uplevel_refs`, bead domain-pascal-thc; PMAP_$FLUSH keeps such
-a word in its frame and the boolean no nested routine reads in D3,
-section 6).  Other locals of a routine with nested routines follow the
-rule like any routine's.  A value held
-across a call goes to a callee-saved register (12.4).  A constant assignment is excluded because
-the one register-variable constant seen, 0xE149A4, is `move.w #-1,D2`,
-not the `moveq` `dpc` uses for constants in registers (section 13).
-Unit test `register_local_rule`; golden `tests/golden/sysprog/interrupts`
-(`held_sr`); conformance `tests/conformance/time_get_adjust.pas`.
+**The corpus (bead domain-pascal-iyd; `tools/localsurvey.py`, kept, with
+tests).**  Every scalar local whose source is known, with the facts of
+each (`dpc --dump-locals`, `dpc_m68k::locals`): its assignments and
+reads, each at the routine level or inside an `if`/loop/`case`, a read
+inside a call's argument and whether the argument *is* the local (it is
+pushed as it is), inside a condition, whether a call lies between an
+assignment and a read; and whether the image addresses its frame slot
+(in the frame) or not (in a register; the slot stays allocated).  Only
+"plain" locals are scored: read and assigned as a whole, not
+dereferenced, address never passed or taken, not a `for` index.
+
+- *TTY Pascal* (`localsurvey.py run --rev 3898a2ce`): ../source's
+  `tty/*.pas`, written from the C and checked against the image, the
+  closest thing to the original source we have.  56 routines lower; 43
+  plain locals in routines with a header address (30 in a register, 13 in
+  the frame; I_SIGNAL's and I_STORE_PARITY's not placed: dpc's frame
+  differs or no address).
+- *C corpus* (`localsurvey.py c --rev 3898a2ce`): ../source's C, parsed
+  with clang (the host build's flags), every scalar local whose
+  declaration carries a register or frame note (`/* D3 */`, `/*
+  A6-0x14 */`), the frame ones checked against the image when the map
+  names the function.  status_$t locals are left out (a Pascal record,
+  base.ins.pas), calls of M$ARITH and of ../source's ARCH_ helpers count
+  as operators.  A C local is not always a local of the original (a
+  decompiler names register values too), so this is weaker evidence.
+
+| Rule ("held in a register when ...") | TTY (43) | C, data locals, routines saving at most 4 of D2-D7 (459) |
+|---|---|---|
+| narrow rule of bead 0wc | 17 | 215 |
+| never read inside a call argument | 38 | 351 |
+| ... and not live across a call | 24 | 251 |
+| every plain local | 30 | 346 |
+| **unless every read pushes it as an argument** | **41** | **408** |
+| unless some read pushes it | 39 | 360 |
+
+C data locals by the number of D2-D7 the routine saves, register/frame
+(`localsurvey.py c`, first table): a local some read uses otherwise 67/4,
+60/5, 82/7, 66/10 for 0..3 saved, 67/21 for 4, 110/55 and 193/107 for 5
+and 6; a local every read pushes 2/20, 0/13, 2/14, 0/9, 0/10, 1/25,
+0/34.  So the frame is the rule for the second kind at any pressure, and
+the first kind spills more the more registers the routine uses: under
+pressure the original keeps some register candidates in the frame by a
+priority not found.
+
+**The rule (Verified on the TTY corpus; the C corpus agrees, 89% of the
+459 and 92% where the routine saves at most 3).**  A plain local
+assigned at least once is held in a data register for the whole body,
+unless every read of it is a call argument that pushes it as it is.
+Examples:
+
+- in a register, assigned in both arms of an `if`, one a constant:
+  TTY_$I_BUF_INSERT's `new_tail` D1 (0xE1AF20 `moveq #1,D1`; 0xE1AF24
+  `move.w (2,A0),D1; addq.w #1,D1`), TTY_$I_BUF_PUT's D0 (0xE1AF6C);
+  assigned in a loop and read in conditions and arguments,
+  TTY_$I_PUT_CHARS' `ch` D5 and `chars_processed` D2, TTY_$K_GET's
+  `chars_read` D3 and `read_pos` D2; a `case` index used only inside an
+  argument's address, TTY_$I_SIGNAL's `signal_index` D2 (0xE1B858..);
+  booleans, TTY_$I_NEWLINE (`st D0`, `clr.b D2`), TTY_$K_GET's flags;
+  a set, TTY_$I_RCV's `state_flags` D4; a function's result,
+  TTY_$I_WAIT's `result` D2 (0xE1C368 `move.w D0,D2`);
+- in the frame: every spin-lock token of TTY (8, e.g. TTY_$I_BUF_PUT
+  0xE1AF60 `move.w D0,(-6,A6)`, pushed at 0xE1AF88), TTY_$K_GET's
+  `wait_flag`, TTY_$I_WAIT's `num_ecs`, TTY_$K_RESET's `xon_xoff`, all
+  read only as pushed arguments; the earlier survey's MMAP_$FREE,
+  SIO2681_$SET_BREAK, PROC1_$TS_END_CALLBACK sites.
+
+Exceptions: TTY_$I_PUT_CHARS' `col_mod` (frame, 0xE1B1DA `move.w
+D4,(-0x1e,A6)`, then 0xE1B1E0 `sub.w (-0x1e,A6),D4`, with D6 and D7 free)
+and TTY_$K_GET's `done` (frame, 0xE1C426, D7 free) are not explained;
+UID_$GEN's `token` (D3, pushed only, in a loop) is the one C exception
+not explained by an operator call or a pointer.  How in-place updates
+look: `x := x op c` and `x := x op y` operate on the local's register
+(TTY_$I_PUT_CHARS 0xE1B04A `addi.w #256,D1`, 0xE1B04E `sub.w D0,D1`,
+0xE1B07E `addq.w #1,D2`); other values are computed into it
+(0xE1B03E..0xE1B046 `move.w (978,A0),D1; sub.w (980,A0),D1; subq.w
+#1,D1`).  A constant `moveq` cannot load as the value written (16#FFFF in
+a 0..65535 word) is `move.w #-1,Dn` (0xE149A4; 12 such `move.w` of a
+negative byte-sized word in the image against 57 negative `moveq`s,
+`moveq` 1978 times for positive ones).
+
+**A stored value is not pushed from its register after a register-held
+local took it (TTY_$I_BUF_PUT).**  The token stored from D0 at 0xE1AF60
+is pushed from its slot at 0xE1AF88, with no call between: `new_tail`
+took D0 at 0xE1AF6C.  The original gives variables their registers
+before it tracks the values its registers hold.
+
+**Implemented** (`dpc-m68k` `isel.rs`, `register_locals`,
+`Selector::store_web`; `crate::locals` for the facts; beads
+domain-pascal-0wc, -iyd).  The rule above, over `Function::scalar_locals`
+(1, 2 or 4 bytes of an ordinal, set or pointer type: not a record or an
+array, as the image keeps `status_$t` locals in the frame with registers
+to spare, MST_$ALLOC_ASID 0xE42DB2, FLP_$CINIT 0xE3E0D6; not volatile;
+not reached by a nested routine, which
+reads and writes them through the frame: `dpc-ir` `scalar_locals` with
+`Function::uplevel_refs`, bead domain-pascal-thc; PMAP_$FLUSH keeps such a
+word in its frame and the boolean no nested routine reads in D3, section
+6; not passed or taken by address, bead domain-pascal-pe9, below).  A
+local of the narrow rule (assigned once, by a routine-level statement,
+with a non-constant value, read only by later routine-level statements)
+is a data value as before: the assignment computes or loads it into a
+new virtual register (`move.l (abs).l,Dn`, the `move.w SR,Dn` of
+`set_sr`), which its reads use (TIME_$GET_ADJUST D1 at 0xE16AB4).  Every
+other register-held local is a *web*: one virtual data register for the
+whole body, which every assignment writes: `x := x op c` and `x := x op
+y` in place (`addq`/`subq`/`addi`/`subi`/`andi`/`ori`/`eori`, or the
+operation with `y`), `true` as `st`, other constants as `moveq`/`clr`/
+`move` (one `moveq` cannot tell from `move.w #-1` is refused), other
+values computed into it (the computation's register renamed), or, when
+the computation reads the local after starting its result, computed
+apart and moved (not seen); an M$ARITH result, in D0 from the `jsr`,
+moved (`move.l D0,Dn`; for a local of the narrow rule too, which D0
+itself would not keep past the next call; not seen in the image).  A
+web read before the code first assigns it (a read the back edge of a
+loop reaches, the assignment later in the body; or a local not yet
+assigned) is refused: where the original colours such a value is not
+known.  A computed boolean (`x := a = b`) is refused
+as for memory (section 7.1).  The allocator gives the register like any
+other value (12.4 R1-R3: a callee-saved one across calls; a body that
+runs out of registers is refused, where the original would spill by its
+unknown priority).  Assignments to register-held locals are not memory
+stores for the check of adjacent stores (ref 3.15.3, p. 3-57; `isel.rs`
+`reject_mergeable_stores`), and they end the
+pushing of a stored local from its register (`Selector::forwarded`,
+TTY_$I_BUF_PUT above).  A local every read of which pushes it stays in
+its slot (with the forwarding below).  The frame slot of every local
+stays allocated (`dpc-sema` frame size).  Not reproduced: the two
+exceptions above (in a register in `dpc`), register pressure (refused
+when it runs out; the original spills earlier, at four or more of D2-D7
+in the C corpus), TTY_$I_NEWLINE's `send_cr := true` as `move.b D0,D2`
+(a copy of the register already holding the constant) and its branch
+threading.  Unit tests `register_local_rule`, `body_uses_facts`; driver
+tests `register_held_locals`, `dump_locals_prints_the_uses_of_scalar_locals`,
+`marith_result_into_register_held_local`,
+`register_held_local_read_before_assigned_is_refused`;
+golden `tests/golden/sysprog/interrupts` (`held_sr`); conformance
+`tests/conformance/time_get_adjust.pas`, `tty_buf.pas` (TTY_$I_BUF_INSERT
+and TTY_$I_BUF_PUT, new; srcsurvey of ../source 3898a2ce: 19 of 26 TTY
+routines identical, was 17).  The tests of section 7.1's store flags
+(golden `control/store_flags`, driver tests
+`branch_on_the_store_flags_only_right_after_the_store`,
+`ordered_branch_on_a_store_is_refused`) pass their locals to a `var`
+parameter now, which keeps them in the frame; the image's frame locals
+of that shape are a status record (WIN_$SPIN_DOWN 0xE19BE6) or in
+routines that save D2-D6 or more (0xE55480, 0xE6B180, 0xE4F09C).
 
 **Pointer locals of loops in address registers (implemented narrowly;
 bead domain-pascal-5aw.15).**  A list walk keeps its pointer in an

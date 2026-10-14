@@ -34,7 +34,7 @@ mod lower;
 #[cfg(test)]
 mod tests;
 
-pub use lower::{lower, lower_with};
+pub use lower::{lower, lower_each, lower_with};
 
 use dpc_syntax::Span;
 

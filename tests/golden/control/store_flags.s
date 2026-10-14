@@ -8,8 +8,11 @@ jsr (GETL).l
 addq.w #4,%sp
 move.l %d0,(-4,%fp)
 beq.s 1f
-move.l %d0,-(%sp)
+move.l (-4,%fp),-(%sp)
 jsr (USEL).l
+addq.w #4,%sp
+pea (-4,%fp)
+jsr (TAKEL).l
 1:
 unlk %fp
 rts
@@ -27,8 +30,11 @@ bpl.s 1f
 move.w #1,(%a5)
 1:
 subq.l #2,%sp
-move.b %d0,-(%sp)
+move.b (-2,%fp),-(%sp)
 jsr (USB).l
+addq.w #4,%sp
+pea (-2,%fp)
+jsr (TAKEB).l
 movea.l (-8,%fp),%a5
 unlk %fp
 rts
@@ -46,8 +52,11 @@ bpl.s 1f
 clr.w (%a5)
 1:
 subq.l #2,%sp
-move.w %d0,-(%sp)
+move.w (-2,%fp),-(%sp)
 jsr (USE).l
+addq.w #4,%sp
+pea (-2,%fp)
+jsr (TAKE).l
 movea.l (-8,%fp),%a5
 unlk %fp
 rts
@@ -72,6 +81,9 @@ move.w #2,(%a5)
 subq.l #2,%sp
 move.w (-2,%fp),-(%sp)
 jsr (USE).l
+addq.w #4,%sp
+pea (-2,%fp)
+jsr (TAKE).l
 movea.l (-8,%fp),%a5
 unlk %fp
 rts

@@ -3622,6 +3622,33 @@ var
     assert!(e[0].contains("volatile or device parts"), "{e:?}");
 }
 
+/// Only locals of an ordinal, set or pointer type are register
+/// candidates; a record or an array of 4 bytes or less is not
+/// (codegen-patterns 12.5: the image keeps `status_$t` locals in the
+/// frame, MST_$ALLOC_ASID 0xE42DB2).
+#[test]
+fn record_and_array_locals_are_not_scalar_locals() {
+    let m = lower_src(
+        "module m;
+type st = record all: integer32; end;
+  colour = (red, green);
+procedure p;
+var s: st; a: array[1..2] of integer; f: set of 0..15; c: char;
+  k: colour; n: 0..65535; q: ^integer; b: boolean;
+begin
+  s.all := 0; a[1] := 0; f := []; c := 'x'; k := red; n := 1;
+  b := true;
+end;",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    let mut offs: Vec<i32> = f.scalar_locals.iter().map(|l| l.offset).collect();
+    offs.sort();
+    // s at -4, a at -8: left out; the six others are candidates.
+    assert_eq!(offs.len(), 6, "{offs:?}");
+    assert!(!offs.contains(&-4) && !offs.contains(&-8), "{offs:?}");
+}
+
 /// A volatile local is not offered to the selector as a register
 /// candidate (codegen-patterns 12.5); ref 3.15.1's example `i: [volatile]
 /// integer`.

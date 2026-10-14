@@ -6,11 +6,15 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
-//!            [--parse-only | --dump-ast | --check-only] file.pas
+//!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
 //! their positions); `--dump-ast` also prints the AST to stdout;
-//! `--check-only` stops after semantic analysis.
+//! `--check-only` stops after semantic analysis.  `--dump-locals` lowers
+//! every routine that lowers and prints, one JSON object per line, how
+//! each body uses its scalar locals (`dpc_m68k::locals`; the input of
+//! `tools/localsurvey.py`, codegen-patterns 12.5); routines that do not
+//! lower are named on stderr, and the exit status is 0.
 //!
 //! `--fragment-origin 0xADDR` (for image-conformance tests) says that the
 //! output is a fragment of a module whose first byte belongs at image
@@ -87,7 +91,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
-                     [--parse-only | --dump-ast | --check-only] file.pas";
+                     [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,8 @@ enum Stop {
     DumpAst,
     /// Stop after semantic analysis.
     AfterCheck,
+    /// Lower what lowers and print the uses of scalar locals.
+    DumpLocals,
 }
 
 #[derive(Debug)]
@@ -355,6 +361,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
             "--check-only" => stop = Stop::AfterCheck,
+            "--dump-locals" => stop = Stop::DumpLocals,
             s if s.starts_with("-I") && s.len() > 2 => include_dirs.push(s[2..].into()),
             s if s.starts_with('-') && s != "-" => return Err(format!("unknown option `{s}`")),
             _ => {
@@ -418,7 +425,7 @@ fn compile(
     warnings.extend(pp.diagnostics);
     let unit = dpc_syntax::parser::parse(&pp.tokens)?;
     match args.stop {
-        Stop::Never | Stop::AfterCheck => {}
+        Stop::Never | Stop::AfterCheck | Stop::DumpLocals => {}
         Stop::AfterParse => return Ok(()),
         Stop::DumpAst => {
             println!("{unit:#?}");
@@ -428,6 +435,19 @@ fn compile(
     let program = dpc_sema::analyze(&unit, &target)?;
     warnings.extend(program.warnings.iter().cloned());
     if args.stop == Stop::AfterCheck {
+        return Ok(());
+    }
+    if args.stop == Stop::DumpLocals {
+        let (functions, errors) = dpc_ir::lower_each(&program);
+        for f in &functions {
+            println!("{}", local_facts_json(&program, f));
+        }
+        for d in errors {
+            warnings.push(Diagnostic {
+                severity: dpc_syntax::diag::Severity::Warning,
+                ..d
+            });
+        }
         return Ok(());
     }
     let module = dpc_ir::lower_with(&program, &args.data_base)?;
@@ -456,6 +476,111 @@ fn compile(
             out.display()
         ))]
     })
+}
+
+/// One line of `--dump-locals`: the routine and the uses of each of its
+/// scalar locals (`dpc_m68k::locals`), with the locals' names and type
+/// kinds from the checked program.
+fn local_facts_json(program: &dpc_sema::Program, f: &dpc_ir::Function) -> String {
+    use dpc_m68k::locals::{body_uses, Site};
+    use dpc_sema::types::TypeKind;
+    use std::fmt::Write;
+    let routine = program.routines.iter().find(|r| r.symbol == f.symbol);
+    let var_at = |off: i32| {
+        routine.and_then(|r| {
+            r.frame_vars
+                .iter()
+                .map(|&v| program.var(v))
+                .find(|v| matches!(v.storage, dpc_sema::Storage::Frame { offset } if offset == off))
+        })
+    };
+    let kind = |v: &dpc_sema::Var| {
+        let mut t = v.ty;
+        loop {
+            match program.types.kind(t) {
+                TypeKind::Subrange { base, .. } => t = *base,
+                TypeKind::Integer16 | TypeKind::Integer32 => return "integer",
+                TypeKind::Boolean => return "boolean",
+                TypeKind::Char => return "char",
+                TypeKind::Enum { .. } => return "enum",
+                TypeKind::Set { .. } => return "set",
+                TypeKind::Pointer { .. } | TypeKind::UnivPtr | TypeKind::RoutinePointer(_) => {
+                    return "pointer"
+                }
+                _ => return "other",
+            }
+        }
+    };
+    let site = |s: &Site| {
+        let lp = match s.lp {
+            Some((lo, hi)) => format!("[{lo},{hi}]"),
+            None => "null".into(),
+        };
+        format!(
+            "\"top\":{},\"seq\":{},\"nested\":{},\"loop\":{lp}",
+            s.top, s.seq, s.nested
+        )
+    };
+    let uses = body_uses(f);
+    let mut o = String::new();
+    write!(
+        o,
+        "{{\"routine\":\"{}\",\"global\":{},\"frame\":{},\"nested_routine\":{},\"stmts\":{},\"calls\":[",
+        f.symbol,
+        f.global,
+        f.frame_size,
+        f.nesting.is_some(),
+        f.body.len()
+    )
+    .unwrap();
+    for (k, c) in uses.calls.iter().enumerate() {
+        write!(o, "{}{{{}}}", if k > 0 { "," } else { "" }, site(c)).unwrap();
+    }
+    o.push_str("],\"locals\":[");
+    for (k, l) in uses.locals.iter().enumerate() {
+        let v = var_at(l.offset);
+        write!(
+            o,
+            "{}{{\"name\":\"{}\",\"type\":\"{}\",\"offset\":{},\"bytes\":{},\"deref\":{},\"other\":{},\"for_index\":{},\"across_call\":{},\"stores\":[",
+            if k > 0 { "," } else { "" },
+            v.map_or("?", |v| v.name.as_str()),
+            v.map_or("?", kind),
+            l.offset,
+            l.width.bytes(),
+            l.deref,
+            l.other,
+            l.for_index,
+            uses.across_call(l)
+        )
+        .unwrap();
+        for (j, s) in l.stores.iter().enumerate() {
+            write!(
+                o,
+                "{}{{{},\"const\":{},\"call\":{}}}",
+                if j > 0 { "," } else { "" },
+                site(&s.at),
+                s.konst,
+                s.call
+            )
+            .unwrap();
+        }
+        o.push_str("],\"loads\":[");
+        for (j, r) in l.loads.iter().enumerate() {
+            write!(
+                o,
+                "{}{{{},\"arg\":{},\"whole\":{},\"cond\":{}}}",
+                if j > 0 { "," } else { "" },
+                site(&r.at),
+                r.arg,
+                r.whole,
+                r.cond
+            )
+            .unwrap();
+        }
+        o.push_str("]}");
+    }
+    o.push_str("]}");
+    o
 }
 
 fn main() -> ExitCode {

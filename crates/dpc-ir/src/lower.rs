@@ -88,6 +88,24 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
     }
 }
 
+/// Lower every routine family of `program` that lowers, ignoring the
+/// others: the functions, and the diagnostics of the families that did
+/// not lower.  For surveys of the IR only (`dpc --dump-locals`,
+/// codegen-patterns 12.5): static links and the data-base choice are not
+/// decided, so the functions are not fit for code generation.
+pub fn lower_each(program: &Program) -> (Vec<Function>, Vec<Diagnostic>) {
+    let mut functions = Vec::new();
+    let mut errors = Vec::new();
+    for &id in &program.top_routines {
+        let r = program.routine(id);
+        if r.external || r.body.is_none() {
+            continue;
+        }
+        lower_family(program, id, &mut functions, &mut errors);
+    }
+    (functions, errors)
+}
+
 /// The unit's static data areas (codegen-patterns 4): every variable with
 /// [`Storage::Static`] storage, unit-level or a routine's `static` one,
 /// lives in a data section of the unit at the offset `dpc-sema` gave it.
@@ -1584,7 +1602,15 @@ fn addr_uses_static(a: &Addr) -> bool {
 
 /// The routine's own scalar local variables ([`Function::scalar_locals`]):
 /// the frame variables other than the function result variable (parameter
-/// copies are not frame variables), of 1, 2 or 4 bytes.
+/// copies are not frame variables), of 1, 2 or 4 bytes, of an ordinal,
+/// set or pointer type.
+///
+/// Not a record or an array, even one of 4 bytes or less used only as a
+/// whole: the image keeps `status_$t` locals (a packed record,
+/// base.ins.pas) in the frame in routines with registers to spare
+/// (MST_$ALLOC_ASID 0xE42DB2 and FLP_$CINIT 0xE3E0D6, `status` at
+/// `(-4,A6)`, stored and tested there with three and two of D2-D7 saved;
+/// `tools/localsurvey.py c`, bead domain-pascal-iyd).
 ///
 /// Not the locals its nested routines reach (`uplevel`): they read and
 /// write them through the frame (ref 2.4), which the selector's per-body
@@ -1605,7 +1631,24 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
                 return None;
             };
             let width = Width::of_size(p.types.size(var.ty))?;
-            if overlaps(uplevel, offset, width.bytes()) {
+            let mut t = var.ty;
+            while let dpc_sema::types::TypeKind::Subrange { base, .. } = p.types.kind(t) {
+                t = *base;
+            }
+            use dpc_sema::types::TypeKind as K;
+            let scalar = matches!(
+                p.types.kind(t),
+                K::Integer16
+                    | K::Integer32
+                    | K::Boolean
+                    | K::Char
+                    | K::Enum { .. }
+                    | K::Set { .. }
+                    | K::Pointer { .. }
+                    | K::UnivPtr
+                    | K::RoutinePointer(_)
+            );
+            if !scalar || overlaps(uplevel, offset, width.bytes()) {
                 return None;
             }
             // A volatile local is referenced in its frame slot as written

@@ -16,6 +16,7 @@ pub mod emit;
 pub mod frame;
 pub mod insn;
 pub mod isel;
+pub mod locals;
 pub mod regs;
 pub mod sched;
 

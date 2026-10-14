@@ -11,7 +11,14 @@
 
   Not on the store's flags: a test after a join, where the other path
   did not store (`tst' of the slot); a test of a variable of the unit's
-  data (other memory: tested again, 0xE02806). }
+  data (other memory: tested again, 0xE02806).
+
+  Each local is also passed to a `var' parameter (`take'), which keeps it
+  in its frame slot: a local read otherwise is held in a register
+  (codegen-patterns 12.5, bead domain-pascal-iyd).  The image's frame
+  locals of this shape are a status record (WIN_$SPIN_DOWN 0xE19BE6,
+  status_$t) or are in routines that save D2-D6 or D2-D7 (0xE55480,
+  0xE6B180, 0xE4F09C), where the original spills. }
 module stflags;
 var
   seen: integer;
@@ -22,6 +29,9 @@ function ready(k: integer): boolean; val_param; extern;
 procedure use(k: integer); val_param; extern;
 procedure usel(k: integer32); val_param; extern;
 procedure usb(b: boolean); val_param; extern;
+procedure take(var k: integer); extern;
+procedure takel(var k: integer32); extern;
+procedure takeb(var b: boolean); extern;
 
 procedure call_result(k: integer); val_param;
 var x: integer32;
@@ -29,6 +39,7 @@ begin
   x := getl(k);
   if x = 0 then return;
   usel(x);
+  takel(x);
 end;
 
 procedure boolean_flag(n: integer); val_param;
@@ -37,6 +48,7 @@ begin
   b := ready(n);
   if b then seen := 1;
   usb(b);
+  takeb(b);
 end;
 
 procedure negative(k: integer); val_param;
@@ -45,6 +57,7 @@ begin
   x := getw(k);
   if x < 0 then seen := 0;
   use(x);
+  take(x);
 end;
 
 procedure after_join;
@@ -54,6 +67,7 @@ begin
   if seen > 3 then x := getw(seen);
   if x <> 0 then seen := 2;
   use(x);
+  take(x);
 end;
 
 procedure unit_data(k: integer); val_param;

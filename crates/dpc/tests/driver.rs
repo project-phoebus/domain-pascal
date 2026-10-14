@@ -920,6 +920,165 @@ end;
 }
 
 #[test]
+fn dump_locals_prints_the_uses_of_scalar_locals() {
+    // `--dump-locals' (tools/localsurvey.py, codegen-patterns 12.5): one
+    // JSON line per routine that lowers, nothing written, exit status 0.
+    let dir = scratch("dump_locals");
+    let path = dir.join("m.pas");
+    std::fs::write(
+        &path,
+        "module m;
+var g: integer;
+procedure use(k: integer); val_param; extern;
+procedure a;
+var t, u: integer;
+begin
+  t := g;
+  if t > 0 then u := 1 else u := 2;
+  use(t);
+  g := u;
+end;
+",
+    )
+    .unwrap();
+    let run = dpc().arg("--dump-locals").arg(&path).output().unwrap();
+    assert!(run.status.success());
+    let out = String::from_utf8(run.stdout).unwrap();
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        out.starts_with("{\"routine\":\"A\",\"global\":true,"),
+        "{out}"
+    );
+    assert!(
+        out.contains("{\"name\":\"t\",\"type\":\"integer\",\"offset\":-2,\"bytes\":2,")
+            && out.contains("\"arg\":true,\"whole\":true,\"cond\":false}")
+            && out.contains("{\"name\":\"u\",")
+            && out.contains("\"nested\":true,\"loop\":null,\"const\":true,\"call\":false}"),
+        "{out}"
+    );
+    assert!(!dir.join("m.s").exists());
+}
+
+#[test]
+fn register_held_locals() {
+    // codegen-patterns 12.5 (bead domain-pascal-iyd): a local read and
+    // assigned only as a whole is held in one data register for the body
+    // unless every read pushes it as an argument.  Assignments update the
+    // register in place (TTY_$I_PUT_CHARS 0xE1B04A `addi.w #256,D1`,
+    // 0xE1B04E `sub.w D0,D1`, 0xE1B07E `addq.w #1,D2`) or compute into it
+    // (0xE1B03E..0xE1B046); booleans as `st`/`clr.b` (TTY_$I_NEWLINE
+    // 0xE1B45E `st D0`); a value live across a call in a callee-saved
+    // register; a local only pushed stays in its slot (the spin-lock
+    // tokens of TTY).
+    let src = "module m;
+var g, h: integer; flag: boolean;
+procedure use(k: integer); val_param; extern;
+procedure inplace;
+var x: integer;
+begin
+  x := g - h;
+  x := x + 256;
+  x := x - h;
+  x := x + 1;
+  g := x;
+end;
+procedure selfread;
+var x: integer;
+begin
+  x := g;
+  if h > 0 then x := h - x;
+  g := x;
+end;
+procedure bools;
+var a, b: boolean;
+begin
+  a := true;
+  b := false;
+  if flag then a := false;
+  if a then g := 1;
+  if b then g := 2;
+end;
+procedure loopy;
+var x, n: integer;
+begin
+  x := 0;
+  n := g;
+  while n > 0 do begin
+    x := x + n;
+    n := n - 1;
+  end;
+  use(x);
+  g := x;
+end;
+procedure pushed;
+var t: integer;
+begin
+  t := g + h;
+  use(t);
+  use(t);
+end;
+";
+    let asm = compile_with("register_held_locals", src, &[]).unwrap();
+    let r = routine(&asm, "INPLACE");
+    assert!(
+        r.contains(
+            "\tmove.w\t(%a5),%d0\n\tsub.w\t(2,%a5),%d0\n\taddi.w\t#0x100,%d0\n\
+             \tsub.w\t(2,%a5),%d0\n\taddq.w\t#1,%d0\n\tmove.w\t%d0,(%a5)\n"
+        ),
+        "{r}"
+    );
+    assert!(!r.contains("(-2,%fp)"), "{r}");
+    // `x := h - x` reads the local after its result is started: computed
+    // apart, then moved.
+    let r = routine(&asm, "SELFREAD");
+    assert!(
+        r.contains("\tmove.w\t(2,%a5),%d1\n\tsub.w\t%d0,%d1\n\tmove.w\t%d1,%d0\n"),
+        "{r}"
+    );
+    let r = routine(&asm, "BOOLS");
+    assert!(
+        r.contains("\tst\t%d0\n\tclr.b\t%d1\n") && r.contains("\tclr.b\t%d0\n"),
+        "{r}"
+    );
+    assert!(!r.contains("(-2,%fp)") && !r.contains("(-4,%fp)"), "{r}");
+    // `x` lives across the call: D2, saved.
+    let r = routine(&asm, "LOOPY");
+    assert!(
+        r.contains("\tclr.w\t%d2\n")
+            && r.contains("\tadd.w\t%d0,%d2\n\tsubq.w\t#1,%d0\n")
+            && r.contains("\tmove.w\t%d2,-(%sp)\n"),
+        "{r}"
+    );
+    let r = routine(&asm, "PUSHED");
+    assert!(
+        r.contains(",(-2,%fp)\n") && r.contains("\tmove.w\t(-2,%fp),-(%sp)\n"),
+        "{r}"
+    );
+    // A constant `moveq` could load only as the word -1 (16#FFFF in a
+    // 0..65535 local): `move.w #-1,D2` at 0xE149A4, `moveq` elsewhere.
+    let (code, err) = compile_with(
+        "register_held_local_ffff",
+        "module m;
+var g: integer32;
+procedure a;
+var x: 0..65535;
+begin
+  x := 16#FFFF;
+  if g > 3 then x := 1;
+  g := x;
+end;
+",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("that `moveq` could load") && err.contains("m.pas:6:"),
+        "{err}"
+    );
+}
+
+#[test]
 fn function_results_held_in_a_register() {
     // codegen-patterns 3, "Result variable": several assignments, an
     // early `return', a call after the assignment (callee-saved register
@@ -1671,11 +1830,14 @@ fn branch_on_the_store_flags_only_right_after_the_store() {
     // other path did not store) or another instruction, and the store
     // stays the instruction before the branch
     // whatever the scheduler does with the statement's other
-    // instructions.
+    // instructions.  Each `x` is also passed to a `var` parameter, which
+    // keeps it in its frame slot (codegen-patterns 12.5: a local read
+    // otherwise is held in a register).
     let src = "module m;
 var g, h: integer;
 function getw(k: integer): integer; val_param; extern;
 procedure use(k: integer); val_param; extern;
+procedure take(var k: integer); extern;
 procedure a;
 var x: integer;
 begin
@@ -1683,6 +1845,7 @@ begin
   if x = 0 then g := 1;
   use(g);
   use(x);
+  take(x);
 end;
 procedure b;
 var x: integer;
@@ -1691,6 +1854,7 @@ begin
   if g > 3 then x := getw(g);
   if x = 0 then h := 1;
   use(x);
+  take(x);
 end;
 procedure c;
 var x: integer;
@@ -1699,6 +1863,7 @@ begin
   use(h);
   if x = 0 then h := 1;
   use(x);
+  take(x);
 end;
 ";
     let asm = compile_with("store_flags", src, &[]).unwrap();
@@ -1723,19 +1888,23 @@ fn ordered_branch_on_a_store_is_refused() {
     // Bead domain-pascal-1vp, codegen-patterns 7.1: the image's branches
     // on a frame store's flags are all beq/bne/bmi/bpl; `x > 0' (bgt/ble)
     // or `x <= 0' right after `x := ...' is not seen either way, so it is
-    // refused at the comparison, not compiled to `move; ble'.
+    // refused at the comparison, not compiled to `move; ble'.  `x` is
+    // passed to a `var` parameter as well, which keeps it in its frame
+    // slot (codegen-patterns 12.5).
     for rel in ["> 0", "<= 0"] {
         let src = format!(
             "module m;
 var g: integer;
 function getw(k: integer): integer; val_param; extern;
 procedure use(k: integer); val_param; extern;
+procedure take(var k: integer); extern;
 procedure a;
 var x: integer;
 begin
   x := getw(g);
   if x {rel} then g := 1;
   use(x);
+  take(x);
 end;
 "
         );
@@ -1744,7 +1913,7 @@ end;
         assert!(
             err.contains("an ordered test of a local right after its store")
                 && err.contains("not supported yet")
-                && err.contains("m.pas:9:"),
+                && err.contains("m.pas:10:"),
             "{err}"
         );
     }
@@ -1756,6 +1925,7 @@ end;
 var g: integer;
 function getw(k: integer): integer; val_param; extern;
 procedure use(k: integer); val_param; extern;
+procedure take(var k: integer); extern;
 procedure a;
 var x: integer;
 begin
@@ -1763,6 +1933,7 @@ begin
   use(g);
   if x > 0 then g := 1;
   use(x);
+  take(x);
 end;
 ",
         &[],
@@ -1884,4 +2055,71 @@ end;
     assert!(routine(&asm, "M_$T").contains("\tbmi.s\t1b\n"), "{asm}");
     let asm = compile_with("backward_goto_off", src, &["--loop-align=off"]).unwrap();
     assert!(!asm.contains("0x2048"), "{asm}");
+}
+
+/// An M$ARITH result assigned to a register-held local (codegen-patterns
+/// 12.5): the result is in physical D0, written by the `jsr`, and is
+/// moved into the local's register.  Renamed as a computed value, the
+/// web was never written (`addq.l #1` of a register nothing set), and
+/// the once-assigned local was held in D0 itself across the next call.
+#[test]
+fn marith_result_into_register_held_local() {
+    let src = "module m;
+var g: integer32;
+procedure clob; extern;
+procedure once(k: integer32); val_param;
+var y: integer32;
+begin
+  y := k * g;
+  clob;
+  g := y;
+end;
+procedure web(k: integer32); val_param;
+var y: integer32;
+begin
+  y := k * g;
+  y := y + 1;
+  g := y;
+end;
+";
+    let asm = compile_with("marith_result_into_local", src, &[]).unwrap();
+    let r = routine(&asm, "ONCE");
+    assert!(
+        r.contains("\tjsr\t(M$MIS$LLL).l\n\taddq.w\t#8,%sp\n\tmove.l\t%d0,%d2\n\tjsr\t(CLOB).l\n\tmove.l\t%d2,(%a5)\n"),
+        "{r}"
+    );
+    let r = routine(&asm, "WEB");
+    assert!(
+        r.contains(
+            "\tjsr\t(M$MIS$LLL).l\n\tmove.l\t%d0,%d1\n\taddq.l\t#1,%d1\n\tmove.l\t%d1,(%a5)\n"
+        ),
+        "{r}"
+    );
+}
+
+/// A register-held local read before the code first assigns it (here on
+/// a loop's back edge) is refused with a diagnostic of its own, not the
+/// allocator's internal check (codegen-patterns 12.5).
+#[test]
+fn register_held_local_read_before_assigned_is_refused() {
+    let src = "module m;
+var g: integer;
+procedure p;
+var x, i: integer;
+begin
+  i := 0;
+  while i < 5 do begin
+    if i > 1 then g := g + x;
+    x := i;
+    g := g + 1;
+    i := i + 1;
+  end;
+end;
+";
+    let (_, err) = compile_with("read_before_assigned", src, &[]).unwrap_err();
+    assert!(
+        err.contains("a register-held local read before the code first assigns it")
+            && !err.contains("internal"),
+        "{err}"
+    );
 }
