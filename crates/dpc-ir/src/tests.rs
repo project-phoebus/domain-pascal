@@ -3756,3 +3756,91 @@ procedure x; begin t := p.b end;",
     )
     .unwrap();
 }
+
+/// The statement part of `body` in procedure `t` with label declaration
+/// `labels`, lowered, or its errors.
+fn goto_body(labels: &str, body: &str) -> Result<Vec<Stmt>, Vec<String>> {
+    let src = format!("{CTL}procedure t; internal;\nlabel {labels};\nbegin\n{body}\nend;\n");
+    match lower_src(&src) {
+        Ok(m) => Ok(m.functions[0].body.clone()),
+        Err(_) => Err(errs(&src)),
+    }
+}
+
+/// `goto` and labels (ref 2.2.2.1 p. 2-11; "Goto", pp. 4-95..4-97): `L:
+/// s` is the label's point, then `s`, in the same sequence; labels are
+/// numbered in source order.
+#[test]
+fn goto_and_labels() {
+    let b = goto_body(
+        "10, done",
+        "if b then goto done;\n10: begin w := 1; if b2 then goto 10 end;\ndone:",
+    )
+    .unwrap();
+    assert_eq!(b.len(), 5, "{b:?}");
+    let StmtKind::If { then_, .. } = &b[0].kind else {
+        panic!("{b:?}")
+    };
+    assert_eq!(then_[0].kind, StmtKind::Goto(1));
+    assert_eq!(b[1].kind, StmtKind::Label(0));
+    assert!(matches!(b[2].kind, StmtKind::Store { .. }));
+    let StmtKind::If { then_, .. } = &b[3].kind else {
+        panic!("{b:?}")
+    };
+    assert_eq!(then_[0].kind, StmtKind::Goto(0));
+    assert_eq!(b[4].kind, StmtKind::Label(1));
+}
+
+/// Where a `goto` may jump (ref p. 4-95; p. 6-23; Appendix D p. D-4).
+#[test]
+fn goto_targets() {
+    // Out of loops, between the arms of a `case`, into an `if` part.
+    for (labels, body) in [
+        (
+            "l",
+            "while b do begin if b2 then goto l; w := 1 end;\nl: w := 2;",
+        ),
+        ("l", "repeat goto l until b;\nl: w := 2;"),
+        ("l", "case w of 1: goto l; 2: l: w := 3 end;"),
+        (
+            "l",
+            "case w of 1: if b then w := 4 else goto l; 2: w := 2 otherwise l: w := 3 end;",
+        ),
+        (
+            "l",
+            "if b then goto l;\nif b2 then begin w := 1; l: w := 2 end;",
+        ),
+        (
+            "l",
+            "if b then w := 1 else begin l: w := 2 end;\nif b2 then goto l;",
+        ),
+    ] {
+        assert!(
+            goto_body(labels, body).is_ok(),
+            "{body}: {:?}",
+            goto_body(labels, body)
+        );
+    }
+    // Into a loop or a `case` from outside (open question 30).
+    for body in [
+        "goto l;\nwhile b do begin l: w := 1 end;",
+        "goto l;\nrepeat l: w := 1 until b;",
+        "if b then goto l;\ncase w of 1: l: w := 1; 2: w := 2 end;",
+        "case w of 1: goto l; 2: w := 2 end;\nwhile b do l: w := 1;",
+    ] {
+        let e = goto_body("l", body).unwrap_err();
+        assert!(
+            e[0].contains("a `goto` into a `for`, `while`, `repeat`, `with` or `case`")
+                && e[0].contains("open question 30"),
+            "{body}: {e:?}"
+        );
+    }
+    // A non-local `goto` (ref p. 4-97).
+    let e = errs(&format!(
+        "{CTL}procedure t;\nlabel l;\n  procedure n;\n  begin\n    goto l\n  end;\nbegin\n  n;\nl: w := 1\nend;\n"
+    ));
+    assert!(
+        e[0].contains("t.pas:14:5:") && e[0].contains("non-local `goto`"),
+        "{e:?}"
+    );
+}

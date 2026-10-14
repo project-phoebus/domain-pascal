@@ -650,6 +650,29 @@ fn loops_exit_next() {
 fn goto_and_labels() {
     module("procedure p; label 10, done; begin goto done; 10: ; done: end;");
     assert_err("module m; procedure p; begin goto 9 end;", "not declared");
+    // A goto from a nested routine to its parent's label (ref p. 4-97).
+    module("procedure p; label 9; procedure q; begin goto 9 end; begin q; 9: end;");
+    // ref p. 9-37: "Labels not permitted at MODULE level."
+    assert_err(
+        "module m; label 9; procedure p; begin end;",
+        "labels are not permitted at module level",
+    );
+    // ref p. 4-95: a label is declared in the routine whose statement it
+    // prefixes.
+    assert_err(
+        "module m; procedure p; label 9; procedure q; begin 9: end; begin q; goto 9 end;",
+        "label `9` is not declared in this routine",
+    );
+    assert_err(
+        "module m; procedure p; label 9; begin 9: ; 9: ; goto 9 end;",
+        "label `9` prefixes more than one statement",
+    );
+    assert_err(
+        "module m; procedure p; label 9; begin goto 9 end;",
+        "label `9` prefixes no statement",
+    );
+    // A label declared and never used nor defined is not an error.
+    module("procedure p; label 9; begin end;");
 }
 
 #[test]

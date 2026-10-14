@@ -609,3 +609,70 @@ end;
     assert_eq!(e.len(), 1, "{e:?}");
     assert!(e[0].contains("comparing records of 12 bytes"), "{e:?}");
 }
+
+/// The pop rule through a `goto` (codegen-patterns 1.1, 7.5): a call
+/// whose continuation is a `goto` is not popped when the code from the
+/// label to the epilogue is clean, as before a `bra` to a clean join;
+/// popped when it is not (a call there), or when a cycle of `goto`s
+/// passes a call.
+#[test]
+fn pop_rule_through_goto() {
+    let clean = body(
+        "procedure t; internal;
+label l;
+begin
+  if b then begin ext_$p(1); goto l end;
+  w := 2;
+l:
+  r := 3;
+end;",
+    );
+    assert_eq!(
+        clean,
+        [
+            "tst.b\t(B).l",
+            "bpl.s\t1f",
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "bra.s\t2f",
+            "1:",
+            "move.w\t#2,(W).l",
+            "2:",
+            "move.w\t#3,(R).l",
+        ]
+    );
+    let calls = body(
+        "procedure t; internal;
+label l;
+begin
+  if b then begin ext_$p(1); goto l end;
+  w := 2;
+l:
+  ext_$p(3);
+end;",
+    );
+    assert!(
+        calls
+            .windows(2)
+            .any(|p| p[0] == "jsr\t(EXT_$P).l" && p[1] == "addq.w\t#4,%sp"),
+        "{calls:?}"
+    );
+    // A backward `goto` whose loop calls: the label's continuation is
+    // not clean, so the call before the `goto` is popped.
+    let cycle = body(
+        "procedure t; internal;
+label l;
+begin
+l:
+  ext_$p(1);
+  if b then goto l;
+end;",
+    );
+    assert!(
+        cycle
+            .windows(2)
+            .any(|p| p[0] == "jsr\t(EXT_$P).l" && p[1] == "addq.w\t#4,%sp"),
+        "{cycle:?}"
+    );
+}

@@ -246,6 +246,17 @@ Tests:
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a
   join and for the unit's data (0xE02806).
+- `control/goto` - codegen-patterns 7.5 (bead domain-pascal-o4q): `goto`
+  as a `bra` to its label, `if c then goto` one conditional branch,
+  `else goto` a branch on the negated condition (TTY_$I_RCV 0xE1BBD2),
+  a backward `goto`'s label aligned like a loop head, jumps out of
+  loops and between `case` arms, a label before the epilogue.
+- `regalloc/goto_reuse` - codegen-patterns 7.5, 12.4 R7, 12.5 (bead
+  domain-pascal-o4q): a label a `goto` reaches is a join for the stored
+  local pushed from D0 (PKT_$NEXT_ID 0xE124A8) and for reused computed
+  values (FIM_$ACKNOWLEDGE 0xE0A96C): reloaded or computed again when a
+  branch from before or a later backward `goto` reaches the use, kept
+  when the `goto` comes after; register-held locals across `goto`s.
 - `results/result_variable` - codegen-patterns 3, 12.4 R5, 12.5: the
   result variable of a body of several statements held in one register
   (D2 across a call, PKT_$NEXT_ID 0xE1248E; D0 without, on three paths,

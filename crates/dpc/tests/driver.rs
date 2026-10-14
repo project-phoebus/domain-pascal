@@ -1802,3 +1802,86 @@ procedure m_$p; begin end;
         "{err}"
     );
 }
+
+/// `goto` forms the selector refuses (bead domain-pascal-o4q,
+/// codegen-patterns 7.5), each at the statement's position.
+#[test]
+fn goto_refusals() {
+    for (body, what, line) in [
+        // A branch to the next instruction: not seen.
+        (
+            "w := 1;\n  goto l;\nl: w := 2;",
+            "a `goto` that would branch to the next instruction",
+            8,
+        ),
+        (
+            "w := 1;\n  if b then goto l;\nl: w := 2;",
+            "a `goto` that would branch to the next instruction",
+            8,
+        ),
+        // Code after a `goto` that no label starts.
+        (
+            "goto l;\n  w := 3;\nl: w := 2;",
+            "a statement after `goto` (not reached)",
+            8,
+        ),
+        // A label right before a `bra` (7.1, no branch to a `bra`).
+        (
+            "if b then goto l;\n  if b2 then begin w := 1; l: end else w := 2;\n  ext_$p(1);",
+            "a branch to a `bra`",
+            8,
+        ),
+        // A jump into a loop from outside it.
+        (
+            "goto l;\n  while b do begin l: w := 1 end;",
+            "a `goto` into a `for`, `while`, `repeat`, `with` or `case`",
+            7,
+        ),
+    ] {
+        let src = format!(
+            "module m;
+var w: extern integer; b, b2: extern boolean;
+procedure ext_$p(x: integer); options(val_param, extern);
+procedure m_$t;
+label l;
+begin
+  {body}
+end;
+"
+        );
+        let (code, err) = compile_with("goto_refusals", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(what)
+                && err.contains("not supported yet")
+                && err.contains(&format!("m.pas:{line}:")),
+            "{body}: {err}"
+        );
+    }
+}
+
+/// A backward `goto`'s label heads a loop: the 0x2048 filler in an
+/// aligning routine, none in another (codegen-patterns 7, 7.5).
+#[test]
+fn backward_goto_label_alignment() {
+    let src = "module m;
+var w: extern integer; b: extern boolean;
+procedure ext_$p(x: integer); options(val_param, extern);
+procedure m_$t;
+label l;
+begin
+  w := 0;
+l:
+  ext_$p(w);
+  if b then goto l;
+end;
+";
+    let asm = compile_with("backward_goto_on", src, &[]).unwrap();
+    assert!(
+        routine(&asm, "M_$T").contains("\tclr.w\t(W).l\n\t.balignw\t4,0x2048\n1:\n"),
+        "{asm}"
+    );
+    assert!(routine(&asm, "M_$T").contains("\tbmi.s\t1b\n"), "{asm}");
+    let asm = compile_with("backward_goto_off", src, &["--loop-align=off"]).unwrap();
+    assert!(!asm.contains("0x2048"), "{asm}");
+}

@@ -623,7 +623,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
         | StmtKind::Disable
         | StmtKind::Enable
         | StmtKind::Exit
-        | StmtKind::Next => {}
+        | StmtKind::Next
+        | StmtKind::Label(_)
+        | StmtKind::Goto(_) => {}
     }
 }
 
@@ -771,7 +773,9 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
         | StmtKind::Disable
         | StmtKind::Enable
         | StmtKind::Exit
-        | StmtKind::Next => {}
+        | StmtKind::Next
+        | StmtKind::Label(_)
+        | StmtKind::Goto(_) => {}
     }
 }
 
@@ -1398,7 +1402,9 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
         | StmtKind::Disable
         | StmtKind::Enable
         | StmtKind::Exit
-        | StmtKind::Next => {}
+        | StmtKind::Next
+        | StmtKind::Label(_)
+        | StmtKind::Goto(_) => {}
     }
 }
 
@@ -1519,7 +1525,9 @@ fn stmt_uses_static(s: &Stmt) -> bool {
         | StmtKind::Disable
         | StmtKind::Enable
         | StmtKind::Exit
-        | StmtKind::Next => false,
+        | StmtKind::Next
+        | StmtKind::Label(_)
+        | StmtKind::Goto(_) => false,
     }
 }
 
@@ -1713,7 +1721,14 @@ fn lower_body(
     uplevel: &[(i32, u32)],
 ) -> Res<Vec<Stmt>> {
     let block = r.body.as_ref().expect("routine with a body");
-    let cx = Cx { p, id, r, result };
+    let labels = routine_labels(&block.stmts)?;
+    let cx = Cx {
+        p,
+        id,
+        r,
+        result,
+        labels,
+    };
     let out = cx.seq(&block.stmts)?;
     check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
@@ -1951,7 +1966,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     | StmtKind::Disable
                     | StmtKind::Enable
                     | StmtKind::Exit
-                    | StmtKind::Next => {}
+                    | StmtKind::Next
+                    | StmtKind::Label(_)
+                    | StmtKind::Goto(_) => {}
                 }
             }
             Ok(())
@@ -2002,6 +2019,148 @@ struct Cx<'a> {
     id: RoutineId,
     r: &'a Routine,
     result: Option<ResultSpec>,
+    /// The labels prefixing statements of the routine, by name, and
+    /// their numbers ([`StmtKind::Label`]; [`routine_labels`]).
+    labels: Vec<String>,
+}
+
+/// A structured statement on the way from a routine's statement part to
+/// a statement inside it ([`routine_labels`]): the statement (its
+/// address), which of its parts (an `if`'s `then`/`else`, a `case`'s arm,
+/// `otherwise` last), and its kind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Part {
+    stmt: usize,
+    part: usize,
+    kind: Entered,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entered {
+    If,
+    Case,
+    /// `for`, `while`, `repeat`.
+    Loop,
+    With,
+}
+
+/// The labels prefixing statements of a routine's statement part `stmts`,
+/// in source order (their numbers in [`StmtKind::Label`]), after checking
+/// the routine's `goto` statements (ref "Goto", pp. 4-95..4-97):
+///
+/// - a `goto` to a label of an enclosing routine (a non-local `goto`,
+///   legal by p. 4-97) is not supported yet: its frame unwinding (A6, SP
+///   and the saved registers of the routines left) has not been looked
+///   for in the image;
+/// - a jump into a `for`, `while`, `repeat`, `with` or `case` statement
+///   from outside it is refused: p. 4-95 forbids it ("It is illegal to
+///   use goto to jump inside a structured statement (for example, a for,
+///   while, case, with, or repeat) from outside that statement"), while
+///   Appendix D, p. D-4 (ISO 6.8.1) says "Domain Pascal permits jumps
+///   between branches of a case statement and from one structured
+///   statement into the middle of another" (open question 30 in
+///   docs/reference-clarifications.md);
+/// - allowed: a jump out of any statement, within one statement
+///   sequence, between the arms of one `case` (p. D-4), and into an `if`
+///   statement's parts (p. 6-23: illegal only under `-iso`, the default
+///   being `-niso`).  A compound statement only groups (ref "Begin",
+///   p. 4-31): jumping into one is jumping to its statement.
+fn routine_labels(stmts: &[SStmt]) -> Res<Vec<String>> {
+    type Path = Vec<Part>;
+    fn walk(
+        stmts: &[SStmt],
+        path: &mut Path,
+        defs: &mut Vec<(String, Path)>,
+        gotos: &mut Vec<(String, Path, Span)>,
+    ) {
+        for s in stmts {
+            one(s, path, defs, gotos);
+        }
+    }
+    fn one(
+        s: &SStmt,
+        path: &mut Path,
+        defs: &mut Vec<(String, Path)>,
+        gotos: &mut Vec<(String, Path, Span)>,
+    ) {
+        let id = s as *const SStmt as usize;
+        let mut inside = |part: usize, kind: Entered, body: &[SStmt], path: &mut Path| {
+            path.push(Part {
+                stmt: id,
+                part,
+                kind,
+            });
+            walk(body, path, defs, gotos);
+            path.pop();
+        };
+        match &s.kind {
+            SStmtKind::Labeled { label, stmt } => {
+                defs.push((label.clone(), path.clone()));
+                one(stmt, path, defs, gotos);
+            }
+            SStmtKind::Compound(b) => walk(&b.stmts, path, defs, gotos),
+            SStmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                inside(0, Entered::If, std::slice::from_ref(then_branch), path);
+                if let Some(e) = else_branch {
+                    inside(1, Entered::If, std::slice::from_ref(e), path);
+                }
+            }
+            SStmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                for (i, a) in arms.iter().enumerate() {
+                    inside(i, Entered::Case, std::slice::from_ref(&a.stmt), path);
+                }
+                if let Some(o) = otherwise {
+                    inside(arms.len(), Entered::Case, o, path);
+                }
+            }
+            SStmtKind::While { body, .. } | SStmtKind::For { body, .. } => {
+                inside(0, Entered::Loop, std::slice::from_ref(body), path)
+            }
+            SStmtKind::Repeat { body, .. } => inside(0, Entered::Loop, body, path),
+            SStmtKind::With { body, .. } => {
+                inside(0, Entered::With, std::slice::from_ref(body), path)
+            }
+            SStmtKind::Goto(name) => gotos.push((name.clone(), path.clone(), s.span)),
+            _ => {}
+        }
+    }
+    let (mut defs, mut gotos) = (Vec::new(), Vec::new());
+    walk(stmts, &mut Vec::new(), &mut defs, &mut gotos);
+    for (name, from, span) in &gotos {
+        let Some((_, to)) = defs.iter().find(|(n, _)| n == name) else {
+            return Err(unsupported(
+                *span,
+                "a `goto` to a label of an enclosing routine (a non-local `goto`, ref p. 4-97; \
+                 its frame unwinding has not been looked for in the image) is",
+            ));
+        };
+        let common = to.iter().zip(from).take_while(|(a, b)| a == b).count();
+        let mut entered = &to[common..];
+        if let (Some(t), Some(f)) = (entered.first(), from.get(common)) {
+            // Another part of a statement the `goto` is in: between the
+            // arms of a `case` (p. D-4) or the parts of an `if` (p. 6-23).
+            if t.stmt == f.stmt {
+                entered = &entered[1..];
+            }
+        }
+        // TODO(ref-question): open question 30 (p. 4-95 against p. D-4);
+        // refused until the owner rules.
+        if entered.iter().any(|p| p.kind != Entered::If) {
+            return Err(unsupported(
+                *span,
+                "a `goto` into a `for`, `while`, `repeat`, `with` or `case` statement from \
+                 outside it (illegal by ref p. 4-95, permitted by Appendix D p. D-4: open \
+                 question 30) is",
+            ));
+        }
+    }
+    Ok(defs.into_iter().map(|(n, _)| n).collect())
 }
 
 /// The statements of a statement sequence, with `begin ... end` blocks
@@ -2018,6 +2177,14 @@ fn flatten<'s>(stmts: &'s [SStmt], out: &mut Vec<&'s SStmt>) {
 }
 
 impl Cx<'_> {
+    /// The number of the label `name` of the routine ([`routine_labels`]).
+    fn label(&self, name: &str) -> u32 {
+        self.labels
+            .iter()
+            .position(|n| n == name)
+            .expect("labels and local gotos are checked by routine_labels") as u32
+    }
+
     /// A statement sequence.
     fn seq(&self, stmts: &[SStmt]) -> Res<Vec<Stmt>> {
         let p = self.p;
@@ -2136,6 +2303,22 @@ impl Cx<'_> {
                     builtin: Builtin::Discard,
                     args,
                 } => out.push(self.discard(s, &args[0])?),
+                // `L: s` is the label's point, then `s` (ref "Goto",
+                // p. 4-95: control goes "to the statement immediately
+                // following lbl").
+                SStmtKind::Labeled { label, stmt } => {
+                    out.push(Stmt {
+                        kind: StmtKind::Label(self.label(label)),
+                        span: s.span,
+                    });
+                    out.extend(self.seq(std::slice::from_ref(stmt))?);
+                }
+                // Non-local and refused jumps were refused by
+                // [`routine_labels`].
+                SStmtKind::Goto(name) => out.push(Stmt {
+                    kind: StmtKind::Goto(self.label(name)),
+                    span: s.span,
+                }),
                 _ => return Err(unsupported(s.span, "this statement is")),
             }
         }

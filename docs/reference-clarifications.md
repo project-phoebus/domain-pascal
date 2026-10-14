@@ -364,6 +364,23 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     padding are refused; variant records whose arms together cover every
     byte are compared bytewise (review of domain-pascal-aaj).*
 
+30. **"Goto", p. 4-95 vs. Appendix D, p. D-4 (jumps into structured
+    statements).**  p. 4-95: "It is illegal to use goto to jump inside a
+    structured statement (for example, a for, while, case, with, or
+    repeat) from outside that statement" (with the `bad_gotos` example,
+    p. 4-96, "ILLEGAL: cannot jump to a label inside the for loop").
+    p. D-4 (ISO 6.8.1): "Domain Pascal permits jumps between branches of
+    a case statement and from one structured statement into the middle
+    of another."  Is a `goto` from one structured statement into a loop,
+    `with` or `case` arm of another legal?  And is jumping into a
+    compound statement (`begin ... end`, not in p. 4-95's list) from
+    outside it legal?  *Current (bead domain-pascal-o4q): a jump into a
+    `for`, `while`, `repeat`, `with` or `case` from outside it is refused
+    ("not supported yet", `crates/dpc-ir/src/lower.rs`,
+    `routine_labels`); jumps between the arms of one `case` (p. D-4) and
+    into `if` parts (p. 6-23, `-niso`) are accepted; a compound statement
+    is transparent (accepted).*
+
 ## Reference errata noticed (no ruling needed)
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and

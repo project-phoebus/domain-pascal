@@ -3226,7 +3226,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   begin if b then ... end else ...`; `if a then begin if b then ...;
   return end`), the original threaded the branch or laid the code out
   otherwise; which is not known.  dpc rejects these (`select_body`,
-  `Selector::jump`).
+  `Selector::jump`), and likewise a `goto` to a label followed by a
+  `bra` (7.5).
 - **`if c then return` (Verified; implemented):** one conditional branch
   on `c` itself to the epilogue, not a branch past a `bra`: TERM_$CONTROL
   0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78`, 0xE62E88, 0xE68C08
@@ -3785,6 +3786,93 @@ Conformance (`make conform`): `tests/conformance/disk_unassign_all.pas`
 unit, through the manifest's `module-routines=` token and `dpc
 --module-routine`), `tests/conformance/disk_set_chain_status.pas` (the
 DISK_ module-local 0xE3CCCE).
+
+### 7.5 `goto` and labels (ref "Goto", pp. 4-95..4-97; shapes Verified at the sites given; implemented for local `goto`s, bead domain-pascal-o4q)
+
+**Language** (ref 2.2.2.1 p. 2-11; "Goto" pp. 4-95..4-97; 6.4.18
+p. 6-23; Appendix D p. D-4; 9 p. 9-37).  A label is an identifier or an
+unsigned integer declared in a `label` part, and prefixes one statement
+of the routine that declares it ("(Name_of_Label) has not been declared
+in routine (name_of_routine)", p. 4-95); labels are not permitted at
+module level (p. 9-37).  A `goto` may leave any statement, may go to a
+label of an enclosing routine ("you can use goto to jump directly from a
+nested routine to an outer routine", p. 4-97), may enter an
+`if`/`then`/`else` statement unless compiled with `-iso` (p. 6-23,
+`-niso` the default) and may jump between the arms of a `case`
+(Appendix D, ISO 6.8.1, p. D-4).  Jumping into a `for`, `while`,
+`case`, `with` or `repeat` statement from outside it is illegal by
+p. 4-95 (its `bad_gotos` example), while p. D-4 says Domain Pascal
+permits jumps "from one structured statement into the middle of
+another": reference-clarifications open question 30.
+
+**Image** (bead domain-pascal-o4q; ad-hoc script over the C files of
+`../source` at 3898a2ce with a `goto` (249 files; 59 backward `goto`s)
+and `tools/loopalign.py`'s `head_rows`, not kept):
+
+- **Forward `goto`: a `bra` or `b<cc>` to the label, which is a join
+  like any other** (not aligned, section 7 "Other branch targets").
+  `if c then goto L` is one conditional branch on `c` (no conditional
+  branch over a `bra` in compiled code, 7.1).  `if c then T else goto
+  L`: a branch on the negated condition to L, then T (TTY_$I_RCV
+  0xE1BBCE..0xE1BBD2 `btst #3,D1; beq.s 0xE1BC38`, the crlf arm's `else
+  goto normal_char`, a label on the normal arm 0xE1BC38 of the same
+  `case`; `tty/i_rcv.pas` at 3898a2ce).  Whether a forward `goto` there
+  is a source `goto` or the compiler's merging of identical code cannot
+  always be told (`tty/i_rcv.pas`, `tty/i_err.pas`).
+- **Backward `goto`: its label is a loop head (Verified as part of the
+  loop-head rule of section 7).**  The targets of the C's backward
+  `goto`s that are backward-branch targets in the image: in aligning
+  routines 3 have the filler (NETWORK_$READ_AHEAD 0xE0FDA0; the REM_FILE
+  module-local 0xE60FD8 at 0xE61130 and 0xE611E0), 4 are 4-aligned
+  (BAT_$ALLOCATE 0xE3B294, FLP_DO_IO 0xE3DE64, PROC2_$WAIT 0xE3FE84,
+  PKT_$LIKELY_TO_ANSWER 0xE12AE4) and 1
+  is at 2 mod 4, a 0x3D0-byte outer loop (NETWORK_$READ_AHEAD 0xE0FDE2,
+  like the large loops of section 7); in non-aligning routines none has
+  the filler (0xE09AA6, 0xE0263E, 0xE3C752, 0xE116DE, 0xE1981A at 2 mod
+  4; 0xE05C98, 0xE3A608, 0xE5F1A0 4-aligned).  The C's `goto`s are
+  reconstructions: what this measures is the backward branch, whatever
+  the source construct was.
+- **Non-local `goto`** (out of a nested routine): not looked for.
+- **A `goto` to the next instruction**, a label right before a `bra`, a
+  `case` arm that is only a `goto` (7.3: the one jump arm seen goes to
+  its target directly): not seen.
+
+**Implemented** (`crates/dpc-sema/src/check.rs`, `declare_label`,
+`label_owner`; `crates/dpc-ir/src/lower.rs`, `routine_labels`;
+`StmtKind::Label`/`Goto`; `crates/dpc-m68k/src/isel.rs`,
+`place_user_label`, `goto_selected`, `in_loop`, `label_tails`, `if_`):
+
+- sema: the checks of the language above (module level, the declaring
+  routine, one statement per label, a `goto`'s label prefixes a
+  statement);
+- lowering: `L: s` is `Label(L)` then `s` in the same sequence; jumps
+  into loops, `with` and `case` from outside are refused (question 30),
+  as are non-local `goto`s;
+- selection: `goto` a `bra`; `if c then goto L` and `if c then T else
+  goto L` as above; a label that a `goto` selected later still branches
+  to gets the loop head's `Align4` (dropped in non-aligning routines),
+  and from it to that `goto` the code counts as inside a loop, so the
+  analyses that see only the code selected so far (12.5 "Stored locals
+  pushed from the register", `forwarded`; `a0_holds`; 12.4 R7,
+  `cse_valid`) do not hold a value across its back edge; a branch from
+  before such a value to a label after it ends it as for any join.  The
+  pop rule (1.1) follows a `goto` to its label: a call whose
+  continuation is a `goto` is not popped when the code from the label to
+  the epilogue is clean (**Uncertain**: the rule for joins applied
+  through the `bra`, no site checked).  Refused: a `goto` to the next
+  instruction, a statement after a `goto` that no label starts, a
+  branch to a label followed by a `bra` (7.1).
+
+Goldens `tests/golden/control/goto.pas`, `regalloc/goto_reuse.pas`;
+tests `crates/dpc-ir/src/tests.rs` (`goto_and_labels`, `goto_targets`),
+`crates/dpc-sema/src/tests/checks.rs` (`goto_and_labels`),
+`crates/dpc-m68k/tests/control.rs` (`pop_rule_through_goto`),
+`crates/dpc/tests/driver.rs` (`goto_refusals`,
+`backward_goto_label_alignment`).  **No conformance unit:** TTY_$I_RCV
+(0xE1B92A) stops at the assignment to its value parameter `ch`
+(`tty/i_rcv.pas`, "assigning to a parameter is not supported yet") and
+needs the merged arm tails of 7.3; no other compiled routine with a
+`goto` has been written in Pascal.
 
 ---
 

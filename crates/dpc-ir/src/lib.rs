@@ -494,6 +494,14 @@ pub enum StmtKind {
     /// [`Expr::SetSr`] is produced (`lower.rs`); a discarded function call
     /// is a [`StmtKind::Call`].
     Discard(Expr),
+    /// The point a label marks (ref 2.2.2.1, p. 2-11; "Goto", p. 4-95):
+    /// `L: s` is `Label(L)` followed by `s` in the same sequence.  The
+    /// number is the label's within the routine, from 0; each occurs once.
+    Label(u32),
+    /// `goto L` (ref "Goto", pp. 4-95..4-97) to a label of the routine
+    /// itself (`Label(L)` occurs in the body).  Lowering refuses a jump
+    /// into a loop or a `case` from outside it, and a non-local `goto`.
+    Goto(u32),
 }
 
 impl StmtKind {

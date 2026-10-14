@@ -259,8 +259,30 @@ fn select_body_with(
     }
     s.uplevel = f.uplevel_refs.clone();
     s.escaped = escaped_frame_objects(f);
-    let control_only = f.body.len() == 1 && !is_simple(&f.body[0]);
-    s.multi_body = f.body.len() >= 2 || control_only;
+    // Labels emit nothing: a body is its other statements.
+    let stmts: Vec<&Stmt> = f
+        .body
+        .iter()
+        .filter(|st| !matches!(st.kind, StmtKind::Label(_)))
+        .collect();
+    let control_only = stmts.len() == 1 && !is_simple(stmts[0]);
+    s.multi_body = stmts.len() >= 2 || control_only;
+    // The routine's labels and the `goto`s to each ([`Selector::place_user_label`]).
+    let mut nlabels = 0;
+    dpc_ir::visit_stmts(&f.body, &mut |st| {
+        if let StmtKind::Label(l) = st.kind {
+            nlabels = nlabels.max(l as usize + 1);
+        }
+    });
+    s.user_labels = vec![None; nlabels];
+    s.gotos_total = vec![0; nlabels];
+    s.gotos_seen = vec![0; nlabels];
+    dpc_ir::visit_stmts(&f.body, &mut |st| {
+        if let StmtKind::Goto(l) = st.kind {
+            s.gotos_total[l as usize] += 1;
+        }
+    });
+    s.label_clean = label_tails(&f.body, nlabels);
     if s.multi_body {
         let reads_value_param = param_uses(f)
             .iter()
@@ -394,8 +416,9 @@ fn select_body_with(
         // `if a or else b then return` with the `bmi` past the test of `b`.
         return Err(unsupported(
             span,
-            "a branch to a `bra` (an `if` part ending in an `if`, then a `bra` to a join or \
-             the epilogue; compiled code has no branch to a `bra`, codegen-patterns 7.1) is",
+            "a branch to a `bra` (an `if` part ending in an `if`, or a `goto` label, then a \
+             `bra` to a join, a label or the epilogue; compiled code has no branch to a `bra`, \
+             codegen-patterns 7.1) is",
         ));
     }
     // An `exit` or `next` whose target is the very next instruction (a
@@ -413,6 +436,24 @@ fn select_body_with(
             return Err(unsupported(
                 span,
                 "an `exit` or `next` that would branch to the next instruction is",
+            ));
+        }
+    }
+    // Likewise a `goto` to the next instruction (`goto L; L: ...`, or
+    // `if c then goto L` before it): not seen.
+    debug_assert_eq!(s.open_back, 0, "every backward goto selected");
+    for &(at, span) in &s.goto_jumps {
+        let Insn::Branch { label, .. } = s.out[at] else {
+            unreachable!("goto_jumps records branches")
+        };
+        let next = s.out[at + 1..]
+            .iter()
+            .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
+            .any(|i| matches!(i, Insn::Label(l) if *l == label));
+        if next {
+            return Err(unsupported(
+                span,
+                "a `goto` that would branch to the next instruction is",
             ));
         }
     }
@@ -1374,7 +1415,9 @@ fn register_locals(f: &Function) -> Vec<i32> {
                     | StmtKind::Disable
                     | StmtKind::Enable
                     | StmtKind::Exit
-                    | StmtKind::Next => {}
+                    | StmtKind::Next
+                    | StmtKind::Label(_)
+                    | StmtKind::Goto(_) => {}
                 }
             }
         }
@@ -1538,7 +1581,9 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
             | StmtKind::Disable
             | StmtKind::Enable
             | StmtKind::Exit
-            | StmtKind::Next => {}
+            | StmtKind::Next
+            | StmtKind::Label(_)
+            | StmtKind::Goto(_) => {}
         }
     }
 }
@@ -2130,7 +2175,9 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 | StmtKind::Disable
                 | StmtKind::Enable
                 | StmtKind::Exit
-                | StmtKind::Next => {}
+                | StmtKind::Next
+                | StmtKind::Label(_)
+                | StmtKind::Goto(_) => {}
             }
         }
     }
@@ -2354,13 +2401,25 @@ fn refers_to(st: &Stmt, off: i32) -> bool {
 }
 
 /// Whether `stmts` ends in an unconditional jump (`return`, `exit`,
-/// `next`), so that no `bra` to a join follows it: the `bra` would never
-/// be reached.
+/// `next`, `goto`), so that no `bra` to a join follows it: the `bra`
+/// would never be reached.
 fn ends_in_jump(stmts: &[Stmt]) -> bool {
     matches!(
         stmts.last().map(|s| &s.kind),
-        Some(StmtKind::Return | StmtKind::Exit | StmtKind::Next)
+        Some(StmtKind::Return | StmtKind::Exit | StmtKind::Next | StmtKind::Goto(_))
     )
+}
+
+/// Whether `rest`, the statements after an unconditional jump, are
+/// reached: only through a label that starts them.
+fn reached_after_jump(rest: &[Stmt]) -> bool {
+    rest.is_empty() || matches!(rest[0].kind, StmtKind::Label(_))
+}
+
+/// Whether `rest` emits nothing (labels only): what follows it follows
+/// the statement before it.
+fn only_labels(rest: &[Stmt]) -> bool {
+    rest.iter().all(|s| matches!(s.kind, StmtKind::Label(_)))
 }
 
 /// A statement that is not control flow.
@@ -2375,6 +2434,8 @@ fn is_simple(st: &Stmt) -> bool {
             | StmtKind::Return
             | StmtKind::Exit
             | StmtKind::Next
+            | StmtKind::Label(_)
+            | StmtKind::Goto(_)
     )
 }
 
@@ -2402,11 +2463,15 @@ impl Tail {
 /// Whether the code of `stmts` and then a continuation that is clean when
 /// `tail_clean` is free of pushes, calls and conditional branches up to the
 /// epilogue (see [`Tail::clean`]).  A `return` ends the path: what follows
-/// it, the continuation included, is not reached.
-fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
+/// it, the continuation included, is not reached.  A `goto` continues at
+/// its label, whose own continuation is `labels[l]` ([`label_tails`]); a
+/// label emits nothing.
+fn seq_clean(stmts: &[Stmt], tail_clean: bool, labels: &[bool]) -> bool {
     for st in stmts {
         match &st.kind {
             StmtKind::Return => return true,
+            StmtKind::Goto(l) => return labels[*l as usize],
+            StmtKind::Label(_) => {}
             // A function call inside the value pushes and calls.
             StmtKind::SetResult(e)
             | StmtKind::Store { value: e, .. }
@@ -2436,6 +2501,56 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool) -> bool {
         }
     }
     tail_clean
+}
+
+/// For each label of `body` ([`StmtKind::Label`]), whether the code from
+/// it to the epilogue is clean ([`Tail::clean`], [`seq_clean`]), with the
+/// continuations [`Selector::seq`] gives nested sequences: an `if`'s parts
+/// and a `case`'s arms that of the statement, a loop's body none.  A
+/// `goto` reaches its label's continuation, so the labels are solved
+/// together: each starts clean and loses it until nothing changes (a
+/// cycle of `goto`s with nothing unclean never reaches the epilogue).
+fn label_tails(body: &[Stmt], count: usize) -> Vec<bool> {
+    fn walk(body: &[Stmt], tail_clean: bool, labels: &mut [bool], changed: &mut bool) {
+        for (i, st) in body.iter().enumerate() {
+            let next = seq_clean(&body[i + 1..], tail_clean, labels);
+            match &st.kind {
+                StmtKind::Label(l) => {
+                    if labels[*l as usize] && !next {
+                        labels[*l as usize] = false;
+                        *changed = true;
+                    }
+                }
+                StmtKind::If { then_, else_, .. } => {
+                    walk(then_, next, labels, changed);
+                    walk(else_, next, labels, changed);
+                }
+                StmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    for a in arms {
+                        walk(&a.body, next, labels, changed);
+                    }
+                    if let Some(o) = otherwise {
+                        walk(o, next, labels, changed);
+                    }
+                }
+                StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
+                    walk(body, false, labels, changed)
+                }
+                StmtKind::For(l) => walk(&l.body, false, labels, changed),
+                _ => {}
+            }
+        }
+    }
+    let mut labels = vec![true; count];
+    loop {
+        let mut changed = false;
+        walk(body, true, &mut labels, &mut changed);
+        if !changed {
+            return labels;
+        }
+    }
 }
 
 /// Whether evaluating `e` calls a function, an M$ARITH entry included, or
@@ -2899,7 +3014,9 @@ impl Uses<'_> {
                 | StmtKind::Disable
                 | StmtKind::Enable
                 | StmtKind::Exit
-                | StmtKind::Next => {}
+                | StmtKind::Next
+                | StmtKind::Label(_)
+                | StmtKind::Goto(_) => {}
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Store { addr, value } => {
                     self.address(addr);
@@ -3080,6 +3197,22 @@ pub struct Selector {
     /// The statements' memory writes: the range of `out` they emitted,
     /// the object written and its size in bytes ([`Self::cse_valid`]).
     writes: Vec<(usize, usize, Addr, u32)>,
+    /// The routine's labels ([`StmtKind::Label`]): the local label each
+    /// one is, once made.
+    user_labels: Vec<Option<u32>>,
+    /// Per label, the `goto`s to it in the body, and those selected so
+    /// far.
+    gotos_total: Vec<u32>,
+    gotos_seen: Vec<u32>,
+    /// Labels placed whose backward `goto`s are not all selected yet: the
+    /// code from such a label on is in a loop whose back edge is not
+    /// selected ([`Self::in_loop`]).
+    open_back: u32,
+    /// Per label, whether its continuation is clean ([`label_tails`]).
+    label_clean: Vec<bool>,
+    /// The branches `goto` statements emitted, refused when they go to
+    /// the next instruction ([`select_body`]).
+    goto_jumps: Vec<(usize, Span)>,
 }
 
 /// A pointer local held in D0 from its assignment to the statement that
@@ -3224,6 +3357,70 @@ impl Selector {
             cse_hits: Vec::new(),
             cse_regs: Vec::new(),
             writes: Vec::new(),
+            user_labels: Vec::new(),
+            gotos_total: Vec::new(),
+            gotos_seen: Vec::new(),
+            open_back: 0,
+            label_clean: Vec::new(),
+            goto_jumps: Vec::new(),
+        }
+    }
+
+    /// Whether the code being selected is inside a loop, a structured one
+    /// or one a backward `goto` not selected yet closes: the analyses of
+    /// values held from earlier code ([`Self::forwarded`],
+    /// [`Self::a0_holds`], [`Self::cse_valid`]) see only the instructions
+    /// selected so far, so not that back edge.
+    fn in_loop(&self) -> bool {
+        !self.loops.is_empty() || self.open_back > 0
+    }
+
+    /// The local label of the routine's label `id`.
+    fn user_label(&mut self, id: u32) -> u32 {
+        match self.user_labels[id as usize] {
+            Some(l) => l,
+            None => {
+                let l = self.new_label();
+                self.user_labels[id as usize] = Some(l);
+                l
+            }
+        }
+    }
+
+    /// The routine's label `id` here (`L:` before a statement).  A label
+    /// that a `goto` selected later still branches to (backward) heads a
+    /// loop: it is aligned like a loop head, with the 0x2048 filler in
+    /// aligning routines (codegen-patterns 7, 7.5: of the backward-`goto`
+    /// targets of `../source`'s C, those in aligning routines have the
+    /// filler, NETWORK_$READ_AHEAD 0xE0FDA0, the REM_FILE module-local
+    /// 0xE60FD8 at 0xE61130 and 0xE611E0, or are 4-aligned, BAT_$ALLOCATE
+    /// 0xE3B294, FLP_DO_IO 0xE3DE64, PROC2_$WAIT 0xE3FE84; one large outer
+    /// loop is not, 0xE0FDE2), and the code from it on is in a loop until
+    /// the last such `goto` ([`Self::in_loop`]).  Only forward `goto`s:
+    /// a join, not aligned (7, "Other branch targets").
+    fn place_user_label(&mut self, id: u32) {
+        let l = self.user_label(id);
+        let k = id as usize;
+        let back = self.gotos_total[k] - self.gotos_seen[k];
+        if back > 0 {
+            self.out.push(Insn::Align4);
+            self.open_back += 1;
+        }
+        self.place(l);
+    }
+
+    /// Account for a `goto` to label `id` just selected.
+    fn goto_selected(&mut self, id: u32, at: usize, span: Span) {
+        let k = id as usize;
+        self.gotos_seen[k] += 1;
+        let l = self.user_labels[k].expect("made by the branch");
+        if self.placed.contains(&l) && self.gotos_seen[k] == self.gotos_total[k] {
+            self.open_back -= 1;
+        }
+        for i in at..self.out.len() {
+            if matches!(self.out[i], Insn::Branch { label, .. } if label == l) {
+                self.goto_jumps.push((i, span));
+            }
         }
     }
 
@@ -3371,8 +3568,8 @@ impl Selector {
                 && !(after_call && self.pinned.is_empty() && is_simple(st));
             // What follows this statement up to the epilogue.
             let next = Tail {
-                end: rest.is_empty() && tail.end,
-                clean: seq_clean(rest, tail.clean),
+                end: only_labels(rest) && tail.end,
+                clean: seq_clean(rest, tail.clean, &self.label_clean),
             };
             // A function call in a store's value or a result assignment is
             // followed only by the move of its result: popped unless the
@@ -3417,7 +3614,7 @@ impl Selector {
                 StmtKind::For(l) => self.for_(f, l)?,
                 StmtKind::Exit | StmtKind::Next => {
                     let exit = matches!(st.kind, StmtKind::Exit);
-                    if !rest.is_empty() {
+                    if !reached_after_jump(rest) {
                         return Err(unsupported(
                             rest[0].span,
                             "a statement after `exit` or `next` (not reached) is",
@@ -3454,14 +3651,29 @@ impl Selector {
                 StmtKind::Discard(e) => {
                     self.eval(e)?;
                 }
+                StmtKind::Label(id) => self.place_user_label(*id),
+                // `goto L` (ref "Goto", p. 4-95): a `bra` to the label, as
+                // a `return` is one to the epilogue (codegen-patterns 7.5).
+                StmtKind::Goto(id) => {
+                    if !reached_after_jump(rest) {
+                        return Err(unsupported(
+                            rest[0].span,
+                            "a statement after `goto` (not reached) is",
+                        ));
+                    }
+                    let l = self.user_label(*id);
+                    let at = self.out.len();
+                    self.jump(Cond::T, l);
+                    self.goto_selected(*id, at, st.span);
+                }
                 StmtKind::Return => {
-                    if !rest.is_empty() {
+                    if !reached_after_jump(rest) {
                         return Err(unsupported(
                             rest[0].span,
                             "a statement after `return` (not reached) is",
                         ));
                     }
-                    if tail.end {
+                    if next.end {
                         // The routine's last statement: the epilogue follows
                         // anyway.  In a nested sequence that ends the
                         // routine the original's choice (a `bra` to the
@@ -3663,6 +3875,34 @@ impl Selector {
                 }
             }
             return self.seq(f, else_, next);
+        }
+        // `if c then goto L` likewise: one conditional branch on `c` to
+        // the label (codegen-patterns 7.5).
+        if let [Stmt {
+            kind: StmtKind::Goto(id),
+            span: jspan,
+        }] = then_
+        {
+            let l = self.user_label(*id);
+            let at = self.out.len();
+            self.branch(cond, true, l)?;
+            self.goto_selected(*id, at, *jspan);
+            return self.seq(f, else_, next);
+        }
+        // `if c then T else goto L`: a branch on the negated condition to
+        // the label, then `T`, as an `if` without `else` part (TTY_$I_RCV
+        // 0xE1BBCE..0xE1BBD2 `btst #3,D1; beq.s 0xE1BC38`, the crlf arm's
+        // `else goto normal_char`; codegen-patterns 7.5).
+        if let [Stmt {
+            kind: StmtKind::Goto(id),
+            span: jspan,
+        }] = else_
+        {
+            let l = self.user_label(*id);
+            let at = self.out.len();
+            self.branch(cond, false, l)?;
+            self.goto_selected(*id, at, *jspan);
+            return self.seq(f, then_, next);
         }
         let l_else = self.new_label();
         self.branch(cond, false, l_else)?;
@@ -5688,7 +5928,7 @@ impl Selector {
             // Not a pointer function's A0: whether a later push of the
             // local is made from A0 is not catalogued (12.5 counts data
             // registers only).
-            if *o < 0 && self.loops.is_empty() && !self.escaped.contains(o) && *r != Reg::A(0) {
+            if *o < 0 && !self.in_loop() && !self.escaped.contains(o) && *r != Reg::A(0) {
                 self.stored.push((*o, size, *r, self.out.len()));
             }
         }
@@ -5713,7 +5953,7 @@ impl Selector {
     /// none through a pointer when any frame object's address escapes),
     /// and the local's address never taken ([`escaped_frame_objects`]).
     fn forwarded(&self, o: i32, size: Size) -> Option<Reg> {
-        if !self.loops.is_empty() {
+        if self.in_loop() {
             return None;
         }
         let &(_, sz, r, at) = self.stored.iter().rev().find(|s| s.0 == o)?;
@@ -5771,7 +6011,7 @@ impl Selector {
     /// predecessor ends it.  Not inside a loop (its back edge is not
     /// selected yet).
     fn a0_holds(&self, o: i32) -> bool {
-        if !self.loops.is_empty() {
+        if self.in_loop() {
             return false;
         }
         let uplevel = self.is_uplevel(o);
@@ -5935,7 +6175,7 @@ impl Selector {
             }
         }
         let d = compute(self)?;
-        if self.loops.is_empty() {
+        if !self.in_loop() {
             self.cse.push(Cse {
                 key,
                 leaf,
@@ -5982,7 +6222,7 @@ impl Selector {
     /// - when it is held, its register not written since (an internal
     ///   check; in the probe its users modify it in place).
     fn cse_valid(&self, c: &Cse) -> bool {
-        if !self.loops.is_empty() || c.at > self.out.len() {
+        if self.in_loop() || c.at > self.out.len() {
             return false;
         }
         let region = &self.out[c.at..];

@@ -52,7 +52,9 @@ enum Sym {
         with: WithId,
         rec_ty: TypeId,
     },
-    Label,
+    /// A label (ref 2.2.2.1, p. 2-11), with the routine that declares it
+    /// (`None`: the main program).
+    Label(Option<RoutineId>),
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +130,14 @@ pub(crate) struct Checker<'t> {
     align_stack: Vec<bool>,
     /// String-literal types, by length.
     string_types: HashMap<u32, TypeId>,
+    /// The unit is a module (no main program).
+    is_module: bool,
+    /// Labels prefixing a statement: (declaring routine, name) and the
+    /// first definition's position.
+    label_defs: HashMap<(Option<RoutineId>, String), Span>,
+    /// `goto` statements: the target's declaring routine and name, and
+    /// the statement's position (checked against `label_defs` at the end).
+    label_gotos: Vec<(Option<RoutineId>, String, Span)>,
 }
 
 fn upper(name: &str) -> String {
@@ -157,6 +167,9 @@ impl<'t> Checker<'t> {
             natural: false,
             align_stack: Vec::new(),
             string_types: HashMap::new(),
+            is_module: false,
+            label_defs: HashMap::new(),
+            label_gotos: Vec::new(),
         };
         c.predeclare();
         c
@@ -349,6 +362,7 @@ impl<'t> Checker<'t> {
         for p in &unit.leading_pragmas {
             self.pragma(p);
         }
+        self.is_module = matches!(unit.kind, ast::UnitKind::Module);
         let mut unit_vars = Vec::new();
         let top = self.decls(&unit.decls, None, &mut unit_vars);
         let main = unit.body.as_ref().map(|b| self.block(b));
@@ -364,6 +378,17 @@ impl<'t> Checker<'t> {
                 "Unmatched %push_alignment directive: more %push_alignment than \
                  %pop_alignment directives (ref 4.7 p. 4-58; 9, p. 9-45)",
             ));
+        }
+        // Every `goto` names a label that prefixes a statement of the
+        // routine declaring it (ref "Goto", p. 4-95: "transfers control to
+        // the statement immediately following lbl").
+        for (owner, name, span) in &self.label_gotos {
+            if !self.label_defs.contains_key(&(*owner, name.clone())) {
+                self.errors.push(Diagnostic::error(
+                    *span,
+                    format!("label `{name}` prefixes no statement"),
+                ));
+            }
         }
         for r in &self.routines {
             if r.options.forward && r.body.is_none() {
@@ -505,7 +530,23 @@ impl<'t> Checker<'t> {
     }
 
     fn declare_label(&mut self, id: &ast::Ident) {
-        self.declare(id, Sym::Label);
+        let owner = self.ctx.last().map(|c| c.id);
+        if owner.is_none() && self.is_module {
+            // ref 9, p. 9-37: "ERROR Labels not permitted at MODULE level."
+            self.error(
+                id.span,
+                "labels are not permitted at module level (ref p. 9-37)",
+            );
+        }
+        self.declare(id, Sym::Label(owner));
+    }
+
+    /// The routine declaring label `name`, when it is a label.
+    fn label_owner(&self, name: &str) -> Option<Option<RoutineId>> {
+        match self.lookup(name) {
+            Some(Sym::Label(owner)) => Some(*owner),
+            _ => None,
+        }
     }
 
     fn const_def(&mut self, def: &ast::ConstDef) {
@@ -2113,8 +2154,28 @@ impl<'t> Checker<'t> {
             S::Empty => StmtKind::Empty,
             S::Labeled { label, stmt } => {
                 let name = label_name(label);
-                if !matches!(self.lookup(&name), Some(Sym::Label)) {
-                    self.error(label.span(), format!("label `{name}` is not declared"));
+                let here = self.ctx.last().map(|c| c.id);
+                match self.label_owner(&name) {
+                    None => self.error(label.span(), format!("label `{name}` is not declared")),
+                    // ref "Goto", p. 4-95: "(Name_of_Label) has not been
+                    // declared in routine (name_of_routine)": a label is
+                    // declared in the routine whose statement it prefixes.
+                    Some(owner) if owner != here => self.error(
+                        label.span(),
+                        format!("label `{name}` is not declared in this routine (ref p. 4-95)"),
+                    ),
+                    Some(owner) => {
+                        if self
+                            .label_defs
+                            .insert((owner, name.clone()), label.span())
+                            .is_some()
+                        {
+                            self.error(
+                                label.span(),
+                                format!("label `{name}` prefixes more than one statement"),
+                            );
+                        }
+                    }
                 }
                 StmtKind::Labeled {
                     label: name,
@@ -2199,8 +2260,9 @@ impl<'t> Checker<'t> {
             S::With { items, body } => self.with(items, body),
             S::Goto(l) => {
                 let name = label_name(l);
-                if !matches!(self.lookup(&name), Some(Sym::Label)) {
-                    self.error(l.span(), format!("label `{name}` is not declared"));
+                match self.label_owner(&name) {
+                    None => self.error(l.span(), format!("label `{name}` is not declared")),
+                    Some(owner) => self.label_gotos.push((owner, name.clone(), l.span())),
                 }
                 StmtKind::Goto(name)
             }
@@ -2710,7 +2772,7 @@ impl<'t> Checker<'t> {
                 self.error(span, format!("`{}` needs arguments", id.name));
                 self.error_expr(span)
             }
-            Sym::Options(_) | Sym::Attributes(_) | Sym::Label => {
+            Sym::Options(_) | Sym::Attributes(_) | Sym::Label(_) => {
                 self.error(span, format!("`{}` is not a value", id.name));
                 self.error_expr(span)
             }
