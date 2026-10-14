@@ -51,6 +51,13 @@ Question: what precedence do `not`, `and` and `or` have in a predicate?
 Owner's answer (2026-10-13): standard Pascal operator precedence: `not` (with the other unary operators) highest, then the multiplying operators including `and`, then the adding operators including `or`, then the relational operators.
 Consequence: no change; dpc already evaluates `not` > `and` > `or` (Table 4-3, p. 4-4).  The TODO(ref-question) in `crates/dpc-syntax/src/preprocess.rs` (`Pred`) is replaced by a citation of this ruling.
 
+## 2.1.4 C-style /* */ comments in the 2.1.2 example (p. 2-2; PDF p. 35)
+Asked: 2026-10-11, by the lead agent (open question 4; lexer work)
+Passage: the integer example writes "half_life := 5260; /* default (base 10) */", but 2.1.4 lists only `{ }`, `(* *)` and `" "`.
+Question: is `/* */` a Domain Pascal comment form?
+Owner's answer (2026-10-13): a copy-edit miss in the manual; `/* */` is not supported.  Revisit only if the wider Domain Pascal corpus turns out to use C-style comments (unlikely).
+Consequence: no change; the lexer already rejects `/* */` per 2.1.4.  Errata list updated.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -78,7 +85,7 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
    settle how a list ends before an ordinary token such as `module`.
 3. **ANSWERED 2026-10-13 (see Clarifications above).  4.7, p. 4-46, predicates.** "Optional Boolean keywords not, and, or
    or": no precedence is given.  *Current: Table 4-3 order, not > and > or.*
-4. **2.1.2, p. 2-2 (PDF p. 35).** The integer example uses
+4. **ANSWERED 2026-10-13 (see Clarifications above).  2.1.2, p. 2-2 (PDF p. 35).** The integer example uses
    `/* default (base 10) */` comments, but 2.1.4 lists only `{ }`,
    `(* *)` and `" "`.  Is `/* */` a comment form?  *Current: rejected,
    per 2.1.4.*
@@ -389,6 +396,9 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     is transparent (accepted).*
 
 ## Reference errata noticed (no ruling needed)
+
+- **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`
+  comments; owner ruling (question 4): a copy-edit miss, not a comment form.
 
 - **Table 4-11, p. 4-45** swaps the descriptions of `%push_alignment` and
   `%pop_alignment`.  The prose on p. 4-58 is followed: push saves, pop
