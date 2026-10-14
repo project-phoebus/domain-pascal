@@ -53,6 +53,10 @@ Tests:
   array, boolean, enumeration, `nil`, sets; values from TTY's .DATA
   0xE8242C, WIRED_DATA 0xE2DDB4, OS_INIT_DATA 0xE351B0), a section with
   no initial value left NOBITS.
+- `data/with` - codegen-patterns 5.2 ("`with`", "`addr(x)` as a
+  value"), 1.5: records named in place, a unit pointer held for the
+  body, an element through a pointer (NETLOG_$LOG_IT 0xE71BB6..0xE71BFC),
+  a stable pointer parameter, `lea; move.l`, `pea`.
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).
@@ -100,6 +104,11 @@ Tests:
   `nil`, `cmpi` against constants, `cmp` with a held left operand,
   signed and unsigned branches, booleans with `tst.b` and `bpl`/`bmi`,
   `not`, `and then`, `or else`.
+- `control/and_or` - codegen-patterns 7.1 ("Plain `and` and `or`"), 8
+  (`odd`): `s<cc>` operands combined with `and.b`/`or.b` and the sign
+  branch (TTY_$I_ERR 0xE1BE48, 0xE4BC2A), boolean variables as operands,
+  `not.b`, a stored value; `btst #0` of held parameters (FIM_$BUILD_DF
+  0xE0A6F6).
 - `control/compares_mixed` - codegen-patterns 7.1, 8, 12.4 R11: two
   variables in memory (the left one loaded, TTY_$K_SET_FLAG 0xE67462),
   a signed and an unsigned word widened to longwords (TTY_$K_PUT

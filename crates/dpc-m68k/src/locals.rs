@@ -269,9 +269,9 @@ impl Walk<'_> {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            Cond::Test(e) => self.expr(e),
+            Cond::Test(e) | Cond::Odd(e) => self.expr(e),
             Cond::Not(x) => self.cond(x),
-            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
                 self.cond(a);
                 self.cond(b);
             }

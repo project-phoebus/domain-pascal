@@ -1026,6 +1026,7 @@ mod tests {
             nesting: None,
             uplevel_refs: Vec::new(),
             param_copies: Vec::new(),
+            with_temps: Vec::new(),
             result_slot: None,
             body: Vec::new(),
             span,

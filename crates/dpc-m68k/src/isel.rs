@@ -321,6 +321,10 @@ fn select_body_with(
         .into_iter()
         .map(|o| (o, None))
         .collect();
+    // A `with` record reached at run time: its pointer, computed once,
+    // held in an address register for the body (codegen-patterns 5.2,
+    // "`with`"; NETLOG_$LOG_IT 0xE71BCA).
+    s.ptr_locals.extend(f.with_temps.iter().map(|&o| (o, None)));
     let mut taken = s.reg_locals.clone();
     taken.extend(s.ptr_locals.iter().map(|&(o, _)| o));
     let call_ptrs = call_pointer_locals(f, &taken);
@@ -1359,9 +1363,9 @@ fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
             walk_expr(lhs, v);
             walk_expr(rhs, v);
         }
-        IrCond::Test(e) => walk_expr(e, v),
+        IrCond::Test(e) | IrCond::Odd(e) => walk_expr(e, v),
         IrCond::Not(x) => walk_cond(x, v),
-        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) | IrCond::And(a, b) | IrCond::Or(a, b) => {
             walk_cond(a, v);
             walk_cond(b, v);
         }
@@ -1936,9 +1940,9 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 exprs(lhs, off, st);
                 exprs(rhs, off, st);
             }
-            IrCond::Test(e) => exprs(e, off, st),
+            IrCond::Test(e) | IrCond::Odd(e) => exprs(e, off, st),
             IrCond::Not(x) => cond(x, off, st),
-            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) | IrCond::And(a, b) | IrCond::Or(a, b) => {
                 cond(a, off, st);
                 cond(b, off, st);
             }
@@ -2489,9 +2493,11 @@ fn addr_has_call(a: &Addr) -> bool {
 fn cond_has_call(c: &IrCond) -> bool {
     match c {
         IrCond::Compare { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
-        IrCond::Test(e) => expr_has_call(e),
+        IrCond::Test(e) | IrCond::Odd(e) => expr_has_call(e),
         IrCond::Not(x) => cond_has_call(x),
-        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => cond_has_call(a) || cond_has_call(b),
+        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) | IrCond::And(a, b) | IrCond::Or(a, b) => {
+            cond_has_call(a) || cond_has_call(b)
+        }
         IrCond::Block { lhs, rhs, .. } => addr_has_call(lhs) || addr_has_call(rhs),
     }
 }
@@ -2787,9 +2793,9 @@ impl Uses<'_> {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            IrCond::Test(e) => self.expr(e),
+            IrCond::Test(e) | IrCond::Odd(e) => self.expr(e),
             IrCond::Not(x) => self.cond(x),
-            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
+            IrCond::AndThen(a, b) | IrCond::OrElse(a, b) | IrCond::And(a, b) | IrCond::Or(a, b) => {
                 self.cond(a);
                 self.cond(b);
             }
@@ -4496,7 +4502,41 @@ impl Selector {
     /// it is true, the last one back to the head.
     fn branch(&mut self, c: &IrCond, when: bool, l: u32) -> Res<()> {
         match c {
+            // `not (a or b)` on a plain `and`/`or`: the value complemented
+            // with `not.b` and the branch on its sign (0xE0AED6..0xE0AEDA
+            // `or.b D1,D0; not.b D0; bmi.w`; `tools/boolsurvey.py`, the one
+            // `not` read of such a value).
+            IrCond::Not(x) if matches!(**x, IrCond::And(..) | IrCond::Or(..)) => {
+                let d = self.logic_value(x)?;
+                self.out.push(Insn::Unary {
+                    op: UnaryOp::Not,
+                    size: Size::B,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                let cc = if when { Cond::Mi } else { Cond::Pl };
+                self.jump(cc, l);
+                Ok(())
+            }
             IrCond::Not(x) => self.branch(x, !when, l),
+            // A plain `and`/`or` (ref pp. 4-18, 4-134: both operands may be
+            // evaluated): the boolean value in a register, the branch on
+            // the sign of the `and.b`/`or.b` that formed it (`bpl` 39,
+            // `bmi` 31 of the 133 sites of `tools/boolsurvey.py`; TTY_$I_ERR
+            // 0xE1BE5E `and.b D3,D1; bmi.b`; 0xE01984 `and.b D0,D1; bpl.s`).
+            IrCond::And(..) | IrCond::Or(..) => {
+                self.logic_value(c)?;
+                let cc = if when { Cond::Mi } else { Cond::Pl };
+                self.jump(cc, l);
+                Ok(())
+            }
+            // `odd(x)`: `btst #0` on the integer in a data register, the
+            // branch on Z (FIM_$BUILD_DF 0xE0A6F6 `btst #0,D5; beq.s`,
+            // 0xE0A8EE `btst #0,D0; bne.s`; [`Self::odd_test`]).
+            IrCond::Odd(x) => {
+                self.odd_test(x)?;
+                self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                Ok(())
+            }
             IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
                 // `and then` short-circuits on false, `or else` on true.
                 let short = matches!(c, IrCond::OrElse(..));
@@ -5570,6 +5610,19 @@ impl Selector {
         let me = Addr::Frame(o);
         let dst = Ea::Reg(Reg::D(web));
         match value {
+            // A plain `and`/`or`: formed in a register of its own and moved
+            // (0xE072B6..0xE072B8 `or.b D1,D0; move.b D0,D4`; 0xE11CA0..
+            // 0xE11CA2 `or.b D1,D6; move.b D6,D5`; 0xE66024..0xE66028 `or.b
+            // (-722,A6),D3; move.b D3,D2`).
+            Expr::Test(c) if matches!(**c, IrCond::And(..) | IrCond::Or(..)) => {
+                let d = self.logic_value(c)?;
+                self.out.push(Insn::Move {
+                    size: Size::B,
+                    src: Ea::Reg(Reg::D(d)),
+                    dst,
+                });
+                return Ok(());
+            }
             Expr::Test(_) => {
                 return Err(unsupported(
                     self.span,
@@ -5771,6 +5824,19 @@ impl Selector {
                         a
                     }
                 };
+                if let Expr::AddrOf(x) = value {
+                    // `p := addr(x)`, or a `with` statement's record address
+                    // ([`dpc_ir::Function::with_temps`]): `lea` straight into
+                    // the register (NETLOG_$LOG_IT 0xE71BCA `lea
+                    // (0,A0,D1.w),A0`, the element address its eleven field
+                    // stores go through).
+                    self.lea_into(x, a)?;
+                    self.ptr_defs.push((*o, self.out.len() - 1, self.span));
+                    if self.pinned(*o).is_none() {
+                        self.pinned.push((*o, Reg::A(a)));
+                    }
+                    return Ok(());
+                }
                 let src = match value {
                     Expr::Load { addr: src, .. } => self.operand(src)?,
                     // A pointer function's result: `movea.l A0,An`
@@ -5917,6 +5983,17 @@ impl Selector {
             // #MAC_$DEMUX,(-8,A6)`; PROC1_ 0xE14B7A `move.l
             // #PROC1_$TS_END_CALLBACK,(24,A2)`; codegen-patterns 1.6).
             Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => Src::Ea(Ea::ImmSym(name.clone())),
+            // `addr(x)` of an object of this unit's data or frame, or one
+            // reached through a pointer or an index: `lea` into an address
+            // register, then `move.l An,<dst>` ([`Self::addr_into_a`]).
+            Expr::AddrOf(a) => Src::Ea(Ea::Reg(Reg::A(self.addr_into_a(a)?))),
+            // A plain `and`/`or` stored: the value formed in a data register,
+            // then `move.b Dn,<dst>` (`tools/boolsurvey.py`, 11 stores:
+            // 0xE38630..0xE38632 `and.b D4,D1; move.b D1,(631,A3)`; 0xE0AF56
+            // `or.b D2,D1; move.b D1,(A5)`; 0xE34C5E..0xE34C60).
+            Expr::Test(c) if matches!(**c, IrCond::And(..) | IrCond::Or(..)) => {
+                Src::Ea(Ea::Reg(Reg::D(self.logic_value(c)?)))
+            }
             // A comparison stored as a boolean: whether the original set
             // the byte in memory with `s<cc>` directly is not catalogued.
             Expr::Test(_) => {
@@ -6782,6 +6859,14 @@ impl Selector {
                         src: Ea::ImmSym(name.clone()),
                         dst,
                     }),
+                    // `addr(x)` by value of an object of this unit's data or
+                    // frame: `pea`, the push of the same address by address
+                    // (codegen-patterns 1.5: `pea (d,A6)`, PROC1_$BIND 0xE14DF4;
+                    // `pea (d,A5)`, 0xE02884; `pea (d,An)`, 0xE32B86).
+                    Expr::AddrOf(a @ (Addr::Frame(_) | Addr::Static(_))) => {
+                        let ea = self.ea_of(a)?;
+                        self.out.push(Insn::Pea(ea));
+                    }
                     Expr::AddrOf(_)
                     | Expr::SetMember { .. }
                     | Expr::SetMemberAt { .. }
@@ -8886,6 +8971,23 @@ impl Selector {
             });
             return Ok(count);
         }
+        if let IrCond::Odd(x) = c {
+            // `btst #0; sne`: into the tested register when it held a value
+            // computed for the test, as `in` does (REM_NAME_SERVER_LOCAL
+            // 0xE4A412 `btst #13,D0; sne D0`), into a new one when it holds
+            // a variable (AST_$GET_LOCATION 0xE0472E `btst #0,D2; sne D0`;
+            // DISK_$ADD_QUE 0xE3C744 `btst #0,D2; sne D4`).
+            let (d, held) = self.odd_test(x)?;
+            let d = if held { self.alloc_d()? } else { d };
+            self.out.push(Insn::Scc {
+                cond: Cond::Ne,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            return Ok(d);
+        }
+        if let IrCond::And(..) | IrCond::Or(..) = c {
+            return self.logic_value(c);
+        }
         let IrCond::Compare { op, lhs, rhs } = c else {
             return Err(unsupported(
                 self.span,
@@ -8897,16 +8999,26 @@ impl Selector {
         let cc = self.compare(*op, lhs, rhs)?;
         // The data registers the compare's operands used, last allocated
         // first.
+        // Only a register the compare itself defined holds a value
+        // computed for the test: one it merely reads may be a variable's
+        // (a register-held local's web, read by `cmpi.w #3,Dm` in `(m > 3)
+        // or b`, live after the test).
+        let defined: Vec<Reg> = self.out[start..]
+            .iter()
+            .flat_map(|i| crate::regs::access(i).defs)
+            .collect();
         let mut used: Vec<u8> = self.out[start..]
             .iter()
             .flat_map(|i| crate::regs::access(i).uses)
             .filter_map(|r| match r {
-                Reg::D(n) if crate::regs::is_virtual(r) => Some(n),
+                Reg::D(n) if crate::regs::is_virtual(r) && defined.contains(&r) => Some(n),
                 _ => None,
             })
             .collect();
         used.sort_unstable();
-        // A register held for the whole body is not overwritten.
+        // A register held for the whole body (a parameter loaded at
+        // entry, a register-held local, a value held for reuse) is not
+        // overwritten.
         let held: Vec<u8> = self
             .pinned
             .iter()
@@ -8914,6 +9026,8 @@ impl Selector {
                 Reg::D(n) => Some(n),
                 _ => None,
             })
+            .chain(self.webs.iter().map(|&(_, d)| d))
+            .chain(self.cse_regs.iter().copied())
             .collect();
         let d = match used.iter().rev().find(|n| !held.contains(n)) {
             Some(&n) => n,
@@ -8924,6 +9038,229 @@ impl Selector {
             dst: Ea::Reg(Reg::D(d)),
         });
         Ok(d)
+    }
+
+    /// The address of `a` in a new address register, for `addr(x)` as a
+    /// value stored into memory: `lea <ea>,An` (`lea; move.l An,<mem>` in
+    /// compiled code: `(d,A5)` 19 sites, 0xE00964 `lea (24,A5),A0; move.l
+    /// A0,(-108,A6)`; `(d,A6)` 18, 0xE11B1A; `(d,An)` 97, 0xE012CC; an
+    /// element `(d,An,Dx)` 122, 0xE03576 `lea (-48,A1,D0.l),A2; move.l
+    /// A2,(-76,A6)`, the lower bound folded in), or `movea.l #sym,An` for
+    /// another unit's object (0xE00ECC).
+    fn addr_into_a(&mut self, a: &Addr) -> Res<u8> {
+        let r = self.alloc_a()?;
+        self.lea_into(a, r)?;
+        Ok(r)
+    }
+
+    /// The address of `a` into address register `r` ([`Self::addr_into_a`]):
+    /// `lea <ea>,Ar`; `movea.l #sym,Ar` for another unit's object; for an
+    /// element of an array a pointer in memory points to, the scaled index
+    /// first, then the pointer, then the `lea` (NETLOG_$LOG_IT
+    /// 0xE71BB6..0xE71BCA: the index times 26 into D1, `movea.l
+    /// (116,A5),A0; lea (0,A0,D1.w),A0`).
+    fn lea_into(&mut self, a: &Addr, r: u8) -> Res<()> {
+        match a {
+            Addr::Symbol { name, offset: 0 } => self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::ImmSym(name.clone()),
+                dst: r,
+            }),
+            Addr::Symbol { .. } | Addr::Const(_) => {
+                // 6 `lea abs.l,An; move.l An,Dn` (0xE310AA), and `move.l
+                // #sym+d` / `pea abs.l` for arguments (codegen-patterns 1.5):
+                // not settled.
+                return Err(unsupported(
+                    self.span,
+                    "the address of a constant or of a part of another unit's object as a value \
+                     is",
+                ));
+            }
+            Addr::Index {
+                base,
+                index,
+                scale,
+                offset,
+            } if matches!(&**base, Addr::Indirect { base: p, .. }
+                if matches!(&**p, Expr::Load { addr: Addr::Frame(_) | Addr::Static(_), .. })
+                    && !matches!(&**p, Expr::Load { addr: Addr::Frame(f), .. }
+                        if self.pinned(*f).is_some())) =>
+            {
+                let Addr::Indirect { base: p, offset: o } = &**base else {
+                    unreachable!()
+                };
+                let Expr::Load { addr: pa, .. } = &**p else {
+                    unreachable!()
+                };
+                if self.stepped_pointer(base, index, *scale).is_some() {
+                    return Err(unsupported(
+                        self.span,
+                        "the address of a stepped element is",
+                    ));
+                }
+                let long = index.ty().width == Width::Long;
+                let x = self.index_reg(index, *scale)?;
+                let b = self.alloc_a()?;
+                let src = self.operand(pa)?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src,
+                    dst: b,
+                });
+                let disp = o + offset;
+                if !(-128..128).contains(&disp) {
+                    return Err(unsupported(self.span, "a displacement beyond 8 bits is"));
+                }
+                self.out.push(Insn::Lea {
+                    src: Ea::Idx(disp, b, x, long),
+                    dst: r,
+                });
+            }
+            _ => {
+                let src = self.ea_of(a)?;
+                self.out.push(Insn::Lea { src, dst: r });
+            }
+        }
+        Ok(())
+    }
+
+    /// The value of a plain `a and b` / `a or b` (ref "And", p. 4-18; "Or",
+    /// p. 4-134: both operands may be evaluated, in any order) in a data
+    /// register, its flags those of the `and.b`/`or.b` that formed it
+    /// (codegen-patterns 7.1, "Plain `and` and `or`"; `tools/boolsurvey.py
+    /// andor`, 133 sites): the left operand's boolean into a register of
+    /// its own ([`Self::bool_into_reg`]), then `and.b`/`or.b` of the right
+    /// one into it ([`Self::bool_operand`]).  0xE4BC2A..0xE4BC4A `cmpi.l
+    /// #..,(8,A6); seq D0; cmpi.l #..,(8,A6); seq D1; or.b D1,D0; cmpi.l;
+    /// seq D1; or.b D1,D0` (`a or b or c`, left to right); TTY_$I_ERR
+    /// 0xE1BE48..0xE1BE5E `seq D1b; ...; sne D3b; and.b D3b,D1b`.
+    fn logic_value(&mut self, c: &IrCond) -> Res<u8> {
+        let (op, a, b) = match c {
+            IrCond::And(a, b) => (AluOp::And, a, b),
+            IrCond::Or(a, b) => (AluOp::Or, a, b),
+            _ => unreachable!("logic_value of a plain and/or"),
+        };
+        let d = self.bool_into_reg(a)?;
+        if crate::regs::is_virtual(Reg::D(d)) || !cond_has_call(b) {
+            let src = self.bool_operand(b)?;
+            self.out.push(Insn::Alu {
+                op,
+                size: Size::B,
+                src,
+                dst: d,
+            });
+            Ok(d)
+        } else {
+            // A function's boolean in D0 with a call on the right: not seen.
+            Err(unsupported(
+                self.span,
+                "a plain `and`/`or` of a function result and an operand with a call is",
+            ))
+        }
+    }
+
+    /// The boolean value of `c` in a data register of its own, as the left
+    /// operand of a plain `and`/`or` (`tools/boolsurvey.py andor`):
+    ///
+    /// - a comparison, `odd`, a constant member of a register-sized set:
+    ///   `s<cc>` ([`Self::test_value`]; 0xE4BC32 `seq D0`; 0xE01978
+    ///   `btst #13,D0; sne D1`);
+    /// - a boolean variable in memory: `move.b <mem>,Dn` (0xE6E3D8 `move.b
+    ///   (-28,A6),D4; and.b D0,D4`); one held in a register, copied:
+    ///   `move.b Dh,Dn` (0xE01A20 `move.b D2,D0; and.b D3,D0`; 0xE39ED8;
+    ///   0xE6973A);
+    /// - `not v` of such a variable: the same, then `not.b Dn` (0xE1009C
+    ///   `move.b (26,A6),D3; not.b D3`; 0xE3BAAE; 0xE51482 `move.b D4,D7;
+    ///   not.b D7`);
+    /// - a function's boolean result: its D0 (0xE072AA `or.b (-18,A6),D0`
+    ///   right after the call);
+    /// - a nested plain `and`/`or`: its register (0xE4BC4A, a chain).
+    fn bool_into_reg(&mut self, c: &IrCond) -> Res<u8> {
+        match c {
+            IrCond::And(..) | IrCond::Or(..) => self.logic_value(c),
+            IrCond::Not(x) if matches!(&**x, IrCond::Test(Expr::Load { .. })) => {
+                let d = self.bool_into_reg(x)?;
+                self.out.push(Insn::Unary {
+                    op: UnaryOp::Not,
+                    size: Size::B,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(d)
+            }
+            IrCond::Test(e @ Expr::Load { .. }) => {
+                let src = match self.eval(e)? {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r) => Ea::Reg(r),
+                    _ => unreachable!("a variable's value is memory or its register"),
+                };
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: Size::B,
+                    src,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(d)
+            }
+            IrCond::Test(e @ (Expr::Call { .. } | Expr::SetMember { .. } | Expr::Bits { .. })) => {
+                match self.eval(e)? {
+                    Val::Tmp(d) => Ok(d),
+                    // A function's result register.
+                    Val::Reg(Reg::D(d)) if matches!(e, Expr::Call { .. }) => Ok(d),
+                    _ => Err(unsupported(
+                        self.span,
+                        "this operand of a plain `and`/`or` is",
+                    )),
+                }
+            }
+            IrCond::Compare { .. } | IrCond::Block { .. } | IrCond::Odd(_) => self.test_value(c),
+            _ => Err(unsupported(
+                self.span,
+                "this operand of a plain `and`/`or` (`not` of a computed boolean, `and then`, \
+                 `or else`: not catalogued) is",
+            )),
+        }
+    }
+
+    /// The right operand of a plain `and`/`or`: a boolean variable as it
+    /// is, in memory or in its register (0xE39EDA `and.b (20,A6),D6`;
+    /// 0xE072AA `or.b (-18,A6),D0`; 0xE0F554 `or.b (844,A5),D0`; 0xE01A22
+    /// `and.b D3,D0`, D3 a register-held boolean), anything else in a
+    /// register of its own ([`Self::bool_into_reg`]).
+    fn bool_operand(&mut self, c: &IrCond) -> Res<Ea> {
+        if let IrCond::Test(e @ Expr::Load { .. }) = c {
+            return match self.eval(e)? {
+                Val::Mem(ea) => Ok(ea),
+                Val::Reg(r) => Ok(Ea::Reg(r)),
+                _ => unreachable!("a variable's value is memory or its register"),
+            };
+        }
+        Ok(Ea::Reg(Reg::D(self.bool_into_reg(c)?)))
+    }
+
+    /// `odd(x)`: `btst #0` on the integer in a data register (FIM_$BUILD_DF
+    /// 0xE0A6F6 `btst #0,D5`, 0xE0A8EE `btst #0,D0`, both register-held
+    /// longwords; ref "Odd", p. 4-128).  The register and whether it holds
+    /// the value for longer (a register-held variable) are returned.  A
+    /// variable in memory is refused: `btst #0` on its low byte (69 `btst
+    /// #0,(odd d,An)` in compiled code, which bit 0 of a set's last byte
+    /// explains as well) or the value loaded first is not settled.
+    fn odd_test(&mut self, x: &Expr) -> Res<(u8, bool)> {
+        let (d, held) = match self.eval(x)? {
+            Val::Reg(Reg::D(r)) => (r, true),
+            Val::Tmp(r) => (r, false),
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "`odd` of a variable in memory (`btst #0` on its low byte, or the value \
+                     loaded first: not settled) or of a constant is",
+                ))
+            }
+        };
+        self.out.push(Insn::BtstImm {
+            bit: 0,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok((d, held))
     }
 
     /// `lhs op rhs` with a left operand that is not a variable: the value
@@ -10364,6 +10701,7 @@ mod tests {
             nesting: None,
             uplevel_refs: Vec::new(),
             param_copies: Vec::new(),
+            with_temps: Vec::new(),
             result_slot: None,
             body: body
                 .into_iter()
@@ -11676,8 +12014,7 @@ mod tests {
                 "jsr\t(Q).l",
             ]
         );
-        // Not catalogued: an address inside another unit's object, the
-        // address of a frame object as a value.
+        // Not catalogued: an address inside another unit's object.
         let f = proc_(
             0,
             vec![ext(
@@ -11690,9 +12027,23 @@ mod tests {
             )],
         );
         assert!(err(&f).starts_with("passing this kind of object by address"));
+        // `addr(x)` of a frame object by value: `pea`, as by address
+        // (codegen-patterns 1.5).
         let f = proc_(
             4,
             vec![ext("P", vec![val(Expr::AddrOf(Addr::Frame(-4)))], 0)],
+        );
+        assert_eq!(body_text(&f), ["pea\t(-4,%fp)", "jsr\t(P).l"]);
+        let f = proc_(
+            4,
+            vec![ext(
+                "P",
+                vec![val(Expr::AddrOf(Addr::Symbol {
+                    name: "X".into(),
+                    offset: 4,
+                }))],
+                0,
+            )],
         );
         assert!(err(&f).starts_with("this argument value"));
     }

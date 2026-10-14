@@ -34,7 +34,7 @@ mod lower;
 #[cfg(test)]
 mod tests;
 
-pub use lower::{lower, lower_each, lower_with};
+pub use lower::{lower, lower_each, lower_with, WITH_TEMP_BASE};
 
 use dpc_syntax::Span;
 
@@ -187,6 +187,15 @@ pub struct Function {
     /// selector emits the copies after the entry loads and before the
     /// body (codegen-patterns 1.2, "Value parameters passed by address").
     pub param_copies: Vec<ParamCopy>,
+    /// The temporaries of the routine's `with` statements (ref "With",
+    /// p. 4-212: the record "evaluated only once"): pseudo frame offsets
+    /// from [`WITH_TEMP_BASE`] down, outside the frame, each the
+    /// pointer to one `with` record reached at run time.  The body assigns
+    /// one with a [`StmtKind::Store`] at the statement's start and reaches
+    /// the record as [`Addr::Indirect`] on its [`Expr::Load`]; the selector
+    /// holds each in an address register, never in memory (codegen-patterns
+    /// 5.2, "`with`").
+    pub with_temps: Vec<i32>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -586,6 +595,18 @@ pub enum Cond {
     /// `a or else b`: `b` is evaluated only when `a` is false (ref "Or
     /// Else", p. 4-134).
     OrElse(Box<Cond>, Box<Cond>),
+    /// `a and b` on booleans, both operands evaluated (ref "And",
+    /// pp. 4-18..4-19: "the system may evaluate both boolean_1 and boolean_2 ...
+    /// there is no guarantee that the system will evaluate the two
+    /// operands in the order in which they appear").  The image computes
+    /// each operand's boolean value and combines them with `and.b`
+    /// (codegen-patterns 7.1, "Plain `and` and `or`").
+    And(Box<Cond>, Box<Cond>),
+    /// `a or b` on booleans, both operands evaluated (ref "Or", pp.
+    /// 4-134..4-135), combined with `or.b`.
+    Or(Box<Cond>, Box<Cond>),
+    /// `odd(x)` (ref "Odd", p. 4-128): integer `x` is odd, its bit 0 set.
+    Odd(Expr),
     /// `lhs = rhs` or `lhs <> rhs` (`op` is [`Rel::Eq`] or [`Rel::Ne`])
     /// of two records or arrays of `size` bytes, compared in memory (ref
     /// Table 4-1, p. 4-2: `=` and `<>` apply to "All types";

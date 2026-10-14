@@ -410,6 +410,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   ROUTE_$PORT+0x30, 0xE0A36C DMA+0xC0): Uncertain, rejected by `dpc`.
   The same address into a register is `movea.l #sym,An` (0xE00ECC;
   DISK_$GET_ERROR_INFO 0xE6C090).
+- **`addr(x)` by value of a frame or unit-data object** (a `univ_ptr`
+  or pointer value parameter, `val_param`): `pea (d,A6)` / `pea (d,A5)`,
+  the same push as the object by address (no compiled site can be told
+  from that one; implemented, bead domain-pascal-5aw.19; `addr` stored
+  as a value: section 5.2).
 - **A by-address parameter passed on by address** is its slot, pushed
   with `move.l (d,A6),-(SP)` (Verified: LOG_$READ 0xE1780C `actual_len`,
   0xE17818 `buffer`, both passed on to the worker 0xE17778).
@@ -2107,6 +2112,69 @@ model run against the bit model of Figure 3-6).
   address-register sites above all put the constant first, as do two with
   5 and 8).  Golden `tests/golden/expr/transfer`; test `dpc-ir`
   `type_transfers`.
+- **`with` (ref "With", pp. 4-211..4-214; C.3.18; the evaluation
+  Verified at one site, the rest Uncertain; implemented, bead
+  domain-pascal-5aw.19).**  P. 4-212: "Domain Pascal evaluates the
+  expression v1 only once, and this evaluated expression is implied
+  within the body of the with statement", and of `WITH p^ DO ... p :=
+  nil ...`: "changing p does not affect access to the record identified
+  by the with statement".  The image site: NETLOG_$LOG_IT
+  0xE71BB6..0xE71BFC computes `count * 26` into D1, then `movea.l
+  (116,A5),A0; lea (0,A0,D1.w),A0` and stores eleven fields through A0,
+  `(-26,A0)` .. `(-2,A0)`: an element of a 1-based array through a
+  pointer, its address formed once with displacement 0, the lower bound
+  (-26) folded into each field's displacement (the C,
+  `netlog/log_it.c`, has an `entry` pointer local instead; the code is
+  the same).  `tools/boolsurvey.py elem` counts the element addresses
+  `lea (0,An,Dx),Am` used through Am: 1424, of which 170 serve two or
+  more memory operands before a branch, call or label (the shape of a
+  `with` or of a common subexpression; not told apart).  A record whose
+  address has no run-time part needs no code: its references are those
+  of the variable.  **Implemented** (`dpc-ir` `Cx::with_stmt`,
+  `Function::with_temps`; `isel.rs` the pointer locals of 12.5,
+  `lea_into`):
+  - a variable, a field or constant-indexed element of one, a `var`
+    parameter's record through its slot: bound to that address, no code
+    (`with v : r` binds `r` the same way);
+  - `v^` (or a field of it) for a pointer local or by-value parameter
+    of the routine that the body does not write, whose address the
+    routine never takes or passes, and that no nested routine reaches:
+    through `v` as written (loaded at entry when it is a parameter,
+    12.2), since it holds the same pointer for the whole body;
+  - anything else (a pointer in the unit's data or one the body
+    assigns, an element at a run-time index): the run-time part of the
+    address, the pointer or the element address `base + index * size`
+    without its constant displacement, computed once at the statement's
+    start into a temporary that the selector holds in an address
+    register for the body (a callee-saved one across calls, 12.4 R3) and
+    never stores, the constant displacements in each reference; an
+    element through a pointer in memory as at NETLOG_$LOG_IT (index,
+    pointer, `lea`).
+  Uncertain: whether the original reserved a frame slot for the
+  temporary (NETLOG_$LOG_IT's `link #-24` has 6 bytes no instruction
+  addresses below its 18 of locals, enough for a 4-byte temporary or a
+  local), and whether it copied a pointer already held in a register
+  (dpc goes through the variable when it is stable, as above, and
+  copies a register-held local's pointer with `movea.l Dn,An`
+  otherwise).  Refused: a `with` over a volatile record reached at run
+  time; a `goto` into a `with` (ref p. 4-95; 7.5).  Golden `data/with`;
+  exec test `withs`; dpc-ir test `with_statements`.
+- **`addr(x)` as a value (ref "Addr", p. 4-13; Verified by survey;
+  implemented, bead domain-pascal-5aw.19).**  Stored: `lea <ea>,An;
+  move.l An,<dst>` (`lea X,An` directly followed by `move.l An,<mem>`:
+  X `(d,A5)` 19 times, 0xE00964 `lea (24,A5),A0; move.l A0,(-108,A6)`;
+  `(d,A6)` 18, 0xE11B1A; `(d,An)` 97, 0xE012CC; an element `(d,An,Dx)`
+  122, 0xE03576 `lea (-48,A1,D0.l),A2; move.l A2,(-76,A6)`, the lower
+  bound folded in; offset 0 of the data area `lea (A5)`, as for copies
+  above); into a pointer local held in an address register, `lea`
+  straight into it; another unit's object `move.l #sym` / `movea.l
+  #sym,An` (1.5).  Passed by value: `pea`, the push of the same address
+  by address (1.5).  Refused: an address inside another unit's object
+  or a constant (`lea abs.l` 6 sites, 0xE310AA; `move.l #sym+d` / `pea
+  abs.l` for arguments, 1.5: not settled), `addr` in other expressions
+  (a comparison, arithmetic) and into a register-held data local.
+  `dpc-sema` gives `addr` the type `univ_ptr` (p. 4-13).  Golden
+  `data/with`; exec test `withs`.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)
@@ -3251,6 +3319,59 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
   bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
   btst #14,D5; bne.s <head>` (a loop test `c1 or else ... or else c4`).
+- **Plain `and` and `or` (survey Verified; implemented, bead
+  domain-pascal-5aw.19).**  Ref "And", p. 4-19: with `and` "the system
+  may evaluate both boolean_1 and boolean_2 to test if the statement is
+  true.  Also, there is no guarantee that the system will evaluate the
+  two operands in the order in which they appear" ("Or", p. 4-135, the
+  same but "may have to evaluate both"; C.3.3: `and then`/`or else` "guarantee that Domain Pascal will
+  evaluate Boolean expressions in the order that you write them").  So
+  the compiler may evaluate both or short-circuit; the image evaluates
+  both: each operand's boolean is formed in a data register and the two
+  are combined with `and.b`/`or.b`, whose flags the branch reads.
+  `tools/boolsurvey.py andor` (133 `and.b`/`or.b` into a data register
+  with a boolean operand or a sign branch after; of their 266 operands):
+  formed by `s<cc>` 167 times, an earlier `and.b`/`or.b` (a chain) 32, a
+  boolean variable in memory as the source operand 20, `move.b` of a
+  variable from memory or a register 6 and with `not.b` after it 18, not
+  found within six instructions 22; the result read by `bpl` 39, `bmi` 31,
+  a store 11, a further `and.b`/`or.b` 6 (and most of the 33 "other"
+  readers are the next operand's compare), `move.b` into a register 5,
+  `not.b` then `bmi` once.  Sites: TTY_$I_ERR 0xE1BE48..0xE1BE60 `cmpi.l
+  #0x36000b,D0; seq D1b; ...; btst.l #0xa,D2; sne D3b; and.b D3b,D1b;
+  bmi.b` (the `if` of ../source's `tty/i_err.pas`); 0xE4BC2A..0xE4BC4A
+  `seq D0; ...; seq D1; or.b D1,D0; ...; seq D1; or.b D1,D0` (`a or b or
+  c`, left to right, the right operand's register reused); 0xE01A20
+  `move.b D2,D0; and.b D3,D0; bmi.s` (two register-held booleans);
+  0xE39ED8 `move.b D4,D6; and.b (20,A6),D6; bpl.w`; 0xE0F552 `sgt D0;
+  or.b (844,A5),D0; bpl.s`; 0xE1009C `move.b (26,A6),D3; not.b D3; and.b
+  D3,D0; bpl.w`; 0xE0AED6 `or.b D1,D0; not.b D0; bmi.w`; stored 0xE38630
+  `and.b D4,D1; move.b D1,(631,A3)`; into a register-held local 0xE072B6
+  `or.b D1,D0; move.b D0,D4`.  LOG_$INIT 0xE30168..0xE3017A (../source
+  `docs/pascal-translation-notes.md`, finding 17) has one inside an `or
+  else`.  Which jumping-code sites of the image are plain `and`/`or`
+  compiled as jumps cannot be told without the source; the TTY source
+  reads them as `and then`/`or else`.
+  **Implemented** (`dpc-ir` `Cond::And`/`Cond::Or`; `isel.rs`
+  `logic_value`, `bool_into_reg`, `bool_operand`): the left operand into
+  a register of its own (`s<cc>` of a comparison, `odd` or a constant
+  set member; `move.b` of a boolean variable, from memory or its
+  register; `not.b` after it for `not v`; a function's result in D0; a
+  nested plain `and`/`or`), then `and.b`/`or.b` of the right one (a
+  boolean variable as it is, in memory or in its register; anything
+  else formed in a register of its own); in a condition `bmi`/`bpl` on
+  its flags, `not (a or b)` with `not.b`; stored with `move.b Dn,<dst>`;
+  into a register-held local formed apart and moved.  A comparison's
+  `s<cc>` reuses only a register the comparison itself loaded or
+  computed (0xE4BC64..0xE4BC6E `clr.w D1; move.b (9,A6),D1; cmpi.w
+  #17,D1; seq D1`), never a register-held local's, a parameter's or a
+  held value's that it merely reads (`(n > 3) or b` ending a `repeat`
+  over a register-held `n`: a fresh register; exec test `bools`,
+  BOOLS_$LOOP).  Refused: `not` of a comparison as an operand (0xE13B8A forms `shi` and then `not.b`s it:
+  not explained), an `and then`/`or else` inside a plain `and`/`or`,
+  pushing the value as an argument (no site), a function's result on
+  the left with a call on the right.  Golden `control/and_or`; exec test
+  `bools`; dpc-ir test `plain_and_or_and_odd`.
 - **Implemented** (`crates/dpc-ir`, `Cond`, `StmtKind::If`/`Return`;
   `crates/dpc-m68k/src/isel.rs`, `Selector::if_`, `branch`, `compare`):
   all of the above that is Verified, with `not`, `and then`, `or else`.
@@ -3265,8 +3386,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   a constant on the left of a comparison; the refusals of "Two
   variables", "Mixed widths and signs" and "Records" above; unsigned
   ordering against 0; a test right
-  after the load of its register (above); `and`/`or` without
-  `then`/`else`; an `if` with an empty `then` part; a `return` at the
+  after the load of its register (above); an `if` with an empty `then`
+  part; a `return` at the
   end of a nested part that ends the routine (a `bra` to the next
   instruction, or nothing?); the shared pop (section 1.1).  Goldens
   `tests/golden/control/if_else.pas`, `control/compares.pas`;
@@ -3955,6 +4076,26 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
 - **`-x`, `~x`:** `neg.<s>`, `not.<s>` on the value in a register (`neg.w`
   ×97, many from the multiplications below; `not.w` ×13, `not.l` ×46,
   `not.b` ×43).
+- **`odd(x)` (ref "Odd", p. 4-128; register form Verified at two sites;
+  implemented, bead domain-pascal-5aw.19).**  `btst #0` on the integer
+  in a data register, the branch on Z: FIM_$BUILD_DF 0xE0A6F6 `btst
+  #0,D5; beq.s` and 0xE0A8EE `btst #0,D0; bne.s`, both register-held
+  longwords (`fim/build_df.c`: `(new_usp & 1) != 0`, `(fp & 1) != 0`).
+  No `andi #1` tests a value in compiled code.  `tools/boolsurvey.py
+  bit0` counts every `btst #0`: on a data register 25 `beq`, 4 `bne`, 6
+  `sne`, 1 `seq`; on memory at an odd displacement 42 `beq`, 27 `bne`,
+  13 `sne`, at an even one 12.  Member 0 of a set held in a register is
+  the same instruction (ref 3.9.3), so the image cannot tell `odd` from
+  `0 in s` there; the code is the same either way.  As a value (the
+  operand of a plain `and`/`or`, 7.1), `sne` into a new register when
+  the tested one holds a variable (AST_$GET_LOCATION 0xE0472E `btst
+  #0,D2; sne D0`; DISK_$ADD_QUE 0xE3C744 `btst #0,D2; sne D4`), into the
+  tested one when it holds a value computed for the test, as `in` does
+  (5.1, 0xE4A412).  **Not supported** (`isel.rs`, `odd_test`): `odd` of
+  a variable in memory (`btst #0` on its low byte, or the value loaded
+  first?  The memory sites above are explained by sets as well: not
+  settled), and storing `odd(x)` (like any comparison stored, 7.1).
+  Golden `control/and_or`; exec test `bools`.
 - **Shifts (ref pp. 4-109, 4-171, 4-29; Verified):** `lsl`/`lsr`/`asr` on
   the value in a register; a constant count above 8 is split into shifts
   of 8 and the rest (×1024 0xE02AA6 `lsl.l #8,D0; lsl.l #2,D0`, 96 sites;

@@ -177,6 +177,8 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `loops` | `for` over empty ranges, `downto`, negative bounds, `exit`, `next`, `while` |
 | `fill` | `for` clear loops (`clr (A0)+`, `dbf`) over another unit's arrays |
 | `shortcircuit` | `and then` / `or else` skip their right operand |
+| `bools` | plain `and` / `or` in conditions, under `not`, stored; `odd` of words and longwords, negative ones |
+| `withs` | `with` over a variable, a pointer changed in the body, an element (index changed), an element through a pointer across a call, nested and alias forms; `addr` stored and passed by value |
 | `nested` | uplevel reads and writes, siblings, recursion through the static link |
 | `results` | results with junk above them, booleans, A0 pointers, `f := g(...)`, a result held across a call |
 | `records` | 12-, 14- and 144-byte copies, through var parameters and pointers |

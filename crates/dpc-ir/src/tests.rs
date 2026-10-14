@@ -408,11 +408,11 @@ end;
 fn unsupported_constructs_have_positions() {
     // An ordinary statement.
     let e = errs(
-        "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  with x do a := 2;\nend;\n",
+        "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  if x.a = 2 then ;\nend;\n",
     );
     assert_eq!(
         e,
-        vec!["t.pas:5:3: error: this statement is not supported yet"]
+        vec!["t.pas:5:3: error: an `if` with an empty `then` part is not supported yet"]
     );
     // Module data in an overlay section.
     let e = errs("module m;\nvar (sect) v: integer;\n");
@@ -1711,7 +1711,6 @@ fn unsupported_conditions_and_loops() {
         assert_eq!(e.len(), 1, "{e:?}");
         e[0].clone()
     };
-    assert!(one("if b and b2 then w := 0;").contains("`and`/`or` in a condition"));
     assert!(one("if u < 70000 then w := 0;").ends_with(
         "comparing with a constant outside the other operand's type is not supported yet"
     ));
@@ -3870,4 +3869,150 @@ fn goto_targets() {
         e[0].contains("t.pas:14:5:") && e[0].contains("non-local `goto`"),
         "{e:?}"
     );
+}
+
+/// Plain `and`/`or` (ref "And", p. 4-18; "Or", p. 4-134): both operands
+/// kept, as [`Cond::And`]/[`Cond::Or`], in conditions and as values;
+/// `odd(x)` (ref p. 4-128) as [`Cond::Odd`].
+#[test]
+fn plain_and_or_and_odd() {
+    let b = ctl_body("if b and (w = 1) then w := 0;");
+    let StmtKind::If { cond, .. } = &b[0].kind else {
+        panic!("{b:?}")
+    };
+    assert!(
+        matches!(cond, Cond::And(x, y) if matches!(**x, Cond::Test(_)) && matches!(**y, Cond::Compare { .. })),
+        "{cond:?}"
+    );
+    let b = ctl_body("b := b or b2 or (l > 2);");
+    let StmtKind::Store {
+        value: Expr::Test(c),
+        ..
+    } = &b[0].kind
+    else {
+        panic!("{b:?}")
+    };
+    // Left to right: `(b or b2) or (l > 2)`.
+    assert!(
+        matches!(&**c, Cond::Or(x, _) if matches!(**x, Cond::Or(..))),
+        "{c:?}"
+    );
+    let b = ctl_body("if odd(l) then w := 0;");
+    let StmtKind::If { cond, .. } = &b[0].kind else {
+        panic!("{b:?}")
+    };
+    assert_eq!(cond, &Cond::Odd(sym("L", Scalar::signed(Width::Long))));
+    // A constant argument is folded by the checker.
+    let b = ctl_body("b := odd(3);");
+    assert!(
+        matches!(
+            &b[0].kind,
+            StmtKind::Store {
+                value: Expr::Const { value: -1, .. },
+                ..
+            }
+        ),
+        "{b:?}"
+    );
+}
+
+/// `with` (ref "With", pp. 4-211..4-214): a record whose address has no
+/// run-time part is named in place; one through a pointer the body may
+/// change, or an element, gets a temporary assigned once at the start
+/// ([`Function::with_temps`]), the constant displacements in each
+/// reference (codegen-patterns 5.2, "`with`"; NETLOG_$LOG_IT 0xE71BCA).
+#[test]
+fn with_statements() {
+    let src = |body: &str| {
+        format!(
+            "module w;\ntype r = record a: integer; b: integer32; end;\n  rp = ^r;\n\
+             var g: r; p: rp; arr: array[1..4] of r; i: integer;\n\
+             procedure t(q: rp; var v: r); options(val_param);\nvar lp: rp;\nbegin\n{body}\nend;\n"
+        )
+    };
+    let f = |body: &str| lower_src(&src(body)).unwrap().functions[0].clone();
+    // A variable: no code, the references as written.
+    let a = f("with g do begin a := 1; b := 2 end;");
+    assert!(a.with_temps.is_empty());
+    assert!(matches!(
+        &a.body[0].kind,
+        StmtKind::Store {
+            addr: Addr::Static(0),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &a.body[1].kind,
+        StmtKind::Store {
+            addr: Addr::Static(2),
+            ..
+        }
+    ));
+    // A `var` parameter, the alias form: through its slot.
+    let a = f("with v : x do x.b := 2;");
+    assert!(a.with_temps.is_empty());
+    assert_eq!(a.body.len(), 1);
+    // A pointer parameter the body does not change: as written.
+    let a = f("with q^ do begin a := 1; b := 2 end;");
+    assert!(a.with_temps.is_empty());
+    // A unit pointer: a temporary, its references at their displacements.
+    let a = f("with p^ do begin a := 1; b := 2 end;");
+    assert_eq!(a.with_temps, vec![crate::lower::WITH_TEMP_BASE]);
+    let tmp = Addr::Frame(crate::lower::WITH_TEMP_BASE);
+    assert!(
+        matches!(&a.body[0].kind, StmtKind::Store { addr, value: Expr::Load { addr: Addr::Static(_), .. } } if *addr == tmp)
+    );
+    let StmtKind::Store {
+        addr: Addr::Indirect { base, offset: 2 },
+        ..
+    } = &a.body[2].kind
+    else {
+        panic!("{:?}", a.body[2])
+    };
+    assert!(matches!(&**base, Expr::Load { addr, .. } if *addr == tmp));
+    // A local pointer the body assigns: a temporary, so the record stays
+    // the one of the start (p. 4-212, "changing p does not affect access").
+    let a = f("lp := p;\nwith lp^ do begin a := 1; lp := p; b := 2 end;");
+    assert_eq!(a.with_temps.len(), 1);
+    // An element: its address without the lower bound, which goes into
+    // the references.
+    let a = f("with arr[i] do b := 2;");
+    assert_eq!(a.with_temps.len(), 1);
+    let StmtKind::Store {
+        value:
+            Expr::AddrOf(Addr::Index {
+                offset: 0,
+                scale: 6,
+                ..
+            }),
+        ..
+    } = &a.body[0].kind
+    else {
+        panic!("{:?}", a.body[0])
+    };
+    assert!(matches!(
+        &a.body[1].kind,
+        StmtKind::Store {
+            addr: Addr::Indirect { offset: -4, .. },
+            ..
+        }
+    ));
+    // Nested: `with g, ...` resolves the second record in the first.
+    let a = lower_src(
+        "module w;\ntype s = record x: integer; end;\n  r = record a: integer; sub: s; end;\n\
+         var g: r;\nprocedure t;\nbegin\nwith g, sub do x := 3;\nend;\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        &a.functions[0].body[0].kind,
+        StmtKind::Store {
+            addr: Addr::Static(2),
+            ..
+        }
+    ));
+    // A record inside a `with` record reached at run time: through the
+    // same temporary.
+    let a = f("with p^ : x do with x do b := 2;");
+    assert_eq!(a.with_temps.len(), 1);
+    assert_eq!(a.body.len(), 2);
 }

@@ -2123,3 +2123,45 @@ end;
         "{err}"
     );
 }
+
+#[test]
+fn with_and_or_odd_refusals() {
+    // Bead domain-pascal-5aw.19: what stays refused around `with`, plain
+    // `and`/`or` and `odd` (codegen-patterns 5.2, 7.1, 8).
+    let cases = [
+        // `odd` of a variable in memory: `btst #0` on its low byte or the
+        // value loaded first, not settled.
+        ("if odd(g) then g := 1;", "`odd` of a variable in memory"),
+        // `odd` stored as a value, like a comparison.
+        ("b := odd(g + 1);", "storing a computed boolean"),
+        // An `and then` inside a plain `and`.
+        (
+            "if b and ((g = 1) and then (g = 2)) then g := 1;",
+            "this operand of a plain `and`/`or`",
+        ),
+        // A `goto` into a `with` statement (ref p. 4-95).
+        (
+            "goto 1; with r do begin 1: a := 1 end;",
+            "a `goto` into a `for`, `while`, `repeat`, `with` or `case`",
+        ),
+    ];
+    for (body, msg) in cases {
+        let src = format!(
+            "module m;
+type rt = record a: integer; end;
+var g: integer; b: boolean; r: rt;
+procedure a;
+label 1;
+begin
+  {body}
+end;
+"
+        );
+        let (code, err) = compile_with("with_refusals", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(msg) && err.contains("not supported yet"),
+            "{body}: {err}"
+        );
+    }
+}

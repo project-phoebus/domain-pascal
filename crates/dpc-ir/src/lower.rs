@@ -558,9 +558,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 expr(lhs, out);
                 expr(rhs, out);
             }
-            Cond::Test(e) => expr(e, out),
+            Cond::Test(e) | Cond::Odd(e) => expr(e, out),
             Cond::Not(x) => cond(x, out),
-            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
                 cond(a, out);
                 cond(b, out);
             }
@@ -714,9 +714,9 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
                 expr(lhs, f);
                 expr(rhs, f);
             }
-            Cond::Test(e) => expr(e, f),
+            Cond::Test(e) | Cond::Odd(e) => expr(e, f),
             Cond::Not(x) => cond(x, f),
-            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
                 cond(a, f);
                 cond(b, f);
             }
@@ -880,9 +880,9 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
                 expr(lhs, size, max);
                 expr(rhs, size, max);
             }
-            Cond::Test(e) => expr(e, size, max),
+            Cond::Test(e) | Cond::Odd(e) => expr(e, size, max),
             Cond::Not(x) => cond(x, size, max),
-            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
                 cond(a, size, max);
                 cond(b, size, max);
             }
@@ -977,14 +977,14 @@ fn lower_routine(
     };
     // A function whose result type was just reported is not lowered
     // further: its result assignment would only repeat that error.
-    let mut body = if r.result.is_some() && result.is_none() {
-        Vec::new()
+    let (mut body, with_temps) = if r.result.is_some() && result.is_none() {
+        (Vec::new(), Vec::new())
     } else {
         match lower_body(p, id, r, result, uplevel) {
             Ok(b) => b,
             Err(d) => {
                 errors.push(d);
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     };
@@ -1028,6 +1028,7 @@ fn lower_routine(
         }),
         uplevel_refs: uplevel.to_vec(),
         param_copies,
+        with_temps,
         body,
         span: r.span,
     })
@@ -1444,9 +1445,9 @@ fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
             expr_calls(lhs, out);
             expr_calls(rhs, out);
         }
-        Cond::Test(e) => expr_calls(e, out),
+        Cond::Test(e) | Cond::Odd(e) => expr_calls(e, out),
         Cond::Not(x) => cond_calls(x, out),
-        Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+        Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
             cond_calls(a, out);
             cond_calls(b, out);
         }
@@ -1552,9 +1553,11 @@ fn stmt_uses_static(s: &Stmt) -> bool {
 fn cond_uses_static(c: &Cond) -> bool {
     match c {
         Cond::Compare { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
-        Cond::Test(e) => expr_uses_static(e),
+        Cond::Test(e) | Cond::Odd(e) => expr_uses_static(e),
         Cond::Not(x) => cond_uses_static(x),
-        Cond::AndThen(a, b) | Cond::OrElse(a, b) => cond_uses_static(a) || cond_uses_static(b),
+        Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
+            cond_uses_static(a) || cond_uses_static(b)
+        }
         Cond::Block { lhs, rhs, .. } => addr_uses_static(lhs) || addr_uses_static(rhs),
     }
 }
@@ -1762,7 +1765,7 @@ fn lower_body(
     r: &Routine,
     result: Option<ResultSpec>,
     uplevel: &[(i32, u32)],
-) -> Res<Vec<Stmt>> {
+) -> Res<(Vec<Stmt>, Vec<i32>)> {
     let block = r.body.as_ref().expect("routine with a body");
     let labels = routine_labels(&block.stmts)?;
     let cx = Cx {
@@ -1771,8 +1774,11 @@ fn lower_body(
         r,
         result,
         labels,
+        uplevel,
+        with_temps: Default::default(),
     };
     let out = cx.seq(&block.stmts)?;
+    let with_temps = cx.with_temps.into_inner();
     check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
     if r.result.is_some() {
@@ -1790,7 +1796,7 @@ fn lower_body(
             ));
         }
     }
-    Ok(out)
+    Ok((out, with_temps))
 }
 
 /// No `for` loop of `body` has an index that a nested routine reaches
@@ -1931,9 +1937,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     self.expr(lhs)?;
                     self.expr(rhs)
                 }
-                Cond::Test(e) => self.expr(e),
+                Cond::Test(e) | Cond::Odd(e) => self.expr(e),
                 Cond::Not(x) => self.cond(x),
-                Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
                     self.cond(a)?;
                     self.cond(b)
                 }
@@ -2065,7 +2071,150 @@ struct Cx<'a> {
     /// The labels prefixing statements of the routine, by name, and
     /// their numbers ([`StmtKind::Label`]; [`routine_labels`]).
     labels: Vec<String>,
+    /// The objects of the routine's frame its nested routines reach
+    /// ([`Function::uplevel_refs`]).
+    uplevel: &'a [(i32, u32)],
+    /// The `with` temporaries allocated so far ([`Function::with_temps`]).
+    with_temps: std::cell::RefCell<Vec<i32>>,
 }
+
+thread_local! {
+    /// The records of the `with` statements whose bodies are being lowered
+    /// (ref "With", pp. 4-211..4-214): the [`dpc_sema::WithId`], the
+    /// record designator as written, and the address the body's
+    /// references to the record stand for ([`Cx::with_stmt`]).
+    static WITHS: std::cell::RefCell<Vec<(u32, SExpr, Addr)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The designator and address bound to `with` record `w`
+/// ([`WITHS`]).
+fn with_binding(w: dpc_sema::WithId) -> (SExpr, Addr) {
+    try_with_binding(w).expect("a with record is referenced inside its with statement")
+}
+
+/// [`with_binding`], or `None` outside the record's `with` statement.
+fn try_with_binding(w: dpc_sema::WithId) -> Option<(SExpr, Addr)> {
+    WITHS.with(|ws| {
+        let ws = ws.borrow();
+        ws.iter()
+            .rev()
+            .find(|(id, _, _)| *id == w.0)
+            .map(|(_, e, a)| (e.clone(), a.clone()))
+    })
+}
+
+/// Pops the bindings a `with` statement pushed ([`WITHS`]), however its
+/// lowering ends.
+struct WithScope(usize);
+
+impl Drop for WithScope {
+    fn drop(&mut self) {
+        WITHS.with(|ws| ws.borrow_mut().truncate(self.0));
+    }
+}
+
+/// The variable `e` designates part of, up to a dereference
+/// (`v`, `v.f`, `v[i]`; through a `with` record its designator's).
+fn root_var(e: &SExpr) -> Option<VarId> {
+    match &e.kind {
+        ExprKind::Var { var, uplevel: 0 } => Some(*var),
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => root_var(base),
+        // A `with` record is a record, never the pointer variable asked
+        // about; one not bound here (another statement's) has no root.
+        ExprKind::WithRecord(w) => try_with_binding(*w).and_then(|(e, _)| root_var(&e)),
+        _ => None,
+    }
+}
+
+/// Whether variable `v` may be written by `stmts` (`assign`: assigned, a
+/// `for` index) or has its address taken or passed in them (`addr(v)`, an
+/// argument passed by address).
+fn var_touched(stmts: &[SStmt], v: VarId, assign: bool) -> bool {
+    fn expr(e: &SExpr, v: VarId) -> bool {
+        match &e.kind {
+            ExprKind::Const
+            | ExprKind::Var { .. }
+            | ExprKind::Result { .. }
+            | ExprKind::WithRecord(_)
+            | ExprKind::RoutineAddr(_) => false,
+            ExprKind::Field { base, .. } => expr(base, v),
+            ExprKind::Index { base, index, .. } => expr(base, v) || expr(index, v),
+            ExprKind::Deref(x) | ExprKind::Unary { operand: x, .. } | ExprKind::Transfer(x) => {
+                expr(x, v)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => expr(lhs, v) || expr(rhs, v),
+            ExprKind::SetCons(items) => items
+                .iter()
+                .any(|(a, b)| expr(a, v) || b.as_ref().is_some_and(|b| expr(b, v))),
+            ExprKind::Call(c) => call(c, v),
+            ExprKind::Builtin { builtin, args } => {
+                (*builtin == Builtin::Addr && args.iter().any(|a| root_var(a) == Some(v)))
+                    || args.iter().any(|a| expr(a, v))
+            }
+        }
+    }
+    fn call(c: &SCall, v: VarId) -> bool {
+        c.args.iter().any(|a| {
+            (a.conv.passing == Passing::ByAddress && root_var(&a.expr) == Some(v))
+                || expr(&a.expr, v)
+        }) || matches!(&c.callee, SCallee::Pointer(x) if expr(x, v))
+    }
+    fn stmt(s: &SStmt, v: VarId, assign: bool) -> bool {
+        let all = |ss: &[SStmt]| ss.iter().any(|s| stmt(s, v, assign));
+        match &s.kind {
+            SStmtKind::Empty | SStmtKind::Goto(_) | SStmtKind::Exit | SStmtKind::Next => false,
+            SStmtKind::Return => false,
+            SStmtKind::Labeled { stmt: x, .. } => stmt(x, v, assign),
+            SStmtKind::Assign { target, value } => {
+                (assign && root_var(target) == Some(v)) || expr(target, v) || expr(value, v)
+            }
+            SStmtKind::Call(c) => call(c, v),
+            SStmtKind::Builtin { args, .. } => args.iter().any(|a| expr(a, v)),
+            SStmtKind::Compound(b) => all(&b.stmts),
+            SStmtKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                expr(cond, v)
+                    || stmt(then_branch, v, assign)
+                    || else_branch.as_ref().is_some_and(|e| stmt(e, v, assign))
+            }
+            SStmtKind::Case {
+                expr: x,
+                arms,
+                otherwise,
+            } => {
+                expr(x, v)
+                    || arms.iter().any(|a| stmt(&a.stmt, v, assign))
+                    || otherwise.as_ref().is_some_and(|o| all(o))
+            }
+            SStmtKind::While { cond, body } => expr(cond, v) || stmt(body, v, assign),
+            SStmtKind::Repeat { body, cond } => all(body) || expr(cond, v),
+            SStmtKind::For {
+                var,
+                from,
+                to,
+                body,
+                ..
+            } => {
+                (assign && root_var(var) == Some(v))
+                    || expr(from, v)
+                    || expr(to, v)
+                    || stmt(body, v, assign)
+            }
+            SStmtKind::With { items, body } => {
+                items.iter().any(|(_, r)| expr(r, v)) || stmt(body, v, assign)
+            }
+        }
+    }
+    stmts.iter().any(|s| stmt(s, v, assign))
+}
+
+/// The first offset of the `with` temporaries ([`Function::with_temps`]):
+/// far below any frame object, never addressed in memory.
+pub const WITH_TEMP_BASE: i32 = -0x4000_0000;
 
 /// A structured statement on the way from a routine's statement part to
 /// a statement inside it ([`routine_labels`]): the statement (its
@@ -2362,10 +2511,138 @@ impl Cx<'_> {
                     kind: StmtKind::Goto(self.label(name)),
                     span: s.span,
                 }),
+                SStmtKind::With { items, body } => self.with_stmt(items, body, &mut out)?,
                 _ => return Err(unsupported(s.span, "this statement is")),
             }
         }
         Ok(out)
+    }
+
+    /// `with r1, ..., rN do body` (ref "With", pp. 4-211..4-214; the
+    /// alias form `with r : id`, p. 4-212, C.3.18, binds the same way):
+    /// "Domain Pascal evaluates the expression v1 only once, and this
+    /// evaluated expression is implied within the body" (p. 4-212); "changing
+    /// p does not affect access to the record identified by the with
+    /// statement".  Each record is bound, in order, to the address the
+    /// body's references to it stand for (codegen-patterns 5.2, "`with`"):
+    ///
+    /// - a record whose address has no run-time part (a variable, a field
+    ///   or a constant-indexed element of one, a by-address parameter's
+    ///   object through its slot): that address, no code;
+    /// - a record through a pointer variable of this routine (a local or a
+    ///   by-value parameter) that the body never writes and whose address
+    ///   is never taken or passed in the routine (nor reached by a nested
+    ///   routine): the references go through the variable as written,
+    ///   which then holds the same pointer for the whole body;
+    /// - any other: the run-time part of the address, the pointer or the
+    ///   element's address without its constant displacement, computed
+    ///   once into a temporary held in an address register for the body
+    ///   ([`Function::with_temps`]), the constant displacements folded into
+    ///   each reference (NETLOG_$LOG_IT 0xE71BC6..0xE71BFC: `movea.l
+    ///   (116,A5),A0; lea (0,A0,D1.w),A0`, then eleven field stores
+    ///   `(-26,A0)` .. `(-2,A0)`, the 1-based array's `-26` in each).
+    fn with_stmt(
+        &self,
+        items: &[(dpc_sema::WithId, SExpr)],
+        body: &SStmt,
+        out: &mut Vec<Stmt>,
+    ) -> Res<()> {
+        let p = self.p;
+        let _scope = WithScope(WITHS.with(|ws| ws.borrow().len()));
+        for (wid, rec) in items {
+            let a = addr_of(p, rec)?;
+            let bound = if self.with_static(&a) || self.with_stable(rec, body) {
+                a
+            } else {
+                if volatile_access(p, rec).is_some() {
+                    return Err(unsupported(
+                        rec.span,
+                        "a `with` statement over a volatile record reached at run time is",
+                    ));
+                }
+                let (value, offset) = match a {
+                    Addr::Indirect { base, offset } => (*base, offset),
+                    Addr::Index {
+                        base,
+                        index,
+                        scale,
+                        offset,
+                    } => (
+                        Expr::AddrOf(Addr::Index {
+                            base,
+                            index,
+                            scale,
+                            offset: 0,
+                        }),
+                        offset,
+                    ),
+                    _ => return Err(unsupported(rec.span, "this `with` record is")),
+                };
+                let mut temps = self.with_temps.borrow_mut();
+                let tmp = WITH_TEMP_BASE - 8 * temps.len() as i32;
+                temps.push(tmp);
+                out.push(Stmt {
+                    kind: StmtKind::Store {
+                        addr: Addr::Frame(tmp),
+                        value,
+                    },
+                    span: rec.span,
+                });
+                Addr::Indirect {
+                    base: Box::new(Expr::Load {
+                        addr: Addr::Frame(tmp),
+                        ty: Scalar::POINTER,
+                    }),
+                    offset,
+                }
+            };
+            WITHS.with(|ws| ws.borrow_mut().push((wid.0, rec.clone(), bound)));
+        }
+        out.extend(self.seq(std::slice::from_ref(body))?);
+        Ok(())
+    }
+
+    /// Whether address `a` has no run-time part but a by-address
+    /// parameter's slot or an enclosing `with` statement's temporary (`with
+    /// p^ : x do with x.sub do`) ([`Self::with_stmt`]).
+    fn with_static(&self, a: &Addr) -> bool {
+        match a {
+            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Enclosing(_) => true,
+            Addr::Indirect { base, .. } => {
+                matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. }
+                if *o <= WITH_TEMP_BASE
+                    || self.r.params.iter().any(|prm| prm.passing() == Passing::ByAddress
+                        && prm.copy_offset.is_none() && prm.slot_offset == *o))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `rec` is `v^` (or a field of it) for a pointer variable `v`
+    /// of this routine's frame that `body` never writes, whose address the
+    /// routine never takes or passes, and which no nested routine reaches
+    /// ([`Self::with_stmt`]).
+    fn with_stable(&self, rec: &SExpr, body: &SStmt) -> bool {
+        let mut x = rec;
+        while let ExprKind::Field { base, .. } = &x.kind {
+            x = base;
+        }
+        let ExprKind::Deref(ptr) = &x.kind else {
+            return false;
+        };
+        let ExprKind::Var { var, uplevel: 0 } = ptr.kind else {
+            return false;
+        };
+        let Ok(Addr::Frame(o)) = var_addr(self.p, var, ptr.span) else {
+            return false;
+        };
+        let block = self.r.body.as_ref().expect("routine with a body");
+        !self
+            .uplevel
+            .iter()
+            .any(|&(u, n)| u < o + 4 && o < u + n as i32)
+            && !var_touched(std::slice::from_ref(body), var, true)
+            && !var_touched(&block.stmts, var, false)
     }
 
     /// A `for` statement (ref "For", pp. 4-88..4-90): the
@@ -2618,12 +2895,17 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
                         Box::new(cond_of(p, rhs)?),
                     ))
                 }
-                BinOp::And | BinOp::Or => {
-                    return Err(unsupported(
-                        e.span,
-                        "`and`/`or` in a condition (evaluation not catalogued; `and then`/`or \
-                         else` are supported) is",
-                    ))
+                // Both operands evaluated and combined (ref "And", p. 4-19:
+                // the system "may evaluate both"; "Or", p. 4-135: it "may
+                // have to evaluate both"; the image does, codegen-patterns
+                // 7.1, "Plain `and` and `or`").
+                BinOp::And | BinOp::Or if p.types.is_boolean(e.ty) => {
+                    let (a, b) = (Box::new(cond_of(p, lhs)?), Box::new(cond_of(p, rhs)?));
+                    return Ok(if *op == BinOp::And {
+                        Cond::And(a, b)
+                    } else {
+                        Cond::Or(a, b)
+                    });
                 }
                 BinOp::Eq => Rel::Eq,
                 BinOp::Ne => Rel::Ne,
@@ -2635,7 +2917,11 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
             };
             compare(p, e, rel, lhs, rhs)
         }
-        _ => Ok(Cond::Test(bool_value(p, e)?)),
+        _ => match bool_value(p, e)? {
+            // A condition the value is made of (`odd(x)`).
+            Expr::Test(c) => Ok(*c),
+            v => Ok(Cond::Test(v)),
+        },
     }
 }
 
@@ -3428,7 +3714,10 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
         });
     }
     match &e.kind {
-        ExprKind::Var { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => Ok(Expr::Load {
+        ExprKind::Var { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Deref(_)
+        | ExprKind::WithRecord(_) => Ok(Expr::Load {
             addr: access_of(p, e, true)?,
             ty: scalar_of(p, e)?,
         }),
@@ -3862,6 +4151,15 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
             "a run-time `max`, `min` or `in_range` (no image pattern known, codegen-patterns \
              10.1) is",
         )),
+        // "Odd", p. 4-128: "true if i is an odd integer": bit 0 of the
+        // integer (codegen-patterns 8, "odd").
+        Builtin::Odd => {
+            let x = value_of(p, &args[0])?;
+            if x.ty().width == Width::Byte {
+                return Err(unsupported(e.span, "`odd` of a byte value is"));
+            }
+            Ok(Expr::Test(Box::new(Cond::Odd(x))))
+        }
         _ => Err(unsupported(e.span, "this predeclared function is")),
     }
 }
@@ -4087,6 +4385,11 @@ fn volatile_access(p: &Program, e: &SExpr) -> Option<Access> {
             v |= bv;
             d |= bd;
         }
+        if let ExprKind::WithRecord(w) = &e.kind {
+            let (bv, bd) = inherited(p, &with_binding(*w).0);
+            v |= bv;
+            d |= bd;
+        }
         (v, d)
     }
     let (v, d) = inherited(p, e);
@@ -4120,6 +4423,7 @@ fn check_device_access(p: &Program, e: &SExpr, read: bool) -> Res<()> {
         }
         match &x.kind {
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => x = base,
+            ExprKind::WithRecord(w) => return check_device_access(p, &with_binding(*w).0, read),
             _ => return Ok(()),
         }
     }
@@ -4184,6 +4488,7 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
             // 3.15.6.7 pp. 3-75..3-76: `iptr: ^word_int32` "points to a
             // word aligned 4-byte integer"): even unless byte aligned.
             ExprKind::Deref(_) => (p.types.get(e.ty).align >= 2).then_some(true),
+            ExprKind::WithRecord(w) => even(p, &with_binding(*w).0),
             ExprKind::Var { var, .. } => match &p.var(*var).storage {
                 Storage::Static { offset, .. } => Some(offset % 2 == 0),
                 Storage::Frame { .. } | Storage::Param { .. } => Some(true),
@@ -4203,6 +4508,7 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
         }
         match &e.kind {
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => byte_aligned(p, base),
+            ExprKind::WithRecord(w) => byte_aligned(p, &with_binding(*w).0),
             _ => false,
         }
     }
@@ -4247,6 +4553,8 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
             }
         }
         ExprKind::Field { base, offset, .. } => Ok(addr_of(p, base)?.offset_by(*offset as i32)),
+        // The record of an enclosing `with` ([`Cx::with_stmt`]).
+        ExprKind::WithRecord(w) => Ok(with_binding(*w).1),
         ExprKind::Deref(ptr) => Ok(Addr::Indirect {
             base: Box::new(value_of(p, ptr)?),
             offset: 0,
