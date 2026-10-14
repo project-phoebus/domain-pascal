@@ -36,14 +36,19 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      the stage is run again, until the module compiles.  So each routine
      is charged with the diagnostics of the first stage that rejects it
      (dpc reports the first refusal of a statement, not every one).
-     Stubbed internal routines are named with `--module-routine'; dpc
-     takes that only for a module with one code section, so in a module
-     with more the callers of a stubbed internal routine are stubbed too.
+     Stubbed internal routines are named with `--module-routine', so their
+     callers still compile.  dpc takes that with a fragment origin: the
+     lowest routine address of the module, or, for a module with several
+     code sections (TTY: WIRED_PROC, OS_INIT_PROC, .TEXT), one origin per
+     section that still has a routine (`--fragment-origin=SECTION=0xADDR')
+     and each stubbed routine named with its section
+     (`--module-routine=SECTION:NAME=0xADDR'; SECTION from the map).
   4. Conformance (unless --no-conform): every top-level routine that
      compiled, with its nested routines, is compiled alone (all the other
      routines stubbed, `dpc --fragment-origin' and `--module-routine' for
-     the module routines it calls) and compared with the image by
-     tools/conform.py.  A routine's address and size come from its header
+     the module routines it calls, in any of the module's code sections:
+     `bsr' within its own, `jsr abs.l' from another) and compared with the
+     image by tools/conform.py.  A routine's address and size come from its header
      comment, "Original address: 0xADDR, N bytes" (../source's fragment
      format); nested routines lie between the previous top-level routine's
      end and the routine's address.
@@ -580,32 +585,66 @@ class Module:
         return drop_defines(s, deleted)
 
 
-def survey_stage(dpc, mod, check_only, stubbed_before, log):
+def code_section(addr, linkmap):
+    """The map's output code section at ADDR, or None (no map, or none)."""
+    if linkmap is None:
+        return None
+    import conform
+    try:
+        return conform.code_section_of(addr, linkmap)
+    except conform.SetupError:
+        return None
+
+
+def module_routine_opts(mod, stubbed, linkmap):
+    """dpc options naming MOD's STUBBED internal routines as module
+    routines, with the fragment origins dpc wants alongside (compile
+    only: no byte is compared).  A module with one code section: the
+    lowest routine address as the origin.  Several (by the map's output
+    section of each routine's header address): one origin per section that
+    still has a routine with a body, its lowest address, and each stubbed
+    routine with its section."""
+    opts = []
+    sects = {n: code_section(r.addr, linkmap) for n, (_i, r) in mod.routines.items()
+             if r.addr is not None}
+    several = len(set(sects.values()) - {None}) > 1
+    for n in stubbed:
+        _inc, r = mod.routines[n]
+        if r.internal and r.addr is not None:
+            sect = sects[n] + ':' if several and sects[n] else ''
+            opts.append('--module-routine=%s%s=0x%X' % (sect, n.upper(), r.addr))
+    if not opts:
+        return opts
+    if not several:
+        lo = min(r.addr for _i, r in mod.routines.values() if r.addr is not None)
+        return ['--fragment-origin', '0x%X' % lo] + opts
+    los = {}
+    for n, (_i, r) in mod.routines.items():
+        if n in stubbed or not r.has_body or sects.get(n) is None:
+            continue
+        los[sects[n]] = min(los.get(sects[n], r.addr), r.addr)
+    return ['--fragment-origin=%s=0x%X' % kv for kv in sorted(los.items())] + opts
+
+
+def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None):
     """Run one stage until the module passes it, stubbing routines.
     The internal routines stubbed so far (STUBBED_BEFORE and this stage's)
     are named to dpc with `--module-routine' at their header address, so
-    that their callers still compile.  -> ([(diag, routine)], stubbed
-    names, ok)."""
+    that their callers still compile (module_routine_opts; LINKMAP gives
+    each its code section).  -> ([(diag, routine)], stubbed names, ok)."""
     entries, stubbed = [], []
     fragment_ok = True
     for _round in range(50):
-        opts = []
-        for n in (list(stubbed_before) + stubbed) if fragment_ok else ():
-            _inc, r = mod.routines[n]
-            if r.internal and r.addr is not None:
-                opts.append('--module-routine=%s=0x%X' % (n.upper(), r.addr))
-        if opts:
-            # dpc wants a fragment origin with --module-routine; the
-            # lowest routine address of the module serves (compile only)
-            lo = min(r.addr for _i, r in mod.routines.values() if r.addr is not None)
-            opts[:0] = ['--fragment-origin', '0x%X' % lo]
+        opts = (module_routine_opts(mod, list(stubbed_before) + stubbed, linkmap)
+                if fragment_ok else [])
         rc, err = run_dpc(dpc, mod.tree, mod.path, check_only=check_only,
                           out=None if check_only else os.devnull, opts=opts)
         log.write(err)
-        if rc and opts and 'a fragment may have only one' in err:
-            # dpc takes --module-routine only with --fragment-origin, and
-            # that only for one code section: the stubbed internal
-            # routines' callers get charged with their calls instead
+        if rc and opts and re.search(r'^dpc: error: --(fragment-origin|module-routine)', err,
+                                     re.M):
+            # dpc refused the fragment options (a section's origin cannot
+            # be given, say): the stubbed internal routines' callers get
+            # charged with their calls instead
             print('srcsurvey: %s: %s' % (mod.path, err.strip().splitlines()[-1]))
             print('srcsurvey: %s: so no --module-routine: the callers of stubbed internal '
                   'routines are stubbed too' % mod.path)
@@ -684,11 +723,16 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None):
             body = fh.read()[r.start:r.end]
         called = set(re.findall(r'[A-Za-z_$][\w$]*', strip_comments(body).lower()))
         items = []
+        # the module: the code segments of the routine's segment's name,
+        # in any output section (conform.check_in_module)
+        mine = linkmap.segment_containing(r.addr)
         for other, (_i, o) in table.items():
             if other == name or other not in called or o.addr is None:
                 continue
             sym = linkmap.lookup(other)
-            if not (linkmap.segment_containing(o.addr) is linkmap.segment_containing(r.addr)):
+            seg = linkmap.segment_containing(o.addr)
+            if seg is not mine and (seg is None or mine is None or seg.is_section
+                                    or seg.kind != 'I' or seg.name != mine.name):
                 continue
             items.append(sym.name if sym else '%s=0x%X' % (other, o.addr))
         mopts, local = conform.module_routine_args(
@@ -750,8 +794,10 @@ def cmd_run(a):
                 print('srcsurvey: workaround %s: %s (%d place(s))' % (name, what, n))
             ok = True
             all_stubbed = []
+            import sau2map
+            linkmap = sau2map.load()
             for stage, co in (('check', True), ('codegen', False)):
-                entries, stubbed, ok = survey_stage(a.dpc, mod, co, all_stubbed, log)
+                entries, stubbed, ok = survey_stage(a.dpc, mod, co, all_stubbed, log, linkmap)
                 all_stubbed += stubbed
                 report('%s: %s, routines stubbed: %s' % (path, stage, ', '.join(stubbed) or 'none'),
                        summarise(entries), verbose=a.verbose)
@@ -762,8 +808,6 @@ def cmd_run(a):
         print('srcsurvey: log %s' % os.path.relpath(logp, ROOT))
         if not ok or a.no_conform:
             continue
-        import sau2map
-        linkmap = sau2map.load()
         compiled = [n for n, (_i, r) in Module(tree, path).routines.items() if r.has_body]
         print('== %s: conformance of the %d routine(s) that compile' % (path, len(compiled)))
         cwork = os.path.join(work, 'conform')

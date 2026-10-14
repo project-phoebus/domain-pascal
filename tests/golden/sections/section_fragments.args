@@ -1,0 +1,1 @@
+--fragment-origin=wired_proc=0x1002 --fragment-origin=.text=0x20000 --fragment-ends-module=.text --module-routine=WIRED_PROC:SFRAG_$LOCK=0xFF0 --module-routine=.TEXT:SFRAG_$GET_DESC=0x1F000 --module-routine=OS_INIT_PROC:SFRAG_$INIT=0x8000

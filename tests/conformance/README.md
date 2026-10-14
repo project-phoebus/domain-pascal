@@ -102,7 +102,11 @@ reconstructed from ../source's TTY Pascal: `tty_k_flags.pas`
 `move.l A0,D0` after TTY_$I_GET_DESC, `movea.l D0,A0` where first
 dereferenced, before an `if`'s branch when both parts dereference it)
 and `tty_k_session_id.pas` (TTY_$K_SET_SESSION_ID,
-TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).
+TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).  A fragment of two code
+sections (bead domain-pascal-xdh.6; "Fragments of several code sections"
+below): `tty_sections.pas` (the WIRED_PROC module-local 0xE1B3B4,
+`tty/i_xmit_char.c`, with its `bsr.w` to the module-local 0xE1B00A
+outside the unit, and the two .TEXT routines of `tty_k_session_id.pas`).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
@@ -175,7 +179,14 @@ manifest token
 
 names such routines; `tools/conform.py` looks each up in the map (it
 must lie in the unit's map module and outside the unit) and passes `dpc
---module-routine=NAME=0xADDR`.  dpc then calls it with `bsr`, sized from
+--module-routine=NAME=0xADDR`.  The module is every code segment of the
+map with the unit's segment's name (TTY in WIRED_PROC, OS_INIT_PROC and
+.TEXT); a routine in another segment of it than the unit's, or any
+routine of a unit of several code sections, is passed with its map
+section, `--module-routine=SECTION:NAME=0xADDR`, and dpc calls it with
+`bsr` from the unit's code in that section and with `jsr abs.l` from any
+other (codegen-patterns 1.6, 11: TTY_$K_RESET 0xE6730E `jsr` to the
+WIRED_PROC module-local 0xE1AED0).  dpc then calls it with `bsr`, sized from
 the address as for a routine of the unit, and the reference is resolved
 to the map name at link time like any other (DISK_$UNASSIGN_ALL 0xE6BE34
 `bsr.w DISK_$UNASSIGN`, `disk_unassign_all.pas`).
@@ -327,8 +338,8 @@ of a module, and may start at 2 mod 4 (PROC1_$TST_LOCK 0xE148CA).  So:
   and leaves them out of every other comparison.  Every other check (bytes, relocations, globals at their map
   addresses, literal addresses) works on absolute addresses and is
   unchanged.  `.s` files without the symbol are linked at LO as before.
-- A fragment may have only one code section (dpc rejects more): where a
-  second one would start in the module is not known.
+- A unit of several code sections is a fragment of each ("Fragments of
+  several code sections" below).
 
 ## Named sections
 
@@ -345,13 +356,48 @@ addresses, literal addresses; the address must start a code segment of
 the map and the section be exactly its length), and prints `OK section
 NAME 0xADDR LEN`.
 The unit's routine specs are in the code section without
-`--section-addr`.  Each code section is a whole map segment (a fragment
-has one code section).  `scsi.pas` is the whole SCSI_ module:
+`--section-addr`.  Each such code section is a whole map segment (for
+fragments of several code sections see below).  `scsi.pas` is the whole SCSI_ module:
 SCSI_$CINIT in OS_INIT_PROC (0xE34F04), SCSI_$FREE_ASID in
 SCSI_WIRED_PROC (0xE88800), SCSI_$PRESENT in SCSI_WIRED_DATA (0xE88804).
 `proc1_get_loadav.pas` and `smd_busy_wait.pas` name their real sections
 (WIRED_PROC, WIRED_DATA); their bytes are those of the default
 sections.
+
+## Fragments of several code sections
+
+A module's code may lie in several map segments, one per output section
+(TTY: WIRED_PROC 0xE1AED0, OS_INIT_PROC 0xE3324C, .TEXT 0xE671DC; one
+Pascal code section each, codegen-patterns 11).  A unit's routine specs
+may come from several of them: `tools/conform.py` splits them by map
+segment into runs, each contiguous, all of one module (segments of one
+name) and each in its own output section.  Such a `.pas` unit is
+compiled with one origin per run,
+
+    dpc --fragment-origin=SECTION=0xLO [--fragment-ends-module=SECTION] ...
+
+SECTION being the map's output section, which dpc matches with the
+Pascal section name in any case (`.TEXT` is the default `.text`), and
+`--fragment-ends-module=SECTION` where the run ends its segment.  dpc
+then needs an origin for every code section of the unit, pads each
+section to its origin mod 4, pads the end only of the sections that end
+their segments, and records each origin in the absolute local symbol
+`__dpc_fragment_origin<output section>` (`__dpc_fragment_origin.text`,
+`__dpc_fragment_origin.text.TTY.WIRED_PROC`).  The harness links each
+code section at its origin (less the pad) and compares it with its run,
+bytes and relocations as for a one-section fragment; a code section
+with no run starting at its origin, two code sections at one origin, a
+run with no code section, or a code section whose name (the last
+component of `.text` / `.text.<UNIT>.<SECTION>`) is not its run's map
+output section is a setup error, and so is a `--section-addr` for such a
+unit's code section.  `enclosing=` is for one-run units only.  `tty_sections.pas`
+is such a unit.
+
+`tools/srcsurvey.py` uses the same options to compile each routine of
+`../source`'s TTY Pascal in its module context: the stubbed internal
+routines it calls, in any of the module's sections, are named with
+`--module-routine=SECTION:NAME=0xADDR` instead of stubbing their
+callers.
 
 ## Loop alignment on and off
 

@@ -148,6 +148,11 @@ tests/conformance/cal_shutdown.pas           CAL_$SHUTDOWN  --section-addr .bss.
 # dereference it.  Reconstructed from ../source's TTY Pascal.
 tests/conformance/tty_k_flags.pas            TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS
 tests/conformance/tty_k_session_id.pas       TTY_$K_SET_SESSION_ID TTY_$K_INQ_SESSION_ID  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID
+# A fragment of two code sections of one module (bead domain-pascal-xdh.6;
+# README.md, "Fragments of several code sections"): routines in TTY's
+# WIRED_PROC and .TEXT segments, each section linked at its own origin; a
+# `bsr.w' to a module-local routine of WIRED_PROC outside the unit.
+tests/conformance/tty_sections.pas           0xE1B3B4:1A TTY_$K_SET_SESSION_ID TTY_$K_INQ_SESSION_ID  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID  module-routines=TTY_$I_PUT_CHARS=0xE1B00A
 # Calls through routine pointers (codegen-patterns 1.6; bead
 # domain-pascal-5aw.8): a `val_param' pointer type, the argument pushed by
 # value, then `movea.l (A5),A0; jsr (A0)', not popped before `unlk'.

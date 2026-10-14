@@ -22,7 +22,11 @@ switch SEG' shows a segment's modes), or `module-routines=NAME,...' (.pas
 fragments only, at most once): routines of the unit's map module outside
 the unit, which the unit declares `extern' and the original reached with
 `bsr'; each is forwarded as `--module-routine=NAME=0xADDR' with its map
-address (codegen-patterns 1.6, 7.4: DISK_$UNASSIGN_ALL 0xE6BE34).  An
+address (codegen-patterns 1.6, 7.4: DISK_$UNASSIGN_ALL 0xE6BE34), or as
+`--module-routine=SECTION:NAME=0xADDR' with its map output section when
+it lies in another code segment of the module (one of the same name in
+another output section; dpc then calls it with `jsr abs.l' from other
+sections) or the unit has routines in several.  An
 item `NAME=0xADDR' names a module-local routine the map does not name
 (test-only, bead domain-pascal-3h9): NAME is the symbol dpc gives the
 routine the unit declares `internal; extern' (its Pascal name upper-cased,
@@ -45,7 +49,10 @@ segment, whichever comes first.  `--len LEN' overrides the length when
 exactly one routine is given.
 
 The routines of one unit must be contiguous in the image (e.g. a
-module-local worker, then its caller).  All code sections of the object
+module-local worker, then its caller), or, for a module with code in
+several map segments (one per output section: TTY in WIRED_PROC,
+OS_INIT_PROC and .TEXT), contiguous within each segment ("Fragments of
+several code sections" below).  All code sections of the object
 without a `--section-addr' are concatenated in object order and linked at
 the lowest routine address.  A code section with `--section-addr SEC=0xADDR'
 is another code section of the unit's module (a Pascal code section of its
@@ -53,7 +60,7 @@ own, dpc's `.text.<UNIT>.<SECTION>', a segment of another output section in
 the map: SCSI_ in OS_INIT_PROC and SCSI_WIRED_PROC): it is linked at ADDR and
 compared whole, bytes and relocations, ADDR must start a code segment of the
 map and the section must be exactly as long, and its global symbols are
-checked like the unit's.  Such a unit cannot be a fragment.
+checked like the unit's.  Such a unit cannot be a fragment at 2 mod 4.
 
 Fragments.  The compiler's 4-byte alignment (loop heads, module-end
 padding with 0x2048; codegen-patterns 7) is relative to the module's
@@ -69,6 +76,16 @@ left out of every other comparison.  The manifest passes the option for
 every .pas unit except one that is a whole map module (starts at its
 start, ends at its end), adding --fragment-ends-module when the unit ends
 its module; a unit that runs past the end of its module is refused.
+
+Fragments of several code sections.  A unit whose routines lie in several
+map segments of one module is compiled as a fragment of each:
+`--fragment-origin=SECTION=0xLO' per run of routines (SECTION the map's
+output section, LO the run's first address) and
+`--fragment-ends-module=SECTION' for a run that ends its segment.  dpc
+records each origin in `__dpc_fragment_origin<output section>'; each such
+code section is linked at its origin less its pad and compared with the
+run that starts there (tests/conformance/README.md, "Fragments of several
+code sections").
 
 Steps:
   1. m68k-elf-as -m68010.
@@ -134,6 +151,12 @@ TOOLS = (AS, LD, OBJDUMP, OBJCOPY)
 SCRATCH = os.path.join(REPO, 'tmp', 'conform')
 UNPLACED_BASE = 0x40000000      # non-code sections without --section-addr
 CODE_OUT = '.conform_code'
+
+
+def code_out(k):
+    """The output section of the k-th run of code (CODE_OUT for the first)."""
+    return CODE_OUT if k == 0 else '%s%d' % (CODE_OUT, k)
+
 FRAGMENT_ORIGIN = '__dpc_fragment_origin'   # dpc_m68k::emit::FRAGMENT_ORIGIN_SYMBOL
 
 RELOC_SIZE = {'R_68K_32': 4, 'R_68K_16': 2, 'R_68K_8': 1,
@@ -324,7 +347,9 @@ def side_by_side(ours, image, context=4):
 # ---- the check -----------------------------------------------------------
 
 def unit_routines(specs, linkmap, length=None):
-    """The routines of a unit, sorted and checked to be contiguous."""
+    """The routines of a unit, sorted and checked to be contiguous within
+    each map segment (a unit of a module with several code sections has
+    one run of routines per segment, see unit_groups)."""
     routines = sorted((parse_spec(s, linkmap) for s in specs), key=lambda r: r.addr)
     if not routines:
         raise SetupError('no routine given')
@@ -333,10 +358,51 @@ def unit_routines(specs, linkmap, length=None):
             raise SetupError('--len needs exactly one routine')
         routines[0].length = length
     for r0, r1 in zip(routines, routines[1:]):
-        if r0.end != r1.addr:
+        if r0.end != r1.addr and same_segment(r0.addr, r1.addr, linkmap):
             raise SetupError('routines are not contiguous: %s ends at 0x%X, %s starts at 0x%X'
                              % (r0.label, r0.end, r1.label, r1.addr))
     return routines
+
+
+def same_segment(a, b, linkmap):
+    """Do addresses `a' and `b' lie in the same map segment?"""
+    return linkmap.segment_containing(a) is linkmap.segment_containing(b)
+
+
+def unit_groups(routines, linkmap):
+    """The routines of a unit (sorted, from unit_routines) split by map
+    segment: one contiguous run per code section of the unit.  A unit of
+    several segments is one module (README.md, "Fragments of several code
+    sections"): its segments have one name, each in its own output
+    section."""
+    groups = []
+    for r in routines:
+        if groups and same_segment(groups[-1][-1].addr, r.addr, linkmap):
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+    if len(groups) > 1:
+        segs = [linkmap.segment_containing(g[0].addr) for g in groups]
+        if any(sg is None or sg.is_section for sg in segs):
+            raise SetupError('routines in several places, not all in map segments')
+        if len({sg.name for sg in segs}) > 1:
+            raise SetupError('routines of several modules (%s); one unit is one module'
+                             % ', '.join(sorted({sg.name for sg in segs})))
+        names = [code_section_of(sg.addr, linkmap) for sg in segs]
+        if len(set(names)) != len(names):
+            raise SetupError('two runs of routines in one output section (%s)'
+                             % ', '.join(names))
+    return groups
+
+
+def code_section_of(addr, linkmap):
+    """The name of the map's output code section holding `addr' (WIRED_PROC,
+    OS_INIT_PROC, .TEXT): dpc's Pascal code section of a routine there
+    (matched case-insensitively; `.text' is the default)."""
+    for sec in linkmap.sections:
+        if sec.kind == 'I' and sec.size and sec.contains(addr):
+            return sec.name
+    raise SetupError('0x%X is in no code section of the map' % addr)
 
 
 def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
@@ -351,8 +417,12 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     belong to, whose code follows them in `src' and in the image and is
     not compared (`enclosing=NAME'; README.md, "Nested routines")."""
     routines = unit_routines(specs, linkmap, length)
-    lo, hi = routines[0].addr, routines[-1].end
+    groups = unit_groups(routines, linkmap)
+    lo, hi = routines[0].addr, groups[0][-1].end
     if enclosing is not None:
+        if len(groups) > 1:
+            raise SetupError('enclosing=%s: the unit has routines in several code sections'
+                             % enclosing)
         named = linkmap.names_at(hi)
         if named and enclosing not in named:
             raise SetupError('enclosing=%s: the map has %s at the end of the unit, 0x%X'
@@ -366,17 +436,6 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     work = work or scratch_dir(src)
     obj = os.path.join(work, 'unit.o')
     run([AS, '-m68010', '-o', obj, os.path.abspath(src)])
-
-    # a fragment compiled with dpc --fragment-origin: `pad' leading bytes
-    # put section-relative alignment on absolute boundaries; they are linked
-    # below lo and not compared
-    origin = [v for n, v, sec, _ in symbols_of(obj) if n == FRAGMENT_ORIGIN and sec == '*ABS*']
-    pad = 0
-    if origin:
-        if origin[0] != lo:
-            raise SetupError('%s was compiled as a fragment at 0x%X, but the unit starts at 0x%X'
-                             % (src, origin[0], lo))
-        pad = lo % 4
 
     # 2. place sections, resolve externals from the map
     secs = sections_of(obj)
@@ -396,14 +455,79 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     if not code:
         raise SetupError('%s: every code section has a --section-addr; the unit\'s '
                          'routines must be in one without' % src)
-    if extra and pad:
-        raise SetupError('%s: a fragment has one code section (dpc --fragment-origin)' % src)
+
+    # a fragment compiled with dpc --fragment-origin: `pad' leading bytes
+    # put section-relative alignment on absolute boundaries; they are
+    # linked below the fragment's first byte and not compared.  One code
+    # section: the symbol __dpc_fragment_origin.  Several (dpc
+    # --fragment-origin=SECTION=0xADDR): __dpc_fragment_origin<output
+    # section> for each, and each code section is the fragment of one run
+    # of the unit's routines (unit_groups), the one starting there.
+    syms = symbols_of(obj)
+    origin = [v for n, v, sec, _ in syms if n == FRAGMENT_ORIGIN and sec == '*ABS*']
+    per_section = {n[len(FRAGMENT_ORIGIN):]: v for n, v, sec, _ in syms
+                   if n.startswith(FRAGMENT_ORIGIN + '.') and sec == '*ABS*'}
+    # regions: [(code sections, lo, hi, pad)], one per run of routines
+    regions = []
+    if per_section:
+        if extra:
+            raise SetupError('%s: a fragment\'s code sections are placed at their origins, '
+                             'not with --section-addr (%s)' % (src, ', '.join(extra)))
+        for s in code:
+            if s not in per_section:
+                raise SetupError('%s: code section %s has no fragment origin' % (src, s))
+        for s, v in sorted(per_section.items(), key=lambda kv: kv[1]):
+            if s not in code:
+                raise SetupError('%s: fragment origin for %s, which has no code' % (src, s))
+            g = [g for g in groups if g[0].addr == v]
+            if not g:
+                raise SetupError('%s: code section %s was compiled as a fragment at 0x%X, but '
+                                 'no run of the unit\'s routines starts there' % (src, s, v))
+            # the run's map output section must be the code section's
+            # (dpc's `.text' or `.text.<UNIT>.<SECTION>'): a routine
+            # compiled into another section would match here but be
+            # linked into the wrong output section in ../source
+            want = code_section_of(v, linkmap)
+            if s.rsplit('.', 1)[-1].upper() != want.lstrip('.').upper():
+                raise SetupError('%s: code section %s holds the routines at 0x%X, which the '
+                                 'map has in output section %s' % (src, s, v, want))
+            regions.append(([s], v, g[0][-1].end, v % 4))
+        # each run in exactly one code section (two sections with one
+        # origin would leave another run uncompared)
+        starts = [r[1] for r in regions]
+        twice = sorted({a for a in starts if starts.count(a) > 1})
+        if twice:
+            raise SetupError('%s: several code sections compiled as fragments at %s'
+                             % (src, ', '.join('0x%X' % a for a in twice)))
+        if len(regions) != len(groups):
+            missing = [g[0].label for g in groups if g[0].addr not in per_section.values()]
+            raise SetupError('%s: no code section for the unit\'s routines from %s'
+                             % (src, ', '.join(missing)))
+    else:
+        if len(groups) > 1:
+            raise SetupError('%s: the unit\'s routines are in %d map segments, but it was not '
+                             'compiled as a fragment of each (dpc --fragment-origin='
+                             'SECTION=0xADDR)' % (src, len(groups)))
+        pad = 0
+        if origin:
+            if origin[0] != lo:
+                raise SetupError('%s was compiled as a fragment at 0x%X, but the unit starts '
+                                 'at 0x%X' % (src, origin[0], lo))
+            pad = lo % 4
+        if extra and pad:
+            raise SetupError('%s: a fragment has one code section (dpc --fragment-origin)'
+                             % src)
+        regions.append((code, lo, hi, pad))
+    code = [s for r in regions for s in r[0]]
+
     markers = {}                # input section -> marker symbol
-    script = ['SECTIONS {', '  %s 0x%X : SUBALIGN(2) {' % (CODE_OUT, lo - pad)]
-    for i, s in enumerate(code):
-        markers[s] = '__conform_%d' % i
-        script.append('    %s = .; unit.o(%s)' % (markers[s], s))
-    script.append('  }')
+    script = ['SECTIONS {']
+    for k, (rsecs, rlo, _, rpad) in enumerate(regions):
+        script.append('  %s 0x%X : SUBALIGN(2) {' % (code_out(k), rlo - rpad))
+        for s in rsecs:
+            markers[s] = '__conform_%d' % len(markers)
+            script.append('    %s = .; unit.o(%s)' % (markers[s], s))
+        script.append('  }')
     for i, s in enumerate(extra):
         markers[s] = '__conform_c%d' % i
         script.append('  .conform_c%d 0x%X : SUBALIGN(2) { %s = .; unit.o(%s) }'
@@ -419,7 +543,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     with open(os.path.join(work, 'unit.ld'), 'w') as f:
         f.write('\n'.join(script) + '\n')
 
-    undefined = sorted(n for n, _, sec, _ in symbols_of(obj) if sec == '*UND*')
+    undefined = sorted(n for n, _, sec, _ in syms if sec == '*UND*')
     local_syms = dict(local_syms or {})
     defsyms, unknown = [], []
     for n in undefined:
@@ -451,45 +575,50 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if fl[5] != 'd':
             linked.setdefault(n, v)
     base = {s: linked[m] for s, m in markers.items() if m in linked}
-    if base.get(code[0]) != lo - pad:
-        raise SetupError('first code section linked at 0x%X, not 0x%X'
-                         % (base.get(code[0], -1), lo - pad))
+    for rsecs, rlo, _, rpad in regions:
+        if base.get(rsecs[0]) != rlo - rpad:
+            raise SetupError('code section %s linked at 0x%X, not 0x%X'
+                             % (rsecs[0], base.get(rsecs[0], -1), rlo - rpad))
 
-    binpath = os.path.join(work, 'code.bin')
-    run([OBJCOPY, '-O', 'binary', '-j', CODE_OUT, elf, binpath])
-    with open(binpath, 'rb') as f:
-        ours = f.read()
-    # code.bin keeps the fragment pad; dpc fills it with .space, so anything
-    # else there is code that would otherwise escape the comparison
-    ours, padbytes = ours[pad:], ours[:pad]
-
-    # 3. bytes
+    # 3. bytes, region by region
     problems = []
-    # the enclosing routine of nested routines: compiled after them, at
-    # the end of the unit, and left out of every comparison
-    if enclosing is not None:
-        at = linked.get(enclosing)
-        if at is None:
-            raise SetupError('enclosing=%s: no such symbol in %s' % (enclosing, src))
-        if at != hi:
-            problems.append('enclosing routine %s linked at 0x%X, not at the end of the '
-                            'unit, 0x%X' % (enclosing, at, hi))
-        ours = ours[:hi - lo]
-    if padbytes.strip(b'\0'):
-        problems.append('fragment pad 0x%X..0x%X is not zero: %s'
-                        % (lo - pad, lo, padbytes.hex()))
-    img = read_image(lo, hi - lo)
-    if len(ours) != len(img):
-        problems.append('size: ours 0x%X bytes, image range 0x%X..0x%X is 0x%X'
-                        % (len(ours), lo, hi, len(img)))
-    for i, (x, y) in enumerate(zip(ours, img)):
-        if x != y:
-            problems.append('bytes differ first at 0x%X (+0x%X): ours %02x, image %02x'
-                            % (lo + i, i, x, y))
-            break
+    region_bytes = []           # [(lo, hi, ours, image)]
+    for k, (rsecs, rlo, rhi, rpad) in enumerate(regions):
+        binpath = os.path.join(work, 'code.bin' if k == 0 else 'code%d.bin' % k)
+        run([OBJCOPY, '-O', 'binary', '-j', code_out(k), elf, binpath])
+        with open(binpath, 'rb') as f:
+            ours = f.read()
+        # code.bin keeps the fragment pad; dpc fills it with .space, so
+        # anything else there is code that would otherwise escape the
+        # comparison
+        ours, padbytes = ours[rpad:], ours[:rpad]
+        # the enclosing routine of nested routines: compiled after them, at
+        # the end of the unit, and left out of every comparison
+        if enclosing is not None:
+            at = linked.get(enclosing)
+            if at is None:
+                raise SetupError('enclosing=%s: no such symbol in %s' % (enclosing, src))
+            if at != rhi:
+                problems.append('enclosing routine %s linked at 0x%X, not at the end of the '
+                                'unit, 0x%X' % (enclosing, at, rhi))
+            ours = ours[:rhi - rlo]
+        if padbytes.strip(b'\0'):
+            problems.append('fragment pad 0x%X..0x%X is not zero: %s'
+                            % (rlo - rpad, rlo, padbytes.hex()))
+        img = read_image(rlo, rhi - rlo)
+        if len(ours) != len(img):
+            problems.append('size: ours 0x%X bytes, image range 0x%X..0x%X is 0x%X'
+                            % (len(ours), rlo, rhi, len(img)))
+        for i, (x, y) in enumerate(zip(ours, img)):
+            if x != y:
+                problems.append('bytes differ first at 0x%X (+0x%X): ours %02x, image %02x'
+                                % (rlo + i, i, x, y))
+                break
+        region_bytes.append((rlo, rhi, ours, img))
 
     # the other code sections: each compared whole at its --section-addr
-    regions = {sec: (lo, hi, img) for sec in code}
+    regions_of = {sec: (rlo, rhi, img) for (rsecs, _, _, _), (rlo, rhi, _, img)
+                  in zip(regions, region_bytes) for sec in rsecs}
     extra_bytes = {}
     for i, sec in enumerate(extra):
         cpath = os.path.join(work, 'code_c%d.bin' % i)
@@ -500,7 +629,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if a < IMAGE_LO or a + len(data) > IMAGE_HI:
             raise SetupError('--section-addr %s=0x%X: outside the image' % (sec, a))
         cimg = read_image(a, len(data))
-        regions[sec] = (a, a + len(data), cimg)
+        regions_of[sec] = (a, a + len(data), cimg)
         extra_bytes[sec] = data
         # compared whole: the section must be exactly one map segment, or
         # a section shorter than its segment would pass on a prefix
@@ -521,7 +650,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     relocs = relocs_of(obj)
     nrel = 0
     for sec in code + extra:
-        rlo, rhi, rimg = regions[sec]
+        rlo, rhi, rimg = regions_of[sec]
         for off, typ, sym, add in relocs.get(sec, []):
             p = base[sec] + off
             if enclosing is not None and p >= hi:
@@ -562,8 +691,8 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     # map address (>= 0x10000) means a reference was hard-coded instead of
     # named; it would match here but not survive a relink in ../source
     map_addrs = {s.addr for s in linkmap.symbols if s.addr >= 0x10000}
-    for secs_, rlo, data in [(code, lo, ours)] + [([s_], section_addrs[s_], extra_bytes[s_])
-                                                  for s_ in extra]:
+    for secs_, rlo, data in ([(r[0], rb[0], rb[2]) for r, rb in zip(regions, region_bytes)]
+                             + [([s_], section_addrs[s_], extra_bytes[s_]) for s_ in extra]):
         covered = set()
         for sec in secs_:
             for off, typ, _, _ in relocs.get(sec, []):
@@ -613,7 +742,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     # placement of named routines and other global code symbols: a map name
     # must be global and at its map address; a global the map does not name
     # would be a module-local routine exported by mistake (CLAUDE.md 3.15)
-    globals_ = {n for n, _, sec, fl in symbols_of(obj)
+    globals_ = {n for n, _, sec, fl in syms
                 if fl[0] == 'g' and (sec in code or sec in extra)}
     for r in routines:
         if r.name and r.name not in globals_:
@@ -637,18 +766,23 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                 out('OK data %s 0x%X 0x%X  %s' % (sec, a, n, name))
         return True
 
-    out('FAIL %s (%s, 0x%X..0x%X, %d relocation(s))'
-        % (name, ' '.join(r.label for r in routines), lo, hi, nrel))
+    out('FAIL %s (%s, %s, %d relocation(s))'
+        % (name, ' '.join(r.label for r in routines),
+           ' '.join('0x%X..0x%X' % (rlo, rhi) for rlo, rhi, _, _ in region_bytes), nrel))
     for p in problems:
         out('  ' + p)
-    n = max(len(ours), hi - lo)
-    img_show = read_image(lo, min(n, IMAGE_HI - lo))
-    out('%s%-44s | image' % (' ' * 10, 'ours'))
-    for line in side_by_side(disassemble(ours, lo, work, 'ours'),
-                             disassemble(img_show, lo, work, 'image')):
-        out(line)
+    for k, (rlo, rhi, ours, _) in enumerate(region_bytes):
+        if k:
+            out('code at 0x%X:' % rlo)
+        n = max(len(ours), rhi - rlo)
+        img_show = read_image(rlo, min(n, IMAGE_HI - rlo))
+        out('%s%-44s | image' % (' ' * 10, 'ours'))
+        tag = '' if k == 0 else str(k)
+        for line in side_by_side(disassemble(ours, rlo, work, 'ours' + tag),
+                                 disassemble(img_show, rlo, work, 'image' + tag)):
+            out(line)
     for sec in extra:
-        a, _, cimg = regions[sec]
+        a, _, cimg = regions_of[sec]
         out('section %s:' % sec)
         for line in side_by_side(disassemble(extra_bytes[sec], a, work, 'ours_' + sec),
                                  disassemble(cimg, a, work, 'image_' + sec)):
@@ -663,7 +797,27 @@ def fragment_args(routines, linkmap):
     for a whole map module (which dpc compiles as a module, module-end
     padding included), `--fragment-origin LO', plus
     `--fragment-ends-module' when the unit is the tail of its module (the
-    module-end padding is then part of its last routine in the image)."""
+    module-end padding is then part of its last routine in the image).
+    A unit with routines in several map segments (one module in several
+    code sections, unit_groups) is a fragment of each: per run of routines
+    `--fragment-origin=SECTION=0xLO', SECTION being the map's output
+    section (dpc matches it with the Pascal section name, any case), and
+    `--fragment-ends-module=SECTION' for each run that ends its segment."""
+    groups = unit_groups(routines, linkmap)
+    if len(groups) > 1:
+        args = []
+        for g in groups:
+            lo, hi = g[0].addr, g[-1].end
+            seg = linkmap.segment_containing(lo)
+            if hi > seg.end:
+                raise SetupError('the unit 0x%X..0x%X runs past the end of module %s '
+                                 '(0x%X..0x%X); one .pas unit is one module'
+                                 % (lo, hi, seg.name, seg.addr, seg.end))
+            sect = code_section_of(lo, linkmap)
+            args.append('--fragment-origin=%s=0x%X' % (sect, lo))
+            if hi == seg.end:
+                args.append('--fragment-ends-module=%s' % sect)
+        return args
     lo, hi = routines[0].addr, routines[-1].end
     seg = linkmap.segment_containing(lo)
     if seg is None or seg.is_section:
@@ -753,10 +907,14 @@ def module_routine_args(tokens, routines, linkmap):
     unit").  Each must lie in the unit's map module and outside the unit;
     an address must name no map symbol (use the map name) and NAME must
     not be a map name.  Each is forwarded as
-    `--module-routine=NAME=0xADDR'."""
+    `--module-routine=NAME=0xADDR', or, when it lies in another code
+    segment of the module than the unit or the unit has routines in
+    several (check_in_module), `--module-routine=SECTION:NAME=0xADDR' with
+    the map's output section: dpc then calls it with `bsr' from the
+    unit's code in that section and with `jsr abs.l' from any other."""
     if len(tokens) > 1:
         raise SetupError('module-routines= given more than once')
-    out, local = [], {}
+    out, local, seen = [], {}, set()
     for t in tokens:
         items = t[len(MODULE_ROUTINES_TOKEN):].split(',')
         if '' in items:
@@ -772,7 +930,7 @@ def module_routine_args(tokens, routines, linkmap):
                     raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
                 if not a.lower().startswith('0x'):
                     raise SetupError('%s: %r: want NAME=0xADDR' % (t, item))
-                check_local_sym(n, addr, routines, linkmap, t)
+                sect = check_local_sym(n, addr, routines, linkmap, t)
                 # dpc's symbols are upper-cased (CLAUDE.md 3.15)
                 n = n.upper()
                 if n in local:
@@ -783,19 +941,41 @@ def module_routine_args(tokens, routines, linkmap):
                 if sym is None:
                     raise SetupError('%s: routine %s is not in the map' % (t, n))
                 n, addr = sym.name, sym.addr
-                check_in_module(n, addr, routines, linkmap, t)
-            out.append('--module-routine=%s=0x%X' % (n, addr))
+                sect = check_in_module(n, addr, routines, linkmap, t)
+            if n in seen:
+                raise SetupError('%s: %s given more than once' % (t, n))
+            seen.add(n)
+            out.append('--module-routine=%s%s=0x%X' % (sect + ':' if sect else '', n, addr))
     return out, local
 
 
 def check_in_module(n, addr, routines, linkmap, what):
     """Routine `n' at `addr' must lie in the map module of the unit made
-    of `routines', outside the unit.  `what' prefixes the error."""
-    seg = linkmap.segment_containing(routines[0].addr)
-    if seg is None or linkmap.segment_containing(addr) is not seg:
+    of `routines', outside the unit: in one of the unit's map segments, or
+    in another code segment of the same name (the module's code in another
+    output section: TTY in WIRED_PROC, OS_INIT_PROC and .TEXT), but not in
+    another segment of an output section the unit has routines in (that
+    would be another compilation unit).  `what' prefixes the error.
+    Returns the routine's code section for `--module-routine=SECTION:...':
+    None when the unit is one run of routines in the routine's own
+    segment (dpc's default, the unit's only code section), else the map's
+    output section."""
+    groups = unit_groups(routines, linkmap)
+    segs = [linkmap.segment_containing(g[0].addr) for g in groups]
+    there = linkmap.segment_containing(addr)
+    if there is None or segs[0] is None or (
+            there not in segs and (there.is_section or segs[0].is_section
+                                   or there.kind != 'I' or there.name != segs[0].name)):
         raise SetupError('%s: %s is not in the module of the unit' % (what, n))
     if any(r.addr <= addr < r.end for r in routines):
         raise SetupError('%s: %s is part of the unit' % (what, n))
+    if there in segs:
+        return None if len(segs) == 1 else code_section_of(addr, linkmap)
+    sect = code_section_of(addr, linkmap)
+    if sect in [code_section_of(sg.addr, linkmap) for sg in segs]:
+        raise SetupError('%s: %s is in another segment of output section %s than the unit'
+                         % (what, n, sect))
+    return sect
 
 
 def check_local_sym(n, addr, routines, linkmap, what):
@@ -803,14 +983,15 @@ def check_local_sym(n, addr, routines, linkmap, what):
     (`module-routines=NAME=0xADDR', `check --local-sym NAME=0xADDR'):
     `n' is not a map name, the map names nothing at `addr', which lies in
     the unit's map module outside the unit (bead domain-pascal-3h9;
-    README.md, "Routines outside the unit")."""
+    README.md, "Routines outside the unit").  Returns check_in_module's
+    code section."""
     if linkmap.lookup(n) is not None:
         raise SetupError('%s: %s is a map name; give it without an address' % (what, n))
     named = [x for x in linkmap.names_at(addr)]
     if named:
         raise SetupError('%s: 0x%X is %s in the map; give that name'
                          % (what, addr, named[0]))
-    check_in_module(n, addr, routines, linkmap, what)
+    return check_in_module(n, addr, routines, linkmap, what)
 
 
 def run_manifest(path, linkmap, dpc):

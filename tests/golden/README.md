@@ -129,6 +129,13 @@ Tests:
   data section, `jsr abs.l` into another code section from a statement
   and from an expression (PROC1_$INIT 0xE2F9EC), an internal routine so
   called loading its own A5 (0xE14B12).
+- `sections/section_fragments` - codegen-patterns 11, 1.6, 7: a unit of
+  two code sections compiled as a fragment of each (`.args`:
+  `--fragment-origin=SECTION=0xADDR`), one origin symbol, pad and
+  module-end padding per section; routines of the module outside the
+  unit (`--module-routine=SECTION:NAME=0xADDR`) called with `bsr` from
+  their own section (an encoded `bsr.s`, a `bsr.w`) and `jsr abs.l` from
+  another or from a section the unit lacks (TTY_$K_RESET 0xE6730E).
 - `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the
   allocator (bead domain-pascal-g5q.5): parameters held across calls in
   A2/D2 with `pea (d,A2)` pushes (module-local 0xE32B76), a third data

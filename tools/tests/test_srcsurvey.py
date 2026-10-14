@@ -254,5 +254,53 @@ class DataSectionsTest(unittest.TestCase):
                           '.bss.moddata.TTY': 0xE8242C})
 
 
+
+class ModuleRoutineOptsTest(unittest.TestCase):
+    """The dpc options for a module's stubbed internal routines: one
+    fragment origin for a module of one code section, one per section
+    (with each routine's section) for several (bead domain-pascal-xdh.6)."""
+
+    Seg = DataSectionsTest.Seg
+
+    def mod(self, routines):
+        m = type('Mod', (), {})()
+        m.routines = {}
+        for name, addr, internal in routines:
+            r = srcsurvey.Routine(name)
+            r.addr = addr
+            if internal:
+                r.options.add('internal')
+            m.routines[name] = ('frag.pas', r)
+        return m
+
+    def linkmap(self):
+        lm = type('M', (), {})()
+        lm.sections = [self.Seg('I', 'WIRED_PROC', 0xE00800, 0x1D0F4),
+                       self.Seg('I', 'OS_INIT_PROC', 0xE2F000, 0x5F14),
+                       self.Seg('I', '.TEXT', 0xE38000, 0x39D7C)]
+        return lm
+
+    def test_one_section(self):
+        m = self.mod([('a', 0xE1AED0, True), ('b', 0xE1AEE4, True), ('c', 0xE1AEF8, False)])
+        f = srcsurvey.module_routine_opts
+        self.assertEqual(f(m, [], self.linkmap()), [])
+        self.assertEqual(f(m, ['c'], self.linkmap()), [])          # global: deleted
+        self.assertEqual(f(m, ['b'], self.linkmap()),
+                         ['--fragment-origin', '0xE1AED0', '--module-routine=B=0xE1AEE4'])
+        # no map: as one section
+        self.assertEqual(f(m, ['b'], None),
+                         ['--fragment-origin', '0xE1AED0', '--module-routine=B=0xE1AEE4'])
+
+    def test_several_sections(self):
+        m = self.mod([('lock', 0xE1AED0, True), ('put', 0xE1AF0A, False),
+                      ('init', 0xE3324C, False),
+                      ('dfl', 0xE6726E, True), ('reset', 0xE672DE, False)])
+        self.assertEqual(
+            srcsurvey.module_routine_opts(m, ['lock', 'dfl', 'init'], self.linkmap()),
+            ['--fragment-origin=.TEXT=0xE672DE', '--fragment-origin=WIRED_PROC=0xE1AF0A',
+             '--module-routine=WIRED_PROC:LOCK=0xE1AED0',
+             '--module-routine=.TEXT:DFL=0xE6726E'])
+
+
 if __name__ == '__main__':
     unittest.main()

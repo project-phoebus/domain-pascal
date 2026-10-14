@@ -1,9 +1,10 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
 //! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
+//!            [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]...
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE,...]
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
-//!            [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]...
+//!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
 //!            [--parse-only | --dump-ast | --check-only] file.pas
 //!
@@ -16,7 +17,12 @@
 //! address ADDR (even): 4-byte alignment is made absolute and no
 //! module-end padding is emitted (`dpc_m68k::emit::Options`).  With
 //! `--fragment-ends-module` the fragment is the tail of its module and
-//! does get the module-end padding.
+//! does get the module-end padding.  A unit with several code sections
+//! gives each its own origin, `--fragment-origin=SECTION=0xADDR`
+//! (SECTION as the source names it, `.text` for the default; any case),
+//! and `--fragment-ends-module=SECTION` for each that ends its module's
+//! segment (`dpc_m68k::emit::FragmentSection`).  The plain forms are for
+//! a unit with one code section, whatever its name.
 //!
 //! `--a5-*` choose which routines load the unit's data base, A5
 //! (codegen-patterns 4; `dpc_ir::DataBaseOptions`).  By default ("used
@@ -29,12 +35,16 @@
 //! exported routines do not load it and address the data with `lea
 //! <area>.l,An`.  Names are matched case-insensitively.
 //!
-//! `--module-routine=R=0xADDR` (with `--fragment-origin`; repeatable): R,
-//! declared `extern` in the fragment, is a routine of the same module
-//! outside the fragment, at image address ADDR.  The original compiled
-//! the whole module and reached it with `bsr` (codegen-patterns 1.6:
-//! DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w DISK_$UNASSIGN`); the fragment does
-//! too, sized from ADDR (`dpc_m68k::emit::Options::module_routines`).
+//! `--module-routine=[SECTION:]R=0xADDR` (with `--fragment-origin`;
+//! repeatable): R, declared `extern` in the fragment, is a routine of the
+//! same module outside the fragment, at image address ADDR, in Pascal code
+//! section SECTION (default: the unit's only code section).  The original
+//! compiled the whole module and reached it with `bsr` from its own code
+//! section (codegen-patterns 1.6: DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w
+//! DISK_$UNASSIGN`) and with `jsr abs.l` from another (codegen-patterns
+//! 11); the fragment does too, a `bsr` sized from ADDR
+//! (`dpc_m68k::emit::Options::module_routines`).  SECTION need not be one
+//! the unit has routines in.
 //! A module-local routine the map does not name is declared `internal;
 //! extern` and named by its symbol (MST_$MAPS 0xE439C4 `bsr.w` to
 //! 0xE43182, the fragment's `ALLOC_SEGS`): the `bsr` goes to that local
@@ -64,7 +74,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use dpc_ir::DataBaseOptions;
-use dpc_m68k::emit::LoopAlign;
+use dpc_m68k::emit::{FragmentSection, LoopAlign, ModuleRoutine};
 use dpc_m68k::sched::Schedule;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 use dpc_target::Target;
@@ -72,9 +82,10 @@ use dpc_target::Target;
 const PROG: &str = "dpc";
 const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
+                     [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]... \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE,...] \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
-                     [--a5-absolute=ROUTINE,...] [--module-routine=ROUTINE=0xADDR]... \
+                     [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
                      [--parse-only | --dump-ast | --check-only] file.pas";
 
@@ -97,11 +108,10 @@ struct Args {
     output: Option<PathBuf>,
     input: PathBuf,
     stop: Stop,
-    fragment_origin: Option<u32>,
-    fragment_ends_module: bool,
+    fragment: Vec<FragmentSection>,
     loop_align: LoopAlign,
     data_base: DataBaseOptions,
-    module_routines: Vec<(String, u32)>,
+    module_routines: Vec<ModuleRoutine>,
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
 }
@@ -127,18 +137,95 @@ fn parse_number(s: &str) -> Option<u32> {
     }
 }
 
+/// A fragment origin: an even address (code is at even addresses).
+fn fragment_address(v: &str) -> Result<u32, String> {
+    let a = parse_number(v).ok_or_else(|| format!("--fragment-origin: bad address `{v}`"))?;
+    if a % 2 != 0 {
+        return Err(format!("--fragment-origin: odd address `{v}`"));
+    }
+    Ok(a)
+}
+
+/// The fragment's code sections from the `--fragment-origin` options
+/// `origins` (section, or None for the plain form) and the
+/// `--fragment-ends-module` ones `ends`.  The plain forms go together and
+/// at most once; each section at most once, every ending section with an
+/// origin.  Section names are matched case-insensitively.
+fn fragment_sections(
+    origins: &[(Option<String>, u32)],
+    ends: &[Option<String>],
+) -> Result<Vec<FragmentSection>, String> {
+    let plain = origins.iter().filter(|(s, _)| s.is_none()).count();
+    if plain > 1 {
+        return Err("--fragment-origin given more than once".into());
+    }
+    if plain == 1 && origins.len() > 1 {
+        return Err(
+            "--fragment-origin 0xADDR and --fragment-origin=SECTION=0xADDR do not mix".into(),
+        );
+    }
+    let mut out: Vec<FragmentSection> = Vec::new();
+    for (section, origin) in origins {
+        if let Some(n) = section {
+            if out.iter().any(|f| {
+                f.section
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(n))
+            }) {
+                return Err(format!(
+                    "--fragment-origin: code section `{n}` given more than once"
+                ));
+            }
+        }
+        out.push(FragmentSection {
+            section: section.clone(),
+            origin: *origin,
+            ends_module: false,
+        });
+    }
+    for (i, e) in ends.iter().enumerate() {
+        if ends[..i].iter().any(|d| match (d, e) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => true,
+            _ => false,
+        }) {
+            return Err("--fragment-ends-module given more than once for one section".into());
+        }
+        let f = match e {
+            None => out.iter_mut().find(|f| f.section.is_none()).ok_or(
+                "--fragment-ends-module needs --fragment-origin 0xADDR (with \
+                 --fragment-origin=SECTION=0xADDR: --fragment-ends-module=SECTION)",
+            )?,
+            Some(n) => out
+                .iter_mut()
+                .find(|f| {
+                    f.section
+                        .as_deref()
+                        .is_some_and(|m| m.eq_ignore_ascii_case(n))
+                })
+                .ok_or_else(|| {
+                    format!("--fragment-ends-module={n} needs --fragment-origin={n}=0xADDR")
+                })?,
+        };
+        f.ends_module = true;
+    }
+    Ok(out)
+}
+
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut include_dirs = Vec::new();
     let mut output = None;
     let mut input = None;
     let mut stop = Stop::Never;
-    let mut fragment_origin = None;
-    let mut fragment_ends_module = false;
+    // (section or None for the plain form, origin)
+    let mut origins: Vec<(Option<String>, u32)> = Vec::new();
+    // `--fragment-ends-module`: None for the plain form
+    let mut ends: Vec<Option<String>> = Vec::new();
     let mut loop_align = None;
     let mut always_from = None;
     let mut always = None;
     let mut absolute = None;
-    let mut module_routines: Vec<(String, u32)> = Vec::new();
+    let mut module_routines: Vec<ModuleRoutine> = Vec::new();
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
     while let Some(arg) = argv.next() {
@@ -152,15 +239,30 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--fragment-origin" => {
                 let v = argv.next().ok_or("--fragment-origin needs an address")?;
-                let a = parse_number(&v)
-                    .ok_or_else(|| format!("--fragment-origin: bad address `{v}`"))?;
-                // code is at even addresses
-                if a % 2 != 0 {
-                    return Err(format!("--fragment-origin: odd address `{v}`"));
-                }
-                fragment_origin = Some(a);
+                origins.push((None, fragment_address(&v)?));
             }
-            "--fragment-ends-module" => fragment_ends_module = true,
+            s if s.starts_with("--fragment-origin=") => {
+                let v = &s["--fragment-origin=".len()..];
+                origins.push(match v.split_once('=') {
+                    Some((sect, a)) if !sect.is_empty() => {
+                        (Some(sect.to_string()), fragment_address(a)?)
+                    }
+                    Some(_) => {
+                        return Err(format!("--fragment-origin: want SECTION=0xADDR, got `{v}`"))
+                    }
+                    None => (None, fragment_address(v)?),
+                });
+            }
+            "--fragment-ends-module" => ends.push(None),
+            s if s.starts_with("--fragment-ends-module=") => {
+                let v = &s["--fragment-ends-module=".len()..];
+                if v.is_empty() || v.contains('=') {
+                    return Err(format!(
+                        "--fragment-ends-module: want a code section, got `{v}`"
+                    ));
+                }
+                ends.push(Some(v.to_string()));
+            }
             s if s.starts_with("--loop-align=") || s.starts_with("--loop-align-off-from=") => {
                 if loop_align.is_some() {
                     return Err("--loop-align / --loop-align-off-from given more than once".into());
@@ -198,19 +300,28 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             s if s.starts_with("--module-routine=") => {
                 let v = &s["--module-routine=".len()..];
-                let bad = || format!("--module-routine: want ROUTINE=0xADDR, got `{v}`");
+                let bad = || format!("--module-routine: want [SECTION:]ROUTINE=0xADDR, got `{v}`");
                 let (name, a) = v.split_once('=').ok_or_else(bad)?;
+                let (section, name) = match name.split_once(':') {
+                    Some((s, n)) if !s.is_empty() => (Some(s.to_string()), n),
+                    Some(_) => return Err(bad()),
+                    None => (None, name),
+                };
                 let a = parse_number(a).ok_or_else(bad)?;
                 if name.is_empty() || a % 2 != 0 {
                     return Err(bad());
                 }
                 if module_routines
                     .iter()
-                    .any(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .any(|r| r.symbol.eq_ignore_ascii_case(name))
                 {
                     return Err(format!("--module-routine: `{name}` given more than once"));
                 }
-                module_routines.push((name.to_string(), a));
+                module_routines.push(ModuleRoutine {
+                    section,
+                    symbol: name.to_string(),
+                    addr: a,
+                });
             }
             s if s.starts_with("--data-base=") => {
                 let v = &s["--data-base=".len()..];
@@ -255,10 +366,8 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         }
     }
     let input = input.ok_or("no input file")?;
-    if fragment_ends_module && fragment_origin.is_none() {
-        return Err("--fragment-ends-module needs --fragment-origin".into());
-    }
-    if !module_routines.is_empty() && fragment_origin.is_none() {
+    let fragment = fragment_sections(&origins, &ends)?;
+    if !module_routines.is_empty() && fragment.is_empty() {
         return Err("--module-routine needs --fragment-origin".into());
     }
     Ok(Args {
@@ -266,8 +375,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         output,
         input,
         stop,
-        fragment_origin,
-        fragment_ends_module,
+        fragment,
         loop_align: loop_align.unwrap_or_default(),
         data_base: DataBaseOptions {
             always_from: always_from.unwrap_or_default(),
@@ -324,8 +432,7 @@ fn compile(
     }
     let module = dpc_ir::lower_with(&program, &args.data_base)?;
     let opts = dpc_m68k::emit::Options {
-        fragment_origin: args.fragment_origin,
-        fragment_ends_module: args.fragment_ends_module,
+        fragment: args.fragment.clone(),
         loop_align: args.loop_align.clone(),
         module_routines: args.module_routines.clone(),
         schedule: args.schedule,
@@ -397,19 +504,20 @@ mod tests {
         assert_eq!(a.output, Some(PathBuf::from("x.s")));
         assert_eq!(a.input, PathBuf::from("m.pas"));
         assert_eq!(a.stop, Stop::Never);
-        assert_eq!(a.fragment_origin, None);
+        assert!(a.fragment.is_empty());
         let a = args(&["--fragment-origin", "0xE148CA", "m.pas"]).unwrap();
-        assert_eq!(a.fragment_origin, Some(0xE148CA));
+        assert_eq!(a.fragment, vec![FragmentSection::only(0xE148CA)]);
+        let a = args(&["--fragment-origin=0xE148CA", "m.pas"]).unwrap();
+        assert_eq!(a.fragment, vec![FragmentSection::only(0xE148CA)]);
         let a = args(&["--fragment-origin", "16", "m.pas"]).unwrap();
-        assert_eq!(a.fragment_origin, Some(16));
-        assert!(!a.fragment_ends_module);
+        assert_eq!(a.fragment, vec![FragmentSection::only(16)]);
         let a = args(&[
             "--fragment-origin",
             "0xE128F6",
             "--fragment-ends-module",
             "m.pas",
         ]);
-        assert!(a.unwrap().fragment_ends_module);
+        assert!(a.unwrap().fragment[0].ends_module);
         assert_eq!(args(&["m.pas"]).unwrap().loop_align, LoopAlign::On);
         assert_eq!(
             args(&["--loop-align=on", "m.pas"]).unwrap().loop_align,
@@ -469,7 +577,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             a.module_routines,
-            vec![("DISK_$UNASSIGN".into(), 0xE6BDA8), ("X".into(), 16)]
+            vec![
+                ModuleRoutine::new("DISK_$UNASSIGN", 0xE6BDA8),
+                ModuleRoutine::new("X", 16)
+            ]
         );
         for bad in [
             &["--module-routine=X=0x10", "m.pas"][..],
@@ -531,6 +642,99 @@ mod tests {
         assert!(args(&["--data-base=W=", "m.pas"]).is_err());
         assert!(args(&["--data-base=W=A=B", "m.pas"]).is_err());
         assert!(args(&["--data-base=w=A", "--data-base=W=B", "m.pas"]).is_err());
+    }
+
+    /// Per-section fragment origins and module routines with a section
+    /// (a unit of a module with several code sections, TTY).
+    #[test]
+    fn parses_section_fragments() {
+        let a = args(&[
+            "--fragment-origin=wired_proc=0xE1AF0A",
+            "--fragment-origin=.text=0xE67618",
+            "--fragment-ends-module=.TEXT",
+            "--module-routine=WIRED_PROC:TTY_$I_LOCK=0xE1AED0",
+            "--module-routine=TTY_$I_GET_DESC=0xE66738",
+            "m.pas",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.fragment,
+            vec![
+                FragmentSection {
+                    section: Some("wired_proc".into()),
+                    origin: 0xE1AF0A,
+                    ends_module: false
+                },
+                FragmentSection {
+                    section: Some(".text".into()),
+                    origin: 0xE67618,
+                    ends_module: true
+                },
+            ]
+        );
+        assert_eq!(
+            a.module_routines,
+            vec![
+                ModuleRoutine {
+                    section: Some("WIRED_PROC".into()),
+                    symbol: "TTY_$I_LOCK".into(),
+                    addr: 0xE1AED0
+                },
+                ModuleRoutine::new("TTY_$I_GET_DESC", 0xE66738),
+            ]
+        );
+        for bad in [
+            // plain and per-section forms do not mix
+            &[
+                "--fragment-origin",
+                "16",
+                "--fragment-origin=S=0x20",
+                "m.pas",
+            ][..],
+            &["--fragment-origin", "16", "--fragment-origin=0x20", "m.pas"],
+            &[
+                "--fragment-origin=S=16",
+                "--fragment-origin=s=0x20",
+                "m.pas",
+            ],
+            &["--fragment-origin==16", "m.pas"],
+            &["--fragment-origin=S=17", "m.pas"],
+            &["--fragment-origin=S=", "m.pas"],
+            // an ending section needs its origin
+            &[
+                "--fragment-origin=S=16",
+                "--fragment-ends-module=T",
+                "m.pas",
+            ],
+            &["--fragment-origin=S=16", "--fragment-ends-module", "m.pas"],
+            &[
+                "--fragment-origin",
+                "16",
+                "--fragment-ends-module=S",
+                "m.pas",
+            ],
+            &[
+                "--fragment-origin=S=16",
+                "--fragment-ends-module=S",
+                "--fragment-ends-module=s",
+                "m.pas",
+            ],
+            &["--fragment-ends-module=", "m.pas"],
+            &[
+                "--fragment-origin=S=16",
+                "--module-routine=:X=0x10",
+                "m.pas",
+            ],
+            &[
+                "--fragment-origin=S=16",
+                "--module-routine=S:X=0x10",
+                "--module-routine=T:x=0x20",
+                "m.pas",
+            ],
+            &["--module-routine=S:X=0x10", "m.pas"],
+        ] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

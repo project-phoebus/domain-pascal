@@ -13,7 +13,7 @@
 //! gas aligns relative to the section start, which is the same thing for
 //! a whole module.  An image-conformance unit, though, is often a few
 //! routines out of a module, starting at an address that may be 2 mod 4
-//! (PROC1_$TST_LOCK 0xE148CA).  [`Options::fragment_origin`] describes
+//! (PROC1_$TST_LOCK 0xE148CA).  [`Options::fragment`] describes
 //! such a unit; then:
 //!
 //! - the code section starts with `origin mod 4` bytes of `.space`, so
@@ -22,9 +22,20 @@
 //!   unit; the absolute local symbol [`FRAGMENT_ORIGIN_SYMBOL`] records
 //!   `origin` so that `tools/conform.py` can link and compare accordingly;
 //! - no module-end padding is emitted, unless
-//!   [`Options::fragment_ends_module`] says that the unit is the tail of
+//!   [`FragmentSection::ends_module`] says that the unit is the tail of
 //!   its module (then the padding, absolute like the rest, is part of the
 //!   unit's last routine in the image).
+//!
+//! A unit with several code sections (TTY: WIRED_PROC, OS_INIT_PROC and
+//! the default section) is a fragment of each: every code section has its
+//! own origin ([`FragmentSection`], `dpc --fragment-origin=SECTION=0xADDR`),
+//! its own pad, its own module-end padding or none, and the absolute local
+//! symbol [`FRAGMENT_ORIGIN_SYMBOL`] followed by its output section's name
+//! (`__dpc_fragment_origin.text.TTY.WIRED_PROC`).  A routine of the module
+//! outside the unit ([`ModuleRoutine`]) is reached as the whole module
+//! reached it: with `bsr` from its own code section, sized from its
+//! address and that section's origin, and with `jsr abs.l` from any other
+//! (`bsr` never crosses a map segment, codegen-patterns 1.6, 11).
 //!
 //! **Loop alignment on and off.**  In the image, alignment is on for a
 //! leading run of the routines of a map segment and off for the rest;
@@ -74,31 +85,84 @@ pub enum LoopAlign {
     OffFrom(Vec<String>),
 }
 
+/// One code section of a fragment (`dpc --fragment-origin`): where its
+/// first byte belongs in the image, and whether it ends its module.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FragmentSection {
+    /// The Pascal code section, as the source names it (`.text` for the
+    /// default; matched case-insensitively), or `None`: the unit's only
+    /// code section (`dpc --fragment-origin 0xADDR`).
+    pub section: Option<String>,
+    /// The image address of the section's first byte (even).
+    pub origin: u32,
+    /// The section ends its module's segment, so it gets the module-end
+    /// padding (`dpc --fragment-ends-module[=SECTION]`).
+    pub ends_module: bool,
+}
+
+impl FragmentSection {
+    /// The unit's only code section, at `origin`.
+    pub fn only(origin: u32) -> Self {
+        FragmentSection {
+            section: None,
+            origin,
+            ends_module: false,
+        }
+    }
+}
+
+/// A routine of the module outside a fragment (`dpc
+/// --module-routine=[SECTION:]NAME=0xADDR`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ModuleRoutine {
+    /// Its Pascal code section (matched case-insensitively), or `None`:
+    /// the unit's only code section.  A section the unit has no routine
+    /// in is allowed: the routine is then called with `jsr abs.l`, as
+    /// from any other section.
+    pub section: Option<String>,
+    /// Its symbol (matched case-insensitively against the IR's).
+    pub symbol: String,
+    /// Its image address.
+    pub addr: u32,
+}
+
+impl ModuleRoutine {
+    /// A routine of the unit's only code section.
+    pub fn new(symbol: &str, addr: u32) -> Self {
+        ModuleRoutine {
+            section: None,
+            symbol: symbol.into(),
+            addr,
+        }
+    }
+}
+
 /// Emitter options.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The output is a fragment of a module whose first byte belongs at
-    /// this absolute address (test-oriented: `dpc --fragment-origin`).
-    /// `None`: a whole module.
-    pub fragment_origin: Option<u32>,
-    /// With `fragment_origin`: the fragment ends its module, so it gets
-    /// the module-end padding (`dpc --fragment-ends-module`).  Ignored
-    /// for a whole module, which always gets it.
-    pub fragment_ends_module: bool,
+    /// The output is a fragment of a module (test-oriented: `dpc
+    /// --fragment-origin`): one entry per code section of the unit, each
+    /// with the absolute address of the section's first byte.  Empty: a
+    /// whole module.  An entry without a section is the only one, for a
+    /// unit with at most one code section.
+    pub fragment: Vec<FragmentSection>,
     /// Which routines align their loop heads.
     pub loop_align: LoopAlign,
-    /// With `fragment_origin`: routines of the same module that lie
-    /// outside the fragment, by symbol and image address (`dpc
+    /// With `fragment`: routines of the same module that lie outside the
+    /// fragment, with their code section and image address (`dpc
     /// --module-routine`).  The original compiled whole modules and
-    /// called such a routine with `bsr` (codegen-patterns 1.6:
-    /// DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w` to DISK_$UNASSIGN 0xE6BDA8,
-    /// the routine before it); the fragment declares it `extern`, and its
-    /// `jsr` becomes a `bsr` sized from the address, as for a routine of
-    /// the fragment.  The reference resolves to the map name when the
-    /// fragment is linked.  An unnamed module-local routine is declared
-    /// `internal; extern` and named by its local symbol, which the
-    /// conformance harness defines (`--defsym`; bead domain-pascal-3h9).
-    pub module_routines: Vec<(String, u32)>,
+    /// called such a routine with `bsr` from its own code section
+    /// (codegen-patterns 1.6: DISK_$UNASSIGN_ALL 0xE6BE34 `bsr.w` to
+    /// DISK_$UNASSIGN 0xE6BDA8, the routine before it) and with `jsr
+    /// abs.l` from another (codegen-patterns 11: TTY_$K_RESET 0xE6730E to
+    /// the WIRED_PROC module-local 0xE1AED0); the fragment declares it
+    /// `extern`, and its `jsr` from the routine's own section becomes a
+    /// `bsr` sized from the address, as for a routine of the fragment.
+    /// The reference resolves to the map name when the fragment is
+    /// linked.  An unnamed module-local routine is declared `internal;
+    /// extern` and named by its local symbol, which the conformance
+    /// harness defines (`--defsym`; bead domain-pascal-3h9).
+    pub module_routines: Vec<ModuleRoutine>,
     /// The scheduling policy for the bodies (`dpc --schedule`;
     /// `sched.rs`, codegen-patterns 12.4 R9-R12).
     pub schedule: crate::sched::Schedule,
@@ -199,7 +263,8 @@ fn section_directive(unit: &str, sect: &str) -> String {
 
 /// Render `module` as assembly text.  `source_name` is recorded in the
 /// header comment.  Fails if a routine needs a pattern that is not
-/// implemented yet, or if a fragment has more than one code section.
+/// implemented yet, or if the fragment options do not fit the unit's code
+/// sections ([`Options::fragment`], [`Options::module_routines`]).
 pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String, Vec<Diagnostic>> {
     let mut out = format!("| generated by dpc from {source_name}\n");
     let mut errors = Vec::new();
@@ -233,14 +298,15 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             ))]);
         }
     }
-    if let Some((name, _)) = opts.module_routines.iter().find(|(n, _)| {
+    if let Some(r) = opts.module_routines.iter().find(|r| {
         module
             .functions
             .iter()
-            .any(|f| f.symbol.eq_ignore_ascii_case(n))
+            .any(|f| f.symbol.eq_ignore_ascii_case(&r.symbol))
     }) {
         return Err(vec![Diagnostic::error_nopos(format!(
-            "--module-routine: `{name}` has its body in this unit"
+            "--module-routine: `{}` has its body in this unit",
+            r.symbol
         ))]);
     }
     // ref 5.2, p. 5-4: "Internal routines can be called only within the
@@ -255,7 +321,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             !opts
                 .module_routines
                 .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case(sym))
+                .any(|r| r.symbol.eq_ignore_ascii_case(sym))
         })
         .map(|(sym, span)| {
             Diagnostic::error(
@@ -271,19 +337,28 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
     if !outside.is_empty() {
         return Err(outside);
     }
-    if let Some(origin) = opts.fragment_origin {
-        // Where a second code section of a fragment would start in its
-        // module is not known, so its alignment could not be placed.
-        if sections.len() > 1 {
-            return Err(vec![Diagnostic::error_nopos(format!(
-                "--fragment-origin: the module has {} code sections; a fragment may have only one",
-                sections.len()
-            ))]);
-        }
-        out.push_str(&format!(
-            "| fragment of a module, first byte at 0x{origin:X} (dpc --fragment-origin)\n\
+    let fragment = fragment_sections(&sections, opts).map_err(|d| vec![d])?;
+    let homes = module_routine_sections(&sections, opts).map_err(|d| vec![d])?;
+    if sections.len() <= 1 {
+        // One code section (or none): the plain symbol.
+        if let Some(origin) = opts.fragment.first().map(|f| f.origin) {
+            out.push_str(&format!(
+                "| fragment of a module, first byte at 0x{origin:X} (dpc --fragment-origin)\n\
              \t.set\t{FRAGMENT_ORIGIN_SYMBOL},0x{origin:x}\n"
-        ));
+            ));
+        }
+    } else {
+        // One origin per code section, named after its output section.
+        for (sec, f) in &fragment {
+            let name = code_section_name(&module.name, sec);
+            out.push_str(&format!(
+                "| code section {name}: fragment of its module's segment, first byte at \
+                 0x{origin:X} (dpc --fragment-origin)\n\
+                 \t.set\t{},0x{origin:x}\n",
+                fragment_origin_symbol(&name),
+                origin = f.origin,
+            ));
+        }
     }
     // Cell labels are numbered across the code sections: each section has
     // its own cells, but all share the one assembly file.
@@ -292,14 +367,26 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         out.push('\n');
         out.push_str(&section_directive(&module.name, sec));
         out.push('\n');
-        if let Some(origin) = opts.fragment_origin {
-            if origin % 4 != 0 {
+        // This section's fragment origin, if a fragment.
+        let frag = fragment.iter().find(|(s, _)| *s == sec).map(|(_, f)| *f);
+        if let Some(f) = frag {
+            if f.origin % 4 != 0 {
                 out.push_str(&format!(
                     "\t.space\t{}\t| not part of the unit: makes 4-byte alignment absolute\n",
-                    origin % 4
+                    f.origin % 4
                 ));
             }
         }
+        // The routines outside the unit that live in this code section:
+        // called with `bsr`; those of other sections keep their `jsr
+        // abs.l` (codegen-patterns 1.6, 11).
+        let here: Vec<&ModuleRoutine> = opts
+            .module_routines
+            .iter()
+            .zip(&homes)
+            .filter(|(_, h)| h.as_deref() == Some(sec))
+            .map(|(r, _)| r)
+            .collect();
         let mut routines = Vec::new();
         let mut failed = false;
         let mut last_aligns = true;
@@ -322,11 +409,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {
                             // The IR's symbol (upper-cased), not the
                             // option's spelling.
-                            if opts
-                                .module_routines
-                                .iter()
-                                .any(|(n, _)| n.eq_ignore_ascii_case(sym))
-                            {
+                            if here.iter().any(|r| r.symbol.eq_ignore_ascii_case(sym)) {
                                 *insn = Insn::Bsr {
                                     target: sym.clone(),
                                     short: true,
@@ -353,15 +436,14 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             }
         }
         // Branch sizes need every routine of the section laid out.
-        let base = opts.fragment_origin.map_or(0, |o| o % 4);
-        // The outside routines in the layout's coordinates (the section
-        // starts at `origin & !3`).
-        let outside: Vec<(String, i64)> = opts
-            .module_routines
+        let base = frag.map_or(0, |f| f.origin % 4);
+        // The outside routines of this section in the layout's coordinates
+        // (the section starts at `origin & !3`).
+        let outside: Vec<(String, i64)> = here
             .iter()
-            .map(|(n, a)| {
-                let o = opts.fragment_origin.unwrap_or(0) & !3;
-                (n.clone(), *a as i64 - o as i64)
+            .map(|r| {
+                let o = frag.map_or(0, |f| f.origin) & !3;
+                (r.symbol.clone(), r.addr as i64 - o as i64)
             })
             .collect();
         pool_labels = pool.next;
@@ -391,7 +473,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         // A fragment that does not end its module gets none.  When the
         // last routine does not align, the padding is zero words instead
         // (`rts; 0x0000`: AST_ 0xE0736E; see the module comment).
-        if opts.fragment_origin.is_none() || opts.fragment_ends_module {
+        if frag.is_none_or(|f| f.ends_module) {
             if last_aligns {
                 out.push_str(&format!("\t{}\t| movea.l %a0,%a0 filler\n", Insn::Align4));
             } else {
@@ -423,6 +505,103 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
     } else {
         Err(errors)
     }
+}
+
+/// The name of the absolute local symbol that records the fragment origin
+/// of output section `section` in a unit with several code sections:
+/// [`FRAGMENT_ORIGIN_SYMBOL`] followed by the section's name
+/// (`__dpc_fragment_origin.text.TTY.WIRED_PROC`).  A unit with one code
+/// section has [`FRAGMENT_ORIGIN_SYMBOL`] alone.
+pub fn fragment_origin_symbol(section: &str) -> String {
+    format!("{FRAGMENT_ORIGIN_SYMBOL}{section}")
+}
+
+/// Match [`Options::fragment`] to the unit's code sections `sections`:
+/// each code section with its entry, in `sections`' order; empty for a
+/// whole module.  An entry without a section is the only one and is valid
+/// only when the unit has at most one code section.  Every named entry
+/// must be a code section of the unit, and every code section must have
+/// an entry: where a section without one would start is not known.
+fn fragment_sections<'a>(
+    sections: &[&'a str],
+    opts: &'a Options,
+) -> Result<Vec<(&'a str, &'a FragmentSection)>, Diagnostic> {
+    let err = |m: String| Err(Diagnostic::error_nopos(format!("--fragment-origin: {m}")));
+    if opts.fragment.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(f) = opts.fragment.iter().find(|f| f.section.is_none()) {
+        if opts.fragment.len() > 1 {
+            return err("an origin without a code section is the only one".into());
+        }
+        return match sections {
+            [] => Ok(Vec::new()),
+            [s] => Ok(vec![(*s, f)]),
+            _ => err(format!(
+                "the module has {} code sections; give each one's origin with \
+                 --fragment-origin=SECTION=0xADDR",
+                sections.len()
+            )),
+        };
+    }
+    let mut out = Vec::new();
+    for (i, f) in opts.fragment.iter().enumerate() {
+        let name = f.section.as_deref().unwrap_or_default();
+        if opts.fragment[..i].iter().any(|g| {
+            g.section
+                .as_deref()
+                .is_some_and(|g| g.eq_ignore_ascii_case(name))
+        }) {
+            return err(format!("code section `{name}` given more than once"));
+        }
+        if !sections.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            return err(format!(
+                "no routine of this unit is in code section `{name}`"
+            ));
+        }
+    }
+    for s in sections {
+        match opts.fragment.iter().find(|f| {
+            f.section
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(s))
+        }) {
+            Some(f) => out.push((*s, f)),
+            None => {
+                return err(format!(
+                    "code section `{s}` has no origin; a fragment gives one for each of its \
+                     code sections"
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// For each of [`Options::module_routines`]: the unit's code section it
+/// lives in (one of `sections`), or `None` when the unit has no routine
+/// in its section.  A routine without a section is in the unit's only
+/// code section; with several, its section must be given.
+fn module_routine_sections<'a>(
+    sections: &[&'a str],
+    opts: &Options,
+) -> Result<Vec<Option<&'a str>>, Diagnostic> {
+    opts.module_routines
+        .iter()
+        .map(|r| match &r.section {
+            Some(n) => Ok(sections.iter().find(|s| s.eq_ignore_ascii_case(n)).copied()),
+            None => match sections {
+                [] => Ok(None),
+                [s] => Ok(Some(*s)),
+                _ => Err(Diagnostic::error_nopos(format!(
+                    "--module-routine: `{}`: the unit has {} code sections; give the \
+                     routine's (--module-routine=SECTION:NAME=0xADDR)",
+                    r.symbol,
+                    sections.len()
+                ))),
+            },
+        })
+        .collect()
 }
 
 /// Write each `bsr.s` to a routine outside the fragment
@@ -890,7 +1069,7 @@ mod tests {
     #[test]
     fn fragment_at_2_mod_4() {
         let opts = Options {
-            fragment_origin: Some(0xE148CA),
+            fragment: vec![FragmentSection::only(0xE148CA)],
             ..Default::default()
         };
         let s = emit(&module(&[".text"]), "m.pas", &opts).unwrap();
@@ -908,7 +1087,7 @@ mod tests {
     #[test]
     fn fragment_at_0_mod_4_has_no_pad() {
         let opts = Options {
-            fragment_origin: Some(0xE00EB0),
+            fragment: vec![FragmentSection::only(0xE00EB0)],
             ..Default::default()
         };
         let s = emit(&module(&[".text"]), "m.pas", &opts).unwrap();
@@ -923,8 +1102,10 @@ mod tests {
     #[test]
     fn fragment_that_ends_its_module_gets_end_padding() {
         let opts = Options {
-            fragment_origin: Some(0xE148CA),
-            fragment_ends_module: true,
+            fragment: vec![FragmentSection {
+                ends_module: true,
+                ..FragmentSection::only(0xE148CA)
+            }],
             ..Default::default()
         };
         let s = emit(&module(&[".text"]), "m.pas", &opts).unwrap();
@@ -938,10 +1119,96 @@ mod tests {
     #[test]
     fn fragment_with_two_code_sections_is_rejected() {
         let opts = Options {
-            fragment_origin: Some(0xE148CA),
+            fragment: vec![FragmentSection::only(0xE148CA)],
             ..Default::default()
         };
-        assert!(emit(&module(&[".text", "wired_proc"]), "m.pas", &opts).is_err());
+        let e = emit(&module(&[".text", "wired_proc"]), "m.pas", &opts).unwrap_err();
+        assert!(e[0].message.contains("give each one's origin"), "{e:?}");
+    }
+
+    fn sect(section: &str, origin: u32, ends_module: bool) -> FragmentSection {
+        FragmentSection {
+            section: Some(section.into()),
+            origin,
+            ends_module,
+        }
+    }
+
+    /// A fragment of each of two code sections: each has its own origin
+    /// symbol (named after its output section), its own pad, and its own
+    /// module-end padding or none.
+    #[test]
+    fn fragment_of_two_code_sections() {
+        let mut m = module(&[".text", "wired_proc"]);
+        m.name = "tty".into();
+        let opts = Options {
+            fragment: vec![
+                sect("WIRED_PROC", 0xE1AF0A, true),
+                sect(".TEXT", 0xE67618, false),
+            ],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &opts).unwrap();
+        assert!(
+            s.contains("\t.set\t__dpc_fragment_origin.text,0xe67618\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\t.set\t__dpc_fragment_origin.text.TTY.WIRED_PROC,0xe1af0a\n"),
+            "{s}"
+        );
+        assert!(!s.contains("\t.set\t__dpc_fragment_origin,"), "{s}");
+        let (text, wired) = s
+            .split_once("\t.section\t\".text.TTY.WIRED_PROC\",\"ax\",@progbits\n")
+            .unwrap();
+        // .text at 0 mod 4: no pad, no end padding
+        assert!(
+            text.ends_with("\t.text\n\t.globl\tP0\nP0:\n\trts\n\n"),
+            "{s}"
+        );
+        // WIRED_PROC at 2 mod 4 and the end of its segment
+        assert!(wired.starts_with("\t.space\t2\t|"), "{s}");
+        assert!(wired.ends_with(FILLER_END), "{s}");
+        // one section only, given by name: the plain symbol
+        let one = Options {
+            fragment: vec![sect("wired_proc", 0xE1AF0A, false)],
+            ..Default::default()
+        };
+        let s = emit(&module(&["wired_proc"]), "m.pas", &one).unwrap();
+        assert!(
+            s.contains("\t.set\t__dpc_fragment_origin,0xe1af0a\n"),
+            "{s}"
+        );
+        // every code section needs an origin; every origin a section
+        for (fragment, msg) in [
+            (
+                vec![sect(".text", 0x1000, false)],
+                "code section `wired_proc` has no origin",
+            ),
+            (
+                vec![
+                    sect(".text", 0x1000, false),
+                    sect("wired_proc", 0x2000, false),
+                    sect("os_init_proc", 0x3000, false),
+                ],
+                "no routine of this unit is in code section `os_init_proc`",
+            ),
+            (
+                vec![
+                    sect(".text", 0x1000, false),
+                    sect("wired_proc", 0x2000, false),
+                    sect("WIRED_PROC", 0x2000, false),
+                ],
+                "given more than once",
+            ),
+        ] {
+            let opts = Options {
+                fragment,
+                ..Default::default()
+            };
+            let e = emit(&m, "m.pas", &opts).unwrap_err();
+            assert!(e[0].message.contains(msg), "{e:?}");
+        }
     }
 
     #[test]
@@ -1274,8 +1541,10 @@ mod tests {
         // a fragment that ends its module: the padding follows the last
         // routine too; one that does not end it has none
         let tail = Options {
-            fragment_origin: Some(0x1000),
-            fragment_ends_module: true,
+            fragment: vec![FragmentSection {
+                ends_module: true,
+                ..FragmentSection::only(0x1000)
+            }],
             loop_align: LoopAlign::OffFrom(vec!["P_$C".into()]),
             ..Default::default()
         };
@@ -1283,7 +1552,7 @@ mod tests {
         assert!(routine_text(&s, "P_$B").contains("0x2048"), "{s}");
         assert!(s.ends_with(ZERO_END), "{s}");
         let mid = Options {
-            fragment_ends_module: false,
+            fragment: vec![FragmentSection::only(0x1000)],
             ..tail
         };
         let s = emit(&m, "m.pas", &mid).unwrap();
@@ -1374,7 +1643,7 @@ mod tests {
                 ..Default::default()
             };
             let opts = Options {
-                fragment_origin: Some(0x1002),
+                fragment: vec![FragmentSection::only(0x1002)],
                 loop_align: la,
                 ..Default::default()
             };
@@ -1626,8 +1895,8 @@ mod tests {
             ..Default::default()
         };
         let frag = |at: u32| Options {
-            fragment_origin: Some(0x1000),
-            module_routines: vec![("Q".into(), at)],
+            fragment: vec![FragmentSection::only(0x1000)],
+            module_routines: vec![ModuleRoutine::new("Q", at)],
             ..Default::default()
         };
         // P: link at 0x1000, the calls at 0x1004 and 0x1006 (short),
@@ -1641,15 +1910,102 @@ mod tests {
         assert!(s.contains("\tbsr.w\tQ\n\tbsr.w\tQ\n"), "{s}");
         // The option's spelling does not matter: the symbol is the IR's.
         let mut lower = frag(0x1080);
-        lower.module_routines[0].0 = "q".into();
+        lower.module_routines[0].symbol = "q".into();
         let s = emit(&m, "m.pas", &lower).unwrap();
         assert!(s.contains(shorts), "{s}");
         // without the option: `jsr`
         let s = emit(&m, "m.pas", &Options::default()).unwrap();
         assert!(s.contains("\tjsr\t(Q).l\n"), "{s}");
         let mut opts = frag(0x1100);
-        opts.module_routines[0].0 = "p".into();
+        opts.module_routines[0].symbol = "p".into();
         let e = emit(&m, "m.pas", &opts).unwrap_err();
         assert!(e[0].message.contains("has its body in this unit"), "{e:?}");
+    }
+    /// Module routines in a unit of several code sections (TTY): a call
+    /// from the routine's own code section is a `bsr`, sized from its
+    /// address and that section's origin; one from another section, or
+    /// to a routine of a section the unit has no routine in, stays `jsr
+    /// abs.l` (codegen-patterns 1.6, 11: TTY_$K_RESET 0xE6730E `jsr` to
+    /// the WIRED_PROC module-local 0xE1AED0).
+    #[test]
+    fn module_routines_per_code_section() {
+        use dpc_ir::{Call, Callee, Stmt, StmtKind};
+        let calling = |section: &str, symbol: &str, callees: &[&str]| {
+            let mut f = one_routine(section, symbol);
+            f.body = callees
+                .iter()
+                .map(|c| Stmt {
+                    kind: StmtKind::Call(Call {
+                        callee: Callee::External((*c).into()),
+                        args: Vec::new(),
+                        pad: 0,
+                        link: None,
+                    }),
+                    span: f.span,
+                })
+                .collect();
+            f
+        };
+        let m = Module {
+            name: "tty".into(),
+            functions: vec![
+                calling("wired_proc", "W", &["LOCK", "GET_DESC", "INIT"]),
+                calling(".text", "T", &["LOCK", "GET_DESC", "INIT"]),
+            ],
+            ..Default::default()
+        };
+        let routine = |section: &str, symbol: &str, addr| ModuleRoutine {
+            section: Some(section.into()),
+            symbol: symbol.into(),
+            addr,
+        };
+        let opts = Options {
+            fragment: vec![
+                sect("WIRED_PROC", 0xE1AF0A, false),
+                sect(".text", 0xE67618, false),
+            ],
+            module_routines: vec![
+                routine("WIRED_PROC", "LOCK", 0xE1AED0),
+                routine(".TEXT", "GET_DESC", 0xE66738),
+                routine("OS_INIT_PROC", "INIT", 0xE3324C),
+            ],
+            ..Default::default()
+        };
+        let s = emit(&m, "m.pas", &opts).unwrap();
+        // W at 0xE1AF0A: `bsr.s LOCK` at 0xE1AF0E, 0x40 bytes back,
+        // written as its encoding; GET_DESC (.text) and INIT (a section
+        // the unit does not have) by `jsr`.
+        let w = routine_text(&s, "W");
+        assert!(w.contains("\t.short\t0x61c0\t| bsr.s LOCK\n"), "{w}");
+        assert!(w.contains("\tjsr\t(GET_DESC).l\n"), "{w}");
+        assert!(w.contains("\tjsr\t(INIT).l\n"), "{w}");
+        // T at 0xE67618: GET_DESC is 0xEE0 back, `bsr.w`; LOCK by `jsr`.
+        let t = routine_text(&s, "T");
+        assert!(t.contains("\tbsr.w\tGET_DESC\n"), "{t}");
+        assert!(t.contains("\tjsr\t(LOCK).l\n"), "{t}");
+        assert!(t.contains("\tjsr\t(INIT).l\n"), "{t}");
+        // without a section, a module routine of a unit of several code
+        // sections is an error
+        let mut plain = opts.clone();
+        plain.module_routines[0].section = None;
+        let e = emit(&m, "m.pas", &plain).unwrap_err();
+        assert!(e[0].message.contains("give the routine's"), "{e:?}");
+        // with one code section it is that section's
+        let one = Module {
+            name: "tty".into(),
+            functions: vec![calling("wired_proc", "W", &["LOCK", "GET_DESC"])],
+            ..Default::default()
+        };
+        let opts = Options {
+            fragment: vec![FragmentSection::only(0xE1AF0A)],
+            module_routines: vec![
+                ModuleRoutine::new("LOCK", 0xE1AED0),
+                routine(".text", "GET_DESC", 0xE66738),
+            ],
+            ..Default::default()
+        };
+        let s = emit(&one, "m.pas", &opts).unwrap();
+        assert!(s.contains("\t.short\t0x61c0\t| bsr.s LOCK\n"), "{s}");
+        assert!(s.contains("\tjsr\t(GET_DESC).l\n"), "{s}");
     }
 }

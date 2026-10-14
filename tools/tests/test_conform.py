@@ -382,6 +382,125 @@ class ConformTest(unittest.TestCase):
         with self.assertRaisesRegex(conform.SetupError, 'runs past the end of module PKT'):
             conform.fragment_args(past, self.map)
 
+    # -- fragments of several code sections (bead domain-pascal-xdh.6) -----
+    # TTY: WIRED_PROC 0xE1AED0.., OS_INIT_PROC 0xE3324C.., .TEXT 0xE671DC..
+    def test_unit_groups(self):
+        r = conform.unit_routines(['0xE1B3B4:1A', 'TTY_$K_SET_SESSION_ID',
+                                   'TTY_$K_INQ_SESSION_ID'], self.map)
+        groups = conform.unit_groups(r, self.map)
+        self.assertEqual([[x.addr for x in g] for g in groups],
+                         [[0xE1B3B4], [0xE67986, 0xE679C4]])
+        self.assertEqual(conform.fragment_args(r, self.map),
+                         ['--fragment-origin=WIRED_PROC=0xE1B3B4',
+                          '--fragment-origin=.TEXT=0xE67986'])
+        # a run that ends its segment keeps the module-end padding
+        tail = conform.unit_routines(['0xE1B3B4:1A', 'TTY_$K_PUT'], self.map)
+        self.assertEqual(conform.fragment_args(tail, self.map),
+                         ['--fragment-origin=WIRED_PROC=0xE1B3B4',
+                          '--fragment-origin=.TEXT=0xE67BB2',
+                          '--fragment-ends-module=.TEXT'])
+        # still contiguous within a segment, and one module
+        with self.assertRaisesRegex(conform.SetupError, 'not contiguous'):
+            conform.unit_routines(['0xE1B3B4:1A', 'TTY_$K_INQ_SESSION_ID',
+                                   'TTY_$K_INQ_DELAY'], self.map)
+        r = conform.unit_routines(['0xE1B3B4:1A', 'DISK_$UNASSIGN_ALL'], self.map)
+        with self.assertRaisesRegex(conform.SetupError, 'several modules'):
+            conform.unit_groups(r, self.map)
+
+    def test_module_routine_args_other_sections(self):
+        # one run in WIRED_PROC: a routine of its segment is the unit's
+        # section (plain), one in another TTY segment gets its section
+        r = conform.unit_routines(['0xE1B3B4:1A'], self.map)
+        self.assertEqual(
+            conform.module_routine_args(['module-routines=TTY_$I_PUT_CHARS=0xE1B00A,'
+                                         'TTY_$K_RESET,TTY_$I_INIT'], r, self.map),
+            (['--module-routine=TTY_$I_PUT_CHARS=0xE1B00A',
+              '--module-routine=.TEXT:TTY_$K_RESET=0xE672DE',
+              '--module-routine=OS_INIT_PROC:TTY_$I_INIT=0xE3324C'],
+             {'TTY_$I_PUT_CHARS': 0xE1B00A}))
+        # runs in several sections: every routine with its section
+        r = conform.unit_routines(['0xE1B3B4:1A', 'TTY_$K_SET_SESSION_ID'], self.map)
+        self.assertEqual(
+            conform.module_routine_args(['module-routines=TTY_$I_PUT_CHARS=0xE1B00A,'
+                                         'TTY_$K_RESET'], r, self.map)[0],
+            ['--module-routine=WIRED_PROC:TTY_$I_PUT_CHARS=0xE1B00A',
+             '--module-routine=.TEXT:TTY_$K_RESET=0xE672DE'])
+        # DTTY is another module; OS_TERM's TTY_$I_GET_DESC too
+        for item in ('0xE1D588', 'TTY_$I_GET_DESC'):
+            with self.assertRaisesRegex(conform.SetupError, 'not in the module'):
+                conform.module_routine_args(['module-routines=' + (
+                    'W=' + item if item.startswith('0x') else item)], r, self.map)
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_manifest_two_code_sections(self):
+        unit = ('tests/conformance/tty_sections.pas  0xE1B3B4:1A TTY_$K_SET_SESSION_ID '
+                'TTY_$K_INQ_SESSION_ID  --section-addr .bss.moddata.TTY=0xE8242C  '
+                'a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID')
+        rc, out = self.manifest('two_on.txt', unit + '  module-routines=TTY_$I_PUT_CHARS=0xE1B00A')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(out.splitlines()), 3, out)
+        # the `bsr.w' displacement is checked against the address
+        rc, out = self.manifest('two_bad.txt', unit + '  module-routines=TTY_$I_PUT_CHARS=0xE1B00C')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('TTY_$I_PUT_CHARS', out)
+        # a unit with only one of its runs
+        rc, out = self.manifest('two_short.txt', unit.replace('0xE1B3B4:1A ', '') +
+                                '  module-routines=TTY_$I_PUT_CHARS=0xE1B00A')
+        self.assertEqual(rc, 2, out)
+
+    def test_check_two_code_sections_needs_origins(self):
+        # an .s whose routines are in two map segments but that was not
+        # compiled as a fragment of each
+        path = os.path.join(SCRATCH, 'two_no_origins.s')
+        with open(path, 'w') as f:
+            f.write('\t.text\n\trts\n')
+        with self.assertRaisesRegex(conform.SetupError, 'in 2 map segments'):
+            self.run_check(path, ['0xE1B3B4:1A', 'TTY_$K_SET_SESSION_ID'])
+        # two code sections at one origin: the other run is uncovered
+        path = os.path.join(SCRATCH, 'two_one_origin.s')
+        with open(path, 'w') as f:
+            f.write('\t.set\t__dpc_fragment_origin.text.A.WIRED_PROC,0xe1b3b4\n'
+                    '\t.set\t__dpc_fragment_origin.text.B.WIRED_PROC,0xe1b3b4\n'
+                    '\t.section\t".text.A.WIRED_PROC","ax",@progbits\n\trts\n'
+                    '\t.section\t".text.B.WIRED_PROC","ax",@progbits\n\trts\n')
+        with self.assertRaisesRegex(conform.SetupError, 'several code sections compiled'):
+            self.run_check(path, ['0xE1B3B4:1A', 'TTY_$K_SET_SESSION_ID'])
+
+    @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
+    def test_check_two_code_sections_per_section(self):
+        # tty_sections compiled as conform does; then perturbed by hand
+        src = os.path.join(conform.REPO, 'tests', 'conformance', 'tty_sections.pas')
+        work = os.path.join(SCRATCH, 'two_sections')
+        os.makedirs(work, exist_ok=True)
+        asm = conform.compile_pas(src, DPC, work, [
+            '--fragment-origin=WIRED_PROC=0xE1B3B4', '--fragment-origin=.TEXT=0xE67986',
+            '--a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID',
+            '--module-routine=WIRED_PROC:TTY_$I_PUT_CHARS=0xE1B00A'])
+        specs = ['0xE1B3B4:1A', 'TTY_$K_SET_SESSION_ID', 'TTY_$K_INQ_SESSION_ID']
+        kw = dict(section_addrs={'.bss.moddata.TTY': 0xE8242C},
+                  local_syms={'TTY_$I_PUT_CHARS': 0xE1B00A})
+        ok, out = self.run_check(asm, specs, work=work, **kw)
+        self.assertTrue(ok, out)
+        with open(asm) as f:
+            text = f.read()
+
+        def variant(name, old, new):
+            self.assertIn(old, text)
+            path = os.path.join(work, name)
+            with open(path, 'w') as f:
+                f.write(text.replace(old, new))
+            return path
+        # the .TEXT pad must be zero
+        bad = variant('pad.s', '\t.space\t2\t|', '\t.short\t0x4e71\t|')
+        ok, out = self.run_check(bad, specs, work=work, **kw)
+        self.assertFalse(ok)
+        self.assertIn('fragment pad 0xE67984..0xE67986 is not zero', out)
+        # the WIRED_PROC routine compiled into another code section:
+        # same bytes, wrong output section
+        bad = variant('sect.s', 'WIRED_PROC', 'OS_INIT_PROC')
+        with self.assertRaisesRegex(conform.SetupError, 'in output section WIRED_PROC'):
+            self.run_check(bad, specs, work=work, **kw)
+
     # -- a compiled multi-routine fragment of length 0x2E ------------------
     @unittest.skipUnless(os.path.exists(DPC), 'dpc not built')
     def test_compiled_fragment_has_no_module_end_padding(self):

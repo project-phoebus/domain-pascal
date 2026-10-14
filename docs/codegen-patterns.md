@@ -4641,9 +4641,13 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     routine's (the `movea.l #block,An` form above), overlay sections
     (`var (name)` with a name that is no data section of the unit), a
     nested routine in another code section than its parent, section
-    names with characters other than letters, digits, `_`, `$`, `.`,
-    and a fragment (`--fragment-origin`) with more than one code
-    section.
+    names with characters other than letters, digits, `_`, `$`, `.`.
+  - *Fragments of several code sections* (test scaffolding, bead
+    domain-pascal-xdh.6): `--fragment-origin=SECTION=0xADDR` per code
+    section, each with its own pad and module-end padding; a routine of
+    the module outside the unit, `--module-routine=SECTION:NAME=0xADDR`,
+    is a `bsr` from its own section and stays `jsr abs.l` from another,
+    as calls across sections are above.
   - *Options per section* (bead domain-pascal-lco): `--loop-align-off-
     from=R,...` and `--a5-always-from=R,...` take one routine per code
     section and switch only that section, from R on (each map segment
@@ -4653,8 +4657,10 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     section at its map segment (`tools/conform.py` links a code section
     named in `--section-addr` there and compares it whole);
     `proc1_get_loadav.pas` and `smd_busy_wait.pas` name their real
-    sections (WIRED_PROC, WIRED_DATA) and are unchanged in bytes.
-    Golden `tests/golden/sections/named_sections`.
+    sections (WIRED_PROC, WIRED_DATA) and are unchanged in bytes;
+    `tty_sections.pas`, a fragment of TTY's WIRED_PROC and .TEXT, each
+    section at its own origin.  Goldens `tests/golden/sections/
+    named_sections`, `sections/section_fragments`.
 - **Constants (Verified by survey; section 1.5):** constants passed by
   address sit in the code section, in cells right after the code of the
   routine that first uses them (`rts`, then the cells; 733 + 305 sites,
