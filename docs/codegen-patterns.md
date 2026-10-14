@@ -1890,7 +1890,10 @@ variables.  Each module's static data is a data segment, addressed off
       no LOG_ block.  DISK_$DIAG_IO is the `extern` case; LOG_$INIT is
       LOG_'s own code in OS_INIT_PROC, so it may equally be the
       module's block of another data section (section 11, "Data per
-      section"); the image does not tell them apart.)
+      section"); the image does not tell them apart.  The survey of
+      section 11, "Data per section", finds `move.l #block,-(SP)` the
+      only form of the first variable of a module's block of another
+      data section passed by address, 12 sites, so `dpc` emits it so.)
   - **Hypotheses refuted** (counts from `tools/a5survey.py summary`):
     - *Several compilation units per map segment, each "all or
       nothing".*  The routines on both sides of a switch share the same
@@ -5477,7 +5480,9 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   (0xE535FE `jsr 0xE4B340`, 0x82BE bytes back): the segment is 0x8FD0
   bytes, beyond `bsr.w`'s reach (not implemented: no unit is that
   large).
-- **Data per section (Verified at the sites).**  A routine's A5 is its
+- **Data per section (Verified at the sites and by survey; reload rule
+  across branch targets Uncertain; implemented for straight-line
+  routines).**  A routine's A5 is its
   module's block in the data section paired with its code section
   (section 4, "What A5 points at"); an unnamed routine called from
   another section loads its own (0xE14B12 `lea 0xE254E8,A5`, PROC1_'s
@@ -5500,11 +5505,94 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   `pea (A5)` (0xE175EE).  A defined global of the block is reached off
   the register too, LOG_$LOGFILE_PTR as `(0x14,A0)` (0xE301B6), while
   another module writes it by symbol (`clr.l 0xE2B294`, 0xE14104).
-  When the register is reloaded is not settled (Uncertain): every
-  LOG_$INIT reload follows a call or a branch target, so keeping it
-  across a plain statement is not seen (lead: ../source
-  pascal-translation-notes finding 24).  `dpc` refuses this form (bead
-  domain-pascal-a2g).
+  - *Survey (Verified counts; `tools/sectsurvey.py otherdata [-v]`,
+    bead domain-pascal-a2g).*  Every operand of compiled code (reachable
+    instructions, a5survey's routines) naming a `D` segment of the
+    routine's own module name, by whether that segment is in the data
+    section paired with the routine's code section ("own") or not
+    ("other"), and by form.  Other-section operands: `movea.l #block,An`
+    205 (OS_INIT_PROC: 87 WIRED_DATA, 47 .DATA, 3 RING_DATA; PROCEDURE$
+    18; PROC2_CREATE_PRO 28; PROC2_DELETE_PRO 17; WIRED_PROC 5, FLP_$INT
+    and SMD_$COPY_FONT_TO_MD_HDM reaching .DATA); `move.l #block,-(SP)`
+    12 (an argument by address, always the block's first variable: LOG_$INIT
+    0xE30054 x4, RIP_$INIT 0xE2FD94, PCHIST_$INIT 0xE32398, SIO_$INIT
+    0xE32E24, TERM_$INIT 0xE330B2, 0xE33152, PROC2_$INIT 0xE3070C, NAME_$INIT
+    0xE31860, the PROC2 module-local 0xE74526); `move.l #block,Dn` 3
+    (MAC_OS_$INIT 0xE2F518, SOCK_$INIT 0xE2FE02, TERM_$INIT 0xE32ED6, the
+    block then kept in a data register); `lea block,A5` 8, which are the
+    A5 cases above (PCHIST .TEXT, SMD's PROCEDURE$ module-local 0xE72690,
+    the DATA$ 4-byte blocks).  **No absolute operand `(block+d).l`** and
+    no `lea block,An` reaches another section's block.  Every `movea.l
+    #block` loads the block's start (offset 0) except 2 in OS_INIT_PROC
+    (+8); the variables are `(d,An)` off it (`pea (d,An)` 27 times right
+    after the load), the first one `(An)` (EC2_$INIT_S 0xE309A8 `clr.l
+    (A0)`).  (Own-section operands, for comparison: `lea block,A5` 859;
+    the 3 `--a5-absolute` `lea abs,An` of section 4; 27 `movea.l #` and
+    one `tst.b abs.l` in DISK_ that reach *another unit's* DISK_ block at
+    nonzero offsets, the `extern` case.)
+  - *When the register is loaded (same survey, in address order over
+    the 70 routines).*  70 first loads; 122 loads after a call (or after
+    the register was overwritten): the block's register never survives a
+    call (DXM_$INIT 0xE2FF54/0xE2FF66 around `jsr EC_$INIT`; KBD_$INIT
+    0xE3339E), and it is not held through a call whose arguments use it
+    last either: XNS_IDP_$INIT 0xE3026E `movea.l #0xE2B314,A0` in one
+    statement, `pea (0x520,A0)` for the next one's call, in A0 (contrast
+    section 12.4 R4(c) for parameters).  340 uses of a register still
+    holding the block, across statements without calls (SUMA_$INIT
+    0xE33228: one load, four statements; PROC1_$INIT 0xE2F95C: one load,
+    four stores).  Only 5 loads while a register holds the block with no
+    call or branch target in between, none a statement boundary: FLP_$INT
+    0xE19F82 (two registers in one statement, one stepped to an element),
+    NAME_$FORK 0xE73EAC/0xE73EB2 (each array element address from its own
+    load), RINGLOG_$CNTL 0xE72270/0xE7227E (`case` arms, jump-table
+    targets).  Across branch targets the image does both: 8 loads again
+    at a join (AST_$ACTIVATE_ASTE_CANNED 0xE2F266, NAME_$INIT 0xE317C0,
+    NET_IO_$BOOT_DEVICE 0xE31C66, 0xE31C7A, ...), and 26 uses past one
+    with the register kept (NETWORK_$READ_SERVICE 0xE71D9A after an `if`;
+    loops whose block load precedes them, AREA_$INIT 0xE2F3FC, TPAD_$INIT
+    0xE335A4).  Which decides is not known (Uncertain).
+  - *Placement at entry.*  When the first statement starts with the
+    block (a store, KBD_$INIT; a test, NETWORK_$READ_SERVICE and the
+    RINGLOG_ module-local), its load precedes the parameter loads of the
+    entry and the static link, as A5's does: KBD_$INIT 0xE3336A before
+    `movea.l (8,A6),A2`; NETWORK_$READ_SERVICE 0xE71D80 (into A1) before
+    `movea.l (8,A6),A0`; the RINGLOG_ module-local 0xE721D4 before `movea.l
+    (A6),A2`.  No routine with entry loads has them first when its first
+    statement starts with the block (FLP_$INT 0xE19F74 loads a pointer
+    parameter used once, within the statement).
+  - *What `dpc` emits (implemented, bead domain-pascal-a2g).*  A static
+    variable of another data section than the routine's (top-level
+    routine's for a nested one) is `dpc_ir::Addr::OtherStatic`; it does
+    not count as a use of the data base (section 4).  The selector
+    (`Selector::other_base`) loads the block's label `movea.l
+    #.Ldata.<SECT>,An` into a virtual address register where the first
+    operand needs it, keeps it for the following statements, forgets it
+    at every call (`jsr`, `bsr`, M$ARITH), and never holds it through a
+    call (`held_through_calls`); the variables are `(d,An)`, `(An)` at
+    offset 0; by address, the block's first variable is `move.l
+    #block,-(SP)` and the others `pea (d,An)`; `addr(x)` as a value is
+    `lea (d,An),Am` (KBD_$INIT 0xE333A4).  A first statement storing a
+    constant into the block loads it before the entry loads.  Refused:
+    any branch or label in a routine that reaches another section's
+    block (the reload rule above); `addr` of the block's first variable
+    as a value (not seen); a first statement that reaches the block
+    otherwise, in a routine with entry loads (the order is not seen); a
+    block load before entry loads of which one lands in A0 or A1 (the
+    one such site, NETWORK_$READ_SERVICE 0xE71D80, has `movea.l
+    #0xE248FC,A1; movea.l (8,A6),A0`, the parameter in the lower
+    register, which lowest-free allocation in load order does not give;
+    KBD_$INIT and the RINGLOG_ module-local agree only because their
+    parameter or static link is in A2); a block register live across a
+    call within one statement (`l := b + g(x)`, the operand's base taken
+    before the call: never seen, where the original loads it is not
+    known);
+    array elements of the block (the element address forms, NAME_$FORK
+    above, are not modelled: the existing refusal of elements outside
+    the unit's data, the frame or a held pointer); the `move.l
+    #block,Dn` form (bead domain-pascal-hxwq).  Conformance: `tests/conformance/suma_init.pas`
+    (SUMA_$INIT) and `dxm_init.pas` (DXM_$INIT), byte-identical; golden
+    `sections/other_data_section` (the KBD_$INIT shapes); exec test
+    `other_section_data`.
 - **PROCEDURE$ and DATA$ (Verified at the sites; pairing Uncertain;
   lead: ../source pascal-translation-notes finding 33).**  KBD's
   PROCEDURE$ segment 0xE724C4 loads no A5 and reaches KBD's WIRED_DATA
@@ -5572,8 +5660,7 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     0xE14B12 shape; whether the original's rule is "called from another
     data section" or "called from another code section" cannot be told
     apart, the pairs always coincide).
-  - *Refused:* a static variable of another data section than the
-    routine's (the `movea.l #block,An` form above), overlay sections
+  - *Refused:* overlay sections
     (`var (name)` with a name that is no data section of the unit), a
     nested routine in another code section than its parent, section
     names with characters other than letters, digits, `_`, `$`, `.`.

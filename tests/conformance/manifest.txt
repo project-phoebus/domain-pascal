@@ -225,3 +225,9 @@ tests/conformance/pacct_on.pas               PACCT_$ON:26  --section-addr .bss.m
 # Unsigned longwords (codegen-patterns 5, 7.1; bead domain-pascal-5j9):
 # `linteger(addr(ec)) > 1000' as `cmpi.l; bls'.
 tests/conformance/ec2_init.pas               EC2_$INIT
+# Another data section's block (codegen-patterns 11, "Data per section";
+# bead domain-pascal-a2g): routines in OS_INIT_PROC reach their module's
+# WIRED_DATA block by `movea.l #block,A0' and `(d,A0)', one load for the
+# statements up to a call, loaded again after it; no A5.
+tests/conformance/suma_init.pas              SUMA_$INIT  --section-addr .bss.moddata.BITPAD.WIRED_DATA=0xE2DD88
+tests/conformance/dxm_init.pas               DXM_$INIT  --section-addr .bss.moddata.DXM_WIRED_.WIRED_DATA=0xE2A7C0

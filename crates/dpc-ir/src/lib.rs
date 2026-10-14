@@ -10,7 +10,9 @@
 //! - objects in the unit's own static data area are offsets into it
 //!   ([`Addr::Static`]; the target reaches the area through a base
 //!   register, A5 on m68k, which the routines marked
-//!   [`Function::loads_data_base`] load on entry);
+//!   [`Function::loads_data_base`] load on entry); objects in the
+//!   unit's area of another data section than the routine's are
+//!   [`Addr::OtherStatic`];
 //! - data reached through a pointer is [`Addr::Indirect`];
 //! - every value has an explicit [`Scalar`] type: a [`Width`] and a
 //!   [`Sign`], so the selector can choose sign- or zero-extension, signed
@@ -1013,6 +1015,13 @@ pub enum Addr {
     Const(PoolConst),
     /// The unit's own static data area ([`Module::data`]) + offset.
     Static(i32),
+    /// The unit's static data area of data section `section`, another
+    /// than the routine's ([`Function::data_section`]), + offset: the
+    /// module's block of another data section, which the routine does
+    /// not reach through its data base (codegen-patterns 11, "Data per
+    /// section": PROC1_$INIT 0xE2F95C in OS_INIT_PROC, `movea.l
+    /// #0xE254E8,A0`, PROC1_'s WIRED_DATA block, then `(0xc40,A0)`).
+    OtherStatic { section: String, offset: i32 },
     /// The pointer value `base` + offset.
     Indirect { base: Box<Expr>, offset: i32 },
     /// An array element: the address `base` + `index` × `scale` +
@@ -1067,6 +1076,10 @@ impl Addr {
             Addr::Frame(o) => Addr::Frame(o + delta),
             Addr::Enclosing(o) => Addr::Enclosing(o + delta),
             Addr::Static(o) => Addr::Static(o + delta),
+            Addr::OtherStatic { section, offset } => Addr::OtherStatic {
+                section,
+                offset: offset + delta,
+            },
             Addr::Symbol { name, offset } => Addr::Symbol {
                 name,
                 offset: offset + delta,

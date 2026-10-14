@@ -3328,12 +3328,51 @@ fn named_sections() {
     assert_eq!(m.functions[3].body.len(), 2);
 }
 
-/// A routine reaches only its own data section's block through the data
-/// base; another section's data is addressed absolutely in the image
-/// (PROC1_$INIT 0xE2F95C `movea.l #0xE254E8,A0`), not supported.
+/// A routine reaches its own data section's block through the data base
+/// ([`Addr::Static`]) and another data section's block as
+/// [`Addr::OtherStatic`] (codegen-patterns 11: PROC1_$INIT 0xE2F95C
+/// `movea.l #0xE254E8,A0`, PROC1_'s WIRED_DATA block from OS_INIT_PROC),
+/// which does not make the routine load its data base.
 #[test]
 fn static_of_another_data_section() {
-    let e = errs(
+    let m = lower_src(
+        "module s, wired_proc, wired_data;
+var
+  hits: integer32;
+[section(init_proc, init_data)]
+procedure s_$init;
+var
+  n: static integer;
+begin
+  hits := 0;
+  n := 1;
+end;
+",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(f.data_section, "init_data");
+    assert!(f.loads_data_base);
+    let addrs: Vec<&Addr> = f
+        .body
+        .iter()
+        .map(|st| match &st.kind {
+            StmtKind::Store { addr, .. } => addr,
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(
+        addrs,
+        [
+            &Addr::OtherStatic {
+                section: "wired_data".into(),
+                offset: 0
+            },
+            &Addr::Static(0),
+        ]
+    );
+    // Only another section's data: no data base.
+    let m = lower_src(
         "module s, wired_proc, wired_data;
 var
   hits: integer32;
@@ -3343,16 +3382,11 @@ begin
   hits := 0;
 end;
 ",
-    );
-    assert_eq!(
-        e,
-        vec![
-            "t.pas:7:3: error: a static variable of data section `wired_data` in a routine whose \
-              data section is `init_data` is not supported yet"
-        ]
-    );
+    )
+    .unwrap();
+    assert!(!m.functions[0].loads_data_base);
     // A nested routine has its top-level routine's data base.
-    let e = errs(
+    let m = lower_src(
         "module s;
 var
   hits: integer32;
@@ -3367,14 +3401,16 @@ begin
   q;
 end;
 ",
-    );
-    assert_eq!(
-        e,
-        vec![
-            "t.pas:9:5: error: a static variable of data section `other_data` in a routine \
-              whose data section is `.data` is not supported yet"
-        ]
-    );
+    )
+    .unwrap();
+    let q = m.functions.iter().find(|f| f.symbol != "S_$P").unwrap();
+    assert!(matches!(
+        &q.body[0].kind,
+        StmtKind::Store {
+            addr: Addr::OtherStatic { section, offset: 0 },
+            ..
+        } if section == "other_data"
+    ));
 }
 
 #[test]

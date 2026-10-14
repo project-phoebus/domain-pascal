@@ -166,7 +166,11 @@ impl Walk<'_> {
                     self.out.locals[k].other = true;
                 }
             }
-            Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
+            Addr::Enclosing(_)
+            | Addr::Static(_)
+            | Addr::OtherStatic { .. }
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => {}
             Addr::Volatile { addr, .. } => self.other(addr),
             Addr::Indirect { base, .. } => match &**base {
                 // A local dereferenced as a pointer.

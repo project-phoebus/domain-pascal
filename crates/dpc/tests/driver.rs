@@ -2711,3 +2711,102 @@ end;
     assert!(a.contains("jsr\t(Q).l"), "{a}");
     assert_eq!(a, b);
 }
+
+/// Another data section's block (codegen-patterns 11, "Data per section";
+/// bead domain-pascal-a2g): `movea.l #block,An` and `(d,An)`, without A5;
+/// the shapes the image does not settle are refused.
+#[test]
+fn other_data_section_block() {
+    let src = "module s, wired_proc, wired_data;
+var
+  hits: integer32;
+  limit: integer;
+procedure ec_$init(var x: integer32); extern;
+[section(os_init_proc, os_init_data)]
+procedure s_$init;
+begin
+  limit := 3;
+  hits := 0;
+  ec_$init(hits);
+  limit := 4;
+end;
+";
+    let asm = compile_with("other_data_section_block", src, &[]).unwrap();
+    assert!(
+        asm.contains(
+            "\tmovea.l\t#.Ldata.WIRED_DATA,%a0\n\tmove.w\t#3,(4,%a0)\n\tclr.l\t(%a0)\n\
+             \tmove.l\t#.Ldata.WIRED_DATA,-(%sp)\n\tjsr\t(EC_$INIT).l\n\
+             \tmovea.l\t#.Ldata.WIRED_DATA,%a0\n\tmove.w\t#4,(4,%a0)\n"
+        ),
+        "{asm}"
+    );
+    assert!(!asm.contains("%a5"), "{asm}");
+    for (body, what) in [
+        (
+            "procedure s_$p(n: integer);
+begin
+  if n = 0 then limit := 1;
+end;",
+            "a routine that reaches another data section's block and branches",
+        ),
+        (
+            "procedure s_$p;
+var
+  p: ^integer32;
+begin
+  p := addr(hits);
+  p^ := 1;
+end;",
+            "the address of the first variable of another data section's block as a value",
+        ),
+        (
+            "procedure s_$p(var q: rec);
+begin
+  limit := q.a;
+  q.b := 2;
+  q.d := limit;
+end;",
+            "a first statement that reaches another data section's block other than by a \
+             constant store",
+        ),
+        (
+            // The operand's base taken before the call is evaluated.
+            "function s_$g(x: integer32): integer32; extern;
+[section(os_init_proc, os_init_data)]
+procedure s_$p;
+var
+  l: integer32;
+begin
+  l := hits + s_$g(1);
+  hits := l;
+end;",
+            "another data section's block reached on both sides of a call in one statement",
+        ),
+        (
+            // NETWORK_$READ_SERVICE 0xE71D80 has the parameter in A0, the
+            // block in A1.
+            "procedure s_$p(var q: rec);
+begin
+  limit := 0;
+  q.b := 2;
+  q.d := 3;
+end;",
+            "a parameter loaded at entry into A0 or A1 after another data section's block",
+        ),
+    ] {
+        let src = format!(
+            "module s, wired_proc, wired_data;
+type
+  rec = record a, b, c, d: integer; end;
+var
+  hits: integer32;
+  limit: integer;
+[section(os_init_proc, os_init_data)]
+{body}
+"
+        );
+        let (code, err) = compile_with("other_data_section_refused", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1));
+        assert!(err.contains(what), "{what}: {err}");
+    }
+}

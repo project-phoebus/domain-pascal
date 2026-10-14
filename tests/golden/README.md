@@ -162,6 +162,12 @@ Tests:
   unit (`--module-routine=SECTION:NAME=0xADDR`) called with `bsr` from
   their own section (an encoded `bsr.s`, a `bsr.w`) and `jsr abs.l` from
   another or from a section the unit lacks (TTY_$K_RESET 0xE6730E).
+- `sections/other_data_section` - codegen-patterns 11, "Data per
+  section": another data section's block by `movea.l #block,An` and
+  `(d,An)`, loaded before the entry loads for a first constant store,
+  again after each call, `lea (d,An),Am` for `addr`, `move.l
+  #block,-(SP)` for the block's first variable by address (KBD_$INIT
+  0xE3336A, DXM_$INIT 0xE2FF54, LOG_$INIT 0xE30054).
 - `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the
   allocator (bead domain-pascal-g5q.5): parameters held across calls in
   A2/D2 with `pea (d,A2)` pushes (module-local 0xE32B76), a third data

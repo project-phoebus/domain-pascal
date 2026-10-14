@@ -292,6 +292,9 @@ fn select_body_with(
         }
     });
     s.label_clean = label_tails(&f.body, nlabels);
+    // The entry loads (their range in `out`) after a block of another
+    // data section loaded before them, checked after allocation.
+    let mut hoisted: Option<std::ops::Range<usize>> = None;
     if s.multi_body {
         let reads_value_param = param_uses(f)
             .iter()
@@ -309,7 +312,36 @@ fn select_body_with(
         // callee-saved register by the allocator (codegen-patterns 12.4
         // R3: PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`;
         // module-local 0xE32B76, 0xE32B7E A2, D2 around three).
+        // The block of another data section that the first statement
+        // reaches is loaded before the parameters loaded at entry and the
+        // static link, as A5 is (KBD_$INIT 0xE3336A `movea.l #0xE2DDE4,A0`
+        // before 0xE33370 `movea.l (8,A6),A2`; NETWORK_$READ_SERVICE
+        // 0xE71D80 before `movea.l (8,A6),A0`; the RINGLOG_ module-local
+        // 0xE721D4 before `movea.l (A6),A2`; no routine loads its
+        // parameters first when its first statement starts with the block,
+        // `tools/sectsurvey.py otherdata`).
+        // Where the block of a first statement that reaches it otherwise
+        // is loaded relative to those loads is not seen: refused below.
+        let first = stmts.first().copied();
+        if let Some(section) = first.and_then(first_other_static) {
+            s.other_base(&section)?;
+        }
+        let pinned = s.pinned.len();
+        let entry_start = s.out.len();
         s.entry_loads(f)?;
+        if !s.other_base_loads.is_empty() {
+            hoisted = Some(entry_start..s.out.len());
+        }
+        if s.pinned.len() > pinned
+            && first.is_some_and(|st| first_other_static(st).is_none() && mentions_other_static(st))
+        {
+            return Err(unsupported(
+                first.unwrap().span,
+                "a first statement that reaches another data section's block other than by a \
+                 constant store, in a routine that loads parameters at entry (which the \
+                 original loaded first is not seen, codegen-patterns 11) is",
+            ));
+        }
         s.entry_regs = s.pinned.iter().map(|&(_, r)| r).collect();
         // A function body of several statements holds its result variable
         // in a register up to the epilogue (codegen-patterns 3, "Result
@@ -358,6 +390,22 @@ fn select_body_with(
         }
     }
     s.seq(f, &f.body, Tail::END)?;
+    if !s.other_base_loads.is_empty()
+        && s.out
+            .iter()
+            .any(|i| matches!(i, Insn::Branch { .. } | Insn::Dbf { .. } | Insn::Label(_)))
+    {
+        // Across a branch target the image both keeps the block's register
+        // (NETWORK_$READ_SERVICE 0xE71D9A after an `if`; loops, TPAD_$INIT
+        // 0xE335A4) and loads it again (AST_$ACTIVATE_ASTE_CANNED 0xE2F266,
+        // NAME_$INIT 0xE317C0, NET_IO_$BOOT_DEVICE 0xE31C66): not settled
+        // (codegen-patterns 11).
+        return Err(unsupported(
+            f.span,
+            "a routine that reaches another data section's block and branches (where the \
+             block's address is loaded again is not settled, codegen-patterns 11) is",
+        ));
+    }
     if f.data_absolute
         && s.out.iter().any(|i| {
             matches!(
@@ -517,8 +565,46 @@ fn select_body_with(
                 .filter_map(|p| p.home.map(|(a, _)| Reg::A(a))),
         )
         .collect();
-    let mut holds =
-        held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
+    // The registers holding another data section's block: not held
+    // through a call whose arguments use them last (XNS_IDP_$INIT
+    // 0xE3026E..0xE30280: `movea.l #0xE2B314,A0` in one statement,
+    // `pea (0x520,A0)` for the call of the next; MAC_OS_$INIT 0xE2F504),
+    // loaded again after it ([`Selector::other_base`]).
+    let blocks: Vec<Reg> = s
+        .other_base_loads
+        .iter()
+        .filter_map(|&i| match s.out[i] {
+            Insn::Movea { dst, .. } => Some(Reg::A(dst)),
+            _ => None,
+        })
+        .collect();
+    // A block's register loaded before a call and read after it (`l := b
+    // + g(x)`: the operand's base taken before the call is evaluated):
+    // the survey sees no block register live across a call, every use
+    // after one follows a load of its own (codegen-patterns 11); where the
+    // original loads the block for such an expression is not seen.
+    if !blocks.is_empty() {
+        let live_out = crate::regs::liveness(&s.out, exit, &[]);
+        if let Some(&(_, _, span)) = s.call_stmts.iter().find(|&&(_, c, _)| {
+            blocks
+                .iter()
+                .any(|&r| live_out[c].contains(&crate::regs::RegKey(r)))
+        }) {
+            return Err(unsupported(
+                span,
+                "another data section's block reached on both sides of a call in one statement \
+                 (where the original loads the block is not seen, codegen-patterns 11) is",
+            ));
+        }
+    }
+    let mut holds = held_through_calls(
+        &s.out,
+        &s.call_stmts,
+        exit,
+        s.link.map(Reg::A),
+        &held_ptrs,
+        &blocks,
+    )?;
     // A parked local's data register stays the local's until its last
     // dereference, though only the address register is read there: the
     // image leaves D0 alone over that range (TTY_$K_SET_INPUT_FLAG
@@ -605,6 +691,29 @@ fn select_body_with(
         .collect();
     let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first, &after)
         .map_err(|what| unsupported(f.span, what))?;
+    if let Some(range) = hoisted {
+        // A parameter loaded at entry into a scratch address register
+        // after the block's load: the one such site has the parameter in
+        // the lower register, `movea.l #0xE248FC,A1; movea.l (8,A6),A0`
+        // (NETWORK_$READ_SERVICE 0xE71D80), against the lowest-free
+        // allocation in definition order that gives the block A0 here;
+        // the sites that agree hold the parameter or static link in A2
+        // (KBD_$INIT 0xE3336A, the RINGLOG_ module-local 0xE721D4).  Not
+        // settled (codegen-patterns 11, "Placement at entry").
+        if s.out[range].iter().any(|i| {
+            crate::regs::access(i)
+                .defs
+                .iter()
+                .any(|r| matches!(r, Reg::A(0) | Reg::A(1)))
+        }) {
+            return Err(unsupported(
+                f.span,
+                "a parameter loaded at entry into A0 or A1 after another data section's block \
+                 (which of the two takes the lower register is not settled, codegen-patterns 11) \
+                 is",
+            ));
+        }
+    }
     let dropped = reuse_pointer_copies(&mut s.out, &s.ptr_copies);
     if !dropped.is_empty() {
         // A register only a dropped copy took is not saved.
@@ -950,12 +1059,16 @@ fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Ve
 /// 6), loaded at entry like a parameter; whether the original held it
 /// through a call whose arguments use it last (reaching the enclosing
 /// frame, or passing it on to a sibling) is not seen either.
+///
+/// `blocks`: the registers holding another data section's block
+/// ([`Selector::other_base`]): never held, loaded again after the call.
 fn held_through_calls(
     out: &[Insn],
     calls: &[(usize, usize, Span)],
     exit: &[Reg],
     link: Option<Reg>,
     ptrs: &[Reg],
+    blocks: &[Reg],
 ) -> Res<Vec<(usize, Reg)>> {
     let straight = !out
         .iter()
@@ -971,6 +1084,7 @@ fn held_through_calls(
         for i in &out[start..call] {
             for r in crate::regs::access(i).uses {
                 if !defined_before.contains(&r)
+                    || blocks.contains(&r)
                     || live_out[call].contains(&crate::regs::RegKey(r))
                     || holds.contains(&(call, r))
                 {
@@ -1549,6 +1663,34 @@ enum Node<'a> {
     Call(&'a Call),
 }
 
+/// The data section of `st`'s target when `st` stores a constant into
+/// another data section's block ([`Addr::OtherStatic`]): the statement
+/// starts with that block's address (KBD_$INIT 0xE33374 `clr.l
+/// (0x58,A0)`).
+fn first_other_static(st: &Stmt) -> Option<String> {
+    match &st.kind {
+        StmtKind::Store {
+            addr,
+            value: Expr::Const { .. },
+        } => match addr.unwrap_volatile().0 {
+            Addr::OtherStatic { section, .. } => Some(section.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `st` reaches another data section's block anywhere.
+fn mentions_other_static(st: &Stmt) -> bool {
+    let mut found = false;
+    walk(std::slice::from_ref(st), &mut |n| {
+        if let Node::Addr(Addr::OtherStatic { .. }) = n {
+            found = true;
+        }
+    });
+    found
+}
+
 /// Visit `e` and every expression, address and call inside it.
 fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
     v(Node::Expr(e));
@@ -1584,6 +1726,7 @@ fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
         Addr::Frame(_)
         | Addr::Enclosing(_)
         | Addr::Static(_)
+        | Addr::OtherStatic { .. }
         | Addr::Symbol { .. }
         | Addr::Const(_) => {}
         Addr::Volatile { addr, .. } => walk_addr(addr, v),
@@ -1748,6 +1891,7 @@ fn store_may_write(w: &Addr, wbytes: u32, l: &Addr, lbytes: u32, escaped: bool) 
     enum Root<'a> {
         Frame(i32),
         Static(i32),
+        OtherStatic(&'a str, i32),
         Symbol(&'a str, i32),
         Enclosing,
         Pointer,
@@ -1757,6 +1901,7 @@ fn store_may_write(w: &Addr, wbytes: u32, l: &Addr, lbytes: u32, escaped: bool) 
         match a {
             Addr::Frame(o) => (Root::Frame(*o), true),
             Addr::Static(o) => (Root::Static(*o), true),
+            Addr::OtherStatic { section, offset } => (Root::OtherStatic(section, *offset), true),
             Addr::Symbol { name, offset } => (Root::Symbol(name, *offset), true),
             Addr::Enclosing(_) => (Root::Enclosing, true),
             Addr::Indirect { .. } => (Root::Pointer, true),
@@ -1769,6 +1914,9 @@ fn store_may_write(w: &Addr, wbytes: u32, l: &Addr, lbytes: u32, escaped: bool) 
     match (root(w), l) {
         ((Root::Frame(p), exact), Addr::Frame(o)) => !exact || overlap(p, *o),
         ((Root::Static(p), exact), Addr::Static(o)) => !exact || overlap(p, *o),
+        ((Root::OtherStatic(s, p), exact), Addr::OtherStatic { section, offset }) => {
+            s == section && (!exact || overlap(p, *offset))
+        }
         ((Root::Symbol(n, p), exact), Addr::Symbol { name, offset }) => {
             n == name && (!exact || overlap(p, *offset))
         }
@@ -1810,6 +1958,7 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
             // data, or the object a pointer points to.
             Addr::Enclosing(_)
             | Addr::Static(_)
+            | Addr::OtherStatic { .. }
             | Addr::Symbol { .. }
             | Addr::Indirect { .. }
             | Addr::Const(_) => None,
@@ -2789,6 +2938,7 @@ fn addr_has_call(a: &Addr) -> bool {
         Addr::Frame(_)
         | Addr::Enclosing(_)
         | Addr::Static(_)
+        | Addr::OtherStatic { .. }
         | Addr::Symbol { .. }
         | Addr::Const(_) => false,
         Addr::Volatile { addr, .. } => addr_has_call(addr),
@@ -2926,6 +3076,13 @@ fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
         Addr::Frame(o) => Some((Addr::Frame(0), *o)),
         Addr::Enclosing(o) => Some((Addr::Enclosing(0), *o)),
         Addr::Static(o) => Some((Addr::Static(0), *o)),
+        Addr::OtherStatic { section, offset } => Some((
+            Addr::OtherStatic {
+                section: section.clone(),
+                offset: 0,
+            },
+            *offset,
+        )),
         Addr::Symbol { name, offset } => Some((
             Addr::Symbol {
                 name: name.clone(),
@@ -3128,6 +3285,7 @@ impl Uses<'_> {
             Addr::Frame(_)
             | Addr::Enclosing(_)
             | Addr::Static(_)
+            | Addr::OtherStatic { .. }
             | Addr::Symbol { .. }
             | Addr::Const(_) => {}
         }
@@ -3396,6 +3554,13 @@ pub struct Selector {
     /// With `data_absolute`: the address register the area's address was
     /// loaded into, once the first static operand needed it.
     abs_base: Option<u8>,
+    /// Blocks of the unit's other data sections whose address a register
+    /// holds: the Pascal data section and the (virtual) address register
+    /// loaded with `movea.l #block,An` ([`Self::other_base`]).  A call
+    /// ends them.
+    other_bases: Vec<(String, u8)>,
+    /// The indices in `out` of those loads.
+    other_base_loads: Vec<usize>,
     /// The label of the routine's data area, the block of its data
     /// section ([`crate::emit::data_base_label`]).
     data_label: String,
@@ -3618,6 +3783,8 @@ impl Selector {
             unpopped: false,
             data_absolute: false,
             abs_base: None,
+            other_bases: Vec::new(),
+            other_base_loads: Vec::new(),
             loops: Vec::new(),
             stepped: Vec::new(),
             loop_jumps: Vec::new(),
@@ -3787,6 +3954,55 @@ impl Selector {
         });
         self.abs_base = Some(a);
         Ok(a)
+    }
+
+    /// The address register that holds the unit's block of data section
+    /// `section`, another than the routine's (codegen-patterns 11, "Data
+    /// per section"; survey `tools/sectsurvey.py otherdata`): its address
+    /// as an immediate, `movea.l #block,An` (`207c`), where the first
+    /// operand needs it, kept for the statements that follow and loaded
+    /// again after a call (DXM_$INIT 0xE2FF54 and 0xE2FF66, around `jsr
+    /// EC_$INIT`; KBD_$INIT 0xE3336A and 0xE3339E; SUMA_$INIT 0xE33228,
+    /// one load for four statements; PROC1_$INIT 0xE2F95C, one for four).
+    /// The register is a virtual one, so the allocator gives it the lowest
+    /// free (A0 at those sites).  Where a branch target would leave it is
+    /// not settled ([`select_body_with`] refuses branches).
+    fn other_base(&mut self, section: &str) -> Res<u8> {
+        if let Some(&(_, a)) = self.other_bases.iter().find(|(s, _)| s == section) {
+            return Ok(a);
+        }
+        let a = self.alloc_a()?;
+        self.other_base_loads.push(self.out.len());
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src: Ea::ImmSym(crate::emit::data_base_label(section)),
+            dst: a,
+        });
+        self.other_bases.push((section.to_string(), a));
+        Ok(a)
+    }
+
+    /// Push the address of `a`, an [`Addr::OtherStatic`], as an argument:
+    /// the block's start as an immediate, `move.l #block,-(SP)` (`2f3c`;
+    /// LOG_$INIT 0xE30054, 0xE3007A, 0xE3010E, 0xE30148; RIP_$INIT
+    /// 0xE2FD94; PROC2_$INIT 0xE3070C, 12 sites, none `pea (An)` after a
+    /// block load), elsewhere `pea (d,An)` off the block's register
+    /// (DXM_$INIT 0xE2FF5A `pea (0x62c,A0)`; 27 sites).
+    fn push_other_static(&mut self, a: &Addr) -> Res<()> {
+        let Addr::OtherStatic { section, offset } = a else {
+            unreachable!("push_other_static of another address")
+        };
+        if *offset == 0 {
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::ImmSym(crate::emit::data_base_label(section)),
+                dst: Ea::PreDec(SP),
+            });
+        } else {
+            let ea = self.ea_of(a)?;
+            self.out.push(Insn::Pea(ea));
+        }
+        Ok(())
     }
 
     fn new_label(&mut self) -> u32 {
@@ -7042,6 +7258,11 @@ impl Selector {
             | Addr::Static(_)
             | Addr::Symbol { .. }
             | Addr::Const(_) => false,
+            // Another data section's block: a register loaded with its
+            // address unless one still holds it ([`Self::other_base`]).
+            Addr::OtherStatic { section, .. } => {
+                !self.other_bases.iter().any(|(s, _)| s == section)
+            }
             Addr::Index {
                 base, index, scale, ..
             } => self.stepped_pointer(base, index, *scale).is_none(),
@@ -7257,6 +7478,9 @@ impl Selector {
         };
         self.out.push(insn);
         self.call_stmts.push((start, self.out.len() - 1, self.span));
+        // The block of another data section is loaded again after a call
+        // (DXM_$INIT 0xE2FF66, KBD_$INIT 0xE3339E; [`Self::other_base`]).
+        self.other_bases.clear();
         let n = c.bytes();
         if !no_pop && n > 0 {
             self.out.push(if n <= 8 {
@@ -7490,6 +7714,7 @@ impl Selector {
                         let ea = self.ea_of(a)?;
                         self.out.push(Insn::Pea(ea));
                     }
+                    Expr::AddrOf(a @ Addr::OtherStatic { .. }) => self.push_other_static(a)?,
                     Expr::AddrOf(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
                     }
@@ -7530,6 +7755,7 @@ impl Selector {
                     let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
                 }
+                Addr::OtherStatic { .. } => self.push_other_static(addr)?,
                 // A constant: its cell in the code section, `pea (d,PC)`
                 // (codegen-patterns 1.5: TERM_$SEND_KBD_STRING 0xE1AB0C
                 // `pea (0x18,PC)`, MST_$REMAP 0xE439F8 `pea (0x10,PC)`; 1025
@@ -9278,6 +9504,7 @@ impl Selector {
             self.push_val(av, Width::Long)?;
         }
         self.out.push(Insn::Jsr(Ea::AbsL(name.to_string(), 0)));
+        self.other_bases.clear();
         if self.call_no_pop && self.marith_depth == 0 {
             self.unpopped = true;
         } else {
@@ -9797,6 +10024,16 @@ impl Selector {
     /// (116,A5),A0; lea (0,A0,D1.w),A0`).
     fn lea_into(&mut self, a: &Addr, r: u8) -> Res<()> {
         match a {
+            // `lea (d,An),Ar` off the block's register (KBD_$INIT 0xE3339E
+            // `movea.l #0xE2DDE4,A0; lea (0x58,A0),A1`, through the generic
+            // case below); the block's start itself is not seen.
+            Addr::OtherStatic { offset: 0, .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "the address of the first variable of another data section's block as a \
+                     value (not seen, codegen-patterns 11) is",
+                ))
+            }
             Addr::Symbol { name, offset: 0 } => self.out.push(Insn::Movea {
                 size: Size::L,
                 src: Ea::ImmSym(name.clone()),
@@ -11344,6 +11581,23 @@ impl Selector {
                     Ea::Ind(base)
                 } else {
                     Ea::Disp(*o, base)
+                })
+            }
+            // Another data section's block: off a register holding its
+            // address ([`Self::other_base`]; KBD_$INIT 0xE33374 `clr.l
+            // (0x58,A0)`; EC2_$INIT_S 0xE309A8 `clr.l (A0)`).
+            Addr::OtherStatic { section, offset } => {
+                if !(0..0x8000).contains(offset) {
+                    return Err(unsupported(
+                        self.span,
+                        "a static variable beyond 32K into the data area is",
+                    ));
+                }
+                let base = self.other_base(section)?;
+                Ok(if *offset == 0 {
+                    Ea::Ind(base)
+                } else {
+                    Ea::Disp(*offset, base)
                 })
             }
             Addr::Index {

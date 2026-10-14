@@ -9,7 +9,7 @@ STUB	dxm/dxm.pas	dxm_$helper_common
 SETUP	dxm/dxm.pas	dxm_$helper_wired
 SETUP	dxm/dxm.pas	dxm_$helper_unwired
 STUB	dxm/dxm.pas	dxm_$add_signal
-STUB	dxm/dxm.pas	dxm_$init
+SETUP	dxm/dxm.pas	dxm_$init
 STUB	dxm/dxm.pas	dxm_$add_signal_callback
 OK	gpu/gpu.pas	gpu_$init
 OK	gpu/gpu.pas	gpu_$term
@@ -39,7 +39,7 @@ OK	mt/mt.pas	mt_$release
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
 STUB	suma/suma.pas	suma_$rcv
-STUB	suma/suma.pas	suma_$init
+OK	suma/suma.pas	suma_$init
 OK	tape/tape.pas	tape_$boot
 SETUP	tone/tone.pas	tone_$time
 STUB	tpad/tpad.pas	tpad_$init

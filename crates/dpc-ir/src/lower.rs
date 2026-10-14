@@ -574,7 +574,11 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
     fn addr(a: &Addr, size: u32, out: &mut Vec<(i32, u32)>) {
         match a {
             Addr::Enclosing(o) => out.push((*o, size)),
-            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
+            Addr::Frame(_)
+            | Addr::Static(_)
+            | Addr::OtherStatic { .. }
+            | Addr::Symbol { .. }
+            | Addr::Const(_) => {}
             Addr::Volatile { addr: a, .. } => addr(a, size, out),
             Addr::Indirect { base, .. } => expr(base, out),
             Addr::Index { base, index, .. } => {
@@ -734,6 +738,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             Addr::Frame(_)
             | Addr::Enclosing(_)
             | Addr::Static(_)
+            | Addr::OtherStatic { .. }
             | Addr::Symbol { .. }
             | Addr::Const(_) => {}
             Addr::Volatile { addr: a, .. } => addr(a, f),
@@ -916,6 +921,7 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
             Addr::Frame(_)
             | Addr::Enclosing(_)
             | Addr::Static(_)
+            | Addr::OtherStatic { .. }
             | Addr::Symbol { .. }
             | Addr::Const(_) => {}
         }
@@ -1020,25 +1026,12 @@ fn lower_routine_in_context(
         }
     }
     let data_section = top.data_section.clone();
-    for &(v, span) in &r.static_refs {
-        if let Storage::Static { section, .. } = &p.var(v).storage {
-            if *section != data_section {
-                // codegen-patterns 4, 11: such data is reached from its
-                // block's absolute address (PROC1_$INIT 0xE2F95C in
-                // OS_INIT_PROC: `movea.l #0xE254E8,A0`, PROC1_'s WIRED_DATA
-                // block, then `(0xc40,A0)`, ...; PROC2_$INIT 0xE3048E:
-                // `movea.l #0xE7BE84,A1`, PROC2's .DATA block); when that
-                // register is loaded and reloaded is not settled.
-                errors.push(unsupported(
-                    span,
-                    format!(
-                        "a static variable of data section `{section}` in a routine whose \
-                         data section is `{data_section}` is"
-                    ),
-                ));
-            }
-        }
-    }
+    // A static variable of another data section than the routine's is
+    // [`Addr::OtherStatic`] ([`var_addr`]; codegen-patterns 4, 11: such
+    // data is reached from its block's absolute address, PROC1_$INIT
+    // 0xE2F95C in OS_INIT_PROC `movea.l #0xE254E8,A0`, PROC1_'s WIRED_DATA
+    // block, then `(0xc40,A0)`).
+    let _scope = DataSectionScope::enter(&data_section);
     let o = &r.options;
     for (on, name) in [
         (o.abnormal, "options(abnormal)"),
@@ -1577,6 +1570,7 @@ fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
         Addr::Frame(_)
         | Addr::Enclosing(_)
         | Addr::Static(_)
+        | Addr::OtherStatic { .. }
         | Addr::Symbol { .. }
         | Addr::Const(_) => {}
         Addr::Volatile { addr, .. } => addr_calls(addr, out),
@@ -1680,7 +1674,11 @@ fn expr_uses_static(e: &Expr) -> bool {
 fn addr_uses_static(a: &Addr) -> bool {
     match a {
         Addr::Static(_) => true,
-        Addr::Frame(_) | Addr::Enclosing(_) | Addr::Symbol { .. } | Addr::Const(_) => false,
+        Addr::Frame(_)
+        | Addr::Enclosing(_)
+        | Addr::OtherStatic { .. }
+        | Addr::Symbol { .. }
+        | Addr::Const(_) => false,
         Addr::Volatile { addr, .. } => addr_uses_static(addr),
         Addr::Indirect { base, .. } => expr_uses_static(base),
         Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
@@ -1987,6 +1985,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                 Addr::Frame(_)
                 | Addr::Enclosing(_)
                 | Addr::Static(_)
+                | Addr::OtherStatic { .. }
                 | Addr::Symbol { .. }
                 | Addr::Const(_) => Ok(()),
                 Addr::Volatile { addr, .. } => self.addr(addr, size),
@@ -2185,6 +2184,31 @@ struct Cx<'a> {
     uplevel: &'a [(i32, u32)],
     /// The `with` temporaries allocated so far ([`Function::with_temps`]).
     with_temps: std::cell::RefCell<Vec<i32>>,
+}
+
+thread_local! {
+    /// The data section of the routine being lowered
+    /// ([`lower_routine_in_context`]): a static variable of another is an
+    /// [`Addr::OtherStatic`] ([`var_addr`]).
+    static DATA_SECTION: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Sets [`DATA_SECTION`] for the lowering of one routine and restores the
+/// previous value however it ends.
+struct DataSectionScope(Option<String>);
+
+impl DataSectionScope {
+    fn enter(section: &str) -> DataSectionScope {
+        DataSectionScope(DATA_SECTION.with(|d| d.replace(Some(section.to_string()))))
+    }
+}
+
+impl Drop for DataSectionScope {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        DATA_SECTION.with(|d| *d.borrow_mut() = prev);
+    }
 }
 
 thread_local! {
@@ -2716,7 +2740,11 @@ impl Cx<'_> {
     /// p^ : x do with x.sub do`) ([`Self::with_stmt`]).
     fn with_static(&self, a: &Addr) -> bool {
         match a {
-            Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Enclosing(_) => true,
+            Addr::Frame(_)
+            | Addr::Static(_)
+            | Addr::OtherStatic { .. }
+            | Addr::Symbol { .. }
+            | Addr::Enclosing(_) => true,
             Addr::Indirect { base, .. } => {
                 matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. }
                 if *o <= WITH_TEMP_BASE
@@ -5045,11 +5073,24 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
                 }
             }
         }
-        // The unit's data area (codegen-patterns 4): `(d,A5)` on m68k.
-        // Named data sections were rejected by `data_area`.
-        Storage::Static { offset, .. } => i32::try_from(*offset)
-            .map(Addr::Static)
-            .map_err(|_| unsupported(span, "a static variable at this offset is")),
+        // The unit's data area (codegen-patterns 4): `(d,A5)` on m68k; of
+        // another data section than the routine's, that section's block
+        // (codegen-patterns 11, "Data per section").
+        Storage::Static {
+            offset, section, ..
+        } => {
+            let offset = i32::try_from(*offset)
+                .map_err(|_| unsupported(span, "a static variable at this offset is"))?;
+            let own = DATA_SECTION.with(|d| d.borrow().as_ref().is_none_or(|s| s == section));
+            Ok(if own {
+                Addr::Static(offset)
+            } else {
+                Addr::OtherStatic {
+                    section: section.clone(),
+                    offset,
+                }
+            })
+        }
     }
 }
 
