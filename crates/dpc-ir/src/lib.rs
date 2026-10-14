@@ -747,6 +747,33 @@ pub enum Expr {
         set: Box<Expr>,
         set_width: Width,
     },
+    /// Membership of element `elem` (a word) in the set of `bytes` bytes
+    /// (more than 4: not register-sized) in memory at `set` (ref "In",
+    /// p. 4-102; layout ref 3.9.3, Figure 3-6): member k is bit k mod 8
+    /// of the byte at `(bytes*8 - 1 - k) div 8`.  Lowering builds it only
+    /// when every value of the element's type is a member of the set's
+    /// range, so no range check is needed (codegen-patterns 5.1).  The
+    /// result is a boolean.
+    SetMemberAt {
+        elem: Box<Expr>,
+        set: Addr,
+        bytes: u32,
+    },
+    /// A set operator on register-sized sets (one word or one longword,
+    /// ref 3.9.3) of type `ty` (unsigned, the set's width): union `+`,
+    /// intersection `*`, difference `-` (ref "Set Operations",
+    /// pp. 4-174..4-175).  Member k is bit k of the value.  Both operands
+    /// have type `ty`; a constant operand is the set's bit mask.
+    SetOp {
+        op: SetOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        ty: Scalar,
+    },
+    /// The register-sized set `[elem]` of one run-time member (ref "Set
+    /// Operations", p. 4-173, `paint7 := [c]`), of type `ty`: bit `elem`
+    /// set, the others clear.  `elem` is a word.
+    SetOf { elem: Box<Expr>, ty: Scalar },
     /// The address of the object at `addr`, as a pointer value (`addr(x)`,
     /// ref p. 4-13).
     AddrOf(Addr),
@@ -823,6 +850,18 @@ impl BinOp {
     }
 }
 
+/// A set operator ([`Expr::SetOp`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetOp {
+    /// `+`, union.
+    Union,
+    /// `*`, intersection.
+    Inter,
+    /// `-`, set exclusion: the members of the left operand that are not
+    /// in the right one.
+    Diff,
+}
+
 /// A unary integer operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnOp {
@@ -842,8 +881,10 @@ impl Expr {
             | Expr::Binary { ty, .. }
             | Expr::Unary { ty, .. }
             | Expr::Convert { ty, .. }
-            | Expr::Call { ty, .. } => *ty,
-            Expr::SetMember { .. } | Expr::Test(_) => Scalar::BOOLEAN,
+            | Expr::Call { ty, .. }
+            | Expr::SetOp { ty, .. }
+            | Expr::SetOf { ty, .. } => *ty,
+            Expr::SetMember { .. } | Expr::SetMemberAt { .. } | Expr::Test(_) => Scalar::BOOLEAN,
             Expr::SetSr(_) => Scalar::signed(Width::Word),
             Expr::AddrOf(_) => Scalar::POINTER,
         }

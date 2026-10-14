@@ -516,6 +516,16 @@ pub enum Insn {
         bit: u8,
         dst: Ea,
     },
+    /// `bset %dn,<dst>` / `bclr %dn,<dst>`, the bit number in a data
+    /// register (on memory a byte, the number mod 8; on a data register a
+    /// longword, mod 32): a run-time member added to a set
+    /// (codegen-patterns 5.1: TTY_$K_SET_INPUT_FLAG 0xE67692 `bset
+    /// D2,D1`; MSG_$OPENI 0xE59260 `bset D1,(0,A0,D0.w)`).
+    Bit {
+        op: BitOp,
+        bit: u8,
+        dst: Ea,
+    },
     /// `<op>.<size> Dn,<dst>`, an operation into memory: a bit field
     /// merged into its unit (codegen-patterns 5.3: 0xE008A4 `or.b
     /// D0,(39,A2)`).
@@ -775,6 +785,13 @@ impl fmt::Display for Insn {
                 };
                 write!(f, "{mn}\t#{bit},{dst}")
             }
+            Insn::Bit { op, bit, dst } => {
+                let mn = match op {
+                    BitOp::Set => "bset",
+                    BitOp::Clr => "bclr",
+                };
+                write!(f, "{mn}\t{},{dst}", Reg::D(*bit))
+            }
             Insn::AluToMem { op, size, src, dst } => {
                 write!(f, "{}.{size}\t{},{dst}", op.name(), Reg::D(*src))
             }
@@ -823,7 +840,9 @@ impl Insn {
             Insn::Addq { size, dst, .. }
             | Insn::Subq { size, dst, .. }
             | Insn::Clr { size, dst } => 2 + dst.ext_len(*size),
-            Insn::Btst { dst, .. } | Insn::Scc { dst, .. } => 2 + dst.ext_len(Size::B),
+            Insn::Btst { dst, .. } | Insn::Scc { dst, .. } | Insn::Bit { dst, .. } => {
+                2 + dst.ext_len(Size::B)
+            }
             Insn::Branch { short, .. } => {
                 if *short {
                     2

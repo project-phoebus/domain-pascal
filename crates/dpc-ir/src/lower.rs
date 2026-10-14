@@ -20,7 +20,7 @@ use dpc_sema::consts::ConstValue;
 use crate::{
     Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions,
     Expr, ForLoop, Function, LinkArg, Module, Nesting, ParamCopy, PoolConst, Rel, ResultClass,
-    ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -427,13 +427,22 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 expr(elem, out);
                 expr(set, out);
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::SetMemberAt {
+                elem,
+                set: a,
+                bytes,
+            } => {
+                expr(elem, out);
+                addr(a, *bytes, out);
+            }
+            Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                 expr(lhs, out);
                 expr(rhs, out);
             }
-            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-                expr(x, out)
-            }
+            Expr::Unary { operand: x, .. }
+            | Expr::Convert { value: x, .. }
+            | Expr::SetSr(x)
+            | Expr::SetOf { elem: x, .. } => expr(x, out),
             Expr::Call { call: c, .. } => call(c, out),
             Expr::Test(c) => cond(c, out),
         }
@@ -570,13 +579,18 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
                 expr(elem, f);
                 expr(set, f);
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::SetMemberAt { elem, set: a, .. } => {
+                expr(elem, f);
+                addr(a, f);
+            }
+            Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                 expr(lhs, f);
                 expr(rhs, f);
             }
-            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-                expr(x, f)
-            }
+            Expr::Unary { operand: x, .. }
+            | Expr::Convert { value: x, .. }
+            | Expr::SetSr(x)
+            | Expr::SetOf { elem: x, .. } => expr(x, f),
             Expr::Call { call: c, .. } => call(c, f),
             Expr::Test(c) => cond(c, f),
         }
@@ -735,13 +749,19 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
             Expr::SetMember {
                 elem: x, set: y, ..
             }
-            | Expr::Binary { lhs: x, rhs: y, .. } => {
+            | Expr::Binary { lhs: x, rhs: y, .. }
+            | Expr::SetOp { lhs: x, rhs: y, .. } => {
                 expr(x, size, max);
                 expr(y, size, max);
             }
-            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-                expr(x, size, max)
+            Expr::SetMemberAt { elem, set: a, .. } => {
+                expr(elem, size, max);
+                addr(a, size, max);
             }
+            Expr::Unary { operand: x, .. }
+            | Expr::Convert { value: x, .. }
+            | Expr::SetSr(x)
+            | Expr::SetOf { elem: x, .. } => expr(x, size, max),
             Expr::Call { call: c, .. } => call(c, size, max),
             Expr::Test(c) => cond(c, size, max),
         }
@@ -1325,13 +1345,18 @@ fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
             expr_calls(elem, out);
             expr_calls(set, out);
         }
-        Expr::Binary { lhs, rhs, .. } => {
+        Expr::SetMemberAt { elem, set, .. } => {
+            expr_calls(elem, out);
+            addr_calls(set, out);
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
             expr_calls(lhs, out);
             expr_calls(rhs, out);
         }
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-            expr_calls(x, out)
-        }
+        Expr::Unary { operand: x, .. }
+        | Expr::Convert { value: x, .. }
+        | Expr::SetSr(x)
+        | Expr::SetOf { elem: x, .. } => expr_calls(x, out),
         Expr::Call { call, .. } => {
             out.push(call);
             call_arg_calls(call, out);
@@ -1426,10 +1451,14 @@ fn expr_uses_static(e: &Expr) -> bool {
             addr_uses_static(addr)
         }
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
-        Expr::Binary { lhs, rhs, .. } => expr_uses_static(lhs) || expr_uses_static(rhs),
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-            expr_uses_static(x)
+        Expr::SetMemberAt { elem, set, .. } => expr_uses_static(elem) || addr_uses_static(set),
+        Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
+            expr_uses_static(lhs) || expr_uses_static(rhs)
         }
+        Expr::Unary { operand: x, .. }
+        | Expr::Convert { value: x, .. }
+        | Expr::SetSr(x)
+        | Expr::SetOf { elem: x, .. } => expr_uses_static(x),
         Expr::Call { call, .. } => call_uses_static(call),
         Expr::Test(c) => cond_uses_static(c),
     }
@@ -1683,13 +1712,18 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     self.expr(elem)?;
                     self.expr(set)
                 }
-                Expr::Binary { lhs, rhs, .. } => {
+                Expr::SetMemberAt { elem, set, bytes } => {
+                    self.expr(elem)?;
+                    self.addr(set, *bytes)
+                }
+                Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                     self.expr(lhs)?;
                     self.expr(rhs)
                 }
                 Expr::Unary { operand: x, .. }
                 | Expr::Convert { value: x, .. }
-                | Expr::SetSr(x) => self.expr(x),
+                | Expr::SetSr(x)
+                | Expr::SetOf { elem: x, .. } => self.expr(x),
                 Expr::Call { call, .. } => self.call(call),
                 Expr::Test(c) => self.cond(c),
             }
@@ -2254,6 +2288,9 @@ fn bool_value(p: &Program, e: &SExpr) -> Res<Expr> {
 
 /// `lhs rel rhs` (see [`cond_of`]).
 fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    if is_set(p, lhs.ty) && is_set(p, rhs.ty) {
+        return set_compare(p, e, rel, lhs, rhs);
+    }
     let comparable = |x: &SExpr| p.types.is_ordinal(x.ty) || p.types.is_pointer(x.ty);
     if !comparable(lhs) || !comparable(rhs) {
         return Err(unsupported(
@@ -2320,6 +2357,40 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         op: rel,
         lhs: l,
         rhs: r,
+    })
+}
+
+/// `s = []` and `s <> []` (ref "Set Operations", p. 4-176) for a
+/// register-sized set: the set's value against 0.  Image: `tst.w` of a
+/// set variable (TTY_$K_GET 0xE1C5D4 `tst.w (10,A2); beq`), the flags of
+/// the `and` for an intersection or a difference (TTY 0xE1BFFE `moveq
+/// #7,D1; and.w (8,A2),D1; beq.s`; PROC2_$SIGPAUSE 0xE3FAC6 `move.l
+/// (-108,A4),D1; not.l D1; and.l (-100,A4),D1; beq.s`).  Other set
+/// comparisons (`=` with a non-empty set, subset `<=`, superset `>=`) are
+/// not catalogued.
+fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    if p.types.size(lhs.ty) > 4 {
+        // MSG_$CLOSEI 0xE59490..0xE5949C: `tst.l (A1)+; bne` per longword.
+        return Err(unsupported(
+            e.span,
+            "comparing a set of more than a longword (`tst.l (An)+` per longword, \
+             codegen-patterns 5.1) is",
+        ));
+    }
+    let empty = |x: &SExpr| matches!(&x.value, Some(ConstValue::Set(m)) if m.is_empty());
+    if !matches!(rel, Rel::Eq | Rel::Ne) || !empty(rhs) || lhs.value.is_some() {
+        return Err(unsupported(
+            e.span,
+            "a set comparison other than `s = []` / `s <> []` is",
+        ));
+    }
+    let x = lhs;
+    let ty = scalar_of(p, x)?;
+    let l = set_value(p, x, ty)?;
+    Ok(Cond::Compare {
+        op: rel,
+        lhs: l,
+        rhs: Expr::Const { value: 0, ty },
     })
 }
 
@@ -2404,10 +2475,26 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     if let Some((addr, field)) = bit_field(p, target)? {
         return store_bits(p, s, target, value, addr, field);
     }
+    if is_set(p, target.ty) && p.types.size(target.ty) > 4 {
+        // Sets of more than a longword are built and combined in frame
+        // temporaries: `clr.l (A0)+` per longword, the member's byte
+        // `bset`, `dbf` loops of `not.l`/`and.l` through `(An)+`, then a
+        // copy (MSG_$CLOSEI 0xE59454..0xE5948C; MSG_$OPENI 0xE59248..
+        // 0xE5926E; codegen-patterns 5.1).
+        return Err(unsupported(
+            s.span,
+            "an assignment to a set of more than a longword (frame temporaries and `dbf` \
+             loops, codegen-patterns 5.1) is",
+        ));
+    }
     let ty = scalar_of(p, target)?;
     let addr = addr_of(p, target)?;
     let value = if let Some(v) = &value.value {
         const_of(v, ty, value.span)?
+    } else if is_set(p, target.ty) {
+        // A set expression takes the target's size (its constructors have
+        // their own, ref 3.9.3).
+        set_value(p, value, ty)?
     } else {
         let v = value_of(p, value)?;
         if v.ty().width != ty.width {
@@ -2635,6 +2722,22 @@ fn univ_const_type(p: &Program, cty: TypeId, fty: TypeId, span: Span) -> Res<Typ
 fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     let value = match v {
         ConstValue::Bool(b) => -(*b as i64),
+        // A register-sized set (ref 3.9.3, p. 3-16, Figure 3-6): member k
+        // is bit k of the word or longword, so the constant is its bit
+        // mask (`[]` is 0).  TTY_$I_INIT 0xE33290 `move.l #0x1ffef,(0x20,A0)`
+        // stores [0..3, 5..16]; TTY_$K_SET_DELAY 0xE67A1A `moveq #0x1f,D1`
+        // is [0..4] (codegen-patterns 5.1).
+        ConstValue::Set(members) => {
+            let bits = ty.bytes() as i64 * 8;
+            if members.iter().any(|&k| !(0..bits).contains(&k)) {
+                return Err(unsupported(
+                    span,
+                    format!("a set constant with a member outside the {bits} bits of its set is"),
+                ));
+            }
+            let mask = members.iter().fold(0u64, |m, &k| m | (1u64 << k));
+            imm_value(mask, ty)
+        }
         _ => v
             .ordinal()
             .ok_or_else(|| unsupported(span, "this kind of constant is"))?,
@@ -2642,10 +2745,160 @@ fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     Ok(Expr::Const { value, ty })
 }
 
+/// The number a bit pattern of `ty`'s width stands for under `ty`'s sign
+/// (an [`Expr::Const`] holds the value, not the bits).
+fn imm_value(bits: u64, ty: Scalar) -> i64 {
+    match (ty.width, ty.sign) {
+        (Width::Byte, Sign::Signed) => bits as u8 as i8 as i64,
+        (Width::Word, Sign::Signed) => bits as u16 as i16 as i64,
+        (Width::Long, Sign::Signed) => bits as u32 as i32 as i64,
+        (Width::Byte, Sign::Unsigned) => bits as u8 as i64,
+        (Width::Word, Sign::Unsigned) => bits as u16 as i64,
+        (Width::Long, Sign::Unsigned) => bits as u32 as i64,
+    }
+}
+
+/// Whether `ty` is a set type.
+fn is_set(p: &Program, ty: TypeId) -> bool {
+    matches!(p.types.kind(ty), TypeKind::Set { .. })
+}
+
+/// A set expression `e` of register size (ref 3.9.3: one word or one
+/// longword) as a value of the set type `ty`: a constant (its bit mask,
+/// [`const_of`]), a variable, `[x]` with one run-time member
+/// ([`Expr::SetOf`]), or `+`, `*`, `-` of such ([`Expr::SetOp`]; ref "Set
+/// Operations", pp. 4-173..4-175).  A constructor's own type is narrower
+/// or wider than the set it is used with (`[7]` is a `set of 0..7`, ref
+/// 3.9.3 sizes it by its high end), so constants and constructors take
+/// the type of the operation; variables must have it.
+///
+/// Refused: a constructor of several run-time members or of a run-time
+/// range (`[a..b]`: the image has the routine PAS_$SET_BUILD 0xE11FA8,
+/// which adds a range to a set in memory, but no compiled call of it, so
+/// the compiler's code for one is not catalogued, codegen-patterns 5.1).
+fn set_value(p: &Program, e: &SExpr, ty: Scalar) -> Res<Expr> {
+    if let Some(v) = &e.value {
+        return const_of(v, ty, e.span);
+    }
+    match &e.kind {
+        ExprKind::SetCons(items) => match items.as_slice() {
+            [(x, None)] => Ok(Expr::SetOf {
+                elem: Box::new(set_element(p, x)?),
+                ty,
+            }),
+            _ => Err(unsupported(
+                e.span,
+                "a set constructor with a run-time range or several run-time members (codegen-\
+                 patterns 5.1: PAS_$SET_BUILD 0xE11FA8 is never called from compiled code) is",
+            )),
+        },
+        ExprKind::Binary {
+            op: op @ (BinOp::Add | BinOp::Mul | BinOp::Sub),
+            lhs,
+            rhs,
+        } if is_set(p, e.ty) => {
+            let op = match op {
+                BinOp::Add => SetOp::Union,
+                BinOp::Mul => SetOp::Inter,
+                _ => SetOp::Diff,
+            };
+            Ok(Expr::SetOp {
+                op,
+                lhs: Box::new(set_value(p, lhs, ty)?),
+                rhs: Box::new(set_value(p, rhs, ty)?),
+                ty,
+            })
+        }
+        _ => {
+            let v = value_of(p, e)?;
+            if v.ty().width != ty.width {
+                return Err(unsupported(
+                    e.span,
+                    format!(
+                        "a set operation on sets of {} and {} bytes is",
+                        v.ty().bytes(),
+                        ty.bytes()
+                    ),
+                ));
+            }
+            Ok(v)
+        }
+    }
+}
+
+/// A run-time set member as a word (ref 3.9.3: ordinals 0..1023): an
+/// enumeration or integer16 value as it is, a char or boolean byte
+/// zero-extended.
+fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
+    let v = value_of(p, x)?;
+    match v.ty().width {
+        Width::Word => Ok(v),
+        Width::Byte => Ok(convert(v, Scalar::unsigned(Width::Word))),
+        Width::Long => Err(unsupported(
+            x.span,
+            "a set member of a 4-byte type (narrowed to a word: not catalogued) is",
+        )),
+    }
+}
+
+/// `lhs in rhs` for a set of `bytes` bytes, more than a register holds,
+/// in memory ([`Expr::SetMemberAt`]; codegen-patterns 5.1: the byte
+/// `(bits-1 - k) >> 3` and `btst k` on it, MST_$ALLOC_ASID 0xE42D5C for 64
+/// bits, the TTY module-local 0xE1B740..0xE1B750 for a `set of char`).
+///
+/// Only when every value of the element's type is a member of the set's
+/// bits (ref 3.9.3, p. 3-16: one bit per ordinal 0..bits-1): the image
+/// tests such elements unguarded (a `char` in a 256-bit set at 0xE1B750,
+/// an ASID in a 64-bit one at 0xE42D64), but guards the others with `bcs`
+/// on the subtraction and branches with `ble`/`bgt` after the `btst`
+/// (NAME_$INIT 0xE31836..0xE3184A on a 96-bit set; UNMAP_CASE
+/// 0xE54166..0xE54178): that form is refused.  A constant set of more
+/// than a longword (a cell in the code, UNMAP_CASE's `lea (d,PC)`) is
+/// refused too.
+fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -> Res<Expr> {
+    if rhs.value.is_some()
+        || !matches!(
+            rhs.kind,
+            ExprKind::Var { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Deref(_)
+                | ExprKind::Index { .. }
+        )
+    {
+        return Err(unsupported(
+            e.span,
+            format!("`in` on a {bytes}-byte set that is not a variable is"),
+        ));
+    }
+    let bits = bytes as i64 * 8;
+    match p.types.ordinal_range(lhs.ty) {
+        Some((lo, hi)) if lo >= 0 && hi < bits => {}
+        _ => {
+            return Err(unsupported(
+                e.span,
+                format!(
+                    "`in` on a {bytes}-byte set with an element whose type reaches beyond the \
+                     set's {bits} bits (the guarded test, NAME_$INIT 0xE3183E, codegen-patterns \
+                     5.1) is"
+                ),
+            ))
+        }
+    }
+    Ok(Expr::SetMemberAt {
+        elem: Box::new(set_element(p, lhs)?),
+        set: addr_of(p, rhs)?,
+        bytes,
+    })
+}
+
 /// The value of `e`.
 fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if let Some(v) = &e.value {
         return const_of(v, scalar_of(p, e)?, e.span);
+    }
+    if is_set(p, e.ty) && matches!(e.kind, ExprKind::SetCons(_) | ExprKind::Binary { .. }) {
+        let ty = scalar_of(p, e)?;
+        return set_value(p, e, ty);
     }
     if let Some((addr, field)) = bit_field(p, e)? {
         return Ok(Expr::Bits {
@@ -2879,12 +3132,7 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
             let set_width = match set_size {
                 2 => Width::Word,
                 4 => Width::Long,
-                _ => {
-                    return Err(unsupported(
-                        e.span,
-                        format!("`in` on a {set_size}-byte set is"),
-                    ))
-                }
+                _ => return set_member_at(p, e, lhs, rhs, set_size),
             };
             return Ok(Expr::SetMember {
                 elem: Box::new(value_of(p, lhs)?),
@@ -3520,6 +3768,10 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 };
                 let value = match &a.expr.value {
                     Some(v) => const_of(v, ty, a.expr.span)?,
+                    // A set expression takes the parameter's size (`[k]`
+                    // pushed: DISK_$FORMAT 0xE3D4E2..0xE3D4E6 `clr.w D1;
+                    // bset D3,D1; move.w D1,-(SP)`, codegen-patterns 5.1).
+                    None if is_set(p, prm_ty) => set_value(p, &a.expr, ty)?,
                     None => {
                         let v = value_of(p, &a.expr)?;
                         if v.ty().width != width {

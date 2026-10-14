@@ -126,6 +126,123 @@ end;
     );
 }
 
+/// Set operators on register-sized sets (codegen-patterns 5.1): the
+/// constructor `[7]` (a `set of 0..7`, ref 3.9.3) takes the operation's
+/// type, a constant is its mask (member k is bit k), `[k]` a
+/// [`Expr::SetOf`] of the word member.
+#[test]
+fn set_operators() {
+    let src = "module m;
+type
+  e = (e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16);
+  r = record s: set of e; w: set of 0..15; end;
+  rp = ^r;
+procedure t(p: rp; k: e); options(val_param);
+begin
+  p^.s := p^.s - [e1, e16];
+  p^.w := [];
+  p^.s := p^.s + [k];
+end;
+";
+    let m = lower_src(src).unwrap();
+    let f = &m.functions[0];
+    let long = Scalar::unsigned(Width::Long);
+    let s = || {
+        Box::new(Expr::Load {
+            addr: Addr::Indirect {
+                base: Box::new(Expr::Load {
+                    addr: Addr::Frame(8),
+                    ty: Scalar::POINTER,
+                }),
+                offset: 0,
+            },
+            ty: long,
+        })
+    };
+    let StmtKind::Store { value, .. } = &f.body[0].kind else {
+        panic!("a store")
+    };
+    assert_eq!(
+        *value,
+        Expr::SetOp {
+            op: SetOp::Diff,
+            lhs: s(),
+            rhs: Box::new(Expr::Const {
+                value: 0x1_0002,
+                ty: long
+            }),
+            ty: long,
+        }
+    );
+    let StmtKind::Store { value, .. } = &f.body[1].kind else {
+        panic!("a store")
+    };
+    assert_eq!(
+        *value,
+        Expr::Const {
+            value: 0,
+            ty: Scalar::unsigned(Width::Word)
+        }
+    );
+    let StmtKind::Store { value, .. } = &f.body[2].kind else {
+        panic!("a store")
+    };
+    assert_eq!(
+        *value,
+        Expr::SetOp {
+            op: SetOp::Union,
+            lhs: s(),
+            rhs: Box::new(Expr::SetOf {
+                elem: Box::new(Expr::Load {
+                    addr: Addr::Frame(12),
+                    ty: Scalar::unsigned(Width::Word)
+                }),
+                ty: long
+            }),
+            ty: long,
+        }
+    );
+}
+
+/// `c in s` for a `set of char` (32 bytes) in memory: the char widened
+/// to a word; refused for an element type beyond the set's bits.
+#[test]
+fn membership_of_large_sets() {
+    let src = "module m;
+type r = record s: set of char; t: set of 'a'..'z'; end; rp = ^r;
+var g: extern integer;
+procedure t(p: rp; c: char); options(val_param);
+begin
+  g := 0;
+  if c in p^.s then g := 1;
+end;
+";
+    let m = lower_src(src).unwrap();
+    let StmtKind::If { cond, .. } = &m.functions[0].body[1].kind else {
+        panic!("an if")
+    };
+    let Cond::Test(Expr::SetMemberAt { elem, set, bytes }) = cond else {
+        panic!("{cond:?}")
+    };
+    assert_eq!(*bytes, 32);
+    assert_eq!(
+        **elem,
+        Expr::Convert {
+            value: Box::new(Expr::Load {
+                addr: Addr::Frame(12),
+                ty: Scalar::unsigned(Width::Byte)
+            }),
+            ty: Scalar::unsigned(Width::Word)
+        }
+    );
+    assert!(matches!(set, Addr::Indirect { offset: 0, .. }));
+    // `set of 'a'..'z'` is 16 bytes (ref 3.9.3, p. 3-17): a char may lie
+    // beyond its 128 bits.
+    let e = errs(&src.replace("c in p^.s", "c in p^.t"));
+    assert_eq!(e.len(), 1);
+    assert!(e[0].contains("guarded test"), "{e:?}");
+}
+
 #[test]
 fn by_address_parameter_is_indirect() {
     let m = lower_src(
@@ -305,8 +422,8 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:2:5: error: initialised static variables are not supported yet"]
     );
-    // A 6-byte set (sets of one word or one longword are tested in a
-    // register).
+    // A 6-byte set tested with an integer element, which may lie beyond
+    // its 48 bits (the guarded form, codegen-patterns 5.1).
     let e = errs(
         "module m;
 type s16 = set of 0..40;
@@ -318,7 +435,11 @@ end;
     );
     assert_eq!(
         e,
-        vec!["t.pas:5:8: error: `in` on a 6-byte set is not supported yet"]
+        vec![
+            "t.pas:5:8: error: `in` on a 6-byte set with an element whose type reaches beyond \
+             the set's 48 bits (the guarded test, NAME_$INIT 0xE3183E, codegen-patterns 5.1) is \
+             not supported yet"
+        ]
     );
 }
 

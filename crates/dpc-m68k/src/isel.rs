@@ -23,7 +23,8 @@
 
 use dpc_ir::{
     Addr, Arg, BinOp, BitField, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function,
-    LinkArg, Rel, ResultClass, ResultSpec, Scalar, Sign, StaticLink, Stmt, StmtKind, UnOp, Width,
+    LinkArg, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp,
+    Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
@@ -862,13 +863,18 @@ fn register_locals(f: &Function) -> Vec<i32> {
                     self.expr(elem);
                     self.expr(set);
                 }
-                Expr::Binary { lhs, rhs, .. } => {
+                Expr::SetMemberAt { elem, set, .. } => {
+                    self.expr(elem);
+                    self.other(set);
+                }
+                Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                     self.expr(lhs);
                     self.expr(rhs);
                 }
                 Expr::Unary { operand: x, .. }
                 | Expr::Convert { value: x, .. }
-                | Expr::SetSr(x) => self.expr(x),
+                | Expr::SetSr(x)
+                | Expr::SetOf { elem: x, .. } => self.expr(x),
                 Expr::Call { call, .. } => self.call(call),
                 Expr::Test(c) => self.cond(c),
             }
@@ -1013,13 +1019,18 @@ fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
             walk_expr(elem, v);
             walk_expr(set, v);
         }
-        Expr::Binary { lhs, rhs, .. } => {
+        Expr::SetMemberAt { elem, set, .. } => {
+            walk_expr(elem, v);
+            walk_addr(set, v);
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
             walk_expr(lhs, v);
             walk_expr(rhs, v);
         }
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-            walk_expr(x, v)
-        }
+        Expr::Unary { operand: x, .. }
+        | Expr::Convert { value: x, .. }
+        | Expr::SetSr(x)
+        | Expr::SetOf { elem: x, .. } => walk_expr(x, v),
         Expr::Call { call, .. } => walk_call(call, v),
         Expr::Test(c) => walk_cond(c, v),
     }
@@ -1152,6 +1163,7 @@ fn mem_dst(i: &Insn) -> Option<&Ea> {
         | Insn::Subq { dst, .. }
         | Insn::AluImm { dst, .. }
         | Insn::BitImm { dst, .. }
+        | Insn::Bit { dst, .. }
         | Insn::AluToMem { dst, .. } => dst,
         // `Alu` writes a register; `Tst`, `Cmpi`, `Btst`, `BtstImm` read.
         _ => return None,
@@ -1972,6 +1984,8 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Const { .. } | Expr::AddrOf(_) => false,
         Expr::Load { addr, .. } | Expr::Bits { addr, .. } => addr_has_call(addr),
         Expr::SetMember { elem, set, .. } => expr_has_call(elem) || expr_has_call(set),
+        Expr::SetMemberAt { elem, set, .. } => expr_has_call(elem) || addr_has_call(set),
+        Expr::SetOp { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
         Expr::Binary { op, lhs, rhs, ty } => {
             arith_calls(*op, lhs, rhs, *ty, false) || expr_has_call(lhs) || expr_has_call(rhs)
         }
@@ -1997,9 +2011,10 @@ fn expr_has_call(e: &Expr) -> bool {
             };
             arith_calls(*op, lhs, rhs, *ty, true) || expr_has_call(lhs) || expr_has_call(rhs)
         }
-        Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-            expr_has_call(x)
-        }
+        Expr::Unary { operand: x, .. }
+        | Expr::Convert { value: x, .. }
+        | Expr::SetSr(x)
+        | Expr::SetOf { elem: x, .. } => expr_has_call(x),
         Expr::Call { .. } => true,
         Expr::Test(c) => cond_has_call(c),
     }
@@ -2206,13 +2221,18 @@ impl Uses<'_> {
                 self.expr(elem);
                 self.expr(set);
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::SetMemberAt { elem, set, .. } => {
+                self.expr(elem);
+                self.address(set);
+            }
+            Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            Expr::Unary { operand: x, .. } | Expr::Convert { value: x, .. } | Expr::SetSr(x) => {
-                self.expr(x)
-            }
+            Expr::Unary { operand: x, .. }
+            | Expr::Convert { value: x, .. }
+            | Expr::SetSr(x)
+            | Expr::SetOf { elem: x, .. } => self.expr(x),
             Expr::Call { call, .. } => self.call_args(call),
             Expr::Test(c) => self.cond(c),
             Expr::Const { .. } => {}
@@ -3767,6 +3787,33 @@ impl Selector {
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
                     }
+                    // A variable element of a one-longword set: `btst Dn,Dm`
+                    // and the branch on Z ([`Self::set_member_reg`]:
+                    // tty_$i_set_funcs 0xE67228 `btst D3,D0; beq.b`;
+                    // TTY_$K_SET_DELAY 0xE67A1C `btst D0,D1; bne.b`).
+                    Expr::SetMember {
+                        elem,
+                        set,
+                        set_width: Width::Long,
+                    } => {
+                        self.set_member_reg(elem, set)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
+                    Expr::SetMember { .. } => {
+                        return Err(unsupported(
+                            self.span,
+                            "`in` on a one-word set with an element that is not constant is",
+                        ))
+                    }
+                    // A set larger than a longword: `btst` on the byte
+                    // ([`Self::set_member_at`]; 0xE1B750 `btst D1,(0,A0,D2.w);
+                    // beq.b`).
+                    Expr::SetMemberAt { elem, set, bytes } => {
+                        self.set_member_at(elem, set, *bytes)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
                     // A boolean field of a packed record (codegen-patterns
                     // 5.3): `btst #k` and the branch on Z (0xE0088A `btst
                     // #1,(-47,A6); beq.s`); the field in bit 7 is the sign
@@ -4597,6 +4644,21 @@ impl Selector {
                 return Ok(());
             }
         }
+        if self.set_update(addr, value)? {
+            return Ok(());
+        }
+        if let Expr::SetOf { .. } = value {
+            // AST_$GET_SEG_MAP 0xE06E44..0xE06E54 builds `[k]` in the set's
+            // memory: `clr.l (-124,A6)`, the byte offset guarded by `bcs`,
+            // `bset D0,(0,A1,D5.w)` (also FILE_$GET_SEG_MAP 0xE740CE,
+            // REM_FILE_$GET_SEG_MAP 0xE62044); when the guard is left out is
+            // not catalogued (codegen-patterns 5.1).
+            return Err(unsupported(
+                self.span,
+                "assigning `[x]` with a run-time member to a set (built in memory, \
+                 codegen-patterns 5.1) is",
+            ));
+        }
         if self.update_in_place(addr, value)? {
             return Ok(());
         }
@@ -5056,6 +5118,9 @@ impl Selector {
             Expr::Const { .. } | Expr::AddrOf(Addr::Symbol { offset: 0, .. }) => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
             Expr::SetMember { .. }
+            | Expr::SetMemberAt { .. }
+            | Expr::SetOp { .. }
+            | Expr::SetOf { .. }
             | Expr::Bits { .. }
             | Expr::AddrOf(_)
             | Expr::Binary { .. }
@@ -5443,7 +5508,10 @@ impl Selector {
                         src: Ea::ImmSym(name.clone()),
                         dst,
                     }),
-                    Expr::AddrOf(_) | Expr::SetMember { .. } | Expr::Test(_) => {
+                    Expr::AddrOf(_)
+                    | Expr::SetMember { .. }
+                    | Expr::SetMemberAt { .. }
+                    | Expr::Test(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
                     }
                     // A computed value: evaluated right before its push, from
@@ -6024,7 +6092,33 @@ impl Selector {
                         "`in` on a one-word set with an element that is not constant is",
                     ));
                 }
-                Ok(Val::Tmp(self.set_member_long(elem, set)?))
+                if let Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } = &**set
+                {
+                    if self.pinned(*o).is_some() {
+                        return Err(unsupported(
+                            self.span,
+                            "`in` on a set held in a register, as a value, is",
+                        ));
+                    }
+                }
+                let r = self.set_member_reg(elem, set)?;
+                self.out.push(Insn::Scc {
+                    cond: Cond::Ne,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                Ok(Val::Tmp(r))
+            }
+            Expr::SetMemberAt { .. } => Err(unsupported(
+                self.span,
+                "`in` on a set larger than a longword, as a value (`s<cc>` after the byte \
+                 `btst`: not catalogued), is",
+            )),
+            Expr::SetOf { elem, ty } => Ok(Val::Tmp(self.set_of(elem, ty.width)?)),
+            Expr::SetOp { op, lhs, rhs, ty } => {
+                Ok(Val::Tmp(self.set_op_value(*op, lhs, rhs, *ty)?))
             }
             Expr::AddrOf(_) => Err(unsupported(
                 self.span,
@@ -6325,6 +6419,18 @@ impl Selector {
                 // loads followed by `andi`, some of them conversions such as
                 // 0xE00868 `andi.l #0xff`).
                 AluOp::And => {
+                    // A value held in a data register and a constant
+                    // `moveq` cannot load: the value copied, then `andi`
+                    // (TTY_$I_RCV 0xE1BACE `move.w D4,D1; andi.w #0x80,D1`;
+                    // survey: 24 such copies and `andi` with a constant
+                    // outside -128..127, no `move #c,Dn; and Dm,Dn` with
+                    // one; 32 `moveq #c,Dn; and Dm,Dn`, codegen-patterns 8).
+                    let xv = match xv {
+                        Val::Reg(Reg::D(_)) if !(-128..128).contains(&c) => {
+                            Val::Tmp(self.in_tmp(xv, w)?)
+                        }
+                        v => v,
+                    };
                     if let Val::Tmp(d) = xv {
                         self.out.push(Insn::AluImm {
                             op: alu,
@@ -7546,6 +7652,24 @@ impl Selector {
             ));
         }
         if matches!(rhs, Expr::Const { value: 0, .. }) {
+            if let (Expr::SetOp { ty, .. }, Rel::Eq | Rel::Ne) = (lhs, op) {
+                // `x * y <> []`, `x - y = []` (ref p. 4-176): the branch
+                // reads the flags of the `and` that formed the set (TTY
+                // 0xE1BFFE `moveq #7,D1; and.w (8,A2),D1; beq.s`, TTY_$K_PUT
+                // 0xE67D04; PROC2_$SIGPAUSE 0xE3FACC `and.l (-100,A4),D1;
+                // beq.s`; codegen-patterns 5.1).
+                let d = match self.eval(lhs)? {
+                    Val::Tmp(d) => d,
+                    _ => unreachable!("a set operation's value is a new register"),
+                };
+                if !self.sets_flags(d, ty.width) {
+                    return Err(unsupported(
+                        self.span,
+                        "comparing this set value with `[]` is",
+                    ));
+                }
+                return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+            }
             if let (Expr::Bits { ty, .. }, Rel::Eq | Rel::Ne) = (lhs, op) {
                 if *ty != Scalar::BOOLEAN {
                     // A bit field against 0: the branch reads the flags of
@@ -8079,59 +8203,462 @@ impl Selector {
         Ok(r)
     }
 
-    /// `elem in set` for a one-longword set in memory, as a boolean in a
-    /// data register.  PROC1_$TST_LOCK 0xE148CE..0xE148DE:
+    /// `elem in set` for a variable element and a one-longword set: the
+    /// `btst Dn,Dm` that sets Z, in the register that holds the set, which
+    /// is returned (a boolean value takes `sne` there, a condition
+    /// branches on Z).  The register form takes the element mod 32 (no
+    /// range check: TTY_$K_SET_DELAY 0xE67A1C, a word of 32 and above tests
+    /// a member of 0..31; ref 3.9.3 would give false for it).
     ///
-    /// ```text
-    /// movea.l PROC1_$CURRENT_PCB.l,A0   ; the set's address first
-    /// move.w  (8,A6),D0                 ; then the element
-    /// move.l  (0x40,A0),D1              ; then the set's value
-    /// btst    D0,D1                     ; register btst: bit mod 32
-    /// sne     D1                        ; boolean in the set's register
-    /// ```
+    /// - A set variable in memory, PROC1_$TST_LOCK 0xE148CE..0xE148DE:
     ///
-    /// The order (the set operand's address before the element) is seen
-    /// at this one site only (codegen-patterns 5.1).
-    fn set_member_long(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
-        let Expr::Load {
-            addr,
-            ty: Scalar {
-                width: Width::Long, ..
-            },
-        } = set
-        else {
-            return Err(unsupported(
-                self.span,
-                "`in` on a set that is not a variable is",
-            ));
+    ///   ```text
+    ///   movea.l PROC1_$CURRENT_PCB.l,A0   ; the set's address first
+    ///   move.w  (8,A6),D0                 ; then the element
+    ///   move.l  (0x40,A0),D1              ; then the set's value
+    ///   btst    D0,D1                     ; register btst: bit mod 32
+    ///   sne     D1                        ; boolean in the set's register
+    ///   ```
+    ///
+    ///   (the order seen at this one site only, codegen-patterns 5.1); in a
+    ///   condition tty_$i_set_funcs 0xE67230 `move.l (0x20,A0),D4; btst
+    ///   D3,D4; beq.b`.
+    /// - A set held in a register (a parameter loaded at entry): `btst` on
+    ///   it (tty_$i_set_funcs 0xE67228 `btst D3,D0; beq.b`).
+    /// - A constant set: the element, then the constant in a register
+    ///   (TTY_$K_SET_DELAY 0xE67A18..0xE67A1E `move.w (A2),D0; moveq
+    ///   #0x1f,D1; btst D0,D1; bne.b`; tty_$i_wait 0xE1C264 `move.w
+    ///   (0x38,A2),D0; moveq #3,D5; btst D0,D5; bne.b`).
+    fn set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
+        let bit_of = |s: &mut Self, e: &Expr| -> Res<u8> {
+            match e {
+                // Not copied: `btst` only reads it.
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } if matches!(s.pinned(*o), Some(Reg::D(_))) => match s.pinned(*o) {
+                    Some(Reg::D(n)) => Ok(n),
+                    _ => unreachable!(),
+                },
+                e => s.eval_d(e),
+            }
         };
-        let ea = self.ea_of(addr)?;
-        let bit = match elem {
-            // Not copied: `btst` only reads it.
+        let r = match set {
+            Expr::Const { value, .. } => {
+                let bit = bit_of(self, elem)?;
+                let r = self.load_const(*value, Width::Long)?;
+                self.out.push(Insn::Btst {
+                    bit,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                return Ok(r);
+            }
             Expr::Load {
                 addr: Addr::Frame(o),
-                ..
-            } if matches!(self.pinned(*o), Some(Reg::D(_))) => match self.pinned(*o) {
-                Some(Reg::D(n)) => n,
-                _ => unreachable!(),
-            },
-            e => self.eval_d(e)?,
+                ty: Scalar {
+                    width: Width::Long, ..
+                },
+            } if matches!(self.pinned(*o), Some(Reg::D(_))) => {
+                let Some(Reg::D(r)) = self.pinned(*o) else {
+                    unreachable!()
+                };
+                r
+            }
+            Expr::Load {
+                addr,
+                ty: Scalar {
+                    width: Width::Long, ..
+                },
+            } => {
+                let ea = self.ea_of(addr)?;
+                let bit = bit_of(self, elem)?;
+                let r = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: Size::L,
+                    src: ea,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                self.out.push(Insn::Btst {
+                    bit,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                return Ok(r);
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "`in` on a set that is not a variable or a constant is",
+                ))
+            }
         };
-        let r = self.alloc_d()?;
-        self.out.push(Insn::Move {
-            size: Size::L,
-            src: ea,
-            dst: Ea::Reg(Reg::D(r)),
-        });
+        let bit = bit_of(self, elem)?;
         self.out.push(Insn::Btst {
             bit,
             dst: Ea::Reg(Reg::D(r)),
         });
-        self.out.push(Insn::Scc {
-            cond: Cond::Ne,
-            dst: Ea::Reg(Reg::D(r)),
-        });
         Ok(r)
+    }
+
+    /// `elem in s` for a set of `bytes` bytes in memory at `set`, more
+    /// than a register holds (ref 3.9.3, Figure 3-6: member k is bit k mod
+    /// 8 of the byte `(bits-1 - k) div 8`), setting Z for a branch.  The
+    /// element's type lies within the set's bits (lowering refuses the
+    /// guarded form).  Image (codegen-patterns 5.1), the order: the
+    /// constant bits-1, the element, the set's address, the byte offset,
+    /// the `btst` on the byte:
+    ///
+    /// ```text
+    /// clr.w   D1              ; a char element widened...
+    /// move.w  #0xff,D2        ; bits-1 (`moveq` up to 127)
+    /// move.b  (0x2d1,A0),D1   ; ...loaded after the constant
+    /// lea     (A5),A0         ; the set's address, always an `lea`
+    /// sub.w   D1,D2
+    /// lsr.w   #3,D2           ; the byte
+    /// btst    D1,(0,A0,D2.w)  ; the bit, mod 8
+    /// ```
+    ///
+    /// (the TTY module-local 0xE1B740..0xE1B750, and again at 0xE1B77E;
+    /// MST_$ALLOC_ASID 0xE42D5C..0xE42D64 `moveq #63,D1; lea (A0),A2;
+    /// sub.w D2,D1; lsr.w #3,D1; btst D2,(0,A2,D1.w)` with the element held
+    /// in D2; MSG_$OPENI 0xE59250..0xE59260 `moveq #63,D0; move.w
+    /// abs.w,D1; lea (-20,A6),A0; sub.w D1,D0; lsr.w #3,D0` for a word
+    /// element in memory).  **Uncertain:** the `lea` of a set in a record
+    /// reached through a register comes after the `lsr` at MSG_$CLOSEI
+    /// 0xE59432 and MSG_$FORK 0xE73F38 (`lea (472,A0),A1`).
+    fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<()> {
+        let top = bytes as i64 * 8 - 1;
+        let (k, c) = match elem {
+            // A byte element zero-extended around the constant's load.
+            Expr::Convert { value, ty } if *ty == Scalar::unsigned(Width::Word) => {
+                let Expr::Load {
+                    ty:
+                        Scalar {
+                            width: Width::Byte, ..
+                        },
+                    ..
+                } = &**value
+                else {
+                    return Err(unsupported(
+                        self.span,
+                        "`in` on a large set with a computed byte element is",
+                    ));
+                };
+                // A parameter held since the entry is copied from its
+                // register (**Uncertain**: no site; codegen-patterns 8,
+                // held values are never modified).
+                let src = match self.eval(value)? {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+                    _ => unreachable!("a byte load is memory or a data register"),
+                };
+                let k = self.alloc_d()?;
+                self.out.push(Insn::Clr {
+                    size: Size::W,
+                    dst: Ea::Reg(Reg::D(k)),
+                });
+                let c = self.load_const(top, Width::Word)?;
+                self.out.push(Insn::Move {
+                    size: Size::B,
+                    src,
+                    dst: Ea::Reg(Reg::D(k)),
+                });
+                (k, c)
+            }
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if matches!(self.pinned(*o), Some(Reg::D(_))) => {
+                let Some(Reg::D(k)) = self.pinned(*o) else {
+                    unreachable!()
+                };
+                (k, self.load_const(top, Width::Word)?)
+            }
+            Expr::Load { addr, .. } => {
+                let c = self.load_const(top, Width::Word)?;
+                let src = self.ea_of(addr)?;
+                let k = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src,
+                    dst: Ea::Reg(Reg::D(k)),
+                });
+                (k, c)
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "`in` on a large set with a computed element is",
+                ))
+            }
+        };
+        let src = self.ea_of(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        self.out.push(Insn::Alu {
+            op: AluOp::Sub,
+            size: Size::W,
+            src: Ea::Reg(Reg::D(k)),
+            dst: c,
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: c,
+        });
+        self.out.push(Insn::Btst {
+            bit: k,
+            dst: Ea::Idx(0, a, c, false),
+        });
+        Ok(())
+    }
+
+    /// The register-sized set `[elem]` in a new data register: the
+    /// register cleared, then `bset` of the element (codegen-patterns 5.1;
+    /// survey, 30 `clr; bset Dk,Dn` in compiled code).  The element is
+    /// evaluated first when it is computed (DBUF_$GET_BLOCK 0xE3A726
+    /// `moveq #15,D0; and.b (12,A4),D0; clr.w D1; bset D0,D1`;
+    /// PROC2_$DELIVER_FIM 0xE3EE22 `subq.w #1,D0; clr.l D1; bset D0,D1`),
+    /// loaded after the `clr` when it is a variable (TTY_$K_SET_INPUT_FLAG
+    /// 0xE6768E `clr.l D1; move.w (A2),D2; bset D2,D1`; 0xE3EE64), used
+    /// in place when it is held in a register (EC2_$RELEASE_EC1 0xE42BA4
+    /// `clr.l D1; bset D2,D1`).  `bset` on a register takes the element
+    /// mod 32 (no range check; on a word set a member above 15 is lost
+    /// when the word is used, one of 32 and above wraps).
+    fn set_of(&mut self, elem: &Expr, w: Width) -> Res<u8> {
+        let v = self.eval(elem)?;
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Clr {
+            size: size_of(w),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        let k = match v {
+            Val::Reg(Reg::D(r)) | Val::Tmp(r) => r,
+            Val::Imm(_) => unreachable!("a constant member is part of a set constant"),
+            v => self.in_tmp(v, elem.ty().width)?,
+        };
+        self.out.push(Insn::Bit {
+            op: BitOp::Set,
+            bit: k,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// A register-sized set operation as a value in a new data register
+    /// (codegen-patterns 5.1).
+    ///
+    /// - `x * c`, a constant: as the integer `x & c` ([`Self::binary`],
+    ///   codegen-patterns 8): the constant loaded first and `and` of a
+    ///   variable (TTY 0xE1BFFE `moveq #7,D1; and.w (8,A2),D1`; TTY_$K_PUT
+    ///   0xE67D04), a held value copied and masked with `andi` when the
+    ///   constant needs more than `moveq` (TTY_$I_RCV 0xE1BACE `move.w
+    ///   D4,D1; andi.w #0x80,D1`).
+    /// - `x * y`: the right operand loaded, the left one `and`ed in (TTY
+    ///   module-local 0xE1BF92 `move.l (0x24,A5),D1; and.l (0x14,A2),D1`;
+    ///   **Uncertain:** which source operand was the right one cannot be
+    ///   seen).
+    /// - `x - y`: the right operand loaded, complemented, the left one
+    ///   `and`ed in (PROC2_$SIGPAUSE 0xE3FAC6 `move.l (-108,A4),D1; not.l
+    ///   D1; and.l (-100,A4),D1`; PROC2_$SET_SIG_MASK 0xE3F9C6;
+    ///   PROC2_$SIGSETMASK 0xE3F70E; 0xE3EC54 with the left operand in D4).
+    ///
+    /// `x + y` and `x - c` as values (not stored back into `x`) are not
+    /// catalogued.
+    fn set_op_value(&mut self, op: SetOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+        let w = ty.width;
+        let konst = |e: &Expr| matches!(e, Expr::Const { .. });
+        match op {
+            SetOp::Inter if konst(lhs) || konst(rhs) => self.binary(BinOp::And, lhs, rhs, ty),
+            SetOp::Inter | SetOp::Diff if !konst(rhs) => {
+                let d = self.eval_d(rhs)?;
+                if op == SetOp::Diff {
+                    self.out.push(Insn::Unary {
+                        op: UnaryOp::Not,
+                        size: size_of(w),
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                }
+                let src = match self.eval(lhs)? {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "an intersection or difference whose left operand is computed is",
+                        ))
+                    }
+                };
+                self.out.push(Insn::Alu {
+                    op: AluOp::And,
+                    size: size_of(w),
+                    src,
+                    dst: d,
+                });
+                Ok(d)
+            }
+            SetOp::Diff => Err(unsupported(
+                self.span,
+                "a set minus a constant as a value (not stored back into the set) is",
+            )),
+            SetOp::Union => Err(unsupported(
+                self.span,
+                "the union of sets as a value (not `s := s + x`) is",
+            )),
+            SetOp::Inter => unreachable!("a constant operand is the first arm's"),
+        }
+    }
+
+    /// `s := s + x` and `s := s - x` for a register-sized set `s` in memory,
+    /// done in place (codegen-patterns 5.1).  Returns whether the statement
+    /// was this form.
+    ///
+    /// - One constant member: `bset`/`bclr #k mod 8` on the byte that
+    ///   holds it, `size-1 - k div 8` (ref 3.9.3, Figure 3-6):
+    ///   TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39E `bclr #0,(9,A2)`, TTY_$K_SET_FLAG
+    ///   0xE6745C `bset #4,(9,A2)` and 0xE6747C `bclr #4,(9,A2)` on the word
+    ///   at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
+    ///   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`.  **Uncertain:** no
+    ///   site with a member of 8 and above is known to be a set (PROC2_$FORK
+    ///   0xE732B4 `bclr #0,(-186,A2)` on the high byte of a flag word whose
+    ///   type is not known).
+    /// - Several constant members: `ori`/`andi` of the mask (its
+    ///   complement for `-`) on the set (TTY_$I_RCV 0xE1B98E `andi.w
+    ///   #-0xe1,(8,A2)` for `- [5, 6, 7]`; `ori.w #0x180,(42,A2)` at
+    ///   PROC2_$INIT 0xE3065A on a flag word, type not known).
+    /// - `[k]`, one run-time member ([`Self::set_of`]), then `or` (for `-`
+    ///   `not` and `and`) into the set: TTY_$K_SET_INPUT_FLAG 0xE6768E..
+    ///   0xE676A2 `clr.l D1; move.w (A2),D2; bset D2,D1; or.l D1,(0x14,A0)`
+    ///   and `...; not.l D1; and.l D1,(0x14,A0)`; on words AST_$DISMOUNT
+    ///   0xE069F4 `clr.w D3; bset D2,D3; or.w D3,(1056,A5)`,
+    ///   DBUF_$INVALIDATE 0xE3AA8E `clr.w D0; bset D3,D0; not.w D0; and.w
+    ///   D0,(2332,A5)`.
+    /// - Any other set value: computed into a register, then `or` (`not`
+    ///   and `and`) into the set (TTY module-local 0xE1C034 `move.l
+    ///   (0x18,A2),D1; or.l D1,(0x14,A2)`, 0xE1BF9E `move.l (0x24,A5),D1;
+    ///   not.l D1; and.l D1,(0x14,A2)`; TTY_$I_RCV 0xE1BACE `move.w D4,D1;
+    ///   andi.w #0x80,D1; or.w D1,(8,A2)` for `s + (t * [7])`).
+    ///
+    /// `s := s * x` is refused: the image has `andi` to memory, but also
+    /// the mask in a register `and`ed into the set (0xE1C006 `moveq #-8,D1;
+    /// and.w D1,(8,A2)`), and which source gave which is not settled.
+    fn set_update(&mut self, addr: &Addr, value: &Expr) -> Res<bool> {
+        let Expr::SetOp { op, lhs, rhs, ty } = value else {
+            return Ok(false);
+        };
+        let Expr::Load { addr: a, .. } = &**lhs else {
+            return Ok(false);
+        };
+        if a != addr {
+            return Ok(false);
+        }
+        if *op == SetOp::Inter {
+            return Err(unsupported(
+                self.span,
+                "`s := s * x` in place (`andi` to memory, or the mask in a register and `and` to \
+                 memory as at 0xE1C006: not settled) is",
+            ));
+        }
+        if matches!(addr, Addr::Index { .. }) {
+            return Err(unsupported(
+                self.span,
+                "updating a set that is an array element in place is",
+            ));
+        }
+        if let Addr::Frame(o) = addr {
+            if self.pinned(*o).is_some() {
+                return Err(unsupported(
+                    self.span,
+                    "updating a set held in a register in place is",
+                ));
+            }
+        }
+        let w = ty.width;
+        let size = size_of(w);
+        let all: u64 = if w == Width::Long {
+            0xffff_ffff
+        } else {
+            0xffff
+        };
+        if let Expr::Const { value: c, .. } = &**rhs {
+            let mask = (*c as u64) & all;
+            if mask == 0 {
+                return Err(unsupported(
+                    self.span,
+                    "adding or removing the empty set `[]` is",
+                ));
+            }
+            let dst = self.ea_of(addr)?;
+            if mask.count_ones() == 1 {
+                let k = mask.trailing_zeros();
+                let dst = self.byte_of(dst, w.bytes() - 1 - k / 8)?;
+                self.out.push(Insn::BitImm {
+                    op: if *op == SetOp::Union {
+                        BitOp::Set
+                    } else {
+                        BitOp::Clr
+                    },
+                    bit: (k % 8) as u8,
+                    dst,
+                });
+            } else {
+                let (alu, m) = if *op == SetOp::Union {
+                    (AluOp::Or, mask)
+                } else {
+                    (AluOp::And, !mask & all)
+                };
+                self.out.push(Insn::AluImm {
+                    op: alu,
+                    size,
+                    imm: imm(m as i64, w),
+                    dst,
+                });
+            }
+            return Ok(true);
+        }
+        let d = match &**rhs {
+            Expr::SetOf { elem, .. } => self.set_of(elem, w)?,
+            e => match (op, self.eval(e)?) {
+                (SetOp::Union, Val::Reg(Reg::D(r))) => r,
+                (_, v) => self.in_tmp(v, w)?,
+            },
+        };
+        if *op == SetOp::Diff {
+            self.out.push(Insn::Unary {
+                op: UnaryOp::Not,
+                size,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+        }
+        let dst = self.ea_of(addr)?;
+        self.out.push(Insn::AluToMem {
+            op: if *op == SetOp::Union {
+                AluOp::Or
+            } else {
+                AluOp::And
+            },
+            size,
+            src: d,
+            dst,
+        });
+        Ok(true)
+    }
+
+    /// The byte `off` bytes into the object at `ea`.
+    fn byte_of(&self, ea: Ea, off: u32) -> Res<Ea> {
+        let off = off as i32;
+        Ok(match ea {
+            Ea::Ind(a) if off == 0 => Ea::Ind(a),
+            Ea::Ind(a) => Ea::Disp(off, a),
+            Ea::Disp(d, a) if (-0x8000..0x8000).contains(&(d + off)) => Ea::Disp(d + off, a),
+            Ea::AbsL(s, o) => Ea::AbsL(s, o + off),
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "a bit of a set at this kind of address is",
+                ))
+            }
+        })
     }
 
     /// The operand of an array element (codegen-patterns 5.2): the element

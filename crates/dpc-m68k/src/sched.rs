@@ -347,6 +347,17 @@ fn fx(insn: &Insn) -> Fx {
             f.cc_set = true;
             f.cc_use = true;
         }
+        Insn::Bit { bit, dst, .. } => {
+            f.use_(Reg::D(*bit));
+            let size = if matches!(dst, Ea::Reg(_)) {
+                Size::L
+            } else {
+                Size::B
+            };
+            f.rmw(dst, size);
+            f.cc_set = true;
+            f.cc_use = true;
+        }
         Insn::AluToMem { size, src, dst, .. } => {
             f.use_(Reg::D(*src));
             f.rmw(dst, *size);

@@ -306,6 +306,10 @@ pub fn access(insn: &Insn) -> Access {
         Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BitImm { dst, .. } => {
             a.dst_rmw(dst)
         }
+        Insn::Bit { bit, dst, .. } => {
+            a.use_(Reg::D(*bit));
+            a.dst_rmw(dst);
+        }
         Insn::AluToMem { src, dst, .. } => {
             a.use_(Reg::D(*src));
             a.dst_rmw(dst);
@@ -387,7 +391,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::Scc { dst, .. }
         | Insn::Tst { dst, .. }
         | Insn::Cmpi { dst, .. } => fe(dst),
-        Insn::Btst { bit, dst } => {
+        Insn::Btst { bit, dst } | Insn::Bit { bit, dst, .. } => {
             fd(bit);
             fe(dst);
         }

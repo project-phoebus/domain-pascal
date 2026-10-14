@@ -1630,7 +1630,7 @@ their host); no compare or widening of either has been catalogued.
   5. As a function result, `move.b D1,D0` (0xE148E0; section 3).
 
   `dpc` reproduces this order for any `in` on a one-longword set variable
-  (`crates/dpc-m68k/src/isel.rs`, `set_member_long`).  **Uncertain:**
+  (`crates/dpc-m68k/src/isel.rs`, `set_member_reg`).  **Uncertain:**
   whether "address of the right operand before the value of the left
   one" is a general rule of the compiler's binary operators or specific
   to `in`; and the code for one-word sets held in a register (not seen
@@ -1645,9 +1645,11 @@ their host); no compare or widening of either has been catalogued.
   memory loaded, k = 8..15 ×192 and k < 8 ×58; after `move.l`, k >= 16 ×6;
   `btst #k,<memory>` ×422, all with k < 8 (the 68000 takes the bit number
   mod 8 there).  So a word set is loaded and tested whole whatever k is.
-  The memory form is taken to be the test of a bit of a byte object (a
+  The memory form was taken to be the test of a bit of a byte object (a
   packed field or a byte of a larger set): XPD_$INHERIT_PTRACE_OPTIONS
-  0xE5B17C `btst #3,(13,A0); sne D0`, not catalogued.  `dpc`
+  0xE5B17C `btst #3,(13,A0); sne D0`, not catalogued; the TTY sets are
+  tested in that form too (below, "`in` on sets in memory, constant
+  member"), so the choice between the two is not settled.  `dpc`
   (`isel.rs`, `set_bit_test`) implements the register form for sets of
   2 and 4 bytes; a non-constant element on a word set is rejected (`btst
   Dn,Dm` takes the bit mod 32, not catalogued for words), and so is a
@@ -1656,9 +1658,149 @@ their host); no compare or widening of either has been catalogued.
   ref 3.9.3, p. 3-16, but the original's code for it is not catalogued).
 - **Set constants** sit in data, for example the two 32-byte `set of char`
   tables at the start of the OLD_DIR data segment 0xE7FD24 (Reported:
-  `name-dir-subsystems.md`).
-- **Uncertain:** the code for set union, intersection and difference, and
-  for large `+ [x]` / `- [x]` on sets in memory.
+  `name-dir-subsystems.md`); initialised static sets in the routine's
+  data section (the TTY WIRED_DATA `set of char` at 0xE2DDB4 and the
+  longword masks at 0xE2DDD4, ../source `tty/i_word_erase.pas`,
+  `tty/i_set_raw_mode.pas`).  A register-sized constant used as an
+  operand is its bit mask in an immediate (`move.l #0x1ffef,(0x20,A0)`,
+  TTY_$I_INIT 0xE33290; `moveq #0x1f,D1`, TTY_$K_SET_DELAY 0xE67A1A);
+  larger constant sets used by `in` are cells in the code, reached with
+  `lea (d,PC)` (UNMAP_CASE 0xE54170, NAME_$INIT 0xE31842).
+
+#### Set operators (survey Verified; implemented, bead domain-pascal-7qo)
+
+Survey: `tools/setsurvey.py summary` over the compiled routines.  A set
+of one word or one longword is an integer to the 68010, and most of its
+code (`and`, `or`, `andi`/`ori` to memory, `tst`) cannot be told from
+integer `&`/`!` code or from packed boolean fields (5.3).  The forms
+below are taken from sites the ../source TTY reconstruction reads as set
+operations (its Pascal, `domain_os/tty/*.pas` at ../source 3898a2ce,
+was written from the image and Apollo's customer `tty.ins.pas`, whose
+flag fields are sets), and from the forms only a set gives (a one-member
+set built with `clr; bset Dk,Dn`; the byte offset of member k).  `dpc`:
+lowering `crates/dpc-ir/src/lower.rs` (`set_value`, `set_compare`,
+`set_member_at`, constants in `const_of`), selection
+`crates/dpc-m68k/src/isel.rs` (`set_update`, `set_of`, `set_op_value`,
+`set_member_reg`, `set_member_at`); golden `tests/golden/sets/set_ops`;
+tests `crates/dpc-m68k/tests/sets.rs` (forms, refusals, and a 68010
+model run against the bit model of Figure 3-6).
+
+- **`s := s + [c]`, `s := s - [c]`, one constant member (Verified at the
+  TTY sites):** `bset`/`bclr #c mod 8` on the byte that holds it, `size-1
+  - c div 8`: TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39E `bclr #0,(9,A2)` and
+  TTY_$K_SET_FLAG 0xE6745C/0xE6747C `bset`/`bclr #4,(9,A2)` on the word set
+  at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
+  TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`; tty_$i_put_chars 0xE1B362
+  `bset #0,(9,A0)`.  The same narrowing as packed booleans (5.3).
+  **Uncertain:** no member of 8 and above is known to be a set's (the
+  TTY sets use members 0..7); PROC2_$FORK 0xE732B4 `bclr #0,(-186,A2)` is
+  bit 8 of a flag word of unknown type.  `dpc` narrows every member so.
+- **Several constant members (Verified once):** `andi #~mask` to memory
+  for `-` (TTY_$I_RCV 0xE1B98E `andi.w #-0xe1,(8,A2)`, `- [5, 6, 7]`),
+  `ori #mask` for `+` (PROC2_$INIT 0xE3065A `ori.w #0x180,(42,A2)`, two
+  members of the flag word, type not known).  One exception: the TTY
+  module-local 0xE1C006 `moveq #-8,D1; and.w D1,(8,A2)` (the ../source
+  reading `- [0, 1, 2]`), one of 6 sites with a constant `and`/`or`ed
+  into memory through a register (0xE1557C, 0xE1CD32, 0xE3225E, 0xE68E52,
+  0xE68F68), against 385 `andi`/`ori` to memory: perhaps `s := s * c` or a
+  constant left operand; not settled.  Another reading fits both TTY
+  sites: the constant through a register when `moveq` loads it (-8 at
+  0xE1C006; -0xe1 at 0xE1B98E does not fit).  Five of the six register
+  sites have a `moveq` constant, and four are integer updates in
+  ../source's reading (KBD_$RCV 0xE1CD32 `|= 0xF`; RIP 0xE68E52/0xE68F68
+  `&= 0x3F`, ../source `rip/table.c`; 0xE3225E, `peb/load_wcs.c`), but
+  `andi`/`ori` to memory with a `moveq` constant is common too (e.g.
+  `andi.l #15` ×8, 0xE09CE4).  So `dpc`'s `andi.w #-8,(8,A2)` for `s := s
+  - [0, 1, 2]` does not match 0xE1C006.  `dpc` refuses `s := s * x` in
+  place.
+- **`[k]`, one run-time member (Verified, 46 sites):** the register
+  cleared at the set's size, then `bset Dk,Dn` (mod 32: no range check).
+  The element is evaluated first when computed (DBUF_$GET_BLOCK 0xE3A726
+  `moveq #15,D0; and.b (12,A4),D0; clr.w D1; bset D0,D1`;
+  PROC2_$DELIVER_FIM 0xE3EE22 `subq.w #1,D0; clr.l D1; bset D0,D1`),
+  loaded after the `clr` when it is a variable (TTY_$K_SET_INPUT_FLAG
+  0xE6768E `clr.l D1; move.w (A2),D2; bset D2,D1`; 0xE3EE64), used in its
+  register when held (EC2_$RELEASE_EC1 0xE42BA4).  Then: `or Dn,<mem>`
+  for `s := s + [k]` (×17: 6 word, 11 longword; TTY_$K_SET_INPUT_FLAG
+  0xE67694, AST_$DISMOUNT 0xE069F8 `or.w D3,(1056,A5)`), `not Dn; and
+  Dn,<mem>` for `s := s - [k]` (×11; DBUF_$INVALIDATE 0xE3AA92 `not.w D0;
+  and.w D0,(2332,A5)`, TTY_$K_SET_INPUT_FLAG 0xE676A0), a push as an
+  argument (×3, DISK_$FORMAT 0xE3D4E6 `move.w D1,-(SP)`), other uses
+  (×15, combined with other values: BAT_$FREE 0xE3B698 `bset D5,D1; or.l
+  D2,D1`).  So a member above the set's bits is taken mod 32: of a word
+  set, members 16..31 are lost when the word is used, 32 and above wrap
+  (`dpc` reproduces this; ref 3.9.3 has no such member).  `s := [k]` of a
+  32-bit frame set is built *in memory* with a guard instead
+  (AST_$GET_SEG_MAP 0xE06E44..0xE06E54 `clr.l (-124,A6); moveq #31,D5;
+  sub.w D0,D5; bcs.s; lsr.w #3,D5; lea (-124,A6),A1; bset D0,(0,A1,D5.w)`;
+  FILE_$GET_SEG_MAP 0xE740CE, REM_FILE_$GET_SEG_MAP 0xE62044): refused.
+- **`s := s + t`, `s := s - t`, `s := s + (t * c)` (Verified at the TTY
+  sites):** the right operand into a register, then `or` (for `-`, `not`
+  and `and`) into the set: 0xE1C034 `move.l (0x18,A2),D1; or.l
+  D1,(0x14,A2)`; 0xE1BF9E `move.l (0x24,A5),D1; not.l D1; and.l
+  D1,(0x14,A2)`; TTY_$I_RCV 0xE1BACE `move.w D4,D1; andi.w #0x80,D1; or.w
+  D1,(8,A2)` (×3, also 0xE1BAE2, 0xE1BAF6).
+- **Values (Verified forms; operand order Uncertain):** `x * c` as the
+  integer `x & c` (section 8): TTY 0xE1BFFE `moveq #7,D1; and.w
+  (8,A2),D1`, TTY_$K_PUT 0xE67D04; a held value and a constant `moveq`
+  cannot load: copied, then `andi` (0xE1BACE; survey: 24 copies and
+  `andi` with such a constant, no constant-first form; 32 `moveq #c,Dn;
+  and Dm,Dn` with one it can, 5 copies and `andi`).  `x * y`: the right
+  operand loaded, the left `and`ed in (0xE1BF92 `move.l (0x24,A5),D1;
+  and.l (0x14,A2),D1; move.l D1,(0x18,A2)`; which source operand was the
+  right one cannot be seen).  `x - y`: the right operand loaded,
+  complemented, the left `and`ed in (×16 followed by `beq`/`bne`:
+  PROC2_$SIGPAUSE 0xE3FAC6 `move.l (-108,A4),D1; not.l D1; and.l
+  (-100,A4),D1; beq.s`, PROC2_$SET_SIG_MASK 0xE3F9C6, PROC2_$SIGSETMASK
+  0xE3F70E; whether these are sets or `x & ~y` integers is not known:
+  the code is the same).  `x + y` and `x - c` as values are not
+  catalogued: refused.
+- **`[]` (Verified):** `clr` of the set (TTY_$I_INIT 0xE3325E `clr.w
+  (8,A0)`; 0xE1C044 `clr.l (0x18,A2)`; tty_$i_wait 0xE1C282 `clr.w
+  (-0x1e,A6)`).  `s <> []` / `s = []`: `tst` of the set (TTY_$K_GET
+  0xE1C5D4 `tst.w (10,A2)`); of an intersection or difference, the flags
+  of its `and` (0xE1BFFE `...; and.w (8,A2),D1; beq.s`; 0xE3FACC).
+  Other set comparisons (`=` with a non-empty set, `<=`, `>=`) have no
+  catalogued site: refused.
+- **`x in c`, a constant register-sized set (Verified):** the element,
+  then the constant in a register, `btst Dk,Dn` (TTY_$K_SET_DELAY
+  0xE67A18..0xE67A1E `move.w (A2),D0; moveq #0x1f,D1; btst D0,D1;
+  bne.b`; tty_$i_wait 0xE1C264 `move.w (0x38,A2),D0; moveq #3,D5; btst
+  D0,D5`).  A variable element of a longword set in a condition: the set
+  in a register and the branch on Z (tty_$i_set_funcs 0xE67228 `btst
+  D3,D0; beq.b` on a set parameter held since the entry, 0xE67230
+  `move.l (0x20,A0),D4; btst D3,D4; beq.b`).
+- **`in` on a set of more than a longword (Verified, 40 byte-offset
+  sites):** `moveq`/`move.w #bits-1,Dx`, the element, the set's address
+  with `lea` into a new address register (even `lea (A5),A0`), `sub.w
+  Dk,Dx; lsr.w #3,Dx`, `btst Dk,(0,An,Dx.w)`, the branch on Z: the TTY
+  module-local 0xE1B740..0xE1B754 for a char in a `set of char` (`clr.w
+  D1; move.w #0xff,D2; move.b (0x2d1,A0),D1; lea (A5),A0; sub.w D1,D2;
+  lsr.w #3,D2; btst D1,(0,A0,D2.w); beq.b`: the char zero-extended around
+  the constant's load), MST_$ALLOC_ASID 0xE42D5C (64 bits), MSG_$RCVI
+  0xE596E0 and 10 more on 64-bit sets.  Where the element's type reaches
+  beyond the set's bits a `bcs` after the `sub.w` skips the `btst`, and
+  the branch is `ble`/`bgt` (N set by the borrow, or Z): 14 sites, all on
+  constant sets in the code (NAME_$INIT 0xE31836..0xE3184A, UNMAP_CASE
+  0xE54166..0xE54178); refused.  **Uncertain:** the `lea` comes after the
+  `lsr` for a set in a record reached through a register (MSG_$CLOSEI
+  0xE59432, MSG_$FORK 0xE73F38); `in` on a large set as a value (no site).
+- **Sets of more than a longword as operands (Reported, not implemented):**
+  built and combined in frame temporaries: `[k]` as `lea (-20,A6),A0;
+  clr.l (A0)+; clr.l (A0)+` and the byte `bset Dk,(0,A0,Dx.w)` (6 sites,
+  MSG_$OPENI 0xE59248..0xE59260), `s - [k]` as a `dbf` loop `move.l
+  (A3)+,D0; not.l D0; and.l (A1)+,D0; move.l D0,(A4)+` into a second
+  temporary, then a copy back (MSG_$CLOSEI 0xE59454..0xE5948C; 12 such
+  loops); `s = []` as `tst.l (A1)+; bne` per longword (0xE59496).
+  Refused.  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
+  `bset` each member of a range clamped to it) has no compiled caller: a
+  run-time range `[a..b]` is refused.
+- **`in` on sets in memory, constant member:** the TTY code tests some
+  set fields narrowed to the byte (`btst #k,(d,An)`) and some whole
+  (`move.w`/`move.l`; `btst #k,Dn`); ../source `tty/README-pascal.md`
+  ("Findings", 1) and `tty.ins.pas` ("Types") give the sites; the rule
+  is not known and `dpc` keeps the whole form (above).  So TTY routines
+  with narrowed tests do not match yet.
 
 ### 5.2 Records and arrays (Verified / Reported)
 
@@ -1926,7 +2068,8 @@ longword units 57 of a register, 4 of a constant.  Byte units: 0xE0089A, 0xE158B
 bytes 5..6).  Many `bset`/`bclr`/`btst #k,<mem>` are set operations on
 sets in memory rather than packed fields (SIO's `state` at 0x74, a word
 set: 0xE1C6BE `bclr #0,(0x75,A2)`; TTY's flags); the forms coincide for
-a constant member.
+a constant member (5.1, "Set operators": `dpc` gives `s := s + [c]` the
+same `bset #c mod 8` on the member's byte).
 
 - **Boolean field, test:** `btst #k,M` and `beq`/`bne` (0xE0088A); bit 7
   as the sign, `tst.b M` and `bpl`/`bmi` (no `btst #7` on memory in
@@ -3287,8 +3430,12 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   followed directly by `andi`, some of them conversions (0xE00868 `andi.l
   #0xff`, a zero-extension) and some not (0xE05810 `move.l (-188,A6),D1;
   andi.l #0x7fffffff,D1` before a compare; 0xE03494): Uncertain as a
-  rule, `dpc` uses the majority form.  On a computed value: `andi` in
-  place (0xE11024 after `lsr.w`).
+  rule, `dpc` uses the majority form.  Except: a value held in a data
+  register with a constant `moveq` cannot load is copied and masked with
+  `andi` (TTY_$I_RCV 0xE1BACE `move.w D4,D1; andi.w #0x80,D1`: 24 such
+  copies, no constant-first `move #c,Dn; and Dm,Dn` with any register;
+  `tools/setsurvey.py`, "andc"; implemented, bead domain-pascal-7qo).
+  On a computed value: `andi` in place (0xE11024 after `lsr.w`).
 - **`!`, `xor` (Uncertain):** on a computed value, `ori`/`eori` in place
   (0xE03498 `andi.w #-0x4001,D1; ori.w #0x2000,D1`); with a variable both
   orders occur (4 constant-first `or`s, 5 loads and `ori`): rejected.
@@ -5179,7 +5326,7 @@ points need care:
 - PROC1_$TST_LOCK 0xE148DE `sne D1`: D0 (the element, dead after the
   `btst`) is free.  Address-order allocation of a fresh value gives D0.
   `dpc` puts the `sne` in the tested operand's register
-  (`set_member_long`), which is what the image shows; keep that as an
+  (`set_member_reg`), which is what the image shows; keep that as an
   in-place result, not a new allocation.  The order of 0xE148CE..
   0xE148D8 (set address, element, set value) is the generation order
   that `dpc` already uses.  With it, the candidate scheduler of R11

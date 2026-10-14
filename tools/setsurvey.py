@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""setsurvey.py - set operations in the compiled code of the SR10.2 image.
+
+Evidence tool for docs/codegen-patterns.md section 5.1 (bead
+domain-pascal-7qo).  Compiled routines are split and followed as
+tools/casesurvey.py does (map symbols and `link.w A6' words, hand assembly
+excluded, only the instructions reachable from the routine's start).
+Sets of one word or one longword are integers to the 68010, so most of
+their code cannot be told from integer `&'/`!' code; the forms counted
+here are the ones that only a set (or a packed boolean) gives:
+
+    one     `[k]' with a run-time member: `clr.<s> Dn', then `bset Dk,Dn'
+            (the element loaded in between or before), and what the
+            register is used for next: `or Dn,<mem>' (s := s + [k]),
+            `not Dn; and Dn,<mem>' (s := s - [k]), a push, other.
+    memb    `bset'/`bclr'/`btst Dk,(0,An,Dx.w)' after the byte offset of
+            member k in a set of more than a longword, `moveq/move.w
+            #bits-1,Dx; sub.w Dk,Dx; lsr.w #3,Dx': the operation, the
+            bits, whether a `bcs' guards the offset (the element's type
+            reaches beyond the set), whether the set is a constant in the
+            code (`lea (d,PC)').
+    diff    `move <y>,Dn; not Dn; and <x>,Dn' followed by `beq'/`bne':
+            `x - y <> []' (or the integer `x & ~y <> 0').
+    loop    `dbf' loops whose body `and's or `or's longwords through
+            `(An)+': operations on sets in memory.
+    regmem  `moveq/move #c,Dn; and/or Dn,<mem>': a constant `and'ed or
+            `or'ed into memory through a register (against `andi'/`ori'
+            to memory, counted too).
+    andc    `&' of a value held in a data register and a constant: the
+            copy then `andi' (`move Dm,Dn; andi #c,Dn') against the
+            constant first (`moveq/move #c,Dn; and Dm,Dn'), by whether
+            `moveq' can load the constant.
+
+usage:
+    tools/setsurvey.py summary          # the counts quoted in codegen-patterns 5.1
+    tools/setsurvey.py list KIND        # one line per site of KIND
+
+Python 3 standard library + m68k-elf-objdump.  Read-only.
+"""
+
+import os
+import re
+import sys
+from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import a5survey  # noqa: E402
+import arithsurvey  # noqa: E402
+
+KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc')
+
+_CLR = re.compile(r'^clr([wl]) %(d\d)$')
+_BITREG = re.compile(r'^b(set|clr|tst) %(d\d),%(d\d)$')
+_BITIDX = re.compile(r'^b(set|clr|tst) %(d\d),%a\d@\(0,%(d\d):w\)$')
+_TOP = re.compile(r'^(?:moveq|movew) #(\d+),%(d\d)$')
+_IMMREG = re.compile(r'^(?:moveq|move[bwl]) #(-?\d+),%(d\d)$')
+
+
+def fits_moveq(v):
+    return -128 <= v <= 127
+
+
+def one_sites(ins):
+    """`clr; [load]; bset Dk,Dn' -> [(addr, width, use)]."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _BITREG.match(t)
+        if not m or m.group(1) != 'set':
+            continue
+        dn = m.group(3)
+        width = None
+        for j in range(i - 1, max(i - 4, -1), -1):
+            c = _CLR.match(ins[j][2])
+            if c and c.group(2) == dn:
+                width = c.group(1)
+                break
+            if re.search(r'%' + dn + r'\b', ins[j][2]):
+                break
+        if width is None:
+            continue
+        use = 'other'
+        nxt = [x[2] for x in ins[i + 1:i + 3]]
+        if nxt and re.match(r'^or[wl] %' + dn + r',%(a\d|fp)', nxt[0]):
+            use = 'or-mem'
+        elif nxt and re.match(r'^or[wl] %' + dn + r',', nxt[0]):
+            use = 'or-other'
+        elif (len(nxt) == 2 and nxt[0] == 'not%s %%%s' % (width, dn)
+              and re.match(r'^and[wl] %' + dn + r',%(a\d|fp)', nxt[1])):
+            use = 'not-and-mem'
+        elif nxt and re.match(r'^move[wl] %' + dn + r',%sp@-', nxt[0]):
+            use = 'push'
+        out.append((a, width, use))
+    return out
+
+
+def memb_sites(ins):
+    """`#bits-1; sub.w; [bcs]; lsr.w #3; b<op> Dk,(0,An,Dx.w)' ->
+    [(addr, op, bits, guarded, const_set)]."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _BITIDX.match(t)
+        if not m:
+            continue
+        dk, dx = m.group(2), m.group(3)
+        bits = guarded = None
+        const = False
+        for j in range(i - 1, max(i - 10, -1), -1):
+            tj = ins[j][2]
+            if re.match(r'^lea %pc@', tj):
+                const = True
+            if re.match(r'^bcss? ', tj):
+                guarded = True
+            tm = _TOP.match(tj)
+            if tm and tm.group(2) == dx:
+                bits = int(tm.group(1)) + 1
+                break
+        if bits is None or not any(
+                ins[k][2] == 'subw %%%s,%%%s' % (dk, dx) for k in range(max(i - 8, 0), i)):
+            continue
+        out.append((a, m.group(1), bits, bool(guarded), const))
+    return out
+
+
+def diff_sites(ins):
+    """`move <y>,Dn; not Dn; and <x>,Dn; beq/bne' -> [addr]."""
+    out = []
+    for i in range(1, len(ins) - 2):
+        m = re.match(r'^not([wl]) %(d\d)$', ins[i][2])
+        if not m:
+            continue
+        s, dn = m.groups()
+        if (re.match(r'^move' + s + r' .*,%' + dn + '$', ins[i - 1][2])
+                and re.match(r'^and' + s + r' [^,]+,%' + dn + '$', ins[i + 1][2])
+                and re.match(r'^b(eq|ne)', ins[i + 2][2])):
+            out.append(ins[i - 1][0])
+    return out
+
+
+def loop_sites(ins):
+    """`dbf' loops with an `and.l'/`or.l' through `(An)+' in the body."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^dbf %d\d,0x([0-9a-f]+)$', t)
+        if not m:
+            continue
+        head = int(m.group(1), 16)
+        body = [x[2] for x in ins if head <= x[0] < a]
+        if any(re.match(r'^(and|or)l (%a\d@\+,%d\d|%d\d,%a\d@\+)', b) for b in body):
+            out.append(head)
+    return out
+
+
+def regmem_sites(ins):
+    """(`#c,Dn; and/or Dn,<mem>' sites, `andi/ori #c,<mem>' sites)."""
+    reg, imm = [], []
+    for i, (a, _, t) in enumerate(ins):
+        if re.match(r'^(and|or)i[bwl] #-?\d+,(?!%d|%sr)', t):
+            imm.append(a)
+        m = re.match(r'^(and|or)[bwl] %(d\d),(?!%d)', t)
+        if m and i and _IMMREG.match(ins[i - 1][2]) \
+                and _IMMREG.match(ins[i - 1][2]).group(2) == m.group(2):
+            reg.append(ins[i - 1][0])
+    return reg, imm
+
+
+def andc_sites(ins):
+    """[(addr, form, moveq-able)] for `&' of a held value and a constant."""
+    out = []
+    for i in range(1, len(ins)):
+        p, t = ins[i - 1][2], ins[i][2]
+        m = re.match(r'^andi([bwl]) #(-?\d+),%(d\d)$', t)
+        if m and re.match(r'^move' + m.group(1) + r' %d\d,%' + m.group(3) + '$', p):
+            out.append((ins[i - 1][0], 'copy+andi', fits_moveq(int(m.group(2)))))
+        m = re.match(r'^and[bwl] %d\d,%(d\d)$', t)
+        c = _IMMREG.match(p)
+        if m and c and c.group(2) == m.group(1):
+            out.append((ins[i - 1][0], 'const-first', fits_moveq(int(c.group(1)))))
+    return out
+
+
+def scan():
+    """{kind: [(routine start, routine name, site...)]}."""
+    res = {k: [] for k in KINDS}
+    res['immmem'] = []
+    for r0, r1, name in arithsurvey.routines():
+        ins = a5survey.reached(r0, r1)
+        for s in one_sites(ins):
+            res['one'].append((r0, name) + s)
+        for s in memb_sites(ins):
+            res['memb'].append((r0, name) + s)
+        for a in diff_sites(ins):
+            res['diff'].append((r0, name, a))
+        for a in loop_sites(ins):
+            res['loop'].append((r0, name, a))
+        reg, imm = regmem_sites(ins)
+        res['regmem'] += [(r0, name, a) for a in reg]
+        res['immmem'] += [(r0, name, a) for a in imm]
+        for s in andc_sites(ins):
+            res['andc'].append((r0, name) + s)
+    return res
+
+
+def first(sites, n=4):
+    return ', '.join('0x%X' % s[2] for s in sites[:n])
+
+
+def summary(res):
+    one = res['one']
+    print('one-member sets `clr; bset Dk,Dn\': %d' % len(one))
+    for k, v in sorted(Counter((s[3], s[4]) for s in one).items()):
+        print('  %s %-12s %3d  e.g. %s' % (k[0], k[1], v,
+                                           first([s for s in one if (s[3], s[4]) == k])))
+    memb = res['memb']
+    print('byte-offset member operations (sets over a longword): %d' % len(memb))
+    for k, v in sorted(Counter((s[3], s[4], s[5], s[6]) for s in memb).items()):
+        sel = [s for s in memb if (s[3], s[4], s[5], s[6]) == k]
+        print('  b%-3s bits=%-4d guarded=%-5s const=%-5s %3d  e.g. %s' % (k + (v, first(sel))))
+    print('`move y; not; and x; beq/bne\': %d  e.g. %s' % (len(res['diff']), first(res['diff'])))
+    print('dbf loops and/or-ing longwords through (An)+: %d  e.g. %s' % (
+        len(res['loop']), first(res['loop'], 8)))
+    print('constant through a register into memory (`#c,Dn; and/or Dn,<mem>\'): %d  (%s)' % (
+        len(res['regmem']), first(res['regmem'], 8)))
+    print('`andi/ori #c,<mem>\': %d' % len(res['immmem']))
+    andc = res['andc']
+    for k, v in sorted(Counter((s[3], s[4]) for s in andc).items()):
+        print('  & of a held value: %-11s moveq-able=%-5s %3d  e.g. %s' % (
+            k[0], k[1], v, first([s for s in andc if (s[3], s[4]) == k])))
+
+
+def main(argv):
+    if not argv or argv[0] not in ('summary', 'list') or (
+            argv[0] == 'list' and (len(argv) < 2 or argv[1] not in KINDS + ('immmem',))):
+        print(__doc__)
+        return 2
+    res = scan()
+    if argv[0] == 'summary':
+        summary(res)
+    else:
+        for s in res[argv[1]]:
+            print('0x%06X %-28s %s' % (s[2], '%06X %s' % (s[0], s[1]),
+                                      ' '.join(str(x) for x in s[3:])))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

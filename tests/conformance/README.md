@@ -98,7 +98,15 @@ they exercise.
 
 `pending/` holds reconstructions that `dpc` cannot compile yet and that
 are therefore not in the manifest: `pending/log_read.pas` (LOG_$READ
-and its worker 0xE17778; what is missing is in codegen-patterns 12.3).
+and its worker 0xE17778; what is missing is in codegen-patterns 12.3)
+and `pending/tty_k_enable_func.pas` (TTY_$K_ENABLE_FUNC 0xE675AE, set
+`+ [k]`/`- [k]`, codegen-patterns 5.1; refused for the boolean parameter
+whose slot is loaded after the first branch, 12.4 R4(b), and once that
+is lifted the original keeps the descriptor in D0 before `movea.l
+D0,A2`; its manifest line would be `tests/conformance/pending/
+tty_k_enable_func.pas TTY_$K_ENABLE_FUNC --section-addr
+.bss.moddata.TTY=0xE8242C a5-always=TTY_$K_ENABLE_FUNC
+module-routines=SET_DFL_FUNCS=0xE6726E`).
 
 Constants and expressions passed by address (codegen-patterns 1.5; bead
 domain-pascal-5aw.9; "Constants in the code section" below):
