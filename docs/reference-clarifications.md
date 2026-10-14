@@ -66,6 +66,13 @@ Owner's answer (2026-10-14): yes, support attribute lists on parameter types.
 Meaning (from the reference, not a separate ruling): 3.15.6.8 "Passing Arguments by Reference", p. 3-76: "The compiler is unable to determine the alignment of objects passed by reference as arguments to routines. By default, the compiler assumes that such objects are naturally aligned. Therefore, if you know that an argument passed by reference is not naturally aligned, you should specify its alignment."  So `[attrs] T` in a parameter declares the same type as a named `= [attrs] T` (cf. `error_$status_t = [aligned(1)] status_$t`, error.ins.pas line 22): the attributes describe the actual argument's object, and the callee may assume only that alignment.
 Consequence: implemented under bead domain-pascal-lmw.
 
+## 7.2.2 Lists in the define statement (p. 7-5; PDF page 430)
+Asked: 2026-10-14, by the corpus agent (open question 33; bead domain-pascal-hsb)
+Passage: "The define statement takes the following syntax: define variable1 [:= initial_value1]; ... [variableN [:= initial_valueN];]" (one name per `;`), while Apollo's examples write `DEFINE sasc_$get, sasc_$locate, ...;` (streams/sasc io.pas, imex.pas, misc.pas, open.pas, seek.pas; hardcopy driver_ex.pas, filter_ex.pas).
+Question: is a comma-separated list accepted, and may listed names carry `:= initial_value`?
+Owner's answer (2026-10-14; the owner notes not every case was checked): `DEFINE var1, var2, ..., varN;` is allowed; it defines the names and leaves them uninitialised.  A name with an initialiser needs its own `;`: `DEFINE var1 := init1; var2 := init2; ... varN := initN;`.  So `:=` is not allowed inside a comma list.
+Consequence: implemented under bead domain-pascal-hsb.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -364,7 +371,12 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     For `b, c: [ALIGNED(0)] integer16` at odd offsets (Figure 3-24), what
     did the 68000-family compiler emit?  Split references are described
     as "Series 10000 Only".  *Current: an odd-address word/long access is
-    refused (the 68010 traps).*
+    refused (the 68010 traps).*  The same refusal covers a parameter of a
+    byte-aligned type passed by address (`IN a1: UNIV [aligned(0)]
+    error_$integer32`, error.ins.pas): a word or longword reference
+    through it, and the entry copy of a value parameter of such a type
+    (bead domain-pascal-lmw).  A record comparison (`cmpm`) and a packed
+    field's word or longword unit are refused at such addresses too.
 26. **3.15.3, p. 3-57 (device record assignment).**  Is assigning or
     pushing a whole 4-byte `[device]` record as one 32-bit reference
     allowed, or does "The device attribute prevents this optimization"
@@ -444,7 +456,7 @@ example programs, `~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os
 Each is refused today; the corpus baseline (`tests/corpus/baseline.txt`)
 records the files it stops.
 
-33. **7.2.2, p. 7-5 (PDF p. 430, checked; the OCR scrambles the
+33. **Answered 2026-10-14; see Clarifications, "7.2.2 Lists in the define statement".**  **7.2.2, p. 7-5 (PDF p. 430, checked; the OCR scrambles the
     syntax).**  "The define statement takes the following syntax: define
     variable1 [:= initial_value1]; ... [variableN [:= initial_valueN];]":
     one name per `;`.  Apollo's examples write lists:

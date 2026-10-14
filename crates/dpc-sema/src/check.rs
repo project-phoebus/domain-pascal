@@ -1411,10 +1411,21 @@ impl<'t> Checker<'t> {
     }
 
     /// A parameter's type must be a type name (ref 5.1 p. 5-2: "you cannot
-    /// specify an anonymous data type").
+    /// specify an anonymous data type"), optionally preceded by attribute
+    /// lists, `[aligned(1)] status_$t` (owner ruling, docs/reference-
+    /// clarifications.md, "5.1 Attribute lists on parameter types"; Apollo's
+    /// rws.ins.pas and error.ins.pas).  `[attrs] T` is the type a named
+    /// `= [attrs] T` declaration would give (ref 3.15, p. 3-53: the list
+    /// goes "immediately before the type"), so every attribute 3.15 allows
+    /// on a type is accepted.  For an argument passed by reference the
+    /// attributes describe the argument's object, which the callee may
+    /// assume no more aligned than that (ref 3.15.6.8, p. 3-76).
     fn param_type(&mut self, ty: &ast::TypeExpr) -> TypeId {
         match &ty.kind {
             ast::TypeKind::Named(id) => self.named_type(id),
+            ast::TypeKind::Attributed { ty: inner, .. } if Self::attributed_name(inner) => {
+                self.type_expr(ty)
+            }
             _ => {
                 self.error(
                     ty.span,
@@ -1422,6 +1433,15 @@ impl<'t> Checker<'t> {
                 );
                 self.types.builtins.error
             }
+        }
+    }
+
+    /// Whether `ty` is a type name, possibly after attribute lists.
+    fn attributed_name(ty: &ast::TypeExpr) -> bool {
+        match &ty.kind {
+            ast::TypeKind::Named(_) => true,
+            ast::TypeKind::Attributed { ty, .. } => Self::attributed_name(ty),
+            _ => false,
         }
     }
 
@@ -3366,6 +3386,11 @@ impl<'t> Checker<'t> {
                 a.mode == b.mode
                     && a.univ == b.univ
                     && self.types.canon(a.ty) == self.types.canon(b.ty)
+                    // `[aligned(n)] T` is `T` for compatibility, but an
+                    // alignment attribute changes a record's size (ref
+                    // 3.15.6.2, Figure 3-21 p. 3-67): a parameter of
+                    // another size does not "exactly match" (p. 4-146).
+                    && self.types.size(a.ty) == self.types.size(b.ty)
                     && a.conv == b.conv
             })
             && rt.result.as_ref().map(|x| x.ty) == sig.result

@@ -853,6 +853,27 @@ fn parameter_modes_and_univ() {
 }
 
 #[test]
+fn attribute_lists_on_parameter_types() {
+    // Owner ruling, docs/reference-clarifications.md "5.1 Attribute lists
+    // on parameter types": Apollo's rws.ins.pas `OUT Status: [aligned(1)]
+    // Status_$T` and error.ins.pas `IN a1, a2: UNIV [aligned(0)]
+    // error_$integer32`.  The list goes before the type, after `univ`
+    // (ref 3.15, p. 3-53: "immediately before the type").
+    let d = decls(
+        "procedure p(out status : [aligned(1)] status_$t;\n\
+                     in a1, a2 : univ [aligned(0)] error_$integer32;\n\
+                     var v : [volatile, device(read)] integer);\n\
+         begin end;",
+    );
+    let ps = routine(&d[0]).params.as_ref().unwrap();
+    assert_eq!(
+        sparams(ps),
+        "out status:[aligned(1)] status_$t; in a1,a2:univ [aligned(0)] error_$integer32; \
+         var v:[volatile, device(read)] integer"
+    );
+}
+
+#[test]
 fn routine_parameters() {
     // ref 5.4, p. 5-13.
     let d = decls(

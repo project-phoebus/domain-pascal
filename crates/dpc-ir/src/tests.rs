@@ -3819,6 +3819,171 @@ procedure p; begin x := y end;",
     assert!(e[0].contains("byte-aligned object"), "{e:?}");
 }
 
+/// A parameter whose type carries an alignment attribute (owner ruling,
+/// docs/reference-clarifications.md "5.1 Attribute lists on parameter
+/// types"; ref 3.15.6.8 p. 3-76): an argument passed by address may be
+/// only as aligned as the type says.  `[aligned(0)] integer32` (Apollo's
+/// error.ins.pas) may be at an odd address, so a longword reference
+/// through it is refused, as is the entry copy of a value parameter of
+/// that type; `[aligned(1)]` (rws.ins.pas) is word aligned, which the
+/// 68010 needs and no more.  A by-value one (`val_param`) is in the frame.
+#[test]
+fn byte_aligned_parameters_are_refused_where_referenced() {
+    let types = "module m;
+type
+  status_$t = record all: integer32 end;
+  b32 = [aligned(0)] integer32;
+var g: integer32;
+";
+    let e = errs(&format!(
+        "{types}procedure p(in a: univ [aligned(0)] integer32); begin g := a end;"
+    ));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    let e = errs(&format!(
+        "{types}procedure p(out a: b32); begin a := 0 end;"
+    ));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    let e = errs(&format!(
+        "{types}procedure p(a: [aligned(0)] integer32); begin g := a end;"
+    ));
+    assert!(e[0].contains("byte-aligned type"), "{e:?}");
+    // Passed on by address without a reference: accepted.
+    lower_src(&format!(
+        "{types}procedure q(in a: univ b32); extern;
+procedure p(in a: univ [aligned(0)] integer32); begin q(a) end;"
+    ))
+    .unwrap();
+    lower_src(&format!(
+        "{types}procedure p(out status: [aligned(1)] status_$t);
+begin status.all := 0 end;
+procedure v(a: [aligned(0)] integer32); val_param; begin g := a end;"
+    ))
+    .unwrap();
+}
+
+/// Every word or longword path through a byte-aligned object is refused
+/// unless its address is known to be even (bead domain-pascal-lmw review):
+/// a record comparison (`cmpm`) and a packed field's word or longword
+/// unit, for an element of a byte-aligned array reached through a
+/// parameter (ref 3.15.6.8 p. 3-76).  A record with `[aligned(0)]` is
+/// still word aligned (ref 3.10.5.5 p. 3-26), so its own fields and its
+/// entry copy are accepted.
+#[test]
+fn byte_aligned_parameters_refuse_every_word_path() {
+    let types = "module m;
+type
+  uid_t = record hi, lo: integer32 end;
+  pr = packed record a: 0..15; b: 0..4095; c: integer16 end;
+  bau = [aligned(0)] array[1..2] of uid_t;
+  bap = [aligned(0)] array[1..2] of pr;
+  buid = [aligned(0)] uid_t;
+var g: integer32; gw: integer16; gu: uid_t;
+";
+    for body in [
+        "procedure p(in a: bau); begin if a[1] = gu then g := 1 end;",
+        "procedure p(in a: bau); begin if gu = a[2] then g := 1 end;",
+        "procedure p(in a: bap); begin gw := a[1].b end;",
+        "procedure p(var a: bap); begin a[1].b := 3 end;",
+        "procedure p(in a: bau); begin with a[1] do g := hi end;",
+    ] {
+        let e = errs(&format!("{types}{body}"));
+        assert!(e[0].contains("byte-aligned object"), "{body}: {e:?}");
+    }
+    // A byte unit is never odd-trapped.
+    lower_src(&format!(
+        "{types}procedure p(in a: bap); begin gw := a[1].a end;"
+    ))
+    .unwrap();
+    // `[aligned(0)]` on a record: still word aligned.
+    lower_src(&format!(
+        "{types}procedure p(in a: buid); begin g := a.hi; if a = gu then g := 1 end;
+procedure v(a: buid); begin g := a.lo end;"
+    ))
+    .unwrap();
+}
+
+/// An alignment attribute changes a record's size (ref 3.15.6.2, Figure
+/// 3-21 p. 3-67), but `[aligned(2)] T` is `T` for compatibility: a
+/// variable of the plain type passed to a `var`/`out` parameter of the
+/// attributed one would be written beyond its end (here into the saved
+/// frame pointer); it is refused, as is comparing records of the two
+/// sizes.  `univ` turns the check off (ref 5.3.3).
+#[test]
+fn records_resized_by_alignment_are_not_passed_by_address() {
+    let types = "module m;
+type
+  rec2 = record a: integer end;
+  r4 = [aligned(2)] rec2;
+  rec6 = record a, b, c: integer end;
+var t: r4; g: integer32; x6: rec6;
+procedure q(out r: [aligned(2)] rec2); begin r := t end;
+";
+    let e = errs(&format!("{types}procedure z; var x: rec2; begin q(x) end;"));
+    assert!(e[0].contains("2-byte variable to a 4-byte"), "{e:?}");
+    let e = errs(&format!(
+        "{types}procedure z(in r: [aligned(2)] rec6); begin if x6 = r then g := 1 end;"
+    ));
+    assert!(e[0].contains("records of different sizes"), "{e:?}");
+    lower_src(&format!(
+        "{types}procedure u(out r: univ r4); extern;
+procedure z; var x: r4; y: rec2; begin q(x); u(y) end;"
+    ))
+    .unwrap();
+}
+
+/// Volatile and device attributes on a parameter's type flow to the
+/// references through it (ref 3.15.1-3.15.3; the parameter's type is the
+/// one `= [attrs] T` declares), by address and in a value slot.
+#[test]
+fn volatile_parameter_types_are_volatile_references() {
+    let types = "module m;
+var g: integer;
+";
+    match only_stmt(&format!(
+        "{types}procedure p(var x: [volatile] integer); begin g := x end;"
+    )) {
+        StmtKind::Store {
+            value: Expr::Load { addr, .. },
+            ..
+        } => assert_eq!(addr.unwrap_volatile().1, Some(Access::default())),
+        s => panic!("{s:?}"),
+    }
+    match only_stmt(&format!(
+        "{types}procedure p(var x: [device] integer); begin x := 1 end;"
+    )) {
+        StmtKind::Store { addr, .. } => assert_eq!(
+            addr.unwrap_volatile().1,
+            Some(Access {
+                device: true,
+                atomic: false
+            })
+        ),
+        s => panic!("{s:?}"),
+    }
+    let e = errs(&format!(
+        "{types}procedure p(var x: [device(read)] integer); begin x := 1 end;"
+    ));
+    assert!(e[0].contains("read-only device object"), "{e:?}");
+    // A value slot (`val_param`) too: every reference stays in the slot.
+    match only_stmt(&format!(
+        "{types}procedure p(x: [volatile] integer); val_param; begin g := x end;"
+    )) {
+        StmtKind::Store {
+            value: Expr::Load { addr, .. },
+            ..
+        } => assert!(matches!(addr, Addr::Volatile { .. }), "{addr:?}"),
+        s => panic!("{s:?}"),
+    }
+}
+
+/// A function result of a volatile type is refused: the result variable
+/// may be held in a register (bead domain-pascal-lmw review).
+#[test]
+fn volatile_function_results_are_refused() {
+    let e = errs("module m; function f: [volatile] integer32; begin f := 1 end;");
+    assert!(e[0].contains("function result of a volatile"), "{e:?}");
+}
+
 /// A value parameter that is a record with device or volatile parts is
 /// not copied on entry (a block copy merges device references, ref 3.15.3
 /// p. 3-57), as its assignment is not; a volatile scalar one is.

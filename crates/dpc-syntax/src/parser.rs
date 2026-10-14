@@ -1386,7 +1386,10 @@ impl<'a> Parser<'a> {
 
     /// One parameter group: `[var|in|out|in out] names : [univ] type` (ref
     /// 5.3 p. 5-5; 5.3.2 p. 5-7; 5.3.3) or a routine parameter (5.4, p.
-    /// 5-13).
+    /// 5-13).  `type` may carry attribute lists, after `univ`: `univ
+    /// [aligned(0)] error_$integer32` (owner ruling, docs/reference-
+    /// clarifications.md "5.1 Attribute lists on parameter types"); the
+    /// checker requires a type name under them (ref 5.1, p. 5-2).
     fn param(&mut self) -> PResult<Param> {
         let start = self.span();
         if matches!(self.peek(), T::Keyword(Kw::Procedure | Kw::Function)) {

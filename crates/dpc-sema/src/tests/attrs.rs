@@ -444,3 +444,126 @@ fn erroneous_field_types_do_not_upset_layout() {
         "undefined type `nosuch_t`",
     );
 }
+
+// ---------------------------------------------------------------------
+// Attribute lists on parameter types (owner ruling, docs/reference-
+// clarifications.md "5.1 Attribute lists on parameter types"; meaning
+// from ref 3.15.6.8, p. 3-76)
+// ---------------------------------------------------------------------
+
+/// Apollo's rws.ins.pas and error.ins.pas forms, with the declarations
+/// they rely on reduced.
+const PARAM_ATTRS: &str = "type
+       status_$t = record all: integer32 end;
+       error_$integer32 = integer32;
+       error_$status_t = [aligned(1)] status_$t;
+     procedure rws_like(in n: integer32; out status: [aligned(1)] status_$t); extern;
+     procedure error_like(in a1, a2: univ [aligned(0)] error_$integer32); extern;
+     procedure vp(i: [aligned(1)] integer32); val_param; extern;
+     procedure byval(i: [aligned(0)] integer32); extern;
+     procedure vol(var x: [volatile] integer); extern;
+     procedure named(out status: error_$status_t); extern;
+     ";
+
+#[test]
+fn attributed_parameter_types_are_the_declared_types() {
+    // `[attrs] T` is the type `= [attrs] T` declares (3.15 p. 3-53).
+    let p = module(PARAM_ATTRS);
+    let ps = &routine(&p, "rws_like").params;
+    assert_eq!(p.types.get(ps[1].ty).align, 2);
+    assert_eq!(p.types.size(ps[1].ty), 4);
+    assert_eq!(p.types.canon(ps[1].ty), p.types.canon(ty(&p, "status_$t")));
+    assert_eq!(p.types.attrs(ps[1].ty).align, Some(2));
+    let ps = &routine(&p, "error_like").params;
+    assert!(ps[0].univ && ps[1].univ);
+    assert_eq!(p.types.get(ps[0].ty).align, 1);
+    assert_eq!(p.types.attrs(ps[1].ty).align, Some(1));
+    assert!(p.types.attrs(routine(&p, "vol").params[0].ty).volatile);
+    // Same as the named declaration.
+    let named = &routine(&p, "named").params[0];
+    assert_eq!(
+        p.types.attrs(named.ty),
+        p.types.attrs(routine(&p, "rws_like").params[1].ty)
+    );
+}
+
+#[test]
+fn attributed_parameter_types_keep_table_5_1() {
+    // Table 5-1 (ref 5.2, p. 5-5) decides from mode, size and options:
+    // the attributes change none of them.
+    use crate::conv::Passing;
+    let p = module(PARAM_ATTRS);
+    let c = |r: &str, i: usize| routine(&p, r).params[i].conv;
+    assert_eq!(c("rws_like", 1).passing, Passing::ByAddress);
+    assert_eq!(c("error_like", 0).passing, Passing::ByAddress);
+    assert!(!c("error_like", 0).local_copy);
+    assert_eq!(c("vp", 0).passing, Passing::ByValue);
+    assert_eq!(c("vp", 0).slot_size, 4);
+    assert_eq!(c("byval", 0).passing, Passing::ByAddress);
+    assert!(c("byval", 0).local_copy);
+}
+
+#[test]
+fn plain_and_attributed_arguments_match_either_formal() {
+    // As `error_$status_t` and `status_$t` do: an attributed type is its
+    // base type for compatibility (TypeInfo::canon).
+    module(&format!(
+        "{PARAM_ATTRS}
+         procedure plain(out status: status_$t); extern;
+         procedure q;
+         var s: status_$t; e: error_$status_t; w: [aligned(1)] status_$t;
+             l: integer32;
+         begin
+           rws_like(1, s); rws_like(1, e); rws_like(1, w);
+           plain(s); plain(e); plain(w);
+           named(s);
+           error_like(l, 5);
+           vp(l); byval(l);
+         end;"
+    ));
+}
+
+#[test]
+fn an_anonymous_type_under_attributes_is_refused() {
+    // ref 5.1 p. 5-2: "you cannot specify an anonymous data type".
+    assert_err(
+        "module m;
+         procedure p(var r: [aligned(1)] record a: integer32 end); extern;",
+        "a parameter's type must be a type name (ref 5.1, p. 5-2)",
+    );
+    assert_err(
+        "module m;
+         procedure p(var r: [aligned(1)] 1..10); extern;",
+        "a parameter's type must be a type name (ref 5.1, p. 5-2)",
+    );
+}
+
+#[test]
+fn routine_pointer_templates_and_attributed_parameters() {
+    // ref p. 4-146: the routine must "exactly match" the template.  The
+    // same type with an alignment attribute that leaves its size alone
+    // (`[aligned(1)] status_$t`, 4 bytes) matches the plain one, as a
+    // call's argument does; one whose size the attribute changes (ref
+    // 3.15.6.2, Figure 3-21 p. 3-67: `[aligned(2)]` rounds a record up)
+    // does not.
+    module(
+        "type
+           status_$t = record all: integer32 end;
+           pt = ^procedure(out s: status_$t);
+           pa = ^procedure(out s: [aligned(1)] status_$t);
+         var x: pt; y: pa;
+         procedure a1(out s: [aligned(1)] status_$t); extern;
+         procedure a2(out s: status_$t); extern;
+         procedure z; begin x := addr(a1); y := addr(a2) end;",
+    );
+    assert_err(
+        "module m;
+         type
+           rec2 = record a: integer end;
+           pt = ^procedure(out r: rec2);
+         var x: pt;
+         procedure a3(out r: [aligned(2)] rec2); extern;
+         procedure z; begin x := addr(a3) end;",
+        "`a3` does not match the routine pointer type",
+    );
+}

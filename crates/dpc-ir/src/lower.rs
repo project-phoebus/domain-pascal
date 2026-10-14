@@ -1708,6 +1708,24 @@ fn param_copies(p: &Program, r: &Routine) -> Res<Vec<ParamCopy>> {
                  parts (ref 3.15.1-3.15.3) is",
             ));
         }
+        // The copy moves words and longwords from the argument's address
+        // ([`ParamCopy`]), which a byte-aligned parameter type lets be odd
+        // (ref 3.15.6.8 p. 3-76; the 68010 traps; see [`check_even`]).
+        // A record is word aligned whatever its attribute (ref 3.10.5.5 p.
+        // 3-26; [`dpc_sema::types::TypeTable::attributed`]), as for a
+        // reference through the parameter.
+        if p.types.size(prm.ty) > 1
+            && p.types.attrs(prm.ty).align == Some(1)
+            && p.types.get(prm.ty).align < 2
+        {
+            return Err(unsupported(
+                p.var(prm.var).span,
+                "copying a value parameter of a byte-aligned type (`aligned(0)`) of more than \
+                 one byte, whose argument may be at an odd address (the 68010 traps on an odd \
+                 word or longword access; the original's code for one is not known, ref \
+                 3.15.6.6) is",
+            ));
+        }
         out.push(ParamCopy {
             slot: prm.slot_offset,
             copy,
@@ -1758,6 +1776,16 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
             ))
         }
     };
+    // The result variable of a volatile type (`function f: [volatile]
+    // integer32`, ref 3.15.1): the selector may hold the result variable in
+    // a register, which a volatile object never is (ref 3.15.1 p. 3-56;
+    // [`scalar_locals`]); how the original treated one is not seen.
+    if p.types.has_volatile_part(res.ty) {
+        return Err(unsupported(
+            r.span,
+            "a function result of a volatile, atomic or device type (ref 3.15.1-3.15.3) is",
+        ));
+    }
     let size = p.types.size(res.ty);
     let width = Width::of_size(size)
         .ok_or_else(|| unsupported(r.span, format!("a {size}-byte function result is")))?;
@@ -3086,6 +3114,21 @@ fn record_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) ->
         return Err(unsupported(e.span, "comparing a record constant is"));
     }
     let size = p.types.size(lhs.ty);
+    // Compatible records of other sizes: an alignment attribute rounds a
+    // record's size (ref 3.15.6.2, Figure 3-21 p. 3-67; Figure 3-26 p.
+    // 3-71), and `[attrs] T` is `T` for compatibility.  Comparing `size`
+    // bytes would read beyond the smaller one.
+    if p.types.size(rhs.ty) != size {
+        return Err(unsupported(
+            e.span,
+            "comparing records of different sizes (an alignment attribute changes a record's \
+             size, ref 3.15.6.2) is",
+        ));
+    }
+    // `cmpm` moves words or longwords through both addresses: neither may
+    // be odd ([`check_even`]; ref 3.15.6.8 p. 3-76 for a parameter).
+    check_even(p, lhs)?;
+    check_even(p, rhs)?;
     if !covers(p, lhs.ty, size) {
         return Err(unsupported(
             e.span,
@@ -4341,6 +4384,13 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
             "a packed field wider than a longword is",
         ));
     };
+    // A word or longword unit starts at an even offset in the record, so
+    // it is odd when the record's address is ([`check_even`]: a packed
+    // record that is an element of a byte-aligned array, or reached through
+    // a byte-aligned parameter, ref 3.15.6.8 p. 3-76).
+    if unit != Width::Byte {
+        check_even(p, base)?;
+    }
     let shift = 8 * (start + unit.bytes()) - (b.bit + b.width);
     let addr = wrap_volatile(p, e, addr_of(p, base)?.offset_by(start as i32));
     Ok(Some((
@@ -4584,7 +4634,22 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
             ExprKind::WithRecord(w) => even(p, &with_binding(*w).0),
             ExprKind::Var { var, .. } => match &p.var(*var).storage {
                 Storage::Static { offset, .. } => Some(offset % 2 == 0),
-                Storage::Frame { .. } | Storage::Param { .. } => Some(true),
+                Storage::Frame { .. } => Some(true),
+                // An argument passed by address, used in place (no local
+                // copy): the caller's object, which the callee may assume
+                // only as aligned as the parameter's type says (ref
+                // 3.15.6.8 p. 3-76; owner ruling "5.1 Attribute lists on
+                // parameter types", `[aligned(0)] error_$integer32`).  A
+                // value slot or local copy is in the frame.
+                Storage::Param { index } => {
+                    let owner = p.var(*var).owner.expect("a parameter has an owner routine");
+                    let prm = &p.routine(owner).params[*index];
+                    if prm.passing() == Passing::ByAddress && prm.copy_offset.is_none() {
+                        (p.types.get(e.ty).align >= 2).then_some(true)
+                    } else {
+                        Some(true)
+                    }
+                }
                 // Another unit's object: aligned as its type says.
                 Storage::Extern { .. } => (p.types.get(e.ty).align >= 2).then_some(true),
             },
@@ -4900,6 +4965,30 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                         a.expr.span,
                         "passing a variable of another size to a value or `in` parameter (a \
                          converted copy, codegen-patterns 1.5) is",
+                    ));
+                }
+                // A variable of another size than its `var`, `out` or `in
+                // out` parameter: a record whose size an alignment
+                // attribute changed (ref 3.15.6.2, Figure 3-21 p. 3-67:
+                // `[aligned(2)]` rounds it up; Figure 3-26 p. 3-71), which
+                // is compatible with the plain record (`[attrs] T` is `T`).
+                // The callee would read or write the parameter's size at
+                // the argument's address.
+                if !univ
+                    && a.expr.is_designator()
+                    && a.expr.value.is_none()
+                    && matches!(mode, ParamMode::Var | ParamMode::Out | ParamMode::InOut)
+                    && p.types.size(a.expr.ty) != p.types.size(prm_ty)
+                {
+                    return Err(unsupported(
+                        a.expr.span,
+                        format!(
+                            "passing a {}-byte variable to a {}-byte `var`, `out` or `in out` \
+                             parameter (an alignment attribute changes a record's size, ref \
+                             3.15.6.2) is",
+                            p.types.size(a.expr.ty),
+                            p.types.size(prm_ty)
+                        ),
                     ));
                 }
                 if let Some(v) = &a.expr.value {
