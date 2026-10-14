@@ -80,6 +80,13 @@ Question: is `name()` a valid call of a routine with no parameters?
 Owner's answer (2026-10-14): both `simple;` and `simple();` call the procedure `simple` with no arguments and are valid syntax; leaving out the `()` is just an (arguable) ergonomic convenience.
 Consequence: implemented under bead domain-pascal-9iq; the lead applies the same reading to function calls such as `alloc_db()` (Apollo's own example), pending the owner's confirmation.
 
+## 3.13.4 addr(...) as an initial value (p. 3-51)
+Asked: 2026-10-14, by the corpus agent (open question 36; bead domain-pascal-bjz)
+Passage: "Domain Pascal permits you to initialize the values of pointer variables within its variable declaration in most cases"; the only example is `NIL`.  Apollo initialises routine-pointer fields with `init := addr(my_driver_$init),` (hardcopy driver_init_ex.pas, filter_init_ex.pas, recno.pas, scramble.pas).
+Question: is `addr(routine)` (or `addr(variable)`) allowed as an initial value?
+Owner's answer (2026-10-14): permit `addr(...)` in initialisers; Apollo's code clearly uses it.
+Consequence: implemented under bead domain-pascal-bjz.  The initial value is static data, so the lead reads this as `addr` of objects with a static address (routines; module-level, static, define and extern variables), emitted as an address with a relocation; `addr` of a routine's ordinary local is still refused.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -498,7 +505,7 @@ records the files it stops.
     as a "Formal or actual parameter for any pointer type"), in either
     direction, and for every mode?  *Current: refused, "does not match the
     routine pointer type" (bead domain-pascal-ble).*
-36. **3.13.4, p. 3-51.**  "Domain Pascal permits you to initialize the
+36. **Answered 2026-10-14; see Clarifications, "3.13.4 addr(...) as an initial value".**  **3.13.4, p. 3-51.**  "Domain Pascal permits you to initialize the
     values of pointer variables within its variable declaration in most
     cases"; the only example is `NIL`.  Apollo's examples initialise
     routine-pointer fields of module-level records with `addr`:
