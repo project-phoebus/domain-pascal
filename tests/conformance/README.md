@@ -469,3 +469,9 @@ checked with
 
 `handasm/` holds harness fixtures transcribed by hand from the image.  They
 test the harness itself and are **not** compiler output.
+
+The manifest also checks dpc's run-time library, M$ARITH
+(`runtime/README.md`): `target/runtime/m68k/m_arith.o`, the object `make
+runtime` built, is given to `conform.py` as it is (a `.o` unit is linked
+and compared without being assembled again), and its twelve routines must
+match the whole map module, 0x1DC bytes at 0xE0ABD4.

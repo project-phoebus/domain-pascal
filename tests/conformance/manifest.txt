@@ -4,7 +4,8 @@
 #   FILE  path from the repository root; a .pas file is compiled with
 #         target/debug/dpc into tmp/conform/FILE/ first (with
 #         --fragment-origin unless the unit is a whole map module), a .s
-#         file is used as is.
+#         file is used as is, a .o file (a prebuilt object: dpc's
+#         runtime) is not even assembled.
 #   SPEC  NAME | NAME:LEN | 0xADDR | 0xADDR:LEN   (LEN hex).  NAME is a map
 #         name; 0xADDR is a module-local routine the map does not name.
 #         The routines of a unit must be contiguous in the image.
@@ -29,6 +30,9 @@
 #         nested in routine NAME (dpc's symbol), whose code follows them
 #         at the unit's end; it is compiled with them and not compared
 #         (README.md, "Nested routines").
+#   GLOB  global=NAME,...: map names the unit must also define as global
+#         code symbols (at their map addresses) that are no routine of
+#         their own, e.g. a routine's second name (M$OIU$LLL).
 #
 # handasm/ entries are harness fixtures transcribed by hand from the image,
 # not compiler output.
@@ -81,6 +85,12 @@ tests/conformance/mmap_alloc_contig.pas      MMAP_$ALLOC_CONTIG  --section-addr 
 tests/conformance/xns_idp_get_port_info.pas  XNS_IDP_$GET_PORT_INFO  --section-addr .bss.moddata.XNS_IDP=0xE2B314  a5-always=XNS_IDP_$GET_PORT_INFO
 tests/conformance/rem_name_register_server.pas  REM_NAME_$REGISTER_SERVER:1A  --section-addr .bss.moddata.REM_NAME=0xE7DBB8  a5-absolute=REM_NAME_$REGISTER_SERVER
 tests/conformance/mt_release.pas             MT_$RELEASE
+
+# dpc's run-time library (runtime/README.md; bead domain-pascal-w586): the
+# whole M$ARITH module, 0x1DC bytes at 0xE0ABD4, as built by `make
+# runtime' (`make conform' builds it first).  Twelve routines; M$OIU$LLL
+# is M$OIS$LLL's second name (global=: defined, at 0xE0AD7C).
+target/runtime/m68k/m_arith.o  M$MIS$LLL M$MIU$LLW M$MIU$LLL M$MIS$LLW M$DIU$LLW M$DIS$LLW M$OIU$WLW M$DIS$LLL M$DIU$LLL M$OIS$WLW M$OIS$WWL M$OIS$LLL  global=M$OIU$LLL
 
 # Harness fixtures.
 

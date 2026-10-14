@@ -23,6 +23,10 @@ driver writes an assembly file that holds just a comment header.
 - `crates/dpc-target`: the target description trait.
 - `crates/dpc-m68k`: the m68k backend and gas-syntax emitter.
 - `crates/dpc`: the driver, `dpc [-I dir]... [-o out.s] file.pas`.
+- `runtime/`: the run-time library dpc ships, as gcc ships libgcc: for
+  m68k, Apollo's `M$ARITH` (`runtime/m68k/m_arith.s`), built by `make
+  build` into `target/runtime/m68k/libm_arith.a`; `dpc --print-runtime`
+  prints its path (`runtime/README.md`).
 - `tests/golden/`, `tests/conformance/`: golden and image-conformance tests.
 - `tests/corpus/baseline.txt`: the expected `dpc --check-only` outcome of
   each file of Apollo's SR10.2 Pascal inserts and examples

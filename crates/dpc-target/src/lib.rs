@@ -42,6 +42,15 @@ pub trait Target {
     /// preprocessor (`dpc_syntax::preprocess::Options::predeclared`),
     /// which refuses `%enable` and `-config` of them (p. 4-48).
     fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)];
+
+    /// The file name of the target's prebuilt run-time library, the
+    /// object compiled code is linked with (like gcc's `libgcc.a`), or
+    /// None when the target has none.  The driver looks for it in the
+    /// runtime directory under [`Target::name`] (`dpc --print-runtime`;
+    /// runtime/README.md).  Default: none.
+    fn runtime_library(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -84,5 +93,6 @@ mod tests {
         assert_eq!(t.pointer_size(), 8);
         assert_eq!(t.first_arg_offset(), 16);
         assert_eq!(t.predeclared_cond_vars(), [("_dummy", true)]);
+        assert_eq!(t.runtime_library(), None);
     }
 }

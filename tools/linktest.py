@@ -47,6 +47,14 @@ Steps (tests/link/README.md has the why of each):
      the C object's initial bytes, over the bytes the unit declares (a
      NOBITS C object is zeros; a relocated C byte cannot be compared and
      fails).
+  4a. dpc's run-time library (bead domain-pascal-w586; runtime/README.md):
+     the archive `dpc --print-runtime=m68k' names is extracted into
+     domain_os/linktest/runtime/ and its object replaces the one ../source
+     object that defines its globals (math/sau2/arith.s, M$ARITH), which
+     must define exactly those.  The kernel is thus linked with the
+     runtime dpc ships, not ../source's copy; steps 6 and 7 check it like
+     a unit (../source's own arith.o is still built and gated by its
+     hand-written assembly check).
   5. `make check' in the scratch copy with linktest.mk filled in: the
      layout checks (map order of every placed symbol, scratch link), the
      hand-written assembly gate, the guards, the iodefs check, the RFC
@@ -101,6 +109,7 @@ SCRATCH = os.path.join(REPO, 'tmp', 'linktest')
 MANIFEST = os.path.join(REPO, 'tests', 'link', 'manifest.txt')
 DPC = os.path.join(REPO, 'target', 'debug', 'dpc')
 NM = 'm68k-elf-nm'
+AR = 'm68k-elf-ar'
 OBJDIR = 'linktest'             # under the scratch domain_os/
 HOOK_ANCHOR = '# Main target\n'
 HOOK = ('# domain-pascal tools/linktest.py: swap dpc objects in (scratch copy '
@@ -294,6 +303,30 @@ def plan_drops(unit_globals, defs, asm_objs=(), whole=None):
         else:
             notes.append('%s: C helper %s (no map name) goes with it' % (o, h))
     return drops, errors, notes
+
+
+def plan_runtime(runtime_globals, defs):
+    """The ../source object that dpc's run-time library replaces (step 4a):
+    the one object defining its globals (from parse_nm's `defs'), which
+    must define exactly those (../source's math/sau2/arith.s against
+    runtime/m68k/m_arith.s: the M$ARITH module whole).  -> (object or
+    None, errors)."""
+    want = set(runtime_globals)
+    if not want:
+        return None, ['the runtime defines no global symbol']
+    owners = sorted(o for o, d in defs.items() if want & set(d))
+    if len(owners) != 1:
+        return None, ['the runtime\'s globals are defined by %s, not by one object'
+                      % (', '.join(owners) or 'no object of ../source')]
+    have = set(defs[owners[0]])
+    errs = []
+    if have - want:
+        errs.append('%s defines %s besides the runtime\'s globals'
+                    % (owners[0], ', '.join(sorted(have - want))))
+    if want - have:
+        errs.append('%s does not define %s, which the runtime does'
+                    % (owners[0], ', '.join(sorted(want - have))))
+    return (None if errs else owners[0]), errs
 
 
 # dpc's data blocks: `.bss.moddata.<UNIT>' for the Pascal default data
@@ -712,6 +745,30 @@ def nm_undefined(root, objs):
     return refs
 
 
+def runtime_objects(dpc, root):
+    """dpc's run-time library (`dpc --print-runtime=m68k', an archive),
+    its members extracted into the scratch domain_os/linktest/runtime/:
+    -> (their paths relative to `root', their globals)."""
+    p = run([dpc, '--print-runtime=m68k'])
+    lib = p.stdout.strip()
+    if p.returncode or not os.path.isfile(lib):
+        raise SetupError('dpc --print-runtime=m68k failed (not built? `make runtime\'):\n%s'
+                         % tail(p.stderr))
+    rel = os.path.join(OBJDIR, 'runtime')
+    out = os.path.join(root, rel)
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    members = must([AR, 't', lib]).split()
+    if not members:
+        raise SetupError('%s is empty' % lib)
+    must([AR, 'x', lib], cwd=out)
+    objs = [os.path.join(rel, m) for m in members]
+    globs = {}
+    for o in objs:
+        globs.update(object_globals(os.path.join(root, o)))
+    return lib, objs, globs
+
+
 def make_var(root, name):
     """The value of make variable `name' in the scratch Makefile (as
     split words)."""
@@ -1043,6 +1100,15 @@ def run_all(args):
         print('linktest: %s replaces %s' % (u.path, ', '.join(d) or 'nothing'))
         drops += d
         adds.append(obj)
+    # step 4a: dpc's run-time library for ../source's own M$ARITH
+    rt_lib, rt_objs, rt_globs = runtime_objects(args.dpc, root)
+    rt_drop, errs = plan_runtime(rt_globs, defs)
+    for e in errs:
+        print('linktest: FAIL runtime %s: %s' % (conform.display_path(rt_lib), e))
+    if errs:
+        return 1
+    print('linktest: runtime %s (%s) replaces %s' % (
+        conform.display_path(rt_lib), ', '.join(rt_objs), rt_drop))
     undefined = set()
     for o in adds:
         undefined |= object_undefined(os.path.join(root, o))
@@ -1067,6 +1133,8 @@ def run_all(args):
         print('linktest: absolute symbols from the map (%s): %s' % (
             os.path.join(OBJDIR, 'absdefs.o'),
             ', '.join('%s 0x%X' % kv for kv in sorted(absdefs.items()))))
+    drops.append(rt_drop)
+    extra += rt_objs
     with open(mk, 'w') as f:
         f.write(linktest_mk(drops, adds + extra))
 
@@ -1098,6 +1166,7 @@ def run_all(args):
     print('linktest: make check passed')
 
     linked = [(u, g) for u, o, g, *_ in compiled if o in adds]
+    linked.append((Unit(conform.display_path(rt_lib), [], []), rt_globs))
     bad, where = elf_check(root, linked)
     for b in bad:
         print('linktest: FAIL ' + b)
@@ -1136,7 +1205,7 @@ def run_all(args):
         print('linktest: FAIL ' + b)
     if bad:
         return 1
-    p = asm_compare(root, adds, local_syms, work)
+    p = asm_compare(root, adds + rt_objs, local_syms, work)
     for l in (p.stdout + p.stderr).splitlines():
         print('    ' + l)
     if p.returncode:
@@ -1153,7 +1222,8 @@ def run_all(args):
         print('linktest: %d unit(s) not linked: %s'
               % (len(failed), ', '.join(u.path for u in failed)))
         return 1
-    print('linktest: OK, %d unit(s) linked into the kernel and checked' % len(adds))
+    print('linktest: OK, %d unit(s) and the runtime linked into the kernel and checked'
+          % len(adds))
     return 0
 
 

@@ -114,6 +114,33 @@ build/sau2/misc/zero_page.o:00000000 W weakling
 """
 
 
+class RuntimeTest(unittest.TestCase):
+    RT = {'M$MIS$LLL': 'T', 'M$OIS$LLL': 'T', 'M$OIU$LLL': 'T'}
+
+    def test_one_owner_with_the_same_globals(self):
+        defs = {'build/sau2/math/sau2/arith.o': dict(self.RT),
+                'build/sau2/tone/time.o': {'TONE_$TIME': 'T'}}
+        self.assertEqual(linktest.plan_runtime(self.RT, defs),
+                         ('build/sau2/math/sau2/arith.o', []))
+
+    def test_owner_with_other_globals(self):
+        defs = {'a.o': dict(self.RT, M_HELPER='T')}
+        obj, errs = linktest.plan_runtime(self.RT, defs)
+        self.assertIsNone(obj)
+        self.assertIn('defines M_HELPER besides', errs[0])
+
+    def test_owner_missing_a_global(self):
+        defs = {'a.o': {'M$MIS$LLL': 'T', 'M$OIS$LLL': 'T'}}
+        obj, errs = linktest.plan_runtime(self.RT, defs)
+        self.assertIsNone(obj)
+        self.assertIn('does not define M$OIU$LLL', errs[0])
+
+    def test_several_owners_or_none(self):
+        defs = {'a.o': {'M$MIS$LLL': 'T'}, 'b.o': {'M$OIS$LLL': 'T', 'M$OIU$LLL': 'T'}}
+        self.assertIn('a.o, b.o', linktest.plan_runtime(self.RT, defs)[1][0])
+        self.assertIn('no object', linktest.plan_runtime(self.RT, {})[1][0])
+
+
 class DropTest(unittest.TestCase):
     def setUp(self):
         self.defs = linktest.parse_nm(NM)

@@ -21,9 +21,12 @@ They take under a second.
   `target/exectest/`.  That directory is only read.  Its `m68kconf.h`
   enables address-error emulation, which the tests need.
 - `m68k-elf-as`, `-ld`, `-objcopy`, `-nm`, and a host `cc`.
-- **M$ARITH**: `../source/domain_os/math/sau2/arith.s`, the transcription of
-  the image's arithmetic runtime.  It is assembled as is.  Override the
-  path with `EXECTEST_ARITH`.
+- **M$ARITH**: dpc's run-time library, the archive `dpc --print-runtime`
+  names (`target/runtime/m68k/libm_arith.a`, built by `make build` from
+  `runtime/m68k/m_arith.s`, the transcription of the image's arithmetic
+  runtime; `runtime/README.md`).  It is linked as is, like libgcc: only
+  tests that call an M$ entry pull it in.  Override the path with
+  `EXECTEST_RUNTIME`.
 
 If any of these is missing, the driver prints `exectest: skipped: ...`
 and exits 0.
@@ -33,7 +36,8 @@ and exits 0.
 1. `target/debug/dpc -I tests/exec` compiles `NAME.pas`, and any `link:`
    modules.
 2. `m68k-elf-as -m68010` assembles the output.
-3. The objects are linked with `tools/exectest/stubs.s` and M$ARITH by
+3. The objects are linked with `tools/exectest/stubs.s` and the M$ARITH
+   archive by
    `tools/exectest/link.ld`: code at 0x10000, then data, then bss.
 4. `objcopy -O binary` produces a flat image.
 5. `tools/exectest/runner` runs each `call:` in turn, in one memory image,

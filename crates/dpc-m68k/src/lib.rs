@@ -10,7 +10,8 @@
 //!   allocation (12.4 R9-R12);
 //! - [`frame`]: frame layout, prologue and epilogue around the body;
 //! - [`insn`]: instructions and their gas text;
-//! - [`emit`]: a whole module as an assembly file.
+//! - [`emit`]: a whole module as an assembly file;
+//! - [`runtime`]: the run-time library M$ARITH and its entry names.
 
 pub mod emit;
 pub mod frame;
@@ -18,6 +19,7 @@ pub mod insn;
 pub mod isel;
 pub mod locals;
 pub mod regs;
+pub mod runtime;
 pub mod sched;
 
 use dpc_target::Target;
@@ -109,6 +111,11 @@ impl Target for M68k {
             ("obj_$bin", false),
         ]
     }
+
+    /// M$ARITH, shipped as `runtime/m68k/m_arith.s` ([`runtime`]).
+    fn runtime_library(&self) -> Option<&'static str> {
+        Some(runtime::LIBRARY)
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +132,7 @@ mod tests {
         assert_eq!(t.small_arg_offset_in_slot(1), 0);
         assert_eq!(t.first_arg_offset(), 8);
         assert_eq!(t.val_param_max_size(), 4);
+        assert_eq!(t.runtime_library(), Some("libm_arith.a"));
         let vars = t.predeclared_cond_vars();
         assert_eq!(vars.len(), 7);
         for (n, v) in [

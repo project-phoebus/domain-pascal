@@ -62,6 +62,64 @@ fn usage_error() {
 }
 
 #[test]
+fn print_runtime() {
+    let dir = scratch("print_runtime");
+    let lib = dir.join("m68k").join("libm_arith.a");
+    let run = |args: &[&str]| {
+        dpc()
+            .env("DPC_RUNTIME_DIR", &dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // not there: an error naming the path
+    let out = run(&["--print-runtime"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("libm_arith.a not found"));
+    std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+    std::fs::write(&lib, "").unwrap();
+    for opt in ["--print-runtime", "--print-runtime=m68k"] {
+        let out = run(&[opt]);
+        assert_eq!(out.status.code(), Some(0), "{opt}");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("{}\n", lib.display())
+        );
+    }
+    assert_eq!(run(&["--print-runtime=vax"]).status.code(), Some(2));
+    assert_eq!(run(&["--print-runtime", "m.pas"]).status.code(), Some(2));
+}
+
+/// Run through a symlink, dpc still looks beside the real executable's
+/// directory, not the link's.
+#[cfg(unix)]
+#[test]
+fn print_runtime_through_a_symlink() {
+    let dir = scratch("print_runtime_symlink");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let link = bin.join("dpc");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_dpc"), &link).unwrap();
+    let out = Command::new(&link)
+        .env_remove("DPC_RUNTIME_DIR")
+        .arg("--print-runtime")
+        .output()
+        .unwrap();
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_dpc")).unwrap();
+    let want = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .unwrap()
+        .join("runtime/m68k/libm_arith.a");
+    // found (built) or not, the path named is the real one
+    let text = String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap();
+    assert!(text.contains(&want.display().to_string()), "{text}");
+    assert!(!text.contains(&dir.display().to_string()), "{text}");
+}
+
+#[test]
 fn help_is_not_an_error() {
     let out = dpc().arg("--help").output().unwrap();
     assert_eq!(out.status.code(), Some(0));

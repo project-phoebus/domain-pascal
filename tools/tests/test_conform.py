@@ -247,6 +247,47 @@ class ConformTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn('NO_SUCH_ROUTINE is not in the map', buf.getvalue())
 
+    # -- a prebuilt object (dpc's runtime) -------------------------------
+    def test_prebuilt_object_is_checked_as_built(self):
+        src = os.path.join(HANDASM, 'proc1_tst_lock.s')
+        obj = os.path.join(SCRATCH, 'prebuilt_tst_lock.o')
+        conform.run([conform.AS, '-m68010', '-o', obj, src])
+        ok, out = self.run_check(obj, ['PROC1_$TST_LOCK'])
+        self.assertTrue(ok, out)
+        # a wrong byte in the object is seen: the object is not rebuilt
+        # from some source
+        bad = self.variant('proc1_tst_lock.s', 'prebuilt_bad.s',
+                           'link.w\t%fp,#-4', 'link.w\t%fp,#-8')
+        conform.run([conform.AS, '-m68010', '-o', obj, bad])
+        ok, out = self.run_check(obj, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok, out)
+
+    def test_required_global_second_name(self):
+        # global=M$OIU$LLL (M$OIS$LLL's second name, 0xE0AD7C): checked,
+        # though it is no routine of its own (dpc's runtime)
+        src = os.path.join(conform.REPO, 'runtime', 'm68k', 'm_arith.s')
+        specs = ['M$MIS$LLL', 'M$MIU$LLW', 'M$MIU$LLL', 'M$MIS$LLW', 'M$DIU$LLW',
+                 'M$DIS$LLW', 'M$OIU$WLW', 'M$DIS$LLL', 'M$DIU$LLL', 'M$OIS$WLW',
+                 'M$OIS$WWL', 'M$OIS$LLL']
+        ok, out = self.run_check(src, specs, required_globals=['M$OIU$LLL'])
+        self.assertTrue(ok, out)
+        with open(src) as f:
+            text = f.read()
+        old = '.global M$OIU$LLL\n'
+        self.assertIn(old, text)
+        local = os.path.join(SCRATCH, 'm_arith_no_second_name.s')
+        with open(local, 'w') as f:
+            f.write(text.replace(old, '\n'))
+        ok, out = self.run_check(local, specs, required_globals=['M$OIU$LLL'])
+        self.assertFalse(ok, out)
+        self.assertIn('symbol M$OIU$LLL (global=) is not defined', out)
+        with self.assertRaisesRegex(conform.SetupError, 'global=M\\$NO_SUCH: not a map name'):
+            self.run_check(src, specs, required_globals=['M$NO_SUCH'])
+
+    def test_prebuilt_object_missing_is_a_setup_error(self):
+        with self.assertRaisesRegex(conform.SetupError, 'not found'):
+            self.run_check(os.path.join(SCRATCH, 'no_such.o'), ['PROC1_$TST_LOCK'])
+
     def test_module_local_spec(self):
         ok, out = self.run_check(os.path.join(HANDASM, 'proc1_tst_lock.s'), ['0xE148CA:1C'])
         self.assertTrue(ok, out)

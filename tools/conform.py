@@ -7,6 +7,7 @@ reproduces, and compare the bytes with the SR10.2 SAU2 kernel image.
     conform.py check FILE.s --routine NAME [--routine NAME ...]
     conform.py check FILE.s --addr 0xADDR[:LEN] --routine NAME
     conform.py check FILE.s ... --local-sym NAME=0xADDR
+    conform.py check FILE.o ...        (a prebuilt object, not assembled)
     conform.py manifest tests/conformance/manifest.txt [--dpc target/debug/dpc]
 
 A manifest line is `FILE SPEC... [--section-addr SEC=0xADDR]... [OPTION]...'
@@ -43,6 +44,14 @@ it, which follows them; it is compiled with them (their code reaches its
 frame), must be linked at the unit's end, where the map has NAME (or no
 name, when NAME is not a map name), and is left out of every comparison
 (codegen-patterns 6; tests/conformance/README.md, "Nested routines").
+
+FILE may also be an object file (.o), linked and compared as it is: dpc's
+prebuilt run-time library (`make runtime', runtime/README.md), so that the
+object shipped is the one checked.
+
+`global=NAME[,NAME...]': map names the unit must also define as global
+code symbols, at their map addresses, that are not routines of their own:
+a routine's second name (M$OIU$LLL, M$OIS$LLL's, both at 0xE0AD7C).
 
 A routine SPEC is `NAME', `NAME:LEN', `0xADDR' or `0xADDR:LEN' (LEN is hex,
 `0x' optional).  NAME is looked up in the SAU2 map; an address names a
@@ -91,7 +100,7 @@ run that starts there (tests/conformance/README.md, "Fragments of several
 code sections").
 
 Steps:
-  1. m68k-elf-as -m68010.
+  1. m68k-elf-as -m68010 (a .o file is taken as it is).
   2. Every undefined symbol is resolved from the map (`--defsym', exact
      spelling), or from `--local-sym NAME=0xADDR' (a module-local routine
      outside the unit, which the map does not name); any other symbol is
@@ -409,7 +418,7 @@ def code_section_of(addr, linkmap):
 
 
 def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
-          work=None, name=None, local_syms=None, enclosing=None):
+          work=None, name=None, local_syms=None, enclosing=None, required_globals=None):
     """Check one assembly unit.  Returns True on a match.  Raises SetupError
     on bad input.  `work' is the scratch directory (default: from `src'),
     `name' the unit's name in the result lines (default: `src').
@@ -418,7 +427,9 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     (`module-routines=NAME=0xADDR').
     `enclosing' is the symbol of the routine the unit's nested routines
     belong to, whose code follows them in `src' and in the image and is
-    not compared (`enclosing=NAME'; README.md, "Nested routines")."""
+    not compared (`enclosing=NAME'; README.md, "Nested routines").
+    `required_globals' are map names the unit must define as global code
+    symbols besides its routines' (`global=NAME')."""
     routines = unit_routines(specs, linkmap, length)
     groups = unit_groups(routines, linkmap)
     lo, hi = routines[0].addr, groups[0][-1].end
@@ -438,7 +449,14 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
 
     work = work or scratch_dir(src)
     obj = os.path.join(work, 'unit.o')
-    run([AS, '-m68010', '-o', obj, os.path.abspath(src)])
+    if src.endswith('.o'):
+        # a prebuilt object (dpc's runtime, target/runtime/m68k/m_arith.o):
+        # checked as built, not assembled again
+        if not os.path.isfile(src):
+            raise SetupError('%s not found (not built?)' % display_path(src))
+        shutil.copyfile(src, obj)
+    else:
+        run([AS, '-m68010', '-o', obj, os.path.abspath(src)])
 
     # 2. place sections, resolve externals from the map
     secs = sections_of(obj)
@@ -751,6 +769,15 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if r.name and r.name not in globals_:
             problems.append('routine %s is not defined as a global code symbol in %s'
                             % (r.name, src))
+    # `global=NAME': a map name that is not a routine of its own (the
+    # second name of one, M$OIU$LLL = M$OIS$LLL at 0xE0AD7C) must be
+    # defined too; its address is checked with the other globals below
+    for n in required_globals or ():
+        if n not in linkmap.by_name:
+            raise SetupError('global=%s: not a map name' % n)
+        if n not in globals_:
+            problems.append('symbol %s (global=) is not defined as a global code symbol in %s'
+                            % (n, src))
     for n in sorted(globals_):
         sym = linkmap.by_name.get(n)
         if sym is None:
@@ -891,7 +918,10 @@ _ENCODED_BSR = re.compile(r'^\s*\.short\s+0x61[0-9a-fA-F]{2}\s*\|\s*bsr\.s\s+(\S
 
 def encoded_calls(src):
     """The routines that `src' (assembly) calls with a `bsr.s' written as
-    its encoding, `.short 0x61dd | bsr.s NAME'."""
+    its encoding, `.short 0x61dd | bsr.s NAME'.  An object file has no
+    such text: none."""
+    if src.endswith('.o'):
+        return set()
     with open(src) as f:
         return {m.group(1) for m in map(_ENCODED_BSR.match, f) if m}
 
@@ -899,6 +929,7 @@ def encoded_calls(src):
 MODULE_ROUTINES_TOKEN = 'module-routines='
 ENCLOSING_TOKEN = 'enclosing='
 NO_PARK_POINTERS_TOKEN = 'no-park-pointer-locals'
+GLOBAL_TOKEN = 'global='
 
 
 def module_routine_args(tokens, routines, linkmap):
@@ -1012,7 +1043,7 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect, align, a5, mods, encl, park = [], {}, [], [], [], [], []
+        specs, sect, align, a5, mods, encl, park, globs = [], {}, [], [], [], [], [], []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -1028,6 +1059,8 @@ def run_manifest(path, linkmap, dpc):
                 encl.append(t[len(ENCLOSING_TOKEN):])
             elif t == NO_PARK_POINTERS_TOKEN:
                 park.append(t)
+            elif t.startswith(GLOBAL_TOKEN):
+                globs += t[len(GLOBAL_TOKEN):].split(',')
             else:
                 specs.append(t)
         try:
@@ -1064,7 +1097,7 @@ def run_manifest(path, linkmap, dpc):
             else:
                 local = {}
             ok = check(asm, specs, linkmap, sect, work=work, name=toks[0], local_syms=local,
-                       enclosing=enclosing)
+                       enclosing=enclosing, required_globals=globs)
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
             errors += 1

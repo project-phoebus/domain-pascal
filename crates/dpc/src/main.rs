@@ -1,6 +1,7 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
-//! usage: dpc [-I dir]... [--root DIR] [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
+//! usage: dpc --print-runtime[=TARGET]
+//!        dpc [-I dir]... [--root DIR] [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
 //!            [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]...
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE,...]
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
@@ -90,6 +91,18 @@
 //! a translation whose D0 locals are such integers (TTY_$I_INQ_RAW
 //! 0xE67414 keeps its pointer in A0; codegen-patterns 3).
 //!
+//! `dpc --print-runtime` or `dpc --print-runtime=TARGET` (alone, like
+//! `gcc -print-libgcc-file-name`) prints the path of the target's prebuilt
+//! run-time library, the archive compiled code is linked with (m68k:
+//! `libm_arith.a`, M$ARITH; runtime/README.md), and exits 0; 1 when the
+//! file is not there (not built: `make runtime`).  TARGET defaults to, and
+//! may only be, `m68k`.  The library is looked for in
+//! `$DPC_RUNTIME_DIR/TARGET/` when that variable is set, else in
+//! `runtime/TARGET/` beside the directory holding dpc (for
+//! `target/debug/dpc`, `target/runtime/m68k/`, where `make build` puts
+//! it).  The file name comes from the target description
+//! (`dpc_target::Target::runtime_library`).
+//!
 //! `--data-base=SECTION=SYMBOL` (repeatable; link-test scaffolding, bead
 //! domain-pascal-3bp, `tests/link/README.md`): the data area of Pascal
 //! data section SECTION (`.data` for the default) belongs to another
@@ -110,7 +123,8 @@ use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 use dpc_target::Target;
 
 const PROG: &str = "dpc";
-const USAGE: &str = "usage: dpc [-I dir]... [--root DIR] [-o out.s] \
+const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
+                     dpc [-I dir]... [--root DIR] [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
                      [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]... \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE,...] \
@@ -635,8 +649,80 @@ fn local_facts_json(program: &dpc_sema::Program, f: &dpc_ir::Function) -> String
     o
 }
 
+/// The target named by `--print-runtime[=TARGET]` (`opt`), or None when
+/// `opt` is not that option.
+fn print_runtime_target(opt: &str) -> Option<Result<&'static dyn Target, String>> {
+    let name = match opt.strip_prefix("--print-runtime") {
+        Some("") => "m68k",
+        Some(v) => v.strip_prefix('=')?,
+        None => return None,
+    };
+    Some(match name {
+        "m68k" => Ok(&dpc_m68k::M68k),
+        _ => Err(format!("--print-runtime: unknown target `{name}`")),
+    })
+}
+
+/// The directory holding the targets' run-time libraries:
+/// `$DPC_RUNTIME_DIR`, else `runtime` beside the directory of the dpc
+/// executable `exe`.
+fn runtime_dir(env: Option<std::ffi::OsString>, exe: &std::path::Path) -> PathBuf {
+    match env {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => {
+            let bin = exe.parent().unwrap_or(std::path::Path::new("."));
+            bin.parent().unwrap_or(bin).join("runtime")
+        }
+    }
+}
+
+/// `dpc --print-runtime[=TARGET]`: print the run-time library's path.
+fn print_runtime(target: &dyn Target) -> ExitCode {
+    let Some(lib) = target.runtime_library() else {
+        eprintln!(
+            "{PROG}: error: target {} has no run-time library",
+            target.name()
+        );
+        return ExitCode::from(1);
+    };
+    // the executable itself, not a symlink to it (on macOS current_exe
+    // is the path dpc was started by: ~/bin/dpc -> target/debug/dpc must
+    // find target/runtime, not ~/runtime)
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .unwrap_or_else(|_| PathBuf::from(PROG));
+    let path = runtime_dir(std::env::var_os("DPC_RUNTIME_DIR"), &exe)
+        .join(target.name())
+        .join(lib);
+    if !path.is_file() {
+        eprintln!(
+            "{PROG}: error: {} not found (not built? `make runtime'; or set DPC_RUNTIME_DIR)",
+            path.display()
+        );
+        return ExitCode::from(1);
+    }
+    println!("{}", path.display());
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
-    let args = match parse_args(std::env::args().skip(1)) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(t) = argv.first().and_then(|a| print_runtime_target(a)) {
+        let t = match (t, argv.len()) {
+            (Ok(t), 1) => t,
+            (Err(msg), _) => {
+                eprintln!("{PROG}: error: {msg}");
+                return ExitCode::from(2);
+            }
+            (Ok(_), _) => {
+                eprintln!("{PROG}: error: --print-runtime takes no other arguments");
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        };
+        return print_runtime(t);
+    }
+    let args = match parse_args(argv.into_iter()) {
         Ok(a) => a,
         Err(msg) => {
             if msg.is_empty() {
@@ -810,6 +896,33 @@ mod tests {
 
     fn args(v: &[&str]) -> Result<Args, String> {
         parse_args(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn print_runtime_option() {
+        let t = print_runtime_target("--print-runtime").unwrap().unwrap();
+        assert_eq!(t.name(), "m68k");
+        assert_eq!(t.runtime_library(), Some("libm_arith.a"));
+        let t = print_runtime_target("--print-runtime=m68k")
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.name(), "m68k");
+        assert!(print_runtime_target("--print-runtime=aarch64")
+            .unwrap()
+            .is_err());
+        assert!(print_runtime_target("--print-runtimes").is_none());
+        assert!(print_runtime_target("m.pas").is_none());
+    }
+
+    #[test]
+    fn runtime_dir_beside_the_executables_directory() {
+        let exe = std::path::Path::new("/x/target/debug/dpc");
+        assert_eq!(runtime_dir(None, exe), PathBuf::from("/x/target/runtime"));
+        assert_eq!(
+            runtime_dir(Some("".into()), exe),
+            PathBuf::from("/x/target/runtime")
+        );
+        assert_eq!(runtime_dir(Some("/rt".into()), exe), PathBuf::from("/rt"));
     }
 
     #[test]

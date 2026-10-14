@@ -15,19 +15,22 @@ directives (tests/exec/README.md):
 
 The module is compiled with target/debug/dpc (-I tests/exec for
 exec.ins.pas), assembled with m68k-elf-as -m68010, linked with
-tools/exectest/stubs.s and M$ARITH (../source's math/sau2/arith.s) by
+tools/exectest/stubs.s and dpc's M$ARITH runtime (the archive `dpc
+--print-runtime' names, target/runtime/m68k/libm_arith.a, built by `make
+build'; EXECTEST_RUNTIME overrides the path) by
 tools/exectest/link.ld at 0x10000, flattened with objcopy, and run with
 tools/exectest/runner, which this script builds against Musashi into
 target/exectest/.  Musashi is not in this repository (its licence allows
 non-commercial use only); it is found at MUSASHI_DIR, by default
 ~/src/domainos-archeology/otterlater/musashi.  Without it, or without the
-m68k-elf tools or M$ARITH, the tests are skipped with a notice (exit 0).
+m68k-elf tools or the runtime, the tests are skipped with a notice (exit 0).
 
 Work files go to tmp/exectest/<name>/ (the .s is kept for reports).
 """
 
 import argparse
 import difflib
+import functools
 import glob
 import os
 import re
@@ -41,8 +44,9 @@ TOOLDIR = os.path.join(ROOT, 'tools', 'exectest')
 BUILD = os.path.join(ROOT, 'target', 'exectest')
 WORK = os.path.join(ROOT, 'tmp', 'exectest')
 DPC = os.path.join(ROOT, 'target', 'debug', 'dpc')
-ARITH = os.environ.get('EXECTEST_ARITH', os.path.join(
-    ROOT, '..', 'source', 'domain_os', 'math', 'sau2', 'arith.s'))
+# dpc's run-time library (M$ARITH; runtime/README.md): by default the
+# path `dpc --print-runtime=m68k' prints
+RUNTIME = os.environ.get('EXECTEST_RUNTIME')
 MUSASHI = os.environ.get('MUSASHI_DIR', os.path.expanduser(
     '~/src/domainos-archeology/otterlater/musashi'))
 MUSASHI_SRCS = ['m68kcpu', 'm68kops', 'm68kopac', 'm68kopdm', 'm68kopnz',
@@ -147,9 +151,23 @@ def missing_prereqs():
             return '%s not found' % t
     if not os.path.isfile(os.path.join(MUSASHI, 'm68kcpu.c')):
         return 'Musashi not found at %s (set MUSASHI_DIR)' % MUSASHI
-    if not os.path.isfile(ARITH):
-        return 'M$ARITH not found at %s (set EXECTEST_ARITH)' % ARITH
+    if runtime_path() is None:
+        return ('the M$ARITH runtime is not built (`make runtime\'; or set '
+                'EXECTEST_RUNTIME)')
     return None
+
+
+@functools.lru_cache(maxsize=None)
+def runtime_path():
+    """The runtime library to link: EXECTEST_RUNTIME, else what `dpc
+    --print-runtime=m68k' prints; None when there is none."""
+    if RUNTIME:
+        return RUNTIME if os.path.isfile(RUNTIME) else None
+    if not os.path.isfile(DPC):
+        return None
+    p = run([DPC, '--print-runtime=m68k'])
+    path = p.stdout.strip()
+    return path if p.returncode == 0 and os.path.isfile(path) else None
 
 
 def newer(target, sources):
@@ -160,7 +178,7 @@ def newer(target, sources):
 
 
 def build_runner():
-    """Build target/exectest/runner, and the stub and M$ARITH objects."""
+    """Build target/exectest/runner and the stub object."""
     os.makedirs(BUILD, exist_ok=True)
     objs = []
     for n in MUSASHI_SRCS:
@@ -183,13 +201,12 @@ def build_runner():
         p = run([CC, '-o', exe] + objs)
         if p.returncode:
             raise SpecError('linking runner:\n%s' % p.stderr)
-    for src, obj in ((os.path.join(TOOLDIR, 'stubs.s'), 'stubs.o'),
-                     (ARITH, 'arith.o')):
-        obj = os.path.join(BUILD, obj)
-        if newer(obj, [src]):
-            p = run([AS, '-m68010', src, '-o', obj])
-            if p.returncode:
-                raise SpecError('assembling %s:\n%s' % (src, p.stderr))
+    src = os.path.join(TOOLDIR, 'stubs.s')
+    obj = os.path.join(BUILD, 'stubs.o')
+    if newer(obj, [src]):
+        p = run([AS, '-m68010', src, '-o', obj])
+        if p.returncode:
+            raise SpecError('assembling %s:\n%s' % (src, p.stderr))
     return exe
 
 
@@ -231,7 +248,7 @@ def run_test(spec, runner, trace=False):
             return Result(False, [], 'as failed:\n' + p.stderr)
         objs.append(obj)
     p = run([LD, '-T', os.path.join(TOOLDIR, 'link.ld'), '-o', elf] + objs +
-            [os.path.join(BUILD, 'stubs.o'), os.path.join(BUILD, 'arith.o')])
+            [os.path.join(BUILD, 'stubs.o'), runtime_path()])
     if p.returncode:
         return Result(False, [], 'ld failed:\n' + p.stderr)
     p = run([OBJCOPY, '-O', 'binary', elf, binf])

@@ -8875,9 +8875,9 @@ impl Selector {
                     self.marith_op("DI", ty, lhs, rhs)?;
                     return Ok(Val::Tmp(0));
                 }
-                let s = if signed { 'S' } else { 'U' };
                 if let Some(b) = bw {
-                    self.marith(&format!("M$OI{s}$WLW"), lhs, &b)?;
+                    let name = self.marith_name("OI", signed, "WLW")?;
+                    self.marith(name, lhs, &b)?;
                     if narrow {
                         return Ok(Val::Tmp(0));
                     }
@@ -8907,7 +8907,8 @@ impl Selector {
                          `M$OIS$LLL`) is",
                     ));
                 }
-                self.marith(&format!("M$OI{s}$LLL"), lhs, rhs)?;
+                let name = self.marith_name("OI", signed, "LLL")?;
+                self.marith(name, lhs, rhs)?;
                 Ok(Val::Tmp(0))
             }
         }
@@ -9058,14 +9059,38 @@ impl Selector {
     /// An M$ARITH call `M$<kind><s>$LL<W|L>(a, b)` of type `ty`: `W` when
     /// `b` is a word (or a constant that fits one, [`Self::word_part`]).
     fn marith_op(&mut self, kind: &str, ty: Scalar, a: &Expr, b: &Expr) -> Res<()> {
-        let s = if ty.is_signed() { 'S' } else { 'U' };
+        let signed = ty.is_signed();
         match Self::word_part(b, ty.sign) {
-            Some(bw) => self.marith(&format!("M${kind}{s}$LLW"), a, &bw),
-            None => self.marith(&format!("M${kind}{s}$LLL"), a, b),
+            Some(bw) => {
+                let name = self.marith_name(kind, signed, "LLW")?;
+                self.marith(name, a, &bw)
+            }
+            None => {
+                let name = self.marith_name(kind, signed, "LLL")?;
+                self.marith(name, a, b)
+            }
         }
     }
 
-    /// A call of the M$ARITH entry `name` with argument 1 `a` (a longword)
+    /// The M$ARITH entry `M$<kind><S|U>$<form>` from the shipped module's
+    /// list ([`crate::runtime::marith_entry`]); an operation the module
+    /// has no routine for is refused, never given an invented name.
+    fn marith_name(&self, kind: &str, signed: bool, form: &str) -> Res<&'static str> {
+        crate::runtime::marith_entry(kind, signed, form).ok_or_else(|| {
+            unsupported(
+                self.span,
+                format!(
+                    "an operation with no {} routine (M${kind}{}${form}) is",
+                    crate::runtime::MODULE,
+                    if signed { 'S' } else { 'U' }
+                ),
+            )
+        })
+    }
+
+    /// A call of the M$ARITH entry `name` (one of the shipped module's,
+    /// [`Self::marith_name`]; a `'static` name, so never one formed here)
+    /// with argument 1 `a` (a longword)
     /// and argument 2 `b` (a word or a longword); the result is in D0, a
     /// longword or (`M$OI*$WLW`) a word (codegen-patterns 8; the frames in
     /// `../source/domain_os/math/sau2/arith.s`: `(4,SP)` a, `(8,SP)` b).
@@ -9103,7 +9128,7 @@ impl Selector {
     /// call and its pop, then the outer pad); a second call while a
     /// result in D0 is still needed; a call among another call's
     /// arguments.
-    fn marith(&mut self, name: &str, a: &Expr, b: &Expr) -> Res<()> {
+    fn marith(&mut self, name: &'static str, a: &Expr, b: &Expr) -> Res<()> {
         if self.in_args {
             return Err(unsupported(
                 self.span,
