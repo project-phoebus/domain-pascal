@@ -4,7 +4,7 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build test exectest corpus conform linktest clean
+.PHONY: all build test exectest corpus conform linktest srcsurvey clean
 
 all: build
 
@@ -49,6 +49,27 @@ LINKTEST_REV ?= HEAD
 
 linktest: build
 	$(PYTHON) tools/linktest.py run --rev $(LINKTEST_REV) tests/link/manifest.txt
+
+# Source survey (tools/srcsurvey.py; tests/conformance/README.md): dpc over
+# ../source's Pascal modules, each compiled routine compared with the
+# image, the per-routine statuses compared with tests/srcsurvey/baseline.txt
+# (exit 1 when a routine got worse).  At the baseline's ../source commit
+# unless SRCSURVEY_REV is given (e.g. HEAD), so only dpc moves the result.
+# About 10 s and it depends on another repository, so not part of `make
+# test'; skipped with a notice when ../source is missing.  The full report
+# is in tmp/srcsurvey/report.txt; refresh the baseline with
+# `python3 tools/srcsurvey.py run --update'.
+SRCSURVEY_REV ?=
+
+srcsurvey: build
+	@if [ -e ../source/.git ]; then \
+	  mkdir -p tmp/srcsurvey; \
+	  $(PYTHON) tools/srcsurvey.py run --baseline $(if $(SRCSURVEY_REV),--rev $(SRCSURVEY_REV)) \
+	    > tmp/srcsurvey/report.txt 2>&1; rc=$$?; \
+	  sed -n '/^== summary/,$$p' tmp/srcsurvey/report.txt; \
+	  if [ $$rc -ne 0 ]; then tail -5 tmp/srcsurvey/report.txt; fi; \
+	  exit $$rc; \
+	else echo "srcsurvey: ../source not found; skipped"; fi
 
 clean:
 	$(CARGO) clean

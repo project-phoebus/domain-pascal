@@ -232,6 +232,67 @@ class WorkaroundTest(unittest.TestCase):
                                            'timer: linteger;\n'))
 
 
+class PackedInitTest(unittest.TestCase):
+    # KBD's kbd_$state_table: dpc refuses initial values of 4-bit packed
+    # fields; the initialiser goes, the declaration stays
+    def test_drop_initialiser(self):
+        wa = {n: (p, r) for n, _w, _s, p, r in srcsurvey.WORKAROUNDS}
+        pat, rep = wa['packed-init']
+        src = ("{ kbd_$state_table: array[0..1] of kbd_$state_entry_t := [ }\n"
+               "  kbd_$state_table: array[0..1] of kbd_$state_entry_t := [\n"
+               "    [key := chr(16#FB), action := 2, next_state := 0],\n"
+               "    [key := chr(16#E8), action := 3, next_state := 1]];\n"
+               "  other: array[0..1] of integer := [1, 2];\n")
+        text, k = srcsurvey.apply_workaround(pat, rep, src)
+        self.assertEqual(k, 1)
+        self.assertEqual(text.splitlines()[1:],
+                         ['  kbd_$state_table: array[0..1] of kbd_$state_entry_t;',
+                          '  other: array[0..1] of integer := [1, 2];'])
+        self.assertIn('packed-init', srcsurvey.DATA_WORKAROUNDS)
+
+    def test_code_ok_only(self):
+        f = srcsurvey.code_ok_only
+        head = 'FAIL r (R, 0x10..0x20, 0 relocation(s))'
+        listing = ['          ours      | image', '  e1ce94  4e75   rts  | 4e75  rts']
+        data = '  section .moddata.KBD.WIRED_DATA differs first at 0xE2DEA4: ours 00, image fb'
+        self.assertTrue(f([head, data] + listing))
+        self.assertFalse(f([head, '  bytes differ first at 0xE1CEB4 (+0x8): ours 24, image 26',
+                            data] + listing))
+        self.assertFalse(f([head] + listing))
+
+    def test_within_workaround_ranges(self):
+        # CODE-OK needs every differing data byte inside kbd_$state_table
+        # (the last 0x14 bytes of KBD's block, 0xE2DDE4 size 0xD4), not
+        # just the first one conform.check reports
+        f = srcsurvey.within
+        self.assertTrue(f([0xE2DEA4, 0xE2DEB7], ['packed-init']))
+        self.assertFalse(f([0xE2DEA4, 0xE2DEB8], ['packed-init']))
+        self.assertFalse(f([0xE2DEA3], ['packed-init']))
+
+    def test_data_diffs_all_bytes(self):
+        import conform
+        ours = bytes([1, 2, 3, 4, 5, 6])
+        img = bytes([1, 9, 3, 4, 9, 6])
+
+        def run(cmd, cwd=None):
+            if cmd[0] == conform.OBJCOPY:
+                self.assertEqual(cmd[cmd.index('-j') + 1], '.moddata.K.D')
+                with open(cmd[-1], 'wb') as fh:
+                    fh.write(ours)
+            return ''
+        secs = [('.moddata.K.D', 6, {'CONTENTS', 'ALLOC', 'DATA'}),
+                ('.bss.moddata.K', 4, {'ALLOC'}),
+                ('.text', 2, {'CONTENTS', 'ALLOC', 'CODE'})]
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(conform, 'run', run), \
+                unittest.mock.patch.object(conform, 'sections_of', lambda o: secs), \
+                unittest.mock.patch.object(conform, 'read_image',
+                                           lambda a, n: img[:n]):
+            got = srcsurvey.data_diffs(os.path.join(d, 'u.s'),
+                                       {'.moddata.K.D': 0x1000, '.bss.moddata.K': 0x2000}, d)
+        self.assertEqual(got, [0x1001, 0x1004])
+
+
 class DataSectionsTest(unittest.TestCase):
     """--section-addr pairs for dpc's data blocks, zero-filled
     (`.bss.moddata.') or with initial values (`.moddata.')."""
@@ -251,9 +312,19 @@ class DataSectionsTest(unittest.TestCase):
         lm.segments = [S('D', 'TTY', 0xE2DDB4, 0x28), S('D', 'TTY', 0xE8242C, 0x2C)]
         asm = ('\t.section\t".moddata.TTY.WIRED_DATA","aw",@progbits\n'
                '\t.section\t".bss.moddata.TTY","aw",@nobits\n')
-        self.assertEqual(srcsurvey.data_sections(asm, lm, 'tty'),
+        self.assertEqual(srcsurvey.data_sections(asm, lm),
                          {'.moddata.TTY.WIRED_DATA': 0xE2DDB4,
                           '.bss.moddata.TTY': 0xE8242C})
+
+    def test_module_name_not_file_name(self):
+        # log/log.pas is `module log_', the map's LOG_ (D 0xE2B280)
+        S = self.Seg
+        lm = type('M', (), {})()
+        lm.sections = [S('D', 'WIRED_DATA', 0xE1DC00, 0x18000)]
+        lm.segments = [S('D', 'LOG_', 0xE2B280, 0x1C), S('D', 'LOG', 0xE2B000, 0x1C)]
+        asm = '\t.section\t".bss.moddata.LOG_.WIRED_DATA","aw",@nobits\n'
+        self.assertEqual(srcsurvey.data_sections(asm, lm),
+                         {'.bss.moddata.LOG_.WIRED_DATA': 0xE2B280})
 
 
 
@@ -545,7 +616,7 @@ class SettingsTest(unittest.TestCase):
                'always': [(0x130, 'SET_RAW_MODE')], 'absolute': []}
         lw = {'off_from': (0x110, 'PUT_CHARS'), 'interval': (None, 0x110), 'error': None}
         a5t = {'always_from': None, 'interval': (None, None), 'always': [(0x320, None)],
-               'absolute': [(0x310, 'ABS')]}
+               'absolute': [(0x310, 'ABS')], 'for_callees': [(0x330, 'READ')]}
         lt = {'off_from': None, 'interval': (None, None), 'error': 'aligns again'}
         return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw),
                 ('.TEXT', self.Seg(0x300, 0x400), a5t, lt)]
@@ -578,6 +649,9 @@ class SettingsTest(unittest.TestCase):
                          ['--a5-always-from=K_FLUSH', '--loop-align=off'])
         self.assertEqual(f(st, r('local', 0x160, True), 0x160), ['--loop-align=off'])
         self.assertEqual(f(st, r('abs', 0x310), 0x310), ['--a5-absolute=ABS'])
+        # loads A5 only for its callees (LOG_$READ): said for the fragment
+        # only, a whole-module build needs no option (test_settings_opts)
+        self.assertEqual(f(st, r('read', 0x330), 0x330), ['--a5-always=READ'])
         self.assertEqual(f(st, r('elsewhere', 0x500), 0x500), [])
         # nested routines before the switch, the routine after it
         st[0][3]['off_from'] = (0x118, 'PARENT')
@@ -595,6 +669,64 @@ class SettingsTest(unittest.TestCase):
         out = io.StringIO()
         srcsurvey.report_settings('m.pas', st, out)
         self.assertIn("  dpc '--a5-always-from=TTY_$K_FLUSH_INPUT' ", out.getvalue())
+
+
+
+class BaselineTest(unittest.TestCase):
+    RES = [('log/log.pas', 'log_$read', 'OK'), ('log/log.pas', 'log_$add', 'STUB'),
+           ('kbd/kbd.pas', 'kbd_$put', 'MISMATCH')]
+
+    def test_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'b.txt')
+            with open(p, 'w') as fh:
+                fh.write(srcsurvey.format_baseline('abc123', self.RES))
+            commit, base = srcsurvey.read_baseline(p)
+        self.assertEqual(commit, 'abc123')
+        self.assertEqual(base, {(m, n): st for m, n, st in self.RES})
+
+    def test_unknown_status_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'b.txt')
+            with open(p, 'w') as fh:
+                fh.write('# source: abc\nOKAY\tlog/log.pas\tlog_$read\n')
+            with self.assertRaises(ValueError):
+                srcsurvey.read_baseline(p)
+
+    def test_update_refuses_no_conform(self):
+        with unittest.mock.patch('sys.stderr', io.StringIO()), \
+                self.assertRaises(SystemExit):
+            srcsurvey.main(['run', '--update', '--no-conform'])
+
+    def test_compare(self):
+        base = {(m, n): st for m, n, st in self.RES}
+        self.assertEqual(srcsurvey.compare_baseline(base, self.RES), ([], 0))
+        now = [('log/log.pas', 'log_$read', 'MISMATCH'),       # worse
+               ('log/log.pas', 'log_$add', 'OK'),              # better
+               ('tty/tty.pas', 'tty_$i_lock', 'OK')]           # new; kbd_$put gone
+        lines, worse = srcsurvey.compare_baseline(base, now)
+        self.assertEqual(worse, 2)
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(any(ln.startswith('  WORSE') and 'kbd_$put: MISMATCH -> gone' in ln
+                            for ln in lines))
+        self.assertTrue(any('log_$add: STUB -> OK' in ln and ln.startswith('  diff')
+                            for ln in lines))
+        # a run of some modules compares only those
+        lines, worse = srcsurvey.compare_baseline(base, now[:2], {'log/log.pas'})
+        self.assertEqual((len(lines), worse), (2, 1))
+
+    def test_routine_results(self):
+        mod = srcsurvey.Module.__new__(srcsurvey.Module)
+        a, b, c, h = (srcsurvey.Routine(n) for n in ('a', 'b', 'c', 'h'))
+        h.options.add('extern')
+        mod.routines = {'a': ('f', a), 'b': ('f', b), 'c': ('f', c), 'h': ('f', h)}
+        mod.stubbed = {'b'}
+        f = srcsurvey.routine_results
+        self.assertEqual(f('m.pas', mod, True, {'a': 'OK', 'c': 'SETUP: no address'}),
+                         [('m.pas', 'a', 'OK'), ('m.pas', 'b', 'STUB'),
+                          ('m.pas', 'c', 'SETUP')])
+        self.assertEqual([st for _m, _n, st in f('m.pas', mod, False, {})], ['BLOCKED'] * 3)
+        self.assertEqual(f('m.pas', mod, True, {})[0][2], 'COMPILED')
 
 
 if __name__ == '__main__':

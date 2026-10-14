@@ -5,7 +5,8 @@ image (bead domain-pascal-xdh.3).
 
     srcsurvey.py run [--rev REV] [--source DIR] [--work DIR] [--dpc DPC]
                      [--no-workaround NAME]... [--no-conform]
-                     [--no-build-settings] [-v] [MODULE.pas ...]
+                     [--no-build-settings] [--baseline [FILE] | --update]
+                     [-v] [MODULE.pas ...]
     srcsurvey.py summarise DIAGNOSTICS.txt [--tree DIR] [-v]
 
 `run' exports ../source's domain_os/ at REV (default HEAD) with `git
@@ -24,8 +25,10 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      looks at any routine (each one named, see WORKAROUNDS; --no-workaround
      NAME skips one).  Only declarations are rewritten, never text in a
      comment, and none changes a size or an offset the surviving routines
-     use, so a routine reported OK compiles to the image's bytes.  (None
-     is needed at present.)
+     use, so a routine reported OK compiles to the image's bytes.  One
+     is needed at present, `packed-init' (KBD); it changes a data
+     block's contents, so a routine whose code matches is reported
+     CODE-OK, not OK, when only data differs.
   3. Stage "check" and "codegen", repeated: `dpc --check-only', then full
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
@@ -83,6 +86,14 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      first one the image proves; the interval printed with it is where
      the switch could be put as well.
 
+The run ends with a summary of the top-level routines by status (OK,
+CODE-OK, MISMATCH, SETUP, STUB: stubbed for a diagnostic, BLOCKED: the
+module stops outside any routine).  `--update' writes them to the
+baseline, tests/srcsurvey/baseline.txt, with the ../source commit;
+`--baseline' compares with it, at that commit unless --rev is given, so
+that only dpc changes the result (`make srcsurvey'), and exits 1 when a
+routine's status is worse than the baseline's or the routine is gone.
+
 Diagnostics are grouped by kind, most frequent first, with the routines
 each kind occurs in.  A kind is the message with identifiers in backquotes
 (upper case or `$'), quoted strings and numbers replaced by placeholders.  Refusals ("not
@@ -118,7 +129,70 @@ ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(\d+)\s*bytes')
 # removed.  Nor is `field-aligned', which dropped `[aligned(n)]' from
 # record fields (tty.ins.pas `timer: [aligned(1)] linteger'): dpc lays
 # alignment attributes out by ref 3.15.6 (bead domain-pascal-l9p).
-WORKAROUNDS = []
+#
+# `packed-init': dpc refuses an initial value for a packed record field
+# that is not whole bytes (KBD's kbd_$state_table, an array of
+# kbd_$state_entry_t, whose action and next_state are 4-bit fields).
+# The initialiser is dropped: the array keeps its size and offset, only
+# the data block's contents change, which conformance does not compare.
+WORKAROUNDS = [
+    ('packed-init',
+     'initialiser of an array of kbd_$state_entry_t (packed, 4-bit fields) dropped',
+     '.pas',
+     re.compile(r'(\barray\s*\[[^\]]*\]\s*of\s+kbd_\$state_entry_t)\s*:=\s*'
+                r'\[(?:[^\[\]]|\[[^\[\]]*\])*\]', re.I),
+     r'\1'),
+]
+# workarounds that change only the contents of a data block, with the
+# image range [lo, hi) of the bytes each one changes: a routine whose
+# code matches and whose data differs from the image only in those
+# bytes is reported `CODE-OK' (not `OK') when one of them was applied.
+# packed-init: kbd_$state_table, 10 entries of 2 bytes (key, then the
+# 4-bit action and next_state), at +0xC0 of KBD's block (kbd.pas), the
+# block's last 0x14 bytes (map `D E2DDE4 KBD size = D4', end 0xE2DEB8).
+DATA_WORKAROUNDS = {'packed-init': [(0xE2DEA4, 0xE2DEB8)]}
+
+DATA_DIFF_RE = re.compile(r'^  section \S+ differs first at ')
+
+
+def code_ok_only(lines):
+    """Whether conform.check's failure LINES report data-section
+    differences and nothing else (the problem lines, before the
+    side-by-side listing)."""
+    probs = []
+    for ln in lines[1:]:
+        if not ln.startswith('  ') or ln.startswith('   '):
+            break
+        probs.append(ln)
+    return bool(probs) and all(DATA_DIFF_RE.match(p) for p in probs)
+
+
+def data_diffs(asm, sect, work):
+    """Image addresses of every byte in which the data sections of ASM
+    that have contents and an address in SECT ({section: address},
+    data_sections) differ from the image; conform.check reports only the
+    first difference of each."""
+    import conform
+    obj = os.path.join(work, 'data_diffs.o')
+    conform.run([conform.AS, '-m68010', '-o', obj, os.path.abspath(asm)])
+    out = []
+    for s, _n, fl in conform.sections_of(obj):
+        if s not in sect or 'CONTENTS' not in fl or 'CODE' in fl:
+            continue
+        b = os.path.join(work, 'data_diffs.bin')
+        conform.run([conform.OBJCOPY, '-O', 'binary', '-j', s, obj, b])
+        with open(b, 'rb') as fh:
+            ours = fh.read()
+        img = conform.read_image(sect[s], len(ours))
+        out += [sect[s] + i for i, (x, y) in enumerate(zip(ours, img)) if x != y]
+    return out
+
+
+def within(addrs, names):
+    """Whether every address of ADDRS lies in a range of DATA_WORKAROUNDS
+    NAMES."""
+    ranges = [rg for n in names for rg in DATA_WORKAROUNDS[n]]
+    return all(any(lo <= a < hi for lo, hi in ranges) for a in addrs)
 
 
 CODE_SKIP_RE = re.compile(r"""\{[^}]*\}|\(\*.*?\*\)|"[^"\n]*"|'(?:[^'\n]|'')*'""", re.S)
@@ -898,28 +972,33 @@ def unit_specs(mod, name, linkmap, table=None):
     return specs
 
 
-def data_sections(asm_text, linkmap, module):
+def data_sections(asm_text, linkmap):
     """`--section-addr' pairs for the module data sections of an .s."""
     out = {}
     # dpc: `.bss.moddata.<UNIT>[.<SECT>]', or `.moddata.<UNIT>[.<SECT>]'
-    # for a block with initial values (emit.rs, data_section_name)
+    # for a block with initial values (emit.rs, data_section_name).
+    # <UNIT> is the module's name upper-cased, which is the map's
+    # segment name (`module log_' is the map's LOG_, the file log.pas)
     for sec in re.findall(r'\.section\s+"?((?:\.bss)?\.moddata\.[^",\s]+)', asm_text):
-        _unit, dot, name = sec.split('.moddata.', 1)[1].partition('.')
+        unit, dot, name = sec.split('.moddata.', 1)[1].partition('.')
         want = name if dot else '.DATA'
         for s in linkmap.sections:
             if s.kind == 'D' and s.name == want:
                 for g in linkmap.segments:
-                    if g.kind == 'D' and g.name == module.upper() and s.contains(g.addr):
+                    if g.kind == 'D' and g.name == unit.upper() and s.contains(g.addr):
                         out[sec] = g.addr
     return out
 
 
-def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=None):
+def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=None,
+                    data_changed=()):
     """Compile top-level routine NAME alone and compare it with the
     image.  MOD's texts are the module's before any routine was stubbed;
     TABLE (default MOD.routines) gives the addresses of the routines NAME
     calls.  SETTINGS (module_settings) give the routine the A5 mode and
-    loop alignment it has in the image (unit_build_opts).  -> 'OK',
+    loop alignment it has in the image (unit_build_opts).  DATA_CHANGED
+    names the DATA_WORKAROUNDS applied to the module.  -> 'OK',
+    'CODE-OK' (only data differs, all of it in DATA_CHANGED's ranges),
     'MISMATCH', or 'SETUP: ...'."""
     import conform
     table = table or mod.routines
@@ -958,10 +1037,24 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
         if rc:
             return 'SETUP: dpc failed alone: ' + (err.strip().splitlines() or ['?'])[0]
         with open(asm) as fh:
-            sect = data_sections(fh.read(), linkmap, os.path.basename(mod.path)[:-4])
+            sect = data_sections(fh.read(), linkmap)
+        lines = []
+
+        def keep(line):
+            lines.append(line)
+            if out:
+                out(line)
         ok = conform.check(asm, specs, linkmap, sect, work=work, name=name,
-                           local_syms=local, quiet=not out, out=out or (lambda *a: None))
-        return 'OK' if ok else 'MISMATCH'
+                           local_syms=local, quiet=not out, out=keep)
+        if ok:
+            return 'OK'
+        # code-only: no problem but data differences, and every
+        # differing data byte one a workaround in DATA_CHANGED changed
+        if data_changed and code_ok_only(lines):
+            diffs = data_diffs(asm, sect, work)
+            if diffs and within(diffs, data_changed):
+                return 'CODE-OK'
+        return 'MISMATCH'
     except conform.SetupError as e:
         return 'SETUP: %s' % e
 
@@ -1085,7 +1178,16 @@ def module_settings(mod, linkmap):
             rows.append((r.r0, nm, a5survey.letter(r), bool(r.name), r.abs_own))
         names = {r0: src.get(r0) or ((m.names_at(r0) or [None])[0])
                  for sg, r0, _r1, _c in pr if sg is seg}
-        out.append((code_section(sa, linkmap) or seg.name, seg, a5_settings(rows),
+        a5 = a5_settings(rows)
+        # routines that load A5 and use it only in their `bsr' callees
+        # (LOG_$READ 0xE17800 for its worker 0xE17778): used mode loads it
+        # in a whole-module build, a fragment with the callee stubbed
+        # needs it said (unit_build_opts)
+        a5['for_callees'] = [(r.r0, src.get(r.r0) or (r.name.upper() if r.name else None))
+                             for r in sorted(by_start.values(), key=lambda r: r.r0)
+                             if r.segaddr == sa and r.has_link and r.sets
+                             and not r.uses and r.uses_t]
+        out.append((code_section(sa, linkmap) or seg.name, seg, a5,
                     loop_settings(pr, seg, names, segment_end_aligns(seg))))
     return out
 
@@ -1152,7 +1254,9 @@ def report_settings(path, settings, out=sys.stdout):
 def unit_build_opts(settings, r, lo):
     """dpc options that give top-level routine R (with nested routines
     from address LO) the A5 mode and loop alignment it has in a build of
-    the whole module with SETTINGS' options."""
+    the whole module with SETTINGS' options.  A routine that loads A5
+    only for its `bsr' callees (used mode, which the fragment cannot see
+    with the callees stubbed) is given `--a5-always'."""
     name = r.name.upper()
     for _sect, seg, a5, lp in settings:
         if not seg.contains(r.addr):
@@ -1164,6 +1268,9 @@ def unit_build_opts(settings, r, lo):
             opts.append('--a5-absolute=' + name)
         elif a5['always_from'] and not r.internal and r.addr >= a5['always_from'][0]:
             opts.append('--a5-always-from=' + name)
+        elif any(n == name for _a, n in a5.get('for_callees', ())):
+            # loads A5 for module-local callees, stubbed in the fragment
+            opts.append('--a5-always=' + name)
         off = lp['off_from']
         if off and not lp['error']:
             last = lp['interval'][0]
@@ -1177,12 +1284,98 @@ def unit_build_opts(settings, r, lo):
     return []
 
 
+# ------------------------------------------------------------ baseline
+
+BASELINE = os.path.join(ROOT, 'tests', 'srcsurvey', 'baseline.txt')
+
+# per top-level routine, best first: compiled and byte-identical; code
+# identical, data changed by a DATA_WORKAROUNDS rewrite; compiled, not
+# identical; conformance not set up; stubbed (a diagnostic in it); not
+# reached (the module stops outside any routine); compiled, conformance
+# not run (--no-conform)
+STATUS_RANK = {'OK': 5, 'CODE-OK': 4, 'COMPILED': 3, 'MISMATCH': 3, 'SETUP': 2,
+               'STUB': 1, 'BLOCKED': 0}
+
+
+def format_baseline(commit, results):
+    """The baseline file's text: the ../source commit, then one line per
+    (module, routine, status), in RESULTS' order."""
+    lines = ['# tools/srcsurvey.py baseline: status, module, routine (top level).',
+             '# Regenerate with `python3 tools/srcsurvey.py run --update` and say why',
+             '# in the commit.  `make srcsurvey` compares at the commit below.',
+             '# source: %s' % commit]
+    lines += ['%s\t%s\t%s' % (st, m, n) for m, n, st in results]
+    return '\n'.join(lines) + '\n'
+
+
+def read_baseline(path):
+    """-> (commit or None, {(module, routine): status})."""
+    commit, out = None, {}
+    with open(path) as fh:
+        for ln in fh:
+            ln = ln.rstrip('\n')
+            if ln.startswith('# source: '):
+                commit = ln[len('# source: '):].strip()
+            elif ln and not ln.startswith('#'):
+                st, m, n = ln.split('\t')
+                if st not in STATUS_RANK:
+                    raise ValueError('%s: unknown status %r' % (path, st))
+                out[(m, n)] = st
+    return commit, out
+
+
+def compare_baseline(base, results, modules=None):
+    """Differences between BASE ({(module, routine): status}) and
+    RESULTS [(module, routine, status)], restricted to MODULES when
+    given.  -> (lines, regressions): a regression is a routine whose
+    status ranks lower than in the baseline, or that is gone."""
+    now = {(m, n): st for m, n, st in results}
+    lines, regressions = [], 0
+    for key in sorted(set(base) | set(now)):
+        if modules is not None and key[0] not in modules:
+            continue
+        b, c = base.get(key), now.get(key)
+        if b == c:
+            continue
+        worse = c is None or (b is not None and STATUS_RANK[c] < STATUS_RANK[b])
+        regressions += worse
+        lines.append('  %s %-12s %s: %s -> %s' % ('WORSE' if worse else 'diff ', key[0],
+                                                  key[1], b or 'new', c or 'gone'))
+    return lines, regressions
+
+
+def routine_results(path, mod, ok, conformed):
+    """[(module path, routine, status)] for MOD's top-level routines with
+    bodies, in source order; CONFORMED: {name: conformance result}."""
+    out = []
+    for n, (_i, r) in mod.routines.items():
+        if not r.has_body:
+            continue
+        if not ok:
+            st = 'BLOCKED'
+        elif n in mod.stubbed:
+            st = 'STUB'
+        else:
+            st = conformed.get(n, 'COMPILED').split(':')[0]
+        out.append((path, n, st))
+    return out
+
+
 def cmd_run(a):
     work = os.path.abspath(a.work)
+    # dpc runs with the exported tree as its directory
+    a.dpc = os.path.abspath(a.dpc)
+    base_commit, base = None, None
+    if a.baseline and not a.update:
+        base_commit, base = read_baseline(a.baseline)
+    if a.rev is None:
+        # compared with a baseline: at its commit, so that only dpc moves
+        a.rev = base_commit or 'HEAD'
     tree, commit = export_rev(os.path.abspath(a.source), a.rev, work)
     print('srcsurvey: %s at %s (%s)' % (os.path.normpath(a.source), a.rev, commit[:12]))
     mods = a.modules or find_modules(tree)
     settings_out = []
+    results = []
     for k, path in enumerate(mods):
         if k:
             # a fresh copy: the previous module's workarounds and stubs
@@ -1197,6 +1390,7 @@ def cmd_run(a):
               (path, len(dropped), (': ' + ' '.join(dropped)) if dropped and a.verbose else ''))
         logp = os.path.join(work, path.replace('/', '_') + '.log')
         with open(logp, 'w') as log:
+            data_changed = []
             rc, err = run_dpc(a.dpc, tree, path, check_only=True)
             log.write(err)
             loc = Locator(tree)
@@ -1219,6 +1413,8 @@ def cmd_run(a):
                                 with open(q, 'w') as fh:
                                     fh.write(s2)
                 print('srcsurvey: workaround %s: %s (%d place(s))' % (name, what, n))
+                if n and name in DATA_WORKAROUNDS:
+                    data_changed.append(name)
             mod = Module(tree, path)
             ok = True
             all_stubbed = []
@@ -1236,7 +1432,9 @@ def cmd_run(a):
         print('srcsurvey: log %s' % os.path.relpath(logp, ROOT))
         settings = module_settings(mod, linkmap)
         settings_out.append((path, settings))
+        conformed = {}
         if not ok or a.no_conform:
+            results += routine_results(path, mod, ok, conformed)
             continue
         compiled = [n for n, (_i, r) in mod.routines.items()
                     if r.has_body and n not in mod.stubbed]
@@ -1246,13 +1444,36 @@ def cmd_run(a):
         for name in compiled:
             res = conform_routine(mod, name, a.dpc, linkmap, cwork,
                                   print if a.verbose else None, mod.routines,
-                                  None if a.no_build_settings else settings)
+                                  None if a.no_build_settings else settings,
+                                  data_changed)
+            conformed[name] = res
             _i, r = mod.routines[name]
             print('  %-9s %-36s %s' % (res.split(':')[0], name,
                                        ('0x%X' % r.addr) if r.addr else '?')
-                  + (('  ' + res[7:]) if res.startswith('SETUP') else ''))
+                  + (('  ' + res[7:]) if res.startswith('SETUP') else '')
+                  + (('  (data differs: workaround %s)' % ', '.join(data_changed))
+                     if res == 'CODE-OK' else ''))
+        results += routine_results(path, mod, ok, conformed)
     for path, settings in settings_out:
         report_settings(path, settings)
+    counts = collections.Counter(st for _m, _n, st in results)
+    print('== summary: %d routine(s): %s' % (
+        len(results), ', '.join('%s %d' % (st, counts[st])
+                                for st in sorted(counts, key=lambda x: -STATUS_RANK[x]))))
+    if a.update:
+        os.makedirs(os.path.dirname(a.baseline), exist_ok=True)
+        with open(a.baseline, 'w') as fh:
+            fh.write(format_baseline(commit, results))
+        print('srcsurvey: baseline written to %s' % os.path.relpath(a.baseline, ROOT))
+    elif base is not None:
+        lines, worse = compare_baseline(base, results, set(mods) if a.modules else None)
+        print('== baseline %s (source %s): %d difference(s), %d regression(s)'
+              % (os.path.relpath(a.baseline, ROOT), (base_commit or '?')[:12],
+                 len(lines), worse))
+        for ln in lines:
+            print(ln)
+        if worse:
+            return 1
     return 0
 
 
@@ -1269,7 +1490,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     r = sub.add_parser('run')
-    r.add_argument('--rev', default='HEAD')
+    r.add_argument('--rev', default=None,
+                   help="../source revision (default HEAD, or the baseline's commit "
+                        'with --baseline)')
     r.add_argument('--source', default=os.path.join(ROOT, '..', 'source'))
     r.add_argument('--work', default=os.path.join(ROOT, 'tmp', 'srcsurvey'))
     r.add_argument('--dpc', default=os.path.join(ROOT, 'target', 'debug', 'dpc'))
@@ -1277,6 +1500,11 @@ def main(argv=None):
                    choices=[w[0] for w in WORKAROUNDS])
     r.add_argument('--no-conform', action='store_true')
     r.add_argument('--no-build-settings', action='store_true')
+    r.add_argument('--baseline', nargs='?', const=BASELINE, default=None,
+                   help='compare per-routine statuses with this baseline (default '
+                        'tests/srcsurvey/baseline.txt); exit 1 on a regression')
+    r.add_argument('--update', action='store_true',
+                   help='write the baseline (--baseline FILE, or the default)')
     r.add_argument('-v', '--verbose', action='store_true')
     r.add_argument('modules', nargs='*')
     s = sub.add_parser('summarise')
@@ -1284,6 +1512,12 @@ def main(argv=None):
     s.add_argument('--tree', default='.')
     s.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args(argv)
+    if a.cmd == 'run' and a.update:
+        if a.modules:
+            ap.error('--update writes the whole baseline: give no MODULE')
+        if a.no_conform:
+            ap.error('--update records conformance results: not with --no-conform')
+        a.baseline = a.baseline or BASELINE
     return cmd_run(a) if a.cmd == 'run' else cmd_summarise(a)
 
 

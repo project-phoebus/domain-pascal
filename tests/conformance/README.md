@@ -406,7 +406,14 @@ A5 mode and loop alignment of its code section, derived from
 `tools/a5survey.py` and `tools/loopalign.py` (bead domain-pascal-xdh.7);
 its "build settings" section lists, per module, the dpc options
 (`--a5-always-from=`, `--a5-always=`, `--a5-absolute=`,
-`--loop-align-off-from=`) a build of the whole module needs.
+`--loop-align-off-from=`) a build of the whole module needs.  A
+routine that loads A5 only for its module-local callees (LOG_$READ for
+its worker 0xE17778) is given `--a5-always` in its fragment, since the
+stubbed callee cannot show dpc that A5 is needed.  It runs over every
+module of `../source` (TTY, LOG, KBD, TPAD at present); the per-routine
+statuses are recorded in `tests/srcsurvey/baseline.txt` with the
+`../source` commit, and `make srcsurvey` (not part of `make test`)
+compares with them at that commit.
 
 ## Loop alignment on and off
 
