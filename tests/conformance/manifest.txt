@@ -139,6 +139,12 @@ tests/conformance/xpd_reset_ptrace_opts.pas  XPD_$RESET_PTRACE_OPTS
 # its own by-value parameter passed by address with `pea (8,A6)'.
 tests/conformance/ring_discard_packet.pas  0xE76470:2E  enclosing=RECEIVE_PACKET
 tests/conformance/cal_shutdown.pas           CAL_$SHUTDOWN  --section-addr .bss.moddata.OS_CAL_WIRED=0xE7B030
+# Pointer locals held in D0 where no call follows (codegen-patterns 3;
+# bead domain-pascal-dgb): `move.l A0,D0' after the call, `movea.l D0,A0'
+# where first dereferenced, before an `if''s branch when both parts
+# dereference it.  Reconstructed from ../source's TTY Pascal.
+tests/conformance/tty_k_flags.pas            TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS
+tests/conformance/tty_k_session_id.pas       TTY_$K_SET_SESSION_ID TTY_$K_INQ_SESSION_ID  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID
 # Calls through routine pointers (codegen-patterns 1.6; bead
 # domain-pascal-5aw.8): a `val_param' pointer type, the argument pushed by
 # value, then `movea.l (A5),A0; jsr (A0)', not popped before `unlk'.

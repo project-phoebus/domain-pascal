@@ -192,11 +192,23 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 /// [`select_body`] with the body scheduled under `sched` after register
 /// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12).
 pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
-    let (body, hits) = select_body_with(f, CsePlan::Probe, sched)?;
+    // A pointer local that no call follows is found by allocation; the
+    // body is selected again with it held in D0 ([`Park`]).
+    let (body, hits, parked) = match select_body_with(f, CsePlan::Probe, sched, &[])? {
+        Selected::Body(b, h) => (b, h, Vec::new()),
+        Selected::Park(parked) => match select_body_with(f, CsePlan::Probe, sched, &parked)? {
+            Selected::Body(b, h) => (b, h, parked),
+            Selected::Park(_) => unreachable!("a parked local is not parked again"),
+        },
+    };
     if hits.is_empty() {
         return Ok(body);
     }
-    let (body, again) = select_body_with(f, CsePlan::Hold(hits.clone()), sched)?;
+    let Selected::Body(body, again) =
+        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &parked)?
+    else {
+        unreachable!("a parked local is not parked again")
+    };
     if again != hits {
         // The second selection must find the reuses the first one did:
         // the validity of a reuse depends only on labels, calls and
@@ -209,11 +221,19 @@ pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diag
     Ok(body)
 }
 
+/// What [`select_body_with`] gives: the body and the reuses found, or the
+/// pointer locals to select again held in D0 ([`Park`]).
+enum Selected {
+    Body(Body, Vec<(u32, u32)>),
+    Park(Vec<i32>),
+}
+
 fn select_body_with(
     f: &Function,
     plan: CsePlan,
     sched: Schedule,
-) -> Result<(Body, Vec<(u32, u32)>), Diagnostic> {
+    parked: &[i32],
+) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
     s.cse_plan = plan;
     s.data_label = crate::emit::data_base_label(&f.data_section);
@@ -274,7 +294,17 @@ fn select_body_with(
     let mut taken = s.reg_locals.clone();
     taken.extend(s.ptr_locals.iter().map(|&(o, _)| o));
     let call_ptrs = call_pointer_locals(f, &taken);
-    s.ptr_locals.extend(call_ptrs.iter().map(|&o| (o, None)));
+    for &o in &call_ptrs {
+        if parked.contains(&o) {
+            s.parked.push(Park {
+                off: o,
+                d: None,
+                home: None,
+            });
+        } else {
+            s.ptr_locals.push((o, None));
+        }
+    }
     s.seq(f, &f.body, Tail::END)?;
     if f.data_absolute
         && s.out.iter().any(|i| {
@@ -407,7 +437,23 @@ fn select_body_with(
         .filter(|(o, _)| call_ptrs.contains(o))
         .filter_map(|&(_, a)| a.map(Reg::A))
         .collect();
-    let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
+    let mut holds =
+        held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
+    // A parked local's data register stays the local's until its last
+    // dereference, though only the address register is read there: the
+    // image leaves D0 alone over that range (TTY_$K_SET_INPUT_FLAG
+    // 0xE6768E..0xE676A2 builds its set in D1 and D2, saving D2, with D0
+    // free; TTY_$K_SET_DELAY 0xE67A42 `move.w (A2),D1`; the DIR_
+    // module-local 0xE52394 at 0xE5243E `move.w (22,A0),D1`).
+    for p in &s.parked {
+        if let (Some((d, _)), Some((a, at))) = (p.d, p.home) {
+            for (i, insn) in s.out.iter().enumerate().skip(at + 1) {
+                if crate::regs::access(insn).uses.contains(&Reg::A(a)) {
+                    holds.push((i, Reg::D(d)));
+                }
+            }
+        }
+    }
     let (mut apart, late) = fresh_slot_loads(&s.out, &s.fresh);
     apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
@@ -432,23 +478,68 @@ fn select_body_with(
             ));
         }
     }
+    let mut to_park = Vec::new();
     for &(o, k, span) in &s.ptr_defs {
         // A pointer local assigned from calls that no call follows: the
         // image keeps such locals in D0 (`move.l A0,D0` after the call,
-        // `movea.l D0,A0` where it is dereferenced: 28 sites, TTY_$K_*
+        // `movea.l D0,A0` where it is dereferenced: 17 sites, TTY_$K_*
         // and SIO_$K_* after TTY_$I_GET_DESC / SIO_$I_GET_DESC, e.g.
-        // TTY_$K_INQ_FUNC_ENABLED 0xE6763C / 0xE67642) or in A1
-        // (0xE4D7FC, 0xE528CE); which, is not known (bead
-        // domain-pascal-500).  Only one in a callee-saved register (live
-        // across a call, or held through one) is kept.
+        // TTY_$K_INQ_FUNC_ENABLED 0xE6763C / 0xE67642), in A1 where D0
+        // is busy (0xE4D7FC, 0xE528CE) or in A0 (TTY_$I_INQ_RAW 0xE67414;
+        // beads domain-pascal-500, -dgb).  One assigned once and only
+        // dereferenced is selected again in D0 ([`Park`]); others are
+        // refused.  Only one in a callee-saved register (live across a
+        // call, or held through one) is kept.
         if let Insn::Movea { dst, .. } = s.out[k] {
             if call_ptrs.contains(&o) && dst < 2 {
-                return Err(unsupported(
-                    span,
-                    "a pointer local assigned from a call that no call follows (D0, A1 or a \
-                     callee-saved register in the image; not settled) is",
-                ));
+                if !parkable_pointer_local(f, o) {
+                    return Err(unsupported(
+                        span,
+                        "a pointer local assigned from a call that no call follows, assigned \
+                         more than once, inside a statement, or read other than dereferenced \
+                         (D0, A1 or A0 in the image; not settled) is",
+                    ));
+                }
+                if !to_park.contains(&o) {
+                    to_park.push(o);
+                }
             }
+        }
+    }
+    if !to_park.is_empty() {
+        return Ok(Selected::Park(to_park));
+    }
+    for p in &s.parked {
+        // The image's D0 sites all have D0 and A0; where D0 is busy it
+        // has A1 instead (0xE4D7FC: D0 and D1 hold other values over the
+        // local's range), which is not modelled.
+        let (Some((_, d_at)), Some((_, a_at))) = (p.d, p.home) else {
+            return Err(unsupported(
+                f.span,
+                "a pointer local assigned from a call and never dereferenced is",
+            ));
+        };
+        let in_d0 = matches!(
+            &s.out[d_at],
+            Insn::Move {
+                dst: Ea::Reg(Reg::D(0)),
+                ..
+            }
+        );
+        let in_a0 = matches!(
+            &s.out[a_at],
+            Insn::Movea {
+                src: Ea::Reg(Reg::D(0)),
+                dst: 0,
+                ..
+            }
+        );
+        if !(in_d0 && in_a0) {
+            return Err(unsupported(
+                f.span,
+                "a pointer local assigned from a call that no call follows, where D0 or A0 is \
+                 busy (A1 in the image, 0xE4D7FC; not settled) is",
+            ));
         }
     }
     if let Some(Insn::Movea {
@@ -514,9 +605,48 @@ fn select_body_with(
         .filter(|(_, k)| *k)
         .map(|(i, _)| i)
         .collect();
+    // A parked local's `movea.l D0,An` selected before an `if` whose two
+    // parts dereference it moves down to the condition's branch (bead
+    // domain-pascal-dgb; TTY_$K_SET_INPUT_FLAG 0xE67684..0xE6768C
+    // `movea.l (0x10,A6),A1; movea.l D0,A0; tst.b (A1); bpl.b`, and
+    // TTY_$K_SET_OUTPUT_FLAG, TTY_$K_SET_ECHO_FLAG; TTY_$K_ENABLE_FUNC
+    // 0xE675DC with A2).  It is selected first so that the allocator
+    // keeps the condition's registers off An (A1 above), and then sits
+    // just before the branch, where the scheduler lists it after the
+    // condition's first load (12.4 R11).  Only the condition's own
+    // instructions lie between, and none of them may touch D0 or An.
+    for &(m, b, span) in &s.hoists {
+        let (m, b) = (new_index[m], new_index[b]);
+        let Insn::Movea {
+            src: Ea::Reg(src),
+            dst,
+            ..
+        } = out[m].clone()
+        else {
+            unreachable!("a hoist is a movea.l")
+        };
+        let touched = out[m + 1..b].iter().any(|i| {
+            let a = crate::regs::access(i);
+            matches!(
+                i,
+                Insn::Label(_) | Insn::Branch { .. } | Insn::Jsr(_) | Insn::Bsr { .. }
+            ) || a.defs.contains(&src)
+                || a.defs.contains(&Reg::A(dst))
+                || a.uses.contains(&Reg::A(dst))
+        });
+        let split = units.iter().any(|&(u0, u1)| u0 < b && m < u1);
+        if touched || split || !matches!(out[b], Insn::Branch { .. }) {
+            return Err(unsupported(
+                span,
+                "an `if` whose condition uses the register of a pointer local held in D0 is",
+            ));
+        }
+        let mv = out.remove(m);
+        out.insert(b - 1, mv);
+    }
     // Phase 1c: the order inside basic blocks (`sched.rs`).
     crate::sched::schedule(&mut out, &units, sched);
-    Ok((
+    Ok(Selected::Body(
         Body {
             insns: out,
             saves: saves.union(s.clobbered),
@@ -1933,10 +2063,12 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
 /// writes the register (`movea.l A0,An`), the allocator gives it a
 /// callee-saved register when it lives across a call (12.4 R3), and a
 /// call whose arguments use it last holds it through the call
-/// ([`held_through_calls`]).  One that no call follows is refused after
-/// allocation (D0 or A1 in the image, [`select_body_with`]).  Pointer
-/// locals assigned otherwise (`nil`, a memory load) stay in the frame as
-/// before (not surveyed).
+/// ([`held_through_calls`]).  One that no call follows is found by
+/// allocation (A0 or A1) and selected again held in D0 ([`Park`],
+/// [`select_body_with`]) when [`parkable_pointer_local`], else refused.
+/// Pointer locals assigned otherwise (`nil`, a memory load) stay in the
+/// frame as before (codegen-patterns 12.5: often in a register in the
+/// image, AST_$ADD_AOTES 0xE010C0; not settled).
 fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
     #[derive(Default)]
     struct St {
@@ -2063,6 +2195,45 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
         })
         .map(|l| l.offset)
         .collect()
+}
+
+/// Whether the pointer local at `off`, one of [`call_pointer_locals`], may be
+/// held in D0 when no call follows its assignment ([`Park`]; bead
+/// domain-pascal-dgb): assigned exactly once, by a statement of the
+/// routine's own statement part, and otherwise only dereferenced (the
+/// sites: TTY_$K_* and SIO_$K_*, `tty := tty_$i_get_desc(line, status)`
+/// and then `tty^...`; no site reads such a local whole, but RIP_$UPDATE_INT
+/// 0xE159B6, whose `move.l A0,D0; bne.s` is a `nil` test, not supported).
+fn parkable_pointer_local(f: &Function, off: i32) -> bool {
+    let top = f
+        .body
+        .iter()
+        .filter(|s| matches!(&s.kind, StmtKind::Store { addr: Addr::Frame(o), .. } if *o == off))
+        .count();
+    let (mut addrs, mut loads, mut derefs) = (0, 0, 0);
+    walk(&f.body, &mut |n| match n {
+        Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+        Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) if *o == off => loads += 1,
+        Node::Addr(Addr::Indirect { base, .. }) if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. } if *o == off) => {
+            derefs += 1
+        }
+        _ => {}
+    });
+    top == 1 && addrs == loads + 1 && loads == derefs
+}
+
+/// Whether `st` refers to the frame object at `off` (a 4-byte local).
+fn refers_to(st: &Stmt, off: i32) -> bool {
+    let mut found = false;
+    walk(std::slice::from_ref(st), &mut |n| {
+        if let Node::Addr(Addr::Frame(o)) = n {
+            found |= *o < off + 4 && off < *o + 4;
+        }
+    });
+    found
 }
 
 /// Whether `stmts` ends in an unconditional jump (`return`, `exit`,
@@ -2685,6 +2856,15 @@ pub struct Selector {
     /// The assignments to those locals: frame offset, index in `out` of
     /// the `movea.l` and its statement's span.
     ptr_defs: Vec<(i32, usize, Span)>,
+    /// Pointer locals assigned from a call that no call follows, held in
+    /// D0 and moved to an address register where dereferenced ([`Park`]).
+    parked: Vec<Park>,
+    /// The index in `out` of a parked local's `movea.l D0,An` that moves
+    /// down to the branch of the `if` being selected ([`Self::park_home`]).
+    hoist: Option<usize>,
+    /// Those moves: the index of the `movea.l`, of the branch, and the
+    /// statement's span.
+    hoists: Vec<(usize, usize, Span)>,
     /// The register holding the static link of a nested routine, loaded
     /// at entry when the body needs it ([`Selector::load_link`]).
     link: Option<u8>,
@@ -2725,6 +2905,40 @@ pub struct Selector {
     /// The statements' memory writes: the range of `out` they emitted,
     /// the object written and its size in bytes ([`Self::cse_valid`]).
     writes: Vec<(usize, usize, Addr, u32)>,
+}
+
+/// A pointer local held in D0 from its assignment to the statement that
+/// first dereferences it, then in an address register (bead
+/// domain-pascal-dgb; codegen-patterns 3, "Pointer locals").
+///
+/// `tools/resultsurvey.py ptrhold` (the first read of A0 after a call of
+/// an A0 function, on its fall-through path): of the 34 `move.l A0,D0`
+/// copies, 17 are moved to A0 by the first statement that dereferences
+/// the value (`movea.l D0,A0`), which later dereferences share: 15
+/// TTY_$K_* routines after TTY_$I_GET_DESC (TTY_$K_INQ_FUNC_ENABLED
+/// 0xE6763C / 0xE67642), RIP_$UPDATE_INT 0xE159B6, the DIR_ module-local
+/// 0xE52394 at 0xE52418.  3 locals that no call follows are copied to A1
+/// where D0 and D1 are busy over their range (0xE4D7FC, 0xE528CE,
+/// 0xE09C5E): refused.  3 stay in A0 (TTY_$I_INQ_RAW 0xE67414,
+/// TTY_$K_INQ_FLAGS 0xE674BA, KBD_$INQ_KBD_TYPE 0xE72584, the last with
+/// D0 busy): TTY_$I_INQ_RAW has the code around it of the D0 sites
+/// instruction for instruction (it is `val_param` with `link #-4`, which
+/// alone decides nothing: the DIR_ module-local takes its arguments by
+/// value), so what decides is not seen (**Uncertain**; dpc gives it D0,
+/// the form of the 15 TTY_$K_* sites).  TTY_$K_INQ_FLAGS first
+/// dereferences the local in an `if`'s condition after a statement that
+/// does not, which [`Selector::park_home`] refuses.  14 more D0 copies move
+/// to a callee-saved register where a call follows (TTY_$K_FLUSH_INPUT
+/// 0xE1C0AE), against 105 `movea.l A0,An` right after the call: not
+/// reproduced (such a local is [`call_pointer_locals`]'s).
+#[derive(Clone, Debug)]
+struct Park {
+    /// The local's frame offset.
+    off: i32,
+    /// The data register of `move.l A0,Dn` and its index in `out`.
+    d: Option<(u8, usize)>,
+    /// The address register of `movea.l Dn,An` and its index in `out`.
+    home: Option<(u8, usize)>,
 }
 
 /// Which computed values a selection holds for reuse (codegen-patterns
@@ -2816,6 +3030,9 @@ impl Selector {
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
             ptr_defs: Vec::new(),
+            parked: Vec::new(),
+            hoist: None,
+            hoists: Vec::new(),
             link: None,
             uplevel: Vec::new(),
             result_web: false,
@@ -2934,6 +3151,11 @@ impl Selector {
     /// or laid the code out otherwise; which, is not known.  [`select_body`]
     /// rejects them.
     fn jump(&mut self, cond: Cond, l: u32) {
+        if let Some(m) = self.hoist.take() {
+            // The branch of the `if` a parked local's move goes down to
+            // ([`Self::park_home`]).
+            self.hoists.push((m, self.out.len(), self.span));
+        }
         if cond == Cond::T {
             for i in self.out.iter().rev() {
                 match i {
@@ -2984,6 +3206,7 @@ impl Selector {
                 matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. }) && next.clean;
             self.called = false;
             self.unpopped = false;
+            self.park_home(f, body, st)?;
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => {
@@ -3084,6 +3307,84 @@ impl Selector {
                 }
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
+        }
+        Ok(())
+    }
+
+    /// Move a parked pointer local ([`Park`]) from its data register to an
+    /// address register before the first statement of `body` that refers
+    /// to it after its assignment: `movea.l D0,An`, and An holds it from
+    /// there on (later dereferences share it, as A0 at
+    /// 0xE6C24E..0xE6C284).
+    ///
+    /// - A statement of the routine's own statement part that is not
+    ///   control flow: the move is its first instruction
+    ///   (TTY_$K_INQ_INPUT_FLAGS 0xE676DA `movea.l D0,A0; movea.l
+    ///   (0xc,A6),A1; move.l (0x14,A0),(A1)`; TTY_$K_SET_SESSION_ID
+    ///   0xE679B0, the pointer the destination's base; TTY_$K_SET_DELAY
+    ///   0xE67A40, TTY_$K_INQ_PGROUP 0xE6796C, TTY_$K_INQ_FUNC_CHAR
+    ///   0xE6759E).
+    /// - An `if` of the routine's own statement part whose condition is
+    ///   one test that does not read the local and whose two parts both
+    ///   refer to it: the move goes before the condition's branch
+    ///   ([`select_body_with`]: TTY_$K_SET_INPUT_FLAG 0xE67688).
+    ///
+    /// Elsewhere (inside a statement, a loop or `case`, an `if` whose
+    /// condition reads it or that dereferences it in one part only) the
+    /// place is not seen: refused.
+    fn park_home(&mut self, f: &Function, body: &[Stmt], st: &Stmt) -> Res<()> {
+        for k in 0..self.parked.len() {
+            let p = &self.parked[k];
+            if p.d.is_none() || p.home.is_some() || !refers_to(st, p.off) {
+                continue;
+            }
+            let (off, (d, _)) = (p.off, p.d.unwrap());
+            let top = std::ptr::eq(body, f.body.as_slice());
+            let hoist = match &st.kind {
+                _ if !top => None,
+                StmtKind::If { cond, then_, else_ } => {
+                    let mut in_cond = false;
+                    walk_cond(cond, &mut |n| {
+                        if let Node::Addr(Addr::Frame(o)) = n {
+                            in_cond |= *o < off + 4 && off < *o + 4;
+                        }
+                    });
+                    let simple = matches!(cond, IrCond::Test(_) | IrCond::Compare { .. });
+                    let jump = matches!(
+                        then_.as_slice(),
+                        [Stmt {
+                            kind: StmtKind::Return | StmtKind::Exit | StmtKind::Next,
+                            ..
+                        }]
+                    );
+                    let both = then_.iter().any(|s| refers_to(s, off))
+                        && else_.iter().any(|s| refers_to(s, off));
+                    (simple && !in_cond && !jump && both).then_some(true)
+                }
+                k if is_simple(st) && !matches!(k, StmtKind::Return) => Some(false),
+                _ => None,
+            };
+            let Some(hoist) = hoist else {
+                return Err(unsupported(
+                    st.span,
+                    "the first dereference of a pointer local held in D0 inside a statement, a \
+                     loop or `case`, or an `if` other than one test with both parts \
+                     dereferencing it (where the original moves it to an address register is \
+                     not seen) is",
+                ));
+            };
+            let a = self.alloc_a()?;
+            let at = self.out.len();
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Reg(Reg::D(d)),
+                dst: a,
+            });
+            self.parked[k].home = Some((a, at));
+            self.pinned.push((off, Reg::A(a)));
+            if hoist {
+                self.hoist = Some(at);
+            }
         }
         Ok(())
     }
@@ -4041,10 +4342,40 @@ impl Selector {
     /// loaded: whether the original then relies on the flags of the load
     /// is not settled (RIP_$SEND_UPDATES 0xE6887E `move.b (8,A6),D0; bpl`
     /// and 0xE014DC `move.l (A3),D0; beq` do; 0xE0B640 `move.l (A1),D0;
-    /// tst.l D0; bmi` and 0xE0BEAE do not).  After a store to memory the
-    /// memory is tested again (0xE02806 `move.w D0,(0x412,A0); tst.w
-    /// (0x412,A0)`).
+    /// tst.l D0; bmi` and 0xE0BEAE do not).
+    ///
+    /// After a store of a data register into a local's frame slot, a test
+    /// of that slot by the next instruction is the store's own flags (bead
+    /// domain-pascal-dgb; `tools/resultsurvey.py storetest`, codegen-patterns
+    /// 7.1): of the 23 stores `move.<s> Dn,(-k,A6)` the next instruction
+    /// tests, 20 are followed by the conditional branch itself
+    /// (0xE19BE6 `move.l D0,(-4,A6); bne.s`, a call's result;
+    /// 0xE3BCB8 `move.w D4,(-92,A6); bne.s`; 0xE6B180 `seq D1; move.b
+    /// D1,(-60,A6); bmi.s`, a boolean), 1 by `tst` of the slot (0xE0B61C,
+    /// after `not.b`; not explained) and 2 by `tst` of the register at a
+    /// join (0xE554A8; a label between the store and the test is not this
+    /// case).  A `move` sets N and Z from the value moved, at its size, and
+    /// clears V and C, exactly as `tst` of that value would, so the branch
+    /// tests the same relation (codegen-patterns 7.1; the scheduler keeps
+    /// the store as the run's last flags setter, `sched.rs`).  After a
+    /// store to other memory the memory is tested again (0xE02806 `move.w
+    /// D0,(0x412,A0); tst.w (0x412,A0)`; for such stores the survey has 21
+    /// branches on the store's flags, 10 tests of the memory and 3 of the
+    /// register, by a rule not known).
     fn tst(&mut self, size: Size, ea: Ea) -> Res<()> {
+        if let (
+            Ea::Disp(k, FP),
+            Some(Insn::Move {
+                size: s,
+                src: Ea::Reg(Reg::D(_)),
+                dst: Ea::Disp(d, FP),
+            }),
+        ) = (&ea, self.out.last())
+        {
+            if d == k && *k < 0 && *s == size {
+                return Ok(());
+            }
+        }
         if let (
             Ea::Reg(r),
             Some(Insn::Move {
@@ -4752,6 +5083,21 @@ impl Selector {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
         if let Addr::Frame(o) = addr {
+            if let Some(k) = self.parked.iter().position(|p| p.off == *o) {
+                // A pointer local that no call follows: `move.l A0,D0`
+                // right after the call ([`Park`]; TTY_$K_INQ_FUNC_ENABLED
+                // 0xE6763C).
+                let c = a0_call(value).expect("a parked local is assigned a call's A0");
+                let a = self.call_a0(c)?;
+                let d = self.alloc_d()?;
+                self.parked[k].d = Some((d, self.out.len()));
+                self.out.push(Insn::Move {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(a)),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                return Ok(());
+            }
             if let Some(k) = self.ptr_locals.iter().position(|&(p, _)| p == *o) {
                 // A pointer local held in an address register for the whole
                 // body ([`loop_pointer_locals`]): every assignment writes

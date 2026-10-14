@@ -1203,8 +1203,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     0xE511B0);
   - the 48 `move.l A0,Dn` copies (34 into D0: the TTY_$K_* routines
     after TTY_$I_GET_DESC; 0xE1C3FE moves the D0 copy to A2 before the
-    next call, 0xE52418 `move.l A0,D0; movea.l D0,A0`) are not
-    explained and not reproduced beyond 12.5's register locals.
+    next call, 0xE52418 `move.l A0,D0; movea.l D0,A0`): those into D0
+    of a local that no call follows are "Pointer locals held in D0"
+    below; the rest are not reproduced beyond 12.5's register locals.
   `dpc` (`isel.rs`, `call_pointer_locals`) holds a pointer local in one
   virtual address register for the whole body when every assignment to
   it is a pointer function's value, the first reference is an
@@ -1215,14 +1216,94 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   allocator gives An, A2 and up when the local lives across a call
   (R3); a call whose arguments use it last holds it through that call
   in a body with branches too (12.4 R4(c): the 13 such copies are all
-  callee-saved).  A local that no call follows is refused: the image
-  has it in D0 (28 sites, `move.l A0,D0` after the call and `movea.l
-  D0,A0` where it is dereferenced: TTY_$K_* and SIO_$K_* after
-  TTY_$I_GET_DESC / SIO_$I_GET_DESC, e.g. TTY_$K_INQ_FUNC_ENABLED
-  0xE6763C / 0xE67642) or in A1 (0xE4D7FC `movea.l A0,A1; tst.w
-  (10,A1)`, 0xE528CE), by a rule not known.  Conformance `tests/conformance/cal_shutdown.pas`
+  callee-saved).  A local that no call follows: see "Pointer locals
+  held in D0" below.  Conformance `tests/conformance/cal_shutdown.pas`
   (CAL_$SHUTDOWN 0xE3E714 `movea.l A0,A3`, `pea (A3)` at 0xE3E730);
   golden `results/pointer_locals`.
+  **Pointer locals held in D0 (Verified at the sites; the choice
+  against A0 Uncertain; implemented; bead domain-pascal-dgb).**
+  `tools/resultsurvey.py ptrhold` follows every call of an A0 function
+  along its fall-through path to the first instruction that reads A0
+  (not only the next one, as `callers` does): `movea.l A0,An` next 105
+  and later 3, `move.l A0,D0` next 34, `move.l A0,Dn` (D1..D6) 14,
+  `movea.l A0,A1` 3, A0 read in place next 78 and later 28.  Of the 34
+  D0 copies, D0 is next read by `movea.l D0,A0` 17 times (15 TTY_$K_*
+  routines after TTY_$I_GET_DESC, e.g. TTY_$K_INQ_FUNC_ENABLED 0xE6763C
+  / 0xE67642; RIP_$UPDATE_INT 0xE159B6, after a `bne.s` on the copy's
+  flags, a `nil` test; the DIR_ module-local 0xE52394 at 0xE52418, right
+  after the copy), by `movea.l D0,An` with An callee-saved 14 times
+  (TTY_$K_FLUSH_INPUT 0xE1C0AE `movea.l D0,A2`, a call follows; the
+  SIO_$K_* routines), and otherwise 3 times (the result variable of
+  0xE6C21A; arithmetic, 0xE40186, 0xE51ACA).  So a pointer local that
+  no call follows (the TTY ones assigned once, `tty := tty_$i_get_desc
+  (line, status)`, and only dereferenced; ../source's TTY Pascal) is
+  copied to D0 right after the call and moved to A0 by the first
+  statement that dereferences it:
+  - as that statement's first instruction (TTY_$K_INQ_INPUT_FLAGS
+    0xE676DA `movea.l D0,A0; movea.l (0xc,A6),A1; move.l (0x14,A0),(A1)`;
+    TTY_$K_SET_SESSION_ID 0xE679B0, the destination's base;
+    TTY_$K_SET_DELAY 0xE67A40; TTY_$K_INQ_PGROUP 0xE6796C);
+  - in an `if` whose two parts dereference it, just before the
+    condition's branch, after the condition's slot load, which takes A1
+    (TTY_$K_SET_INPUT_FLAG 0xE67684..0xE6768C `movea.l (0x10,A6),A1;
+    movea.l D0,A0; tst.b (A1); bpl.b`; TTY_$K_SET_OUTPUT_FLAG,
+    TTY_$K_SET_ECHO_FLAG; TTY_$K_ENABLE_FUNC 0xE675DC..0xE675E2 the
+    same with A0 and A2);
+  - later dereferences share A0 (0xE6C24E..0xE6C284, across
+    statements), and D0 stays the local's up to the last of them,
+    though nothing reads it there (TTY_$K_SET_INPUT_FLAG builds its set
+    in D1 and D2, saving D2, with D0 free; TTY_$K_SET_DELAY 0xE67A42
+    `move.w (A2),D1`; 0xE5243E `move.w (22,A0),D1`).
+  The 3 A1 copies are locals whose range has D0 and D1 busy (0xE4D7FC
+  `movea.l A0,A1; tst.w (10,A1)`, D0 and D1 written at 0xE4D806 and
+  0xE4D812; 0xE528CE; 0xE09C5E).  Against the D0 sites, 3 locals stay in
+  A0 (TTY_$I_INQ_RAW 0xE67414 `move.b (1241,A0),(A1)` after `tst.l
+  (A2); bne.s`; TTY_$K_INQ_FLAGS 0xE674BA; KBD_$INQ_KBD_TYPE 0xE72584,
+  D0 busy there).  TTY_$I_INQ_RAW has the code around it of
+  TTY_$K_INQ_INPUT_FLAGS instruction for instruction (call, status
+  test, slot load into A1, one dereference); it differs only in being
+  `val_param` (the line pushed from (8,A6)) and in its frame, `link
+  #-4` against the K routines' `link #-8`, and neither decides alone
+  (the DIR_ module-local 0xE52394, a D0 site, takes its arguments by
+  value).  TTY_$K_INQ_FLAGS is not the same shape: a statement that
+  does not dereference the local comes first (`clr.w (A1)`, 0xE674B8)
+  and the first dereference is an `if`'s condition (`btst
+  #4,(9,A0)`, 0xE674BA), which dpc refuses.  ../source's Pascal for
+  both is the same as for the D0 routines, so what decides is not seen
+  (a `with` statement in the D0 routines would
+  explain the separate D0 variable and A0 base, and the 4 frame bytes
+  nothing addresses, `link #-8`, TTY_$K_FLUSH_INPUT's TODO in
+  ../source; but TTY_$K_SET_FLAG and TTY_$K_INQ_FLAGS have those bytes
+  too: Uncertain).  The 14 locals copied from D0 to a callee-saved
+  register where a call follows (TTY_$K_FLUSH_INPUT, TTY_$K_GET,
+  TTY_$K_RESET, SIO_$K_*) are against 105 `movea.l A0,An` right after
+  the call elsewhere (and TTY_$I_SET_RAW 0xE673CC, TTY_$K_SET_FLAG
+  0xE67446 in the same module): not reproduced (dpc's `movea.l A0,An`).
+  **Implemented** (`isel.rs`, `Park`, `Selector::park_home`,
+  `parkable_pointer_local`): a pointer local of `call_pointer_locals`
+  that allocation puts in A0 or A1 (live across no call), assigned
+  exactly once by a statement of the routine's own statement part and
+  otherwise only dereferenced, is selected again held in a data
+  register: `move.l A0,Dn` at the assignment, `movea.l Dn,An` before
+  the first statement that refers to it after it (first in a simple
+  statement; for an `if` whose condition is one test not reading it and
+  whose two parts both dereference it, moved down to the branch after
+  allocation), An the base of every later dereference, Dn held to the
+  last of them.  Dn must come out D0 and An A0, else refused (A1 in the
+  image where D0 is busy, not modelled).  Refused: a second assignment
+  or one inside a statement, a whole read (`nil` test: RIP_$UPDATE_INT
+  branches on the `move.l A0,D0` flags), the first dereference inside a
+  loop, `case` or nested statement, or in one part of an `if` only, or
+  in an `if`'s condition (so a TTY_$K_INQ_FLAGS-like routine is
+  refused).  A TTY_$I_INQ_RAW-like routine is compiled the D0 way, the
+  form of the 15 TTY_$K_* sites (known divergence, above).
+  Golden `results/pointer_parked`; conformance
+  `tests/conformance/tty_k_flags.pas` (TTY_$K_INQ_FUNC_ENABLED ..
+  TTY_$K_INQ_ECHO_FLAGS 0xE67618..0xE6781E) and `tty_k_session_id.pas`
+  (0xE67986..0xE67A02); driver tests
+  `parked_pointer_local_moves_to_a0_where_dereferenced`,
+  `parked_pointer_local_refusals`.
+
   A local kept in its frame slot (pushed by value, addressed, reached by
   a nested routine, or assigned something other than a call) is stored
   with `move.l A0,(-k,A6)`, and then:
@@ -2787,9 +2868,39 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **Flags of a load (Uncertain):** the `tst` is sometimes left out after
   a move into the tested register (RIP_$SEND_UPDATES 0xE6887E `move.b
   (8,A6),D0; bpl`; 0xE014DC `move.l (A3),D0; beq`) and sometimes not
-  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).  After a store
-  to memory the memory is tested again (0xE02806 `move.w D0,(0x412,A0);
-  tst.w (0x412,A0)`; 53 such pairs).
+  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).
+- **A test right after a store (Verified by survey for the frame;
+  implemented there; bead domain-pascal-dgb):** `tools/resultsurvey.py
+  storetest` takes every store of a register into memory (`move.<s>
+  Rn,<mem>`, not a push) whose next instruction tests the stored value.
+  Of a data register into a local's frame slot: the conditional branch
+  itself, on the store's flags, 20 times (0xE19BE6 `move.l D0,(-4,A6);
+  bne.s`, a call's result; 0xE3BCB8 `move.w D4,(-92,A6); bne.s`;
+  0xE6B180 `seq D1; move.b D1,(-60,A6); bmi.s`, a boolean; 0xE4F09C
+  `move.w D1,(-66,A6); bmi.s`); `tst` of the slot once (0xE0B61C, after
+  `not.b`; not explained); `tst` of the register twice, at a join the
+  other path reaches without the store (0xE554A8, 0xE55514).  Of a data
+  register into other memory: on the store's flags 21 times (0xE03DDC
+  `move.l D0,(4,A2); bne.s`; 0xE0AF58 `move.b D1,(A5); bpl.s`), `tst` of
+  the memory 10 times (0xE02806 `move.w D0,(0x412,A0); tst.w
+  (0x412,A0)`; 0xE19C7A `move.l D0,(88,A5); tst.l (88,A5)`), of the
+  register 3 times: no rule seen.  Of an address register: section 3,
+  "Pointer locals".  A `move` sets N and Z from the value moved, at its
+  size, and clears V and C, as `tst` of that value does, so the branch
+  tests the same relation whatever it is.  The survey's branches are
+  all `beq`/`bne`/`bmi`/`bpl`; no frame store is followed by a signed
+  or unsigned ordered branch (`bgt` .. `bcs`) or by a `tst` and one (an
+  ad-hoc count over the same routines, bead domain-pascal-dgb review),
+  so dpc's `move.w D0,(-2,A6); ble.s` for `x > 0` is the same rule
+  extended, not seen (Uncertain).  **Implemented** (`isel.rs`,
+  `Selector::tst`): a test of a local's slot that would directly follow
+  a store of a data register into that slot, at the same size, is left
+  out (the `if`'s branch reads the store's flags; `sched.rs` keeps the
+  store the last flags setter of its run, R10).  A label between them
+  (a join) keeps the `tst` of the slot (the image tests the register
+  there, not reproduced); other memory is tested again, as before.
+  Golden `tests/golden/control/store_flags`; driver test
+  `branch_on_the_store_flags_only_right_after_the_store`.
 - **`if c then T else E`:** a branch on the negated condition to `E`
   (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
   `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.
@@ -5500,6 +5611,17 @@ against the C in `../source`:
   assigned from pointer functions in an address register (section 3,
   "Pointer locals"; bead domain-pascal-500) and those of loops (below);
   any other pointer local that is dereferenced stays in the frame.
+  That is a known divergence (bead domain-pascal-dgb review): an ad-hoc
+  count over compiled code finds 186 `movea.l <memory>,An` (A2..A4, not
+  a parameter slot, not a call's A0) whose register is dereferenced
+  after a later call, against 26 longwords stored from memory into a
+  frame slot and reloaded later as a base (`movea.l (-k,A6),An`, then
+  `(An)`).  The first kind mixes locals with common subexpressions held
+  across calls, so it is no rule, but some are pointer locals: AST_$ADD_AOTES
+  0xE010C0 `movea.l (1012,A5),A2`, the C's `aote = AST_$AOTE_LIMIT`
+  (`ast/add_aotes.c`, "A2"), MMAP_$FREE's `page` and KBD_$PUT's
+  descriptor above.  Which pointer locals assigned from memory the
+  original keeps in a register is not settled (Uncertain).
 - Expression temporaries live across a call are spilled to the frame
   (SMD_$BLT_U 0xE6FB1E; module-local 0xE5AA28 at 0xE5AA6C, across an
   M$ARITH call); not this rule's business.

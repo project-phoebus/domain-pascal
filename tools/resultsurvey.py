@@ -44,6 +44,9 @@ usage:
     tools/resultsurvey.py ptrlocals [-v]  # those copied to An or stored to
                                           # a frame slot: later pushed by
                                           # value? what follows the copy?
+    tools/resultsurvey.py ptrhold [-v]    # every A0-function call: the first
+                                          # read of A0 on its fall-through
+                                          # path (D0 parking, A1, kept)
     tools/resultsurvey.py storetest       # a register stored to memory,
                                           # then the value tested: on the
                                           # store's flags, the register or
@@ -459,6 +462,73 @@ def ptrlocals(rs, by_start, verbose):
         print('%-12s %-22s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
 
 
+def ptrhold(rs, by_start, verbose):
+    """Bead domain-pascal-dgb (codegen-patterns 3, "Pointer locals"): every
+    call of an A0 function, followed along its fall-through path (past
+    conditional branches, up to an unconditional branch, a call, the
+    end, or a write of A0) to the first instruction that reads A0 (not
+    only the next one, as `callers' does).  Classed by that read: `D0'
+    (`move.l A0,D0'), `Dn', `A1' (`movea.l A0,A1'), `An' (callee-saved),
+    `kept' (A0 read in place: a base, a store, a test), each with
+    `next' when it is the first instruction after the call (and its pop)
+    or `later'.  For `D0', how D0 is next read on the same path:
+    `movea.l D0,An' (`->An') or otherwise, and whether a call comes first."""
+    a0 = a0_functions(rs, by_start)
+    c, ex = Counter(), {}
+    for r in rs:
+        ins = r.insns
+        for i, (a, n, t) in enumerate(ins):
+            m = nestsurvey._BSR.match(t) or nestsurvey._JSR.match(t)
+            if not m or int(m.group(1), 16) not in a0:
+                continue
+            j = i + 1
+            if j < len(ins) and _POP.match(ins[j][2]):
+                j += 1
+            first = j
+            while j < len(ins):
+                tj = ins[j][2]
+                if nestsurvey.reads(tj, '%a0') or _CALL.match(tj) or tj.startswith(
+                        ('rts', 'unlk', 'bra', 'jmp')) or nestsurvey.writes(tj, '%a0'):
+                    break
+                j += 1
+            if j >= len(ins) or not nestsurvey.reads(ins[j][2], '%a0'):
+                continue
+            tj = ins[j][2]
+            mn, ops = operands(tj)
+            if mn == 'movel' and ops == ['%a0', '%d0']:
+                k = 'D0'
+            elif mn == 'movel' and ops[0] == '%a0' and re.fullmatch(r'%d[1-7]', ops[1]):
+                k = 'Dn'
+            elif mn == 'moveal' and ops == ['%a0', '%a1']:
+                k = 'A1'
+            elif mn == 'moveal' and ops[0] == '%a0' and re.fullmatch(r'%a[2-5]', ops[1]):
+                k = 'An'
+            else:
+                k = 'kept'
+            how = 'next' if j == first else 'later'
+            tail = ''
+            if k == 'D0':
+                called = False
+                for ak, nk, tk in ins[j + 1:]:
+                    if _CALL.match(tk):
+                        called = True
+                    if nestsurvey.reads(tk, '%d0'):
+                        mk, ok = operands(tk)
+                        tail = ('->' + ok[1][1:].upper() if mk == 'moveal' and ok[0] == '%d0'
+                                else 'other') + (' after call' if called else '')
+                        break
+                    if nestsurvey.writes(tk, '%d0') or tk.startswith(('rts', 'unlk')):
+                        tail = 'unread'
+                        break
+            key = (k, how, tail)
+            c[key] += 1
+            ex.setdefault(key, []).append('0x%06X' % ins[j][0])
+            if verbose:
+                print('%-30s 0x%06X %-5s %-6s %-14s %s' % (name(r), ins[j][0], k, how, tail, tj))
+    for key, v in sorted(c.items()):
+        print('%-5s %-6s %-16s %3d  %s' % (key + (v, ' '.join(ex[key][:6]))))
+
+
 def storetest(rs):
     """A register stored to memory (`move.<s> Rn,<mem>', not a push),
     then a test of the value by the next instruction: a conditional
@@ -511,6 +581,8 @@ def main(argv):
         callers(rs, by_start, '-v' in argv[1:])
     elif cmd == 'ptrlocals':
         ptrlocals(rs, by_start, '-v' in argv[1:])
+    elif cmd == 'ptrhold':
+        ptrhold(rs, by_start, '-v' in argv[1:])
     elif cmd == 'storetest':
         storetest(rs)
     else:

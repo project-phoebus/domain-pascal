@@ -91,7 +91,14 @@ pointer result variable held in A2 across ML_$UNLOCK, `movea.l A0,A2`
 (codegen-patterns 3, 12.5; bead domain-pascal-500): `cal_shutdown.pas`
 (CAL_$SHUTDOWN 0xE3E6E4: `movea.l A0,A3`, fields through A3, `pea
 (A3)` as DBUF_$SET_BUFF's last argument, held through it with the
-status address in A2 in a body with a branch).
+status address in A2 in a body with a branch).  Pointer locals held in
+D0 where no call follows (codegen-patterns 3; bead domain-pascal-dgb),
+reconstructed from ../source's TTY Pascal: `tty_k_flags.pas`
+(TTY_$K_INQ_FUNC_ENABLED .. TTY_$K_INQ_ECHO_FLAGS, 0xE67618..0xE6781E:
+`move.l A0,D0` after TTY_$I_GET_DESC, `movea.l D0,A0` where first
+dereferenced, before an `if`'s branch when both parts dereference it)
+and `tty_k_session_id.pas` (TTY_$K_SET_SESSION_ID,
+TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).
 Each `.pas` starts with a comment
 naming the routines, their addresses and the codegen-patterns sections
 they exercise.
