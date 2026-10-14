@@ -587,6 +587,13 @@ fn signedness_from_source_types() {
         ("boolean", Scalar::BOOLEAN),
         ("char", Scalar::unsigned(Width::Byte)),
         ("color", Scalar::unsigned(Width::Word)),
+        // A size attribute (ref 3.15.5 p. 3-62): one-byte integers,
+        // unsigned when non-negative ("[byte] 0..255 corresponds to the
+        // unsigned char data type in Domain/C").
+        ("[byte] 0..255", Scalar::unsigned(Width::Byte)),
+        ("[byte] 0..15", Scalar::unsigned(Width::Byte)),
+        ("[byte] -128..127", Scalar::signed(Width::Byte)),
+        ("[word] 0..255", Scalar::signed(Width::Word)),
         // Pointers: `signedness_through_designators` (pointer results are
         // not lowered yet).
     ];
@@ -4386,4 +4393,112 @@ fn with_statements() {
     let a = f("with p^ : x do with x do b := 2;");
     assert_eq!(a.with_temps.len(), 1);
     assert_eq!(a.body.len(), 2);
+}
+
+/// One-byte integers (`[byte]` subranges, ref 3.15.5): widened to a word
+/// by their own sign where they meet an integer operation or comparison
+/// (ref 4.3.1, p. 4-5); TPAD_$DATA 0xE691D8 `clr.w D0; move.b (10,A1),D0;
+/// cmpi.w #0xdf,D0`, 0xE69228..0xE6922E `move.b (12,A1),D1; ext.w D1`.
+#[test]
+fn byte_integers_widen_to_words() {
+    let m = lower_src(
+        "module m;
+type ub = [byte] 0..255; sb = [byte] -128..127;
+  pkt = record dev: ub; flags: ub; b0: ub; b1: ub end;
+var x: integer; y: integer32; u: ub;
+procedure p(in out k: pkt);
+begin
+  if k.dev = 16#DF then
+    x := sb(k.b0) * x;
+  x := lshft(k.b1, 6) + k.b0;
+  u := k.flags;
+  k.b1 := 200;
+  if lshft(k.b1, 8) > 5 then x := 1;
+end;
+",
+    )
+    .unwrap();
+    let body = &m.functions[0].body;
+    let byte = |sign| Scalar {
+        width: Width::Byte,
+        sign,
+        pointer: false,
+    };
+    let StmtKind::If {
+        cond, then_: then, ..
+    } = &body[0].kind
+    else {
+        panic!("{:?}", body[0].kind)
+    };
+    let Cond::Compare { lhs, rhs, .. } = cond else {
+        panic!("{cond:?}")
+    };
+    assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
+    let Expr::Convert { value, .. } = lhs else {
+        panic!("{lhs:?}")
+    };
+    assert_eq!(value.ty(), byte(Sign::Unsigned));
+    assert_eq!(
+        *rhs,
+        Expr::Const {
+            value: 0xdf,
+            ty: Scalar::signed(Width::Word)
+        }
+    );
+    // sb(k.b0): the byte retyped (a type transfer changes no bits,
+    // p. 4-197), then sign-extended for the word product.
+    let StmtKind::Store { value, .. } = &then[0].kind else {
+        panic!("{:?}", then[0].kind)
+    };
+    let Expr::Binary { lhs, .. } = value else {
+        panic!("{value:?}")
+    };
+    let Expr::Convert { value: b0, ty } = &**lhs else {
+        panic!("{lhs:?}")
+    };
+    assert_eq!(*ty, Scalar::signed(Width::Word));
+    assert_eq!(b0.ty(), byte(Sign::Signed));
+    // lshft(k.b1, 6): the byte zero-extended and shifted as a word.
+    let StmtKind::Store { value, .. } = &body[1].kind else {
+        panic!()
+    };
+    let Expr::Binary { lhs, .. } = value else {
+        panic!("{value:?}")
+    };
+    // (Read back as the `integer` the reference gives, pp. 4-109, 4-171,
+    // a same-width `Convert`: `lshft(200, 8) > 5` is a signed comparison.)
+    assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
+    let lhs = match &**lhs {
+        Expr::Convert { value, .. } if value.ty().width == Width::Word => value,
+        _ => lhs,
+    };
+    let Expr::Binary {
+        op: BinOp::Shl,
+        lhs: shifted,
+        ..
+    } = &**lhs
+    else {
+        panic!("{lhs:?}")
+    };
+    assert_eq!(shifted.ty().width, Width::Word);
+    assert!(
+        matches!(&**shifted, Expr::Convert { value, .. } if value.ty() == byte(Sign::Unsigned))
+    );
+    // Byte to byte, and a constant into a byte: byte stores.
+    for s in &body[2..4] {
+        let StmtKind::Store { value, .. } = &s.kind else {
+            panic!()
+        };
+        assert_eq!(value.ty(), byte(Sign::Unsigned));
+    }
+    // lshft(k.b1, 8) > 5: the shift read as an `integer` (pp. 4-109,
+    // 4-171, "returns an integer value"), a signed comparison: 200 shifted
+    // is 16#C800, negative.
+    let StmtKind::If { cond, .. } = &body[4].kind else {
+        panic!("{:?}", body[4].kind)
+    };
+    let Cond::Compare { lhs, .. } = cond else {
+        panic!("{cond:?}")
+    };
+    assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
 }

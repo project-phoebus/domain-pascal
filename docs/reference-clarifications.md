@@ -560,6 +560,23 @@ records the files it stops.
     constant is used?  *Current: rshft of a negative constant is not
     folded, so it is refused in a const declaration (bead
     domain-pascal-95c).*
+40. **3.15.5, pp. 3-60..3-62 (PDF pp. 115-117, checked); Table 3-2,
+    p. 3-24.**  "byte_integer = [byte] 0..255; byte_int_array =
+    array[1..1000] of byte_integer;" and "[byte] 0..255 corresponds to
+    the unsigned char data type in Domain/C".  Table 3-2 gives the
+    guaranteed default (field) and natural alignment of the simple types
+    only ("char byte byte", "boolean byte byte", "integer16 word word");
+    p. 9-41, message 305: "A value is naturally aligned if it begins at
+    an address that is a multiple of its size in bytes."  What is the
+    alignment of a `[byte]` integer subrange, freestanding and as a field
+    of an unpacked record: byte, like `char`, or word, like the
+    `integer16` host?  And is `array[1..3] of [byte] 0..255` 3 bytes
+    (3.11.4.1 pp. 3-45..3-46: elements times their size, padding only for
+    booleans)?  *Current (bead domain-pascal-5z7): byte aligned
+    everywhere, 3 bytes; `../source`'s `tpad_$data_packet_t`
+    (tpad/tpad.ins.pas) puts six such fields at 0xA..0xF, read with
+    `move.b` in TPAD_$DATA (0xE691DC, 0xE691F0, 0xE69228), which fits
+    either if they were `char`s, so the image does not settle it.*
 
 ## Reference errata noticed (no ruling needed)
 

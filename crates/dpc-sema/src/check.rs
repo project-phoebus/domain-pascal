@@ -72,6 +72,16 @@ pub(crate) struct Attrs {
     /// `aligned(n)`: 2**n bytes.
     aligned: Option<u32>,
     natural: bool,
+    /// A size attribute: bits (ref 3.15.5).
+    size: Option<SizeAttr>,
+}
+
+/// A size attribute, `[name [(n)]]` (ref 3.15.5, p. 3-60): n units of
+/// `bit`, `byte`, `word`, `long` or `quad`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SizeAttr {
+    bits: u32,
+    span: Span,
 }
 
 /// How a record's fields are laid out.
@@ -953,9 +963,59 @@ impl<'t> Checker<'t> {
                 out.aligned = None;
             }
             "address" => self.unsupported(a.span, "the `address` attribute (ref 3.15.4)"),
-            "bit" | "byte" | "word" | "long" | "quad" => {
-                let what = format!("the `{name}` size attribute (ref 3.15.5)");
-                self.unsupported(a.span, &what);
+            // ref 3.15.5 p. 3-60: "[attribute-name [(n)]] typename ... If
+            // (n) is missing, then the compiler uses a default value of 1";
+            // bit 1 bit, byte 8, word 16, long 32, quad 64.
+            "bit" | "quad" => {
+                let what = match name {
+                    "bit" => "the `bit` size attribute (bit arrays, ref 3.15.5 p. 3-62)",
+                    _ => "the `quad` size attribute (ref 3.15.5)",
+                };
+                self.unsupported(a.span, what);
+            }
+            "byte" | "word" | "long" => {
+                let unit: i64 = match name {
+                    "byte" => 8,
+                    "word" => 16,
+                    _ => 32,
+                };
+                let n = match &a.args {
+                    None => Some(1),
+                    Some(args) if args.len() == 1 => self.const_int(&args[0]),
+                    Some(_) => {
+                        self.error(
+                            a.span,
+                            format!("`{name}` takes one argument (ref 3.15.5, p. 3-60)"),
+                        );
+                        None
+                    }
+                };
+                let Some(n) = n else { return };
+                let bits = n
+                    .checked_mul(unit)
+                    .filter(|b| (1..=i64::from(u32::MAX)).contains(b));
+                let Some(bits) = bits.filter(|_| n >= 1) else {
+                    self.error(
+                        a.span,
+                        format!("Size of {} bits is invalid for specified type (ref 3.15.5, p. 3-60; message 300, p. 9-40)", n.saturating_mul(unit)),
+                    );
+                    return;
+                };
+                let bits = bits as u32;
+                // ref p. 9-40, message 298: "Argument to token attribute
+                // conflicts with value already specified for this type"
+                // (`int = [word, long] -32768..32767`).
+                if out.size.is_some_and(|s| s.bits != bits) {
+                    self.error(
+                        a.span,
+                        format!(
+                            "Argument to `{name}` attribute conflicts with value already \
+                             specified for this type (ref 3.15.5; message 298, p. 9-40)"
+                        ),
+                    );
+                    return;
+                }
+                out.size = Some(SizeAttr { bits, span: a.span });
             }
             _ => match self.lookup(name) {
                 Some(Sym::Attributes(x)) => {
@@ -968,6 +1028,23 @@ impl<'t> Checker<'t> {
                     if x.aligned.is_some() || x.natural {
                         out.aligned = x.aligned;
                         out.natural = x.natural;
+                    }
+                    if let Some(sz) = x.size {
+                        if out.size.is_some_and(|s| s.bits != sz.bits) {
+                            self.error(
+                                a.span,
+                                format!(
+                                    "Argument to `{name}` attribute conflicts with value \
+                                     already specified for this type (ref 3.15.5; message 298, \
+                                     p. 9-40)"
+                                ),
+                            );
+                        } else {
+                            out.size = Some(SizeAttr {
+                                bits: sz.bits,
+                                span: a.span,
+                            });
+                        }
                     }
                 }
                 _ => self.error(
@@ -1002,6 +1079,14 @@ impl<'t> Checker<'t> {
         if self.types.is_error(base) {
             return base;
         }
+        let mut base = base;
+        if let Some(sz) = a.size {
+            match self.sized(base, sz) {
+                Some(t) => base = t,
+                None => return self.types.builtins.error,
+            }
+        }
+        let a = Attrs { size: None, ..a };
         if a == Attrs::default() {
             return base;
         }
@@ -1049,8 +1134,112 @@ impl<'t> Checker<'t> {
                 atomic: a.atomic,
                 device: a.device,
                 align,
+                size_bits: None,
             },
         )
+    }
+
+    /// `base` with size attribute `sz` (ref 3.15.5, pp. 3-60..3-62), or
+    /// `None` after a diagnostic.  The rules (p. 3-61): "Every data type
+    /// has a minimum size.  A size attribute must specify at least the
+    /// number of bits required for the type to which it is applied.  A
+    /// size attribute can specify a number of bits greater than the
+    /// minimum for integer, boolean, and set data types."  The minimum is
+    /// Table 3-7 (p. 3-61): integer16 16 bits, integer32 32, single/real
+    /// 32, double 64, boolean 8, char 8, enumerated 16, a subrange the
+    /// "Number of bits needed to store subrange".  Fewer bits, or more for
+    /// another type, is message 300 (p. 9-40): "Size of token1 bits is
+    /// invalid for specified type" (`bad : [byte] number`, number =
+    /// integer32).
+    ///
+    /// Implemented: a size equal to the type's own storage (no change, as
+    /// `[long] integer32`), and `[byte]` on an integer subrange that needs
+    /// at most 8 bits (`[byte] 0..255`, `[byte] -128..127`: one byte,
+    /// [`crate::types::TypeTable::sized`]; p. 3-62: "[byte] 0..255
+    /// corresponds to the unsigned char data type in Domain/C").  Not
+    /// supported yet: a size larger than the type's storage (`[long]
+    /// integer16`, `[long] boolean`, p. 3-60 and 7.5.1 p. 7-15, whose
+    /// values the compiler then represents "using all of the bits"), a
+    /// size attribute on a type without a Table 3-7 minimum (sets,
+    /// pointers, structured types), on a subrange of an enumeration,
+    /// boolean or char (an enumeration's minimum is 16 bits, a subrange's
+    /// its bits: which applies is not stated), and a second, different
+    /// size on a type that has one (p. 9-40, message 299: a warning, the
+    /// size that results not stated).
+    fn sized(&mut self, base: TypeId, sz: SizeAttr) -> Option<TypeId> {
+        let span = sz.span;
+        let bits = sz.bits;
+        let info = self.types.get(base);
+        if let Some(old) = info.attrs.size_bits {
+            if old == bits {
+                return Some(base);
+            }
+            self.unsupported(
+                span,
+                "a size attribute on a type that has another (message 299, p. 9-40: a warning; \
+                 the size that results is not stated)",
+            );
+            return None;
+        }
+        let default = info.size;
+        let (min, may_grow) = match self.types.kind(base).clone() {
+            TypeKind::Integer16 => (16, true),
+            TypeKind::Integer32 => (32, true),
+            TypeKind::Real { size } => (8 * size, false),
+            TypeKind::Boolean => (8, true),
+            TypeKind::Char => (8, false),
+            TypeKind::Enum { .. } => (16, false),
+            TypeKind::Subrange { base: host, lo, hi }
+                if matches!(
+                    self.types.kind(host),
+                    TypeKind::Integer16 | TypeKind::Integer32
+                ) =>
+            {
+                (crate::types::TypeTable::subrange_bits(lo, hi), true)
+            }
+            TypeKind::Subrange { .. } => {
+                self.unsupported(
+                    span,
+                    "a size attribute on a subrange of char, boolean or an enumeration (ref \
+                     3.15.5 Table 3-7: its minimum is not settled)",
+                );
+                return None;
+            }
+            _ => {
+                self.unsupported(
+                    span,
+                    "a size attribute on a type that Table 3-7 (ref 3.15.5, p. 3-61) gives no \
+                     minimum size",
+                );
+                return None;
+            }
+        };
+        if bits < min || (bits > min && !may_grow) {
+            self.error(
+                span,
+                format!(
+                    "Size of {bits} bits is invalid for specified type (ref 3.15.5 Table 3-7, \
+                     p. 3-61; message 300, p. 9-40)"
+                ),
+            );
+            return None;
+        }
+        let bytes = bits / 8;
+        if bits % 8 != 0 || bytes > default {
+            self.unsupported(
+                span,
+                "a size attribute larger than the type's own storage (ref 3.15.5: the compiler \
+                 \"uses all of the bits in the larger object to represent the value\")",
+            );
+            return None;
+        }
+        if bytes < default && bytes != 1 {
+            // Every integer subrange that needs 9..16 bits is a word
+            // already (`TypeTable::layout_of`).
+            self.unsupported(span, "this size attribute");
+            return None;
+        }
+        Some(self.types.sized(base, bits))
     }
 
     /// ref 3.11.4.2 Table 3-5 p. 3-47: element types whose packed storage

@@ -174,6 +174,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `ulong_ops` | review of bead domain-pascal-5j9: `0..2147483647` decremented in place past 0, wrapped, `*` (M$MIU), mixed with `integer32` (signed), `case`, function result, uplevel, `while`, index |
 | `bits` | `&`, `!`, `~`, `xor`, `lshft`, `rshft`, `arshft` |
 | `bytes` | char and boolean fields at odd offsets, char-indexed arrays, byte value slots |
+| `byte_ints` | `[byte]` subranges (ref 3.15.5): unsigned and signed bytes at odd offsets, widened for arithmetic and comparisons, transfers between them, by value and by address, a byte result, `&`/`lshft`/`rshft`, byte arrays; boundary values (0, 127, 128, 255; -128, -1) through `-`, `div`, `mod`, `~`, `!`, comparisons, `case`, and `lshft(b, 8) > 5` as a signed `integer` |
 | `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
 | `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |
 | `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |

@@ -8087,6 +8087,37 @@ impl Selector {
         };
         if let (Some(x), Some(c)) = (x, c) {
             let c = imm(c, w);
+            // `x & c` of an unsigned byte widened to a word, `c` in
+            // 0..255: the constant loaded as a word, then `and.b` of the
+            // byte, whose high byte the constant's clears (TPAD_$DATA
+            // 0xE691EE `moveq #0x70,D0; and.b (11,A1),D0; lsr.w #4,D0`,
+            // 0xE693EC `move.w #240,D3; ... and.b (12,A1),D3`; the same
+            // form as a packed field's, codegen-patterns 5.3, "Wider
+            // field, value", RIP 0xE158B6).  The bytes are `[byte] 0..255`
+            // record fields in `../source`'s reconstruction (ref 3.15.5).
+            if let (AluOp::And, Width::Word, Expr::Convert { value: inner, .. }) = (alu, w, x) {
+                let it = inner.ty();
+                if matches!(**inner, Expr::Load { .. })
+                    && it.width == Width::Byte
+                    && it.sign == Sign::Unsigned
+                    && (0..=0xff).contains(&c)
+                {
+                    let xv = self.eval(inner)?;
+                    // (Evaluated once: falling through would evaluate the
+                    // byte again.)
+                    if !matches!(xv, Val::Mem(_) | Val::Reg(Reg::D(_)) | Val::Tmp(_)) {
+                        return Err(unsupported(self.span, "this byte operand of `&` is"));
+                    }
+                    let d = self.load_const(c, w)?;
+                    self.out.push(Insn::Alu {
+                        op: alu,
+                        size: Size::B,
+                        src: Self::ea_val(&xv),
+                        dst: d,
+                    });
+                    return Ok(d);
+                }
+            }
             let xv = self.eval(x)?;
             match alu {
                 // `x + c`, `x - c`: `addq`/`subq` for 1..8 (0xE00C10 `addq.l
@@ -9197,7 +9228,13 @@ impl Selector {
                 "a word `div`/`mod` of a sum, difference or product used as a longword is",
             ));
         }
-        if let Expr::Binary { op: BinOp::Shl, .. } = value {
+        // (`dpc-ir` reads a shift of an unsigned operand back as the
+        // `integer` result, a same-width [`Expr::Convert`].)
+        let shifted = match value {
+            Expr::Convert { value: inner, .. } if inner.ty().width == from.width => inner,
+            v => v,
+        };
+        if let Expr::Binary { op: BinOp::Shl, .. } = shifted {
             // A word `lshft` used as a longword: shifted at the word's
             // width and extended, or extended and shifted in 32 bits (ref
             // 4.3.1, p. 4-5, and the expansion pp. 4-29 and 4-171 describe
@@ -11423,6 +11460,66 @@ mod tests {
                 "movea.l\t(8,%fp),%a0",
                 "move.w\t(0xc,%fp),%d0",
                 "move.w\t(0xe,%fp),%d1",
+            ]
+        );
+    }
+
+    /// One-byte integers (`[byte]` subranges, ref 3.15.5) in word
+    /// operations: `x & c` with c in 0..255 loads the constant as a word
+    /// and `and.b`s the byte (TPAD_$DATA 0xE691EE `moveq #0x70,D0; and.b
+    /// (11,A1),D0`, 0xE693EC `move.w #240,D3; ... and.b (12,A1),D3`); a
+    /// signed byte is sign-extended, `move.b; ext.w` (0xE69228..0xE6922E),
+    /// an unsigned one zero-extended, `clr.w; move.b` (0xE691D8..0xE691DC).
+    #[test]
+    fn byte_integers_in_word_operations() {
+        let ub = Scalar::unsigned(Width::Byte);
+        let sb = Scalar::signed(Width::Byte);
+        let uw = Scalar::unsigned(Width::Word);
+        let widen = |e: Expr, ty: Scalar| Expr::Convert {
+            value: Box::new(e),
+            ty,
+        };
+        let and = |c: i64| Expr::Binary {
+            op: BinOp::And,
+            lhs: Box::new(widen(load(through(8, 11), ub), uw)),
+            rhs: Box::new(konst(c, uw)),
+            ty: uw,
+        };
+        let mut f = func(
+            0,
+            None,
+            vec![
+                store(Addr::Static(0), and(0x70)),
+                store(Addr::Static(4), and(240)),
+                store(Addr::Static(8), widen(load(through(8, 12), sb), word())),
+                store(Addr::Static(12), widen(load(through(8, 10), ub), uw)),
+            ],
+        );
+        vparams(&mut f, &[(8, Scalar::POINTER)]);
+        let f = with_data(f);
+        let t = text(&f);
+        let body: Vec<&str> = t
+            .iter()
+            .map(String::as_str)
+            .skip_while(|i| !i.starts_with("movea.l"))
+            .take(13)
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "movea.l\t(8,%fp),%a0",
+                "moveq\t#0x70,%d0",
+                "and.b\t(0xb,%a0),%d0",
+                "move.w\t%d0,(%a5)",
+                "move.w\t#0xf0,%d0",
+                "and.b\t(0xb,%a0),%d0",
+                "move.w\t%d0,(4,%a5)",
+                "move.b\t(0xc,%a0),%d0",
+                "ext.w\t%d0",
+                "move.w\t%d0,(8,%a5)",
+                "clr.w\t%d0",
+                "move.b\t(0xa,%a0),%d0",
+                "move.w\t%d0,(0xc,%a5)",
             ]
         );
     }

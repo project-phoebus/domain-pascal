@@ -294,6 +294,10 @@ pub struct TypeAttrs {
     /// is laid out by the natural rules (3.15.6.3 p. 3-70).  `None`: the
     /// default rules of the alignment environment apply.
     pub align: Option<u32>,
+    /// A size attribute's storage in bits (`[byte]` is 8, `[word]` 16,
+    /// `[long]` 32; ref 3.15.5 pp. 3-60..3-62), as written.  The type's
+    /// [`TypeInfo::size`] is the size it gives ([`TypeTable::sized`]).
+    pub size_bits: Option<u32>,
 }
 
 /// Which accesses a `device` object allows (ref 3.15.3 p. 3-59:
@@ -524,6 +528,7 @@ impl TypeTable {
                     atomic: false,
                     device: e.device,
                     align: None,
+                    size_bits: None,
                 }
             }
             TypeKind::Record(r) => {
@@ -596,6 +601,7 @@ impl TypeTable {
                     (x, y) => x.or(y),
                 },
                 align: attrs.align.or(b.attrs.align),
+                size_bits: attrs.size_bits.or(b.attrs.size_bits),
             },
             ..b
         };
@@ -615,6 +621,63 @@ impl TypeTable {
         let id = TypeId(self.types.len() as u32);
         self.types.push(info);
         id
+    }
+
+    /// A new type: `base` with a size attribute of `bits` bits (ref
+    /// 3.15.5, pp. 3-60..3-62), which the caller has checked against
+    /// Table 3-7 (p. 3-61).  It is `base` for compatibility
+    /// ([`TypeInfo::canon`]), as an alignment attribute's type is.  The
+    /// object takes `bits / 8` bytes ("Size attributes specify the amount
+    /// of storage to be reserved" for variables, formal parameters,
+    /// function results, record fields and array components, p. 3-60).
+    /// Only a one-byte object changes the layout: an integer subrange
+    /// whose default storage is a word (`[byte] 0..255`, p. 3-62).  It is
+    /// byte aligned freestanding, as a field and naturally, like `char`
+    /// and `boolean`, the reference's other one-byte types (Table 3-2,
+    /// p. 3-24, gives byte alignment for both; p. 9-41, message 305: "A
+    /// value is naturally aligned if it begins at an address that is a
+    /// multiple of its size in bytes").  **Uncertain:** the alignment of
+    /// a sized type is not stated; the image's TPAD packet record has
+    /// such bytes at consecutive offsets 0xA..0xF, read with `move.b`
+    /// (TPAD_$DATA 0xE691DC `move.b (10,A1)`, 0xE691F0 `and.b (11,A1)`,
+    /// 0xE69228 `move.b (12,A1)`; their Pascal types are inferred by
+    /// `../source`, `tpad/tpad.ins.pas`).
+    pub fn sized(&mut self, base: TypeId, bits: u32) -> TypeId {
+        let b = self.get(base).clone();
+        let size = bits / 8;
+        let mut info = TypeInfo {
+            name: None,
+            attrs: TypeAttrs {
+                size_bits: Some(bits),
+                ..b.attrs
+            },
+            ..b
+        };
+        if size != info.size {
+            debug_assert_eq!(size, 1, "only a one-byte size changes the layout");
+            info.size = size;
+            info.align = 1;
+            info.field_align = 1;
+            info.natural_align = 1;
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.types.push(info);
+        id
+    }
+
+    /// The bits an integer subrange `lo..hi` needs: its "extreme values"
+    /// (ref 3.10.7 Table 3-3, p. 3-36; Table 3-7, p. 3-61, "Number of
+    /// bits needed to store subrange"), two's complement when `lo` is
+    /// negative.
+    pub fn subrange_bits(lo: i64, hi: i64) -> u32 {
+        fn bits_for(v: u64) -> u32 {
+            (64 - v.leading_zeros()).max(1)
+        }
+        if lo >= 0 {
+            bits_for(hi as u64)
+        } else {
+            1 + bits_for(hi.max(-lo - 1).max(0) as u64)
+        }
     }
 
     /// The type `id` is for compatibility ([`TypeInfo::canon`]).
@@ -848,7 +911,23 @@ impl TypeTable {
     ///   32 bits.
     /// - Records (packed or not) and varying strings are structured:
     ///   their size, word aligned.
+    ///
+    /// A size attribute (ref 3.15.5) that gives other bits than these is
+    /// refused: which one a packed record takes is not stated (`[byte]
+    /// 0..15`, `[byte] boolean`).
     pub fn packed_field_bits(&self, ty: TypeId) -> Result<(u32, PackAlign), String> {
+        let (n, al) = self.packed_field_bits_by_kind(ty)?;
+        if self.get(ty).attrs.size_bits.is_some_and(|b| b != n) {
+            return Err(
+                "a packed record field whose size attribute gives other bits than ref 3.10.7 \
+                 Table 3-3 does (which one decides is not stated, 3.15.5)"
+                    .into(),
+            );
+        }
+        Ok((n, al))
+    }
+
+    fn packed_field_bits_by_kind(&self, ty: TypeId) -> Result<(u32, PackAlign), String> {
         fn bits_for(v: u64) -> u32 {
             (64 - v.leading_zeros()).max(1)
         }
@@ -870,11 +949,7 @@ impl TypeTable {
                     (bits_for((*hi).max(0) as u64), PackAlign::Bit)
                 }
                 _ => {
-                    let n = if *lo >= 0 {
-                        bits_for(*hi as u64)
-                    } else {
-                        1 + bits_for((*hi).max(-*lo - 1).max(0) as u64)
-                    };
+                    let n = Self::subrange_bits(*lo, *hi);
                     let n = if n == 31 && *lo >= 0 { 32 } else { n };
                     (n.min(32), PackAlign::Bit)
                 }

@@ -425,9 +425,11 @@ fn attribute_errors() {
         "module m; var x: [address(16#ff7000)] char;",
         "`address` attribute (ref 3.15.4) is not supported yet",
     );
+    // ref 3.15.5 p. 3-60, 7.5.1 p. 7-15: `bool4 = [long] boolean`, a
+    // size larger than the type's storage (not implemented).
     assert_err(
         "module m; type t = [long] boolean;",
-        "size attribute (ref 3.15.5) is not supported yet",
+        "a size attribute larger than the type's own storage",
     );
     assert_err(
         "module m; var x: [device(sideways)] char;",
@@ -566,4 +568,242 @@ fn routine_pointer_templates_and_attributed_parameters() {
          procedure z; begin x := addr(a3) end;",
         "`a3` does not match the routine pointer type",
     );
+}
+
+// ---------------------------------------------------------------------
+// Size attributes (ref 3.15.5, pp. 3-60..3-62)
+// ---------------------------------------------------------------------
+
+#[test]
+fn byte_subranges_are_one_byte() {
+    // ref 3.15.5 p. 3-62: "byte_integer = [byte] 0..255; byte_int_array =
+    // array[1..1000] of byte_integer"; "[byte] 0..255 corresponds to the
+    // unsigned char data type in Domain/C".  Table 3-7 p. 3-61: a
+    // subrange's minimum is the bits it needs, so -128..127 fits a byte.
+    let p = module(
+        "type
+           byte_integer = [byte] 0..255;
+           byte_int_array = array[1..1000] of byte_integer;
+           sbyte = [byte] -128..127;
+           small = [byte] 0..15;
+           odd3 = array[1..3] of byte_integer;
+           { tpad.ins.pas (../source): bytes at 0xA..0xF }
+           pkt = record
+             elapsed: integer32;
+             clock: integer32;
+             w: integer;
+             dev_id: byte_integer;
+             flags: byte_integer;
+             b0: byte_integer;
+             b1: sbyte;
+             b2: byte_integer;
+             b3: byte_integer;
+           end;
+           mixed = record a: byte_integer; b: integer; c: sbyte end;",
+    );
+    assert_eq!(size(&p, "byte_integer"), 1);
+    assert_eq!(align(&p, "byte_integer"), 1);
+    assert_eq!(field_align(&p, "byte_integer"), 1);
+    assert_eq!(size(&p, "sbyte"), 1);
+    assert_eq!(size(&p, "small"), 1);
+    // ref 3.11.4.1 pp. 3-45..3-46: elements times element size; only arrays of
+    // booleans get a pad byte.
+    assert_eq!(size(&p, "byte_int_array"), 1000);
+    assert_eq!(size(&p, "odd3"), 3);
+    for (f, o) in [
+        ("dev_id", 0xA),
+        ("flags", 0xB),
+        ("b0", 0xC),
+        ("b1", 0xD),
+        ("b2", 0xE),
+        ("b3", 0xF),
+    ] {
+        assert_eq!(offset(&p, "pkt", f), o, "{f}");
+    }
+    assert_eq!(size(&p, "pkt"), 0x10);
+    // A byte field, then a word-aligned integer, then a byte; records are
+    // a multiple of 2 bytes (ref 3.15.6.3 p. 3-70).
+    assert_eq!(offset(&p, "mixed", "b"), 2);
+    assert_eq!(offset(&p, "mixed", "c"), 4);
+    assert_eq!(size(&p, "mixed"), 6);
+    // The sized type is its subrange for compatibility (3.15.7 p. 3-76,
+    // as for the other attributes) and keeps its range.
+    assert_eq!(p.types.ordinal_range(ty(&p, "sbyte")), Some((-128, 127)));
+    assert_eq!(p.types.attrs(ty(&p, "byte_integer")).size_bits, Some(8));
+}
+
+#[test]
+fn byte_variables_parameters_and_results() {
+    // ref 3.15.5 p. 3-60: size attributes reserve storage for variables,
+    // formal parameters, function results, record fields and array
+    // components, given with the type or with the object.
+    let p = ok("module m;
+        type ub = 0..255; tri = -1..1;
+        var
+          x: [byte] 0..255;
+          y: integer;
+          z: [byte] -128..127;
+        function f(in a: [byte] ub; b: [byte] tri): [byte] ub; extern;");
+    let st = |n: &str| match &var(&p, n).storage {
+        crate::program::Storage::Static { offset, .. } => *offset,
+        s => panic!("{n}: {s:?}"),
+    };
+    assert_eq!(p.types.size(var(&p, "x").ty), 1);
+    assert_eq!(st("x"), 0);
+    assert_eq!(st("y"), 2);
+    assert_eq!(st("z"), 4);
+    let r = routine(&p, "f");
+    assert_eq!(p.types.size(r.result.as_ref().unwrap().ty), 1);
+    let a = r.params[0].ty;
+    assert_eq!(p.types.size(a), 1);
+    assert_eq!(p.types.size(r.params[1].ty), 1);
+}
+
+#[test]
+fn sizes_equal_to_the_storage_change_nothing() {
+    // ref 3.15.5 p. 3-60: `(n)` units, 1 by default; "big_number = [long]
+    // integer16" reserves 32 bits, so `[byte(2)]` is 16 bits.
+    let p = module(
+        "type
+           w1 = [word] integer16;
+           w2 = [byte(2)] integer;
+           l1 = [long] integer32;
+           l2 = [word(2)] integer32;
+           c1 = [byte] char;
+           b1 = [byte] boolean;
+           e1 = [word] (red, green);
+           r1 = [long] real;
+           u16 = [word] 0..65535;
+           s8w = [word] 0..255;",
+    );
+    for (t, n) in [
+        ("w1", 2),
+        ("w2", 2),
+        ("l1", 4),
+        ("l2", 4),
+        ("c1", 1),
+        ("b1", 1),
+        ("e1", 2),
+        ("r1", 4),
+        ("u16", 2),
+        ("s8w", 2),
+    ] {
+        assert_eq!(size(&p, t), n, "{t}");
+    }
+    // [byte] and [word] on a type that already says the same size.
+    let p = module("type b = [byte] 0..255; bb = [byte] b; arr = [byte, byte] 0..3; var v: bb;");
+    assert_eq!(p.types.size(var(&p, "v").ty), 1);
+    assert_eq!(size(&p, "arr"), 1);
+}
+
+#[test]
+fn size_attribute_errors() {
+    // ref p. 9-40, message 300: "Size of token1 bits is invalid for
+    // specified type", `bad : [byte] number` with number = integer32;
+    // Table 3-7 p. 3-61 minima.
+    assert_err(
+        "module m; type number = integer32; var bad: [byte] number;",
+        "Size of 8 bits is invalid for specified type",
+    );
+    assert_err(
+        "module m; var x: [byte] integer;",
+        "Size of 8 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [byte] 0..256;",
+        "Size of 8 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [byte] -129..0;",
+        "Size of 8 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [byte] (a, b);",
+        "Size of 8 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [word] 0..65536;",
+        "Size of 16 bits is invalid",
+    );
+    // p. 3-61: more bits than the minimum only for integer, boolean and set.
+    assert_err(
+        "module m; var x: [word] char;",
+        "Size of 16 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [long] (a, b);",
+        "Size of 32 bits is invalid",
+    );
+    assert_err(
+        "module m; var x: [byte(0)] char;",
+        "Size of 0 bits is invalid",
+    );
+    // p. 9-40, message 298: `int = [word, long] -32768..32767`.
+    assert_err(
+        "module m; type int = [word, long] -32768..32767;",
+        "Argument to `long` attribute conflicts with value already specified",
+    );
+}
+
+#[test]
+fn unsettled_size_attributes_are_refused() {
+    // p. 9-40, message 299 (a warning; the size that results not stated):
+    // `int = [word] -32768..32767; long_int = [long] int`.
+    assert_err(
+        "module m; type int = [word] -32768..32767; long_int = [long] int;",
+        "a size attribute on a type that has another",
+    );
+    assert_err(
+        "module m; type t = [long] integer16;",
+        "a size attribute larger than the type's own storage",
+    );
+    assert_err(
+        "module m; type t = [bit(4)] 0..1;",
+        "the `bit` size attribute (bit arrays, ref 3.15.5 p. 3-62) is not supported yet",
+    );
+    assert_err(
+        "module m; type t = [quad] double;",
+        "the `quad` size attribute (ref 3.15.5) is not supported yet",
+    );
+    assert_err(
+        "module m; type t = [word] record a: integer end;",
+        "Table 3-7 (ref 3.15.5, p. 3-61) gives no minimum size",
+    );
+    assert_err(
+        "module m; type t = [byte] 'a'..'z';",
+        "a size attribute on a subrange of char",
+    );
+    // A packed record field whose size attribute gives other bits than
+    // Table 3-3 (ref 3.10.7 p. 3-36) gives the field.
+    assert_err(
+        "module m; type t = packed record a: [byte] 0..15; b: boolean end;",
+        "a packed record field whose size attribute gives other bits",
+    );
+    assert_err(
+        "module m; type t = packed record a: [byte] boolean end;",
+        "a packed record field whose size attribute gives other bits",
+    );
+}
+
+#[test]
+fn byte_fields_of_packed_records_take_their_bits() {
+    // ref 3.10.7 Table 3-3 p. 3-36: an integer subrange field takes the
+    // bits of its extreme values, bit aligned; `[byte] 0..255` needs 8.
+    let p = module(
+        "type
+           b8 = [byte] 0..255;
+           t = packed record a: boolean; b: b8; c: [byte] -128..127 end;",
+    );
+    let f = |n: &str| field(&p, "t", n).bits.unwrap();
+    assert_eq!((f("b").bit, f("b").width), (1, 8));
+    assert_eq!((f("c").bit, f("c").width), (9, 8));
+}
+
+#[test]
+fn attribute_declarations_carry_sizes() {
+    // ref 3.16 p. 3-78: an attribute declaration names a list.
+    let p = module("attribute small = byte; type t = [small] 0..255; u = [small, volatile] 0..7;");
+    assert_eq!(size(&p, "t"), 1);
+    assert_eq!(size(&p, "u"), 1);
+    assert!(p.types.attrs(ty(&p, "u")).volatile);
 }

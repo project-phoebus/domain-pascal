@@ -3081,7 +3081,22 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
                 Ok(c)
             }
             (Some(_), None) => Err(unsupported(e.span, "comparing two constants is")),
-            (None, _) => value_of(p, x),
+            // A one-byte integer (`[byte] 0..255`, ref 3.15.5) is compared
+            // as a word, an `integer` (ref 4.3.1, p. 4-5: integer
+            // operands smaller than the operation are expanded), zero- or
+            // sign-extended by its own sign: TPAD_$DATA 0xE691D8..0xE691E0
+            // `clr.w D0; move.b (10,A1),D0; cmpi.w #0xdf,D0` (an
+            // unsigned byte against a constant; `../source`'s Pascal type).
+            // **Uncertain:** a byte compared with another byte or a
+            // variable is not catalogued; the same widening is applied.
+            (None, _) => {
+                let v = value_of(p, x)?;
+                if v.ty().width == Width::Byte && p.types.is_integer(x.ty) {
+                    Ok(convert(v, Scalar::signed(Width::Word)))
+                } else {
+                    Ok(v)
+                }
+            }
         }
     };
     let (l, r) = match (&lhs.value, &rhs.value) {
@@ -3465,6 +3480,9 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
             }
             Some(Expr::Const { value: v, ty })
         }
+        // A value read with another sign ([`reinterpret`], as a shift's
+        // result): the same bits.
+        Expr::Convert { value, ty: t } if value.ty().width == t.width => narrow(value, ty),
         Expr::Convert { value, .. } if value.ty().width == ty.width => Some(convert(
             (**value).clone(),
             Scalar {
@@ -4249,7 +4267,39 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
             // for a 16-bit signed operand (an `ext.l` and a 32-bit shift?)
             // is not catalogued, so only operands of the result's width are
             // taken (lshft keeps its operand's width, p. 4-109).
-            let x = value_of(p, &args[0])?;
+            let mut x = value_of(p, &args[0])?;
+            let mut ty = ty;
+            // A one-byte integer (`[byte] 0..255`, ref 3.15.5) is widened
+            // to the word `dpc-sema` gives the result, by its own sign,
+            // and shifted there: TPAD_$DATA 0xE6936A..0xE69376 `clr.w D2;
+            // ...; move.b (13,A1),D2; ...; lsl.w #6,D2` (`../source`'s
+            // `lshft(sample.b1, 6)`).
+            if x.ty().width == Width::Byte && ty.width == Width::Word && !x.ty().pointer {
+                let wide = Scalar {
+                    width: Width::Word,
+                    ..x.ty()
+                };
+                x = convert(x, wide);
+            }
+            // An unsigned operand of the result's width (the `&` of
+            // unsigned values, [`binary`]) shifted left or logically right:
+            // the same bits whatever the sign (TPAD_$DATA 0xE691EE..0xE691F4
+            // `moveq #0x70,D0; and.b (11,A1),D0; lsr.w #4,D0`, `../source`'s
+            // `rshft(sample.flags & 16#70, 4)`); the shift is done at the
+            // operand's type and its value read back as the result's
+            // type, the `integer` the reference gives (pp. 4-109, 4-171:
+            // "returns an integer value"; `lshft(i, 7)` of an `integer16`
+            // is "10#-6144"), so that `lshft(b, 8) > 5` of a byte 200 is a
+            // signed comparison.  An `arshft` keeps the strict rule.
+            let result = ty;
+            if x.ty().width == ty.width
+                && x.ty().sign == Sign::Unsigned
+                && !x.ty().pointer
+                && !ty.pointer
+                && matches!(b, Builtin::Lshft | Builtin::Rshft)
+            {
+                ty = x.ty();
+            }
             if x.ty() != ty {
                 return Err(unsupported(
                     e.span,
@@ -4276,12 +4326,15 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
                 Some(v) => const_of(v, Scalar::signed(Width::Word), args[1].span)?,
                 None => value_of(p, &args[1])?,
             };
-            Ok(Expr::Binary {
-                op,
-                lhs: Box::new(x),
-                rhs: Box::new(count),
-                ty,
-            })
+            Ok(reinterpret(
+                Expr::Binary {
+                    op,
+                    lhs: Box::new(x),
+                    rhs: Box::new(count),
+                    ty,
+                },
+                result,
+            ))
         }
         Builtin::Xor => Ok(Expr::Binary {
             op: IrBinOp::Xor,
@@ -4406,6 +4459,27 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
     match types.kind(ty) {
         TypeKind::Integer16 | TypeKind::Integer32 => Sign::Signed,
         TypeKind::Boolean => Scalar::BOOLEAN.sign,
+        // A one-byte integer subrange (a size attribute, `[byte] 0..255`,
+        // ref 3.15.5 p. 3-62: "corresponds to the unsigned char data type
+        // in Domain/C"): unsigned when non-negative, signed otherwise
+        // (`[byte] -128..127`).  Its values need every bit of the byte
+        // either way.  Image: TPAD_$DATA zero-extends the packet's bytes
+        // (0xE691D8 `clr.w D0; move.b (10,A1),D0; cmpi.w #0xdf,D0`;
+        // 0xE6936A..0xE69372 `clr.w D2; clr.w D3; move.b (13,A1),D2;
+        // move.b (12,A1),D3`) and sign-extends the mouse deltas (0xE69228
+        // `move.b (12,A1),D1`, 0xE6922E `ext.w D1`); their Pascal types
+        // (`tpad_$byte_t`, `tpad_$signed_byte_t`) are `../source`'s
+        // inference (`tpad/tpad.ins.pas`).
+        TypeKind::Subrange { base, lo, .. }
+            if types.size(ty) == 1
+                && matches!(types.kind(*base), TypeKind::Integer16 | TypeKind::Integer32) =>
+        {
+            if *lo >= 0 {
+                Sign::Unsigned
+            } else {
+                Sign::Signed
+            }
+        }
         TypeKind::Subrange { base, lo, .. } => {
             let long_host = matches!(types.kind(*base), TypeKind::Integer32);
             if long_host && (types.size(ty) < types.size(*base) || *lo >= 0) {

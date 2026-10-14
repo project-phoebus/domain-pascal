@@ -196,6 +196,12 @@ Tests:
 - `expr/bits` - codegen-patterns 8: constant-first `&` (0xE177A0),
   `andi`/`ori`/`eori` on computed values, shifts split above 8 (0xE02AA6),
   a shift by a register (0xE02D52).
+- `expr/byte_ints` - ref 3.15.5 (`[byte]` subranges); codegen-patterns
+  7.1, 8, 1.3, 7.3, 5.2: TPAD_$DATA 0xE691D8 (`clr.w; move.b; cmpi.w`),
+  0xE691EE and 0xE693EC (`moveq`/`move.w #c; and.b`), 0xE69228 (`move.b;
+  ext.w` of a type transfer to a signed byte), 0xE6936A (`lshft` of a
+  zero-extended byte); byte stores, a byte argument by value, a byte
+  `case` selector and index.
 - `expr/index` - codegen-patterns 5.2: array elements in the unit's data
   and the frame, `(d,An,Dn.w)` / `lea (0,An,Dn.w)` (0xE70DA8, 0xE0AA18,
   0xE3BB6E), scaling, the parameter-index copy (0xE3BB68, 0xE0AA8A), a
