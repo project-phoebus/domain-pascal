@@ -58,6 +58,14 @@ Question: is `/* */` a Domain Pascal comment form?
 Owner's answer (2026-10-13): a copy-edit miss in the manual; `/* */` is not supported.  Revisit only if the wider Domain Pascal corpus turns out to use C-style comments (unlikely).
 Consequence: no change; the lexer already rejects `/* */` per 2.1.4.  Errata list updated.
 
+## 5.1 Attribute lists on parameter types (p. 5-2; meaning from 3.15.6.8, p. 3-76)
+Asked: 2026-10-13, by the lead agent (open question 23; corpus evidence from bead domain-pascal-lmw)
+Passage: 5.1 gives a parameter's type as a type name, but Apollo's `rws.ins.pas` declares "`OUT Status: [aligned(1)] Status_$T`" and `error.ins.pas` "`IN a1,...,a10: UNIV [aligned(0)] error_$integer32`" (both under `%if isp_$m68k or isp_$a88k`).
+Question: did the compiler accept an attribute list on a parameter type, and with what meaning?
+Owner's answer (2026-10-14): yes, support attribute lists on parameter types.
+Meaning (from the reference, not a separate ruling): 3.15.6.8 "Passing Arguments by Reference", p. 3-76: "The compiler is unable to determine the alignment of objects passed by reference as arguments to routines. By default, the compiler assumes that such objects are naturally aligned. Therefore, if you know that an argument passed by reference is not naturally aligned, you should specify its alignment."  So `[attrs] T` in a parameter declares the same type as a named `= [attrs] T` (cf. `error_$status_t = [aligned(1)] status_$t`, error.ins.pas line 22): the attributes describe the actual argument's object, and the callee may assume only that alignment.
+Consequence: implemented under bead domain-pascal-lmw.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -338,7 +346,7 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     `packed_field_bits`; test `packed_sets_not_from_zero_are_refused`).
     No such field has been found in the SR10.2 inserts.*
 
-23. **5.1, p. 5-2 (attributes on parameter types).**  A parameter's type
+23. **Answered 2026-10-14; see Clarifications, "5.1 Attribute lists on parameter types".**  **5.1, p. 5-2 (attributes on parameter types).**  A parameter's type
     must be a type name, but Apollo's `rws.ins.pas` declares `OUT Status:
     [aligned(1)] Status_$T`.  Did the compiler accept an attribute list on
     a parameter type, and with what meaning?  *Current: refused.*

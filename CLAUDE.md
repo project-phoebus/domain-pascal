@@ -21,6 +21,16 @@ build it with this compiler.  The objects we produce must therefore:
 - assemble with the toolchain `../source` already uses (`m68k-elf-as`,
   `m68k-elf-ld`).
 
+**Future goal: retargeting Domain/OS.**  m68k is only the *first* target.
+The owner's longer-term aim (2026-10-14) is a compiler with several
+backends, so that Domain/OS itself can be rebuilt for other
+architectures.  This is a future goal, not current work (section 4.5),
+but it shapes today's design: keep the front end, the IR and any
+target-independent analysis free of target specifics, and keep
+Apollo-fidelity choices (register policy, encodings, ABI details) inside
+the m68k backend.  dpc must also stay a cross-compiler: it generates
+assembly on any host.
+
 **Mindset: we are archivists.**  The goal is to **reproduce the original
 compiler's output patterns**, not to produce good code.
 
@@ -34,8 +44,9 @@ compiler's output patterns**, not to produce good code.
 
 **Out of scope for now:**
 
-- Any target other than m68k.  aarch64 is a "later, would be cool" target,
-  mainly so the test suite can run compiled programs natively (section 4.5).
+- Building any backend other than m68k.  Other targets are a future goal
+  (retargeting Domain/OS, above); the first is likely aarch64, which would
+  also let the test suite run compiled programs natively (section 4.5).
 - LLVM or any other large optimising backend.  These are **forbidden**.
 - Pascal I/O runtime (`writeln` etc.), reals and floating point, unless a
   kernel routine needs them.
@@ -357,10 +368,16 @@ enough that a reviewer can line it up with the image's instruction order.
 - Layout and parameter-passing decisions that come from the *language*
   stay in the front end.  Decisions that come from the *ABI* (word slots,
   A5, result registers) live in the target description.
-- aarch64 later: same front end and IR, a second selector and emitter.  Its
-  purpose is to run the test suite natively, not ABI compatibility with
-  Apollo.  Do not build it now.  Just do not hard-code m68k register names
-  in the front end or the IR.
+- More targets later (section 1, "Future goal"): same front end and IR, a
+  second selector and emitter per target.  aarch64 is the likely first; it
+  also lets the test suite run natively.  A new target needs its own ABI,
+  not Apollo's m68k one.  Do not build one now.  Meanwhile:
+  - do not hard-code m68k register names or ABI facts in the front end or
+    the IR;
+  - put target-independent analyses (IR use analysis, liveness, the
+    allocation mechanism) where a second backend could share them when
+    you touch them, and keep the m68k *policy* in `dpc-m68k` (bead
+    domain-pascal-3aj).
 
 ## 5. Implementation language: DECIDED
 
