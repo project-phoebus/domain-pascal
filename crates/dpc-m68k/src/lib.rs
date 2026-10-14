@@ -85,6 +85,29 @@ impl Target for M68k {
     fn val_param_max_size(&self) -> u32 {
         4
     }
+
+    /// The reference's names (p. 4-46): `_ISP__M68K` true "for 68000 code
+    /// generation", `_ISP__A88K` false, `_BFMT__COFF` true "whenever the
+    /// compiler is generating COFF" (we model the SR10 compiler, which
+    /// "generates COFF files whenever it compiles", p. 4-46, although dpc
+    /// itself writes gas assembly).  Plus the names
+    /// Apollo's SR10.2 inserts test (`/sys/ins/base.ins.pas`), per the
+    /// owner's ruling on reference question 21 (docs/reference-
+    /// clarifications.md, "4.7 Predeclared conditional variables"):
+    /// `isp_$m68k` true, `isp_$a88k` false, `obj_$coff` true
+    /// (**provisional**: the owner is not sure the compiler predeclared
+    /// it) and `obj_$bin` false (the pre-Domain/OS object format).
+    fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)] {
+        &[
+            ("_ISP__M68K", true),
+            ("_ISP__A88K", false),
+            ("_BFMT__COFF", true),
+            ("isp_$m68k", true),
+            ("isp_$a88k", false),
+            ("obj_$coff", true),
+            ("obj_$bin", false),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +124,19 @@ mod tests {
         assert_eq!(t.small_arg_offset_in_slot(1), 0);
         assert_eq!(t.first_arg_offset(), 8);
         assert_eq!(t.val_param_max_size(), 4);
+        let vars = t.predeclared_cond_vars();
+        assert_eq!(vars.len(), 7);
+        for (n, v) in [
+            ("_ISP__M68K", true),
+            ("_ISP__A88K", false),
+            ("_BFMT__COFF", true),
+            ("isp_$m68k", true),
+            ("isp_$a88k", false),
+            ("obj_$coff", true),
+            ("obj_$bin", false),
+        ] {
+            assert!(vars.contains(&(n, v)), "{n}");
+        }
     }
 
     #[test]

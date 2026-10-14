@@ -76,7 +76,9 @@ COMPUTER INC.").
   pinteger; END` for SR10 68k).  They also show Apollo's own use of the
   language: routine options on routine pointer types
   (`prsvr.ins.pas`, `^FUNCTION (...) : db_ptr ;options(d0_return,val_param,extern);`),
-  the conditional variables `isp_$m68k` / `obj_$coff`, include guards
+  the conditional variables `isp_$m68k` / `obj_$coff` (predeclared by
+  the m68k target, `dpc_m68k::M68k`'s `Target::predeclared_cond_vars`),
+  include guards
   (`docs/reference-clarifications.md` Q2, Q4, Q19, Q21).
 - **They are not the kernel's own inserts.**  The kernel was compiled
   against Apollo's internal `.ins.pas` files, which may differ, and the

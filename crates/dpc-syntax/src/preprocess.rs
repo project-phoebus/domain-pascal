@@ -13,7 +13,7 @@
 //! |---|---|
 //! | `%include 'p';` | tokens of file `p` are spliced in (p. 4-55; search order ref 6.4.13, p. 6-20) |
 //! | `%if`/`%ifdef`/`%elseif`/`%elseifdef` *pred* `%then`, `%else`, `%endif` | conditional compilation (pp. 4-45..4-50) |
-//! | `%var n...`, `%enable n...` | declare / set conditional variables (p. 4-50) |
+//! | `%var n...`, `%enable n...` | declare / set conditional variables (p. 4-50); the predeclared ones come from [`Options::predeclared`] (p. 4-46) and cannot be enabled or set with `-config` (p. 4-48) or declared again (p. 4-49) |
 //! | `%error 's'`, `%warning 's'` | a diagnostic (pp. 4-51..4-52) |
 //! | `%exit` | stop reading the current file (p. 4-52) |
 //! | `%debug;` | without [`Options::cond`], drop the rest of the line (pp. 4-54..4-55; ref 6.4.7, p. 6-12) |
@@ -47,6 +47,13 @@ pub struct Options {
     /// `-cond`: compile `%debug` lines (ref 6.4.7, p. 6-12).  Default off
     /// (`-ncond`).
     pub cond: bool,
+    /// The predeclared conditional variables and their values (p. 4-46),
+    /// e.g. `_ISP__M68K` true.  They depend on the target, so the driver
+    /// fills this from `dpc_target::Target::predeclared_cond_vars`
+    /// (CLAUDE.md 4.5); this crate knows no target.  Names are
+    /// case-insensitive like all conditional variables (p. 4-50).  Empty by
+    /// default: then no variable is predeclared.
+    pub predeclared: Vec<(String, bool)>,
 }
 
 /// Preprocessor result.  `tokens` ends with `Eof`.  Compilation should stop
@@ -68,28 +75,32 @@ impl Output {
 /// `sm`.
 pub fn preprocess(sm: &mut SourceMap, file: FileId, opts: &Options) -> Output {
     let mut vars = HashMap::new();
-    // Predeclared conditional variables (p. 4-46).  We model the SR10 m68k
-    // compiler: it "generates COFF files whenever it compiles" (p. 4-46)
-    // and generates 68000 code.
-    for (n, v) in [
-        ("_bfmt__coff", true),
-        ("_isp__m68k", true),
-        ("_isp__a88k", false),
-    ] {
+    // Predeclared conditional variables (p. 4-46), from the target.
+    for (n, v) in &opts.predeclared {
         vars.insert(
-            n.to_string(),
+            n.to_ascii_lowercase(),
             Var {
-                enabled: v,
+                enabled: *v,
                 predeclared: true,
             },
         );
     }
-    let config = opts
+    let config: HashSet<String> = opts
         .config
         .iter()
         .flatten()
         .map(|s| s.to_ascii_lowercase())
         .collect();
+    // p. 4-48: "Since _ISP__M68K and _ISP__A88K are predeclared, you cannot
+    // use the %enable directive or the -config option with them."
+    let mut diags = Vec::new();
+    for n in opts.config.iter().flatten() {
+        if vars.contains_key(&n.to_ascii_lowercase()) {
+            diags.push(Diagnostic::error_nopos(format!(
+                "predeclared conditional variable `{n}` cannot be set with -config"
+            )));
+        }
+    }
     let key = std::fs::canonicalize(&sm.file(file).path).ok();
     let lexer = Lexer::new(sm, file);
     let mut pp = Pp {
@@ -100,7 +111,7 @@ pub fn preprocess(sm: &mut SourceMap, file: FileId, opts: &Options) -> Output {
         vars,
         config,
         out: Vec::new(),
-        diags: Vec::new(),
+        diags,
         debug_skip: None,
     };
     pp.run();
@@ -477,7 +488,11 @@ impl Pp<'_> {
     /// Include search, ref 6.4.13, p. 6-20: names beginning with `/`,
     /// `//`, `~` or `.` are absolute; others are tried in the working
     /// directory, then in each `-idir` directory, in order.  The reference
-    /// does not search the including file's directory.
+    /// does not search the including file's directory.  A name the host
+    /// considers absolute ([`Path::is_absolute`], e.g. a Windows drive or
+    /// UNC path) is not searched either; `/`-leading names stay absolute on
+    /// every host (on Windows `/x` is not `is_absolute`, but `join` keeps
+    /// only the base's drive prefix).
     fn resolve(&self, name: &str) -> Result<PathBuf, String> {
         let base = self.opts.cwd.as_deref().unwrap_or(Path::new(""));
         if name.starts_with('~') {
@@ -488,18 +503,19 @@ impl Pp<'_> {
         }
         // TODO: `//node/...` network paths and `/sys/ins/...` are taken as
         // host paths unchanged.
-        let candidates: Vec<PathBuf> = if name.starts_with('/') || name.starts_with('.') {
-            vec![base.join(name)]
-        } else {
-            std::iter::once(base.join(name))
-                .chain(
-                    self.opts
-                        .include_dirs
-                        .iter()
-                        .map(|d| base.join(d).join(name)),
-                )
-                .collect()
-        };
+        let candidates: Vec<PathBuf> =
+            if name.starts_with('/') || name.starts_with('.') || Path::new(name).is_absolute() {
+                vec![base.join(name)]
+            } else {
+                std::iter::once(base.join(name))
+                    .chain(
+                        self.opts
+                            .include_dirs
+                            .iter()
+                            .map(|d| base.join(d).join(name)),
+                    )
+                    .collect()
+            };
         candidates
             .into_iter()
             .find(|p| p.is_file())
@@ -767,8 +783,31 @@ mod tests {
         Run { sm, out }
     }
 
+    /// The predeclared conditional variables the tests run with: the m68k
+    /// list (dpc-m68k `Target::predeclared_cond_vars`), written out here
+    /// because this crate does not depend on the targets.
+    const PREDECLARED: [(&str, bool); 7] = [
+        ("_ISP__M68K", true),
+        ("_ISP__A88K", false),
+        ("_BFMT__COFF", true),
+        ("isp_$m68k", true),
+        ("isp_$a88k", false),
+        ("obj_$coff", true),
+        ("obj_$bin", false),
+    ];
+
+    fn opts() -> Options {
+        Options {
+            predeclared: PREDECLARED
+                .iter()
+                .map(|&(n, v)| (n.to_string(), v))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn run(src: &str) -> Run {
-        run_opts(src, &Options::default())
+        run_opts(src, &opts())
     }
 
     /// Identifiers of a run that must be clean.
@@ -796,7 +835,7 @@ mod tests {
         assert_eq!(clean(src), ["c", "d"]);
         let opts = Options {
             config: Some(vec!["MONO".into()]),
-            ..Default::default()
+            ..opts()
         };
         let r = run_opts(src, &opts);
         assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
@@ -849,7 +888,7 @@ mod tests {
         assert_eq!(clean("%if _ISP__A88K\n%then x\n%endif y"), ["y"]);
         let opts = Options {
             config: Some(vec![]),
-            ..Default::default()
+            ..opts()
         };
         let r = run_opts("%if %config %then x %endif", &opts);
         assert_eq!(r.idents(), ["x"]);
@@ -882,7 +921,7 @@ mod tests {
         assert!(errs("%var x\n%enable x\n%enable x")[0].contains("already set to true"));
         let opts = Options {
             config: Some(vec!["x".into()]),
-            ..Default::default()
+            ..opts()
         };
         assert!(run_opts("%var x\n%enable x", &opts).diags()[0].contains("already set"));
         assert!(errs("%enable y")[0].contains("must be declared with %var"));
@@ -961,7 +1000,7 @@ mod tests {
         assert_eq!(clean(src), ["a", "b", "c", "f"]);
         let opts = Options {
             cond: true,
-            ..Default::default()
+            ..opts()
         };
         let r = run_opts(src, &opts);
         assert_eq!(r.idents(), ["a", "writeln", "a", "b", "c", "d", "e", "f"]);
@@ -1037,7 +1076,7 @@ mod tests {
         let opts = Options {
             include_dirs: vec!["ins".into(), dir.join("ins2")],
             cwd: Some(dir.clone()),
-            ..Default::default()
+            ..opts()
         };
         let r = run_opts(
             "m1 %INCLUDE 'a.ins.pas'; {%include 'c.ins.pas'} %include './ins2/b.ins.pas'; m2",
@@ -1069,7 +1108,7 @@ mod tests {
         std::fs::write(dir.join("open.ins.pas"), "%if _isp__m68k %then x").unwrap();
         let opts = Options {
             cwd: Some(dir.clone()),
-            ..Default::default()
+            ..opts()
         };
         let d = run_opts("%include 'nope.ins.pas';", &opts).diags();
         assert_eq!(
@@ -1101,6 +1140,147 @@ mod tests {
         // %include in a skipped region has no effect (p. 4-55).
         let r = run_opts("%var v\n%if v %then %include 'nope'; %endif", &opts);
         assert!(r.out.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn predeclared_come_from_options() {
+        // Without a target's list nothing is predeclared.
+        let r = run_opts("%if _ISP__M68K %then x %endif", &Options::default());
+        assert!(r.diags()[0].contains("`_isp__m68k` is not declared with %var"));
+        assert_eq!(
+            run_opts("%var _ISP__M68K", &Options::default()).diags(),
+            Vec::<String>::new()
+        );
+        // Names are case-insensitive, whatever case the target wrote.
+        let o = Options {
+            predeclared: vec![("Tgt_$X".into(), true)],
+            ..Default::default()
+        };
+        let r = run_opts("%if TGT_$x %then a %endif %ifdef tgt_$X %then b %endif", &o);
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["a", "b"]);
+    }
+
+    #[test]
+    fn sr10_predeclared_names() {
+        // Owner ruling on reference question 21 (docs/reference-
+        // clarifications.md, "4.7 Predeclared conditional variables").
+        for (p, want) in [
+            ("isp_$m68k", true),
+            ("ISP_$A88K", false),
+            ("obj_$coff", true),
+            ("OBJ_$BIN", false),
+        ] {
+            assert_eq!(
+                clean(&format!("%if {p} %then t %else f %endif")),
+                [if want { "t" } else { "f" }],
+                "%if {p}"
+            );
+            // %ifdef asks whether the variable is declared, not whether it
+            // is true (p. 4-49): every predeclared variable is declared.
+            assert_eq!(
+                clean(&format!("%ifdef {p} %then t %else f %endif")),
+                ["t"],
+                "%ifdef {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_ins_pas_guards() {
+        // Excerpts of Apollo's SR10.2 /sys/ins/base.ins.pas (lines 35-40,
+        // 68-74, 95-99, 123-129, 178-187), conditional lines verbatim,
+        // other lines replaced by marker identifiers; the two `obj_$bin`
+        // lines at the end are ours (base.ins.pas does not test it).
+        let src = "\
+%ifdef not isp_$m68k %then
+    %var isp_$m68k
+%endif
+%ifdef not isp_$a88k %then
+    %var isp_$a88k
+%endif
+%IF ISP_$A88K or ISP_$M68k %THEN  { SR10 or later }
+    clock_sr10
+%ELSE
+    clock_sr9
+%ENDIF
+%IF ISP_$A88K %THEN
+    n_user_247
+%ELSE
+    n_user_56
+%ENDIF
+%IFDEF obj_$coff %THEN                  { If sr10 or later }
+    errout_2
+%ELSE
+    errout_3
+%ENDIF
+%IF ISP_$A88K %THEN  
+    ec_a88k
+%ELSEIF ISP_$M68K %THEN  { SR10 or later 68k }
+    ec_m68k
+%ELSE
+    ec_sr9
+%ENDIF
+%IFDEF obj_$bin %THEN bin_declared %ENDIF
+%IF obj_$bin %THEN bin_true %ENDIF
+";
+        // The guards do not redeclare the predeclared variables (no
+        // "already declared" error), and the SR10 m68k branches are taken.
+        assert_eq!(
+            clean(src),
+            [
+                "clock_sr10",
+                "n_user_56",
+                "errout_2",
+                "ec_m68k",
+                "bin_declared"
+            ]
+        );
+    }
+
+    #[test]
+    fn predeclared_cannot_be_set() {
+        // p. 4-48: no %enable or -config of a predeclared variable.
+        for n in [
+            "isp_$m68k",
+            "ISP_$A88K",
+            "obj_$coff",
+            "obj_$bin",
+            "_isp__a88k",
+        ] {
+            assert!(errs(&format!("%enable {n}"))[0].contains("cannot be enabled"));
+            assert!(errs(&format!("%var {n}"))[0].contains("already declared"));
+            let o = Options {
+                config: Some(vec!["other".into(), n.into()]),
+                ..opts()
+            };
+            assert_eq!(
+                run_opts("x", &o).diags(),
+                [format!(
+                    "dpc: error: predeclared conditional variable `{n}` cannot be set with -config"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn include_host_absolute_path() {
+        // A host-absolute name is used as is, whatever the working
+        // directory (ref 6.4.13, p. 6-20; Path::is_absolute, so Windows
+        // drive and UNC names count too).
+        let dir = scratch("include_host_absolute_path");
+        std::fs::create_dir_all(dir.join("cwd")).unwrap();
+        std::fs::write(dir.join("abs.ins.pas"), "abs").unwrap();
+        let abs = std::fs::canonicalize(dir.join("abs.ins.pas")).unwrap();
+        assert!(abs.is_absolute());
+        let o = Options {
+            cwd: Some(dir.join("cwd")),
+            include_dirs: vec!["nope".into()],
+            ..opts()
+        };
+        let r = run_opts(&format!("%include '{}'; m", abs.display()), &o);
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["abs", "m"]);
     }
 
     #[test]

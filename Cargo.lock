@@ -10,6 +10,7 @@ dependencies = [
  "dpc-m68k",
  "dpc-sema",
  "dpc-syntax",
+ "dpc-target",
 ]
 
 [[package]]

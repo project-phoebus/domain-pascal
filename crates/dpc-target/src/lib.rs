@@ -35,6 +35,13 @@ pub trait Target {
     /// routines receive by value (ref 5.5.7, p. 5-19: "four bytes or less
     /// in size (on 680x0 workstations)").
     fn val_param_max_size(&self) -> u32;
+
+    /// The predeclared conditional variables (ref 4.7, p. 4-46) and their
+    /// values, e.g. `("_ISP__M68K", true)`.  Names are case-insensitive,
+    /// like all conditional variables.  The driver hands them to the
+    /// preprocessor (`dpc_syntax::preprocess::Options::predeclared`),
+    /// which refuses `%enable` and `-config` of them (p. 4-48).
+    fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)];
 }
 
 #[cfg(test)]
@@ -65,6 +72,9 @@ mod tests {
         fn val_param_max_size(&self) -> u32 {
             8
         }
+        fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)] {
+            &[("_dummy", true)]
+        }
     }
 
     #[test]
@@ -73,5 +83,6 @@ mod tests {
         assert_eq!(t.name(), "dummy");
         assert_eq!(t.pointer_size(), 8);
         assert_eq!(t.first_arg_offset(), 16);
+        assert_eq!(t.predeclared_cond_vars(), [("_dummy", true)]);
     }
 }

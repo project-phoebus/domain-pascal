@@ -1773,3 +1773,32 @@ end;
         "{asm}"
     );
 }
+
+#[test]
+fn target_predeclares_conditional_variables() {
+    // The m68k target's predeclared conditional variables reach the
+    // preprocessor (dpc_target::Target::predeclared_cond_vars; owner
+    // ruling on reference question 21).
+    let src = "module m;
+%ifdef not isp_$m68k %then %var isp_$m68k %endif
+%if isp_$m68k and _ISP__M68K and obj_$coff and _BFMT__COFF
+    and not (isp_$a88k or _ISP__A88K or obj_$bin) %then
+procedure m_$p; begin end;
+%else
+%error 'not the m68k target'
+%endif
+";
+    let asm = compile_with("target_predeclares_conditional_variables", src, &[]).unwrap();
+    assert!(asm.contains("M_$P:"), "{asm}");
+    let (code, err) = compile_with(
+        "target_predeclared_cannot_be_enabled",
+        "module m;\n%enable obj_$bin\n",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("predeclared conditional variable `obj_$bin` cannot be enabled"),
+        "{err}"
+    );
+}

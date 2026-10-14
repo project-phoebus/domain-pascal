@@ -67,6 +67,7 @@ use dpc_ir::DataBaseOptions;
 use dpc_m68k::emit::LoopAlign;
 use dpc_m68k::sched::Schedule;
 use dpc_syntax::{preprocess, Diagnostic, SourceMap};
+use dpc_target::Target;
 
 const PROG: &str = "dpc";
 const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
@@ -292,8 +293,14 @@ fn compile(
             args.input.display()
         ))]
     })?;
+    let target = dpc_m68k::M68k;
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
+        predeclared: target
+            .predeclared_cond_vars()
+            .iter()
+            .map(|&(n, v)| (n.to_string(), v))
+            .collect(),
         ..Default::default()
     };
     let pp = preprocess::preprocess(sm, file, &opts);
@@ -310,7 +317,7 @@ fn compile(
             return Ok(());
         }
     }
-    let program = dpc_sema::analyze(&unit, &dpc_m68k::M68k)?;
+    let program = dpc_sema::analyze(&unit, &target)?;
     warnings.extend(program.warnings.iter().cloned());
     if args.stop == Stop::AfterCheck {
         return Ok(());

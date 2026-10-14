@@ -46,6 +46,9 @@ impl Target for M68kAbi {
     fn val_param_max_size(&self) -> u32 {
         4
     }
+    fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)] {
+        &[]
+    }
 }
 
 /// Analyse `src`; errors are rendered `t.pas:line:col: error: msg`.
