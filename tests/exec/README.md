@@ -1,0 +1,185 @@
+# Execution tests
+
+CLAUDE.md section 6 item 5 asks for tests that run compiled programs and
+check them against Pascal semantics.  These tests do that on the m68k
+itself, not on aarch64: dpc output runs on the Musashi 68010 emulator
+(bead domain-pascal-f03).  Golden and conformance tests check that the
+code *looks like* Apollo's.  These tests check that it *computes* what the
+Pascal source says.  A failure here is a miscompile.
+
+Run them with `make exectest`, which `make test` also runs, or with
+`python3 tools/exectest.py [-v] [--trace] [tests/exec/NAME.pas ...]`.
+They take under a second.
+
+## Prerequisites
+
+- **Musashi** (Karl Stenerud's 68000-family emulator, version 3.3).  It is
+  **not** in this repository: its licence allows non-commercial use only
+  and does not grant redistribution.  The driver compiles it from
+  `MUSASHI_DIR`, which defaults to
+  `~/src/domainos-archeology/otterlater/musashi`, into
+  `target/exectest/`.  That directory is only read.  Its `m68kconf.h`
+  enables address-error emulation, which the tests need.
+- `m68k-elf-as`, `-ld`, `-objcopy`, `-nm`, and a host `cc`.
+- **M$ARITH**: `../source/domain_os/math/sau2/arith.s`, the transcription of
+  the image's arithmetic runtime.  It is assembled as is.  Override the
+  path with `EXECTEST_ARITH`.
+
+If any of these is missing, the driver prints `exectest: skipped: ...`
+and exits 0.
+
+## How a test runs
+
+1. `target/debug/dpc -I tests/exec` compiles `NAME.pas`, and any `link:`
+   modules.
+2. `m68k-elf-as -m68010` assembles the output.
+3. The objects are linked with `tools/exectest/stubs.s` and M$ARITH by
+   `tools/exectest/link.ld`: code at 0x10000, then data, then bss.
+4. `objcopy -O binary` produces a flat image.
+5. `tools/exectest/runner` runs each `call:` in turn, in one memory image,
+   so static data persists from one call to the next.
+
+The work files (`.s`, `.o`, `.elf`, `.bin`) are kept in
+`tmp/exectest/NAME/`.  The `.s` is the one to quote in reports.
+
+The runner (`tools/exectest/runner.c`) does the following:
+
+- It single-steps a 68010 in supervisor mode (so privileged
+  instructions, `disable`/`enable`, do not trap).  It refuses to build
+  unless Musashi's `m68kconf.h` enables the 68010 and address errors.
+- For each call, it pushes the arguments right to left with the word-slot
+  ABI (codegen-patterns 1.3):
+  - a 2-byte pad first if the slots do not total a multiple of 4;
+  - a byte goes in the high half of its slot.
+- It loads canaries into D2-D7 and A2-A6, and junk into D0/D1/A0/A1.
+- It fills the stack with 0xA5.
+- It returns through a sentinel address.
+
+On return it checks:
+
+- the callee-saved registers;
+- SP: just above the return address, since the caller pops the arguments;
+- a guard area above the arguments;
+- the interrupt mask: it must be back to 0.
+
+The run fails on any of the following:
+
+- an exception, especially an **address error** (a word or long access at
+  an odd address, which the 68010 traps);
+- an **illegal instruction**, which includes 68020-only encodings;
+- a zero divide;
+- a **wild access**: memory outside the image, the stack and the argument
+  cells.  Low memory (the vectors) is outside, so a nil pointer is
+  caught; a write to the code section (below `_etext`) is wild too, and
+  so is a stub argument that points outside, or a word or longword one at
+  an odd address;
+- a stack overflow (SP within 256 bytes of the bottom of the stack);
+- more than 2,000,000 instructions.
+
+The runner prints `!! ...` lines into the compared output.  `--trace`
+prints each instruction and the scratch registers on stderr.
+
+## Stubs
+
+`exec.ins.pas` declares the stub routines; `%include 'exec.ins.pas'`.  The
+runner implements them in C.  Like a real call, each one:
+
+- clobbers D0, D1, A0 and A1 with junk (except the register that holds its
+  result);
+- clobbers the condition codes.
+
+A word or byte result has junk in the bits above it.
+
+| Routine | Prints |
+|---|---|
+| `exec_$log_l` / `_w` / `_uw` / `_c` / `_bool` / `_x (in v)` | the value, by address: decimal, unsigned, `true` / `false` / `bool?0xNN` (not 0 or 0xFF), hex |
+| `exec_$log_mem(in v: univ ...; in n)` | `mem` and n bytes in hex |
+| `exec_$logv_l` / `_w` / `_c (v)` | a value parameter (`val_param`) |
+| `exec_$mark(v)` | `mark N` (`val_param` word) |
+| `exec_$id_l` / `_w` / `_bool (in v)` | nothing; returns v in D0 |
+| `exec_$id_p(in v: univ_ptr)` | nothing; returns v in A0 (also a way to get `addr(x)` into a pointer) |
+| `exec_$clobber` | nothing |
+
+`exec_$counter` is a word that acts as a device register: each word read
+returns the next value, and a store sets it (see `volatile.pas`).
+
+## Writing a test
+
+A test is a module, `tests/exec/NAME.pas`.  Its first comment holds the
+directives:
+
+```
+{ What it tests, with ref and codegen-patterns citations.
+
+  call: NAME_$ENTRY w:5 @l:-7! b:200 -> w
+  link: other.mod.pas
+  dpc: --loop-align=off
+  xfail: why (a known miscompile)
+  expect:
+    one expected output line per line
+    => 3
+}
+```
+
+The directives:
+
+- `call: SYMBOL ARGS [-> KIND]`: a call of an exported routine.  There can
+  be any number.
+  - Value slots are `l:N`, `w:N` and `b:N`.
+  - By-address arguments are `@l:N`, `@w:N` and `@b:N`: N goes in a fresh
+    cell.
+  - A trailing `!` prints `out V`, the cell's value after the call.
+  - `-> l|w|uw|c|b|a0` prints `=> V`, the result in D0 (signed long,
+    signed word, unsigned word, unsigned byte, boolean) or A0 (hex).
+  - Use the parameter conventions of ref 5.2 / Table 5-1.  With
+    `val_param`, an `in integer32` is a value `l:`, not `@l:`.
+- `link:`: more modules in `tests/exec/` named `*.mod.pas`, which are not
+  tests themselves.  An example is a unit whose arrays the test reaches as
+  another unit's.
+- `xfail:`: the test documents a known miscompile.  It must build, run
+  and fail: `XPASS` is an error, so remove the line once the compiler is
+  fixed, and so is dpc (or a tool) refusing the test.  The expected output
+  stays the **correct** one.
+- `expect:` must come last.  The rest of the comment is the expected
+  output.
+
+Expected values come from the Pascal semantics, never from dpc's output:
+
+- Cite the reference for anything subtle, e.g. `div` truncates toward zero
+  and `mod` takes the dividend's sign (p. 4-65, 4-115).
+- When a test fails, decide from the reference which side is wrong before
+  touching either.
+- dpc refuses many forms it has not catalogued yet ("not supported yet").
+  Those are not failures.  Rewrite the test around them, and say in its
+  header what it could not express.
+
+## Tests
+
+| Test | Covers |
+|---|---|
+| `smoke` | the harness: every stub kind, value arguments, a result, an out parameter |
+| `regheld` | register-held locals across calls, branches, loops; M$ARITH results held |
+| `regloop` | a loop calling M$ARITH and a stub; a variable changed in the loop |
+| `cse` | reused values invalidated by stores through another index, a var call, a field, a pointer |
+| `forward` | stored-local forwarding; a var call on the local |
+| `stale_param` | bead domain-pascal-pe9: a value parameter re-read after its address is passed (also from a nested routine) |
+| `divmod` | `div`/`mod` signs, words and longwords, by powers of two, word operands widened |
+| `udiv` | unsigned-word `div`/`mod`; longword by a word constant |
+| `arith` | multiplication by constants, `muls.w` products, M$ARITH, wraparound |
+| `wide_compare` | **xfail**: a word sum compared, 32-bit per ref p. 4-5 and 4-198 |
+| `unsigned` | `0..65535` compares (`bhi`/`bcs`), zero-extension, bytes |
+| `bits` | `&`, `!`, `~`, `xor`, `lshft`, `rshft`, `arshft` |
+| `bytes` | char and boolean fields at odd offsets, char-indexed arrays, byte value slots |
+| `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
+| `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |
+| `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |
+| `gotos` | forward and backward `goto`, out of loops, into a `case` arm, from a function |
+| `loops` | `for` over empty ranges, `downto`, negative bounds, `exit`, `next`, `while` |
+| `fill` | `for` clear loops (`clr (A0)+`, `dbf`) over another unit's arrays |
+| `shortcircuit` | `and then` / `or else` skip their right operand |
+| `nested` | uplevel reads and writes, siblings, recursion through the static link |
+| `results` | results with junk above them, booleans, A0 pointers, `f := g(...)`, a result held across a call |
+| `records` | 12-, 14- and 144-byte copies, through var parameters and pointers |
+| `pointers` | routine pointers (`jsr (An)`), a linked list |
+| `initdata` | initialised data, repeat counts, variants, strings, a `static` local across calls |
+| `volatile` | a volatile variable re-read in a loop and in one expression |

@@ -4,7 +4,7 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build test conform linktest clean
+.PHONY: all build test exectest conform linktest clean
 
 all: build
 
@@ -14,6 +14,15 @@ build:
 test:
 	$(CARGO) test
 	@if [ -d tools/tests ]; then $(PYTHON) -m unittest discover -s tools/tests; fi
+	$(MAKE) exectest
+
+# Execution tests (tests/exec/README.md): dpc output run on the Musashi
+# 68010 emulator, built from MUSASHI_DIR (default
+# ~/src/domainos-archeology/otterlater/musashi; not part of this repo),
+# linked with M$ARITH from ../source.  Skipped with a notice when Musashi,
+# the m68k-elf tools or arith.s are missing.  Under a second.
+exectest: build
+	$(PYTHON) tools/exectest.py
 
 # Image conformance (CLAUDE.md section 6.3): every unit listed in the
 # manifest is linked at its image address and compared with the image.

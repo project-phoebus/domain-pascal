@@ -395,6 +395,18 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     into `if` parts (p. 6-23, `-niso`) are accepted; a compound statement
     is transparent (accepted).*
 
+31. **4.3.1 p. 4-5 vs "Type Transfer Functions" p. 4-198 vs the image
+    (word arithmetic in comparisons).**  p. 4-198: for `x + y > 5` on
+    integer16 operands "the compiler expands operands x and y to 32-bit
+    integers and performs 32-bit addition before making the comparison";
+    `INTEGER16(x + y)` asks for the 16-bit form.  But the image compares
+    word sums at word width at 41 sites against 7 that widen first (bead
+    domain-pascal-9js; e.g. 0xE0F9D0..D8 widens).  The source types at the
+    41 sites are not known.  Should dpc follow the reference (widen) or
+    the image's majority (16-bit, wrapping on overflow)?  *Current: 16-bit
+    compare; tests/exec/wide_compare.pas marks the reference's behaviour as
+    an expected failure (domain-pascal-f03).*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`
