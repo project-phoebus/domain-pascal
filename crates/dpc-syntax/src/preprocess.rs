@@ -648,8 +648,9 @@ fn pragma(name: &str) -> Option<Pragma> {
 
 /// Predicate evaluator (p. 4-46): names, `not`, `and`, `or`, parentheses
 /// and `%config`.
-/// TODO(ref-question): the reference gives no precedence for predicates;
-/// we use Pascal's (Table 4-3, p. 4-4): `not` > `and` > `or`.
+/// Precedence is Pascal's (Table 4-3, p. 4-4): `not` > `and` > `or`; the
+/// reference gives none for predicates, and the owner ruled for standard
+/// Pascal precedence (docs/reference-clarifications.md, question 3).
 struct Pred<'t> {
     toks: &'t [Token],
     i: usize,

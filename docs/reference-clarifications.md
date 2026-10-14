@@ -44,6 +44,13 @@ Owner's answer: "yes. isp_$m68k and isp_$a88k are target-specific and pre-declar
 Consequence: dpc predeclares `isp_$m68k` (true) and `isp_$a88k` (false) like `_ISP__M68K`/`_ISP__A88K`, `obj_$coff` (true, provisionally: the owner is not sure the compiler predeclared it) like `_BFMT__COFF`, and `obj_$bin` (false: the pre-Domain/OS object format, which dpc does not generate); Apollo's base.ins.pas then takes its SR10 branches.  Implementation: bead domain-pascal-mhg (crates/dpc-syntax/src/preprocess.rs).
 Implemented (domain-pascal-mhg): the list is target-specific, so `dpc_target::Target::predeclared_cond_vars` supplies it (`dpc_m68k::M68k`: `_ISP__M68K`, `isp_$m68k`, `_BFMT__COFF`, `obj_$coff` true; `_ISP__A88K`, `isp_$a88k`, `obj_$bin` false) and the driver passes it to the preprocessor in `preprocess::Options::predeclared`; the preprocessor has no built-in list.  `%enable` and `-config` of any of them are errors (p. 4-48), and so is `%var` (already declared, p. 4-49).  `%ifdef` of any of them is true, since `%ifdef` tests "declared with %var", not true (p. 4-49): so `%IFDEF obj_$bin` is true while `%IF obj_$bin` is false.  With this, `dpc --check-only` over a copy of SR10.2 base.ins.pas preprocesses cleanly and takes the SR10 m68k branches; the remaining errors are semantic (the `[aligned(1)]` and `[volatile]` attributes, not supported yet).  Since domain-pascal-l9p/-t36 (alignment and `volatile`/`atomic`/`device` attributes) it checks clean (codegen-patterns 5.4).
 
+## 4.7 Precedence of not / and / or in %if predicates (p. 4-46; PDF p. 179)
+Asked: 2026-10-11, by the lead agent (open question 3; lexer/preprocessor work)
+Passage: "A predicate can contain ... Optional Boolean keywords not, and, or or" (no precedence given).
+Question: what precedence do `not`, `and` and `or` have in a predicate?
+Owner's answer (2026-10-13): standard Pascal operator precedence: `not` (with the other unary operators) highest, then the multiplying operators including `and`, then the adding operators including `or`, then the relational operators.
+Consequence: no change; dpc already evaluates `not` > `and` > `or` (Table 4-3, p. 4-4).  The TODO(ref-question) in `crates/dpc-syntax/src/preprocess.rs` (`Pred`) is replaced by a citation of this ruling.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -69,7 +76,7 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
    `dpc --check-only` accepts all three forms (checked).  This shows
    that a directive ends a `%var` list on the same line; it does not
    settle how a list ends before an ordinary token such as `module`.
-3. **4.7, p. 4-46, predicates.** "Optional Boolean keywords not, and, or
+3. **ANSWERED 2026-10-13 (see Clarifications above).  4.7, p. 4-46, predicates.** "Optional Boolean keywords not, and, or
    or": no precedence is given.  *Current: Table 4-3 order, not > and > or.*
 4. **2.1.2, p. 2-2 (PDF p. 35).** The integer example uses
    `/* default (base 10) */` comments, but 2.1.4 lists only `{ }`,
