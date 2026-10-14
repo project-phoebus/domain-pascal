@@ -909,14 +909,29 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
         data_base_label(&data.section)
     );
     let size = data.size.div_ceil(4) * 4;
-    let bytes = data_bytes(data, size);
+    let (bytes, addrs) = data_bytes(data, size);
+    // Labels of `define`d variables and addresses, in offset order (a
+    // label before the address at its offset).
+    let mut marks: Vec<(u32, Option<&str>, Option<&dpc_ir::InitAddr>)> = data
+        .globals
+        .iter()
+        .map(|(sym, off)| (*off, Some(sym.as_str()), None))
+        .chain(addrs.iter().map(|(off, a)| (*off, None, Some(*a))))
+        .collect();
+    marks.sort_by_key(|&(off, _, a)| (off, a.is_some()));
     let mut at = 0;
-    for (sym, off) in &data.globals {
-        if *off > at {
-            out.push_str(&data_run(&bytes[at as usize..*off as usize]));
-            at = *off;
+    for (off, sym, addr) in marks {
+        if off > at {
+            out.push_str(&data_run(&bytes[at as usize..off as usize]));
+            at = off;
         }
-        out.push_str(&format!("\t.globl\t{sym}\n{sym}:\n"));
+        if let Some(sym) = sym {
+            out.push_str(&format!("\t.globl\t{sym}\n{sym}:\n"));
+        }
+        if let Some(a) = addr {
+            out.push_str(&format!("\t.long\t{}\n", init_addr_operand(a)));
+            at = off + 4;
+        }
     }
     if size > at {
         out.push_str(&data_run(&bytes[at as usize..size as usize]));
@@ -924,13 +939,38 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
     out
 }
 
+/// The assembler operand of an address initial value: the symbol, or the
+/// data area's [`data_base_label`], plus the offset.  The assembler
+/// leaves a 32-bit absolute relocation against it.
+fn init_addr_operand(a: &dpc_ir::InitAddr) -> String {
+    let (base, offset) = match a {
+        dpc_ir::InitAddr::Symbol { name, offset } => (name.clone(), *offset),
+        dpc_ir::InitAddr::Static { section, offset } => (data_base_label(section), *offset),
+    };
+    match offset {
+        0 => base,
+        o if o > 0 => format!("{base}+{o}"),
+        o => format!("{base}-{}", -i64::from(o)),
+    }
+}
+
 /// The `size` bytes of a data block: zeros, then each initial value
 /// written in order (a later one overwrites an earlier one).  Integers
-/// are big-endian.
-fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> Vec<u8> {
+/// are big-endian.  Addresses are left zero in the bytes and returned
+/// by offset (4 bytes each); the IR has refused a later value that
+/// overwrites only part of one, and one that overwrites all of it drops
+/// it.
+fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> (Vec<u8>, Vec<(u32, &dpc_ir::InitAddr)>) {
     let mut bytes = vec![0u8; size as usize];
+    let mut addrs: Vec<(u32, &dpc_ir::InitAddr)> = Vec::new();
     for init in &data.init {
         let at = init.offset as usize;
+        let n = match &init.value {
+            dpc_ir::InitValue::Int { size, .. } => *size,
+            dpc_ir::InitValue::Bytes(b) => b.len() as u32,
+            dpc_ir::InitValue::Address(_) => 4,
+        };
+        addrs.retain(|&(o, _)| o + 4 <= init.offset || o >= init.offset + n);
         match &init.value {
             dpc_ir::InitValue::Int { size, value } => {
                 let n = *size as usize;
@@ -938,9 +978,13 @@ fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> Vec<u8> {
                 bytes[at..at + n].copy_from_slice(&be[8 - n..]);
             }
             dpc_ir::InitValue::Bytes(b) => bytes[at..at + b.len()].copy_from_slice(b),
+            dpc_ir::InitValue::Address(a) => {
+                bytes[at..at + 4].fill(0);
+                addrs.push((init.offset, a));
+            }
         }
     }
-    bytes
+    (bytes, addrs)
 }
 
 /// Directives for a run of data bytes: `.space n` for zeros (also what

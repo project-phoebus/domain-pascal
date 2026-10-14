@@ -130,7 +130,47 @@ pub enum Storage {
 pub struct InitStore {
     pub offset: u32,
     pub ty: TypeId,
-    pub value: ConstValue,
+    pub value: InitDatum,
+}
+
+/// The value of one [`InitStore`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitDatum {
+    Const(ConstValue),
+    /// `addr(...)` of an object with a static address (owner's ruling on
+    /// 3.13.4, p. 3-51; docs/reference-clarifications.md "3.13.4
+    /// addr(...) as an initial value"): a pointer-sized address, fixed
+    /// at link time.
+    Addr(StaticAddr),
+}
+
+impl From<ConstValue> for InitDatum {
+    fn from(c: ConstValue) -> Self {
+        InitDatum::Const(c)
+    }
+}
+
+impl PartialEq<ConstValue> for InitDatum {
+    fn eq(&self, other: &ConstValue) -> bool {
+        matches!(self, InitDatum::Const(c) if c == other)
+    }
+}
+
+/// An address known at link time: `offset` bytes into `base`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaticAddr {
+    pub base: StaticBase,
+    pub offset: i64,
+}
+
+/// What a [`StaticAddr`] is relative to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticBase {
+    /// A routine's entry (a top-level routine that is not `internal`,
+    /// ref 3.13.3 p. 3-50).
+    Routine(RoutineId),
+    /// A variable with [`Storage::Static`] or [`Storage::Extern`].
+    Var(VarId),
 }
 
 /// A procedure or function.

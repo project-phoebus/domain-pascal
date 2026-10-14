@@ -106,8 +106,28 @@ pub struct DataInit {
 /// string, ref 3.9.3 Figure 3-6 p. 3-16; a string's characters).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitValue {
-    Int { size: u32, value: i64 },
+    Int {
+        size: u32,
+        value: i64,
+    },
     Bytes(Vec<u8>),
+    /// A pointer-sized address fixed at link time: `addr(...)` of an
+    /// object with a static address (owner's ruling on 3.13.4, p. 3-51;
+    /// docs/reference-clarifications.md "3.13.4 addr(...) as an initial
+    /// value").  The target emits it with a relocation.
+    Address(InitAddr),
+}
+
+/// The address of an [`InitValue::Address`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitAddr {
+    /// A symbol + offset: a routine, or another unit's (`extern`)
+    /// variable.
+    Symbol { name: String, offset: i32 },
+    /// The unit's own static data area of Pascal data section `section`
+    /// ([`DataArea::section`]) + offset: a variable of the unit, `define`d
+    /// or not (a `static` one has no symbol, ref 7.2).
+    Static { section: String, offset: i32 },
 }
 
 /// One routine with a body.

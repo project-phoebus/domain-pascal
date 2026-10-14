@@ -53,6 +53,11 @@ Tests:
   array, boolean, enumeration, `nil`, sets; values from TTY's .DATA
   0xE8242C, WIRED_DATA 0xE2DDB4, OS_INIT_DATA 0xE351B0), a section with
   no initial value left NOBITS.
+- `data/addr_init` - codegen-patterns 11 ("Initial values",
+  addresses): `addr(...)` initial values as relocated `.long`s (a
+  routine, another unit's variable plus an offset, the unit's own data
+  area plus an offset; FLP_ 0xE7AEF4, WIN_ 0xE2B89C), owner's ruling on
+  3.13.4 p. 3-51.
 - `data/with` - codegen-patterns 5.2 ("`with`", "`addr(x)` as a
   value"), 1.5: records named in place, a unit pointer held for the
   body, an element through a pointer (NETLOG_$LOG_IT 0xE71BB6..0xE71BFC),

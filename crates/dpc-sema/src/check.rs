@@ -1534,7 +1534,18 @@ impl<'t> Checker<'t> {
                         None
                     } else {
                         let mut stores = Vec::new();
+                        // A variable an initial value names (`addr(v)`,
+                        // ref 3.13.4) is a relocation in the data, not an
+                        // access by the routine's body: keep it out of
+                        // the routine's `static_refs`.
+                        let refs = self
+                            .ctx
+                            .last()
+                            .map(|c| (c.id, self.routines[c.id.0 as usize].static_refs.len()));
                         self.init(ty, 0, init, &mut stores);
+                        if let Some((id, n)) = refs {
+                            self.routines[id.0 as usize].static_refs.truncate(n);
+                        }
                         Some(stores)
                     }
                 }
@@ -1666,6 +1677,76 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// The link-time address an initial value `x` denotes, if it is
+    /// `addr(...)` of an object with a static address (owner's ruling on
+    /// 3.13.4, p. 3-51; docs/reference-clarifications.md "3.13.4
+    /// addr(...) as an initial value"): a routine (`addr(r)`, already
+    /// limited to top-level routines that are not `internal`, ref 3.13.3
+    /// p. 3-50), or a unit-level, `static`, `define`d or `extern`
+    /// variable, or a field or element of one at a constant offset.
+    /// `Err(Some(msg))`: an `addr` with no static address; `Err(None)`:
+    /// not an `addr` at all.
+    fn static_addr(&self, x: &Expr) -> Result<StaticAddr, Option<String>> {
+        match &x.kind {
+            ExprKind::RoutineAddr(r) => Ok(StaticAddr {
+                base: StaticBase::Routine(*r),
+                offset: 0,
+            }),
+            ExprKind::Builtin {
+                builtin: Builtin::Addr,
+                args,
+            } if args.len() == 1 => self.static_designator(&args[0]).map_err(Some),
+            _ => Err(None),
+        }
+    }
+
+    /// The static address of designator `d` (see [`Checker::static_addr`]).
+    fn static_designator(&self, d: &Expr) -> Result<StaticAddr, String> {
+        match &d.kind {
+            ExprKind::Var { var, .. } => match &self.vars[var.0 as usize].storage {
+                Storage::Static { .. } | Storage::Extern { .. } => Ok(StaticAddr {
+                    base: StaticBase::Var(*var),
+                    offset: 0,
+                }),
+                Storage::Frame { .. } | Storage::Param { .. } => Err(format!(
+                    "`addr` of `{}` is not a valid initial value: a routine's variable or \
+                     parameter has no static address (ref 3.13.4, p. 3-51)",
+                    self.vars[var.0 as usize].name
+                )),
+            },
+            // A packed record's field that is a whole byte, word or
+            // longword has an address, `offset` (ref 3.10.7; as
+            // `addr` of one in a statement); a bit field has none and
+            // `addr` has already refused it.
+            ExprKind::Field { base, offset, .. } if !self.is_bit_field(d) => {
+                let mut a = self.static_designator(base)?;
+                a.offset += i64::from(*offset);
+                Ok(a)
+            }
+            ExprKind::Index {
+                base,
+                index,
+                lo,
+                elem_size,
+            } => {
+                let mut a = self.static_designator(base)?;
+                let Some(k) = index.value.as_ref().and_then(|v| v.ordinal()) else {
+                    return Err(
+                        "`addr` of an element with a variable index is not a valid initial value"
+                            .into(),
+                    );
+                };
+                a.offset += (k - lo) * i64::from(*elem_size);
+                Ok(a)
+            }
+            _ => Err(
+                "`addr` of an object with no static address is not a valid initial value \
+                 (ref 3.13.4, p. 3-51)"
+                    .into(),
+            ),
+        }
+    }
+
     /// Flatten an initialiser for an object of type `ty` at byte `base`.
     fn init(&mut self, ty: TypeId, base: u32, init: &ast::Init, out: &mut Vec<InitStore>) {
         match init {
@@ -1678,14 +1759,22 @@ impl<'t> Checker<'t> {
                 if !char_into_array && !self.check_assignable(ty, &x, e.span) {
                     return;
                 }
-                match x.value {
-                    Some(value) => out.push(InitStore {
-                        offset: base,
-                        ty,
-                        value,
-                    }),
-                    None => self.error(e.span, "initial value must be a constant"),
+                if self.types.is_error(x.ty) {
+                    return;
                 }
+                let value = match x.value {
+                    Some(value) => InitDatum::Const(value),
+                    None => match self.static_addr(&x) {
+                        Ok(a) => InitDatum::Addr(a),
+                        Err(Some(msg)) => return self.error(e.span, msg),
+                        Err(None) => return self.error(e.span, "initial value must be a constant"),
+                    },
+                };
+                out.push(InitStore {
+                    offset: base,
+                    ty,
+                    value,
+                });
             }
             ast::Init::List { items, span } => match self.types.kind(ty).clone() {
                 TypeKind::Set { elem } => {
@@ -1723,7 +1812,7 @@ impl<'t> Checker<'t> {
                     out.push(InitStore {
                         offset: base,
                         ty,
-                        value: ConstValue::Set(members),
+                        value: InitDatum::Const(ConstValue::Set(members)),
                     });
                 }
                 TypeKind::Array { index, elem, .. } => {

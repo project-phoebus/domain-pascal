@@ -85,7 +85,7 @@ Asked: 2026-10-14, by the corpus agent (open question 36; bead domain-pascal-bjz
 Passage: "Domain Pascal permits you to initialize the values of pointer variables within its variable declaration in most cases"; the only example is `NIL`.  Apollo initialises routine-pointer fields with `init := addr(my_driver_$init),` (hardcopy driver_init_ex.pas, filter_init_ex.pas, recno.pas, scramble.pas).
 Question: is `addr(routine)` (or `addr(variable)`) allowed as an initial value?
 Owner's answer (2026-10-14): permit `addr(...)` in initialisers; Apollo's code clearly uses it.
-Consequence: implemented under bead domain-pascal-bjz.  The initial value is static data, so the lead reads this as `addr` of objects with a static address (routines; module-level, static, define and extern variables), emitted as an address with a relocation; `addr` of a routine's ordinary local is still refused.
+Consequence: implemented under bead domain-pascal-bjz.  The initial value is static data, so the lead reads this as `addr` of objects with a static address (routines; module-level, static, define and extern variables), emitted as an address with a relocation; `addr` of a routine's ordinary local is still refused.  As in any `addr`, a nested or `internal` routine's address stays refused (3.13.3, p. 3-50: "you cannot obtain the addresses of nested or explicitly declared internal procedures and functions").  Fields and elements of static variables at constant offsets are accepted; an element at a variable index is refused.
 
 ## "Type Transfer Functions" (p. 4-197): integer constant to a pointer type
 Asked: 2026-10-14, by the lead agent (bead domain-pascal-gqp; found by the corpus test in domain_examples/streams/sasc/misc.pas)

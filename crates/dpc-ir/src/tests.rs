@@ -3596,6 +3596,115 @@ end;
     );
 }
 
+/// Owner's ruling on 3.13.4, p. 3-51 (docs/reference-clarifications.md
+/// "3.13.4 addr(...) as an initial value"): `addr(...)` initial values
+/// are addresses fixed at link time: a routine's or another unit's
+/// symbol, or the unit's data area (a `static` variable has no symbol),
+/// plus an offset.
+#[test]
+fn address_initial_values() {
+    use crate::{DataInit, InitAddr, InitValue};
+    let m = lower_src(
+        "module m;
+type pr = ^procedure(in x: integer32);
+     epv = record init: pr; mon: pr; data: ^integer32 end;
+procedure m_$ext(in x: integer32); extern;
+procedure m_$init(in x: integer32); forward;
+var
+  c: integer32;
+  t: array[1..3] of integer32;
+  o: extern integer32;
+  v: epv := [init := addr(m_$init), mon := nil, data := addr(c)];
+  pt: ^integer32 := addr(t[2]);
+  po: ^integer32 := addr(o);
+  pr2: pr := addr(m_$ext);
+procedure m_$init;
+var s: static ^integer32 := addr(t[3]);
+begin
+  c := x;
+end;
+",
+    )
+    .unwrap();
+    let sym = |offset, name: &str, off| DataInit {
+        offset,
+        value: InitValue::Address(InitAddr::Symbol {
+            name: name.into(),
+            offset: off,
+        }),
+    };
+    let stat = |offset, off| DataInit {
+        offset,
+        value: InitValue::Address(InitAddr::Static {
+            section: ".data".into(),
+            offset: off,
+        }),
+    };
+    assert_eq!(
+        m.data[0].init,
+        vec![
+            sym(16, "M_$INIT", 0),
+            DataInit {
+                offset: 20,
+                value: InitValue::Int { size: 4, value: 0 },
+            },
+            stat(24, 0),
+            stat(28, 8),
+            sym(32, "O", 0),
+            sym(36, "M_$EXT", 0),
+            stat(40, 12),
+        ]
+    );
+}
+
+/// A routine's `static` variable in its own data section may hold the
+/// address of a variable of another data section: a relocation, not an
+/// access through the routine's data base (which reaches only its own
+/// section's block, codegen-patterns 4, 11).
+#[test]
+fn address_initial_value_across_data_sections() {
+    use crate::{InitAddr, InitValue};
+    let m = lower_src(
+        "module m, mcode, mdata;
+var c: integer32; d: integer32;
+[section(pc, pdata)]
+procedure m_$p;
+var s: static integer32; ps: static univ_ptr := addr(d);
+begin
+  s := 1;
+end;
+",
+    )
+    .unwrap();
+    let pdata = m.data.iter().find(|d| d.section == "pdata").unwrap();
+    assert_eq!(
+        pdata.init[0].value,
+        InitValue::Address(InitAddr::Static {
+            section: "mdata".into(),
+            offset: 4,
+        })
+    );
+}
+
+/// A later initial value over part of an address (a variant's field)
+/// is refused: its bytes would be the address's.
+#[test]
+fn initial_value_over_part_of_an_address_is_refused() {
+    let e = lower_src(
+        "module m;
+type r = record case integer of 1: (p: ^integer32); 2: (w: integer) end;
+var c: integer32; v: r := [p := addr(c), w := 1];
+procedure z; begin end;
+",
+    )
+    .unwrap_err();
+    assert!(
+        e.iter()
+            .any(|d| d.contains("an initial value over part of an address initial value")),
+        "{e:#?}"
+    );
+}
+
 /// The single statement of the single routine of `src`.
 fn only_stmt(src: &str) -> StmtKind {
     let m = lower_src(src).unwrap_or_else(|e| panic!("{e:#?}"));

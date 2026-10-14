@@ -2121,7 +2121,17 @@ impl<'a> Parser<'a> {
                 }
                 T::LParen if !matches!(e.kind, ExprKind::Str(_)) => {
                     self.bump();
-                    let args = self.expr_list()?;
+                    // An empty argument list `name()` is a call with no
+                    // arguments, the same as `name` (owner's ruling on
+                    // 5.1, p. 5-3; docs/reference-clarifications.md "5.1
+                    // Empty argument lists").  Applying it to function and
+                    // routine-pointer calls (`alloc_db()`, `p^()`) is the
+                    // lead's reading, pending the owner's confirmation.
+                    let args = if self.at(&T::RParen) {
+                        Vec::new()
+                    } else {
+                        self.expr_list()?
+                    };
                     self.expect(&T::RParen)?;
                     ExprKind::Call {
                         callee: Box::new(e),

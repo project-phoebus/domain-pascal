@@ -2235,3 +2235,37 @@ fn internal_error_backstop() {
     assert!(r.success());
     assert!(out.exists());
 }
+
+/// Owner's ruling on 5.1, p. 5-3 (docs/reference-clarifications.md "5.1
+/// Empty argument lists"): `q();` is the call `q;`.  The function and
+/// routine-pointer forms are the lead's reading.  The code is identical.
+#[test]
+fn empty_argument_lists_compile_like_bare_names() {
+    let bare = "module eal;
+type pp = ^procedure; fp = ^function: integer32;
+var i: integer32; vp: pp; vf: fp;
+procedure q; extern;
+function f: integer32; extern;
+procedure p;
+begin
+  q;
+  i := f;
+  vp^;
+  i := vf^;
+  i := f + 1;
+end;
+";
+    let parens = bare
+        .replace("  q;", "  q();")
+        .replace("i := f;", "i := f();")
+        .replace("vp^;", "vp^();")
+        .replace("i := vf^;", "i := vf^();")
+        .replace("f + 1", "f() + 1");
+    assert_ne!(bare, parens);
+    // The first line names the source file.
+    let body = |s: String| s.split_once('\n').unwrap().1.to_string();
+    let a = body(compile_with("eal_bare", bare, &[]).unwrap());
+    let b = body(compile_with("eal_parens", &parens, &[]).unwrap());
+    assert!(a.contains("jsr\t(Q).l"), "{a}");
+    assert_eq!(a, b);
+}

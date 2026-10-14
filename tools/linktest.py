@@ -845,6 +845,15 @@ def plan_data(u, root, obj, blocks, symtab, ctx, linkmap, dpc):
     # a block with initial values: its bytes, before --data-base drops it
     ours = {sec: section_bytes(root, obj, sec) for sec in blocks
             if sec.startswith(INIT_DATA_PREFIX)}
+    # an address initial value (bead domain-pascal-bjz) is a relocation
+    # whose bytes in the object are not final: not comparable either
+    for sec in sorted(ours):
+        rel = sorted(relocated_offsets(root, obj, sec, 0, len(ours[sec])))
+        if rel:
+            errs.append('%s: initial bytes: the dpc object has a relocation at +0x%X; '
+                        'its bytes cannot be compared' % (sec, rel[0]))
+    if errs:
+        return [], errs
     obj2, _, _, left, symtab2 = compile_unit(u, linkmap, dpc, root, bases)
     assert obj2 == obj
     if left:
@@ -902,14 +911,20 @@ def c_initial_bytes(root, cobj, sym, size):
     if 'CONTENTS' not in flags:
         return bytes(size), set()
     data = section_bytes(root, cobj, sec)[value:value + size]
+    return data, relocated_offsets(root, cobj, sec, value, size)
+
+
+def relocated_offsets(root, obj, sec, value, size):
+    """The offsets, from `value' and below `size', of section `sec' of
+    relocatable object `obj' that a relocation fills in."""
     relocated = set()
-    for l in must(['m68k-elf-objdump', '-r', '-j', sec, cobj], cwd=root).splitlines():
+    for l in must(['m68k-elf-objdump', '-r', '-j', sec, obj], cwd=root).splitlines():
         m = re.match(r'^([0-9a-fA-F]{8})\s+R_68K_(\w+)', l)
         if m:
             off = int(m.group(1), 16) - value
             n = {'32': 4, '16': 2, '8': 1}.get(re.sub(r'^PC', '', m.group(2)), 4)
             relocated.update(o for o in range(off, off + n) if 0 <= o < size)
-    return data, relocated
+    return relocated
 
 
 def run_all(args):

@@ -66,11 +66,11 @@ diag	domain_examples/gpr_examples/gpr_pixel_formats.pas	undefined identifier `_`
 diag	domain_examples/gpr_examples/intersecting_lines.pas	include file `_` not found
 diag	domain_examples/gpr_examples/my_include_file.pas	include file `_` not found
 diag	domain_examples/gpr_examples/raster_ops_in_blts.pas	include file `_` not found
-diag	domain_examples/hardcopy/driver/driver_ex.pas	expected expression, found `_`
+diag	domain_examples/hardcopy/driver/driver_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/hardcopy/driver/driver_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/hardcopy/filter/filter_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/hardcopy/filter/filter_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
-diag	domain_examples/streams/recno/recno.pas	initial value must be a constant
+diag	domain_examples/streams/recno/recno.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 diag	domain_examples/streams/sasc/imex.pas	`_` of an `_` parameter (or a part of one) is not supported yet
 diag	domain_examples/streams/sasc/init.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 diag	domain_examples/streams/sasc/io.pas	argument type T does not match parameter type T
@@ -87,4 +87,4 @@ diag	sys/source/emt/siorf.pas	expected `_`, found `_`
 diag	sys/source/emt/siotf.pas	expected `_`, found `_`
 diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
 diag	usr/X11/examples/dmwin/dmwin.pas	argument type T does not match parameter type T
-diag	usr/X11/examples/pascal/xhw1.pas	expected expression, found `_`
+diag	usr/X11/examples/pascal/xhw1.pas	constant expression expected

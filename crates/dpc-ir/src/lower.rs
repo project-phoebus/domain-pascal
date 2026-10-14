@@ -7,8 +7,9 @@
 
 use dpc_sema::conv::{Passing, ResultReg};
 use dpc_sema::{
-    Builtin, Call as SCall, Callee as SCallee, Expr as SExpr, ExprKind, Program, Routine,
-    RoutineId, Stmt as SStmt, StmtKind as SStmtKind, Storage, VarId,
+    Builtin, Call as SCall, Callee as SCallee, Expr as SExpr, ExprKind, InitDatum, Program,
+    Routine, RoutineId, StaticAddr, StaticBase, Stmt as SStmt, StmtKind as SStmtKind, Storage,
+    VarId,
 };
 use dpc_syntax::ast::{BinOp, ForDir, ParamMode, UnOp};
 use dpc_syntax::{Diagnostic, Span};
@@ -19,9 +20,9 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Access, Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea,
-    DataBaseOptions, DataInit, Expr, ForLoop, Function, InitValue, LinkArg, Module, Nesting,
-    ParamCopy, PoolConst, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt,
-    StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    DataBaseOptions, DataInit, Expr, ForLoop, Function, InitAddr, InitValue, LinkArg, Module,
+    Nesting, ParamCopy, PoolConst, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink,
+    Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -152,8 +153,13 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
             errors.push(d);
         }
         if let Some(stores) = &v.init {
+            let first = inits.len();
             for st in stores {
-                match init_value(&p.types, st.ty, &st.value) {
+                let value = match &st.value {
+                    InitDatum::Const(c) => init_value(&p.types, st.ty, c),
+                    InitDatum::Addr(a) => init_addr(p, st.ty, a),
+                };
+                match value {
                     Ok(value) => inits.push((
                         section.as_str(),
                         DataInit {
@@ -163,6 +169,16 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
                     )),
                     Err(what) => errors.push(unsupported(v.span, what)),
                 }
+            }
+            let mine: Vec<&DataInit> = inits[first..].iter().map(|(_, d)| d).collect();
+            if address_partly_overwritten(&mine) {
+                // A later initial value (a variant's field, ref 3.10.4
+                // p. 3-22) over part of an address: its bytes would be
+                // the address's link-time value.
+                errors.push(unsupported(
+                    v.span,
+                    "an initial value over part of an address initial value is",
+                ));
             }
         }
         if !used.contains(&section.as_str()) {
@@ -198,6 +214,62 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
             }
         })
         .collect())
+}
+
+/// Whether a value of `inits` (one variable's, in order) overwrites
+/// part, not all, of an earlier address (4 bytes, [`init_addr`]).
+fn address_partly_overwritten(inits: &[&DataInit]) -> bool {
+    let size = |d: &DataInit| match &d.value {
+        InitValue::Int { size, .. } => *size,
+        InitValue::Bytes(b) => b.len() as u32,
+        InitValue::Address(_) => 4,
+    };
+    inits.iter().enumerate().any(|(i, a)| {
+        matches!(a.value, InitValue::Address(_))
+            && inits[i + 1..].iter().any(|b| {
+                let (lo, hi) = (b.offset, b.offset + size(b));
+                let overlaps = lo < a.offset + 4 && hi > a.offset;
+                overlaps && !(lo <= a.offset && hi >= a.offset + 4)
+            })
+    })
+}
+
+/// The initial value `addr(...)` of an object of type `ty`, a pointer
+/// (one store of `dpc_sema::InitStore`): a symbol or the unit's data area
+/// plus an offset, emitted as a relocated long.  Image: compiled modules'
+/// data areas hold their routines' entry addresses as plain longs (FLP_ D
+/// 0xE7AEF4: FLP_$SHUTDOWN 0xE3E228 at +0x04, FLP_$DINIT, FLP_$REVALIDATE,
+/// FLP_$DO_IO at +0x08..+0x10; WIN_ D 0xE2B89C: WIN_$SPIN_DOWN 0xE19BC0 at
+/// +0x10).  Whether those came from Pascal initialisers is not known.
+fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, String> {
+    if p.types.size(ty) != 4 {
+        return Err(format!(
+            "an address as the initial value of a {} is",
+            p.types.display(ty)
+        ));
+    }
+    let offset = i32::try_from(a.offset).map_err(|_| "an address offset this large is")?;
+    Ok(InitValue::Address(match a.base {
+        StaticBase::Routine(r) => InitAddr::Symbol {
+            name: p.routine(r).symbol.clone(),
+            offset,
+        },
+        StaticBase::Var(v) => match &p.var(v).storage {
+            Storage::Extern { symbol } => InitAddr::Symbol {
+                name: symbol.clone(),
+                offset,
+            },
+            Storage::Static {
+                section, offset: o, ..
+            } => InitAddr::Static {
+                section: section.clone(),
+                offset: *o as i32 + offset,
+            },
+            Storage::Frame { .. } | Storage::Param { .. } => {
+                return Err("an address of a routine's variable as an initial value is".into())
+            }
+        },
+    }))
 }
 
 /// The initial value `value` of an object of type `ty` (one store of

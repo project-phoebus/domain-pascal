@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::consts::ConstValue;
-use crate::program::{ExprKind, InitStore, StmtKind, Storage};
+use crate::program::{ExprKind, InitDatum, InitStore, StaticAddr, StaticBase, StmtKind, Storage};
 
 // ---------------------------------------------------------------------
 // Diagnostics carry positions
@@ -120,38 +120,152 @@ fn initialisers_flatten_to_stores() {
             InitStore {
                 offset: 0,
                 ty: i16,
-                value: ConstValue::Int(1)
+                value: ConstValue::Int(1).into()
             },
             InitStore {
                 offset: 2,
                 ty: i16,
-                value: ConstValue::Int(7)
+                value: ConstValue::Int(7).into()
             },
             InitStore {
                 offset: 4,
                 ty: i16,
-                value: ConstValue::Int(7)
+                value: ConstValue::Int(7).into()
             },
             InitStore {
                 offset: 6,
                 ty: i16,
-                value: ConstValue::Int(9)
+                value: ConstValue::Int(9).into()
             },
         ]
     );
     let rec = var(&p, "rec").init.clone().unwrap();
     assert_eq!(
         (rec[0].offset, rec[0].value.clone()),
-        (2, ConstValue::Int(5))
+        (2, ConstValue::Int(5).into())
     );
     assert_eq!(
         (rec[1].offset, rec[1].value.clone()),
-        (0, ConstValue::Char(b'x'))
+        (0, ConstValue::Char(b'x').into())
     );
     assert_eq!(
         var(&p, "flags").init.as_ref().unwrap()[0].value,
         ConstValue::Set(vec![0, 3, 4, 5])
     );
+}
+
+/// Owner's ruling on 3.13.4, p. 3-51 (docs/reference-clarifications.md
+/// "3.13.4 addr(...) as an initial value"): `addr(...)` of an object with
+/// a static address is an initial value; Apollo's hardcopy
+/// driver_init_ex.pas has `init := addr(my_driver_$init),`.
+#[test]
+fn addr_initial_values() {
+    let p = module(
+        "type pr = ^procedure(in x: integer32);
+              epv = record init: pr; mon: pr; data: ^integer32 end;
+         procedure q(in x: integer32); extern;
+         procedure d(in x: integer32); forward;
+         var c: integer32; t: array[1..3] of integer32; o: extern integer32;
+             e: extern epv;
+             v: epv := [init := addr(q), mon := nil, data := addr(c)];
+             pt: ^integer32 := addr(t[2]);
+             po: ^integer32 := addr(o);
+             pe: univ_ptr := addr(e.data);
+             dd: extern ^integer32;
+         define dd := addr(t[3]);
+         procedure d; var s: static ^integer32 := addr(c); begin end;",
+    );
+    let q = p.find_routine("q").unwrap();
+    let vid = |n: &str| p.find_var(n).unwrap();
+    let at = |base, offset| InitDatum::Addr(StaticAddr { base, offset });
+    let v = var(&p, "v").init.clone().unwrap();
+    assert_eq!(
+        v.iter()
+            .map(|s| (s.offset, s.value.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, at(StaticBase::Routine(q), 0)),
+            (4, ConstValue::Nil.into()),
+            (8, at(StaticBase::Var(vid("c")), 0)),
+        ]
+    );
+    let one = |n: &str| var(&p, n).init.as_ref().unwrap()[0].value.clone();
+    assert_eq!(one("pt"), at(StaticBase::Var(vid("t")), 4));
+    assert_eq!(one("po"), at(StaticBase::Var(vid("o")), 0));
+    assert_eq!(one("pe"), at(StaticBase::Var(vid("e")), 8));
+    assert_eq!(one("dd"), at(StaticBase::Var(vid("t")), 8));
+    assert_eq!(one("s"), at(StaticBase::Var(vid("c")), 0));
+
+    // A routine's ordinary variable or parameter has no static address.
+    assert_err(
+        "module m; procedure p(x: integer32);
+         var l: integer32; s: static ^integer32 := addr(l); begin end;",
+        "`addr` of `l` is not a valid initial value: a routine's variable or parameter has no \
+         static address",
+    );
+    assert_err(
+        "module m; procedure p(x: integer32);
+         var s: static ^integer32 := addr(x); begin end;",
+        "`addr` of `x` is not a valid initial value",
+    );
+    // Nor what a pointer points to, nor an element at a variable index.
+    assert_err(
+        "module m; var p: ^integer32; q: ^integer32 := addr(p^);",
+        "`addr` of an object with no static address is not a valid initial value",
+    );
+    assert_err(
+        "module m; var i: integer; t: array[1..3] of integer32; q: ^integer32 := addr(t[i]);",
+        "`addr` of an element with a variable index is not a valid initial value",
+    );
+    // Type checking as for an assignment: the routine pointer template
+    // (ref p. 4-146), and only pointers take an address.
+    assert_err(
+        "module m; type pr = ^procedure(in x: integer32);
+         procedure q(in x: integer); extern; var v: pr := addr(q);",
+        "does not match the routine pointer type",
+    );
+    assert_err(
+        "module m; var c: integer32; i: integer32 := addr(c);",
+        "not compatible with the assignment variable (integer32 := univ_ptr)",
+    );
+    // ref 3.13.3 p. 3-50: no address of an internal or nested routine.
+    assert_err(
+        "module m; type pr = ^procedure; procedure q; internal; begin end;
+         var v: pr := addr(q);",
+        "the address of an internal routine cannot be taken",
+    );
+    // A packed record's field that is a whole byte or longword has an
+    // address (ref 3.10.7), as `addr` of one in a statement; a bit field
+    // has none (one error, `addr`'s).
+    let p = module(
+        "type pk = packed record b: 0..7; c: char; d: integer32; end;
+         var r: pk; pc: univ_ptr := addr(r.c); pd: univ_ptr := addr(r.d);",
+    );
+    let one = |n: &str| var(&p, n).init.as_ref().unwrap()[0].value.clone();
+    let r = p.find_var("r").unwrap();
+    assert_eq!(one("pc"), at(StaticBase::Var(r), 1));
+    assert_eq!(one("pd"), at(StaticBase::Var(r), 2));
+    let e = errs(
+        "module m; type pk = packed record b: 0..7; c: char; end;
+         var r: pk; pb: univ_ptr := addr(r.b);",
+    );
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert!(
+        e[0].contains("has no address (ref 3.10.3, 3.10.7)"),
+        "{e:#?}"
+    );
+    // A variable an initial value names is not a reference by the
+    // routine's body (its data section need not be the routine's).
+    let p = module(
+        "var c: integer32; d: integer32;
+         procedure q; var s: static univ_ptr := addr(c); begin d := 1 end;",
+    );
+    let refs: Vec<_> = routine(&p, "q").static_refs.iter().map(|r| r.0).collect();
+    assert_eq!(refs, vec![p.find_var("d").unwrap()]);
+    // Other non-constant values are still refused, with one message.
+    let e = errs("module m; var c: integer32; d: integer32 := c;");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert!(e[0].contains("initial value must be a constant"), "{e:#?}");
 }
 
 /// Bead domain-pascal-1dn (fuzzer, mutate seed 777): a set initialiser's
@@ -189,14 +303,17 @@ fn variant_and_packed_record_initialisers() {
     assert_eq!(s.len(), 1);
     assert_eq!(
         (s[0].offset, s[0].value.clone()),
-        (0, ConstValue::Int(0xB000E))
+        (0, ConstValue::Int(0xB000E).into())
     );
     let x = var(&p, "x").init.clone().unwrap();
     assert_eq!(
         x.iter()
             .map(|st| (st.offset, st.value.clone()))
             .collect::<Vec<_>>(),
-        vec![(0, ConstValue::Int(7)), (2, ConstValue::Char(b'q'))]
+        vec![
+            (0, ConstValue::Int(7).into()),
+            (2, ConstValue::Char(b'q').into())
+        ]
     );
     // A bit field of a packed record; a positional value for, or after,
     // a variant's field (not covered by ref 3.10.4).
@@ -650,6 +767,122 @@ fn argument_count() {
     );
     // `variable` routines may get fewer (ref 5.5.5 p. 5-17).
     module("procedure q(a, b: integer); options(extern, variable); procedure p; begin q(1) end;");
+}
+
+/// Owner's ruling on 5.1, p. 5-3 (docs/reference-clarifications.md "5.1
+/// Empty argument lists"): `q();` calls `q` with no arguments, like `q;`.
+/// Function and routine-pointer calls (`f()`, `fp^()`) follow the lead's
+/// reading, pending the owner's confirmation.
+#[test]
+fn empty_argument_lists() {
+    let p = module(
+        "type pp = ^procedure; fp = ^function: integer;
+         var i: integer; vp: pp; vf: fp;
+         procedure q; extern;
+         function f: integer; extern;
+         procedure p; begin q(); q; i := f(); i := f; vp^(); vp^; i := vf^(); i := vf^ end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    let shape = |k: &StmtKind| match k {
+        StmtKind::Call(c) => match &c.callee {
+            crate::program::Callee::Routine(r) => {
+                format!("call {} {}", p.routine(*r).name, c.args.len())
+            }
+            crate::program::Callee::Pointer(_) => format!("ptrcall {}", c.args.len()),
+        },
+        StmtKind::Assign { value, .. } => match &value.kind {
+            ExprKind::Call(c) => match &c.callee {
+                crate::program::Callee::Routine(r) => {
+                    format!("i := {} {}", p.routine(*r).name, c.args.len())
+                }
+                crate::program::Callee::Pointer(_) => format!("i := ptr {}", c.args.len()),
+            },
+            k => format!("{k:?}"),
+        },
+        k => format!("{k:?}"),
+    };
+    let got: Vec<String> = stmts.iter().map(|s| shape(&s.kind)).collect();
+    assert_eq!(
+        got,
+        [
+            "call q 0",
+            "call q 0",
+            "i := f 0",
+            "i := f 0",
+            "ptrcall 0",
+            "ptrcall 0",
+            "i := ptr 0",
+            "i := ptr 0",
+        ]
+    );
+    // A routine with parameters still needs its arguments.
+    assert_err(
+        "module m; procedure q(a: integer); extern; procedure p; begin q() end;",
+        "wrong number of arguments: 0 given, 1 expected",
+    );
+    assert_err(
+        "module m; var i: integer; function f(a: integer): integer; extern;
+         procedure p; begin i := f() end;",
+        "wrong number of arguments: 0 given, 1 expected",
+    );
+    assert_err(
+        "module m; type pp = ^procedure(a: integer); var vp: pp;
+         procedure p; begin vp^() end;",
+        "wrong number of arguments: 0 given, 1 expected",
+    );
+    // `()` does not change what kind of routine may be called where.
+    assert_err(
+        "module m; var i: integer; procedure q; extern; procedure p; begin i := q() end;",
+        "procedure `q` used as a value",
+    );
+    // Only a routine (or routine pointer) can be called: `()` after a
+    // variable, a data pointer, a constant or a call is no call.
+    for (src, msg) in [
+        (
+            "var i, x: integer; procedure p; begin i := x() end;",
+            "function call expected",
+        ),
+        (
+            "var i: integer; x: ^integer; procedure p; begin i := x^() end;",
+            "function call expected",
+        ),
+        (
+            "var i: integer; procedure p; begin i := nil() end;",
+            "function call expected",
+        ),
+        (
+            "var x: integer; procedure p; begin x() end;",
+            "procedure call expected",
+        ),
+        (
+            "procedure q; extern; procedure p; begin q()() end;",
+            "procedure call expected",
+        ),
+        (
+            "var i: integer32; procedure p; begin i := integer32() end;",
+            "a type transfer takes one argument",
+        ),
+        (
+            "var i: integer; procedure p; begin i := abs() end;",
+            "`abs` takes 1 argument(s)",
+        ),
+    ] {
+        assert_err(&format!("module m; {src}"), msg);
+    }
+    // Inside a function, `f()` on the right is a recursive call, as `f`
+    // alone is; the left `f` is the result.
+    let p = module("function f: integer; begin f := f() + 1 end;");
+    let StmtKind::Assign { value, .. } = &routine(&p, "f").body.as_ref().unwrap().stmts[0].kind
+    else {
+        panic!()
+    };
+    let ExprKind::Binary { lhs, .. } = &value.kind else {
+        panic!("{value:?}")
+    };
+    assert!(
+        matches!(&lhs.kind, ExprKind::Call(c) if c.args.is_empty()),
+        "{lhs:?}"
+    );
 }
 
 #[test]

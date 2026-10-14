@@ -285,6 +285,21 @@ class DataTest(unittest.TestCase):
         # a relocation past the declared bytes does not matter
         self.assertIsNone(f(sec, b'\0', o, obj, b'\0\0', {1}))
 
+    def test_relocated_offsets(self):
+        # a dpc block with an address initial value (bead domain-pascal-bjz):
+        # its relocated bytes are zeros in the object, not comparable
+        if shutil.which('m68k-elf-as') is None:
+            self.skipTest('m68k-elf-as not found')
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'a.s'), 'w') as f:
+                f.write('\t.section ".moddata.A","aw",@progbits\n.Ldata:\n'
+                        '\t.byte 0,7\n\t.space 2\n\t.long X+4\n\t.long .Ldata\n')
+            subprocess.run(['m68k-elf-as', '-m68010', '-o', 'a.o', 'a.s'], cwd=d, check=True)
+            self.assertEqual(linktest.relocated_offsets(d, 'a.o', '.moddata.A', 0, 12),
+                             set(range(4, 12)))
+            self.assertEqual(linktest.relocated_offsets(d, 'a.o', '.moddata.A', 4, 6),
+                             set(range(0, 6)))
+
     def test_parse_nm_sizes(self):
         self.assertEqual(self.c_data['PROC1_$DATA'],
                          ('build/sau2/proc1/proc1_data.o', 0xCC4))

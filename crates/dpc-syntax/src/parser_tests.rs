@@ -1074,6 +1074,36 @@ fn assignment_and_calls() {
     );
 }
 
+/// Owner's ruling on 5.1, p. 5-3 (docs/reference-clarifications.md "5.1
+/// Empty argument lists"): `simple();` is a call with no arguments, like
+/// `simple;`.  The same form for functions (`alloc_db()`, Apollo's
+/// driver_ex.pas) and routine pointers is the lead's reading.
+#[test]
+fn empty_argument_lists() {
+    let s = stmts("simple(); pgm_$exit( ); p^(); ext_db := alloc_db(); x := f() + g(1)");
+    let k: Vec<String> = s
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Assign { target, value } => format!("{} := {}", sx(target), sx(value)),
+            StmtKind::Call(e) => format!("call {}", sx(e)),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        k,
+        vec![
+            "call (call simple )",
+            "call (call pgm_$exit )",
+            "call (call (^ p) )",
+            "ext_db := (call alloc_db )",
+            "x := (+ (call f ) (call g 1))",
+        ]
+    );
+    // An empty list is not a list with a missing element.
+    assert!(!errs("procedure p; begin q(1,) end;").is_empty());
+    assert!(!errs("procedure p; begin q(,) end;").is_empty());
+}
+
 #[test]
 fn compound_and_empty_statements() {
     // ref p. 4-188: `;;` is an empty statement.

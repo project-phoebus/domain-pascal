@@ -4922,6 +4922,32 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     value stays NOBITS `.bss.moddata.<UNIT>[.<SECT>]`.  The prefixes are
     `../source`'s (`arch/m68k/arch.h`: `.moddata.<name>` is a
     `MODULE_DATA_DEFINE_INIT` block, "the image's initial contents").
+  - *Addresses (layout Verified; source Uncertain; implemented, bead
+    domain-pascal-bjz).*  Compiled modules' `D` segments hold routine
+    entry addresses as plain big-endian longs: FLP_ 0xE7AEF4 has
+    FLP_$SHUTDOWN 0xE3E228, FLP_$DINIT, FLP_$REVALIDATE, FLP_$DO_IO at
+    +0x04..+0x10 (`../source` `flp/flp_data.c`: the jump table
+    DISK_$REGISTER reads), WIN_ 0xE2B89C has WIN_$SPIN_DOWN 0xE19BC0 at
+    +0x10, WIN_$DINIT at +0x18, WIN_$DO_IO, WIN_$ERROR_QUE,
+    WIN_$GET_STATS at +0x20..+0x28; both modules' routines are compiled
+    (FLP_$SHUTDOWN 0xE3E228 `link.w A6,#-12; movem.l; lea 0xE7AEF4,A5`).
+    Whether those longs came from Pascal initialisers or from another
+    source of the data is not known.  `addr(...)` as an initial value
+    is the owner's ruling on 3.13.4 p. 3-51
+    (docs/reference-clarifications.md); `dpc` accepts `addr` of a
+    top-level non-`internal` routine (ref 3.13.3 p. 3-50) or of a
+    unit-level, `static`, `define`d or `extern` variable, or a field or
+    element of one at a constant offset, and emits `.long SYMBOL[+n]`
+    (a routine, another unit's variable) or `.long .Ldata[.<SECT>]+n`
+    (the unit's own variables, which may have no symbol), one
+    `R_68K_32` relocation each (`dpc_ir::InitValue::Address`; golden
+    `data/addr_init`, exec test `addr_init`).  A later initial value
+    over part of an address is refused.  No conformance or link unit
+    has such a section yet, so neither `tools/conform.py` nor
+    `tools/linktest.py` has been exercised on one; `linktest.py` refuses
+    to compare a block's initial bytes where the dpc object has a
+    relocation (its bytes there are not final), as it already did for
+    the C object's.
   - *Rules taken from the reference, not seen in the image:* components
     with no initialisation data are "not initialized" (ref 3.11.1 p.
     3-38) and are zero here, as the rest of a NOBITS block is; a string
