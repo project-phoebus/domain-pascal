@@ -163,8 +163,10 @@ pub struct Body {
 /// the live range (12.4 R4) are modelled for a parameter the arguments of
 /// a call read last ([`held_through_calls`]; PROC1_$SET_ASID 0xE148FE)
 /// and for by-address slots read once, which avoid the registers of
-/// earlier statements ([`fresh_slot_loads`]; IIC_$RECEIVE 0xE70ABA), in
-/// bodies without branches or calls; not to the end of a statement
+/// earlier statements ([`fresh_slot_loads`]; IIC_$RECEIVE 0xE70ABA)
+/// before a body's first branch or call, and after it only where the
+/// lowest free register is clean on every path
+/// ([`check_late_slot_loads`]); not to the end of a statement
 /// (R4(a)), nor the scheduling of entry loads with other work (0xE758C4,
 /// R9).
 ///
@@ -406,7 +408,7 @@ fn select_body_with(
         .filter_map(|&(_, a)| a.map(Reg::A))
         .collect();
     let holds = held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
-    let mut apart = fresh_slot_loads(&s.out, &s.fresh)?;
+    let (mut apart, late) = fresh_slot_loads(&s.out, &s.fresh);
     apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     let saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
@@ -475,6 +477,9 @@ fn select_body_with(
             ));
         }
     }
+    // After the checks above, whose refusals are the more basic ones (a
+    // pointer local in A1 writes A1 before a slot load, TTY_$K_*).
+    check_late_slot_loads(&s.out, &late)?;
     // A result computed in D0 already is not moved (0xE148E0 moves it
     // only because the `sne` left it in D1).
     let keep: Vec<bool> = s
@@ -618,7 +623,10 @@ fn held_through_calls(
 
 /// The register pairs to keep apart for by-address slots loaded for one
 /// use in a body of several statements (codegen-patterns 12.4 R4(b)), as
-/// `(slot value, earlier value)` for [`allocate_apart`].
+/// `(slot value, earlier value)` for [`allocate_apart`], and the loads that
+/// come after the body's first branch, call or label, which
+/// [`check_late_slot_loads`] checks after allocation (as `(index of the
+/// load in out, statement)`).
 ///
 /// Such a slot is loaded where its statement needs it, into the lowest
 /// address register that is free over its range *and* does not hold a
@@ -645,25 +653,25 @@ fn held_through_calls(
 /// routines without branches and calls, this rule and plain lowest-free
 /// (12.4 R1) agree 86 times; of the other 19 this rule picks the
 /// original's register 17 times, lowest-free once (0xE41C2E, the same
-/// statement), neither once (0xE3353A).  Where a branch or a call comes
-/// before the load the original's register fits this rule only, or
-/// lowest-free only, 85/28 times (branches) and 102/81 (branches and
-/// calls), a reload of the same slot counted as the same value: the rule
-/// there is not known, and such loads are refused.  Before the first
-/// branch or call of a routine that has some, the rule holds as without
-/// them (bead domain-pascal-5aw.12; ad-hoc script over
-/// `tools/nestsurvey.py`'s routines, not kept: of the slot loads in that
-/// straight-line prefix whose register is dead after it, 496 of 553 fit
-/// this rule, the others mostly argument lists, R4(a), or values held
-/// through a call, R4(c); the value-parameter copies there, 133 of 135,
+/// statement), neither once (0xE3353A).  Before the first branch or call
+/// of a routine that has some, the rule holds as without them (bead
+/// domain-pascal-5aw.12; ad-hoc script over `tools/nestsurvey.py`'s
+/// routines, not kept: of the slot loads in that straight-line prefix
+/// whose register is dead after it, 496 of 553 fit this rule, the others
+/// mostly argument lists, R4(a), or values held through a call, R4(c);
+/// the value-parameter copies there, 133 of 135,
 /// [`Selector::param_copies`]); DIR_$GET_ENTRYU 0xE4D51E `movea.l
-/// (0x10,A6),A0` in its `if` condition, after the copy's `(A0)+`.
-fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg, Reg)>> {
+/// (0x10,A6),A0` in its `if` condition, after the copy's `(A0)+`.  After
+/// it, see [`check_late_slot_loads`].
+fn fresh_slot_loads(
+    out: &[Insn],
+    fresh: &[(Reg, usize, Span)],
+) -> (Vec<(Reg, Reg)>, LateSlotLoads) {
     if fresh.is_empty() {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     }
-    // The first instruction after which the rule is not known: a branch,
-    // a call, or a label (a loop head, a join).
+    // The first instruction after which the straight-line rule is not
+    // known: a branch, a call, or a label (a loop head, a join).
     let first_flow = out
         .iter()
         .position(|i| {
@@ -678,42 +686,50 @@ fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg,
             )
         })
         .unwrap_or(out.len());
-    for &(v, _, span) in fresh {
+    // Registers used up by `(An)+` / `-(An)`.
+    let consumed: Vec<u8> = out.iter().flat_map(autoinc_regs).collect();
+    let mut apart = Vec::new();
+    let mut late = Vec::new();
+    for &(v, start, span) in fresh {
         let load = out
             .iter()
             .position(|i| crate::regs::access(i).defs.contains(&v))
             .unwrap_or(out.len());
         if load > first_flow {
-            return Err(unsupported(
-                span,
-                "in a body of several statements, a pointer parameter or by-address parameter \
-                 that is used once after a branch or a call (loaded where needed into a fresh \
-                 register: IIC_$RECEIVE 0xE70AC0, codegen-patterns 12.4 R4(b)) is",
-            ));
-        }
-    }
-    // Registers used up by `(An)+` / `-(An)`.
-    let consumed: Vec<u8> = out
-        .iter()
-        .flat_map(|i| {
-            let mut v = Vec::new();
-            let mut note = |ea: &Ea| {
-                if let Ea::PostInc(a) | Ea::PreDec(a) = ea {
-                    v.push(*a);
+            // After the first branch or call: kept apart only from the
+            // address values of earlier statements since a call that
+            // reaches the load in straight-line code (the rule above,
+            // restarted at the call; PROC2_$PGUID_TO_UPGID 0xE410B8
+            // `movea.l (0x10,A6),A1` after `(0xc,A6)` in A0 and ML_$UNLOCK).
+            let call = out[..load]
+                .iter()
+                .rposition(|i| {
+                    matches!(
+                        i,
+                        Insn::Jsr(_)
+                            | Insn::Bsr { .. }
+                            | Insn::Label(_)
+                            | Insn::Branch { .. }
+                            | Insn::Dbf { .. }
+                            | Insn::TableIndex { .. }
+                            | Insn::TableJump { .. }
+                    )
+                })
+                .filter(|&c| c < start && matches!(out[c], Insn::Jsr(_) | Insn::Bsr { .. }));
+            if let Some(c) = call {
+                for i in &out[c + 1..start] {
+                    for d in crate::regs::access(i).defs {
+                        if let Reg::A(n) = d {
+                            if crate::regs::is_virtual(d) && !consumed.contains(&n) {
+                                apart.push((v, d));
+                            }
+                        }
+                    }
                 }
-            };
-            if let Insn::Move { src, dst, .. } = i {
-                note(src);
-                note(dst);
             }
-            if let Insn::Clr { dst, .. } = i {
-                note(dst);
-            }
-            v
-        })
-        .collect();
-    let mut apart = Vec::new();
-    for &(v, start, _) in fresh {
+            late.push((load, call, span));
+            continue;
+        }
         for i in &out[..start] {
             for d in crate::regs::access(i).defs {
                 if let Reg::A(n) = d {
@@ -724,7 +740,165 @@ fn fresh_slot_loads(out: &[Insn], fresh: &[(Reg, usize, Span)]) -> Res<Vec<(Reg,
             }
         }
     }
-    Ok(apart)
+    (apart, late)
+}
+
+/// The address registers an instruction steps with `(An)+` / `-(An)`
+/// (the stack pointer excepted).
+fn autoinc_regs(insn: &Insn) -> Vec<u8> {
+    let eas: Vec<&Ea> = match insn {
+        Insn::Move { src, dst, .. } => vec![src, dst],
+        Insn::Clr { dst, .. } | Insn::Tst { dst, .. } => vec![dst],
+        Insn::Cmp { src, .. } | Insn::Alu { src, .. } => vec![src],
+        _ => Vec::new(),
+    };
+    eas.into_iter()
+        .filter_map(|ea| match ea {
+            Ea::PostInc(a) | Ea::PreDec(a) if *a != SP => Some(*a),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The slot loads [`check_late_slot_loads`] checks: the index of each
+/// load in the body, the call after which it follows in straight-line
+/// code, if any, and its statement.
+type LateSlotLoads = Vec<(usize, Option<usize>, Span)>;
+
+/// After allocation: a slot loaded for one use after the body's first
+/// branch, call or label (codegen-patterns 12.4 R4(b), bead
+/// domain-pascal-178).  Its register is the lowest one free over its range
+/// (what [`allocate_apart`] gives it, R1; [`fresh_slot_loads`] keeps it
+/// apart from the address values of earlier statements since a call it
+/// follows in straight-line code).  The original takes that register when
+/// no earlier instruction left a value in it on any path to the load (a
+/// value used up by `(An)+` / `-(An)`, or one a call clobbered after,
+/// does not count), and passes over the registers written since such a
+/// call when every dirty register was written there.  Otherwise its
+/// choice is not known and the load is refused; so is A0 after a call
+/// when A1 was written before the load (other than by a call).
+///
+/// Survey (`tools/regalloc.py slots`, routines of 0x30-0x150 bytes, the
+/// slot loads after the first branch, call or label whose slot no other
+/// instruction names and whose value lives in one block and across no
+/// call: 350): the rule takes 174 and fits 172 (TTY_$K_SET_INPUT_FLAG
+/// 0xE67684 `movea.l (0x10,A6),A1` after the call, A0 holding the
+/// descriptor; FILE_$TRUNCATE_D 0xE74022 A0; PROC2_$PGUID_TO_UPGID
+/// 0xE410B8 A1 after 0xE410B2 A0, both after ML_$UNLOCK); the two misses
+/// are MAC_$DEMUX 0xE0BCD2 (A1 after a copy used up A0 and A1) and
+/// 0xE6AA1C (A3 while A1 is free and clean).  It refuses 176.  In 114 the
+/// lowest free register is dirty on some path otherwise; the lowest one
+/// that is not dirty on every path fits 86 of them, and the exceptions
+/// include callee-saved registers taken while a scratch one is free and
+/// clean (0xE0D6DE A3, 0xE69834 A4) and a dirty A0 reused (0xE19158,
+/// after a `lea (0,A5,D1.l),A0` that only formed an address).  In 62,
+/// after a call with A1 written before, the original takes A0 40 times,
+/// A1 17 times (PROC2_$DEBUG 0xE41710, PROC2_$GET_EC 0xE40148,
+/// XPD_$SET_PTRACE_OPTS 0xE5B066, against PROC2_$SET_NAME 0xE3EABE and
+/// PROC2_$SIGNAL 0xE3F080) and A2-A4 5 times.
+fn check_late_slot_loads(out: &[Insn], late: &[(usize, Option<usize>, Span)]) -> Res<()> {
+    if late.is_empty() {
+        return Ok(());
+    }
+    // Per instruction, before it, on some path: the address registers an
+    // earlier instruction left a value in (bit n for An); those written
+    // by an instruction that is not a call; whether a call (not M$ARITH)
+    // came before.
+    #[derive(Clone, Copy, Default, PartialEq)]
+    struct State {
+        dirty: u8,
+        written: u8,
+        call: bool,
+    }
+    let amask = |regs: &[Reg]| {
+        regs.iter().fold(0u8, |m, r| match r {
+            Reg::A(n) if *n < 5 => m | 1 << n,
+            _ => m,
+        })
+    };
+    let succ = crate::regs::successors(out);
+    let mut inn: Vec<Option<State>> = vec![None; out.len()];
+    if !out.is_empty() {
+        inn[0] = Some(State::default());
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..out.len() {
+            let Some(st) = inn[i] else { continue };
+            let acc = crate::regs::access(&out[i]);
+            let defs = amask(&acc.defs);
+            let o = if matches!(out[i], Insn::Jsr(_) | Insn::Bsr { .. }) {
+                State {
+                    dirty: st.dirty & !defs,
+                    written: st.written,
+                    // M$ARITH writes only D0 and A0 (12.4 R3).
+                    call: st.call || defs & 2 != 0,
+                }
+            } else {
+                let used_up =
+                    autoinc_regs(&out[i])
+                        .iter()
+                        .fold(0u8, |m, &n| if n < 5 { m | 1 << n } else { m });
+                State {
+                    dirty: (st.dirty | defs) & !used_up,
+                    written: st.written | defs,
+                    call: st.call,
+                }
+            };
+            for s in succ[i].iter().flatten() {
+                let merged = match inn[*s] {
+                    None => o,
+                    Some(t) => State {
+                        dirty: t.dirty | o.dirty,
+                        written: t.written | o.written,
+                        call: t.call || o.call,
+                    },
+                };
+                if inn[*s] != Some(merged) {
+                    inn[*s] = Some(merged);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for &(k, call, span) in late {
+        let Some(Insn::Movea { dst, .. }) = out.get(k) else {
+            continue;
+        };
+        let st = inn[k].unwrap_or_default();
+        // The registers written since the call the load follows in
+        // straight-line code: kept apart ([`fresh_slot_loads`]).  When one
+        // of them below the load's register is dirty, the load took the
+        // straight-line rule's register, which the image shows only when
+        // every dirty register was written there.
+        let local = call.map_or(0, |c| {
+            out[c + 1..k]
+                .iter()
+                .fold(0u8, |m, i| m | amask(&crate::regs::access(i).defs))
+        });
+        let below = (1u8 << dst) - 1;
+        if st.dirty & (1 << dst) != 0 || (st.dirty & below & local != 0 && st.dirty & !local != 0) {
+            return Err(unsupported(
+                span,
+                "in a body of several statements, a pointer parameter or by-address parameter \
+                 used once after a branch or a call, whose lowest free register an earlier \
+                 statement left a value in on some path (the original's choice there is not \
+                 known, codegen-patterns 12.4 R4(b)), is",
+            ));
+        }
+        if *dst == 0 && st.call && st.written & 2 != 0 {
+            return Err(unsupported(
+                span,
+                "in a body of several statements, a pointer parameter or by-address parameter \
+                 used once after a call, in A0 while A1 was written before (A0 or A1 in the \
+                 original, codegen-patterns 12.4 R4(b)), is",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Address values loaded inside one call's argument list are kept apart
@@ -4151,8 +4325,8 @@ impl Selector {
     /// attribute (codegen-patterns 13).  A slot used once is loaded where
     /// it is needed, into a register no earlier statement left a value in
     /// (IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL
-    /// 0xE41D82; [`fresh_slot_loads`]), in bodies without branches and
-    /// calls only.
+    /// 0xE41D82; [`fresh_slot_loads`]); after a branch or a call, see
+    /// [`check_late_slot_loads`].
     fn entry_loads(&mut self, f: &Function) -> Res<()> {
         let uses = param_uses(f);
         // (offset, IR type when by value), in parameter order.
@@ -5145,7 +5319,8 @@ impl Selector {
     ///    `../source/domain_os/mmu/sau2/install.s`).  In the compiled code
     ///    0xE00800..0xE88834 no `move.w #n,-(SP)` / `clr.w -(SP)` is
     ///    directly followed by another one, except at a branch target
-    ///    (0xE38B42/0xE38B44): every such pair was merged.  A run of
+    ///    (0xE38B42/0xE38B44): every such pair was merged.  `false`,
+    ///    cleared as a word, counts as a word 0 (0xE73FFC).  A run of
     ///    three word constants (which pair is merged?) is not supported
     ///    yet.
     /// 3. `jsr (sym).l` to another unit's routine (0xE00EF6), `bsr` to one
@@ -5200,6 +5375,25 @@ impl Selector {
                     },
                 slot: 2,
             } => Some(*value),
+            // A byte 0 (`false`) is a word 0 too: [`Self::push`] clears
+            // its whole slot with `clr.w -(SP)`, which compiled code never
+            // follows with another word constant (above), and FILE_$CHECK_
+            // PROT's boolean `ignore_super` (read as a byte by ACL_$RIGHTS,
+            // `move.b (A3),-(SP)` at 0xE46A54, through `pea (0x12,A6)` at
+            // 0xE5D226) and the word after it are pushed as one `clr.l
+            // -(SP)` at both call sites (FILE_$TRUNCATE_D 0xE73FFC,
+            // 0xE43DAC).
+            Arg::Value {
+                value:
+                    Expr::Const {
+                        value: 0,
+                        ty:
+                            Scalar {
+                                width: Width::Byte, ..
+                            },
+                    },
+                slot: 2,
+            } => Some(0),
             _ => None,
         };
         let mut k = c.args.len();
@@ -8861,10 +9055,14 @@ impl Selector {
             // operand, into the lowest free register (PMAP_$FLUSH: `movea.l
             // (8,A6),A0` at 0xE1378A and again at 0xE1379C, in the next
             // statement).
+            // A simple statement right after a call in a body of several
+            // statements takes the lowest free register ([`Self::seq`]);
+            // after a call that is the rule above too, and its slot loads
+            // are checked like the others ([`check_late_slot_loads`]).
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if self.multi && *o > 0 && !self.is_uplevel(*o) => {
+            } if (self.multi || self.multi_body) && *o > 0 && !self.is_uplevel(*o) => {
                 let a = self.alloc_a()?;
                 self.out.push(Insn::Movea {
                     size: Size::L,
@@ -10207,6 +10405,27 @@ mod tests {
         let w = || val(konst(1, word()));
         let f = proc_(0, vec![ext("P", vec![w(), w(), w()], 2)]);
         assert!(err(&f).starts_with("three or more adjacent word constant"));
+        // `false` (a byte 0, cleared as a word) merges with a word constant
+        // next to it (FILE_$TRUNCATE_D 0xE73FFC `clr.l -(SP)`); `true`
+        // (`st -(SP)`) does not.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(0, Scalar::BOOLEAN)), val(konst(5, word()))],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f)[0], "pea\t(5).w");
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![val(konst(-1, Scalar::BOOLEAN)), val(konst(0, word()))],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f)[..2], ["clr.w\t-(%sp)", "st\t-(%sp)"]);
     }
 
     #[test]

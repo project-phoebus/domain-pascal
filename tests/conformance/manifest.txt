@@ -162,3 +162,7 @@ tests/conformance/tape_boot.pas              TAPE_$BOOT
 tests/conformance/ethernet_init.pas          ETHERNET_$INIT
 tests/conformance/pkt_init.pas               PKT_$INIT
 tests/conformance/xpd_inherit_ptrace_options.pas  XPD_$INHERIT_PTRACE_OPTIONS:14
+tests/conformance/file_truncate_d.pas     FILE_$TRUNCATE_D
+tests/conformance/ring_svc_open.pas       RING_$SVC_OPEN  --section-addr .bss.moddata.RING=0xE86400  a5-always=RING_$SVC_OPEN  module-routines=RING_$OPEN_INTERNAL=0xE76B7C
+tests/conformance/time_q_remove_elem.pas   TIME_$Q_REMOVE_ELEM  module-routines=TIME_$Q_REMOVE_INTERNAL=0xE16B70
+tests/conformance/proc2_pguid_to_upgid.pas  PROC2_$PGUID_TO_UPGID  --section-addr .bss.moddata.PROC2=0xE7BE84  a5-always=PROC2_$PGUID_TO_UPGID  module-routines=PROC2_$UID_TO_UPGID_INTERNAL=0xE422CC

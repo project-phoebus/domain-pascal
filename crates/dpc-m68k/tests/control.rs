@@ -247,32 +247,141 @@ begin
 end;",
             "a body of one `if`, `case` or loop statement",
         ),
-        // A by-address slot used once in a body of several statements.
+        // A by-address slot used once after a branch, whose lowest free
+        // register an earlier statement left a value in (12.4 R4(b),
+        // `check_late_slot_loads`).
         (
-            "(var x: integer); internal;
+            "(var x, y: integer); internal;
 begin
-  r := 1;
+  y := 2;
   if w = 3 then x := 0;
 end;",
-            "used once after a branch or a call (loaded where needed",
+            "whose lowest free register an earlier statement left a value in",
         ),
-        // The same after a call (12.4 R4(b) is known only before a body's
-        // first branch or call; before it, the slot is loaded as without
-        // them, golden `params/value_copies`).
+        // The rule restarted at a call, while a register written before
+        // the call (A2, the entry load of `s') is dirty too.
         (
-            "(var x: integer); internal;
+            "(var x, y, s: integer); internal;
 begin
+  s := 0;
   ext_$p(1);
-  r := 1;
+  s := 1;
+  x := 1;
+  y := 2;
+end;",
+            "whose lowest free register an earlier statement left a value in",
+        ),
+        // A0 after a call, A1 written before (A0 or A1 in the image).
+        (
+            "(var x, y, z: integer); internal;
+begin
+  y := 2;
+  z := 3;
+  ext_$p(1);
   x := 0;
 end;",
-            "by-address parameter that is used once after a branch or a call",
+            "in A0 while A1 was written before",
         ),
     ];
     for (b, want) in with_param {
         let e = error(&format!("procedure t{b}\n"));
         assert!(e.contains(want), "{e}");
     }
+}
+
+/// codegen-patterns 12.4 R4(b) after a body's first branch or call: a
+/// slot used once takes the lowest free register when no earlier
+/// statement left a value in it on any path (a call clobbering it counts
+/// as clean): TTY_$K_SET_INPUT_FLAG 0xE67684 `movea.l (0x10,A6),A1` after
+/// the call, A0 holding the descriptor; survey `tools/regalloc.py slots`.
+#[test]
+fn slot_loads_after_branches_and_calls() {
+    let b = body(
+        "procedure t(var x: integer); internal;
+begin
+  r := 1;
+  if w = 3 then x := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.w\t#1,(R).l",
+            "cmpi.w\t#3,(W).l",
+            "bne.s\t1f",
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(%a0)",
+            "1:",
+        ]
+    );
+    let b = body(
+        "procedure t(var x: integer); internal;
+begin
+  ext_$p(1);
+  r := 1;
+  x := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "move.w\t#1,(R).l",
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(%a0)",
+        ]
+    );
+    // Two statements after a call in straight-line code: the second slot
+    // passes over A0, which the first left (the rule restarted at the
+    // call; PROC2_$PGUID_TO_UPGID 0xE410B2/0xE410B8).
+    let b = body(
+        "procedure t(var x, y: integer); internal;
+begin
+  ext_$p(1);
+  x := 1;
+  y := 2;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t#1,(%a0)",
+            "movea.l\t(0xc,%fp),%a1",
+            "move.w\t#2,(%a1)",
+        ]
+    );
+    // Two slots in one statement after a call: A0 is live at the second
+    // load, so A1, which is clean.
+    let b = body(
+        "procedure t(var x, y: integer); internal;
+begin
+  ext_$p(1);
+  w := y + x;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "movea.l\t(0xc,%fp),%a0",
+            "movea.l\t(8,%fp),%a1",
+            "move.w\t(%a0),%d0",
+            "add.w\t(%a1),%d0",
+            "move.w\t%d0,(W).l",
+        ]
+    );
 }
 
 /// Compiled code has no branch to a `bra` (codegen-patterns 7.1), so the

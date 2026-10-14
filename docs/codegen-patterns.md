@@ -294,10 +294,9 @@ where nothing holds them, XPD_$SET_PTRACE_OPTS 0xE5AFB0, OS_$INIT
 `crates/dpc-m68k/tests/params.rs`; byte-identical in `make conform`:
 TONE_$TIME (`tone_time.pas`, the whole TONE module, a 6-byte copy) and
 SMD_$SET_TP_CURSOR (`smd_set_tp_cursor.pas`, two copies and A2 for the
-`in` slot).  Blocked: DIR_$GET_ENTRYU (section 6), MST_$GET_UID_ASID (its
-frame order), PROC2_$PGUID_TO_UPGID 0xE41072 (`movea.l (0xc,A6),A0`,
-`movea.l (0x10,A6),A1` after a call, 12.4 R4(b) after a call is refused),
-SET_LITES_LOC 0xE0C4DC (its copy reloaded into A1 for a `nil` test and
+`in` slot), PROC2_$PGUID_TO_UPGID (`proc2_pguid_to_upgid.pas`, an 8-byte
+copy; its slots after ML_$UNLOCK in A0 and A1, 12.4 R4(b)).  Blocked: DIR_$GET_ENTRYU (section 6), MST_$GET_UID_ASID (its
+frame order), SET_LITES_LOC 0xE0C4DC (its copy reloaded into A1 for a `nil` test and
 reused, `movea.l (-4,A6),A1; cmpa.w #0,A1; ...; move.l A1,(A5)`: a
 pointer local's register and reuse not modelled), TERM_$WRITE 0xE668D8
 (a constant cell of an earlier routine, `pea (-0x5e,PC)` to 0xE66898).
@@ -388,8 +387,18 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   - Survey: no `move.w #n,-(SP)` / `clr.w -(SP)` is directly followed by
     another one, except 0xE38B42/0xE38B44, where the second is a branch
     target (two paths, not one argument list).  So every pair was merged.
-    **Uncertain:** which pair merges in a run of three word constants
-    (`dpc` rejects it), and whether a byte next to a word merges.
+  - `false` (a byte 0, pushed as `clr.w`, below) next to a word constant
+    merges like a word 0 (Verified at these sites): FILE_$CHECK_PROT's
+    boolean `ignore_super` (passed on with `pea (0x12,A6)` at 0xE5D226,
+    read by ACL_$RIGHTS as a byte, `move.b (A3),-(SP)` at 0xE46A54) and
+    the word after it are one `clr.l -(SP)` at both call sites (0xE73FFC
+    FILE_$TRUNCATE_D, 0xE43DAC).  Conformance unit
+    `tests/conformance/file_truncate_d.pas`.  `st -(SP)` for `true`
+    stands unmerged next to `clr.w -(SP)` in 33 adjacent pairs
+    (0xE05BFC; whether those `clr.w` are word zeros or `false` is not
+    known); `dpc` pushes `true` apart.
+  - **Uncertain:** which pair merges in a run of three word constants
+    (`dpc` rejects it).
 - **Address of another unit's variable** (by address under the default
   convention, or `addr(x)` by value): `move.l #sym,-(SP)`, 374 sites, 362
   of them a map symbol's own address (UID_$NIL ×36 e.g. 0xE01824,
@@ -3873,7 +3882,9 @@ stored.
   - A status whose last use is a call argument in a body with branches
     (12.4 R4(c)), e.g. `status.all := status_$ok; if ... then begin
     status.all := ...; return end; p(..., status)`.
-  - A slot used once in a body with branches or calls (12.4 R4(b)).
+  - A slot used once after a branch or a call whose lowest free
+    register is dirty on some path, or A0 after a call with A1 written
+    before (12.4 R4(b), "After the first branch or call").
 - **Status code names** come from the real text tables
   (`~/src/domainos-archeology/stcodes`: `node stcode.js stcode.db.10.2`
   prints the whole 10.2 table, subsystem headings and `(hex)` codes;
@@ -4434,9 +4445,14 @@ in routines that do branch or call, 496 of the 553 slot loads before the
 first branch or call whose register is dead after it fit R4(b), the
 others mostly argument lists, 12.4 R4(a), or values held through a call,
 R4(c); ad-hoc script over `tools/nestsurvey.py`'s routines, not kept;
-DIR_$GET_ENTRYU 0xE4D51E), and is rejected after one, except
-in a simple statement right after a call in a body that loaded nothing
-at entry (0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2).
+DIR_$GET_ENTRYU 0xE4D51E).  After one, it takes the lowest free
+register only where that register is clean on every path, or where the
+rule restarted at a call in straight-line code decides, and is refused
+otherwise (12.4 R4(b), "After the first branch or call"; bead
+domain-pascal-178); a simple statement right after a call in a body
+that loaded nothing at entry takes the lowest free registers
+(0xE00ECC..0xE00ED2: A0, D0 after the `jsr` at 0xE00EC2), its slot
+loads checked the same way.
 The entry copies of value parameters count as earlier statements
 (section 1.2): after them a one-statement body's slot loads are fresh
 too (SMD_$SET_TP_CURSOR 0xE6E98C, A2 after the copies' A0 and A1).  A parameter that is only pushed as a whole argument is not
@@ -4570,7 +4586,7 @@ image's shape except for, in image order:
   register (12.5: a dereferenced pointer local stays in the frame), so
   dpc stores the sum to `(-8,A6)` and reloads it after the guard where
   the image has `movea.l D3,A1` before it; `buffer`'s fresh load (12.4
-  R4(b): refused in bodies with branches, fresh_slot_loads) comes after
+  R4(b) after a branch: A0 is dirty there, so refused) comes after
   the guard in dpc (section 7.4, forming: the other sites load bases
   there; the worker hoists it to 0xE177CC), so the registers differ too
   (dpc: A0 source base, A1 `buffer`, A2/A0 pointers; image: A1, A2,
@@ -4863,20 +4879,94 @@ of the remaining misses).**  The corpus misses fall into these groups:
     status in A0).  So the rule holds in straight-line, call-free code
     as "a register no earlier *statement* left a value in" (the 0xE41C2E
     reuse is within a statement); elsewhere something else decides.
-  - **Implemented** for bodies without branches and calls
-    (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`; the allocator
-    keeps each such slot apart from the address values of earlier
-    statements that no `(An)+` used up, `regs::allocate_apart`).  Bodies
-    with branches or calls are refused when such a load comes after a
-    branch, call or label; before the first one the rule is applied
-    (bead domain-pascal-5aw.12: 496 of 553 such loads in routines with
-    branches or calls fit it, 12.2; the value-parameter copies, 133 of
-    135, section 1.2).  The slot loads of block copies
-    (`block_address`) still take the lowest free register (ACL_
-    0xE47944 suggests the same rule applies there: A2 after an `(A2)+`
-    copy while the dead A0 of an earlier statement is passed over; not
-    implemented).  Conformance: `tests/conformance/iic.pas`,
-    `xns_idp_get_stats.pas`.
+  - **After the first branch or call (bead domain-pascal-178;
+    `tools/regalloc.py slots`, kept, with tests).**  The loads: a `movea.l
+    (d,A6),An` (d > 0) after the routine's first branch, call or label,
+    whose slot no other instruction names and whose value lives in one
+    block and across no call (what `dpc` loads where it is needed: slots
+    used more than once are loaded at entry, 12.2); 350 in the routines
+    of 0x30-0x150 bytes.  "Dirty" registers: those an earlier instruction
+    left a value in, a value used up by `(An)+`/`-(An)` not counting; a
+    reload of the same slot into the register holding it allowed.  Hits
+    of each rule (the image's register), by the routine's shape:
+
+    | Rule | branches and calls (274) | branches only (42) | calls only (34) | all (350) |
+    |---|---|---|---|---|
+    | `colU`: lowest free over the range (R1; hypothesis (a)) | 188 | 14 | 27 | 229 (65%) |
+    | lowest free, not dirty on *any* path, a call making the registers it writes clean (hypothesis (b), the straight-line rule over the CFG) | 222 | 33 | 32 | 287 (82%) |
+    | the same, dirty only when dirty on *every* path | 231 | 35 | 32 | 298 (85%) |
+    | (b) with calls not cleaning (hypothesis (c) negated), any / every path | 170 / 195 | 33 / 35 | 29 / 29 | 232 / 259 |
+    | (b), the set emptied at branch targets / at every block start (hypothesis (d)) | 217 / 215 | 23 / 22 | 32 / 32 | 272 / 269 |
+    | the load's range extended back to its block start or the last call | 206 | 19 | 31 | 256 |
+    | a stack of free registers (a dead value stays "cached"; `(An)+` returns its register among the unused ones; a call pushes A0 then A1) | 214 | 34 | 31 | 279 |
+
+    Also tried, no better: only loads, `lea`s and constants (no index or
+    data register) make a register dirty, 293-294; dirtiness carried in
+    address order rather than over the CFG, 284-297; A0 left dirty by
+    every call (as if holding a result), 12 of 35 after-call loads in
+    routines with calls only.  So calls do clean the registers they write
+    (c), labels do not reset the state (d), and no rule reaches 90%.  For
+    slot loads named more than once ("reloads", 71 with branches and
+    calls) taking the register of the slot's first earlier load first
+    fits 65 against 45, but `dpc` loads such slots at entry.
+
+    What is certain: **when the lowest free register is clean on every
+    path, the original takes it** (164 loads, 162 hits; the misses are
+    MAC_$DEMUX 0xE0BCD2, A1 after a copy used up A0 and A1, and 0xE6AA1C
+    A3 with A1 free and clean); **when every dirty register was written
+    since a call that precedes the load in its block, the straight-line
+    rule restarted at that call decides** (the lowest free register not
+    dirty: 10 loads, 10 hits; PROC2_$PGUID_TO_UPGID 0xE410B8 A1 after
+    0xE410B2 A0, both after ML_$UNLOCK); **except A0 after a call when A1
+    was written before**: after a call, with A0 the lowest free register
+    and clean on every path, the original takes A0 in all 70 loads where
+    nothing wrote A1 before (`slot_survey`'s `written_sets`), but where
+    something did, A0 or A1 (by the final rule's count, 62
+    loads: A0 40, A1 17, A2-A4 5), e.g. A1 in PROC2_$DEBUG 0xE41710,
+    PROC2_$GET_EC 0xE40148, XPD_$SET_PTRACE_OPTS 0xE5B066, PROC2_$SIGNAL_
+    PGROUP 0xE3F2B2, DISK_$AS_READ 0xE6B896, A0 in the like-shaped
+    PROC2_$SET_NAME 0xE3EABE, PROC2_$SIGNAL 0xE3F080, DISK_$AS_WRITE
+    0xE6B920.  Neither the order in which A0 and A1 were last used, nor
+    their dirtiness before the call (any or every path), nor a free-stack
+    order separates the two (Uncertain).  When the lowest free register
+    is dirty on some path otherwise (114 loads), the lowest one that is
+    not dirty on every path fits 86; among the rest, callee-saved registers while
+    a scratch one is free and clean (0xE0D6DE A3, 0xE0D6E4 A4, 0xE69834
+    A4, 0xE6CDA0 A2) and a dirty A0 reused (0xE19158 and 0xE161C6, after a
+    `lea (0,A5,Dn.l),A0` that only formed the address of a load into a
+    callee-saved register) (Uncertain).
+  - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`,
+    `check_late_slot_loads`): before the body's first branch, call or
+    label, the allocator keeps each such slot apart from the address
+    values of earlier statements that no `(An)+` used up
+    (`regs::allocate_apart`; bead domain-pascal-5aw.12: 496 of 553 such
+    loads in routines with branches or calls fit it, 12.2; the
+    value-parameter copies, 133 of 135, section 1.2).  After it, the
+    slot takes the lowest free register, kept apart only from the
+    address values of earlier statements since a call that the load
+    follows in straight-line code; after allocation the body is refused
+    unless that register is clean on every path to the load (a data flow
+    over the body: written by a non-call instruction, made clean by a
+    call that writes it and by `(An)+`/`-(An)`), unless a lower dirty
+    register was passed over while a register dirty from before that
+    call remains, and unless it is A0 after a call with A1 written
+    before.  So it takes the 174 loads of the survey above that the two
+    certain rules cover (172 hits) and refuses the other 176.  This
+    covers a simple statement right after a call too (0xE00ECC's
+    lowest-free shape).
+    The check runs after the other register checks, so a pointer local
+    that `dpc` puts in A1 against the image's D0 (TTY_$K_*, bead
+    domain-pascal-500) is reported as that.  The slot loads of block
+    copies (`block_address`) still take the lowest free register
+    unchecked (ACL_ 0xE47944 suggests the same rule applies there: A2
+    after an `(A2)+` copy while the dead A0 of an earlier statement is
+    passed over; not implemented).  Conformance: `tests/conformance/
+    iic.pas`, `xns_idp_get_stats.pas`; after a call, `file_truncate_d.pas`
+    (FILE_$TRUNCATE_D 0xE74022 A0), `ring_svc_open.pas` (RING_$SVC_OPEN
+    0xE76E12 A0), `time_q_remove_elem.pas` (TIME_$Q_REMOVE_ELEM 0xE16E84
+    A0), `proc2_pguid_to_upgid.pas` (PROC2_$PGUID_TO_UPGID 0xE410B2 A0,
+    0xE410B8 A1); driver test `slot_loads_after_branches_and_calls`
+    (`crates/dpc-m68k/tests/control.rs`).
 - **(c) A call in the statement.**  A value that does not live across a
   call, but belongs to a statement that ends in one, gets a callee-saved
   register:

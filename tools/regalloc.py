@@ -74,6 +74,11 @@ usage:
                                          # 12.4 R4(c): values last read by
                                          # a call's arguments, scratch or
                                          # callee-saved
+    tools/regalloc.py slots [RULE[:KEY]] [--min N] [--max N]
+                                         # 12.4 R4(b): the register of slot
+                                         # loads under each rule (slot_
+                                         # predictions), by routine shape;
+                                         # with RULE, its misses
     tools/regalloc.py csaved [--min N] [--max N]
                                          # routines that use callee-saved
                                          # registers, with and without calls
@@ -965,6 +970,222 @@ def sched_survey(done, m, show=0):
     return c
 
 
+# -- 12.4 R4(b): registers of by-address slot loads (bead domain-pascal-178)
+
+def slot_values(rt):
+    """Address values started by `movea.l (d,A6),An' with d > 0 (a
+    parameter slot: by address, or a pointer by value)."""
+    return [v for v in rt.values
+            if v.param and v.reg[0] == 'a' and rt.ins[v.first].mn == 'moveal']
+
+
+def is_label(rt, i):
+    """Instruction i is the target of a branch (a join or a loop head)."""
+    return any(rt.ins[p].target == rt.ins[i].addr and not rt.ins[p].call
+               for p in rt.pred.get(i, []))
+
+
+def is_call(x):
+    """A call other than M$ARITH (which writes only D0 and A0, R3)."""
+    return x.call and x.defs != {'d0', 'a0'}
+
+
+def flow_sets(rt, step, init=frozenset(), meet='any'):
+    """{i: set before instruction i}: a forward data flow over the CFG,
+    `step(i, x, set) -> set' per instruction, sets joined by union ('any')
+    or intersection ('all')."""
+    D, out = {}, {}
+    changed = True
+    while changed:
+        changed = False
+        for i in rt.reach:
+            ins = [out[p] for p in rt.pred.get(i, []) if p in out]
+            if i == 0:
+                ins.append(init)
+            if not ins:
+                continue
+            d = frozenset.union(*ins) if meet == 'any' else frozenset.intersection(*ins)
+            o = frozenset(step(i, rt.ins[i], d))
+            if D.get(i) != d or out.get(i) != o:
+                D[i], out[i] = d, o
+                changed = True
+    return D
+
+
+def dirty_sets(rt, meet='any', calls='clean', reset=None):
+    """{i: the address registers "dirty" before instruction i}: an earlier
+    instruction left a value in them, on some path ('any') or on every
+    path ('all').  A value used up by `(An)+' / `-(An)' leaves An clean.
+    A call: 'clean' makes the registers it writes clean, 'keep' leaves the
+    set as it is.  `reset': 'label' empties the set at a branch target,
+    'block' at every block start."""
+    AR = set(AREGS)
+
+    def step(i, x, d):
+        if (reset == 'block' and i in rt.leaders) or (reset == 'label' and is_label(rt, i)):
+            d = frozenset()
+        if x.call:
+            return d - (x.defs & AR) if calls == 'clean' else d
+        return (d | (x.defs & AR)) - (x.incdec & AR)
+    return flow_sets(rt, step, meet=meet)
+
+
+def written_sets(rt):
+    """{i: registers written before i on some path by an instruction that
+    is not a call}, and {i: True when a call (not M$ARITH) precedes i on
+    some path} (as the pseudo-register 'call')."""
+    def step(i, x, d):
+        if x.call:
+            return d | ({'call'} if is_call(x) else set())
+        return d | (x.defs & set(AREGS))
+    return flow_sets(rt, step)
+
+
+def ext_back(rt, v):
+    """v's load extended back to the start of its block, or to the last
+    call before it there."""
+    b = rt.block_of[v.first]
+    back = set()
+    for i in reversed([j for j in rt.reach if rt.block_of[j] == b and j < v.first]):
+        if rt.ins[i].call:
+            break
+        back.add(i)
+    return back
+
+
+def free_stack(rt):
+    """{i: free address registers before i, top first}: a stack of free
+    registers in address order.  A new value takes its register off the
+    stack; a value that dies stays "cached" (not returned) unless `(An)+'
+    used it up, which puts An back among the never-used registers in
+    numeric order; a call pushes the scratch registers it kills that are
+    not on the stack, A0 first (so A1 ends on top)."""
+    free, st = list(AREGS), {}
+    for i in rt.reach:
+        st[i] = list(free)
+        x = rt.ins[i]
+        if x.call:
+            for r in [r for r in ('a0', 'a1') if r in x.defs and r not in free]:
+                free.insert(0, r)
+            continue
+        for r in sorted(x.defs & set(AREGS)):
+            if r in free:
+                free.remove(r)
+            if r in x.incdec:
+                k = 0
+                while k < len(free) and free[k] < r:
+                    k += 1
+                free.insert(k, r)
+    return st
+
+
+# Dirty-set variants: name -> dirty_sets arguments.
+DIRTY_VARIANTS = {'yc': ('any', 'clean', None), 'lc': ('all', 'clean', None),
+                  'yk': ('any', 'keep', None), 'lk': ('all', 'keep', None),
+                  'ycL': ('any', 'clean', 'label'), 'ycB': ('any', 'clean', 'block')}
+SLOT_RULES = ('colU',) + tuple(DIRTY_VARIANTS) + ('ext', 'stack', 'dpc')
+
+
+def slot_predictions(rt, v, dirty, written, stack):
+    """{rule: register} for slot value v (codegen-patterns 12.4 R4(b)).
+
+    colU: the lowest register free over the range (R1-R3).  The dirty
+    variants: the lowest colU candidate not dirty at the load (dirty_sets;
+    first letter y/l = dirty on any / all paths; then c/k = a call cleans
+    the registers it writes / keeps them; L/B = emptied at branch targets
+    / block starts); a reload of the same slot into the register holding
+    it is allowed.  ext: the load's range extended back to its block start
+    or the last call.  stack: free_stack's top candidate.  dpc: what
+    `dpc' implements (bead domain-pascal-178): colU when that register is
+    clean on every path (yc); when it is dirty on some path, the yc pick
+    if every dirty register was written since a call earlier in the
+    load's block (since_call), else 'refused'; and 'refused' for A0 after
+    a call while A1 was written before."""
+    cand = [c for c in v.cls if not interferes_any(rt, v, c, use=True)]
+    p = {'colU': cand[0] if cand else None}
+    slot = rt.ins[v.first].ops[0]
+
+    def same(c):
+        ds = rt.rd_in[v.first][c]
+        return bool(ds) and all(d != 'entry' and rt.ins[d].mn == 'moveal' and
+                                rt.ins[d].ops[0] == slot for d, _ in ds)
+    for k, d in dirty.items():
+        dd = d.get(v.first, frozenset())
+        ok = [c for c in cand if c not in dd or same(c)]
+        p[k] = ok[0] if ok else p['colU']
+    back = ext_back(rt, v)
+    ok = [c for c in cand if not any(
+        w.reg == c and w is not v and w.var != v.var and (back & w.pts)
+        for w in rt.values + rt.livein)]
+    p['ext'] = ok[0] if ok else p['colU']
+    ok = [c for c in cand if same(c)] + [c for c in stack.get(v.first, []) if c in cand]
+    p['stack'] = ok[0] if ok else p['colU']
+    w = written.get(v.first, frozenset())
+    yc = dirty['yc'].get(v.first, frozenset())
+    pick = p['colU']
+    if pick in yc:
+        # straight code since a call in the load's block that wrote every
+        # dirty register: the straight-line rule, restarted at the call
+        local = since_call(rt, v.first)
+        pick = p['yc'] if local is not None and yc <= local else 'refused'
+    if pick == 'a0' and 'call' in w and 'a1' in w:
+        pick = 'refused'
+    p['dpc'] = pick
+    return p
+
+
+def since_call(rt, i):
+    """The registers written between the last call before i in i's block
+    and i (None when no call precedes i there)."""
+    blk = [j for j in rt.reach if rt.block_of[j] == rt.block_of[i] and j < i]
+    calls = [j for j in blk if rt.ins[j].call]
+    if not calls:
+        return None
+    out = set()
+    for j in blk:
+        if j > max(calls):
+            out |= rt.ins[j].defs
+    return out
+
+
+def slot_shape(rt):
+    """'straight', 'branches', 'calls' or 'both' (M$ARITH calls do not
+    count), and the index of the first branch, call or label."""
+    calls = [i for i in rt.calls if is_call(rt.ins[i])]
+    br = [i for i in rt.reach if rt.ins[i].kind in ('bcc', 'br', 'db')]
+    lab = [i for i in rt.reach if is_label(rt, i)]
+    shape = {(False, False): 'straight', (True, False): 'branches',
+             (False, True): 'calls', (True, True): 'both'}[(bool(br), bool(calls))]
+    return shape, min(br + calls + lab + [len(rt.ins)])
+
+
+def slot_survey(done):
+    """[(rt, v, shape, position, use, predictions)] for every slot value
+    of the routines in `done'.  position: 'before' or 'after' the first
+    branch, call or label; use: 'single' (the slot is named by this load
+    only, its value used in one block and not across a call: what `dpc'
+    loads where it is needed), 'reload' (likewise, the slot named
+    elsewhere too), 'held' (the rest)."""
+    res = []
+    for seg, rt in done:
+        vs = slot_values(rt)
+        if not vs:
+            continue
+        shape, flow = slot_shape(rt)
+        dirty = {k: dirty_sets(rt, *a) for k, a in DIRTY_VARIANTS.items()}
+        written = written_sets(rt)
+        stack = free_stack(rt)
+        for v in vs:
+            uses = [i for i in v.pts if v.reg in rt.ins[i].uses and rt.rd_in[i][v.reg] & v.keys]
+            slot = rt.ins[v.first].ops[0]
+            single = sum(slot in x.text for x in rt.ins) == 1
+            once = len({rt.block_of[i] for i in v.pts}) == 1 and not v.crosses_call
+            use = ('single' if single else 'reload') if once and uses else 'held'
+            res.append((rt, v, shape, 'after' if v.first > flow else 'before', use,
+                        slot_predictions(rt, v, dirty, written, stack)))
+    return res
+
+
 # The corpus of codegen-patterns section 12.4: routine starts, studied by
 # hand against their C reconstructions in ../source/domain_os.
 CORPUS = [
@@ -1119,6 +1340,29 @@ def main(argv):
                                                      tot['inner', 'csaved']))
         for k in sorted(ex):
             print('%-6s %-8s %-8s %4d  %s' % (k + (tot[k], ' '.join(ex[k][:12]))))
+        return 0
+    if cmd == 'slots':
+        # 12.4 R4(b): which rule picks the register of a slot load.
+        # `slots RULE[:KEY]' also lists the loads RULE mispredicts (KEY:
+        # only those whose shape/position/use has it).
+        want = argv[1].split(':') if len(argv) > 1 else None
+        tot = Counter()
+        for rt, v, shape, pos, use, p in slot_survey(done):
+            k = (shape, pos, use)
+            tot[k, 'n'] += 1
+            for r in SLOT_RULES:
+                tot[k, r] += p[r] == v.reg
+            tot[k, 'refused'] += p['dpc'] == 'refused'
+            if want and p[want[0]] != v.reg and (len(want) == 1 or want[1] in k):
+                print('%06X %-28s %-3s %s  %s' % (
+                    rt.ins[v.first].addr, m.describe(rt.r0)[:28], v.reg,
+                    ' '.join('%s=%s' % (r, p[r]) for r in SLOT_RULES if p[r] != v.reg),
+                    v.text))
+        cols = SLOT_RULES + ('refused',)
+        print('%-24s %5s ' % ('shape/position/use', 'n') + ' '.join('%5s' % r for r in cols))
+        for k in sorted({k for k, _ in tot}):
+            print('%-24s %5d ' % ('/'.join(k), tot[k, 'n']) +
+                  ' '.join('%5d' % tot[k, r] for r in cols))
         return 0
     if cmd == 'csaved':
         c = Counter()

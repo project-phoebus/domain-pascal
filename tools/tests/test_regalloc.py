@@ -124,6 +124,63 @@ class CallArgsTest(unittest.TestCase):
         self.assertIsNone(regalloc.arg_call(rt, a))
 
 
+class SlotRuleTest(unittest.TestCase):
+    """12.4 R4(b) (bead domain-pascal-178): `slots'."""
+
+    def preds(self, texts):
+        rt = routine(texts)
+        dirty = {k: regalloc.dirty_sets(rt, *a) for k, a in regalloc.DIRTY_VARIANTS.items()}
+        written = regalloc.written_sets(rt)
+        stack = regalloc.free_stack(rt)
+        return rt, {rt.ins[v.first].text: regalloc.slot_predictions(rt, v, dirty, written, stack)
+                    for v in regalloc.slot_values(rt)}
+
+    def test_fresh_in_straight_code(self):
+        # IIC_$RECEIVE 0xE70AC0..0xE70AD0: A0, A1, then A2
+        rt, p = self.preds(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'clrl %a0@',
+                            'moveal %fp@(12),%a1', 'clrw %a1@',
+                            'moveal %fp@(16),%a2', 'clrw %a2@', 'unlk %fp', 'rts'])
+        q = p['moveal %fp@(16),%a2']
+        self.assertEqual((q['colU'], q['yc'], q['lc']), ('a0', 'a2', 'a2'))
+        self.assertEqual(q['dpc'], 'refused')      # A0 dirty: not dpc's shape
+
+    def test_after_a_call(self):
+        # A0 written, then a call: A0 and A1 clean, A1 never written: A0
+        rt, p = self.preds(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'movew %a0@,%sp@-',
+                            'jsr 0xe20b12', 'moveal %fp@(12),%a0', 'clrl %a0@',
+                            'unlk %fp', 'rts'])
+        self.assertEqual(p['moveal %fp@(12),%a0']['dpc'], 'a0')
+        # A1 written before the call: A0 or A1 in the image, refused
+        rt, p = self.preds(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'moveal %fp@(16),%a1',
+                            'movew %a0@,%a1@', 'jsr 0xe20b12', 'moveal %fp@(12),%a0',
+                            'clrl %a0@', 'unlk %fp', 'rts'])
+        self.assertEqual(p['moveal %fp@(12),%a0']['dpc'], 'refused')
+
+    def test_restarted_at_a_call(self):
+        # PROC2_$PGUID_TO_UPGID 0xE410B2/0xE410B8: A0 then A1 after the call
+        rt, p = self.preds(['linkw %fp,#0', 'movew #4,%sp@-', 'jsr 0xe20b62',
+                            'moveal %fp@(12),%a0', 'movew %d2,%a0@',
+                            'moveal %fp@(16),%a1', 'clrl %a1@', 'unlk %fp', 'rts'])
+        q = p['moveal %fp@(16),%a1']
+        self.assertEqual((q['colU'], q['dpc']), ('a0', 'a1'))
+        self.assertEqual(regalloc.since_call(rt, rt.at[0x100a]), {'a0'})
+
+    def test_dirty_on_one_path(self):
+        # A0 written on one path only: dirty for 'any', clean for 'all'
+        rt = routine(['linkw %fp,#0', 'tstw %d0', 'beqs 0x1008', 'moveal %fp@(8),%a0',
+                      'clrl %a0@', 'moveal %fp@(12),%a1', 'clrl %a1@', 'unlk %fp', 'rts'])
+        k = rt.at[0x100a]
+        self.assertEqual(regalloc.dirty_sets(rt, 'any')[k], {'a0'})
+        self.assertEqual(regalloc.dirty_sets(rt, 'all')[k], set())
+        # a call cleans what it writes; `keep' does not
+        rt = routine(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'clrl %a0@', 'jsr 0xe20b12',
+                      'unlk %fp', 'rts'])
+        k = rt.at[0x1008]
+        self.assertEqual(regalloc.dirty_sets(rt, 'any', 'clean')[k], set())
+        self.assertEqual(regalloc.dirty_sets(rt, 'any', 'keep')[k], {'a0'})
+        self.assertEqual(regalloc.written_sets(rt)[k], {'a0', 'call'})
+
+
 class RuleTest(unittest.TestCase):
     def test_rule_spec(self):
         self.assertEqual(regalloc.rule_spec('colU'), ('col', False, True, False, None, False))
