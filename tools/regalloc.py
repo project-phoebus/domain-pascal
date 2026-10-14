@@ -79,6 +79,13 @@ usage:
                                          # loads under each rule (slot_
                                          # predictions), by routine shape;
                                          # with RULE, its misses
+    tools/regalloc.py orders [--split even|odd] [--tie rev] [--min N] [--max N]
+                                         # bead domain-pascal-jjh: allocator
+                                         # orders (Chow-Hennessy, Chaitin/
+                                         # Briggs, usage count, two-level)
+                                         # simulated over colU's graph
+    tools/regalloc.py simmisses MODEL [loo|sim] [N] [--class d|a] ...
+                                         # the values MODEL mispredicts
     tools/regalloc.py csaved [--min N] [--max N]
                                          # routines that use callee-saved
                                          # registers, with and without calls
@@ -1291,6 +1298,209 @@ def ptr_dregs(rt):
     return out
 
 
+# -- allocator simulations (bead domain-pascal-jjh) ----------------------
+#
+# The values of a routine and colU's interference, as a graph that does not
+# depend on the registers the original chose: an edge joins two values of
+# one class that overlap (Chaitin) or where one is defined by an
+# instruction reading the other (R2, "U"); values of one parameter slot
+# are not joined.  `forbid' holds the registers a value can never take:
+# those a call inside its range writes (R3) and those of occupants that
+# are not allocation decisions (call results, partly undefined values,
+# rt.livein).  An order is then scored two ways:
+#   loo  the value gets the lowest register its neighbours placed *earlier
+#        in the order* leave free, the neighbours keeping the original's
+#        registers (order-free = colU).  loo in address order is close
+#        to colQU but not equal: colQU also refuses a register read by
+#        the defining instruction when its value is defined later in
+#        address order (a loop-carried read), and lets a load through
+#        its own dying base keep that base;
+#   sim  a full simulation: the neighbours keep the registers the
+#        simulation gave them (errors compound).
+
+class Graph:
+    def __init__(self, rt):
+        self.rt = rt
+        vs = rt.values
+        self.idx = {id(v): k for k, v in enumerate(vs)}
+        self.nb = [set() for _ in vs]
+        self.forbid = [set() for _ in vs]
+        reads = [self._reads(v) for v in vs]
+        for k, v in enumerate(vs):
+            for p in v.pts:
+                x = rt.ins[p]
+                if x.call and v.reg in rt.lout[p]:
+                    self.forbid[k] |= x.defs & set(v.cls)
+            for w in rt.livein:
+                if w.reg in v.cls and (overlap(rt, v, w, v.pts, w.pts) or
+                                       any(d in v.pts and d in reads[k] for d in w.defs) or
+                                       any(w.reg in rt.ins[d].uses and rt.rd_in[d][w.reg] & w.keys
+                                           for d in v.defs)):
+                    self.forbid[k].add(w.reg)
+            # registers the defining instruction reads that hold no value
+            # (e.g. a static link live at the entry)
+            for d in v.defs:
+                for r in rt.ins[d].uses & set(v.cls):
+                    if r != v.reg and not any(rt.rd_in[d][r] & u.keys
+                                              for u in vs + rt.livein if u.reg == r):
+                        self.forbid[k].add(r)
+        for k, v in enumerate(vs):
+            for j in range(k + 1, len(vs)):
+                w = vs[j]
+                if w.cls is not v.cls or w.var == v.var:
+                    continue
+                if (any(d in reads[k] for d in w.defs) or any(d in reads[j] for d in v.defs)
+                        or overlap(rt, v, w, v.pts, w.pts)):
+                    self.nb[k].add(j)
+                    self.nb[j].add(k)
+
+    def _reads(self, v):
+        return {p for p in v.pts if v.reg in self.rt.ins[p].uses
+                and self.rt.rd_in[p][v.reg] & v.keys}
+
+    def pick(self, k, taken):
+        v = self.rt.values[k]
+        return next((c for c in v.cls if c not in taken and c not in self.forbid[k]), None)
+
+
+def loop_depth(rt):
+    """{instruction index: loop nesting depth}: a back edge (a branch to an
+    earlier or the same address) makes the range [target, branch] a loop."""
+    heads = {}
+    for i in rt.reach:
+        for s in rt.succ[i]:
+            if s <= i:
+                heads[s] = max(heads.get(s, s), i)
+    return {i: sum(1 for s, e in heads.items() if s <= i <= e) for i in rt.reach}
+
+
+def refs(rt, v, depth, w):
+    """Chow-Hennessy savings: each definition and use weighted w**depth."""
+    occ = set(v.defs) | {p for p in v.pts if v.reg in rt.ins[p].uses
+                         and rt.rd_in[p][v.reg] & v.keys}
+    return sum(w ** depth[p] for p in occ)
+
+
+def is_global(rt, v):
+    return len(v.blocks) > 1 or v.crosses_call
+
+
+def kfree(g, k):
+    return len(g.rt.values[k].cls) - len(g.forbid[k])
+
+
+def order_priority(g, prio, tie, defer=False):
+    """Values by descending priority (ties: address order, or reverse
+    with tie=-1); with `defer', unconstrained values (fewer neighbours
+    than free registers) last, as Chow-Hennessy colour them."""
+    vs = g.rt.values
+    ks = sorted(range(len(vs)), key=lambda k: (-prio(vs[k]), tie * vs[k].first))
+    if defer:
+        con = [k for k in ks if len(g.nb[k]) >= kfree(g, k)]
+        ks = con + [k for k in ks if k not in con]
+    return ks
+
+
+def order_simplify(g, tie, pick='addr', optimistic=True, cost=None):
+    """Chaitin/Briggs: remove a node with degree < k (its class's free
+    registers) while one exists (choice: lowest address, `pick'='deg'
+    smallest degree first); when blocked, remove the node of least
+    cost/degree (Briggs: optimistic, coloured if possible; Chaitin: a
+    spill, returned in `spilled').  Select order: reverse removal."""
+    vs = g.rt.values
+    left = set(range(len(vs)))
+    deg = {k: len(g.nb[k]) for k in left}
+    stack, spilled = [], set()
+    while left:
+        ok = [k for k in left if deg[k] < kfree(g, k)]
+        if ok:
+            if pick == 'deg':
+                k = min(ok, key=lambda k: (deg[k], tie * vs[k].first))
+            else:
+                k = min(ok, key=lambda k: tie * vs[k].first)
+        else:
+            k = min(left, key=lambda k: ((cost(vs[k]) if cost else 1) / max(deg[k], 1),
+                                         tie * vs[k].first))
+            if not optimistic:
+                spilled.add(k)
+        left.discard(k)
+        stack.append(k)
+        for j in g.nb[k]:
+            if j in left:
+                deg[j] -= 1
+    return stack[::-1], spilled
+
+
+def run_order(g, order, spilled=()):
+    """{value index: (loo prediction, sim prediction)} for an order."""
+    vs = g.rt.values
+    pos = {k: n for n, k in enumerate(order)}
+    sim, out = {}, {}
+    for k in order:
+        loo = g.pick(k, {vs[j].reg for j in g.nb[k] if pos[j] < pos[k]})
+        s = None if k in spilled else g.pick(k, {sim[j] for j in g.nb[k] if j in sim})
+        if s is not None:
+            sim[k] = s
+        out[k] = (loo, s)
+    return out
+
+
+def models(rt, g, tie=1):
+    """{model name: (order, spilled)}."""
+    vs = rt.values
+    depth = loop_depth(rt)
+    out = {'addr': (sorted(range(len(vs)), key=lambda k: vs[k].first), ()),
+           'raddr': (sorted(range(len(vs)), key=lambda k: -vs[k].first), ())}
+    for w in (1, 10):
+        cnt = {id(v): refs(rt, v, depth, w) for v in vs}
+        sw = '' if w == 1 else 'w'
+        out['use' + sw] = (order_priority(g, lambda v: cnt[id(v)], tie), ())
+        for size in ('i', 'b'):
+            def prio(v, size=size):
+                return cnt[id(v)] / (len(v.pts) if size == 'i' else len(v.blocks))
+            for defer in (False, True):
+                name = 'ch%s%s%s' % (size, sw, 'd' if defer else '')
+                out[name] = (order_priority(g, prio, tie, defer), ())
+    cnt = {id(v): refs(rt, v, depth, 10) for v in vs}
+    for pick in ('addr', 'deg'):
+        for opt in (True, False):
+            name = ('briggs' if opt else 'chaitin') + ('' if pick == 'addr' else '-deg')
+            out[name] = order_simplify(g, tie, pick, opt, lambda v: cnt[id(v)])
+    # two-level: global values (live in more than one block or across a
+    # call) first in the given order, then the block-local ones in address
+    # order
+    for base in ('addr', 'chbwd', 'briggs', 'use'):
+        o, sp = out[base]
+        glob = [k for k in o if is_global(rt, vs[k])]
+        loc = sorted((k for k in o if not is_global(rt, vs[k])), key=lambda k: vs[k].first)
+        out['2l-' + base] = (glob + loc, sp)
+        # the other way round: block-local values first (address order)
+        out['lf-' + base] = (loc + glob, sp)
+    return out
+
+
+MODELS = ('addr', 'raddr', 'use', 'usew', 'chi', 'chid', 'chb', 'chbd', 'chiw', 'chiwd',
+          'chbw', 'chbwd', 'briggs', 'chaitin', 'briggs-deg', 'chaitin-deg',
+          '2l-addr', '2l-chbwd', '2l-briggs', '2l-use',
+          'lf-addr', 'lf-chbwd', 'lf-briggs', 'lf-use')
+
+
+def sim_survey(done, tie=1):
+    """[(rt, value, {model: (loo, sim)}, colU-from-the-graph)] for every
+    value of the routines in `done'."""
+    res = []
+    for seg, rt in done:
+        if not rt.values:
+            continue
+        g = Graph(rt)
+        ms = models(rt, g, tie)
+        runs = {name: run_order(g, *ms[name]) for name in MODELS}
+        for k, v in enumerate(rt.values):
+            free = g.pick(k, {rt.values[j].reg for j in g.nb[k]})
+            res.append((rt, v, {name: runs[name][k] for name in MODELS}, free))
+    return res
+
+
 def one(m, r0):
     seg = m.segment_containing(r0)
     st = loopalign.routine_starts(m, seg)
@@ -1477,6 +1687,52 @@ def main(argv):
               'address register free over its range)')
         for k in sorted(tot):
             print('%-40s %5d  %s' % ('/'.join(k), tot[k], ' '.join(ex[k][:show])))
+        return 0
+    if cmd in ('orders', 'simmisses'):
+        # bead domain-pascal-jjh: allocator orders simulated over colU's
+        # interference graph (Graph, models, sim_survey).
+        tie = -1 if '--tie' in argv and argv[argv.index('--tie') + 1] == 'rev' else 1
+        split = argv[argv.index('--split') + 1] if '--split' in argv else None
+        if split:
+            # alternate routines in address order (bit 1 of the start
+            # address would split by the loop-alignment mode, section 7)
+            done = [d for n, d in enumerate(sorted(done, key=lambda d: d[1].r0))
+                    if n % 2 == (split == 'odd')]
+        res = sim_survey(done, tie)
+        if cmd == 'simmisses':
+            # positional arguments, without --tie/--split and their values
+            pos = [a for n, a in enumerate(argv)
+                   if a not in ('--tie', '--split') and argv[n - 1] not in ('--tie', '--split')]
+            name, mode = pos[1], (pos[2] if len(pos) > 2 else 'loo')
+            show = int(pos[3]) if len(pos) > 3 else 40
+            n = 0
+            for rt, v, p, free in res:
+                pr = p[name][0 if mode == 'loo' else 1]
+                if pr != v.reg and (not cls or v.reg[0] == cls) and n < show:
+                    n += 1
+                    print('%06X %-24s %-3s pred=%-4s %s %s' % (
+                        rt.ins[v.first].addr, m.describe(rt.r0)[:24], v.reg, pr,
+                        'glob' if is_global(rt, v) else 'loc ', v.text))
+            return 0
+        groups = ('d', 'a', 'glob', 'loc', 'all')
+        tot = Counter()
+        for rt, v, p, free in res:
+            for gname in (v.reg[0], 'glob' if is_global(rt, v) else 'loc', 'all'):
+                tot[gname, 'n'] += 1
+                tot[gname, 'colU'] += free == v.reg
+                for name in MODELS:
+                    tot[gname, name, 0] += p[name][0] == v.reg
+                    tot[gname, name, 1] += p[name][1] == v.reg
+        print('routines %d (skipped %s), tie %s%s' % (
+            len(done), dict(skipped), 'reverse address' if tie < 0 else 'address',
+            ', split ' + split if split else ''))
+        print('%-12s ' % 'loo/sim %' + ' '.join('%11s' % ('%s %d' % (g, tot[g, 'n']))
+                                               for g in groups))
+        pc = lambda g, k: 100.0 * tot[k] / max(tot[g, 'n'], 1)  # noqa: E731
+        print('%-12s ' % 'colU' + ' '.join('%11.1f' % pc(g, (g, 'colU')) for g in groups))
+        for name in MODELS:
+            print('%-12s ' % name + ' '.join('%5.1f/%5.1f' % (
+                pc(g, (g, name, 0)), pc(g, (g, name, 1))) for g in groups))
         return 0
     if cmd == 'csaved':
         c = Counter()

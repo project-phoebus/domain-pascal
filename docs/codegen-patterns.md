@@ -5613,6 +5613,8 @@ parameters.
   Other orders scored no better (by survey, data / address): reverse
   address order 58.6% / 65.0%; shortest live range first 59.3% / 65.5%;
   single-block values first 67.1% / 70.1%; longest first 71.9% / 72.8%.
+  Nor did Chow-Hennessy, Chaitin/Briggs, usage-count or two-level orders
+  (R1a below).
 - Linear scans that look only at the definition point do worse: "lowest
   free at the definition in address order" (`lo`) scores 60.1% / 57.0%;
   "most recently freed" (`lifo`) 58.6% / 50.2%.  Unlike `colQU`, they
@@ -5953,6 +5955,123 @@ implemented; beads domain-pascal-5aw.11, -8aj).**
     strength reduction removed (ref p. 6-30: "the optimizer may eliminate
     all assignments to i"), and `ord4(ptr) + offset` is a loop invariant
     hoisted into the preheader while `i` is allocated (ref p. 6-29).
+
+**R1a. The allocation order: classic allocators simulated (bead
+domain-pascal-jjh; `tools/regalloc.py orders`, `simmisses`; no algorithm
+identified).**  This tests whether a published allocation order explains
+R1's misses.  Method: per routine, a graph over the values (webs) that does
+not depend on the original's registers.  An edge joins two values of one
+class that overlap (Chaitin) or where one is defined by an instruction
+reading the other (R2).  Each value also has a set of forbidden registers:
+those a call inside its range writes (R3), and those of occupants that are
+not allocation decisions (call results).  An order is scored in two ways:
+- `loo`: the value takes the lowest register left free by its neighbours
+  *earlier in the order*, those neighbours keeping the original's
+  registers.  In address order this is close to `colQU` (R1) but not
+  equal: 130 values differ, `colQU` right on 111 and `loo` on none.  93
+  of them are registers read by the defining instruction whose value is
+  defined later in address order (a loop-carried read): `colQU` refuses
+  them, `loo` does not see that neighbour yet.  Hence 71.6 / 72.1 below
+  against R1's 72.8 / 73.1.
+- `sim`: a full simulation, the neighbours keeping the simulated
+  registers.  Errors compound, so `sim` is lower.
+
+The order-free row is `colU` computed on this graph.  It is also what the
+oracle order (values sorted by the original's register) achieves.  It
+differs from `summary`'s `colU` on 41 values: the graph applies R2 to a
+load into its own dying base (`movea.l (4,A0),A0`, 0xE190E0), which
+`colU` lets through for the original's register.
+
+Routines of 0x30–0x150 bytes (1099; 10136 values), as `loo / sim` %.
+"Global" means live in more than one block or across a call (4705 values);
+"local" is the rest (5431).  The two halves are alternate routines in
+address order (550 / 549; bit 1 of the start address would split by the
+loop-alignment mode, section 7).  Nothing is fitted, so the halves are a
+stability check, not a held-out test.  Chow-Hennessy is simulated without
+live-range splitting (its `sim` leaves at most 4 values without a
+register).  "Rev. ties" breaks priority ties in
+reverse address order instead of address order.
+
+| Order | D (4978) | A (5158) | global | local | all | even half | odd half | rev. ties | whole image (22629) |
+|---|---|---|---|---|---|---|---|---|---|
+| order-free (`colU` on the graph) | 80.6 | 81.2 | 91.8 | 71.5 | 80.9 | 80.2 | 81.7 | 80.9 | 75.5 |
+| address order (first definition) | 71.6 / 60.7 | 72.1 / 62.8 | 76.0 / 63.4 | 68.3 / 60.3 | **71.9** / 61.8 | 72.0 | 71.7 | 71.9 | **65.9** / 55.7 |
+| reverse address order | 53.3 / 39.8 | 57.5 / 42.4 | 62.6 / 39.1 | 49.3 / 42.9 | 55.5 / 41.1 | 54.7 | 56.3 | 55.5 | 53.3 / 40.4 |
+| usage count (Freiburghouse; defs + uses, most first) | 64.6 / 50.1 | 70.4 / 58.6 | 71.2 / 53.1 | 64.4 / 55.5 | 67.6 / 54.4 | 67.3 | 67.8 | 62.1 | 63.5 / 51.3 |
+| the same, loop-weighted (10^depth) | 62.3 / 47.5 | 68.9 / 55.7 | 69.2 / 49.5 | 62.5 / 53.5 | 65.6 / 51.7 | 65.5 | 65.8 | 62.1 | 62.5 / 50.0 |
+| Chow-Hennessy, refs / instructions in range | 55.7 / 42.2 | 59.5 / 43.7 | 65.8 / 40.3 | 50.5 / 45.3 | 57.6 / 43.0 | 56.9 | 58.3 | 57.2 | 55.4 / 42.1 |
+| the same, unconstrained values last | 57.5 / 43.6 | 62.3 / 46.9 | 66.5 / 43.7 | 54.3 / 46.6 | 60.0 / 45.3 | 59.5 | 60.4 | 59.6 | 57.6 / 44.0 |
+| Chow-Hennessy, refs / blocks in range | 58.6 / 45.1 | 65.0 / 51.7 | 69.8 / 44.8 | 54.9 / 51.6 | 61.8 / 48.5 | 61.4 | 62.3 | 58.9 | 58.9 / 46.6 |
+| the same, unconstrained last | 60.6 / 47.3 | 67.8 / 55.7 | 70.7 / 49.5 | 58.8 / 53.5 | 64.3 / 51.6 | 64.1 | 64.4 | 61.1 | 61.2 / 49.3 |
+| Chow-Hennessy, loop-weighted refs / instructions, unconstrained last | 57.9 / 43.8 | 62.8 / 47.7 | 66.9 / 44.4 | 54.7 / 47.0 | 60.4 / 45.8 | 59.9 | 60.9 | 60.1 | 58.0 / 44.5 |
+| Chow-Hennessy, loop-weighted refs / blocks, unconstrained last (`chbwd`) | 61.0 / 47.2 | 67.6 / 55.2 | 70.2 / 49.1 | 59.3 / 53.1 | 64.4 / 51.3 | 64.3 | 64.5 | 61.4 | 61.4 / 49.3 |
+| Chaitin = Briggs simplify/select, lowest address removed first | 54.5 / 40.1 | 59.4 / 43.0 | 64.0 / 40.0 | 50.9 / 43.0 | 57.0 / 41.6 | 56.3 | 57.7 | 71.9 | 55.0 / 40.4 |
+| the same, smallest degree removed first | 58.6 / 40.4 | 61.7 / 43.7 | 64.4 / 40.4 | 56.4 / 43.5 | 60.2 / 42.1 | 59.8 | 60.5 | 71.7 | 57.7 / 41.5 |
+| two-level: global values in address order, then local in address order | 71.1 / 60.1 | 71.9 / 62.7 | 74.2 / 63.5 | 69.1 / 59.7 | 71.5 / 61.4 | 71.8 | 71.2 | 71.5 | 65.6 / 55.3 |
+| two-level, global values by `chbwd` | 67.4 / 54.8 | 70.2 / 58.8 | 68.5 / 53.4 | 69.1 / 59.7 | 68.9 / 56.8 | 68.6 | 69.1 | 67.2 | 64.7 / 53.4 |
+| two-level, global values by Chaitin/Briggs | 65.4 / 51.3 | 66.1 / 52.4 | 61.9 / 43.9 | 69.1 / 58.8 | 65.8 / 51.9 | 65.2 | 66.3 | 71.5 | 61.8 / 49.0 |
+| the other way: local values first, then global (address order) | 64.2 / 50.4 | 68.3 / 57.5 | **78.9** / 55.6 | 55.4 / 52.7 | 66.3 / 54.0 | 66.3 | 66.3 | 66.3 | 61.6 / 49.3 |
+
+Findings:
+- **No published order separates from the others, and none beats a plain
+  top-down pass.**  Address order is the best order-dependent model.  It
+  is stable across the halves (72.0 / 71.7) and leaves 9 points to the
+  order-free bound.  Chow-Hennessy is 7–14 points lower in every variant
+  (block or instruction size, with or without loop weights, with or without
+  deferring unconstrained values), and it is tie-sensitive (`chbwd` drops
+  3 points with reverse ties).  The usage count is 4 points lower.
+- **Chaitin and Briggs cannot be told apart here.**  No routine's graph
+  ever blocks: in all 1505 routines with values, simplify always finds a
+  node with fewer neighbours than free registers (k = 8 data, 5 address,
+  less the forbidden ones).  The test is not vacuous: 3151 values (1259
+  in the 0x30–0x150 set) start with at least k neighbours and are removed
+  only after some of them.  There is never a spill or optimistic
+  decision.  The select order is then the removal tie-break, apart from
+  those late removals.  Removing the highest address first selects
+  nearly in address order and matches that row on all but 3 of the 10136
+  values ("rev. ties", 71.9; data 71.7 / 60.7 against 71.6 / 60.7).  So
+  the image cannot
+  distinguish "Chaitin/Briggs with an address-order tie-break" from a
+  one-pass top-down greedy colouring.
+- **Two-level (the getreg hypothesis)**: colouring the global values first
+  gains nothing over address order (71.5 against 71.9).  Local values in
+  address order after them score 69.1, against 68.3 when interleaved.
+  The reverse, local values first, is the best model for global values
+  (78.9) but the worst for local ones (55.4).  Global values seem to see
+  the registers of later local values (the parameters in D3/A3 and above
+  under R1, 0xE01C5A), but no fixed split reproduces it.
+- **The residual is not an ordering effect.**  Almost every miss of
+  address order (2766 of 2853) and of the order-free bound (1802 of 1935)
+  is a value in a *higher* register than predicted.  Of those, 1359 and
+  996 are in a callee-saved register where a scratch one was free; 239 of
+  the 996 are in routines without calls.  In `loo`, a value's prediction
+  under any order is never above its `colU` prediction (it avoids a subset
+  of the same neighbours' registers), so no colouring order explains the
+  1802.  The free register must be occupied in the original's view, so
+  lifetimes are longer than the web's liveness (R4).
+  Examples of misses of the order-free bound:
+  - MEM_$PARITY_LOG 0xE0ADF8..0xE0AE04 and again 0xE0AE42..0xE0AE4E.
+    The strength-reduced `index * 18` (`ext.l; add.l Dn,Dn; move.l
+    Dn,Dm; lsl.l #3,Dm; add.l Dm,Dn`) is computed in D3/D4 while D2 is
+    free, then in D5/D6 while D2–D4 are free (`colU` predicts D2 for
+    the product at both sites).  The product is then copied into D0 for
+    `addq.w #1,(4,A5,D0.l)` (0xE0AE06) and `move.w #1,(4,A5,D0.l)`
+    (0xE0AE50).  D0, the enclosing `dbf` counter (0xE0AE12), is dead on
+    the first path; address order predicts D0 at both sites.
+  - APP_$DEMUX 0xE00A9C, 0xE00AA0: `(12)`→D2 and `(16)`→D3 in a routine
+    where D1 is free over those webs (`colU`).  They are later copied
+    into A4 and A3 before a call (0xE00B1A, 0xE00B16).  A copy (a `move`)
+    into a call-crossing value reads 24 of the 996 values (16 where the
+    copy is their last use), so it explains few of them.
+
+  Misses of address order that `colU` explains, i.e. later values seem
+  to be coloured first (the two-level finding above):
+  - Module-local 0xE0C5AE loads its parameters `(12)`→D2 and `(14)`→D1
+    (0xE0C5B6, 0xE0C5BA), the first-loaded in the higher register.
+  - Module-local 0xE01C52 (R1 above): A3, D5, D6, A4 where address order
+    predicts A2, D2, D2, A2.
+- Consequence for `dpc`: keep the address-order greedy colouring (R1,
+  `colQU`).  The next step is the lifetime model (R4), not the order.
 
 #### Common subexpressions
 

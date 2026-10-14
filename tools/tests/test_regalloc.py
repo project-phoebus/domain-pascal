@@ -219,5 +219,70 @@ class PointerCopiesTest(unittest.TestCase):
                          ['fresh', 'same', 'other', 'fresh'])
 
 
+class SimulationTest(unittest.TestCase):
+    """Allocator orders over colU's graph (bead domain-pascal-jjh)."""
+    # (8) in D1 and (12) in D0 overlap; the sum stays in D0
+    TWO = ['linkw %fp,#0', 'movel %fp@(8),%d1', 'movel %fp@(12),%d0',
+           'addl %d1,%d0', 'unlk %fp', 'rts']
+
+    def graph(self, texts):
+        rt = routine(texts)
+        return rt, regalloc.Graph(rt)
+
+    def index(self, rt, text):
+        return next(k for k, v in enumerate(rt.values) if rt.ins[v.first].text == text)
+
+    def test_overlap_edge_and_orders(self):
+        rt, g = self.graph(self.TWO)
+        a, b = self.index(rt, 'movel %fp@(8),%d1'), self.index(rt, 'movel %fp@(12),%d0')
+        self.assertEqual(g.nb[a], {b})
+        # order-free (colU): D1 is locally minimal; address order wants D0
+        self.assertEqual(g.pick(a, {'d0'}), 'd1')
+        run = regalloc.run_order(g, sorted(range(2), key=lambda k: rt.values[k].first))
+        self.assertEqual(run[a], ('d0', 'd0'))
+        # the second value: loo sees D1 (the original's), sim sees D0
+        self.assertEqual(run[b], ('d0', 'd1'))
+
+    def test_r2_edge_without_overlap(self):
+        # 0xE177D0 shape: the sum is not computed in the copied register
+        rt, g = self.graph(['linkw %fp,#0', 'movel %fp@(8),%d1', 'movel %d1,%d3',
+                            'addl %a5@(20),%d3', 'movel %d3,%a5@(24)', 'unlk %fp', 'rts'])
+        a, b = self.index(rt, 'movel %fp@(8),%d1'), self.index(rt, 'movel %d1,%d3')
+        self.assertIn(b, g.nb[a])
+
+    def test_call_forbids_scratch(self):
+        rt, g = self.graph(['linkw %fp,#0', 'movel %fp@(8),%d2', 'jsr 0xe20b12',
+                            'movel %d2,%a5@(4)', 'unlk %fp', 'rts'])
+        k = self.index(rt, 'movel %fp@(8),%d2')
+        self.assertEqual(g.forbid[k], {'d0', 'd1'})
+        self.assertEqual(g.pick(k, set()), 'd2')
+
+    def test_loop_depth(self):
+        rt = routine(['linkw %fp,#0', 'moveq #3,%d0', 'clrl %a0@+', 'dbf %d0,0x1004',
+                      'unlk %fp', 'rts'])
+        d = regalloc.loop_depth(rt)
+        self.assertEqual([d[i] for i in rt.reach], [0, 0, 1, 1, 0, 0])
+
+    def test_simplify_and_priority(self):
+        rt, g = self.graph(self.TWO)
+        a, b = self.index(rt, 'movel %fp@(8),%d1'), self.index(rt, 'movel %fp@(12),%d0')
+        # never blocked: the select order is the reverse of the removal
+        # order, i.e. reverse address order, or address order with tie=-1
+        self.assertEqual(regalloc.order_simplify(g, 1), ([b, a], set()))
+        self.assertEqual(regalloc.order_simplify(g, -1), ([a, b], set()))
+        # a priority order, ties in address order; with `defer' the
+        # unconstrained values go last (here: all of them)
+        self.assertEqual(regalloc.order_priority(g, lambda v: 1, 1), [a, b])
+        self.assertEqual(regalloc.order_priority(g, lambda v: v.first, 1), [b, a])
+        self.assertEqual(regalloc.order_priority(g, lambda v: 1, 1, defer=True), [a, b])
+
+    def test_models_cover_every_value(self):
+        rt, g = self.graph(self.TWO)
+        ms = regalloc.models(rt, g)
+        self.assertEqual(set(regalloc.MODELS) - set(ms), set())
+        for name in regalloc.MODELS:
+            self.assertEqual(sorted(ms[name][0]), [0, 1])
+
+
 if __name__ == '__main__':
     unittest.main()
