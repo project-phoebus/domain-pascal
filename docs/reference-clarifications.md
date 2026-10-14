@@ -87,6 +87,13 @@ Question: is `addr(routine)` (or `addr(variable)`) allowed as an initial value?
 Owner's answer (2026-10-14): permit `addr(...)` in initialisers; Apollo's code clearly uses it.
 Consequence: implemented under bead domain-pascal-bjz.  The initial value is static data, so the lead reads this as `addr` of objects with a static address (routines; module-level, static, define and extern variables), emitted as an address with a relocation; `addr` of a routine's ordinary local is still refused.
 
+## "Type Transfer Functions" (p. 4-197): integer constant to a pointer type
+Asked: 2026-10-14, by the lead agent (bead domain-pascal-gqp; found by the corpus test in domain_examples/streams/sasc/misc.pas)
+Passage: "With one exception, the size of the argument must be the same as the size of the destination type. ... The one exception is that integer subranges are always compatible regardless of their sizes."  Apollo writes `ecp := ec2_$ptr_t( ec2_$always_ready_ec )`, where ec2.ins.pas line 24 declares `ec2_$always_ready_ec = 1;  { as ec2_$ptr to ec2_$wait is an always ready EC2 }`: a 2-byte integer constant transferred to a 4-byte pointer type.
+Question: is a type transfer from an integer constant to a pointer type of a different size allowed?
+Owner's answer (2026-10-14): yes, allow it; the constant is a sentinel value expanded to a pointer so that type checking works.
+Consequence: to be implemented under bead domain-pascal-gqp.  The lead reads the ruling as covering integer *constants* (the value is known, so the widening is exact); a run-time integer16 transferred to a pointer stays refused until something needs it.  Related: open question 37 (`char(16#9E)`), the narrowing counterpart.  Side note: 2.2.2.2 (p. 2-12) lists "A type transfer function" among the terms a const value may contain but names `nil` as the only pointer value, which may be why Apollo declared the sentinel as an integer and transferred it at each use.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
