@@ -162,6 +162,8 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `regloop` | a loop calling M$ARITH and a stub; a variable changed in the loop |
 | `cse` | reused values invalidated by stores through another index, a var call, a field, a pointer |
 | `forward` | stored-local forwarding; a var call on the local |
+| `ptr_dregs` | bead domain-pascal-pze: a by-address parameter whose address is also data, held in a data register; its copies reused across `if`s, made again after a call; passed on from the data register |
+| `ptr_dregs_flow` | review of bead domain-pascal-pze: copies of pointers in data registers not reused across a call in a loop or inside `with`, reused after a join both parts copied on; a by-address parameter compared and stepped around a call; a pointer only stored, held in an address register |
 | `stale_param` | bead domain-pascal-pe9: a value parameter re-read after its address is passed (also from a nested routine) |
 | `divmod` | `div`/`mod` signs, words and longwords, by powers of two, word operands widened |
 | `udiv` | unsigned-word `div`/`mod`; longword by a word constant |

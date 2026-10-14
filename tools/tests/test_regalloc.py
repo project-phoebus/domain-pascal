@@ -197,5 +197,27 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(regalloc.lifo_pick(V, ['d4', 'd5'], {}), 'd4')
 
 
+class PointerCopiesTest(unittest.TestCase):
+    # EC2_$INIT 0xE42C60: the slot in D0, compared, one copy for two
+    # stores (codegen-patterns 12.2, "Pointers in data registers").
+    EC2_INIT = ['linkw %fp,#-4', 'movel %fp@(8),%d0', 'cmpil #1000,%d0',
+                'blss 0x100e', 'moveal %d0,%a0', 'clrl %a0@', 'clrw %a0@(4)',
+                'unlk %fp', 'rts']
+
+    def test_param_used_as_data(self):
+        rt = routine(self.EC2_INIT)
+        self.assertEqual([k for k, _ in regalloc.ptr_dregs(rt)],
+                         [('param', 'cmp', '1copy', 'Afree')])
+
+    def test_copies_while_held(self):
+        # a second copy into the register that still holds the first
+        rt = routine(['linkw %fp,#0', 'movel %fp@(8),%d2', 'moveal %d2,%a0',
+                      'clrl %a0@', 'moveal %d2,%a0', 'clrw %a0@(4)',
+                      'moveal %d2,%a1', 'clrl %a1@', 'jsr 0xe20b12',
+                      'moveal %d2,%a0', 'clrl %a0@', 'unlk %fp', 'rts'])
+        self.assertEqual([k for k, _ in regalloc.ptr_copies(rt)],
+                         ['fresh', 'same', 'other', 'fresh'])
+
+
 if __name__ == '__main__':
     unittest.main()

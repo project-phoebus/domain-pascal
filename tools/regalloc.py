@@ -82,6 +82,16 @@ usage:
     tools/regalloc.py csaved [--min N] [--max N]
                                          # routines that use callee-saved
                                          # registers, with and without calls
+    tools/regalloc.py ptrcopies [N]      # 12.2 "Pointers in data registers":
+                                         # each `movea.l Dn,An' copy, made
+                                         # while an address register still
+                                         # holds a copy of the same value
+                                         # or not (N examples)
+    tools/regalloc.py ptrdregs [N]       # the same: parameters loaded into a
+                                         # D register and dereferenced
+                                         # through copies, by their other
+                                         # uses and whether an address
+                                         # register was free over their range
 
 --min/--max bound the routine size in bytes (default 0 and 0x10000).
 
@@ -1199,6 +1209,88 @@ CORPUS = [
 ]
 
 
+def ptr_copies(rt):
+    """[(kind, insn)] for each `movea.l Dn,An' whose data register has a
+    definition on every path: 'fresh' when no address register holds a
+    copy of the same value there (on every path), 'same' when An itself
+    does, 'other' when another one does."""
+    out = []
+    for i in rt.reach:
+        x = rt.ins[i]
+        if x.mn != 'moveal' or not re.fullmatch(r'%d[0-7]', x.ops[0]):
+            continue
+        dn, am = x.ops[0][1:], x.ops[1][1:]
+        dsrc = rt.rd_in[i][dn]
+        if not dsrc or any(k[0] == 'entry' for k in dsrc):
+            continue
+        holders = []
+        for a in AREGS:
+            ds = rt.rd_in[i][a]
+            if not ds or any(k[0] == 'entry' for k in ds):
+                continue
+            if all(rt.ins[j].mn == 'moveal' and rt.ins[j].ops[0] == '%' + dn
+                   and rt.rd_in[j][dn] == dsrc for j, _ in ds):
+                holders.append(a)
+        out.append(('fresh' if not holders else 'same' if am in holders else 'other', x))
+    return out
+
+
+def value_uses(rt, v):
+    return [p for p in sorted(v.pts)
+            if v.reg in rt.ins[p].uses and rt.rd_in[p][v.reg] & v.keys]
+
+
+def ptr_dregs(rt):
+    """[(key, text)] for each value in a D register read by at least one
+    `movea.l Dn,An' copy.  key: 'param' (a longword parameter load) or
+    'other'; its other uses ('push' = `move.l Dn,-(SP)', 'cmp', 'arith',
+    'store' = to memory, 'move' = to a register, '-' none); '1copy' or
+    'copies'; 'Afree' when some address register A0-A4 is free over its
+    range (colU's interference, the value's own copies left out), else
+    'Afull'."""
+    out = []
+    for v in rt.values:
+        if v.reg[0] != 'd':
+            continue
+        r = '%' + v.reg
+        kinds = []
+        for p in value_uses(rt, v):
+            x = rt.ins[p]
+            if x.mn == 'moveal' and x.ops[0] == r:
+                kinds.append('copy')
+            elif x.mn == 'movel' and x.ops[0] == r and x.ops[1] == '%sp@-':
+                kinds.append('push')
+            elif (x.mn.startswith('cmp') or x.mn.startswith('tst')) and r in x.ops:
+                kinds.append('cmp')
+            elif x.mn.startswith('move') and x.ops[0] == r:
+                kinds.append('move' if is_reg(x.ops[1]) else 'store')
+            else:
+                kinds.append('arith')
+        n = kinds.count('copy')
+        if not n:
+            continue
+
+        def is_copy(w):
+            return all(rt.ins[d].mn == 'moveal' and rt.ins[d].ops[0] == r
+                       and rt.rd_in[d][v.reg] & v.keys for d in w.defs)
+        free = []
+        saved = rt.values
+        for c in AREGS:
+            rt.values = [w for w in saved if not (w.reg == c and is_copy(w))]
+            try:
+                if not interferes_any(rt, v, c, use=True):
+                    free.append(c)
+            finally:
+                rt.values = saved
+        param = v.param and rt.ins[v.first].mn == 'movel'
+        other = ','.join(sorted(set(k for k in kinds if k != 'copy'))) or '-'
+        key = ('param' if param else 'other', other, '1copy' if n == 1 else 'copies',
+               'Afree' if free else 'Afull')
+        out.append((key, '%06X:%s%s' % (rt.ins[v.first].addr, v.reg,
+                                         '/' + ','.join(free) if free else '')))
+    return out
+
+
 def one(m, r0):
     seg = m.segment_containing(r0)
     st = loopalign.routine_starts(m, seg)
@@ -1363,6 +1455,28 @@ def main(argv):
         for k in sorted({k for k, _ in tot}):
             print('%-24s %5d ' % ('/'.join(k), tot[k, 'n']) +
                   ' '.join('%5d' % tot[k, r] for r in cols))
+        return 0
+    if cmd == 'ptrcopies':
+        show = int(argv[1]) if len(argv) > 1 else 10
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            for k, x in ptr_copies(rt):
+                tot[k] += 1
+                ex[k].append('%06X' % x.addr)
+        for k in sorted(tot):
+            print('%-12s %5d  %s' % (k, tot[k], ' '.join(ex[k][:show])))
+        return 0
+    if cmd == 'ptrdregs':
+        show = int(argv[1]) if len(argv) > 1 else 10
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            for k, text in ptr_dregs(rt):
+                tot[k] += 1
+                ex[k].append(text)
+        print('(param or other value, its uses other than copies, copies, '
+              'address register free over its range)')
+        for k in sorted(tot):
+            print('%-40s %5d  %s' % ('/'.join(k), tot[k], ' '.join(ex[k][:show])))
         return 0
     if cmd == 'csaved':
         c = Counter()

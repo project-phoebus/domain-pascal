@@ -3619,10 +3619,13 @@ tails (AS_$GET_ADDR, SMD_$GET_EC, ROUTE_$GET_EC), pointer results in A0
 0xE1CC64), nested routines (IO_ 0xE1A4DC, `movea.l (A6),A0`), loops
 (module-local 0xE33778), an `in`-style chain and bit operations on memory
 (DISK_$WRITE_PROTECT 0xE3D956 `bset #0,(165,A1)`).  OSINFO_$GET_MMAP
-(0xE5C694, 0x36C bytes) is blocked at its first instructions: its seven
-by-address slots are loaded at entry into D3, D4, A2, D5, D6 and moved to
-A0/A1 for each use (`movea.l D6,A0; clr.l (A0)` at 0xE5C6B0), which dpc
-does not do (12.2: a pointer kept in a D register); then `btst #5,(1,A1)`
+(0xE5C694, 0x36C bytes) is blocked at its first instructions: five of
+its seven by-address slots are loaded at entry into D3, D4, A2, D5, D6
+and moved to A0/A1 for each use (`movea.l D6,A0; clr.l (A0)` at
+0xE5C6B0); `dpc` has the copies (12.2, "Pointers in data registers",
+bead domain-pascal-pze) but not the rule that puts these
+dereference-only slots in D registers (bead domain-pascal-0b1; the
+unit's other blockers: bead domain-pascal-2q2); then `btst #5,(1,A1)`
 on a byte in memory (5.1, not catalogued), `while` loops (7.2), local
 variables in registers (12.4), and the `asid` selection repeated in
 three arms with `cmpi.w #0x40; bls` joins.
@@ -4906,7 +4909,7 @@ reproduce.
   parameters are loaded into callee-saved registers right after the
   `movem` (OSINFO_$GET_MMAP 0xE5C69C..0xE5C6AC: `move.l (8,A6),D3`, ...,
   pointers kept in **D** registers and moved to an A register only when
-  used, `movea.l D6,A0`).  In routines without calls, into scratch
+  used, `movea.l D6,A0`: 12.2, "Pointers in data registers").  In routines without calls, into scratch
   registers (TIME_$Q_INIT_QUEUE 0xE16C62..0xE16C6A).  When this happens
   and when it does not: section 12.2.
 - **Redundant moves** are kept: `lea (A5),A0` (0xE14BC6); `movea.l A0,A0`
@@ -4947,7 +4950,7 @@ precedes `unlk`.
 | LOG_$READ 0xE17800 (`log/read.c`) | `link #0` | `pea (A5)` 0xE17804 / `movea.l (-4,A6),A5` 0xE17820 | `lea 0xE2B280,A5`; A0 scratch to dereference the by-address `max_len` (0xE17810). The final `bsr` is followed by the A5 restore, no pop. |
 | nested 0xE1359C of PMAP_$FLUSH | `link #-4` (frame unused) | `movem.l D2/A2-A3,-(SP)` (`48e7 2030`) 0xE135A0 / `movem.l (-0x10,A6),D2/A2-A3` (`4cee 0c04 fff0`) 0xE13602 | Static link `movea.l A1,A2` at entry (0xE135A4); parameter `(0xc,A6)`→D2 at entry (0xE135A6), **held across** `jsr` 0xE135BC and used after it (0xE135D4, 0xE135FA). Inside one argument list the pointer `(8,A2)` is reloaded into A0 (0xE135DA), then into **A1** (0xE135E2), and a pointer read through it goes to **A3** (0xE135E6): registers are not reused within the statement (A2 is busy). |
 | PROC1_$SET_ASID 0xE148F8 | `link #0` | `move.l D2,-(SP)` 0xE148FC / `move.l (-4,A6),D2` 0xE14916 | Parameter `(8,A6)` → D2 at entry, used twice (a store and a push) before the one `jsr`, not after it. |
-| OSINFO_$GET_MMAP 0xE5C694 | `link #-0x18` | `movem.l D2-D7/A2-A4,-(SP)` (`48e7 3f38`) 0xE5C698 / `movem.l (-0x3c,A6),D2-D7/A2-A4` (`4cee 1cfc ffc4`) 0xE5C9F6 | Parameters at entry: `(8)`→D3, `(0xc)`→D4, `(0x10)`→A2, `(0x1c)`→D5, `(0x20)`→D6 (0xE5C69C..0xE5C6AC); pointers kept in D registers and moved to A0/A1 when used (`movea.l D6,A0`, `movea.l D3,A1`). D2 is a temporary (0xE5C76C, 0xE5C77A, 0xE5C7BC). |
+| OSINFO_$GET_MMAP 0xE5C694 | `link #-0x18` | `movem.l D2-D7/A2-A4,-(SP)` (`48e7 3f38`) 0xE5C698 / `movem.l (-0x3c,A6),D2-D7/A2-A4` (`4cee 1cfc ffc4`) 0xE5C9F6 | Parameters at entry: `(8)`→D3, `(0xc)`→D4, `(0x10)`→A2, `(0x1c)`→D5, `(0x20)`→D6 (0xE5C69C..0xE5C6AC); pointers kept in D registers and moved to A0/A1 when used (`movea.l D6,A0`, `movea.l D3,A1`), a copy read again while its register holds it (A1 at 0xE5C8C8, 0xE5C952; 12.2 "Pointers in data registers": none of the four is used as data, rule Uncertain, bead domain-pascal-0b1). D2 is a temporary (0xE5C76C, 0xE5C77A, 0xE5C7BC). |
 | MAC_OS_$OPEN 0xE0B246 | `link #-0x28` | `movem.l D2-D7/A2-A5,-(SP)` (`48e7 3f3c`) 0xE0B24A / `movem.l (-0x50,A6),D2-D7/A2-A5` (`4cee 3cfc ffb0`) 0xE0B452 | A5 saved inside the `movem`, then `lea 0xE22990,A5`; parameters `(8)`→D6, `(0xc)`→D7. |
 | TONE_$ENABLE 0xE1ACE8 | `link #-8` | `pea (A5)` / `movea.l (-0xc,A6),A5` 0xE1AD0E | Saved A5 directly below the 8 bytes of locals. |
 
@@ -4991,7 +4994,10 @@ for their sites.
   while A1 is free.  Parameters go to registers at entry in some routines
   (0xE16C5E, 0xE17778, 0xE1359C, OSINFO_$GET_MMAP) and are re-read from the
   frame in others (0xE00EB0).  Pointers may be kept in D registers
-  (OSINFO_$GET_MMAP).
+  (OSINFO_$GET_MMAP): when also used as an integer (compared with a
+  number, stepped, masked; not when only stored; Verified,
+  implemented), otherwise by a rule not settled (12.2, "Pointers in data
+  registers").
 - Which callee-saved register first: lowest-free fits 0xE1359C,
   PROC1_$SET_ASID and 0xE17778, but OSINFO_$GET_MMAP's first parameter
   goes to D3 with D2 used as a temporary.
@@ -5029,10 +5035,12 @@ kinds from the C in `../source/domain_os`.
   A1 (the five sites above).  Under register pressure, or when the value
   must survive a call, callee-saved registers are used, also without
   calls (MST_$VA_TO_SEGNO 0xE0DCD6 D2; ROUTE_$FIND_PORT 0xE15B06 D3;
-  PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`).  A pointer that is
-  also used as data is kept in a D register and copied to an A register
-  for each dereference (EC2_$INIT 0xE42C64, `movea.l D0,A0` at
-  0xE42C70; ACL_$ADD_PROJ 0xE47EC0, `movea.l D4,A0` at 0xE47ED4).
+  PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`).  A pointer may be
+  kept in a D register and copied to an A register where it is
+  dereferenced: when it is also used as an integer (EC2_$INIT 0xE42C64,
+  `movea.l D0,A0` at 0xE42C70), and in other cases whose rule is not
+  settled (ACL_$ADD_PROJ 0xE47EC0, `movea.l D4,A0` at 0xE47ED4, a status
+  slot only dereferenced); "Pointers in data registers" below.
 - *Functions differ:* PARITY_$CHK_IO 0xE0B180..0xE0B18A loads `(8)` into
   **D1** and `(0xc)` into D0: the result variable takes D0, and the
   parameter used later shares it (12.4 R5; implemented).
@@ -5181,8 +5189,9 @@ variable in a register (section 3, "Result variable"; beads
 domain-pascal-5aw.11, -8aj); the order in which the allocator colours
 the result and the entry loads is R5 (12.4).  IO_$ALLOC 0xE1A9C2 and
 IIC_$RECEIVE_CHECK 0xE70ADE (section 9) are such bodies, with the result
-in D0.  Reported as not supported yet: a pointer parameter also
-used as data; storing
+in D0.  A pointer parameter also used as an integer is held in a data
+register ("Pointers in data registers" below).  Reported as not
+supported yet: storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
 last use is an argument of a call (12.4 R4(c)), unless it is live
@@ -5192,6 +5201,95 @@ with `pea (A2)` at 0xE3E72A; `tools/regalloc.py callargs` counts only
 values that cross no call; bead domain-pascal-500).  In a body without
 branches such a parameter is held through the call, in a callee-saved
 register (12.4 R4(c): PROC1_$SET_ASID 0xE148FE D2, a conformance unit).
+
+**Pointers in data registers** (bead domain-pascal-pze; `tools/regalloc.py
+ptrdregs`, `ptrcopies`, over the routines `tools/regalloc.py` analyses).
+A pointer held in a data register is dereferenced through a copy,
+`movea.l Dn,An`.
+
+- *Also used as data: held in a D register (Verified at the sites).*
+  The parameters whose pointer value the body also uses as an integer
+  (compared with a number, stepped or masked) and dereferences are in D
+  registers: EC2_$INIT 0xE42C64 (`cmpi.l #0x3e8,D0` at 0xE42C68,
+  `movea.l D0,A0` at 0xE42C70; its parameter is `OUT ec:
+  ec2_$eventcount_t`, ec2.ins.pas, so the slot's address is the value:
+  `addr(ec)`), EC2_$READ 0xE42C82, EC2_$ADVANCE 0xE42CB8 (also passed
+  on, `move.l D0,-(SP)` at 0xE42CDA), PROC1_$FREE_STACK 0xE15126
+  (compared, `subq.l #4`, stored at 0xE15132), DISK_$DIAG_IO 0xE6BCBC
+  (`andi.l #0x3ff` on a copy), the NET_IO module-local 0xE0E238
+  (0xE0E270 `tst.l D3`, see below): 6 parameters (`ptrdregs`: param,
+  uses other than `push`; its seventh, 0xE42CF4 in the MST_UNWIRED
+  module-local 0xE42CEC, is masked, `andi.w #0xfc00,D0`, and the masked
+  value moved to A2, not a copy of the parameter).
+- *Stored whole: not such a use (Verified at the sites).*  A pointer
+  parameter that is dereferenced and stored to memory as it is stays in
+  an address register and is stored from it: EC_$INIT 0xE15202..0xE1520C
+  (`movea.l (8,A6),A0; clr.l (A0); move.l A0,(4,A0); move.l
+  A0,(8,A0)`), the AST module-local 0xE00F7C (0xE00F86 `movea.l
+  (8,A6),A1`, 0xE00FA0 `move.l A1,(0x3ec,A5)`), DISK_$ADD_QUE 0xE3C716
+  (`(0x12,A6)` loaded into A1 at 0xE3C7D6, before a loop rather than at
+  entry, stored at 0xE3C7EE and 0xE3C804).  No D-register parameter in
+  `ptrdregs` has stores as its only other use.
+- *Compared with `nil` (Uncertain, refused; bead domain-pascal-nys).*
+  The AREA_ module-local
+  0xE09E48 loads `(0xc,A6)` into A3 at entry, compares it `cmpa.w #0,A3`
+  (0xE09EAC) and dereferences it (0xE09EC2 `(4,A3)`); the NET_IO
+  module-local 0xE0E238 loads `(8,A6)` into D3 (0xE0E240), tests it
+  `tst.l D3` (0xE0E270) and copies it (0xE0E29E `movea.l D3,A3`).  What
+  decides between them is not known.  A comparison with another pointer
+  is counted as data: 0xE01A7A..0xE01A7E `movea.l (8,A6),A1; cmpa.l
+  (4,A0),A1` re-reads its slot rather than holding it, so it does not
+  settle where a held pointer goes; nor does VTOC_$GET_UID 0xE392BC
+  `cmpa.w #0,A2`, whose A2 is a local (`suba.l A2,A2` at 0xE392AA).
+- *Copies.*  The image copies again only where no address register
+  still holds a copy of the same value: of 981 copies whose data
+  register is defined on every path, 969 are made where none holds one,
+  6 into the register that holds it (RINGLOG_$LOGIT 0xE1A258) and 6
+  into another (0xE09CA4; `ptrcopies`).  OSINFO_$GET_MMAP: the copy
+  of D3 in A1 made at 0xE5C870 is read at 0xE5C8C8 and 0xE5C952, past
+  two `if`s whose parts do not write A1, and made again at 0xE5C9A2
+  after a loop that wrote A1, at 0xE5C798 after `case` arms that call,
+  and at 0xE5C870 after the `jsr` at 0xE5C864; EC2_$INIT makes one copy
+  for its two stores (0xE42C70..0xE42C74).  A copy takes its register
+  as a slot loaded for one use does (12.4 R4(b): 0xE5C6B4 A1 after the
+  copy in A0 at 0xE5C6B0, which is dead there).
+- *Passed on to a `var` parameter:* `move.l Dn,-(SP)` (0xE42CDA;
+  OSINFO_$GET_MMAP 0xE5C72C, 0xE5C860, 0xE5C862), where an address
+  register would give `pea (An)` (0xE3E72A).
+- *Dereference-only pointers (Uncertain; bead domain-pascal-0b1).*  157
+  parameters only dereferenced (and 120 also passed on) live in D
+  registers.  For 103 (91) no address register is free over their range
+  (`ptrdregs` "Afull": OSINFO_$GET_MMAP's D3-D6, 0xE5C69C..0xE5C6AC,
+  whose loops use A0, A1, A3, A4 with A2 holding `(0x10)`; PROC1_$GET_LIST
+  0xE15370; module-local 0xE01C52 D5, A2-A4 busy), which fits register
+  pressure; for 54 (29) one is (MAC_$DEMUX 0xE0BC5A D2 with A4 free;
+  XNS_IDP_$REGISTER_ADDR 0xE19018 D2 with A3 and A4 free and no call;
+  ACL_$ADD_PROJ is "Afull").  Which pointer gives up the address
+  register is not settled.
+
+**Implemented** (`crates/dpc-m68k/src/isel.rs`): in a body that loads
+parameters at entry, a by-value pointer or a by-address slot the body
+both dereferences and uses as data (a slot's data use is `addr(p)` in an
+expression; passed as an argument it stays a base; a store of the whole
+value, `g := p`, is not a data use, `ParamUse::Stored`; compared with
+`nil` or 0 and otherwise only dereferenced is refused,
+`ParamUse::ZeroCompare`) is loaded into a
+data register (`move.l (d,A6),Dn`, `Selector::entry_loads`); each
+dereference copies it (`Selector::copy_to_a`) into a register chosen as
+for a slot load (12.4 R4(b), `fresh_slot_loads`, `check_late_slot_loads`);
+after allocation a copy whose value an address register holds on every
+path is dropped and that register read instead, renamed in where the
+copy's uses lie in straight-line code that writes neither register
+(`reuse_pointer_copies`); passed on by address it is pushed with `move.l
+Dn,-(SP)` (a part of the object passed by address is refused, not
+seen).  A dereference-only pointer keeps an address register (as before:
+the allocator refuses when none is free).  Golden
+`tests/golden/regalloc/ptr_data_regs`; exec tests `ptr_dregs`,
+`ptr_dregs_flow`; unit tests
+`pointer_used_as_data_is_held_in_a_data_register`,
+`pointer_copies_are_reused_while_held`.  No conformance unit: EC2_$INIT
+needs its unsigned `bls` (0xE42C6E) and `link #-4` (bead
+domain-pascal-kwu); OSINFO_$GET_MMAP, bead domain-pascal-2q2.
 
 **Uncertain:**
 

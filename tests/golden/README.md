@@ -160,6 +160,16 @@ Tests:
   zero-extended `offset` reused after the `if` (0xE177D0), the sum in the
   operand not reused (0xE177B4 `add.l D1,D2`), both `clr.l` first
   (0xE177A6..0xE177AC, the scheduler, 12.4 R11).
+- `regalloc/ptr_data_regs` - codegen-patterns 12.2 ("Pointers in data
+  registers", bead domain-pascal-pze): a pointer or by-address parameter
+  also used as data held in a data register and copied with `movea.l
+  Dn,An` where it is dereferenced (EC2_$INIT 0xE42C64..0xE42C74,
+  PROC1_$FREE_STACK 0xE15126..0xE15136), passed on with `move.l
+  Dn,-(SP)` (EC2_$ADVANCE 0xE42CDA), copied again after a call and read
+  again across `if`s while its register still holds it (OSINFO_$GET_MMAP
+  0xE5C870, 0xE5C8C8, 0xE5C952); a pointer only stored whole stays in an
+  address register (`stored`: the AST module-local 0xE00F7C, EC_$INIT
+  0xE15202).
 - `regalloc/schedule` - codegen-patterns 12.4 R9-R11 (bead
   domain-pascal-g5q.8, `crates/dpc-m68k/src/sched.rs`): a zero-extension's
   `clr.l` moved into a load's stall (0xE382BE), a store ordered against

@@ -548,8 +548,20 @@ fn select_body_with(
         }
     }
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
-    let saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
+    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
         .map_err(|what| unsupported(f.span, what))?;
+    let dropped = reuse_pointer_copies(&mut s.out, &s.ptr_copies);
+    if !dropped.is_empty() {
+        // A register only a dropped copy took is not saved.
+        let mut used = RegSet::of(&[Reg::A(5)]);
+        for i in &s.out {
+            let a = crate::regs::access(i);
+            for r in a.uses.iter().chain(a.defs.iter()) {
+                used.insert(*r);
+            }
+        }
+        saves = saves.intersection(used);
+    }
     for &(k, span) in &s.copy_blocks {
         // A block copy of a value parameter is seen from A0 into A1 only
         // (`tools/framesurvey.py`-style search of `movea.l (d,A6),An; lea
@@ -673,6 +685,7 @@ fn select_body_with(
                 && (matches!(i, Insn::Move { src: Ea::Reg(a), dst: Ea::Reg(b), .. } if a == b)
                     || matches!(i, Insn::Movea { src: Ea::Reg(Reg::A(a)), dst, .. } if a == dst)))
                 && !matches!(i, Insn::Label(l) if !used.contains(l))
+                && !dropped.contains(&k)
         })
         .collect();
     // The units in the kept instructions' indices.
@@ -1206,6 +1219,169 @@ fn check_late_slot_loads(out: &[Insn], late: &[(usize, Option<usize>, Span)]) ->
         }
     }
     Ok(())
+}
+
+/// After allocation: the copies `movea.l Dn,An` of pointers held in data
+/// registers ([`Selector::copy_to_a`]) whose value an address register
+/// still holds on every path are dropped, and that register is read
+/// instead (codegen-patterns 12.2, "Pointers in data registers").  The
+/// image copies again only where no address register holds the copy any
+/// more: of the 981 `movea.l Dn,An` in the routines `tools/regalloc.py`
+/// analyses whose data register is defined on every path, 969 are made
+/// where no address register holds a copy of the same value, 12 where one
+/// does (`tools/regalloc.py ptrcopies`).  OSINFO_$GET_MMAP reads A1, the
+/// copy of D3 made at 0xE5C870, at 0xE5C8C8 and 0xE5C952 (past two `if`s
+/// that do not write A1), but copies again at 0xE5C798 and 0xE5C9A2
+/// (calls and a loop wrote A1) and at 0xE5C870 (after the `jsr` at
+/// 0xE5C864); EC2_$INIT 0xE42C70 makes one copy for its two stores.
+///
+/// A copy whose register is not the holder's is dropped only when its
+/// value lives in straight-line code that writes neither register (the
+/// holder is renamed in); otherwise it stays.  Returns the dropped
+/// copies' indices; each is left in `out` as an empty `Insn::Words`
+/// (no registers, no bytes), which the caller leaves out of the body.
+fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
+    if copies.is_empty() {
+        return Vec::new();
+    }
+    // Per address register A0..A4, the data register it holds a copy of.
+    type Holds = [Option<u8>; 5];
+    let mut dropped: Vec<usize> = Vec::new();
+    loop {
+        let succ = crate::regs::successors(out);
+        let mut inn: Vec<Option<Holds>> = vec![None; out.len()];
+        if !out.is_empty() {
+            inn[0] = Some([None; 5]);
+        }
+        loop {
+            let mut changed = false;
+            for i in 0..out.len() {
+                let Some(mut st) = inn[i] else { continue };
+                {
+                    let acc = crate::regs::access(&out[i]);
+                    for d in &acc.defs {
+                        match *d {
+                            Reg::A(n) if n < 5 => st[n as usize] = None,
+                            Reg::D(n) => {
+                                for h in st.iter_mut() {
+                                    if *h == Some(n) {
+                                        *h = None;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if copies.contains(&i) {
+                        if let Insn::Movea {
+                            src: Ea::Reg(Reg::D(d)),
+                            dst,
+                            ..
+                        } = out[i]
+                        {
+                            st[dst as usize] = Some(d);
+                        }
+                    }
+                }
+                for s in succ[i].iter().flatten() {
+                    let merged = match inn[*s] {
+                        None => st,
+                        Some(t) => {
+                            let mut m = t;
+                            for (k, h) in m.iter_mut().enumerate() {
+                                if *h != st[k] {
+                                    *h = None;
+                                }
+                            }
+                            m
+                        }
+                    };
+                    if inn[*s] != Some(merged) {
+                        inn[*s] = Some(merged);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut progress = false;
+        for &k in copies {
+            if dropped.contains(&k) {
+                continue;
+            }
+            let Insn::Movea {
+                src: Ea::Reg(Reg::D(d)),
+                dst: a,
+                ..
+            } = out[k]
+            else {
+                continue;
+            };
+            let Some(st) = inn[k] else { continue };
+            // The copy's own register first: it needs no renaming.
+            let Some(j) = (a < 5 && st[a as usize] == Some(d))
+                .then_some(a)
+                .or_else(|| (0..5u8).find(|&j| st[j as usize] == Some(d)))
+            else {
+                continue;
+            };
+            if j == a {
+                out[k] = Insn::Words(Vec::new());
+                dropped.push(k);
+                progress = true;
+                break;
+            }
+            // The copy's uses, up to its last, in straight-line code that
+            // writes neither An nor the holder.
+            let live = crate::regs::liveness(out, &[], &[]);
+            let ra = crate::regs::RegKey(Reg::A(a));
+            let mut uses = Vec::new();
+            let mut i = k;
+            let mut ok = true;
+            while live[i].contains(&ra) {
+                i += 1;
+                let Some(x) = out.get(i) else {
+                    ok = false;
+                    break;
+                };
+                let acc = crate::regs::access(x);
+                let flow = matches!(
+                    x,
+                    Insn::Label(_)
+                        | Insn::Branch { .. }
+                        | Insn::Dbf { .. }
+                        | Insn::Jsr(_)
+                        | Insn::Bsr { .. }
+                        | Insn::TableIndex { .. }
+                        | Insn::TableJump { .. }
+                        | Insn::Rts
+                );
+                if flow || acc.defs.contains(&Reg::A(a)) || acc.defs.contains(&Reg::A(j)) {
+                    ok = false;
+                    break;
+                }
+                if acc.uses.contains(&Reg::A(a)) {
+                    uses.push(i);
+                }
+            }
+            if !ok || uses.is_empty() {
+                continue;
+            }
+            for &u in &uses {
+                crate::regs::rename(&mut out[u], &|r| if r == Reg::A(a) { Reg::A(j) } else { r });
+            }
+            out[k] = Insn::Words(Vec::new());
+            dropped.push(k);
+            progress = true;
+            break;
+        }
+        if !progress {
+            dropped.sort_unstable();
+            return dropped;
+        }
+    }
 }
 
 /// Address values loaded inside one call's argument list are kept apart
@@ -2662,6 +2838,19 @@ enum ParamUse {
     Data,
     /// It is a pointer the body dereferences (`p^`, `p^.f`).
     Base,
+    /// Its whole value is stored to memory (`g := p`, `g := addr(ec)`):
+    /// data unless the body also dereferences it.  A pointer parameter
+    /// that is dereferenced and stored is held in an address register
+    /// and stored from it (codegen-patterns 12.2, "Pointers in data
+    /// registers": EC_$INIT 0xE15202..0xE1520C `movea.l (8,A6),A0; clr.l
+    /// (A0); move.l A0,(4,A0)`; the AST module-local 0xE00F7C, 0xE00FA0
+    /// `move.l A1,(0x3ec,A5)`; DISK_$ADD_QUE 0xE3C804 `move.l
+    /// A1,(-4,A6)`).
+    Stored,
+    /// Its whole value is compared with 0 (`p = nil`, `addr(ec) <> nil`):
+    /// data, but a pointer also dereferenced is not settled (below,
+    /// [`Selector::entry_loads`]).
+    ZeroCompare,
 }
 
 /// Every use of a by-value parameter in `f`'s body, as (frame offset,
@@ -2722,6 +2911,24 @@ impl Uses<'_> {
                 addr: Addr::Frame(o),
                 ..
             } if self.is_param(*o) => self.out.push((*o, ParamUse::Data)),
+            // The address a by-address slot holds, as a value in an
+            // expression (`addr(p)`, ref "Addr", p. 4-13): the slot is
+            // read as data (EC2_$INIT 0xE42C64..0xE42C68 `move.l
+            // (8,A6),D0; cmpi.l #0x3e8,D0`, its `out` parameter, ec2.ins.pas).
+            // Passed as an argument it stays a base ([`Self::call_args`]).
+            Expr::AddrOf(Addr::Indirect { base, offset: 0 })
+                if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. }
+                    if self.is_slot(*o)) =>
+            {
+                let Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } = &**base
+                else {
+                    unreachable!()
+                };
+                self.out.push((*o, ParamUse::Data))
+            }
             // A bit field is read in memory (a parameter's in its slot).
             Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => {
                 self.address(addr)
@@ -2745,6 +2952,29 @@ impl Uses<'_> {
             Expr::Call { call, .. } => self.call_args(call),
             Expr::Test(c) => self.cond(c),
             Expr::Const { .. } => {}
+        }
+    }
+
+    /// The parameter whose whole longword value `value` is, as a store's
+    /// value or a comparison's operand ([`ParamUse::Stored`],
+    /// [`ParamUse::ZeroCompare`]): a by-value parameter's load or
+    /// `addr` of a by-address parameter's object, through type transfers
+    /// that keep the width.
+    fn whole_pointer(&self, value: &Expr) -> Option<i32> {
+        match value {
+            Expr::Convert { value, ty } if ty.width == Width::Long => self.whole_pointer(value),
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ty,
+            } if self.is_param(*o) && ty.width == Width::Long => Some(*o),
+            Expr::AddrOf(Addr::Indirect { base, offset: 0 }) => match &**base {
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } if self.is_slot(*o) => Some(*o),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -2797,6 +3027,13 @@ impl Uses<'_> {
                         },
                     ..
                 } => {}
+                // `addr(p)` pushed: the address, as for a by-address
+                // argument (`pea`, codegen-patterns 5.2 "`addr(x)` as a
+                // value").
+                Arg::Value {
+                    value: Expr::AddrOf(addr),
+                    ..
+                } => self.address(addr),
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value),
                 Arg::Address { addr, .. } => self.address(addr),
             }
@@ -2820,6 +3057,19 @@ impl Uses<'_> {
 
     fn cond(&mut self, c: &IrCond) {
         match c {
+            IrCond::Compare { lhs, rhs, .. }
+                if matches!(
+                    (lhs, rhs),
+                    (Expr::Const { value: 0, .. }, _) | (_, Expr::Const { value: 0, .. })
+                ) && (self.whole_pointer(lhs).is_some()
+                    || self.whole_pointer(rhs).is_some()) =>
+            {
+                let o = self
+                    .whole_pointer(lhs)
+                    .or_else(|| self.whole_pointer(rhs))
+                    .unwrap();
+                self.out.push((o, ParamUse::ZeroCompare));
+            }
             IrCond::Compare { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
@@ -2909,7 +3159,10 @@ impl Uses<'_> {
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Store { addr, value } => {
                     self.address(addr);
-                    self.expr(value);
+                    match self.whole_pointer(value) {
+                        Some(o) => self.out.push((o, ParamUse::Stored)),
+                        None => self.expr(value),
+                    }
                 }
                 // The value is evaluated before the destination's address
                 // when it is not a plain load ([`Selector::store_bits`]).
@@ -2957,6 +3210,9 @@ pub struct Selector {
     /// statements: the register, the start of its statement in `out`, and
     /// the statement ([`fresh_slot_loads`]).
     fresh: Vec<(Reg, usize, Span)>,
+    /// The `movea.l Dn,An` copies of pointers held in data registers
+    /// ([`Self::copy_to_a`]), by index in `out`.
+    ptr_copies: Vec<usize>,
     /// Parameters loaded at entry, and locals held in a register once
     /// assigned ([`register_locals`]): frame offset and the (virtual)
     /// register the value is in.
@@ -3210,6 +3466,7 @@ impl Selector {
             span,
             stmt_start: 0,
             fresh: Vec::new(),
+            ptr_copies: Vec::new(),
             pinned: Vec::new(),
             reg_locals: Vec::new(),
             webs: Vec::new(),
@@ -5115,6 +5372,28 @@ impl Selector {
         }
     }
 
+    /// A pointer parameter held in data register `d` (also used as data,
+    /// [`Self::entry_loads`]), copied to an address register to be
+    /// dereferenced: `movea.l Dn,An` (codegen-patterns 12.2, "Pointers in
+    /// data registers"; EC2_$INIT 0xE42C70 `movea.l D0,A0`; OSINFO_$GET_MMAP
+    /// 0xE5C6B0 `movea.l D6,A0`, 0xE5C6B4 `movea.l D3,A1`).  Each
+    /// dereference makes a copy, which takes a register as a slot loaded
+    /// for one use does (12.4 R4(b), [`fresh_slot_loads`]: 0xE5C6B4 A1
+    /// after the copy in A0 of the statement before); after allocation a
+    /// copy whose value an address register still holds is dropped and
+    /// that register read instead ([`reuse_pointer_copies`]).
+    fn copy_to_a(&mut self, d: u8) -> Res<u8> {
+        let a = self.alloc_a()?;
+        self.ptr_copies.push(self.out.len());
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src: Ea::Reg(Reg::D(d)),
+            dst: a,
+        });
+        self.fresh.push((Reg::A(a), self.stmt_start, self.span));
+        Ok(a)
+    }
+
     /// The register a by-value parameter at frame offset `o` was loaded
     /// into at entry, if it was.
     fn pinned(&self, o: i32) -> Option<Reg> {
@@ -5154,7 +5433,9 @@ impl Selector {
     /// 0xE32B76; PROC1_$SET_TYPE 0xE152F2).  A known miss of that rule:
     /// MST_$VA_TO_SEGNO 0xE0DCD6, D2 for the first parameter (12.4 corpus,
     /// R5); ROUTE_$FIND_PORT 0xE15B06 (D3, 12.2) has not been checked
-    /// against it.  A pointer also used as data is not supported yet.
+    /// against it.  A pointer also used as data is held in a data register
+    /// and copied where it is dereferenced ([`Self::copy_to_a`];
+    /// codegen-patterns 12.2, "Pointers in data registers").
     ///
     /// **By-address parameters** (the slot holds the argument's address)
     /// that the body reaches through more than once are loaded the same
@@ -5224,24 +5505,41 @@ impl Selector {
                 .filter(|(o, _)| *o == offset)
                 .map(|&(_, u)| u)
                 .collect();
-            let Some(&first) = mine.first() else {
-                continue;
-            };
-            if ty.is_none() && mine.len() < 2 {
+            if mine.is_empty() || (ty.is_none() && mine.len() < 2) {
                 continue;
             }
-            if mine.iter().any(|&u| u != first) {
-                // ACL_$ADD_PROJ 0xE47EC0 / EC2_$INIT 0xE42C64: a pointer
-                // that is also data is kept in a D register and copied to
-                // an A register for each dereference.
+            // A pointer that is also data is kept in a D register and
+            // copied to an address register where it is dereferenced
+            // ([`Self::eval_a`]; codegen-patterns 12.2, "Pointers in data
+            // registers"): EC2_$INIT 0xE42C64 `move.l (8,A6),D0`, compared
+            // at 0xE42C68, `movea.l D0,A0` at 0xE42C70; EC2_$READ
+            // 0xE42C82, EC2_$ADVANCE 0xE42CB8, PROC1_$FREE_STACK 0xE15126.
+            // A pointer compared with `nil` (or 0) and dereferenced: in
+            // an address register at the AREA_ module-local 0xE09E48
+            // (`(0xc,A6)` loaded into A3 at entry, 0xE09EAC `cmpa.w
+            // #0,A3`, 0xE09EC2 `(4,A3)`), in a data register at the NET_IO
+            // module-local 0xE0E238 (0xE0E240 `move.l (8,A6),D3`, 0xE0E270
+            // `tst.l D3`, 0xE0E29E `movea.l D3,A3`).  What decides is not
+            // known (codegen-patterns 12.2, "Pointers in data registers";
+            // bead domain-pascal-nys).
+            if mine.contains(&ParamUse::ZeroCompare)
+                && mine.contains(&ParamUse::Base)
+                && !mine.contains(&ParamUse::Data)
+            {
                 return Err(unsupported(
                     f.span,
-                    "a parameter used both as a pointer and as a value is",
+                    "a pointer parameter compared with `nil` or 0 and dereferenced (an address \
+                     register at 0xE09EAC, a data register at 0xE0E270; not settled, \
+                     codegen-patterns 12.2) is",
                 ));
             }
-            let class = match first {
-                ParamUse::Data => RegClass::Data,
-                ParamUse::Base => RegClass::Addr,
+            // A store of the whole pointer is not such a use
+            // ([`ParamUse::Stored`]: EC_$INIT 0xE15202 holds its pointer
+            // in A0 and stores it from there).
+            let class = if mine.contains(&ParamUse::Data) || !mine.contains(&ParamUse::Base) {
+                RegClass::Data
+            } else {
+                RegClass::Addr
             };
             // Each load is a new value; the allocator gives it the lowest
             // register free over its live range (codegen-patterns 12.4 R1):
@@ -5254,7 +5552,9 @@ impl Selector {
             let src = Ea::Disp(offset, FP);
             self.out.push(match r {
                 Reg::D(_) => Insn::Move {
-                    size: size_of(ty.expect("only by-value parameters are data").width),
+                    // A by-address slot holds an address (EC2_$INIT
+                    // 0xE42C64 `move.l`).
+                    size: ty.map_or(Size::L, |t| size_of(t.width)),
                     src,
                     dst: Ea::Reg(r),
                 },
@@ -6981,6 +7281,40 @@ impl Selector {
                         dst,
                     });
                 }
+                // A by-address parameter held in a data register
+                // (codegen-patterns 12.2, "Pointers in data registers")
+                // passed on: `move.l Dn,-(SP)` (EC2_$ADVANCE 0xE42CDA
+                // `move.l D0,-(SP)` to EC2_$WAKEUP; OSINFO_$GET_MMAP
+                // 0xE5C72C, 0xE5C860, 0xE5C862).  Inside the object: not
+                // seen.
+                Addr::Indirect { base, offset }
+                    if matches!(
+                        &**base,
+                        Expr::Load { addr: Addr::Frame(o), .. }
+                            if matches!(self.pinned(*o), Some(Reg::D(_)))
+                    ) =>
+                {
+                    let Expr::Load {
+                        addr: Addr::Frame(o),
+                        ..
+                    } = &**base
+                    else {
+                        unreachable!()
+                    };
+                    if *offset != 0 {
+                        return Err(unsupported(
+                            self.span,
+                            "passing by address a part of an object reached through a pointer \
+                             held in a data register (not seen, codegen-patterns 12.2) is",
+                        ));
+                    }
+                    let r = self.pinned(*o).unwrap();
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src: Ea::Reg(r),
+                        dst,
+                    });
+                }
                 // An object reached through a pointer held in an address
                 // register since the entry: `pea (d,An)`, `pea (An)`
                 // (module-local 0xE32B76, `sio/init_dtte.c`: 0xE32B86 `pea
@@ -7510,6 +7844,22 @@ impl Selector {
             Expr::SetOf { elem, ty } => Ok(Val::Tmp(self.set_of(elem, ty.width)?)),
             Expr::SetOp { op, lhs, rhs, ty } => {
                 Ok(Val::Tmp(self.set_op_value(*op, lhs, rhs, *ty)?))
+            }
+            // The address a by-address slot holds, held in a data register
+            // since the entry ([`Self::entry_loads`]; EC2_$INIT 0xE42C68
+            // `cmpi.l #0x3e8,D0`).
+            Expr::AddrOf(Addr::Indirect { base, offset: 0 })
+                if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. }
+                    if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
+            {
+                let Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } = &**base
+                else {
+                    unreachable!()
+                };
+                Ok(Val::Reg(self.pinned(*o).unwrap()))
             }
             Expr::AddrOf(_) => Err(unsupported(
                 self.span,
@@ -10524,9 +10874,7 @@ impl Selector {
             if let Some(r) = self.pinned(*o) {
                 return match r {
                     Reg::A(a) => Ok(a),
-                    // `entry_loads` puts dereferenced pointers in A
-                    // registers.
-                    Reg::D(_) => unreachable!("pointer parameter pinned in a data register"),
+                    Reg::D(d) => self.copy_to_a(d),
                 };
             }
             if *o < 0 && self.a0_holds(*o) {
@@ -11421,26 +11769,118 @@ mod tests {
         );
     }
 
+    /// [`reuse_pointer_copies`]: a copy whose value an address register
+    /// still holds on every path is dropped (the same register) or renamed
+    /// to the holder (another one); a holder written in between, or a
+    /// call, keeps the copy (OSINFO_$GET_MMAP 0xE5C870 after the `jsr` at
+    /// 0xE5C864; reads of the copy at 0xE5C8C8 past an `if`).
     #[test]
-    fn pointer_used_as_data_is_rejected() {
-        let mut f = func(
-            0,
-            None,
-            vec![
-                store(through(8, 0), konst(0, word())),
-                store(
-                    Addr::Symbol {
-                        name: "X".into(),
-                        offset: 0,
-                    },
-                    param(8, Scalar::POINTER),
-                ),
-            ],
-        );
-        vparams(&mut f, &[(8, Scalar::POINTER)]);
+    fn pointer_copies_are_reused_while_held() {
+        let copy = |a: u8| Insn::Movea {
+            size: Size::L,
+            src: Ea::Reg(Reg::D(0)),
+            dst: a,
+        };
+        let clr = |size: Size, d: i32, a: u8| Insn::Clr {
+            size,
+            dst: if d == 0 { Ea::Ind(a) } else { Ea::Disp(d, a) },
+        };
+        // Another register: renamed to the holder.
+        let mut out = vec![copy(0), clr(Size::L, 0, 0), copy(1), clr(Size::W, 4, 1)];
+        assert_eq!(reuse_pointer_copies(&mut out, &[0, 2]), vec![2]);
+        assert_eq!(out[3], clr(Size::W, 4, 0));
+        // The same register past an `if` and its join: dropped.
+        let mut out = vec![
+            copy(1),
+            Insn::Tst {
+                size: Size::L,
+                dst: Ea::Ind(1),
+            },
+            Insn::Branch {
+                cond: Cond::Ne,
+                label: 1,
+                short: true,
+                back: false,
+            },
+            clr(Size::W, 4, 0),
+            Insn::Label(1),
+            copy(1),
+            clr(Size::L, 0, 1),
+        ];
+        assert_eq!(reuse_pointer_copies(&mut out, &[0, 5]), vec![5]);
+        // The holder written in between, or a call: kept.
+        let mut out = vec![
+            copy(0),
+            clr(Size::L, 0, 0),
+            Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(8, FP),
+                dst: 0,
+            },
+            clr(Size::L, 0, 0),
+            copy(1),
+            clr(Size::W, 4, 1),
+        ];
+        assert!(reuse_pointer_copies(&mut out, &[0, 4]).is_empty());
+        let mut out = vec![
+            copy(0),
+            clr(Size::L, 0, 0),
+            Insn::Jsr(Ea::AbsL("X".into(), 0)),
+            copy(0),
+            clr(Size::W, 4, 0),
+        ];
+        assert!(reuse_pointer_copies(&mut out, &[0, 3]).is_empty());
+        // Two registers hold the copy: the copy's own is read, though
+        // a label keeps the other from being renamed in.
+        let mut out = vec![
+            copy(0),
+            clr(Size::L, 0, 0),
+            copy(1),
+            Insn::Label(1),
+            clr(Size::L, 0, 1),
+            copy(1),
+            Insn::Label(2),
+            clr(Size::W, 4, 1),
+        ];
+        assert_eq!(reuse_pointer_copies(&mut out, &[0, 2, 5]), vec![5]);
+    }
+
+    /// A pointer parameter also used as data is held in a data register
+    /// and copied to an address register to be dereferenced
+    /// (codegen-patterns 12.2, "Pointers in data registers"; EC2_$INIT
+    /// 0xE42C64..0xE42C74; PROC1_$FREE_STACK 0xE15126..0xE15136, the
+    /// pointer stepped by `subq.l #4,D0` at 0xE15130).  Only stored whole,
+    /// it stays in an address register (EC_$INIT 0xE15202..0xE1520C; the
+    /// AST module-local 0xE00F7C, 0xE00FA0 `move.l A1,(0x3ec,A5)`).
+    #[test]
+    fn pointer_used_as_data_is_held_in_a_data_register() {
+        let x = || Addr::Symbol {
+            name: "X".into(),
+            offset: 0,
+        };
+        let body = |value: Expr| {
+            let mut f = func(
+                0,
+                None,
+                vec![store(through(8, 0), konst(0, word())), store(x(), value)],
+            );
+            vparams(&mut f, &[(8, Scalar::POINTER)]);
+            f
+        };
+        let f = body(Expr::Binary {
+            op: BinOp::Sub,
+            lhs: Box::new(param(8, Scalar::POINTER)),
+            rhs: Box::new(konst(4, Scalar::POINTER)),
+            ty: Scalar::POINTER,
+        });
         assert_eq!(
-            err(&f),
-            "a parameter used both as a pointer and as a value is not supported yet"
+            text(&f)[1..4],
+            ["move.l\t(8,%fp),%d0", "movea.l\t%d0,%a0", "clr.w\t(%a0)",]
+        );
+        let f = body(param(8, Scalar::POINTER));
+        assert_eq!(
+            text(&f)[1..4],
+            ["movea.l\t(8,%fp),%a0", "clr.w\t(%a0)", "move.l\t%a0,(X).l",]
         );
     }
 
