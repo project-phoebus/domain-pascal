@@ -1,0 +1,45 @@
+.text
+SET_DFL:
+link.w %fp,#-4
+movea.l (8,%fp),%a0
+move.l (0x20,%a5),(%a0)
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".text.INITD.WIRED_PROC","ax",@progbits
+.globl WORD_ERASE
+WORD_ERASE:
+link.w %fp,#0
+movea.l (8,%fp),%a0
+clr.l (%a0)
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".text.INITD.OS_INIT_PROC","ax",@progbits
+.globl ZERO_ONLY
+ZERO_ONLY:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata.OS_INIT_DATA).l,%a5
+movea.l (8,%fp),%a0
+move.l (%a5),(%a0)
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".moddata.INITD","aw",@progbits
+.balign 4
+.Ldata:
+.byte 0x00,0x07,0x00,0x09,0x00,0x08,0x00,0x08,0x00,0x12,0x00,0x10,0x00,0x0b,0x00,0x0e
+.byte 0x74,0x74,0x79,0x00,0x00,0x00,0x00,0x00,0xff,0x00,0x00,0x02,0x00,0x00,0x00,0x00
+.byte 0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0x00,0x01,0xff,0xff
+.section ".moddata.INITD.WIRED_DATA","aw",@progbits
+.balign 4
+.Ldata.WIRED_DATA:
+.space 27
+.byte 0x01,0x00,0x00,0x37
+.space 1
+.section ".bss.moddata.INITD.OS_INIT_DATA","aw",@nobits
+.balign 4
+.Ldata.OS_INIT_DATA:
+.space 4

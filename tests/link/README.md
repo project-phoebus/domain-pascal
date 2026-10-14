@@ -149,7 +149,8 @@ symbols, not by name.  `objcopy --rename-section` is not used.
 ### Module data (bead domain-pascal-3bp)
 
 A unit's static data is the NOBITS block `.bss.moddata.<UNIT>[.<SECTION>]`
-labelled `.Ldata[.<SECTION>]` (codegen-patterns 4 and 11).  In `../source`
+labelled `.Ldata[.<SECTION>]` (codegen-patterns 4 and 11), or the block
+with contents `.moddata.<UNIT>[.<SECTION>]` when it has initial values.  In `../source`
 the same image bytes already belong to a C object that the module's other
 C routines use: a `MODULE_DATA_DEFINE` block (PROC1_$DATA), a C object
 with a map name (CAL_$TIMEZONE) or one `gen_layout_ld.py` keys by
@@ -167,7 +168,7 @@ and the dpc unit refers to them**:
   symbol changes.  dpc also writes the absolute local symbol
   `__dpc_data_size[.SECTION]`, the bytes the unit declares there.
 - The harness takes the block's image address from the manifest's
-  `--section-addr .bss.moddata...=0xADDR` (the address the conformance
+  `--section-addr [.bss].moddata...=0xADDR` (the address the conformance
   gate proves; a unit test checks the two manifests agree) and finds the
   one C data object of the link that starts there, from `../source`'s own
   placement facts only: `MODULE_DATA_DEFINE` address literals
@@ -192,6 +193,19 @@ and the dpc unit refers to them**:
     `FIM_$DATA` with `(as_id + 15) * 4`; `fim/fim.h` asserts the offset).
     Informational: an offset the C reaches some other way is not a
     mismatch.
+- **Initial contents** (bead domain-pascal-63t).  A block with initial
+  values (`.moddata.*`) says what its bytes must be, and `make conform`
+  ties them to the image.  Before compiling with `--data-base`, the
+  harness takes the block's bytes from the dpc object (`objcopy -O
+  binary --only-section`) and compares the declared ones
+  (`__dpc_data_size`) with the C owner's initial bytes: its section's
+  contents at its symbol, or zeros for a NOBITS C object.  A difference
+  fails the unit, and so does a relocation in the compared C bytes (a
+  pointer, not final in the object).  fim_get_fim_addr.pas: its 0x134
+  bytes (the frame size table at +0x124) equal FIM_$DATA's
+  (`fim/fim_data.c`, `MODULE_DATA_DEFINE_INIT`); a changed table byte
+  fails with "initial bytes differ from FIM_$DATA ... first at +0x12C"
+  (tried, 2026-10-13).
 - **Proof.**  `asm_compare.py` resolves the `lea` relocation to the
   owner's image address and checks it against the image's operand
   (`lea 0x00E254E8,A5` at PROC1_$GET_LOADAV 0xE14BC0).
@@ -238,7 +252,7 @@ uncommitted edits, passed too.
 | proc1_get_loadav.pas; data: PROC1_$DATA (0xC of 0xCC4 bytes) | proc1/get_loadav.o |
 | proc2_get_boot_flags.pas; data: PROC2_$UNWIRED_DATA (0x1E6 of 0x1E8) | proc2/get_boot_flags.o |
 | proc2_quit.pas (`bsr.w PROC2_$SIGNAL`); data: PROC2_$UNWIRED_DATA | proc2/quit.o |
-| fim_get_fim_addr.pas; data: FIM_$DATA (0x124 of 0x134) | fim/get_fim_addr.o |
+| fim_get_fim_addr.pas; data: FIM_$DATA (0x134 of 0x134, initial bytes equal) | fim/get_fim_addr.o |
 | smd_busy_wait.pas (SMD_$PUTC, _$BUSY_WAIT, _$LITES); data: SMD_$BLINK_TIMER_DATA | smd/{putc,busy_wait,lites}.o |
 | mmap_alloc_contig.pas; data: MMAP_$DATA | mmap/alloc_contig.o |
 | pkt_next_id.pas; data: PKT_$DATA (0x5E of 0xA8) | pkt/next_id.o |
@@ -307,7 +321,9 @@ manifest is read.  The other cases are refused after compiling or after
   (XNS_IDP_$DATA) but are refused for their code: `xns/idp_misc.o` holds
   four routines.
 - **Only module-local routines** (sio_init_dtte.pas, rip_packet_length.pas,
-  disk_set_chain_status.pas, vfmt_get_next_arg.pas).  dpc gives them local
+  disk_set_chain_status.pas, vfmt_get_next_arg.pas; tty_wired_data.pas and
+  tty_set_dfl_funcs.pas, the units with TTY's initialised data blocks,
+  whose blocks `../source` has no single C owner for either).  dpc gives them local
   symbols, while the C callers name C functions (e.g. a C name for
   0xE32B76).  Such a unit would add unreachable code and replace nothing.
   Swapping it needs a whole-module unit whose callers come along, or a C

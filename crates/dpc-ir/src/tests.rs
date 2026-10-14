@@ -411,17 +411,13 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:5:3: error: this statement is not supported yet"]
     );
-    // Module data in an overlay section, or with an initial value.
+    // Module data in an overlay section.
     let e = errs("module m;\nvar (sect) v: integer;\n");
     assert_eq!(
         e,
         vec!["t.pas:2:12: error: variables in an overlay section (`var (name)`, ref 3.14 p. 3-52) are not supported yet"]
     );
-    let e = errs("module m;\nvar v: integer := 3;\n");
-    assert_eq!(
-        e,
-        vec!["t.pas:2:5: error: initialised static variables are not supported yet"]
-    );
+
     // A 6-byte set tested with an integer element, which may lie beyond
     // its 48 bits (the guarded form, codegen-patterns 5.1).
     let e = errs(
@@ -759,7 +755,8 @@ end;
         [DataArea {
             section: ".data".into(),
             size: 12,
-            globals: vec![]
+            globals: vec![],
+            init: vec![]
         }]
     );
     let f = &m.functions[0];
@@ -807,7 +804,8 @@ end;
         [DataArea {
             section: ".data".into(),
             size: 10,
-            globals: vec![("B".into(), 4)]
+            globals: vec![("B".into(), 4)],
+            init: vec![]
         }]
     );
     let p = &m.functions[0];
@@ -3035,12 +3033,14 @@ fn named_sections() {
             DataArea {
                 section: "wired_data".into(),
                 size: 4,
-                globals: vec![]
+                globals: vec![],
+                init: vec![]
             },
             DataArea {
                 section: "init_data".into(),
                 size: 4,
-                globals: vec![]
+                globals: vec![],
+                init: vec![]
             }
         ]
     );
@@ -3293,4 +3293,103 @@ fn packed_fields_refused() {
          procedure t(var q: r); begin g := q.s end;",
     );
     assert!(e[0].contains("negative values"), "{e:?}");
+}
+
+#[test]
+fn initial_values_of_module_data() {
+    // ref 3.2.2, 3.5.1, 3.6.2, 3.7, 3.9.2, 3.10.4, 3.11.1, 3.13.4: each
+    // store of the flattened initialiser, at its offset in the block.
+    use crate::{DataInit, InitValue};
+    let m = lower_src(
+        "module m;
+type
+  colour = (red, green, blue);
+  st = record case integer of 1: (all: integer32); 2: (w: integer) end;
+  rec = record c: char; n: integer; end;
+var
+  i: integer := -2;
+  l: integer32 := 16#120010;
+  b: boolean := true;
+  f: boolean := false;
+  c: char := 'A';
+  e: colour := blue;
+  s: set of 0..31 := [0, 3..5, 31];
+  p: ^integer := nil;
+  a: array[1..4] of integer := [2 of 7, * of 7];
+  t: array[1..6] of char := 'abc';
+  r: rec := [n := 5, c := 'z'];
+  v: array[0..1] of st := [[all := 16#B000E], [w := 1]];
+procedure z;
+begin
+  i := 0;
+end;
+",
+    )
+    .unwrap();
+    let int = |offset, size, value| DataInit {
+        offset,
+        value: InitValue::Int { size, value },
+    };
+    let bytes = |offset, b: &[u8]| DataInit {
+        offset,
+        value: InitValue::Bytes(b.to_vec()),
+    };
+    assert_eq!(m.data.len(), 1);
+    assert_eq!(
+        m.data[0].init,
+        vec![
+            int(0, 2, -2),
+            // longword aligned (dpc-sema's freestanding layout)
+            int(4, 4, 0x120010),
+            int(8, 1, 0xFF),
+            int(9, 1, 0),
+            int(10, 1, 0x41),
+            int(12, 2, 2),
+            // members 0, 3, 4, 5 in the last byte, 31 in the first
+            bytes(14, &[0x80, 0, 0, 0x39]),
+            int(20, 4, 0),
+            int(24, 2, 7),
+            int(26, 2, 7),
+            int(28, 2, 7),
+            int(30, 2, 7),
+            // the first three elements only, not blank-padded
+            bytes(32, b"abc"),
+            int(40, 2, 5),
+            int(38, 1, 0x7A),
+            // variant fields by name
+            int(44, 4, 0xB000E),
+            int(48, 2, 1),
+        ]
+    );
+}
+
+#[test]
+fn one_character_initialises_a_char_array() {
+    // ref 3.11.1.1 p. 3-39: `blank_line : STRING := chr(10)' initialises
+    // element 1 only; a char literal likewise.
+    use crate::{DataInit, InitValue};
+    let m = lower_src(
+        "module m;
+var
+  nl: array[1..80] of char := chr(10);
+  x: array[1..3] of char := 'x';
+procedure z;
+begin
+end;
+",
+    )
+    .unwrap();
+    assert_eq!(
+        m.data[0].init,
+        vec![
+            DataInit {
+                offset: 0,
+                value: InitValue::Bytes(vec![10]),
+            },
+            DataInit {
+                offset: 80,
+                value: InitValue::Bytes(vec![b'x']),
+            },
+        ]
+    );
 }

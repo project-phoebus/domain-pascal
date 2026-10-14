@@ -650,9 +650,11 @@ def unit_specs(mod, name, linkmap, table=None):
 def data_sections(asm_text, linkmap, module):
     """`--section-addr' pairs for the module data sections of an .s."""
     out = {}
-    for sec in re.findall(r'\.section\s+"?(\.(?:bss|data)\.moddata\.[^",\s]+)', asm_text):
-        parts = sec.split('.')
-        want = parts[-1] if len(parts) > 4 else '.DATA'
+    # dpc: `.bss.moddata.<UNIT>[.<SECT>]', or `.moddata.<UNIT>[.<SECT>]'
+    # for a block with initial values (emit.rs, data_section_name)
+    for sec in re.findall(r'\.section\s+"?((?:\.bss)?\.moddata\.[^",\s]+)', asm_text):
+        _unit, dot, name = sec.split('.moddata.', 1)[1].partition('.')
+        want = name if dot else '.DATA'
         for s in linkmap.sections:
             if s.kind == 'D' and s.name == want:
                 for g in linkmap.segments:

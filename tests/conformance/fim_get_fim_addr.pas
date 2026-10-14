@@ -22,11 +22,26 @@
   A0 and D0; the routine writes only D0 (it is a TRAP #0 service, whose
   results are taken from D0), so its result type is declared integer32
   here.  How the original declared it is not known.  The 0x3C bytes
-  before the table are padding here. }
+  before the table are padding here.
+
+  The block's last 16 bytes, +0x124..+0x133, are the exception frame
+  size table of the image (`08 08 0C 00 10 00 00 00 3A 14 20 5C 00 00 00
+  00', one byte per 68010 stack frame format; ../source fim/fim_data.c,
+  FIM_$DATA's frame_size), given as initial values (ref 3.11.1.2; bead
+  domain-pascal-63t), so the block is the map segment's 0x134 bytes with
+  contents, compared with the image by tools/conform.py and with the C
+  block's initial bytes by tools/linktest.py.  The element type is not
+  known (../source: uint8_t): `char' with chr() stands in for an
+  unsigned byte (a subrange 0..255 is 2 bytes, ref 3.8.1 p. 3-14; a
+  `packed array of 0..255', 8 bits per element by ref 3.11.4.2 Table
+  3-5, is not supported by dpc yet). }
 module fim_;
 var
   fim_pad: array[1..15] of integer32;                    { 0x00..0x3B }
   fim_$user_fim_addr: array[0..57] of integer32;         { 0x3C..0x123 }
+  fim_frame_size: array[0..15] of char := [              { 0x124..0x133 }
+    chr(16#08), chr(16#08), chr(16#0C), chr(0), chr(16#10), chr(0), chr(0),
+    chr(0), chr(16#3A), chr(16#14), chr(16#20), chr(16#5C), * of chr(0)];
   proc1_$as_id: extern integer;
 function fim_$get_fim_addr: integer32;
 begin

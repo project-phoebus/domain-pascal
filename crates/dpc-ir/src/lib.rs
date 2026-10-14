@@ -69,9 +69,10 @@ pub struct Module {
     pub outside_internal_calls: Vec<(String, Span)>,
 }
 
-/// A unit's static data area in one data section: one block,
-/// zero-filled (initialised static data is not supported yet), reached as
+/// A unit's static data area in one data section: one block, reached as
 /// [`Addr::Static`] offsets by the routines whose data section it is.
+/// Zero-filled, except for the initial values of its variables
+/// ([`DataArea::init`]; ref 3.2.2, 3.9.2, 3.10.4, 3.11.1, 3.13.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataArea {
     /// The Pascal data section, as `dpc_sema` names it (`.data` when
@@ -85,6 +86,28 @@ pub struct DataArea {
     /// offset order.  Other static variables are local (ref 7.2) and get
     /// no symbol.
     pub globals: Vec<(String, u32)>,
+    /// Initial values, in source order (a later one overwrites an earlier
+    /// one where they overlap, as for a record field given twice, ref
+    /// 3.10.4 p. 3-22).  Empty: the block is all zeros.  The bytes not
+    /// named stay zero (ref 3.11.1 p. 3-38: components with no
+    /// initialisation data are not initialised).
+    pub init: Vec<DataInit>,
+}
+
+/// One initial value in a [`DataArea`], at byte `offset` of the block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataInit {
+    pub offset: u32,
+    pub value: InitValue,
+}
+
+/// An initial value: an integer of `size` bytes (its byte order is the
+/// target's), or bytes whose order the language fixes (a set's bit
+/// string, ref 3.9.3 Figure 3-6 p. 3-16; a string's characters).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitValue {
+    Int { size: u32, value: i64 },
+    Bytes(Vec<u8>),
 }
 
 /// One routine with a body.

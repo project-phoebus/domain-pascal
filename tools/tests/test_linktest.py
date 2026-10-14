@@ -263,11 +263,27 @@ class DataTest(unittest.TestCase):
         self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC2'), '.data')
         self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC1_.WIRED_DATA'),
                          'WIRED_DATA')
+        self.assertEqual(linktest.pascal_data_section('.moddata.FIM_'), '.data')
+        self.assertEqual(linktest.pascal_data_section('.moddata.TTY.WIRED_DATA'),
+                         'WIRED_DATA')
         with self.assertRaises(linktest.SetupError):
             linktest.pascal_data_section('.data.X')
         self.assertEqual(linktest.data_size_symbol('.data'), '__dpc_data_size')
         self.assertEqual(linktest.data_size_symbol('wired_data'),
                          '__dpc_data_size.WIRED_DATA')
+
+    def test_initial_bytes_mismatch(self):
+        f = linktest.initial_bytes_mismatch
+        sec, o, obj = '.moddata.FIM_', 'FIM_$DATA', 'build/sau2/fim/fim_data.o'
+        self.assertIsNone(f(sec, b'\0\x08\x0c', o, obj, b'\0\x08\x0c\x77', set()))
+        self.assertIn('first at +0x2: dpc 0c, C 0d (1 byte(s) differ)',
+                      f(sec, b'\0\x08\x0c', o, obj, b'\0\x08\x0d', set()))
+        self.assertIn('the unit declares 0x3, FIM_$DATA (%s) has 0x2' % obj,
+                      f(sec, b'\0\x08\x0c', o, obj, b'\0\x08', set()))
+        self.assertIn('has a relocation at +0x1',
+                      f(sec, b'\0\0\0', o, obj, b'\0\0\0', {1, 2, 3, 4}))
+        # a relocation past the declared bytes does not matter
+        self.assertIsNone(f(sec, b'\0', o, obj, b'\0\0', {1}))
 
     def test_parse_nm_sizes(self):
         self.assertEqual(self.c_data['PROC1_$DATA'],

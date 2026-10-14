@@ -4314,8 +4314,9 @@ impl Selector {
                         ))
                     }
                 };
-                self.tst(Size::B, ea)?;
-                self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+                let cc = if when { Cond::Mi } else { Cond::Pl };
+                self.tst(Size::B, ea, cc)?;
+                self.jump(cc, l);
                 Ok(())
             }
             IrCond::Compare { op, lhs, rhs } => {
@@ -4362,7 +4363,14 @@ impl Selector {
     /// D0,(0x412,A0); tst.w (0x412,A0)`; for such stores the survey has 21
     /// branches on the store's flags, 10 tests of the memory and 3 of the
     /// register, by a rule not known).
-    fn tst(&mut self, size: Size, ea: Ea) -> Res<()> {
+    ///
+    /// `cc` is the condition the caller will branch on.  The survey's
+    /// branches on a store's flags are all `beq`/`bne`/`bmi`/`bpl`; no
+    /// frame store is followed by an ordered branch (`bgt` .. `bcs`),
+    /// with or without a `tst` between them (bead domain-pascal-1vp,
+    /// codegen-patterns 7.1), so that shape is refused rather than
+    /// extended from the seen ones.
+    fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
         if let (
             Ea::Disp(k, FP),
             Some(Insn::Move {
@@ -4373,6 +4381,14 @@ impl Selector {
         ) = (&ea, self.out.last())
         {
             if d == k && *k < 0 && *s == size {
+                if !matches!(cc, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) {
+                    return Err(unsupported(
+                        self.span,
+                        "an ordered test of a local right after its store (only \
+                         `beq`/`bne`/`bmi`/`bpl` on a store's flags are seen, \
+                         codegen-patterns 7.1) is",
+                    ));
+                }
                 return Ok(());
             }
         }
@@ -4526,7 +4542,7 @@ impl Selector {
                     self.out.push(Insn::CmpaZero(a));
                     return Ok(cc);
                 }
-                self.tst(size, ea)?;
+                self.tst(size, ea, cc)?;
                 Ok(cc)
             }
             Expr::Const { value, .. } => {

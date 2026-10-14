@@ -165,20 +165,34 @@ class ConformTest(unittest.TestCase):
         self.assertIn('global symbol WORKER is not in the map', out)
 
     def test_data_section_compared(self):
-        # a data section must be placed and is then compared with the image
-        # (0xE148E6 starts PROC1_$GET_LOCKS: 4e56 fffc)
+        # a data section must be placed, at the start of a data segment of
+        # the map, and is then compared with the image (TTY's .DATA block
+        # 0xE8242C starts 0007 0009)
         good = self.variant('proc1_tst_lock.s', 'tst_lock_data_ok.s',
-                            '\trts\t', '\t.data\n\t.short\t0x4e56\n\t.text\n\trts\t')
+                            '\trts\t', '\t.data\n\t.short\t0x0007\n\t.text\n\trts\t')
         ok, out = self.run_check(good, ['PROC1_$TST_LOCK'])
         self.assertFalse(ok)
         self.assertIn('section .data has contents but no --section-addr', out)
-        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE148E6})
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE8242C})
         self.assertTrue(ok, out)
+        self.assertIn('OK data .data 0xE8242C 0x2', out)
         bad = self.variant('proc1_tst_lock.s', 'tst_lock_data_bad.s',
-                           '\trts\t', '\t.data\n\t.short\t0x4e57\n\t.text\n\trts\t')
-        ok, out = self.run_check(bad, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE148E6})
+                           '\trts\t', '\t.data\n\t.short\t0x0008\n\t.text\n\trts\t')
+        ok, out = self.run_check(bad, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE8242C})
         self.assertFalse(ok)
-        self.assertIn('section .data differs first at 0xE148E7: ours 57, image 56', out)
+        self.assertIn('section .data differs first at 0xE8242D: ours 08, image 07', out)
+        # not a data segment's start (0xE8242E is inside TTY's block;
+        # 0xE148E6 is code), or longer than the segment (0x2C bytes)
+        for at in (0xE8242E, 0xE148E6):
+            ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={'.data': at})
+            self.assertFalse(ok)
+            self.assertIn('data section .data at 0x%X: not the start of a data segment' % at,
+                          out)
+        long_ = self.variant('proc1_tst_lock.s', 'tst_lock_data_long.s', '\trts\t',
+                             '\t.data\n\t.space\t0x30\n\t.text\n\trts\t')
+        ok, out = self.run_check(long_, ['PROC1_$TST_LOCK'], section_addrs={'.data': 0xE8242C})
+        self.assertFalse(ok)
+        self.assertIn('data section .data: ours 0x30 bytes, map segment TTY', out)
 
     def test_extra_code_section(self):
         # a second code section with --section-addr is linked there and

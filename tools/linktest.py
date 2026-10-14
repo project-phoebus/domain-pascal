@@ -42,7 +42,11 @@ Steps (tests/link/README.md has the why of each):
      a gen_layout_ld.py DATA_ANCHORS entry); the declared bytes
      (`__dpc_data_size') must fit in that one object; and the unit is
      compiled again with `dpc --data-base=SECTION=SYMBOL', so it allocates
-     no block and its `lea' names the C object.
+     no block and its `lea' names the C object.  A block with initial
+     values (`.moddata.*', bead domain-pascal-63t) must also agree with
+     the C object's initial bytes, over the bytes the unit declares (a
+     NOBITS C object is zeros; a relocated C byte cannot be compared and
+     fails).
   5. `make check' in the scratch copy with linktest.mk filled in: the
      layout checks (map order of every placed symbol, scratch link), the
      hand-written assembly gate, the guards, the iodefs check, the RFC
@@ -141,14 +145,14 @@ def parse_manifest_line(toks, lineno=0):
     for t in rest:
         if t == '--section-addr':
             sec, addr = conform.parse_section_addr(next(rest, ''))
-            if sec.startswith(DATA_PREFIX):
+            if sec.startswith(DATA_PREFIXES):
                 # the block's image address: which C object owns it
                 if sec in data:
                     raise SetupError('%s: %s given twice' % (path, sec))
                 data[sec] = addr
             elif not sec.startswith('.text'):
                 raise SetupError('%s: %s is neither a code section nor a dpc '
-                                 'data block (%s...)' % (path, sec, DATA_PREFIX))
+                                 'data block (%s...)' % (path, sec, '... / '.join(DATA_PREFIXES)))
         elif t.startswith(conform.LOOP_ALIGN_TOKENS):
             align.append(t)
         elif t.startswith(conform.A5_TOKENS):
@@ -293,9 +297,12 @@ def plan_drops(unit_globals, defs, asm_objs=(), whole=None):
 
 
 # dpc's data blocks: `.bss.moddata.<UNIT>' for the Pascal default data
-# section, `.bss.moddata.<UNIT>.<SECTION>' for a named one
+# section, `.bss.moddata.<UNIT>.<SECTION>' for a named one, and
+# `.moddata.<UNIT>[.<SECTION>]' for a block with initial values
 # (crates/dpc-m68k/src/emit.rs, data_section_name).
-DATA_PREFIX = '.bss.moddata.'
+DATA_PREFIXES = ('.bss.moddata.', '.moddata.')
+DATA_PREFIX = DATA_PREFIXES[0]
+INIT_DATA_PREFIX = DATA_PREFIXES[1]
 # what dpc --data-base records for a section (emit.rs, data_size_symbol)
 DATA_SIZE_SYMBOL = '__dpc_data_size'
 
@@ -303,10 +310,34 @@ DATA_SIZE_SYMBOL = '__dpc_data_size'
 def pascal_data_section(sec):
     """The Pascal data section of dpc block section `sec', as dpc
     --data-base takes it (`.data' for the default section)."""
-    if not sec.startswith(DATA_PREFIX):
+    pre = next((p for p in DATA_PREFIXES if sec.startswith(p)), None)
+    if pre is None:
         raise SetupError('%s is not a dpc data block' % sec)
-    _, dot, name = sec[len(DATA_PREFIX):].partition('.')
+    _, dot, name = sec[len(pre):].partition('.')
     return name if dot else '.data'
+
+
+def initial_bytes_mismatch(sec, ours, owner, cobj, theirs, relocated):
+    """Why dpc block `sec''s initial bytes `ours' (its declared bytes)
+    disagree with C object `owner''s initial bytes `theirs' (from
+    `cobj', as many), or None.  `relocated': offsets in the C object
+    that a relocation fills in (a pointer), whose bytes are not final in
+    the object and so cannot be compared.  C owns the bytes in the link
+    (README, "Module data"); a block with initial values says what they
+    must be, and the conformance gate has tied those to the image."""
+    if len(theirs) < len(ours):
+        return ('%s: initial bytes: the unit declares 0x%X, %s (%s) has 0x%X'
+                % (sec, len(ours), owner, cobj, len(theirs)))
+    rel = sorted(o for o in relocated if o < len(ours))
+    if rel:
+        return ('%s: initial bytes: %s (%s) has a relocation at +0x%X; its bytes '
+                'cannot be compared' % (sec, owner, cobj, rel[0]))
+    bad = [i for i, (x, y) in enumerate(zip(ours, theirs)) if x != y]
+    if bad:
+        i = bad[0]
+        return ('%s: initial bytes differ from %s (%s) first at +0x%X: dpc %02x, C %02x '
+                '(%d byte(s) differ)' % (sec, owner, cobj, i, ours[i], theirs[i], len(bad)))
+    return None
 
 
 def data_size_symbol(psec):
@@ -811,6 +842,9 @@ def plan_data(u, root, obj, blocks, symtab, ctx, linkmap, dpc):
         errs.append('%s: --section-addr names a block the dpc object does not have' % sec)
     if errs:
         return [], errs
+    # a block with initial values: its bytes, before --data-base drops it
+    ours = {sec: section_bytes(root, obj, sec) for sec in blocks
+            if sec.startswith(INIT_DATA_PREFIX)}
     obj2, _, _, left, symtab2 = compile_unit(u, linkmap, dpc, root, bases)
     assert obj2 == obj
     if left:
@@ -827,7 +861,55 @@ def plan_data(u, root, obj, blocks, symtab, ctx, linkmap, dpc):
         e = extent_error(sec, addr, p[5], owner, cobj, size)
         if e:
             errs.append(e)
+        elif sec in ours:
+            theirs, relocated = c_initial_bytes(root, cobj, owner, size)
+            e = initial_bytes_mismatch(sec, ours[sec][:p[5]], owner, cobj, theirs, relocated)
+            if e:
+                errs.append(e)
+            else:
+                print('linktest: %s: %s: the 0x%X declared initial bytes equal %s\'s (%s)'
+                      % (u.path, sec, p[5], owner, cobj))
     return [tuple(p) for p in plan], errs
+
+
+def section_bytes(root, obj, sec):
+    """The contents of section `sec' of relocatable object `obj'."""
+    out = os.path.join(root, OBJDIR, '_section.bin')
+    must([conform.OBJCOPY, '-O', 'binary', '--only-section=' + sec, obj, out], cwd=root)
+    with open(out, 'rb') as f:
+        data = f.read()
+    os.remove(out)
+    return data
+
+
+def c_initial_bytes(root, cobj, sym, size):
+    """The initial bytes of data object `sym' (`size' bytes) of C object
+    `cobj': zeros in a NOBITS section, else the section's contents at the
+    symbol's offset; and the offsets in it that a relocation fills in."""
+    entries = [e for e in parse_symtab(must(['m68k-elf-objdump', '-t', cobj], cwd=root))
+               if e[0] == sym and e[3] != '*UND*']
+    if not entries:
+        raise SetupError('%s: no symbol %s' % (cobj, sym))
+    _, value, _, sec = entries[0]
+    heads = must(['m68k-elf-objdump', '-h', cobj], cwd=root).splitlines()
+    for i, l in enumerate(heads):
+        f = l.split()
+        if len(f) >= 7 and f[0].isdigit() and f[1] == sec:
+            flags = heads[i + 1] if i + 1 < len(heads) else ''
+            break
+    else:
+        raise SetupError('%s: no section %s' % (cobj, sec))
+    if 'CONTENTS' not in flags:
+        return bytes(size), set()
+    data = section_bytes(root, cobj, sec)[value:value + size]
+    relocated = set()
+    for l in must(['m68k-elf-objdump', '-r', '-j', sec, cobj], cwd=root).splitlines():
+        m = re.match(r'^([0-9a-fA-F]{8})\s+R_68K_(\w+)', l)
+        if m:
+            off = int(m.group(1), 16) - value
+            n = {'32': 4, '16': 2, '8': 1}.get(re.sub(r'^PC', '', m.group(2)), 4)
+            relocated.update(o for o in range(off, off + n) if 0 <= o < size)
+    return data, relocated
 
 
 def run_all(args):

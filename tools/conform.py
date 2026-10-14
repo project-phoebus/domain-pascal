@@ -79,8 +79,11 @@ Steps:
      sections are placed with `--section-addr SEC=0xADDR', or else at an
      address outside the image (references to them then fail step 4).
   3. The linked code is compared byte for byte with the image, and so is
-     every non-code section with contents; such a section without
-     `--section-addr' is a failure.  A 32-bit field without a relocation
+     every non-code section with contents (dpc's `.moddata.<UNIT>[.<SECT>]',
+     a module data block with initial values), which must start a data
+     segment of the map and fit in it; such a section without
+     `--section-addr' is a failure.  A zero-filled block (NOBITS,
+     `.bss.moddata.') is placed but has no bytes to compare.  A 32-bit field without a relocation
      whose value is a map address (>= 0x10000) is a failure: the reference
      was hard-coded rather than named.
   4. Every relocation of the object is checked symbolically: the image's
@@ -572,9 +575,13 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                 problems.append('0x%X: literal 0x%X (%s) with no relocation; reference '
                                 'it by name' % (rlo + i, v, linkmap.describe(v)))
 
-    # non-code sections with contents: compared byte for byte at their
-    # --section-addr; without one they cannot be checked, which is a failure
+    # non-code sections with contents (dpc's `.moddata.<UNIT>[.<SECT>]', a
+    # module data block with initial values): compared byte for byte at
+    # their --section-addr, which must start a data segment of the map
+    # that holds the whole section (a unit may declare a prefix of the
+    # block only); without one they cannot be checked, which is a failure
     flags = {s: fl for s, _, fl in secs}
+    data_ok = []
     for i, s in enumerate(other):
         if 'CONTENTS' not in flags[s]:
             continue
@@ -587,11 +594,21 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         with open(dpath, 'rb') as f:
             data = f.read()
         a = section_addrs[s]
+        if a < IMAGE_LO or a + len(data) > IMAGE_HI:
+            raise SetupError('--section-addr %s=0x%X: outside the image' % (s, a))
+        seg = linkmap.segment_containing(a)
+        if seg is None or seg.is_section or seg.kind != 'D' or seg.addr != a:
+            problems.append('data section %s at 0x%X: not the start of a data segment of '
+                            'the map' % (s, a))
+        elif len(data) > seg.size:
+            problems.append('data section %s: ours 0x%X bytes, map segment %s 0x%X..0x%X '
+                            'is 0x%X' % (s, len(data), seg.name, seg.addr, seg.end, seg.size))
         dimg = read_image(a, len(data))
         bad = [j for j, (x, y) in enumerate(zip(data, dimg)) if x != y]
         if bad:
             problems.append('section %s differs first at 0x%X: ours %02x, image %02x'
                             % (s, a + bad[0], data[bad[0]], dimg[bad[0]]))
+        data_ok.append((s, a, len(data)))
 
     # placement of named routines and other global code symbols: a map name
     # must be global and at its map address; a global the map does not name
@@ -616,6 +633,8 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
             for sec in extra:
                 out('OK section %s 0x%X 0x%X  %s'
                     % (sec, section_addrs[sec], len(extra_bytes[sec]), name))
+            for sec, a, n in data_ok:
+                out('OK data %s 0x%X 0x%X  %s' % (sec, a, n, name))
         return True
 
     out('FAIL %s (%s, 0x%X..0x%X, %d relocation(s))'

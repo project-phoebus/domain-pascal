@@ -227,5 +227,30 @@ class WorkaroundTest(unittest.TestCase):
         self.assertEqual(text, src.replace('timer: [aligned(1)] linteger;\n',
                                            'timer: linteger;\n'))
 
+
+class DataSectionsTest(unittest.TestCase):
+    """--section-addr pairs for dpc's data blocks, zero-filled
+    (`.bss.moddata.') or with initial values (`.moddata.')."""
+
+    class Seg:
+        def __init__(self, kind, name, addr, size):
+            self.kind, self.name, self.addr, self.size = kind, name, addr, size
+
+        def contains(self, a):
+            return self.addr <= a < self.addr + self.size
+
+    def test_both_prefixes(self):
+        S = self.Seg
+        lm = type('M', (), {})()
+        lm.sections = [S('D', 'WIRED_DATA', 0xE1DC00, 0x18000),
+                       S('D', '.DATA', 0xE78400, 0xD308)]
+        lm.segments = [S('D', 'TTY', 0xE2DDB4, 0x28), S('D', 'TTY', 0xE8242C, 0x2C)]
+        asm = ('\t.section\t".moddata.TTY.WIRED_DATA","aw",@progbits\n'
+               '\t.section\t".bss.moddata.TTY","aw",@nobits\n')
+        self.assertEqual(srcsurvey.data_sections(asm, lm, 'tty'),
+                         {'.moddata.TTY.WIRED_DATA': 0xE2DDB4,
+                          '.bss.moddata.TTY': 0xE8242C})
+
+
 if __name__ == '__main__':
     unittest.main()

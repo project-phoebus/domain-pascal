@@ -660,30 +660,34 @@ fn size_branches(
 }
 
 /// The output section of unit `unit`'s static data area in Pascal data
-/// section `sect`: the NOBITS section `.bss.moddata.<UNIT>` for the
-/// default section, `.bss.moddata.<UNIT>.<SECT>` for another, upper-cased
-/// like every external name (codegen-patterns 11); for the kernel's units
+/// section `sect`: `.bss.moddata.<UNIT>` (NOBITS) for the default
+/// section, `.bss.moddata.<UNIT>.<SECT>` for another, upper-cased like
+/// every external name (codegen-patterns 11); for the kernel's units
 /// `<UNIT>` is the map's `D` segment name (`PROC1_`, `PROC2`) and
-/// `<SECT>` its section (WIRED_DATA, OS_INIT_DATA).
+/// `<SECT>` its section (WIRED_DATA, OS_INIT_DATA).  A block with initial
+/// values (`initialised`) is `.moddata.<UNIT>[.<SECT>]`, with contents.
 ///
-/// Only the prefix is `../source`'s: there a block is the input section
-/// `.bss.moddata.<name>` / `.moddata.<name>` where `<name>` is the C
-/// object of a `MODULE_DATA_DEFINE` site (`PROC1_$DATA`,
-/// `PROC2_$UNWIRED_DATA`; `../source/domain_os/arch/m68k/arch.h`), and
-/// `tools/gen_layout_ld.py` orders a block by the address literal of that
-/// C site, never by the map's segment name.  A section of ours would get
-/// no ordering key there.  To link a unit into `../source`, the C object
-/// owns the bytes and the unit refers to it ([`Options::data_bases`],
-/// `dpc --data-base`; `tests/link/README.md`).
-pub fn data_section_name(unit: &str, sect: &str) -> String {
-    if sect == DEFAULT_DATA_SECTION {
-        format!(".bss.moddata.{}", unit.to_uppercase())
+/// Only the prefixes are `../source`'s: there a block is the input
+/// section `.bss.moddata.<name>` (MODULE_DATA_DEFINE, zero-filled) or
+/// `.moddata.<name>` (MODULE_DATA_DEFINE_INIT, "block with the image's
+/// initial contents") where `<name>` is the C object of the site
+/// (`PROC1_$DATA`, `PROC2_$UNWIRED_DATA`;
+/// `../source/domain_os/arch/m68k/arch.h`), and `tools/gen_layout_ld.py`
+/// orders a block by the address literal of that C site, never by the
+/// map's segment name.  A section of ours would get no ordering key
+/// there.  To link a unit into `../source`, the C object owns the bytes
+/// and the unit refers to it ([`Options::data_bases`], `dpc
+/// --data-base`; `tests/link/README.md`).
+pub fn data_section_name(unit: &str, sect: &str, initialised: bool) -> String {
+    let prefix = if initialised {
+        ".moddata"
     } else {
-        format!(
-            ".bss.moddata.{}.{}",
-            unit.to_uppercase(),
-            sect.to_uppercase()
-        )
+        ".bss.moddata"
+    };
+    if sect == DEFAULT_DATA_SECTION {
+        format!("{prefix}.{}", unit.to_uppercase())
+    } else {
+        format!("{prefix}.{}.{}", unit.to_uppercase(), sect.to_uppercase())
     }
 }
 
@@ -700,31 +704,89 @@ pub fn data_base_label(sect: &str) -> String {
     }
 }
 
-/// The unit's data area in one data section: one zero-filled block
-/// starting at its [`data_base_label`], `define`d variables as global
-/// symbols at their offsets.
+/// The unit's data area in one data section: one block starting at its
+/// [`data_base_label`], `define`d variables as global symbols at their
+/// offsets.  Zero-filled and NOBITS when no variable of the section has
+/// an initial value; otherwise the whole block has contents, zeros
+/// wherever no initial value is given (the image's `D` segments are one
+/// block per module and data section, codegen-patterns 11), integers
+/// big-endian (m68k).
 ///
 /// The block is 4-aligned and its size a multiple of 4: all 161 `D`
 /// segments of the SAU2 map start at a multiple of 4 and have such a
 /// size (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the
-/// binder rounded is not known.
+/// binder rounded is not known; the rounding bytes are zero (TTY's
+/// OS_INIT_DATA 0xE351B0, `00 00` at +0x3A after its last datum).
 fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
+    let initialised = !data.init.is_empty();
     let mut out = format!(
-        "\n\t.section\t\"{}\",\"aw\",@nobits\n\t.balign\t4\n{}:\n",
-        data_section_name(unit, &data.section),
+        "\n\t.section\t\"{}\",\"aw\",{}\n\t.balign\t4\n{}:\n",
+        data_section_name(unit, &data.section, initialised),
+        if initialised { "@progbits" } else { "@nobits" },
         data_base_label(&data.section)
     );
     let size = data.size.div_ceil(4) * 4;
+    let bytes = data_bytes(data, size);
     let mut at = 0;
     for (sym, off) in &data.globals {
         if *off > at {
-            out.push_str(&format!("\t.space\t{}\n", off - at));
+            out.push_str(&data_run(&bytes[at as usize..*off as usize]));
             at = *off;
         }
         out.push_str(&format!("\t.globl\t{sym}\n{sym}:\n"));
     }
     if size > at {
-        out.push_str(&format!("\t.space\t{}\n", size - at));
+        out.push_str(&data_run(&bytes[at as usize..size as usize]));
+    }
+    out
+}
+
+/// The `size` bytes of a data block: zeros, then each initial value
+/// written in order (a later one overwrites an earlier one).  Integers
+/// are big-endian.
+fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> Vec<u8> {
+    let mut bytes = vec![0u8; size as usize];
+    for init in &data.init {
+        let at = init.offset as usize;
+        match &init.value {
+            dpc_ir::InitValue::Int { size, value } => {
+                let n = *size as usize;
+                let be = value.to_be_bytes();
+                bytes[at..at + n].copy_from_slice(&be[8 - n..]);
+            }
+            dpc_ir::InitValue::Bytes(b) => bytes[at..at + b.len()].copy_from_slice(b),
+        }
+    }
+    bytes
+}
+
+/// Directives for a run of data bytes: `.space n` for zeros (also what
+/// a NOBITS block is made of), `.byte` lines of up to 16 otherwise; a
+/// zero run inside the contents stays in the `.byte` lines unless it is
+/// 16 bytes or more.
+fn data_run(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let zeros = bytes[i..].iter().take_while(|&&b| b == 0).count();
+        if zeros >= 16 || i + zeros == bytes.len() {
+            out.push_str(&format!("\t.space\t{zeros}\n"));
+            i += zeros;
+            continue;
+        }
+        // up to 16 bytes, stopping before a long zero run or the
+        // trailing zeros
+        let mut j = i;
+        while j < bytes.len() && j - i < 16 {
+            let z = bytes[j..].iter().take_while(|&&b| b == 0).count();
+            if z > 0 && (z >= 16 || j + z == bytes.len()) {
+                break;
+            }
+            j += 1;
+        }
+        let row: Vec<String> = bytes[i..j].iter().map(|b| format!("0x{b:02x}")).collect();
+        out.push_str(&format!("\t.byte\t{}\n", row.join(",")));
+        i = j;
     }
     out
 }
@@ -890,6 +952,7 @@ mod tests {
             section: ".data".into(),
             size: 14,
             globals: vec![("PROC1_$X".into(), 2), ("PROC1_$Y".into(), 8)],
+            init: vec![],
         }];
         let s = emit(&m, "m.pas", &Options::default()).unwrap();
         let tail = s.split("filler\n").nth(1).unwrap();
@@ -903,6 +966,52 @@ mod tests {
     }
 
     #[test]
+    fn initialised_data_area_has_contents() {
+        use dpc_ir::{DataInit, InitValue};
+        let mut m = module(&[".text"]);
+        m.name = "tty".into();
+        let int = |offset, size, value| DataInit {
+            offset,
+            value: InitValue::Int { size, value },
+        };
+        m.data = vec![dpc_ir::DataArea {
+            section: "wired_data".into(),
+            size: 0x2A,
+            globals: vec![("TTY_$X".into(), 0x24)],
+            init: vec![
+                int(0, 4, 0x0012_0010),
+                int(4, 2, -2),
+                int(6, 1, 0xFF),
+                DataInit {
+                    offset: 7,
+                    value: InitValue::Bytes(vec![1, 0, 2]),
+                },
+                // overwritten by the later value
+                int(0x24, 4, 0x1111_1111),
+                int(0x24, 4, 0x3C),
+                int(0x28, 2, 0x1A),
+            ],
+        }];
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        let tail = s.split("filler\n").nth(1).unwrap();
+        assert_eq!(
+            tail,
+            "\n\t.section\t\".moddata.TTY.WIRED_DATA\",\"aw\",@progbits\n\t.balign\t4\n\
+             .Ldata.WIRED_DATA:\n\
+             \t.byte\t0x00,0x12,0x00,0x10,0xff,0xfe,0xff,0x01,0x00,0x02\n\
+             \t.space\t26\n\
+             \t.globl\tTTY_$X\nTTY_$X:\n\
+             \t.byte\t0x00,0x00,0x00,0x3c,0x00,0x1a\n\
+             \t.space\t2\n"
+        );
+        // a long zero run inside the contents
+        assert_eq!(
+            data_run(&[1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
+            "\t.byte\t0x01,0x00,0x00,0x02\n\t.space\t16\n\t.byte\t0x03\n"
+        );
+    }
+
+    #[test]
     fn data_base_aliases_an_external_block() {
         let mut m = module(&[".text"]);
         m.name = "proc1_".into();
@@ -910,6 +1019,7 @@ mod tests {
             section: "wired_data".into(),
             size: 14,
             globals: vec![("PROC1_$X".into(), 2)],
+            init: vec![],
         }];
         let with = |bases: &[(&str, &str)]| {
             let opts = Options {
@@ -961,10 +1071,18 @@ mod tests {
             section_directive("proc1_", "wired_proc"),
             "\t.section\t\".text.PROC1_.WIRED_PROC\",\"ax\",@progbits"
         );
-        assert_eq!(data_section_name("proc1_", ".data"), ".bss.moddata.PROC1_");
         assert_eq!(
-            data_section_name("proc1_", "wired_data"),
+            data_section_name("proc1_", ".data", false),
+            ".bss.moddata.PROC1_"
+        );
+        assert_eq!(
+            data_section_name("proc1_", "wired_data", false),
             ".bss.moddata.PROC1_.WIRED_DATA"
+        );
+        assert_eq!(data_section_name("tty", ".data", true), ".moddata.TTY");
+        assert_eq!(
+            data_section_name("tty", "wired_data", true),
+            ".moddata.TTY.WIRED_DATA"
         );
         assert_eq!(data_base_label(".data"), ".Ldata");
         assert_eq!(data_base_label("wired_data"), ".Ldata.WIRED_DATA");

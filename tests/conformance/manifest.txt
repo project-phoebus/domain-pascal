@@ -58,7 +58,7 @@ tests/conformance/sio_init_dtte.pas          0xE32B76:42
 # as a boolean result.
 tests/conformance/rip_packet_length.pas      0xE68864:16
 tests/conformance/bat_get_bat_step.pas       BAT_$GET_BAT_STEP  --section-addr .bss.moddata.BAT_=0xE79478
-tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .bss.moddata.FIM_=0xE2126C
+tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .moddata.FIM_=0xE2126C
 tests/conformance/audit_is_process_audited.pas  AUDIT_$IS_PROCESS_AUDITED  --section-addr .bss.moddata.AUDIT=0xE854D8
 
 # Status out-parameters (codegen-patterns 9): `status.all := ...' through
@@ -172,3 +172,11 @@ tests/conformance/file_truncate_d.pas     FILE_$TRUNCATE_D
 tests/conformance/ring_svc_open.pas       RING_$SVC_OPEN  --section-addr .bss.moddata.RING=0xE86400  a5-always=RING_$SVC_OPEN  module-routines=RING_$OPEN_INTERNAL=0xE76B7C
 tests/conformance/time_q_remove_elem.pas   TIME_$Q_REMOVE_ELEM  module-routines=TIME_$Q_REMOVE_INTERNAL=0xE16B70
 tests/conformance/proc2_pguid_to_upgid.pas  PROC2_$PGUID_TO_UPGID  --section-addr .bss.moddata.PROC2=0xE7BE84  a5-always=PROC2_$PGUID_TO_UPGID  module-routines=PROC2_$UID_TO_UPGID_INTERNAL=0xE422CC
+# Initialised module data (ref 3.2.2, 3.9.2, 3.11.1; codegen-patterns 11;
+# bead domain-pascal-63t): a block with initial values is the section
+# `.moddata.<UNIT>[.<SECT>]', with contents, compared byte for byte with
+# the map's D segment.  TTY's whole .DATA and WIRED_DATA blocks, from
+# ../source's TTY Pascal: word arrays, sets of an enumeration, a 256-member
+# set of char, a routine's static between unit-level variables.
+tests/conformance/tty_set_dfl_funcs.pas      0xE6726E  --section-addr .moddata.TTY=0xE8242C  a5-always=TTY_$I_SET_DFL_FUNCS  module-routines=TTY_$I_SET_FUNCS=0xE6720E
+tests/conformance/tty_wired_data.pas         0xE1AED0:14 0xE1AEE4:14  --section-addr .moddata.TTY.WIRED_DATA=0xE2DDB4

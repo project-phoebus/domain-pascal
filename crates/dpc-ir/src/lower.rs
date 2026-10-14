@@ -19,8 +19,9 @@ use dpc_sema::consts::ConstValue;
 
 use crate::{
     Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions,
-    Expr, ForLoop, Function, LinkArg, Module, Nesting, ParamCopy, PoolConst, Rel, ResultClass,
-    ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp, ValueParam, Width,
+    DataInit, Expr, ForLoop, Function, InitValue, LinkArg, Module, Nesting, ParamCopy, PoolConst,
+    Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp,
+    ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -105,14 +106,14 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
 /// addressing has not been catalogued (codegen-patterns 11: the image's
 /// sections with no per-module segment, such as PROC2_$DATA 0xEA551C,
 /// are reached with `movea.l #<section>,An`, PROC2_$INIT 0xE30466); and
-/// initial values (ref 3.2.2), whose section contents the emitter does
-/// not write yet.
+/// the initial values [`init_value`] cannot encode.
 fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let module_section =
         |name: &str| name == p.data_section || p.routines.iter().any(|r| r.data_section == name);
     let mut used: Vec<&str> = Vec::new();
     let mut globals: Vec<(&str, String, u32)> = Vec::new();
+    let mut inits: Vec<(&str, DataInit)> = Vec::new();
     for v in &p.vars {
         let Storage::Static {
             symbol,
@@ -132,8 +133,19 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
         if let Err(d) = check_section_name(section, v.span) {
             errors.push(d);
         }
-        if v.init.is_some() {
-            errors.push(unsupported(v.span, "initialised static variables are"));
+        if let Some(stores) = &v.init {
+            for st in stores {
+                match init_value(&p.types, st.ty, &st.value) {
+                    Ok(value) => inits.push((
+                        section.as_str(),
+                        DataInit {
+                            offset: offset + st.offset,
+                            value,
+                        },
+                    )),
+                    Err(what) => errors.push(unsupported(v.span, what)),
+                }
+            }
         }
         if !used.contains(&section.as_str()) {
             used.push(section);
@@ -160,9 +172,72 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
                 section: n.clone(),
                 size: *size,
                 globals: g,
+                init: inits
+                    .iter()
+                    .filter(|(s, _)| s == n)
+                    .map(|(_, i)| i.clone())
+                    .collect(),
             }
         })
         .collect())
+}
+
+/// The initial value `value` of an object of type `ty` (one store of
+/// `dpc_sema::InitStore`), or what is not supported.
+///
+/// - Integers, subranges and enumerations (ref 3.2.2 p. 3-4; 3.7.1 p.
+///   3-13: an enumeration is one word) take their type's size; a boolean
+///   is 0xFF or 0 (ref 3.5.3 p. 3-11); a `char` one byte (3.6.2); `nil`
+///   a zero pointer (ref 3.13.4 p. 3-51; the image's nil is 0, codegen-
+///   patterns 7.1 `tst.l` against `nil`).
+/// - A set is its bit string, member k in byte `size-1 - k/8`, bit `k mod
+///   8` (ref 3.9.2 p. 3-15, 3.9.3 Figure 3-6 p. 3-16).
+/// - A string (or one character) given to an array of `char` fills its
+///   first elements only (ref 3.11.1.1 p. 3-38: "assign elements 1
+///   through 21 of array s1"; the rest is not initialised, i.e. stays
+///   zero here, not blank-padded as an assignment would be, ref p. 4-204).
+///
+/// Not supported yet: reals (no real constants, CLAUDE.md 1), a string
+/// given to a `varying` string (its length word and the trailing null of
+/// ref p. 4-205 are not catalogued for initialisers).
+fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitValue, String> {
+    let size = types.size(ty);
+    let int = |v: i64| -> Result<InitValue, String> {
+        if matches!(size, 1 | 2 | 4) {
+            Ok(InitValue::Int { size, value: v })
+        } else {
+            Err(format!("an initial value of a {size}-byte scalar is"))
+        }
+    };
+    match (types.kind(ty), value) {
+        (TypeKind::Real { .. }, _) => Err("initialising a real variable is".into()),
+        (TypeKind::Varying { .. }, _) => {
+            Err("initialising a varying string (length word, trailing null) is".into())
+        }
+        (TypeKind::Set { .. }, ConstValue::Set(members)) => {
+            let mut bytes = vec![0u8; size as usize];
+            for &k in members {
+                let (b, bit) = types.set_bit_location(ty, k as u32);
+                bytes[b as usize] |= 1 << bit;
+            }
+            Ok(InitValue::Bytes(bytes))
+        }
+        (TypeKind::Array { .. }, ConstValue::Str(chars)) if chars.len() <= size as usize => {
+            Ok(InitValue::Bytes(chars.clone()))
+        }
+        (TypeKind::Array { .. }, ConstValue::Char(c)) => Ok(InitValue::Bytes(vec![*c])),
+        (TypeKind::Array { .. } | TypeKind::Record(_) | TypeKind::Set { .. }, _) => {
+            Err(format!("this initial value of a {} is", types.display(ty)))
+        }
+        (_, ConstValue::Bool(b)) => int(if *b { 0xFF } else { 0 }),
+        (_, ConstValue::Nil) => int(0),
+        (_, ConstValue::Int(_) | ConstValue::Char(_) | ConstValue::Enum { .. }) => {
+            int(value.ordinal().unwrap_or(0))
+        }
+        (_, ConstValue::Str(_) | ConstValue::Set(_)) => {
+            Err(format!("this initial value of a {} is", types.display(ty)))
+        }
+    }
 }
 
 /// A section name the output can carry: letters, digits, `_`, `$` and

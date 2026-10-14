@@ -1751,7 +1751,8 @@ their host); no compare or widening of either has been catalogued.
   `name-dir-subsystems.md`); initialised static sets in the routine's
   data section (the TTY WIRED_DATA `set of char` at 0xE2DDB4 and the
   longword masks at 0xE2DDD4, ../source `tty/i_word_erase.pas`,
-  `tty/i_set_raw_mode.pas`).  A register-sized constant used as an
+  `tty/i_set_raw_mode.pas`; dpc's encoding of them is byte-identical,
+  `tests/conformance/tty_wired_data.pas`, section 11 "Initial values").  A register-sized constant used as an
   operand is its bit mask in an immediate (`move.l #0x1ffef,(0x20,A0)`,
   TTY_$I_INIT 0xE33290; `moveq #0x1f,D1`, TTY_$K_SET_DELAY 0xE67A1A);
   larger constant sets used by `in` are cells in the code, reached with
@@ -2891,12 +2892,18 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   all `beq`/`bne`/`bmi`/`bpl`; no frame store is followed by a signed
   or unsigned ordered branch (`bgt` .. `bcs`) or by a `tst` and one (an
   ad-hoc count over the same routines, bead domain-pascal-dgb review),
-  so dpc's `move.w D0,(-2,A6); ble.s` for `x > 0` is the same rule
-  extended, not seen (Uncertain).  **Implemented** (`isel.rs`,
-  `Selector::tst`): a test of a local's slot that would directly follow
-  a store of a data register into that slot, at the same size, is left
-  out (the `if`'s branch reads the store's flags; `sched.rs` keeps the
-  store the last flags setter of its run, R10).  A label between them
+  so whether an ordered test right after a store branches on the
+  store's flags or tests again is not seen either way (Uncertain).
+  **Implemented** (`isel.rs`, `Selector::tst`): a test of a local's slot
+  that would directly follow a store of a data register into that slot,
+  at the same size, is left out when the branch is `beq`/`bne`/`bmi`/
+  `bpl` (the `if`'s branch reads the store's flags; `sched.rs` keeps the
+  store the last flags setter of its run, R10); for any other branch
+  (`x > 0`, `x <= 0`: `bgt`/`ble`) it is refused, "an ordered test of a
+  local right after its store ... not supported yet" (bead
+  domain-pascal-1vp; dpc used to emit `move.w D0,(-2,A6); ble.s`, the
+  rule extended without evidence).  Driver test
+  `ordered_branch_on_a_store_is_refused`.  A label between them
   (a join) keeps the `tst` of the slot (the image tests the register
   there, not reproduced); other memory is tested again, as before.
   Golden `tests/golden/control/store_flags`; driver test
@@ -4214,7 +4221,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     its own constant pool and module-end padding.  The data area of a
     named data section `D` is the NOBITS `.bss.moddata.<U>.<D>`, labelled
     `.Ldata.<D>` (`.bss.moddata.<U>` and `.Ldata` for `.data`, as
-    before).  Evidence for the scheme, `../source`'s link
+    before; `.moddata.<U>[.<D>]` with contents when it has initial
+    values, below).  Evidence for the scheme, `../source`'s link
     (`domain_os/tools/gen_layout_ld.py`, read only): a code input section
     is any `.text` or `.text.*` section, keyed by the earliest map symbol
     it defines (its name is not looked at), and a section whose map
@@ -4297,8 +4305,63 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   variables are global symbols inside the block; other statics have no
   symbol.  `tools/conform.py` places the section with the manifest's
   `--section-addr .bss.moddata.<UNIT>=0x<D segment>`.  Named data
-  sections: above.  Not supported yet: initial values (a progbits
-  block), overlay sections (`var (name)`).
+  sections: above.  Not supported yet: overlay sections (`var (name)`).
+- **Initial values (Verified at the sites below; implemented, bead
+  domain-pascal-63t).**  The image is the kernel file as loaded, so a
+  module's `D` segment holds its static data's initial values (ref
+  3.2.2 p. 3-4, 3.5.1, 3.6.2, 3.9.2 p. 3-15, 3.10.4 pp. 3-21..3-22,
+  3.11.1 pp. 3-38..3-43, 3.13.4 p. 3-51; 7.2.2 for `define`), and
+  initialised and zero data share one segment per module and data
+  section: TTY's WIRED_DATA 0xE2DDB4 is a 32-byte `set of char` then two
+  longword sets, all initialised; FIM_ 0xE2126C is 0x124 zero bytes
+  (FIM_$USER_FIM_ADDR's table among them) and then a 16-byte initialised
+  table (+0x124); TTY's OS_INIT_DATA 0xE351B0 ends in `00 00` after its
+  last datum (+0x3A, the rounding to 4).
+  - *What `dpc` emits.*  `dpc-sema` flattens an initialiser into stores
+    (`InitStore`: offset, type, constant); `dpc-ir` encodes each as an
+    integer of its type's size (a boolean 0xFF/0, a `char` one byte, an
+    enumeration a word, `nil` 0) or as bytes whose order the language
+    fixes (a set's bit string, member k in byte `size-1 - k/8`, bit `k
+    mod 8`, ref 3.9.3 Figure 3-6; a string's characters), in
+    `dpc_ir::DataArea::init`; the emitter writes integers big-endian.  A
+    data section with at least one initial value is one block with
+    contents, the section `.moddata.<UNIT>[.<SECT>]`, `"aw",@progbits`
+    (`.byte` rows, `.space` for runs of 16 zeros or more and the tail),
+    every byte not given a value zero: the rest of the variables, the
+    padding between them, and the rounding to 4.  A block with no initial
+    value stays NOBITS `.bss.moddata.<UNIT>[.<SECT>]`.  The prefixes are
+    `../source`'s (`arch/m68k/arch.h`: `.moddata.<name>` is a
+    `MODULE_DATA_DEFINE_INIT` block, "the image's initial contents").
+  - *Rules taken from the reference, not seen in the image:* components
+    with no initialisation data are "not initialized" (ref 3.11.1 p.
+    3-38) and are zero here, as the rest of a NOBITS block is; a string
+    shorter than its `array of char` fills only its first elements (ref
+    3.11.1.1: "elements 1 through 21"), not blank-padded as an
+    assignment would be (p. 4-204), and one character fills element 1
+    (ref 3.11.1.1 p. 3-39, `blank_line : STRING := chr(10)`); a later value for the same field
+    overwrites an earlier one (ref 3.10.4, "field c gets reinitialized");
+    a variant's field is initialised by name (ref 3.10.4, `lb := 'a'`;
+    status_$t's `all`, TTY_$I_INIT's statics in `../source`).
+  - *Not supported yet:* a bare (positional) value for or after a
+    variant's field (ref 3.10.4 shows variants by name only); a packed
+    record's field that is not whole bytes holding its type's whole
+    object (bit fields); a `varying` string (length word, the trailing
+    null of p. 4-205); reals; overlay sections.
+  - *Harness.*  `tools/conform.py` compares a section with contents byte
+    for byte with the image at its `--section-addr`, which must start a
+    `D` segment of the map that holds the whole section (a unit may
+    declare a prefix of the block).  `tools/linktest.py` (C owns the
+    bytes in the link, `dpc --data-base`) compares the unit's declared
+    initial bytes with the C owner's initial bytes (a NOBITS C object is
+    zeros; a relocated C byte fails as not comparable).
+  - Byte-identical in `make conform` (data compared whole):
+    `tty_set_dfl_funcs.pas` (TTY .DATA 0xE8242C, 0x2C bytes: 18 words,
+    two sets of a 32-value enumeration, one a routine's `static` between
+    unit-level variables), `tty_wired_data.pas` (TTY WIRED_DATA
+    0xE2DDB4, 0x28 bytes: a 256-member `set of char`, two longword
+    sets; `.moddata.TTY.WIRED_DATA`), `fim_get_fim_addr.pas` (FIM_
+    0xE2126C, 0x134 bytes, the frame size table at +0x124; also equal to
+    `../source`'s FIM_$DATA in `make linktest`).
 
 ---
 

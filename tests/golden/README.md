@@ -39,6 +39,12 @@ Tests:
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS
   0xE18FE6, PROC2_$GET_BOOT_FLAGS 0xE41B66), an internal routine that
   inherits A5 (0xE17778), the `.bss.moddata.<UNIT>` block.
+- `data/initialised` - codegen-patterns 11 ("Initial values"), 5.1:
+  initialised static data as `.moddata.<UNIT>[.<SECT>]` blocks with
+  contents (words, a variant's field by name, a string shorter than its
+  array, boolean, enumeration, `nil`, sets; values from TTY's .DATA
+  0xE8242C, WIRED_DATA 0xE2DDB4, OS_INIT_DATA 0xE351B0), a section with
+  no initial value left NOBITS.
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).

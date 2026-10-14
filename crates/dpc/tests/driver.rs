@@ -1717,3 +1717,59 @@ end;
         assert!(text.contains("\ttst.w\t(-2,%fp)\n"), "{r}: {text}");
     }
 }
+
+#[test]
+fn ordered_branch_on_a_store_is_refused() {
+    // Bead domain-pascal-1vp, codegen-patterns 7.1: the image's branches
+    // on a frame store's flags are all beq/bne/bmi/bpl; `x > 0' (bgt/ble)
+    // or `x <= 0' right after `x := ...' is not seen either way, so it is
+    // refused at the comparison, not compiled to `move; ble'.
+    for rel in ["> 0", "<= 0"] {
+        let src = format!(
+            "module m;
+var g: integer;
+function getw(k: integer): integer; val_param; extern;
+procedure use(k: integer); val_param; extern;
+procedure a;
+var x: integer;
+begin
+  x := getw(g);
+  if x {rel} then g := 1;
+  use(x);
+end;
+"
+        );
+        let (code, err) = compile_with("store_ordered", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("an ordered test of a local right after its store")
+                && err.contains("not supported yet")
+                && err.contains("m.pas:9:"),
+            "{err}"
+        );
+    }
+    // Not right after the store (a call between): `tst' then `ble', as
+    // before.
+    let asm = compile_with(
+        "store_ordered_ok",
+        "module m;
+var g: integer;
+function getw(k: integer): integer; val_param; extern;
+procedure use(k: integer); val_param; extern;
+procedure a;
+var x: integer;
+begin
+  x := getw(g);
+  use(g);
+  if x > 0 then g := 1;
+  use(x);
+end;
+",
+        &[],
+    )
+    .unwrap();
+    assert!(
+        routine(&asm, "A").contains("\ttst.w\t(-2,%fp)\n\tble.s"),
+        "{asm}"
+    );
+}

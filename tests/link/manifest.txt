@@ -50,7 +50,7 @@ tests/conformance/pchist_interrupt.pas       PCHIST_$INTERRUPT  module-routines=
 # its own, `lea SYMBOL.l,A5'.
 tests/conformance/proc1_get_loadav.pas       PROC1_$GET_LOADAV  --section-addr .bss.moddata.PROC1_.WIRED_DATA=0xE254E8
 tests/conformance/proc2_get_boot_flags.pas   PROC2_$GET_BOOT_FLAGS  --section-addr .bss.moddata.PROC2=0xE7BE84
-tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .bss.moddata.FIM_=0xE2126C
+tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .moddata.FIM_=0xE2126C
 tests/conformance/smd_busy_wait.pas          SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES  --section-addr .bss.moddata.SMD.WIRED_DATA=0xE2E060  a5-always-from=SMD_$BUSY_WAIT
 tests/conformance/mmap_alloc_contig.pas      MMAP_$ALLOC_CONTIG  --section-addr .bss.moddata.MMAP_=0xE23284  a5-always=MMAP_$ALLOC_CONTIG
 tests/conformance/pkt_next_id.pas            PKT_$NEXT_ID  --section-addr .bss.moddata.PKT=0xE24C9C

@@ -155,6 +155,52 @@ fn initialisers_flatten_to_stores() {
 }
 
 #[test]
+fn variant_and_packed_record_initialisers() {
+    // ref 3.10.4 p. 3-22: a variant's field by name.  status_$t as
+    // Apollo's base.ins.pas declares it: `all' is the whole longword.
+    let p = module(
+        "type st = packed record case integer of
+                 1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+                 2: (all: integer32);
+               end;
+             v = record n: integer; case integer of 1: (i: integer32); 2: (c: char) end;
+         var s: st := [all := 16#B000E];
+             x: v := [7, c := 'q'];",
+    );
+    let s = var(&p, "s").init.clone().unwrap();
+    assert_eq!(s.len(), 1);
+    assert_eq!(
+        (s[0].offset, s[0].value.clone()),
+        (0, ConstValue::Int(0xB000E))
+    );
+    let x = var(&p, "x").init.clone().unwrap();
+    assert_eq!(
+        x.iter()
+            .map(|st| (st.offset, st.value.clone()))
+            .collect::<Vec<_>>(),
+        vec![(0, ConstValue::Int(7)), (2, ConstValue::Char(b'q'))]
+    );
+    // A bit field of a packed record; a positional value for, or after,
+    // a variant's field (not covered by ref 3.10.4).
+    assert_err(
+        "module m; type st = packed record case integer of
+             1: (fail: boolean; subsys: 0..127); 2: (all: integer32) end;
+         var s: st := [fail := true];",
+        "initialising a packed record's field that is not whole bytes is not supported yet",
+    );
+    assert_err(
+        "module m; type v = record n: integer; case integer of 1: (i: integer32) end;
+         var x: v := [1, 2];",
+        "a positional initial value for a variant's field is not supported yet",
+    );
+    assert_err(
+        "module m; type v = record case integer of 1: (i, j: integer) end;
+         var x: v := [i := 1, 2];",
+        "a positional initial value after a variant's field is not supported yet",
+    );
+}
+
+#[test]
 fn routine_local_initialiser_needs_static() {
     // ref 3.2.2 p. 3-4.
     assert_err(

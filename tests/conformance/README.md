@@ -258,6 +258,19 @@ section has no bytes to compare; a reference into a data section with no
 `--section-addr` is a failure.  Only the variables a unit needs are
 declared, at the offsets the image uses (each `.pas` header says so).
 
+A data section with initial values (ref 3.2.2, 3.9.2, 3.11.1; bead
+domain-pascal-63t) is the section `.moddata.<UNIT>[.<SECTION>]`, with
+contents: the whole block, zeros where no value is given.  The manifest
+places it with `--section-addr .moddata.<UNIT>=0xADDR`, which must start
+a `D` segment of the map that holds the whole section, and
+`tools/conform.py` compares it byte for byte with the image (result line
+`OK data SECTION 0xADDR LEN`).  Units: `tty_set_dfl_funcs.pas` (TTY
+.DATA 0xE8242C, whole), `tty_wired_data.pas` (TTY WIRED_DATA 0xE2DDB4,
+whole), `fim_get_fim_addr.pas` (FIM_ 0xE2126C, whole: the frame size
+table at +0x124).  Where a datum belongs to a routine the unit does not
+hold, a unit-level variable of the same layout stands in for it (each
+header says which).
+
 Which routines load A5 is not recorded in the source (codegen-patterns
 4): in "used mode", dpc's default, an exported routine loads it iff it
 uses the unit's data (directly or through `internal` callees that

@@ -1256,7 +1256,11 @@ impl<'t> Checker<'t> {
         match init {
             ast::Init::Expr(e) => {
                 let x = self.expr(e);
-                if !self.check_assignable(ty, &x, e.span) {
+                // ref 3.11.1.1 p. 3-39: one character initialises element
+                // 1 of a char array (`blank_line : STRING := chr(10)').
+                let char_into_array = self.types.char_array_len(ty).is_some_and(|n| n > 0)
+                    && self.types.is_char(x.ty);
+                if !char_into_array && !self.check_assignable(ty, &x, e.span) {
                     return;
                 }
                 match x.value {
@@ -1347,20 +1351,36 @@ impl<'t> Checker<'t> {
                     }
                 }
                 TypeKind::Record(rec) => {
-                    if rec.variant.is_some() {
-                        self.unsupported(*span, "initialising a variant record");
-                        return;
-                    }
-                    let mut next = 0usize;
+                    // ref 3.10.4 pp. 3-21..3-22: `field := value' or a
+                    // bare value for the field after the previous one;
+                    // a variant's field by name ("the third field in the
+                    // variant portion ... lb := 'a'").  A bare value
+                    // after a variant's field (the "next" field across
+                    // arms) is not covered by the text.
+                    let mut next = Some(0usize);
                     for it in items {
-                        match it {
+                        let f = match it {
                             ast::InitItem::Value(v) => {
-                                let Some(f) = rec.fields.get(next) else {
-                                    self.error(*span, "too many initial values for the record");
+                                let Some(i) = next else {
+                                    self.unsupported(
+                                        *span,
+                                        "a positional initial value after a variant's field",
+                                    );
                                     return;
                                 };
-                                self.init(f.ty, base + f.offset, v, out);
-                                next += 1;
+                                let Some(f) = rec.fields.get(i) else {
+                                    if rec.variant.is_some() {
+                                        self.unsupported(
+                                            *span,
+                                            "a positional initial value for a variant's field",
+                                        );
+                                    } else {
+                                        self.error(*span, "too many initial values for the record");
+                                    }
+                                    return;
+                                };
+                                next = Some(i + 1);
+                                Some((f.clone(), v))
                             }
                             ast::InitItem::Keyed {
                                 key,
@@ -1372,17 +1392,37 @@ impl<'t> Checker<'t> {
                                     self.error(key.span, "field name expected");
                                     continue;
                                 };
-                                match rec.fields.iter().position(|f| f.name == id.name) {
-                                    Some(i) => {
-                                        let f = &rec.fields[i];
-                                        self.init(f.ty, base + f.offset, value, out);
-                                        next = i + 1;
-                                    }
-                                    None => self.error(id.span, format!("no field `{}`", id.name)),
+                                if let Some(i) = rec.fields.iter().position(|f| f.name == id.name) {
+                                    next = Some(i + 1);
+                                    Some((rec.fields[i].clone(), value))
+                                } else if let Some(f) = rec.field(&id.name) {
+                                    next = None;
+                                    Some((f.clone(), value))
+                                } else {
+                                    self.error(id.span, format!("no field `{}`", id.name));
+                                    None
                                 }
                             }
-                            _ => self.error(*span, "malformed record initialiser"),
+                            _ => {
+                                self.error(*span, "malformed record initialiser");
+                                None
+                            }
+                        };
+                        let Some((f, v)) = f else { continue };
+                        // A packed record's field is initialised only when
+                        // it is whole bytes holding the whole object of its
+                        // type (status_$t's `all', ref 3.10.7 Table 3-3);
+                        // values in bit fields are not encoded yet.
+                        if let Some(bits) = f.bits {
+                            if bits.whole_bytes() != Some(self.types.size(f.ty)) {
+                                self.unsupported(
+                                    *span,
+                                    "initialising a packed record's field that is not whole bytes",
+                                );
+                                continue;
+                            }
                         }
+                        self.init(f.ty, base + f.offset, v, out);
                     }
                 }
                 _ => self.error(
