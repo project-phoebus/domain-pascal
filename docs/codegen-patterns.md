@@ -526,14 +526,42 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     parameter) is "not supported yet".  The cell holds the value (a
     2-byte `0..65535` constant 65535 becomes `0000 ffff`, -2 becomes
     `ffff fffe`).  `dpc-sema` gives the reference's warning (Appendix B
-    message 246) for an expression smaller than its `univ` formal.  Image: no site settles it.  A
-    survey of the `pea (d,PC)` sites against the callee's C prototype in
-    `../source` (ad-hoc script, not kept) cannot tell `univ` formals
-    (`../source` never says `univ`; `void *` stands for many types);
-    the nearest site, LOG_$SHUTDN 0xE175A0,
-    passes a longword `0000 0000` cell as LOG_$ADD's data (C `void
-    *data`, length 0), consistent with both an `integer32` constant and
-    the extension.  Uncertain.
+    message 246) for an expression smaller than its `univ` formal.
+    Image (lead: ../source pascal-translation-notes findings 16, 25):
+    **constants are not extended to the size of a `univ` formal
+    (Verified where the formal is Apollo's own).**  vfmt_$write2's
+    heading in Apollo's customer insert (section 0.1;
+    `sys/ins/vfmt.ins.pas`: `IN control_string: UNIV vfmt_$string_t`,
+    `ARRAY [1..200] OF char`; `IN a1, a2: UNIV
+    vfmt_$generic_signed_arg`, an `integer32`) is the formal at the
+    module-local 0xE2FF7C (LOG_'s OS_INIT_PROC segment, `jsr
+    VFMT_$WRITE2` 0xE2FF96, 0xE2FFAA, 0xE2FFC0).  Its strings' cells
+    have the strings' own sizes, not 200: 0xE2FFD4, 37 characters plus
+    a pad byte, and 0xE30000, 32 bytes.  A constant *larger* than its
+    formal is not cut either: the 36-character path at 0xE30020 goes to
+    `a1` (4 bytes) whole (`pea (0x66,PC)` 0xE2FFB8), the same cell
+    LOG_$INIT passes to NAME_$RESOLVE (0xE3005E).  The integer 0 for
+    `a1`/`a2` is a 4-byte cell, 0xE2FFFC, which LOG_$INIT names again
+    for LOG_$ADD's data argument (`pea` 0xE30214), as LOG_$SHUTDN
+    0xE175A0 names its own 4-byte 0 (0xE17608); LOG_$ADD's heading is
+    not Apollo's (../source's reading: `univ`, 192 bytes), so that pair
+    is Reported.  KBD_$INIT 0xE3338E `pea (0x4a,PC)` names 0xE333DA, a
+    2-byte `32 00` cell (`'2'`, followed by the next segment, SIO_IO
+    0xE333DC), for a string parameter of the module-local 0xE1CA8C
+    (4 bytes in ../source's reading; Reported).  So the reference's
+    sentence (p. 5-11) does not describe the cells; what message 246's
+    "converted" means for a by-address constant is not seen.  `dpc`
+    differs (extends integer constants, refuses the rest; bead
+    domain-pascal-c5u).
+    **The cell rule above holds at two more routines (Verified; lead:
+    finding 25):** LOG_$INIT's 10 cells 0xE3022A..0xE30267 (word group
+    22A, 22C, 232, 238, 23A, 23C, 23E, 244; `0x2048` at 0xE3024E; then
+    250, 258) and 0xE2FF7C's (group 1 0xE2FFD4; filler 0xE2FFFA; group
+    2 FFFC, 30000, 30020, 30044) are in exactly the order above.
+    LOG_$INIT has two `00 00` word cells (0xE30238, 0xE3023C; a word 0
+    and `false` in ../source's reading), more evidence that a cell's
+    identity is more than its bytes.  The constant 36 has a word cell
+    (0xE3022A) and a longword one (0xE30044).
 - **Expression by address (Verified at the sites; implemented).**  A
   non-variable, non-constant actual passed by address is first stored in a
   frame temporary, and that temporary's address is pushed, right where
@@ -556,7 +584,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     order of temporaries for a call nested in another call's arguments
     (dpc puts them below the outer call's).  An expression of another
     size than the parameter (to a `univ` one: extended, ref 5.3.3 p.
-    5-11) is rejected: its conversion code is not catalogued (bead
+    5-11; but by-address constants are not extended in the image, 1.5
+    "To a `univ` parameter") is rejected: its conversion code is not catalogued (bead
     domain-pascal-4be).  Conformance:
     `tone_enable.pas`.
 - **Variable of another size by address:** an `integer32` variable for a
@@ -804,6 +833,16 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
         there, lies below an untouched longword (the C's `taken`, a
         4-byte set held in D2, whose slot 12.5 says stays allocated) and
         above the token at `(-10,A6)`: in the middle.
+        TTY_$I_GET_DESC 0xE66738 (`link #-12`): a status local at
+        `(-4,A6)` passed by address (`pea (-4,A6)`, 0xE6678E), the
+        pointer result at `(-8,A6)` (stored 0xE667B0, loaded into A0
+        0xE667B6), the real line held in a data register (its slot
+        below): in the middle.  SIO_$I_GET_DESC 0xE667C6 (`link #-8`):
+        the result at `(-4,A6)` (0xE66808, 0xE6680E), the real line held
+        in D1: above a local.  Both count only under 12.5's rule that a
+        register-held local keeps its slot, as for SIO_$I_ERR (lead:
+        ../source pascal-translation-notes finding 13; bead
+        domain-pascal-67c).
       - *Not decisive*: a slot written on every path and returned with
         `move.l (-n,A6),D0` can be a local copied by a final `f :=
         local`, which goes straight to D0 (section 3).  So FLP_$CINIT
@@ -816,7 +855,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
         place.  FLP_$CINIT fits "locals, result, then temporaries" if
         `(-4,A6)` is a local status: the gap at -24..-21 for the result
         and the `addr(...)` temporary at `(-28,A6)` passed by address.
-      Six forced sites put the result below, one above and one in the
+      Six forced sites put the result below, two above and two in the
       middle.  Possible causes not settled: declarations the C does not
       show; a result variable without a slot of its own (it would fit
       NETBUF_$RTNVA with a 4-byte local first, but not the functions with
@@ -913,6 +952,29 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     0xE43590 and 0xE443E8 a `bne` on the flags of the store follows (the
     value tested as well as stored), elsewhere the reason is not seen
     (ad-hoc survey, not kept).  The ACL_ ones need bit-array stores.
+  - **Objects of 8 bytes or more at multiples of 8 (Reported; rule
+    Uncertain; lead: ../source pascal-translation-notes finding 6; bead
+    domain-pascal-1edl).**  Module-local 0xE1C204 (../source
+    tty_$i_wait, `link #-108`): an eventcount (12 bytes) at -0x10, a
+    time queue element (26 bytes) at -0x30, the two 3-element
+    EC_$WAITN lists at -0x40 and -0x50; each object right below the one
+    above it under longword alignment would give -0xC, -0x2C, -0x3C and
+    -0x4C.  The 6-byte clocks below (-0x58, -0x60) are longword placed.
+    (Every 8+-byte object there is also at a multiple of 16; the routine
+    cannot tell 8 from 16.)  The module-local 0xE4232A (`link #-16`)
+    has its 8-byte result at -0x10..-0x9 (`move.l (A0)+` to -0x10 and
+    -0xC, 0xE42338) with nothing at -8..-1.
+    Temporaries do not follow it: MSG_$SHARE_SOCKET 0xE5A02C (`link
+    #-12`, an 8-byte set at -0xC, nothing else addressed),
+    PROC2_$UPGID_TO_UID 0xE4100C (an 8-byte temporary at -0x14).  An
+    ad-hoc survey (not kept) of 8-byte copies into the frame (exactly
+    two `move.l (An)+,(d,A6)`): d mod 8 = 0 at 154 map-named and 97
+    unnamed sites, 4 at 69 and 9, 2 or 6 at 15 and 1; copies out of the
+    frame 28 at 0, 26 at 4.  Many off-rule sites are runs 8 apart
+    (elements or fields, e.g. 0xE4AF52 -44/-36/-28), but some are not
+    explained: VTOC_$DISMOUNT 0xE387E0 (-12, words at -4 and -2 above),
+    VTOC_$MOUNT 0xE38658 (-20), the module-local 0xE323E6 (a source at
+    -52).  Not modelled: `dpc` aligns frame objects to at most 4.
   - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
     Of the compiled routines that end in `rts` (survey as in 1.5), 306
     without any loop have a `link` area they never address (143 of
@@ -1514,6 +1576,22 @@ variables.  Each module's static data is a data segment, addressed off
       0xE5DD08 `s`, then FILE_$SET_PROT 0xE5DF3A .. FILE_$SET_DIRPTR
       0xE5E1B2 `n`).  So the mode can switch back; it is a property of
       runs of routines, not strictly once per segment.
+    - The OS_TERM .TEXT segment 0xE66738 (TTY_$I_GET_DESC ..
+      TERM_$INQUIRE), right before TTY's 0xE671DC, is `nnnnnnn`: none
+      of its 7 routines loads A5, although OS_TERM has a .DATA block
+      (0xE82428, TERM_$PCHIST_FLAG, which no instruction of the segment
+      addresses).  That is used mode with no users, so the segment
+      shows no mode; OS_TERM's WIRED_PROC segment 0xE1A9D4 does load A5
+      (`nn(S)n`).  In TTY's segment TTY_$I_DXM_SIGNAL and
+      TTY_$I_ENABLE_CRASH_FUNC 0xE67292 load no A5; the module-local
+      0xE6726E loads it (`lea 0xE8242C,A5`, 0xE67274) and uses it
+      (`move.l (36,A5),-(SP)`, 0xE67280) for the module-local 0xE6720E,
+      which inherits it (`lea (A5),A1`, 0xE67226); every named routine
+      from TTY_$K_RESET 0xE672DE on loads A5, and of those only
+      TTY_$K_SET_INPUT_BREAK_MODE uses it (`(40,A5)`, 0xE67860,
+      0xE6788C) (lead: ../source pascal-translation-notes finding 15,
+      which reads OS_TERM as "never"; the image does not show a mode
+      difference between the two modules).
     - In used mode, 3 routines address their own block absolutely
       instead of loading A5: AUDIT_$SUSPEND 0xE70DB6 and AUDIT_$RESUME
       0xE70DD6 (`lea 0xE854D8,A0`), REM_NAME_$REGISTER_SERVER 0xE4A4AE
@@ -1523,7 +1601,10 @@ variables.  Each module's static data is a data segment, addressed off
       listed here before, reaches 0xE7ACCA in the *other* DISK_ unit's
       block 0xE7A1CC; its own segment loads 0xE826C4.  LOG_$INIT
       0xE30054 pushes the LOG_ address from the OS_INIT unit, which has
-      no LOG_ block.  Both are the `extern` case.)
+      no LOG_ block.  DISK_$DIAG_IO is the `extern` case; LOG_$INIT is
+      LOG_'s own code in OS_INIT_PROC, so it may equally be the
+      module's block of another data section (section 11, "Data per
+      section"); the image does not tell them apart.)
   - **Hypotheses refuted** (counts from `tools/a5survey.py summary`):
     - *Several compilation units per map segment, each "all or
       nothing".*  The routines on both sides of a switch share the same
@@ -1750,6 +1831,18 @@ widened to longwords, as for `0..65535`, or a word compare, as the
 range allows) is not catalogued (bead domain-pascal-4x2).  Booleans, which
 the same entries call unsigned, are `Scalar::BOOLEAN` (signed) for the
 `tst.b; bmi` tests; no ordered compare of booleans is supported.
+One enumeration compare is catalogued in the image (no survey for
+others), and it is unsigned (Verified
+at two sites): TTY_$K_SET_FUNC_CHAR 0xE67500..0xE6750C `move.w (A3),D1;
+cmpi.w #31,D1; bhi.s; cmpi.w #17,D1; bls.s` on a tty_$func_t word
+(Apollo's customer tty.ins.pas, section 0.1; 31 its last ordinal), and
+TTY_$K_INQ_FUNC_CHAR 0xE67586..0xE67592 the same (lead: ../source
+pascal-translation-notes finding 9).  The first compare is implied by
+the second; ../source `tty/k_func.pas` reads it as `not
+in_range(func)` (10.1), which the image cannot tell from a compare
+against the last enumerator.  Of the seven `cmpi.w #31,Dn` in the image
+(also 0xE03B1A, 0xE03C5A, 0xE1A4B2, 0xE44A22, 0xE646C6) no other has
+this pair.
 
 ### 5.1 Sets (Verified)
 
@@ -1801,6 +1894,21 @@ the same entries call unsigned, are `Scalar::BOOLEAN` (signed) for the
   constant element beyond the set's bits (`20 in s` for a word set would
   test a bit of the register above the loaded word; the value is false,
   ref 3.9.3, p. 3-16, but the original's code for it is not catalogued).
+- **Member 0 (or bit 0) as `lsr.b #1` (Verified at 9 sites; the choice
+  Uncertain):** a value loaded whole into a data register, then `lsr.b
+  #1,Dn` and the carry: 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1;
+  bcc.s` (member 0 of TTY's output_flags, module-local 0xE1B00A);
+  0xE07B66 `move.w (46,A2),D0; lsr.b #1,D0; bcc.w`; 0xE08826,
+  0xE0905A, 0xE093CC, 0xE431EC, 0xE75820 (`bcc`/`bcs`); as a value
+  0xE052FA and 0xE70E98 `lsr.b #1; scs`.  These are all the `lsr.b
+  #1,Dn` in the image.  Against them, `btst #0,Dn` right after a load
+  (0xE2283C, 0xE2B140, 0xE5ADE8, 0xE66E9A from memory; 0xE11F14,
+  0xE20F52, 0xE4DD04, 0xE70EF8 from a register); at 0xE22840 the
+  register is used again after the test, which `lsr` would destroy,
+  but the other `btst` sites show no such use.  The image cannot tell
+  `0 in s` from `odd(x)` here (section 8, `odd`).  Not modelled by
+  `dpc` (lead: ../source pascal-translation-notes finding 2; bead
+  domain-pascal-ogzd).
 - **Set constants** sit in data, for example the two 32-byte `set of char`
   tables at the start of the OLD_DIR data segment 0xE7FD24 (Reported:
   `name-dir-subsystems.md`); initialised static sets in the routine's
@@ -1853,7 +1961,8 @@ model run against the bit model of Figure 3-6).
   sites: the constant through a register when `moveq` loads it (-8 at
   0xE1C006; -0xe1 at 0xE1B98E does not fit).  Five of the six register
   sites have a `moveq` constant, and four are integer updates in
-  ../source's reading (KBD_$RCV 0xE1CD32 `|= 0xF`; RIP 0xE68E52/0xE68F68
+  ../source's reading (KBD_$RCV 0xE1CD32 `|= 0xF`, which ../source's
+  Pascal reads as a packed field, 5.3; RIP 0xE68E52/0xE68F68
   `&= 0x3F`, ../source `rip/table.c`; 0xE3225E, `peb/load_wcs.c`), but
   `andi`/`ori` to memory with a `moveq` constant is common too (e.g.
   `andi.l #15` ×8, 0xE09CE4).  So `dpc`'s `andi.w #-8,(8,A2)` for `s := s
@@ -1941,12 +2050,35 @@ model run against the bit model of Figure 3-6).
   Refused.  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
   `bset` each member of a range clamped to it) has no compiled caller: a
   run-time range `[a..b]` is refused.
-- **`in` on sets in memory, constant member:** the TTY code tests some
-  set fields narrowed to the byte (`btst #k,(d,An)`) and some whole
-  (`move.w`/`move.l`; `btst #k,Dn`); ../source `tty/README-pascal.md`
-  ("Findings", 1) and `tty.ins.pas` ("Types") give the sites; the rule
-  is not known and `dpc` keeps the whole form (above).  So TTY routines
-  with narrowed tests do not match yet.
+- **`in` on sets in memory, constant member (sites Verified; rule
+  Uncertain):** the TTY code tests the same set fields in two forms.
+  Narrowed: `btst #k` on the byte holding member k for k < 8
+  (module-local 0xE1B456 at 0xE1B466 `btst #0,(15,A2)`, output_flags;
+  0xE1B3F6 `btst #4,(31,A2)`, echo_flags; module-local 0xE1B8B0 at
+  0xE1B8F6 `btst #4,(9,A2)`, state_flags; TTY_$K_INQ_FLAGS 0xE674BA
+  `btst #4,(9,A0)`), and a load of the *word* holding it for k = 8..15
+  (TTY_$I_RCV 0xE1B972 `move.w (22,A2),D0; btst #12,D0` on the longword
+  input_flags at 20; the same routine tests member 0 as `btst
+  #0,(23,A2)`, 0xE1BAB6).  Whole: the field loaded at its own size
+  (module-local 0xE1B00A at 0xE1B0E6/0xE1B0F6 `move.l (12,A0),D1`;
+  0xE1B01E `move.w (8,A0),D1; btst #5`; module-local 0xE1BCFC at
+  0xE1BD0A and TTY_$I_ERR 0xE1BE3C/0xE1BE54 `move.l (20,A0),Dn; btst
+  #12/#10`).  In TTY the whole form occurs where the descriptor's
+  address is re-read from a frame slot (or through the static link) at
+  each reference, the narrowed form where it is held in a register
+  (lead: ../source pascal-translation-notes finding 1; ../source
+  `tty/README-pascal.md` "Findings", 1, and `tty.ins.pas` "Types").
+  The image outside TTY does not follow that criterion: AST tests the
+  word at 190 whole with the base held (0xE013BA, 0xE01446, 0xE04892
+  `move.w (190,A2),D0; btst #4,D0`; 0xE02CD4 through A3), although it
+  sets the same member as `bset #4,(191,A2)` (0xE0143C); a heuristic
+  scan (ad hoc, not kept) finds 38 `move.w (d,An),Dn; btst #k<8,Dn`
+  with An not just reloaded, and 44 memory `btst #k` right after a
+  `movea` reload (e.g. 0xE028C4 `movea.l (-152,A6),A1; btst
+  #1,(15,A1)`; 0xE0306E through the static link, `btst #1,(29,A2)`;
+  the objects' types are not known, so byte objects are not ruled
+  out).  `dpc` keeps the whole form (above), so TTY routines with
+  narrowed tests do not match yet (bead domain-pascal-578).
 
 ### 5.2 Records and arrays (Verified / Reported)
 
@@ -1991,6 +2123,19 @@ model run against the bit model of Figure 3-6).
     move.l (A0)+,(-0xb0,A6)`, again at 0xE534DC (noticed in passing,
     bead domain-pascal-5aw.2; not counted by the survey above, which
     looked for `(Am)+,(An)+`; Uncertain).
+    The same form with the destination through an address register
+    (Verified at the sites; lead: ../source pascal-translation-notes
+    finding 10): TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8..0xE678F2
+    `movea.l (0xc,A6),A3; lea (0x38,A0),A1; move.l (A1)+,(A3); move.l
+    (A1)+,(4,A3)`, an `out` slot as destination, its base loaded
+    before the source's address although the source pointer was
+    already in A0, the first destination without displacement;
+    TTY_$K_SET_INPUT_BREAK_MODE 0xE6784E `lea (A2),A0; move.l
+    (A0)+,(0x38,A3); move.l (A0)+,(0x3c,A3)`, into a pointer just
+    assigned to A3 (no order shown there).  So for 8 bytes the source
+    is post-incremented and the destination addressed by displacement;
+    the destination base first is one site.  `dpc` refuses 8-byte
+    assignments (bead domain-pascal-fbg).
   - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
     0xE18FE6 `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l
     (8,A5),(8,A0)` and 0xE1ABEA (16 bytes) against 59 + 42 `(An)+`
@@ -2008,7 +2153,7 @@ model run against the bit model of Figure 3-6).
     pointer held in an address register points to (`lea (d,An),Am`, the
     form above; added with the record comparisons of 7.1, bead
     domain-pascal-aaj).  Rejected: 6 and 8 bytes
-    (which operand the original formed first is not catalogued), another
+    (destination base first at one site, 0xE678E8, above), another
     unit's object (`movea.l #abs,A1` at 0xE336E2, one site; the record
     comparisons of 7.1 load such addresses so 201 times, a copy only
     once), a field through a pointer not held in a register, statements
@@ -2036,6 +2181,16 @@ model run against the bit model of Figure 3-6).
     ×43 (0xE39364, after an unsigned compare of the index); `muls.w`
     feeding a `.l` index ×118 (0xE1D7A2); no `muls.w #c` feeds a `.w`
     index.  So the product's sign matters only for `.l` indices.
+    One variable gets both forms: TPAD_$DATA 0xE691CA..0xE691D4 `moveq
+    #44,D0; muls.w (380,A5),D0; lea (0,A5,D0.l),A2` reads the module's
+    unit number off A5, and TPAD_$SET_UNIT_MODE 0xE69824..0xE69828
+    `moveq #44,D2; mulu.w (A4),D2; lea (0,A5,D2.w),A1` reads it through
+    its by-address parameter (TPAD_$SET_MODE passes `pea (380,A5)`,
+    0xE697E2), which the routine compares signed (0xE6980A `tst.w (A4);
+    ble`; 0xE69814 `cmp.w (A4),D0; slt`).  So the form depends on how
+    the index is reached, not only on its type (Verified at the sites;
+    lead: ../source pascal-translation-notes finding 39; bead
+    domain-pascal-wkg).
   - There are no 68020 scaled-index modes in compiled code.
 - **Element operand (Verified at the sites; implemented in `isel.rs`,
   `index_ea`):**
@@ -2342,7 +2497,17 @@ same `bset #c mod 8` on the member's byte).
   both halves, which no narrower `ori` could set (0xE4A83C `ori.l
   #0x8001e00,(50,A0)` after 0xE4A834 `andi.l #255,(50,A0)`; one site);
   with bits in one half only it is refused (not catalogued); so is a
-  constant into a one-bit field that is not a boolean.  An 8-bit field
+  constant into a one-bit field that is not a boolean.  A lead for the
+  unit (site Verified, reading Uncertain): KBD_$RCV 0xE1CD32 `moveq
+  #15,D0; or.w D0,(A3)` sets the low 4 bits of byte 1 of a 2-byte
+  record, the "every bit set" `or` but on the record's word and through
+  a register, where the reads of the same bits use the byte, `moveq
+  #15,D0; and.b (1,A3),D0; cmpi.w #15,D0` (0xE1CE1E, and module-local
+  code at 0xE1CBC8).  ../source `kbd/kbd.ins.pas` reads it as a 4-bit
+  packed field (`next_state := 15`), its C as an integer `|= 0xF` (5.1,
+  the six constant `and`/`or` through a register; beads
+  domain-pascal-iv5, domain-pascal-d89) (lead: ../source
+  pascal-translation-notes finding 31).  An 8-bit field
   of a wider type on a byte boundary (`0..255`) is refused: the general
   forms would give `andi.b #0,M`, which the image never has, and how
   the original read and wrote it is not catalogued (a lead:
@@ -2618,7 +2783,18 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   0xE69CCC and 0xE69EC2, has `link #-4` and no frame or link access,
   and is called by 0xE69EC2 at 0xE69F3C (`subq.l #2,SP; clr.w -(SP);
   move.w D2,-(SP); st -(SP); bsr.w`).  DIR's 0xE4EF42 lies inside
-  0xE4F3BA's family and is called by 0xE4EF7C and 0xE4F2DA.  So the
+  0xE4F3BA's family and is called by 0xE4EF7C and 0xE4F2DA.
+  Three more linkless routines lie inside families and are called once,
+  by the family's parent (Verified: a scan for `bsr` and absolute
+  references finds no other caller): KBD_$RCV's 0xE1CC64 (`link #-8`,
+  between the nested 0xE1CC10 and KBD_$RCV 0xE1CCC0; `bsr.w`
+  0xE1CE50), AUDIT's 0xE712BA (between 0xE7128A and its parent
+  0xE7131C; `bsr.w` 0xE71424), FLOP_BOOT's 0xE323E6 (between 0xE323A8
+  and FLOP_$BOOT 0xE3254C; `bsr.w` 0xE32558).  None reads A1 or
+  `(A6)`.  Their position makes them nested (Reported: a module-local
+  routine called only by the parent would look the same).  Read as
+  nested, the AUDIT and FLOP_BOOT families become adjacent (below)
+  (lead: ../source pascal-translation-notes finding 34).  So the
   link is passed only to a routine that needs it: one that reaches the
   enclosing frame, or that passes the link on to a sibling (or itself)
   that takes it.  `dpc` computes this as a fixpoint.  **Implemented**
@@ -2786,7 +2962,8 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
     (0x4C) is a `case` whose four labels share one arm, a comparison as
     the result; the ACL_ 0xE45154 (0x48) compares 8-byte records with
     `cmpm.l (A3)+,(A2)+`.  The AUDIT 0xE7128A (0x30) and FLOP_BOOT
-    0xE323A8 are not adjacent to their parents (routines lie between).
+    0xE323A8 are not adjacent to their parents (`families`): the
+    linkless 0xE712BA and 0xE323E6 lie between (above).
   PMAP_$FLUSH (0xE1359C..0xE13A14) needs, in 0xE1359C alone: a run of
   three word constants
   (0xE135D0 `clr.l -(SP); clr.w -(SP)` for three zero words: the
@@ -2951,6 +3128,16 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
       0xE332FE, before the loop head 0xE33300 (TTY_$I_INIT);
     - 0xE4DC90 (DIR_$READ_LINKU, non-aligning code) is followed by
       `moveq #18,D1` at 2 mod 4.
+    - Another register's self-copy: LOG_$ADD 0xE176F0 `movea.l A1,A1`
+      (`2249`), followed by 0xE176F2, at 2 mod 4 and no loop head (that
+      routine's loop-head fillers are 0xE176BA and 0xE1772E).  It is
+      the only `movea.l An,An` other than A0's in 0xE00800..0xE88834
+      (word scan).  A1 holds `addr(buf^.data[buf^.tail])` just stored to
+      `(8,A5)`; the copy is read as an assignment to a register-held
+      local the allocator also put in A1 (Reported reading; lead:
+      ../source pascal-translation-notes finding 19).  So a copy into
+      the same register is kept, not dropped; `dpc` renames and emits
+      no move (bead domain-pascal-reso).
   - **What the filler precedes:**
     - 315 loop heads.  Examples: 0xE00ED6, 0xE0149E, 0xE128DA, and
       0xE1CE42 before KBD_$RCV's loop at 0xE1CE44.
@@ -3313,6 +3500,15 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   ad-hoc count over the same routines, bead domain-pascal-dgb review),
   so whether an ordered test right after a store branches on the
   store's flags or tests again is not seen either way (Uncertain).
+  An ordered compare against a nonzero constant right after a store to
+  other memory compares the register: module-local 0xE1CA8C (../source
+  kbd_$set_type) at 0xE1CABC `move.w
+  D0,(0x44,A0); cmpi.w #2,D0; bge.s`, D0 compared unsigned with 2 just
+  before (0xE1CAA0 `moveq #2,D1; cmp.w D1,D0; bls.s; move.w D1,D0`);
+  the signed branch is read as a test of the integer field just stored,
+  its value reused from D0 (Reported; the reading is the translator's,
+  the image shows only the signed compare of the register; lead:
+  ../source pascal-translation-notes finding 32).
   **Implemented** (`isel.rs`, `Selector::tst`): a test of a local's slot
   that would directly follow a store of a data register into that slot,
   at the same size, is left out when the branch is `beq`/`bne`/`bmi`/
@@ -3339,16 +3535,24 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   Compiled code never has two `bra`s in a row, so a `then` part ending in
   `return` has no `bra` to the join after it (Verified by absence; dpc
   leaves it out).
-- **No branch to a `bra` (Verified by absence):** of the 3324 forward
-  `bra`s in compiled code none targets a `bra`, and no `b<cc>` does
-  (0xE34BC8, the one hit, is data).  So where the plain layout above
-  would branch to a `bra` (`if a then begin if b then ... else ... end
-  else ...`: the inner join is followed by the outer `bra`; `if a then
-  begin if b then ... end else ...`; `if a then begin if b then ...;
-  return end`), the original threaded the branch or laid the code out
-  otherwise; which is not known.  dpc rejects these (`select_body`,
-  `Selector::jump`), and likewise a `goto` to a label followed by a
-  `bra` (7.5).
+- **No branch to a `bra` (Verified by absence; threading Verified at one
+  site):** of the 3324 forward `bra`s in compiled code none targets a
+  `bra`, and no `b<cc>` does (0xE34BC8, the one hit, is data).  At the
+  one site seen where the plain layout above would branch to a `bra`,
+  the original threads
+  the branch to the `bra`'s target and drops the `bra` when that leaves
+  it unreachable: TTY_$K_PUT 0xE67C0E (`if 1 in options then begin ...;
+  return end`, then a `while`) is `beq.w 0xE67D82`, straight to the
+  loop's bottom test (`cmp.w (A4),D3; bcs.w 0xE67C5E`); the `then` part
+  ends `bra.w 0xE67D92` (the epilogue) at 0xE67C5A and the loop head
+  0xE67C5E follows it with no opening `bra` (section 7.4) (lead:
+  ../source pascal-translation-notes finding 11).  One site; the nested
+  `if` cases (`if a then begin if b then ... else ... end else ...`: the
+  inner join is followed by the outer `bra`; `if a then begin if b then
+  ... end else ...`; `if a then begin if b then ...; return end`) are
+  not seen; threading predicts them but does not show them.  dpc rejects
+  all of these (`select_body`, `Selector::jump`; bead domain-pascal-o6p),
+  and likewise a `goto` to a label followed by a `bra` (7.5).
 - **`if c then return` (Verified; implemented):** one conditional branch
   on `c` itself to the epilogue, not a branch past a `bra`: TERM_$CONTROL
   0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78`, 0xE62E88, 0xE68C08
@@ -3359,15 +3563,24 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   operand of an `or else` on its own (`if a or else b then return`:
   `b<a> epi; b<b> epi`), and an `else` part follows the branch.  A `then
   return` that ends the routine stays refused (below).
-- **Identical ends of the two parts (Uncertain):** the pop is shared at
+- **Identical ends of the two parts (Verified that it happens at the
+  sites; when is not settled; not modelled; bead domain-pascal-sggk):** the pop is shared at
   the join (section 1.1), and RIP_$SEND_UPDATES shares a `jsr`: one part
   is `subq.l #2,SP; st -(SP); bra.s 0xE688BE`, the other `subq.l #2,SP;
-  clr.w -(SP)` falling into the `jsr RIP_$BROADCAST` at 0xE688BE.  But
-  0xE381A8 and 0xE381D2 are two `jsr 0xE825E4` ending the two parts of
+  clr.w -(SP)` falling into the `jsr RIP_$BROADCAST` at 0xE688BE.  A
+  whole statement is shared too: LOG_$ADD 0xE176C8..0xE176D2, `if size
+  = 0 then head := 1 else begin head := head + size; if head >= 16#1fe
+  then head := 1 end`, is `beq.s 0xE176D2; add.w D1,(A0); cmpi.w
+  #0x1fe,(A0); blt.s 0xE176D6; 0xE176D2: move.w #1,(A0)`: the `then`
+  part is only a branch to the copy inside the inner `if` (the `beq` on
+  the flags of the load at 0xE176C4, no `tst`) (lead: ../source
+  pascal-translation-notes finding 18; 7.3 "Shared code" has the same
+  across `case` arms and separate statements).  But 0xE381A8 and 0xE381D2 are two `jsr 0xE825E4` ending the two parts of
   one `if`, not shared, and 0xE1A9F0/0xE1AA00 two identical `move.w
   0xE2E00E,D0` (of the 3324 forward `bra`s to a join reached by falling
   through, 4 have the same instruction before the `bra` and before the
-  join).  dpc never shares anything but rejects the shared-pop case.
+  join).  dpc never shares anything but rejects the shared-pop case
+  (bead domain-pascal-myk).
 - **`and then` / `or else`** (ref pp. 4-18..4-19, 4-134): jumping code,
   each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
   bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
@@ -3425,6 +3638,29 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   pushing the value as an argument (no site), a function's result on
   the left with a call on the right.  Golden `control/and_or`; exec test
   `bools`; dpc-ir test `plain_and_or_and_odd`.
+- **A plain `or`/`and` whose right operand calls a function (Reported;
+  a reading, the source unknown):** seven TPAD routines validate a unit
+  as `tst.w (A4); ble.s <then>; jsr SMD_$N_DEVICES; cmp.w (A4),D0; slt
+  D2; tst.b D2; bpl.s <else>` (TPAD_$SET_UNIT_MODE 0xE6980A..0xE6981A;
+  TPAD_$SET_UNIT 0xE699EE with `sge D2` for the `and` of the opposite
+  tests): the left operand is jumping code, the right one, which
+  contains the call, formed as a boolean and tested, where `or else`
+  would branch on the compare.  A boolean local would explain the
+  `s<cc>`, but TPAD_$SET_UNIT has `link #0`.  Read as `(unitp <= 0) or
+  (unitp > smd_$n_devices)` (ref "Or", p. 4-135: no order of
+  evaluation guaranteed): the left operand short-circuited, the right
+  evaluated as a value, no `or.b`.  The `s<cc>` goes to D2 where the
+  compare reads a slot held in an address register, and to D0, the
+  call's register, where it reads the module's word off A5
+  (TPAD_$SET_UNIT_CURSOR 0xE698E4, TPAD_$INQUIRE_UNIT 0xE6998E `cmp.w
+  (380,A5),D0; slt D0; tst.b D0`): not explained.  A byte scan of
+  0xE00800..0xE88834 finds 57 adjacent `s<cc> Dn; tst.b Dn` pairs
+  (0xE10D10 among them), candidates for this rule or for boolean
+  locals, not classified (lead: ../source pascal-translation-notes
+  finding 36).  dpc refuses a call on the right of a plain `and`/`or`
+  only after a function result on the left (above); otherwise it forms
+  both operands and combines them with `and.b`/`or.b` (`logic_value`),
+  which would not give these bytes (bead domain-pascal-1rwo).
 - **Implemented** (`crates/dpc-ir`, `Cond`, `StmtKind::If`/`Return`;
   `crates/dpc-m68k/src/isel.rs`, `Selector::if_`, `branch`, `compare`):
   all of the above that is Verified, with `not`, `and then`, `or else`.
@@ -3468,6 +3704,10 @@ Backward branches other than `dbf` in compiled code (same survey):
   a `bra` to the test; the head after the `bra` is aligned like any loop
   head (in aligning routines 29 with the filler, 27 4-aligned, 2 at 2 mod
   4, both large; bead domain-pascal-ju5).  **Implemented**: section 7.4.
+  A `while` can also be entered by a conditional branch to its test
+  with no `bra` at all, when the statement before it ends in a `bra`
+  (TTY_$K_PUT 0xE67C0E, 7.1 "No branch to a `bra`"; lead: ../source
+  pascal-translation-notes finding 11).
 
 
 ### 7.3 `case` statements (Verified at the sites given; the choice of form Verified by survey; implemented)
@@ -3609,6 +3849,25 @@ T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
   0xE69C8E..0xE69CAE share the `jsr EC2_$REGISTER_EC1` of all arms;
   TERM_$CONTROL's two chains share one `otherwise` part (0xE66C72 and
   0xE66CDC both `bra.s 0xE66CEA`).
+  Three more in KBD (Verified at the sites, jump tables decoded; lead:
+  ../source pascal-translation-notes finding 27): KBD_$RCV, table at
+  0xE1CCFE, arm 2 (0xE1CD18) is `jsr MMU_$NORMAL_MODE; tst.b D0; bmi.b
+  0xE1CD3A`, and 0xE1CD3A is the code of labels 1, 10, 11 and 12
+  (`subq.l #2,SP; pea (A2); move.b (12,A6),-(SP); bsr.w 0xE1CC10;
+  addq.w #8,SP; bra.w 0xE1CE1E`), so arm 2's `else` part, the same
+  call, exists only as that later arm; module-local 0xE1CAFE (../source
+  kbd_$fetch_key), table at
+  0xE1CB66, the arm of labels 1, 2, 13 and 14 ends in label 10's `st
+  D3; bra.s 0xE1CBC8` (0xE1CB9C), reached by its `bne.s` (0xE1CB88) and
+  its `bra.s` (0xE1CB96); and across two statements, KBD_$GET_DESC
+  0xE1AA4C `bcc.s 0xE1AA68`, the first `if`'s `then` part (`status :=
+  16#000B000D; return`) merged into the second's (`move.l
+  #0xB000D,(A0); bra.s 0xE1AA98`) with `clr.l (A0)` and a test between
+  (no single condition).  At these sites, as at AS_$GET_ADDR, the
+  merged sequence ends in a `bra` (to a join or the epilogue) and the
+  copy kept is the later one (Reported as a rule; no counter-survey).
+  Not modelled (beads domain-pascal-pil, domain-pascal-myk,
+  domain-pascal-sggk).
 
 **The selector (Verified).**
 
@@ -3732,6 +3991,30 @@ scripts besides, not kept, are named as such below; re-check sites with
   back on the second's success (NAME_$VALIDATE's module-local
   0xE4A028..0xE4A034 `cmp.w (A1),D0; bcs.s <exit>; move.w (A1),D1;
   cmpi.b #47,(-1,A0,D1.w); beq.s <head>`).
+- **A `while` condition's value spilled to the frame (Verified at the
+  site).**  KBD_$RCV 0xE1CCC0 saves only A2/A3/A5 and no data
+  register.  Its loop `while kbd_$fetch_key(...) do if fetched_mode = 0
+  then ...` (../source's reading) stores the call's boolean to the
+  frame at the test, then loads the body's first operand into D0 before
+  testing the stored byte: `bsr.w 0xE1CAFE; lea (12,SP),SP; move.b
+  D0,(-0x1e,A6); move.w (-0x14,A6),D0; tst.b (-0x1e,A6); bmi.b
+  0xE1CE44` (0xE1CE6C..0xE1CE80); the head 0xE1CE44 is `tst.w D0; bne.s
+  <test>`.  The byte at -0x1E lies below the -0x1C temporary (`move.l
+  A0,(-0x1c,A6); pea (-0x1c,A6)`, 0xE1CDFC), so it is a temporary
+  (section 2, "Frame size", item 4).  No other site looked for.  `dpc`
+  tests D0 straight after the call and reads the local in the body
+  (lead: ../source pascal-translation-notes finding 28; bead
+  domain-pascal-b8dz).
+- **A loop entered past its test's `tst` (Verified at the site).**  The
+  module-local 0xE1CAFE (../source kbd_$fetch_key), `while (not found)
+  and then (head <> kbd.ring.tail) do`, is entered by `move.b D3,D5;
+  bra.w 0xE1CBE4` (0xE1CB28; D3 is `found`, just cleared): the target
+  is the test's `bmi.s` (0xE1CBE4), past its `tst.b D3` (0xE1CBE2),
+  the `move.b` having set the flags from D3 already.  Compare the
+  module-local 0xE1A4A4 (section 9), which branches past a `tst.l` to
+  its `seq` (bead domain-pascal-gaj).  `dpc` branches to the `tst`
+  (lead: ../source pascal-translation-notes finding 30; bead
+  domain-pascal-b8dz).
 - **`while p <> nil` on a pointer variable** (ad-hoc script over the
   bottom tests): 45 loops test an address register (`cmpa.w #0,An`), 12 a
   frame slot (`tst.l (d,A6)`), a few a D register or the flags of a
@@ -3740,6 +4023,50 @@ scripts besides, not kept, are named as such below; re-check sites with
 - **`repeat`**: fall-through heads, aligned (section 7.2).  The `bra`
   rows (a test at the top, a `bra` back; 7.2): source construct not
   identified; `dpc` never emits it.
+- **A pointer walk in a `while` loop (Verified at the site; the rule
+  Uncertain).**  The stepped pointers below are not only in `for`
+  loops, and not only for elements wider than a byte: the module-local
+  0xE1B00A (../source tty_$i_put_chars) has a `while` loop
+  0xE1B07A..0xE1B32C, entered by `bra.w` at 0xE1B076, that reads the
+  characters of its by-address buffer with `move.b (A2)+,D5`
+  (0xE1B07A), A2 the parameter's slot loaded at 0xE1B072 (`movea.l
+  (12,A6),A2`): the in-place forming.  The count of characters handled
+  is kept apart in D2 (`clr.w D2` 0xE1B070; `addq.w #1,D2` 0xE1B07E),
+  since the test and the result read it (`move.w D2,D0` 0xE1B388).
+  How often `while` loops get a stepped pointer is not surveyed.  `dpc`
+  steps pointers in `for` loops only (lead: ../source
+  pascal-translation-notes finding 3; bead domain-pascal-j8pw).
+- **Loop invariants held in registers in some loops only (Verified at
+  the sites; which loops get it Uncertain; ref 6.4.24 p. 6-29,
+  "Removal of invariant expressions from loops").**  The module-local
+  0xE1B716 (../source tty_$i_word_erase) has two `while` loops with
+  the same references.  Before the first it forms two field addresses
+  (`lea (0x2ce,A2),A3; lea (0x2ca,A2),A4`, 0xE1B722), used by the body
+  and the test (`cmpi.w #1,(A3)` 0xE1B72C; `move.w (A3),D0; cmp.w
+  (A4),D0` 0xE1B75E); the second loop (0xE1B766..0xE1B7A4) reaches the
+  same fields as `(0x2ce,A2)` and `(0x2ca,A2)`, although A3 and A4 are
+  still saved and unchanged.  Not a `with`: the rest of the first loop
+  still goes through A2.  (Both exits of the first loop go straight to
+  the second loop's test: `beq.s 0xE1B79C` at 0xE1B754, `bra.s
+  0xE1B79C` at 0xE1B764.)  TTY_$K_DRAIN_OUTPUT 0xE67AAE (saves
+  D2-D7/A2-A5) forms before its loop head 0xE67B0C the bases of
+  FIM_$QUIT_EC and FIM_$QUIT_VALUE (`move.l #0xe22002,D6; move.l
+  #0xe222ba,D7`), PROC1_$AS_ID's address (`movea.l #0xe2060a,A4`), and
+  two field addresses from a copy of the descriptor pointer (`movea.l
+  A2,A3` 0xE67ADE; `move.l #0x3d2,D4; move.l #0x3d4,D5; add.l A3,D4;
+  add.l A3,D5`, 0xE67AEA..0xE67B0A), used as `movea.l D6,A1`, `move.w
+  (A4),D1`, `movea.l D4,A1; move.w (A1),D2` (0xE67B1E..0xE67B48).
+  TTY_$K_PUT 0xE67BB2 (saves D2-D5/A2-A5) builds the same two EC_$WAITN
+  lists in its `while` body (0xE67CBE..0xE67D00) and forms nothing:
+  `move.w (0xe2060a).l,Dn` (D2 at 0xE67CD0, D0 at 0xE67CEC) and
+  `movea.l #0xe22002,A1` / `#0xe222ba,A1` at each use,
+  though every path from its head 0xE67C5E to the back edge passes
+  there and D6/D7 are free (not saved).  Neither register pressure nor
+  the loop kind explains it: DRAIN's loop is entered by falling
+  through, K_PUT's by a branch to its test, and word_erase's two
+  `while` loops differ.  `dpc` hoists no invariants (only the bases of
+  stepped pointers, below) (lead: ../source pascal-translation-notes
+  findings 4 and 12; bead domain-pascal-9k9m).
 
 **`for` loops** (`fors`; 963 `dbf` loops):
 
@@ -3867,6 +4194,21 @@ scripts besides, not kept, are named as such below; re-check sites with
   a choice made before allocation.  Without a call `T` is live after the
   loop in 5 copies and 2 in-place loops (approximated by a linear scan
   from the exit), so liveness does not decide either.
+- **A guard formed as a boolean (Verified at the site; cause
+  Uncertain).**  TPAD_$INIT 0xE33570, `for unit := 1 to smd_$n_devices
+  do`, has `jsr SMD_$N_DEVICES; subq.w #1,D0; move.w D0,D2; slt D3;
+  tst.b D3; bmi.w 0xE33628` (0xE33584..0xE33592), then `moveq #1,D3`,
+  the index.  The `slt` reads the flags of the `move.w`, which clears
+  V, so it is the sign of n-1, not the `subq`'s N xor V.  A byte scan
+  of 0xE00800..0xE88834 finds no other `slt Dn` within two instructions
+  of a `subq.w #1,Dn`; all seven `slt Dn` in the image are TPAD's
+  (0xE3358E; 0xE69816, 0xE698E4, 0xE6998E, 0xE69A4E, 0xE69AFE,
+  0xE69B54, the last six section 7.1's plain `or` with a call).
+  DTTY_$WRITE_STRING, whose bound is a slot, branches on the `subq`
+  (0xE1D6AC `subq.w #1,D0; bmi.s`).  Whether a bound that is a function
+  result causes the boolean form is not known: one site (lead:
+  ../source pascal-translation-notes finding 38; bead
+  domain-pascal-b8dz).
 - **Hidden frame cost of a `for` loop** (bead domain-pascal-nda; evidence
   only, nothing implemented): five routines with one `for` loop have no
   frame bytes beyond their locals: DTTY_$WRITE_STRING `link #-4` (the
@@ -4132,6 +4474,26 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
 - **`-x`, `~x`:** `neg.<s>`, `not.<s>` on the value in a register (`neg.w`
   ×97, many from the multiplications below; `not.w` ×13, `not.l` ×46,
   `not.b` ×43).
+- **`abs(x)` (ref "Abs", p. 4-12; Verified at the sites, one routine;
+  not implemented):** a copy, then `bpl.s` over `neg.w`, on the flags
+  of the instruction that formed the value: `move.w D2,D5; bpl.s; neg.w
+  D5` (TPAD_$DATA 0xE6924A, 0xE6927E; into D3 at 0xE69764; `move.w
+  D1,D0` at 0xE692D4), a `muls.w` (0xE69624
+  `move.w D2,D5; muls.w (-0x10,A2),D5; bpl.s; neg.w D5`: the 32-bit
+  product's sign, only the low word negated), or a `tst.w` after
+  `divs.w` (0xE6966E).  The result is then treated as a non-negative
+  word: compared signed with an integer variable (0xE69250 `cmp.w
+  (-0x12,A2),D5; bge.s`), unsigned with a constant (0xE69674 `cmpi.w
+  #5,D0; bls.s`), and zero-extended where it enters longword arithmetic
+  (0xE69284 `clr.l D0; ...; move.w D5,D0; addi.l #10,D0`, then a call of
+  M$MIS$LLW, not the `muls.w` of two signed words; 0xE6976A..0xE69778
+  `clr.l D5; move.w D3,D5; ...; clr.l D6; move.w D3,D6; add.l D6,D5`,
+  compared `cmp.l` with an `ext.l` word).  As if the result's type were
+  a non-negative subrange (the forms agree for 0..32767; abs(-32768) is
+  the one value where they do not).  One routine; Reported as a general
+  rule (lead: ../source pascal-translation-notes finding 37).  dpc folds
+  `abs` of a constant (dpc-sema) and refuses a run-time one (dpc-ir,
+  "this predeclared function is ..."; bead domain-pascal-1che).
 - **`odd(x)` (ref "Odd", p. 4-128; register form Verified at two sites;
   implemented, bead domain-pascal-5aw.19).**  `btst #0` on the integer
   in a data register, the branch on Z: FIM_$BUILD_DF 0xE0A6F6 `btst
@@ -4257,6 +4619,17 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     longword is zero-extended into a new register (0xE07FF6 `clr.l D1;
     move.w D0,D1`; 0xE07A3A, 0xE07DD2, 0xE5AA4C); the 16 `M$OIS$WLW`
     results are all used as words (`dpc` refuses one used as a longword);
+  - a non-M$ARITH word result kept in a register is widened the same
+    way: of 71 `jsr ML_$SPIN_LOCK` sites, 68 store `move.w D0,(d,A6)`
+    and the 3 that keep the token in a register zero-extend it, `clr.l
+    Dn; move.w D0,Dn` (LOG_$ADD 0xE1768A D5; UID_$GEN 0xE1A03E,
+    0xE1A0B0 D3); every later use is a word (`move.w D5,-(SP)`
+    0xE1775E; `move.w D3,-(SP)` 0xE1A07A).  ML_$SPIN_LOCK is `move.w
+    SR,D0; ori.w #0x700,SR; rts`.  Reported reading: an unsigned word
+    result assigned to a longword local (../source declares the token
+    `integer32`; how a register-held *word* local would be loaded is
+    not separated) (lead: ../source pascal-translation-notes finding
+    20);
   - **registers (Verified; 12.4 R3):** D1 or A1 is live across 31 of the
     83 calls `tools/regalloc.py` models (42 register/call pairs; the
     entries write only D0/A0, and preserve D1-D3 with `movem`).  A value
@@ -4429,7 +4802,18 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   unchanged: a word sum is compared at the word's width (review survey:
   `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41 against `move.w; ext.l;
   add.l/sub.l; cmp.l/cmpi.l` ×7, e.g. 0xE0F9D0..0xE0F9D8; the rule
-  between them is not known).  An integer32
+  between them is not known; bead domain-pascal-9js).  TPAD_$DATA has
+  4 widened sites in one routine (0xE69448..0xE6945A `move.w
+  (0x170,A5),D5; ext.l D5; addi.l #50,D5; move.w (-0x1e,A2),D2; ext.l
+  D2; cmp.l D2,D5`; 0xE69474..0xE69482, 0xE694B8..0xE694C4,
+  0xE694DE..0xE694EC with `subi.l #50`), while the same sum stored is
+  a word (0xE6945E `moveq #50,D2; add.w (0x170,A5),D2`) (lead:
+  ../source pascal-translation-notes finding 39).  The same routine
+  forms `v - e` both as `e` negated plus `v` (0xE692E8 `muls.w
+  (-0x24,A2),D5; neg.w D5; add.w (0x178,A5),D5`, which ../source reads
+  as a unary minus, `-dy * y_scale + accum_y`) and as `v` loaded minus
+  `e` (0xE693AE `move.w (-0x24,A2),D3; sub.w D2,D3`) (Verified at the
+  sites; finding 39).  An integer32
   expression stored into a word object (or returned as a word result) is
   computed at word width when the operation allows it (`+`, `-`, `*`,
   `&`, `!`, `xor`, `lshft`, `-`, `~`): 0xE177C4 `move.w #0x400,D3; sub.w
@@ -4536,6 +4920,18 @@ stored.
   pressure is a candidate cause).  **Uncertain:** when the original
   reloads instead of holding.  `dpc` does the majority form (entry load,
   allocator register).
+- **In a data register** when A2-A4 are taken (registers Verified at
+  the sites; "when A2-A4 are taken" as the cause Reported; lead:
+  ../source pascal-translation-notes finding 14):
+  TTY_$K_DRAIN_OUTPUT 0xE67ABC `move.l (0xc,A6),D3` (A2 the
+  descriptor, A3 its copy, A4 PROC1_$AS_ID's address, A5 data), pushed
+  as `move.l D3,-(SP)` (0xE67AC2), tested via `movea.l D3,A0; tst.l
+  (A0)` (0xE67AD4), written via `movea.l D3,A1` (0xE67B80).  TTY_$K_PUT
+  holds two by-address slots likewise, D4 and D5 (0xE67BC0, 0xE67BC4;
+  `movea.l D4,A0` 0xE67C06, `movea.l D5,A0` 0xE67C6A), with A3/A4
+  holding its count and status slots.  The shape of 12.2's pointer
+  parameters in data registers (beads domain-pascal-0b1,
+  domain-pascal-izc).
 - **Passing the status on:** held in An, it is pushed with `pea (An)`
   (survey of every slot held in A2-A4, not only status slots: `pea (An)`
   1447 times, `move.l (d,A6),-(SP)` 80 times while the register holds the
@@ -4705,10 +5101,19 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   - `max`, `min`, `in_range` of run-time values: **refused**.  The only
     candidates in the image are the five `x := min(x, c)`-shaped sites of
     12.4 R8 (`move.w #c,Dn; cmp.w Dn,Dx; ble.s; move.w Dn,Dx`: 0xE19ED0,
-    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6), which an `if x > c then x
-    := c` would give too (0xE66372 even skips the store to memory when
+    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6; and unsigned with `moveq`,
+    module-local 0xE1CA8C at 0xE1CAA0 `moveq #2,D1; cmp.w D1,D0; bls.s; move.w
+    D1,D0`, lead: ../source pascal-translation-notes finding 32), which
+    an `if x > c then x := c` would give too (0xE66372 even skips the store to memory when
     the value is in range).  No site that must be one of these built-ins
-    is known.
+    is known.  A lead for `in_range`: TTY_$K_SET_FUNC_CHAR 0xE67502 and
+    TTY_$K_INQ_FUNC_CHAR 0xE67588 `cmpi.w #31,D1; bhi` on an
+    enumeration word whose last ordinal is 31, followed by the real
+    bound `cmpi.w #17,D1; bls` (section 5; ../source `tty/k_func.pas`
+    reads `not in_range(func) or else ...`); for an unsigned
+    enumeration from 0 it would be one compare against the last
+    ordinal.  Uncertain: a compare against the last enumerator gives the
+    same code (lead: ../source pascal-translation-notes finding 9).
 - `addr` is section 1.5 and 5.2.
 
 ---
@@ -4735,7 +5140,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   `0x0000` when they do not (section 7).
 - **Uncertain:** which source construct produced `WIRED_PROC`/`WIRED_DATA`
   (module heading section names are the likely candidate), and why
-  `PROCEDURE$`/`DATA$` exist besides `.TEXT`/`.DATA`.  They may be another
+  `PROCEDURE$`/`DATA$` exist besides `.TEXT`/`.DATA` (see "PROCEDURE$
+  and DATA$" below).  They may be another
   compiler's defaults or older defaults.  Section names are at most 16
   characters in the map (`PROC2_CREATE_PRO` beside `PROC2_CREATE_DAT`,
   `COLOR4_$WIRED_DA`): truncated, by the binder or the object format
@@ -4783,8 +5189,36 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   (PROC2's .DATA block, from OS_INIT_PROC), KBD_$INIT 0xE3336A (KBD's
   WIRED_DATA 0xE2DDE4, twice: 0xE3336A and 0xE3339E, after a call).
   The encoding is `movea.l #imm` (`207c`), not the `lea abs.l` of the
-  `--a5-absolute` sites (section 4).  When the register is reloaded is
-  not settled (Uncertain).
+  `--a5-absolute` sites (section 4).  LOG_$INIT (OS_INIT_PROC) reaches
+  LOG_'s WIRED_DATA block 0xE2B280 this way, `movea.l #0xE2B280,A0` at
+  0xE300B2, 0xE30198, 0xE301B0, 0xE301DC and `movea.l #...,A1` at
+  0xE30180 (A0 holding a pointer there).  It pushes the block's first
+  variable by address as `move.l #0xE2B280,-(SP)` (`2f3c`; 0xE30054,
+  0xE3007A, 0xE3010E, 0xE30148), where WIRED_PROC's LOG_$SHUTDN has
+  `pea (A5)` (0xE175EE).  A defined global of the block is reached off
+  the register too, LOG_$LOGFILE_PTR as `(0x14,A0)` (0xE301B6), while
+  another module writes it by symbol (`clr.l 0xE2B294`, 0xE14104).
+  When the register is reloaded is not settled (Uncertain): every
+  LOG_$INIT reload follows a call or a branch target, so keeping it
+  across a plain statement is not seen (lead: ../source
+  pascal-translation-notes finding 24).  `dpc` refuses this form (bead
+  domain-pascal-a2g).
+- **PROCEDURE$ and DATA$ (Verified at the sites; pairing Uncertain;
+  lead: ../source pascal-translation-notes finding 33).**  KBD's
+  PROCEDURE$ segment 0xE724C4 loads no A5 and reaches KBD's WIRED_DATA
+  block absolutely (`movea.l #0xE2DDE4,A0`, `207c`, 0xE724FC); KBD has
+  no DATA$ block.  DXM_WIRED_'s DXM_$ADD_SIGNAL_CALLBACK 0xE72184
+  (PROCEDURE$) loads DATA$ (`lea 0xE85708,A5`, 0xE7218C).  But DATA$ is
+  not PROCEDURE$'s partner only: MST_$FORK 0xE739F8 (PROC2_CREATE_PRO)
+  loads MST_UNWIRED's DATA$ block (`lea 0xE85714`, 0xE73A00: the end
+  of the 4-byte block 0xE85710, the "A5 = its end" case of section 4),
+  SMD_$FREE_ASID 0xE75250 (PROC2_DELETE_PRO) SMD's (`lea 0xE85718`,
+  the end of 0xE85714; neither routine addresses off A5),
+  and SMD's PROCEDURE$ module-local at 0xE72690 loads SMD's
+  *WIRED_DATA* block (`lea 0xE2E060,A5`, 0xE72696; used, `pea (A5)`
+  0xE726B8; called by `jsr` from 0xE34EF0 and 0xE6FFA4).  So
+  "PROCEDURE$/DATA$" is not a one-to-one pair.  Which data section a
+  PROCEDURE$ routine's attribute named is not settled.
 - **Overlay sections (Verified from the map; addressing at the sites).**
   Sections with no per-module segment, named like variables (ACL_$DATA
   0xE88834, FILE_$LOT_DATA, RINGLOG_$DATA, XPD_$DATA, PROC2_$DATA
@@ -4879,6 +5313,29 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   start at a multiple of 4 and have a size that is a multiple of 4
   (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the binder
   rounded is not known.
+- **Defined and other variables interleave in a block (Verified from
+  the map and the code; lead: ../source pascal-translation-notes
+  finding 26).**  LOG_ 0xE2B280 (WIRED_DATA, size 0x1C) has the map
+  names LOG_$LOGFILE_UID at +0 and LOG_$LOGFILE_PTR at +0x14.  Between
+  and after them the code addresses unnamed variables: +8 (`(8,A5)`
+  LOG_$ADD 0xE176EC), +0xC (`pea (12,A5)`, the spin lock), +0x10
+  (0xE3019E), +0x18 (a byte, `st (24,A1)` 0xE30186).  So defined
+  globals are not grouped apart from the unit's other variables.
+  Which declaration order produces this is a language question (ref
+  7.2; bead domain-pascal-ptd); ../source log/log.pas gets it by
+  interleaving `define` and `var` parts (not re-checked here).
+- **Objects of 8 bytes or more in a block (lead, not settled; ../source
+  pascal-translation-notes finding 29; bead domain-pascal-1edl).**
+  KBD's block (`D E2DDE4 KBD size = D4`) has TERM_$TPAD_BUFFER at +0x58
+  (0xE2DE3C, map) and, as ../source's translation lays it out, its
+  other 8+-byte objects at multiples of 8 from the block start, with 4
+  unaddressed bytes at +0xBC; but FIM_'s block (`D E2126C`, FIM_IN_FIM
+  at +0, FIM_$USER_FIM_ADDR at +0x3C, 0xE212A8, map) has an 8+-byte
+  object at 4 mod 8 from its start.  Both blocks start at 4 mod 8, so
+  8-alignment neither from the block nor from address 0 fits both.  The
+  frame analogue is in section 2 ("Objects of 8 bytes or more").
+  Uncertain; the object sizes inside the blocks are ../source's, not
+  checked here.
 - **What `dpc` emits for a unit's static data (our convention):** one
   zero-filled block in the NOBITS section `.bss.moddata.<UNIT>` (unit
   name upper-cased), `.balign 4`, size rounded up to 4, starting at the
@@ -6115,6 +6572,17 @@ domain-pascal-g5q.7).**
   0xE177B4 `add.l D1,D2` keeps D1 (the CSE).  A sum of the held value and
   a variable copies the held value and adds the variable to the copy:
   0xE177D0..0xE177D4 `move.l D1,D3; ...; add.l (0x14,A5),D3`.
+- A register known to hold 0 stands in for the constant 0 as a bit
+  number (Verified at three sites; rule Reported): TTY_$K_GET 0xE1C3EA
+  `clr.w D3` (a register-held local set to 0), then, after a call,
+  0xE1C414 `btst D3,(1,A4); sne D0` for member 0 of a word set, where
+  member 1 next is `btst #1,(1,A4)` (0xE1C41E); TTY_$K_PUT 0xE67BFA
+  `clr.w D3` ... 0xE67C32 `btst D3,(1,A0)` (member 1 at 0xE67C08 is
+  `btst #1,(1,A0)`); RING_$SENDP 0xE759B4 `clr.b D4` ... 0xE759C6
+  `btst D4,(1,A1); sne D7`.  The value survives a call in two of the
+  three (callee-saved registers); compare FLP_$SHUTDOWN's copy of a
+  register-held 0 (7.4, 0xE3E24A).  `dpc` emits `btst #0` (lead:
+  ../source pascal-translation-notes finding 7; bead domain-pascal-wgme).
 
 *Survey* (`tools/csesurvey.py`; routines of 0x30..0x150 bytes, 1099
 analysed).  Each routine is evaluated symbolically: a register holds an
@@ -6216,10 +6684,41 @@ the sites).**
     (0xE0285A..0xE02868), then again in the next statement (0xE0286C).
   - FIM_$ACKNOWLEDGE reads PROC1_$AS_ID twice for its first statement
     (0xE0A972 for ×12, 0xE0A980 for ×4).
+  - LOG_$ADD 0xE1763E reads `buf^.head` once for both operands of an
+    `and then`: `move.w (A0),D1; cmp.w (2,A0),D1; blt.b <exit>; cmp.w
+    D0,D1; ble.b <head>` (0xE176D6..0xE176E0, its loop test), the shape
+    of 0xE0283C.  `dpc` loads the operand again for the second compare
+    (lead: ../source pascal-translation-notes finding 22; bead
+    domain-pascal-g5q.6).
 - Uplevel variables (through the static link) are re-read even within
   one statement: 0xE03FEE/0xE03FF8; 0xE135DA/0xE135E2.
 - Uncertain against: AREA_$DELETE reads the flags word once
   (0xE07C78) for the `while` test and for the next `if` (0xE07C80).
+- Uncertain against (Reported), also LOG_$ADD: its copy loop reads
+  `data[i]` once for two statements, `move.w (-2,A0),D6; move.w
+  D6,(6,A2); move.w D6,(10,A1)` (0xE17730..0xE17738); and
+  TIME_$CURRENT_CLOCKH is read once (`move.l (0xe2b0e4).l,D6`, 0xE17708)
+  for two stores (0xE1770E, 0xE17712), though ../source's C reads it
+  into a local, so a register-held local (12.5) explains that site too
+  (lead: ../source pascal-translation-notes finding 22).  TPAD_$DATA's
+  `if ... else if` clamp reads one field once for both tests (D3, the
+  cursor line, `cmp.w (-0x14,A2),D3` 0xE696F6, no reload) and reloads
+  the other (`move.w (0x162,A5),D3` at 0xE6970A and again at 0xE69722,
+  on a path where D3 still holds it): not explained (finding 39).
+- **Another unit's object's address held in a register across
+  statements (Verified at the sites; rule Uncertain):** straight-line
+  code, not a loop invariant.  LOG_$ADD `move.l #0xe0000c,D1`
+  (LOG_$LAST_ENTRY, 0xE176F2), copied to A2 for three stores of
+  separate statements (`movea.l D1,A2` 0xE176FA; stores 0xE176FC,
+  0xE17704, 0xE17712) and
+  to A4 for the loop (`movea.l D1,A4` 0xE17724); LOG_$INIT 0xE30048
+  `movea.l #0xe0000c,A2` (0xE301BA), live across `jsr LOG_$ADD`
+  (0xE301D4) and used after it (0xE301E6, `clr.l (A2)` 0xE301EC), then
+  `movea.l #0xe00000,A2` (CRASH_$RECORD, 0xE301EE).  A `with` would
+  explain the LOG_$INIT sites.  `dpc` addresses such fields as
+  `(sym+d).l` in each statement.  How often the image does either is
+  not surveyed (lead: ../source pascal-translation-notes finding 23;
+  bead domain-pascal-sht0).
 - **Constants in registers** (Verified, rare).  In the whole image there
   are only 11 `move #imm,Dn` followed within three instructions by
   `cmp Dn,..`; `.TEXT` alone has 996 `cmpi.w` and 355 `cmpi.l`
@@ -6639,9 +7138,22 @@ operation with `y`), `true` as `st`, other constants as `moveq`/`clr`/
 `move` (one `moveq` cannot tell from `move.w #-1` is refused), other
 values computed into it (the computation's register renamed), or, when
 the computation reads the local after starting its result, computed
-apart and moved (not seen); an M$ARITH result, in D0 from the `jsr`,
+apart and moved (seen, below); an M$ARITH result, in D0 from the `jsr`,
 moved (`move.l D0,Dn`; for a local of the narrow rule too, which D0
-itself would not keep past the next call; not seen in the image).  A
+itself would not keep past the next call; not seen in the image).
+Computed in another register and moved (the moves Verified at the
+sites; that their destinations are register-held locals is ../source's
+reading, Reported; lead: ../source pascal-translation-notes finding 39;
+bead domain-pascal-er7r):
+TPAD_$DATA 0xE692CC `move.w D0,D1`, where D1 held a subterm (the
+product `muls.w (-0x24,A2),D1`, 0xE692B4) that the computation, started
+in D0, reads (`sub.l D1,D0`): close to the case above, the conflict
+being with a subterm in the local's register rather than with the
+local's old value.  Also 0xE6920E `move.w
+D2,D3` (D3 used as a temporary in the sum) and 0xE6960C/0xE6961A
+`move.w D5,D2` / `move.w D5,D1` (computed in D5), so moves occur
+without the read conflict too.  Which locals the registers hold is
+../source's reading.  A
 web read before the code first assigns it (a read the back edge of a
 loop reaches, the assignment later in the body; or a local not yet
 assigned) is refused: where the original colours such a value is not
@@ -6789,12 +7301,36 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     #0`, and `move.b #0xff` for `true` (`st` reads its operand too);
     0xE0A328 (five `move.b #n` stores to `device` registers, among them
     0xE0A33E `move.b #-1,(A0)`) is a byte-identical conformance unit.
-- **Store merging (reference; Uncertain in the image):** ref 3.15.3,
+- **Store merging (reference; found in the image, Reported; when it
+  happens Uncertain):** ref 3.15.3,
   p. 3-57: "By default, the compiler optimizes certain adjacent references
   by merging them into one large reference" (`a := 0; b := 0` on two
-  `integer16`s becomes one 32-bit store).  Not yet found in the image;
-  the two adjacent `clr.b` of XPD_$RESET_PTRACE_OPTS (0xE5B15E, 0xE5B164)
-  are not merged.  `dpc` rejects two consecutive stores to adjacent
+  `integer16`s becomes one 32-bit store).  Found in the image (lead:
+  ../source pascal-translation-notes findings 5, 21, 39): TTY_$K_RESET
+  0xE67322 `move.l #0x10001,(0x2ca,A2)`, 0xE6732A `move.l
+  #0x10100,(0x2ce,A2)`, 0xE67332 `move.l #0x10001,(0x3d2,A2)` (then the
+  lone `move.w #0x100,(0x3d6,A2)`, 0xE6733A) and 0xE67340 `clr.l
+  (0x56,A2)`, A2 the pointer returned by TTY_$I_GET_DESC; the
+  module-local 0xE1BF70 at 0xE1BFE4 `move.l #0x10001,(0x38,A2)` (A2 =
+  (8,A6)); LOG_$ADD 0xE176B0 `move.l #0x10001,(A0)`; LOG_$INIT 0xE3017C
+  `moveq #1,D0; move.l D0,(A0)`; KBD_$INIT 0xE333B6/0xE333C4 `move.l
+  #0x10001,(88,A2)` and `move.l #0x10001,(158,A2)`, each followed by an
+  unmerged `move.w #64`.  Pairs at offsets 2 mod 4 from the base
+  merge too (0x2CA, 0x3D2, 0x56).  Not
+  merging is the majority: TTY_$I_INIT 0xE3332E..0xE33352 makes the
+  same buffer stores as TTY_$K_RESET one `move.w` at a time (through
+  A4 = (8,A6), a by-address record) and clears 0x58 then 0x56 apart
+  (0xE332CC); TPAD_$INIT 0xE3363E/0xE33644 (TPAD's block via `movea.l
+  #`), TPAD_$RE_RANGE_UNIT 0xE69A68..0xE69A7A (an element via A1); an
+  ad-hoc survey (not kept) finds 44 consecutive unmerged constant
+  word-store pairs to adjacent words of one base (29 through An, among
+  them A5 0xE1955C, 0xE69902, 0xE719A4, and 0xE2FAC4 `move.w #0`,
+  the `device` zero of this section, so possibly exempt; 15 in
+  the frame), and the two adjacent `clr.b` of XPD_$RESET_PTRACE_OPTS
+  (0xE5B15E, 0xE5B164) are not merged either.  Every merge seen is of
+  constants through an address register holding a pointer value (or
+  an internal routine's (8,A6) slot); what decides is Uncertain (bead
+  domain-pascal-2m0).  `dpc` rejects two consecutive stores to adjacent
   objects of one base that fit in a longword, except `device` objects,
   which the reference exempts from merging (section 5.5).
 - `link.w`, `bsr.s`/`bsr.w`, `bra.s`/`bra.w`: the length must match the
