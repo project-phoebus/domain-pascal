@@ -1,0 +1,90 @@
+# tools/corpus.py baseline: outcome, corpus entry, first diagnostic kind.
+# Regenerate with `python3 tools/corpus.py --update` and say why in the commit.
+ok	sys/ins/aclm.ins.pas
+ok	sys/ins/base.ins.pas
+ok	sys/ins/cache.ins.pas
+ok	sys/ins/cal.ins.pas
+ok	sys/ins/ctm.ins.pas
+ok	sys/ins/ec2.ins.pas
+ok	sys/ins/errlog.ins.pas
+diag	sys/ins/error.ins.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+ok	sys/ins/ev.ins.pas
+ok	sys/ins/fault.ins.pas
+ok	sys/ins/fontn.ins.pas
+ok	sys/ins/fpp.ins.pas
+ok	sys/ins/fpp1.ins.pas
+ok	sys/ins/gmf.ins.pas
+ok	sys/ins/gpr.ins.pas
+diag	sys/ins/gsr_types.ins.pas	a real constant is not supported yet
+ok	sys/ins/io_traits.ins.pas
+ok	sys/ins/ios.ins.pas
+ok	sys/ins/ios_dir.ins.pas
+ok	sys/ins/ios_dir_trait.ins.pas
+ok	sys/ins/ipc.ins.pas
+diag	sys/ins/kbd.ins.pas	type transfer needs equal sizes: ...
+ok	sys/ins/loader.ins.pas
+ok	sys/ins/mbx.ins.pas
+ok	sys/ins/ms.ins.pas
+ok	sys/ins/mts.ins.pas
+ok	sys/ins/mutex.ins.pas
+ok	sys/ins/name.ins.pas
+ok	sys/ins/nud.ins.pas
+ok	sys/ins/osinfo.ins.pas
+ok	sys/ins/pad.ins.pas
+ok	sys/ins/passthru.ins.pas
+ok	sys/ins/pbufs.ins.pas
+ok	sys/ins/pfm.ins.pas
+ok	sys/ins/pgm.ins.pas
+ok	sys/ins/pm.ins.pas
+ok	sys/ins/prf.ins.pas
+ok	sys/ins/proc1.ins.pas
+ok	sys/ins/proc2.ins.pas
+diag	sys/ins/prsvr.ins.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
+diag	sys/ins/rws.ins.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+ok	sys/ins/sfcb.ins.pas
+ok	sys/ins/sio.ins.pas
+ok	sys/ins/sio_hw.ins.pas
+ok	sys/ins/sio_trait.ins.pas
+ok	sys/ins/smdu.ins.pas
+ok	sys/ins/streams.ins.pas
+ok	sys/ins/task.ins.pas
+ok	sys/ins/time.ins.pas
+ok	sys/ins/tone.ins.pas
+ok	sys/ins/tpad.ins.pas
+ok	sys/ins/trait.ins.pas
+ok	sys/ins/tty.ins.pas
+ok	sys/ins/type_uids.ins.pas
+ok	sys/ins/vec.ins.pas
+ok	sys/ins/vfmt.ins.pas
+diag	domain_examples/dde/average.pas	undefined identifier `_`
+diag	domain_examples/fix_font/fix_font.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	domain_examples/gpr_examples/ctm_mark1.pas	include file `_` not found
+diag	domain_examples/gpr_examples/ctm_mark2.pas	include file `_` not found
+diag	domain_examples/gpr_examples/gpr_dial.pas	undefined identifier `_`
+diag	domain_examples/gpr_examples/gpr_pfk.pas	undefined identifier `_`
+diag	domain_examples/gpr_examples/gpr_pixel_formats.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	domain_examples/gpr_examples/intersecting_lines.pas	include file `_` not found
+diag	domain_examples/gpr_examples/my_include_file.pas	include file `_` not found
+diag	domain_examples/gpr_examples/raster_ops_in_blts.pas	include file `_` not found
+diag	domain_examples/hardcopy/driver/driver_ex.pas	expected `_`, found `_`
+diag	domain_examples/hardcopy/driver/driver_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
+diag	domain_examples/hardcopy/filter/filter_ex.pas	expected `_`, found `_`
+diag	domain_examples/hardcopy/filter/filter_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
+diag	domain_examples/streams/recno/recno.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	domain_examples/streams/sasc/imex.pas	expected `_`, found `_`
+diag	domain_examples/streams/sasc/init.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
+diag	domain_examples/streams/sasc/io.pas	expected `_`, found `_`
+diag	domain_examples/streams/sasc/misc.pas	expected `_`, found `_`
+diag	domain_examples/streams/sasc/open.pas	expected `_`, found `_`
+diag	domain_examples/streams/sasc/seek.pas	expected `_`, found `_`
+diag	domain_examples/streams/scramble/enscramble.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	domain_examples/streams/scramble/scramble.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	sys/source/bp1/sbp1_example.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	sys/source/emt/emt.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	sys/source/emt/rcv_pas_model.pas	expected `_`, found `_`
+diag	sys/source/emt/send_pas_model.pas	expected `_`, found `_`
+diag	sys/source/emt/siorf.pas	expected `_`, found `_`
+diag	sys/source/emt/siotf.pas	expected `_`, found `_`
+diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
+diag	usr/X11/examples/dmwin/dmwin.pas	a parameter's type must be a type name (ref N.N, p. N-N)
+diag	usr/X11/examples/pascal/xhw1.pas	expected expression, found `_`

@@ -1751,6 +1751,12 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
                 "a pointer result in A0 and D0 (`d0_return`, `c_param`) is",
             ))
         }
+        ResultReg::Unknown => {
+            return Err(Diagnostic::error(
+                r.span,
+                dpc_sema::conv::unknown_result_message(res.ty, &p.types),
+            ))
+        }
     };
     let size = p.types.size(res.ty);
     let width = Width::of_size(size)
@@ -3711,6 +3717,37 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
 }
 
 /// The value of `e`.
+/// Refuse a call (callee `c`) of a function whose result convention is
+/// not known (`ResultReg::Unknown`: sets, records, reals; codegen-patterns
+/// 3), whether its value is used or discarded (`discard`): such a result
+/// may need caller-provided storage, so even a bare call could be wrong
+/// code.  Through a routine pointer the template's result type decides,
+/// as `dpc_sema::conv::result_reg` does for a routine (pointers and
+/// ordinals are known).
+fn refuse_unknown_result(p: &Program, c: &SCall, span: Span) -> Res<()> {
+    let unknown = match &c.callee {
+        SCallee::Routine(id) => p
+            .routine(*id)
+            .result
+            .as_ref()
+            .filter(|r| r.reg == ResultReg::Unknown)
+            .map(|r| r.ty),
+        SCallee::Pointer(x) => match p.types.kind(x.ty) {
+            TypeKind::RoutinePointer(sig) => sig.result.filter(|&t| {
+                !p.types.is_pointer(t) && !p.types.is_ordinal(t) && !p.types.is_error(t)
+            }),
+            _ => None,
+        },
+    };
+    match unknown {
+        Some(ty) => Err(Diagnostic::error(
+            span,
+            dpc_sema::conv::unknown_result_message(ty, &p.types),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if let Some(v) = &e.value {
         return const_of(v, scalar_of(p, e)?, e.span);
@@ -3778,6 +3815,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             // MST_$MAPS 0xE439C8 `move.l A0,(-4,A6)`).  `d0_return` puts
             // it in D0 too, where the caller reads it like a data result
             // (no compiled site; ref 5.5.10).
+            refuse_unknown_result(p, c, e.span)?;
             let reg = match &c.callee {
                 SCallee::Routine(id) => match p.routine(*id).result.as_ref().map(|r| r.reg) {
                     Some(ResultReg::Address) => ResultClass::Address,
@@ -4792,6 +4830,7 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   `variable` routine called with fewer arguments (ref 5.5.5) is not
 ///   supported yet: its pad and slots are not catalogued.
 fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
+    refuse_unknown_result(p, c, span)?;
     // The parameters as (mode, univ, type), and the pad.
     let (callee, params, pad): (Callee, Vec<(ParamMode, bool, TypeId)>, u32) = match &c.callee {
         SCallee::Routine(id) => {

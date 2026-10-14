@@ -156,10 +156,26 @@ pub enum ResultReg {
     /// `d0_return` on a pointer result: the callee puts the pointer in both
     /// registers; callers read the data register (5.5.10, p. 5-20).
     AddressAndData,
+    /// Not known yet: sets, records and reals (codegen-patterns 3,
+    /// Uncertain).  The declaration is accepted, so that Apollo's inserts
+    /// that declare such functions check (bead domain-pascal-qia); a
+    /// definition or a call is refused when lowered (`dpc-ir`), with
+    /// [`unknown_result_message`].
+    Unknown,
+}
+
+/// The refusal of a definition of, or a call to, a function whose result
+/// convention is [`ResultReg::Unknown`].
+pub fn unknown_result_message(ty: TypeId, types: &TypeTable) -> String {
+    format!(
+        "functions returning {} are not supported yet (codegen-patterns 3: result convention unknown)",
+        types.display(ty)
+    )
 }
 
 /// Decide the result register of a function returning `ty`.  `Err` names
-/// result types whose convention is not known yet.
+/// results that cannot be returned in a register;
+/// [`ResultReg::Unknown`] is a result whose convention is not known yet.
 pub fn result_reg(
     ty: TypeId,
     opts: &RoutineOptions,
@@ -192,8 +208,5 @@ pub fn result_reg(
     }
     // Sets, records, reals: how they are returned is not yet observed
     // (codegen-patterns 3, Uncertain).
-    Err(format!(
-        "functions returning {} are not supported yet (codegen-patterns 3: result convention unknown)",
-        types.display(ty)
-    ))
+    Ok(ResultReg::Unknown)
 }

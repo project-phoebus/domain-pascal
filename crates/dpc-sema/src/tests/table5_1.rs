@@ -465,8 +465,12 @@ fn result_registers() {
         result_reg("function f: integer; options(extern, a0_return);"),
         Address
     );
-    assert_err(
-        "module m; type s = set of 0..7; function f: s; extern;",
-        "not supported yet",
+    // Sets, records and reals: not known yet; the declaration is
+    // accepted (Apollo's inserts declare such functions), and `dpc-ir`
+    // refuses definitions and calls.
+    assert_eq!(
+        result_reg("type s = set of 0..7; function f: s; extern;"),
+        Unknown
     );
+    assert_eq!(result_reg("function f: real; extern;"), Unknown);
 }

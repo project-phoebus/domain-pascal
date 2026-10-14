@@ -1193,3 +1193,24 @@ fn builtins_can_be_redeclared() {
          function min(a, b: integer): integer; begin min := a end;",
     );
 }
+
+#[test]
+fn univ_ptr_by_reference_parameters_take_any_pointer() {
+    // ref 3.13.2, p. 3-50: univ_ptr as a "Formal or actual parameter for
+    // any pointer type"; Apollo's ios.ins.pas `ios_$locate(...; OUT b:
+    // univ_ptr; ...)` is passed a `^name_$pname_t` (enscramble.pas).
+    ok("module m;
+        type ip = ^integer; cp = ^char;
+        procedure loc(out b: univ_ptr); extern;
+        procedure typed(var b: ip); extern;
+        procedure q;
+        var p: ip; u: univ_ptr;
+        begin loc(p); loc(u); typed(u); typed(p) end;");
+    assert_err(
+        "module m;
+         type ip = ^integer; cp = ^char;
+         procedure typed(var b: ip); extern;
+         procedure q; var c: cp; begin typed(c) end;",
+        "argument type cp does not match parameter type ip",
+    );
+}

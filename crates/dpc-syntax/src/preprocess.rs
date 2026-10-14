@@ -54,6 +54,13 @@ pub struct Options {
     /// case-insensitive like all conditional variables (p. 4-50).  Empty by
     /// default: then no variable is predeclared.
     pub predeclared: Vec<(String, bool)>,
+    /// The directory that stands for the Aegis root `/` in include names
+    /// (driver option `--root`).  With it, a name beginning with a single
+    /// `/` (`/sys/ins/base.ins.pas`, the form Apollo's programs use) is
+    /// looked up under this directory instead of the host's root, so a
+    /// copy of an Apollo installation can be compiled in place.  `//node`
+    /// names are never mapped.  `None`: `/` names are host paths.
+    pub root: Option<PathBuf>,
 }
 
 /// Preprocessor result.  `tokens` ends with `Eof`.  Compilation should stop
@@ -397,7 +404,18 @@ impl Pp<'_> {
             }
             "then" => self.error(span, "%then without %if or %elseif"),
             "config" => self.error(span, "%config can only be used in a predicate"),
-            "include" => {
+            "include" | "insert" => {
+                if name == "insert" {
+                    // Message 321, p. 9-42: "Unrecognized option
+                    // (%token1); assuming %token2. ... if the compiler
+                    // finds %insert which is not legal in Domain Pascal,
+                    // the compiler substitutes %include and warns you."
+                    // Only this documented substitution is made.
+                    self.diags.push(Diagnostic::warning(
+                        span,
+                        "unrecognized option (%insert); assuming %include",
+                    ));
+                }
                 if let Some(p) = self.expect_str(lx, &name, span) {
                     let sspan = span;
                     match self.resolve(&p) {
@@ -501,8 +519,32 @@ impl Pp<'_> {
                 "include file `{name}`: `~` pathnames are not supported"
             ));
         }
-        // TODO: `//node/...` network paths and `/sys/ins/...` are taken as
-        // host paths unchanged.
+        // TODO: `//node/...` network paths are taken as host paths
+        // unchanged; `/...` too unless `Options::root` maps it.
+        if let (Some(root), Some(rest)) = (&self.opts.root, name.strip_prefix('/')) {
+            if !rest.starts_with('/') {
+                // Only plain components are joined: on Windows a `rest`
+                // with a root (`\x`) or a drive prefix (`C:x`) would make
+                // `join` leave the root directory.
+                use std::path::Component;
+                if !Path::new(rest).components().all(|c| {
+                    matches!(
+                        c,
+                        Component::Normal(_) | Component::CurDir | Component::ParentDir
+                    )
+                }) {
+                    return Err(format!(
+                        "include file `{name}` cannot be looked up under --root"
+                    ));
+                }
+                let p = base.join(root).join(rest);
+                return if p.is_file() {
+                    Ok(p)
+                } else {
+                    Err(format!("include file `{name}` not found"))
+                };
+            }
+        }
         let candidates: Vec<PathBuf> =
             if name.starts_with('/') || name.starts_with('.') || Path::new(name).is_absolute() {
                 vec![base.join(name)]
@@ -1098,6 +1140,48 @@ mod tests {
         // Eof belongs to the main file.
         let eof = r.out.tokens.last().unwrap();
         assert_eq!(r.sm.file(eof.span.file).path, PathBuf::from("t.pas"));
+    }
+
+    #[test]
+    fn root_maps_slash_names() {
+        // `--root`: `/sys/ins/x` is looked up under the root, relative
+        // names are not affected, and a missing file is not searched for
+        // elsewhere.
+        let dir = scratch("include_root");
+        std::fs::create_dir_all(dir.join("r/sys/ins")).unwrap();
+        std::fs::write(dir.join("r/sys/ins/x.ins.pas"), "x1").unwrap();
+        std::fs::write(dir.join("y.ins.pas"), "y1").unwrap();
+        let opts = Options {
+            cwd: Some(dir.clone()),
+            root: Some("r".into()),
+            ..opts()
+        };
+        let r = run_opts(
+            "%include '/sys/ins/x.ins.pas'; %include 'y.ins.pas';",
+            &opts,
+        );
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["x1", "y1"]);
+        let d = run_opts("%include '/y.ins.pas';", &opts).diags();
+        assert_eq!(d, ["t.pas:1:1: error: include file `/y.ins.pas` not found"]);
+    }
+
+    #[test]
+    fn insert_is_include_with_a_warning() {
+        // Message 321, p. 9-42.
+        let dir = scratch("insert");
+        std::fs::write(dir.join("a.ins.pas"), "a1").unwrap();
+        let opts = Options {
+            cwd: Some(dir.clone()),
+            ..opts()
+        };
+        let r = run_opts("%insert 'a.ins.pas'; m", &opts);
+        assert_eq!(r.idents(), ["a1", "m"]);
+        assert_eq!(
+            r.diags(),
+            ["t.pas:1:1: warning: unrecognized option (%insert); assuming %include"]
+        );
+        assert!(!r.out.has_errors());
     }
 
     #[test]

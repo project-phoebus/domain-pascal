@@ -49,6 +49,21 @@ fn scalar_sizes() {
     assert_eq!(p.types.get(ty(&p, "char")).align, 1);
 }
 
+#[test]
+fn predeclared_string_is_80_chars() {
+    // ref 3.11, p. 3-38: "string = array[1..80] of CHAR;"; "Sizeof",
+    // p. 4-181: "sizeof returns 80 because animal is declared to be a
+    // string".
+    let p = module(
+        "type line = string;
+         var animal: string; n: integer;
+         procedure q; begin n := sizeof(animal); animal[80] := 'x' end;",
+    );
+    assert_eq!(size(&p, "string"), 80);
+    // Like the other predeclared names, it can be redeclared.
+    module("type string = array[1..10] of char; var s: string;");
+}
+
 // ---------------------------------------------------------------------
 // Sets (ref 3.9.3, pp. 3-16..3-17)
 // ---------------------------------------------------------------------

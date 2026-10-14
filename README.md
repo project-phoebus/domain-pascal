@@ -24,6 +24,9 @@ driver writes an assembly file that holds just a comment header.
 - `crates/dpc-m68k`: the m68k backend and gas-syntax emitter.
 - `crates/dpc`: the driver, `dpc [-I dir]... [-o out.s] file.pas`.
 - `tests/golden/`, `tests/conformance/`: golden and image-conformance tests.
+- `tests/corpus/baseline.txt`: the expected `dpc --check-only` outcome of
+  each file of Apollo's SR10.2 Pascal inserts and examples
+  (`tools/corpus.py`, `make corpus`; skipped when the install is absent).
 
 Dependencies run one way: syntax, then sema, then ir, then m68k (with
 target), then dpc.  Build with `make build` (or `cargo build`).  Run the

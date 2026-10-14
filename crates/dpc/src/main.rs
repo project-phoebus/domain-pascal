@@ -1,6 +1,6 @@
 //! `dpc`: the Domain Pascal compiler driver.
 //!
-//! usage: dpc [-I dir]... [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
+//! usage: dpc [-I dir]... [--root DIR] [-o out.s] [--fragment-origin 0xADDR [--fragment-ends-module]]
 //!            [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]...
 //!            [--loop-align=on|off | --loop-align-off-from=ROUTINE,...]
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
@@ -15,6 +15,11 @@
 //! each body uses its scalar locals (`dpc_m68k::locals`; the input of
 //! `tools/localsurvey.py`, codegen-patterns 12.5); routines that do not
 //! lower are named on stderr, and the exit status is 0.
+//!
+//! `--root DIR`: include names beginning with one `/` (Apollo's
+//! `%include '/sys/ins/base.ins.pas'`) are looked up under DIR, e.g. a
+//! copy of an Apollo installation (`preprocess::Options::root`; used by
+//! `tools/corpus.py`).
 //!
 //! `--fragment-origin 0xADDR` (for image-conformance tests) says that the
 //! output is a fragment of a module whose first byte belongs at image
@@ -84,7 +89,7 @@ use dpc_syntax::{preprocess, Diagnostic, SourceMap};
 use dpc_target::Target;
 
 const PROG: &str = "dpc";
-const USAGE: &str = "usage: dpc [-I dir]... [-o out.s] \
+const USAGE: &str = "usage: dpc [-I dir]... [--root DIR] [-o out.s] \
                      [--fragment-origin 0xADDR [--fragment-ends-module]] \
                      [--fragment-origin=SECTION=0xADDR [--fragment-ends-module=SECTION]]... \
                      [--loop-align=on|off | --loop-align-off-from=ROUTINE,...] \
@@ -111,6 +116,7 @@ enum Stop {
 #[derive(Debug)]
 struct Args {
     include_dirs: Vec<PathBuf>,
+    root: Option<PathBuf>,
     output: Option<PathBuf>,
     input: PathBuf,
     stop: Stop,
@@ -220,6 +226,7 @@ fn fragment_sections(
 
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut include_dirs = Vec::new();
+    let mut root = None;
     let mut output = None;
     let mut input = None;
     let mut stop = Stop::Never;
@@ -237,6 +244,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
+            "--root" => {
+                if root.is_some() {
+                    return Err("--root given more than once".into());
+                }
+                root = Some(argv.next().ok_or("--root needs a directory")?.into());
+            }
             "-o" => {
                 if output.is_some() {
                     return Err("-o given more than once".into());
@@ -379,6 +392,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     }
     Ok(Args {
         include_dirs,
+        root,
         output,
         input,
         stop,
@@ -411,6 +425,7 @@ fn compile(
     let target = dpc_m68k::M68k;
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
+        root: args.root.clone(),
         predeclared: target
             .predeclared_cond_vars()
             .iter()
@@ -768,6 +783,12 @@ mod tests {
         assert_eq!(a.input, PathBuf::from("m.pas"));
         assert_eq!(a.stop, Stop::Never);
         assert!(a.fragment.is_empty());
+        assert_eq!(a.root, None);
+        let a = args(&["--root", "/x/install", "--check-only", "m.pas"]).unwrap();
+        assert_eq!(a.root, Some(PathBuf::from("/x/install")));
+        assert_eq!(a.stop, Stop::AfterCheck);
+        assert!(args(&["--root", "a", "--root", "b", "m.pas"]).is_err());
+        assert!(args(&["m.pas", "--root"]).is_err());
         let a = args(&["--fragment-origin", "0xE148CA", "m.pas"]).unwrap();
         assert_eq!(a.fragment, vec![FragmentSection::only(0xE148CA)]);
         let a = args(&["--fragment-origin=0xE148CA", "m.pas"]).unwrap();

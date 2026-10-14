@@ -192,6 +192,20 @@ impl<'t> Checker<'t> {
         put(self, "single", Sym::Type(b.real));
         put(self, "double", Sym::Type(b.double));
         put(self, "univ_ptr", Sym::Type(b.univ_ptr));
+        // ref 3.11, p. 3-38: "String is a predefined Domain Pascal array
+        // type. ... string = array[1..80] of CHAR;".
+        let index = self.new_type(TypeKind::Subrange {
+            base: b.integer16,
+            lo: 1,
+            hi: 80,
+        });
+        let string = self.new_type(TypeKind::Array {
+            index,
+            elem: b.char,
+            packed: false,
+        });
+        self.types.set_name_if_none(string, "string");
+        put(self, "string", Sym::Type(string));
         put(
             self,
             "true",
@@ -3449,7 +3463,7 @@ impl<'t> Checker<'t> {
                     ParamMode::Var | ParamMode::Out | ParamMode::InOut => {
                         if !x.is_designator() && !self.types.is_error(x.ty) {
                             self.error(a.span, "a variable is needed for this parameter");
-                        } else if !self.same_type(x.ty, ty) {
+                        } else if !self.same_type(x.ty, ty) && !self.univ_ptr_param(x.ty, ty) {
                             self.error(
                                 a.span,
                                 format!(
@@ -3999,6 +4013,17 @@ impl<'t> Checker<'t> {
             }
             _ => false,
         }
+    }
+
+    /// A pointer argument for a `var`, `out` or `in out` parameter of
+    /// another pointer type, one of the two being `univ_ptr`: ref 3.13.2,
+    /// p. 3-50, a `univ_ptr` may be used as a "Formal or actual parameter
+    /// for any pointer type" (Apollo's ios.ins.pas `ios_$locate`'s `OUT b:
+    /// univ_ptr` is passed typed pointers, e.g. domain_examples
+    /// enscramble.pas).
+    fn univ_ptr_param(&self, arg: TypeId, param: TypeId) -> bool {
+        let univ = |t: TypeId| matches!(self.types.kind(self.types.canon(t)), TypeKind::UnivPtr);
+        self.types.is_pointer(arg) && self.types.is_pointer(param) && (univ(arg) || univ(param))
     }
 
     /// `nil` and `univ_ptr` are compatible with every pointer (ref 3.13.2

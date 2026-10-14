@@ -462,6 +462,77 @@ end;
     );
 }
 
+#[test]
+fn unknown_result_conventions_are_refused_when_used() {
+    // codegen-patterns 3: how sets, records and reals are returned is not
+    // known.  `dpc-sema` accepts the declarations (Apollo's inserts have
+    // them, bead domain-pascal-qia); a definition and a call are refused
+    // here, and an unused extern declaration is not.
+    lower_src("module m; type s = set of 0..7; function f: s; extern; function g: real; extern;")
+        .unwrap();
+    let e = errs(
+        "module m;
+type s = set of 0..7;
+function f: s;
+begin
+  f := [1];
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec!["t.pas:3:1: error: functions returning s are not supported yet (codegen-patterns 3: result convention unknown)"]
+    );
+    let e = errs(
+        "module m;
+type s = set of 0..7;
+function f: s; extern;
+procedure p;
+var x: s;
+begin
+  x := f;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec!["t.pas:7:8: error: functions returning s are not supported yet (codegen-patterns 3: result convention unknown)"]
+    );
+    // ... and through a routine pointer.
+    let e = errs(
+        "module m;
+type s = set of 0..7;
+  fp = ^function: s;
+procedure p(q: fp);
+var x: s;
+begin
+  x := q^;
+end;
+",
+    );
+    assert_eq!(
+        e,
+        vec!["t.pas:7:8: error: functions returning s are not supported yet (codegen-patterns 3: result convention unknown)"]
+    );
+    // A discarded result is refused too: a bare call could be wrong code
+    // if such results need caller-provided storage.
+    for (decl, call) in [
+        ("function f: s; extern;", "f"),
+        ("function f: real; extern;", "f"),
+        ("var q: ^function: s;", "q^"),
+    ] {
+        let e = errs(&format!(
+            "module m;\ntype s = set of 0..7;\n{decl}\nprocedure p;\nbegin\n  discard({call});\nend;\n"
+        ));
+        assert_eq!(e.len(), 1, "{decl}: {e:?}");
+        assert!(
+            e[0].starts_with("t.pas:6:11: error: functions returning ")
+                && e[0].contains("result convention unknown"),
+            "{decl}: {e:?}"
+        );
+    }
+}
+
 /// The first `SetResult` value of the module's only function.
 fn result_value(src: &str) -> Expr {
     let m = lower_src(src).unwrap();

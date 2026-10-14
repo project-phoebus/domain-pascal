@@ -4,7 +4,7 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build test exectest conform linktest clean
+.PHONY: all build test exectest corpus conform linktest clean
 
 all: build
 
@@ -15,6 +15,7 @@ test:
 	$(CARGO) test
 	@if [ -d tools/tests ]; then $(PYTHON) -m unittest discover -s tools/tests; fi
 	$(MAKE) exectest
+	$(MAKE) corpus
 
 # Execution tests (tests/exec/README.md): dpc output run on the Musashi
 # 68010 emulator, built from MUSASHI_DIR (default
@@ -23,6 +24,15 @@ test:
 # the m68k-elf tools or arith.s are missing.  Under a second.
 exectest: build
 	$(PYTHON) tools/exectest.py
+
+# Front-end corpus test (bead domain-pascal-qia): dpc --check-only over
+# Apollo's SR10.2 inserts (sys/ins/*.ins.pas) and Pascal programs, from
+# CORPUS_DIR (default ~/src/domainos-archeology/sr10.2-install/install/
+# ri.apollo.os.v.10.2; not part of this repo, not redistributable),
+# compared with tests/corpus/baseline.txt.  Skipped with a notice when the
+# install is missing.  About a second.
+corpus: build
+	$(PYTHON) tools/corpus.py
 
 # Image conformance (CLAUDE.md section 6.3): every unit listed in the
 # manifest is linked at its image address and compared with the image.

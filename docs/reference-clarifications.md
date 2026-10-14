@@ -342,6 +342,10 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     must be a type name, but Apollo's `rws.ins.pas` declares `OUT Status:
     [aligned(1)] Status_$T`.  Did the compiler accept an attribute list on
     a parameter type, and with what meaning?  *Current: refused.*
+    *Evidence note (not an owner ruling; bead domain-pascal-lmw):*
+    Apollo's `error.ins.pas` has the form too, after `UNIV`: "`IN
+    a1,a2,a3,a4,a5,a6,a7,a8,a9,a10:  UNIV [aligned(0)] error_$integer32`",
+    so every program that includes error.ins.pas is refused today.
 24. **3.15.7, p. 3-77 (device inheritance).**  "if you designate any one
     field within a record as having the device attribute, the entire
     record itself inherits the device attribute."  With a `device(read)`
@@ -425,6 +429,85 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     subranges such as `0..100`, and booleans, which the same sentence
     calls unsigned: the image cannot tell which words had such types, so
     the code for them is not settled (bead domain-pascal-4x2).*
+
+Raised by the front-end corpus test (bead domain-pascal-qia,
+`tools/corpus.py`: `dpc --check-only` over Apollo's SR10.2 inserts and
+example programs, `~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/`).
+Each is refused today; the corpus baseline (`tests/corpus/baseline.txt`)
+records the files it stops.
+
+33. **7.2.2, p. 7-5 (PDF p. 430, checked; the OCR scrambles the
+    syntax).**  "The define statement takes the following syntax: define
+    variable1 [:= initial_value1]; ... [variableN [:= initial_valueN];]":
+    one name per `;`.  Apollo's examples write lists:
+    `domain_examples/streams/sasc/io.pas` "`DEFINE` / `sasc_$get,` /
+    `sasc_$locate,` ...", also `imex.pas`, `misc.pas`, `open.pas`,
+    `seek.pas`, `hardcopy/driver/driver_ex.pas` ("`DEFINE` /
+    `my_driver_$init,` / `my_driver_$render,` ..."), `filter_ex.pas`.  Is
+    a comma-separated list accepted in a define statement, meaning one
+    item per name?  May listed names carry `:= initial_value`?  *Current:
+    a parse error (bead domain-pascal-hsb).*
+34. **5.1, p. 5-3 (PDF p. 358, checked).**  "To call a routine, simply
+    specify its name. If the procedure has a parameter list, you must also
+    specify arguments."  Apollo's examples call parameterless routines
+    with empty parentheses: `usr/X11/examples/pascal/xhw1.pas`
+    "`pgm_$exit( );`", `domain_examples/hardcopy/driver/driver_ex.pas`
+    "`ext_db := alloc_db();`".  Is `name()` accepted as a call (statement
+    and expression) of a routine with no parameters?  *Current: a parse
+    error (bead domain-pascal-9iq).*
+35. **"Addressing Procedure and Function Pointers", p. 4-146 (PDF p. 279,
+    checked).**  "the declaration for proc2 must exactly match the
+    template for the procedure type of pptr. If not, the compiler reports
+    an error."  Apollo's type-manager examples assign routines whose
+    handle parameter is a typed pointer to EPV fields whose template has
+    `univ_ptr`: `domain_examples/streams/sasc/init.pas` "`open :=
+    addr(sasc_$open),`", where `sasc.ins.pas` declares "`PROCEDURE
+    sasc_$open( IN xoid: xoid_$t; IN opts: ios_$open_options_t; OUT h:
+    sasc_handle_ptr_t; OUT st: status_$t); EXTERN;`" and `io_traits.ins.pas`
+    the field "`open: ^PROCEDURE( IN xoid: xoid_$t; IN opts:
+    ios_$open_options_t; OUT h: univ_ptr; OUT S: status_$t );`" (also
+    `scramble.pas`, `recno.pas`).  Does a parameter of a pointer type
+    match a `univ_ptr` parameter of the template (3.13.2, p. 3-50: univ_ptr
+    as a "Formal or actual parameter for any pointer type"), in either
+    direction, and for every mode?  *Current: refused, "does not match the
+    routine pointer type" (bead domain-pascal-ble).*
+36. **3.13.4, p. 3-51.**  "Domain Pascal permits you to initialize the
+    values of pointer variables within its variable declaration in most
+    cases"; the only example is `NIL`.  Apollo's examples initialise
+    routine-pointer fields of module-level records with `addr`:
+    `domain_examples/hardcopy/driver/driver_init_ex.pas` "`init :=
+    addr(my_driver_$init),`" (also `filter_init_ex.pas`, `recno.pas`,
+    `scramble.pas`).  Is `addr(routine)` (or `addr(variable)`) allowed as
+    an initial value?  *Current: refused, "initial value must be a
+    constant" (bead domain-pascal-bjz).*
+37. **"Type Transfer Functions", p. 4-197.**  "With one exception, the
+    size of the argument must be the same as the size of the destination
+    type. ... The one exception is that integer subranges are always
+    compatible regardless of their sizes."  Apollo's `sys/ins/kbd.ins.pas`
+    has "`KBD_$NUMERIC_KEYPAD = char(16#9E);    {KEYPAD introducer}`" and
+    four more such constants (`sys/source/emt/emt.pas` too).  An integer
+    constant is 2 bytes and `char` 1.  Is `char(k)` of an integer
+    constant legal (with the value `chr(k)`), and for which `k`?
+    *Current: refused, "type transfer needs equal sizes" (bead
+    domain-pascal-qvy).*
+38. **Messages 83 and 84, p. 9-16 (PDF p. 497); 5.1, p. 5-3.**  "Argument
+    n to routine is not compatible with the declared argument type." /
+    "Argument n to routine is not within the declared argument subrange."
+    / "The data type of each argument must match the data type of its
+    corresponding parameter."  Apollo's code passes subranges and their
+    base types to each other's `var`/`out` parameters:
+    `sys/source/emt/emt.pas` an `integer32` variable to a `linteger`
+    (`base.ins.pas` "`linteger= 0..2147483647;`") parameter and a
+    `pinteger` to an `integer16` one; `usr/X11/examples/dmwin/dmwin.pas`
+    `ios_$id_t` (`0..ios_$max`, `ios_$max = 127`) variables to the
+    `integer16`-typed `OUT` parameter of `pad_$create_window`.  It also
+    assigns a constant outside a subrange: dmwin.pas "`connv[ios_$stderr]
+    := ios_$no_stream;`" with `ios_$no_stream = 16#7FFF` and `connv` an
+    array of `ios_$id_t`.  For `var`/`out`/`in out` parameters, are a
+    subrange and its base type (or two subranges of one base type)
+    compatible?  Is an out-of-range constant assigned to a subrange an
+    error, a warning, or accepted?  *Current: both refused (bead
+    domain-pascal-4tm).*
 
 ## Reference errata noticed (no ruling needed)
 
