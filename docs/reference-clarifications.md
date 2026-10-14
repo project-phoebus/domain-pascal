@@ -42,7 +42,7 @@ Passage: "_BFMT__COFF ... set to true whenever the compiler is generating COFF";
 Question: do the SR10 compilers also predeclare `isp_$m68k` / `isp_$a88k` and `obj_$coff`?
 Owner's answer: "yes. isp_$m68k and isp_$a88k are target-specific and pre-declared. obj_$coff I'm not sure about, but let's use it."  Follow-up: "also list `obj_$bin`, which is the pre-domainos binary type."
 Consequence: dpc predeclares `isp_$m68k` (true) and `isp_$a88k` (false) like `_ISP__M68K`/`_ISP__A88K`, `obj_$coff` (true, provisionally: the owner is not sure the compiler predeclared it) like `_BFMT__COFF`, and `obj_$bin` (false: the pre-Domain/OS object format, which dpc does not generate); Apollo's base.ins.pas then takes its SR10 branches.  Implementation: bead domain-pascal-mhg (crates/dpc-syntax/src/preprocess.rs).
-Implemented (domain-pascal-mhg): the list is target-specific, so `dpc_target::Target::predeclared_cond_vars` supplies it (`dpc_m68k::M68k`: `_ISP__M68K`, `isp_$m68k`, `_BFMT__COFF`, `obj_$coff` true; `_ISP__A88K`, `isp_$a88k`, `obj_$bin` false) and the driver passes it to the preprocessor in `preprocess::Options::predeclared`; the preprocessor has no built-in list.  `%enable` and `-config` of any of them are errors (p. 4-48), and so is `%var` (already declared, p. 4-49).  `%ifdef` of any of them is true, since `%ifdef` tests "declared with %var", not true (p. 4-49): so `%IFDEF obj_$bin` is true while `%IF obj_$bin` is false.  With this, `dpc --check-only` over a copy of SR10.2 base.ins.pas preprocesses cleanly and takes the SR10 m68k branches; the remaining errors are semantic (the `[aligned(1)]` and `[volatile]` attributes, not supported yet).
+Implemented (domain-pascal-mhg): the list is target-specific, so `dpc_target::Target::predeclared_cond_vars` supplies it (`dpc_m68k::M68k`: `_ISP__M68K`, `isp_$m68k`, `_BFMT__COFF`, `obj_$coff` true; `_ISP__A88K`, `isp_$a88k`, `obj_$bin` false) and the driver passes it to the preprocessor in `preprocess::Options::predeclared`; the preprocessor has no built-in list.  `%enable` and `-config` of any of them are errors (p. 4-48), and so is `%var` (already declared, p. 4-49).  `%ifdef` of any of them is true, since `%ifdef` tests "declared with %var", not true (p. 4-49): so `%IFDEF obj_$bin` is true while `%IF obj_$bin` is false.  With this, `dpc --check-only` over a copy of SR10.2 base.ins.pas preprocesses cleanly and takes the SR10 m68k branches; the remaining errors are semantic (the `[aligned(1)]` and `[volatile]` attributes, not supported yet).  Since domain-pascal-l9p/-t36 (alignment and `volatile`/`atomic`/`device` attributes) it checks clean (codegen-patterns 5.4).
 
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
@@ -323,6 +323,38 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     ordinal 0 is refused (`crates/dpc-sema/src/types.rs`,
     `packed_field_bits`; test `packed_sets_not_from_zero_are_refused`).
     No such field has been found in the SR10.2 inserts.*
+
+23. **5.1, p. 5-2 (attributes on parameter types).**  A parameter's type
+    must be a type name, but Apollo's `rws.ins.pas` declares `OUT Status:
+    [aligned(1)] Status_$T`.  Did the compiler accept an attribute list on
+    a parameter type, and with what meaning?  *Current: refused.*
+24. **3.15.7, p. 3-77 (device inheritance).**  "if you designate any one
+    field within a record as having the device attribute, the entire
+    record itself inherits the device attribute."  With a `device(read)`
+    field, do the record's other fields become device and read-only?
+    *Current: the whole record is `device(read)`, so writing a plain
+    sibling field is an error.*
+25. **3.15.6.3 / 3.15.6.6, pp. 3-70, 3-74 (byte-aligned words on m68k).**
+    For `b, c: [ALIGNED(0)] integer16` at odd offsets (Figure 3-24), what
+    did the 68000-family compiler emit?  Split references are described
+    as "Series 10000 Only".  *Current: an odd-address word/long access is
+    refused (the 68010 traps).*
+26. **3.15.3, p. 3-57 (device record assignment).**  Is assigning or
+    pushing a whole 4-byte `[device]` record as one 32-bit reference
+    allowed, or does "The device attribute prevents this optimization"
+    forbid it?  *Current: a 4-byte device record moves as one `move.l`;
+    larger ones are refused.*
+27. **Table 3-6 p. 3-55 / 3.15.2 p. 3-57 (atomic "when possible").**
+    "perform updates with single instruction when possible"; the value is
+    "not changed by other processes while it completes" the assignment.
+    When no single instruction exists (`x := x * 2`), did the compiler
+    bracket the update (disable/enable) or emit a plain sequence?
+    *Current: refused.*
+28. **3.10.5.2 (natural alignment of arrays, sets, varying strings).**
+    Natural alignment is given for simple types and records only.  What
+    applies to arrays, sets and varying strings under
+    `%natural_alignment`?  *Current: such fields without an attribute are
+    refused under the natural rules.*
 
 ## Reference errata noticed (no ruling needed)
 

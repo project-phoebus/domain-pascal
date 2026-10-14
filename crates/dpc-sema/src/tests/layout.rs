@@ -368,13 +368,11 @@ fn route_port_stats_matches_source_static_asserts() {
 
 #[test]
 fn unsupported_layouts_are_diagnosed() {
+    // Under the natural rules an array, set or varying field's alignment
+    // is not stated (ref 3.10.5.2).
     assert_err(
-        "module m; type r = aligned record a: integer end;",
-        "aligned record",
-    );
-    assert_err(
-        "%natural_alignment;\nmodule m; type r = record a: integer end;",
-        "natural_alignment",
+        "module m; type r = aligned record a: char; b: array[1..2] of char end;",
+        "natural alignment rules",
     );
     assert_err(
         "module m; type a = packed array[1..8] of boolean;",

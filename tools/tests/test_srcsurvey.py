@@ -1,6 +1,7 @@
 """Tests for tools/srcsurvey.py (no image, dpc or ../source needed)."""
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -198,21 +199,24 @@ dpc: error: not a diagnostic line
 
 
 class WorkaroundTest(unittest.TestCase):
-    def apply(self, name, text):
-        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
-            if n == name:
-                return srcsurvey.apply_workaround(pat, rep, text)[0]
-        raise KeyError(name)
+    # The rewrite mechanism, with the pattern of the former
+    # `field-aligned' workaround (dpc now takes alignment attributes, bead
+    # domain-pascal-l9p).
+    PAT = re.compile(r'(:\s*)\[\s*aligned(?:\s*\(\s*\d+\s*\))?\s*\]\s*', re.I)
 
-    def test_field_aligned(self):
-        self.assertEqual(self.apply('field-aligned', 'timer: [aligned(1)] linteger;'),
-                         'timer: linteger;')
+    def apply(self, text):
+        return srcsurvey.apply_workaround(self.PAT, r'\1', text)
 
-    def test_packed_records_are_not_rewritten(self):
+    def test_rewrite(self):
+        self.assertEqual(self.apply('timer: [aligned(1)] linteger;')[0], 'timer: linteger;')
+
+    def test_no_attribute_workarounds(self):
         # dpc takes packed records (ref 3.10.7, bead domain-pascal-xlm)
+        # and alignment attributes (ref 3.15.6, bead domain-pascal-l9p)
         names = [n for n, *_ in srcsurvey.WORKAROUNDS]
         self.assertNotIn('packed-record', names)
         self.assertNotIn('packed-overlay', names)
+        self.assertNotIn('field-aligned', names)
 
     def test_comments_and_strings_untouched(self):
         # only the real declaration is rewritten and counted, not the
@@ -220,9 +224,7 @@ class WorkaroundTest(unittest.TestCase):
         src = ("{ customer: timer: [aligned(1)] linteger }\n"
                "(* timer: [aligned(1)] linteger *) \"timer: [aligned(1)]\" s = ': [aligned(1)] ';\n"
                "timer: [aligned(1)] linteger;\n")
-        for n, _what, _suffix, pat, rep in srcsurvey.WORKAROUNDS:
-            if n == 'field-aligned':
-                text, k = srcsurvey.apply_workaround(pat, rep, src)
+        text, k = self.apply(src)
         self.assertEqual(k, 1)
         self.assertEqual(text, src.replace('timer: [aligned(1)] linteger;\n',
                                            'timer: linteger;\n'))

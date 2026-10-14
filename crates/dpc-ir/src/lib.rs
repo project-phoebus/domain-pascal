@@ -946,9 +946,40 @@ pub enum Addr {
         scale: u32,
         offset: i32,
     },
+    /// A reference to a volatile object (ref 3.15.1-3.15.3: an object of
+    /// a `volatile`, `atomic` or `device` type, or a field or element of
+    /// one): the object at `addr`, referenced exactly as written.  The
+    /// target must not reuse a value read from it earlier, keep it in a
+    /// register, forward a stored value, or move references to volatile
+    /// objects past each other; for [`Access::device`] it must not merge
+    /// references nor use instructions that read the object only to write
+    /// it.  Lowering wraps the address of a load, a store or a bit field
+    /// in it, outermost; an address that is only taken (`addr(x)`, an
+    /// argument passed by address) is not wrapped.
+    Volatile { addr: Box<Addr>, access: Access },
+}
+
+/// How a volatile object ([`Addr::Volatile`]) is referenced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Access {
+    /// `device` (ref 3.15.3, p. 3-57): also no merged references and no
+    /// "gratuitous read-modify-write references".
+    pub device: bool,
+    /// `atomic` (ref 3.15.2, p. 3-56; Table 3-6 p. 3-55: "perform updates
+    /// with single instruction when possible").
+    pub atomic: bool,
 }
 
 impl Addr {
+    /// The address without its [`Addr::Volatile`] wrapper, and the
+    /// wrapper's access if there is one.
+    pub fn unwrap_volatile(&self) -> (&Addr, Option<Access>) {
+        match self {
+            Addr::Volatile { addr, access } => (addr, Some(*access)),
+            a => (a, None),
+        }
+    }
+
     /// This address plus `delta` bytes.
     pub fn offset_by(self, delta: i32) -> Addr {
         match self {
@@ -977,6 +1008,10 @@ impl Addr {
                 index,
                 scale,
                 offset: offset + delta,
+            },
+            Addr::Volatile { addr, access } => Addr::Volatile {
+                addr: Box::new(addr.offset_by(delta)),
+                access,
             },
         }
     }

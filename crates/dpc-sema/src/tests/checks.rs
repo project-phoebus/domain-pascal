@@ -981,20 +981,15 @@ end;
 }
 
 /// Ref 3.15.1-3.15.3 (pp. 3-56..3-57): `volatile`, `atomic` and `device`
-/// change the code (no `clr` on a device register: WIN_ 0xE19112,
-/// codegen-patterns 13), so they are rejected rather than dropped.
+/// are accepted by the checker and carried by the type; what they do to
+/// the code is `dpc-ir`'s and the target's (`Addr::Volatile`).
 #[test]
-fn optimisation_attributes_are_rejected() {
+fn optimisation_attributes_are_accepted() {
     for a in ["volatile", "atomic", "device"] {
-        let e = errs(&format!(
+        let p = ok(&format!(
             "module m;\nvar x: extern [{a}] integer;\nprocedure p;\nbegin\n  x := 0;\nend;\n"
         ));
-        assert_eq!(
-            e,
-            vec![format!(
-                "t.pas:2:16: error: the `{a}` attribute (ref 3.15) is not supported yet"
-            )],
-        );
+        assert!(p.types.attrs(var(&p, "x").ty).is_volatile(), "{a}");
     }
 }
 

@@ -38,6 +38,12 @@
 //!   subq.l #2,SP; movea.l (8,A2),A0`) and a nested routine's static link
 //!   `movea.l An,A1` before its `bsr` (all 34 calls that pass one in A1)
 //!   end a run; nothing moves across them.
+//! - volatile references (ref 3.15.1-3.15.3): two instructions that
+//!   reference volatile objects (marked by the selector) keep their
+//!   order, so that every reference is made as written; other loads may
+//!   still pass them (WIN_'s module-local 0xE190C8 reads TIME_$CLOCKH
+//!   among the entry loads; whether the original ordered more is not
+//!   seen).
 //! - units (R10): an unrolled `(An)+` block copy is one node ([`Unit`],
 //!   marked by the selector).  A shift-and-add multiplication is not: the
 //!   ×56 at 0xE1AA50..0xE1AA60 has a `movea.l #` before its last `add`.
@@ -149,6 +155,8 @@ struct Fx {
     /// Ends a run without being part of one: labels, branches, `dbf`,
     /// `case` tables, alignment and data.
     boundary: bool,
+    /// References a volatile object (marked by the selector).
+    volatile: bool,
 }
 
 impl Fx {
@@ -410,7 +418,7 @@ fn alias(a: &Loc, b: &Loc, same_base: bool) -> bool {
 /// through registers or memory.  `between_defs`: the
 /// registers written by the instructions strictly between them.
 fn depends(i: &Fx, j: &Fx, between_defs: RegSet) -> bool {
-    if i.barrier || j.barrier {
+    if i.barrier || j.barrier || (i.volatile && j.volatile) {
         return true;
     }
     if !i.defs.intersection(j.uses).is_empty()
@@ -485,13 +493,20 @@ fn cc_live_out(body: &[Insn]) -> Vec<bool> {
 }
 
 /// Schedule `body` (a routine body after register allocation) under
-/// `policy`.  `units` are ranges of `body` that move as one node.
-pub fn schedule(body: &mut Vec<Insn>, units: &[Unit], policy: Schedule) {
+/// `policy`.  `units` are ranges of `body` that move as one node;
+/// `volatile` the indices of the instructions that reference volatile
+/// objects.
+pub fn schedule(body: &mut Vec<Insn>, units: &[Unit], volatile: &[usize], policy: Schedule) {
     if policy == Schedule::Off {
         return;
     }
     let cc_live = cc_live_out(body);
     let mut fxs: Vec<Fx> = body.iter().map(fx).collect();
+    for &k in volatile {
+        if let Some(f) = fxs.get_mut(k) {
+            f.volatile = true;
+        }
+    }
     // A nested routine's static link, `movea.l An,A1`, stays right before
     // its `bsr` (all 34 calls in the image that pass one in A1, 33 of
     // them `movea.l An,A1`; codegen-patterns 12.4 R10), and a
@@ -607,6 +622,7 @@ fn schedule_run(
             f.stores.extend(x.stores.iter().cloned());
             f.cc_set |= x.cc_set;
             f.cc_use |= x.cc_use;
+            f.volatile |= x.volatile;
         }
         nodes.push(Node {
             first: k,
@@ -740,7 +756,7 @@ mod tests {
     /// indices into `g`.
     fn order(g: &[Insn], units: &[Unit], policy: Schedule) -> Vec<usize> {
         let mut body = g.to_vec();
-        schedule(&mut body, units, policy);
+        schedule(&mut body, units, &[], policy);
         body.iter()
             .map(|x| g.iter().position(|y| y == x).expect("same instructions"))
             .collect()
@@ -995,6 +1011,31 @@ mod tests {
             mv(Size::L, Ea::Disp(-6, 6), dr(1)),
         ];
         assert_eq!(order(&g, &[], R11), vec![0, 1, 2]);
+    }
+
+    /// References to volatile objects keep their order (ref 3.15.1:
+    /// each reference made as written); other loads still pass them.
+    #[test]
+    fn volatile_references_keep_their_order() {
+        // movea; load through A0 (stalls on A0); a second load, which
+        // R11 lists first when nothing orders the two.
+        let g = vec![
+            movea(Ea::Disp(8, 6), 0),
+            mv(Size::W, Ea::Disp(6, 0), dr(1)),
+            mv(Size::L, Ea::AbsL("CLOCK".into(), 0), dr(2)),
+        ];
+        assert_eq!(order(&g, &[], R11), vec![0, 2, 1]);
+        let ordered = |vol: &[usize]| {
+            let mut body = g.clone();
+            schedule(&mut body, &[], vol, R11);
+            body.iter()
+                .map(|x| g.iter().position(|y| y == x).unwrap())
+                .collect::<Vec<_>>()
+        };
+        // Both volatile: as written.
+        assert_eq!(ordered(&[1, 2]), vec![0, 1, 2]);
+        // One volatile: the other load may pass it.
+        assert_eq!(ordered(&[2]), vec![0, 2, 1]);
     }
 
     /// Nothing crosses a call, an SR instruction or the data-base load,
@@ -1558,7 +1599,7 @@ mod tests {
                 Schedule::R11 { window: 2 },
             ] {
                 let mut body = g.clone();
-                schedule(&mut body, &units, p);
+                schedule(&mut body, &units, &[], p);
                 let mut got = Machine::new();
                 for x in &body {
                     got.step(x);

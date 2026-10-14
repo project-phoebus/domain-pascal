@@ -34,6 +34,10 @@ Tests:
   immediates 0..255), 12.2.
 - `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
   one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
+- `stores/volatile` - ref 3.15.1-3.15.3; codegen-patterns 13 (device
+  registers: `move.<s> #0`, `move.b #0xff`, WIN_ 0xE19112, RING
+  0xE758E2), 12.4 R7 (no reuse of a volatile variable's computed
+  value), 12.5 (a volatile local stays in its frame slot).
 - `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
   restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS

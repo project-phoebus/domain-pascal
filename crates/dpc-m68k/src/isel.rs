@@ -22,9 +22,9 @@
 //! image has not shown are rejected, not guessed.
 
 use dpc_ir::{
-    Addr, Arg, BinOp, BitField, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop, Function,
-    LinkArg, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp,
-    Width,
+    Access, Addr, Arg, BinOp, BitField, Call, Callee, CaseArm, Cond as IrCond, Expr, ForLoop,
+    Function, LinkArg, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt,
+    StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
 
@@ -416,6 +416,10 @@ fn select_body_with(
             ));
         }
     }
+    // References to volatile objects (ref 3.15.1-3.15.3): the
+    // instructions that reference one, kept in order by the scheduler;
+    // none of them a read-modify-write of a device object.
+    let volatile_insns = volatile_references(&s.out, &s.volatile_eas, f.span)?;
     // Phase 1b: physical registers (`regs.rs`, codegen-patterns 12.4).
     let exit: &[Reg] = match f.result {
         Some(ResultSpec {
@@ -598,6 +602,7 @@ fn select_body_with(
         .map(|&(a, b)| (new_index[a], new_index[b]))
         .filter(|(a, b)| b - a > 1)
         .collect();
+    let mut volatile_insns: Vec<usize> = volatile_insns.iter().map(|&k| new_index[k]).collect();
     let mut out: Vec<Insn> = s
         .out
         .into_iter()
@@ -643,9 +648,16 @@ fn select_body_with(
         }
         let mv = out.remove(m);
         out.insert(b - 1, mv);
+        for k in volatile_insns.iter_mut() {
+            if *k == m {
+                *k = b - 1;
+            } else if m < *k && *k < b {
+                *k -= 1;
+            }
+        }
     }
     // Phase 1c: the order inside basic blocks (`sched.rs`).
-    crate::sched::schedule(&mut out, &units, sched);
+    crate::sched::schedule(&mut out, &units, &volatile_insns, sched);
     Ok(Selected::Body(
         Body {
             insns: out,
@@ -653,6 +665,84 @@ fn select_body_with(
         },
         s.cse_hits,
     ))
+}
+
+/// The memory operands instruction `i` reads or writes (not those whose
+/// address only it takes: `pea`, `lea`, `jsr`).
+fn memory_operands(i: &Insn) -> Vec<&Ea> {
+    let v: Vec<&Ea> = match i {
+        Insn::Move { src, dst, .. } => vec![src, dst],
+        Insn::Movea { src, .. }
+        | Insn::Cmp { src, .. }
+        | Insn::Alu { src, .. }
+        | Insn::Mul { src, .. }
+        | Insn::Div { src, .. } => vec![src],
+        Insn::Addq { dst, .. }
+        | Insn::Subq { dst, .. }
+        | Insn::Clr { dst, .. }
+        | Insn::Btst { dst, .. }
+        | Insn::Scc { dst, .. }
+        | Insn::Tst { dst, .. }
+        | Insn::Cmpi { dst, .. }
+        | Insn::AluImm { dst, .. }
+        | Insn::Unary { dst, .. }
+        | Insn::BtstImm { dst, .. }
+        | Insn::BitImm { dst, .. }
+        | Insn::Bit { dst, .. }
+        | Insn::AluToMem { dst, .. } => vec![dst],
+        _ => vec![],
+    };
+    v.into_iter()
+        .filter(|e| !matches!(e, Ea::Reg(_) | Ea::Imm(_) | Ea::ImmSym(_)))
+        .collect()
+}
+
+/// The memory operand instruction `i` reads before it writes it: the
+/// read-modify-write instructions, and `clr` and `s<cc>`, which on the
+/// MC68000/68010 read their operand before writing it (MC68000 PRM).
+fn read_modify_write_operand(i: &Insn) -> Option<&Ea> {
+    let dst = match i {
+        Insn::Addq { dst, .. }
+        | Insn::Subq { dst, .. }
+        | Insn::Clr { dst, .. }
+        | Insn::Scc { dst, .. }
+        | Insn::AluImm { dst, .. }
+        | Insn::Unary { dst, .. }
+        | Insn::BitImm { dst, .. }
+        | Insn::Bit { dst, .. }
+        | Insn::AluToMem { dst, .. } => dst,
+        _ => return None,
+    };
+    (!matches!(dst, Ea::Reg(_))).then_some(dst)
+}
+
+/// The indices in `out` of the instructions that reference a volatile
+/// object (`eas`, the operands [`Selector::ea_of`] gave for
+/// [`Addr::Volatile`] addresses; virtual registers name one value each,
+/// so an operand names one object).  A read-modify-write instruction on
+/// a device object is refused (ref 3.15.3 p. 3-57, "the compiler [avoids]
+/// using instructions that do unnecessary reads"; codegen-patterns 13):
+/// the selector does not choose one for a device ([`Selector::store`]), so
+/// one here comes from a form it has no device variant of.
+fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Vec<usize>> {
+    let mut v = Vec::new();
+    for (k, i) in out.iter().enumerate() {
+        if let Some(d) = read_modify_write_operand(i) {
+            if eas.iter().any(|(e, a)| a.device && e == d) {
+                return Err(unsupported(
+                    span,
+                    "a read-modify-write instruction on a device object (ref 3.15.3) is",
+                ));
+            }
+        }
+        if memory_operands(i)
+            .iter()
+            .any(|m| eas.iter().any(|(e, _)| e == *m))
+        {
+            v.push(k);
+        }
+    }
+    Ok(v)
 }
 
 /// The values to hold live through a call (codegen-patterns 12.4 R4(c)),
@@ -1135,6 +1225,7 @@ fn register_locals(f: &Function) -> Vec<i32> {
                     }
                 }
                 Addr::Enclosing(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
+                Addr::Volatile { addr, .. } => self.other(addr),
                 Addr::Indirect { base, .. } => match &**base {
                     // A local dereferenced as a pointer: not a data value.
                     Expr::Load { addr, .. } => self.other(addr),
@@ -1348,6 +1439,7 @@ fn walk_addr<'a>(a: &'a Addr, v: &mut dyn FnMut(Node<'a>)) {
         | Addr::Static(_)
         | Addr::Symbol { .. }
         | Addr::Const(_) => {}
+        Addr::Volatile { addr, .. } => walk_addr(addr, v),
         Addr::Indirect { base, .. } => walk_expr(base, v),
         Addr::Index { base, index, .. } => {
             walk_addr(base, v);
@@ -1517,6 +1609,7 @@ fn store_may_write(w: &Addr, wbytes: u32, l: &Addr, lbytes: u32, escaped: bool) 
             Addr::Indirect { .. } => (Root::Pointer, true),
             Addr::Const(_) => (Root::Const, true),
             Addr::Index { base, .. } => (root(base).0, false),
+            Addr::Volatile { addr, .. } => root(addr),
         }
     }
     let overlap = |a: i32, b: i32| a < b + lbytes as i32 && b < a + wbytes as i32;
@@ -1558,7 +1651,7 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
     fn root(a: &Addr) -> Option<i32> {
         match a {
             Addr::Frame(o) => Some(*o),
-            Addr::Index { base, .. } => root(base),
+            Addr::Index { base, .. } | Addr::Volatile { addr: base, .. } => root(base),
             // Another frame (the enclosing routine's objects are never
             // held in a register, [`Function::uplevel_refs`]), the unit's
             // data, or the object a pointer points to.
@@ -1587,6 +1680,18 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
         Node::Expr(_) | Node::Addr(_) => {}
     });
     out
+}
+
+/// Whether `e` reads the object at `a` (the same address, wrapper
+/// included).
+fn expr_reads_addr(e: &Expr, a: &Addr) -> bool {
+    let mut hit = false;
+    walk_expr(e, &mut |n| {
+        if let Node::Expr(Expr::Load { addr, .. } | Expr::Bits { addr, .. }) = n {
+            hit |= addr == a;
+        }
+    });
+    hit
 }
 
 /// Whether `e` reads the frame object at `off` as a value.
@@ -2403,6 +2508,7 @@ fn addr_has_call(a: &Addr) -> bool {
         | Addr::Static(_)
         | Addr::Symbol { .. }
         | Addr::Const(_) => false,
+        Addr::Volatile { addr, .. } => addr_has_call(addr),
         Addr::Indirect { base, .. } => expr_has_call(base),
         Addr::Index { base, index, .. } => addr_has_call(base) || expr_has_call(index),
     }
@@ -2486,6 +2592,41 @@ fn reject_mergeable_stores(body: &[Stmt]) -> Res<()> {
     Ok(())
 }
 
+/// The frame offset of the parameter (a by-value pointer or a by-address
+/// slot, `o > 0`) that `addr` dereferences, when `addr` is a reference to
+/// a device object through it ([`Addr::Volatile`], [`Access::device`]).
+///
+/// Such a pointer is read from the frame for each reference, into the
+/// lowest free register, rather than loaded at entry and held: the
+/// module-local 0xE0A328 (DMA_; `dma/init_m68450_channel.c`) reloads
+/// `movea.l (8,A6),A0` before each of its five stores to the M68450
+/// channel's registers (0xE0A330..0xE0A35A), while it loads its other
+/// parameter, a word, at entry (`move.w (0xc,A6),D0`), and the image's
+/// other by-address slots used more than once are loaded at entry
+/// (codegen-patterns 12.2).  How its parameter was declared is not known;
+/// this is the device reading (ref 3.15.3: references to a device are
+/// made as written).  A pointer local is not affected: WIN_'s
+/// module-local 0xE190BC keeps the register block's address in A0 for all
+/// its references (0xE190EC..0xE19112).
+fn device_param_base(addr: &Addr) -> Option<i32> {
+    let Addr::Volatile { addr, access } = addr else {
+        return None;
+    };
+    if !access.device {
+        return None;
+    }
+    match &**addr {
+        Addr::Indirect { base, .. } => match &**base {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if *o > 0 => Some(*o),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The base of `addr` (with offset 0) and the offset.
 fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
     match addr {
@@ -2510,6 +2651,12 @@ fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
         // Two elements of one array at run-time indices: adjacency is not
         // known at compile time.
         Addr::Index { .. } => None,
+        // ref 3.15.3 p. 3-57: the device attribute "prevents this
+        // optimization" (merging adjacent references), so two device
+        // stores are not candidates.  A volatile one still is (3.15.1
+        // names no such rule).
+        Addr::Volatile { access, .. } if access.device => None,
+        Addr::Volatile { addr, .. } => split_addr(addr),
     }
 }
 
@@ -2600,6 +2747,14 @@ impl Uses<'_> {
             Addr::Index { base, index, .. } => {
                 self.address(base);
                 self.expr(index);
+            }
+            // A parameter that is the pointer to a device object is read
+            // from the frame at each reference, not loaded at entry
+            // ([`device_param_base`]; module-local 0xE0A328).
+            a @ Addr::Volatile { addr, .. } => {
+                if device_param_base(a).is_none() {
+                    self.address(addr)
+                }
             }
             Addr::Frame(_)
             | Addr::Enclosing(_)
@@ -2882,6 +3037,9 @@ pub struct Selector {
     stored: Vec<(i32, Size, Reg, usize)>,
     /// [`escaped_frame_objects`] of the routine.
     escaped: Vec<i32>,
+    /// The operands of the references to volatile objects selected so far
+    /// ([`Addr::Volatile`]), over virtual registers, with their access.
+    volatile_eas: Vec<(Ea, Access)>,
     /// Where [`Self::eval_a`] gave A0 as the base of a pointer local
     /// ([`Self::a0_holds`]): the index in `out` then, checked once the
     /// body is selected (no write of A0 before the base's use).
@@ -3041,6 +3199,7 @@ impl Selector {
             entry_regs: Vec::new(),
             stored: Vec::new(),
             escaped: Vec::new(),
+            volatile_eas: Vec::new(),
             a0_bases: Vec::new(),
             cse_plan: CsePlan::Probe,
             cse: Vec::new(),
@@ -4371,6 +4530,12 @@ impl Selector {
     /// codegen-patterns 7.1), so that shape is refused rather than
     /// extended from the seen ones.
     fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
+        if self.volatile_eas.iter().any(|(v, _)| *v == ea) {
+            // A volatile object is read again, whatever the last store
+            // left in the flags (ref 3.15.1).
+            self.out.push(Insn::Tst { size, dst: ea });
+            return Ok(());
+        }
         if let (
             Ea::Disp(k, FP),
             Some(Insn::Move {
@@ -4666,10 +4831,11 @@ impl Selector {
     /// - NAME_CONVERT_ACL_STATUS 0xE58620 (six uses), PEB_$TEST_PARITY_ERR
     ///   0xE12000.
     ///
-    /// Not so DMA_$INIT_M68450_CHANNEL 0xE0A328, which reloads its slot
-    /// before each of five stores; they are device-register stores
-    /// (`dma/init_m68450_channel.c`), and `dpc-sema` rejects the `device`
-    /// attribute (codegen-patterns 13).  A slot used once is loaded where
+    /// Not so DMA_$INIT_M68450_CHANNEL 0xE0A328, which reloads its
+    /// pointer before each of five stores; they are device-register
+    /// stores (`dma/init_m68450_channel.c`), and a parameter that is the
+    /// base of device references is not loaded at entry
+    /// ([`device_param_base`]; codegen-patterns 5.5).  A slot used once is loaded where
     /// it is needed, into a register no earlier statement left a value in
     /// (IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL
     /// 0xE41D82; [`fresh_slot_loads`]); after a branch or a call, see
@@ -5073,9 +5239,9 @@ impl Selector {
     ///   GO register per `win/wait_for_controller.c`; RING 0xE758E2), which
     ///   fits ref 3.15.3 (p. 3-57): the `device` attribute stops "gratuitous
     ///   read-modify-write references", and `clr` reads its operand on the
-    ///   68000.  How those objects were declared is not known; `dpc-sema`
-    ///   rejects `device`, `volatile` and `atomic` (ref 3.15), so no
-    ///   store reaching here is to such an object.
+    ///   68000.  How those objects were declared is not known; a store to
+    ///   a `device` object ([`Addr::Volatile`]) takes `move.<s> #0`, and
+    ///   `move.b #0xff` for `true` (codegen-patterns 5.5).
     /// - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st
     ///   (0xe0,A5)`, a boolean field per `smd/smd_internal.h`).
     /// - another constant: `move.<s> #n,<ea>` (module-local 0xE0A328 at
@@ -5095,8 +5261,38 @@ impl Selector {
     fn store(&mut self, addr: &Addr, value: &Expr) -> Res<()> {
         let ty = value.ty();
         let size = size_of(ty.width);
-        if matches!(addr, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
+        let (plain, access) = addr.unwrap_volatile();
+        if matches!(plain, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
+        }
+        let device = access.is_some_and(|a| a.device);
+        if access.is_some_and(|a| a.atomic) {
+            // ref 3.15.2 p. 3-57: an assignment to an atomic variable
+            // whose right side contains it is handled so that "the value
+            // of x is not changed by other processes while it completes"
+            // it; Table 3-6 p. 3-55: "perform updates with single
+            // instruction when possible".  The single instruction is the
+            // in-place update (`addq`, `addi`, `subi`, `andi`, `ori` to
+            // memory); what the compiler did when there is none is not
+            // known, nor how `device` combines with it (no image site
+            // known).
+            if expr_reads_addr(value, addr) {
+                if device {
+                    return Err(unsupported(
+                        self.span,
+                        "updating an atomic device object (one instruction, ref 3.15.2, or no \
+                         read-modify-write, ref 3.15.3) is",
+                    ));
+                }
+                if self.update_in_place(addr, value)? {
+                    return Ok(());
+                }
+                return Err(unsupported(
+                    self.span,
+                    "an update of an atomic variable that is not one instruction (`x := x + c`, \
+                     `-`, `&`, `!` with a constant; ref 3.15.2) is",
+                ));
+            }
         }
         if let Addr::Frame(o) = addr {
             if let Some(k) = self.parked.iter().position(|p| p.off == *o) {
@@ -5180,7 +5376,13 @@ impl Selector {
                 return Ok(());
             }
         }
-        if self.set_update(addr, value)? {
+        // A device object is not updated in place: ref 3.15.3 p. 3-57,
+        // "specifying a variable as device causes the compiler to avoid
+        // using instructions that do unnecessary reads" (`bset`/`bclr`,
+        // `addq`, `ori` ... on memory read it first).  The value is
+        // computed in a register and stored (Uncertain: no image site of
+        // an update of a device register is catalogued).
+        if !device && self.set_update(addr, value)? {
             return Ok(());
         }
         if let Expr::SetOf { .. } = value {
@@ -5195,7 +5397,7 @@ impl Selector {
                  codegen-patterns 5.1) is",
             ));
         }
-        if self.update_in_place(addr, value)? {
+        if !device && self.update_in_place(addr, value)? {
             return Ok(());
         }
         if self.addr_needs_reg(addr) && self.value_needs_reg(value) {
@@ -5210,6 +5412,18 @@ impl Selector {
             Ea(Ea),
         }
         let src = match value {
+            // A device object is cleared with `move.<s> #0`, not `clr`,
+            // which reads its operand on the 68000/68010 (MC68000 PRM; ref
+            // 3.15.3 p. 3-57, no "gratuitous read-modify-write
+            // references"): WIN_ 0xE19112 `move.b #0,(14,A0)`, RING
+            // 0xE758E2 `move.b #0,(0x29,A0)`, 0xE758F2, the M68450
+            // registers of 0xE0A328 (codegen-patterns 13).  `st` (`Scc`
+            // reads its operand too) likewise becomes `move.b #0xff`
+            // (0xE0A33E `move.b #-1,(A0)`, `10bc 00ff`).
+            Expr::Const { value: 0, ty } if device => Src::Ea(Ea::Imm(imm(0, ty.width))),
+            Expr::Const { value: -1, ty } if device && *ty == Scalar::BOOLEAN => {
+                Src::Ea(Ea::Imm(imm(-1, ty.width)))
+            }
             Expr::Const { value: 0, .. } => Src::Zero,
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => Src::True,
             Expr::Const { value, ty } => Src::Ea(Ea::Imm(imm(*value, ty.width))),
@@ -5226,6 +5440,23 @@ impl Selector {
                 }
             },
             Expr::Load { addr: a, .. } => Src::Ea(self.ea_of(a)?),
+            // The low bytes of a parameter loaded at entry: stored from
+            // its register (module-local 0xE0A328 at 0xE0A35A `move.b
+            // D0,(0x2d,A0)`, the word loaded into D0 at 0xE0A32C).
+            Expr::Convert { value: x, ty: t }
+                if t.width.bytes() < x.ty().width.bytes()
+                    && matches!(&**x, Expr::Load { addr: Addr::Frame(o), .. }
+                        if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
+            {
+                let Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } = &**x
+                else {
+                    unreachable!()
+                };
+                Src::Ea(Ea::Reg(self.pinned(*o).unwrap()))
+            }
             // The address of another unit's object or of a routine, as an
             // immediate: `move.l #sym,<dst>` (ACL_ 0xE465C6 `move.l
             // #UID_$NIL,(-136,A6)`; MAC_OS 0xE0B9A8 `move.l
@@ -5645,6 +5876,9 @@ impl Selector {
                 &**base,
                 Expr::Load { addr: Addr::Frame(o), .. } if self.pinned(*o).is_some()
             ),
+            a @ Addr::Volatile { addr, .. } => {
+                device_param_base(a).is_some() || self.addr_needs_reg(addr)
+            }
         }
     }
 
@@ -5653,6 +5887,17 @@ impl Selector {
         match value {
             Expr::Const { .. } | Expr::AddrOf(Addr::Symbol { offset: 0, .. }) => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
+            // The low bytes of a parameter loaded at entry into a data
+            // register: stored from that register (module-local 0xE0A328
+            // at 0xE0A35A `move.b D0,(0x2d,A0)`, a word loaded at entry
+            // into D0 by 0xE0A32C).
+            Expr::Convert { value: x, ty }
+                if ty.width.bytes() < x.ty().width.bytes()
+                    && matches!(&**x, Expr::Load { addr: Addr::Frame(o), .. }
+                        if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
+            {
+                false
+            }
             Expr::SetMember { .. }
             | Expr::SetMemberAt { .. }
             | Expr::SetOp { .. }
@@ -6831,7 +7076,7 @@ impl Selector {
             BinOp::Or => AluOp::Or,
             _ => return Ok(false),
         };
-        if matches!(addr, Addr::Index { .. }) {
+        if matches!(addr.unwrap_volatile().0, Addr::Index { .. }) {
             return Err(unsupported(
                 self.span,
                 "updating an array element in place (`addq` to the element or a load, \
@@ -9516,6 +9761,55 @@ impl Selector {
                 scale,
                 offset,
             } => self.index_ea(base, index, *scale, *offset),
+            // A reference to a volatile object: its address as usual,
+            // recorded so that the instruction that references it is not
+            // moved past another volatile reference (`sched.rs`), its
+            // value not taken from a store's flags ([`Self::tst`]), and,
+            // for a device, not referenced by a read-modify-write
+            // instruction ([`Self::check_device_references`]).
+            a @ Addr::Volatile { addr, access } => {
+                let ea = match device_param_base(a) {
+                    Some(o) => {
+                        if self.pinned(o).is_some() {
+                            return Err(unsupported(
+                                self.span,
+                                "a parameter that is both the pointer to a device object and \
+                                 otherwise used (reloaded for each device reference at \
+                                 0xE0A328; not seen together) is",
+                            ));
+                        }
+                        let Addr::Indirect { offset, .. } = &**addr else {
+                            unreachable!("device_param_base is a dereference")
+                        };
+                        if !(-0x8000..0x8000).contains(offset) {
+                            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+                        }
+                        let r = self.alloc_a()?;
+                        self.out.push(Insn::Movea {
+                            size: Size::L,
+                            src: Ea::Disp(o, FP),
+                            dst: r,
+                        });
+                        if *offset == 0 {
+                            Ea::Ind(r)
+                        } else {
+                            Ea::Disp(*offset, r)
+                        }
+                    }
+                    None => self.ea_of(addr)?,
+                };
+                if matches!(ea, Ea::Reg(_)) {
+                    // Not expected (volatile locals and parameters are not
+                    // register candidates), but refused rather than
+                    // compiled with the object held in a register.
+                    return Err(unsupported(
+                        self.span,
+                        "a volatile object held in a register (ref 3.15.1) is",
+                    ));
+                }
+                self.volatile_eas.push((ea.clone(), *access));
+                Ok(ea)
+            }
             // Through a pointer: `(d,An)` (0xE148D8), `(An)` when d = 0
             // (LOG_$READ 0xE17814 `move.w (A0),-(SP)`).
             Addr::Indirect { base, offset } => {

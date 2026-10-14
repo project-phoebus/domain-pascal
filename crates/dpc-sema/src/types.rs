@@ -15,11 +15,16 @@
 //!   field of an unpacked record in the default (word) alignment
 //!   environment, ref 3.10.5.3 Table 3-2 p. 3-24 and 3.10.5.5 p. 3-26.
 //!
-//! Only the default word-alignment environment is implemented.  Natural
-//! alignment (`%natural_alignment`, `aligned record`, the `natural` /
-//! `aligned(n)` attributes, ref 3.10.6 and 3.15.6) is rejected by the
-//! checker for now.  Packed records follow ref 3.10.7 (see
+//! Records are laid out in the word-alignment environment (the default,
+//! ref 4.7 p. 4-57) or the natural one (`%natural_alignment`, `aligned
+//! record`, ref 3.10.6), with the alignment attributes `aligned(n)` and
+//! `natural` (ref 3.15.6) overriding either ([`TypeTable::layout_fields`],
+//! [`TypeTable::attributed`]).  Packed records follow ref 3.10.7 (see
 //! [`TypeTable::packed_field_bits`] and [`TypeTable::layout_packed_fields`]).
+//!
+//! Attributes (ref 3.15) make a new type ([`TypeTable::attributed`]) that
+//! is the same type as the one it is made from for compatibility
+//! ([`TypeInfo::canon`]) and carries [`TypeAttrs`].
 
 use std::fmt;
 
@@ -136,6 +141,11 @@ pub struct RecordType {
     pub variant: Option<Box<VariantPart>>,
     /// `packed record` (ref 3.10.3, 3.10.7): every field has [`Field::bits`].
     pub packed: bool,
+    /// Laid out by the natural alignment rules: declared under
+    /// `%natural_alignment` (ref 4.7 p. 4-57, 3.15.6.3 p. 3-70) or as an
+    /// `aligned record` (ref 3.10.6 p. 3-33).  Otherwise the word
+    /// alignment rules (the default, and `unaligned record`, p. 3-34).
+    pub natural: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -264,6 +274,44 @@ impl RecordType {
     }
 }
 
+/// The attributes of a type (ref 3.15 pp. 3-53..3-77).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypeAttrs {
+    /// `volatile` (ref 3.15.1 p. 3-56), also implied by `atomic` and
+    /// `device`: every reference is made as written.
+    pub volatile: bool,
+    /// `atomic` (ref 3.15.2 p. 3-56): "Implies volatile.  Also perform
+    /// updates with single instruction when possible" (Table 3-6).
+    pub atomic: bool,
+    /// `device`, `device(read)`, `device(write)` (ref 3.15.3 pp.
+    /// 3-57..3-59): implies volatile; no merged references, no
+    /// "gratuitous read-modify-write references".
+    pub device: Option<DeviceAccess>,
+    /// The alignment specification in bytes: `aligned(n)` is 2**n,
+    /// `natural` the type's natural alignment (ref 3.15.6.1 p. 3-63); for
+    /// a record also the largest specification of its fields, which it
+    /// inherits (ref 3.15.6.2 pp. 3-67..3-68), or its alignment when it
+    /// is laid out by the natural rules (3.15.6.3 p. 3-70).  `None`: the
+    /// default rules of the alignment environment apply.
+    pub align: Option<u32>,
+}
+
+/// Which accesses a `device` object allows (ref 3.15.3 p. 3-59:
+/// `device(read)`, `device(write)`; `device` and `device(read, write)`
+/// allow both).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceAccess {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl TypeAttrs {
+    /// Every reference is made as written (ref 3.15.1-3.15.3).
+    pub fn is_volatile(&self) -> bool {
+        self.volatile || self.atomic || self.device.is_some()
+    }
+}
+
 /// A type and its layout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeInfo {
@@ -279,6 +327,13 @@ pub struct TypeInfo {
     /// Natural alignment, used by the record allocation algorithm
     /// (ref 3.10.5.2 p. 3-23, 3.10.5.6 pp. 3-27..3-28).
     pub natural_align: u32,
+    /// Attributes (ref 3.15).
+    pub attrs: TypeAttrs,
+    /// The type this one is for compatibility: itself, or for a type
+    /// made by attributes ([`TypeTable::attributed`]) the type the
+    /// attributes were given to.  ref 3.15.7 p. 3-76: `semaphore =
+    /// [VOLATILE] integer` is still an integer.
+    pub canon: TypeId,
 }
 
 /// Every type of a compilation unit.  [`TypeTable::default`] is empty (no
@@ -382,6 +437,8 @@ impl TypeTable {
             align,
             field_align,
             natural_align,
+            attrs: TypeAttrs::default(),
+            canon: id,
         });
         id
     }
@@ -430,6 +487,7 @@ impl TypeTable {
     /// Add a type, computing its layout.  `pointer_size` is the target's.
     pub fn add(&mut self, kind: TypeKind, pointer_size: u32) -> TypeId {
         let (size, align, field_align, natural_align) = self.layout_of(&kind, pointer_size);
+        let attrs = self.inherited_attrs(&kind);
         let id = TypeId(self.types.len() as u32);
         self.types.push(TypeInfo {
             kind,
@@ -438,8 +496,162 @@ impl TypeTable {
             align,
             field_align,
             natural_align,
+            attrs,
+            canon: id,
         });
         id
+    }
+
+    /// The attributes a new type inherits from its parts (ref 3.15.7
+    /// pp. 3-76..3-77): an array its element's `volatile` and `device`
+    /// (`resource = array[1..10] of semaphore` "inherits the volatile
+    /// attribute from semaphore"); a record `device` from any field ("if
+    /// you designate any one field within a record as having the device
+    /// attribute, the entire record itself inherits the device attribute",
+    /// but not `volatile`: "the entire record is not considered volatile
+    /// just because one field is declared that way"), and the largest
+    /// alignment specification of its fields (3.15.6.2 p. 3-67: "a record
+    /// inherits the largest alignment specification of its fields"), or
+    /// under the natural rules its alignment (3.15.6.3 p. 3-70).
+    /// "Pointer types do not inherit the device or volatile attributes of
+    /// their base type" (p. 3-77).
+    fn inherited_attrs(&self, kind: &TypeKind) -> TypeAttrs {
+        match kind {
+            TypeKind::Array { elem, .. } => {
+                let e = self.get(*elem).attrs;
+                TypeAttrs {
+                    volatile: e.is_volatile(),
+                    atomic: false,
+                    device: e.device,
+                    align: None,
+                }
+            }
+            TypeKind::Record(r) => {
+                let mut a = TypeAttrs::default();
+                for f in r.all_fields() {
+                    let fa = self.get(f.ty).attrs;
+                    if let Some(d) = fa.device {
+                        a.device = Some(match a.device {
+                            Some(x) => DeviceAccess {
+                                read: x.read || d.read,
+                                write: x.write || d.write,
+                            },
+                            None => d,
+                        });
+                    }
+                }
+                if !r.packed {
+                    a.align = self.record_spec(r);
+                }
+                a
+            }
+            _ => TypeAttrs::default(),
+        }
+    }
+
+    /// The alignment specification an unpacked record carries
+    /// ([`TypeAttrs::align`]): under the natural rules its alignment, the
+    /// largest of its fields' (3.15.6.3 p. 3-70, Figure 3-25); otherwise
+    /// the largest explicit specification of its fields (3.15.6.2 p.
+    /// 3-67, Figures 3-21, 3-22), if any.
+    fn record_spec(&self, r: &RecordType) -> Option<u32> {
+        let mut spec: Option<u32> = None;
+        for f in r.all_fields() {
+            let fi = self.get(f.ty);
+            let a = match fi.attrs.align {
+                Some(a) => a,
+                None if r.natural => fi.natural_align,
+                None => continue,
+            };
+            spec = Some(spec.map_or(a, |s| s.max(a)));
+        }
+        spec
+    }
+
+    /// A new type: `base` with attributes `attrs` added (ref 3.15).  It is
+    /// `base` for compatibility ([`TypeInfo::canon`]).  `attrs.align`
+    /// replaces `base`'s alignment (ref 3.15.6.2 p. 3-64: the attributes
+    /// "override the default alignment rules ... as well as the alignment
+    /// rules specified by any compiler alignment directive"): a freestanding
+    /// object, a field, and the record allocation algorithm (3.10.5.6) all
+    /// take it.  A record's size is rounded up to a multiple of it
+    /// (Figure 3-21 p. 3-67: `S = [ALIGNED(2)] record a: integer32; b:
+    /// integer16 end` is 8 bytes; Figure 3-26 p. 3-71: `[ALIGNED(1)]` on a
+    /// record laid out by the natural rules removes its final word of
+    /// padding), and stays a multiple of 2 (ref 3.15.6.3 p. 3-70:
+    /// "Records created by Domain Pascal are always 2-byte multiples").
+    /// Other types keep their size.
+    pub fn attributed(&mut self, base: TypeId, attrs: TypeAttrs) -> TypeId {
+        let b = self.get(base).clone();
+        let mut info = TypeInfo {
+            name: None,
+            attrs: TypeAttrs {
+                volatile: b.attrs.volatile || attrs.volatile,
+                atomic: b.attrs.atomic || attrs.atomic,
+                device: match (b.attrs.device, attrs.device) {
+                    (Some(x), Some(y)) => Some(DeviceAccess {
+                        read: x.read && y.read,
+                        write: x.write && y.write,
+                    }),
+                    (x, y) => x.or(y),
+                },
+                align: attrs.align.or(b.attrs.align),
+            },
+            ..b
+        };
+        if let Some(a) = attrs.align {
+            if let TypeKind::Record(r) = &info.kind {
+                let a2 = a.max(2);
+                info.size = round_up(self.record_end(r), a2).max(2);
+                info.align = a2;
+                info.field_align = a2;
+                info.natural_align = a2;
+            } else {
+                info.align = a;
+                info.field_align = a;
+                info.natural_align = a;
+            }
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.types.push(info);
+        id
+    }
+
+    /// The type `id` is for compatibility ([`TypeInfo::canon`]).
+    pub fn canon(&self, id: TypeId) -> TypeId {
+        self.get(id).canon
+    }
+
+    /// The attributes of type `id`.
+    pub fn attrs(&self, id: TypeId) -> TypeAttrs {
+        self.get(id).attrs
+    }
+
+    /// Whether an object of type `id` has a part that is volatile (or
+    /// atomic, or device), itself included.
+    pub fn has_volatile_part(&self, id: TypeId) -> bool {
+        let info = self.get(id);
+        if info.attrs.is_volatile() {
+            return true;
+        }
+        match &info.kind {
+            TypeKind::Record(r) => r.all_fields().iter().any(|f| self.has_volatile_part(f.ty)),
+            TypeKind::Array { elem, .. } => self.has_volatile_part(*elem),
+            _ => false,
+        }
+    }
+
+    /// The end of a record's last byte used by a field (bytes from its
+    /// start; a packed record's in whole 16-bit words, ref 3.10.7).
+    fn record_end(&self, r: &RecordType) -> u32 {
+        let mut end = 0u32;
+        for f in r.all_fields() {
+            end = end.max(match f.bits {
+                Some(b) => round_up(b.bit.saturating_add(b.width), 16) / 8,
+                None => f.offset.saturating_add(self.size(f.ty)),
+            });
+        }
+        end
     }
 
     /// Layout of a new type: (size, align, field_align, natural_align).
@@ -537,7 +749,8 @@ impl TypeTable {
         // boundary if that larger allocation produces natural alignment
         // for any of the record's fields": lay out from address 0, find
         // the largest naturally aligned field, allocate on its natural
-        // alignment.
+        // alignment.  A field with an alignment attribute counts with that
+        // alignment ([`TypeTable::attributed`] makes it its natural one).
         let mut alloc = 2u32;
         for f in r.all_fields() {
             let fi = self.get(f.ty);
@@ -548,10 +761,18 @@ impl TypeTable {
         }
         // ref 3.10.5.5 p. 3-26: "The size of a record must be an even
         // number of bytes ... the smallest possible record is 2 bytes."
-        let size = round_up(end, 2).max(2);
+        // A record that carries an alignment specification (inherited
+        // from its fields, or its natural alignment) is rounded up to a
+        // multiple of it and aligned on it, as a field too (Figure 3-21
+        // p. 3-67, 8 bytes; Figure 3-22 p. 3-68: `y: S` at offset 4 and
+        // 2 bytes of padding at the end of S1; Figure 3-25 p. 3-71, 12
+        // bytes).
+        let spec = self.record_spec(r).unwrap_or(2).max(2);
+        let size = round_up(end, spec).max(2);
         // A record field is word aligned: "The default alignment of the
         // beginning of a record is at least word aligned" (p. 3-26).
-        (size, alloc, 2, alloc)
+        let alloc = alloc.max(spec);
+        (size, alloc, spec, alloc)
     }
 
     /// Size and alignments of a packed record whose fields' bits are set
@@ -721,19 +942,44 @@ impl TypeTable {
         Ok(at)
     }
 
-    /// Assign offsets to a list of fields starting at `start`, in the
-    /// default (word) alignment environment.  Returns the end offset.
+    /// Assign offsets to a list of fields starting at `start`, by the
+    /// word alignment rules or, with `natural`, the natural ones.  Returns
+    /// the end offset.
     ///
-    /// ref 3.10.5.5 p. 3-26: "the compiler lays out record fields based on
-    /// their guaranteed default alignment.  Thus, all objects longer than a
-    /// byte are aligned on word boundaries.  Objects which are chars and
-    /// booleans may be aligned on byte boundaries."  Checked against
-    /// Figures 3-8..3-13 (PDF pp. 82-86).
-    pub fn layout_fields(&self, fields: &mut [Field], start: u32) -> u32 {
+    /// - Word rules, ref 3.10.5.5 p. 3-26: "the compiler lays out record
+    ///   fields based on their guaranteed default alignment.  Thus, all
+    ///   objects longer than a byte are aligned on word boundaries.
+    ///   Objects which are chars and booleans may be aligned on byte
+    ///   boundaries."  Checked against Figures 3-8..3-13 (PDF pp. 82-86).
+    /// - Natural rules (`%natural_alignment`, `aligned record`): each
+    ///   field at its natural alignment (ref 3.15.6.3 p. 3-70, Figure
+    ///   3-25: `a: char; b: integer32; c: char` at 0, 4, 8; 3.10.6 p.
+    ///   3-33, Figure 3-15).
+    /// - A field whose type has an alignment attribute is aligned on it in
+    ///   either environment (3.15.6.2 p. 3-64; 3.15.6.3 Figure 3-24 p.
+    ///   3-70: `b, c: [ALIGNED(0)] integer16` after a char at 1 and 3;
+    ///   3.15.6.4 Figure 3-29 p. 3-73; read in the PDF).
+    /// - "A byte aligned field may not cross two word boundaries" (p.
+    ///   3-26): such a field goes to the next word (3.15.6.3 p. 3-72: a
+    ///   byte-aligned integer32 after a char lands at 2, as a word-aligned
+    ///   one does).
+    pub fn layout_fields(&self, fields: &mut [Field], start: u32, natural: bool) -> u32 {
         let mut off = start;
         for f in fields {
             let fi = self.get(f.ty);
-            off = round_up(off, fi.field_align);
+            let align = match fi.attrs.align {
+                Some(a) => a,
+                None if natural => fi.natural_align,
+                None => fi.field_align,
+            };
+            off = round_up(off, align);
+            if align == 1 && fi.size > 1 {
+                // Word boundaries strictly inside the field.
+                let crossed = (off.saturating_add(fi.size) - 1) / 2 - off / 2;
+                if crossed >= 2 {
+                    off = round_up(off, 2);
+                }
+            }
             f.offset = off;
             off = off.saturating_add(fi.size);
         }
@@ -748,8 +994,8 @@ impl TypeTable {
             | TypeKind::Integer32
             | TypeKind::Boolean
             | TypeKind::Char
-            | TypeKind::Enum { .. } => Some(id),
-            TypeKind::Subrange { base, .. } => Some(*base),
+            | TypeKind::Enum { .. } => Some(self.canon(id)),
+            TypeKind::Subrange { base, .. } => Some(self.canon(*base)),
             _ => None,
         }
     }

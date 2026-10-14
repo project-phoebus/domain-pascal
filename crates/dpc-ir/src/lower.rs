@@ -18,10 +18,10 @@ use dpc_sema::types::{TypeId, TypeKind, TypeTable};
 use dpc_sema::consts::ConstValue;
 
 use crate::{
-    Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea, DataBaseOptions,
-    DataInit, Expr, ForLoop, Function, InitValue, LinkArg, Module, Nesting, ParamCopy, PoolConst,
-    Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt, StmtKind, UnOp as IrUnOp,
-    ValueParam, Width,
+    Access, Addr, Arg, BinOp as IrBinOp, BitField, Call, Callee, CaseArm, Cond, DataArea,
+    DataBaseOptions, DataInit, Expr, ForLoop, Function, InitValue, LinkArg, Module, Nesting,
+    ParamCopy, PoolConst, Rel, ResultClass, ResultSpec, Scalar, SetOp, Sign, StaticLink, Stmt,
+    StmtKind, UnOp as IrUnOp, ValueParam, Width,
 };
 
 type Res<T> = Result<T, Diagnostic>;
@@ -485,6 +485,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
         match a {
             Addr::Enclosing(o) => out.push((*o, size)),
             Addr::Frame(_) | Addr::Static(_) | Addr::Symbol { .. } | Addr::Const(_) => {}
+            Addr::Volatile { addr: a, .. } => addr(a, size, out),
             Addr::Indirect { base, .. } => expr(base, out),
             Addr::Index { base, index, .. } => {
                 addr(base, 1, out);
@@ -639,6 +640,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             | Addr::Static(_)
             | Addr::Symbol { .. }
             | Addr::Const(_) => {}
+            Addr::Volatile { addr: a, .. } => addr(a, f),
             Addr::Indirect { base, .. } => expr(base, f),
             Addr::Index { base, index, .. } => {
                 addr(base, f);
@@ -803,6 +805,7 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
     }
     fn addr(a: &mut Addr, size: u32, max: &mut u32) {
         match a {
+            Addr::Volatile { addr: a, .. } => addr(a, size, max),
             Addr::Indirect { base, .. } => expr(base, size, max),
             Addr::Index { base, index, .. } => {
                 addr(base, size, max);
@@ -953,6 +956,10 @@ fn lower_routine(
     };
     let frame_size = assign_temps(&mut body, r.frame_size);
     set_call_sections(p, &r.code_section, &mut body);
+    let param_copies = param_copies(p, r).unwrap_or_else(|d| {
+        errors.push(d);
+        Vec::new()
+    });
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -986,7 +993,7 @@ fn lower_routine(
             link: StaticLink::CallerFrame,
         }),
         uplevel_refs: uplevel.to_vec(),
-        param_copies: param_copies(p, r),
+        param_copies,
         body,
         span: r.span,
     })
@@ -1447,6 +1454,7 @@ fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
         | Addr::Static(_)
         | Addr::Symbol { .. }
         | Addr::Const(_) => {}
+        Addr::Volatile { addr, .. } => addr_calls(addr, out),
         Addr::Indirect { base, .. } => expr_calls(base, out),
         Addr::Index { base, index, .. } => {
             addr_calls(base, out);
@@ -1543,6 +1551,7 @@ fn addr_uses_static(a: &Addr) -> bool {
     match a {
         Addr::Static(_) => true,
         Addr::Frame(_) | Addr::Enclosing(_) | Addr::Symbol { .. } | Addr::Const(_) => false,
+        Addr::Volatile { addr, .. } => addr_uses_static(addr),
         Addr::Indirect { base, .. } => expr_uses_static(base),
         Addr::Index { base, index, .. } => addr_uses_static(base) || expr_uses_static(index),
     }
@@ -1574,6 +1583,12 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
             if overlaps(uplevel, offset, width.bytes()) {
                 return None;
             }
+            // A volatile local is referenced in its frame slot as written
+            // (ref 3.15.1, p. 3-56: `i: [volatile] integer`), never held
+            // in a register.
+            if p.types.has_volatile_part(var.ty) {
+                return None;
+            }
             Some(ValueParam {
                 offset,
                 ty: Scalar {
@@ -1590,18 +1605,37 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
 /// "by making a local copy of the argument").  `dpc-sema` gave each copy
 /// its frame slot (`Param::copy_offset`); the body refers to the copy
 /// ([`var_addr`]).
-fn param_copies(p: &Program, r: &Routine) -> Vec<ParamCopy> {
-    r.params
-        .iter()
-        .filter_map(|prm| {
-            prm.copy_offset.map(|copy| ParamCopy {
-                slot: prm.slot_offset,
-                copy,
-                bytes: p.types.size(prm.ty),
-                span: p.var(prm.var).span,
-            })
-        })
-        .collect()
+///
+/// A record or array with volatile or device parts is refused, as its
+/// assignment is ([`copy`]): the copy moves longwords, merging device
+/// references (ref 3.15.3 p. 3-57), and its shape for such objects is
+/// not seen.
+fn param_copies(p: &Program, r: &Routine) -> Res<Vec<ParamCopy>> {
+    let mut out = Vec::new();
+    for prm in &r.params {
+        let Some(copy) = prm.copy_offset else {
+            continue;
+        };
+        if p.types.has_volatile_part(prm.ty)
+            && matches!(
+                p.types.kind(prm.ty),
+                TypeKind::Record(_) | TypeKind::Array { .. }
+            )
+        {
+            return Err(unsupported(
+                p.var(prm.var).span,
+                "copying a value parameter that is a record or array with volatile or device \
+                 parts (ref 3.15.1-3.15.3) is",
+            ));
+        }
+        out.push(ParamCopy {
+            slot: prm.slot_offset,
+            copy,
+            bytes: p.types.size(prm.ty),
+            span: p.var(prm.var).span,
+        });
+    }
+    Ok(out)
 }
 
 /// The parameters passed by value, in parameter order (ref 5.2 Table 5-1,
@@ -1765,6 +1799,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                 | Addr::Static(_)
                 | Addr::Symbol { .. }
                 | Addr::Const(_) => Ok(()),
+                Addr::Volatile { addr, .. } => self.addr(addr, size),
                 // The whole object is reached through the base.
                 Addr::Indirect { base, .. } => self.expr(base),
                 Addr::Index { base, index, .. } => {
@@ -2110,6 +2145,10 @@ impl Cx<'_> {
         body: &SStmt,
     ) -> Res<Stmt> {
         let p = self.p;
+        if p.types.attrs(var.ty).is_volatile() {
+            // The index is held in a register (codegen-patterns 7.4).
+            return Err(unsupported(var.span, "a volatile `for` index variable is"));
+        }
         if let Some(st) = fill(p, s, var, from, dir, to, body)? {
             return Ok(st);
         }
@@ -2563,7 +2602,7 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         ));
     }
     let ty = scalar_of(p, target)?;
-    let addr = addr_of(p, target)?;
+    let addr = access_of(p, target, false)?;
     let value = if let Some(v) = &value.value {
         const_of(v, ty, value.span)?
     } else if is_set(p, target.ty) {
@@ -2709,6 +2748,23 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             "assigning a record or array of another size is",
         ));
     }
+    if volatile_access(p, target).is_some()
+        || volatile_access(p, value).is_some()
+        || p.types.has_volatile_part(target.ty)
+        || p.types.has_volatile_part(value.ty)
+    {
+        // A block copy (`move.l (An)+,(Am)+`, a `dbf` loop) of an object
+        // with volatile or device parts: how the original copied those is
+        // not seen.
+        return Err(unsupported(
+            s.span,
+            "assigning a record or array with volatile or device parts (ref 3.15.1-3.15.3) is",
+        ));
+    }
+    // A byte-aligned array may lie at an odd address; the block copy
+    // moves words and longwords.
+    check_even(p, target)?;
+    check_even(p, value)?;
     Ok(Stmt {
         kind: StmtKind::Copy {
             dst: addr_of(p, target)?,
@@ -2945,6 +3001,12 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
             format!("`in` on a {bytes}-byte set that is not a variable is"),
         ));
     }
+    if volatile_access(p, rhs).is_some() {
+        return Err(unsupported(
+            e.span,
+            format!("`in` on a volatile {bytes}-byte set in memory is"),
+        ));
+    }
     let bits = bytes as i64 * 8;
     match p.types.ordinal_range(lhs.ty) {
         Some((lo, hi)) if lo >= 0 && hi < bits => {}
@@ -2976,6 +3038,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
         return set_value(p, e, ty);
     }
     if let Some((addr, field)) = bit_field(p, e)? {
+        check_device_access(p, e, true)?;
         return Ok(Expr::Bits {
             addr,
             field,
@@ -2984,7 +3047,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     }
     match &e.kind {
         ExprKind::Var { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => Ok(Expr::Load {
-            addr: addr_of(p, e)?,
+            addr: access_of(p, e, true)?,
             ty: scalar_of(p, e)?,
         }),
         // `addr(x)` (ref p. 4-13): the address of the variable as a value.
@@ -2993,7 +3056,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             args,
         } => Ok(Expr::AddrOf(addr_of(p, &args[0])?)),
         ExprKind::Index { .. } => Ok(Expr::Load {
-            addr: addr_of(p, e)?,
+            addr: access_of(p, e, true)?,
             ty: scalar_of(p, e)?,
         }),
         ExprKind::Binary { op, lhs, rhs } => binary(p, e, *op, lhs, rhs),
@@ -3506,7 +3569,7 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
         ));
     };
     let shift = 8 * (start + unit.bytes()) - (b.bit + b.width);
-    let addr = addr_of(p, base)?.offset_by(start as i32);
+    let addr = wrap_volatile(p, e, addr_of(p, base)?.offset_by(start as i32));
     Ok(Some((
         addr,
         BitField {
@@ -3569,6 +3632,25 @@ fn store_bits(
     field: BitField,
 ) -> Res<Stmt> {
     let ty = bit_field_type(p, target)?;
+    if let Some(a) = volatile_access(p, target) {
+        check_device_access(p, target, false)?;
+        // The other bits of the unit are read and written back (`and`/`or`
+        // into memory, `bset`/`bclr`): for a device, ref 3.15.3 p. 3-57
+        // forbids "gratuitous read-modify-write references"; for any
+        // volatile object the field form writes the unit twice (`andi`
+        // then `ori`), and whether the original did so for one is not
+        // known.
+        return Err(unsupported(
+            s.span,
+            if a.device {
+                "storing into a packed field of a device record (a read-modify-write of its \
+                 unit, ref 3.15.3) is"
+            } else {
+                "storing into a packed field of a volatile record (its unit read and written \
+                 back, perhaps twice; not seen, ref 3.15.1) is"
+            },
+        ));
+    }
     let (v, mask) = if let Some(c) = &value.value {
         (const_of(c, ty, value.span)?, false)
     } else {
@@ -3601,6 +3683,156 @@ fn store_bits(
         },
         span: s.span,
     })
+}
+
+/// How designator `e` is referenced when it is volatile (ref
+/// 3.15.1-3.15.3), or `None`.  The attributes of `e`'s type, and the
+/// `volatile` and `device` of the records and arrays it is a field or an
+/// element of (ref 3.15.7 pp. 3-76..3-77: "If you define a record type as
+/// volatile or device, all the fields within the record inherit the
+/// attribute"; an array of a volatile type is volatile), up to a
+/// dereference: "Pointer types do not inherit the device or volatile
+/// attributes of their base type.  However, when pointer variables are
+/// dereferenced, the system applies any attributes of their base type"
+/// (p. 3-77).  `atomic` is the object's own (ref 3.15.2: scalar variables
+/// only).
+fn volatile_access(p: &Program, e: &SExpr) -> Option<Access> {
+    fn inherited(p: &Program, e: &SExpr) -> (bool, bool) {
+        let a = p.types.attrs(e.ty);
+        let (mut v, mut d) = (a.is_volatile(), a.device.is_some());
+        if let ExprKind::Field { base, .. } | ExprKind::Index { base, .. } = &e.kind {
+            let (bv, bd) = inherited(p, base);
+            v |= bv;
+            d |= bd;
+        }
+        (v, d)
+    }
+    let (v, d) = inherited(p, e);
+    v.then(|| Access {
+        device: d,
+        atomic: p.types.attrs(e.ty).atomic,
+    })
+}
+
+/// The `device(read)` / `device(write)` restriction of `e` (ref 3.15.3 p.
+/// 3-59: "if you attempt to write to this variable, the compiler flags the
+/// attempt as invalid"; reading a write-only one likewise), the nearest
+/// one up to a dereference.
+fn check_device_access(p: &Program, e: &SExpr, read: bool) -> Res<()> {
+    let mut x = e;
+    loop {
+        if let Some(d) = p.types.attrs(x.ty).device {
+            if read && !d.read {
+                return Err(Diagnostic::error(
+                    e.span,
+                    "reading a write-only device object (`device(write)`, ref 3.15.3, p. 3-59)",
+                ));
+            }
+            if !read && !d.write {
+                return Err(Diagnostic::error(
+                    e.span,
+                    "writing a read-only device object (`device(read)`, ref 3.15.3, p. 3-59)",
+                ));
+            }
+            return Ok(());
+        }
+        match &x.kind {
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => x = base,
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// `addr`, the address of designator `e`, wrapped in [`Addr::Volatile`]
+/// when `e` is volatile.
+fn wrap_volatile(p: &Program, e: &SExpr, addr: Addr) -> Addr {
+    match volatile_access(p, e) {
+        Some(access) => Addr::Volatile {
+            addr: Box::new(addr),
+            access,
+        },
+        None => addr,
+    }
+}
+
+/// The address of designator `e` for a load (`read`) or a store of it:
+/// [`addr_of`], wrapped when `e` is volatile ([`Addr::Volatile`]), after
+/// the `device(read)`/`device(write)` check.
+fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
+    check_device_access(p, e, read)?;
+    check_even(p, e)?;
+    Ok(wrap_volatile(p, e, addr_of(p, e)?))
+}
+
+/// Refuse a reference to an object of more than one byte that an
+/// alignment attribute lets lie at an odd address (`aligned(0)`, ref
+/// 3.15.6.3 p. 3-69: `b, c: [ALIGNED(0)] integer16` at offsets 1 and 3),
+/// unless its address is known to be even.  The 68010 traps on a word or
+/// longword reference at an odd address; the reference describes split
+/// references for objects known not to be aligned only for the Series
+/// 10000 (3.15.6.6 p. 3-74), and how the original referenced such an
+/// object on the 68000 family is not known.  A record, an array's first
+/// element and an object reached through a pointer are taken to be at
+/// least word aligned (ref 3.10.5.5 p. 3-26, "The default alignment of the
+/// beginning of a record is at least word aligned"; 3.15.6.7 p. 3-75, a
+/// pointer's target is assumed naturally aligned, unless the pointer's
+/// base type has an alignment attribute), as is every frame
+/// object (codegen-patterns 2).  An object inside a byte-aligned array
+/// or record counts too.
+fn check_even(p: &Program, e: &SExpr) -> Res<()> {
+    /// The parity of `e`'s address: `Some(true)` even, `Some(false)` odd,
+    /// `None` not known.
+    fn even(p: &Program, e: &SExpr) -> Option<bool> {
+        match &e.kind {
+            ExprKind::Field { base, offset, .. } => Some(even(p, base)? == (offset % 2 == 0)),
+            ExprKind::Index {
+                base,
+                index,
+                lo,
+                elem_size,
+            } => {
+                let b = even(p, base)?;
+                if elem_size % 2 == 0 {
+                    return Some(b);
+                }
+                let i = index.value.as_ref().and_then(ConstValue::ordinal)?;
+                Some(b == ((i - lo) % 2 == 0))
+            }
+            // The target is aligned as the pointer's base type says (ref
+            // 3.15.6.7 pp. 3-75..3-76: `iptr: ^word_int32` "points to a
+            // word aligned 4-byte integer"): even unless byte aligned.
+            ExprKind::Deref(_) => (p.types.get(e.ty).align >= 2).then_some(true),
+            ExprKind::Var { var, .. } => match &p.var(*var).storage {
+                Storage::Static { offset, .. } => Some(offset % 2 == 0),
+                Storage::Frame { .. } | Storage::Param { .. } => Some(true),
+                // Another unit's object: aligned as its type says.
+                Storage::Extern { .. } => (p.types.get(e.ty).align >= 2).then_some(true),
+            },
+            _ => None,
+        }
+    }
+    /// Whether `e` or an array or record it is an element or a field of
+    /// (up to a dereference) is byte aligned: an element of a byte-aligned
+    /// array (`x: [aligned(0)] array[1..2] of integer16` after a char)
+    /// may lie at an odd address although its own type has no attribute.
+    fn byte_aligned(p: &Program, e: &SExpr) -> bool {
+        if p.types.attrs(e.ty).align == Some(1) {
+            return true;
+        }
+        match &e.kind {
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => byte_aligned(p, base),
+            _ => false,
+        }
+    }
+    if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e) != Some(true) {
+        return Err(unsupported(
+            e.span,
+            "a reference to a byte-aligned object (`aligned(0)`) of more than one byte at an \
+             address not known to be even (the 68010 traps on an odd word or longword access; \
+             the original's code for one is not known, ref 3.15.6.6) is",
+        ));
+    }
+    Ok(())
 }
 
 /// The address of designator `e`.
@@ -4050,6 +4282,13 @@ fn fill(
     let Some(c) = &value.value else {
         return Ok(None);
     };
+    if volatile_access(p, target).is_some() {
+        // Each element is stored as written, one statement per iteration.
+        return Ok(None);
+    }
+    // The elements of a byte-aligned array may lie at odd addresses, as
+    // for a store to one of them ([`access_of`]).
+    check_even(p, target)?;
     let ty = scalar_of(p, target)?;
     if ty.bytes() != *elem_size {
         return Ok(None);

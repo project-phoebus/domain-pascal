@@ -16,8 +16,8 @@ use crate::consts::ConstValue;
 use crate::conv::{self, Passing, RoutineOptions};
 use crate::program::*;
 use crate::types::{
-    round_up, Field, RecordType, SigParam, Signature, TypeId, TypeKind, TypeTable, VariantArm,
-    VariantPart, MAX_OBJECT_SIZE,
+    round_up, DeviceAccess, Field, RecordType, SigParam, Signature, TypeAttrs, TypeId, TypeKind,
+    TypeTable, VariantArm, VariantPart, MAX_OBJECT_SIZE,
 };
 
 /// Smallest alignment of an object in a routine's frame, in bytes: the
@@ -38,6 +38,10 @@ enum Sym {
     Builtin(Builtin),
     /// A `routine_option` name (ref 5.6.1, p. 5-21).
     Options(RoutineOptions),
+    /// A name from an attribute declaration part (ref 3.16, p. 3-78): the
+    /// attributes it stands for, already resolved ("the compiler evaluates
+    /// attributes when they are declared").
+    Attributes(Attrs),
     /// A field visible through `with` (ref p. 4-211).
     WithField {
         with: WithId,
@@ -55,6 +59,32 @@ enum Sym {
 struct Scope {
     names: HashMap<String, Sym>,
 }
+
+/// Attributes written in a `[...]` list or named in an attribute
+/// declaration part, resolved (ref 3.15, 3.16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Attrs {
+    volatile: bool,
+    atomic: bool,
+    device: Option<DeviceAccess>,
+    /// `aligned(n)`: 2**n bytes.
+    aligned: Option<u32>,
+    natural: bool,
+}
+
+/// How a record's fields are laid out.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    packed: bool,
+    /// The natural alignment rules (not for a packed record).
+    natural: bool,
+}
+
+/// The predeclared attribute names (ref 3.15 p. 3-53; Table 3-6 p. 3-55).
+const PREDECLARED_ATTRIBUTES: &[&str] = &[
+    "volatile", "atomic", "device", "address", "bit", "byte", "word", "long", "quad", "aligned",
+    "natural",
+];
 
 /// The routine whose body is being checked.
 struct RoutineCtx {
@@ -325,6 +355,16 @@ impl<'t> Checker<'t> {
         for p in &unit.trailing_pragmas {
             self.pragma(p);
         }
+        // ref 9 Diagnostic Messages, p. 9-45: "ERROR Unmatched
+        // %PUSH_ALIGNMENT directive.  This error indicates that you have
+        // more %push_alignment directives than %pop_alignment directives."
+        if !self.align_stack.is_empty() {
+            self.errors.push(Diagnostic::error(
+                unit.name.span,
+                "Unmatched %push_alignment directive: more %push_alignment than \
+                 %pop_alignment directives (ref 4.7 p. 4-58; 9, p. 9-45)",
+            ));
+        }
         for r in &self.routines {
             if r.options.forward && r.body.is_none() {
                 self.errors.push(Diagnostic::error(
@@ -431,7 +471,9 @@ impl<'t> Checker<'t> {
                     }
                 }
                 Decl::Attribute(a) => {
-                    self.unsupported(a.span, "the attribute declaration part (ref 3.16)")
+                    for def in &a.defs {
+                        self.attribute_def(def);
+                    }
                 }
                 Decl::RoutineOption(ro) => {
                     for def in &ro.defs {
@@ -597,6 +639,18 @@ impl<'t> Checker<'t> {
                 elem,
             } => {
                 let mut elem_ty = self.type_expr(elem);
+                if let Some(a) = self.types.attrs(elem_ty).align {
+                    if self.types.size(elem_ty) % a != 0 {
+                        // Elements are contiguous (ref 3.15.6.2 p. 3-66);
+                        // whether an over-aligned element is padded is not
+                        // stated.
+                        self.unsupported(
+                            elem.span,
+                            "an array of elements aligned on more than their size (ref 3.15.6.2)",
+                        );
+                        return err;
+                    }
+                }
                 if *packed && !self.packed_elem_same_as_unpacked(elem_ty) {
                     self.unsupported(
                         t.span,
@@ -626,29 +680,24 @@ impl<'t> Checker<'t> {
                 fields,
                 variant,
             } => {
-                match form {
+                let natural = match form {
                     // ref 3.10.7: the packing rules do not depend on the
                     // alignment environment (Table 3-3 states no other).
                     ast::RecordForm::Packed => {
-                        let r = self.record(fields, variant.as_deref(), true);
+                        let r = self.record(fields, variant.as_deref(), true, false);
                         return self.check_size(r, t.span);
                     }
-                    ast::RecordForm::Aligned => {
-                        self.unsupported(
-                            t.span,
-                            "an aligned record (natural alignment, ref 3.10.6)",
-                        );
-                        return err;
-                    }
+                    // ref 3.10.6 p. 3-33: an aligned record is laid out by
+                    // the natural rules "regardless of the alignment
+                    // environment".
+                    ast::RecordForm::Aligned => true,
                     // ref 3.10.6 p. 3-34: unaligned records always use the
                     // word alignment rules, which are also the default.
-                    ast::RecordForm::Plain | ast::RecordForm::Unaligned => {}
-                }
-                if self.natural && *form == ast::RecordForm::Plain {
-                    self.unsupported(t.span, "a record under %natural_alignment (ref 3.15.6)");
-                    return err;
-                }
-                let r = self.record(fields, variant.as_deref(), false);
+                    ast::RecordForm::Unaligned => false,
+                    // ref 4.7 p. 4-57: the environment's rules.
+                    ast::RecordForm::Plain => self.natural,
+                };
+                let r = self.record(fields, variant.as_deref(), false, natural);
                 self.check_size(r, t.span)
             }
             T::Set { elem, .. } => {
@@ -728,21 +777,202 @@ impl<'t> Checker<'t> {
                 self.new_type(TypeKind::RoutinePointer(Box::new(s)))
             }
             T::Attributed { attrs, ty } => {
-                // Every attribute is rejected for now, `volatile` and
-                // `atomic` included.  They do not change layout, but they
-                // change code: ref 3.15.1-3.15.3 (pp. 3-56..3-57) says they
-                // prevent optimisations, `atomic` assignments are handled
-                // "in a special way", and the image clears device
-                // registers with `move.b #0` rather than `clr` (WIN_
-                // 0xE19112, codegen-patterns 13).  Accepting them and
-                // dropping them would emit the plain code silently.
-                for a in attrs {
-                    let what = format!("the `{}` attribute (ref 3.15)", a.name.name);
-                    self.unsupported(a.span, &what);
-                }
-                self.type_expr(ty)
+                let a = self.attribute_list(attrs);
+                let base = self.type_expr(ty);
+                self.apply_attrs(base, a, t.span)
             }
         }
+    }
+
+    /// Resolve the attributes of a `[...]` list (ref 3.15, 3.16).
+    fn attribute_list(&mut self, attrs: &[ast::Attribute]) -> Attrs {
+        let mut out = Attrs::default();
+        for a in attrs {
+            self.attribute(a, &mut out);
+        }
+        out
+    }
+
+    /// Add attribute `a` to `out`.  Implemented: `volatile`, `atomic`,
+    /// `device` with `read`/`write` (ref 3.15.1-3.15.3), `aligned(n)` and
+    /// `natural` (3.15.6), and names from an attribute declaration part
+    /// (3.16).  `address` (3.15.4) and the size attributes (3.15.5) are
+    /// not supported yet.
+    fn attribute(&mut self, a: &ast::Attribute, out: &mut Attrs) {
+        let name = a.name.name.as_str();
+        let no_args = |c: &mut Self| {
+            if a.args.is_some() {
+                c.error(a.span, format!("`{name}` takes no arguments (ref 3.15)"));
+            }
+        };
+        match name {
+            "volatile" => {
+                no_args(self);
+                out.volatile = true;
+            }
+            "atomic" => {
+                no_args(self);
+                out.atomic = true;
+            }
+            // ref 3.15.3 p. 3-59: `device(read)`, `device(write)`,
+            // `device(read, write)` = `device(write, read)` = `device`.
+            "device" => {
+                let mut d = DeviceAccess {
+                    read: true,
+                    write: true,
+                };
+                if let Some(args) = &a.args {
+                    let mut read = false;
+                    let mut write = false;
+                    for x in args {
+                        match &x.kind {
+                            ast::ExprKind::Name(i) if i.name == "read" => read = true,
+                            ast::ExprKind::Name(i) if i.name == "write" => write = true,
+                            _ => self.error(
+                                x.span,
+                                "a device attribute takes `read` and/or `write` (ref 3.15.3, p. 3-59)",
+                            ),
+                        }
+                    }
+                    d = DeviceAccess { read, write };
+                }
+                out.device = Some(d);
+            }
+            // ref 3.15.6.1 p. 3-63: "[aligned [(n)]] ... where n is the
+            // number of low order zeros in the address ... If you omit a
+            // value for n, then the compiler will default to a value of 0
+            // (byte aligned)"; aligned(n) is 2**n-byte alignment, n up to
+            // 4 (octaword).
+            "aligned" => {
+                let n = match &a.args {
+                    None => Some(0),
+                    Some(args) if args.len() == 1 => self.const_int(&args[0]),
+                    Some(_) => {
+                        self.error(
+                            a.span,
+                            "`aligned` takes one argument (ref 3.15.6.1, p. 3-63)",
+                        );
+                        None
+                    }
+                };
+                match n {
+                    Some(n @ 0..=2) => out.aligned = Some(1 << n),
+                    Some(3..=4) => self.unsupported(
+                        a.span,
+                        "quadword and octaword alignment (`aligned(3)`, `aligned(4)`, ref 3.15.6.1)",
+                    ),
+                    Some(_) => self.error(
+                        a.span,
+                        "`aligned(n)` takes n from 0 to 4 (ref 3.15.6.1, p. 3-63)",
+                    ),
+                    None => {}
+                }
+                out.natural = false;
+            }
+            "natural" => {
+                no_args(self);
+                out.natural = true;
+                out.aligned = None;
+            }
+            "address" => self.unsupported(a.span, "the `address` attribute (ref 3.15.4)"),
+            "bit" | "byte" | "word" | "long" | "quad" => {
+                let what = format!("the `{name}` size attribute (ref 3.15.5)");
+                self.unsupported(a.span, &what);
+            }
+            _ => match self.lookup(name) {
+                Some(Sym::Attributes(x)) => {
+                    let x = *x;
+                    out.volatile |= x.volatile;
+                    out.atomic |= x.atomic;
+                    if x.device.is_some() {
+                        out.device = x.device;
+                    }
+                    if x.aligned.is_some() || x.natural {
+                        out.aligned = x.aligned;
+                        out.natural = x.natural;
+                    }
+                }
+                _ => self.error(
+                    a.span,
+                    format!("`{name}` is not an attribute (ref 3.15, 3.16)"),
+                ),
+            },
+        }
+    }
+
+    /// `name = attr, ...;` in an attribute declaration part (ref 3.16, p.
+    /// 3-78).  The name may not be a predeclared attribute (ref Appendix
+    /// B: "Illegal to redefine ... The name of a user-defined attribute
+    /// list may not conflict with a predeclared attribute or option").
+    fn attribute_def(&mut self, def: &ast::AttributeDef) {
+        if PREDECLARED_ATTRIBUTES.contains(&def.name.name.as_str()) {
+            self.error(
+                def.name.span,
+                format!(
+                    "Illegal to redefine `{}`: a predeclared attribute (ref 3.16)",
+                    def.name.name
+                ),
+            );
+            return;
+        }
+        let a = self.attribute_list(&def.attrs);
+        self.declare(&def.name, Sym::Attributes(a));
+    }
+
+    /// The type `base` with attributes `a` (ref 3.15).
+    fn apply_attrs(&mut self, base: TypeId, a: Attrs, span: Span) -> TypeId {
+        if self.types.is_error(base) {
+            return base;
+        }
+        if a == Attrs::default() {
+            return base;
+        }
+        // ref 3.15.2 p. 3-57: "Atomic attributes can only be used with
+        // scalar variables.  The scalar data types are integer, Boolean,
+        // character, and enumerated."
+        if a.atomic && !self.types.is_ordinal(base) {
+            self.error(
+                span,
+                "`atomic` can only be used with scalar variables: integer, boolean, char, \
+                 enumerated (ref 3.15.2, p. 3-57)",
+            );
+            return self.types.builtins.error;
+        }
+        let align = if a.natural {
+            // ref 3.15.6.1 p. 3-63: `[NATURAL] integer32` "at least
+            // longword aligned".
+            Some(self.types.get(base).natural_align.max(1))
+        } else {
+            a.aligned
+        };
+        if let Some(al) = align {
+            match self.types.kind(base) {
+                TypeKind::Set { .. } | TypeKind::Varying { .. } => {
+                    self.unsupported(
+                        span,
+                        "an alignment attribute on a set or varying string type (alignment of                          these not stated, ref 3.15.6)",
+                    );
+                    return self.types.builtins.error;
+                }
+                TypeKind::Array { .. } if al > 2 => {
+                    self.unsupported(
+                        span,
+                        "an array type aligned on more than a word (ref 3.15.6: its element                          layout is not stated)",
+                    );
+                    return self.types.builtins.error;
+                }
+                _ => {}
+            }
+        }
+        self.types.attributed(
+            base,
+            TypeAttrs {
+                volatile: a.volatile,
+                atomic: a.atomic,
+                device: a.device,
+                align,
+            },
+        )
     }
 
     /// ref 3.11.4.2 Table 3-5 p. 3-47: element types whose packed storage
@@ -832,23 +1062,77 @@ impl<'t> Checker<'t> {
         fields: &[ast::FieldDecl],
         variant: Option<&ast::VariantPart>,
         packed: bool,
+        natural: bool,
     ) -> TypeId {
         let mut seen = HashSet::new();
         let mut fixed = self.field_list(fields, &mut seen);
-        let end = self.lay_out(&mut fixed, 0, packed);
-        let variant = variant.map(|v| Box::new(self.variant_part(v, end, &mut seen, packed)));
+        let mode = Layout { packed, natural };
+        let end = self.lay_out(&mut fixed, 0, mode);
+        let variant = variant.map(|v| Box::new(self.variant_part(v, end, &mut seen, mode)));
         self.new_type(TypeKind::Record(RecordType {
             fields: fixed,
             variant,
             packed,
+            natural,
         }))
     }
 
     /// Lay out `fields` from `start`: a byte offset, or for a packed
     /// record a bit offset.  Returns the end in the same unit.
-    fn lay_out(&mut self, fields: &mut [Field], start: u32, packed: bool) -> u32 {
-        if !packed {
-            return self.types.layout_fields(fields, start);
+    fn lay_out(&mut self, fields: &mut [Field], start: u32, mode: Layout) -> u32 {
+        if !mode.packed {
+            if mode.natural {
+                // Under the natural rules, an array, set or varying string
+                // field's alignment is not stated (ref 3.10.5.2 gives the
+                // natural alignment of simple types and records only).
+                if let Some(f) = fields.iter().find(|f| {
+                    self.types.attrs(f.ty).align.is_none()
+                        && matches!(
+                            self.types.kind(f.ty),
+                            TypeKind::Array { .. }
+                                | TypeKind::Set { .. }
+                                | TypeKind::Varying { .. }
+                        )
+                }) {
+                    let span = f.span;
+                    self.unsupported(
+                        span,
+                        "an array, set or varying field laid out by the natural alignment rules                          (its natural alignment is not stated, ref 3.10.5.2)",
+                    );
+                    for f in fields.iter_mut() {
+                        f.ty = self.types.builtins.error;
+                    }
+                    return start;
+                }
+            }
+            return self.types.layout_fields(fields, start, mode.natural);
+        }
+        // An alignment attribute on a packed record's field: accepted
+        // where it agrees with the field's alignment by Table 3-3 (ref
+        // 3.10.7 p. 3-36): word for a word-aligned field
+        // (`cal_$timezone_rec_t`'s `drift: [aligned(1)] time_$clock_t`,
+        // cal.ins.pas), byte for a byte-aligned one.  What it does
+        // otherwise is not stated.
+        for (i, f) in fields.iter().enumerate() {
+            let Some(a) = self.types.attrs(f.ty).align else {
+                continue;
+            };
+            let agrees = match self.types.packed_field_bits(f.ty) {
+                Ok((_, crate::types::PackAlign::Word)) => a <= 2,
+                Ok((_, crate::types::PackAlign::Byte)) => a == 1,
+                _ => false,
+            };
+            if !agrees {
+                let span = fields[i].span;
+                self.unsupported(
+                    span,
+                    "an alignment attribute on a packed record's field that differs from its                      packed alignment (ref 3.10.7 Table 3-3)",
+                );
+                for f in fields.iter_mut() {
+                    f.ty = self.types.builtins.error;
+                }
+                return start;
+            }
         }
         match self.types.layout_packed_fields(fields, start) {
             Ok(end) => end,
@@ -890,7 +1174,7 @@ impl<'t> Checker<'t> {
         v: &ast::VariantPart,
         start: u32,
         seen: &mut HashSet<String>,
-        packed: bool,
+        mode: Layout,
     ) -> VariantPart {
         let tag_type = self.named_type(&v.tag_type);
         if !self.types.is_ordinal(tag_type) && !self.types.is_error(tag_type) {
@@ -911,7 +1195,7 @@ impl<'t> Checker<'t> {
                 span: t.span,
                 bits: None,
             }];
-            arm_start = self.lay_out(&mut f, start, packed);
+            arm_start = self.lay_out(&mut f, start, mode);
             f.pop().unwrap()
         });
         let mut arms = Vec::new();
@@ -934,11 +1218,11 @@ impl<'t> Checker<'t> {
                 }
             }
             let mut fields = self.field_list(&arm.fields, seen);
-            let end = self.lay_out(&mut fields, arm_start, packed);
+            let end = self.lay_out(&mut fields, arm_start, mode);
             let variant = arm
                 .variant
                 .as_deref()
-                .map(|sub| Box::new(self.variant_part(sub, end, seen, packed)));
+                .map(|sub| Box::new(self.variant_part(sub, end, seen, mode)));
             arms.push(VariantArm {
                 labels,
                 fields,
@@ -2426,7 +2710,7 @@ impl<'t> Checker<'t> {
                 self.error(span, format!("`{}` needs arguments", id.name));
                 self.error_expr(span)
             }
-            Sym::Options(_) | Sym::Label => {
+            Sym::Options(_) | Sym::Attributes(_) | Sym::Label => {
                 self.error(span, format!("`{}` is not a value", id.name));
                 self.error_expr(span)
             }
@@ -2966,7 +3250,10 @@ impl<'t> Checker<'t> {
         let rt = &self.routines[r.0 as usize];
         rt.params.len() == sig.params.len()
             && rt.params.iter().zip(&sig.params).all(|(a, b)| {
-                a.mode == b.mode && a.univ == b.univ && a.ty == b.ty && a.conv == b.conv
+                a.mode == b.mode
+                    && a.univ == b.univ
+                    && self.types.canon(a.ty) == self.types.canon(b.ty)
+                    && a.conv == b.conv
             })
             && rt.result.as_ref().map(|x| x.ty) == sig.result
             && rt.options.small_by_value() == sig.options.small_by_value()
@@ -3588,7 +3875,9 @@ impl<'t> Checker<'t> {
     // -----------------------------------------------------------------
 
     fn same_type(&self, a: TypeId, b: TypeId) -> bool {
-        a == b || self.types.is_error(a) || self.types.is_error(b)
+        self.types.canon(a) == self.types.canon(b)
+            || self.types.is_error(a)
+            || self.types.is_error(b)
     }
 
     /// Ordinal types with the same host type.  integer16 and integer32 (and
@@ -3621,7 +3910,9 @@ impl<'t> Checker<'t> {
         use TypeKind as K;
         match (self.types.kind(a), self.types.kind(b)) {
             (K::Nil, _) | (_, K::Nil) | (K::UnivPtr, _) | (_, K::UnivPtr) => true,
-            (K::Pointer { target: x }, K::Pointer { target: y }) => x == y || a == b,
+            (K::Pointer { target: x }, K::Pointer { target: y }) => {
+                self.types.canon(*x) == self.types.canon(*y) || self.same_type(a, b)
+            }
             (K::RoutinePointer(x), K::RoutinePointer(y)) => a == b || x == y,
             _ => false,
         }
@@ -3659,7 +3950,7 @@ impl<'t> Checker<'t> {
             }
             return true;
         }
-        if self.types.is_error(dst) || self.types.is_error(src) || dst == src {
+        if self.types.is_error(dst) || self.types.is_error(src) || self.same_type(dst, src) {
             return true;
         }
         let ok = if self.types.is_ordinal(dst) && self.types.is_ordinal(src) {

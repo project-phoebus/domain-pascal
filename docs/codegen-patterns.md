@@ -1684,7 +1684,7 @@ variables.  Each module's static data is a data segment, addressed off
 | enumeration | 2 | ordinal in a word (ref 3.7.1) |
 | pointer, `univ_ptr` | 4 | |
 | set | ⌈(max ordinal + 1)/16⌉ words | ref 3.9.3; see 5.1.  The high end of the base type decides, whatever the low end: `set of 80..170` is 11 words, `set of 'a'..'z'` 8 words (p. 3-17); checked by `crates/dpc-sema/src/tests/layout.rs` |
-| record | ref 3.10.5 (alignment rules: "natural" vs default word alignment; `aligned`/`unaligned` records) | **Reported: default word alignment** (ref 3.10.5.5: fields longer than a byte on word boundaries, record size even).  `route_$port_stats_t` (`../source/domain_os/route/route.h`) has longwords at 0x2 and 0x6, which natural alignment cannot produce: ROUTE_RTWIRED code `addq.l #1,(0x6,A2)` 0xE87660, `addq.l #1,(0xA,A2,D1.l)` 0xE8765A (seen; that A2 is the record start is the C's claim).  `proc1_t` (`proc1/proc1.h`) also matches word rules.  Field offsets in `_Static_assert`s remain ground truth |
+| record | ref 3.10.5 (alignment rules: "natural" vs default word alignment; `aligned`/`unaligned` records; attributes and directives: section 5.4) | **Reported: default word alignment** (ref 3.10.5.5: fields longer than a byte on word boundaries, record size even).  `route_$port_stats_t` (`../source/domain_os/route/route.h`) has longwords at 0x2 and 0x6, which natural alignment cannot produce: ROUTE_RTWIRED code `addq.l #1,(0x6,A2)` 0xE87660, `addq.l #1,(0xA,A2,D1.l)` 0xE8765A (seen; that A2 is the record start is the C's claim).  `proc1_t` (`proc1/proc1.h`) also matches word rules.  Field offsets in `_Static_assert`s remain ground truth |
 | arrays | 1-based is common in the kernel; element N at base + (N-lo)*size | |
 
 **Signedness (implemented in `dpc-ir`, `lower.rs` `sign_of`).**  Every IR
@@ -2246,6 +2246,186 @@ same `bset #c mod 8` on the member's byte).
   a model of the instructions run over random records: stores keep the
   neighbouring bits, loads give the value), `crates/dpc-ir/src/tests.rs`
   (`packed_field_units`), golden `tests/golden/packed/fields`.
+
+### 5.4 Alignment attributes and environments (ref 3.10.5, 3.10.6, 3.15.6, 4.7; layout from the reference's figures; implemented, bead domain-pascal-l9p)
+
+**Layout** (`crates/dpc-sema/src/types.rs`: `layout_fields`,
+`record_layout`, `record_spec`, `attributed`; `check.rs`: `attribute`,
+`apply_attrs`, `lay_out`).  The figures were read in the PDF (pp.
+3-65..3-73); the OCR loses them.
+
+- `aligned(n)` is 2**n-byte alignment, `aligned` alone `aligned(0)`
+  (byte); `natural` the type's natural alignment (ref 3.15.6.1 p. 3-63).
+  An attribute overrides the default rules and any alignment directive
+  (3.15.6.2 p. 3-64): the object, freestanding or as a field, and the
+  record allocation algorithm (3.10.5.6) take it.  A record's size is
+  rounded up to it, never below a multiple of 2 (3.15.6.3 p. 3-70:
+  "Records created by Domain Pascal are always 2-byte multiples").  Other
+  types keep their size.  `aligned(3)`/`aligned(4)` are refused (not
+  needed so far); so is an alignment attribute on a set or varying type
+  (their alignment is not stated), and an array of elements aligned on
+  more than their size (whether they are padded is not stated).
+- A record inherits the largest alignment specification of its fields
+  (3.15.6.2 p. 3-67): Figure 3-21, `S = record a: [NATURAL] integer32;
+  b: integer16 end` is 8 bytes, longword aligned (likewise
+  `[ALIGNED(2)]` on the record or on `a`); Figure 3-22, `S1 = record x:
+  integer16; y: S; z: integer16 end` has `y` at 4, `z` at 12, 16 bytes.
+- `aligned(0)` removes padding (3.15.6.3, Figures 3-23/3-24: `a: char;
+  b, c: [ALIGNED(0)] integer16` at 0, 1, 3, 6 bytes), except that "a
+  byte aligned field may not cross two word boundaries" (3.10.5.5 p.
+  3-26): a byte-aligned integer32 after a char goes to 2 (Figure 3-27
+  p. 3-72, "the same layout as specifying word alignment").
+- `%natural_alignment` (ref 4.7 p. 4-57) lays records out by the natural
+  rules: each field at its natural alignment, the record aligned on and
+  rounded to its largest (Figure 3-25: `a: char; b: integer32; c: char`
+  at 0, 4, 8, 12 bytes); `[ALIGNED(1)]` on that record removes the final
+  word (Figure 3-26, 10 bytes), on `b` too moves `b` to 2 (Figure 3-27,
+  8 bytes).  `%word_alignment` restores the default, `%push_alignment` /
+  `%pop_alignment` save and restore the mode (p. 4-58; Table 4-11 p. 4-45
+  swaps them, reference-clarifications "errata").  A record laid out by
+  the natural rules carries its alignment as a specification, so it is
+  aligned the same where it is used (3.15.6.3 p. 3-70: "The
+  %natural_alignment directive applies not only to each field, but also
+  to the entire record").  `aligned record` is laid out by the natural
+  rules and `unaligned record` by the word rules whatever the
+  environment (3.10.6, Figures 3-15/3-16).  Refused under the natural
+  rules: array, set and varying fields without an attribute (ref
+  3.10.5.2 gives the natural alignment of simple types and records only).
+  The kernel is compiled in word mode; no image site of the natural rules
+  is known.
+- Packed records: the packing rules do not depend on the environment
+  (3.10.7).  An attribute on a packed record aligns it (`time_$clock_t`);
+  one on a packed record's field is accepted where it agrees with Table
+  3-3 (`aligned(1)` on a word-aligned field, `cal_$timezone_rec_t`'s
+  `drift: [aligned(1)] time_$clock_t`), refused otherwise.
+- Apollo's inserts (section 0.1), checked in
+  `crates/dpc-sema/src/tests/attrs.rs`: base.ins.pas `time_$clock_t =
+  [aligned(1)] PACKED RECORD` under `%PUSH_ALIGNMENT; %WORD_ALIGNMENT`
+  is 6 bytes, word aligned (`../source` base/base.h `_Static_assert`s:
+  size 6, `_Alignof` 2; without the attribute the 3.10.5.6 algorithm
+  would allocate it on a longword, its `high` being a naturally aligned
+  `linteger`); `ec2_$eventcount_t = [volatile] RECORD value:
+  [aligned(1)] integer32; awaiters: pinteger END` is 6 bytes, value at 0,
+  awaiters at 4, word aligned (ec/ec.h "Size: 6 bytes"); tty.ins.pas's
+  `timer: [aligned(1)] linteger` is at 4 of an 8-byte variant.
+  `dpc --check-only` over a copy of SR10.2 base.ins.pas is now clean
+  (before: the `[aligned(1)]` and `[volatile]` refusals, so every insert
+  that includes it failed), and over each of the other 55 inserts, with
+  base.ins.pas included first, 31 are clean; the other 24 fail for other
+  reasons (types from inserts not included, reals, set and record
+  function results, 4 files not UTF-8, an unequal-size type transfer in
+  kbd.ins.pas, and rws.ins.pas's attribute on a parameter type, `OUT
+  Status: [aligned(1)] Status_$T`, which ref 5.1 p. 5-2 does not allow
+  but Apollo's compiler evidently did).
+- **What `aligned(n)` changes in the code on the 68000 family: nothing
+  observed.**  Word alignment is all the 68010 needs; a word-aligned
+  integer32 is referenced with `.l` instructions like any other (ref
+  3.15.6.6 describes split references for objects known not to be
+  naturally aligned "Series 10000 Only").  EC2_$INIT 0xE42C72 clears an
+  eventcount with `clr.l (A0); clr.w (4,A0)`, EC2_$ADVANCE 0xE42CD0
+  increments its `value` with `addq.l #1,(A0)` (`ec2/` in `../source`).
+  A byte-aligned (`aligned(0)`) object of more than one byte at an
+  address not known to be even is refused when referenced (`dpc-ir`,
+  `check_even`): the 68010 traps on an odd word or longword access, and
+  how the original referenced one is not known.  This covers loads,
+  stores, by-value arguments, block copies and `for` fills, and an
+  element or field of a byte-aligned array (whose own type has no
+  attribute), and a target reached through a pointer whose base type is
+  byte aligned (ref 3.15.6.7 pp. 3-75..3-76); objects passed by address
+  are assumed naturally aligned by the callee (ref 3.15.6.8 p. 3-76).
+- More `%push_alignment` than `%pop_alignment` directives is an error
+  (ref 9 p. 9-45, "Unmatched %PUSH_ALIGNMENT directive"), as is the
+  reverse ("Alignment stack underflow").
+
+### 5.5 Volatile, atomic and device references (ref 3.15.1-3.15.3, 3.15.7; implemented, bead domain-pascal-t36)
+
+**The rules** (ref pp. 3-55..3-59, 3-76..3-77):
+
+- `volatile`: "memory contents may change in a way that the compiler
+  cannot predict"; the compiler must not keep the value in a register or
+  assume it unchanged (the 3.15.1 example: `i: [volatile] integer`,
+  modified through a pointer by a called routine).
+- `atomic` (scalar variables only: "integer, Boolean, character, and
+  enumerated"): implies volatile; an assignment whose right side contains
+  the variable is done so that other processes cannot change it in
+  between; Table 3-6: "perform updates with single instruction when
+  possible".
+- `device`: implies volatile; also no merging of adjacent references
+  ("the compiler optimizes the two 16-bit assignments by merging them
+  into one 32-bit assignment") and no "gratuitous read-modify-write
+  references ... instructions that do unnecessary reads"; `device(read)`
+  / `device(write)` make writes / reads errors (p. 3-59).
+- Inheritance (3.15.7): a type defined from a volatile or device type
+  inherits it (`resource = array[1..10] of semaphore`); every field of a
+  volatile or device record is volatile or device; a device field makes
+  its record device, a volatile field does not make its record volatile;
+  pointer types do not inherit, a dereference applies the target type's
+  attributes.
+
+**Implementation.**  `dpc-sema` gives an attributed type its own id
+whose `canon` is the original for compatibility (`semaphore` is still an
+integer).  `dpc-ir` wraps the address of every load, store and bit field
+of a volatile designator in `Addr::Volatile` (with `device` and `atomic`
+flags; `lower.rs`, `volatile_access`, `access_of`); taking an address
+(`addr`, passing by address) is not a reference and is not wrapped.  The
+selector (`isel.rs`) and the scheduler (`sched.rs`) then:
+
+- **reuse nothing:** a volatile variable is not a CSE leaf (12.4 R7), a
+  volatile local is not a register candidate (12.5) and stays in its
+  frame slot, a stored value is not forwarded, a test right after a store
+  reads the object again rather than branching on the store's flags
+  (7.1), a volatile value parameter is read from its slot at each use
+  (not loaded at entry, 12.2).  Golden `stores/volatile`: FIM_$ACKNOWLEDGE's
+  shape with a volatile `proc1_$as_id` re-reads and rescales it in each
+  statement where golden `regalloc/cse` reuses `D2`;
+- **keep the order:** the instructions that reference volatile objects
+  are marked, and the scheduler orders any two of them (`sched.rs`,
+  `volatile_references_keep_their_order`); other loads may pass them
+  (WIN_'s module-local 0xE190C8 reads TIME_$CLOCKH among the entry
+  loads; whether the original ordered more is not seen);
+- **device:** a zero is stored with `move.<s> #0` and `true` with `move.b
+  #0xff`, never `clr`/`st` (which read their operand on the 68000/68010;
+  section 13 "device registers": WIN_ 0xE19112, RING 0xE758E2, 0xE0A33E);
+  no in-place update (`addq`, `addi`, `andi`, `ori`, `bset`/`bclr` to
+  memory): `x := x + 1` is a load, an add and a store (**Uncertain**: no
+  image site of an update of a device register is catalogued); a
+  read-modify-write instruction on a device operand is refused after
+  selection, so no path can produce one silently; two adjacent device
+  stores are not a merging candidate (the refusal of section 13, "Store
+  merging", does not apply); a `for` fill of device elements falls back
+  to the loop, storing `move.<s> #0` per element;
+- **device pointers in parameters (Verified at one site):** a by-value
+  pointer parameter or a by-address slot through which a device object
+  is referenced is read from its frame slot before each reference, into
+  the lowest free register, not loaded at entry: the module-local
+  0xE0A328 (DMA_; `dma/init_m68450_channel.c`) reloads `movea.l
+  (8,A6),A0` before each of its five stores to the MC68450 channel
+  registers, while loading its word parameter at entry (`move.w
+  (0xc,A6),D0`), against the rule of 12.2 for parameters used more than
+  once.  How its parameter was declared is not known; the device
+  reading explains both the reloads and the `move.b #n` stores.  The
+  conformance unit `tests/conformance/dma_init_m68450_channel.pas` is
+  byte-identical.  A pointer *local* keeps the normal rules: WIN_'s
+  0xE190BC keeps the register block's address in A0 across its four
+  device references (0xE190EC..0xE19112).  A parameter both used as a
+  device base and otherwise is refused (not seen);
+- **atomic:** `x := x op c` (`+`, `-`, `&`, `!` with a constant) is the
+  one-instruction in-place update (`addq`, `subi`, `andi`, `ori` to
+  memory); any other assignment whose right side reads the variable is
+  refused (what the original did "when not possible" is not known), as
+  is an atomic device update.  No image site of `atomic` is known.
+- **refused:** a store into a packed field of a volatile or device
+  record (the field form reads its unit and writes it back, twice for a
+  field of several bits: `andi` then `ori`; for a device a gratuitous
+  read-modify-write, for a volatile object a shape not seen); copying a
+  record or array with volatile or device parts
+  (the block copy's shape for them is not seen), by assignment or as a
+  value parameter's copy on entry (`move.l (A0)+` would merge device
+  references), `in` on a volatile set
+  of more than 4 bytes in memory, a volatile `for` index, `address`
+  (3.15.4) and the size attributes (3.15.5).
+- `device(read)` / `device(write)` violations are errors (`dpc-ir`,
+  `check_device_access`).
 
 ---
 
@@ -4533,7 +4713,8 @@ kinds from the C in `../source/domain_os`.
     exception found, module-local 0xE0A328 (DMA_$INIT_M68450_CHANNEL in
     `dma/init_m68450_channel.c`), reloads `movea.l (8,A6),A0` before each
     of five stores, which are device-register stores (`device`, ref
-    3.15.3; rejected by `dpc-sema`).
+    3.15.3; implemented as the device rule of section 5.5, conformance
+    unit `dma_init_m68450_channel.pas`).
   - **used once: loaded where needed**, into a register no earlier load
     of the body used: IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2 (the
     last one callee-saved, although A0 and A1 are free again);
@@ -5833,15 +6014,18 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     included).  Ref 3.15.3 (p. 3-57): the
     `device` attribute stops "gratuitous read-modify-write references";
     `clr` reads its operand on the 68000.  How the objects were declared
-    is not known.  `dpc-sema` rejects `device`, `volatile` and `atomic`
-    ("not supported yet") so that such stores are never compiled to `clr`.
+    is not known.  Implemented for `device` objects (section 5.5): `move
+    #0`, and `move.b #0xff` for `true` (`st` reads its operand too);
+    0xE0A328 (five `move.b #n` stores to `device` registers, among them
+    0xE0A33E `move.b #-1,(A0)`) is a byte-identical conformance unit.
 - **Store merging (reference; Uncertain in the image):** ref 3.15.3,
   p. 3-57: "By default, the compiler optimizes certain adjacent references
   by merging them into one large reference" (`a := 0; b := 0` on two
   `integer16`s becomes one 32-bit store).  Not yet found in the image;
   the two adjacent `clr.b` of XPD_$RESET_PTRACE_OPTS (0xE5B15E, 0xE5B164)
   are not merged.  `dpc` rejects two consecutive stores to adjacent
-  objects of one base that fit in a longword.
+  objects of one base that fit in a longword, except `device` objects,
+  which the reference exempts from merging (section 5.5).
 - `link.w`, `bsr.s`/`bsr.w`, `bra.s`/`bra.w`: the length must match the
   original, so emit explicit sizes and never rely on gas relaxation
   (`jbra`).

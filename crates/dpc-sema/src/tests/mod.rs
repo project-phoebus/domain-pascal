@@ -6,6 +6,7 @@
 //! - `checks`: name resolution, type checking, diagnostics;
 //! - `tst_lock`: the PROC1_$TST_LOCK module end to end.
 
+mod attrs;
 mod checks;
 mod layout;
 mod packed;

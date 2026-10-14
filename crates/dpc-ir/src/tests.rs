@@ -3396,3 +3396,238 @@ end;
         ]
     );
 }
+
+/// The single statement of the single routine of `src`.
+fn only_stmt(src: &str) -> StmtKind {
+    let m = lower_src(src).unwrap_or_else(|e| panic!("{e:#?}"));
+    m.functions[0].body[0].kind.clone()
+}
+
+/// References to volatile objects are wrapped in `Addr::Volatile`
+/// (ref 3.15.1-3.15.3), with the attribute inherited from records and
+/// arrays and through dereferences (3.15.7); addresses only taken are not.
+#[test]
+fn volatile_references_are_wrapped() {
+    let types = "module m;
+type
+  lock = [volatile] integer;
+  queue = record key: lock; users: integer end;
+  volque = [volatile] queue;
+  regs = [device] record csr: char; dcr: char end;
+  vint = [atomic] integer;
+var
+  q: queue;
+  vq: volque;
+  r: extern ^regs;
+  a: vint;
+  i: integer;
+procedure x(var z: integer); extern;
+";
+    let vol = |src: &str| match only_stmt(&format!("{types}{src}")) {
+        StmtKind::Store { addr, .. } => addr.unwrap_volatile().1,
+        s => panic!("{s:?}"),
+    };
+    let dflt = Access::default();
+    // A volatile field; not its neighbour (p. 3-77: "references to
+    // wait.key are volatile ... references to wait.users are not").
+    assert_eq!(vol("procedure p; begin q.key := 1 end;"), Some(dflt));
+    assert_eq!(vol("procedure p; begin q.users := 1 end;"), None);
+    // `volque = [VOLATILE] queue`: every field.
+    assert_eq!(vol("procedure p; begin vq.users := 1 end;"), Some(dflt));
+    // Through a pointer to a device record.
+    assert_eq!(
+        vol("procedure p; begin r^.dcr := 'a' end;"),
+        Some(Access {
+            device: true,
+            atomic: false
+        })
+    );
+    assert_eq!(
+        vol("procedure p; begin a := 1 end;"),
+        Some(Access {
+            device: false,
+            atomic: true
+        })
+    );
+    // A load as well.
+    match only_stmt(&format!("{types}procedure p; begin i := q.key end;")) {
+        StmtKind::Store {
+            value: Expr::Load { addr, .. },
+            ..
+        } => assert!(matches!(addr, Addr::Volatile { .. })),
+        s => panic!("{s:?}"),
+    }
+    // The address of a volatile object passed by address: not a reference.
+    match only_stmt(&format!("{types}procedure p; begin x(q.key) end;")) {
+        StmtKind::Call(c) => {
+            assert!(matches!(c.args[0], Arg::Address { ref addr, .. }
+                if !matches!(addr, Addr::Volatile { .. })))
+        }
+        s => panic!("{s:?}"),
+    }
+}
+
+/// ref 3.15.3 p. 3-59: `device(read)` objects may not be written,
+/// `device(write)` ones not read; a device record's packed field is not
+/// stored into (a read-modify-write of its unit); a record with volatile
+/// parts is not block-copied.
+#[test]
+fn device_access_restrictions() {
+    let types = "module m;
+type
+  ro = [device(read)] char;
+  wo = [device(write)] char;
+  pr = [device] packed record a: 0..15; b: 0..15 end;
+  vr = record a: [volatile] integer32; b: integer32; c: integer32 end;
+var
+  r: extern ro;
+  w: extern wo;
+  c: char;
+  p: extern pr;
+  v1, v2: vr;
+";
+    let e = errs(&format!("{types}procedure x; begin r := 'a' end;"));
+    assert!(e[0].contains("writing a read-only device object"), "{e:?}");
+    let e = errs(&format!("{types}procedure x; begin c := w end;"));
+    assert!(e[0].contains("reading a write-only device object"), "{e:?}");
+    lower_src(&format!("{types}procedure x; begin c := r; w := c end;")).unwrap();
+    let e = errs(&format!("{types}procedure x; begin p.a := 1 end;"));
+    assert!(e[0].contains("packed field of a device record"), "{e:?}");
+    let e = errs(&format!("{types}procedure x; begin v1 := v2 end;"));
+    assert!(e[0].contains("volatile or device parts"), "{e:?}");
+}
+
+/// A volatile local is not offered to the selector as a register
+/// candidate (codegen-patterns 12.5); ref 3.15.1's example `i: [volatile]
+/// integer`.
+#[test]
+fn volatile_locals_stay_in_the_frame() {
+    let m = lower_src(
+        "module m;
+procedure p;
+var i: [volatile] integer; j: integer32; k: integer;
+begin
+  i := 0; j := 1; k := i;
+end;",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    let offs: Vec<i32> = f.scalar_locals.iter().map(|l| l.offset).collect();
+    assert_eq!(offs.len(), 2, "{offs:?}");
+    assert!(!offs.contains(&-2), "{offs:?}");
+}
+
+/// A byte-aligned word at an odd offset (ref 3.15.6.3 Figure 3-24: `b,
+/// c: [ALIGNED(0)] integer16` after a char, at 1 and 3) is not
+/// referenced with a word instruction (the 68010 traps); at an even
+/// offset it is.
+#[test]
+fn byte_aligned_words_at_odd_addresses_are_refused() {
+    let types = "module m;
+type
+  s2 = record a: char; b, c: [aligned(0)] integer16 end;
+  s3 = record a, z: char; b: [aligned(0)] integer16 end;
+var
+  r: s2;
+  q: s3;
+  i: integer;
+";
+    let e = errs(&format!("{types}procedure x; begin i := r.b end;"));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    let e = errs(&format!("{types}procedure x; begin r.c := 1 end;"));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    lower_src(&format!(
+        "{types}procedure x; begin q.b := 1; i := q.b end;"
+    ))
+    .unwrap();
+}
+
+/// An element of a byte-aligned array has a type without the attribute,
+/// but may lie at an odd address all the same (`x` after a char at 1):
+/// refused when it is not known to be even, accepted when it is.
+#[test]
+fn elements_of_byte_aligned_arrays_at_odd_addresses_are_refused() {
+    let types = "module m;
+type
+  oa = [aligned(0)] array[1..2] of integer16;
+  r1 = record c: char; f: oa end;
+var
+  c0: char;
+  x: oa;
+  rr: r1;
+  i: integer;
+procedure v(n: integer); val_param; extern;
+";
+    let e = errs(&format!("{types}procedure p; begin i := x[1] end;"));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    let e = errs(&format!("{types}procedure p; begin v(x[2]) end;"));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    // `f` would cross two word boundaries at 1, so it is at 2 (p. 3-26).
+    lower_src(&format!("{types}procedure p; begin i := rr.f[2] end;")).unwrap();
+    // Through a pointer to a byte-aligned word (ref 3.15.6.7: the base
+    // type gives the target's alignment): not known to be even.
+    let e = errs(
+        "module m;
+type bw = [aligned(0)] integer16;
+var bp: extern ^bw; i: integer;
+procedure p; begin i := bp^ end;",
+    );
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    // Nor is a `for` fill (`clr.w (A0)+`) of another unit's byte-aligned
+    // array.
+    let e = errs(
+        "module m;
+type oa = [aligned(0)] array[1..4] of integer16;
+var x: extern oa;
+procedure p; var k: integer; begin for k := 1 to 4 do x[k] := 0 end;",
+    );
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    // Nor a block copy (`move.l (A0)+,(A1)+`) from or to one at an odd
+    // address.
+    let e = errs(
+        "module m;
+type oa = [aligned(0)] array[1..8] of integer16;
+var c0: char; x: oa; y: oa;
+procedure p; begin x := y end;",
+    );
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+}
+
+/// A value parameter that is a record with device or volatile parts is
+/// not copied on entry (a block copy merges device references, ref 3.15.3
+/// p. 3-57), as its assignment is not; a volatile scalar one is.
+#[test]
+fn volatile_record_value_parameters_are_not_copied() {
+    let types = "module m;
+type
+  dr = [device] record a, b, c, d: integer end;
+  vr = record a: [volatile] integer; b: integer end;
+  vi = [volatile] integer;
+var h: extern integer;
+";
+    for t in ["dr", "vr"] {
+        let e = errs(&format!("{types}procedure p(r: {t}); begin h := r.b end;"));
+        assert!(e[0].contains("volatile or device parts"), "{t}: {e:?}");
+    }
+    lower_src(&format!("{types}procedure p(x: vi); begin h := x end;")).unwrap();
+}
+
+/// A packed field of a volatile record is not stored into (the field
+/// form reads and writes its unit back, `andi` then `ori`).
+#[test]
+fn volatile_packed_fields_are_not_stored() {
+    let e = errs(
+        "module m;
+type pr = [volatile] packed record a: 0..15; b: 0..15 end;
+var p: extern pr; t: extern integer;
+procedure x; begin p.a := 3 end;",
+    );
+    assert!(e[0].contains("packed field of a volatile record"), "{e:?}");
+    lower_src(
+        "module m;
+type pr = [volatile] packed record a: 0..15; b: 0..15 end;
+var p: extern pr; t: extern integer;
+procedure x; begin t := p.b end;",
+    )
+    .unwrap();
+}

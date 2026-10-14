@@ -24,8 +24,8 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      looks at any routine (each one named, see WORKAROUNDS; --no-workaround
      NAME skips one).  Only declarations are rewritten, never text in a
      comment, and none changes a size or an offset the surviving routines
-     use (the word-aligned `timer' is where the aligned declaration puts
-     it), so a routine reported OK compiles to the image's bytes.
+     use, so a routine reported OK compiles to the image's bytes.  (None
+     is needed at present.)
   3. Stage "check" and "codegen", repeated: `dpc --check-only', then full
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
@@ -77,11 +77,10 @@ ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(\d+)\s*bytes')
 # in base/base.ins.pas), is no longer one: dpc lays packed records out by
 # ref 3.10.7 (bead domain-pascal-xlm), and the `packed-overlay' and
 # `packed-record' rewrites that reduced them to unpacked records were
-# removed.
-WORKAROUNDS = [
-    ('field-aligned', 'attribute on a record field (ref 3.15): `[aligned(n)]\' dropped',
-     '.ins.pas', re.compile(r'(:\s*)\[\s*aligned(?:\s*\(\s*\d+\s*\))?\s*\]\s*', re.I), r'\1'),
-]
+# removed.  Nor is `field-aligned', which dropped `[aligned(n)]' from
+# record fields (tty.ins.pas `timer: [aligned(1)] linteger'): dpc lays
+# alignment attributes out by ref 3.15.6 (bead domain-pascal-l9p).
+WORKAROUNDS = []
 
 
 CODE_SKIP_RE = re.compile(r"""\{[^}]*\}|\(\*.*?\*\)|"[^"\n]*"|'(?:[^'\n]|'')*'""", re.S)
