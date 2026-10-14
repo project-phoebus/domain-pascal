@@ -1611,9 +1611,22 @@ impl<'t> Checker<'t> {
                         };
                         let l = self.set_member(elem, lo);
                         let h = hi.map(|h| self.set_member(elem, h)).unwrap_or(l);
-                        if let (Some(l), Some(h)) = (l, h) {
-                            members.extend(l..=h);
+                        let Some((l, h)) = l.zip(h) else {
+                            continue;
+                        };
+                        // A member outside the set's base type has no bit
+                        // in the set (ref 3.9.3 p. 3-16); refused, not
+                        // enumerated (bead domain-pascal-1dn: `[0..
+                        // 2147483647]` for a `set of 0..31` ran for ever).
+                        let (elo, ehi) = self.types.ordinal_range(elem).unwrap_or((0, 1023));
+                        if l <= h && (l < elo || h > ehi) {
+                            self.error(
+                                lo.span,
+                                format!("set element out of range {elo}..{ehi} of the set's type"),
+                            );
+                            continue;
                         }
+                        members.extend(l..=h);
                     }
                     members.sort_unstable();
                     members.dedup();
@@ -1812,6 +1825,18 @@ impl<'t> Checker<'t> {
 
     /// Process a routine declaration (heading, and body if any).
     fn routine(&mut self, r: &ast::Routine, parent: Option<RoutineId>) -> Option<RoutineId> {
+        // For the driver's internal-error backstop (`diag::set_context`).
+        let outer = dpc_syntax::diag::set_context(Some(r.span));
+        let id = self.routine_in_context(r, parent);
+        dpc_syntax::diag::set_context(outer);
+        id
+    }
+
+    fn routine_in_context(
+        &mut self,
+        r: &ast::Routine,
+        parent: Option<RoutineId>,
+    ) -> Option<RoutineId> {
         // A body for a routine declared `forward` or `extern` earlier in
         // this scope (ref 5.5.2 p. 5-16; 7.3.4 p. 7-11).
         let earlier = self.scopes.last().unwrap().names.get(&r.name.name).cloned();

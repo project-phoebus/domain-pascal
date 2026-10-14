@@ -106,6 +106,14 @@ pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
 
 /// [`select`] with the body scheduled under `sched` (`sched.rs`).
 pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
+    // For the driver's internal-error backstop (`diag::set_context`).
+    let outer = dpc_syntax::diag::set_context(Some(f.span));
+    let insns = select_in_context(f, sched);
+    dpc_syntax::diag::set_context(outer);
+    insns
+}
+
+fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
             // A bare `rts` has no frame for the copy; whether the original
@@ -215,7 +223,8 @@ pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diag
         // stores, which holding a value does not change.
         return Err(unsupported(
             f.span,
-            "a body whose reusable computed values change when they are held (codegen-patterns              12.4 R7) is",
+            "a body whose reusable computed values change when they are held (codegen-patterns \
+             12.4 R7) is",
         ));
     }
     Ok(body)
@@ -2677,6 +2686,28 @@ struct Uses<'a> {
 }
 
 impl Uses<'_> {
+    /// The uses walked since `start`, a loop's, as if the loop were
+    /// walked twice (below, `Repeat`).  Walking it twice would take time
+    /// exponential in the loop nesting (bead domain-pascal-1dn: 30 nested
+    /// `repeat`s did not finish); what the walk is for (the first use of
+    /// each parameter, whether all its uses agree, whether there are two)
+    /// needs no more than two of each use, so that is all that is kept.
+    fn twice(&mut self, start: usize) {
+        let mut seen: Vec<((i32, ParamUse), u8)> = Vec::new();
+        let tail = self.out.split_off(start);
+        let mut kept = Vec::new();
+        for u in tail {
+            match seen.iter_mut().find(|(k, _)| *k == u) {
+                Some((_, n)) if *n >= 2 => continue,
+                Some((_, n)) => *n += 1,
+                None => seen.push((u, 1)),
+            }
+            kept.push(u);
+        }
+        self.out.extend_from_slice(&kept);
+        self.out.extend_from_slice(&kept);
+    }
+
     fn is_param(&self, o: i32) -> bool {
         self.f.value_params.iter().any(|p| p.offset == o)
     }
@@ -2823,16 +2854,16 @@ impl Uses<'_> {
                 // (0x14), used once outside them, at 0xE4A03C; 0xE49E5C,
                 // 0xE49E60), so the body is walked twice.
                 StmtKind::Repeat { body, until } => {
-                    for _ in 0..2 {
-                        self.stmts(body);
-                        self.cond(until);
-                    }
+                    let start = self.out.len();
+                    self.stmts(body);
+                    self.cond(until);
+                    self.twice(start);
                 }
                 StmtKind::While { cond, body } => {
-                    for _ in 0..2 {
-                        self.cond(cond);
-                        self.stmts(body);
-                    }
+                    let start = self.out.len();
+                    self.cond(cond);
+                    self.stmts(body);
+                    self.twice(start);
                 }
                 // The pointers of the arrays a `for` loop steps through
                 // are loaded once, before it (codegen-patterns 7.4;
@@ -2848,9 +2879,9 @@ impl Uses<'_> {
                         }
                         self.stepped.push(l.index.offset);
                     }
-                    for _ in 0..2 {
-                        self.stmts(&l.body);
-                    }
+                    let start = self.out.len();
+                    self.stmts(&l.body);
+                    self.twice(start);
                     if arrays.is_ok() {
                         self.stepped.pop();
                     }
@@ -9191,7 +9222,14 @@ impl Selector {
                 let src = match self.eval(e)? {
                     Val::Mem(ea) => ea,
                     Val::Reg(r) => Ea::Reg(r),
-                    _ => unreachable!("a variable's value is memory or its register"),
+                    // Bead domain-pascal-1dn: a refusal, not a crash, if
+                    // a variable's value is ever anything else.
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "this boolean variable operand of a plain `and`/`or` is",
+                        ))
+                    }
                 };
                 let d = self.alloc_d()?;
                 self.out.push(Insn::Move {
@@ -9231,7 +9269,10 @@ impl Selector {
             return match self.eval(e)? {
                 Val::Mem(ea) => Ok(ea),
                 Val::Reg(r) => Ok(Ea::Reg(r)),
-                _ => unreachable!("a variable's value is memory or its register"),
+                _ => Err(unsupported(
+                    self.span,
+                    "this boolean variable operand of a plain `and`/`or` is",
+                )),
             };
         }
         Ok(Ea::Reg(Reg::D(self.bool_into_reg(c)?)))

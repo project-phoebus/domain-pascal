@@ -909,6 +909,18 @@ fn lower_routine(
     id: RoutineId,
     uplevel: &[(i32, u32)],
 ) -> Result<Function, Vec<Diagnostic>> {
+    // For the driver's internal-error backstop (`diag::set_context`).
+    let outer = dpc_syntax::diag::set_context(Some(p.routine(id).span));
+    let f = lower_routine_in_context(p, id, uplevel);
+    dpc_syntax::diag::set_context(outer);
+    f
+}
+
+fn lower_routine_in_context(
+    p: &Program,
+    id: RoutineId,
+    uplevel: &[(i32, u32)],
+) -> Result<Function, Vec<Diagnostic>> {
     let r = p.routine(id);
     let mut errors = Vec::new();
     for name in [&r.code_section, &r.data_section] {

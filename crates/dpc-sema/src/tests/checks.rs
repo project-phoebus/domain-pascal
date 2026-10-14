@@ -154,6 +154,24 @@ fn initialisers_flatten_to_stores() {
     );
 }
 
+/// Bead domain-pascal-1dn (fuzzer, mutate seed 777): a set initialiser's
+/// range outside the set's type is an error, not enumerated member by
+/// member (`[0..2147483647]` ran for minutes).
+#[test]
+fn set_initialiser_out_of_the_sets_range() {
+    let e = errs("module m; var s: set of 0..31 := [0..2147483647];");
+    assert_eq!(
+        e,
+        vec!["t.pas:1:35: error: set element out of range 0..31 of the set's type"]
+    );
+    assert_err(
+        "module m; var s: set of 0..31 := [1, 40];",
+        "set element out of range 0..31",
+    );
+    // An empty range is no member at all.
+    analyze_src("module m; var s: set of 0..31 := [5..2];").unwrap();
+}
+
 #[test]
 fn variant_and_packed_record_initialisers() {
     // ref 3.10.4 p. 3-22: a variant's field by name.  status_$t as

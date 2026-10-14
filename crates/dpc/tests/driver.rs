@@ -2165,3 +2165,73 @@ end;
         );
     }
 }
+
+/// Bead domain-pascal-1dn: a panic in the compiler (driven here by the
+/// test-only `DPC_INTERNAL_PANIC_FOR_TEST`, since no input is known to
+/// panic) is one `internal error` line on stderr, without Rust's panic
+/// text, exit status 3, and no output file.  `N` > 0 panics at the Nth
+/// time a phase enters a routine: the checker enters `p` (1) and `q`
+/// (2), so 2 is reported at `q`, not at `p` before it; 0 panics before
+/// any routine, reported at the input file.
+#[test]
+fn internal_error_backstop() {
+    let dir = scratch("internal_error_backstop");
+    let src = dir.join("two.pas");
+    std::fs::write(
+        &src,
+        "module m;\nvar x: integer;\nprocedure p;\nbegin\n  x := 1;\nend;\n\
+         procedure q;\nbegin\n  x := 2;\nend;\n",
+    )
+    .unwrap();
+    let out = dir.join("two.s");
+    let at = format!("{}", src.display());
+    for (n, want) in [
+        (
+            "0",
+            format!("{at}: internal error: DPC_INTERNAL_PANIC_FOR_TEST (at "),
+        ),
+        (
+            "1",
+            format!("{at}:3:1: internal error: DPC_INTERNAL_PANIC_FOR_TEST (at "),
+        ),
+        (
+            "2",
+            format!("{at}:7:1: internal error: DPC_INTERNAL_PANIC_FOR_TEST (at "),
+        ),
+        // The lowering, then the selector, of `q` after `p`.
+        (
+            "4",
+            format!("{at}:7:1: internal error: DPC_INTERNAL_PANIC_FOR_TEST (at "),
+        ),
+        (
+            "8",
+            format!("{at}:7:1: internal error: DPC_INTERNAL_PANIC_FOR_TEST (at "),
+        ),
+    ] {
+        let r = dpc()
+            .env("DPC_INTERNAL_PANIC_FOR_TEST", n)
+            .env_remove("RUST_BACKTRACE")
+            .arg("-o")
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert_eq!(r.status.code(), Some(3), "{n}");
+        let err = String::from_utf8(r.stderr).unwrap();
+        assert_eq!(err.lines().count(), 1, "{n}: {err}");
+        assert!(err.starts_with(&want), "{n}: {err}");
+        assert!(err.ends_with("; please report)\n"), "{n}: {err}");
+        assert!(!err.contains("panicked"), "{n}: {err}");
+        assert!(!out.exists(), "{n}: output written");
+    }
+    // Past the last routine: compiled as usual.
+    let r = dpc()
+        .env("DPC_INTERNAL_PANIC_FOR_TEST", "1000")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(r.success());
+    assert!(out.exists());
+}

@@ -597,21 +597,159 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The passes recurse over the program's nesting; they run on a thread
+    // whose stack `MAX_DEPTH` (dpc_syntax::parser) is sized for (bead
+    // domain-pascal-9gb).  The backstop runs on that thread too: the
+    // routine context it reports is that thread's.
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("dpc".into())
+            .stack_size(dpc_syntax::parser::STACK_SIZE)
+            .spawn_scoped(s, || run(&args))
+            .map(|h| h.join())
+    })
+    .unwrap_or_else(|e| Err(Box::new(e)))
+    .unwrap_or_else(|_| {
+        // The backstop catches every panic of the compiler; this is the
+        // thread itself failing.
+        eprintln!("{PROG}: internal error: the compiler thread failed (please report)");
+        ExitCode::from(3)
+    })
+}
+
+/// Compile `args.input`, report, and give the exit status: 0, 1 with
+/// diagnostics, 3 on an internal error ([`backstop`]).
+fn run(args: &Args) -> ExitCode {
     let mut sm = SourceMap::new();
     let mut warnings = Vec::new();
-    let result = compile(&args, &mut sm, &mut warnings);
+    let panic_now = test_panic_setup();
+    let result = backstop(|| {
+        if panic_now {
+            panic!("DPC_INTERNAL_PANIC_FOR_TEST");
+        }
+        compile(args, &mut sm, &mut warnings)
+    });
     for d in &warnings {
         eprintln!("{}", d.render_with_source(&sm, PROG));
     }
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(diags) => {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Err(diags)) => {
             for d in &diags {
                 eprintln!("{}", d.render_with_source(&sm, PROG));
             }
             ExitCode::FAILURE
         }
+        Err(panic) => {
+            eprintln!("{}", internal_error(args, &sm, &panic));
+            ExitCode::from(3)
+        }
     }
+}
+
+/// A panic caught by [`backstop`]: its message and where in the compiler
+/// it was raised.
+struct Panic {
+    message: String,
+    location: String,
+}
+
+std::thread_local! {
+    static PANIC: std::cell::RefCell<Option<Panic>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f`, turning a panic (a compiler bug: every user-reachable failure
+/// is a diagnostic) into `Err` instead of a crash.  The default panic
+/// message is suppressed unless `RUST_BACKTRACE` is set (not to `0`), so the report is
+/// the one line of [`internal_error`].
+fn backstop<T>(f: impl FnOnce() -> T) -> Result<T, Panic> {
+    let verbose = std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0");
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic".to_string()
+        };
+        let location = info
+            .location()
+            .map_or_else(String::new, |l| format!("{}:{}", l.file(), l.line()));
+        PANIC.with(|p| *p.borrow_mut() = Some(Panic { message, location }));
+        if verbose {
+            default(info);
+        }
+    }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    let _ = std::panic::take_hook();
+    r.map_err(|_| {
+        PANIC.with(|p| p.borrow_mut().take()).unwrap_or(Panic {
+            message: "panic".into(),
+            location: String::new(),
+        })
+    })
+}
+
+/// The report of a caught panic, one line: `FILE:LINE:COL: internal
+/// error: MSG (at SRC:LINE; please report)`, at the routine being
+/// compiled (`dpc_syntax::diag::context`) when there is one, else
+/// `FILE: internal error: ...` at the input file.  A message of several
+/// lines (`assert_eq!`'s) is joined into one.
+fn internal_error(args: &Args, sm: &SourceMap, panic: &Panic) -> String {
+    let at = if panic.location.is_empty() {
+        String::new()
+    } else {
+        format!("at {}; ", panic.location)
+    };
+    let text: Vec<&str> = panic
+        .message
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let message = format!("internal error: {} ({at}please report)", text.join(" "));
+    match dpc_syntax::diag::context() {
+        Some(span) => {
+            let file = sm.file(span.file);
+            let lc = file.line_col(span.lo);
+            format!("{}:{}:{}: {message}", file.path.display(), lc.line, lc.col)
+        }
+        None => format!("{}: {message}", args.input.display()),
+    }
+}
+
+/// Test only: `DPC_INTERNAL_PANIC_FOR_TEST=N` makes the compiler panic,
+/// so the tests can drive the internal-error backstop end to end (no
+/// input is known to panic).  `0` panics before anything is compiled;
+/// `N` > 0 when the phases (checker, lowering, selector) enter a
+/// routine for the Nth time, counting every entry of every phase
+/// (`dpc_syntax::diag::set_context_hook`).  Not for anything but tests.
+/// True for `0`: the caller panics.
+fn test_panic_setup() -> bool {
+    std::thread_local! {
+        static LEFT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let Some(n) = std::env::var("DPC_INTERNAL_PANIC_FOR_TEST")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    if n == 0 {
+        return true;
+    }
+    LEFT.with(|l| l.set(n));
+    dpc_syntax::diag::set_context_hook(Some(|_| {
+        let left = LEFT.with(|l| {
+            l.set(l.get().saturating_sub(1));
+            l.get()
+        });
+        if left == 0 {
+            panic!("DPC_INTERNAL_PANIC_FOR_TEST");
+        }
+    }));
+    false
 }
 
 #[cfg(test)]
@@ -878,5 +1016,38 @@ mod tests {
                 (".data".to_string(), "X".to_string())
             ]
         );
+    }
+
+    /// Bead domain-pascal-1dn: a panic is caught and reported as one
+    /// `internal error` line, at the routine being compiled when one is
+    /// recorded, else at the input file.
+    #[test]
+    fn backstop_reports_a_panic_as_an_internal_error() {
+        assert_eq!(backstop(|| 7).ok(), Some(7));
+        let p = backstop(|| panic!("boom {}", 1)).err().unwrap();
+        assert_eq!(p.message, "boom 1");
+        assert!(p.location.contains("main.rs"), "{}", p.location);
+        let a = args(&["m.pas"]).unwrap();
+        let mut sm = SourceMap::new();
+        dpc_syntax::diag::set_context(None);
+        let line = internal_error(&a, &sm, &p);
+        assert!(
+            line.starts_with("m.pas: internal error: boom 1 (at "),
+            "{line}"
+        );
+        assert!(line.ends_with("; please report)"), "{line}");
+        let f = sm.add("m.pas", "module m;\nprocedure p; begin end;\n".into());
+        let span = dpc_syntax::Span::new(f, 10, 22);
+        dpc_syntax::diag::set_context(Some(span));
+        let line = internal_error(&a, &sm, &p);
+        dpc_syntax::diag::set_context(None);
+        assert!(
+            line.starts_with("m.pas:2:1: internal error: boom 1 (at "),
+            "{line}"
+        );
+        // One line, whatever the message.
+        let p = backstop(|| assert_eq!(1, 2)).err().unwrap();
+        let line = internal_error(&a, &sm, &p);
+        assert_eq!(line.lines().count(), 1, "{line}");
     }
 }

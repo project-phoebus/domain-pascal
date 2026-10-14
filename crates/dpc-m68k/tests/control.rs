@@ -676,3 +676,25 @@ end;",
         "{cycle:?}"
     );
 }
+
+/// Bead domain-pascal-1dn: the parameter-use walk took time exponential
+/// in the loop nesting (each loop body was walked twice), so 30 nested
+/// `repeat`s never finished.  Now each nesting costs a constant factor.
+#[test]
+fn deeply_nested_loops_compile_quickly() {
+    let n = 40;
+    for (head, tail) in [
+        ("repeat ", " until x = 1"),
+        ("while x = 1 do begin ", " end"),
+    ] {
+        let src = format!(
+            "module m; var x: integer; procedure p(v: integer); options(val_param); \
+             begin {}x := v{}; end;",
+            head.repeat(n),
+            tail.repeat(n)
+        );
+        let t = std::time::Instant::now();
+        let _ = compile(&src);
+        assert!(t.elapsed().as_secs() < 10, "{head}: {:?}", t.elapsed());
+    }
+}

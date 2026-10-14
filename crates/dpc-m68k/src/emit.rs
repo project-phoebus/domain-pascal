@@ -403,6 +403,9 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .filter(|(f, _)| f.code_section == sec)
         {
             last_aligns = al;
+            // For the driver's internal-error backstop
+            // (`diag::set_context`): the routine, up to its pool cells.
+            let outer = dpc_syntax::diag::set_context(Some(f.span));
             match isel::select_with(f, opts.schedule) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
@@ -434,6 +437,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                     failed = true;
                 }
             }
+            dpc_syntax::diag::set_context(outer);
         }
         // Branch sizes need every routine of the section laid out.
         let base = frag.map_or(0, |f| f.origin % 4);

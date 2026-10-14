@@ -2,6 +2,7 @@
 //! followed by the source line with the span marked, rustc/clang style
 //! ([`Diagnostic::render_with_source`]).
 
+use std::cell::Cell;
 use std::fmt;
 
 use crate::source::{SourceFile, SourceMap, Span};
@@ -24,6 +25,38 @@ impl fmt::Display for Severity {
             Severity::Note => "note",
         })
     }
+}
+
+thread_local! {
+    static CONTEXT: Cell<Option<Span>> = const { Cell::new(None) };
+    static CONTEXT_HOOK: Cell<Option<fn(Span)>> = const { Cell::new(None) };
+}
+
+/// Records `span` as the construct being compiled (a routine, by the
+/// checker, the lowering and the selector) and returns the one recorded
+/// before.  Each phase restores the one before when the routine is done,
+/// so outside every routine it is `None`.  Only the driver's
+/// internal-error backstop reads it ([`context`]): a panic is reported at
+/// the routine it happened in.
+pub fn set_context(span: Option<Span>) -> Option<Span> {
+    let outer = CONTEXT.with(|c| c.replace(span));
+    if let (Some(span), Some(hook)) = (span, CONTEXT_HOOK.with(Cell::get)) {
+        hook(span);
+    }
+    outer
+}
+
+/// Test only: `hook` is called with each span [`set_context`] records
+/// from now on, on this thread, after recording it.  The driver's
+/// `DPC_INTERNAL_PANIC_FOR_TEST` uses it to panic inside a routine, to
+/// test its internal-error backstop end to end.
+pub fn set_context_hook(hook: Option<fn(Span)>) {
+    CONTEXT_HOOK.with(|h| h.set(hook));
+}
+
+/// The span [`set_context`] last recorded on this thread.
+pub fn context() -> Option<Span> {
+    CONTEXT.with(Cell::get)
 }
 
 /// A message, optionally tied to a source location.

@@ -78,12 +78,21 @@ struct Parser<'a> {
 }
 
 /// Maximum nesting of expressions, types, statements, initialisers,
-/// routines and parameter lists.  Deeper input is rejected with a
-/// diagnostic instead of overflowing the stack.  Generous for real code;
-/// small enough for a 2 MB thread stack (the `cargo test` default) in a
-/// debug build, where the costliest level (a parenthesised expression)
-/// takes about 11 KB of stack.
-const MAX_DEPTH: usize = 128;
+/// routines and parameter lists, counting each operator of a chain
+/// (`a + b + c`) and each selector (`a^.b[i]`) as a level.  Deeper input
+/// is rejected with a diagnostic instead of overflowing the stack of the
+/// passes that recurse over the tree.  Sized for [`STACK_SIZE`] in a debug
+/// build (bead domain-pascal-9gb): there, a level costs at most about
+/// 13 KB across all the passes (5000 `*` overflowed 64 MB; every
+/// construct at this limit compiles), so the margin is about 4x.  Far
+/// past real code: a 997-term sum is accepted.
+const MAX_DEPTH: usize = 1000;
+
+/// The stack the compiler runs on (the driver's compile thread), for which
+/// [`MAX_DEPTH`] is sized.  Callers running the passes on deep input use
+/// a thread of this size; the 2 MB of a `cargo test` thread is enough
+/// only for moderately nested input.
+pub const STACK_SIZE: usize = 64 << 20;
 
 /// A short description of a token for diagnostics.
 fn describe(k: &T) -> String {
@@ -243,6 +252,30 @@ impl<'a> Parser<'a> {
         let r = f(self);
         self.depth -= 1;
         r
+    }
+
+    /// Run `f`, the loop of a left-associative chain (`a + b + c`, ...),
+    /// whose every operator calls [`Self::link`]: the operators nest the
+    /// tree as deeply as parentheses do, and the passes after the parser
+    /// recurse over it, so they count against [`MAX_DEPTH`] too (a chain
+    /// of 1000 `+` overflowed the checker's stack, bead domain-pascal-1dn).
+    fn chain<X>(&mut self, f: impl FnOnce(&mut Self) -> PResult<X>) -> PResult<X> {
+        let depth = self.depth;
+        let r = f(self);
+        self.depth = depth;
+        r
+    }
+
+    /// One more operator of a [`Self::chain`]: one level deeper, or the
+    /// "nested too deeply" error at the operator.
+    fn link(&mut self) -> PResult<()> {
+        if self.depth >= MAX_DEPTH {
+            let span = self.span();
+            self.error_at(span, "constructs nested too deeply");
+            return Err(());
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -1850,8 +1883,13 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_inner(&mut self) -> PResult<Expr> {
+        self.chain(Self::or_else_chain)
+    }
+
+    fn or_else_chain(&mut self) -> PResult<Expr> {
         let mut lhs = self.and_then()?;
         while self.at_kw(Kw::Or) && matches!(self.peek_at(1), T::Keyword(Kw::Else)) {
+            self.link()?;
             self.bump();
             self.bump();
             let rhs = self.and_then()?;
@@ -1862,8 +1900,13 @@ impl<'a> Parser<'a> {
 
     /// and_then = relation {`and then` relation}
     fn and_then(&mut self) -> PResult<Expr> {
+        self.chain(Self::and_then_chain)
+    }
+
+    fn and_then_chain(&mut self) -> PResult<Expr> {
         let mut lhs = self.relation()?;
         while self.at_kw(Kw::And) && matches!(self.peek_at(1), T::Keyword(Kw::Then)) {
+            self.link()?;
             self.bump();
             self.bump();
             let rhs = self.relation()?;
@@ -1902,6 +1945,10 @@ impl<'a> Parser<'a> {
     /// so whether `a + -b` (same level) is allowed is open.  Conservative
     /// choice: standard Pascal, rejected.
     fn simple(&mut self) -> PResult<Expr> {
+        self.chain(Self::simple_chain)
+    }
+
+    fn simple_chain(&mut self) -> PResult<Expr> {
         let start = self.span();
         let sign = match self.peek() {
             T::Minus => Some(UnOp::Neg),
@@ -1929,6 +1976,7 @@ impl<'a> Parser<'a> {
                 T::Keyword(Kw::Or) if !matches!(self.peek_at(1), T::Keyword(Kw::Else)) => BinOp::Or,
                 _ => break,
             };
+            self.link()?;
             self.bump();
             let rhs = self.term()?;
             lhs = Self::binary(lhs, op, rhs);
@@ -1938,6 +1986,10 @@ impl<'a> Parser<'a> {
 
     /// term = power {(& | * | / | div | mod | and) power}
     fn term(&mut self) -> PResult<Expr> {
+        self.chain(Self::term_chain)
+    }
+
+    fn term_chain(&mut self) -> PResult<Expr> {
         let mut lhs = self.power()?;
         loop {
             let op = match self.peek() {
@@ -1951,6 +2003,7 @@ impl<'a> Parser<'a> {
                 }
                 _ => break,
             };
+            self.link()?;
             self.bump();
             let rhs = self.power()?;
             lhs = Self::binary(lhs, op, rhs);
@@ -1993,9 +2046,19 @@ impl<'a> Parser<'a> {
 
     /// postfix = primary {`^` | `.` field | `[` exprs `]` | `(` args `)`}
     fn postfix(&mut self) -> PResult<Expr> {
+        self.chain(Self::postfix_chain)
+    }
+
+    fn postfix_chain(&mut self) -> PResult<Expr> {
         let mut e = self.primary()?;
         let start = e.span;
         loop {
+            if matches!(self.peek(), T::Caret | T::Dot | T::LBracket)
+                || (matches!(self.peek(), T::LParen) && !matches!(e.kind, ExprKind::Str(_)))
+            {
+                // Each selector nests the tree one level, like an operator.
+                self.link()?;
+            }
             let kind = match self.peek() {
                 T::Caret => {
                     self.bump();

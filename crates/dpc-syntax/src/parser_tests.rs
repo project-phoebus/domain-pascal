@@ -1488,11 +1488,11 @@ end;
 // Robustness: deep nesting is a diagnostic, not a stack overflow
 // ---------------------------------------------------------------------
 
-/// Parse on a thread with the default 2 MB test-thread stack, as `cargo
-/// test` gives each test.
-fn parse_on_small_stack(src: String) -> Result<CompilationUnit, Vec<String>> {
+/// Parse on a thread with the compiler's stack (`parser::STACK_SIZE`), as
+/// the driver does.
+fn parse_on_compiler_stack(src: String) -> Result<CompilationUnit, Vec<String>> {
     std::thread::Builder::new()
-        .stack_size(2 << 20)
+        .stack_size(crate::parser::STACK_SIZE)
         .spawn(move || parse_src(&src))
         .unwrap()
         .join()
@@ -1521,9 +1521,19 @@ fn deep_nesting_is_an_error_not_a_crash() {
         format!("module m; procedure p; begin {}x end;", "l: ".repeat(n)),
         format!("module m; {}", "procedure p; ".repeat(n)),
         format!("module m; procedure p({};", "procedure q(".repeat(n)),
+        // Operator chains and selectors nest the tree as deeply as
+        // parentheses do (bead domain-pascal-1dn: 1000 `+` overflowed the
+        // checker's stack).
+        format!("module m; const c = {}1;", "1 + ".repeat(n)),
+        format!("module m; const c = {}1;", "1 * ".repeat(n)),
+        format!("module m; const c = {}a;", "a and then ".repeat(n)),
+        format!("module m; const c = {}a;", "a or else ".repeat(n)),
+        format!("module m; const c = a{};", "^".repeat(n)),
+        format!("module m; const c = a{};", ".b".repeat(n)),
+        format!("module m; const c = a{};", "[1]".repeat(n)),
     ];
     for src in cases {
-        let e = parse_on_small_stack(src).expect_err("must not parse");
+        let e = parse_on_compiler_stack(src).expect_err("must not parse");
         assert!(e[0].contains("nested too deeply"), "{:?}", &e[..1]);
     }
 }
@@ -1539,5 +1549,19 @@ fn reasonable_nesting_still_parses() {
         ")".repeat(n),
         " end".repeat(n),
     );
-    parse_on_small_stack(src).unwrap();
+    parse_on_compiler_stack(src).unwrap();
+}
+
+/// Bead domain-pascal-9gb: operator chains and selectors count against
+/// the nesting limit, which is generous enough for long real ones.
+#[test]
+fn long_chains_still_parse() {
+    let n = 900;
+    for src in [
+        format!("module m; const c = {}1;", "1 + ".repeat(n)),
+        format!("module m; const c = {}a;", "a or else ".repeat(n)),
+        format!("module m; const c = a{};", ".b".repeat(n)),
+    ] {
+        parse_on_compiler_stack(src).unwrap();
+    }
 }
