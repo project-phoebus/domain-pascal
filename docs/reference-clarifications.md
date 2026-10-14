@@ -40,8 +40,8 @@ Check the PDF before you rely on text from these pages.
 Asked: 2026-10-13, by the lead agent (open question 21; review of domain-pascal-xdh.3)
 Passage: "_BFMT__COFF ... set to true whenever the compiler is generating COFF"; "_ISP__M68K (for 68000 code generation) / _ISP__A88K (for Series 10000 code generation)" (p. 4-46).  Apollo's SR10.2 inserts test `isp_$m68k`, `isp_$a88k` and `obj_$coff` instead (base.ins.pas and others; see question 21's former text below).
 Question: do the SR10 compilers also predeclare `isp_$m68k` / `isp_$a88k` and `obj_$coff`?
-Owner's answer: "yes. isp_$m68k and isp_$a88k are target-specific and pre-declared. obj_$coff I'm not sure about, but let's use it."
-Consequence: dpc predeclares `isp_$m68k` (true) and `isp_$a88k` (false) like `_ISP__M68K`/`_ISP__A88K`, and `obj_$coff` (true, provisionally: the owner is not sure the compiler predeclared it) like `_BFMT__COFF`; Apollo's base.ins.pas then takes its SR10 branches.  Implementation: bead domain-pascal-mhg (crates/dpc-syntax/src/preprocess.rs).
+Owner's answer: "yes. isp_$m68k and isp_$a88k are target-specific and pre-declared. obj_$coff I'm not sure about, but let's use it."  Follow-up: "also list `obj_$bin`, which is the pre-domainos binary type."
+Consequence: dpc predeclares `isp_$m68k` (true) and `isp_$a88k` (false) like `_ISP__M68K`/`_ISP__A88K`, `obj_$coff` (true, provisionally: the owner is not sure the compiler predeclared it) like `_BFMT__COFF`, and `obj_$bin` (false: the pre-Domain/OS object format, which dpc does not generate); Apollo's base.ins.pas then takes its SR10 branches.  Implementation: bead domain-pascal-mhg (crates/dpc-syntax/src/preprocess.rs).
 
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
