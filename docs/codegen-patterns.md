@@ -1458,10 +1458,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       _PUT stubbed for the refusals they had before (12.4 R4(b),
       adjacent stores, `in_range`, an 8-byte record assignment, an array
       element, a 4-byte argument to a word parameter), except that
-      TTY_$K_GET now stops first at the move's placement (its first
+      TTY_$K_GET stopped first at the move's placement (its first
       dereference is inside `if status.all = status_$ok then begin`,
       `movea.l D0,A2` at 0xE1C40A the then part's first instruction;
-      before, at a computed boolean store; bead domain-pascal-1j61).  Cut down to the statements
+      before, at a computed boolean store), until bead
+      domain-pascal-1j61 placed the move there ("Placement inside an
+      `if`" below): it stops at the computed boolean store again
+      (k_get.pas `wait_flag := 0 in options`).  Cut down to the statements
       up to the first call after the status test, TTY_$K_RESET and
       TTY_$K_SIMULATE_TERMINAL_INPUT give the image's `move.l A0,D0;
       tst.l (An); bne; movea.l D0,A2` (0xE67302..0xE6730A,
@@ -1550,9 +1553,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   branch after allocation), An the base of every later dereference, Dn
   held to the last of them or to the next call.  Where no call follows,
   Dn must come out D0 and An A0, else refused (A1 in the image where D0
-  is busy, not modelled).  Refused: the first dereference inside a
-  loop, `case` or nested statement, in one part of an `if` only, or in
-  an `if`'s condition.  A pointer local of `call_pointer_locals` that
+  is busy, not modelled).  Inside an `if`, see "Placement inside an
+  `if`" below.  Refused: the first dereference inside a loop, `case` or
+  nested statement, and the `if` shapes that paragraph leaves out.  A
+  pointer local of `call_pointer_locals` that
   allocation puts in A0 or A1 (live across no call) stays in A0 (the
   TTY_$I_INQ_RAW / TTY_$K_INQ_FLAGS form), refused when assigned twice,
   inside a statement, read whole (a `nil` test: RIP_$UPDATE_INT
@@ -1568,6 +1572,69 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `parked_integer_local_moves_to_a0_where_dereferenced`,
   `parked_integer_local_refusals`,
   `pointer_local_that_no_call_follows_stays_in_a0`.
+
+  **Placement inside an `if` (bead domain-pascal-1j61; Verified at the
+  sites below: 1 site for the condition form, 1 for the `then` part
+  form; the `else` part form has no site of its own, see below).**  Survey (scratch
+  script over `tools/resultsurvey.py`'s `ptrhold_sites`, the 31 `move.l
+  A0,D0` copies next read by `movea.l D0,An`): every one of the 31
+  routines has exactly one `movea.l D0,An`, so the move is never
+  duplicated per branch.  29 are callers of TTY_$I_GET_DESC or
+  SIO_$I_GET_DESC whose status test (`tst.l; bne`) comes between the
+  copy and the move, and in all 29 the move is after that test's branch,
+  never before it.  28 of those branches go to the register restore
+  (`if status.all <> status_$ok then return`, or a `then` part running
+  to the end: the same code); one, TTY_$K_GET 0xE1C406 `bne.w
+  0xE1C614`, goes to the result assignment (`move.w D3,D0`) after the
+  `if`, so the routine's statements are the `then` part of `if
+  status.all = status_$ok then begin ... end`, and the move is that
+  part's first instruction (0xE1C40A `movea.l D0,A2`, the first
+  statement `pea (A2); bsr.w tty_$i_lock`).  Of the 28, two move it at
+  the target of a guard's `bls.b`, past a `then` part ending in `bra.b`
+  to the epilogue (`if ... then begin ...; return end`):
+  TTY_$K_INQ_FUNC_CHAR 0xE6759E into an assignment, and
+  TTY_$K_SET_FUNC_CHAR 0xE67516 as the first instruction of an `if`
+  whose condition dereferences it (`movea.l D0,A2; move.l (0x20,A2),D2;
+  btst.l D1,D2; beq.b`, `if func in tty^.func_enabled then`), before
+  the condition's own code.  4 hoist it before an `if`'s branch, both
+  parts dereferencing it (above).  The other 2 copies (RIP_$UPDATE_INT
+  0xE159C2, the DIR_ module-local 0xE52394 at 0xE5241A) follow other
+  callees and are not this form.  So, in dpc (`Selector::park_home`):
+  - an `if` whose condition is one test (a compare or a boolean) that
+    reads the local and calls nothing: the move is the `if`'s first
+    instruction (TTY_$K_SET_FUNC_CHAR 0xE67516);
+  - an `if` whose condition does not read the local and calls nothing,
+    with no later statement referring to it, and either a `then` part
+    referring to it and no `else` part (TTY_$K_GET 0xE1C40A), or an
+    `else` part referring to it after a `then` part that ends in
+    `return` and neither refers to it nor calls: the move goes down
+    into the referring part, placed there by the same rules as in the
+    statement part.  The `else` form is an inference, not a site: dpc
+    emits for it the same code as for `if ... then begin ...; return
+    end` followed by the statement, which is TTY_$K_SET_FUNC_CHAR's and
+    TTY_$K_INQ_FUNC_CHAR's guard; no image site tells the two source
+    shapes apart.
+  Not seen, so refused: a condition reading it that is not one test
+  (`and then`, `or else`, `not`, ...); a `then` part with an `else`
+  part (even one ending in `return`); an `else` part after a `then`
+  part falling through to the join (`bra`), or calling; a reference
+  after the `if`; a call in the condition.  The `then` form accepts a
+  condition that is not one test (K_GET's is `tst.l; bne`): the move
+  is in the part, after all of the condition's code, and D0 is held
+  over that code as over any statement before the move.  Cut down to the in_range guard (`func > 31` for
+  `not in_range(func)`) and without the refused byte store
+  `func_chars[func] := ch`, ../source's TTY_$K_SET_FUNC_CHAR compiles
+  with `movea.l D0,A3` first in the condition's `if` (A3 where the image
+  has A2: dpc gives func A2 and status A3, the image the reverse; and
+  func reloaded where the image keeps it in D1, bead domain-pascal-rvv9:
+  not this rule).  Golden
+  `results/integer_parked_if`; exec tests `tests/exec/park_int_if.pas`
+  (both sides of each test) and `tests/exec/park_int_if_edge.pas` (D0
+  held over a compound condition, statements, a loop and a nested `if`
+  before the move; an out parameter's register after it); driver tests
+  `parked_integer_local_in_one_if_part`,
+  `parked_integer_local_in_if_condition`,
+  `parked_integer_local_refusals`.
 
   A local kept in its frame slot (pushed by value, addressed, reached by
   a nested routine, or assigned something other than a call) is stored

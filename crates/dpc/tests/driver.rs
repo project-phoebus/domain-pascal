@@ -1935,20 +1935,104 @@ end;
     assert!(!after[home..].contains("%d0"), "{r}");
 }
 
+/// The move of a parked local goes down into the one `if` part that
+/// refers to it, as that part's first instruction (TTY_$K_GET 0xE1C40A,
+/// the `then` part; bead domain-pascal-1j61), or into the `else` part
+/// when the `then` part ends in `return`.
+#[test]
+fn parked_integer_local_in_one_if_part() {
+    let src = format!(
+        "{PARKED_INT}function f(in line: integer; out status: status_$t): integer;
+var d: integer32; n: integer;
+begin
+  n := 0;
+  d := get_desc(line, status);
+  if status.all = 0 then begin
+    use(desc_ptr_t(d)^);
+    n := desc_ptr_t(d)^.b;
+  end;
+  f := n;
+end;
+
+procedure e(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then begin
+    g := 0;
+    return;
+  end
+  else
+    g := desc_ptr_t(d)^.b;
+end;
+"
+    );
+    let asm = compile_with("parked_if_part", &src, &[]).unwrap();
+    let r = routine(&asm, "F");
+    let want = "\tmove.l\t%a0,%d0
+\ttst.l\t(%a2)
+\tbne.s\t1f
+\tmovea.l\t%d0,%a2
+\tpea\t(%a2)
+\tjsr\t(USE).l
+";
+    assert!(r.contains(want), "{r}");
+    assert_eq!(r.matches("%d0,%a").count(), 1, "{r}");
+    let r = routine(&asm, "E");
+    let want = "\tbra.s\t2f
+1:
+\tmovea.l\t%d0,%a0
+";
+    assert!(r.contains(want), "{r}");
+}
+
+/// An `if` whose condition dereferences a parked local: the move is the
+/// `if`'s first instruction (TTY_$K_SET_FUNC_CHAR 0xE67516; bead
+/// domain-pascal-1j61), after a statement that does not refer to it.
+#[test]
+fn parked_integer_local_in_if_condition() {
+    let src = format!(
+        "{PARKED_INT}procedure p(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g := 0;
+  if desc_ptr_t(d)^.b = 3 then g := 1;
+end;
+"
+    );
+    let asm = compile_with("parked_if_cond", &src, &[]).unwrap();
+    let r = routine(&asm, "P");
+    let want = "\tmovea.l\t%d0,%a0
+\tcmpi.w\t#3,(4,%a0)
+";
+    assert!(r.contains(want), "{r}");
+}
+
 #[test]
 fn parked_integer_local_refusals() {
-    // Where the image's choice is not seen, refused: the first dereference
-    // in one part of an `if' only, inside a loop, or in an `if''s
-    // condition after a statement that does not dereference it.
+    // Where the image's choice is not seen, refused (bead
+    // domain-pascal-1j61): the first dereference in one part of an `if'
+    // whose other part falls through to the join, or calls, or with a
+    // dereference after the `if'; in a `then' part with an `else' (even
+    // one ending in `return'); inside a loop; in an `if''s condition that is not one test.
     let cases = [
         "d := get_desc(line, status);
   if status.all <> 0 then g := 1 else g := desc_ptr_t(d)^.b;",
+        "d := get_desc(line, status);
+  if status.all = 0 then g := desc_ptr_t(d)^.b else begin g := 1; return end;",
+        "d := get_desc(line, status);
+  if status.all <> 0 then begin tick; return end else g := desc_ptr_t(d)^.b;",
+        "d := get_desc(line, status);
+  if status.all = 0 then g := desc_ptr_t(d)^.b;
+  g := g + desc_ptr_t(d)^.c;",
         "d := get_desc(line, status);
   while g > 0 do g := g - desc_ptr_t(d)^.b;",
         "d := get_desc(line, status);
   if status.all <> 0 then return;
   g := 0;
-  if desc_ptr_t(d)^.b = 3 then g := 1;",
+  if (g = 0) and then (desc_ptr_t(d)^.b = 3) then g := 1;",
     ];
     for (k, body) in cases.iter().enumerate() {
         let src = format!(

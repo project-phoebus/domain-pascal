@@ -294,6 +294,11 @@ Tests:
   rewritten to integer locals with type transfers when pointer locals
   stopped being held in D0 (bead domain-pascal-78n2); the expected output
   is unchanged.
+- `results/integer_parked_if` - codegen-patterns 3 ("Placement inside
+  an `if`"; bead domain-pascal-1j61): a parked integer local's `movea.l
+  D0,An` as the first instruction of the one `if` part that refers to
+  it (TTY_$K_GET 0xE1C40A) and as the first instruction of an `if` whose
+  condition dereferences it (TTY_$K_SET_FUNC_CHAR 0xE67516).
 - `control/store_flags` - codegen-patterns 7.1 (bead domain-pascal-dgb):
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a

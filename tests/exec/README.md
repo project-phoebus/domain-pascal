@@ -195,3 +195,5 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `initdata` | initialised data, repeat counts, variants, strings, a `static` local across calls |
 | `volatile` | a volatile variable re-read in a loop and in one expression |
 | `ptr_a0` | bead domain-pascal-78n2: pointer locals assigned a call that no call follows, held in A0 itself, around out and var parameters, other pointers, `with`, `case`, `while`, sets, block copies, nested calls, `and then`, results |
+| `park_int_if` | bead domain-pascal-1j61: an integer local held in D0 moved to an address register in the one `if` part that refers to it (`then`; `else` after a `then` ending in `return`) and first in an `if` whose condition dereferences it; both sides of each test |
+| `park_int_if_edge` | bead domain-pascal-1j61: the same, with D0 held over a compound condition, statements, a loop and a nested `if` before the move, an out parameter written after the `if`, and a condition reading the local with arithmetic |

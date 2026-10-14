@@ -3430,6 +3430,10 @@ pub struct Selector {
     /// Those moves: the index of the `movea.l`, of the branch, and the
     /// statement's span.
     hoists: Vec<(usize, usize, Span)>,
+    /// The `if` parts a parked local's move goes down into
+    /// ([`Self::park_home`]): the local's frame offset and the part's
+    /// statements (compared by address).
+    park_parts: Vec<(i32, *const Stmt, usize)>,
     /// The register holding the static link of a nested routine, loaded
     /// at entry when the body needs it ([`Selector::load_link`]).
     link: Option<u8>,
@@ -3623,6 +3627,7 @@ impl Selector {
             a0_locals: Vec::new(),
             hoist: None,
             hoists: Vec::new(),
+            park_parts: Vec::new(),
             link: None,
             uplevel: Vec::new(),
             result_web: false,
@@ -3861,7 +3866,7 @@ impl Selector {
                 matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. }) && next.clean;
             self.called = false;
             self.unpopped = false;
-            self.park_home(f, body, st)?;
+            self.park_home(f, body, st, rest)?;
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => {
@@ -3998,18 +4003,43 @@ impl Selector {
     ///   one test that does not read the local and whose two parts both
     ///   refer to it: the move goes before the condition's branch
     ///   ([`select_body_with`]: TTY_$K_SET_INPUT_FLAG 0xE67688).
+    /// - An `if` of the routine's own statement part whose condition is
+    ///   one test that reads it (and calls nothing): the move is the
+    ///   `if`'s first instruction, before the condition's
+    ///   (TTY_$K_SET_FUNC_CHAR 0xE67516 `movea.l D0,A2; move.l
+    ///   (0x20,A2),D2; btst.l D1,D2; beq.b`, `if func in
+    ///   tty^.func_enabled then`).
+    /// - An `if` of the routine's own statement part whose condition does
+    ///   not read it and calls nothing, with no later statement referring
+    ///   to it, and either a `then` part referring to it and no `else`
+    ///   part, or an `else` part referring to it after a `then` part that
+    ///   ends in a `return` and neither refers to it nor calls: the move
+    ///   goes down into the referring part, placed there by these same
+    ///   rules (TTY_$K_GET 0xE1C40A `movea.l D0,A2` the first instruction
+    ///   of the `then` part of `if status.all = status_$ok then begin ...
+    ///   end`, whose false branch 0xE1C406 `bne.w 0xE1C614` goes to the
+    ///   result assignment, not the epilogue; the `else` part is the
+    ///   same code as the statement after `if ... then begin ...; return
+    ///   end`, TTY_$K_SET_FUNC_CHAR 0xE67516 the target of `bls.b`
+    ///   0xE6750C).  The parts so entered count as the routine's own
+    ///   statement part.
     ///
     /// Elsewhere (inside a statement, a loop or `case`, an `if` whose
-    /// condition reads it or that dereferences it in one part only) the
-    /// place is not seen: refused.
-    fn park_home(&mut self, f: &Function, body: &[Stmt], st: &Stmt) -> Res<()> {
+    /// condition reads it but is not one test, or calls, one that
+    /// dereferences it in one part and after it, a `then` part with an
+    /// `else`, an `else` part after a `then` that calls or does not end
+    /// in `return`) the place is not seen: refused.
+    fn park_home(&mut self, f: &Function, body: &[Stmt], st: &Stmt, rest: &[Stmt]) -> Res<()> {
         for k in 0..self.parked.len() {
             let p = &self.parked[k];
             if p.d.is_none() || p.home.is_some() || !(refers_to(st, p.off) || has_call(st)) {
                 continue;
             }
             let (off, (d, _)) = (p.off, p.d.unwrap());
-            let top = std::ptr::eq(body, f.body.as_slice());
+            let top = std::ptr::eq(body, f.body.as_slice())
+                || self.park_parts.iter().any(|&(o, ptr, len)| {
+                    o == off && std::ptr::eq(ptr, body.as_ptr()) && len == body.len()
+                });
             let hoist = match &st.kind {
                 _ if !top => None,
                 StmtKind::If { cond, then_, else_ } => {
@@ -4027,9 +4057,45 @@ impl Selector {
                             ..
                         }]
                     );
-                    let both = then_.iter().any(|s| refers_to(s, off))
-                        && else_.iter().any(|s| refers_to(s, off));
-                    (simple && !in_cond && !jump && both).then_some(true)
+                    let in_then = then_.iter().any(|s| refers_to(s, off));
+                    let in_else = else_.iter().any(|s| refers_to(s, off));
+                    let calls = cond_has_call(cond);
+                    if in_cond {
+                        (simple && !calls).then_some(false)
+                    } else if in_then && in_else {
+                        (simple && !jump).then_some(true)
+                    } else if in_then != in_else {
+                        let (part, other) = if in_then {
+                            (then_, else_)
+                        } else {
+                            (else_, then_)
+                        };
+                        let later = rest.iter().any(|s| refers_to(s, off));
+                        // Only the two shapes seen: the `then` part with
+                        // no `else` (TTY_$K_GET), and the `else` part
+                        // after a `then` part ending in `return` (the
+                        // guard of TTY_$K_SET_FUNC_CHAR); not a `then`
+                        // part with an `else` that returns.
+                        let other_seen = if in_then {
+                            other.is_empty()
+                        } else {
+                            matches!(
+                                other.last(),
+                                Some(Stmt {
+                                    kind: StmtKind::Return,
+                                    ..
+                                })
+                            )
+                        };
+                        if !later && !calls && other_seen && !other.iter().any(has_call) {
+                            // Placed when the part is selected.
+                            self.park_parts.push((off, part.as_ptr(), part.len()));
+                            continue;
+                        }
+                        None
+                    } else {
+                        None
+                    }
                 }
                 k if is_simple(st) && !matches!(k, StmtKind::Return) => Some(false),
                 _ => None,
@@ -4039,8 +4105,10 @@ impl Selector {
                     st.span,
                     "the first dereference of a local held in D0 (or the first call after its \
                      assignment) inside a statement, a loop or `case`, or an `if` other than \
-                     one test with both parts dereferencing it (where the original moves it to \
-                     an address register is not seen) is",
+                     one test reading it, one test with both parts dereferencing it, a `then` \
+                     part alone dereferencing it with no `else`, or an `else` part after a \
+                     `then` ending in `return` and calling nothing, with nothing after it \
+                     (where the original moves it to an address register is not seen) is",
                 ));
             };
             let a = self.alloc_a()?;
