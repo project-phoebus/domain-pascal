@@ -1699,9 +1699,57 @@ zero-extends with `clr.l D1; move.w D0,D1` (0xE177A6..0xE177AA), compares
 with `cmpi.w #0x400,D1; bcc` (0xE1779A) and `bls` (0xE177BA), and halves
 with `lsr.w #1` (0xE177D8).  `integer`/`integer32` signed (ref 3.2.1);
 boolean signed (the `tst.b`/`bmi` tests above); char, pointers and sets
-unsigned.  **Uncertain:** enumerations (taken as unsigned) and
-non-negative `integer16` subranges such as `0..100` (taken as signed, like
-their host); no compare or widening of either has been catalogued.
+unsigned.
+
+**A non-negative subrange stored in 4 bytes is unsigned (reference and
+image Verified; implemented, bead domain-pascal-5j9).**  `0..65536` up to
+`0..2147483647`, Apollo's own `linteger = 0..2147483647` ("positive 31
+bit integer", `base.ins.pas`, section 0.1).  Reference: 3.4 p. 3-9
+("large unsigned subranges (from 0..2^30 up to 0..2^31-1), you can
+achieve much of the effect of having true unsigned types"; `u32 :
+unsigned_32`, `0..2147483647`); 4.3.3 pp. 4-6..4-7 (PDF pp. 139-140,
+checked: `>`, `>=`, `<`, `<=`, `min`, `max`, `div`, `mod` are unsigned
+when both operands are unsigned run-time values or one is and the other
+a constant in 0..2147483647, signed otherwise; the example `u_type =
+0..2147483647`, `u_type(s32) DIV u32` "generates an unsigned divide");
+"Max"/"Min" pp. 4-111, 4-113 ("The unsigned scalar data types are
+non-negative subranges of integers, Boolean, character, and
+enumerated").  Image: longwords that are neither pointers nor
+zero-extended words compared, divided and multiplied unsigned:
+PMAP_$PURIFIER_L 0xE13EB0..0xE13EB8 and 0xE13F1A..0xE13F22 `move.l
+(4,An),Dn; cmp.l (32,An),Dn; bhi` (two working-set counts, `page_count`
+and `ws_floor` of `ws_hdr_t` in `mmap/mmap.h`); 0xE1404E..0xE1405E
+`moveq #11,D4; add.l MMAP_$WSL+0x70,D4` (WSL[3]'s `page_count`) divided
+by 12 with `M$DIU$LLW`; AST_$GET_SEG_MAP 0xE06E10..0xE06E2E, two
+run-time longwords by `M$DIU$LLL` and `M$OIU$LLL`, the remainder then
+`lsr.l #8; lsr.l #2` (D4 is computed with a `sub.l` at 0xE06D2C, so its
+sign comes from a declared type, not from the operation);
+CAL_$DECODE_TIME 0xE68794 `M$DIU$LLW` by 60; PCHIST_$UNIX_PROFIL_ADDUPC
+0xE5CFF6..0xE5D008 `cmp.l D2,D1; bcs`, `sub.l`, `M$MIU$LLL`; the PACCT
+module-local's `cmpi.l #8192,D0; bcc` (0xE5A9E6, 5.3).  Addresses
+compared as integers: EC2_$INIT 0xE42C68 `cmpi.l #1000,D0; bls`,
+EC2_$READ 0xE42C86 `bls`, EC2_$ADVANCE 0xE42CBC `bhi`, PROC1_$FREE_STACK
+0xE1512A `cmp.l (0xc3c,A5),D0; bls` (conformance unit `ec2_init.pas`,
+`linteger(addr(ec)) > 1000`).  Survey (`tools/cmpsurvey.py summary`,
+kind `ord`): after a longword compare 269 unsigned ordered branches
+(`cmpi.l` 79, `cmp.l` with a memory source 126, with a register 53,
+`cmp.l #` 3, `cmpa.l` 8) against 153 signed (34, 38, 81); the image does
+not show which of the unsigned ones are pointers.  In `dpc-ir` such a
+subrange is `Sign::Unsigned` without `Scalar::pointer` (a pointer is
+also an unsigned longword, but held in address registers and returned in
+A0: the two are told apart by that flag).
+
+**Uncertain:** enumerations (taken as unsigned, as the "Max" entry says)
+and non-negative `integer16` subranges such as `0..100` (taken as signed,
+like their host).  The "Max"/"Min" entries call every non-negative
+subrange unsigned, which would make `x < 10` on a `0..100` word `bcs`;
+but the image cannot tell a `0..100` word from a `0..65535` one (after a
+word compare: 518 unsigned ordered branches, 336 signed, `ord`), and
+what the original did for such a word against an `integer` (both
+widened to longwords, as for `0..65535`, or a word compare, as the
+range allows) is not catalogued (bead domain-pascal-4x2).  Booleans, which
+the same entries call unsigned, are `Scalar::BOOLEAN` (signed) for the
+`tst.b; bmi` tests; no ordered compare of booleans is supported.
 
 ### 5.1 Sets (Verified)
 
@@ -3176,10 +3224,15 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   (not as at 0xE1BD7C, where the right operand's pointer load comes
   after the left's `ext.l`).  A word against a longword when the word
   is on the left (the longword on the left would be `cmp.l Dw,Dl`, not
-  catalogued: refused).  Other mixes (bytes against wider values, a
-  signed and an unsigned longword) are refused; Pascal's typing leaves
-  few of them (`0..255` is a word, ref 3.8).  Golden
-  `tests/golden/control/compares_mixed`.
+  catalogued: refused).  A signed longword or word against an unsigned
+  longword (`integer32` or `integer` against `0..2147483647`, bead
+  domain-pascal-5j9): signed, as ref 4.3.3 (pp. 4-6..4-7) says of mixed
+  operands, the word widened with `ext.l` and the unsigned longword
+  compared as it is (its values fit); **Uncertain:** no image site is
+  identified, the instructions are those of the forms above (golden
+  `tests/golden/expr/ulong`).  Other mixes (bytes against wider values)
+  are refused; Pascal's typing leaves few of them (`0..255` is a word,
+  ref 3.8).  Golden `tests/golden/control/compares_mixed`.
 - **Records (Verified at the sites; survey; implemented, bead
   domain-pascal-aaj).**  Ref Table 4-1 p. 4-2: `=` and `<>` apply to
   "All types".  The image compares records in memory with `cmpm`
@@ -4303,17 +4356,19 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     otherwise.  `M$OIS$WWL` (a word mod a longword) is never called:
     refused.
   - **The sign:** ref 4.3.3, pp. 4-6..4-7: `div` and `mod` (and the
-    relational operators, `max`) are unsigned when both operands are
-    unsigned run-time values, or one is and the other a constant in
+    relational operators, `min`, `max`) are unsigned when both operands
+    are unsigned run-time values, or one is and the other a constant in
     0..2147483647.  The image's unsigned entries (`M$DIU`, `M$OIU`,
     `M$MIU`) take zero-extended `0..65535` words, their sums, and
-    longwords whose type the image does not show (0xE1C2B4); `dpc` gives
-    `*` the same rule (Uncertain, above).  **Open:** ref 3.4 (p. 3-9) calls the
-    subranges 0..2^30 to 0..2^31-1 "unsigned ranges" and 4.3.3's example
-    divides a `0..2147483647` value unsigned, but `dpc-ir`'s `sign_of`
-    treats such 4-byte subranges as signed (only 2-byte ones with an
-    integer32 host are unsigned): the unsigned longword forms are not
-    reachable from such types yet.
+    unsigned longwords (0xE1C2B4; AST_$GET_SEG_MAP 0xE06E16 `M$DIU$LLL`
+    of two run-time longwords; CAL_$DECODE_TIME 0xE68794); `dpc` gives
+    `*` the same rule (Uncertain, above).  A non-negative subrange stored
+    in 4 bytes (`0..2147483647`) is unsigned (section 5, "Signedness";
+    bead domain-pascal-5j9), so `M$DIU$LLL`, `M$OIU$LLL`, `M$MIU$LLL`,
+    `M$DIU$LLW`, `M$OIU$WLW` and `lsr.l` are reached from such types
+    (golden `tests/golden/expr/ulong`, exec test `ulong`); ref 4.3.3's
+    type transfers pick the sign (`u_type(s32) DIV u32` unsigned, `s32
+    DIV integer32(u32)` signed).
   - **A word sum, difference or product as the dividend is divided in 32
     bits** (ref 4.3.1, p. 4-5): CAL_$WEEKDAY 0xE686AE..0xE686C0 `move.w
     (A1),D0; ext.l D0; addi.l #9,D0` then `M$OIS$WLW` for `(month + 9) mod
@@ -5287,9 +5342,14 @@ the allocator refuses when none is free).  Golden
 `tests/golden/regalloc/ptr_data_regs`; exec tests `ptr_dregs`,
 `ptr_dregs_flow`; unit tests
 `pointer_used_as_data_is_held_in_a_data_register`,
-`pointer_copies_are_reused_while_held`.  No conformance unit: EC2_$INIT
-needs its unsigned `bls` (0xE42C6E) and `link #-4` (bead
-domain-pascal-kwu); OSINFO_$GET_MMAP, bead domain-pascal-2q2.
+`pointer_copies_are_reused_while_held`.  Conformance unit
+`ec2_init.pas` (EC2_$INIT 0xE42C60, byte-identical; bead
+domain-pascal-kwu): the unsigned `bls` (0xE42C6E) from
+`linteger(addr(ec)) > 1000` (section 5, "Signedness"), but its `link
+#-4` from a stand-in local, `unused_4`: what the 4 bytes held is not
+settled (EC2_$READ `link #-12` with 8 used, EC2_$ADVANCE `link #-4`
+with none: a local held in a register, 12.5, would fit all three).
+OSINFO_$GET_MMAP: bead domain-pascal-2q2.
 
 **Uncertain:**
 

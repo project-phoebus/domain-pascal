@@ -485,8 +485,12 @@ fn signedness_from_source_types() {
         // Fits integer16: the host's sign.
         ("0..100", Scalar::signed(Width::Word)),
         ("-5..5", Scalar::signed(Width::Word)),
-        // Needs 32 bits: integer32 host, 4 bytes, signed.
-        ("0..65536", Scalar::signed(Width::Long)),
+        // Needs 32 bits: 4 bytes, unsigned when non-negative (ref 3.4
+        // p. 3-9, 4.3.3 p. 4-7; `linteger` of base.ins.pas), signed
+        // otherwise.
+        ("0..65536", Scalar::unsigned(Width::Long)),
+        ("0..2147483647", Scalar::unsigned(Width::Long)),
+        ("-1..65536", Scalar::signed(Width::Long)),
         ("boolean", Scalar::BOOLEAN),
         ("char", Scalar::unsigned(Width::Byte)),
         ("color", Scalar::unsigned(Width::Word)),
@@ -2363,7 +2367,7 @@ fn uplevel_references() {
             addr: Addr::Indirect {
                 base: Box::new(Expr::Load {
                     addr: Addr::Enclosing(8),
-                    ty: Scalar::unsigned(Width::Long)
+                    ty: Scalar::POINTER
                 }),
                 offset: 0
             },

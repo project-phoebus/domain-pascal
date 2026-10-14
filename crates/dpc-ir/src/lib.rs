@@ -369,10 +369,17 @@ pub enum Sign {
 /// shift right (codegen-patterns 8; e.g. 0xE177A6..0xE177B8 `clr.l D1;
 /// move.w D0,D1` zero-extends a `0..65535` word, `cmpi.w #0x400,D1; bcc`
 /// compares it unsigned).
+///
+/// `pointer` tells a pointer value (a pointer, `univ_ptr` or routine
+/// pointer type, an address) from an unsigned longword integer (a
+/// non-negative subrange such as `0..2147483647`, `lower.rs` `sign_of`):
+/// both are compared unsigned, but the selector holds pointers in
+/// address registers and returns them in A0 (codegen-patterns 3, 12.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scalar {
     pub width: Width,
     pub sign: Sign,
+    pub pointer: bool,
 }
 
 impl Scalar {
@@ -380,6 +387,7 @@ impl Scalar {
         Scalar {
             width,
             sign: Sign::Signed,
+            pointer: false,
         }
     }
 
@@ -387,11 +395,25 @@ impl Scalar {
         Scalar {
             width,
             sign: Sign::Unsigned,
+            pointer: false,
+        }
+    }
+
+    /// An integer of this width and sign.
+    pub const fn integer(width: Width, sign: Sign) -> Scalar {
+        Scalar {
+            width,
+            sign,
+            pointer: false,
         }
     }
 
     /// A pointer value (4 bytes, unsigned).
-    pub const POINTER: Scalar = Scalar::unsigned(Width::Long);
+    pub const POINTER: Scalar = Scalar {
+        width: Width::Long,
+        sign: Sign::Unsigned,
+        pointer: true,
+    };
 
     /// A Pascal boolean (1 byte, 0xFF true, 0 false; ref 3.5.3 p. 3-11).
     /// Signed: the image tests booleans with `tst.b` and `bmi`/`bpl`

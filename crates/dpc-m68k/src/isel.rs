@@ -5639,7 +5639,7 @@ impl Selector {
             let from = Addr::Indirect {
                 base: Box::new(Expr::Load {
                     addr: Addr::Frame(pc.slot),
-                    ty: Scalar::unsigned(Width::Long),
+                    ty: Scalar::POINTER,
                 }),
                 offset: 0,
             };
@@ -8283,10 +8283,7 @@ impl Selector {
     /// of that sign.  These are the "W" operands of M$ARITH and the operands
     /// of `mul<s>.w` with a longword product (codegen-patterns 8).
     fn word_part(e: &Expr, sign: Sign) -> Option<Expr> {
-        let wty = Scalar {
-            width: Width::Word,
-            sign,
-        };
+        let wty = Scalar::integer(Width::Word, sign);
         match e {
             Expr::Const { value, .. } => {
                 let fits = match sign {
@@ -8567,10 +8564,7 @@ impl Selector {
                     // (0xE382B4..0xE382CC `clr.l D0; move.w (2,A1),D0; clr.l
                     // D2; divu.w #101,D0; swap D0; move.w D0,D2; ... lsl.l
                     // #6,D2`).
-                    let wty = Scalar {
-                        width: Width::Word,
-                        sign: ty.sign,
-                    };
+                    let wty = Scalar::integer(Width::Word, ty.sign);
                     let v = self.div(op, &l, &r, wty, false)?;
                     if narrow {
                         return Ok(v);

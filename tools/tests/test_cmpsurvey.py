@@ -87,3 +87,16 @@ class ByteCompareTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OrderedBranchTest(unittest.TestCase):
+    def test_unsigned_longwords(self):
+        # PMAP_$PURIFIER_L 0xE13EB0..0xE13EB8, EC2_$INIT 0xE42C68..0xE42C6E
+        ins = insns(['movel %a1@(4),%d7', 'cmpl %a1@(32),%d7', 'bhis 0x200',
+                     'cmpil #1000,%d0', 'blss 0x200'])
+        self.assertEqual(cmpsurvey.ord_sites(ins),
+                         [(0x102, 'cmpl', 'mem', 'U'), (0x106, 'cmpil', 'imm', 'U')])
+
+    def test_signed_and_equality(self):
+        ins = insns(['cmpw %d1,%d0', 'bges 0x200', 'tstl %d0', 'beqs 0x200'])
+        self.assertEqual(cmpsurvey.ord_sites(ins), [(0x100, 'cmpw', 'reg', 'S')])

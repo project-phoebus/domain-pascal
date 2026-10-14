@@ -1674,10 +1674,7 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
             }
             Some(ValueParam {
                 offset,
-                ty: Scalar {
-                    width,
-                    sign: sign_of(&p.types, var.ty),
-                },
+                ty: scalar_of_type(&p.types, var.ty, width),
             })
         })
         .collect()
@@ -1731,10 +1728,7 @@ fn value_params(p: &Program, r: &Routine) -> Vec<ValueParam> {
         .filter_map(|prm| {
             Width::of_size(p.types.size(prm.ty)).map(|width| ValueParam {
                 offset: prm.value_offset,
-                ty: Scalar {
-                    width,
-                    sign: sign_of(&p.types, prm.ty),
-                },
+                ty: scalar_of_type(&p.types, prm.ty, width),
             })
         })
         .collect()
@@ -1763,10 +1757,7 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
         .ok_or_else(|| unsupported(r.span, format!("a {size}-byte function result is")))?;
     Ok(ResultSpec {
         class,
-        ty: Scalar {
-            width,
-            sign: sign_of(&p.types, res.ty),
-        },
+        ty: scalar_of_type(&p.types, res.ty, width),
     })
 }
 
@@ -2721,10 +2712,7 @@ impl Cx<'_> {
                  in a word) is",
             ));
         }
-        let ty = Scalar {
-            width: Width::Word,
-            sign: sign_of(&p.types, vty),
-        };
+        let ty = scalar_of_type(&p.types, vty, Width::Word);
         let bound = |e: &SExpr| -> Res<Expr> {
             match &e.value {
                 Some(c) => const_of(c, ty, e.span),
@@ -3029,9 +3017,19 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
 ///   <ea>,Dn`, 0xE179BC; `clr.l Dn; move.w; cmp.l <ea>,Dn; bls`,
 ///   0xE0D7CE; 38 sites, `tools/cmpsurvey.py`, widen1).
 ///
-/// Anything else that mixes widths or signs (a byte against a word, a
-/// signed and an unsigned longword, a signed word against an unsigned
-/// longword) is not supported yet.
+/// - A signed longword and an unsigned one (`integer32` against
+///   `0..2147483647`), or a signed word against an unsigned longword:
+///   compared signed (ref 4.3.3, pp. 4-6..4-7: `<`, `<=`, `>`, `>=` are
+///   "signed except" when both operands are unsigned run-time values or
+///   one is and the other a constant in 0..2147483647), the word widened
+///   by its own sign (`ext.l`, as above), the unsigned longword read as
+///   it is (its values, 0..2^31-1, are the same signed).  **Uncertain:**
+///   no image site of these mixes is identified (the image does not
+///   show which longwords are `integer32`); the instructions are those
+///   of the forms above.
+///
+/// Anything else that mixes widths or signs (a byte against a word) is
+/// not supported yet.
 fn widen_operands(e: &SExpr, l: Expr, r: Expr) -> Res<(Expr, Expr)> {
     let (lt, rt) = (l.ty(), r.ty());
     if lt == rt {
@@ -3046,6 +3044,10 @@ fn widen_operands(e: &SExpr, l: Expr, r: Expr) -> Res<(Expr, Expr)> {
         (Width::Long, Width::Word) if lt.sign == Sign::Signed || lt.sign == rt.sign => {
             return Ok((l, convert(r, lt)))
         }
+        // Here the longword is unsigned and the word signed.
+        (Width::Word, Width::Long) => return Ok((convert(l, long), reinterpret(r, long))),
+        (Width::Long, Width::Word) => return Ok((reinterpret(l, long), convert(r, long))),
+        (Width::Long, Width::Long) => return Ok((reinterpret(l, long), reinterpret(r, long))),
         _ => {}
     }
     Err(unsupported(
@@ -3346,7 +3348,7 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
             (**value).clone(),
             Scalar {
                 width: ty.width,
-                sign: value.ty().sign,
+                ..value.ty()
             },
         )),
         Expr::Binary {
@@ -3848,19 +3850,27 @@ fn transfer(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
             )
         });
     }
-    Ok(match v {
+    Ok(reinterpret(v, ty))
+}
+
+/// `v` read as a value of type `ty` of the same width (another sign or
+/// class): no code; a load or a constant is retyped, any other value
+/// wrapped in a [`Expr::Convert`] of the same width, which the selector
+/// evaluates as its operand.
+fn reinterpret(v: Expr, ty: Scalar) -> Expr {
+    match v {
         Expr::Const { value, .. } => Expr::Const { value, ty },
         Expr::Load { addr, .. } => Expr::Load { addr, ty },
         v if v.ty() == ty => v,
         Expr::Convert { value, .. } if value.ty() == ty => *value,
         v => {
-            debug_assert_eq!(v.ty().width, ty.width, "sema checks equal sizes");
+            debug_assert_eq!(v.ty().width, ty.width, "same width only");
             Expr::Convert {
                 value: Box::new(v),
                 ty,
             }
         }
-    })
+    }
 }
 
 /// `v` as a value of type `ty`: a constant retyped, a value of another
@@ -3929,7 +3939,19 @@ fn operand(p: &Program, x: &SExpr, ty: Scalar) -> Res<Expr> {
             }
             Ok(c)
         }
-        None => Ok(convert(value_of(p, x)?, ty)),
+        None => {
+            let v = value_of(p, x)?;
+            // An integer of the operation's width and another sign (a
+            // `0..2147483647` operand of a signed `-`, `u - 1`): read as
+            // it is, a load retyped, so that the forms that take a
+            // variable as an operand still match it (`subq.l #1,<ea>`,
+            // [`convert`] would wrap it in a `Convert`).
+            if v.ty().width == ty.width && !v.ty().pointer && !ty.pointer {
+                Ok(reinterpret(v, ty))
+            } else {
+                Ok(convert(v, ty))
+            }
+        }
     }
 }
 
@@ -4043,10 +4065,7 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
         ) && lhs.value.is_none()
             && ty.width == Width::Word;
         if widened {
-            let lty = Scalar {
-                width: Width::Long,
-                sign: ty.sign,
-            };
+            let lty = Scalar::integer(Width::Long, ty.sign);
             return Ok(Expr::Convert {
                 value: Box::new(Expr::Binary {
                     op,
@@ -4176,15 +4195,22 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
     }
 }
 
+/// The IR scalar type of a value of type `ty` stored in `width`: its
+/// sign ([`sign_of`]), and whether it is a pointer ([`Scalar::pointer`]).
+pub(crate) fn scalar_of_type(types: &TypeTable, ty: TypeId, width: Width) -> Scalar {
+    Scalar {
+        width,
+        sign: sign_of(types, ty),
+        pointer: types.is_pointer(ty),
+    }
+}
+
 /// The IR scalar type of `e`'s type.
 fn scalar_of(p: &Program, e: &SExpr) -> Res<Scalar> {
     let size = p.types.size(e.ty);
     let width = Width::of_size(size)
         .ok_or_else(|| unsupported(e.span, format!("a {size}-byte value is")))?;
-    Ok(Scalar {
-        width,
-        sign: sign_of(&p.types, e.ty),
-    })
+    Ok(scalar_of_type(&p.types, e.ty, width))
 }
 
 /// Whether values of type `ty` are read as signed or unsigned numbers.
@@ -4198,9 +4224,26 @@ fn scalar_of(p: &Program, e: &SExpr) -> Res<Scalar> {
 ///   them unsigned (`cmpi.w #0x400,D1; bcc` at 0xE1779A; `bls` at
 ///   0xE177BA).  Its C (`log/read_internal.c`) has `uint16_t`; the
 ///   Pascal type is our inference.
+/// - A non-negative subrange stored in 4 bytes (`0..2147483647`, Apollo's
+///   `linteger` in `base.ins.pas`; anything from `0..65536` up):
+///   unsigned.  Ref 3.4 p. 3-9 ("large unsigned subranges (from 0..2^30
+///   up to 0..2^31-1) ... much of the effect of having true unsigned
+///   types"), 4.3.3 pp. 4-6..4-7 (`u_type = 0..2147483647`; `u_type(s32)
+///   DIV u32` "generates an unsigned divide"), "Max"/"Min" pp. 4-111,
+///   4-113 ("The unsigned scalar data types are non-negative subranges of
+///   integers").  Image: longwords that are neither pointers nor
+///   zero-extended words compared, added and divided unsigned (PMAP_$
+///   PURIFIER_L 0xE13EB0..0xE13EB8 `move.l (4,A1),D7; cmp.l (32,A1),D7;
+///   bhi`, two working-set counts; 0xE14050..0xE1405E `moveq #11,D4; add.l
+///   MMAP_$WSL+0x70,D4` then `M$DIU$LLW` by 12; CAL_$DECODE_TIME
+///   0xE68794 `M$DIU$LLW` by 60; EC2_$INIT 0xE42C68 `cmpi.l #1000,D0;
+///   bls`; codegen-patterns 5).
 /// - Any other subrange: its host's sign.  **Uncertain:** whether the
 ///   original treated a non-negative `integer16` subrange (`0..100`) as
-///   unsigned in compares; not observed yet.
+///   unsigned in compares (the reference's "Max" entry says such
+///   subranges are unsigned scalars, but the image cannot tell a
+///   `0..100` word from a `0..65535` one, and the mixed compares with
+///   `integer` that would change are not catalogued for it).
 /// - `char`: unsigned (ordinals 0..255, ref 3.6.4 p. 3-13).
 /// - `boolean`: signed ([`Scalar::BOOLEAN`]).
 /// - Enumerations: unsigned (ordinals 0..n-1, ref 3.7.1 p. 3-13).
@@ -4210,9 +4253,9 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
     match types.kind(ty) {
         TypeKind::Integer16 | TypeKind::Integer32 => Sign::Signed,
         TypeKind::Boolean => Scalar::BOOLEAN.sign,
-        TypeKind::Subrange { base, .. } => {
-            let widened_host = matches!(types.kind(*base), TypeKind::Integer32);
-            if widened_host && types.size(ty) < types.size(*base) {
+        TypeKind::Subrange { base, lo, .. } => {
+            let long_host = matches!(types.kind(*base), TypeKind::Integer32);
+            if long_host && (types.size(ty) < types.size(*base) || *lo >= 0) {
                 Sign::Unsigned
             } else {
                 sign_of(types, *base)
@@ -4703,7 +4746,10 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
                     Ok(Addr::Indirect {
                         base: Box::new(Expr::Load {
                             addr: Addr::Frame(prm.slot_offset),
-                            ty: Scalar::unsigned(width),
+                            ty: Scalar {
+                                pointer: true,
+                                ..Scalar::unsigned(width)
+                            },
                         }),
                         offset: 0,
                     })
@@ -4785,10 +4831,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 let width = Width::of_size(size).ok_or_else(|| {
                     unsupported(a.expr.span, format!("a {size}-byte value argument is"))
                 })?;
-                let ty = Scalar {
-                    width,
-                    sign: sign_of(&p.types, prm_ty),
-                };
+                let ty = scalar_of_type(&p.types, prm_ty, width);
                 let value = match &a.expr.value {
                     Some(v) => const_of(v, ty, a.expr.span)?,
                     // A set expression takes the parameter's size (`[k]`

@@ -31,6 +31,12 @@ address order).  Kinds:
             closes a loop, and the branches after each.
     cmpb    `cmp.b' and `cmpi.b' compares (char and byte values): the
             source kind; `cmpi.b #-1' (0xFF) separately.
+    ord     word and longword compares (`cmp', `cmpi', `cmpa', `tst')
+            followed directly by an ordered branch: the instruction, the
+            source kind (imm, reg, mem) and whether the branch is signed
+            (`blt' `ble' `bgt' `bge': S) or unsigned (`bcs' `bls' `bhi'
+            `bcc': U).  Evidence for the sign of subranges
+            (codegen-patterns 5; bead domain-pascal-5j9).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -48,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
-KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb')
+KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -237,6 +243,30 @@ def cmpb_sites(ins):
     return out
 
 
+_ORD = re.compile(r'^(cmpl|cmpil|cmpal|cmpw|cmpiw|cmpaw|tstl|tstw) (.*)$')
+_SIGNED = ('blt', 'ble', 'bgt', 'bge')
+_UNSIGNED = ('bcs', 'bls', 'bhi', 'bcc')
+
+
+def ord_sites(ins):
+    """[(addr, insn, source kind, S|U)] of word and longword compares
+    followed by an ordered branch."""
+    out = []
+    for i, (a, _, t) in enumerate(ins[:-1]):
+        m = _ORD.match(t)
+        b = _BCC.match(ins[i + 1][2] + ' ')
+        if not m or not b:
+            continue
+        cls = 'S' if b.group(1) in _SIGNED else 'U' if b.group(1) in _UNSIGNED else None
+        if cls is None:
+            continue
+        src = m.group(2).split(',')[0]
+        kind = ('imm' if src.startswith('#') else
+                'reg' if re.match(r'^%[da]\d$', src) else 'mem')
+        out.append((a, m.group(1), kind, cls))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -250,6 +280,7 @@ def scan():
         res['widen1'] += [(r0, name) + s for s in one]
         res['cmpm'] += [(r0, name) + s for s in cmpm_sites(ins)]
         res['cmpb'] += [(r0, name) + s for s in cmpb_sites(ins)]
+        res['ord'] += [(r0, name) + s for s in ord_sites(ins)]
     return res
 
 
@@ -277,6 +308,8 @@ def summary(res):
     counts('cmpm runs (size, run, count, loop, branches)', res['cmpm'],
            lambda s: (s[3], s[4], s[5], s[6], s[7]))
     counts('byte compares', res['cmpb'], lambda s: (s[3],))
+    counts('ordered branches after word/longword compares (insn, source, sign)',
+           res['ord'], lambda s: (s[3], s[4], s[5]))
 
 
 def main(argv):

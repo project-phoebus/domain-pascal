@@ -4,10 +4,10 @@
   entry and copied to an address register where it is dereferenced.
   - init: EC2_$INIT 0xE42C60 (ec/ec2_init.c; `out ec' in ec2.ins.pas):
     `move.l (8,A6),D0', the address compared (0xE42C68), one `movea.l
-    D0,A0' for the two stores (0xE42C70..0xE42C74).  The image's compare
-    is unsigned (`bls'); a 32-bit unsigned comparison is not settled
-    (codegen-patterns 7.1), so `<>' stands in here, and the image's
-    `link #-4' is not reproduced.
+    D0,A0' for the two stores (0xE42C70..0xE42C74), the compare of a
+    non-negative 4-byte subrange unsigned (`bls', 0xE42C6E; bead
+    domain-pascal-5j9).  The image's `link #-4' is not reproduced here
+    (tests/conformance/ec2_init.pas has the whole routine).
   - free_stack: PROC1_$FREE_STACK 0xE1511A (proc1/free_stack.c): a
     pointer value parameter used in arithmetic (0xE15130 `subq.l #4,D0')
     and copied for the store through it (0xE15136).  In wake and joins
@@ -46,7 +46,7 @@ procedure wakeup(in out ec: ec_t; out st: status_$t); extern;
 
 procedure init(out ec: ec_t);
 begin
-  if addr_t(addr(ec)) <> 1000 then begin
+  if addr_t(addr(ec)) > 1000 then begin
     ec.value := 0;
     ec.awaiters := 0;
   end;

@@ -60,7 +60,10 @@ D0`).  Comparisons (codegen-patterns 7.1; bead domain-pascal-aaj):
 `acl_clear_super.pas` (ACL_$CLEAR_SUPER 0xE46FF8: two variables in
 memory, the left one loaded, `cmp.w (0xb72,A5),D0`) and `pacct_on.pas`
 (PACCT_$ON 0xE5A9A4: `<>` of two UIDs with `cmpm.l`, UID_$NIL by
-`movea.l #abs`, the result by `sne`).  Whole map modules for the link test (bead domain-pascal-xdh.2;
+`movea.l #abs`, the result by `sne`) and `ec2_init.pas` (EC2_$INIT
+0xE42C60: a `0..2147483647` value compared unsigned, `bls`, bead
+domain-pascal-5j9; the address held in D0, `link #-4` from a stand-in
+local).  Whole map modules for the link test (bead domain-pascal-xdh.2;
 every routine of a map code segment, no fragment option, the module-end
 filler included): `gpu.pas` (GPU 0xE707FC..0xE70810), `pbu.pas` (PBU
 0xE590F8..0xE59110), `ct_release.pas` (CT 0xE70AF4..0xE70AF8),

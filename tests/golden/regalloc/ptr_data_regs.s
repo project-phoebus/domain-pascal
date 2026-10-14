@@ -4,7 +4,7 @@ INIT:
 link.w %fp,#0
 move.l (8,%fp),%d0
 cmpi.l #0x3e8,%d0
-beq.s 1f
+bls.s 1f
 movea.l %d0,%a0
 clr.l (%a0)
 clr.w (4,%a0)

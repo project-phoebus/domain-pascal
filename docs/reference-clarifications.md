@@ -407,6 +407,25 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     compare; tests/exec/wide_compare.pas marks the reference's behaviour as
     an expected failure (domain-pascal-f03).*
 
+32. *Settled by the reference (no owner ruling needed; bead
+    domain-pascal-5j9).*  A non-negative subrange stored in 4 bytes
+    (`0..2147483647`) is unsigned.  3.4, p. 3-9: "Through the use of large
+    unsigned subranges (from 0..2^30 up to 0..2^31-1), you can achieve
+    much of the effect of having true unsigned types"; 4.3.3, pp. 4-6..4-7
+    (PDF pp. 139-140, checked: the OCR text drops the first four items of
+    the list, which are `>`, `>=`, `<`, `<=`, before `min`, `max`, `div`,
+    `mod`): these operations are signed "except" when "Both operands are
+    unsigned run-time values" or "One operand is an unsigned run-time value
+    and the other is a constant in the positive subrange 0..2147483647";
+    its example's `u_type = 0..2147483647` gives "an unsigned divide".
+    "Max", p. 4-111, and "Min", p. 4-113: "The unsigned scalar data types
+    are non-negative subranges of integers, Boolean, character, and
+    enumerated."  *Implemented for 4-byte subranges (codegen-patterns 5,
+    "Signedness", with image sites).  Not changed: 2-byte `integer16`
+    subranges such as `0..100`, and booleans, which the same sentence
+    calls unsigned: the image cannot tell which words had such types, so
+    the code for them is not settled (bead domain-pascal-4x2).*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

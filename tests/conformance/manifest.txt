@@ -199,3 +199,6 @@ tests/conformance/acl_clear_super.pas        ACL_$CLEAR_SUPER  --section-addr .b
 # domain-pascal-aaj): `<>' of two UIDs with `cmpm.l', another unit's
 # object by `movea.l #abs', the result by `sne'.
 tests/conformance/pacct_on.pas               PACCT_$ON:26  --section-addr .bss.moddata.PACCT=0xE817EC
+# Unsigned longwords (codegen-patterns 5, 7.1; bead domain-pascal-5j9):
+# `linteger(addr(ec)) > 1000' as `cmpi.l; bls'.
+tests/conformance/ec2_init.pas               EC2_$INIT

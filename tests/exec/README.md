@@ -170,6 +170,8 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `arith` | multiplication by constants, `muls.w` products, M$ARITH, wraparound |
 | `wide_compare` | **xfail**: a word sum compared, 32-bit per ref p. 4-5 and 4-198 |
 | `unsigned` | `0..65535` compares (`bhi`/`bcs`), zero-extension, bytes |
+| `ulong` | bead domain-pascal-5j9: `0..2147483647` values of 2^31 and above compared unsigned, `div`/`mod` unsigned (M$ARITH, `lsr.l`); against an `integer32` or `integer` signed |
+| `ulong_ops` | review of bead domain-pascal-5j9: `0..2147483647` decremented in place past 0, wrapped, `*` (M$MIU), mixed with `integer32` (signed), `case`, function result, uplevel, `while`, index |
 | `bits` | `&`, `!`, `~`, `xor`, `lshft`, `rshft`, `arshft` |
 | `bytes` | char and boolean fields at odd offsets, char-indexed arrays, byte value slots |
 | `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
