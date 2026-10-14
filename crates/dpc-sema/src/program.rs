@@ -491,6 +491,8 @@ pub enum Builtin {
     Odd,
     /// `abs(x)` (Table 4-4).
     Abs,
+    /// `sqr(n)` ("Sqr", p. 4-184): `n * n`.
+    Sqr,
     /// `lshft(x, n)` (p. 4-109).
     Lshft,
     /// `rshft(x, n)` (Table 4-4).

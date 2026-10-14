@@ -93,6 +93,7 @@ Passage: "With one exception, the size of the argument must be the same as the s
 Question: is a type transfer from an integer constant to a pointer type of a different size allowed?
 Owner's answer (2026-10-14): yes, allow it; the constant is a sentinel value expanded to a pointer so that type checking works.
 Consequence: to be implemented under bead domain-pascal-gqp.  The lead reads the ruling as covering integer *constants* (the value is known, so the widening is exact); a run-time integer16 transferred to a pointer stays refused until something needs it.  Related: open question 37 (`char(16#9E)`), the narrowing counterpart.  Side note: 2.2.2.2 (p. 2-12) lists "A type transfer function" among the terms a const value may contain but names `nil` as the only pointer value, which may be why Apollo declared the sentinel as an integer and transferred it at each use.
+Implemented (domain-pascal-gqp): `dpc-sema` (`Checker::transfer`) accepts a type transfer of an integer constant >= 0 to a pointer type of another size; the result is a pointer-typed constant with that value (an address), so it is stored as `move.l #n`, passed by address as a code-section cell and by value as `pea (n).w`, like a 4-byte integer constant (golden `expr/transfer_const_ptr`; no image site identified).  A negative constant is refused: p. 4-197 says nothing once the sizes differ.  A run-time integer16 stays refused (the p. 4-197 size rule).  In a const declaration (`c = ptr_t(1)`) the transfer is refused as before, now with its own message: 2.2.2.2 (p. 2-12) names `nil` as the only pointer value.  A static variable's initial value (`p: ptr_t := ptr_t(1)`) is accepted and emitted as the 4-byte value.  An integer32 constant transferred to a pointer type (equal sizes, so p. 4-197 already allowed it, negative or not) is a pointer constant in the same way, so `ptr_t(16#20000)` is also accepted as an initial value.
 
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
@@ -549,6 +550,16 @@ records the files it stops.
     compatible?  Is an out-of-range constant assigned to a subrange an
     error, a warning, or accepted?  *Current: both refused (bead
     domain-pascal-4tm).*
+39. **"Rshft", p. 4-171; 3.2.3, p. 3-5.**  "if num is negative and is a
+    32-bit integer, the result of an rshft is always positive", and
+    "Suppose num is 16 bits and equals -9. You perform an rshft with sh
+    equaling 3 and put the result back in a 16-bit integer ... = -2".
+    3.2.3 says integer constants are represented as 32-bit integers.  In a
+    constant expression such as `c = rshft(-9, 3)`, is the value the
+    32-bit result 16#1FFFFFFE (536870910), or does it depend on where the
+    constant is used?  *Current: rshft of a negative constant is not
+    folded, so it is refused in a const declaration (bead
+    domain-pascal-95c).*
 
 ## Reference errata noticed (no ruling needed)
 

@@ -249,6 +249,7 @@ impl<'t> Checker<'t> {
             ("chr", Builtin::Chr),
             ("odd", Builtin::Odd),
             ("abs", Builtin::Abs),
+            ("sqr", Builtin::Sqr),
             ("lshft", Builtin::Lshft),
             ("rshft", Builtin::Rshft),
             ("arshft", Builtin::Arshft),
@@ -570,10 +571,27 @@ impl<'t> Checker<'t> {
 
     fn const_def(&mut self, def: &ast::ConstDef) {
         let e = self.expr(&def.value);
+        let pointer_transfer =
+            matches!(e.kind, ExprKind::Transfer(_)) && self.types.is_pointer(e.ty);
         match e.value {
-            Some(value) => self.declare(&def.name, Sym::Const { value, ty: e.ty }),
-            None => {
-                if !self.types.is_error(e.ty) {
+            Some(value) if !pointer_transfer => {
+                self.declare(&def.name, Sym::Const { value, ty: e.ty })
+            }
+            _ => {
+                if pointer_transfer {
+                    // Ref 2.2.2.2, p. 2-12: "Value can also be the pointer
+                    // expression nil"; it lists "A type transfer function"
+                    // among the terms of a const value but describes no
+                    // other pointer constant, so a type transfer to a
+                    // pointer type (bead domain-pascal-gqp) is not taken
+                    // as a const value (kept as before the ruling; not
+                    // settled by the reference).
+                    self.error(
+                        def.value.span,
+                        "a pointer constant other than nil (ref 2.2.2.2, p. 2-12: a const value \
+                         may be the pointer expression nil)",
+                    );
+                } else if !self.types.is_error(e.ty) {
                     self.error(def.value.span, "constant expression expected");
                 }
                 let ty = self.types.builtins.error;
@@ -3722,6 +3740,45 @@ impl<'t> Checker<'t> {
             return self.error_expr(span);
         }
         let ints = self.types.is_integer(x.ty) && self.types.is_integer(t);
+        // An integer *constant* to a pointer type of another size: allowed
+        // by the owner's ruling (reference-clarifications, "Type Transfer
+        // Functions" (p. 4-197): integer constant to a pointer type; bead
+        // domain-pascal-gqp): Apollo's `ec2_$ptr_t( ec2_$always_ready_ec )`
+        // (streams/sasc misc.pas), the constant 1 a sentinel.  The value
+        // is known, so the pointer is that address.  The reference says
+        // nothing of a negative constant (no bits to keep, p. 4-197, once
+        // the sizes differ): refused.  A run-time integer of another size
+        // stays refused (the p. 4-197 size rule).  An integer32 constant
+        // (equal sizes, p. 4-197: the bits are kept, negative or not) is
+        // a pointer constant too, so that `ptr_t(16#20000)` goes where
+        // `ptr_t(1)` goes (a static variable's initial value).
+        let int_const = match &x.value {
+            Some(ConstValue::Int(v)) if self.types.is_integer(x.ty) => Some(*v),
+            _ => None,
+        };
+        if let Some(v) = int_const.filter(|_| self.types.is_pointer(t)) {
+            if v < 0 && self.types.size(x.ty) != self.types.size(t) {
+                self.error(
+                    span,
+                    format!(
+                        "a type transfer of the negative constant {v} to the pointer type {} \
+                         (the reference does not say what it means; only constants >= 0 are \
+                         accepted, ref p. 4-197)",
+                        self.types.display(t)
+                    ),
+                );
+                return self.error_expr(span);
+            }
+            // A constant, so that it goes where constants go (a stored
+            // immediate, a code-section cell passed by address,
+            // codegen-patterns 1.5).
+            return Expr {
+                kind: ExprKind::Transfer(Box::new(x)),
+                ty: t,
+                value: Some(ConstValue::Int(v)),
+                span,
+            };
+        }
         if !ints && self.types.size(x.ty) != self.types.size(t) {
             self.error(
                 span,
@@ -3879,10 +3936,43 @@ impl<'t> Checker<'t> {
                 }
                 self.int_result(xs[0].ty, bi.integer16)
             }
+            // "Sqr", p. 4-184: "returns an integer if n is an integer";
+            // "calculates n * n".  Reals are out of scope (CLAUDE.md 1).
+            // A computed argument is not lowered yet (dpc-ir: no image
+            // pattern catalogued); a constant one folds (ref 2.2.2.2,
+            // p. 2-12, names sqr), out of range an error (ref 3.2.3).
+            Builtin::Sqr => {
+                if !self.types.is_integer(xs[0].ty) {
+                    self.error(
+                        span,
+                        "`sqr` needs an integer argument (reals are not supported)",
+                    );
+                    return self.error_expr(span);
+                }
+                if let Some(ConstValue::Int(v)) = &xs[0].value {
+                    return self.int_const(v * v, span);
+                }
+                self.int_result(xs[0].ty, bi.integer16)
+            }
             Builtin::Lshft | Builtin::Rshft | Builtin::Arshft | Builtin::Xor => {
                 if !xs.iter().all(|x| self.types.is_integer(x.ty)) {
                     self.error(span, format!("`{name}` needs integer arguments"));
                     return self.error_expr(span);
+                }
+                // Constant arguments (ref 2.2.2.2, p. 2-12: a const value
+                // may contain "Any predefined Domain Pascal function (for
+                // example, chr, sqr, lshft, sizeof, but only if the
+                // argument to the function is a constant)") fold within
+                // the constants' 32-bit representation (ref 3.2.3, p. 3-5),
+                // as `&`, `!` and `~` of constants do.  Apollo's X11
+                // x.ins.pas relies on it: `ExposureMask = LSHFT(1,15)`,
+                // `OwnerGrabButtonMask = LSHFT(1,24)` (X11's 1<<15, 1<<24).
+                if let (Some(ConstValue::Int(a)), Some(ConstValue::Int(n))) =
+                    (&xs[0].value, &xs[1].value)
+                {
+                    if let Some(v) = self.fold_bits(b, *a, *n) {
+                        return self.int_const(v, span);
+                    }
                 }
                 // Shifts: the result has the width of the shifted operand
                 // (p. 4-109 example shifts an integer16 within 16 bits).
@@ -4009,6 +4099,37 @@ impl<'t> Checker<'t> {
             ty,
             value: None,
             span,
+        }
+    }
+
+    /// `lshft`, `rshft`, `arshft` or `xor` of integer constants `a` and
+    /// `n`, folded in 32 bits (ref 3.2.3, p. 3-5: "When you declare an
+    /// integer constant, Domain Pascal internally represents the value as a
+    /// 32-bit integer").  `None`, left to run time, where the reference
+    /// gives no constant value:
+    ///
+    /// - a shift count outside 0..=31: "Results are unpredictable if sh is
+    ///   negative" ("Lshft", p. 4-109); counts of 32 or more are not
+    ///   described;
+    /// - `rshft` of a negative constant: p. 4-171 gives both the 32-bit
+    ///   result ("if num is negative and is a 32-bit integer, the result
+    ///   of an rshft is always positive") and, for a 16-bit num stored in
+    ///   16 bits, the narrowed one (`rshft(-9, 3)` is -2); which one a
+    ///   negative *constant* gets is not stated.
+    fn fold_bits(&self, b: Builtin, a: i64, n: i64) -> Option<i64> {
+        let a32 = a as i32;
+        match b {
+            // "Xor", p. 4-221: the bitwise exclusive or.
+            Builtin::Xor => Some((a32 ^ (n as i32)) as i64),
+            _ if !(0..=31).contains(&n) => None,
+            // "Lshft", p. 4-109: zeros shifted in on the right; bits
+            // shifted out on the left are lost.
+            Builtin::Lshft => Some(((a32 as u32) << n) as i32 as i64),
+            // "Rshft", p. 4-171: zeros shifted in from the left.
+            Builtin::Rshft if a >= 0 => Some(((a32 as u32) >> n) as i64),
+            // "Arshft", p. 4-29: the sign bit preserved.
+            Builtin::Arshft => Some((a32 >> n) as i64),
+            _ => None,
         }
     }
 

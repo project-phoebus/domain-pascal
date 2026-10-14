@@ -1084,6 +1084,162 @@ fn builtins() {
     ));
 }
 
+/// An integer constant transferred to a pointer type of another size
+/// (owner's ruling, reference-clarifications "Type Transfer Functions"
+/// (p. 4-197); bead domain-pascal-gqp): Apollo's streams/sasc misc.pas
+/// `ecp := ec2_$ptr_t( ec2_$always_ready_ec )`, the constant 1.
+#[test]
+fn integer_constant_to_pointer_transfer() {
+    let p = module(
+        "type ec2_$ptr_t = ^integer32;
+         const ec2_$always_ready_ec = 1;
+         var e: ec2_$ptr_t := ec2_$ptr_t(0);
+         procedure p(out ecp: ec2_$ptr_t); begin ecp := ec2_$ptr_t(ec2_$always_ready_ec) end;",
+    );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    let StmtKind::Assign { value, .. } = &stmts[0].kind else {
+        panic!("assignment expected: {:?}", stmts[0].kind)
+    };
+    assert!(matches!(value.kind, ExprKind::Transfer(_)));
+    assert!(p.types.is_pointer(value.ty));
+    assert_eq!(value.value, Some(ConstValue::Int(1)));
+    assert_eq!(
+        var(&p, "e").init.as_ref().unwrap()[0].value,
+        InitDatum::from(ConstValue::Int(0))
+    );
+    // A negative constant: the reference does not say what it means.
+    assert_err(
+        "module m; type t = ^integer32; var x: t; procedure p; begin x := t(-1) end;",
+        "negative constant -1",
+    );
+    // A run-time integer16 of another size stays refused (p. 4-197).
+    assert_err(
+        "module m; type t = ^integer32; var x: t; i: integer;
+         procedure p; begin x := t(i) end;",
+        "equal sizes",
+    );
+    // Not a const value: ref 2.2.2.2, p. 2-12 names nil as the pointer
+    // value.
+    assert_err(
+        "module m; type t = ^integer32; const c = t(1);",
+        "a pointer constant other than nil",
+    );
+    assert_err(
+        "module m; type t = ^integer32; const c = (t(16#20000));",
+        "a pointer constant other than nil",
+    );
+    // An integer32 constant (equal sizes, p. 4-197) is a pointer constant
+    // as an integer16 one is, negative or not (the bits are kept).
+    let p = module(
+        "type t = ^integer32;
+         var a: t := t(16#20000); b: t := t(-70000); c: array[1..2] of t := [t(1), t(2)];",
+    );
+    let v = |n: &str| var(&p, n).init.as_ref().unwrap()[0].value.clone();
+    assert_eq!(v("a"), InitDatum::from(ConstValue::Int(0x20000)));
+    assert_eq!(v("b"), InitDatum::from(ConstValue::Int(-70000)));
+    // A pointer constant has no address: not a `var` argument, not addr's.
+    assert_err(
+        "module m; type t = ^integer32; procedure r(var y: t); extern;
+         procedure p; begin r(t(1)) end;",
+        "a variable is needed",
+    );
+    assert_err(
+        "module m; type t = ^integer32; var u: univ_ptr;
+         procedure p; begin u := addr(t(1)) end;",
+        "`addr` needs a variable",
+    );
+}
+
+/// Predefined functions of constants fold (ref 2.2.2.2, p. 2-12; bead
+/// domain-pascal-95c), in 32 bits (ref 3.2.3, p. 3-5).  Apollo's X11
+/// x.ins.pas: `KeyPressMask = LSHFT(1,0)` ... `OwnerGrabButtonMask =
+/// LSHFT(1,24)`.
+#[test]
+fn predefined_functions_in_constants() {
+    let p = module(
+        "const KeyPressMask = LSHFT(1,0); ExposureMask = LSHFT(1,15);
+               OwnerGrab = lshft(1,24); top = lshft(1,31); out = lshft(16#40000001, 2);
+               r = rshft(16#40000000, 4); ar = arshft(-100, 3); ar2 = arshft(16#80000000, 31);
+               x = xor(16#ff, 16#0f); xn = xor(-1, 16#0f0f); s = sqr(200); sn = sqr(-3);
+               o = ord('A'); c = chr(16#141); a = abs(-5); od = odd(3);
+               su = succ(5); pr = pred('b'); mx = max(3, 9); mn = min(3, 9);
+               sz = sizeof(integer32); m = KeyPressMask ! ExposureMask;
+         var v: array[1..22] of integer32 := [KeyPressMask, ExposureMask, OwnerGrab, top,
+               out, r, ar, ar2, x, xn, s, sn, o, a, su, mx, mn, sz, m, 0, 0, 0];
+             vc: char := c; vp: char := pr; vb: boolean := od;",
+    );
+    let init = var(&p, "v").init.clone().unwrap();
+    let got: Vec<InitDatum> = init.iter().take(19).map(|s| s.value.clone()).collect();
+    let want: Vec<InitDatum> = [
+        1,
+        32768,
+        1 << 24,
+        i32::MIN as i64,
+        4,
+        0x0400_0000,
+        -13,
+        -1,
+        0xf0,
+        !0x0f0f,
+        40000,
+        9,
+        65,
+        5,
+        6,
+        9,
+        3,
+        4,
+        32769,
+    ]
+    .into_iter()
+    .map(|k| ConstValue::Int(k).into())
+    .collect();
+    assert_eq!(got, want);
+    let v = |n: &str| var(&p, n).init.as_ref().unwrap()[0].value.clone();
+    assert_eq!(v("vc"), ConstValue::Char(0x41));
+    assert_eq!(v("vp"), ConstValue::Char(b'a'));
+    assert_eq!(v("vb"), ConstValue::Bool(true));
+    // No constant value where the reference gives none: a negative shift
+    // count ("Results are unpredictable", p. 4-109), rshft of a negative
+    // constant (p. 4-171 gives a 32-bit and a 16-bit result).
+    assert_err(
+        "module m; const c = lshft(1, -1);",
+        "constant expression expected",
+    );
+    assert_err(
+        "module m; const c = rshft(-9, 3);",
+        "constant expression expected",
+    );
+    // sqr out of the constants' range (ref 3.2.3).
+    assert_err("module m; const c = sqr(70000);", "out of range");
+    // A folded result is typed as any integer constant (ref 3.2.3): one
+    // outside -32768..32767 is not an integer16 value, as the literal is
+    // not; `xor` is not a boolean operator ("Xor", p. 4-221).
+    assert_err(
+        "module m; var i: integer; procedure p; begin i := lshft(1, 15) end;",
+        "constant 32768 is out of range for integer16",
+    );
+    assert_err(
+        "module m; var b: boolean := xor(true, false);",
+        "integer arguments",
+    );
+    // Folded values serve wherever a constant does: subrange and array
+    // bounds, set constructors, case labels.
+    let p = module(
+        "type t = 0..lshft(1, 4) - 1; s = set of 0..sqr(4) - 1;
+         var a: array[0..lshft(1, 3)] of integer32; v: s := [lshft(1, 2), rshft(16, 2)..xor(5, 3)];
+             i: integer;
+         procedure q; begin case i of lshft(1, 2): i := 1; arshft(-8, 1): i := 2 end end;",
+    );
+    assert_eq!(size(&p, "t"), 2);
+    assert_eq!(size(&p, "s"), 2);
+    assert_eq!(p.types.size(var(&p, "a").ty), 9 * 4);
+    assert_eq!(
+        var(&p, "v").init.as_ref().unwrap()[0].value,
+        InitDatum::from(ConstValue::Set(vec![4, 5, 6]))
+    );
+}
+
 /// `addr(x)` ("Addr", p. 4-13): a univ_ptr value; x must be a variable.
 #[test]
 fn addr_builtin() {

@@ -290,6 +290,28 @@ fn constants_lower() {
     );
 }
 
+/// An integer constant transferred to a pointer type of another size
+/// (owner's ruling on p. 4-197; bead domain-pascal-gqp) is a 4-byte
+/// pointer constant: Apollo's `ecp := ec2_$ptr_t( ec2_$always_ready_ec )`.
+#[test]
+fn integer_constant_transferred_to_a_pointer() {
+    let m = lower_src(
+        "module m;\ntype p = ^integer32;\nconst one = 1;\nvar e: p;\n\
+         procedure q;\nbegin\n  e := p(one);\nend;\n",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!("not a store: {:?}", m.functions[0].body[0].kind)
+    };
+    assert_eq!(
+        *value,
+        Expr::Const {
+            value: 1,
+            ty: Scalar::POINTER
+        }
+    );
+}
+
 #[test]
 fn empty_procedure_and_extern_routines() {
     let m = lower_src("module m;\nprocedure e(x: integer); extern;\nprocedure p;\nbegin\nend;\n")

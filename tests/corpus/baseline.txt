@@ -74,7 +74,7 @@ diag	domain_examples/streams/recno/recno.pas	`_` does not match the routine poin
 diag	domain_examples/streams/sasc/imex.pas	`_` of an `_` parameter (or a part of one) is not supported yet
 diag	domain_examples/streams/sasc/init.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 diag	domain_examples/streams/sasc/io.pas	argument type T does not match parameter type T
-diag	domain_examples/streams/sasc/misc.pas	type transfer needs equal sizes: ...
+diag	domain_examples/streams/sasc/misc.pas	argument type T does not match parameter type T
 diag	domain_examples/streams/sasc/open.pas	argument type T does not match parameter type T
 diag	domain_examples/streams/sasc/seek.pas	argument type T does not match parameter type T
 diag	domain_examples/streams/scramble/enscramble.pas	undefined identifier `_`
@@ -87,4 +87,4 @@ diag	sys/source/emt/siorf.pas	expected `_`, found `_`
 diag	sys/source/emt/siotf.pas	expected `_`, found `_`
 diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
 diag	usr/X11/examples/dmwin/dmwin.pas	argument type T does not match parameter type T
-diag	usr/X11/examples/pascal/xhw1.pas	constant expression expected
+diag	usr/X11/examples/pascal/xhw1.pas	an open array bound `_` is not supported yet

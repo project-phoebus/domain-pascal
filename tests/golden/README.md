@@ -309,6 +309,11 @@ Tests:
   constant first, 0xE00AB4; `addq`/`subq`, 0xE4D5A2, 0xE028DE) and moved
   to an address register where used as one (0xE4EFCA..0xE4EFD2), integer
   transfers converting like assignments.
+- `expr/transfer_const_ptr` - ref p. 4-197 with the owner's ruling
+  (docs/reference-clarifications.md, integer constant to a pointer type;
+  bead domain-pascal-gqp): `ec2_$ptr_t(1)` stored, passed by address and
+  by value as a 4-byte constant (codegen-patterns 13, 1.5).  No image
+  site identified.
 - `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
   shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
   the static link passed in A1 to a routine a sibling also calls
