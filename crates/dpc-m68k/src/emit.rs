@@ -179,6 +179,14 @@ pub struct Options {
     /// a harness can check they fit in the owner's object.  The code is
     /// byte for byte the same as without the option.
     pub data_bases: Vec<(String, String)>,
+    /// Routines (symbols, matched case-insensitively) whose pointer locals
+    /// assigned from a call are held in D0 where a call follows the
+    /// assignment too (`dpc --park-d0`; `isel::select_body_scheduled`,
+    /// codegen-patterns 3, "Pointer locals held in D0"): the image does so
+    /// in 14 routines (TTY_$K_FLUSH_INPUT 0xE1C0A8) and copies the result
+    /// straight to a callee-saved register in about 105 sites of the same
+    /// shape (TTY_$K_SET_FLAG 0xE67446), by a rule not known.
+    pub park_d0: Vec<String>,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -298,6 +306,16 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             ))]);
         }
     }
+    if let Some(r) = opts.park_d0.iter().find(|r| {
+        !module
+            .functions
+            .iter()
+            .any(|f| f.symbol.eq_ignore_ascii_case(r))
+    }) {
+        return Err(vec![Diagnostic::error_nopos(format!(
+            "--park-d0: no routine `{r}` in this unit"
+        ))]);
+    }
     if let Some(r) = opts.module_routines.iter().find(|r| {
         module
             .functions
@@ -406,7 +424,11 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             // For the driver's internal-error backstop
             // (`diag::set_context`): the routine, up to its pool cells.
             let outer = dpc_syntax::diag::set_context(Some(f.span));
-            match isel::select_with(f, opts.schedule) {
+            let park_calls = opts
+                .park_d0
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&f.symbol));
+            match isel::select_with(f, opts.schedule, park_calls) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {

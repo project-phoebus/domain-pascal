@@ -1143,10 +1143,23 @@ def segment_end_aligns(seg):
 _SURVEYS = {}
 
 
+def park_d0_starts():
+    """The image routines that hold a call's pointer result in D0 where a
+    call follows (resultsurvey.park_d0_routines; `dpc --park-d0'),
+    computed once."""
+    if 'park' not in _SURVEYS:
+        import nestsurvey
+        import resultsurvey
+        rs = nestsurvey.load()
+        by_start, _ = nestsurvey.analyse(rs)
+        _SURVEYS['park'] = resultsurvey.park_d0_routines(rs, by_start)
+    return _SURVEYS['park']
+
+
 def image_surveys():
     """(map, a5survey routines by start, loopalign per_routine list),
     computed once."""
-    if not _SURVEYS:
+    if 'map' not in _SURVEYS:
         m, _sites, _f, routines = loopalign.scan()
         _SURVEYS['pr'] = loopalign.per_routine(_sites, routines)
         rs, ah = a5survey.load()
@@ -1156,10 +1169,12 @@ def image_surveys():
 
 
 def module_settings(mod, linkmap):
-    """[(code section name, map segment, a5 dict, loop dict)] for MOD's
-    code sections (the map code segments holding its routines' header
-    addresses), in address order.  Names are the source's (upper case)
-    where it has a routine at the address, else the map's."""
+    """[(code section name, map segment, a5 dict, loop dict, park list)]
+    for MOD's code sections (the map code segments holding its routines'
+    header addresses), in address order.  Names are the source's (upper
+    case) where it has a routine at the address, else the map's.  PARK:
+    [(addr, name)], the source's routines of the section that the image
+    compiles as `dpc --park-d0' does (park_d0_starts)."""
     m, by_start, pr = image_surveys()
     src = {r.addr: n.upper() for n, (_i, r) in mod.routines.items() if r.addr is not None}
     segs = {}
@@ -1187,8 +1202,9 @@ def module_settings(mod, linkmap):
                              for r in sorted(by_start.values(), key=lambda r: r.r0)
                              if r.segaddr == sa and r.has_link and r.sets
                              and not r.uses and r.uses_t]
+        park = [(a, src[a]) for a in sorted(park_d0_starts()) if seg.contains(a) and a in src]
         out.append((code_section(sa, linkmap) or seg.name, seg, a5,
-                    loop_settings(pr, seg, names, segment_end_aligns(seg))))
+                    loop_settings(pr, seg, names, segment_end_aligns(seg)), park))
     return out
 
 
@@ -1202,7 +1218,7 @@ def settings_opts(settings):
     `-from' routine per code section), and what no option can say (a
     routine without a name).  -> (options, problems)."""
     lists = {'--a5-always-from': [], '--a5-always': [], '--a5-absolute': [],
-             '--loop-align-off-from': []}
+             '--loop-align-off-from': [], '--park-d0': []}
     problems = []
 
     def add(flag, sect, an):
@@ -1210,7 +1226,7 @@ def settings_opts(settings):
             lists[flag].append(an[1])
         else:
             problems.append('%s: %s needs %s, which has no name' % (sect, flag, _nm(an)))
-    for sect, _seg, a5, lp in settings:
+    for sect, _seg, a5, lp, park in settings:
         if a5['always_from']:
             add('--a5-always-from', sect, a5['always_from'])
         for an in a5['always']:
@@ -1221,19 +1237,21 @@ def settings_opts(settings):
             problems.append('%s: loop alignment: %s' % (sect, lp['error']))
         elif lp['off_from']:
             add('--loop-align-off-from', sect, lp['off_from'])
+        for an in park:
+            add('--park-d0', sect, an)
     return ['%s=%s' % (f, ','.join(v)) for f, v in lists.items() if v], problems
 
 
 def report_settings(path, settings, out=sys.stdout):
     """The `build settings' section for one module."""
     opts, problems = settings_opts(settings)
-    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7)' % path,
-          file=out)
+    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7; '
+          'D0 parking, 3)' % path, file=out)
 
     def iv(lo, hi):
         return '(%s, %s]' % ('0x%X' % lo if lo is not None else 'start',
                              '0x%X' % hi if hi is not None else 'end')
-    for sect, seg, a5, lp in settings:
+    for sect, seg, a5, lp, park in settings:
         a = a5['always_from']
         print('  %-14s 0x%X..0x%X  A5: %s%s%s;  loops: %s' % (
             sect, seg.addr, seg.end,
@@ -1245,6 +1263,9 @@ def report_settings(path, settings, out=sys.stdout):
             ('not expressible: ' + lp['error']) if lp['error']
             else 'off from %s, switch in %s' % (_nm(lp['off_from']), iv(*lp['interval']))
             if lp['off_from'] else 'aligned (default)'), file=out)
+        if park:
+            print('  %-14s D0 parking where a call follows: %s'
+                  % ('', ', '.join(map(_nm, park))), file=out)
     # quoted for a shell: the names have `$'
     print('  dpc %s' % (' '.join(map(shlex.quote, opts)) or '(no options)'), file=out)
     for p in problems:
@@ -1256,9 +1277,10 @@ def unit_build_opts(settings, r, lo):
     from address LO) the A5 mode and loop alignment it has in a build of
     the whole module with SETTINGS' options.  A routine that loads A5
     only for its `bsr' callees (used mode, which the fragment cannot see
-    with the callees stubbed) is given `--a5-always'."""
+    with the callees stubbed) is given `--a5-always'.  A routine the
+    image compiles as `--park-d0' does is given it."""
     name = r.name.upper()
-    for _sect, seg, a5, lp in settings:
+    for _sect, seg, a5, lp, park in settings:
         if not seg.contains(r.addr):
             continue
         opts = []
@@ -1280,6 +1302,8 @@ def unit_build_opts(settings, r, lo):
                 opts.append('--loop-align=off')
             elif off[0] <= r.addr:
                 opts.append('--loop-align-off-from=' + name)
+        if any(n == name for _a, n in park):
+            opts.append('--park-d0=' + name)
         return opts
     return []
 

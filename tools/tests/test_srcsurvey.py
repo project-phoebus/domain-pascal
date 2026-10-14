@@ -618,19 +618,21 @@ class SettingsTest(unittest.TestCase):
         a5t = {'always_from': None, 'interval': (None, None), 'always': [(0x320, None)],
                'absolute': [(0x310, 'ABS')], 'for_callees': [(0x330, 'READ')]}
         lt = {'off_from': None, 'interval': (None, None), 'error': 'aligns again'}
-        return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw),
-                ('.TEXT', self.Seg(0x300, 0x400), a5t, lt)]
+        return [('WIRED_PROC', self.Seg(0x100, 0x200), a5w, lw, [(0x150, 'K_FLUSH')]),
+                ('.TEXT', self.Seg(0x300, 0x400), a5t, lt, [])]
 
     def test_settings_opts(self):
         opts, problems = srcsurvey.settings_opts(self.settings())
         self.assertEqual(opts, ['--a5-always-from=K_FLUSH', '--a5-always=SET_RAW_MODE',
-                                '--a5-absolute=ABS', '--loop-align-off-from=PUT_CHARS'])
+                                '--a5-absolute=ABS', '--loop-align-off-from=PUT_CHARS',
+                                '--park-d0=K_FLUSH'])
         self.assertEqual(problems, [
             '.TEXT: --a5-always needs module-local at 0x320, which has no name',
             '.TEXT: loop alignment: aligns again'])
         out = io.StringIO()
         srcsurvey.report_settings('m.pas', self.settings(), out)
         self.assertIn('  dpc --a5-always-from=K_FLUSH --a5-always=SET_RAW_MODE', out.getvalue())
+        self.assertIn('D0 parking where a call follows: K_FLUSH', out.getvalue())
 
     def test_unit_build_opts(self):
         def r(name, addr, internal=False):
@@ -646,7 +648,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(f(st, r('set_raw_mode', 0x130, True), 0x120),
                          ['--a5-always=SET_RAW_MODE', '--loop-align=off'])
         self.assertEqual(f(st, r('k_flush', 0x150), 0x150),
-                         ['--a5-always-from=K_FLUSH', '--loop-align=off'])
+                         ['--a5-always-from=K_FLUSH', '--loop-align=off', '--park-d0=K_FLUSH'])
         self.assertEqual(f(st, r('local', 0x160, True), 0x160), ['--loop-align=off'])
         self.assertEqual(f(st, r('abs', 0x310), 0x310), ['--a5-absolute=ABS'])
         # loads A5 only for its callees (LOG_$READ): said for the fragment

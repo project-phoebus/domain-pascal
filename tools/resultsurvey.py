@@ -44,6 +44,7 @@ usage:
     tools/resultsurvey.py ptrlocals [-v]  # those copied to An or stored to
                                           # a frame slot: later pushed by
                                           # value? what follows the copy?
+    tools/resultsurvey.py parkd0          # routines `dpc --park-d0' fits
     tools/resultsurvey.py ptrhold [-v]    # every A0-function call: the first
                                           # read of A0 on its fall-through
                                           # path (D0 parking, A1, kept)
@@ -462,7 +463,7 @@ def ptrlocals(rs, by_start, verbose):
         print('%-12s %-22s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
 
 
-def ptrhold(rs, by_start, verbose):
+def ptrhold_sites(rs, by_start):
     """Bead domain-pascal-dgb (codegen-patterns 3, "Pointer locals"): every
     call of an A0 function, followed along its fall-through path (past
     conditional branches, up to an unconditional branch, a call, the
@@ -472,9 +473,9 @@ def ptrhold(rs, by_start, verbose):
     `kept' (A0 read in place: a base, a store, a test), each with
     `next' when it is the first instruction after the call (and its pop)
     or `later'.  For `D0', how D0 is next read on the same path:
-    `movea.l D0,An' (`->An') or otherwise, and whether a call comes first."""
+    `movea.l D0,An' (`->An') or otherwise, and whether a call comes first.
+    Yields (routine, address of the read, class, next/later, tail, text)."""
     a0 = a0_functions(rs, by_start)
-    c, ex = Counter(), {}
     for r in rs:
         ins = r.insns
         for i, (a, n, t) in enumerate(ins):
@@ -520,13 +521,31 @@ def ptrhold(rs, by_start, verbose):
                     if nestsurvey.writes(tk, '%d0') or tk.startswith(('rts', 'unlk')):
                         tail = 'unread'
                         break
-            key = (k, how, tail)
-            c[key] += 1
-            ex.setdefault(key, []).append('0x%06X' % ins[j][0])
-            if verbose:
-                print('%-30s 0x%06X %-5s %-6s %-14s %s' % (name(r), ins[j][0], k, how, tail, tj))
+            yield r, ins[j][0], k, how, tail, tj
+
+
+def ptrhold(rs, by_start, verbose):
+    """`ptrhold': ptrhold_sites counted by (class, next/later, tail)."""
+    c, ex = Counter(), {}
+    for r, a, k, how, tail, tj in ptrhold_sites(rs, by_start):
+        key = (k, how, tail)
+        c[key] += 1
+        ex.setdefault(key, []).append('0x%06X' % a)
+        if verbose:
+            print('%-30s 0x%06X %-5s %-6s %-14s %s' % (name(r), a, k, how, tail, tj))
     for key, v in sorted(c.items()):
         print('%-5s %-6s %-16s %3d  %s' % (key + (v, ' '.join(ex[key][:6]))))
+
+
+def park_d0_routines(rs, by_start):
+    """The starts of the routines that hold a call's pointer result in D0
+    and then move it to a callee-saved register (`move.l A0,D0' right
+    after the call, D0 next read by `movea.l D0,An', n 2..5, with no call
+    between): what `dpc --park-d0' reproduces (bead domain-pascal-bks;
+    codegen-patterns 3, "Pointer locals held in D0").  14 routines, the
+    TTY_$K_* and SIO_$K_* ones (TTY_$K_FLUSH_INPUT 0xE1C0A8)."""
+    return {r.r0 for r, _a, k, how, tail, _t in ptrhold_sites(rs, by_start)
+            if k == 'D0' and how == 'next' and re.fullmatch(r'->A[2-5]', tail)}
 
 
 def storetest(rs):
@@ -583,6 +602,9 @@ def main(argv):
         ptrlocals(rs, by_start, '-v' in argv[1:])
     elif cmd == 'ptrhold':
         ptrhold(rs, by_start, '-v' in argv[1:])
+    elif cmd == 'parkd0':
+        for a in sorted(park_d0_routines(rs, by_start)):
+            print('0x%06X %s' % (a, by_start[a].name or ''))
     elif cmd == 'storetest':
         storetest(rs)
     else:

@@ -1344,10 +1344,72 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   nothing addresses, `link #-8`, TTY_$K_FLUSH_INPUT's TODO in
   ../source; but TTY_$K_SET_FLAG and TTY_$K_INQ_FLAGS have those bytes
   too: Uncertain).  The 14 locals copied from D0 to a callee-saved
-  register where a call follows (TTY_$K_FLUSH_INPUT, TTY_$K_GET,
-  TTY_$K_RESET, SIO_$K_*) are against 105 `movea.l A0,An` right after
-  the call elsewhere (and TTY_$I_SET_RAW 0xE673CC, TTY_$K_SET_FLAG
-  0xE67446 in the same module): not reproduced (dpc's `movea.l A0,An`).
+  register where a call follows (`tools/resultsurvey.py parkd0`:
+  TTY_$K_FLUSH_INPUT 0xE1C0A8, _FLUSH_OUTPUT, _SIMULATE_TERMINAL_INPUT,
+  _GET, _RESET, _SET_FUNC_CHAR, _ENABLE_FUNC, _SET_INPUT_BREAK_MODE,
+  _DRAIN_OUTPUT, _PUT; SIO_$K_TIMED_BREAK, _SIGNAL_WAIT, _SET_PARAM,
+  _INQ_PARAM; D0 next read by `movea.l D0,A2` 12 times, A3 once, A4
+  once) are against 105 `movea.l A0,An` right after the call elsewhere.
+  **No rule found (bead domain-pascal-bks):** the callee nearly decides
+  but not quite: all 14 sites, and 15 of the 17 `->A0` ones below, follow
+  a call of OS_TERM's TTY_$I_GET_DESC 0xE66738 or SIO_$I_GET_DESC
+  0xE667C6, and no call of any other routine is followed by this form;
+  but of the 33 calls of those two, 4 do not park, and they are exactly
+  the run 0xE673AA..0xE674D2 (TTY_$I_SET_RAW 0xE673CC and TTY_$K_SET_FLAG
+  0xE67446 `movea.l A0,An`; TTY_$I_INQ_RAW 0xE67414 and TTY_$K_INQ_FLAGS
+  0xE674BA keep A0; the routine 0xE4B340, whose callers are all in DIR,
+  has 2 D0 callers, 0xE518BC and 0xE52394, among its 35 call sites
+  whose first read of A0 is the next instruction).  A lead not
+  settled (review of bks): the parking callers may hold the result in a
+  local of an integer type (a function declared with an integer result
+  and `a0_return`, ref 5.5.11, or a type transfer at the assignment),
+  turned into a pointer by a type transfer where it is dereferenced
+  (`movea.l D0,An`), and the four others a pointer-typed local.  dpc
+  cannot test it: it keeps an integer32 local assigned a call in its
+  frame slot (`move.l A0,(-4,A6)`), and a `univ_ptr` local is a pointer
+  local (`movea.l A0,A2`).  Nor the status test that follows
+  (of the calls followed by `tst.l (An); b<cc>` on an `out` status, 14
+  park and about 25 copy straight to An: AREA_$ASSOC 0xE096D4, KBD_$PUT
+  0xE1CEBE, VTOC_$MOUNT 0xE385FC, FM_$READ 0xE3A3E2, CAL_$SHUTDOWN
+  0xE3E70A, KBD_$SET_KBD_TYPE 0xE72536, ...); nor whether the register
+  is free (TTY_$K_PUT 0xE67BF0 parks with A2 unused before; TTY_$K_FLUSH_INPUT
+  parks with A2 the status's); nor the position in the module (in TTY's
+  .TEXT segment the four routines TTY_$I_SET_RAW .. TTY_$K_INQ_FLAGS
+  0xE673AA..0xE674D2 do not park, those on both sides do, so no one
+  switch per segment as for A5, section 4, or loops, section 7).  The
+  form is the same at all 14: `move.l A0,D0` right after the call's pop;
+  `movea.l D0,An` once the status test has branched, as the first
+  instruction of the next statement (TTY_$K_FLUSH_INPUT 0xE1C0AE, before
+  the spin lock's push; TTY_$K_RESET 0xE6730A; TTY_$K_SET_INPUT_BREAK_MODE
+  0xE6784C) or after that statement's slot load or pad (TTY_$K_ENABLE_FUNC
+  0xE675E0, an `if` whose two parts use it; SIO_$K_SET_PARAM 0xE680DA;
+  SIO_$K_TIMED_BREAK 0xE67F0E), except TTY_$K_SET_FUNC_CHAR 0xE67516 and
+  TTY_$K_INQ_FUNC_CHAR 0xE6759E (A0), which move it in the `else` part of the next `if`,
+  the first that uses it; An is the lowest callee-saved register free from
+  there (the dead status's A2 at TTY_$K_FLUSH_INPUT, TTY_$K_RESET,
+  TTY_$K_ENABLE_FUNC; A2 beside a live A3 at TTY_$K_PUT; A4 at
+  SIO_$K_SET_PARAM with A2 and A3 live); D0 is the local's up to its last
+  use before the next call (TTY_$K_ENABLE_FUNC builds its masks in D1/D2)
+  and free after it (TTY_$K_FLUSH_INPUT 0xE1C0BE `move.w D0,(-6,A6)`).
+  **Implemented as an option** (`dpc --park-d0=R,...`,
+  `emit::Options::park_d0`; `isel.rs`, `Selector::park_calls`): in the
+  named routines a local assigned once and only dereferenced (`parkable_pointer_local`, below) is parked whether a call
+  follows or not, `movea.l D0,An` placed before the first statement after
+  the assignment that refers to it or calls a routine (the image's
+  placement up to the scheduler's order within that statement), An a
+  virtual register (callee-saved where a call follows, held through a
+  call whose arguments use it last as for 12.4 R4(c)'s pointer locals),
+  D0 held up to the last use of An before the next `jsr`/`bsr`.  Without
+  the option dpc keeps the 105-site form.  As with the A5 options, the
+  choice comes from the image: `tools/srcsurvey.py` gives `--park-d0` to
+  the routines `resultsurvey.park_d0_routines` lists (TTY_$K_FLUSH_INPUT
+  and _OUTPUT now conform; TTY_$K_ENABLE_FUNC differs only in A2/A3, the
+  image putting the status and the local in A2 and `func` in A3, bead
+  domain-pascal-80rr).  Driver test `park_d0_where_a_call_follows`;
+  exec test `tests/exec/park_d0.pas`.
+  (Also fixed with it: a pointer local was taken as addressed when a
+  smaller local lay just below its slot, `t: integer` at -6 under the
+  pointer at -4, so TTY_$K_FLUSH_INPUT's `tty` stayed in its frame slot.)
   **Implemented** (`isel.rs`, `Park`, `Selector::park_home`,
   `parkable_pointer_local`): a pointer local of `call_pointer_locals`
   that allocation puts in A0 or A1 (live across no call), assigned

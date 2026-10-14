@@ -61,8 +61,8 @@ OK	tty/tty.pas	tty_$i_interrupt
 OK	tty/tty.pas	tty_$i_hup
 MISMATCH	tty/tty.pas	tty_$i_put_output
 STUB	tty/tty.pas	tty_$i_set_raw_mode
-MISMATCH	tty/tty.pas	tty_$k_flush_input
-MISMATCH	tty/tty.pas	tty_$k_flush_output
+OK	tty/tty.pas	tty_$k_flush_input
+OK	tty/tty.pas	tty_$k_flush_output
 STUB	tty/tty.pas	tty_$k_simulate_terminal_input
 STUB	tty/tty.pas	tty_$i_wait
 STUB	tty/tty.pas	tty_$k_get

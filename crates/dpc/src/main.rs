@@ -6,6 +6,7 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
+//!            [--park-d0=ROUTINE,...]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -69,6 +70,18 @@
 //! a window of the next N instructions.  The default is `r11:3`; the
 //! policy is not settled (12.4 R11).
 //!
+//! `--park-d0=R,...`: in these routines a pointer local assigned once from
+//! a call and otherwise only dereferenced is held in D0 after the call
+//! (`move.l A0,D0`) and moved to an address register by the first
+//! statement that refers to it or calls a routine, also where a call
+//! follows the assignment (`dpc_m68k::emit::Options::park_d0`;
+//! codegen-patterns 3, "Pointer locals held in D0").  Without it only a
+//! local that no call follows is (the image does both by a rule not known:
+//! 14 routines park where a call follows, TTY_$K_FLUSH_INPUT 0xE1C0A8,
+//! against about 105 sites of the same shape that do not; the option is
+//! taken from the image, `tools/srcsurvey.py`).  Names are matched
+//! case-insensitively.
+//!
 //! `--data-base=SECTION=SYMBOL` (repeatable; link-test scaffolding, bead
 //! domain-pascal-3bp, `tests/link/README.md`): the data area of Pascal
 //! data section SECTION (`.data` for the default) belongs to another
@@ -96,6 +109,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [--root DIR] [-o out.s] \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
+                     [--park-d0=ROUTINE,...] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
@@ -126,10 +140,11 @@ struct Args {
     module_routines: Vec<ModuleRoutine>,
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
+    park_d0: Vec<String>,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
-/// `--a5-always-from=` and `--loop-align-off-from=`: a comma list without
+/// `--a5-always-from=`, `--loop-align-off-from=` and `--park-d0=`: a comma list without
 /// empty items.
 fn routine_list(opt: &str, v: &str) -> Result<Vec<String>, String> {
     let names: Vec<String> = v.split(',').map(str::to_string).collect();
@@ -241,6 +256,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut module_routines: Vec<ModuleRoutine> = Vec::new();
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
+    let mut park_d0 = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -316,6 +332,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     return Err("--a5-absolute given more than once".into());
                 }
                 absolute = Some(routine_list("--a5-absolute", &s["--a5-absolute=".len()..])?);
+            }
+            s if s.starts_with("--park-d0=") => {
+                if park_d0.is_some() {
+                    return Err("--park-d0 given more than once".into());
+                }
+                park_d0 = Some(routine_list("--park-d0", &s["--park-d0=".len()..])?);
             }
             s if s.starts_with("--module-routine=") => {
                 let v = &s["--module-routine=".len()..];
@@ -406,6 +428,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         module_routines,
         schedule: schedule.unwrap_or_default(),
         data_bases,
+        park_d0: park_d0.unwrap_or_default(),
     })
 }
 
@@ -472,6 +495,7 @@ fn compile(
         module_routines: args.module_routines.clone(),
         schedule: args.schedule,
         data_bases: args.data_bases.clone(),
+        park_d0: args.park_d0.clone(),
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -918,6 +942,14 @@ mod tests {
         assert!(args(&["--a5-always=P,", "m.pas"]).is_err());
         assert!(args(&["--a5-always=P", "--a5-always=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-absolute=,P", "m.pas"]).is_err());
+        assert_eq!(
+            args(&["--park-d0=TTY_$K_FLUSH_INPUT,b", "m.pas"])
+                .unwrap()
+                .park_d0,
+            vec!["TTY_$K_FLUSH_INPUT".to_string(), "b".to_string()]
+        );
+        assert!(args(&["--park-d0=", "m.pas"]).is_err());
+        assert!(args(&["--park-d0=a", "--park-d0=b", "m.pas"]).is_err());
         assert!(args(&["--a5-absolute=P", "--a5-absolute=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-always-from", "P", "m.pas"]).is_err());
         assert!(args(&["--data-base=", "m.pas"]).is_err());

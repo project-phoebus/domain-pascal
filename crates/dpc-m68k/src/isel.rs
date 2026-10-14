@@ -101,19 +101,28 @@ fn size_of(w: Width) -> Size {
 /// has no `link; unlk; rts` at all).  One with locals is refused: no such
 /// frame is seen, and whether it would be kept is not known.
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
-    select_with(f, Schedule::default())
+    select_with(f, Schedule::default(), false)
 }
 
-/// [`select`] with the body scheduled under `sched` (`sched.rs`).
-pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
+/// [`select`] with the body scheduled under `sched` (`sched.rs`), and with
+/// `park_calls` ([`select_body_scheduled`]).
+pub fn select_with(
+    f: &Function,
+    sched: Schedule,
+    park_calls: bool,
+) -> Result<Vec<Insn>, Diagnostic> {
     // For the driver's internal-error backstop (`diag::set_context`).
     let outer = dpc_syntax::diag::set_context(Some(f.span));
-    let insns = select_in_context(f, sched);
+    let insns = select_in_context(f, sched, park_calls);
     dpc_syntax::diag::set_context(outer);
     insns
 }
 
-fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
+fn select_in_context(
+    f: &Function,
+    sched: Schedule,
+    park_calls: bool,
+) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
             // A bare `rts` has no frame for the copy; whether the original
@@ -134,7 +143,7 @@ fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnos
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_scheduled(f, sched)?;
+    let body = select_body_scheduled(f, sched, park_calls)?;
     wrap(f, body)
 }
 
@@ -194,26 +203,36 @@ pub struct Body {
 /// which computations a later one can reuse ([`Selector::cse_value`]),
 /// then again holding exactly those.
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
-    select_body_scheduled(f, Schedule::default())
+    select_body_scheduled(f, Schedule::default(), false)
 }
 
 /// [`select_body`] with the body scheduled under `sched` after register
 /// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12).
-pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
+///
+/// `park_calls` (`dpc --park-d0`): a pointer local assigned from a call is
+/// held in D0 ([`Park`]) where a call follows its assignment too, not only
+/// where none does.
+pub fn select_body_scheduled(
+    f: &Function,
+    sched: Schedule,
+    park_calls: bool,
+) -> Result<Body, Diagnostic> {
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in D0 ([`Park`]).
-    let (body, hits, parked) = match select_body_with(f, CsePlan::Probe, sched, &[])? {
+    let (body, hits, parked) = match select_body_with(f, CsePlan::Probe, sched, park_calls, &[])? {
         Selected::Body(b, h) => (b, h, Vec::new()),
-        Selected::Park(parked) => match select_body_with(f, CsePlan::Probe, sched, &parked)? {
-            Selected::Body(b, h) => (b, h, parked),
-            Selected::Park(_) => unreachable!("a parked local is not parked again"),
-        },
+        Selected::Park(parked) => {
+            match select_body_with(f, CsePlan::Probe, sched, park_calls, &parked)? {
+                Selected::Body(b, h) => (b, h, parked),
+                Selected::Park(_) => unreachable!("a parked local is not parked again"),
+            }
+        }
     };
     if hits.is_empty() {
         return Ok(body);
     }
     let Selected::Body(body, again) =
-        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &parked)?
+        select_body_with(f, CsePlan::Hold(hits.clone()), sched, park_calls, &parked)?
     else {
         unreachable!("a parked local is not parked again")
     };
@@ -241,9 +260,11 @@ fn select_body_with(
     f: &Function,
     plan: CsePlan,
     sched: Schedule,
+    park_calls: bool,
     parked: &[i32],
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
+    s.park_calls = park_calls;
     s.cse_plan = plan;
     s.data_label = crate::emit::data_base_label(&f.data_section);
     if f.loads_data_base {
@@ -502,6 +523,11 @@ fn select_body_with(
         .iter()
         .filter(|(o, _)| call_ptrs.contains(o))
         .filter_map(|&(_, a)| a.map(Reg::A))
+        .chain(
+            s.parked
+                .iter()
+                .filter_map(|p| p.home.map(|(a, _)| Reg::A(a))),
+        )
         .collect();
     let mut holds =
         held_through_calls(&s.out, &s.call_stmts, exit, s.link.map(Reg::A), &held_ptrs)?;
@@ -514,6 +540,12 @@ fn select_body_with(
     for p in &s.parked {
         if let (Some((d, _)), Some((a, at))) = (p.d, p.home) {
             for (i, insn) in s.out.iter().enumerate().skip(at + 1) {
+                if s.park_calls && matches!(insn, Insn::Jsr(_) | Insn::Bsr { .. }) {
+                    // `--park-d0`: the call clobbers D0, which is free
+                    // from there (TTY_$K_FLUSH_INPUT 0xE1C0BE `move.w
+                    // D0,(-6,A6)`, the spin lock's token).
+                    break;
+                }
                 if crate::regs::access(insn).uses.contains(&Reg::A(a)) {
                     holds.push((i, Reg::D(d)));
                 }
@@ -603,7 +635,7 @@ fn select_body_with(
         // refused.  Only one in a callee-saved register (live across a
         // call, or held through one) is kept.
         if let Insn::Movea { dst, .. } = s.out[k] {
-            if call_ptrs.contains(&o) && dst < 2 {
+            if call_ptrs.contains(&o) && (dst < 2 || park_calls) {
                 if !parkable_pointer_local(f, o) {
                     return Err(unsupported(
                         span,
@@ -646,7 +678,15 @@ fn select_body_with(
                 ..
             }
         );
-        if !(in_d0 && in_a0) {
+        let callee_saved = matches!(
+            &s.out[a_at],
+            Insn::Movea {
+                src: Ea::Reg(Reg::D(0)),
+                dst: 2..,
+                ..
+            }
+        );
+        if !(in_d0 && (in_a0 || callee_saved)) {
             return Err(unsupported(
                 f.span,
                 "a pointer local assigned from a call that no call follows, where D0 or A0 is \
@@ -2117,7 +2157,7 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     st.deref = true;
                 }
             }
-            Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+            Node::Addr(Addr::Frame(o)) if off <= *o && *o < off + 4 => addrs += 1,
             _ => {}
         });
         if addrs != loads {
@@ -2312,7 +2352,7 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 loads += 1;
                 bad |= *ty != Scalar::POINTER;
             }
-            Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+            Node::Addr(Addr::Frame(o)) if off <= *o && *o < off + 4 => addrs += 1,
             Node::Call(c) => {
                 for a in &c.args {
                     if let Arg::Value { value, .. } | Arg::Temp { value, .. } = a {
@@ -2419,7 +2459,7 @@ fn parkable_pointer_local(f: &Function, off: i32) -> bool {
         .count();
     let (mut addrs, mut loads, mut derefs) = (0, 0, 0);
     walk(&f.body, &mut |n| match n {
-        Node::Addr(Addr::Frame(o)) if *o < off + 4 && off < *o + 4 => addrs += 1,
+        Node::Addr(Addr::Frame(o)) if off <= *o && *o < off + 4 => addrs += 1,
         Node::Expr(Expr::Load {
             addr: Addr::Frame(o),
             ..
@@ -2432,12 +2472,21 @@ fn parkable_pointer_local(f: &Function, off: i32) -> bool {
     top == 1 && addrs == loads + 1 && loads == derefs
 }
 
+/// Whether `st` calls a routine.
+fn has_call(st: &Stmt) -> bool {
+    let mut found = false;
+    walk(std::slice::from_ref(st), &mut |n| {
+        found |= matches!(n, Node::Call(_))
+    });
+    found
+}
+
 /// Whether `st` refers to the frame object at `off` (a 4-byte local).
 fn refers_to(st: &Stmt, off: i32) -> bool {
     let mut found = false;
     walk(std::slice::from_ref(st), &mut |n| {
         if let Node::Addr(Addr::Frame(o)) = n {
-            found |= *o < off + 4 && off < *o + 4;
+            found |= off <= *o && *o < off + 4;
         }
     });
     found
@@ -3307,6 +3356,9 @@ pub struct Selector {
     /// Pointer locals assigned from a call that no call follows, held in
     /// D0 and moved to an address register where dereferenced ([`Park`]).
     parked: Vec<Park>,
+    /// `dpc --park-d0`: [`Park`] where a call follows the assignment too
+    /// ([`Selector::park_home`]).
+    park_calls: bool,
     /// The index in `out` of a parked local's `movea.l D0,An` that moves
     /// down to the branch of the `if` being selected ([`Self::park_home`]).
     hoist: Option<usize>,
@@ -3396,8 +3448,10 @@ pub struct Selector {
 /// dereferences the local in an `if`'s condition after a statement that
 /// does not, which [`Selector::park_home`] refuses.  14 more D0 copies move
 /// to a callee-saved register where a call follows (TTY_$K_FLUSH_INPUT
-/// 0xE1C0AE), against 105 `movea.l A0,An` right after the call: not
-/// reproduced (such a local is [`call_pointer_locals`]'s).
+/// 0xE1C0AE), against 105 `movea.l A0,An` right after the call, by a rule
+/// not known: parked too in the routines `dpc --park-d0` names
+/// ([`Selector::park_calls`], bead domain-pascal-bks), else such a local
+/// is [`call_pointer_locals`]'s.
 #[derive(Clone, Debug)]
 struct Park {
     /// The local's frame offset.
@@ -3500,6 +3554,7 @@ impl Selector {
             ptr_locals: Vec::new(),
             ptr_defs: Vec::new(),
             parked: Vec::new(),
+            park_calls: false,
             hoist: None,
             hoists: Vec::new(),
             link: None,
@@ -3884,7 +3939,10 @@ impl Selector {
     fn park_home(&mut self, f: &Function, body: &[Stmt], st: &Stmt) -> Res<()> {
         for k in 0..self.parked.len() {
             let p = &self.parked[k];
-            if p.d.is_none() || p.home.is_some() || !refers_to(st, p.off) {
+            if p.d.is_none()
+                || p.home.is_some()
+                || !(refers_to(st, p.off) || self.park_calls && has_call(st))
+            {
                 continue;
             }
             let (off, (d, _)) = (p.off, p.d.unwrap());
@@ -3895,7 +3953,7 @@ impl Selector {
                     let mut in_cond = false;
                     walk_cond(cond, &mut |n| {
                         if let Node::Addr(Addr::Frame(o)) = n {
-                            in_cond |= *o < off + 4 && off < *o + 4;
+                            in_cond |= off <= *o && *o < off + 4;
                         }
                     });
                     let simple = matches!(cond, IrCond::Test(_) | IrCond::Compare { .. });
@@ -3916,7 +3974,8 @@ impl Selector {
             let Some(hoist) = hoist else {
                 return Err(unsupported(
                     st.span,
-                    "the first dereference of a pointer local held in D0 inside a statement, a \
+                    "the first dereference of a pointer local held in D0 (with `--park-d0`, \
+                     also the first call after its assignment) inside a statement, a \
                      loop or `case`, or an `if` other than one test with both parts \
                      dereferencing it (where the original moves it to an address register is \
                      not seen) is",

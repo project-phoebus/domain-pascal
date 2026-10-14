@@ -1822,6 +1822,60 @@ end;
     );
 }
 
+/// `--park-d0` (bead domain-pascal-bks; codegen-patterns 3, "Pointer
+/// locals held in D0"): the local is held in D0 where a call follows too,
+/// moved to a callee-saved register by the first statement that refers
+/// to it or calls (TTY_$K_FLUSH_INPUT 0xE1C0A8 `move.l A0,D0`, 0xE1C0AE
+/// `movea.l D0,A2` before the spin lock's call, the status's A2 reused),
+/// D0 free after that call (0xE1C0BE `move.w D0,(-6,A6)`).
+#[test]
+fn park_d0_where_a_call_follows() {
+    let src = format!(
+        "{PARKED}function lock: integer; extern;
+procedure use(in out d: desc_t); extern;
+procedure k(in line: integer; out status: status_$t);
+var d: desc_ptr_t; t: integer;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then return;
+  t := lock;
+  use(d^);
+  g := t;
+end;
+"
+    );
+    let asm = compile_with("park_d0", &src, &["--park-d0=K"]).unwrap();
+    let r = routine(&asm, "K");
+    let want = "	move.l	%a0,%d0
+	tst.l	(%a2)
+	bne.s	1f
+	movea.l	%d0,%a2
+	jsr	(LOCK).l
+";
+    assert!(r.contains(want), "{r}");
+    assert!(
+        r.contains(
+            "	pea	(%a2)
+	jsr	(USE).l
+"
+        ),
+        "{r}"
+    );
+    // Without the option: `movea.l A0,An` right after the call.
+    let asm = compile_with("park_d0_off", &src, &[]).unwrap();
+    let r = routine(&asm, "K");
+    assert!(!r.contains("%d0,%a"), "{r}");
+    assert!(
+        r.contains(
+            "	addq.w	#8,%sp
+	movea.l	%a0,%a"
+        ),
+        "{r}"
+    );
+    let (_, err) = compile_with("park_d0_unknown", &src, &["--park-d0=nope"]).unwrap_err();
+    assert!(err.contains("--park-d0: no routine `nope`"), "{err}");
+}
+
 #[test]
 fn branch_on_the_store_flags_only_right_after_the_store() {
     // codegen-patterns 7.1: a frame local stored from a data register and
