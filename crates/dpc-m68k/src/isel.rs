@@ -31,7 +31,7 @@ use dpc_syntax::{Diagnostic, Span};
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
 use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
-use crate::regs::{allocate_apart, RegClass, VRegs, DATA_BASE};
+use crate::regs::{allocate_apart, call_results_first, RegClass, VRegs, DATA_BASE};
 use crate::sched::Schedule;
 
 /// The register a nested routine's static link is passed in
@@ -548,7 +548,16 @@ fn select_body_with(
         }
     }
     let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
-    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first)
+    // A pointer local assigned a call's result before a parameter that
+    // dies in the same block (codegen-patterns 12.4 R1b, `regs.rs`).
+    let results: Vec<usize> = s
+        .ptr_defs
+        .iter()
+        .filter(|(o, _, _)| call_ptrs.contains(o))
+        .map(|&(_, k, _)| k)
+        .collect();
+    let after = call_results_first(&s.out, exit, &holds, &results, &s.entry_regs);
+    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first, &after)
         .map_err(|what| unsupported(f.span, what))?;
     let dropped = reuse_pointer_copies(&mut s.out, &s.ptr_copies);
     if !dropped.is_empty() {

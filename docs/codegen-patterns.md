@@ -5573,7 +5573,10 @@ kinds from the C in `../source/domain_os`.
   A1 (the five sites above).  Under register pressure, or when the value
   must survive a call, callee-saved registers are used, also without
   calls (MST_$VA_TO_SEGNO 0xE0DCD6 D2; ROUTE_$FIND_PORT 0xE15B06 D3;
-  PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`).  A pointer may be
+  PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`).  Which of them a
+  by-address parameter held across a call takes beside a pointer local
+  assigned that call's result: 12.4 R1b (the local first when the
+  parameter dies in the assignment's block, KBD_$PUT 0xE1CEB4 A3).  A pointer may be
   kept in a D register and copied to an A register where it is
   dereferenced: when it is also used as an integer (EC2_$INIT 0xE42C64,
   `movea.l D0,A0` at 0xE42C70), and in other cases whose rule is not
@@ -6494,6 +6497,10 @@ reverse address order instead of address order.
 | two-level, global values by `chbwd` | 67.4 / 54.8 | 70.2 / 58.8 | 68.5 / 53.4 | 69.1 / 59.7 | 68.9 / 56.8 | 68.6 | 69.1 | 67.2 | 64.7 / 53.4 |
 | two-level, global values by Chaitin/Briggs | 65.4 / 51.3 | 66.1 / 52.4 | 61.9 / 43.9 | 69.1 / 58.8 | 65.8 / 51.9 | 65.2 | 66.3 | 71.5 | 61.8 / 49.0 |
 | the other way: local values first, then global (address order) | 64.2 / 50.4 | 68.3 / 57.5 | **78.9** / 55.6 | 55.4 / 52.7 | 66.3 / 54.0 | 66.3 | 66.3 | 66.3 | 61.6 / 49.3 |
+| end of the live range, latest first (`rlast`, a backward scan; bead domain-pascal-ue7) | 68.0 / 53.8 | 68.9 / 55.3 | 72.5 / 56.0 | 64.9 / 53.2 | 68.4 / 54.5 | 68.0 | 68.9 | 68.4 | 63.3 / 50.5 |
+| parameter loads at their first use (`fu`; ue7) | 67.6 / 55.9 | 69.9 / 58.7 | 72.3 / 56.7 | 65.8 / 57.9 | 68.8 / 57.4 | 68.3 | 69.2 | 68.8 | 64.1 / 53.0 |
+| values live in several blocks first, a call not counted (`2lb-addr`; ue7) | 71.0 / 60.0 | 71.9 / 62.6 | 74.2 / 63.3 | 69.1 / 59.6 | 71.5 / 61.3 | 71.9 | 71.1 | 71.5 | 65.6 / 55.3 |
+| the same with `fu` (`2lb-fu`; ue7) | 68.7 / 57.4 | 70.2 / 59.2 | 70.5 / 57.8 | 68.6 / 58.8 | 69.5 / 58.3 | 69.5 | 69.5 | 69.5 | 64.4 / 53.4 |
 
 Findings:
 - **No published order separates from the others, and none beats a plain
@@ -6555,6 +6562,90 @@ Findings:
     predicts A2, D2, D2, A2.
 - Consequence for `dpc`: keep the address-order greedy colouring (R1,
   `colQU`).  The next step is the lifetime model (R4), not the order.
+
+**R1b. A pointer local assigned a call's result before a parameter that
+dies in its block (bead domain-pascal-ue7; survey `tools/regalloc.py
+paramlocal`; rule Uncertain, a shape with no counterexample in the image;
+implemented).**  The shape: `p := f(..., status); if status.all <>
+status_$ok then ...`, the status address loaded at entry and pushed, `p`
+kept in a callee-saved address register.  Address order gives the status
+A2 and `p` A3; the image the reverse: KBD_$PUT 0xE1CEB4 `(0x18)`->A3,
+0xE1CEC6 `movea.l A0,A2`; KBD_$SET_KBD_TYPE 0xE7252C / 0xE7253E;
+TTY_$I_SET_RAW 0xE673B8 / 0xE673CC.
+- *The survey.*  Pairs of interfering values of one class in
+  callee-saved registers, one a parameter load (P) and the other not (L),
+  that could swap registers (each register free of the other's remaining
+  neighbours): which gets the lower register?  Whole image, P defined
+  first:
+
+  | L (the other value) | address: L lower / P lower | data: L lower / P lower |
+  |---|---|---|
+  | any (P live across a call) | 113 / 186 | 224 / 352 |
+  | any (P not) | 13 / 32 | 18 / 47 |
+  | a call's result kept (`movea.l A0,An` / `move.l D0,Dn` after the call and its pop), P live across that call | 22 / 9 | 10 / 13 |
+
+  So neither "locals before parameters" nor address order holds in
+  general; the orders tried on the whole graph (R1a table: `rlast`, `fu`,
+  `2lb-addr`, `2lb-fu`) all score below address order.  Kept call results
+  of the address class, unfiltered (no swap test), by what P does after
+  the assignment:
+
+  | P after `movea.l A0,An` | L lower | P lower |
+  |---|---|---|
+  | used, and last used in the assignment's block | **6** | **0** |
+  | used again after the block, used before the call too | 13 | 13 |
+  | used again after the block, not used before the call | 8 | 3 |
+
+  The six: KBD_$PUT, KBD_$SET_KBD_TYPE, TTY_$I_SET_RAW above;
+  TTY_$K_SET_FLAG 0xE67430 / 0xE67446; KBD_$GET_CHAR_AND_MODE 0xE724CC /
+  0xE724E0; the AUDIT_ routine at 0xE712BA (map: AUDIT_$SERVER+0x1F4),
+  0xE712C6 A4 / 0xE712D8 A2 (there the result comes in D0 from the
+  `bsr.w` to the module-local 0xE7120C, `movea.l D0,A2`, so the
+  implemented rule below, which looks for `movea.l A0,An`, covers five
+  of the six).  Against a wider rule: CAL_$SHUTDOWN 0xE3E6F2
+  keeps the status in A2 and the result in A3 (0xE3E714), the status
+  pushed again by the later call (0xE3E72A).  Data: one pair each way
+  (0xE03556 / 0xE0377E, 0xE02B0A / 0xE02B22).
+- *How much the six show (ue7 review).*  The condition "last used in the
+  assignment's block" was chosen after looking at the six, and they are
+  one idiom (`p := f(..., status); if status.all <> status_$ok then
+  ...`, the status address used only by the push and the test; three
+  callees: KBD_$GET_DESC 0xE1AA26 three times, TTY_$I_GET_DESC twice,
+  the module-local 0xE7120C once).  "Live across the
+  call" adds nothing: a parameter loaded before the call that interferes
+  with the result is live across it.  Against the base rate the 6 / 0 is
+  weak: kept call results are already lower in 22 of 31 swappable pairs
+  (71%), 16 of 25 (64%) without the six, and 0.64^6 is about 0.07.  A
+  parameter dying in the block of a value that is *not* a call result
+  shows no preference (9 lower / 13 higher, swappable pairs).  The
+  split of the other rows depends on how "used before the call" is
+  defined (counting from the start of the call's argument pushes: 9 / 9
+  and 11 / 7, unfiltered; 20 / 16 in all, against the table's 21 / 16).  What the six do
+  settle: address order is wrong for all of them, and no site in the
+  analysed image (1588 routines; 47 with a `case` table skipped)
+  contradicts the rule, so it changes no prediction elsewhere.  A
+  broader rule (every kept call result before a parameter live across
+  the call) would match 22 of 31 against 15 of 31 for R1b plus address
+  order, but breaks CAL_$SHUTDOWN (conformance test); not adopted
+  (bead domain-pascal-80rr).
+- *Rule (`regs::call_results_first`, `allocate_apart`'s `late`).*  A
+  pointer local assigned a pointer function's result (`movea.l A0,An`
+  right after the call and its pop) is coloured before an address
+  register parameter loaded at entry that is live across that call and
+  whose last use is in the assignment's block; the parameter then takes
+  the next free register.  Other values keep address order.  Why the
+  original does this is not known (no order or lifetime rule tried
+  explains the six together with the 13 / 13 row).
+- Not covered: the parameter used again after the block, in particular
+  the AUDIT_ routine's `(8)` (0xE712C2 A3, used after the test, above the
+  result's A2) and TTY_$K_ENABLE_FUNC 0xE675BC `(0xc)`->A3 beside the
+  result's A2; there `dpc` keeps address order (bead
+  domain-pascal-80rr).  TTY_$K_ENABLE_FUNC also
+  parks the result in D0 until the status (A2) dies (0xE675D6,
+  0xE675E0), bead domain-pascal-bks.
+- Conformance: `tests/conformance/tty_i_set_raw.pas` (TTY_$I_SET_RAW);
+  `tools/srcsurvey.py`: KBD_$PUT and KBD_$SET_KBD_TYPE now CODE-OK,
+  TTY_$I_SET_RAW OK.
 
 #### Common subexpressions
 

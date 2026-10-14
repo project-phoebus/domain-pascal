@@ -284,5 +284,34 @@ class SimulationTest(unittest.TestCase):
             self.assertEqual(sorted(ms[name][0]), [0, 1])
 
 
+class ParamLocalTest(unittest.TestCase):
+    # KBD_$PUT 0xE1CEB4..0xE1CEDC shape (bead domain-pascal-ue7): the
+    # status address in A3 across the call, the call result kept in A2
+    KBD_PUT = ['linkw %fp,#-12', 'moveal %fp@(24),%a3', 'pea %a3@', 'jsr 0xe1aa26',
+               'addqw #8,%sp', 'moveal %a0,%a2', 'tstl %a3@', 'bnes 0x1014',
+               'pea %a2@', 'bsrw 0xe1ca8a', 'unlk %fp', 'rts']
+
+    def test_def_kind(self):
+        rt = routine(self.KBD_PUT)
+        kinds = {rt.ins[v.first].text: regalloc.def_kind(rt, v) for v in rt.values}
+        self.assertEqual(kinds['moveal %fp@(24),%a3'], 'slot')
+        self.assertEqual(kinds['moveal %a0,%a2'], 'callres')
+
+    def test_pair(self):
+        rt = routine(self.KBD_PUT)
+        pairs = regalloc.param_pairs(rt)
+        self.assertEqual(len(pairs), 1)
+        P, L, key = pairs[0]
+        self.assertEqual((P.reg, L.reg), ('a3', 'a2'))
+        self.assertEqual(key, ('a', 'L<P', 'Pfirst', 'Pcall', 'Lnocall', 'callres'))
+
+    def test_new_orders(self):
+        rt = routine(self.KBD_PUT)
+        ms = regalloc.models(rt, regalloc.Graph(rt))
+        for name in ('rlast', 'fu', '2lb-addr', '2lb-fu'):
+            self.assertIn(name, regalloc.MODELS)
+            self.assertEqual(sorted(ms[name][0]), list(range(len(rt.values))))
+
+
 if __name__ == '__main__':
     unittest.main()

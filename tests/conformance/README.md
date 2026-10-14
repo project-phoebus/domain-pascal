@@ -105,7 +105,10 @@ reconstructed from ../source's TTY Pascal: `tty_k_flags.pas`
 `move.l A0,D0` after TTY_$I_GET_DESC, `movea.l D0,A0` where first
 dereferenced, before an `if`'s branch when both parts dereference it)
 and `tty_k_session_id.pas` (TTY_$K_SET_SESSION_ID,
-TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).  A fragment of two code
+TTY_$K_INQ_SESSION_ID 0xE67986..0xE67A02).  A pointer local assigned a
+call's result before the status parameter that dies in its block
+(codegen-patterns 12.4 R1b; bead domain-pascal-ue7): `tty_i_set_raw.pas`
+(TTY_$I_SET_RAW 0xE673AA, the local in A2, the status in A3).  A fragment of two code
 sections (bead domain-pascal-xdh.6; "Fragments of several code sections"
 below): `tty_sections.pas` (the WIRED_PROC module-local 0xE1B3B4,
 `tty/i_xmit_char.c`, with its `bsr.w` to the module-local 0xE1B00A

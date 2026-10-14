@@ -94,6 +94,11 @@ usage:
                                          # while an address register still
                                          # holds a copy of the same value
                                          # or not (N examples)
+    tools/regalloc.py paramlocal [N] [--class d|a]
+                                         # bead domain-pascal-ue7: a held
+                                         # parameter load and a held other
+                                         # value that could swap registers:
+                                         # which is lower (N examples)
     tools/regalloc.py ptrdregs [N]       # the same: parameters loaded into a
                                          # D register and dereferenced
                                          # through copies, by their other
@@ -1298,6 +1303,63 @@ def ptr_dregs(rt):
     return out
 
 
+def def_kind(rt, v):
+    """How a value starts: 'slot' (a parameter load), 'callres' (a copy
+    of A0/D0 right after a call: a call result kept), 'copy' (another
+    register copy), 'const', 'load' (through a register or from A5/an
+    absolute address), 'lea', 'other'."""
+    if v.param:
+        return 'slot'
+    x = rt.ins[v.first]
+    src = x.ops[0] if x.ops else ''
+    if x.mn.startswith('move') and src in ('%a0', '%d0'):
+        j = v.first - 1
+        while j >= 0 and rt.ins[j].ops and rt.ins[j].ops[-1] == '%sp' and not rt.ins[j].call:
+            j -= 1                          # the caller's pop
+        if j >= 0 and rt.ins[j].call:
+            return 'callres'
+    if x.mn.startswith('move') and is_reg(src):
+        return 'copy'
+    if x.mn in ('moveq', 'moveql', 'clrl', 'clrw', 'clrb') or src.startswith('#'):
+        return 'const'
+    if x.mn == 'lea':
+        return 'lea'
+    if x.mn.startswith('move'):
+        return 'load'
+    return 'other'
+
+
+def param_pairs(rt, g=None):
+    """Bead domain-pascal-ue7: pairs of interfering values of one class,
+    both in callee-saved registers (D2-D7 / A2-A4), one a parameter load
+    (P) and the other not (L), that could swap registers (each register
+    is free of the other's remaining neighbours and not forbidden).
+    [(P, L, key)], key = (class, which is lower: 'L<P' or 'P<L', which is
+    defined first: 'Pfirst'/'Lfirst', P crosses a call, L crosses a call,
+    L's def_kind)."""
+    g = g or Graph(rt)
+    vs = rt.values
+    out = []
+    for kp, P in enumerate(vs):
+        if not P.param or P.reg in SCRATCH:
+            continue
+        for kl in g.nb[kp]:
+            L = vs[kl]
+            if L.param or L.reg in SCRATCH or L.cls is not P.cls:
+                continue
+            others_p = {vs[j].reg for j in g.nb[kp] if j != kl}
+            others_l = {vs[j].reg for j in g.nb[kl] if j != kp}
+            if (L.reg == P.reg or L.reg in others_p or L.reg in g.forbid[kp]
+                    or P.reg in others_l or P.reg in g.forbid[kl]):
+                continue
+            key = (P.reg[0], 'L<P' if L.reg < P.reg else 'P<L',
+                   'Pfirst' if P.first < L.first else 'Lfirst',
+                   'Pcall' if P.crosses_call else 'Pnocall',
+                   'Lcall' if L.crosses_call else 'Lnocall', def_kind(rt, L))
+            out.append((P, L, key))
+    return out
+
+
 # -- allocator simulations (bead domain-pascal-jjh) ----------------------
 #
 # The values of a routine and colU's interference, as a graph that does not
@@ -1450,7 +1512,10 @@ def models(rt, g, tie=1):
     vs = rt.values
     depth = loop_depth(rt)
     out = {'addr': (sorted(range(len(vs)), key=lambda k: vs[k].first), ()),
-           'raddr': (sorted(range(len(vs)), key=lambda k: -vs[k].first), ())}
+           'raddr': (sorted(range(len(vs)), key=lambda k: -vs[k].first), ()),
+           # bead domain-pascal-ue7: by the end of the live range, latest
+           # first (a backward linear scan), ties in address order
+           'rlast': (sorted(range(len(vs)), key=lambda k: (-vs[k].last, vs[k].first)), ())}
     for w in (1, 10):
         cnt = {id(v): refs(rt, v, depth, w) for v in vs}
         sw = '' if w == 1 else 'w'
@@ -1476,10 +1541,25 @@ def models(rt, g, tie=1):
         out['2l-' + base] = (glob + loc, sp)
         # the other way round: block-local values first (address order)
         out['lf-' + base] = (loc + glob, sp)
+    # bead domain-pascal-ue7: a parameter load ordered by its first use
+    # rather than its load (`fu'); values live in more than one block
+    # (crossing a call not counted) before the single-block ones (`2lb-')
+    def key_fu(k):
+        v = vs[k]
+        if v.param:
+            us = value_uses(rt, v)
+            return us[0] if us else v.first
+        return v.first
+    multi = [k for k in range(len(vs)) if len(vs[k].blocks) > 1]
+    single = [k for k in range(len(vs)) if len(vs[k].blocks) <= 1]
+    out['fu'] = (sorted(range(len(vs)), key=lambda k: (key_fu(k), vs[k].first)), ())
+    for name, key in (('addr', lambda k: vs[k].first),
+                      ('fu', lambda k: (key_fu(k), vs[k].first))):
+        out['2lb-' + name] = (sorted(multi, key=key) + sorted(single, key=key), ())
     return out
 
 
-MODELS = ('addr', 'raddr', 'use', 'usew', 'chi', 'chid', 'chb', 'chbd', 'chiw', 'chiwd',
+MODELS = ('addr', 'raddr', 'rlast', 'fu', '2lb-addr', '2lb-fu', 'use', 'usew', 'chi', 'chid', 'chb', 'chbd', 'chiw', 'chiwd',
           'chbw', 'chbwd', 'briggs', 'chaitin', 'briggs-deg', 'chaitin-deg',
           '2l-addr', '2l-chbwd', '2l-briggs', '2l-use',
           'lf-addr', 'lf-chbwd', 'lf-briggs', 'lf-use')
@@ -1687,6 +1767,23 @@ def main(argv):
               'address register free over its range)')
         for k in sorted(tot):
             print('%-40s %5d  %s' % ('/'.join(k), tot[k], ' '.join(ex[k][:show])))
+        return 0
+    if cmd == 'paramlocal':
+        # bead domain-pascal-ue7: a parameter load and another value, both
+        # callee-saved, interfering, able to swap: which gets the lower
+        # register?
+        show = int(argv[1]) if len(argv) > 1 else 6
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            for P, L, key in param_pairs(rt):
+                if cls and key[0] != cls:
+                    continue
+                tot[key] += 1
+                ex[key].append('%06X:%s/%06X:%s' % (rt.ins[P.first].addr, P.reg,
+                                                     rt.ins[L.first].addr, L.reg))
+        print('(class, lower, first defined, P call, L call, L kind)')
+        for k in sorted(tot, key=lambda k: (k[0], k[2:], k[1])):
+            print('%-44s %5d  %s' % ('/'.join(k), tot[k], ' '.join(ex[k][:show])))
         return 0
     if cmd in ('orders', 'simmisses'):
         # bead domain-pascal-jjh: allocator orders simulated over colU's

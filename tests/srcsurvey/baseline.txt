@@ -10,11 +10,11 @@ STUB	kbd/kbd.pas	kbd_$fetch_key
 STUB	kbd/kbd.pas	kbd_$rcv
 CODE-OK	kbd/kbd.pas	kbd_$crash_init
 STUB	kbd/kbd.pas	kbd_$output_buffer_drained
-MISMATCH	kbd/kbd.pas	kbd_$put
+CODE-OK	kbd/kbd.pas	kbd_$put
 STUB	kbd/kbd.pas	kbd_$init
 STUB	kbd/kbd.pas	kbd_$get_char_and_mode
 CODE-OK	kbd/kbd.pas	kbd_$set_kbd_mode
-MISMATCH	kbd/kbd.pas	kbd_$set_kbd_type
+CODE-OK	kbd/kbd.pas	kbd_$set_kbd_type
 STUB	kbd/kbd.pas	kbd_$inq_kbd_type
 STUB	log/log.pas	log_$shutdn
 OK	log/log.pas	log_$update
@@ -72,7 +72,7 @@ STUB	tty/tty.pas	tty_$i_set_funcs
 OK	tty/tty.pas	tty_$i_set_dfl_funcs
 STUB	tty/tty.pas	tty_$i_enable_crash_func
 STUB	tty/tty.pas	tty_$k_reset
-MISMATCH	tty/tty.pas	tty_$i_set_raw
+OK	tty/tty.pas	tty_$i_set_raw
 MISMATCH	tty/tty.pas	tty_$i_inq_raw
 STUB	tty/tty.pas	tty_$k_set_flag
 STUB	tty/tty.pas	tty_$k_inq_flags

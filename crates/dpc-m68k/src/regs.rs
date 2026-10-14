@@ -56,14 +56,17 @@
 //! from the values of earlier statements ([`allocate_apart`]; IIC_$RECEIVE
 //! 0xE70AC0..0xE70AD0).  R5: a function's result variable and the
 //! parameters loaded at entry are coloured first ([`allocate_apart`]'s
-//! `first`; PARITY_$CHK_IO 0xE0B180..0xE0B18A).
+//! `first`; PARITY_$CHK_IO 0xE0B180..0xE0B18A).  R1b: a pointer local
+//! assigned a call's result is coloured before a parameter live across
+//! that call that dies in the assignment's block ([`call_results_first`];
+//! KBD_$PUT 0xE1CEB4/0xE1CEC6).
 //!
 //! The callee-saved registers the assignment uses are what the prologue
 //! saves ([`crate::frame::Frame`]), with A5 when the body loads it.
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::insn::{Ea, Insn, Reg, RegSet};
+use crate::insn::{Ea, Insn, Reg, RegSet, Size};
 
 /// Data or address register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -504,6 +507,90 @@ pub fn liveness(insns: &[Insn], exit: &[Reg], holds: &[(usize, Reg)]) -> Vec<BTr
     }
 }
 
+/// Pairs `(l, p)` for [`allocate_apart`]'s `late` (codegen-patterns 12.4
+/// R1b; bead domain-pascal-ue7; Uncertain, a shape fitted to the image):
+/// a pointer local `l` assigned a pointer function's result (`movea.l
+/// A0,l` at index `k` of `results`, right after the call and its pop)
+/// gets its register before the address register `p` of a parameter
+/// loaded at entry (`entry`) when `p` is live across that call and its
+/// last use follows in the block of the assignment (the status test after
+/// `p := f(..., status)`).  The parameter then takes the next register:
+/// KBD_$PUT 0xE1CEB4/0xE1CEC6 A3/A2, KBD_$SET_KBD_TYPE 0xE7252C/0xE7253E,
+/// TTY_$I_SET_RAW 0xE673B8/0xE673CC, TTY_$K_SET_FLAG 0xE67430/0xE67446,
+/// KBD_$GET_CHAR_AND_MODE 0xE724CC/0xE724E0, and the AUDIT_ routine at
+/// 0xE712BA (0xE712C6 A4 / 0xE712D8 A2, a result in D0, `movea.l D0,A2`,
+/// which this function does not look for): every such pair in the image
+/// (`tools/regalloc.py paramlocal`).  Six sites of one idiom, the condition
+/// chosen after seeing them; no counterexample (codegen-patterns 12.4
+/// R1b, "How much the six show").  A parameter used again after the
+/// block keeps the address order: there the image goes either way (13
+/// and 13 pairs).
+pub fn call_results_first(
+    insns: &[Insn],
+    exit: &[Reg],
+    holds: &[(usize, Reg)],
+    results: &[usize],
+    entry: &[Reg],
+) -> Vec<(Reg, Reg)> {
+    let live_out = liveness(insns, exit, holds);
+    let mut out = Vec::new();
+    for &k in results {
+        let Some(Insn::Movea {
+            size: Size::L,
+            src: Ea::Reg(Reg::A(0)),
+            dst,
+        }) = insns.get(k)
+        else {
+            continue;
+        };
+        let l = Reg::A(*dst);
+        if !is_virtual(l) {
+            continue;
+        }
+        // The call: back over the caller's pop.
+        let mut c = k;
+        while c > 0 {
+            c -= 1;
+            let pops = match &insns[c] {
+                Insn::Addq { dst, .. } => *dst == Ea::Reg(Reg::A(7)),
+                Insn::Lea { dst, .. } => *dst == 7,
+                _ => false,
+            };
+            if !pops {
+                break;
+            }
+        }
+        if !matches!(insns[c], Insn::Jsr(_) | Insn::Bsr { .. }) {
+            continue;
+        }
+        // The end of the assignment's block: the last instruction before a
+        // label, or the first branch.
+        let mut end = k;
+        while end + 1 < insns.len() {
+            if matches!(insns[end + 1], Insn::Label(_)) {
+                break;
+            }
+            end += 1;
+            if matches!(
+                insns[end],
+                Insn::Branch { .. } | Insn::Dbf { .. } | Insn::TableJump { .. } | Insn::Rts
+            ) {
+                break;
+            }
+        }
+        for &p in entry {
+            if !matches!(p, Reg::A(_)) || !live_out[c].contains(&RegKey(p)) {
+                continue;
+            }
+            let used = (k + 1..=end).any(|i| access(&insns[i]).uses.contains(&p));
+            if used && !live_out[end].contains(&RegKey(p)) {
+                out.push((l, p));
+            }
+        }
+    }
+    out
+}
+
 /// [`Reg`] with an order, for the sets of [`liveness`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RegKey(pub Reg);
@@ -541,7 +628,7 @@ pub fn allocate(
     exit: &[Reg],
     holds: &[(usize, Reg)],
 ) -> Result<RegSet, String> {
-    allocate_apart(insns, exit, holds, &[], None)
+    allocate_apart(insns, exit, holds, &[], None, &[])
 }
 
 /// [`allocate`], with each pair of `apart` kept in different registers
@@ -562,12 +649,16 @@ pub fn allocate(
 /// 0xE76422 likewise; 0xE0B202, 0xE7630C, 0xE54B58 in parameter order;
 /// PROC1_$SUSPENDP 0xE1487E `(8)`->D1 beside the result in D0).  The other
 /// values follow in the usual order.
+///
+/// `late`: pairs `(l, p)` where `p` is coloured right after `l` instead of
+/// in its own place ([`call_results_first`]).
 pub fn allocate_apart(
     insns: &mut [Insn],
     exit: &[Reg],
     holds: &[(usize, Reg)],
     apart: &[(Reg, Reg)],
     first: Option<(Reg, Vec<Reg>)>,
+    late: &[(Reg, Reg)],
 ) -> Result<RegSet, String> {
     let web = first.as_ref().map(|(w, _)| *w);
     let live_out = liveness(insns, exit, holds);
@@ -639,6 +730,18 @@ pub fn allocate_apart(
             order = lead;
         }
     }
+    for &(l, p) in late {
+        let (Some(il), Some(ip)) = (
+            order.iter().position(|&r| r == l),
+            order.iter().position(|&r| r == p),
+        ) else {
+            continue;
+        };
+        if ip < il {
+            order.remove(ip);
+            order.insert(il, p);
+        }
+    }
     let mut assigned: HashMap<RegKey, Reg> = HashMap::new();
     for v in order {
         let taken: Vec<Reg> = adj
@@ -690,7 +793,7 @@ pub fn allocate_apart(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insn::{Cond, Size};
+    use crate::insn::Cond;
 
     const FP: u8 = 6;
     const SP: u8 = 7;
@@ -901,6 +1004,69 @@ mod tests {
         );
     }
 
+    /// KBD_$PUT 0xE1CEB4..0xE1CEC8 (12.4 R1b): the status address, live
+    /// across the call and last used by the test in the block of the
+    /// pointer local's assignment, is coloured after the local: the local
+    /// in A2, the status in A3.  Used again after the block, it keeps the
+    /// address order.
+    #[test]
+    fn call_result_before_dying_parameter() {
+        let body = |reuse: bool| {
+            let mut b = vec![
+                load(0x18, va(0)),
+                Insn::Pea(Ea::Ind(an(va(0)))),
+                jsr(),
+                Insn::Addq {
+                    size: Size::W,
+                    value: 4,
+                    dst: Ea::Reg(a(SP)),
+                },
+                Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(a(0)),
+                    dst: an(va(1)),
+                },
+                Insn::Tst {
+                    size: Size::L,
+                    dst: Ea::Ind(an(va(0))),
+                },
+                Insn::Branch {
+                    cond: Cond::Ne,
+                    label: 1,
+                    short: true,
+                    back: false,
+                },
+                Insn::Pea(Ea::Ind(an(va(1)))),
+            ];
+            if reuse {
+                b.push(Insn::Pea(Ea::Ind(an(va(0)))));
+            }
+            b.push(jsr());
+            // The local live across the call (the original holds it
+            // through its last call, 12.4 R4(c)).
+            b.push(Insn::Tst {
+                size: Size::L,
+                dst: Ea::Ind(an(va(1))),
+            });
+            b.push(Insn::Label(1));
+            b
+        };
+        let mut insns = body(false);
+        let after = call_results_first(&insns, &[], &[], &[4], &[va(0)]);
+        assert_eq!(after, [(va(1), va(0))]);
+        allocate_apart(&mut insns, &[], &[], &[], None, &after).unwrap();
+        let t = text(&insns);
+        assert_eq!(t[0], "movea.l\t(0x18,%fp),%a3");
+        assert_eq!(t[4], "movea.l\t%a0,%a2");
+        // Without the pairs: address order.
+        let mut plain = body(false);
+        allocate(&mut plain, &[], &[]).unwrap();
+        assert_eq!(text(&plain)[0], "movea.l\t(0x18,%fp),%a2");
+        // The status used again after the block: no pair.
+        let insns = body(true);
+        assert!(call_results_first(&insns, &[], &[], &[4], &[va(0)]).is_empty());
+    }
+
     /// IIC_$RECEIVE 0xE70AC0..0xE70AD0: values kept apart (12.4 R4(b)) take
     /// new registers although the earlier ones are dead, A2 included.
     #[test]
@@ -922,7 +1088,7 @@ mod tests {
         assert!(text(&plain).iter().all(|l| !l.contains("%a1")));
         let mut insns = body;
         let apart = [(va(1), va(0)), (va(2), va(0)), (va(2), va(1))];
-        let saves = allocate_apart(&mut insns, &[], &[], &apart, None).unwrap();
+        let saves = allocate_apart(&mut insns, &[], &[], &apart, None, &[]).unwrap();
         assert_eq!(
             text(&insns),
             [
