@@ -1876,6 +1876,176 @@ end;
     assert!(err.contains("--park-d0: no routine `nope`"), "{err}");
 }
 
+/// The descriptor function as an integer `a0_return` function (bead
+/// domain-pascal-yzxr; ref 5.5.11, p. 5-20).
+const PARKED_INT: &str = "module m;
+type
+  status_$t = record case integer of 1: (all: integer32); end;
+  desc_t = record a: integer32; b: integer; c: integer; end;
+  desc_ptr_t = ^desc_t;
+var g: integer; g32: integer32;
+function get_desc(line: integer; out status: status_$t): integer32;
+  options(extern, val_param, a0_return);
+function lock: integer; extern;
+procedure use(in out d: desc_t); extern;
+";
+
+/// An integer local assigned an `a0_return` result and read only through
+/// a type transfer to a pointer it dereferences is held in D0 and moved
+/// to an address register where first dereferenced, with no option and
+/// where a call follows (TTY_$K_FLUSH_INPUT 0xE1C0A8 / 0xE1C0AE) or not
+/// (TTY_$K_INQ_INPUT_FLAGS 0xE676D4 / 0xE676DA); bead domain-pascal-yzxr.
+#[test]
+fn integer_a0_result_local_is_parked() {
+    let src = format!(
+        "{PARKED_INT}procedure k(in line: integer; out status: status_$t);
+var d: integer32; t: integer;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then return;
+  t := lock;
+  use(desc_ptr_t(d)^);
+  g := t;
+end;
+
+procedure q(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g := desc_ptr_t(d)^.b;
+end;
+"
+    );
+    let asm = compile_with("park_int", &src, &[]).unwrap();
+    let r = routine(&asm, "K");
+    let want = "	move.l	%a0,%d0
+	tst.l	(%a2)
+	bne.s	1f
+	movea.l	%d0,%a2
+	jsr	(LOCK).l
+";
+    assert!(r.contains(want), "{r}");
+    assert!(!r.contains("(-4,%fp)"), "{r}");
+    let r = routine(&asm, "Q");
+    assert!(
+        r.contains("\tmove.l\t%a0,%d0\n") && r.contains("\tmovea.l\t%d0,%a0\n"),
+        "{r}"
+    );
+    // The same with `--no-park-pointer-locals` (which only concerns
+    // pointer-typed locals).
+    let np = compile_with("park_int_np", &src, &["--no-park-pointer-locals"]).unwrap();
+    assert_eq!(routine(&np, "K"), routine(&asm, "K"));
+    assert_eq!(routine(&np, "Q"), routine(&asm, "Q"));
+}
+
+/// Integer locals assigned an `a0_return` result that are also read whole
+/// keep their frame slot as before (`move.l A0,(-4,A6)`); one only read
+/// whole is an ordinary register-held integer local (codegen-patterns
+/// 12.5): the parked form covers only the transfer-and-dereference shape.
+#[test]
+fn integer_a0_result_local_read_whole_is_not_parked() {
+    for (k, body, want) in [
+        (
+            0,
+            "d := get_desc(line, status);
+  if status.all <> 0 then return;
+  g32 := d + desc_ptr_t(d)^.a;",
+            "\tmove.l\t%a0,(-4,%fp)\n",
+        ),
+        (
+            1,
+            "d := get_desc(line, status);
+  if status.all <> 0 then d := get_desc(line, status);
+  g := desc_ptr_t(d)^.b;",
+            "\tmove.l\t%a0,(-4,%fp)\n",
+        ),
+        (
+            2,
+            "d := get_desc(line, status);
+  g32 := d;",
+            "\tmove.l\t%a0,%d0\n\tmove.l\t%d0,(4,%a5)\n",
+        ),
+    ] {
+        let src = format!(
+            "{PARKED_INT}procedure p(in line: integer; out status: status_$t);
+var d: integer32;
+begin
+  {body}
+end;
+"
+        );
+        let asm = compile_with(&format!("park_int_whole_{k}"), &src, &[]).unwrap();
+        let r = routine(&asm, "P");
+        assert!(r.contains(want), "{k}: {r}");
+        assert!(!r.contains("\tmovea.l\t%d0,%a"), "{k}: {r}");
+    }
+}
+
+/// A type transfer of an A0 result is still that call's A0: assigned to
+/// a pointer local it is copied with `movea.l A0,An` where a call follows
+/// (TTY_$I_SET_RAW 0xE673CC `movea.l A0,A2`); with
+/// `--no-park-pointer-locals`, a pointer local that no call follows stays
+/// in A0 itself and the slot of the `out` parameter takes A1
+/// (TTY_$I_INQ_RAW 0xE67410..0xE67414 `movea.l (0xa,A6),A1; move.b
+/// (0x4d9,A0),(A1)`); bead domain-pascal-yzxr.
+#[test]
+fn transferred_a0_result_in_pointer_locals() {
+    let src = format!(
+        "{PARKED_INT}procedure s(line: integer; out status: status_$t); options(val_param);
+var d: desc_ptr_t;
+begin
+  d := desc_ptr_t(get_desc(line, status));
+  if status.all <> 0 then return;
+  use(d^);
+end;
+
+procedure i(line: integer; out v: integer; out status: status_$t); options(val_param);
+var d: desc_ptr_t;
+begin
+  d := desc_ptr_t(get_desc(line, status));
+  if status.all <> 0 then return;
+  v := d^.b;
+end;
+"
+    );
+    let asm = compile_with("xfer_a0", &src, &["--no-park-pointer-locals"]).unwrap();
+    let r = routine(&asm, "S");
+    assert!(r.contains("\taddq.w\t#8,%sp\n\tmovea.l\t%a0,%a2\n"), "{r}");
+    let r = routine(&asm, "I");
+    assert!(
+        r.contains(
+            "\taddq.w\t#8,%sp
+\ttst.l\t(%a2)
+\tbne.s\t1f
+\tmovea.l\t(0xa,%fp),%a1
+\tmove.w\t(4,%a0),(%a1)
+"
+        ),
+        "{r}"
+    );
+    assert!(!r.contains("%d0"), "{r}");
+    // By default (dgb) such a local is held in D0 instead.
+    let asm = compile_with("xfer_a0_dflt", &src, &[]).unwrap();
+    let r = routine(&asm, "I");
+    assert!(r.contains("\tmove.l\t%a0,%d0\n"), "{r}");
+    // Kept in A0 only while nothing writes A0: M$ARITH between the call
+    // and the dereference is refused.
+    let src = format!(
+        "{PARKED_INT}var h32: integer32;
+procedure m(line: integer; out status: status_$t); options(val_param);
+var d: desc_ptr_t;
+begin
+  d := desc_ptr_t(get_desc(line, status));
+  g32 := g32 * h32;
+  g := d^.b;
+end;
+"
+    );
+    let (_, err) = compile_with("xfer_a0_marith", &src, &["--no-park-pointer-locals"]).unwrap_err();
+    assert!(err.contains("with A0 written before its last use"), "{err}");
+}
+
 #[test]
 fn branch_on_the_store_flags_only_right_after_the_store() {
     // codegen-patterns 7.1: a frame local stored from a data register and

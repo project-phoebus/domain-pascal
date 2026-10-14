@@ -187,6 +187,13 @@ pub struct Options {
     /// straight to a callee-saved register in about 105 sites of the same
     /// shape (TTY_$K_SET_FLAG 0xE67446), by a rule not known.
     pub park_d0: Vec<String>,
+    /// Pointer locals assigned from a call that no call follows stay in
+    /// their address register, A0, instead of being held in D0 (`dpc
+    /// --no-park-pointer-locals`; `isel::Parking::pointers`).  For a
+    /// translation that declares the D0 locals as 4-byte integers
+    /// assigned an `a0_return` result and the A0 ones as pointers (bead
+    /// domain-pascal-yzxr; TTY_$I_INQ_RAW 0xE67414 keeps A0).
+    pub no_park_pointers: bool,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -424,11 +431,14 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             // For the driver's internal-error backstop
             // (`diag::set_context`): the routine, up to its pool cells.
             let outer = dpc_syntax::diag::set_context(Some(f.span));
-            let park_calls = opts
-                .park_d0
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(&f.symbol));
-            match isel::select_with(f, opts.schedule, park_calls) {
+            let parking = isel::Parking {
+                calls: opts
+                    .park_d0
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&f.symbol)),
+                pointers: !opts.no_park_pointers,
+            };
+            match isel::select_with(f, opts.schedule, parking) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {

@@ -196,6 +196,14 @@ tests/conformance/tty_wired_data.pas         0xE1AED0:14 0xE1AEE4:14  --section-
 # local assigned in both arms of an `if' in a register, a spin-lock token
 # read only as a pushed argument in its frame slot.
 tests/conformance/tty_buf.pas                0xE1AF0A:38 0xE1AF42:60
+# TTY_$I_GET_DESC declared `integer32; options(a0_return)' (bead
+# domain-pascal-yzxr; codegen-patterns 3, "Pointer locals held in D0"):
+# integer locals held in D0 and moved to An where dereferenced through a
+# type transfer, where a call follows too (no --park-d0); pointer locals
+# assigned the transferred value copied to An or kept in A0.
+tests/conformance/tty_k_flags_int.pas        TTY_$K_INQ_FUNC_ENABLED TTY_$K_SET_INPUT_FLAG TTY_$K_INQ_INPUT_FLAGS TTY_$K_SET_OUTPUT_FLAG TTY_$K_INQ_OUTPUT_FLAGS TTY_$K_SET_ECHO_FLAG TTY_$K_INQ_ECHO_FLAGS  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS  no-park-pointer-locals
+tests/conformance/tty_i_raw_int.pas          TTY_$I_SET_RAW TTY_$I_INQ_RAW  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$I_SET_RAW,TTY_$I_INQ_RAW  module-routines=TTY_$I_SET_RAW_MODE=0xE1BF70  no-park-pointer-locals
+tests/conformance/tty_k_flush_int.pas        TTY_$K_FLUSH_INPUT TTY_$K_FLUSH_OUTPUT  --section-addr .bss.moddata.TTY.WIRED_DATA=0xE2DDB4  a5-always=TTY_$K_FLUSH_INPUT,TTY_$K_FLUSH_OUTPUT  module-routines=TTY_$I_FLUSH_INPUT,TTY_$I_FLUSH_OUTPUT  no-park-pointer-locals
 # Two variables in memory compared, the left one loaded (codegen-patterns
 # 7.1; bead domain-pascal-aaj).
 tests/conformance/acl_clear_super.pas        ACL_$CLEAR_SUPER  --section-addr .bss.moddata.ACL_=0xE7CF54

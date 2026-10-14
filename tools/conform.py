@@ -34,6 +34,9 @@ a local symbol), and ADDR must lie in the unit's map module, outside the
 unit, with no map name; it is forwarded the same way, and the reference is
 resolved with `--defsym NAME=0xADDR' at link time (`check --local-sym').
 `check --local-sym NAME=0xADDR' is checked the same way.
+`no-park-pointer-locals' (.pas units only): forwarded as
+`--no-park-pointer-locals' (a pointer local assigned a call that no
+call follows stays in A0; bead domain-pascal-yzxr).
 `enclosing=NAME' (.pas fragments only, at most once; `check --enclosing
 NAME'): the unit's routines are nested in routine NAME, dpc's symbol for
 it, which follows them; it is compiled with them (their code reaches its
@@ -895,6 +898,7 @@ def encoded_calls(src):
 
 MODULE_ROUTINES_TOKEN = 'module-routines='
 ENCLOSING_TOKEN = 'enclosing='
+NO_PARK_POINTERS_TOKEN = 'no-park-pointer-locals'
 
 
 def module_routine_args(tokens, routines, linkmap):
@@ -1008,7 +1012,7 @@ def run_manifest(path, linkmap, dpc):
         if not toks:
             continue
         src = os.path.join(REPO, toks[0])
-        specs, sect, align, a5, mods, encl = [], {}, [], [], [], []
+        specs, sect, align, a5, mods, encl, park = [], {}, [], [], [], [], []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -1022,6 +1026,8 @@ def run_manifest(path, linkmap, dpc):
                 mods.append(t)
             elif t.startswith(ENCLOSING_TOKEN):
                 encl.append(t[len(ENCLOSING_TOKEN):])
+            elif t == NO_PARK_POINTERS_TOKEN:
+                park.append(t)
             else:
                 specs.append(t)
         try:
@@ -1034,6 +1040,10 @@ def run_manifest(path, linkmap, dpc):
             if a5opts and not src.endswith('.pas'):
                 raise SetupError('%s: a5 options apply to .pas units only' % toks[0])
             opts += a5opts
+            if park and not src.endswith('.pas'):
+                raise SetupError('%s: %s applies to .pas units only'
+                                 % (toks[0], NO_PARK_POINTERS_TOKEN))
+            opts += ['--' + NO_PARK_POINTERS_TOKEN] if park else []
             if mods and not src.endswith('.pas'):
                 raise SetupError('%s: module-routines applies to .pas units only' % toks[0])
             if len(encl) > 1 or encl and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', encl[0]):

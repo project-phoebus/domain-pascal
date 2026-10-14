@@ -6,6 +6,7 @@ image (bead domain-pascal-xdh.3).
     srcsurvey.py run [--rev REV] [--source DIR] [--work DIR] [--dpc DPC]
                      [--no-workaround NAME]... [--no-conform]
                      [--no-build-settings] [--baseline [FILE] | --update]
+                     [--dpc-opt OPT]... [--no-park-d0]
                      [-v] [MODULE.pas ...]
     srcsurvey.py summarise DIAGNOSTICS.txt [--tree DIR] [-v]
 
@@ -85,6 +86,13 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      printed at the end ("build settings").  The `-from' routine is the
      first one the image proves; the interval printed with it is where
      the switch could be put as well.
+
+Experiments (not for the baseline): `--dpc-opt OPT' gives OPT to every
+dpc run, `--no-park-d0' leaves out step 5's `--park-d0' setting.  With a
+REV of a scratch clone of ../source (--source) whose TTY Pascal declares
+TTY_$I_GET_DESC `integer32; options(a0_return)', `--no-park-d0
+--dpc-opt=--no-park-pointer-locals' checks bead domain-pascal-yzxr's
+reading (codegen-patterns 3, "Pointer locals held in D0").
 
 The run ends with a summary of the top-level routines by status (OK,
 CODE-OK, MISMATCH, SETUP, STUB: stubbed for a diagnostic, BLOCKED: the
@@ -785,8 +793,15 @@ def report(title, summary, out=sys.stdout, verbose=False):
 
 # --------------------------------------------------------------- driver
 
+# `run --dpc-opt': options given to every dpc run; `run --no-park-d0':
+# no `--park-d0' build setting (module_settings).  For experiments with a
+# changed translation (bead domain-pascal-yzxr), not for the baseline.
+EXTRA_DPC_OPTS = []
+NO_PARK_D0 = False
+
+
 def run_dpc(dpc, tree, src, check_only=False, out=None, opts=()):
-    cmd = [dpc, '-I', '.'] + list(opts)
+    cmd = [dpc, '-I', '.'] + EXTRA_DPC_OPTS + list(opts)
     if check_only:
         cmd.append('--check-only')
     if out:
@@ -1202,7 +1217,8 @@ def module_settings(mod, linkmap):
                              for r in sorted(by_start.values(), key=lambda r: r.r0)
                              if r.segaddr == sa and r.has_link and r.sets
                              and not r.uses and r.uses_t]
-        park = [(a, src[a]) for a in sorted(park_d0_starts()) if seg.contains(a) and a in src]
+        park = [] if NO_PARK_D0 else \
+            [(a, src[a]) for a in sorted(park_d0_starts()) if seg.contains(a) and a in src]
         out.append((code_section(sa, linkmap) or seg.name, seg, a5,
                     loop_settings(pr, seg, names, segment_end_aligns(seg)), park))
     return out
@@ -1386,6 +1402,9 @@ def routine_results(path, mod, ok, conformed):
 
 
 def cmd_run(a):
+    global NO_PARK_D0
+    EXTRA_DPC_OPTS[:] = a.dpc_opt
+    NO_PARK_D0 = a.no_park_d0
     work = os.path.abspath(a.work)
     # dpc runs with the exported tree as its directory
     a.dpc = os.path.abspath(a.dpc)
@@ -1530,6 +1549,10 @@ def main(argv=None):
     r.add_argument('--update', action='store_true',
                    help='write the baseline (--baseline FILE, or the default)')
     r.add_argument('-v', '--verbose', action='store_true')
+    r.add_argument('--dpc-opt', action='append', default=[],
+                   help='an option for every dpc run (experiments)')
+    r.add_argument('--no-park-d0', action='store_true',
+                   help='no --park-d0 build setting (experiments)')
     r.add_argument('modules', nargs='*')
     s = sub.add_parser('summarise')
     s.add_argument('diagnostics')

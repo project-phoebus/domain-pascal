@@ -6,7 +6,7 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
-//!            [--park-d0=ROUTINE,...]
+//!            [--park-d0=ROUTINE,...] [--no-park-pointer-locals]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -80,7 +80,15 @@
 //! 14 routines park where a call follows, TTY_$K_FLUSH_INPUT 0xE1C0A8,
 //! against about 105 sites of the same shape that do not; the option is
 //! taken from the image, `tools/srcsurvey.py`).  Names are matched
-//! case-insensitively.
+//! case-insensitively.  A 4-byte integer local assigned an `a0_return`
+//! function's result and read only as a type-transferred pointer it
+//! dereferences is held so in every routine, with or without the option
+//! (bead domain-pascal-yzxr).
+//!
+//! `--no-park-pointer-locals`: a pointer local that no call follows stays
+//! in A0 instead of D0 (`dpc_m68k::emit::Options::no_park_pointers`): for
+//! a translation whose D0 locals are such integers (TTY_$I_INQ_RAW
+//! 0xE67414 keeps its pointer in A0; codegen-patterns 3).
 //!
 //! `--data-base=SECTION=SYMBOL` (repeatable; link-test scaffolding, bead
 //! domain-pascal-3bp, `tests/link/README.md`): the data area of Pascal
@@ -109,7 +117,7 @@ const USAGE: &str = "usage: dpc [-I dir]... [--root DIR] [-o out.s] \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
-                     [--park-d0=ROUTINE,...] \
+                     [--park-d0=ROUTINE,...] [--no-park-pointer-locals] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
@@ -141,6 +149,7 @@ struct Args {
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
     park_d0: Vec<String>,
+    no_park_pointers: bool,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
@@ -257,6 +266,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
     let mut park_d0 = None;
+    let mut no_park_pointers = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -333,6 +343,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 absolute = Some(routine_list("--a5-absolute", &s["--a5-absolute=".len()..])?);
             }
+            "--no-park-pointer-locals" => no_park_pointers = true,
             s if s.starts_with("--park-d0=") => {
                 if park_d0.is_some() {
                     return Err("--park-d0 given more than once".into());
@@ -429,6 +440,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         schedule: schedule.unwrap_or_default(),
         data_bases,
         park_d0: park_d0.unwrap_or_default(),
+        no_park_pointers,
     })
 }
 
@@ -496,6 +508,7 @@ fn compile(
         schedule: args.schedule,
         data_bases: args.data_bases.clone(),
         park_d0: args.park_d0.clone(),
+        no_park_pointers: args.no_park_pointers,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -950,6 +963,12 @@ mod tests {
         );
         assert!(args(&["--park-d0=", "m.pas"]).is_err());
         assert!(args(&["--park-d0=a", "--park-d0=b", "m.pas"]).is_err());
+        assert!(
+            args(&["--no-park-pointer-locals", "m.pas"])
+                .unwrap()
+                .no_park_pointers
+        );
+        assert!(!args(&["m.pas"]).unwrap().no_park_pointers);
         assert!(args(&["--a5-absolute=P", "--a5-absolute=Q", "m.pas"]).is_err());
         assert!(args(&["--a5-always-from", "P", "m.pas"]).is_err());
         assert!(args(&["--data-base=", "m.pas"]).is_err());

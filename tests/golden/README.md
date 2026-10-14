@@ -279,6 +279,14 @@ Tests:
   `if`'s branch when both parts dereference it, D0 left alone to its
   last dereference (TTY_$K_INQ_INPUT_FLAGS 0xE676D4, TTY_$K_SET_INPUT_FLAG
   0xE6767E..0xE676A2, TTY_$K_SET_SESSION_ID 0xE679AA).
+- `results/integer_parked` - codegen-patterns 3 ("Pointer locals held in
+  D0"; bead domain-pascal-yzxr; `--no-park-pointer-locals`): an integer
+  local assigned an `a0_return` function's value and dereferenced through
+  a type transfer, held in D0 and moved to An where first dereferenced,
+  where a call follows too (TTY_$K_FLUSH_INPUT 0xE1C0A8 / 0xE1C0AE) or
+  not (TTY_$K_INQ_INPUT_FLAGS 0xE676DA); pointer locals assigned the
+  transferred value copied to A2 (TTY_$I_SET_RAW 0xE673CC) or left in A0
+  (TTY_$I_INQ_RAW 0xE67414).
 - `control/store_flags` - codegen-patterns 7.1 (bead domain-pascal-dgb):
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a

@@ -4032,6 +4032,21 @@ fn reinterpret(v: Expr, ty: Scalar) -> Expr {
     match v {
         Expr::Const { value, .. } => Expr::Const { value, ty },
         Expr::Load { addr, .. } => Expr::Load { addr, ty },
+        // A result in A0 (`a0_return`, ref 5.5.11 p. 5-20, or a pointer
+        // function) read as another 4-byte type: still the call's A0, so
+        // the call is retyped, and its callers see the usual A0 forms
+        // (`p := ptr_t(f(...))` for an integer `a0_return` function `f`
+        // is `movea.l A0,An`, TTY_$I_SET_RAW 0xE673CC; bead
+        // domain-pascal-yzxr).
+        Expr::Call {
+            call,
+            reg: ResultClass::Address,
+            ..
+        } => Expr::Call {
+            call,
+            ty,
+            reg: ResultClass::Address,
+        },
         v if v.ty() == ty => v,
         Expr::Convert { value, .. } if value.ty() == ty => *value,
         v => {
