@@ -6690,6 +6690,33 @@ TTY_$I_SET_RAW 0xE673B8 / 0xE673CC.
   the call) would match 22 of 31 against 15 of 31 for R1b plus address
   order, but breaks CAL_$SHUTDOWN (conformance test); not adopted
   (bead domain-pascal-80rr).
+- *Target before right-hand side?  (bead domain-pascal-u6di,
+  `tools/rhssurvey.py`; refuted.)*  Hypothesis: the original colours an
+  assignment's target before the values first read in its right-hand
+  side (a parameter's first read counted after its entry load).  Pairs
+  (entry-loaded parameter P, other value L; callee-saved, interfering),
+  split by where P is first read: before L's statement, in it (the
+  call's argument pushes, or L's defining instruction), or after.
+  - Kept address call results with P first pushed in the call's
+    arguments: 8 L-lower / 3 P-lower, which is exactly the six R1b sites
+    (P dies, 6/0) plus 2/3 where P lives on.  P is lower at
+    CAL_$SHUTDOWN (`pea (A2)` 0xE3E6F8 in the arguments, result to A3
+    0xE3E714) and AST_$MSTE_ACTIVATE_AND_WIRE (`pea` 0xE02F4E, result
+    to A3 0xE02F56).  Against the base rate of the other pairs (18/13)
+    p ~ 0.25: nothing beyond R1b.  Those two sites fit R1b's "P dies in
+    the block" and contradict "right-hand side first".
+  - Data call results: 4/0 (1/0 swappable).
+  - Non-call right-hand sides that read P (`movea.l (32,A2),A3`
+    0xE17D52; `lea (718,A2),A3` 0xE1B722): P is *lower*, address 4/21,
+    data 25/51, below the base rates.  Weak evidence: in the wider
+    statement window some first reads belong to an interleaved
+    statement (0xE00CB4/0xE00CC0).
+  - A full top-down first-use order scores below address order (address
+    non-call, swappable: 55% against 68%).
+  - The counts do not depend on whether a statement starts after the
+    previous statement or at the first argument push.
+  - Parameters keep their entry order among themselves (AUDIT_ routine
+    0xE712BA: `(8)`, first read after the call, A3 below the status A4).
 - *Rule (`regs::call_results_first`, `allocate_apart`'s `late`).*  A
   pointer local assigned a pointer function's result (`movea.l A0,An`
   right after the call and its pop) is coloured before an address
