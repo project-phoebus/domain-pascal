@@ -284,6 +284,85 @@ fn define_part_methods() {
     ));
 }
 
+/// `define a, b, ...;` means one uninitialised item per name (owner
+/// ruling 2026-10-14 on ref 7.2.2 p. 7-5; reference-clarifications
+/// "7.2.2 Lists in the define statement").  Routines may be listed too
+/// (ref 7.3.4 p. 7-11), as in Apollo's streams/sasc examples.
+#[test]
+fn define_list_is_n_single_defines() {
+    let src = "var x: extern integer; y: extern integer32;
+               procedure q; extern;
+               define x, q, y;
+               procedure q; begin end;";
+    let one = "var x: extern integer; y: extern integer32;
+               procedure q; extern;
+               define x; q; y;
+               procedure q; begin end;";
+    for s in [src, one] {
+        let p = module(s);
+        for n in ["x", "y"] {
+            assert!(
+                matches!(var(&p, n).storage, Storage::Static { global: true, .. }),
+                "{n}"
+            );
+            assert!(var(&p, n).init.is_none(), "{n}");
+        }
+        let q = routine(&p, "q");
+        assert!(!q.external && q.global);
+    }
+    let a = module(src);
+    let b = module(one);
+    assert_eq!(var(&a, "x").storage, var(&b, "x").storage);
+    assert_eq!(var(&a, "y").storage, var(&b, "y").storage);
+}
+
+#[test]
+fn define_routine_with_initial_value_is_an_error() {
+    // ref 7.3.4 p. 7-11.
+    assert_err(
+        "module m; procedure q; extern; define q := 1;",
+        "a define item for a routine cannot have an initial value",
+    );
+}
+
+/// Every defined name must be declared somewhere in the unit, as a
+/// variable or a routine, whichever side of the define part it is on.
+#[test]
+fn define_names_must_be_declared() {
+    let e = errs("module m; define zz, yy;");
+    assert_eq!(e.len(), 2, "{e:?}");
+    assert!(e[0].contains("`zz` is named in a define statement but never declared"));
+    assert!(e[1].contains("`yy` is named in a define statement but never declared"));
+    // Method 3 order (ref 7.2.3 p. 7-6) with a name that is not a
+    // variable or routine; reported once even when listed twice.
+    let e = errs("module m; define t, t; type t = integer;");
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("`t` cannot be defined"), "{e:?}");
+    assert_err("module m; const k = 1; define k;", "`k` cannot be defined");
+    // Method 3 for routines, as in Apollo's streams/sasc io.pas.
+    module(
+        "define a, q; var a: extern integer := 3;
+            procedure q; extern; procedure q; begin a := 1 end;",
+    );
+}
+
+/// ref 7.3.4 p. 7-11: define says the routine is "a global symbol defined
+/// in module math2"; a routine with only an `extern` heading is not.
+#[test]
+fn defined_routine_needs_a_body() {
+    for src in [
+        "module m; procedure q; extern; define q;",
+        "module m; define q, q; procedure q; extern;",
+    ] {
+        let e = errs(src);
+        assert_eq!(e.len(), 1, "{src}: {e:?}");
+        assert!(
+            e[0].contains("routine `q` is named in a define statement but has no body"),
+            "{e:?}"
+        );
+    }
+}
+
 #[test]
 fn module_heading_and_section_attribute() {
     let p = ok("module kitchen, wired_proc, wired_data;

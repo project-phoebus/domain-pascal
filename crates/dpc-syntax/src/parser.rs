@@ -882,27 +882,62 @@ impl<'a> Parser<'a> {
     }
 
     /// `define variable1 [:= initial_value1]; ...` (ref 7.2.2, p. 7-5,
-    /// checked against the PDF: items end with `;`).
+    /// checked against the PDF: items end with `;`).  Also the list form
+    /// `define v1, v2, ..., vN;`, meaning N uninitialised items; `:=` is
+    /// not allowed inside a list (owner ruling 2026-10-14, see
+    /// docs/reference-clarifications.md "7.2.2 Lists in the define
+    /// statement").
     fn define_part(&mut self, out: &mut Vec<Decl>) {
+        const LIST_INIT: &str = "`:=` is not allowed in a define list: a name with an initial \
+             value needs its own `;` (`define a := 1; b := 2;`) (ref 7.2.2, p. 7-5; \
+             owner ruling 2026-10-14)";
         let start = self.bump().span;
         self.part_items(
             out,
             start,
             Self::at_item,
             |p| {
-                let name = p.ident()?;
-                let init = if p.eat(&T::Assign) {
-                    Some(p.init()?)
-                } else {
-                    None
-                };
+                let first = p.ident()?;
+                if p.eat(&T::Assign) {
+                    let init = p.init()?;
+                    if matches!(p.peek(), T::Comma) {
+                        let span = p.span();
+                        p.error_at(span, LIST_INIT);
+                        return Err(());
+                    }
+                    p.expect(&T::Semi)?;
+                    let span = p.since(first.span);
+                    return Ok(vec![DefineItem {
+                        name: first,
+                        init: Some(init),
+                        span,
+                    }]);
+                }
+                let mut names = vec![first];
+                while p.eat(&T::Comma) {
+                    names.push(p.ident()?);
+                }
+                if matches!(p.peek(), T::Assign) {
+                    let span = p.span();
+                    p.error_at(span, LIST_INIT);
+                    return Err(());
+                }
                 p.expect(&T::Semi)?;
-                let span = p.since(name.span);
-                Ok(DefineItem { name, init, span })
+                Ok(names
+                    .into_iter()
+                    .map(|name| {
+                        let span = name.span;
+                        DefineItem {
+                            name,
+                            init: None,
+                            span,
+                        }
+                    })
+                    .collect())
             },
-            &|items, continues_previous, span| {
+            &|items: Vec<Vec<DefineItem>>, continues_previous, span| {
                 Decl::Define(DefinePart {
-                    items,
+                    items: items.into_iter().flatten().collect(),
                     continues_previous,
                     span,
                 })

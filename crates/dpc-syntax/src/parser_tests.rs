@@ -594,6 +594,68 @@ fn define_part() {
 }
 
 #[test]
+fn define_list() {
+    // Owner ruling 2026-10-14 on ref 7.2.2 p. 7-5: `define a, b, c;` is N
+    // uninitialised items (Apollo's streams/sasc io.pas `DEFINE sasc_$get,
+    // sasc_$locate, ...;`); it mixes with single items in one part.
+    let d = decls("define a, b, c; x := 8; d;");
+    let Decl::Define(p) = &d[0] else {
+        panic!("{d:?}")
+    };
+    let v: Vec<String> = p
+        .items
+        .iter()
+        .map(|i| match &i.init {
+            Some(init) => format!("{}:={}", i.name.name, sinit(init)),
+            None => i.name.name.clone(),
+        })
+        .collect();
+    assert_eq!(v, vec!["a", "b", "c", "x:=8", "d"]);
+}
+
+#[test]
+fn define_list_rejects_initial_value() {
+    // Owner ruling 2026-10-14: `:=` is not allowed inside a comma list.
+    for src in ["module m; define a, b := 1;", "module m; define a := 1, b;"] {
+        let e = errs(src);
+        assert_eq!(e.len(), 1, "{src}: {e:?}");
+        assert!(
+            e[0].contains("`:=` is not allowed in a define list"),
+            "{e:?}"
+        );
+    }
+    // Recovery: the next item still parses.
+    let e = errs("module m; define a, b := 1; c, d;");
+    assert_eq!(e.len(), 1, "{e:?}");
+}
+
+#[test]
+fn define_list_ends_the_part() {
+    // A list's `;` ends the item; a keyword or another part ends the part.
+    let d = decls("define a, b; var c: integer; define d, e; procedure p; begin end;");
+    assert!(
+        matches!(
+            d.as_slice(),
+            [Decl::Define(x), Decl::Var(_), Decl::Define(y), Decl::Routine(_)]
+                if x.items.len() == 2 && y.items.len() == 2
+        ),
+        "{d:?}"
+    );
+    // Trailing comma, missing `;`.
+    for (src, msg) in [
+        ("module m; define a, ;", "expected identifier, found `;`"),
+        (
+            "module m; define a, b procedure p; begin end;",
+            "expected `;`, found `procedure`",
+        ),
+    ] {
+        let e = errs(src);
+        assert_eq!(e.len(), 1, "{src}: {e:?}");
+        assert!(e[0].contains(msg), "{src}: {e:?}");
+    }
+}
+
+#[test]
 fn define_part_not_in_routine() {
     // ref 2.2.3.2, p. 2-16.
     let e = errs("module m; procedure p; define x; begin end;");

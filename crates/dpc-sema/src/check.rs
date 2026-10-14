@@ -120,6 +120,9 @@ pub(crate) struct Checker<'t> {
     /// Names given in a `define` part before their `var` declaration (ref
     /// 7.2.3 Method 3, p. 7-6).
     pre_defined: HashSet<String>,
+    /// Every unit-level `define` item, (name, span, named before its
+    /// declaration), checked once the unit is complete.
+    defines: Vec<(String, Span, bool)>,
     next_with: u32,
     /// The `with` records ([`WithId`]) that are, or are part of, an `in`
     /// parameter ([`Checker::in_param_part`]).
@@ -161,6 +164,7 @@ impl<'t> Checker<'t> {
             data_section: ".data".into(),
             pending_pointers: Vec::new(),
             pre_defined: HashSet::new(),
+            defines: Vec::new(),
             next_with: 0,
             in_withs: HashSet::new(),
             loop_depth: 0,
@@ -404,6 +408,7 @@ impl<'t> Checker<'t> {
                 ));
             }
         }
+        self.check_defines();
         for r in &self.routines {
             if r.options.forward && r.body.is_none() {
                 self.errors.push(Diagnostic::error(
@@ -1551,9 +1556,48 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// Once the unit is complete, every name in a define part must have
+    /// been declared as a variable or a routine, and a defined routine
+    /// must have its body in this unit.
+    fn check_defines(&mut self) {
+        let mut seen = HashSet::new();
+        for (name, span, before) in std::mem::take(&mut self.defines) {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            match self.lookup(&name).cloned() {
+                None => self.error(
+                    span,
+                    format!("`{name}` is named in a define statement but never declared"),
+                ),
+                Some(Sym::Var(_)) => {}
+                // ref 7.3.4 p. 7-11: "define exponent; -- Use a define
+                // statement to tell the compiler that exponent is a global
+                // symbol defined in module math2"; a routine with only an
+                // `extern` heading here is not defined here.
+                Some(Sym::Routine(r)) => {
+                    if self.routines[r.0 as usize].body.is_none() {
+                        self.error(
+                            span,
+                            format!(
+                                "routine `{name}` is named in a define statement but has no body in this unit (ref 7.3.4, p. 7-11)"
+                            ),
+                        );
+                    }
+                }
+                // Defined after the define part: `define_item` reported it.
+                Some(_) if !before => {}
+                Some(_) => self.error(span, format!("`{name}` cannot be defined")),
+            }
+        }
+    }
+
     /// `define x [:= v];` (ref 7.2.2, p. 7-5).
     fn define_item(&mut self, item: &ast::DefineItem) {
-        let Some(sym) = self.lookup(&item.name.name).cloned() else {
+        let sym = self.lookup(&item.name.name).cloned();
+        self.defines
+            .push((item.name.name.clone(), item.name.span, sym.is_none()));
+        let Some(sym) = sym else {
             // Method 3 (p. 7-6): the define comes first.
             self.pre_defined.insert(item.name.name.clone());
             if item.init.is_some() {
@@ -1601,8 +1645,20 @@ impl<'t> Checker<'t> {
                     self.vars[v.0 as usize].init = Some(stores);
                 }
             }
-            // ref 7.3.4 p. 7-11: a define part may also name routines.
-            Sym::Routine(_) => {}
+            // ref 7.3.4 p. 7-11: a define part may also name routines,
+            // but "you cannot assign an initial value to a procedure or
+            // function symbol".
+            Sym::Routine(_) => {
+                if item.init.is_some() {
+                    self.error(
+                        item.span,
+                        format!(
+                            "`{}` is a routine: a define item for a routine cannot have an initial value (ref 7.3.4, p. 7-11)",
+                            item.name.name
+                        ),
+                    );
+                }
+            }
             _ => self.error(
                 item.name.span,
                 format!("`{}` cannot be defined", item.name.name),
