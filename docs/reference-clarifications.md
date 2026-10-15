@@ -102,6 +102,20 @@ Question: in a constant expression such as `c = rshft(-9, 3)`, is the value the 
 Owner's answer (2026-10-14): refuse it until something needs it.  (The lead's reading, not adopted: a 32-bit logical shift, as Delphi and Free Pascal also do for wide constant folding.)
 Consequence: none; dpc already leaves rshft of a negative constant unfolded, so it is refused in a const declaration and by the existing run-time check elsewhere.  No use in the corpus or in ../source's Pascal at the time of the ruling.
 
+## Narrowing integer32 to integer16 (5.1 p. 5-3; Appendix D pp. D-3, D-4)
+Asked: 2026-10-15, by the 8td work (open question 41)
+Passage: see open question 41 (5.1: "the second argument must be an integer16 value"; D-3: "you may pass an integer argument that is outside the corresponding parameter's declared subrange"; D-4: no overflow detection).
+Question: does integer16 count as a subrange of integer32 for assignment and value arguments, and what value does the target hold?
+Owner's answer (2026-10-15): yes, integer16 is a subrange of integer32 for narrowing purposes.
+Consequence: no change; dpc already accepts integer32 where integer16 is expected (assignment, value and `in` arguments, function results) and keeps the low bytes with no check (bead domain-pascal-8td; codegen-patterns 8, "Narrowing and widening").
+
+## Module heading with an empty code section (7.1.1, p. 7-2; 2.2.1, p. 2-10)
+Asked: 2026-10-15, by the lead (srcsurvey: PCHIST blocked; ../source pascal-translation-notes gap 35)
+Passage: 7.1.1 gives "module name [, code_section_name [, data_section_name]];" and says the module heading "is similar to a program heading"; 2.2.1 shows the program heading's `name, , data_section' form (question 8 accepted it for programs).
+Question: may a module heading leave the code section name empty, `module pchist, , wired_data;`?
+Owner's answer (2026-10-15): yes; the compiler must parse the form without the code section name, which targets .text for the code section.
+Consequence: implemented under the bead filed for it (module heading parse; code in the default section, data in the named one).
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -159,7 +173,7 @@ Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
 7. **Case, p. 4-36.** A constantlist is "One or more values (separated by
    commas)".  Are ranges (`1..3:`) allowed in case labels?  *Current:
    rejected.*
-8. **7.1.1, p. 7-2.** The empty-code-section form `name, , data_section`
+8. **Answered 2026-10-15; see Clarifications, "Module heading with an empty code section".**  **7.1.1, p. 7-2.** The empty-code-section form `name, , data_section`
    is shown for programs (2.2.1, p. 2-10) but not for modules.  *Current:
    accepted for programs only.*
 
@@ -259,6 +273,21 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`.
     `addr` of it also that error (or allowed)?  *Current: whole
     assignment is the error; the other forms are refused as "not
     supported yet" (review of domain-pascal-pe9).*
+    *`addr` settled by the reference (no owner ruling needed; bead
+    domain-pascal-mbtx):* "Addr", p. 4-13 (PDF p. 146, checked): "x Can
+    be a variable declared as any data type except as a procedure or
+    function data type having the internal attribute"; the only `addr`
+    message of chapter 9 (Diagnostic Messages) is "Cannot take the
+    address of internal routine identifier", and the message
+    "Attempted assignment to (variable), a FOR-index variable, or
+    formal parameter marked as IN" is about assignment only.  Apollo's
+    own SR10.2 example `domain_examples/streams/sasc/imex.pas` does it:
+    `PROCEDURE sasc_$import(IN mgr_data: UNIV string; ...)` with
+    "`hptr := addr( mgr_data );`" (line 81).  So `addr` of an `in` parameter, or of a field or
+    element of one, is accepted and compiled like a `var` parameter's
+    (codegen-patterns 5.2, "`addr` of a parameter").  Writing through the
+    address would break 5.3.2's "not allowed to alter its value", which
+    nothing checks (as for any `univ_ptr`).  The other forms stay open.
 
 Raised by the routine pointer work (bead domain-pascal-5aw.8; no bead
 filed for the questions yet).  Conservative choices are implemented and
@@ -591,7 +620,7 @@ records the files it stops.
     domain-pascal-yvko); the field and array-element cases, and the
     array's size, stay open.*
 
-41. **5.1, p. 5-3 (PDF p. 358, checked); messages 79 and 83, pp. 9-15,
+41. **Answered 2026-10-15; see Clarifications, "Narrowing integer32 to integer16".**  **5.1, p. 5-3 (PDF p. 358, checked); messages 79 and 83, pp. 9-15,
     9-16; 3.8, p. 3-14 (PDF p. 69); Appendix D, ISO 6.7.2.2, p. D-4 (PDF
     p. 561); "Type Transfer Functions", p. 4-197.**  5.1: "The data type
     of each argument must match the data type of its corresponding

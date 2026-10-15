@@ -279,9 +279,11 @@ it before touching the backend.  The most important points:
 16. **Encodings.**
     - 68010 instructions only.
     - Explicit branch sizes; do not rely on gas relaxation.
-    - Mostly CMPI/ADDI/SUBI encodings, with a few exceptions (`90bc`
-      sub.l #imm, `b?fc` cmpa.w #imm).  Where gas would choose differently,
-      emit `.short`.
+    - Mostly CMPI/ADDI/SUBI encodings, with a few exceptions that use the
+      ordinary two-operand opcode with an immediate source operand: `90bc`
+      sub.l #imm,D0 and `d0bc` add.l #imm,D0 (register in bits 9-11; seen
+      with a symbol's address as the immediate), `b?fc` cmpa.w #imm.  Where
+      gas would choose differently, emit `.short`.
 
 Where to look for more evidence:
 
