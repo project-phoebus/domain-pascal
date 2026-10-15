@@ -2587,28 +2587,73 @@ model run against the bit model of Figure 3-6).
     and AST_$LOAD_AOTE.  In AST_$LOAD_AOTE, 0xE023D4 is at 0 mod 4 by
     accident and 0xE02482 is at 2 mod 4.  `dpc` currently always aligns
     (the AST_ 0xE0149E form).  That is right only for aligning routines.
-  - **6 and 8 bytes: displacement moves.**  No `(An)+` copy of exactly 6
-    or 8 bytes exists; pairs such as `move.l (0x30,A5),(-8,A6); move.l
-    (0x34,A5),(-4,A6)` (0xE4AD5C) and many `move.l`/`move.w` pairs of
-    6-byte objects are found instead.  But an 8-byte copy *from* a slot
-    with only the source post-incremented exists: DIR_$ADD_MOUNT
-    0xE534CA..0xE534D2 `movea.l (8,A6),A0; move.l (A0)+,(-0xb4,A6);
-    move.l (A0)+,(-0xb0,A6)`, again at 0xE534DC (noticed in passing,
-    bead domain-pascal-5aw.2; not counted by the survey above, which
-    looked for `(Am)+,(An)+`; Uncertain).
-    The same form with the destination through an address register
-    (Verified at the sites; lead: ../source pascal-translation-notes
-    finding 10): TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8..0xE678F2
-    `movea.l (0xc,A6),A3; lea (0x38,A0),A1; move.l (A1)+,(A3); move.l
-    (A1)+,(4,A3)`, an `out` slot as destination, its base loaded
-    before the source's address although the source pointer was
-    already in A0, the first destination without displacement;
-    TTY_$K_SET_INPUT_BREAK_MODE 0xE6784E `lea (A2),A0; move.l
-    (A0)+,(0x38,A3); move.l (A0)+,(0x3c,A3)`, into a pointer just
-    assigned to A3 (no order shown there).  So for 8 bytes the source
-    is post-incremented and the destination addressed by displacement;
-    the destination base first is one site.  `dpc` refuses 8-byte
-    assignments (bead domain-pascal-fbg).
+  - **6 and 8 bytes (Verified counts; `tools/storesurvey.py blocks 6
+    8`, bead domain-pascal-fbg).**  Runs of adjacent `move.l`/`move.w`
+    over consecutive memory, in every compiled routine (1635):
+    - **8 bytes: the source post-incremented, the destination by
+      displacement.**  865 runs of two `move.l`: 855 `move.l (Am)+,<d>;
+      move.l (Am)+,<d+4>` (into a register's object 426 + 11 indexed,
+      the frame 401, the data area 12, an absolute address 5); no `(Am)+,
+      (An)+` pair.  The other 10 move both operands by displacement
+      from A5/A6/an absolute address, and are adjacent field assignments
+      where the C is known (REM_NAME_$GET_ENTRY 0xE4AD5C, `node :=
+      curr_node; net := curr_net`, two integer32 fields).  The source
+      register is formed as for longer copies: `lea (d,An)` 228 and `lea
+      (An)` 94, A5 among them (UID_$GEN 0xE1A0B6 `lea (A5),A0`;
+      TTY_$K_SET_INPUT_BREAK_MODE 0xE6784E `lea (A2),A0`, an `in`
+      parameter held in A2), `movea.l (d,A6)` 150, `lea (d,A6)` 146,
+      `movea.l Dn` 35, and `movea.l #abs` for another unit's object
+      (121 name UID_$NIL, 0xE00F80): a source is never addressed by
+      displacement.
+    - **Order and registers when the destination is a pointer slot's
+      object (Verified at the sites).**  Of the 90 copies whose two
+      sides each take one instruction, the source's register is the
+      lower (coloured first) at 80; of the other 10, 3 are destinations
+      held or copied from another register (TTY_$K_SET_PGROUP 0xE67930,
+      0xE45862, 0xE53D94), the rest unexplained (0xE478F4, 0xE496E4,
+      0xE2FB0C, 0xE3179A, 0xE440D8, 0xE48D8C, 0xE4D23C).  The source's
+      load comes first with a frame source (18 sites, UID_$GEN
+      0xE1A0E2 `lea (-8,A6),A0; movea.l (8,A6),A1`) or another unit's
+      (11, 0xE00F80; 6 others load the destination first: 0xE478F4,
+      and 0xE48E22, 0xE4A082, 0xE4A26E, 0xE50848, 0xE57810 into
+      callee-saved A2-A4), the destination's first with a source in
+      the data area (all 3: NAME_$GET_ROOT_UID 0xE589C8 `movea.l (8,A6),A1; lea
+      (0x38,A5),A0`, 0xE589EA, 0xE58A0C) and with one reached through a
+      parked integer local (section 3), whose `movea.l D0,A0` comes
+      first (TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E6 `movea.l D0,A0;
+      movea.l (0xc,A6),A3; lea (0x38,A0),A1`, A3 because A1 is the
+      source's and A2 holds the status; TTY_$K_INQ_PGROUP 0xE6796C).
+      Destinations loaded into a callee-saved register away from the
+      copy (0xE48E22, 0xE4A26E, 0xE50848 A2-A4) and destinations copied
+      from another register (0xE45502 `movea.l A3,A2`) come first
+      too; no rule found for them.  A destination needing no register
+      of its own (the frame, the data area, a held register, a parked
+      local's `movea.l D0,A0`, TTY_$K_SET_PGROUP 0xE6792A) is set up
+      first.
+    - **6 bytes: two moves memory to memory**, `move.l <s>,<d>; move.w
+      <s+4>,<d+4>` (122 of 127 runs; no 6-byte run post-increments):
+      KBD_$RCV 0xE1CDB8 `move.l (-0x10,A6),(0x20,A2); move.w
+      (-0xc,A6),(0x24,A2)`; CAL_$SET_DRIFT 0xE68588 `move.l (A0),abs.l;
+      move.w (4,A0),abs+4.l`.  The other 5 are `move.w` then `move.l`
+      (4) or three `move.w` (1), field assignments by their shape.
+      Both operands are set up as a longword store's (12.4, "Stores whose destination and value both need a
+      register"): the source first at 0xE05104, 0xE1542A, 0xE65184,
+      0xE747FC, 0xE74828, the destination at 0xE16DF8 (a slot into
+      callee-saved A2).
+    **Implemented** (`isel.rs` `copy6`, `copy8`): the forms above.  An
+    8-byte copy into an element indexed at run time is refused (11
+    sites, 0xE38CA2, order not settled; bead domain-pascal-0qy3), as
+    is one whose destination needs other set-up, a source through another pointer expression and
+    volatile objects.  Byte-identical in `make conform`:
+    NAME_$GET_ROOT_UID, _GET_NODE_UID, _GET_NODE_DATA_UID
+    (`name_uid_getters.pas`), TTY_$K_SET_PGROUP (`tty_k_set_pgroup.pas`),
+    CAL_$SET_DRIFT (`cal_set_drift.pas`).  TTY_$K_INQ_INPUT_BREAK_MODE
+    and TTY_$K_INQ_PGROUP stay refused: their slot load after the
+    status test passes over A2, which the entry load left dirty (12.4
+    R4(b), `check_late_slot_loads`; bead domain-pascal-i24w); golden
+    `data/small_copies` has their order without the test.
+    TTY_$K_SET_INPUT_BREAK_MODE compiles, its copy byte-identical, and
+    differs only in the test after it (bead domain-pascal-0g98).
   - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
     0xE18FE6 `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l
     (8,A5),(8,A0)` and 0xE1ABEA (16 bytes) against 59 + 42 `(An)+`
@@ -2625,8 +2670,7 @@ model run against the bit model of Figure 3-6).
     object a pointer in the frame points to, or a field of the object a
     pointer held in an address register points to (`lea (d,An),Am`, the
     form above; added with the record comparisons of 7.1, bead
-    domain-pascal-aaj).  Rejected: 6 and 8 bytes
-    (destination base first at one site, 0xE678E8, above), another
+    domain-pascal-aaj).  6 and 8 bytes: above.  Rejected: another
     unit's object (`movea.l #abs,A1` at 0xE336E2, one site; the record
     comparisons of 7.1 load such addresses so 201 times, a copy only
     once), a field through a pointer not held in a register, statements

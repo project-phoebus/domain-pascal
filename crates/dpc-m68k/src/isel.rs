@@ -697,7 +697,8 @@ fn select_body_with(
         .filter(|(o, _, _)| call_ptrs.contains(o))
         .map(|&(_, k, _)| k)
         .collect();
-    let after = call_results_first(&s.out, exit, &holds, &results, &s.entry_regs);
+    let mut after = call_results_first(&s.out, exit, &holds, &results, &s.entry_regs);
+    after.extend(s.colour_after.iter().copied());
     // The pointer locals of `call_pointer_locals` that could stay in A0
     // itself: nothing writes the physical A0
     // from the copy `movea.l A0,An` to the copy's last use.
@@ -2027,6 +2028,29 @@ fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
 
 /// Visit every expression, address and call of `body`, nested statements
 /// included.
+/// How an 8-byte copy's source register is loaded ([`Selector::copy8`]).
+enum Src8 {
+    /// `lea <ea>,An`.
+    Lea(Ea),
+    /// `movea.l (o,A6),An`: the pointer in a frame slot.
+    Slot(i32),
+    /// `movea.l #sym,An`: another unit's object.
+    Sym(String),
+}
+
+/// The operand `n` bytes after `ea` (a memory operand by displacement or
+/// absolute address), if it has one in the same form.
+fn ea_plus(ea: &Ea, n: i32) -> Option<Ea> {
+    let fits = |d: i32| (-0x8000..0x8000).contains(&d);
+    match ea {
+        Ea::Ind(r) => Some(Ea::Disp(n, *r)),
+        Ea::Disp(d, r) if fits(d + n) => Some(Ea::Disp(d + n, *r)),
+        Ea::Idx(d, r, x, l) if (-0x80..0x80).contains(&(d + n)) => Some(Ea::Idx(d + n, *r, *x, *l)),
+        Ea::AbsL(s, d) => Some(Ea::AbsL(s.clone(), d + n)),
+        _ => None,
+    }
+}
+
 fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     for st in body {
         match &st.kind {
@@ -3733,6 +3757,11 @@ pub struct Selector {
     /// Ranges of `out` the scheduler moves as one node (`sched.rs`,
     /// codegen-patterns 12.4 R10): unrolled `(An)+` block copies.
     units: Vec<crate::sched::Unit>,
+    /// Pairs `(l, p)` of virtual registers where `p`, defined first, is
+    /// coloured right after `l` (`regs.rs`, `allocate_apart`'s `late`):
+    /// an 8-byte copy whose destination base is loaded before the
+    /// source's register ([`Selector::copy8`]).
+    colour_after: Vec<(Reg, Reg)>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -4020,6 +4049,7 @@ impl Selector {
             clobbered: RegSet::EMPTY,
             result_moves: Vec::new(),
             units: Vec::new(),
+            colour_after: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -6485,11 +6515,7 @@ impl Selector {
     ///   0xE0149E.  **Uncertain:** 50 of 240 such loops start at 2 mod 4
     ///   with no filler, in compiled code too (0xE1155E, 0xE496C2); which
     ///   loops the original aligned is not known (codegen-patterns 5.2).
-    /// - 6 and 8 bytes: no `(An)+` copy of exactly 8 bytes, nor of 6, was
-    ///   found; such blocks are copied with displacement moves, `move.l
-    ///   (0x30,A5),(-8,A6); move.l (0x34,A5),(-4,A6)` (0xE4AD5C) and many
-    ///   `move.l`/`move.w` pairs.  Not supported yet: which operands the
-    ///   original formed first has not been catalogued.
+    /// - 6 and 8 bytes: [`Self::copy6`], [`Self::copy8`].
     /// - 12 bytes as displacement moves, XNS_IDP_$GET_STATS 0xE18FE6
     ///   `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l (8,A5),(8,A0)`:
     ///   2 sites against 59 `(An)+` copies.  Taken to be three field
@@ -6499,6 +6525,11 @@ impl Selector {
     /// Address registers: source first, then destination, each the lowest
     /// free (A0, A1 at 0xE14BC6..0xE14BC8; codegen-patterns 12.4 R1).
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
+        match bytes {
+            6 => return self.copy6(dst, src),
+            8 => return self.copy8(dst, src),
+            _ => {}
+        }
         if bytes % 2 != 0 || bytes < 10 {
             return Err(unsupported(
                 self.span,
@@ -6555,6 +6586,269 @@ impl Selector {
             self.units.push((start, self.out.len()));
         }
         Ok(())
+    }
+
+    /// `d := s` for a 6-byte record or array (codegen-patterns 5.2,
+    /// "6 and 8 bytes"; `tools/storesurvey.py blocks 6`): two moves, memory
+    /// to memory, a `move.l` and a `move.w` four bytes on, both operands by
+    /// displacement; no 6-byte copy in compiled code post-increments (0 of
+    /// 127 runs).  KBD_$RCV 0xE1CDB8 `move.l (-0x10,A6),(0x20,A2); move.w
+    /// (-0xc,A6),(0x24,A2)`; TONE_$TIME 0xE17304 `move.l (A0),(-8,A6);
+    /// move.w (4,A0),(-4,A6)`; CAL_$SET_DRIFT 0xE68588 `move.l (A0),abs.l;
+    /// move.w (4,A0),abs+4.l`.  The operands are those of a longword store
+    /// of the first four bytes ([`Self::store`]), so a destination and a
+    /// source that both need a register follow its order (the side with
+    /// more set-up first, the value on a tie: the source first at
+    /// 0xE05104, 0xE1542A, 0xE65184, 0xE747FC, 0xE74828; the destination
+    /// at 0xE16DF8, a slot loaded into callee-saved A2).
+    fn copy6(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
+        if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
+            return Err(unsupported(
+                self.span,
+                "a 6-byte copy of a volatile object (not seen) is",
+            ));
+        }
+        let start = self.out.len();
+        let long = Scalar::signed(Width::Long);
+        self.store(
+            dst,
+            &Expr::Load {
+                addr: src.clone(),
+                ty: long,
+            },
+        )?;
+        let refused = || {
+            unsupported(
+                self.span,
+                "a 6-byte record or array assignment whose operands are not both in memory is",
+            )
+        };
+        let Some(Insn::Move {
+            size: Size::L,
+            src: s,
+            dst: d,
+        }) = self.out.last()
+        else {
+            return Err(refused());
+        };
+        let (Some(s2), Some(d2)) = (ea_plus(s, 4), ea_plus(d, 4)) else {
+            return Err(refused());
+        };
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: s2,
+            dst: d2,
+        });
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// `d := s` for an 8-byte record or array, a UID most often
+    /// (codegen-patterns 5.2, "6 and 8 bytes"; `tools/storesurvey.py
+    /// blocks 8`): the source's address in an address register, post-
+    /// incremented, the destination by displacement, `move.l (Am)+,<d>;
+    /// move.l (Am)+,<d+4>` (855 of the 865 8-byte runs in compiled code;
+    /// the other 10 move both operands by displacement, adjacent field
+    /// assignments such as REM_NAME_$GET_ENTRY 0xE4AD5C, `node :=
+    /// curr_node; net := curr_net` in ../source).  The source register
+    /// is formed as for a block copy ([`Self::block_address`]; TTY_$K_SET_
+    /// INPUT_BREAK_MODE 0xE6784E `lea (A2),A0`, an `in` parameter held in
+    /// A2; 0xE0723C `lea (-8,A6),A0`; DIR_$ADD_MOUNT 0xE534CA `movea.l
+    /// (8,A6),A0`), and for another unit's object `movea.l #sym,Am` (121
+    /// sites name UID_$NIL, 0xE00F8A).  The destination:
+    ///
+    /// - in the frame, the data area, another unit's data, or through a
+    ///   pointer held in a register: its own operand, set up first
+    ///   (TTY_$K_SET_PGROUP 0xE6792A `movea.l D0,A0; movea.l (0xc,A6),A1;
+    ///   move.l (A1)+,(0x4c,A0); move.l (A1)+,(0x50,A0)`, a pointer local
+    ///   parked in D0; 0xE00BF0 `(1144,A5)`; 0xE31C28 `abs.l`);
+    /// - the object a pointer slot points to: `movea.l (d,A6),An`, `(An)`
+    ///   then `(4,An)`.  The source's register is coloured first (the
+    ///   lowest free), the destination's next, at every site where both
+    ///   load one instruction.  The source's is loaded first (0xE1A0EA
+    ///   `lea (-8,A6),A0; movea.l (8,A6),A1`, 18 sites with a frame
+    ///   source; 0xE00F8A `movea.l #UID_$NIL,A0; movea.l (8,A6),A1`, 11),
+    ///   but the destination's first when the source is in the data area
+    ///   (NAME_$GET_ROOT_UID 0xE589C8 `movea.l (8,A6),A1; lea (0x38,A5),A0`,
+    ///   also 0xE589EA, 0xE58A0C: all 3 such sites) or reached through a
+    ///   parked pointer local, whose `movea.l D0,An` comes first
+    ///   (TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E6 `movea.l D0,A0; movea.l
+    ///   (0xc,A6),A3; lea (0x38,A0),A1`, A3 since A1 is the source's and
+    ///   A2 holds the status; TTY_$K_INQ_PGROUP 0xE6796C the same).
+    ///
+    /// Refused: a destination indexed at run time (11 sites, `(d,An,Dn)`,
+    /// which side is set up first is not settled), one whose operand takes
+    /// other instructions, a source through another pointer expression,
+    /// volatile objects (not seen).
+    fn copy8(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
+        if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
+            return Err(unsupported(
+                self.span,
+                "an 8-byte copy of a volatile object (not seen) is",
+            ));
+        }
+        let start = self.out.len();
+        let slot = match dst {
+            Addr::Indirect { base, offset } if (-0x8000..0x7ffc).contains(offset) => {
+                match &**base {
+                    Expr::Load {
+                        addr: Addr::Frame(o),
+                        ty:
+                            Scalar {
+                                width: Width::Long, ..
+                            },
+                    } if self.pinned(*o).is_none() => Some((*o, *offset)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (from, to) = if let Some((o, k)) = slot {
+            // The source through a parked pointer local moved to its
+            // address register at this statement's start ([`Self::park_home`]).
+            let parked = self.parked.iter().any(|p| {
+                let mut hit = false;
+                if matches!(p.home, Some((_, at)) if at >= self.stmt_start) {
+                    walk_addr(src, &mut |n| {
+                        if let Node::Addr(Addr::Frame(o)) = n {
+                            hit |= p.off <= *o && *o < p.off + 4;
+                        }
+                    });
+                }
+                hit
+            });
+            let from = self.copy8_source(src)?;
+            let s = self.alloc_a()?;
+            let d = self.alloc_a()?;
+            let load_d = Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(o, FP),
+                dst: d,
+            };
+            // Slot loads keep apart from the values of earlier statements
+            // (12.4 R4(b), [`fresh_slot_loads`]): A3 at 0xE678E8, A2
+            // holding the status pointer loaded at entry.
+            self.fresh.push((Reg::A(d), self.stmt_start, self.span));
+            if matches!(from, Src8::Slot(_)) {
+                self.fresh.push((Reg::A(s), self.stmt_start, self.span));
+            }
+            let a5 = matches!(&from, Src8::Lea(Ea::Ind(r) | Ea::Disp(_, r)) if *r == DATA_BASE_A);
+            if a5 || parked {
+                self.out.push(load_d);
+                self.copy8_load(from, s);
+                self.colour_after.push((Reg::A(s), Reg::A(d)));
+            } else {
+                self.copy8_load(from, s);
+                self.out.push(load_d);
+            }
+            (s, if k == 0 { Ea::Ind(d) } else { Ea::Disp(k, d) })
+        } else {
+            let mark = self.out.len();
+            let to = self.ea_of(dst)?;
+            // Nothing, or a pointer held in a data register copied to an
+            // address register (`movea.l Dn,An`, [`Self::copy_to_a`]).
+            let simple = matches!(
+                &self.out[mark..],
+                [] | [Insn::Movea {
+                    src: Ea::Reg(Reg::D(_)),
+                    ..
+                }]
+            );
+            if !simple || !matches!(to, Ea::Ind(_) | Ea::Disp(..) | Ea::AbsL(..)) {
+                return Err(unsupported(
+                    self.span,
+                    "an 8-byte copy into this kind of destination (indexed, or set up by \
+                     several instructions) is",
+                ));
+            }
+            let from = self.copy8_source(src)?;
+            let s = self.alloc_a()?;
+            if matches!(from, Src8::Slot(_)) {
+                self.fresh.push((Reg::A(s), self.stmt_start, self.span));
+            }
+            self.copy8_load(from, s);
+            (s, to)
+        };
+        let Some(to2) = ea_plus(&to, 4) else {
+            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+        };
+        for d in [to, to2] {
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::PostInc(from),
+                dst: d,
+            });
+        }
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// How an 8-byte copy's source register is loaded ([`Self::copy8`]);
+    /// a pointer held in a data register is copied to an address register
+    /// here ([`Self::copy_to_a`]).
+    fn copy8_source(&mut self, src: &Addr) -> Res<Src8> {
+        Ok(match src {
+            Addr::Static(_) | Addr::Frame(_) => Src8::Lea(self.ea_of(src)?),
+            Addr::Symbol { name, offset: 0 } => Src8::Sym(name.clone()),
+            Addr::Indirect { base, offset: 0 }
+                if matches!(&**base, Expr::Load {
+                    addr: Addr::Frame(o),
+                    ty: Scalar { width: Width::Long, .. },
+                } if self.pinned(*o).is_none()) =>
+            {
+                let Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                } = &**base
+                else {
+                    unreachable!()
+                };
+                Src8::Slot(*o)
+            }
+            Addr::Indirect { .. } => {
+                let mark = self.out.len();
+                let ea = self.ea_of(src)?;
+                let ok = matches!(
+                    &self.out[mark..],
+                    [] | [Insn::Movea {
+                        src: Ea::Reg(Reg::D(_)),
+                        ..
+                    }]
+                );
+                if !ok || !matches!(ea, Ea::Ind(_) | Ea::Disp(..)) {
+                    return Err(unsupported(
+                        self.span,
+                        "an 8-byte copy from a pointer not held in an address register is",
+                    ));
+                }
+                Src8::Lea(ea)
+            }
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "an 8-byte copy from this kind of address is",
+                ))
+            }
+        })
+    }
+
+    /// Load an 8-byte copy's source register `a`: `lea <ea>,An` (`lea
+    /// (A5),An` for offset 0 of the data area, 0xE58A10), `movea.l
+    /// (d,A6),An` for a pointer slot, `movea.l #sym,An`.
+    fn copy8_load(&mut self, from: Src8, a: u8) {
+        self.out.push(match from {
+            Src8::Lea(src) => Insn::Lea { src, dst: a },
+            Src8::Slot(o) => Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(o, FP),
+                dst: a,
+            },
+            Src8::Sym(name) => Insn::Movea {
+                size: Size::L,
+                src: Ea::ImmSym(name),
+                dst: a,
+            },
+        });
     }
 
     /// The address of a block in a new address register.
@@ -13376,19 +13670,143 @@ mod tests {
         assert_eq!(text(&f)[3], "move.w\t#0x82,%d0");
     }
 
+    /// 8 bytes: the source post-incremented, the destination by
+    /// displacement (codegen-patterns 5.2, bead domain-pascal-fbg).
+    #[test]
+    fn eight_byte_copies() {
+        // Into the frame from a pointer slot: DIR_$ADD_MOUNT 0xE534CA.
+        let f = func(8, None, vec![copy(Addr::Frame(-8), through(8, 0), 8)]);
+        assert_eq!(
+            &text(&f)[1..4],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.l\t(%a0)+,(-8,%fp)",
+                "move.l\t(%a0)+,(-4,%fp)"
+            ]
+        );
+        // From the data area into the data area: `lea (A5),A0` (UID_$GEN
+        // 0xE1A0B6 into the frame; 0xE00BF0 into `(1144,A5)`).
+        let f = with_data(func(
+            0,
+            None,
+            vec![copy(Addr::Static(0x478), Addr::Static(0), 8)],
+        ));
+        assert_eq!(
+            &text(&f)[3..6],
+            [
+                "lea\t(%a5),%a0",
+                "move.l\t(%a0)+,(0x478,%a5)",
+                "move.l\t(%a0)+,(0x47c,%a5)"
+            ]
+        );
+        // Into a pointer slot's object from the frame: the source first
+        // (UID_$GEN 0xE1A0E2..0xE1A0EC).
+        let f = func(8, None, vec![copy(through(8, 0), Addr::Frame(-8), 8)]);
+        assert_eq!(
+            &text(&f)[1..5],
+            [
+                "lea\t(-8,%fp),%a0",
+                "movea.l\t(8,%fp),%a1",
+                "move.l\t(%a0)+,(%a1)",
+                "move.l\t(%a0)+,(4,%a1)"
+            ]
+        );
+        // Another unit's object as the source: `movea.l #sym` (0xE00F80
+        // `movea.l #UID_$NIL,A0; movea.l (8,A6),A1; move.l (A0)+,(16,A1)`).
+        let nil = Addr::Symbol {
+            name: "UID_$NIL".into(),
+            offset: 0,
+        };
+        let f = func(4, None, vec![copy(through(8, 16), nil, 8)]);
+        assert_eq!(
+            &text(&f)[1..5],
+            [
+                "movea.l\t#UID_$NIL,%a0",
+                "movea.l\t(8,%fp),%a1",
+                "move.l\t(%a0)+,(0x10,%a1)",
+                "move.l\t(%a0)+,(0x14,%a1)"
+            ]
+        );
+        // From the data area into a pointer slot's object: the slot first,
+        // coloured after the source (NAME_$GET_ROOT_UID 0xE589C8).
+        let f = with_data(func(
+            0,
+            None,
+            vec![copy(through(8, 0), Addr::Static(0x38), 8)],
+        ));
+        assert_eq!(
+            &text(&f)[3..7],
+            [
+                "movea.l\t(8,%fp),%a1",
+                "lea\t(0x38,%a5),%a0",
+                "move.l\t(%a0)+,(%a1)",
+                "move.l\t(%a0)+,(4,%a1)"
+            ]
+        );
+        // Into another unit's object (0xE31C28 `move.l (A0)+,abs.l`).
+        let sym = Addr::Symbol {
+            name: "X".into(),
+            offset: 0,
+        };
+        let f = func(4, None, vec![copy(sym, through(8, 0), 8)]);
+        assert_eq!(
+            &text(&f)[1..4],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.l\t(%a0)+,(X).l",
+                "move.l\t(%a0)+,(X+4).l"
+            ]
+        );
+    }
+
+    /// 6 bytes: `move.l` and `move.w` by displacement on both sides
+    /// (TONE_$TIME 0xE17304; KBD_$RCV 0xE1CDB8; CAL_$SET_DRIFT 0xE68588).
+    #[test]
+    fn six_byte_copies() {
+        let f = func(0x10, None, vec![copy(Addr::Frame(-0x10), through(8, 0), 6)]);
+        assert_eq!(
+            &text(&f)[1..4],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.l\t(%a0),(-0x10,%fp)",
+                "move.w\t(4,%a0),(-0xc,%fp)"
+            ]
+        );
+        let f = with_data(func(
+            0x10,
+            None,
+            vec![copy(Addr::Static(0x20), Addr::Frame(-0x10), 6)],
+        ));
+        assert_eq!(
+            &text(&f)[3..5],
+            [
+                "move.l\t(-0x10,%fp),(0x20,%a5)",
+                "move.w\t(-0xc,%fp),(0x24,%a5)"
+            ]
+        );
+    }
+
     #[test]
     fn unsettled_block_copies_are_rejected() {
-        for bytes in [6, 8, 11] {
-            let f = func(
-                0x10,
-                None,
-                vec![copy(Addr::Frame(-0x10), through(8, 0), bytes)],
-            );
-            assert_eq!(
-                err(&f),
-                format!("a {bytes}-byte record or array assignment is not supported yet")
-            );
-        }
+        let f = func(
+            0x10,
+            None,
+            vec![copy(Addr::Frame(-0x10), through(8, 0), 11)],
+        );
+        assert_eq!(
+            err(&f),
+            "a 11-byte record or array assignment is not supported yet"
+        );
+        // 8 bytes into an element indexed at run time (0xE38CA2, 11
+        // sites, order not settled).
+        let idx = Addr::Index {
+            base: Box::new(Addr::Frame(-0x10)),
+            index: Box::new(load(Addr::Frame(-0x12), word())),
+            scale: 8,
+            offset: 0,
+        };
+        let f = func(0x12, None, vec![copy(idx, through(8, 0), 8)]);
+        assert!(err(&f).starts_with("an 8-byte copy into this kind of destination"));
         // Another unit's object; a field through a pointer.
         let sym = Addr::Symbol {
             name: "X".into(),

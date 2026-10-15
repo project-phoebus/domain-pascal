@@ -47,5 +47,45 @@ class StoresTest(unittest.TestCase):
         self.assertEqual(res, [])
 
 
+def copies(texts):
+    return storesurvey.small_copies(FakeRoutine(texts).ins)
+
+
+class SmallCopiesTest(unittest.TestCase):
+    def test_inq_input_break_mode(self):
+        # TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E6..0xE678F2: 8 bytes, the
+        # source post-incremented, the destination's slot loaded first
+        res = copies(['moveal %d0,%a0', 'moveal %fp@(12),%a3',
+                      'lea %a0@(56),%a1', 'movel %a1@+,%a3@',
+                      'movel %a1@+,%a3@(4)'])
+        self.assertEqual(len(res), 1)
+        c = res[0]
+        self.assertEqual((c['addr'], c['size'], c['form'], c['moves'], c['src'],
+                          c['dst'], c['sreg'], c['dreg']),
+                         (0x106, 8, 'pi-disp', 'l+l', 'reg', 'reg', 'a1', 'a3'))
+        self.assertEqual(c['first'], 'src')   # the movea.l D0,A0 is the source's
+
+    def test_six_byte_displacement_pair(self):
+        # KBD_$RCV 0xE1CDB8: move.l then move.w, both by displacement
+        res = copies(['movel %fp@(-16),%a2@(32)', 'movew %fp@(-12),%a2@(36)',
+                      'movel %a2@(34),%d1'])
+        self.assertEqual([(c['size'], c['form'], c['moves'], c['src'], c['dst'])
+                          for c in res], [(6, 'disp', 'l+w', 'a6', 'reg')])
+
+    def test_loops_and_unrelated_moves(self):
+        # a dbf copy loop is not a small copy; non-consecutive offsets
+        # are not one run
+        res = copies(['lea %a5@,%a0', 'movel %a0@+,%a1@+', 'dbf %d0,0x100',
+                      'movel %a5@(8),%fp@(-8)', 'movel %a5@(16),%fp@(-4)'])
+        self.assertEqual(res, [])
+
+    def test_abs_destination(self):
+        # 0xE31C28: into another unit's object by absolute address
+        res = copies(['moveal #14775436,%a0', 'movel %a0@+,0xe2453c',
+                      'movel %a0@+,0xe24540'])
+        self.assertEqual([(c['form'], c['dst'], c['size']) for c in res],
+                         [('pi-disp', 'abs', 8)])
+
+
 if __name__ == '__main__':
     unittest.main()

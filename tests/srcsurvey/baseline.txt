@@ -128,9 +128,9 @@ OK	tty/tty.pas	tty_$k_set_output_flag
 OK	tty/tty.pas	tty_$k_inq_output_flags
 OK	tty/tty.pas	tty_$k_set_echo_flag
 OK	tty/tty.pas	tty_$k_inq_echo_flags
-STUB	tty/tty.pas	tty_$k_set_input_break_mode
+MISMATCH	tty/tty.pas	tty_$k_set_input_break_mode
 STUB	tty/tty.pas	tty_$k_inq_input_break_mode
-STUB	tty/tty.pas	tty_$k_set_pgroup
+OK	tty/tty.pas	tty_$k_set_pgroup
 STUB	tty/tty.pas	tty_$k_inq_pgroup
 OK	tty/tty.pas	tty_$k_set_session_id
 OK	tty/tty.pas	tty_$k_inq_session_id
