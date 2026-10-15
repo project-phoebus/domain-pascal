@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: e534fb112c413cd40fab40a7d2067e3618017f15
+# source: 07360b29b1616fa5790f539c4f77ca90bb05f0e2
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -468,6 +468,25 @@ MISMATCH	volx/volx.pas	volx_$shutdown
 STUB	volx/volx.pas	volx_$get_info
 STUB	volx/volx.pas	volx_$get_uids
 STUB	volx/volx.pas	volx_$rec_entry
+STUB	vtoc/vtoc.pas	vtoce_$old_to_new
+STUB	vtoc/vtoc.pas	os_disk_proc
+STUB	vtoc/vtoc.pas	vtoc_$uid_cache_insert
+STUB	vtoc/vtoc.pas	vtoc_$uid_cache_lookup
+STUB	vtoc/vtoc.pas	vtoc_$hash_uid
+MISMATCH	vtoc/vtoc.pas	vtoce_$new_to_old
+STUB	vtoc/vtoc.pas	vtoc_$mount
+STUB	vtoc/vtoc.pas	vtoc_$dismount
+STUB	vtoc/vtoc.pas	vtoc_$allocate
+STUB	vtoc/vtoc.pas	vtoc_$lookup
+STUB	vtoc/vtoc.pas	vtoc_$get_uid
+STUB	vtoc/vtoc.pas	vtoc_$get_name_dirs
+MISMATCH	vtoc/vtoc.pas	vtoc_$set_name_dirs
+STUB	vtoc/vtoc.pas	vtoce_$read
+STUB	vtoc/vtoc.pas	vtoce_$write
+STUB	vtoc/vtoc.pas	vtoce_$lookup_fm
+STUB	vtoc/vtoc.pas	vtoce_$truncate
+STUB	vtoc/vtoc.pas	fm_$read
+STUB	vtoc/vtoc.pas	fm_$write
 STUB	win/win.pas	wait_for_controller
 STUB	win/win.pas	win_$ansi_command
 STUB	win/win.pas	win_$sense_general_status
@@ -484,6 +503,32 @@ MISMATCH	win/win.pas	win_$dinit
 OK	win/win.pas	win_$error_que
 STUB	win/win.pas	win_$get_stats
 STUB	win/win.pas	win_$cinit
+MISMATCH	xns/xns_error.pas	xns_$is_local_addr
+MISMATCH	xns/xns_error.pas	xns_$pkt_bufs_in_netbuf_pool
+STUB	xns/xns_error.pas	maybe_open_error_socket
+MISMATCH	xns/xns_error.pas	maybe_close_error_socket
+STUB	xns/xns_error.pas	xns_error_$send
+STUB	xns/xns_idp.pas	xns_$add_port
+STUB	xns/xns_idp.pas	xns_$delete_port
+STUB	xns/xns_idp.pas	xns_$find_socket
+STUB	xns/xns_idp.pas	xns_$get_checksum
+STUB	xns/xns_idp.pas	xns_$is_broadcast_addr
+STUB	xns/xns_idp.pas	xns_idp_$os_open
+MISMATCH	xns/xns_idp.pas	xns_idp_$os_close
+STUB	xns/xns_idp.pas	xns_idp_$os_send
+STUB	xns/xns_idp.pas	xns_idp_$os_demux
+OK	xns/xns_idp.pas	xns_idp_$os_add_port
+OK	xns/xns_idp.pas	xns_idp_$os_delete_port
+STUB	xns/xns_idp.pas	xns_idp_$open
+STUB	xns/xns_idp.pas	xns_idp_$close
+STUB	xns/xns_idp.pas	xns_idp_$send
+STUB	xns/xns_idp.pas	xns_idp_$demux
+STUB	xns/xns_idp.pas	xns_idp_$receive
+STUB	xns/xns_idp.pas	xns_idp_$proc2_cleanup
+OK	xns/xns_idp.pas	xns_idp_$get_port_info
+OK	xns/xns_idp.pas	xns_idp_$get_stats
+STUB	xns/xns_idp.pas	xns_idp_$register_addr
+STUB	xns/xns_idp.pas	xns_idp_$init
 STUB	xpd/xpd.pas	xpd_$init
 STUB	xpd/xpd.pas	xpd_$find_index
 STUB	xpd/xpd.pas	xpd_$set_ptrace_opts
