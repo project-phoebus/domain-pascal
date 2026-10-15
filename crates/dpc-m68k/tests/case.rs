@@ -432,16 +432,12 @@ fn unsettled_cases_are_rejected() {
         "case f of 1: x := 1; 2: x := 2; end;",
         "a function call in a `case` selector",
     );
-    // An arm of only `return` would put a `bra` right at its label.
+    // An arm of only `return` in a jump table: its entry would name a
+    // `bra` (no entry in the image does; only branches are seen threaded,
+    // codegen-patterns 7.1).
     has(
-        "case w of 0: return; 1: x := 1; 2: x := 2; end; x := 3;",
-        "a branch to a `bra`",
-    );
-    // A `case` ending an `if` part followed by a `bra`: its arms would
-    // branch to the `bra` (codegen-patterns 7.1).
-    has(
-        "if y = 0 then case w of 0: x := 1; 1: x := 2; end else x := 3;",
-        "a branch to a `bra`",
+        "case w of 0: return; 1: x := 1; 2: x := 2; 3: x := 3; end; x := 3;",
+        "a `case` table entry whose target a `bra` follows",
     );
 }
 

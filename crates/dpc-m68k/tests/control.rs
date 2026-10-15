@@ -387,10 +387,13 @@ end;
     );
 }
 
-/// Compiled code has no branch to a `bra` (codegen-patterns 7.1), so the
-/// shapes that would make one are rejected rather than guessed at.
+/// Compiled code has no branch to a `bra` (codegen-patterns 7.1, "Branch
+/// threading"): a branch to a label that a `bra` follows goes to the
+/// `bra`'s target (TTY_$K_SET_FLAG 0xE6746A `beq.b 0xE67482` past the
+/// `bra.b 0xE67482` at 0xE6747A), and a `bra` no longer reached is
+/// dropped (TTY_$K_GET 0xE1C448).
 #[test]
-fn branches_to_a_bra_are_rejected() {
+fn branches_to_a_bra_are_threaded() {
     let cases = [
         // The inner `then` part's `bra` to its join, then the outer `bra`.
         "begin
@@ -398,7 +401,8 @@ fn branches_to_a_bra_are_rejected() {
     if u = 2 then r := 1 else r := 2
   else r := 3;
 end;",
-        // The inner test's `b<cc>` past its `then` part, then the outer `bra`.
+        // The inner test's `b<cc>` past its `then` part, then the outer `bra`
+        // (TTY_$K_SET_FLAG 0xE6745A..0xE67482).
         "begin
   if w = 1 then begin
     if u = 2 then r := 1;
@@ -412,10 +416,99 @@ end;",
   end;
   r := 3;
 end;",
+        // A `return` ending the inner `else` part: the outer `bra` after
+        // it is no longer reached and is dropped.
+        "begin
+  if w = 1 then
+    if u = 2 then r := 1 else begin r := 2; return end
+  else r := 3;
+  ext_$p(1);
+end;",
+        // An `else` part that starts with a `while`: the outer test goes
+        // to the loop's test, the opening `bra` is dropped (TTY_$K_GET
+        // 0xE1C44A `bpl.w 0xE1C4FC`, the head 0xE1C4D6).
+        "begin
+  if w = 1 then r := 1
+  else while u <> 0 do u := u - 1;
+  ext_$p(1);
+end;",
     ];
-    for b in cases {
-        let e = error(&format!("procedure t; internal;\n{b}\n"));
-        assert!(e.contains("a branch to a `bra`"), "{e}");
+    let want: [&[&str]; 5] = [
+        &[
+            "cmpi.w\t#1,(W).l",
+            "bne.s\t1f",
+            "cmpi.w\t#2,(U).l",
+            "bne.s\t2f",
+            "move.w\t#1,(R).l",
+            "bra.s\t4f",
+            "2:",
+            "move.w\t#2,(R).l",
+            "bra.s\t4f",
+            "1:",
+            "move.w\t#3,(R).l",
+            "4:",
+        ],
+        &[
+            "cmpi.w\t#1,(W).l",
+            "bne.s\t1f",
+            "cmpi.w\t#2,(U).l",
+            "bne.s\t3f",
+            "move.w\t#1,(R).l",
+            "bra.s\t3f",
+            "1:",
+            "move.w\t#3,(R).l",
+            "3:",
+        ],
+        &[
+            "cmpi.w\t#1,(W).l",
+            "bne.s\t1f",
+            "cmpi.w\t#2,(U).l",
+            "bne.s\t3f",
+            "move.w\t#1,(R).l",
+            "bra.s\t3f",
+            "1:",
+            "move.w\t#3,(R).l",
+            "3:",
+        ],
+        &[
+            "cmpi.w\t#1,(W).l",
+            "bne.s\t1f",
+            "cmpi.w\t#2,(U).l",
+            "bne.s\t2f",
+            "move.w\t#1,(R).l",
+            "bra.s\t5f",
+            "2:",
+            "move.w\t#2,(R).l",
+            "bra.s\t4f",
+            "1:",
+            "move.w\t#3,(R).l",
+            "5:",
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "4:",
+        ],
+        // The head still aligned (the module-local 0xE4AFA8: `bra.s` at
+        // 0xE4B0F4, the filler, the head 0xE4B0F8).
+        &[
+            "cmpi.w\t#1,(W).l",
+            "bne.s\t4f",
+            "move.w\t#1,(R).l",
+            "bra.s\t2f",
+            ".balignw\t4,0x2048",
+            "3:",
+            "subq.w\t#1,(U).l",
+            "4:",
+            "tst.w\t(U).l",
+            "bne.s\t3b",
+            "2:",
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+        ],
+    ];
+    for (b, want) in cases.iter().zip(want) {
+        assert_eq!(body(&format!("procedure t; internal;\n{b}\n")), want, "{b}");
     }
     // The same nesting without an `else` (or a `return`) after the inner
     // `if` has no such branch: the joins coincide (0xE177B8..0xE177CC).
@@ -442,6 +535,83 @@ end;
             "1:",
         ]
     );
+}
+
+/// Threading on loop paths (codegen-patterns 7.1, "Branch threading"):
+/// a `next` in an inner `else` part is reached by the inner test's
+/// branch alone, its own `bra` and the outer one after it dropped; a
+/// `while` whose body is a `while` has its outer back edge go to the
+/// inner test and the inner opening `bra` dropped, one alignment kept.
+#[test]
+fn loop_jumps_and_nested_whiles_are_threaded() {
+    let b = body(
+        "procedure t; internal;
+begin
+  while w > 0 do begin
+    w := w - 1;
+    if u = 1 then begin if r = 1 then r := 2 else next end else r := 3;
+    ext_$p(r);
+  end;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "bra.s\t2f",
+            ".balignw\t4,0x2048",
+            "1:",
+            "subq.w\t#1,(W).l",
+            "cmpi.w\t#1,(U).l",
+            "bne.s\t4f",
+            "cmpi.w\t#1,(R).l",
+            "bne.s\t2f",
+            "move.w\t#2,(R).l",
+            "bra.s\t7f",
+            "4:",
+            "move.w\t#3,(R).l",
+            "7:",
+            "subq.l\t#2,%sp",
+            "move.w\t(R).l,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "addq.w\t#4,%sp",
+            "2:",
+            "tst.w\t(W).l",
+            "bgt.s\t1b",
+        ]
+    );
+    let b = body(
+        "procedure t; internal;
+begin
+  while r > 0 do while w > 0 do w := w - 1;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "bra.s\t2f",
+            ".balignw\t4,0x2048",
+            "4:",
+            "subq.w\t#1,(W).l",
+            "5:",
+            "tst.w\t(W).l",
+            "bgt.s\t4b",
+            "2:",
+            "tst.w\t(R).l",
+            "bgt.s\t5b",
+        ]
+    );
+    // A `repeat` (or a backward `goto`'s label) right before a `while`:
+    // its head would fall into the opening `bra`, no longer a branch
+    // target; aligned or not is not seen (bead domain-pascal-tfae).
+    for b in [
+        "begin repeat while w > 0 do w := w - 1; r := r - 1 until r = 0 end;",
+        "label l; begin l: while w > 0 do w := w - 1; if r > 0 then begin r := r - 1; goto l end end;",
+    ] {
+        let e = error(&format!("procedure t; internal;\n{b}\n"));
+        assert!(e.contains("right before a `while`"), "{e}");
+    }
 }
 
 /// codegen-patterns 9: `if c then return` is one branch on `c` to the

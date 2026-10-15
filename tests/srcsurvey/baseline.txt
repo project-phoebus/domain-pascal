@@ -54,7 +54,7 @@ STUB	netlog/netlog.pas	netlog_$send_page
 STUB	osinfo/osinfo.pas	osinfo_$get_seg_table
 STUB	osinfo/osinfo.pas	osinfo_$get_mmap
 STUB	parity/parity.pas	parity_$chk
-STUB	parity/parity.pas	parity_$chk_io
+MISMATCH	parity/parity.pas	parity_$chk_io
 STUB	pbu/ec2_pbu.pas	pbu_$advance_ec_int
 OK	pbu/pbu.pas	pbu_$free_asid
 OK	pbu/pbu.pas	pbu_$faulted_units
@@ -91,8 +91,8 @@ STUB	tty/tty.pas	tty_$i_echo_char
 MISMATCH	tty/tty.pas	tty_$i_newline
 STUB	tty/tty.pas	tty_$i_calc_column
 STUB	tty/tty.pas	tty_$i_delete_char
-STUB	tty/tty.pas	tty_$i_kill_line
-STUB	tty/tty.pas	tty_$i_word_erase
+MISMATCH	tty/tty.pas	tty_$i_kill_line
+MISMATCH	tty/tty.pas	tty_$i_word_erase
 MISMATCH	tty/tty.pas	tty_$i_flush_input
 OK	tty/tty.pas	tty_$i_flush_output
 STUB	tty/tty.pas	tty_$i_signal

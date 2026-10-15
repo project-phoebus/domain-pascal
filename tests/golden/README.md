@@ -347,6 +347,12 @@ Tests:
   `else goto` a branch on the negated condition (TTY_$I_RCV 0xE1BBD2),
   a backward `goto`'s label aligned like a loop head, jumps out of
   loops and between `case` arms, a label before the epilogue.
+- `control/threading` - codegen-patterns 7.1 ("Branch threading"), 7.2
+  (bead domain-pascal-o6p): a branch to a label that a `bra` follows
+  goes to the `bra`'s target (TTY_$K_SET_FLAG 0xE6746A), a `bra` no
+  longer reached is dropped, and a `while` that starts an `else` part is
+  entered at its test with its head still aligned (TTY_$K_GET 0xE1C448;
+  the module-local 0xE4AFA8 at 0xE4B0F4..0xE4B0F8).
 - `regalloc/goto_reuse` - codegen-patterns 7.5, 12.4 R7, 12.5 (bead
   domain-pascal-o4q): a label a `goto` reaches is a join for the stored
   local pushed from D0 (PKT_$NEXT_ID 0xE124A8) and for reused computed

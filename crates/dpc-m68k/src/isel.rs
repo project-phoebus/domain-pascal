@@ -471,11 +471,15 @@ fn select_body_with(
             dst: 0,
         });
     }
+    // Branches to a `bra` go to its target, and a `bra` no longer
+    // reached is replaced by a label nothing names (dropped below with
+    // the other unused labels; codegen-patterns 7.1, "Branch threading").
+    thread_branches(&mut s.out, &mut s.next_label, &s.before_bra, f.span)?;
     // Labels nothing branches to (the join after a `then` part that ends
     // in `return`, ...) are dropped; they emit no bytes either way.
     // A `case` table's entries name their targets like branches (a
-    // target before a `bra` is refused as for a branch); its own label is
-    // named by the dispatch.
+    // target before a `bra` is refused, [`thread_branches`]); its own
+    // label is named by the dispatch.
     let used: Vec<u32> = s
         .out
         .iter()
@@ -486,25 +490,16 @@ fn select_body_with(
             _ => vec![],
         })
         .collect();
-    if let Some(&(_, span)) = s.before_bra.iter().find(|(l, _)| used.contains(l)) {
-        // `if a then begin if b then ... else ... end else ...`: the inner
-        // `then` part's `bra` to its join reaches the outer `bra`; `if a
-        // then begin if b then ... end else ...` and `if a then begin if b
-        // then ...; return end` likewise with the inner test's `b<cc>`;
-        // `if a or else b then return` with the `bmi` past the test of `b`.
-        return Err(unsupported(
-            span,
-            "a branch to a `bra` (an `if` part ending in an `if`, or a `goto` label, then a \
-             `bra` to a join, a label or the epilogue; compiled code has no branch to a `bra`, \
-             codegen-patterns 7.1) is",
-        ));
-    }
     // An `exit` or `next` whose target is the very next instruction (a
     // `next` ending a loop body, an `exit` before an inner loop's end):
     // whether the original emitted the branch is not known.
     for &(at, span) in &s.loop_jumps {
-        let Insn::Branch { label, .. } = s.out[at] else {
-            unreachable!("loop_jumps records branches")
+        let label = match s.out[at] {
+            Insn::Branch { label, .. } => label,
+            // Dropped by [`thread_branches`]: the branches to it now go
+            // where it went, and nothing reaches it.
+            Insn::Label(_) => continue,
+            _ => unreachable!("loop_jumps records branches"),
         };
         let next = s.out[at + 1..]
             .iter()
@@ -521,8 +516,12 @@ fn select_body_with(
     // `if c then goto L` before it): not seen.
     debug_assert_eq!(s.open_back, 0, "every backward goto selected");
     for &(at, span) in &s.goto_jumps {
-        let Insn::Branch { label, .. } = s.out[at] else {
-            unreachable!("goto_jumps records branches")
+        let label = match s.out[at] {
+            Insn::Branch { label, .. } => label,
+            // Dropped by [`thread_branches`]: the branches to it now go
+            // where it went, and nothing reaches it.
+            Insn::Label(_) => continue,
+            _ => unreachable!("goto_jumps records branches"),
         };
         let next = s.out[at + 1..]
             .iter()
@@ -940,6 +939,201 @@ fn select_body_with(
         },
         s.cse_hits,
     ))
+}
+
+/// Branch threading (codegen-patterns 7.1, "Branch threading"; bead
+/// domain-pascal-o6p).  Compiled code has no branch to a `bra`
+/// (`tools/threadsurvey.py tobra`: none of the `b<cc>`, `bra`, `dbf` or
+/// `case` table entries of 0xE00800..0xE88834), and 845 forward branches
+/// go past a `bra` to that `bra`'s own target, the outer join or the
+/// epilogue (`thread`: TTY_$K_SET_FLAG 0xE6746A `beq.b 0xE67482` past the
+/// `bra.b 0xE67482` at 0xE6747A).  So a branch to a label that a `bra`
+/// follows takes the `bra`'s target, transitively.  A `bra` that nothing
+/// reaches after that (the instruction before it an unconditional `bra`)
+/// is dropped: no such `bra` is in the image (`dead`: none), and a
+/// `while` whose opening `bra` follows one is entered by the threaded
+/// branch to its test alone (TTY_$K_GET 0xE1C44A `bpl.w 0xE1C4FC`, the
+/// head 0xE1C4D6 right after the `then` part's `bra.s` at 0xE1C4D4;
+/// TTY_$K_PUT 0xE67C0E), its head still aligned in aligning code (the module-local
+/// 0xE4AFA8: `bne.b 0xE4B0FC` to the test, `bra.s` at 0xE4B0F4, the
+/// filler at 0xE4B0F6, the head 0xE4B0F8).  The sizes follow from the
+/// threaded layout (`size_branches`): 263 of the threaded branches are
+/// `.w` though a `.s` would have reached the `bra`.
+///
+/// The dropped `bra` becomes a fresh label that nothing names, so the
+/// indices into `out` stay valid; the unused labels go later.  Refused:
+/// a `dbf` or a `case` table entry whose target a `bra` follows (an arm
+/// of only `return`; no table entry in the image goes to the epilogue
+/// unless its default does; bead domain-pascal-r4yn), a cycle of `bra`s,
+/// a branch that threading leaves pointing at the next instruction (not
+/// seen), and a loop head that falls into a `bra` (a `repeat` before a
+/// `while`; bead domain-pascal-tfae).  An `exit`, `next` or `goto` whose
+/// `bra` is dropped leaves its entry in `loop_jumps` / `goto_jumps`
+/// pointing at a label; [`select_body_with`] skips those.
+fn thread_branches(
+    out: &mut [Insn],
+    next_label: &mut u32,
+    before_bra: &[(u32, Span)],
+    span: Span,
+) -> Res<()> {
+    use std::collections::HashMap;
+    let span_of = |l: u32| {
+        before_bra
+            .iter()
+            .find(|(m, _)| *m == l)
+            .map_or(span, |&(_, s)| s)
+    };
+    let refused = |l: u32, what: &str| {
+        unsupported(
+            span_of(l),
+            format!(
+                "{what} whose target a `bra` follows (compiled code has no branch to a `bra`; \
+                 only branches are seen threaded, codegen-patterns 7.1) is"
+            ),
+        )
+    };
+    // The `bra` right after each label (other labels between).
+    let mut succ: HashMap<u32, u32> = HashMap::new();
+    let mut pos: HashMap<u32, usize> = HashMap::new();
+    for (k, i) in out.iter().enumerate() {
+        if let Insn::Label(l) = i {
+            pos.insert(*l, k);
+            let next = out[k + 1..].iter().find(|i| !matches!(i, Insn::Label(_)));
+            if let Some(Insn::Branch {
+                cond: Cond::T,
+                label,
+                ..
+            }) = next
+            {
+                succ.insert(*l, *label);
+            }
+        }
+    }
+    if succ.is_empty() {
+        return Ok(());
+    }
+    let resolve = |l: u32| -> Option<u32> {
+        let mut t = l;
+        for _ in 0..=succ.len() {
+            match succ.get(&t) {
+                Some(&m) => t = m,
+                None => return Some(t),
+            }
+        }
+        None
+    };
+    for (k, i) in out.iter_mut().enumerate() {
+        match i {
+            Insn::Branch { label, back, .. } if succ.contains_key(label) => {
+                let Some(t) = resolve(*label) else {
+                    return Err(refused(*label, "a cycle of `bra`s (a branch)"));
+                };
+                *label = t;
+                *back = pos[&t] < k;
+            }
+            Insn::Dbf { label, .. } if succ.contains_key(label) => {
+                return Err(refused(*label, "a `dbf`"));
+            }
+            Insn::TableEntry { target, .. } if succ.contains_key(target) => {
+                return Err(refused(*target, "a `case` table entry"));
+            }
+            _ => {}
+        }
+    }
+    // The labels still named after threading.
+    let used: std::collections::HashSet<u32> = out
+        .iter()
+        .flat_map(|i| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => vec![*label],
+            Insn::TableIndex { table, .. } => vec![*table],
+            Insn::TableEntry { target, .. } => vec![*target],
+            _ => vec![],
+        })
+        .collect();
+    // A `bra` after an unconditional `bra`, with no named label between
+    // (a loop head's alignment may be: the head of a `while` whose body
+    // starts with a `while`, its back edge threaded to the inner test).
+    let mut dead = Vec::new();
+    for k in 0..out.len() {
+        if !matches!(out[k], Insn::Branch { cond: Cond::T, .. }) {
+            continue;
+        }
+        let prev = out[..k].iter().rev().find(|i| {
+            !matches!(i, Insn::Label(l) if !used.contains(l)) && !matches!(i, Insn::Align4)
+        });
+        if matches!(prev, Some(Insn::Branch { cond: Cond::T, .. })) {
+            dead.push(k);
+        }
+    }
+    for &k in &dead {
+        out[k] = Insn::Label(*next_label);
+        *next_label += 1;
+    }
+    // The dropped `bra` of a `while` that starts a `while`'s body leaves
+    // the two heads' alignments together: one is enough (the outer head
+    // is no longer a branch target).
+    for k in 0..out.len() {
+        if matches!(out[k], Insn::Align4)
+            && matches!(
+                out[k + 1..]
+                    .iter()
+                    .find(|i| !matches!(i, Insn::Label(l) if !used.contains(l))),
+                Some(Insn::Align4)
+            )
+        {
+            out[k] = Insn::Label(*next_label);
+            *next_label += 1;
+        }
+    }
+    // A branch now to the next instruction (the labels and a loop head's
+    // alignment between): not seen.
+    for k in 0..out.len() {
+        let Insn::Branch { label, .. } = out[k] else {
+            continue;
+        };
+        let next = out[k + 1..]
+            .iter()
+            .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
+            .any(|i| matches!(i, Insn::Label(l) if *l == label));
+        if next && !dead.is_empty() {
+            return Err(unsupported(
+                span,
+                "a branch that would go to the next instruction once a `bra` no longer reached \
+                 is dropped (not seen, codegen-patterns 7.1) is",
+            ));
+        }
+    }
+    // A loop head that a `bra` still follows (a `repeat`, or a backward
+    // `goto`'s label, before a `while`: the back edge goes to the inner
+    // test, and the head, reached by falling into it, is a branch target
+    // no longer).  Compiled code has no 0x2048 filler before a `bra` that
+    // falls through to it, and a head entered so is not seen in aligning
+    // code: whether the original still aligns it is not known (bead
+    // domain-pascal-tfae).
+    for k in 0..out.len() {
+        if !matches!(out[k], Insn::Align4) {
+            continue;
+        }
+        let rest = || {
+            out[k + 1..]
+                .iter()
+                .skip_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
+        };
+        let head = out[k + 1..].iter().find_map(|i| match i {
+            Insn::Label(l) => Some(*l),
+            _ => None,
+        });
+        let next = rest().next();
+        if matches!(next, Some(Insn::Branch { cond: Cond::T, .. })) {
+            return Err(unsupported(
+                head.map_or(span, span_of),
+                "a `repeat` or a backward `goto`'s label right before a `while` (the back edge \
+                 goes to the `while`'s test; whether the head, falling into the opening `bra`, \
+                 stays aligned is not seen, codegen-patterns 7.1) is",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The memory operands instruction `i` reads or writes (not those whose
@@ -4046,11 +4240,9 @@ impl Selector {
     /// size is the emitter's (`emit.rs`, `size_branches`).
     ///
     /// A `bra` placed right after labels is recorded: a branch to one of
-    /// them would be a branch to a `bra`, which compiled code never has
-    /// (survey of 0xE00800..0xE88834: of the forward `bra`s none targets a
-    /// `bra`, nor does any `b<cc>`), so the original threaded such branches
-    /// or laid the code out otherwise; which, is not known.  [`select_body`]
-    /// rejects them.
+    /// them would be a branch to a `bra`, which compiled code never has;
+    /// [`thread_branches`] sends it to the `bra`'s target, and names the
+    /// statement in its refusals.
     fn jump(&mut self, cond: Cond, l: u32) {
         if let Some(m) = self.hoist.take() {
             // The branch of the `if` a parked local's move goes down to

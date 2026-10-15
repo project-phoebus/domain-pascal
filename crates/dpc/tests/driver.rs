@@ -2369,12 +2369,6 @@ fn goto_refusals() {
             "a statement after `goto` (not reached)",
             8,
         ),
-        // A label right before a `bra` (7.1, no branch to a `bra`).
-        (
-            "if b then goto l;\n  if b2 then begin w := 1; l: end else w := 2;\n  ext_$p(1);",
-            "a branch to a `bra`",
-            8,
-        ),
         // A jump into a loop from outside it.
         (
             "goto l;\n  while b do begin l: w := 1 end;",
@@ -2402,6 +2396,46 @@ end;
             "{body}: {err}"
         );
     }
+}
+
+/// A `goto` to a label that a `bra` follows goes to the `bra`'s target
+/// (codegen-patterns 7.1, "Branch threading"; compiled code has no
+/// branch to a `bra`).
+#[test]
+fn goto_to_a_label_before_a_bra_is_threaded() {
+    let src = "module m;
+var w: extern integer; b, b2: extern boolean;
+procedure ext_$p(x: integer); options(val_param, extern);
+procedure m_$t;
+label l;
+begin
+  if b then goto l;
+  if b2 then begin w := 1; l: end else w := 2;
+  ext_$p(1);
+end;
+";
+    let s = compile_with("goto_threaded", src, &[]).unwrap();
+    let body: Vec<&str> = s
+        .lines()
+        .map(|l| l.split('|').next().unwrap().trim())
+        .skip_while(|l| !l.starts_with("link.w"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("subq.l"))
+        .collect();
+    assert_eq!(
+        body,
+        [
+            "tst.b\t(B).l",
+            "bmi.s\t3f",
+            "tst.b\t(B2).l",
+            "bpl.s\t2f",
+            "move.w\t#1,(W).l",
+            "bra.s\t3f",
+            "2:",
+            "move.w\t#2,(W).l",
+            "3:",
+        ]
+    );
 }
 
 /// A backward `goto`'s label heads a loop: the 0x2048 filler in an

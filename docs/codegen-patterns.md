@@ -1597,7 +1597,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       domain-pascal-1j61 placed the move there ("Placement inside an
       `if`" below): it stopped at the computed boolean store again
       (k_get.pas `break_mode_flag := ... = tty_$break_on_eol`), then,
-      after bead domain-pascal-k1sv, at a branch to a `bra` (7.1).  Cut down to the statements
+      after bead domain-pascal-k1sv, at a branch to a `bra` (7.1; threaded
+      since bead domain-pascal-o6p, it stops at register pressure now).  Cut down to the statements
       up to the first call after the status test, TTY_$K_RESET and
       TTY_$K_SIMULATE_TERMINAL_INPUT give the image's `move.l A0,D0;
       tst.l (An); bne; movea.l D0,A2` (0xE67302..0xE6730A,
@@ -1616,7 +1617,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       domain-pascal-udmb), and the member
       test as `move.w (8,A0),D0; btst #4,D0` where the image tests the
       byte, `btst #4,(9,A0)` (bead domain-pascal-578), A0 the base in
-      both; TTY_$K_SET_FLAG stubbed as before (a branch to a `bra`).
+      both; TTY_$K_SET_FLAG stubbed as before (a branch to a `bra`;
+      threaded since bead domain-pascal-o6p, it stops at a slot load
+      after a branch, 12.4 R4(b), now).
     The 4 SIO_$K_* routines that park where a call follows have no
     Pascal in ../source yet: not tested.  Conformance
     `tests/conformance/tty_k_flags_int.pas`, `tty_k_flush_int.pas`,
@@ -3959,24 +3962,97 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   Compiled code never has two `bra`s in a row, so a `then` part ending in
   `return` has no `bra` to the join after it (Verified by absence; dpc
   leaves it out).
-- **No branch to a `bra` (Verified by absence; threading Verified at one
-  site):** of the 3324 forward `bra`s in compiled code none targets a
-  `bra`, and no `b<cc>` does (0xE34BC8, the one hit, is data).  At the
-  one site seen where the plain layout above would branch to a `bra`,
-  the original threads
-  the branch to the `bra`'s target and drops the `bra` when that leaves
-  it unreachable: TTY_$K_PUT 0xE67C0E (`if 1 in options then begin ...;
-  return end`, then a `while`) is `beq.w 0xE67D82`, straight to the
-  loop's bottom test (`cmp.w (A4),D3; bcs.w 0xE67C5E`); the `then` part
-  ends `bra.w 0xE67D92` (the epilogue) at 0xE67C5A and the loop head
-  0xE67C5E follows it with no opening `bra` (section 7.4) (lead:
-  ../source pascal-translation-notes finding 11).  One site; the nested
-  `if` cases (`if a then begin if b then ... else ... end else ...`: the
-  inner join is followed by the outer `bra`; `if a then begin if b then
-  ... end else ...`; `if a then begin if b then ...; return end`) are
-  not seen; threading predicts them but does not show them.  dpc rejects
-  all of these (`select_body`, `Selector::jump`; bead domain-pascal-o6p),
-  and likewise a `goto` to a label followed by a `bra` (7.5).
+- **Branch threading (Verified by survey; implemented; bead
+  domain-pascal-o6p).**  Survey: `tools/threadsurvey.py summary`
+  (every compiled routine, followed as `tools/cmpsurvey.py` does).
+  - **No branch to a `bra`:** none of the `b<cc>`, `bra` or `dbf`
+    branches, nor any `case` jump-table entry, targets a `bra` (`tobra`:
+    0; 0xE34BC8, the one hit of an earlier linear sweep, is data).
+  - **The branch goes to the `bra`'s target instead** wherever the
+    plain layout would branch to a `bra`: an `if` part that ends in an
+    inner `if` followed by the outer `bra` to its join or to the
+    epilogue, an `exit` before such a `bra`, a `goto` label before one.
+    `thread` counts 845 forward branches that go past a `bra T` to T
+    itself, where the `bra` ends an outer `then` part (the instruction
+    after it is the target of a branch from before the threaded one):
+    443 `bra`s and 402 `b<cc>`s; T the epilogue 216 times.  TTY_$K_SET_FLAG
+    0xE6745A..0xE67482 (`if value then begin ...; if a <> b then
+    tty_$i_signal(...) end else ...`): the inner test's `beq.b 0xE67482`
+    goes past the `then` part's `bra.b 0xE67482` (0xE6747A) to the
+    epilogue; the TTY module-local 0xE1B6AC (tty.pas `tty_$i_kill_line`)
+    at 0xE1B700 (`beq.s 0xE1B70E` past `bra.s 0xE1B70E` at 0xE1B706);
+    the TTY module-local 0xE1B716 (`tty_$i_word_erase`) at 0xE1B754, an
+    `exit` from the first of two `while`s, `beq.s 0xE1B79C` to the
+    second loop's test, past its opening `bra.s 0xE1B79C` at 0xE1B764 (which stays: the
+    first loop's test falls into it).
+  - **A `bra` that nothing reaches any more is dropped:** no `bra` in
+    compiled code follows an unconditional transfer unreached (`dead`:
+    0).  So a `while` whose opening `bra` follows a `bra` (an `else` part
+    that starts with the loop) is entered only by the threaded branch to
+    its test: TTY_$K_GET 0xE1C44A `bpl.w 0xE1C4FC` (`if break_mode_flag
+    then ... else while ...`, k_get.pas 0xE1C448), the `then` part's
+    `bra.s 0xE1C50E` at 0xE1C4D4 then the head 0xE1C4D6; TTY_$K_PUT
+    0xE67C0E (`if 1 in options then begin ...; return end`, then a `while`) `beq.w 0xE67D82`, straight to the
+    loop's bottom test, the `then` part's `bra.w 0xE67D92` (the
+    epilogue) at 0xE67C5A and the head 0xE67C5E right after it (lead:
+    ../source pascal-translation-notes finding 11).  `loop` finds 13
+    loops closed by a backward `b<cc>` whose head follows an
+    unconditional transfer and that a branch from outside enters at
+    the test (some of them `goto` targets, not `while`s).
+  - **Alignment:** the head of such a `while` is still aligned in
+    aligning code: the module-local 0xE4AFA8 (aligning) `bne.s 0xE4B0FC`
+    to the test, the `then` part's `bra.s 0xE4B106` at 0xE4B0F4, the
+    0x2048 filler at 0xE4B0F6 (unreached), the head 0xE4B0F8.
+    TTY_$K_GET and TTY_$K_PUT are in non-aligning code (heads at 2 mod 4).  One exception (`tools/loopalign.py`
+    `head_rows`, entry `bra-out` in an aligning routine): 0xE7469E in the
+    module-local 0xE743CE, at 2 mod 4 with no filler, entered at
+    0xE746A2 past its first instruction, not at a `while`'s test (a
+    different shape; aligning routines have other heads at 2 mod 4,
+    section 7).
+  - **A loop head that would fall into a `bra`** (a `repeat`, or a
+    backward `goto`'s label, right before a `while`: its back edge
+    threaded to the `while`'s test): no 0x2048 filler precedes a `bra`
+    reached by falling through in compiled code (`tools/loopalign.py
+    fillers`: only 0xE649E6, before a label reached through a jump table,
+    section 7, and 0xE313B2 in data), so whether the
+    original aligns such a head is not seen.  Refused (bead
+    domain-pascal-tfae).  A `while` whose body is a `while` has no such
+    head: the outer opening `bra` passes it, the inner one is dropped,
+    and one alignment stays before the inner head.
+  - **Sizes** are those of the threaded layout (section 7, "Branch
+    sizes": every `.w` out of reach): 263 of the 845 threaded branches
+    are `.w` though a `.s` would have reached the `bra` they pass.
+  - **Not seen:** a `case` table entry threaded (no entry goes to the
+    epilogue unless the table's default does; an arm of only `return`
+    or `goto` in a table), a `dbf` to a label before a `bra` (both
+    refused, bead domain-pascal-r4yn).
+  - **Tail merging is separate:** PARITY_$CHK_IO 0xE0B1A4 (`if ... then
+    if ... then r := 1 else if ... then r := 2 else r := 0 else r :=
+    0`) has the inner `else` part's `bne.s 0xE0B1AA` go to the outer
+    `else` part's identical `clr.w D0` rather than a copy of it before
+    the threaded `bra` ("Identical ends" below, bead
+    domain-pascal-sggk); dpc keeps both copies (srcsurvey MISMATCH).
+  - **Implemented** (`crates/dpc-m68k/src/isel.rs` `thread_branches`,
+    after selection, before register allocation): every `Insn::Branch`
+    to a label that a `bra` follows (other labels between) takes that
+    `bra`'s target, transitively; a `bra` after an unconditional `bra`
+    with no label still named between is dropped (replaced by an unused
+    label, so the side tables' indices hold); a loop head's `Align4`
+    stays (a loop head's alignment between two `bra`s does not keep the
+    second; two alignments left together become one).  An `exit`,
+    `next` or `goto` whose `bra` is dropped (in an inner `else` part,
+    reached by the inner test's threaded branch alone) is skipped by the
+    checks of `loop_jumps` and `goto_jumps`.  The emitter sizes the
+    branches afterwards.  Refused: a `case` table entry or a `dbf` whose
+    target a `bra` follows, a cycle of `bra`s, a branch that would go to
+    the next instruction once a `bra` is dropped (not seen; a compare
+    chain whose last arm is only `return`), and a loop head falling into
+    a `bra` (above).  Tests: `crates/dpc-m68k/tests/control.rs`
+    (`branches_to_a_bra_are_threaded`,
+    `loop_jumps_and_nested_whiles_are_threaded`), `crates/dpc/tests/driver.rs`
+    (`goto_to_a_label_before_a_bra_is_threaded`), golden
+    `tests/golden/control/threading.pas`, exec `tests/exec/threading.pas`
+    and `tests/exec/threading_paths.pas`.
 - **`if c then return` (Verified; implemented):** one conditional branch
   on `c` itself to the epilogue, not a branch past a `bra`: TERM_$CONTROL
   0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78`, 0xE62E88, 0xE68C08
@@ -4093,7 +4169,7 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`);
   against 0 it is rejected (the flags of the operation, or a `tst`?).  A
   function's boolean result is tested with `tst.b D0` (section 3); `k in
-  s` for a constant k with `btst #k` (section 5.1).  Not supported yet: a branch to a `bra` (above); comparing booleans
+  s` for a constant k with `btst #k` (section 5.1).  Not supported yet: comparing booleans
   (`b = true`: compiled code tests booleans with `tst.b`, and has two
   `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
   a constant on the left of a comparison; the refusals of "Two
@@ -4130,8 +4206,10 @@ Backward branches other than `dbf` in compiled code (same survey):
   4, both large; bead domain-pascal-ju5).  **Implemented**: section 7.4.
   A `while` can also be entered by a conditional branch to its test
   with no `bra` at all, when the statement before it ends in a `bra`
-  (TTY_$K_PUT 0xE67C0E, 7.1 "No branch to a `bra`"; lead: ../source
-  pascal-translation-notes finding 11).
+  (TTY_$K_PUT 0xE67C0E, TTY_$K_GET 0xE1C448; 7.1 "Branch threading":
+  the opening `bra`, no longer reached, is dropped and the head stays
+  aligned in aligning code, the module-local 0xE4AFA8 at 0xE4B0F8;
+  **implemented**).
 
 
 ### 7.3 `case` statements (Verified at the sites given; the choice of form Verified by survey; implemented)
@@ -4342,8 +4420,10 @@ selector (boolean); a function call in the selector (CAL_$WEEKDAY
 longword selector not starting at 0, or whose lowest label is below -8;
 an empty `otherwise` part; parts ending in calls of the same argument
 bytes when a pop is needed (shared pop, 1.1); arms that are only a jump
-(`return`: refused by the branch-to-`bra` rule of 7.1, as is a `case` at
-the end of an `if` part followed by a `bra`); label ranges
+in a jump table (`return`: its entry would name a `bra`, and no threaded
+table entry is seen, 7.1 "Branch threading"; in a compare chain the
+`beq` is threaded to the epilogue, and a `case` at the end of an `if`
+part followed by a `bra` has its arms' branches threaded); label ranges
 (`1..3:`, reference-clarifications Q7, open).  Goldens
 `tests/golden/control/case_table.pas`, `control/case_chain.pas`; tests
 `crates/dpc-m68k/tests/case.rs`.  **No conformance unit yet:** every
@@ -4803,8 +4883,9 @@ and `tools/loopalign.py`'s `head_rows`, not kept):
   continuation is a `goto` is not popped when the code from the label to
   the epilogue is clean (**Uncertain**: the rule for joins applied
   through the `bra`, no site checked).  Refused: a `goto` to the next
-  instruction, a statement after a `goto` that no label starts, a
-  branch to a label followed by a `bra` (7.1).
+  instruction, a statement after a `goto` that no label starts.  A
+  `goto` to a label followed by a `bra` goes to the `bra`'s target (7.1,
+  "Branch threading").
 
 Goldens `tests/golden/control/goto.pas`, `regalloc/goto_reuse.pas`;
 tests `crates/dpc-ir/src/tests.rs` (`goto_and_labels`, `goto_targets`),
