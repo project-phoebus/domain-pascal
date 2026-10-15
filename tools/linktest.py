@@ -49,12 +49,13 @@ Steps (tests/link/README.md has the why of each):
      fails).
   4a. dpc's run-time library (bead domain-pascal-w586; runtime/README.md):
      the archive `dpc --print-runtime=m68k' names is extracted into
-     domain_os/linktest/runtime/ and its object replaces the one ../source
-     object that defines its globals (math/sau2/arith.s, M$ARITH), which
-     must define exactly those.  The kernel is thus linked with the
-     runtime dpc ships, not ../source's copy; steps 6 and 7 check it like
-     a unit (../source's own arith.o is still built and gated by its
-     hand-written assembly check).
+     domain_os/linktest/runtime/ and each of its objects replaces the one
+     ../source object that defines its globals, which must define exactly
+     those: m_arith.o (M$ARITH) the object ../source extracts from the
+     same archive (once its own math/sau2/arith.s), pas_set_build.o
+     (PAS_$SET_BUILD, bead domain-pascal-jzm5) ../source's C stand-in
+     pas/set_build.c.  The kernel is thus linked with the runtime dpc
+     ships, not ../source's copy; steps 6 and 7 check it like a unit.
   5. `make check' in the scratch copy with linktest.mk filled in: the
      layout checks (map order of every placed symbol, scratch link), the
      hand-written assembly gate, the guards, the iodefs check, the RFC
@@ -327,6 +328,24 @@ def plan_runtime(runtime_globals, defs):
         errs.append('%s does not define %s, which the runtime does'
                     % (owners[0], ', '.join(sorted(want - have))))
     return (None if errs else owners[0]), errs
+
+
+def plan_runtime_members(member_globals, defs):
+    """plan_runtime for each member of the run-time library (step 4a):
+    `member_globals' {member object: its globals} -> (the ../source
+    objects they replace, in member order; errors, each naming its
+    member).  Two members may not replace one object."""
+    drops, errs = [], []
+    for m, g in member_globals.items():
+        o, e = plan_runtime(g, defs)
+        errs += ['%s: %s' % (os.path.basename(m), x) for x in e]
+        if o is not None:
+            if o in drops:
+                errs.append('%s: %s is replaced by another member too'
+                            % (os.path.basename(m), o))
+            else:
+                drops.append(o)
+    return drops, errs
 
 
 # dpc's data blocks: `.bss.moddata.<UNIT>' for the Pascal default data
@@ -748,7 +767,8 @@ def nm_undefined(root, objs):
 def runtime_objects(dpc, root):
     """dpc's run-time library (`dpc --print-runtime=m68k', an archive),
     its members extracted into the scratch domain_os/linktest/runtime/:
-    -> (their paths relative to `root', their globals)."""
+    -> (the archive, their paths relative to `root', their globals,
+    {path: that member's globals})."""
     p = run([dpc, '--print-runtime=m68k'])
     lib = p.stdout.strip()
     if p.returncode or not os.path.isfile(lib):
@@ -763,10 +783,11 @@ def runtime_objects(dpc, root):
         raise SetupError('%s is empty' % lib)
     must([AR, 'x', lib], cwd=out)
     objs = [os.path.join(rel, m) for m in members]
-    globs = {}
+    globs, per = {}, {}
     for o in objs:
-        globs.update(object_globals(os.path.join(root, o)))
-    return lib, objs, globs
+        per[o] = object_globals(os.path.join(root, o))
+        globs.update(per[o])
+    return lib, objs, globs, per
 
 
 def make_var(root, name):
@@ -1100,15 +1121,16 @@ def run_all(args):
         print('linktest: %s replaces %s' % (u.path, ', '.join(d) or 'nothing'))
         drops += d
         adds.append(obj)
-    # step 4a: dpc's run-time library for ../source's own M$ARITH
-    rt_lib, rt_objs, rt_globs = runtime_objects(args.dpc, root)
-    rt_drop, errs = plan_runtime(rt_globs, defs)
+    # step 4a: dpc's run-time library for ../source's own copies
+    rt_lib, rt_objs, rt_globs, rt_per = runtime_objects(args.dpc, root)
+    rt_drops, errs = plan_runtime_members(rt_per, defs)
     for e in errs:
         print('linktest: FAIL runtime %s: %s' % (conform.display_path(rt_lib), e))
     if errs:
         return 1
-    print('linktest: runtime %s (%s) replaces %s' % (
-        conform.display_path(rt_lib), ', '.join(rt_objs), rt_drop))
+    for o, d in zip(rt_objs, rt_drops):
+        print('linktest: runtime %s: %s replaces %s' % (
+            conform.display_path(rt_lib), o, d))
     undefined = set()
     for o in adds:
         undefined |= object_undefined(os.path.join(root, o))
@@ -1133,7 +1155,7 @@ def run_all(args):
         print('linktest: absolute symbols from the map (%s): %s' % (
             os.path.join(OBJDIR, 'absdefs.o'),
             ', '.join('%s 0x%X' % kv for kv in sorted(absdefs.items()))))
-    drops.append(rt_drop)
+    drops += rt_drops
     extra += rt_objs
     with open(mk, 'w') as f:
         f.write(linktest_mk(drops, adds + extra))

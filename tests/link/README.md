@@ -108,12 +108,17 @@ Read from `../source/domain_os/Makefile`, `sau2.ld` and `tools/` (2026-10-13).
    "Module data") and compiled again with `dpc --data-base`.
    Then dpc's run-time library (bead domain-pascal-w586;
    `runtime/README.md`): the archive `dpc --print-runtime=m68k` names is
-   extracted into `linktest/runtime/`, and its object `m_arith.o` replaces
-   the one `../source` object that defines its globals,
-   `build/sau2/math/sau2/arith.o` (M$ARITH), which must define exactly
-   those thirteen names.  The kernel is linked with the runtime dpc ships;
-   steps 7 and 8 check it like a unit.  (`../source`'s own `arith.o` is
-   still built, and still gated by its hand-written assembly check.)
+   extracted into `linktest/runtime/`, and each of its objects replaces
+   the one `../source` object that defines its globals, which must define
+   exactly those names (`tools/linktest.py` `plan_runtime_members`):
+   - `m_arith.o` (M$ARITH, thirteen names) replaces the copy `../source`
+     extracts from the same archive, `build/sau2/runtime/m_arith.o` (once
+     its own `build/sau2/math/sau2/arith.o`);
+   - `pas_set_build.o` (PAS_$SET_BUILD, bead domain-pascal-jzm5) replaces
+     `../source`'s C stand-in, `build/sau2/pas/set_build.o`.
+
+   Two members may not replace one object.  The kernel is linked with the
+   runtime dpc ships; steps 7 and 8 check it like a unit.
 5. Undefined symbols of the dpc objects that nothing in the link defines
    must be map names at or above IODEFS_GUARD 0xF4FC00, i.e. absolute
    addresses in the I/O region.  They are defined in `linktest/absdefs.o`

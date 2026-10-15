@@ -12,17 +12,20 @@ build:
 	$(CARGO) build
 	@$(MAKE) --no-print-directory runtime
 
-# The m68k run-time library (runtime/README.md): M$ARITH, Apollo's
-# compiler arithmetic routines, assembled from runtime/m68k/m_arith.s into
-# target/runtime/m68k/m_arith.o and the archive libm_arith.a (`dpc
-# --print-runtime' names it).  Built with `make build' when the m68k-elf
-# tools are present; otherwise skipped with a notice.  The archive is
-# written deterministically (ar D), so the output is reproducible.
+# The m68k run-time library (runtime/README.md): Apollo's compiler run-time
+# routines, transcriptions of the image's map segments, each assembled from
+# runtime/m68k/<name>.s into target/runtime/m68k/<name>.o and all archived
+# in libm_arith.a (`dpc --print-runtime' names it): m_arith (M$ARITH, the
+# arithmetic routines dpc calls) and pas_set_build (PAS_$SET_BUILD, which
+# dpc never calls; shipped for ../source's kernel link).  The archive keeps
+# its first member's name.  Built with `make build' when the m68k-elf tools
+# are present; otherwise skipped with a notice.  The archive is written
+# deterministically (ar D), so the output is reproducible.
 M68K_AS ?= m68k-elf-as
 M68K_AR ?= m68k-elf-ar
-RUNTIME_SRC := runtime/m68k/m_arith.s
+RUNTIME_SRCS := runtime/m68k/m_arith.s runtime/m68k/pas_set_build.s
 RUNTIME_OUT := target/runtime/m68k
-RUNTIME_OBJ := $(RUNTIME_OUT)/m_arith.o
+RUNTIME_OBJS := $(patsubst runtime/m68k/%.s,$(RUNTIME_OUT)/%.o,$(RUNTIME_SRCS))
 RUNTIME_LIB := $(RUNTIME_OUT)/libm_arith.a
 
 runtime:
@@ -30,13 +33,13 @@ runtime:
 	  $(MAKE) -s --no-print-directory $(RUNTIME_LIB); \
 	else echo "runtime: $(M68K_AS) or $(M68K_AR) not found; m68k runtime not built (skipped)"; fi
 
-$(RUNTIME_OBJ): $(RUNTIME_SRC)
+$(RUNTIME_OUT)/%.o: runtime/m68k/%.s
 	@mkdir -p $(@D)
 	$(M68K_AS) -m68010 -o $@ $<
 
-$(RUNTIME_LIB): $(RUNTIME_OBJ)
+$(RUNTIME_LIB): $(RUNTIME_OBJS)
 	@rm -f $@
-	$(M68K_AR) rcsD $@ $<
+	$(M68K_AR) rcsD $@ $^
 	@echo "runtime: built $@"
 
 # A stable dpc for other repositories (../source): built from the
@@ -71,7 +74,7 @@ test:
 # Execution tests (tests/exec/README.md): dpc output run on the Musashi
 # 68010 emulator, built from MUSASHI_DIR (default
 # ~/src/domainos-archeology/otterlater/musashi; not part of this repo),
-# linked with dpc's M$ARITH runtime (target/runtime/m68k/m_arith.o).
+# linked with dpc's M$ARITH runtime (target/runtime/m68k/libm_arith.a).
 # Skipped with a notice when Musashi or the m68k-elf tools are missing.
 # Under a second.
 exectest: build

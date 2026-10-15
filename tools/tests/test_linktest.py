@@ -140,6 +140,37 @@ class RuntimeTest(unittest.TestCase):
         self.assertIn('a.o, b.o', linktest.plan_runtime(self.RT, defs)[1][0])
         self.assertIn('no object', linktest.plan_runtime(self.RT, {})[1][0])
 
+    def test_members_each_replace_their_owner(self):
+        sb = {'PAS_$SET_BUILD': 'T'}
+        defs = {'build/sau2/runtime/m_arith.o': dict(self.RT),
+                'build/sau2/pas/set_build.o': dict(sb),
+                'build/sau2/tone/time.o': {'TONE_$TIME': 'T'}}
+        rt = {'linktest/runtime/m_arith.o': self.RT,
+              'linktest/runtime/pas_set_build.o': sb}
+        self.assertEqual(linktest.plan_runtime_members(rt, defs),
+                         (['build/sau2/runtime/m_arith.o', 'build/sau2/pas/set_build.o'], []))
+
+    def test_member_errors_name_the_member(self):
+        rt = {'linktest/runtime/m_arith.o': self.RT,
+              'linktest/runtime/pas_set_build.o': {'PAS_$SET_BUILD': 'T'}}
+        drops, errs = linktest.plan_runtime_members(rt, {'a.o': dict(self.RT)})
+        self.assertEqual(drops, ['a.o'])
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].startswith('pas_set_build.o: '), errs[0])
+        self.assertIn('no object', errs[0])
+
+    def test_two_members_one_owner(self):
+        a, b = {'M$MIS$LLL': 'T'}, {'M$OIS$LLL': 'T'}
+        drops, errs = linktest.plan_runtime_members(
+            {'x.o': a, 'y.o': b}, {'arith.o': dict(a, **b)})
+        self.assertEqual(drops, [])
+        self.assertEqual(len(errs), 2)
+        # two members with the same globals: each passes plan_runtime alone
+        drops, errs = linktest.plan_runtime_members(
+            {'x.o': a, 'y.o': dict(a)}, {'arith.o': dict(a)})
+        self.assertEqual(drops, ['arith.o'])
+        self.assertEqual(errs, ['y.o: arith.o is replaced by another member too'])
+
 
 class DropTest(unittest.TestCase):
     def setUp(self):

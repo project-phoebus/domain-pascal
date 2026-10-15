@@ -2522,7 +2522,9 @@ model run against the bit model of Figure 3-6).
   loops); `s = []` as `tst.l (A1)+; bne` per longword (0xE59496).
   Refused.  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
   `bset` each member of a range clamped to it) has no compiled caller: a
-  run-time range `[a..b]` is refused.
+  run-time range `[a..b]` is refused.  dpc ships the routine in its
+  runtime for kernel links (`runtime/m68k/pas_set_build.s`, transcribed
+  from the image; bead domain-pascal-jzm5) but never calls it.
 - **`in` on sets in memory, constant member (survey Verified; reading
   of the exceptions Uncertain; implemented, bead domain-pascal-578).**
   Survey: `tools/setsurvey.py summary`, kind `ctest` (every `btst #k`

@@ -98,6 +98,10 @@ target/runtime/m68k/m_arith.o  M$MIS$LLL M$MIU$LLW M$MIU$LLL M$MIS$LLW M$DIU$LLW
 # Harness fixtures.
 
 tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
+# Its second member (bead domain-pascal-jzm5): PAS_$SET_BUILD, the whole
+# map segment, 0x4C bytes at 0xE11FA8 (the zero word after the rts
+# included), transcribed from the image (runtime/m68k/pas_set_build.s).
+target/runtime/m68k/pas_set_build.o  PAS_$SET_BUILD
 tests/conformance/handasm/ast_page_zero.s    0xE00EB0 AST_$PAGE_ZERO
 tests/conformance/handasm/pkt_recently_missing.s  PKT_$RECENTLY_MISSING
 # 12.4 R4(c): a parameter whose last use is a call's argument, held through

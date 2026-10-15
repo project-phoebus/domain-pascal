@@ -1,16 +1,36 @@
-//! The m68k run-time library: M$ARITH, the Domain Pascal compiler's
-//! arithmetic routines (CLAUDE.md 3.11; codegen-patterns 8), shipped with
-//! dpc as `runtime/m68k/m_arith.s`, built into
-//! `target/runtime/m68k/libm_arith.a` (runtime/README.md).
+//! The m68k run-time library (runtime/README.md), built into
+//! `target/runtime/m68k/libm_arith.a`: transcriptions of the image's
+//! compiler run-time segments ([`MEMBERS`]).
 //!
-//! The instruction selector names an entry only through [`marith_entry`],
-//! so it can name only routines the shipped module defines.
+//! - M$ARITH, the Domain Pascal compiler's arithmetic routines (CLAUDE.md
+//!   3.11; codegen-patterns 8), `runtime/m68k/m_arith.s`.  The instruction
+//!   selector names an entry only through [`marith_entry`], so it can name
+//!   only routines the shipped module defines.
+//! - PAS_$SET_BUILD, the set builder (codegen-patterns 5.1),
+//!   `runtime/m68k/pas_set_build.s`.  dpc never calls it ([`UNCALLED`]): a
+//!   set constructor with a run-time range is refused (dpc-ir `set_value`).
+//!   It is shipped for links of the kernel (bead domain-pascal-jzm5).
 
 /// The map module: `I E0ABD4 M$ARITH size = 1DC` (SAU2 map).
 pub const MODULE: &str = "M$ARITH";
 
 /// The library file under `<runtime dir>/m68k/` ([`dpc_target::Target::runtime_library`]).
+/// It keeps its first member's name; it holds every member of [`MEMBERS`].
 pub const LIBRARY: &str = "libm_arith.a";
+
+/// The library's members, in archive order: (object, map segment, image
+/// address, size), each the whole SAU2 map segment `I <address> <segment>
+/// size = <size>`, in the object's section `.text.<segment>`.
+pub const MEMBERS: [(&str, &str, u32, u32); 2] = [
+    ("m_arith.o", "M$ARITH", 0xE0ABD4, 0x1DC),
+    ("pas_set_build.o", "PAS_$SET_BUILD", 0xE11FA8, 0x4C),
+];
+
+/// Global names of the library that dpc never emits a call to, with their
+/// map addresses: `I E11FA8 PAS_$SET_BUILD size = 4C` has no caller in the
+/// image, so the code a compiler generates for its call is not catalogued
+/// and the set constructor that would need it is refused.
+pub const UNCALLED: [(&str, u32); 1] = [("PAS_$SET_BUILD", 0xE11FA8)];
 
 /// The module's entry points in image order, with their map addresses.
 /// `M$OIS$LLL` and `M$OIU$LLL` are one routine (both at 0xE0AD7C).
@@ -55,13 +75,54 @@ mod tests {
     /// The shipped module's source.
     const SOURCE: &str = include_str!("../../../runtime/m68k/m_arith.s");
 
-    /// The `.global` names of the shipped module, in source order.
-    fn source_globals() -> Vec<&'static str> {
-        SOURCE
-            .lines()
+    /// PAS_$SET_BUILD's source.
+    const SET_BUILD: &str = include_str!("../../../runtime/m68k/pas_set_build.s");
+
+    /// The `.global` names of a source, in source order.
+    fn globals_of(src: &'static str) -> Vec<&'static str> {
+        src.lines()
             .filter_map(|l| l.trim().strip_prefix(".global"))
             .map(str::trim)
             .collect()
+    }
+
+    /// The `.global` names of the shipped M$ARITH module, in source order.
+    fn source_globals() -> Vec<&'static str> {
+        globals_of(SOURCE)
+    }
+
+    #[test]
+    fn members_are_the_shipped_sources() {
+        assert_eq!(MEMBERS[0].1, MODULE);
+        for ((obj, seg, ..), src) in MEMBERS.iter().zip([SOURCE, SET_BUILD]) {
+            assert!(obj.ends_with(".o"), "{obj}");
+            assert!(
+                src.contains(&format!(".section \".text.{seg}\"")),
+                "{obj}: section .text.{seg}"
+            );
+        }
+        // the Makefile archives exactly these, in this order
+        let srcs: Vec<String> = MEMBERS
+            .iter()
+            .map(|(obj, ..)| format!("runtime/m68k/{}.s", obj.trim_end_matches(".o")))
+            .collect();
+        let line = format!("RUNTIME_SRCS := {}", srcs.join(" "));
+        assert!(
+            include_str!("../../../Makefile").lines().any(|l| l == line),
+            "Makefile: {line}"
+        );
+    }
+
+    #[test]
+    fn uncalled_entries_are_set_builds_globals() {
+        let names: Vec<_> = UNCALLED.iter().map(|&(n, _)| n).collect();
+        assert_eq!(globals_of(SET_BUILD), names);
+        assert_eq!(UNCALLED[0].1, MEMBERS[1].2);
+        // never a name the selector can ask for, nor one it spells itself
+        for (n, _) in UNCALLED {
+            assert!(ENTRIES.iter().all(|&(e, _)| e != n));
+            assert!(!include_str!("isel.rs").contains(n), "isel.rs names {n}");
+        }
     }
 
     #[test]
