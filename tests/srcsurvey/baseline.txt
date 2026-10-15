@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: ac053ee8b9f43a99cda2edec8b1ed96f0b269b01
+# source: acd5790fc2cb19dfce4125b31877f06a0ff4b358
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -88,6 +88,28 @@ STUB	disk/disk_dev.pas	disk_$spin_down
 MISMATCH	disk/disk_dev.pas	disk_$revalid
 STUB	disk/disk_dev.pas	disk_$get_stats
 MISMATCH	disk/disk_dev.pas	disk_$shutdown
+STUB	disk/disk_vol.pas	disk_$diskless_init
+STUB	disk/disk_vol.pas	as_io_setup
+MISMATCH	disk/disk_vol.pas	disk_$read_mfg_badspots
+MISMATCH	disk/disk_vol.pas	disk_$as_read
+MISMATCH	disk/disk_vol.pas	disk_$as_write
+STUB	disk/disk_vol.pas	disk_$as_xfer_multi
+STUB	disk/disk_vol.pas	disk_$diag_io
+STUB	disk/disk_vol.pas	disk_$unassign
+OK	disk/disk_vol.pas	disk_$unassign_all
+STUB	disk/disk_vol.pas	disk_$get_mnt_info
+MISMATCH	disk/disk_vol.pas	disk_$revalidate
+STUB	disk/disk_vol.pas	disk_$get_error_info
+STUB	disk/disk_vol.pas	disk_$as_options
+STUB	disk/disk_vol.pas	disk_$pv_mount_internal
+STUB	disk/disk_vol.pas	disk_$pv_assign_n
+STUB	disk/disk_vol.pas	disk_$pv_assign
+STUB	disk/disk_vol.pas	disk_$pv_mount
+STUB	disk/disk_vol.pas	disk_$lv_mount
+STUB	disk/disk_vol.pas	disk_$lv_uid
+STUB	disk/disk_vol.pas	disk_$lv_assign
+STUB	disk/disk_vol.pas	disk_$dismount
+STUB	disk/disk_vol.pas	disk_$lvuid_to_volx
 OK	dma/dma.pas	dma_$init_m68450_channel
 STUB	dma/dma.pas	dma_$init
 STUB	dma/dma.pas	dma_$check
@@ -284,7 +306,7 @@ OK	net_io/net_io.pas	net_io_$put_in_sock_int
 STUB	net_io/net_io.pas	net_io_$copy_packet
 STUB	net_io/net_io.pas	net_io_$send
 STUB	net_io/net_io_unwired.pas	net_io_$boot_device
-MISMATCH	net_io/net_io_unwired.pas	net_io_$init
+STUB	net_io/net_io_unwired.pas	net_io_$init
 STUB	net_io/net_io_unwired.pas	net_io_$device_stat
 STUB	net_io/net_io_unwired.pas	net_io_$device_stat2
 STUB	net_io/net_io_unwired.pas	net_io_$create_port
@@ -376,6 +398,19 @@ STUB	rem_name/rem_name.pas	rem_name_$dir_readu
 STUB	rem_name/rem_name.pas	rem_name_$get_entry
 STUB	rem_name/rem_name.pas	rem_name_$find_network
 STUB	rem_name/rem_name.pas	rem_name_$find_uid
+STUB	route/route_rtwired.pas	route_$process
+STUB	route/route_rtwired.pas	route_$incoming
+STUB	route/route_rtwired.pas	route_$outgoing
+STUB	route/route_rtwired.pas	route_$send_user_port
+MISMATCH	route/route_unwired.pas	route_$cleanup_wired
+STUB	route/route_unwired.pas	route_$wire_routing_area
+STUB	route/route_unwired.pas	route_$short_port
+STUB	route/route_unwired.pas	route_$get_ec
+STUB	route/route_unwired.pas	route_$service
+STUB	route/route_unwired.pas	route_$shutdown
+STUB	route/route_unwired.pas	route_$read_user_stats
+STUB	route/route_wired.pas	route_$find_port
+STUB	route/route_wired.pas	route_$find_portp
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
 MISMATCH	sio/sio.pas	sio_$i_rcv
