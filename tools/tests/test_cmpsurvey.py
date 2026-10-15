@@ -157,3 +157,43 @@ class AndOrTest(unittest.TestCase):
     def test_mask_is_not_a_site(self):
         ins = insns(['andb #7,%d0'])
         self.assertEqual(cmpsurvey.andor_sites(ins), [])
+
+
+class OpFlagsTest(unittest.TestCase):
+    def test_branch_on_the_operation(self):
+        # SOCK_$ALLOCATE 0xE15EF8..0xE15EFC `move.w D3,D0; or.w D4,D0;
+        # beq.s'; tty_$i_put_chars 0xE1B046 `subq.w #1,D1; bpl.s'
+        ins = insns(['movew %d3,%d0', 'orw %d4,%d0', 'beqs 0x200',
+                     'subqw #1,%d1', 'bpls 0x200'])
+        self.assertEqual(cmpsurvey.opflags_sites(ins),
+                         [(0x102, 'or', 'w', 'flags', 'w', 'eq', 'b', '-'),
+                          (0x106, 'sub', 'w', 'flags', 'w', 'pl', 'b', '-')])
+
+    def test_tst_between(self):
+        # SMD_$SIGNAL 0xE6F25A..0xE6F260 `moveq #39,D1; sub.l D0,D1; tst.l
+        # D1; bgt.s'; 0xE0A542 `moveq #7,D1; and.b (-64,A6),D1; tst.w D1'
+        ins = insns(['moveq #39,%d1', 'subl %d0,%d1', 'tstl %d1', 'bgts 0x200',
+                     'moveq #7,%d1', 'andb %fp@(-64),%d1', 'tstw %d1', 'bnes 0x200'])
+        self.assertEqual(cmpsurvey.opflags_sites(ins),
+                         [(0x102, 'sub', 'l', 'tst', 'l', 'gt', 'b', '-'),
+                          (0x10A, 'and', 'b', 'tst', 'w', 'ne', 'b', '-')])
+        self.assertEqual(cmpsurvey.opflags_class(cmpsurvey.opflags_sites(ins)[1]),
+                         ('and', 'eq/ne', 'tst', 'size', '-'))
+
+    def test_s_cc_store_and_join(self):
+        # SOCK_$PUT_INT-like `seq' after a subtraction; a store between
+        # (0xE3BCB4 `sub.w D1,D0; move.w D0,(-92,A6); bne.s'); a `tst' that
+        # a branch reaches (a join, 0xE08F80)
+        ins = insns(['subw %d1,%d0', 'seq %d2',
+                     'subw %d1,%d0', 'movew %d0,%fp@(-92)', 'bnes 0x200',
+                     'subl %d1,%d3', 'tstl %d3', 'beqs 0x200', 'bras 0x10c'])
+        self.assertEqual(cmpsurvey.opflags_sites(ins),
+                         [(0x100, 'sub', 'w', 'flags', 'w', 'eq', 's', '-'),
+                          (0x104, 'sub', 'w', 'store', 'w', 'ne', 'b', '-'),
+                          (0x10A, 'sub', 'l', 'tst', 'l', 'eq', 'b', 'join')])
+
+    def test_not_sites(self):
+        # a compare, a load into an address register, a gap in memory
+        ins = insns(['cmpw %d1,%d0', 'beqs 0x200', 'moveal %a0@,%a1', 'beqs 0x200'])
+        ins += [(0x120, 2, 'addw %d1,%d0'), (0x130, 2, 'beqs 0x200')]
+        self.assertEqual(cmpsurvey.opflags_sites(ins), [])

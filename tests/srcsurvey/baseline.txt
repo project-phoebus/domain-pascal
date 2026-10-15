@@ -155,11 +155,11 @@ STUB	sio2681/sio2681.pas	sio2681_$init
 STUB	sio2681/sio2681.pas	sio6509_$init
 STUB	sio2681/sio2681.pas	sio2681_$inq_line
 MISMATCH	sio2681/sio2681.pas	sio6509_$set_line
-STUB	sio2681/sio2681.pas	sio6509_$inq_line
+MISMATCH	sio2681/sio2681.pas	sio6509_$inq_line
 MISMATCH	sock/sock.pas	sock_$open
-STUB	sock/sock.pas	sock_$allocate
+MISMATCH	sock/sock.pas	sock_$allocate
 MISMATCH	sock/sock.pas	sock_$allocate_user
-STUB	sock/sock.pas	sock_$close
+MISMATCH	sock/sock.pas	sock_$close
 STUB	sock/sock.pas	sock_$get
 MISMATCH	sock/sock.pas	sock_$put
 STUB	sock/sock.pas	sock_$put_int

@@ -373,6 +373,14 @@ Tests:
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a
   join and for the unit's data (0xE02806).
+- `control/computed_zero` - codegen-patterns 7.1 ("A computed value
+  against 0"; bead domain-pascal-qlzu): `=`/`<>`/`<`/`>=` on the flags of
+  the add, sub, and, or that formed the value (SOCK_$ALLOCATE 0xE15EFA,
+  SIO6509_$INQ_LINE 0xE7267C, tty_$i_put_chars 0xE1B046, MAC_OS_$SEND's nested
+  routine 0xE0B522 at 0xE0B57C), `tst` before `>`/`<=` after an add or sub (SMD_$SIGNAL
+  0xE6F25C) and after a call, a divide or a widened byte (SOCK_$PUT_INT
+  0xE161EA, 0xE11BF4, SOCK_$CLOSE 0xE15FBE), `btst` for one bit
+  (pacct_$compress 0xE5A9DE).
 - `control/goto` - codegen-patterns 7.5 (bead domain-pascal-o4q): `goto`
   as a `bra` to its label, `if c then goto` one conditional branch,
   `else goto` a branch on the negated condition (TTY_$I_RCV 0xE1BBD2),

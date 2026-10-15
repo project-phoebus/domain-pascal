@@ -4253,7 +4253,20 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **Flags of a load (Uncertain):** the `tst` is sometimes left out after
   a move into the tested register (RIP_$SEND_UPDATES 0xE6887E `move.b
   (8,A6),D0; bpl`; 0xE014DC `move.l (A3),D0; beq`) and sometimes not
-  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).
+  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).  `tools/cmpsurvey.py
+  opflags` counts a same-size move into Dn then the branch 398 times
+  (`beq`/`bne` 295, `bmi`/`bpl` 78, signed 25; 3 at joins) against 14
+  with `tst` between (10 more at joins): still no rule.  A load of
+  **another size** than the test is tested: `move.b M,Dn; tst.w Dn` 83
+  times, after a `clr.w Dn` (SOCK_$CLOSE
+  0xE15FB8..0xE15FC0 `clr.w D0; move.b (21,A2),D0; tst.w D0; beq.s`, a
+  `[byte] 0..255` field against 0).  **Implemented** for that case (bead
+  domain-pascal-qlzu, `isel.rs` `Selector::tst`); a same-size load is
+  still refused ("testing a register the previous instruction loaded"),
+  and so is a load at any other pair of sizes: no `move.w` then `tst.l`
+  of the register (a word widened to a longword, `clr.l; move.w`) is in
+  compiled code (one `move.l; tst.w`, at a join, 0xE0EB82; one `move.w;
+  tst.b`, 0xE19106).
 - **A test right after a store (Verified by survey for the frame;
   implemented there; bead domain-pascal-dgb):** `tools/resultsurvey.py
   storetest` takes every store of a register into memory (`move.<s>
@@ -4301,6 +4314,106 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   there, not reproduced); other memory is tested again, as before.
   Golden `tests/golden/control/store_flags`; driver test
   `branch_on_the_store_flags_only_right_after_the_store`.
+- **A computed value against 0 (Verified by survey; implemented; bead
+  domain-pascal-qlzu):** `tools/cmpsurvey.py opflags` takes every
+  conditional branch and `s<cc>` in compiled code (SMD_UTILS
+  0xE702F4..0xE707FC left out: it saves registers before its `link` and
+  takes A5 from A0, hand assembly by section 0's signs) whose previous
+  instruction is an operation on a data register (add, sub, and, or,
+  eor, a shift, neg, not, clr, ext, swap, mul, div, move, moveq), or a
+  `tst`, a `cmpi #0` or a store of that register between them: 1156
+  sites, 993 on the operation's own flags, 144 after a `tst`, 14 after a
+  store of the register, 5 after a store and a `tst`, **none after
+  `cmpi #0`**.  Left out the loads (move, moveq, clr; "Flags of a load"
+  above), by operation and relation:
+
+  | operation | `beq`/`bne` | `bmi`/`bpl` | `bgt`/`ble`/`blt`/`bge` |
+  |---|---|---|---|
+  | add, sub | flags 19 (2 at joins); `tst` 4, all at joins | flags 315, none with `tst` | `tst` 8 (1 at a join), flags 0 |
+  | and, or | flags 115; `tst` 2, both at joins; `tst` 6 at another size | flags 70 (`and.b`/`or.b` of booleans) | none |
+  | lsr | flags 36; `tst` 2 at another size | none | none |
+  | asr, lsl, not, muls | `tst` 1 at another size (asr.l) | flags 2, 1, 1, 2 | none |
+  | divs, divu | `tst` 2 (1 at a join) | `tst` 1 | none |
+  | swap | `tst.w` 3 (another size) | none | none |
+  | eor, neg, ext | none | none | none |
+
+  (Unsigned `bcs`/`bcc`/`bhi`/`bls` after sub 20 and after `lsr.b` 9
+  read the carry: compiler expansions, not a relation with 0.)  The rule:
+  the original trusts the **N and Z** flags of an add, sub, and, or,
+  shift, `not` and multiply, **not their V flag**, and no flags of a
+  divide (N and Z are undefined after an overflowing `divs`/`divu`):
+
+  - `=`, `<>`, `<`, `>=` (`beq`/`bne`/`bmi`/`bpl`) read the operation's
+    flags: SOCK_$ALLOCATE 0xE15EFA `move.w D3,D0; or.w D4,D0; beq.s`
+    (../source `(hdr_pages ! data_pages) <> 0`), SOCK_$CLOSE 0xE16004,
+    SIO6509_$INQ_LINE 0xE7267C `move.l D0,D1; andi.l #0x180,D1; beq.s`
+    (`(mask & 16#180) <> 0`).  The same after an assignment to a
+    register-held local, tested by the next statement: MAC_OS_$SEND's nested
+    routine (module-local at 0xE0B522) at 0xE0B57C `sub.w D5,D3; bne.b`
+    (`remaining := remaining - chunk; if
+    remaining = 0`), PROC1_$ALLOC_STACK 0xE150EA `subi.w #0x400,D2;
+    bne`, tty_$i_put_chars 0xE1B046 `subq.w #1,D1; bpl.s` (`free_space
+    := head - tail - 1; if free_space < 0`), TTY_$K_PUT 0xE67C1A,
+    TTY_$K_GET 0xE1C516 `sub.w (716,A2),D0; bpl.s`, netbuf_rtnva_locked
+    0xE0E8E0 `asr.l #2,D2; bmi.s` (`slot := (va - base) div 1024; if
+    slot < 0`), NETBUF_$RTN_HDR 0xE0EED6.  Of the ~300 other `sub;
+    bmi/bpl` most are the compiler's own: a run-time `for` count guard
+    (`subq.w #1; bmi`), `abs` (0xE1AE02 `sub.l D0,D3; bpl.s; neg.l D3`),
+    the rounding of a signed `div` by 2^k (0xE06D5A `sub.l D3,D2; bpl.s;
+    addi.l #1023,D2; asr.l #8,D2`).
+  - `>`, `<=` (`bgt`/`ble`, which read V) after an add or sub: `tst`
+    first, 7 of 7: in a condition, SMD_$SIGNAL 0xE6F258..0xE6F260 `sub.l
+    D1,D0; moveq #39,D1; sub.l D0,D1; tst.l D1; bgt.s` and 0xE6F26E
+    `sub.l D1,D0; subq.l #1,D0; tst.l D0; bgt.s`; after an assignment,
+    NETWORK_$WRITE 0xE0FBF6, NETWORK_$READ_AHEAD 0xE1018A,
+    PKT_$COPY_TO_PA 0xE125E0, SHAKE 0xE3E4CC, LOG_$ADD 0xE1766A `addq.w
+    #4,D2; tst.w D2; ble.w`.
+  - At another size than the operation (an `and.b` tested as a word,
+    0xE0A544 `moveq #7,D1; and.b (-64,A6),D1; tst.w D1; bne.s`; `and.w`
+    as a longword, 0xE3EE6E; `lsr.l`, `asr.l`, `swap` as a word,
+    0xE1701C, 0xE130AA, NETWORK_$PAGE_SERVER 0xE11822), after a divide
+    (0xE11BF4 `divs.w #60,D1; tst.w D1; beq.s`; 0xE6966E), after a call
+    (`tools/cmpsurvey.py callcmp`: 31 branches after `tst` of a call's
+    D0, SOCK_$PUT_INT 0xE161EA `tst.w D0; seq D0` as a value; 7 after an
+    M$ARITH call, 0xE14C02 `tst.l D0`): `tst`.
+  - At a join (a label between the operation and the branch) the `tst`
+    is there (0xE08F80, 0xE3C930, 0xE4445E, 0xE3DF66, 0xE3EF72).
+  - **One bit:** no `and` with a one-bit mask, immediate or loaded into
+    a register, is followed by a branch or an `s<cc>` (92 with other
+    masks); `(value & 4) <> 0` of a register-held parameter is `btst
+    #2,D0; sne D2` (pacct_$compress 0xE5A9DE).  The mask on the left
+    (`4 & x`) is taken the same way: the source order cannot be seen,
+    and the `and` it would otherwise give is not seen.
+  - **Multiply:** the two branches after a `muls.w` (0xE69626, 0xE69630)
+    are `abs` of a word product, `muls.w; bpl.s; neg.w`: the 32-bit
+    flags read for a value used as a word, no `tst.w`.  A product tested
+    as a longword reads the flags; tested as a word it is refused (a
+    `tst.w` first is not seen, and those sites suggest it is not there).
+
+  N and Z after an add or sub are those of the 16- or 32-bit result, as
+  `tst` would give them, so `bmi`/`bpl`/`beq`/`bne` on the operation's
+  flags test the value Pascal keeps (no overflow detection); `bgt`/`ble`
+  there would read V and test the exact sum or difference
+  (16#7FFFFFFF + 1 > 0), which the `tst` avoids.  No semantic divergence
+  follows from the implemented forms (exec test `computed_zero`, with
+  32-bit overflows both ways).  How wide a word sum is in a comparison is
+  a separate open question (bead domain-pascal-9js, exec test
+  `wide_compare`); these forms follow dpc's present word width.
+
+  **Implemented** (`isel.rs` `Selector::compare_computed_zero`,
+  `flags_test`, `tst`): all of the above, for a value computed for the
+  test and for a register-held local an assignment just formed (it used
+  to be tested again, `sub.w D2,D3; tst.w D3; bne`, against MAC_OS_$SEND's nested
+  routine 0xE0B522 at 0xE0B57C).  Refused, not seen either way: `>`, `<=` after an and, or,
+  shift, `not` or multiply (V is clear after them; whether the original
+  re-tests is not seen); a word product tested as a word (above); any
+  test right after an eor, a `neg`, an `ext`
+  or a `swap` tested as a longword (no branch or `tst` follows one in
+  compiled code) (bead domain-pascal-bkoz); one bit of a value in memory
+  or computed (`btst` on the byte, or the value loaded first?; bead
+  domain-pascal-bjx0); unsigned orderings against 0, as for variables.  Golden `control/computed_zero`; exec test
+  `computed_zero`; driver tests `computed_value_against_zero_*`,
+  `one_bit_mask_is_btst`, `assigned_register_against_zero_on_the_operation_flags`.
 - **`if c then T else E`:** a branch on the negated condition to `E`
   (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
   `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.
@@ -4583,7 +4696,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   A computed left operand (an expression, a function result, an array
   element's value) is compared in its register with `cmpi #c,Dn` (0xE1216E
   `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`);
-  against 0 it is rejected (the flags of the operation, or a `tst`?).
+  against 0 the branch reads the operation's flags, or `tst` comes first
+  ("A computed value against 0" above; bead domain-pascal-qlzu).
   A function's result against a variable is refused outside the right
   operand of a plain `and`/`or` (formed as a boolean at all 14 sites,
   2 of them outside a chain; the relation formed in a loop test not
@@ -4596,7 +4710,7 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   a constant on the left of a comparison; the refusals of "Two
   variables", "Mixed widths and signs" and "Records" above; unsigned
   ordering against 0; a test right
-  after the load of its register (above); an `if` with an empty `then`
+  after a load of its register at the test's size (above); an `if` with an empty `then`
   part; a `return` at the
   end of a nested part that ends the routine (a `bra` to the next
   instruction, or nothing?); the shared pop (section 1.1).  Goldens

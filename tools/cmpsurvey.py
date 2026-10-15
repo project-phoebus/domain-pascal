@@ -51,6 +51,20 @@ address order).  Kinds:
             whether a call lies between the last write of Dn (the left
             operand formed) and the combination, i.e. whether the right
             operand calls (bead domain-pascal-1rwo).
+    opflags a conditional branch or `s<cc>' whose tested value a data
+            register operation just formed (bead domain-pascal-qlzu):
+            `op Dn; b<cc>' (form `flags', the operation's own flags),
+            `op Dn; tst.<s> Dn; b<cc>' (`tst'), `op Dn; cmpi.<s> #0,Dn;
+            b<cc>' (`cmpi0'), `op Dn; move.<s> Dn,<mem>; b<cc>'
+            (`store') and `op Dn; move.<s> Dn,<mem>; tst ...; b<cc>'
+            (`store+tst').  `op' is an add, sub, and, or, eor (register,
+            immediate or quick forms), a shift or rotate, neg, not, clr,
+            ext, swap, mul, div, a move or moveq into Dn; the size of the
+            operation and of the test, the branch's condition, whether it
+            is a branch or an `s<cc>', and whether the tested instruction
+            is a branch target (a join: the test cannot rely on the
+            operation's flags there).  Evidence for comparisons of a
+            computed value with 0 (codegen-patterns 7.1).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -69,7 +83,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor')
+         'andor', 'opflags')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -368,6 +382,120 @@ def andor_sites(ins):
     return out
 
 
+# A data register operation that sets the flags from its result: (op
+# family, size, register).  objdump spellings: `addqw', `andil', `lsrl',
+# `extl', `moveq'.
+_OPDN = re.compile(r'^(add|sub|and|or|eor|lsl|lsr|asl|asr|rol|ror|roxl|roxr|neg|negx|not'
+                   r'|clr|ext|move|mul[su]|div[su])(q|i|x)?([bwl])? (?:.*,)?%(d\d)$')
+_SWAP = re.compile(r'^swap %(d\d)$')
+_MOVEQ = re.compile(r'^moveq #-?\d+,%(d\d)$')
+_CONDS = ('eq', 'ne', 'mi', 'pl', 'lt', 'ge', 'le', 'gt', 'cs', 'cc', 'hi', 'ls', 'vs', 'vc')
+_COND = re.compile(r'^(?:b(' + '|'.join(_CONDS) + r')[sw]? 0x|s(' + '|'.join(_CONDS)
+                   + r') %d\d$)')
+_STORE = re.compile(r'^move([bwl]) %(d\d),(' + _MEM + r')$')
+
+
+def op_of(t):
+    """(family, size, register) of a flag-setting data register
+    operation, or None.  `mulu.w'/`muls.w' and `divu.w'/`divs.w' are word
+    operations whose register is a longword; moveq is a longword."""
+    m = _MOVEQ.match(t)
+    if m:
+        return ('moveq', 'l', m.group(1))
+    m = _SWAP.match(t)
+    if m:
+        return ('swap', 'l', m.group(1))
+    m = _OPDN.match(t)
+    if not m or (m.group(1) == 'move' and m.group(2)):
+        return None
+    fam, size = m.group(1), m.group(3)
+    if fam.startswith(('mul', 'div')):
+        return (fam, 'w', m.group(4))
+    if size is None:
+        return None
+    return (fam, size, m.group(4))
+
+
+# SMD_UTILS, left out of `opflags': its code saves registers with `movem'
+# before the `link' and takes A5 from A0 (smd_$write_str_clip_impl
+# 0xE70390), SMD_$INVERT_DISP 0xE70376 is frameless with SP-relative
+# arguments: hand assembly by codegen-patterns section 0's signs, though
+# loopalign.HAND_ASM does not list it.
+_OPFLAGS_SKIP = (0xE702F4, 0xE707FC)
+
+_REL = {'eq': 'eq/ne', 'ne': 'eq/ne', 'mi': 'mi/pl', 'pl': 'mi/pl', 'lt': 'signed', 'ge': 'signed',
+        'le': 'signed', 'gt': 'signed', 'cs': 'unsigned', 'cc': 'unsigned', 'hi': 'unsigned',
+        'ls': 'unsigned', 'vs': 'overflow', 'vc': 'overflow'}
+
+
+def opflags_class(site):
+    """(operation family, relation class, form, same size|size differs,
+    join) of an `opflags' site (as opflags_sites gives it)."""
+    _, fam, size, form, tsize, cond, _, join = site
+    return (fam, _REL[cond], form, 'same' if size == tsize else 'size', join)
+
+
+def opflags_sites(ins):
+    """[(addr of the operation, family, op size, form, test size, cond,
+    b|s, join)] of conditional branches and `s<cc>' after a data register
+    operation (see the module docstring, kind `opflags').  The
+    instructions must be adjacent in memory."""
+    targets = set()
+    for _, _, t in ins:
+        m = re.match(r'^b[a-z]{2,3}[sw]? 0x([0-9a-f]+)$', t)
+        if m:
+            targets.add(int(m.group(1), 16))
+    out = []
+
+    def adjacent(i, j):
+        return all(ins[k][0] + ins[k][1] == ins[k + 1][0] for k in range(i, j))
+
+    for i, (a, _, t) in enumerate(ins):
+        op = op_of(t)
+        if op is None:
+            continue
+        fam, size, d = op
+        nxt = [x[2] for x in ins[i + 1:i + 4]]
+        if not nxt:
+            continue
+
+        def cond(k):
+            if i + k >= len(ins) or not adjacent(i, i + k):
+                return None
+            m = _COND.match(ins[i + k][2])
+            if not m:
+                return None
+            return (m.group(1) or m.group(2), 'b' if m.group(1) else 's')
+
+        def join(k):
+            return 'join' if any(ins[i + q][0] in targets for q in range(1, k + 1)) else '-'
+
+        c = cond(1)
+        if c:
+            out.append((a, fam, size, 'flags', size) + c + (join(1),))
+            continue
+        t1 = nxt[0]
+        m = re.match(r'^tst([bwl]) %' + d + '$', t1)
+        if m and cond(2):
+            out.append((a, fam, size, 'tst', m.group(1)) + cond(2) + (join(1),))
+            continue
+        m = re.match(r'^cmpi([bwl]) #0,%' + d + '$', t1)
+        if m and cond(2):
+            out.append((a, fam, size, 'cmpi0', m.group(1)) + cond(2) + (join(1),))
+            continue
+        m = _STORE.match(t1)
+        if m and m.group(2) == d:
+            if cond(2):
+                out.append((a, fam, size, 'store', m.group(1)) + cond(2) + (join(1),))
+                continue
+            if len(nxt) > 1:
+                q = re.match(r'^tst([bwl]) (.*)$', nxt[1])
+                if q and q.group(2) in ('%' + d, m.group(3)) and cond(3):
+                    out.append((a, fam, size, 'store+tst', q.group(1)) + cond(3)
+                               + (join(2),))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -384,6 +512,8 @@ def scan():
         res['ord'] += [(r0, name) + s for s in ord_sites(ins)]
         res['callcmp'] += [(r0, name) + s for s in callcmp_sites(ins)]
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
+        if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
+            res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
     return res
 
 
@@ -418,6 +548,10 @@ def summary(res):
     counts('  ... formed as a boolean and tested (other operand, s<cc> register)',
            [s for s in res['callcmp'] if s[6] == 's<cc>>tst'], lambda s: (s[5], s[7]))
     counts('and.b/or.b into Dn (op, right operand calls)', res['andor'], lambda s: (s[3], s[4]))
+    counts('branches after a data register operation (op, size, form, test size, cond, b|s, '
+           'join)', res['opflags'], lambda s: s[3:])
+    counts('  ... by operation, relation, form, sizes and join', res['opflags'],
+           lambda s: opflags_class(s[2:]))
 
 
 def main(argv):

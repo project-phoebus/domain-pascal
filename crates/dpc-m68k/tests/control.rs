@@ -1009,3 +1009,244 @@ end;
     );
     assert_eq!(b[..2], ["move.w\t(8,%fp),%d0", "bne.s\t1f"], "{b:?}");
 }
+
+/// A computed value against 0 (bead domain-pascal-qlzu; codegen-patterns
+/// 7.1, "A computed value against 0"; `tools/cmpsurvey.py opflags`).
+const ZERO_DECLS: &str = "var l: extern integer32;
+function ext_$f(x: integer): integer; options(val_param, extern);
+";
+
+/// `=`, `<>`, `<`, `>=` branch on the flags of the add, sub, and, or that
+/// formed the value (SOCK_$ALLOCATE 0xE15EFA `or.w D4,D0; beq.s`;
+/// tty_$i_put_chars 0xE1B046 `subq.w #1,D1; bpl.s`; SIO6509_$INQ_LINE
+/// 0xE7267C `andi.l #0x180,D1; beq.s`); `>`, `<=` test it first
+/// (SMD_$SIGNAL 0xE6F25C `sub.l D0,D1; tst.l D1; bgt.s`).
+#[test]
+fn computed_value_against_zero_on_the_operation_flags() {
+    let b = body(&format!(
+        "{ZERO_DECLS}procedure t; internal;
+begin
+  if (w ! r) = 0 then r := 0;
+  if (w - r) < 0 then r := 1;
+  if (w - r) > 0 then r := 2;
+  if (l & 16#180) <> 0 then r := 3;
+end;
+"
+    ));
+    assert_eq!(
+        b,
+        [
+            "move.w\t(W).l,%d0",
+            "or.w\t(R).l,%d0",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.w\t(W).l,%d0",
+            "sub.w\t(R).l,%d0",
+            "bpl.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "move.w\t(W).l,%d0",
+            "sub.w\t(R).l,%d0",
+            "tst.w\t%d0",
+            "ble.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+            "move.l\t#0x180,%d0",
+            "and.l\t(L).l,%d0",
+            "beq.s\t4f",
+            "move.w\t#3,(R).l",
+            "4:",
+        ]
+    );
+}
+
+/// `tst` where the flags are not the value's: a function's result
+/// (SOCK_$PUT_INT 0xE161EA `tst.w D0`), a quotient (0xE11BF4 `divs.w
+/// #60,D1; tst.w D1; beq.s`), a remainder (`swap`, NETWORK_$PAGE_SERVER
+/// 0xE11822), a byte widened to a word (SOCK_$CLOSE 0xE15FB8 `clr.w D0;
+/// move.b (21,A2),D0; tst.w D0; beq.s`).
+#[test]
+fn computed_value_against_zero_tested() {
+    let b = body(&format!(
+        "{ZERO_DECLS}procedure t; internal;
+begin
+  if ext_$f(w) = 0 then r := 0;
+  if (w div 60) = 0 then r := 1;
+  if (w mod 60) <> 0 then r := 2;
+end;
+"
+    ));
+    assert_eq!(
+        b,
+        [
+            "subq.l\t#2,%sp",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(EXT_$F).l",
+            "addq.w\t#4,%sp",
+            "tst.w\t%d0",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "divs.w\t#0x3c,%d0",
+            "tst.w\t%d0",
+            "bne.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "divs.w\t#0x3c,%d0",
+            "swap\t%d0",
+            "tst.w\t%d0",
+            "beq.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+        ]
+    );
+    let b = body(
+        "type bt = [byte] 0..255; br = record a: integer; q: bt; end; brp = ^br;
+procedure t(p: brp); val_param;
+begin
+  if p^.q = 0 then r := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t%d0",
+            "move.b\t(2,%a0),%d0",
+            "tst.w\t%d0",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+        ]
+    );
+}
+
+/// `(x & 2^k) <> 0` of a register-held `x`: `btst #k` (pacct_$compress
+/// 0xE5A9DE `btst #2,D0; sne D2`; no one-bit `and` mask before a branch in
+/// compiled code).
+#[test]
+fn one_bit_mask_is_btst() {
+    let b = body(
+        "procedure t(x: integer32); val_param;
+begin
+  if (x & 16#4000) = 0 then r := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.l\t(8,%fp),%d0",
+            "btst\t#14,%d0",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+        ]
+    );
+    // The mask on the left: the same `btst` (the source order cannot be
+    // seen; an `and` with a one-bit mask before a branch is not).
+    let b = body(
+        "procedure t(x: integer32); val_param;
+begin
+  if (16#4000 & x) <> 0 then r := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.l\t(8,%fp),%d0",
+            "btst\t#14,%d0",
+            "beq.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+        ]
+    );
+}
+
+/// A register-held variable an assignment just formed: the same rule
+/// (MAC_OS_$SEND's nested routine, module-local at 0xE0B522, at 0xE0B57C
+/// `sub.w D5,D3; bne.b`, `remaining := remaining - chunk; if remaining =
+/// 0`; TTY_$K_PUT 0xE67C1A `subq.w #1,D2; bpl.s`;
+/// LOG_$ADD 0xE1766A `addq.w #4,D2; tst.w D2; ble.w`).
+#[test]
+fn assigned_register_against_zero_on_the_operation_flags() {
+    let b = body(&format!(
+        "{ZERO_DECLS}procedure t; internal;
+var x: integer;
+begin
+  x := ext_$f(1);
+  x := x - w;
+  if x = 0 then r := 0;
+  x := x - w;
+  if x < 0 then r := 1;
+  x := x + w;
+  if x <= 0 then r := 2;
+  r := x;
+end;
+"
+    ));
+    assert_eq!(
+        b[4..],
+        [
+            "move.w\t%d0,%d1",
+            "sub.w\t(W).l,%d1",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "sub.w\t(W).l,%d1",
+            "bpl.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "add.w\t(W).l,%d1",
+            "tst.w\t%d1",
+            "bgt.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+            "move.w\t%d1,(R).l",
+        ]
+    );
+}
+
+/// Refused (no site either way): any test after an eor or a `neg`, a word
+/// product tested as a word; `>`, `<=` after an and, or, shift; unsigned
+/// orderings; one bit of a value in memory; a word widened to a longword.
+#[test]
+fn computed_value_against_zero_refusals() {
+    let formed = "right after the operation that formed it";
+    for (routine, why) in [
+        ("if xor(w, r) = 0 then r := 0;", formed),
+        ("if -w = 0 then r := 0;", formed),
+        // A word product tested as a word: `muls.w` sets the flags from
+        // 32 bits; `tst.w` first is not seen (0xE69626 reads the 32-bit
+        // flags for `abs` of a word product).
+        ("if (w * r) < 0 then r := 0;", formed),
+        ("if (w & r) > 0 then r := 0;", formed),
+        ("if arshft(w, 2) <= 0 then r := 0;", formed),
+        (
+            "if (u ! 1) > 0 then r := 0;",
+            "an unsigned ordering comparison with 0",
+        ),
+        (
+            "if (l & 4) <> 0 then r := 0;",
+            "testing one bit of a value not held",
+        ),
+        // A word widened to a longword, `clr.l; move.w; tst.l`: not seen
+        // (only a byte widened to a word is tested, 83 sites).
+        (
+            "if integer32(u) = 0 then r := 0;",
+            "testing a register the previous instruction loaded",
+        ),
+    ] {
+        let e = error(&format!(
+            "{ZERO_DECLS}procedure t; internal;\nbegin\n  {routine}\nend;\n"
+        ));
+        assert!(e.contains(why), "{routine}: {e}");
+    }
+}

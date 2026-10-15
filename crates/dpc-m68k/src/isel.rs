@@ -6891,12 +6891,27 @@ impl Selector {
     /// with or without a `tst` between them (bead domain-pascal-1vp,
     /// codegen-patterns 7.1), so that shape is refused rather than
     /// extended from the seen ones.
+    ///
+    /// A data register right after the operation that formed its value
+    /// (an expression computed for the test, or a register-held variable
+    /// an assignment just formed) is tested as [`Self::flags_test`] says:
+    /// the branch on the operation's flags, a `tst`, or a refusal (bead
+    /// domain-pascal-qlzu).  Right after a load into it of the test's size
+    /// it is refused (the load's flags: not settled); a byte widened to a
+    /// word (`clr.w; move.b`), tested; other sizes, refused.
     fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
         if self.volatile_eas.iter().any(|(v, _)| *v == ea) {
             // A volatile object is read again, whatever the last store
             // left in the flags (ref 3.15.1).
             self.out.push(Insn::Tst { size, dst: ea });
             return Ok(());
+        }
+        if let Ea::Reg(Reg::D(d)) = ea {
+            // Right after the operation that formed the register's value:
+            // its flags, a `tst` or a refusal ([`Self::flags_test`]).
+            if !self.flags_test(d, size, cc)? {
+                return Ok(());
+            }
         }
         if let (
             Ea::Disp(k, FP),
@@ -6957,14 +6972,26 @@ impl Selector {
                 return Ok(());
             }
         }
+        // A load of another size than the test (a byte zero-extended to a
+        // word, `clr.w Dn; move.b M,Dn`) is tested: the load's flags are
+        // the byte's (`move.b` then `tst.w` of the register 83 times in
+        // compiled code, SOCK_$CLOSE 0xE15FB8..0xE15FC0 `clr.w D0; move.b
+        // (21,A2),D0; tst.w D0; beq.s`; codegen-patterns 7.1, "A computed
+        // value against 0"; bead domain-pascal-qlzu).  Other sizes: a word
+        // load tested as a longword (`clr.l Dn; move.w M,Dn; tst.l Dn`) is
+        // not seen (no `move.w` then `tst.l` of the register in compiled
+        // code; one `move.l; tst.w` at a join, 0xE0EB82, one `move.w; tst.b`,
+        // 0xE19106): refused with the same-size load.
         if let (
             Ea::Reg(r),
             Some(Insn::Move {
-                dst: Ea::Reg(d), ..
+                size: s,
+                dst: Ea::Reg(d),
+                ..
             }),
         ) = (&ea, self.out.last())
         {
-            if d == r {
+            if d == r && !(*s == Size::B && size == Size::W) {
                 return Err(unsupported(
                     self.span,
                     "testing a register the previous instruction loaded (whether the load's \
@@ -12665,10 +12692,7 @@ impl Selector {
                     return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
                 }
             }
-            return Err(unsupported(
-                self.span,
-                "comparing a computed value with 0 (the flags of the operation or a `tst`) is",
-            ));
+            return self.compare_computed_zero(op, lhs);
         }
         let lv = self.eval(lhs)?;
         let d = match lv {
@@ -12711,6 +12735,216 @@ impl Selector {
             _ => return Err(unsupported(self.span, "comparing two computed values is")),
         }
         Ok(rel_cond(op, signed))
+    }
+
+    /// `lhs op 0` with a left operand that is not a variable (bead
+    /// domain-pascal-qlzu; codegen-patterns 7.1, "A computed value against
+    /// 0"; `tools/cmpsurvey.py opflags`):
+    ///
+    /// - `(x & 2^k) = 0` or `<> 0` (or `(2^k & x)`) with `x` held in a
+    ///   data register: `btst #k,Dx` (pacct_$compress 0xE5A9DE `btst #2,D0; sne D2`, ../source
+    ///   `(value & 4) <> 0`).  No `and` with a one-bit mask is followed by
+    ///   a branch or an `s<cc>` in compiled code, against 92 with other
+    ///   masks, immediate or loaded.  `x` in memory or computed: refused
+    ///   (`btst` of a byte of memory, or the value loaded first: not
+    ///   seen; bead domain-pascal-bjx0).
+    /// - Anything else: the value in a data register, then the test
+    ///   [`Self::tst`] gives (through [`Self::flags_test`]): the branch on
+    ///   the flags of the operation that formed it (SOCK_$ALLOCATE
+    ///   0xE15EFA `or.w D4,D0; beq.s`; SOCK_$CLOSE 0xE16004;
+    ///   SIO6509_$INQ_LINE 0xE7267C `andi.l #0x180,D1; beq.s`), or `tst.<s>
+    ///   Dn` (a function's result, SOCK_$PUT_INT 0xE161EA `tst.w D0; seq
+    ///   D0`, 31 branches on `tst` of a call's D0; SMD_$SIGNAL 0xE6F25C
+    ///   `sub.l D0,D1; tst.l D1; bgt.s`).
+    ///
+    /// The relations map to conditions as for a variable ([`Self::compare`]):
+    /// unsigned `<`, `<=`, `>`, `>=` against 0 are refused.
+    fn compare_computed_zero(&mut self, op: Rel, lhs: &Expr) -> Res<Cond> {
+        let ty = lhs.ty();
+        let size = size_of(ty.width);
+        let cc = match (op, ty.sign == Sign::Signed) {
+            (Rel::Eq, _) => Cond::Eq,
+            (Rel::Ne, _) => Cond::Ne,
+            (Rel::Lt, true) => Cond::Mi,
+            (Rel::Ge, true) => Cond::Pl,
+            (Rel::Le, true) => Cond::Le,
+            (Rel::Gt, true) => Cond::Gt,
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "an unsigned ordering comparison with 0 is",
+                ))
+            }
+        };
+        if let (
+            Expr::Binary {
+                op: BinOp::And,
+                lhs: a,
+                rhs: b,
+                ..
+            },
+            Rel::Eq | Rel::Ne,
+        ) = (lhs, op)
+        {
+            // The mask on either side (`4 & x` as `x & 4`): the source
+            // order cannot be seen in the image, and the `and` with a
+            // one-bit mask the other order would give is not seen.
+            let (x, m) = match (&**a, &**b) {
+                (Expr::Const { .. }, _) => (b, a),
+                _ => (a, b),
+            };
+            if let Expr::Const { value, .. } = **m {
+                let mask = match ty.width {
+                    Width::Byte => value & 0xff,
+                    Width::Word => value & 0xffff,
+                    Width::Long => value & 0xffff_ffff,
+                } as u64;
+                if mask.is_power_of_two() {
+                    let Val::Reg(Reg::D(r)) = self.eval(x)? else {
+                        return Err(unsupported(
+                            self.span,
+                            "testing one bit of a value not held in a data register (`btst` on \
+                             a byte of memory, or the value loaded first: not seen, \
+                             codegen-patterns 7.1) is",
+                        ));
+                    };
+                    self.out.push(Insn::BtstImm {
+                        bit: mask.trailing_zeros() as u8,
+                        dst: Ea::Reg(Reg::D(r)),
+                    });
+                    return Ok(cc);
+                }
+            }
+        }
+        let d = match self.eval(lhs)? {
+            Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+            v => self.in_tmp(v, ty.width)?,
+        };
+        self.tst(size, Ea::Reg(Reg::D(d)), cc)?;
+        Ok(cc)
+    }
+
+    /// Whether a test of data register `d` at `size`, for a branch on
+    /// `cc` right after the instruction that last wrote it, needs a `tst`
+    /// (`true`) or reads that instruction's flags (`false`), whether the
+    /// value was computed for the test or is a register-held variable an
+    /// assignment just formed (bead domain-pascal-qlzu; codegen-patterns
+    /// 7.1, "A computed value against 0"; `tools/cmpsurvey.py opflags`
+    /// over compiled code: of 1156 branches and `s<cc>`s after an
+    /// operation on a data register, 993 read its flags, 144 follow a
+    /// `tst`, none a `cmpi #0`).  The rule found: the original trusts the
+    /// N and Z flags of an add, sub, and, or, shift, `not` or multiply,
+    /// not their V flag, and none of a divide.
+    ///
+    /// - `=`, `<>`, `<`, `>=` (`beq`/`bne`/`bmi`/`bpl`) after an add, sub,
+    ///   and, or, `lsr`, `asr`, `lsl`, `not` or `mul` of `d` at `size`: the
+    ///   operation's flags (eq/ne: and 113, lsr 36, sub 15, add 4, or 2;
+    ///   SOCK_$ALLOCATE 0xE15EFA `or.w D4,D0; beq.s`; MAC_OS_$SEND's nested
+    ///   routine 0xE0B522 at 0xE0B57C `sub.w D5,D3; bne.b`, `remaining := remaining - chunk;
+    ///   if remaining = 0`.  mi/pl: tty_$i_put_chars 0xE1B046 `subq.w
+    ///   #1,D1; bpl.s`, `free_space := head - tail - 1; if free_space <
+    ///   0`; TTY_$K_PUT 0xE67C1A; TTY_$K_GET 0xE1C516 `sub.w (716,A2),D0;
+    ///   bpl.s`; netbuf_rtnva_locked 0xE0E8E0 `asr.l #2,D2; bmi.s`, `slot
+    ///   := (va - base) div 1024; if slot < 0`, NETBUF_$RTN_HDR 0xE0EED6;
+    ///   `and.b`/`or.b` of booleans 70, `not.b` 1, `lsl.l` 1, `muls.w` 2).
+    ///   Of the same-size `tst`s after these with `beq`/`bne`/`bmi`/`bpl`,
+    ///   all are at a join, a label between (0xE08F80, 0xE3C930, 0xE4445E,
+    ///   0xE3DF66, 0xE3EF72): a label is the last instruction
+    ///   there, and the `tst` is kept.  N and Z are those `tst` would
+    ///   give, so the relation tested is the same.
+    /// - `>`, `<=` (`bgt`/`ble`, which read V) after an add or sub: `tst`
+    ///   (7 of 7, none on the flags: SMD_$SIGNAL 0xE6F25C `sub.l D0,D1;
+    ///   tst.l D1; bgt.s`, 0xE6F270; NETWORK_$WRITE 0xE0FBF6;
+    ///   PKT_$COPY_TO_PA 0xE125E0; SHAKE 0xE3E4CC; LOG_$ADD 0xE1766A).
+    ///   On the operation's flags the overflow would make them test the
+    ///   exact sum or difference, not the 16- or 32-bit one Pascal keeps.
+    /// - The operation at another size than the test (and.b of a byte
+    ///   tested as a word, 0xE0A544 `moveq #7,D1; and.b (-64,A6),D1; tst.w
+    ///   D1; bne.s`; and.w as a longword, 0xE3EE6E; lsr.l, asr.l or `swap`
+    ///   tested as a word, 0xE1701C, 0xE130AA, NETWORK_$PAGE_SERVER
+    ///   0xE11822), a divide (0xE11BF4 `divs.w #60,D1; tst.w D1; beq.s`;
+    ///   0xE6966E `divs.w D1,D0; tst.w D0; bpl.s`: N and Z are undefined
+    ///   after an overflowing divide), a call (31 `tst` of a call's D0
+    ///   then a branch; 7 after an M$ARITH call, 0xE14C02 `tst.l D0`),
+    ///   anything else: `tst` (a load into `d`: refused by [`Self::tst`]).
+    ///
+    /// Refused (no site either way): `>`, `<=` after an and, or, shift,
+    /// `not` or multiply (their V is clear, the original's choice is not
+    /// seen); a `muls.w`/`mulu.w` product tested as a word (the two
+    /// branches after a `muls.w`, 0xE69626 and 0xE69630, are `abs` of a
+    /// word product reading the 32-bit flags, no `tst.w`); any test after
+    /// an eor, a `neg`, an `ext` or a `swap` tested
+    /// as a longword (no branch or `tst` follows one in compiled code;
+    /// bead domain-pascal-bkoz).
+    fn flags_test(&self, d: u8, size: Size, cc: Cond) -> Res<bool> {
+        #[derive(PartialEq)]
+        enum Op {
+            /// Add or subtract: N and Z trusted, V not.
+            AddSub,
+            /// And, or, shift, `not`, multiply: N and Z trusted.
+            Nz,
+            /// No branch after one seen.
+            Unseen,
+        }
+        let alu = |op: AluOp| match op {
+            AluOp::Add | AluOp::Sub => Op::AddSub,
+            AluOp::And | AluOp::Or => Op::Nz,
+            AluOp::Eor => Op::Unseen,
+        };
+        let reg = Ea::Reg(Reg::D(d));
+        let (op, s) = match self.out.last() {
+            Some(Insn::Alu {
+                op, size: s, dst, ..
+            }) if *dst == d => (alu(*op), *s),
+            Some(Insn::AluImm {
+                op, size: s, dst, ..
+            }) if *dst == reg => (alu(*op), *s),
+            Some(Insn::Addq { size: s, dst, .. } | Insn::Subq { size: s, dst, .. })
+                if *dst == reg =>
+            {
+                (Op::AddSub, *s)
+            }
+            Some(Insn::Shift { size: s, dst, .. }) if *dst == d => (Op::Nz, *s),
+            Some(Insn::Unary { op, size: s, dst }) if *dst == reg => (
+                if *op == UnaryOp::Not {
+                    Op::Nz
+                } else {
+                    Op::Unseen
+                },
+                *s,
+            ),
+            // `mulu.w`/`muls.w` and `swap` set the flags from all 32 bits.
+            // A word product tested as a word: not seen either way (the
+            // two branches after a `muls.w`, 0xE69626 and 0xE69630, read
+            // its 32-bit flags for `abs` of a word product, `muls.w;
+            // bpl.s; neg.w`, no `tst.w`): refused, not re-tested.
+            Some(Insn::Mul { dst, .. }) if *dst == d => {
+                if size != Size::L {
+                    return Err(self.flags_refusal());
+                }
+                (Op::Nz, Size::L)
+            }
+            Some(Insn::Swap(r)) if *r == d => (Op::Unseen, Size::L),
+            Some(Insn::Ext { size: s, dst }) if *dst == d => (Op::Unseen, *s),
+            _ => return Ok(true),
+        };
+        if s != size {
+            return Ok(true);
+        }
+        match (op, cc) {
+            (Op::AddSub | Op::Nz, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) => Ok(false),
+            (Op::AddSub, Cond::Le | Cond::Gt) => Ok(true),
+            _ => Err(self.flags_refusal()),
+        }
+    }
+
+    fn flags_refusal(&self) -> Diagnostic {
+        unsupported(
+            self.span,
+            "this test of a value right after the operation that formed it (the flags of the \
+             operation or a `tst`: not seen for this operation and relation, codegen-patterns \
+             7.1) is",
+        )
     }
 
     /// A bit field that fills its unit: an 8-bit field of a word type
