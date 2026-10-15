@@ -4,7 +4,8 @@
   0xE0A328 at 0xE0A334 move.b #0x10; 0xE758D8 move.w #0x200;
   MMAP_$ALLOC_CONTIG 0xE0D906 move.l #imm).  A byte immediate is written 0..255
   (0xE0A33E `10bc 00ff`).  12.2: the pointer is loaded at entry, once.
-  No two stores are adjacent (ref 3.15.3 p. 3-56 store merging). }
+  No two stores are adjacent (ref 3.15.3 p. 3-56 store merging; w2 and l2,
+  a word and a longword above it, are kept apart: codegen-patterns 13). }
 module consts;
 type
   r = record
@@ -23,6 +24,6 @@ begin
   q^.l := 0;
   q^.c := chr(255);
   q^.w2 := -1;
-  q^.l2 := 16#6000e;
   q^.w := 512;
+  q^.l2 := 16#6000e;
 end;

@@ -9,7 +9,8 @@
   survives a call (codegen-patterns 5.2, "`with`").
 
   Not expressible yet: `nil' (refused as a constant), adjacent stores of
-  two bytes or two words (refused: they may be merged, ref 3.15.3).
+  two byte, two word or a word and a longword constants (refused: they may
+  be merged, ref 3.15.3; codegen-patterns 13).
 
   call: WITHS_$RUN
   expect:
@@ -76,8 +77,8 @@ procedure withs_$run;
 begin
   with g do begin
     a := 5;
-    b := 70000;
     c := 'z';
+    b := 70000;
   end;
   exec_$log_w(g.a);
   exec_$log_l(g.b);

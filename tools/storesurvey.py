@@ -45,6 +45,29 @@ usage:
     tools/storesurvey.py blocks [SIZE ...] [-v]     # small block copies,
                                                     # all sizes or SIZE
                                                     # bytes; -v lists them
+    tools/storesurvey.py merge [-v]                 # adjacent stores and
+                                                    # longword constants
+
+`merge' (bead domain-pascal-2m0, codegen-patterns 13 "Store merging"):
+pairs of stores to adjacent memory of one base, made one after the other
+(`move', `clr', `st'/`sf' to memory other than a push or `(An)+'; only
+register set-up between them, no store, call, branch or branch target),
+whose sizes add up to a word or a longword: the stores the original
+compiler did not merge (ref 3.15.3 p. 3-57).  Pairs of a word and a
+longword are counted apart (FIM_$BUILD_DF 0xE0A896 is such a pair of
+constants merged and split again at the other boundary; one with the
+word at the low address is not).  Each pair is classified by
+its sizes, the kind of base (`a5', `a6' the frame, `abs', `reg' an
+address register), the values (`zero', `const', `reg' a computed
+register, `mem'), the order of the addresses (`asc', `desc') and the
+offset of the pair's low address modulo 4 (for `reg', from the
+register).  A pair whose base register is loaded again between the two
+stores is not counted.  Then the candidates for *merged* stores: a
+`move.l #imm' (or `moveq #imm,Dn; move.l Dn') with both halves non-zero
+(of a longword object these values are unusual; the merged pairs found
+are all such), and a `move.w #imm' with both bytes non-zero, listed
+for checking against ../source (a `clr.l' of two words cannot be told
+from a longword store and is not listed).
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -299,9 +322,202 @@ def blocks_main(argv):
     return 0
 
 
+_SIZE = {'b': 1, 'w': 2, 'l': 4}
+
+
+def mem_store(x):
+    """(size, value kind, value text, destination) of a plain store to
+    memory (`move', `clr', `st'/`sf'), or None."""
+    mn, ops = x.mn, x.ops
+    if re.fullmatch(r'move[bwl]', mn) and len(ops) == 2:
+        src, dst = ops
+        if src in ('%sr', '%ccr', '%usp'):
+            return None
+        if src.startswith('#'):
+            v = int(src[1:], 0)
+            kind = 'zero' if v == 0 else 'const'
+        elif regalloc.is_reg(src):
+            kind = 'reg'
+        else:
+            kind = 'mem'
+        size = _SIZE[mn[-1]]
+    elif re.fullmatch(r'clr[bwl]', mn) and len(ops) == 1:
+        dst, kind, src, size = ops[0], 'zero', '#0', _SIZE[mn[-1]]
+    elif mn in ('st', 'sf') and len(ops) == 1:
+        dst, size = ops[0], 1
+        kind, src = ('const', '#255') if mn == 'st' else ('zero', '#0')
+    else:
+        return None
+    if not regalloc.is_mem(dst) or dst.endswith('@-') or dst.endswith('@+'):
+        return None
+    return size, kind, src, dst
+
+
+def moveq_const(ins, i, reg):
+    """The constant a `moveq #n,reg' between the previous store or call
+    and i loaded into reg (and nothing redefined it since), or None."""
+    for j in range(i - 1, -1, -1):
+        y = ins[j]
+        if y.call or y.kind or mem_store(y):
+            return None
+        if reg in y.defs:
+            if y.mn in ('moveq', 'moveql') and y.ops[1] == '%' + reg:
+                return int(y.ops[0][1:], 0)
+            return None
+    return None
+
+
+def base_def(ins, i, reg):
+    """The text of the last instruction before i (in address order) that
+    writes reg, or '' (A5, A6, absolute bases, or none found)."""
+    if reg in ('a5', 'a6', 'a7', 'abs'):
+        return ''
+    for j in range(i - 1, -1, -1):
+        if reg in ins[j].defs:
+            return ins[j].text
+    return ''
+
+
+def adjacent_pairs(ins, sums=(2, 4)):
+    """[dict] of the pairs of consecutive stores to adjacent memory of
+    one base whose sizes add up to one of `sums' (see the module doc,
+    `merge')."""
+    labels = {y.target for y in ins if y.target is not None}
+    res = []
+    prev = None          # (index, size, kind, value, base, offset)
+    for i, x in enumerate(ins):
+        if i and x.addr in labels:
+            prev = None
+        st = mem_store(x)
+        if st is None:
+            if x.call or x.kind or (x.ops and regalloc.is_mem(x.ops[-1])
+                                    and not x.mn.startswith(('cmp', 'tst', 'btst', 'pea',
+                                                             'lea', 'jmp'))
+                                    and not x.ops[-1].endswith(('@-', '@+'))):
+                prev = None
+            elif prev and prev[4] in x.defs:
+                prev = None          # the base register loaded again
+            continue
+        size, kind, src, dst = st
+        bo = base_off(dst)
+        if bo is None:
+            prev = None
+            continue
+        if kind == 'reg':
+            c = moveq_const(ins, i, regalloc.is_reg(src))
+            if c is not None:
+                kind = 'zero' if c == 0 else 'const'
+        if prev:
+            j, psize, pkind, psrc, pbase, poff = prev
+            base, off = bo
+            if base == pbase and psize + size in sums and (
+                    poff + psize == off or off + size == poff):
+                lo = min(off, poff)
+                mod = lo % 4
+                copy = False
+                if pkind == 'mem' and kind == 'mem':
+                    a, b = base_off(psrc), base_off(src)
+                    copy = bool(a and b and a[0] == b[0] and b[1] - a[1] == off - poff)
+                res.append({'addr': ins[j].addr, 'sizes': '%d+%d' % (psize, size),
+                            'basedef': base_def(ins, j, base),
+                            'base': base_kind(base), 'reg': base,
+                            'values': '%s+%s' % (pkind, kind),
+                            'order': 'asc' if off > poff else 'desc', 'mod4': mod,
+                            'copy': copy,
+                            'text': '%s; %s' % (ins[j].text, x.text)})
+        prev = (i, size, kind, src, bo[0], bo[1])
+    return res
+
+
+def merged_candidates(ins):
+    """[dict] of the stores of a longword constant with both halves
+    non-zero, or of a word constant with both bytes non-zero (see the
+    module doc, `merge')."""
+    res = []
+    for i, x in enumerate(ins):
+        st = mem_store(x)
+        if st is None:
+            continue
+        size, kind, src, dst = st
+        if size == 1 or base_off(dst) is None:
+            continue
+        if kind == 'reg':
+            v = moveq_const(ins, i, regalloc.is_reg(src))
+        elif src.startswith('#'):
+            v = int(src[1:], 0)
+        else:
+            v = None
+        if v is None:
+            continue
+        half = 16 if size == 4 else 8
+        mask = (1 << half) - 1
+        hi, lo = (v >> half) & mask, v & mask
+        if hi and lo:
+            res.append({'addr': x.addr, 'size': size, 'base': base_kind(base_off(dst)[0]),
+                        'value': v & ((1 << 2 * half) - 1), 'text': x.text})
+    return res
+
+
+def merge_main(argv):
+    verbose = '-v' in argv
+    _, rs = regalloc.routines()
+    pairs, cands = [], []
+    for seg, r0, r1 in rs:
+        ins = [regalloc.Insn(a, k, t) for a, k, t in loopalign.disasm(r0, r1 - r0)]
+        for p in adjacent_pairs(ins):
+            p['routine'] = r0
+            pairs.append(p)
+        for c in merged_candidates(ins):
+            c['routine'] = r0
+            cands.append(c)
+    print('routines %d; unmerged adjacent store pairs: %d' % (len(rs), len(pairs)))
+    key = ('sizes', 'base', 'values', 'order', 'mod4')
+    by = Counter(tuple(p[k] for k in key) for p in pairs)
+    print('sizes base values      order mod4  count  e.g.')
+    for k in sorted(by, key=str):
+        ex = [p for p in pairs if tuple(p[f] for f in key) == k]
+        print('%-5s %-4s %-12s %-5s %d %6d  %s' % (k + (by[k], ', '.join(
+            '0x%06X' % p['addr'] for p in ex[:3]))))
+    def cls(p):
+        if p['mod4'] % 2:
+            return 'odd'
+        v = p['values'].split('+')
+        if all(x in ('zero', 'const') for x in v):
+            return 'constants'
+        if p['copy']:
+            return 'copy'
+        return 'other'
+    byk = Counter(cls(p) for p in pairs)
+    print('by class: constants (low address even) %d, adjacent memory copied %d, '
+          'other values %d, low byte odd %d' % (byk['constants'], byk['copy'],
+                                                byk['other'], byk['odd']))
+    six = [p for seg, r0, r1 in rs for p in adjacent_pairs(
+        [regalloc.Insn(a, k, t) for a, k, t in loopalign.disasm(r0, r1 - r0)], (6,))]
+    sixc = [p for p in six if all(v in ('zero', 'const') for v in p['values'].split('+'))]
+    wlo = [p for p in sixc if p['sizes'] == ('2+4' if p['order'] == 'asc' else '4+2')]
+    print('word and longword pairs: %d, of two constants %d, the word at the low address '
+          '%d (%s)' % (len(six), len(sixc), len(wlo),
+                       ', '.join('0x%06X' % p['addr'] for p in wlo[:4])))
+    print('merge candidates (constant halves both non-zero): %d' % len(cands))
+    byc = Counter((c['size'], c['base']) for c in cands)
+    for k in sorted(byc):
+        print('  size %d base %-4s %4d' % (k + (byc[k],)))
+    if verbose:
+        for p in pairs:
+            print('pair %06X (r %06X) %s %s %s %s mod4=%d %s  %s   [%s]' % (
+                p['addr'], p['routine'], p['sizes'], p['base'], p['values'],
+                p['order'], p['mod4'], cls(p), p['text'], p['basedef']))
+        for c in cands:
+            print('cand %06X (r %06X) %d %s %#x  %s' % (
+                c['addr'], c['routine'], c['size'], c['base'], c['value'], c['text']))
+    return 0
+
+
 def main(argv):
     if argv and argv[0] == 'blocks':
         return blocks_main(argv[1:])
+    if argv and argv[0] == 'merge':
+        return merge_main(argv[1:])
     lo, hi, _, argv = regalloc.opts(argv)
     if not argv or argv[0] not in ('summary', 'list'):
         print(__doc__)

@@ -8237,38 +8237,153 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     #0`, and `move.b #0xff` for `true` (`st` reads its operand too);
     0xE0A328 (five `move.b #n` stores to `device` registers, among them
     0xE0A33E `move.b #-1,(A0)`) is a byte-identical conformance unit.
-- **Store merging (reference; found in the image, Reported; when it
-  happens Uncertain):** ref 3.15.3,
-  p. 3-57: "By default, the compiler optimizes certain adjacent references
-  by merging them into one large reference" (`a := 0; b := 0` on two
-  `integer16`s becomes one 32-bit store).  Found in the image (lead:
-  ../source pascal-translation-notes findings 5, 21, 39): TTY_$K_RESET
-  0xE67322 `move.l #0x10001,(0x2ca,A2)`, 0xE6732A `move.l
-  #0x10100,(0x2ce,A2)`, 0xE67332 `move.l #0x10001,(0x3d2,A2)` (then the
-  lone `move.w #0x100,(0x3d6,A2)`, 0xE6733A) and 0xE67340 `clr.l
-  (0x56,A2)`, A2 the pointer returned by TTY_$I_GET_DESC; the
-  module-local 0xE1BF70 at 0xE1BFE4 `move.l #0x10001,(0x38,A2)` (A2 =
-  (8,A6)); LOG_$ADD 0xE176B0 `move.l #0x10001,(A0)`; LOG_$INIT 0xE3017C
-  `moveq #1,D0; move.l D0,(A0)`; KBD_$INIT 0xE333B6/0xE333C4 `move.l
-  #0x10001,(88,A2)` and `move.l #0x10001,(158,A2)`, each followed by an
-  unmerged `move.w #64`.  Pairs at offsets 2 mod 4 from the base
-  merge too (0x2CA, 0x3D2, 0x56).  Not
-  merging is the majority: TTY_$I_INIT 0xE3332E..0xE33352 makes the
-  same buffer stores as TTY_$K_RESET one `move.w` at a time (through
-  A4 = (8,A6), a by-address record) and clears 0x58 then 0x56 apart
-  (0xE332CC); TPAD_$INIT 0xE3363E/0xE33644 (TPAD's block via `movea.l
-  #`), TPAD_$RE_RANGE_UNIT 0xE69A68..0xE69A7A (an element via A1); an
-  ad-hoc survey (not kept) finds 44 consecutive unmerged constant
-  word-store pairs to adjacent words of one base (29 through An, among
-  them A5 0xE1955C, 0xE69902, 0xE719A4, and 0xE2FAC4 `move.w #0`,
-  the `device` zero of this section, so possibly exempt; 15 in
-  the frame), and the two adjacent `clr.b` of XPD_$RESET_PTRACE_OPTS
-  (0xE5B15E, 0xE5B164) are not merged either.  Every merge seen is of
-  constants through an address register holding a pointer value (or
-  an internal routine's (8,A6) slot); what decides is Uncertain (bead
-  domain-pascal-2m0).  `dpc` rejects two consecutive stores to adjacent
-  objects of one base that fit in a longword, except `device` objects,
-  which the reference exempts from merging (section 5.5).
+- **Store merging (reference; merges and non-merges Verified by survey;
+  which constant pairs merge Uncertain; non-candidates implemented, bead
+  domain-pascal-2m0):** ref 3.15.3, p. 3-57: "By default, the compiler
+  optimizes certain adjacent references by merging them into one large
+  reference" (`a := 0; b := 0` on two `integer16`s becomes one 32-bit
+  store); ref 6.4.24, p. 6-28 lists "Merges assignment statements where
+  possible" among the `-opt 1` optimizations (the default is `-opt 3`),
+  without saying when it is possible.
+  - **Survey** (`tools/storesurvey.py merge [-v]`): in the 1635 compiled
+    routines of `tools/regalloc.py`, 420 pairs of stores made one after
+    the other (only register set-up between them: no store, call, branch
+    or branch target, the base register not reloaded) to adjacent memory
+    of one base, of 2 or 4 bytes together, all *unmerged*:
+    - 118 of two constants with the low address even: 1+1 bytes 35 in the
+      frame, 24 through an address register, 2 off A5, 1 absolute; 2+2
+      words 22 through an address register, 13 in the frame, 13 absolute
+      (MST_UNWIRED 0xE30A04.., a descending run), 8 off A5.  Ascending
+      and descending, at 0 and 2 mod 4, zero and non-zero alike, through
+      pointer locals and parameters as well as statics: TTY_$I_INIT
+      0xE3332E..0xE33352 (A4 = (8,A6), the buffer stores TTY_$K_RESET
+      merges), AREA_$INIT 0xE2F4A4 (`clr.w (8,A0); move.w #-1,(0xa,A0)`,
+      an element through a cursor), XNS_IDP_$PROC2_CLEANUP 0xE18F8C,
+      TPAD_$INIT 0xE3363E (TPAD's block through `movea.l #`),
+      TPAD_$RE_RANGE_UNIT 0xE69A68 (a `with` element), TPAD_$SET_UNIT_
+      CURSOR 0xE69902 and NETLOG_$CNTL 0xE719A4 (off A5), ASKNODE_$SERVER
+      0xE65A3E (two frame words), PKT_$BLD_INTERNET_HDR 0xE1217E (bytes
+      through a by-address parameter); RING 0xE2FAC4 `move.w #0` is the
+      `device` zero above;
+    - 19 copies of adjacent memory to adjacent memory in the same
+      arrangement (0xE31EA2 `move.w (0x800,A1),(A0); move.w
+      (0x802,A1),(2,A0)`, 0xE3C344);
+    - 270 whose values are not both constants and not such a copy: a
+      computed or register value, a load from elsewhere, a constant next
+      to either (TPAD_$SET_UNIT_MODE 0xE69830..0xE69840, three words from
+      three by-address parameters; 0xE02D40 `move.w D2,(-0x4e,A6); move.w
+      D3,(-0x50,A6)`);
+    - 13 byte pairs whose lower byte is at an odd displacement: a word
+      there is an odd-address reference, which the 68010 traps.  One is
+      absolute (MST_$DISKLESS_INIT 0xE30DD2, 0xE24353), one in the frame
+      (0xE62A42, (-0xf7,A6)), 11 through an address register, whose
+      parity is the displacement's only if the pointer is even (0xE04CAC,
+      0xE19F1A).  None is in A5's data: every `lea abs.l,A5` target (867)
+      and every `D` segment is 4-aligned (section 11).
+    - Apart from these, pairs of a word and a longword (6 bytes; `merge`
+      prints them on their own line): 363, 66 of two constants, 13 of
+      them with the word at the low address (FIM's 0xE0A896 below would be
+      one if not merged): 0xE14CBC `clr.w (-0x14,A6); move.l
+      #1250000,(-0x12,A6)`, 0xE1465E, 0xE2F8BA, 0xE71AC6 (off A5), 0xE2FF2C
+      (absolute), 0xE0C958 (descending).  The other 53 have the longword
+      at the low address, as a merge split at the other boundary would.
+  - **Merges** (`move.l #imm` / `move.w #imm` candidates with both halves
+    non-zero, 1183, less the 964 longwords that are status codes of the
+    stcode database, read against ../source's C; a `clr.l` of two words
+    cannot be told from a longword clear and is known only from the C):
+    TTY_$K_RESET 0xE67322 `move.l #0x10001,(0x2ca,A2)`, 0xE6732A `move.l
+    #0x10100,(0x2ce,A2)`, 0xE67332 `move.l #0x10001,(0x3d2,A2)` (then the
+    lone `move.w #0x100,(0x3d6,A2)`, 0xE6733A) and 0xE67340 `clr.l
+    (0x56,A2)`, A2 the pointer TTY_$I_GET_DESC returns; the module-local
+    0xE1BF70 at 0xE1BFE4 `move.l #0x10001,(0x38,A2)` (A2 = (8,A6));
+    LOG_$ADD 0xE176B0 `move.l #0x10001,(A0)`; LOG_$INIT 0xE3017C `moveq
+    #1,D0; move.l D0,(A0)`; KBD_$INIT 0xE33374 `clr.l (0x58,A0)` (A0 =
+    `movea.l #` of its block), 0xE3337C `clr.l (0x3a,A2)` between the
+    unmerged `clr.w (0x38,A2)` and `clr.w (0x3e,A2)`, 0xE333B6/0xE333C4
+    `move.l #0x10001,(88,A2)` and `(158,A2)`, each followed by an
+    unmerged `move.w #64`; PROC1_$BIND 0xE14DA6 `move.l
+    #0x10010,(0x56,A2)` (inh_count, sw_bsr in ../source) and 0xE14DD8
+    `move.w #0xa,(0x54,A2)` (the bytes pri_min, pri_max); PROC1_$INIT
+    0xE2F998 the same longword; ASKNODE_$PROPAGATE_WHO 0xE65EBC `move.l
+    #0x100be,(-0x21c,A6)` (two words of a frame record, then the lone
+    `clr.w (-0x218,A6)`) and 0xE65ED0 `move.l #0x30046,(-0x200,A6)`;
+    0xE65ED8 `clr.l (-0x1fc,A6)` (four words of a frame array, in pairs).
+    MAC_OS_$INIT 0xE2F590 `move.l #0x10001,(4,A0)` may be one (../source
+    reads one longword).  A word and a longword of constants merged and
+    split again at the other boundary (Reported, ../source
+    pascal-translation-notes finding 68, fim/build_df.pas): FIM_$BUILD_DF
+    0xE0A896 `clr.l (0x54,A2); clr.w (0x58,A2)` for `sr := []; pc := 0`
+    of a record whose word sr is at 0x54 and longword pc at 0x56 (the
+    other arm stores them `move.w D1,(0x54,A2); move.l (-0x3e,A6),
+    (0x56,A2)`, 0xE0A87A).  Every merge the image shows by itself is of
+    two constants.  Merged copies cannot be told from longword copies
+    there: ../source reads SOCK_$GET 0xE16108 `move.l (0x3e8,A1),
+    (0x2a,A2)` and SOCK_$PUT_INT_INT 0xE1628A as two word assignments
+    merged, since MAC_$DEMUX fills the record's two words apart (0xE0BCB6,
+    0xE0BCBC; pascal-translation-notes finding 75), or one longword field
+    (sock/get.pas, Uncertain).
+  - **No merge of other values found** (a review scan of the compiled
+    routines, not kept as a tool): a merged pair with a computed value
+    would need the two values put together in a register before one
+    store.  None found: the 46 `swap`s take remainders of `divu`/`divs`,
+    take high halves apart or push them, multiply by 0x10000 (`swap;
+    clr.w`), or store a longword's two halves apart (0xE70716); the 14
+    `lsl.w #8` are arithmetic (TPAD 0xE693E4, XPD_$CAPTURE_FAULT 0xE5B414
+    `lsl.w #8; or.w (A4)`); RING_$GET_ID 0xE2FA76 stores a longword it
+    builds from three bytes with `swap` and `lsl.w #8`, also its result
+    (`move.l D2,D0`), an expression in ../source.
+    The 55 zero-extensions stored as a longword (`clr.l Dn; move.w x,Dn;
+    move.l Dn,mem`), which a merged `0` and a word would also give, are
+    longword objects where ../source shows (PROC1_$INIT_TS_TIMER 0xE14B86,
+    0xE3B838, 0xE1222C; NET_IO 0xE5A5F6's longword at 0x34 is read as one
+    at 0xE6A6E4), except acl_$convert_image 0xE44F86 `move.l
+    D1,(0x18,A3)`, whose low word ../source reads alone (`and.w
+    (0x1a,A0)`, 0xE46228): a longword set narrowed or a merged pair,
+    unsettled.
+  - **What decides is Uncertain.**  No property of the pair separates the
+    two lists: base kind (frame, pointer local, by-address parameter,
+    `movea.l #` block), alignment (merged pairs at 0 and 2 mod 4), zero
+    or not, the size.  The two lists meet in one module (TTY_$I_INIT's
+    unmerged stores are TTY_$K_RESET's merged ones, in another code
+    section) and in one map segment (ASKNODE 0xE64598: ASKNODE_$SERVER
+    0xE65A3E unmerged, two locals in ../source, and
+    ASKNODE_$PROPAGATE_WHO 0xE65EBC merged).  Within a run the pairing is
+    not "first two, next two": KBD_$INIT leaves 0x38 alone and merges
+    0x3A with 0x3C (source order unknown).  Otherwise the lists are apart
+    by segment (of the 9 segments with a merge, 8 have no unmerged
+    constant pair), which suggests a compilation setting such as the
+    `-opt` level, but nothing in the image names it (bead
+    domain-pascal-qb9q).  The grouping is strong by store (17 merged
+    and 118 unmerged pairs in 41 segments, 1 segment with both; shuffled
+    within the same segment sizes, 9.2 on average, never as few as 1 in
+    20000) but weak by routine (8 merging and 77 unmerging routines, 1
+    segment with both against 3.25 on average, p about 0.05): the merges
+    come in runs within single routines.  It does not follow the
+    per-routine settings already known: loop alignment (section 7,
+    `loopalign.align_classes`) is on in the merging LOG_$ADD, MAC_OS_$INIT,
+    ASKNODE_$PROPAGATE_WHO and TTY_$K_RESET and off in PROC1_$BIND and
+    0xE1BF70, and A5 loading (section 4, `a5survey.py switch`) is
+    `always` in ASKNODE_$PROPAGATE_WHO and TTY_$K_RESET and `used` in
+    PROC1_$BIND, PROC1_$INIT, LOG_$INIT, KBD_$INIT; the unmerged pairs
+    are in routines of every combination too (69 aligning and `used`, 12
+    not aligning and `always`, 7 aligning and `always`).
+  - **`dpc`** (`isel.rs`, `reject_mergeable_stores`): two consecutive
+    stores to adjacent objects of one base that fit in a word or a
+    longword are refused when one reference could store both: two
+    constants, or two loads of adjacent memory in the same arrangement.
+    A word and, above it, a longword of constants are refused too
+    (FIM_$BUILD_DF 0xE0A896 against 0xE14CBC); with the longword the
+    lower, merged (split at the longword, as at 0xE0A896) or not they are
+    the same two stores, compiled in source order (0xE70B5E `clr.w
+    (0x1a0,A5); clr.l (0x19c,A5)`).
+    Not candidates, and compiled as two stores: a pair with any other
+    value (no one reference stores it; the 270 above apart, no merge of
+    such values found); two
+    bytes whose lower one is at an odd address in the frame or the
+    module's static data (an even base; the parity through a pointer or
+    a symbol is not known, so such a pair stays refused); `device`
+    objects, which the reference exempts from merging (section 5.5).
+    Golden `stores/adjacent_unmergeable`, exec test `adjacent_stores`.
 - `link.w`, `bsr.s`/`bsr.w`, `bra.s`/`bra.w`: the length must match the
   original, so emit explicit sizes and never rely on gas relaxation
   (`jbra`).

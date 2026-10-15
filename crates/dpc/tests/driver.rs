@@ -2887,3 +2887,45 @@ end;
     let r = routine(&asm, "EXT_$CASE");
     assert!(r.contains("\tmove.w\t(8,%fp),%d0\n"), "{r}");
 }
+
+/// Codegen-patterns 13, "Store merging" (bead domain-pascal-2m0): two
+/// constants stored to adjacent words are refused (the original merged
+/// some such pairs, TTY_$K_RESET 0xE67322, and kept others apart,
+/// TTY_$I_INIT 0xE3332E); a constant next to a value read through a
+/// parameter is compiled, as two stores.
+#[test]
+fn adjacent_constant_stores_refused_other_pairs_compiled() {
+    let dir = scratch("adjacent_constant_stores_refused_other_pairs_compiled");
+    let decls = "module m;\ntype r = record a, b: integer; end;\n";
+    let refused = dir.join("k.pas");
+    std::fs::write(
+        &refused,
+        format!("{decls}procedure p(var x: r);\nbegin\n  x.a := 1;\n  x.b := 1;\nend;\n"),
+    )
+    .unwrap();
+    let out = dpc().arg(&refused).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("k.pas:6:3: error: a store adjacent to the previous statement's store"),
+        "{err}"
+    );
+    let ok = dir.join("v.pas");
+    std::fs::write(
+        &ok,
+        format!(
+            "{decls}procedure p(var x: r; var v: integer);\nbegin\n  x.a := 0;\n  \
+             x.b := v;\nend;\n"
+        ),
+    )
+    .unwrap();
+    let out = dpc().arg(&ok).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let asm = std::fs::read_to_string(dir.join("v.s")).unwrap();
+    assert!(asm.contains("\tclr.w\t(%a0)\n"), "{asm}");
+    assert!(asm.contains(",(2,%a0)\n"), "{asm}");
+}

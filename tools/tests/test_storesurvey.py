@@ -87,5 +87,69 @@ class SmallCopiesTest(unittest.TestCase):
                          [('pi-disp', 'abs', 8)])
 
 
+
+def pairs(texts):
+    return storesurvey.adjacent_pairs(FakeRoutine(texts).ins)
+
+
+class MergeSurveyTest(unittest.TestCase):
+    def test_i_init_buffer_stores(self):
+        # TTY_$I_INIT 0xE3332A..0xE33340: word constants one at a time
+        res = pairs(['moveal %fp@(8),%a4', 'movew #1,%a4@(714)', 'movew #1,%a4@(716)',
+                     'movew #1,%a4@(718)', 'movew #256,%a4@(720)'])
+        self.assertEqual([(p['sizes'], p['base'], p['values'], p['order'], p['mod4'])
+                          for p in res],
+                         [('2+2', 'reg', 'const+const', 'asc', 2)] +
+                         [('2+2', 'reg', 'const+const', 'asc', 0)] +
+                         [('2+2', 'reg', 'const+const', 'asc', 2)])
+        self.assertEqual(res[0]['basedef'], 'moveal %fp@(8),%a4')
+
+    def test_descending_clears_and_moveq(self):
+        # TPAD_$SET_UNIT_CURSOR 0xE69902 (A5, descending); a constant
+        # through `moveq' counts as a constant
+        res = pairs(['clrw %a5@(378)', 'clrw %a5@(376)'])
+        self.assertEqual([(p['base'], p['values'], p['order']) for p in res],
+                         [('a5', 'zero+zero', 'desc')])
+        res = pairs(['moveq #1,%d0', 'movew %d0,%fp@(-4)', 'movew %a0@,%fp@(-2)'])
+        self.assertEqual([p['values'] for p in res], ['const+mem'])
+
+    def test_boundaries(self):
+        # not adjacent, too big, a call, a branch target, the base reloaded
+        self.assertEqual(pairs(['clrw %a0@(4)', 'clrw %a0@(8)']), [])
+        self.assertEqual(pairs(['clrl %a0@(4)', 'clrw %a0@(8)']), [])
+        self.assertEqual(pairs(['clrw %a0@', 'jsr 0xe20b12', 'clrw %a0@(2)']), [])
+        self.assertEqual(pairs(['clrw %a0@', 'bras 0x104', 'clrw %a0@(2)']), [])
+        self.assertEqual(pairs(['clrw %a0@', 'moveal %a1,%a0', 'clrw %a0@(2)']), [])
+        # a set-up instruction between them does not end the pair
+        res = pairs(['clrw %a0@', 'moveq #3,%d1', 'clrw %a0@(2)'])
+        self.assertEqual(len(res), 1)
+
+    def test_copy_class(self):
+        # ACL 0xE31EA2: adjacent words copied to adjacent words
+        res = pairs(['movew %a1@(2048),%a0@', 'movew %a1@(2050),%a0@(2)'])
+        self.assertTrue(res[0]['copy'])
+        res = pairs(['movew %a1@(2050),%a0@', 'movew %a1@(2048),%a0@(2)'])
+        self.assertFalse(res[0]['copy'])
+
+    def test_merged_candidates(self):
+        # TTY_$K_RESET 0xE67322 and 0xE6732A; LOG_$INIT 0xE3017C's
+        # `moveq #1,D0; move.l D0,(A0)' (0 and 1) has a zero half: not listed
+        rt = FakeRoutine(['movel #65537,%a2@(714)', 'movel #65792,%a2@(718)',
+                          'moveq #1,%d0', 'movel %d0,%a0@', 'movel #65536,%a0@',
+                          'movew #257,%a0@'])
+        res = storesurvey.merged_candidates(rt.ins)
+        self.assertEqual([(c['size'], c['value']) for c in res],
+                         [(4, 0x10001), (4, 0x10100), (2, 0x101)])
+
+    def test_word_and_longword(self):
+        # FIM_$BUILD_DF 0xE0A896 (merged, split again) and 0xE14CBC
+        # (apart): counted only when asked for
+        texts = ['clrw %fp@(-20)', 'movel #1250000,%fp@(-18)']
+        self.assertEqual(pairs(texts), [])
+        res = storesurvey.adjacent_pairs(FakeRoutine(texts).ins, (6,))
+        self.assertEqual([(p['sizes'], p['values'], p['order']) for p in res],
+                         [('2+4', 'zero+const', 'asc')])
+
+
 if __name__ == '__main__':
     unittest.main()

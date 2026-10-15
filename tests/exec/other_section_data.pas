@@ -35,9 +35,10 @@ var
 [section(init_proc, init_data)]
 procedure osd_$init;
 begin
-  first := 7;
   pr.a := 300;
-  pr.b := -2;
+  first := 7;
+  pr.b := -2;                   { not next to pr.a (codegen-patterns 13,
+                                  "Store merging") }
   exec_$log_l(first);
   exec_$log_w(pr.a);
   exec_$log_l(pr.b);
