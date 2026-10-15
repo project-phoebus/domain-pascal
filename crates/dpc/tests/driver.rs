@@ -2687,9 +2687,12 @@ fn with_and_or_odd_refusals() {
     // Bead domain-pascal-5aw.19: what stays refused around `with`, plain
     // `and`/`or` and `odd` (codegen-patterns 5.2, 7.1, 8).
     let cases = [
-        // `odd` of a variable in memory: `btst #0` on its low byte or the
-        // value loaded first, not settled.
-        ("if odd(g) then g := 1;", "`odd` of a variable in memory"),
+        // `odd` of a variable in memory as a value: `lsr.b #1; scs` into
+        // which register is not settled (bead domain-pascal-uwfe).
+        (
+            "b := odd(g);",
+            "`odd` of a variable in memory as a boolean value",
+        ),
         // An `and then` inside a plain `and`.
         (
             "if b and ((g = 1) and then (g = 2)) then g := 1;",

@@ -409,6 +409,12 @@ Tests:
   0xE6F25C) and after a call, a divide or a widened byte (SOCK_$PUT_INT
   0xE161EA, 0xE11BF4, SOCK_$CLOSE 0xE15FBE), `btst` for one bit
   (pacct_$compress 0xE5A9DE).
+- `control/one_bit` - codegen-patterns 7.1 ("One bit"), 8 (`odd`), 5.1
+  (bead domain-pascal-3xwx): a word or longword in memory loaded whole,
+  then `btst #k` (tty_$i_put_chars 0xE1B01E, 0xE1B0E6; module-local
+  0xE1BCFC at 0xE1BD0A), `odd` of one as `lsr.b #1` and the carry
+  (0xE1B0F6), `btst` on a register-held or computed value
+  (pacct_$compress 0xE5A9DE, DIR_$SET_PROTECTION 0xE522D4).
 - `control/goto` - codegen-patterns 7.5 (bead domain-pascal-o4q): `goto`
   as a `bra` to its label, `if c then goto` one conditional branch,
   `else goto` a branch on the negated condition (TTY_$I_RCV 0xE1BBD2),

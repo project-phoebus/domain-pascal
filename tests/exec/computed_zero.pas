@@ -8,7 +8,8 @@
   overflow): 16#7FFFFFFF + 1 < 0, 16#80000000 - 1 > 0.  `bgt'/`ble' on
   the sub's own flags would test the exact difference (N xor V) and get
   these wrong.  Also `=', `<>' on the flags of `or'/`and', `btst' for one
-  bit (the mask on either side, bit 31 too), `tst' of a function's result
+  bit (the mask on either side; bit 31 alone is refused, bead
+  domain-pascal-3xwx), `tst' of a function's result
   (with junk above its word), of a quotient and of a byte widened to a
   word, and a register-held local an assignment just formed.  Word sums stay clear of 16-bit overflow: their
   width in a comparison is bead domain-pascal-9js (wide_compare.pas).
@@ -33,7 +34,7 @@
   call: COMPUTED_ZERO_$LOGIC w:0 w:-32768 l:0x200
   call: COMPUTED_ZERO_$BIT l:0x10000
   call: COMPUTED_ZERO_$BIT l:0xfffeffff
-  call: COMPUTED_ZERO_$BIT l:0x7fffffff
+  call: COMPUTED_ZERO_$BIT l:0x3fffffff
   call: COMPUTED_ZERO_$TESTED w:0 w:6 b:0
   call: COMPUTED_ZERO_$TESTED w:-1 w:13 b:128
   call: COMPUTED_ZERO_$ASSIGNED w:5 w:6
@@ -122,7 +123,7 @@ end;
 procedure computed_zero_$bit(m: integer32); options(val_param);
 begin
   if (m & 16#10000) <> 0 then exec_$mark(31);
-  if (16#80000000 & m) = 0 then exec_$mark(33);
+  if (16#40000000 & m) = 0 then exec_$mark(33);
   l := m;
   exec_$mark(39);
 end;

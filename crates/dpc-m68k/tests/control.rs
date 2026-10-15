@@ -1170,6 +1170,156 @@ end;
     );
 }
 
+/// `(x & 2^k) <> 0` of a word or longword variable in memory: the variable
+/// loaded whole into a data register, then `btst #k` (codegen-patterns 5.1
+/// and 7.1, "One bit"; bead domain-pascal-3xwx: tty_$i_put_chars 0xE1B01E
+/// `move.w (8,A0),D1; btst #5,D1; beq.s`, 0xE1B0E6 `move.l (12,A0),D1;
+/// btst #3,D1`; AST 0xE013BA `move.w (190,A2),D0; btst #4,D0`; FILE_
+/// 0xE5F7B8 on an indexed word).  A value an operation computed: `btst`
+/// on its register (DIR_$SET_PROTECTION 0xE522D4 `lsr.w #4,D1; btst
+/// #4,D1; bne`).
+#[test]
+fn one_bit_of_memory_is_a_whole_load() {
+    let b = body(&format!(
+        "{ZERO_DECLS}type st = set of 0..15; rp = ^rec; rec = record pad: integer; s: st; f: integer32; end;
+procedure t(p: rp); val_param;
+begin
+  if (integer(p^.s) & 16#20) <> 0 then r := 0;
+  if (p^.f & 8) = 0 then r := 1;
+  if (16#100000 & l) <> 0 then r := 2;
+  if (w & 16#4000) <> 0 then r := 3;
+  if (rshft(l, 4) & 16) <> 0 then r := 5;
+end;
+"
+    ));
+    assert_eq!(
+        b,
+        [
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t(2,%a0),%d0",
+            "btst\t#5,%d0",
+            "beq.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.l\t(4,%a0),%d0",
+            "btst\t#3,%d0",
+            "bne.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "move.l\t(L).l,%d0",
+            "btst\t#20,%d0",
+            "beq.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+            "move.w\t(W).l,%d0",
+            "btst\t#14,%d0",
+            "beq.s\t4f",
+            "move.w\t#3,(R).l",
+            "4:",
+            "move.l\t(L).l,%d0",
+            "lsr.l\t#4,%d0",
+            "btst\t#4,%d0",
+            "beq.s\t5f",
+            "move.w\t#5,(R).l",
+            "5:",
+        ]
+    );
+}
+
+/// `odd(x)` of a word or longword variable in memory: loaded whole, then
+/// `lsr.b #1` and the carry (all 9 `lsr.b #1` of compiled code:
+/// tty_$i_put_chars 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1; bcc.s`;
+/// AREA_$COPY 0xE0905A `move.w (46,A1),D0; lsr.b #1,D0; bcc`); in a
+/// register, `btst #0` as before (FIM_$BUILD_DF 0xE0A6F6).
+#[test]
+fn odd_of_memory_is_lsr() {
+    let b = body(&format!(
+        "{ZERO_DECLS}procedure t(x: integer); val_param;
+begin
+  if odd(l) then r := 0;
+  if not odd(w) then r := 1;
+  if odd(x) then r := 2;
+end;
+"
+    ));
+    assert_eq!(
+        b,
+        [
+            "move.w\t(8,%fp),%d0",
+            "move.l\t(L).l,%d1",
+            "lsr.b\t#1,%d1",
+            "bcc.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.w\t(W).l,%d1",
+            "lsr.b\t#1,%d1",
+            "bcs.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "btst\t#0,%d0",
+            "beq.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+        ]
+    );
+}
+
+/// What stays refused of the one-bit tests (bead domain-pascal-3xwx):
+/// bit 7, 15 or 31 (no `btst #7`/`#15`/`#31` in compiled code), a byte
+/// variable in memory, a variable in memory as a boolean value (`&` or
+/// `odd`), a call's result, a widened value.
+#[test]
+fn one_bit_test_refusals() {
+    for (routine, why) in [
+        (
+            "if (l & 16#80) <> 0 then r := 0;",
+            "testing bit 7, 15 or 31 alone",
+        ),
+        (
+            "if (w & 16#80) <> 0 then r := 0;",
+            "testing bit 7, 15 or 31 alone",
+        ),
+        (
+            "if (l & 16#8000) = 0 then r := 0;",
+            "testing bit 7, 15 or 31 alone",
+        ),
+        (
+            "if (l & 16#80000000) = 0 then r := 0;",
+            "testing bit 7, 15 or 31 alone",
+        ),
+        (
+            "if (c & 4) <> 0 then r := 0;",
+            "one bit of a byte widened for the `&`",
+        ),
+        (
+            "if (u & 4) <> 0 then r := 0;",
+            "one bit of a word widened to a longword",
+        ),
+        ("if odd(c) then r := 0;", "`odd` of a byte value"),
+        (
+            "b := (w & 4) <> 0;",
+            "one bit of a variable in memory as a boolean value",
+        ),
+        (
+            "b := odd(l);",
+            "`odd` of a variable in memory as a boolean value",
+        ),
+        (
+            "if (ext_$f(1) & 4) <> 0 then r := 0;",
+            "testing one bit of a function's result",
+        ),
+        (
+            "if (w & (-32768)) <> 0 then r := 0;",
+            "testing bit 7, 15 or 31 alone",
+        ),
+    ] {
+        let e = error(&format!(
+            "{ZERO_DECLS}var c: extern [byte] 0..255;\nprocedure t; internal;\nbegin\n  {routine}\nend;\n"
+        ));
+        assert!(e.contains(why), "{routine}: {e}");
+    }
+}
+
 /// A register-held variable an assignment just formed: the same rule
 /// (MAC_OS_$SEND's nested routine, module-local at 0xE0B522, at 0xE0B57C
 /// `sub.w D5,D3; bne.b`, `remaining := remaining - chunk; if remaining =
@@ -1232,10 +1382,6 @@ fn computed_value_against_zero_refusals() {
         (
             "if (u ! 1) > 0 then r := 0;",
             "an unsigned ordering comparison with 0",
-        ),
-        (
-            "if (l & 4) <> 0 then r := 0;",
-            "testing one bit of a value not held",
         ),
         // A word widened to a longword, `clr.l; move.w; tst.l`: not seen
         // (only a byte widened to a word is tested, 83 sites).

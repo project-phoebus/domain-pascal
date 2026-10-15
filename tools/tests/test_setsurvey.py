@@ -109,5 +109,47 @@ class OtherFormsTest(unittest.TestCase):
                          [(0x100, 'copy+andi', False), (0x104, 'const-first', True)])
 
 
+
+class OneBitTest(unittest.TestCase):
+    def test_whole_load_then_btst(self):
+        # tty_$i_put_chars 0xE1B01E..0xE1B026
+        ins = insns(['moveal %fp@(8),%a0', 'movew %a0@(8),%d1', 'btst #5,%d1', 'beqs 0x200'])
+        self.assertEqual(setsurvey.onebit_sites(ins),
+                         [(0x104, 'btst-reg', 5, 'load.w/whole', 'branch', '', False)])
+
+    def test_lsr_bit0_and_scs(self):
+        # 0xE1B0F6 (branch); AUDIT_$LOG_EVENT_S 0xE70E98 (value, another register)
+        ins = insns(['movel %a0@(12),%d1', 'lsrb #1,%d1', 'bccs 0x200',
+                     'movew %a5@(168),%d3', 'lsrb #1,%d3', 'scs %d0'])
+        self.assertEqual(setsurvey.onebit_sites(ins),
+                         [(0x102, 'lsrb#1', 0, 'load.l', 'branch', '', False),
+                          (0x108, 'lsrb#1', 0, 'load.w', 'scc', 'new', False)])
+
+    def test_held_computed_and_reused(self):
+        # pacct_$compress 0xE5A9DE (held, value); DIR_$SET_PROTECTION
+        # 0xE522D4 (computed); AREA_ 0xE07C78 (the loaded copy reused)
+        ins = insns(['jsr 0xe00000', 'btst #2,%d0', 'sne %d2',
+                     'lsrw #4,%d1', 'btst #4,%d1', 'bnes 0x200',
+                     'movew %a4@,%d0', 'btst #4,%d0', 'bnes 0x200', 'btst #0,%d0', 'beqs 0x200'])
+        self.assertEqual(setsurvey.onebit_sites(ins),
+                         [(0x102, 'btst-reg', 2, 'held', 'scc', 'new', False),
+                          (0x108, 'btst-reg', 4, 'op:lsrw', 'branch', '', False),
+                          (0x10e, 'btst-reg', 4, 'load.w/whole', 'branch', '', True),
+                          (0x112, 'btst-reg', 0, 'held', 'branch', '', False)])
+
+    def test_memory_sign_and_masks(self):
+        # TTY_$I_BREAK_CHAR's byte form; 0xE19106 bit 7 of a loaded word;
+        # a one-bit `and' before a branch (none in compiled code) and a
+        # multi-bit one (SIO6509_$INQ_LINE 0xE7267C, not a site)
+        ins = insns(['btst #4,%a2@(9)', 'beqs 0x200',
+                     'movew %a0@(6),%d3', 'tstb %d3', 'bpls 0x200',
+                     'moveq #4,%d1', 'andw %a0@(2),%d1', 'beqs 0x200',
+                     'andil #384,%d1', 'beqs 0x200'])
+        self.assertEqual(setsurvey.onebit_sites(ins),
+                         [(0x100, 'btst-mem', 4, 'An/odd', 'branch', '', False),
+                          (0x106, 'tstb-of-load', 7, 'load.w', 'branch', '', False),
+                          (0x10c, 'and-1bit', 2, 'w', 'branch', '', False)])
+
+
 if __name__ == '__main__':
     unittest.main()

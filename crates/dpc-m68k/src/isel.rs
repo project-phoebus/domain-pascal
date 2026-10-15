@@ -4803,6 +4803,10 @@ pub struct Selector {
     /// pop (codegen-patterns 1.1): the statement is a store or result
     /// assignment whose continuation is clean ([`Tail::clean`]).
     call_no_pop: bool,
+    /// A comparison is being formed as a boolean value (`s<cc>`), not
+    /// for a branch ([`Self::test_value`]): the one-bit tests of a
+    /// variable in memory are refused there ([`Self::one_bit_test`]).
+    test_as_value: bool,
     /// Arguments of a call are being pushed (a function call there is
     /// refused: its pop is merged with the outer call's, codegen-patterns
     /// 1.1, 0xE69FF6).
@@ -5064,6 +5068,7 @@ impl Selector {
             epilogue: None,
             before_bra: Vec::new(),
             call_no_pop: false,
+            test_as_value: false,
             in_args: false,
             called: false,
             marith_depth: 0,
@@ -6783,9 +6788,12 @@ impl Selector {
             // `odd(x)`: `btst #0` on the integer in a data register, the
             // branch on Z (FIM_$BUILD_DF 0xE0A6F6 `btst #0,D5; beq.s`,
             // 0xE0A8EE `btst #0,D0; bne.s`; [`Self::odd_test`]).
+            // A variable in memory: loaded whole, `lsr.b #1` and the carry
+            // (tty_$i_put_chars 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1;
+            // bcc.s`).
             IrCond::Odd(x) => {
-                self.odd_test(x)?;
-                self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                let (_, _, cc) = self.odd_test(x, false)?;
+                self.jump(if when { cc } else { cc.negate() }, l);
                 Ok(())
             }
             IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
@@ -12636,7 +12644,7 @@ impl Selector {
             // 0xE4A412 `btst #13,D0; sne D0`), into a new one when it holds
             // a variable (AST_$GET_LOCATION 0xE0472E `btst #0,D2; sne D0`;
             // DISK_$ADD_QUE 0xE3C744 `btst #0,D2; sne D4`).
-            let (d, held) = self.odd_test(x)?;
+            let (d, held, _) = self.odd_test(x, true)?;
             let d = if held { self.alloc_d()? } else { d };
             self.out.push(Insn::Scc {
                 cond: Cond::Ne,
@@ -12655,7 +12663,10 @@ impl Selector {
             ));
         };
         let start = self.out.len();
-        let cc = self.compare(*op, lhs, rhs)?;
+        let outer = std::mem::replace(&mut self.test_as_value, true);
+        let cc = self.compare(*op, lhs, rhs);
+        self.test_as_value = outer;
+        let cc = cc?;
         // The data registers the compare's operands used, last allocated
         // first.
         // Only a register the compare itself defined holds a value
@@ -13094,30 +13105,74 @@ impl Selector {
         Ok(Ea::Reg(Reg::D(self.bool_into_reg(c)?)))
     }
 
-    /// `odd(x)`: `btst #0` on the integer in a data register (FIM_$BUILD_DF
-    /// 0xE0A6F6 `btst #0,D5`, 0xE0A8EE `btst #0,D0`, both register-held
-    /// longwords; ref "Odd", p. 4-128).  The register and whether it holds
-    /// the value for longer (a register-held variable) are returned.  A
-    /// variable in memory is refused: `btst #0` on its low byte (69 `btst
-    /// #0,(odd d,An)` in compiled code, which bit 0 of a set's last byte
-    /// explains as well) or the value loaded first is not settled.
-    fn odd_test(&mut self, x: &Expr) -> Res<(u8, bool)> {
+    /// `odd(x)` (ref "Odd", p. 4-128), the instructions that test it and
+    /// the condition that holds when `x` is odd.  The register and whether
+    /// it holds the value for longer (a register-held variable) are
+    /// returned too.  Codegen-patterns 8, `odd`; bead domain-pascal-3xwx.
+    ///
+    /// - `x` in a data register (a register-held variable, or a value
+    ///   computed for the test): `btst #0` on it, Z (FIM_$BUILD_DF
+    ///   0xE0A6F6 `btst #0,D5`, 0xE0A8EE `btst #0,D0`, both register-held
+    ///   longwords).
+    /// - A word or longword variable in memory: loaded whole into a data
+    ///   register, then `lsr.b #1` and the carry (`tools/setsurvey.py
+    ///   onebit`: all 9 `lsr.b #1` in compiled code, each on a word or
+    ///   longword just loaded, 7 of them followed by `bcc`/`bcs`:
+    ///   tty_$i_put_chars 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1;
+    ///   bcc.s`; AREA_$COPY 0xE0905A `move.w (46,A1),D0; lsr.b #1,D0`).
+    ///   The reading: these are `odd` of an integer, bit 0 of the same
+    ///   fields being otherwise tested with `btst #k` on the loaded value
+    ///   (`&`, [`Self::one_bit_test`]); `btst #0` after a whole load (4
+    ///   sites, 0xE05C5E with the loaded value reused, DTTY_$INIT
+    ///   0xE34C4C, PEB_$GET_STATUS 0xE5ADEA, TERM_$INQUIRE 0xE66E9E) is
+    ///   `(x & 1) <> 0`.
+    ///   **Uncertain**: the image cannot show the source.
+    ///
+    /// Refused: a byte variable in memory (no `lsr.b #1` after a byte
+    /// load); a variable in memory as a value (`scs` into a new register
+    /// at both sites, 0xE052FE and 0xE70E9C, the latter with the load in
+    /// D3: not modelled; bead domain-pascal-uwfe); a constant.
+    fn odd_test(&mut self, x: &Expr, value: bool) -> Res<(u8, bool, Cond)> {
         let (d, held) = match self.eval(x)? {
             Val::Reg(Reg::D(r)) => (r, true),
             Val::Tmp(r) => (r, false),
-            _ => {
+            Val::Mem(ea) if x.ty().width != Width::Byte && !value => {
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: size_of(x.ty().width),
+                    src: ea,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                self.out.push(Insn::Shift {
+                    op: ShiftOp::Lsr,
+                    size: Size::B,
+                    count: ShiftCount::Imm(1),
+                    dst: d,
+                });
+                return Ok((d, false, Cond::Cs));
+            }
+            Val::Mem(_) if value => {
                 return Err(unsupported(
                     self.span,
-                    "`odd` of a variable in memory (`btst #0` on its low byte, or the value \
-                     loaded first: not settled) or of a constant is",
+                    "`odd` of a variable in memory as a boolean value (`lsr.b #1; scs` into \
+                     another register at 0xE052FE and 0xE70E9C: not settled, bead \
+                     domain-pascal-uwfe) is",
                 ))
             }
+            Val::Mem(_) => {
+                return Err(unsupported(
+                    self.span,
+                    "`odd` of a byte variable in memory (no `lsr.b #1` after a byte load in \
+                     compiled code) is",
+                ))
+            }
+            _ => return Err(unsupported(self.span, "`odd` of a constant here is")),
         };
         self.out.push(Insn::BtstImm {
             bit: 0,
             dst: Ea::Reg(Reg::D(d)),
         });
-        Ok((d, held))
+        Ok((d, held, Cond::Ne))
     }
 
     /// `lhs op rhs` with a left operand that is not a variable: the value
@@ -13216,13 +13271,12 @@ impl Selector {
     /// domain-pascal-qlzu; codegen-patterns 7.1, "A computed value against
     /// 0"; `tools/cmpsurvey.py opflags`):
     ///
-    /// - `(x & 2^k) = 0` or `<> 0` (or `(2^k & x)`) with `x` held in a
-    ///   data register: `btst #k,Dx` (pacct_$compress 0xE5A9DE `btst #2,D0; sne D2`, ../source
-    ///   `(value & 4) <> 0`).  No `and` with a one-bit mask is followed by
-    ///   a branch or an `s<cc>` in compiled code, against 92 with other
-    ///   masks, immediate or loaded.  `x` in memory or computed: refused
-    ///   (`btst` of a byte of memory, or the value loaded first: not
-    ///   seen; bead domain-pascal-bjx0).
+    /// - `(x & 2^k) = 0` or `<> 0` (or `(2^k & x)`): `btst #k` on `x` in a
+    ///   data register, a word or longword in memory loaded whole first
+    ///   ([`Self::one_bit_test`]; pacct_$compress 0xE5A9DE `btst #2,D0;
+    ///   sne D2`, ../source `(value & 4) <> 0`).  No `and` with a one-bit
+    ///   mask is followed by a branch or an `s<cc>` in compiled code,
+    ///   against 92 with other masks, immediate or loaded.
     /// - Anything else: the value in a data register, then the test
     ///   [`Self::tst`] gives (through [`Self::flags_test`]): the branch on
     ///   the flags of the operation that formed it (SOCK_$ALLOCATE
@@ -13275,18 +13329,7 @@ impl Selector {
                     Width::Long => value & 0xffff_ffff,
                 } as u64;
                 if mask.is_power_of_two() {
-                    let Val::Reg(Reg::D(r)) = self.eval(x)? else {
-                        return Err(unsupported(
-                            self.span,
-                            "testing one bit of a value not held in a data register (`btst` on \
-                             a byte of memory, or the value loaded first: not seen, \
-                             codegen-patterns 7.1) is",
-                        ));
-                    };
-                    self.out.push(Insn::BtstImm {
-                        bit: mask.trailing_zeros() as u8,
-                        dst: Ea::Reg(Reg::D(r)),
-                    });
+                    self.one_bit_test(x, mask.trailing_zeros() as u8)?;
                     return Ok(cc);
                 }
             }
@@ -13297,6 +13340,117 @@ impl Selector {
         };
         self.tst(size, Ea::Reg(Reg::D(d)), cc)?;
         Ok(cc)
+    }
+
+    /// `(x & 2^k) <> 0` or `= 0` (the mask on either side): `btst #k` on
+    /// `x` in a data register, the branch on Z (bead domain-pascal-3xwx;
+    /// codegen-patterns 7.1, "One bit"; `tools/setsurvey.py onebit`).
+    /// Compiled code never tests a one-bit `and` mask (0 of the 92 masks
+    /// followed by a branch or an `s<cc>`, `tools/cmpsurvey.py opflags`;
+    /// none in `tools/setsurvey.py onebit` either):
+    ///
+    /// - `x` held in a data register: `btst #k` on it (pacct_$compress
+    ///   0xE5A9DE `btst #2,D0; sne D2`, ../source `(value & 4) <> 0`).
+    /// - `x` a word or longword variable in memory: loaded whole, at its
+    ///   own size, into a data register, then `btst #k` on it (the 80
+    ///   `whole` tests of `tools/setsurvey.py onebit`, codegen-patterns
+    ///   7.1, 78 in 5.1's `ctest` count, which read more than the part
+    ///   holding bit k: tty_$i_put_chars 0xE1B01E `move.w (8,A0),D1;
+    ///   btst #5,D1; beq.s`, 0xE1B0E6 `move.l (12,A0),D1; btst #3,D1`;
+    ///   AST 0xE013BA `move.w (190,A2),D0; btst #4,D0`; TTY_$I_ERR
+    ///   0xE1BE3C; FILE_$PRIV_LOCK 0xE5F7B8 on an indexed word).  The
+    ///   reading (5.1): `in` on a set in memory is narrowed to the byte or
+    ///   word holding the bit, an integer is read whole.  **Uncertain**:
+    ///   the image cannot show the source.
+    /// - `x` computed (an operation, not a call or a widening): `btst #k`
+    ///   on the register that holds it (DIR_$SET_PROTECTION 0xE522D4
+    ///   `lsr.w #4,D1; btst #4,D1; bne`, DIR_$SET_DEFAULT_ACL 0xE530D6,
+    ///   FILE_$SET_PROT 0xE5DF5C).
+    ///
+    /// Not reproduced: a loaded copy tested again for another bit later
+    /// (TTY_$I_ERR 0xE1BE62 `btst #11,D2` on the longword 0xE1BE54
+    /// loaded; AREA_ 0xE07C80): each test loads again (bead
+    /// domain-pascal-gwpz).
+    ///
+    /// Refused: bit 7, 15 or 31 (no `btst #7`, `#15` or `#31` on any
+    /// operand among the 926 one-bit tests of compiled code; a lead for
+    /// bit 7 of a word: 0xE19106..0xE1910C `move.w (6,A0),D3; tst.b D3;
+    /// bpl`; bead domain-pascal-fhd4);
+    /// a byte variable in memory (`move.b` then `btst` at 4 sites, each
+    /// explained otherwise, against `btst #k` on 66 even-addressed bytes:
+    /// not settled; bead domain-pascal-kqa2); a variable in memory as a
+    /// boolean value (the `s<cc>` register after a whole load: the loaded
+    /// one at 0xE04C3C and 0xE5EC4A, another at 0xE02CD8: not settled;
+    /// bead domain-pascal-uwfe); a call's result (not
+    /// seen); a byte or a word widened for the `&` (an integer mask on a
+    /// `[byte]` or `0..65535` variable: the widening is not seen before a
+    /// `btst`, `clr.w; move.b` only into register-held locals, 0xE0A3BC;
+    /// beads domain-pascal-kqa2, domain-pascal-9js).
+    fn one_bit_test(&mut self, x: &Expr, k: u8) -> Res<()> {
+        if matches!(k, 7 | 15 | 31) {
+            return Err(unsupported(
+                self.span,
+                "testing bit 7, 15 or 31 alone (no `btst #7`/`#15`/`#31` exists in compiled \
+                 code; lead: 0xE1910A `tst.b` of a loaded word; bead domain-pascal-fhd4) is",
+            ));
+        }
+        match x {
+            Expr::Call { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "testing one bit of a function's result (`btst` on D0 after a call is not \
+                     seen in compiled code) is",
+                ))
+            }
+            Expr::Convert { value, .. } if value.ty().width == Width::Byte => {
+                return Err(unsupported(
+                    self.span,
+                    "testing one bit of a byte widened for the `&` (`btst` on the byte in \
+                     memory, or `clr.w; move.b` first: not settled, bead domain-pascal-kqa2) is",
+                ))
+            }
+            Expr::Convert { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "testing one bit of a word widened to a longword for the `&` (an unsigned \
+                     word with an integer mask: `clr.l; move.w; btst` is not seen in compiled \
+                     code; beads domain-pascal-kqa2, domain-pascal-9js) is",
+                ))
+            }
+            _ => {}
+        }
+        let r = match self.eval(x)? {
+            Val::Reg(Reg::D(r)) | Val::Tmp(r) => r,
+            Val::Mem(_) if x.ty().width == Width::Byte => {
+                return Err(unsupported(
+                    self.span,
+                    "testing one bit of a byte variable in memory (`btst` on the byte, or the \
+                     byte loaded first: not settled, bead domain-pascal-kqa2) is",
+                ))
+            }
+            Val::Mem(_) if self.test_as_value => {
+                return Err(unsupported(
+                    self.span,
+                    "one bit of a variable in memory as a boolean value (which register takes \
+                     the `s<cc>` after the load is not settled, bead domain-pascal-uwfe) is",
+                ))
+            }
+            Val::Mem(ea) => {
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: size_of(x.ty().width),
+                    src: ea,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                d
+            }
+            _ => return Err(unsupported(self.span, "testing one bit of this operand is")),
+        };
+        self.out.push(Insn::BtstImm {
+            bit: k,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        Ok(())
     }
 
     /// Whether a test of data register `d` at `size`, for a branch on

@@ -44,6 +44,25 @@ here are the ones that only a set (or a packed boolean) gives:
             Also counted: `btst #k' for k = 7, 15, 31 (none: the sign is
             tested with `tst'), and the routines that test one field in
             both forms.
+    onebit  every one-bit test in compiled code (bead domain-pascal-3xwx;
+            codegen-patterns 7.1 "One bit", 8 `odd'): `btst #k' on a data
+            register, by how the register was last written before it in
+            the block (`held': not written since a label or a branch,
+            call or return, a register-held variable or a value kept
+            from before; `load.<s>/whole' or `/fits': loaded from memory
+            at size s, more than or just the part holding bit k, as in
+            ctest; `copy'; `op:<mnemonic>': computed); `btst #k' on memory
+            (the byte's address parity); `lsr.<s> #1,Dn' followed by a
+            carry branch or `scs'/`scc' (bit 0 through the carry); `tst.b
+            Dn' right after a word or longword load into Dn, followed by
+            a sign branch or `s<cc>' (bit 7 of the loaded value); an `and'
+            with a one-bit mask (`andi #c,Dn', or `moveq/move #c,Dn; and
+            <ea>,Dn') followed by a branch or an `s<cc>' (none).  For each:
+            k, what reads the flags (`branch', `scc', other), and for an
+            `s<cc>' whether it writes the tested register (`same') or
+            another (`new'); whether the tested register is read again
+            after the test (`reused').  Also: `btst #7', `#15' or `#31'
+            (none).
 
 usage:
     tools/setsurvey.py summary          # the counts quoted in codegen-patterns 5.1
@@ -61,7 +80,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
-KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc', 'ctest')
+KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc', 'ctest', 'onebit')
 
 _CLR = re.compile(r'^clr([wl]) %(d\d)$')
 _BITREG = re.compile(r'^b(set|clr|tst) %(d\d),%(d\d)$')
@@ -245,6 +264,126 @@ def ctest_sites(ins):
     return out
 
 
+_SCCX = re.compile(r'^s(hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le) (\S+)$')
+_BRX = re.compile(r'^b(hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le)[sw]? ')
+_STOP = re.compile(r'^(b[a-z]{2}[sw]? |bra|jsr|bsr|jmp|rts|db[a-z]+ |unlk)')
+
+
+def _writes(t, d):
+    """Whether instruction text t writes %d (its last operand; `btst',
+    `cmp' and `tst' only read it)."""
+    if t.startswith(('btst', 'cmp', 'tst')):
+        return False
+    return re.search(r',%' + d + r'$', t) is not None or re.match(
+        r'^[a-z]+ %' + d + r'$', t) is not None
+
+
+def _source(ins, i, d, labels, k=None):
+    """How %d, tested at ins[i], was last written in its block."""
+    for j in range(i - 1, max(-1, i - 8), -1):
+        t = ins[j][2]
+        if _STOP.match(t):
+            return 'held'
+        if _writes(t, d):
+            m = _LOADD.match(t)
+            if m and m.group(3) == d:
+                src = m.group(2)
+                if '@' in src or src.startswith('0x'):
+                    w = m.group(1)
+                    if k is None:
+                        return 'load.' + w
+                    narrower = (w == 'w' and k < 8) or (w == 'l' and k < 16)
+                    return 'load.%s/%s' % (w, 'whole' if narrower else 'fits')
+                if re.match(r'^%d\d$', src):
+                    return 'copy'
+            return 'op:' + t.split()[0]
+        if ins[j][0] in labels:
+            return 'held'
+    return 'held'
+
+
+def _reader(ins, i, d):
+    """(what reads the flags of ins[i], `same'/`new' for an s<cc>)."""
+    t = ins[i + 1][2] if i + 1 < len(ins) else ''
+    if _BRX.match(t):
+        return 'branch', ''
+    m = _SCCX.match(t)
+    if m:
+        return 'scc', 'same' if m.group(2) == '%' + d else 'new'
+    return 'other', ''
+
+
+def _reused(ins, i, d, labels):
+    """Whether %d is read again after ins[i] in its block."""
+    for j in range(i + 1, min(len(ins), i + 12)):
+        t = ins[j][2]
+        if j > i + 1 and ins[j][0] in labels:
+            return False
+        if re.search(r'%' + d + r'\b', t):
+            return not (_writes(t, d) and t.count('%' + d) == 1
+                        and re.match(r'^(move[bwl]?|moveq|clr[bwl]|s[a-z]{2}) ', t))
+        if re.match(r'^(bra|jsr|bsr|jmp|rts|unlk)', t):
+            return False
+    return False
+
+
+def onebit_sites(ins, labels=frozenset()):
+    """Every one-bit test (KINDS `onebit') -> [(addr, form, k, source,
+    reader, scc register, reused)]."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _BTSTK.match(t)
+        if m:
+            k, opnd = int(m.group(1)), m.group(2)
+            if re.match(r'^%d\d$', opnd):
+                d = opnd[1:]
+                rd, reg = _reader(ins, i, d)
+                out.append((a, 'btst-reg', k, _source(ins, i, d, labels, k), rd, reg,
+                            _reused(ins, i, d, labels)))
+            else:
+                kind, disp = operand_kind(opnd)
+                par = '?' if disp is None else ('odd' if disp % 2 else 'even')
+                rd, _ = _reader(ins, i, '')
+                out.append((a, 'btst-mem', k, '%s/%s' % (kind, par), rd, '', False))
+            continue
+        m = re.match(r'^lsr([bwl]) #1,%(d\d)$', t)
+        if m and i + 1 < len(ins) and re.match(r'^(b(cc|cs)[sw]? |s(cc|cs) )', ins[i + 1][2]):
+            d = m.group(2)
+            rd, reg = _reader(ins, i, d)
+            out.append((a, 'lsr' + m.group(1) + '#1', 0, _source(ins, i, d, labels), rd, reg,
+                        _reused(ins, i, d, labels)))
+            continue
+        m = re.match(r'^tstb %(d\d)$', t)
+        if m and i + 1 < len(ins) and re.match(r'^(b(mi|pl)[sw]? |s(mi|pl) )', ins[i + 1][2]):
+            d = m.group(1)
+            src = _source(ins, i, d, labels)
+            if src in ('load.w', 'load.l'):
+                rd, reg = _reader(ins, i, d)
+                out.append((a, 'tstb-of-load', 7, src, rd, reg, _reused(ins, i, d, labels)))
+            continue
+        m = re.match(r'^(?:andi?)([bwl]) (\S+),%(d\d)$', t)
+        if m and i + 1 < len(ins):
+            w, src, d = m.groups()
+            c = None
+            if src.startswith('#'):
+                c = int(src[1:])
+            elif re.match(r'^%d\d$', src) and i > 0:
+                im = _IMMREG.match(ins[i - 1][2])
+                if im and im.group(2) == src[1:]:
+                    c = int(im.group(1))
+            elif i > 0:
+                im = _IMMREG.match(ins[i - 1][2])
+                if im and im.group(2) == d:
+                    c = int(im.group(1))
+            if c is None:
+                continue
+            c &= {'b': 0xff, 'w': 0xffff, 'l': 0xffffffff}[w]
+            rd, reg = _reader(ins, i, d)
+            if c and not c & (c - 1) and rd != 'other':
+                out.append((a, 'and-1bit', c.bit_length() - 1, w, rd, reg, False))
+    return out
+
+
 def scan():
     """{kind: [(routine start, routine name, site...)]}."""
     res = {k: [] for k in KINDS}
@@ -266,6 +405,10 @@ def scan():
             res['andc'].append((r0, name) + s)
         for s in ctest_sites(ins):
             res['ctest'].append((r0, name) + s)
+        labels = frozenset(int(b.group(1), 16) for _, _, t in ins
+                           for b in [re.search(r' 0x([0-9a-f]+)$', t)] if b)
+        for s in onebit_sites(ins, labels):
+            res['onebit'].append((r0, name) + s)
     return res
 
 
@@ -295,6 +438,26 @@ def summary(res):
         print('  & of a held value: %-11s moveq-able=%-5s %3d  e.g. %s' % (
             k[0], k[1], v, first([s for s in andc if (s[3], s[4]) == k])))
     ctest_summary(res['ctest'])
+    onebit_summary(res['onebit'])
+
+
+def onebit_summary(sites):
+    """The counts of the one-bit tests (codegen-patterns 7.1, "One bit")."""
+    print('one-bit tests: %d' % len(sites))
+
+    def cls(s):
+        src = s[5]
+        if s[3] == 'btst-reg' and src.startswith('op:'):
+            src = 'op'
+        return (s[3], src, s[6] + ('/' + s[7] if s[7] else ''))
+    for k, v in sorted(Counter(cls(s) for s in sites).items()):
+        sel = [s for s in sites if cls(s) == k]
+        print('  %-12s %-16s %-10s %4d  e.g. %s' % (k + (v, first(sel))))
+    reused = [s for s in sites if s[3] == 'btst-reg' and s[5].endswith('whole') and s[8]]
+    print('  whole loads whose register is read again after the test: %d (%s)' % (
+        len(reused), first(reused, 8)))
+    sign = [s for s in sites if s[3].startswith('btst') and s[4] in (7, 15, 31)]
+    print('  btst #7, #15 or #31: %d' % len(sign))
 
 
 def ctest_summary(sites):

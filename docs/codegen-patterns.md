@@ -2337,21 +2337,41 @@ this pair.
   the set's bits (`20 in s` for a word set would test a bit of the
   register above the loaded word; the value is false, ref 3.9.3, p.
   3-16, but the original's code for it is not catalogued).
-- **Member 0 (or bit 0) as `lsr.b #1` (Verified at 9 sites; the choice
-  Uncertain):** a value loaded whole into a data register, then `lsr.b
-  #1,Dn` and the carry: 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1;
-  bcc.s` (member 0 of TTY's output_flags, module-local 0xE1B00A);
-  0xE07B66 `move.w (46,A2),D0; lsr.b #1,D0; bcc.w`; 0xE08826,
-  0xE0905A, 0xE093CC, 0xE431EC, 0xE75820 (`bcc`/`bcs`); as a value
-  0xE052FA and 0xE70E98 `lsr.b #1; scs`.  These are all the `lsr.b
-  #1,Dn` in the image.  Against them, `btst #0,Dn` right after a load
-  (0xE2283C, 0xE2B140, 0xE5ADE8, 0xE66E9A from memory; 0xE11F14,
-  0xE20F52, 0xE4DD04, 0xE70EF8 from a register); at 0xE22840 the
-  register is used again after the test, which `lsr` would destroy,
-  but the other `btst` sites show no such use.  The image cannot tell
-  `0 in s` from `odd(x)` here (section 8, `odd`).  Not modelled by
-  `dpc` (lead: ../source pascal-translation-notes finding 2; bead
-  domain-pascal-ogzd).
+- **Member 0 (or bit 0) as `lsr.b #1` (Verified at 9 sites; read as
+  `odd`, Uncertain; implemented, bead domain-pascal-3xwx):** a value
+  loaded whole into a data register, then `lsr.b #1,Dn` and the carry:
+  0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1; bcc.s` (bit 0 of TTY's
+  output_flags, module-local 0xE1B00A); 0xE07B66 `move.w (46,A2),D0;
+  lsr.b #1,D0; bcc.w`; 0xE08826, 0xE0905A, 0xE093CC, 0xE431EC, 0xE75820
+  (`bcc`/`bcs`); as a value 0xE052FA and 0xE70E98 `lsr.b #1; scs` into
+  another register.  These are all the `lsr.b #1,Dn` in the image, each
+  right after a word or longword load (`tools/setsurvey.py onebit`).
+  Against them, `btst #0` after a whole load 4 times: AST_$TRUNCATE
+  0xE05C5E (the loaded word reused for `btst #1` next), DTTY_$INIT
+  0xE34C4C (a device word read in two `if` parts, tested at the join,
+  `sne D1`), PEB_$GET_STATUS 0xE5ADEA `move.l (A0),D0; btst #0,D0;
+  beq`, TERM_$INQUIRE 0xE66E9E `btst #0,D0; seq D1`; and `btst #0` on a
+  register that holds a variable or a value kept from before 32 times
+  (FIM_$BUILD_DF 0xE0A6F6).  The fields read by `lsr.b #1` are tested
+  for their other bits by `btst #k` after a whole load in the same
+  routines (tty_$i_put_chars on output_flags; AREA_$COPY on its word at
+  46, 0xE09098 `btst #1`; AUDIT's word at (168,A5), `btst #1` in
+  AUDIT_$SERVER 0xE71132), so the source wrote bit 0 differently from
+  the others.  **The reading taken:** `lsr.b #1` is `odd(x)` of an
+  integer in memory, `btst #0` after a whole load is `(x & 1) <> 0`
+  (the `&` of one bit, 7.1 "One bit"), and `odd` of a register-held
+  value is `btst #0` (`lsr` would destroy the register; AUDIT_$LOG_EVENT_S
+  tests its word at (168,A5) with `lsr.b #1` at 0xE70E98 and a
+  register-held word with `btst #0` at 0xE70EFA, both read as the
+  rounding idiom `if odd(n)`).  The image cannot show the source:
+  **Uncertain**; `0 in s` is narrowed like any member (below), so it is
+  not this form.  `dpc` (`isel.rs`, `odd_test`): `odd` of a word or
+  longword in memory as `move.<s>; lsr.b #1; bcs`/`bcc` in a condition;
+  as a value refused (`scs` into another register at both sites, the
+  load in D3 at 0xE70E98: bead domain-pascal-uwfe); `odd` of a byte is
+  refused by `dpc-ir`.  Golden `control/one_bit`; exec test `onebit`.
+  (The earlier lead: ../source pascal-translation-notes finding 2; bead
+  domain-pascal-ogzd.)
 - **Set constants** sit in data, for example the two 32-byte `set of char`
   tables at the start of the OLD_DIR data segment 0xE7FD24 (Reported:
   `name-dir-subsystems.md`); initialised static sets in the routine's
@@ -2553,7 +2573,7 @@ model run against the bit model of Figure 3-6).
       static link).  Not the count of tests, the context (condition or
       value), the module or its place in the image (whole tests in 14 of
       the 52 code segments with sites, 11 of them with memory tests too);
-    - 7 of the 9 `lsr.b #1` bit-0 tests (below) are on such fields
+    - 7 of the 9 `lsr.b #1` bit-0 tests (above) are on such fields
       (tty_$i_put_chars 0xE1B0F6, AREA_ 0xE07B66/0xE08826/0xE0905A on
       46, AREA_/MST_ (-2,An), AUDIT (168,A5)), and compiled code has no
       `and` with a one-bit mask tested for zero (33 with several bits),
@@ -2561,8 +2581,17 @@ model run against the bit model of Figure 3-6).
       taken: the whole form is an integer bit test (`&` of one bit,
       `odd`), possibly of a set viewed through a type transfer (ref
       4-197), and `in` is always narrowed.  **Uncertain:** the image
-      cannot show the source; the integer form is not implemented
-      (bead domain-pascal-3xwx).
+      cannot show the source.  The integer form is implemented (7.1,
+      "One bit"; bead domain-pascal-3xwx).  A routine's word read both
+      ways supports the reading for `in`: WIN's module-local 0xE19276
+      (../source `win_$check_disk_status`) tests its frame word at -0x1A
+      narrowed for bits 3, 4, 1, 6, 5 (0xE192C0 `btst #3,(-0x19,A6)`) and
+      loaded for bits 11, 13 and 12 (0xE192AA `move.w (-0x1a,A6),D1;
+      btst #11,D1`, that copy also `andi.w #0xfa` at 0xE192BA; loaded
+      again at 0xE1932C for bit 13, bit 12 at 0xE19356 on that second
+      copy): the `in` rule exactly, so
+      under this reading that word is a set there, not the integer the
+      translation's `&` makes it.
   - `dpc` (`isel.rs`, `set_bit_test`; tests `crates/dpc-m68k/tests/sets.rs`
     `constant_members_in_memory` and the 68010 model run
     `constant_membership_in_memory_follows_the_bit_model`; goldens
@@ -4599,12 +4628,53 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
     M$ARITH call, 0xE14C02 `tst.l D0`): `tst`.
   - At a join (a label between the operation and the branch) the `tst`
     is there (0xE08F80, 0xE3C930, 0xE4445E, 0xE3DF66, 0xE3EF72).
-  - **One bit:** no `and` with a one-bit mask, immediate or loaded into
-    a register, is followed by a branch or an `s<cc>` (92 with other
-    masks); `(value & 4) <> 0` of a register-held parameter is `btst
-    #2,D0; sne D2` (pacct_$compress 0xE5A9DE).  The mask on the left
-    (`4 & x`) is taken the same way: the source order cannot be seen,
-    and the `and` it would otherwise give is not seen.
+  - **One bit (survey Verified; the reading of the memory forms
+    Uncertain; implemented, bead domain-pascal-3xwx):** no `and` with a
+    one-bit mask, immediate or loaded into a register, is followed by a
+    branch or an `s<cc>` (92 with other masks); `(value & 4) <> 0` of a
+    register-held parameter is `btst #2,D0; sne D2` (pacct_$compress
+    0xE5A9DE).  The mask on the left (`4 & x`) is taken the same way:
+    the source order cannot be seen, and the `and` it would otherwise
+    give is not seen.  `tools/setsurvey.py onebit` takes every one-bit
+    test of compiled code, 926:
+
+    | form | operand | branch | `s<cc>` | other |
+    |---|---|---|---|---|
+    | `btst #k,<byte>` | memory, odd address | 285 | 65 | 6 (merged tails) |
+    | `btst #k,<byte>` | memory, even address | 64 | 2 | |
+    | `btst #k,Dn` | a register-held value (not written in the block) | 159 | 21 (all into another register) | |
+    | `btst #k,Dn` | a word/longword just loaded, bit in the part a set test would load (`fits`) | 182 | 34 (16 same register, 18 another) | 1 |
+    | `btst #k,Dn` | a word/longword just loaded, more than that part (`whole`) | 65 | 12 (2 same, 10 another) | 3 |
+    | `btst #k,Dn` | a byte just loaded | 3 | 1 | |
+    | `btst #k,Dn` | computed (`lsr.w`, `andi`), a copy | 13 | | |
+    | `lsr.b #1,Dn; bcc`/`bcs`/`scs` | a word/longword just loaded | 7 | 2 (another register) | |
+    | `tst.b Dn; bpl` | a word just loaded (bit 7) | 1 | | |
+    | `and` with a one-bit mask | any | 0 | 0 | |
+
+    and no `btst #7`, `#15` or `#31` on any operand.  The rule taken
+    (the 5.1 reading: a set in memory is narrowed to the part holding
+    the bit, an integer is read whole):
+    - `(x & 2^k) <> 0`/`= 0` of a register-held `x`: `btst #k,Dx`;
+    - of a word or longword variable in memory: `move.<s> M,Dn; btst
+      #k,Dn` at its own size, whatever k (tty_$i_put_chars 0xE1B01E
+      `move.w (8,A0),D1; btst #5,D1; beq.s`, 0xE1B0E6 `move.l
+      (12,A0),D1; btst #3,D1`; TTY_$I_ERR 0xE1BE3C; the module-local
+      0xE1BCFC at 0xE1BD0A `move.l (20,A0),D0; btst #12,D0` and
+      0xE1BDCA `move.w (8,A0),D0; btst #4,D0`; AST 0xE013BA; FILE_
+      0xE5F7B8 on an indexed word); the 80 `whole` sites are the ones
+      that show it, the `fits` ones agree;
+    - of a computed value: `btst #k` on its register (DIR_$SET_PROTECTION
+      0xE522D0..0xE522DA `and.w (4,A4),D1; lsr.w #4,D1; btst #4,D1;
+      bne`; DIR_$SET_DEFAULT_ACL 0xE530D6; FILE_$SET_PROT 0xE5DF5C);
+    - `odd(x)`: section 8 (`lsr.b #1` for a word or longword in memory,
+      `btst #0` in a register).
+
+    A loaded copy is tested again for another bit later in 11 places
+    (TTY_$I_ERR 0xE1BE54 `move.l (20,A0),D2; btst #10,D2; ...` then
+    0xE1BE62 `btst #11,D2` in the next `else if`; AREA_ 0xE07C78 `move.w
+    (A4),D0; btst #4,D0; bne` then `btst #0,D0`; TERM_$INQUIRE 0xE66EF0,
+    0xE66EF6): not reproduced, dpc loads again for each test (bead
+    domain-pascal-gwpz; for sets, domain-pascal-ozaq).
   - **Multiply:** the two branches after a `muls.w` (0xE69626, 0xE69630)
     are `abs` of a word product, `muls.w; bpl.s; neg.w`: the 32-bit
     flags read for a value used as a word, no `tst.w`.  A product tested
@@ -4630,11 +4700,24 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   re-tests is not seen); a word product tested as a word (above); any
   test right after an eor, a `neg`, an `ext`
   or a `swap` tested as a longword (no branch or `tst` follows one in
-  compiled code) (bead domain-pascal-bkoz); one bit of a value in memory
-  or computed (`btst` on the byte, or the value loaded first?; bead
-  domain-pascal-bjx0); unsigned orderings against 0, as for variables.  Golden `control/computed_zero`; exec test
-  `computed_zero`; driver tests `computed_value_against_zero_*`,
-  `one_bit_mask_is_btst`, `assigned_register_against_zero_on_the_operation_flags`.
+  compiled code) (bead domain-pascal-bkoz); unsigned orderings against
+  0, as for variables.  Of the one-bit tests (`isel.rs`
+  `Selector::one_bit_test`, `odd_test`; bead domain-pascal-3xwx), refused:
+  bit 7, 15 or 31 alone (no `btst #7`/`#15`/`#31`; a lead for bit 7 of
+  a loaded word, 0xE19106..0xE1910C `move.w (6,A0),D3; tst.b D3; bpl`;
+  bead domain-pascal-fhd4; dpc used to emit `btst #31` on a register);
+  a byte variable, and a `0..65535` variable with an integer mask, both
+  widened for the `&` by dpc-ir (`btst` on a byte in memory, or `clr.w;
+  move.b` first?  `clr.l; move.w; btst` is not seen; bead
+  domain-pascal-kqa2, and domain-pascal-9js for the width); a variable
+  in memory as a boolean value, `&` or `odd` (the `s<cc>` register:
+  the loaded one at 0xE04C3C and 0xE5EC4A, another at 0xE02CD8,
+  0xE052FE, 0xE70E98; bead domain-pascal-uwfe); a call's result (not
+  seen).  Golden `control/computed_zero`, `control/one_bit`; exec tests
+  `computed_zero`, `onebit`; driver tests `computed_value_against_zero_*`,
+  `one_bit_mask_is_btst`, `one_bit_of_memory_is_a_whole_load`,
+  `odd_of_memory_is_lsr`, `one_bit_test_refusals`,
+  `assigned_register_against_zero_on_the_operation_flags`.
 - **`if c then T else E`:** a branch on the negated condition to `E`
   (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
   `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.
@@ -5888,7 +5971,8 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   `abs` of a constant (dpc-sema) and refuses a run-time one (dpc-ir,
   "this predeclared function is ..."; bead domain-pascal-1che).
 - **`odd(x)` (ref "Odd", p. 4-128; register form Verified at two sites;
-  implemented, bead domain-pascal-5aw.19).**  `btst #0` on the integer
+  memory form read off 9 sites, Uncertain; implemented, beads
+  domain-pascal-5aw.19, domain-pascal-3xwx).**  `btst #0` on the integer
   in a data register, the branch on Z: FIM_$BUILD_DF 0xE0A6F6 `btst
   #0,D5; beq.s` and 0xE0A8EE `btst #0,D0; bne.s`, both register-held
   longwords (`fim/build_df.c`: `(new_usp & 1) != 0`, `(fp & 1) != 0`).
@@ -5902,11 +5986,19 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   the tested one holds a variable (AST_$GET_LOCATION 0xE0472E `btst
   #0,D2; sne D0`; DISK_$ADD_QUE 0xE3C744 `btst #0,D2; sne D4`), into the
   tested one when it holds a value computed for the test, as `in` does
-  (5.1, 0xE4A412).  **Not supported** (`isel.rs`, `odd_test`): `odd` of
-  a variable in memory (`btst #0` on its low byte, or the value loaded
-  first?  The memory sites above are explained by sets as well: not
-  settled), and storing `odd(x)` (like any comparison stored, 7.1).
-  Golden `control/and_or`; exec test `bools`.
+  (5.1, 0xE4A412).  A word or longword variable in memory: loaded
+  whole, then `lsr.b #1` and the carry, `bcs` when odd (tty_$i_put_chars
+  0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1; bcc.s`; AREA_$COPY 0xE0905A;
+  all 9 `lsr.b #1` of compiled code, 5.1 "Member 0 (or bit 0) as `lsr.b
+  #1`", where the reading is argued: `btst #0` after a whole load is
+  `(x & 1) <> 0`, 7.1 "One bit"; `0 in s` of a set in memory is
+  `btst #0` on its last byte).  **Not supported** (`isel.rs`,
+  `odd_test`): `odd` of a variable in memory as a value (`lsr.b #1;
+  scs` into another register at both sites, 0xE052FA and 0xE70E98, the
+  latter's load in D3: bead domain-pascal-uwfe), `odd` of a byte
+  (`dpc-ir`), and storing `odd(x)` of a register (like any comparison
+  stored, 7.1).  Goldens `control/and_or`, `control/one_bit`; exec tests
+  `bools`, `onebit`.
 - **Shifts (ref pp. 4-109, 4-171, 4-29; Verified):** `lsl`/`lsr`/`asr` on
   the value in a register; a constant count above 8 is split into shifts
   of 8 and the rest (×1024 0xE02AA6 `lsl.l #8,D0; lsl.l #2,D0`, 96 sites;
