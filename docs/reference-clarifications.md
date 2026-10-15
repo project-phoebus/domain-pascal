@@ -174,8 +174,8 @@ Raised by the parser work (domain-pascal-0sp.4; no bead filed yet):
    commas)".  Are ranges (`1..3:`) allowed in case labels?  *Current:
    rejected.*
 8. **Answered 2026-10-15; see Clarifications, "Module heading with an empty code section".**  **7.1.1, p. 7-2.** The empty-code-section form `name, , data_section`
-   is shown for programs (2.2.1, p. 2-10) but not for modules.  *Current:
-   accepted for programs only.*
+   is shown for programs (2.2.1, p. 2-10) but not for modules.  *Now
+   accepted for modules too (domain-pascal-zzru).*
 
 Raised by the semantics work (domain-pascal-0sp.5; no bead filed yet).
 Conservative choices are implemented and marked `TODO(ref-question)` in

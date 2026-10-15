@@ -336,20 +336,59 @@ fn nil_stored_is_the_pointer_zero() {
     }
 }
 
-/// `nil` passed by value, by address, and as a function result: each
-/// refused with the forms the image shows (beads domain-pascal-73sx,
-/// domain-pascal-bdi0; codegen-patterns 13, "`nil`").
+/// `nil` passed by value is the pointer constant 0, pushed like any
+/// longword 0 (`clr.l -(SP)`, NET_IO_$PUT_IN_SOCK 0xE0E4CC; bead
+/// domain-pascal-73sx), unless another constant argument is next to it
+/// (no site).
 #[test]
-fn nil_other_than_stored_is_refused() {
+fn nil_passed_by_value_is_the_pointer_zero() {
     let decls = "module m;\ntype p = ^integer32;\n\
-                 procedure byval(x: p); options(val_param, extern);\n\
+                 procedure byval(x: p; n: integer; y: p); options(val_param, extern);\n";
+    let m = lower_src(&format!(
+        "{decls}procedure q(k: integer; z: p);\nbegin\n  byval(nil, k, z);\n  byval(z, k, nil);\nend;\n"
+    ))
+    .unwrap();
+    let body = &m.functions[0].body;
+    for (st, i) in body.iter().zip([0, 2]) {
+        let StmtKind::Call(c) = &st.kind else {
+            panic!("not a call: {:?}", st.kind)
+        };
+        assert_eq!(
+            c.args[i],
+            Arg::Value {
+                value: Expr::Const {
+                    value: 0,
+                    ty: Scalar::POINTER
+                },
+                slot: 4
+            }
+        );
+    }
+    // Two `nil`s with a non-constant between them: neither has a constant
+    // neighbour.
+    lower_src(&format!(
+        "{decls}procedure q(k: integer);\nbegin\n  byval(nil, k, nil);\nend;\n"
+    ))
+    .unwrap();
+    for call in ["byval(nil, 1, z)", "byval(z, 0, nil)"] {
+        let e = errs(&format!(
+            "{decls}procedure q(k: integer; z: p);\nbegin\n  {call};\nend;\n"
+        ));
+        assert_eq!(e.len(), 1, "{call}: {e:?}");
+        assert!(
+            e[0].contains("`nil` passed by value next to another constant argument"),
+            "{e:?}"
+        );
+    }
+}
+
+/// `nil` passed by address and as a function result: each refused with
+/// the forms the image shows (bead domain-pascal-bdi0; codegen-patterns
+/// 13, "`nil`").
+#[test]
+fn nil_other_than_stored_or_pushed_is_refused() {
+    let decls = "module m;\ntype p = ^integer32;\n\
                  procedure byref(in x: p); extern;\n";
-    let e = errs(&format!(
-        "{decls}procedure q;\nbegin\n  byval(nil);\nend;\n"
-    ));
-    assert_eq!(e.len(), 1, "{e:?}");
-    assert!(e[0].contains("`nil` passed by value"), "{e:?}");
-    assert!(e[0].contains("domain-pascal-73sx"), "{e:?}");
     let e = errs(&format!(
         "{decls}procedure q;\nbegin\n  byref(nil);\nend;\n"
     ));

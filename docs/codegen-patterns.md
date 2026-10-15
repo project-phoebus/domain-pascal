@@ -388,9 +388,12 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `move.l #0,-(SP); move.l (SP),-(SP)`).  `nil` itself pushed is `clr.l
   -(SP)`: the port pointer of the module-local NET_IO_$PUT_IN_SOCK_COMMON
   at NET_IO_$PUT_IN_SOCK 0xE0E4CC and NET_IO_$PUT_IN_SOCK_INT 0xE0E506
-  (the C passes NULL), the only `nil` push known; `dpc` still refuses
-  `nil` passed by value (bead domain-pascal-73sx).  `dpc` uses `clr.l`
-  for the integer 0 (Verified at FLP's EXCS).
+  (the C passes NULL), the only `nil` push known; `dpc` pushes `nil`
+  so, as any longword 0 (bead domain-pascal-73sx; golden `calls/nil_push`,
+  exec test `nil_push`; Verified: ../source net_io/put_in_sock.pas's two
+  routines compile byte-identical, srcsurvey OK), and refuses a `nil` next to another constant
+  argument (no site: at both sites its neighbours are parameters).
+  `dpc` uses `clr.l` for the integer 0 (Verified at FLP's EXCS).
 - **Bytes:** `st -(SP)` for true (196 sites, 0xE1365C).  `false` (a
   byte 0) clears the whole slot with `clr.w -(SP)`: RIP_$SEND_UPDATES
   pushes `st -(SP)` on one path (0xE6889E) and `clr.w -(SP)` on the other
@@ -9438,8 +9441,8 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     as a pointer function's result (`suba.l A0,A0` before the epilogue,
     ROUTE_$FIND_PORTP; the result slot cleared and reloaded,
     NET_$FIND_HANDLER 0xE5A178), bead domain-pascal-bdi0; `nil` passed
-    by value (`clr.l -(SP)`, section 1.5, "Zero"), bead
-    domain-pascal-73sx; `nil` passed by address (no site known);
+    by address (no site known).  `nil` passed by value is `clr.l -(SP)`
+    (section 1.5, "Zero"; implemented, bead domain-pascal-73sx);
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
     a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the
     image);

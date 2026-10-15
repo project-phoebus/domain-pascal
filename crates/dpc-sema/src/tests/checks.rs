@@ -618,6 +618,28 @@ fn module_heading_and_section_attribute() {
 }
 
 #[test]
+fn module_heading_empty_code_section() {
+    // `module name, , data_section;`: code in the default `.text`, data in
+    // the named section (owner ruling 2026-10-15; ../source
+    // pchist/pchist.pas).
+    let p = ok("module pchist, , wired_data;
+                var v: integer;
+                procedure a; begin end;");
+    assert_eq!(
+        (p.code_section.as_str(), p.data_section.as_str()),
+        (".text", "wired_data")
+    );
+    let r = routine(&p, "a");
+    assert_eq!(
+        (r.code_section.as_str(), r.data_section.as_str()),
+        (".text", "wired_data")
+    );
+    assert!(
+        matches!(&var(&p, "v").storage, Storage::Static { section, .. } if section == "wired_data")
+    );
+}
+
+#[test]
 fn linkage_and_symbols() {
     let p = module(
         "procedure ast_$page_zero; begin end;

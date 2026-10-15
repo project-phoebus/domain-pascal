@@ -550,7 +550,9 @@ impl<'a> Parser<'a> {
     /// default code section (ref 2.2.1, p. 2-10).
     ///
     /// `module name [, code_section_name] [, data_section_name];` (ref
-    /// 7.1.1, p. 7-2).
+    /// 7.1.1, p. 7-2), with `module name, , data_section_name;` as for
+    /// programs (owner ruling 2026-10-15, docs/reference-clarifications.md
+    /// "Module heading with an empty code section").
     #[allow(clippy::type_complexity)]
     fn heading(&mut self) -> PResult<(UnitKind, Ident, Option<Ident>, Option<Ident>)> {
         let is_program = if self.eat_kw(Kw::Program) {
@@ -575,13 +577,10 @@ impl<'a> Parser<'a> {
         let mut data = None;
         if self.eat(&T::Comma) {
             if self.at(&T::Comma) {
-                // `, , data_section_name` (p. 2-10).
-                // TODO(ref-question): 7.1.1 p. 7-2 shows only
-                // `[, code][, data]` for modules; the empty-code form is
-                // documented for programs only.  Conservative: programs only.
-                if !is_program {
-                    return self.expected("code section name");
-                }
+                // `, , data_section_name` (p. 2-10): the code goes to
+                // the default code section.  Modules too (7.1.1, p. 7-2;
+                // owner ruling 2026-10-15, reference-clarifications.md
+                // "Module heading with an empty code section").
             } else {
                 code = Some(self.ident()?);
             }

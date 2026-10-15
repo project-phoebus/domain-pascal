@@ -154,8 +154,8 @@ STUB	net/net.pas	net_$ioctl
 STUB	net/net.pas	net_$rcv
 STUB	net/net.pas	net_$send
 STUB	net_io/net_io.pas	net_io_$put_in_sock_common
-STUB	net_io/net_io.pas	net_io_$put_in_sock
-STUB	net_io/net_io.pas	net_io_$put_in_sock_int
+OK	net_io/net_io.pas	net_io_$put_in_sock
+OK	net_io/net_io.pas	net_io_$put_in_sock_int
 STUB	net_io/net_io.pas	net_io_$copy_packet
 STUB	net_io/net_io.pas	net_io_$send
 STUB	net_io/net_io_unwired.pas	net_io_$boot_device

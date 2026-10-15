@@ -3275,3 +3275,57 @@ begin s; end;
     let err = compile_with("addr_of_in_parameter_nested", src, &[]).unwrap_err();
     assert!(err.1.contains("domain-pascal-ucss"), "{}", err.1);
 }
+
+/// `module name, , data_section;` (owner ruling 2026-10-15; bead
+/// domain-pascal-zzru): the code in `.text`, as for `module name;`, the
+/// data in the named section's block, which A5 is loaded with.
+#[test]
+fn module_heading_with_an_empty_code_section() {
+    let src = "module pchist, , wired_data;
+var hits: integer32;
+procedure pchist_$hits(out n: integer32);
+begin n := hits; end;
+";
+    let asm = compile_with("module_heading_with_an_empty_code_section", src, &[]).unwrap();
+    assert!(asm.contains("\t.text\n"), "{asm}");
+    assert!(!asm.contains(".text.PCHIST"), "{asm}");
+    assert!(
+        asm.contains(".section\t\".bss.moddata.PCHIST.WIRED_DATA\""),
+        "{asm}"
+    );
+    assert!(asm.contains("lea\t(.Ldata.WIRED_DATA).l,%a5"), "{asm}");
+    // A code section name alone, or nothing after `, ,`: still errors.
+    for bad in ["module m, , ;\n", "module m, ;\n"] {
+        let err = compile_with("module_heading_with_an_empty_code_section_bad", bad, &[]);
+        assert_eq!(err.unwrap_err().0, Some(1), "{bad}");
+    }
+}
+
+/// `nil` passed by value: `clr.l -(SP)` (NET_IO_$PUT_IN_SOCK 0xE0E4CC;
+/// bead domain-pascal-73sx); refused next to another constant argument.
+#[test]
+fn nil_passed_by_value() {
+    let decls = "module m;
+type p = ^integer32;
+procedure take(x: p; n: integer); options(val_param, extern);
+";
+    let asm = compile_with(
+        "nil_passed_by_value",
+        &format!("{decls}procedure q(k: integer); options(val_param);\nbegin take(nil, k); end;\n"),
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("\tclr.l\t-(%sp)\n\tjsr\t(TAKE).l"), "{asm}");
+    let err = compile_with(
+        "nil_passed_by_value_const",
+        &format!("{decls}procedure q;\nbegin take(nil, 3); end;\n"),
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        err.1
+            .contains("`nil` passed by value next to another constant argument"),
+        "{}",
+        err.1
+    );
+}

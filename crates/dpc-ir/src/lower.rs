@@ -5303,7 +5303,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
         ));
     }
     let mut args = Vec::new();
-    for (a, &(mode, univ, prm_ty)) in c.args.iter().zip(&params) {
+    for (i, (a, &(mode, univ, prm_ty))) in c.args.iter().zip(&params).enumerate() {
         let slot = a.conv.slot_size;
         args.push(match a.conv.passing {
             Passing::ByValue => {
@@ -5322,13 +5322,32 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // EXCS 0xE3E2B6; so are DXM_$HELPER_COMMON 0xE171F2's
                     // and PKT_$PING_SERVER 0xE12C14's `movea.l #0,A2`
                     // pushed with `pea (A2)` (`tools/nilsurvey.py push`,
-                    // `areg`; bead domain-pascal-73sx).  Not implemented.
+                    // `areg`; bead domain-pascal-73sx).  So `nil` is the
+                    // pointer 0, pushed as any longword 0 (`clr.l -(SP)`,
+                    // codegen-patterns 1.5 "Zero").  At both sites it is
+                    // the first argument and its one neighbour a
+                    // parameter (`move.w (8,A6),-(SP)` pushed just
+                    // before it, 0xE0E4C8); a `nil` next to another constant
+                    // argument has no site, and the original might have
+                    // treated the pair otherwise (CLAUDE.md 3.4, merged
+                    // word constants), so it is refused.
                     Some(ConstValue::Nil) => {
-                        return Err(unsupported(
-                            a.expr.span,
-                            "`nil` passed by value (`clr.l -(SP)` at NET_IO_$PUT_IN_SOCK \
-                             0xE0E4CC; bead domain-pascal-73sx) is",
-                        ))
+                        let is_const = |b: &dpc_sema::program::Arg| {
+                            matches!(b.conv.passing, Passing::ByValue) && b.expr.value.is_some()
+                        };
+                        if [i.checked_sub(1), Some(i + 1)]
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|j| c.args.get(j))
+                            .any(is_const)
+                        {
+                            return Err(unsupported(
+                                a.expr.span,
+                                "`nil` passed by value next to another constant argument (no \
+                                 site; NET_IO_$PUT_IN_SOCK 0xE0E4CC has none beside it) is",
+                            ));
+                        }
+                        stored_const(&ConstValue::Nil, ty, a.expr.span)?
                     }
                     Some(v) => const_of(v, ty, a.expr.span)?,
                     // A set expression takes the parameter's size (`[k]`

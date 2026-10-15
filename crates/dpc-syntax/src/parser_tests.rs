@@ -357,10 +357,19 @@ fn module_heading_sections() {
 }
 
 #[test]
-fn module_heading_empty_code_section_rejected() {
-    // Documented for programs only (p. 2-10); see TODO(ref-question).
-    let e = errs("module m, , d;");
-    assert!(e[0].contains("expected code section name"), "{e:?}");
+fn module_heading_empty_code_section() {
+    // Owner ruling 2026-10-15 (reference-clarifications.md, "Module
+    // heading with an empty code section"): `module pchist, , wired_data;`
+    // (../source pchist/pchist.pas).
+    let u = ok("module pchist, , wired_data;");
+    assert_eq!(u.kind, UnitKind::Module);
+    assert!(u.code_section.is_none());
+    assert_eq!(u.data_section.unwrap().name, "wired_data");
+    // The data section name is still required after `, ,`.
+    let e = errs("module m, , ;");
+    assert!(!e.is_empty());
+    let e = errs("module m, ;");
+    assert!(!e.is_empty());
 }
 
 #[test]

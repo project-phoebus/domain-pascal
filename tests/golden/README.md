@@ -139,6 +139,10 @@ Tests:
 - `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
   index is used for nothing else, as `movea.l #sym,A0`, count, filler,
   `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).
+- `calls/nil_push` - codegen-patterns 1.5, "Zero" (bead
+  domain-pascal-73sx): `nil` passed by value, `clr.l -(SP)`, pushed after
+  word values and `st -(SP)` (NET_IO_$PUT_IN_SOCK_INT 0xE0E506,
+  0xE0E4FC).
 - `calls/pointer_targets` - codegen-patterns 1.5 (bead domain-pascal-s9j):
   objects reached through a pointer passed by address: `p.f^` with the
   record held, `move.l (d,A2),-(SP)` (0xE1CC52 in KBD_$RCV's nested
@@ -213,6 +217,10 @@ Tests:
   data section, `jsr abs.l` into another code section from a statement
   and from an expression (PROC1_$INIT 0xE2F9EC), an internal routine so
   called loading its own A5 (0xE14B12).
+- `sections/empty_code_section` - codegen-patterns 11, 4 (bead
+  domain-pascal-zzru): `module name, , data_section;`, the code in
+  `.text`, the data in the named section, A5 loaded with that block
+  (PCHIST_$CNTL 0xE5CDBE).
 - `sections/section_fragments` - codegen-patterns 11, 1.6, 7: a unit of
   two code sections compiled as a fragment of each (`.args`:
   `--fragment-origin=SECTION=0xADDR`), one origin symbol, pad and
