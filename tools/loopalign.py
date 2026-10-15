@@ -43,6 +43,11 @@ usage:
                                           # (al aligning, na not, ? unknown,
                                           # from `switch') and F/A/U
                                           # (codegen-patterns 7.4)
+    tools/loopalign.py notest [-v]        # loops closed only by `bra's (no
+                                          # test anywhere: `repeat ... until
+                                          # false', 7.2) by entry, routine
+                                          # class and F/A/U; -v one line
+                                          # per loop with its size
     tools/loopalign.py fors [-v]          # `dbf' loops: preheader order of
                                           # count and index, index in a
                                           # register or memory, index use
@@ -331,6 +336,36 @@ def heads(m, sites, routines):
            if e == 'bra-in' and a == 'al' and cl == 'U']
     print('while heads at 2 mod 4 in aligning routines: %s' % ', '.join(
         '0x%X (loop 0x%X bytes)' % (t, src - t) for t, src in big))
+
+
+def notest_rows(m, sites, routines):
+    """[(head, F/A/U, entry, routine class, routine start, last back
+    branch)] of the loops every backward branch of which is a `bra': no
+    test anywhere (codegen-patterns 7.2, bead domain-pascal-pkle)."""
+    lp = loops(sites)
+    out = []
+    for t, cl, back, entry, acls, r0, last in head_rows(m, sites, routines):
+        if back == 'bra' and all(s.text.startswith('bra') for s in lp[t][1] if s.src >= t):
+            out.append((t, cl, entry, acls, r0, last))
+    return out
+
+
+def notest(m, sites, routines, verbose=False):
+    rows = notest_rows(m, sites, routines)
+    c = Counter((e, a, cl) for _, cl, e, a, _, _ in rows)
+    print('loops closed only by `bra\'s: %d' % len(rows))
+    for e in ('fall', 'bra-in', 'bra-out'):
+        for a in ('al', 'na', '?'):
+            n = [c[e, a, k] for k in 'FAU']
+            if sum(n):
+                print('%-8s %-3s F=%-4d A=%-4d U=%-4d' % (e, a, *n))
+    big = [(t, src) for t, cl, e, a, _, src in rows if a == 'al' and cl == 'U']
+    print('heads at 2 mod 4 in aligning routines: %s' % ', '.join(
+        '0x%X (loop 0x%X bytes)' % (t, src - t) for t, src in big))
+    if verbose:
+        for t, cl, e, a, r0, src in rows:
+            print('0x%06X %s %-7s %-2s routine 0x%06X %-28s bra 0x%06X size 0x%X'
+                  % (t, cl, e, a, r0, m.describe(r0), src, src - t))
 
 
 _STEP = re.compile(r'(addq|subq)w #1,(%d\d)$')
@@ -678,6 +713,8 @@ def main(argv):
         return rc
     elif argv[0] == 'heads':
         heads(m, sites, routines)
+    elif argv[0] == 'notest':
+        notest(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'fors':
         fors(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'ptrs':

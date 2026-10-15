@@ -102,7 +102,7 @@ OK	dtty/dtty.pas	dtty_$reload_font
 STUB	dtty/dtty.pas	dtty_$init
 STUB	dxm/dxm.pas	dxm_$add_callback
 STUB	dxm/dxm.pas	dxm_$scan_queue
-STUB	dxm/dxm.pas	dxm_$helper_common
+MISMATCH	dxm/dxm.pas	dxm_$helper_common
 OK	dxm/dxm.pas	dxm_$helper_wired
 OK	dxm/dxm.pas	dxm_$helper_unwired
 STUB	dxm/dxm.pas	dxm_$add_signal
@@ -205,7 +205,7 @@ STUB	mac_os/mac_os.pas	mac_os_$put_info
 STUB	mac_os/mac_os.pas	mac_$net_to_port_num
 STUB	mac_os/mac_os.pas	mac_os_$init
 STUB	mem/mem.pas	mem_$parity_log
-STUB	misc/misc.pas	mem_lites
+OK	misc/misc.pas	mem_lites
 STUB	misc/misc.pas	start_mem_lites
 MISMATCH	misc/misc.pas	set_lites_loc
 STUB	mmap/mmap.pas	mmap_$add_to_wsl

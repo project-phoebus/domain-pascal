@@ -1328,6 +1328,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   restores paired with a `link` + save in the sweep of section 12.1).
 - **Procedures without callee-saved registers:** just `unlk A6; rts`
   (0xE16C7C).
+- **No epilogue when nothing reaches it (Verified; implemented):** the 6
+  compiled routines whose body ends in a loop with no way out have no
+  restore, `unlk` or `rts` at all, though the prologue saves registers
+  (DXM_$HELPER_COMMON 0xE171E4..0xE1721C; section 7.2, "Loops with no
+  test"; bead domain-pascal-pkle).
 - **Empty procedures: a bare `rts`, no `link` (Reported; strong image
   evidence; implemented).**  The image (0xE00800..0xE88834) has no
   `link; unlk; rts` sequence at all, nor `link; pea (A5); lea ...,A5;
@@ -5324,11 +5329,17 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
     `next` or `goto` whose `bra` is dropped (in an inner `else` part,
     reached by the inner test's threaded branch alone) is skipped by the
     checks of `loop_jumps` and `goto_jumps`.  The emitter sizes the
-    branches afterwards.  Refused: a `case` table entry or a `dbf` whose
-    target a `bra` follows, a cycle of `bra`s, a branch that would go to
-    the next instruction once a `bra` is dropped (not seen; a compare
-    chain whose last arm is only `return`), and a loop head falling into
-    a `bra` (above).  Tests: `crates/dpc-m68k/tests/control.rs`
+    branches afterwards.  At the bottom of a loop with no test (7.2,
+    "Loops with no test"; bead domain-pascal-pkle) a conditional branch
+    over the `bra` back to the head becomes the negated branch to the
+    head, and a `bra` left going to the next instruction by the dropping
+    of that `bra` is dropped too (compiled code has neither,
+    `tools/threadsurvey.py` `over` and `next`: 0).  Refused: a `case`
+    table entry or a `dbf` whose
+    target a `bra` follows, a cycle of `bra`s, any other branch that would
+    go to the next instruction once a `bra` is dropped (not seen; a
+    compare chain whose last arm is only `return`), and a loop head
+    falling into a `bra` (above).  Tests: `crates/dpc-m68k/tests/control.rs`
     (`branches_to_a_bra_are_threaded`,
     `loop_jumps_and_nested_whiles_are_threaded`), `crates/dpc/tests/driver.rs`
     (`goto_to_a_label_before_a_bra_is_threaded`), golden
@@ -5543,7 +5554,7 @@ Backward branches other than `dbf` in compiled code (same survey):
 |---|---|---|---|
 | `b<cc>` | a `bra` (to the test) | 213 | `while`: `bra test; head: body; test: <cond>; b<cc> head` (0xE01A8E..0xE01A98; section 7.4) |
 | `b<cc>` | falling through | 190 | test at the bottom, entered from the top: `repeat ... until` (0xE03192..0xE031B6, 0xE03208..0xE03224) |
-| `bra` | falling through | 131 | test at the top, exits forward (0xE00E68); source construct not identified |
+| `bra` | falling through | 131 | test at the top, exits forward (0xE00E68); among them the loops with no test below |
 | `bra` | a `bra` | 7 | |
 
 - **`repeat body until c`:** the head is entered by falling through and
@@ -5562,6 +5573,97 @@ Backward branches other than `dbf` in compiled code (same survey):
   the opening `bra`, no longer reached, is dropped and the head stays
   aligned in aligning code, the module-local 0xE4AFA8 at 0xE4B0F8;
   **implemented**).
+
+#### Loops with no test (Verified by survey; implemented; bead domain-pascal-pkle)
+
+`repeat body until false` (ref "Repeat/Until", p. 4-161; the reference's
+own examples use it with `exit`: the `close`, `find` and `put`
+examples, pp. 4-42, 4-86, 4-154) is a loop with no test.  Survey:
+`tools/loopalign.py notest` (loops every backward branch of which is a
+`bra`; a backward `goto` gives the same shape, which the image cannot
+tell apart) and `tools/threadsurvey.py summary` (`next`, `over`,
+`noepi`).
+
+- **Shape (Verified).**  `head: body; bra head`, the head entered by
+  falling through, left by forward branches (`exit`, `return`,
+  `goto`).  MEM_LITES 0xE0C3D2..0xE0C410 (`misc/mem_lites.pas`): the
+  filler, the head 0xE0C3D4, `tst.l (A5); beq.b 0xE0C412` for `if
+  lites_loc = nil then exit`, `bra.b 0xE0C3D4`, the code after the loop
+  at 0xE0C412.  86 loops are closed only by `bra`s: 81 entered by
+  falling through, 5 after a `bra` that skips them (0xE2F29C after
+  `bra.s 0xE2F2C6` and the filler; read as a loop in an `else` part,
+  not checked against a source).
+- **Head alignment (Verified): as for every loop head (section 7).**
+  In aligning routines the heads entered by falling through split 13
+  with the filler (MEM_LITES 0xE0C3D4, NETBUF_$GET_DAT 0xE0EFB8, EC2_$WAIT
+  0xE424F4; the heads), 16 4-aligned, and 4 at 2 mod 4, all of loops over 0x100
+  bytes (0xE64F86 0x390, 0xE6DAEE 0x120, 0xE71F66 0x10C, 0xE75A22
+  0x39C: the large-loop exception of section 7, bead domain-pascal-ux8);
+  non-aligning routines never have the filler (25 4-aligned, 19 not).
+- **`next`** goes to the bottom `bra`, so to the head (branch threading,
+  7.1): PKT_$SAR_INTERNET 0xE720C0 `bne.w 0xE71FE8` (`if status_ret.all
+  <> status_$ok then next`), SIO2681_$INT 0xE1CF18 (seven branches back
+  to the head).
+- **A body that ends in `if c then exit`** has no `bra` at the bottom:
+  the last test branches back on the negated condition and falls into
+  the code after the loop (PKT_$SAR_INTERNET 0xE72152 `cmp.w D4w,D2w;
+  bne.w 0xE71FE8`, then 0xE72158).  Compiled code has no conditional
+  branch over a `bra` (`over`: 0), so `b<cc> EXIT; bra HEAD; EXIT:`
+  cannot be the original's; the shape is that of `repeat ... until c`,
+  which the image cannot tell from it.  The same holds when the `if` is
+  nested at the end of the body (an inner `if c then exit` at the end of
+  a `then` part, whose join is the bottom).
+- **A body that ends in an unconditional jump** (`exit`, `return`,
+  `goto`, in the last arm of a `case` or the last part of an `if`) has
+  no bottom `bra` either, and an `exit` there leaves no `bra` of its
+  own: MSG_$SARI 0xE59F76..0xE59F98, the last `case` arm, ends in its
+  last store and the code after the loop follows at 0xE59F9E; the
+  dispatch's default 0xE59F06 `bra.s 0xE59EC0` and arm 0's `bne.w
+  0xE59EC0` are the back edges.  Compiled code has no branch to the
+  next instruction (`next`: 0).
+- **No way out: no epilogue (Verified).**  The 6 compiled routines with
+  a `link` and no reached `rts`/`unlk` (`noepi`) all end in the `bra`
+  of such a loop, followed directly by the next routine or the
+  routine's cells: DXM_$HELPER_COMMON 0xE1721C `bra.b 0xE171FC` (then
+  DXM_$HELPER_WIRED at 0xE1721E), PKT_$PING_SERVER 0xE12D2E (the filler
+  and a cell follow), PMAP_$PURIFIER_L 0xE14166 (a cell 0xE1416A that
+  0xE13F68 passes with `pea (d,PC)`), PMAP_$PURIFIER_R 0xE143AE,
+  PROC2_$DELETE 0xE743CC, the module-local 0xE76048 at 0xE76286.  The
+  prologue still saves the registers the body writes (0xE171E8
+  `movem.l D2/A2-A4,-(SP)`).
+- **Implemented** (`crates/dpc-ir/src/lower.rs`, the `Repeat` lowering:
+  an `until` whose value is the constant `false`, any constant
+  expression, ref 6.4.24, p. 6-27, becomes `until: None`;
+  `crates/dpc-m68k/src/isel.rs`, `Selector::repeat`,
+  `thread_branches`, `wrap`): the head's filler as for every head, the
+  bottom `bra`; in `thread_branches`, after the threading and the
+  dropping of unreached `bra`s, a conditional branch over a backward
+  `bra` becomes the negated branch to that `bra`'s target (the `bra`
+  dropped), and a `bra` that would go to the next instruction because a
+  backward `bra` between was dropped is dropped too; `wrap` leaves out
+  the epilogue when the body ends in a `bra` and no branch reaches the
+  labels after it.  Golden `tests/golden/loops/forever.pas`, exec
+  `tests/exec/forever.pas`, tests `crates/dpc-m68k/tests/control.rs`
+  (`loops_with_no_test`), `crates/dpc/tests/driver.rs`
+  (`constant_conditions`), `crates/dpc-ir/src/tests.rs`
+  (`repeat_until_false`).  srcsurvey: MEM_LITES byte-identical;
+  DXM_$HELPER_COMMON compiles (its loop-invariant arguments in A2/A4,
+  ../source finding 43, remain a mismatch: bead domain-pascal-hmpi).
+- **Refused** (not seen): `repeat ... until true` (the body run once:
+  whether a loop head is kept is not known); `while true do` (its form
+  cannot be told from `repeat ... until false` in the image: whether the
+  opening `bra` to the test stays, or is dropped as one to the next
+  instruction, is not known) and `while false do` (its body is dead
+  code, eliminated at `-opt 1` and above, ref 6.4.24, p. 6-27, which
+  leaves nothing to see); an `if` with a constant condition (the part it
+  never runs likewise; the kernel's optimisation level is not
+  recorded); bead domain-pascal-exrr.  The ../source sites all use
+  `repeat ... until false` (22 at ac053ee8).  Also refused: a statement
+  after a loop with no test that no `exit` of its own leaves (not
+  reached unless it is a label, as after `return`; dead code, eliminated
+  at `-opt 1` and above, ref 6.4.24, p. 6-27; the image's 6 such loops
+  end their routines): `crates/dpc-m68k/tests/control.rs`
+  (`after_a_loop_with_no_way_out`).
 
 
 ### 7.3 `case` statements (Verified at the sites given; the choice of form Verified by survey; implemented)

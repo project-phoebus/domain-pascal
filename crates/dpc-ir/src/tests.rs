@@ -2077,7 +2077,11 @@ fn unsupported_conditions_and_loops() {
     assert!(one("if u > -1 then w := 0;").contains("outside the other operand's type"));
     assert!(one("while w = 0 do ;").contains("a `while` loop with an empty body"));
     assert!(one("if w = 0 then ;").contains("an `if` with an empty `then` part"));
-    assert!(one("if true then w := 0;").contains("a constant condition"));
+    assert!(one("if true then w := 0;").contains("an `if` with a constant condition"));
+    assert!(one("if false then w := 0 else w := 1;").contains("an `if` with a constant condition"));
+    assert!(one("while true do w := 0;").contains("a `while` loop with a constant condition"));
+    assert!(one("while false do w := 0;").contains("a `while` loop with a constant condition"));
+    assert!(one("repeat w := 0 until true;").contains("a constant `true` condition"));
     assert!(one("if b = true then w := 0;").contains("comparing boolean values"));
     assert!(one("if b <> b2 then w := 0;").contains("comparing boolean values"));
 }
@@ -2090,8 +2094,29 @@ fn repeat_and_return() {
         panic!()
     };
     assert_eq!(body.len(), 2);
-    assert_eq!(*until, Cond::Test(sym("B", Scalar::BOOLEAN)));
+    assert_eq!(*until, Some(Cond::Test(sym("B", Scalar::BOOLEAN))));
     assert_eq!(b[1].kind, StmtKind::Return);
+}
+
+/// `repeat ... until false` (the reference's examples, e.g. p. 4-42): a
+/// loop with no test (codegen-patterns 7.2), whatever constant expression
+/// gives the `false` (constant expressions are computed at every level,
+/// ref 6.4.24, p. 6-27).
+#[test]
+fn repeat_until_false() {
+    for src in [
+        "repeat w := 1; if b then exit until false;",
+        "repeat w := 1; if b then exit until not true;",
+        "repeat w := 1; if b then exit until (1 = 2);",
+    ] {
+        let b = ctl_body(src);
+        assert_eq!(b.len(), 1, "{src}");
+        let StmtKind::Repeat { body, until } = &b[0].kind else {
+            panic!("{src}")
+        };
+        assert_eq!(body.len(), 2, "{src}");
+        assert_eq!(*until, None, "{src}");
+    }
 }
 
 /// `case` (ref "Case", pp. 4-36..4-37): arms and labels in source order,

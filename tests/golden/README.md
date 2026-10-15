@@ -365,6 +365,13 @@ Tests:
   0xE0B4CC), an `and then` test (0xE4A028), a walk pointer held in an
   address register and tested with `cmpa.w #0,An` (0xE3CCCE), `exit` and
   `next` as branches past or to the test.
+- `loops/forever` - codegen-patterns 7.2 ("Loops with no test"; bead
+  domain-pascal-pkle): `repeat ... until false`, the bottom `bra` back
+  to the aligned head (MEM_LITES 0xE0C3D2..0xE0C410), `next` to the
+  head, a final `if ... then exit` as the negated branch back
+  (PKT_$SAR_INTERNET 0xE72152), a final `exit` with no `bra` (MSG_$SARI
+  0xE59F76..0xE59F9E), no epilogue after a loop with no way out
+  (DXM_$HELPER_COMMON 0xE1721C).
 - `loops/for` - codegen-patterns 7.4: `for` loops with an index the body
   uses: the `dbf` count, then the index (`clr.w` / `moveq`), the step
   before `dbf` (`subq.w` for `downto`), a byte array indexed with the

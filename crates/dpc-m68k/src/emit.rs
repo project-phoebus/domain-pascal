@@ -1609,7 +1609,7 @@ mod tests {
             f.body = vec![Stmt {
                 kind: StmtKind::Repeat {
                     body,
-                    until: test.clone(),
+                    until: Some(test.clone()),
                 },
                 span: f.span,
             }];
@@ -1649,13 +1649,13 @@ mod tests {
         f.body = vec![Stmt {
             kind: StmtKind::Repeat {
                 body: vec![store],
-                until: Cond::Test(Expr::Load {
+                until: Some(Cond::Test(Expr::Load {
                     addr: Addr::Symbol {
                         name: "B".into(),
                         offset: 0,
                     },
                     ty: Scalar::BOOLEAN,
-                }),
+                })),
             },
             span: f.span,
         }];

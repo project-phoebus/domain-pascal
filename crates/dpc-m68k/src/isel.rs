@@ -259,12 +259,52 @@ fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnos
 }
 
 /// Phase 2: the frame of `f` around `body`.
+///
+/// A body whose end nothing reaches (its last instruction a `bra` back
+/// into it, no branch to the labels after that: a loop with no test and
+/// no way out) has no epilogue: the image's 6 compiled routines with no
+/// reachable `unlk`/`rts` all end in such a `bra`, followed by the next
+/// routine or the routine's cells (DXM_$HELPER_COMMON 0xE1721C `bra.s
+/// 0xE171FC`, then DXM_$HELPER_WIRED at 0xE1721E; PKT_$PING_SERVER
+/// 0xE12D2E, PMAP_$PURIFIER_L 0xE14166, PMAP_$PURIFIER_R 0xE143AE,
+/// PROC2_$DELETE 0xE743CC, the module-local 0xE76048 at 0xE76286;
+/// codegen-patterns 7.2).  The prologue still saves the registers the body
+/// writes (0xE171E8 `movem.l D2/A2-A4,-(SP)`).
 pub fn wrap(f: &Function, body: Body) -> Result<Vec<Insn>, Diagnostic> {
     let frame = frame_for(f.frame_size, body.saves, f.span)?;
     let mut out = frame.prologue();
+    let reached = end_reached(&body.insns);
     out.extend(body.insns);
-    out.extend(frame.epilogue());
+    if reached {
+        out.extend(frame.epilogue());
+    }
     Ok(out)
+}
+
+/// Whether the end of `body` (where the epilogue goes) is reached: by
+/// falling off its last instruction, or by a branch to a label after it.
+fn end_reached(body: &[Insn]) -> bool {
+    let Some(last) = body
+        .iter()
+        .rposition(|i| !matches!(i, Insn::Label(_) | Insn::Align4))
+    else {
+        return true;
+    };
+    if !matches!(body[last], Insn::Branch { cond: Cond::T, .. }) {
+        return true;
+    }
+    let tail: Vec<u32> = body[last + 1..]
+        .iter()
+        .filter_map(|i| match i {
+            Insn::Label(l) => Some(*l),
+            _ => None,
+        })
+        .collect();
+    body.iter().any(|i| match i {
+        Insn::Branch { label, .. } | Insn::Dbf { label, .. } => tail.contains(label),
+        Insn::TableEntry { target, .. } => tail.contains(target),
+        _ => false,
+    })
 }
 
 /// Phase 1's result: the body's instructions and the callee-saved
@@ -1200,13 +1240,19 @@ fn select_body_with(
 /// threaded layout (`size_branches`): 263 of the threaded branches are
 /// `.w` though a `.s` would have reached the `bra`.
 ///
+/// At the bottom of a loop with no test (codegen-patterns 7.2, "Loops
+/// with no test"; bead domain-pascal-pkle), a conditional branch over the
+/// `bra` back to the head becomes the negated branch to the head, and a
+/// `bra` that the dropping of that `bra` leaves going to the next
+/// instruction is dropped too (compiled code has neither).
+///
 /// The dropped `bra` becomes a fresh label that nothing names, so the
 /// indices into `out` stay valid; the unused labels go later.  Refused:
 /// a `dbf` or a `case` table entry whose target a `bra` follows (an arm
 /// of only `return`; no table entry in the image goes to the epilogue
 /// unless its default does; bead domain-pascal-r4yn), a cycle of `bra`s,
-/// a branch that threading leaves pointing at the next instruction (not
-/// seen), and a loop head that falls into a `bra` (a `repeat` before a
+/// any other branch that threading leaves pointing at the next
+/// instruction (not seen), and a loop head that falls into a `bra` (a `repeat` before a
 /// `while`; bead domain-pascal-tfae).  An `exit`, `next` or `goto` whose
 /// `bra` is dropped leaves its entry in `loop_jumps` / `goto_jumps`
 /// pointing at a label; [`select_body_with`] skips those.
@@ -1248,9 +1294,6 @@ fn thread_branches(
                 succ.insert(*l, *label);
             }
         }
-    }
-    if succ.is_empty() {
-        return Ok(());
     }
     let resolve = |l: u32| -> Option<u32> {
         let mut t = l;
@@ -1305,8 +1348,66 @@ fn thread_branches(
             dead.push(k);
         }
     }
+    // The dropped `bra`s that went back to a loop head: the bottom of a
+    // loop with no test (`repeat ... until false`) after a body that ends
+    // in a jump.
+    let dead_back: Vec<usize> = dead
+        .iter()
+        .copied()
+        .filter(|&k| matches!(out[k], Insn::Branch { back: true, .. }))
+        .collect();
     for &k in &dead {
         out[k] = Insn::Label(*next_label);
+        *next_label += 1;
+    }
+    // A conditional branch over a `bra` back to a loop head (the bottom of
+    // a loop with no test, after an `if c then exit` that ends its body)
+    // is the branch on the negated condition to the head, with no `bra`:
+    // compiled code has no conditional branch over a `bra` (codegen-
+    // patterns 7.1; `tools/threadsurvey.py over`: none), and PKT_$SAR_
+    // INTERNET's wait 0xE72152 `cmp.w D4w,D2w; bne.w 0xE71FE8` falls into
+    // the code after the loop (codegen-patterns 7.2).
+    for k in 0..out.len() {
+        let Insn::Branch {
+            cond,
+            label: over,
+            short,
+            ..
+        } = out[k]
+        else {
+            continue;
+        };
+        if cond == Cond::T {
+            continue;
+        }
+        let Some(j) =
+            (k + 1..out.len()).find(|&j| !matches!(out[j], Insn::Label(l) if !used.contains(&l)))
+        else {
+            continue;
+        };
+        let Insn::Branch {
+            cond: Cond::T,
+            label: head,
+            back: true,
+            ..
+        } = out[j]
+        else {
+            continue;
+        };
+        let lands = out[j + 1..]
+            .iter()
+            .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
+            .any(|i| matches!(i, Insn::Label(l) if *l == over));
+        if !lands {
+            continue;
+        }
+        out[k] = Insn::Branch {
+            cond: cond.negate(),
+            label: head,
+            short,
+            back: true,
+        };
+        out[j] = Insn::Label(*next_label);
         *next_label += 1;
     }
     // The dropped `bra` of a `while` that starts a `while`'s body leaves
@@ -1328,14 +1429,29 @@ fn thread_branches(
     // A branch now to the next instruction (the labels and a loop head's
     // alignment between): not seen.
     for k in 0..out.len() {
-        let Insn::Branch { label, .. } = out[k] else {
+        let Insn::Branch { cond, label, .. } = out[k] else {
             continue;
         };
-        let next = out[k + 1..]
+        let to = out[k + 1..]
             .iter()
             .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
-            .any(|i| matches!(i, Insn::Label(l) if *l == label));
-        if next && !dead.is_empty() {
+            .position(|i| matches!(i, Insn::Label(l) if *l == label))
+            .map(|n| k + 1 + n);
+        // A `bra` to the next instruction once the `bra` back to the head
+        // of a loop with no test is dropped: an `exit` or `return` ending
+        // the body (MSG_$SARI's wait, whose last `case` arm ends in `exit`:
+        // 0xE59F76..0xE59F98, then the code after the loop at 0xE59F9E,
+        // with no `bra` between).  Compiled code has no branch to the next
+        // instruction (codegen-patterns 7.2; `tools/threadsurvey.py next`:
+        // none).
+        if let Some(to) = to {
+            if cond == Cond::T && dead_back.iter().any(|&d| k < d && d < to) {
+                out[k] = Insn::Label(*next_label);
+                *next_label += 1;
+                continue;
+            }
+        }
+        if to.is_some() && !dead.is_empty() {
             return Err(unsupported(
                 span,
                 "a branch that would go to the next instruction once a `bra` no longer reached \
@@ -2681,7 +2797,9 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
             }
             StmtKind::Repeat { body, until } => {
                 walk(body, v);
-                walk_cond(until, v);
+                if let Some(u) = until {
+                    walk_cond(u, v);
+                }
             }
             StmtKind::While { cond, body } => {
                 walk_cond(cond, v);
@@ -3045,7 +3163,9 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
             }
             StmtKind::Repeat { body, until } => {
                 walk_eval(body, v);
-                walk_cond(until, v);
+                if let Some(u) = until {
+                    walk_cond(u, v);
+                }
             }
             StmtKind::While { cond, body } => {
                 walk_cond(cond, v);
@@ -3317,7 +3437,9 @@ fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
             }
             StmtKind::Repeat { body, until } => {
                 addrs_mut(body, f);
-                cond_addrs_mut(until, f);
+                if let Some(u) = until {
+                    cond_addrs_mut(u, f);
+                }
             }
             StmtKind::While { cond, body } => {
                 cond_addrs_mut(cond, f);
@@ -3723,7 +3845,9 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 }
                 StmtKind::Repeat { body, until } => {
                     stmts(body, off, false, true, st);
-                    cond(until, off, st);
+                    if let Some(u) = until {
+                        cond(u, off, st);
+                    }
                 }
                 StmtKind::While { cond: c, body } => {
                     cond(c, off, st);
@@ -3893,7 +4017,9 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 }
                 StmtKind::Repeat { body, until } => {
                     stmts(body, off, st);
-                    cond(until, off, st);
+                    if let Some(u) = until {
+                        cond(u, off, st);
+                    }
                 }
                 StmtKind::While { cond: c, body } => {
                     cond(c, off, st);
@@ -4046,6 +4172,22 @@ fn ends_in_jump(stmts: &[Stmt]) -> bool {
 /// reached: only through a label that starts them.
 fn reached_after_jump(rest: &[Stmt]) -> bool {
     rest.is_empty() || matches!(rest[0].kind, StmtKind::Label(_))
+}
+
+/// Whether an `exit` of `body`'s own loop (not one of a loop nested in
+/// it) is in `body`: what leaves a loop with no test to the statement
+/// after it.
+fn exits_loop(body: &[Stmt]) -> bool {
+    body.iter().any(|s| match &s.kind {
+        StmtKind::Exit => true,
+        StmtKind::If { then_, else_, .. } => exits_loop(then_) || exits_loop(else_),
+        StmtKind::Case {
+            arms, otherwise, ..
+        } => {
+            arms.iter().any(|a| exits_loop(&a.body)) || otherwise.as_deref().is_some_and(exits_loop)
+        }
+        _ => false,
+    })
 }
 
 /// Whether `rest` emits nothing (labels only): what follows it follows
@@ -4810,7 +4952,9 @@ impl Uses<'_> {
                 StmtKind::Repeat { body, until } => {
                     let start = self.out.len();
                     self.stmts(body);
-                    self.cond(until);
+                    if let Some(u) = until {
+                        self.cond(u);
+                    }
                     self.twice(start);
                 }
                 StmtKind::While { cond, body } => {
@@ -5614,7 +5758,21 @@ impl Selector {
                     self.wrote(start, count * value.ty().bytes());
                 }
                 StmtKind::If { cond, then_, else_ } => self.if_(f, cond, then_, else_, next)?,
-                StmtKind::Repeat { body, until } => self.repeat(f, body, until)?,
+                StmtKind::Repeat { body, until } => {
+                    if until.is_none() && !exits_loop(body) && !reached_after_jump(rest) {
+                        // Nothing reaches the code after a loop with no
+                        // test and no `exit` (bead domain-pascal-pkle
+                        // review): dead code, eliminated at `-opt 1` and
+                        // above (ref 6.4.24, p. 6-27); the image's 6 such
+                        // loops end their routines (codegen-patterns 7.2).
+                        return Err(unsupported(
+                            rest[0].span,
+                            "a statement after a `repeat ... until false` loop that no `exit` \
+                             leaves (not reached) is",
+                        ));
+                    }
+                    self.repeat(f, body, until.as_ref())?
+                }
                 StmtKind::While { cond, body } => self.while_(f, cond, body)?,
                 StmtKind::For(l) => self.for_(f, l)?,
                 StmtKind::Exit | StmtKind::Next => {
@@ -6008,7 +6166,15 @@ impl Selector {
     /// already 158 times and at 2 mod 4 25 times).  A loop with the test at
     /// the bottom entered by falling through: 0xE03192..0xE031B6 (an `or
     /// else` chain, the last test branching back), 0xE03208..0xE03224.
-    fn repeat(&mut self, f: &Function, body: &[Stmt], until: &IrCond) -> Res<()> {
+    ///
+    /// With no test (`until` is `None`: `repeat ... until false`), the
+    /// bottom is a `bra` back to the head (codegen-patterns 7.2: 86 loops
+    /// closed only by `bra`s; MEM_LITES 0xE0C3D2..0xE0C410, the filler,
+    /// the head 0xE0C3D4, `beq.b 0xE0C412` for the `if ... then exit`,
+    /// `bra.b 0xE0C3D4`), its head aligned like any other.  `next` goes to
+    /// that `bra`, and so to the head ([`thread_branches`]); a body that
+    /// ends in an `if c then exit` or a jump leaves no `bra` (also there).
+    fn repeat(&mut self, f: &Function, body: &[Stmt], until: Option<&IrCond>) -> Res<()> {
         if body.is_empty() {
             return Err(unsupported(self.span, "an empty `repeat` loop is"));
         }
@@ -6038,7 +6204,10 @@ impl Selector {
         if let Some(t) = test {
             self.place(t);
         }
-        self.branch(until, false, head)?;
+        match until {
+            Some(c) => self.branch(c, false, head)?,
+            None => self.jump(Cond::T, head),
+        }
         if let Some(x) = exit {
             self.place(x);
         }

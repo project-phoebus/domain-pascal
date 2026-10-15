@@ -565,8 +565,15 @@ pub enum StmtKind {
         else_: Vec<Stmt>,
     },
     /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body runs
-    /// at least once, and again while `until` is false.
-    Repeat { body: Vec<Stmt>, until: Cond },
+    /// at least once, and again while `until` is false.  `until` is `None`
+    /// for a condition whose value is the constant `false` (`repeat ...
+    /// until false`, the reference's examples, e.g. p. 4-42): a loop with
+    /// no test, left only by `exit`, `return` or `goto` (codegen-patterns
+    /// 7.2).
+    Repeat {
+        body: Vec<Stmt>,
+        until: Option<Cond>,
+    },
     /// `while cond do body` (ref "While", p. 4-208): the body runs while
     /// `cond` is true, tested before each iteration.  `body` is never
     /// empty.

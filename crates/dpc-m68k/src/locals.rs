@@ -356,7 +356,11 @@ impl Walk<'_> {
                     self.stmts(else_, true);
                 }
                 StmtKind::Repeat { body, until } => {
-                    self.loop_body(seq, body, |w| w.cond(until));
+                    self.loop_body(seq, body, |w| {
+                        if let Some(u) = until {
+                            w.cond(u)
+                        }
+                    });
                 }
                 StmtKind::While { cond, body } => {
                     self.loop_body(seq, body, |w| w.cond(cond));

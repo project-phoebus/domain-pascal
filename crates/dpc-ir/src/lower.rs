@@ -850,7 +850,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             for st in body {
                 stmt_enclosing(st, out);
             }
-            cond(until, out);
+            if let Some(u) = until {
+                cond(u, out);
+            }
         }
         StmtKind::While { cond: c, body } => {
             cond(c, out);
@@ -1009,7 +1011,9 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             for st in body.iter_mut() {
                 stmt_calls_mut(st, f);
             }
-            cond(until, f);
+            if let Some(u) = until {
+                cond(u, f);
+            }
         }
         StmtKind::While { cond: c, body } => {
             cond(c, f);
@@ -1683,7 +1687,9 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             for st in body {
                 stmt_calls(st, out);
             }
-            cond_calls(until, out);
+            if let Some(u) = until {
+                cond_calls(u, out);
+            }
         }
         StmtKind::While { cond, body } => {
             cond_calls(cond, out);
@@ -1823,7 +1829,7 @@ fn stmt_uses_static(s: &Stmt) -> bool {
             cond_uses_static(cond) || then_.iter().chain(else_).any(stmt_uses_static)
         }
         StmtKind::Repeat { body, until } => {
-            body.iter().any(stmt_uses_static) || cond_uses_static(until)
+            body.iter().any(stmt_uses_static) || until.as_ref().is_some_and(cond_uses_static)
         }
         StmtKind::While { cond, body } => {
             cond_uses_static(cond) || body.iter().any(stmt_uses_static)
@@ -2348,7 +2354,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     }
                     StmtKind::Repeat { body, until } => {
                         self.stmts(body)?;
-                        self.cond(until)?;
+                        if let Some(u) = until {
+                            self.cond(u)?;
+                        }
                     }
                     StmtKind::While { cond, body } => {
                         self.cond(cond)?;
@@ -2816,6 +2824,19 @@ impl Cx<'_> {
                     then_branch,
                     else_branch,
                 } => {
+                    if cond.value.is_some() {
+                        // The part a constant condition never runs is dead
+                        // code, eliminated at `-opt 1` and above (ref
+                        // 6.4.24, p. 6-27); constant expressions are
+                        // computed at every level (same page).  A removed
+                        // part leaves nothing in the image, and the
+                        // kernel's optimisation level is not recorded.
+                        return Err(unsupported(
+                            cond.span,
+                            "an `if` with a constant condition (whether the original removes the \
+                             part it never runs is not seen, codegen-patterns 7.1) is",
+                        ));
+                    }
                     let then_ = self.seq(std::slice::from_ref(then_branch))?;
                     if then_.is_empty() {
                         // What the original emitted for an empty `then`
@@ -2836,13 +2857,33 @@ impl Cx<'_> {
                         span: s.span,
                     });
                 }
-                SStmtKind::Repeat { body, cond } => out.push(Stmt {
-                    kind: StmtKind::Repeat {
-                        body: self.seq(body)?,
-                        until: cond_of(p, cond)?,
-                    },
-                    span: s.span,
-                }),
+                SStmtKind::Repeat { body, cond } => {
+                    // `until false` (any condition whose value is the
+                    // constant `false`: constant expressions are computed
+                    // at every optimisation level, ref 6.4.24, p. 6-27): a
+                    // loop with no test, a `bra` back to its head
+                    // (codegen-patterns 7.2, MEM_LITES 0xE0C410).
+                    // `until true` runs the body once; whether the
+                    // original kept a loop head for it is not seen.
+                    let until =
+                        match cond.value {
+                            Some(ConstValue::Bool(false)) => None,
+                            Some(_) => return Err(unsupported(
+                                cond.span,
+                                "`repeat ... until` with a constant `true` condition (the body \
+                                 run once; whether the original keeps a loop is not seen, \
+                                 codegen-patterns 7.2) is",
+                            )),
+                            None => Some(cond_of(p, cond)?),
+                        };
+                    out.push(Stmt {
+                        kind: StmtKind::Repeat {
+                            body: self.seq(body)?,
+                            until,
+                        },
+                        span: s.span,
+                    })
+                }
                 SStmtKind::Return => out.push(Stmt {
                     kind: StmtKind::Return,
                     span: s.span,
@@ -2855,6 +2896,21 @@ impl Cx<'_> {
                 // codegen-patterns 7.4: test at the bottom, entered by a
                 // `bra` to the test.
                 SStmtKind::While { cond, body } => {
+                    if cond.value.is_some() {
+                        // `while true do`: the image's loops with no test
+                        // do not tell it from `repeat ... until false`
+                        // (codegen-patterns 7.2: whether the opening `bra`
+                        // to the test stays is not seen); `while false
+                        // do`: the body is dead code, eliminated at `-opt
+                        // 1` and above (ref 6.4.24, p. 6-27), which leaves
+                        // no trace in the image.
+                        return Err(unsupported(
+                            cond.span,
+                            "a `while` loop with a constant condition (`while true` cannot be told \
+                             from `repeat ... until false` in the image, `while false` leaves \
+                             nothing to see; codegen-patterns 7.2) is",
+                        ));
+                    }
                     let body = self.seq(std::slice::from_ref(body))?;
                     if body.is_empty() {
                         // No such loop has been looked for in the image.

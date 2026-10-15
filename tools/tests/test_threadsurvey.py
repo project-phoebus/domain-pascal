@@ -100,5 +100,52 @@ class LoopTest(unittest.TestCase):
                          [(0x108, 0x102, 'bra', 'U')])
 
 
+
+# DXM_$HELPER_COMMON 0xE171FC..0xE1721C: a loop with no way out ends the
+# routine (bead domain-pascal-pkle).
+HELPER_COMMON = insns([
+    (0xe171e4, 'linkw %fp,#-4'),
+    (0xe171e8, 'moveml %d2/%a2-%a4,%sp@-'),
+    (0xe171ec, 'moveal %fp@(8),%a3'),
+    (0xe171f0, 'moveq #1,%d2'),
+    (0xe171f2, 'moveal #0,%a2'),
+    (0xe171f8, 'lea %a3@(12),%a4'),
+    (0xe171fc, 'clrl %sp@-'),
+    (0xe171fe, 'clrl %sp@-'),
+    (0xe17200, 'movel %d2,%sp@-'),
+    (0xe17202, 'pea %a2@'),
+    (0xe17204, 'pea %a2@'),
+    (0xe17206, 'pea %a4@'),
+    (0xe17208, 'jsr 0xe20610'),
+    (0xe1720e, 'lea %sp@(24),%sp'),
+    (0xe17212, 'pea %a3@'),
+    (0xe17214, 'bsrw 0xe17168'),
+    (0xe17218, 'addqw #4,%sp'),
+    (0xe1721a, 'addql #1,%d2'),
+    (0xe1721c, 'bras 0xe171fc'),
+])
+
+
+class NoTestLoopTest(unittest.TestCase):
+    def test_no_epilogue(self):
+        self.assertEqual(threadsurvey.noepi_sites(HELPER_COMMON),
+                         [(0xe1721c, 'bras 0xe171fc')])
+
+    def test_epilogue(self):
+        self.assertEqual(threadsurvey.noepi_sites(SET_FLAG), [])
+
+    def test_branch_to_next(self):
+        ins = insns([(0x100, 'beqs 0x102'), (0x102, 'braw 0x106'),
+                     (0x106, 'rts')])
+        self.assertEqual(threadsurvey.next_sites(ins), [(0x100, 'beqs'), (0x102, 'braw')])
+        self.assertEqual(threadsurvey.next_sites(SET_FLAG), [])
+
+    def test_conditional_branch_over_a_bra(self):
+        ins = insns([(0x100, 'beqs 0x104'), (0x102, 'bras 0x100'),
+                     (0x104, 'rts')])
+        self.assertEqual(threadsurvey.over_sites(ins), [(0x100, 'beqs')])
+        self.assertEqual(threadsurvey.over_sites(SET_FLAG), [])
+
+
 if __name__ == '__main__':
     unittest.main()

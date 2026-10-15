@@ -1396,3 +1396,124 @@ fn computed_value_against_zero_refusals() {
         assert!(e.contains(why), "{routine}: {e}");
     }
 }
+
+/// Loops with no test (`repeat ... until false`, codegen-patterns 7.2;
+/// bead domain-pascal-pkle): the bottom `bra` back to the head; an
+/// `exit` nested at the end of the body takes the inverted branch back
+/// (PKT_$SAR_INTERNET 0xE72152) or, unconditional, falls out with no `bra`
+/// (MSG_$SARI 0xE59F76..0xE59F9E, the last `case` arm), the dispatch's
+/// default threaded to the head (0xE59F06 `bra.s 0xE59EC0`).
+#[test]
+fn loops_with_no_test() {
+    let b = body(
+        "procedure t; internal;
+begin
+  repeat
+    ext_$p(1);
+    if b then begin
+      r := 5;
+      if w = 3 then exit;
+    end;
+  until false;
+  r := 1;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            ".balignw\t4,0x2048",
+            "1:",
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "addq.w\t#4,%sp",
+            "tst.b\t(B).l",
+            "bpl.s\t1b",
+            "move.w\t#5,(R).l",
+            "cmpi.w\t#3,(W).l",
+            "bne.s\t1b",
+            "move.w\t#1,(R).l",
+        ]
+    );
+    let b = body(
+        "procedure t; internal;
+begin
+  repeat
+    ext_$p(1);
+    case w of
+      1: begin r := 1; exit end;
+      3: r := 3;
+      5: begin r := 5; exit end;
+    end;
+  until false;
+  r := 1;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            ".balignw\t4,0x2048",
+            "1:",
+            "subq.l\t#2,%sp",
+            "move.w\t#1,-(%sp)",
+            "jsr\t(EXT_$P).l",
+            "addq.w\t#4,%sp",
+            "move.w\t(W).l,%d0",
+            "cmpi.w\t#1,%d0",
+            "beq.s\t3f",
+            "cmpi.w\t#3,%d0",
+            "beq.s\t4f",
+            "cmpi.w\t#5,%d0",
+            "beq.s\t5f",
+            "bra.s\t1b",
+            "3:",
+            "move.w\t#1,(R).l",
+            "bra.s\t6f",
+            "4:",
+            "move.w\t#3,(R).l",
+            "bra.s\t1b",
+            "5:",
+            "move.w\t#5,(R).l",
+            "6:",
+            "move.w\t#1,(R).l",
+        ]
+    );
+}
+
+/// Code after a loop with no test that no `exit` leaves is not reached
+/// (dead code, eliminated at `-opt 1` and above, ref 6.4.24, p. 6-27;
+/// the image's 6 such loops end their routines, codegen-patterns 7.2):
+/// refused, as a statement after `return` is; an `exit` of a nested loop
+/// does not leave the outer one.  A label after the loop, `goto`'s
+/// target, is reached.
+#[test]
+fn after_a_loop_with_no_way_out() {
+    let why = "a statement after a `repeat ... until false` loop that no `exit` leaves";
+    for routine in [
+        "repeat ext_$p(1) until false; r := 1;",
+        "repeat ext_$p(1); if b then return; until false; r := 1;",
+        "repeat repeat if b then exit; until false; until false; r := 1;",
+        "repeat while w = 0 do begin if b then exit; w := 1 end; until false; r := 1;",
+    ] {
+        let e = error(&format!(
+            "procedure t; internal;\nbegin\n  {routine}\nend;\n"
+        ));
+        assert!(e.contains(why), "{routine}: {e}");
+    }
+    let b = body(
+        "procedure t; internal;
+label 9;
+begin
+  repeat
+    ext_$p(1);
+    if b then goto 9;
+  until false;
+9:
+  r := 1;
+end;
+",
+    );
+    assert_eq!(b.last().map(String::as_str), Some("move.w\t#1,(R).l"));
+}

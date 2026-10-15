@@ -3651,3 +3651,79 @@ end;
         "{err}"
     );
 }
+
+/// Constant conditions (bead domain-pascal-pkle; codegen-patterns 7.1,
+/// 7.2): `repeat ... until false` is a loop with no test; `while` with a
+/// constant condition, an `if` with one and `until true` are refused at
+/// the condition.
+#[test]
+fn constant_conditions() {
+    let src = |stmt: &str| {
+        format!(
+            "module m;
+var w: extern integer;
+procedure m_$t;
+begin
+  {stmt}
+end;
+"
+        )
+    };
+    for (name, stmt, msg) in [
+        (
+            "const_if",
+            "if true then w := 1;",
+            "an `if` with a constant condition",
+        ),
+        (
+            "const_while",
+            "while true do w := 1;",
+            "a `while` loop with a constant condition",
+        ),
+        (
+            "const_while_f",
+            "while false do w := 1;",
+            "a `while` loop with a constant condition",
+        ),
+        (
+            "const_until",
+            "repeat w := 1 until true;",
+            "a constant `true` condition",
+        ),
+    ] {
+        let (code, err) = compile_with(name, &src(stmt), &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(msg) && err.contains("not supported yet"),
+            "{err}"
+        );
+    }
+    // `until false`, here a constant expression: a `bra` back to the head
+    // and, with no way out, no epilogue; in a routine that does not
+    // align, no filler, and the module end padded with zero words
+    // (PMAP_$PURIFIER_R 0xE143AE `bra.w 0xE141C8`, the next routine at
+    // 0xE143B2).
+    let asm = compile_with(
+        "const_until_false",
+        &src("repeat w := w + 1 until 1 = 2;"),
+        &["--loop-align=off"],
+    )
+    .unwrap();
+    let body: Vec<&str> = asm
+        .lines()
+        .map(|l| l.split('|').next().unwrap().trim())
+        .skip_while(|l| !l.starts_with("link.w"))
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        body,
+        [
+            "link.w\t%fp,#0",
+            "1:",
+            "addq.w\t#1,(W).l",
+            "bra.s\t1b",
+            ".balignw\t4,0x0000",
+        ],
+        "{asm}"
+    );
+}

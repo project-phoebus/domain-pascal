@@ -32,6 +32,15 @@ only the instructions reachable from the routine's start).  Kinds:
             alignment: `F' the 0x2048 filler before it (whether or not
             the filler is reached), `A' 4-aligned, `U' at 2 mod 4.  A
             backward `b<cc>' to shared code (a `goto' label) counts too.
+    next    a branch (`bra', `b<cc>') to the instruction right after it
+            (bead domain-pascal-pkle: an `exit' ending the body of a
+            loop with no test, codegen-patterns 7.2).
+    over    a conditional branch over one `bra' to the instruction
+            after that `bra' (codegen-patterns 7.1, 7.2).
+    noepi   a routine starting with `link' none of whose reached
+            instructions is `rts', `rtd', `unlk' or `jmp': the address
+            and text of its last reached instruction (a loop with no
+            way out, codegen-patterns 7.2).
 
 usage:
     tools/threadsurvey.py summary          # the counts quoted in codegen-patterns
@@ -50,7 +59,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 import loopalign  # noqa: E402
 
-KINDS = ('tobra', 'thread', 'dead', 'loop')
+KINDS = ('tobra', 'thread', 'dead', 'loop', 'next', 'over', 'noepi')
 
 _TABLE = re.compile(r'^jmp %pc@\(0x([0-9a-f]+),%d\d:w\)')
 _BR = re.compile(r'^(bra|b(?:hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le)|db\w+)([sw]?)\s+'
@@ -158,6 +167,37 @@ def loop_sites(ins, word=None):
     return out
 
 
+def next_sites(ins):
+    """[(addr, mnemonic)] of the branches to the next instruction."""
+    out = []
+    for a, n, t in ins:
+        b = branch(t)
+        if b and not b[0].startswith('db') and b[2] == a + n:
+            out.append((a, b[0] + b[1]))
+    return out
+
+
+def over_sites(ins):
+    """[(addr, mnemonic)] of the conditional branches over one `bra' (to
+    the instruction right after it)."""
+    out = []
+    for (a, n, t), (a2, n2, t2) in zip(ins, ins[1:]):
+        b = branch(t)
+        if (b and b[0] != 'bra' and not b[0].startswith('db') and a2 == a + n
+                and t2.startswith('bra') and b[2] == a2 + n2):
+            out.append((a, b[0] + b[1]))
+    return out
+
+
+def noepi_sites(ins):
+    """[(addr, text)] of the last reached instruction when none of `ins'
+    returns (`rts', `rtd', `unlk', `jmp'); [] otherwise."""
+    if not ins or any(t.startswith(('rts', 'rtd', 'unlk', 'jmp')) for _, _, t in ins):
+        return []
+    a, _, t = max(ins)
+    return [(a, t)]
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -166,6 +206,10 @@ def scan():
         res['thread'] += [(r0, name) + s for s in thread_sites(ins)]
         res['dead'] += [(r0, name) + s for s in dead_sites(ins)]
         res['loop'] += [(r0, name) + s for s in loop_sites(ins)]
+        res['next'] += [(r0, name) + s for s in next_sites(ins)]
+        res['over'] += [(r0, name) + s for s in over_sites(ins)]
+        if loopalign.word(r0) == 0x4E56:
+            res['noepi'] += [(r0, name) + s for s in noepi_sites(ins)]
     return res
 
 
@@ -187,6 +231,10 @@ def summary(res):
     counts('unreached `bra\' after a transfer (transfer)', res['dead'], lambda s: (s[3],))
     counts('loops closed by a backward b<cc> (head entered by, head: F filler, A 4-aligned, U not)', res['loop'],
            lambda s: (s[4], s[5]))
+    counts('branches to the next instruction (branch)', res['next'], lambda s: (s[3],))
+    counts('conditional branches over one `bra\' (branch)', res['over'], lambda s: (s[3],))
+    counts('routines with a `link\' and no reached return (last instruction)', res['noepi'],
+           lambda s: (s[3].split()[0],))
 
 
 def main(argv):
