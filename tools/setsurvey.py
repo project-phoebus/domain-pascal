@@ -30,6 +30,20 @@ here are the ones that only a set (or a packed boolean) gives:
             copy then `andi' (`move Dm,Dn; andi #c,Dn') against the
             constant first (`moveq/move #c,Dn; and Dm,Dn'), by whether
             `moveq' can load the constant.
+    ctest   `btst #k' with a constant bit (codegen-patterns 5.1, "`in' on
+            sets in memory, constant member"; bead domain-pascal-578): on
+            memory (`mem', always a byte: the address's parity, the base
+            kind), or on a data register loaded from memory by the last
+            instruction that wrote it, within 5 instructions (`load': the
+            load's width, the base kind, and whether the low-order part
+            holding bit k at the same number is narrower than the load,
+            `whole', or not, `fits').  The `whole' loads are the tests
+            that do not read only that part: in the image they are on
+            fields tested so in the whole routine, read by `lsr.b #1' for
+            bit 0 elsewhere, and never on an indexed operand's byte.
+            Also counted: `btst #k' for k = 7, 15, 31 (none: the sign is
+            tested with `tst'), and the routines that test one field in
+            both forms.
 
 usage:
     tools/setsurvey.py summary          # the counts quoted in codegen-patterns 5.1
@@ -47,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
-KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc')
+KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc', 'ctest')
 
 _CLR = re.compile(r'^clr([wl]) %(d\d)$')
 _BITREG = re.compile(r'^b(set|clr|tst) %(d\d),%(d\d)$')
@@ -178,6 +192,59 @@ def andc_sites(ins):
     return out
 
 
+_BTSTK = re.compile(r'^btst #(\d+),(.+)$')
+_LOADD = re.compile(r'^move([bwl]) (.+),%(d\d)$')
+_SIZE = {'b': 1, 'w': 2, 'l': 4}
+
+
+def operand_kind(o):
+    """(base kind, displacement or None) of a memory operand's text."""
+    if ':' in o:
+        return 'idx', None
+    m = re.match(r'^%(a\d|fp)@(?:\((-?\d+)\))?$', o)
+    if m:
+        kind = {'fp': 'fp', 'a5': 'a5'}.get(m.group(1), 'An')
+        return kind, int(m.group(2) or 0)
+    m = re.match(r'^0x([0-9a-f]+)$', o)
+    if m:
+        return 'abs', int(m.group(1), 16)
+    return 'other', None
+
+
+def ctest_sites(ins):
+    """`btst #k' on memory or on a register just loaded from memory ->
+    [(addr, form, k, width, base kind, class, operand)]; class is the
+    parity (`odd'/`even') of a memory byte, `whole'/`fits' for a load
+    (above)."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _BTSTK.match(t)
+        if not m:
+            continue
+        k, opnd = int(m.group(1)), m.group(2)
+        if not re.match(r'^%d\d$', opnd):
+            if opnd.startswith('%a') or opnd.startswith('%fp') or opnd.startswith('0x'):
+                kind, d = operand_kind(opnd)
+                cls = '?' if d is None else ('odd' if d % 2 else 'even')
+                out.append((a, 'mem', k, 'b', kind, cls, opnd))
+            continue
+        dn = opnd[1:]
+        for j in range(i - 1, max(i - 6, -1), -1):
+            tj = ins[j][2]
+            if re.search(r',%' + dn + '$', tj):
+                lm = _LOADD.match(tj)
+                src = lm.group(2) if lm else ''
+                if lm and ('@' in src or src.startswith('0x')):
+                    w = lm.group(1)
+                    kind, _ = operand_kind(src)
+                    narrower = (w == 'w' and k < 8) or (w == 'l' and k < 16)
+                    out.append((a, 'load', k, w, kind, 'whole' if narrower else 'fits', src))
+                break
+            if re.search(r'%' + dn + r'\b', tj) or re.match(r'^(b[a-z]+s? 0x|bra|jmp|rts|dbf)', tj):
+                break
+    return out
+
+
 def scan():
     """{kind: [(routine start, routine name, site...)]}."""
     res = {k: [] for k in KINDS}
@@ -197,6 +264,8 @@ def scan():
         res['immmem'] += [(r0, name, a) for a in imm]
         for s in andc_sites(ins):
             res['andc'].append((r0, name) + s)
+        for s in ctest_sites(ins):
+            res['ctest'].append((r0, name) + s)
     return res
 
 
@@ -225,6 +294,28 @@ def summary(res):
     for k, v in sorted(Counter((s[3], s[4]) for s in andc).items()):
         print('  & of a held value: %-11s moveq-able=%-5s %3d  e.g. %s' % (
             k[0], k[1], v, first([s for s in andc if (s[3], s[4]) == k])))
+    ctest_summary(res['ctest'])
+
+
+def ctest_summary(sites):
+    """The counts of `btst #k' on memory and after a load."""
+    print('constant `btst #k\' on memory or a register loaded from it: %d' % len(sites))
+    for k, v in sorted(Counter((s[3], s[5], s[6], s[7]) for s in sites).items()):
+        sel = [s for s in sites if (s[3], s[5], s[6], s[7]) == k]
+        print('  %-4s %s %-5s %-5s %3d  e.g. %s' % (k + (v, first(sel))))
+    sign = [s for s in sites if s[4] in (7, 15, 31)]
+    print('  btst #7, #15 or #31: %d' % len(sign))
+    # A field: (routine, base kind, the word holding the tested byte).
+    forms = {}
+    for s in sites:
+        kind, d = operand_kind(s[8])
+        if d is None or (s[3] == 'load' and s[7] != 'whole'):
+            continue
+        byte = d if s[3] == 'mem' else d + _SIZE[s[5]] - 1 - s[4] // 8
+        forms.setdefault((s[0], kind, byte & ~1), set()).add(s[3])
+    both = sorted('0x%X' % f[0] for f, v in forms.items() if len(v) == 2)
+    print('  routine fields tested both in memory and by a whole load: %d (%s)' % (
+        len(both), ', '.join(both)))
 
 
 def main(argv):

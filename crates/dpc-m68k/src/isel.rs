@@ -5484,16 +5484,19 @@ impl Selector {
                         _ => unreachable!("a call's value is its result register"),
                     },
                     // `k in s` for a constant k and a set of one word or one
-                    // longword: `btst #k` on the set in a register, the
-                    // branch on Z (0xE013BA..0xE013C2 `move.w (190,A2),D0;
-                    // btst #4,D0; beq.w`; 0xE031B2 `btst #14,D5; bne.s`).
+                    // longword ([`Self::set_bit_test`]): `btst #k` on the
+                    // byte that holds it in memory, or on the set (or its
+                    // low word) in a register, the branch on Z; bit 7 of a
+                    // byte as its sign (tty_$i_kill_line 0xE1B6B6 `btst
+                    // #2,(0x1f,A2); beq.b`; 0xE1B63E `tst.b (9,A2); bmi`;
+                    // 0xE031B2 `btst #14,D5; bne.s`).
                     Expr::SetMember {
                         elem,
                         set,
                         set_width,
                     } if matches!(**elem, Expr::Const { .. }) => {
-                        self.set_bit_test(elem, set, *set_width, false)?;
-                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        let (_, cc) = self.set_bit_test(elem, set, *set_width, false)?;
+                        self.jump(if when { cc } else { cc.negate() }, l);
                         return Ok(());
                     }
                     // A variable element of a one-longword set: `btst Dn,Dm`
@@ -8723,9 +8726,13 @@ impl Selector {
                 set_width,
             } => {
                 if matches!(**elem, Expr::Const { .. }) {
-                    let r = self.set_bit_test(elem, set, *set_width, true)?;
+                    let (r, cc) = self.set_bit_test(elem, set, *set_width, true)?;
+                    let r = match r {
+                        Some(r) => r,
+                        None => self.alloc_d()?,
+                    };
                     self.out.push(Insn::Scc {
-                        cond: Cond::Ne,
+                        cond: cc,
                         dst: Ea::Reg(Reg::D(r)),
                     });
                     return Ok(Val::Tmp(r));
@@ -11179,18 +11186,52 @@ impl Selector {
         }
     }
 
-    /// `k in s` for a constant `k` and a set of one word or one longword:
-    /// the set's value in a data register, then `btst #k` on it
-    /// (REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A416 `move.w (22,A0),D0; btst
-    /// #13,D0`; 0xE013BA `move.w (190,A2),D0; btst #4,D0`; 0xE3EF4A
-    /// `move.l (d,An),Dn` then `btst #k` with k >= 16 for a longword).  In
-    /// compiled code a `btst #k` on a register that a `move.w` from memory
-    /// loaded has 0 <= k <= 15 (250 sites, 58 of them with k < 8); `btst
-    /// #k,<memory>` (422 sites) needs k < 8 and is taken to be the test of
-    /// a bit field or a byte set (not catalogued).  Returns the register,
-    /// a new one when `value` (the boolean is then set in it with `sne`,
-    /// 0xE4A41A `sne D0`), else possibly a held one.
-    fn set_bit_test(&mut self, elem: &Expr, set: &Expr, w: Width, value: bool) -> Res<u8> {
+    /// `k in s` for a constant `k` and a set of one word or one longword
+    /// (codegen-patterns 5.1, "`in` on sets in memory, constant member";
+    /// `tools/setsurvey.py`, kind `ctest`).  Returns the register the test
+    /// left its value in, if any, and the condition that is true when `k`
+    /// is a member.
+    ///
+    /// - A set in memory, at an `(An)`, `(d,An)` or absolute address and
+    ///   not volatile, is read only as far as the low-order part that
+    ///   holds bit `k` *at the same bit number*: the byte at the set's
+    ///   last address for k < 8, `btst #k` on it (tty_$i_kill_line
+    ///   0xE1B6B6 `btst #2,(0x1f,A2)`, TTY_$I_RCV 0xE1BAB6 `btst
+    ///   #0,(23,A2)`; as a value `btst; sne Dn`, TTY_$K_GET 0xE1C54E), bit
+    ///   7 as the byte's sign (`tst.b (9,A2); bmi`, 0xE1B63E: no `btst #7`
+    ///   exists in compiled code); the word at its last two bytes for
+    ///   member 8..15 of a longword, loaded (TTY_$I_RCV 0xE1B972 `move.w
+    ///   (22,A2),D0; btst #12,D0`).  The bit is never renumbered: member
+    ///   8..15 of a word set is tested in the loaded word (PROC2's word at
+    ///   -186: members 8..13 `move.w` in 31 routines, members 2..6 `btst
+    ///   (-185,An)`), member 16..30 of a longword in the loaded longword
+    ///   (PROC2_$SET_SIG_MASK 0xE3F94A `move.l; btst #17`).
+    /// - Otherwise the set's value in a data register, then `btst #k` on
+    ///   it: a set held in a register (0xE031B2 `btst #14,D5`), an
+    ///   indexed operand (`(d,An,Dn)`: the four k < 8 sites are whole,
+    ///   0xE4437E, 0xE5F4C8, 0xE5F7B8, 0xE5FB70), a volatile set (not
+    ///   catalogued).  The boolean value takes `sne` in that register
+    ///   (REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0; btst
+    ///   #13,D0; sne D0`).
+    ///
+    /// Member 7, 15 or 31 tested in a register is refused (member 15 of a
+    /// word set or of a longword's low word, 31 of a longword, 7 of a set
+    /// read whole: volatile, indexed or held): compiled code has no `btst
+    /// #7`, `#15` or `#31` on any operand (916 `btst #k` sites), so the
+    /// original tested such a bit some other way, not catalogued for sets
+    /// (a lead for 7: 0xE19106..0xE1910C `move.w (6,A0),D3; tst.b D3;
+    /// bpl` on the WIN_ controller's status word).  The whole-value
+    /// tests of k < 8 in memory that the image also has (0xE013BA `move.w
+    /// (190,A2),D0; btst #4,D0`; tty_$i_put_chars 0xE1B0E6) are read as
+    /// integer bit tests (`&` of one bit, `odd`), not as `in`
+    /// (codegen-patterns 5.1).
+    fn set_bit_test(
+        &mut self,
+        elem: &Expr,
+        set: &Expr,
+        w: Width,
+        value: bool,
+    ) -> Res<(Option<u8>, Cond)> {
         let Expr::Const { value: k, .. } = elem else {
             unreachable!()
         };
@@ -11205,14 +11246,46 @@ impl Selector {
                 "`in` with a constant element outside the set's bits is",
             ));
         }
+        let k = *k as u32;
+        let volatile = matches!(
+            set,
+            Expr::Load {
+                addr: Addr::Volatile { .. },
+                ..
+            }
+        );
         let v = self.eval(set)?;
         let r = match v {
             Val::Reg(Reg::D(r)) if !value => r,
             Val::Tmp(r) => r,
             Val::Mem(ea) => {
+                let narrow = !volatile && matches!(ea, Ea::Ind(_) | Ea::Disp(..) | Ea::AbsL(..));
+                if narrow && k < 8 {
+                    let byte = self.byte_of(ea, w.bytes() - 1)?;
+                    if k == 7 {
+                        self.out.push(Insn::Tst {
+                            size: Size::B,
+                            dst: byte,
+                        });
+                        return Ok((None, Cond::Mi));
+                    }
+                    self.out.push(Insn::BtstImm {
+                        bit: k as u8,
+                        dst: byte,
+                    });
+                    return Ok((None, Cond::Ne));
+                }
+                let (ea, lw) = if narrow && w == Width::Long && k < 16 {
+                    (self.byte_of(ea, 2)?, Width::Word)
+                } else {
+                    (ea, w)
+                };
+                if matches!(k, 7 | 15 | 31) {
+                    return Err(Self::sign_member(self.span));
+                }
                 let d = self.alloc_d()?;
                 self.out.push(Insn::Move {
-                    size: size_of(w),
+                    size: size_of(lw),
                     src: ea,
                     dst: Ea::Reg(Reg::D(d)),
                 });
@@ -11225,11 +11298,24 @@ impl Selector {
                 ))
             }
         };
+        if matches!(k, 7 | 15 | 31) {
+            return Err(Self::sign_member(self.span));
+        }
         self.out.push(Insn::BtstImm {
-            bit: *k as u8,
+            bit: k as u8,
             dst: Ea::Reg(Reg::D(r)),
         });
-        Ok(r)
+        Ok((Some(r), Cond::Ne))
+    }
+
+    /// The refusal of [`Self::set_bit_test`] for bit 7, 15 or 31 of a
+    /// set tested in a register.
+    fn sign_member(span: Span) -> Diagnostic {
+        unsupported(
+            span,
+            "`in` testing member 7, 15 or 31 of a set in a register (no `btst #7`/`#15`/`#31` \
+             exists in compiled code; the original's form for a set is not catalogued) is",
+        )
     }
 
     /// `elem in set` for a variable element and a one-longword set: the

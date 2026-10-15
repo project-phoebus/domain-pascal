@@ -300,6 +300,152 @@ fn membership() {
     );
 }
 
+/// `k in s` for a constant `k` on a set in memory (codegen-patterns 5.1,
+/// "`in` on sets in memory, constant member"): the low-order part that
+/// holds bit k at the same bit number, nothing renumbered.
+#[test]
+fn constant_members_in_memory() {
+    let t = |cond: &str| {
+        body(&format!(
+            "procedure t(p: rp); options(val_param); begin gw := 0; if {cond} then gw := 1 end;"
+        ))
+    };
+    // Member 0..6: `btst #k` on the set's last byte (tty_$i_kill_line
+    // 0xE1B6B6 `btst #2,(0x1f,A2)`; TTY_$I_RCV 0xE1BAB6 `btst #0,(23,A2)`).
+    assert_eq!(
+        t("2 in p^.w"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "btst\t#2,(1,%a0)",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    assert_eq!(
+        t("e05 in p^.l"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "btst\t#5,(5,%a0)",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // Member 7: the byte's sign (0xE1B63E `tst.b (9,A2); bmi`).
+    assert_eq!(
+        t("not (7 in p^.w)"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "tst.b\t(1,%a0)",
+            "bmi.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // Member 8..15 of a longword: its low word loaded (TTY_$I_RCV 0xE1B972
+    // `move.w (22,A2),D0; btst #12,D0`).
+    assert_eq!(
+        t("e12 in p^.l"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "move.w\t(4,%a0),%d0",
+            "btst\t#12,%d0",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // Member 8..14 of a word, 16..30 of a longword: the whole set loaded
+    // (PROC2's word at -186, members 8..13; PROC2_$SET_SIG_MASK 0xE3F94A
+    // `move.l; btst #17`).
+    assert_eq!(
+        t("12 in p^.w"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "move.w\t(%a0),%d0",
+            "btst\t#12,%d0",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    assert_eq!(
+        t("e17 in p^.l"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t(GW).l",
+            "move.l\t(2,%a0),%d0",
+            "btst\t#17,%d0",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // As a value: `btst; sne` (TTY_$K_GET 0xE1C54E `btst #1,(0x17,A2);
+    // sne D1`), `tst.b; smi` for bit 7.
+    assert_eq!(
+        body("function t(p: rp): boolean; options(val_param); begin t := e01 in p^.l end;"),
+        ["movea.l\t(8,%fp),%a0", "btst\t#1,(5,%a0)", "sne\t%d0"]
+    );
+    assert_eq!(
+        body("function t(p: rp): boolean; options(val_param); begin t := 7 in p^.w2 end;"),
+        ["movea.l\t(8,%fp),%a0", "tst.b\t(0x2f,%a0)", "smi\t%d0"]
+    );
+    // The sign member of the loaded part: no `btst #15`/`#31` in compiled
+    // code; refused.
+    assert!(error(
+        "procedure t(p: rp); options(val_param); begin gw := 0; if 15 in p^.w then gw := 1 end;"
+    )
+    .contains("member 7, 15 or 31"));
+    assert!(error(
+        "procedure t(p: rp); options(val_param); begin gw := 0; if e31 in p^.l then gw := 1 end;"
+    )
+    .contains("member 7, 15 or 31"));
+    // Member 7 of a set read whole (volatile here) is tested in a register,
+    // where no `btst #7` exists either; refused.
+    assert!(error(
+        "type vw = [volatile] set of 0..15; var gv: extern vw;
+         procedure t; begin gw := 0; if 7 in gv then gw := 1 end;"
+    )
+    .contains("member 7, 15 or 31"));
+    // A volatile or device set is read whole, at its own size, never
+    // narrowed (ref 3.15.1, 3.15.3: referenced exactly as written).
+    assert_eq!(
+        body(
+            "type dw = [device] set of 0..15; var gd: extern dw;
+             procedure t; begin gw := 0; if 3 in gd then gw := 1 end;"
+        ),
+        [
+            "clr.w\t(GW).l",
+            "move.w\t(GD).l,%d0",
+            "btst\t#3,%d0",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    assert_eq!(
+        body(
+            "type vl = [volatile] set of e32; var gv: extern vl;
+             procedure t; begin gw := 0; if e12 in gv then gw := 1 end;"
+        ),
+        [
+            "clr.w\t(GW).l",
+            "move.l\t(GV).l,%d0",
+            "btst\t#12,%d0",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+}
+
 #[test]
 fn refusals() {
     // `s := s * c` in place: `andi` or the mask in a register (0xE1C006).
@@ -426,8 +572,15 @@ impl Machine {
                 self.a[*a as usize].wrapping_add(*d as u32).wrapping_add(x)
             }
             Ea::AbsL(s, o) => {
-                assert_eq!(s, "GW", "symbol {s}");
-                GW.wrapping_add(*o as u32)
+                // GS and GL: [`DECLS`]'s record's `w` and `l` seen as
+                // module variables.
+                let at = match s.as_str() {
+                    "GW" => GW,
+                    "GS" => REC,
+                    "GL" => REC + 2,
+                    _ => panic!("symbol {s}"),
+                };
+                at.wrapping_add(*o as u32)
             }
             e => panic!("operand {e:?}"),
         }
@@ -823,6 +976,113 @@ fn membership_of_a_longword_set_follows_the_bit_model() {
             m.wr(FP + 8, Size::W, k);
             m.run(&u);
             assert_eq!(m.rd(GW, Size::W) == 1, konst.contains(&k), "{k} in [..]");
+        }
+    }
+}
+
+/// `k in s` for every constant member of a word and a longword set in
+/// memory (all but the sign members, refused), narrowed or not, in a
+/// condition and as a value.
+#[test]
+fn constant_membership_in_memory_follows_the_bit_model() {
+    let mut src = DECLS.to_string();
+    for k in 0..15 {
+        src += &format!(
+            "procedure w{k}(p: rp); options(val_param);\n\
+             begin gw := 0; if {k} in p^.w2 then gw := 1 end;\n\
+             function v{k}(p: rp): boolean; options(val_param);\n\
+             begin v{k} := {k} in p^.w end;\n"
+        );
+    }
+    for k in 0..31 {
+        src += &format!(
+            "procedure l{k}(p: rp); options(val_param);\n\
+             begin gw := 0; if e{k:02} in p^.l2 then gw := 1 end;\n"
+        );
+    }
+    let w: Vec<_> = (0..15).map(|k| code(&src, &format!("W{k}"))).collect();
+    let v: Vec<_> = (0..15).map(|k| code(&src, &format!("V{k}"))).collect();
+    // Member 15 of the longword is refused like 31 (its low word's sign).
+    let lk: Vec<usize> = (0..31).filter(|&k| k != 15).collect();
+    let l: Vec<_> = lk.iter().map(|k| code(&src, &format!("L{k}"))).collect();
+    let mut rng = Rng(0x0f1e_2d3c_4b5a_6978);
+    for _ in 0..8 {
+        let mut m = Machine::new();
+        random_record(&mut m, &mut rng);
+        let (w2, ws, l2) = (members(&m, 46, 2), members(&m, 0, 2), members(&m, 48, 4));
+        for k in 0..15 {
+            m.wr(FP + 8, Size::L, REC);
+            m.run(&w[k]);
+            assert_eq!(m.rd(GW, Size::W) == 1, w2[k], "{k} in w2");
+            m.run(&v[k]);
+            assert_eq!(m.d[0] & 0xff == 0xff, ws[k], "{k} in w");
+            assert!(m.d[0] & 0xff == 0xff || m.d[0] & 0xff == 0, "boolean {k}");
+        }
+        for (i, &k) in lk.iter().enumerate() {
+            m.wr(FP + 8, Size::L, REC);
+            m.run(&l[i]);
+            assert_eq!(m.rd(GW, Size::W) == 1, l2[k], "e{k} in l2");
+        }
+    }
+}
+
+/// `k in s` for every constant member (but the refused 15 and 31) of a
+/// word and a longword set at the other kinds of address: absolute (a
+/// module variable), `(An)` (a `var` parameter) and the frame (a value
+/// parameter's copy).
+#[test]
+fn constant_membership_at_other_addresses_follows_the_bit_model() {
+    let mut src = DECLS.to_string();
+    src += "type l32 = set of e32;\nvar gs: extern w16; gl: extern l32;\n";
+    let wk: Vec<u32> = (0..15).collect();
+    let lk: Vec<u32> = (0..31).filter(|&k| k != 15).collect();
+    for &k in &wk {
+        src += &format!(
+            "procedure aw{k}; begin gw := 0; if {k} in gs then gw := 1 end;\n\
+             procedure fw{k}(s: w16); begin gw := 0; if {k} in s then gw := 1 end;\n"
+        );
+    }
+    for &k in &lk {
+        src += &format!(
+            "procedure al{k}; begin gw := 0; if e{k:02} in gl then gw := 1 end;\n\
+             procedure il{k}(var s: l32); begin gw := 0; if e{k:02} in s then gw := 1 end;\n"
+        );
+    }
+    let run = |m: &mut Machine, name: &str, arg: Option<u32>| -> bool {
+        if let Some(a) = arg {
+            m.wr(FP + 8, Size::L, a);
+        }
+        m.wr(GW, Size::W, 0x5a5a);
+        m.run(&code(&src, name));
+        m.rd(GW, Size::W) == 1
+    };
+    let mut rng = Rng(0x7a69_5848_3726_1504);
+    for _ in 0..8 {
+        let mut m = Machine::new();
+        random_record(&mut m, &mut rng);
+        let (w, l, w2, l2) = (
+            members(&m, 0, 2),
+            members(&m, 2, 4),
+            members(&m, 46, 2),
+            members(&m, 48, 4),
+        );
+        for &k in &wk {
+            let k = k as usize;
+            assert_eq!(run(&mut m, &format!("AW{k}"), None), w[k], "{k} in gs");
+            assert_eq!(
+                run(&mut m, &format!("FW{k}"), Some(REC + 46)),
+                w2[k],
+                "{k} in s (frame)"
+            );
+        }
+        for &k in &lk {
+            let k = k as usize;
+            assert_eq!(run(&mut m, &format!("AL{k}"), None), l[k], "e{k} in gl");
+            assert_eq!(
+                run(&mut m, &format!("IL{k}"), Some(REC + 48)),
+                l2[k],
+                "e{k} in s (An)"
+            );
         }
     }
 }

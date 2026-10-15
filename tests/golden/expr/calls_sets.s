@@ -46,8 +46,7 @@ rts
 BIT4:
 link.w %fp,#-4
 movea.l (RP).l,%a0
-move.w (0x16,%a0),%d0
-btst #4,%d0
+btst #4,(0x17,%a0)
 beq.s 1f
 clr.w (R).l
 1:

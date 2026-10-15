@@ -30,8 +30,7 @@ rts
 PUSHES:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-move.w (4,%a0),%d0
-btst #1,%d0
+btst #1,(5,%a0)
 sne %d0
 move.b %d0,-(%sp)
 movea.l (8,%fp),%a1

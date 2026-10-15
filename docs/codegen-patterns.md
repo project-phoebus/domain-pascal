@@ -1614,10 +1614,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       TTY_$K_INQ_FLAGS compiles (refused before) and differs only
       elsewhere: the `out` slot loaded at entry into A2 where the image
       loads it after the status test into A1 (0xE674B4, bead
-      domain-pascal-udmb), and the member
-      test as `move.w (8,A0),D0; btst #4,D0` where the image tests the
-      byte, `btst #4,(9,A0)` (bead domain-pascal-578), A0 the base in
-      both; TTY_$K_SET_FLAG stubbed as before (a branch to a `bra`;
+      domain-pascal-udmb) (the member test was `move.w (8,A0),D0; btst
+      #4,D0` where the image tests the byte, `btst #4,(9,A0)`, until bead
+      domain-pascal-578, 5.1); TTY_$K_SET_FLAG stubbed as before (a branch to a `bra`;
       threaded since bead domain-pascal-o6p, it stops at a slot load
       after a branch, 12.4 R4(b), now).
     The 4 SIO_$K_* routines that park where a call follows have no
@@ -2298,26 +2297,19 @@ this pair.
   to `in`; and the code for one-word sets held in a register (not seen
   yet; `dpc` rejects them).
 - **Constant member of a one-word or one-longword set (Verified;
-  implemented):** the set's value loaded into a data register, then `btst
-  #k` on it: REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0;
-  btst #13,D0; sne D0` (a boolean function, `sne` in the set's register);
-  in conditions 0xE013BA..0xE013C2 `move.w (190,A2),D0; btst #4,D0;
-  beq.w` and 0xE031B2 `btst #14,D5; bne.s`.  Survey of `btst #k` in
-  compiled code (ad-hoc script): on a data register that a `move.w` from
-  memory loaded, k = 8..15 ×192 and k < 8 ×58; after `move.l`, k >= 16 ×6;
-  `btst #k,<memory>` ×422, all with k < 8 (the 68000 takes the bit number
-  mod 8 there).  So a word set is loaded and tested whole whatever k is.
-  The memory form was taken to be the test of a bit of a byte object (a
-  packed field or a byte of a larger set): XPD_$INHERIT_PTRACE_OPTIONS
-  0xE5B17C `btst #3,(13,A0); sne D0`, not catalogued; the TTY sets are
-  tested in that form too (below, "`in` on sets in memory, constant
-  member"), so the choice between the two is not settled.  `dpc`
-  (`isel.rs`, `set_bit_test`) implements the register form for sets of
-  2 and 4 bytes; a non-constant element on a word set is rejected (`btst
-  Dn,Dm` takes the bit mod 32, not catalogued for words), and so is a
-  constant element beyond the set's bits (`20 in s` for a word set would
-  test a bit of the register above the loaded word; the value is false,
-  ref 3.9.3, p. 3-16, but the original's code for it is not catalogued).
+  implemented):** see "`in` on sets in memory, constant member" below:
+  a set in memory is read only as far as the part holding bit k at the
+  same bit number (the byte for k < 8, `btst #k,(d,An)`; the low word of
+  a longword for 8..15); otherwise, and for a set held in a register,
+  the set's value in a data register, then `btst #k` on it:
+  REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0; btst
+  #13,D0; sne D0` (a boolean function, `sne` in the set's register);
+  0xE031B2 `btst #14,D5; bne.s`.  `dpc` (`isel.rs`, `set_bit_test`)
+  rejects a non-constant element on a word set (`btst Dn,Dm` takes the
+  bit mod 32, not catalogued for words), and a constant element beyond
+  the set's bits (`20 in s` for a word set would test a bit of the
+  register above the loaded word; the value is false, ref 3.9.3, p.
+  3-16, but the original's code for it is not catalogued).
 - **Member 0 (or bit 0) as `lsr.b #1` (Verified at 9 sites; the choice
   Uncertain):** a value loaded whole into a data register, then `lsr.b
   #1,Dn` and the carry: 0xE1B0F6 `move.l (12,A0),D1; lsr.b #1,D1;
@@ -2474,35 +2466,92 @@ model run against the bit model of Figure 3-6).
   Refused.  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
   `bset` each member of a range clamped to it) has no compiled caller: a
   run-time range `[a..b]` is refused.
-- **`in` on sets in memory, constant member (sites Verified; rule
-  Uncertain):** the TTY code tests the same set fields in two forms.
-  Narrowed: `btst #k` on the byte holding member k for k < 8
-  (module-local 0xE1B456 at 0xE1B466 `btst #0,(15,A2)`, output_flags;
-  0xE1B3F6 `btst #4,(31,A2)`, echo_flags; module-local 0xE1B8B0 at
-  0xE1B8F6 `btst #4,(9,A2)`, state_flags; TTY_$K_INQ_FLAGS 0xE674BA
-  `btst #4,(9,A0)`), and a load of the *word* holding it for k = 8..15
-  (TTY_$I_RCV 0xE1B972 `move.w (22,A2),D0; btst #12,D0` on the longword
-  input_flags at 20; the same routine tests member 0 as `btst
-  #0,(23,A2)`, 0xE1BAB6).  Whole: the field loaded at its own size
-  (module-local 0xE1B00A at 0xE1B0E6/0xE1B0F6 `move.l (12,A0),D1`;
-  0xE1B01E `move.w (8,A0),D1; btst #5`; module-local 0xE1BCFC at
-  0xE1BD0A and TTY_$I_ERR 0xE1BE3C/0xE1BE54 `move.l (20,A0),Dn; btst
-  #12/#10`).  In TTY the whole form occurs where the descriptor's
-  address is re-read from a frame slot (or through the static link) at
-  each reference, the narrowed form where it is held in a register
-  (lead: ../source pascal-translation-notes finding 1; ../source
-  `tty/README-pascal.md` "Findings", 1, and `tty.ins.pas` "Types").
-  The image outside TTY does not follow that criterion: AST tests the
-  word at 190 whole with the base held (0xE013BA, 0xE01446, 0xE04892
-  `move.w (190,A2),D0; btst #4,D0`; 0xE02CD4 through A3), although it
-  sets the same member as `bset #4,(191,A2)` (0xE0143C); a heuristic
-  scan (ad hoc, not kept) finds 38 `move.w (d,An),Dn; btst #k<8,Dn`
-  with An not just reloaded, and 44 memory `btst #k` right after a
-  `movea` reload (e.g. 0xE028C4 `movea.l (-152,A6),A1; btst
-  #1,(15,A1)`; 0xE0306E through the static link, `btst #1,(29,A2)`;
-  the objects' types are not known, so byte objects are not ruled
-  out).  `dpc` keeps the whole form (above), so TTY routines with
-  narrowed tests do not match yet (bead domain-pascal-578).
+- **`in` on sets in memory, constant member (survey Verified; reading
+  of the exceptions Uncertain; implemented, bead domain-pascal-578).**
+  Survey: `tools/setsurvey.py summary`, kind `ctest` (every `btst #k`
+  with a constant bit in compiled code, on memory or on a data register
+  that a `move` from memory loaded just before; 713 sites).
+  - **The rule:** the set is read only as far as the low-order part
+    that holds bit k *at the same bit number*, never renumbered:
+    - k < 8: `btst #k` on the set's last byte (an odd address for the
+      word and longword fields): tty_$i_kill_line 0xE1B6B6 `btst
+      #2,(0x1f,A2)`, TTY_$I_RCV 0xE1BAB6 `btst #0,(23,A2)` on the
+      longword at 20, PROC1_$RESUME 0xE1479A `btst #3,(85,A2)`, PROC2's
+      word at -186 `btst #1..6,(-185,An)`; through a base just reloaded
+      too (PROC2's module-local 0xE748F8 `movea.l (-188,A6),A1; btst
+      #3,(-185,A1)`; AST 0xE028C4).  As a value `btst; sne Dn` (TTY_$K_GET
+      0xE1C54E `btst #1,(0x17,A2); sne D1`).  Member 7 is the byte's
+      sign, `tst.b; bmi`/`smi` (0xE1B63E `tst.b (9,A2); bmi`): no `btst
+      #7` (nor `#15`, `#31`) exists in compiled code.  Memory forms: 356
+      at odd addresses, 66 at even ones (byte objects or packed booleans,
+      5.3, which take any byte; no field shows an even-byte `btst` and a
+      `move.w` of the same word with k >= 8).
+    - k = 8..15 of a longword: its low word loaded, `btst #k` (TTY_$I_RCV
+      0xE1B972 `move.w (22,A2),D0; btst #12,D0`).
+    - Otherwise the whole set: k = 8..15 of a word (PROC2's word at -186:
+      members 8..13 by `move.w` in 29 routines, members 1..6 in memory in
+      11, 5 of them with both; FIM_ (20,A6), WIN_ (-26,A6) likewise), k = 16..30 of a
+      longword (PROC2_$SET_SIG_MASK 0xE3F94A `move.l (-100,A2),D?; btst
+      #17`, ×5; 0xE3EF4A; NETLOG_$PROC_START 0xE71AF0).  An *update* is
+      narrowed with renumbering (above, `bset #c mod 8`; PROC2_$FORK
+      0xE732B4 `bclr #0,(-186,A2)`, member 8 of the word whose tests of
+      8..13 are `move.w`).
+  - **The exceptions:** 78 tests read more than that part (`whole` in
+    the survey): a word loaded for k < 8 ×61 (0xE013BA..0xE013BE `move.w
+    (190,A2),D0; btst #4,D0`, AST's word at 190 in 5 routines; AREA_'s
+    field at 46 in 11; NETWORK (-878,A2); RING (-48,A2); FILE_
+    0xE5EDB4..0xE5EE58), a longword for k < 16 ×13 (tty_$i_put_chars
+    0xE1B0E6, 0xE1B166, 0xE1B1E8 `move.l (12,A0),D1`; TTY_$I_ERR
+    0xE1BE3C, 0xE1BE54; TTY_$I_STORE_PARITY 0xE1BD0A; TERM_$INQUIRE
+    0xE66E68.. on frame longwords), an indexed operand ×4 (0xE4437E,
+    0xE5F4C8, 0xE5F7B8, 0xE5FB70: no `btst #k,(d,An,Dn)` exists).  What
+    they have in common is the *field*, not the code around the test:
+    - per routine, a field is tested one way only: of the routine
+      fields with a narrowable test, 2 have both forms, and in both the
+      loaded copy is reused (PROC1_$SUSPEND 0xE1482A `move.w (84,A3),D1;
+      btst #3,D1; ...; moveq #6,D2; and.w D1,D2; ...; btst #1,D1`, then
+      after a call `btst #1,(85,A3)`; TTY_$I_RCV 0xE1B994 tests a copy
+      saved in D4 before an `andi` to the field: a local);
+    - no context rule fits.  Not the base: AST's word at 190 and its
+      byte 15 are tested through the same A2, held since the entry, in
+      the same routine (0xE013BA whole, 0xE013C6 `btst #0,(15,A2)`);
+      the TTY reading (base reloaded from a frame slot: whole; held:
+      narrowed; ../source pascal-translation-notes finding 1) is refuted
+      by PROC1, PROC2 0xE748F8 and AST 0xE028C4 (reloaded, narrowed).
+      Not an up-level reference: FILE_$PRIV_LOCK's word parameter at
+      0x14 is tested in memory by FILE_$PRIV_LOCK itself (0xE5F15E
+      `btst #1,(21,A6)`) and
+      by one nested routine (0xE5ECAE `btst #5,(21,A0)`, A0 its static
+      link), whole by the other (0xE5EDB4 `move.w (20,A3),D0`, A3 the
+      static link).  Not the count of tests, the context (condition or
+      value), the module or its place in the image (whole tests in 14 of
+      the 52 code segments with sites, 11 of them with memory tests too);
+    - 7 of the 9 `lsr.b #1` bit-0 tests (below) are on such fields
+      (tty_$i_put_chars 0xE1B0F6, AREA_ 0xE07B66/0xE08826/0xE0905A on
+      46, AREA_/MST_ (-2,An), AUDIT (168,A5)), and compiled code has no
+      `and` with a one-bit mask tested for zero (33 with several bits),
+      so a one-bit `(x & c) <> 0` must become a `btst` too.  The reading
+      taken: the whole form is an integer bit test (`&` of one bit,
+      `odd`), possibly of a set viewed through a type transfer (ref
+      4-197), and `in` is always narrowed.  **Uncertain:** the image
+      cannot show the source; the integer form is not implemented
+      (bead domain-pascal-3xwx).
+  - `dpc` (`isel.rs`, `set_bit_test`; tests `crates/dpc-m68k/tests/sets.rs`
+    `constant_members_in_memory` and the 68010 model run
+    `constant_membership_in_memory_follows_the_bit_model`; goldens
+    `expr/calls_sets`, `stores/bool_stores`): the rule above for a set at
+    `(An)`, `(d,An)` or an absolute address; the whole set for an
+    indexed operand, a volatile set (not catalogued) and a set held in a
+    register.  Refused: member 7, 15 or 31 tested in a register (member
+    15 of a word or of a longword's low word, 31 of a longword, 7 of a
+    set read whole: volatile, indexed or held), since no `btst #7`,
+    `#15` or `#31` exists on any operand among the 916 `btst #k` of
+    compiled code (a lead for 7: 0xE19106..0xE1910C `move.w (6,A0),D3;
+    tst.b D3; bpl` on the WIN_ controller's status word, the type not
+    known); a loaded
+    part reused for several tests (PROC1_$SUSPEND, TTY_$I_RCV 0xE1BBC2
+    `move.w (22,A2),D1` for members 9, 3 and 4) is not reproduced: `dpc`
+    tests each member in memory (bead domain-pascal-ozaq).
 
 ### 5.2 Records and arrays (Verified / Reported)
 

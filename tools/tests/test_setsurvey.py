@@ -53,6 +53,38 @@ class MemberTest(unittest.TestCase):
         self.assertEqual(setsurvey.memb_sites(ins), [])
 
 
+class ConstantTestTest(unittest.TestCase):
+    def test_byte_in_memory(self):
+        # tty_$i_kill_line 0xE1B6B6
+        ins = insns(['btst #2,%a2@(31)', 'beqs 0x200'])
+        self.assertEqual(setsurvey.ctest_sites(ins),
+                         [(0x100, 'mem', 2, 'b', 'An', 'odd', '%a2@(31)')])
+
+    def test_whole_word_load(self):
+        # 0xE013BA..0xE013BE: member 4 could be read in byte 191
+        ins = insns(['movew %a2@(190),%d0', 'btst #4,%d0', 'beqw 0x200'])
+        self.assertEqual(setsurvey.ctest_sites(ins),
+                         [(0x102, 'load', 4, 'w', 'An', 'whole', '%a2@(190)')])
+
+    def test_low_word_of_a_longword(self):
+        # TTY_$I_RCV 0xE1B972: member 12 of the longword at 20, its low word
+        ins = insns(['movew %a2@(22),%d0', 'btst #12,%d0', 'beqs 0x200',
+                     'movel %a0@(20),%d1', 'btst #10,%d1'])
+        self.assertEqual(setsurvey.ctest_sites(ins),
+                         [(0x102, 'load', 12, 'w', 'An', 'fits', '%a2@(22)'),
+                          (0x108, 'load', 10, 'l', 'An', 'whole', '%a0@(20)')])
+
+    def test_register_not_loaded_from_memory(self):
+        ins = insns(['movew %d3,%d0', 'btst #4,%d0', 'btst #14,%d5'])
+        self.assertEqual(setsurvey.ctest_sites(ins), [])
+
+    def test_indexed(self):
+        # 0xE5F4C8
+        ins = insns(['movew %a5@(28,%d1:w),%d0', 'btst #1,%d0'])
+        self.assertEqual(setsurvey.ctest_sites(ins),
+                         [(0x102, 'load', 1, 'w', 'idx', 'whole', '%a5@(28,%d1:w)')])
+
+
 class OtherFormsTest(unittest.TestCase):
     def test_difference_tested(self):
         # PROC2_$SIGPAUSE 0xE3FAC6..0xE3FAD0

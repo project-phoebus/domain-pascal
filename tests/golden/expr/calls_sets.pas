@@ -5,9 +5,10 @@
     (0xE01BA2..0xE01BA4 `addq.w #8,SP; move.w D0,D1'); a boolean result
     tested with `tst.b D0' after the pop (0xE0082C..0xE00830); the tail
     wrapper `f := g(x)', the call followed by the epilogue (ACL_$IS_SUSER);
-  - `k in s' for a constant k and a one-word set: `move.w; btst #k,Dn;
-    sne Dn' (REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A), and in a condition
-    `btst #k,Dn; beq' (0xE013BA..0xE013C2);
+  - `k in s' for a constant k and a one-word set: member 8..15 `move.w;
+    btst #k,Dn; sne Dn' (REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A), member
+    0..6 in a condition `btst #k' on the set's low byte and `beq'
+    (tty_$i_kill_line 0xE1B6B6..0xE1B6BC);
   - a comparison as a boolean result: the compare, then `s<cc>'
     (AUDIT_$IS_PROCESS_AUDITED 0xE70DA8..0xE70DAC; ACL_$IN_SUBSYS
     0xE470B6..0xE470BA `sgt'). }
