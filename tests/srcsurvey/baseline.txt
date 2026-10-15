@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 90ba05816657e10f45e76486cd3e43e29896ea37
+# source: 2c2a368fc86409cff4f40eb233ee8bd76a703e6e
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -19,6 +19,17 @@ STUB	bat/bat.pas	bat_$n_free
 STUB	bat/bat.pas	bat_$reserve
 MISMATCH	bat/bat.pas	bat_$cancel
 OK	bat/bat.pas	bat_$get_bat_step
+STUB	cal/os_cal_unwired.pas	cal_$verify
+STUB	cal/os_cal_unwired.pas	cal_$get_info
+OK	cal/os_cal_unwired.pas	cal_$set_drift
+STUB	cal/os_cal_unwired.pas	cal_$get_local_time
+STUB	cal/os_cal_unwired.pas	cal_$apply_local_offset
+STUB	cal/os_cal_unwired.pas	cal_$remove_local_offset
+STUB	cal/os_cal_unwired.pas	cal_$weekday
+STUB	cal/os_cal_unwired.pas	cal_$decode_time
+MISMATCH	cal/os_cal_wired.pas	cal_$read_timezone
+STUB	cal/os_cal_wired.pas	cal_$write_timezone
+MISMATCH	cal/os_cal_wired.pas	cal_$shutdown
 OK	ct/ct.pas	ct_$release
 STUB	dbuf/dbuf.pas	dbuf_$get_block
 STUB	dbuf/dbuf.pas	dbuf_$set_buff
@@ -206,6 +217,22 @@ BLOCKED	pchist/pchist.pas	pchist_$unix_profil_cntl
 BLOCKED	pchist/pchist.pas	pchist_$unix_profil_fork
 BLOCKED	pchist/pchist.pas	pchist_$cntl
 BLOCKED	pchist/pchist.pas	pchist_$unix_profil_addupc
+MISMATCH	peb/peb_parity.pas	peb_$test_parity_err
+STUB	peb/peb_unwired.pas	peb_$init
+STUB	peb/peb_unwired.pas	peb_$write_wcs
+STUB	peb/peb_unwired.pas	peb_$read_wcs
+STUB	peb/peb_unwired.pas	peb_$load_wcs
+MISMATCH	peb/peb_unwired.pas	peb_$assoc
+MISMATCH	peb/peb_unwired.pas	peb_$dissoc
+MISMATCH	peb/peb_unwired.pas	peb_$get_status
+MISMATCH	peb/peb_unwired.pas	peb_$load_regs
+STUB	peb/peb_unwired.pas	peb_$unload_regs
+OK	peb/peb_unwired.pas	peb_$get_fp
+OK	peb/peb_unwired.pas	peb_$put_fp
+STUB	peb/peb_wired.pas	peb_$touch
+STUB	peb/peb_wired.pas	peb_$cleanup_internal
+SETUP	peb/peb_wired.pas	peb_$proc_cleanup
+OK	peb/peb_wired.pas	peb_$get_info
 STUB	pkt/pkt.pas	pkt_$bld_internet_hdr
 STUB	pkt/pkt.pas	pkt_$brk_internet_hdr
 OK	pkt/pkt.pas	pkt_$next_id
@@ -262,6 +289,27 @@ STUB	sock/sock.pas	sock_$init
 STUB	suma/suma.pas	suma_$rcv
 OK	suma/suma.pas	suma_$init
 OK	tape/tape.pas	tape_$boot
+MISMATCH	term/os_term.pas	term_$get_real_line
+STUB	term/os_term.pas	kbd_$get_desc
+STUB	term/os_term.pas	term_$status_convert
+MISMATCH	term/os_term.pas	term_$send_kbd_string
+STUB	term/os_term.pas	tty_$i_get_desc
+STUB	term/os_term.pas	term_$read
+STUB	term/os_term.pas	term_$read_cond
+STUB	term/os_term.pas	term_$write
+STUB	term/os_term.pas	term_$control
+STUB	term/os_term.pas	term_$inquire
+STUB	term/os_term.pas	term_$get_ec
+OK	term/os_term.pas	term_$help_callback
+OK	term/os_term_init.pas	kbd_$reset
+OK	term/os_term_init.pas	term_$set_discipline
+MISMATCH	term/os_term_init.pas	term_$set_real_line_discipline
+MISMATCH	term/os_term_init.pas	term_$inq_discipline
+OK	term/os_term_init.pas	tone_$enable
+STUB	term/os_term_init.pas	term_$init
+MISMATCH	term/os_term_init.pas	term_$pchist_enable
+STUB	term/os_term_init.pas	term_$enqueue_tpad
+STUB	term/os_term_init.pas	term_$p2_cleanup
 OK	tone/tone.pas	tone_$time
 STUB	tpad/tpad.pas	tpad_$init
 STUB	tpad/tpad.pas	tpad_$data
