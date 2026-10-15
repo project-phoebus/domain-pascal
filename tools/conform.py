@@ -101,7 +101,11 @@ Steps:
   2. Every undefined symbol is resolved from the map (`--defsym', exact
      spelling), or from `--local-sym NAME=0xADDR' (a module-local routine
      outside the unit, which the map does not name); any other symbol is
-     an error, and so is a `--local-sym' the object does not reference.  Non-code
+     an error, and so is a `--local-sym' the object does not reference.
+     A common symbol (dpc's overlay section, `var (name)', ref 3.14) is
+     resolved to the map's overlay section of that name, a data section
+     with no module segment (PCHIST_UNWIRED_D 0xE85718); a common larger
+     than that section is a failure.  Non-code
      sections are placed with `--section-addr SEC=0xADDR', or else at an
      address outside the image (references to them then fail step 4).
   3. The linked code is compared byte for byte with the image, and so is
@@ -574,6 +578,21 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
             unknown.append(n)
         else:
             defsyms += ['--defsym', '%s=0x%X' % (n, sym.addr)]
+    # common symbols: dpc's overlay sections (`var (name)', ref 3.14;
+    # dpc-m68k emit.rs, overlay_area), resolved to the map's overlay
+    # section of that name (a data section with no module segment)
+    # (objdump -t gives a common symbol's size as its value): a unit may
+    # declare a prefix of the section, not more than the map's section
+    common_problems = []
+    for n, size in sorted((n, v) for n, v, sec, _ in syms if sec == '*COM*'):
+        ov = linkmap.overlay(n)
+        if ov is None:
+            unknown.append(n + ' (an overlay section)')
+        else:
+            defsyms += ['--defsym', '%s=0x%X' % (n, ov.addr)]
+            if size > ov.size:
+                common_problems.append('overlay section %s: ours 0x%X bytes, map section '
+                                       '0x%X..0x%X is 0x%X' % (n, size, ov.addr, ov.end, ov.size))
     if unknown:
         raise SetupError('%s: external symbol(s) not in the SAU2 map: %s'
                          % (src, ', '.join(unknown)))
@@ -599,7 +618,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                              % (rsecs[0], base.get(rsecs[0], -1), rlo - rpad))
 
     # 3. bytes, region by region
-    problems = []
+    problems = list(common_problems)
     region_bytes = []           # [(lo, hi, ours, image)]
     for k, (rsecs, rlo, rhi, rpad) in enumerate(regions):
         binpath = os.path.join(work, 'code.bin' if k == 0 else 'code%d.bin' % k)
@@ -723,10 +742,12 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                                 'it by name' % (rlo + i, v, linkmap.describe(v)))
 
     # non-code sections with contents (dpc's `.moddata.<UNIT>[.<SECT>]', a
-    # module data block with initial values): compared byte for byte at
+    # module data block with initial values, or `.data.overlay.<NAME>', an
+    # overlay section with initial values): compared byte for byte at
     # their --section-addr, which must start a data segment of the map
-    # that holds the whole section (a unit may declare a prefix of the
-    # block only); without one they cannot be checked, which is a failure
+    # (for an overlay, the map's overlay section) that holds the whole
+    # section (a unit may declare a prefix of the block only); without one
+    # they cannot be checked, which is a failure
     flags = {s: fl for s, _, fl in secs}
     data_ok = []
     for i, s in enumerate(other):
@@ -744,7 +765,13 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
         if a < IMAGE_LO or a + len(data) > IMAGE_HI:
             raise SetupError('--section-addr %s=0x%X: outside the image' % (s, a))
         seg = linkmap.segment_containing(a)
-        if seg is None or seg.is_section or seg.kind != 'D' or seg.addr != a:
+        # dpc's initialised overlay section (`.data.overlay.<NAME>'): the
+        # map's overlay section NAME, which has no module segment
+        if s.startswith('.data.overlay.'):
+            seg = linkmap.overlay(s[len('.data.overlay.'):])
+        elif seg is not None and seg.is_section:
+            seg = None
+        if seg is None or seg.kind != 'D' or seg.addr != a:
             problems.append('data section %s at 0x%X: not the start of a data segment of '
                             'the map' % (s, a))
         elif len(data) > seg.size:

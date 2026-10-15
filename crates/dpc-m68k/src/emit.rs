@@ -504,6 +504,9 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .map_or(0, |d| d.size);
         out.push_str(&external_data_area(sect, sym, size));
     }
+    for ov in &module.overlays {
+        out.push_str(&overlay_area(ov));
+    }
     if errors.is_empty() {
         Ok(out)
     } else {
@@ -939,6 +942,55 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
     out
 }
 
+/// An overlay section the unit declares (ref 3.14, p. 3-52; 7.2.4,
+/// Method 4, p. 7-7): one object, [`dpc_ir::overlay_symbol`], that every
+/// unit declaring the section shares, the units' variables at their
+/// offsets in it.  The object file's form of a FORTRAN named common
+/// block, which 3.14 likens it to: a common symbol, `.comm SYM,size,4`,
+/// which the linker merges with every other unit's of the same name,
+/// taking the largest size.  A unit that gives the section initial
+/// values defines the symbol instead, in the section
+/// `.data.overlay.<SYM>` with its contents (zeros where no initial value
+/// is given), and the other units' common symbols resolve to it (with
+/// the definition's size: the linker warns when a common block is
+/// larger); two units that both do are a link error ("multiple
+/// definition"): which unit's values the Domain binder kept is not
+/// known (docs/reference-clarifications.md, question 43).
+///
+/// 4-aligned and a multiple of 4 bytes, as every overlay section of the
+/// SAU2 map (`tools/sectsurvey.py overlays`: PCHIST_UNWIRED_D 0xE85718,
+/// size 0x938, the end of its last variable; XPD_$DATA 0xEA5034, 0x4E8;
+/// five start at 4 mod 8).  The code never names a section of it
+/// (codegen-patterns 11, "Overlay sections"); for a conformance link
+/// the symbol is the map section's address (`tools/conform.py`).
+fn overlay_area(data: &dpc_ir::DataArea) -> String {
+    let sym = dpc_ir::overlay_symbol(&data.section);
+    let size = data.size.div_ceil(4) * 4;
+    if data.init.is_empty() {
+        return format!("\n\t.comm\t{sym},{size},4\n");
+    }
+    // `.size`: the linker warns when another unit's common block is
+    // larger ("size of symbol ... changed"), which it does not honour.
+    let mut out = format!(
+        "\n\t.section\t\".data.overlay.{sym}\",\"aw\",@progbits\n\t.balign\t4\n\
+         \t.globl\t{sym}\n\t.type\t{sym},@object\n\t.size\t{sym},{size}\n{sym}:\n"
+    );
+    let (bytes, mut addrs) = data_bytes(data, size);
+    addrs.sort_by_key(|&(off, _)| off);
+    let mut at = 0;
+    for (off, a) in addrs {
+        if off > at {
+            out.push_str(&data_run(&bytes[at as usize..off as usize]));
+        }
+        out.push_str(&format!("\t.long\t{}\n", init_addr_operand(a)));
+        at = off + 4;
+    }
+    if size > at {
+        out.push_str(&data_run(&bytes[at as usize..size as usize]));
+    }
+    out
+}
+
 /// The assembler operand of an address initial value: the symbol, or the
 /// data area's [`data_base_label`], plus the offset.  The assembler
 /// leaves a 32-bit absolute relocation against it.
@@ -1287,6 +1339,49 @@ mod tests {
              \t.space\t2\n\t.globl\tPROC1_$X\nPROC1_$X:\n\
              \t.space\t6\n\t.globl\tPROC1_$Y\nPROC1_$Y:\n\
              \t.space\t8\n"
+        );
+    }
+
+    /// An overlay section (ref 3.14): a common symbol of the section's
+    /// name, its size rounded to 4; with initial values, the symbol
+    /// defined in `.data.overlay.<SYM>` with its contents.
+    #[test]
+    fn overlay_sections_are_common_blocks() {
+        let mut m = module(&[".text"]);
+        m.overlays = vec![
+            dpc_ir::DataArea {
+                section: "pchist_unwired_d".into(),
+                size: 0x937,
+                globals: vec![],
+                init: vec![],
+            },
+            dpc_ir::DataArea {
+                section: "sec".into(),
+                size: 6,
+                globals: vec![],
+                init: vec![
+                    dpc_ir::DataInit {
+                        offset: 4,
+                        value: dpc_ir::InitValue::Address(dpc_ir::InitAddr::Symbol {
+                            name: "X".into(),
+                            offset: 2,
+                        }),
+                    },
+                    dpc_ir::DataInit {
+                        offset: 0,
+                        value: dpc_ir::InitValue::Int { size: 2, value: 5 },
+                    },
+                ],
+            },
+        ];
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        let tail = s.split("filler\n").nth(1).unwrap();
+        assert_eq!(
+            tail,
+            "\n\t.comm\tPCHIST_UNWIRED_D,2360,4\n\
+             \n\t.section\t\".data.overlay.SEC\",\"aw\",@progbits\n\t.balign\t4\n\
+             \t.globl\tSEC\n\t.type\tSEC,@object\n\t.size\tSEC,8\nSEC:\n\
+             \t.byte\t0x00,0x05\n\t.space\t2\n\t.long\tX+2\n"
         );
     }
 

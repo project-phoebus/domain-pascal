@@ -140,6 +140,48 @@ class ConformTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('0xE148D0: literal 0xE1EAC8 (PROC1_$CURRENT_PCB) with no relocation', out)
 
+    def test_common_symbol_is_an_overlay_section(self):
+        # dpc's overlay section (`var (name)', ref 3.14) is a common
+        # symbol, resolved to the map's overlay section of that name
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_overlay.s', '\trts\t',
+                            '\trts\n\t.comm\tPCHIST_UNWIRED_D,2360,4\n|')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertTrue(ok, out)
+        # a prefix of the section is fine; more than the map's is not
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_overlay_prefix.s', '\trts\t',
+                            '\trts\n\t.comm\tPCHIST_UNWIRED_D,16,4\n|')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertTrue(ok, out)
+        path = self.variant('proc1_tst_lock.s', 'tst_lock_overlay_long.s', '\trts\t',
+                            '\trts\n\t.comm\tPCHIST_UNWIRED_D,2364,4\n|')
+        ok, out = self.run_check(path, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('overlay section PCHIST_UNWIRED_D: ours 0x93C bytes, map section '
+                      '0xE85718..0xE86050 is 0x938', out)
+        # a module's data section (WIRED_DATA) or a name the map lacks is
+        # no overlay section
+        for name in ('WIRED_DATA', 'NO_SUCH_SECTION'):
+            path = self.variant('proc1_tst_lock.s', 'tst_lock_overlay_bad.s', '\trts\t',
+                                '\trts\n\t.comm\t%s,4,4\n|' % name)
+            with self.assertRaisesRegex(conform.SetupError, name + r' \(an overlay section\)'):
+                self.run_check(path, ['PROC1_$TST_LOCK'])
+
+    def test_initialised_overlay_section_placement(self):
+        # `.data.overlay.<NAME>' (dpc's overlay section with initial
+        # values) is compared at the map's overlay section NAME only: not
+        # at a module's data block, nor at another overlay section
+        sec = '.data.overlay.PCHIST_UNWIRED_D'
+        good = self.variant('proc1_tst_lock.s', 'tst_lock_ovdata.s', '\trts\t',
+                            '\t.section\t"%s","aw",@progbits\n\t.long\t0\n\t.text\n\trts\t'
+                            % sec)
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={sec: 0xE85718})
+        self.assertTrue(ok, out)
+        # PCHIST's WIRED_DATA block; SMD_$WIRED_DATA, another overlay
+        for at in (0xE2C204, 0xE2E3FC):
+            ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={sec: at})
+            self.assertFalse(ok)
+            self.assertIn('data section %s at 0x%X: not the start of' % (sec, at), out)
+
     def test_lowercase_external_is_an_error(self):
         # external names are upper-cased; the map lookup must be exact
         path = self.variant('proc1_tst_lock.s', 'tst_lock_lower.s',

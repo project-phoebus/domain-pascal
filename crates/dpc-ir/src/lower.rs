@@ -51,11 +51,11 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         };
         errors.push(d);
     }
-    let data = match data_area(program) {
+    let (data, overlays) = match data_area(program) {
         Ok(d) => d,
         Err(d) => {
             errors.extend(d);
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
     let mut functions = Vec::new();
@@ -82,6 +82,7 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
             name: program.name.clone(),
             functions,
             data,
+            overlays,
             outside_internal_calls,
         })
     } else {
@@ -118,21 +119,49 @@ pub fn lower_each(program: &Program) -> (Vec<Function>, Vec<Diagnostic>) {
 /// (PROC2: 0xE7BE84 in .DATA, 0xE35030 in OS_INIT_DATA, 0xE86050 in
 /// PROC2_CREATE_DAT; codegen-patterns 11).
 ///
-/// Rejected for now: variables of an overlay section, `var (name)` with a
-/// name no routine and no module heading of the unit gives as its data
-/// section (ref 3.14, p. 3-52: "just like a named common block in
-/// FORTRAN", shared by name between units, ref 7.2.4 p. 7-7), whose
-/// addressing has not been catalogued (codegen-patterns 11: the image's
-/// sections with no per-module segment, such as PROC2_$DATA 0xEA551C,
-/// are reached with `movea.l #<section>,An`, PROC2_$INIT 0xE30466); and
-/// the initial values [`init_value`] cannot encode.
-fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
+/// The second list: the overlay sections, `var (name)` with a name no
+/// routine and no module heading of the unit gives as its data section
+/// (ref 3.14, p. 3-52: "just like a named common block in FORTRAN",
+/// shared by name between units, ref 7.2.4 p. 7-7), allocated by
+/// `dpc-sema` like a data section (3.14: "allocates variables ...
+/// sequentially within the specified section"; a later `var (name)` part
+/// of the same name continues it).  Their variables are addressed as
+/// another unit's object ([`var_addr`]; codegen-patterns 11, "Overlay
+/// sections").
+///
+/// Rejected: the initial values [`init_value`] cannot encode; in an
+/// overlay section, a `define`d variable (no map symbol lies inside any
+/// of the image's overlay sections past its start, `tools/sectsurvey.py
+/// overlays`; whether ROUTE_$PORT at NET_PORT_TABLE's start is one is
+/// not known; an object file cannot define a symbol inside a common
+/// block either), a
+/// section of more than 0x8000 bytes (the image's two such sections are
+/// also reached from a base 60000 bytes in, `movea.l #ACL_$DATA+0xEA60`,
+/// codegen-patterns 5.2, "Another unit's array"; when is not known, bead
+/// domain-pascal-7pcf), a name that is no assembler symbol, or that the
+/// unit also uses as a symbol (a routine's, an `extern` or `define`d
+/// variable's), or two spellings of one name (also of one of the unit's
+/// data sections).
+fn data_area(p: &Program) -> Result<(Vec<DataArea>, Vec<DataArea>), Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let module_section =
-        |name: &str| name == p.data_section || p.routines.iter().any(|r| r.data_section == name);
     let mut used: Vec<&str> = Vec::new();
     let mut globals: Vec<(&str, String, u32)> = Vec::new();
     let mut inits: Vec<(&str, DataInit)> = Vec::new();
+    // The symbols the unit defines or references, for the overlay names.
+    let symbols: Vec<&str> = p
+        .routines
+        .iter()
+        .map(|r| r.symbol.as_str())
+        .chain(p.vars.iter().filter_map(|v| match &v.storage {
+            Storage::Extern { symbol }
+            | Storage::Static {
+                symbol,
+                global: true,
+                ..
+            } => Some(symbol.as_str()),
+            _ => None,
+        }))
+        .collect();
     for v in &p.vars {
         let Storage::Static {
             symbol,
@@ -143,13 +172,19 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
         else {
             continue;
         };
-        if !module_section(section) {
-            errors.push(unsupported(
-                v.span,
-                "variables in an overlay section (`var (name)`, ref 3.14 p. 3-52) are",
-            ));
-        }
-        if let Err(d) = check_section_name(section, v.span) {
+        if is_overlay(p, section) {
+            if let Err(d) = check_overlay(p, section, &symbols, v.span) {
+                errors.push(d);
+            }
+            if *global {
+                errors.push(unsupported(
+                    v.span,
+                    "a `define`d variable in an overlay section (`var (name)`, ref 3.14 p. 3-52; \
+                     no map symbol lies inside the image's overlay sections past their start, \
+                     codegen-patterns 11) is",
+                ));
+            }
+        } else if let Err(d) = check_section_name(section, v.span) {
             errors.push(d);
         }
         if let Some(stores) = &v.init {
@@ -196,28 +231,116 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
         errors.dedup();
         return Err(errors);
     }
-    Ok(p.data_sections
+    let area = |n: &String, size: u32| {
+        let mut g: Vec<(String, u32)> = globals
+            .iter()
+            .filter(|(s, _, _)| s == n)
+            .map(|(_, sym, o)| (sym.clone(), *o))
+            .collect();
+        g.sort_by_key(|&(_, o)| o);
+        DataArea {
+            section: n.clone(),
+            size,
+            globals: g,
+            init: inits
+                .iter()
+                .filter(|(s, _)| s == n)
+                .map(|(_, i)| i.clone())
+                .collect(),
+        }
+    };
+    let (mut blocks, mut overlays) = (Vec::new(), Vec::new());
+    for (n, size) in p
+        .data_sections
         .iter()
         .filter(|(n, _)| used.contains(&n.as_str()))
-        .map(|(n, size)| {
-            let mut g: Vec<(String, u32)> = globals
-                .iter()
-                .filter(|(s, _, _)| s == n)
-                .map(|(_, sym, o)| (sym.clone(), *o))
-                .collect();
-            g.sort_by_key(|&(_, o)| o);
-            DataArea {
-                section: n.clone(),
-                size: *size,
-                globals: g,
-                init: inits
-                    .iter()
-                    .filter(|(s, _)| s == n)
-                    .map(|(_, i)| i.clone())
-                    .collect(),
-            }
-        })
-        .collect())
+    {
+        if is_overlay(p, n) {
+            overlays.push(area(n, *size));
+        } else {
+            blocks.push(area(n, *size));
+        }
+    }
+    Ok((blocks, overlays))
+}
+
+/// Whether Pascal data section `name` is an overlay section of unit `p`
+/// (ref 3.14, p. 3-52): none of its data sections, which are the module
+/// heading's (ref 7.1.1) and those its routines name (`[section(c,d)]`,
+/// ref 5.7.1).  A `var (name)` part naming one of those adds to the
+/// unit's block there (dpc's reading; srcsurvey's hoisted statics rely
+/// on it).
+fn is_overlay(p: &Program, name: &str) -> bool {
+    name != p.data_section && !p.routines.iter().any(|r| r.data_section == name)
+}
+
+/// The checks of an overlay section's name and size ([`data_area`]).
+fn check_overlay(p: &Program, section: &str, symbols: &[&str], span: Span) -> Res<()> {
+    let sym = crate::overlay_symbol(section);
+    let mut chars = section.chars();
+    if !chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '$'))
+        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+    {
+        return Err(unsupported(
+            span,
+            format!(
+                "overlay section name `{section}` (only a letter, `_` or `$`, then letters, \
+                 digits, `_` and `$`, are supported) is"
+            ),
+        ));
+    }
+    if let Some(other) = p
+        .data_sections
+        .iter()
+        .find(|(n, _)| n != section && is_overlay(p, n) && crate::overlay_symbol(n) == sym)
+    {
+        return Err(unsupported(
+            span,
+            format!(
+                "overlay sections `{section}` and `{}`, one symbol `{sym}`, are",
+                other.0
+            ),
+        ));
+    }
+    // One of the unit's data sections spelt another way (`var
+    // ('WIRED_DATA')` in `module m, , wired_data;`): the unit's block
+    // there or an overlay section of its own is not known (question 44).
+    if let Some(own) = std::iter::once(p.data_section.as_str())
+        .chain(p.routines.iter().map(|r| r.data_section.as_str()))
+        .find(|n| *n != section && crate::overlay_symbol(n) == sym)
+    {
+        return Err(unsupported(
+            span,
+            format!(
+                "overlay section `{section}`, the unit's data section `{own}` spelt another \
+                 way (docs/reference-clarifications.md, question 44), is"
+            ),
+        ));
+    }
+    if symbols.iter().any(|s| s.eq_ignore_ascii_case(&sym)) {
+        return Err(unsupported(
+            span,
+            format!(
+                "an overlay section named like a routine or variable symbol of the unit \
+                 (`{sym}`) is"
+            ),
+        ));
+    }
+    let size = p
+        .data_sections
+        .iter()
+        .find(|(n, _)| n == section)
+        .map_or(0, |(_, s)| *s);
+    if size > 0x8000 {
+        return Err(unsupported(
+            span,
+            "an overlay section of more than 0x8000 bytes (the image reaches its larger ones \
+             from a base 60000 bytes in, `movea.l #ACL_$DATA+0xEA60`, codegen-patterns 5.2) is",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a value of `inits` (one variable's, in order) overwrites
@@ -258,6 +381,14 @@ fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, Strin
             Storage::Extern { symbol } => InitAddr::Symbol {
                 name: symbol.clone(),
                 offset,
+            },
+            // A variable of an overlay section: an offset into the
+            // section's symbol ([`var_addr`]).
+            Storage::Static {
+                section, offset: o, ..
+            } if is_overlay(p, section) => InitAddr::Symbol {
+                name: crate::overlay_symbol(section),
+                offset: *o as i32 + offset,
             },
             Storage::Static {
                 section, offset: o, ..
@@ -5401,12 +5532,24 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
         }
         // The unit's data area (codegen-patterns 4): `(d,A5)` on m68k; of
         // another data section than the routine's, that section's block
-        // (codegen-patterns 11, "Data per section").
+        // (codegen-patterns 11, "Data per section").  A variable of an
+        // overlay section is an offset into the section's symbol, as
+        // another unit's object (codegen-patterns 11, "Overlay sections":
+        // never through A5; PCHIST_$CNTL 0xE5CD1A `tst.w (0xe8604e).l`,
+        // PCHIST_UNWIRED_D+0x936; 0xE5CE46 `movea.l #0xe85718,A2`, the
+        // section's start, for fields at `(0x510,A2)`; `tools/sectsurvey.py
+        // overlays`).
         Storage::Static {
             offset, section, ..
         } => {
             let offset = i32::try_from(*offset)
                 .map_err(|_| unsupported(span, "a static variable at this offset is"))?;
+            if is_overlay(p, section) {
+                return Ok(Addr::Symbol {
+                    name: crate::overlay_symbol(section),
+                    offset,
+                });
+            }
             let own = DATA_SECTION.with(|d| d.borrow().as_ref().is_none_or(|s| s == section));
             Ok(if own {
                 Addr::Static(offset)

@@ -524,11 +524,11 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:5:3: error: an `if` with an empty `then` part is not supported yet"]
     );
-    // Module data in an overlay section.
-    let e = errs("module m;\nvar (sect) v: integer;\n");
+    // A `define`d variable in an overlay section.
+    let e = errs("module m;\nvar (sect) v: define integer;\n");
     assert_eq!(
         e,
-        vec!["t.pas:2:12: error: variables in an overlay section (`var (name)`, ref 3.14 p. 3-52) are not supported yet"]
+        vec!["t.pas:2:12: error: a `define`d variable in an overlay section (`var (name)`, ref 3.14 p. 3-52; no map symbol lies inside the image's overlay sections past their start, codegen-patterns 11) is not supported yet"]
     );
 
     // A 6-byte set tested with an integer element, which may lie beyond
@@ -3617,13 +3617,126 @@ end;
     );
 }
 
-/// A quoted overlay section name (ref 3.14, p. 3-52) is refused twice
-/// over: as an overlay and for its characters.
+/// Overlay sections, `var (name)` (ref 3.14, p. 3-52; 7.2.4, p. 7-7;
+/// codegen-patterns 11, "Overlay sections"): allocated in order, a later
+/// part of the same name continuing the first; their variables are
+/// offsets into the section's symbol, never the unit's data area.
 #[test]
-fn overlay_section_name() {
+fn overlay_sections() {
+    let src = "module m, , wired_data;
+var
+  a5var: integer;
+var (pchist_unwired_d)
+  proc_data: array[1..64] of array[1..5] of integer32;
+  wire_pages: array[1..3] of integer32;
+var (other_sec)
+  o: integer;
+var (pchist_unwired_d)
+  wired_count: integer;
+  flag: boolean;
+var (wired_data)
+  w: integer;
+define p;
+procedure p;
+var s: static integer32;
+var (other_sec) t: integer32;
+begin
+  wired_count := 1;
+  wire_pages[2] := 0;
+  o := 2;
+  t := 3;
+  w := 4;
+end;
+";
+    let m = lower_src(src).unwrap();
+    let at = |n: &str, offset| Addr::Symbol {
+        name: n.into(),
+        offset,
+    };
+    let stores: Vec<&Addr> = m.functions[0]
+        .body
+        .iter()
+        .map(|st| match &st.kind {
+            StmtKind::Store { addr, .. } => addr,
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(
+        stores,
+        [
+            &at("PCHIST_UNWIRED_D", 0x50C),
+            &at("PCHIST_UNWIRED_D", 0x504),
+            &at("OTHER_SEC", 0),
+            &at("OTHER_SEC", 4),
+            // `var (wired_data)`: the heading's data section, the block.
+            &Addr::Static(2),
+        ]
+    );
+    let ov: Vec<(&str, u32)> = m
+        .overlays
+        .iter()
+        .map(|d| (d.section.as_str(), d.size))
+        .collect();
+    assert_eq!(ov, [("pchist_unwired_d", 0x50F), ("other_sec", 8)]);
+    assert!(m
+        .overlays
+        .iter()
+        .all(|d| d.init.is_empty() && d.globals.is_empty()));
+    let blocks: Vec<(&str, u32)> = m
+        .data
+        .iter()
+        .map(|d| (d.section.as_str(), d.size))
+        .collect();
+    assert_eq!(blocks, [("wired_data", 8)]);
+
+    // Initial values; `addr` of an overlay variable as one.
+    let m = lower_src(
+        "module m;
+type ip = ^integer;
+var (sec) a: integer := 5; b: integer32;
+var p: ip := addr(b);
+",
+    )
+    .unwrap();
+    assert_eq!(
+        m.overlays[0].init,
+        [DataInit {
+            offset: 0,
+            value: InitValue::Int { size: 2, value: 5 }
+        }]
+    );
+    assert_eq!(
+        m.data[0].init,
+        [DataInit {
+            offset: 0,
+            value: InitValue::Address(InitAddr::Symbol {
+                name: "SEC".into(),
+                offset: 4
+            })
+        }]
+    );
+
+    // Refused: names that are no assembler symbol, or the unit's own
+    // symbols; two spellings of one symbol; sections beyond 0x8000 bytes.
     let e = errs("module m;\nvar ('a b') v: integer;\n");
-    assert!(e.iter().any(|x| x.contains("overlay section")), "{e:?}");
-    assert!(e.iter().any(|x| x.contains("section name `a b`")), "{e:?}");
+    assert!(e[0].contains("overlay section name `a b`"), "{e:?}");
+    let e = errs("module m;\nvar ('.sec') v: integer;\n");
+    assert!(e[0].contains("overlay section name `.sec`"), "{e:?}");
+    let e = errs("module m;\nvar (p) v: integer;\ndefine p;\nprocedure p; begin end;\n");
+    assert!(
+        e[0].contains("named like a routine or variable symbol of the unit (`P`)"),
+        "{e:?}"
+    );
+    let e = errs("module m;\nvar (sec) v: integer;\nvar ('SEC') w: integer;\n");
+    assert!(e[0].contains("one symbol `SEC`"), "{e:?}");
+    // the unit's own data section spelt another way (question 44)
+    let e = errs("module m, , wired_data;\nvar ('WIRED_DATA') v: integer;\n");
+    assert!(
+        e[0].contains("the unit's data section `wired_data` spelt another way"),
+        "{e:?}"
+    );
+    let e = errs("module m;\nvar (sec) v: array[1..16385] of integer;\n");
+    assert!(e[0].contains("more than 0x8000 bytes"), "{e:?}");
 }
 
 /// Bit fields of packed records (ref 3.10.7): the unit that holds each

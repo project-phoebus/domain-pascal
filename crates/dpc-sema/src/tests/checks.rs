@@ -449,6 +449,63 @@ fn unit_variable_storage() {
     );
 }
 
+/// Overlay sections (ref 3.14, p. 3-52: "Domain Pascal allocates
+/// variables defined in a var declaration part sequentially within the
+/// specified section.  If more than one var declaration specifies the
+/// same section name, the subsequent declarations are considered to be
+/// continuations of the first declaration"), laid out as a data section:
+/// PCHIST_UNWIRED_D (0xE85718, size 0x938; ../source pchist/pchist.pas):
+/// 64 records of 0x14 bytes, 3 longwords at +0x500, a 0x42A-byte record
+/// at +0x50C (4 mod 8: no 8-alignment, codegen-patterns 11), a word at
+/// +0x936.  A routine's `var (name)` part is static, in that section.
+/// An `extern` variable of a `var (name)` part that a `define` statement
+/// defines (ref 7.2.2, Method 2) is allocated in that section.
+#[test]
+fn overlay_section_layout() {
+    let p = module(
+        "type pr = record a, b, c, d, e: integer32 end;
+              hist = record w: array[1..16#215] of integer end;
+         var (pchist_unwired_d)
+           proc_data: array[1..64] of pr;
+           wire_pages: array[1..3] of integer32;
+         var x: integer;
+         var (pchist_unwired_d)
+           histogram: hist;
+           wired_count: integer;
+         var (sec) e: extern integer; f: char;
+         define e;
+         procedure p; var (sec) g: integer32; begin g := 0 end;",
+    );
+    let at = |n: &str| match var(&p, n).storage {
+        Storage::Static {
+            ref section,
+            offset,
+            global,
+            ..
+        } => (section.clone(), offset, global),
+        ref s => panic!("{n}: {s:?}"),
+    };
+    assert_eq!(at("proc_data").0, "pchist_unwired_d");
+    assert_eq!(at("wired_count").0, "pchist_unwired_d");
+    assert_eq!(at("proc_data").1, 0);
+    assert_eq!(at("wire_pages").1, 0x500);
+    assert_eq!(at("histogram").1, 0x50C);
+    assert_eq!(at("wired_count").1, 0x936);
+    assert_eq!(at("x"), (".data".into(), 0, false));
+    // f first (offset 0), then e when the define allocates it, then g.
+    assert_eq!(at("f"), ("sec".into(), 0, false));
+    assert_eq!(at("e"), ("sec".into(), 2, true));
+    assert_eq!(at("g"), ("sec".into(), 4, false));
+    assert_eq!(
+        p.data_sections,
+        vec![
+            ("pchist_unwired_d".to_string(), 0x938),
+            (".data".to_string(), 2),
+            ("sec".to_string(), 8)
+        ]
+    );
+}
+
 /// Static objects are at least word aligned: a byte variable takes the
 /// high byte of a word of its own and two are never packed into one word
 /// (codegen-patterns 11, "Byte-sized module variables"; bead

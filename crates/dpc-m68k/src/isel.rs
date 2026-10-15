@@ -9899,10 +9899,12 @@ impl Selector {
     ///   an object in the unit's data area: `pea (d,A5)` (0xE02884);
     /// - another unit's variable: `move.l #sym,-(SP)` (UID_$NIL ×36,
     ///   TIME_$CLOCKH_EC ×24, ... : 362 of the 374 `move.l #abs,-(SP)` in
-    ///   compiled code push a map symbol's own address).  An address
-    ///   inside another unit's object is pushed both ways (12 `move.l #`,
-    ///   e.g. 0xE32398 DIR_$MUTEX+0x14; 24 `pea abs.l`, e.g. 0xE0F5DC
-    ///   ROUTE_$PORT+0x30): not supported yet;
+    ///   compiled code push a map symbol's own address, the others a
+    ///   data block's or an overlay section's start).  An address inside
+    ///   another unit's object, or a variable of an overlay section after
+    ///   its first: `pea (sym+d).l` (all 21 such pushes: 19 into overlay
+    ///   sections, PCHIST_$CNTL 0xE5CF00 `pea (0xe85c18).l`; 0xE0F5DC
+    ///   ROUTE_$PORT+0x30; PEB_$INIT 0xE31D12, PEB_$INFO+8);
     /// - the object a pointer in the frame points to (a by-address
     ///   parameter passed on, `p^` of a pointer local): the pointer,
     ///   `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C; 0xE53DB0 to
@@ -10076,6 +10078,16 @@ impl Selector {
                     src: Ea::ImmSym(name.clone()),
                     dst,
                 }),
+                // An address inside another unit's object, or a variable
+                // of an overlay section after its first: `pea (sym+d).l`
+                // (codegen-patterns 1.5, 11: all 21 such pushes of
+                // compiled code, 19 into overlay sections, PCHIST_$CNTL
+                // 0xE5CF00 `pea (0xe85c18).l`, PCHIST_UNWIRED_D+0x500;
+                // also PEB_$INIT 0xE31D12, PEB_$INFO+8, CAL_$GET_LOCAL_TIME
+                // 0xE685E2, CAL_$TIMEZONE+6; never `move.l #sym+d`).
+                Addr::Symbol { name, offset } => {
+                    self.out.push(Insn::Pea(Ea::AbsL(name.clone(), *offset)))
+                }
                 // The object a pointer in the frame points to, e.g. a
                 // by-address parameter passed on by address: the pointer
                 // itself, `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C and
@@ -17543,7 +17555,9 @@ mod tests {
                 "jsr\t(Q).l",
             ]
         );
-        // Not catalogued: an address inside another unit's object.
+        // An address inside another unit's object (or an overlay
+        // section's variable after its first): `pea (sym+d).l`
+        // (codegen-patterns 1.5, 11: PCHIST_$CNTL 0xE5CF00).
         let f = proc_(
             0,
             vec![ext(
@@ -17555,7 +17569,7 @@ mod tests {
                 0,
             )],
         );
-        assert!(err(&f).starts_with("passing this kind of object by address"));
+        assert_eq!(body_text(&f), ["pea\t(X+4).l", "jsr\t(P).l"]);
         // `addr(x)` of a frame object by value: `pea`, as by address
         // (codegen-patterns 1.5).
         let f = proc_(

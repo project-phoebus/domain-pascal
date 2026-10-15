@@ -65,6 +65,18 @@ class RealMapTest(unittest.TestCase):
         wp = [s for s in self.m.sections if s.name == 'WIRED_PROC'][0]
         self.assertEqual((wp.kind, wp.number, wp.addr, wp.size), ('I', 4, 0xE00800, 0x1D0F4))
 
+    def test_overlay_sections(self):
+        # data sections with no module segment (ref 3.14; codegen-patterns
+        # 11, "Overlay sections"), 4-byte markers left out
+        names = [s.name for s in self.m.overlay_sections()]
+        for n in ('PCHIST_UNWIRED_D', 'XPD_$DATA', 'PROC2_$DATA', 'NET_PORT_TABLE'):
+            self.assertIn(n, names)
+        for n in ('WIRED_DATA', '.DATA', 'DATA$', 'MONO_END_DATA'):
+            self.assertNotIn(n, names)
+        ov = self.m.overlay('PCHIST_UNWIRED_D')
+        self.assertEqual((ov.addr, ov.size), (0xE85718, 0x938))
+        self.assertIsNone(self.m.overlay('WIRED_DATA'))
+
     def test_extents(self):
         self.assertEqual(self.m.routine_extent('PROC1_$TST_LOCK'), (0xE148CA, 0x1C))
         self.assertEqual(self.m.routine_extent('AST_$PAGE_ZERO'), (0xE00EEC, 0x2A))

@@ -678,6 +678,72 @@ records the files it stops.
     `packed_array_elem`); a subrange of 32 bits (also an unsigned one of
     31, ref 3.4 p. 3-10) is stored as unpacked.*
 
+Raised by the overlay-section work (bead domain-pascal-raxl):
+
+43. **7.2.4, Method 4, p. 7-7 (PDF p. 432, checked); 3.14, p. 3-52 (PDF
+    p. 107, checked); 7.9.6.2, p. 7-45.**  Method 4 has `Program Math;
+    VAR (my_sec) x : integer16 := 5; y : real := 6.2; q : array[1..3]
+    of char := 'cat';` and `Module Sub2; VAR (my_sec) x : integer16; y :
+    real; q : array[1..3] of char;`: "the variables x, y, and q from
+    Math occupy the same memory locations as x, y, and q from Sub2".
+    3.14: "A Domain Pascal overlay section is just like a named common
+    block in FORTRAN"; 7.9.6.2: "the binder ensures that overlay sections
+    with the same name refer to the same memory locations".  Neither
+    says what happens when two units both give initial values to one
+    overlay section (the same variable, or different ones), nor when the
+    units declare it with different sizes.  Which unit's values does the
+    binder keep, and is it an error?  *Current: a unit with initial
+    values for the section defines it (`.data.overlay.<NAME>`), the
+    others' common symbols resolve to it, and two defining units fail to
+    link ("multiple definition"); sizes: the linker's common-block rule,
+    the largest common size, but a defining unit's size when there is
+    one, with a warning if a common is larger (codegen-patterns 11,
+    "Overlay sections").*
+44. **3.14, p. 3-52; 7.1.1, p. 7-2; 5.7.1, p. 5-24.**  3.14: "To
+    specify an overlay data section, place the section name inside a set
+    of parentheses after the reserved word var"; 7.1.1 and 5.7.1 name
+    the data section of a module heading (`module name, code, data;`)
+    and of a routine (`[section(c, d)]`), whose static data the compiler
+    puts there (5.7.1: "VAR seed : static real; { In "npd" }").  When a
+    `var (name)` part names the unit's own data section (`module m, ,
+    wired_data; var (wired_data) x: integer;`), is `x` part of the
+    unit's contribution to wired_data, like its other static data, or
+    a separate overlay section of the same name?  *Current: part of the
+    unit's block in that section (dpc's reading; tools/srcsurvey.py
+    relies on it to keep a stubbed routine's statics in their block).*
+45. **7.2.4, p. 7-7 (PDF p. 432, checked) vs 3.3.4, p. 3-9 (PDF p. 64,
+    checked) and 3.2.4, p. 3-5.**  7.2.4, of `VAR (my_sec) x :
+    integer16 := 5; y : real := 6.2;` in Math against `y : real; x :
+    integer16;` in Sub2: "when compiling Sub2, the compiler sees y as
+    being the first four bytes in my_sec.  However, when compiling Math,
+    the compiler sees y as being bytes 2 through 5 in my_sec", i.e. a
+    `real` at offset 2 after an `integer16`.  3.3.4: "By default, Domain
+    Pascal stores single-precision floating-point numbers (types real
+    and single) on longword boundaries"; 3.2.4: "aligns ... 32-bit
+    integers on longword boundaries".  The image's modules agree with
+    3.2.4: all 102 map-named variables in compiled modules' data blocks
+    that are accessed as longwords lie at 0 mod 4 (`tools/datasurvey.py`'s
+    scan, ad-hoc query, not kept), none at 2 mod 4.  Is 7.2.4's "bytes 2
+    through 5" an error, or are variables of an overlay section (or of a
+    main program, Math) laid out differently?  Three other passages
+    lean toward 7.2.4's reading, none states it for overlay sections:
+    4.7, `%natural_alignment`/`%word_alignment`, p. 4-57 (PDF p. 190,
+    checked): "By default, the Domain Pascal compiler aligns all objects
+    larger than a byte in word-alignment mode"; 7.6, p. 7-17 (PDF p.
+    442, checked): `VAR (my_sec) x : INTEGER16; d : DOUBLE;` shares
+    memory with FORTRAN `INTEGER*2 x / REAL*8 d / COMMON /my_sec/ x,d`
+    ("A named section in Domain Pascal is identical to the named common
+    area of Domain FORTRAN"; the reference does not give the FORTRAN
+    common's layout, but a common block's members are normally
+    consecutive, d at byte 2); 7.9.6.2, p. 7-45: `VAR (example) x :
+    INTEGER16; y : DOUBLE;` beside C's `struct { short x; double y; }
+    example` (the C layout not given).  The image cannot settle it: no
+    map symbol lies inside an overlay section, so where its variables
+    start, and any padding between them, are not known
+    (`tools/sectsurvey.py overlays -v` lists the accesses).  *Current:
+    every static variable at its type's freestanding alignment (at least
+    2), overlay sections included: y at offset 4.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

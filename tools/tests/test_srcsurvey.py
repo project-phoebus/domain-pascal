@@ -466,6 +466,21 @@ class DataSectionsTest(unittest.TestCase):
                          {'.bss.moddata.LOG_.WIRED_DATA': 0xE2B280})
 
 
+    def test_overlay_with_initial_values(self):
+        # an overlay section with initial values (`.data.overlay.<NAME>',
+        # ref 3.14): the map's overlay section, a data section with no
+        # module segment; not a module's data section
+        S = self.Seg
+        lm = type('M', (), {})()
+        ov = S('D', 'PCHIST_UNWIRED_D', 0xE85718, 0x938)
+        lm.sections = [S('D', 'WIRED_DATA', 0xE1DC00, 0x18000), ov]
+        lm.segments = [S('D', 'TTY', 0xE2DDB4, 0x28)]
+        lm.overlay = lambda n: ov if n == 'PCHIST_UNWIRED_D' else None
+        asm = ('\t.section\t".data.overlay.PCHIST_UNWIRED_D","aw",@progbits\n'
+               '\t.section\t".data.overlay.WIRED_DATA","aw",@progbits\n')
+        self.assertEqual(srcsurvey.data_sections(asm, lm),
+                         {'.data.overlay.PCHIST_UNWIRED_D': 0xE85718})
+
 
 class ModuleRoutineOptsTest(unittest.TestCase):
     """The dpc options for a module's stubbed internal routines: one

@@ -234,6 +234,14 @@ Tests:
   again after each call, `lea (d,An),Am` for `addr`, `move.l
   #block,-(SP)` for the block's first variable by address (KBD_$INIT
   0xE3336A, DXM_$INIT 0xE2FF54, LOG_$INIT 0xE30054).
+- `sections/overlay_sections` - codegen-patterns 11, "Overlay sections"
+  (bead domain-pascal-raxl): `var (name)` overlay sections laid out as
+  PCHIST_UNWIRED_D, their variables absolute off the section's symbol
+  (PCHIST_$CNTL 0xE5CD1A, 0xE5CDA8), `move.l #sym,-(SP)` for the
+  section's start and `pea (sym+d).l` after it by address (XPD_$INIT
+  0xE32334; PCHIST_$CNTL 0xE5CEF6, 0xE5CF00), an element off `movea.l
+  #sym,An` (PCHIST_$UNIX_PROFIL_FORK 0xE5CC76), A5 for the unit's own
+  block; `.comm`, and a definition for a section with initial values.
 - `regalloc/live_ranges` - codegen-patterns 12.4 R1-R3, 12.2, 1.5: the
   allocator (bead domain-pascal-g5q.5): parameters held across calls in
   A2/D2 with `pea (d,A2)` pushes (module-local 0xE32B76), a third data

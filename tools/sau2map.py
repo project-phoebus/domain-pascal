@@ -167,6 +167,23 @@ class LinkMap:
             raise KeyError(name)
         return self.extent_at(s.addr)
 
+    def overlay_sections(self):
+        """The data sections with no module segment in them and more than
+        4 bytes: the overlay sections (ref 3.14, p. 3-52; codegen-patterns
+        11, "Overlay sections": PCHIST_UNWIRED_D, XPD_$DATA, ...), in map
+        order.  The 4-byte ones (MONO_END_DATA, ETHER_DATA_START, ...) are
+        markers, left out."""
+        return [s for s in self.sections
+                if s.kind == 'D' and s.size > 4
+                and not any(g.kind == 'D' and s.contains(g.addr) for g in self.segments)]
+
+    def overlay(self, name):
+        """The overlay section called `name' (exact spelling), or None."""
+        for s in self.overlay_sections():
+            if s.name == name:
+                return s
+        return None
+
     def describe(self, addr):
         """A short name for an address: `SYM', `SYM+0xN' or `0xADDR'."""
         names = self.names_at(addr)

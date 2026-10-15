@@ -150,6 +150,12 @@ pub(crate) struct Checker<'t> {
     /// Every unit-level `define` item, (name, span, named before its
     /// declaration), checked once the unit is complete.
     defines: Vec<(String, Span, bool)>,
+    /// The section named by the `var (section_name)` part an `extern`
+    /// variable is declared in (ref 3.14, p. 3-52: "All the variables
+    /// named in all the identifier_lists will be stored in
+    /// section_name"), by [`VarId`]: where a later `define` of it
+    /// allocates it (ref 7.2.2, Method 2).
+    extern_sections: HashMap<u32, String>,
     next_with: u32,
     /// The `with` records ([`WithId`]) that are, or are part of, an `in`
     /// parameter ([`Checker::in_param_part`]).
@@ -192,6 +198,7 @@ impl<'t> Checker<'t> {
             pending_pointers: Vec::new(),
             pre_defined: HashSet::new(),
             defines: Vec::new(),
+            extern_sections: HashMap::new(),
             next_with: 0,
             in_withs: HashSet::new(),
             loop_depth: 0,
@@ -1773,6 +1780,11 @@ impl<'t> Checker<'t> {
             if let (true, Some(r)) = (frame_var, owner) {
                 self.routines[r.0 as usize].frame_vars.push(id);
             }
+            if let (Storage::Extern { .. }, Some(sec)) =
+                (&self.vars[id.0 as usize].storage, &overlay)
+            {
+                self.extern_sections.insert(id.0, sec.clone());
+            }
             vars_out.push(id);
             self.declare(name, Sym::Var(id));
         }
@@ -1836,7 +1848,13 @@ impl<'t> Checker<'t> {
                     let var = &self.vars[v.0 as usize];
                     (var.ty, var.storage.clone())
                 };
-                let section = self.data_section.clone();
+                // Allocated in the section of its `var (section_name)`
+                // part, if it had one (ref 3.14, p. 3-52).
+                let section = self
+                    .extern_sections
+                    .get(&v.0)
+                    .cloned()
+                    .unwrap_or_else(|| self.data_section.clone());
                 let new = match storage {
                     Storage::Extern { symbol } => Storage::Static {
                         offset: self.alloc_static(&section, ty),

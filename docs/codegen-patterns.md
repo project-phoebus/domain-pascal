@@ -491,9 +491,19 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   convention, or `addr(x)` by value): `move.l #sym,-(SP)`, 374 sites, 362
   of them a map symbol's own address (UID_$NIL ×36 e.g. 0xE01824,
   TIME_$CLOCKH_EC ×24, DIR_$MUTEX ×22; 0xE00EB8 `move.l #AST_$ZERO_BUFF`).
-  An address *inside* another unit's object is pushed both ways: 12
-  `move.l #` (0xE32398 DIR_$MUTEX+0x14) and all 24 `pea abs.l` (0xE0F5DC
-  ROUTE_$PORT+0x30, 0xE0A36C DMA+0xC0): Uncertain, rejected by `dpc`.
+  An address *inside* another unit's object is `pea (abs).l` (Verified,
+  bead domain-pascal-raxl; ad-hoc scan of every `move.l #imm,-(SP)` and
+  `pea abs.l` of compiled code, a5survey's routines, script not kept):
+  21 pushes of a data address inside an object, all `pea abs.l` (19
+  into overlay sections, section 11, e.g. PCHIST_$CNTL 0xE5CF00
+  PCHIST_UNWIRED_D+0x500, NETWORK_$SET_SERVICE 0xE0F5DC ROUTE_$PORT+0x30;
+  PEB_$INIT 0xE31D12 PEB_$INFO+8; CAL_$GET_LOCAL_TIME 0xE685E2
+  CAL_$TIMEZONE+6), no `move.l #` of one.  (This entry read 12 `move.l
+  #` as inside an object, 0xE32398 "DIR_$MUTEX+0x14": that is PCHIST's
+  WIRED_DATA block's start, 0xE2C204, and the 12 are the blocks' and
+  sections' starts of section 11; the other `move.l #` "inside" the
+  scan finds are constants such as status codes.)  `dpc` pushes
+  `pea (sym+d).l` for any symbol plus a nonzero offset.
   The same address into a register is `movea.l #sym,An` (0xE00ECC;
   DISK_$GET_ERROR_INFO 0xE6C090).
 - **`addr(x)` by value of a frame or unit-data object** (a `univ_ptr`
@@ -7024,14 +7034,123 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   0xE726B8; called by `jsr` from 0xE34EF0 and 0xE6FFA4).  So
   "PROCEDURE$/DATA$" is not a one-to-one pair.  Which data section a
   PROCEDURE$ routine's attribute named is not settled.
-- **Overlay sections (Verified from the map; addressing at the sites).**
-  Sections with no per-module segment, named like variables (ACL_$DATA
-  0xE88834, FILE_$LOT_DATA, RINGLOG_$DATA, XPD_$DATA, PROC2_$DATA
-  0xEA551C; NET_PORT_TABLE, REM_FILE_$DATA 0xE2E380, SMD_$WIRED_DATA),
-  fit `var (name)` overlays (ref 3.14, p. 3-52: "just like a named common
-  block in FORTRAN").  Code reaches them by absolute address:
-  PROC2_$INIT 0xE30466 `movea.l #0xEA551C,A0; ... clr.w (0x3eb6,A0)`,
-  REM_FILE 0xE61178 `move.l #0xE2E380,-(SP)` (an address argument).
+- **Overlay sections (Verified from the map and by survey;
+  implemented, bead domain-pascal-raxl).**  The reference: "An overlay
+  section is a section whose contribution from a module 'overlays' that
+  of other modules.  A Domain Pascal overlay section is just like a
+  named common block in FORTRAN" (ref 3.14, p. 3-52); "place the section
+  name inside a set of parentheses after the reserved word var";
+  variables are allocated "sequentially within the specified section",
+  a later `var (name)` part of the same name continuing the first;
+  Method 4 (ref 7.2.4, p. 7-7) shares a section between a program and a
+  module by position, not by name, the program giving initial values;
+  ref 7.9.6.2 (p. 7-45): "the binder ensures that overlay sections with
+  the same name refer to the same memory locations".
+  - *The map.*  `tools/sectsurvey.py overlays` (`sau2map.py`,
+    `overlay_sections`): the data sections of more than 4 bytes with no
+    module segment in them are NET_PORT_TABLE 0xE2E0A0, REM_FILE_$DATA
+    0xE2E380, SMD_$WIRED_DATA 0xE2E3FC, PCHIST_UNWIRED_D 0xE85718 (size
+    0x938), ACL_$DATA 0xE88834 (0xAD98), FILE_$LOT_DATA 0xE935CC
+    (0x1086C), RINGLOG_$DATA 0xEA3E38, XPD_$DATA 0xEA5034 (0x4E8),
+    PROC2_$DATA 0xEA551C (0x4168), VTOC_CACHE 0xEB2C00, AUDIT_LIST
+    0xEC4800.  Each starts at a multiple of 4 (five at 4 mod 8) and its
+    size is a multiple of 4.  No map symbol lies inside any of them past
+    the start.  Four start at map symbols: NET_PORT_TABLE at ROUTE_$PORT
+    (MARKED), NETWORK_$ME and DCTE_$NULL, which share the address with
+    the zero-sized sections DCTE_START, DCTES and DCTE_END; ACL_$DATA at
+    RELOC (also a zero-sized section), VTOC_CACHE at INT_STACK_BASE,
+    AUDIT_LIST at OS_PAGE_END (markers).  Whether ROUTE_$PORT or
+    NETWORK_$ME name a variable at +0 of NET_PORT_TABLE (a `define` in
+    the section, which `dpc` refuses, below) is not known.  PCHIST_UNWIRED_D's size
+    is the end of the last variable PCHIST reaches (+0x936, a word;
+    ../source `pchist/pchist.pas`), and its 0x42A-byte record lies at
+    +0x50C, 4 mod 8: laid out as a data block (section 5; byte variables
+    word aligned).  Three of the sections in the image file hold nonzero
+    bytes (NET_PORT_TABLE 24 bytes, REM_FILE_$DATA 82; SMD_$WIRED_DATA
+    and PCHIST_UNWIRED_D none): initial values, from which unit not known.
+  - *The code (survey: every operand of compiled code, a5survey's
+    routines, naming an address in one of these sections).*  Never A5:
+    PCHIST's routines load A5 with their WIRED_DATA block and reach
+    PCHIST_UNWIRED_D absolutely meanwhile.  (The survey's one `lea
+    <start>,A5`, SMD_$FREE_ASID 0xE75258 `lea 0xE85718,A5`, is the end of
+    SMD's 4-byte DATA$ block 0xE85714, which PCHIST_UNWIRED_D follows:
+    the "A5 = its end" case of section 4, not an access to the overlay;
+    "PROCEDURE$ and DATA$" above.)  The forms are another unit's
+    object's (sections 1.5, 5.2), the section's start the object:
+    - whole variables and fields as absolute operands, at the start (40,
+      NET_PORT_TABLE 34, RINGLOG_$DATA 6) and inside (14: PCHIST_$CNTL 0xE5CD1A
+      `tst.w (0xe8604e).l`, +0x936; 0xE5CDA8 `clr.b (0x00e85c26).l`,
+      +0x50E, a field of the record at +0x50C);
+    - a base register `movea.l #<start>,An` (299 loads of the start:
+      PROC2_$DATA 163, SMD_$WIRED_DATA 34, NET_PORT_TABLE 23, XPD_$DATA
+      21, ACL_$DATA 13, PCHIST_UNWIRED_D 7, ...) with every offset in the
+      displacement (PCHIST_$UNIX_PROFIL_FORK 0xE5CC76 `movea.l
+      #0xe85718,A0; lea (-0x14,A0,D0.w),A1`, an element of the 1-based
+      array at +0; PCHIST_$CNTL 0xE5CE46 `movea.l #0xe85718,A2` for the
+      record at +0x50C, `(0x510,A2)`); the only loads of an address
+      inside are the large sections' base 60000 bytes in (section 5.2,
+      "Another unit's array"), which the survey lists as 82 loads into
+      FILE_$LOT_DATA: 20 of `FILE_$LOT_DATA+0xEA60` (FILE_, e.g.
+      FILE_$LOCK_INIT 0xE32752) and 62 of `ACL_$DATA+0xEA60` (ACL_,
+      e.g. ACL_$IN_SUBSYS 0xE470AA `movea.l #0xE97294,A0`), an address
+      past ACL_$DATA's end (size 0xAD98) that lies in FILE_$LOT_DATA
+      (+0x3CC8), which follows it: a base beyond the section, reaching
+      back with negative displacements;
+    - by address: the start `move.l #<start>,-(SP)` (8: XPD_$INIT
+      0xE32334, REM_FILE 0xE61178, ASKNODE_$WHO 0xE65F9C, SMD_$INIT
+      0xE34D34, ACL_$INIT 0xE310BA, ...), an address inside `pea
+      (abs).l` (19: PCHIST_$CNTL 0xE5CEF6 +0x936, 0xE5CF00 +0x500;
+      SMD_$INIT 0xE34D42 +0xC; REM_FILE_$SERVER 0xE63D28 +0x3C;
+      NETWORK_$SET_SERVICE 0xE0F5DC +0x30), never the other way round;
+    - a whole record copied from `lea (abs).l,A0` (PCHIST_$CNTL 0xE5CF3A
+      `lea 0xe85c24,A0`, the record at +0x50C).
+  - *What `dpc` emits.*  A `var (name)` part whose name is none of the
+    unit's data sections (the module heading's, ref 7.1.1, or a
+    routine's `[section(c,d)]`, ref 5.7.1) declares variables of the
+    overlay section `name`, unit-level or a routine's (static);
+    `dpc-sema` allocates them like a data block (section 5).  A
+    `var (name)` naming one of the unit's data sections adds to the
+    unit's block there (dpc's reading, reference-clarifications question
+    44).  The variables are `dpc_ir::Addr::Symbol` offsets into the
+    section's symbol, the name upper-cased (`dpc_ir::overlay_symbol`,
+    PCHIST_UNWIRED_D), so the selector treats them as another unit's
+    object: absolute operands, `movea.l #sym,An` bases with the offsets
+    in the displacement, `move.l #sym,-(SP)` for the start and `pea
+    (sym+d).l` inside by address (section 1.5), `addr(x)` of one as an
+    initial value `.long sym+d`.  The section itself is the object
+    file's common block, `.comm SYM,size,4` (size rounded to 4), which
+    the linker merges by name with every other unit's, the largest size
+    winning; a unit that gives it initial values defines SYM instead,
+    in `.data.overlay.<SYM>` with the section's bytes (and `.size`), and
+    the other units' commons resolve to that, at its size (GNU ld warns
+    "size of symbol ... changed" when a common is larger).  Two units that both give initial
+    values fail to link ("multiple definition"): what the Domain binder
+    did is not known (reference-clarifications question 43).  The units
+    share the name with the linker's namespace of symbols: a routine or
+    variable symbol of another unit of the same name would clash
+    (Domain's binder keeps sections apart from symbols; not checked
+    across units).  `tools/conform.py` resolves a common symbol to the
+    map's overlay section of that name (`--defsym`), and places a
+    `.data.overlay.<SYM>` at it (srcsurvey's `data_sections`).
+    Refused: a `define`d variable in an overlay section (a `define` of
+    an `extern` variable of a `var (name)` part allocates it there, ref
+    3.14 "will be stored in section_name"); a section of more than
+    0x8000 bytes (the 60000-byte base above, when it is used not known;
+    bead domain-pascal-7pcf); a name that is no assembler symbol
+    (letters, digits, `_`, `$`, not starting with a digit), names a
+    routine or variable symbol of the unit, or is spelt two ways
+    (`'SEC'` and `sec`; also a spelling of one of the unit's own data
+    sections, `var ('WIRED_DATA')` in `module m, , wired_data;`,
+    reference-clarifications question 44).  Not modelled: a `with` over an overlay record
+    held in a base register (PCHIST_$COUNT 0xE1A196 `movea.l
+    #0xe85718,A1`, PCHIST_$CNTL 0xE5CE46: `dpc` addresses each field
+    absolutely, as for any other unit's object; section 12.4, "Another
+    unit's object's address held in a register across statements", bead
+    domain-pascal-sht0).  Golden `sections/overlay_sections`; exec test
+    `overlays` (two units, Method 4's shape); dpc-ir test
+    `overlay_sections`, dpc-sema test `overlay_section_layout`;
+    srcsurvey: PCHIST_$INIT and PCHIST_$INTERRUPT byte-identical with
+    the module's overlay declared (they were blocked by it).
 - **What `dpc` emits for named sections (implemented, bead
   domain-pascal-5aw.10).**  The module heading's sections (ref 7.1.1,
   p. 7-2) and `[section(c,d)]` (ref 5.7.1, p. 5-24; a nested routine
@@ -7075,10 +7194,9 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     0xE14B12 shape; whether the original's rule is "called from another
     data section" or "called from another code section" cannot be told
     apart, the pairs always coincide).
-  - *Refused:* overlay sections
-    (`var (name)` with a name that is no data section of the unit), a
-    nested routine in another code section than its parent, section
-    names with characters other than letters, digits, `_`, `$`, `.`.
+  - *Refused:* a nested routine in another code section than its
+    parent, section names with characters other than letters, digits,
+    `_`, `$`, `.` (overlay sections: above).
   - *Fragments of several code sections* (test scaffolding, bead
     domain-pascal-xdh.6): `--fragment-origin=SECTION=0xADDR` per code
     section, each with its own pad and module-end padding; a routine of

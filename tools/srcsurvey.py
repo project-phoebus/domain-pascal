@@ -1140,8 +1140,16 @@ def unit_specs(mod, name, linkmap, table=None):
 
 
 def data_sections(asm_text, linkmap):
-    """`--section-addr' pairs for the module data sections of an .s."""
+    """`--section-addr' pairs for the module data sections of an .s,
+    and for its overlay sections with initial values."""
     out = {}
+    # an overlay section with initial values, `.data.overlay.<NAME>'
+    # (emit.rs, overlay_area): the map's overlay section NAME (one with
+    # no initial values is a common symbol, which conform.py resolves)
+    for sec in re.findall(r'\.section\s+"?(\.data\.overlay\.[^",\s]+)', asm_text):
+        ov = linkmap.overlay(sec[len('.data.overlay.'):])
+        if ov is not None:
+            out[sec] = ov.addr
     # dpc: `.bss.moddata.<UNIT>[.<SECT>]', or `.moddata.<UNIT>[.<SECT>]'
     # for a block with initial values (emit.rs, data_section_name).
     # <UNIT> is the module's name upper-cased, which is the map's

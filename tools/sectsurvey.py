@@ -21,6 +21,11 @@ domain-pascal-5aw.10).
                                     # when a `movea.l #block,An' of another
                                     # section's block is loaded again
     tools/sectsurvey.py otherdata -v  # ... and the sites
+    tools/sectsurvey.py overlays    # operands naming an address in an
+                                    # overlay section (a map data section
+                                    # with no module segment): counts by
+                                    # (section, form, offset 0 or not)
+    tools/sectsurvey.py overlays -v # ... and the sites
 
 A segment's output section is the map section (a map line with a section
 number and a non-zero size) of its kind that contains its address.  The
@@ -193,6 +198,34 @@ def otherdata(m, verbose=False, out=print):
     return counts, reloads
 
 
+def overlays(m, verbose=False, out=print):
+    """Operands (absolute or immediate) of compiled code naming an
+    address inside an overlay section: {(section, form, 'start' or
+    'inside'): count}."""
+    rs, _asm = a5survey.load()
+    secs = m.overlay_sections()
+    counts = Counter()
+    for r in rs:
+        name = r.name or 'module-local@0x%X' % r.r0
+        for a, _, t in a5survey.reached(r.r0, r.r1):
+            if t.startswith(('jsr', 'bsr', 'bra', 'db')) or _BR.match(t):
+                continue
+            for mm in _NUM.finditer(t):
+                v = int(mm.group(1)) if mm.group(1) else int(mm.group(2), 16)
+                for s in secs:
+                    if not s.addr <= v < s.end:
+                        continue
+                    where = 'start' if v == s.addr else 'inside'
+                    form = operand_form(t, bool(mm.group(1)))
+                    counts[(s.name, form, where)] += 1
+                    if verbose:
+                        out('0x%X %s %s %s +0x%X  %s' % (a, r.seg, name, s.name,
+                                                         v - s.addr, t))
+    for k, v in sorted(counts.items()):
+        out('%-18s %-24s %-6s %d' % (k + (v,)))
+    return counts
+
+
 def main(argv):
     m = sau2map.load()
     if argv[:1] == ['modules']:
@@ -204,6 +237,9 @@ def main(argv):
         return 0
     if argv[:1] == ['otherdata']:
         otherdata(m, verbose='-v' in argv[1:])
+        return 0
+    if argv[:1] == ['overlays']:
+        overlays(m, verbose='-v' in argv[1:])
         return 0
     print(__doc__.split('\n\n')[1], file=sys.stderr)
     return 2

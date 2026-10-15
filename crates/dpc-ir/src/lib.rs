@@ -61,6 +61,18 @@ pub struct Module {
     /// (PROC2: 0xE7BE84 in .DATA, 0xE35030 in OS_INIT_DATA, 0xE86050 in
     /// PROC2_CREATE_DAT; codegen-patterns 4, 11).
     pub data: Vec<DataArea>,
+    /// The overlay sections the unit declares variables in, `var (name)`
+    /// with a name that is none of the unit's data sections (ref 3.14,
+    /// p. 3-52: "just like a named common block in FORTRAN"; 7.2.4,
+    /// Method 4, p. 7-7: every unit that declares the section shares its
+    /// memory), in order of first allocation.  Each is one object of
+    /// [`overlay_symbol`]'s name, shared by name with every other unit
+    /// that declares it; its variables are [`Addr::Symbol`] offsets into
+    /// it (codegen-patterns 11, "Overlay sections").  `size`: the bytes
+    /// this unit declares there; `init`: its initial values (ref 7.2.4's
+    /// example initialises them); `globals` is always empty (a `define`d
+    /// variable in an overlay section is refused).
+    pub overlays: Vec<DataArea>,
     /// Calls of `internal` routines with no body in the unit (declared
     /// `internal; extern`): symbol and the innermost statement holding
     /// the first such call, per symbol.  The reference allows calls of an
@@ -94,6 +106,15 @@ pub struct DataArea {
     /// named stay zero (ref 3.11.1 p. 3-38: components with no
     /// initialisation data are not initialised).
     pub init: Vec<DataInit>,
+}
+
+/// The symbol of overlay section `section` (ref 3.14, p. 3-52), as the
+/// source names it: the name upper-cased, like every external name
+/// (CLAUDE.md 3.15; the map's overlay sections are upper case,
+/// `D32 E85718 PCHIST_UNWIRED_D`).  Units share the section through
+/// this name, so it is not qualified by the unit's.
+pub fn overlay_symbol(section: &str) -> String {
+    section.to_ascii_uppercase()
 }
 
 /// One initial value in a [`DataArea`], at byte `offset` of the block.
