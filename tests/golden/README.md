@@ -55,6 +55,19 @@ Tests:
 - `control/in_range` - codegen-patterns 10.1 (bead domain-pascal-k1sv):
   `in_range` of an enumeration, `cmpi.w #31; bhi` (TTY_$K_SET_FUNC_CHAR
   0xE67502), and as a value.
+- `control/in_range_subrange` - codegen-patterns 10.1 (bead
+  domain-pascal-bzkf): `in_range` of word subranges, 0..3 as `cmpi.w #3`
+  in memory, 1..3 as `clr.l; move.w; subq.l #1; cmpi.l #2`
+  (SIO_$K_SET_PARAM 0xE68252, 0xE68278).
+- `expr/const_minus_widened` - codegen-patterns 10.1, 12.4 R8/R11 (bead
+  domain-pascal-bzkf): a constant minus a word widened to a longword
+  (NETWORK_$READ_AHEAD 0xE10000, AREA_$INVALIDATE 0xE08EF4).
+- `expr/min_max` - codegen-patterns 10.1 (bead domain-pascal-bzkf):
+  `min`/`max` as compare-and-select, the first operand in the result's
+  register: word arithmetic widened (NETBUF_$ADD_PAGES 0xE0E95A),
+  unsigned (MMAP_$GET_IMPURE 0xE0D624, NET_IO_$COPY_PACKET 0xE0E612), a
+  constant second operand (PKT_$DAT_COPY 0xE12850), `max(x, 0)` on the
+  flags (NETBUF_$DEL_PAGES 0xE0EB64).
 - `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
   one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
 - `stores/volatile` - ref 3.15.1-3.15.3; codegen-patterns 13 (device

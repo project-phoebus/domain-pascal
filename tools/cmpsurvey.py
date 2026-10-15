@@ -83,6 +83,20 @@ address order).  Kinds:
             it is written, a call or the end (`used' / `dead', in address
             order, approximate).  Evidence for the flags of a load
             (codegen-patterns 7.1, 12.2).
+    select  compare-and-select: `cmp.<s> X,Dn' (or `cmpi.<s> #c,Dn',
+            or `cmp.<s> #c,Dn') directly followed by a conditional branch
+            over exactly one instruction that moves X into Dn (`move.<s>
+            X,Dn'; for an immediate also `moveq', or `clr' of 0); and
+            `<op> Dn' or `tst.<s> Dn', a signed branch over one `clr.<s>
+            Dn' (a clamp at 0).  The form (`cmp' or `zero'), the size, the
+            branch's condition, and X's kind: reg, mem, imm, or constreg
+            (a register the instruction before loaded with an immediate,
+            `move.<s> #c,Dm; cmp.<s> Dm,Dn'); for `zero' whether the
+            branch reads the forming operation's flags or a `tst'.  The
+            branch keeps Dn when its condition holds: `ble'/`bls' keep the
+            smaller (`min'), `bge'/`bcc' the larger (`max'), `bhi'/`bcs'
+            the same with the move taken on equality.  Evidence for `min'
+            and `max' (codegen-patterns 10.1; bead domain-pascal-bzkf).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -101,7 +115,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor', 'opflags', 'loadflags')
+         'andor', 'opflags', 'loadflags', 'select')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -613,6 +627,45 @@ def loadflags_sites(ins):
     return out
 
 
+_SEL_BR = re.compile(r'^b(hi|ls|cc|cs|ne|eq|pl|mi|ge|lt|gt|le)[sw]? 0x([0-9a-f]+)$')
+
+
+def select_sites(ins):
+    """[(addr, form, size, cond, kind)] of compare-and-select (see
+    `select' in the module docstring); addr is the compare's."""
+    out = []
+    for i in range(len(ins) - 3):
+        m = _SEL_BR.match(ins[i + 1][2])
+        if not m or int(m.group(2), 16) != ins[i + 3][0]:
+            continue
+        t, mv, cond = ins[i][2], ins[i + 2][2], m.group(1)
+        c = re.match(r'^cmpi?([wl]) (.*),%(d\d)$', t)
+        if c:
+            sz, x, dn = c.groups()
+            if x.startswith('#'):
+                kind = 'imm'
+                ok = (mv == 'move%s %s,%%%s' % (sz, x, dn)
+                      or mv == 'moveq %s,%%%s' % (x, dn)
+                      or (x == '#0' and mv == 'clr%s %%%s' % (sz, dn)))
+            else:
+                ok = mv == 'move%s %s,%%%s' % (sz, x, dn)
+                kind = 'reg' if re.match(r'^%d\d$', x) else 'mem'
+                if kind == 'reg' and i > 0 and re.match(
+                        r'^(move[wl] #-?\w+|moveq #-?\w+),' + x + '$', ins[i - 1][2]):
+                    kind = 'constreg'
+            if ok:
+                out.append((ins[i][0], 'cmp', sz, cond, kind))
+            continue
+        z = re.match(r'^clr([wl]) %(d\d)$', mv)
+        if z and cond in ('pl', 'mi', 'ge', 'lt', 'gt', 'le'):
+            sz, dn = z.groups()
+            if t == 'tst%s %%%s' % (sz, dn):
+                out.append((ins[i][0], 'zero', sz, cond, 'tst'))
+            elif writes(t, dn) and re.match(r'^\w+?' + sz + r'\b', t.split()[0]):
+                out.append((ins[i][0], 'zero', sz, cond, 'flags'))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -629,6 +682,7 @@ def scan():
         res['ord'] += [(r0, name) + s for s in ord_sites(ins)]
         res['callcmp'] += [(r0, name) + s for s in callcmp_sites(ins)]
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
+        res['select'] += [(r0, name) + s for s in select_sites(ins)]
         if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
             res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
             res['loadflags'] += [(r0, name) + s for s in loadflags_sites(ins)]
@@ -666,6 +720,8 @@ def summary(res):
     counts('  ... formed as a boolean and tested (other operand, s<cc> register)',
            [s for s in res['callcmp'] if s[6] == 's<cc>>tst'], lambda s: (s[5], s[7]))
     counts('and.b/or.b into Dn (op, right operand calls)', res['andor'], lambda s: (s[3], s[4]))
+    counts('compare-and-select (form, size, branch, operand)', res['select'],
+           lambda s: (s[3], s[4], s[5], s[6]))
     counts('branches after a data register operation (op, size, form, test size, cond, b|s, '
            'join)', res['opflags'], lambda s: s[3:])
     counts('  ... by operation, relation, form, sizes and join', res['opflags'],

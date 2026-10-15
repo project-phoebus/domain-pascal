@@ -2635,16 +2635,12 @@ end;
     // ordinal.
     assert!(asm.contains("cmpi.w\t#2,(4,%a5)\n\tbhi.s"), "{asm}");
     let cases = [
-        // `in_range` of a subrange or an integer, `max`, `min`.
-        (
-            "b := in_range(s);",
-            "`in_range` of a value other than an enumeration",
-        ),
+        // `in_range` of an integer (subranges and `max`/`min`: bead
+        // domain-pascal-bzkf, `bzkf_min_max_in_range`).
         (
             "b := in_range(g);",
-            "`in_range` of a value other than an enumeration",
+            "`in_range` of a value other than an enumeration or an integer subrange",
         ),
-        ("g := max(g, 3);", "a run-time `max` or `min`"),
         // A comparison that computes into a data register, assigned to a
         // register-held local.
         (
@@ -2674,6 +2670,121 @@ end;
 "
         );
         let (code, err) = compile_with("k1sv_refusals", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(msg) && err.contains("not supported yet"),
+            "{body}: {err}"
+        );
+    }
+}
+
+/// Bead domain-pascal-bzkf: `min`/`max` of run-time integers and
+/// `in_range` of a word subrange (codegen-patterns 10.1), and what stays
+/// refused around them.
+#[test]
+fn bzkf_min_max_in_range() {
+    let ok = "module m;
+type pinteger = 0..65535; linteger = 0..2147483647; two = 0..3; three = 1..3;
+var w: integer; lim, cnt: integer32; pl: linteger; g: linteger; h: pinteger;
+  t: two; s: three; b: boolean;
+define p, q, r;
+procedure p(n: integer; m: integer); options(val_param);
+var x, y: integer;
+begin
+  x := min(n, 176 - w);
+  y := min(m, lim - cnt);
+  w := x + y;
+end;
+procedure q(c: pinteger; d: pinteger); options(val_param);
+begin
+  g := min(c, pl);
+  h := min(1024, d);
+end;
+procedure r(n: integer); options(val_param);
+var x: integer;
+begin
+  x := n;
+  x := max(x, w);
+  w := max(x - w, 0);
+  if not in_range(t) then w := 1;
+  if not in_range(s) then w := 2;
+end;
+";
+    let asm = compile_with("bzkf_ok", ok, &[]).unwrap();
+    // NETBUF_$ADD_PAGES 0xE0E95A..0xE0E970: both words widened (the
+    // scheduler interleaving them), the difference in 32 bits, the
+    // first operand in the result's register.
+    assert!(
+        asm.contains(
+            "move.w\t%d0,%d2\n\tmove.w\t(%a5),%d0\n\text.l\t%d2\n\text.l\t%d0\n\t\
+             move.l\t#0xb0,%d3\n\tsub.l\t%d0,%d3\n\tcmp.l\t%d3,%d2\n\tble.s\t1f\n\t\
+             move.l\t%d3,%d2\n1:"
+        ),
+        "{asm}"
+    );
+    // 0xE0E972..0xE0E982: a difference of longwords.
+    assert!(
+        asm.contains("sub.l\t(8,%a5),%d1\n\tcmp.l\t%d1,%d0\n\tble.s\t2f\n\tmove.l\t%d1,%d0"),
+        "{asm}"
+    );
+    // MMAP_$ALLOC_PURE 0xE0D7CA..0xE0D7D4: unsigned, the word widened
+    // with zeros, the longword compared and moved from memory.
+    assert!(
+        asm.contains(
+            "clr.l\t%d2\n\tmove.w\t%d0,%d2\n\tcmp.l\t(0xc,%a5),%d2\n\tbls.s\t1f\n\t\
+             move.l\t(0xc,%a5),%d2"
+        ),
+        "{asm}"
+    );
+    // NET_IO_$COPY_PACKET 0xE0E612: the constant first, unsigned words.
+    assert!(
+        asm.contains("move.w\t#0x400,%d0\n\tcmp.w\t%d1,%d0\n\tbls.s\t2f\n\tmove.w\t%d1,%d0"),
+        "{asm}"
+    );
+    // `x := max(x, w)` in x's register (DISK_$SPIN_DOWN 0xE3DB34's
+    // shape); `max(.., 0)` on the subtraction's flags (NETBUF_$DEL_PAGES
+    // 0xE0EB64 `bpl; clr`).
+    assert!(
+        asm.contains("move.w\t%d0,%d1\n\tcmp.w\t(%a5),%d1\n\tbge.s\t1f\n\tmove.w\t(%a5),%d1\n1:"),
+        "{asm}"
+    );
+    assert!(asm.contains("bpl.s\t2f\n\tclr.l\t"), "{asm}");
+    // SIO_$K_SET_PARAM 0xE68252, 0xE68278.
+    assert!(asm.contains("cmpi.w\t#3,(0x16,%a5)\n\tbls.s"), "{asm}");
+    assert!(
+        asm.contains("clr.l\t%d0\n\tmove.w\t(0x18,%a5),%d0\n\tsubq.l\t#1,%d0\n\tcmpi.l\t#2,%d0"),
+        "{asm}"
+    );
+    let cases = [
+        // An unsigned `max` (`bhi` or `bcc`).
+        ("h := max(h, 3);", "an unsigned `max`"),
+        // `min(x, 0)`.
+        ("w := min(w, 0);", "`min(x, 0)`"),
+        // Other types.
+        (
+            "k := max(k, 'a');",
+            "`max` or `min` of values other than integers",
+        ),
+        // A destination that needs a register.
+        (
+            "q^ := min(w, 3);",
+            "a store whose destination needs a register of a `max`",
+        ),
+        // `in_range` of a subrange with a negative lower bound.
+        ("b := in_range(n);", "with a negative lower bound"),
+    ];
+    for (body, msg) in cases {
+        let src = format!(
+            "module m;
+type pinteger = 0..65535; neg = -7..7; ip = ^integer;
+var w: integer; h: pinteger; k: char; b: boolean; n: neg;
+procedure p(q: ip); options(val_param);
+begin
+  {body}
+end;
+"
+        );
+        let (code, err) = compile_with("bzkf_refusals", &src, &[]).unwrap_err();
         assert_eq!(code, Some(1), "{err}");
         assert!(
             err.contains(msg) && err.contains("not supported yet"),

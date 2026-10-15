@@ -4265,6 +4265,8 @@ fn arith_calls(op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar, narrowed: bool) ->
             long && !(word(lhs) && word(rhs)) && !(narrowed && word(rhs))
         }
         BinOp::Mod => long && !(word(lhs) && word(rhs)),
+        // The compare and the branch over the move ([`Selector::min_max`]).
+        BinOp::Min | BinOp::Max => true,
         _ => false,
     }
 }
@@ -8647,6 +8649,21 @@ impl Selector {
         let me = Addr::Frame(o);
         let dst = Ea::Reg(Reg::D(web));
         match value {
+            // `x := min(x, y)` / `max`: the select in x's register
+            // ([`Self::min_max`]; DISK_$SPIN_DOWN 0xE3DB34 `cmp.w D0,D2;
+            // bge.b; move.w D0,D2`, as the `if` the image cannot tell from
+            // it).
+            Expr::Binary {
+                op: op @ (BinOp::Min | BinOp::Max),
+                lhs,
+                rhs,
+                ty: bty,
+            } if matches!(&**lhs, Expr::Load { addr, ty } if *addr == me && ty == bty)
+                && !expr_reads_addr(rhs, &me) =>
+            {
+                self.min_max(*op, lhs, rhs, *bty, Some(web))?;
+                return Ok(());
+            }
             // A plain `and`/`or`: formed in a register of its own and moved
             // (0xE072B6..0xE072B8 `or.b D1,D0; move.b D0,D4`; 0xE11CA0..
             // 0xE11CA2 `or.b D1,D6; move.b D6,D5`; 0xE66024..0xE66028 `or.b
@@ -9059,6 +9076,25 @@ impl Selector {
             ));
         }
         let both = self.addr_needs_reg(addr) && self.value_needs_reg(value);
+        let mut select = false;
+        walk_expr(value, &mut |n| {
+            if let Node::Expr(Expr::Binary {
+                op: BinOp::Min | BinOp::Max,
+                ..
+            }) = n
+            {
+                select = true;
+            }
+        });
+        if both && select {
+            // The compare-and-select's branch (codegen-patterns 10.1)
+            // before or after the destination's register: not seen.
+            return Err(unsupported(
+                self.span,
+                "a store whose destination needs a register of a `max` or `min` value (the \
+                 destination's register before or after the branch: not seen) is",
+            ));
+        }
         if both && (expr_has_call(value) || addr_has_call(addr)) {
             return Err(unsupported(
                 self.span,
@@ -11302,6 +11338,7 @@ impl Selector {
         };
         match op {
             BinOp::Shl | BinOp::Shr | BinOp::Ashr => return self.shift(op, lhs, rhs, ty),
+            BinOp::Min | BinOp::Max => return self.min_max(op, lhs, rhs, ty, None),
             BinOp::Mul => return self.mul(lhs, rhs, ty),
             BinOp::Div | BinOp::Mod => {
                 return match self.div(op, lhs, rhs, ty, false)? {
@@ -11491,7 +11528,29 @@ impl Selector {
         if let (Some(c), AluOp::Sub) = (konst(lhs), alu) {
             // `c - x`: the constant first, then `sub.<s> x,Dn` (0xE08EE4
             // `moveq #31,D2; sub.w (-26,A6),D2`; 0xE10114 `move.l
-            // #0x400,D2; sub.l (-372,A6),D2`; 0xE0E964).
+            // #0x400,D2; sub.l (-372,A6),D2`; 0xE0E964).  A widened word
+            // is extended first, then the constant loaded and the word
+            // subtracted; R11 (12.4) then moves the constant's load up
+            // between the word's load and its extension: NETWORK_$READ_AHEAD
+            // 0xE10000 `move.w D4,D0; move.l #0x400,D1; ext.l D0; sub.l
+            // D0,D1`, XNS_ERROR_$SEND 0xE17B22, AREA_$INVALIDATE 0xE08EF4
+            // `clr.l D0; moveq #32,D1; move.w (0xe,A6),D0; sub.l D0,D1`;
+            // `min`'s operands, NETBUF_$ADD_PAGES 0xE0E95C..0xE0E96A,
+            // REM_FILE_$SERVER 0xE637AE..0xE637BC.  Other computed values
+            // are refused (not seen).
+            if matches!(rhs, Expr::Convert { value, ty: t }
+                if value.ty().width == Width::Word && t.width == Width::Long)
+            {
+                let xv = self.eval(rhs)?;
+                let d = self.load_const(imm(c, w), w)?;
+                self.out.push(Insn::Alu {
+                    op: alu,
+                    size,
+                    src: Self::ea_val(&xv),
+                    dst: d,
+                });
+                return Ok(d);
+            }
             let d = self.load_const(imm(c, w), w)?;
             let xv = self.eval(rhs)?;
             if let Val::Tmp(_) = xv {
@@ -12193,6 +12252,132 @@ impl Selector {
             src: Self::ea_val(&v),
             dst: Ea::Reg(Reg::D(d)),
         });
+        Ok(d)
+    }
+
+    /// `min(a, b)` / `max(a, b)` of type `ty` (`dpc-ir` `min_max`;
+    /// codegen-patterns 10.1; **Reported**: the image's compare-and-select,
+    /// read as these built-ins by ../source's Pascal):
+    ///
+    /// ```text
+    ///         <a into Dn>             ; the first operand in the result's register
+    ///         cmp.<s> b,Dn            ; cmpi.<s> #c,Dn for a constant
+    ///         b<keep>.s L             ; min: ble / bls; max: bge
+    /// L':     move.<s> b,Dn           ; clr, moveq or move #c for a constant
+    /// L:
+    /// ```
+    ///
+    /// - `a` is evaluated into a new register (a copy of a register-held
+    ///   variable, a load, a constant: `moveq #2,D3`, PKT_$PING_SERVER
+    ///   0xE12C8C; `move.w #0x400,D0`, NET_IO_$COPY_PACKET 0xE0E612), or
+    ///   is the register it was computed in (0xE17DF2 `move.l
+    ///   (0x38,A2),D7; sub.l (-0x2c,A6),D7; cmpi.l #0x400,D7`), or is
+    ///   `into`, a register-held local `x` in `x := min(x, b)` (the select
+    ///   in its register, as the `if` the image cannot tell from it:
+    ///   DISK_$SPIN_DOWN 0xE3DB34 `cmp.w D0,D2; bge.b; move.w D0,D2`).
+    /// - `b` is an operand used twice, in memory (MMAP_$ALLOC_PURE
+    ///   0xE0D7CE `cmp.l (0x30,A2),D6; bls.b; move.l (0x30,A2),D6`), a
+    ///   register (NETBUF_$ADD_PAGES 0xE0E96C `cmp.l D6,D3; ble.b; move.l
+    ///   D6,D3`, D6 computed), or an immediate (PKT_$DAT_COPY 0xE12852
+    ///   `cmpi.w #0x400,D5; ble.b; move.w #0x400,D5`; module-local at
+    ///   0xE17D46 (../source's xns_$get_checksum) at 0xE17DFA; the move as a constant load, `moveq #1,D5` at 0xE08B56,
+    ///   `moveq #17,D0` at 0xE1594A).  **Uncertain against:** six sites
+    ///   hold the constant in a register, `move.w #c,Dn; cmp.w Dn,Dx;
+    ///   ble.s; move.w Dn,Dx` (OS_INIT_START 0xE2F08A, 0xE66008, 0xE874D6,
+    ///   0xE41B04, 0xE1CAA0, 0xE15230), against 22 with the immediate:
+    ///   unexplained (bead domain-pascal-avnn).
+    /// - The branch keeps `a` when `a <= b` (min: `ble`, `bls`) or `a >= b`
+    ///   (max: `bge`): of the 109 compare-and-selects of compiled code
+    ///   (`tools/cmpsurvey.py select`), `ble` 43, `bls` 41, `bge` 9 and
+    ///   `bpl` over a `clr` 6, against `bhi` 7, `bcc` 1, `bcs` 2, and no
+    ///   `blt` or `bgt`.  Against 0, `max(x,
+    ///   0)` tests the flags of the operation that formed `x` or a `tst`
+    ///   and clears (NETBUF_$DEL_PAGES 0xE0EB64 `sub.l D4,D1; bpl.b; clr.l
+    ///   D1`; also 0xE0FD64, 0xE6E282; `tst.w D2; bpl.s; clr.w D2`
+    ///   0xE4BD78), as `div_pow2` does.
+    ///
+    /// Refused: an unsigned `max` (`bhi` 7 times, among them module-local
+    /// at 0xE6C2BC, read as `max(1, num_parts)` at 0xE6C4CA by ../source's
+    /// disk/pv_mount_internal.c, against
+    /// `bcc` once, 0xE5C7C6: not settled, bead domain-pascal-ckzr),
+    /// `min(x, 0)` (not seen), `b` in an address register.
+    fn min_max(&mut self, op: BinOp, a: &Expr, b: &Expr, ty: Scalar, into: Option<u8>) -> Res<u8> {
+        let w = ty.width;
+        let size = size_of(w);
+        let keep = match (op, ty.sign == Sign::Signed) {
+            (BinOp::Min, true) => Cond::Le,
+            (BinOp::Min, false) => Cond::Ls,
+            (_, true) => Cond::Ge,
+            (_, false) => {
+                return Err(unsupported(
+                    self.span,
+                    "an unsigned `max` (`bhi` or `bcc`: not settled, codegen-patterns 10.1) is",
+                ))
+            }
+        };
+        let d = match into {
+            Some(r) => r,
+            None => {
+                let v = self.eval(a)?;
+                self.in_tmp(v, w)?
+            }
+        };
+        let dst = Ea::Reg(Reg::D(d));
+        let (src, cond) = match b {
+            Expr::Const { value: 0, .. } if op == BinOp::Max => {
+                if !self.sets_flags(d, w) {
+                    self.out.push(Insn::Tst {
+                        size,
+                        dst: dst.clone(),
+                    });
+                }
+                (Val::Imm(0), Cond::Pl)
+            }
+            Expr::Const { value: 0, .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "`min(x, 0)` (not seen, codegen-patterns 10.1) is",
+                ))
+            }
+            Expr::Const { value, .. } => {
+                let c = imm(*value, w);
+                self.out.push(Insn::Cmpi {
+                    size,
+                    imm: c,
+                    dst: dst.clone(),
+                });
+                (Val::Imm(c), keep)
+            }
+            _ => {
+                let v = self.eval(b)?;
+                let src = Self::ea_val(&v);
+                if matches!(src, Ea::Reg(Reg::A(_)) | Ea::Imm(_)) {
+                    return Err(unsupported(
+                        self.span,
+                        "a `max` or `min` operand in an address register is",
+                    ));
+                }
+                self.out.push(Insn::Cmp { size, src, dst: d });
+                (v, keep)
+            }
+        };
+        if self.unpopped {
+            return Err(unsupported(
+                self.span,
+                "a conditional branch after a call whose pop was skipped (codegen-patterns 1.1) is",
+            ));
+        }
+        let l = self.new_label();
+        self.jump(cond, l);
+        match src {
+            Val::Imm(c) => self.const_into(c, w, d),
+            v => self.out.push(Insn::Move {
+                size,
+                src: Self::ea_val(&v),
+                dst,
+            }),
+        }
+        self.place(l);
         Ok(d)
     }
 

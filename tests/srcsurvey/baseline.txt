@@ -227,7 +227,7 @@ STUB	mmap/mmap.pas	mmap_$ws_scan
 STUB	mmap/mmap.pas	mmap_$get_impure
 STUB	mmap/mmap.pas	mmap_$alloc_pages_from_wsl
 STUB	mmap/mmap.pas	mmap_$alloc_pure
-STUB	mmap/mmap.pas	mmap_$alloc_free
+MISMATCH	mmap/mmap.pas	mmap_$alloc_free
 OK	mmap/mmap.pas	mmap_$alloc_contig
 STUB	mmap/mmap.pas	mmap_$reclaim
 OK	mmap/mmap_unwired.pas	mmu_$vtop_or_crash
@@ -314,7 +314,7 @@ STUB	pkt/pkt.pas	pkt_$bld_internet_hdr
 STUB	pkt/pkt.pas	pkt_$brk_internet_hdr
 OK	pkt/pkt.pas	pkt_$next_id
 MISMATCH	pkt/pkt.pas	pkt_$next_long_id
-STUB	pkt/pkt.pas	pkt_$copy_to_pa
+MISMATCH	pkt/pkt.pas	pkt_$copy_to_pa
 STUB	pkt/pkt.pas	pkt_$send_internet
 STUB	pkt/pkt.pas	pkt_$dump_data
 STUB	pkt/pkt.pas	pkt_$dat_copy

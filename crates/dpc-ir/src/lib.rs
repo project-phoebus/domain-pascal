@@ -1021,6 +1021,14 @@ pub enum BinOp {
     Shr,
     /// `arshft(x, n)` (p. 4-29): the sign bit kept.
     Ashr,
+    /// `min(a, b)` ("Min", p. 4-113): the smaller of the two, compared
+    /// with `ty`'s sign; `a` is the operand formed in the result's
+    /// register, `b` the one compared with it and moved over it
+    /// (codegen-patterns 10.1).  Not commutative for the code.
+    Min,
+    /// `max(a, b)` ("Max", p. 4-111): the larger of the two; as
+    /// [`BinOp::Min`].
+    Max,
 }
 
 impl BinOp {

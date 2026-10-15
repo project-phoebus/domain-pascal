@@ -7224,23 +7224,142 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     (a subrange, an integer, a char) it stays refused.  Tests:
     `tests/golden/control/in_range`, `tests/exec/bool_stores.pas`,
     `tests/exec/store_order.pas`.
-  - `max`, `min`, and `in_range` of other run-time values:
-    **refused**.  The only
-    candidates in the image are the five `x := min(x, c)`-shaped sites of
-    12.4 R8 (`move.w #c,Dn; cmp.w Dn,Dx; ble.s; move.w Dn,Dx`: 0xE19ED0,
-    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6; and unsigned with `moveq`,
-    module-local 0xE1CA8C at 0xE1CAA0 `moveq #2,D1; cmp.w D1,D0; bls.s; move.w
-    D1,D0`, lead: ../source pascal-translation-notes finding 32), which
-    an `if x > c then x := c` would give too (0xE66372 even skips the store to memory when
-    the value is in range).  No site that must be one of these built-ins
-    is known.  A lead for `in_range`: TTY_$K_SET_FUNC_CHAR 0xE67502 and
-    TTY_$K_INQ_FUNC_CHAR 0xE67588 `cmpi.w #31,D1; bhi` on an
-    enumeration word whose last ordinal is 31, followed by the real
+  - `in_range(x)` of an integer subrange `lo..hi` stored in a word,
+    `lo >= 0` (**Reported, implemented**, bead domain-pascal-bzkf;
+    `dpc-ir` `in_range_subrange`): one unsigned compare, the reading of
+    ../source's sio/k_set_param.pas (`if not in_range(params.parity)`).
+    `lo = 0`: `x <= hi` unsigned on the word where it is,
+    SIO_$K_SET_PARAM 0xE68252 `cmpi.w #0x3,(0x14,A2); bhi` and 0xE682A6
+    (`sio_$parity_t`, `sio_$word_size_t` = 0..3; the enumeration's form).
+    `lo > 0`: `x - lo <= hi - lo` unsigned in 32 bits, the word widened
+    with zeros, 0xE68278..0xE68286 `clr.l D1; move.w (0x12,A2),D1;
+    subq.l #0x1,D1; cmpi.l #0x2,D1; bhi` (`sio_$stop_bit_t` = 1..3), the
+    only subtract-and-compare of the shape in compiled code (`subq`/
+    `subi` then `cmpi` and `bhi`/`bls`; the 11 `addq` ones are other
+    constructs).  The image cannot tell either from `(x < lo) or (x >
+    hi)` written with the unsigned trick.  **Refused:** a negative lower
+    bound (p. 4-104's own example, `small_int = -7..7`: zero extension
+    would put -1 out of range, the original's form is not seen),
+    subranges stored in a byte or a longword, `integer`, `char`,
+    `boolean`.  Tests: `tests/golden/control/in_range_subrange`,
+    `tests/exec/min_max.pas`.
+  - `min(a, b)` / `max(a, b)` of run-time integers (**Reported,
+    implemented**, bead domain-pascal-bzkf; `dpc-ir` `min_max`,
+    `dpc-m68k` `Selector::min_max`).  Ref "Min", p. 4-113, "Max",
+    p. 4-111 (PDF pp. 246, 244, checked): two arguments only; "If exp1
+    and exp2 are unsigned scalars or pointers, Domain Pascal performs an
+    unsigned comparison ... if they are signed integers, Domain Pascal
+    performs a signed comparison".  The image form is a
+    **compare-and-select**: the first operand in the result's register,
+    the second compared with it and moved over it when the branch does
+    not keep the first:
+
+    ```text
+            <a into Dn>          ; a copy, a load, a constant, or computed there
+            cmp.<s> b,Dn         ; cmpi.<s> #c,Dn for a constant
+            b<keep>.s L          ; min: ble / bls; max: bge
+            move.<s> b,Dn        ; moveq / move #c / clr for a constant
+    L:
+    ```
+
+    `tools/cmpsurvey.py select` (compiled code, a5survey's routines):
+    109 sites, by branch: `ble` 43, `bls` 41 (keep the smaller, `min`);
+    `bge` 9 and `bpl` over a `clr` 6 (keep the larger, signed `max`);
+    `bhi` 7, `bcc` 1 (unsigned, larger); `bcs` 2 (0xE15232, 0xE5C95C);
+    **no `blt` or `bgt`**.  By operand (the `cmp` forms): in a register
+    39, in memory 36, an immediate 22 (21 `cmpi`, and `cmp.w #6,D2` at
+    0xE7034A, an encoding compiled code otherwise does not use), a
+    constant loaded into a register first 6 (below).  ../source's Pascal
+    reads 17 of them, in 13 routines, as `min`/`max` (the 13 refusals of
+    the srcsurvey at ../source 91c45caa):
+
+    | Site | Reading | Form |
+    |---|---|---|
+    | MMAP_$ALLOC_FREE 0xE0D8A6 | `min(count, wsl[0].page_count)`, `0..65535` / `0..2147483647` | `andi.l #0xffff,D2; cmp.l (0x30,A5),D2; bls.b; move.l (0x30,A5),D2` |
+    | MMAP_$ALLOC_PURE 0xE0D7CA | the same, count still live | `clr.l D6; move.w D2,D6; cmp.l (0x30,A2),D6; bls` |
+    | MMAP_$GET_IMPURE 0xE0D624 | `min(100, wsl.page_count)` | `moveq #0x64,D2; cmp.l (0x30,A0),D2; bls` |
+    | NET_IO_$COPY_PACKET 0xE0E612 | `min(1024, left)`, `0..65535` | `move.w #0x400,D0; cmp.w D3,D0; bls.b; move.w D3,D0` |
+    | NETBUF_$ADD_PAGES 0xE0E95A | `min(hdr_pages, 176 - netbuf_hdr_alloc)`, `integer`s | `move.w D5,D3; move.w (0x334,A5),D4; ext.l D3; ext.l D4; move.l #0xb0,D6; sub.l D4,D6; cmp.l D6,D3; ble.b; move.l D6,D3` |
+    | NETBUF_$ADD_PAGES 0xE0E972 | `min(data_pages, dat_lim - dat_cnt)` | `cmp.l D6,D4; ble` |
+    | NETBUF_$DEL_PAGES 0xE0EB54 | `max(hdr_pages - (netbuf_hdr_alloc - 176), 0)` | `subi.l #0xb0,D4; sub.l D4,D1; bpl.b; clr.l D1; move.w D1,D4` |
+    | NETBUF_$DEL_PAGES 0xE0EB6E, 0xE0EC10 | `min(hdr_pages, netbuf_hdr_alloc - 39)`, `min(data_pages, dat_cnt - 10)` | `cmp.l D1,D4; ble` |
+    | PKT_$BRK_INTERNET_HDR 0xE12466 | `min(data_len, data_max)`, two `0..65535` words | `move.w (A4),D2; cmp.w D0,D2; bls` |
+    | PKT_$COPY_TO_PA 0xE125A4 | `min(1024, remaining)`, `integer` | `move.w #0x400,D0; cmp.w D2,D0; ble` |
+    | PKT_$DAT_COPY 0xE12850 | `min(remaining, 1024)` | `move.w D3,D5; cmpi.w #0x400,D5; ble.b; move.w #0x400,D5` |
+    | PKT_$PING_SERVER 0xE12C8C | `min(2, hdr_len)` | `moveq #2,D3; cmp.w (2,A0),D3; bls` |
+    | PKT_$SAR_INTERNET 0xE720C8, 0xE72112 | `min(hdr_len, resp_tpl_max)`, `min(data_len, resp_data_max)` | `move.w (2,A0),D1; cmp.w (0x2c,A6),D1; bls` |
+    | module-local at 0xE17D46 (../source xns/idp_helpers.pas, xns_$get_checksum), 0xE17DF2 | `min(length - (page - 1) * 16#400, 16#400)` | `move.l (0x38,A2),D7; sub.l (-0x2c,A6),D7; cmpi.l #0x400,D7; ble.b; move.l #0x400,D7` |
+    | XPD module-local, xpd/memory.pas 0xE5B782 | `min(16#400, remaining)`, `0..2147483647` | `move.l #0x400,D0; cmp.l (-0x424,A6),D0; bls.b; move.l (-0x424,A6),D0` |
+
+    So, as `dpc` implements it:
+    - **Sign:** unsigned when both operands are unsigned run-time values
+      (codegen-patterns 5 "Signedness": `0..65535` words,
+      `0..2147483647` longwords, an unsigned sum), or one is and the
+      other a constant in 0..2147483647 (4.3.3); signed otherwise.  All
+      17 readings agree.
+    - **Width:** a word when both operands are words, a longword when
+      either is one (the word widened by its own sign); **a word sum,
+      difference or product is computed in 32 bits**, its operands
+      widened, and the comparison too (ref 4.3.1 p. 4-5, as for `div`'s
+      dividend; 0xE0E95A, 0xE0EB54, 0xE0EB6E, and REM_FILE_$SERVER
+      0xE637AC `clr.l D0; clr.l D1; move.w D4,D0; move.w (-0x4ca,A6),D1;
+      move.l #0x294,D6; sub.l D1,D6; cmp.l D6,D0; ble`, which no ../source
+      Pascal reads yet), whereas a plain word comparison of a sum is
+      16-bit (bead domain-pascal-9js).  `c - x` of a widened word: the
+      word extended first, then the constant loaded, R11 scheduling the
+      constant's load between the word's load and its extension where
+      nothing else intervenes (0xE0E95C..0xE0E96A, 0xE637AE..0xE637BC;
+      outside `min`/`max`, NETWORK_$READ_AHEAD 0xE10000, XNS_ERROR_$SEND
+      0xE17B22, AREA_$INVALIDATE 0xE08EF4; `Selector::binary`; golden
+      `expr/const_minus_widened`).  A signed comparison with
+      an unsigned word (against a signed operand or a negative constant)
+      widens both, as a comparison does (7.1 "Mixed widths and signs";
+      not seen for `min`/`max`).  The result has the function's type,
+      narrowed back to the word where the comparison was 32-bit
+      (0xE0EB6A `move.w D1,D4`).
+    - **Relation:** `min` keeps `a` when `a <= b` (`ble`/`bls`), signed
+      `max` when `a >= b` (`bge`; against 0, `max(x, 0)` reads the flags
+      of the operation that formed `x`, or a `tst`, `bpl`, and clears:
+      0xE0EB64; also 0xE08A1C, 0xE0FD64 `sub.l D3,D0; bpl.s; clr.l D0`,
+      0xE6E282 `sub.w`, ACL_$SET_PROJ_LIST 0xE48126 on a load's flags,
+      0xE4BD78 after `tst.w`).
+    - **Registers:** `a` evaluated into a new register (a register-held
+      variable copied, PKT_$DAT_COPY 0xE12850 `move.w D3,D5`), or computed
+      in place (0xE17DF2); `x := min(x, b)` with `x` register-held is
+      the select in x's register (as DISK_$SPIN_DOWN 0xE3DB34 `cmp.w D0,D2;
+      bge.b; move.w D0,D2`, read as an `if` by ../source).  `b` is used
+      twice where it is (memory, a register, an immediate); a computed
+      `b` takes a register of its own.  The result is then stored, or
+      taken as the target local's register when nothing in the
+      computation reads it (NETBUF_$ADD_PAGES' D3).
+    - **Uncertain against:** six sites hold a constant `b` in a register,
+      `move.w #c,Dn; cmp.w Dn,Dx; ble.s; move.w Dn,Dx` (12.4 R8: OS_INIT_START
+      0xE2F08A, ASKNODE_$WHO_NOTOPO 0xE66008, ROUTE_$PROCESS 0xE874D6,
+      PROC2_$SET_ACCT_INFO 0xE41B04, 0xE1CAA0, 0xE15230 with `bcs`),
+      against 22 with the immediate, small constants with `moveq` in
+      both (bead domain-pascal-avnn).  Every select site is also what
+      an `if a > b then a := b` gives (`dpc`'s `if` gives the same
+      code); ../source's C reads most of them so.
+    - **Refused:** an unsigned `max` (`bhi` 7 against `bcc` 1, the
+      `bhi` one at 0xE6C4CA read as `max(1, num_parts)` by ../source's C:
+      bead domain-pascal-ckzr); `min(x, 0)` (not seen); operands that
+      are bytes, chars, enumerations, booleans or pointers (no site); a
+      store whose destination needs a register (bead
+      domain-pascal-p7xj).  MMAP_$ALLOC_FREE compiles but differs: the
+      image widens the parameter's entry register in place and keeps the
+      result there (bead domain-pascal-dzad).
+    - Tests: `tests/golden/expr/min_max`, `tests/exec/min_max.pas`
+      (signed and unsigned, equal operands, a word difference past
+      32767, a wrapped difference against 0), `crates/dpc/tests/driver.rs`
+      `bzkf_min_max_in_range`, `crates/dpc-ir/src/tests.rs`
+      `min_max_and_in_range_lower`.
+  - A lead for `in_range` of an enumeration (above): TTY_$K_SET_FUNC_CHAR
+    0xE67502 and TTY_$K_INQ_FUNC_CHAR 0xE67588 `cmpi.w #31,D1; bhi` on
+    an enumeration word whose last ordinal is 31, followed by the real
     bound `cmpi.w #17,D1; bls` (section 5; ../source `tty/k_func.pas`
-    reads `not in_range(func) or else ...`); for an unsigned
-    enumeration from 0 it would be one compare against the last
-    ordinal.  Uncertain: a compare against the last enumerator gives the
-    same code (lead: ../source pascal-translation-notes finding 9).
+    reads `not in_range(func) or else ...`).  Uncertain: a compare
+    against the last enumerator gives the same code (lead: ../source
+    pascal-translation-notes finding 9).
 - `addr` is section 1.5 and 5.2.
 
 ---
@@ -9554,7 +9673,9 @@ the sites).**
   (section 13).
   - Five have the `x := min(x, c)` shape, where the constant is used
     twice: `move #c,Dn; cmp Dn,Dx; b..; move Dn,x` at 0xE19ED0,
-    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6.
+    0xE2F08A, 0xE66008, 0xE66372, 0xE874D6.  (Section 10.1: 22
+    compare-and-selects with a constant compare it as an immediate
+    instead; bead domain-pascal-avnn.)
   - Two are the same shape for `c - y`: `move.l #c,Dn; sub.l Dy,Dn`
     (0xE0E964, 0xE637B6).
   - Two are a constant assigned to a variable's register: 0xE6DAF2 in

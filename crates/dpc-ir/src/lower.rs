@@ -5005,17 +5005,8 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
                 rhs: Expr::Const { value: hi, ty: xty },
             })))
         }
-        // "Max", p. 4-111 / "Min", p. 4-113 / "In_range", p. 4-104: the
-        // image's `x := min(x, c)`-shaped sites (codegen-patterns 12.4 R8,
-        // 0xE2F08A `move.w #504,D0; cmp.w D0,D2; ble.s; move.w D0,D2`) are
-        // indistinguishable from an `if`; no site that must be `max` or
-        // `min` is known, nor an `in_range` of anything but an
-        // enumeration (above; codegen-patterns 10.1).
-        Builtin::Max | Builtin::Min | Builtin::InRange => Err(unsupported(
-            e.span,
-            "a run-time `max` or `min`, or `in_range` of a value other than an enumeration \
-             (no image pattern known, codegen-patterns 10.1) is",
-        )),
+        Builtin::InRange => in_range_subrange(p, e, &args[0]),
+        Builtin::Max | Builtin::Min => min_max(p, e, b, &args[0], &args[1]),
         // "Odd", p. 4-128: "true if i is an odd integer": bit 0 of the
         // integer (codegen-patterns 8, "odd").
         Builtin::Odd => {
@@ -5027,6 +5018,191 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
         }
         _ => Err(unsupported(e.span, "this predeclared function is")),
     }
+}
+
+/// `in_range(x)` ("In_range", p. 4-104) of an integer subrange `lo..hi`
+/// stored in a word, `lo >= 0` (an enumeration is [`builtin_value`]'s):
+/// "true if the value of x is within its defined range", one unsigned
+/// compare (codegen-patterns 10.1; **Reported**, the reading of
+/// ../source's sio/k_set_param.pas):
+///
+/// - `lo = 0`: `x <= hi` unsigned, the word compared where it is, `cmpi.w
+///   #hi,<ea>; bhi` for `not in_range(x)` (SIO_$K_SET_PARAM 0xE68252,
+///   0xE682A6, `sio_$parity_t` and `sio_$word_size_t`, 0..3).
+/// - `lo > 0`: `x - lo <= hi - lo` unsigned, in 32 bits, the word widened
+///   with zeros: `clr.l D1; move.w (0x12,A2),D1; subq.l #1,D1; cmpi.l
+///   #2,D1; bhi` (0xE68278..0xE68286, `sio_$stop_bit_t` = 1..3; the only
+///   subtract-and-compare of this shape in compiled code).
+///
+/// Refused: a negative lower bound (the zero extension would put -1 out
+/// of `-7..7`, p. 4-104's `small_int`: the original's form is not seen),
+/// a subrange stored in a byte or a longword, and integers, chars and
+/// booleans (no site).
+fn in_range_subrange(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
+    let canon = p.types.canon(x.ty);
+    let (lo, hi) = match p.types.kind(canon) {
+        TypeKind::Subrange { lo, hi, .. } if p.types.is_integer(canon) => (*lo, *hi),
+        _ => {
+            return Err(unsupported(
+                e.span,
+                "`in_range` of a value other than an enumeration or an integer subrange (no \
+                 image site, codegen-patterns 10.1) is",
+            ))
+        }
+    };
+    let v = value_of(p, x)?;
+    if v.ty().width != Width::Word || lo < 0 {
+        return Err(unsupported(
+            e.span,
+            "`in_range` of an integer subrange stored in a byte or a longword, or with a \
+             negative lower bound (no image site, codegen-patterns 10.1) is",
+        ));
+    }
+    let uw = Scalar::unsigned(Width::Word);
+    let ul = Scalar::unsigned(Width::Long);
+    let (lhs, rhs) = if lo == 0 {
+        (reinterpret(v, uw), Expr::Const { value: hi, ty: uw })
+    } else {
+        (
+            Expr::Binary {
+                op: IrBinOp::Sub,
+                lhs: Box::new(convert(reinterpret(v, uw), ul)),
+                rhs: Box::new(Expr::Const { value: lo, ty: ul }),
+                ty: ul,
+            },
+            Expr::Const {
+                value: hi - lo,
+                ty: ul,
+            },
+        )
+    };
+    Ok(Expr::Test(Box::new(Cond::Compare {
+        op: Rel::Le,
+        lhs,
+        rhs,
+    })))
+}
+
+/// `min(x, y)` / `max(x, y)` of run-time integers ("Min", p. 4-113;
+/// "Max", p. 4-111; codegen-patterns 10.1): an [`IrBinOp::Min`] or
+/// [`IrBinOp::Max`] whose type is that of the comparison.  **Reported**:
+/// the image's compare-and-select form, read as `min`/`max` by
+/// ../source's Pascal (an `if x > y then x := y` gives the same code).
+///
+/// - Sign (the reference's entries and 4.3.3, pp. 4-6..4-7): unsigned
+///   when both operands are unsigned run-time values ([`sign_of`]; a
+///   `0..65535` word, a `0..2147483647` longword, an unsigned sum), or one
+///   is and the other a constant in 0..2147483647; signed otherwise.
+///   Image: `bls` for MMAP_$ALLOC_FREE 0xE0D8B0 (`0..65535` against
+///   `0..2147483647`), MMAP_$GET_IMPURE 0xE0D62A (100 against a
+///   longword count), PKT_$BRK_INTERNET_HDR 0xE1246A (two `0..65535`
+///   words); `ble` for PKT_$COPY_TO_PA 0xE125AA (1024 against an
+///   `integer`), NETBUF_$ADD_PAGES 0xE0E980 (an `integer` against a
+///   difference of longwords).
+/// - Width: a word when both operands are words (0xE12468 `cmp.w`), a
+///   longword when either is one (0xE0D8AC `cmp.l`, the word widened by
+///   its own sign: `andi.l #0xffff` or `clr.l; move.w`, `ext.l`), and
+///   when either is a word sum, difference or product, which is then
+///   computed in 32 bits, its operands widened (ref 4.3.1, p. 4-5, as
+///   for `div`'s dividend): NETBUF_$ADD_PAGES 0xE0E95A..0xE0E96C
+///   `min(hdr_pages, 176 - netbuf_hdr_alloc)`, two `integer`s, `ext.l`
+///   both, `move.l #0xb0,D6; sub.l D4,D6; cmp.l D6,D3`; NETBUF_$DEL_PAGES
+///   0xE0EB54, 0xE0EB6E, 0xE0EC10.  A signed word against an unsigned
+///   one is widened too, as a comparison is ([`widen_operands`]; not
+///   seen for `min`/`max`), and so is an unsigned word against a negative
+///   constant (the comparison signed).
+/// - The result has the function's type (`dpc-sema`); a longword
+///   comparison of word operands is narrowed back (the register's low
+///   word: 0xE0EB6A `move.w D1,D4`).
+///
+/// Refused: bytes, chars, enumerations, booleans and pointers (no site).
+fn min_max(p: &Program, e: &SExpr, b: Builtin, x: &SExpr, y: &SExpr) -> Res<Expr> {
+    if !p.types.is_integer(x.ty) || !p.types.is_integer(y.ty) {
+        return Err(unsupported(
+            e.span,
+            "`max` or `min` of values other than integers (no image site, codegen-patterns \
+             10.1) is",
+        ));
+    }
+    let runtime = |s: &SExpr| -> Res<Option<Expr>> {
+        match s.value {
+            Some(_) => Ok(None),
+            None => value_of(p, s).map(Some),
+        }
+    };
+    let (vx, vy) = (runtime(x)?, runtime(y)?);
+    let vals: Vec<&Expr> = [&vx, &vy].into_iter().flatten().collect();
+    if vals.iter().any(|v| v.ty().width == Width::Byte) {
+        return Err(unsupported(
+            e.span,
+            "`max` or `min` of a one-byte integer (no image site, codegen-patterns 10.1) is",
+        ));
+    }
+    let non_negative = |s: &SExpr| {
+        s.value
+            .as_ref()
+            .and_then(|v| v.ordinal())
+            .is_some_and(|n| (0..=0x7fff_ffff).contains(&n))
+    };
+    let unsigned = [(x, &vx), (y, &vy)].iter().all(|(s, v)| match v {
+        Some(v) => v.ty().sign == Sign::Unsigned,
+        None => non_negative(s),
+    });
+    let word_arith = |v: &Expr| {
+        matches!(v, Expr::Binary { op: IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul, ty, .. }
+            if ty.width == Width::Word)
+    };
+    let long = vals.iter().any(|v| {
+        v.ty().width == Width::Long || word_arith(v) || (!unsigned && v.ty().sign == Sign::Unsigned)
+    });
+    let cty = Scalar::integer(
+        if long { Width::Long } else { Width::Word },
+        if unsigned {
+            Sign::Unsigned
+        } else {
+            Sign::Signed
+        },
+    );
+    let operand = |s: &SExpr, v: Option<Expr>| -> Res<Expr> {
+        match v {
+            Some(v) if v.ty().width == cty.width => Ok(reinterpret(v, cty)),
+            Some(v) => Ok(convert(v, cty)),
+            None => {
+                let c = const_of(s.value.as_ref().unwrap(), cty, s.span)?;
+                let Expr::Const { value, .. } = c else {
+                    unreachable!()
+                };
+                if !fits(value, cty) {
+                    return Err(unsupported(
+                        s.span,
+                        "a `max` or `min` constant outside the other operand's type is",
+                    ));
+                }
+                Ok(c)
+            }
+        }
+    };
+    let v = Expr::Binary {
+        op: if b == Builtin::Max {
+            IrBinOp::Max
+        } else {
+            IrBinOp::Min
+        },
+        lhs: Box::new(operand(x, vx)?),
+        rhs: Box::new(operand(y, vy)?),
+        ty: cty,
+    };
+    let rty = scalar_of(p, e)?;
+    Ok(if rty.width == cty.width {
+        reinterpret(v, rty)
+    } else if rty.bytes() > cty.bytes() {
+        convert(v, rty)
+    } else {
+        Expr::Convert {
+            value: Box::new(v),
+            ty: rty,
+        }
+    })
 }
 
 /// The IR scalar type of a value of type `ty` stored in `width`: its

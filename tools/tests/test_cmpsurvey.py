@@ -197,3 +197,39 @@ class OpFlagsTest(unittest.TestCase):
         ins = insns(['cmpw %d1,%d0', 'beqs 0x200', 'moveal %a0@,%a1', 'beqs 0x200'])
         ins += [(0x120, 2, 'addw %d1,%d0'), (0x130, 2, 'beqs 0x200')]
         self.assertEqual(cmpsurvey.opflags_sites(ins), [])
+
+
+class SelectTest(unittest.TestCase):
+    def test_memory_operand(self):
+        # MMAP_$ALLOC_PURE 0xE0D7CE `cmp.l (0x30,A2),D6; bls.b; move.l
+        # (0x30,A2),D6'
+        ins = insns(['cmpl %a2@(48),%d6', 'blss 0x106', 'movel %a2@(48),%d6',
+                     'subql #2,%sp'])
+        self.assertEqual(cmpsurvey.select_sites(ins), [(0x100, 'cmp', 'l', 'ls', 'mem')])
+
+    def test_immediate_and_moveq(self):
+        # PKT_$DAT_COPY 0xE12852; 0xE08B50 (`moveq')
+        ins = insns(['cmpiw #1024,%d5', 'bles 0x106', 'movew #1024,%d5', 'nop',
+                     'cmpiw #1,%d5', 'bles 0x10e', 'moveq #1,%d5', 'nop'])
+        self.assertEqual(cmpsurvey.select_sites(ins), [(0x100, 'cmp', 'w', 'le', 'imm'),
+                                                       (0x108, 'cmp', 'w', 'le', 'imm')])
+
+    def test_constant_in_a_register(self):
+        # OS_INIT_START 0xE2F08A
+        ins = insns(['movew #504,%d0', 'cmpw %d0,%d2', 'bles 0x108', 'movew %d0,%d2',
+                     'nop'])
+        self.assertEqual(cmpsurvey.select_sites(ins), [(0x102, 'cmp', 'w', 'le', 'constreg')])
+
+    def test_clamp_at_zero(self):
+        # NETBUF_$DEL_PAGES 0xE0EB64; 0xE4BD78
+        ins = insns(['subl %d4,%d1', 'bpls 0x106', 'clrl %d1', 'nop',
+                     'tstw %d2', 'bpls 0x10e', 'clrw %d2', 'nop'])
+        self.assertEqual(cmpsurvey.select_sites(ins), [(0x100, 'zero', 'l', 'pl', 'flags'),
+                                                       (0x108, 'zero', 'w', 'pl', 'tst')])
+
+    def test_not_sites(self):
+        # Another register moved, another target, a move of another value.
+        ins = insns(['cmpw %d1,%d0', 'bles 0x106', 'movew %d1,%d2', 'nop',
+                     'cmpw %d1,%d0', 'bles 0x110', 'movew %d1,%d0', 'nop', 'nop',
+                     'cmpw %d1,%d0', 'bles 0x118', 'movew %d3,%d0', 'nop'])
+        self.assertEqual(cmpsurvey.select_sites(ins), [])

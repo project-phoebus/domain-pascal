@@ -2573,10 +2573,11 @@ end;
 }
 
 /// "Succ"/"Pred" (pp. 4-191, 4-147) of a run-time value: `x + 1` / `x -
-/// 1` at x's type; `max`, `min` of run-time values, `in_range` of
-/// anything but an enumeration and `discard` of other expressions are
-/// refused (no image pattern).  `in_range` of an enumeration is the
-/// unsigned `x <= last` (codegen-patterns 10.1, bead domain-pascal-k1sv).
+/// 1` at x's type; `max`/`min` of non-integers, `in_range` of anything
+/// but an enumeration or a non-negative word subrange and `discard` of
+/// other expressions are refused (no image pattern).  `in_range` of an
+/// enumeration is the unsigned `x <= last` (codegen-patterns 10.1, bead
+/// domain-pascal-k1sv).
 #[test]
 fn ordinal_builtins_lower() {
     let e = result_value(
@@ -2595,17 +2596,23 @@ function f: integer; begin f := succ(w) end;",
         }
     ));
     for (src, needle) in [
-        ("w := max(w, 3)", "a run-time `max` or `min`"),
         (
-            "b := in_range(s)",
-            "`in_range` of a value other than an enumeration",
+            "c := max(c, 'a')",
+            "`max` or `min` of values other than integers",
         ),
+        ("w := min(y, w)", "`max` or `min` of a one-byte integer"),
+        (
+            "b := in_range(w)",
+            "`in_range` of a value other than an enumeration or an integer subrange",
+        ),
+        ("b := in_range(n)", "with a negative lower bound"),
         ("b := succ(b)", "this predeclared function is"),
         ("discard(w + 1)", "`discard` of an expression"),
     ] {
         let e = errs(&format!(
-            "module m; type small = 1..5; var w: extern integer; b: extern boolean;
-             s: extern small;
+            "module m; type small = 1..5; neg = -7..7; byte_t = [byte] 0..255;
+             var w: extern integer; b: extern boolean;
+             s: extern small; n: extern neg; c: extern char; y: extern byte_t;
 procedure p; begin {src} end;"
         ));
         assert!(e.iter().any(|m| m.contains(needle)), "{src}: {e:?}");
@@ -2623,6 +2630,108 @@ function f: boolean; begin f := in_range(c) end;",
                 ..
             })
         ),
+        "{e:?}"
+    );
+}
+
+/// `min`/`max` of run-time integers and `in_range` of a word subrange
+/// (bead domain-pascal-bzkf; codegen-patterns 10.1): the comparison's
+/// width and sign (ref "Min" p. 4-113, "Max" p. 4-111, 4.3.3 pp.
+/// 4-6..4-7), word arithmetic widened (NETBUF_$ADD_PAGES 0xE0E95A), the
+/// result narrowed back; `in_range` as one unsigned compare (SIO_$K_SET_
+/// PARAM 0xE68252, 0xE68278).
+#[test]
+fn min_max_and_in_range_lower() {
+    let src = |decl: &str, value: &str, result: &str| {
+        format!(
+            "module m; type pinteger = 0..65535; linteger = 0..2147483647;
+             two = 0..3; three = 1..3;
+             var i, j: extern integer; l: extern integer32; p, q: extern pinteger;
+             u: extern linteger; t: extern two; h: extern three; {decl}
+function f: {result}; begin f := {value} end;"
+        )
+    };
+    let min_ty = |e: &Expr| match e {
+        Expr::Binary {
+            op: BinOp::Min | BinOp::Max,
+            ty,
+            ..
+        } => Some(*ty),
+        Expr::Convert { value, .. } => match &**value {
+            Expr::Binary {
+                op: BinOp::Min | BinOp::Max,
+                ty,
+                ..
+            } => Some(*ty),
+            _ => None,
+        },
+        _ => None,
+    };
+    let sw = Scalar::signed(Width::Word);
+    let uw = Scalar::unsigned(Width::Word);
+    let sl = Scalar::signed(Width::Long);
+    let ul = Scalar::unsigned(Width::Long);
+    for (value, result, ty) in [
+        // Two signed words; a constant and a signed word.
+        ("min(i, j)", "integer", sw),
+        ("max(i, 3)", "integer", sw),
+        // Two unsigned words (PKT_$BRK_INTERNET_HDR 0xE1246A, `bls`), a
+        // non-negative constant and one (NET_IO_$COPY_PACKET 0xE0E612).
+        ("min(p, q)", "pinteger", uw),
+        ("min(1024, p)", "pinteger", uw),
+        // A word and an unsigned longword (MMAP_$ALLOC_FREE 0xE0D8AC).
+        ("min(p, u)", "linteger", ul),
+        ("min(100, u)", "linteger", ul),
+        // A signed and an unsigned operand: signed; two words of other
+        // signs widened, as a comparison is.
+        ("min(i, u)", "integer32", sl),
+        ("min(i, p)", "integer32", sl),
+        // A negative constant and an unsigned word: signed, widened.
+        ("max(-1, p)", "integer32", sl),
+        // A word difference: in 32 bits (NETBUF_$ADD_PAGES 0xE0E95A).
+        ("min(i, 176 - j)", "integer", sl),
+        ("min(i, l - 1)", "integer32", sl),
+    ] {
+        let e = result_value(&src("", value, result));
+        assert_eq!(min_ty(&e), Some(ty), "{value}: {e:?}");
+    }
+    // The word difference computed at 32 bits, its operands widened, the
+    // result narrowed back to the word.
+    let e = result_value(&src("", "min(i, 176 - j)", "integer"));
+    let Expr::Convert { value, ty } = &e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(*ty, sw);
+    let Expr::Binary { lhs, rhs, .. } = &**value else {
+        panic!("{e:?}")
+    };
+    assert!(
+        matches!(&**lhs, Expr::Convert { ty, .. } if *ty == sl),
+        "{e:?}"
+    );
+    assert!(
+        matches!(&**rhs, Expr::Binary { op: BinOp::Sub, lhs, ty, .. }
+            if *ty == sl && matches!(&**lhs, Expr::Const { value: 176, .. })),
+        "{e:?}"
+    );
+    // `in_range` of 0..3: the word compared unsigned with 3.
+    let e = result_value(&src("", "in_range(t)", "boolean"));
+    assert!(
+        matches!(&e, Expr::Test(c) if matches!(&**c, Cond::Compare {
+            op: Rel::Le,
+            lhs: Expr::Load { ty, .. },
+            rhs: Expr::Const { value: 3, .. },
+        } if *ty == uw)),
+        "{e:?}"
+    );
+    // `in_range` of 1..3: `x - 1 <= 2` in 32 bits, unsigned.
+    let e = result_value(&src("", "in_range(h)", "boolean"));
+    assert!(
+        matches!(&e, Expr::Test(c) if matches!(&**c, Cond::Compare {
+            op: Rel::Le,
+            lhs: Expr::Binary { op: BinOp::Sub, ty, .. },
+            rhs: Expr::Const { value: 2, .. },
+        } if *ty == ul)),
         "{e:?}"
     );
 }
