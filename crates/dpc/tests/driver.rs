@@ -3425,3 +3425,118 @@ end;
     let r = routine(&asm, "T");
     assert!(r.contains("\ttst.w\t%d"), "{r}");
 }
+
+#[test]
+fn compare_right_after_a_store_reads_the_register() {
+    // codegen-patterns 7.1, "A test right after a store": a compare with
+    // a nonzero constant right after a data register is stored into a
+    // local's frame slot compares the register (23 of 23 sites: MAC_OS_
+    // $SEND 0xE0B604 `move.l D0,(-0x20,A6); cmpi.l #0x120035,D0`; 0xE1CD8E
+    // `move.w D0,(-22,A6); cmpi.w #6,D0`).  Not after a label, another
+    // instruction, or at another size (a field of another offset).
+    let src = "module m;
+type status_$t = packed record case integer of
+    1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+    2: (all: integer32);
+  end;
+var g: integer;
+function getw(k: integer): integer; val_param; extern;
+function gets(k: integer): status_$t; val_param; extern;
+procedure take(var k: integer); extern;
+procedure takes(in s: status_$t); extern;
+procedure a;
+var x: integer;
+begin
+  x := getw(g);
+  if x = 6 then g := 1;
+  take(x);
+end;
+procedure b;
+var s: status_$t;
+begin
+  s := gets(g);
+  if s.all = 16#120035 then g := 1;
+  takes(s);
+end;
+procedure c;
+var s: status_$t;
+begin
+  s := gets(g);
+  if s.code = 5 then g := 1;
+  takes(s);
+end;
+procedure d;
+var x: integer;
+begin
+  x := 0;
+  if g > 3 then x := getw(g);
+  if x = 6 then g := 1;
+  take(x);
+end;
+";
+    let asm = compile_with("store_cmp", src, &[]).unwrap();
+    let a = routine(&asm, "A");
+    assert!(
+        a.contains("\tmove.w\t%d0,(-2,%fp)\n\tcmpi.w\t#6,%d0\n"),
+        "{a}"
+    );
+    let b = routine(&asm, "B");
+    assert!(
+        b.contains("\tmove.l\t%d0,(-4,%fp)\n\tcmpi.l\t#0x120035,%d0\n"),
+        "{b}"
+    );
+    let c = routine(&asm, "C");
+    assert!(
+        c.contains("\tmove.l\t%d0,(-4,%fp)\n\tcmpi.w\t#5,(-2,%fp)\n"),
+        "{c}"
+    );
+    let d = routine(&asm, "D");
+    assert!(d.contains("\tcmpi.w\t#6,(-2,%fp)\n"), "{d}");
+}
+
+#[test]
+fn four_byte_record_function_results() {
+    // codegen-patterns 3, "Record results": callers read D0.l; the callee
+    // copies the record into its result slot and loads it into D0
+    // (PEB_$GET_STATUS 0xE5AE52 `move.l (-8,A6),(-0x10,A6); move.l
+    // (-0x10,A6),D0`).
+    let src = "module m;
+type status_$t = packed record case integer of
+    1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+    2: (all: integer32);
+  end;
+function g(in x: integer32): status_$t;
+var st: status_$t;
+begin
+  st.all := x;
+  g := st;
+end;
+";
+    let asm = compile_with("record_result", src, &[]).unwrap();
+    let g = routine(&asm, "G");
+    assert!(
+        g.contains("\tmove.l\t(-4,%fp),(-8,%fp)\n\tmove.l\t(-8,%fp),%d0\n\tunlk\t%fp\n"),
+        "{g}"
+    );
+    let (code, err) = compile_with(
+        "record_result_twice",
+        "module m;
+type status_$t = packed record case integer of
+    1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+    2: (all: integer32);
+  end;
+function g(var s: status_$t): status_$t;
+begin
+  if s.all = 0 then g := s else g := s;
+end;
+",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("a record function result assigned other than once")
+            && err.contains("m.pas:6:"),
+        "{err}"
+    );
+}

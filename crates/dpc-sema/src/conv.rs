@@ -156,7 +156,18 @@ pub enum ResultReg {
     /// `d0_return` on a pointer result: the callee puts the pointer in both
     /// registers; callers read the data register (5.5.10, p. 5-20).
     AddressAndData,
-    /// Not known yet: sets, records and reals (codegen-patterns 3,
+    /// A 4-byte record (`status_$t`, base.ins.pas): in the data register
+    /// as a longword, which callers read like a [`ResultReg::Data`]
+    /// result, with no caller-provided storage (codegen-patterns 3,
+    /// "Record results": the 23 compiled calls of FIM_$CLEANUP, Apollo's
+    /// `pfm_$cleanup ...: status_$t`, `pea; jsr; addq.w #4,SP; move.l
+    /// D0,<dst>`).  The callee's result variable is a frame object like
+    /// any record: `f := r` copies into its slot, which is loaded into
+    /// the register at the end (PEB_$GET_STATUS 0xE5AE52, VOLX_$SHUTDOWN
+    /// 0xE6B5B2).
+    Record,
+    /// Not known yet: sets, reals, records of other sizes than 4 bytes,
+    /// and a 4-byte record under `a0_return` (codegen-patterns 3,
     /// Uncertain).  The declaration is accepted, so that Apollo's inserts
     /// that declare such functions check (bead domain-pascal-qia); a
     /// definition or a call is refused when lowered (`dpc-ir`), with
@@ -206,7 +217,19 @@ pub fn result_reg(
             ResultReg::Data
         });
     }
-    // Sets, records, reals: how they are returned is not yet observed
-    // (codegen-patterns 3, Uncertain).
+    // A 4-byte record: in D0 (codegen-patterns 3, "Record results"; seen
+    // for `status_$t` only, a packed record with a variant, base.ins.pas).
+    // `a0_return` ("Puts into A0 any values returned from that routine
+    // that should go into a register", 5.5.11 p. 5-20) on one: no site,
+    // left unknown.  `d0_return` and `c_param` speak of pointer results
+    // only (5.5.10, 5.5.12), so they change nothing here.
+    if matches!(types.kind(ty), TypeKind::Record(_))
+        && types.size(ty) == target.val_param_max_size()
+        && !opts.a0_return
+    {
+        return Ok(ResultReg::Record);
+    }
+    // Sets, reals, other records: how they are returned is not yet
+    // observed (codegen-patterns 3, Uncertain).
     Ok(ResultReg::Unknown)
 }

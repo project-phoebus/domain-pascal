@@ -465,12 +465,54 @@ fn result_registers() {
         result_reg("function f: integer; options(extern, a0_return);"),
         Address
     );
-    // Sets, records and reals: not known yet; the declaration is
-    // accepted (Apollo's inserts declare such functions), and `dpc-ir`
-    // refuses definitions and calls.
+    // Sets, reals and records other than 4-byte ones: not known yet; the
+    // declaration is accepted (Apollo's inserts declare such functions),
+    // and `dpc-ir` refuses definitions and calls.
     assert_eq!(
         result_reg("type s = set of 0..7; function f: s; extern;"),
         Unknown
     );
     assert_eq!(result_reg("function f: real; extern;"), Unknown);
+    // A 4-byte record, base.ins.pas's `status_$t` (codegen-patterns 3,
+    // "Record results"): in D0.  `d0_return`/`c_param` (pointers only,
+    // 5.5.10, 5.5.12) change nothing.
+    let status = "type status_$t = packed record case integer of
+        1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+        2: (all: integer32);
+      end;";
+    assert_eq!(
+        result_reg(&format!("{status} function f: status_$t; extern;")),
+        Record
+    );
+    assert_eq!(
+        result_reg(&format!(
+            "{status} function f: status_$t; options(extern, d0_return);"
+        )),
+        Record
+    );
+    assert_eq!(
+        result_reg("type r = record a, b: integer; end; function f: r; extern;"),
+        Record
+    );
+    // a0_return on one (5.5.11): no site, not known.
+    assert_eq!(
+        result_reg(&format!(
+            "{status} function f: status_$t; options(extern, a0_return);"
+        )),
+        Unknown
+    );
+    // Other sizes: not known.
+    assert_eq!(
+        result_reg("type r = record a: integer; end; function f: r; extern;"),
+        Unknown
+    );
+    assert_eq!(
+        result_reg("type r = record a, b: integer32; end; function f: r; extern;"),
+        Unknown
+    );
+    // A 4-byte array is no record.
+    assert_eq!(
+        result_reg("type a = array[1..2] of integer; function f: a; extern;"),
+        Unknown
+    );
 }

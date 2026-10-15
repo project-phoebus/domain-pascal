@@ -7622,12 +7622,41 @@ impl Selector {
                 Ok(cc)
             }
             Expr::Const { value, .. } => {
-                let ea = self.operand(addr)?;
+                let mut ea = self.operand(addr)?;
                 if let Ea::Reg(Reg::A(_)) = ea {
                     return Err(unsupported(
                         self.span,
                         "comparing an address register with a constant is",
                     ));
+                }
+                // Right after a store of a data register into a local's
+                // frame slot, at the compare's size, the register is
+                // compared, not the slot: 23 of the 23 such stores of
+                // compiled code that the next instruction compares with a
+                // nonzero constant (an ad-hoc scan, codegen-patterns 7.1,
+                // "A test right after a store"): the 21 compiled calls of
+                // FIM_$CLEANUP that store its `status_$t` into the frame,
+                // `move.l D0,(-0x20,A6); cmpi.l #0x120035,D0` (MAC_OS_$SEND
+                // 0xE0B604), and two word locals, 0xE1CD8E `move.w
+                // D0,(-22,A6); cmpi.w #6,D0`, 0xE63634 `move.w
+                // D1,(-0x4c2,A6); cmpi.w #8,D1`.  A volatile local is read
+                // again (ref 3.15.1).
+                if let (
+                    Ea::Disp(k, FP),
+                    Some(Insn::Move {
+                        size: s,
+                        src: src @ Ea::Reg(Reg::D(_)),
+                        dst: Ea::Disp(d, FP),
+                    }),
+                ) = (&ea, self.out.last())
+                {
+                    if d == k
+                        && *k < 0
+                        && *s == size
+                        && !self.volatile_eas.iter().any(|(v, _)| *v == ea)
+                    {
+                        ea = src.clone();
+                    }
                 }
                 self.out.push(Insn::Cmpi {
                     size,

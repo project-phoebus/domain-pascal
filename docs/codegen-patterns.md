@@ -350,7 +350,8 @@ last parameter, and the caller's pop includes it.
   bytes through its `(8,A6)` and the caller then copies them from
   `(-0x14,A6)`: perhaps a function returning a record through a hidden
   address, which would then not be padded.  `dpc` pads every list of
-  2 mod 4 bytes and has no record-valued functions.
+  2 mod 4 bytes and has no record-valued functions but 4-byte ones,
+  returned in D0 (section 3, "Record results").
 
 ### 1.5 Constant arguments (Verified / Reported)
 
@@ -1965,8 +1966,95 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   directly by the epilogue, with no move to D0 (ACL_$IS_SUSER,
   PROC2_$GET_ASID).  So from the wrapper alone you cannot tell a procedure
   from a function.  See `svc-d0-result-trap.md`.
-- **Uncertain:** how results larger than 4 bytes (records, sets, reals) are
-  returned.  This is not yet observed in the kernel.
+- **Record results (caller side Verified; callee side Verified at two
+  sites whose result type is the C's; implemented for 4-byte records;
+  bead domain-pascal-gcpo).**  The reference allows a function of any
+  type (2.2.3.1 p. 2-16, "typename is the data type of the value that
+  the function returns"; the diagnostic "Function name returns more than
+  32K bytes", appendix "Diagnostic Messages", suggests a parameter
+  instead of a large array) but
+  says nothing of how a record comes back: 5.5.10/5.5.11 (p. 5-20)
+  speak of pointer results and of "any values returned from that
+  routine that should go into a register", 5.2 (p. 5-3) of `c_param`
+  returning results in D0.  The image:
+  - *Callers (Verified).*  `status_$t` (Apollo's base.ins.pas: a packed
+    record of 4 bytes, variants `fail`/`subsys`/`modc`/`code` and
+    `all: integer32`) is the result of Apollo's own `FUNCTION
+    pfm_$cleanup (OUT cl_rec: pfm_$cleanup_rec): status_$t ;
+    OPTIONS(ABNORMAL, EXTERN)` (the SR10.2 install's /sys/ins/pfm.ins.pas,
+    line 97; also `prsvr_$update_status`, with `d0_return`, line 326, and
+    the routine-pointer type `pr_$render_t`, line 349, in its
+    prsvr.ins.pas).  The kernel's counterpart is
+    FIM_$CLEANUP 0xE21634 (hand assembly, in the D segment FIM_UNWIRED;
+    `fim.ins.pas` in ../source).  Of its 24 calls, the 23 in compiled code push only the
+    record's address, pop it, and read **D0 as a longword** right after
+    the pop: `pea (-0x18,A6); jsr FIM_$CLEANUP; addq.w #4,SP; move.l
+    D0,(-0x20,A6)` (MAC_OS_$SEND 0xE0B5F8..0xE0B604; likewise MAC_$SEND
+    0xE0BB7A, MAC_$RECEIVE 0xE0BE8C, PKT_$COPY_TO_PA 0xE1254A,
+    XNS_ERROR_$SEND, XNS_IDP_$OS_SEND, _$SEND, _$RECEIVE, PROC2_$LIST,
+    _$LIST2, _$LIST_PGROUP, _$ZOMBIE_LIST, the module-local at 0xE743CE
+    that PROC2_$DELETE calls, EC2_$WAIT 0xE4239E,
+    EC2_$WAKEUP, the ACL_ module-local at 0xE45A60 (call at 0xE45B1C),
+    ACL_$IMAGE, PCHIST_$UNIX_PROFIL_CNTL 0xE5CAEE, the REM_FILE
+    module-local at 0xE60FD8 (call at 0xE6135E), RING_$SVC_WRITE,
+    _$SVC_READ: 21
+    into the routine's frame), into an `out` parameter (the module-local at
+    0xE5B704, ../source's XPD_$COPY_MEMORY; map: XPD_$RESTART+0x1BA:
+    0xE5B72E `movea.l (24,A6),A0; move.l D0,(A0)`) and into an
+    enclosing frame (the module-local at 0xE4F3BA, ../source's
+    dir_$insert_entry; map: DIR_$FIND_NET+0xB06: 0xE4FD58 `movea.l
+    (-4,A6),A2; move.l D0,(-152,A2)`).  No caller pushes an address for the result (no
+    hidden argument) and none pops more than the record's address.  The
+    24th, STOP_$WATCH 0xE81820, is hand assembly in a D segment
+    (section 0: `addq.l #4,SP; move.l D0,D2`).  22 of the 23 compare the
+    status right after the store, against D0 (section 7.1, "A test right
+    after a store").  The other callers of routines the C in
+    `../source` types `status_$t` (DISK_IO 0xE3D50E 8 calls, EXCS 6,
+    SHAKE 5, SEEK 3, DISK_$MNT_DINIT 3, DISK_INIT 2, VOLX_$SHUTDOWN 3,
+    DMA_$CHECK 2, PEB_$GET_STATUS 1) read D0 the same way (`move.l
+    D0,<dst>`, `tst.l D0`, `move.l D0,Dn`), but their Pascal headings
+    are not known (`../source` declares them `integer32`).
+  - *The callee (Verified at two sites; Reported as a record result).*
+    No compiled routine is known by an Apollo declaration to return a
+    record.  Two whose C returns `status_$t`, assigned from a status
+    local as the last statement, copy that local into the result
+    variable's frame slot (the lowest, below the locals, section 2) and
+    load the slot into D0: PEB_$GET_STATUS 0xE5AE52 `move.l
+    (-8,A6),(-0x10,A6); move.l (-0x10,A6),D0` (`link #-0x10`) and
+    VOLX_$SHUTDOWN 0xE6B5B2 `move.l (-12,A6),(-16,A6); move.l
+    (-16,A6),D0`.  A scalar result assigned from a frame local at the
+    end reads the local itself, `move.<s> (-k,A6),D0` (the 16 other
+    `frame` functions of `tools/resultsurvey.py list`), and a pointer
+    result goes through its slot the same way ("Pointer results"
+    below), so this is the record shape, not the scalar one: a record
+    result variable is a frame object, as `status_$t` locals are (12.5),
+    and `f := r` is a record assignment into it.  With the result
+    declared `status_$t`, dpc compiles PEB_$GET_STATUS's tail
+    byte-for-byte (0xE5AE52..0xE5AE5E); the routine still differs by
+    its `regs` pointer local, which the image holds in A0 and dpc in the
+    frame (12.5, the pointer-local divergence).  (`../source`'s Pascal
+    returns `integer32` there: `peb_$get_status := st.all` compiles to
+    `move.l (-8,A6),D0`, one of the reasons it is MISMATCH.)
+  - Not seen: records of other sizes (PROC2_$UPGID_TO_UID 0xE41030
+    hints at an 8-byte result through a hidden address, section 1.4),
+    sets, reals; a 4-byte record under `a0_return`; a record result
+    through a routine pointer; in the callee, `f := g(x)`, several
+    assignments, an assignment before other statements or a `return`
+    (where the slot is loaded is not seen), a value parameter as the
+    value (beads domain-pascal-e2ei for other sizes, -jnze for the 4-byte
+    forms).
+  **Implemented** (`dpc-sema` `conv::result_reg`, `ResultReg::Record`:
+  a record of exactly 4 bytes, extended from `status_$t` to every
+  4-byte record, Uncertain for the others; `dpc-ir`
+  `record_result_assignment`, `check_record_result`): callers as for a
+  longword data result (`move.l D0,<dst>`; passed by address through a
+  temporary, section 1.5; `discard`); the callee's `f := r` from a
+  record in memory, as the last statement of the body, assigned once,
+  no `return`: `move.l r,(slot); move.l (slot),D0`.  Everything in "Not
+  seen" is refused, as are sets, reals and other records ("result
+  convention unknown").  Golden `tests/golden/results/record_results`;
+  driver test `four_byte_record_function_results`; exec test
+  `record_results`; `dpc-ir` test `four_byte_record_results`.
 - **Constant results (Verified at the sites):** `clr.<s> D0` for 0
   (PARITY_$CHK_IO 0xE0B1AA `clr.w D0`; IO_$ALLOC 0xE1A9CC `clr.l D0`),
   `moveq` for -128..127 (0xE0B19C `moveq #1,D0`, 0xE0B23A `moveq #-1,D0`,
@@ -4964,6 +5052,31 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   there, not reproduced); other memory is tested again, as before.
   Golden `tests/golden/control/store_flags`; driver test
   `branch_on_the_store_flags_only_right_after_the_store`.
+- **A compare with a nonzero constant right after a store (Verified by
+  survey for the frame; implemented there; bead domain-pascal-gcpo):**
+  over compiled code (an ad-hoc scan of `move.<s> Dn,<mem>` followed by
+  `cmpi.<s> #k,X`, k not 0, at the same size, X the register or the
+  memory just stored), a store into the routine's frame is followed by a
+  compare of the **register** 23 times and of the slot never: the 21
+  calls of FIM_$CLEANUP whose `status_$t` goes into the frame (section
+  3, "Record results": MAC_OS_$SEND 0xE0B604 `move.l D0,(-0x20,A6);
+  cmpi.l #0x120035,D0`, i.e. `if st.all = fault_$cleanup_set`), KBD_$RCV
+  0xE1CD8E `move.w D0,(-22,A6); cmpi.w #6,D0` and REM_FILE_$SERVER
+  0xE63634 `move.w D1,(-0x4c2,A6); cmpi.w #8,D1`.  A store to other
+  memory: the register 8 times (the module-local at 0xE5B704, 0xE5B734
+  after `move.l D0,(A0)`; after a call of DISK_IO, 0xE6B840 `move.l D0,(A2); cmpi.l
+  #0x80011,D0`;
+  0xE1CABC above), the memory once (the NAMEU module-local at 0xE49E48,
+  0xE49E84 `move.w D1,(A3); cmpi.w #1,(A3)`).  **Implemented** (`isel.rs`,
+  `Selector::compare`) for the frame: a compare of a local's slot with a
+  nonzero constant whose previous instruction is `move.<s> Dn,` that slot
+  at the compare's size compares Dn (a volatile local is read again, ref
+  3.15.1); not across a label, not for a field at another offset or size
+  (`s := f; if s.code = 5`: no site, the slot is compared).  Other memory
+  is compared in memory as before (bead domain-pascal-apna; a call's
+  result stored into an `out` parameter is refused anyway).  Golden `tests/golden/results/
+  record_results`; driver test
+  `compare_right_after_a_store_reads_the_register`.
 - **A computed value against 0 (Verified by survey; implemented; bead
   domain-pascal-qlzu):** `tools/cmpsurvey.py opflags` takes every
   conditional branch and `s<cc>` in compiled code (SMD_UTILS

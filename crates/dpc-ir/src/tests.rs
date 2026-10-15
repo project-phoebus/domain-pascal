@@ -574,10 +574,11 @@ end;
 
 #[test]
 fn unknown_result_conventions_are_refused_when_used() {
-    // codegen-patterns 3: how sets, records and reals are returned is not
-    // known.  `dpc-sema` accepts the declarations (Apollo's inserts have
-    // them, bead domain-pascal-qia); a definition and a call are refused
-    // here, and an unused extern declaration is not.
+    // codegen-patterns 3: how sets, reals and records other than 4-byte
+    // ones are returned is not known.  `dpc-sema` accepts the
+    // declarations (Apollo's inserts have them, bead domain-pascal-qia); a
+    // definition and a call are refused here, and an unused extern
+    // declaration is not.
     lower_src("module m; type s = set of 0..7; function f: s; extern; function g: real; extern;")
         .unwrap();
     let e = errs(
@@ -640,6 +641,120 @@ end;
                 && e[0].contains("result convention unknown"),
             "{decl}: {e:?}"
         );
+    }
+}
+
+const STATUS: &str = "module m;
+type status_$t = packed record case integer of
+    1: (fail: boolean; subsys: 0..127; modc: 0..255; code: integer);
+    2: (all: integer32);
+  end;
+  cleanup_rec_t = record pad: array[1..6] of integer32; end;
+function fim_$cleanup(out rec: cleanup_rec_t): status_$t; options(abnormal, extern);
+procedure use(in s: status_$t); extern;
+";
+
+/// codegen-patterns 3, "Record results": a 4-byte record comes back in
+/// D0.  Callers read it like a longword data result; the callee copies
+/// the record into its result variable's frame slot and loads that.
+#[test]
+fn four_byte_record_results() {
+    // The caller: `move.l D0,<dst>` (MAC_OS_$SEND 0xE0B604).
+    let m = lower_src(&format!(
+        "{STATUS}procedure p;
+var r: cleanup_rec_t; cs: status_$t;
+begin
+  cs := fim_$cleanup(r);
+end;
+"
+    ))
+    .unwrap();
+    let StmtKind::Store {
+        addr: Addr::Frame(_),
+        value: Expr::Call { ty, reg, .. },
+    } = &m.functions[0].body[0].kind
+    else {
+        panic!("{:#?}", m.functions[0].body)
+    };
+    assert_eq!(*ty, Scalar::unsigned(Width::Long));
+    assert_eq!(*reg, ResultClass::Data);
+
+    // The callee: a store into the result slot, then the slot as the
+    // result (PEB_$GET_STATUS 0xE5AE52).
+    let m = lower_src(&format!(
+        "{STATUS}function g(in x: integer32): status_$t;
+var st: status_$t;
+begin
+  st.all := x;
+  g := st;
+end;
+"
+    ))
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(
+        f.result,
+        Some(ResultSpec {
+            class: ResultClass::Data,
+            ty: Scalar::unsigned(Width::Long),
+        })
+    );
+    let slot = f.result_slot.expect("a result slot");
+    let n = f.body.len();
+    assert!(matches!(
+        &f.body[n - 2].kind,
+        StmtKind::Store { addr: Addr::Frame(o), value: Expr::Load { addr: Addr::Frame(_), .. } }
+            if *o == slot
+    ));
+    assert!(matches!(
+        &f.body[n - 1].kind,
+        StmtKind::SetResult(Expr::Load { addr: Addr::Frame(o), .. }) if *o == slot
+    ));
+
+    // Refused: other values, other places of the assignment, records of
+    // other sizes, `a0_return`, calls through routine pointers.
+    let refused = [
+        (
+            "function g: status_$t; begin g := fim_$cleanup(r); end;",
+            "a record function result assigned other than a record variable",
+        ),
+        (
+            "function g(var s: status_$t): status_$t; begin g := s; g := s; end;",
+            "a record function result assigned other than once",
+        ),
+        (
+            "function g(var s: status_$t): status_$t; begin if s.all = 0 then g := s else g := s; end;",
+            "a record function result assigned other than once",
+        ),
+        (
+            "function g(var s: status_$t): status_$t; begin if s.all = 0 then return; g := s; end;",
+            "a record function result assigned other than once",
+        ),
+        (
+            "function g(s: status_$t): status_$t; options(val_param); begin g := s; end;",
+            "a record function result assigned from a parameter passed by value",
+        ),
+        (
+            "function g(var s: status_$t): status_$t; options(a0_return); begin g := s; end;",
+            "functions returning status_$t are not supported yet (codegen-patterns 3: result \
+             convention unknown)",
+        ),
+        (
+            "type two = record a, b: integer32; end;
+function g(var s: two): two; begin g := s; end;",
+            "functions returning two are not supported yet",
+        ),
+        (
+            "procedure q; type fp = ^function: status_$t; var f: fp; s: status_$t;
+begin s := f^; end;",
+            "a record result of a call through a routine pointer",
+        ),
+    ];
+    for (src, want) in refused {
+        let src = format!("{STATUS}var r: cleanup_rec_t;\n{src}\n");
+        let e = errs(&src);
+        assert_eq!(e.len(), 1, "{src}: {e:?}");
+        assert!(e[0].contains(want), "{src}: {e:?}");
     }
 }
 

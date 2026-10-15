@@ -2072,6 +2072,10 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
                 "a pointer result in A0 and D0 (`d0_return`, `c_param`) is",
             ))
         }
+        // A 4-byte record: in D0 as a longword (codegen-patterns 3,
+        // "Record results"); the result variable stays in its frame slot
+        // ([`record_result_assignment`]).
+        ResultReg::Record => ResultClass::Data,
         ResultReg::Unknown => {
             return Err(Diagnostic::error(
                 r.span,
@@ -2136,6 +2140,9 @@ fn lower_body(
                 r.span,
                 "a function with no assignment to its result is",
             ));
+        }
+        if is_record_result(r) {
+            check_record_result(&out, r.span)?;
         }
     }
     Ok((out, with_temps, elem_temps))
@@ -2774,9 +2781,12 @@ impl Cx<'_> {
         let mut out = Vec::new();
         for s in &flat {
             match &s.kind {
-                SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) =>
-                {
-                    out.push(result_assignment(p, s, value, self.result)?);
+                SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) => {
+                    if is_record_result(self.r) {
+                        out.extend(record_result_assignment(p, self.r, s, value)?);
+                    } else {
+                        out.push(result_assignment(p, s, value, self.result)?);
+                    }
                 }
                 SStmtKind::Assign { target, .. }
                     if matches!(target.kind, ExprKind::Result { .. }) =>
@@ -3696,6 +3706,114 @@ fn result_assignment(
     })
 }
 
+/// Whether `r` returns a 4-byte record ([`ResultReg::Record`]).
+fn is_record_result(r: &Routine) -> bool {
+    r.result
+        .as_ref()
+        .is_some_and(|res| res.reg == ResultReg::Record)
+}
+
+/// `f := r` inside `f`, for a 4-byte record result ([`ResultReg::Record`];
+/// codegen-patterns 3, "Record results").  The result variable is a frame
+/// object, as a `status_$t` local is ([`scalar_locals`]): the record is
+/// copied into the result variable's slot, which is then loaded into the
+/// result register, `move.l (-8,A6),(-0x10,A6); move.l (-0x10,A6),D0`
+/// (PEB_$GET_STATUS 0xE5AE52, `link #-0x10`, the slot below the locals;
+/// VOLX_$SHUTDOWN 0xE6B5B2 `move.l (-12,A6),(-16,A6); move.l
+/// (-16,A6),D0`), where a final `f := local` of a scalar result reads the
+/// local itself (`tools/resultsurvey.py list frame`: the other 16
+/// functions of that class).  Both sites' C (`peb/get_status.c`,
+/// `volx/shutdown.c`) returns `status_$t`; that their Pascal did is not
+/// known.  So: a [`StmtKind::Store`] into the slot and a
+/// [`StmtKind::SetResult`] of the slot, which [`check_record_result`]
+/// keeps to the last statement of the body.
+///
+/// Only a record in memory is accepted: a function's result (`f :=
+/// g(x)`; a pointer function's A0 is stored and left in A0, MST_$MAPS
+/// 0xE439C8, but no record site is known) and a parameter passed by
+/// value (the selector may hold it in a register) are refused.
+fn record_result_assignment(p: &Program, r: &Routine, s: &SStmt, value: &SExpr) -> Res<Vec<Stmt>> {
+    let res = r.result.as_ref().expect("a function");
+    let slot = res
+        .var
+        .and_then(|v| match p.var(v).storage {
+            dpc_sema::Storage::Frame { offset } => Some(offset),
+            _ => None,
+        })
+        .ok_or_else(|| unsupported(r.span, "a record result without a frame slot is"))?;
+    if !value.is_designator() || value.value.is_some() {
+        return Err(unsupported(
+            value.span,
+            "a record function result assigned other than a record variable (a function's \
+             result: no site seen, codegen-patterns 3, \"Record results\") is",
+        ));
+    }
+    if p.types.size(value.ty) != p.types.size(res.ty) {
+        return Err(unsupported(
+            value.span,
+            "assigning a record of another size to a record function result is",
+        ));
+    }
+    if volatile_access(p, value).is_some() || p.types.has_volatile_part(value.ty) {
+        return Err(unsupported(
+            value.span,
+            "a record function result assigned from a volatile or device record (ref \
+             3.15.1-3.15.3) is",
+        ));
+    }
+    let v = value_of(p, value)?;
+    if matches!(&v, Expr::Load { addr: Addr::Frame(o), .. } if *o > 0) {
+        return Err(unsupported(
+            value.span,
+            "a record function result assigned from a parameter passed by value (no site \
+             seen) is",
+        ));
+    }
+    let ty = v.ty();
+    Ok(vec![
+        Stmt {
+            kind: StmtKind::Store {
+                addr: Addr::Frame(slot),
+                value: v,
+            },
+            span: s.span,
+        },
+        Stmt {
+            kind: StmtKind::SetResult(Expr::Load {
+                addr: Addr::Frame(slot),
+                ty,
+            }),
+            span: s.span,
+        },
+    ])
+}
+
+/// A function returning a 4-byte record assigns its result once, as the
+/// last statement of its body, with no `return` before it: the two sites
+/// of [`record_result_assignment`] store into the result slot and load it
+/// right before the epilogue; where the load would be with several
+/// assignments, or with a `return` (at the epilogue, where `return`
+/// branches, or after each store), is not seen.
+fn check_record_result(body: &[Stmt], span: Span) -> Res<()> {
+    let mut sets = 0;
+    let mut returns = false;
+    crate::visit_stmts(body, &mut |s| match s.kind {
+        StmtKind::SetResult(_) => sets += 1,
+        StmtKind::Return => returns = true,
+        _ => {}
+    });
+    let last = matches!(body.last().map(|s| &s.kind), Some(StmtKind::SetResult(_)));
+    if sets != 1 || !last || returns {
+        return Err(unsupported(
+            span,
+            "a record function result assigned other than once, by the last statement of the \
+             body with no `return` (where the result slot is loaded is not seen, \
+             codegen-patterns 3, \"Record results\") is",
+        ));
+    }
+    Ok(())
+}
+
 /// `d := e` for a scalar designator `d` (ref "Assignment", p. 4-25).
 ///
 /// A constant value takes the designator's type (the checker has made
@@ -4297,12 +4415,13 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
 
 /// The value of `e`.
 /// Refuse a call (callee `c`) of a function whose result convention is
-/// not known (`ResultReg::Unknown`: sets, records, reals; codegen-patterns
-/// 3), whether its value is used or discarded (`discard`): such a result
-/// may need caller-provided storage, so even a bare call could be wrong
-/// code.  Through a routine pointer the template's result type decides,
-/// as `dpc_sema::conv::result_reg` does for a routine (pointers and
-/// ordinals are known).
+/// not known (`ResultReg::Unknown`: sets, reals, records other than
+/// 4-byte ones; codegen-patterns 3), whether its value is used or
+/// discarded (`discard`): such a result may need caller-provided storage,
+/// so even a bare call could be wrong code.  Through a routine pointer the
+/// template's result type decides, as `dpc_sema::conv::result_reg` does
+/// for a routine (pointers and ordinals are known; a 4-byte record, known
+/// for a routine, is refused through a pointer: no site).
 fn refuse_unknown_result(p: &Program, c: &SCall, span: Span) -> Res<()> {
     let unknown = match &c.callee {
         SCallee::Routine(id) => p
@@ -4312,9 +4431,23 @@ fn refuse_unknown_result(p: &Program, c: &SCall, span: Span) -> Res<()> {
             .filter(|r| r.reg == ResultReg::Unknown)
             .map(|r| r.ty),
         SCallee::Pointer(x) => match p.types.kind(x.ty) {
-            TypeKind::RoutinePointer(sig) => sig.result.filter(|&t| {
-                !p.types.is_pointer(t) && !p.types.is_ordinal(t) && !p.types.is_error(t)
-            }),
+            TypeKind::RoutinePointer(sig) => {
+                let rec = sig.result.filter(|&t| {
+                    matches!(p.types.kind(t), TypeKind::Record(_)) && p.types.size(t) == 4
+                });
+                if rec.is_some() {
+                    // A 4-byte record result is in D0 for a routine
+                    // (codegen-patterns 3, "Record results"); no compiled
+                    // call through a pointer is known to read one.
+                    return Err(unsupported(
+                        span,
+                        "a record result of a call through a routine pointer (no site seen) is",
+                    ));
+                }
+                sig.result.filter(|&t| {
+                    !p.types.is_pointer(t) && !p.types.is_ordinal(t) && !p.types.is_error(t)
+                })
+            }
             _ => None,
         },
     };
