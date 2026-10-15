@@ -36,7 +36,11 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 `mulu.w`, `lea (0,A5,D1.w)`), `fim_get_fim_addr.pas` (FIM_$GET_FIM_ADDR
 0xE0AA04: `lsl.w #2`, `(0x3c,A5,D0.w)`) and
 `audit_is_process_audited.pas` (AUDIT_$IS_PROCESS_AUDITED 0xE70D94: a
-1-based array, `(-2,A5,D0.w)`, a comparison as the result with `seq`).
+1-based array, `(-2,A5,D0.w)`, a comparison as the result with `seq`);
+`acl_is_process_type_2.pas` (the module-local routine at 0xE46498,
+`acl/is_process_type_2.c`: another unit's array, `movea.l
+#PROC1_$TYPE,A0` between the parameter's load and its copy and scaling,
+`(-2,A0,D1.w)`; bead domain-pascal-rlnm).
 `time_q_init_queue.pas` starts at TIME_$Q_INIT 0xE16C5C, an empty
 procedure (codegen-patterns 2, bead domain-pascal-lkr), and
 `mt_release.pas` is the whole one-routine MT module (MT_$RELEASE

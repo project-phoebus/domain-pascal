@@ -2366,6 +2366,38 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
+/// Whether `e` reads a pointer that `p` reads or is (an equal load of a
+/// longword through which `p` is reached).
+fn shares_pointer(e: &Expr, p: &Expr) -> bool {
+    let mut loads = Vec::new();
+    walk_expr(p, &mut |n| {
+        if let Node::Expr(x @ Expr::Load { ty, .. }) = n {
+            if ty.width == Width::Long {
+                loads.push(x);
+            }
+        }
+    });
+    let mut found = false;
+    walk_expr(e, &mut |n| {
+        if let Node::Expr(x) = n {
+            found |= loads.contains(&x);
+        }
+    });
+    found
+}
+
+/// Whether [`Selector::mul_const`] multiplies by `c` with a `neg`: an odd
+/// part 2^k - 1 of k >= 3 (×28, ×56, ×60, ×120, ×248; codegen-patterns 8).
+fn neg_form(c: u32) -> bool {
+    if c == 0 {
+        return false;
+    }
+    let m = c >> c.trailing_zeros();
+    let plus = m > 1 && (m - 1).is_power_of_two();
+    let minus = m > 3 && (m + 1).is_power_of_two();
+    minus && !plus
+}
+
 /// Whether `index` is the plain `for` index at frame offset `off`.
 fn is_index(index: &Expr, off: i32) -> bool {
     matches!(index, Expr::Load { addr: Addr::Frame(o), ty } if *o == off && ty.width == Width::Word)
@@ -3851,6 +3883,16 @@ pub struct Selector {
     /// The index in `out` of the first instruction of the statement being
     /// selected.
     stmt_start: usize,
+    /// The statement (its start in `out` and span) that last addressed an
+    /// element of another unit's array ([`Self::other_unit_index`]).
+    other_elem: Option<(usize, Span)>,
+    /// The other units' arrays whose elements were addressed since the
+    /// routine's entry or the last call ([`Self::other_unit_index`]).
+    other_syms: Vec<String>,
+    /// How many elements of another unit's array or through a pointer
+    /// loaded from memory were addressed ([`Self::split_base`]): a call
+    /// checks whether its first pushed argument formed one.
+    split_elems: usize,
     /// By-address slots loaded for one use in a body of several
     /// statements: the register, the start of its statement in `out`, and
     /// the statement ([`fresh_slot_loads`]).
@@ -4134,6 +4176,9 @@ impl Selector {
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
+            other_elem: None,
+            other_syms: Vec::new(),
+            split_elems: 0,
             fresh: Vec::new(),
             ptr_copies: Vec::new(),
             pinned: Vec::new(),
@@ -7415,6 +7460,36 @@ impl Selector {
         // TTY_$K_GET 0xE1C4D6 `lea (0,A2,D2.w),A0; movea.l (-4,A6),A1;
         // move.b (0x2d1,A0),(A1)` (a tie).  A call on either side is not
         // seen (the survey leaves calls out): refused.
+        // An element of another unit's array and another object of the
+        // same variable in one store: the original reaches the other
+        // through a register loaded with the same symbol (0xE19F7A
+        // `movea.l #0xE7AEF4,A1; ...; movea.l #0xE7AEF4,A2; ...; lea
+        // (0,A1,D0.w),A1; move.l (236,A1),(300,A2)`), `dpc` absolutely
+        // (review of bead domain-pascal-rlnm; codegen-patterns 5.2).
+        let mut syms: Vec<String> = Vec::new();
+        let mut elems: Vec<String> = Vec::new();
+        let mut note = |n: Node| match n {
+            Node::Addr(Addr::Index { base, .. }) => {
+                if let Addr::Symbol { name, .. } = &**base {
+                    elems.push(name.clone());
+                }
+            }
+            Node::Addr(Addr::Symbol { name, .. }) => syms.push(name.clone()),
+            _ => {}
+        };
+        walk_addr(addr, &mut note);
+        walk_expr(value, &mut note);
+        if elems
+            .iter()
+            .any(|e| syms.iter().filter(|s| *s == e).count() > 1)
+        {
+            return Err(unsupported(
+                self.span,
+                "a store reaching an element of another unit's array and another part of the \
+                 same variable (through a register loaded with the same symbol, 0xE19F82; \
+                 codegen-patterns 5.2; bead domain-pascal-lnzy) is",
+            ));
+        }
         let both = self.addr_needs_reg(addr) && self.value_needs_reg(value);
         if both && (expr_has_call(value) || addr_has_call(addr)) {
             return Err(unsupported(
@@ -7520,6 +7595,34 @@ impl Selector {
         };
         let mid = self.out.len();
         let dst = self.ea_of(addr)?;
+        if both
+            && self.split_base(plain)
+            && (self.out.len() - mid > mid - start
+                || self.out[start..mid].iter().any(|i| {
+                    crate::regs::access(i)
+                        .defs
+                        .iter()
+                        .any(|r| matches!(r, Reg::A(_)))
+                }))
+        {
+            // An element of another unit's array or through a loaded
+            // pointer as the destination, the value needing an address
+            // register: the original sets the value up before the
+            // destination's base (TERM_$CONTROL 0xE66B40..0xE66B56, the ×56
+            // index, `movea.l (16,A6),A0`, then `movea.l #DTTE,A1`;
+            // NET_IO_$SEND 0xE0E8A6..0xE0E8B2; PROC2_$FORK 0xE731EA..0xE731FA
+            // `lea (-228,A3),A0` between the index load and its shift, the
+            // base last; 0xE6AA1C the value's pointer first), where `dpc`
+            // puts the destination first; with the value first, an
+            // address register's set-up is not seen (review of bead
+            // domain-pascal-rlnm; codegen-patterns 5.2).
+            return Err(unsupported(
+                self.span,
+                "a store into an element of another unit's array or through a pointer loaded \
+                 from memory whose value needs a register set up (the value before the base, \
+                 TERM_$CONTROL 0xE66B4C; codegen-patterns 5.2; bead domain-pascal-lnzy) is",
+            ));
+        }
         if both && self.out.len() - mid > mid - start {
             // The destination's instructions first, unless they read what
             // the value's wrote (a shared base: not seen).
@@ -8134,6 +8237,7 @@ impl Selector {
             }
         }
         let mut k = c.args.len();
+        let split0 = self.split_elems;
         while k > 0 {
             let a = &c.args[k - 1];
             if k >= 2 {
@@ -8200,6 +8304,22 @@ impl Selector {
                 ));
             }
             self.push(a)?;
+            if k == c.args.len() && c.pad == 2 && self.split_elems > split0 {
+                // The first pushed argument formed an element of another
+                // unit's array or through a loaded pointer, after the pad:
+                // the original sets it up before the pad (NAME_$FREE_ASID
+                // 0xE74DD8 `movea.l #NAME_$NODE_DATA_UID,A1; subq.l #2,SP;
+                // pea (40,A1,D2.w)`; MSG_$RCV_CONTIGI 0xE59900 `movea.l
+                // (44,A6),A3; move.w (A4),D1; subq.l #2,SP; pea
+                // (0,A3,D1.w)`; review of bead domain-pascal-rlnm).
+                return Err(unsupported(
+                    self.span,
+                    "a call with a pad whose first pushed argument is an element of another \
+                     unit's array or through a pointer loaded from memory (set up before the \
+                     pad, NAME_$FREE_ASID 0xE74DDE; codegen-patterns 1.4, 5.2; bead \
+                     domain-pascal-lnzy) is",
+                ));
+            }
             k -= 1;
         }
         // The static link of a nested callee, last before the `bsr`
@@ -8238,8 +8358,12 @@ impl Selector {
         self.out.push(insn);
         self.call_stmts.push((start, self.out.len() - 1, self.span));
         // The block of another data section is loaded again after a call
-        // (DXM_$INIT 0xE2FF66, KBD_$INIT 0xE3339E; [`Self::other_base`]).
+        // (DXM_$INIT 0xE2FF66, KBD_$INIT 0xE3339E; [`Self::other_base`]),
+        // and so is another unit's array (27 reloads of a `movea.l #`
+        // after a call in a run without branch targets, 3 bases held
+        // across one; [`Self::other_unit_index`]).
         self.other_bases.clear();
+        self.other_syms.clear();
         let n = c.bytes();
         if !no_pop && n > 0 {
             self.out.push(if n <= 8 {
@@ -10365,6 +10489,7 @@ impl Selector {
         }
         self.out.push(Insn::Jsr(Ea::AbsL(name.to_string(), 0)));
         self.other_bases.clear();
+        self.other_syms.clear();
         if self.call_no_pop && self.marith_depth == 0 {
             self.unpopped = true;
         } else {
@@ -10948,6 +11073,31 @@ impl Selector {
                     src: Ea::Idx(disp, b, x, long),
                     dst: r,
                 });
+            }
+            // The element's address of another unit's array, or of a byte
+            // array through a pointer loaded from memory, formed with a
+            // `lea` into the base's register or into another (`lea
+            // (0,An,Dx),Am` stored to memory: with a `movea.l #` base, 12
+            // into An and 15 into another at displacement 0, 1 and 14 at
+            // another; 0xE142BA `lea (0,A0,D0.l),A0`, TTY_$I_WAIT 0xE1C242
+            // `lea (0,A0,D0.w),A1`), which the allocator does not choose
+            // (codegen-patterns 12.4 R2, 5.2).
+            Addr::Index { base, .. }
+                if matches!(&**base, Addr::Symbol { .. })
+                    || matches!(&**base, Addr::Indirect { base: p, .. }
+                        if !matches!(&**p, Expr::Load { addr: Addr::Frame(f), .. }
+                            if self.pinned(*f).is_some())) =>
+            {
+                if matches!(&**base, Addr::Symbol { .. }) && self.in_loop() {
+                    return Err(self.other_unit_in_loop());
+                }
+                return Err(unsupported(
+                    self.span,
+                    "the address of an element of another unit's array or through a pointer \
+                     loaded from memory as a value (the `lea` into the base's register or \
+                     another, not settled: codegen-patterns 5.2, 12.4 R2; bead \
+                     domain-pascal-o1kl) is",
+                ));
             }
             _ => {
                 let src = self.ea_of(a)?;
@@ -12235,13 +12385,18 @@ impl Selector {
     /// is at `base + index × scale + offset`.
     ///
     /// - The base: the unit's data area (A5), the frame (A6), or the object
-    ///   a pointer held in an address register since the entry points to.
-    ///   Another unit's array is refused: the image splits its address
-    ///   between a `movea.l #` immediate and the displacement in a way not
-    ///   catalogued (ACL_$IN_SUBSYS 0xE470AA `movea.l #0xe97294,A0` and
-    ///   `(-0x3d5a,A1)`; module-local 0xE464A0 `movea.l #0xe2622c,A0` and
-    ///   `(-2,A0,D1.w)`, PROC1_$TYPE being 0xE2612C), and the base load is
-    ///   scheduled into the index computation (12.4 R11).
+    ///   a pointer held in an address register since the entry points to:
+    ///   no instruction.  Another unit's array: `movea.l #sym,An`, the
+    ///   immediate the variable's own symbol and every offset (field, lower
+    ///   bound) in the displacement (`tools/boolsurvey.py ebase`: 958 of the
+    ///   1043 `movea.l #` bases of indexed operands are a map symbol or a
+    ///   data block's start, the other 85 a section's start + 60000, ACL_
+    ///   0xE470AA; module-local 0xE4649C `movea.l #PROC1_$TYPE,A0; ...;
+    ///   cmpi.w #2,(-2,A0,D1.w)`, a 1-based array), loaded after the index's
+    ///   value and before its scaling ([`Self::other_unit_index`]).  An
+    ///   element of 1 byte through a pointer loaded from memory: the index,
+    ///   then the pointer ([`Self::pointer_index`]).  Other bases are refused
+    ///   (codegen-patterns 5.2, "Element operand").
     /// - The index in a data register ([`Self::index_reg`]), `.w` for a word
     ///   index, `.l` for a longword one.  **Uncertain:** words are also used
     ///   as `.l` indices after `ext.l` (0xE01D10..0xE01D16, an index held in
@@ -12297,18 +12452,49 @@ impl Selector {
                 let a = self.eval_a(p)?;
                 (a, *o)
             }
+            Addr::Symbol { name, offset: o } => {
+                self.split_disp(o + offset)?;
+                let (x, a) = self.other_unit_index(name, index, scale)?;
+                return self.element_ea(a, x, index, o + offset);
+            }
+            Addr::Indirect { base: p, offset: o } if scale == 1 => {
+                self.split_disp(o + offset)?;
+                let (x, a) = self.pointer_index(p, index)?;
+                return self.element_ea(a, x, index, o + offset);
+            }
+            Addr::Indirect { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "an element of more than 1 byte of an array through a pointer loaded from \
+                     memory (the pointer's load between the index's value and its scaling or \
+                     after the scaling, no rule found: tools/boolsurvey.py ebase, \
+                     codegen-patterns 5.2; bead domain-pascal-nqg1) is",
+                ))
+            }
+            Addr::OtherStatic { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "an element of an array in another data section's block (each element's \
+                     block load, NAME_$FORK 0xE73EAC, and the block's register across branch \
+                     targets: not settled, codegen-patterns 11; bead domain-pascal-hxwq) is",
+                ))
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
-                    "an element of an array other than one in the unit's data, the frame, or \
-                     through a pointer held since the entry (address split and scheduling not \
-                     catalogued, codegen-patterns 5.2) is",
+                    "an element of an array at this kind of address (codegen-patterns 5.2) is",
                 ))
             }
         };
-        let long = index.ty().width == Width::Long;
         let x = self.index_reg(index, scale)?;
-        let disp = disp0 + offset;
+        self.element_ea(areg, x, index, disp0 + offset)
+    }
+
+    /// The operand of an element at `disp` off base register `areg` with
+    /// the scaled index in `x` ([`Self::index_ea`]): `(d,An,Dx)` within
+    /// -128..127, otherwise `lea (0,An,Dx),Am` and `(d,Am)`.
+    fn element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
+        let long = index.ty().width == Width::Long;
         if (-128..128).contains(&disp) {
             return Ok(Ea::Idx(disp, areg, x, long));
         }
@@ -12351,29 +12537,61 @@ impl Selector {
     ///   0xE0AA8A `move.w D2,D0; lsl.w #2,D0`).  The scaling is
     ///   [`Self::mul_const`].
     fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<u8> {
-        let w = index.ty().width;
-        if scale == 1 {
-            let v = self.eval(index)?;
-            return match v {
-                Val::Tmp(d) | Val::Reg(Reg::D(d)) => Ok(d),
-                v => self.in_tmp(v, w),
-            };
-        }
-        // A scaled index is a reusable computation (codegen-patterns 12.4
-        // R7: FIM_$ACKNOWLEDGE's `PROC1_$AS_ID * 12`, 0xE0A972..0xE0A97E,
-        // indexes FIM_$QUIT_EC at 0xE0A994 and FIM_$DELIV_EC at 0xE0A9B0).
-        if let Some(leaf) = self.cse_leaf(index) {
-            let key = CseKey::Scaled(index.clone(), scale as i64);
-            return match self.cse_value(key, leaf, |s| s.scaled_index(index, scale))? {
-                Val::Tmp(d) | Val::Reg(Reg::D(d)) => Ok(d),
-                _ => unreachable!("a scaled index is in a data register"),
-            };
-        }
-        self.scaled_index(index, scale)
+        self.index_reg_with(index, scale, &mut |_| Ok(()))
     }
 
-    /// The scaling of [`Self::index_reg`].
-    fn scaled_index(&mut self, index: &Expr, scale: u32) -> Res<u8> {
+    /// [`Self::index_reg`], calling `between` once the index's value is in
+    /// its register and before the scaling (right after the value when
+    /// there is none to do, or when the scaled index is a computed value
+    /// held from earlier, 12.4 R7).
+    fn index_reg_with(
+        &mut self,
+        index: &Expr,
+        scale: u32,
+        between: &mut dyn FnMut(&mut Self) -> Res<()>,
+    ) -> Res<u8> {
+        let w = index.ty().width;
+        let mut called = false;
+        let x = {
+            let mut once = |s: &mut Self| -> Res<()> {
+                called = true;
+                between(s)
+            };
+            if scale == 1 {
+                let v = self.eval(index)?;
+                let d = match v {
+                    Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+                    v => self.in_tmp(v, w)?,
+                };
+                once(self)?;
+                d
+            } else if let Some(leaf) = self.cse_leaf(index) {
+                // A scaled index is a reusable computation (codegen-patterns
+                // 12.4 R7: FIM_$ACKNOWLEDGE's `PROC1_$AS_ID * 12`,
+                // 0xE0A972..0xE0A97E, indexes FIM_$QUIT_EC at 0xE0A994 and
+                // FIM_$DELIV_EC at 0xE0A9B0).
+                let key = CseKey::Scaled(index.clone(), scale as i64);
+                match self.cse_value(key, leaf, |s| s.scaled_index(index, scale, &mut once))? {
+                    Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+                    _ => unreachable!("a scaled index is in a data register"),
+                }
+            } else {
+                self.scaled_index(index, scale, &mut once)?
+            }
+        };
+        if !called {
+            between(self)?;
+        }
+        Ok(x)
+    }
+
+    /// The scaling of [`Self::index_reg`], `between` called before it.
+    fn scaled_index(
+        &mut self,
+        index: &Expr,
+        scale: u32,
+        between: &mut dyn FnMut(&mut Self) -> Res<()>,
+    ) -> Res<u8> {
         let w = index.ty().width;
         let mut v = self.eval(index)?;
         if let (
@@ -12390,8 +12608,185 @@ impl Selector {
             }
         }
         let d = self.in_tmp(v, w)?;
+        between(self)?;
         self.mul_const(d, scale as i64, w)?;
         Ok(d)
+    }
+
+    /// The scaled index and the base register of an element of another
+    /// unit's array `sym` ([`Self::index_ea`]; codegen-patterns 5.2,
+    /// "Another unit's array").
+    ///
+    /// The base is `movea.l #sym,An`, the immediate the symbol itself, the
+    /// offsets in the displacement.  It is generated after the index's
+    /// value (a load, a copy, a zero-extension) and before the scaling
+    /// (`tools/boolsurvey.py ebase`, the place R11 gives from that order,
+    /// 12.4: 518 of the 641 such bases it can judge; module-local 0xE4649C
+    /// `move.w (8,A6),D0; movea.l #PROC1_$TYPE,A0; move.w D0,D1; add.w
+    /// D1,D1`; TTY_$I_WAIT 0xE1C22E `move.w PROC1_$AS_ID,D0; movea.l
+    /// #FIM_$QUIT_EC,A0; lsl.w #2,D0; ...` for ×12).  For a scaling with
+    /// `neg` (2^s (2^k - 1), [`Self::mul_const`]) it is generated after the
+    /// scaling, which R11 then moves above its last `add` (the ×56 of
+    /// 0xE1AA5A, the ×28 of 0xE1975C, 37 sites).  Refused in a loop: the
+    /// image loads such a base in the loop (202 indexed operands, KBD_$FETCH_KEY
+    /// 0xE1CBAA) and also holds it in a register from before the loop
+    /// (TTY_$K_DRAIN_OUTPUT 0xE67AF0 `move.l #FIM_$QUIT_VALUE,D7`, then
+    /// `movea.l D7,A1` in the loop); which one is not settled.  Restricted
+    /// to element operands and `pea`s outside loops, 173 of 210 fit and
+    /// one misfit is not explained by a refused shape (PKT_$SAR_INTERNET
+    /// 0xE71F36; review of bead domain-pascal-rlnm, codegen-patterns 5.2).
+    fn other_unit_index(&mut self, sym: &str, index: &Expr, scale: u32) -> Res<(u8, u8)> {
+        if self.in_loop() {
+            return Err(self.other_unit_in_loop());
+        }
+        let here = (self.stmt_start, self.span);
+        if self.other_elem == Some(here) {
+            return Err(unsupported(
+                self.span,
+                "a statement with two elements of other units' arrays (FIM_$ACKNOWLEDGE \
+                 0xE0A972..0xE0A994 and 10 like it: the value's index in full, the \
+                 destination's index load, the value's base, then the destination's scaling \
+                 and base; not modelled, codegen-patterns 5.2; bead domain-pascal-0r1v) is",
+            ));
+        }
+        self.other_elem = Some(here);
+        if self.other_syms.iter().any(|s| s == sym) {
+            // Within a run without calls the image keeps the base for the
+            // next statement: of 78 `movea.l #` bases of indexed operands
+            // used again in their block, none is loaded a second time while
+            // a register holds it (MMAP_$FREE_PAGES 0xE0CF5C..0xE0CF74,
+            // `(0,A1,D2.l)` in two statements; module-local 0xE5B744
+            // ..0xE5B756 `clr.l (0,A1,D2.w); ...; clr.l (0,A1,D3.w)`).
+            // `dpc` loads it again; across a branch target not seen.
+            return Err(unsupported(
+                self.span,
+                "an element of another unit's array that an earlier statement since the last \
+                 call reached too (the original keeps the base's register for it, \
+                 MMAP_$FREE_PAGES 0xE0CF74, 0xE5B756; codegen-patterns 5.2; bead \
+                 domain-pascal-lnzy) is",
+            ));
+        }
+        let mut sym_read = false;
+        walk_expr(index, &mut |n| {
+            if let Node::Addr(Addr::Symbol { name, .. }) = n {
+                sym_read |= name == sym;
+            }
+        });
+        if sym_read {
+            // SIO_$INIT 0xE32C9C..0xE32CB4 `movea.l #0xE2C9F0,A1; move.w
+            // (5000,A1),D0; ...; lea (0,A1,D0.w),A1`: the base first, the
+            // index read through it (8 operands); `dpc` reads it absolutely.
+            return Err(unsupported(
+                self.span,
+                "an element of another unit's array whose index is read from the same variable \
+                 (through the base's register, SIO_$INIT 0xE32CA2; codegen-patterns 5.2; bead \
+                 domain-pascal-lnzy) is",
+            ));
+        }
+        self.other_syms.push(sym.to_string());
+        self.split_elems += 1;
+        let mut base = None;
+        let mut load = |s: &mut Self| -> Res<()> {
+            let a = s.alloc_a()?;
+            s.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::ImmSym(sym.to_string()),
+                dst: a,
+            });
+            base = Some(a);
+            Ok(())
+        };
+        let x = if neg_form(scale) {
+            let x = self.index_reg(index, scale)?;
+            load(self)?;
+            x
+        } else {
+            self.index_reg_with(index, scale, &mut load)?
+        };
+        Ok((x, base.expect("the base is loaded")))
+    }
+
+    /// The refusal of an element of another unit's array in a loop
+    /// ([`Self::other_unit_index`]).
+    fn other_unit_in_loop(&self) -> Diagnostic {
+        unsupported(
+            self.span,
+            "an element of another unit's array in a loop (its address loaded in the loop or \
+             held from before it, TTY_$K_DRAIN_OUTPUT 0xE67AF0: not settled, codegen-patterns \
+             5.2; bead domain-pascal-dw25) is",
+        )
+    }
+
+    /// The index and the base register of a 1-byte element of an array
+    /// through the pointer `p`, loaded from memory ([`Self::index_ea`];
+    /// codegen-patterns 5.2, "Arrays through a pointer"): the index into
+    /// its register, then the pointer (KBD_$FETCH_KEY 0xE1CB8A `clr.w D0;
+    /// movea.l (0x34,A4),A1; move.b (A2),D0; move.b (0,A1,D0.w),(A2)`, the
+    /// `movea.l` in the zero-extension's stall by R11; 0xE4D13A `move.w
+    /// (A2),D0; movea.l (8,A6),A0; cmpi.b #47,(-1,A0,D0.w)`).  Of the 1-byte
+    /// elements through such a pointer with the index formed in the block
+    /// (`tools/boolsurvey.py ebase`, base kinds `slot`, `local`,
+    /// `field-ptr`, `unit-ptr` with no scaling; review of bead
+    /// domain-pascal-rlnm), 10 fit (also 0xE4D180, 0xE4D1C6, 0xE4D292,
+    /// 0xE4D2EC, VFMT_$MAIN 0xE6AB5E, 0xE6AB84, 0xE6AC98, 0xE6AF62), all in
+    /// a loop's range; the other two are a call's first argument with a pad
+    /// (MSG_$RCV_CONTIGI 0xE59900, [`Self::call`]) and a store whose value
+    /// needs a register (0xE6AA1C, [`Self::store`]), both refused.  An index
+    /// read through the same pointer, loaded once for both (0xE1B2E0
+    /// `movea.l (8,A6),A0; move.w (980,A0),D1; lea (0,A0,D1.w),A1`;
+    /// 0xE4DE58), is refused.
+    fn pointer_index(&mut self, p: &Expr, index: &Expr) -> Res<(u8, u8)> {
+        if shares_pointer(index, p) {
+            return Err(unsupported(
+                self.span,
+                "an element of an array through a pointer that its index is read through too \
+                 (the pointer loaded once for both, 0xE1B2E0; codegen-patterns 5.2) is",
+            ));
+        }
+        self.split_elems += 1;
+        let x = self.index_reg(index, 1)?;
+        let a = self.eval_a(p)?;
+        Ok((x, a))
+    }
+
+    /// Refuse an element of another unit's array or through a pointer
+    /// loaded from memory ([`Self::index_ea`]) at a displacement beyond a
+    /// byte: `lea (0,An,Dx),Am` into the base's own register or another,
+    /// for an element used once with the base dead after it 84 against 105
+    /// (`movea.l #` bases; own: SIO_$INIT 0xE32CB0 `lea (0,A1,D0.w),A1`,
+    /// MMAP_ 0xE02912; another: 0xE0CC80 `lea (0,A0,D0.l),A2`, 0xE3E7A4),
+    /// not settled (codegen-patterns 5.2, 12.4 R2).
+    fn split_disp(&self, disp: i32) -> Res<()> {
+        if (-128..128).contains(&disp) {
+            return Ok(());
+        }
+        Err(unsupported(
+            self.span,
+            "an element of another unit's array or through a pointer loaded from memory at a \
+             displacement beyond a byte (the `lea` into the base's register or another, 84 \
+             against 105 sites: not settled, codegen-patterns 5.2, 12.4 R2; bead \
+             domain-pascal-o1kl, domain-pascal-lnzy) is",
+        ))
+    }
+
+    /// Whether `a` is an element of another unit's array or of an array
+    /// through a pointer not held in an address register since the entry
+    /// (the bases [`Self::index_ea`] loads itself; [`Self::store`],
+    /// [`Self::lea_into`]).
+    fn split_base(&self, a: &Addr) -> bool {
+        match a {
+            Addr::Volatile { addr, .. } => self.split_base(addr),
+            Addr::Index { base, .. } => match &**base {
+                Addr::Symbol { .. } => true,
+                Addr::Indirect { base: p, .. } => !matches!(
+                    &**p,
+                    Expr::Load { addr: Addr::Frame(f), .. }
+                        if matches!(self.pinned(*f), Some(Reg::A(_)))
+                ),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// Evaluate a pointer into a new address register, or give the

@@ -30,6 +30,9 @@ type
   pinteger = 0..65535;
   rec = record a: integer32; b: integer; end;
   s16 = set of 0..15;
+  cbuf = array[1..8] of char;
+  ibuf = array[1..8] of integer;
+  pbuf = record n: integer; cs: ^cbuf; end;
 var
   ss: extern s16;
   w: extern integer;
@@ -37,8 +40,17 @@ var
   u: extern pinteger;
   ws: array[1..8] of integer;
   xs: extern array[1..8] of integer;
+  xrs: extern array[1..8] of record a, b, c: integer32; end;
+  xbs: extern array[1..8] of record a: integer32; z: array[1..13] of integer32; end;
+  pp: extern univ_ptr;
+  cp: extern ^cbuf;
+  ip: extern ^ibuf;
+  pb: extern ^pbuf;
+  xh: extern array[100..107] of integer;
+  xsr: extern record n: integer; a: array[1..8] of integer; end;
   rs: array[1..8] of rec;
 function f(x: integer): integer; options(val_param, extern);
+procedure g(n: integer; var c: integer); options(val_param, extern);
 ";
 
 /// The body lines of routine `t`, after its `link`, up to its `unlk`.
@@ -144,8 +156,9 @@ fn unsupported_expressions() {
         ),
         // Both operands of an M$ARITH call computed: order not settled.
         ("t := (l + 1) * (l - 1);", "both operands computed"),
-        // Another unit's array: address split not catalogued.
-        ("t := xs[w];", "an element of an array other than"),
+        // Two elements of other units' arrays in one statement
+        // (FIM_$ACKNOWLEDGE 0xE0A994: not modelled).
+        ("t := xs[w] + xs[w];", "two elements of other units' arrays"),
         // Two calls in one statement.
         ("t := f(w) + f(w);", "two function calls in one statement"),
         // `!' of a variable and a constant: both orders in the image.
@@ -170,6 +183,114 @@ fn unsupported_expressions() {
         e.contains("one-word set with an element that is not constant"),
         "{e}"
     );
+}
+
+/// An element of another unit's array (codegen-patterns 5.2, "Another
+/// unit's array"): `movea.l #sym,An`, the lower bound in the displacement,
+/// the base after the index's value and before its scaling (module-local
+/// 0xE4649C `move.w (8,A6),D0; movea.l #PROC1_$TYPE,A0; move.w D0,D1;
+/// add.w D1,D1; cmpi.w #2,(-2,A0,D1.w)`); after a scaling with `neg`,
+/// moved above its last `add` by the scheduler (0xE1AA5A).
+#[test]
+fn other_units_array_elements() {
+    assert_eq!(
+        body("function t: integer32; internal;\nbegin\n  t := xs[w];\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XS,%a0",
+            "add.w\t%d0,%d0",
+            "move.w\t(-2,%a0,%d0.w),%d0",
+            "ext.l\t%d0",
+        ]
+    );
+    // ×12 (TTY_$I_WAIT 0xE1C24A for ×4, 0xE1C22E for ×12).
+    assert_eq!(
+        body("function t: integer32; internal;\nbegin\n  t := xrs[w].a;\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XRS,%a0",
+            "lsl.w\t#2,%d0",
+            "move.w\t%d0,%d1",
+            "add.w\t%d1,%d1",
+            "add.w\t%d1,%d0",
+            "move.l\t(-0xc,%a0,%d0.w),%d0",
+        ]
+    );
+    // ×56: the base generated after the scaling (0xE1AA50..0xE1AA62).
+    assert_eq!(
+        body("function t: integer32; internal;\nbegin\n  t := xbs[w].a;\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "lsl.w\t#3,%d0",
+            "move.w\t%d0,%d1",
+            "neg.w\t%d0",
+            "lsl.w\t#3,%d1",
+            "movea.l\t#XBS,%a0",
+            "add.w\t%d1,%d0",
+            "move.l\t(-0x38,%a0,%d0.w),%d0",
+        ]
+    );
+    // Refused: in a loop (loaded in the loop or held from before it,
+    // TTY_$K_DRAIN_OUTPUT 0xE67AF0); its address as a value (`lea` into
+    // the base's register or another, 12.4 R2).
+    let e = error("procedure t; internal;\nbegin\n  while w > 0 do l := xs[w];\nend;\n");
+    assert!(e.contains("another unit's array in a loop"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  pp := addr(xs[w]);\nend;\n");
+    assert!(e.contains("as a value"), "{e}");
+    // Refused, review of bead domain-pascal-rlnm: the same array in a
+    // later statement with no call between (the base kept, MMAP_$FREE_
+    // PAGES 0xE0CF74); an index read from the same variable (SIO_$INIT
+    // 0xE32CA2); a displacement beyond a byte (`lea` into the base's
+    // register or another); a store whose value needs an address register
+    // (TERM_$CONTROL 0xE66B4C); the first argument pushed after a pad
+    // (NAME_$FREE_ASID 0xE74DDE).
+    let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  l := xs[u];\nend;\n");
+    assert!(
+        e.contains("an earlier statement since the last call"),
+        "{e}"
+    );
+    let e = error("procedure t; internal;\nbegin\n  if xsr.a[xsr.n] = 0 then l := 0;\nend;\n");
+    assert!(e.contains("read from the same variable"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  xsr.n := xsr.a[w];\nend;\n");
+    assert!(e.contains("another part of the same variable"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  l := xh[w];\nend;\n");
+    assert!(e.contains("displacement beyond a byte"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  xs[w] := pb^.n;\nend;\n");
+    assert!(e.contains("whose value needs a register set up"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  g(w, xs[u]);\nend;\n");
+    assert!(e.contains("a call with a pad"), "{e}");
+    // A call between: the base loaded again (27 reloads after a call).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  l := xs[w];\n  w := f(w);\n  l := xs[u];\nend;\n")
+            .iter()
+            .filter(|i| i.starts_with("movea.l\t#XS,"))
+            .count(),
+        2
+    );
+}
+
+/// Elements through a pointer loaded from memory (codegen-patterns 5.2,
+/// "Arrays through a pointer"): 1 byte, the index then the pointer
+/// (KBD_$FETCH_KEY 0xE1CB8A); wider elements and an index read through
+/// the same pointer refused.
+#[test]
+fn elements_through_loaded_pointers() {
+    assert_eq!(
+        body("function t: char; internal;\nbegin\n  t := cp^[w];\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t(CP).l,%a0",
+            "move.b\t(-1,%a0,%d0.w),%d0",
+        ]
+    );
+    let e = error("function t: integer; internal;\nbegin\n  t := ip^[w];\nend;\n");
+    assert!(e.contains("more than 1 byte"), "{e}");
+    let e = error("function t: char; internal;\nbegin\n  t := pb^.cs^[pb^.n];\nend;\n");
+    assert!(e.contains("its index is read through too"), "{e}");
+    // A store whose value needs an address register (0xE6AA1C, the
+    // value's pointer first): refused (review of bead domain-pascal-rlnm).
+    let e = error("procedure t; internal;\nbegin\n  cp^[w] := pb^.cs^[1];\nend;\n");
+    assert!(e.contains("whose value needs a register set up"), "{e}");
 }
 
 /// Ref 4.3.1, p. 4-5: a word sum, difference, product or negation used as

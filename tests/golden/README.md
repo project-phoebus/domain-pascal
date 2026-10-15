@@ -59,6 +59,12 @@ Tests:
   indices zero-extended with `clr.w; move.b`, scaled, `.w` indices
   (tty_$i_enable_crash_func 0xE672AA, TTY_$K_SET_INPUT_BREAK_MODE
   0xE67874, VTOC_$LOOKUP 0xE38FD2).
+- `data/other_unit_index` - codegen-patterns 5.2 ("Another unit's array",
+  "Arrays through a pointer"), 12.4 R11 (bead domain-pascal-rlnm):
+  `movea.l #sym,An` after the index's value and before its scaling
+  (module-local 0xE4649C, byte-identical; TTY_$I_WAIT 0xE1C22E ×12),
+  after a `neg` scaling (0xE1AA50 ×56), in a byte index's stall
+  (KBD_$FETCH_KEY 0xE1CBAA, 0xE1CB8A for a pointer loaded from memory).
 - `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
   restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS

@@ -2748,24 +2748,185 @@ model run against the bit model of Figure 3-6).
     `0..65535`-indexed array of 40001 chars, or of an `array[0..20000] of
     integer`, would be addressed wrongly); other word indices are
     rejected (review of bead domain-pascal-5aw.13).
-  - **Another unit's array (Uncertain; rejected):** the base is loaded
-    with `movea.l #imm,An`, but the immediate is not the array's address:
-    ACL_$IN_SUBSYS 0xE470AA `movea.l #0xe97294,A0`, then `(-0x3d5a,A1)`;
-    module-local 0xE464A0 `movea.l #0xe2622c,A0` (PROC1_$TYPE is
-    0xE2612C), then `(-2,A0,D1.w)`; DISK_$REVALIDATE 0xE6C06A.  How the
-    original split the address between the immediate and the displacement
-    is not known.  `lea abs.l,An` occurs too (12 sites, AUDIT_$SUSPEND
-    0xE70DC0) against 1731 `movea.l #abs,An`.  The base load is scheduled
-    into the index computation (after the index's first instruction:
-    0xE4703E..0xE47058, 0xE470A4..0xE470B2, 0xE4649C..0xE464A6,
-    0xE6C066..0xE6C070), which fits the R11 rule of section 12.4 when
-    the base is generated within the rule's window.
+  - **Another unit's array (survey Verified; implemented in straight-line
+    code, bead domain-pascal-rlnm).**  `tools/boolsurvey.py summary`
+    (kind `ebase`: every indexed operand `(d,An,Dx)` through A0-A4 of
+    compiled code, 1952, with how An was set in the block and where that
+    sits among the instructions that form Dx; `list ebase` for the sites).
+    - *The split: the immediate is the variable's symbol, every offset in
+      the displacement.*  Of the 1043 `movea.l #imm,An` bases, 958 are
+      exactly a map symbol or a data block's start; the displacement holds
+      the lower bound and field offsets (module-local 0xE4649C `movea.l
+      #PROC1_$TYPE,A0; ...; cmpi.w #2,(-2,A0,D1.w)`, a 1-based word array;
+      DISK_$REVALIDATE 0xE6C06A `movea.l #DISK_$DVTBL,A0`, `pea
+      (-0x48,A0,D0.w)`, ×72 1-based).  The other 85 are the start of a
+      data section plus 60000 (`ACL_$DATA+0xEA60`, 66 sites, ACL_$IN_SUBSYS
+      0xE470AA `movea.l #0xE97294,A0` and `tst.w (-15706,A1)`, although
+      ACL_$DATA is only 0xAD98 bytes; `FILE_$LOT_DATA+0xEA60` = 0xEA202C,
+      19 sites, a section of 0x1086C bytes): variables of those
+      sections, which have no map symbols of their own.  (An earlier
+      version of this entry read 0xE4649C's immediate as 0xE2622C; it is
+      0xE2612C, PROC1_$TYPE.)  `lea abs.l,An` occurs for the unit's own
+      data addressed absolutely (AUDIT_$SUSPEND 0xE70DC0, 4 operands).
+    - *The order: the index's value, then the base, then the scaling.*
+      The tool simulates the scheduler of 12.4 R11 (W = 3) over the index's
+      chain (back from the operand to its first full write: a load, a
+      copy, `clr` and the move into it, through a shift-and-add's
+      temporaries), the base and the instruction before them, for two
+      generation orders: the value (the chain less its trailing scaling),
+      the base, the scaling; or the whole chain, then the base.  The rule
+      "value, base, scaling; for a scaling with `neg` (2^s (2^k - 1),
+      section 8), the whole index first" fits 518 of the 641 `movea.l
+      #sym` bases it can judge (348 of 427 with a one-instruction scaling,
+      147 of 189 with more, 23 of 25 with none); 69 of 82 for the 60000
+      bases.  Sites: module-local 0xE4649C `move.w (8,A6),D0; movea.l
+      #PROC1_$TYPE,A0; move.w D0,D1; add.w D1,D1` (the parameter's load,
+      then the base, then the copy and the scaling: the base in the
+      copy's stall); TTY_$I_WAIT 0xE1C22E `move.w PROC1_$AS_ID,D0;
+      movea.l #FIM_$QUIT_EC,A0; lsl.w #2,D0; move.w D0,D1; add.w D1,D1;
+      add.w D1,D0` (×12); 0xE042D6 `clr.l D0; movea.l #0xED5000,A1;
+      move.w (14,A0),D0; lsl.l #7,D0` (a zero-extension: the base in its
+      stall); 0xE1D79A `move.w D2,D0; movea.l #0xE2E3FC,A1; muls.w #268,D0`
+      (`mul<s>.w`).  With `neg` the base is after the scaling, which R11
+      moves above its last `add` (0xE1AA50..0xE1AA62 ×56, 0xE19750 ×28,
+      0xE33178; 37 of the 48 bases with a `neg` within the eight
+      instructions before the operand; the "value first" order would put
+      it right after the load).  The ×26 of NETLOG_$LOG_IT (0xE71BBA, bit by bit)
+      has a pointer base, below.  Of the 123 misfits, most are other
+      shapes: a register added to the element in place (`add.l
+      D1,(-8,A0,D0.w)`, the value's load in the index's stall and the base
+      after the scaling, 0xE02C30; 9 of the 10 such operations), which
+      dpc does not do (it loads, adds and stores); two elements in one
+      instruction (below); an index shared by two elements
+      (FIM_$ACKNOWLEDGE, 12.4 R7).
+    - *Restricted to what `dpc` forms* (review of bead domain-pascal-rlnm,
+      ad-hoc classification of `list ebase` with `tools/imgdis.sh`): of
+      the 641 judged sites, 506 lie outside every backward branch's range.
+      165 of those are `lea (0,An,Dx),Am` used as an address (refused,
+      below), 115 a `lea` for one access at a displacement beyond a byte
+      (refused, below), 16 updates in place (two elements in one
+      statement).  The other 210 are element operands and `pea`s: 173
+      fit.  Of the 37 misfits, 15 have two elements of other units'
+      arrays in one statement, 10 are 8-byte record stores (`move.l
+      (A0)+,(10,A1,D1.w)` twice, PROC2_$FORK 0xE731FA; `dpc` refuses an
+      8-byte copy to an indexed destination), 1 is a store whose value
+      needs an address register (TERM_$CONTROL 0xE66B56, below), 3 use a
+      base set by an earlier statement (0xE30B62, 0xE5B756 below; WIN_$CINIT
+      0xE3039E, the base held from field stores through it), 3 use a
+      scaled index of an earlier statement and get the base right before
+      the operand as `dpc` does (FIM_$ACKNOWLEDGE 0xE0A9B0, SIO2681_$INIT
+      0xE3346E, SIO6509_$INIT 0xE33532; the tool's chain runs back into
+      the earlier statement), 2 zero-extend a word index to a `.l` one
+      (0xE430F8, 0xE43154; `dpc` uses `.w` or refuses, above), 1 spills
+      the scaled index to the frame (AST_$COPY_AREA 0xE03A9A), 1 reads an
+      element whose address it also forms (FILE_$CHECK_PROT 0xE5D1D6).
+      One misfit is within the conditions: PKT_$SAR_INTERNET
+      0xE71F26..0xE71F36 `move.w PROC1_$AS_ID,D7; addq.l #1,D6; lsl.w
+      #2,D7; movea.l #FIM_$QUIT_VALUE,A4; move.l (0,A4,D7.w),D7`, the
+      base after the shift (the previous statement's `addq` in between),
+      where R11 from "value, base, scaling" puts it before the shift.
+    - *Refused besides* (the same review): the same array in a later
+      statement with no call between, where the image keeps the base (of
+      the 78 `movea.l #` bases that indexed operands of their block use
+      again, none is loaded a second time while a register holds it:
+      MMAP_$FREE_PAGES 0xE0CF5C..0xE0CF74, 0xE5B744..0xE5B756 `clr.l
+      (0,A1,D2.w); move.w (8,A6),D3; lsl.w #2,D3; clr.l (0,A1,D3.w)`;
+      after a call it is loaded again, 27 against 3 held; across a branch
+      target not seen); an index read from the same variable, through the
+      base (SIO_$INIT 0xE32C9C..0xE32CB4 `movea.l #0xE2C9F0,A1; move.w
+      (5000,A1),D0; ...`), or a store that reaches another part of the
+      same variable (0xE19F7A..0xE19F8A, A1 and A2 both loaded with
+      0xE7AEF4, `move.l (236,A1),(300,A2)`), where `dpc` reads it
+      absolutely; an element at a displacement beyond a byte,
+      `lea (0,An,Dx),Am` into the base's register or another (with the
+      base dead after one use, 84 own, SIO_$INIT 0xE32CB0, against 105
+      another, 0xE0CC80 `lea (0,A0,D0.l),A2`; 12.4 R2); a store whose value
+      needs a register set up, when that is an address register or when
+      the destination takes more instructions (`dpc` then puts the
+      destination first, 12.4 "Stores whose destination and value both
+      need a register"; the image sets the value up before the base:
+      TERM_$CONTROL 0xE66B40..0xE66B56 `...; add.w D2,D1; movea.l
+      (16,A6),A0; movea.l #DTTE,A1; move.b (A0),(36,A1,D1.w)`, NET_IO_$SEND
+      0xE0E8A6, PROC2_$FORK 0xE731EA); the first argument pushed after a
+      pad (`dpc` pads first; the image after the set-up: NAME_$FREE_ASID
+      0xE74DD8 `movea.l #NAME_$NODE_DATA_UID,A1; subq.l #2,SP; pea
+      (40,A1,D2.w)`); follow-ups, bead domain-pascal-lnzy, with the
+      PKT_$SAR_INTERNET misfit).
+    - *Two elements of other units' arrays in one statement:* 14 moves
+      with two such operands (ad-hoc count).  At 8, `fim_$quit_value[as]
+      := fim_$quit_ec[as].value` (FIM_$ACKNOWLEDGE 0xE0A972..0xE0A994,
+      FIM_$INIT_ASID 0xE0AA54, PROC2_$WAIT 0xE400A4, MSG_$WAITI 0xE59CC4,
+      ASKNODE_$WHO_NOTOPO 0xE66310, TTY_$K_PUT 0xE67D7A, ...): the value's
+      index in full (×12), the destination's index load, the value's base,
+      the destination's scaling, its base, the move.  Three read the index
+      once for both (TIME_$WAIT 0xE1662E), two index one array twice with
+      one base (PROC2_$FORK 0xE72EE2), one has the value's index from
+      before (0xE614C2).  Not modelled: refused (bead
+      domain-pascal-0r1v, with the in-place `add.l` above).
+    - *In loops:* such bases are loaded in the loop (202 operands,
+      KBD_$FETCH_KEY 0xE1CBAA `movea.l #SMD_$KTT,A0`) and also held in a
+      register from before the loop (TTY_$K_DRAIN_OUTPUT 0xE67AF0
+      `move.l #FIM_$QUIT_VALUE,D7`, `movea.l D7,A1` in the loop, with
+      FIM_$QUIT_EC, PROC1_$AS_ID and two field addresses).  Not settled:
+      refused (bead domain-pascal-dw25).
+    - *The element's address as a value* (`lea (0,An,Dx),Am` stored to
+      memory): Am is An at 12 and another register at 15 with
+      displacement 0, another at 14 of 15 otherwise (ad-hoc count; 0xE142BA
+      `lea (0,A0,D0.l),A0`; TTY_$I_WAIT 0xE1C242 `lea (0,A0,D0.w),A1`), a
+      register choice dpc's allocator does not make (12.4 R2): refused
+      (bead domain-pascal-o1kl).
+    **Implemented** (`isel.rs`, `index_ea`, `other_unit_index`,
+    `index_reg_with`): the rule above, in straight-line code, one such
+    element per statement and per array between calls, at displacements
+    within a byte, with any index dpc forms that does not read the same
+    variable, less the stores and padded calls refused above (test
+    `dpc-m68k` `other_units_array_elements` has one case of each).  A scaled index held from earlier (12.4 R7) is
+    read where it is; the base follows it.  Another data section's block
+    (11) stays refused (bead domain-pascal-hxwq).  Golden
+    `data/other_unit_index`; conformance `acl_is_process_type_2.pas`
+    (module-local 0xE46498, byte-identical); exec test
+    `elem_bases`; test `dpc-m68k` `other_units_array_elements`.
   - **Bounds checks:** none in the image; the C of FIM_$FREE_ASID
     (`fim/free_asid.c`) notes "the original performs no bounds check".
     `dpc` emits none.
-  - Arrays through a pointer are supported when the pointer is held in an
-    address register since the entry; others are rejected (where the
-    pointer load goes relative to the index is not catalogued).
+  - **Arrays through a pointer** (survey, kind `ebase` as above; bead
+    domain-pascal-rlnm).  A pointer held in an address register since the
+    entry is the base itself (implemented).  A pointer loaded from memory
+    (a parameter's slot, a frame or unit pointer variable, a field through
+    another register):
+    - *Elements of 1 byte* (no scaling, so both orders above give one
+      place): the index, then the pointer.  The tool judges 28 operands
+      through such pointers with no scaling instruction in the block, 18
+      fitting, but those include wider elements whose index was scaled
+      before and pointers held since the entry.  Of the 1-byte elements
+      with the index formed in the block (review of bead
+      domain-pascal-rlnm), 10 fit (KBD_$FETCH_KEY 0xE1CB8A `clr.w D0;
+      movea.l (0x34,A4),A1; move.b (A2),D0; move.b (0,A1,D0.w),(A2)`;
+      0xE4D13A `move.w (A2),D0; movea.l (8,A6),A0; cmpi.b
+      #47,(-1,A0,D0.w)`; 0xE4D180, 0xE4D1C6, 0xE4D292, 0xE4D2EC; VFMT_$MAIN
+      0xE6AB5E, 0xE6AB84, 0xE6AC98, 0xE6AF62), all within a loop's range;
+      the other two are a padded call's first argument (MSG_$RCV_CONTIGI
+      0xE59900 `movea.l (44,A6),A3; move.w (A4),D1; subq.l #2,SP; pea
+      (0,A3,D1.w)`) and a store whose value needs a register (0xE6AA1C,
+      the value's pointer first), both refused as above.  Others read the
+      index through the same pointer, loaded once for both (0xE1B2E0
+      `movea.l (8,A6),A0; move.w (980,A0),D1; lea (0,A0,D1.w),A1`;
+      0xE4DE58), which dpc does not do.  **Implemented** (`pointer_index`);
+      an index read through the same pointer expression is refused, and
+      so are displacements beyond a byte, as above.
+    - *Wider elements:* not settled.  The pointer's load sits between the
+      index's value and its scaling (DXM_$SCAN_QUEUE 0xE17178 `move.w
+      (A2),D0; movea.l (0x18,A2),A0; lsl.w #4,D0`; TTY_$I_SIGNAL 0xE1B878
+      `move.w D2,D1; movea.l (8,A6),A0; lsl.w #2,D1; ...` ×12; 0xE0C664)
+      at 14 of the 56 operands judged, after the scaling and not pulled
+      into it by R11 at most others (PMAP_$FLUSH 0xE137E0 `move.w D6,D0;
+      lsl.w #2,D0; movea.l (12,A6),A0; lea (0,A0,D0.w),A1`; BAT_$ALLOCATE
+      0xE3B27A, 0xE3B30E `move.w D4,D0; lsl.w #2,D0; movea.l (3384,A5),A0`;
+      0xE1370C; 0xE4D8C2); neither generation order, nor R11 with an
+      interlock on loads only, explains both groups.  Refused (bead
+      domain-pascal-nqg1; the
+      address of such an element as a value, `lea_into`'s NETLOG_$LOG_IT
+      form below, is unchanged).
   - **Byte indices (survey; implemented, bead domain-pascal-ji9).**
     `tools/cmpsurvey.py summary` (kind `bidx`): of the 27 indexed
     operands of compiled code whose index register was last written by a
@@ -3467,8 +3628,7 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   - Nested routines alone, adjacent to their parent: PROC2_$SUSPEND's
     0xE4120C (0x5E) reads an element of another unit's array, `movea.l
     #sym,A0; mulu.w #0xe4,D0; move.w (-0x4a,A0,D0.w),-(SP)` (0xE41222..
-    0xE4122C; `dpc` refuses arrays outside the unit's data and the frame,
-    5.2) and sets bit 31 of a status with `bset #7,(-8,A2)` after testing
+    0xE4122C; 5.2, "Another unit's array") and sets bit 31 of a status with `bset #7,(-8,A2)` after testing
     its low word, `tst.w (-6,A2)` (the layout of `status_$t` is Uncertain,
     9); AST_$FREE_PAGES's 0xE03FBC (0x50) updates a byte field
     `move.b (0x10,A0),D1; sub.b D0,D1; movea.l (8,A2),A0; move.b
@@ -7570,8 +7730,9 @@ written on one path, computed in one arm, stores through pointers to the
 unit's data and to a pointer parameter, an escaped local, a call, a loop,
 a scaled index with and without its variable written); unit test
 `store_may_write_cases`.  No conformance unit yet: FIM_$ACKNOWLEDGE needs
-other units' arrays as bases (`movea.l #sym,An`) and the order of R9;
-the LOG_$READ worker the rest of 12.3.
+two elements of other units' arrays in one statement, which `dpc`
+refuses (5.2, "Another unit's array": the order of their bases is not
+modelled); the LOG_$READ worker the rest of 12.3.
 
 **R8. Plain variable reads are not kept across statements (Verified at
 the sites).**

@@ -67,6 +67,9 @@ tests/conformance/dma_init_m68450_channel.pas  0xE0A328:3A
 tests/conformance/bat_get_bat_step.pas       BAT_$GET_BAT_STEP  --section-addr .bss.moddata.BAT_=0xE79478
 tests/conformance/fim_get_fim_addr.pas       FIM_$GET_FIM_ADDR  --section-addr .moddata.FIM_=0xE2126C
 tests/conformance/audit_is_process_audited.pas  AUDIT_$IS_PROCESS_AUDITED  --section-addr .bss.moddata.AUDIT=0xE854D8
+# Another unit's array (codegen-patterns 5.2, bead domain-pascal-rlnm):
+# `movea.l #sym,An' between the index's load and its scaling.
+tests/conformance/acl_is_process_type_2.pas  0xE46498:20
 
 # Status out-parameters (codegen-patterns 9): `status.all := ...' through
 # the status slot; by-address slots used once each in a register no

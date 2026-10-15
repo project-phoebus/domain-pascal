@@ -96,5 +96,42 @@ class ElemTest(unittest.TestCase):
                          [(0x102, 'w', 3, (-26, -25, -24))])
 
 
+class EbaseTest(unittest.TestCase):
+    def test_other_unit_base_between_value_and_scaling(self):
+        # TTY_$I_WAIT 0xE1C22E..0xE1C242: ×12, the base after the load
+        ins = insns(['movew 0xe2060a,%d0', 'moveal #14819330,%a0', 'lslw #2,%d0',
+                     'movew %d0,%d1', 'addw %d1,%d1', 'addw %d1,%d0',
+                     'lea %a0@(0,%d0:w),%a1'])
+        sym = {14819330}.__contains__
+        self.assertEqual(boolsurvey.ebase_sites(ins, sym=sym),
+                         [(0x10c, 'imm=sym', 'd0', '1/5', 'load', 'fit:s2', 'straight',
+                           '0xE22002+0')])
+
+    def test_neg_scaling_base_after(self):
+        # 0xE1AA50..0xE1AA62: ×56, the base before the last `add'
+        ins = insns(['movew %d2,%d3', 'lslw #3,%d3', 'movew %d3,%d0', 'negw %d3',
+                     'lslw #3,%d0', 'moveal #14867600,%a1', 'addw %d0,%d3',
+                     'tstl %a1@(2c,%d3:w)'])
+        s = boolsurvey.ebase_sites(ins, sym=lambda a: True)
+        self.assertEqual(s[0][1:7], ('imm=sym', 'd', '5/6', 'copy', 'fit:s2', 'straight'))
+
+    def test_pointer_base_held_and_loop(self):
+        # a base not set in the block; a site inside a backward branch
+        ins = insns(['movew %a2@,%d0', 'lslw #4,%d0', 'lea %a0@(0,%d0:w),%a0',
+                     'bnes 0x100'])
+        self.assertEqual(boolsurvey.ebase_sites(ins),
+                         [(0x104, 'held', 'd0', '0/2', 'load', '-', 'loop', '')])
+        ins = insns(['movew %a2@,%d0', 'moveal %a2@(24),%a0', 'lslw #4,%d0',
+                     'lea %a0@(0,%d0:w),%a0'])
+        self.assertEqual(boolsurvey.ebase_sites(ins)[0][1:7],
+                         ('field-ptr', 'd0', '1/2', 'load', 'fit:s1', 'straight'))
+
+    def test_r11(self):
+        # the base placed in the stall of a zero-extension (0xE1CB8A)
+        gen = ['clrw %d0', 'moveb %a2@,%d0', 'moveal %a4@(52),%a1',
+               'moveb %a1@(0,%d0:w),%a2@']
+        self.assertEqual(boolsurvey._r11(gen, None), [0, 2, 1, 3])
+
+
 if __name__ == '__main__':
     unittest.main()

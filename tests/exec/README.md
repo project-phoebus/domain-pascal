@@ -186,6 +186,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |
 | `gotos` | forward and backward `goto`, out of loops, into a `case` arm, from a function |
 | `loops` | `for` over empty ranges, `downto`, negative bounds, `exit`, `next`, `while` |
+| `elem_bases` | bead domain-pascal-rlnm: elements of other units' arrays (1-based words, ×12 and ×56 records, `char` indices) read, stored and passed by address, indices from parameters, another unit's variable and a local held across a call; byte elements through a pointer in another unit; a negative lower bound, a longword index, `i + 1`, an element in a condition, a byte element by a word index, one array in two statements around a call, a computed value stored |
 | `fill` | `for` clear loops (`clr (A0)+`, `dbf`) over another unit's arrays |
 | `shortcircuit` | `and then` / `or else` skip their right operand |
 | `bools` | plain `and` / `or` in conditions, under `not`, stored; `odd` of words and longwords, negative ones |
