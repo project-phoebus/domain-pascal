@@ -171,6 +171,47 @@ fn size_of(w: Width) -> Size {
     }
 }
 
+/// The memory operand `ea` moved `k` bytes up, when its mode allows it
+/// (a 16-bit displacement, an 8-bit one with an index, an absolute
+/// address); `None` otherwise.  Used to read the low bytes of a
+/// big-endian object ([`Selector::convert`]).
+fn displace(ea: &Ea, k: i32) -> Option<Ea> {
+    Some(match ea {
+        Ea::Ind(a) => Ea::Disp(k, *a),
+        Ea::Disp(d, a) if i16::try_from(d + k).is_ok() => Ea::Disp(d + k, *a),
+        Ea::Idx(d, a, x, l) if i8::try_from(d + k).is_ok() => Ea::Idx(d + k, *a, *x, *l),
+        Ea::AbsL(s, o) => Ea::AbsL(s.clone(), o + k),
+        Ea::AbsW(v) if i16::try_from(v + k).is_ok() => Ea::AbsW(v + k),
+        _ => return None,
+    })
+}
+
+/// Whether `value` narrowed to `ty` is read in place, its low bytes at
+/// the higher address ([`displace`], [`Selector::convert`]): a load of a
+/// non-volatile object one step wider (a longword as a word, a word as a
+/// byte), not an element with a computed index.  A volatile object is
+/// read at its own size (ref 3.15.1-3.15.3); a longword's low byte is
+/// not catalogued, nor is an element's low part (AST_$TOUCH 0xE0350E
+/// reads an element's longword whole, `move.l (A1),D5; move.w
+/// D5,-(SP)`; codegen-patterns 8, "Narrowing and widening").  These
+/// reach the selector only through `chr` (`dpc-ir` refuses them in an
+/// assignment), which reads them whole as before.
+fn narrows_in_place(value: &Expr, ty: Scalar) -> bool {
+    value.ty().bytes() == 2 * ty.bytes()
+        && matches!(
+            value,
+            Expr::Load {
+                addr: Addr::Frame(_)
+                    | Addr::Enclosing(_)
+                    | Addr::Static(_)
+                    | Addr::Symbol { .. }
+                    | Addr::OtherStatic { .. }
+                    | Addr::Indirect { .. },
+                ..
+            }
+        )
+}
+
 /// Select the instructions of one routine, prologue to `rts`.
 ///
 /// An empty procedure is a bare `rts`, without `link` (codegen-patterns
@@ -7748,6 +7789,10 @@ impl Selector {
                 // register (0xE04704 `move.l D0,(A3)` after `bsr.w`;
                 // 0xE16C74 `move.b D0,(8,A0)`).
                 Val::Reg(r) => Src::Ea(Ea::Reg(r)),
+                // The low bytes of a variable, moved from memory
+                // ([`Self::convert`]; APP_$DEMUX 0xE00AF6 `move.w
+                // (0x1a,A0),(-0x14,A6)`).
+                Val::Mem(ea) => Src::Ea(ea),
                 v => Src::Ea(Ea::Reg(Reg::D(self.in_tmp(v, ty.width)?))),
             },
         };
@@ -8253,6 +8298,9 @@ impl Selector {
             {
                 false
             }
+            // The low bytes of a variable in memory, read in place
+            // ([`Self::convert`]).
+            Expr::Convert { value: x, ty } if narrows_in_place(x, *ty) => self.value_needs_reg(x),
             Expr::SetMember { .. }
             | Expr::SetMemberAt { .. }
             | Expr::SetOp { .. }
@@ -8811,6 +8859,11 @@ impl Selector {
                         self.in_args = false;
                         let src = match v? {
                             Val::Reg(r) => Ea::Reg(r),
+                            // The low bytes of a variable, pushed from
+                            // memory ([`Self::convert`]; AREA_$COPY
+                            // 0xE092DE `move.w (-10,A6),-(SP)` for a
+                            // longword at -12).
+                            Val::Mem(ea) => ea,
                             v => Ea::Reg(Reg::D(self.in_tmp(v, e.ty().width)?)),
                         };
                         self.out.push(Insn::Move {
@@ -11037,8 +11090,42 @@ impl Selector {
                 let v = self.div(*op, lhs, rhs, *t, true)?;
                 return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
             }
+            // `x & c` of a longword held in a register and a `moveq`
+            // constant, used as a word: a word `and` on the register's low
+            // word, the constant first (DBUF_$GET_BLOCK 0xE3A5EC `moveq
+            // #31,D0; and.w D3,D0`; 0xE0630E..0xE06312, 0xE064CC..0xE064D0,
+            // RIP_$NET_LOOKUP 0xE154F6..0xE154FC `moveq #63,D1; and.w
+            // D3,D1`, D3 loaded `move.l (8,A6),D3`).  A longword in memory
+            // is read whole and masked at its width (0xE4F25E `move.l
+            // (10,A0),D1; andi.l #1023,D1; move.w D1,-(SP)`), as below.
+            if let Some(n) = self.narrow_held_and(value, ty) {
+                return self.eval(&n);
+            }
+            // The low bytes of a value (codegen-patterns 8, "Narrowing and
+            // widening"; `dpc-ir`'s `assign_convert`): of a register, the
+            // register read at the narrow width (LOG_$ADD 0xE1775E `move.w
+            // D5,-(SP)`, a longword held in D5; SOCK 0xE15ECE `move.b
+            // D4,(0x1b,A2)`); of a variable in memory, the bytes at the
+            // higher address, big-endian (APP_$DEMUX 0xE00AF6 `move.w
+            // (0x1a,A0),(-0x14,A6)` for a longword at 0x18; PACCT_$LOG
+            // 0xE5AB26 `move.b (1,A0),...` for a word); of a computed
+            // value, its register (DBUF_$GET_BLOCK 0xE3A5F6 `move.w
+            // D1,-(SP)` after `lsr.l #5,D1`).
+            // A volatile object is read whole, at its own size (ref
+            // 3.15.1-3.15.3: an access of another size is another
+            // access; `chr(exec_$counter)`), and a longword narrowed to
+            // a byte (`chr(l)`, not catalogued) too, as before.
             let v = self.eval(value)?;
-            return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
+            let k = (from.bytes() - ty.bytes()) as i32;
+            return Ok(match v {
+                Val::Reg(Reg::D(d)) => Val::Reg(Reg::D(d)),
+                Val::Reg(Reg::A(a)) if ty.width == Width::Word => Val::Reg(Reg::A(a)),
+                Val::Mem(ea) if narrows_in_place(value, ty) => match displace(&ea, k) {
+                    Some(ea) => Val::Mem(ea),
+                    None => Val::Tmp(self.in_tmp(Val::Mem(ea), from.width)?),
+                },
+                v => Val::Tmp(self.in_tmp(v, from.width)?),
+            });
         }
         if matches!(value, Expr::Convert { value: inner, .. }
             if matches!(**inner, Expr::Binary { op: BinOp::Div | BinOp::Mod, .. }))
@@ -11080,6 +11167,42 @@ impl Selector {
             });
         }
         self.widen(value, ty)
+    }
+
+    /// `value` (a longword `x & c`, `c` a `moveq` constant, `x` held in a
+    /// data register) narrowed to the word `ty` as a word `and`
+    /// ([`Self::convert`]); `None` for any other value.
+    fn narrow_held_and(&self, value: &Expr, ty: Scalar) -> Option<Expr> {
+        let Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ty: t,
+        } = value
+        else {
+            return None;
+        };
+        if t.width != Width::Long || ty.width != Width::Word {
+            return None;
+        }
+        let (x, c) = match (&**lhs, &**rhs) {
+            (x, Expr::Const { value: c, .. }) | (Expr::Const { value: c, .. }, x) => (x, *c),
+            _ => return None,
+        };
+        let held = matches!(x, Expr::Load { addr: Addr::Frame(o), .. }
+            if matches!(self.pinned(*o), Some(Reg::D(_))));
+        if !held || !(-128..=127).contains(&c) {
+            return None;
+        }
+        Some(Expr::Binary {
+            op: BinOp::And,
+            lhs: Box::new(Expr::Convert {
+                value: Box::new(x.clone()),
+                ty,
+            }),
+            rhs: Box::new(Expr::Const { value: c, ty }),
+            ty,
+        })
     }
 
     /// The widening of [`Self::convert`].
@@ -15144,6 +15267,55 @@ mod tests {
             )],
         );
         assert_eq!(body_text(&f)[..2], ["clr.w\t-(%sp)", "st\t-(%sp)"]);
+    }
+
+    /// The low bytes of a big-endian object in memory are at the higher
+    /// address ([`displace`]; APP_$DEMUX 0xE00AF6 `(0x1a,A0)` for a
+    /// longword at 0x18, PACCT_$LOG 0xE5AB26 `(1,A0)` for a word at
+    /// `(A0)`); a mode without room for the displacement is left alone.
+    #[test]
+    fn displace_low_bytes() {
+        assert_eq!(displace(&Ea::Disp(0x18, 0), 2), Some(Ea::Disp(0x1a, 0)));
+        assert_eq!(displace(&Ea::Ind(0), 1), Some(Ea::Disp(1, 0)));
+        assert_eq!(displace(&Ea::Disp(-20, 6), 2), Some(Ea::Disp(-18, 6)));
+        assert_eq!(
+            displace(&Ea::AbsL("X".into(), 4), 2),
+            Some(Ea::AbsL("X".into(), 6))
+        );
+        assert_eq!(
+            displace(&Ea::Idx(-4, 0, 1, true), 2),
+            Some(Ea::Idx(-2, 0, 1, true))
+        );
+        assert_eq!(displace(&Ea::Disp(0x7fff, 0), 2), None);
+        assert_eq!(displace(&Ea::Idx(126, 0, 1, false), 2), None);
+        assert_eq!(displace(&Ea::PostInc(0), 2), None);
+    }
+
+    /// Only a non-volatile object one step wider, not an element with a
+    /// computed index, is narrowed by reading its low part in place
+    /// ([`narrows_in_place`]); a volatile word (`chr(exec_$counter)`)
+    /// is read whole (review of bead domain-pascal-8td).
+    #[test]
+    fn narrows_in_place_forms() {
+        let load = |addr, ty| Expr::Load { addr, ty };
+        let byte = Scalar::unsigned(Width::Byte);
+        let w = Scalar::signed(Width::Word);
+        let l = Scalar::signed(Width::Long);
+        assert!(narrows_in_place(&load(Addr::Frame(-4), l), w));
+        assert!(narrows_in_place(&load(Addr::Static(2), w), byte));
+        assert!(!narrows_in_place(&load(Addr::Frame(-4), l), byte));
+        let vol = Addr::Volatile {
+            addr: Box::new(Addr::Static(2)),
+            access: Access::default(),
+        };
+        assert!(!narrows_in_place(&load(vol, w), byte));
+        let elem = Addr::Index {
+            base: Box::new(Addr::Frame(-8)),
+            index: Box::new(load(Addr::Frame(-10), w)),
+            scale: 4,
+            offset: 0,
+        };
+        assert!(!narrows_in_place(&load(elem, l), w));
     }
 
     #[test]

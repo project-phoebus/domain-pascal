@@ -129,5 +129,46 @@ class ScaleSiteTest(unittest.TestCase):
         self.assertEqual(arithsurvey.mem_kind('0xe2060a'), 'abs')
 
 
+
+class NarrowTest(unittest.TestCase):
+    """`narrow' (bead domain-pascal-8td)."""
+
+    def test_lowword(self):
+        # MMAP_$FREE_PAGES 0xE0CE98..0xE0CF2C: a longword local, its low
+        # word stored
+        ins = insns(['movel %fp@(-28),%fp@(-20)', 'movel %fp@(-20),%d2',
+                     'movew %fp@(-18),%a4@(-8186)', 'moveb %fp@(-17),%d0',
+                     'movew %fp@(-30),%d1'])
+        self.assertEqual(arithsurvey.lowword_sites(ins),
+                         [('l@d,w@d+2', -20, 0x104), ('w@d,b@d+1', -18, 0x106)])
+
+    def test_narrowed_by_writer(self):
+        # DBUF_$GET_BLOCK 0xE3A5F2..0xE3A5F6; a word store of a word value
+        # is not a site, nor a register formed before a call
+        ins = insns(['movel %d3,%d1', 'lsrl #5,%d1', 'movew %d1,%sp@-',
+                     'movew %d4,%d0', 'movew %d0,%fp@(-2)',
+                     'movel %a0@,%d5', 'jsr 0xe20b12', 'movew %d5,%sp@-',
+                     'movew %fp@(12),%d0', 'moveb %d0,%a0@(45)'])
+        got = [(s, c, a) for s, c, a, *_ in arithsurvey.narrowed_sites(ins)]
+        self.assertEqual(got, [('w', 'lsr.l', 0x104), ('b', 'load.w', 0x112)])
+
+    def test_widened_pushes(self):
+        # APP_$RECEIVE 0xE008E6..0xE008EC; SOCK_$CLOSE 0xE16008..0xE1600E;
+        # a sign extension
+        ins = insns(['clrl %d1', 'movew %a3@(994),%d1', 'movel %d1,%sp@-',
+                     'clrw %d0', 'moveb %a2@(27),%d0', 'movew %d0,%sp@-',
+                     'movew %d2,%d0', 'extl %d0', 'movel %d0,%sp@-',
+                     'movew %d2,%d1', 'movel %d1,%sp@-'])
+        self.assertEqual(arithsurvey.widened_sites(ins),
+                         [('clr.l;move.w', 0x104), ('clr.w;move.b', 0x10a), ('ext.l', 0x110)])
+
+    def test_heldop(self):
+        # 0xE06302..0xE06312: a longword parameter's low word masked
+        ins = insns(['movel %fp@(8),%d4', 'moveq #31,%d3', 'andw %d4,%d3',
+                     'movew %d2,%d1', 'subw %d1,%d0', 'extl %d5', 'addw %d5,%d0'])
+        got = [(o, c, a) for o, c, a, *_ in arithsurvey.heldop_sites(ins)]
+        self.assertEqual(got, [('and', 'load.l', 0x104)])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -35,6 +35,27 @@ usage:
     tools/arithsurvey.py summary     # the counts quoted in codegen-patterns 8
     tools/arithsurvey.py scale       # products by a constant, by factor and form
     tools/arithsurvey.py scales      # one line per product by a constant
+    tools/arithsurvey.py narrow      # size changes, codegen-patterns 8
+                                     # ("Narrowing and widening")
+    tools/arithsurvey.py narrows KIND  # the sites of one kind of `narrow'
+
+For `narrow' (bead domain-pascal-8td), per routine and per basic block
+(cut at branch targets, branches and calls):
+
+    lowword   a frame slot (d,A6) accessed as a longword at d and as a
+              word at d+2, or as a word at d and a byte at d+1: the low
+              part of a variable read or written in place (or a record
+              of two halves: re-check sites);
+    narrowed  a word (byte) store or push `move.<s> Dn,<mem>' whose
+              register was last written by a longword (word) instruction
+              in the block: a value formed wider and its low part used,
+              by the writer (`lsr.l', a load `move.l <mem>,Dn', ...);
+    widened   a longword push `move.l Dn,-(SP)' of a register formed by
+              `ext.l Dn' (sign) or `clr.l Dn; ...; move.w x,Dn' (zero),
+              and a word push of `clr.w Dn; ...; move.b x,Dn';
+    heldop    a word operation `<op>.w Dm,Dn' whose source register was
+              last written by a longword instruction (a longword's low
+              word used in word arithmetic).
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -488,10 +509,187 @@ def scale_scan():
     return out
 
 
+# ---------------------------------------------------------------------------
+# `narrow': size changes of integer values (bead domain-pascal-8td).
+
+_FPSLOT = re.compile(r'%fp@\((-?\d+)\)')
+_SIZED = re.compile(r'^[a-z]+([bwl])$')
+
+
+def op_size(op):
+    """`b', `w' or `l' of a sized objdump mnemonic (`movew'), else None
+    (`moveq', `lea', `pea', `movem' have none here)."""
+    if op in ('moveq',) or op.startswith(('lea', 'pea', 'movem', 'jsr', 'bsr', 'b')):
+        return None
+    m = _SIZED.match(op)
+    return m.group(1) if m else None
+
+
+def lowword_sites(ins):
+    """[(kind, d, addr)] of the frame slots of one routine accessed at two
+    sizes: kind `l@d,w@d+2' (a longword at d, a word at d+2) or `w@d,b@d+1';
+    addr is the narrower access's first instruction."""
+    acc = {}
+    for a, _, t in ins:
+        s = op_size(t.split()[0])
+        if not s:
+            continue
+        for m in _FPSLOT.finditer(t):
+            acc.setdefault(int(m.group(1)), []).append((s, a))
+    out = []
+    for d in sorted(acc):
+        if d >= 0:
+            continue
+        sizes = {s for s, _ in acc[d]}
+        for wide, narrow, k in (('l', 'w', 2), ('w', 'b', 1)):
+            if wide in sizes:
+                hits = [a for s, a in acc.get(d + k, ()) if s == narrow]
+                if hits:
+                    out.append(('%s@d,%s@d+%d' % (wide, narrow, k), d, hits[0]))
+    return out
+
+
+_BLOCK_CUT = re.compile(r'^(b[a-z]{2}[sw]?|bra[sw]?|jmp|rts|db[a-z]+) ')
+
+
+def last_writer(ins, i, r, labels=frozenset()):
+    """The index of the instruction before ins[i], in its block, that last
+    wrote data register `r' (`d0'..`d7'), or None.  A call ends the search
+    with None (it clobbers D0/D1), so does a branch or a branch target."""
+    k = i - 1
+    while k >= 0:
+        a, _, t = ins[k]
+        if _BLOCK_CUT.match(t) or t.startswith(('jsr', 'bsr')):
+            return None
+        op, ops = operands(t)
+        if ops and ops[-1] == '%' + r and not op.startswith(('cmp', 'tst', 'btst')):
+            return k
+        if op == 'exg' and '%' + r in ops:
+            return k
+        if a in labels:
+            return None
+        k -= 1
+    return None
+
+
+def writer_class(t):
+    """How an instruction writing a data register forms it: `load.<s>'
+    (from memory), `copy.<s>' (from a register), `moveq', or the
+    mnemonic without its size and `.<s>' (`lsr.l', `add.w')."""
+    op, ops = operands(t)
+    if op == 'moveq':
+        return 'moveq'
+    s = op_size(op) or '?'
+    if op.startswith('move') and len(ops) == 2:
+        if re.fullmatch(r'%[ad]\d', ops[0]):
+            return 'copy.' + s
+        if not ops[0].startswith('#'):
+            return 'load.' + s
+    return re.sub(r'[bwl]$', '', op) + '.' + s
+
+
+def narrowed_sites(ins, labels=frozenset()):
+    """[(size, writer class, addr, writer text, text)] of the word and
+    byte stores and pushes `move.<s> Dn,<mem>' whose register was formed
+    by a wider instruction in the block."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^move([wb]) %(d\d),(.*)$', t)
+        if not m or re.fullmatch(r'%[ad]\d', m.group(3)):
+            continue
+        k = last_writer(ins, i, m.group(2), labels)
+        if k is None:
+            continue
+        cls = writer_class(ins[k][2])
+        wide = {'w': ('l',), 'b': ('w', 'l')}[m.group(1)]
+        if cls.endswith(tuple('.' + w for w in wide)) and not cls.startswith(('ext', 'clr')):
+            out.append((m.group(1), cls, a, ins[k][2], t))
+    return out
+
+
+def widened_sites(ins, labels=frozenset()):
+    """[(kind, addr)] of the pushes of a widened register: `ext.l',
+    `clr.l;move.w' for `move.l Dn,-(SP)', `clr.w;move.b' for `move.w
+    Dn,-(SP)'."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^move([lw]) %(d\d),%sp@-$', t)
+        if not m:
+            continue
+        r = m.group(2)
+        k = last_writer(ins, i, r, labels)
+        if k is None:
+            continue
+        w = ins[k][2]
+        if m.group(1) == 'l' and w == 'extl %' + r:
+            out.append(('ext.l', a))
+        elif re.match(r'^move([wb]) ', w) and (m.group(1), w[4]) in (('l', 'w'), ('w', 'b')):
+            k2 = last_writer(ins, k, r, labels)
+            clr = 'clr' + {'l': 'l', 'w': 'w'}[m.group(1)] + ' %' + r
+            if k2 is not None and ins[k2][2] == clr:
+                out.append(('clr.l;move.w' if m.group(1) == 'l' else 'clr.w;move.b', a))
+    return out
+
+
+def heldop_sites(ins, labels=frozenset()):
+    """[(op, writer class, addr, writer text, text)] of the word
+    operations `<op>.w Dm,Dn' whose source register was last written by a
+    longword instruction other than a widening (`ext.l', `clr.l')."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^(add|sub|and|or|eor|cmp)w %(d\d),%d\d$', t)
+        if not m:
+            continue
+        k = last_writer(ins, i, m.group(2), labels)
+        if k is None:
+            continue
+        cls = writer_class(ins[k][2])
+        if cls.endswith('.l') and not cls.startswith(('ext', 'clr')):
+            out.append((m.group(1), cls, a, ins[k][2], t))
+    return out
+
+
+def narrow_scan():
+    """{kind: [(key, addr, routine, detail)]} over the compiled code."""
+    import boolsurvey
+    out = {'lowword': [], 'narrowed': [], 'widened': [], 'heldop': []}
+    for r0, r1, name in routines():
+        ins = a5survey.reached(r0, r1)
+        labels = boolsurvey.branch_targets(ins)
+        rt = '%06X %s' % (r0, name)
+        for kind, d, a in lowword_sites(ins):
+            out['lowword'].append((kind, a, rt, 'd=%d' % d))
+        for s, cls, a, w, t in narrowed_sites(ins, labels):
+            out['narrowed'].append(('%s<-%s' % (s, cls), a, rt, '%s; %s' % (w, t)))
+        for kind, a in widened_sites(ins, labels):
+            out['widened'].append((kind, a, rt, ''))
+        for op, cls, a, w, t in heldop_sites(ins, labels):
+            out['heldop'].append(('%s.w<-%s' % (op, cls), a, rt, '%s; %s' % (w, t)))
+    return out
+
+
+def narrow_summary(res):
+    for kind in ('lowword', 'narrowed', 'widened', 'heldop'):
+        print('%s:' % kind)
+        c = Counter(k for k, *_ in res[kind])
+        for key, n in c.most_common():
+            ex = [a for k, a, *_ in res[kind] if k == key][:3]
+            print('  %-24s %4d  e.g. %s' % (key, n, ', '.join('0x%X' % a for a in ex)))
+
+
 def main(argv):
-    if not argv or argv[0] not in ('calls', 'inline', 'summary', 'scale', 'scales'):
+    if not argv or argv[0] not in ('calls', 'inline', 'summary', 'scale', 'scales',
+                                   'narrow', 'narrows'):
         print(__doc__)
         return 2
+    if argv[0] == 'narrow':
+        narrow_summary(narrow_scan())
+        return 0
+    if argv[0] == 'narrows':
+        kind = argv[1] if len(argv) > 1 else 'narrowed'
+        for key, a, rt, detail in narrow_scan().get(kind, []):
+            print('0x%06X %-22s %-30s %s' % (a, key, rt, detail))
+        return 0
     if argv[0] in ('scale', 'scales'):
         sites = scale_scan()
         if argv[0] == 'scale':

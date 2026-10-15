@@ -3,7 +3,7 @@
 # in the commit.  `make srcsurvey` compares at the commit below.
 # source: aff6020a474203b99ec4332707c03b9cea94fcc3
 STUB	app/app.pas	app_$receive
-STUB	app/app.pas	app_$demux
+MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
 STUB	as/as.pas	as_$init
 STUB	as/as.pas	as_$get_info
@@ -108,7 +108,7 @@ OK	pbu/pbu.pas	pbu_$faulted_units
 OK	pbu/pbu.pas	pbu_$init
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
-STUB	sock/sock.pas	sock_$open
+MISMATCH	sock/sock.pas	sock_$open
 STUB	sock/sock.pas	sock_$allocate
 MISMATCH	sock/sock.pas	sock_$allocate_user
 STUB	sock/sock.pas	sock_$close

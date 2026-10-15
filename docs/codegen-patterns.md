@@ -3082,8 +3082,9 @@ model run against the bit model of Figure 3-6).
   in a same-width `Expr::Convert` the selector evaluates as its operand);
   between integers it converts as an assignment does: widened by the
   operand's sign, or computed at the narrower width where `narrow` can
-  (p. 4-198, `INTEGER16(x + y) > 5`), other narrowings refused like the
-  assignment.  The arithmetic is section 8's; the `movea.l` comes from the
+  (p. 4-198, `INTEGER16(x + y) > 5`); other narrowings are refused (the
+  further forms of an assignment, section 8 "Narrowing and widening",
+  are not applied to transfers).  The arithmetic is section 8's; the `movea.l` comes from the
   use.  Not modelled: a constant of 9..127 added to a pointer held in a
   register (section 8 refuses `x + c` with `x` in a register; the
   address-register sites above all put the constant first, as do two with
@@ -5761,6 +5762,101 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   for `offset + actual_len^ > 16#400` with two `0..65535` words.  `dpc`
   makes `+`, `*`, `&`, `!` of such operands unsigned (the analogue of ref
   4.3.3 for `div`/`mod`); `-` stays signed.
+- **Narrowing and widening (bead domain-pascal-8td; the forms Verified
+  at the sites given, the choice between them Uncertain where noted;
+  implemented).**  An integer value stored into an object, passed by
+  value (ref 5.2, Table 5-1) or returned as a function result of another
+  size.  (An expression of another size passed by address, in a frame
+  temporary, stays refused: its conversion is not catalogued.)
+  *Reference:* no section states the rule for integers of different
+  sizes; 4.3.1 (p. 4-5) expands operands, messages 79 and 83 (pp. 9-15,
+  9-16) require compatible types, 5.1 (p. 5-3) says "if the second
+  parameter is declared as integer16, the second argument must be an
+  integer16 value", and the reference checks no ranges: "Currently,
+  Domain Pascal does not support subrange checking" (3.8, p. 3-14);
+  "Domain Pascal does not detect an overflow or underflow on integer
+  arithmetic" (Appendix D, ISO 6.7.2.2, p. D-4); "You may make an
+  assignment from an integer expression that includes a value outside
+  one of the variables' declared subranges. Also, you may pass an integer
+  argument that is outside the corresponding parameter's declared
+  subrange" (Appendix D, ISO 6.4.6, p. D-3), which does not say whether
+  `integer16` counts as a subrange of `integer32` nor what value the
+  target holds (reference-clarifications 41).  `dpc-sema` already
+  accepted integers of any size for one another (`ordinal_compatible`);
+  the image gives the code.  Survey: `tools/arithsurvey.py narrow`.
+  - *Widening* (by the value's sign, as for operands): a word or byte
+    pushed for a longword or word value parameter is extended into a new
+    register and pushed, `clr.l Dn; move.w x,Dn; move.l Dn,-(SP)` for an
+    unsigned word (47 pushes; APP_$RECEIVE 0xE008E6..0xE008EC, a
+    `0..65535` field for ROUTE_$FIND_PORTP's integer32 `val_param`),
+    `ext.l Dn; move.l Dn,-(SP)` for a signed one (31; 0xE0B56A),
+    `clr.w Dn; move.b x,Dn; move.w Dn,-(SP)` for a `[byte] 0..255` (20;
+    SOCK_$CLOSE 0xE16008..0xE1600E).  No `andi.l #0xffff` or `ext.w`
+    before a push.  **Uncertain** (bead domain-pascal-sjzf): the pad is
+    scheduled after the `clr.l` at NET's module-local 0xE5A128 at
+    0xE5A13C (`clr.l D0; subq.l #2,SP; move.w D2,D0; move.l D0,-(SP)`);
+    `dpc` emits the pad first (R11).
+  - *Narrowing a variable* (a variable, a parameter, a field of one):
+    its low bytes read in place.  In memory, at the higher address
+    (big-endian): APP_$DEMUX 0xE00AF6 `move.w (0x1a,A0),(-0x14,A6)` (a
+    longword field at 0x18 of a record passed by address); MMAP_$FREE_
+    PAGES 0xE0CF2C `move.w (-0x12,A6),(-0x1ffa,A4)` (a longword local at
+    -0x14, `mmap/free_pages.c` `(word)next`); AREA_$COPY 0xE092DE
+    `move.w (-10,A6),-(SP)` (a longword stored at -12 by 0xE090BC);
+    PACCT_$LOG 0xE5AB26 `movea.l (0x10,A6),A0; move.b (1,A0),(-0x18e,A6)`
+    (a word `in` parameter into a byte).  `lowword` finds 67 frame slots
+    read as a longword at d and a word at d+2 (some are records of two
+    words) and 27 word/byte pairs.  In a register, the register at the
+    narrow width: LOG_$ADD 0xE1775E `move.w D5,-(SP)` (a longword held in
+    D5); SOCK_$ALLOCATE 0xE15ECE `move.b D4,(0x1b,A2); move.b
+    D3,(0x1a,A2)` (word parameters held in D3/D4); NETLOG_$LOG_IT
+    0xE71BCE `move.b D2,(-0x1a,A0)`; module-local 0xE0A328 at 0xE0A35A.
+    **Refused** (`dpc-ir`, `assign_convert`; bead domain-pascal-vusy):
+    an array element, a
+    pointer's target and a `with` record: AST_$TOUCH 0xE0350E `move.l
+    (A1),D5; move.w D5,-(SP)` and AST_$TOUCH_AREA 0xE039FC load an
+    element's longword through a by-address pointer whole (`ppn_array[0]`
+    in the C), 0xE03974 another (`*ppn_out++`); which source forms give
+    which code is not known.  A volatile object (an access of another
+    size) and a longword narrowed to a byte (not catalogued) are refused
+    too.
+  - *Narrowing a computed value:* computed at the narrow width when every
+    part allows it (above, `dpc-ir` `narrow`); otherwise computed at its
+    own width and the low bytes used (`narrowed` survey, word stores and
+    pushes of a register a longword instruction formed: `lsr.l` 29,
+    `asr.l` 14, `sub.l` 10, `addq.l` 5, ...): DBUF_$GET_BLOCK
+    0xE3A5F2..0xE3A5F6 `move.l D3,D1; lsr.l #5,D1; move.w D1,-(SP)`;
+    DBUF_$INIT 0xE3ABE8..0xE3ABF4 `lsr.l #8; lsr.l #2; lsl.l #4; move.w
+    D0,(0x91a,A5)` (the product of a `rshft` at the longword width too);
+    MAC_OS_$SEND 0xE0B650..0xE0B658 `move.w (-62,A6),D0; ext.l D0; add.l
+    (A1),D0; move.w D0,(-62,A6)` (a word plus a longword in memory);
+    PARITY_$CHK 0xE0B034..0xE0B04A (`ext.l D2; ...; add.l D1,D2`, a word
+    plus a `rshft`); NET_$OPEN 0xE5A1BE..0xE5A1C6 `move.l A0,D0; sub.l
+    #abs,D0; move.w D0,-(SP)`; DIR's module-local at 0xE4BE82..0xE4BE88 `move.l A2,D0;
+    sub.l A1,D0; addq.l #1,D0; move.w D0,(-298,A6)`; 0xE4F25E..0xE4F268
+    `move.l (10,A0),D1; andi.l #1023,D1; move.w D1,-(SP)`.  Except `x &
+    c` with `x` a longword held in a data register and `c` a `moveq`
+    constant: a word `and` on the register's low word, the constant
+    first (`heldop` survey, `and.w` from a longword register 3:
+    0xE0630E..0xE06312 `moveq #31,D3; and.w D4,D3`, 0xE064CC..0xE064D0,
+    RIP_$NET_LOOKUP 0xE154F6..0xE154FC; and DBUF_$GET_BLOCK 0xE3A5EC
+    `moveq #31,D0; and.w D3,D0`, D3 loaded at the entry).  **Uncertain**
+    (bead domain-pascal-lpqr): the other operators on a held longword,
+    `dpc` computes them at the longword width; 0xE4F252..0xE4F256
+    `move.l A2,D0; move.l A4,D1; sub.w D1,D0; move.w D0,-(SP)`
+    subtracts two held pointers at the word width, against the DIR site
+    above.  A call in the value is refused (no site catalogued).
+  - Implemented: `dpc-ir` `assign_convert` (stores, value arguments,
+    function results), the selector's `convert` (`isel.rs`: `displace`,
+    `narrows_in_place`, `narrow_held_and`), `push`/`store` from memory.
+    The selector's in-place read also serves `chr(x)`, the other
+    narrowing `Expr::Convert`: a word variable or field is read as its
+    low byte in place, a held register at the byte width (**Uncertain**,
+    bead domain-pascal-4tu1: no `chr` site of a variable is catalogued; before bead
+    domain-pascal-8td `dpc` loaded the word into a register first); a
+    volatile object, an element with a computed index and a longword are
+    still read whole.  Tests: `dpc-ir` `narrowing_store`; golden
+    `expr/narrow`; exec test `narrow`.
 - **No libgcc-style helpers.** M$ARITH is the whole integer runtime seen so
   far.
 - **Floating point:** not used in the kernel as far as is known.  The

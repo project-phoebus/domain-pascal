@@ -3422,19 +3422,17 @@ fn result_assignment(
     let v = value_of(p, value)?;
     let v = if vsize == res.ty.bytes() {
         v
-    } else if vsize < res.ty.bytes() && p.types.is_integer(value.ty) {
-        // Widening, as for a store (`store`).
-        convert(v, res.ty)
-    } else if let Some(n) = narrow(&v, res.ty) {
-        n
     } else {
-        return Err(unsupported(
-            value.span,
-            format!(
-                "assigning a {vsize}-byte value to a {}-byte function result is",
-                res.ty.bytes()
-            ),
-        ));
+        // Widened or narrowed as for a store (`store`, [`assign_convert`]).
+        assign_convert(p, value, v, res.ty).ok_or_else(|| {
+            unsupported(
+                value.span,
+                format!(
+                    "assigning a {vsize}-byte value to a {}-byte function result is",
+                    res.ty.bytes()
+                ),
+            )
+        })?
     };
     Ok(Stmt {
         kind: StmtKind::SetResult(v),
@@ -3445,9 +3443,8 @@ fn result_assignment(
 /// `d := e` for a scalar designator `d` (ref "Assignment", p. 4-25).
 ///
 /// A constant value takes the designator's type (the checker has made
-/// sure it fits); any other value must have the designator's width, since
-/// implicit integer widening (`integer16` to `integer32`) has not been
-/// catalogued yet.
+/// sure it fits); an integer of another size is widened or narrowed
+/// ([`assign_convert`]).
 fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     if let Some((addr, field)) = bit_field(p, target)? {
         return store_bits(p, s, target, value, addr, field);
@@ -3475,23 +3472,15 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     } else {
         let v = value_of(p, value)?;
         if v.ty().width != ty.width {
-            // Widening an integer (ref 4.3.1, p. 4-5) is a conversion of
-            // the value; narrowing (an integer32 value into an integer16
-            // object) has not been catalogued.
-            if v.ty().bytes() < ty.bytes() && p.types.is_integer(value.ty) {
-                convert(v, ty)
-            } else if let Some(n) = narrow(&v, ty) {
-                n
-            } else {
-                return Err(unsupported(
+            // Widened or narrowed as an integer (ref 4.3.1, p. 4-5;
+            // [`assign_convert`]).
+            let (vb, tb) = (v.ty().bytes(), ty.bytes());
+            assign_convert(p, value, v, ty).ok_or_else(|| {
+                unsupported(
                     value.span,
-                    format!(
-                        "assigning a {}-byte value to a {}-byte object is",
-                        v.ty().bytes(),
-                        ty.bytes()
-                    ),
-                ));
-            }
+                    format!("assigning a {vb}-byte value to a {tb}-byte object is"),
+                )
+            })?
         } else {
             v
         }
@@ -3535,6 +3524,13 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
                 ..value.ty()
             },
         )),
+        // A byte widened to a longword, used as a word: the byte widened
+        // to a word (the same low word).
+        Expr::Convert { value, ty: t }
+            if value.ty().bytes() < ty.bytes() && ty.bytes() < t.bytes() =>
+        {
+            Some(convert((**value).clone(), ty))
+        }
         Expr::Binary {
             op: op @ (IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or),
             lhs,
@@ -3581,6 +3577,86 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
             ty,
         }),
         _ => None,
+    }
+}
+
+/// `v`, the value of the integer expression `e`, converted to the integer
+/// type `ty` of an assignment's target, a value parameter or a function
+/// result (bead domain-pascal-8td; codegen-patterns 8, "Narrowing and
+/// widening").  The reference sets no range check: "Currently, Domain
+/// Pascal does not support subrange checking" (3.8, p. 3-14) and "Domain
+/// Pascal does not detect an overflow or underflow on integer arithmetic"
+/// (Appendix D, ISO 6.7.2.2, p. D-4); "you may pass an integer argument
+/// that is outside the corresponding parameter's declared subrange"
+/// (ISO 6.4.6, p. D-3).  The target keeps the low bytes (not stated by
+/// the reference: reference-clarifications 41).
+///
+/// - Wider: widened by the value's sign ([`convert`]).
+/// - Narrower, computable at the narrow width ([`narrow`]): so computed.
+/// - Narrower, otherwise, by one step (a longword to a word, a word to a
+///   byte; `None` for a longword to a byte, not catalogued):
+///   - a variable, a parameter or a field of one: its low bytes read in
+///     place, a [`Expr::Convert`] of the load that the selector reads at
+///     the narrow width, in memory at the higher address (big-endian;
+///     APP_$DEMUX 0xE00AF6 `move.w (0x1a,A0),(-0x14,A6)` for a longword
+///     field at 0x18; MMAP_$FREE_PAGES 0xE0CF2C `move.w (-0x12,A6),...`
+///     for a longword local at -0x14; PACCT_$LOG 0xE5AB26 `move.b
+///     (1,A0),(-0x18e,A6)` for a word `in` parameter) or in its register
+///     (LOG_$ADD 0xE1775E `move.w D5,-(SP)`, a longword held in D5; SOCK
+///     0xE15ECE `move.b D4,(0x1b,A2)`, a word held in D4).  An array
+///     element, a pointer's target or a `with` record (AST_$TOUCH 0xE0350E
+///     and AST_$TOUCH_AREA 0xE039FC load an element's longword through a
+///     pointer, `move.l (An),Dn; move.w Dn,-(SP)`: which source form is
+///     not known) and a volatile object (ref 3.15.1-3.15.3: an access of
+///     another size) are refused;
+///   - a computed value (a right shift, a sum with a longword operand):
+///     computed at its own width, the low bytes used, a [`Expr::Convert`]
+///     (DBUF_$GET_BLOCK 0xE3A5F2 `move.l D3,D1; lsr.l #5,D1; move.w
+///     D1,-(SP)`; DBUF_$INIT 0xE3ABE8..0xE3ABF4 `lsr.l #8; lsr.l #2;
+///     lsl.l #4; move.w D0,(0x91a,A5)`; MAC_OS_$SEND 0xE0B650..0xE0B658
+///     `move.w (-62,A6),D0; ext.l D0; add.l (A1),D0; move.w
+///     D0,(-62,A6)`).  A call in it is refused (no site catalogued).
+fn assign_convert(p: &Program, e: &SExpr, v: Expr, ty: Scalar) -> Option<Expr> {
+    let (from, to) = (v.ty().bytes(), ty.bytes());
+    if from == to {
+        return Some(v);
+    }
+    if !p.types.is_integer(e.ty) {
+        return None;
+    }
+    if from < to {
+        return Some(convert(v, ty));
+    }
+    if let Some(n) = narrow(&v, ty) {
+        return Some(n);
+    }
+    if from != 2 * to {
+        return None;
+    }
+    let ok = match &v {
+        Expr::Load { addr, .. } => !matches!(addr, Addr::Volatile { .. }) && plain_designator(e),
+        Expr::Binary { .. } | Expr::Unary { .. } | Expr::Convert { .. } => {
+            let mut calls = Vec::new();
+            expr_calls(&v, &mut calls);
+            calls.is_empty()
+        }
+        _ => false,
+    };
+    ok.then(|| Expr::Convert {
+        value: Box::new(v),
+        ty,
+    })
+}
+
+/// A variable or parameter, or a field of one (through any number of
+/// fields): not an element, a pointer's target or a `with` record.
+fn plain_designator(e: &SExpr) -> bool {
+    match &e.kind {
+        ExprKind::Var { .. } => true,
+        ExprKind::Field {
+            base, bits: None, ..
+        } => plain_designator(base),
+        _ => false,
     }
 }
 
@@ -4036,7 +4112,8 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
 ///   in an assignment: widened by its own sign ([`convert`]), or computed
 ///   at the narrower width where [`narrow`] can (p. 4-198, `INTEGER16(x +
 ///   y) > 5` "ignores the possibility of integer overflow"); other
-///   narrowings are refused, as in an assignment (not catalogued).
+///   narrowings are refused (an assignment's further forms,
+///   [`assign_convert`], have no transfer site catalogued).
 /// - Otherwise the sizes are equal (`dpc-sema` checks it) and no code is
 ///   emitted: a load or a constant is retyped, any other value wrapped in
 ///   a [`Expr::Convert`] of the same width, which the selector evaluates
@@ -5186,19 +5263,27 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // pushed: DISK_$FORMAT 0xE3D4E2..0xE3D4E6 `clr.w D1;
                     // bset D3,D1; move.w D1,-(SP)`, codegen-patterns 5.1).
                     None if is_set(p, prm_ty) => set_value(p, &a.expr, ty)?,
+                    // Another width: converted as in an assignment
+                    // ([`assign_convert`]).  Widened: APP_$RECEIVE
+                    // 0xE008E6..0xE008EC `clr.l D1; move.w (994,A3),D1;
+                    // move.l D1,-(SP)` (a `0..65535` field to an integer32
+                    // `val_param`); SOCK_$CLOSE 0xE16008..0xE1600E `clr.w
+                    // D1; move.b (27,A2),D1; move.w D1,-(SP)` (a `[byte]
+                    // 0..255` field to an integer).  Narrowed: DBUF_$GET_
+                    // BLOCK 0xE3A5F2..0xE3A5F6 `rshft` of a longword, its
+                    // low word pushed; LOG_$ADD 0xE1775E `move.w D5,-(SP)`.
                     None => {
                         let v = value_of(p, &a.expr)?;
-                        if v.ty().width != width {
-                            return Err(unsupported(
+                        let vb = v.ty().bytes();
+                        assign_convert(p, &a.expr, v, ty).ok_or_else(|| {
+                            unsupported(
                                 a.expr.span,
                                 format!(
-                                    "passing a {}-byte value to a {}-byte parameter is",
-                                    v.ty().bytes(),
+                                    "passing a {vb}-byte value to a {}-byte parameter is",
                                     width.bytes()
                                 ),
-                            ));
-                        }
-                        v
+                            )
+                        })?
                     }
                 };
                 Arg::Value { value, slot }

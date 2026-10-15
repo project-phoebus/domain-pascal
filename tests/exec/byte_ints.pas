@@ -15,8 +15,8 @@
   integer value"; `lshft(i, 7)` "10#-6144"), so `lshft(200, 8) > 5` is
   false, `rshft` by a variable count, a `case` on a byte, the bytes
   stored at odd offsets.  Not expressible yet (refused by dpc): two byte operands
-  compared with each other, a widened byte compared with 0 (`tst`), a
-  word variable assigned to a byte.
+  compared with each other, a widened byte compared with 0 (`tst`).  A
+  word variable assigned to a byte: tests/exec/narrow.pas.
 
   call: BYTE_INTS_$MAIN b:200 b:253
   call: BYTE_INTS_$MAIN b:5 b:127

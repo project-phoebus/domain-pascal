@@ -585,6 +585,42 @@ records the files it stops.
     `move.b` in TPAD_$DATA (0xE691DC, 0xE691F0, 0xE69228), which fits
     either if they were `char`s, so the image does not settle it.*
 
+41. **5.1, p. 5-3 (PDF p. 358, checked); messages 79 and 83, pp. 9-15,
+    9-16; 3.8, p. 3-14 (PDF p. 69); Appendix D, ISO 6.7.2.2, p. D-4 (PDF
+    p. 561); "Type Transfer Functions", p. 4-197.**  5.1: "The data type
+    of each argument must match the data type of its corresponding
+    parameter. For example, if the second parameter is declared as
+    integer16, the second argument must be an integer16 value."  3.8:
+    "Currently, Domain Pascal does not support subrange checking."
+    D-4: "Domain Pascal does not detect an overflow or underflow on
+    integer arithmetic."  p. 4-197: "integer subranges are always
+    compatible regardless of their sizes" (for type transfers).
+    Appendix D, ISO 6.4.6, p. D-3 (PDF p. 560, checked): "You may make an
+    assignment from an integer expression that includes a value outside
+    one of the variables' declared subranges. Also, you may pass an
+    integer argument that is outside the corresponding parameter's
+    declared subrange."  ISO 6.6.3.5, 6.6.3.6, same page: "Domain Pascal
+    treats integer and subrange of integer as identical."  ISO 6.6.6.4,
+    p. D-4: "Succ, pred, and chr do not detect overflow."  So an
+    out-of-range integer value may be assigned or passed to a declared
+    subrange (`0..65535`, `[byte] 0..255`) without an error, but no
+    section says whether `integer16` itself counts as such a subrange of
+    `integer32`, nor what value the target then holds.  The image
+    narrows such values (the low word
+    of a longword stored or pushed: APP_$DEMUX 0xE00AF6, LOG_$ADD
+    0xE1775E, DBUF_$GET_BLOCK 0xE3A5F6), but cannot show whether the
+    source wrote a type transfer (`integer16(rshft(x, 5))`) or relied
+    on an implicit conversion.  Question: (a) is an `integer32` expression
+    accepted without a type transfer where an `integer16` is expected (a
+    smaller declared subrange: D-3 above), in an assignment, a value or
+    `in` argument and a function result?  (b) If so, is the value its low
+    bytes, with no
+    check or warning (also for a constant out of range, question 38)?
+    *Current (bead domain-pascal-8td; codegen-patterns 8, "Narrowing and
+    widening"): accepted (`dpc-sema` already treated all integer types as
+    compatible, `ordinal_compatible`), the low bytes kept; widening by the
+    value's sign; the forms the image does not show are refused.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

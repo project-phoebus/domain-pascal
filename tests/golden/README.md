@@ -410,6 +410,15 @@ Tests:
   bead domain-pascal-gqp): `ec2_$ptr_t(1)` stored, passed by address and
   by value as a 4-byte constant (codegen-patterns 13, 1.5).  No image
   site identified.
+- `expr/narrow` - codegen-patterns 8 ("Narrowing and widening"; bead
+  domain-pascal-8td): a longword field by address stored into a word
+  (APP_$DEMUX 0xE00AF6), a word `in` parameter into a byte (PACCT_$LOG
+  0xE5AB26), a longword in the frame and in a register pushed as words
+  (0xE0CF2C, LOG_$ADD 0xE1775E), `rshft` and `&` of a held longword
+  pushed (DBUF_$GET_BLOCK 0xE3A5EC..0xE3A5F6), a longword product stored
+  into a word (DBUF_$INIT 0xE3ABE8), a word plus a longword (MAC_OS_$SEND
+  0xE0B650), words and bytes widened for value parameters (APP_$RECEIVE
+  0xE008E6, SOCK_$CLOSE 0xE16008).
 - `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
   shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
   the static link passed in A1 to a routine a sibling also calls

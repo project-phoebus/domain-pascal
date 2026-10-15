@@ -803,23 +803,78 @@ end;
     );
 }
 
-/// Narrowing an integer32 value into an integer16 object is not
-/// catalogued; widening is a conversion (0xE02C28..0xE02C2C `move.w
-/// D2,D0; ext.l D0; move.l D0,(-32,A6)`).
+/// Narrowing a value into a smaller object keeps its low bytes (bead
+/// domain-pascal-8td; `assign_convert`): a variable or parameter is read
+/// at the narrow width, a [`Expr::Convert`] of its load (APP_$DEMUX
+/// 0xE00AF6); an element, a pointer's target, a call and a longword
+/// narrowed to a byte are refused.  Widening is a conversion
+/// (0xE02C28..0xE02C2C `move.w D2,D0; ext.l D0; move.l D0,(-32,A6)`).
 #[test]
-fn narrowing_store_is_rejected() {
-    let e = errs(
+fn narrowing_store() {
+    let m = lower_src(
         "module m;
 procedure p(var x: integer; i: integer32); options(val_param);
 begin
   x := i;
 end;
 ",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(value, Expr::Convert { value: v, ty }
+            if *ty == Scalar::signed(Width::Word)
+                && matches!(**v, Expr::Load { ty: t, .. } if t == Scalar::signed(Width::Long))),
+        "{value:?}"
     );
-    assert_eq!(
-        e,
-        vec!["t.pas:4:8: error: assigning a 4-byte value to a 2-byte object is not supported yet"]
+    // A right shift: computed in 32 bits, the low word used.
+    let m = lower_src(
+        "module m;
+procedure p(var x: integer; i: integer32); options(val_param);
+begin
+  x := rshft(i, 5);
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(value, Expr::Convert { value: v, .. }
+            if matches!(**v, Expr::Binary { op: BinOp::Shr, .. })),
+        "{value:?}"
     );
+    for (decl, stmt, msg) in [
+        (
+            "type a_t = array[1..2] of integer32;\nprocedure p(var x: integer; in a: a_t);",
+            "x := a[1]",
+            "assigning a 4-byte value to a 2-byte object",
+        ),
+        (
+            "type p_t = ^integer32;\nprocedure p(var x: integer; q: p_t); options(val_param);",
+            "x := q^",
+            "assigning a 4-byte value to a 2-byte object",
+        ),
+        (
+            "function f: integer32; extern;\nprocedure p(var x: integer);",
+            "x := f + 1",
+            "assigning a 4-byte value to a 2-byte object",
+        ),
+        (
+            "type b_t = [byte] 0..255;\nprocedure p(var x: b_t; i: integer32); options(val_param);",
+            "x := i",
+            "assigning a 4-byte value to a 1-byte object",
+        ),
+    ] {
+        let e = errs(&format!("module m;\n{decl}\nbegin\n  {stmt};\nend;\n"));
+        assert!(
+            e[0].ends_with(&format!("{msg} is not supported yet")),
+            "{e:?}"
+        );
+    }
     let m = lower_src(
         "module m;
 procedure p(var x: integer32; i: integer); options(val_param);
@@ -1546,16 +1601,16 @@ end;
     );
     let e = errs(
         "module m;
-var w: extern integer;
-procedure q(v: integer32); options(val_param, extern);
+procedure q(v: integer); options(val_param, extern);
+function f: integer32; extern;
 procedure p;
 begin
-  q(w);
+  q(f);
 end;
 ",
     );
     assert!(
-        e[0].ends_with("passing a 2-byte value to a 4-byte parameter is not supported yet"),
+        e[0].ends_with("passing a 4-byte value to a 2-byte parameter is not supported yet"),
         "{e:?}"
     );
     let e = errs(
