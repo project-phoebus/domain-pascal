@@ -142,7 +142,9 @@ class SlotRuleTest(unittest.TestCase):
                             'moveal %fp@(16),%a2', 'clrw %a2@', 'unlk %fp', 'rts'])
         q = p['moveal %fp@(16),%a2']
         self.assertEqual((q['colU'], q['yc'], q['lc']), ('a0', 'a2', 'a2'))
-        self.assertEqual(q['dpc'], 'refused')      # A0 dirty: not dpc's shape
+        # A0 and A1 hold dead slot loads, A2 never written: the pass rule
+        # (bead domain-pascal-i24w)
+        self.assertEqual((q['pass'], q['dpc']), ('a2', 'a2'))
 
     def test_after_a_call(self):
         # A0 written, then a call: A0 and A1 clean, A1 never written: A0
@@ -164,6 +166,38 @@ class SlotRuleTest(unittest.TestCase):
         q = p['moveal %fp@(16),%a1']
         self.assertEqual((q['colU'], q['dpc']), ('a0', 'a1'))
         self.assertEqual(regalloc.since_call(rt, rt.at[0x100a]), {'a0'})
+
+    def test_pass_over_dead_slot_loads(self):
+        # bead domain-pascal-i24w (TTY_$K_INQ_PGROUP 0xE6796E's shape):
+        # A2 holds the status loaded at entry, dead after its test; A0
+        # and A1 are busy over the out slot's range; A3 never written
+        texts = ['linkw %fp,#0', 'moveal %fp@(16),%a2', 'movew %fp@(8),%sp@-',
+                 'jsr 0xe66738', 'movel %a0,%d0', 'tstl %a2@', 'bnes 0x101c',
+                 'moveal %d0,%a0', 'moveal %fp@(12),%a2', 'lea %a0@(76),%a1',
+                 'movel %a1@+,%a2@', 'movel %a1@+,%a2@(4)', 'nop', 'unlk %fp', 'rts']
+        rt, p = self.preds(texts)
+        q = p['moveal %fp@(12),%a2']
+        self.assertEqual((q['colU'], q['pass'], q['dpc']), ('a2', 'a3', 'a3'))
+        v = next(v for v in regalloc.slot_values(rt) if v.first == rt.at[0x1010])
+        st = regalloc.slot_states(rt, v, ['a2', 'a3', 'a4'])
+        self.assertEqual((st['a2'], st['a3']), ({'slot'}, {'entry'}))
+        # pass_rule: only past {'slot'} registers, to {'entry'} or {'incdec'}
+        self.assertEqual(regalloc.pass_rule(['a0', 'a1'], {'a0': {'slot'}, 'a1': {'incdec'}}),
+                         'a1')
+        self.assertIsNone(regalloc.pass_rule(['a0', 'a1'], {'a0': {'slot'}, 'a1': {'call'}}))
+        self.assertIsNone(regalloc.pass_rule(['a0', 'a1'], {'a0': {'entry'}, 'a1': {'entry'}}))
+        self.assertIsNone(regalloc.pass_rule(['a0', 'a4'], {'a0': {'slot'}, 'a4': {'slot'}}))
+        self.assertIsNone(regalloc.pass_rule(['a0', 'a1'],
+                                             {'a0': {'slot', 'leaidx'}, 'a1': {'entry'}}))
+
+    def test_reach_kind(self):
+        rt = routine(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'moveal %fp@(-4),%a1',
+                      'lea %a5@(0,%d0:w),%a2', 'moveal #4096,%a3', 'movel %a1@+,%a0@',
+                      'jsr 0xe20b12', 'unlk %fp', 'rts'])
+        k = lambda i, r: regalloc.reach_kind(rt, i, r)  # noqa: E731
+        self.assertEqual([k(1, 'a0'), k(2, 'a1'), k(3, 'a2'), k(4, 'a3'), k(5, 'a1'),
+                          k(6, 'a0'), k('entry', 'a4')],
+                         ['slot', 'local', 'leaidx', 'const', 'incdec', 'call', 'entry'])
 
     def test_dirty_on_one_path(self):
         # A0 written on one path only: dirty for 'any', clean for 'all'

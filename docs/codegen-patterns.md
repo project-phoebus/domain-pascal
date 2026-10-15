@@ -2647,11 +2647,12 @@ model run against the bit model of Figure 3-6).
     volatile objects.  Byte-identical in `make conform`:
     NAME_$GET_ROOT_UID, _GET_NODE_UID, _GET_NODE_DATA_UID
     (`name_uid_getters.pas`), TTY_$K_SET_PGROUP (`tty_k_set_pgroup.pas`),
-    CAL_$SET_DRIFT (`cal_set_drift.pas`).  TTY_$K_INQ_INPUT_BREAK_MODE
-    and TTY_$K_INQ_PGROUP stay refused: their slot load after the
-    status test passes over A2, which the entry load left dirty (12.4
-    R4(b), `check_late_slot_loads`; bead domain-pascal-i24w); golden
-    `data/small_copies` has their order without the test.
+    CAL_$SET_DRIFT (`cal_set_drift.pas`), TTY_$K_INQ_PGROUP
+    (`tty_k_inq_pgroup.pas`: its slot load after the status test passes
+    over A2, the status's dead entry load, to A3, 12.4 R4(b); bead
+    domain-pascal-i24w; TTY_$K_INQ_INPUT_BREAK_MODE likewise, OK in
+    srcsurvey); golden `data/small_copies` has their order without the
+    test, `regalloc/late_slot_pass` with it.
     TTY_$K_SET_INPUT_BREAK_MODE compiles, its copy byte-identical, and
     differs only in the test after it (bead domain-pascal-0g98).
   - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
@@ -7502,8 +7503,82 @@ of the remaining misses).**  The corpus misses fall into these groups:
     A4, 0xE6CDA0 A2) and a dirty A0 reused (0xE19158 and 0xE161C6, after a
     `lea (0,A5,Dn.l),A0` that only formed the address of a load into a
     callee-saved register) (Uncertain).
+  - **Past dead slot loads (bead domain-pascal-i24w; `tools/regalloc.py
+    slotpass`, kept, with tests).**  The same loads, by what reaches each
+    candidate register (free over the load's range, `colU`'s set) on
+    every path to the load (`slot_states`, `reach_kind`): nothing
+    ('entry'), a call, a block copy that used it up ('incdec'), a dead
+    parameter slot load ('slot': `movea.l (d,A6),An`, d > 0, the entry
+    loads included), or another value (`movea.l (-d,A6)`, constants,
+    copies, `lea`s with and without an index, ...).  Over the whole image
+    (474 such loads, no size bound), a register reached only by a slot
+    load is passed over 145 times and taken 41; one reached by nothing
+    is taken 65 times and passed over once (0xE6AA1C, above); one used
+    up, 60 and 3; one a call wrote, 231 and 29; the other kinds go both
+    ways (an indexed `lea`, 14 and 17; a constant, 4 and 16).  Candidate
+    rules on the loads the rule above refuses for a dirty register (180
+    in the whole image; 114 in 0x30-0x150 bytes), with the hits in
+    alternate routines (address order):
+
+    | Rule | whole image (180) | halves | 0x30-0x150 (114) | halves |
+    |---|---|---|---|---|
+    | `colU` | 53 | 32 / 21 | 27 | 14 / 13 |
+    | lowest not dirty on any path, a call cleaning (`yc`) | 103 | 41 / 62 | 75 | 41 / 34 |
+    | the same, dirty on every path (`lc`) | 122 | 54 / 68 | 86 | 45 / 41 |
+    | `yc`, the set emptied at branch targets (`ycL`) | 100 | 49 / 51 | 60 | 30 / 30 |
+    | entry loads not making a register dirty (`ycE` / `lcE`) | 82 / 99 | 35 / 47, 45 / 54 | 55 / 63 | 28 / 27, 30 / 33 |
+    | the registers the load's own statement wrote free (`ycS` / `lcS`: the set at the statement's start, after the last call or store) | 90 / 109 | 37 / 53, 50 / 59 | 63 / 74 | 37 / 26, 41 / 33 |
+    | a stack of free registers (`stack`) | 109 | 45 / 64 | 79 | 42 / 37 |
+    | **past dead slot loads (`pass`), where it applies** | **38 of 38** | 13 / 25 | **34 of 34** | 19 / 15 |
+
+    No rule fits the whole set (`lc`, the best, 68%); counterexamples to
+    `lc` include a dirty A0 reused after an indexed `lea` (0xE161C6,
+    0xE38452, 0xE3E1E0; MSG_$TEST_FOR_MESSAGE 0xE5A010 and SMD_$READ_
+    CRSR_BITMAP 0xE6FD4E reuse A2 after `lea (0,A2,D1.w),A2`), and
+    the loads where every free register is dirty, where the choice looks
+    round-robin (MSG_$SEND_HW 0xE59B6E..0xE59B8C A2, A0, A1, A4, A2, A0,
+    A3, the dead status, never taken; TPAD_$SET_UNIT_MODE 0xE69834 A4,
+    0xE6983C A0, 0xE6987C A4; PCHIST_$UNIX_PROFIL_CNTL 0xE5CAB6..0xE5CAD2
+    neither round-robin nor most-recent; bead domain-pascal-aerg).  A
+    dirty register reused after an indexed `lea` or other values: bead
+    domain-pascal-d0hd.  **What is certain (Verified): when every free
+    register below the lowest one reached by nothing (or used up on every
+    path) holds a dead parameter slot load on every path, at least one,
+    the original takes that register** (the `pass` rule): 41 loads in the
+    whole image, 41 hits (38 of them refused by the rule above, 3 taken
+    by its since-call form too), by the register taken and those passed
+    over: A1 past A0 (8: 0xE58C28, 0xE5971C, 0xE70A2E, 0xE763C4, ...), A2
+    past A0, A1, A0 and A1, A3 past A1 (0xE699B0, PBU_$ADVANCE_EC_INT
+    0xE88432), A3 past A2 (TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8, TTY_$K_
+    INQ_PGROUP 0xE6796E: the status loaded at entry into A2, dead after
+    its test; SMD_$READ_CRSR_BITMAP 0xE6FD54), A4 past A0-A3 (0xE4410C,
+    MSG_$SEND_HW 0xE59B64), ...; used up: XNS_IDP_$DEMUX 0xE18C26 A1 past
+    A0 after an `(A1)+` copy, 0xE18C2C A4, 0xE440FC A3, 0xE6041E A2,
+    0xE32B08 A3.  Not settled: past a dead slot load to a register a
+    call wrote (A1 past A0: taken 24 times, VTOCE_$LOOKUP_FM 0xE39A9C,
+    MST_$CHANGE_RIGHTS 0xE435DC, SMD_$INVERT_DISP 0xE703C6, 0xE703D2,
+    0xE706E2 reuse A0; TTY_$K_SET_FLAG 0xE67454 takes A1; bead
+    domain-pascal-quio); a lower
+    register reached by a slot load on some paths only (A0 'call+slot'
+    taken 9 times, passed over once, VFMT_$MAIN 0xE6AC88); past
+    registers holding other values.  The `pass` rule holds for slots
+    no other instruction names (the population above), not for slots
+    named elsewhere too (review of bead domain-pascal-i24w; ad-hoc
+    script, own data flow over the whole image, not kept: the same 41
+    single slots in 35 routines of 24 map segments, 41 hits; 35 loads
+    of the shape whose slot is named elsewhere): past a dead load of
+    the same slot the original reuses that register 8 times of 8 (the
+    AREA_ module-local 0xE08816 at 0xE0887C, 0xE08894, 0xE0889E,
+    0xE088C6, 0xE08A00 A0; VTOCE_$TRUNCATE 0xE39E78, 0xE39E86 A0;
+    IO_$ACQUIRE 0xE1A6AC A1); past dead loads of other slots it takes
+    the `pass` register 22 times and the lowest one 5 (VTOCE_$TRUNCATE
+    0xE39E90; the OLD_DIR module-local 0xE55220 at 0xE55308, 0xE55314;
+    XPD_$PUT_REGISTERS 0xE5C3B6;
+    FILE_$READ_LOCK_ENTRYI 0xE60BC0 A0) (Uncertain).  Copies
+    `movea.l Dn,An` of the same shape (same script): 9, 9 hits (0xE09A94
+    A1 past A0, 0xE16BC2 A3 past A2, 0xE769AA A3 past A0-A2).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`,
-    `check_late_slot_loads`): before the body's first branch, call or
+    `pass_dead_slot_loads`, `check_late_slot_loads`): before the body's first branch, call or
     label, the allocator keeps each such slot apart from the address
     values of earlier statements that no `(An)+` used up
     (`regs::allocate_apart`; bead domain-pascal-5aw.12: 496 of 553 such
@@ -7517,10 +7592,22 @@ of the remaining misses).**  The corpus misses fall into these groups:
     call that writes it and by `(An)+`/`-(An)`), unless a lower dirty
     register was passed over while a register dirty from before that
     call remains, and unless it is A0 after a call with A1 written
-    before.  So it takes the 174 loads of the survey above that the two
-    certain rules cover (172 hits) and refuses the other 176.  This
-    covers a simple statement right after a call too (0xE00ECC's
-    lowest-free shape).
+    before.  A register reached only by dead slot loads is passed over
+    (bead domain-pascal-i24w, `pass_dead_slot_loads`: the slot is kept
+    apart from those loads and the body coloured again), and the load is
+    then accepted only in the `pass` rule's shape (every free register
+    below it reached only by a dead slot load, itself by nothing or used
+    up on every path); a load so moved that ends elsewhere (a register a
+    call wrote, another value, no register left) is refused.  Only a
+    slot that no other instruction of the body names, or a copy
+    `movea.l Dn,An`, is so passed (`passes_dead_slot_loads`); a slot read
+    from the frame at each use (an escaped parameter) stays refused (the
+    original reuses the register of its own dead load, above).  So it
+    takes the 208 loads of the survey above (0x30-0x150 bytes) that the
+    three certain rules cover (206 hits; `tools/regalloc.py slots`'s
+    `dpc` column) and refuses the other 142 (176 before bead
+    domain-pascal-i24w).  This covers a simple statement right after a
+    call too (0xE00ECC's lowest-free shape).
     The check runs after the other register checks, so a pointer local
     that `dpc` puts in A1 against the image's D0 (TTY_$K_*, bead
     domain-pascal-500) is reported as that.  The slot loads of block
@@ -7532,8 +7619,12 @@ of the remaining misses).**  The corpus misses fall into these groups:
     (FILE_$TRUNCATE_D 0xE74022 A0), `ring_svc_open.pas` (RING_$SVC_OPEN
     0xE76E12 A0), `time_q_remove_elem.pas` (TIME_$Q_REMOVE_ELEM 0xE16E84
     A0), `proc2_pguid_to_upgid.pas` (PROC2_$PGUID_TO_UPGID 0xE410B2 A0,
-    0xE410B8 A1); driver test `slot_loads_after_branches_and_calls`
-    (`crates/dpc-m68k/tests/control.rs`).
+    0xE410B8 A1); past dead slot loads, `tty_k_inq_pgroup.pas`
+    (TTY_$K_INQ_PGROUP 0xE6796E A3; TTY_$K_INQ_INPUT_BREAK_MODE OK in
+    srcsurvey); driver tests `slot_loads_after_branches_and_calls`,
+    `slot_loads_pass_over_dead_slot_loads`
+    (`crates/dpc-m68k/tests/control.rs`); golden
+    `regalloc/late_slot_pass`; execution test `late_slot_pass`.
 - **(c) A call in the statement.**  A value that does not live across a
   call, but belongs to a statement that ends in one, gets a callee-saved
   register:

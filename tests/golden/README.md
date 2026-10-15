@@ -244,6 +244,12 @@ Tests:
   `clr.l` moved into a load's stall (0xE382BE), a store ordered against
   the next statement's code, a call's pop and the next pad kept together
   (0xE1AFC8).
+- `regalloc/late_slot_pass` - codegen-patterns 12.4 R4(b) (bead
+  domain-pascal-i24w): a slot loaded for one use after a branch passes
+  over the free registers holding a dead slot load on every path to the
+  first one never written: the status in A2 passed over after its test
+  (TTY_$K_INQ_PGROUP 0xE6796E, TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8 A3),
+  A0 and A1 after the straight-line rule's slots (A2).
 - `expr/arith` - codegen-patterns 8, 13, 3: `addq`/`subq`, constant-first
   `moveq; add`, `addi`/`subi`, `c - x`, constant multiplication with
   shifts and adds (x6 0xE6886C, x12, x28 0xE5AEF6) or `mulu.w` (x564

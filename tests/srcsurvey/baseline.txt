@@ -233,9 +233,9 @@ OK	tty/tty.pas	tty_$k_inq_output_flags
 OK	tty/tty.pas	tty_$k_set_echo_flag
 OK	tty/tty.pas	tty_$k_inq_echo_flags
 MISMATCH	tty/tty.pas	tty_$k_set_input_break_mode
-STUB	tty/tty.pas	tty_$k_inq_input_break_mode
+OK	tty/tty.pas	tty_$k_inq_input_break_mode
 OK	tty/tty.pas	tty_$k_set_pgroup
-STUB	tty/tty.pas	tty_$k_inq_pgroup
+OK	tty/tty.pas	tty_$k_inq_pgroup
 OK	tty/tty.pas	tty_$k_set_session_id
 OK	tty/tty.pas	tty_$k_inq_session_id
 OK	tty/tty.pas	tty_$k_set_delay

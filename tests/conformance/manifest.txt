@@ -236,4 +236,7 @@ tests/conformance/suma_init.pas              SUMA_$INIT  --section-addr .bss.mod
 tests/conformance/dxm_init.pas               DXM_$INIT  --section-addr .bss.moddata.DXM_WIRED_.WIRED_DATA=0xE2A7C0
 tests/conformance/name_uid_getters.pas       NAME_$GET_ROOT_UID NAME_$GET_NODE_UID NAME_$GET_NODE_DATA_UID  --section-addr .bss.moddata.NAME=0xE80264
 tests/conformance/tty_k_set_pgroup.pas       TTY_$K_SET_PGROUP  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_PGROUP
+# A slot loaded after the status test passes over the dead entry load of
+# the status (12.4 R4(b); bead domain-pascal-i24w): A3 past A2.
+tests/conformance/tty_k_inq_pgroup.pas       TTY_$K_INQ_PGROUP  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_PGROUP
 tests/conformance/cal_set_drift.pas          CAL_$SET_DRIFT

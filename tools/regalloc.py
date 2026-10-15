@@ -79,6 +79,15 @@ usage:
                                          # loads under each rule (slot_
                                          # predictions), by routine shape;
                                          # with RULE, its misses
+    tools/regalloc.py slotpass [N] [--min N] [--max N]
+                                         # bead domain-pascal-i24w: single
+                                         # slot loads after the first
+                                         # branch or call: candidate
+                                         # registers' states taken or
+                                         # passed over, the rules' hits on
+                                         # the loads bead 178's rule
+                                         # refuses (with alternate
+                                         # halves), pass_rule's shape
     tools/regalloc.py orders [--split even|odd] [--tie rev] [--min N] [--max N]
                                          # bead domain-pascal-jjh: allocator
                                          # orders (Chow-Hennessy, Chaitin/
@@ -1105,7 +1114,7 @@ def free_stack(rt):
 DIRTY_VARIANTS = {'yc': ('any', 'clean', None), 'lc': ('all', 'clean', None),
                   'yk': ('any', 'keep', None), 'lk': ('all', 'keep', None),
                   'ycL': ('any', 'clean', 'label'), 'ycB': ('any', 'clean', 'block')}
-SLOT_RULES = ('colU',) + tuple(DIRTY_VARIANTS) + ('ext', 'stack', 'dpc')
+SLOT_RULES = ('colU',) + tuple(DIRTY_VARIANTS) + ('ext', 'stack', 'pass', 'dpc')
 
 
 def slot_predictions(rt, v, dirty, written, stack):
@@ -1117,12 +1126,14 @@ def slot_predictions(rt, v, dirty, written, stack):
     the registers it writes / keeps them; L/B = emptied at branch targets
     / block starts); a reload of the same slot into the register holding
     it is allowed.  ext: the load's range extended back to its block start
-    or the last call.  stack: free_stack's top candidate.  dpc: what
-    `dpc' implements (bead domain-pascal-178): colU when that register is
-    clean on every path (yc); when it is dirty on some path, the yc pick
-    if every dirty register was written since a call earlier in the
-    load's block (since_call), else 'refused'; and 'refused' for A0 after
-    a call while A1 was written before."""
+    or the last call.  stack: free_stack's top candidate.  pass: pass_rule
+    (None outside its shape).  dpc: what `dpc' implements (beads
+    domain-pascal-178, -i24w): colU when that register is clean on every
+    path (yc); when it is dirty on some path, the yc pick if every dirty
+    register was written since a call earlier in the load's block
+    (since_call), else the pass pick (a slot no other instruction names),
+    else 'refused'; and 'refused' for A0
+    after a call while A1 was written before."""
     cand = [c for c in v.cls if not interferes_any(rt, v, c, use=True)]
     p = {'colU': cand[0] if cand else None}
     slot = rt.ins[v.first].ops[0]
@@ -1142,6 +1153,7 @@ def slot_predictions(rt, v, dirty, written, stack):
     p['ext'] = ok[0] if ok else p['colU']
     ok = [c for c in cand if same(c)] + [c for c in stack.get(v.first, []) if c in cand]
     p['stack'] = ok[0] if ok else p['colU']
+    p['pass'] = pass_rule(cand, slot_states(rt, v, cand))
     w = written.get(v.first, frozenset())
     yc = dirty['yc'].get(v.first, frozenset())
     pick = p['colU']
@@ -1150,10 +1162,81 @@ def slot_predictions(rt, v, dirty, written, stack):
         # dirty register: the straight-line rule, restarted at the call
         local = since_call(rt, v.first)
         pick = p['yc'] if local is not None and yc <= local else 'refused'
+        if pick == 'refused' and sum(slot in x.text for x in rt.ins) == 1:
+            # bead domain-pascal-i24w: past dead slot loads to a register
+            # never written or used up, for a slot no other instruction
+            # names (a slot named elsewhere too reuses the register of a
+            # dead load of the same slot, 0xE39E78; dpc refuses it)
+            pick = p['pass'] or 'refused'
     if pick == 'a0' and 'call' in w and 'a1' in w:
         pick = 'refused'
     p['dpc'] = pick
     return p
+
+
+def reach_kind(rt, d, r):
+    """What a definition `d' (rd_in's (index, reg) first element) left in
+    address register r at a later load (bead domain-pascal-i24w): 'entry'
+    (no instruction wrote r on that path), 'call' (a call clobbered it),
+    'incdec' (written only by `(An)+' / `-(An)': used up), 'slot' (a
+    parameter slot load `movea.l (d,A6),An', d > 0), or a finer kind of
+    other value: 'local' (`movea.l (-d,A6),An'), 'const', 'copy'
+    (`movea.l Rn,An', `lea (An),Am'), 'loadidx' / 'load' (through a
+    register, with / without an index), 'leaidx' (`lea' with an index
+    register), 'leastat' (`lea' of A5, A6, PC or absolute), 'leaoff'
+    (`lea (d,An),Am'), 'arith' (`addq', `adda', ...), 'other:MN'."""
+    if d == 'entry':
+        return 'entry'
+    x = rt.ins[d]
+    if x.call:
+        return 'call'
+    if r in x.incdec:
+        return 'incdec'
+    src = x.ops[0] if x.ops else ''
+    if x.mn == 'moveal':
+        if re.fullmatch(r'%fp@\(\d+\)', src):
+            return 'slot'
+        if re.fullmatch(r'%fp@\(-\d+\)', src):
+            return 'local'
+        if src.startswith('#'):
+            return 'const'
+        if is_reg(src):
+            return 'copy'
+        return 'loadidx' if '%d' in src else 'load'
+    if x.mn == 'lea':
+        if re.fullmatch(r'%a\d@', src):
+            return 'copy'
+        if '%d' in src:
+            return 'leaidx'
+        if re.match(r'%(a5|fp|pc)@|0x', src):
+            return 'leastat'
+        return 'leaoff'
+    if x.mn in ('addql', 'subql', 'addal', 'addaw', 'subal', 'subaw'):
+        return 'arith'
+    return 'other:' + x.mn
+
+
+def slot_states(rt, v, cand):
+    """{register: frozenset of reach_kind} for the candidate registers of
+    slot value v at its load: what the definitions reaching it on every
+    path left there."""
+    return {c: frozenset(reach_kind(rt, d, r) for d, r in rt.rd_in[v.first][c])
+            for c in cand}
+
+
+def pass_rule(cand, states):
+    """12.4 R4(b), bead domain-pascal-i24w: the lowest candidate register
+    that no instruction wrote on any path ({'entry'}) or that a block copy
+    used up ({'incdec'}), when it is not the lowest candidate and every
+    candidate below it holds a dead parameter slot load on every path
+    ({'slot'}).  None when the load is not of that shape."""
+    for c in cand:
+        s = states[c]
+        if s in ({'entry'}, {'incdec'}):
+            return c if c != cand[0] else None
+        if s != {'slot'}:
+            return None
+    return None
 
 
 def since_call(rt, i):
@@ -1179,6 +1262,71 @@ def slot_shape(rt):
     shape = {(False, False): 'straight', (True, False): 'branches',
              (False, True): 'calls', (True, True): 'both'}[(bool(br), bool(calls))]
     return shape, min(br + calls + lab + [len(rt.ins)])
+
+
+def stmt_start(rt, i):
+    """The first instruction of i's "statement": after the last call or
+    store to memory that is not a push (stmt_end) before i in its block,
+    else the block's first instruction."""
+    b = rt.block_of[i]
+    s = b
+    for j in rt.reach:
+        if j >= i:
+            break
+        if rt.block_of[j] == b and (rt.ins[j].call or stmt_end(rt.ins[j])):
+            s = j + 1
+    return s
+
+
+def pass_variants(rt, flow):
+    """The dirty-set variants slot_pass_survey scores besides
+    DIRTY_VARIANTS: {name: {i: set}}.  E: the parameter slot loads before
+    the routine's first branch, call or label (its entry loads) do not
+    make a register dirty; S (any / all path): the set at the start of the
+    load's statement (stmt_start), so that the registers the load's own
+    statement wrote count as free."""
+    AR = set(AREGS)
+
+    def step_e(i, x, d):
+        if x.call:
+            return d - (x.defs & AR)
+        if i < flow and reach_kind(rt, i, None) == 'slot':
+            return d
+        return (d | (x.defs & AR)) - (x.incdec & AR)
+    out = {'ycE': flow_sets(rt, step_e), 'lcE': flow_sets(rt, step_e, meet='all')}
+    for k, meet in (('ycS', 'any'), ('lcS', 'all')):
+        d = dirty_sets(rt, meet)
+        out[k] = {i: d.get(stmt_start(rt, i), frozenset()) for i in d}
+    return out
+
+
+PASS_RULES = ('colU', 'yc', 'lc', 'ycL', 'ycE', 'lcE', 'ycS', 'lcS', 'stack', 'pass')
+
+
+def slot_pass_survey(done):
+    """Bead domain-pascal-i24w: the slot loads of slot_survey after the
+    first branch, call or label, read once ('single'), as [(rt, v,
+    predictions, states, refused)], predictions extended with
+    pass_variants' rules, states slot_states', refused: the pick of
+    domain-pascal-178's rule ('dpc' without the pass rule) is 'refused'
+    because the lowest free register is dirty on some path."""
+    res = []
+    for rt, v, shape, pos, use, p in slot_survey(done):
+        if pos != 'after' or use != 'single':
+            continue
+        if getattr(rt, '_pv', None) is None:
+            rt._pv = pass_variants(rt, slot_shape(rt)[1])
+        cand = [c for c in v.cls if not interferes_any(rt, v, c, use=True)]
+        for k, d in rt._pv.items():
+            dd = d.get(v.first, frozenset())
+            ok = [c for c in cand if c not in dd]
+            p[k] = ok[0] if ok else p['colU']
+        st = slot_states(rt, v, cand)
+        yc = dirty_sets(rt).get(v.first, frozenset())
+        local = since_call(rt, v.first)
+        refused = bool(cand) and cand[0] in yc and not (local is not None and yc <= local)
+        res.append((rt, v, p, st, refused))
+    return res
 
 
 def slot_survey(done):
@@ -1745,6 +1893,70 @@ def main(argv):
         for k in sorted({k for k, _ in tot}):
             print('%-24s %5d ' % ('/'.join(k), tot[k, 'n']) +
                   ' '.join('%5d' % tot[k, r] for r in cols))
+        return 0
+    if cmd == 'slotpass':
+        # bead domain-pascal-i24w: the single slot loads after the first
+        # branch, call or label.  (1) per candidate register's state at
+        # the load (slot_states), how often the image takes it (the
+        # image's register) or passes over it (a lower candidate);
+        # (2) the rules' hits on the loads domain-pascal-178's rule
+        # refuses, in all routines and in alternate halves (address
+        # order); (3) pass_rule's shape: the kind of the register it
+        # picks, the registers passed over, hits and misses.
+        show = int(argv[1]) if len(argv) > 1 else 6
+        res = slot_pass_survey(done)
+        half = {rt.r0: n % 2 for n, rt in enumerate(sorted({id(r): r for r, *_ in res}.values(),
+                                                           key=lambda r: r.r0))}
+        acc, ex = Counter(), defaultdict(list)
+        for rt, v, p, st, refused in res:
+            cand = list(st)
+            if v.reg not in cand:
+                continue
+            for c in cand[:cand.index(v.reg) + 1]:
+                k = ('+'.join(sorted(st[c])), 'take' if c == v.reg else 'pass')
+                acc[k] += 1
+                ex[k].append('%06X:%s' % (rt.ins[v.first].addr, c))
+        print('(1) candidate state: taken / passed over (examples)')
+        for s in sorted({s for s, _ in acc},
+                        key=lambda s: (-(acc[s, 'take'] + acc[s, 'pass']), s)):
+            print('  %-24s take %4d pass %4d  %s | %s' % (
+                s[:24], acc[s, 'take'], acc[s, 'pass'], ' '.join(ex[s, 'take'][:show]),
+                ' '.join(ex[s, 'pass'][:show])))
+        tot = Counter()
+        for rt, v, p, st, refused in res:
+            if not refused:
+                continue
+            h = half[rt.r0]
+            tot['n'] += 1
+            tot['n', h] += 1
+            for r in PASS_RULES:
+                tot[r] += p[r] == v.reg
+                tot[r, h] += p[r] == v.reg
+            tot['pass', 'cover'] += p['pass'] is not None
+            tot['pass', 'cover', h] += p['pass'] is not None
+        print('(2) loads refused by the bead domain-pascal-178 rule: %d (halves %d / %d)' % (
+            tot['n'], tot['n', 0], tot['n', 1]))
+        for r in PASS_RULES:
+            print('  %-6s %4d %5.1f%%  halves %3d / %3d' % (
+                r, tot[r], 100.0 * tot[r] / max(tot['n'], 1), tot[r, 0], tot[r, 1]))
+        print('  pass covers %d (halves %d / %d)' % (
+            tot['pass', 'cover'], tot['pass', 'cover', 0], tot['pass', 'cover', 1]))
+        shp, sex = Counter(), defaultdict(list)
+        for rt, v, p, st, refused in res:
+            if p['pass'] is None:
+                continue
+            cand = list(st)
+            k = ('+'.join(sorted(st[p['pass']])),
+                 ','.join(cand[:cand.index(p['pass'])]), p['pass'], p['pass'] == v.reg)
+            shp[k] += 1
+            sex[k].append('%06X' % rt.ins[v.first].addr)
+        print('(3) pass_rule: picked register kind / passed over / pick: hits, misses')
+        for k in sorted({k[:3] for k in shp}):
+            print('  %-8s %-12s %-3s hit %3d miss %3d  %s | %s' % (
+                k + (shp[k + (True,)], shp[k + (False,)], ' '.join(sex[k + (True,)][:show]),
+                     ' '.join(sex[k + (False,)][:show]))))
+        print('  total hit %d miss %d' % (sum(n for k, n in shp.items() if k[3]),
+                                         sum(n for k, n in shp.items() if not k[3])))
         return 0
     if cmd == 'ptrcopies':
         show = int(argv[1]) if len(argv) > 1 else 10

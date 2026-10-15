@@ -27,6 +27,7 @@ use dpc_ir::{
     StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
+use std::collections::BTreeSet;
 
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
@@ -848,8 +849,35 @@ fn select_body_with(
         })
         .map(|&(o, _, _)| o)
         .collect();
-    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first, &after)
+    let pre = s.out.clone();
+    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first.clone(), &after)
         .map_err(|what| unsupported(f.span, what))?;
+    // A slot loaded late into a register that holds a dead slot load on
+    // every path passes over it ([`pass_dead_slot_loads`], 12.4 R4(b));
+    // the body is coloured again with the slot kept apart from those loads.
+    let mut passed: Vec<usize> = Vec::new();
+    loop {
+        let more = pass_dead_slot_loads(&pre, &s.out, &late, &apart);
+        if more.is_empty() {
+            break;
+        }
+        for (k, pair) in more {
+            if !passed.contains(&k) {
+                passed.push(k);
+            }
+            apart.push(pair);
+        }
+        s.out = pre.clone();
+        saves = allocate_apart(&mut s.out, exit, &holds, &apart, first.clone(), &after).map_err(
+            |_| {
+                late_slot_refusal(
+                    late.iter()
+                        .find(|l| passed.contains(&l.0))
+                        .map_or(f.span, |l| l.2),
+                )
+            },
+        )?;
+    }
     if let Some(range) = hoisted {
         // A parameter loaded at entry into a scratch address register
         // after the block's load: the one such site has the parameter in
@@ -1007,7 +1035,7 @@ fn select_body_with(
     }
     // After the checks above, whose refusals are the more basic ones (a
     // pointer local in A1 writes A1 before a slot load, TTY_$K_*).
-    check_late_slot_loads(&s.out, &late)?;
+    check_late_slot_loads(&s.out, &late, &passed, exit, &holds)?;
     // A result computed in D0 already is not moved (0xE148E0 moves it
     // only because the `sne` left it in D1).
     let keep: Vec<bool> = s
@@ -1619,38 +1647,230 @@ fn autoinc_regs(insn: &Insn) -> Vec<u8> {
 /// code, if any, and its statement.
 type LateSlotLoads = Vec<(usize, Option<usize>, Span)>;
 
+/// The refusal of a slot load after the first branch or call whose
+/// register the original's choice is not known for (12.4 R4(b)).
+fn late_slot_refusal(span: Span) -> Diagnostic {
+    unsupported(
+        span,
+        "in a body of several statements, a pointer parameter or by-address parameter used \
+         once after a branch or a call, whose lowest free register an earlier statement left a \
+         value in on some path (the original's choice there is not known, codegen-patterns \
+         12.4 R4(b)), is",
+    )
+}
+
+/// What reaches an address register at an instruction, on some path
+/// ([`reaching_aregs`], [`reach_kinds`]): nothing wrote it on that path.
+const REACH_ENTRY: u8 = 1;
+/// A call wrote it.
+const REACH_CALL: u8 = 2;
+/// A block copy used it up (`(An)+` / `-(An)`).
+const REACH_USED_UP: u8 = 4;
+/// A parameter slot load `movea.l (d,A6),An`, d > 0.
+const REACH_SLOT: u8 = 8;
+/// Anything else.
+const REACH_OTHER: u8 = 16;
+
+/// Per instruction of an allocated body, before it: for A0..A4 the
+/// instructions whose definition of the register reaches it on some path
+/// (`usize::MAX` for the body's entry); `None` for unreachable code.
+fn reaching_aregs(out: &[Insn]) -> Vec<Option<[BTreeSet<usize>; 5]>> {
+    let succ = crate::regs::successors(out);
+    let mut inn: Vec<Option<[BTreeSet<usize>; 5]>> = vec![None; out.len()];
+    if !out.is_empty() {
+        inn[0] = Some(std::array::from_fn(|_| BTreeSet::from([usize::MAX])));
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..out.len() {
+            let Some(mut st) = inn[i].clone() else {
+                continue;
+            };
+            for d in crate::regs::access(&out[i]).defs {
+                if let Reg::A(n) = d {
+                    if n < 5 {
+                        st[n as usize] = BTreeSet::from([i]);
+                    }
+                }
+            }
+            for s in succ[i].iter().flatten() {
+                let merged = match &inn[*s] {
+                    None => st.clone(),
+                    Some(t) => std::array::from_fn(|n| t[n].union(&st[n]).copied().collect()),
+                };
+                if inn[*s].as_ref() != Some(&merged) {
+                    inn[*s] = Some(merged);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    inn
+}
+
+/// Whether the late load at `k` may pass over dead slot loads
+/// ([`pass_dead_slot_loads`]): a slot load whose slot no other
+/// instruction of the body names, the shape the rule is verified on
+/// (`tools/regalloc.py slotpass`, 41 of 41), or a copy `movea.l Dn,An`
+/// ([`Selector::copy_to_a`]; review of bead domain-pascal-i24w, ad-hoc
+/// script over the whole image: 9 copies after the first branch, call
+/// or label in the rule's shape, 9 hits, 0xE09A94 A1 past A0, 0xE769AA
+/// A3 past A0-A2).  A slot named elsewhere too (a parameter read from
+/// the frame at each use, an escaped one in `dpc`) goes the other way
+/// (same script, 35 loads of the rule's shape): past a dead load of the
+/// same slot the image reuses its register 8 times of 8 (the AREA_
+/// module-local 0xE08816 at 0xE0887C, 0xE08894, ... A0; VTOCE_$TRUNCATE
+/// 0xE39E78, 0xE39E86 A0; IO_$ACQUIRE 0xE1A6AC A1), past dead loads of
+/// other slots it takes the rule's register 22 times and reuses the
+/// lowest 5 (VTOCE_$TRUNCATE 0xE39E90, XPD_$PUT_REGISTERS 0xE5C3B6,
+/// FILE_$READ_LOCK_ENTRYI 0xE60BC0 A0); such a load is not passed over
+/// and stays refused.
+fn passes_dead_slot_loads(out: &[Insn], k: usize) -> bool {
+    match out.get(k) {
+        Some(Insn::Movea {
+            src: Ea::Reg(Reg::D(_)),
+            ..
+        }) => true,
+        Some(Insn::Movea {
+            src: src @ Ea::Disp(d, FP),
+            ..
+        }) if *d > 0 => {
+            let slot = src.to_string();
+            !out.iter()
+                .enumerate()
+                .any(|(i, x)| i != k && x.to_string().contains(&slot))
+        }
+        _ => false,
+    }
+}
+
+/// The `REACH_*` kinds of the definitions `defs` of An ([`reaching_aregs`]).
+fn reach_kinds(out: &[Insn], n: u8, defs: &BTreeSet<usize>) -> u8 {
+    defs.iter().fold(0, |m, &j| {
+        m | match out.get(j) {
+            None => REACH_ENTRY,
+            Some(Insn::Jsr(_) | Insn::Bsr { .. }) => REACH_CALL,
+            Some(i) if autoinc_regs(i).contains(&n) => REACH_USED_UP,
+            Some(Insn::Movea {
+                src: Ea::Disp(d, FP),
+                ..
+            }) if *d > 0 => REACH_SLOT,
+            Some(_) => REACH_OTHER,
+        }
+    })
+}
+
+/// After allocation, for each slot load of [`check_late_slot_loads`]
+/// whose register holds a dead parameter slot load on every path to it
+/// (only `REACH_SLOT` reaches it): `(index of the load, (its value, the
+/// value of each such reaching load))`, from `pre`, the body before
+/// allocation, to keep apart in a new colouring (bead
+/// domain-pascal-i24w).  Such a register is passed over in the image when
+/// a free register above it is untouched or used up
+/// ([`check_late_slot_loads`]); the pairs already in `apart` are left out.
+fn pass_dead_slot_loads(
+    pre: &[Insn],
+    out: &[Insn],
+    late: &[(usize, Option<usize>, Span)],
+    apart: &[(Reg, Reg)],
+) -> Vec<(usize, (Reg, Reg))> {
+    if late.is_empty() {
+        return Vec::new();
+    }
+    let reach = reaching_aregs(out);
+    let mut more = Vec::new();
+    for &(k, _, _) in late {
+        let (Some(Insn::Movea { dst, .. }), Some(Insn::Movea { dst: v, .. })) =
+            (out.get(k), pre.get(k))
+        else {
+            continue;
+        };
+        if !passes_dead_slot_loads(out, k) {
+            continue;
+        }
+        let Some(Some(st)) = reach.get(k) else {
+            continue;
+        };
+        let defs = &st[*dst as usize];
+        if reach_kinds(out, *dst, defs) != REACH_SLOT {
+            continue;
+        }
+        for &j in defs {
+            if let Some(Insn::Movea { dst: w, .. }) = pre.get(j) {
+                let pair = (Reg::A(*v), Reg::A(*w));
+                if crate::regs::is_virtual(pair.1)
+                    && !apart.contains(&pair)
+                    && !more.iter().any(|(_, p)| *p == pair)
+                {
+                    more.push((k, pair));
+                }
+            }
+        }
+    }
+    more
+}
+
 /// After allocation: a slot loaded for one use after the body's first
-/// branch, call or label (codegen-patterns 12.4 R4(b), bead
-/// domain-pascal-178).  Its register is the lowest one free over its range
-/// (what [`allocate_apart`] gives it, R1; [`fresh_slot_loads`] keeps it
-/// apart from the address values of earlier statements since a call it
-/// follows in straight-line code).  The original takes that register when
-/// no earlier instruction left a value in it on any path to the load (a
-/// value used up by `(An)+` / `-(An)`, or one a call clobbered after,
-/// does not count), and passes over the registers written since such a
-/// call when every dirty register was written there.  Otherwise its
-/// choice is not known and the load is refused; so is A0 after a call
-/// when A1 was written before the load (other than by a call).
+/// branch, call or label (codegen-patterns 12.4 R4(b), beads
+/// domain-pascal-178, -i24w).  Its register is the lowest one free over
+/// its range (what [`allocate_apart`] gives it, R1; [`fresh_slot_loads`]
+/// keeps it apart from the address values of earlier statements since a
+/// call it follows in straight-line code; [`pass_dead_slot_loads`] from
+/// dead slot loads; `passed` lists the loads so moved).
+///
+/// - When every free register below it holds a dead parameter slot load
+///   on every path (at least one), and no instruction wrote it on any
+///   path or a block copy used it up on every path, the original takes
+///   it (bead domain-pascal-i24w; `tools/regalloc.py slotpass`, 41 loads
+///   of that shape, 41 hits: TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8 and
+///   TTY_$K_INQ_PGROUP 0xE6796E `movea.l (0xc,A6),A3` past A2, the
+///   status loaded at entry; PBU_$ADVANCE_EC_INT 0xE88432 A3 past A1;
+///   SMD_$READ_CRSR_BITMAP 0xE6FD54 A3, 0xE6FD5C A4; used up:
+///   XNS_IDP_$DEMUX 0xE18C26 A1 past A0 after an `(A1)+` copy).  A load
+///   moved by [`pass_dead_slot_loads`] that does not end in this shape is
+///   refused: past a dead slot load, a register a call wrote is taken 24
+///   times and passed over 5 (VTOCE_$LOOKUP_FM 0xE39A9C, SMD_$INVERT_DISP
+///   0xE703C6 A0 against TTY_$K_SET_FLAG 0xE67454 A1; bead
+///   domain-pascal-quio), and when every free register holds one the
+///   choice looks round-robin (MSG_$SEND_HW 0xE59B6E..0xE59B8C,
+///   TPAD_$SET_UNIT_MODE 0xE69834 A4, 0xE6983C A0; bead
+///   domain-pascal-aerg).
+/// - Otherwise the original takes the register when no earlier
+///   instruction left a value in it on any path to the load (a value used
+///   up by `(An)+` / `-(An)`, or one a call clobbered after, does not
+///   count), and passes over the registers written since such a call
+///   when every dirty register was written there.  Otherwise its choice
+///   is not known and the load is refused; so is A0 after a call when A1
+///   was written before the load (other than by a call).
 ///
 /// Survey (`tools/regalloc.py slots`, routines of 0x30-0x150 bytes, the
 /// slot loads after the first branch, call or label whose slot no other
 /// instruction names and whose value lives in one block and across no
-/// call: 350): the rule takes 174 and fits 172 (TTY_$K_SET_INPUT_FLAG
+/// call: 350): the second rule takes 174 and fits 172 (TTY_$K_SET_INPUT_FLAG
 /// 0xE67684 `movea.l (0x10,A6),A1` after the call, A0 holding the
 /// descriptor; FILE_$TRUNCATE_D 0xE74022 A0; PROC2_$PGUID_TO_UPGID
 /// 0xE410B8 A1 after 0xE410B2 A0, both after ML_$UNLOCK); the two misses
 /// are MAC_$DEMUX 0xE0BCD2 (A1 after a copy used up A0 and A1) and
-/// 0xE6AA1C (A3 while A1 is free and clean).  It refuses 176.  In 114 the
-/// lowest free register is dirty on some path otherwise; the lowest one
-/// that is not dirty on every path fits 86 of them, and the exceptions
-/// include callee-saved registers taken while a scratch one is free and
-/// clean (0xE0D6DE A3, 0xE69834 A4) and a dirty A0 reused (0xE19158,
-/// after a `lea (0,A5,D1.l),A0` that only formed an address).  In 62,
-/// after a call with A1 written before, the original takes A0 40 times,
-/// A1 17 times (PROC2_$DEBUG 0xE41710, PROC2_$GET_EC 0xE40148,
+/// 0xE6AA1C (A3 while A1 is free and clean).  In 114 the lowest free
+/// register is dirty on some path otherwise; the lowest one that is not
+/// dirty on every path fits 86 of them, and the exceptions include
+/// callee-saved registers taken while a scratch one is free and clean
+/// (0xE0D6DE A3, 0xE69834 A4) and a dirty A0 reused (0xE19158, after a
+/// `lea (0,A5,D1.l),A0` that only formed an address).  In 62, after a
+/// call with A1 written before, the original takes A0 40 times, A1 17
+/// times (PROC2_$DEBUG 0xE41710, PROC2_$GET_EC 0xE40148,
 /// XPD_$SET_PTRACE_OPTS 0xE5B066, against PROC2_$SET_NAME 0xE3EABE and
 /// PROC2_$SIGNAL 0xE3F080) and A2-A4 5 times.
-fn check_late_slot_loads(out: &[Insn], late: &[(usize, Option<usize>, Span)]) -> Res<()> {
+fn check_late_slot_loads(
+    out: &[Insn],
+    late: &[(usize, Option<usize>, Span)],
+    passed: &[usize],
+    exit: &[Reg],
+    holds: &[(usize, Reg)],
+) -> Res<()> {
     if late.is_empty() {
         return Ok(());
     }
@@ -1718,10 +1938,41 @@ fn check_late_slot_loads(out: &[Insn], late: &[(usize, Option<usize>, Span)]) ->
             break;
         }
     }
+    let reach = reaching_aregs(out);
+    let live_out = crate::regs::liveness(out, exit, holds);
     for &(k, call, span) in late {
         let Some(Insn::Movea { dst, .. }) = out.get(k) else {
             continue;
         };
+        // The registers below the load's that are free over its range
+        // (not live out of an instruction from the load to the one before
+        // its last use).
+        let mine = crate::regs::RegKey(Reg::A(*dst));
+        let mut end = k;
+        while live_out.get(end).is_some_and(|l| l.contains(&mine)) {
+            end += 1;
+        }
+        let free_below: Vec<u8> = (0..*dst)
+            .filter(|&n| {
+                !live_out[k..end]
+                    .iter()
+                    .any(|l| l.contains(&crate::regs::RegKey(Reg::A(n))))
+            })
+            .collect();
+        if let Some(Some(r)) = reach.get(k).filter(|_| passes_dead_slot_loads(out, k)) {
+            let own = reach_kinds(out, *dst, &r[*dst as usize]);
+            if matches!(own, REACH_ENTRY | REACH_USED_UP)
+                && !free_below.is_empty()
+                && free_below
+                    .iter()
+                    .all(|&n| reach_kinds(out, n, &r[n as usize]) == REACH_SLOT)
+            {
+                continue;
+            }
+        }
+        if passed.contains(&k) {
+            return Err(late_slot_refusal(span));
+        }
         let st = inn[k].unwrap_or_default();
         // The registers written since the call the load follows in
         // straight-line code: kept apart ([`fresh_slot_loads`]).  When one
@@ -1735,13 +1986,7 @@ fn check_late_slot_loads(out: &[Insn], late: &[(usize, Option<usize>, Span)]) ->
         });
         let below = (1u8 << dst) - 1;
         if st.dirty & (1 << dst) != 0 || (st.dirty & below & local != 0 && st.dirty & !local != 0) {
-            return Err(unsupported(
-                span,
-                "in a body of several statements, a pointer parameter or by-address parameter \
-                 used once after a branch or a call, whose lowest free register an earlier \
-                 statement left a value in on some path (the original's choice there is not \
-                 known, codegen-patterns 12.4 R4(b)), is",
-            ));
+            return Err(late_slot_refusal(span));
         }
         if *dst == 0 && st.call && st.written & 2 != 0 {
             return Err(unsupported(

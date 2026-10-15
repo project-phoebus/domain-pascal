@@ -245,10 +245,12 @@ end;",
         ),
         // A by-address slot used once after a branch, whose lowest free
         // register an earlier statement left a value in (12.4 R4(b),
-        // `check_late_slot_loads`).
+        // `check_late_slot_loads`): past a dead slot load in A0, A1 a
+        // call wrote (A0 or A1 in the image; bead domain-pascal-i24w).
         (
             "(var x, y: integer); internal;
 begin
+  ext_$p(1);
   y := 2;
   if w = 3 then x := 0;
 end;",
@@ -393,6 +395,107 @@ end;
             "move.w\t%d0,(W).l",
         ]
     );
+}
+
+/// A slot loaded after a branch passes over the free registers that hold
+/// a dead slot load on every path to the first one never written
+/// (codegen-patterns 12.4 R4(b), bead domain-pascal-i24w:
+/// TTY_$K_INQ_INPUT_BREAK_MODE 0xE678E8 `movea.l (0xc,A6),A3` past A2, the
+/// status; PBU_$ADVANCE_EC_INT 0xE88432 A3 past A1).
+#[test]
+fn slot_loads_pass_over_dead_slot_loads() {
+    let b = body(
+        "procedure t(var a, c: integer; var x: integer); internal;
+begin
+  a := 1;
+  c := 2;
+  if w = 3 then x := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "pea\t(%a2)",
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t#1,(%a0)",
+            "movea.l\t(0xc,%fp),%a1",
+            "move.w\t#2,(%a1)",
+            "cmpi.w\t#3,(W).l",
+            "bne.s\t1f",
+            "movea.l\t(0x10,%fp),%a2",
+            "clr.w\t(%a2)",
+            "1:",
+            "movea.l\t(-8,%fp),%a2",
+        ]
+    );
+    // One slot before the branch: A1, never written (0xE58C28, 0xE5971C).
+    let b = body(
+        "procedure t(var x, y: integer); internal;
+begin
+  y := 2;
+  if w = 3 then x := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "movea.l\t(0xc,%fp),%a0",
+            "move.w\t#2,(%a0)",
+            "cmpi.w\t#3,(W).l",
+            "bne.s\t1f",
+            "movea.l\t(8,%fp),%a1",
+            "clr.w\t(%a1)",
+            "1:",
+        ]
+    );
+    // Past a dead slot load to a register a call wrote: A1 at
+    // TTY_$K_SET_FLAG 0xE67454, A0 reused at VTOCE_$LOOKUP_FM 0xE39A9C;
+    // refused (bead domain-pascal-quio).
+    let e = error(
+        "procedure t(var a: integer; var x: integer); internal;
+begin
+  ext_$p(1);
+  a := 1;
+  if w = 3 then x := 0;
+end;
+",
+    );
+    assert!(e.contains("12.4 R4(b)"), "{e}");
+    // Every free register holds a dead slot load (round-robin-like in
+    // the image, MSG_$SEND_HW 0xE59B6E..0xE59B8C; bead
+    // domain-pascal-aerg): refused.
+    let e = error(
+        "procedure t(var a, c, d, f, g: integer; var x: integer); internal;
+begin
+  a := 1;
+  c := 2;
+  d := 3;
+  f := 4;
+  g := 5;
+  if w = 3 then x := 0;
+end;
+",
+    );
+    assert!(e.contains("12.4 R4(b)"), "{e}");
+    // A slot read from the frame at each use (its address escapes):
+    // after the branch A1 holds its own dead load and A0 another slot's.
+    // The image reuses the register past a dead load of the same slot (8
+    // of 8: VTOCE_$TRUNCATE 0xE39E78, IO_$ACQUIRE 0xE1A6AC); not passed
+    // over, refused (review of bead domain-pascal-i24w).
+    let e = error(
+        "procedure upd(var p: ip); options(extern);
+procedure t(p: ip; var a: integer); options(val_param);
+begin
+  upd(p);
+  a := 1;
+  p^ := 1;
+  if w = 3 then p^ := 2;
+end;
+",
+    );
+    assert!(e.contains("12.4 R4(b)"), "{e}");
 }
 
 /// Compiled code has no branch to a `bra` (codegen-patterns 7.1, "Branch
