@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 91c45caac314d82a09d39ba3dd008bded08742b9
+# source: ac053ee8b9f43a99cda2edec8b1ed96f0b269b01
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -57,6 +57,7 @@ STUB	dbuf/dbuf.pas	dbuf_$init
 MISMATCH	disk/disk.pas	disk_$get_block
 MISMATCH	disk/disk.pas	disk_$set_buff
 MISMATCH	disk/disk.pas	disk_$invalidate
+STUB	disk/disk.pas	disk_$grow_qblk_pool
 STUB	disk/disk.pas	disk_$get_qblks_internal
 MISMATCH	disk/disk.pas	disk_$get_qblks
 MISMATCH	disk/disk.pas	disk_$rtn_qblks_internal
@@ -65,11 +66,18 @@ MISMATCH	disk/disk.pas	disk_$init
 STUB	disk/disk.pas	disk_$io_error
 STUB	disk/disk.pas	disk_$sort
 MISMATCH	disk/disk.pas	disk_$init_que
+STUB	disk/disk.pas	disk_$add_que
 STUB	disk/disk.pas	disk_$wait_io
 MISMATCH	disk/disk.pas	disk_$wait_que
 STUB	disk/disk.pas	disk_$map_request
 MISMATCH	disk/disk.pas	disk_$write
+MISMATCH	disk/disk.pas	disk_$set_chain_status
+STUB	disk/disk.pas	disk_$write_multi
 MISMATCH	disk/disk.pas	disk_$read
+STUB	disk/disk.pas	disk_$read_multi
+STUB	disk/disk.pas	disk_$format_whole
+STUB	disk/disk.pas	disk_$format
+STUB	disk/disk.pas	disk_io
 MISMATCH	disk/disk.pas	disk_$write_protect
 MISMATCH	disk/disk_dev.pas	disk_$register
 STUB	disk/disk_dev.pas	disk_$get_drte
@@ -233,6 +241,35 @@ STUB	mmap/mmap.pas	mmap_$reclaim
 OK	mmap/mmap_unwired.pas	mmu_$vtop_or_crash
 STUB	mmap/mmap_unwired.pas	mmap_$init
 MISMATCH	mmap/mmap_unwired.pas	mmap_$remote_pool
+STUB	msg/msg_unwired.pas	msg_$init
+OK	msg/msg_unwired.pas	msg_$get_my_net
+OK	msg/msg_unwired.pas	msg_$get_my_node
+STUB	msg/msg_unwired.pas	msg_$set_hpipc
+OK	msg/msg_unwired.pas	msg_$open
+STUB	msg/msg_unwired.pas	msg_$openi
+OK	msg/msg_unwired.pas	msg_$allocate
+STUB	msg/msg_unwired.pas	msg_$allocatei
+OK	msg/msg_unwired.pas	msg_$close
+STUB	msg/msg_unwired.pas	msg_$closei
+OK	msg/msg_unwired.pas	msg_$rcv
+STUB	msg/msg_unwired.pas	msg_$$rcv_internal
+STUB	msg/msg_unwired.pas	msg_$rcvi
+MISMATCH	msg/msg_unwired.pas	msg_$rcv_contig
+STUB	msg/msg_unwired.pas	msg_$rcv_contigi
+STUB	msg/msg_unwired.pas	msg_$rcv_hw
+STUB	msg/msg_unwired.pas	msg_$send
+STUB	msg/msg_unwired.pas	msg_$sendi
+STUB	msg/msg_unwired.pas	msg_$send_hw
+OK	msg/msg_unwired.pas	msg_$wait
+STUB	msg/msg_unwired.pas	msg_$waiti
+STUB	msg/msg_unwired.pas	msg_$get_ec
+STUB	msg/msg_unwired.pas	msg_$sar
+STUB	msg/msg_unwired.pas	msg_$sari
+STUB	msg/msg_unwired.pas	msg_$test_for_message
+STUB	msg/msg_unwired.pas	msg_$share_socket
+STUB	msg/msg_unwired.pas	msg_$fork
+STUB	msg/msg_unwired.pas	msg_$free_asid
+STUB	msg/msg_wired.pas	msg_$$send
 OK	mt/mt.pas	mt_$release
 STUB	net/net.pas	net_$find_handler
 OK	net/net.pas	net_$get_info
