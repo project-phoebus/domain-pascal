@@ -172,6 +172,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `late_slot_pass` | bead domain-pascal-i24w: by-address parameters loaded for one use after a branch into a register past dead slot loads (the out parameter after a status test in A3, a third slot after an `if` in A2), on both sides of the test |
 | `one_stmt_params` | bead domain-pascal-s4a5: bodies of one `if`, `case`, `for`, `while` or `repeat` reading by-value parameters loaded at entry; a boolean tested on its load's flags |
 | `entry_load_flags` | review of bead domain-pascal-s4a5: a parameter tested right after the entry loads on its load's flags (bytes, words, longs; zero, negative, unsigned bytes, low byte or word zero), also past `movea.l` entry loads; `tst` of a parameter loaded before the last |
+| `args_held` | bead domain-pascal-9j1z: parameters loaded at entry whose last use is a call's argument in bodies with branches (in an `if` part, in each part, used on the other path, after an inner join, before the first branch, in a `case` arm, before a `return`, with others live across the call), held in callee-saved registers |
 | `divmod` | `div`/`mod` signs, words and longwords, by powers of two, word operands widened |
 | `udiv` | unsigned-word `div`/`mod`; longword by a word constant |
 | `arith` | multiplication by constants, `muls.w` products, M$ARITH, wraparound |

@@ -756,9 +756,13 @@ fn select_body_with(
         &s.out,
         &s.call_stmts,
         exit,
-        s.link.map(Reg::A),
-        &held_ptrs,
-        &blocks,
+        HeldKinds {
+            link: s.link.map(Reg::A),
+            ptrs: &held_ptrs,
+            blocks: &blocks,
+            params: &s.entry_regs,
+            data_ptrs: &s.data_ptr_regs,
+        },
     )?;
     // A parked local's data register stays the local's until its last
     // dereference, though only the address register is read there: the
@@ -1405,8 +1409,8 @@ fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Ve
 /// The values to hold live through a call (codegen-patterns 12.4 R4(c)),
 /// as `(index of the jsr/bsr, register)` for [`allocate`].
 ///
-/// A value defined before a call statement (in `dpc`, a parameter loaded at
-/// entry) whose last use is in that statement's arguments:
+/// A value defined before a call statement whose last use is in that
+/// statement's arguments:
 ///
 /// - in a body without branches it is held through the call, so it takes
 ///   a callee-saved register: PROC1_$SET_ASID 0xE148FE D2 (`move.w
@@ -1415,11 +1419,32 @@ fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Ve
 ///   0xE1D598 A2, SIO_$I_INIT 0xE67E64 A2.  These are
 ///   all five such parameter loads in the image's routines without
 ///   branches where liveness alone leaves a scratch register free
-///   (`tools/regalloc.py callargs`);
-/// - in a body with branches the image does both (26 parameter loads
-///   callee-saved, 49 scratch: EC2_$ADVANCE 0xE42CB8 D0, `move.l
-///   D0,-(SP)` at 0xE42CDA; DIR_$FIND_NET 0xE4FE36 A0, `pea (A0)` at
-///   0xE4FE76), by a rule not known: refused.
+///   (`tools/regalloc.py callargs`, `callparams`);
+/// - in a body with branches, a parameter loaded at entry (`params`) is
+///   held too, wherever the call lies (bead domain-pascal-9j1z;
+///   `tools/regalloc.py callparams`, the parameters loaded once before
+///   the routine's first branch, branch target or call, whose last use on
+///   some path pushes an argument of a call, with a scratch register free
+///   by liveness): before the first branch, 2 of 2 callee-saved
+///   (VOLX_$GET_INFO 0xE6B5D4 A3, 0xE6B5D8 A4); in a conditional part, 26
+///   of 27 (AREA_$ASSOC 0xE096B0 D2, `move.w D2,-(SP)` at 0xE096D2;
+///   XPD_$GET_FP_INT 0xE5C560 A2, a call in each part); after a join
+///   inside one, 5 of 5 (SOCK_$PUT_INT 0xE161A2 A2, `pea (A2)` at
+///   0xE161E4; the nested 0xE1CC10 of KBD_$RCV keeps `kbd` in A2,
+///   `move.l (0x48,A2),-(SP)` at 0xE1CC52); whether the
+///   value is also used on another path (10 of 10) or passed to several
+///   calls (7 of 7) does not matter, nor does the class (A 29 of 29, D 4
+///   of 5).  Refused:
+///   - the one other site's kind, a pointer parameter held in a data
+///     register (`data_ptrs`): EC2_$ADVANCE 0xE42CB8 pushes D0, a scratch
+///     register, `move.l D0,-(SP)` at 0xE42CDA, the only such site;
+///   - a call on every path after a join: its 4 sites are all
+///     callee-saved, but at each no scratch register is free by
+///     liveness, so they do not show whether the value is held;
+/// - other values (register-held locals, computed values) are refused in
+///   a body with branches: not surveyed, and DTTY_$TSTART 0xE1D6E0 keeps
+///   the local `current` in D0, a scratch register, for `pea
+///   (5,A3,D0.w)` at 0xE1D6F8 inside an `if`.
 ///
 /// A value already live across an earlier call (so in a callee-saved
 /// register by R3) is held with branches too: CAL_$SHUTDOWN 0xE3E6E4
@@ -1448,10 +1473,15 @@ fn held_through_calls(
     out: &[Insn],
     calls: &[(usize, usize, Span)],
     exit: &[Reg],
-    link: Option<Reg>,
-    ptrs: &[Reg],
-    blocks: &[Reg],
+    kinds: HeldKinds,
 ) -> Res<Vec<(usize, Reg)>> {
+    let HeldKinds {
+        link,
+        ptrs,
+        blocks,
+        params,
+        data_ptrs,
+    } = kinds;
     let straight = !out
         .iter()
         .any(|i| matches!(i, Insn::Branch { .. } | Insn::Dbf { .. }));
@@ -1489,18 +1519,91 @@ fn held_through_calls(
                     .iter()
                     .any(|&(_, c, _)| c < start && live_out[c].contains(&crate::regs::RegKey(r)));
                 if !straight && !ptrs.contains(&r) && !crossed {
-                    return Err(unsupported(
-                        span,
-                        "in a body with branches, a call whose arguments are the last use of a \
-                         parameter loaded at entry (held through the call or not, \
-                         codegen-patterns 12.4 R4(c)) is",
-                    ));
+                    if !params.contains(&r) {
+                        return Err(unsupported(
+                            span,
+                            "in a body with branches, a call whose arguments are the last use of \
+                             a register-held local or computed value (held through the call or \
+                             not: DTTY_$TSTART 0xE1D6F8 does not hold one; not surveyed, \
+                             codegen-patterns 12.4 R4(c), bead domain-pascal-ig8d) is",
+                        ));
+                    }
+                    if data_ptrs.contains(&r) {
+                        return Err(unsupported(
+                            span,
+                            "in a body with branches, a call whose arguments are the last use of \
+                             a pointer parameter held in a data register (not held at \
+                             EC2_$ADVANCE 0xE42CDA, the only site; codegen-patterns 12.4 R4(c), \
+                             bead domain-pascal-b3wz) is",
+                        ));
+                    }
+                    if after_a_branch(out, call) && on_every_path(out, call) {
+                        return Err(unsupported(
+                            span,
+                            "a call on every path after a join whose arguments are the last use \
+                             of a parameter loaded at entry (held through the call or not: no \
+                             site with a scratch register free, codegen-patterns 12.4 R4(c), \
+                             bead domain-pascal-cs2n) is",
+                        ));
+                    }
                 }
                 holds.push((call, r));
             }
         }
     }
     Ok(holds)
+}
+
+/// The kinds of values [`held_through_calls`] treats apart.
+struct HeldKinds<'a> {
+    /// The static link's register.
+    link: Option<Reg>,
+    /// Pointer locals assigned from calls.
+    ptrs: &'a [Reg],
+    /// Registers holding another data section's block.
+    blocks: &'a [Reg],
+    /// The parameters loaded at entry ([`Selector::entry_loads`]).
+    params: &'a [Reg],
+    /// Those of `params` held in a data register although pointers.
+    data_ptrs: &'a [Reg],
+}
+
+/// A branch, `dbf`, `case` dispatch or branch target comes before
+/// instruction `i` of `out`.
+fn after_a_branch(out: &[Insn], i: usize) -> bool {
+    out[..i].iter().any(|x| {
+        matches!(
+            x,
+            Insn::Branch { .. } | Insn::Dbf { .. } | Insn::TableJump { .. } | Insn::Label(_)
+        )
+    })
+}
+
+/// Every path from the start of the body to its end goes through
+/// instruction `i` of `out`.
+fn on_every_path(out: &[Insn], i: usize) -> bool {
+    if out.is_empty() {
+        return true;
+    }
+    let succ = crate::regs::successors(out);
+    let mut seen = vec![false; out.len()];
+    let mut work = vec![0usize];
+    while let Some(j) = work.pop() {
+        if j == i || seen[j] {
+            continue;
+        }
+        seen[j] = true;
+        if matches!(out[j], Insn::Rts) {
+            return false;
+        }
+        for s in &succ[j] {
+            match s {
+                Some(k) => work.push(*k),
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 /// The register pairs to keep apart for by-address slots loaded for one
@@ -4761,6 +4864,9 @@ pub struct Selector {
     /// The registers of the parameters loaded at entry
     /// ([`Self::entry_loads`]), in load order.
     entry_regs: Vec<Reg>,
+    /// Those of them that hold a pointer or a by-address slot's address
+    /// in a data register (also used as data, [`Self::entry_loads`]).
+    data_ptr_regs: Vec<Reg>,
     /// The range of `out` the entry loads take, when any were made: a
     /// test, made right after them, of the register the last data
     /// register load among them loaded branches on that load's flags
@@ -4947,6 +5053,7 @@ impl Selector {
             web: None,
             web_a: None,
             entry_regs: Vec::new(),
+            data_ptr_regs: Vec::new(),
             entry_end: None,
             stored: Vec::new(),
             escaped: Vec::new(),
@@ -7486,6 +7593,9 @@ impl Selector {
             // (8,A6),A2` and 0xE32B82 `move.w (0xc,A6),D2` around three
             // `jsr EC_$INIT`).
             let r = self.alloc(class)?;
+            if class == RegClass::Data && (ty.is_none() || mine.contains(&ParamUse::Base)) {
+                self.data_ptr_regs.push(r);
+            }
             let src = Ea::Disp(offset, FP);
             self.out.push(match r {
                 Reg::D(_) => Insn::Move {
@@ -14884,6 +14994,39 @@ mod tests {
     use super::*;
     use dpc_ir::{ResultSpec, Stmt};
     use dpc_syntax::SourceMap;
+
+    /// [`on_every_path`], [`after_a_branch`] (codegen-patterns 12.4
+    /// R4(c), bead domain-pascal-9j1z): a call in an `if` part is not on
+    /// every path; one after the `if`'s join is, and comes after a branch;
+    /// one before the `if` is on every path but before any branch.
+    #[test]
+    fn call_positions_for_held_arguments() {
+        let call = || Insn::Jsr(Ea::AbsL("T".into(), 0));
+        let bne = Insn::Branch {
+            cond: Cond::Ne,
+            label: 1,
+            short: true,
+            back: false,
+        };
+        // 0: call; 1: bne 1f; 2: call; 3: 1:; 4: call
+        let out = vec![call(), bne, call(), Insn::Label(1), call()];
+        assert!(on_every_path(&out, 0) && !after_a_branch(&out, 0));
+        assert!(!on_every_path(&out, 2) && after_a_branch(&out, 2));
+        assert!(on_every_path(&out, 4) && after_a_branch(&out, 4));
+        // An `rts` in the middle (no epilogue join) is a way out too.
+        let out = vec![
+            Insn::Branch {
+                cond: Cond::Ne,
+                label: 1,
+                short: true,
+                back: false,
+            },
+            Insn::Rts,
+            Insn::Label(1),
+            call(),
+        ];
+        assert!(!on_every_path(&out, 3));
+    }
 
     fn span() -> Span {
         let f = SourceMap::new().add("t.pas", String::new());

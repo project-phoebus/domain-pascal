@@ -409,14 +409,16 @@ fn loop_align_off_from_unknown_routine_is_an_error() {
     assert!(err.contains("want `on` or `off`"), "{err}");
 }
 
-/// codegen-patterns 12.4 R4(c): in a body with branches, a parameter
-/// loaded at entry whose last use is an argument of a call is refused at
-/// the call (the image holds such values through the call in 26 cases and
-/// not in 49, by a rule not known); the same body without the `if` holds
-/// it in D2 (PROC1_$SET_ASID 0xE148FE).
+/// codegen-patterns 12.4 R4(c) (bead domain-pascal-9j1z): in a body with
+/// branches, a parameter loaded at entry whose last use is an argument of
+/// a call is held through the call (D2) when the call lies in an `if`
+/// part (AREA_$ASSOC 0xE096D2) or before the first branch; a call on every
+/// path after a join is refused (no site in the image shows it, bead
+/// domain-pascal-cs2n); the same body without the `if` holds it in D2
+/// (PROC1_$SET_ASID 0xE148FE).
 #[test]
 fn argument_last_use_in_a_branchy_body_is_refused() {
-    let src = |cond: &str| {
+    let src = |before: &str, after: &str| {
         format!(
             "module m;
 type r = record a: integer; b: integer; end;
@@ -426,25 +428,103 @@ procedure tick(n: integer); options(val_param, extern);
 procedure m_$p(p: rp; n: integer); options(val_param);
 begin
   p^.a := n;
-  {cond}
+  {before}
   tick(n);
+  {after}
 end;
 "
         )
     };
     let (code, err) = compile_with(
         "argument_last_use_in_a_branchy_body_is_refused",
-        &src("if done then p^.b := 0;"),
+        &src("if done then p^.b := 0;", ""),
         &[],
     )
     .unwrap_err();
     assert_eq!(code, Some(1));
     assert!(
-        err.contains("m.pas:10:3: error: in a body with branches, a call whose arguments"),
+        err.contains(
+            "m.pas:10:3: error: a call on every path after a join whose arguments are the last \
+             use of a parameter loaded at entry"
+        ),
         "{err}"
     );
-    let asm = compile_with("argument_last_use_held", &src(""), &[]).unwrap();
+    let asm = compile_with("argument_last_use_held", &src("", ""), &[]).unwrap();
     assert!(asm.contains("\tmove.w\t%d2,-(%sp)\n"), "{asm}");
+    // Before the first branch: held.
+    let asm = compile_with(
+        "argument_last_use_before_a_branch",
+        &src("", "if done then p^.b := 0;"),
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("\tmove.w\t%d2,-(%sp)\n"), "{asm}");
+    // In an `if` part: held.
+    let asm = compile_with(
+        "argument_last_use_in_an_if_part",
+        &src("if done then", ""),
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("\tmove.w\t%d2,-(%sp)\n"), "{asm}");
+    assert!(asm.contains("\tbpl.s\t1f\n"), "{asm}");
+}
+
+/// codegen-patterns 12.4 R4(c): in a body with branches, a pointer
+/// parameter held in a data register (12.2, "Pointers in data registers")
+/// whose last use is an argument is refused (EC2_$ADVANCE 0xE42CDA pushes
+/// it from D0, not held; the only site, bead domain-pascal-b3wz), and so
+/// is a register-held local (DTTY_$TSTART 0xE1D6F8; not surveyed, bead
+/// domain-pascal-ig8d).
+#[test]
+fn argument_last_use_of_a_data_pointer_or_local_is_refused() {
+    let (code, err) = compile_with(
+        "argument_last_use_of_a_data_pointer",
+        "module m;
+type ec_t = record value: integer32; waiters: integer; end;
+var done: extern boolean;
+procedure wake(var ec: ec_t); extern;
+procedure m_$advance(var ec: ec_t);
+begin
+  if integer32(addr(ec)) > 1000 then begin
+    ec.value := ec.value + 1;
+    if ec.waiters <> 0 then
+      wake(ec);
+  end;
+end;
+",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("the last use of a pointer parameter held in a data register"),
+        "{err}"
+    );
+    let (code, err) = compile_with(
+        "argument_last_use_of_a_local",
+        "module m;
+var done: extern boolean;
+  src: extern integer;
+procedure tick(n: integer); options(val_param, extern);
+procedure m_$p;
+var k: integer;
+begin
+  k := src;
+  if done then begin
+    src := k + 1;
+    tick(k);
+  end;
+end;
+",
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("the last use of a register-held local or computed value"),
+        "{err}"
+    );
 }
 
 /// codegen-patterns 4: `--a5-always-from`, `--a5-always`, `--a5-absolute`.

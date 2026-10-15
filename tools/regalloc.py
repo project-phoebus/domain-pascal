@@ -74,6 +74,12 @@ usage:
                                          # 12.4 R4(c): values last read by
                                          # a call's arguments, scratch or
                                          # callee-saved
+    tools/regalloc.py callparams [N] [--min N] [--max N]
+                                         # bead domain-pascal-9j1z: parameter
+                                         # loads last used by a call's
+                                         # argument push, by call position
+                                         # (prefix, conditional part, after
+                                         # a join), other paths and class
     tools/regalloc.py slots [RULE[:KEY]] [--min N] [--max N]
                                          # 12.4 R4(b): the register of slot
                                          # loads under each rule (slot_
@@ -788,6 +794,114 @@ def arg_tail(rt, v, outer):
         return set()
     return {j for j in rt.reach if rt.block_of[j] == rt.block_of[call]
             and max(v.pts) < j <= call} | {call}
+
+
+def last_uses(rt, v):
+    """The instructions that read v and after which v is dead."""
+    uses = [i for i in v.pts if v.reg in rt.ins[i].uses and rt.rd_in[i][v.reg] & v.keys]
+    return [i for i in uses if not (v.reg in rt.lout[i] and live_val_out(rt, v, i))]
+
+
+def is_push(x):
+    """An argument push: `pea' or a move to -(SP)."""
+    return x.mn == 'pea' or bool(x.ops and x.ops[-1] == '%sp@-' and x.mn.startswith('move'))
+
+
+def push_call(rt, u):
+    """The call (not M$ARITH) whose argument sequence holds instruction u
+    (arg_call's sequence: up to the call, no branch or store to memory
+    other than a push in between), else None."""
+    b = rt.block_of[u]
+    blk = [j for j in rt.reach if rt.block_of[j] == b]
+    for j in blk[blk.index(u):]:
+        x = rt.ins[j]
+        if x.call:
+            return None if x.defs == {'d0', 'a0'} else j
+        if x.kind or stmt_end(x):
+            return None
+    return None
+
+
+def dominators(rt):
+    """{block: the blocks that dominate it} (blocks named by their first
+    instruction's index)."""
+    if not hasattr(rt, 'dom'):
+        bl = sorted(set(rt.block_of.values()))
+        bpred = {b: {rt.block_of[p] for p in rt.pred.get(b, [])} for b in bl}
+        dom = {b: set(bl) for b in bl}
+        dom[bl[0]] = {bl[0]}
+        changed = True
+        while changed:
+            changed = False
+            for b in bl[1:]:
+                ps = [dom[p] for p in bpred[b]]
+                n = (set.intersection(*ps) if ps else set()) | {b}
+                if n != dom[b]:
+                    dom[b], changed = n, True
+        rt.dom = dom
+    return rt.dom
+
+
+def call_position(rt, c):
+    """Where call c lies (bead domain-pascal-9j1z): 'straight' (a routine
+    without branches), 'prefix' (before the routine's first branch or
+    branch target), 'cond' (in a conditional part: some path from the
+    entry to the exit avoids it, and no join comes before it), 'join'
+    (likewise, after a join: a block with two predecessors dominates it)
+    or 'every' (on every path, after a join)."""
+    br = [i for i in rt.reach if rt.ins[i].kind in ('bcc', 'br', 'db')]
+    if not br:
+        return 'straight'
+    labs = [i for i in rt.reach if is_label(rt, i)]
+    if c < min(br + labs):
+        return 'prefix'
+    ipdom_region(rt, rt.reach[0])           # builds rt.pdom
+    cb = rt.block_of[c]
+    merge = any(len(rt.pred.get(b, [])) > 1 for b in dominators(rt)[cb])
+    if cb in rt.pdom[rt.block_of[rt.reach[0]]]:
+        return 'every'
+    return 'join' if merge else 'cond'
+
+
+def call_param(rt, v):
+    """Bead domain-pascal-9j1z (12.4 R4(c)): for a parameter load v that
+    crosses no call and whose last use on some path is a push in the
+    argument sequence of a call statement it does not belong to, the
+    tuple (load, slot, position, paths, class, where, forced, call);
+    else None.
+
+    load: 'entry' (before the routine's first branch, branch target or
+    call) or 'late'.  slot: 'once' (no other instruction reads the slot)
+    or 'reload'.  position: call_position of the first such call.  paths:
+    'dead' (every last use is such a push, of one call), 'multi' (of
+    several calls), 'other' (another last use is not one: the value is
+    live on another path).  where: 'csaved' or 'scratch'.  forced: no
+    scratch register is free over the value's range by liveness alone
+    (colU), so the choice says nothing about holding."""
+    if not v.param or v.crosses_call:
+        return None
+    lu = last_uses(rt, v)
+    calls = {u: push_call(rt, u) if is_push(rt.ins[u]) else None for u in lu}
+    args = [u for u in lu if calls[u] is not None]
+    if not args:
+        return None
+    c0 = min(calls[u] for u in args)
+    if rt.block_of[v.first] == rt.block_of[c0] and v.first >= stmt_start(rt, c0):
+        return None                         # defined inside the call statement
+    br = [i for i in rt.reach if rt.ins[i].kind in ('bcc', 'br', 'db') or is_label(rt, i)
+          or is_call(rt.ins[i])]
+    load = 'entry' if v.first < min(br + [len(rt.ins)]) else 'late'
+    slot = rt.ins[v.first].ops[0]
+    reload = any(rt.ins[j].ops and rt.ins[j].ops[0] == slot for j in rt.reach if j not in v.defs)
+    if len(args) < len(lu):
+        paths = 'other'
+    else:
+        paths = 'multi' if len({calls[u] for u in args}) > 1 else 'dead'
+    cand = [r for r in v.cls if not interferes_any(rt, v, r, use=True)]
+    forced = not cand or cand[0] not in SCRATCH
+    return ('entry' if load == 'entry' else 'late', 'reload' if reload else 'once',
+            call_position(rt, c0), paths, v.reg[0],
+            'scratch' if v.reg in SCRATCH else 'csaved', forced, c0)
 
 
 def interferes_any(rt, v, c, blk=False, ent=False, use=False, stmt=False, seq=False):
@@ -1870,6 +1984,30 @@ def main(argv):
                                                      tot['inner', 'csaved']))
         for k in sorted(ex):
             print('%-6s %-8s %-8s %4d  %s' % (k + (tot[k], ' '.join(ex[k][:12]))))
+        return 0
+    if cmd == 'callparams':
+        # bead domain-pascal-9j1z: parameter loads whose last use is an
+        # argument push of a call (call_param), by load, slot, call
+        # position, paths and class: callee-saved / scratch, and the
+        # forced ones (no scratch register free by liveness) apart.
+        show = int(argv[1]) if len(argv) > 1 else 10
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            for v in rt.values:
+                k = call_param(rt, v)
+                if k is None:
+                    continue
+                key, col = k[:5], k[5] + ('-forced' if k[6] else '')
+                tot[key, col] += 1
+                ex[key, col].append('%06X' % rt.ins[v.first].addr)
+        cols = ('csaved', 'scratch', 'csaved-forced', 'scratch-forced')
+        print('%-36s ' % 'load/slot/position/paths/class' + ' '.join('%8s' % c[:8] for c in
+                                                                    ('csaved', 'scratch',
+                                                                     'cs-forc', 'sc-forc')))
+        for key in sorted({k for k, _ in tot}):
+            print('%-36s ' % '/'.join(key) + ' '.join('%8d' % tot[key, c] for c in cols) +
+                  '  ' + ' | '.join(' '.join(ex[key, c][:show]) for c in cols[:2]
+                                    if ex[key, c]))
         return 0
     if cmd == 'slots':
         # 12.4 R4(b): which rule picks the register of a slot load.

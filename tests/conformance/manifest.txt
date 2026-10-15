@@ -103,6 +103,9 @@ tests/conformance/handasm/pkt_recently_missing.s  PKT_$RECENTLY_MISSING
 # 12.4 R4(c): a parameter whose last use is a call's argument, held through
 # the call in D2 (a body without branches).
 tests/conformance/proc1_set_asid.pas         PROC1_$SET_ASID
+# The same in bodies with branches (bead domain-pascal-9j1z): a parameter
+# last read by a call's argument in each part of an `if', held in A2.
+tests/conformance/xpd_fp_int.pas             XPD_$GET_FP_INT XPD_$PUT_FP_INT
 
 # Interrupt built-ins (codegen-patterns 10): `disable'/`enable' as
 # `ori.w #0x700,SR' / `andi.w #0xF8FF,SR'; a local held in a register

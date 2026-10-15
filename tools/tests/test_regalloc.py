@@ -124,6 +124,48 @@ class CallArgsTest(unittest.TestCase):
         self.assertIsNone(regalloc.arg_call(rt, a))
 
 
+class CallParamTest(unittest.TestCase):
+    """Bead domain-pascal-9j1z: `callparams' (call_param, call_position)."""
+
+    # XPD_$GET_FP_INT 0xE5C55A: `asid' in A2, last read by a push of the
+    # call in each part of the `if'.
+    XPD = ['linkw %fp,#0', 'pea %a2@', 'moveal %fp@(8),%a2', 'moveal %fp@(12),%a0',
+           'clrl %a0@', 'tstb 0xe24c98', 'bpls 0x1016', 'subql #2,%sp',
+           'movew %a2@,%sp@-', 'jsr 0xe21d48', 'bras 0x101a', 'pea %a2@',
+           'jsr 0xe5aeec', 'moveal %fp@(-4),%a2', 'unlk %fp', 'rts']
+
+    def test_both_parts(self):
+        rt = routine(self.XPD)
+        v = next(v for v in rt.values if v.reg == 'a2')
+        self.assertEqual(regalloc.call_param(rt, v),
+                         ('entry', 'once', 'cond', 'multi', 'a', 'csaved', False, 9))
+        self.assertEqual(regalloc.call_position(rt, 12), 'cond')
+        # the status slot's last use is a store, not a push
+        a0 = next(v for v in rt.values if v.reg == 'a0')
+        self.assertIsNone(regalloc.call_param(rt, a0))
+
+    def test_positions(self):
+        # 2: call before the branch; 6: in the `if' part; 8: after the join
+        rt = routine(['linkw %fp,#0', 'movew %fp@(8),%d2', 'jsr 0xe00000',
+                      'tstb 0xe24c98', 'bpls 0x100e', 'movew %d2,%sp@-', 'jsr 0xe00000',
+                      'movew %d2,%sp@-', 'jsr 0xe00000', 'unlk %fp', 'rts'])
+        self.assertEqual(regalloc.call_position(rt, 2), 'prefix')
+        self.assertEqual(regalloc.call_position(rt, 6), 'cond')
+        self.assertEqual(regalloc.call_position(rt, 8), 'every')
+        rt = routine(['linkw %fp,#0', 'movew %fp@(8),%d2', 'movew %d2,%sp@-',
+                      'jsr 0xe00000', 'unlk %fp', 'rts'])
+        self.assertEqual(regalloc.call_position(rt, 3), 'straight')
+
+    def test_reload_and_late(self):
+        # TTY_$I_INIT 0xE3325A's shape: the slot read again after the call
+        rt = routine(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'clrw %a0@(8)',
+                      'tstb 0xe24c98', 'bpls 0x100c', 'clrw %a0@(10)', 'pea %a0@',
+                      'jsr 0xe00000', 'moveal %fp@(8),%a0', 'clrw %a0@', 'unlk %fp', 'rts'])
+        v = next(v for v in rt.values if v.first == 1)
+        k = regalloc.call_param(rt, v)
+        self.assertEqual(k[:6], ('entry', 'reload', 'every', 'dead', 'a', 'scratch'))
+
+
 class SlotRuleTest(unittest.TestCase):
     """12.4 R4(b) (bead domain-pascal-178): `slots'."""
 

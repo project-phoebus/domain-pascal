@@ -6361,9 +6361,14 @@ stored.
   0xE1D89E), `mmap_alloc_contig.pas` (MMAP_$ALLOC_CONTIG 0xE0D8F0),
   `xns_idp_get_port_info.pas` (XNS_IDP_$GET_PORT_INFO 0xE18FB8).
 - **Not supported yet:**
-  - A status whose last use is a call argument in a body with branches
-    (12.4 R4(c)), e.g. `status.all := status_$ok; if ... then begin
-    status.all := ...; return end; p(..., status)`.
+  - A status whose last use is an argument of a call on every path
+    after a join, in a body with branches (12.4 R4(c); bead
+    domain-pascal-cs2n).  Elsewhere such a status is held through the
+    call (bead domain-pascal-9j1z), e.g. `status.all := status_$ok; if
+    ... then begin status.all := ...; return end; p(..., status)`, where
+    the `return` path avoids the call (likewise an error store in one
+    part of an `if` and the call in the other: EC2_$ADVANCE 0xE42CB4
+    A2, `pea (A2)` at 0xE42CD8).
   - A slot used once after a branch or a call whose lowest free
     register is dirty on some path, or A0 after a call with A1 written
     before (12.4 R4(b), "After the first branch or call").
@@ -7387,13 +7392,18 @@ register ("Pointers in data registers" below).  Reported as not
 supported yet: storing
 a parameter that was not loaded at entry (one-statement bodies);
 assigning to a parameter; in a body with branches, a parameter whose
-last use is an argument of a call (12.4 R4(c)), unless it is live
-across an earlier call (then callee-saved anyway, and held: CAL_$SHUTDOWN
-0xE3E6E4 keeps `status` in A2 across DBUF_$GET_BLOCK and passes it last
-with `pea (A2)` at 0xE3E72A; `tools/regalloc.py callargs` counts only
-values that cross no call; bead domain-pascal-500).  In a body without
-branches such a parameter is held through the call, in a callee-saved
-register (12.4 R4(c): PROC1_$SET_ASID 0xE148FE D2, a conformance unit).
+last use is an argument of a call that lies on every path after a join,
+or a pointer parameter held in a data register whose last use is one
+(12.4 R4(c); beads domain-pascal-cs2n, -b3wz).  Otherwise a parameter
+loaded at entry whose last use is an argument of a call is held through
+the call, in a callee-saved register: in a body without branches
+(PROC1_$SET_ASID 0xE148FE D2, a conformance unit) and with branches,
+the call before the first branch, in an `if` part or after a join
+inside one (12.4 R4(c), bead domain-pascal-9j1z: XPD_$GET_FP_INT
+0xE5C560 A2, a conformance unit); one live across an earlier call is
+callee-saved anyway, and held (CAL_$SHUTDOWN 0xE3E6E4 keeps `status`
+in A2 across DBUF_$GET_BLOCK and passes it last with `pea (A2)` at
+0xE3E72A; bead domain-pascal-500).
 
 **Pointers in data registers** (bead domain-pascal-pze; `tools/regalloc.py
 ptrdregs`, `ptrcopies`, over the routines `tools/regalloc.py` analyses).
@@ -8097,9 +8107,11 @@ of the remaining misses).**  The corpus misses fall into these groups:
       scratch** (the proxy also counts some values last used in a
       register-variable assignment just before a call, e.g. AREA_$DELETE
       0xE07C34).  Checked scratch sites: EC2_$ADVANCE 0xE42CB8 D0
-      (`move.l D0,-(SP)` at 0xE42CDA); DIR_$FIND_NET 0xE4FE36 A0 (`pea
-      (A0)` at 0xE4FE76); DIR_$DO_OP 0xE4D00E A0 (0xE4D040); TTY_$I_INIT
-      0xE3325A A0 (0xE332DC); AST_$UPDATE 0xE01B6E A0 (0xE01B82);
+      (`move.l D0,-(SP)` at 0xE42CDA); the routine at 0xE4FE0A (map:
+      DIR_$FIND_NET+0x1556), 0xE4FE36 A0 (`pea (A0)` at 0xE4FE76); the
+      routine at 0xE4CFFA (map: DIR_$DO_OP+0xFCE), 0xE4D00E A0
+      (0xE4D040); TTY_$I_INIT 0xE3325A A0 (0xE332DC); the routine at
+      0xE01AD2 (map: AST_$UPDATE+0x402), 0xE01B6E A0 (0xE01B82);
       MAC_$SEND 0xE0BB88 A0 (0xE0BB9C); the routine at 0xE55220 (map:
       DIR_$OLD_CLEANUP+0x6F6), 0xE5523C A0, `clr.l (A0)` then `pea (A0)`
       at 0xE5524C, the shape of 0xE1D592;
@@ -8107,10 +8119,110 @@ of the remaining misses).**  The corpus misses fall into these groups:
       callee-saved.
 
     So the hypothesis holds without exception only in routines without
-    branches (why is Uncertain).  `dpc` holds such a parameter through
-    the call in a body without branches (`held_through_calls` in
-    `crates/dpc-m68k/src/isel.rs`; conformance unit PROC1_$SET_ASID) and
-    refuses it in a body with branches.
+    branches, by this proxy.  The proxy mixes kinds of parameter load,
+    though; separated, the branch case is settled for loads at entry
+    (next item).
+  - **Survey with branches (bead domain-pascal-9j1z; `tools/regalloc.py
+    callparams`, kept, with tests):** the parameter loads that cross no
+    call and whose last use on some path is an argument *push* (`pea`,
+    `move -(SP)`) of a call statement they are not part of, by kind of
+    load: "entry" (before the routine's first branch, branch target or
+    call) or "late"; "once" (no other instruction reads the slot: the
+    parameter lives in that one register, as `dpc`'s entry loads do,
+    12.2) or "reload" (the slot is read again elsewhere); by where the
+    call lies: before the first branch ("prefix"), in a conditional part
+    with no join before it ("cond"), after a join inside a conditional
+    part ("join"), on every path after a join ("every"); by the other
+    paths: "dead" (every last use is a push for that call), "multi"
+    (pushes for several calls, e.g. one in each part of an `if`),
+    "other" (another last use is not a push: the value is live on
+    another path); by class.  Counted separately: "forced" values, for
+    which liveness alone leaves no scratch register free (colU), so the
+    register shows nothing about holding.  Whole image, routines with
+    branches, not forced:
+
+    | load / slot | position | callee-saved | scratch | forced (all callee-saved) |
+    |---|---|---|---|---|
+    | entry / once | prefix | 2 (VOLX_$GET_INFO 0xE6B5D4 A3, 0xE6B5D8 A4) | 0 | 1 |
+    | entry / once | cond | 26 | 1 (EC2_$ADVANCE 0xE42CB8 D0) | 15 |
+    | entry / once | join | 5 (SOCK_$PUT_INT 0xE161A2 A2; the nested 0xE1CC10 of KBD_$RCV, 0xE1CC1A A2) | 0 | 14 |
+    | entry / once | every | 0 | 0 | 4 |
+    | entry / reload | any | 1 (0xE41A32) | 3 (0xE02572, TTY_$I_INIT 0xE3325A, 0xE5523C) | 0 |
+    | late / once | any | 1 (DISK_$DIAG_IO 0xE6BCBC D2) | 1 (0xE4D00E A0 in the routine at 0xE4CFFA, map: DIR_$DO_OP+0xFCE) | 0 |
+    | late / reload | any | 3 | 43 (0xE01B6E in the routine at 0xE01AD2, map: AST_$UPDATE+0x402; MAC_$SEND 0xE0BB88; 0xE4FE36 in the routine at 0xE4FE0A, map: DIR_$FIND_NET+0x1556) | 0 |
+
+    The entry/once loads with branches, by the other paths: dead 16 of
+    17 callee-saved, multi 7 of 7 (XPD_$GET_FP_INT 0xE5C560 A2, `move.w
+    (A2),-(SP)` at 0xE5C574 in the `then` part, `pea (A2)` at 0xE5C57E
+    in the `else`), other 10 of 10 (SIO_$I_INHIBIT_XMIT 0xE1C9D4 A2,
+    `bset` through it in one part, `pea (A2)` at 0xE1C9EC in the other);
+    by class: A 29 of 29, D 4 of 5 (AREA_$ASSOC 0xE096B0 D2, `move.w
+    D2,-(SP)` at 0xE096D2 inside an `if`).  Without branches: 5 of 5
+    (above).
+
+    Recounted independently (review of bead domain-pascal-9j1z: an own
+    instruction model, liveness and dominators over the same routine
+    list, with `case` tables decoded, so the routines `regalloc.py`
+    skips for a computed `jmp` are in): the same sites and the same
+    forced counts, plus two in `case` routines, TERM_$INQUIRE 0xE66D98
+    A2 (held, after a join, a call in many arms) and OS_$BOOT_ERRCHK
+    0xE34B22 (forced): 34 of 35 held.  The 35 sites lie in 30 routines
+    of 23 map segments.  Sites in one routine are not independent where
+    two such values compete for the one free scratch register
+    (VOLX_$GET_INFO A3 and A4: A1 is free for either, not for both).
+
+    **Rule (Reported; 33 of 34 sites):** a parameter loaded once at
+    entry whose last use is an argument of a call is held through the
+    call, so it takes a callee-saved register, whether the call lies
+    before the first branch, in an `if` part or after a join inside one,
+    and whether or not the parameter is used on another path.  So
+    neither a later branch target nor the call being in an `if` part
+    matters.  Not seen: a call on every path after a join (its 4 sites
+    are forced).  The one exception, EC2_$ADVANCE 0xE42CB8, is a
+    by-address slot whose address is kept in a data register because
+    it is also used as data (12.2, "Pointers in data registers"):
+    `move.l D0,-(SP)` at 0xE42CDA, inside an `if`, D0 not held.  It is
+    the only entry/once pointer of this survey that is also used as
+    data and for which a scratch register is free.  The two other
+    data-register pointers with one free are held: NAME_$VALIDATE
+    0xE49F54 D2, dereferenced only through a copy (`movea.l D2,A3` at
+    0xE49F76; bead domain-pascal-0b1), and DIR_$OLD_GET_ENTRYU 0xE58064
+    D2, only passed on (`move.l D2,-(SP)` at 0xE5809C and 0xE580B0, one
+    call in each part of an `if`).  Why EC2_$ADVANCE
+    differs is not known (bead domain-pascal-b3wz).
+
+    The other kinds do not bear on the rule.  A slot read again
+    elsewhere (reload; nearly all the late loads) means that the original
+    did not keep the parameter in one register: such a load is a
+    temporary, mostly scratch (TTY_$I_INIT 0xE3325A pushes A0 at
+    0xE332DC and reloads `(8,A6)` into A0 at 0xE332E6).  `dpc` does not
+    reproduce these reloads (12.2).  The routine at 0xE4CFFA (map:
+    DIR_$DO_OP+0xFCE) loads its `(0x16,A6)`, used three times, after the
+    routine's first call, not at entry (0xE4D00E), and does not hold it
+    (`pea (A0)` at 0xE4D040, inside an `if`); `dpc` would load it at entry, live across that call (R3).
+
+    **Implemented** (`held_through_calls` in
+    `crates/dpc-m68k/src/isel.rs`): a parameter loaded at entry
+    (`Selector::entry_loads`) whose last use is in a call statement's
+    arguments is held through the call in a body with branches too.
+    Refused: a call on every path from the entry after a branch
+    (`on_every_path`, `after_a_branch`; bead domain-pascal-cs2n); a
+    pointer parameter held in a data register (`data_ptr_regs`; bead
+    domain-pascal-b3wz); and any other value, a register-held local or a
+    computed value (not surveyed: DTTY_$TSTART 0xE1D6E0 keeps its local
+    `current` in D0, a scratch register, for `pea (5,A3,D0.w)` at
+    0xE1D6F8 inside an `if`; bead domain-pascal-ig8d; refused so in
+    `../source`'s Pascal at 343e0939: the procedure pointer local
+    `handler` of NET_$OPEN, NET_$CLOSE, NET_$IOCTL, NET_$RCV and
+    NET_$SEND, and locals of DTTY_$TSTART, BAT_$DISMOUNT and
+    MAC_OS_$DEMUX).  Pointer locals assigned from calls and values live
+    across an earlier call stay held as before.  Conformance unit
+    `tests/conformance/xpd_fp_int.pas` (XPD_$GET_FP_INT,
+    XPD_$PUT_FP_INT, byte-identical); golden
+    `regalloc/args_held_branches`; execution test `args_held`; driver
+    tests `argument_last_use_in_a_branchy_body_is_refused`,
+    `argument_last_use_of_a_data_pointer_or_local_is_refused`; unit test
+    `call_positions_for_held_arguments`.
 - **Mechanical proxies tested and refuted as general rules** (each makes
   the original's own choices conflict elsewhere):
   - free only after the next store or call (`colUS`): 66.5% / 69.0%;
@@ -8805,7 +8917,7 @@ earlier:
 
 | # | Step | Image sites | Support |
 |---|---|---|---|
-| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
+| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches, and with branches (bead domain-pascal-9j1z) unless the call lies on every path after a join.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
 | 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; kills by survey (R7).  **Implemented** (bead domain-pascal-g5q.7): widenings, scaled indices and constant products of plain variables, no reuse across calls nor into or out of a loop (past one: yes); golden `regalloc/cse` |
 | 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8).  **Implemented** (section 8, `&`; bead domain-pascal-d7i) |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |

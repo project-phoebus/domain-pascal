@@ -234,6 +234,14 @@ Tests:
   a parameter live around a `repeat` with a call in it, and (12.4 R4(c))
   parameters whose last use is a call's argument held through the call in
   D2 / A2 (PROC1_$SET_ASID 0xE148FE; module-local 0xE1D592).
+- `regalloc/args_held_branches` - codegen-patterns 12.4 R4(c) in bodies
+  with branches (bead domain-pascal-9j1z): a parameter loaded at entry
+  whose last use is a call's argument is held through the call in D2 /
+  A2 when the call lies in an `if` part (AREA_$ASSOC 0xE096D2), in each
+  part (XPD_$GET_FP_INT 0xE5C574/0xE5C57E), with the parameter used on
+  the other path (SIO_$I_INHIBIT_XMIT 0xE1C9EC), after a join inside an
+  `if` part (SOCK_$PUT_INT 0xE161E4) or before the first branch
+  (VOLX_$GET_INFO 0xE6B5D4).
 - `regalloc/cse` - codegen-patterns 12.4 R7: computed values reused
   across statements (bead domain-pascal-g5q.7): FIM_$ACKNOWLEDGE's
   `PROC1_$AS_ID * 12` in D2 (0xE0A972..0xE0A97E, reused at 0xE0A9B0)
