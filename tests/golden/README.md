@@ -65,6 +65,13 @@ Tests:
   (module-local 0xE4649C, byte-identical; TTY_$I_WAIT 0xE1C22E ×12),
   after a `neg` scaling (0xE1AA50 ×56), in a byte index's stall
   (KBD_$FETCH_KEY 0xE1CBAA, 0xE1CB8A for a pointer loaded from memory).
+- `data/index_mul` - codegen-patterns 5.2 ("Index scaling"), 8
+  ("Multiplication by a constant"; bead domain-pascal-r3yy): a constant
+  of 1..127 done with a multiply goes first, `moveq #c,Dn; mul<s>.w
+  x,Dn` (TPAD_$SET_PUNCH_IMPACT 0xE69B0E ×44 through a by-address
+  parameter, TPAD_$INQUIRE_UNIT 0xE6999C, TPAD_$DATA 0xE691CA, module-local
+  0xE383B0 ×100 of a by-value parameter, RIP_$TABLE 0xE6904C ×92 of
+  another unit's array, 0xE458CC a word product); ×268 `mulu.w #c`.
 - `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
   restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS

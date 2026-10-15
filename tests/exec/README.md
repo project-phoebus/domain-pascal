@@ -187,6 +187,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `gotos` | forward and backward `goto`, out of loops, into a `case` arm, from a function |
 | `loops` | `for` over empty ranges, `downto`, negative bounds, `exit`, `next`, `while` |
 | `elem_bases` | bead domain-pascal-rlnm: elements of other units' arrays (1-based words, ×12 and ×56 records, `char` indices) read, stored and passed by address, indices from parameters, another unit's variable and a local held across a call; byte elements through a pointer in another unit; a negative lower bound, a longword index, `i + 1`, an element in a condition, a byte element by a word index, one array in two statements around a call, a computed value stored |
+| `index_mul` | bead domain-pascal-r3yy: index scalings and products by constants done with a multiply (×44, ×46, ×84, ×92, ×100 with the constant first; ×268 `mulu.w #c`): indices at both bounds, a negative lower bound, from a by-value or by-address parameter, a unit variable, a register-held loop index; another unit's array; word and longword products of negative words and beyond 16 bits (at the ends of `integer`); a `.w` index of -13200..13200 by `mulu.w`; a zero-extended byte index multiplied in place |
 | `fill` | `for` clear loops (`clr (A0)+`, `dbf`) over another unit's arrays |
 | `shortcircuit` | `and then` / `or else` skip their right operand |
 | `bools` | plain `and` / `or` in conditions, under `not`, stored; `odd` of words and longwords, negative ones |

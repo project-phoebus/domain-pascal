@@ -132,8 +132,13 @@ fn record_array_elements() {
 #[test]
 fn unsupported_expressions() {
     let cases: &[(&str, &str)] = &[
-        // Odd part of three bits: shifts (x26, 0xE71BBA) or `mulu' (x21).
-        ("t := w * 21;", "not settled for an odd part of three bits"),
+        // Odd part of three bits other than 11, 21, 25, 67, 145: shifts
+        // (x26, odd part 13, 0xE71BBA) or a multiply (bead
+        // domain-pascal-irb4).
+        ("t := w * 13;", "odd parts of three bits"),
+        ("t := w * 38;", "odd parts of three bits"),
+        // The constant first with another unit's variable: no site.
+        ("t := w * 44;", "another unit's variable, an array element"),
         // M$ARITH with a word argument and a computed operand: the pad is
         // scheduled into the computation (CAL_$WEEKDAY 0xE686B0).
         (
@@ -182,6 +187,140 @@ fn unsupported_expressions() {
     assert!(
         e.contains("one-word set with an element that is not constant"),
         "{e}"
+    );
+}
+
+/// Scalings and products by a constant of 1..127 done with a multiply
+/// (codegen-patterns 5.2, 8; bead domain-pascal-r3yy;
+/// `tools/arithsurvey.py scale`): the constant first, `moveq #c,Dn;
+/// mul<s>.w x,Dn` (TPAD_$SET_UNIT_MODE 0xE69824 `moveq #44,D2; mulu.w
+/// (A4),D2`); 128 and more: `mul<s>.w #c` on the loaded value.
+#[test]
+fn products_with_the_constant_first() {
+    let src = |routine: &str| {
+        format!(
+            "module m;
+type
+  c44 = record a: integer; pad: array[1..20] of integer; z: integer; end;
+  c84 = record a: integer; pad: array[1..41] of integer; end;
+  c26 = record a: integer; pad: array[1..12] of integer; end;
+  c336 = record a: integer; pad: array[1..167] of integer; end;
+  pinteger = 0..65535;
+var
+  cfgs: array[1..8] of c44;
+  c84s: array[0..7] of c84;
+  c26s: array[0..7] of c26;
+  c336s: array[0..7] of c336;
+  k: integer;
+  pk: pinteger;
+  cs: array[0..255] of c44;
+  ks: array[1..4] of integer;
+{routine}"
+        )
+    };
+    let body = |routine: &str| {
+        let lines = compile(&src(routine)).unwrap();
+        let start = lines.iter().position(|l| l == "T:").unwrap() + 2;
+        let end = start
+            + lines[start..]
+                .iter()
+                .position(|l| l.starts_with("movea.l\t(-8,%fp),%a5") || l.starts_with("unlk"))
+                .unwrap();
+        lines[start..end].to_vec()
+    };
+    let error = |routine: &str| {
+        let e = compile(&src(routine)).unwrap_err();
+        assert_eq!(e.len(), 1, "{e:?}");
+        e[0].clone()
+    };
+    // A by-address parameter, its slot loaded after the `moveq'
+    // (TPAD_$INQUIRE_UNIT 0xE6999C..0xE699A2); `.w': `mulu.w'.
+    assert_eq!(
+        body("function t(in u: integer): integer;\nbegin\n  t := cfgs[u].z;\nend;\n"),
+        [
+            "pea\t(%a5)",
+            "lea\t(.Ldata).l,%a5",
+            "moveq\t#0x2c,%d0",
+            "movea.l\t(8,%fp),%a0",
+            "mulu.w\t(%a0),%d0",
+            "move.w\t(-2,%a5,%d0.w),%d0",
+        ]
+    );
+    // A unit variable (TPAD_$DATA 0xE691CA).
+    assert_eq!(
+        body("function t: integer;\nbegin\n  t := cfgs[k].a;\nend;\n")[2..],
+        [
+            "moveq\t#0x2c,%d0",
+            "mulu.w\t(0xf50,%a5),%d0",
+            "move.w\t(-0x2c,%a5,%d0.w),%d0",
+        ]
+    );
+    // A by-value parameter, loaded first (module-local 0xE383B0 at
+    // 0xE383C8 `move.w (12,A6),D2; moveq #100,D0; mulu.w D2,D0'); ×84,
+    // odd part 21.
+    assert_eq!(
+        body("function t(i: integer): integer;\n  options(val_param);\nbegin\n  t := c84s[i].a;\nend;\n")[2..],
+        [
+            "move.w\t(8,%fp),%d0",
+            "moveq\t#0x54,%d1",
+            "mulu.w\t%d0,%d1",
+            "lea\t(0,%a5,%d1.w),%a0",
+            "move.w\t(0x160,%a0),%d0",
+        ]
+    );
+    // ×336 (odd part 21): `mulu.w #c' on the loaded value.
+    assert_eq!(
+        body("function t: integer;\nbegin\n  t := c336s[k].a;\nend;\n")[2..4],
+        ["move.w\t(0xf50,%a5),%d0", "mulu.w\t#0x150,%d0"]
+    );
+    // A computed index (a zero-extended byte): in place (RIP_$BROADCAST
+    // 0xE872F8 `mulu.w #92,D5').
+    assert_eq!(
+        body("function t(c: char): integer;\n  options(val_param);\nbegin\n  t := cs[ord(c)].a;\nend;\n")
+            .iter()
+            .filter(|l| l.starts_with("mul") || l.starts_with("moveq"))
+            .collect::<Vec<_>>(),
+        ["mulu.w\t#0x2c,%d0"]
+    );
+    // Word and longword products of a signed word: `muls.w' (0xE458D2;
+    // TPAD_$DATA 0xE691D0).
+    assert_eq!(
+        body("function t: integer;\nbegin\n  t := k * 44;\nend;\n")[2..],
+        ["moveq\t#0x2c,%d0", "muls.w\t(0xf50,%a5),%d0"]
+    );
+    assert_eq!(
+        body("function t: integer32;\nbegin\n  t := k * 44;\nend;\n")[2..],
+        ["moveq\t#0x2c,%d0", "muls.w\t(0xf50,%a5),%d0"]
+    );
+    // Refused: an unsigned word product (no site); an index read from an
+    // array element (no site); ×26 (odd part 13, done bit by bit at
+    // 0xE71BBA, bead domain-pascal-irb4).
+    assert!(
+        error("function t: integer;\nbegin\n  t := pk * 44;\nend;\n")
+            .contains("a word product of a `0..65535` variable")
+    );
+    assert!(
+        error("function t: integer;\nbegin\n  t := cfgs[ks[k]].a;\nend;\n")
+            .contains("another unit's variable, an array element")
+    );
+    assert!(
+        error("function t: integer;\nbegin\n  t := c26s[k].a;\nend;\n")
+            .contains("odd parts of three bits")
+    );
+    // Refused: a computed value other than a zero-extended byte (a mask
+    // has the constant first, HINT_$GET_HINTS 0xE4998E; bead
+    // domain-pascal-q322), as an index or a factor; a longword product of
+    // an unsigned word (the `.l` indices are all `muls.w`).
+    for routine in [
+        "function t: integer;\nbegin\n  t := cfgs[k + 1].a;\nend;\n",
+        "function t: integer;\nbegin\n  t := c84s[k & 7].a;\nend;\n",
+        "function t: integer;\nbegin\n  t := (k + 1) * 44;\nend;\n",
+    ] {
+        assert!(error(routine).contains("of a computed value"), "{routine}");
+    }
+    assert!(
+        error("function t: integer32;\nbegin\n  t := pk * 44;\nend;\n")
+            .contains("a longword product of a `0..65535` variable")
     );
 }
 

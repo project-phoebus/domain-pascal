@@ -97,6 +97,72 @@ fn by_shifts(c: i64) -> bool {
     m == 1 || (m - 1).is_power_of_two() || (m > 3 && (m + 1).is_power_of_two())
 }
 
+/// Whether a multiplication by the constant `c` that is not done with
+/// shifts and adds ([`by_shifts`]) is one `mul<s>.w` (codegen-patterns 8,
+/// "Multiplication by a constant"; `tools/arithsurvey.py scale`): `c` in
+/// 1..=0xffff with an odd part of four bits or more (23: ×46, ×92; 75:
+/// ×150; 51, 57, 61, 125, 141, 153, 203, 311, 655, 1083, 12345), or one of the
+/// odd parts of three bits seen with a multiply: 11 (×44, TPAD_$SET_UNIT_MODE
+/// 0xE69826), 25 (×100, VTOC_$MOUNT 0xE38614), 21 (×336, 0xE395AA; ×84,
+/// HINT_$GET_HINTS 0xE4999A), 67 (×268, 0xE1D7A2), 145 (×580, 0xE2FB08).  Odd part 13 is done bit by bit
+/// (×26, NETLOG_$LOG_IT 0xE71BBA, the one such site) and no other odd part
+/// of three bits is seen: refused (bead domain-pascal-irb4).
+fn by_mul_insn(c: i64) -> bool {
+    if !(1..=0xffff).contains(&c) || by_shifts(c) {
+        return false;
+    }
+    let m = (c >> c.trailing_zeros()) as u32;
+    m.count_ones() >= 4 || [11, 21, 25, 67, 145].contains(&m)
+}
+
+/// Whether a product of `x` by a constant of 1..=127 done with a multiply
+/// puts the constant in the register (`moveq #c,Dn; mul<s>.w x,Dn`,
+/// [`Selector::mul_const_first`]): `x` a variable.  For a computed value
+/// see [`in_place`].
+fn const_first(x: &Expr) -> bool {
+    matches!(x, Expr::Load { .. })
+}
+
+/// Whether a computed `x` times a constant of 1..=127 done with a
+/// multiply is multiplied in place, `mul<s>.w #c`: a zero-extended byte
+/// (RIP_$BROADCAST 0xE872F8 `clr.w D5; move.b (14,A2),D5; mulu.w #92,D5`,
+/// the one in-place site).  Other computed values are refused
+/// ([`computed_factor`]): the two others, masks, have the constant first
+/// (HINT_$GET_HINTS 0xE4998E..0xE4999A `moveq #63,D3; moveq #84,D5; and.w
+/// D0,D3; movea.l #sym,A1; muls.w D3,D5`; 0xE49A5C..0xE49A68).
+fn in_place(x: &Expr) -> bool {
+    matches!(x, Expr::Convert { value, .. }
+        if value.ty().width == Width::Byte && !value.ty().is_signed()
+            && matches!(**value, Expr::Load { .. }))
+}
+
+/// The refusal of a computed value other than a zero-extended byte times
+/// a constant `c` of 1..=127 done with a multiply ([`in_place`]).
+fn computed_factor(span: Span, c: i64) -> Diagnostic {
+    unsupported(
+        span,
+        format!(
+            "a multiplication by {c} of a computed value (`mul<s>.w #{c}` in place for a \
+             zero-extended byte, RIP_$BROADCAST 0xE872F8; the constant first for a mask, \
+             HINT_$GET_HINTS 0xE4998E; not settled, codegen-patterns 8; bead \
+             domain-pascal-q322) is"
+        ),
+    )
+}
+
+/// The refusal of a multiplication by `c` whose odd part has three bits
+/// and is not one seen with a multiply ([`by_mul_insn`]).
+fn three_bit_odd_part(span: Span, c: i64) -> Diagnostic {
+    unsupported(
+        span,
+        format!(
+            "a multiplication by {c} (shifts and adds or `mul<s>.w`: odd parts of three bits \
+             other than 11, 21, 25, 67 and 145 not settled, ×26 bit by bit at 0xE71BBA; bead \
+             domain-pascal-irb4) is"
+        ),
+    )
+}
+
 fn size_of(w: Width) -> Size {
     match w {
         Width::Byte => Size::B,
@@ -9936,7 +10002,11 @@ impl Selector {
     /// "Multiplication"; beads domain-pascal-5aw.5, -1x1).
     ///
     /// - A constant factor done with shifts and adds ([`Self::mul_const`];
-    ///   at a word's width also `mulu.w #c`), at either width; at a
+    ///   at a word's width also `mulu.w #c`, or for a constant of 1..=127
+    ///   and a variable `moveq #c,Dn; mul<s>.w x,Dn`,
+    ///   [`Self::mul_const_first`], the type's sign: module-local 0xE4519C
+    ///   at 0xE458CC..0xE458D2 `moveq #44,D3; muls.w D2,D3`, a signed word;
+    ///   an unsigned one is refused, no site), at either width; at a
     ///   longword width a word operand is extended first (0xE07442 `ext.l
     ///   D6; lsl.l #2,D6; ...` ×12).
     /// - A word times a word (or a constant that fits a word) used as a
@@ -9949,9 +10019,8 @@ impl Selector {
     ///   word; 0xE554AC, 0xE3C1BE).  `muls` for signed operands, `mulu`
     ///   for unsigned ones (the IR type's sign).
     /// - A word times a word for a word: `mul<s>.w` with the sign of the
-    ///   type (0xE30A9A `muls.w D3,D0; move.w D0,(A0)+`; VTOC_$GET_UID
-    ///   0xE3925A `mulu.w D4,D6`; **Uncertain:** the mnemonic of a word
-    ///   product is the same either way).
+    ///   type (0xE30A9A `muls.w D3,D0; move.w D0,(A0)+`; **Uncertain:**
+    ///   the mnemonic of a word product is the same either way).
     /// - Otherwise M$ARITH ([`Self::marith`]): `M$MI<s>$LLW` when one
     ///   operand is a word (or a constant that fits one), which is argument
     ///   2; `M$MI<s>$LLL` otherwise, a constant as argument 2 (0xE14BFA
@@ -9980,23 +10049,54 @@ impl Selector {
             (None, None) => None,
         };
         if let Some((x, c)) = factor {
+            if w == Width::Word && c < 128 && by_mul_insn(c) && const_first(x) {
+                if !signed || !x.ty().is_signed() {
+                    return Err(unsupported(
+                        self.span,
+                        format!(
+                            "a word product of a `0..65535` variable and {c} (`moveq #{c},Dn; \
+                             mul<s>.w x,Dn`: the one such word product, module-local 0xE4519C \
+                             at 0xE458D2, is `muls.w` of a signed word; codegen-patterns 8) is"
+                        ),
+                    ));
+                }
+                return self.mul_const_first(x, c, true, &mut |_| Ok(()));
+            }
+            if w == Width::Word && (1..128).contains(&c) && by_mul_insn(c) && !in_place(x) {
+                return Err(computed_factor(self.span, c));
+            }
             if w == Width::Word || by_shifts(c) {
                 let d = self.eval_d(x)?;
                 self.mul_const(d, c, w)?;
                 return Ok(d);
             }
-            if (1..=0xffff).contains(&c) && (c >> c.trailing_zeros()).count_ones() < 4 {
-                return Err(unsupported(
-                    self.span,
-                    format!(
-                        "a multiplication by {c} (shifts and adds or `mulu.w`, not settled for an \
-                         odd part of three bits) is"
-                    ),
-                ));
+            if (1..=0xffff).contains(&c) && !by_mul_insn(c) {
+                return Err(three_bit_odd_part(self.span, c));
             }
             let b = Expr::Const { value: c, ty };
             if let (Some(xw), Some(_)) = (Self::word_part(x, ty.sign), Self::word_part(&b, ty.sign))
             {
+                if (1..128).contains(&c) && const_first(&xw) {
+                    // The constant first, as for a `.l` index (20 of 20,
+                    // all `muls.w` of signed words: RIP_$NET_LOOKUP
+                    // 0xE15504 `moveq #44,D0; muls.w D1,D0`; TPAD_$DATA
+                    // 0xE691D0; codegen-patterns 5.2).  An unsigned word:
+                    // no site.
+                    if !signed {
+                        return Err(unsupported(
+                            self.span,
+                            format!(
+                                "a longword product of a `0..65535` variable and {c} (`moveq \
+                                 #{c},Dn; mul<s>.w x,Dn`: the 20 such products, `.l` indices, \
+                                 are `muls.w` of signed words; codegen-patterns 5.2) is"
+                            ),
+                        ));
+                    }
+                    return self.mul_const_first(&xw, c, signed, &mut |_| Ok(()));
+                }
+                if (1..128).contains(&c) && !in_place(&xw) {
+                    return Err(computed_factor(self.span, c));
+                }
                 let d = self.eval_d(&xw)?;
                 self.out.push(Insn::Mul {
                     signed,
@@ -10686,17 +10786,20 @@ impl Selector {
     ///   copy shifted by k and added (×28 PEB_$GET_FP 0xE5AEF6..0xE5AF04:
     ///   `lsl.w #2,D0; move.w D0,D1; neg.w D0; lsl.w #3,D1; add.w D1,D0`;
     ///   ×56, ×60, ×120, ×248);
-    /// - other odd parts with four or more bits set: `mulu.w #c` (BAT_$GET_BAT_STEP
-    ///   0xE3BB6A `mulu.w #0x234`; survey of compiled code: every constant
-    ///   multiplied with `mulu.w`/`muls.w` (92, 150, 153, 204, 228, 244, 250,
-    ///   268, 300, 336, 363, 564, 580, 1083, 1244, 1624, 5240, 12345) has an
-    ///   odd part that is not 2^k ± 1, and every one done with shifts (3, 5,
-    ///   6, 9, 10, 12, 17, 18, 20, 24, 28, 36, 48, 56, 60, 72, 96, 120, 144,
-    ///   192, 248, 257) has one that is, except ×26 (0xE71BBA, odd part 13
-    ///   done bit by bit).  Odd parts of three bits are done both ways (13
-    ///   with shifts; 21, 67, 145 with `mulu`): refused.  `mulu.w` at
-    ///   a word width only (the low word of the product is the same for
-    ///   both signs; 94 `mulu.w #c` feed a word index, 118 `muls.w #c` a
+    /// - other odd parts ([`by_mul_insn`]): `mulu.w #c` in place
+    ///   (BAT_$GET_BAT_STEP 0xE3BB6A `mulu.w #0x234`; `tools/arithsurvey.py
+    ///   scale`: every constant multiplied with `mulu.w`/`muls.w` (44, 46,
+    ///   92, 100, 150, 153, 204, 228, 244, 250, 268, 300, 336, 564, 580,
+    ///   1083, 1244, 1624, 5240, 12345) has an odd part that is not 2^k ± 1,
+    ///   and every one done with shifts (2^s, 6, 10, 12, 17, 18, 20, 24, 28,
+    ///   36, 40, 48, 56, 60, 72, 96, 120, 144, 248, 257) has one that is,
+    ///   except ×26 (0xE71BBA, odd part 13 done bit by bit, refused).  A
+    ///   constant of 1..=127 multiplies a variable with the constant first
+    ///   ([`Self::mul_const_first`]); here it multiplies a zero-extended byte
+    ///   (RIP_$BROADCAST 0xE872F8 `mulu.w #92,D5`; other computed values
+    ///   refused, [`in_place`]).  `mulu.w` at a word
+    ///   width only (the low word of the product is the same for both
+    ///   signs; 94 `mulu.w #c` feed a word index, 118 `muls.w #c` a
     ///   longword one, codegen-patterns 5.2).
     ///
     /// The partial product takes a new register (R8: D1 at 0xE68870, D3 at
@@ -10719,14 +10822,8 @@ impl Selector {
         let plus = m > 1 && (m - 1).is_power_of_two();
         let minus = m > 3 && (m + 1).is_power_of_two();
         if m != 1 && !plus && !minus {
-            if m.count_ones() < 4 {
-                return Err(unsupported(
-                    self.span,
-                    format!(
-                        "a multiplication by {c} (shifts and adds or `mulu.w`, not settled for an \
-                         odd part of three bits) is"
-                    ),
-                ));
+            if !by_mul_insn(c as i64) {
+                return Err(three_bit_odd_part(self.span, c as i64));
             }
             if w != Width::Word {
                 return Err(unsupported(
@@ -10769,6 +10866,104 @@ impl Selector {
             dst: d,
         });
         Ok(())
+    }
+
+    /// `x × c` for a constant `c` in 1..=127 done with a multiply
+    /// ([`by_mul_insn`]), `x` a word variable (the value `v`: memory or a
+    /// held register, not a computed value): the constant first, `moveq
+    /// #c,Dn; mul<s>.w x,Dn`, into a new register (codegen-patterns 5.2, 8;
+    /// `tools/arithsurvey.py scale`, bead domain-pascal-r3yy).  `between` is
+    /// called after the `moveq` (another unit's array base: RIP_$TABLE
+    /// 0xE6904C..0xE69054 `moveq #92,D1; movea.l #sym,A0; mulu.w D0,D1`, 5
+    /// of the 6 such bases).
+    ///
+    /// Of the 44 products by such constants with a multiply in compiled
+    /// code, 43 have this form: the variable in memory (TPAD_$SET_UNIT_MODE
+    /// 0xE69824..0xE69826 `moveq #44,D2; mulu.w (A4),D2`, a by-address
+    /// parameter's object, and the 5 other TPAD unit routines; TPAD_$DATA
+    /// 0xE691D0 `muls.w (380,A5),D0`; RINGLOG_$CNTL 0xE722A0 `moveq #46,D1;
+    /// muls.w (-2,A6),D1`, a local) or in a register (VTOC_$MOUNT 0xE38612
+    /// `moveq #100,D0; mulu.w D2,D0`; a by-value parameter loaded first,
+    /// module-local 0xE383B0 at 0xE383C8..0xE383CE `move.w (12,A6),D2;
+    /// moveq #100,D0; mulu.w D2,D0`) or a mask (HINT_$GET_HINTS 0xE4998E
+    /// ..0xE4999A, refused: [`in_place`]).  The other multiplies a
+    /// zero-extended byte in place, RIP_$BROADCAST 0xE872F8 `mulu.w #92,D5`
+    /// ([`Self::mul_const`]).  Constants of 128 and more: the value
+    /// in a register, then `mul<s>.w #c` (261 of 261; no `move.w #c,Dn`
+    /// multiplied by the value).  A multiplicand at an absolute or indexed
+    /// address is refused (no site).
+    fn mul_const_first(
+        &mut self,
+        x: &Expr,
+        c: i64,
+        signed: bool,
+        between: &mut dyn FnMut(&mut Self) -> Res<()>,
+    ) -> Res<u8> {
+        let held = match x {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } => *o > 0 || self.pinned(*o).is_some(),
+            Expr::Load {
+                addr: Addr::Static(_) | Addr::Indirect { .. },
+                ..
+            } => false,
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a multiplication by {c} of another unit's variable, an array element or \
+                         an enclosing routine's variable (`moveq #{c},Dn; mul<s>.w x,Dn` with \
+                         such an operand: no site, codegen-patterns 8) is"
+                    ),
+                ))
+            }
+        };
+        let (d, src) = if held {
+            // A by-value parameter in a register first (loaded now, or at
+            // the entry), then the constant.
+            let v = match self.eval(x)? {
+                Val::Mem(ea) => Val::Reg(Reg::D(self.in_tmp(Val::Mem(ea), Width::Word)?)),
+                v => v,
+            };
+            let d = self.alloc_d()?;
+            self.out.push(Insn::Moveq {
+                value: c as i8,
+                dst: d,
+            });
+            (d, v)
+        } else {
+            // The constant, then the operand's address (TPAD_$INQUIRE_UNIT
+            // 0xE6999C..0xE699A2 `moveq #44,D0; movea.l (8,A6),A0; mulu.w
+            // (A0),D0`; PKT_$BLD_INTERNET_HDR 0xE121E6..0xE121F2).
+            let d = self.alloc_d()?;
+            self.out.push(Insn::Moveq {
+                value: c as i8,
+                dst: d,
+            });
+            (d, self.eval(x)?)
+        };
+        let src = match src {
+            Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+            Val::Mem(ea @ (Ea::Ind(_) | Ea::Disp(..))) => ea,
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a multiplication by {c} of a value at an absolute or indexed address \
+                         (`moveq #{c},Dn; mul<s>.w x,Dn` with such an operand: no site, \
+                         codegen-patterns 8) is"
+                    ),
+                ))
+            }
+        };
+        between(self)?;
+        self.out.push(Insn::Mul {
+            signed,
+            src,
+            dst: d,
+        });
+        Ok(d)
     }
 
     /// `d <<= n`: `add.<w> Dd,Dd` for 1, `lsl.<w>` by at most 8 at a time
@@ -12757,7 +12952,11 @@ impl Selector {
     ///   #0x234,D1`; module-local 0xE4649C..0xE464A8 `move.w (8,A6),D0; ...;
     ///   move.w D0,D1; add.w D1,D1`), as one loaded at entry is (FIM_$FREE_ASID
     ///   0xE0AA8A `move.w D2,D0; lsl.w #2,D0`).  The scaling is
-    ///   [`Self::mul_const`].
+    ///   [`Self::mul_const`], except an element size of 1..=127 done with a
+    ///   multiply ([`by_mul_insn`]) and a word index read from a variable:
+    ///   the size first, `moveq #size,Dn; mulu.w x,Dn`
+    ///   ([`Self::mul_const_first`]; TPAD_$SET_UNIT_MODE 0xE69824..0xE69828
+    ///   `moveq #44,D2; mulu.w (A4),D2; lea (0,A5,D2.w),A1`).
     fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<u8> {
         self.index_reg_with(index, scale, &mut |_| Ok(()))
     }
@@ -12815,6 +13014,15 @@ impl Selector {
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
     ) -> Res<u8> {
         let w = index.ty().width;
+        if w == Width::Word && scale < 128 && by_mul_insn(scale as i64) && const_first(index) {
+            // `.w` indices: `mulu.w` (21 of 21 such scalings by a constant
+            // in a register; `muls.w` feeds `.l` indices only,
+            // codegen-patterns 5.2).
+            return self.mul_const_first(index, scale as i64, false, between);
+        }
+        if w == Width::Word && scale < 128 && by_mul_insn(scale as i64) && !in_place(index) {
+            return Err(computed_factor(self.span, scale as i64));
+        }
         let mut v = self.eval(index)?;
         if let (
             Val::Mem(_),

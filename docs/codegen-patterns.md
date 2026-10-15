@@ -2689,10 +2689,106 @@ model run against the bit model of Figure 3-6).
     #2` or `lsl.l #2` (FIM_$GET_FIM_ADDR 0xE0AA16, 0xE0B26C, 0xE13942).
   - Other sizes: the constant multiplication of section 8 (shifts and adds
     for 2^s (2^k ± 1), e.g. ×72 at DISK_$REVALIDATE 0xE6C072..0xE6C078;
-    otherwise `mulu.w #size`, BAT_$GET_BAT_STEP 0xE3BB6A `mulu.w #0x234`,
-    `proc2/suspend.c` 0xE412AE `mulu.w #0xE4`).  The `idx*0xF8` =
-    `(idx<<8)-(idx<<3)` of `vtoc-disk-layouts.md` is the ×248 form of
-    section 8 (`lsl #3; move; neg; lsl #5; add`, 0xE38994).
+    otherwise a multiply: `mulu.w #size` for sizes of 128 and more,
+    BAT_$GET_BAT_STEP 0xE3BB6A `mulu.w #0x234`, `proc2/suspend.c`
+    0xE412AE `mulu.w #0xE4`; for sizes of 1..127 the size first, `moveq
+    #size,Dn; mulu.w <index>,Dn`, TPAD_$SET_UNIT_MODE 0xE69824).  The
+    `idx*0xF8` = `(idx<<8)-(idx<<3)` of `vtoc-disk-layouts.md` is the
+    ×248 form of section 8 (`lsl #3; move; neg; lsl #5; add`, 0xE38994).
+  - **Scalings by element size (survey Verified; `tools/arithsurvey.py
+    scale` / `scales`, bead domain-pascal-r3yy; implemented for `.w`
+    indices).**  Every product of a value by a constant formed in a block
+    of compiled code, simulated register by register, with what reads it
+    first (an indexed operand or another instruction):
+
+    | Size (odd part) | Form | Sites (index `.w` / `.l` / other) |
+    |---|---|---|
+    | 2, 4, 8, 16, 32, 64, 128, 1024 | shifts | 1150 indices (`add.w Dn,Dn`; `lsl`, split above 8) |
+    | 6, 10, 12, 17, 18, 20, 24, 36, 40, 48, 72, 96, 144, 257 (2^k + 1) | shifts | 378 |
+    | 28, 56, 60, 120, 248 (2^k - 1) | shifts with `neg` | 106 |
+    | 26 (13) | bit by bit, `add.w D1,D1; move.w D1,D0; lsl.w #2,D0; add.w D0,D1; add.w D0,D0; add.w D0,D1` | 1 (NETLOG_$LOG_IT 0xE71BBA) |
+    | 44 (11), 46 (23), 84 (21), 92 (23), 100 (25) | `moveq #size,Dn; mul<s>.w x,Dn` | 43: 21 / 20 / 2 |
+    | 92 (23) | `mulu.w #92` in place | 1 (RIP_$BROADCAST 0xE872F8, after `clr.w D5; move.b (14,A2),D5`) |
+    | 150, 153, 204, 228, 244, 250, 268 (67), 300, 336 (21), 564, 580 (145), 1083, 1244, 1624, 5240, 12345 | value loaded or copied, `mul<s>.w #size` | 261 |
+
+    The survey models a mask (`and`, `andi`) as a new computed value
+    (review of bead domain-pascal-r3yy: without it the two ×84 scalings
+    of HINT_$GET_HINTS 0xE4999A and module-local 0xE49A2C at 0xE49A68,
+    `uid_key & 63`, and 25 power-of-two scalings were missed).  It does
+    not follow a product read past a branch target: PROC1_$LOADAV_CALLBACK
+    0xE14C56 `muls.w #363,D1` (a held register multiplied in place, its
+    last use) is not in the 261 (an independent scan of every
+    `mul<s>.w #c` in compiled code: 263, 262 of them by 128 or more).
+
+    - **The rule:** a constant whose odd part is not 1 or 2^k ± 1 is
+      multiplied with `mul<s>.w`; a constant of 1..127 (one `moveq` can
+      load it) goes into the product's register first and the value is
+      the source operand: a variable in memory (`mulu.w (A4),D2` through a
+      by-address parameter held since the entry, TPAD_$SET_UNIT_MODE
+      0xE69826, and the five other TPAD unit routines, RIP_$TABLE_D
+      0xE68E5E, 0xE45CAC through a pointer field; `muls.w (380,A5),D0` a
+      unit variable, TPAD_$DATA 0xE691D0; `muls.w (-2,A6),D1` a local,
+      RINGLOG_$CNTL 0xE722A2), or a register (a value held since before
+      the block, VTOC_$MOUNT 0xE38612 `moveq #100,D0; mulu.w D2,D0`,
+      RIP_$NET_LOOKUP 0xE15504 `moveq #44,D0; muls.w D1,D0`; a by-value
+      parameter loaded first, module-local 0xE383B0 at 0xE383C8..0xE383CE
+      `move.w (12,A6),D2; moveq #100,D0; mulu.w D2,D0`, VTOC_$GET_NAME_DIRS
+      0xE39406, VTOC_$SET_NAME_DIRS 0xE394AE).  43 of the 44 products by
+      such constants.  Of the three with a computed value, the two masks
+      have the constant first too (HINT_$GET_HINTS 0xE4998E..0xE4999A
+      `moveq #63,D3; moveq #84,D5; and.w D0,D3; movea.l #sym,A1; muls.w
+      D3,D5`, the mask's `moveq` and the product's before the `and`;
+      0xE49A5C..0xE49A68) and a zero-extended byte is multiplied in place
+      (RIP_$BROADCAST 0xE872F8 `mulu.w #92,D5`).  Constants of 128 and more: the value
+      in a register (a load, or a copy of a held one), then `mul<s>.w
+      #c`: 261 of 261; no `move.w #c,Dn` multiplied by the value.  As for
+      `x + c` (section 8), a constant `moveq` loads goes first.
+    - **The order:** the `moveq`, then the operand's address (a
+      by-address parameter's slot: TPAD_$INQUIRE_UNIT 0xE6999C..0xE699A2
+      `moveq #44,D0; movea.l (8,A6),A0; mulu.w (A0),D0`;
+      PKT_$BLD_INTERNET_HDR 0xE121E6..0xE121F2), then another unit's
+      array base, then the multiply (RIP_$TABLE 0xE6904C..0xE69054
+      `moveq #92,D1; movea.l #sym,A0; mulu.w D0,D1`; 0xE0B8F2, 0xE121E6,
+      RIP_$UPDATE 0xE690FA, RIP_$TABLE_D 0xE68E56; 5 of 6, RIP_$TABLE_D
+      0xE68F6C has the base after the multiply and a `lea` between).  A
+      by-value parameter is loaded before the `moveq` (above).
+    - **The sign:** a `.w` index is always `mulu.w` (21 of 21 with the
+      constant first, 94 with `#c`), a `.l` index `muls.w` for a signed
+      index (20 of 20 with the constant first) and `mulu.w` for an
+      unsigned one (below).  The width, not the index type's sign, goes
+      with the mnemonic: the TPAD unit routines' `in unitp: integer` is
+      `mulu.w`/`.w` (0xE69826) where TPAD_$DATA's `tpad_$unit: integer`
+      into the same array is `muls.w`/`.l` (0xE691D0); when an index is
+      `.l` is bead domain-pascal-wkg.  `mulu.w` for a `.w` index of a
+      negative word is right: the low word of the product is the same for
+      both signs, and the index is that word sign-extended (exec test
+      `index_mul`, indices down to -13200).  Other uses: the one word product,
+      module-local 0xE4519C at 0xE458CC..0xE458D2 `moveq #44,D3; muls.w
+      D2,D3; addi.w #52,D3`, a signed word (`acl/prim_create_internal.c`
+      `out_idx`).
+    - **Odd parts of three bits:** 11, 21, 25, 67 and 145 are multiplied;
+      13 is done bit by bit (×26, one site).  No rule (the bit count, a
+      68000 cycle count) separates them; `dpc` refuses the other odd
+      parts of three bits (19, 35, 37, 41, ...) and 13 (bead
+      domain-pascal-irb4).
+    - **Implemented** (`isel.rs`, `by_mul_insn`, `mul_const_first`,
+      `const_first`; `scaled_index`, `mul`): `.w` indices and word
+      products of a signed word, with the constant first for a variable
+      (a unit variable, a local, a by-address parameter's object or a
+      pointer's target, a parameter or register-held value); a
+      zero-extended byte in place.  The longword product of a signed word
+      (`.l` index evidence, TPAD_$DATA 0xE691D0) the same way.  Refused (no
+      site): an index or factor that is another unit's variable, an array
+      element or an enclosing routine's variable; a word or longword
+      product of an unsigned word by such a constant.  Refused (not
+      settled): other computed values (`i + 1`, a mask; the masks above
+      have the constant first, scheduled with the mask's own `moveq`;
+      bead domain-pascal-q322).  Golden `data/index_mul`, exec test
+      `index_mul`, tests `crates/dpc-m68k/tests/expr.rs`
+      (`products_with_the_constant_first`).  TPAD_$SET_PUNCH_IMPACT and
+      TPAD_$INQ_PUNCH_IMPACT now compile but differ in register choice
+      (the by-address parameters' address registers, the product's D2;
+      bead domain-pascal-qhda).
   - `mulu.w #c` and `muls.w #c` (survey, ad-hoc script: what reads the
     product): `mulu.w` feeding a `.w` index ×94 (0xE0B2D0), a `.l` index
     ×43 (0xE39364, after an unsigned compare of the index); `muls.w`
@@ -5358,14 +5454,24 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   | 1 | `add.w Dn,Dn` for s = 1, else `lsl #s` (split above 8) | 2, 4, 8, 16, 128, 256, 1024 (×96), 4096, 32768 |
   | 2^k + 1 | the 2^s part; `move Dn,Dm`; `Dm` shifted by k (`add Dm,Dm` for k = 1); `add Dm,Dn` | 3, 5, 6 (RIP_$PACKET_LENGTH 0xE6886C), 9, 10, 12 (×109, 0xE073D4), 17, 18, 20, 24, 36, 48, 72 (DISK_$REVALIDATE 0xE6C072), 96, 144, 192, 257 |
   | 2^k - 1, k >= 3 | the 2^s part; `move Dn,Dm`; `neg Dn`; `Dm` shifted by k; `add Dm,Dn` | 28 (PEB_$GET_FP 0xE5AEF6), 56, 60, 120, 248 |
-  | other | `mulu.w #c,Dn` (word results) | 92, 150, 153, 204, 228, 244, 250, 268, 300, 336, 363, 564 (BAT_$GET_BAT_STEP 0xE3BB6A), 580, 1083, 1244, 1624, 5240, 12345 |
+  | other, c of 1..127 | `moveq #c,Dn; mul<s>.w x,Dn`, the variable the source operand (section 5.2, "Scalings by element size") | 44 (TPAD_$SET_UNIT_MODE 0xE69824), 46, 84 (HINT_$GET_HINTS 0xE4999A), 92, 100 |
+  | other, c of 128 and more | `mulu.w #c,Dn` (word results) | 150, 153, 204, 228, 244, 250, 268, 300, 336, 363, 564 (BAT_$GET_BAT_STEP 0xE3BB6A), 580, 1083, 1244, 1624, 5240, 12345 |
 
   The one exception is ×26 at 0xE71BBA (odd part 13, done bit by bit:
   `add.w D1,D1; move.w D1,D0; lsl.w #2,D0; add.w D0,D1; add.w D0,D0;
-  add.w D0,D1`), while other odd parts of three bits (21, 67, 145) use
-  `mulu.w`: `dpc` rejects odd parts of three bits other than 2^k ± 1.  A
-  68000 cycle count does not separate the two groups (268 and 336 would
-  be cheaper with shifts).  `muls.w #c` occurs where the product is a
+  add.w D0,D1`), while other odd parts of three bits (11, 21, 25, 67,
+  145: ×44, ×336 and ×84, ×100, ×268, ×580) use a multiply: `dpc` multiplies by
+  those and rejects the other odd parts of three bits other than 2^k ±
+  1, and 13 (bead domain-pascal-irb4).  A 68000 cycle count does not
+  separate the two groups (268 and 336 would be cheaper with shifts).
+  A constant of 1..127 multiplied with `mul<s>.w` goes into the
+  register first (43 of 44 sites, `tools/arithsurvey.py scale`, bead
+  domain-pascal-r3yy; the other a zero-extended byte multiplied in
+  place, RIP_$BROADCAST 0xE872F8 `mulu.w #92,D5`; other computed values
+  refused, bead domain-pascal-q322), as `x + c` does for 9..127
+  (above): a word product of a signed word is `muls.w` (module-local
+  0xE4519C at 0xE458CC..0xE458D2 `moveq #44,D3; muls.w D2,D3`; one
+  site), one of an unsigned word is refused.  `muls.w #c` occurs where the product is a
   `.l` index (section 5.2); for a word result `dpc` uses `mulu.w`, for a
   longword product of a word see "Products of words used as longwords"
   below.  The `move` that
@@ -5485,8 +5591,9 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     passed as `b` whichever side it is on; `M$MI<s>$LLL` otherwise, a
     constant as `b` (all 5 constant sites).  A word times a word for a word:
     `mul<s>.w` by the sign of the type (0xE30A9A `muls.w D3,D0; move.w
-    D0,(A0)+`; VTOC_$GET_UID 0xE3925A `mulu.w D4,D6`; Uncertain: either
-    gives the low word).  **Uncertain:** which of two variables goes to the
+    D0,(A0)+`; Uncertain: either gives the low word; VTOC_$GET_UID
+    0xE3925A `mulu.w D4,D6`, once cited here, is `moveq #100,D6` times a
+    word, the scaling of an index, section 5.2).  **Uncertain:** which of two variables goes to the
     register (`dpc`: the left one or the computed one, as for `+`;
     0xE10A7E copies a held D2 and multiplies by memory); which operand of
     `M$MI*$LLL` is `a` (`dpc`: the left one).

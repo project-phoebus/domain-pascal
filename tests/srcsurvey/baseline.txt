@@ -77,8 +77,8 @@ OK	tpad/tpad.pas	tpad_$set_unit
 OK	tpad/tpad.pas	tpad_$re_range
 STUB	tpad/tpad.pas	tpad_$re_range_unit
 OK	tpad/tpad.pas	tpad_$inq_dtype
-STUB	tpad/tpad.pas	tpad_$set_punch_impact
-STUB	tpad/tpad.pas	tpad_$inq_punch_impact
+MISMATCH	tpad/tpad.pas	tpad_$set_punch_impact
+MISMATCH	tpad/tpad.pas	tpad_$inq_punch_impact
 OK	tty/tty.pas	tty_$i_lock
 OK	tty/tty.pas	tty_$i_unlock
 OK	tty/tty.pas	tty_$i_advance_ec

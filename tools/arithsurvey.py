@@ -21,10 +21,20 @@ For every inline `muls.w'/`mulu.w'/`divs.w'/`divu.w': the source kind
 (immediate, register, memory) and how the result is used next (an index
 `(d,An,Dn.l)' / `(d,An,Dn.w)', or the next instruction reading it).
 
+For every product of a run-time value by a constant (bead
+domain-pascal-r3yy; `scale_sites'): the factor, how it is formed (shifts
+and adds; `mul<s>.w #c'; the constant first, `moveq #c,Dn; mul<s>.w
+<mem>,Dn' or `mul<s>.w Dm,Dn'), where the value comes from (memory by
+kind, a register held from before the block, a by-value parameter's
+slot), and what reads the product first (an index `.w'/`.l' or another
+instruction).  The table of codegen-patterns 5.2 and 8.
+
 usage:
     tools/arithsurvey.py calls       # one line per M$ARITH call site
     tools/arithsurvey.py inline      # one line per inline mul/div
     tools/arithsurvey.py summary     # the counts quoted in codegen-patterns 8
+    tools/arithsurvey.py scale       # products by a constant, by factor and form
+    tools/arithsurvey.py scales      # one line per product by a constant
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -205,10 +215,294 @@ def summary(calls, inline):
     print('inline uses: %s' % dict(Counter((s['op'], s['cls']) for s in inline)))
 
 
+
+# ---------------------------------------------------------------------------
+# `scale': products by a constant, index scalings among them (bead
+# domain-pascal-r3yy).
+
+def operands(t):
+    """(mnemonic, [operands]) of an objdump instruction text, the operands
+    split at the commas outside parentheses."""
+    if ' ' not in t:
+        return t, []
+    op, rest = t.split(' ', 1)
+    out, depth, cur = [], 0, ''
+    for ch in rest:
+        if ch == ',' and depth == 0:
+            out.append(cur)
+            cur = ''
+            continue
+        depth += ch == '('
+        depth -= ch == ')'
+        cur += ch
+    out.append(cur)
+    return op, out
+
+
+def mem_kind(ea):
+    """Where a memory operand is: `param' (a by-value slot, (d,A6) d > 0),
+    `local' ((d,A6) d < 0), `unit' ((d,A5)), `abs', `elem' (indexed),
+    `ptr' (through A0-A4: a by-address parameter or a pointer)."""
+    if ea.startswith('0x') or re.fullmatch(r'\d+', ea):
+        return 'abs'
+    if re.search(r',%[ad]\d:[wl]\)', ea):
+        return 'elem'
+    m = re.match(r'^%fp@\((-?\d+)\)$', ea)
+    if m:
+        return 'param' if int(m.group(1)) > 0 else 'local'
+    if ea.startswith('%a5@'):
+        return 'unit'
+    if re.match(r'^%a\d@', ea):
+        return 'ptr'
+    return 'other'
+
+
+_ONE_WRITES = re.compile(r'^(clr|neg|not|ext|swap|s(?:t|f|hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|'
+                         r'gt|le))[bwl]?$')
+_IDXOP = re.compile(r'%(a\d|pc)@\((-?[0-9a-fx]+),%(d\d):([wl])\)')
+def _pow2(v):
+    return v > 0 and v & (v - 1) == 0
+
+
+def scale_sites(ins, labels=frozenset()):
+    """[dict] of the products of a run-time value by a constant formed in
+    a block of `ins' (cut at branch targets and after branches, calls and
+    jumps): each product's first reading other than an instruction that
+    goes on forming it (an indexed operand `(d,An,Dx.<s>)', a store, an
+    add of another value, a compare...).  Only products whose factor is
+    not 1 are kept; a factor of 2^s is kept for indexed operands only.
+
+    The registers are simulated: a constant (`moveq', `move #'), a linear
+    function `coef * X + off' of a value X first read in the block (a load
+    from memory, or a register's value at the block's start, `held'), or
+    unknown.  Each dict: addr (the reading), coef, form (`mulu #imm',
+    `muls #imm', `moveq*mem' for `moveq #c,Dn; mul<s>.w <mem>,Dn',
+    `movew#*mem' for `move.w #c,Dn; ...', `const*reg', `reg*const',
+    `shifts' when no multiply instruction is used), mul (`mulu', `muls' or
+    None), x (the kind of X: mem_kind, `held', `areg', `call', `computed'
+    for a mask), zext / ext (X zero- or sign-extended before), idx (`w',
+    `l' or None: the reading is an indexed operand with the product as
+    its index), use (the reading's text), chain (the texts that formed
+    the product)."""
+    regs, xs, hist = {}, [], {}
+    out, done = [], set()
+
+    def fresh(kind, k):
+        xs.append({'kind': kind, 'at': k, 'zext': False, 'ext': False})
+        return ('x', len(xs) - 1, 1, 0)
+
+    def reset(k):
+        for r in range(8):
+            regs['d%d' % r] = fresh('held', k)
+            hist['d%d' % r] = ()
+
+    def record(k, r, idx):
+        v = regs.get(r)
+        if not v or v[0] != 'x' or v[2] in (0, 1):
+            return
+        if idx is None and (_pow2(abs(v[2])) or v[2] == -1):
+            return
+        if (r, v, hist[r]) in done:
+            return
+        done.add((r, v, hist[r]))
+        chain = [ins[j][2] for j in sorted(set(hist[r]))]
+        muls = [c for c in chain if c.startswith(('mulu', 'muls'))]
+        if muls:
+            mop, mops = operands(muls[-1])
+            src = mops[0]
+            before = [c for c in chain if operands(c)[1][-1:] == mops[-1:]
+                      and chain.index(c) < chain.index(muls[-1])]
+            if src.startswith('#'):
+                form = mop[:4] + ' #imm'
+            elif re.fullmatch(r'%d\d', src):
+                form = 'const*reg' if before and re.match(r'^(moveq|movew) #', before[-1]) \
+                    else 'reg*const'
+            else:
+                cl = before[-1] if before else ''
+                form = ('moveq*mem' if cl.startswith('moveq') else
+                        'movew#*mem' if cl.startswith('movew #') else 'movel#*mem'
+                        if cl.startswith('movel #') else '?*mem')
+            mul = mop[:4]
+        else:
+            form, mul = 'shifts', None
+        x = xs[v[1]]
+        out.append({'addr': ins[k][0], 'coef': v[2], 'off': v[3], 'form': form, 'mul': mul,
+                    'x': x['kind'], 'zext': x['zext'], 'ext': x['ext'], 'idx': idx,
+                    'use': ins[k][2], 'chain': chain})
+
+    reset(0)
+    seen = set()
+    for k, (a, _, t) in enumerate(ins):
+        if a in labels:
+            reset(k)
+        op, ops = operands(t)
+        dst = ops[-1] if ops else ''
+        dreg = dst if re.fullmatch(r'%d\d', dst) else None
+        dreg = dreg[1:] if dreg else None
+        base = re.sub(r'[bwl]$', '', op) if op not in ('moveq', 'mulsw', 'muluw') else op
+        sz = op[-1] if op[-1] in 'bwl' and op not in ('moveq',) else 'l'
+        # readings by indexed operands
+        for m in _IDXOP.finditer(t):
+            r = m.group(3)
+            key = (regs.get(r), r)
+            if key[0] and key[0][0] == 'x' and (k, r) not in seen:
+                seen.add((k, r))
+                record(k, r, m.group(4))
+        new = None
+        cont = set()        # registers whose value this instruction goes on forming
+        src = ops[0] if len(ops) == 2 else None
+        sv = regs.get(src[1:]) if src and re.fullmatch(r'%d\d', src) else None
+        dv = regs.get(dreg) if dreg else None
+        h = hist.get(dreg, ()) if dreg else ()
+        if dreg and len(ops) == 2:
+            imm = int(src[1:], 0) if re.fullmatch(r'#-?\d+', src) else None
+            if op == 'moveq' or (base == 'move' and imm is not None):
+                new, h = ('c', imm), (k,)
+            elif base == 'move' and sv is not None and sz in 'wl':
+                new, h = sv, hist[src[1:]] + (k,)
+                cont.add(src[1:])
+            elif base == 'move' and re.fullmatch(r'%a\d', src):
+                new, h = fresh('areg', k), ()
+            elif base == 'move' and src:
+                new, h = fresh(mem_kind(src) if src != '%sp@+' else 'pop', k), (k,)
+                xs[new[1]]['size'] = sz
+                if sz == 'w' and dv == ('c', 0):
+                    xs[new[1]]['zext'] = True
+                    h = hist[dreg] + (k,)
+            elif base in ('add', 'sub', 'addq', 'subq', 'addi', 'subi') and dv:
+                sgn = -1 if base.startswith('sub') else 1
+                if imm is not None and dv[0] == 'x':
+                    new, h = ('x', dv[1], dv[2], dv[3] + sgn * imm), h + (k,)
+                elif imm is not None and dv[0] == 'c':
+                    new = ('c', dv[1] + sgn * imm)
+                elif sv and sv[0] == 'x' and dv[0] == 'x' and sv[1] == dv[1]:
+                    new = ('x', dv[1], dv[2] + sgn * sv[2], dv[3] + sgn * sv[3])
+                    h = h + hist[src[1:]] + (k,)
+                    cont.add(src[1:])
+                elif sv and sv[0] == 'c' and dv[0] == 'x':
+                    new, h = ('x', dv[1], dv[2], dv[3] + sgn * sv[1]), h + (k,)
+                elif sv and sv[0] == 'c' and dv[0] == 'c':
+                    new = ('c', dv[1] + sgn * sv[1])
+            elif base in ('and', 'andi') and sz in 'wl':
+                # a mask (a hash's bucket: HINT_$GET_HINTS 0xE4998E..0xE4999A
+                # `moveq #63,D3; moveq #84,D5; and.w D0,D3; ...; muls.w D3,D5'):
+                # a new value X, computed
+                new, h = fresh('computed', k), h + (k,)
+            elif base in ('lsl', 'asl') and dv and imm is not None:
+                new = (('x', dv[1], dv[2] << imm, dv[3] << imm) if dv[0] == 'x'
+                       else ('c', dv[1] << imm))
+                h = h + (k,)
+            elif op in ('mulsw', 'muluw') and dv:
+                if imm is not None and dv[0] == 'x':
+                    new, h = ('x', dv[1], dv[2] * imm, dv[3] * imm), h + (k,)
+                elif sv and sv[0] == 'c' and dv[0] == 'x':
+                    new, h = ('x', dv[1], dv[2] * sv[1], dv[3] * sv[1]), h + hist[src[1:]] + (k,)
+                elif sv and sv[0] == 'x' and dv[0] == 'c':
+                    new = ('x', sv[1], sv[2] * dv[1], sv[3] * dv[1])
+                    h = h + hist[src[1:]] + (k,)
+                    cont.add(src[1:])
+                elif dv[0] == 'c' and imm is None and not re.fullmatch(r'%[ad]\d', src):
+                    x = fresh(mem_kind(src), k)
+                    new, h = ('x', x[1], dv[1], 0), h + (k,)
+        elif dreg and len(ops) == 1:
+            if base == 'clr':
+                new, h = ('c', 0), (k,)
+            elif base == 'neg' and dv:
+                new = ('x', dv[1], -dv[2], -dv[3]) if dv[0] == 'x' else ('c', -dv[1])
+                h = h + (k,)
+            elif base == 'ext' and dv:
+                new, h = dv, h + (k,)
+                if dv[0] == 'x':
+                    xs[dv[1]]['ext'] = True
+        if dreg and new and new[0] == 'x' and dv and dv[0] == 'x' and dv[1] == new[1]:
+            cont.add(dreg)
+        # other readings of a product
+        rd = set(re.findall(r'%(d\d)', t)) - {m.group(3) for m in _IDXOP.finditer(t)}
+        if dreg and (base in ('move', 'moveq', 'clr') or op == 'exg'
+                     or (len(ops) == 1 and _ONE_WRITES.match(op) and base != 'neg'
+                         and not base.startswith(('ext', 'not', 'swap')))):
+            rd.discard(dreg)        # written, not read
+        if op.startswith('movem') and '%d' in dst:
+            rd = set()
+        for r in sorted(rd - cont):
+            if (k, r) not in seen:
+                seen.add((k, r))
+                record(k, r, None)
+        # writes
+        if op.startswith(('jsr', 'bsr')):
+            for r in ('d0', 'd1'):
+                regs[r], hist[r] = fresh('call', k), ()
+        elif dreg and (len(ops) == 2 or _ONE_WRITES.match(op)):
+            if op == 'exg':
+                a2 = ops[0][1:]
+                regs[a2], regs[dreg] = regs.get(dreg), regs.get(a2)
+                hist[a2], hist[dreg] = hist.get(dreg, ()), hist.get(a2, ())
+            elif op.startswith(('cmp', 'tst', 'btst')):
+                pass
+            else:
+                regs[dreg], hist[dreg] = new, (h if new else ())
+        elif op.startswith('movem') and dst.startswith('%d'):
+            for r in re.findall(r'%(d\d)', dst):
+                regs[r], hist[r] = fresh('held', k), ()
+        elif op.startswith('db') and len(ops) == 2:
+            r = ops[0][1:]
+            regs[r], hist[r] = None, ()
+        if _BLOCK_END.match(t):
+            reset(k + 1)
+    return out
+
+
+_BLOCK_END = re.compile(r'^(b[a-z]{2}[sw]?|bra[sw]?|jmp|rts|db[a-z]+|bsr[sw]?|jsr) ')
+
+
+def odd_bits(c):
+    c = abs(c)
+    while c and not c & 1:
+        c >>= 1
+    return bin(c).count('1')
+
+
+def scale_summary(sites):
+    """The table of codegen-patterns 5.2/8: per factor, the forms."""
+    by = {}
+    for s in sites:
+        by.setdefault(abs(s['coef']), []).append(s)
+    print('products by a constant (factor: odd part bits; form x count [idx w/l] e.g.)')
+    for c in sorted(by):
+        ss = by[c]
+        forms = Counter((s['form'], s['idx'] or '-') for s in ss)
+        print('%6d %d  %s' % (c, odd_bits(c), '; '.join(
+            '%s %s x%d e.g. 0x%X' % (f, i, n, next(s['addr'] for s in ss
+                                                  if (s['form'], s['idx'] or '-') == (f, i)))
+            for (f, i), n in sorted(forms.items()))))
+
+
+def scale_scan():
+    import boolsurvey
+    out = []
+    for r0, r1, name in routines():
+        ins = a5survey.reached(r0, r1)
+        for s in scale_sites(ins, boolsurvey.branch_targets(ins)):
+            s['routine'] = (r0, name)
+            out.append(s)
+    return out
+
+
 def main(argv):
-    if not argv or argv[0] not in ('calls', 'inline', 'summary'):
+    if not argv or argv[0] not in ('calls', 'inline', 'summary', 'scale', 'scales'):
         print(__doc__)
         return 2
+    if argv[0] in ('scale', 'scales'):
+        sites = scale_scan()
+        if argv[0] == 'scale':
+            scale_summary(sites)
+            return 0
+        for s in sites:
+            print('0x%06X %6d %-10s %-5s %-6s %-5s %-26s %-34s | %s' % (
+                s['addr'], s['coef'], s['form'], s['idx'] or '-', s['x'],
+                'zext' if s['zext'] else 'ext' if s['ext'] else '-',
+                '%06X %s' % s['routine'], s['use'], '; '.join(s['chain'])))
+        return 0
     calls, inline = scan(with_live=argv[0] != 'inline')
     if argv[0] == 'calls':
         for c in calls:
