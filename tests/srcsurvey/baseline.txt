@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: aff6020a474203b99ec4332707c03b9cea94fcc3
+# source: 340effeeac208e4b81163b137f6dff1643560051
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -42,6 +42,16 @@ STUB	fim/fim.pas	fim_$init_asid
 MISMATCH	fim/fim.pas	fim_$free_asid
 MISMATCH	fim/fim.pas	fim_$get_user_pc
 STUB	flop/flop.pas	flop_$boot
+STUB	flp/flp.pas	flp_$int
+MISMATCH	flp/flp.pas	flp_$revalidate
+STUB	flp/flp.pas	flp_format_track
+STUB	flp/flp.pas	flp_do_io
+MISMATCH	flp/flp.pas	flp_$do_io
+STUB	flp/flp.pas	flp_$cinit
+STUB	flp/flp.pas	flp_$dinit
+MISMATCH	flp/flp.pas	flp_$shutdown
+STUB	flp/flp.pas	excs
+STUB	flp/flp.pas	shake
 OK	gpu/gpu.pas	gpu_$init
 OK	gpu/gpu.pas	gpu_$term
 OK	iic/iic.pas	iic_$init
@@ -53,6 +63,7 @@ OK	iic/iic.pas	iic_$send
 OK	iic/iic.pas	iic_$exists
 OK	iic/iic.pas	iic_$receive
 OK	iic/iic.pas	iic_$receive_check
+MISMATCH	io/io.pas	chk
 STUB	io/io.pas	io_$get_dcte
 STUB	io/io.pas	io_$build_dcte_list
 STUB	io/io.pas	io_$init
@@ -79,6 +90,9 @@ OK	log/log.pas	log_$read
 OK	log/log.pas	log_$read2
 STUB	log/log.pas	log_$init
 STUB	mem/mem.pas	mem_$parity_log
+STUB	misc/misc.pas	mem_lites
+STUB	misc/misc.pas	start_mem_lites
+MISMATCH	misc/misc.pas	set_lites_loc
 OK	mt/mt.pas	mt_$release
 STUB	net/net.pas	net_$find_handler
 OK	net/net.pas	net_$get_info
@@ -87,6 +101,19 @@ STUB	net/net.pas	net_$close
 STUB	net/net.pas	net_$ioctl
 STUB	net/net.pas	net_$rcv
 STUB	net/net.pas	net_$send
+MISMATCH	netbuf/netbuf.pas	netbuf_rtnva_locked
+STUB	netbuf/netbuf.pas	netbuf_$add_pages
+STUB	netbuf/netbuf.pas	netbuf_$del_pages
+STUB	netbuf/netbuf.pas	netbuf_$getva
+MISMATCH	netbuf/netbuf.pas	netbuf_$rtnva
+STUB	netbuf/netbuf.pas	netbuf_$get_hdr_cond
+STUB	netbuf/netbuf.pas	netbuf_$get_hdr
+MISMATCH	netbuf/netbuf.pas	netbuf_$rtn_hdr
+STUB	netbuf/netbuf.pas	netbuf_$get_dat_cond
+STUB	netbuf/netbuf.pas	netbuf_$get_dat
+STUB	netbuf/netbuf.pas	netbuf_$rtn_dat
+STUB	netbuf/netbuf.pas	netbuf_$rtn_pkt
+STUB	netbuf/netbuf.pas	netbuf_$init
 STUB	netlog/netlog.pas	netlog_$cntl
 STUB	netlog/netlog.pas	netlog_$log_it
 STUB	netlog/netlog.pas	netlog_$send_page
@@ -106,8 +133,29 @@ STUB	pbu/ec2_pbu.pas	pbu_$advance_ec_int
 OK	pbu/pbu.pas	pbu_$free_asid
 OK	pbu/pbu.pas	pbu_$faulted_units
 OK	pbu/pbu.pas	pbu_$init
+BLOCKED	pchist/pchist.pas	pchist_$count
+BLOCKED	pchist/pchist.pas	pchist_$interrupt
+BLOCKED	pchist/pchist.pas	pchist_$init
+BLOCKED	pchist/pchist.pas	pchist_$enable_terminal
+BLOCKED	pchist/pchist.pas	pchist_$unix_profil_cntl
+BLOCKED	pchist/pchist.pas	pchist_$unix_profil_fork
+BLOCKED	pchist/pchist.pas	pchist_$cntl
+BLOCKED	pchist/pchist.pas	pchist_$unix_profil_addupc
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
+STUB	sio2681/sio2681.pas	sio2681_$int
+MISMATCH	sio2681/sio2681.pas	sio2681_$set_break
+STUB	sio2681/sio2681.pas	sio2681_$tone
+MISMATCH	sio2681/sio2681.pas	sio2681_set_baud_rate
+STUB	sio2681/sio2681.pas	sio2681_$set_line
+STUB	sio2681/sio2681.pas	sio2681_$xmit
+STUB	sio2681/sio2681.pas	sio6509_$rcv
+MISMATCH	sio2681/sio2681.pas	sio6509_$xmit
+STUB	sio2681/sio2681.pas	sio2681_$init
+STUB	sio2681/sio2681.pas	sio6509_$init
+STUB	sio2681/sio2681.pas	sio2681_$inq_line
+MISMATCH	sio2681/sio2681.pas	sio6509_$set_line
+STUB	sio2681/sio2681.pas	sio6509_$inq_line
 MISMATCH	sock/sock.pas	sock_$open
 STUB	sock/sock.pas	sock_$allocate
 MISMATCH	sock/sock.pas	sock_$allocate_user
@@ -196,6 +244,9 @@ STUB	tty/tty.pas	tty_$k_drain_output
 STUB	tty/tty.pas	tty_$k_put
 STUB	uid/uid.pas	uid_$gen
 OK	uid/uid.pas	uid_$init
+STUB	vfmt/vfmt.pas	vfmt_format_number
+STUB	vfmt/vfmt.pas	vfmt_$main
+MISMATCH	vfmt/vfmt.pas	vfmt_$write
 STUB	volx/volx.pas	find_volx
 STUB	volx/volx.pas	volx_$mount
 STUB	volx/volx.pas	volx_$dismount
