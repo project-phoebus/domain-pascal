@@ -1,18 +1,30 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 7abcec233ca334fad2e50337889dc0ab6dad710f
+# source: 368121458ed7264ab0da2033e030ee694113947c
+STUB	as/as.pas	as_$init
+STUB	as/as.pas	as_$get_info
+STUB	as/as.pas	as_$get_addr
 OK	ct/ct.pas	ct_$release
+OK	dma/dma.pas	dma_$init_m68450_channel
+STUB	dma/dma.pas	dma_$init
+STUB	dma/dma.pas	dma_$check
+OK	dma/dma.pas	dma_$free_asid
 STUB	dxm/dxm.pas	dxm_$add_callback
 STUB	dxm/dxm.pas	dxm_$scan_queue
 STUB	dxm/dxm.pas	dxm_$helper_common
-SETUP	dxm/dxm.pas	dxm_$helper_wired
-SETUP	dxm/dxm.pas	dxm_$helper_unwired
+OK	dxm/dxm.pas	dxm_$helper_wired
+OK	dxm/dxm.pas	dxm_$helper_unwired
 STUB	dxm/dxm.pas	dxm_$add_signal
-SETUP	dxm/dxm.pas	dxm_$init
+OK	dxm/dxm.pas	dxm_$init
 STUB	dxm/dxm.pas	dxm_$add_signal_callback
+STUB	flop/flop.pas	flop_$boot
 OK	gpu/gpu.pas	gpu_$init
 OK	gpu/gpu.pas	gpu_$term
+STUB	io/io.pas	io_$get_dcte
+STUB	io/io.pas	io_$build_dcte_list
+STUB	io/io.pas	io_$init
+STUB	io/io.pas	io_$get_config
 STUB	kbd/kbd.pas	kbd_$state_lookup
 STUB	kbd/kbd.pas	kbd_$get_mode
 STUB	kbd/kbd.pas	kbd_$put_line
@@ -36,12 +48,23 @@ OK	log/log.pas	log_$read2
 STUB	log/log.pas	log_$init
 STUB	mem/mem.pas	mem_$parity_log
 OK	mt/mt.pas	mt_$release
+STUB	netlog/netlog.pas	netlog_$cntl
+STUB	netlog/netlog.pas	netlog_$log_it
+STUB	netlog/netlog.pas	netlog_$send_page
+STUB	osinfo/osinfo.pas	osinfo_$get_seg_table
+STUB	osinfo/osinfo.pas	osinfo_$get_mmap
+STUB	parity/parity.pas	parity_$chk
+STUB	parity/parity.pas	parity_$chk_io
+STUB	pbu/ec2_pbu.pas	pbu_$advance_ec_int
+OK	pbu/pbu.pas	pbu_$free_asid
+OK	pbu/pbu.pas	pbu_$faulted_units
+OK	pbu/pbu.pas	pbu_$init
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
 STUB	suma/suma.pas	suma_$rcv
 OK	suma/suma.pas	suma_$init
 OK	tape/tape.pas	tape_$boot
-SETUP	tone/tone.pas	tone_$time
+OK	tone/tone.pas	tone_$time
 STUB	tpad/tpad.pas	tpad_$init
 STUB	tpad/tpad.pas	tpad_$data
 OK	tpad/tpad.pas	tpad_$set_mode
@@ -115,3 +138,5 @@ OK	tty/tty.pas	tty_$k_set_delay
 OK	tty/tty.pas	tty_$k_inq_delay
 STUB	tty/tty.pas	tty_$k_drain_output
 STUB	tty/tty.pas	tty_$k_put
+STUB	uid/uid.pas	uid_$gen
+OK	uid/uid.pas	uid_$init

@@ -127,6 +127,66 @@ class RoutineTest(unittest.TestCase):
                                       'procedure b; begin end;\n')
         self.assertEqual([(r.name, r.has_body) for r in rs], [('a', False), ('b', True)])
 
+    def test_hex_sizes_and_code_only(self):
+        # bead domain-pascal-0vcm: "0x28 bytes" (dxm/helpers.pas), and
+        # "0x5E bytes of code and three constant cells" (tone/time.pas)
+        text = ('{ Original address: 0x00E1721E, 0x28 bytes, dxm.pas, section WIRED_PROC; }\n'
+                'procedure a; begin end;\n'
+                '{ Original address: 0x00E172FC, 0x5E bytes of code and three constant\n'
+                '  cells (0xE1735A..0xE1735F) }\n'
+                'procedure b; begin end;\n'
+                '{ Original address: 0x00E1B456, 96 bytes (92 of code, then 4 of\n'
+                '  constant cells) }\n'
+                'procedure c; begin end;\n'
+                '{ Original address: 0x00E70A4C, 2 bytes of\n  code and the filler }\n'
+                'procedure d; begin end;\n')
+        rs = srcsurvey.parse_routines(text)
+        self.assertEqual([(r.addr, r.size, r.code_only) for r in rs],
+                         [(0xE1721E, 0x28, False), (0xE172FC, 0x5E, True),
+                          (0xE1B456, 96, False), (0xE70A4C, 2, True)])
+        self.assertEqual(srcsurvey.header_addrs(text),
+                         {0xE1721E, 0xE172FC, 0xE1B456, 0xE70A4C})
+
+    def test_routine_size(self):
+        Seg = DataSectionsTest.Seg
+        seg = Seg('I', 'TONE', 0xE172FC, 0x64)
+        seg.end = seg.addr + seg.size
+        lm = type('M', (), {})()
+        lm.segment_containing = lambda a: seg if seg.contains(a) else None
+        syms = [0xE172FC, 0xE17300]
+        lm.next_symbol_addr = lambda a: min([s for s in syms if s > a], default=None)
+        image = {}
+
+        def read(va, n):
+            return bytes(image.get(va + k, 0) for k in range(n))
+
+        def rt(addr, size, code_only):
+            r = srcsurvey.Routine('r')
+            r.addr, r.size, r.code_only = addr, size, code_only
+            return r
+        # a size of the whole extent: as given
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, False), set(), lm, read), 0x5E)
+        # code alone: the cells to the segment end (tone/time.pas: 0x5E -> 0x64)
+        syms[1:] = []
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, True), set(), lm, read), 0x64)
+        # ... to the next routine start (a header's, a nested routine's too)
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x40, True), {0xE172FC, 0xE17344},
+                                                lm, read), 0x48)
+        # ... or the next map symbol
+        syms.append(0xE17350)
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x40, True), set(), lm, read), 0x54)
+        syms.pop()
+        # without the module-end filler (uid/gen.pas, 0xE2 of code, then
+        # `movea.l A0,A0' to the segment end), but never below the code
+        image.update({0xE1735C: 0x20, 0xE1735D: 0x48, 0xE1735E: 0x20, 0xE1735F: 0x48})
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, True), set(), lm, read), 0x60)
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x62, True), set(), lm, read), 0x62)
+        # a filler before the next routine (not the segment end) is compared
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, True), {0xE1735E}, lm, read),
+                         0x62)
+        # no map: the code
+        self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, True), set(), None), 0x5E)
+
     def test_stub(self):
         text, deleted = srcsurvey.stub_text(FRAG, {'m_$glob', 'm_$local'})
         self.assertEqual(deleted, ['m_$glob'])
@@ -594,6 +654,60 @@ class StaticsTest(unittest.TestCase):
             with open(os.path.join(d, 'm/f.pas')) as fh:
                 self.assertNotIn('p_a', fh.read())
             self.assertNotIn('p_a', mod.unit_text('q'))
+
+    def test_nested_routine_in_its_own_file(self):
+        # bead domain-pascal-aoee: flop/boot.pas includes flop/mount.pas
+        # (flop_$mount_floppy) inside FLOP_$BOOT; a diagnostic there is
+        # FLOP_$BOOT's, which the survey can stub
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm.pas'), 'w') as fh:
+                fh.write("module m;\n%include 'base.ins.pas';\n%include 'm/f.pas';\n")
+            with open(os.path.join(d, 'base.ins.pas'), 'w') as fh:
+                fh.write('procedure ext(x: integer); extern;\n')
+            with open(os.path.join(d, 'm/f.pas'), 'w') as fh:
+                fh.write("{ Original address: 0x00E3254C, 0x152 bytes }\n"
+                         "procedure p;\n  %include 'm/n.pas';    { nested }\n"
+                         "begin\n  n;\nend;\n")
+            with open(os.path.join(d, 'm/n.pas'), 'w') as fh:
+                fh.write("{ Original address: 0x00E323E6, 0x152 bytes }\n"
+                         "procedure n;\n%include 'base.ins.pas';\nbegin\nend;\n")
+            mod = srcsurvey.Module(d, 'm.pas')
+            self.assertEqual(list(mod.routines), ['p'])
+            self.assertEqual([r.name for r in mod.routines['p'][1].nested], ['n'])
+            self.assertEqual(mod.starts, {0xE3254C, 0xE323E6})
+            with open(os.path.join(d, 'm/f.pas')) as fh:
+                f = fh.read()
+            self.assertIn("  { Original address: 0x00E323E6", f)
+            self.assertIn("%include 'base.ins.pas';", f)      # interfaces stay
+            self.assertIn('    { nested }', f)
+            line = f.splitlines().index('procedure n;') + 1
+            self.assertEqual(srcsurvey.Locator(d)('m/f.pas', line), 'p')
+
+    def test_survey_stage_unknown_routine(self):
+        # an error charged to a routine that is not one of the module's
+        # (an interface's heading): the stage stops, with the reason,
+        # instead of a KeyError (bead domain-pascal-aoee)
+        fake = ('#!%s\nimport sys\n'
+                'sys.stderr.write("base.ins.pas:1:11: error: something\\n")\n'
+                'sys.exit(1)\n' % sys.executable)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm.pas'), 'w') as fh:
+                fh.write("module m;\n%include 'base.ins.pas';\n%include 'm/f.pas';\n")
+            with open(os.path.join(d, 'base.ins.pas'), 'w') as fh:
+                fh.write('procedure ext(x: integer); extern;\n')
+            with open(os.path.join(d, 'm/f.pas'), 'w') as fh:
+                fh.write('procedure p; internal;\nbegin\nend;\n')
+            dpc = os.path.join(d, 'dpc')
+            with open(dpc, 'w') as fh:
+                fh.write(fake)
+            os.chmod(dpc, 0o755)
+            mod = srcsurvey.Module(d, 'm.pas')
+            entries, stubbed, ok = srcsurvey.survey_stage(dpc, mod, False, [], io.StringIO())
+            self.assertEqual((stubbed, ok), ([], False))
+            self.assertIn('ext', mod.problem)
+            self.assertIn('cannot stub', mod.problem)
 
     def test_module_unit_text(self):
         with tempfile.TemporaryDirectory() as d:

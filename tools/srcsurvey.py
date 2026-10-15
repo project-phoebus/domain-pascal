@@ -127,7 +127,12 @@ import loopalign  # noqa: E402
 
 DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
                      r'(?P<sev>error|warning): (?P<msg>.*)$')
-ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(\d+)\s*bytes')
+# A routine's header: "Original address: 0xADDR, N bytes" with N decimal
+# or hex ("0x28 bytes"), the routine's extent (its cells included, the
+# module-end filler not), or "N bytes of code", its code alone: the cells
+# after it are not counted (routine_size; bead domain-pascal-0vcm).
+ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+|\d+)\s*bytes'
+                     r'(\s+of\s+code)?')
 
 # Workarounds for refusals in declarations (stage 2).  Each: (name, what
 # dpc refuses, files it applies to, pattern, replacement, a string or a
@@ -288,6 +293,27 @@ def module_includes(text):
     return re.findall(r"(?m)^\s*%include\s+'([^']+)'", text)
 
 
+def inline_fragment_includes(tree, text, seen=()):
+    """TEXT (a fragment of a module) with its own `%include's of other
+    fragments (not `.ins.pas' interfaces) replaced by their texts,
+    recursively: a nested routine kept in a file of its own (flop/boot.pas
+    includes flop/mount.pas inside FLOP_$BOOT, bead domain-pascal-aoee).
+    The survey then sees each top-level routine whole in the fragment
+    the module file names, and charges a diagnostic in it to that
+    routine.  A missing file, or one already being inlined, is left as
+    an `%include' (dpc reports it).  The rest of the include's line (a
+    comment) stays."""
+    def repl(m):
+        path = m.group(2)
+        q = os.path.join(tree, path)
+        if path.endswith('.ins.pas') or path in seen or not os.path.isfile(q):
+            return m.group(0)
+        with open(q) as fh:
+            body = fh.read()
+        return m.group(1) + inline_fragment_includes(tree, body, tuple(seen) + (path,))
+    return re.sub(r"(?m)^([ \t]*)%include\s+'([^']+)'\s*;", repl, text)
+
+
 # ------------------------------------------------------------- routines
 
 TOKEN_RE = re.compile(r"""
@@ -328,6 +354,7 @@ class Routine:
         self.nested = []
         self.addr = None         # from the header comment
         self.size = None
+        self.code_only = False   # the size is "N bytes of code" (routine_size)
 
     @property
     def internal(self):
@@ -467,9 +494,57 @@ def parse_routines(text):
     for r in rs:
         ms = list(ADDR_RE.finditer(text, prev, r.start))
         if ms:
-            r.addr, r.size = int(ms[-1].group(1), 16), int(ms[-1].group(2))
+            m = ms[-1]
+            r.addr, r.size = int(m.group(1), 16), parse_size(m.group(2))
+            r.code_only = bool(m.group(3))
         prev = r.end
     return rs
+
+
+def parse_size(s):
+    """A header's size: hex with `0x', else decimal."""
+    return int(s[2:], 16) if s.lower().startswith('0x') else int(s, 10)
+
+
+def header_addrs(text):
+    """The addresses of every routine header of TEXT (nested routines'
+    too): the places where a routine starts."""
+    return {int(m.group(1), 16) for m in ADDR_RE.finditer(text)}
+
+
+MODULE_END_FILLER = b'\x20\x48'          # movea.l A0,A0 (codegen-patterns 7)
+
+
+def routine_size(r, starts, linkmap, read_image=None):
+    """The bytes conform compares for routine R: its header size, or for
+    a header that gives the code alone ("0x5E bytes of code and three
+    constant cells", tone/time.pas) the code and the cells after it, to
+    the next routine start (STARTS: header addresses of the module;
+    LINKMAP's symbols) or its map segment's end, without the module-end
+    filler there (0x2048 words; not compared, as in the headers that
+    give the whole extent: DXM_$INIT "0x2A bytes and the 0x2048
+    module-end filler").  READ_IMAGE(va, n) (default conform.read_image)
+    reads the image."""
+    if not r.code_only or linkmap is None:
+        return r.size
+    end = r.addr + r.size
+    seg = linkmap.segment_containing(r.addr)
+    bounds = [a for a in starts if a >= end]
+    nxt = linkmap.next_symbol_addr(end - 1)
+    if nxt is not None:
+        bounds.append(nxt)
+    if seg is not None:
+        bounds.append(seg.end)
+    if not bounds:
+        return r.size
+    hi = min(bounds)
+    if seg is not None and hi == seg.end:
+        if read_image is None:
+            import conform
+            read_image = conform.read_image
+        while hi - 2 >= end and read_image(hi - 2, 2) == MODULE_END_FILLER:
+            hi -= 2
+    return hi - r.addr
 
 
 def routine_spans(text):
@@ -885,13 +960,23 @@ class Module:
         self.routines = {}                  # name -> (fragment, Routine)
         self.dsect = {}                     # name -> data section (lower case) or None
         self.stubbed = set()
-        self.no_hoist = set()               # stubbed routines whose statics are dropped
+        self.problem = None                 # why a stage stopped (survey_stage)
+        self.starts = set()                 # header addresses, nested routines' too
+        self.no_hoist = set()             # stubbed routines whose statics are dropped
         for inc in module_includes(self.text):
             if inc.endswith('.ins.pas'):
                 continue
             with open(os.path.join(tree, inc)) as fh:
-                self.frag_text[inc] = fh.read()
+                text = fh.read()
+            self.frag_text[inc] = inline_fragment_includes(tree, text, (inc,))
+            if self.frag_text[inc] != text:
+                # dpc reads the inlined text too (the survey's copy of
+                # the tree): its diagnostics then point into this
+                # fragment (Locator)
+                with open(os.path.join(tree, inc), 'w') as fh:
+                    fh.write(self.frag_text[inc])
             rs = parse_routines(self.frag_text[inc])
+            self.starts |= header_addrs(self.frag_text[inc])
             self.fragments.append(inc)
             for r in rs:
                 self.routines[r.name] = (inc, r)
@@ -1016,6 +1101,14 @@ def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None):
                 names.append(r)
         if rc == 0:
             return entries, stubbed, True
+        unknown = [n for n in names if n not in mod.routines]
+        if unknown:
+            # a diagnostic in a routine the survey cannot stub (one of an
+            # interface, or of a file it did not take for a fragment):
+            # the module stops, with the reason (bead domain-pascal-aoee)
+            mod.problem = ('with error(s) charged to %s, not a top-level routine of the module '
+                           "file's fragments: cannot stub" % ', '.join(unknown))
+            return entries, stubbed, False
         if unhoist:
             print('srcsurvey: %s: the static data of %s does not compile at unit level; '
                   'left out (the data after it moves)' % (mod.path, ', '.join(sorted(unhoist))))
@@ -1033,7 +1126,8 @@ def unit_specs(mod, name, linkmap, table=None):
     inc, r = mod.routines[name]
     if r.addr is None:
         return None
-    ends = [o.addr + o.size for _i, o in (table or mod.routines).values()
+    starts = getattr(mod, 'starts', set())
+    ends = [o.addr + routine_size(o, starts, linkmap) for _i, o in (table or mod.routines).values()
             if o.addr is not None and o.addr < r.addr]
     sym = linkmap.lookup(name)
     specs = []
@@ -1041,7 +1135,7 @@ def unit_specs(mod, name, linkmap, table=None):
     if lo < r.addr:
         specs.append('0x%X:%X' % (lo, r.addr - lo))
     specs.append('%s:%X' % (sym.name if sym and sym.addr == r.addr else '0x%X' % r.addr,
-                            r.size))
+                            routine_size(r, starts, linkmap)))
     return specs
 
 
@@ -1075,7 +1169,10 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
     'MISMATCH', or 'SETUP: ...'."""
     import conform
     table = table or mod.routines
-    specs = unit_specs(mod, name, linkmap, table)
+    try:
+        specs = unit_specs(mod, name, linkmap, table)
+    except conform.SetupError as e:          # reading the image (routine_size)
+        return 'SETUP: %s' % e
     if specs is None:
         return 'SETUP: no "Original address" in the header'
     unit = os.path.join(mod.tree, '_unit_%s.pas' % name.replace('$', '_'))
@@ -1500,8 +1597,8 @@ def cmd_run(a):
                 report('%s: %s, routines stubbed: %s' % (path, stage, ', '.join(stubbed) or 'none'),
                        summarise(entries), verbose=a.verbose)
                 if not ok:
-                    print('srcsurvey: %s: %s stage fails outside any routine; stopping'
-                          % (path, stage))
+                    print('srcsurvey: %s: %s stage fails %s; stopping'
+                          % (path, stage, mod.problem or 'outside any routine'))
                     break
         print('srcsurvey: log %s' % os.path.relpath(logp, ROOT))
         settings = module_settings(mod, linkmap)
