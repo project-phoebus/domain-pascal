@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 2c2a368fc86409cff4f40eb233ee8bd76a703e6e
+# source: 7237096d2e16512650b28d04d60681304a57daf8
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -412,3 +412,36 @@ MISMATCH	win/win.pas	win_$dinit
 OK	win/win.pas	win_$error_que
 STUB	win/win.pas	win_$get_stats
 STUB	win/win.pas	win_$cinit
+STUB	xpd/xpd.pas	xpd_$init
+STUB	xpd/xpd.pas	xpd_$find_index
+STUB	xpd/xpd.pas	xpd_$set_ptrace_opts
+STUB	xpd/xpd.pas	xpd_$inq_ptrace_opts
+STUB	xpd/xpd.pas	xpd_$reset_ptrace_opts
+STUB	xpd/xpd.pas	xpd_$inherit_ptrace_options
+STUB	xpd/xpd.pas	xpd_$capture_fault
+STUB	xpd/xpd.pas	xpd_$restart
+STUB	xpd/xpd.pas	xpd_$copy_memory
+STUB	xpd/xpd.pas	xpd_$read_proc_async
+STUB	xpd/xpd.pas	xpd_$read_proc
+STUB	xpd/xpd.pas	xpd_$write_proc
+SETUP	xpd/xpd.pas	xpd_$read
+SETUP	xpd/xpd.pas	xpd_$write
+STUB	xpd/xpd.pas	xpd_$find_debugger_index
+STUB	xpd/xpd.pas	xpd_$register_debugger
+STUB	xpd/xpd.pas	xpd_$set_debugger
+STUB	xpd/xpd.pas	xpd_$get_ec
+STUB	xpd/xpd.pas	xpd_$get_event_and_data
+STUB	xpd/xpd.pas	xpd_$continue_proc
+STUB	xpd/xpd.pas	xpd_$set_enable
+STUB	xpd/xpd.pas	xpd_$get_fp
+STUB	xpd/xpd.pas	xpd_$put_fp
+STUB	xpd/xpd.pas	xpd_$get_target_info
+STUB	xpd/xpd.pas	xpd_$unregister_debugger
+STUB	xpd/xpd.pas	xpd_$cleanup
+STUB	xpd/xpd.pas	xpd_$post_event
+STUB	xpd/xpd_ker.pas	xpd_$get_registers
+STUB	xpd/xpd_ker.pas	xpd_$put_registers
+MISMATCH	xpd/xpd_ker.pas	xpd_$fp_put_state
+MISMATCH	xpd/xpd_ker.pas	xpd_$fp_get_state
+SETUP	xpd/xpd_ker.pas	xpd_$get_fp_int
+SETUP	xpd/xpd_ker.pas	xpd_$put_fp_int
