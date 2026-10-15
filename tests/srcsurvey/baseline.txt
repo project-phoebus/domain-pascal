@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 07360b29b1616fa5790f539c4f77ca90bb05f0e2
+# source: 91c45caac314d82a09d39ba3dd008bded08742b9
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -54,6 +54,32 @@ STUB	dbuf/dbuf.pas	dbuf_$set_buff
 STUB	dbuf/dbuf.pas	dbuf_$invalidate
 STUB	dbuf/dbuf.pas	dbuf_$update_vol
 STUB	dbuf/dbuf.pas	dbuf_$init
+MISMATCH	disk/disk.pas	disk_$get_block
+MISMATCH	disk/disk.pas	disk_$set_buff
+MISMATCH	disk/disk.pas	disk_$invalidate
+STUB	disk/disk.pas	disk_$get_qblks_internal
+MISMATCH	disk/disk.pas	disk_$get_qblks
+MISMATCH	disk/disk.pas	disk_$rtn_qblks_internal
+MISMATCH	disk/disk.pas	disk_$rtn_qblks
+MISMATCH	disk/disk.pas	disk_$init
+STUB	disk/disk.pas	disk_$io_error
+STUB	disk/disk.pas	disk_$sort
+MISMATCH	disk/disk.pas	disk_$init_que
+STUB	disk/disk.pas	disk_$wait_io
+MISMATCH	disk/disk.pas	disk_$wait_que
+STUB	disk/disk.pas	disk_$map_request
+MISMATCH	disk/disk.pas	disk_$write
+MISMATCH	disk/disk.pas	disk_$read
+MISMATCH	disk/disk.pas	disk_$write_protect
+MISMATCH	disk/disk_dev.pas	disk_$register
+STUB	disk/disk_dev.pas	disk_$get_drte
+STUB	disk/disk_dev.pas	disk_$mnt_dinit
+MISMATCH	disk/disk_dev.pas	disk_$do_io
+MISMATCH	disk/disk_dev.pas	disk_$error_que
+STUB	disk/disk_dev.pas	disk_$spin_down
+MISMATCH	disk/disk_dev.pas	disk_$revalid
+STUB	disk/disk_dev.pas	disk_$get_stats
+MISMATCH	disk/disk_dev.pas	disk_$shutdown
 OK	dma/dma.pas	dma_$init_m68450_channel
 STUB	dma/dma.pas	dma_$init
 STUB	dma/dma.pas	dma_$check
