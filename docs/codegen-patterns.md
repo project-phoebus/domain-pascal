@@ -375,9 +375,50 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   pushes `st -(SP)` on one path (0xE6889E) and `clr.w -(SP)` on the other
   (0xE688BC) for the same byte parameter of RIP_$BROADCAST, which reads
   it with `move.b (8,A6),D2` (0xE872A6) (Verified at this site;
-  implemented).  There is no `clr.b -(SP)` and no `move.b #n,-(SP)` at
-  all, so other byte constants (characters) are pushed some other way,
-  not yet catalogued; `dpc` rejects them.
+  implemented).  There is no `clr.b -(SP)`, no `sf -(SP)` and no
+  `move.b #n,-(SP)` at all.  **Other byte constants are word pushes
+  with the byte in the high half, `move.w #n<<8,-(SP)` (Verified;
+  implemented, bead domain-pascal-g5xv).**  Survey (ad-hoc script; each
+  push's call followed to its callee, the slot's first read checked):
+  1422 `move.w #n,-(SP)` in compiled code, 54 of them with a zero low
+  byte.  None of the other 1368 (1292 of them followed) is read as a byte
+  (`move.b (d,A6)`, or `pea (d,A6)` of the slot).  Of the 54, 26 go to
+  byte parameters, all characters:
+  - TTY's tty_$i_buf_put (module-local 0xE1AF42, reads `move.b
+    (8,A6),D2` at 0xE1AF4A): 0xE1AFC0 `move.w #-0x200` (chr(254), the
+    delay escape; `../source/domain_os/tty/i_put_chars.pas`), 0xE1B0C4
+    #0x0800, 0xE1B10C/0xE1B1AE #0x0a00, 0xE1B130/0xE1B17A #0x0d00,
+    0xE1B20A #0x2000;
+  - module-local 0xE1B3B4 (takes `pea (12,A6)` of its byte): 0xE1B608,
+    0xE1B624, 0xE1BB18, 0xE1BB26, 0xE1BB5E, 0xE1BB6C #0x0800, 0xE1B616
+    #0x2000, 0xE1B646 #0x5c00, 0xE1B660 #0x5e00, 0xE1BC92 #0x2f00, and
+    0xE1B67E #0x3f00, which joins a path pushing `move.b D2,-(SP)`
+    (0xE1B686) for the same call;
+  - TTY_$I_RCV 0xE1B92A (`move.b (12,A6),D3`): 0xE1BBDE #0x0a00
+    (0xE1BBBC #0x0d00 reaches the same call by a branch);
+  - SIO2681_$XMIT 0xE1D4FC (`move.b (12,A6),(7,A2)`): SIO2681_$INT
+    0xE1CFDA, 0xE1D036 #0x2000;
+  - TTY_$I_ENABLE_CRASH_FUNC 0xE67292 (`move.b (12,A6),D0`): SIO_$INIT 0xE32E62,
+    TERM_$INIT 0xE331F4 #0x1b00;
+  - SIO_$I_TSTART 0xE1C7D6 #0x1300 and 0xE1C7F8 #0x1100 (XOFF / XON
+    through the driver's routine pointer, `jsr (A1)`;
+    `../source/domain_os/sio/i_tstart.c`).
+
+  The other 28 zero-low-byte word pushes go to word parameters (M$OIS$WLW
+  0xE0AD54 #0x100 ×7 and #0x400 ×1; module-local 0xE47B78 `move.w (12,A6),D2` #0x400;
+  0xE15D8C, 0xE15E62, 0xE15F14, 0xE17828, 0xE4A4C8, 0xE60FD8, 0xE1501A).
+  No word push whose low byte is nonzero is read as a byte.  chr(0) is
+  `clr.w` like `false` (0xE1AFD4, to tty_$i_buf_put); 111 of the 472
+  `clr.w -(SP)` (391 followed) reach a byte slot.  **Not settled (bead domain-pascal-3f6h),
+  `dpc` refuses:** a byte with all bits set other than `true` (chr(255),
+  a signed -1): `move.w #-0x100` is not in compiled code and `st` sites
+  cannot be told from `true` without the callee's type; and a nonzero
+  byte constant next to a word or byte constant: none of the 26 has one
+  (a pad, a pointer, `st` or a non-constant is next to each; SIO_$INIT
+  0xE32E60 `st -(SP)` then 0xE32E62 `move.w #0x1b00` stand unmerged, as
+  `true` does next to `clr.w`), so whether it merges like `false` is
+  unknown.  Constants passed by address (default convention) go to the
+  code-section pool (below) and are unaffected.
 - **Adjacent word constants merged:** two adjacent word constants become
   one longword push.
   - 0xE00EB4 is the MMU_$INSTALL asid.w/prot.w pair, `pea (0x16).w`
@@ -394,7 +435,28 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     boolean `ignore_super` (passed on with `pea (0x12,A6)` at 0xE5D226,
     read by ACL_$RIGHTS as a byte, `move.b (A3),-(SP)` at 0xE46A54) and
     the word after it are one `clr.l -(SP)` at both call sites (0xE73FFC
-    FILE_$TRUNCATE_D, 0xE43DAC).  Conformance unit
+    FILE_$TRUNCATE_D, 0xE43DAC).  Also (bead domain-pascal-g5xv
+    survey; callee reads the low half's slot as a byte): `move.l
+    #0x10000,-(SP)` at AST_$PMAP_ASSOC 0xE04404 and AST_$ASSOC_AREA
+    0xE0466C (callee MMAP_$INSTALL_LIST 0xE0CD80 `move.b (14,A6),D0`),
+    MMAP_$IMPURE_TRANSFER 0xE0CC16 (0xE0C514 `move.b (18,A6),D2`),
+    DISK_$FORMAT_WHOLE 0xE3D2FA and DISK_$FORMAT 0xE3D416 (0xE3BE8A
+    `move.b (10,A6),D3`); RIP_$HALT_ROUTER 0xE873C8 `move.l #0x80000`
+    (RIP_$SEND 0xE871B6); ACL_$CONVERT_FROM_9ACL 0xE48FB6 `move.l #0x4000000`
+    (0xE47B78 `move.b (14,A6),D3`); PROC2_$CREATE 0xE7281A `move.l
+    #0x70000` (MST_$MAP_INITIAL_AREA 0xE42E9E `move.b (24,A6),D4`);
+    PMAP_$WS_SCAN_CALLBACK 0xE145C6 `move.l #0x50000` (MMAP_$WS_SCAN
+    0xE0D364 `tst.b (10,A6)`); `move.l #0x40000` at DIR_$SET_PROTECTION
+    0xE5232A, DIR_$SET_ACL 0xE52D10, DIR_$OLD_FIX_DIR 0xE55D04,
+    DIR_$OLD_DROP_HARD_LINKU 0xE56D30, PACCT_$START 0xE5A846 and
+    AUDIT_$INHERIT_AUDIT 0xE71790 (FILE_$PRIV_LOCK 0xE5F0EE `tst.b
+    (18,A6)`): a word constant and a byte 0 after it, one longword.  The
+    other order as `pea (n).w`: ROUTE_$SEND_USER_PORT 0xE87CE8 `pea
+    (0x2).w`, a byte 0 then the word 2 (SOCK_$PUT 0xE1614E `move.b
+    (14,A6),-(SP)`, `move.w (16,A6),-(SP)`).  No merged longword
+    (`move.l #n` or `pea (n).w`) has a nonzero byte half (re-surveyed in
+    review: every constant longword push followed to a callee reading
+    one of its halves only as a byte).  Conformance unit
     `tests/conformance/file_truncate_d.pas`.  `st -(SP)` for `true`
     stands unmerged next to `clr.w -(SP)` in 33 adjacent pairs
     (0xE05BFC; whether those `clr.w` are word zeros or `false` is not

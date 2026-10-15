@@ -97,6 +97,11 @@ Tests:
   of constants (`clr`, `pea (n).w`, `move.l #n`, merged word pairs, `st`),
   values and addresses, pads, `addq.w`/`lea` pops, no pop when no push
   follows (0xE41050), `jsr` and `bsr.s`/`bsr.w` (0xE00EB0, AST_$PAGE_ZERO 0xE00EEC).
+- `calls/byte_consts` - codegen-patterns 1.5, 1.3 (bead
+  domain-pascal-g5xv): byte constants by value, `move.w #n<<8,-(SP)` with
+  the byte in the high half (TTY 0xE1AFC0 chr(254) `move.w #-0x200`),
+  chr(0) `clr.w` (0xE1AFD4), a char next to `true` pushed separately
+  (SIO_$INIT 0xE32E60/0xE32E62); `[byte]` subranges likewise.
 - `loops/align_off_from` - codegen-patterns 7: `dpc
   --loop-align-off-from` (options in `align_off_from.args`); fillers
   before the named routine, none from it on, the module end padded

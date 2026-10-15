@@ -7526,6 +7526,29 @@ impl Selector {
                     continue;
                 }
             }
+            // A byte constant other than 0 and `true` is a word push
+            // ([`Self::push`]), so it may merge with a word constant next
+            // to it as `false` does; no such pair is in compiled code (the
+            // 26 nonzero byte constants have a pad, a pointer, `st` or a
+            // non-constant next to them), so how is not known.
+            let other_byte = |a: &Arg| {
+                matches!(a, Arg::Value {
+                    value: Expr::Const { value, ty: ty @ Scalar { width: Width::Byte, .. } },
+                    slot: 2,
+                } if *value & 0xff != 0 && !(*value == -1 && *ty == Scalar::BOOLEAN))
+            };
+            if other_byte(a)
+                && [k.checked_sub(2).map(|i| &c.args[i]), c.args.get(k)]
+                    .into_iter()
+                    .flatten()
+                    .any(|b| word_const(b).is_some() || other_byte(b))
+            {
+                return Err(unsupported(
+                    self.span,
+                    "a byte constant argument other than `true` and 0 next to a word or byte \
+                     constant (merged into one longword push?) is",
+                ));
+            }
             self.push(a)?;
             k -= 1;
         }
@@ -7716,9 +7739,12 @@ impl Selector {
     /// - boolean true: `st -(SP)` (0xE1365C; 196 sites); a byte 0
     ///   (`false`) clears its whole slot, `clr.w -(SP)` (RIP_$SEND_UPDATES
     ///   0xE688BC; the callee RIP_$BROADCAST reads the byte, 0xE872A6).
-    ///   No `clr.b -(SP)` or `move.b #n,-(SP)` exists in compiled code, so
-    ///   how other byte constants were pushed is not known: not supported
-    ///   yet;
+    ///   No `clr.b -(SP)` or `move.b #n,-(SP)` exists in compiled code:
+    ///   any other byte constant is a word with the byte in the high half,
+    ///   `move.w #n<<8,-(SP)` (26 sites whose callee reads a byte slot,
+    ///   TTY 0xE1AFC0 `move.w #-0x200` for chr(254)).  Refused: a byte
+    ///   with all bits set other than `true` (no evidence), and a nonzero
+    ///   byte next to a word or byte constant (merged? no evidence);
     /// - a value in memory: `move.<s> <ea>,-(SP)`, a byte with `move.b`
     ///   into the high half of its slot (0xE00EBE `move.l (8,A6),-(SP)`;
     ///   LOG_$READ 0xE17814 `move.w (A0),-(SP)`; KBD_$RCV 0xE1CE56 `move.b
@@ -7773,12 +7799,32 @@ impl Selector {
                         // (0xE872A6); the other path pushes `st -(SP)`
                         // (0xE6889E), so this is `false`.
                         Width::Byte if *v == 0 => self.out.push(Insn::Clr { size: Size::W, dst }),
-                        Width::Byte => {
+                        // Any other byte: the byte in the high half of its
+                        // word slot, the low half 0, pushed as a word
+                        // (codegen-patterns 1.5): all 26 nonzero byte
+                        // constants that reach a callee reading a byte
+                        // slot are `move.w #n<<8,-(SP)` (TTY 0xE1AFC0
+                        // `move.w #-0x200,-(SP)` for chr(254) to
+                        // tty_$i_buf_put, which reads `move.b (8,A6),D2`
+                        // at 0xE1AF4A; SIO_$I_TSTART 0xE1C7D6 #0x1300;
+                        // SIO_$INIT 0xE32E62 #0x1b00).  A byte whose bits
+                        // are all ones other than `true` (chr(255), a
+                        // signed -1) would be `move.w #-0x100` or `st`:
+                        // the first is not in compiled code and an `st`
+                        // cannot be told from `true` without the callee's
+                        // type, so not known (bead domain-pascal-3f6h).
+                        Width::Byte if *v & 0xff == 0xff => {
                             return Err(unsupported(
                                 self.span,
-                                "a byte constant argument other than `true` and 0 is",
+                                "a byte constant argument with all bits set other than `true` \
+                                 (st or move.w #-0x100?) is",
                             ))
                         }
+                        Width::Byte => self.out.push(Insn::Move {
+                            size: Size::W,
+                            src: Ea::Imm(imm((*v & 0xff) << 8, Width::Word)),
+                            dst,
+                        }),
                     },
                     Expr::Load { addr, ty } => {
                         let src = match addr {
@@ -13142,16 +13188,56 @@ mod tests {
             let f = proc_(0, vec![ext("P", vec![val(e)], 0), ext("Q", vec![], 0)]);
             assert_eq!(body_text(&f)[0], want);
         }
-        // Other bytes: not catalogued.
+        // Other bytes: in the high half of a word push (0xE1AFC0 chr(254)
+        // `move.w #-0x200`; 0xE1C7D6 0x13 `move.w #0x1300`).
+        let byte = |v| konst(v, Scalar::unsigned(Width::Byte));
+        for (v, want) in [
+            (254, "move.w\t#-0x200,-(%sp)"),
+            (0x13, "move.w\t#0x1300,-(%sp)"),
+            (0x7f, "move.w\t#0x7f00,-(%sp)"),
+        ] {
+            let f = proc_(
+                0,
+                vec![ext("P", vec![val(byte(v))], 2), ext("Q", vec![], 0)],
+            );
+            assert_eq!(body_text(&f)[1], want);
+        }
+        // A signed byte -2: the same bits as 254.
+        let f = proc_(
+            0,
+            vec![
+                ext("P", vec![val(konst(-2, Scalar::signed(Width::Byte)))], 2),
+                ext("Q", vec![], 0),
+            ],
+        );
+        assert_eq!(body_text(&f)[1], "move.w\t#-0x200,-(%sp)");
+        // All bits set other than `true`: st or move.w #-0x100?  Not known.
+        let f = proc_(0, vec![ext("P", vec![val(byte(255))], 2)]);
+        assert!(err(&f).starts_with("a byte constant argument with all bits set"));
+        // Next to a word constant or another such byte: merged?  Not known.
+        let f = proc_(
+            0,
+            vec![ext("P", vec![val(byte(0x41)), val(konst(1, word()))], 0)],
+        );
+        assert!(err(&f).contains("next to a word or byte constant"));
+        let f = proc_(
+            0,
+            vec![ext("P", vec![val(konst(0, word())), val(byte(0x41))], 0)],
+        );
+        assert!(err(&f).contains("next to a word or byte constant"));
+        let f = proc_(0, vec![ext("P", vec![val(byte(0x41)), val(byte(0x42))], 0)]);
+        assert!(err(&f).contains("next to a word or byte constant"));
+        // Next to `true` (`st`): separate pushes (SIO_$INIT 0xE32E60 `st
+        // -(SP)` then 0xE32E62 `move.w #0x1b00,-(SP)`).
         let f = proc_(
             0,
             vec![ext(
                 "P",
-                vec![val(konst(0x41, Scalar::unsigned(Width::Byte)))],
-                2,
+                vec![val(byte(0x1b)), val(konst(-1, Scalar::BOOLEAN))],
+                0,
             )],
         );
-        assert!(err(&f).starts_with("a byte constant argument other than `true` and 0"));
+        assert_eq!(body_text(&f)[..2], ["st\t-(%sp)", "move.w\t#0x1b00,-(%sp)"]);
     }
 
     #[test]
