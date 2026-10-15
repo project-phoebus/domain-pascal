@@ -930,8 +930,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     0xE1248E favours it over 4-byte slots per object: a word local at
     `(-2,A6)` (0xE124A8) and its word result variable share `link #-4`
     (one site; the Uncertain point stays open).
-  - **Frame size (model; items 1 and 3's slot Verified by survey, the
-    result's position Uncertain; bead domain-pascal-9mr):**
+  - **Frame size (model; items 1 and 3's slot Verified by survey, item
+    4 by ../source's Pascal, the result's and item 4's positions
+    Uncertain; beads domain-pascal-9mr, -s9g0):**
     the frame holds, from the top down,
     1. a **4-byte slot for a routine that is not a global symbol**
        (nested, or `internal`: unnamed in the map), never addressed except
@@ -944,7 +945,17 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
        not the code ever keeps them in memory ("Untouched frames" below);
     3. a function's **result variable**, below the locals (its place is
        Uncertain: sites both ways, see below);
-    4. the **temporaries** of expressions passed by address (section
+    4. a **4-byte slot for each `with` temporary of an array element's
+       address** (section 5.2, "`with`"), longword aligned, though the
+       code mostly holds the temporary in an address register and never
+       addresses the slot (survey below, "Frame bytes no instruction
+       addresses"; below the declared locals where the code does store
+       it, MAC_$SEND and MAC_OS_$SEND below; its place relative to item
+       5 is not visible: `dpc` puts it above; bead domain-pascal-s9g0);
+       none for a pointer's temporary (`with p^`): the one site,
+       HINT_$ADD_NET 0xE49C76, has `link #0` (Uncertain, one site; bead
+       domain-pascal-njy0);
+    5. the **temporaries** of expressions passed by address (section
        1.5: TONE_$ENABLE 0xE1ACE8, the temporary at -8 below the status
        at -4), shared by the calls of the routine (implemented, bead
        domain-pascal-5aw.9);
@@ -1044,10 +1055,117 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     **Implemented** (`dpc-sema` `routine_body`: the frame of a routine that
     is not `global` starts at 4; the result variable is allocated after
     the declarations; test `frame_size_model` in
-    `crates/dpc-sema/src/tests/table5_1.rs`).  The conformance units that
-    declared stand-in locals for 0xE32B76, 0xE68864 and 0xE3CCCE no longer
-    do; `ast_page_zero.pas` and `pending/log_read.pas` keep 4 stand-in
-    bytes each, `rem_name_register_server.pas` its 8.
+    `crates/dpc-sema/src/tests/table5_1.rs`; the `with` slots, `dpc-ir`
+    `with_slots`, test `with_temporaries_keep_frame_slots`).  The
+    conformance units that declared stand-in locals for 0xE32B76,
+    0xE68864, 0xE3CCCE and MMAP_$AVAIL 0xE0CC64 no longer do;
+    `ast_page_zero.pas` and `pending/log_read.pas` keep 4 stand-in bytes
+    each, `rem_name_register_server.pas` its 8, `ec2_init.pas` and
+    `acl_clear_super.pas` 4 (no `with` there: EC2_$INIT's record is its
+    `out` parameter's, reached through the slot without a temporary in
+    `dpc`; ACL_$CLEAR_SUPER's element is a word).
+  - **Frame bytes no instruction addresses (survey; the `with` rule
+    Verified on ../source's Pascal and implemented, the rest not
+    settled; beads domain-pascal-s9g0, -kwu, -nda).**  Which objects the
+    code keeps in registers still have a slot?  Register-held *declared*
+    locals do (section 12.5).  For the compiler's own objects:
+    - *`with` temporaries of element addresses: a 4-byte slot each;
+      of pointers: none (Uncertain).*  ../source's Pascal at
+      e534fb11, with every local its translators marked as a stand-in
+      removed (141), compiled by `tools/srcsurvey.py` with and without
+      the slots and compared by `tools/framesurvey.py srclinks`: of the
+      196 routines that compile, the 12 whose `with` statements need a
+      temporary are the ones whose frame changes, all 12 toward the
+      image's `link`, 9 to it
+      (MMAP_$AVAIL, MMAP_$WIRE, MMAP_$UNWIRE, MMAP_$GET_WS_SIZ, MMAP_$FREE,
+      MAC_$CLOSE, TPAD_$SET_PUNCH_IMPACT, TPAD_$INQ_PUNCH_IMPACT, and
+      TERM_$SET_REAL_LINE_DISCIPLINE with two temporaries: 8 bytes), none
+      past it.  The other three still lack 4 bytes: BAT_$CANCEL 0xE3BAF6
+      (`link #-8`, `with bat_data[vol_idx], hdr do`: the image forms the
+      second record's address as a temporary of its own, `lea
+      (0,A5,D2.w),A0; move.l A0,D0; movea.l D0,A0`, 0xE3BB24, where
+      `dpc` reaches `hdr` through the first; 8 bytes for two
+      temporaries), VOLX_$SHUTDOWN 0xE6B508 and
+      PCHIST_$UNIX_PROFIL_ADDUPC 0xE5CFAC (4 bytes each not explained).  Image
+      sites that fit (not compiled from ../source's Pascal):
+      NETLOG_$LOG_IT 0xE71B38 `link #-24` (18 bytes of locals),
+      XPD_$FIND_INDEX 0xE5AF38 `link #-8` (a word at -2),
+      AST_$INVALIDATE_PAGE 0xE00F16 `link #-4`, the five TPAD routines of
+      ../source's finding 35 (`link #-4`, nothing addressed; TPAD_$SET_UNIT,
+      the same code without the record, `link #0`).  PEB_$ASSOC 0xE5AD38 and
+      PEB_$DISSOC 0xE5ADA4 (`link #-4`) load another unit's record's
+      address into an address register (`movea.l #0xE24C78,A0`) where
+      `dpc` binds a `with` over a variable to its absolute address with
+      no temporary (section 5.2), so their code differs as well as their
+      frame (bead domain-pascal-mkub).  Shared element addresses that are
+      not `with` records cost nothing (PROC2_$GET_TTY_DATA 0xE41BB8
+      `link #0`: ../source finding 35's review), so the rule is about
+      the source construct, which the image cannot show directly; and
+      ../source's `with` statements are its translators' readings, not
+      the original source, so "Verified" here means "fits that reading".
+      Wider, by `dpc --dump-locals` (frames before code generation, so
+      the routines that do not compile count too) over the same tree
+      without stand-ins, HEAD against the rule: 72 routines' frames
+      change; 47 reach the image's `link`, 20 stay short of it, and every
+      temporary of the 47 is an array element's (`mmap[vpn]`,
+      `xpd_$targets[target]`, `proc2_$info[index]`, ...).  Past the
+      `link`: HINT_$ADD_NET 0xE49C76, `link #0`, ../source's `with
+      hint_$hintfile_ptr^ do` (the pointer loaded once into A0, 0xE49C96,
+      for two stores) where a slot per pointer temporary would give
+      `link #-4`: a pointer's temporary has no fitting site and this one
+      against it, so `dpc` gives pointer temporaries no slot (HEAD's
+      behaviour before the rule; Uncertain, one site: the original
+      source may have had no `with` there; bead domain-pascal-njy0); BAT_$ALLOC_VTOCE 0xE3AEC0 by 4 (two element
+      temporaries beside eight register-held locals the translators
+      chose); APP_$RECEIVE and MMAP_$ALLOC_PAGES_FROM_WSL only through
+      locals that are not marked stand-ins (APP_$RECEIVE's
+      `unused_68`, 24 bytes) or already past it without the slots.
+      BAT_$RESERVE 0xE3BA74 (`link #-8`, `with bat_data[vol_idx], hdr
+      do`) forms the second temporary as BAT_$CANCEL does (`move.l A0,D0;
+      movea.l D0,A0`, 0xE3BAAA): 8 bytes for two (bead
+      domain-pascal-mkub).  Where the code does keep the temporary in
+      its slot, the slot is the frame's lowest, below every declared
+      local: MAC_$SEND 0xE0BB12 (`link #-128`; `lea (0,A5,D0.w),A0`, then
+      `move.l A0,(-0x80,A6)` 0xE0BB44, reloaded at 0xE0BB9E after
+      FIM_$CLEANUP) and MAC_OS_$SEND 0xE0B5A8 (`link #-72`; `move.l
+      A3,(-0x48,A6)` 0xE0B5DC), ../source's `with
+      mac_os_$channel_table[channel] do` (a slot made for a value live
+      across a call would give the same bytes).  Neither has a temporary
+      passed by address, so whether the `with` slots lie above or below
+      those (item 5) is not visible; no conformance unit, golden or
+      compiled ../source routine has both.
+    - *Other register-held compiler objects: no rule fits*
+      (`tools/framesurvey.py hidden`, every routine with a `link`,
+      1635; and ../source's Pascal, 518 routines with a header address,
+      106 with stand-in locals).  Per hypothesis: routines it predicts
+      bytes for / routines whose frame has no room for them (more than
+      the unaddressed bytes, an upper bound: refuted) / untouched frames
+      of map-named procedures (258, `link` > 0) where round4(P) is the
+      `link` / routines with stand-ins where it gives their bytes / of
+      the 412 without stand-ins, where it gives 0:
+
+      | 4 bytes per ... | P > 0 | refuted | untouched exact | stand-ins | none |
+      |---|---|---|---|---|---|
+      | (nothing; the one "refuted" addresses its reserved slot, 0xE70396) | 0 | 1 | 0 | 0 / 106 | 412 |
+      | element address formed as a value (`lea (d,An,Xn),Am`) | 622 | 116 | 43 | 15 | 280 |
+      | ... once per routine | 622 | 43 | 37 | 21 | 280 |
+      | `dbf` loop (2 bytes instead: 17 refuted, 12, 12) | 522 | 24 | 15 | 10 | 314 |
+      | by-address slot read in place (a value parameter's copy kept in a register; its own size instead: 90 refuted, 29, 31) | 475 | 106 | 37 | 25 | 319 |
+      | saved register D2-D7/A2-A4 | 1295 | 626 | 53 | 22 | 107 |
+      | saved address register | 1171 | 273 | 66 | 28 | 145 |
+      | address register stepped in place (`addq.l`, `lea (k,An),An`) | 316 | 20 | 11 | 4 | 344 |
+
+      Each is refuted by routines whose frame has no room for it (e.g.
+      PROC2_$GET_TTY_DATA, two `lea (0,A0,D0.w)` and `link #0`), and
+      none predicts the stand-ins' bytes in more than 31 of 106.  A slot
+      per stepped pointer, tried in `dpc` like the `with` slots, fits
+      0xE00EB0 (`link #-12`: reserved slot, index, the `clr.l (A0)+`
+      pointer) and VOLX_$SHUTDOWN, but HINT_$LOOKUP_CACHE 0xE49D06 and
+      HINT_$ADD_CACHE 0xE49D88 (`link #-4`: the index's word only, though
+      A0 is stepped by `lea (12,A0),A0`, 0xE49D68, 0xE49DDC) refute it.  What the TTY_$K_ routines'
+      4 bytes (20 routines, ../source tty/k_flush.pas), ACL_$CLEAR_SUPER
+      0xE46FF8 and EC2_$INIT 0xE42C60 (`link #-4`, nothing addressed, no
+      `with`-shaped access) held is not known.
   - **Frame layout: alignment (Verified by survey; implemented; bead
     domain-pascal-ek7).**  Every frame object is at least word aligned,
     and 4-byte scalars are longword aligned.  `tools/framesurvey.py
@@ -1176,7 +1294,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     `for` loop costs no hidden slot of 4 bytes or more; (a) is favoured.
     The unnamed routines among these (0xE00EB0, the KBD module-local
     0xE1CA62, ...) have 4 bytes fewer to explain: their frames start
-    with the reserved slot ("Frame size" above).
+    with the reserved slot ("Frame size" above).  A slot per `dbf` loop
+    (4 or 2 bytes) and per stepped pointer are refuted by routines
+    without room for them ("Frame bytes no instruction addresses"
+    above: 24 (17 for 2 bytes) and 20 routines; HINT_$LOOKUP_CACHE 0xE49D06, a stepped
+    pointer in `link #-4` with its index); 0xE00EB0's 4 bytes would be
+    its `clr.l (A0)+` pointer's slot under the second, so its stand-in
+    stays.
 - **Register save:** straight after `link`, only the callee-saved
   registers the routine uses.  The instruction depends on how many there
   are (Verified, sweep of every `link` at 0xE00800..0xE88834; details and
@@ -3116,8 +3240,9 @@ model run against the bit model of Figure 3-6).
       copied or stored, so read once, and a record element is more than a
       byte): its refusal is tested, not its code.  Golden `data/elem_addr`; exec test
       `elem_addrs`; conformance `mmap_avail.pas` (MMAP_$AVAIL 0xE0CC64,
-      byte-identical with a stand-in local for its `link #-4`, bead
-      domain-pascal-s9g0); test `dpc-m68k` `element_addresses_as_values`.
+      byte-identical, its `link #-4` the `with` temporary's slot, section
+      2 "Frame size", bead domain-pascal-s9g0); test `dpc-m68k`
+      `element_addresses_as_values`.
     **Implemented** (`isel.rs`, `index_ea`, `other_unit_index`,
     `index_reg_with`): the rule above, in straight-line code, one such
     element per statement and per array between calls, at displacements
@@ -3275,13 +3400,19 @@ model run against the bit model of Figure 3-6).
     never stores, the constant displacements in each reference; an
     element through a pointer in memory as at NETLOG_$LOG_IT (index,
     pointer, `lea`).
-  Uncertain: whether the original reserved a frame slot for the
-  temporary (NETLOG_$LOG_IT's `link #-24` has 6 bytes no instruction
-  addresses below its 18 of locals, enough for a 4-byte temporary or a
-  local; MMAP_$AVAIL 0xE0CC64, MMAP_$WIRE 0xE0CCBC and
-  AST_$INVALIDATE_PAGE 0xE00F16 have `link #-4`, the element address
-  in A2/A3 and no other local in ../source's C, and XPD_$FIND_INDEX 0xE5AF38 `link
-  #-8` beside its word at -2: bead domain-pascal-s9g0), and whether it copied a pointer already held in a register
+  An element's temporary keeps a 4-byte frame slot that no instruction
+  addresses (survey Verified on ../source's Pascal; implemented; section
+  2, "Frame size", item 4; bead domain-pascal-s9g0): NETLOG_$LOG_IT's
+  `link #-24` (18 bytes of locals), MMAP_$AVAIL 0xE0CC64, MMAP_$WIRE
+  0xE0CCBC and AST_$INVALIDATE_PAGE 0xE00F16 `link #-4` (the element
+  address in A2/A3, no other local in ../source's C), XPD_$FIND_INDEX
+  0xE5AF38 `link #-8` (a word at -2); stored in it where the code keeps
+  it in memory, MAC_$SEND 0xE0BB44 `move.l A0,(-0x80,A6)`.  Every
+  fitting site is an array element's temporary.  A pointer's (`with
+  p^`) gets no slot: HINT_$ADD_NET 0xE49C76 `link #0` is against one if
+  its source is a `with`, and no site fits one (Uncertain, one site;
+  bead domain-pascal-njy0).  Uncertain:
+  whether it copied a pointer already held in a register
   (dpc goes through the variable when it is stable, as above, and
   copies a register-held local's pointer with `movea.l Dn,An`
   otherwise).  Refused: a `with` over a volatile record reached at run
@@ -5613,7 +5744,7 @@ scripts besides, not kept, are named as such below; re-check sites with
   0xE1CE44` (0xE1CE6C..0xE1CE80); the head 0xE1CE44 is `tst.w D0; bne.s
   <test>`.  The byte at -0x1E lies below the -0x1C temporary (`move.l
   A0,(-0x1c,A6); pea (-0x1c,A6)`, 0xE1CDFC), so it is a temporary
-  (section 2, "Frame size", item 4).  No other site looked for.  `dpc`
+  (section 2, "Frame size", item 5).  No other site looked for.  `dpc`
   tests D0 straight after the call and reads the local in the body
   (lead: ../source pascal-translation-notes finding 28; bead
   domain-pascal-b8dz).
@@ -5948,7 +6079,12 @@ scripts besides, not kept, are named as such below; re-check sites with
   (The DISK_ module-local 0xE3CCCE, `while`, one 4-byte local held in
   A1, `link #-8`, once counted here as unused space, is explained by the
   reserved slot of a routine that is not a global symbol: section 2,
-  "Frame size".)
+  "Frame size".)  A slot per `dbf` loop or per stepped pointer does not
+  fit either (section 2, "Frame bytes no instruction addresses": 24
+  routines have no room for 4 bytes per `dbf` loop, 20 for 4 bytes per
+  stepped address register; HINT_$LOOKUP_CACHE 0xE49D06 and HINT_$ADD_CACHE
+  0xE49D88, a pointer stepped by `lea (12,A0),A0` and `link #-4`, the
+  index's word; bead domain-pascal-s9g0).
 - **`exit` and `next`** (ref pp. 4-77, 4-123): a jump to the loop's exit
   (after `dbf` or after the bottom test) or to its continuation (the
   `for` step, the `while`/`repeat` test).  The image cannot tell them
@@ -8090,7 +8226,11 @@ domain-pascal-kwu): the unsigned `bls` (0xE42C6E) from
 `linteger(addr(ec)) > 1000` (section 5, "Signedness"), but its `link
 #-4` from a stand-in local, `unused_4`: what the 4 bytes held is not
 settled (EC2_$READ `link #-12` with 8 used, EC2_$ADVANCE `link #-4`
-with none: a local held in a register, 12.5, would fit all three).
+with none: a local held in a register, 12.5, would fit all three; so
+would a `with ec do` temporary, section 2 "Frame size" item 4, if the
+original formed one for a parameter's record, which `dpc` does not;
+the survey of section 2, "Frame bytes no instruction addresses", finds
+no compiler object that explains them).
 OSINFO_$GET_MMAP: bead domain-pascal-2q2.
 
 **Uncertain:**
@@ -9780,7 +9920,13 @@ stores for the check of adjacent stores (ref 3.15.3, p. 3-57; `isel.rs`
 pushing of a stored local from its register (`Selector::forwarded`,
 TTY_$I_BUF_PUT above).  A local every read of which pushes it stays in
 its slot (with the forwarding below).  The frame slot of every local
-stays allocated (`dpc-sema` frame size).  Not reproduced: the two
+stays allocated (`dpc-sema` frame size), and so does one for each
+`with` temporary of an element address, held in an address register as
+well (section 2, "Frame size" item 4; bead domain-pascal-s9g0; a
+pointer's temporary gets none, bead domain-pascal-njy0); for the compiler's
+other register-held objects (element addresses, stepped pointers,
+loop counts) no slot rule fits and `dpc` gives them none (section 2,
+"Frame bytes no instruction addresses").  Not reproduced: the two
 exceptions above (in a register in `dpc`), register pressure (refused
 when it runs out; the original spills earlier, at four or more of D2-D7
 in the C corpus), TTY_$I_NEWLINE's `send_cr := true` as `move.b D0,D2`

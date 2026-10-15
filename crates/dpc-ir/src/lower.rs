@@ -1051,6 +1051,37 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     }
 }
 
+/// The frame of `frame` bytes of locals (and result variable) with a
+/// 4-byte slot for each of `n` array-element `with` temporaries
+/// ([`Function::with_temps`], the [`Addr::Index`] case of
+/// [`Cx::with_stmt`]) below them, longword aligned as a pointer local
+/// is: the selector holds each temporary in an address register and
+/// never addresses its slot, but the original compiler reserved one
+/// (codegen-patterns 2, "Frame size", and 5.2, "`with`"; bead
+/// domain-pascal-s9g0).  Fitted to ../source's Pascal, stand-ins
+/// removed: of its routines that compile, the 12 with element
+/// temporaries all come closer to the image's `link` and 9 meet it
+/// (MMAP_$AVAIL 0xE0CC64, MMAP_$WIRE 0xE0CCBC, MMAP_$UNWIRE,
+/// MMAP_$GET_WS_SIZ, MMAP_$FREE, MAC_$CLOSE, TPAD_$SET_PUNCH_IMPACT,
+/// TPAD_$INQ_PUNCH_IMPACT, TERM_$SET_REAL_LINE_DISCIPLINE with two);
+/// the frame of no other routine changes; NETLOG_$LOG_IT 0xE71B38 (18
+/// bytes of locals, `link #-24`) and XPD_$FIND_INDEX 0xE5AF38 (a word,
+/// `link #-8`) fit too.  A pointer's temporary (`with p^`) gets no
+/// slot: the one such site, HINT_$ADD_NET 0xE49C76, has `link #0`
+/// while it loads the pointer into A0 for two stores (Uncertain, one
+/// site; bead domain-pascal-njy0).  Where the code stores the
+/// temporary, its slot is below the declared locals (MAC_$SEND
+/// 0xE0BB44 `move.l A0,(-0x80,A6)`, `link #-128`); whether above or
+/// below the call temporaries is not visible: here above them
+/// ([`assign_temps`]), Uncertain.
+pub(crate) fn with_slots(frame: u32, n: usize) -> u32 {
+    if n == 0 {
+        frame
+    } else {
+        frame.div_ceil(4) * 4 + 4 * n as u32
+    }
+}
+
 /// Give every expression passed by address ([`Arg::Temp`]) its frame
 /// temporary, and return the frame size with them (`frame` without).
 ///
@@ -1236,18 +1267,18 @@ fn lower_routine_in_context(
     };
     // A function whose result type was just reported is not lowered
     // further: its result assignment would only repeat that error.
-    let (mut body, with_temps) = if r.result.is_some() && result.is_none() {
-        (Vec::new(), Vec::new())
+    let (mut body, with_temps, elem_temps) = if r.result.is_some() && result.is_none() {
+        (Vec::new(), Vec::new(), 0)
     } else {
         match lower_body(p, id, r, result, uplevel) {
             Ok(b) => b,
             Err(d) => {
                 errors.push(d);
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), 0)
             }
         }
     };
-    let frame_size = assign_temps(&mut body, r.frame_size);
+    let frame_size = assign_temps(&mut body, with_slots(r.frame_size, elem_temps));
     set_call_sections(p, &r.code_section, &mut body);
     let param_copies = param_copies(p, r).unwrap_or_else(|d| {
         errors.push(d);
@@ -2074,7 +2105,7 @@ fn lower_body(
     r: &Routine,
     result: Option<ResultSpec>,
     uplevel: &[(i32, u32)],
-) -> Res<(Vec<Stmt>, Vec<i32>)> {
+) -> Res<(Vec<Stmt>, Vec<i32>, usize)> {
     let block = r.body.as_ref().expect("routine with a body");
     let labels = routine_labels(&block.stmts)?;
     let cx = Cx {
@@ -2085,9 +2116,11 @@ fn lower_body(
         labels,
         uplevel,
         with_temps: Default::default(),
+        with_elem_temps: Default::default(),
     };
     let out = cx.seq(&block.stmts)?;
     let with_temps = cx.with_temps.into_inner();
+    let elem_temps = cx.with_elem_temps.get();
     check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
     if r.result.is_some() {
@@ -2105,7 +2138,7 @@ fn lower_body(
             ));
         }
     }
-    Ok((out, with_temps))
+    Ok((out, with_temps, elem_temps))
 }
 
 /// No `for` loop of `body` has an index that a nested routine reaches
@@ -2404,6 +2437,9 @@ struct Cx<'a> {
     uplevel: &'a [(i32, u32)],
     /// The `with` temporaries allocated so far ([`Function::with_temps`]).
     with_temps: std::cell::RefCell<Vec<i32>>,
+    /// How many of [`Self::with_temps`] hold an array element's address
+    /// (the ones given a frame slot: [`with_slots`]).
+    with_elem_temps: std::cell::Cell<usize>,
 }
 
 thread_local! {
@@ -2914,21 +2950,28 @@ impl Cx<'_> {
                     ));
                 }
                 let (value, offset) = match a {
+                    // A pointer's temporary: no frame slot (HINT_$ADD_NET
+                    // 0xE49C76 `link #0`; Uncertain, bead
+                    // domain-pascal-njy0).
                     Addr::Indirect { base, offset } => (*base, offset),
+                    // An element's: a frame slot ([`with_slots`]).
                     Addr::Index {
                         base,
                         index,
                         scale,
                         offset,
-                    } => (
-                        Expr::AddrOf(Addr::Index {
-                            base,
-                            index,
-                            scale,
-                            offset: 0,
-                        }),
-                        offset,
-                    ),
+                    } => {
+                        self.with_elem_temps.set(self.with_elem_temps.get() + 1);
+                        (
+                            Expr::AddrOf(Addr::Index {
+                                base,
+                                index,
+                                scale,
+                                offset: 0,
+                            }),
+                            offset,
+                        )
+                    }
                     _ => return Err(unsupported(rec.span, "this `with` record is")),
                 };
                 let mut temps = self.with_temps.borrow_mut();

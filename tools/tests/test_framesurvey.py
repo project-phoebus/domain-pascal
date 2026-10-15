@@ -81,6 +81,80 @@ class FrameSurveyTest(unittest.TestCase):
         r = ins('linkw %fp,#-4', 'movew %fp@(-6),%d0', 'movew %fp@(8),%d1')
         self.assertEqual(framesurvey.accesses(r, -4), [])
 
+    # ---- hidden (bead domain-pascal-s9g0)
+
+    def test_used_bytes(self):
+        # sizes from the access; one byte for pea and indexed operands;
+        # nothing outside the link area or from the movem restore
+        r = ins('linkw %fp,#-16', 'movew %d0,%fp@(-2)', 'pea %fp@(-8)',
+                'movel %fp@(-12,%d0:w),%d1', 'moveml %fp@(-24),%d2/%a2',
+                'movel %fp@(8),%d2', 'movel %d1,%fp@(-20)')
+        self.assertEqual(framesurvey.used_bytes(r, -16), {-2, -1, -8, -12})
+
+    def test_counts(self):
+        # MMAP_$AVAIL 0xE0CC80: one element address; KBD 0xE1CA62-like dbf
+        r = ins('lea %a0@(0,%d0:l),%a2', 'lea %a5@(12),%a0', 'dbf %d0,0x100',
+                'lea %a0@(12),%a0', 'addql #4,%a1')
+        self.assertEqual(framesurvey.elem_leas(r), 1)
+        self.assertEqual(framesurvey.dbf_loops(r), 1)
+        self.assertEqual(framesurvey.stepped_regs(r), {'%a0', '%a1'})
+
+    def test_saved_regs(self):
+        r = ins('linkw %fp,#-8', 'moveml %d2-%d4/%a2-%a3/%a5,%sp@-')
+        self.assertEqual(framesurvey.saved_regs(r), {'d2', 'd3', 'd4', 'a2', 'a3'})
+        self.assertEqual(framesurvey.saved_regs(ins('linkw %fp,#-4', 'pea %a2@')), {'a2'})
+        self.assertEqual(framesurvey.saved_regs(ins('linkw %fp,#-4', 'pea %a5@')), set())
+
+    def test_slot_reads(self):
+        # TTY_$K_SET_FLAG 0xE67422: the line read in place and pushed, the
+        # flag read into D0; a slot copied into the frame is left out
+        r = ins('linkw %fp,#-8', 'moveal %fp@(8),%a0', 'movew %a0@,%sp@-',
+                'jsr 0xe66738', 'moveal %fp@(12),%a0', 'movew %a0@,%d0',
+                'moveal %fp@(16),%a1', 'movel %a1@,%fp@(-4)')
+        self.assertEqual(framesurvey.slot_reads(r), {8: 'w', 12: 'w'})
+
+    def test_standin_bytes(self):
+        decls = """
+  tty: tty_$desc_ptr_t;                   { (-0x4,A6): A2 }
+  unused_8: integer32;                    { (-0x8,A6): stand-in, see
+                                            the TODO }
+  unused_a: integer;                      { -0xA: the stand-in (TODO) }
+  unused_30: array[1..3] of integer32;    { -0x30: the stand-in (TODO) }
+  odd: array[1..3] of char;               { stand-in }
+  pad: weird_t;                           { stand-in }
+"""
+        self.assertEqual(framesurvey.standin_bytes(decls), (4 + 2 + 12 + 4, ['pad']))
+
+    def test_image_fit(self):
+        f = lambda **k: dict(dict(L=4, free=4, untouched=True, reserved=0, func=False,
+                                  elem=0, dbf=0, slots={}, saved=set(), stepped=set()), **k)
+        fs = [f(elem=1), f(L=0, free=0, elem=1), f(L=8, free=8)]
+        rows = {r[0].split(':')[0]: r[1:] for r in framesurvey.image_fit(fs)}
+        # elem: two predict, one refuted (no room), one exact of three
+        self.assertEqual(rows['elem'], (2, 1, 1, 2))
+        self.assertEqual(rows['none'], (0, 0, 0, 2))
+
+    def test_unit_link(self):
+        text = ('\t.globl\tA\nA:\n\tlink.w\t%fp,#-0xc\n\trts\n'
+                'B:\n\trts\nC:\n\tlink.w\t%fp,#0\n\trts\n')
+        self.assertEqual(framesurvey.unit_link(text, 'a'), -12)
+        self.assertIsNone(framesurvey.unit_link(text, 'b'))
+        self.assertEqual(framesurvey.unit_link(text, 'c'), 0)
+        self.assertIsNone(framesurvey.unit_link(text, 'd'))
+
+    def test_compare_links(self):
+        names = {'a': 1, 'b': 2, 'c': 3, 'd': 4}
+        img = {1: -4, 2: -8, 3: -8, 4: 0}
+        before = {'a': 0, 'b': -8, 'c': 0, 'd': 0}
+        after = {'a': -4, 'b': -12, 'c': -4, 'd': 0}
+        fixed, broke, closer, farther, n0, n1 = framesurvey.compare_links(
+            names, before.get, after.get, img.get)
+        self.assertEqual([x[0] for x in fixed], ['a'])
+        self.assertEqual([x[0] for x in broke], ['b'])
+        self.assertEqual([x[0] for x in closer], ['c'])
+        self.assertEqual(farther, [])
+        self.assertEqual((n0, n1), (2, 2))
+
 
 if __name__ == '__main__':
     unittest.main()

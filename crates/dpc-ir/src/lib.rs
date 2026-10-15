@@ -193,7 +193,9 @@ pub struct Function {
     /// inherits.
     pub data_section: String,
     /// Bytes of frame used below the frame pointer, raw (not rounded):
-    /// `dpc_sema::Routine::frame_size`.
+    /// `dpc_sema::Routine::frame_size`, then the slots of the `with`
+    /// temporaries ([`Self::with_temps`]) and of the temporaries passed
+    /// by address ([`Arg::Temp`]).
     pub frame_size: u32,
     /// The function result, if this is a function.
     pub result: Option<ResultSpec>,
@@ -260,7 +262,11 @@ pub struct Function {
     /// one with a [`StmtKind::Store`] at the statement's start and reaches
     /// the record as [`Addr::Indirect`] on its [`Expr::Load`]; the selector
     /// holds each in an address register, never in memory (codegen-patterns
-    /// 5.2, "`with`").
+    /// 5.2, "`with`"), but [`Function::frame_size`] reserves a 4-byte slot
+    /// for each that holds an array element's address, as the original
+    /// did (codegen-patterns 2, "Frame size"; bead domain-pascal-s9g0);
+    /// a pointer's gets none (HINT_$ADD_NET 0xE49C76; Uncertain, bead
+    /// domain-pascal-njy0).
     pub with_temps: Vec<i32>,
     pub body: Vec<Stmt>,
     pub span: Span,

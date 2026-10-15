@@ -46,7 +46,8 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 `(-2,A0,D1.w)`; bead domain-pascal-rlnm); `mmap_avail.pas` (MMAP_$AVAIL
 0xE0CC64: an element of another unit's array as a `with` record live
 across a call, `movea.l #MMAP,A0; move.l D2,D0; lsl.l #4,D0; lea
-(0,A0,D0.l),A2`; bead domain-pascal-o1kl).
+(0,A0,D0.l),A2`; bead domain-pascal-o1kl; its `link #-4` the `with`
+temporary's slot, bead domain-pascal-s9g0).
 `time_q_init_queue.pas` starts at TIME_$Q_INIT 0xE16C5C, an empty
 procedure (codegen-patterns 2, bead domain-pascal-lkr), and
 `mt_release.pas` is the whole one-routine MT module (MT_$RELEASE

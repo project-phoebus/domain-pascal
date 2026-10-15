@@ -4672,9 +4672,11 @@ fn with_statements() {
         )
     };
     let f = |body: &str| lower_src(&src(body)).unwrap().functions[0].clone();
-    // A variable: no code, the references as written.
+    // A variable: no code, the references as written; no frame slot
+    // (the frame is `lp`'s 4 bytes).
     let a = f("with g do begin a := 1; b := 2 end;");
     assert!(a.with_temps.is_empty());
+    assert_eq!(a.frame_size, 4);
     assert!(matches!(
         &a.body[0].kind,
         StmtKind::Store {
@@ -4699,6 +4701,9 @@ fn with_statements() {
     // A unit pointer: a temporary, its references at their displacements.
     let a = f("with p^ do begin a := 1; b := 2 end;");
     assert_eq!(a.with_temps, vec![crate::lower::WITH_TEMP_BASE]);
+    // No frame slot for a pointer's temporary (HINT_$ADD_NET 0xE49C76
+    // `link #0`; Uncertain, bead domain-pascal-njy0): `lp`'s 4 bytes.
+    assert_eq!(a.frame_size, 4);
     let tmp = Addr::Frame(crate::lower::WITH_TEMP_BASE);
     assert!(
         matches!(&a.body[0].kind, StmtKind::Store { addr, value: Expr::Load { addr: Addr::Static(_), .. } } if *addr == tmp)
@@ -4719,6 +4724,9 @@ fn with_statements() {
     // the references.
     let a = f("with arr[i] do b := 2;");
     assert_eq!(a.with_temps.len(), 1);
+    // Its 4-byte slot below the locals, never addressed (bead
+    // domain-pascal-s9g0).
+    assert_eq!(a.frame_size, 8);
     let StmtKind::Store {
         value:
             Expr::AddrOf(Addr::Index {
@@ -4756,6 +4764,66 @@ fn with_statements() {
     let a = f("with p^ : x do with x do b := 2;");
     assert_eq!(a.with_temps.len(), 1);
     assert_eq!(a.body.len(), 2);
+    assert_eq!(a.frame_size, 4);
+}
+
+/// Each `with` temporary of an array element keeps a longword-aligned
+/// 4-byte frame slot below the locals (codegen-patterns 2, "Frame size";
+/// bead domain-pascal-s9g0): MMAP_$AVAIL 0xE0CC64 `link #-4` with no
+/// locals, XPD_$FIND_INDEX 0xE5AF38 `link #-8` with a word local,
+/// NETLOG_$LOG_IT 0xE71B38 `link #-24` with 18 bytes of locals,
+/// TERM_$SET_REAL_LINE_DISCIPLINE two.  A pointer's temporary keeps none
+/// (HINT_$ADD_NET 0xE49C76 `link #0`; Uncertain, bead domain-pascal-njy0).
+#[test]
+fn with_temporaries_keep_frame_slots() {
+    use crate::lower::with_slots;
+    assert_eq!(with_slots(6, 0), 6);
+    assert_eq!(with_slots(0, 1), 4);
+    assert_eq!(with_slots(2, 1), 8);
+    assert_eq!(with_slots(18, 1), 24);
+    assert_eq!(with_slots(8, 2), 16);
+    // The frame and the slots of the temporaries passed by address of
+    // `with <w> do begin q(b + 1); a := 1 end` with a word local `k`.
+    let frame = |w: &str| {
+        let m = lower_src(&format!(
+            "module w;
+type r = record a: integer; b: integer32; end;
+  rp = ^r;
+         var p: rp; arr: array[1..4] of r; i: integer;
+procedure q(in x: integer32); extern;
+         procedure t;
+var k: integer;
+begin
+with {w} do begin q(b + 1); a := 1 end;
+end;
+"
+        ))
+        .unwrap();
+        let f = &m.functions[0];
+        assert_eq!(f.with_temps.len(), 1);
+        let temps: Vec<i32> = f
+            .body
+            .iter()
+            .filter_map(|st| match &st.kind {
+                StmtKind::Call(c) => Some(c),
+                _ => None,
+            })
+            .flat_map(|c| c.args.iter())
+            .filter_map(|a| match a {
+                Arg::Temp { offset, .. } => Some(*offset),
+                _ => None,
+            })
+            .collect();
+        (f.frame_size, temps)
+    };
+    // An element's temporary: above the call temporaries' slots
+    // (Uncertain: the slot is never addressed): `k` at -2, the `with`
+    // slot at -8, the temporary passed by address under it at -12.
+    assert_eq!(frame("arr[i]"), (12, vec![-12]));
+    // A pointer's temporary: no slot, the temporary passed by address
+    // right under `k` (HINT_$ADD_NET 0xE49C76 `link #0`; bead
+    // domain-pascal-njy0).
+    assert_eq!(frame("p^"), (8, vec![-8]));
 }
 
 /// One-byte integers (`[byte]` subranges, ref 3.15.5): widened to a word

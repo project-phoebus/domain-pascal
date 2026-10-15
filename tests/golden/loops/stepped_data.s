@@ -1,7 +1,7 @@
 .text
 .globl SD_$INVALIDATE
 SD_$INVALIDATE:
-link.w %fp,#-4
+link.w %fp,#-8
 movem.l %d2/%a2-%a3/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (0x70,%a5),%d0
@@ -22,12 +22,12 @@ clr.w (8,%a3)
 lea (0xc,%a2),%a2
 dbf %d2,2b
 1:
-movem.l (-0x14,%fp),%d2/%a2-%a3/%a5
+movem.l (-0x18,%fp),%d2/%a2-%a3/%a5
 unlk %fp
 rts
 .globl SD_$FIND
 SD_$FIND:
-link.w %fp,#-4
+link.w %fp,#-8
 movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 clr.w %d0
@@ -46,7 +46,7 @@ addq.w #1,%d2
 lea (0xc,%a0),%a0
 dbf %d1,2b
 5:
-movem.l (-0xc,%fp),%d2/%a5
+movem.l (-0x10,%fp),%d2/%a5
 unlk %fp
 rts
 .globl SD_$CLEAR

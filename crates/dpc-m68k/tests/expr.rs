@@ -452,7 +452,9 @@ fn element_addresses_as_values() {
             "move.w\t(W).l,-(%sp)",
             "jsr\t(G).l",
             "clr.w\t(-2,%a2)",
-            "movea.l\t(-8,%fp),%a2",
+            // Below the reserved slot and the `with` temporary's (bead
+            // domain-pascal-s9g0): `link #-8`.
+            "movea.l\t(-0xc,%fp),%a2",
         ]
     );
     // Read twice, the last read a call's argument: held through the call
@@ -472,7 +474,7 @@ fn element_addresses_as_values() {
             "pea\t(-4,%a2)",
             "move.w\t(W).l,-(%sp)",
             "jsr\t(G).l",
-            "movea.l\t(-8,%fp),%a2",
+            "movea.l\t(-0xc,%fp),%a2",
         ]
     );
     // Read once: a `with` record used once, an address stored (SIO6509_

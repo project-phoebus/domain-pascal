@@ -1,7 +1,7 @@
 .text
 .globl WITH_UNIT
 WITH_UNIT:
-link.w %fp,#0
+link.w %fp,#-4
 movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 moveq #0x2c,%d0
@@ -12,7 +12,7 @@ lea (0,%a5,%d0.w),%a0
 move.w (-2,%a0),(%a1)
 movea.l (0xc,%fp),%a2
 move.w (%a2),(-2,%a0)
-movem.l (-8,%fp),%a2/%a5
+movem.l (-0xc,%fp),%a2/%a5
 unlk %fp
 rts
 .globl BY_UNIT_VAR

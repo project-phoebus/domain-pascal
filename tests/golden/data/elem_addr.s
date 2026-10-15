@@ -1,7 +1,7 @@
 .text
 .globl FIND
 FIND:
-link.w %fp,#-4
+link.w %fp,#-8
 move.l %d2,-(%sp)
 move.w (8,%fp),%d1
 clr.w %d0
@@ -20,12 +20,12 @@ bne.s 3f
 moveq #2,%d0
 3:
 2:
-move.l (-8,%fp),%d2
+move.l (-0xc,%fp),%d2
 unlk %fp
 rts
 .globl AVAIL
 AVAIL:
-link.w %fp,#0
+link.w %fp,#-4
 movem.l %d2/%a2,-(%sp)
 move.l (8,%fp),%d2
 movea.l #MMAP,%a0
@@ -45,7 +45,7 @@ move.w %d0,-(%sp)
 move.l %d2,-(%sp)
 pea (-0x2000,%a2)
 jsr (ADD_TO_WSL).l
-movem.l (-8,%fp),%d2/%a2
+movem.l (-0xc,%fp),%d2/%a2
 unlk %fp
 rts
 .balignw 4,0x2048

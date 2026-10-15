@@ -26,7 +26,7 @@ unlk %fp
 rts
 .globl W_$ELEM
 W_$ELEM:
-link.w %fp,#0
+link.w %fp,#-4
 movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.b (8,%fp),%d0
@@ -40,7 +40,7 @@ move.b (0x12,%a5),(-7,%a2)
 pea (-2,%a2)
 jsr (POKE).l
 move.w #5,(-2,%a2)
-movem.l (-8,%fp),%a2/%a5
+movem.l (-0xc,%fp),%a2/%a5
 unlk %fp
 rts
 .globl W_$PARAM

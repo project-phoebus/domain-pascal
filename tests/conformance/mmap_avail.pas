@@ -34,11 +34,12 @@
   unsigned `bls' and pushes it zero-extended, which a char gives (a
   `[byte] 0..255' field, as mmap.ins.pas has it, dpc compares widened,
   codegen-patterns 7.1); `with ... : page' (the alias form, ref "With",
-  p. 4-212) to pass the record itself; `unused_4', a stand-in for the 4
-  frame bytes no instruction addresses (`link #-4'; the C's pointer
-  local `page' held in A2, or a `with' temporary's slot: bead
-  domain-pascal-s9g0); `mmap_$data_stand_in', a variable only so that
-  the unit has a data area. }
+  p. 4-212) to pass the record itself; `mmap_$data_stand_in', a
+  variable only so that the unit has a data area.
+
+  The frame, `link #-4': the `with' temporary's slot, held in A2 and
+  never addressed (codegen-patterns 2, "Frame size"; bead
+  domain-pascal-s9g0). }
 module mmap_;
 const
   status_$mmap_bad_avail = 16#00060004;
@@ -70,8 +71,6 @@ procedure mmap_$add_to_wsl(var page: mmap_$mmape_t; vpn: integer32;
   options(val_param); internal; extern;
 
 procedure mmap_$avail(vpn: integer32); options(val_param);
-var
-  unused_4: integer32;                    { (-4,A6): stand-in }
 begin
   with mmap[vpn]: page do begin
     if page.wsl_index > chr(16#45) then
