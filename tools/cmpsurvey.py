@@ -37,6 +37,20 @@ address order).  Kinds:
             (`blt' `ble' `bgt' `bge': S) or unsigned (`bcs' `bls' `bhi'
             `bcc': U).  Evidence for the sign of subranges
             (codegen-patterns 5; bead domain-pascal-5j9).
+    callcmp the first instruction after a call (its pops and an A5
+            restore skipped) when it compares D0, the call's result:
+            `tst.<s> D0', `cmpi.<s> #c,D0', `cmp.<s> X,D0' (D0 the
+            destination) or `cmp.<s> D0,X' (the source); the other
+            operand's kind (zero, imm, reg, a memory operand by base:
+            An, A5, A6, abs); and its use: the branch that follows
+            (`b<cc>'), or `s<cc> Dn' then `tst.b Dn' and a branch
+            (`s<cc>>tst', with Dn), or `s<cc> Dn' otherwise.  Evidence
+            for comparisons of a function's result (codegen-patterns 7.1;
+            bead domain-pascal-i1by).
+    andor   `and.b'/`or.b' of two data registers or of memory into Dn:
+            whether a call lies between the last write of Dn (the left
+            operand formed) and the combination, i.e. whether the right
+            operand calls (bead domain-pascal-1rwo).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -54,7 +68,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
-KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord')
+KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
+         'andor')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -267,6 +282,92 @@ def ord_sites(ins):
     return out
 
 
+_POP = re.compile(r'^(addql #\d,%sp|addqw #\d,%sp|addaw #\d+,%sp|addal #\d+,%sp'
+                  r'|lea %sp@\(\d+\),%sp|moveal %fp@\(-?\d+\),%a5)$')
+_CALL = re.compile(r'^(jsr|bsr[sw]?) ')
+
+
+def operand_kind(x):
+    """The kind of a compare's other operand."""
+    if x.startswith('#'):
+        return 'imm'
+    if re.match(r'^%[da]\d$', x):
+        return 'reg'
+    m = re.match(r'^%(a\d|fp|pc)@', x)
+    if m:
+        return {'a5': 'mem-A5', 'fp': 'mem-A6', 'pc': 'mem-PC'}.get(m.group(1), 'mem-An')
+    return 'mem-abs'
+
+
+def callcmp_sites(ins):
+    """[(addr, insn, D0 side, other kind, use, s<cc> register)] of
+    compares of a call's D0 right after the call.  Calls of M$ARITH
+    entries are left out: they compute `*', `div' and `mod'
+    (codegen-patterns 11), not a function's result."""
+    out = []
+    for i, (_, _, t) in enumerate(ins):
+        if not _CALL.match(t):
+            continue
+        m = re.match(r'^jsr 0x([0-9a-f]+)$', t)
+        if m and int(m.group(1), 16) in arithsurvey.ENTRIES:
+            continue
+        j = i + 1
+        while j < len(ins) and _POP.match(ins[j][2]):
+            j += 1
+        if j >= len(ins):
+            continue
+        u = ins[j][2]
+        m = re.match(r'^tst([bwl]) %d0$', u)
+        if m:
+            k = ('tst.' + m.group(1), 'dst', 'zero')
+        else:
+            m = re.match(r'^(cmpi?)([bwl]) (.*),%d0$', u)
+            if m:
+                k = (m.group(1) + '.' + m.group(2), 'dst', operand_kind(m.group(3)))
+            else:
+                m = re.match(r'^cmp([bwl]) %d0,(.*)$', u)
+                if not m:
+                    continue
+                k = ('cmp.' + m.group(1), 'src', operand_kind(m.group(2)))
+        nxt = ins[j + 1][2] if j + 1 < len(ins) else ''
+        b = _BCC.match(nxt + ' ')
+        sc = re.match(r'^s([a-z]{1,2}) %(d\d)$', nxt)
+        if b:
+            use, reg = b.group(1), '-'
+        elif sc and sc.group(1) not in ('ub', 'ubq', 'ubx'):
+            reg = sc.group(2)
+            after = [x[2] for x in ins[j + 2:j + 4]]
+            tested = (len(after) == 2 and after[0] == 'tstb %' + reg
+                      and _BCC.match(after[1] + ' '))
+            use = 's<cc>>tst' if tested else 's<cc>'
+        else:
+            use, reg = 'other', '-'
+        out.append((ins[j][0],) + k + (use, reg))
+    return out
+
+
+def andor_sites(ins):
+    """[(addr, op, right operand calls: 'call'|'-')] of `and.b'/`or.b'
+    into a data register."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^(and|or)b (.*),%(d\d)$', t)
+        if not m or m.group(2).startswith('#'):
+            continue
+        dn, call = m.group(3), '-'
+        for j in range(i - 1, -1, -1):
+            tj = ins[j][2]
+            if _CALL.match(tj):
+                if dn in ('d0', 'd1'):
+                    break   # the call itself writes Dn: a function result
+                call = 'call'
+                continue
+            if writes(tj, dn):
+                break
+        out.append((a, m.group(1), call))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -281,6 +382,8 @@ def scan():
         res['cmpm'] += [(r0, name) + s for s in cmpm_sites(ins)]
         res['cmpb'] += [(r0, name) + s for s in cmpb_sites(ins)]
         res['ord'] += [(r0, name) + s for s in ord_sites(ins)]
+        res['callcmp'] += [(r0, name) + s for s in callcmp_sites(ins)]
+        res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
     return res
 
 
@@ -310,6 +413,11 @@ def summary(res):
     counts('byte compares', res['cmpb'], lambda s: (s[3],))
     counts('ordered branches after word/longword compares (insn, source, sign)',
            res['ord'], lambda s: (s[3], s[4], s[5]))
+    counts('compares of a call\'s D0 (insn, D0 side, other operand, use)', res['callcmp'],
+           lambda s: (s[3], s[4], s[5], s[6]))
+    counts('  ... formed as a boolean and tested (other operand, s<cc> register)',
+           [s for s in res['callcmp'] if s[6] == 's<cc>>tst'], lambda s: (s[5], s[7]))
+    counts('and.b/or.b into Dn (op, right operand calls)', res['andor'], lambda s: (s[3], s[4]))
 
 
 def main(argv):

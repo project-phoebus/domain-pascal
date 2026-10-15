@@ -73,7 +73,7 @@ OK	tpad/tpad.pas	tpad_$set_cursor
 STUB	tpad/tpad.pas	tpad_$set_unit_cursor
 OK	tpad/tpad.pas	tpad_$inquire
 STUB	tpad/tpad.pas	tpad_$inquire_unit
-STUB	tpad/tpad.pas	tpad_$set_unit
+OK	tpad/tpad.pas	tpad_$set_unit
 OK	tpad/tpad.pas	tpad_$re_range
 STUB	tpad/tpad.pas	tpad_$re_range_unit
 OK	tpad/tpad.pas	tpad_$inq_dtype

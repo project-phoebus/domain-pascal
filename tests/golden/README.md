@@ -158,6 +158,13 @@ Tests:
   branch (TTY_$I_ERR 0xE1BE48, 0xE4BC2A), boolean variables as operands,
   `not.b`, a stored value; `btst #0` of held parameters (FIM_$BUILD_DF
   0xE0A6F6).
+- `control/and_or_call` - codegen-patterns 7.1 ("A plain `or`/`and`
+  whose right operand calls a function"; bead domain-pascal-i1by): the
+  left operand jumping code, the right one's compare of the call's D0
+  formed with `s<cc>` into the lowest callee-saved register and tested
+  (TPAD_$SET_UNIT 0xE699EE, TPAD_$SET_UNIT_MODE 0xE6980A; against 0,
+  FILE_$SET_PROT_INT 0xE5DE5A; a constant, EC2_$WAIT 0xE4262A; a
+  register-held local, 0xE5E590).
 - `control/compares_mixed` - codegen-patterns 7.1, 8, 12.4 R11: two
   variables in memory (the left one loaded, TTY_$K_SET_FLAG 0xE67462),
   a signed and an unsigned word widened to longwords (TTY_$K_PUT

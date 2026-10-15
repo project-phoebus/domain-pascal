@@ -100,3 +100,60 @@ class OrderedBranchTest(unittest.TestCase):
     def test_signed_and_equality(self):
         ins = insns(['cmpw %d1,%d0', 'bges 0x200', 'tstl %d0', 'beqs 0x200'])
         self.assertEqual(cmpsurvey.ord_sites(ins), [(0x100, 'cmpw', 'reg', 'S')])
+
+
+class CallCompareTest(unittest.TestCase):
+    def test_tpad_boolean_tested(self):
+        # TPAD_$SET_UNIT_MODE 0xE6980E..0xE6981A
+        ins = insns(['jsr 0xe70024', 'cmpw %a4@,%d0', 'slt %d2', 'tstb %d2', 'bpls 0x200'])
+        self.assertEqual(cmpsurvey.callcmp_sites(ins),
+                         [(0x102, 'cmp.w', 'dst', 'mem-An', 's<cc>>tst', 'd2')])
+
+    def test_static_and_pop(self):
+        # TPAD_$INQUIRE_UNIT 0xE69984..0xE69990; a pop skipped
+        ins = insns(['jsr 0xe70024', 'addqw #4,%sp', 'cmpw %a5@(380),%d0', 'slt %d0',
+                     'tstb %d0', 'bpls 0x200'])
+        self.assertEqual(cmpsurvey.callcmp_sites(ins),
+                         [(0x104, 'cmp.w', 'dst', 'mem-A5', 's<cc>>tst', 'd0')])
+
+    def test_direct_branches(self):
+        # 0xE0FD5A `cmp.l (d,A6),D0; ble'; 0xE10AA2 `cmp.l D0,Dn; ble';
+        # `tst.w D0; beq' (0xE0F7BE)
+        ins = insns(['bsrw 0x300', 'cmpl %fp@(-8),%d0', 'bles 0x200',
+                     'jsr 0x400', 'lea %sp@(12),%sp', 'cmpl %d0,%d3', 'bles 0x200',
+                     'jsr 0x500', 'tstw %d0', 'beqs 0x200'])
+        self.assertEqual(cmpsurvey.callcmp_sites(ins),
+                         [(0x102, 'cmp.l', 'dst', 'mem-A6', 'ble', '-'),
+                          (0x10A, 'cmp.l', 'src', 'reg', 'ble', '-'),
+                          (0x110, 'tst.w', 'dst', 'zero', 'beq', '-')])
+
+    def test_m_arith_calls_left_out(self):
+        # NETWORK_$READ_AHEAD 0xE0FD52..0xE0FD5E: M$DIU$LLW computes a
+        # `div', not a function's result
+        ins = insns(['jsr 0xe0ac68', 'addqw #8,%sp', 'cmpl %fp@(-364),%d0', 'bles 0x200'])
+        self.assertEqual(cmpsurvey.callcmp_sites(ins), [])
+
+    def test_value_stored_and_no_compare(self):
+        # SOCK_$PUT_INT 0xE161EA `tst.w D0; seq D0' (the function's
+        # result); a call whose result is stored is not a site
+        ins = insns(['bsrs 0x300', 'tstw %d0', 'seq %d0', 'jsr 0x400', 'movew %d0,%a0@'])
+        self.assertEqual(cmpsurvey.callcmp_sites(ins),
+                         [(0x102, 'tst.w', 'dst', 'zero', 's<cc>', 'd0')])
+
+
+class AndOrTest(unittest.TestCase):
+    def test_right_operand_without_call(self):
+        # 0xE072A2..0xE072B6: the call is the left operand's (its D0)
+        ins = insns(['jsr 0xe148ca', 'addqw #4,%sp', 'orb %fp@(-18),%d0',
+                     'cmpil #512,%d3', 'scs %d1', 'orb %d1,%d0'])
+        self.assertEqual(cmpsurvey.andor_sites(ins),
+                         [(0x104, 'or', '-'), (0x10A, 'or', '-')])
+
+    def test_right_operand_with_call(self):
+        ins = insns(['tstw %a2@', 'sgt %d2', 'jsr 0x300', 'cmpw %a2@,%d0', 'sge %d0',
+                     'andb %d0,%d2'])
+        self.assertEqual(cmpsurvey.andor_sites(ins), [(0x10A, 'and', 'call')])
+
+    def test_mask_is_not_a_site(self):
+        ins = insns(['andb #7,%d0'])
+        self.assertEqual(cmpsurvey.andor_sites(ins), [])

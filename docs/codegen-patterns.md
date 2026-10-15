@@ -4388,39 +4388,109 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   over a register-held `n`: a fresh register; exec test `bools`,
   BOOLS_$LOOP).  Refused: `not` of a comparison as an operand (0xE13B8A forms `shi` and then `not.b`s it:
   not explained), an `and then`/`or else` inside a plain `and`/`or`,
-  pushing the value as an argument (no site), a function's result on
-  the left with a call on the right.  Golden `control/and_or`; exec test
+  pushing the value as an argument (no site), a right operand that
+  calls a function (next item).  Golden `control/and_or`; exec test
   `bools`; dpc-ir test `plain_and_or_and_odd`.
-- **A plain `or`/`and` whose right operand calls a function (Reported;
-  a reading, the source unknown):** seven TPAD routines validate a unit
-  as `tst.w (A4); ble.s <then>; jsr SMD_$N_DEVICES; cmp.w (A4),D0; slt
-  D2; tst.b D2; bpl.s <else>` (TPAD_$SET_UNIT_MODE 0xE6980A..0xE6981A;
-  TPAD_$SET_UNIT 0xE699EE with `sge D2` for the `and` of the opposite
-  tests): the left operand is jumping code, the right one, which
-  contains the call, formed as a boolean and tested, where `or else`
-  would branch on the compare.  A boolean local would explain the
-  `s<cc>`, but TPAD_$SET_UNIT has `link #0`.  Read as `(unitp <= 0) or
-  (unitp > smd_$n_devices)` (ref "Or", p. 4-135: no order of
-  evaluation guaranteed): the left operand short-circuited, the right
-  evaluated as a value, no `or.b`.  The `s<cc>` goes to D2 where the
-  compare reads a slot held in an address register, and to D0, the
-  call's register, where it reads the module's word off A5
-  (TPAD_$SET_UNIT_CURSOR 0xE698E4, TPAD_$INQUIRE_UNIT 0xE6998E `cmp.w
-  (380,A5),D0; slt D0; tst.b D0`): not explained.  A byte scan of
-  0xE00800..0xE88834 finds 57 adjacent `s<cc> Dn; tst.b Dn` pairs
-  (0xE10D10 among them), candidates for this rule or for boolean
-  locals, not classified (lead: ../source pascal-translation-notes
-  finding 36).  dpc refuses a call on the right of a plain `and`/`or`
-  only after a function result on the left (above); otherwise it forms
-  both operands and combines them with `and.b`/`or.b` (`logic_value`),
-  which would not give these bytes (bead domain-pascal-1rwo).
+- **A plain `or`/`and` whose right operand calls a function (Verified
+  at the sites given for the form; the register partly Uncertain; a
+  reading, the source unknown; beads domain-pascal-i1by, -1rwo):** seven
+  TPAD routines validate a unit as `tst.w (A4); ble.s <then>; jsr
+  SMD_$N_DEVICES; cmp.w (A4),D0; slt D2; tst.b D2; bpl.s <else>`
+  (TPAD_$SET_UNIT_MODE 0xE6980A..0xE6981A; TPAD_$SET_UNIT 0xE699EE with
+  `sge D2` for the `and` of the opposite tests): the left operand is
+  jumping code, the right one, which contains the call, formed as a
+  boolean and tested.  A boolean local would explain the `s<cc>`, but
+  TPAD_$SET_UNIT has `link #0` (register-held locals keep their slot,
+  12.5).  Read as `(unitp <= 0) or (unitp > smd_$n_devices)` (ref "Or",
+  p. 4-135: no order of evaluation guaranteed): the left operand
+  short-circuited, the right evaluated as a value, no `or.b` (lead:
+  ../source pascal-translation-notes finding 36).
+  Survey (`tools/cmpsurvey.py summary`, kinds `callcmp` and `andor`; the
+  first instruction after a call, its pops skipped, that compares D0;
+  calls of M$ARITH left out, since they compute `*`, `div`, `mod`, not a
+  function's result, section 11):
+  - of the 76 word and longword compares, 75 have the call's result as
+    the *destination* (`tst.<s> D0`, `cmpi.<s> #c,D0`, `cmp.<s> X,D0`),
+    a variable in memory read after the call; 1 has it as the source,
+    DISK_$SPIN_DOWN 0xE3DB34 `jsr (A1); addq.w #4,SP; cmp.w D0,D2; bge.s
+    +2; move.w D0,D2`, a call through a routine pointer whose result is
+    kept afterwards (a `max`-like select, not `if f() > v`);
+  - compares with a variable: formed as a boolean and tested (`s<cc> Dn;
+    tst.b Dn; bpl/bmi`) at 14, branched on only at 0xE3DB34.  The four
+    other branched compares a first count included are M$ARITH results,
+    each a `min`-like select (NETWORK_$READ_AHEAD 0xE0FD5A M$DIU$LLW
+    `cmp.l (d,A6),D0; ble.s +4; move.l (d,A6),D0`; MST_$INIT 0xE30CD2
+    M$MIU$LLW, `bls`; the module-locals 0xE10628 at 0xE10AA2 M$DIS$LLL
+    `cmp.l D0,D4; ble.s +2; move.l D0,D4` and 0xE4DFFE at 0xE4E060
+    M$DIU$LLW `cmp.l D0,D3; bls`).  Of the 14, 12 are in a chain of
+    jumping tests to the same label (the 7 TPAD sites, 0xE10D0C,
+    0xE184FA, 0xE3D7F4, 0xE68B0E, 0xE75ECE) and 2 stand alone: DISK_IO
+    0xE3D86E, an `if` reached by a `beq` to the call's argument push
+    (0xE3D856), `cmp.w (0x3a,A3),D0; sne D2; tst.b D2; bpl` past the
+    `then` part; and 0xE5E590, the end of a `repeat` (no branch into
+    the test), `cmp.l D3,D0; sne D5; tst.b D5;
+    bmi` back to the head (../source check_same_volume.c `while
+    (dism_seqn_end != dism_seqn_start)`: the loop continues on `<>`, so
+    an `until x = y` formed with the negated relation, the source
+    unknown).  No compare of a function's result with a variable
+    branches on the compare.  The 14 by the variable's kind and the
+    `s<cc>` register: through a pointer, D2 (the 5 TPAD sites, 0xE184FA,
+    DISK_IO 0xE3D7F4 and 0xE3D86E); register-held, D5 with D2..D4 live
+    (0xE5E590, 0xE68B0E); a static variable off A5, D0 (TPAD_$SET_UNIT_CURSOR
+    0xE698E0, TPAD_$INQUIRE_UNIT 0xE6998A); an enclosing routine's
+    variable through the dynamic link, D1 (the module-locals 0xE10628 at
+    0xE10D0C, 0xE75DE4 at 0xE75ECE).  The register therefore depends on
+    the variable's kind: not explained;
+  - compares with 0 or a constant: branched on at 40 (`tst.w D0; beq`
+    14, ...), formed and tested at 20 (EC2_$WAIT 0xE4262A `cmpi.w
+    #2,D0; seq D2; tst.b D2; bpl` stands alone), every one in a callee-saved
+    register (D2 11, D3 4, D7 2, D4, D5, D6; 0xE6EBE2 `sne D3` with D2
+    live; 0xE12B6A `seq D7`), formed as a function's result at 1
+    (SOCK_$PUT_INT 0xE161EA `seq D0`); FILE_$SET_PROT_INT
+    0xE5DE5A/0xE5DE7C are the last operands of a chain of jumping tests,
+    the others not classified;
+  - `and.b`/`or.b` into a data register: 318, none whose right operand
+    calls (a call between the left operand's register being formed and
+    the combination).
+  **Implemented** (`isel.rs`, `Selector::branch`, `call_compare_test`):
+  a plain `and`/`or` in a condition whose right operand calls and whose
+  left operand is a comparison without a call: the left operand as `and
+  then`/`or else` jumping code, the right one a comparison of a D0
+  function's result with 0 (`tst`), a constant (`cmpi`), a variable
+  read through a pointer or a register-held local (`cmp.<s> v,D0`, the
+  relation reversed when the source has the call on the right), `s<cc>`
+  into a data register coloured as if live across the call (kept apart
+  from D0 and D1, and from the compared register: the lowest
+  callee-saved one free), `tst.b`, `bmi`/`bpl`.  TPAD_$SET_UNIT
+  0xE699DC compiles byte-identical (srcsurvey); TPAD_$SET_UNIT_MODE,
+  _SET_PUNCH_IMPACT and _INQ_PUNCH_IMPACT then stop at the element
+  scaling by 44 (bead domain-pascal-r3yy).  Refused: a static
+  variable (D0) or an enclosing routine's (D1), not explained; a frame
+  variable, another unit's, an element, one whose address is loaded
+  for the compare (not seen in this form); a left operand other than a
+  comparison (0xE5DE5A's chain: a nested plain `and` or `and then`?);
+  the value outside a condition or under `not` (no site); and a compare
+  of a function's result with a variable anywhere else, `if f() < v`
+  included (no site branches on such a compare; the two that stand
+  alone form the boolean, but in a `repeat` with the negated relation,
+  and which relation an `if`/`while`/`until` forms is not settled;
+  bead domain-pascal-l78t).  Before this, dpc compiled `if f() < v`
+  with the variable loaded before the call and `cmp.w Dn,D0; b<cc>`,
+  a form no site has.  Golden
+  `control/and_or_call`; exec test `and_or_call`; driver test
+  `call_result_compares_outside_a_plain_and_or_are_refused`.
 - **Implemented** (`crates/dpc-ir`, `Cond`, `StmtKind::If`/`Return`;
   `crates/dpc-m68k/src/isel.rs`, `Selector::if_`, `branch`, `compare`):
   all of the above that is Verified, with `not`, `and then`, `or else`.
   A computed left operand (an expression, a function result, an array
   element's value) is compared in its register with `cmpi #c,Dn` (0xE1216E
   `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`);
-  against 0 it is rejected (the flags of the operation, or a `tst`?).  A
+  against 0 it is rejected (the flags of the operation, or a `tst`?).
+  A function's result against a variable is refused outside the right
+  operand of a plain `and`/`or` (formed as a boolean at all 14 sites,
+  2 of them outside a chain; the relation formed in a loop test not
+  settled: "A plain `or`/`and` whose right operand calls a function"
+  above; bead domain-pascal-l78t).  A
   function's boolean result is tested with `tst.b D0` (section 3); `k in
   s` for a constant k with `btst #k` (section 5.1).  Not supported yet: comparing booleans
   (`b = true`: compiled code tests booleans with `tst.b`, and has two

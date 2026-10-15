@@ -2929,3 +2929,89 @@ fn adjacent_constant_stores_refused_other_pairs_compiled() {
     assert!(asm.contains("\tclr.w\t(%a0)\n"), "{asm}");
     assert!(asm.contains(",(2,%a0)\n"), "{asm}");
 }
+
+/// Bead domain-pascal-i1by (codegen-patterns 7.1): a comparison of a
+/// function's result with a variable compiles only as the right operand
+/// of a plain `and`/`or` in a condition (`s<cc>` into the lowest
+/// callee-saved register, `tst.b`); elsewhere, with a variable off A5,
+/// after a left operand that is not a comparison, and as a value, it is
+/// refused.
+#[test]
+fn call_result_compares_outside_a_plain_and_or_are_refused() {
+    let unit = |body: &str| {
+        format!(
+            "module m;
+var u: integer; b: boolean;
+function n: integer; extern;
+procedure m_$p(in k: integer);
+begin
+  {body}
+end;
+"
+        )
+    };
+    let refused = [
+        ("cr_if", "if k > n then u := 0;", "other than in the right"),
+        (
+            "cr_if_left",
+            "if n < k then u := 0;",
+            "other than in the right",
+        ),
+        (
+            "cr_and_then",
+            "if (k > 0) and then (k <= n) then u := 0;",
+            "other than in the right",
+        ),
+        (
+            "cr_a5",
+            "if (u <= 0) or (u > n) then u := 0;",
+            "with a static variable",
+        ),
+        (
+            "cr_left_bool",
+            "if b or (k > n) then u := 0;",
+            "a left operand other than a comparison",
+        ),
+        (
+            "cr_value",
+            "b := (k > 0) or (k > n);",
+            "outside a condition, or under `not`",
+        ),
+        (
+            "cr_not",
+            "if not ((k > 0) or (k > n)) then u := 0;",
+            "outside a condition, or under `not`",
+        ),
+    ];
+    for (name, body, what) in refused {
+        let (code, err) = compile_with(name, &unit(body), &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains(what), "{name}: {err}");
+    }
+    let nested = "module m;
+var u: integer;
+function n: integer; extern;
+procedure m_$outer(in k: integer);
+var v: integer;
+  procedure inner;
+  begin
+    if (v <= 0) or (v > n) then u := 0;
+  end;
+begin
+  v := k;
+  inner;
+end;
+";
+    let (_, err) = compile_with("cr_enclosing", nested, &[]).unwrap_err();
+    assert!(err.contains("an enclosing routine's variable"), "{err}");
+    let asm = compile_with(
+        "cr_plain_or",
+        &unit("if (k <= 0) or (k > n) then u := 0;"),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        asm.contains("\tjsr\t(N).l\n\tcmp.w\t(%a2),%d0\n\tslt\t%d2\n\ttst.b\t%d2\n\tbpl.s\t"),
+        "{asm}"
+    );
+}

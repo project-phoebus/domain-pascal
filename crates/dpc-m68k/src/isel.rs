@@ -74,6 +74,18 @@ fn rel_cond(op: Rel, signed: bool) -> Cond {
     }
 }
 
+/// The relation `r` with its operands exchanged: `a r b` = `b (swap_rel
+/// r) a`.
+fn swap_rel(r: Rel) -> Rel {
+    match r {
+        Rel::Eq | Rel::Ne => r,
+        Rel::Lt => Rel::Gt,
+        Rel::Gt => Rel::Lt,
+        Rel::Le => Rel::Ge,
+        Rel::Ge => Rel::Le,
+    }
+}
+
 /// Whether a multiplication by the constant `c` is done with shifts and
 /// adds ([`Selector::mul_const`]): `c` = 2^s × m with m = 1 or 2^k ± 1
 /// (2^k - 1 for k >= 3), `c` in 1..=0xffff.
@@ -663,6 +675,10 @@ fn select_body_with(
     }
     let (mut apart, late) = fresh_slot_loads(&s.out, &s.fresh);
     apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
+    for &d in &s.callee_only {
+        apart.extend([(Reg::D(d), Reg::D(0)), (Reg::D(d), Reg::D(1))]);
+    }
+    apart.extend(s.colour_apart.iter().copied());
     // A register-held local read before the first instruction that
     // assigns it (a read the loop's back edge reaches, or of a local not
     // yet assigned): its register is live into the body.  Where the
@@ -2110,7 +2126,6 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
-/// The memory operand an instruction writes, if any.
 /// The call of `e` when `e` is the value of a function whose result is in
 /// A0 (codegen-patterns 3, "Callers of pointer functions").
 fn a0_call(e: &Expr) -> Option<&Call> {
@@ -2124,6 +2139,18 @@ fn a0_call(e: &Expr) -> Option<&Call> {
     }
 }
 
+/// Whether `e` is the value of a function whose result is in D0.
+fn d0_call(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Call {
+            reg: ResultClass::Data,
+            ..
+        }
+    )
+}
+
+/// The memory operand an instruction writes, if any.
 fn mem_dst(i: &Insn) -> Option<&Ea> {
     let dst = match i {
         Insn::Move { dst, .. }
@@ -3875,6 +3902,12 @@ pub struct Selector {
     /// an 8-byte copy whose destination base is loaded before the
     /// source's register ([`Selector::copy8`]).
     colour_after: Vec<(Reg, Reg)>,
+    /// Data values coloured as if live across a call: kept apart from D0
+    /// and D1 ([`Selector::call_compare_test`]).
+    callee_only: Vec<u8>,
+    /// Further pairs of values kept in different registers
+    /// ([`allocate_apart`]'s `apart`).
+    colour_apart: Vec<(Reg, Reg)>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -4173,6 +4206,8 @@ impl Selector {
             result_moves: Vec::new(),
             units: Vec::new(),
             colour_after: Vec::new(),
+            callee_only: Vec::new(),
+            colour_apart: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -5635,6 +5670,39 @@ impl Selector {
                 Ok(())
             }
             IrCond::Not(x) => self.branch(x, !when, l),
+            // A plain `and`/`or` whose right operand calls a function: the
+            // left operand jumping code, as `and then`/`or else` (ref "Or",
+            // p. 4-135: no order of evaluation guaranteed), the right one
+            // formed as a boolean and tested ([`Self::call_compare_test`]):
+            // TPAD_$SET_UNIT_MODE 0xE6980A..0xE6981A `tst.w (A4); ble.s
+            // <then>; jsr SMD_$N_DEVICES; cmp.w (A4),D0; slt D2; tst.b D2;
+            // bpl.s <else>`; TPAD_$SET_UNIT 0xE699EE, the `and`, `ble` to
+            // the end and `sge D2` (codegen-patterns 7.1, "A plain
+            // `or`/`and` whose right operand calls a function"; bead
+            // domain-pascal-1rwo; `tools/cmpsurvey.py callcmp`: no and.b/or.b
+            // combines a right operand with a call in compiled code).
+            IrCond::And(a, b) | IrCond::Or(a, b) if cond_has_call(b) && !cond_has_call(a) => {
+                if !matches!(**a, IrCond::Compare { .. }) {
+                    // E5DE5A's left operand is a chain of jumping tests:
+                    // a nested plain `and`, or `and then`?  Not settled.
+                    return Err(unsupported(
+                        self.span,
+                        "a plain `and`/`or` with a call in its right operand and a left operand \
+                         other than a comparison (codegen-patterns 7.1) is",
+                    ));
+                }
+                let short = matches!(c, IrCond::Or(..));
+                if when == short {
+                    self.branch(a, when, l)?;
+                    self.call_compare_test(b, when, l)
+                } else {
+                    let skip = self.new_label();
+                    self.branch(a, short, skip)?;
+                    self.call_compare_test(b, when, l)?;
+                    self.place(skip);
+                    Ok(())
+                }
+            }
             // A plain `and`/`or` (ref pp. 4-18, 4-134: both operands may be
             // evaluated): the boolean value in a register, the branch on
             // the sign of the `and.b`/`or.b` that formed it (`bpl` 39,
@@ -6053,6 +6121,30 @@ impl Selector {
             let a = self.call_a0(c)?;
             self.out.push(Insn::CmpaZero(a));
             return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+        }
+        if (d0_call(lhs) && matches!(rhs, Expr::Load { .. }))
+            || (d0_call(rhs) && matches!(lhs, Expr::Load { .. }))
+        {
+            // Compiled code forms a compare of a function's result with a
+            // variable as a boolean and tests it, `jsr; cmp.<s> v,D0;
+            // s<cc> Dn; tst.b Dn; bpl/bmi`, at all 14 sites
+            // (`tools/cmpsurvey.py callcmp`): 12 in chains of jumping tests,
+            // among them the seven TPAD right operands of plain `or`/`and`
+            // ([`Self::call_compare_test`]), and 2 alone, DISK_IO 0xE3D86E
+            // (an `if`, `sne D2; tst.b D2; bpl`) and 0xE5E590 (ending a
+            // `repeat`, `sne D5; tst.b D5; bmi` back to the head: the
+            // negated relation?).  None branches on the compare (the
+            // branched compares of D0 with a variable are M$ARITH results,
+            // 0xE0FD5A, 0xE10AA2, and a routine pointer's kept for a
+            // `max`, 0xE3DB34).  Which relation a loop test forms, and the
+            // register outside a chain, are not settled (codegen-patterns
+            // 7.1; bead domain-pascal-l78t).
+            return Err(unsupported(
+                self.span,
+                "a comparison of a function's result with a variable other than in the right \
+                 operand of a plain `and`/`or` (formed as a boolean, the relation and register \
+                 not settled: codegen-patterns 7.1) is",
+            ));
         }
         let Expr::Load { addr, .. } = lhs else {
             return self.compare_computed(op, lhs, rhs);
@@ -11123,23 +11215,153 @@ impl Selector {
             IrCond::Or(a, b) => (AluOp::Or, a, b),
             _ => unreachable!("logic_value of a plain and/or"),
         };
-        let d = self.bool_into_reg(a)?;
-        if crate::regs::is_virtual(Reg::D(d)) || !cond_has_call(b) {
-            let src = self.bool_operand(b)?;
-            self.out.push(Insn::Alu {
-                op,
-                size: Size::B,
-                src,
-                dst: d,
-            });
-            Ok(d)
-        } else {
-            // A function's boolean in D0 with a call on the right: not seen.
-            Err(unsupported(
+        if cond_has_call(b) {
+            // The right operand calls: compiled code forms such an operand
+            // only after a left one that is jumping code ([`Self::branch`];
+            // the TPAD sites of codegen-patterns 7.1), never combined with
+            // `and.b`/`or.b` (`tools/cmpsurvey.py callcmp`).  As a value,
+            // or under `not`: not seen.
+            return Err(unsupported(
                 self.span,
-                "a plain `and`/`or` of a function result and an operand with a call is",
-            ))
+                "a plain `and`/`or` with a call in its right operand outside a condition, or \
+                 under `not` (codegen-patterns 7.1; bead domain-pascal-1rwo) is",
+            ));
         }
+        let d = self.bool_into_reg(a)?;
+        let src = self.bool_operand(b)?;
+        self.out.push(Insn::Alu {
+            op,
+            size: Size::B,
+            src,
+            dst: d,
+        });
+        Ok(d)
+    }
+
+    /// The right operand of a plain `and`/`or` that calls a function, in
+    /// a condition ([`Self::branch`]): a comparison of the function's
+    /// result, formed as a boolean and tested, the branch on its sign.
+    /// The call first, its result in D0 compared there (`tst`, `cmpi
+    /// #c,D0`, `cmp.<s> v,D0`: the call's result is the left operand, the
+    /// relation reversed when the source has it on the right), `s<cc>`
+    /// into a data register as if live across the call, the lowest
+    /// callee-saved one free, `tst.b` of it (codegen-patterns 7.1; bead
+    /// domain-pascal-i1by; `tools/cmpsurvey.py callcmp`).  Image: the five
+    /// TPAD compares of a word through a held parameter address
+    /// (TPAD_$SET_UNIT_MODE 0xE69814 `cmp.w (A4),D0; slt D2; tst.b D2`;
+    /// TPAD_$SET_UNIT 0xE699F8 `sge D2`; 0xE69A4C, 0xE69AFC, 0xE69B52),
+    /// and the other compares of a call's result formed so: through a
+    /// pointer, D2 (XNS_IDP_$OS_DEMUX 0xE184FA `cmp.w (A2),D0; sne D2`;
+    /// DISK_IO 0xE3D7F4, 0xE3D86E); with a register-held variable, D5
+    /// with D2..D4 live (0xE5E590 `cmp.l D3,D0; sne D5`; 0xE68B0E); with
+    /// 0 or a constant, a callee-saved register at all 20 (FILE_$SET_PROT_INT
+    /// 0xE5DE5A `tst.w D0; sne D2; tst.b D2`; 0xE6EBE2 `sne D3`, D2 live;
+    /// 0xE12B6A `seq D7`).
+    ///
+    /// Refused, the register not explained: a static variable
+    /// (TPAD_$SET_UNIT_CURSOR 0xE698E0 and TPAD_$INQUIRE_UNIT 0xE6998A
+    /// `cmp.w (0x17c,A5),D0; slt D0`, the call's own register); an
+    /// enclosing routine's variable (the module-locals 0xE10628 at
+    /// 0xE10D0C `cmp.l (-0x22e,A2),D0; sne D1` and 0xE75DE4 at 0xE75ECE,
+    /// A2 the dynamic link).  Refused, not seen: a variable in the frame
+    /// (no compare of one with a function's result; 0xE0FD5A `cmp.l
+    /// (d,A6),D0; ble` and 0xE30CD2 `bls` compare M$ARITH results), another
+    /// unit's, an element, one whose address is loaded for the compare;
+    /// widened operands; a pointer function.
+    fn call_compare_test(&mut self, c: &IrCond, when: bool, l: u32) -> Res<()> {
+        const OTHER: &str = "a comparison with a function's result in the right operand of a \
+             plain `and`/`or` other than with a constant or with a variable held in a register \
+             or read through a held address (codegen-patterns 7.1) is";
+        let IrCond::Compare { op, lhs, rhs } = c else {
+            return Err(unsupported(
+                self.span,
+                "a right operand of a plain `and`/`or` with a call other than a comparison of \
+                 the function's result is",
+            ));
+        };
+        let (op, call, other) = if d0_call(lhs) {
+            (*op, lhs, rhs)
+        } else if d0_call(rhs) {
+            (swap_rel(*op), rhs, lhs)
+        } else {
+            return Err(unsupported(self.span, OTHER));
+        };
+        if expr_has_call(other) {
+            return Err(unsupported(self.span, OTHER));
+        }
+        let ty = call.ty();
+        let size = size_of(ty.width);
+        self.eval(call)?;
+        let mut held = None;
+        match other {
+            Expr::Const { value: 0, .. } => self.out.push(Insn::Tst {
+                size,
+                dst: Ea::Reg(Reg::D(0)),
+            }),
+            Expr::Const { value, .. } => self.out.push(Insn::Cmpi {
+                size,
+                imm: imm(*value, ty.width),
+                dst: Ea::Reg(Reg::D(0)),
+            }),
+            Expr::Load { addr, .. } => {
+                match addr {
+                    Addr::Static(_) | Addr::OtherStatic { .. } => {
+                        return Err(unsupported(
+                            self.span,
+                            "a comparison of a function's result with a static variable in the \
+                             right operand of a plain `and`/`or` (`s<cc>` into D0, the call's \
+                             register, at the two sites, not explained; codegen-patterns 7.1) is",
+                        ))
+                    }
+                    Addr::Enclosing(_) => {
+                        return Err(unsupported(
+                            self.span,
+                            "a comparison of a function's result with an enclosing routine's \
+                             variable in the right operand of a plain `and`/`or` (`s<cc>` into \
+                             D1 at the two sites, not explained; codegen-patterns 7.1) is",
+                        ))
+                    }
+                    Addr::Indirect { .. } => {}
+                    Addr::Frame(o) if matches!(self.pinned(*o), Some(Reg::D(_))) => {}
+                    _ => return Err(unsupported(self.span, OTHER)),
+                }
+                let start = self.out.len();
+                let src = self.operand(addr)?;
+                let seen = match src {
+                    Ea::Ind(a) | Ea::Disp(_, a) => crate::regs::is_virtual(Reg::A(a)),
+                    Ea::Reg(Reg::D(_)) => true,
+                    _ => false,
+                };
+                if !seen || self.out.len() != start {
+                    return Err(unsupported(self.span, OTHER));
+                }
+                held = match src {
+                    Ea::Reg(Reg::D(r)) => Some(r),
+                    _ => None,
+                };
+                self.out.push(Insn::Cmp { size, src, dst: 0 });
+            }
+            _ => return Err(unsupported(self.span, OTHER)),
+        }
+        let d = self.alloc_d()?;
+        self.callee_only.push(d);
+        if let Some(r) = held {
+            // Not the compared register either, even where the compare is
+            // its last use: the value is coloured as if live from the call
+            // on, where the register is live (0xE5E590 `cmp.l D3,D0; sne
+            // D5`, D3 live after; no site where it dies).
+            self.colour_apart.push((Reg::D(d), Reg::D(r)));
+        }
+        self.out.push(Insn::Scc {
+            cond: rel_cond(op, ty.sign == Sign::Signed),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.out.push(Insn::Tst {
+            size: Size::B,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+        Ok(())
     }
 
     /// The boolean value of `c` in a data register of its own, as the left
