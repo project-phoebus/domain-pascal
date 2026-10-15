@@ -4,7 +4,7 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build runtime test exectest corpus conform linktest srcsurvey clean
+.PHONY: all build runtime stable test exectest corpus conform linktest srcsurvey clean
 
 all: build
 
@@ -38,6 +38,29 @@ $(RUNTIME_LIB): $(RUNTIME_OBJ)
 	@rm -f $@
 	$(M68K_AR) rcsD $@ $<
 	@echo "runtime: built $@"
+
+# A stable dpc for other repositories (../source): built from the
+# committed HEAD only, never from the working tree, so agents' unreviewed
+# edits cannot leak into another repository's build.  `make stable'
+# exports HEAD with `git archive' into target/stable/src, builds it there,
+# and installs target/stable/bin/dpc with the runtime beside it in
+# target/stable/runtime/m68k/ (where `dpc --print-runtime' looks:
+# <dpc dir>/../runtime/<target>/).  target/stable/COMMIT names the
+# commit.  Run it after each commit that other repositories should see.
+STABLE := target/stable
+
+stable:
+	@rev=$$(git rev-parse --verify HEAD) && \
+	rm -rf $(STABLE)/src && mkdir -p $(STABLE)/src $(STABLE)/bin && \
+	git archive HEAD | tar -x -C $(STABLE)/src && \
+	( cd $(STABLE)/src && $(CARGO) build --release --quiet ) && \
+	$(MAKE) --no-print-directory -C $(STABLE)/src runtime RUNTIME_OUT=$(CURDIR)/$(STABLE)/runtime/m68k && \
+	cp $(STABLE)/src/target/release/dpc $(STABLE)/bin/dpc.new && \
+	mv $(STABLE)/bin/dpc.new $(STABLE)/bin/dpc && \
+	echo $$rev > $(STABLE)/COMMIT && \
+	echo "stable: $(STABLE)/bin/dpc built from $$rev"; \
+	if ! git diff --quiet HEAD -- crates runtime 2>/dev/null; then \
+	  echo "stable: note: the working tree has uncommitted changes; they are NOT in the stable build"; fi
 
 test:
 	$(CARGO) test
