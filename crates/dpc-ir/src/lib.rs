@@ -502,6 +502,18 @@ pub enum StmtKind {
         value: Expr,
         mask: bool,
     },
+    /// `a[index] := value` for an element of a packed array of booleans
+    /// at `array` (one bit per element, ref 3.11.4.2 Table 3-5 p. 3-47;
+    /// [`Expr::BitElem`] gives where it lies), `value` a constant (true
+    /// sets the bit, false clears it; the other bits are kept).  `index`
+    /// is a word; `lo` the array's lower bound; `bytes` the array's size.
+    StoreBitElem {
+        array: Addr,
+        bytes: u32,
+        index: Expr,
+        lo: i64,
+        value: bool,
+    },
     /// Copy `bytes` bytes from the object at `src` to the object at `dst`:
     /// `d := s` for a record or array that is not scalar-sized (ref
     /// "Assignment", p. 4-25).  The objects do not overlap partially (two
@@ -867,6 +879,21 @@ pub enum Expr {
         field: BitField,
         ty: Scalar,
     },
+    /// Element `index` of a packed array of booleans at `array` (ref
+    /// 3.11.4.2 Table 3-5 p. 3-47, "Boolean 1 bit; bit aligned"; 3.15.5
+    /// p. 3-62: "The order of elements within words is from most
+    /// significant bit to least significant bit"): bit `7 - (index - lo)
+    /// mod 8` (0 = least significant) of the byte `(index - lo) div 8`
+    /// bytes from `array`, as a boolean.  `index` is a word, `lo` the
+    /// array's lower bound, `bytes` the array's size.  Image:
+    /// PCHIST_$COUNT 0xE1A156..0xE1A16C (codegen-patterns 5.2, "Packed
+    /// arrays of booleans").
+    BitElem {
+        array: Addr,
+        bytes: u32,
+        index: Box<Expr>,
+        lo: i64,
+    },
     /// Membership of element `elem` in the set value `set` (ref "In",
     /// p. 4-102; layout ref 3.9.3): true when bit `elem` of `set`, read as
     /// one big-endian integer, is 1.  `set` is a register-sized set value
@@ -1013,7 +1040,10 @@ impl Expr {
             | Expr::Call { ty, .. }
             | Expr::SetOp { ty, .. }
             | Expr::SetOf { ty, .. } => *ty,
-            Expr::SetMember { .. } | Expr::SetMemberAt { .. } | Expr::Test(_) => Scalar::BOOLEAN,
+            Expr::SetMember { .. }
+            | Expr::SetMemberAt { .. }
+            | Expr::BitElem { .. }
+            | Expr::Test(_) => Scalar::BOOLEAN,
             Expr::SetSr(_) => Scalar::signed(Width::Word),
             Expr::AddrOf(_) => Scalar::POINTER,
         }

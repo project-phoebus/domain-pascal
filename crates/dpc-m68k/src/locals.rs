@@ -217,7 +217,12 @@ impl Walk<'_> {
                 self.expr(elem);
                 self.expr(set);
             }
-            Expr::SetMemberAt { elem, set, .. } => {
+            Expr::SetMemberAt { elem, set, .. }
+            | Expr::BitElem {
+                index: elem,
+                array: set,
+                ..
+            } => {
                 self.expr(elem);
                 self.other(set);
             }
@@ -325,7 +330,13 @@ impl Walk<'_> {
                     };
                     self.out.locals[k].stores.push(u);
                 }
-                StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+                StmtKind::Store { addr, value }
+                | StmtKind::StoreBits { addr, value, .. }
+                | StmtKind::StoreBitElem {
+                    array: addr,
+                    index: value,
+                    ..
+                } => {
                     self.other(addr);
                     self.expr(value);
                 }

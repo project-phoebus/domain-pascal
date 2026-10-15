@@ -194,6 +194,20 @@ impl BitPos {
     }
 }
 
+/// How an element of a packed array is stored ([`TypeTable::packed_array_elem`];
+/// ref 3.11.4.2 Table 3-5, p. 3-47).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedElem {
+    /// As in an array that is not packed.
+    Unpacked,
+    /// One byte: an integer subrange of 5 to 8 bits ("byte integers", ref
+    /// 3.11.3 p. 3-45), stored like a `[byte]` subrange (ref 3.15.5).
+    Byte,
+    /// `n` bits, n = 1, 2 or 4, from the most significant bit (ref 3.15.5
+    /// p. 3-62).
+    Bits(u32),
+}
+
 /// How a packed record's field is aligned (ref 3.10.7 Table 3-3,
 /// p. 3-36).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -762,16 +776,32 @@ impl TypeTable {
                 // choice (sets are word strings, 3.9.3).  Uncertain.
                 (size, 2, 2, 2)
             }
-            TypeKind::Array { index, elem, .. } => {
+            TypeKind::Array {
+                index,
+                elem,
+                packed,
+            } => {
                 let n = self
                     .ordinal_range(*index)
                     .map_or(0, |(lo, hi)| (hi - lo + 1).max(0)) as u64;
                 let e = self.get(*elem);
-                let mut size = (n * e.size as u64).min(u32::MAX as u64) as u32;
+                let bits = match packed.then(|| self.packed_array_elem(*elem)) {
+                    Some(Ok(PackedElem::Bits(b))) => Some(b),
+                    _ => None,
+                };
+                let mut size = match bits {
+                    // ref 3.11.4.2 p. 3-47 and 3.15.5 p. 3-62: the elements'
+                    // bits, in whole bytes ("2 bytes would be used to store
+                    // the entire array1", 3 elements of 4 bits; "3 bytes"
+                    // for 6 elements of 4 bits).
+                    Some(b) => (n * u64::from(b)).div_ceil(8).min(u32::MAX as u64) as u32,
+                    None => (n * e.size as u64).min(u32::MAX as u64) as u32,
+                };
                 // ref 3.11.4.1 p. 3-46: an array of an odd number of
                 // booleans gets a pad byte, so its size is even.  (Char
-                // arrays get none.)
-                if matches!(self.kind(*elem), TypeKind::Boolean) && size % 2 == 1 {
+                // arrays get none.)  A packed one has bits (3.11.4.2).
+                if bits.is_none() && matches!(self.kind(*elem), TypeKind::Boolean) && size % 2 == 1
+                {
                     size = size.saturating_add(1);
                 }
                 let fa = if size > 1 { 2 } else { 1 };
@@ -797,6 +827,135 @@ impl TypeTable {
             | TypeKind::RoutinePointer(_) => (pointer_size, pointer_size, 2, pointer_size),
             TypeKind::StringLit { len } => (*len, 1, if *len > 1 { 2 } else { 1 }, 1),
             TypeKind::Forward { .. } => (0, 1, 1, 1),
+        }
+    }
+
+    /// How an element of type `elem` is stored in a packed array (ref
+    /// 3.11.4.2 Table 3-5 p. 3-47, read in the PDF; the OCR scrambles the
+    /// table), or why it is not supported:
+    ///
+    /// | type of element | space |
+    /// |---|---|
+    /// | subranges of integers, enumerated, subrange of enumerated | "Exact number of bits required; bit aligned" |
+    /// | integer, integer16 | 16 bits; word aligned |
+    /// | boolean | "1 bit; bit aligned" |
+    /// | real, integer32, pointer | 32 bits; word aligned |
+    /// | double | 64 bits; word aligned |
+    /// | character, subrange of character | 8 bits; byte aligned |
+    /// | character array | "Exact number of bytes required; byte aligned" |
+    /// | record, array of non-characters | "Exact number of words required; word aligned" |
+    /// | set | "Exact number of bits required; bit aligned" (footnotes 1, 2) |
+    ///
+    /// Footnote 1, and the text below the table for every element: "if
+    /// the element size is less than 16 bits, then the element is padded
+    /// up to the nearest power of 2 bits" (`packed array [1..3] of 0..7`:
+    /// 4 bits each, 2 bytes in all).  3.15.5 p. 3-62 (PDF p. 117): "Domain
+    /// Pascal supports arrays of 1-, 2-, and 4-bit elements.  The order of
+    /// elements within words is from most significant bit to least
+    /// significant bit."  Image (codegen-patterns 5.2, "Packed arrays of
+    /// booleans"): PCHIST's `packed array[1..64] of boolean`, 8 bytes at
+    /// +0x18 of its WIRED_DATA block, element p in bit 7 - (p - 1) mod 8
+    /// of byte (p - 1) div 8 (PCHIST_$COUNT 0xE1A156..0xE1A16C).
+    ///
+    /// The bits an ordinal needs are those of a packed record's field
+    /// ([`TypeTable::subrange_bits`]: two's complement for a negative low
+    /// bound).  So:
+    ///
+    /// - 1 to 4 bits: [`PackedElem::Bits`] of 1, 2 or 4;
+    /// - an integer subrange of 5 to 8 bits: [`PackedElem::Byte`] (3.11.3
+    ///   p. 3-45: packed arrays "store sequences of characters, byte
+    ///   integers, and boolean variables");
+    /// - 9 to 16 bits, and the 16-, 32- and 64-bit types, character types
+    ///   and arrays, records: the same as unpacked ([`PackedElem::Unpacked`]);
+    ///   an array of non-characters of an odd number of bytes would be
+    ///   padded to words ("exact number of words") and is refused;
+    /// - refused: an enumeration of 5 to 8 bits (a byte enumeration is not
+    ///   implemented), a subrange of 17 to 31 bits (footnote 2, "If the
+    ///   element size is greater than 16 bits, then the elements are word
+    ///   aligned", does not say how many bits each element then takes),
+    ///   sets (as in packed records, where the elements lie is not
+    ///   settled), varying strings (not in the table), and a type with a
+    ///   size attribute that changes its size (ref 3.15.5: `[bit (4)]
+    ///   0..1` makes 4-bit elements, `dpc` has no bit sizes).
+    pub fn packed_array_elem(&self, elem: TypeId) -> Result<PackedElem, String> {
+        fn bits_for(v: u64) -> u32 {
+            (64 - v.leading_zeros()).max(1)
+        }
+        let info = self.get(elem);
+        if let Some(b) = info.attrs.size_bits {
+            return if b == 8 * info.size {
+                Ok(PackedElem::Unpacked)
+            } else {
+                Err("a packed array of elements with a bit size attribute".into())
+            };
+        }
+        let (bits, byte_ok) = match &info.kind {
+            TypeKind::Boolean => (1, false),
+            TypeKind::Enum { consts } => (bits_for(consts.len().saturating_sub(1) as u64), false),
+            TypeKind::Subrange { base, lo, hi } => match self.kind(*base) {
+                TypeKind::Char => return Ok(PackedElem::Unpacked),
+                TypeKind::Boolean | TypeKind::Enum { .. } => (bits_for((*hi).max(0) as u64), false),
+                _ => {
+                    let n = Self::subrange_bits(*lo, *hi);
+                    // ref 3.4 p. 3-10: an unsigned subrange of 31 bits is
+                    // allocated 32 (as in packed records, Table 3-3).
+                    (if n == 31 && *lo >= 0 { 32 } else { n }, true)
+                }
+            },
+            TypeKind::Set { .. } => {
+                return Err(
+                    "a packed array of sets (where the elements lie is not settled, \
+                     ref 3.11.4.2 Table 3-5 footnotes 1 and 2)"
+                        .into(),
+                )
+            }
+            TypeKind::Varying { .. } => {
+                return Err(
+                    "a packed array of varying strings (not in ref 3.11.4.2 Table 3-5)".into(),
+                )
+            }
+            TypeKind::Array { elem: e, .. } => {
+                return if self.is_char(*e) || info.size % 2 == 0 {
+                    Ok(PackedElem::Unpacked)
+                } else {
+                    Err(
+                        "a packed array of arrays of an odd number of bytes (\"Exact number of \
+                         words required\", ref 3.11.4.2 Table 3-5: padding not settled)"
+                            .into(),
+                    )
+                };
+            }
+            _ => return Ok(PackedElem::Unpacked),
+        };
+        match bits {
+            1 => Ok(PackedElem::Bits(1)),
+            2 => Ok(PackedElem::Bits(2)),
+            3 | 4 => Ok(PackedElem::Bits(4)),
+            5..=8 if byte_ok => Ok(PackedElem::Byte),
+            5..=8 => {
+                Err("a packed array of a one-byte enumeration (ref 3.11.4.2 Table 3-5)".into())
+            }
+            9..=16 | 32 => Ok(PackedElem::Unpacked),
+            _ => Err(format!(
+                "a packed array of {bits}-bit elements (ref 3.11.4.2 Table 3-5 footnote 2: \"word \
+                 aligned\", their size not stated)"
+            )),
+        }
+    }
+
+    /// The bits of an element of array type `array` when it is a packed
+    /// array of 1-, 2- or 4-bit elements ([`TypeTable::packed_array_elem`]):
+    /// element `k` is bits `(k - lo) * n .. (k - lo) * n + n - 1` of the
+    /// array, counted from the most significant bit of its first byte.
+    pub fn packed_elem_bits(&self, array: TypeId) -> Option<u32> {
+        match self.kind(array) {
+            TypeKind::Array {
+                elem, packed: true, ..
+            } => match self.packed_array_elem(*elem) {
+                Ok(PackedElem::Bits(b)) => Some(b),
+                _ => None,
+            },
+            _ => None,
         }
     }
 

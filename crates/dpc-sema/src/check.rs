@@ -16,8 +16,8 @@ use crate::consts::ConstValue;
 use crate::conv::{self, Passing, RoutineOptions};
 use crate::program::*;
 use crate::types::{
-    round_up, BitPos, DeviceAccess, Field, RecordType, SigParam, Signature, TypeAttrs, TypeId,
-    TypeKind, TypeTable, VariantArm, VariantPart, MAX_OBJECT_SIZE,
+    round_up, BitPos, DeviceAccess, Field, PackedElem, RecordType, SigParam, Signature, TypeAttrs,
+    TypeId, TypeKind, TypeTable, VariantArm, VariantPart, MAX_OBJECT_SIZE,
 };
 
 /// Smallest alignment of an object in a routine's frame, in bytes: the
@@ -759,13 +759,6 @@ impl<'t> Checker<'t> {
                         return err;
                     }
                 }
-                if *packed && !self.packed_elem_same_as_unpacked(elem_ty) {
-                    self.unsupported(
-                        t.span,
-                        "a packed array of this element type (ref 3.11.4.2 Table 3-5)",
-                    );
-                    return err;
-                }
                 let mut index_tys = Vec::new();
                 for ix in indices {
                     let it = self.type_expr(ix);
@@ -775,6 +768,19 @@ impl<'t> Checker<'t> {
                     index_tys.push(it);
                 }
                 for it in index_tys.into_iter().rev() {
+                    if *packed {
+                        // ref 3.11.4.2 Table 3-5 p. 3-47
+                        // ([`TypeTable::packed_array_elem`]); each dimension
+                        // of `packed array[i, j]` is a packed array.
+                        match self.types.packed_array_elem(elem_ty) {
+                            Ok(PackedElem::Unpacked | PackedElem::Bits(_)) => {}
+                            Ok(PackedElem::Byte) => elem_ty = self.types.sized(elem_ty, 8),
+                            Err(what) => {
+                                self.unsupported(t.span, &what);
+                                return err;
+                            }
+                        }
+                    }
                     elem_ty = self.new_type(TypeKind::Array {
                         index: it,
                         elem: elem_ty,
@@ -1260,28 +1266,6 @@ impl<'t> Checker<'t> {
             return None;
         }
         Some(self.types.sized(base, bits))
-    }
-
-    /// ref 3.11.4.2 Table 3-5 p. 3-47: element types whose packed storage
-    /// is the same as unpacked.
-    fn packed_elem_same_as_unpacked(&self, elem: TypeId) -> bool {
-        match self.types.kind(elem) {
-            TypeKind::Integer16
-            | TypeKind::Integer32
-            | TypeKind::Char
-            | TypeKind::Real { .. }
-            | TypeKind::Pointer { .. }
-            | TypeKind::UnivPtr
-            | TypeKind::Record(_)
-            | TypeKind::Error => true,
-            // Subrange of char: 8 bits, byte aligned.
-            TypeKind::Subrange { base, .. } => matches!(self.types.kind(*base), TypeKind::Char),
-            // Arrays of non-characters: "Exact number of words required".
-            // Character arrays: "Exact number of bytes required".  Both
-            // equal the unpacked size for the element types accepted here.
-            TypeKind::Array { elem, .. } => self.packed_elem_same_as_unpacked(*elem),
-            _ => false,
-        }
     }
 
     /// Reject a type larger than [`MAX_OBJECT_SIZE`].
@@ -1955,7 +1939,15 @@ impl<'t> Checker<'t> {
                 index,
                 lo,
                 elem_size,
+                elem_bits,
             } => {
+                if elem_bits.is_some() {
+                    return Err(
+                        "`addr` of an element of a packed array of bits (ref 3.11.4.2) is not a \
+                         valid initial value"
+                            .into(),
+                    );
+                }
                 let mut a = self.static_designator(base)?;
                 let Some(k) = index.value.as_ref().and_then(|v| v.ordinal()) else {
                     return Err(
@@ -2047,8 +2039,24 @@ impl<'t> Checker<'t> {
                 TypeKind::Array { index, elem, .. } => {
                     let (lo, hi) = self.types.ordinal_range(index).unwrap_or((0, -1));
                     let esize = self.types.size(elem);
+                    // A packed array of 1-, 2- or 4-bit elements (ref
+                    // 3.11.4.2, 3.15.5 p. 3-62): element k is the bits
+                    // (k - lo) * n .. of the array from the most
+                    // significant bit of its first byte, initialised like a
+                    // packed record's bit field.
+                    let ebits = self.types.packed_elem_bits(ty);
                     let mut next = lo;
                     let at = |k: i64| base + ((k - lo) as u32) * esize;
+                    let one =
+                        |c: &mut Self, k: i64, v: &ast::Init, out: &mut Vec<InitStore>| match ebits
+                        {
+                            Some(n) => {
+                                let bit = (k - lo) as u32 * n;
+                                let pos = BitPos { bit, width: n };
+                                c.init_bits(elem, base + bit / 8, pos, v, out)
+                            }
+                            None => c.init(elem, at(k), v, out),
+                        };
                     for it in items {
                         match it {
                             ast::InitItem::Value(v) => {
@@ -2056,7 +2064,7 @@ impl<'t> Checker<'t> {
                                     self.error(*span, "too many initial values for the array");
                                     return;
                                 }
-                                self.init(elem, at(next), v, out);
+                                one(self, next, v, out);
                                 next += 1;
                             }
                             ast::InitItem::Repeat { count, value, .. } => {
@@ -2069,7 +2077,7 @@ impl<'t> Checker<'t> {
                                         self.error(*span, "too many initial values for the array");
                                         return;
                                     }
-                                    self.init(elem, at(next), value, out);
+                                    one(self, next, value, out);
                                     next += 1;
                                 }
                             }
@@ -2086,7 +2094,7 @@ impl<'t> Checker<'t> {
                                     continue;
                                 };
                                 for j in k..=kh {
-                                    self.init(elem, at(j), value, out);
+                                    one(self, j, value, out);
                                 }
                                 next = kh + 1;
                             }
@@ -3355,12 +3363,14 @@ impl<'t> Checker<'t> {
             }
         }
         let elem_size = self.types.size(elem);
+        let elem_bits = self.types.packed_elem_bits(base.ty);
         Expr {
             kind: ExprKind::Index {
                 base: Box::new(base),
                 index: Box::new(i),
                 lo,
                 elem_size,
+                elem_bits,
             },
             ty: elem,
             value: None,

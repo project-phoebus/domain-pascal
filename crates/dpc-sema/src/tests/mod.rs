@@ -10,6 +10,7 @@ mod attrs;
 mod checks;
 mod layout;
 mod packed;
+mod packed_arrays;
 mod table5_1;
 mod tst_lock;
 

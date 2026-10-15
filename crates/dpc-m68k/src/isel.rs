@@ -2431,7 +2431,12 @@ fn walk_expr<'a>(e: &'a Expr, v: &mut dyn FnMut(Node<'a>)) {
             walk_expr(elem, v);
             walk_expr(set, v);
         }
-        Expr::SetMemberAt { elem, set, .. } => {
+        Expr::SetMemberAt { elem, set, .. }
+        | Expr::BitElem {
+            index: elem,
+            array: set,
+            ..
+        } => {
             walk_expr(elem, v);
             walk_addr(set, v);
         }
@@ -2527,7 +2532,13 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     for st in body {
         match &st.kind {
             StmtKind::SetResult(e) | StmtKind::Discard(e) => walk_expr(e, v),
-            StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+            StmtKind::Store { addr, value }
+            | StmtKind::StoreBits { addr, value, .. }
+            | StmtKind::StoreBitElem {
+                array: addr,
+                index: value,
+                ..
+            } => {
                 walk_addr(addr, v);
                 walk_expr(value, v);
             }
@@ -2895,6 +2906,11 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 walk_expr(value, v);
                 walk_addr(addr, v);
             }
+            // The index is read first ([`Selector::store_bit_elem`]).
+            StmtKind::StoreBitElem { array, index, .. } => {
+                walk_expr(index, v);
+                walk_addr(array, v);
+            }
             StmtKind::Copy { dst, src, .. } => {
                 walk_addr(src, v);
                 walk_addr(dst, v);
@@ -3132,6 +3148,9 @@ fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bo
         StmtKind::StoreBits { addr: a, field, .. } => {
             ok &= !hits(a, Some(field.unit.bytes() as i32))
         }
+        StmtKind::StoreBitElem {
+            array: a, bytes, ..
+        } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Copy { dst: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Fill {
             start: a,
@@ -3149,7 +3168,13 @@ fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
     for st in body {
         match &mut st.kind {
             StmtKind::SetResult(e) | StmtKind::Discard(e) => expr_addrs_mut(e, f),
-            StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+            StmtKind::Store { addr, value }
+            | StmtKind::StoreBits { addr, value, .. }
+            | StmtKind::StoreBitElem {
+                array: addr,
+                index: value,
+                ..
+            } => {
                 addr_mut(addr, f);
                 expr_addrs_mut(value, f);
             }
@@ -3230,7 +3255,12 @@ fn expr_addrs_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Addr)) {
             expr_addrs_mut(elem, f);
             expr_addrs_mut(set, f);
         }
-        Expr::SetMemberAt { elem, set, .. } => {
+        Expr::SetMemberAt { elem, set, .. }
+        | Expr::BitElem {
+            index: elem,
+            array: set,
+            ..
+        } => {
             expr_addrs_mut(elem, f);
             addr_mut(set, f);
         }
@@ -3539,7 +3569,13 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     }
                     st.loop_store |= in_loop;
                 }
-                StmtKind::Store { addr: a, value } | StmtKind::StoreBits { addr: a, value, .. } => {
+                StmtKind::Store { addr: a, value }
+                | StmtKind::StoreBits { addr: a, value, .. }
+                | StmtKind::StoreBitElem {
+                    array: a,
+                    index: value,
+                    ..
+                } => {
                     addr(a, off, st);
                     exprs(value, off, st);
                 }
@@ -3949,11 +3985,15 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool, labels: &[bool]) -> bool {
             StmtKind::SetResult(e)
             | StmtKind::Store { value: e, .. }
             | StmtKind::StoreBits { value: e, .. }
+            | StmtKind::StoreBitElem { index: e, .. }
                 if expr_has_call(e) =>
             {
                 return false
             }
-            StmtKind::SetResult(_) | StmtKind::Store { .. } | StmtKind::StoreBits { .. } => {}
+            StmtKind::SetResult(_)
+            | StmtKind::Store { .. }
+            | StmtKind::StoreBits { .. }
+            | StmtKind::StoreBitElem { .. } => {}
             StmtKind::Discard(e) if expr_has_call(e) => return false,
             StmtKind::Discard(_) | StmtKind::Disable | StmtKind::Enable => {}
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
@@ -4034,7 +4074,12 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Const { .. } | Expr::AddrOf(_) => false,
         Expr::Load { addr, .. } | Expr::Bits { addr, .. } => addr_has_call(addr),
         Expr::SetMember { elem, set, .. } => expr_has_call(elem) || expr_has_call(set),
-        Expr::SetMemberAt { elem, set, .. } => expr_has_call(elem) || addr_has_call(set),
+        Expr::SetMemberAt { elem, set, .. }
+        | Expr::BitElem {
+            index: elem,
+            array: set,
+            ..
+        } => expr_has_call(elem) || addr_has_call(set),
         Expr::SetOp { lhs, rhs, .. } => expr_has_call(lhs) || expr_has_call(rhs),
         Expr::Binary { op, lhs, rhs, ty } => {
             arith_calls(*op, lhs, rhs, *ty, false) || expr_has_call(lhs) || expr_has_call(rhs)
@@ -4465,7 +4510,12 @@ impl Uses<'_> {
                 self.expr(elem);
                 self.expr(set);
             }
-            Expr::SetMemberAt { elem, set, .. } => {
+            Expr::SetMemberAt { elem, set, .. }
+            | Expr::BitElem {
+                index: elem,
+                array: set,
+                ..
+            } => {
                 self.expr(elem);
                 self.address(set);
             }
@@ -4698,6 +4748,12 @@ impl Uses<'_> {
                 StmtKind::StoreBits { addr, value, .. } => {
                     self.expr(value);
                     self.address(addr);
+                }
+                // The index is read first ([`Selector::bit_elem_test`],
+                // [`Selector::store_bit_elem`]).
+                StmtKind::StoreBitElem { array, index, .. } => {
+                    self.expr(index);
+                    self.address(array);
                 }
                 StmtKind::Copy { dst, src, .. } => {
                     self.address(src);
@@ -5390,6 +5446,16 @@ impl Selector {
                 } => {
                     self.store_bits(addr, *field, value, *mask)?;
                     self.wrote(addr, field.unit.bytes());
+                }
+                StmtKind::StoreBitElem {
+                    array,
+                    bytes,
+                    index,
+                    lo,
+                    value,
+                } => {
+                    self.store_bit_elem(array, index, *lo, *value)?;
+                    self.wrote(array, *bytes);
                 }
                 StmtKind::Copy { dst, src, bytes } => {
                     self.copy(dst, src, *bytes)?;
@@ -6863,6 +6929,19 @@ impl Selector {
                     // beq.b`).
                     Expr::SetMemberAt { elem, set, bytes } => {
                         self.set_member_at(elem, set, *bytes)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
+                    // An element of a packed array of booleans: `btst` on
+                    // its byte and the branch on Z ([`Self::bit_elem_test`];
+                    // PCHIST_$COUNT 0xE1A16C `btst D3,(0x18,A1); beq.b`).
+                    Expr::BitElem {
+                        array,
+                        bytes,
+                        index,
+                        lo,
+                    } => {
+                        self.bit_elem_test(array, *bytes, index, *lo)?;
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
                     }
@@ -9385,6 +9464,7 @@ impl Selector {
             Expr::Convert { value: x, ty } if narrows_in_place(x, *ty) => self.value_needs_reg(x),
             Expr::SetMember { .. }
             | Expr::SetMemberAt { .. }
+            | Expr::BitElem { .. }
             | Expr::SetOp { .. }
             | Expr::SetOf { .. }
             | Expr::Bits { .. }
@@ -10302,6 +10382,30 @@ impl Selector {
         if self.result_web {
             return self.set_result_web(res, e);
         }
+        // An element of a packed array of booleans: `btst`, then `sne`
+        // (ACL_$USED_SUSER 0xE492FA..0xE492FE `btst D2,(-15568,A1); sne
+        // D0`, its one statement; codegen-patterns 5.2).
+        if let Expr::BitElem {
+            array,
+            bytes,
+            index,
+            lo,
+        } = e
+        {
+            self.bit_elem_test(array, *bytes, index, *lo)?;
+            let d = self.alloc_d()?;
+            self.out.push(Insn::Scc {
+                cond: Cond::Ne,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            self.result_moves.push(self.out.len());
+            self.out.push(Insn::Move {
+                size: Size::B,
+                src: Ea::Reg(Reg::D(d)),
+                dst: Ea::Reg(Reg::D(0)),
+            });
+            return Ok(());
+        }
         // A function result in D0 already (the tail wrapper `F :=
         // G(args)`: the call, then the epilogue, codegen-patterns 3,
         // ACL_$IS_SUSER), a held value or a computed one.
@@ -10694,6 +10798,12 @@ impl Selector {
                 self.span,
                 "`in` on a set larger than a longword, as a value (`s<cc>` after the byte \
                  `btst`: not catalogued), is",
+            )),
+            // As a function result: [`Self::set_result`].
+            Expr::BitElem { .. } => Err(unsupported(
+                self.span,
+                "an element of a packed array of booleans as a value other than a condition or \
+                 the function result of a one-statement body (not seen, codegen-patterns 5.2) is",
             )),
             Expr::SetOf { elem, ty } => Ok(Val::Tmp(self.set_of(elem, ty.width)?)),
             Expr::SetOp { op, lhs, rhs, ty } => {
@@ -14354,6 +14464,255 @@ impl Selector {
         self.out.push(Insn::Btst {
             bit: k,
             dst: Ea::Idx(0, a, c, false),
+        });
+        Ok(())
+    }
+
+    /// The byte of the array at `array` (the unit's data) that the bit
+    /// `btst`/`or.b`/`and.b` reaches: `lea (0,A5,Do.w),Aa`, the element's
+    /// displacement in the data area kept for the operand, `(d,Aa)`
+    /// (codegen-patterns 5.2, "Packed arrays of booleans": PCHIST_$COUNT
+    /// 0xE1A160 `lea (0,A5,D1.w),A1` then `btst D3,(0x18,A1)`, though
+    /// `(0x18,A5,D1.w)` would do).  Only the unit's own data through A5:
+    /// another unit's array is `movea.l #sym,An; lea (0,An,Dx.w),...` into
+    /// the base's register or another (ACL_$ALLOC_ASID 0xE73CAE A3 to A3,
+    /// ACL_$USED_SUSER 0xE492EE A0 to A1: which one is not settled), and a
+    /// frame or pointer base is not seen.
+    fn bit_elem_byte(&mut self, array: &Addr, offset: u8) -> Res<Ea> {
+        let o = match array {
+            Addr::Static(o) if !self.data_absolute && (0..0x8000).contains(o) => *o,
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "an element of a packed array of booleans that is not in the unit's data \
+                     reached through A5 (other units\' arrays: the `lea` register not settled, \
+                     codegen-patterns 5.2) is",
+                ))
+            }
+        };
+        let base = self.static_base()?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea {
+            src: Ea::Idx(0, base, offset, false),
+            dst: a,
+        });
+        Ok(if o == 0 { Ea::Ind(a) } else { Ea::Disp(o, a) })
+    }
+
+    /// The low byte (`byte`) or the word of a word index of a packed array
+    /// of booleans, as the source of the `move` that starts the element's
+    /// computation: a register-held value itself (PCHIST_$COUNT 0xE1A156
+    /// `move.b D2,D0`; ACL_$INIT 0xE310E4 `move.w D3,D0`), a variable in
+    /// memory read in place, its low byte at the next address
+    /// (PCHIST_$UNIX_PROFIL_CNTL 0xE5CB3A `move.b (-0x21,A6),D0` for the
+    /// word at -0x22; PCHIST_$UNIX_PROFIL_FORK 0xE5CC44 `move.b
+    /// (0x00e20609).l,D0` for PROC1_$CURRENT, 0xE5CC9E `move.b (0x1,A2),D0`
+    /// through an `in` parameter's address held in A2).  A computed index
+    /// is not seen.
+    fn bit_elem_index(&mut self, index: &Expr, byte: bool) -> Res<Ea> {
+        let bad = |s: &Selector| {
+            unsupported(
+                s.span,
+                "a computed index into a packed array of booleans (not seen, codegen-patterns \
+                 5.2) is",
+            )
+        };
+        if !matches!(index, Expr::Load { .. }) {
+            return Err(bad(self));
+        }
+        match self.eval(index)? {
+            Val::Reg(r @ Reg::D(_)) => Ok(Ea::Reg(r)),
+            Val::Mem(ea) if !byte => Ok(ea),
+            Val::Mem(ea) => ea_plus(&ea, 1).ok_or_else(|| bad(self)),
+            _ => Err(bad(self)),
+        }
+    }
+
+    /// `btst` of element `index` of the packed array of booleans at
+    /// `array` (ref 3.11.4.2 Table 3-5, 3.15.5 p. 3-62; [`Expr::BitElem`]):
+    /// Z is set when the element is false.  The image's one form
+    /// (codegen-patterns 5.2, "Packed arrays of booleans"; PCHIST_$COUNT
+    /// 0xE1A156..0xE1A16C, PCHIST_$UNIX_PROFIL_CNTL 0xE5CB3A..0xE5CB52 and
+    /// 0xE5CBA8..0xE5CBC0, PCHIST_$UNIX_PROFIL_FORK 0xE5CC44..0xE5CC5E and
+    /// 0xE5CC9E..0xE5CCB6; with another base ACL_$SET_ACL_CHECK 0xE47384,
+    /// ACL_$ALLOC_ASID 0xE73C9A, ACL_$USED_SUSER 0xE492DA), computed on the
+    /// index's low byte:
+    ///
+    /// ```text
+    /// move.b <index's low byte>,Dp
+    /// clr.w Do
+    /// subq.b #lo,Dp           ; the position from 0
+    /// move.b Dp,Do
+    /// lsr.w #3,Do             ; its byte, zero-extended
+    /// lea (0,A5,Do.w),Aa
+    /// moveq #7,Dm             ; Do's register again
+    /// moveq #7,Dn
+    /// and.b Dp,Dm
+    /// sub.b Dm,Dn             ; 7 - position mod 8
+    /// btst Dn,(d,Aa)
+    /// ```
+    ///
+    /// The sequence is one scheduling unit (`sched.rs`): R11's window
+    /// would place `moveq #7,Dn` before the `lea`, which no site does.
+    /// Byte arithmetic covers 256 elements, and a larger array is refused;
+    /// every site's array has 64 elements and a lower bound of 1, so other
+    /// sizes up to 256 and lower bounds 2..=8 (`subq`) are extrapolated
+    /// (unverified).  Not reproduced: ACL_$USED_SUSER has Dp and Do the other
+    /// way round (D1, D0), and the module-local 0xE464B8 (0xE4655C) forms
+    /// the bit number as `andi.b #7,Dp; ...; moveq #7,Dm; sub.b Dp,Dm`.
+    fn bit_elem_test(&mut self, array: &Addr, bytes: u32, index: &Expr, lo: i64) -> Res<()> {
+        self.bit_elem_bound(lo)?;
+        if bytes > 32 {
+            return Err(unsupported(
+                self.span,
+                "testing an element of a packed array of more than 256 booleans (the byte \
+                 arithmetic of the 64-element sites would not reach it, codegen-patterns 5.2) is",
+            ));
+        }
+        let src = self.bit_elem_index(index, true)?;
+        let start = self.out.len();
+        let dp = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::B,
+            src,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        let dof = self.alloc_d()?;
+        self.out.push(Insn::Clr {
+            size: Size::W,
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        self.out.push(Insn::Subq {
+            size: Size::B,
+            value: lo as u8,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        self.out.push(Insn::Move {
+            size: Size::B,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: dof,
+        });
+        let ea = self.bit_elem_byte(array, dof)?;
+        let dm = self.alloc_d()?;
+        let dn = self.alloc_d()?;
+        self.out.push(Insn::Moveq { value: 7, dst: dm });
+        self.out.push(Insn::Moveq { value: 7, dst: dn });
+        self.out.push(Insn::Alu {
+            op: AluOp::And,
+            size: Size::B,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: dm,
+        });
+        self.out.push(Insn::Alu {
+            op: AluOp::Sub,
+            size: Size::B,
+            src: Ea::Reg(Reg::D(dm)),
+            dst: dn,
+        });
+        self.out.push(Insn::Btst { bit: dn, dst: ea });
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// The lower bound of a packed array of booleans whose element is
+    /// formed at run time: 1..=8, subtracted with `subq` (every site's is
+    /// 1, `subq.b #0x1` / `subq.w #0x1`).
+    fn bit_elem_bound(&self, lo: i64) -> Res<()> {
+        if (1..=8).contains(&lo) {
+            Ok(())
+        } else {
+            Err(unsupported(
+                self.span,
+                "a packed array of booleans whose lower bound is not 1..8 (only `subq` of 1 is \
+                 seen, codegen-patterns 5.2) is",
+            ))
+        }
+    }
+
+    /// `a[index] := true` / `false` for an element of a packed array of
+    /// booleans ([`StmtKind::StoreBitElem`]; codegen-patterns 5.2,
+    /// "Packed arrays of booleans"): the mask `0x80 >> (position mod 8)`
+    /// (`#-0x81` for false: the low byte has all but that bit) `or`ed
+    /// (`and`ed) into the element's byte, computed on the index's word
+    /// (PCHIST_$UNIX_PROFIL_FORK 0xE5CCDC..0xE5CCF4, ACL_$INIT
+    /// 0xE310E4..0xE310FC, ACL_$SET_LOCAL_LOCKSMITH 0xE49204..0xE49226;
+    /// PCHIST_$UNIX_PROFIL_CNTL 0xE5CB5C..0xE5CB76 and the clear
+    /// 0xE5CBF2..0xE5CC0C):
+    ///
+    /// ```text
+    /// move.w <index>,Dp
+    /// moveq #7,Dc
+    /// subq.w #lo,Dp
+    /// move.l #0x80,Dm         ; #-0x81 for false
+    /// and.w Dp,Dc
+    /// lsr.l Dc,Dm
+    /// move.w Dp,Do
+    /// lsr.w #3,Do
+    /// lea (0,A5,Do.w),Aa
+    /// or.b Dm,(d,Aa)          ; and.b for false
+    /// ```
+    ///
+    /// The selector writes the instructions in that order and the
+    /// scheduler (R11) keeps it; the allocator gives Do the count's
+    /// register, free after the `lsr.l` (FORK, ACL_$INIT, LOCKSMITH: D1).
+    /// **Not reproduced:** PCHIST_$UNIX_PROFIL_CNTL, the module-local
+    /// 0xE463E4 (0xE4646C) and ACL_$SET_ACL_CHECK 0xE473AC take a new
+    /// register for Do, `move.w Dp,Do` then placed before the `lsr.l`
+    /// (with a new register R11 gives that order); why is not known.
+    fn store_bit_elem(&mut self, array: &Addr, index: &Expr, lo: i64, value: bool) -> Res<()> {
+        self.bit_elem_bound(lo)?;
+        let src = self.bit_elem_index(index, false)?;
+        let dp = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        let dc = self.alloc_d()?;
+        self.out.push(Insn::Moveq { value: 7, dst: dc });
+        self.out.push(Insn::Subq {
+            size: Size::W,
+            value: lo as u8,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        let dm = self.alloc_d()?;
+        self.const_into(if value { 0x80 } else { -0x81 }, Width::Long, dm);
+        self.out.push(Insn::Alu {
+            op: AluOp::And,
+            size: Size::W,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: dc,
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::L,
+            count: ShiftCount::Reg(dc),
+            dst: dm,
+        });
+        let dof = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: dof,
+        });
+        let ea = self.bit_elem_byte(array, dof)?;
+        self.out.push(Insn::AluToMem {
+            op: if value { AluOp::Or } else { AluOp::And },
+            size: Size::B,
+            src: dm,
+            dst: ea,
         });
         Ok(())
     }

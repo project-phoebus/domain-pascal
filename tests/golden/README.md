@@ -534,3 +534,12 @@ Tests:
   the mask, `and.b`, `lsr.w` and set with `andi`/`ori` (RIP 0xE158B6),
   a word variable's low byte merged into a longword unit (APP_$RECEIVE
   0xE00864).
+- `packed/bool_arrays` - codegen-patterns 5.2 ("Packed arrays"; bead
+  domain-pascal-51e): PCHIST's `packed array[1..64] of boolean` at +0x18
+  of its data: tests on the index's low byte (PCHIST_$COUNT 0xE1A156,
+  PCHIST_$UNIX_PROFIL_FORK 0xE5CC44 and 0xE5CC9E), `not` with `bne`, set
+  with `move.l #0x80; lsr.l; or.b` (0xE5CCDC), cleared with `#-0x81` and
+  `and.b` (PCHIST_$UNIX_PROFIL_CNTL 0xE5CBF2), a function result with
+  `sne` (ACL_$USED_SUSER 0xE492FA), a register-held `for` index (ACL_$INIT
+  0xE310E4); FIM_'s frame size table as an initialised `packed array of
+  0..255`.

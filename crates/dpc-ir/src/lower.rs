@@ -622,6 +622,15 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 expr(elem, out);
                 addr(a, *bytes, out);
             }
+            Expr::BitElem {
+                array: a,
+                bytes,
+                index,
+                ..
+            } => {
+                expr(index, out);
+                addr(a, *bytes, out);
+            }
             Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                 expr(lhs, out);
                 expr(rhs, out);
@@ -677,6 +686,15 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
         } => {
             addr(a, field.unit.bytes(), out);
             expr(value, out);
+        }
+        StmtKind::StoreBitElem {
+            array: a,
+            bytes,
+            index,
+            ..
+        } => {
+            addr(a, *bytes, out);
+            expr(index, out);
         }
         StmtKind::Copy { dst, src, bytes } => {
             addr(dst, *bytes, out);
@@ -774,7 +792,12 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
                 expr(elem, f);
                 expr(set, f);
             }
-            Expr::SetMemberAt { elem, set: a, .. } => {
+            Expr::SetMemberAt { elem, set: a, .. }
+            | Expr::BitElem {
+                index: elem,
+                array: a,
+                ..
+            } => {
                 expr(elem, f);
                 addr(a, f);
             }
@@ -822,7 +845,13 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
     }
     match &mut s.kind {
         StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, f),
-        StmtKind::Store { addr: a, value } | StmtKind::StoreBits { addr: a, value, .. } => {
+        StmtKind::Store { addr: a, value }
+        | StmtKind::StoreBits { addr: a, value, .. }
+        | StmtKind::StoreBitElem {
+            array: a,
+            index: value,
+            ..
+        } => {
             addr(a, f);
             expr(value, f);
         }
@@ -957,7 +986,12 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
                 expr(x, size, max);
                 expr(y, size, max);
             }
-            Expr::SetMemberAt { elem, set: a, .. } => {
+            Expr::SetMemberAt { elem, set: a, .. }
+            | Expr::BitElem {
+                index: elem,
+                array: a,
+                ..
+            } => {
                 expr(elem, size, max);
                 addr(a, size, max);
             }
@@ -1455,7 +1489,13 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
     let e = |x: &'a Expr, out: &mut Vec<&'a Call>| expr_calls(x, out);
     match &s.kind {
         StmtKind::SetResult(x) => e(x, out),
-        StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+        StmtKind::Store { addr, value }
+        | StmtKind::StoreBits { addr, value, .. }
+        | StmtKind::StoreBitElem {
+            array: addr,
+            index: value,
+            ..
+        } => {
             addr_calls(addr, out);
             e(value, out);
         }
@@ -1562,7 +1602,12 @@ fn expr_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Call>) {
             expr_calls(elem, out);
             expr_calls(set, out);
         }
-        Expr::SetMemberAt { elem, set, .. } => {
+        Expr::SetMemberAt { elem, set, .. }
+        | Expr::BitElem {
+            index: elem,
+            array: set,
+            ..
+        } => {
             expr_calls(elem, out);
             addr_calls(set, out);
         }
@@ -1602,9 +1647,13 @@ fn addr_calls<'a>(a: &'a Addr, out: &mut Vec<&'a Call>) {
 fn stmt_uses_static(s: &Stmt) -> bool {
     match &s.kind {
         StmtKind::SetResult(e) => expr_uses_static(e),
-        StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
-            addr_uses_static(addr) || expr_uses_static(value)
-        }
+        StmtKind::Store { addr, value }
+        | StmtKind::StoreBits { addr, value, .. }
+        | StmtKind::StoreBitElem {
+            array: addr,
+            index: value,
+            ..
+        } => addr_uses_static(addr) || expr_uses_static(value),
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
         StmtKind::Call(c) => call_uses_static(c),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
@@ -1675,7 +1724,12 @@ fn expr_uses_static(e: &Expr) -> bool {
             addr_uses_static(addr)
         }
         Expr::SetMember { elem, set, .. } => expr_uses_static(elem) || expr_uses_static(set),
-        Expr::SetMemberAt { elem, set, .. } => expr_uses_static(elem) || addr_uses_static(set),
+        Expr::SetMemberAt { elem, set, .. }
+        | Expr::BitElem {
+            index: elem,
+            array: set,
+            ..
+        } => expr_uses_static(elem) || addr_uses_static(set),
         Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
             expr_uses_static(lhs) || expr_uses_static(rhs)
         }
@@ -2032,6 +2086,15 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     self.expr(elem)?;
                     self.addr(set, *bytes)
                 }
+                Expr::BitElem {
+                    array,
+                    bytes,
+                    index,
+                    ..
+                } => {
+                    self.expr(index)?;
+                    self.addr(array, *bytes)
+                }
                 Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
                     self.expr(lhs)?;
                     self.expr(rhs)
@@ -2088,6 +2151,15 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     } => {
                         self.addr(addr, field.unit.bytes())?;
                         self.expr(value)?;
+                    }
+                    StmtKind::StoreBitElem {
+                        array,
+                        bytes,
+                        index,
+                        ..
+                    } => {
+                        self.addr(array, *bytes)?;
+                        self.expr(index)?;
                     }
                     StmtKind::Copy { dst, src, bytes } => {
                         self.addr(dst, *bytes)?;
@@ -3456,6 +3528,31 @@ fn result_assignment(
 /// sure it fits); an integer of another size is widened or narrowed
 /// ([`assign_convert`]).
 fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
+    if let Some((array, bytes, index, lo)) = bit_element(p, target)? {
+        // `true` or `false`: the bit set or cleared through a mask
+        // (codegen-patterns 5.2, "Packed arrays of booleans").  A computed
+        // value is merged under a mask whose bit number the image keeps
+        // in a frame byte (ACL_$INHERIT_SUBSYS 0xE4914C..0xE49182,
+        // ACL_$OVERRIDE_LOCAL_LOCKSMITH 0xE4928C..0xE492BC), not modelled.
+        let Some(ConstValue::Bool(b)) = &value.value else {
+            return Err(unsupported(
+                value.span,
+                "storing a value other than the constant `true` or `false` into an element of \
+                 a packed array of booleans (the bit number kept in a frame byte, \
+                 codegen-patterns 5.2) is",
+            ));
+        };
+        return Ok(Stmt {
+            kind: StmtKind::StoreBitElem {
+                array,
+                bytes,
+                index,
+                lo,
+                value: *b,
+            },
+            span: s.span,
+        });
+    }
     if let Some((addr, field)) = bit_field(p, target)? {
         return store_bits(p, s, target, value, addr, field);
     }
@@ -4063,6 +4160,14 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if is_set(p, e.ty) && matches!(e.kind, ExprKind::SetCons(_) | ExprKind::Binary { .. }) {
         let ty = scalar_of(p, e)?;
         return set_value(p, e, ty);
+    }
+    if let Some((array, bytes, index, lo)) = bit_element(p, e)? {
+        return Ok(Expr::BitElem {
+            array,
+            bytes,
+            index: Box::new(index),
+            lo,
+        });
     }
     if let Some((addr, field)) = bit_field(p, e)? {
         check_device_access(p, e, true)?;
@@ -4765,6 +4870,63 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
     )))
 }
 
+/// `e` as an element of a packed array of booleans (one bit each, ref
+/// 3.11.4.2 Table 3-5 p. 3-47; [`Expr::BitElem`]): the array's address
+/// and size, the index (a word) and the array's lower bound; `None` when `e` is no
+/// element of a packed array of bits.  Refused: elements of 2 or 4 bits
+/// and one-bit elements that are no `boolean` (their values and code are
+/// not catalogued), a constant index (no site: whether it becomes a
+/// `bset #k`/`btst #k` as a packed record's field does is not seen), an
+/// index of another width than a word (every site's is a word: PCHIST,
+/// ACL; codegen-patterns 5.2), and volatile arrays.
+fn bit_element(p: &Program, e: &SExpr) -> Res<Option<(Addr, u32, Expr, i64)>> {
+    let ExprKind::Index {
+        base,
+        index,
+        lo,
+        elem_bits: Some(bits),
+        ..
+    } = &e.kind
+    else {
+        return Ok(None);
+    };
+    if *bits != 1 || !matches!(p.types.kind(e.ty), TypeKind::Boolean) {
+        return Err(unsupported(
+            e.span,
+            format!(
+                "an element of a packed array of {bits}-bit elements of type {} (only booleans \
+                 are catalogued, codegen-patterns 5.2) is",
+                p.types.display(e.ty)
+            ),
+        ));
+    }
+    if volatile_access(p, e).is_some() {
+        return Err(unsupported(
+            e.span,
+            "an element of a volatile packed array of booleans is",
+        ));
+    }
+    if index.value.is_some() {
+        return Err(unsupported(
+            index.span,
+            "an element of a packed array of booleans with a constant index (no site in the \
+             image, codegen-patterns 5.2) is",
+        ));
+    }
+    let ix = value_of(p, index)?;
+    if ix.ty().width != Width::Word {
+        return Err(unsupported(
+            index.span,
+            format!(
+                "a {}-byte index into a packed array of booleans (only word indices are \
+                 catalogued, codegen-patterns 5.2) is",
+                ix.ty().bytes()
+            ),
+        ));
+    }
+    Ok(Some((addr_of(p, base)?, p.types.size(base.ty), ix, *lo)))
+}
+
 /// The value type of bit field `e` ([`bit_field`]): a boolean of one bit,
 /// or an ordinal of non-negative values (an enumeration, a subrange with a
 /// low bound of 0 or more), zero-extended.  A subrange with negative
@@ -4977,11 +5139,16 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
     fn even(p: &Program, e: &SExpr) -> Option<bool> {
         match &e.kind {
             ExprKind::Field { base, offset, .. } => Some(even(p, base)? == (offset % 2 == 0)),
+            // An element of a packed array of bits has no address.
+            ExprKind::Index {
+                elem_bits: Some(_), ..
+            } => None,
             ExprKind::Index {
                 base,
                 index,
                 lo,
                 elem_size,
+                elem_bits: None,
             } => {
                 let b = even(p, base)?;
                 if elem_size % 2 == 0 {
@@ -5086,11 +5253,21 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
         // a 1-based word array, AUDIT_$IS_PROCESS_AUDITED 0xE70DA8).  No
         // range check is emitted: the image has none (FIM_$FREE_ASID's C,
         // `fim/free_asid.c`, notes "the original performs no bounds check").
+        // Its byte and bit are formed by the selector ([`Expr::BitElem`],
+        // [`StmtKind::StoreBitElem`]); passing one by address or taking its
+        // `addr` is not seen in the image.
+        ExprKind::Index {
+            elem_bits: Some(_), ..
+        } => Err(unsupported(
+            e.span,
+            "the address of an element of a packed array of bits (ref 3.11.4.2 Table 3-5) is",
+        )),
         ExprKind::Index {
             base,
             index,
             lo,
             elem_size,
+            elem_bits: None,
         } => {
             let b = addr_of(p, base)?;
             let big = || unsupported(e.span, "an array offset beyond 32 bits is");
@@ -5578,6 +5755,7 @@ fn fill(
         index: ix,
         lo: array_lo,
         elem_size,
+        elem_bits: None,
     } = &target.kind
     else {
         return Ok(None);

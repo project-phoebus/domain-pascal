@@ -4797,3 +4797,61 @@ begin k := addr(y); end;",
     assert_eq!(m.functions[0].address_params, [8]);
     assert_eq!(stored(&m.functions[1], 0), Expr::AddrOf(Addr::Frame(8)));
 }
+
+/// Elements of a packed array of booleans (ref 3.11.4.2 Table 3-5;
+/// codegen-patterns 5.2, "Packed arrays of booleans"): tested and set
+/// through [`Expr::BitElem`] / [`StmtKind::StoreBitElem`] with the array's
+/// address, its size, the word index and the lower bound; a `for` loop of
+/// constant stores is not a byte fill.
+#[test]
+fn packed_boolean_elements() {
+    let m = lower_src(
+        "module m;
+         var pad: integer; bm: packed array[1..64] of boolean; g: integer;
+         procedure t;
+         var i: integer;
+         begin
+           if bm[g] then bm[g] := false;
+           for i := 1 to 64 do bm[i] := true;
+         end;",
+    )
+    .unwrap();
+    let f = &m.functions[0];
+    let StmtKind::If { cond, then_, .. } = &f.body[0].kind else {
+        panic!("{:?}", f.body[0].kind)
+    };
+    let Cond::Test(Expr::BitElem {
+        array,
+        bytes,
+        index,
+        lo,
+    }) = cond
+    else {
+        panic!("{cond:?}")
+    };
+    assert_eq!((array, *bytes, *lo), (&Addr::Static(2), 8, 1));
+    assert_eq!(
+        **index,
+        Expr::Load {
+            addr: Addr::Static(10),
+            ty: Scalar::signed(Width::Word)
+        }
+    );
+    assert!(matches!(
+        &then_[0].kind,
+        StmtKind::StoreBitElem {
+            array: Addr::Static(2),
+            bytes: 8,
+            lo: 1,
+            value: false,
+            ..
+        }
+    ));
+    let StmtKind::For(l) = &f.body[1].kind else {
+        panic!("{:?}", f.body[1].kind)
+    };
+    assert!(matches!(
+        &l.body[0].kind,
+        StmtKind::StoreBitElem { value: true, .. }
+    ));
+}

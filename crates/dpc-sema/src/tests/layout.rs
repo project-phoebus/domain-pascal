@@ -389,8 +389,10 @@ fn unsupported_layouts_are_diagnosed() {
         "module m; type r = aligned record a: char; b: array[1..2] of char end;",
         "natural alignment rules",
     );
+    // Table 3-5 footnote 2: the size of an element over 16 bits is not
+    // stated (packed_arrays.rs).
     assert_err(
-        "module m; type a = packed array[1..8] of boolean;",
+        "module m; type a = packed array[1..8] of -40000..40000;",
         "packed array",
     );
 }

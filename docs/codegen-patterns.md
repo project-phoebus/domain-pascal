@@ -3404,6 +3404,117 @@ model run against the bit model of Figure 3-6).
   `params/addr_in`, exec test `addr_in`, conformance unit `ec_init.pas`,
   dpc-ir test `addr_of_in_parameters`, driver test
   `addr_of_in_parameter`.
+- **Packed arrays (ref 3.11.3 p. 3-45, 3.11.4.2 Table 3-5 p. 3-47, 3.15.5
+  p. 3-62, read in the PDF; layout from the reference, element code
+  Verified at the sites given; implemented, bead domain-pascal-51e).**
+  - *Layout* (`crates/dpc-sema/src/types.rs`, `packed_array_elem`,
+    `packed_elem_bits`).  Table 3-5: subranges and enumerations take the
+    bits they need ("Exact number of bits required; bit aligned"),
+    booleans "1 bit; bit aligned", characters 8 bits, integer 16, integer32
+    and pointers 32, records and arrays of non-characters "exact number of
+    words"; below the table, for every element: "if the element size is
+    less than 16 bits, then the element is padded up to the nearest power
+    of 2 bits" (`packed array [1..3] of 0..7`: 4 bits each, "2 bytes").
+    3.15.5 p. 3-62: "Domain Pascal supports arrays of 1-, 2-, and 4-bit
+    elements.  The order of elements within words is from most
+    significant bit to least significant bit", six 4-bit elements in "3
+    bytes".  So a packed array of 1-, 2- or 4-bit elements is a bit string
+    from the most significant bit of its first byte, in whole bytes (no
+    pad byte for an odd count, unlike an unpacked boolean array, 3.11.4.1);
+    an integer subrange of 5 to 8 bits is one byte per element, read like
+    a `[byte]` subrange (3.11.3: packed arrays store "byte integers"); 9
+    to 16 bits and the other types as unpacked.  Refused (reference
+    unclear, [reference-clarifications](reference-clarifications.md)
+    question 42, or not implemented): elements of 17 to 31 bits (footnote
+    2, "word aligned"), sets, varying strings, one-byte enumerations, arrays
+    of non-characters of an odd size, a bit size attribute.  Image:
+    PCHIST's `pchist_$proc_bitmap: packed array[1..64] of boolean` (../source
+    `pchist/pchist.pas`), 8 bytes at +0x18 of PCHIST's WIRED_DATA block
+    (0xE2C204), element p in bit 7 - (p - 1) mod 8 of byte (p - 1) div 8
+    (below); ACL's three 64-bit bitmaps (`acl/acl_internal.h`), the same
+    bit order.  Initial values: element k is the bit field `(k - lo) * n`,
+    width n, as a packed record's (`check.rs`, `init`); none in the image
+    (the bitmaps are zero).  FIM_'s frame size table (FIM_'s block
+    0xE2126C+0x124, 16 bytes) is declared `packed array[0..15] of 0..255`
+    in `tests/conformance/fim_get_fim_addr.pas` (byte-identical data);
+    FIM_$BUILD_DF reads it as unsigned bytes (0xE0A486..0xE0A492 `clr.l D2;
+    ...; lea (0,A5,D1.w),A2; move.b (0x124,A2),D2`).
+  - **Packed arrays of booleans: the elements (Verified at the sites
+    given).**  An ad-hoc survey of compiled code (every `btst`/`bset`/
+    `bclr`/`or.b`/`and.b` with a register operand on memory, with `#7`,
+    `#0x80`, `#-0x81` or `lsr #3` in the 14 instructions before it, read
+    by hand; not kept) finds bit-array elements only in PCHIST and ACL_,
+    always a 64-element 1-based boolean array indexed by a word variable
+    (a process number): 9 tests and 9 stores of a constant, and 2 stores
+    of a computed value found from the bitmaps' displacements.
+    - *Test* (`btst`, then `beq`/`bne` or `sne`): on the index's **low
+      byte**, 9 sites, PCHIST_$COUNT 0xE1A156..0xE1A16C:
+      `move.b D2,D0; clr.w D1; subq.b #1,D0; move.b D0,D1; lsr.w #3,D1;
+      lea (0,A5,D1.w),A1; moveq #7,D1; moveq #7,D3; and.b D0,D1; sub.b
+      D1,D3; btst D3,(0x18,A1); beq`.  The byte from memory is read at the
+      word's address + 1: PCHIST_$UNIX_PROFIL_CNTL 0xE5CB3A `move.b
+      (-0x21,A6),D0` (pid at -0x22; again 0xE5CBA8), PCHIST_$UNIX_PROFIL_FORK
+      0xE5CC44 `move.b (0x00e20609).l,D0` (PROC1_$CURRENT, 0xE20608) and
+      0xE5CC9E `move.b (0x1,A2),D0` (an `in` parameter's address held in
+      A2).  The element's byte is always formed with `lea (0,An,Dx.w),Am`
+      and the array's offset kept for the operand, `(0x18,Am)`, though the
+      indexed mode's 8-bit displacement would hold it.  As a function
+      result: ACL_$USED_SUSER 0xE492DA..0xE492FE, `btst D2,(-15568,A1);
+      sne D0`.  With other bases: ACL_$SET_ACL_CHECK 0xE47384, ACL_$ALLOC_ASID
+      0xE73C9A, the module-local 0xE464B8 at 0xE4655C (whose bit number is
+      `andi.b #7,D0; ...; moveq #7,D1; sub.b D0,D1`).
+    - *Set and clear* (`or.b`/`and.b` of a mask): on the index's **word**,
+      9 sites, PCHIST_$UNIX_PROFIL_FORK 0xE5CCDC..0xE5CCF4: `move.w
+      (A2),D0; moveq #7,D1; subq.w #1,D0; move.l #0x80,D2; and.w D0,D1;
+      lsr.l D1,D2; move.w D0,D1; lsr.w #3,D1; lea (0,A5,D1.w),A1; or.b
+      D2,(0x18,A1)`; cleared with `move.l #-0x81` (0xFFFFFF7F shifted right:
+      all of the low byte but the element's bit) and `and.b`
+      (PCHIST_$UNIX_PROFIL_CNTL 0xE5CBF2..0xE5CC0C).  The same at ACL_$INIT
+      0xE310E4 (a `for` index held in D3, `move.w D3,D0`),
+      ACL_$SET_LOCAL_LOCKSMITH 0xE49204, the module-local 0xE463E4 at
+      0xE4646C, ACL_$SET_ACL_CHECK 0xE473AC, ACL_$FREE_ASID 0xE74D5E (set,
+      then a clear of another bitmap reusing the count and the address,
+      0xE74D80..0xE74D88).
+    - *A computed value stored*: 2 sites, ACL_$INHERIT_SUBSYS
+      0xE49146..0xE49182 and ACL_$OVERRIDE_LOCAL_LOCKSMITH 0xE49286..0xE492BC:
+      the bit number stored to a frame byte and reloaded as the shift count,
+      the mask complemented, the byte and the value masked and `or`ed,
+      `move.b` back.
+    - **Implemented** (`isel.rs`, `bit_elem_test`, `store_bit_elem`; IR
+      `Expr::BitElem`, `StmtKind::StoreBitElem`): the test and the
+      set/clear forms above for an array in the unit's data through A5,
+      the index a word variable (register-held, in the frame, the unit's
+      or another unit's, through a held address), a lower bound of 1..8
+      (`subq`); an element as a condition or as the result of a
+      one-statement function.  Every site's array has 64 elements and a
+      lower bound of 1: other sizes (up to 256 for a test) and lower
+      bounds 2..8 take the same forms by extrapolation, unverified.  The test is one scheduling unit (R11's
+      window would put the second `moveq #7` before the `lea`, which no
+      site has); the stores are left to R11, which keeps the order.  The
+      allocator gives the store's byte offset the count's register, free
+      after the `lsr.l` (FORK, ACL_$INIT, LOCKSMITH).  **Not reproduced**
+      (bead domain-pascal-0bkd): PCHIST_$UNIX_PROFIL_CNTL 0xE5CB6C, 0xE4647A
+      and ACL_$SET_ACL_CHECK 0xE473BE take a new register for it (D3, D5,
+      D7), its copy then before the `lsr.l`; ACL_$USED_SUSER's test has the
+      position and the offset in D1 and D0; the 0xE4655C bit number; other
+      bases (ACL's `movea.l #ACL_$DATA+0xEA60,An`, then the `lea` into An at
+      ACL_$ALLOC_ASID 0xE73CAE but into another register at ACL_$USED_SUSER
+      0xE492EE); ACL_$FREE_ASID's reuse across two statements.
+      **Refused**: a computed value stored (bead domain-pascal-ysp5), and
+      the forms no site shows (bead domain-pascal-pubp): a constant index,
+      another lower bound, a test on more than 256 elements (the byte
+      arithmetic), a computed or non-word index, an element as another
+      value or passed by address, arrays in the frame, through a pointer or
+      of another unit, 2- and 4-bit elements.  Tests: golden
+      `packed/bool_arrays`, `crates/dpc-m68k/tests/packed_arrays.rs`,
+      `crates/dpc-sema/src/tests/packed_arrays.rs`, `crates/dpc-ir`
+      `packed_boolean_elements`, exec tests `packed_bools` and
+      `packed_bools_all` (every element of a 64-element array set and
+      cleared alone, every byte and element read back; 256-element arrays;
+      bit and byte initial values).  No routine is
+      a conformance unit yet: PCHIST's routines also need overlay sections
+      (bead domain-pascal-raxl) and other forms; ACL's bitmaps have the
+      refused base.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)
@@ -3576,7 +3687,7 @@ same `bset #c mod 8` on the member's byte).
   value that both need a register (the order of 12.4 "Stores whose
   destination and value both need a register" is not applied to bit
   fields: not seen), set fields as
-  operands, packed arrays of bit elements (ref 3.11.4.2, Table 3-5).
+  operands.  Packed arrays of bit elements: 5.2, "Packed arrays".
 - Tests: `crates/dpc-m68k/tests/packed.rs` (the forms, the refusals, and
   a model of the instructions run over random records: stores keep the
   neighbouring bits, loads give the value), `crates/dpc-ir/src/tests.rs`

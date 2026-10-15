@@ -30,18 +30,21 @@
   FIM_$DATA's frame_size), given as initial values (ref 3.11.1.2; bead
   domain-pascal-63t), so the block is the map segment's 0x134 bytes with
   contents, compared with the image by tools/conform.py and with the C
-  block's initial bytes by tools/linktest.py.  The element type is not
-  known (../source: uint8_t): `char' with chr() stands in for an
-  unsigned byte (a subrange 0..255 is 2 bytes, ref 3.8.1 p. 3-14; a
-  `packed array of 0..255', 8 bits per element by ref 3.11.4.2 Table
-  3-5, is not supported by dpc yet). }
+  block's initial bytes by tools/linktest.py.  The table is a `packed
+  array of 0..255': one byte per element (ref 3.11.4.2 Table 3-5 p. 3-47,
+  "Subranges of integers: Exact number of bits required", 8 for 0..255;
+  3.11.3 p. 3-45, packed arrays "store sequences of ... byte integers";
+  bead domain-pascal-51e), read as unsigned bytes by FIM_$BUILD_DF
+  (0xE0A486..0xE0A492 `clr.l D2; ...; move.b (0x124,A2),D2'; 0xE0A666
+  `clr.l D1; move.b (0x124,A5),D1').  How the original declared it is not
+  known: `array of [byte] 0..255' (ref 3.15.5 p. 3-62, ../source's
+  fim/fim.pas) lays it out the same. }
 module fim_;
 var
   fim_pad: array[1..15] of integer32;                    { 0x00..0x3B }
   fim_$user_fim_addr: array[0..57] of integer32;         { 0x3C..0x123 }
-  fim_frame_size: array[0..15] of char := [              { 0x124..0x133 }
-    chr(16#08), chr(16#08), chr(16#0C), chr(0), chr(16#10), chr(0), chr(0),
-    chr(0), chr(16#3A), chr(16#14), chr(16#20), chr(16#5C), * of chr(0)];
+  fim_frame_size: packed array[0..15] of 0..255 := [     { 0x124..0x133 }
+    16#08, 16#08, 16#0C, 0, 16#10, 0, 0, 0, 16#3A, 16#14, 16#20, 16#5C, * of 0];
   proc1_$as_id: extern integer;
 function fim_$get_fim_addr: integer32;
 begin

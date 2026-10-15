@@ -656,6 +656,28 @@ records the files it stops.
     compatible, `ordinal_compatible`), the low bytes kept; widening by the
     value's sign; the forms the image does not show are refused.*
 
+42. **3.11.4.2, Table 3-5, p. 3-47 (PDF p. 102, read in the page image;
+    the OCR scrambles the table).**  The row "Subranges of integers /
+    Enumerated / Subrange of enumerated" reads "Exact number of bits
+    required *; bit aligned **", the row "Set" "Exact number of bits
+    required ¹; bit aligned ²", and the table's only footnotes are "¹ If
+    the element size is less than 16 bits, the element is padded up to
+    the nearest power of 2 bits.  ² If the element size is greater than 16
+    bits, then the elements are word aligned."  The text below the table
+    applies footnote 1 to every element ("In packed arrays, if the element
+    size is less than 16 bits, then the element is padded up to the
+    nearest power of 2 bits"), and 3.15.5 p. 3-62 (PDF p. 117) gives the
+    order ("from most significant bit to least significant bit") and the
+    whole size of 1-, 2- and 4-bit arrays ("3 bytes" for six 4-bit
+    elements), so elements of up to 16 bits are settled.  Question: do *
+    and ** mean footnotes 1 and 2, and if so how many bits does an element
+    of a subrange that needs 17 to 31 bits take (`packed array[1..4] of
+    0..100000`, 17 bits): 17 bits, each element starting at the next word
+    boundary (32 bits apart), or 32 bits?  *Current: refused (bead
+    domain-pascal-51e; `crates/dpc-sema/src/types.rs`,
+    `packed_array_elem`); a subrange of 32 bits (also an unsigned one of
+    31, ref 3.4 p. 3-10) is stored as unpacked.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

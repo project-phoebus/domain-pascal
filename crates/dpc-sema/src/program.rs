@@ -435,12 +435,18 @@ pub enum ExprKind {
         bits: Option<crate::types::BitPos>,
     },
     /// `base[index]` (one dimension; `a[i, j]` is `a[i][j]`).  The element
-    /// is at `(index - lo) * elem_size` bytes into the array.
+    /// is at `(index - lo) * elem_size` bytes into the array, unless
+    /// `elem_bits` is given: the array is a packed array of 1-, 2- or 4-bit
+    /// elements ([`crate::types::TypeTable::packed_elem_bits`]), the element
+    /// is bits `(index - lo) * n ..` of it from the most significant bit of
+    /// its first byte and has no address of its own (`elem_size` is then
+    /// the element type's unpacked size, not a stride).
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
         lo: i64,
         elem_size: u32,
+        elem_bits: Option<u32>,
     },
     /// `base^`.
     Deref(Box<Expr>),
