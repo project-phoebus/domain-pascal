@@ -19,7 +19,7 @@ use dpc_syntax::{Diagnostic, Span};
 
 use crate::consts::ConstValue;
 use crate::conv::{ParamConv, Passing, ResultReg, RoutineOptions};
-use crate::types::{TypeId, TypeTable};
+use crate::types::{BitPos, TypeId, TypeTable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VarId(pub u32);
@@ -125,12 +125,18 @@ pub enum Storage {
 }
 
 /// One store of an initialiser: `value` at byte `offset` of the variable,
-/// with the size of type `ty`.
+/// with the size of type `ty`, or in bits `bits` from there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitStore {
     pub offset: u32,
     pub ty: TypeId,
     pub value: InitDatum,
+    /// A bit field of a packed record (ref 3.10.7): `width` bits from bit
+    /// `bit` (0..7) of the byte at `offset`, counted from its most
+    /// significant bit ([`BitPos`]), holding the ordinal of `value` (a
+    /// [`InitDatum::Const`]), two's complement, most significant bit
+    /// first.  `None`: the whole object of type `ty`.
+    pub bits: Option<BitPos>,
 }
 
 /// The value of one [`InitStore`].

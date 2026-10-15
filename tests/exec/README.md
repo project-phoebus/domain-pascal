@@ -192,7 +192,10 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `results` | results with junk above them, booleans, A0 pointers, `f := g(...)`, a result held across a call |
 | `records` | 12-, 14- and 144-byte copies, through var parameters and pointers |
 | `pointers` | routine pointers (`jsr (An)`), a linked list |
+| `pointer_targets` | bead domain-pascal-s9j: objects reached through a pointer passed by address (`p.f^` with the record held, a field through a slot, the enclosing routine's slot, a pointer local, a pointer in the unit's data) |
+| `pointer_targets_more` | review of bead domain-pascal-s9j: two pointer locals and two slots in one argument list, a call after a push through a held slot, a nested routine called by a sibling (static link in A1), `p^` of a pointer local, `p.f^` with a field of the same held record |
 | `initdata` | initialised data, repeat counts, variants, strings, a `static` local across calls |
+| `packed_init` | bead domain-pascal-c0j8: initial values of packed records' bit fields (KBD's kbd_$state_table bytes), read back |
 | `volatile` | a volatile variable re-read in a loop and in one expression |
 | `ptr_a0` | bead domain-pascal-78n2: pointer locals assigned a call that no call follows, held in A0 itself, around out and var parameters, other pointers, `with`, `case`, `while`, sets, block copies, nested calls, `and then`, results |
 | `park_int_if` | bead domain-pascal-1j61: an integer local held in D0 moved to an address register in the one `if` part that refers to it (`then`; `else` after a `then` ending in `return`) and first in an `if` whose condition dereferences it; both sides of each test |

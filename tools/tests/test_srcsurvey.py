@@ -320,23 +320,14 @@ class WorkaroundTest(unittest.TestCase):
                                            'timer: linteger;\n'))
 
 
-class PackedInitTest(unittest.TestCase):
-    # KBD's kbd_$state_table: dpc refuses initial values of 4-bit packed
-    # fields; the initialiser goes, the declaration stays
-    def test_drop_initialiser(self):
-        wa = {n: (p, r) for n, _w, _s, p, r in srcsurvey.WORKAROUNDS}
-        pat, rep = wa['packed-init']
-        src = ("{ kbd_$state_table: array[0..1] of kbd_$state_entry_t := [ }\n"
-               "  kbd_$state_table: array[0..1] of kbd_$state_entry_t := [\n"
-               "    [key := chr(16#FB), action := 2, next_state := 0],\n"
-               "    [key := chr(16#E8), action := 3, next_state := 1]];\n"
-               "  other: array[0..1] of integer := [1, 2];\n")
-        text, k = srcsurvey.apply_workaround(pat, rep, src)
-        self.assertEqual(k, 1)
-        self.assertEqual(text.splitlines()[1:],
-                         ['  kbd_$state_table: array[0..1] of kbd_$state_entry_t;',
-                          '  other: array[0..1] of integer := [1, 2];'])
-        self.assertIn('packed-init', srcsurvey.DATA_WORKAROUNDS)
+class DataWorkaroundTest(unittest.TestCase):
+    # The CODE-OK mechanism.  Its one user, `packed-init' (KBD's
+    # kbd_$state_table), went when dpc took packed bit-field initial
+    # values (bead domain-pascal-c0j8); the ranges below are a made-up
+    # workaround's, over that table's bytes.
+    def test_no_packed_init(self):
+        self.assertNotIn('packed-init', [n for n, *_ in srcsurvey.WORKAROUNDS])
+        self.assertNotIn('packed-init', srcsurvey.DATA_WORKAROUNDS)
 
     def test_code_ok_only(self):
         f = srcsurvey.code_ok_only
@@ -349,13 +340,13 @@ class PackedInitTest(unittest.TestCase):
         self.assertFalse(f([head] + listing))
 
     def test_within_workaround_ranges(self):
-        # CODE-OK needs every differing data byte inside kbd_$state_table
-        # (the last 0x14 bytes of KBD's block, 0xE2DDE4 size 0xD4), not
-        # just the first one conform.check reports
+        # CODE-OK needs every differing data byte inside the workaround's
+        # ranges, not just the first one conform.check reports
         f = srcsurvey.within
-        self.assertTrue(f([0xE2DEA4, 0xE2DEB7], ['packed-init']))
-        self.assertFalse(f([0xE2DEA4, 0xE2DEB8], ['packed-init']))
-        self.assertFalse(f([0xE2DEA3], ['packed-init']))
+        with unittest.mock.patch.dict(srcsurvey.DATA_WORKAROUNDS, {'w': [(0xE2DEA4, 0xE2DEB8)]}):
+            self.assertTrue(f([0xE2DEA4, 0xE2DEB7], ['w']))
+            self.assertFalse(f([0xE2DEA4, 0xE2DEB8], ['w']))
+            self.assertFalse(f([0xE2DEA3], ['w']))
 
     def test_data_diffs_all_bytes(self):
         import conform

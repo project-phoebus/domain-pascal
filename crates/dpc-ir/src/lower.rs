@@ -14,7 +14,7 @@ use dpc_sema::{
 use dpc_syntax::ast::{BinOp, ForDir, ParamMode, UnOp};
 use dpc_syntax::{Diagnostic, Span};
 
-use dpc_sema::types::{TypeId, TypeKind, TypeTable};
+use dpc_sema::types::{BitPos, TypeId, TypeKind, TypeTable};
 
 use dpc_sema::consts::ConstValue;
 
@@ -155,9 +155,13 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
         if let Some(stores) = &v.init {
             let first = inits.len();
             for st in stores {
-                let value = match &st.value {
-                    InitDatum::Const(c) => init_value(&p.types, st.ty, c),
-                    InitDatum::Addr(a) => init_addr(p, st.ty, a),
+                let value = match (&st.value, st.bits) {
+                    (InitDatum::Const(c), Some(b)) => init_bits(b, c),
+                    (InitDatum::Const(c), None) => init_value(&p.types, st.ty, c),
+                    (InitDatum::Addr(a), None) => init_addr(p, st.ty, a),
+                    (InitDatum::Addr(_), Some(_)) => {
+                        Err("an address in a packed record's bit field is".into())
+                    }
                 };
                 match value {
                     Ok(value) => inits.push((
@@ -219,11 +223,7 @@ fn data_area(p: &Program) -> Result<Vec<DataArea>, Vec<Diagnostic>> {
 /// Whether a value of `inits` (one variable's, in order) overwrites
 /// part, not all, of an earlier address (4 bytes, [`init_addr`]).
 fn address_partly_overwritten(inits: &[&DataInit]) -> bool {
-    let size = |d: &DataInit| match &d.value {
-        InitValue::Int { size, .. } => *size,
-        InitValue::Bytes(b) => b.len() as u32,
-        InitValue::Address(_) => 4,
-    };
+    let size = |d: &DataInit| d.value.size();
     inits.iter().enumerate().any(|(i, a)| {
         matches!(a.value, InitValue::Address(_))
             && inits[i + 1..].iter().any(|b| {
@@ -328,6 +328,23 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
             Err(format!("this initial value of a {} is", types.display(ty)))
         }
     }
+}
+
+/// The initial value of a packed record's bit field (one store of
+/// `dpc_sema::InitStore` with `bits`, ref 3.10.7): the ordinal's low
+/// `width` bits, two's complement for a negative one (sema, `init_bits`).
+fn init_bits(b: BitPos, value: &ConstValue) -> Result<InitValue, String> {
+    let Some(v) = value.ordinal() else {
+        return Err("this initial value of a packed record's bit field is".into());
+    };
+    if b.width > 32 {
+        return Err("an initial value of a packed bit field wider than 32 bits is".into());
+    }
+    Ok(InitValue::Bits {
+        bit: b.bit,
+        width: b.width,
+        value: (v as u64) & ((1u64 << b.width) - 1),
+    })
 }
 
 /// A section name the output can carry: letters, digits, `_`, `$` and

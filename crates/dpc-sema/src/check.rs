@@ -16,8 +16,8 @@ use crate::consts::ConstValue;
 use crate::conv::{self, Passing, RoutineOptions};
 use crate::program::*;
 use crate::types::{
-    round_up, DeviceAccess, Field, RecordType, SigParam, Signature, TypeAttrs, TypeId, TypeKind,
-    TypeTable, VariantArm, VariantPart, MAX_OBJECT_SIZE,
+    round_up, BitPos, DeviceAccess, Field, RecordType, SigParam, Signature, TypeAttrs, TypeId,
+    TypeKind, TypeTable, VariantArm, VariantPart, MAX_OBJECT_SIZE,
 };
 
 /// Smallest alignment of an object in a routine's frame, in bytes: the
@@ -1981,6 +1981,7 @@ impl<'t> Checker<'t> {
                     offset: base,
                     ty,
                     value,
+                    bits: None,
                 });
             }
             ast::Init::List { items, span } => match self.types.kind(ty).clone() {
@@ -2020,6 +2021,7 @@ impl<'t> Checker<'t> {
                         offset: base,
                         ty,
                         value: InitDatum::Const(ConstValue::Set(members)),
+                        bits: None,
                     });
                 }
                 TypeKind::Array { index, elem, .. } => {
@@ -2133,20 +2135,17 @@ impl<'t> Checker<'t> {
                             }
                         };
                         let Some((f, v)) = f else { continue };
-                        // A packed record's field is initialised only when
-                        // it is whole bytes holding the whole object of its
-                        // type (status_$t's `all', ref 3.10.7 Table 3-3);
-                        // values in bit fields are not encoded yet.
-                        if let Some(bits) = f.bits {
-                            if bits.whole_bytes() != Some(self.types.size(f.ty)) {
-                                self.unsupported(
-                                    *span,
-                                    "initialising a packed record's field that is not whole bytes",
-                                );
-                                continue;
+                        // A packed record's field that is whole bytes
+                        // holding the whole object of its type
+                        // (status_$t's `all', ref 3.10.7 Table 3-3) is
+                        // initialised like an unpacked one; any other is
+                        // a bit field.
+                        match f.bits {
+                            Some(bits) if bits.whole_bytes() != Some(self.types.size(f.ty)) => {
+                                self.init_bits(f.ty, base + f.offset, bits, v, out)
                             }
+                            _ => self.init(f.ty, base + f.offset, v, out),
                         }
-                        self.init(f.ty, base + f.offset, v, out);
                     }
                 }
                 _ => self.error(
@@ -2154,6 +2153,60 @@ impl<'t> Checker<'t> {
                     "a bracketed initialiser needs a set, array or record",
                 ),
             },
+        }
+    }
+
+    /// Initialise bit field `bits` of a packed record whose first bit is
+    /// in byte `byte` (ref 3.10.7, p. 3-35: "Pascal allocates fields left
+    /// to right within bytes and then by increasing byte address"): the
+    /// value's ordinal in the field's bits, most significant bit first
+    /// ([`BitPos`]).  A boolean is one bit, set for true; an enumeration
+    /// its ordinal; a subrange its value, two's complement for negative
+    /// ones (p. 3-37: `-100..40` takes 8 bits "because it can take a
+    /// range of 140 values").  Image: KBD's kbd_$state_table at WIRED_DATA
+    /// 0xE2DDE4+0xC0, `FB 20 E8 31 ...`: a char, then two 4-bit
+    /// subranges in one byte, the first in its high bits.  The two's
+    /// complement of a negative value in the data is not seen in the
+    /// image; stores of such values are masked to the field
+    /// (0xE31DF2..0xE31E00, codegen-patterns 5.3).
+    ///
+    /// A set field that is not whole bytes is refused: where its
+    /// elements lie within the field is not stated (Table 3-3, p. 3-36,
+    /// gives only its size) and no read of one is catalogued (bead
+    /// domain-pascal-bk8k).
+    fn init_bits(
+        &mut self,
+        ty: TypeId,
+        byte: u32,
+        bits: BitPos,
+        init: &ast::Init,
+        out: &mut Vec<InitStore>,
+    ) {
+        let span = match init {
+            ast::Init::Expr(e) => e.span,
+            ast::Init::List { span, .. } => *span,
+        };
+        if matches!(self.types.kind(ty), TypeKind::Set { .. }) {
+            return self.unsupported(
+                span,
+                "initialising a set field of a packed record that is not whole bytes \
+                 (where its elements lie is not stated, ref 3.10.7 Table 3-3)",
+            );
+        }
+        let ast::Init::Expr(_) = init else {
+            return self.error(span, "a packed record's bit field needs a single value");
+        };
+        let mut one = Vec::new();
+        self.init(ty, byte, init, &mut one);
+        for mut st in one {
+            if !matches!(&st.value, InitDatum::Const(c) if c.ordinal().is_some()) {
+                return self.unsupported(span, "this initial value of a packed bit field");
+            }
+            st.bits = Some(BitPos {
+                bit: bits.bit % 8,
+                width: bits.width,
+            });
+            out.push(st);
         }
     }
 

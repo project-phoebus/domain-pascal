@@ -26,10 +26,11 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      looks at any routine (each one named, see WORKAROUNDS; --no-workaround
      NAME skips one).  Only declarations are rewritten, never text in a
      comment, and none changes a size or an offset the surviving routines
-     use, so a routine reported OK compiles to the image's bytes.  One
-     is needed at present, `packed-init' (KBD); it changes a data
-     block's contents, so a routine whose code matches is reported
-     CODE-OK, not OK, when only data differs.
+     use, so a routine reported OK compiles to the image's bytes.  None
+     is needed at present (the last, `packed-init', went with bead
+     domain-pascal-c0j8).  One that changes only a data block's contents
+     (DATA_WORKAROUNDS) makes a routine whose code matches CODE-OK, not
+     OK, when only data differs.
   3. Stage "check" and "codegen", repeated: `dpc --check-only', then full
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
@@ -139,27 +140,17 @@ ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(\d+)\s*bytes')
 # record fields (tty.ins.pas `timer: [aligned(1)] linteger'): dpc lays
 # alignment attributes out by ref 3.15.6 (bead domain-pascal-l9p).
 #
-# `packed-init': dpc refuses an initial value for a packed record field
-# that is not whole bytes (KBD's kbd_$state_table, an array of
-# kbd_$state_entry_t, whose action and next_state are 4-bit fields).
-# The initialiser is dropped: the array keeps its size and offset, only
-# the data block's contents change, which conformance does not compare.
-WORKAROUNDS = [
-    ('packed-init',
-     'initialiser of an array of kbd_$state_entry_t (packed, 4-bit fields) dropped',
-     '.pas',
-     re.compile(r'(\barray\s*\[[^\]]*\]\s*of\s+kbd_\$state_entry_t)\s*:=\s*'
-                r'\[(?:[^\[\]]|\[[^\[\]]*\])*\]', re.I),
-     r'\1'),
-]
+#
+# `packed-init' (KBD's kbd_$state_table, whose initialiser was dropped)
+# is no longer one either: dpc encodes initial values of packed records'
+# bit fields (ref 3.10.7, bead domain-pascal-c0j8).
+WORKAROUNDS = []
 # workarounds that change only the contents of a data block, with the
 # image range [lo, hi) of the bytes each one changes: a routine whose
 # code matches and whose data differs from the image only in those
 # bytes is reported `CODE-OK' (not `OK') when one of them was applied.
-# packed-init: kbd_$state_table, 10 entries of 2 bytes (key, then the
-# 4-bit action and next_state), at +0xC0 of KBD's block (kbd.pas), the
-# block's last 0x14 bytes (map `D E2DDE4 KBD size = D4', end 0xE2DEB8).
-DATA_WORKAROUNDS = {'packed-init': [(0xE2DEA4, 0xE2DEB8)]}
+# None at present.
+DATA_WORKAROUNDS = {}
 
 DATA_DIFF_RE = re.compile(r'^  section \S+ differs first at ')
 

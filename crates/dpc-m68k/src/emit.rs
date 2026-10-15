@@ -965,11 +965,7 @@ fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> (Vec<u8>, Vec<(u32, &dpc_ir
     let mut addrs: Vec<(u32, &dpc_ir::InitAddr)> = Vec::new();
     for init in &data.init {
         let at = init.offset as usize;
-        let n = match &init.value {
-            dpc_ir::InitValue::Int { size, .. } => *size,
-            dpc_ir::InitValue::Bytes(b) => b.len() as u32,
-            dpc_ir::InitValue::Address(_) => 4,
-        };
+        let n = init.value.size();
         addrs.retain(|&(o, _)| o + 4 <= init.offset || o >= init.offset + n);
         match &init.value {
             dpc_ir::InitValue::Int { size, value } => {
@@ -981,6 +977,19 @@ fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> (Vec<u8>, Vec<(u32, &dpc_ir
             dpc_ir::InitValue::Address(a) => {
                 bytes[at..at + 4].fill(0);
                 addrs.push((init.offset, a));
+            }
+            dpc_ir::InitValue::Bits { bit, width, value } => {
+                // Bit `p` of the field's string is bit `7 - p % 8` of
+                // byte `p / 8`; the value's most significant bit first.
+                for i in 0..*width {
+                    let p = (bit + i) as usize;
+                    let m = 0x80u8 >> (p % 8);
+                    if (value >> (width - 1 - i)) & 1 != 0 {
+                        bytes[at + p / 8] |= m;
+                    } else {
+                        bytes[at + p / 8] &= !m;
+                    }
+                }
             }
         }
     }
@@ -1325,6 +1334,38 @@ mod tests {
             data_run(&[1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
             "\t.byte\t0x01,0x00,0x00,0x02\n\t.space\t16\n\t.byte\t0x03\n"
         );
+    }
+
+    #[test]
+    fn bit_field_initial_values_merge_into_bytes() {
+        // ref 3.10.7 p. 3-35: bit 0 the most significant of the first
+        // byte; a field across a byte boundary; a later value replaces
+        // only its own bits.
+        use dpc_ir::{DataInit, InitValue};
+        let bits = |offset, bit, width, value| DataInit {
+            offset,
+            value: InitValue::Bits { bit, width, value },
+        };
+        let area = dpc_ir::DataArea {
+            section: "data".into(),
+            size: 4,
+            globals: vec![],
+            init: vec![
+                DataInit {
+                    offset: 0,
+                    value: InitValue::Int {
+                        size: 1,
+                        value: 0xFB,
+                    },
+                },
+                bits(1, 0, 4, 2),
+                bits(1, 4, 4, 0),
+                bits(2, 4, 8, 0x9C),
+                bits(2, 0, 16, 0xFFFF),
+                bits(2, 6, 2, 0),
+            ],
+        };
+        assert_eq!(data_bytes(&area, 4).0, vec![0xFB, 0x20, 0xFC, 0xFF]);
     }
 
     #[test]

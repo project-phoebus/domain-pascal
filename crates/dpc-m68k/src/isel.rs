@@ -1564,6 +1564,31 @@ fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
     }
 }
 
+/// The pointer field `p.f` of `p.f^` with the record reached through a
+/// pointer in a frame slot (`base` is the load of the field;
+/// [`Selector::push`], 0xE1CC52 `move.l (0x48,A2),-(SP)` in KBD_$RCV's
+/// nested 0xE1CC10): the frame offset of the record's pointer and the
+/// field's address, `(d,An)` once evaluated.  Whether that pointer is
+/// held is the caller's to check.
+fn field_pointer(base: &Expr) -> Option<(i32, &Addr)> {
+    let Expr::Load {
+        addr: field @ Addr::Indirect { base: rec, .. },
+        ty: Scalar {
+            width: Width::Long, ..
+        },
+    } = base
+    else {
+        return None;
+    };
+    match &**rec {
+        Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        } => Some((*o, field)),
+        _ => None,
+    }
+}
+
 /// Address values loaded inside one call's argument list are kept apart
 /// (codegen-patterns 12.4 R4(a), "Inside one argument list"): each takes a
 /// register no earlier load of the list took, although the earlier one
@@ -5808,6 +5833,31 @@ impl Selector {
         Ok(a)
     }
 
+    /// Whether an argument passed by address at `base` + `offset` is the
+    /// object inside one a pointer in memory points to that the push
+    /// loads into an address register, `movea.l <pointer>,An; pea
+    /// (d,An)` ([`Self::push`]): a pointer in a frame slot not held in a
+    /// register (a parameter slot or a pointer local), the enclosing
+    /// routine's slot, a pointer in the unit's data, at a displacement
+    /// other than 0 (the pointer's own target `p^` is the pointer pushed,
+    /// `move.l`; codegen-patterns 1.5).
+    fn reloaded_pointer(&self, base: &Expr, offset: i32) -> bool {
+        let Expr::Load {
+            addr,
+            ty: Scalar {
+                width: Width::Long, ..
+            },
+        } = base
+        else {
+            return false;
+        };
+        match addr {
+            Addr::Frame(o) if self.pinned(*o).is_none() => offset != 0,
+            Addr::Enclosing(_) | Addr::Static(_) => offset != 0,
+            _ => false,
+        }
+    }
+
     /// The register a by-value parameter at frame offset `o` was loaded
     /// into at entry, if it was.
     fn pinned(&self, o: i32) -> Option<Reg> {
@@ -7397,6 +7447,42 @@ impl Selector {
             } => Some(0),
             _ => None,
         };
+        // A pointer an argument passed by address is reached through and
+        // that the pushes load ([`Self::reloaded_pointer`]), read again by
+        // the argument list: the original loads it once for both
+        // (0xE74706 `movea.l (-0xbc,A6),A1; pea (-0x38,A1); pea
+        // (-0x34,A1)`; 0xE3CA4E, 0xE748A4), `dpc` would load it twice.
+        for a in &c.args {
+            let Arg::Address {
+                addr: Addr::Indirect { base, offset },
+                ..
+            } = a
+            else {
+                continue;
+            };
+            if !self.reloaded_pointer(base, *offset) {
+                continue;
+            }
+            let mut n = 0;
+            let mut v = |node: Node| {
+                if matches!(node, Node::Expr(e) if e == &**base) {
+                    n += 1;
+                }
+            };
+            for a in &c.args {
+                match a {
+                    Arg::Value { value, .. } | Arg::Temp { value, .. } => walk_expr(value, &mut v),
+                    Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                }
+            }
+            if n > 1 {
+                return Err(unsupported(
+                    self.span,
+                    "an argument list that reads twice a pointer it loads to pass an object by \
+                     address (one load for both, 0xE74706; not modelled) is",
+                ));
+            }
+        }
         let mut k = c.args.len();
         while k > 0 {
             let a = &c.args[k - 1];
@@ -7650,9 +7736,18 @@ impl Selector {
     ///   e.g. 0xE32398 DIR_$MUTEX+0x14; 24 `pea abs.l`, e.g. 0xE0F5DC
     ///   ROUTE_$PORT+0x30): not supported yet;
     /// - the object a pointer in the frame points to (a by-address
-    ///   parameter passed on): the pointer, `move.l (d,A6),-(SP)`
-    ///   (LOG_$READ 0xE1780C); other objects reached through a pointer are
-    ///   not catalogued yet.
+    ///   parameter passed on, `p^` of a pointer local): the pointer,
+    ///   `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C; 0xE53DB0 to
+    ///   FILE_$FW_FILE);
+    /// - the target of a pointer field of a record held in an address
+    ///   register, `p.f^`: the pointer, `move.l (d,An),-(SP)` (0xE1CC52
+    ///   in KBD_$RCV's nested 0xE1CC10);
+    /// - an object inside one a pointer the push loads points to (a slot
+    ///   not held, the enclosing routine's slot, a pointer local in the
+    ///   frame, a pointer in the unit's data), at a displacement other
+    ///   than 0: `movea.l <pointer>,An; pea (d,An)`
+    ///   (KBD_$OUTPUT_BUFFER_DRAINED 0xE1CE9E, AST_$PURIFY 0xE0599E);
+    ///   other objects reached through a pointer are not catalogued yet.
     fn push(&mut self, a: &Arg) -> Res<()> {
         let dst = Ea::PreDec(SP);
         match a {
@@ -7771,7 +7866,12 @@ impl Selector {
                 // by-address parameter passed on by address: the pointer
                 // itself, `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C and
                 // 0xE17818 pass its `actual_len` and `buffer` slots on to
-                // the worker 0xE17778).
+                // the worker 0xE17778).  A pointer local's target `p^`
+                // likewise (codegen-patterns 1.5): 0xE53D32, 0xE53DD6
+                // `move.l (-0x180,A6),-(SP)` to FILE_$TRUNCATE and 0xE53DB0,
+                // 0xE53DEE, 0xE53E26 to FILE_$FW_FILE, the uid at the start
+                // of the record the local points to (module-local
+                // 0xE53A18, `dir/do_op_fix_dir.c` `orig_handle`).
                 // The enclosing routine's by-address parameter passed on:
                 // its slot through the static link, 0xE135B8 `move.l
                 // (8,A2),-(SP)` in 0xE1359C.
@@ -7856,6 +7956,66 @@ impl Selector {
                         base: base.clone(),
                         offset: *offset,
                     })?;
+                    self.out.push(Insn::Pea(ea));
+                }
+                // The target of a pointer field of a record reached
+                // through a pointer held in an address register since the
+                // entry, `p.f^`: the pointer itself, `move.l (d,An),-(SP)`
+                // (0xE1CC52 `move.l (0x48,A2),-(SP)` in KBD_$RCV's nested
+                // 0xE1CC10 for `kbd.key_ec^` to EC_$ADVANCE_WITHOUT_DISPATCH, a `var`
+                // parameter; TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B3A4,
+                // TTY_$I_DELETE_CHAR 0xE1B588, TTY_$I_FLUSH_INPUT 0xE1B7DA
+                // `move.l (0x2a8,A2),-(SP)`, TTY_$I_BREAK_CHAR 0xE1B8EC
+                // `move.l (0x2a4,A2),-(SP)`).  With the record's pointer not
+                // held: not seen (TIME_$ADVANCE_CALLBACK 0xE16440 `movea.l
+                // (8,A1),A2; pea (A2)` is a chain through a slot, but its
+                // source is not known), refused below.
+                Addr::Indirect { base, offset: 0 }
+                    if field_pointer(base)
+                        .is_some_and(|(o, _)| matches!(self.pinned(o), Some(Reg::A(_)))) =>
+                {
+                    let (_, field) = field_pointer(base).unwrap();
+                    let src = self.ea_of(field)?;
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src,
+                        dst,
+                    });
+                }
+                // An object inside one a pointer in memory points to, the
+                // pointer loaded into an address register for the push:
+                // `movea.l <pointer>,An; pea (d,An)` (ad-hoc survey of
+                // compiled code, codegen-patterns 1.5: 34 `movea.l
+                // (d,A6),An; pea (d',An)` of a parameter slot, 25 of a
+                // frame slot, 35 through another address register):
+                // - a parameter slot not held: KBD_$OUTPUT_BUFFER_DRAINED
+                //   0xE1CE9E `movea.l (8,A6),A0; pea (0x4c,A0)`;
+                //   TTY_$I_PUT_CHARS 0xE1B0BC `movea.l (8,A6),A0; pea
+                //   (0x3d2,A0)`, reloaded for each call (0xE1B104, ...);
+                // - the enclosing routine's slot, through the static link:
+                //   0xE1AFB8 `movea.l (8,A2),A0; pea (0x3d2,A0)`, again for
+                //   each call (0xE1AFCC, 0xE1AFDE, 0xE1AFF2), also
+                //   0xE1BD16, 0xE1BDF0;
+                // - a pointer local in the frame: AST_$PURIFY 0xE0599E
+                //   `movea.l (-0xb8,A6),A0; pea (0x28,A0)` (its own target
+                //   `p^` is the pointer pushed, `move.l (-k,A6),-(SP)`,
+                //   above; the image's 7 `movea.l (-k,A6),An; pea (An)` all
+                //   go to routines that take arguments by value, where the
+                //   same position also gets `move.l (-k,A6),-(SP)`, 6 with
+                //   the register holding the pointer from an earlier
+                //   statement: codegen-patterns 1.5);
+                // - a pointer in the unit's data: AUDIT_$LOG_EVENT_S
+                //   0xE70E88 `movea.l (0x198,A5),A0; pea (0xc,A0)` (13
+                //   such in AUDIT).
+                // The register is the allocator's, as for any pointer
+                // loaded as a base (codegen-patterns 12.4: kept apart from
+                // the argument list's other address values, a slot read
+                // once in a register no earlier statement left a value in).
+                // The pointer's own target through the unit's data, and
+                // pointers reached through other pointers: not catalogued,
+                // refused below.
+                Addr::Indirect { base, offset } if self.reloaded_pointer(base, *offset) => {
+                    let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
                 }
                 // An array element: `pea (d,An,Dn.w)` (DISK_$REVALIDATE
@@ -13128,6 +13288,57 @@ mod tests {
             body_text(&f),
             ["move.l\t(8,%fp),-(%sp)", "jsr\t(P).l", "move.w\t#3,(G).l"]
         );
+    }
+
+    /// An object inside one a pointer in memory points to, passed by
+    /// address: the pointer loaded, then `pea` (codegen-patterns 1.5;
+    /// KBD_$OUTPUT_BUFFER_DRAINED 0xE1CE9E, AST_$PURIFY 0xE0599E).
+    #[test]
+    fn reloaded_pointer_pushes() {
+        let addr = |a: Addr| Arg::Address {
+            addr: a,
+            slot: 4,
+            writable: true,
+        };
+        let local = |offset| Addr::Indirect {
+            base: Box::new(load(Addr::Frame(-4), Scalar::POINTER)),
+            offset,
+        };
+        // A field through a slot not held.
+        let f = proc_(0, vec![ext("P", vec![addr(through(8, 0x4c))], 0)]);
+        assert_eq!(
+            body_text(&f),
+            ["movea.l\t(8,%fp),%a0", "pea\t(0x4c,%a0)", "jsr\t(P).l"]
+        );
+        // The slot's own target is still the slot pushed (LOG_$READ).
+        let f = proc_(0, vec![ext("P", vec![addr(through(8, 0))], 0)]);
+        assert_eq!(body_text(&f), ["move.l\t(8,%fp),-(%sp)", "jsr\t(P).l"]);
+        // A pointer local in the frame: loaded for a field; its own
+        // target `p^` is the pointer pushed (0xE53DB0 FILE_$FW_FILE).
+        let f = proc_(4, vec![ext("P", vec![addr(local(0x28))], 0)]);
+        assert_eq!(
+            body_text(&f),
+            ["movea.l\t(-4,%fp),%a0", "pea\t(0x28,%a0)", "jsr\t(P).l"]
+        );
+        let f = proc_(4, vec![ext("P", vec![addr(local(0))], 0)]);
+        assert_eq!(body_text(&f), ["move.l\t(-4,%fp),-(%sp)", "jsr\t(P).l"]);
+        // The same pointer read twice by one argument list: refused (the
+        // original loads it once, 0xE74706).
+        let f = proc_(4, vec![ext("P", vec![addr(local(4)), addr(local(8))], 0)]);
+        assert!(err(&f).starts_with("an argument list that reads twice a pointer"));
+        // The target of a pointer in the unit's data: not catalogued.
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![addr(Addr::Indirect {
+                    base: Box::new(load(Addr::Static(8), Scalar::POINTER)),
+                    offset: 0,
+                })],
+                0,
+            )],
+        );
+        assert!(err(&f).starts_with("passing this kind of object by address"));
     }
 
     #[test]

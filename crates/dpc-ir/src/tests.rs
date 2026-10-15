@@ -3681,6 +3681,49 @@ end;
     );
 }
 
+#[test]
+fn packed_bit_field_initial_values() {
+    // ref 3.10.7 p. 3-35; KBD's kbd_$state_entry_t (WIRED_DATA
+    // 0xE2DDE4+0xC0 `FB 20'): the char a byte, the 4-bit fields bits
+    // 0..3 and 4..7 of the next; a boolean one bit, set for true; a
+    // negative subrange its two's complement in its 8 bits.
+    use crate::{DataInit, InitValue};
+    let m = lower_src(
+        "module m;
+type
+  e = packed record key: char; action: 0..15; next: 0..15 end;
+  n = packed record f: boolean; s: -100..40 end;
+var
+  t: e := [key := chr(16#FB), action := 2, next := 0];
+  x: n := [true, -100];
+procedure z;
+begin
+end;
+",
+    )
+    .unwrap();
+    let bits = |offset, bit, width, value| DataInit {
+        offset,
+        value: InitValue::Bits { bit, width, value },
+    };
+    assert_eq!(
+        m.data[0].init,
+        vec![
+            DataInit {
+                offset: 0,
+                value: InitValue::Int {
+                    size: 1,
+                    value: 0xFB
+                },
+            },
+            bits(1, 0, 4, 2),
+            bits(1, 4, 4, 0),
+            bits(2, 0, 1, 1),
+            bits(2, 1, 8, 0x9C),
+        ]
+    );
+}
+
 /// Owner's ruling on 3.13.4, p. 3-51 (docs/reference-clarifications.md
 /// "3.13.4 addr(...) as an initial value"): `addr(...)` initial values
 /// are addresses fixed at link time: a routine's or another unit's

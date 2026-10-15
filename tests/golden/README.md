@@ -65,6 +65,12 @@ Tests:
   array, boolean, enumeration, `nil`, sets; values from TTY's .DATA
   0xE8242C, WIRED_DATA 0xE2DDB4, OS_INIT_DATA 0xE351B0), a section with
   no initial value left NOBITS.
+- `data/packed_init` - codegen-patterns 11 ("Initial values", packed
+  records), ref 3.10.7 p. 3-35 (bead domain-pascal-c0j8): bit fields of
+  packed records in the data block, the first field in the most
+  significant bits (KBD's kbd_$state_table, WIRED_DATA 0xE2DDE4+0xC0);
+  booleans, an enumeration, a negative subrange, fields across a byte,
+  folded constants, a repeat count.
 - `data/addr_init` - codegen-patterns 11 ("Initial values",
   addresses): `addr(...)` initial values as relocated `.long`s (a
   routine, another unit's variable plus an offset, the unit's own data
@@ -98,6 +104,16 @@ Tests:
 - `loops/fill` - codegen-patterns 7, 5.2: `for` loops over an array whose
   index is used for nothing else, as `movea.l #sym,A0`, count, filler,
   `clr.<s> (A0)+`, `dbf` (0xE00ECC..0xE00EDA).
+- `calls/pointer_targets` - codegen-patterns 1.5 (bead domain-pascal-s9j):
+  objects reached through a pointer passed by address: `p.f^` with the
+  record held, `move.l (d,A2),-(SP)` (0xE1CC52 in KBD_$RCV's nested
+  0xE1CC10,
+  TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B3A4); a field through a slot not
+  held (KBD_$OUTPUT_BUFFER_DRAINED 0xE1CE9E), the enclosing routine's
+  slot (0xE1AFB8), a pointer local (AST_$PURIFY 0xE0599E) or a pointer
+  in the unit's data (AUDIT_$LOG_EVENT_S 0xE70E88): `movea.l
+  <pointer>,A0; pea (d,A0)`; a pointer local's own target `q^`: the
+  pointer pushed, `move.l (d,A6),-(SP)` (0xE53DB0 to FILE_$FW_FILE).
 - `calls/routine_pointers` - codegen-patterns 1.6, 1.4, 3: calls through
   routine pointers (`val_param` on the type, ref p. 4-146), the pointer
   read into an address register after the pushes (SIO_$I_CTS_CHANGE

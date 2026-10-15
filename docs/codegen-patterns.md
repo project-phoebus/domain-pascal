@@ -424,6 +424,76 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `sio/init_dtte.c`, 0xE32B86 `pea (0xc,A2)`, 0xE32B92 `pea (0x18,A2)`,
   0xE32B9E `pea (A2)`; also `pea (A2)` at 0xE1BEB2, 0xE1D59E, 0xE3DB8C).
   Implemented; conformance unit `tests/conformance/sio_init_dtte.pas`.
+- **The target of a pointer field of a record held in an address
+  register, `p.f^`** (Verified; bead domain-pascal-s9j): the pointer
+  field itself is pushed, `move.l (d,An),-(SP)`: 0xE1CC52 `move.l
+  (0x48,A2),-(SP)` in KBD_$RCV's nested 0xE1CC10 (A2 its by-address
+  parameter's slot (0xa,A6)) for `kbd.key_ec^` to
+  EC_$ADVANCE_WITHOUT_DISPATCH (a `var` parameter, `ec/ec.ins.pas`);
+  TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B3A4, TTY_$I_DELETE_CHAR 0xE1B588,
+  TTY_$I_FLUSH_INPUT 0xE1B7DA `move.l (0x2a8,A2),-(SP)`,
+  TTY_$I_BREAK_CHAR 0xE1B8EC `move.l (0x2a4,A2),-(SP)` (to the TTY
+  module-local 0xE1AEF8; that callee could also take a pointer by value,
+  `tty/i_advance_ec.pas`, the same bytes).  Not seen with the record's
+  pointer not held: TIME_$ADVANCE_CALLBACK 0xE16440 `movea.l (8,A1),A2;
+  pea (A2)` is a chain through a slot into a callee-saved register, the
+  source's shape unknown (a local or a `with`?); `dpc` refuses `p.f^`
+  unless the record is held, and `q^.f^` through anything else (bead
+  domain-pascal-royb).
+- **An object through a pointer the push loads** (Verified at the sites;
+  bead domain-pascal-s9j): `movea.l <pointer>,An; pea (d,An)`.  Ad-hoc
+  survey of the compiled routines with a `link` (script not kept):
+  `movea.l` then a `pea` through the loaded register, 34 with a
+  parameter slot `(d,A6)`, d > 0, and a displacement (KBD_$OUTPUT_
+  BUFFER_DRAINED 0xE1CE9E `movea.l (8,A6),A0; pea (0x4c,A0)`;
+  TTY_$I_PUT_CHARS 0xE1B0BC..0xE1B2B6, nine `movea.l (8,A6),A0; pea
+  (0x3d2,A0)`, the slot reloaded for each call); 25 with a frame
+  slot, d < 0, a pointer local (AST_$PURIFY 0xE0599E `pea (0x28,A0)`);
+  35 + 11 through another address register (the enclosing routine's slot from a
+  nested routine, 0xE1AFB8, 0xE1AFCC, 0xE1AFDE, 0xE1AFF2 `movea.l
+  (8,A2),A0; pea (0x3d2,A0)` in TTY_$I_PUT_CHARS' nested 0xE1AFA2, also
+  0xE1BD16, 0xE1BDF0; a pointer in the unit's data, AUDIT_$LOG_EVENT_S
+  0xE70E88 `movea.l (0x198,A5),A0; pea (0xc,A0)`, 13 such in AUDIT;
+  the rest chains and array elements).  The register is the
+  allocator's, as for any pointer loaded as a base (12.4: A0, A1 and
+  A2..A4 all occur; kept apart within an argument list, 0xE6154A A0 then
+  0xE61552 A1).  **Uncertain** there: a pointer local reloaded into the register
+  that already held it from an earlier statement (A1 at 0xE39D00,
+  0xE53AF4, 0xE74484) where `dpc` takes the lowest free one (bead
+  domain-pascal-0os2).
+  **Not modelled, refused:** one argument list reading the same loaded
+  pointer twice: the original loads it once (0xE74706 `movea.l
+  (-0xbc,A6),A1; pea (-0x38,A1); pea (-0x34,A1)`, 0xE3CA4E, 0xE748A4; bead domain-pascal-ux1w);
+  the target `p^` of a pointer in the unit's data or of another unit's
+  pointer (no site told apart from a pointer pushed by value; bead
+  domain-pascal-royb).
+  Implemented (`isel.rs`, `Selector::push`, `reloaded_pointer`,
+  `field_pointer`); golden `calls/pointer_targets`, exec test
+  `pointer_targets`.
+- **A pointer local's own target `p^`** (Verified; review of bead
+  domain-pascal-s9j, ad-hoc survey of the compiled routines with a
+  `link`, script not kept): the pointer is pushed, `move.l
+  (d,A6),-(SP)`, as for a parameter slot (LOG_$READ above).  By-address
+  sites, each a uid (8 bytes, by address in every convention, ref 5.2)
+  at the start of the record the local points to: module-local 0xE53A18
+  (`dir/do_op_fix_dir.c`, `orig_handle` at (-0x180,A6)) 0xE53DB0,
+  0xE53DEE, 0xE53E26 to FILE_$FW_FILE, 0xE53D32, 0xE53DD6 to
+  FILE_$TRUNCATE (whose length argument is a constant passed by
+  address, `pea (d,PC)`: default convention).  The image has 7 `movea.l
+  (-k,A6),An; pea (An)` (AST_$RESERVE 0xE0680E, 0xE39D00, 0xE4AA60,
+  0xE535F8, 0xE53AF4, 0xE59EE6, 0xE87476); all go to routines taking
+  other arguments by value (0xE0250C, DBUF_$SET_BUFF, OS_$DATA_COPY,
+  module-local 0xE4B340, EC_$WAIT's by-value arrays), where the same
+  argument position also gets `move.l (-k,A6),-(SP)` from a pointer
+  local (DBUF_$SET_BUFF 11 times, e.g. 0xE39E04 in the routine of
+  0xE39D00; 0xE4B340 11, e.g. 0xE53A60 for the same local as 0xE53AF4;
+  OS_$DATA_COPY 10; EC_$WAIT 3), so the pointer is most likely passed
+  by value there.  In 6 of the 7 the same register was set to the
+  pointer earlier in the routine (A0 at AST_$RESERVE 0xE067DA, A1 at
+  0xE39C68, 0xE4AA3C, 0xE535C6, 0xE53AD4, 0xE59E28); not 0xE87476.
+  `dpc` pushes `move.l` (by address or by value); the `pea (An)` form
+  is **Uncertain**, its trigger unknown, not modelled (bead
+  domain-pascal-mrsu; the register choice, bead domain-pascal-0os2).
 - **Implemented** (`isel.rs`, `Selector::push`, `push_long_const`): all
   the forms above that are Verified; `addr(x)` (ref "Addr", p. 4-13) in
   `dpc-sema`.  Golden `tests/golden/data/through_worker.pas` (LOG_$READ's
@@ -5754,7 +5824,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   table (+0x124); TTY's OS_INIT_DATA 0xE351B0 ends in `00 00` after its
   last datum (+0x3A, the rounding to 4).
   - *What `dpc` emits.*  `dpc-sema` flattens an initialiser into stores
-    (`InitStore`: offset, type, constant); `dpc-ir` encodes each as an
+    (`InitStore`: offset, type, constant, and the bits of a packed
+    record's bit field); `dpc-ir` encodes each as an
     integer of its type's size (a boolean 0xFF/0, a `char` one byte, an
     enumeration a word, `nil` 0) or as bytes whose order the language
     fixes (a set's bit string, member k in byte `size-1 - k/8`, bit `k
@@ -5804,11 +5875,40 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     overwrites an earlier one (ref 3.10.4, "field c gets reinitialized");
     a variant's field is initialised by name (ref 3.10.4, `lb := 'a'`;
     status_$t's `all`, TTY_$I_INIT's statics in `../source`).
+  - *Packed records' bit fields (Verified at KBD; implemented, bead
+    domain-pascal-c0j8).*  A packed record's field that is whole bytes
+    holding its type's whole object (status_$t's `all`, a `char`) is
+    initialised as in an unpacked record; any other is a bit field
+    (`InitStore::bits`, `dpc_ir::InitValue::Bits`): the value's ordinal
+    in the field's bits, most significant bit first, the record a
+    big-endian bit string whose bit 0 is the most significant bit of
+    its first byte (ref 3.10.7 p. 3-35, "Pascal allocates fields left to
+    right within bytes and then by increasing byte address"; the layout
+    is `types.rs` `layout_packed_fields`, codegen-patterns 5.3).  A
+    later value replaces only its own bits.  Image: KBD's
+    kbd_$state_table, WIRED_DATA 0xE2DDE4+0xC0, `FB 20 E8 31 DF 31 FE B4
+    FF 10 00 10 00 42 00 53 00 6F 00 C0`: entries of a `char` and two
+    `0..15` fields, the first (`action`) in bits 7..4 of the second byte
+    (`2`, `3`, `3`, `0xB`, ...), the second (`next_state`) in bits 3..0;
+    `../source` kbd/kbd.pas now compiles to those bytes (`make
+    srcsurvey`: KBD_$CRASH_INIT, KBD_$PUT, KBD_$SET_KBD_MODE,
+    KBD_$SET_KBD_TYPE OK, no longer CODE-OK).  *From the reference, not
+    seen in the image:* a boolean is one bit, set for true (Table 3-3,
+    "1 bit"; the run-time stores `bset`, PROC2_$RESUME 0xE41444); an
+    enumeration its ordinal; a negative subrange value its two's
+    complement in the field's bits (p. 3-37: `-100..40` takes 8 bits;
+    the run-time stores of signed values mask them to the field,
+    0xE31DF2..0xE31E00); fields across a byte boundary as the layout
+    places them.  Refused: a set field that is not whole bytes (where a
+    packed set's elements lie in its bits is not stated, Table 3-3 gives
+    only the size, and no read of one is catalogued; bead
+    domain-pascal-bk8k).  Golden
+    `data/packed_init`, exec test `packed_init`.
   - *Not supported yet:* a bare (positional) value for or after a
     variant's field (ref 3.10.4 shows variants by name only); a packed
-    record's field that is not whole bytes holding its type's whole
-    object (bit fields); a `varying` string (length word, the trailing
-    null of p. 4-205); reals; overlay sections.
+    record's set field that is not whole bytes; a `varying` string
+    (length word, the trailing null of p. 4-205); reals; overlay
+    sections.
   - *Harness.*  `tools/conform.py` compares a section with contents byte
     for byte with the image at its `--section-addr`, which must start a
     `D` segment of the map that holds the whole section (a unit may

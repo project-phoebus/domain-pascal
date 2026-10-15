@@ -118,6 +118,29 @@ pub enum InitValue {
     /// docs/reference-clarifications.md "3.13.4 addr(...) as an initial
     /// value").  The target emits it with a relocation.
     Address(InitAddr),
+    /// A bit field of a packed record (ref 3.10.7, p. 3-35: fields "left
+    /// to right within bytes and then by increasing byte address"): the
+    /// low `width` bits of `value`, most significant first, at bits `bit`
+    /// .. `bit + width - 1` of the bytes from the [`DataInit::offset`],
+    /// bit 0 the most significant bit of the first byte.  The other bits
+    /// of those bytes keep what earlier values gave them.
+    Bits {
+        bit: u32,
+        width: u32,
+        value: u64,
+    },
+}
+
+impl InitValue {
+    /// The bytes the value occupies, from its [`DataInit::offset`].
+    pub fn size(&self) -> u32 {
+        match self {
+            InitValue::Int { size, .. } => *size,
+            InitValue::Bytes(b) => b.len() as u32,
+            InitValue::Address(_) => 4,
+            InitValue::Bits { bit, width, .. } => (bit + width).div_ceil(8),
+        }
+    }
 }
 
 /// The address of an [`InitValue::Address`].

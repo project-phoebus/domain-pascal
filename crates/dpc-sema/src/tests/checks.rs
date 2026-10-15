@@ -120,22 +120,26 @@ fn initialisers_flatten_to_stores() {
             InitStore {
                 offset: 0,
                 ty: i16,
-                value: ConstValue::Int(1).into()
+                value: ConstValue::Int(1).into(),
+                bits: None
             },
             InitStore {
                 offset: 2,
                 ty: i16,
-                value: ConstValue::Int(7).into()
+                value: ConstValue::Int(7).into(),
+                bits: None
             },
             InitStore {
                 offset: 4,
                 ty: i16,
-                value: ConstValue::Int(7).into()
+                value: ConstValue::Int(7).into(),
+                bits: None
             },
             InitStore {
                 offset: 6,
                 ty: i16,
-                value: ConstValue::Int(9).into()
+                value: ConstValue::Int(9).into(),
+                bits: None
             },
         ]
     );
@@ -315,13 +319,19 @@ fn variant_and_packed_record_initialisers() {
             (2, ConstValue::Char(b'q').into())
         ]
     );
-    // A bit field of a packed record; a positional value for, or after,
-    // a variant's field (not covered by ref 3.10.4).
+    // A set bit field of a packed record (where its elements lie is not
+    // stated, ref 3.10.7 Table 3-3); a positional value for, or after, a
+    // variant's field (not covered by ref 3.10.4).
     assert_err(
-        "module m; type st = packed record case integer of
-             1: (fail: boolean; subsys: 0..127); 2: (all: integer32) end;
-         var s: st := [fail := true];",
-        "initialising a packed record's field that is not whole bytes is not supported yet",
+        "module m; type st = packed record b: boolean; s: set of 0..3 end;
+         var s: st := [s := [1]];",
+        "initialising a set field of a packed record that is not whole bytes \
+         (where its elements lie is not stated, ref 3.10.7 Table 3-3) is not supported yet",
+    );
+    assert_err(
+        "module m; type st = packed record b: boolean; n: 0..3 end;
+         var s: st := [n := [1]];",
+        "a packed record's bit field needs a single value",
     );
     assert_err(
         "module m; type v = record n: integer; case integer of 1: (i: integer32) end;
@@ -332,6 +342,64 @@ fn variant_and_packed_record_initialisers() {
         "module m; type v = record case integer of 1: (i, j: integer) end;
          var x: v := [i := 1, 2];",
         "a positional initial value after a variant's field is not supported yet",
+    );
+}
+
+#[test]
+fn packed_bit_field_initialisers() {
+    // ref 3.10.7 p. 3-35: fields left to right within bytes; a store per
+    // bit field, its bits from the byte its first bit is in (KBD's
+    // kbd_$state_entry_t, a char and two 4-bit subranges; image WIRED_DATA
+    // 0xE2DDE4+0xC0 `FB 20').
+    let p = module(
+        "type e = packed record key: char; action: 0..15; next: 0..15 end;
+              c = (red, green, blue);
+              m = packed record f: boolean; h: c; s: -100..40; w: 0..1023 end;
+         var t: array[0..1] of e := [[key := chr(16#FB), action := 2, next := 0],
+                                     [chr(16#E8), 3, 1]];
+             x: m := [true, blue, -100, 2 * 8];",
+    );
+    let at = |st: &InitStore| {
+        (
+            st.offset,
+            st.bits.map(|b| (b.bit, b.width)),
+            st.value.clone(),
+        )
+    };
+    assert_eq!(
+        var(&p, "t")
+            .init
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(at)
+            .collect::<Vec<_>>(),
+        vec![
+            (0, None, ConstValue::Char(0xFB).into()),
+            (1, Some((0, 4)), ConstValue::Int(2).into()),
+            (1, Some((4, 4)), ConstValue::Int(0).into()),
+            (2, None, ConstValue::Char(0xE8).into()),
+            (3, Some((0, 4)), ConstValue::Int(3).into()),
+            (3, Some((4, 4)), ConstValue::Int(1).into()),
+        ]
+    );
+    // f bit 0, h bits 1..2, s bits 3..10 (across a byte), w bits 11..20.
+    let x = var(&p, "x").init.clone().unwrap();
+    assert_eq!(
+        x.iter().map(at).map(|(o, b, _)| (o, b)).collect::<Vec<_>>(),
+        vec![
+            (0, Some((0, 1))),
+            (0, Some((1, 2))),
+            (0, Some((3, 8))),
+            (1, Some((3, 10))),
+        ]
+    );
+    assert_eq!(x[0].value, ConstValue::Bool(true));
+    assert_eq!(x[2].value, ConstValue::Int(-100));
+    assert_eq!(x[3].value, ConstValue::Int(16));
+    assert_err(
+        "module m; type e = packed record a: 0..15; b: 0..15 end; var v: e := [a := 16];",
+        "constant 16 is out of range for 0..15",
     );
 }
 
