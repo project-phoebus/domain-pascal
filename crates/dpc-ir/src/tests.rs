@@ -3683,12 +3683,13 @@ end;
             int(0, 2, -2),
             // longword aligned (dpc-sema's freestanding layout)
             int(4, 4, 0x120010),
+            // byte variables one to a word (codegen-patterns 11)
             int(8, 1, 0xFF),
-            int(9, 1, 0),
-            int(10, 1, 0x41),
-            int(12, 2, 2),
+            int(10, 1, 0),
+            int(12, 1, 0x41),
+            int(14, 2, 2),
             // members 0, 3, 4, 5 in the last byte, 31 in the first
-            bytes(14, &[0x80, 0, 0, 0x39]),
+            bytes(16, &[0x80, 0, 0, 0x39]),
             int(20, 4, 0),
             int(24, 2, 7),
             int(26, 2, 7),
@@ -4061,25 +4062,34 @@ var
 }
 
 /// An element of a byte-aligned array has a type without the attribute,
-/// but may lie at an odd address all the same (`x` after a char at 1):
-/// refused when it is not known to be even, accepted when it is.
+/// but may lie at an odd address all the same (`f1` after a char at 1 in
+/// a record): refused when it is not known to be even, accepted when it
+/// is.  A static variable is always at an even offset (codegen-patterns
+/// 11, "Byte-sized module variables"), so `x` after a char is at 2.
 #[test]
 fn elements_of_byte_aligned_arrays_at_odd_addresses_are_refused() {
     let types = "module m;
 type
   oa = [aligned(0)] array[1..2] of integer16;
+  oa1 = [aligned(0)] array[1..1] of integer16;
   r1 = record c: char; f: oa end;
+  r2 = record c: char; f1: oa1 end;
 var
   c0: char;
   x: oa;
   rr: r1;
+  r2v: r2;
   i: integer;
 procedure v(n: integer); val_param; extern;
 ";
-    let e = errs(&format!("{types}procedure p; begin i := x[1] end;"));
+    let e = errs(&format!("{types}procedure p; begin i := r2v.f1[1] end;"));
     assert!(e[0].contains("byte-aligned object"), "{e:?}");
-    let e = errs(&format!("{types}procedure p; begin v(x[2]) end;"));
+    let e = errs(&format!("{types}procedure p; begin v(r2v.f1[1]) end;"));
     assert!(e[0].contains("byte-aligned object"), "{e:?}");
+    lower_src(&format!(
+        "{types}procedure p; begin i := x[1]; v(x[2]) end;"
+    ))
+    .unwrap();
     // `f` would cross two word boundaries at 1, so it is at 2 (p. 3-26).
     lower_src(&format!("{types}procedure p; begin i := rr.f[2] end;")).unwrap();
     // Through a pointer to a byte-aligned word (ref 3.15.6.7: the base
@@ -4105,7 +4115,7 @@ procedure p; var k: integer; begin for k := 1 to 4 do x[k] := 0 end;",
     let e = errs(
         "module m;
 type oa = [aligned(0)] array[1..8] of integer16;
-var c0: char; x: oa; y: oa;
+var x: extern oa; y: oa;
 procedure p; begin x := y end;",
     );
     assert!(e[0].contains("byte-aligned object"), "{e:?}");

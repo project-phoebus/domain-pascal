@@ -4914,7 +4914,8 @@ fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
 /// beginning of a record is at least word aligned"; 3.15.6.7 p. 3-75, a
 /// pointer's target is assumed naturally aligned, unless the pointer's
 /// base type has an alignment attribute), as is every frame
-/// object (codegen-patterns 2).  An object inside a byte-aligned array
+/// object (codegen-patterns 2) and every static one (codegen-patterns 11,
+/// "Byte-sized module variables").  An object inside a byte-aligned array
 /// or record counts too.
 fn check_even(p: &Program, e: &SExpr) -> Res<()> {
     /// The parity of `e`'s address: `Some(true)` even, `Some(false)` odd,

@@ -182,6 +182,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `narrow` | bead domain-pascal-8td: longwords narrowed to words and words to bytes (stored, passed by value, returned; from a register, the frame, the unit's data, a field by address read at the higher address, `rshft` and longword sums computed in 32 bits); words and bytes widened for value parameters; low words 0x5678, 0xFFFF, 0x8000, 0x7FFF, 0 and bytes 0xFF, 0x80, 0; `chr` of a volatile word read whole |
 | `bits` | `&`, `!`, `~`, `xor`, `lshft`, `rshft`, `arshft` |
 | `bytes` | char and boolean fields at odd offsets, char-indexed arrays, byte value slots |
+| `byte_statics` | bead domain-pascal-yvko: char and boolean module variables and a routine's `static` char one to a word (SIO_IO 0xE2DEB8+0x48 `70 00 60 00`), initialised and not; stores leave the neighbours and pad bytes alone |
 | `byte_ints` | `[byte]` subranges (ref 3.15.5): unsigned and signed bytes at odd offsets, widened for arithmetic and comparisons, transfers between them, by value and by address, a byte result, `&`/`lshft`/`rshft`, byte arrays; boundary values (0, 127, 128, 255; -128, -1) through `-`, `div`, `mod`, `~`, `!`, comparisons, `case`, and `lshft(b, 8) > 5` as a signed `integer` |
 | `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
 | `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |

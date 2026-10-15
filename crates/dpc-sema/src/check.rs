@@ -25,6 +25,23 @@ use crate::types::{
 /// layout"; Verified by survey, bead domain-pascal-ek7).
 const FRAME_MIN_ALIGN: u32 = 2;
 
+/// Smallest alignment of a static object (a unit-level, `define` or
+/// `static` variable) in its data section, in bytes: the original
+/// compiler word-aligns byte variables there too, one to a word
+/// (codegen-patterns 11, "Byte-sized module variables"; Verified by
+/// survey, bead domain-pascal-yvko: the 26 map-named byte variables of
+/// compiled modules' data blocks are all at even addresses, and the 10
+/// followed by another map name have it 2 bytes on, e.g.
+/// NETWORK_$ACTIVITY_FLAG 0xE24C42 .. NETWORK_$REALLY_DISKLESS 0xE24C4A,
+/// `tools/datasurvey.py names`; SIO_IO's char commands
+/// at +0x48, +0x4A, +0x54..+0x5C of 0xE2DEB8, `70 00 60 00`).  Ref 3.5.3
+/// p. 3-11 ("stores freestanding Boolean objects on byte boundaries") and
+/// 3.6.4 p. 3-13 ("freestanding char variables are byte aligned") give
+/// them byte alignment, which 3.10.5.1 p. 3-23 defines as a permission
+/// ("can allocate byte aligned objects on any byte boundary"); the
+/// padding is the compiler's.
+const STATIC_MIN_ALIGN: u32 = 2;
+
 /// What a name means.
 #[derive(Clone, Debug)]
 enum Sym {
@@ -350,13 +367,16 @@ impl<'t> Checker<'t> {
         -(ctx.frame as i32)
     }
 
-    /// Allocate `ty` in static data section `section`.  The order of
-    /// statics in a module's data area is not verified against the image
-    /// (Uncertain); declaration order at freestanding alignment is used.
+    /// Allocate `ty` in static data section `section`, in declaration
+    /// order ("Domain Pascal allocates variables defined in a var
+    /// declaration part sequentially within the specified section", ref
+    /// 3.14 p. 3-52), at the type's freestanding alignment but at least
+    /// word aligned ([`STATIC_MIN_ALIGN`]): a byte variable takes the high
+    /// byte of a word of its own, as in a frame.
     fn alloc_static(&mut self, section: &str, ty: TypeId) -> u32 {
         let (size, align) = {
             let i = self.types.get(ty);
-            (i.size, i.align)
+            (i.size, i.align.max(STATIC_MIN_ALIGN))
         };
         let idx = match self.sections.iter().position(|(n, _)| n == section) {
             Some(i) => i,

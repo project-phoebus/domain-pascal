@@ -449,6 +449,49 @@ fn unit_variable_storage() {
     );
 }
 
+/// Static objects are at least word aligned: a byte variable takes the
+/// high byte of a word of its own and two are never packed into one word
+/// (codegen-patterns 11, "Byte-sized module variables"; bead
+/// domain-pascal-yvko).  SIO_IO's WIRED_DATA 0xE2DEB8: chars at +0x48 and
+/// +0x4A (`70 00 60 00`) before a 4-byte record at +0x4C; NETWORK
+/// 0xE248FC: the booleans NETWORK_$ACTIVITY_FLAG .. _$REALLY_DISKLESS 2
+/// bytes apart.  Multi-byte objects keep their own alignment and size.
+#[test]
+fn static_byte_variables_word_aligned() {
+    let p = module(
+        "type rates = record tx, rx: integer end;
+              c3 = array[1..3] of char;
+              mr = packed record case integer of
+                     1: (c: char); 2: (mode: 0..3; stop: 0..15) end;
+         var
+           stop: char := chr(16#70);
+           start: char := chr(16#60);
+           baud: rates;
+           f1: define boolean;
+           f2: define boolean;
+           ub: [byte] 0..255;
+           a3: c3;
+           last: char;
+           tmpl: mr;
+           l: integer32;
+         procedure p; var s1: static boolean; s2: static char;
+         begin s1 := true; s2 := 'a' end;",
+    );
+    let off = |n: &str| match var(&p, n).storage {
+        Storage::Static { offset, .. } => offset,
+        ref s => panic!("{n}: {s:?}"),
+    };
+    assert_eq!((off("stop"), off("start"), off("baud")), (0, 2, 4));
+    assert_eq!((off("f1"), off("f2"), off("ub")), (8, 10, 12));
+    // A 3-char array keeps its 3 bytes; the next byte is not packed after
+    // it.
+    assert_eq!((off("a3"), off("last")), (14, 18));
+    // A one-char packed record is a word (ref 3.10.7 p. 3-35).
+    assert_eq!((off("tmpl"), off("l")), (20, 24));
+    assert_eq!((off("s1"), off("s2")), (28, 30));
+    assert_eq!(p.data_sections, vec![(".data".to_string(), 31)]);
+}
+
 #[test]
 fn define_part_methods() {
     // Method 2 (ref 7.2.2 p. 7-4): extern, then define with a value.

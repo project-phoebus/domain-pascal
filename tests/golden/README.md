@@ -83,6 +83,12 @@ Tests:
   array, boolean, enumeration, `nil`, sets; values from TTY's .DATA
   0xE8242C, WIRED_DATA 0xE2DDB4, OS_INIT_DATA 0xE351B0), a section with
   no initial value left NOBITS.
+- `data/byte_statics` - codegen-patterns 11 ("Byte-sized module
+  variables"; bead domain-pascal-yvko): char and boolean module
+  variables one to a word, the high byte (SIO_IO's WIRED_DATA 0xE2DEB8
+  from +0x48, `70 00 60 00 ...`, read as in SIO2681_$SET_BREAK
+  0xE1D13E/0xE1D148; NETWORK_$ACTIVITY_FLAG 0xE24C42 ..), one-char
+  packed records a word each.
 - `data/packed_init` - codegen-patterns 11 ("Initial values", packed
   records), ref 3.10.7 p. 3-35 (bead domain-pascal-c0j8): bit fields of
   packed records in the data block, the first field in the most

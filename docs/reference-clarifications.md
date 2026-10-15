@@ -583,7 +583,13 @@ records the files it stops.
     everywhere, 3 bytes; `../source`'s `tpad_$data_packet_t`
     (tpad/tpad.ins.pas) puts six such fields at 0xA..0xF, read with
     `move.b` in TPAD_$DATA (0xE691DC, 0xE691F0, 0xE69228), which fits
-    either if they were `char`s, so the image does not settle it.*
+    either if they were `char`s, so the image does not settle it.
+    Freestanding, the alignment answer no longer changes a layout:
+    every frame object and every static object is at least word aligned
+    whatever its type's alignment (codegen-patterns 2 "Frame layout:
+    alignment", 11 "Byte-sized module variables", bead
+    domain-pascal-yvko); the field and array-element cases, and the
+    array's size, stay open.*
 
 41. **5.1, p. 5-3 (PDF p. 358, checked); messages 79 and 83, pp. 9-15,
     9-16; 3.8, p. 3-14 (PDF p. 69); Appendix D, ISO 6.7.2.2, p. D-4 (PDF

@@ -1056,7 +1056,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     takes the high byte of a word, as in an argument slot (1.3).  For
     objects longer than a byte this is the record rule of ref 3.10.5.5
     p. 3-26 ("all objects longer than a byte are aligned on word
-    boundaries"), but records pack bytes and frames do not.
+    boundaries"), but records pack bytes and frames do not (nor do
+    module data blocks, section 11, "Byte-sized module variables").
     **Order: not sorted by size** (`tools/framesurvey.py order`): 200
     map-named routines have a lone byte or word object above a lone
     longword, 105 have every longword above them.  Declaration order is
@@ -6699,6 +6700,91 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   Which declaration order produces this is a language question (ref
   7.2; bead domain-pascal-ptd); ../source log/log.pas gets it by
   interleaving `define` and `var` parts (not re-checked here).
+- **Byte-sized module variables (Verified by survey; implemented; bead
+  domain-pascal-yvko).**  Every static object (unit-level, `define`, a
+  routine's `static`) starts at an even offset of its block: a `char` or
+  `boolean` variable takes the high byte of a word of its own, and two
+  are never packed into one word, as in a frame (section 2, "Frame
+  layout: alignment").  The reference does not say how variables are
+  padded in a section: 3.14 p. 3-52 "Domain Pascal allocates variables
+  defined in a var declaration part sequentially within the specified
+  section"; 3.5.3 p. 3-11 ("stores freestanding Boolean objects on byte
+  boundaries") and 3.6.4 p. 3-13 ("freestanding char variables are byte
+  aligned") give booleans and chars byte alignment, which 3.10.5.1
+  p. 3-23 defines as the addresses the compiler *can* use ("any byte
+  boundary"), so an even one is within the rule.  The reference's
+  sample `-map` listing (6.4.20, p. 6-25, PDF p. 406) agrees without
+  settling it: section MICROS has X: INTEGER16 at 0, Q: CHAR at +2,
+  R5: DOUBLE at +4 (Q's pad would also be R5's alignment; the listing
+  is alphabetical, the declaration order not shown), and the frame two
+  CHARs A, A2 at -8 and -6.  The image's modules use the default
+  alignment environment; under `%natural_alignment` / `-natural`
+  (6.4.22 p. 6-25) the rule is assumed, not verified.  Evidence (`tools/datasurvey.py`, which maps
+  the `(d,A5)` and absolute operands of every compiled routine to the
+  map's `D` segments):
+  - `names`: the map names 343 addresses in compiled modules' blocks,
+    one odd (LPR_$DATA_END 0xE854D7, a marker at the end of PEB_WIRED,
+    no variable).  26 map-named variables there are accessed only as
+    bytes with nothing at the next address; none is at an odd address,
+    and the 10 followed by another map name have it 2 bytes on:
+    NETWORK_$ACTIVITY_FLAG 0xE24C42, _$LOOPBACK_FLAG 0xE24C44,
+    _$DO_CHKSUM 0xE24C46, _$USER_SOCK_OPEN 0xE24C48, _$REALLY_DISKLESS
+    0xE24C4A (`tst.b`, `st`, `clr.b`; booleans), RIP_$STD_RECENT_CHANGES
+    0xE26EDE, RINGLOG_$MBX_SOCK 0xE2C35E, _$WHO_SOCK, _$NIL_SOCK,
+    DISK_$DIAG 0xE7ACCA.  A map name is a global symbol, which `define`
+    gives a variable (ref 7.2, pp. 7-3..7-7) and a record's fields do
+    not get, so these are separate byte variables one to a word.
+  - `align`: lone bytes (accessed only as bytes, nothing else accessed
+    in their word) in compiled modules' blocks: 56 at even offsets, 5 at
+    odd ones (and, next above an indexed base, 4 even and 1 odd); the
+    blocks are 4-aligned, so block and absolute parity agree.  The odd
+    ones are inside other objects: SUMA's sample record at BITPAD
+    0xE2DD88+0xF (../source suma/suma.pas `suma_$prev`, +0x4..+0x13),
+    FLP_$SREGS (+0x70) at FLP_ 0xE7AEF4+0x75 (`btst` on the low bytes
+    of its words +0x71, +0x73, +0x75, 0xE3E386..0xE3E460; +0x72 read
+    as a word, 0xE3E3F0), the low byte of the word at FLP_+0x102
+    (`move.b (259,A5)` 0xE3DCCC, a narrowing), bit 0 of the longword at
+    DIR 0xE7DBF8+0x2044 (A5 = block+8: `btst`/`bset #0,(0x203f,A5)`
+    0xE4B8DA/0xE4B8E6 on its low byte, `or.l D0,(0x203c,A5)` 0xE4B936,
+    `and.l` 0xE4B9A2), the three flags SMD 0xE82B8C+0x173D..+0x173F
+    (`st`/`clr.b`, 0xE6D838; inside a block that ../source models as one
+    record, smd_globals_t, which the image cannot confirm; the map name
+    SMD_REQUEST_QUEUE at +0x17F0 makes the block at least two variables,
+    so such a record would end by +0x17F0), and MST_$DISKLESS_MSG's
+    characters (MST_WIRED 0xE24304+0x4F).
+  - `pairs`: 18 pairs of lone bytes in adjacent words in compiled
+    modules' blocks (NETWORK +0x346..+0x350, RINGLOG_ +0x32..+0x3A,
+    SIO_IO 0xE2DEB8 +0x54..+0x5C, DISK_ +0xAFA..+0xB00, PCHIST +0x124 /
+    +0x126, RIP_WIRED +0xC86 / +0xC88, NETLOG +0x7E / +0x80).  The 11
+    words of such blocks whose two bytes are both accessed only as bytes
+    all lie inside one named object or a record of ../source: PEB_$INFO
+    0xE24C78 (+0x1A..+0x21, the one map name of PEB_PARITY), SUMA's
+    sample records (BITPAD +0x10..+0x13, +0x20..+0x23), SMD +0xDC/+0xDD
+    and +0x173E/+0x173F, MST_$DISKLESS_MSG +0x50/+0x51.
+  SIO_IO's WIRED_DATA 0xE2DEB8 shows it with chars: `70 00 60 00` at
+  +0x48 (read `move.b (0x48,A5),(5,A0)` / `(0x4a,A5)`,
+  SIO2681_$SET_BREAK 0xE1D148 / 0xE1D13E), `10 00 45 00 2A 00 3A 00 0A
+  00` at +0x54..+0x5D; the two templates at +0x5E / +0x60 are one-char
+  packed records, a word each by ref 3.10.7 p. 3-35 ("The minimum size
+  of a packed record is 16 bits"), so ../source's types there are not
+  the cause.  Not distinguishable in the image: whether a lone byte was
+  declared `char`/`boolean` or as a one-field record of one (a record is
+  2 bytes, 3.10.5.5 p. 3-26); either gives this layout.
+  **Implemented** (`dpc-sema` `alloc_static`, `STATIC_MIN_ALIGN`): each
+  static object at `round_up(offset, max(align, 2))`, in declaration
+  order; objects longer than a byte already had word alignment from
+  their types.  An `[aligned(0)]` object (3.15.6) is word aligned there
+  too, as in a frame, so only a field can put one at an odd address.
+  Tests `static_byte_variables_word_aligned` (`crates/dpc-sema/src/
+  tests/checks.rs`), golden `data/byte_statics`, exec `byte_statics`;
+  `tools/srcsurvey.py` turned SIO2681_$SET_BREAK, SIO6509_$XMIT,
+  SIO6509_$SET_LINE and SIO6509_$INQ_LINE from MISMATCH (data only) to
+  OK.  ../source flp/flp.pas (its last two variables `flp_initialized:
+  boolean` at +0x138, `flp_pad_139: array[1..3] of char` at +0x139,
+  "the block's rounding to 4") cannot be laid out that way: dpc puts
+  the pad at +0x13A, so the block is 0x13D, emitted as 0x140 against
+  the map's `FLP_ size = 13C`; without the pad it is 0x139, rounded to
+  0x13C, the image's 3 zero bytes (a ../source change, for the owner).
 - **Objects of 8 bytes or more in a block (lead, not settled; ../source
   pascal-translation-notes finding 29; bead domain-pascal-1edl).**
   KBD's block (`D E2DDE4 KBD size = D4`) has TERM_$TPAD_BUFFER at +0x58
