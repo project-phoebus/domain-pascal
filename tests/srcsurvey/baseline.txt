@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 343e0939f929dfc484ca2861101fbcb9cc384544
+# source: a64b494f1ed8e3c29883153976935d4e4f8899fa
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -45,6 +45,17 @@ OK	dxm/dxm.pas	dxm_$helper_unwired
 STUB	dxm/dxm.pas	dxm_$add_signal
 OK	dxm/dxm.pas	dxm_$init
 STUB	dxm/dxm.pas	dxm_$add_signal_callback
+STUB	ec/ec2.pas	ec2_$wait
+STUB	ec/ec2.pas	ec2_$wakeup
+STUB	ec/ec2.pas	ec2_$register_ec1
+STUB	ec/ec2.pas	ec2_$allocate_ec1
+STUB	ec/ec2.pas	ec2_$get_ec1_addr
+STUB	ec/ec2.pas	ec2_$release_ec1
+STUB	ec/ec2.pas	ec2_$get_val
+STUB	ec/ec2.pas	ec2_$init_s
+OK	ec/ec2u.pas	ec2_$init
+STUB	ec/ec2u.pas	ec2_$read
+STUB	ec/ec2u.pas	ec2_$advance
 STUB	fim/fim.pas	fim_$build_df
 STUB	fim/fim.pas	fim_$acknowledge
 MISMATCH	fim/fim.pas	fim_$install
@@ -209,6 +220,21 @@ STUB	pkt/pkt.pas	pkt_$likely_to_answer
 STUB	pkt/pkt.pas	pkt_$ping_server
 OK	pkt/pkt.pas	pkt_$init
 STUB	pkt/pkt.pas	pkt_$sar_internet
+OK	rem_name/rem_name.pas	rem_name_server_local
+STUB	rem_name/rem_name.pas	locate_server
+OK	rem_name/rem_name.pas	rem_name_$register_server
+STUB	rem_name/rem_name.pas	rem_name_$send_request
+STUB	rem_name/rem_name.pas	rem_name_$get_entry_by_name
+STUB	rem_name/rem_name.pas	rem_name_$get_info
+STUB	rem_name/rem_name.pas	rem_name_$locate_server
+STUB	rem_name/rem_name.pas	rem_name_$get_entry_by_node_id
+STUB	rem_name/rem_name.pas	rem_name_$get_entry_by_uid
+STUB	rem_name/rem_name.pas	rem_name_$read_dir
+STUB	rem_name/rem_name.pas	rem_name_$read_rep
+STUB	rem_name/rem_name.pas	rem_name_$dir_readu
+STUB	rem_name/rem_name.pas	rem_name_$get_entry
+STUB	rem_name/rem_name.pas	rem_name_$find_network
+STUB	rem_name/rem_name.pas	rem_name_$find_uid
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
 STUB	sio2681/sio2681.pas	sio2681_$int
@@ -322,3 +348,19 @@ MISMATCH	volx/volx.pas	volx_$shutdown
 STUB	volx/volx.pas	volx_$get_info
 STUB	volx/volx.pas	volx_$get_uids
 STUB	volx/volx.pas	volx_$rec_entry
+STUB	win/win.pas	wait_for_controller
+STUB	win/win.pas	win_$ansi_command
+STUB	win/win.pas	win_$sense_general_status
+STUB	win/win.pas	win_$check_disk_status
+MISMATCH	win/win.pas	read_or_write_disk_record
+STUB	win/win.pas	win_$reinit_drive
+STUB	win/win.pas	seek
+STUB	win/win.pas	win_$format_track
+STUB	win/win.pas	win_$do_io
+STUB	win/win.pas	disk_init
+STUB	win/win.pas	win_$spin_down
+STUB	win/win.pas	win_$int
+MISMATCH	win/win.pas	win_$dinit
+OK	win/win.pas	win_$error_que
+STUB	win/win.pas	win_$get_stats
+STUB	win/win.pas	win_$cinit
