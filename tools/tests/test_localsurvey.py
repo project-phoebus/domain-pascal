@@ -171,3 +171,64 @@ class CTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def ref(name, pid):
+    return {'kind': 'DeclRefExpr', 'name': name,
+            'referencedDecl': {'id': pid, 'kind': 'ParmVarDecl'}}
+
+
+class OneStmtTests(unittest.TestCase):
+    """`onestmt' (bead domain-pascal-s4a5)."""
+
+    def test_param_bytes_and_slots(self):
+        b = localsurvey.c_param_bytes
+        self.assertEqual(b({'qualType': 'tty_desc_t *'}), 4)
+        self.assertEqual(b({'qualType': 'uint8_t', 'desugaredQualType': 'unsigned char'}), 1)
+        self.assertEqual(b({'qualType': 'int16_t', 'desugaredQualType': 'short'}), 2)
+        self.assertEqual(b({'qualType': 'uint32_t', 'desugaredQualType': 'unsigned int'}), 4)
+        self.assertIsNone(b({'qualType': 'status_$t'}))
+        self.assertIsNone(b({'qualType': 'uid_t', 'desugaredQualType': 'struct uid'}))
+        # TTY_$I_ENABLE_CRASH_FUNC: pointer (8), char (0xc), boolean (0xe)
+        self.assertEqual(localsurvey.param_slots([4, 1, 1]), [8, 12, 14])
+        self.assertEqual(localsurvey.param_slots([2, None, 2]), [8, None, None])
+
+    def test_statements(self):
+        body = {'inner': [{'kind': 'DeclStmt', 'inner': [{'kind': 'VarDecl'}]},
+                          {'kind': 'IfStmt'}, {'kind': 'NullStmt'},
+                          {'kind': 'ReturnStmt'}]}
+        self.assertEqual([x['kind'] for x in localsurvey._stmts(body)], ['IfStmt'])
+        body['inner'][0]['inner'][0]['init'] = 'c'
+        self.assertEqual(len(localsurvey._stmts(body)), 2)
+
+    def test_param_reads(self):
+        st = {'kind': 'IfStmt', 'inner': [
+            ref('enable', 'p2'),
+            {'kind': 'CallExpr', 'inner': [
+                {'kind': 'ImplicitCastExpr', 'inner': [ref('f', 'x')]},
+                {'kind': 'ImplicitCastExpr', 'inner': [ref('ch', 'p1')]},
+                {'kind': 'UnaryOperator', 'opcode': '&', 'inner': [ref('ch', 'p1')]}]},
+            {'kind': 'BinaryOperator', 'inner': [ref('ch', 'p1')]}]}
+        reads, call = localsurvey.param_reads(st, {'p1': 1, 'p2': 2})
+        self.assertTrue(call)
+        self.assertEqual(reads, [('p2', 'cond', 'value'), ('p1', 'body', 'arg'),
+                                 ('p1', 'body', 'addr'), ('p1', 'body', 'value')])
+
+    def test_classify(self):
+        insns = [(0xE67292, 4, 'linkw %fp,#0'),
+                 (0xE67298, 4, 'moveal %fp@(8),%a0'),
+                 (0xE6729C, 4, 'moveb %fp@(12),%d0'),
+                 (0xE672A0, 4, 'moveb %fp@(14),%d1'),
+                 (0xE672A4, 2, 'bpls 0xe672bc'),
+                 (0xE672A6, 4, 'moveb %d0,%a0@(1240)'),
+                 (0xE672C0, 4, 'cmpiw #3,%fp@(16)'),
+                 (0xE672C4, 4, 'movew %fp@(18),%sp@-'),
+                 (0xE672C8, 4, 'movew %fp@(20),%d2')]
+        refs = localsurvey.slot_refs(insns, 14, 1)
+        self.assertEqual(refs, [(3, True, 'load', 'moveb %fp@(14),%d1')])
+        c = localsurvey.classify_param
+        self.assertEqual(c(refs), 'entry')
+        self.assertEqual(c(localsurvey.slot_refs(insns, 16, 2)), 'frame')
+        self.assertEqual(c(localsurvey.slot_refs(insns, 18, 2)), 'pushed')
+        self.assertEqual(c(localsurvey.slot_refs(insns, 20, 2)), 'late')
+        self.assertEqual(c(localsurvey.slot_refs(insns, 22, 2)), 'none')

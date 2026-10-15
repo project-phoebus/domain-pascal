@@ -223,22 +223,25 @@ end;",
         assert!(e.contains(want), "{e}");
     }
     let with_param: &[(&str, &str)] = &[
-        // The first test right after the entry load of its register.
+        // An ordered test right after the entry load of its register
+        // (only `beq`/`bne`/`bmi`/`bpl` on a load's flags are seen,
+        // codegen-patterns 12.2).
         (
             "(x: integer); internal;
 begin
-  if x = 0 then r := 0;
+  if x > 0 then r := 0;
   r := 1;
 end;",
-            "testing a register the previous instruction loaded",
+            "an ordered test of a parameter right after its entry load",
         ),
-        // A body of one `if` that reads a by-value parameter.
+        // A function of one `if` that assigns a by-value parameter to its
+        // result (bead domain-pascal-0zo8).
         (
-            "(x: integer); internal;
+            "(x: integer): integer; internal;
 begin
-  if x = 3 then r := 0;
+  if x = 3 then t := 0 else t := x;
 end;",
-            "a body of one `if`, `case` or loop statement",
+            "a function body of one `if`, `case` or loop statement",
         ),
         // A by-address slot used once after a branch, whose lowest free
         // register an earlier statement left a value in (12.4 R4(b),
@@ -287,7 +290,12 @@ end;",
         ),
     ];
     for (b, want) in with_param {
-        let e = error(&format!("procedure t{b}\n"));
+        let kind = if b.contains("): ") {
+            "function"
+        } else {
+            "procedure"
+        };
+        let e = error(&format!("{kind} t{b}\n"));
         assert!(e.contains(want), "{e}");
     }
 }
@@ -867,4 +875,34 @@ fn deeply_nested_loops_compile_quickly() {
         let _ = compile(&src);
         assert!(t.elapsed().as_secs() < 10, "{head}: {:?}", t.elapsed());
     }
+}
+
+/// Bead domain-pascal-s4a5 (codegen-patterns 12.2, "One-statement
+/// bodies"): a body of one `if` loads the by-value parameter it reads at
+/// entry, and a test of the parameter loaded last branches on the load's
+/// flags, in a body of one statement or of several (tty_$i_set_raw_mode
+/// 0xE1BF82 `move.b (0xc,A6),D0; bpl.w`; AREA_$DELETE 0xE07C34).
+#[test]
+fn entry_load_flags_are_tested() {
+    let b = body(
+        "procedure t(x: integer; y: boolean); internal;
+begin
+  if y then r := x;
+end;
+",
+    );
+    assert_eq!(
+        b[..3],
+        ["move.w\t(8,%fp),%d0", "move.b\t(0xa,%fp),%d1", "bpl.s\t1f"],
+        "{b:?}"
+    );
+    let b = body(
+        "procedure t(x: integer); internal;
+begin
+  if x = 0 then r := 0;
+  r := 1;
+end;
+",
+    );
+    assert_eq!(b[..2], ["move.w\t(8,%fp),%d0", "bne.s\t1f"], "{b:?}");
 }

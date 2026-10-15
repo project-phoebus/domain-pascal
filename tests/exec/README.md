@@ -169,6 +169,8 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `ptr_dregs` | bead domain-pascal-pze: a by-address parameter whose address is also data, held in a data register; its copies reused across `if`s, made again after a call; passed on from the data register |
 | `ptr_dregs_flow` | review of bead domain-pascal-pze: copies of pointers in data registers not reused across a call in a loop or inside `with`, reused after a join both parts copied on; a by-address parameter compared and stepped around a call; a pointer only stored, held in an address register |
 | `stale_param` | bead domain-pascal-pe9: a value parameter re-read after its address is passed (also from a nested routine) |
+| `one_stmt_params` | bead domain-pascal-s4a5: bodies of one `if`, `case`, `for`, `while` or `repeat` reading by-value parameters loaded at entry; a boolean tested on its load's flags |
+| `entry_load_flags` | review of bead domain-pascal-s4a5: a parameter tested right after the entry loads on its load's flags (bytes, words, longs; zero, negative, unsigned bytes, low byte or word zero), also past `movea.l` entry loads; `tst` of a parameter loaded before the last |
 | `divmod` | `div`/`mod` signs, words and longwords, by powers of two, word operands widened |
 | `udiv` | unsigned-word `div`/`mod`; longword by a word constant |
 | `arith` | multiplication by constants, `muls.w` products, M$ARITH, wraparound |

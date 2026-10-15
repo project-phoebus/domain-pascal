@@ -30,6 +30,11 @@ Tests:
   TTY_$K_SET_DELAY 0xE67A18, the module-local 0xE1B716's 0xE1B740.
 - `stores/entry_loads` - codegen-patterns 12.2, 13, 1.3, 2:
   TIME_$Q_INIT_QUEUE 0xE16C5E.
+- `stores/one_stmt_entry_loads` - codegen-patterns 12.2 ("One-statement
+  bodies"; bead domain-pascal-s4a5): a body of one `if` loads its
+  by-value parameters at entry and branches on the last load's flags,
+  TTY_$I_ENABLE_CRASH_FUNC 0xE67292; `tst` of an earlier one, PROC1_$SET_TYPE
+  0xE152FA.
 - `stores/const_stores` - codegen-patterns 13 (clr, st, move #n, byte
   immediates 0..255), 12.2.
 - `stores/bool_stores` - codegen-patterns 3 ("Computed booleans stored

@@ -296,15 +296,48 @@ fn select_body_with(
     // data section loaded before them, checked after allocation.
     let mut hoisted: Option<std::ops::Range<usize>> = None;
     if s.multi_body {
-        let reads_value_param = param_uses(f)
-            .iter()
-            .any(|(o, _)| f.value_params.iter().any(|p| p.offset == *o));
-        if control_only && reads_value_param {
-            return Err(unsupported(
-                f.body[0].span,
-                "a body of one `if`, `case` or loop statement that reads by-value parameters \
-                 (whether they are loaded at entry is not settled, codegen-patterns 12.2) is",
-            ));
+        // A body of one `if`, `case` or loop statement loads the by-value
+        // parameters it reads at entry as a body of several statements
+        // does (codegen-patterns 12.2, "One-statement bodies"; bead
+        // domain-pascal-s4a5): KBD_$RCV's nested 0xE1CC64 `move.b
+        // (8,A6),D1` before its `case` chain, tty_$i_set_raw_mode 0xE1BF82
+        // `move.b (0xc,A6),D0; bpl` (read once, in the condition),
+        // PROC2_$SET_CLEANUP 0xE41580 (read in the body only, past a test
+        // of a global), DBUF_$UPDATE_VOL 0xE3AAB0 (a `for'), and every
+        // other such body surveyed (`tools/localsurvey.py onestmt`); none
+        // reads one in its slot.
+        // A function of one such statement that assigns a by-value
+        // parameter to its result: KBD_$RCV's nested 0xE1CC64 keeps `ch`
+        // in D1 apart from the result in D0 (`move.b D1b,D0b` at
+        // 0xE1CCBA, the selector widened into D0), where the allocator's
+        // result variable shares a register with a parameter it is
+        // assigned from (0xE15222; codegen-patterns 12.4 R5).  Which
+        // applies is not settled (bead domain-pascal-0zo8).
+        if control_only && f.result.is_some() {
+            let mut copies_param = false;
+            dpc_ir::visit_stmts(&f.body, &mut |st| {
+                if let StmtKind::SetResult(e) = &st.kind {
+                    let mut e = e;
+                    while let Expr::Convert { value, .. } = e {
+                        e = value;
+                    }
+                    if let Expr::Load {
+                        addr: Addr::Frame(o),
+                        ..
+                    } = e
+                    {
+                        copies_param |= f.value_params.iter().any(|p| p.offset == *o);
+                    }
+                }
+            });
+            if copies_param {
+                return Err(unsupported(
+                    f.body[0].span,
+                    "a function body of one `if`, `case` or loop statement that assigns a \
+                     by-value parameter to the result (kept apart at 0xE1CCBA, shared at \
+                     0xE15222; not settled, codegen-patterns 12.2) is",
+                ));
+            }
         }
         let held: Vec<i32> = register_locals(f).iter().map(|&(o, _)| o).collect();
         reject_mergeable_stores(&f.body, &held)?;
@@ -343,6 +376,9 @@ fn select_body_with(
             ));
         }
         s.entry_regs = s.pinned.iter().map(|&(_, r)| r).collect();
+        if s.pinned.len() > pinned {
+            s.entry_end = Some(entry_start..s.out.len());
+        }
         // A function body of several statements holds its result variable
         // in a register up to the epilogue (codegen-patterns 3, "Result
         // variable"; [`Selector::set_result_web`]).
@@ -3845,6 +3881,11 @@ pub struct Selector {
     /// The registers of the parameters loaded at entry
     /// ([`Self::entry_loads`]), in load order.
     entry_regs: Vec<Reg>,
+    /// The range of `out` the entry loads take, when any were made: a
+    /// test, made right after them, of the register the last data
+    /// register load among them loaded branches on that load's flags
+    /// ([`Self::tst`]).
+    entry_end: Option<std::ops::Range<usize>>,
     /// The frame objects nested routines reach
     /// ([`Function::uplevel_refs`]): never held in a register.
     uplevel: Vec<(i32, u32)>,
@@ -4020,6 +4061,7 @@ impl Selector {
             web: None,
             web_a: None,
             entry_regs: Vec::new(),
+            entry_end: None,
             stored: Vec::new(),
             escaped: Vec::new(),
             volatile_eas: Vec::new(),
@@ -5742,6 +5784,44 @@ impl Selector {
                         "an ordered test of a local right after its store (only \
                          `beq`/`bne`/`bmi`/`bpl` on a store's flags are seen, \
                          codegen-patterns 7.1) is",
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        // The parameter the last data-register entry load loaded, tested
+        // right after the entry loads: the branch uses the load's flags.
+        // In compiled code every `move.<s> (d,A6),Dn` (d >= 8) made before
+        // the routine's first branch or call and followed by a test of Dn
+        // is followed by the branch itself, 20 of 20, all `beq`/`bne`/
+        // `bmi`/`bpl` (tty_$i_set_raw_mode 0xE1BF82 `move.b (0xc,A6),D0;
+        // bpl`; TTY_$I_ENABLE_CRASH_FUNC 0xE672A0; AREA_$DELETE 0xE07C34;
+        // SIO_$I_INHIBIT_XMIT 0xE1C9D8); none is followed by `tst Dn`.
+        // The `movea.l (d,A6),An` entry loads after it leave the flags
+        // (MC68000 PRM: MOVEA sets no condition codes) and the branch
+        // follows them, 10 of 10 (PROC1_$RESUME 0xE14774..0xE1477C
+        // `move.w (8,A6),D0; movea.l (0xa,A6),A0; beq.s`; 0xE02844,
+        // 0xE08CF8, 0xE71214), none with a `tst` of that Dn
+        // (codegen-patterns 12.2, "One-statement bodies"; bead
+        // domain-pascal-s4a5).  Later loads are not settled (below).
+        if let (Ea::Reg(r @ Reg::D(_)), Some(range)) = (&ea, &self.entry_end) {
+            let last_d = self.out[range.clone()]
+                .iter()
+                .rev()
+                .find(|i| !matches!(i, Insn::Movea { .. }));
+            if range.end == self.out.len()
+                && matches!(
+                    last_d,
+                    Some(Insn::Move { size: s, src: Ea::Disp(o, FP), dst: Ea::Reg(d) })
+                        if d == r && *s == size && *o >= 8
+                )
+            {
+                if !matches!(cc, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) {
+                    return Err(unsupported(
+                        self.span,
+                        "an ordered test of a parameter right after its entry load (only \
+                         `beq`/`bne`/`bmi`/`bpl` on the load's flags are seen, \
+                         codegen-patterns 12.2) is",
                     ));
                 }
                 return Ok(());
@@ -14914,6 +14994,196 @@ mod tests {
         let t = body_text(&f);
         assert_eq!(t[..2], ["move.w\t(0xa,%fp),%d0", "move.w\t%d0,(W).l"]);
         assert!(t.contains(&"cmpi.w\t#3,(8,%fp)".to_string()), "{t:?}");
+    }
+
+    /// Bead domain-pascal-s4a5: a body of one `if` (or `case` or loop)
+    /// loads the by-value parameters it reads at entry, as a body of
+    /// several statements does, and a test of the parameter loaded last
+    /// branches on that load's flags (TTY_$I_ENABLE_CRASH_FUNC
+    /// 0xE67298..0xE672A4 `movea.l (8,A6),A0; move.b (0xc,A6),D0; move.b
+    /// (0xe,A6),D1; bpl.s`; codegen-patterns 12.2, "One-statement
+    /// bodies").
+    #[test]
+    fn one_statement_if_loads_value_parameters_at_entry() {
+        let arm = |v: Expr| {
+            vec![Stmt {
+                kind: store(through(8, 0x10), v),
+                span: span(),
+            }]
+        };
+        let mut f = proc_(
+            0,
+            vec![StmtKind::If {
+                cond: IrCond::Test(param(14, Scalar::BOOLEAN)),
+                then_: arm(param(12, Scalar::unsigned(Width::Byte))),
+                else_: arm(konst(0, Scalar::unsigned(Width::Byte))),
+            }],
+        );
+        vparams(
+            &mut f,
+            &[
+                (8, Scalar::POINTER),
+                (12, Scalar::unsigned(Width::Byte)),
+                (14, Scalar::BOOLEAN),
+            ],
+        );
+        let t = body_text(&f);
+        assert_eq!(
+            t[..5],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.b\t(0xc,%fp),%d0",
+                "move.b\t(0xe,%fp),%d1",
+                "bpl.s\t1f",
+                "move.b\t%d0,(0x10,%a0)",
+            ],
+            "{t:?}"
+        );
+        // A parameter loaded before the last entry load: `tst` of its
+        // register (PROC1_$SET_TYPE 0xE152F2..0xE152FA `move.w (8,A6),D2;
+        // move.w (0xa,A6),D3; tst.w D2`; 12 such sites in compiled code).
+        let mut f = proc_(
+            0,
+            vec![StmtKind::If {
+                cond: IrCond::Test(param(12, Scalar::BOOLEAN)),
+                then_: arm(param(14, Scalar::unsigned(Width::Byte))),
+                else_: vec![],
+            }],
+        );
+        vparams(
+            &mut f,
+            &[
+                (8, Scalar::POINTER),
+                (12, Scalar::BOOLEAN),
+                (14, Scalar::unsigned(Width::Byte)),
+            ],
+        );
+        let t = body_text(&f);
+        assert_eq!(
+            t[..4],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.b\t(0xc,%fp),%d0",
+                "move.b\t(0xe,%fp),%d1",
+                "tst.b\t%d0",
+            ],
+            "{t:?}"
+        );
+        // A pointer loaded after the tested word: `movea` leaves the
+        // word's flags and the branch follows it (PROC1_$RESUME
+        // 0xE14774..0xE1477C `move.w (8,A6),D0; movea.l (0xa,A6),A0;
+        // beq.s`); a byte boolean likewise.
+        let ptr_arm = |v: i64| {
+            vec![Stmt {
+                kind: store(through(10, 0), konst(v, Scalar::signed(Width::Long))),
+                span: span(),
+            }]
+        };
+        for (ty, size) in [(word(), "w"), (Scalar::BOOLEAN, "b")] {
+            let cond = if ty == word() {
+                IrCond::Compare {
+                    op: Rel::Eq,
+                    lhs: param(8, ty),
+                    rhs: konst(0, ty),
+                }
+            } else {
+                IrCond::Test(param(8, ty))
+            };
+            let mut f = proc_(
+                0,
+                vec![StmtKind::If {
+                    cond,
+                    then_: ptr_arm(1),
+                    else_: ptr_arm(2),
+                }],
+            );
+            vparams(&mut f, &[(8, ty), (10, Scalar::POINTER)]);
+            let t = body_text(&f);
+            assert_eq!(
+                t[..3],
+                [
+                    format!("move.{size}\t(8,%fp),%d0").as_str(),
+                    "movea.l\t(0xa,%fp),%a0",
+                    if size == "w" {
+                        "bne.s\t1f"
+                    } else {
+                        "bpl.s\t1f"
+                    },
+                ],
+                "{t:?}"
+            );
+        }
+        // A word compared with a constant: loaded, then compared
+        // (DBUF_$UPDATE_VOL 0xE3AAB0 `move.w (8,A6),D2`, its `for` loop's
+        // `tst.w D2w` at 0xE3AAD2).
+        let mut f = proc_(
+            0,
+            vec![StmtKind::If {
+                cond: IrCond::Compare {
+                    op: Rel::Eq,
+                    lhs: param(8, word()),
+                    rhs: konst(3, word()),
+                },
+                then_: vec![Stmt {
+                    kind: store(sym("X"), konst(0, word())),
+                    span: span(),
+                }],
+                else_: vec![],
+            }],
+        );
+        vparams(&mut f, &[(8, word())]);
+        let t = body_text(&f);
+        assert_eq!(
+            t[..3],
+            ["move.w\t(8,%fp),%d0", "cmpi.w\t#3,%d0", "bne.s\t1f"],
+            "{t:?}"
+        );
+        // An ordered test against 0 right after the load: no branch of
+        // that kind is seen on a load's flags (all 20 are `beq`/`bne`/
+        // `bmi`/`bpl`).
+        let mut f = proc_(
+            0,
+            vec![StmtKind::If {
+                cond: IrCond::Compare {
+                    op: Rel::Gt,
+                    lhs: param(8, word()),
+                    rhs: konst(0, word()),
+                },
+                then_: vec![Stmt {
+                    kind: store(sym("X"), konst(0, word())),
+                    span: span(),
+                }],
+                else_: vec![],
+            }],
+        );
+        vparams(&mut f, &[(8, word())]);
+        assert!(err(&f).starts_with("an ordered test of a parameter right after its entry load"));
+        // A function of one `if` assigning the parameter to its result:
+        // refused (0xE1CCBA against 0xE15222; bead domain-pascal-0zo8).
+        let mut f = func(
+            0,
+            Some(ResultSpec {
+                class: ResultClass::Data,
+                ty: word(),
+            }),
+            vec![StmtKind::If {
+                cond: IrCond::Compare {
+                    op: Rel::Eq,
+                    lhs: param(8, word()),
+                    rhs: konst(3, word()),
+                },
+                then_: vec![Stmt {
+                    kind: StmtKind::SetResult(konst(0, word())),
+                    span: span(),
+                }],
+                else_: vec![Stmt {
+                    kind: StmtKind::SetResult(param(8, word())),
+                    span: span(),
+                }],
+            }],
+        );
+        vparams(&mut f, &[(8, word())]);
+        assert!(err(&f).starts_with("a function body of one `if`, `case` or loop statement"));
     }
 
     /// Bead domain-pascal-pe9: a by-value parameter whose address is

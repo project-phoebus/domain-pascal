@@ -2844,3 +2844,46 @@ var
         assert!(err.contains(what), "{what}: {err}");
     }
 }
+
+#[test]
+fn one_statement_bodies_load_value_parameters_at_entry() {
+    // Bead domain-pascal-s4a5 (codegen-patterns 12.2, "One-statement
+    // bodies"): a body of one `if` or `case` reading by-value parameters
+    // loads them at entry; the `if` branches on the last load's flags
+    // (TTY_$I_ENABLE_CRASH_FUNC 0xE672A0..0xE672A4).
+    let src = "\
+module s4a5;
+var
+  g: integer;
+procedure ext_$if(n: integer; b: boolean); options(val_param);
+begin
+  if b then g := n;
+end;
+procedure ext_$case(n: integer); options(val_param);
+begin
+  case n of
+    1: g := 5;
+    2: g := n;
+    otherwise g := 0;
+  end;
+end;
+function ext_$f(n: integer): integer; options(val_param);
+begin
+  if n = 0 then ext_$f := 1 else ext_$f := n;
+end;
+";
+    let (code, err) = compile_with("s4a5", src, &[]).unwrap_err();
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("a function body of one `if`, `case` or loop statement that assigns"),
+        "{err}"
+    );
+    let asm = compile_with("s4a5_ok", &src[..src.find("function").unwrap()], &[]).unwrap();
+    let r = routine(&asm, "EXT_$IF");
+    assert!(
+        r.contains("\tmove.w\t(8,%fp),%d0\n\tmove.b\t(0xa,%fp),%d1\n\tbpl.s\t"),
+        "{r}"
+    );
+    let r = routine(&asm, "EXT_$CASE");
+    assert!(r.contains("\tmove.w\t(8,%fp),%d0\n"), "{r}");
+}

@@ -6269,6 +6269,49 @@ kinds from the C in `../source/domain_os`.
 - *One-statement bodies:* PROC1_$TST_LOCK reads its parameter inside the
   expression, after the set's address (0xE148CE..0xE148D4, section 5.1);
   TIME_$Q_FLUSH_QUEUE 0xE16C84 loads its pointer right before the store.
+  That is a *simple* statement (an assignment).  **A body of one `if`,
+  `case` or loop statement loads the by-value parameters it reads at
+  entry, like a body of several statements** (Verified at every site
+  found; bead domain-pascal-s4a5):
+  - the srcsurvey sites (`../source`'s Pascal): KBD_$RCV's nested
+    0xE1CC64 `move.b (8,A6),D1` before its `case` chain (selector
+    widened into D0); tty_$i_echo_char 0xE1B3DA `move.b (0xc,A6),D2`;
+    tty_$i_set_raw_mode 0xE1BF82 `move.b (0xc,A6),D0; bpl.w` (read once,
+    in the condition only); TTY_$I_ENABLE_CRASH_FUNC 0xE6729C..0xE672A4;
+    tty_$i_set_funcs 0xE6721A..0xE6721E (a `for`); DBUF_$UPDATE_VOL
+    0xE3AAB0 (a `for`; at `../source` HEAD 61469f98);
+  - `tools/localsurvey.py onestmt` (C functions whose body is one `if`,
+    `switch` or loop reading a non-pointer by-value parameter, test
+    directories left out; at `../source` 61469f98): 10 parameters of 9
+    routines, 9 `entry` (loaded before the first branch or call), none
+    read in its slot; the tenth is in a nested routine whose reads are
+    uplevel (pmap_$update_seg_map 0xE1359C, `none`).  Among them:
+    PROC2_$SET_CLEANUP 0xE41580 `move.w (8,A6),D0` read only in the body,
+    past a test of a global; NET_IO_$CLEANUP_NIL 0xE74ED2,
+    NET_IO_$CLEANUP_USER, RIP_$HALT_ROUTER 0xE873A2, SIO_$I_INHIBIT_XMIT
+    0xE1C9D8 read only in the condition, with a call after;
+  - over all compiled routines (`regalloc.py`'s), only three have a
+    parameter slot as the operand of their first test (`cmp`/`tst`/`btst
+    (d,A6)` after the prologue and entry loads): the one-statement
+    assignment function 0xE4BC26 (`cmpi.l #k,(8,A6)` five times, a
+    simple statement); MEM_$PARITY_LOG 0xE0ADBE and FILE_$PRIV_CREATE
+    0xE5D382, bodies of several statements (bead domain-pascal-wxlw).
+  - *The test of the parameter loaded last is the load's flags:* every
+    `move.<s> (d,A6),Dn` (d >= 8) made before a routine's first branch or
+    call and followed by a test of Dn is followed by the branch itself,
+    20 of 20, all `beq`/`bne`/`bmi`/`bpl` (0xE1BF82, 0xE672A0,
+    AREA_$DELETE 0xE07C34, 0xE1C9D8; no `tst Dn` there).  `movea.l
+    (d,A6),An` entry loads after that load leave its flags (MOVEA sets
+    no condition codes) and the branch follows them: 10 of 10, none with
+    a `tst Dn` (PROC1_$RESUME 0xE14774..0xE1477C `move.w (8,A6),D0;
+    movea.l (0xa,A6),A0; beq.s`; 0xE02844, 0xE08CF8, 0xE71214; review
+    of bead domain-pascal-s4a5, which first emitted `tst.w D0` there;
+    exec test `entry_load_flags`).  A parameter
+    loaded before another is tested with `tst Dn` (PROC1_$SET_TYPE
+    0xE152F2..0xE152FA `move.w (8,A6),D2; move.w (0xa,A6),D3; tst.w D2`;
+    12 such sites).  After a later load the image does both (a load from
+    memory followed by its test: 302 branches on the load's flags, 20
+    `tst`; not settled).
 - *Entry loads are interleaved with other code* (an instruction
   scheduler; Verified that it happens, rule unknown; 12.4 R9–R12; `dpc`'s
   scheduler does not reproduce these, 12.4 R11 "Not explained"): `movea.l #imm,A0`
@@ -6367,8 +6410,21 @@ class takes D2/A2, a value live across a call a callee-saved register
 (module-local 0xE32B76: A2, D2 around three `jsr`; PROC1_$SET_TYPE
 0xE152F2: D2, D3), and a parameter's register is free after its last
 use.  The statements of such a body take registers of their own the same
-way.  A body of one `if`/`repeat` (or `while`/`for`) that reads a by-value
-parameter is rejected (no site seen).  A slot used inside a loop body
+way.  A body of one `if`, `case` or loop statement loads the by-value
+parameters it reads at entry the same way ("One-statement bodies" above;
+bead domain-pascal-s4a5), and a test of the parameter its last entry
+load loaded, made right there, branches on that load's flags
+(`Selector::tst`, `entry_end`; an ordered branch there is refused, not
+seen).  Refused: a function of one such statement that assigns a
+by-value parameter to its result (KBD_$RCV's nested 0xE1CC64 keeps `ch`
+in D1 apart from the result in D0, `move.b D1b,D0b` at 0xE1CCBA, where
+R5's result variable shares a register with a parameter it is assigned
+from, 0xE15222; bead domain-pascal-0zo8).  Not reproduced: the image keeps
+the register of a parameter whose last use is the `if`'s condition out
+of the arms (TTY_$I_ENABLE_CRASH_FUNC 0xE672AA D2, not D1; bead
+domain-pascal-d85r).  Golden `stores/one_stmt_entry_loads`; exec test
+`one_stmt_params`; unit test
+`one_statement_if_loads_value_parameters_at_entry`.  A slot used inside a loop body
 counts as used more than once and is loaded at entry (bead
 domain-pascal-5aw.15; the DISK_ module-local 0xE3CCD6 `movea.l
 (0xc,A6),A0`, the status slot of its `while` loop's one store;

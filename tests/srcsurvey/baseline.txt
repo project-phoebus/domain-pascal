@@ -87,7 +87,7 @@ OK	tty/tty.pas	tty_$i_buf_put
 STUB	tty/tty.pas	tty_$i_put_chars
 OK	tty/tty.pas	tty_$i_output_buffer_drained
 OK	tty/tty.pas	tty_$i_xmit_char
-STUB	tty/tty.pas	tty_$i_echo_char
+MISMATCH	tty/tty.pas	tty_$i_echo_char
 MISMATCH	tty/tty.pas	tty_$i_newline
 STUB	tty/tty.pas	tty_$i_calc_column
 STUB	tty/tty.pas	tty_$i_delete_char
@@ -112,7 +112,7 @@ STUB	tty/tty.pas	tty_$i_init
 STUB	tty/tty.pas	tty_$i_dxm_signal
 STUB	tty/tty.pas	tty_$i_set_funcs
 OK	tty/tty.pas	tty_$i_set_dfl_funcs
-STUB	tty/tty.pas	tty_$i_enable_crash_func
+MISMATCH	tty/tty.pas	tty_$i_enable_crash_func
 STUB	tty/tty.pas	tty_$k_reset
 OK	tty/tty.pas	tty_$i_set_raw
 OK	tty/tty.pas	tty_$i_inq_raw

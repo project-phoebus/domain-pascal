@@ -7,6 +7,7 @@ domain-pascal-iyd; docs/codegen-patterns.md 12.5).
                        [--module PATH] [-v]
     localsurvey.py c [--rev REV] [--source DIR] [--work DIR] [-v] [--misses]
                      [--dump FILE] [FILE.c ...]
+    localsurvey.py onestmt [--rev REV] [--source DIR] [--work DIR] [FILE.c ...]
 
 `run' exports ../source's domain_os/ at REV (default HEAD; as
 tools/srcsurvey.py does, into WORK/export, default tmp/localsurvey; the
@@ -39,7 +40,15 @@ locals whose declarations carry a register or frame note, scored by the
 same rules, split by data and pointer locals and by how many of D2-D7
 the routine saves (register pressure).
 
-Python 3 standard library, dpc, clang (for `c'), m68k-elf-objdump.
+`onestmt' (bead domain-pascal-s4a5; codegen-patterns 12.2, "One-
+statement bodies") lists the C functions (test directories left out)
+whose body is one `if', `switch' or loop statement reading a non-pointer
+by-value parameter, finds each in the image (its `Original address'
+header, else the map), and classifies each such parameter by its first
+reference there: `entry' (loaded into a register before the first branch
+or call), `frame' (tested or used in its slot), `pushed', `late', `none'.
+
+Python 3 standard library, dpc, clang (for `c' and `onestmt'), m68k-elf-objdump.
 Writes only under WORK (and --dump FILE).
 """
 
@@ -733,6 +742,276 @@ def pressure_table(rows):
             c[(k, True, 'register')], c[(k, True, 'frame')]))
 
 
+# --- one-statement bodies (bead domain-pascal-s4a5) ---------------------------
+
+ONE_KINDS = {'IfStmt': 'if', 'SwitchStmt': 'case', 'ForStmt': 'for', 'WhileStmt': 'while',
+             'DoStmt': 'repeat'}
+
+
+def c_param_bytes(ty):
+    """The size of a C parameter type TY (a clang type dict) as the image
+    passes it by value: 1, 2 or 4; None for a type this survey does not
+    lay out (records, arrays, C_RECORDS)."""
+    q = re.sub(r'\b(const|volatile)\b', '', ty.get('qualType', '')).strip()
+    if q in C_RECORDS:
+        return None
+    t = re.sub(r'\b(const|volatile)\b', '',
+               (ty.get('desugaredQualType') or ty.get('qualType') or '')).strip()
+    t = re.sub(r'\s+', ' ', t)
+    if t.endswith('*'):
+        return 4
+    if '[' in t or '(' in t or t.startswith(('struct', 'union')):
+        return None
+    if t in ('char', 'signed char', 'unsigned char', '_Bool', 'bool', 'int8_t', 'uint8_t'):
+        return 1
+    if t in ('short', 'unsigned short', 'short int', 'unsigned short int', 'int16_t',
+             'uint16_t'):
+        return 2
+    if t in ('int', 'unsigned int', 'unsigned', 'long', 'unsigned long', 'long int',
+             'unsigned long int', 'int32_t', 'uint32_t'):
+        return 4
+    return None
+
+
+def param_slots(sizes):
+    """The (d,A6) offsets of parameters of SIZES (bytes each, pushed right
+    to left: the first at 8; a byte or a word takes a 2-byte slot, the
+    byte in its high half, so at the slot's own offset; codegen-patterns
+    1.1); None where a size is None (and for every later parameter)."""
+    out, off = [], 8
+    for n in sizes:
+        if n is None or off is None:
+            out.append(None)
+            off = None
+            continue
+        out.append(off)
+        off += 2 if n <= 2 else 4
+    return out
+
+
+def _stmts(compound):
+    """The statements of a C compound statement as Pascal counts them: a
+    declaration without an initialiser, a null statement and a final
+    `return;' are not statements."""
+    out = []
+    for x in compound.get('inner') or []:
+        k = x.get('kind')
+        if k == 'NullStmt':
+            continue
+        if k == 'DeclStmt' and not any(d.get('init') for d in x.get('inner') or []):
+            continue
+        out.append(x)
+    if out and out[-1].get('kind') == 'ReturnStmt' and not out[-1].get('inner'):
+        out.pop()
+    return out
+
+
+def _cond_children(st):
+    """Indices of ST's children that are its controlling expression."""
+    k = st.get('kind')
+    inner = st.get('inner') or []
+    if k == 'DoStmt':
+        return {len(inner) - 1}
+    if k == 'ForStmt':
+        return {0, 1, 2, 3}  # init, condition variable, condition, increment
+    if k == 'IfStmt':
+        n = (1 if st.get('hasInit') else 0) + (1 if st.get('hasVar') else 0)
+        return set(range(n + 1))
+    return {0}
+
+
+def param_reads(st, pids):
+    """The reads of the parameters PIDS (clang ids) in statement ST:
+    [(id, where, how)], where 'cond' (in the controlling expression of ST)
+    or 'body', how 'addr' (`&p'), 'arg' (a whole call argument) or
+    'value'; and whether ST has a call."""
+    reads, calls = [], [False]
+
+    def walk(n, where, parent):
+        if not isinstance(n, dict):
+            return
+        k = n.get('kind')
+        if k == 'CallExpr':
+            calls[0] = True
+        if k == 'DeclRefExpr':
+            d = n.get('referencedDecl') or {}
+            if d.get('id') in pids:
+                how = 'value'
+                if parent and parent.get('kind') == 'UnaryOperator' and parent.get('opcode') == '&':
+                    how = 'addr'
+                elif parent and parent.get('kind') == 'CallExpr':
+                    how = 'arg'
+                reads.append((d['id'], where, how))
+            return
+        for x in n.get('inner') or []:
+            # the casts and parentheses around a reference keep its parent
+            p = parent if k in ('ImplicitCastExpr', 'ParenExpr') else n
+            walk(x, where, p)
+
+    conds = _cond_children(st)
+    for i, x in enumerate(st.get('inner') or []):
+        walk(x, 'cond' if i in conds else 'body', st)
+    return reads, calls[0]
+
+
+def c_one_statement(ast, text):
+    """The functions of the clang JSON AST (TEXT the main file) whose body
+    is one `if', `switch', loop statement: [{name, kind, addr (from the
+    nearest `Original address' header before it, else None), params:
+    [{name, bytes, slot, reads: [(where, how)]}], call}]."""
+    out = []
+    prev_end = 0
+    for fd in ast.get('inner') or []:
+        if fd.get('kind') != 'FunctionDecl':
+            continue
+        rng = fd.get('range', {})
+        body = [x for x in fd.get('inner') or [] if x.get('kind') == 'CompoundStmt']
+        name = fd.get('name', '')
+        off = fd.get('loc', {}).get('offset')
+        if not body or off is None or text[off:off + len(name)] != name:
+            continue
+        hdr = re.findall(r'Original address:?\s*0x([0-9a-fA-F]+)', text[prev_end:off])
+        prev_end = rng.get('end', {}).get('offset', off)
+        st = _stmts(body[0])
+        if len(st) != 1 or st[0].get('kind') not in ONE_KINDS:
+            continue
+        parms = [x for x in fd.get('inner') or [] if x.get('kind') == 'ParmVarDecl']
+        sizes = [c_param_bytes(p.get('type', {})) for p in parms]
+        slots = param_slots(sizes)
+        pids = {p['id']: i for i, p in enumerate(parms)}
+        reads, call = param_reads(st[0], pids)
+        params = []
+        for i, p in enumerate(parms):
+            t = (p.get('type', {}).get('desugaredQualType')
+                 or p.get('type', {}).get('qualType', ''))
+            params.append({'name': p.get('name', '?'), 'bytes': sizes[i], 'slot': slots[i],
+                           'pointer': t.strip().endswith('*'),
+                           'reads': [(w, h) for pid, w, h in reads if pids[pid] == i]})
+        out.append({'name': name, 'kind': ONE_KINDS[st[0]['kind']],
+                    'addr': int(hdr[-1], 16) if hdr else None, 'params': params,
+                    'call': call})
+    return out
+
+
+_CT = re.compile(r'^(b(?:ra|hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le|sr)[sw]?|db\w+|jmp|jsr|bsr\w*|rts)\b')
+
+
+def slot_refs(insns, slot, nbytes):
+    """How INSNS (a routine, [(addr, len, text)]) reach a by-value
+    parameter of NBYTES at (SLOT,A6): [(index, before, kind, insn text)],
+    `before' whether no branch, call or return comes earlier, kind 'load'
+    (a move into a register), 'push' (a move to -(SP) or `pea'), 'inplace'
+    (another instruction with the slot as an operand)."""
+    out = []
+    first_ct = next((i for i, (_, _, t) in enumerate(insns) if _CT.match(t)), len(insns))
+    for i, (_, _, t) in enumerate(insns):
+        hit = False
+        for m in _FP.finditer(t):
+            d = int(m.group(1))
+            if slot <= d < slot + (2 if nbytes <= 2 else 4):
+                hit = True
+        if not hit:
+            continue
+        mn, _, ops = t.partition(' ')
+        if mn.startswith('pea') or ops.endswith('%sp@-'):
+            kind = 'push'
+        elif mn.startswith('move') and re.search(r',%[ad][0-7]$', ops) and ops.startswith('%fp@'):
+            kind = 'load'
+        else:
+            kind = 'inplace'
+        out.append((i, i < first_ct, kind, t))
+    return out
+
+
+def classify_param(refs):
+    """One by-value parameter's image class from slot_refs: 'entry' (its
+    first reference loads it into a register before the first branch or
+    call), 'frame' (it is tested or used in place, `cmpi #k,(d,A6)'),
+    'pushed', 'late' (loaded after a branch or call), 'none'."""
+    if not refs:
+        return 'none'
+    _, before, kind, _ = refs[0]
+    if kind == 'load':
+        return 'entry' if before else 'late'
+    return 'frame' if kind == 'inplace' else 'pushed'
+
+
+def cmd_onestmt(a):
+    import concurrent.futures
+    import a5survey
+    import regalloc
+    import srcsurvey
+    work = os.path.abspath(a.work)
+    tree, commit = srcsurvey.export_rev(os.path.abspath(a.source), a.rev, work)
+    print('localsurvey onestmt: %s at %s (%s)' % (os.path.normpath(a.source), a.rev, commit[:12]))
+    m, rs = regalloc.routines()
+    ends = {r0: r1 for _seg, r0, r1 in rs}
+    files = a.files or sorted(
+        os.path.relpath(os.path.join(d, f), tree)
+        for d, _s, fs in os.walk(tree) for f in fs
+        if f.endswith('.c') and '/test' not in os.path.relpath(d, tree) + '/'
+        and not os.path.relpath(d, tree).startswith('test'))
+
+    def ast_of(path):
+        with open(os.path.join(tree, path), errors='replace') as fh:
+            text = fh.read()
+        if not re.search(r'\b(if|switch|for|while|do)\b', text):
+            return path, text, None
+        res = subprocess.run(['clang', '-std=gnu2x', '-DARCH_HOST', '-I.',
+                              '-I' + os.path.dirname(path), '-fsyntax-only', '-w', '-Xclang',
+                              '-ast-dump=json', path],
+                             cwd=tree, capture_output=True, text=True)
+        try:
+            return path, text, json.loads(res.stdout) if res.stdout else None
+        except ValueError:
+            return path, text, None
+
+    rows = []
+    seen = set()
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        for path, text, ast in ex.map(ast_of, files):
+            if ast is None:
+                continue
+            for f in c_one_statement(ast, text):
+                addr = f['addr']
+                if addr is None:
+                    s = m.lookup(f['name'].upper())
+                    addr = s.addr if s else None
+                if addr is None or addr not in ends or addr in seen:
+                    continue
+                seen.add(addr)
+                insns = a5survey.reached(addr, ends[addr])
+                vals = [p for p in f['params']
+                        if p['slot'] is not None and not p['pointer'] and p['reads']
+                        and any(h == 'value' for _w, h in p['reads'])]
+                if not vals:
+                    continue
+                for p in vals:
+                    refs = slot_refs(insns, p['slot'], p['bytes'])
+                    p['class'] = classify_param(refs)
+                    p['refs'] = len(refs)
+                    p['first'] = refs[0][3] if refs else ''
+                rows.append((path, f, addr, insns))
+    from collections import Counter
+    by = Counter()
+    for path, f, addr, insns in rows:
+        for p in [p for p in f['params'] if 'class' in p]:
+            where = ('cond' if all(w == 'cond' for w, _h in p['reads'])
+                     else 'body' if all(w == 'body' for w, _h in p['reads']) else 'both')
+            nr = len(p['reads'])
+            key = (f['kind'], where, 'call' if f['call'] else 'nocall', p['class'])
+            by[key] += 1
+            print('%-8s %-40s %-28s %-6s %-7s %-6s reads=%d refs=%d %-6s %s' % (
+                '%06X' % addr, path, f['name'][:28], f['kind'], where,
+                'call' if f['call'] else '-', nr, p['refs'], p['class'], p['first']))
+    print('== by statement, where read, call, image class')
+    for k, n in sorted(by.items()):
+        print('  %-8s %-5s %-7s %-7s %d' % (k + (n,)))
+    tot = Counter(k[3] for k in by.elements())
+    print('== totals: %s' % ', '.join('%s %d' % kv for kv in sorted(tot.items())))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -751,8 +1030,13 @@ def main(argv=None):
     c.add_argument('--misses', action='store_true')
     c.add_argument('--dump', help='write the rows as JSON to this file')
     c.add_argument('files', nargs='*')
+    o = sub.add_parser('onestmt')
+    o.add_argument('--rev', default='HEAD')
+    o.add_argument('--source', default=os.path.join(ROOT, '..', 'source'))
+    o.add_argument('--work', default=os.path.join(ROOT, 'tmp', 'localsurvey'))
+    o.add_argument('files', nargs='*')
     a = ap.parse_args(argv)
-    return cmd_run(a) if a.cmd == 'run' else cmd_c(a)
+    return {'run': cmd_run, 'c': cmd_c, 'onestmt': cmd_onestmt}[a.cmd](a)
 
 
 if __name__ == '__main__':
