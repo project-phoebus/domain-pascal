@@ -3015,3 +3015,127 @@ end;
         "{asm}"
     );
 }
+
+#[test]
+fn addr_values_in_sums_and_differences() {
+    // Bead domain-pascal-j28d (codegen-patterns 5.2, "`addr(x)` as a
+    // value"): the forms of NET_$OPEN 0xE5A1B8..0xE5A1C0 (`lea abs.l;
+    // move.l; sub.l #sym` in the `90bc` encoding), `add.l #sym` (`d0bc`,
+    // 0xE0F14E), the subtrahend's `lea` first (0xE65DA0), and transfers
+    // stored and pushed as `addr` itself; then what stays refused.
+    let ok = "module m;
+type r_t = record a, b: integer32; c: integer; end;
+var o: extern r_t; l: extern integer32; g: integer32; w: integer;
+procedure q(v: integer32); options(extern, val_param);
+procedure p(x: integer32); options(val_param);
+var loc: array[1..4] of integer32;
+begin
+  w := integer32(addr(o.c)) - integer32(addr(o));
+  g := (x & 16#3FF) + integer32(addr(l));
+  g := integer32(addr(loc[2])) - integer32(addr(loc));
+  g := integer32(addr(l));
+  q(integer32(addr(loc)));
+end;
+";
+    let asm = compile_with("addr_values_ok", ok, &[]).unwrap();
+    assert!(
+        asm.contains(
+            "lea\t(O+8).l,%a0\n\tmove.l\t%a0,%d1\n\t.short\t0x92bc\t| sub.l #O,%d1\n\t.long\tO\n\
+             \tmove.w\t%d1,(4,%a5)"
+        ),
+        "{asm}"
+    );
+    assert!(
+        asm.contains("andi.l\t#0x3ff,%d1\n\t.short\t0xd2bc\t| add.l #L,%d1\n\t.long\tL\n"),
+        "{asm}"
+    );
+    assert!(
+        asm.contains(
+            "lea\t(-0x10,%fp),%a0\n\tlea\t(-0xc,%fp),%a1\n\tmove.l\t%a1,%d0\n\tsub.l\t%a0,%d0"
+        ),
+        "{asm}"
+    );
+    assert!(asm.contains("move.l\t#L,(%a5)"), "{asm}");
+    assert!(asm.contains("pea\t(-0x10,%fp)\n\tjsr\t(Q).l"), "{asm}");
+    let cases = [
+        ("g := integer32(addr(l)) + 4;", "an address and a constant"),
+        ("g := 4 - integer32(addr(l));", "an address and a constant"),
+        (
+            "g := 4 + integer32(addr(loc));",
+            "an address and a constant",
+        ),
+        (
+            "g := 4 - integer32(addr(loc));",
+            "a constant minus an address",
+        ),
+        (
+            "g := integer32(addr(loc)) - 4;",
+            "an address and a constant",
+        ),
+        (
+            "g := g + integer32(addr(loc));",
+            "an address that needs an address register and a value that is not one",
+        ),
+        (
+            "g := integer32(addr(loc)) - g;",
+            "an address minus a value that is not an address",
+        ),
+        (
+            "g := integer32(addr(l)) - g;",
+            "an address minus a value that is not an address",
+        ),
+        (
+            "g := integer32(addr(l)) + integer32(addr(loc));",
+            "the sum of two addresses",
+        ),
+        (
+            "g := integer32(addr(l)) & 16#FF;",
+            "an operation other than a longword `+` or `-`",
+        ),
+        (
+            "if integer32(addr(l)) > g then g := 0;",
+            "an address (`addr`) in a comparison",
+        ),
+        (
+            "if addr(loc) = p then g := 0;",
+            "an address (`addr`) in a comparison",
+        ),
+    ];
+    for (body, msg) in cases {
+        let src = format!(
+            "module m;
+var l: extern integer32; g: integer32; p: univ_ptr;
+procedure r;
+var loc: array[1..4] of integer32;
+begin
+  {body}
+end;
+"
+        );
+        let (code, err) = compile_with("addr_values_refusals", &src, &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(msg) && err.contains("not supported yet"),
+            "{body}: {err}"
+        );
+    }
+    // An address formed here with the address a by-address slot holds in
+    // a data register (the parameter loaded at entry, `held_addr`): no
+    // form seen; a value stored into a register-held local: refused.
+    let held = "module m;
+type r_t = record a, b: integer32; end;
+var g: integer32;
+procedure q(in v: integer32); extern;
+procedure r(var x: r_t);
+begin
+  g := integer32(addr(x.b)) - integer32(addr(x));
+  q(g);
+end;
+";
+    let (code, err) = compile_with("addr_values_held", held, &[]).unwrap_err();
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("the address a parameter's slot holds in a data register"),
+        "{err}"
+    );
+}

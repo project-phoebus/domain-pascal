@@ -754,6 +754,27 @@ impl fmt::Display for Insn {
             }
             Insn::CmpaZero(a) => write!(f, "cmpa.w\t#0,{}", Reg::A(*a)),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
+            // A symbol's address added or subtracted: the immediate-EA
+            // encodings `d0bc`/`90bc` (+ the register's number << 9),
+            // which gas does not choose (it writes `addi`/`subi`):
+            // NET_$OPEN 0xE5A1C0 `90bc 00e2 44f4` `sub.l
+            // #NET_IO_$NIL_DRIVER,D0`; 0xE0F14E `d2bc 00ff 8800` `add.l
+            // #AST_$COPY_BUFF,D1` (codegen-patterns 5.2, 13).
+            Insn::Alu {
+                op: op @ (AluOp::Add | AluOp::Sub),
+                size: Size::L,
+                src: Ea::ImmSym(s),
+                dst,
+            } => {
+                let base: u16 = if *op == AluOp::Add { 0xd0bc } else { 0x90bc };
+                write!(
+                    f,
+                    ".short\t0x{:04x}\t| {}.l #{s},{}\n\t.long\t{s}",
+                    base | (u16::from(*dst) << 9),
+                    op.name(),
+                    Reg::D(*dst)
+                )
+            }
             Insn::Alu { op, size, src, dst } => {
                 write!(f, "{}.{size}\t{src},{}", op.name(), Reg::D(*dst))
             }
@@ -1076,6 +1097,27 @@ mod tests {
                 ".short\t2f-7b",
             ),
             (Insn::Pea(Ea::AbsW(0x16)), "pea\t(0x16).w"),
+            // A symbol's address added or subtracted: the immediate-EA
+            // encodings gas does not choose (NET_$OPEN 0xE5A1C0 `90bc`;
+            // 0xE0F14E `d2bc`).
+            (
+                Insn::Alu {
+                    op: AluOp::Sub,
+                    size: Size::L,
+                    src: Ea::ImmSym("NET_IO_$NIL_DRIVER".into()),
+                    dst: 0,
+                },
+                ".short\t0x90bc\t| sub.l #NET_IO_$NIL_DRIVER,%d0\n\t.long\tNET_IO_$NIL_DRIVER",
+            ),
+            (
+                Insn::Alu {
+                    op: AluOp::Add,
+                    size: Size::L,
+                    src: Ea::ImmSym("AST_$COPY_BUFF".into()),
+                    dst: 1,
+                },
+                ".short\t0xd2bc\t| add.l #AST_$COPY_BUFF,%d1\n\t.long\tAST_$COPY_BUFF",
+            ),
             (Insn::Pea(Ea::AbsW(-1)), "pea\t(-1).w"),
             (
                 Insn::Move {

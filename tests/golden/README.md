@@ -430,6 +430,15 @@ Tests:
   bead domain-pascal-gqp): `ec2_$ptr_t(1)` stored, passed by address and
   by value as a 4-byte constant (codegen-patterns 13, 1.5).  No image
   site identified.
+- `expr/addr_arith` - ref p. 4-13, p. 4-197, codegen-patterns 5.2
+  ("`addr(x)` as a value"), 13 (bead domain-pascal-j28d): an address
+  inside another unit's record minus the record's address (NET_$OPEN
+  0xE5A1B8..0xE5A1C6, `sub.l #sym` in the `90bc` encoding), `add.l
+  #sym` / `sub.l #sym` with a computed value and a variable (0xE0F148,
+  0xE09E6A), two frame addresses subtracted, the subtrahend's `lea` first
+  (ASKNODE_$SERVER 0xE65DA0), `integer32(addr(x))` stored and passed by
+  value as `addr(x)` (NETBUF_$INIT 0xE2F63C, SOCK_$INIT 0xE2FE4C,
+  FLP_$DINIT 0xE3E15E).
 - `expr/narrow` - codegen-patterns 8 ("Narrowing and widening"; bead
   domain-pascal-8td): a longword field by address stored into a word
   (APP_$DEMUX 0xE00AF6), a word `in` parameter into a byte (PACCT_$LOG

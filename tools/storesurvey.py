@@ -69,6 +69,30 @@ are all such), and a `move.w #imm' with both bytes non-zero, listed
 for checking against ../source (a `clr.l' of two words cannot be told
 from a longword store and is not listed).
 
+`addr' (bead domain-pascal-j28d, codegen-patterns 5.2 "`addr(x)` as a
+value"): addresses used as data in compiled code, over the instructions
+of every compiled routine reachable from its start (a5survey.reached).
+Two kinds of site:
+
+- `areg': an address register read as a value (not as a base): `move.l
+  An,Dm', `add.l An,Dm', `sub.l An,Dm', `cmp.l An,Dm', `cmpa.l X,An',
+  `movea.l An,Am', `move.l An,<mem>', whose last definition in the
+  straight-line run before it (no branch or call between) is
+  `lea X,An' (not an update `lea (d,An),An') or `movea.l #imm,An'
+  (a branch target in between is not looked for).
+  Classed by the use, the destination (`dreg', `areg', `mem') and the
+  `lea' source (`a5', `a6' the frame, `abs', `ptr' (d,An), `idx' with an
+  index register, `imm' a `movea.l #').  A `movea.l A0,A0' (the filler)
+  is not a use.
+- `imm': `add', `sub', `cmp' (and `addi', `subi', `cmpi') of a longword
+  immediate into a data register, and `cmpa.l #imm,An', the immediate in
+  the window 0xD00000..0xFFFFFF, by encoding (`ea' the
+  immediate-EA form `d0bc'/`90bc'/`b0bc', what objdump writes `addl
+  #'/`subl #'/`cmpl #'; `i' the ADDI/SUBI/CMPI form) and whether the
+  immediate is a map symbol's own address (`sym') or not (`num').
+
+    tools/storesurvey.py addr [-v]     # -v lists the sites
+
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
 
@@ -513,7 +537,119 @@ def merge_main(argv):
     return 0
 
 
+_AREG_USES = ('movel', 'addl', 'subl', 'cmpl', 'cmpal', 'moveal')
+_IMM = re.compile(r'(addl|subl|cmpl|addil|subil|cmpil|cmpal) #(0x[0-9a-f]+|-?\d+),(%[ad]\d)$')
+
+
+def addr_def_kind(y):
+    """The kind of address a defining `lea X,An' / `movea.l #imm,An'
+    forms (see the module doc, `addr'), or None for another definition."""
+    if y.mn == 'moveal' and y.ops[0].startswith('#'):
+        return 'imm'
+    if y.mn != 'lea':
+        return None
+    r = regalloc.is_reg(y.ops[1])
+    if r in y.upd:
+        return None
+    src = y.ops[0]
+    if '%a5@' in src:
+        return 'a5'
+    if '%fp@' in src:
+        return 'a6'
+    if '%pc@' in src:
+        return 'pc'
+    if '@' not in src:
+        return 'abs'
+    return 'idx' if re.search(r',%[ad]\d', src) else 'ptr'
+
+
+def addr_sites(ins, is_sym=lambda v: False):
+    """[dict] of the address-as-value sites of a routine's reachable
+    instructions (regalloc.Insn, in address order; see the module doc,
+    `addr').  is_sym(v): whether v is a map symbol's own address."""
+    res = []
+    for i, x in enumerate(ins):
+        if len(x.ops) != 2:
+            continue
+        m = _IMM.match(x.text)
+        if m:
+            v = int(m.group(2), 0) & 0xffffffff
+            if 0xD00000 <= v < 0x1000000:
+                op = m.group(1)
+                res.append({'kind': 'imm', 'addr': x.addr,
+                            'use': 'cmpa' if op == 'cmpal' else op.rstrip('il'),
+                            'enc': 'i' if op.endswith('il') and op != 'cmpal' else 'ea',
+                            'sym': 'sym' if is_sym(v) else 'num', 'value': v,
+                            'text': x.text})
+            continue
+        r = regalloc.is_reg(x.ops[0])
+        if (x.mn not in _AREG_USES or not r or r[0] != 'a' or r in ('a5', 'a6', 'a7')
+                or x.ops[0] == x.ops[1]):
+            continue
+        if x.mn in ('cmpal', 'moveal') and regalloc.is_reg(x.ops[1]) is None:
+            continue
+        d = None
+        for j in range(i - 1, -1, -1):
+            y = ins[j]
+            if y.kind or y.call or ins[j + 1].addr != y.addr + y.n:
+                break
+            if r in y.defs:
+                d = y
+                break
+        k = addr_def_kind(d) if d else None
+        if k is None:
+            continue
+        dst = regalloc.is_reg(x.ops[1])
+        dk = 'dreg' if dst and dst[0] == 'd' else 'areg' if dst else 'mem'
+        res.append({'kind': 'areg', 'addr': x.addr, 'use': x.mn, 'dst': dk, 'def': k,
+                    'text': d.text + '; ' + x.text})
+    return res
+
+
+def addr_main(argv):
+    import a5survey
+    verbose = '-v' in argv
+    m, rs = regalloc.routines()
+    syms = {s.addr for s in m.symbols}
+    sites = []
+    for seg, r0, r1 in rs:
+        raw = a5survey.reached(r0, r1)
+        raw = sorted(raw.values()) if isinstance(raw, dict) else sorted(raw)
+        ins = [regalloc.Insn(a, n, t) for a, n, t in raw]
+        for s in addr_sites(ins, lambda v: v in syms):
+            s['routine'] = r0
+            sites.append(s)
+    if verbose:
+        for s in sites:
+            if s['kind'] == 'imm':
+                print('imm  %06X (r %06X) %-4s %-2s %-3s %-24s %s' % (
+                    s['addr'], s['routine'], s['use'], s['enc'], s['sym'],
+                    m.describe(s['value']), s['text']))
+            else:
+                print('areg %06X (r %06X) %-6s %-4s %-4s %s' % (
+                    s['addr'], s['routine'], s['use'], s['dst'], s['def'], s['text']))
+        return 0
+    print('routines %d' % len(rs))
+    print('address registers read as values after `lea\' / `movea.l #\' '
+          '(use, destination, definition):')
+    c = Counter((s['use'], s['dst'], s['def']) for s in sites if s['kind'] == 'areg')
+    for k in sorted(c):
+        ex = [s for s in sites if s['kind'] == 'areg' and (s['use'], s['dst'], s['def']) == k]
+        print('  %-6s %-4s %-4s %5d   e.g. %s' % (
+            k + (c[k], ', '.join('0x%06X' % s['addr'] for s in ex[:4]))))
+    print('longword immediates in 0xD00000..0xFFFFFF in add/sub/cmp (op, encoding, '
+          'symbol):')
+    c = Counter((s['use'], s['enc'], s['sym']) for s in sites if s['kind'] == 'imm')
+    for k in sorted(c):
+        ex = [s for s in sites if s['kind'] == 'imm' and (s['use'], s['enc'], s['sym']) == k]
+        print('  %-4s %-2s %-3s %5d   e.g. %s' % (
+            k + (c[k], ', '.join('0x%06X' % s['addr'] for s in ex[:4]))))
+    return 0
+
+
 def main(argv):
+    if argv and argv[0] == 'addr':
+        return addr_main(argv[1:])
     if argv and argv[0] == 'blocks':
         return blocks_main(argv[1:])
     if argv and argv[0] == 'merge':

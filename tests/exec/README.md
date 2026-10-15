@@ -198,6 +198,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `bools` | plain `and` / `or` in conditions, under `not`, stored; `odd` of words and longwords, negative ones |
 | `and_or_call` | bead domain-pascal-i1by: a plain `or` / `and` whose right operand compares a function's result (the call on either side, a word through a pointer, 0, a constant, a register-held longword, `0..65535` unsigned) at -32768, -128, -1, 0, 1, 127, 128, 255, 32767 and the longword extremes |
 | `withs` | `with` over a variable, a pointer changed in the body, an element (index changed), an element through a pointer across a call, nested and alias forms; `addr` stored and passed by value |
+| `addr_values` | bead domain-pascal-j28d: `integer32(addr(x))` in differences (another unit's field offsets, `lea abs.l` and `sub.l #sym`; frame elements, both `lea`d), plus and minus a value (`add.l #sym`/`sub.l #sym`), stored as integers and read back through a pointer, passed by value |
 | `nested` | uplevel reads and writes, siblings, recursion through the static link |
 | `results` | results with junk above them, booleans, A0 pointers, `f := g(...)`, a result held across a call |
 | `records` | 12-, 14- and 144-byte copies, through var parameters and pointers |

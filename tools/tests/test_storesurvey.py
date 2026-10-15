@@ -151,5 +151,42 @@ class MergeSurveyTest(unittest.TestCase):
                          [('2+4', 'zero+const', 'asc')])
 
 
+def addr_sites(texts, syms=()):
+    return storesurvey.addr_sites(FakeRoutine(texts).ins, lambda v: v in syms)
+
+
+class AddrSitesTest(unittest.TestCase):
+    def test_net_open(self):
+        # NET_$OPEN 0xE5A1B8..0xE5A1C0: an address inside another unit's
+        # record into D0, the record's own address subtracted as an
+        # immediate in the `90bc' encoding
+        res = addr_sites(['subql #2,%sp', 'pea %a3@', 'lea 0xe2451c,%a0',
+                          'movel %a0,%d0', 'subl #14828788,%d0',
+                          'movew %d0,%sp@-'], syms={14828788})
+        self.assertEqual([(r['kind'], r['use']) for r in res],
+                         [('areg', 'movel'), ('imm', 'sub')])
+        self.assertEqual((res[0]['dst'], res[0]['def']), ('dreg', 'abs'))
+        self.assertEqual((res[1]['enc'], res[1]['sym']), ('ea', 'sym'))
+
+    def test_difference_of_frame_addresses(self):
+        # ASKNODE_$SERVER 0xE65DA0..0xE65DAA
+        res = addr_sites(['lea %fp@(-592),%a0', 'lea %fp@(-582),%a1',
+                          'movel %a1,%d1', 'subl %a0,%d1'])
+        self.assertEqual([(r['use'], r['dst'], r['def']) for r in res],
+                         [('movel', 'dreg', 'a6'), ('subl', 'dreg', 'a6')])
+
+    def test_not_sites(self):
+        # a pointer loaded (not an address formed), the filler, an update
+        # `lea (d,An),An', a numeric `subi', a branch between
+        res = addr_sites(['moveal %fp@(8),%a0', 'movel %a0,%d0',
+                          'lea %a1@(4),%a1', 'movel %a1,%d1',
+                          'lea %a5@(8),%a0', 'moveal %a0,%a0',
+                          'subil #1024,%d2',
+                          'lea %a5@(8),%a2', 'bras 0x200', 'movel %a2,%d3'])
+        self.assertEqual(res, [])
+        res = addr_sites(['subil #14828788,%d0'])
+        self.assertEqual([(r['enc'], r['sym']) for r in res], [('i', 'num')])
+
+
 if __name__ == '__main__':
     unittest.main()

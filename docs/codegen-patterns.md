@@ -3140,8 +3140,8 @@ model run against the bit model of Figure 3-6).
   time; a `goto` into a `with` (ref p. 4-95; 7.5).  Golden `data/with`;
   exec test `withs`; dpc-ir test `with_statements`.
 - **`addr(x)` as a value (ref "Addr", p. 4-13; Verified by survey;
-  implemented, bead domain-pascal-5aw.19).**  Stored: `lea <ea>,An;
-  move.l An,<dst>` (`lea X,An` directly followed by `move.l An,<mem>`:
+  implemented, beads domain-pascal-5aw.19, domain-pascal-j28d).**
+  Stored: `lea <ea>,An; move.l An,<dst>` (`lea X,An` directly followed by `move.l An,<mem>`:
   X `(d,A5)` 19 times, 0xE00964 `lea (24,A5),A0; move.l A0,(-108,A6)`;
   `(d,A6)` 18, 0xE11B1A; `(d,An)` 97, 0xE012CC; an element `(d,An,Dx)`
   122, 0xE03576 `lea (-48,A1,D0.l),A2; move.l A2,(-76,A6)`, the lower
@@ -3149,12 +3149,94 @@ model run against the bit model of Figure 3-6).
   above); into a pointer local held in an address register, `lea`
   straight into it; another unit's object `move.l #sym` / `movea.l
   #sym,An` (1.5).  Passed by value: `pea`, the push of the same address
-  by address (1.5).  Refused: an address inside another unit's object
-  or a constant (`lea abs.l` 6 sites, 0xE310AA; `move.l #sym+d` / `pea
-  abs.l` for arguments, 1.5: not settled), `addr` in other expressions
-  (a comparison, arithmetic) and into a register-held data local.
-  `dpc-sema` gives `addr` the type `univ_ptr` (p. 4-13).  Golden
-  `data/with`; exec test `withs`.
+  by address (1.5).  A type transfer of it to another 4-byte type
+  (`integer32(addr(x))`, p. 4-197: no bits changed) is stored and passed
+  the same way: NETBUF_$INIT 0xE2F63C `move.l #NETWORK_$BUFPOOL,
+  (0x330,A0)`; SOCK_$INIT 0xE2FE4C `lea (0x4,A2),A1; move.l A1,(0xc,A0)`;
+  FLP_$DINIT 0xE3E15E `pea (0x80,A5)` for MMU_$VTOP's by-value `va`
+  (the ../source reconstructions of those routines; `dpc` peels the
+  transfer, `isel.rs` `addr_value`).
+
+  **In `+` and `-`** (bead domain-pascal-j28d; `tools/storesurvey.py
+  addr`, over every compiled routine's reachable instructions):
+  - *Another unit's object (a map symbol's own address) as an operand
+    is an immediate in the immediate-EA encodings.*  In compiled code
+    `sub.l #imm,Dn` (`90bc`+) occurs 10 times, `add.l #imm,Dn`
+    (`d0bc`+) 3, `cmp.l #imm,Dn` (`b0bc`+) 3, `cmpa.l #imm,An` 1, every
+    one with a map symbol's address as the immediate; no
+    `addi`/`subi`/`cmpi` has one (and the numeric immediates are all
+    `addi`/`subi`/`cmpi`, section 13).  Sites: NET_$OPEN 0xE5A1C0 `sub.l
+    #NET_IO_$NIL_DRIVER,D0`, NET_$CLOSE 0xE5A230, NET_$IOCTL 0xE5A28C,
+    NET_$RCV 0xE5A2E8, NET_$SEND 0xE5A350, ACL_$INIT 0xE310B2 `#RELOC`,
+    PROC2_$GET_CR_REC 0xE40188 `#PROC2_$EC`, AREA_ 0xE078CE and 0xE07A72
+    `#NETPOOL_END`, 0xE09E6E `#PIT_PAGES`; `add.l` 0xE0F14E
+    `#AST_$COPY_BUFF`, 0xE0F15E `#AST_$ZERO_BUFF`, OS_$INIT 0xE339FA;
+    `cmp.l` FIM_$BUILD_DF 0xE0A58E, OS_$INIT 0xE33982, 0xE34452; `cmpa.l`
+    FIM_$BUILD_DF 0xE0A552 `#FIM_$COLD_BUS_ERR`.  The other operand is
+    in a data register first as in any sum (section 8): a variable
+    loaded (0xE09E6A `move.l (8,A2),D3; sub.l #PIT_PAGES,D3`), a
+    computed value in place (0xE0F148 `andi.l #1023,D1; add.l
+    #AST_$COPY_BUFF,D1`), a pointer held in an address register copied
+    (0xE078CC `move.l A3,D0`).  gas writes `addi`/`subi` for `add.l
+    #sym`, so `dpc` emits these as `.short` with the symbol a `.long`
+    (`insn.rs`, section 13).
+  - *An address as the left operand of `-` goes to a data register*:
+    another unit's object `move.l #sym,Dn` (OS_$INIT 0xE3397C `move.l
+    #VM_TABLES_END,D0`, a compare's left operand; the immediate of the
+    stores and pushes); an address inside another unit's object `lea
+    (sym+d).l,An; move.l An,Dn` (NET_$OPEN 0xE5A1B8 `lea (0xe2451c).l,A0;
+    move.l A0,D0`, NET_IO_$NIL_DRIVER's field at +0x28, `integer32(addr(
+    net_io_$nil_driver.svc_open)) - integer32(addr(net_io_$nil_driver))`
+    in net/open.pas; the four other NET entries; ACL_$INIT 0xE310AA
+    `lea (0xe935cc).l,A0`, the start of the map's FILE_$LOT_DATA segment,
+    no symbol: these are all 6 `lea abs.l,An` read as values); any
+    other object its `lea`, then `move.l An,Dn` (survey: `lea; move.l
+    An,Dn` with X `(d,A5)` 16, `(d,A6)` 5, `(d,An)` 18, indexed 25;
+    most are pointer locals held in data registers, 12.5).  A0 and D0 at
+    NET's five sites; D1 at ASKNODE_$SERVER 0xE65DA8 and FLP_$DINIT
+    0xE3E17E `lea (0x80,A5),A0; move.l A0,D1; andi.l #0x3ff,D1` where D0
+    looks free (**Uncertain**; `dpc` takes the lowest free register;
+    bead domain-pascal-i2na).
+  - *Two addresses subtracted, both needing a `lea`: the subtrahend's
+    first* (6 of 6 sites, the `sub.l An,Dn` after `lea`s in compiled
+    code): the DIR module-local 0xE4BD48 at 0xE4BDCE `lea (-1304,A6),A0;
+    lea (0,A3,D2.l),A1; move.l A1,D0; sub.l A0,D0`, likewise 0xE4BE7A,
+    0xE4BF4A, 0xE4BFE4; ASKNODE_$SERVER 0xE65DA0 `lea (-592,A6),A0; lea
+    (-582,A6),A1; move.l A1,D1; sub.l A0,D1`; ASKNODE_$INTERNET_INFO
+    0xE6519C (the minuend `lea (38,A1),A1` into its base's register: not
+    modelled, 12.4 R2).
+  - **Refused** (no form settled; bead domain-pascal-awzk): an address
+    and a constant (`addr(x) + c`: no `lea; move.l An,Dn; addq/addi` in
+    compiled code, and whether the constant went into the `lea`'s
+    displacement is not seen); an address that needs a `lea` with a
+    value that is not an address (NETBUF_$GETVA
+    0xE0ECC8..0xE0ECE2 forms the element's address first, `movea.l
+    #NETWORK_$BUFPOOL,A0; ...; lea (0,A0,D3.l),A1`, then the masked
+    value, `add.l A1,D3`: one site, of the unsettled element form, bead
+    domain-pascal-o1kl; DIR_$GET_ENTRYU 0xE4D648 `clr.l D0; lea
+    (12,A2),A0; move.b (1,A2),D0; add.l A0,D0` and the other `add.l
+    An,Dn` after a `lea` or `movea.l #`, 8 sites in all, the source's
+    operand order unknown); an address formed with a `lea` or an
+    immediate together with the address a by-address parameter's slot
+    holds in a data register since the entry (12.2; no site seen); the
+    sum of two addresses; `&`, `!`, `xor`, `*`, shifts.
+  - **Comparisons** with an address: not implemented (refused; bead
+    domain-pascal-awzk).  The image compares a symbol's address as an
+    immediate operand, `cmp.l
+    #sym,Dn` after the variable is loaded (FIM_$BUILD_DF 0xE0A58A `move.l
+    (-6,A6),D2; cmp.l #GLOBAL_B,D2; bhi`), a pointer with `cmpa.l
+    #sym,An` after loading it (0xE0A54C `movea.l (0x8).l,A3; cmpa.l
+    #FIM_$COLD_BUS_ERR,A3; beq`), and two symbols `move.l #sym,D0; cmp.l
+    #sym,D0` (OS_$INIT 0xE3397C).  The ../source reconstructions of
+    these are not compiled yet, and the forms of an address that needs a
+    `lea` are not seen.
+
+  Refused besides: an address inside another unit's object or a constant
+  stored or pushed (`move.l #sym+d` / `pea abs.l` for arguments, 1.5:
+  not settled), and into a register-held data local.  `dpc-sema` gives
+  `addr` the type `univ_ptr` (p. 4-13).  Golden `data/with`,
+  `expr/addr_arith`; exec tests `withs`, `addr_values`; driver test
+  `addr_values_in_sums_and_differences`.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)
@@ -9050,7 +9132,12 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   which is what gas emits by default.
 - **Exceptions:**
   - `sub.l #imm,Dn` with the immediate-EA encoding `90bc`, seen 6 times
-    (e.g. 0xE40188).
+    (e.g. 0xE40188).  Over all compiled code (`tools/storesurvey.py
+    addr`): `sub.l #` 10, `add.l #` (`d0bc`) 3, `cmp.l #` (`b0bc`) 3,
+    `cmpa.l #` 1, every immediate a map symbol's address, and no
+    `addi`/`subi`/`cmpi` of one: the form of an address operand
+    (section 5.2, "`addr(x)` as a value"; implemented for `add`/`sub` as
+    `.short` plus a `.long` of the symbol).
   - `cmpa.w #0,An` (`b6fc`, e.g. 0xE38EC0).
   
   Where gas would pick a different encoding, the emitter must write the

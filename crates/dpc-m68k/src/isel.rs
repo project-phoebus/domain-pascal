@@ -2478,6 +2478,23 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
+/// The object `x` when `e` is `addr(x)`, or a type transfer of it to
+/// another 4-byte type (`integer32(addr(x))`: ref "Type Transfer
+/// Functions", p. 4-197, "does not change any bits"; `dpc-ir` wraps it in
+/// a same-width [`Expr::Convert`]).  The image stores, pushes and
+/// computes with such a transfer as with the address itself
+/// (codegen-patterns 5.2, "`addr(x)` as a value": NETBUF_$INIT 0xE2F63C
+/// `move.l #NETWORK_$BUFPOOL,(0x330,A0)`, SOCK_$INIT 0xE2FE4C `lea
+/// (0x4,A2),A1; move.l A1,(0xc,A0)`, FLP_$DINIT 0xE3E15E `pea (0x80,A5)`
+/// by value, NET_$OPEN 0xE5A1B8 in a difference).
+fn addr_value(e: &Expr) -> Option<&Addr> {
+    match e {
+        Expr::AddrOf(a) => Some(a),
+        Expr::Convert { value, ty } if value.ty().width == ty.width => addr_value(value),
+        _ => None,
+    }
+}
+
 /// The call of `e` when `e` is the value of a function whose result is in
 /// A0 (codegen-patterns 3, "Callers of pointer functions").
 fn a0_call(e: &Expr) -> Option<&Call> {
@@ -8306,6 +8323,11 @@ impl Selector {
     fn store(&mut self, addr: &Addr, value: &Expr) -> Res<()> {
         let ty = value.ty();
         let size = size_of(ty.width);
+        // `integer32(addr(x))` (or another 4-byte transfer of it) stored
+        // as `addr(x)` ([`addr_value`]: NETBUF_$INIT 0xE2F63C, SOCK_$INIT
+        // 0xE2FE4C).
+        let peeled = self.addr_peeled(value);
+        let value: &Expr = &peeled;
         let (plain, access) = addr.unwrap_volatile();
         if matches!(plain, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
@@ -9587,6 +9609,11 @@ impl Selector {
                 if value.ty().bytes().max(2) != *slot {
                     return Err(unsupported(self.span, "an argument slot of this size is"));
                 }
+                // `integer32(addr(x))` by value pushed as `addr(x)`
+                // ([`addr_value`]: FLP_$DINIT 0xE3E15E `pea (0x80,A5)` for
+                // MMU_$VTOP's `va`, mmu/mmu.ins.pas).
+                let peeled = self.addr_peeled(value);
+                let value: &Expr = &peeled;
                 match value {
                     Expr::Const { value: v, ty } => match ty.width {
                         Width::Long => self.push_long_const(*v),
@@ -9908,6 +9935,9 @@ impl Selector {
                 // (d,A6)` (GET_BUILD_TIME 0xE380F4, TERM_$CONTROL
                 // 0xE66A08; `tools/pcsurvey.py temps`).
                 let tmp = Ea::Disp(*offset, FP);
+                // `integer32(addr(x))` as `addr(x)` ([`addr_value`]).
+                let peeled = self.addr_peeled(value);
+                let value: &Expr = &peeled;
                 match value {
                     Expr::AddrOf(a) if !matches!(a, Addr::Symbol { .. } | Addr::Const(_)) => {
                         let src = self.ea_of(a)?;
@@ -10268,6 +10298,34 @@ impl Selector {
         Ok(())
     }
 
+    /// The data register holding `addr(x)` when `x` is the object of a
+    /// by-address slot held in one since the entry ([`Self::entry_loads`];
+    /// EC2_$INIT 0xE42C68 `cmpi.l #0x3e8,D0`).
+    fn held_addr(&self, a: &Addr) -> Option<Reg> {
+        let Addr::Indirect { base, offset: 0 } = a else {
+            return None;
+        };
+        match &**base {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } => self.pinned(*o).filter(|r| matches!(r, Reg::D(_))),
+            _ => None,
+        }
+    }
+
+    /// `e` with a 4-byte type transfer of `addr(x)` read as `addr(x)`
+    /// ([`addr_value`]), for a store or an argument; an address held in a
+    /// data register ([`Self::held_addr`]) is left to [`Self::eval`].
+    fn addr_peeled<'e>(&self, e: &'e Expr) -> std::borrow::Cow<'e, Expr> {
+        match addr_value(e) {
+            Some(x) if !matches!(e, Expr::AddrOf(_)) && self.held_addr(x).is_none() => {
+                std::borrow::Cow::Owned(Expr::AddrOf(x.clone()))
+            }
+            _ => std::borrow::Cow::Borrowed(e),
+        }
+    }
+
     /// Evaluate `e` into a new data register the caller may modify.
     fn eval_d(&mut self, e: &Expr) -> Res<u8> {
         let v = self.eval(e)?;
@@ -10394,22 +10452,21 @@ impl Selector {
             // The address a by-address slot holds, held in a data register
             // since the entry ([`Self::entry_loads`]; EC2_$INIT 0xE42C68
             // `cmpi.l #0x3e8,D0`).
-            Expr::AddrOf(Addr::Indirect { base, offset: 0 })
-                if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. }
-                    if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
-            {
-                let Expr::Load {
-                    addr: Addr::Frame(o),
-                    ..
-                } = &**base
-                else {
-                    unreachable!()
-                };
-                Ok(Val::Reg(self.pinned(*o).unwrap()))
+            Expr::AddrOf(a) if self.held_addr(a).is_some() => {
+                Ok(Val::Reg(self.held_addr(a).unwrap()))
             }
+            // Elsewhere (a store, an argument, `+`/`-`: [`Self::store`],
+            // [`Self::push`], [`Self::addr_arith`]) the address has the
+            // forms of codegen-patterns 5.2, "`addr(x)` as a value"; in
+            // other expressions (a comparison, `*`, a shift, `&`, ...) no
+            // form is catalogued (`cmp.l #sym,Dn` and `cmpa.l #sym,An`
+            // are seen for comparisons, codegen-patterns 5.2; bead
+            // domain-pascal-awzk).
             Expr::AddrOf(_) => Err(unsupported(
                 self.span,
-                "an address (`addr`) as a value other than an argument is",
+                "an address (`addr`) in a comparison, in an expression other than `+`/`-`, or \
+                 into or with a register-held local (no form catalogued, codegen-patterns 5.2) \
+                 is",
             )),
             Expr::SetSr(x) => Ok(Val::Tmp(self.set_sr(x)?)),
         }
@@ -10625,6 +10682,12 @@ impl Selector {
             BinOp::Xor => AluOp::Eor,
             _ => unreachable!(),
         };
+        if [lhs, rhs]
+            .iter()
+            .any(|e| addr_value(e).is_some_and(|a| self.held_addr(a).is_none()))
+        {
+            return self.addr_arith(alu, lhs, rhs, ty);
+        }
         // A constant operand: on the right for `-`; either side otherwise.
         let (x, c) = match (konst(lhs), konst(rhs)) {
             (_, Some(c)) => (Some(lhs), Some(c)),
@@ -10851,6 +10914,176 @@ impl Selector {
             size,
             src,
             dst: d,
+        });
+        Ok(d)
+    }
+
+    /// `lhs op rhs` with an operand `addr(x)` (or `integer32(addr(x))`,
+    /// [`addr_value`]; ref "Addr", p. 4-13, "Type Transfer Functions",
+    /// p. 4-197) into a new data register (codegen-patterns 5.2, "`addr(x)`
+    /// as a value"; bead domain-pascal-j28d):
+    ///
+    /// - the address of another unit's object (a map symbol's own
+    ///   address) as the right operand: the symbol an immediate operand,
+    ///   `add.l #sym,Dn` / `sub.l #sym,Dn` in the immediate-EA encodings
+    ///   `d0bc` / `90bc` (all 13 `add.l`/`sub.l` with an immediate that is
+    ///   an address in compiled code, against no `addi`/`subi` of one:
+    ///   NET_$OPEN 0xE5A1C0 `sub.l #NET_IO_$NIL_DRIVER,D0` and its four
+    ///   neighbours, ACL_$INIT 0xE310B2, PROC2_$GET_CR_REC 0xE40188,
+    ///   0xE078CE, 0xE07A72, 0xE09E6E; `add.l` 0xE0F14E, 0xE0F15E,
+    ///   0xE339FA), the left operand in a data register first as for any
+    ///   sum (a variable loaded, 0xE09E6A `move.l (8,A2),D3`; a computed
+    ///   value in place, 0xE0F148 `andi.l #1023,D1; add.l #AST_$COPY_BUFF,
+    ///   D1`; a pointer held in an address register copied, 0xE078CC
+    ///   `move.l A3,D0`);
+    /// - an address as the left operand of `-`, in a data register
+    ///   ([`Self::addr_into_d`]), then the right operand subtracted: an
+    ///   immediate as above (NET_$OPEN 0xE5A1B8..0xE5A1C0 `lea
+    ///   (NET_IO_$NIL_DRIVER+0x28).l,A0; move.l A0,D0; sub.l
+    ///   #NET_IO_$NIL_DRIVER,D0`, NET_$CLOSE 0xE5A228, NET_$IOCTL
+    ///   0xE5A284, NET_$RCV 0xE5A2E0, NET_$SEND 0xE5A348; ACL_$INIT
+    ///   0xE310AA), or the address of an object that needs a `lea`, formed
+    ///   first, before the left one, and subtracted from its register
+    ///   (`sub.l An,Dn`, 6 of 6 sites: the DIR module-local 0xE4BD48 at
+    ///   0xE4BDCE `lea (-1304,A6),A0; lea (0,A3,D2.l),A1; move.l A1,D0;
+    ///   sub.l A0,D0`, 0xE4BE7A, 0xE4BF4A, 0xE4BFE4; ASKNODE_$SERVER
+    ///   0xE65DA0 `lea (-592,A6),A0; lea (-582,A6),A1; move.l A1,D1; sub.l
+    ///   A0,D1`; ASKNODE_$INTERNET_INFO 0xE6519C).
+    ///
+    /// Refused, no form catalogued: an address with a constant (`addr(x)
+    /// + c`), with a variable or a computed value other than a symbol's
+    /// immediate on the right (NETBUF_$GETVA 0xE0ECC8..0xE0ECE2 forms its
+    /// element address first, then the masked value, `add.l A1,D3`: one
+    /// site, of the unsettled element form, bead domain-pascal-o1kl), the
+    /// sum of two addresses, a constant minus an address, `&`, `!`,
+    /// `xor`, a width other than a longword (bead domain-pascal-awzk).
+    fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+        let refuse = |s: &Self, what: &str| {
+            Err(unsupported(
+                s.span,
+                format!(
+                    "{what} (codegen-patterns 5.2, \"`addr(x)` as a value\": no form \
+                     catalogued) is"
+                ),
+            ))
+        };
+        if !matches!(alu, AluOp::Add | AluOp::Sub) || ty.width != Width::Long {
+            return refuse(
+                self,
+                "an address (`addr`) in an operation other than a longword `+` or `-`",
+            );
+        }
+        let la = addr_value(lhs).filter(|a| self.held_addr(a).is_none());
+        let ra = addr_value(rhs).filter(|a| self.held_addr(a).is_none());
+        let d = match (la, ra) {
+            (Some(_), Some(_)) if alu == AluOp::Add => {
+                return refuse(self, "the sum of two addresses")
+            }
+            (Some(a), Some(b)) => {
+                let src = match b {
+                    Addr::Symbol { name, offset: 0 } => Ea::ImmSym(name.clone()),
+                    b => Ea::Reg(Reg::A(self.addr_into_a(b)?)),
+                };
+                let d = self.addr_into_d(a)?;
+                self.out.push(Insn::Alu {
+                    op: alu,
+                    size: Size::L,
+                    src,
+                    dst: d,
+                });
+                d
+            }
+            (None, Some(Addr::Symbol { name, offset: 0 }))
+            | (Some(Addr::Symbol { name, offset: 0 }), None)
+                if alu == AluOp::Add || ra.is_some() =>
+            {
+                let x = if ra.is_some() { lhs } else { rhs };
+                if matches!(x, Expr::Const { .. }) {
+                    return refuse(self, "an address and a constant in a sum or difference");
+                }
+                let v = self.eval(x)?;
+                let d = self.in_tmp(v, Width::Long)?;
+                self.out.push(Insn::Alu {
+                    op: alu,
+                    size: Size::L,
+                    src: Ea::ImmSym(name.clone()),
+                    dst: d,
+                });
+                d
+            }
+            (Some(_), None) if matches!(rhs, Expr::Const { .. }) => {
+                return refuse(self, "an address and a constant in a sum or difference")
+            }
+            (None, Some(_)) if matches!(lhs, Expr::Const { .. }) => {
+                return refuse(
+                    self,
+                    if alu == AluOp::Add {
+                        "an address and a constant in a sum or difference"
+                    } else {
+                        "a constant minus an address"
+                    },
+                );
+            }
+            // The other operand the address a by-address slot holds in a
+            // data register since the entry ([`Self::held_addr`]): with an
+            // immediate on the right it is a value like any other (the arm
+            // above); with an address formed here no form is seen.
+            _ if [lhs, rhs]
+                .iter()
+                .any(|e| addr_value(e).is_some_and(|a| self.held_addr(a).is_some())) =>
+            {
+                return refuse(
+                    self,
+                    "an address formed here with the address a parameter's slot holds in a \
+                     data register",
+                )
+            }
+            (Some(_), None) if alu == AluOp::Sub => {
+                return refuse(self, "an address minus a value that is not an address")
+            }
+            _ => {
+                return refuse(
+                    self,
+                    "an address that needs an address register and a value that is not one \
+                     (the order is not settled: NETBUF_$GETVA 0xE0ECC8, one site; bead \
+                     domain-pascal-o1kl)",
+                )
+            }
+        };
+        Ok(d)
+    }
+
+    /// `addr(x)` in a new data register, the left operand of a difference
+    /// ([`Self::addr_arith`]): another unit's object, `move.l #sym,Dn`
+    /// (OS_$INIT 0xE3397C `move.l #VM_TABLES_END,D0`, compared; the
+    /// immediate of its stores and pushes, codegen-patterns 1.5); an
+    /// address inside one, `lea (sym+d).l,An; move.l An,Dn` (NET_$OPEN
+    /// 0xE5A1B8 `lea (0xe2451c).l,A0; move.l A0,D0`, the record's field at
+    /// +0x28, and NET's four other entries; ACL_$INIT 0xE310AA); any other
+    /// object, its `lea` ([`Self::addr_into_a`]), then `move.l An,Dn` (the
+    /// DIR module-local 0xE4BD48 at 0xE4BDD2 `lea (0,A3,D2.l),A1; move.l
+    /// A1,D0`).  The address register and the data register are new ones
+    /// (A0 and D0 at NET's five sites; D1 at ASKNODE_$SERVER 0xE65DA8 and
+    /// at FLP_$DINIT 0xE3E17E, where D0 looks free: Uncertain, bead
+    /// domain-pascal-i2na).
+    fn addr_into_d(&mut self, a: &Addr) -> Res<u8> {
+        let src = match a {
+            Addr::Symbol { name, offset: 0 } => Ea::ImmSym(name.clone()),
+            Addr::Symbol { name, offset } => {
+                let r = self.alloc_a()?;
+                self.out.push(Insn::Lea {
+                    src: Ea::AbsL(name.clone(), *offset),
+                    dst: r,
+                });
+                Ea::Reg(Reg::A(r))
+            }
+            a => Ea::Reg(Reg::A(self.addr_into_a(a)?)),
+        };
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::L,
+            src,
+            dst: Ea::Reg(Reg::D(d)),
         });
         Ok(d)
     }
