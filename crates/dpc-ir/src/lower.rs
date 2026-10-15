@@ -3413,6 +3413,16 @@ fn result_assignment(
 ) -> Res<Stmt> {
     let res = result.expect("lower_routine skips the body when the result type failed");
     let vsize = p.types.size(value.ty);
+    if let Some(ConstValue::Nil) = &value.value {
+        // `suba.l A0,A0` before the epilogue (ROUTE_$FIND_PORTP 0xE15B84),
+        // or `clr.l` of the result slot and a reload (NET_$FIND_HANDLER
+        // 0xE5A178): not settled (bead domain-pascal-bdi0).
+        return Err(unsupported(
+            value.span,
+            "`nil` as a function result (`suba.l A0,A0` at ROUTE_$FIND_PORTP 0xE15B84, the \
+             result slot cleared at NET_$FIND_HANDLER 0xE5A178; bead domain-pascal-bdi0) is",
+        ));
+    }
     if let Some(v) = &value.value {
         return Ok(Stmt {
             kind: StmtKind::SetResult(const_of(v, res.ty, value.span)?),
@@ -3464,7 +3474,7 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     let ty = scalar_of(p, target)?;
     let addr = access_of(p, target, false)?;
     let value = if let Some(v) = &value.value {
-        const_of(v, ty, value.span)?
+        stored_const(v, ty, value.span)?
     } else if is_set(p, target.ty) {
         // A set expression takes the target's size (its constructors have
         // their own, ref 3.9.3).
@@ -3717,24 +3727,34 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     })
 }
 
-/// The constant `v` as a value of IR type `ty`.  A boolean is its byte:
-/// 0xFF for true, read as the signed byte -1 (ref 3.5.3, p. 3-11: "The
-/// system sets all eight bits to 1 for true and sets all eight bits to 0
-/// for false").
 /// The code-section cell of constant `v` passed by address as type `ty`
 /// (codegen-patterns 1.5): the value big-endian in the type's size, a
 /// byte in the high byte of a word (`ff00` for `true`: 17 sites name an
 /// earlier `ff00` cell, e.g. PROC2_$COMPLETE_VFORK's 0xE735F0; ref 3.5.3
 /// p. 3-11).  Scalars of 1, 2 or 4 bytes only; strings, sets, records and
-/// `nil` are not supported yet.
+/// `nil` are not supported yet (`nil` passed by address: no site known).
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
     let size = p.types.size(ty);
     let width = match Width::of_size(size) {
         Some(w) if v.ordinal().is_some() => w,
+        _ if *v == ConstValue::Nil => {
+            return Err(unsupported(
+                span,
+                "`nil` passed by address (a code-section cell; no site known) is",
+            ))
+        }
         _ => {
             return Err(unsupported(
                 span,
-                format!("a constant of {size} bytes or of this kind passed by address is"),
+                match v {
+                    ConstValue::Set(_) => {
+                        format!("a {size}-byte set constant passed by address is")
+                    }
+                    ConstValue::Str(_) => {
+                        format!("a string constant passed by address (as a {size}-byte object) is")
+                    }
+                    _ => format!("a {size}-byte constant passed by address is"),
+                },
             ))
         }
     };
@@ -3792,6 +3812,26 @@ fn univ_const_type(p: &Program, cty: TypeId, fty: TypeId, span: Span) -> Res<Typ
     }
 }
 
+/// The constant `v` stored into an object of type `ty` (`store`, the
+/// `Fill` of a `for` loop): as [`const_of`], and `nil` too, the pointer 0
+/// (ref 3.13.4 p. 3-51), which the selector stores as any longword 0,
+/// `clr.l <ea>` (codegen-patterns 13, "Constants stored": no `move.l
+/// #0,<mem>` in compiled code; `nil` stored at BAT_$ALLOC_VTOCE 0xE3AEDA
+/// `clr.l (-0x14,A6)`, BAT_$ALLOCATE 0xE3B2EE `clr.l (0xd38,A5)`, HINT_$INIT
+/// 0xE3139A `clr.l abs.l`, PKT_$SEND_INTERNET 0xE12670 `clr.l (-0x10,A6)`).
+fn stored_const(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
+    match v {
+        ConstValue::Nil if ty.pointer => Ok(Expr::Const { value: 0, ty }),
+        _ => const_of(v, ty, span),
+    }
+}
+
+/// The constant `v` as a value of IR type `ty`.  A boolean is its byte:
+/// 0xFF for true, read as the signed byte -1 (ref 3.5.3, p. 3-11: "The
+/// system sets all eight bits to 1 for true and sets all eight bits to 0
+/// for false").
+/// `nil` and strings are refused here; [`stored_const`] takes `nil`
+/// stored into a pointer.
 fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     let value = match v {
         ConstValue::Bool(b) => -(*b as i64),
@@ -3811,9 +3851,23 @@ fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
             let mask = members.iter().fold(0u64, |m, &k| m | (1u64 << k));
             imm_value(mask, ty)
         }
-        _ => v
-            .ordinal()
-            .ok_or_else(|| unsupported(span, "this kind of constant is"))?,
+        ConstValue::Nil => {
+            return Err(unsupported(
+                span,
+                format!("`nil` as a {}-byte scalar value is", ty.bytes()),
+            ))
+        }
+        ConstValue::Str(s) => {
+            return Err(unsupported(
+                span,
+                format!(
+                    "a {}-character string constant as a {}-byte scalar value is",
+                    s.len(),
+                    ty.bytes()
+                ),
+            ))
+        }
+        _ => v.ordinal().expect("an ordinal constant"),
     };
     Ok(Expr::Const { value, ty })
 }
@@ -5259,6 +5313,23 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 })?;
                 let ty = scalar_of_type(&p.types, prm_ty, width);
                 let value = match &a.expr.value {
+                    // `nil` pushed: `clr.l -(SP)` at NET_IO_$PUT_IN_SOCK
+                    // 0xE0E4CC and NET_IO_$PUT_IN_SOCK_INT 0xE0E506.  The
+                    // 19 `move.l #0,-(SP)` (all EC_$WAIT arguments) are
+                    // not `nil`: their immediates are in the binder's
+                    // RELOC table, a symbol at 0 (the map's EC_$NIL_EC),
+                    // pushed as TIME_$CLOCKH_EC is beside them at FLP's
+                    // EXCS 0xE3E2B6; so are DXM_$HELPER_COMMON 0xE171F2's
+                    // and PKT_$PING_SERVER 0xE12C14's `movea.l #0,A2`
+                    // pushed with `pea (A2)` (`tools/nilsurvey.py push`,
+                    // `areg`; bead domain-pascal-73sx).  Not implemented.
+                    Some(ConstValue::Nil) => {
+                        return Err(unsupported(
+                            a.expr.span,
+                            "`nil` passed by value (`clr.l -(SP)` at NET_IO_$PUT_IN_SOCK \
+                             0xE0E4CC; bead domain-pascal-73sx) is",
+                        ))
+                    }
                     Some(v) => const_of(v, ty, a.expr.span)?,
                     // A set expression takes the parameter's size (`[k]`
                     // pushed: DISK_$FORMAT 0xE3D4E2..0xE3D4E6 `clr.w D1;
@@ -5524,7 +5595,7 @@ fn fill(
         kind: StmtKind::Fill {
             start: addr_of(p, base)?.offset_by(first),
             count,
-            value: const_of(c, ty, value.span)?,
+            value: stored_const(c, ty, value.span)?,
         },
         span: s.span,
     }))

@@ -37,6 +37,12 @@ Tests:
   0xE152FA.
 - `stores/const_stores` - codegen-patterns 13 (clr, st, move #n, byte
   immediates 0..255), 12.2.
+- `stores/nil_stores` - codegen-patterns 13 ("Stores of constants",
+  `nil`; bead domain-pascal-j4ip): `nil` stored as `clr.l` to a frame
+  local (BAT_$ALLOC_VTOCE 0xE3AEDA), a variable of the unit (BAT_$ALLOCATE
+  0xE3B2EE), another unit's variable (HINT_$SHUTDN 0xE49924), two
+  adjacent longwords through a pointer (MAC_OS_$CLOSE 0xE0B506), a local
+  in a data register (IO_$GET_DCTE 0xE1A466).
 - `stores/bool_stores` - codegen-patterns 3 ("Computed booleans stored
   and pushed"; bead domain-pascal-k1sv): a comparison stored with `s<cc>`
   into a data register and `move.b` (TTY_$K_GET 0xE1C506), into a

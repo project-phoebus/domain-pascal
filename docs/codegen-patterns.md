@@ -367,9 +367,30 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   other than 0.  Others: `move.l #n,-(SP)`.  **Uncertain:** negative
   values other than -1 are taken to follow the same 16-bit rule.
 - **Zero:** `clr.l -(SP)` (374 sites, 0xE135D0) and `clr.w -(SP)` (472,
-  0xE135D2); no `move.w #0,-(SP)`.  19 `move.l #0,-(SP)` remain
-  unexplained (0xE0F79E, 0xE13B32, ...; perhaps `nil`): Uncertain, `dpc`
-  uses `clr.l` for the integer 0.
+  0xE135D2); no `move.w #0,-(SP)`.  The 19 `move.l #0,-(SP)` are all
+  arguments of EC_$WAIT 0xE20610 (`tools/nilsurvey.py push`: 0xE0F79E,
+  0xE13B32, ...), its unused eventcount pointers, and **not** a zero:
+  every one of their immediates is a cell of the binder's RELOC table
+  (`tools/nilsurvey.py` reads it; ../source docs/rfc-cold-start.md step
+  8), so each is the address of a symbol at 0, pushed as `move.l
+  #sym,-(SP)` like any other unit's variable ("Address of another unit's
+  variable" below).  The map has two symbols at 0, EC_$NIL_EC (segment
+  ABSOLUTE, MARKED) and TRAP_PAGE; an eventcount argument makes it
+  EC_$NIL_EC, passed as TIME_$CLOCKH_EC is beside it (FLP's EXCS
+  0xE3E2A0 `clr.l` for the integer 0, 0xE3E2B0 `move.l #0` [RELOC],
+  0xE3E2B6 `move.l #0xe2b0d4`).  The ../source translations write `nil`
+  there (dxm/helpers.pas, dbuf/get_block.pas, flp/excs.pas,
+  pkt/ping_server.pas); that is not the original's source.  Likewise 15
+  of the 17 `movea.l #0,An` are RELOC cells (`tools/nilsurvey.py
+  areg`), among them DXM_$HELPER_COMMON 0xE171F2 and PKT_$PING_SERVER
+  0xE12C14, which load the address into A2 before a loop and push it
+  twice with `pea (A2)` (DBUF_$GET_BLOCK 0xE3A88E pushes it twice with
+  `move.l #0,-(SP); move.l (SP),-(SP)`).  `nil` itself pushed is `clr.l
+  -(SP)`: the port pointer of the module-local NET_IO_$PUT_IN_SOCK_COMMON
+  at NET_IO_$PUT_IN_SOCK 0xE0E4CC and NET_IO_$PUT_IN_SOCK_INT 0xE0E506
+  (the C passes NULL), the only `nil` push known; `dpc` still refuses
+  `nil` passed by value (bead domain-pascal-73sx).  `dpc` uses `clr.l`
+  for the integer 0 (Verified at FLP's EXCS).
 - **Bytes:** `st -(SP)` for true (196 sites, 0xE1365C).  `false` (a
   byte 0) clears the whole slot with `clr.w -(SP)`: RIP_$SEND_UPDATES
   pushes `st -(SP)` on one path (0xE6889E) and `clr.w -(SP)` on the other
@@ -638,7 +659,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     scalar constants of 1, 2 or 4 bytes (integers, enumerations,
     booleans, characters) by address; cells laid out as above, labels
     `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
-    Not yet: strings, sets, records, `nil`; `lea (d,PC)`.  Conformance
+    Not yet: strings, sets, records, `nil` (no `nil` passed by address
+    is known); `lea (d,PC)`.  Conformance
     units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
     (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
     `pchist_interrupt.pas`, `file_set_len.pas`, `asknode_info.pas`,
@@ -1327,7 +1349,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   itself (DISK_$GET_BLOCK: conformance
   `tests/conformance/disk_get_block.pas`; golden
   `results/pointer_callers`).  Refused: a computed value, `nil`
-  (`suba.l`) and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
+  (`suba.l`; or the result slot cleared and reloaded, NET_$FIND_HANDLER
+  0xE5A178; bead domain-pascal-bdi0) and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
   as pointer results, `d0_return`/`c_param` pointer results, and
   `a0_return` on a non-pointer result (no site).  Also refused: a
   register-held pointer result variable that the allocator would put in
@@ -9157,6 +9180,37 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   - zero: `clr.<s> <ea>` (TIME_$Q_INIT_QUEUE 0xE16C6E `clr.l (A0)`;
     `clr.w` IIC_$RECEIVE 0xE70ACE; `clr.b` XPD_$RESET_PTRACE_OPTS
     0xE5B15E);
+  - **`nil`** (Verified at the sites; implemented, `dpc-ir`
+    `stored_const`; bead domain-pascal-j4ip): the pointer 0, stored like
+    any longword 0.  `tools/nilsurvey.py store`: 1160 longword zeros
+    stored to memory in compiled code, every one `clr.l` (through an
+    address register 785, frame 231, `(An)+` 54, A5 40, indexed 25,
+    absolute 25), no `move.l #0,<ea>`.  Sites the ../source translations
+    write as `nil`: BAT_$ALLOC_VTOCE 0xE3AEDA `clr.l (-0x14,A6)` (a
+    frame local), BAT_$ALLOCATE 0xE3B2EE and BAT_$DISMOUNT 0xE3B90A
+    `clr.l (0xd38,A5)`, HINT_$INIT 0xE3139A and HINT_$SHUTDN 0xE49924
+    `clr.l abs.l`, PKT_$SEND_INTERNET 0xE12670 `clr.l (-0x10,A6)`,
+    MAC_OS_$CLOSE 0xE0B506 `clr.l (0x7a4,A2); clr.l (0x7a0,A2)` (two
+    adjacent longwords, a routine pointer among them, not merged); a
+    local held in a data register, IO_$GET_DCTE 0xE1A466 `clr.l D2`.
+    Golden `stores/nil_stores`, exec test `nil_stores`.  The whole image
+    has no `move.l #0,<ea>` to memory (a sweep of every even offset of
+    0xE00800..0xE88834 for the opcode words: only pushes, and two
+    decodes of FIM_WIRED data), so a longword zero to a `device` object,
+    which `dpc` stores with `move.l #0` (section 5.5), has no site.  An
+    odd-address `clr.l` cannot arise: a 4-byte field may not cross two
+    word boundaries (3.10.5.5 p. 3-26), so `[aligned(0)]` moves it to an
+    even offset (section 5.4).  Refused: `nil` into an address register
+    (`suba.l An,An` 24 sites, e.g. ROUTE_$FIND_PORTP 0xE15B84,
+    DBUF_$GET_BLOCK 0xE3A832; of the 17 `movea.l #0,An`, 15 are
+    relocated addresses of a symbol at 0, section 1.5 "Zero", and the
+    other two end TIME_$RTE_INT 0xE163D6 and TIME_$VT_INT 0xE16426, whose
+    A0 no caller reads, section 3; `tools/nilsurvey.py areg`) and `nil`
+    as a pointer function's result (`suba.l A0,A0` before the epilogue,
+    ROUTE_$FIND_PORTP; the result slot cleared and reloaded,
+    NET_$FIND_HANDLER 0xE5A178), bead domain-pascal-bdi0; `nil` passed
+    by value (`clr.l -(SP)`, section 1.5, "Zero"), bead
+    domain-pascal-73sx; `nil` passed by address (no site known);
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
     a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the
     image);

@@ -68,7 +68,7 @@ OK	gpu/gpu.pas	gpu_$term
 STUB	hint/hint.pas	hint_$clear_hintfile
 STUB	hint/hint.pas	hint_$init
 STUB	hint/hint.pas	hint_$init_cache
-STUB	hint/hint.pas	hint_$shutdn
+MISMATCH	hint/hint.pas	hint_$shutdn
 STUB	hint/hint.pas	hint_$get_hints
 STUB	hint/hint.pas	hint_$add_internal
 OK	hint/hint.pas	hint_$addi
@@ -88,7 +88,7 @@ OK	iic/iic.pas	iic_$exists
 OK	iic/iic.pas	iic_$receive
 OK	iic/iic.pas	iic_$receive_check
 MISMATCH	io/io.pas	chk
-STUB	io/io.pas	io_$get_dcte
+MISMATCH	io/io.pas	io_$get_dcte
 STUB	io/io.pas	io_$build_dcte_list
 STUB	io/io.pas	io_$init
 STUB	io/io.pas	io_$get_config

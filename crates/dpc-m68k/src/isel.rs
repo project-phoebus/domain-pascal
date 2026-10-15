@@ -8423,10 +8423,26 @@ impl Selector {
                         Val::Reg(r) => Ea::Reg(r),
                         Val::Tmp(d) => Ea::Reg(Reg::D(d)),
                         Val::Mem(ea) => ea,
+                        // `nil` (the pointer 0): `suba.l An,An` at 24
+                        // sites; of the 17 `movea.l #0,An`, 15 are an
+                        // address the binder relocates (a symbol at 0,
+                        // EC_$NIL_EC or TRAP_PAGE in the map), only TIME_$
+                        // RTE_INT 0xE163D6 and TIME_$VT_INT 0xE16426 a
+                        // literal 0, both pointer results
+                        // (`tools/nilsurvey.py areg`).
+                        Val::Imm(0) => {
+                            return Err(unsupported(
+                                self.span,
+                                "`nil` (the pointer 0) assigned to a pointer held in an \
+                                 address register (`suba.l An,An`, `tools/nilsurvey.py \
+                                 areg`; bead domain-pascal-bdi0) is",
+                            ))
+                        }
                         Val::Imm(_) => {
                             return Err(unsupported(
                                 self.span,
-                                "a constant assigned to a pointer held in a register is",
+                                "a constant assigned to a pointer held in an address \
+                                 register is",
                             ))
                         }
                     },

@@ -312,6 +312,55 @@ fn integer_constant_transferred_to_a_pointer() {
     );
 }
 
+/// `nil` stored into a pointer is the pointer constant 0, stored like
+/// any longword 0 (`clr.l`, codegen-patterns 13; bead domain-pascal-j4ip):
+/// a variable and a routine pointer.
+#[test]
+fn nil_stored_is_the_pointer_zero() {
+    let m = lower_src(
+        "module m;\ntype p = ^integer32;\nvar e: p; f: ^procedure;\n\
+         procedure q;\nbegin\n  e := nil;\n  f := nil;\nend;\n",
+    )
+    .unwrap();
+    for st in &m.functions[0].body {
+        let StmtKind::Store { value, .. } = &st.kind else {
+            panic!("not a store: {:?}", st.kind)
+        };
+        assert_eq!(
+            *value,
+            Expr::Const {
+                value: 0,
+                ty: Scalar::POINTER
+            }
+        );
+    }
+}
+
+/// `nil` passed by value, by address, and as a function result: each
+/// refused with the forms the image shows (beads domain-pascal-73sx,
+/// domain-pascal-bdi0; codegen-patterns 13, "`nil`").
+#[test]
+fn nil_other_than_stored_is_refused() {
+    let decls = "module m;\ntype p = ^integer32;\n\
+                 procedure byval(x: p); options(val_param, extern);\n\
+                 procedure byref(in x: p); extern;\n";
+    let e = errs(&format!(
+        "{decls}procedure q;\nbegin\n  byval(nil);\nend;\n"
+    ));
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("`nil` passed by value"), "{e:?}");
+    assert!(e[0].contains("domain-pascal-73sx"), "{e:?}");
+    let e = errs(&format!(
+        "{decls}procedure q;\nbegin\n  byref(nil);\nend;\n"
+    ));
+    assert!(e[0].contains("`nil` passed by address"), "{e:?}");
+    let e = errs(&format!(
+        "{decls}function f: p;\nbegin\n  f := nil;\nend;\n"
+    ));
+    assert!(e[0].contains("`nil` as a function result"), "{e:?}");
+    assert!(e[0].contains("domain-pascal-bdi0"), "{e:?}");
+}
+
 #[test]
 fn empty_procedure_and_extern_routines() {
     let m = lower_src("module m;\nprocedure e(x: integer); extern;\nprocedure p;\nbegin\nend;\n")
@@ -1594,9 +1643,7 @@ end;
 ",
     );
     assert!(
-        e[0].ends_with(
-            "a constant of 2 bytes or of this kind passed by address is not supported yet"
-        ),
+        e[0].ends_with("a 2-byte set constant passed by address is not supported yet"),
         "{e:?}"
     );
     let e = errs(
