@@ -254,7 +254,12 @@ pub fn access(insn: &Insn) -> Access {
         }
         Insn::Lea { src, dst } => {
             // `lea (d,An),Am` computes from An like an operator (R2:
-            // 0xE177E0 `lea (2,A1),A0` while A0 is free otherwise).
+            // 0xE177E0 `lea (2,A1),A0` while A0 is free otherwise).  An
+            // indexed `lea (d,An,Dx),Am` may take its dying base's
+            // register: an element address read twice or more does where
+            // that is the lowest free (XPD_$FIND_INDEX 0xE5AF60 `lea
+            // (0,A0,D1.l),A0`; 129 sites against 6 that R2 fits,
+            // codegen-patterns 12.4 R2, 5.2; bead domain-pascal-o1kl).
             if let Ea::Ind(b) | Ea::Disp(_, b) = src {
                 if tracked(Reg::A(*b)) {
                     a.reg_operands.push(Reg::A(*b));

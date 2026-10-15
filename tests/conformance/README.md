@@ -43,7 +43,10 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 `acl_is_process_type_2.pas` (the module-local routine at 0xE46498,
 `acl/is_process_type_2.c`: another unit's array, `movea.l
 #PROC1_$TYPE,A0` between the parameter's load and its copy and scaling,
-`(-2,A0,D1.w)`; bead domain-pascal-rlnm).
+`(-2,A0,D1.w)`; bead domain-pascal-rlnm); `mmap_avail.pas` (MMAP_$AVAIL
+0xE0CC64: an element of another unit's array as a `with` record live
+across a call, `movea.l #MMAP,A0; move.l D2,D0; lsl.l #4,D0; lea
+(0,A0,D0.l),A2`; bead domain-pascal-o1kl).
 `time_q_init_queue.pas` starts at TIME_$Q_INIT 0xE16C5C, an empty
 procedure (codegen-patterns 2, bead domain-pascal-lkr), and
 `mt_release.pas` is the whole one-routine MT module (MT_$RELEASE
@@ -487,4 +490,6 @@ The manifest also checks dpc's run-time library, M$ARITH
 (`runtime/README.md`): `target/runtime/m68k/m_arith.o`, the object `make
 runtime` built, is given to `conform.py` as it is (a `.o` unit is linked
 and compared without being assembled again), and its twelve routines must
-match the whole map module, 0x1DC bytes at 0xE0ABD4.
+match the whole map module, 0x1DC bytes at 0xE0ABD4.  Its second member,
+`target/runtime/m68k/pas_set_build.o`, must match PAS_$SET_BUILD, the
+whole map segment, 0x4C bytes at 0xE11FA8 (bead domain-pascal-jzm5).

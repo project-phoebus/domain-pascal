@@ -547,6 +547,52 @@ fn select_body_with(
         }
     }
     s.seq(f, &f.body, Tail::END)?;
+    // An element address of another unit's array or through a loaded
+    // pointer formed as a value ([`Selector::lea_into`]): read twice or
+    // more, or live across a call, the allocator's choice of its register
+    // is the image's (codegen-patterns 5.2, "The element's address as a
+    // value"; `tools/regalloc.py elemaddr`): read twice or more with no
+    // call, it takes the lowest register free over its range, the dying
+    // base's counted free, where that and R2 differ 129 times against 6
+    // (XPD_$FIND_INDEX 0xE5AF60 `lea (0,A0,D1.l),A0`), and with R4(c) for
+    // a last read that is a call's argument 197 of 208 sites fit
+    // (MMAP_$FREE_LIST 0xE0CB50 `lea (0,A0,D0.l),A2`, `pea (-8192,A2);
+    // bsr.w`); live across a call, the lowest callee-saved register free
+    // (R3), the base in another 122 times and in it 21 (MMAP_$AVAIL
+    // 0xE0CC80 `lea (0,A0,D0.l),A2`).  Read once in no call's range it fits
+    // the first 98 times and R2 99 times (0xE32CD6 `lea (78,A0,D3.l),A0`,
+    // stored; 0xE1C242 `lea (0,A0,D0.w),A1`, stored), neither 114
+    // (SIO6509_$INIT 0xE33548 `lea (-32,A3,D0.w),A3`): not settled,
+    // refused.
+    for &(k, span) in &s.elem_leas {
+        let Insn::Lea { dst, .. } = s.out[k] else {
+            unreachable!("an element address's `lea`")
+        };
+        let r = Reg::A(dst);
+        let mut reads = 0;
+        let mut call = false;
+        let mut across = false;
+        for i in &s.out[k + 1..] {
+            let a = crate::regs::access(i);
+            if a.uses.contains(&r) {
+                reads += 1;
+                across |= call;
+            }
+            if a.defs.contains(&r) && !a.uses.contains(&r) {
+                break;
+            }
+            call |= matches!(i, Insn::Jsr(_) | Insn::Bsr { .. });
+        }
+        if reads < 2 && !across {
+            return Err(unsupported(
+                span,
+                "the address of an element of another unit's array or through a pointer loaded \
+                 from memory, read once and not across a call (the `lea` into the base's \
+                 register or another, 98 against 99 sites: not settled, codegen-patterns 5.2; \
+                 bead domain-pascal-1ibr) is",
+            ));
+        }
+    }
     if !s.other_base_loads.is_empty()
         && s.out
             .iter()
@@ -4912,6 +4958,10 @@ pub struct Selector {
     /// The assignments to those locals: frame offset, index in `out` of
     /// the `movea.l` and its statement's span.
     ptr_defs: Vec<(i32, usize, Span)>,
+    /// The `lea (d,An,Dx),Ar` of element addresses of other units'
+    /// arrays or through pointers loaded from memory formed as values
+    /// ([`Self::lea_into`]): index in `out` and the statement's span.
+    elem_leas: Vec<(usize, Span)>,
     /// Locals assigned from a call, held in D0 and moved to an address
     /// register where dereferenced ([`Park`]).
     parked: Vec<Park>,
@@ -5138,6 +5188,7 @@ impl Selector {
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
             ptr_defs: Vec::new(),
+            elem_leas: Vec::new(),
             parked: Vec::new(),
             a0_locals: Vec::new(),
             hoist: None,
@@ -11326,7 +11377,7 @@ impl Selector {
     /// + c`), with a variable or a computed value other than a symbol's
     /// immediate on the right (NETBUF_$GETVA 0xE0ECC8..0xE0ECE2 forms its
     /// element address first, then the masked value, `add.l A1,D3`: one
-    /// site, of the unsettled element form, bead domain-pascal-o1kl), the
+    /// site; its element address is read once, bead domain-pascal-1ibr), the
     /// sum of two addresses, a constant minus an address, `&`, `!`,
     /// `xor`, a width other than a longword (bead domain-pascal-awzk).
     fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
@@ -11418,7 +11469,7 @@ impl Selector {
                     self,
                     "an address that needs an address register and a value that is not one \
                      (the order is not settled: NETBUF_$GETVA 0xE0ECC8, one site; bead \
-                     domain-pascal-o1kl)",
+                     domain-pascal-awzk)",
                 )
             }
         };
@@ -12941,34 +12992,31 @@ impl Selector {
                     dst: r,
                 });
             }
-            // The element's address of another unit's array, or of a byte
-            // array through a pointer loaded from memory, formed with a
-            // `lea` into the base's register or into another (`lea
-            // (0,An,Dx),Am` stored to memory: with a `movea.l #` base, 12
-            // into An and 15 into another at displacement 0, 1 and 14 at
-            // another; 0xE142BA `lea (0,A0,D0.l),A0`, TTY_$I_WAIT 0xE1C242
-            // `lea (0,A0,D0.w),A1`), which the allocator does not choose
-            // (codegen-patterns 12.4 R2, 5.2).
-            Addr::Index { base, .. }
-                if matches!(&**base, Addr::Symbol { .. })
-                    || matches!(&**base, Addr::Indirect { base: p, .. }
-                        if !matches!(&**p, Expr::Load { addr: Addr::Frame(f), .. }
-                            if self.pinned(*f).is_some())) =>
-            {
-                if matches!(&**base, Addr::Symbol { .. }) && self.in_loop() {
-                    return Err(self.other_unit_in_loop());
-                }
-                return Err(unsupported(
-                    self.span,
-                    "the address of an element of another unit's array or through a pointer \
-                     loaded from memory as a value (the `lea` into the base's register or \
-                     another, not settled: codegen-patterns 5.2, 12.4 R2; bead \
-                     domain-pascal-o1kl) is",
-                ));
-            }
+            // Anything else: `lea <ea>,Ar`.  The element of another unit's
+            // array, or of a byte array through a pointer loaded from memory
+            // ([`Self::split_base`]), takes the base and the index as an
+            // operand does ([`Self::index_ea`]: the index's value, the base,
+            // the scaling; for a byte element the index, then the pointer),
+            // then `lea (d,An,Dx),Ar` (codegen-patterns 5.2, "The element's
+            // address as a value").  Whether `Ar` is the base's register or
+            // another is the allocator's choice: the dying base's register
+            // counts as free for an indexed `lea` (12.4 R2 does not apply to
+            // it), so the address takes it where that is the lowest register
+            // free over the address's range (XPD_$FIND_INDEX 0xE5AF56..
+            // 0xE5AF60 `movea.l #0xEA551C,A0; muls.w #228,D1; lea
+            // (0,A0,D1.l),A0`, a `with` record read twice) and another where
+            // it is not (MMAP_$AVAIL 0xE0CC76..0xE0CC80 `movea.l #MMAP,A0;
+            // ...; lea (0,A0,D0.l),A2`, a callee-saved A2 across the call).
+            // Only an address read twice or more, or live across a call, is
+            // settled; one read once in no call's range is refused after
+            // selection ([`select_body_with`], `elem_leas`).
             _ => {
+                let split = self.split_base(a);
                 let src = self.ea_of(a)?;
                 self.out.push(Insn::Lea { src, dst: r });
+                if split {
+                    self.elem_leas.push((self.out.len() - 1, self.span));
+                }
             }
         }
         Ok(())
@@ -15385,7 +15433,7 @@ impl Selector {
             "an element of another unit's array or through a pointer loaded from memory at a \
              displacement beyond a byte (the `lea` into the base's register or another, 84 \
              against 105 sites: not settled, codegen-patterns 5.2, 12.4 R2; bead \
-             domain-pascal-o1kl, domain-pascal-lnzy) is",
+             domain-pascal-1ibr, domain-pascal-lnzy) is",
         ))
     }
 

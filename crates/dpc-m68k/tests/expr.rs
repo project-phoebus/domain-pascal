@@ -41,6 +41,7 @@ var
   ws: array[1..8] of integer;
   xs: extern array[1..8] of integer;
   xrs: extern array[1..8] of record a, b, c: integer32; end;
+  xws: extern array[1..8] of record a, b: integer; end;
   xbs: extern array[1..8] of record a: integer32; z: array[1..13] of integer32; end;
   pp: extern univ_ptr;
   cp: extern ^cbuf;
@@ -370,12 +371,13 @@ fn other_units_array_elements() {
         ]
     );
     // Refused: in a loop (loaded in the loop or held from before it,
-    // TTY_$K_DRAIN_OUTPUT 0xE67AF0); its address as a value (`lea` into
-    // the base's register or another, 12.4 R2).
+    // TTY_$K_DRAIN_OUTPUT 0xE67AF0); its address as a value read once
+    // (`lea` into the base's register or another, bead domain-pascal-1ibr;
+    // [`element_addresses_as_values`]).
     let e = error("procedure t; internal;\nbegin\n  while w > 0 do l := xs[w];\nend;\n");
     assert!(e.contains("another unit's array in a loop"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  pp := addr(xs[w]);\nend;\n");
-    assert!(e.contains("as a value"), "{e}");
+    assert!(e.contains("read once and not across a call"), "{e}");
     // Refused, review of bead domain-pascal-rlnm: the same array in a
     // later statement with no call between (the base kept, MMAP_$FREE_
     // PAGES 0xE0CF74); an index read from the same variable (SIO_$INIT
@@ -406,6 +408,89 @@ fn other_units_array_elements() {
             .count(),
         2
     );
+}
+
+/// The address of an element of another unit's array as a value
+/// (codegen-patterns 5.2, "The element's address as a value"; bead
+/// domain-pascal-o1kl): the index's value, the base, the scaling, then
+/// `lea (d,An,Dx),Ar`, `Ar` the allocator's.  A `with` record read twice
+/// takes the dying base's register (XPD_$FIND_INDEX 0xE5AF56..0xE5AF60
+/// `movea.l #0xEA551C,A0; muls.w #228,D1; lea (0,A0,D1.l),A0`); one live
+/// across a call a callee-saved register, the base another (MMAP_$AVAIL
+/// 0xE0CC76..0xE0CC80 `movea.l #MMAP,A0; move.l D2,D0; lsl.l #4,D0; lea
+/// (0,A0,D0.l),A2`; the pad of the call's arguments scheduled into the
+/// address as at XPD_$SET_DEBUGGER 0xE5BC98..0xE5BCA4 `subq.l #2,SP; add.w
+/// D2,D1; lea (0,A0,D1.w),A3; move.w #2,-(SP); jsr ML_$LOCK`).  Read once
+/// and not across a call: refused (98 sites take the base's register, 99
+/// another; bead domain-pascal-1ibr).
+#[test]
+fn element_addresses_as_values() {
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  with xrs[w] do begin\n    a := l;\n    c := b;\n  end;\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XRS,%a0",
+            "lsl.w\t#2,%d0",
+            "move.w\t%d0,%d1",
+            "add.w\t%d1,%d1",
+            "add.w\t%d1,%d0",
+            "lea\t(0,%a0,%d0.w),%a0",
+            "move.l\t(L).l,(-0xc,%a0)",
+            "move.l\t(-8,%a0),(-4,%a0)",
+        ]
+    );
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  with xws[w] do begin\n    g(w, a);\n    b := 0;\n  end;\nend;\n"),
+        [
+            "pea\t(%a2)",
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XWS,%a0",
+            "lsl.w\t#2,%d0",
+            "subq.l\t#2,%sp",
+            "lea\t(0,%a0,%d0.w),%a2",
+            "pea\t(-4,%a2)",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(G).l",
+            "clr.w\t(-2,%a2)",
+            "movea.l\t(-8,%fp),%a2",
+        ]
+    );
+    // Read twice, the last read a call's argument: held through the call
+    // in a callee-saved register (12.4 R4(c); MMAP_$FREE_LIST 0xE0CB46..
+    // 0xE0CB62 `lea (0,A0,D0.l),A2; move.w (-8182,A2),D2; ...; pea
+    // (-8192,A2); bsr.w`).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  with xws[w] do begin\n    w := b;\n    g(w, a);\n  end;\nend;\n"),
+        [
+            "pea\t(%a2)",
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XWS,%a0",
+            "lsl.w\t#2,%d0",
+            "lea\t(0,%a0,%d0.w),%a2",
+            "move.w\t(-2,%a2),(W).l",
+            "subq.l\t#2,%sp",
+            "pea\t(-4,%a2)",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(G).l",
+            "movea.l\t(-8,%fp),%a2",
+        ]
+    );
+    // Read once: a `with` record used once, an address stored (SIO6509_
+    // $INIT 0xE33548 into the base's register, the module-local routine
+    // at 0xE1C204 at 0xE1C242 into another), a byte element through a
+    // loaded pointer stored.
+    for stmt in [
+        "with xrs[w] do b := 0;",
+        "pp := addr(xrs[w]);",
+        "pp := addr(cp^[w]);",
+    ] {
+        let e = error(&format!("procedure t; internal;\nbegin\n  {stmt}\nend;\n"));
+        assert!(e.contains("read once and not across a call"), "{stmt}: {e}");
+    }
+    // Wider elements through a loaded pointer stay refused (bead
+    // domain-pascal-nqg1).
+    let e = error("procedure t; internal;\nbegin\n  pp := addr(ip^[w]);\nend;\n");
+    assert!(e.contains("more than 1 byte"), "{e}");
 }
 
 /// Elements through a pointer loaded from memory (codegen-patterns 5.2,

@@ -389,5 +389,49 @@ class ParamLocalTest(unittest.TestCase):
             self.assertEqual(sorted(ms[name][0]), list(range(len(rt.values))))
 
 
+
+class ElemAddrTest(unittest.TestCase):
+    """tools/regalloc.py elemaddr (bead domain-pascal-o1kl)."""
+
+    def test_parse(self):
+        self.assertEqual(regalloc.elem_lea(insn('lea %a0@(0,%d1:l),%a0')), ('a0', 0, 'a0'))
+        self.assertEqual(regalloc.elem_lea(insn('lea %a3@(ffffffffffffffe0,%d0:w),%a3')),
+                         ('a3', -32, 'a3'))
+        self.assertIsNone(regalloc.elem_lea(insn('lea %a0@(4),%a1')))
+        self.assertIsNone(regalloc.elem_lea(insn('lea %fp@(0,%d1:w),%a1')))
+        self.assertEqual(regalloc.elem_setup('moveal #15419392,%a0'), 'imm')
+        self.assertEqual(regalloc.elem_setup('moveal %a2@(24),%a0'), 'load')
+        self.assertEqual(regalloc.elem_setup('moveal %d5,%a4'), 'other')
+        self.assertEqual(regalloc.elem_class(2, False), 'multi')
+        self.assertEqual(regalloc.elem_class(1, True), 'call')
+        self.assertEqual(regalloc.elem_class(1, False), 'once')
+
+    def test_read_twice_in_the_base_register(self):
+        # XPD_$FIND_INDEX 0xE5AF56..0xE5AF60's shape
+        rt = routine(['linkw %fp,#0', 'movew %fp@(8),%d0', 'moveal #100000,%a0',
+                      'lslw #2,%d0', 'lea %a0@(0,%d0:w),%a0', 'movel %a0@,%d1',
+                      'movel %d1,%a0@(4)', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_addr_sites(rt)
+        self.assertEqual((s['an'], s['am'], s['setup'], s['live']), ('a0', 'a0', 'imm', False))
+        self.assertEqual((s['reads'], s['across'], s['col'], s['colU']), (2, False, 'a0', 'a1'))
+
+    def test_across_a_call(self):
+        # MMAP_$AVAIL 0xE0CC76..0xE0CC80's shape
+        rt = routine(['linkw %fp,#0', 'movew %fp@(8),%d0', 'moveal #100000,%a0',
+                      'lslw #2,%d0', 'lea %a0@(0,%d0:w),%a2', 'jsr 0xe20b12',
+                      'movel %a2@,%d0', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_addr_sites(rt)
+        self.assertEqual((s['an'], s['am'], s['reads'], s['across']), ('a0', 'a2', 1, True))
+        self.assertEqual((s['col'], s['colU']), ('a2', 'a2'))
+
+    def test_last_read_a_call_argument(self):
+        # MMAP_$FREE_LIST 0xE0CB46..0xE0CB62's shape (12.4 R4(c))
+        rt = routine(['linkw %fp,#0', 'movel %fp@(8),%d0', 'moveal #100000,%a0',
+                      'lsll #4,%d0', 'lea %a0@(0,%d0:l),%a2', 'movew %a2@(10),%d1',
+                      'pea %a2@', 'jsr 0xe0c514', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_addr_sites(rt)
+        self.assertEqual((s['reads'], s['across'], s['held']), (2, False, True))
+        self.assertEqual((s['col'], s['r4c']), ('a0', 'a2'))
+
 if __name__ == '__main__':
     unittest.main()

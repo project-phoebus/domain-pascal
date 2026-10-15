@@ -87,6 +87,10 @@ tests/conformance/smd_busy_wait.pas          SMD_$PUTC SMD_$BUSY_WAIT SMD_$LITES
 tests/conformance/mmap_alloc_contig.pas      MMAP_$ALLOC_CONTIG  --section-addr .bss.moddata.MMAP_=0xE23284  a5-always=MMAP_$ALLOC_CONTIG
 tests/conformance/xns_idp_get_port_info.pas  XNS_IDP_$GET_PORT_INFO  --section-addr .bss.moddata.XNS_IDP=0xE2B314  a5-always=XNS_IDP_$GET_PORT_INFO
 tests/conformance/rem_name_register_server.pas  REM_NAME_$REGISTER_SERVER:1A  --section-addr .bss.moddata.REM_NAME=0xE7DBB8  a5-absolute=REM_NAME_$REGISTER_SERVER
+# The element address of another unit's array as a `with' record live
+# across a call (codegen-patterns 5.2, "The element's address as a value";
+# bead domain-pascal-o1kl): `movea.l #MMAP,A0; ...; lea (0,A0,D0.l),A2'.
+tests/conformance/mmap_avail.pas             MMAP_$AVAIL  --section-addr .bss.moddata.MMAP_=0xE23284  a5-always=MMAP_$AVAIL  module-routines=MMAP_$ADD_TO_WSL=0xE0C514
 tests/conformance/mt_release.pas             MT_$RELEASE
 
 # dpc's run-time library (runtime/README.md; bead domain-pascal-w586): the
@@ -94,14 +98,14 @@ tests/conformance/mt_release.pas             MT_$RELEASE
 # runtime' (`make conform' builds it first).  Twelve routines; M$OIU$LLL
 # is M$OIS$LLL's second name (global=: defined, at 0xE0AD7C).
 target/runtime/m68k/m_arith.o  M$MIS$LLL M$MIU$LLW M$MIU$LLL M$MIS$LLW M$DIU$LLW M$DIS$LLW M$OIU$WLW M$DIS$LLL M$DIU$LLL M$OIS$WLW M$OIS$WWL M$OIS$LLL  global=M$OIU$LLL
-
-# Harness fixtures.
-
-tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
 # Its second member (bead domain-pascal-jzm5): PAS_$SET_BUILD, the whole
 # map segment, 0x4C bytes at 0xE11FA8 (the zero word after the rts
 # included), transcribed from the image (runtime/m68k/pas_set_build.s).
 target/runtime/m68k/pas_set_build.o  PAS_$SET_BUILD
+
+# Harness fixtures.
+
+tests/conformance/handasm/proc1_tst_lock.s   PROC1_$TST_LOCK
 tests/conformance/handasm/ast_page_zero.s    0xE00EB0 AST_$PAGE_ZERO
 tests/conformance/handasm/pkt_recently_missing.s  PKT_$RECENTLY_MISSING
 # 12.4 R4(c): a parameter whose last use is a call's argument, held through

@@ -216,7 +216,7 @@ STUB	pchist/pchist.pas	pchist_$enable_terminal
 STUB	pchist/pchist.pas	pchist_$unix_profil_cntl
 STUB	pchist/pchist.pas	pchist_$unix_profil_fork
 STUB	pchist/pchist.pas	pchist_$cntl
-STUB	pchist/pchist.pas	pchist_$unix_profil_addupc
+MISMATCH	pchist/pchist.pas	pchist_$unix_profil_addupc
 MISMATCH	peb/peb_parity.pas	peb_$test_parity_err
 STUB	peb/peb_unwired.pas	peb_$init
 STUB	peb/peb_unwired.pas	peb_$write_wcs
@@ -432,7 +432,7 @@ STUB	xpd/xpd.pas	xpd_$set_debugger
 STUB	xpd/xpd.pas	xpd_$get_ec
 STUB	xpd/xpd.pas	xpd_$get_event_and_data
 STUB	xpd/xpd.pas	xpd_$continue_proc
-STUB	xpd/xpd.pas	xpd_$set_enable
+SETUP	xpd/xpd.pas	xpd_$set_enable
 STUB	xpd/xpd.pas	xpd_$get_fp
 STUB	xpd/xpd.pas	xpd_$put_fp
 STUB	xpd/xpd.pas	xpd_$get_target_info

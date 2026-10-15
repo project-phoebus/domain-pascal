@@ -18,7 +18,9 @@ var
   eb_$k: integer;
   eb_$neg: array[-5..5] of integer;
   eb_$longs: array[0..9] of integer32;
-define eb_$words, eb_$recs, eb_$big, eb_$bytes, eb_$ptr, eb_$k, eb_$neg, eb_$longs;
+  eb_$negr: array[-3..3] of rec12;
+define eb_$words, eb_$recs, eb_$big, eb_$bytes, eb_$ptr, eb_$k, eb_$neg, eb_$longs,
+  eb_$negr;
 
 procedure eb_$fill;
 var
@@ -57,6 +59,13 @@ begin
   while i <= 9 do begin
     l := i * 100000;
     eb_$longs[i] := l;
+    i := i + 1;
+  end;
+  i := -3;
+  while i <= 3 do begin
+    eb_$negr[i].a := i * 10 + 1;
+    eb_$negr[i].b := i * 10 + 2;
+    eb_$negr[i].c := i * 10 + 3;
     i := i + 1;
   end;
   eb_$ptr := addr(eb_$bytes);

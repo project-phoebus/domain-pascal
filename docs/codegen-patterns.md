@@ -3005,7 +3005,9 @@ model run against the bit model of Figure 3-6).
       absolutely; an element at a displacement beyond a byte,
       `lea (0,An,Dx),Am` into the base's register or another (with the
       base dead after one use, 84 own, SIO_$INIT 0xE32CB0, against 105
-      another, 0xE0CC80 `lea (0,A0,D0.l),A2`; 12.4 R2); a store whose value
+      another, NETBUF_$ADD_PAGES 0xE0EAD6 `lea (0,A0,D1.l),A1; move.w
+      (806,A5),(-8186,A1)`; 12.4 R2; the address read
+      once, below, bead domain-pascal-1ibr); a store whose value
       needs a register set up, when that is an address register or when
       the destination takes more instructions (`dpc` then puts the
       destination first, 12.4 "Stores whose destination and value both
@@ -3034,12 +3036,88 @@ model run against the bit model of Figure 3-6).
       `move.l #FIM_$QUIT_VALUE,D7`, `movea.l D7,A1` in the loop, with
       FIM_$QUIT_EC, PROC1_$AS_ID and two field addresses).  Not settled:
       refused (bead domain-pascal-dw25).
-    - *The element's address as a value* (`lea (0,An,Dx),Am` stored to
-      memory): Am is An at 12 and another register at 15 with
-      displacement 0, another at 14 of 15 otherwise (ad-hoc count; 0xE142BA
-      `lea (0,A0,D0.l),A0`; TTY_$I_WAIT 0xE1C242 `lea (0,A0,D0.w),A1`), a
-      register choice dpc's allocator does not make (12.4 R2): refused
-      (bead domain-pascal-o1kl).
+    - *The element's address as a value (survey Verified for the
+      register choice where the address is read twice or more or lives
+      across a call; implemented there, bead domain-pascal-o1kl).*  The
+      base and the index as for an operand (above), then `lea
+      (d,An,Dx),Am`: a `with` record (5.2, "`with`"), a pointer local
+      held in a register, an address stored, compared or returned.
+      Whether Am is the base's register or another is the register
+      allocator's choice, and the one thing to settle.
+      `tools/regalloc.py elemaddr` takes every `lea (d,An,Dx),Am` (An one
+      of A0-A4) of the analysed routines (12.4: `link` routines with a
+      known instruction model) whose base is set in its block: with the
+      base still read after the `lea`, Am is another register (100: 84
+      `movea.l #`, 7 loads, 9 other; the base kept for a second element
+      of the same array, XPD_$READ_PROC_ASYNC 0xE5B8E8; 0xE038C8..0xE038D2
+      `movea.l #0xED5000,A3; ...; lea (0,A3,D1.l),A4`).  With the
+      base dying at the `lea`, the tool tests two rules for Am: the lowest
+      address register free over the address's live range with the base's
+      register counted free (`col`), or not (`colU`, 12.4 R2), by use:
+      - *read twice or more, no call in the range:* `col` alone 129,
+        `colU` alone 6, both 59, neither 14 (the allocator's order,
+        12.4 R1): the base's own register where it is the lowest free
+        (XPD_$FIND_INDEX 0xE5AF56..0xE5AF60 `movea.l #0xEA551C,A0; muls.w
+        #228,D1; lea (0,A0,D1.l),A0`, a `with` record read at `(-190,A0)`
+        and `(-185,A0)`; PARITY_$CHK 0xE0AF80; DXM_$SCAN_QUEUE 0xE17180,
+        `entry` read twice).  Of the 20 misses of `col`, 9 have their
+        last read an argument push of a call later in the block, and Am
+        the lowest callee-saved register free up to that call, as 12.4
+        R4(c) says (MMAP_$FREE_LIST 0xE0CB46..0xE0CB62 `movea.l
+        #MMAP,A0; ...; lea (0,A0,D0.l),A2; move.w (-8182,A2),D2; ...;
+        pea (-8192,A2); bsr.w`; 7 of the 14 neither, 2 of the 6 `colU`
+        alone; one such site, 0xE09052, takes A1): `col` with R4(c),
+        `dpc`'s model, fits 197 of 208 (review of the bead; misses
+        AST_$WAIT_FOR_AST_INTRANS 0xE00CD0, AREA_$TRANSFER 0xE08420,
+        AREA_$COPY 0xE090EA and 0xE09052, MAC_$OPEN 0xE0B998, ...);
+      - *live across a call:* Am is the lowest callee-saved register
+        free (R3), which `col` gives at all 143 and `colU` at the 122
+        where the base is in another register; the base is in another
+        register 122 times (MMAP_$AVAIL
+        0xE0CC76..0xE0CC80 `movea.l #MMAP,A0; move.l D2,D0; lsl.l #4,D0;
+        lea (0,A0,D0.l),A2`, read after CRASH_SYSTEM; AST_$INVALIDATE_PAGE
+        0xE00F30 into A3; XPD_$SET_DEBUGGER 0xE5BC9C), and in Am itself
+        21 times (AST_$PMAP_ASSOC 0xE04318 `movea.l #0xEB4800,A2; ...;
+        lea (0,A2,D1.l),A2`; AREA_$REMOVE_SEG 0xE099D0);
+      - *read once, no call in the range* (an address stored, a `with`
+        record or pointer read once, a `lea (0,An,Dx),Am` for one access
+        at a displacement beyond a byte): `col` alone 98 (0xE32CD6
+        `lea (78,A0,D3.l),A0; move.l A0,(-8,A6)`; XPD_$FIND_INDEX
+        0xE5AF72), `colU` alone 99 (the module-local routine at
+        0xE1C204, ../source's tty_$i_wait: 0xE1C242 `lea (0,A0,D0.w),A1;
+        move.l A1,(-80,A6)`; 0xE0085C), both 47, neither 114 (SIO6509_$INIT
+        0xE33548 `lea (-32,A3,D0.w),A3; movea.l (16,A6),A4; move.l
+        A3,(A4)`, the base and Am in A3 while A0 is free).  R4(c) does
+        not help: of 26 with the last read a call's argument, 6 take the
+        lowest callee-saved register (`tools/regalloc.py elemaddr`, last
+        table).  By the base's register (ad-hoc count, not kept): a
+        `movea.l #sym` base in A0, another 81, own 18; any base in A1,
+        own 69, another 58.  No rule found: not settled (bead
+        domain-pascal-1ibr).  The read count is where the survey
+        separates, not a known mechanism: why an address read once
+        follows neither rule is not known.
+      The earlier counts (12 own against 15 another for stores with
+      displacement 0; 84 against 105 for single accesses beyond a byte)
+      are of this last class.  `dpc`'s allocator does not apply R2 to
+      an indexed `lea` (`regs.rs`), which is `col` with its order (12.4
+      R1); a call in the range gives the callee-saved register (R3).
+      **Implemented** (`isel.rs` `lea_into`, `select_body`'s `elem_leas`):
+      the address of an element of another unit's array, or of a byte
+      element through a pointer loaded from memory other than a frame
+      or unit pointer (a field, another unit's pointer; the frame and
+      unit pointers keep the NETLOG_$LOG_IT form, "Arrays through a
+      pointer" and "`with`"), formed with `index_ea`'s order and
+      restrictions, then `lea (d,An,Dx),Ar`, where the address is read
+      twice or more after the `lea` or a call lies between the `lea` and
+      its last read; otherwise refused after selection (bead
+      domain-pascal-1ibr), as are wider elements through such pointers
+      (bead domain-pascal-nqg1).  The byte form is reached by no accepted
+      program the review of the bead found (a pointer local's address is
+      copied or stored, so read once, and a record element is more than a
+      byte): its refusal is tested, not its code.  Golden `data/elem_addr`; exec test
+      `elem_addrs`; conformance `mmap_avail.pas` (MMAP_$AVAIL 0xE0CC64,
+      byte-identical with a stand-in local for its `link #-4`, bead
+      domain-pascal-s9g0); test `dpc-m68k` `element_addresses_as_values`.
     **Implemented** (`isel.rs`, `index_ea`, `other_unit_index`,
     `index_reg_with`): the rule above, in straight-line code, one such
     element per statement and per array between calls, at displacements
@@ -3200,7 +3278,10 @@ model run against the bit model of Figure 3-6).
   Uncertain: whether the original reserved a frame slot for the
   temporary (NETLOG_$LOG_IT's `link #-24` has 6 bytes no instruction
   addresses below its 18 of locals, enough for a 4-byte temporary or a
-  local), and whether it copied a pointer already held in a register
+  local; MMAP_$AVAIL 0xE0CC64, MMAP_$WIRE 0xE0CCBC and
+  AST_$INVALIDATE_PAGE 0xE00F16 have `link #-4`, the element address
+  in A2/A3 and no other local in ../source's C, and XPD_$FIND_INDEX 0xE5AF38 `link
+  #-8` beside its word at -2: bead domain-pascal-s9g0), and whether it copied a pointer already held in a register
   (dpc goes through the variable when it is stable, as above, and
   copies a register-held local's pointer with `movea.l Dn,An`
   otherwise).  Refused: a `with` over a volatile record reached at run
@@ -3279,8 +3360,8 @@ model run against the bit model of Figure 3-6).
     value that is not an address (NETBUF_$GETVA
     0xE0ECC8..0xE0ECE2 forms the element's address first, `movea.l
     #NETWORK_$BUFPOOL,A0; ...; lea (0,A0,D3.l),A1`, then the masked
-    value, `add.l A1,D3`: one site, of the unsettled element form, bead
-    domain-pascal-o1kl; DIR_$GET_ENTRYU 0xE4D648 `clr.l D0; lea
+    value, `add.l A1,D3`: one site, its element address read once, the
+    unsettled form of 5.2, bead domain-pascal-1ibr; DIR_$GET_ENTRYU 0xE4D648 `clr.l D0; lea
     (12,A2),A0; move.b (1,A2),D0; add.l A0,D0` and the other `add.l
     An,Dn` after a `lea` or `movea.l #`, 8 sites in all, the source's
     operand order unknown); an address formed with a `lea` or an
@@ -8238,6 +8319,15 @@ words, no copy coalescing:
   counted as an update (`adda`), not a new value: 337 such, against 378
   `lea` into another register while the base dies.  When the compiler
   reuses the base is not known.
+- **Not for an indexed `lea` (survey; bead domain-pascal-o1kl).**  `lea
+  (d,An,Dx),Am` with a base set in its block and dying there
+  (`tools/regalloc.py elemaddr`; 5.2, "The element's address as a
+  value"): an address read twice or more takes the base's register where
+  it is the lowest free over the address's range (129 sites where only
+  that fits, 6 where only R2 does; with R4(c) for a last read that is a
+  call's argument, 197 of 208), one live across a call a callee-saved
+  register as R3 says; one read once fits either 98 and 99 times.  `dpc`'s allocator applies R2 to the base of `lea (d,An)` and
+  not to that of `lea (d,An,Dx)` (`regs.rs`).
 
 **R3. Calls (Verified).**
 - A value live across a call is in D2–D7/A2–A4.  1834 such values in

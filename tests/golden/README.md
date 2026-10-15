@@ -71,6 +71,11 @@ Tests:
   (module-local 0xE4649C, byte-identical; TTY_$I_WAIT 0xE1C22E ×12),
   after a `neg` scaling (0xE1AA50 ×56), in a byte index's stall
   (KBD_$FETCH_KEY 0xE1CBAA, 0xE1CB8A for a pointer loaded from memory).
+- `data/elem_addr` - codegen-patterns 5.2 ("The element's address as a
+  value"), 12.4 R2 (bead domain-pascal-o1kl): a `with` record of another
+  unit's array read twice in the base's own register (XPD_$FIND_INDEX
+  0xE5AF60), one live across a call in a callee-saved register with the
+  base in A0 (MMAP_$AVAIL 0xE0CC80).
 - `data/index_mul` - codegen-patterns 5.2 ("Index scaling"), 8
   ("Multiplication by a constant"; bead domain-pascal-r3yy): a constant
   of 1..127 done with a multiply goes first, `moveq #c,Dn; mul<s>.w

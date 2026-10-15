@@ -119,6 +119,22 @@ usage:
                                          # through copies, by their other
                                          # uses and whether an address
                                          # register was free over their range
+    tools/regalloc.py elemaddr [N]       # bead domain-pascal-o1kl: each
+                                         # `lea (d,An,Dx),Am' (An A0-A4):
+                                         # Am the base's register or
+                                         # another, by the address's use
+                                         # (read once, twice or more, live
+                                         # across a call), the base's set-up
+                                         # (`movea.l #', a load) and whether
+                                         # the lowest register free over
+                                         # the address's range, the dying
+                                         # base's counted free (`col') or
+                                         # not (`colU', 12.4 R2), is Am;
+                                         # then, with no call in the
+                                         # range, the fit of `col' or,
+                                         # where the last read is a
+                                         # call's argument, the lowest
+                                         # callee-saved free (R4(c))
 
 --min/--max bound the routine size in bytes (default 0 and 0x10000).
 
@@ -1879,6 +1895,144 @@ def opts(argv):
     return lo, hi, cls, rest
 
 
+_ELEA = re.compile(r'^%(a[0-4])@\((-?[0-9a-f]+),%(d[0-7]):[wl]\)$')
+
+
+def elem_lea(x):
+    """(base, displacement, result) of an indexed `lea (d,An,Dx),Am'
+    (An one of A0-A4), else None.  objdump prints the displacement in hex
+    without `0x', a negative one in 16 digits."""
+    if x.mn != 'lea' or len(x.ops) != 2:
+        return None
+    m = _ELEA.match(x.ops[0])
+    r = is_reg(x.ops[1])
+    if not m or not r:
+        return None
+    d = int(m.group(2), 16)
+    if len(m.group(2)) == 16:
+        d -= 1 << 64
+    return m.group(1), d, r
+
+
+def elem_setup(text):
+    """How the instruction `text' sets the base register: `imm' (`movea.l
+    #n,An', another unit's object), `load' (`movea.l <memory>,An', a
+    pointer), `other' (a copy, a `lea', ...)."""
+    if re.match(r'^moveal #', text):
+        return 'imm'
+    if re.match(r'^moveal (?!%[ad]\d,)', text):
+        return 'load'
+    return 'other'
+
+
+def elem_class(reads, across):
+    """The use class of an element address: live across a call (`call'),
+    read twice or more (`multi') or once (`once')."""
+    return 'call' if across else ('multi' if reads >= 2 else 'once')
+
+
+def elem_addr_sites(rt):
+    """[dict] of the indexed `lea's of `rt' whose base is set in the
+    block (elem_lea, elem_setup) and dies at the `lea' (else `live'): the
+    result register `am', the base `an', the reads of the address over its
+    range, whether a call lies in that range, and the lowest A register
+    free over it with the dying base's counted free (`col') and not
+    (`colU')."""
+    out = []
+    for i in rt.reach:
+        e = elem_lea(rt.ins[i])
+        if not e:
+            continue
+        an, d, am = e
+        b = next((k for k in range(i - 1, -1, -1)
+                  if k in rt.block_of and rt.block_of[k] == rt.block_of[i]
+                  and an in rt.ins[k].defs), None)
+        if b is None:
+            continue
+        pts = [q for q in rt.reach
+               if q != i and am in rt.lin[q] and (i, am) in rt.rd_in[q][am]]
+
+        def free(c, base_ok):
+            if c == am:
+                return True
+            if c in rt.lout[i] or (c in rt.lin[i] and not (base_ok and c == an)):
+                return False
+            return not any(c in rt.lin[q] or c in rt.ins[q].defs for q in pts)
+        col = next((c for c in AREGS if free(c, True)), None)
+        colu = next((c for c in AREGS if c != an and free(c, False)), None)
+        last = max(pts) if pts else i
+        # 12.4 R4(c): the last read an argument push of a call later in
+        # its block; the address held through that call takes the lowest
+        # callee-saved register free up to the call (`r4c').
+        reads = [q for q in pts if am in rt.ins[q].uses]
+        call = None
+        if reads and re.match(r'^pea |.*%sp@-$', rt.ins[max(reads)].text):
+            k = max(reads)
+            blk = rt.block_of.get(k)
+            call = next((j for j in range(k + 1, len(rt.ins))
+                         if rt.block_of.get(j) != blk or rt.ins[j].call), None)
+            if call is not None and not rt.ins[call].call:
+                call = None
+        r4c = None
+        if call is not None:
+            held = pts + list(range(max(reads) + 1, call))
+
+            def free_held(c):
+                if c == am:
+                    return True
+                if c in rt.lout[i] or (c in rt.lin[i] and c != an):
+                    return False
+                return not any(c in rt.lin[q] or c in rt.ins[q].defs for q in held)
+            r4c = next((c for c in ('a2', 'a3', 'a4') if free_held(c)), None)
+        out.append(dict(
+            addr=rt.ins[i].addr, an=an, am=am, disp=d,
+            setup=elem_setup(rt.ins[b].text),
+            live=am != an and an in rt.lout[i],
+            reads=len(reads),
+            across=any(rt.ins[q].call for q in pts if q < last),
+            held=call is not None,
+            col=col, colU=colu, r4c=r4c))
+    return out
+
+
+def elem_summary(done, show=6):
+    """The counts of codegen-patterns 5.2, "The element's address as a
+    value" (bead domain-pascal-o1kl)."""
+    tot, ex = Counter(), defaultdict(list)
+    for seg, rt in done:
+        for s in elem_addr_sites(rt):
+            if s['live']:
+                k = ('base live', s['setup'], 'another')
+            else:
+                fit = ('col' if s['col'] == s['am'] else '-') + '/' + (
+                    'colU' if s['colU'] == s['am'] else '-')
+                k = (elem_class(s['reads'], s['across']), s['setup'],
+                     'own' if s['am'] == s['an'] else 'another', fit)
+            tot[k] += 1
+            ex[k].append('%06X' % s['addr'])
+    print('(use class, base set-up, Am, fit: col/colU)')
+    for k in sorted(tot):
+        print('%-36s %5d  %s' % (' '.join(k), tot[k], ' '.join(ex[k][:show])))
+    # dpc's model: `col', or where the last read is an argument of a
+    # call (R4(c), `held'), the lowest callee-saved register free up to
+    # the call (`r4c').
+    fit, ex = Counter(), defaultdict(list)
+    for seg, rt in done:
+        for s in elem_addr_sites(rt):
+            if s['live'] or s['across']:
+                continue
+            k = ('multi' if s['reads'] >= 2 else 'once',
+                 'held' if s['held'] else 'not held')
+            p = s['r4c'] if s['held'] else s['col']
+            k += ('fit' if p == s['am'] else 'miss',)
+            fit[k] += 1
+            ex[k].append('%06X' % s['addr'])
+    print('(no call in the range: use class, last read an argument of a '
+          'call (R4(c)), col or R4(c) fits)')
+    for k in sorted(fit):
+        print('%-36s %5d  %s' % (' '.join(k), fit[k], ' '.join(ex[k][:show])))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -2134,6 +2288,9 @@ def main(argv):
         print('(class, lower, first defined, P call, L call, L kind)')
         for k in sorted(tot, key=lambda k: (k[0], k[2:], k[1])):
             print('%-44s %5d  %s' % ('/'.join(k), tot[k], ' '.join(ex[k][:show])))
+        return 0
+    if cmd == 'elemaddr':
+        elem_summary(done, int(argv[1]) if len(argv) > 1 else 6)
         return 0
     if cmd in ('orders', 'simmisses'):
         # bead domain-pascal-jjh: allocator orders simulated over colU's
