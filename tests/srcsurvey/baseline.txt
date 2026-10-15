@@ -250,7 +250,7 @@ MISMATCH	vfmt/vfmt.pas	vfmt_$write
 STUB	volx/volx.pas	find_volx
 STUB	volx/volx.pas	volx_$mount
 STUB	volx/volx.pas	volx_$dismount
-STUB	volx/volx.pas	volx_$shutdown
+MISMATCH	volx/volx.pas	volx_$shutdown
 STUB	volx/volx.pas	volx_$get_info
 STUB	volx/volx.pas	volx_$get_uids
 STUB	volx/volx.pas	volx_$rec_entry

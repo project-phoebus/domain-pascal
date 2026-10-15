@@ -77,5 +77,80 @@ class HeadRowsTest(unittest.TestCase):
                           (0x114, 'U', 'dbf', 'fall', 'al')])
 
 
+class SteppedPointersTest(unittest.TestCase):
+    """`ptrs' (bead domain-pascal-xm5w): the stepped pointers of a `dbf'
+    loop and how the preheader forms them."""
+
+    def ins(self, texts, at=0x100):
+        out, a = [], at
+        for t in texts:
+            out.append((a, 2, t))
+            a += 2
+        return out
+
+    def test_roots(self):
+        self.assertEqual(loopalign.root_class('lea %a5@(36),%a2'), 'lea A5')
+        self.assertEqual(loopalign.root_class('lea %a5@,%a1'), 'lea A5')
+        self.assertEqual(loopalign.root_class('moveal %a5,%a0'), 'movea A5')
+        self.assertEqual(loopalign.root_class('lea %fp@(4),%a0'), 'lea A6')
+        self.assertEqual(loopalign.root_class('moveal %fp,%a0'), 'movea A6')
+        self.assertEqual(loopalign.root_class('moveal #14848408,%a2'), 'movea abs')
+        self.assertEqual(loopalign.root_class('lea %a1@(2),%a0'), 'lea An')
+        self.assertEqual(loopalign.root_class('moveal %fp@(8),%a2'), 'load frame')
+        self.assertEqual(loopalign.root_class('moveal %d3,%a1'), 'from Dn')
+
+    def test_in_place_and_new(self):
+        # EC2_$REGISTER_EC1 0xE42968: `movea.l A5,A0; moveq #1,D1;
+        # addq.l #4,A0', the head, `cmpa.l (2700,A0),A1', the step.
+        ins = self.ins([
+            'subqw #1,%d0',
+            'bmis 0x200',
+            'moveal %a5,%a0',
+            'moveq #1,%d1',
+            'addql #4,%a0',
+            'cmpal %a0@(2700),%a1',       # head, index 5
+            'addqw #1,%d1',
+            'addql #4,%a0',
+            'dbf %d0,0x10a',              # index 8
+        ])
+        (p,) = loopalign.stepped_pointers(ins, 5, 8)
+        self.assertEqual(p['reg'], '%a0')
+        self.assertEqual((p['kind'], p['step'], p['root']), ('step', 4, 'movea A5'))
+        self.assertEqual([t for _, t in p['chain']], ['moveal %a5,%a0', 'addql #4,%a0'])
+        self.assertEqual((p['offset'], p['disps'], p['count']), (4, [2700], 'run'))
+        # DBUF_$INVALIDATE 0xE3AA0E: `lea (36,A5),A2', the filler skipped,
+        # a `with' copy at the head, a constant count.
+        ins = self.ins([
+            'moveq #7,%d4',
+            'lea %a5@(36),%a2',
+            'moveal %a0,%a0',
+            'moveal %a2,%a3',             # head, index 3
+            'tstl %a3@(-8)',
+            'lea %a2@(36),%a2',
+            'dbf %d4,0x106',              # index 6
+        ])
+        (p,) = loopalign.stepped_pointers(ins, 3, 6, lambda a: a == 0x104)
+        self.assertEqual((p['root'], p['offset'], p['step'], p['count']),
+                         ('lea A5', 36, 36, 'const'))
+        self.assertEqual(p['disps'], [])
+
+    def test_lea_from_pointer_is_an_access(self):
+        # DIR_$DO_OP 0xE4CC16: `lea (5460,A0),A3' reaches an element
+        # through the stepped A0 (it is not A0's step).
+        ins = self.ins([
+            'moveal %a5,%a0',
+            'moveq #1,%d1',
+            'addql #8,%a0',
+            'lea %a0@(5460),%a3',         # head, index 3
+            'cmpml %a3@+,%a4@+',
+            'addqw #1,%d1',
+            'addql #8,%a0',
+            'dbf %d0,0x106',              # index 7
+        ])
+        ps = loopalign.stepped_pointers(ins, 3, 7)
+        (p,) = [x for x in ps if x['reg'] == '%a0']
+        self.assertEqual((p['root'], p['offset'], p['disps']), ('movea A5', 8, [5460]))
+
+
 if __name__ == '__main__':
     unittest.main()

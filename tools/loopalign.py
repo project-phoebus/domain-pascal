@@ -48,6 +48,16 @@ usage:
                                           # register or memory, index use
                                           # (byte index vs stepped pointer),
                                           # run-time guards (7.4)
+    tools/loopalign.py ptrs [-v] [ROOT...] # `dbf' loops: the stepped
+                                          # pointers by how the preheader
+                                          # forms them (root: `lea A5',
+                                          # `movea A5', `lea A6', `movea
+                                          # A6', `movea abs', `lea An', ...;
+                                          # adjusted in place or not); -v
+                                          # one line per pointer of the
+                                          # ROOTs (default the A5 and A6
+                                          # ones) with its displacements
+                                          # and preheader (7.4, "Forming")
 
 Python 3 standard library + m68k-elf-objdump.  Read-only.
 """
@@ -393,6 +403,161 @@ def fors(m, sites, routines, verbose=False):
         print('  %4d %s' % (v, k))
 
 
+# A pointer step at a loop's bottom: `addq.l/subq.l #s,An' or `lea (s,An),An'.
+_PSTEP = re.compile(r'(addql|subql) #(\d),(%a[0-6])$')
+_PLEA = re.compile(r'lea (%a[0-6])@\((-?\d+)\),(%a[0-6])$')
+
+# The definition that starts a stepped pointer's chain, by its source
+# (bead domain-pascal-xm5w): the unit's data (A5), the frame (A6), an
+# absolute address (another unit's variable), another address register
+# (a pointer), a load from memory, a data register.
+_ROOTS = [
+    (r'lea %a5@(\((-?\d+)\))?,', 'lea A5'),
+    (r'moveal %a5,', 'movea A5'),
+    (r'lea %fp@(\((-?\d+)\))?,', 'lea A6'),
+    (r'moveal %fp,', 'movea A6'),
+    (r'moveal #', 'movea abs'),
+    (r'lea 0x', 'lea abs'),
+    (r'lea %a[0-4]@', 'lea An'),
+    (r'moveal %a[0-4],', 'movea An'),
+    (r'moveal %fp@', 'load frame'),
+    (r'moveal %a5@', 'load A5'),
+    (r'moveal %a[0-4]@', 'load An'),
+    (r'moveal %d\d,', 'from Dn'),
+    (r'moveal 0x', 'load abs'),
+]
+
+
+def root_class(text):
+    """The class of a stepped pointer's first definition (see _ROOTS)."""
+    for pat, name in _ROOTS:
+        if re.match(pat, text):
+            return name
+    return 'other ' + text.split()[0]
+
+
+def _writes(text, reg):
+    """Whether instruction `text' writes address register `reg' (as its
+    last operand; `(An)+'/`-(An)' side effects are not counted)."""
+    return text.endswith(',' + reg) or text in ('clrl ' + reg,) or \
+        re.match(r'\w+ ' + re.escape(reg) + '$', text) is not None
+
+
+def stepped_pointers(ins, i, j, filler=lambda a: False):
+    """The pointers a `dbf' loop steps, its head ins[i], its `dbf' ins[j]
+    (codegen-patterns 7.4, "Array indexing by the index"; bead
+    domain-pascal-xm5w).  [dict] per address register stepped in the body
+    (`addq.l'/`subq.l'/`lea (s,An),An'; `(An)+' only: kind `postinc'):
+
+      reg, step (the step's size, 0 for `(An)+'), kind ('step'|'postinc'),
+      chain [(addr, text)]: the preheader's definitions of the register,
+          the first a root (`lea (d,A5),An', `movea.l A5,An', ...) and the
+          rest in-place adjustments (`addq.l', `lea (d,An),An'),
+      root (root_class of the first), offset (the constant the chain adds
+          to its source: the root's displacement plus the adjustments),
+      disps: the displacements of the body's accesses through the
+          register (`(d,An)', 0 for `(An)'; the step itself not counted),
+      count ('const' or 'run': the `dbf' counter's last preheader
+          definition is an immediate `moveq'/`move.w', or not),
+      order: the preheader instructions from the root on, as text.
+
+    `filler(addr)' says whether the word at addr is the 0x2048 filler (it
+    is skipped before the head)."""
+    body = [x for _, _, x in ins[i:j]]
+    stepped = {}
+    for x in body:
+        mm = _PSTEP.match(x)
+        if mm:
+            stepped.setdefault(mm.group(3), []).append(int(mm.group(2)))
+        mm = _PLEA.match(x)
+        if mm and mm.group(1) == mm.group(3):
+            stepped.setdefault(mm.group(1), []).append(abs(int(mm.group(2))))
+    for r in re.findall(r'(%a[0-6])@\+', ' '.join(body)):
+        stepped.setdefault(r, [])
+    creg = re.search(r'(%d\d)', ins[j][2]).group(1)
+    count = 'run'
+    for k in range(i - 1, max(-1, i - 40), -1):
+        x = ins[k][2]
+        if x.endswith(',' + creg) or x.endswith(' ' + creg):
+            count = 'const' if re.match(r'(moveq|movew) #', x) else 'run'
+            break
+    out = []
+    for r, steps in sorted(stepped.items()):
+        k = i - 1
+        if k >= 0 and ins[k][1] == 2 and filler(ins[k][0]):
+            k -= 1
+        chain = []
+        while k >= 0 and i - k < 40:
+            x = ins[k][2]
+            if _writes(x, r):
+                chain.insert(0, (ins[k][0], x))
+                mm = _PLEA.match(x)
+                if not (_PSTEP.match(x) or (mm and mm.group(1) == r)):
+                    break
+            k -= 1
+        root = root_class(chain[0][1]) if chain else 'none'
+        offset = 0
+        for n, (_, x) in enumerate(chain):
+            mm = re.match(r'lea (?:%a\d|%fp)@\((-?\d+)\),', x)
+            if mm:
+                offset += int(mm.group(1))
+            mm = _PSTEP.match(x)
+            if mm:
+                offset += int(mm.group(2)) * (1 if mm.group(1) == 'addql' else -1)
+        disps = set()
+        for x in body:
+            mm = _PLEA.match(x)
+            if (mm and mm.group(1) == r == mm.group(3)) or _PSTEP.match(x):
+                continue                      # a step (`lea (d,Ap),Aw' is an access)
+            for d in re.findall(re.escape(r) + r'@\((-?\d+)\)', x):
+                disps.add(int(d))
+            if re.search(re.escape(r) + r'@(?![(+])', x):
+                disps.add(0)
+        start = idx_of(ins, chain[0][0]) if chain else i
+        out.append(dict(reg=r, step=steps[-1] if steps else 0,
+                        kind='step' if steps else 'postinc', chain=chain,
+                        root=root, offset=offset, disps=sorted(disps),
+                        count=count, order=[x for _, _, x in ins[start:i]]))
+    return out
+
+
+def idx_of(ins, addr):
+    for n, (a, _, _) in enumerate(ins):
+        if a == addr:
+            return n
+    raise KeyError(addr)
+
+
+def ptrs(m, sites, routines, verbose=False, roots=None):
+    """Stepped pointers of `dbf' loops by how they are formed (bead
+    domain-pascal-xm5w; codegen-patterns 7.4): counts by kind, root and
+    in place (a chain longer than the root) or not, then with -v one line
+    per pointer of the roots given (default the unit's data and the
+    frame).  Loops whose body is one instruction (block copies and fills,
+    codegen-patterns 5.2) are counted apart as `blk'."""
+    rows = [r for r in head_rows(m, sites, routines) if r[2] == 'dbf']
+    c = Counter()
+    lines = []
+    roots = roots or ('lea A5', 'movea A5', 'lea A6', 'movea A6')
+    for t, cls, back, entry, al, r0, src in rows:
+        ins = INSNS[r0]
+        idx = {a: n for n, (a, _, _) in enumerate(ins)}
+        i, j = idx[t], idx[src]
+        for p in stepped_pointers(ins, i, j, lambda a: word(a) == 0x2048):
+            kind = 'blk' if j - i == 1 else p['kind']
+            inplace = len(p['chain']) > 1
+            c[(kind, p['root'], 'in place' if inplace else '')] += 1
+            if verbose and kind == 'step' and p['root'] in roots:
+                lines.append('%06X %-3s %-5s %-9s %-24s %s step=%-3d off=%-5d disps=%s  | %s' % (
+                    t, al, p['count'], p['root'] + ('+' if inplace else ''),
+                    m.describe(r0)[:24], p['reg'], p['step'], p['offset'],
+                    ','.join(map(str, p['disps'])), ' ; '.join(p['order'])))
+    for k, v in sorted(c.items()):
+        print('%4d %-8s %-12s %s' % (v, *k))
+    for x in lines:
+        print(x)
+
+
 def summary(m, sites, fillers, routines):
     """The counts quoted in codegen-patterns section 7."""
     import bisect
@@ -515,6 +680,9 @@ def main(argv):
         heads(m, sites, routines)
     elif argv[0] == 'fors':
         fors(m, sites, routines, '-v' in argv[1:])
+    elif argv[0] == 'ptrs':
+        roots = [a for a in argv[1:] if a != '-v']
+        ptrs(m, sites, routines, '-v' in argv[1:], roots or None)
     elif argv[0] == 'ends':
         # last word of each code segment that ends after an rts, with the
         # classes of the segment's routines (as in `routines')

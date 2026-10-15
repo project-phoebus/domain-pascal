@@ -2687,12 +2687,50 @@ fn stmts_call(body: &[Stmt]) -> bool {
 
 /// An array a `for` loop reaches through a pointer stepped by the element
 /// size (codegen-patterns 7.4, "Array indexing by the index"): the
-/// array's address (`base`, an [`Addr::Indirect`] at offset 0) and the
-/// element size.
+/// array's address (`base`: an [`Addr::Indirect`] at offset 0, the unit's
+/// data [`Addr::Static`], the frame [`Addr::Frame`], or another unit's
+/// object [`Addr::Symbol`]), the element size, and how its pointer is
+/// formed (decided by [`Selector::step_plan`]; [`StepForm::New`] until
+/// then).
 #[derive(Clone, Debug, PartialEq)]
 struct SteppedArray {
     base: Addr,
     scale: u32,
+    form: StepForm,
+}
+
+/// How a stepped pointer is formed (codegen-patterns 7.4, "Forming"; bead
+/// domain-pascal-xm5w, `tools/loopalign.py ptrs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StepForm {
+    /// `lea (from × size,Bn),Ap` into a new register, Bn the pointer
+    /// variable's register, A5 or A6 (LOG_$READ's worker 0xE177E0;
+    /// DBUF_$INVALIDATE 0xE3AA0E `lea (36,A5),A2`; MSG_$$SEND 0xE0DB7A
+    /// `lea (4,A6),A0`).
+    New,
+    /// `movea.l A5|A6|#sym,Ap`, then `addq.l #k,Ap` (`lea (k,Ap),Ap`
+    /// above 8) with k = from × size, in place (EC2_$REGISTER_EC1
+    /// 0xE42968 `movea.l A5,A0; moveq #1,D1; addq.l #4,A0`; FILE_$PRIV_CREATE
+    /// 0xE5D63E `movea.l A6,A0; moveq #35,D0; addq.l #4,A0`; TIME_$INIT
+    /// 0xE2FE94 `moveq #63,D3; movea.l #abs,A2; moveq #1,D4; lea
+    /// (12,A2),A2`).
+    InPlace,
+}
+
+impl SteppedArray {
+    /// The array's own offset from the register its pointer is formed
+    /// from: the unit's data area's, the frame's, the symbol's; 0 through
+    /// a pointer (the array at offset 0, [`stepped_arrays`]).  Each
+    /// element is reached at this offset plus the lower bound and field
+    /// offsets of its [`Addr::Index`] (DBUF_$INVALIDATE 0xE3AA16 `(-8,A3)`:
+    /// the array at 0x10, 36-byte elements from 1, the field at 0xC).
+    fn base_offset(&self) -> i32 {
+        match &self.base {
+            Addr::Static(o) | Addr::Frame(o) => *o,
+            Addr::Symbol { offset, .. } => *offset,
+            _ => 0,
+        }
+    }
 }
 
 /// Visit the expressions, addresses and calls of `body` in evaluation
@@ -2796,14 +2834,12 @@ fn is_index(index: &Expr, off: i32) -> bool {
 ///
 /// - an index that is an expression of the loop index (`a[i + 1]`), or an
 ///   array whose address depends on it;
-/// - an array in the unit's data or in the frame: the pointer is formed
-///   with `lea (d,A5)` (PKT_$RECENTLY_MISSING 0xE128D6 `lea (8,A5),A0`)
-///   or `movea.l A5,An; addq.l #d,An` (0xE4296E, 0xE5142E, 0xE4E478), with
-///   `lea (d,A6)` (0xE4EB06) or `movea.l A6,An; addq.l #d,An` (0xE427DE),
-///   both in one preheader at 0xE134DE: no rule found; another unit's
-///   array: `movea.l #abs,A0; lea (12,A0),A0` (HINT_$INIT_CACHE 0xE313DA),
-///   the address split between the immediate and the displacements not
-///   catalogued (section 5.2);
+/// - an array at an address other than through a pointer, in the unit's
+///   data area ([`Addr::Static`]), in the frame ([`Addr::Frame`]) or in
+///   another unit's object ([`Addr::Symbol`]): another data section's
+///   block (bead domain-pascal-hxwq), the enclosing routine's frame;
+///   (those three are accepted here; how their pointers are formed, and
+///   what is refused of them, is [`Selector::step_plan`]'s);
 /// - an array at a non-zero offset from its pointer (`p^.f[i]`: whether
 ///   the offset goes into the pointer or the displacements is not seen;
 ///   the sites looked at all have offset 0);
@@ -2843,6 +2879,7 @@ fn stepped_arrays(
         let a = SteppedArray {
             base: (**base).clone(),
             scale: *scale,
+            form: StepForm::New,
         };
         if !out.contains(&a) {
             out.push(a);
@@ -2853,11 +2890,18 @@ fn stepped_arrays(
     }
     for a in &out {
         let Addr::Indirect { base: p, offset } = &a.base else {
+            if matches!(
+                a.base,
+                Addr::Static(_) | Addr::Frame(_) | Addr::Symbol { .. }
+            ) {
+                // A constant address: the unit's data area, the frame,
+                // another unit's object ([`Selector::step_plan`]).
+                continue;
+            }
             return Err(
-                "a `for` loop stepping a pointer through an array not reached through a \
-                 pointer (in the unit's data or the frame: `lea (d,A5)` or `movea.l A5,An; \
-                 addq.l #d,An`, no rule found; another unit's: `movea.l #abs,An`, address \
-                 split not catalogued; codegen-patterns 7.4) is",
+                "a `for` loop stepping a pointer through an array of another data section's \
+                 block or of the enclosing routine's frame (not surveyed, codegen-patterns \
+                 7.4; bead domain-pascal-hxwq) is",
             );
         };
         if *offset != 0 {
@@ -2945,6 +2989,288 @@ fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bo
         _ => {}
     });
     ok
+}
+
+/// Apply `f` to every address of `body`, nested ones included, each
+/// before the ones inside it (the mutable counterpart of [`walk`]).
+fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
+    for st in body {
+        match &mut st.kind {
+            StmtKind::SetResult(e) | StmtKind::Discard(e) => expr_addrs_mut(e, f),
+            StmtKind::Store { addr, value } | StmtKind::StoreBits { addr, value, .. } => {
+                addr_mut(addr, f);
+                expr_addrs_mut(value, f);
+            }
+            StmtKind::Copy { dst, src, .. } => {
+                addr_mut(dst, f);
+                addr_mut(src, f);
+            }
+            StmtKind::Call(c) => call_addrs_mut(c, f),
+            StmtKind::Fill { start, value, .. } => {
+                addr_mut(start, f);
+                expr_addrs_mut(value, f);
+            }
+            StmtKind::If { cond, then_, else_ } => {
+                cond_addrs_mut(cond, f);
+                addrs_mut(then_, f);
+                addrs_mut(else_, f);
+            }
+            StmtKind::Repeat { body, until } => {
+                addrs_mut(body, f);
+                cond_addrs_mut(until, f);
+            }
+            StmtKind::While { cond, body } => {
+                cond_addrs_mut(cond, f);
+                addrs_mut(body, f);
+            }
+            StmtKind::For(l) => {
+                expr_addrs_mut(&mut l.from, f);
+                expr_addrs_mut(&mut l.to, f);
+                addrs_mut(&mut l.body, f);
+            }
+            StmtKind::Case {
+                selector,
+                arms,
+                otherwise,
+            } => {
+                expr_addrs_mut(selector, f);
+                for a in arms {
+                    addrs_mut(&mut a.body, f);
+                }
+                if let Some(o) = otherwise {
+                    addrs_mut(o, f);
+                }
+            }
+            StmtKind::Return
+            | StmtKind::Disable
+            | StmtKind::Enable
+            | StmtKind::Exit
+            | StmtKind::Next
+            | StmtKind::Label(_)
+            | StmtKind::Goto(_) => {}
+        }
+    }
+}
+
+fn addr_mut(a: &mut Addr, f: &mut dyn FnMut(&mut Addr)) {
+    f(a);
+    match a {
+        Addr::Frame(_)
+        | Addr::Enclosing(_)
+        | Addr::Static(_)
+        | Addr::OtherStatic { .. }
+        | Addr::Symbol { .. }
+        | Addr::Const(_) => {}
+        Addr::Volatile { addr, .. } => addr_mut(addr, f),
+        Addr::Indirect { base, .. } => expr_addrs_mut(base, f),
+        Addr::Index { base, index, .. } => {
+            addr_mut(base, f);
+            expr_addrs_mut(index, f);
+        }
+    }
+}
+
+fn expr_addrs_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Addr)) {
+    match e {
+        Expr::Const { .. } => {}
+        Expr::Load { addr, .. } | Expr::Bits { addr, .. } | Expr::AddrOf(addr) => addr_mut(addr, f),
+        Expr::SetMember { elem, set, .. } => {
+            expr_addrs_mut(elem, f);
+            expr_addrs_mut(set, f);
+        }
+        Expr::SetMemberAt { elem, set, .. } => {
+            expr_addrs_mut(elem, f);
+            addr_mut(set, f);
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::SetOp { lhs, rhs, .. } => {
+            expr_addrs_mut(lhs, f);
+            expr_addrs_mut(rhs, f);
+        }
+        Expr::Unary { operand: x, .. }
+        | Expr::Convert { value: x, .. }
+        | Expr::SetSr(x)
+        | Expr::SetOf { elem: x, .. } => expr_addrs_mut(x, f),
+        Expr::Call { call, .. } => call_addrs_mut(call, f),
+        Expr::Test(c) => cond_addrs_mut(c, f),
+    }
+}
+
+fn call_addrs_mut(c: &mut Call, f: &mut dyn FnMut(&mut Addr)) {
+    for a in &mut c.args {
+        match a {
+            Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_addrs_mut(value, f),
+            Arg::Address { addr, .. } => addr_mut(addr, f),
+        }
+    }
+    if let Some(x) = c.pointer_mut() {
+        expr_addrs_mut(x, f);
+    }
+}
+
+fn cond_addrs_mut(c: &mut IrCond, f: &mut dyn FnMut(&mut Addr)) {
+    match c {
+        IrCond::Compare { lhs, rhs, .. } => {
+            expr_addrs_mut(lhs, f);
+            expr_addrs_mut(rhs, f);
+        }
+        IrCond::Test(e) | IrCond::Odd(e) => expr_addrs_mut(e, f),
+        IrCond::Not(x) => cond_addrs_mut(x, f),
+        IrCond::AndThen(a, b) | IrCond::OrElse(a, b) | IrCond::And(a, b) | IrCond::Or(a, b) => {
+            cond_addrs_mut(a, f);
+            cond_addrs_mut(b, f);
+        }
+        IrCond::Block { lhs, rhs, .. } => {
+            addr_mut(lhs, f);
+            addr_mut(rhs, f);
+        }
+    }
+}
+
+/// A `with a[i] do` temporary ([`Function::with_temps`]) of a `for`
+/// loop's stepped array: the temporary's frame offset and the array's
+/// index in the loop's list.
+type StepTemp = (i32, usize);
+
+/// The `with` temporaries of `body` that hold the address of an element
+/// of a stepped array of `arrays` (`with a[i] do`, `i` the `for` index at
+/// `off`).
+fn stepped_with_temps(
+    body: &[Stmt],
+    arrays: &[SteppedArray],
+    off: i32,
+    temps: &[i32],
+) -> Vec<StepTemp> {
+    let mut out = Vec::new();
+    dpc_ir::visit_stmts(body, &mut |st| {
+        if let StmtKind::Store {
+            addr: Addr::Frame(t),
+            value: Expr::AddrOf(Addr::Index {
+                base, index, scale, ..
+            }),
+        } = &st.kind
+        {
+            if !temps.contains(t) || !is_index(index, off) {
+                return;
+            }
+            if let Some(k) = arrays
+                .iter()
+                .position(|a| a.scale == *scale && a.base == **base)
+            {
+                out.push((*t, k));
+            }
+        }
+    });
+    out
+}
+
+/// `body` with each `with a[i] do` temporary of a stepped array at an
+/// offset from its register rebased to hold the stepped pointer itself,
+/// the array's offset ([`SteppedArray::base_offset`]) moved into the
+/// references through it (codegen-patterns 7.4, "`with`":
+/// DBUF_$INVALIDATE 0xE3AA12 `movea.l A2,A3`, the array at 0x10 of the
+/// unit's data and its field at 0xC reached as `(-8,A3)`, A2 `lea
+/// (36,A5),A2`; XNS_IDP_$OS_DEMUX 0xE185BC `movea.l A1,A0`, A1 `movea.l
+/// A5,A1`, the channels at 0xA0 reached at `(216,A0)`).  The temporary is
+/// assigned once, at its `with` statement, and referenced only inside it,
+/// so its value less the offset and each reference plus it are the same
+/// addresses.
+fn with_rebase(body: &[Stmt], arrays: &[SteppedArray], temps: &[StepTemp]) -> Vec<Stmt> {
+    let mut out = body.to_vec();
+    let shift = |t: i32| {
+        temps
+            .iter()
+            .find(|&&(x, _)| x == t)
+            .map(|&(_, k)| arrays[k].base_offset())
+    };
+    addrs_mut(&mut out, &mut |a| {
+        if let Addr::Indirect { base, offset } = a {
+            if let Expr::Load {
+                addr: Addr::Frame(t),
+                ..
+            } = &**base
+            {
+                *offset += shift(*t).unwrap_or(0);
+            }
+        }
+    });
+    for &(t, k) in temps {
+        rebase_store(&mut out, t, arrays[k].base_offset());
+    }
+    out
+}
+
+/// Give the element address stored to `with` temporary `t` the offset
+/// `-o` ([`with_rebase`]).
+fn rebase_store(body: &mut [Stmt], t: i32, o: i32) {
+    for st in body {
+        match &mut st.kind {
+            StmtKind::Store {
+                addr: Addr::Frame(x),
+                value: Expr::AddrOf(Addr::Index { offset, .. }),
+            } if *x == t => *offset -= o,
+            StmtKind::If { then_, else_, .. } => {
+                rebase_store(then_, t, o);
+                rebase_store(else_, t, o);
+            }
+            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
+                rebase_store(body, t, o)
+            }
+            StmtKind::For(l) => rebase_store(&mut l.body, t, o),
+            StmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                for a in arms {
+                    rebase_store(&mut a.body, t, o);
+                }
+                if let Some(x) = otherwise {
+                    rebase_store(x, t, o);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The displacements at which `body` (rebased, [`with_rebase`]) reaches
+/// the elements of stepped array `arrays[k]` (the `for` index at `off`)
+/// through its pointer, directly or through one of its `with`
+/// temporaries; the copy into a temporary (displacement 0,
+/// [`Selector::lea_into`]) is not one.
+fn step_displacements(
+    body: &[Stmt],
+    arrays: &[SteppedArray],
+    k: usize,
+    off: i32,
+    temps: &[StepTemp],
+) -> Vec<i32> {
+    let a = &arrays[k];
+    let mut out = Vec::new();
+    walk(body, &mut |n| match n {
+        Node::Addr(Addr::Index {
+            base,
+            index,
+            scale,
+            offset,
+        }) if *scale == a.scale && **base == a.base && is_index(index, off) => {
+            let d = a.base_offset() + offset;
+            if d != 0 {
+                out.push(d);
+            }
+        }
+        Node::Addr(Addr::Indirect { base, offset }) => {
+            if let Expr::Load {
+                addr: Addr::Frame(t),
+                ..
+            } = &**base
+            {
+                if temps.iter().any(|&(x, j)| x == *t && j == k) {
+                    out.push(*offset);
+                }
+            }
+        }
+        _ => {}
+    });
+    out
 }
 
 /// Whether `body` reads the `for` index at `off` other than as the index
@@ -5479,6 +5805,9 @@ impl Selector {
             _ => None,
         };
         let exit = self.new_label();
+        // The count's and the index's set-up instructions (an in-place
+        // pointer's `movea.l` goes before the last of them, [`Self::step_in_place`]).
+        let mut setup = Vec::new();
         let (count, init) = match (konst(&l.from), konst(&l.to)) {
             (Some(a), Some(b)) => {
                 let n = if l.down { a - b + 1 } else { b - a + 1 };
@@ -5500,7 +5829,17 @@ impl Selector {
                 }
                 let c = self.alloc_d()?;
                 let n = n - 1;
-                self.out.push(if n <= 127 {
+                setup.push(self.out.len());
+                self.out.push(if n == 0 {
+                    // One pass: `clr.w`, never `moveq #0` (6 of 6 `dbf`
+                    // counters set to 0: SMD_$DM_COND_EVENT_WAIT 0xE6F012
+                    // `clr.w D0`, SMD_$FREE_ASID 0xE75262, SMD_$INIT;
+                    // codegen-patterns 7.4).
+                    Insn::Clr {
+                        size: Size::W,
+                        dst: Ea::Reg(Reg::D(c)),
+                    }
+                } else if n <= 127 {
                     Insn::Moveq {
                         value: n as i8,
                         dst: c,
@@ -5534,6 +5873,7 @@ impl Selector {
                 });
                 self.jump(Cond::Mi, exit);
                 let c = self.alloc_d()?;
+                setup.push(self.out.len());
                 self.out.push(Insn::Move {
                     size: Size::W,
                     src: Ea::Reg(Reg::D(t)),
@@ -5551,6 +5891,7 @@ impl Selector {
         };
         let index = if uses_index {
             let d = self.alloc_d()?;
+            setup.push(self.out.len());
             self.out.push(match init {
                 0 => Insn::Clr {
                     size: Size::W,
@@ -5573,7 +5914,8 @@ impl Selector {
         } else {
             None
         };
-        let ptrs = self.stepped_pointers(&arrays, init)?;
+        let (arrays, body) = self.step_plan(f, l, arrays, init)?;
+        let ptrs = self.stepped_pointers(&arrays, init, &setup)?;
         let depth = self.stepped.len();
         self.stepped
             .extend(arrays.iter().zip(&ptrs).map(|(a, &r)| (off, a.clone(), r)));
@@ -5585,7 +5927,7 @@ impl Selector {
         self.loops.push((Some(step), Some(exit)));
         self.seq(
             f,
-            &l.body,
+            &body,
             Tail {
                 end: false,
                 clean: false,
@@ -5647,33 +5989,181 @@ impl Selector {
         Ok(())
     }
 
+    /// How each of a `for` loop's stepped arrays gets its pointer
+    /// ([`StepForm`]), and the loop's body with its `with a[i] do`
+    /// temporaries rebased onto the pointers ([`with_rebase`]); `from` is
+    /// the index's initial value (codegen-patterns 7.4, "Forming"; bead
+    /// domain-pascal-xm5w; `tools/loopalign.py ptrs`, the `dbf` loops of
+    /// compiled code, block copies left out):
+    ///
+    /// - through a pointer: [`StepForm::New`] (202 `lea (d,An),Ap` from a
+    ///   pointer's register; the in-place form, 14 sites, not explained);
+    /// - another unit's object: [`StepForm::InPlace`] from `movea.l
+    ///   #sym,Ap`, the symbol itself, its offset and the element's in the
+    ///   displacements (42 of 42 with an absolute base, none formed with
+    ///   `lea`: MAC_$NET_TO_PORT_NUM 0xE0C376 `movea.l #ROUTE_$PORTP,A2`;
+    ///   NET_IO_$CREATE_PORT 0xE5A5C4 `movea.l #ROUTE_$USER_STAT,A0; moveq
+    ///   #1,D1; lea (144,A0),A0`, the elements at `(-144,A0)`; MMAP_$INIT
+    ///   0xE31946 `movea.l #MMAP_$WS_OWNER,A0`, displacement -2);
+    /// - the unit's data area or the frame: [`StepForm::New`], `lea
+    ///   (from × size,A5|A6),Ap`, when every displacement the body reaches
+    ///   an element at through the pointer and that displacement plus
+    ///   `from × size` (the element's offset from A5/A6 in the first pass)
+    ///   lie in -128..127; [`StepForm::InPlace`] from `movea.l A5|A6,Ap`
+    ///   otherwise.  The frame: 52 of 52 (`lea` 35, MSG_$$SEND 0xE0DB7A
+    ///   `lea (4,A6),A0` with `(-116,A0)` and `(-20,A0)`; in place 17,
+    ///   OS_$INSTALL_DISPLAY_ASTE 0xE6D2BE `movea.l A6,A0; moveq #35,D0;
+    ///   addq.l #4,A0` with `(-180,A0)`, then 0xE6D2CE `moveq #7,D0; lea (4,A6),A0`
+    ///   with `(-36,A0)` in the next loop; FILE_$FW_PAGES 0xE5E7D2, -132
+    ///   but -128 in the first pass).  The unit's data: 57 of 60 (`lea` 28,
+    ///   PKT_$RECENTLY_MISSING 0xE128D6 `lea (8,A5),A0`, `(-8,A0)`;
+    ///   DBUF_$INVALIDATE 0xE3AA0E; in place 29, EC2_$REGISTER_EC1
+    ///   0xE42968, `(2700,A0)`; FLP's module-local 0xE3DC78 at 0xE3DCB6
+    ///   `movea.l A5,A1; addq.l #4,A1` with `(124,A0)`..`(127,A0)`, 128..131
+    ///   in the first pass).  The three exceptions, ROUTE_$FIND_PORT
+    ///   0xE15B12, ROUTE_$FIND_PORTP 0xE15B5E (`(4,A0)`) and the module-
+    ///   local 0xE17EAE (`(68,A2)`), all `movea.l A5,An` with `from × size`
+    ///   0, are not explained: an array of the unit's data with `from ×
+    ///   size` 0 and small displacements (11 `lea (A5),An` against those
+    ///   3) is refused.
+    ///
+    /// Refused besides (not settled): an in-place pointer with any other
+    /// stepped pointer in the loop (their order: 0xE6BB2C `movea.l A6,A4;
+    /// lea (4,A6),A3; movea.l A6,A2; addq.l #4,A4; lea (32,A2),A2`, but
+    /// 0xE0E37A forms a pointer variable's `lea` before the frame's); two
+    /// arrays of one element size in the unit's data or the frame (one
+    /// pointer for both at MSG_$$SEND 0xE0DB80 `move.l (-116,A0),(-20,A0)`
+    /// and DIR_$GET_DEFAULT_ACL 0xE53418, `(5460,A0)` and `(5524,A0)`; two
+    /// at RIP_$SERVER 0xE68D64 `lea (A6),A1; lea (A6),A0`); a negative
+    /// `from × size` in place (not seen); the unit's data addressed
+    /// absolutely (`--a5-absolute`, not seen).
+    fn step_plan(
+        &self,
+        f: &Function,
+        l: &ForLoop,
+        mut arrays: Vec<SteppedArray>,
+        from: i64,
+    ) -> Res<(Vec<SteppedArray>, Vec<Stmt>)> {
+        let span = self.span;
+        let off = l.index.offset;
+        let temps = stepped_with_temps(&l.body, &arrays, off, &f.with_temps);
+        let body = with_rebase(&l.body, &arrays, &temps);
+        let fits = |d: i64| (-128..128).contains(&d);
+        for k in 0..arrays.len() {
+            let a = &arrays[k];
+            let start = from * a.scale as i64;
+            let form = match &a.base {
+                Addr::Indirect { .. } => StepForm::New,
+                Addr::Symbol { .. } => StepForm::InPlace,
+                Addr::Static(_) if self.data_absolute => {
+                    return Err(unsupported(
+                        span,
+                        "a `for` loop stepping a pointer through an array of the unit's data \
+                         addressed absolutely (`--a5-absolute`; not seen, codegen-patterns \
+                         7.4) is",
+                    ))
+                }
+                _ => {
+                    let ds = step_displacements(&body, &arrays, k, off, &temps);
+                    if ds.iter().all(|&d| fits(d as i64) && fits(d as i64 + start)) {
+                        StepForm::New
+                    } else {
+                        StepForm::InPlace
+                    }
+                }
+            };
+            if form == StepForm::New && start == 0 && matches!(a.base, Addr::Static(_)) {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop stepping a pointer from the start of the unit's data area \
+                     (`lea (A5),An` 11 times, `movea.l A5,An` 3 times with displacements in a \
+                     byte: ROUTE_$FIND_PORT 0xE15B12, 0xE17EAE; codegen-patterns 7.4; bead \
+                     domain-pascal-s9tx) is",
+                ));
+            }
+            if form == StepForm::InPlace && start < 0 {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop stepping a pointer formed in place from a negative start (not \
+                     seen, codegen-patterns 7.4) is",
+                ));
+            }
+            arrays[k].form = form;
+        }
+        if arrays.len() > 1 && arrays.iter().any(|a| a.form == StepForm::InPlace) {
+            return Err(unsupported(
+                span,
+                "a `for` loop stepping a pointer formed in place (`movea.l A5|A6|#sym,An`) and \
+                 another pointer (their order not settled: 0xE6BB2C, 0xE0E37A; codegen-patterns \
+                 7.4; bead domain-pascal-883c) is",
+            ));
+        }
+        for (k, a) in arrays.iter().enumerate() {
+            let same = |b: &SteppedArray| {
+                b.scale == a.scale
+                    && matches!(
+                        (&a.base, &b.base),
+                        (Addr::Static(_), Addr::Static(_)) | (Addr::Frame(_), Addr::Frame(_))
+                    )
+            };
+            if arrays[..k].iter().any(same) {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop over two arrays of one element size in the unit's data or the \
+                     frame (one pointer for both, MSG_$$SEND 0xE0DB80, or two, RIP_$SERVER \
+                     0xE68D64: not settled, codegen-patterns 7.4; bead domain-pascal-y1yj) is",
+                ));
+            }
+        }
+        Ok((arrays, body))
+    }
+
     /// Form the pointers of a `for` loop's stepped arrays
-    /// ([`stepped_arrays`], codegen-patterns 7.4) after its count and
-    /// index: each array's pointer is loaded into an address register (or
-    /// taken from the one it was loaded into at entry), all of them first,
-    /// then each stepping pointer is formed from it with `lea (from ×
-    /// size,An),Ap`, `lea (An),Ap` for 0, in the order of first use
+    /// ([`stepped_arrays`], [`Self::step_plan`], codegen-patterns 7.4) after
+    /// its count and index (`setup`, the indices in `out` of their
+    /// instructions).  [`StepForm::New`]: each array's pointer is loaded
+    /// into an address register (or taken from the one it was loaded into
+    /// at entry; A5 for the unit's data, A6 for the frame), all of them
+    /// first, then each stepping pointer is formed from it with `lea (from
+    /// × size,An),Ap`, `lea (An),Ap` for 0, in the order of first use
     /// (0xE4F010 `movea.l D6,A4; lea (2,A3),A1; lea (2,A4),A0`; 0xE6FCC6
     /// loads its second base before forming the first pointer; LOG_$READ's
     /// worker 0xE177E0 `lea (2,A1),A0; lea (2,A2),A1`; PKT_$DUMP_DATA
     /// 0xE12800 `lea (4,A0),A2` from a pointer loaded at entry; 0xE3E4C6
-    /// `lea (A3),A2`).  The pointer is the address of the element at the
-    /// index *plus the lower bound times the size*, so the elements are
-    /// reached at the displacements the selector forms anyway (the lower
-    /// bound and field offsets folded in, section 5.2): 0xE177E8 `move.w
-    /// (-2,A0),(-2,A1)`.  A new register for each pointer (R2, no copy
-    /// coalescing; 0xE177E0 although A1 dies there).  **Not reproduced:**
-    /// the forms in place (`lea (12,A0),A0` after `movea.l (12,A6),A0`,
-    /// 0xE7632C, 0xE76378, 0xE76448; `movea.l (32,A6),A1; ...; addq.l
-    /// #2,A1`, 0xE6FCC6), and LOG_$READ's worker's `movea.l (8,A6),A2`
-    /// hoisted above the count (0xE177CC; 12.4 R11/R12).
-    fn stepped_pointers(&mut self, arrays: &[SteppedArray], from: i64) -> Res<Vec<u8>> {
+    /// `lea (A3),A2`; DBUF_$INVALIDATE 0xE3AA0E `lea (36,A5),A2`; VOLX's
+    /// FIND_VOLX 0xE6B0DA `moveq #5,D3; moveq #1,D4; lea (32,A5),A0`;
+    /// 0xE0E37A `lea (4,A0),A1; lea (4,A6),A0`).  The pointer is the
+    /// address of the element at the index *plus the lower bound times the
+    /// size* (and less the array's own offset from A5/A6), so the elements
+    /// are reached at the displacements the selector forms anyway (the
+    /// lower bound and field offsets folded in, section 5.2): 0xE177E8
+    /// `move.w (-2,A0),(-2,A1)`.  A new register for each pointer (R2, no
+    /// copy coalescing; 0xE177E0 although A1 dies there).  **Not
+    /// reproduced:** the forms in place from a pointer (`lea (12,A0),A0`
+    /// after `movea.l (12,A6),A0`, 0xE7632C, 0xE76378, 0xE76448; `movea.l
+    /// (32,A6),A1; ...; addq.l #2,A1`, 0xE6FCC6), and LOG_$READ's worker's
+    /// `movea.l (8,A6),A2` hoisted above the count (0xE177CC; 12.4
+    /// R11/R12).  [`StepForm::InPlace`] (the loop's only stepped array):
+    /// [`Self::step_in_place`].
+    fn stepped_pointers(
+        &mut self,
+        arrays: &[SteppedArray],
+        from: i64,
+        setup: &[usize],
+    ) -> Res<Vec<u8>> {
+        if let [a] = arrays {
+            if a.form == StepForm::InPlace {
+                return Ok(vec![self.step_in_place(a, from, setup)?]);
+            }
+        }
         let mut bases = Vec::new();
         for a in arrays {
-            let Addr::Indirect { base, .. } = &a.base else {
-                unreachable!("stepped_arrays takes arrays through pointers only")
-            };
-            bases.push(self.eval_a(base)?);
+            bases.push(match &a.base {
+                Addr::Indirect { base, .. } => self.eval_a(base)?,
+                Addr::Static(_) => self.static_base()?,
+                Addr::Frame(_) => FP,
+                _ => unreachable!("step_plan forms other arrays' pointers in place"),
+            });
         }
         let mut ptrs = Vec::new();
         for (a, &b) in arrays.iter().zip(&bases) {
@@ -5693,6 +6183,70 @@ impl Selector {
             ptrs.push(r);
         }
         Ok(ptrs)
+    }
+
+    /// A stepped pointer formed in place ([`StepForm::InPlace`]): `movea.l
+    /// A5|A6|#sym,Ap`, then for a non-zero `from × size` k `addq.l #k,Ap`,
+    /// `lea (k,Ap),Ap` above 8 (EC2_$REGISTER_EC1 0xE4296C `addq.l #4,A0`;
+    /// RIP_$SERVER 0xE68D94 `addq.l #6,A3`; DISK_$INIT 0xE3C106 `lea
+    /// (28,A2),A2`).
+    ///
+    /// Placement (`tools/loopalign.py ptrs`, the preheaders of the in-place
+    /// pointers of A5, A6 and absolute bases): with k = 0 the `movea.l`
+    /// comes after the count and the index (AREA_$SHUTDOWN 0xE07F3E `moveq
+    /// #10,D3; movea.l A5,A2`; XNS_IDP_$OS_DEMUX 0xE185B6 `moveq #15,D0;
+    /// clr.w D1; movea.l A5,A1`; 13 + 7 sites); with an adjustment, the
+    /// `movea.l` goes one instruction earlier, before the last set-up
+    /// instruction of the count or the index (14 `movea; count; add`:
+    /// DISK_$INIT 0xE3C102 `movea.l A5,A2; moveq #63,D2; lea (28,A2),A2`,
+    /// MMAP_$INIT 0xE31946, FILE_$PRIV_CREATE 0xE5D63E; 11 `count; movea;
+    /// index; add`: TIME_$INIT 0xE2FE94 `moveq #63,D3; movea.l #abs,A2;
+    /// moveq #1,D4; lea (12,A2),A2`, PROC2_$PGROUP_INFO 0xE42236,
+    /// NET_IO_$CREATE_PORT 0xE5A52C; RIP_$SERVER 0xE68D90 `movea.l A6,A3;
+    /// move.w D1,D4; addq.l #6,A3` past the count's copy), but not across
+    /// another pointer's `lea` (0xE134D6 `lea (4,A6),A1; movea.l A6,A0;
+    /// addq.l #4,A0`) nor a branch (EC2_$WAIT 0xE427D8 `bmi.s; movea.l
+    /// A6,A1; addq.l #2,A1`).  Which model this is (a scheduler filling
+    /// the `movea`'s stall from above?) is not known; dpc's top-down R11
+    /// cannot, so the selector places it.
+    fn step_in_place(&mut self, a: &SteppedArray, from: i64, setup: &[usize]) -> Res<u8> {
+        let src = match &a.base {
+            Addr::Static(_) => Ea::Reg(Reg::A(self.static_base()?)),
+            Addr::Frame(_) => Ea::Reg(Reg::A(FP)),
+            Addr::Symbol { name, .. } => Ea::ImmSym(name.clone()),
+            _ => unreachable!("step_plan forms only constant addresses in place"),
+        };
+        let k = from * a.scale as i64;
+        if !(0..0x8000).contains(&k) {
+            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+        }
+        let r = self.alloc_a()?;
+        let at = self.out.len();
+        self.out.push(Insn::Movea {
+            size: Size::L,
+            src,
+            dst: r,
+        });
+        if k == 0 {
+            return Ok(r);
+        }
+        self.out.push(if k <= 8 {
+            Insn::Addq {
+                size: Size::L,
+                value: k as u8,
+                dst: Ea::Reg(Reg::A(r)),
+            }
+        } else {
+            Insn::Lea {
+                src: Ea::Disp(k as i32, r),
+                dst: r,
+            }
+        });
+        if at > 0 && setup.contains(&(at - 1)) {
+            let m = self.out.remove(at);
+            self.out.insert(at - 1, m);
+        }
+        Ok(r)
     }
 
     /// `case selector of ... otherwise ... end` (ref "Case", pp.
@@ -11663,6 +12217,35 @@ impl Selector {
     /// 0xE71BB6..0xE71BCA: the index times 26 into D1, `movea.l
     /// (116,A5),A0; lea (0,A0,D1.w),A0`).
     fn lea_into(&mut self, a: &Addr, r: u8) -> Res<()> {
+        if let Addr::Index {
+            base,
+            index,
+            scale,
+            offset,
+        } = a
+        {
+            if let Some((p, o)) = self.stepped_array(base, index, *scale) {
+                // A stepped element's address: a `with a[i] do` record
+                // (codegen-patterns 7.4, "`with`"): the pointer copied, the
+                // array's offset and the lower bound in the references
+                // ([`with_rebase`]; DBUF_$INVALIDATE 0xE3AA12 `movea.l
+                // A2,A3`, then `(-8,A3)`, `(A3)`; DISK_$REGISTER 0xE3D9EC,
+                // XNS_IDP_$OS_DEMUX 0xE185BC, PROC2_$PGROUP_INFO 0xE42244).
+                if o + offset != 0 {
+                    return Err(unsupported(
+                        self.span,
+                        "the address of a stepped element other than a `with` record's \
+                         (`lea (d,Ap)` not catalogued, codegen-patterns 7.4) is",
+                    ));
+                }
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(p)),
+                    dst: r,
+                });
+                return Ok(());
+            }
+        }
         match a {
             // `lea (d,An),Ar` off the block's register (KBD_$INIT 0xE3339E
             // `movea.l #0xE2DDE4,A0; lea (0x58,A0),A1`, through the generic
@@ -11705,12 +12288,6 @@ impl Selector {
                 let Expr::Load { addr: pa, .. } = &**p else {
                     unreachable!()
                 };
-                if self.stepped_pointer(base, index, *scale).is_some() {
-                    return Err(unsupported(
-                        self.span,
-                        "the address of a stepped element is",
-                    ));
-                }
                 let long = index.ty().width == Width::Long;
                 let x = self.index_reg(index, *scale)?;
                 let b = self.alloc_a()?;
@@ -13194,14 +13771,18 @@ impl Selector {
     ///   and `(d,Am)` (BAT_$GET_BAT_STEP 0xE3BB6E..0xE3BB72 `lea
     ///   (0,A5,D1.w),A0; move.w (-0x220,A0),D0`; ACL_$IN_SUBSYS 0xE470B2).
     fn index_ea(&mut self, base: &Addr, index: &Expr, scale: u32, offset: i32) -> Res<Ea> {
-        if let Some(p) = self.stepped_pointer(base, index, scale) {
+        if let Some((p, o)) = self.stepped_array(base, index, scale) {
             // Through the `for` loop's stepped pointer ([`Self::for_`]):
             // `(d,Ap)`, the lower bound and field offsets in `d` (0xE177E8
             // `move.w (-2,A0),(-2,A1)`; PKT_$RECENTLY_MISSING 0xE128DC
-            // `cmp.l (-8,A0),D1`).  An access at displacement 0 is made
-            // with `(An)+` where it is the pointer's last use (0xE00ED8
-            // `clr.l (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l #3,A2`),
-            // which `dpc` does not do.
+            // `cmp.l (-8,A0),D1`), and the array's own offset from the
+            // unit's data area, the frame or the symbol (DBUF_$INVALIDATE
+            // 0xE3AA16 `(-8,A3)`, the array at 0x10; EC2_$REGISTER_EC1
+            // 0xE42972 `cmpa.l (2700,A0),A1`).  An access at displacement 0
+            // is made with `(An)+` where it is the pointer's last use
+            // (0xE00ED8 `clr.l (A0)+`; AST_ 0xE0287A `bclr #7,(A2)+; addq.l
+            // #3,A2`), which `dpc` does not do.
+            let offset = o + offset;
             if offset == 0 {
                 return Err(unsupported(
                     self.span,
@@ -13301,11 +13882,18 @@ impl Selector {
     /// The pointer a `for` loop steps through the array at `base` for
     /// elements of `scale` bytes, when `index` is that loop's index.
     fn stepped_pointer(&self, base: &Addr, index: &Expr, scale: u32) -> Option<u8> {
+        self.stepped_array(base, index, scale).map(|(r, _)| r)
+    }
+
+    /// The pointer a `for` loop steps through the array at `base`
+    /// ([`Self::stepped_pointer`]) and the array's own offset from it
+    /// ([`SteppedArray::base_offset`]).
+    fn stepped_array(&self, base: &Addr, index: &Expr, scale: u32) -> Option<(u8, i32)> {
         self.stepped
             .iter()
             .rev()
             .find(|(o, a, _)| is_index(index, *o) && a.scale == scale && a.base == *base)
-            .map(|&(_, _, r)| r)
+            .map(|(_, a, r)| (*r, a.base_offset()))
     }
 
     /// The scaled index of an array element in a data register.
@@ -13574,6 +14162,10 @@ impl Selector {
     fn split_base(&self, a: &Addr) -> bool {
         match a {
             Addr::Volatile { addr, .. } => self.split_base(addr),
+            // Through a `for` loop's stepped pointer: no base to load.
+            Addr::Index {
+                base, index, scale, ..
+            } if self.stepped_pointer(base, index, *scale).is_some() => false,
             Addr::Index { base, .. } => match &**base {
                 Addr::Symbol { .. } => true,
                 Addr::Indirect { base: p, .. } => !matches!(
@@ -16307,6 +16899,17 @@ mod tests {
             )],
         );
         assert_eq!(body_text(&f)[1], "clr.w\t%d1");
+        // One pass: the count cleared (SMD_$DM_COND_EVENT_WAIT 0xE6F012).
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(5, word()),
+                konst(5, word()),
+                false,
+                vec![store(sym("W"), konst(1, word()))],
+            )],
+        );
+        assert_eq!(body_text(&f)[0], "clr.w\t%d0");
     }
 
     /// Stepped pointers (codegen-patterns 7.4): LOG_$READ's worker
@@ -16404,6 +17007,137 @@ mod tests {
         );
     }
 
+    /// Stepped pointers through arrays at constant addresses
+    /// (codegen-patterns 7.4, "Forming"; bead domain-pascal-xm5w): another
+    /// unit's always in place from `movea.l #sym`; the frame's with `lea
+    /// (k,A6)` when every displacement fits in a byte in the first pass,
+    /// in place from `movea.l A6` otherwise; the in-place `movea.l` one
+    /// instruction before the last set-up instruction when it is adjusted.
+    #[test]
+    fn constant_address_stepped_loops() {
+        let elem = |base: Addr, scale: u32, offset: i32| Addr::Index {
+            base: Box::new(base),
+            index: Box::new(index()),
+            scale,
+            offset,
+        };
+        // NET_IO_$CREATE_PORT 0xE5A52C: `moveq; movea.l #sym; moveq; addq`.
+        let f = proc_(
+            4,
+            vec![
+                for_loop(
+                    konst(1, word()),
+                    konst(4, word()),
+                    false,
+                    vec![
+                        store(elem(sym("TAB"), 2, -2), konst(0, word())),
+                        store(sym("W"), index()),
+                    ],
+                ),
+                ext("Q", vec![], 0),
+            ],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "moveq\t#3,%d0",
+                "movea.l\t#TAB,%a0",
+                "moveq\t#1,%d1",
+                "addq.l\t#2,%a0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "clr.w\t(-2,%a0)",
+                "move.w\t%d1,(W).l",
+                "addq.w\t#1,%d1",
+                "addq.l\t#2,%a0",
+                "dbf\t%d0,2b",
+                "jsr\t(Q).l",
+            ]
+        );
+        // A frame array in reach of a byte: `lea (2,A6)` after the count.
+        let f = proc_(
+            48,
+            vec![for_loop(
+                konst(1, word()),
+                konst(8, word()),
+                false,
+                vec![store(elem(Addr::Frame(-40), 2, -2), load(sym("W"), word()))],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "moveq\t#7,%d0",
+                "lea\t(2,%fp),%a0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t(W).l,(-0x2a,%a0)",
+                "addq.l\t#2,%a0",
+                "dbf\t%d0,2b",
+            ]
+        );
+        // Out of reach: `movea.l A6,A0` before the count, `addq.l` after
+        // (FILE_$PRIV_CREATE 0xE5D63E).
+        let f = proc_(
+            208,
+            vec![for_loop(
+                konst(1, word()),
+                konst(36, word()),
+                false,
+                vec![store(
+                    elem(Addr::Frame(-200), 4, -4),
+                    load(sym("L"), long()),
+                )],
+            )],
+        );
+        assert_eq!(
+            body_text(&f),
+            [
+                "movea.l\t%fp,%a0",
+                "moveq\t#0x23,%d0",
+                "addq.l\t#4,%a0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.l\t(L).l,(-0xcc,%a0)",
+                "addq.l\t#4,%a0",
+                "dbf\t%d0,2b",
+            ]
+        );
+        // From 0, nothing to adjust: after the count (AREA_$REMOVE_SEG
+        // 0xE099E2 `moveq #31,D0; movea.l A6,A0`).
+        let f = proc_(
+            208,
+            vec![for_loop(
+                konst(0, word()),
+                konst(31, word()),
+                false,
+                vec![store(elem(Addr::Frame(-200), 4, 4), load(sym("L"), long()))],
+            )],
+        );
+        assert_eq!(
+            body_text(&f)[..3],
+            ["moveq\t#0x1f,%d0", "movea.l\t%fp,%a0", ".balignw\t4,0x2048"]
+        );
+        let one = |body: Vec<StmtKind>| {
+            err(&proc_(
+                208,
+                vec![for_loop(konst(1, word()), konst(4, word()), false, body)],
+            ))
+        };
+        // Two frame arrays of one element size: shared or not, unsettled.
+        assert!(one(vec![store(
+            elem(Addr::Frame(-40), 2, -2),
+            load(elem(Addr::Frame(-20), 2, -2), word())
+        )])
+        .contains("two arrays of one element size"));
+        // An in-place pointer and another.
+        assert!(one(vec![store(
+            elem(Addr::Frame(-200), 4, -4),
+            load(elem(sym("TAB"), 2, -2), word())
+        )])
+        .contains("formed in place"));
+    }
+
     /// Refused `for` loops (codegen-patterns 7.4).
     #[test]
     fn unsettled_for_loops() {
@@ -16441,9 +17175,18 @@ mod tests {
             konst(1, word()),
             konst(4, word()),
             false,
-            vec![store(elem(sym("TAB"), index()), konst(0, word()))]
+            vec![store(
+                elem(
+                    Addr::OtherStatic {
+                        section: "S".into(),
+                        offset: 0
+                    },
+                    index()
+                ),
+                konst(0, word())
+            )]
         )
-        .contains("not reached through a pointer"));
+        .contains("another data section's block"));
         let through = |offset| Addr::Indirect {
             base: Box::new(load(sym("P"), Scalar::POINTER)),
             offset,
