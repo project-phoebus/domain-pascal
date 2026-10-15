@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 7237096d2e16512650b28d04d60681304a57daf8
+# source: e9d04c3a3459aedc175f8538b88c1055fba1ca84
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
@@ -264,6 +264,21 @@ STUB	rem_name/rem_name.pas	rem_name_$find_network
 STUB	rem_name/rem_name.pas	rem_name_$find_uid
 OK	scsi/scsi.pas	scsi_$cinit
 OK	scsi/scsi.pas	scsi_$free_asid
+MISMATCH	sio/sio.pas	sio_$i_rcv
+MISMATCH	sio/sio.pas	sio_delay_restart
+MISMATCH	sio/sio.pas	sio_$i_xmit_done
+MISMATCH	sio/sio.pas	sio_$i_cts_change
+MISMATCH	sio/sio.pas	sio_$i_dcd_change
+STUB	sio/sio.pas	sio_$i_tstart
+MISMATCH	sio/sio.pas	sio_$i_inhibit_rcv
+MISMATCH	sio/sio.pas	sio_$i_inhibit_xmit
+MISMATCH	sio/sio.pas	sio_$i_err
+OK	sio/sio.pas	sio_$i_init
+OK	sio/sio.pas	sio_$set_break
+STUB	sio/sio.pas	sio_$k_timed_break
+STUB	sio/sio.pas	sio_$k_signal_wait
+STUB	sio/sio.pas	sio_$k_set_param
+STUB	sio/sio.pas	sio_$k_inq_param
 STUB	sio2681/sio2681.pas	sio2681_$int
 OK	sio2681/sio2681.pas	sio2681_$set_break
 STUB	sio2681/sio2681.pas	sio2681_$tone
@@ -294,6 +309,7 @@ STUB	term/os_term.pas	kbd_$get_desc
 STUB	term/os_term.pas	term_$status_convert
 MISMATCH	term/os_term.pas	term_$send_kbd_string
 STUB	term/os_term.pas	tty_$i_get_desc
+STUB	term/os_term.pas	sio_$i_get_desc
 STUB	term/os_term.pas	term_$read
 STUB	term/os_term.pas	term_$read_cond
 STUB	term/os_term.pas	term_$write
@@ -306,6 +322,11 @@ OK	term/os_term_init.pas	term_$set_discipline
 MISMATCH	term/os_term_init.pas	term_$set_real_line_discipline
 MISMATCH	term/os_term_init.pas	term_$inq_discipline
 OK	term/os_term_init.pas	tone_$enable
+STUB	term/os_term_init.pas	sio_$init_desc
+STUB	term/os_term_init.pas	sio_$init_line
+STUB	term/os_term_init.pas	sio_$init_dtte
+OK	term/os_term_init.pas	sio_$init_drain_handler
+STUB	term/os_term_init.pas	sio_$init
 STUB	term/os_term_init.pas	term_$init
 MISMATCH	term/os_term_init.pas	term_$pchist_enable
 STUB	term/os_term_init.pas	term_$enqueue_tpad
