@@ -65,6 +65,24 @@ address order).  Kinds:
             is a branch target (a join: the test cannot rely on the
             operation's flags there).  Evidence for comparisons of a
             computed value with 0 (codegen-patterns 7.1).
+    loadflags
+            a `move.<s> X,Dn' (a load: X memory, another register or an
+            immediate; not moveq) directly followed by a conditional
+            branch or `s<cc>' (form `flags') or by `tst.<s> Dn' and one
+            (`tst') (bead domain-pascal-1gyq): the move's size, the
+            source kind (param, local and fidx: the frame at d >= 8, at
+            d < 0, indexed; A5, An, idx: through an address register;
+            abs, PC, imm; D0call: D0 right after a call and its pops;
+            Dreg, Areg: another register), the form, the test size, the
+            branch's condition, b|s, the context (entry: no branch or
+            call before it in the routine; join: the move or the test is
+            a branch target; call: right after a call and its pops, the
+            source not D0; branch: right after a branch, `jmp' or `rts';
+            else `seq'), the register class (D0/D1 temporaries, D2-D7)
+            and whether Dn is read again in the next instructions before
+            it is written, a call or the end (`used' / `dead', in address
+            order, approximate).  Evidence for the flags of a load
+            (codegen-patterns 7.1, 12.2).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -83,7 +101,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor', 'opflags')
+         'andor', 'opflags', 'loadflags')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -496,6 +514,105 @@ def opflags_sites(ins):
     return out
 
 
+_LOAD = re.compile(r'^move([bwl]) (.*),%(d\d)$')
+_FLOW = re.compile(r'^(b[a-z]{2,3}[sw]?|jmp|rts|rte|dbf|db[a-z]{2}) ')
+
+
+def load_src_kind(x, prev_call):
+    """The kind of a load's source operand (see `loadflags')."""
+    if x.startswith('#'):
+        return 'imm'
+    if x == '%d0' and prev_call:
+        return 'D0call'
+    if re.match(r'^%d\d$', x):
+        return 'Dreg'
+    if re.match(r'^%a\d$', x):
+        return 'Areg'
+    m = re.match(r'^%fp@\((-?\d+)\)$', x)
+    if m:
+        return 'param' if int(m.group(1)) >= 8 else 'local'
+    if x.startswith('%fp@'):
+        return 'fidx'
+    if re.search(r',%[da]\d:[wl]\)$', x):
+        return 'idx'
+    if x.startswith('%a5@'):
+        return 'A5'
+    if re.match(r'^%a\d@', x):
+        return 'An'
+    if x.startswith('%pc@'):
+        return 'PC'
+    if x.startswith('%sp@'):
+        return 'SP'
+    return 'abs'
+
+
+def reads_after(ins, j, d, n=24):
+    """Whether register `d' is read in ins[j:j+n] before it is written,
+    a call clobbers it or the routine returns ('used' / 'dead')."""
+    for _, _, t in ins[j:j + n]:
+        if re.search(r'%' + d + r'\b', t):
+            if writes(t, d) and not re.search(r'%' + d + r'\b.*,', t) and not \
+                    re.match(r'^(add|sub|and|or|eor|ls|as|ro|neg|not|ext|swap|mul|div)', t):
+                return 'dead'
+            return 'used'
+        if _CALL.match(t) or t.startswith(('rts', 'rte', 'unlk')):
+            return 'dead'
+    return 'dead'
+
+
+def loadflags_sites(ins):
+    """[(addr, size, source kind, form, test size, cond, b|s, context,
+    register class, later)] of loads into a data register tested next
+    (see the module docstring, kind `loadflags')."""
+    targets = set()
+    for _, _, t in ins:
+        m = re.match(r'^(?:b[a-z]{2,3}[sw]?|db[a-z]{1,2}) (?:%d\d,)?0x([0-9a-f]+)$', t)
+        if m:
+            targets.add(int(m.group(1), 16))
+    out = []
+    seen_flow = False
+    for i, (a, n, t) in enumerate(ins):
+        if i > 0 and (_FLOW.match(ins[i - 1][2] + ' ') or _CALL.match(ins[i - 1][2])):
+            seen_flow = True
+        m = _LOAD.match(t)
+        if not m or i + 1 >= len(ins) or ins[i + 1][0] != a + n:
+            continue
+        size, src, d = m.group(1), m.group(2), m.group(3)
+        k = i - 1
+        while k >= 0 and _POP.match(ins[k][2]):
+            k -= 1
+        prev_call = k >= 0 and bool(_CALL.match(ins[k][2]))
+        t1 = ins[i + 1][2]
+        c = _COND.match(t1)
+        if c:
+            form, tsize, ci, j = 'flags', size, c, i + 2
+        else:
+            q = re.match(r'^tst([bwl]) %' + d + '$', t1)
+            if not q or i + 2 >= len(ins) or ins[i + 2][0] != ins[i + 1][0] + ins[i + 1][1]:
+                continue
+            c = _COND.match(ins[i + 2][2])
+            if not c:
+                continue
+            form, tsize, ci, j = 'tst', q.group(1), c, i + 3
+        cond = ci.group(1) or ci.group(2)
+        bs = 'b' if ci.group(1) else 's'
+        kind = load_src_kind(src, prev_call)
+        if a in targets or ins[i + 1][0] in targets:
+            ctx = 'join'
+        elif not seen_flow:
+            ctx = 'entry'
+        elif prev_call:
+            ctx = 'call'
+        elif i > 0 and _FLOW.match(ins[i - 1][2] + ' '):
+            ctx = 'branch'
+        else:
+            ctx = 'seq'
+        rc = 'D0/D1' if d in ('d0', 'd1') else 'D2-D7'
+        later = reads_after(ins, j, d) if bs == 'b' else reads_after(ins, j - 1, d)
+        out.append((a, size, kind, form, tsize, cond, bs, ctx, rc, later))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -514,6 +631,7 @@ def scan():
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
         if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
             res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
+            res['loadflags'] += [(r0, name) + s for s in loadflags_sites(ins)]
     return res
 
 
@@ -552,6 +670,11 @@ def summary(res):
            'join)', res['opflags'], lambda s: s[3:])
     counts('  ... by operation, relation, form, sizes and join', res['opflags'],
            lambda s: opflags_class(s[2:]))
+    lf = res['loadflags']
+    counts('loads tested next (form, context, source, same size|size, relation)', lf,
+           lambda s: (s[5], s[9], s[4], 'same' if s[3] == s[6] else 'size', _REL[s[7]]))
+    counts('  ... by form, context, register class, later use', lf,
+           lambda s: (s[5], s[9], s[10], s[11]))
 
 
 def main(argv):

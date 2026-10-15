@@ -3332,3 +3332,96 @@ procedure take(x: p; n: integer); options(val_param, extern);
         err.1
     );
 }
+
+#[test]
+fn assigned_local_tests() {
+    // codegen-patterns 7.1 "Flags of a load" (bead domain-pascal-1gyq):
+    // a register-held local tested right after the `move` that assigned
+    // it branches on the move's flags (golden control/assign_flags) only
+    // where the survey settles it; the rest is refused.
+    let decls = "module m;
+var
+  seen, gw: integer;
+  pw: ^integer;
+function getw(k: integer): integer; val_param; extern;
+procedure use(k: integer); val_param; extern;
+";
+    for (body, why) in [
+        // Compared again right after the branch: 104 on the load's flags,
+        // 12 with a `tst` first (DIR_$READ_LINKU 0xE4D6E6 against
+        // DIR_$GET_ENTRYU 0xE4D522), no rule found.
+        (
+            "var x: integer;
+begin
+  x := pw^;
+  if (x = 0) or else (x > 255) then seen := 1;
+  gw := x;
+end;",
+            "compared twice right after",
+        ),
+        // A nested `if` testing it again: the same shape in the image.
+        (
+            "var x: integer;
+begin
+  x := pw^;
+  if x <> 0 then
+    if x = 3 then seen := 1;
+  gw := x;
+end;",
+            "compared twice right after",
+        ),
+        // `bgt` (`x <= 0`): not seen after a load, either way.
+        (
+            "var x: integer;
+begin
+  x := pw^;
+  if x <= 0 then seen := 1;
+  gw := x;
+end;",
+            "right after its assignment (on the move's flags only",
+        ),
+        // A function's result in D1 (no call after it): the original
+        // tests D0 and copies it after the branch (XPD_$CONTINUE_PROC
+        // 0xE5BEF8 `tst.w D0; beq.s; move.w D0,D1`).
+        (
+            "var x: integer;
+begin
+  x := getw(seen);
+  if x <> 0 then gw := x;
+end;",
+            "a function's result assigned to a local in a scratch register",
+        ),
+        // A function's result's sign: only `beq`/`bne` are seen on the
+        // copy's flags.
+        (
+            "var x: integer;
+begin
+  x := getw(seen);
+  if x < 0 then return;
+  use(seen);
+  gw := x;
+end;",
+            "an ordered test of a function's result",
+        ),
+    ] {
+        let src = format!("{decls}procedure t;\n{body}\n");
+        let (_, err) = compile_with("assigned_flags", &src, &[]).unwrap_err();
+        assert!(err.contains(why), "{body}\n{err}");
+    }
+    // At a join (a label between the assignment and the test) the
+    // register is tested: the flags are those of the other path too.
+    let src = format!(
+        "{decls}procedure t;
+var x: integer;
+begin
+  x := pw^;
+  if seen = 2 then x := 5;
+  if x = 0 then seen := 1;
+  gw := x;
+end;
+"
+    );
+    let asm = compile_with("assigned_flags_join", &src, &[]).unwrap();
+    let r = routine(&asm, "T");
+    assert!(r.contains("\ttst.w\t%d"), "{r}");
+}

@@ -929,6 +929,7 @@ fn select_body_with(
             },
         )?;
     }
+    check_assigned_flags(&s.out, &s.flag_moves)?;
     if let Some(range) = hoisted {
         // A parameter loaded at entry into a scratch address register
         // after the block's load: the one such site has the parameter in
@@ -2435,6 +2436,82 @@ enum Node<'a> {
     Expr(&'a Expr),
     Addr(&'a Addr),
     Call(&'a Call),
+}
+
+/// Check, once the body is allocated, the tests [`Selector::tst`] left to
+/// the flags of an assignment's `move` (`flag_moves`: the move's index,
+/// the test's span, whether it copies a function's result out of D0;
+/// bead domain-pascal-1gyq, codegen-patterns 7.1 "Flags of a load"):
+///
+/// - a register compared again right after the branch (`move.w (A3),D0;
+///   beq.s; cmpi.w #255,D0`, a compound condition or a test in the next
+///   statement): after a load the image goes both ways, 104 on the load's
+///   flags (DIR_$READ_LINKU 0xE4D6E6) and 12 with a `tst` first
+///   (DIR_$GET_ENTRYU 0xE4D522 `move.w (A0),D0; tst.w D0; beq.s; cmpi.w
+///   #255,D0`), the same shapes; no rule found (bead domain-pascal-rmse):
+///   refused.  After a call's
+///   result (`move.w D0,D2; beq.s; cmpi.w #1,D2`, MSG_$WAITI 0xE59C84):
+///   on the flags 4 times, never a `tst`;
+/// - the branch: on a load's flags only `beq`/`bne`/`bmi`/`bpl`/`ble`
+///   are seen, on a call's result's only `beq`/`bne` ([`Selector::
+///   assigned_flags`]): others refused;
+/// - a function's result copied into D1 (a local not held across a
+///   call): the original tests D0 and copies after the branch
+///   (XPD_$CONTINUE_PROC 0xE5BEF8 `tst.w D0; beq.s; move.w D0,D1`;
+///   XPD_$GET_TARGET_INFO 0xE5C158); not reproduced (bead
+///   domain-pascal-59gz): refused.
+fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> {
+    for &(k, span, call) in moves {
+        let Some(Insn::Move {
+            dst: Ea::Reg(r @ Reg::D(n)),
+            ..
+        }) = out.get(k)
+        else {
+            // Allocation renames registers in place and keeps the
+            // indices; a test already left to this move must not go
+            // unchecked.
+            unreachable!("a flag move is a `move` into a data register after allocation")
+        };
+        // The instruction that reads the flags: the branch the survey
+        // counts (an `s<cc>`: one site, `slt`, 0xE3358C).
+        let branch = match out.get(k + 1) {
+            Some(Insn::Branch { cond, .. }) => Some(*cond),
+            _ => None,
+        };
+        let seen = if call {
+            matches!(branch, Some(Cond::Eq | Cond::Ne))
+        } else {
+            matches!(
+                branch,
+                Some(Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl | Cond::Le)
+            )
+        };
+        if !seen {
+            return Err(Selector::assigned_ordered(span));
+        }
+        if call && *n < 2 {
+            return Err(unsupported(
+                span,
+                "a function's result assigned to a local in a scratch register and tested next \
+                 (the original tests D0 and copies it after the branch, XPD_$CONTINUE_PROC \
+                 0xE5BEF8; not reproduced, bead domain-pascal-59gz) is",
+            ));
+        }
+        let again = match out.get(k + 2) {
+            Some(Insn::Tst { dst, .. } | Insn::Cmpi { dst, .. }) => *dst == Ea::Reg(*r),
+            Some(Insn::Cmp { src, dst, .. }) => *dst == *n || *src == Ea::Reg(*r),
+            _ => false,
+        };
+        if again && !call {
+            return Err(unsupported(
+                span,
+                "a local assigned a load and compared twice right after (on the load's flags \
+                 or after a `tst`: both seen, no rule found, codegen-patterns 7.1, bead \
+                 domain-pascal-rmse) is",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The data section of `st`'s target when `st` stores a constant into
@@ -5017,6 +5094,16 @@ pub struct Selector {
     /// register load among them loaded branches on that load's flags
     /// ([`Self::tst`]).
     entry_end: Option<std::ops::Range<usize>>,
+    /// The index in `out` of the `move` an assignment statement just made
+    /// into the data register of a register-held local (`x := y`): a test
+    /// of that register right after it branches on the move's flags
+    /// ([`Self::tst`]; bead domain-pascal-1gyq).
+    assigned_move: Option<usize>,
+    /// The moves [`Self::tst`] left the test to (their index in `out`),
+    /// with the test's span and whether the move copies a function's
+    /// result out of D0: checked once the body is selected
+    /// ([`check_assigned_flags`]).
+    flag_moves: Vec<(usize, Span, bool)>,
     /// The frame objects nested routines reach
     /// ([`Function::uplevel_refs`]): never held in a register.
     uplevel: Vec<(i32, u32)>,
@@ -5202,6 +5289,8 @@ impl Selector {
             entry_regs: Vec::new(),
             data_ptr_regs: Vec::new(),
             entry_end: None,
+            assigned_move: None,
+            flag_moves: Vec::new(),
             stored: Vec::new(),
             escaped: Vec::new(),
             address_slots: Vec::new(),
@@ -5487,6 +5576,7 @@ impl Selector {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => {
                     self.store(addr, value)?;
+                    self.mark_assigned_move(addr);
                     self.wrote(addr, value.ty().bytes());
                 }
                 StmtKind::StoreBits {
@@ -7194,9 +7284,13 @@ impl Selector {
     /// (an expression computed for the test, or a register-held variable
     /// an assignment just formed) is tested as [`Self::flags_test`] says:
     /// the branch on the operation's flags, a `tst`, or a refusal (bead
-    /// domain-pascal-qlzu).  Right after a load into it of the test's size
-    /// it is refused (the load's flags: not settled); a byte widened to a
-    /// word (`clr.w; move.b`), tested; other sizes, refused.
+    /// domain-pascal-qlzu).  Right after the `move` of an assignment to a
+    /// register-held local, of the test's size: on the move's flags, or
+    /// refused ([`Self::assigned_flags`]; bead domain-pascal-1gyq).  Right
+    /// after another load into it of the test's size it is refused (a
+    /// load the condition makes: not met in `../source`'s Pascal yet); a
+    /// byte widened to a word (`clr.w; move.b`), tested; other sizes,
+    /// refused.
     fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
         if self.volatile_eas.iter().any(|(v, _)| *v == ea) {
             // A volatile object is read again, whatever the last store
@@ -7284,16 +7378,20 @@ impl Selector {
             Ea::Reg(r),
             Some(Insn::Move {
                 size: s,
+                src,
                 dst: Ea::Reg(d),
-                ..
             }),
         ) = (&ea, self.out.last())
         {
+            if d == r && *s == size && self.assigned_move == Some(self.out.len() - 1) {
+                return self.assigned_flags(src.clone(), cc);
+            }
             if d == r && !(*s == Size::B && size == Size::W) {
                 return Err(unsupported(
                     self.span,
-                    "testing a register the previous instruction loaded (whether the load's \
-                     flags are used is not settled, codegen-patterns 7) is",
+                    "testing a register the previous instruction loaded other than by an \
+                     assignment to a local (its flags or a `tst`: not settled, codegen-patterns \
+                     7.1) is",
                 ));
             }
         }
@@ -7302,6 +7400,70 @@ impl Selector {
             dst: ea.clone(),
         });
         Ok(())
+    }
+
+    /// A test of a register-held local right after the `move` of the
+    /// assignment statement before it (`x := y; if x ... then`, bead
+    /// domain-pascal-1gyq; `tools/cmpsurvey.py loadflags`, codegen-patterns
+    /// 7.1 "Flags of a load"): the branch reads the move's flags, no `tst`.
+    /// A `move` sets N and Z from the value moved and clears V and C, as
+    /// `tst` does, so every relation with 0 reads the same flags; which of
+    /// the two the original emitted is what the survey settles.  The
+    /// image cannot tell an assignment from a load made for the test, so
+    /// the counts are of every `move.<s> X,Dn` directly followed by a
+    /// branch on Dn (or by `tst.<s> Dn` and one), same size, outside a
+    /// join:
+    ///
+    /// - X memory or another data register: 208 on the move's flags and
+    ///   none with a `tst` when the branch is the register's only compare
+    ///   there (BAT_$FREE's loop 0xE3B590 `move.l (A4),D3; bne.s`;
+    ///   0xE072B8 `or.b D1,D0; move.b D0,D4; bmi`): `beq` 78, `bne` 50,
+    ///   `bmi` 19, `bpl` 52, `ble` 8 (0xE10104), one `slt`.  When the
+    ///   register is compared again right after the branch, both (104 and
+    ///   12, the same shapes, no rule found): refused after selection
+    ///   ([`check_assigned_flags`]).  Two more `tst` sites are a `for`
+    ///   loop's count guard (0xE19020), not an `if`.  `bgt` and `bge` are
+    ///   seen neither on a load's flags nor after its `tst`, an `s<cc>`
+    ///   once (`slt`, 0xE3358C): refused there too (the branch is known
+    ///   only once it is emitted).
+    /// - X a function's result, `move.<s> D0,Dn` after the call and its
+    ///   pop: 24 on the move's flags, all `beq`/`bne` (XPD_$GET_EC
+    ///   0xE5BDDE `move.w D0,D2; beq.s`; VOLX_$DISMOUNT 0xE6B3A4; SEEK
+    ///   0xE195DE `move.l D0,D2; bne.s`; 4 compared again, MSG_$WAITI
+    ///   0xE59C84), none with a `tst` (one at a join, 0xE16978).  Two of
+    ///   the 24 copy a `case` selector into D1; every other is into D2..D7.
+    ///   A local in a scratch register is refused after allocation
+    ///   ([`check_assigned_flags`]); other branches are refused here.
+    fn assigned_flags(&mut self, src: Ea, cc: Cond) -> Res<()> {
+        if src == Ea::Reg(Reg::D(0)) {
+            if !matches!(cc, Cond::Eq | Cond::Ne) {
+                return Err(unsupported(
+                    self.span,
+                    "an ordered test of a function's result right after its assignment to a \
+                     local (only `beq`/`bne` on the copy's flags are seen, codegen-patterns 7.1) \
+                     is",
+                ));
+            }
+            self.flag_moves.push((self.out.len() - 1, self.span, true));
+            return Ok(());
+        }
+        if !matches!(
+            cc,
+            Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl | Cond::Le | Cond::Gt
+        ) {
+            return Err(Self::assigned_ordered(self.span));
+        }
+        self.flag_moves.push((self.out.len() - 1, self.span, false));
+        Ok(())
+    }
+
+    fn assigned_ordered(span: Span) -> Diagnostic {
+        unsupported(
+            span,
+            "this test of a local right after its assignment (on the move's flags only \
+             `beq`/`bne`/`bmi`/`bpl`/`ble` are seen; `bgt`, `bge` and `s<cc>` but one `slt` \
+             neither there nor after a `tst`, codegen-patterns 7.1) is",
+        )
     }
 
     /// Set the condition codes for `lhs op rhs` and give the condition
@@ -9258,6 +9420,29 @@ impl Selector {
             }
         }
         out[n - 1]
+    }
+
+    /// After an assignment to `addr`: when it is a local held in a data
+    /// register and the statement ended with a `move` into that register
+    /// (a load, a copy of another register or of a call's D0), remember
+    /// the move for a test of the register right after it ([`Self::tst`]).
+    fn mark_assigned_move(&mut self, addr: &Addr) {
+        self.assigned_move = None;
+        let Addr::Frame(o) = addr.unwrap_volatile().0 else {
+            return;
+        };
+        let Some(Insn::Move {
+            dst: Ea::Reg(Reg::D(d)),
+            ..
+        }) = self.out.last()
+        else {
+            return;
+        };
+        let held = self.webs.contains(&(*o, *d))
+            || (self.reg_locals.contains(o) && self.pinned.contains(&(*o, Reg::D(*d))));
+        if held {
+            self.assigned_move = Some(self.out.len() - 1);
+        }
     }
 
     /// Record that the statement just selected (from `stmt_start`) wrote

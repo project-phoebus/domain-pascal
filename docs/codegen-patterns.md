@@ -4704,23 +4704,88 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   The other register-held constants found are the left operand of a
   subtraction (0xE10002 `move.l #0x400,D1; ...; sub.l D0,D1`; 0xE0E964).
   Not explained.
-- **Flags of a load (Uncertain):** the `tst` is sometimes left out after
-  a move into the tested register (RIP_$SEND_UPDATES 0xE6887E `move.b
-  (8,A6),D0; bpl`; 0xE014DC `move.l (A3),D0; beq`) and sometimes not
-  (0xE0B640 `move.l (A1),D0; tst.l D0; bmi`; 0xE0BEAE).  `tools/cmpsurvey.py
-  opflags` counts a same-size move into Dn then the branch 398 times
-  (`beq`/`bne` 295, `bmi`/`bpl` 78, signed 25; 3 at joins) against 14
-  with `tst` between (10 more at joins): still no rule.  A load of
-  **another size** than the test is tested: `move.b M,Dn; tst.w Dn` 83
-  times, after a `clr.w Dn` (SOCK_$CLOSE
+- **Flags of a load (Verified by survey for an assignment's load tested
+  once; implemented there; the rest Uncertain; bead domain-pascal-1gyq):**
+  `tools/cmpsurvey.py loadflags` takes every `move.<s> X,Dn` (X memory,
+  another register or an immediate; not `moveq`) in compiled code that
+  is directly followed by a conditional branch or `s<cc>` on Dn (form
+  `flags`) or by `tst.<s> Dn` and one (`tst`), and classifies it by the
+  source, the context (before the routine's first branch or call; at a
+  join; right after a call; right after a branch; else), the register
+  and whether Dn is compared again right after the branch.  507 sites.
+  A load of **another size** than the test is tested: `move.b M,Dn;
+  tst.w Dn` 83 times, after a `clr.w Dn` (SOCK_$CLOSE
   0xE15FB8..0xE15FC0 `clr.w D0; move.b (21,A2),D0; tst.w D0; beq.s`, a
   `[byte] 0..255` field against 0).  **Implemented** for that case (bead
-  domain-pascal-qlzu, `isel.rs` `Selector::tst`); a same-size load is
-  still refused ("testing a register the previous instruction loaded"),
-  and so is a load at any other pair of sizes: no `move.w` then `tst.l`
-  of the register (a word widened to a longword, `clr.l; move.w`) is in
-  compiled code (one `move.l; tst.w`, at a join, 0xE0EB82; one `move.w;
-  tst.b`, 0xE19106).
+  domain-pascal-qlzu); a load at any other pair of sizes is refused: no
+  `move.w` then `tst.l` of the register (a word widened to a longword,
+  `clr.l; move.w`) is in compiled code (one `move.l; tst.w`, at a join,
+  0xE0EB82; one `move.w; tst.b`, 0xE19106).  At the **same size**,
+  outside a join (a join is counted apart: the label on the move only,
+  the flags 59 times, `tst` never; a label between the move and the
+  branch, `tst` 10 times, every one where some path into the label ends
+  with another instruction than a move into Dn (PROC2_$SET_SIG_MASK
+  0xE3F93A after `clr.w (-68,A6); bra`; NAMEQ 0xE49ED4), and the flags
+  3 times, where every path ends with a move into Dn (AREA_$TOUCH
+  0xE09608 `move.l D6,D0; bra` to `move.l D2,D0; ble`; ROUTE_$SERVICE
+  0xE6A23E; VFMT_$MAIN 0xE6AF24); not reproduced, bead
+  domain-pascal-7oy8):
+
+  | source, what follows the branch | on the move's flags | `tst` first |
+  |---|---|---|
+  | memory or a register; Dn not compared again | 208 (`beq` 78, `bne` 50, `bmi` 19, `bpl` 52, `ble` 8, `slt` 1) | 0 |
+  | memory or a register; Dn compared again right after (`beq; cmpi #k,Dn`) | 104 | 12 |
+  | memory; a `for` loop's count guard (`tst; bmi; move.w Dn,Dn`) | 0 | 2 (0xE17EBA, 0xE19020) |
+  | a call's D0, `move.<s> D0,Dn` right after the call and its pop | 24 (all `beq`/`bne`; 4 compared again) | 0 (one at a join, 0xE16978) |
+
+  The image cannot tell an assignment `x := y; if x ...` from a load the
+  condition makes for itself, so the rows count both.  The rule read
+  from them: **a branch on a register just loaded and compared once
+  reads the load's flags** (BAT_$FREE's loop 0xE3B590 `move.l (A4),D3;
+  bne.s`, ../source bat/free.pas `block := ...^; if block = 0`; 0xE072B8
+  `or.b D1,D0; move.b D0,D4; bmi`; RIP_$SEND_UPDATES 0xE6887E `move.b
+  (8,A6),D0; bpl`); so does a function's result copied into a register
+  of D2..D7 (XPD_$GET_EC 0xE5BDDE `move.w D0,D2; beq.s`; VOLX_$DISMOUNT
+  0xE6B3A4; SEEK 0xE195DE `move.l D0,D2; bne.s`).  When the register is
+  compared again right after the branch, the image goes both ways in the
+  same shapes and the same modules (DIR_$READ_LINKU 0xE4D6E6 `move.w
+  (A4),D0; beq.s; cmpi.w #255,D0; bls.s` against DIR_$GET_ENTRYU 0xE4D522
+  `move.w (A0),D0; tst.w D0; beq.s; cmpi.w #255,D0; bls.s`; MAC_$OPEN
+  0xE0B8DE `move.w (A1),D0; bmi.s; cmpi.w #7,D0` against MAC_OS_$SEND
+  0xE0B640 `move.l (A1),D0; tst.l D0; bmi.s; tst.l D0; ble.s`): no rule
+  found (the 12 are listed by `tools/cmpsurvey.py list loadflags`; bead
+  domain-pascal-rmse).  The two copies of a call's D0 into D1 are a
+  `case` selector's (MSG_$SARI 0xE59EF6 `move.w D0,D1; beq.s; cmpi.w
+  #1,D0`); a local that is not
+  held across a call is left in D0 and tested there, then copied
+  (XPD_$CONTINUE_PROC 0xE5BEF8 `tst.w D0; beq.s; move.w D0,D1`;
+  XPD_$GET_TARGET_INFO 0xE5C158; VOLX_$GET_UIDS 0xE6B674; 0xE764E2:
+  the only `tst.<s> D0; b<cc>; move.<s> D0,Dn` right after a call and
+  its pop besides WIN_$DO_IO 0xE19862 `tst.l D0; beq.w; move.l D0,D2;
+  bra.w`, a copy made only on one path).  A `move` sets N and Z from the value
+  and clears V and C, as `tst` does, so either form tests the same
+  relation; `bgt` and `bge` are seen after neither (the 18 `ble` are
+  8 compared once, 10 again).
+  **Implemented** (`isel.rs`, `Selector::tst` / `assigned_flags`,
+  `check_assigned_flags`): a test of a register-held local right after
+  the `move` its assignment statement ended with (`x := y; if x ...`,
+  the local held in a register by 12.5) leaves out the `tst` when the
+  branch is `beq`/`bne`/`bmi`/`bpl`/`ble` and the register is not
+  compared again right after it; for a function's result (`move D0,Dn`)
+  when the branch is `beq`/`bne` and the local is in D2..D7 after
+  allocation.  Refused: the local compared again right after the branch
+  ("a local assigned a load and compared twice right after"), another
+  branch or an `s<cc>` ("this test of a local right after its
+  assignment"; "an ordered test of a function's result"), a function's
+  result in D1 ("... in a scratch register and tested next", the D0
+  test and late copy not reproduced; bead domain-pascal-59gz).  A load
+  the condition makes (not an assignment) is still refused ("testing a
+  register the previous instruction loaded other than by an assignment
+  to a local"); at a join (a label between the assignment and the test)
+  the register is tested with `tst` (the image's 10, not its 3 where
+  every path ends with a move, bead domain-pascal-7oy8).
+  Golden `tests/golden/control/assign_flags`; driver test
+  `assigned_local_tests`; exec test `assign_flags`.
 - **A test right after a store (Verified by survey for the frame;
   implemented there; bead domain-pascal-dgb):** `tools/resultsurvey.py
   storetest` takes every store of a register into memory (`move.<s>
@@ -7748,9 +7813,14 @@ kinds from the C in `../source/domain_os`.
     exec test `entry_load_flags`).  A parameter
     loaded before another is tested with `tst Dn` (PROC1_$SET_TYPE
     0xE152F2..0xE152FA `move.w (8,A6),D2; move.w (0xa,A6),D3; tst.w D2`;
-    12 such sites).  After a later load the image does both (a load from
-    memory followed by its test: 302 branches on the load's flags, 20
-    `tst`; not settled).
+    12 such sites).  A later load (codegen-patterns 7.1, "Flags of a
+    load"; `tools/cmpsurvey.py loadflags`; bead domain-pascal-1gyq): a
+    register compared once after it is branched on its flags (208 of
+    208 loads from memory or a register; a call's D0 copied into a
+    register, 24 of 24, 22 of them into D2..D7); compared again right
+    after the branch, after a load both (104 on the flags, 12 `tst`; not
+    settled).  Implemented for a register-held
+    local's assignment followed by its test.
 - *Entry loads are interleaved with other code* (an instruction
   scheduler; Verified that it happens, rule unknown; 12.4 R9–R12; `dpc`'s
   scheduler does not reproduce these, 12.4 R11 "Not explained"): `movea.l #imm,A0`
