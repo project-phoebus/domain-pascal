@@ -3219,3 +3219,59 @@ end;
         "{err}"
     );
 }
+
+/// Bead domain-pascal-mbtx: `addr` of an `in` parameter compiles (ref
+/// "Addr", p. 4-13), as the slot's value: stored from the frame when that
+/// is the slot's one use (PKT_$COPY_TO_PA 0xE12538 `move.l
+/// (0x8,A6),(-0x1c,A6)`) and pushed by value as the parameter passed on
+/// by address.  Stored with one other use of the slot it is refused: the
+/// module-local 0xE32A60 loads such a slot at entry (0xE32A6C),
+/// MAC_OS_$PUT_INFO does not (0xE0C322); bead domain-pascal-m2w3.
+#[test]
+fn addr_of_in_parameter() {
+    let src = "module m;
+type r_t = record a, b: integer32; end;
+procedure q(in p: univ_ptr); options(val_param); extern;
+procedure r(in x: r_t);
+var l: univ_ptr;
+begin
+  l := addr(x);
+  q(l);
+end;
+procedure s(in x: r_t);
+begin
+  q(addr(x));
+end;
+";
+    let asm = compile_with("addr_of_in_parameter", src, &[]).unwrap();
+    assert!(asm.contains("\tmove.l\t(8,%fp),(-4,%fp)\n"), "{asm}");
+    assert!(asm.contains("\tmove.l\t(8,%fp),-(%sp)\n"), "{asm}");
+    for body in [
+        "l := addr(x); q(addr(x))",
+        "if x.a = 1 then l := addr(x)",
+        "l := addr(x); q(l); l := addr(x)",
+    ] {
+        let src = format!(
+            "module m;
+type r_t = record a, b: integer32; end;
+var l: univ_ptr;
+procedure q(in p: univ_ptr); options(val_param); extern;
+procedure r(var x: r_t);
+begin {body}; end;
+"
+        );
+        let err = compile_with("addr_of_in_parameter_split", &src, &[]).unwrap_err();
+        assert!(err.1.contains("domain-pascal-m2w3"), "{body}: {}", err.1);
+    }
+    // An enclosing routine's parameter: no site (bead domain-pascal-ucss).
+    let src = "module m;
+type r_t = record a, b: integer32; end;
+var l: univ_ptr;
+procedure r(in x: r_t);
+  procedure s;
+  begin l := addr(x); end;
+begin s; end;
+";
+    let err = compile_with("addr_of_in_parameter_nested", src, &[]).unwrap_err();
+    assert!(err.1.contains("domain-pascal-ucss"), "{}", err.1);
+}

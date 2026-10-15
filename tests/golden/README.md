@@ -503,6 +503,14 @@ Tests:
   an assignment to a value parameter stored to the copy (`addq.w
   #1,(-2,A6)`), never through the caller's address; `addr` of it and
   passing it to a `var` parameter name the copy (0xE4D55E `pea (-8,A6)`).
+- `params/addr_in` - codegen-patterns 5.2 ("`addr` of a parameter"), 12.2
+  (bead domain-pascal-mbtx): `addr` of an `in` parameter or a part of
+  one.  By address: stored from the slot when that is its one use,
+  `move.l (8,A6),(d,A6)` (PKT_$COPY_TO_PA 0xE12538), or from the register
+  holding the slot, `move.l A0,(4,A0)` (EC_$INIT 0xE15208); by value as
+  the parameter passed on by address (`move.l (d,A6),-(SP)`, `pea
+  (k,An)`); a field stored, `lea (k,An),Am; move.l Am,<dst>`.  Under
+  `val_param` an `in` integer32's slot: `pea (d,A6)`, `lea (d,A6),An`.
 - `packed/fields` - codegen-patterns 5.3, 9 (bead domain-pascal-xlm):
   fields of packed records (ref 3.10.7): `status_$t` as Apollo's
   base.ins.pas declares it, `bset #7` for `fail` after `tst.w (2,A0)` of

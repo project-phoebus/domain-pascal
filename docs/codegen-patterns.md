@@ -3260,6 +3260,118 @@ model run against the bit model of Figure 3-6).
   `addr` the type `univ_ptr` (p. 4-13).  Golden `data/with`,
   `expr/addr_arith`; exec tests `withs`, `addr_values`; driver test
   `addr_values_in_sums_and_differences`.
+- **`addr` of a parameter** (bead domain-pascal-mbtx; ad-hoc survey of
+  every compiled routine's reachable instructions, the regalloc/a5survey
+  routines, script not kept).  Any mode: "Addr", p. 4-13, excepts only
+  routines with the internal attribute, and 5.3.2 (p. 5-7) forbids only
+  assigning to an `in` parameter, so `addr` of an `in` parameter or a
+  part of one is accepted like a `var` one (it was refused until this
+  bead; reference-clarifications open question 18; Apollo's SR10.2
+  example `domain_examples/streams/sasc/imex.pas` line 81 takes `addr(
+  mgr_data )` of an `IN mgr_data: UNIV string`).  The image cannot
+  tell the modes apart: the code depends only on how the parameter is
+  passed (ref 5.2 Table 5-1, p. 5-5).
+  - *Passed by address, the whole object: the address the slot holds
+    (Verified at the reconstructed sites).*  Stored, from the frame,
+    `move.l (d,A6),<dst>`: MAC_OS_$PUT_INFO 0xE0C322 `move.l
+    (0x8,A6),(-0x8,A6)` and PKT_$COPY_TO_PA 0xE12538 (`in`, the latter
+    an array under `val_param`), TTY_$I_INIT 0xE33302 `move.l
+    (0x8,A6),(0x5c,A3)`, SIO2681_$INIT 0xE3342C, 0xE3344A, 0xE3346E,
+    0xE33490, 0xE33496, SIO6509_$INIT 0xE33526 (`var`), as ../source
+    reconstructs them.  Compiled code has 58 `move.l (d,A6),<mem>` with
+    d > 0 (27 to the frame, 27 through an address register, 4 to the
+    unit's data); a by-value pointer parameter stored is the same bytes,
+    so only the source tells them apart.  From the register that holds
+    the slot, when it is held (12.2): EC_$INIT 0xE15208, 0xE1520C
+    `move.l A0,(0x4,A0)` (`out`; conformance unit `ec_init.pas`);
+    EC2_$READ 0xE42C94 `move.l D2,(-0x8,A6)` (`in`, held in a data
+    register since it is also compared; `dpc` gives D0 where the image
+    has D2, srcsurvey MISMATCH, bead domain-pascal-hmz6).  Whether
+    such a store counts towards the two uses that load the slot at
+    entry (12.2) is **split**: the module-local 0xE32A60 (../source's
+    OS_TERM_INIT, os/term_init.c; the default convention, its pointer
+    arguments passed through frame cells, 0xE32C2C) loads `(0xc,A6)` at
+    entry, 0xE32A6C `movea.l (0xc,A6),A0`, for one dereference (0xE32A9C
+    `move.l A2,(0x2c,A0)`) and one store of the address (0xE32A80
+    `move.l A0,(0x48,A2)`), no call between; MAC_OS_$PUT_INFO
+    dereferences `info` once (0xE0C240 `movea.l (0x8,A6),A1; cmpi.l
+    #0x1,(A1)`) and stores its address after a call from the slot
+    (0xE0C322), not loaded at entry.  A call between the uses would
+    separate them, but that is not checked further, so `dpc` refuses a
+    slot whose stores decide it (fewer than two other uses, two or more
+    in all; bead domain-pascal-m2w3).  A slot whose one use is the store
+    is read in place (PKT_$COPY_TO_PA 0xE12538, no other reference to
+    `(0x8,A6)`).  SIO2681_$INIT and SIO6509_$INIT do not follow `dpc`'s
+    entry loads at all (a slot loaded at its first statement and kept
+    across statements: `(0x28,A6)` into A3 at 0xE33400, its address
+    stored from A3 at 0xE33428 and 0xE33450 and from the slot at
+    0xE33496 once A3 is reused; `(0x10,A6)` at SIO6509_$INIT stored from
+    the slot at 0xE33526, then loaded into A4 at 0xE3354C for three
+    dereferences); both are STUB in srcsurvey.  Passed by value
+    (`univ_ptr` under `val_param`): the push of the parameter passed on by
+    address, `move.l (d,A6),-(SP)` (LOG_$READ 0xE1780C), `pea (An)` or
+    `move.l Dn,-(SP)` when held (1.5); the image cannot tell `addr(p)`
+    by value from `p` by address.
+  - *A field: `lea (k,An),Am` off the loaded slot.*  Stored, `movea.l
+    (d,A6),An; lea (k,An),Am; move.l Am,<dst>`, the form `dpc` already
+    had: in compiled code 4 to the frame (MAC_$RECEIVE 0xE0BE9A `lea
+    (0x1c,A3),A2`, `chain_head := addr(pkt_desc.buffers)` in
+    ../source's mac/receive.pas; the module-local 0xE1327E at 0xE132A2;
+    EC2_$WAIT 0xE423DA, 0xE423EE), 1 through an address register
+    (DISK_$INIT_QUE 0xE3C59E), the sources of the last four not checked;
+    passed by value, as by
+    address, `movea.l (d,A6),An; pea (k,An)` (1.5,
+    KBD_$OUTPUT_BUFFER_DRAINED 0xE1CE9E).
+  - *Not `addr`: `lea (An),Am` read as a value.*  Every one of the 29
+    `lea (An),Am` (displacement 0) whose register is then moved
+    (`tools/storesurvey.py addr -v`; review of this bead) starts a
+    pointer for a loop (7.4), never `addr(p)` in ../source: 20 are
+    followed by the `dbf` loop that steps the register (e.g. the
+    module-local 0xE01872 at 0xE018A4, MAC_$OPEN 0xE0B92E, TTY_$I_INIT
+    0xE332F0, which stores `addr(tty)` itself from the slot in that
+    loop, 0xE33302 `move.l (0x8,A6),(0x5c,A3)`); 8 go to a frame cell, which is stepped
+    (AREA_$COPY 0xE09192, 0xE09198 `addq.l #0x4` 0xE0936E, 0xE0936A;
+    MAC_OS_$PUT_INFO 0xE0C2A2 `add.l D4` 0xE0C2FE; MAC_OS_$INIT 0xE2F536
+    `addi.l #0xf4` 0xE2F5E6; BAT_$ALLOCATE 0xE3B290, BAT_$FREE 0xE3B588
+    `addq.l #0x4` 0xE3B372, 0xE3B6C2; VFMT_$MAIN 0xE6AB50, "the
+    compiler's temporary" in vfmt/main.pas) or kept as the start of a
+    second loop (AST_$GET_SEG_MAP 0xE06B3A, read again at 0xE06ED2 for
+    the loop at 0xE06ED8, `output[i]` in ast/get_seg_map.c); the 29th,
+    FLP_$CINIT 0xE3E0E0 `lea (A5),A0; move.l A0,(-0x1c,A6)`, is the
+    unit data's object at offset 0 (the `(d,A5)` form above).  Of
+    these, the ones off a parameter's slot are the module-locals
+    0xE01566 (at 0xE015B8) and 0xE01872, AST_$GET_SEG_MAP, MAC_$OPEN,
+    TTY_$I_INIT, BAT_$ALLOC_VTOCE 0xE3B068, BAT_$ALLOCATE, BAT_$FREE and
+    VFMT_$MAIN.  So `dpc`'s earlier form for `addr` of a `var` or `out`
+    parameter's object stored, `movea.l (d,A6),An; lea (An),Am; move.l
+    Am,<dst>`, has no `addr` site and is gone (EC_$INIT, above, is
+    byte-identical now).  ../source writes the two BAT ones `cursor :=
+    integer32(addr(blocks))`, for which `dpc` emits `move.l
+    (d,A6),(-k,A6)`; both routines are refused earlier.
+  - *Passed by value (`val_param`, `internal`: an `in` scalar of 4 bytes
+    or less): the slot's own address*, as for a value parameter: `pea
+    (d,A6)` (76 in compiled code with d > 0, none told apart from the
+    parameter passed on by address), stored `lea (d,A6),An; move.l
+    An,<dst>` (no compiled site with d > 0: **Uncertain**, the
+    frame-object form above, which `dpc` already gave `addr` of a value
+    parameter under `val_param`); the slot is then read from the frame at
+    each use (12.2, bead domain-pascal-pe9).
+  - **Refused:** the whole object's address stored where those stores
+    decide the slot's entry load (above; bead domain-pascal-m2w3); an
+    enclosing routine's parameter's, stored (the generic form would be
+    `lea (An),Am; move.l Am`, which has no `addr` site, above; `addr(p^)`
+    of a pointer still takes that form, unverified, bead
+    domain-pascal-ucss); a
+    part reached through a slot held in a data register,
+    passed by value (as by address, 1.5); an element at a run-time index
+    passed by value; the target of a type transfer of it,
+    `T(addr(x))^[i]` (PKT_$BRK_INTERNET_HDR 0xE12478, PKT_$BLD_INTERNET_HDR
+    0xE12300 `pea (-0x1,A2,D3.l)`; bead domain-pascal-u7gg).
+  Implemented (`dpc-sema` `Checker::builtin_fn`; `isel.rs`
+  `Selector::store`, `Selector::push`, `entry_loads`); golden
+  `params/addr_in`, exec test `addr_in`, conformance unit `ec_init.pas`,
+  dpc-ir test `addr_of_in_parameters`, driver test
+  `addr_of_in_parameter`.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)
@@ -7432,7 +7544,12 @@ A pointer held in a data register is dereferenced through a copy,
   (8,A6),A1`, 0xE00FA0 `move.l A1,(0x3ec,A5)`), DISK_$ADD_QUE 0xE3C716
   (`(0x12,A6)` loaded into A1 at 0xE3C7D6, before a loop rather than at
   entry, stored at 0xE3C7EE and 0xE3C804).  No D-register parameter in
-  `ptrdregs` has stores as its only other use.
+  `ptrdregs` has stores as its only other use.  For a by-address slot,
+  whether `addr(p)` stored counts towards the two uses that load it at
+  entry is split (the module-local 0xE32A60 at 0xE32A6C, 0xE32A80
+  against MAC_OS_$PUT_INFO 0xE0C240, 0xE0C322; 5.2, "`addr` of a
+  parameter"): refused where it decides (bead domain-pascal-m2w3);
+  EC_$INIT's slot is loaded for its three dereferences.
 - *Compared with `nil` (Uncertain, refused; bead domain-pascal-nys).*
   The AREA_ module-local
   0xE09E48 loads `(0xc,A6)` into A3 at entry, compares it `cmpa.w #0,A3`

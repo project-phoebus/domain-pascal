@@ -54,7 +54,7 @@ STUB	ec/ec2.pas	ec2_$release_ec1
 STUB	ec/ec2.pas	ec2_$get_val
 STUB	ec/ec2.pas	ec2_$init_s
 OK	ec/ec2u.pas	ec2_$init
-STUB	ec/ec2u.pas	ec2_$read
+MISMATCH	ec/ec2u.pas	ec2_$read
 STUB	ec/ec2u.pas	ec2_$advance
 STUB	fim/fim.pas	fim_$build_df
 STUB	fim/fim.pas	fim_$acknowledge

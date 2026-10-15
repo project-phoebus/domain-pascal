@@ -243,3 +243,6 @@ tests/conformance/tty_k_set_pgroup.pas       TTY_$K_SET_PGROUP  --section-addr .
 # the status (12.4 R4(b); bead domain-pascal-i24w): A3 past A2.
 tests/conformance/tty_k_inq_pgroup.pas       TTY_$K_INQ_PGROUP  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_INQ_PGROUP
 tests/conformance/cal_set_drift.pas          CAL_$SET_DRIFT
+# `addr' of a parameter passed by address stored from the register that
+# holds its slot (codegen-patterns 5.2; bead domain-pascal-mbtx).
+tests/conformance/ec_init.pas                EC_$INIT

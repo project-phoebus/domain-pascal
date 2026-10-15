@@ -71,7 +71,7 @@ diag	domain_examples/hardcopy/driver/driver_init_ex.pas	the routine option `_` o
 diag	domain_examples/hardcopy/filter/filter_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/hardcopy/filter/filter_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/streams/recno/recno.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
-diag	domain_examples/streams/sasc/imex.pas	`_` of an `_` parameter (or a part of one) is not supported yet
+diag	domain_examples/streams/sasc/imex.pas	argument type T does not match parameter type T
 diag	domain_examples/streams/sasc/init.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 diag	domain_examples/streams/sasc/io.pas	argument type T does not match parameter type T
 diag	domain_examples/streams/sasc/misc.pas	argument type T does not match parameter type T

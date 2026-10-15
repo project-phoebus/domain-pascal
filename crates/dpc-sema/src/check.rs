@@ -4139,11 +4139,19 @@ impl<'t> Checker<'t> {
                     self.error(span, "`addr` needs a variable (ref p. 4-13)");
                     return self.error_expr(span);
                 }
-                if self.in_param_part(&xs[0]) {
-                    // ref 5.3.2 p. 5-7; see [`Checker::in_param_part`].
-                    self.unsupported(span, "`addr` of an `in` parameter (or a part of one)");
-                    return self.error_expr(span);
-                }
+                // `addr` of an `in` parameter, or of a field or element
+                // of one, is accepted (bead domain-pascal-mbtx): p. 4-13
+                // excepts only routines with the internal attribute (the
+                // one `addr` message of chapter 9, "Cannot take the
+                // address of internal routine"), and 5.3.2 (p. 5-7)
+                // forbids only "us[ing] the parameter on the left side of
+                // an assignment statement".  Writing through the address
+                // breaks 5.3.2's "not allowed to alter its value" (which
+                // callers rely on, [`Checker::in_param_part`]) as writing
+                // through any univ_ptr may; nothing checks that.  The
+                // address is the parameter's slot value when it is passed
+                // by address, the slot's address when by value
+                // (`dpc_ir`'s `var_addr`; Table 5-1, p. 5-5).
                 if self.is_bit_field(&xs[0]) {
                     self.error(
                         span,

@@ -388,6 +388,7 @@ fn select_body_with(
     }
     s.uplevel = f.uplevel_refs.clone();
     s.escaped = escaped_frame_objects(f);
+    s.address_slots = f.address_params.clone();
     // Labels emit nothing: a body is its other statements.
     let stmts: Vec<&Stmt> = f
         .body
@@ -2590,6 +2591,37 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
 /// `move.l #NETWORK_$BUFPOOL,(0x330,A0)`, SOCK_$INIT 0xE2FE4C `lea
 /// (0x4,A2),A1; move.l A1,(0xc,A0)`, FLP_$DINIT 0xE3E15E `pea (0x80,A5)`
 /// by value, NET_$OPEN 0xE5A1B8 in a difference).
+/// The frame offset of the slot `a` is the object of, when `a` is a whole
+/// object reached through a parameter slot (`Addr::Indirect` on the slot's
+/// load, offset 0): `addr(p)` of a parameter passed by address is the
+/// slot's value ([`Selector::is_address_slot`] tells such slots from
+/// by-value pointer parameters).
+fn by_address_slot(a: &Addr) -> Option<i32> {
+    match a {
+        Addr::Indirect { base, offset: 0 } => match &**base {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if *o > 0 => Some(*o),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The frame offset of the slot `a` is reached through, when `a` is an
+/// object at a constant offset in the object a parameter slot points to
+/// (`Addr::Indirect` on the slot's load): the whole object or a field.
+fn slot_root(a: &Addr) -> Option<i32> {
+    match a {
+        Addr::Indirect { base, .. } => by_address_slot(&Addr::Indirect {
+            base: base.clone(),
+            offset: 0,
+        }),
+        _ => None,
+    }
+}
+
 fn addr_value(e: &Expr) -> Option<&Addr> {
     match e {
         Expr::AddrOf(a) => Some(a),
@@ -4854,6 +4886,9 @@ pub struct Selector {
     stored: Vec<(i32, Size, Reg, usize)>,
     /// [`escaped_frame_objects`] of the routine.
     escaped: Vec<i32>,
+    /// The slots of the routine's parameters passed by address
+    /// ([`dpc_ir::Function::address_params`]).
+    address_slots: Vec<i32>,
     /// The operands of the references to volatile objects selected so far
     /// ([`Addr::Volatile`]), over virtual registers, with their access.
     volatile_eas: Vec<(Ea, Access)>,
@@ -5057,6 +5092,7 @@ impl Selector {
             entry_end: None,
             stored: Vec::new(),
             escaped: Vec::new(),
+            address_slots: Vec::new(),
             volatile_eas: Vec::new(),
             a0_bases: Vec::new(),
             cse_plan: CsePlan::Probe,
@@ -7440,6 +7476,12 @@ impl Selector {
 
     /// The register a by-value parameter at frame offset `o` was loaded
     /// into at entry, if it was.
+    /// Whether frame offset `o` is the slot of a parameter passed by
+    /// address ([`dpc_ir::Function::address_params`]).
+    fn is_address_slot(&self, o: i32) -> bool {
+        self.address_slots.contains(&o)
+    }
+
     fn pinned(&self, o: i32) -> Option<Reg> {
         self.pinned
             .iter()
@@ -7549,6 +7591,30 @@ impl Selector {
                 .filter(|(o, _)| *o == offset)
                 .map(|&(_, u)| u)
                 .collect();
+            // A by-address slot is loaded when the body uses it twice or
+            // more.  Whether `addr(p)` stored ([`ParamUse::Stored`]) is
+            // such a use is split: the module-local 0xE32A60 loads its
+            // `(0xc,A6)` at entry (0xE32A6C) for one dereference and one
+            // such store, `move.l A0,(0x48,A2)` (0xE32A80), while
+            // MAC_OS_$PUT_INFO dereferences `info` once (0xE0C240 `movea.l
+            // (0x8,A6),A1`) and stores its address after a call from the
+            // slot, 0xE0C322 `move.l (0x8,A6),(-0x8,A6)`.  Where those
+            // stores decide it, it is refused (codegen-patterns 12.2; bead
+            // domain-pascal-m2w3).  A slot loaded for two other uses is
+            // stored from its register (EC_$INIT 0xE15208); one used only
+            // by one store is read in place (PKT_$COPY_TO_PA 0xE12538).
+            if ty.is_none() && mine.contains(&ParamUse::Stored) {
+                let others = mine.iter().filter(|&&u| u != ParamUse::Stored).count();
+                if others < 2 && mine.len() >= 2 {
+                    return Err(unsupported(
+                        f.span,
+                        "`addr` of a parameter passed by address stored, its slot used less \
+                         than twice besides (loaded at entry at 0xE32A6C, read in place \
+                         at MAC_OS_$PUT_INFO 0xE0C322; not settled, codegen-patterns 12.2, bead \
+                         domain-pascal-m2w3) is",
+                    ));
+                }
+            }
             if mine.is_empty() || (ty.is_none() && mine.len() < 2) {
                 continue;
             }
@@ -8729,6 +8795,37 @@ impl Selector {
             // #MAC_$DEMUX,(-8,A6)`; PROC1_ 0xE14B7A `move.l
             // #PROC1_$TS_END_CALLBACK,(24,A2)`; codegen-patterns 1.6).
             Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => Src::Ea(Ea::ImmSym(name.clone())),
+            // `addr(p)` of a parameter passed by address (any mode), the
+            // whole object: the address its slot holds, moved from the
+            // frame, `move.l (d,A6),<dst>` (codegen-patterns 5.2, "`addr`
+            // of a parameter"; bead domain-pascal-mbtx): MAC_OS_$PUT_INFO
+            // 0xE0C322 `move.l (0x8,A6),(-0x8,A6)` and PKT_$COPY_TO_PA
+            // 0xE12538 (`in`), TTY_$I_INIT 0xE33302 `move.l
+            // (0x8,A6),(0x5c,A3)`, SIO2681_$INIT 0xE3344A, SIO6509_$INIT
+            // 0xE33526 (`var`), as ../source reconstructs them.  A slot
+            // held in a register (12.2) is stored from it, as a by-value
+            // pointer is ([`ParamUse::Stored`]): EC_$INIT 0xE15208 `move.l
+            // A0,(0x4,A0)`, `addr(ec)` of its `out` parameter.
+            Expr::AddrOf(a) if by_address_slot(a).is_some_and(|o| self.is_address_slot(o)) => {
+                let o = by_address_slot(a).unwrap();
+                match self.pinned(o) {
+                    Some(r) => Src::Ea(Ea::Reg(r)),
+                    None => Src::Ea(Ea::Disp(o, FP)),
+                }
+            }
+            // `addr(p)` of an enclosing routine's parameter passed by
+            // address: the slot's value through the static link; the `lea
+            // (An),Am` of the generic form below has no `addr` site in
+            // compiled code (codegen-patterns 5.2, "`addr` of a
+            // parameter"; bead domain-pascal-ucss).
+            Expr::AddrOf(Addr::Indirect { base, offset: 0 }) if matches!(&**base, Expr::Load { addr: Addr::Enclosing(o), .. } if *o > 0) =>
+            {
+                return Err(unsupported(
+                    self.span,
+                    "`addr` of an enclosing routine's parameter passed by address, stored (no \
+                     site, codegen-patterns 5.2; bead domain-pascal-ucss) is",
+                ));
+            }
             // `addr(x)` of an object of this unit's data or frame, or one
             // reached through a pointer or an index: `lea` into an address
             // register, then `move.l An,<dst>` ([`Self::addr_into_a`]).
@@ -9260,6 +9357,9 @@ impl Selector {
     fn value_needs_reg(&self, value: &Expr) -> bool {
         match value {
             Expr::Const { .. } | Expr::AddrOf(Addr::Symbol { offset: 0, .. }) => false,
+            // `addr(p)` of a parameter passed by address: its slot, read
+            // in place ([`Self::store`]).
+            Expr::AddrOf(a) if by_address_slot(a).is_some_and(|o| self.is_address_slot(o)) => false,
             Expr::Load { addr, .. } => self.addr_needs_reg(addr),
             // The low bytes of a parameter loaded at entry into a data
             // register: stored from that register (module-local 0xE0A328
@@ -9815,6 +9915,22 @@ impl Selector {
                         self.out.push(Insn::Pea(ea));
                     }
                     Expr::AddrOf(a @ Addr::OtherStatic { .. }) => self.push_other_static(a)?,
+                    // `addr(p)` by value of a parameter passed by address
+                    // (any mode), or of a field of one: the push of the
+                    // same address by address, below (the whole object,
+                    // the slot's value, `move.l (d,A6),-(SP)`, LOG_$READ
+                    // 0xE1780C; a field, `movea.l (d,A6),An; pea (k,An)`,
+                    // KBD_$OUTPUT_BUFFER_DRAINED 0xE1CE9E; from the
+                    // register that holds the slot, 12.2;
+                    // codegen-patterns 5.2, bead domain-pascal-mbtx).  The
+                    // image cannot tell the two apart.
+                    Expr::AddrOf(a) if slot_root(a).is_some_and(|o| self.is_address_slot(o)) => {
+                        return self.push(&Arg::Address {
+                            addr: a.clone(),
+                            slot: 4,
+                            writable: false,
+                        });
+                    }
                     Expr::AddrOf(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
                     }

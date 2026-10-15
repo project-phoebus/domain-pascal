@@ -766,7 +766,6 @@ fn in_parameter_parts_are_not_written() {
         ("s(x.a)", "passing an `in` parameter"),
         ("s(y)", "passing an `in` parameter"),
         ("t(x)", "passing an `in` parameter"),
-        ("discard(addr(y))", "`addr` of an `in` parameter"),
     ] {
         assert_err(
             &format!(
@@ -789,6 +788,30 @@ fn in_parameter_parts_are_not_written() {
         "{rec} procedure s(var v: integer); extern; \
          procedure p(in q: ip; in y: integer); var z: integer; begin q^ := y; s(q^); z := y end;"
     ));
+}
+
+/// Bead domain-pascal-mbtx: `addr` of an `in` parameter, or of a part of
+/// one, is accepted ("Addr", p. 4-13: "any data type except as a procedure
+/// or function data type having the internal attribute"; 5.3.2 p. 5-7
+/// forbids only assignment), by address and, under `val_param`, by value.
+#[test]
+fn addr_of_in_parameter() {
+    let rec = "type r = record a, b: integer; end; a2 = array[1..2] of integer;";
+    for opts in ["", " options(val_param);"] {
+        for body in [
+            "u := addr(x)",
+            "u := addr(y)",
+            "u := addr(x.b)",
+            "u := addr(z[2])",
+            "with x do u := addr(b)",
+            "discard(addr(y))",
+        ] {
+            module(&format!(
+                "{rec} var u: univ_ptr; \
+                 procedure p(in x: r; in y: integer; in z: a2);{opts} begin {body} end;"
+            ));
+        }
+    }
 }
 
 #[test]

@@ -4713,3 +4713,48 @@ end;
     };
     assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
 }
+
+/// Bead domain-pascal-mbtx: `addr` of an `in` parameter is lowered like
+/// that of a `var` one (ref "Addr", p. 4-13; Table 5-1, p. 5-5): passed by
+/// address, the address its slot holds; under `val_param`, an `in`
+/// integer32 passed by value, its slot's address; a field, at its offset.
+#[test]
+fn addr_of_in_parameters() {
+    let m = lower_src(
+        "module m;
+type r = record a, b: integer32; end;
+var g, h, k: univ_ptr;
+procedure p(in x: r);
+begin g := addr(x); h := addr(x.b); end;
+procedure q(in y: integer32); options(val_param);
+begin k := addr(y); end;",
+    )
+    .unwrap();
+    let slot = |o| Expr::Load {
+        addr: Addr::Frame(o),
+        ty: Scalar {
+            pointer: true,
+            ..Scalar::unsigned(Width::Long)
+        },
+    };
+    let stored = |f: &Function, i: usize| match &f.body[i].kind {
+        StmtKind::Store { value, .. } => value.clone(),
+        k => panic!("{k:?}"),
+    };
+    assert_eq!(
+        stored(&m.functions[0], 0),
+        Expr::AddrOf(Addr::Indirect {
+            base: Box::new(slot(8)),
+            offset: 0
+        })
+    );
+    assert_eq!(
+        stored(&m.functions[0], 1),
+        Expr::AddrOf(Addr::Indirect {
+            base: Box::new(slot(8)),
+            offset: 4
+        })
+    );
+    assert_eq!(m.functions[0].address_params, [8]);
+    assert_eq!(stored(&m.functions[1], 0), Expr::AddrOf(Addr::Frame(8)));
+}
