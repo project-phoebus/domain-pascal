@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: ec814eec0785b5ade0496138a82d10070639eb77
+# source: 980aa83a8bf116d0ab790598f86c8ec8ba0ae5b5
 STUB	acl/acl.pas	acl_$init
 MISMATCH	acl/acl.pas	acl_$cache_list_insert
 STUB	acl/acl.pas	acl_$cache_list_remove
@@ -69,6 +69,25 @@ STUB	acl/acl.pas	acl_$free_asid
 STUB	app/app.pas	app_$receive
 MISMATCH	app/app.pas	app_$demux
 STUB	app/app.pas	app_$std_open
+STUB	area/area.pas	area_$rpmap_get
+STUB	area/area.pas	area_$alloc_resources
+MISMATCH	area/area.pas	area_$wait_in_trans
+MISMATCH	area/area.pas	area_$wait_pite_in_trans
+STUB	area/area.pas	area_$internal_create
+MISMATCH	area/area.pas	area_$create
+STUB	area/area.pas	area_$create_from
+STUB	area/area.pas	area_$internal_delete
+STUB	area/area.pas	area_$delete
+STUB	area/area.pas	area_$delete_from
+STUB	area/area.pas	area_$free_asid
+STUB	area/area.pas	area_$shutdown
+STUB	area/area.pas	area_$free_from
+STUB	area/area.pas	area_$transfer
+STUB	area/area.pas	area_$free_segments
+STUB	area/area.pas	area_$resize
+STUB	area/area.pas	area_$grow
+STUB	area/area.pas	area_$grow_to
+STUB	area/area.pas	area_$init
 STUB	as/as.pas	as_$init
 STUB	as/as.pas	as_$get_info
 STUB	as/as.pas	as_$get_addr
