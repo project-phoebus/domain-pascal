@@ -198,5 +198,73 @@ class GuardClassTest(unittest.TestCase):
             ('bmi sub', 'copied', '?'))
 
 
+def routine(texts):
+    """A tools/regalloc.py Routine from instruction texts (2 bytes each,
+    from 0x1000), without the image (as tools/tests/test_regalloc.py)."""
+    import regalloc
+    rt = regalloc.Routine.__new__(regalloc.Routine)
+    rt.ins = [regalloc.Insn(0x1000 + 2 * k, 2, t) for k, t in enumerate(texts)]
+    rt.r0, rt.r1 = 0x1000, 0x1000 + 2 * len(texts)
+    rt.at = {x.addr: i for i, x in enumerate(rt.ins)}
+    rt.tails = {}
+    word = loopalign.word
+    loopalign.word = lambda a: 0
+    try:
+        rt.cfg()
+        rt.epilogue()
+        rt.zext()
+        rt.liveness()
+        rt.result()
+        rt.webs()
+    finally:
+        loopalign.word = word
+    return rt
+
+
+class CounterSiteTest(unittest.TestCase):
+    """`counters' (bead domain-pascal-fbah; codegen-patterns 7.4, "The
+    count's register")."""
+
+    def test_in_place(self):
+        # PROC2_$GET_INFO 0xE40912..0xE40928: the counter in T's D0, the
+        # index in D1 (the bound's dead register)
+        rt = routine([
+            'linkw %fp,#-8', 'movew %fp@(8),%d1', 'moveal %fp@(12),%a0',
+            'movew %d1,%d0', 'subqw #1,%d0', 'bmis 0x1018', 'moveq #1,%d1',
+            'moveb %a0@(-1,%d1:w),%fp@(-2)', 'addqw #1,%d1', 'dbf %d0,0x100e',
+            'nop', 'nop', 'unlk %fp', 'rts'])
+        s = loopalign.counter_site(rt, 0x100e, '%d0')
+        self.assertEqual((s['where'], s['T'], s['C'], s['I'], s['L'], s['rel']),
+                         ('in place', 'd0', 'd0', 'd1', 'd0', 'L=T'))
+        self.assertEqual((s['bound'], s['first'], s['iuse']), ('var dies', 'C', 1))
+
+    def test_copied_index_first(self):
+        # PROC2_$INFO 0xE40840..0xE40858: the index in T's D0, the counter
+        # in D1 above it
+        rt = routine([
+            'linkw %fp,#-8', 'movew %fp@(8),%d1', 'moveal %fp@(12),%a0',
+            'movew %d1,%d0', 'subqw #1,%d0', 'bmis 0x101a', 'movew %d0,%d1',
+            'moveq #1,%d0', 'moveb %a0@(-1,%d0:w),%fp@(-2)', 'addqw #1,%d0',
+            'dbf %d1,0x1010', 'nop', 'nop', 'unlk %fp', 'rts'])
+        s = loopalign.counter_site(rt, 0x1010, '%d1')
+        self.assertEqual((s['where'], s['T'], s['C'], s['I'], s['L'], s['rel'], s['holder']),
+                         ('copied', 'd0', 'd1', 'd0', 'd1', 'L>T', 'index'))
+        self.assertEqual(s['first'], 'I')
+
+    def test_copied_below_t(self):
+        # the MAC_OS_ module-local 0xE0B202 at 0xE0B208..0xE0B218: the
+        # bound's D1 dies at the copy into T (R2 keeps T out of it), the
+        # counter takes it back
+        rt = routine([
+            'linkw %fp,#-16', 'movel %fp@(8),%d0', 'movew %fp@(16),%d1',
+            'movew %d1,%d2', 'subqw #1,%d2', 'bmis 0x101c', 'movew %d2,%d1',
+            'clrw %d2', 'moveal %fp@(12),%a0', 'cmpl %a0@(0,%d2:w),%d0',
+            'addqw #1,%d2', 'dbf %d1,0x1012', 'nop', 'nop', 'unlk %fp', 'rts'])
+        s = loopalign.counter_site(rt, 0x1012, '%d1')
+        self.assertEqual((s['where'], s['T'], s['C'], s['I'], s['L'], s['rel']),
+                         ('copied', 'd2', 'd1', 'd2', 'd1', 'L<T'))
+        self.assertEqual((s['bound'], s['across']), ('var dies', '0'))
+
+
 if __name__ == '__main__':
     unittest.main()

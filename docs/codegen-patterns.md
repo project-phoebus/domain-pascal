@@ -7005,7 +7005,9 @@ scripts besides, not kept, are named as such below; re-check sites with
   also takes guards past the exit's `bra`; DTTY_$WRITE_STRING 0xE1D6B0
   `move.w D0,D3`, the counter callee-saved, the scratch `T` not);
   without one, copied 45 times and kept in place 64 times (50 and 71 in
-  `guards`),
+  `guards`; the counter's register decides, "The count's register"
+  below, bead domain-pascal-fbah; the rest of this paragraph is the
+  earlier search),
   whether `T` was loaded from memory or copied from a register, with no
   rule found (LOG_$READ's worker and PKT_$RECENTLY_MISSING keep
   it; 0xE0B1D8 `move.w D0,D1; subq.w #1,D1; bmi; move.w D1,D0` copies it
@@ -7065,7 +7067,7 @@ scripts besides, not kept, are named as such below; re-check sites with
     #1,D0; bmi; move.w D0,D1; clr.w D0`) copy; KBD's module-local
     0xE1CA8C at 0xE1CAA8 (`move.w D0,D1; subq.w #1,D1; bmi; clr.w D2`,
     the bound's variable live after the loop) keeps it in place.  The
-    copy question stays open without a call (above).
+    copy without a call: "The count's register", below.
   - *The constant of `e - c` is folded* into the one subtraction: no
     guard subtracts twice (no two `subq`/`subi` on `T` before a guard).
     With a call, DISK_$AS_XFER_MULTI 0xE6BA42 `move.w D3,D0; subq.w
@@ -7124,6 +7126,128 @@ scripts besides, not kept, are named as such below; re-check sites with
     from memory and loaded again for the index (KBD's module-local
     0xE1C9FC at 0xE1CA10 `move.w (26,A5,D1.w),D2; subq.w #1,D2; sub.w
     (24,A5,D1.w),D2; bmi; move.w (24,A5,D1.w),D3`).  Not settled.
+- **The count's register (survey Verified; the copy below the count
+  implemented; bead domain-pascal-fbah).**  `tools/loopalign.py counters
+  [-v]` (kept, with tests) takes the `subq.w #k`/`subi.w #k; bmi` guards
+  of `guards` without a call in the body (125; 8 in routines with a
+  computed `jmp` skipped, 117 loops) and, from `tools/regalloc.py`'s
+  model of the routine, the count's register `T`, the counter `Dc`, the
+  index, and `L`, the lowest data register free over the loop body (live
+  into or out of, or written by, no instruction from the head to the
+  `dbf`; the index's register counted as taken, the counter's own as
+  free).  **The counter is in `L` at all 117, and the count stays in
+  place exactly where `L` is `T`.**  Where the index lies below the
+  counter (26 loops) that the counter is in `L` follows partly from
+  counting the index's register as taken; the observation is that no
+  lower register is free there besides the index's:
+
+  | `L` against `T` | in place | copied |
+  |---|---|---|
+  | `L = T` | 70 | 0 |
+  | `L < T`: `T` above a free register | 0 | 18 |
+  | `L > T`: `T`'s register taken in the loop | 0 | 29 |
+
+  So the copy is no decision of its own; what is open is which value of
+  the loop gets `T`'s dying register.
+  - *`L < T`* (18): `T` stands above a register free over the loop, kept
+    out of it by a bound variable that dies at `move.w Dv,T` (R2, 6: the
+    MAC_OS_ module-locals 0xE0B1BC at 0xE0B1C8..0xE0B1D2 `move.w
+    (16,A6),D0; move.w D0,D1; subq.w #1,D1; bmi.s; move.w D1,D0` and
+    0xE0B202 at 0xE0B20C..0xE0B218 `move.w (16,A6),D1; move.w D1,D2;
+    subq.w #1,D2; bmi.s; move.w D2,D1; clr.w D2`; HDR_CHKSUM's loop at
+    0xE762EC; the RING_ module-locals 0xE7630C, 0xE76352, 0xE76422 at
+    0xE76436..0xE7643C `move.w D2,D3; subq.w #1,D3; bmi.s; move.w
+    D3,D2`; at all 6 the counter in the bound's register), or with that
+    register free over `T`'s whole range, the counter coloured before
+    `T` and `T` kept from it (12: five loads, DIR_$ADD_LINKU 0xE50880
+    `move.w (18,A6),D3` with D0 free, SMD_$ALLOC_HDM 0xE6D990,
+    SHOW_CURSOR 0xE6E2E8, SMD_$DEL_TRK_RECT 0xE6E640, DIR_$FIND_NET
+    0xE4F374; seven expressions, the `(e + 2^k - 1) div 2^k` idiom
+    `move.l D3,D1; bpl.s; addq.l #3,D1; asr.l #2,D1; subq.w #1,D1;
+    bmi.s; move.w D1,D0` at MST_$INVALIDATE 0xE444D8..0xE444E4, also
+    0xE44446, ACL_$PRIM_CREATE 0xE47AEA, 0xE47CFC, DIR_$DIR_READU
+    0xE4E522, DIR_$FIND_NET 0xE4F010, and a byte bound zero-extended
+    into D7 at 0xE4FA1E).  Of the bound variables dying at the bound
+    (14), the 6 below `T` are all copied into their register, the 8
+    above it in place 6 times and copied twice (PROC2_$INFO, DIR_$CLEANUP
+    0xE53C18: the index first, below).
+    With an index, it takes the lowest register left after the
+    counter in 7 of the 8, often `T`'s (0xE0B218 `clr.w D2`); 0xE4F374
+    has the index (from 2, a scaled one: `moveq #2,D0`) below the
+    counter.
+  - *`L > T`* (29): `T`'s register is taken in the loop by the index
+    (21: PROC2_$INFO 0xE40840..0xE40848 `move.w D1,D0; subq.w #1,D0;
+    bmi.s; move.w D0,D1; moveq #1,D0`, where PROC2_$GET_INFO
+    0xE40912..0xE40918 has `move.w D1,D0; subq.w #1,D0; bmi.s; moveq
+    #1,D1` before the same body; PROC2_$NAME_TO_UID 0xE3EB38; KBD_$INQ_
+    KBD_TYPE 0xE72590), by a value of the body (6: BAT_$ALLOC_FM
+    0xE3AD70, SHAKE 0xE3E4C6, DISK_$GET_MNT_INFO 0xE6BF6C, DIR_$READ_LINKU
+    0xE4E0D2, 0xE4E108, FILE_$PRIV_UNLOCK 0xE5FDDE), or by the count
+    itself, read after the loop (2: AST_$LOAD_AOTE 0xE02980, `tst.w D0`
+    at 0xE029A2 for the next loop's guard; XPD_$PUT_REGISTERS 0xE5C3FC).
+  - *`L = T`* (70): the counter got `T`'s register.  With an index, the
+    index lies above the counter in 38 of these 39 (VFMT_$MAIN 0xE6AD5C
+    the exception, the count loaded into D1 with the index in D0), and
+    below it in 25 of the 32 copies.  So the order in which the counter
+    and the index (or the body's values) are coloured decides, and it is
+    not settled (12.4 R1): of `tools/regalloc.py`'s allocator orders
+    (`orders`; ad-hoc script over the 67 loops with an index whose count
+    is not read after the loop, not kept), address order (the counter
+    first) fits 36 of the 37 in place and 6 of the 30 copies, the
+    Chow-Hennessy, Briggs and Chaitin orders 1-4 of the 37 and 21-25 of
+    the 30, a plain usage count 24 and 24: none both.
+
+  Features tested, none separating (in place / copied; `counters`
+  prints them): the bound (a variable dying at the bound 6 / 8, live
+  after it 13 / 8, a load 39 / 21, already in `T` 12 / 3, an expression
+  0 / 7); `T` callee-saved 3 / 13; the counter callee-saved 3 / 9; the
+  index's reads in the body (none 31 / 15, one 16 / 16, two 21 / 14,
+  three 2 / 2); its initial value (1: 34 / 27; 0: 1 / 2); data registers
+  written in the body (none 37 / 20, one 23 / 12, more 10 / 15) or live
+  across the loop (none 21 / 11); no call in the routine before the loop
+  28 / 13, after it 16 / 17; inside another loop 7 / 10; holding one 4 /
+  3.  Also tried (ad-hoc scripts, not kept): the routine's data values
+  defined before the loop (up to 4: the counter below the index 20 of 22
+  times; 15 or more: above it 10 of 11; but EC2_$WAIT 0xE427DE in place
+  after 101 values, KBD_$INQ_KBD_TYPE 0xE72590 copied after 5), the loop
+  inside an `if` (28 / 15), at the routine's tail (10 / 3), earlier
+  loops in the routine, the guard's block starting at a label.  Nine
+  loop shapes (the bound's load, the guard, the preheader and the body
+  alike up to register names and displacements) occur both ways: the
+  DIR_ name copies (DIR_$READ_LINKU 0xE4D71A, DIR_$CLEANUP 0xE53C18,
+  PACCT_$LOG 0xE5AC00 copied; DIR_$ADD_HARD_LINKU 0xE5060A and 11 more
+  in place), PROC2_$INFO and PROC2_$GET_INFO, KBD's module-local 0xE1CAB0
+  and KBD_$INQ_KBD_TYPE 0xE72590, XPD_$GET_REGISTERS 0xE5C2E0 and
+  XPD_$PUT_REGISTERS 0xE5C4A8: no feature of the loop decides.  Unlike
+  the `tst.w` guard's copy, which stays as `move.w D2,D2` where the
+  counter takes the bound's register (0xE17EC2), no `subq` guard is
+  followed by a self-copy (0 of 117).
+
+  **Implemented** (`isel.rs` `for_`, `count_copy_check`): without a call
+  in the body, from 0 or 1 to `e` or `e - c` where `e` is a variable
+  held in a data register (the R2 shape; any other bound is refused,
+  since the image's other `L < T` sites are the colouring order's), as
+  with a call: `move.w Dv,T`, `subq.w #k,T`, `bmi`, `move.w T,Dc`, the
+  counter coloured before the index and the body's values (definition
+  order) with its count's dying register counting as free (`regs.rs`
+  `allocate_apart`'s `coalesce`).  Accepted where the counter lands
+  below `T` in the bound variable's register, as at the 6 R2 sites, the
+  index then in the lowest register left; refused where it would take
+  `T`'s own register (in place or copied by the colouring order) or
+  lands below `T` elsewhere (not seen).  An in-place stepped pointer's
+  `movea.l` goes before the copy when no index is set up after it, the
+  pointer's adjustment after (SHOW_CURSOR 0xE6E2E2..0xE6E2E8 `bmi;
+  movea.l A5,A1; move.w D1,D0; addq.l #8,A1`, an `L < T` site; 7.4,
+  "Placement").  srcsurvey at ../source 980aa83a: the MAC_OS_
+  module-locals 0xE0B1BC and 0xE0B202 and the RING_ ones 0xE7630C,
+  0xE76352, 0xE76422 STUB -> MISMATCH, their count's instructions as in
+  the image; but not their place against the stepped pointer's
+  `movea.l` at the RING_ ones (0xE7630C `move.w D2,D1; movea.l
+  (12,A6),A0; moveq #1,D2`, 0xE76352 `movea.l (16,A6),A0; move.w
+  D3,D2`, 0xE76422 `move.w D3,D2; movea.l (16,A6),A0; moveq #1,D3`):
+  the image steps the parameter's pointer in place where `dpc` forms a
+  new one (7.4, "Forming").  Golden `loops/for_runtime_nocall`, exec
+  test `for_nocall`.
 - **A guard formed as a boolean (Verified at the site; cause
   Uncertain).**  TPAD_$INIT 0xE33570, `for unit := 1 to smd_$n_devices
   do`, has `jsr SMD_$N_DEVICES; subq.w #1,D0; move.w D0,D2; slt D3;
@@ -7188,7 +7312,9 @@ scripts besides, not kept, are named as such below; re-check sites with
     `e` of `hi = e - c`, `c` a constant), `subq.w #k,T` (`subi.w` above
     8; `k = from + c`), `bmi EXIT`, `move.w T,Dc`, the index `moveq
     #1`/`clr.w` (bead domain-pascal-jnsb; `isel.rs`, `for_`; `c >= 2`
-    Inferred, above);
+    Inferred, above); without a call, the same for a bound variable held
+    in a data register where the counter lands below `T` in its register
+    ("The count's register", bead domain-pascal-fbah);
   - from 0 to a variable held in a register or of the unit's data, with
     or without a call: `tst.w T; bmi EXIT; move.w T,Dc`, the copy exempt
     from R2 (`regs.rs`, `allocate_apart`'s `coalesce`; `isel.rs`,
@@ -7239,8 +7365,10 @@ scripts besides, not kept, are named as such below; re-check sites with
 
 **Not supported yet** (positioned errors): run-time bounds other than
 the cases above, each with its own message (bead domain-pascal-jnsb):
-from 1, or from 0 to `e - c`, without a call in the body (no rule for
-the copy); from 0 to an expression other than a variable
+from 1, or from 0 to `e - c`, without a call in the body, where `e` is
+not a variable held in a data register or the counter would take the
+count's register (the colouring order, "The count's register", bead
+domain-pascal-fbah); from 0 to an expression other than a variable
 or `e - c` (the guard of its value not surveyed), through a pointer (no
 `tst.w`, ROUTE_$READ_USER_STATS 0xE6A6C4), or another unit's, absolute,
 indexed or unheld frame variable (not surveyed); from another constant

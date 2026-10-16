@@ -61,6 +61,15 @@ usage:
                                           # the index's initial value (7.4,
                                           # "Run-time bounds"); -v one line
                                           # per loop
+    tools/loopalign.py counters [-v]      # `subq.w #k; bmi' guards without
+                                          # a call in the body: the count
+                                          # in place or copied by the
+                                          # lowest data register free over
+                                          # the loop, who holds T's
+                                          # register, and the other
+                                          # features tested (bead
+                                          # domain-pascal-fbah; 7.4); -v
+                                          # one line per loop
     tools/loopalign.py ptrs [-v] [ROOT...] # `dbf' loops: the stepped
                                           # pointers by how the preheader
                                           # forms them (root: `lea A5',
@@ -695,6 +704,173 @@ def idx_of(ins, addr):
     raise KeyError(addr)
 
 
+_DREGS = ['d%d' % n for n in range(8)]
+
+
+def counter_site(rt, head, creg):
+    """The count of a `dbf' loop guarded by `subq.w #k,T; bmi' (bead
+    domain-pascal-fbah; codegen-patterns 7.4, "The count's register"):
+    where it goes, and the features tested against that, from
+    tools/regalloc.py's model of the routine `rt' (liveness, values).
+    `head': the loop head's address; `creg': the `dbf' register (`d1').
+    A dict:
+
+      where   'in place' (the guard's T is the `dbf' register) or 'copied'
+              (`move.w T,C' between the guard and the head)
+      T, C, I the count's, the counter's and the index's registers (I:
+              the first `clr.w'/`moveq' into another data register after
+              the guard, None when there is none)
+      L       the lowest data register free over the loop: not live into
+              or out of, nor written by, any instruction of the body,
+              with the counter's own register free and the index's taken
+      rel     'L=T', 'L<T' (T stands above the lowest free register) or
+              'L>T' (T's register is taken in the loop)
+      holder  who holds T's register in the loop when rel is 'L>T': 'T'
+              (the count read after the loop), 'index', 'body' (a value
+              of the body), else ''
+      bound   how T gets the bound: 'var dies' / 'var live' (`move.w
+              Dv,T', Dv dead or live after it), 'memory' (`move.w ea,T'),
+              'held' (T is written by no instruction just before the
+              `subq': the bound already in T, e.g. after a store of it),
+              'expression' (another instruction defines T)
+      Tcs, Ccs  T's / C's register callee-saved (D2-D7)
+      iuse    the instructions of the body that read the index (its step
+              left out)
+      body    data registers written in the body other than C and I
+      across  data registers live into the head other than C and I
+      calls_before, calls_after   calls in the routine before the guard
+              and after the loop
+      nested  the loop lies inside another loop
+      inner   the loop contains another loop
+      first   for loops with an index, 'I' when the index's register is
+              below the counter's, 'C' otherwise
+      Tlive   the count read after the loop (copied loops)
+    None when the guard is not `subq.w'/`subi.w' on a data register."""
+    i = rt.at[head]
+    c = creg.lstrip('%')
+    j = next(k for k in range(i, len(rt.ins)) if rt.ins[k].kind == 'db'
+             and rt.ins[k].target == head and rt.ins[k].ops[0] == '%' + c)
+    g = next((k for k in range(i - 1, -1, -1) if rt.ins[k].kind == 'bcc'), None)
+    if g is None or g < 1:
+        return None
+    sq = rt.ins[g - 1]
+    mm = re.match(r'sub[qi]w #\d+,%(d\d)$', sq.text)
+    if not mm:
+        return None
+    T = mm.group(1)
+    copied = any(rt.ins[k].text == 'movew %%%s,%%%s' % (T, c) for k in range(g + 1, i))
+    where = 'in place' if T == c and not copied else 'copied' if copied else 'other'
+    I = None
+    for k in range(g + 1, i):
+        im = re.match(r'(clrw |moveq #-?\d+,)%(d\d)$', rt.ins[k].text)
+        if im and im.group(2) != c:
+            I = im.group(2)
+            break
+    body = range(i, j + 1)
+    busy, written = set(), set()
+    for k in body:
+        x = rt.ins[k]
+        busy |= {r for r in rt.lin[k] | rt.lout[k] | x.defs if r in _DREGS}
+        written |= {r for r in x.defs if r in _DREGS}
+    L = next((r for r in _DREGS if r != I and r not in busy - {c}), None)
+    exit_i = j + 1
+    tlive = copied and T in rt.lin.get(exit_i, set())
+    rel = '?' if L is None else 'L=T' if L == T else 'L<T' if int(L[1]) < int(T[1]) else 'L>T'
+    holder = ''
+    if rel == 'L>T':
+        holder = 'T' if tlive else 'index' if I == T else 'body' if T in busy else ''
+    d = rt.ins[g - 2] if g >= 2 else None
+    if d is not None and T in d.defs:
+        if d.mn == 'movew' and re.fullmatch(r'%d\d', d.ops[0]):
+            v = d.ops[0][1:]
+            bound = 'var live' if v in rt.lout[g - 2] else 'var dies'
+        elif d.mn == 'movew':
+            bound = 'memory'
+        else:
+            bound = 'expression'
+    else:
+        bound = 'held'
+    iuse = 0
+    if I:
+        iuse = sum(1 for k in body if I in rt.ins[k].uses
+                   and not re.match(r'(addq|subq)[wl] #\d,%' + I + '$', rt.ins[k].text))
+    loops = [(rt.at[x.target], k) for k, x in enumerate(rt.ins)
+             if k in rt.succ and x.kind in ('db', 'bcc', 'br') and x.target in rt.at
+             and rt.at[x.target] <= k]
+    return dict(
+        where=where, T=T, C=c, I=I, L=L, rel=rel, holder=holder, bound=bound,
+        Tcs=T >= 'd2', Ccs=c >= 'd2', iuse=iuse,
+        body=''.join(sorted(r[1] for r in written - {c, I})),
+        across=''.join(sorted(r[1] for r in rt.lin[i] if r in _DREGS and r not in (c, I))),
+        calls_before=sum(1 for k in rt.calls if k < g),
+        calls_after=sum(1 for k in rt.calls if k > j),
+        nested=any(h < i and e > j for h, e in loops),
+        inner=any(i <= h and e < j for h, e in loops),
+        first=(('I' if int(I[1]) < int(c[1]) else 'C') if I else None),
+        Tlive=tlive)
+
+
+def counters(m, sites, routines, verbose=False):
+    """The `subq.w #k; bmi' guards of `guards' without a call in the body:
+    the count in place or copied against the features of counter_site
+    (bead domain-pascal-fbah; codegen-patterns 7.4, "The count's
+    register"); -v one line per loop."""
+    import regalloc     # noqa: E402 (regalloc imports this module)
+    rows, skipped, cache = [], Counter(), {}
+    for t, r0, br, before, after, calls, creg in guard_rows(m, sites, routines):
+        how, where, lo = guard_class(br, before, after, creg)
+        if not how.startswith(('bmi subq', 'bmi subi')) or calls:
+            continue
+        if r0 not in cache:
+            try:
+                cache[r0] = regalloc.one(m, r0)
+            except (regalloc.Unknown, ValueError, IndexError, KeyError) as e:
+                cache[r0] = str(e).split()[0] or 'parse'
+        rt = cache[r0]
+        if isinstance(rt, str):
+            skipped[rt] += 1
+            continue
+        s = counter_site(rt, t, creg)
+        if s is None or s['where'] == 'other':
+            skipped['shape'] += 1
+            continue
+        s.update(head=t, how=how, lo=lo, name=m.describe(t))
+        rows.append(s)
+    print('loops: %d (skipped: %s)' % (len(rows), dict(skipped)))
+    tabs = [('rel', 'the lowest free register L against T'),
+            ('holder', "who holds T's register in the loop (rel L>T)"),
+            ('C=L', 'the counter in the lowest free register'),
+            ('how', 'guard'), ('bound', 'bound'), ('Tcs', 'T callee-saved'),
+            ('Ccs', 'C callee-saved'), ('lo', 'index from'),
+            ('iuse', 'index reads in the body'), ('first', 'index below counter'),
+            ('body#', 'data registers written in the body'),
+            ('across#', 'data registers live across the loop'),
+            ('calls_before0', 'no call before'), ('calls_after0', 'no call after'),
+            ('nested', 'inside another loop'), ('inner', 'contains a loop'),
+            ('Tlive', 'count read after the loop')]
+    for s in rows:
+        s['C=L'] = s['C'] == s['L']
+        s['body#'] = len(s['body'])
+        s['across#'] = len(s['across'])
+        s['calls_before0'] = s['calls_before'] == 0
+        s['calls_after0'] = s['calls_after'] == 0
+    for key, title in tabs:
+        c = defaultdict(Counter)
+        for s in rows:
+            c[s[key]][s['where']] += 1
+        print('%s:' % title)
+        for k in sorted(c, key=str):
+            print('    %-12s in place %3d   copied %3d' % (k, c[k]['in place'], c[k]['copied']))
+    if verbose:
+        for s in sorted(rows, key=lambda s: s['head']):
+            print('%(head)06X %(where)-8s T=%(T)s C=%(C)s I=%(I)-4s L=%(L)s %(rel)s '
+                  '%(holder)-5s %(bound)-10s lo=%(lo)-2s iuse=%(iuse)d body=%(body)-6s '
+                  'across=%(across)-6s calls=%(calls_before)d/%(calls_after)d '
+                  'nested=%(nested)d inner=%(inner)d %(name)s' % {
+                      k: ('-' if v is None else v) for k, v in s.items()})
+    return rows
+
+
 def ptrs(m, sites, routines, verbose=False, roots=None):
     """Stepped pointers of `dbf' loops by how they are formed (bead
     domain-pascal-xm5w; codegen-patterns 7.4): counts by kind, root and
@@ -851,6 +1027,8 @@ def main(argv):
         fors(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'guards':
         guards(m, sites, routines, '-v' in argv[1:])
+    elif argv[0] == 'counters':
+        counters(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'ptrs':
         roots = [a for a in argv[1:] if a != '-v']
         ptrs(m, sites, routines, '-v' in argv[1:], roots or None)

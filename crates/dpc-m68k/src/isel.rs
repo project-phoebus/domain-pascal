@@ -1099,6 +1099,9 @@ fn select_body_with(
         .iter()
         .map(|&(k, span)| (s.out[k].clone(), s.out[k + 1].clone(), span))
         .collect();
+    for &(b, k, span) in &s.count_copies {
+        count_copy_check(&s.out[b], &s.out[k], span)?;
+    }
     for &(lea, second, span) in &s.held_firsts {
         // The pointer held for a block's first address dies at its `lea
         // (An),Am` and the second address took An: the image never does
@@ -3047,6 +3050,71 @@ enum Node<'a> {
 ///   (XPD_$CONTINUE_PROC 0xE5BEF8 `tst.w D0; beq.s; move.w D0,D1`;
 ///   XPD_$GET_TARGET_INFO 0xE5C158); not reproduced (bead
 ///   domain-pascal-59gz): refused.
+/// The copy `move.w T,C` of a `for` loop's count (a run-time bound, no
+/// call in the body), after allocation (codegen-patterns 7.4, "The count's
+/// register"; bead domain-pascal-fbah; `tools/loopalign.py counters`).
+/// In the image the counter is in the lowest data register free over the
+/// loop at all 117 `subq`/`subi` guards without a call, and the count is
+/// copied exactly where that register is not T's own (70 in place, 47
+/// copied).  The allocator colours the counter before the index and the
+/// body's values, its count's dying register counting as free (`coalesce`),
+/// so the counter is at most T:
+///
+/// - below T (T kept above a lower free register by a bound variable that
+///   dies there, R2, or a value that dies before the loop): the copy, as
+///   at all 18 such sites (the MAC_OS_ module-local 0xE0B202 at
+///   0xE0B210..0xE0B218 `move.w D1,D2; subq.w #1,D2; bmi.s; move.w D2,D1;
+///   clr.w D2`; the RING_ module-local 0xE76422 at 0xE76436..0xE7643C
+///   `move.w D2,D3; subq.w #1,D3; bmi.s; move.w D3,D2`; the counter
+///   first in 7 of the 8 with an index, the index then in the lowest
+///   register left, often T's);
+/// - T's own register: the image keeps the count in place only where the
+///   counter is coloured before the other values of the loop (in place
+///   70; copied where the index takes T's register first, 21, PROC2_$INFO
+///   0xE40846 against the like-shaped PROC2_$GET_INFO 0xE40918, or a body
+///   value, 6): the order is not settled (12.4 R1), so refused.
+fn count_copy_check(bound: &Insn, copy: &Insn, span: Span) -> Res<()> {
+    let (
+        Insn::Move {
+            src: Ea::Reg(Reg::D(v)),
+            dst: Ea::Reg(Reg::D(t0)),
+            ..
+        },
+        Insn::Move {
+            src: Ea::Reg(Reg::D(t)),
+            dst: Ea::Reg(Reg::D(c)),
+            ..
+        },
+    ) = (bound, copy)
+    else {
+        return Err(unsupported(span, "internal: a `for` count's moves not found"));
+    };
+    if t0 != t {
+        return Err(unsupported(span, "internal: a `for` count's moves not found"));
+    }
+    match () {
+        // Back into the bound variable's register, below the count (the
+        // 6 R2 sites).
+        _ if c < t && c == v => Ok(()),
+        _ if c < t => Err(unsupported(
+            span,
+            "a `for` loop with a run-time bound and no call in its body whose counter \
+             would land below the count in another register than the bound variable's \
+             (not seen: at the 6 sites of a bound variable dying at the bound the \
+             counter takes its register, codegen-patterns 7.4, bead domain-pascal-fbah) \
+             is",
+        )),
+        _ => Err(unsupported(
+            span,
+            "a `for` loop with a run-time bound and no call in its body whose counter \
+             would take the count's own register (in place where the counter is \
+             coloured before the index and the body's values, 70 sites; copied where \
+             the index or a body value takes that register first, 27: the order is \
+             not settled, codegen-patterns 7.4, bead domain-pascal-fbah) is",
+        )),
+    }
+}
+
 fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> {
     for &(k, span, call) in moves {
         let Some(Insn::Move {
@@ -5658,6 +5726,11 @@ pub struct Selector {
     /// where `src` dies at the copy ([`allocate_apart`]'s `coalesce`; a
     /// `for` loop's count copied from its tested bound, [`Selector::for_`]).
     colour_coalesce: Vec<(Reg, Reg)>,
+    /// `for` loops with a run-time bound and no call in the body: the
+    /// indices in `out` of the bound's move `move.w Dv,T` and of the
+    /// count's copy `move.w T,C`, and the statement
+    /// ([`Selector::for_`]; checked after allocation, [`count_copy_check`]).
+    count_copies: Vec<(usize, usize, Span)>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -5995,6 +6068,7 @@ impl Selector {
             colour_apart: Vec::new(),
             held_firsts: Vec::new(),
             colour_coalesce: Vec::new(),
+            count_copies: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -6952,10 +7026,15 @@ impl Selector {
     /// 0xE4EAAE `subq.w #2,D0` with the index from 1, no call.  `c >= 2` is
     /// Inferred from these; a `subi.w` above 8 as HDR_CHKSUM 0xE762E0
     /// `subi.w #13` encodes a loop from 13.)  Without a call in the body
-    /// the count is copied 50 times and counted down in place 71 times,
-    /// with no rule found: refused, as are other constant
-    /// lower bounds, run-time lower bounds, run-time `downto` and unsigned
-    /// indices.  From 0 to a variable, with or without a call, the bound
+    /// the counter is in the lowest data register free over the loop and
+    /// the count is copied only where that is not T's own (117 of 117,
+    /// bead domain-pascal-fbah): for a bound variable held in a data
+    /// register the copy is kept where the counter lands below T in that
+    /// variable's register; other bounds, and a counter in T's register
+    /// (in place or copied by the colouring order), are refused
+    /// ([`count_copy_check`]).
+    /// Refused too: other constant lower bounds, run-time lower bounds,
+    /// run-time `downto` and unsigned indices.  From 0 to a variable, with or without a call, the bound
     /// is tested and copied ([`Self::for_count_tested`]).
     ///
     /// Refused besides: a loop that never runs (no site looked at); an
@@ -7055,15 +7134,27 @@ impl Selector {
                          NAME_$INIT 0xE31828 `subi.w #16` from 16, both without a call: the \
                          count's copy not settled, codegen-patterns 7.4) is",
                     ));
-                } else if !stmts_call(&l.body) {
-                    return Err(unsupported(
-                        span,
-                        "a `for` loop with a run-time bound and no call in its body (the count \
-                         is copied into a counter of its own or not, no rule found, \
-                         codegen-patterns 7.4) is",
-                    ));
                 } else {
-                    let t = match self.eval(e)? {
+                    let calls = stmts_call(&l.body);
+                    let v = self.eval(e)?;
+                    // Without a call, only a bound variable held in a data
+                    // register is surveyed with a copy below the count: it
+                    // dies at `move.w Dv,T` and the counter takes it back
+                    // (codegen-patterns 7.4, "The count's register": 6 of
+                    // 6, 0xE0B1C8, 0xE0B20C, 0xE76436).
+                    let bound_move = self.out.len();
+                    if !calls && !matches!(v, Val::Reg(Reg::D(_))) {
+                        return Err(unsupported(
+                            span,
+                            "a `for` loop with a run-time bound and no call in its body, the \
+                             bound not a variable held in a data register (the count copied \
+                             below its register only after `move.w Dv,T` at the image's \
+                             sites; loads and expressions in place or copied by the \
+                             colouring order, codegen-patterns 7.4, bead domain-pascal-fbah) \
+                             is",
+                        ));
+                    }
+                    let t = match v {
                         Val::Tmp(d) => d,
                         v => self.in_tmp(v, Width::Word)?,
                     };
@@ -7084,6 +7175,16 @@ impl Selector {
                     self.jump(Cond::Mi, exit);
                     let c = self.alloc_d()?;
                     setup.push(self.out.len());
+                    if !calls {
+                        // No call in the body: the counter takes the
+                        // lowest data register free over the loop, the
+                        // count's own register counting as free, and the
+                        // copy is made where that lies below it
+                        // (codegen-patterns 7.4, "The count's register";
+                        // checked after allocation, [`count_copy_check`]).
+                        self.colour_coalesce.push((Reg::D(c), Reg::D(t)));
+                        self.count_copies.push((bound_move, self.out.len(), span));
+                    }
                     self.out.push(Insn::Move {
                         size: Size::W,
                         src: Ea::Reg(Reg::D(t)),
@@ -7681,6 +7782,14 @@ impl Selector {
         if at > 0 && setup.contains(&(at - 1)) {
             let m = self.out.remove(at);
             self.out.insert(at - 1, m);
+            // The count's copy, when it was that last setup instruction,
+            // moves down one with it (SHOW_CURSOR 0xE6E2E2..0xE6E2E8
+            // `bmi; movea.l A5,A1; move.w D1,D0; addq.l #8,A1`).
+            for c in self.count_copies.iter_mut() {
+                if c.1 == at - 1 {
+                    c.1 = at;
+                }
+            }
         }
         Ok(r)
     }

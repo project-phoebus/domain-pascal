@@ -426,6 +426,15 @@ Tests:
   0 to `e - 1` across a call, `subq.w #1; bmi`, the copy, `clr.w`
   (PEB_$LOAD_WCS 0xE3214A); the constant of `e - c` folded into one
   `subq.w` (DISK_$AS_XFER_MULTI 0xE6BA42).
+- `loops/for_runtime_nocall` - codegen-patterns 7.4 ("The count's
+  register"; bead domain-pascal-fbah): from 0 to `count - 1` and from 1
+  to `count` with no call in the body, the bound a value parameter dying
+  at the bound: the count kept out of its register (R2), the counter in
+  the lowest register free over the loop, the bound's, below the count,
+  and the copy (the MAC_OS_ module-local 0xE0B202 at 0xE0B20C..0xE0B218;
+  the RING_ module-local 0xE76422 at 0xE76432..0xE7643C); with no index,
+  another unit's array stepped in place, its `movea.l` before the copy
+  (SHOW_CURSOR 0xE6E2E2..0xE6E2E8).
 - `loops/stepped` - codegen-patterns 7.4, 5.2: `for` loops over arrays of
   elements wider than a byte through pointers stepped by the element size:
   formed with `lea (from*size,An),Ap` after the count and the index, the
