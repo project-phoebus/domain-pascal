@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 41f1715550f245d792714049b55e90ca8b72fbcd
+# source: ec814eec0785b5ade0496138a82d10070639eb77
 STUB	acl/acl.pas	acl_$init
 MISMATCH	acl/acl.pas	acl_$cache_list_insert
 STUB	acl/acl.pas	acl_$cache_list_remove
@@ -24,8 +24,8 @@ STUB	acl/acl.pas	acl_$check_rights
 STUB	acl/acl.pas	acl_$rights_check
 STUB	acl/acl.pas	acl_$setids
 STUB	acl/acl.pas	acl_$enter_subs
-STUB	acl/acl.pas	acl_$enter_super
-STUB	acl/acl.pas	acl_$exit_super
+OK	acl/acl.pas	acl_$enter_super
+MISMATCH	acl/acl.pas	acl_$exit_super
 MISMATCH	acl/acl.pas	acl_$clear_super
 STUB	acl/acl.pas	acl_$up
 STUB	acl/acl.pas	acl_$down
@@ -78,8 +78,8 @@ STUB	audit/audit.pas	audit_$start_logging
 OK	audit/audit.pas	audit_$shutdown
 STUB	audit/audit.pas	audit_$stop_logging
 OK	audit/audit.pas	audit_$is_process_audited
-STUB	audit/audit.pas	audit_$suspend
-STUB	audit/audit.pas	audit_$resume
+OK	audit/audit.pas	audit_$suspend
+OK	audit/audit.pas	audit_$resume
 MISMATCH	audit/audit.pas	audit_$log_event
 STUB	audit/audit.pas	audit_$log_event_s
 MISMATCH	audit/audit.pas	audit_$server
@@ -475,6 +475,20 @@ STUB	pkt/pkt.pas	pkt_$likely_to_answer
 STUB	pkt/pkt.pas	pkt_$ping_server
 OK	pkt/pkt.pas	pkt_$init
 STUB	pkt/pkt.pas	pkt_$sar_internet
+STUB	pmap/pmap.pas	pmap_$wait_in_transit
+STUB	pmap/pmap.pas	pmap_$write_complete
+STUB	pmap/pmap.pas	pmap_$write_page
+STUB	pmap/pmap.pas	pmap_$fill_write_qblks
+STUB	pmap/pmap.pas	pmap_$flush
+OK	pmap/pmap.pas	pmap_$wake_purifier
+STUB	pmap/pmap.pas	pmap_$purifier_l
+STUB	pmap/pmap.pas	pmap_$purifier_r
+OK	pmap/pmap.pas	pmap_$update_callback
+STUB	pmap/pmap.pas	pmap_$t_purif_callback
+STUB	pmap/pmap.pas	pmap_$ws_scan_callback
+STUB	pmap/pmap.pas	pmap_$init_ws_scan
+STUB	pmap/pmap.pas	pmap_$purge_ws
+STUB	pmap/pmap.pas	pmap_$init_timers
 STUB	proc1/proc1.pas	proc1_$try_to_suspend
 MISMATCH	proc1/proc1.pas	proc1_$resume
 STUB	proc1/proc1.pas	proc1_$suspend
