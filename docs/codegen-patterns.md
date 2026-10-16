@@ -2429,7 +2429,9 @@ variables.  Each module's static data is a data segment, addressed off
     specify a routine option", which would give exactly this shape (runs, with
     single routines that keep the other behaviour, as in PKT and
     FILE_ 0xE5D050), but no documented option loads A5.  The cause is
-    not recorded in the image.
+    not recorded in the image.  The survey of `-opt` features per
+    segment (docs/opt-levels.md section 5, bead domain-pascal-g728) finds
+    no level that goes with the mode (Reported).
   - **What `dpc` should do (recommendation, bead domain-pascal-acw).**
     Like loop alignment, make the mode a `dpc` option, since the source
     does not decide it:
@@ -5459,6 +5461,10 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
     `%push_alignment`/`%pop_alignment` (4.7, Table 4-11, p. 4-44).  The
     reference ties them to data layout only.  Whether one of them also
     turns loop alignment off is untested (a lead, not a finding).
+    The `-opt` level does not explain it either (Reported, survey,
+    docs/opt-levels.md section 5, bead domain-pascal-g728): aligning and
+    non-aligning routines both show the level-3 optimisations, and the
+    few signs of a missing optimisation point both ways.
   - **Implemented** (bead domain-pascal-vp7): since the cause is not
     known, the switch is a `dpc` option, not a source directive:
     `--loop-align=on|off` (default on) and
@@ -9972,7 +9978,10 @@ evidence about the image):
 The image shows global register allocation, global CSE, strength
 reduction and instruction reordering (sites below).  In the reference
 that combination needs `-opt 3` or higher.  The level actually used is
-not recorded (Uncertain).
+not recorded (Uncertain).  Per segment (docs/opt-levels.md, bead
+domain-pascal-g728, `tools/optsurvey.py`; Reported): no segment shows
+evidence of a lower level, 54 of 181 are too small to tell; `-opt 3`
+and `-opt 4` cannot be told apart.
 
 **Method.** `tools/regalloc.py` (docstring) splits every compiled routine
 as `tools/loopalign.py` does, builds a def/use model of each instruction,
@@ -11894,6 +11903,15 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     (both ascending, both at 2 mod 4), and ASKNODE, which merges
     constants, keeps five ascending word copies apart (ASKNODE_$INTERNET_
     INFO 0xE647BE..).  So the per-unit lead is for constants only.
+  - **Not the `-opt` level, as far as the image shows** (Reported, survey;
+    `tools/optsurvey.py`, docs/opt-levels.md, bead domain-pascal-g728):
+    no segment shows evidence of a level below the one seen across the
+    image (54 of 181 modelled segments are too small to tell), and no
+    feature of a level separates the merging segments from the others.
+    A pair kept apart may also be a `device` object (ref 3.15.3, p. 3-57;
+    41 of the 118 pairs apart contain a `clr` or `st` and so are not
+    `device` stores, 76 cannot be classed; docs/opt-levels.md section
+    1).  What sets the per-unit merging of constants stays Uncertain.
   - **Survey** (`tools/storesurvey.py merge [-v]`): in the 1635 compiled
     routines of `tools/regalloc.py`, 420 pairs of stores made one after
     the other (only register set-up between them: no store, call, branch
