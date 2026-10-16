@@ -3150,16 +3150,91 @@ model run against the bit model of Figure 3-6).
     `move.l (An)+,(k,A6)` twice (124 sites, the DIR_$ADD_MOUNT form
     above); implemented for those copies only (`Selector::param_copies`).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `copy`): records and
-    arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1;
-    the source or destination in the data area, in the frame, or the
-    object a pointer in the frame points to, or a field of the object a
-    pointer held in an address register points to (`lea (d,An),Am`, the
-    form above; added with the record comparisons of 7.1, bead
-    domain-pascal-aaj).  6 and 8 bytes: above.  Rejected: another
-    unit's object (`movea.l #abs,A1` at 0xE336E2, one site; the record
-    comparisons of 7.1 load such addresses so 201 times, a copy only
-    once), a field through a pointer not held in a register, statements
-    of bodies with several statements.
+    arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1
+    (the lowest free); the addresses as below.  6 and 8 bytes: above.
+  - **Block addresses (survey Verified; implemented in part, bead
+    domain-pascal-21xu).**  Ad-hoc survey (script not kept: every
+    address register of a block copy of 8 bytes and more, `(Am)+,(An)+`
+    or `(Am)+,<d>`, and of a `cmpm` run, in the compiled routines of
+    `tools/regalloc.py routines`, with its last definition in the
+    straight-line code before it): 2586 registers, set by `lea (d,An)`
+    847, `lea (d,A6)` 486, `movea.l #imm` 387, `movea.l (d,A6)` 271,
+    `lea (An)` 264, `movea.l Dn` 87, `lea (d,An,Dx)` 41, `movea.l (d,An)`
+    32, `lea (A5)` 24, `lea (d,A5)` 15, `lea abs.l` 2, `movea.l An` 0
+    (the `movea.l A0,A0` filler aside).  The forms, by the block's place:
+    - *the unit's data, the frame:* `lea (d,A5)` / `lea (A5)`, `lea
+      (d,A6)` (above);
+    - *the object a pointer slot points to:* `movea.l (d,A6),An`;
+    - *another unit's object:* `movea.l #sym,An`; every one of the 387
+      immediates is a map symbol (CAL_$GET_INFO 0xE6856C `movea.l
+      #CAL_$TIMEZONE,A0; movea.l (8,A6),A1`, DISK_$GET_ERROR_INFO
+      0xE6C090, 0xE69FBE `#RIP_$BCAST_CONTROL`; as a destination
+      0xE336E2 `lea (-0x208,A6),A0; movea.l #sym,A1`); a copy loads the
+      source first (18 of 18), a comparison its left operand (7.1).  The
+      2 `lea abs.l` are one overlay object at an offset (PCHIST_$CNTL
+      0xE5CF3A `lea (0xe85c24).l,A0`, PCHIST_UNWIRED_D+0x50C);
+    - *a pointer held in an address register* (a by-address parameter or
+      a `with` record loaded at entry, a parked pointer local moved to
+      its register at the statement's start, a `for` loop's stepped
+      element pointer): `lea (An),Am` for its object, `lea (d,An),Am`
+      for a field, never `movea.l An,Am`: ACL_ 0xE44DD0 `lea (A0),A1;
+      movea.l #ACL_$FILE_ACL,A2`, NAME_ 0xE588D8 `lea (A1),A2; movea.l
+      #UID_$NIL,A3`, CAL_$WRITE_TIMEZONE 0xE3E626 `lea (A0),A1; lea
+      (A5),A3`, DISK_$GET_STATS 0xE3DBBE `lea (0x180,A5),A1; lea (A2),A3`,
+      DISK_$LVUID_TO_VOLX 0xE6D182 `lea (-0x48,A0),A2; lea (-8,A6),A3`
+      (the loop's stepped pointer), SIO_$K_INQ_PARAM 0xE68352 `movea.l
+      D0,A2; lea (A3),A1; lea (0x4c,A2),A0` (the parked pointer moved
+      home; the destination's `lea` first, which 12.4 R11 gives in a
+      scratch test; **Uncertain:** no golden or conformance unit checks
+      this order, and the ../source routine still stubs on another
+      refusal);
+    - *a pointer held in a data register:* `movea.l Dn,An`, that
+      register used (TIME_$Q_SCAN_QUEUE 0xE16EBC `lea (-0x10,A6),A0;
+      movea.l D3,A1; moveq #2,D0; cmpm.w`, `now` held in D3 as it is also
+      passed on, 12.2).
+    The second address's register when the pointer held for the first
+    dies at its `lea`: in the image it is not that pointer's register,
+    17 of 17 with `lea (An),Am` (ACL_ 0xE44E0A `movea.l
+    #ACL_$DIR_ACL,A2` past a dead A0; CAL_$WRITE_TIMEZONE 0xE3E628 A3
+    past A0), 69 of 79 with `lea (d,An),Am` (the 10 others mostly a base
+    loaded in the same statement: 0xE180C4, 0xE6BB56; 0xE462AA a held
+    A3).  **Refused** with `lea (An),Am`: which register the second
+    address takes is not modelled, and dpc's lowest free would be the
+    dead one, so a second address coloured into it is refused after
+    allocation (`isel.rs` `block_addresses`, `held_firsts`; bead
+    domain-pascal-76uw; acl_$convert_rights and cal_$write_timezone of
+    ../source stub on it).  With `lea (d,An),Am`, the form before this
+    entry, dpc is unchanged (it takes the dead register).
+    - *Arrays of char:* copied byte by byte, `moveq #n-1; move.b
+      (A1)+,(A2)+; dbf` (ACL_ 0xE45130, 24 chars, `lea (A0),A2` the
+      held destination; 0xE44F68; 50 `move.b` copy loops in compiled
+      code).  dpc copies them by longwords; refused at the forms of this
+      entry (another unit's object, a held or data-register pointer, a
+      stepped element pointer), unchanged at the others (`dpc-ir`
+      `StmtKind::Copy::chars`; bead domain-pascal-40r2).
+    **Implemented** (`isel.rs` `block_address`, for copies and record
+    comparisons): the forms above.  **Refused** (bead domain-pascal-dsr5):
+    another unit's object
+    at an offset (the one overlay routine); another data section's block
+    of the unit (RIP_$INIT 0xE2FC1E `movea.l #0xe26258,A0; lea
+    (-0x50,A6),A2; lea (0xc68,A0),A1`, one site); a pointer loaded
+    through another pointer (XPD_ 0xE5C238 `movea.l (0x10,A6),A0;
+    movea.l (4,A3),A1; lea (A0),A4; lea (A1),A2`: both pointers loaded,
+    then copied by `lea`; 32 `movea.l (d,An)` sides used directly
+    elsewhere, 0xE04F1C) or through the static link (RIP_ 0xE158E4
+    `movea.l (0xc,A1),A2`, A2 past the link in A1; ACL_ 0xE4515E
+    `movea.l (18,A0),A2` with A1 free: the register not settled); a
+    field through a pointer in a data register not moved home (not
+    catalogued); an array element whose address takes instructions (41
+    `lea (d,An,Dx)` and the `lea (0,An,Dx),Am; lea (d,Am),Am` pairs:
+    VTOC_$MOUNT 0xE3860E..0xE3861A `moveq #100,D0; lea (76,A4),A0; mulu.w
+    D2,D0; lea (-84,A5,D0.w),A1; moveq #24,D1`, the source's `lea` inside
+    the index's computation; VTOC_$DISMOUNT 0xE387C0 with the count in
+    the index's D0; ACL_$GET_SID 0xE74C32..0xE74C50; NAME_$SET_WDIRUS
+    0xE5868C `lea (A2),A1; lea (0,A5,D0.w),A0; moveq #1,D0; lea
+    (0x950,A0),A0`; KBD_$RCV 0xE1CDD0 a `.l` index; codegen-patterns
+    5.2 above, bead domain-pascal-1ibr).  Golden `data/block_addresses`;
+    conformance units `cal_get_info.pas`, `disk_get_error_info.pas`.
     Records and arrays of 1, 2 or 4 bytes are moved as scalars
     (Uncertain: not catalogued).
 - **1-based arrays (Verified):** the compiler folds the `-1` into the
@@ -5192,7 +5267,11 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   unit's data or the frame (`lea`), the object a pointer slot points to
   (`movea.l (d,A6),An`), a field through a pointer held in an address
   register (`lea (d,An),Am`, 0xE1C1B0), another unit's object (`movea.l
-  #sym,An`).  Refused: other sizes (12..28 bytes not seen), arrays and
+  #sym,An`), and the other forms of 5.2, "Block addresses" (the object
+  of a pointer held in an address register, `lea (An),Am`, ACL_ 0xE44DD0;
+  in a data register, `movea.l Dn,An`, TIME_$Q_SCAN_QUEUE 0xE16EC0; a
+  loop's stepped element pointer, 0xE6D182; bead domain-pascal-21xu).
+  Refused: other sizes (12..28 bytes not seen), arrays and
   strings (the `cmpm.b` site), records with bytes no field covers
   (padding: the image compares every byte, and the reference gives no
   rule for padding; packed records count their fields' bits), ordering

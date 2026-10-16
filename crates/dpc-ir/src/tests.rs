@@ -1137,7 +1137,8 @@ end;
                 offset: 0
             },
             src: Addr::Static(0),
-            bytes: 12
+            bytes: 12,
+            chars: false
         }
     );
 }
@@ -1509,7 +1510,8 @@ end;
         StmtKind::Copy {
             dst: Addr::Static(0),
             src: Addr::Static(8),
-            bytes: 6
+            bytes: 6,
+            chars: false
         }
     );
     assert_eq!(

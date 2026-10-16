@@ -134,6 +134,13 @@ Tests:
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).
+- `data/block_addresses` - codegen-patterns 5.2 "Block addresses", 7.1:
+  another unit's record as a block copy's source or destination,
+  `movea.l #sym,An` (CAL_$GET_INFO 0xE6856C, DISK_$GET_ERROR_INFO
+  0xE6C090, 0xE336E2); a pointer held in an address register, `lea
+  (An),Am` (0xE588D8, 0xE3DBBE), in a data register, `movea.l Dn,An`
+  (TIME_$Q_SCAN_QUEUE 0xE16EBC); a loop's stepped element pointer, `lea
+  (-0x48,An),Am` (DISK_$LVUID_TO_VOLX 0xE6D182).
 - `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
   address as cells after the routine that first uses them, `pea (d,PC)`,
   `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING

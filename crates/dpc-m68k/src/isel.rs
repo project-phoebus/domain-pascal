@@ -1048,6 +1048,32 @@ fn select_body_with(
         )?;
     }
     check_assigned_flags(&s.out, &s.flag_moves)?;
+    for &(lea, second, span) in &s.held_firsts {
+        // The pointer held for a block's first address dies at its `lea
+        // (An),Am` and the second address took An: the image never does
+        // (17 of 17 such sites; ACL_ 0xE44E0A `movea.l #ACL_$DIR_ACL,A2`
+        // past a dead A0, CAL_$WRITE_TIMEZONE 0xE3E628 `lea (A5),A3`;
+        // codegen-patterns 5.2, "Block addresses").
+        let held = match &s.out[lea] {
+            Insn::Lea {
+                src: Ea::Ind(r), ..
+            } => Some(*r),
+            _ => None,
+        };
+        let taken = match &s.out[second] {
+            Insn::Lea { dst, .. } | Insn::Movea { dst, .. } => Some(*dst),
+            _ => None,
+        };
+        if held.is_some() && held == taken {
+            return Err(unsupported(
+                span,
+                "a block's second address in the register of the pointer held for its first, \
+                 which dies at the first's `lea (An),Am` (the image passes it over, 17 of 17: \
+                 0xE44E0A, 0xE3E628; the register it takes is not modelled, bead \
+                 domain-pascal-76uw) is",
+            ));
+        }
+    }
     if let Some(range) = hoisted {
         // A parameter loaded at entry into a scratch address register
         // after the block's load: the one such site has the parameter in
@@ -2944,6 +2970,19 @@ enum Src8 {
     Slot(i32),
     /// `movea.l #sym,An`: another unit's object.
     Sym(String),
+}
+
+/// How [`Selector::block_address`] formed a block's address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockForm {
+    /// The data area, the frame, a pointer slot, a field through a held
+    /// pointer: the forms before bead domain-pascal-21xu.
+    Known,
+    /// `lea (An),Am` of a pointer held in an address register.
+    HeldInd,
+    /// Another form of bead domain-pascal-21xu: another unit's object, a
+    /// pointer in a data register, a loop's stepped element pointer.
+    New,
 }
 
 /// The operand `n` bytes after `ea` (a memory operand by displacement or
@@ -5279,6 +5318,11 @@ pub struct Selector {
     /// Further pairs of values kept in different registers
     /// ([`allocate_apart`]'s `apart`).
     colour_apart: Vec<(Reg, Reg)>,
+    /// Block copies and comparisons whose first address is `lea (An),Am`
+    /// of a held pointer: the index in `out` of that `lea` and of the
+    /// instruction that sets the second address, and the statement
+    /// ([`Selector::block_addresses`]; checked after allocation).
+    held_firsts: Vec<(usize, usize, Span)>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -5610,6 +5654,7 @@ impl Selector {
             colour_after: Vec::new(),
             callee_only: Vec::new(),
             colour_apart: Vec::new(),
+            held_firsts: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -5968,8 +6013,13 @@ impl Selector {
                     self.store_bit_elem(array, index, *lo, *value)?;
                     self.wrote(array, *bytes);
                 }
-                StmtKind::Copy { dst, src, bytes } => {
-                    self.copy(dst, src, *bytes)?;
+                StmtKind::Copy {
+                    dst,
+                    src,
+                    bytes,
+                    chars,
+                } => {
+                    self.copy(dst, src, *bytes, *chars)?;
                     self.wrote(dst, *bytes);
                 }
                 StmtKind::Call(c) => self.call(c, next.clean)?,
@@ -7595,8 +7645,7 @@ impl Selector {
                 ))
             }
         };
-        let dst = self.compared_block(lhs)?;
-        let src = self.compared_block(rhs)?;
+        let (dst, src, _) = self.block_addresses(lhs, rhs)?;
         let count = self.alloc_d()?;
         self.out.push(Insn::Moveq {
             value: (n - 1) as i8,
@@ -7624,24 +7673,6 @@ impl Selector {
             });
             Ok((count, false))
         }
-    }
-
-    /// The address of a compared block ([`Self::block_address`]), or of
-    /// another unit's object: `movea.l #sym,An` (201 of the address loads
-    /// before a `cmpm` in compiled code, e.g. PACCT_$ON 0xE5A9B2 `movea.l
-    /// #UID_$NIL,A1`; `tools/cmpsurvey.py`; no `lea abs.l` of an
-    /// operand).
-    fn compared_block(&mut self, addr: &Addr) -> Res<u8> {
-        if let Addr::Symbol { name, offset: 0 } = addr {
-            let a = self.alloc_a()?;
-            self.out.push(Insn::Movea {
-                size: Size::L,
-                src: Ea::ImmSym(name.clone()),
-                dst: a,
-            });
-            return Ok(a);
-        }
-        self.block_address(addr)
     }
 
     /// The effective address of the scalar at `addr` as an operand, without
@@ -8529,7 +8560,7 @@ impl Selector {
                 }
                 n if n >= 10 && n % 2 == 0 => {
                     let before = self.out.len();
-                    self.copy(&to, &from, n)?;
+                    self.copy(&to, &from, n, false)?;
                     // The slot's register is the source, loaded first.
                     if let Some(Insn::Movea { dst, .. }) = self.out.get(before) {
                         self.fresh.push((Reg::A(*dst), self.stmt_start, self.span));
@@ -8605,7 +8636,13 @@ impl Selector {
     ///
     /// Address registers: source first, then destination, each the lowest
     /// free (A0, A1 at 0xE14BC6..0xE14BC8; codegen-patterns 12.4 R1).
-    fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
+    ///
+    /// An array of `char` (`chars`) is copied byte by byte in the image
+    /// (ACL_ 0xE45130 `lea (A0),A2; moveq #23,D0; move.b (A1)+,(A2)+;
+    /// dbf`, 24 chars; 50 `move.b` copy loops in compiled code; bead
+    /// domain-pascal-40r2): refused at the addresses of bead
+    /// domain-pascal-21xu, copied by longwords as before at the others.
+    fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
         match bytes {
             6 => return self.copy6(dst, src),
             8 => return self.copy8(dst, src),
@@ -8621,8 +8658,15 @@ impl Selector {
         if longs - 1 > 0x7fff {
             return Err(unsupported(self.span, "a block copy this large is"));
         }
-        let from = self.block_address(src)?;
-        let to = self.block_address(dst)?;
+        let (from, to, new) = self.block_addresses(src, dst)?;
+        if chars && new {
+            return Err(unsupported(
+                self.span,
+                "a copy of an array of char at this kind of address (the original copies it byte \
+                 by byte, `moveq #n-1; move.b (A1)+,(A2)+; dbf`, ACL_ 0xE45130; bead \
+                 domain-pascal-40r2) is",
+            ));
+        }
         let mv = |size| Insn::Move {
             size,
             src: Ea::PostInc(from),
@@ -8932,7 +8976,9 @@ impl Selector {
         });
     }
 
-    /// The address of a block in a new address register.
+    /// The address of a block in a new address register (codegen-patterns
+    /// 5.2, "Block addresses": every block copy and `cmpm` of compiled
+    /// code, bead domain-pascal-21xu):
     ///
     /// - in the unit's data area: `lea (d,A5),An`, and `lea (A5),An` for
     ///   offset 0, not `movea.l A5,An` (PROC1_$GET_LOADAV 0xE14BC6;
@@ -8941,55 +8987,130 @@ impl Selector {
     /// - the object a pointer in the frame points to (a by-address
     ///   parameter, a pointer variable): the pointer itself, `movea.l
     ///   (d,A6),An` (0xE14BC8 `movea.l (8,A6),A1`; 0xE2F148 `movea.l
-    ///   (8,A6),A0` as a source).
+    ///   (8,A6),A0` as a source);
+    /// - another unit's object: `movea.l #sym,An` (every `movea.l #imm`
+    ///   base of a block copy or `cmpm` in compiled code is a map symbol,
+    ///   387 of 387; CAL_$GET_INFO 0xE6856C `movea.l #CAL_$TIMEZONE,A0;
+    ///   movea.l (8,A6),A1`, DISK_$GET_ERROR_INFO 0xE6C090, ROUTE_
+    ///   0xE69FBE; as a destination 0xE336E2);
+    /// - the object, or a field of the object, a pointer held in an
+    ///   address register points to (a by-address parameter or a `with`
+    ///   record loaded at entry, a pointer local held in a register or
+    ///   moved there at the statement's start, a `for` loop's stepped
+    ///   element pointer): `lea (An),Am` / `lea (d,An),Am`, never `movea.l
+    ///   An,Am` (of the 2586 address registers of block copies of 8 bytes
+    ///   and more and of `cmpm` runs in compiled code, `lea (An),Am` 264,
+    ///   `lea (d,An),Am` 847, `movea.l An,Am` 0; ACL_ 0xE44DD0 `lea
+    ///   (A0),A1`, NAME_ 0xE588D8 `lea (A1),A2`, CAL_$WRITE_TIMEZONE
+    ///   0xE3E626 `lea (A0),A1; lea (A5),A3`, DISK_$GET_STATS 0xE3DBC2 `lea
+    ///   (A2),A3`; the stepped pointer of DISK_$LVUID_TO_VOLX 0xE6D182 `lea
+    ///   (-0x48,A0),A2`; TTY_$K_SIMULATE_TERMINAL_INPUT 0xE1C1B0 `lea
+    ///   (0x4c,A2),A1`; SIO_$K_INQ_PARAM 0xE68352 `movea.l D0,A2; lea
+    ///   (A3),A1; lea (0x4c,A2),A0`, a parked pointer local moved home,
+    ///   the destination's `lea` put first by the scheduler, 12.4 R11);
+    /// - the object a pointer held in a data register points to: the
+    ///   pointer copied to an address register ([`Self::copy_to_a`]) and
+    ///   that register used (TIME_$Q_SCAN_QUEUE 0xE16EC0 `movea.l D3,A1`,
+    ///   `now` held in D3; 87 `movea.l Dn,An` sides in all).
     ///
-    /// Other places (another unit's object, `movea.l #abs,A1` at 0xE336E2
-    /// once; a field at a nonzero offset through a pointer) are not
-    /// supported yet.
-    fn block_address(&mut self, addr: &Addr) -> Res<u8> {
-        let src = match addr {
-            Addr::Static(_) | Addr::Frame(_) => self.ea_of(addr)?,
-            Addr::Indirect { base, offset: 0 } => match &**base {
-                Expr::Load {
-                    addr: Addr::Frame(o),
-                    ty:
-                        Scalar {
-                            width: Width::Long, ..
-                        },
-                } if self.pinned(*o).is_none() => {
+    /// Registers: each the lowest free when its address is formed, as for
+    /// the other forms.  Where the pointer held for the first address dies
+    /// at its `lea (An),Am`, the second address does not take its
+    /// register in the image (17 of 17: ACL_ 0xE44E0A `movea.l
+    /// #ACL_$DIR_ACL,A2` past a dead A0, CAL_$WRITE_TIMEZONE 0xE3E628 A3
+    /// past A0); which one it takes is not modelled, and a second address
+    /// coloured into it is refused after allocation
+    /// ([`Self::block_addresses`]; bead domain-pascal-76uw).  With `lea
+    /// (d,An),Am` (the form before bead 21xu, unchanged) the image takes
+    /// it 10 times in 79 (0xE462AA, 0xE180C4), mostly a base loaded in
+    /// the same statement.
+    ///
+    /// Refused (bead domain-pascal-dsr5): a field through a pointer
+    /// in a data register that is not moved home (not catalogued); a
+    /// pointer loaded through another pointer or through the static link
+    /// (XPD_ 0xE5C238 loads both pointers, then `lea (A0),A4; lea
+    /// (A1),A2`; nested ACL_ 0xE4515E `movea.l (18,A0),A2` with A1 free,
+    /// RIP_ 0xE158E4 `movea.l (0xc,A1),A2`); an array element whose
+    /// address takes instructions (the index's computation and the
+    /// block's own `lea` interleave, VTOC_$MOUNT 0xE3860E, ACL_$GET_SID
+    /// 0xE74C32; codegen-patterns 5.2, bead domain-pascal-1ibr); another
+    /// unit's object at an offset (0xE5CF3A `lea (0xe85c24).l,A0`, in an
+    /// overlay section, the one such routine); another data section's
+    /// block of the unit (RIP_$INIT 0xE2FC1E, one site).
+    fn block_address(&mut self, addr: &Addr) -> Res<(u8, BlockForm)> {
+        const OFFSET: &str = "a block at an offset into another unit's object (0xE5CF3A `lea \
+                              (0xe85c24).l,A0`, one routine's overlay object; bead domain-pascal-dsr5) is";
+        const ELEMENT: &str = "a block that is an array element whose address takes \
+                               instructions (the index's and the `lea`'s order and registers \
+                               not settled: VTOC_$MOUNT 0xE3860E, ACL_$GET_SID 0xE74C32; \
+                               codegen-patterns 5.2, beads domain-pascal-1ibr, -dsr5) is";
+        const POINTER: &str = "a block through a pointer that is not held in a register \
+                               (loaded through another pointer or the static link: XPD_ \
+                               0xE5C238, ACL_ 0xE4515E, RIP_ 0xE158E4, not settled), or a field \
+                               through one in a data register (not catalogued; bead \
+                               domain-pascal-dsr5), is";
+        const OTHER_SECTION: &str = "a block in another data section of the unit (RIP_$INIT \
+                                     0xE2FC1E: the section's base, the other operand, then the \
+                                     block's `lea`; one site; bead domain-pascal-dsr5) is";
+        if let Addr::Indirect { base, offset: 0 } = addr {
+            if let Expr::Load {
+                addr: Addr::Frame(o),
+                ty: Scalar {
+                    width: Width::Long, ..
+                },
+            } = &**base
+            {
+                if self.pinned(*o).is_none() {
                     let a = self.alloc_a()?;
                     self.out.push(Insn::Movea {
                         size: Size::L,
                         src: Ea::Disp(*o, FP),
                         dst: a,
                     });
-                    return Ok(a);
+                    return Ok((a, BlockForm::Known));
                 }
-                _ => {
-                    return Err(unsupported(
-                        self.span,
-                        "a block through this pointer expression is",
-                    ))
-                }
-            },
-            // A field of the object a pointer held in an address register
-            // points to: `lea (d,An),Am` (TTY_$K_SIMULATE_TERMINAL_INPUT
-            // 0xE1C1B0 `lea (0x4c,A2),A1`, `tty^.pgroup_uid` with `tty` in
-            // A2; codegen-patterns 5.2 lists `lea (d,An)` among the
-            // source address forms of copies).  Only when forming the
-            // operand needs no instruction: where the original loaded a
-            // pointer that is not held is not catalogued.
-            Addr::Indirect { .. } => {
+            }
+        }
+        let (src, form) = match addr {
+            Addr::Static(_) | Addr::Frame(_) => (self.ea_of(addr)?, BlockForm::Known),
+            Addr::Symbol { name, offset: 0 } => {
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::ImmSym(name.clone()),
+                    dst: a,
+                });
+                return Ok((a, BlockForm::New));
+            }
+            Addr::Symbol { .. } => return Err(unsupported(self.span, OFFSET)),
+            Addr::Indirect { .. } | Addr::Index { .. } => {
                 let mark = self.out.len();
                 let ea = self.ea_of(addr)?;
-                if self.out.len() != mark || !matches!(ea, Ea::Disp(..)) {
-                    return Err(unsupported(
-                        self.span,
-                        "a block through a pointer not held in an address register is",
-                    ));
+                match (&self.out[mark..], &ea) {
+                    // Held in an address register: `lea (d,An),Am`, a
+                    // field through a held pointer as before (0xE1C1B0).
+                    ([], Ea::Disp(..)) if matches!(addr, Addr::Indirect { .. }) => {
+                        (ea, BlockForm::Known)
+                    }
+                    ([], Ea::Ind(_)) => (ea, BlockForm::HeldInd),
+                    ([], Ea::Disp(..)) => (ea, BlockForm::New),
+                    // A pointer held in a data register, copied to a new
+                    // address register: that register (0xE16EC0).
+                    (
+                        [Insn::Movea {
+                            src: Ea::Reg(Reg::D(_)),
+                            dst,
+                            ..
+                        }],
+                        Ea::Ind(a),
+                    ) if dst == a => return Ok((*a, BlockForm::New)),
+                    _ if matches!(addr, Addr::Index { .. }) => {
+                        return Err(unsupported(self.span, ELEMENT))
+                    }
+                    _ => return Err(unsupported(self.span, POINTER)),
                 }
-                ea
             }
+            Addr::OtherStatic { .. } => return Err(unsupported(self.span, OTHER_SECTION)),
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -8999,7 +9120,24 @@ impl Selector {
         };
         let a = self.alloc_a()?;
         self.out.push(Insn::Lea { src, dst: a });
-        Ok(a)
+        Ok((a, form))
+    }
+
+    /// The two addresses of a block copy or comparison, `first` formed
+    /// before `second` ([`Self::block_address`]).  Where the first is
+    /// `lea (An),Am` of a held pointer, the pair is recorded so that a
+    /// second address coloured into that dead pointer's register is
+    /// refused after allocation ([`Selector::held_firsts`]; bead
+    /// domain-pascal-76uw).  Gives the registers and whether either
+    /// address is of a form added by bead domain-pascal-21xu.
+    fn block_addresses(&mut self, first: &Addr, second: &Addr) -> Res<(u8, u8, bool)> {
+        let (a, fa) = self.block_address(first)?;
+        let lea = self.out.len() - 1;
+        let (b, fb) = self.block_address(second)?;
+        if fa == BlockForm::HeldInd {
+            self.held_firsts.push((lea, self.out.len() - 1, self.span));
+        }
+        Ok((a, b, fa != BlockForm::Known || fb != BlockForm::Known))
     }
 
     /// `d := e`: one move into the destination's effective address.
@@ -17876,7 +18014,12 @@ mod tests {
     // ---- module data and block copies (codegen-patterns 4, 5.2) ----
 
     fn copy(dst: Addr, src: Addr, bytes: u32) -> StmtKind {
-        StmtKind::Copy { dst, src, bytes }
+        StmtKind::Copy {
+            dst,
+            src,
+            bytes,
+            chars: false,
+        }
     }
 
     fn with_data(mut f: Function) -> Function {
@@ -18176,19 +18319,21 @@ mod tests {
         };
         let f = func(0x12, None, vec![copy(idx, through(8, 0), 8)]);
         assert!(err(&f).starts_with("an 8-byte copy into this kind of destination"));
-        // Another unit's object; a field through a pointer.
+        // Another unit's object at an offset (0xE5CF3A, one routine); a
+        // field through a pointer not held in a register (bead
+        // domain-pascal-21xu).
         let sym = Addr::Symbol {
             name: "X".into(),
-            offset: 0,
+            offset: 4,
         };
         let f = func(0x10, None, vec![copy(Addr::Frame(-0x10), sym, 12)]);
-        assert!(err(&f).starts_with("a block (record or array copy or comparison) at this kind"));
+        assert!(err(&f).starts_with("a block at an offset into another unit's object"));
         let f = func(
             0x10,
             None,
             vec![copy(Addr::Frame(-0x10), through(8, 4), 12)],
         );
-        assert!(err(&f).starts_with("a block through a pointer not held in an address register"));
+        assert!(err(&f).starts_with("a block through a pointer that is not held in a register"));
     }
 
     // ---------------------------------------------------------------

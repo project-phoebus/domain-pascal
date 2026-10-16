@@ -545,7 +545,16 @@ pub enum StmtKind {
     /// `d := s` for a record or array that is not scalar-sized (ref
     /// "Assignment", p. 4-25).  The objects do not overlap partially (two
     /// designators of the same type are the same object or disjoint).
-    Copy { dst: Addr, src: Addr, bytes: u32 },
+    /// `chars`: the object is an array of `char` (of any dimensions),
+    /// which the original copies byte by byte (codegen-patterns 5.2,
+    /// "Block addresses"; ACL_ 0xE45130 `moveq #23; move.b (A1)+,(A2)+;
+    /// dbf`; bead domain-pascal-40r2).
+    Copy {
+        dst: Addr,
+        src: Addr,
+        bytes: u32,
+        chars: bool,
+    },
     /// A procedure call (ref 5.2).
     Call(Call),
     /// Store `value` (a constant of the element type) into `count`

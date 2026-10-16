@@ -815,7 +815,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             addr(a, *bytes, out);
             expr(index, out);
         }
-        StmtKind::Copy { dst, src, bytes } => {
+        StmtKind::Copy {
+            dst, src, bytes, ..
+        } => {
             addr(dst, *bytes, out);
             addr(src, *bytes, out);
         }
@@ -2326,7 +2328,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         self.addr(array, *bytes)?;
                         self.expr(index)?;
                     }
-                    StmtKind::Copy { dst, src, bytes } => {
+                    StmtKind::Copy {
+                        dst, src, bytes, ..
+                    } => {
                         self.addr(dst, *bytes)?;
                         self.addr(src, *bytes)?;
                     }
@@ -4155,9 +4159,21 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             dst: addr_of(p, target)?,
             src: addr_of(p, value)?,
             bytes,
+            chars: char_array(p, target.ty),
         },
         span: s.span,
     })
+}
+
+/// Whether `ty` is an array of `char`, of one dimension or more
+/// ([`StmtKind::Copy`]'s `chars`).
+fn char_array(p: &Program, ty: TypeId) -> bool {
+    match p.types.kind(ty) {
+        TypeKind::Array { elem, .. } => {
+            matches!(p.types.kind(*elem), TypeKind::Char) || char_array(p, *elem)
+        }
+        _ => false,
+    }
 }
 
 /// The code-section cell of constant `v` passed by address as type `ty`
