@@ -53,8 +53,11 @@ begin
       handler := nil;
     end;
   table[3].waiters := 1;
-  table[2].count := 10;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   table[2].limit := 40;
+  table[2].count := 10;
   table[3].handler := addr(exec_$log_l);
 end;
 

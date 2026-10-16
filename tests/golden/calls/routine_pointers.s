@@ -41,7 +41,8 @@ PLAIN:
 link.w %fp,#-4
 pea (%a5)
 lea (.Ldata).l,%a5
-move.l #5,(-4,%fp)
+moveq #5,%d0
+move.l %d0,(-4,%fp)
 pea (.Lc0,%pc)
 pea (-4,%fp)
 movea.l (%a5),%a0

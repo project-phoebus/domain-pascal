@@ -11,6 +11,10 @@
   the section's start and `pea (sym+d).l' after it by address, an
   element off `movea.l #sym,An'; ovl_$zero is a common symbol in both
   units, ovl_$init one here and defined by the peer.
+  The constants stored into elements lie outside the range of `moveq': a
+  smaller longword is stored from a register (codegen-patterns 13), set
+  up before or after the element's base: not seen, refused (bead
+  domain-pascal-53xi).
 
   link: overlays_peer.mod.pas
   call: OVERLAYS_$RUN w:2
@@ -23,11 +27,11 @@
     1000
     81
     42
-    -1
+    -1000
     0
     -7
     99
-    77
+    777
 }
 module overlays;
 %include 'exec.ins.pas';
@@ -51,12 +55,12 @@ begin
   exec_$log_c(c);
   exec_$log_w(z);
   z := 42;
-  w[k] := -1;
+  w[k] := -1000;
   b := 1000;
   ovp_$show;
   ovp_$set;
   exec_$log_w(a);
   exec_$log_l(w[3]);
-  w[k + 1] := 77;
+  w[k + 1] := 777;
   exec_$log_l(w[3]);
 end;

@@ -269,7 +269,7 @@ fn select_in_context(
     overlays: &Overlays,
     merge: bool,
 ) -> Result<Vec<Insn>, Diagnostic> {
-    let (f, merged) = merge::adjacent_stores(f, merge)?;
+    let f = merge::adjacent_stores(f, merge)?;
     let f: &Function = &f;
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
@@ -291,7 +291,7 @@ fn select_in_context(
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_in_unit(f, sched, overlays, &merged)?;
+    let body = select_body_in_unit(f, sched, overlays)?;
     wrap(f, body)
 }
 
@@ -400,8 +400,8 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 /// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12); no overlay
 /// sections, as [`select`].
 pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
-    let (f, merged) = merge::adjacent_stores(f, false)?;
-    select_body_in_unit(&f, sched, &[], &merged)
+    let f = merge::adjacent_stores(f, false)?;
+    select_body_in_unit(&f, sched, &[])
 }
 
 /// [`select_body_scheduled`] for a routine of a unit with overlay sections
@@ -410,31 +410,23 @@ fn select_body_in_unit(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
-    merged: &merge::Merged,
 ) -> Result<Body, Diagnostic> {
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
-    let (body, hits, in_a0) =
-        match select_body_with(f, CsePlan::Probe, sched, &[], overlays, merged)? {
-            Selected::Body(b, h) => (b, h, Vec::new()),
-            Selected::InA0(in_a0) => {
-                match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, merged)? {
-                    Selected::Body(b, h) => (b, h, in_a0),
-                    Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
-                }
+    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[], overlays)? {
+        Selected::Body(b, h) => (b, h, Vec::new()),
+        Selected::InA0(in_a0) => {
+            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays)? {
+                Selected::Body(b, h) => (b, h, in_a0),
+                Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
             }
-        };
+        }
+    };
     if hits.is_empty() {
         return Ok(body);
     }
-    let Selected::Body(body, again) = select_body_with(
-        f,
-        CsePlan::Hold(hits.clone()),
-        sched,
-        &in_a0,
-        overlays,
-        merged,
-    )?
+    let Selected::Body(body, again) =
+        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0, overlays)?
     else {
         unreachable!("an A0-held local is not found again")
     };
@@ -464,10 +456,8 @@ fn select_body_with(
     sched: Schedule,
     in_a0: &[i32],
     overlays: &Overlays,
-    merged: &merge::Merged,
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
-    s.merged = merged.clone();
     s.cse_plan = plan;
     s.overlays = overlays.to_vec();
     s.data_label = crate::emit::data_base_label(&f.data_section);
@@ -5231,6 +5221,90 @@ fn split_addr(addr: &Addr) -> Option<(Addr, i32)> {
     }
 }
 
+/// How a store statement stores a longword constant in `moveq`'s range,
+/// -128..127 and not 0 (codegen-patterns 13, "Stores of constants";
+/// `tools/moveqsurvey.py`; bead domain-pascal-53xi).
+///
+/// In compiled code, in straight-line code (no branch target between the
+/// constant and its store), 44 such constants are stored from a register,
+/// `moveq #n,Dk; move.l Dk,<mem>` (41 read by stores alone, 45 stores:
+/// through an address register 28, the frame 15, absolute 1, indexed 1;
+/// DISK_$PV_MOUNT 0xE6C9F4 `moveq #18,D0; move.l D0,(-20,A6)`; LOG_$INIT
+/// 0xE3017C two words merged), against 3 `move.l #n,<mem>`, every one in
+/// a run of constant stores off one base:
+///
+/// - MAC_OS_$INIT 0xE2F55E `move.l #1,(2204,A1); clr.w (2208,A1)`
+///   (`version := 1; config := 0`, mac_os/init.c);
+/// - the module-local 0xE311C8 (hint_$clear_hintfile) `move.l #7,(A0);
+///   clr.l (4,A0)` (`version := 7; net_port := 0`);
+/// - MST_$INIT 0xE30B9E `clr.l 0xE24384; move.l #1,0xE24388`, the two
+///   longwords of one 8-byte set, MST_$ASID_LIST (mst/mst_internal.h): one
+///   statement, not a pair.
+///
+/// 12 more `moveq` values are stored at a join of tail-merged arms
+/// (TERM_$CONTROL 0xE66C24 `moveq #2,D0; bra.s` to the shared store),
+/// which dpc does not make.  Word and byte constants are not affected:
+/// `move.w #n` 639 and `move.b #n` 300 times, and no `moveq` read by word
+/// or byte stores alone in straight-line code.  Pushes neither: `pea
+/// (n).w` 100 times (codegen-patterns 1.5), no `move.l #n,-(SP)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstForm {
+    /// From a data register (the rule).  The register is the allocator's
+    /// (codegen-patterns 12.4: the lowest free at the `moveq` at 24 of the
+    /// 41 sites read by stores alone, 27 with the second property below),
+    /// with two properties of a run of consecutive constant-store
+    /// statements ([`Selector::const_reg`]):
+    ///
+    /// - one longword stored again is stored from the same register
+    ///   (NETWORK_$INIT 0xE2F7C2 `moveq #1,D0; movea.l #..,A1; move.l
+    ///   D0,(632,A1); move.l D0,(636,A1); move.l D0,(640,A1)`,
+    ///   FILE_$PRIV_CREATE 0xE5D498 `moveq #12,D1` and three stores; no
+    ///   `moveq` of a constant another register of the run holds);
+    /// - another constant takes a register apart from the run's constants
+    ///   (TTY_$I_INIT 0xE33262..0xE3326E `moveq #41,D0; move.l D0,(20,A0);
+    ///   moveq #2,D1; move.l D1,(12,A0); moveq #35,D2; move.l D2,(28,A0)`,
+    ///   D2 saved for it; XPD_$FP_GET_STATE 0xE5C548 D0 then D1; none
+    ///   in the same register).
+    ///
+    /// After the run its registers are still passed over: NETWORK_$INIT
+    /// 0xE2F7D6 `moveq #60,D1; add.l TIME_$CLOCKH,D1` with the run's D0
+    /// dead, which the allocator does not model, so a `moveq` in the
+    /// statement right after a run is refused ([`Selector::seq`]); a `for`
+    /// loop's count there takes the lowest register (TTY_$I_INIT 0xE33280
+    /// `moveq #17,D0`, TERM_$INIT 0xE32EDC, FILE_$PRIV_CREATE 0xE5D6CA)
+    /// and is allowed.  The store's value used again by a later
+    /// statement's expression is refused too: the image keeps the register
+    /// for it (NETWORK_$INIT 0xE2F782 `add.l NETLOG_$EC,D0`,
+    /// XPD_$GET_REGISTERS 0xE5C25C `moveq #12,D1`), where dpc would load it
+    /// again.  The previous statement's constant just above is no run
+    /// either way (EC2_$INIT_S 0xE309C6..0xE309CE `move.w #1,(3740,A1);
+    /// moveq #1,D0; move.l D0,(3736,A1)`).
+    ///
+    /// Where the image takes another register (14 of the 41, most right
+    /// after a branch: PROC2_$SIGRETURN 0xE3F618 `moveq #1,D1` with D0
+    /// free, the register the test before the branch read) is the
+    /// allocator's open question (12.4 R1), not this rule's.
+    Moveq,
+    /// `move.l #n,<mem>`: the store and the next statement's zero word or
+    /// longword just above it, off the same base (MAC_OS_$INIT 0xE2F55E, a
+    /// word; 0xE311C8, a longword).  Why is Uncertain: a run of constants
+    /// stored as one block, as the merging units store constant runs (13,
+    /// "Store merging"), fits both sites, but 0xE311C8's unit is not known
+    /// to merge.  Refused, no site: another constant just above (a byte, a
+    /// nonzero word or longword, the same value in a word), and a
+    /// different constant just below in the previous statement (no site;
+    /// `move.l #n` there made ../source's acl_$def_acldata `move.l #12;
+    /// moveq #12,D0; move.l D0; move.l D0`, against the one-register runs).
+    Imm,
+}
+
+/// Whether `value` is a longword constant in `moveq`'s range other than 0
+/// ([`ConstForm`]).
+fn moveq_const(value: &Expr) -> bool {
+    matches!(value, Expr::Const { value: v, ty }
+        if ty.width == Width::Long && *v as i32 != 0 && (-128..=127).contains(&(*v as i32)))
+}
+
 /// How the body uses a by-value parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParamUse {
@@ -5601,9 +5675,13 @@ impl Uses<'_> {
 /// Selection state of one routine body.
 pub struct Selector {
     out: Vec<Insn>,
-    /// The stores that stand for two word stores merged
-    /// ([`merge::Merged`]).
-    merged: merge::Merged,
+    /// The form the store statement being selected gives a small nonzero
+    /// longword constant ([`ConstForm`]; set by [`Self::seq`]).
+    const_form: ConstForm,
+    /// The small longword constants the current run of constant stores
+    /// holds in data registers, `(value, register)` ([`Self::seq`],
+    /// [`Self::const_reg`]).
+    const_chain: Vec<(i64, u8)>,
     /// Virtual registers handed out so far (`regs.rs`).
     vregs: VRegs,
     /// Callee-saved registers the body writes outside the allocator (A5,
@@ -5970,7 +6048,8 @@ enum Val {
 impl Selector {
     fn new(span: Span) -> Selector {
         Selector {
-            merged: Vec::new(),
+            const_form: ConstForm::Moveq,
+            const_chain: Vec::new(),
             data_label: DATA_BASE_LABEL.into(),
             overlays: Vec::new(),
             out: Vec::new(),
@@ -6289,6 +6368,19 @@ impl Selector {
         for (i, st) in body.iter().enumerate() {
             self.span = st.span;
             self.stmt_start = self.out.len();
+            // A run of constant stores keeps its constants in registers
+            // ([`ConstForm`]): a new run starts at any other statement.
+            // Right after a run whose constants are in registers, a
+            // constant the next statement loads with `moveq` is checked
+            // below.
+            let after_run = i > 0
+                && !self.const_chain.is_empty()
+                && !self.chain_member(st)
+                && !matches!(st.kind, StmtKind::For(_));
+            if !(i > 0 && self.chain_member(st) && self.chain_member(&body[i - 1])) {
+                self.const_chain.clear();
+            }
+            self.const_form = self.const_store_form(body, i)?;
             let rest = &body[i + 1..];
             // A slot used once is loaded where it is needed, into a
             // register no earlier statement left a value in (codegen-patterns
@@ -6460,6 +6552,35 @@ impl Selector {
                         let l = self.epilogue_label();
                         self.jump(Cond::T, l);
                     }
+                }
+            }
+            if after_run {
+                // NETWORK_$INIT 0xE2F7D6 `moveq #60,D1; add.l
+                // TIME_$CLOCKH,D1` after the run 0xE2F7C2 stored from D0:
+                // the run's register is passed over, where the allocator
+                // would take it again.  A `for` count takes it (TTY_$I_INIT
+                // 0xE33280 `moveq #17,D0` after D0..D2; TERM_$INIT
+                // 0xE32EDC; FILE_$PRIV_CREATE 0xE5D6CA).
+                let moveq = self.out[self.stmt_start..]
+                    .iter()
+                    .take_while(|i| {
+                        !matches!(
+                            i,
+                            Insn::Label(_)
+                                | Insn::Branch { .. }
+                                | Insn::Dbf { .. }
+                                | Insn::Jsr(_)
+                                | Insn::Bsr { .. }
+                        )
+                    })
+                    .any(|i| matches!(i, Insn::Moveq { .. }));
+                if moveq {
+                    return Err(unsupported(
+                        st.span,
+                        "a constant loaded with `moveq` right after a run of constant stores \
+                         from registers (a register apart from the run's at NETWORK_$INIT \
+                         0xE2F7D6, not modelled; codegen-patterns 13) is",
+                    ));
                 }
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
@@ -10371,7 +10492,15 @@ impl Selector {
                  codegen-patterns 5.2; bead domain-pascal-lnzy) is",
             ));
         }
-        let both = self.addr_needs_reg(addr) && self.value_needs_reg(value);
+        // A longword constant stored from a register needs one like any
+        // computed value: the destination's set-up first when it has more
+        // instructions, the `moveq` first on a tie (RIP_$NET_LOOKUP
+        // 0xE155A2..0xE155AC the element's address, then `moveq #1,D0`;
+        // module-local 0xE13136 `moveq #1,D0; movea.l (-116,A6),A1`,
+        // WIN_$DO_IO 0xE19958, NETBUF_$INIT 0xE2F658, NETWORK_$INIT
+        // 0xE2F7C2).
+        let moveq = !device && self.const_form == ConstForm::Moveq && moveq_const(value);
+        let both = self.addr_needs_reg(addr) && (moveq || self.value_needs_reg(value));
         let mut select = false;
         walk_expr(value, &mut |n| {
             if let Node::Expr(Expr::Binary {
@@ -10419,23 +10548,10 @@ impl Selector {
             }
             Expr::Const { value: 0, .. } => Src::Zero,
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => Src::True,
-            // Two words merged into one longword in `moveq`'s range: from
-            // a register, LOG_$INIT 0xE3017C `moveq #1,D0; move.l D0,(A0)`
-            // for `head := 0; tail := 1` (the only such merge in the
-            // image).  The image stores small nonzero longword constants
-            // so in general too (37 `moveq #n,Dk; move.l Dk,<mem>` against
-            // 3 `move.l #n`, 0xE2F55E, 0xE30B9E, 0xE311C8: codegen-patterns
-            // 13), where dpc still emits `move.l #n` (bead
-            // domain-pascal-53xi).
-            Expr::Const { value, .. }
-                if (-128..=127).contains(value)
-                    && self
-                        .merged
-                        .iter()
-                        .any(|(sp, a)| *sp == self.span && a == addr) =>
-            {
-                Src::Ea(Ea::Reg(Reg::D(self.load_const(*value, Width::Long)?)))
-            }
+            // A longword in `moveq`'s range: from a data register
+            // ([`ConstForm`]; DISK_$PV_MOUNT 0xE6C9F4 `moveq #18,D0;
+            // move.l D0,(-20,A6)`; LOG_$INIT 0xE3017C, two words merged).
+            Expr::Const { value, .. } if moveq => Src::Ea(Ea::Reg(Reg::D(self.const_reg(*value)?))),
             Expr::Const { value, ty } => Src::Ea(Ea::Imm(imm(*value, ty.width))),
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -12589,6 +12705,145 @@ impl Selector {
             Val::Mem(ea) => ea.clone(),
             Val::Imm(c) => Ea::Imm(*c),
         }
+    }
+
+    /// The register a longword constant in `moveq`'s range is stored from
+    /// ([`ConstForm::Moveq`]): the one the current run of constant stores
+    /// already holds it in, or a new one kept apart from the run's other
+    /// constants.
+    fn const_reg(&mut self, value: i64) -> Res<u8> {
+        if let Some(&(_, d)) = self.const_chain.iter().find(|&&(v, _)| v == value) {
+            return Ok(d);
+        }
+        let d = self.load_const(value, Width::Long)?;
+        for &(_, e) in &self.const_chain {
+            self.colour_apart.push((Reg::D(d), Reg::D(e)));
+        }
+        self.const_chain.push((value, d));
+        Ok(d)
+    }
+
+    /// Whether a frame offset is a local held in a register (a store to
+    /// it writes no memory).
+    fn held_local(&self, o: i32) -> bool {
+        self.reg_locals.contains(&o)
+            || self.webs.iter().any(|&(p, _)| p == o)
+            || self.ptr_locals.iter().any(|&(p, _)| p == o)
+            || self.a0_locals.contains(&o)
+            || self.parked.iter().any(|p| p.off == o)
+    }
+
+    /// Whether `st` stores a constant to memory with no call in its
+    /// address: a statement of a run of constant stores ([`ConstForm`]).
+    fn chain_member(&self, st: &Stmt) -> bool {
+        match &st.kind {
+            StmtKind::Store {
+                addr,
+                value: Expr::Const { .. },
+            } => !matches!(addr, Addr::Frame(o) if self.held_local(*o)) && !addr_has_call(addr),
+            _ => false,
+        }
+    }
+
+    /// The base, offset, size and value of a constant store of a run
+    /// ([`Self::chain_member`]) whose address is a base and an offset
+    /// ([`split_addr`]: not an element at a run-time index, not a
+    /// `device` object).
+    fn run_item(&self, st: &Stmt) -> Option<(Addr, i32, u32, i64)> {
+        if !self.chain_member(st) {
+            return None;
+        }
+        let StmtKind::Store {
+            addr,
+            value: Expr::Const { value, ty },
+        } = &st.kind
+        else {
+            return None;
+        };
+        let (base, off) = split_addr(addr)?;
+        Some((base, off, ty.bytes(), *value))
+    }
+
+    /// The form of `body[i]` when it stores a longword constant in
+    /// `moveq`'s range ([`ConstForm`]; `Moveq` for any other statement).
+    fn const_store_form(&self, body: &[Stmt], i: usize) -> Res<ConstForm> {
+        let st = &body[i];
+        let StmtKind::Store { addr, value } = &st.kind else {
+            return Ok(ConstForm::Moveq);
+        };
+        if !moveq_const(value) || addr.unwrap_volatile().1.is_some_and(|a| a.device) {
+            // A `device` longword keeps `move.l #n` ([`Self::store`]).
+            return Ok(ConstForm::Moveq);
+        }
+        let Expr::Const { value: n, .. } = value else {
+            unreachable!("moveq_const")
+        };
+        let n = *n;
+        // The constant used again by a later statement's computed value:
+        // the image keeps the `moveq` register for it (NETWORK_$INIT
+        // 0xE2F782 `add.l NETLOG_$EC,D0` after `move.l D0,(656,A1)`;
+        // XPD_$GET_REGISTERS 0xE5C25C `moveq #12,D1`, later `add.l
+        // (A1),D1`), where dpc would load it again.
+        let again = body[i + 1..]
+            .iter()
+            .take_while(|s| {
+                matches!(&s.kind, StmtKind::Store { addr, value }
+                    if !expr_has_call(value) && !addr_has_call(addr))
+            })
+            .any(|s| {
+                let StmtKind::Store { value, .. } = &s.kind else {
+                    unreachable!()
+                };
+                let mut found = false;
+                if !matches!(value, Expr::Const { .. }) {
+                    walk_expr(value, &mut |x| {
+                        if let Node::Expr(Expr::Const { value: c, .. }) = x {
+                            found |= *c == n;
+                        }
+                    });
+                }
+                found
+            });
+        if again {
+            return Err(unsupported(
+                st.span,
+                "a longword constant in `moveq`'s range stored, its value used again by a later \
+                 statement's expression (the `moveq` register kept for it at NETWORK_$INIT \
+                 0xE2F782 and XPD_$GET_REGISTERS 0xE5C25C; codegen-patterns 13) is",
+            ));
+        }
+        let Some((base, off, _, _)) = self.run_item(st) else {
+            return Ok(ConstForm::Moveq);
+        };
+        if let Some((b, o, bytes, v)) = body.get(i + 1).and_then(|s| self.run_item(s)) {
+            if b == base && o == off + 4 {
+                match (v, bytes) {
+                    (0, 2 | 4) => return Ok(ConstForm::Imm),
+                    (v, 4) if v == n => {}
+                    _ => {
+                        return Err(unsupported(
+                            st.span,
+                            "a longword constant in `moveq`'s range stored just below the next \
+                             statement's constant other than a zero word or longword or the \
+                             same longword (`move.l #n` below a zero, MAC_OS_$INIT 0xE2F55E, \
+                             0xE311C8; one register for the same longword, NETWORK_$INIT \
+                             0xE2F7C2; other constants above: not seen; codegen-patterns 13) is",
+                        ))
+                    }
+                }
+            }
+        }
+        if let Some((b, o, bytes, v)) = i.checked_sub(1).and_then(|j| self.run_item(&body[j])) {
+            if b == base && o + bytes as i32 == off && !(v == n && bytes == 4) {
+                return Err(unsupported(
+                    st.span,
+                    "a longword constant in `moveq`'s range stored just above the previous \
+                     statement's other constant (not seen: MST_$INIT 0xE30B9E's `clr.l; move.l \
+                     #1` is one 8-byte set; codegen-patterns 13) is",
+                ));
+            }
+        }
+        Ok(ConstForm::Moveq)
     }
 
     /// A constant in a new data register (codegen-patterns 3, 13):

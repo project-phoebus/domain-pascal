@@ -31,7 +31,8 @@ movea.l (8,%fp),%a0
 st (%a0)
 clr.w (2,%a0)
 move.w #7,(8,%a0)
-move.l #5,(4,%a0)
+moveq #5,%d0
+move.l %d0,(4,%a0)
 unlk %fp
 rts
 .globl GLOBALS

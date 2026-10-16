@@ -11898,12 +11898,70 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
     a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the
     image);
-  - others: `move.<s> #n,<ea>` (dpc emits it also for small longwords;
-    the image's majority for a nonzero longword in `moveq`'s range is
-    `moveq #n,Dk; move.l Dk,<mem>`, 37 sites (DISK_$PV_MOUNT 0xE6C9F4
-    `moveq #18,D0; move.l D0,(-20,A6)`, LOG_$INIT 0xE3017C, 0xE1042C),
-    against 3 `move.l #n` (0xE2F55E, 0xE30B9E, 0xE311C8 `move.l
-    #7,(A0)`); which applies is not settled, bead domain-pascal-53xi):
+  - **a longword in `moveq`'s range** (-128..127, not 0; Verified by
+    survey, implemented, `ConstForm` in `isel.rs`, bead
+    domain-pascal-53xi; `tools/moveqsurvey.py summary`): from a data
+    register, `moveq #n,Dk; move.l Dk,<mem>`.  In straight-line code (no
+    branch target between the `moveq` and its store) 44 such constants
+    are stored so, 41 read by stores alone (45 stores: through an
+    address register 28, the frame 15, absolute 1, indexed 1;
+    DISK_$PV_MOUNT 0xE6C9F4 `moveq #18,D0; move.l D0,(-20,A6)`, MMAP_$INIT
+    0xE31B6E `moveq #100,D0; move.l D0,abs.l`, LOG_$INIT 0xE3017C two
+    words merged), against 3 `move.l #n`, each in a run of constant
+    stores off one base: MAC_OS_$INIT 0xE2F55E `move.l #1,(2204,A1);
+    clr.w (2208,A1)` (`version := 1; config := 0`), the module-local
+    0xE311C8 `move.l #7,(A0); clr.l (4,A0)` (hint_$clear_hintfile,
+    `version := 7; net_port := 0`), MST_$INIT 0xE30B9E `clr.l abs;
+    move.l #1,abs+4` (one statement: an 8-byte set, MST_$ASID_LIST).  No
+    D register was short at any of the three.  12 more `moveq` values
+    are stored at a join of tail-merged arms (NETWORK_$REPORT_FAILURE
+    0xE10428/0xE1042C `moveq #1,D0; bra; moveq #3,D0; move.l
+    D0,(772,A5)`; TERM_$CONTROL 0xE66C24 `moveq #2,D0; bra.s` back to the
+    shared store), which dpc does not make.  dpc:
+    - `move.l #n` when the next statement stores a zero word or longword
+      to the bytes just above, off the same base (the two sites).  Why is
+      Uncertain: a constant run stored as one block, as merging units
+      store runs (below), fits both, but 0xE311C8's unit (HINT_) is not
+      known to merge.  Refused, no site: another constant just above (a
+      byte, a nonzero word or longword, the same value in a word; the same
+      longword is a run, below), and a different constant just below in
+      the previous statement (`move.l #n` there gave ../source's
+      acl_$def_acldata `move.l #12; moveq #12,D0; move.l D0; move.l D0`,
+      against the one-register runs).  The previous statement's constant
+      just above is no such run: the `moveq` (EC2_$INIT_S
+      0xE309C6..0xE309CE `move.w #1,(3740,A1); moveq #1,D0; move.l
+      D0,(3736,A1)`);
+    - otherwise the `moveq`, the register the allocator's (12.4; the
+      lowest free at the `moveq` at 24 of the 41, most others right
+      after a branch, PROC2_$SIGRETURN 0xE3F618 `moveq #1,D1` with D0
+      free), and in a run of consecutive constant-store statements one
+      longword is stored again from its register (NETWORK_$INIT 0xE2F7C2
+      `moveq #1,D0` and three stores; FILE_$PRIV_CREATE 0xE5D498; no
+      `moveq` of a constant a register of the run holds), another takes
+      a register apart from the run's (TTY_$I_INIT 0xE33262..0xE3326E
+      D0, D1, D2 for 41, 2, 35, D2 saved for it; XPD_$FP_GET_STATE
+      0xE5C548 D0 then D1; 3 of 3 such pairs; with them 27 of the 41).
+      The run's registers are passed over after it too (NETWORK_$INIT
+      0xE2F7D6 `moveq #60,D1; add.l TIME_$CLOCKH,D1` with D0 dead),
+      which the allocator does not model: a `moveq` in the statement
+      right after a run is refused, except a `for` count, which takes
+      the lowest register (TTY_$I_INIT 0xE33280 `moveq #17,D0`,
+      TERM_$INIT 0xE32EDC, FILE_$PRIV_CREATE 0xE5D6CA).  The stored
+      value used again by a later statement's expression is refused: the
+      image keeps the `moveq` register for it (NETWORK_$INIT 0xE2F782
+      `moveq #1,D0; move.l D0,(656,A1); clr.l (660,A1); add.l
+      NETLOG_$EC,D0`; XPD_$GET_REGISTERS 0xE5C25C), where dpc would load
+      it again.  The order against a destination that needs a register
+      is that of any value (12.4): the `moveq` first on a tie (0xE13136,
+      WIN_$DO_IO 0xE19958, NETBUF_$INIT 0xE2F658), the element's address
+      first when longer (RIP_$NET_LOOKUP 0xE155A2); into an element of
+      another unit's array, refused (bead domain-pascal-lnzy's rule; no
+      `moveq` site).  A `device` longword keeps `move.l #n` (no site).
+    Word and byte constants are not affected: `move.w #n` 639 and `move.b
+    #n` 300 times, and no `moveq` read by word or byte stores alone in
+    straight-line code.  Nor pushes: `pea (n).w` 100 times (section 1.5),
+    no `move.l #n,-(SP)`.  Golden `stores/small_long_consts`;
+  - others: `move.<s> #n,<ea>`:
     module-local 0xE0A328 at 0xE0A334 `move.b #0x10,(7,A0)`,
     MMAP_$ALLOC_CONTIG 0xE0D906 `move.l #0x6000e,(A1)`, 0xE758D8
     `move.w #0x200,(0xa,A0)`;
@@ -12207,9 +12265,8 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
       (TTY_$K_RESET 0xE67322 `move.l #0x10001,(0x2ca,A2)`), and a merged
       value in `moveq`'s range is stored from a register (LOG_$INIT
       0xE3017C `moveq #1,D0; move.l D0,(A0)`, the only one; the form is
-      not specific to merging: it is the image's majority for small
-      nonzero longword stores, 37 sites against 3 `move.l #n`, see
-      "Stores of constants" above and bead domain-pascal-53xi); another
+      not specific to merging: it is how any longword constant in that
+      range is stored, see "Stores of constants" above); another
       data section's block through `movea.l #` too
       (KBD_$INIT 0xE33374);
     - runs: three words pair the first two (5 runs in ../source's order:

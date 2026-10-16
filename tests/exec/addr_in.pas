@@ -42,8 +42,11 @@ var
 
 procedure addrin_$setup;
 begin
-  r.version := 1;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   r.port := 77;
+  r.version := 1;
   e.value := 5;
 end;
 

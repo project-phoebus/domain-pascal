@@ -14,6 +14,10 @@
   to 16#540 (64512), 24-byte ones from -1000 to 1400 (33600), 44-byte
   ones to 1000 (44000; the constant first), and chars to 40000 (no
   scaling).  A store through a `.l' index is read back.
+  The constants stored into elements lie outside the range of `moveq': a
+  smaller longword is stored from a register (codegen-patterns 13), set
+  up before or after the element's base: not seen, refused (bead
+  domain-pascal-53xi).
 
   link: wide_index_data.mod.pas
   call: WI_$FILL
@@ -59,7 +63,7 @@
     => 137
     => 138
     => 91
-    => -7
+    => -700
     => 200999
 }
 module wide_index;
@@ -108,7 +112,7 @@ procedure wi_$set48(i: pinteger);
   options(val_param);
 begin
   if i <> 0 then
-    wi_$r48[i].z := -7;
+    wi_$r48[i].z := -700;
 end;
 
 { `ext.l', ×24 with shifts. }

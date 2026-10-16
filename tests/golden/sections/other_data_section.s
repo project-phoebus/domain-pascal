@@ -7,7 +7,8 @@ movea.l #.Ldata.WIRED_DATA,%a0
 movea.l (8,%fp),%a2
 clr.w (4,%a0)
 clr.w (%a2)
-move.l #1,(8,%a2)
+moveq #1,%d0
+move.l %d0,(8,%a2)
 pea (8,%a0)
 jsr (EC_$INIT).l
 addq.w #4,%sp

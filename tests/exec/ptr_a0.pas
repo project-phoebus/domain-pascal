@@ -387,10 +387,13 @@ end;
 
 procedure ptr_a0_$reset;
 begin
-  park_int_$desc.a := 7;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   park_int_$desc.b := 10;
-  h.a := 0;
+  park_int_$desc.a := 7;
   h.b := 4;
+  h.a := 0;
   hp := addr(h);
   g := 3;
   n1.v := 1;
@@ -398,10 +401,13 @@ begin
   n2.v := 2;
   n2.next := addr(n3);
   n3.v := 3;
-  arr[1] := 11;
-  arr[2] := 22;
-  arr[3] := 33;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   arr[4] := 44;
+  arr[3] := 33;
+  arr[2] := 22;
+  arr[1] := 11;
   bg.x[2] := 66;
 end;
 

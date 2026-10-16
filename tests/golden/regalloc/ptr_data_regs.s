@@ -42,7 +42,8 @@ move.l %d2,-(%sp)
 jsr (WAKEUP).l
 movea.l %d2,%a0
 clr.w (4,%a0)
-move.l #2,(%a0)
+moveq #2,%d0
+move.l %d0,(%a0)
 clr.l (%a2)
 movem.l (-0xc,%fp),%d2/%a2/%a5
 unlk %fp
@@ -62,16 +63,19 @@ tst.l (%a1)
 bne.s 1f
 move.w #1,(4,%a1)
 1:
-move.l #2,(%a1)
+moveq #2,%d1
+move.l %d1,(%a1)
 clr.l (%a0)
 cmpi.l #1,(%a1)
 bne.s 2f
-move.l #1,(%a0)
+moveq #1,%d1
+move.l %d1,(%a0)
 bra.s 3f
 2:
 clr.l (%a5)
 3:
-move.l #3,(%a1)
+moveq #3,%d1
+move.l %d1,(%a1)
 movea.l (-4,%fp),%a5
 unlk %fp
 rts

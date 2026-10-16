@@ -64,8 +64,11 @@ begin
   for i := 1 to 8 do
     with tab[i] do begin
       k := k + 10;
-      next := 100;
+      { the higher field first: a small longword constant stored below the
+        next statement's nonzero one is refused (codegen-patterns 13; bead
+        domain-pascal-53xi) }
       flags := 7;
+      next := 100;
       count := i;
       blk := k;
     end;

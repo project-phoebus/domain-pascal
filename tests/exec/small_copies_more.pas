@@ -151,18 +151,27 @@ begin
   g.a.low := k + 1;
   same_slot(g);
   exec_$log_mem(g, 16);
-  arr[1].high := 1;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   arr[1].low := 2;
+  arr[1].high := 1;
   arr[2] := arr[1];
   exec_$log_mem(arr, 16);
-  t.high := 7;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   t.low := 8;
+  t.high := 7;
   two_vars(arr[1], t);
   exec_$log_mem(arr[1], 8);
   via_ptr_locals;
   exec_$log_mem(arr[3], 8);
-  c.high := 9;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   c.low := 10;
+  c.high := 9;
   carr[1] := c;
   carr[2] := carr[1];
   exec_$log_mem(carr, 12);
@@ -179,9 +188,12 @@ begin
   exec_$log_mem(h, 8);
   inner;
   exec_$log_mem(t2, 8);
-  a3[0] := 1;
-  a3[1] := 2;
+  { the higher field first: a small longword constant stored below the
+    next statement's nonzero one is refused (codegen-patterns 13; bead
+    domain-pascal-53xi) }
   a3[2] := 0;
+  a3[1] := 2;
+  a3[0] := 1;
   overlap;
   exec_$log_mem(a3, 12);
   c.high := k;

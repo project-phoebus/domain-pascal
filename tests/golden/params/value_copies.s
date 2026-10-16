@@ -44,7 +44,8 @@ move.l (%a0)+,(-4,%fp)
 movea.l (0xc,%fp),%a0
 tst.w (%a0)
 bne.s 1f
-move.l #1,(%a2)
+moveq #1,%d0
+move.l %d0,(%a2)
 bra.s 2f
 1:
 pea (%a2)

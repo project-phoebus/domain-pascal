@@ -59,7 +59,9 @@
 //! ascending order are one longword, `clr.l` for two zeros, else the two
 //! words' bits as one `move.l #imm` (TTY_$K_RESET 0xE67322 `move.l
 //! #0x10001,(0x2ca,A2)`; LOG_$INIT 0xE3017C, the one merged value in
-//! `moveq`'s range, `moveq #1,D0; move.l D0,(A0)`); a run of three words
+//! `moveq`'s range, `moveq #1,D0; move.l D0,(A0)`, which is how any
+//! longword constant in that range is stored: [`super::ConstForm`]); a run
+//! of three words
 //! pairs the first two (5 runs: KBD_$INIT 0xE333B6, 0xE333C4,
 //! TTY_$K_RESET 0xE67332, ACL_ 0xE4521E, 0xE45C1C); the shapes the
 //! merging units keep apart (bytes, words descending or off A5, two word
@@ -74,25 +76,26 @@ use dpc_syntax::Span;
 use super::{expr_has_call, register_locals, split_addr, unsupported, Res};
 
 /// The stores that stand for two statements' word stores merged (the
-/// first statement's span and the longword's address): their value in
-/// `moveq`'s range is stored from a register (LOG_$INIT 0xE3017C).
-pub(super) type Merged = Vec<(Span, Addr)>;
+/// first statement's span and the longword's address).
+type Merged = Vec<(Span, Addr)>;
 
 /// Check every pair of consecutive stores to adjacent memory of `f`'s
 /// body (see the module doc) and, with `merge` (`dpc
 /// --merge-constant-stores`), merge the pairs the image merges.  -> the
-/// function to select (`f` itself when nothing merged) and the merged
-/// stores.
-pub(super) fn adjacent_stores(f: &Function, merge: bool) -> Res<(Cow<'_, Function>, Merged)> {
+/// function to select (`f` itself when nothing merged).  A merged
+/// longword is an ordinary constant store: in `moveq`'s range it is
+/// stored from a register (LOG_$INIT 0xE3017C), as [`super::ConstForm`]
+/// says for every longword constant.
+pub(super) fn adjacent_stores(f: &Function, merge: bool) -> Res<Cow<'_, Function>> {
     let ctx = Ctx::new(f, merge);
     let mut merged = Merged::new();
     let body = ctx.seq(&f.body, &mut merged)?;
     if merged.is_empty() {
-        return Ok((Cow::Borrowed(f), merged));
+        return Ok(Cow::Borrowed(f));
     }
     let mut g = f.clone();
     g.body = body;
-    Ok((Cow::Owned(g), merged))
+    Ok(Cow::Owned(g))
 }
 
 /// The kind of a pair's common base ([`split_addr`]), as the image's

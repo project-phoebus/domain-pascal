@@ -7,7 +7,8 @@ movea.l (0xc,%fp),%a2
 movea.l (0x14,%fp),%a3
 cmpi.w #4,(%a2)
 bls.s 1f
-move.l #1,(%a3)
+moveq #1,%d0
+move.l %d0,(%a3)
 bra.s 2f
 1:
 pea (%a3)
@@ -34,7 +35,8 @@ movea.l (0xc,%fp),%a2
 movea.l (0x14,%fp),%a3
 cmpi.w #4,(%a2)
 bls.s 1f
-move.l #1,(%a3)
+moveq #1,%d0
+move.l %d0,(%a3)
 bra.s 2f
 1:
 pea (%a3)

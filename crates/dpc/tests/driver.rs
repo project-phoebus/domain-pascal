@@ -386,6 +386,97 @@ fn loop_align_off_from_a_routine() {
     assert!(asm.contains(ZERO_PAD), "{asm}");
 }
 
+/// codegen-patterns 13, "Stores of constants" (bead domain-pascal-53xi):
+/// a longword constant in `moveq`'s range below the next statement's zero
+/// word or longword is `move.l #n` (MAC_OS_$INIT 0xE2F55E, 0xE311C8); the
+/// shapes the image does not settle are refused: another constant above
+/// it (a byte, a nonzero one, the same value in a word), a different
+/// constant just below it in the previous statement, its value used
+/// again by a later statement's expression (NETWORK_$INIT 0xE2F782 keeps
+/// the `moveq` register for `ec + 1`), and a `moveq` in the statement
+/// right after a run of constant stores (NETWORK_$INIT 0xE2F7D6 takes
+/// another register).  A `device` longword is `move.l #n`, never refused.
+#[test]
+fn small_long_constant_runs_refused() {
+    let src = |body: &str| {
+        format!(
+            "module m;
+type
+  rb = record l: integer32; b: char; end;
+  rw = record l: integer32; w: integer; pad: integer; m: integer32; end;
+var
+  xb: rb;
+  xw: rw;
+  e: integer32;
+  dv: [device] rw;
+procedure m_$p;
+begin
+{body}
+end;
+"
+        )
+    };
+    let refused = [
+        (
+            "small_long_below_byte",
+            "  xb.l := 7;\n  xb.b := chr(0);",
+            "m.pas:12:3: error: a longword constant in `moveq`'s range stored just below the \
+             next statement's constant other than a zero word or longword or the same longword",
+        ),
+        (
+            "small_long_below_nonzero",
+            "  xw.l := 7;\n  xw.w := 3;",
+            "just below the next statement's constant other than a zero",
+        ),
+        (
+            "small_long_below_same_word",
+            "  xw.l := 1;\n  xw.w := 1;",
+            "just below the next statement's constant other than a zero",
+        ),
+        (
+            "small_long_above_other",
+            "  xw.pad := 0;\n  xw.m := 5;",
+            "m.pas:13:3: error: a longword constant in `moveq`'s range stored just above the \
+             previous statement's other constant",
+        ),
+        (
+            "small_long_used_again",
+            "  xw.l := 1;\n  xw.m := e + 1;",
+            "its value used again by a later statement's expression",
+        ),
+        (
+            "small_long_after_run",
+            "  xw.l := 1;\n  e := 1;\n  xw.m := e + 60;",
+            "m.pas:14:3: error: a constant loaded with `moveq` right after a run of constant \
+             stores from registers",
+        ),
+    ];
+    for (name, body, msg) in refused {
+        let (code, err) = compile_with(name, &src(body), &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains(msg), "{name}: {err}");
+    }
+    // A zero word above: `move.l #1` (MAC_OS_$INIT 0xE2F55E).
+    let asm = compile_with(
+        "small_long_below_word",
+        &src("  xw.l := 1;\n  xw.w := 0;"),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        asm.contains("\tmove.l\t#1,(8,%a5)\n\tclr.w\t(0xc,%a5)\n"),
+        "{asm}"
+    );
+    // A device record: `move.l #n`, whatever is next to it.
+    let asm = compile_with(
+        "small_long_device",
+        &src("  dv.l := 1;\n  dv.w := 1;\n  e := e + 1;"),
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("\tmove.l\t#1,"), "{asm}");
+}
+
 #[test]
 fn loop_align_off_from_unknown_routine_is_an_error() {
     let (code, err) = compile_with(
@@ -690,7 +781,7 @@ end;
     assert!(
         asm.contains(
             "\tlea\t(.Ldata).l,%a0\n\tmove.w\t#1,(%a0)\n\tmovea.l\t(8,%fp),%a1\n\
-             \tmove.w\t#2,(%a1)\n\tmove.l\t#3,(4,%a0)\n"
+             \tmove.w\t#2,(%a1)\n\tmoveq\t#3,%d0\n\tmove.l\t%d0,(4,%a0)\n"
         ),
         "{asm}"
     );

@@ -7,6 +7,10 @@
   an earlier statement's address (SIO_$INIT 0xE32CD6).  Elements of 12
   bytes (1-based) and 288 bytes (the field at -284), word indices, read
   and written through, the stored address read back.
+  The constants stored into elements lie outside the range of `moveq': a
+  smaller longword is stored from a register (codegen-patterns 13), set
+  up before or after the element's base: not seen, refused (bead
+  domain-pascal-53xi).
 
   link: elem_once_data.mod.pas
   call: EB_$FILL_ONCE
@@ -18,7 +22,7 @@
   call: EO_$AFTER w:6 -> l
   expect:
     => -3
-    => 77
+    => 777
     => 42
     => 524
     => 63
@@ -54,7 +58,7 @@ end;
 procedure eo_$put(i: integer);
   options(val_param);
 begin
-  eo_$big[i].z := 77;
+  eo_$big[i].z := 777;
 end;
 
 { an address stored, then read through }
