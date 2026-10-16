@@ -50,7 +50,7 @@ STUB	audit/audit.pas	audit_$log_event_s
 MISMATCH	audit/audit.pas	audit_$server
 MISMATCH	audit/audit.pas	audit_$alloc
 STUB	audit/audit.pas	audit_$load_list
-STUB	audit/audit.pas	audit_$administrator
+MISMATCH	audit/audit.pas	audit_$administrator
 STUB	audit/audit.pas	audit_$control
 MISMATCH	audit/audit.pas	audit_$inherit_audit
 STUB	audit/audit.pas	audit_$open_log
@@ -145,7 +145,7 @@ STUB	dma/dma.pas	dma_$check
 OK	dma/dma.pas	dma_$free_asid
 OK	dtty/dtty.pas	dtty_$get_disp_type
 OK	dtty/dtty.pas	dtty_$clear_window
-STUB	dtty/dtty.pas	dtty_$report_error
+OK	dtty/dtty.pas	dtty_$report_error
 OK	dtty/dtty.pas	dtty_$load_font
 MISMATCH	dtty/dtty.pas	dtty_$write_string
 STUB	dtty/dtty.pas	dtty_$tstart
@@ -231,7 +231,7 @@ STUB	kbd/kbd.pas	kbd_$get_char_and_mode
 OK	kbd/kbd.pas	kbd_$set_kbd_mode
 OK	kbd/kbd.pas	kbd_$set_kbd_type
 STUB	kbd/kbd.pas	kbd_$inq_kbd_type
-STUB	log/log.pas	log_$shutdn
+OK	log/log.pas	log_$shutdn
 OK	log/log.pas	log_$update
 STUB	log/log.pas	log_$add
 STUB	log/log.pas	log_$read_internal
@@ -257,7 +257,7 @@ STUB	mac_os/mac_os.pas	mac_$net_to_port_num
 STUB	mac_os/mac_os.pas	mac_os_$init
 STUB	mem/mem.pas	mem_$parity_log
 OK	misc/misc.pas	mem_lites
-STUB	misc/misc.pas	start_mem_lites
+MISMATCH	misc/misc.pas	start_mem_lites
 MISMATCH	misc/misc.pas	set_lites_loc
 STUB	mmap/mmap.pas	mmap_$add_to_wsl
 STUB	mmap/mmap.pas	mmap_$add_pages_to_wsl
@@ -342,7 +342,7 @@ STUB	name/name.pas	name_$fork
 STUB	name/name.pas	name_$free_asid
 STUB	name/nameu.pas	name_$split_path
 STUB	name/nameu.pas	nameq
-STUB	name/nameu.pas	name_$validate
+MISMATCH	name/nameu.pas	name_$validate
 STUB	name/nameu.pas	name_$parse_component
 STUB	name/nameu.pas	name_$resolve_internal
 MISMATCH	name/nameu.pas	name_$resolve_dir_and_leaf
@@ -405,7 +405,7 @@ OK	pbu/pbu.pas	pbu_$init
 STUB	pchist/pchist.pas	pchist_$count
 OK	pchist/pchist.pas	pchist_$interrupt
 OK	pchist/pchist.pas	pchist_$init
-STUB	pchist/pchist.pas	pchist_$enable_terminal
+OK	pchist/pchist.pas	pchist_$enable_terminal
 STUB	pchist/pchist.pas	pchist_$unix_profil_cntl
 STUB	pchist/pchist.pas	pchist_$unix_profil_fork
 STUB	pchist/pchist.pas	pchist_$cntl
@@ -474,7 +474,7 @@ STUB	proc1/proc1.pas	proc1_$init
 OK	rem_name/rem_name.pas	rem_name_server_local
 STUB	rem_name/rem_name.pas	locate_server
 OK	rem_name/rem_name.pas	rem_name_$register_server
-STUB	rem_name/rem_name.pas	rem_name_$send_request
+MISMATCH	rem_name/rem_name.pas	rem_name_$send_request
 STUB	rem_name/rem_name.pas	rem_name_$get_entry_by_name
 STUB	rem_name/rem_name.pas	rem_name_$get_info
 STUB	rem_name/rem_name.pas	rem_name_$locate_server
@@ -539,7 +539,7 @@ STUB	rip/rip_unwired.pas	rip_$table_d
 STUB	rip/rip_unwired.pas	rip_$table
 STUB	rip/rip_unwired.pas	rip_$update_d
 STUB	rip/rip_unwired.pas	rip_$update
-STUB	rip/rip_unwired.pas	rip_$announce_ns
+MISMATCH	rip/rip_unwired.pas	rip_$announce_ns
 OK	rip/rip_wired.pas	rip_$lock
 OK	rip/rip_wired.pas	rip_$unlock
 STUB	rip/rip_wired.pas	rip_$net_lookup
