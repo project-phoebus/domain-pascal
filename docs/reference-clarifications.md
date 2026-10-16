@@ -130,6 +130,13 @@ Question: is `[byte] set of 0..7` legal, a 1-byte set, with element k at bit k o
 Owner's answer (2026-10-16): legal, 1 byte.
 Consequence: a set's minimum size for a size attribute is the number of bits its range needs; `[byte]` on a set of at most 8 elements gives a 1-byte set, element k at bit k; as any one-byte object it may sit at an odd offset of an unpacked record (3.10.5.5).  Code for such sets follows the image (bead filed with this entry).
 
+## Lshft of a 16-bit operand; the sign of a shift of an unsigned word ("Lshft", p. 4-109; "Rshft", p. 4-171; 4.3.3)
+Asked: 2026-10-16, by the lead (open question 15, extended for bead domain-pascal-4rfc)
+Passage: see open question 15.  "Rshft" (p. 4-171) and "Arshft" (p. 4-29) expand an operand smaller than 32 bits to 32 bits, shift, and convert back; "Lshft" (p. 4-109) does not say, and its example (`i : INTEGER16`, `LSHFT(i, 7)` = 10#-6144) shows a 16-bit result.  4.3.3: `>`, `>=`, `<`, `<=`, max, div and mod are signed unless both operands are unsigned run-time values.
+Question: when the result is used as an integer32, is lshft of a 16-bit operand a 16-bit shift then widened, or a 32-bit shift?  Is a shift of an unsigned 0..65535 word itself an unsigned run-time value?
+Owner's answer (2026-10-16): 32-bit, like rshft: a 16-bit operand is expanded to 32 bits (by its sign; a 0..65535 value zero-extended), shifted, and the result is integer32, narrowed back only when stored into a 16-bit target (so the p. 4-109 example is the value narrowed back into `i`).  A shift of an unsigned run-time value is unsigned (compares unsigned, div/mod in the unsigned forms).
+Consequence: implemented under bead domain-pascal-4rfc.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -247,7 +254,7 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
     pointer types compatible when they point to the same type, or only
     when they are the same named type (p. 4-207 says the latter for
     pointers to varying strings)?  *Current: same target type.*
-15. **"Lshft", p. 4-109 (printed 4-108/4-109).** The example uses
+15. **Answered 2026-10-16; see Clarifications, "Lshft of a 16-bit operand; the sign of a shift of an unsigned word".**  **"Lshft", p. 4-109 (printed 4-108/4-109).** The example uses
     `i : INTEGER16` and shows `LSHFT(i, 7)` giving "2#1110100000000000 =
     10#-6144", i.e. a 16-bit result.  Unlike "Rshft" (p. 4-171) and
     "Arshft" (p. 4-29), the entry does not say whether a 16-bit operand
