@@ -4058,6 +4058,34 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
             rhs: rhs.clone(),
             ty,
         }),
+        // A logical right shift of an unsigned word (or byte) widened with
+        // zeros (`rshft` of a `0..65535` value, [`builtin_value`]) stored
+        // as a word: the same low word as the word shifted, so shifted at
+        // the word's width: module-local 0xE07386 `move.w D0w,D4w; lsr.w
+        // #3,D4w` (`seg_group := rshft(seg_idx, 3)`, both `0..65535`);
+        // module-local 0xE085E8..0xE085F2 `move.w (-0xa6,A6),D3w; lsr.w
+        // #3,D3w; move.w (-0xa4,A6),D4w; lsr.w #3,D4w` (into `integer`s);
+        // VTOC_$GET_UID 0xE3922A and module-local 0xE3845A `lsr.w
+        // #2` (bead domain-pascal-4rfc).  Only that operand: a wider
+        // value's high bits would be shifted in.
+        Expr::Binary {
+            op: IrBinOp::Shr,
+            lhs,
+            rhs,
+            ..
+        } if matches!(&**lhs, Expr::Convert { value, ty: t, .. }
+            if value.ty().bytes() <= ty.bytes()
+                && value.ty().sign == Sign::Unsigned
+                && !value.ty().pointer
+                && t.width == Width::Long) =>
+        {
+            Some(Expr::Binary {
+                op: IrBinOp::Shr,
+                lhs: Box::new(narrow(lhs, ty)?),
+                rhs: rhs.clone(),
+                ty,
+            })
+        }
         Expr::Unary { op, operand, .. } => Some(Expr::Unary {
             op: *op,
             operand: Box::new(narrow(operand, ty)?),
@@ -5294,8 +5322,8 @@ fn reinterpret(v: Expr, ty: Scalar) -> Expr {
 /// widened with `ext.l` in 0xE00800..0xE88834 (review survey: what writes
 /// the register an `ext.l` extends is a `move.w` ×355, `andi.w` ×2,
 /// `asr.w`, `subq.w` before a `divs.w`, `divs.w`).  The bit operators,
-/// `div`, `mod` and the right shifts give the same value either way and
-/// stay as they are; a widened `lshft` is refused by the selector.
+/// `div`, `mod` and `arshft` give the same value either way and stay as
+/// they are; `lshft` and `rshft` are longwords already ([`builtin_value`]).
 fn convert(v: Expr, ty: Scalar) -> Expr {
     match v {
         _ if v.ty() == ty => v,
@@ -5364,6 +5392,28 @@ fn operand(p: &Program, x: &SExpr, ty: Scalar) -> Res<Expr> {
 
 /// `lhs op rhs` as a value.
 fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
+    if op == BinOp::BitAnd {
+        // `rshft(w, 8) & c` of a `0..65535` word: DISK_'s module-local
+        // 0xE6C55C reads the word's high byte, `moveq #7,D3; and.b
+        // (-0x22,A3),D3b` (`../source`'s `rshft(part_dev[part], 8) & 7`),
+        // while module-local 0xE1101E and 0xE11164 shift a loaded word,
+        // `move.w (d,A2),Dn; lsr.w #8,Dn; andi.w #0xf8,Dn` (operand types
+        // not known).  Which the original chose when is not settled (bead
+        // domain-pascal-4rfc; codegen-patterns 8, "Shifts of an unsigned
+        // word").
+        let by8 = |x: &SExpr| {
+            widened_unsigned_shift(p, x)
+                && matches!(&x.kind, ExprKind::Builtin { builtin: Builtin::Rshft, args }
+                    if args[1].value.as_ref().and_then(|v| v.ordinal()) == Some(8))
+        };
+        if (by8(lhs) && rhs.value.is_some()) || (by8(rhs) && lhs.value.is_some()) {
+            return Err(unsupported(
+                e.span,
+                "`rshft(w, 8) & c` of a `0..65535` word (its high byte read, 0xE6C55C, or the \
+                 word shifted, 0xE1101E: not settled) is",
+            ));
+        }
+    }
     let op = match op {
         BinOp::Add => IrBinOp::Add,
         BinOp::Sub => IrBinOp::Sub,
@@ -5411,6 +5461,10 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
     // and added in 32 bits, with `bls` (0xE177B4..0xE177B8), as ref 4.3.3
     // (p. 4-6) says the compiler does for `div` and `mod` with such
     // operands.  **Uncertain:** one site; `-` is left signed (no site).
+    // An `lshft`/`rshft` of an unsigned run-time value is one (its type,
+    // `dpc-sema`'s `shift_result`): module-local 0xE09412..0xE0942A `clr.l
+    // D2; clr.l D1; move.w D0w,D2w; move.w (A2),D1w; lsl.l #5,D1; add.l
+    // D1,D2; ...; cmp.l D1,D2; bls` (`page + lshft(bste, 5)`).
     let unsigned_operand = |x: &SExpr| match &x.value {
         Some(v) => v.ordinal().is_some_and(|n| n >= 0),
         None => sign_of(&p.types, x.ty) == Sign::Unsigned,
@@ -5490,85 +5544,154 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
     })
 }
 
+/// Whether `e` is an `lshft` or `rshft` of an unsigned word run-time value
+/// (a `0..65535` like subrange): shifted in 32 bits, the word widened with
+/// zeros, the result unsigned ([`builtin_value`]; bead
+/// domain-pascal-4rfc).
+fn widened_unsigned_shift(p: &Program, e: &SExpr) -> bool {
+    let ExprKind::Builtin {
+        builtin: Builtin::Lshft | Builtin::Rshft,
+        args,
+    } = &e.kind
+    else {
+        return false;
+    };
+    e.value.is_none()
+        && args.len() == 2
+        && args[0].value.is_none()
+        && p.types.is_integer(args[0].ty)
+        && p.types.is_integer(e.ty)
+        && p.types.size(args[0].ty) == 2
+        && p.types.size(e.ty) == 4
+        && sign_of(&p.types, args[0].ty) == Sign::Unsigned
+}
+
 /// A predeclared function's value.
 fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr> {
     let ty = scalar_of(p, e)?;
     match b {
-        Builtin::Lshft | Builtin::Rshft | Builtin::Arshft => {
-            // Ref pp. 4-29, 4-171: rshft and arshft of an operand smaller
-            // than 32 bits expand it to 32 bits first, shift, and convert
-            // the result back where it is stored; what the original emitted
-            // for a 16-bit signed operand (an `ext.l` and a 32-bit shift?)
-            // is not catalogued, so only operands of the result's width are
-            // taken (lshft keeps its operand's width, p. 4-109).
-            let mut x = value_of(p, &args[0])?;
-            let mut ty = ty;
-            // A one-byte integer (`[byte] 0..255`, ref 3.15.5) is widened
-            // to the word `dpc-sema` gives the result, by its own sign,
-            // and shifted there: TPAD_$DATA 0xE6936A..0xE69376 `clr.w D2;
-            // ...; move.b (13,A1),D2; ...; lsl.w #6,D2` (`../source`'s
-            // `lshft(sample.b1, 6)`).
-            if x.ty().width == Width::Byte && ty.width == Width::Word && !x.ty().pointer {
-                let wide = Scalar {
-                    width: Width::Word,
-                    ..x.ty()
-                };
-                x = convert(x, wide);
+        Builtin::Lshft | Builtin::Rshft => {
+            // Owner's ruling (reference-clarifications "Lshft of a 16-bit
+            // operand; the sign of a shift of an unsigned word"; "Rshft",
+            // p. 4-171): an operand smaller than 32 bits is expanded to 32
+            // bits by its own sign, shifted in 32 bits, and the integer32
+            // result narrowed only where it is stored into a smaller
+            // target ([`narrow`]); `dpc-sema` gives the result its type,
+            // unsigned for an unsigned run-time operand.  Image
+            // (codegen-patterns 8, "Shifts of a 16-bit operand"; bead
+            // domain-pascal-4rfc): a `0..65535` word widened with zeros,
+            // AS_$GET_ADDR 0xE58418 `clr.l D0; move.w (0x00e2445c).l,D0w;
+            // lsl.l #8,D0; lsl.l #7,D0; move.l D0,(4,A0)`, UID_$GEN
+            // 0xE1A04A `clr.l D2; move.w (-0x10,A6),D2w; lsr.l #8,D2;
+            // lsr.l #4,D2`, a count in a register at module-local
+            // 0xE3C1CE..0xE3C1EA `lsl.l D6,D5`, `lsr.l D7,D6`; an
+            // `integer` widened by its sign, PEB_'s module-local 0xE31DEA
+            // `move.w D0w,D1w; ext.l D1; lsr.l #7,D1` (`rshft(wcs_addr,
+            // 7)`), and `ext.l` then `lsl.l` 212 times in compiled code
+            // (with products by powers of two, which look the same).
+            let x = value_of(p, &args[0])?;
+            let xt = x.ty();
+            if xt.pointer || ty.pointer || ty.width != Width::Long {
+                return Err(unsupported(
+                    e.span,
+                    "this shift (internal: not a longword) is",
+                ));
             }
-            // An unsigned operand of the result's width (the `&` of
-            // unsigned values, [`binary`]) shifted left or logically right:
-            // the same bits whatever the sign (TPAD_$DATA 0xE691EE..0xE691F4
-            // `moveq #0x70,D0; and.b (11,A1),D0; lsr.w #4,D0`, `../source`'s
-            // `rshft(sample.flags & 16#70, 4)`); the shift is done at the
-            // operand's type and its value read back as the result's
-            // type, the `integer` the reference gives (pp. 4-109, 4-171:
-            // "returns an integer value"; `lshft(i, 7)` of an `integer16`
-            // is "10#-6144"), so that `lshft(b, 8) > 5` of a byte 200 is a
-            // signed comparison.  An `arshft` keeps the strict rule.
-            let result = ty;
-            if x.ty().width == ty.width
-                && x.ty().sign == Sign::Unsigned
-                && !x.ty().pointer
-                && !ty.pointer
-                && matches!(b, Builtin::Lshft | Builtin::Rshft)
-            {
-                ty = x.ty();
-            }
+            let op = if b == Builtin::Lshft {
+                IrBinOp::Shl
+            } else {
+                IrBinOp::Shr
+            };
+            let count = match &args[1].value {
+                Some(v) => const_of(v, Scalar::signed(Width::Word), args[1].span)?,
+                None => value_of(p, &args[1])?,
+            };
+            let long = Scalar {
+                width: Width::Long,
+                ..xt
+            };
+            let shifted = match xt.width {
+                Width::Long => Expr::Binary {
+                    op,
+                    lhs: Box::new(x),
+                    rhs: Box::new(count),
+                    ty: xt,
+                },
+                Width::Word => Expr::Binary {
+                    op,
+                    lhs: Box::new(convert(x, long)),
+                    rhs: Box::new(count),
+                    ty: long,
+                },
+                // A one-byte integer (`[byte] 0..255`, ref 3.15.5) shifted
+                // left by a constant of at most 8, whose result fits a
+                // word: shifted as a word, widened to it by its own sign,
+                // and the word widened again where the longword is used
+                // (RING_$GET_ID 0xE2FA5C..0xE2FA6C `clr.w D0; move.b
+                // (0x14,A1),D0; clr.l D1; lsl.w #8,D0; move.w D0,D1; add.l
+                // D1,D2`: a form the selector refuses, not implemented);
+                // stored as a word, TPAD_$DATA 0xE6936A..0xE69376 `clr.w D2; ...;
+                // move.b (13,A1),D2; ...; lsl.w #6,D2` stored as a word
+                // (`../source`'s `lshft(sample.b1, 6)`).  Other shifts of a
+                // byte are widened to a longword first, which a word
+                // target narrows back to the byte widened to a word and
+                // shifted there (as before the ruling); used as a longword
+                // the byte's widening to a longword is refused by the
+                // selector (`move.b; andi.l #0xff`, not catalogued).
+                Width::Byte
+                    if op == IrBinOp::Shl
+                        && matches!(&count, Expr::Const { value, .. } if (0..=8).contains(value)) =>
+                {
+                    let word = Scalar {
+                        width: Width::Word,
+                        ..xt
+                    };
+                    convert(
+                        Expr::Binary {
+                            op,
+                            lhs: Box::new(convert(x, word)),
+                            rhs: Box::new(count),
+                            ty: word,
+                        },
+                        long,
+                    )
+                }
+                Width::Byte => Expr::Binary {
+                    op,
+                    lhs: Box::new(convert(x, long)),
+                    rhs: Box::new(count),
+                    ty: long,
+                },
+            };
+            Ok(reinterpret(shifted, ty))
+        }
+        Builtin::Arshft => {
+            // Ref p. 4-29: arshft of an operand smaller than 32 bits
+            // expands it to 32 bits first, shifts, and converts the result
+            // back where it is stored; its value is that of the 16-bit
+            // `asr` widened by its sign, which `dpc` emits (`asr.w`, then
+            // `ext.l` where a longword is needed; `dpc-sema` keeps the
+            // operand's width for the result).  No `arshft` site is
+            // identified in the image.  An unsigned operand of another
+            // width or sign than the result is refused.
+            let x = value_of(p, &args[0])?;
             if x.ty() != ty {
                 return Err(unsupported(
                     e.span,
-                    "a shift of an operand of another width than its result is",
-                ));
-            }
-            let op = match b {
-                Builtin::Lshft => IrBinOp::Shl,
-                Builtin::Rshft => IrBinOp::Shr,
-                _ => IrBinOp::Ashr,
-            };
-            if op == IrBinOp::Shr && x.ty().width != Width::Long && x.ty().is_signed() {
-                // P. 4-171: "rshft expands num to a 32-bit integer, performs
-                // the shift, and converts it back", so rshft(-9, 3) is -2 in
-                // 16 bits, not what `lsr.w` gives; the original's code for it
-                // is not catalogued.
-                return Err(unsupported(
-                    e.span,
-                    "`rshft` of a signed operand smaller than 32 bits (expanded first, ref \
-                     p. 4-171) is",
+                    "an `arshft` of an operand of another width or sign than its result (an \
+                     unsigned `0..65535` word: no site seen) is",
                 ));
             }
             let count = match &args[1].value {
                 Some(v) => const_of(v, Scalar::signed(Width::Word), args[1].span)?,
                 None => value_of(p, &args[1])?,
             };
-            Ok(reinterpret(
-                Expr::Binary {
-                    op,
-                    lhs: Box::new(x),
-                    rhs: Box::new(count),
-                    ty,
-                },
-                result,
-            ))
+            Ok(Expr::Binary {
+                op: IrBinOp::Ashr,
+                lhs: Box::new(x),
+                rhs: Box::new(count),
+                ty,
+            })
         }
         Builtin::Xor => Ok(Expr::Binary {
             op: IrBinOp::Xor,
@@ -5906,24 +6029,15 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
         // `move.b (12,A1),D1`, 0xE6922E `ext.w D1`); their Pascal types
         // (`tpad_$byte_t`, `tpad_$signed_byte_t`) are `../source`'s
         // inference (`tpad/tpad.ins.pas`).
-        TypeKind::Subrange { base, lo, .. }
-            if types.size(ty) == 1
-                && matches!(types.kind(*base), TypeKind::Integer16 | TypeKind::Integer32) =>
-        {
-            if *lo >= 0 {
+        // Integer subranges: [`TypeTable::unsigned_integer`].
+        TypeKind::Subrange { .. } if types.is_integer(ty) => {
+            if types.unsigned_integer(ty) {
                 Sign::Unsigned
             } else {
                 Sign::Signed
             }
         }
-        TypeKind::Subrange { base, lo, .. } => {
-            let long_host = matches!(types.kind(*base), TypeKind::Integer32);
-            if long_host && (types.size(ty) < types.size(*base) || *lo >= 0) {
-                Sign::Unsigned
-            } else {
-                sign_of(types, *base)
-            }
-        }
+        TypeKind::Subrange { base, .. } => sign_of(types, *base),
         _ => Sign::Unsigned,
     }
 }
@@ -6870,7 +6984,25 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                             ),
                         )
                     })?;
-                    let value = value_of(p, &a.expr)?;
+                    let mut value = value_of(p, &a.expr)?;
+                    // A wider integer expression to an integer parameter
+                    // is narrowed as an assignment narrows it (owner's
+                    // ruling on question 41: integer16 is a subrange of
+                    // integer32, the low bytes kept) when it can be
+                    // computed at the parameter's width ([`narrow`]):
+                    // then it is the expression of that width the
+                    // temporary already takes (an `lshft` of a word, a
+                    // longword sum of words, bead domain-pascal-4rfc).
+                    if value.ty().width.bytes() > width.bytes()
+                        && p.types.is_integer(a.expr.ty)
+                        && p.types.is_integer(prm_ty)
+                        && !value.ty().pointer
+                    {
+                        let narrow_ty = Scalar::integer(width, sign_of(&p.types, prm_ty));
+                        if let Some(n) = narrow(&value, narrow_ty) {
+                            value = n;
+                        }
+                    }
                     // The temporary has the parameter's size.  An
                     // expression of another size (to a `univ` parameter:
                     // extended to its size, ref 5.3.3 p. 5-11; to a

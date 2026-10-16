@@ -1,7 +1,7 @@
 { Execution test: bit operators and functions (ref p. 4-33 `&', `!',
   `~'; 4-221 xor; 4-109 lshft, 4-171 rshft (logical), 4-29 arshft
   (arithmetic)) on words and longwords, negative operands included.
-  (dpc does not yet compile `rshft' of a signed word.)
+  (`rshft' of a signed word: tests/exec/shift_widen.pas.)
 
   call: BITS_$W w:-24 w:3
   call: BITS_$L l:-1048576 w:4

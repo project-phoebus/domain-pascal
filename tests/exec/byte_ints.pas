@@ -11,9 +11,10 @@
   their size).  BYTE_INTS_$EDGE takes the boundary values 0, 127, 128,
   255 and 0, 127, -128, -1 through negation, `div`, `mod`, `~`, `!`, a
   product, comparisons with constants (an unsigned byte against -1),
-  `lshft` read back as an `integer16` (pp. 4-109, 4-171: "returns an
-  integer value"; `lshft(i, 7)` "10#-6144"), so `lshft(200, 8) > 5` is
-  false, `rshft` by a variable count, a `case` on a byte, the bytes
+  `lshft` stored into an `integer16` (its low word; owner's ruling,
+  reference-clarifications "Lshft of a 16-bit operand"; a byte's `lshft`
+  used as a longword, e.g. compared, is refused: bead
+  domain-pascal-4rfc), `rshft` by a variable count, a `case` on a byte, the bytes
   stored at odd offsets.  Not expressible yet (refused by dpc): two byte operands
   compared with each other, a widened byte compared with 0 (`tst`).  A
   word variable assigned to a byte: tests/exec/narrow.pas.
@@ -67,7 +68,6 @@
     0
     0
     0
-    mark 8
     0
     0
     0
@@ -89,7 +89,6 @@
     127
     -127
     -127
-    mark 7
     32512
     42
     42
@@ -112,7 +111,6 @@
     -128
     -128
     128
-    mark 8
     -32768
     42
     -42
@@ -135,7 +133,6 @@
     -1
     -255
     1
-    mark 8
     -256
     85
     0
@@ -253,8 +250,6 @@ begin
   exec_$logv_w(w);
   w := -s;
   exec_$logv_w(w);
-  if lshft(u, 8) > 5 then exec_$mark(7);
-  if lshft(u, 8) <= 5 then exec_$mark(8);
   w := lshft(u, 8);
   exec_$logv_w(w);
   w := u div 3;

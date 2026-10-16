@@ -2520,14 +2520,14 @@ end;
 fn unsupported_operations() {
     let e = errs(
         "module m;
-var a: extern integer;
+var a: extern 0..65535;
 function f: integer; internal;
 begin
-  f := rshft(a, 2);
+  f := arshft(a, 2);
 end;
 ",
     );
-    assert!(e[0].contains("`rshft` of a signed operand"), "{e:?}");
+    assert!(e[0].contains("an `arshft` of an operand"), "{e:?}");
     let e = errs(
         "module m;
 var c: extern boolean; s: array[boolean] of integer;
@@ -5411,9 +5411,11 @@ end;
     let Expr::Binary { lhs, .. } = value else {
         panic!("{value:?}")
     };
-    // (Read back as the `integer` the reference gives, pp. 4-109, 4-171,
-    // a same-width `Convert`: `lshft(200, 8) > 5` is a signed comparison.)
-    assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
+    // (An unsigned integer32 narrowed back to the word for the word sum:
+    // the shift of an unsigned operand is unsigned, owner's ruling,
+    // reference-clarifications "Lshft of a 16-bit operand"; bead
+    // domain-pascal-4rfc.)
+    assert_eq!(lhs.ty(), Scalar::unsigned(Width::Word));
     let lhs = match &**lhs {
         Expr::Convert { value, .. } if value.ty().width == Width::Word => value,
         _ => lhs,
@@ -5437,16 +5439,25 @@ end;
         };
         assert_eq!(value.ty(), byte(Sign::Unsigned));
     }
-    // lshft(k.b1, 8) > 5: the shift read as an `integer` (pp. 4-109,
-    // 4-171, "returns an integer value"), a signed comparison: 200 shifted
-    // is 16#C800, negative.
+    // lshft(k.b1, 8) > 5: an unsigned integer32 (owner's ruling,
+    // reference-clarifications "Lshft of a 16-bit operand"; bead
+    // domain-pascal-4rfc): 200 shifted is 51200, compared unsigned, the
+    // byte shifted as a word and the word widened, which the selector
+    // refuses (RING_$GET_ID 0xE2FA66 widens it through a second register
+    // cleared early, not implemented).
     let StmtKind::If { cond, .. } = &body[4].kind else {
         panic!("{:?}", body[4].kind)
     };
     let Cond::Compare { lhs, .. } = cond else {
         panic!("{cond:?}")
     };
-    assert_eq!(lhs.ty(), Scalar::signed(Width::Word));
+    assert_eq!(lhs.ty(), Scalar::unsigned(Width::Long));
+    assert!(
+        matches!(lhs, Expr::Convert { value, .. }
+            if matches!(&**value, Expr::Binary { op: BinOp::Shl, ty, .. }
+                if *ty == Scalar::unsigned(Width::Word))),
+        "{lhs:?}"
+    );
 }
 
 /// Bead domain-pascal-mbtx: `addr` of an `in` parameter is lowered like

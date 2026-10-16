@@ -1265,6 +1265,33 @@ impl TypeTable {
         )
     }
 
+    /// Whether the integer type `id` holds unsigned values (the integer
+    /// cases of `dpc-ir`'s `sign_of`, which uses this): a one-byte
+    /// subrange with no negative value (`[byte] 0..255`, ref 3.15.5
+    /// p. 3-62); a subrange of `integer32` stored in fewer bytes
+    /// (`0..65535`) or with no negative value (`0..2147483647`); a
+    /// subrange of such a subrange.  `integer16`, `integer32` and their
+    /// other subranges are signed.
+    pub fn unsigned_integer(&self, id: TypeId) -> bool {
+        match self.kind(id) {
+            TypeKind::Subrange { base, lo, .. }
+                if self.size(id) == 1
+                    && matches!(self.kind(*base), TypeKind::Integer16 | TypeKind::Integer32) =>
+            {
+                *lo >= 0
+            }
+            TypeKind::Subrange { base, lo, .. } => {
+                let long_host = matches!(self.kind(*base), TypeKind::Integer32);
+                if long_host && (self.size(id) < self.size(*base) || *lo >= 0) {
+                    true
+                } else {
+                    self.unsigned_integer(*base)
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_boolean(&self, id: TypeId) -> bool {
         matches!(
             self.ordinal_base(id).map(|b| self.kind(b)),

@@ -174,6 +174,10 @@ pub(crate) struct Checker<'t> {
     /// `goto` statements: the target's declaring routine and name, and
     /// the statement's position (checked against `label_defs` at the end).
     label_gotos: Vec<(Option<RoutineId>, String, Span)>,
+    /// The type of an unsigned integer32 run-time value, the result of a
+    /// shift of an unsigned operand ([`Checker::shift_result`]): an
+    /// `integer32` subrange `0..2147483647`, made when first needed.
+    unsigned32: Option<TypeId>,
 }
 
 fn upper(name: &str) -> String {
@@ -208,6 +212,7 @@ impl<'t> Checker<'t> {
             is_module: false,
             label_defs: HashMap::new(),
             label_gotos: Vec::new(),
+            unsigned32: None,
         };
         c.predeclare();
         c
@@ -3556,6 +3561,37 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// The type of `lshft(x, n)` and `rshft(x, n)` (owner's ruling,
+    /// reference-clarifications "Lshft of a 16-bit operand; the sign of a
+    /// shift of an unsigned word"; "Rshft", p. 4-171): an operand smaller
+    /// than 32 bits is expanded to 32 bits by its sign (a `0..65535` or
+    /// `[byte] 0..255` value with zeros) and shifted, the result an
+    /// integer32, narrowed only where it is stored into a smaller
+    /// target; the shift of an unsigned run-time value is unsigned (ref
+    /// 4.3.3, pp. 4-6..4-7: compares, `div` and `mod` in their unsigned
+    /// forms), the type an `integer32` subrange `0..2147483647` as for
+    /// any unsigned longword (bead domain-pascal-4rfc).  `arshft` keeps
+    /// its operand's width ([`Checker::int_result`]): p. 4-29's
+    /// expansion gives the same value as the 16-bit shift widened.
+    fn shift_result(&mut self, x: &Expr) -> TypeId {
+        let bi = self.types.builtins;
+        if x.value.is_some() || !self.types.unsigned_integer(x.ty) {
+            return bi.integer32;
+        }
+        match self.unsigned32 {
+            Some(t) => t,
+            None => {
+                let t = self.new_type(TypeKind::Subrange {
+                    base: bi.integer32,
+                    lo: 0,
+                    hi: 0x7fff_ffff,
+                });
+                self.unsigned32 = Some(t);
+                t
+            }
+        }
+    }
+
     /// The wider of two integer types (ref 4.3.1 p. 4-5: 16-bit operands
     /// are expanded to 32 bits when necessary).
     fn int_result(&self, a: TypeId, b: TypeId) -> TypeId {
@@ -4316,13 +4352,12 @@ impl<'t> Checker<'t> {
                         return self.int_const(v, span);
                     }
                 }
-                // Shifts: the result has the width of the shifted operand
-                // (p. 4-109 example shifts an integer16 within 16 bits).
-                // xor: the wider operand (Uncertain).
-                if b == Builtin::Xor {
-                    self.int_result(xs[0].ty, xs[1].ty)
-                } else {
-                    self.int_result(xs[0].ty, bi.integer16)
+                // xor: the wider operand (Uncertain).  Shifts:
+                // [`Checker::shift_result`].
+                match b {
+                    Builtin::Xor => self.int_result(xs[0].ty, xs[1].ty),
+                    Builtin::Arshft => self.int_result(xs[0].ty, bi.integer16),
+                    _ => self.shift_result(&xs[0]),
                 }
             }
             // Appendix E, p. E-5: "oldsr := set_sr(newsr); {set_sr is a

@@ -572,6 +572,17 @@ Tests:
   into a word (DBUF_$INIT 0xE3ABE8), a word plus a longword (MAC_OS_$SEND
   0xE0B650), words and bytes widened for value parameters (APP_$RECEIVE
   0xE008E6, SOCK_$CLOSE 0xE16008).
+- `expr/shift_widen` - codegen-patterns 8 ("Shifts of a 16-bit
+  operand"; bead domain-pascal-4rfc): `lshft`/`rshft` of a `0..65535`
+  word into a longword, widened with zeros and shifted in 32 bits
+  (AS_$GET_ADDR 0xE58418, UID_$GEN 0xE1A04A; a count in a word variable,
+  module-local 0xE3C1CE..0xE3C1EA), into a word at the word's width
+  (module-local 0xE07386, 0xE3CB9E), compared unsigned (AREA_$REMOVE_SEG
+  0xE0998E, MST_$INVALIDATE 0xE44222), added to another word unsigned
+  (module-local 0xE09412..0xE0942A), divided unsigned (M$DIU$LLL,
+  M$OIU$LLL, `lsr.l`); of an `integer`, `ext.l` then the 32-bit shift
+  (PEB_'s module-local 0xE31DEA), `lshft` stored at the word's width;
+  `arshft` of an `integer` unchanged (`asr.w; ext.l`).
 - `expr/narrow_store` - codegen-patterns 8 ("Narrowing in an
   assignment"; bead domain-pascal-d59a): an element's, a `with` record's,
   a pointer's target's and a packed field's low bytes read in place (MMAP

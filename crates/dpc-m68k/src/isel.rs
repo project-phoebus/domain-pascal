@@ -14323,6 +14323,21 @@ impl Selector {
         match count {
             Expr::Const { value, .. } => {
                 let bits = (ty.bytes() * 8) as i64;
+                if bits < 32 && (bits..32).contains(value) {
+                    // `dpc-ir` narrows a 32-bit `lshft` (or `rshft` of an
+                    // unsigned word) stored into a 16-bit or 8-bit target
+                    // to that width (owner's ruling, reference-
+                    // clarifications "Lshft of a 16-bit operand"); by
+                    // this count the target's bits are all 0 (all sign
+                    // bits for `arshft`), a form no site shows.
+                    return Err(unsupported(
+                        self.span,
+                        format!(
+                            "a shift by {value} at {bits} bits, into a {bits}-bit target (a count \
+                             of {bits} or more leaves only zeros or sign bits; no site seen) is"
+                        ),
+                    ));
+                }
                 if !(0..bits).contains(value) {
                     return Err(unsupported(
                         self.span,
@@ -14679,14 +14694,22 @@ impl Selector {
             v => v,
         };
         if let Expr::Binary { op: BinOp::Shl, .. } = shifted {
-            // A word `lshft` used as a longword: shifted at the word's
-            // width and extended, or extended and shifted in 32 bits (ref
-            // 4.3.1, p. 4-5, and the expansion pp. 4-29 and 4-171 describe
-            // for `arshft` and `rshft`; p. 4-109 says nothing for `lshft`)?
-            // Not settled; the two differ when bits reach the sign.
+            // A word left shift used as a longword.  `dpc-ir` shifts a
+            // 16-bit `lshft` operand in 32 bits (owner's ruling,
+            // reference-clarifications "Lshft of a 16-bit operand"); the
+            // word shift it forms for a one-byte integer shifted by at most
+            // 8 is widened in the image by a second register cleared early
+            // and a copy (RING_$GET_ID 0xE2FA66..0xE2FA6C `clr.l D1; lsl.w
+            // #8,D0; move.w D0,D1; add.l D1,D2`; DIR_'s module-local
+            // 0xE4B36C, 0xE4B398, 0xE4B42E, the sum's other operand in
+            // memory), a form seen only for a sum and not implemented; no
+            // site widens such a word in place (`andi.l #0xffff` widens a
+            // stored word variable, 0xE3CBA2..0xE3CBA6).
             return Err(unsupported(
                 self.span,
-                "an `lshft` of a word operand used as a longword is",
+                "a word left shift used as a longword (a `[byte]` integer's `lshft`: widened \
+                 through a second register cleared early, RING_$GET_ID 0xE2FA66, DIR_ \
+                 0xE4B36C; not implemented) is",
             ));
         }
         let widening = matches!(

@@ -177,9 +177,14 @@ fn unsupported_expressions() {
         ));
         assert!(e.contains(want), "{stmt}: {e}");
     }
-    // rshft of a signed word (ref p. 4-171).
-    let e = error("function t: integer; internal;\nbegin\n  t := rshft(w, 2);\nend;\n");
-    assert!(e.contains("`rshft` of a signed operand"), "{e}");
+    // rshft of a signed word (ref p. 4-171; owner's ruling,
+    // reference-clarifications "Lshft of a 16-bit operand"): expanded by
+    // its sign and shifted in 32 bits, the low word the result (PEB_'s
+    // module-local 0xE31DEA `ext.l D1; lsr.l #7,D1`).
+    assert_eq!(
+        body("function t: integer; internal;\nbegin\n  t := rshft(w, 2);\nend;\n"),
+        ["move.w\t(W).l,%d0", "ext.l\t%d0", "lsr.l\t#2,%d0"]
+    );
     // `in' on a one-word set variable with a variable element (guarded
     // or not, codegen-patterns 5.1: not settled).
     let e = error("function t: boolean; internal;\nbegin\n  t := w in ss;\nend;\n");
@@ -645,11 +650,40 @@ fn word_arithmetic_widened_is_done_in_32_bits() {
             "move.l\t%d0,(L).l",
         ]
     );
-    // A word `lshft' used as a longword: not settled (p. 4-109).
-    let e = error("procedure t; internal;\nbegin\n  l := lshft(w, 8);\nend;\n");
-    assert!(
-        e.contains("`lshft` of a word operand used as a longword"),
-        "{e}"
+    // A 32-bit `lshft' (or `rshft' of an unsigned word) stored into a word
+    // by 16 or more: narrowed to the word, where only zeros remain (no
+    // site; bead domain-pascal-4rfc).
+    for stmt in [
+        "w := lshft(w, 16);",
+        "w := lshft(w, 17);",
+        "u := rshft(u, 16);",
+    ] {
+        let e = error(&format!("procedure t; internal;\nbegin\n  {stmt}\nend;\n"));
+        assert!(e.contains("into a 16-bit target"), "{stmt}: {e}");
+    }
+    // ... while an `integer`'s `rshft` by 16 is done in 32 bits, its low
+    // word stored (ref p. 4-171).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  w := rshft(w, 16);\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "lsr.l\t#8,%d0",
+            "lsr.l\t#8,%d0",
+            "move.w\t%d0,(W).l",
+        ]
+    );
+    // A word `lshft' used as a longword: expanded by its sign and shifted
+    // in 32 bits (owner's ruling, reference-clarifications "Lshft of a
+    // 16-bit operand"; `ext.l; lsl.l` in compiled code).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  l := lshft(w, 8);\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "ext.l\t%d0",
+            "lsl.l\t#8,%d0",
+            "move.l\t%d0,(L).l",
+        ]
     );
     // `arshft' gives the same value either way: kept.
     assert_eq!(

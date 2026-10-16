@@ -7825,10 +7825,103 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   the value in a register; a constant count above 8 is split into shifts
   of 8 and the rest (×1024 0xE02AA6 `lsl.l #8,D0; lsl.l #2,D0`, 96 sites;
   ×32768 0xE00876 `lsl.l #8; lsl.l #7`); a count in a register: `lsl.w
-  D1,D3` (0xE02D52).  Ref p. 4-171: `rshft` of an operand smaller than 32
-  bits expands it to 32 bits first (`rshft(-9, 3)` is -2 in 16 bits); its
-  code for a signed 16-bit operand is not catalogued and `dpc` rejects
-  it.  `arshft` gives the same low word either way (`asr.w`).
+  D1,D3` (0xE02D52).  Shifts of a 16-bit operand: the next entry.
+  `arshft` gives the same low word either way (`asr.w`).
+- **Shifts of a 16-bit operand (owner's ruling, reference-clarifications
+  "Lshft of a 16-bit operand; the sign of a shift of an unsigned word";
+  "Rshft", p. 4-171; ref 4.3.3; Verified; bead domain-pascal-4rfc):**
+  `lshft`/`rshft` expand an operand smaller than 32 bits to 32 bits by
+  its sign (a `0..65535` word, "a subrange of base type integer" stored
+  in 16 bits, 5.3.4.1 p. 5-13, with zeros), shift in 32 bits, and give
+  an integer32, narrowed only where it is stored into a smaller target;
+  the shift of an unsigned run-time value is unsigned (compares, `div`,
+  `mod`).  Image:
+  - A `0..65535` word used as a longword: widened with zeros (`clr.l
+    Dn; move.w x,Dn`, or `andi.l #0xffff` on a held word), then shifted
+    in 32 bits, constant counts split at 8, a count in a register as is.
+    Sites (`../source`'s Pascal at 40960127 names the shifts):
+    AS_$GET_ADDR 0xE58418, 0xE5842A, 0xE58442, 0xE5845A, 0xE58468
+    (`lsl.l #8; lsl.l #7`, `lshft(mst_$.., 15)`); AREA_$INVALIDATE
+    0xE08EBA, 0xE08F86; module-local 0xE093F0, 0xE09412, 0xE09436;
+    AREA_$TOUCH 0xE095DE; AREA_$REMOVE_SEG 0xE0998E; PMAP_$WRITE_PAGE
+    0xE12F1C; module-local 0xE13334; UID_$GEN 0xE1A04A (`lsr.l #8;
+    lsr.l #4`, `rshft(abs_clock.low, 12)`); module-local
+    0xE3C1CE..0xE3C1EA (`lsl.l D6,D5`, `lsr.l D7,D6`: counts in
+    `0..65535` words); MST_$INVALIDATE 0xE44222; REM_FILE_$GET_SEG_MAP
+    0xE62070.
+  - Stored as a word: the shift at the word's width (`lshft`; `rshft`
+    of an unsigned word): module-local 0xE07386 `lsr.w #3` (`seg_group
+    := rshft(seg_idx, 3)`), 0xE085E8..0xE085F2 (two `lsr.w #3`, into
+    `integer`s), VTOC_$GET_UID 0xE3922A and module-local 0xE3845A
+    (`lsr.w #2`), module-local 0xE3CB9E `lsl.w D6,D1w` (`sectors :=
+    lshft(rem, sector_size_code)`).  The `rshft` of an `integer` is
+    computed in 32 bits and its low word stored (p. 4-171: `rshft(-9,
+    3)` is -2).
+  - An `integer` used as a longword: `ext.l`, then the 32-bit shift:
+    PEB_'s module-local 0xE31DEA `move.w D0w,D1w; ext.l D1; lsr.l #7,D1`
+    (`rshft(wcs_addr, 7)`, also 0xE31E68); PROC2_'s module-local
+    0xE3FCAA `move.w (-80,A0),D1; ext.l D1; lsl.l #8,D1; ori.b #0x7f,D1`
+    and 0xE3FD8C (`../source`'s proc2/wait_try_live_child.c:43, `pad_94
+    << 8 | 0x7f`).  `lsl.l` after `ext.l` occurs 212 times in compiled
+    code, but mostly as array-index scaling (131 used directly as `.l`
+    indices, more through a copy), which looks the same as a shift.
+  - Unsigned: compared with an unsigned longword the branches are
+    unsigned (0xE09996 `bhi`, 0xE4422E `bls`, 0xE6207C `bhi`), and so is
+    its sum with another `0..65535` word (0xE09412..0xE0942A `add.l;
+    cmp.l; bls`, `page + lshft(bste, 5)`); no signed branch after such a
+    shift was found.  `div` and `mod` take the unsigned forms of any
+    unsigned longword (`M$DIU$LLL`, `M$OIU$LLL`, `lsr.l` for a power of
+    two; "Which form", below; no image site of a shift divided).
+  - A `[byte] 0..255` shifted left by a constant of at most 8 and used
+    as a longword: shifted as a word, then widened through a second
+    register cleared early and a copy (RING_$GET_ID 0xE2FA66..0xE2FA6C
+    `clr.l D1; lsl.w #8,D0; move.w D0,D1; add.l D1,D2`; DIR_'s
+    module-local 0xE4B36C, 0xE4B398, 0xE4B42E, `(x & 31)` times 1024,
+    the sum's other operand in memory).  Seen only for a sum, and no
+    site widens such a word in place (`andi.l #0xffff` widens a stored
+    word variable, 0xE3CBA2..0xE3CBA6): **refused** (the selector
+    refuses any word left shift used as a longword).  Stored as a word,
+    the byte's shift is a word shift (TPAD_$DATA 0xE69376 `lsl.w #6`).
+    Other shifts of a byte used as a longword need the byte widened to a
+    longword (`move.b; andi.l #0xff`): refused, as before.
+  - A count of 16 or more into a 16-bit target (`w := lshft(w, 16)`,
+    `v := rshft(v, 16)` of a `0..65535`): the narrowed word shift leaves
+    only zeros; no site: refused with its own message.  An `integer`'s
+    `rshft` by 16 is computed in 32 bits and its low word stored.
+  - Passed to a 16-bit value parameter by address (a frame temporary,
+    section 1.5): narrowed as stored (owner's ruling on question 41),
+    when the expression can be computed at the word's width.
+  - Survey (compiled code, 0xE00800..0xE88834, the last shift of a
+    split; scratch script on the forms of `tools/arithsurvey.py`): a
+    32-bit shift whose register was formed from a word is `lsl.l` after
+    `clr.l; move.w` ×238 or `andi.l #0xffff` ×14 (118 of them scaled
+    `.l` indices), `lsr.l` after `clr.l; move.w` ×5, `lsl.l` after
+    `ext.l` ×212, `lsr.l` after `ext.l` ×2 (0xE31DEE, 0xE31E68), `asr.l`
+    after `ext.l` ×3 (0xE07908, 0xE087D6, 0xE08AF8: steps of a signed
+    division by a power of two, not `arshft`).  Word shifts whose value
+    is widened afterwards: 9, none of a full 16-bit value used as a
+    longword: a word variable's value widened later (0xE07388, 0xE3CBA2,
+    0xE3CBEA), an index (0xE31E1C, 0xE31E96, `x & 127`), and operands
+    the compiler knew to be narrower, shifted at the word's width and
+    then zero-extended (RING_$GET_ID 0xE2FA68, a byte; DIR_'s
+    module-local 0xE4B36C, 0xE4B398, 0xE4B42E, `(x & 31)` times 1024:
+    **not implemented**, `dpc` computes `x & 31` of a `0..65535` as an
+    integer32).
+  - `dpc`: `dpc-sema`'s `shift_result` types the result (an integer32,
+    or the `0..2147483647` subrange for an unsigned run-time operand,
+    the type of any unsigned longword, so `lshft(w, 5) > -1` is refused
+    in lowering as `u > -1` is); `lower.rs` `builtin_value` widens and
+    shifts, `narrow` does the word-width store.  **Not implemented:**
+    `arshft` keeps its operand's width (`asr.w`, then `ext.l` for a
+    longword: the same value as p. 4-29's expansion; no image site, the
+    `asr.l` after `ext.l` above being divisions); `arshft` of a
+    `0..65535` word is refused (no site).  `rshft(w, 8) & c` of a
+    `0..65535` word is refused: DISK_'s module-local 0xE6C55C reads its
+    high byte (`moveq #7,D3; and.b (-0x22,A3),D3b`,
+    `rshft(part_dev[part], 8) & 7`), module-local 0xE1101E and 0xE11164
+    shift a loaded word (`lsr.w #8; andi.w #0xf8`, operand types not
+    known): not settled.  Golden `expr/shift_widen`; exec tests
+    `shift_widen`, `byte_ints`.
 - **Multiplication by a constant (ref p. 6-28; Verified):** with c = 2^s
   × m, m odd:
 
@@ -8110,14 +8203,13 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   `add`/`sub`/`mul`; `ext.l` followed by a 32-bit `lsl.l`, `add.l`,
   `addq.l` or `addi.l` and a `move.l` store ×79.  **Implemented**
   (`lower.rs`, `convert`: the widening is pushed into the operands of
-  `+`, `-`, `*` and unary `-`; the bit operators, `div`, `mod`, `rshft`
-  and `arshft` give the same value either way and are widened after).  A
-  word `lshft` used as a longword is rejected (p. 4-109 does not say
-  whether it is expanded first, as pp. 4-29 and 4-171 say of `arshft` and
-  `rshft`).  A word product whose constant is not done with shifts, or of
-  two words, is one `muls.w`/`mulu.w` instead (32-bit product, see the
-  rule for `*` below).  Compares are
-  unchanged: a word sum is compared at the word's width (review survey:
+  `+`, `-`, `*` and unary `-`; the bit operators, `div`, `mod` and
+  `arshft` give the same value either way and are widened after).
+  `lshft` and `rshft` of a 16-bit operand are 32-bit shifts (owner's
+  ruling; "Shifts of a 16-bit operand", above).  A word product whose
+  constant is not done with shifts, or of two words, is one
+  `muls.w`/`mulu.w` instead (32-bit product, see the rule for `*`
+  below).  Compares are unchanged: a word sum is compared at the word's width (review survey:
   `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41 against `move.w; ext.l;
   add.l/sub.l; cmp.l/cmpi.l` ×7, e.g. 0xE0F9D0..0xE0F9D8; the rule
   between them is not known; bead domain-pascal-9js).  TPAD_$DATA has
