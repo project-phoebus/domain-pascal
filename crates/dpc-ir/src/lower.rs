@@ -2844,6 +2844,19 @@ impl Cx<'_> {
                              part it never runs is not seen, codegen-patterns 7.1) is",
                         ));
                     }
+                    if let (None, Some(SStmtKind::Assign { target, value })) =
+                        (else_branch, sole_stmt(then_branch).map(|t| &t.kind))
+                    {
+                        if narrowing_select(p, cond, target, value) {
+                            return Err(unsupported(
+                                s.span,
+                                "a select `if a < b then a := b` that narrows `b` into `a` (the \
+                                 compare and the store at the wider width in `a`'s register, \
+                                 XNS_ERROR_$SEND 0xE17A04 `move.l (A3),D5`; codegen-patterns 8, \
+                                 bead domain-pascal-dzad) is",
+                            ));
+                        }
+                    }
                     let then_ = self.seq(std::slice::from_ref(then_branch))?;
                     if then_.is_empty() {
                         // What the original emitted for an empty `then`
@@ -3278,6 +3291,7 @@ impl Cx<'_> {
                 selector = Expr::Convert {
                     value: Box::new(selector),
                     ty: Scalar::unsigned(Width::Word),
+                    in_place: false,
                 }
             }
             (Width::Byte, Sign::Signed) => {
@@ -3935,14 +3949,22 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         let v = value_of(p, value)?;
         if v.ty().width != ty.width {
             // Widened or narrowed as an integer (ref 4.3.1, p. 4-5;
-            // [`assign_convert`]).
+            // [`assign_convert`]); the further narrowings of an assignment
+            // ([`store_narrow`]).
             let (vb, tb) = (v.ty().bytes(), ty.bytes());
-            assign_convert(p, value, v, ty).ok_or_else(|| {
-                unsupported(
-                    value.span,
-                    format!("assigning a {vb}-byte value to a {tb}-byte object is"),
-                )
-            })?
+            match assign_convert(p, value, v.clone(), ty) {
+                Some(c) => c,
+                None => match store_narrow(p, value, v, ty) {
+                    Some(Ok(c)) => c,
+                    Some(Err(why)) => return Err(unsupported(value.span, why)),
+                    None => {
+                        return Err(unsupported(
+                            value.span,
+                            format!("assigning a {vb}-byte value to a {tb}-byte object is"),
+                        ))
+                    }
+                },
+            }
         } else {
             v
         }
@@ -3978,7 +4000,7 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         }
         // A value read with another sign ([`reinterpret`], as a shift's
         // result): the same bits.
-        Expr::Convert { value, ty: t } if value.ty().width == t.width => narrow(value, ty),
+        Expr::Convert { value, ty: t, .. } if value.ty().width == t.width => narrow(value, ty),
         Expr::Convert { value, .. } if value.ty().width == ty.width => Some(convert(
             (**value).clone(),
             Scalar {
@@ -3988,7 +4010,7 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         )),
         // A byte widened to a longword, used as a word: the byte widened
         // to a word (the same low word).
-        Expr::Convert { value, ty: t }
+        Expr::Convert { value, ty: t, .. }
             if value.ty().bytes() < ty.bytes() && ty.bytes() < t.bytes() =>
         {
             Some(convert((**value).clone(), ty))
@@ -4037,6 +4059,7 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         } if ty.width == Width::Word => Some(Expr::Convert {
             value: Box::new(e.clone()),
             ty,
+            in_place: false,
         }),
         _ => None,
     }
@@ -4068,16 +4091,17 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
 ///     0xE15ECE `move.b D4,(0x1b,A2)`, a word held in D4).  An array
 ///     element, a pointer's target or a `with` record (AST_$TOUCH 0xE0350E
 ///     and AST_$TOUCH_AREA 0xE039FC load an element's longword through a
-///     pointer, `move.l (An),Dn; move.w Dn,-(SP)`: which source form is
-///     not known) and a volatile object (ref 3.15.1-3.15.3: an access of
-///     another size) are refused;
+///     pointer, `move.l (An),Dn; move.w Dn,-(SP)`, both pushed) and a
+///     volatile object (ref 3.15.1-3.15.3: an access of another size) are
+///     refused here; an assignment's are [`store_narrow`]'s;
 ///   - a computed value (a right shift, a sum with a longword operand):
 ///     computed at its own width, the low bytes used, a [`Expr::Convert`]
 ///     (DBUF_$GET_BLOCK 0xE3A5F2 `move.l D3,D1; lsr.l #5,D1; move.w
 ///     D1,-(SP)`; DBUF_$INIT 0xE3ABE8..0xE3ABF4 `lsr.l #8; lsr.l #2;
 ///     lsl.l #4; move.w D0,(0x91a,A5)`; MAC_OS_$SEND 0xE0B650..0xE0B658
 ///     `move.w (-62,A6),D0; ext.l D0; add.l (A1),D0; move.w
-///     D0,(-62,A6)`).  A call in it is refused (no site catalogued).
+///     D0,(-62,A6)`).  A call in it is refused (no site catalogued; a
+///     call alone, in an assignment, is [`store_narrow`]'s).
 fn assign_convert(p: &Program, e: &SExpr, v: Expr, ty: Scalar) -> Option<Expr> {
     let (from, to) = (v.ty().bytes(), ty.bytes());
     if from == to {
@@ -4107,7 +4131,171 @@ fn assign_convert(p: &Program, e: &SExpr, v: Expr, ty: Scalar) -> Option<Expr> {
     ok.then(|| Expr::Convert {
         value: Box::new(v),
         ty,
+        in_place: false,
     })
+}
+
+/// The narrowings of an assignment `d := e` beyond [`assign_convert`]'s
+/// (bead domain-pascal-d59a; codegen-patterns 8, "Narrowing and
+/// widening"), for a store only: `Some(Ok(v))` the value to store,
+/// `Some(Err(why))` a refusal naming the class, `None` when the value is
+/// none of these (the caller's general refusal).
+///
+/// - An element (a constant or a run-time index), a pointer's target, a
+///   `with` record, a packed record's whole field (or a field of these),
+///   one step narrower (a longword into a word, a word into a byte): its
+///   low bytes read in place, as a variable's.  4 to 2: MMAP's
+///   module-local 0xE0C5AE at 0xE0C602 `move.w (0x6,A0),(-0x1ffa,A2)`
+///   (`vpn_array[2]`, an `in` parameter's element), 0xE0C636 and 0xE0C640
+///   `move.w (0x2,A1),..`, `move.w (-0x6,A1),..` (elements through the
+///   loop's stepped pointer), 0xE0C664 `move.w (-0x6,A0,D0.w),..` (a
+///   run-time index); NETBUF_$ADD_PAGES 0xE0EAA8 `move.w (-0x20e,A2),..`
+///   (a frame array's element); BAT_$ALLOC_FM 0xE3AD9C `move.w
+///   (-0x206,A0),D4` (into a local held in D4); MMAP_$FREE_PAGES 0xE0CFCC
+///   `move.w (0xe,A0),(-0x1ffa,A2)` (a `with` record's longword).  2 to
+///   1: RINGLOG_$LOGIT 0xE1A3A0, 0xE1A3A6, 0xE1A3E6 `move.b
+///   (0x39,A3),(0x3,A2)` (fields of an `in` record, the first two of a
+///   packed one) and 0xE1A3F4 `move.b (0x1f,A3,D1.w),(0x3,A2)` (an
+///   element at a run-time index); RING's module-local 0xE76048 at
+///   0xE760F4 `move.b (0x33,A3),(0x4,A0)` (a pointer's target).  A
+///   [`Expr::Convert`] of the load marked `in_place` (bead
+///   domain-pascal-dkik): the target reads the low-order bytes where
+///   they are (`chr` reads a computed-index element and a longword
+///   whole).  **Against** (unexplained, one site): AST_$TOUCH_AREA
+///   0xE03974 `move.l (-0x4,A4),D0; move.w D0,(0x2,A2)`.
+/// - A function's result one step narrower: its result register at the
+///   narrow width.  2 to 1: RIP_$TABLE_D 0xE68F24 `move.b D0,(0xe,A4)`
+///   and RIP_$TABLE 0xE68FEC `move.b D0,(0xc,A4)` after
+///   ROUTE_$FIND_PORT; RING_$SENDP 0xE75A12 `move.b D0,(0xd,A0)` after
+///   HDR_CHKSUM.  4 to 2: NETWORK 0xE0F526, 0xE115BC, 0xE1194E
+///   `move.w D0,(0x344,A5)` after MMAP_$REMOTE_POOL (0xE59110 `move.l
+///   (0x8,A6),D0`, a longword result).
+/// - A longword value parameter's frame slot (a field of one) into a
+///   byte: its low byte in place, DISK_IO 0xE3D630 `move.b
+///   (0x13,A6),(0x6,A3)` (a longword by value at 0x10), marked `in_place`
+///   as above (one site; the other nine frame slots read as a longword at
+///   d and a byte at d+3 are packed fields: VTOC_$ALLOCATE 0xE38C72,
+///   VTOCE_$READ 0xE39654, FM_$READ 0xE3A33E, SMD_$BLT 0xE6ED52).
+///
+/// Refused: a volatile object (an access of another size, ref
+/// 3.15.1-3.15.3); a longword element, pointer's target, parameter
+/// passed by address, local, unit or enclosing routine's variable or
+/// function result into a byte (not catalogued).
+fn store_narrow(p: &Program, e: &SExpr, v: Expr, ty: Scalar) -> Option<Result<Expr, String>> {
+    let (from, to) = (v.ty().bytes(), ty.bytes());
+    if from <= to || !p.types.is_integer(e.ty) {
+        return None;
+    }
+    let narrowed = |v: Expr, in_place: bool| Expr::Convert {
+        value: Box::new(v),
+        ty,
+        in_place,
+    };
+    match &v {
+        Expr::Load {
+            addr: Addr::Volatile { .. },
+            ..
+        } => Some(Err(format!(
+            "narrowing a volatile or device object ({from} bytes into {to}: an access of \
+             another size, ref 3.15.1-3.15.3) is"
+        ))),
+        Expr::Load { .. } if from == 2 * to => Some(Ok(narrowed(v, true))),
+        Expr::Load { addr, .. } if from == 4 && to == 1 => {
+            if !plain_designator(e) || matches!(addr, Addr::Index { .. }) {
+                Some(Err(
+                    "narrowing a longword element, pointer's target or `with` record to a byte \
+                     (not catalogued; a variable's is DISK_IO 0xE3D630, codegen-patterns 8) is"
+                        .to_string(),
+                ))
+            } else if matches!(addr, Addr::Indirect { .. }) {
+                Some(Err(
+                    "narrowing a longword parameter passed by address (or a field of one) to a \
+                     byte (not catalogued; a value parameter's slot is DISK_IO 0xE3D630, \
+                     codegen-patterns 8) is"
+                        .to_string(),
+                ))
+            } else if !matches!(addr, Addr::Frame(o) if *o > 0) {
+                Some(Err(
+                    "narrowing a longword local, unit or enclosing routine's variable to a byte \
+                     (not catalogued; the one site is a value parameter's slot, DISK_IO \
+                     0xE3D630, codegen-patterns 8) is"
+                        .to_string(),
+                ))
+            } else {
+                Some(Ok(narrowed(v, true)))
+            }
+        }
+        Expr::Call { .. } if from == 2 * to => Some(Ok(narrowed(v, false))),
+        Expr::Call { .. } => Some(Err(
+            "narrowing a longword function result to a byte (not catalogued, codegen-patterns \
+             8) is"
+                .to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `if cond then target := value` (no `else`) is a select of the
+/// shape `if a < b then a := b` whose assignment narrows `value` by
+/// [`store_narrow`]: `cond` compares `target` with `value` (either way
+/// round, widened).  The image computes such a select at the wider width
+/// in the target's own register and stores the whole longword into it:
+/// XNS_ERROR_$SEND's nested routine 0xE17960 at 0xE179F6..0xE17A04
+/// `move.w (-0x36,A2),D5; ext.l D5; cmp.l (A3),D5; ble.b; move.l (A3),D5`
+/// (`chunk := remaining; if chunk > node^.length then chunk :=
+/// node^.length`, chunk a word held in D5), 0xE179B2..0xE179C2 the same
+/// through A0; MMAP_$ALLOC_FREE 0xE0D8A6's `min` widens its register in
+/// place too (bead domain-pascal-dzad).  A narrowing assignment with
+/// another statement in the `then` part is the plain one: BAT_$ALLOC_FM
+/// 0xE3AD92..0xE3AD9C `move.w D4,D0; ext.l D0; cmp.l (-0x208,A0),D0;
+/// bge.b; move.w (-0x206,A0),D4`.
+fn narrowing_select(p: &Program, cond: &SExpr, target: &SExpr, value: &SExpr) -> bool {
+    if value.value.is_some() || !p.types.is_integer(value.ty) || !p.types.is_integer(target.ty) {
+        return false;
+    }
+    if p.types.size(value.ty) <= p.types.size(target.ty) {
+        return false;
+    }
+    let (Ok(tv), Ok(vv), Ok(c)) = (value_of(p, target), value_of(p, value), cond_of(p, cond))
+    else {
+        return false;
+    };
+    let Ok(ty) = scalar_of(p, target) else {
+        return false;
+    };
+    if assign_convert(p, value, vv.clone(), ty).is_some()
+        || !matches!(store_narrow(p, value, vv.clone(), ty), Some(Ok(_)))
+    {
+        return false;
+    }
+    let Cond::Compare { lhs, rhs, .. } = c else {
+        return false;
+    };
+    let strip = |e: &Expr| match e {
+        Expr::Convert { value, .. } => (**value).clone(),
+        e => e.clone(),
+    };
+    let (l, r) = (strip(&lhs), strip(&rhs));
+    (l == tv && r == vv) || (l == vv && r == tv)
+}
+
+/// `s` itself, or the one statement of a compound `s` (nested, with
+/// empty statements around it, `begin x := y; end`); `None` for a
+/// compound of none or several ([`narrowing_select`]).
+fn sole_stmt(s: &SStmt) -> Option<&SStmt> {
+    match &s.kind {
+        SStmtKind::Compound(b) => {
+            let mut it = b
+                .stmts
+                .iter()
+                .filter(|t| !matches!(t.kind, SStmtKind::Empty));
+            match (it.next(), it.next()) {
+                (Some(t), None) => sole_stmt(t),
+                _ => None,
+            }
+        }
+        _ => Some(s),
+    }
 }
 
 /// A variable or parameter, or a field of one (through any number of
@@ -4971,6 +5159,7 @@ fn reinterpret(v: Expr, ty: Scalar) -> Expr {
             Expr::Convert {
                 value: Box::new(v),
                 ty,
+                in_place: false,
             }
         }
     }
@@ -5020,6 +5209,7 @@ fn convert(v: Expr, ty: Scalar) -> Expr {
         v => Expr::Convert {
             value: Box::new(v),
             ty,
+            in_place: false,
         },
     }
 }
@@ -5173,6 +5363,7 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
                     ty: lty,
                 }),
                 ty,
+                in_place: false,
             });
         }
     }
@@ -5526,6 +5717,7 @@ fn min_max(p: &Program, e: &SExpr, b: Builtin, x: &SExpr, y: &SExpr) -> Res<Expr
         Expr::Convert {
             value: Box::new(v),
             ty: rty,
+            in_place: false,
         }
     })
 }

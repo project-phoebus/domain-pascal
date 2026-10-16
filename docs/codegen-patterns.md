@@ -7555,15 +7555,73 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     D5); SOCK_$ALLOCATE 0xE15ECE `move.b D4,(0x1b,A2); move.b
     D3,(0x1a,A2)` (word parameters held in D3/D4); NETLOG_$LOG_IT
     0xE71BCE `move.b D2,(-0x1a,A0)`; module-local 0xE0A328 at 0xE0A35A.
-    **Refused** (`dpc-ir`, `assign_convert`; bead domain-pascal-vusy):
-    an array element, a
-    pointer's target and a `with` record: AST_$TOUCH 0xE0350E `move.l
-    (A1),D5; move.w D5,-(SP)` and AST_$TOUCH_AREA 0xE039FC load an
-    element's longword through a by-address pointer whole (`ppn_array[0]`
-    in the C), 0xE03974 another (`*ppn_out++`); which source forms give
-    which code is not known.  A volatile object (an access of another
-    size) and a longword narrowed to a byte (not catalogued) are refused
-    too.
+    **Refused** passed by value or returned (`dpc-ir`, `assign_convert`;
+    bead domain-pascal-vusy): an array element, a pointer's target and a
+    `with` record: AST_$TOUCH 0xE0350E `move.l (A1),D5; move.w D5,-(SP)`
+    and AST_$TOUCH_AREA 0xE039FC push an element's longword loaded whole
+    through a by-address pointer (`ppn_array[0]` in the C); no in-place
+    push of one is catalogued.  A volatile object (an access of another
+    size) is refused everywhere.
+  - *Narrowing in an assignment* (beads domain-pascal-d59a,
+    domain-pascal-dkik; Verified at the sites given, one store against;
+    4 to 1 Uncertain, one site; implemented, `dpc-ir` `store_narrow`).
+    Sites from ../source's Pascal annotations and scratch scans of the
+    image, not kept (pairs of a longword access at d and a
+    word or byte read at d+2/d+1/d+3 off the same base in one block; a
+    longword load into Dn followed by a word store of Dn, Dn dead).
+    | source | size | in place (low bytes read at the higher address) | loaded whole |
+    |---|---|---|---|
+    | an element, constant index (`in` array) | 4 to 2 | MMAP's module-local 0xE0C5AE at 0xE0C602 `move.w (0x6,A0),(-0x1ffa,A2)` | - |
+    | an element, run-time index | 4 to 2 | 0xE0C664 `move.w (-0x6,A0,D0.w),..`; NETBUF_$ADD_PAGES 0xE0EAA8 `move.w (-0x20e,A2),(-0x1ffa,A3)` (a frame array); BAT_$ALLOC_FM 0xE3AD9C `move.w (-0x206,A0),D4` (into a local held in D4) | - |
+    | an element through a loop's stepped pointer | 4 to 2 | 0xE0C636 `move.w (0x2,A1),..`, 0xE0C640 `move.w (-0x6,A1),..` | AST_$TOUCH_AREA 0xE03974 `move.l (-0x4,A4),D0; move.w D0,(0x2,A2)` (unexplained) |
+    | a `with` record's field | 4 to 2 | MMAP_$FREE_PAGES 0xE0CFCC `move.w (0xe,A0),(-0x1ffa,A2)` | - |
+    | a field of an `in` record (packed or not) | 2 to 1 | RINGLOG_$LOGIT 0xE1A3A0, 0xE1A3A6, 0xE1A3E6 `move.b (0x39,A3),(0x3,A2)` | - |
+    | an element of one, run-time index | 2 to 1 | 0xE1A3F4 `move.b (0x1f,A3,D1.w),(0x3,A2)` | - |
+    | a pointer's target | 2 to 1 | RING's module-local 0xE76048 at 0xE760F4 `move.b (0x33,A3),(0x4,A0)` | - |
+    | a longword value parameter's slot | 4 to 1 | (one site, Uncertain) DISK_IO 0xE3D630 `move.b (0x13,A6),(0x6,A3)` | - |
+    | a function's result | 2 to 1 | (from D0) RIP_$TABLE_D 0xE68F24 `move.b D0,(0xe,A4)`, RIP_$TABLE 0xE68FEC `move.b D0,(0xc,A4)` (ROUTE_$FIND_PORT); RING_$SENDP 0xE75A12 `move.b D0,(0xd,A0)` (HDR_CHKSUM) | - |
+    | a function's result | 4 to 2 | (from D0) NETWORK 0xE0F526, 0xE115BC, 0xE1194E `move.w D0,(0x344,A5)` (MMAP_$REMOTE_POOL, `move.l (0x8,A6),D0` at 0xE59114) | - |
+    More of the same in ../source's annotations whose sources are plain
+    variables (already accepted): RIP_$TABLE_D 0xE68F52 `move.b
+    (0x17,A2),(0xf,A4)`, RIP_$UPDATE_INT's 0xE158F2/0xE158F8 (uplevel
+    words into bytes), FLP's 0xE3DCCC `move.b (0x103,A5),(0x7f,A0)`.
+    The other longword-to-byte frame pairs (`l@d,b@d+3`: VTOC_$ALLOCATE
+    0xE38C72, VTOCE_$READ 0xE39654, FM_$READ 0xE3A33E, SMD_$BLT 0xE6ED52)
+    are packed fields, not narrowings.  `dpc-ir` emits the narrowed load
+    as an `Expr::Convert` marked `in_place` (bead domain-pascal-dkik), and
+    the selector (`narrow_in_place`) reads the low-order bytes at d+2,
+    d+1 or d+3 (a data register at the narrow width, one step only); a
+    call's result is an unmarked `Convert`, taken from its register.  A
+    longword into a byte is accepted only from a value parameter's frame
+    slot (DISK_IO's, the one site).  **Refused:** a longword element,
+    pointer's target, parameter passed by address (`var`/`in`), local,
+    variable of the unit or of an enclosing routine, or result into a
+    byte, and a longword held in a register into a byte (not
+    catalogued); an address mode that takes no further
+    displacement (no form seen); a call inside a computed value (as
+    before); and the select `if a < b then a := b` that narrows `b` (no
+    `else`, the `then` part that one assignment, alone or as the only
+    statement of a `begin ... end`, the condition comparing the two):
+    the image compares and stores at the wider width in `a`'s own
+    register, XNS_ERROR_$SEND's nested 0xE17960 at 0xE179F6..0xE17A04
+    `move.w (-0x36,A2),D5; ext.l D5; cmp.l (A3),D5; ble.b; move.l
+    (A3),D5` and 0xE179B2..0xE179C2 (`chunk := remaining; if chunk >
+    node^.length then chunk := node^.length`, chunk a word in D5), as
+    MMAP_$ALLOC_FREE's `min` (bead domain-pascal-dzad); with another
+    statement in the `then` part the store is the plain one
+    (BAT_$ALLOC_FM 0xE3AD92..0xE3AD9C `move.w D4,D0; ext.l D0; cmp.l
+    (-0x208,A0),D0; bge.b; move.w (-0x206,A0),D4`).  The same select
+    with a plain variable as `b` goes through `assign_convert` and is not
+    refused; MMAP_$ALLOC_FREE's `min` suggests it may be wrong too (bead
+    domain-pascal-dzad).  **Uncertain:** the
+    AST counterexample (three AST sites load the same `ppn_array`'s
+    elements whole, two pushes and the store above; the source form is
+    not known); `chr` keeps its own reads (it narrows a field in place,
+    a computed-index element and a longword whole), and TERM_$CONTROL
+    0xE66B64 `move.w (A0),D0; move.b D0,(-0x36,A6)` reads `chr(value.w)`
+    of a `var` record whole (bead domain-pascal-4tu1).  Tests: golden
+    `expr/narrow_store`; exec test `narrow_store`; `dpc-ir`
+    `narrowing_store`.
   - *Narrowing a computed value:* computed at the narrow width when every
     part allows it (above, `dpc-ir` `narrow`); otherwise computed at its
     own width and the low bytes used (`narrowed` survey, word stores and

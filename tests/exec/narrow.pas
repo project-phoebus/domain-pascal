@@ -21,9 +21,10 @@
   words and bytes widened for longword and word value parameters.
   Boundary values: low words 0x5678, 0xFFFF (-1 / 65535), 0x8000
   (-32768 / 32768), 0x7FFF, 0; bytes 0xFF, 0x80, 0x00.
-  Not expressible (refused by dpc): an array element or a pointer's
-  target narrowed, a function's result narrowed, a longword narrowed to a
-  byte.  A volatile word narrowed by `chr' (a device register, each word
+  Narrowings of elements, pointers' targets, function results and a
+  longword into a byte in an assignment: tests/exec/narrow_store.pas
+  (bead domain-pascal-d59a); passed by value or returned they are still
+  refused by dpc.  A volatile word narrowed by `chr' (a device register, each word
   read counted) is read whole, at its own size (ref 3.15.1-3.15.3;
   review of bead domain-pascal-8td): not a byte read at the higher
   address.

@@ -191,12 +191,14 @@ fn displace(ea: &Ea, k: i32) -> Option<Ea> {
 /// the higher address ([`displace`], [`Selector::convert`]): a load of a
 /// non-volatile object one step wider (a longword as a word, a word as a
 /// byte), not an element with a computed index.  A volatile object is
-/// read at its own size (ref 3.15.1-3.15.3); a longword's low byte is
-/// not catalogued, nor is an element's low part (AST_$TOUCH 0xE0350E
-/// reads an element's longword whole, `move.l (A1),D5; move.w
-/// D5,-(SP)`; codegen-patterns 8, "Narrowing and widening").  These
-/// reach the selector only through `chr` (`dpc-ir` refuses them in an
-/// assignment), which reads them whole as before.
+/// read at its own size (ref 3.15.1-3.15.3).  The narrowings an
+/// assignment reads in place whatever the address (an element at a
+/// computed index, a longword into a byte) come marked `in_place`
+/// ([`Selector::narrow_in_place`], beads domain-pascal-d59a,
+/// domain-pascal-dkik); unmarked, a computed-index element and a
+/// longword come only from `chr`, which reads them whole as before
+/// (`chr` of a field: TERM_$CONTROL 0xE66B64 `move.w (A0),D0; move.b
+/// D0,(-0x36,A6)`, bead domain-pascal-4tu1).
 fn narrows_in_place(value: &Expr, ty: Scalar) -> bool {
     value.ty().bytes() == 2 * ty.bytes()
         && matches!(
@@ -3123,7 +3125,7 @@ fn slot_root(a: &Addr) -> Option<i32> {
 fn addr_value(e: &Expr) -> Option<&Addr> {
     match e {
         Expr::AddrOf(a) => Some(a),
-        Expr::Convert { value, ty } if value.ty().width == ty.width => addr_value(value),
+        Expr::Convert { value, ty, .. } if value.ty().width == ty.width => addr_value(value),
         _ => None,
     }
 }
@@ -4624,6 +4626,7 @@ fn expr_has_call(e: &Expr) -> bool {
             ty: Scalar {
                 width: Width::Word, ..
             },
+            ..
         } if matches!(
             **x,
             Expr::Binary {
@@ -5077,7 +5080,7 @@ impl Uses<'_> {
     /// that keep the width.
     fn whole_pointer(&self, value: &Expr) -> Option<i32> {
         match value {
-            Expr::Convert { value, ty } if ty.width == Width::Long => self.whole_pointer(value),
+            Expr::Convert { value, ty, .. } if ty.width == Width::Long => self.whole_pointer(value),
             Expr::Load {
                 addr: Addr::Frame(o),
                 ty,
@@ -9936,10 +9939,16 @@ impl Selector {
             Expr::Load { addr: a, .. } => Src::Ea(self.ea_of(a)?),
             // The low bytes of a parameter loaded at entry: stored from
             // its register (module-local 0xE0A328 at 0xE0A35A `move.b
-            // D0,(0x2d,A0)`, the word loaded into D0 at 0xE0A32C).
-            Expr::Convert { value: x, ty: t }
-                if t.width.bytes() < x.ty().width.bytes()
-                    && matches!(&**x, Expr::Load { addr: Addr::Frame(o), .. }
+            // D0,(0x2d,A0)`, the word loaded into D0 at 0xE0A32C).  A
+            // longword into a byte read in place is not
+            // ([`Self::narrow_in_place`] refuses it held).
+            Expr::Convert {
+                value: x,
+                ty: t,
+                in_place,
+            } if t.width.bytes() < x.ty().width.bytes()
+                && !(*in_place && x.ty().bytes() != 2 * t.bytes())
+                && matches!(&**x, Expr::Load { addr: Addr::Frame(o), .. }
                         if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
             {
                 let Expr::Load {
@@ -10550,7 +10559,7 @@ impl Selector {
             // register: stored from that register (module-local 0xE0A328
             // at 0xE0A35A `move.b D0,(0x2d,A0)`, a word loaded at entry
             // into D0 by 0xE0A32C).
-            Expr::Convert { value: x, ty }
+            Expr::Convert { value: x, ty, .. }
                 if ty.width.bytes() < x.ty().width.bytes()
                     && matches!(&**x, Expr::Load { addr: Addr::Frame(o), .. }
                         if matches!(self.pinned(*o), Some(Reg::D(_)))) =>
@@ -10558,8 +10567,15 @@ impl Selector {
                 false
             }
             // The low bytes of a variable in memory, read in place
-            // ([`Self::convert`]).
-            Expr::Convert { value: x, ty } if narrows_in_place(x, *ty) => self.value_needs_reg(x),
+            // ([`Self::convert`], [`Self::narrow_in_place`]).
+            Expr::Convert {
+                value: x,
+                in_place: true,
+                ..
+            } => self.value_needs_reg(x),
+            Expr::Convert { value: x, ty, .. } if narrows_in_place(x, *ty) => {
+                self.value_needs_reg(x)
+            }
             Expr::SetMember { .. }
             | Expr::SetMemberAt { .. }
             | Expr::BitElem { .. }
@@ -11849,7 +11865,12 @@ impl Selector {
                 });
                 Ok(Val::Tmp(d))
             }
-            Expr::Convert { value, ty } => self.convert(value, *ty),
+            Expr::Convert {
+                value,
+                ty,
+                in_place: true,
+            } => self.narrow_in_place(value, *ty),
+            Expr::Convert { value, ty, .. } => self.convert(value, *ty),
             // A pointer function's A0 is read only where the image reads
             // it (codegen-patterns 3, "Callers of pointer functions";
             // [`a0_call`]): a store, a copy into a register-held local, a
@@ -12341,7 +12362,7 @@ impl Selector {
             // `min`'s operands, NETBUF_$ADD_PAGES 0xE0E95C..0xE0E96A,
             // REM_FILE_$SERVER 0xE637AE..0xE637BC.  Other computed values
             // are refused (not seen).
-            if matches!(rhs, Expr::Convert { value, ty: t }
+            if matches!(rhs, Expr::Convert { value, ty: t, .. }
                 if value.ty().width == Width::Word && t.width == Width::Long)
             {
                 let xv = self.eval(rhs)?;
@@ -13853,6 +13874,49 @@ impl Selector {
         self.widen(value, ty)
     }
 
+    /// `value`, the load of a non-volatile integer object wider than `ty`,
+    /// narrowed in place ([`Expr::Convert`] with `in_place`; `dpc-ir`'s
+    /// `store_narrow`, beads domain-pascal-d59a, domain-pascal-dkik;
+    /// codegen-patterns 8, "Narrowing in an assignment"): in memory, its
+    /// low bytes at the higher address, big-endian (MMAP's module-local
+    /// 0xE0C5AE at 0xE0C664 `move.w (-0x6,A0,D0.w),..` for a run-time
+    /// index; DISK_IO 0xE3D630 `move.b (0x13,A6),(0x6,A3)`, a longword's
+    /// low byte); in a data register, the register at the narrow width as
+    /// in [`Self::convert`] (one step only).  Refused: an address mode
+    /// that takes no further displacement (no form seen) and a longword
+    /// held in a register narrowed to a byte (not catalogued).
+    fn narrow_in_place(&mut self, value: &Expr, ty: Scalar) -> Res<Val> {
+        let from = value.ty();
+        let k = (from.bytes() - ty.bytes()) as i32;
+        if !matches!(value, Expr::Load { .. }) || k <= 0 {
+            return Err(unsupported(
+                self.span,
+                "an in-place narrowing of a value other than a wider load is",
+            ));
+        }
+        match self.eval(value)? {
+            Val::Mem(ea) => displace(&ea, k).map(Val::Mem).ok_or_else(|| {
+                unsupported(
+                    self.span,
+                    "the low bytes of an object read in place where its address mode takes no \
+                     further displacement (no site seen, codegen-patterns 8) is",
+                )
+            }),
+            Val::Reg(Reg::D(d)) if k < 3 => Ok(Val::Reg(Reg::D(d))),
+            Val::Reg(Reg::A(a)) if ty.width == Width::Word => Ok(Val::Reg(Reg::A(a))),
+            Val::Reg(_) => Err(unsupported(
+                self.span,
+                "a longword held in a register narrowed to a byte (not catalogued, \
+                 codegen-patterns 8) is",
+            )),
+            _ => Err(unsupported(
+                self.span,
+                "an in-place narrowing of a load the selector computes (no site seen, \
+                 codegen-patterns 8) is",
+            )),
+        }
+    }
+
     /// `value` (a longword `x & c`, `c` a `moveq` constant, `x` held in a
     /// data register) narrowed to the word `ty` as a word `and`
     /// ([`Self::convert`]); `None` for any other value.
@@ -13883,6 +13947,7 @@ impl Selector {
             lhs: Box::new(Expr::Convert {
                 value: Box::new(x.clone()),
                 ty,
+                in_place: false,
             }),
             rhs: Box::new(Expr::Const { value: c, ty }),
             ty,
@@ -14621,7 +14686,7 @@ impl Selector {
             // 0xE67C42..0xE67C4A `move.w D2,D0; clr.l D1; ext.l D0; move.w
             // (A4),D1; cmp.l D1,D0`, the two widenings interleaved by the
             // scheduler, 12.4 R11; tty_$i_put_chars 0xE1B050..0xE1B058).
-            Expr::Convert { value, ty: t }
+            Expr::Convert { value, ty: t, .. }
                 if t.width == Width::Long && value.ty().width == Width::Word =>
             {
                 let r = match self.eval(rhs)? {
@@ -15180,7 +15245,7 @@ impl Selector {
         let var = |e: &Expr| -> Option<(Addr, Width, bool)> {
             match e {
                 Expr::Load { addr: a, ty } => Some((a.clone(), ty.width, false)),
-                Expr::Convert { value: x, ty } if ty.width.bytes() > x.ty().width.bytes() => {
+                Expr::Convert { value: x, ty, .. } if ty.width.bytes() > x.ty().width.bytes() => {
                     match &**x {
                         Expr::Load { addr: a, ty: xt } => {
                             Some((a.clone(), xt.width, xt.sign == Sign::Signed))
@@ -15678,7 +15743,7 @@ impl Selector {
             // A `0..65535` element zero-extended around the constant's
             // load (AS_IO_SETUP 0xE6B75C..0xE6B766).
             Expr::Const { value, .. }
-                if matches!(elem, Expr::Convert { value: w, ty }
+                if matches!(elem, Expr::Convert { value: w, ty, .. }
                     if *ty == Scalar::unsigned(Width::Long)
                         && w.ty() == Scalar::unsigned(Width::Word)) =>
             {
@@ -15817,7 +15882,7 @@ impl Selector {
         let top = bytes as i64 * 8 - 1;
         let (k, c) = match elem {
             // A byte element zero-extended around the constant's load.
-            Expr::Convert { value, ty } if *ty == Scalar::unsigned(Width::Word) => {
+            Expr::Convert { value, ty, .. } if *ty == Scalar::unsigned(Width::Word) => {
                 let Expr::Load {
                     ty:
                         Scalar {
@@ -17540,6 +17605,7 @@ mod tests {
         let widen = |e: Expr, ty: Scalar| Expr::Convert {
             value: Box::new(e),
             ty,
+            in_place: false,
         };
         let and = |c: i64| Expr::Binary {
             op: BinOp::And,

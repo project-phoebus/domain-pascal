@@ -235,7 +235,8 @@ end;
                 addr: Addr::Frame(12),
                 ty: Scalar::unsigned(Width::Byte)
             }),
-            ty: Scalar::unsigned(Width::Word)
+            ty: Scalar::unsigned(Width::Word),
+            in_place: false,
         }
     );
     assert!(matches!(set, Addr::Indirect { offset: 0, .. }));
@@ -1009,9 +1010,13 @@ end;
 /// Narrowing a value into a smaller object keeps its low bytes (bead
 /// domain-pascal-8td; `assign_convert`): a variable or parameter is read
 /// at the narrow width, a [`Expr::Convert`] of its load (APP_$DEMUX
-/// 0xE00AF6); an element, a pointer's target, a call and a longword
-/// narrowed to a byte are refused.  Widening is a conversion
-/// (0xE02C28..0xE02C2C `move.w D2,D0; ext.l D0; move.l D0,(-32,A6)`).
+/// 0xE00AF6).  In an assignment (bead domain-pascal-d59a; `store_narrow`)
+/// also an element, a pointer's target and a function's result one step
+/// narrower, and a longword variable into a byte (DISK_IO 0xE3D630); a
+/// call inside a computed value, a volatile object, a longword element or
+/// result into a byte and the select `if a < b then a := b` are refused.
+/// Widening is a conversion (0xE02C28..0xE02C2C `move.w D2,D0; ext.l D0;
+/// move.l D0,(-32,A6)`).
 #[test]
 fn narrowing_store() {
     let m = lower_src(
@@ -1027,7 +1032,7 @@ end;
         panic!()
     };
     assert!(
-        matches!(value, Expr::Convert { value: v, ty }
+        matches!(value, Expr::Convert { value: v, ty, .. }
             if *ty == Scalar::signed(Width::Word)
                 && matches!(**v, Expr::Load { ty: t, .. } if t == Scalar::signed(Width::Long))),
         "{value:?}"
@@ -1050,28 +1055,146 @@ end;
             if matches!(**v, Expr::Binary { op: BinOp::Shr, .. })),
         "{value:?}"
     );
-    for (decl, stmt, msg) in [
+    // An element (at a constant or a run-time index), a pointer's target:
+    // a [`Expr::Convert`] of the whole object's load marked `in_place`,
+    // the target choosing the low bytes' address (MMAP 0xE0C602, 0xE0C664;
+    // bead domain-pascal-dkik).
+    let store_value = |decl: &str, stmt: &str| {
+        let m = lower_src(&format!("module m;\n{decl}\nbegin\n  {stmt};\nend;\n")).unwrap();
+        match &m.functions[0].body.last().unwrap().kind {
+            StmtKind::Store { value, .. } => value.clone(),
+            k => panic!("{k:?}"),
+        }
+    };
+    let w = Scalar::signed(Width::Word);
+    for (decl, stmt) in [
         (
             "type a_t = array[1..2] of integer32;\nprocedure p(var x: integer; in a: a_t);",
             "x := a[1]",
-            "assigning a 4-byte value to a 2-byte object",
         ),
         (
             "type p_t = ^integer32;\nprocedure p(var x: integer; q: p_t); options(val_param);",
             "x := q^",
-            "assigning a 4-byte value to a 2-byte object",
         ),
+    ] {
+        let v = store_value(decl, stmt);
+        assert!(
+            matches!(&v, Expr::Convert { value: l, ty, in_place: true }
+                if *ty == w && matches!(**l, Expr::Load { ty: t, .. } if t == Scalar::signed(Width::Long))),
+            "{v:?}"
+        );
+    }
+    let v = store_value(
+        "type a_t = array[1..8] of integer32;\nprocedure p(var x: integer; i: integer; in a: a_t); \
+         options(val_param);",
+        "x := a[i]",
+    );
+    assert!(
+        matches!(&v, Expr::Convert { value: l, ty, in_place: true } if *ty == w
+            && matches!(&**l, Expr::Load { addr: Addr::Index { offset: -4, .. }, ty: t }
+                if *t == Scalar::signed(Width::Long))),
+        "{v:?}"
+    );
+    // A function's result: its register at the narrow width.
+    let v = store_value(
+        "function f: integer32; extern;\nprocedure p(var x: integer);",
+        "x := f",
+    );
+    assert!(
+        matches!(&v, Expr::Convert { value: c, ty, in_place: false } if *ty == w
+            && matches!(**c, Expr::Call { .. })),
+        "{v:?}"
+    );
+    // A longword value parameter into a byte, in place (DISK_IO 0xE3D630).
+    let v = store_value(
+        "type b_t = [byte] 0..255;\nprocedure p(var x: b_t; i: integer32); options(val_param);",
+        "x := i",
+    );
+    assert!(
+        matches!(&v, Expr::Convert { value: l, ty, in_place: true } if ty.width == Width::Byte
+            && matches!(**l, Expr::Load { addr: Addr::Frame(_), .. })),
+        "{v:?}"
+    );
+    for (decl, stmt, msg) in [
         (
             "function f: integer32; extern;\nprocedure p(var x: integer);",
             "x := f + 1",
             "assigning a 4-byte value to a 2-byte object",
         ),
         (
-            "type b_t = [byte] 0..255;\nprocedure p(var x: b_t; i: integer32); options(val_param);",
+            "type b_t = [byte] 0..255;\na_t = array[1..2] of integer32;\n\
+             procedure p(var x: b_t; in a: a_t);",
+            "x := a[2]",
+            "narrowing a longword element, pointer's target or `with` record to a byte (not \
+             catalogued; a variable's is DISK_IO 0xE3D630, codegen-patterns 8)",
+        ),
+        (
+            "type b_t = [byte] 0..255;\nvar g: integer32;\nprocedure p(var x: b_t);",
+            "x := g",
+            "narrowing a longword local, unit or enclosing routine's variable to a byte (not \
+             catalogued; the one site is a value parameter's slot, DISK_IO 0xE3D630, \
+             codegen-patterns 8)",
+        ),
+        (
+            "type b_t = [byte] 0..255;\nprocedure p(var x: b_t; i: integer32); options(val_param);\n\
+             var l: integer32;",
+            "l := i; x := l",
+            "narrowing a longword local, unit or enclosing routine's variable to a byte (not \
+             catalogued; the one site is a value parameter's slot, DISK_IO 0xE3D630, \
+             codegen-patterns 8)",
+        ),
+        (
+            "type b_t = [byte] 0..255;\nprocedure p(var x: b_t; in i: integer32);",
             "x := i",
-            "assigning a 4-byte value to a 1-byte object",
+            "narrowing a longword parameter passed by address (or a field of one) to a byte (not \
+             catalogued; a value parameter's slot is DISK_IO 0xE3D630, codegen-patterns 8)",
+        ),
+        (
+            "type p_t = ^integer32;\nprocedure p(var x: integer; q: p_t); options(val_param);",
+            "if q^ > x then begin x := q^; end",
+            "a select `if a < b then a := b` that narrows `b` into `a` (the compare and the \
+             store at the wider width in `a`'s register, XNS_ERROR_$SEND 0xE17A04 `move.l \
+             (A3),D5`; codegen-patterns 8, bead domain-pascal-dzad)",
+        ),
+        (
+            "type b_t = [byte] 0..255;\nfunction f: integer32; extern;\nprocedure p(var x: b_t);",
+            "x := f",
+            "narrowing a longword function result to a byte (not catalogued, codegen-patterns 8)",
+        ),
+        (
+            "var d: extern integer32;\nprocedure p(var x: integer);",
+            "x := d",
+            "",
+        ),
+        (
+            // Passed by value: an element's longword is loaded whole at
+            // AST_$TOUCH 0xE0350E (refused, codegen-patterns 8).
+            "type a_t = array[1..2] of integer32;\n\
+             procedure q(w: integer); options(val_param, extern);\n\
+             procedure p(in a: a_t);",
+            "q(a[1])",
+            "passing a 4-byte value to a 2-byte parameter",
+        ),
+        (
+            "var a: extern [volatile] array[1..2] of integer32;\n\
+             procedure p(var x: integer; i: integer); options(val_param);",
+            "x := a[i]",
+            "narrowing a volatile or device object (4 bytes into 2: an access of another size, \
+             ref 3.15.1-3.15.3)",
+        ),
+        (
+            "type p_t = ^integer32;\nprocedure p(var x: integer; q: p_t); options(val_param);",
+            "if x < q^ then x := q^",
+            "a select `if a < b then a := b` that narrows `b` into `a` (the compare and the \
+             store at the wider width in `a`'s register, XNS_ERROR_$SEND 0xE17A04 `move.l \
+             (A3),D5`; codegen-patterns 8, bead domain-pascal-dzad)",
         ),
     ] {
+        if msg.is_empty() {
+            // (a variable of another unit: [`assign_convert`]'s.)
+            assert!(lower_src(&format!("module m;\n{decl}\nbegin\n  {stmt};\nend;\n")).is_ok());
+            continue;
+        }
         let e = errs(&format!("module m;\n{decl}\nbegin\n  {stmt};\nend;\n"));
         assert!(
             e[0].ends_with(&format!("{msg} is not supported yet")),
@@ -1976,6 +2099,7 @@ fn conditions() {
     let widened = |name: &str, ty: Scalar| Expr::Convert {
         value: Box::new(sym(name, ty)),
         ty: long,
+        in_place: false,
     };
     assert_eq!(
         cond("w < u"),
@@ -2158,6 +2282,7 @@ fn case_statements() {
         Expr::Convert {
             value: Box::new(sym("C", Scalar::unsigned(Width::Byte))),
             ty: Scalar::unsigned(Width::Word),
+            in_place: false,
         }
     );
     assert_eq!(arms[0].labels, vec![97]);
@@ -2443,7 +2568,8 @@ end;
         **index,
         Expr::Convert {
             value: Box::new(sym("C", Scalar::unsigned(Width::Byte))),
-            ty: Scalar::unsigned(Width::Word)
+            ty: Scalar::unsigned(Width::Word),
+            in_place: false,
         }
     );
 }
@@ -2491,7 +2617,7 @@ begin
 end;
 ",
     );
-    let Expr::Convert { value, ty } = e else {
+    let Expr::Convert { value, ty, .. } = e else {
         panic!("{e:?}")
     };
     assert_eq!(ty, Scalar::signed(Width::Word));
@@ -2546,7 +2672,7 @@ end;
     };
     assert_eq!((op, ty), (BinOp::Add, Scalar::signed(Width::Word)));
     assert!(
-        matches!(&*lhs, Expr::Convert { value, ty } if *ty == Scalar::signed(Width::Word)
+        matches!(&*lhs, Expr::Convert { value, ty, .. } if *ty == Scalar::signed(Width::Word)
             && matches!(**value, Expr::Binary { op: BinOp::Div, .. })),
         "{lhs:?}"
     );
@@ -2725,7 +2851,7 @@ function f: {result}; begin f := {value} end;"
     // The word difference computed at 32 bits, its operands widened, the
     // result narrowed back to the word.
     let e = result_value(&src("", "min(i, 176 - j)", "integer"));
-    let Expr::Convert { value, ty } = &e else {
+    let Expr::Convert { value, ty, .. } = &e else {
         panic!("{e:?}")
     };
     assert_eq!(*ty, sw);
@@ -3650,7 +3776,7 @@ end;";
     // integer32(p) + offset: the pointer's load retyped, the offset
     // zero-extended, the sum seen as a pointer through a same-width
     // conversion (no code).
-    let Expr::Convert { value: sum, ty } = value(0) else {
+    let Expr::Convert { value: sum, ty, .. } = value(0) else {
         panic!("not a retyped sum")
     };
     assert_eq!(ty, Scalar::POINTER);
@@ -3665,7 +3791,7 @@ end;";
     };
     assert_eq!(ty, long);
     assert!(matches!(*lhs, Expr::Load { ty, .. } if ty == long));
-    assert!(matches!(*rhs, Expr::Convert { ref value, ty }
+    assert!(matches!(*rhs, Expr::Convert { ref value, ty, .. }
         if ty == long && value.ty() == Scalar::unsigned(Width::Word)));
     assert!(matches!(value(1), Expr::Load { ty, .. } if ty == long));
     assert!(matches!(value(2), Expr::Load { ty, .. } if ty == Scalar::POINTER));
@@ -5273,7 +5399,7 @@ end;
     let Expr::Binary { lhs, .. } = value else {
         panic!("{value:?}")
     };
-    let Expr::Convert { value: b0, ty } = &**lhs else {
+    let Expr::Convert { value: b0, ty, .. } = &**lhs else {
         panic!("{lhs:?}")
     };
     assert_eq!(*ty, Scalar::signed(Width::Word));

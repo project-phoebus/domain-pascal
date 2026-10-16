@@ -538,6 +538,13 @@ Tests:
   into a word (DBUF_$INIT 0xE3ABE8), a word plus a longword (MAC_OS_$SEND
   0xE0B650), words and bytes widened for value parameters (APP_$RECEIVE
   0xE008E6, SOCK_$CLOSE 0xE16008).
+- `expr/narrow_store` - codegen-patterns 8 ("Narrowing in an
+  assignment"; bead domain-pascal-d59a): an element's, a `with` record's,
+  a pointer's target's and a packed field's low bytes read in place (MMAP
+  0xE0C602, NETBUF_$ADD_PAGES 0xE0EAA8, MMAP_$FREE_PAGES 0xE0CFCC, RING
+  0xE760F4, RINGLOG_$LOGIT 0xE1A3A0 and 0xE1A3F4), a longword parameter's
+  low byte (DISK_IO 0xE3D630), function results stored at the narrow
+  width from D0 (RIP_$TABLE_D 0xE68F24, NETWORK 0xE0F526).
 - `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
   shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
   the static link passed in A1 to a routine a sibling also calls

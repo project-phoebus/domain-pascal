@@ -3809,3 +3809,61 @@ end;
         "{asm}"
     );
 }
+
+/// Bead domain-pascal-d59a (codegen-patterns 8, "Narrowing in an
+/// assignment"): a longword in memory narrowed to a byte is read at its
+/// low byte (DISK_IO 0xE3D630 `move.b (0x13,A6),(0x6,A3)`, a value
+/// parameter's slot, the one form seen), while `chr` of a longword is
+/// still read whole; one held in a register and a unit's variable are
+/// refused (not catalogued).
+#[test]
+fn d59a_longword_into_byte() {
+    let src = "module m;
+type b_t = [byte] 0..255; r_t = record pad: integer; head: b_t; end; rp_t = ^r_t;
+var c: char; g: integer32;
+define p, q;
+procedure p(req: rp_t; daddr: integer32); options(val_param);
+begin
+  req^.head := daddr;
+end;
+procedure q;
+begin
+  c := chr(g);
+end;
+";
+    let asm = compile_with("d59a_ok", src, &[]).unwrap();
+    assert!(asm.contains("move.b\t(0xf,%fp),(2,%a0)"), "{asm}");
+    assert!(
+        asm.contains("move.l\t(4,%a5),%d0\n\tmove.b\t%d0,(%a5)"),
+        "{asm}"
+    );
+    let held = "module m;
+type b_t = [byte] 0..255;
+var b: b_t; g: integer32;
+procedure p(l: integer32); options(val_param);
+begin
+  g := l + 1;
+  b := l;
+  g := l;
+end;
+";
+    let (_, err) = compile_with("d59a_held", held, &[]).unwrap_err();
+    assert!(
+        err.contains("a longword held in a register narrowed to a byte"),
+        "{err}"
+    );
+    // A unit's variable: no site (only a value parameter's slot).
+    let unit = "module m;
+type b_t = [byte] 0..255;
+var b: b_t; g: integer32;
+procedure p;
+begin
+  b := g;
+end;
+";
+    let (_, err) = compile_with("d59a_unit", unit, &[]).unwrap_err();
+    assert!(
+        err.contains("narrowing a longword local, unit or enclosing routine's variable to a byte"),
+        "{err}"
+    );
+}

@@ -999,7 +999,19 @@ pub enum Expr {
     },
     /// `value` converted to `ty`: widened (sign- or zero-extended by
     /// `value`'s sign, ref 4.3.1 p. 4-5) or narrowed to its low bytes.
-    Convert { value: Box<Expr>, ty: Scalar },
+    ///
+    /// `in_place` (bead domain-pascal-dkik): `value` is a load of a
+    /// non-volatile object wider than `ty`, narrowed by an assignment
+    /// whose source the original reads at its low-order bytes in memory,
+    /// whatever its address (an element at a run-time index, a longword
+    /// into a byte; codegen-patterns 8, "Narrowing in an assignment").
+    /// The target picks those bytes' address.  `false`: the target's own
+    /// rule for a narrowing (`chr` and the other conversions).
+    Convert {
+        value: Box<Expr>,
+        ty: Scalar,
+        in_place: bool,
+    },
     /// The result of a function call (ref 5.2; the result register,
     /// codegen-patterns 3), of type `ty`.  `reg` is the callee's result
     /// register class: [`ResultClass::Address`] for a pointer result in
