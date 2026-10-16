@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: ace5706dac98b7c92757c909a9c97cb834f5eb06
+# source: a2f37edb7dbd3d72b0c350a0767de3aa503e899e
 STUB	acl/acl.pas	acl_$init
 MISMATCH	acl/acl.pas	acl_$cache_list_insert
 STUB	acl/acl.pas	acl_$cache_list_remove
@@ -30,8 +30,19 @@ MISMATCH	acl/acl.pas	acl_$clear_super
 STUB	acl/acl.pas	acl_$up
 STUB	acl/acl.pas	acl_$down
 STUB	acl/acl.pas	acl_$in_subsys
+STUB	acl/acl.pas	acl_$set_acl_check
+MISMATCH	acl/acl.pas	acl_$default_acl
 STUB	acl/acl.pas	acl_$def_acldata
+STUB	acl/acl.pas	acl_$prim_create
+STUB	acl/acl.pas	acl_$image_internal
+STUB	acl/acl.pas	acl_$image
 OK	acl/acl.pas	acl_$is_suser
+STUB	acl/acl.pas	acl_$add_proj
+STUB	acl/acl.pas	acl_$delete_proj
+STUB	acl/acl.pas	acl_$get_proj_list
+STUB	acl/acl.pas	acl_$set_proj_list
+STUB	acl/acl.pas	acl_$set_re_all_sids
+STUB	acl/acl.pas	acl_$set_res_all_sids
 STUB	acl/acl.pas	acl_$alloc_asid
 STUB	acl/acl.pas	acl_$get_sid
 STUB	acl/acl.pas	acl_$free_asid
@@ -71,7 +82,7 @@ STUB	bat/bat.pas	bat_$reserve
 MISMATCH	bat/bat.pas	bat_$cancel
 OK	bat/bat.pas	bat_$get_bat_step
 STUB	cal/os_cal_unwired.pas	cal_$verify
-STUB	cal/os_cal_unwired.pas	cal_$get_info
+OK	cal/os_cal_unwired.pas	cal_$get_info
 OK	cal/os_cal_unwired.pas	cal_$set_drift
 STUB	cal/os_cal_unwired.pas	cal_$get_local_time
 STUB	cal/os_cal_unwired.pas	cal_$apply_local_offset
@@ -119,7 +130,7 @@ MISMATCH	disk/disk_dev.pas	disk_$do_io
 MISMATCH	disk/disk_dev.pas	disk_$error_que
 STUB	disk/disk_dev.pas	disk_$spin_down
 MISMATCH	disk/disk_dev.pas	disk_$revalid
-STUB	disk/disk_dev.pas	disk_$get_stats
+MISMATCH	disk/disk_dev.pas	disk_$get_stats
 MISMATCH	disk/disk_dev.pas	disk_$shutdown
 STUB	disk/disk_vol.pas	disk_$diskless_init
 STUB	disk/disk_vol.pas	as_io_setup
@@ -132,7 +143,7 @@ STUB	disk/disk_vol.pas	disk_$unassign
 OK	disk/disk_vol.pas	disk_$unassign_all
 STUB	disk/disk_vol.pas	disk_$get_mnt_info
 MISMATCH	disk/disk_vol.pas	disk_$revalidate
-STUB	disk/disk_vol.pas	disk_$get_error_info
+OK	disk/disk_vol.pas	disk_$get_error_info
 STUB	disk/disk_vol.pas	disk_$as_options
 STUB	disk/disk_vol.pas	disk_$pv_mount_internal
 STUB	disk/disk_vol.pas	disk_$pv_assign_n
