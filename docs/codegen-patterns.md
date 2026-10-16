@@ -11686,13 +11686,95 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     0xE0A328 (five `move.b #n` stores to `device` registers, among them
     0xE0A33E `move.b #-1,(A0)`) is a byte-identical conformance unit.
 - **Store merging (reference; merges and non-merges Verified by survey;
-  which constant pairs merge Uncertain; non-candidates implemented, bead
-  domain-pascal-2m0):** ref 3.15.3, p. 3-57: "By default, the compiler
+  constants merged across statements Verified; copies merged across
+  statements Verified assuming route_$port_t is one type without variants
+  at 0x2C..0x31; which pairs merge Uncertain; non-candidates implemented,
+  bead domain-pascal-2m0):**
+  ref 3.15.3,
+  p. 3-57: "By default, the compiler
   optimizes certain adjacent references by merging them into one large
   reference" (`a := 0; b := 0` on two `integer16`s becomes one 32-bit
   store); ref 6.4.24, p. 6-28 lists "Merges assignment statements where
   possible" among the `-opt 1` optimizations (the default is `-opt 3`),
   without saying when it is possible.
+  - **One assignment or two** (`tools/storesurvey.py sites [-v]`; every
+    instruction text it cites is checked against the image, but its
+    object and layout tables are entered by hand from ../source's and
+    Apollo's declarations).  The hypothesis
+    "the compiler never merges two statements' stores; each merged site
+    is one 4-byte (or larger) assignment that ../source splits" is
+    *refuted for constants*: of 30 merged constant sites, 22 cover two
+    declared objects (or part of one) that the image also reaches alone,
+    and no single assignment covers them, the reference having no record
+    constants ("A value must be a real, integer, string, char, or set
+    constant expression", ref 2.2.2.2, p. 2-12).  The clearest:
+    the module-local 0xE1BF70 (tty_$i_set_raw_mode in ../source) at
+    0xE1BFE4 `move.l #0x10001,(0x38,A2)` sets the tag
+    and `count` of Apollo's own `tty_$input_break_mode_t`
+    (sys/ins/tty.ins.pas), the tag cleared alone at 0xE1C04C and count
+    read alone at 0xE1BD86; TTY_$K_RESET 0xE67322..0xE6733A pairs
+    input_head with the input buffer's first field and splits one buffer
+    type tail+size (input) but head+tail (output), the same seven words
+    TTY_$I_INIT stores one by one (0xE3332E..0xE33352), a greedy pairing
+    of consecutive statements; KBD_$INIT 0xE3337C clears sub_state and
+    kbd_type_idx, words read and written alone (0xE1CB20, 0xE1CBF2,
+    0xE1CE2A); AUDIT_$LOG_EVENT_S 0xE71032 clears uppid and upgid, passed
+    apart by address at 0xE71012/0xE71016; PROC1_$GET_INFO 0xE15004
+    clears usr, upc, usp and usb (each passed by address, 0xE14FDA..
+    0xE14FE6) as `clr.l` x3, `clr.w`, across the field boundaries
+    (w, l, l, l), as FIM_$BUILD_DF 0xE0A896 clears a word and a longword
+    `clr.l; clr.w`.  Merges past a pair: a run of constants becomes one
+    block, stored longwords first (PROC1_$GET_INFO; WIN_$GET_STATS
+    0xE19D8A, nine counters of a local `clr.l; lea; clr.l (A1)+` x4,
+    `clr.w (A1)+`), or copied from a constant in the code (FLP_$DINIT
+    0xE3E1FC, four fields from 10 bytes at 0xE3E21E, then `w_06 := 1`
+    again at 0xE3E208; PROC1_$BIND 0xE14DAE, 8 bytes, Reported).  The 8
+    other constant sites have no access apart (one 4-byte object
+    possible: NETBUF_$ADD_PAGES 0xE0EA1A, whose 1000 is a longword in
+    every access, 0xE0EE9A, 0xE16308; MSG 0xE59886, 0xE595EE; KBD
+    0xE33374, 0xE333C4; MAC_OS_$INIT 0xE2F590; ASKNODE_$PROPAGATE_WHO).
+    It is *refuted for copies* too: ROUTE_$SHORT_PORT 0xE69C16 `move.l
+    (0x2c,A0),(4,A1)` copies route_$port_t's active and port_type as one
+    longword, HINT_$ADD_NET 0xE49CA6, the module-local 0xE31194 at
+    0xE311D8 and RIP_$TABLE 0xE6905E copy its port_type and socket
+    (0x2E..0x31) as one; no record without variants can hold both 4-byte
+    objects (assuming all four copy from the one type route_$port_t), and
+    the three words are reached alone (MAC_$OPEN 0xE0B8FE, MAC_$DEMUX
+    0xE0BCFA, 0xE0BCFE).  Copies are kept apart elsewhere (19 pairs),
+    among them RIP_$TABLE_D 0xE68ECA (`move.w (0x2e,A4),(0x12,A2); move.w
+    (0x30,A4),(0x14,A2)`), whose other arm merges its two constants into
+    the same two words (0xE68EDA `move.l #0x10000,(0x12,A2)`), and five
+    in ASKNODE_$INTERNET_INFO (0xE647BE..).  SOCK_$GET 0xE16108 and
+    SOCK_$PUT_INT_INT 0xE1628A stay one object possible.
+  - **By segment** (`sites -v`; the constant sites above against the 118
+    unmerged pairs; a map segment is assumed to be one compilation unit,
+    which TTY already strains: its segments 0xE1AED0 and 0xE671DC merge,
+    0xE3324C keeps its pairs apart).  The 118 are the pairs that meet the
+    tool's merge conditions (one base, adjacent, low address even, both
+    constants, one after the other, no branch target between); 30 of them
+    are descending and 62 are two bytes, and no merge of either kind is
+    known anywhere.  20 segments have a merge, 34 a pair apart, 5 both
+    (ACL_ 0xE44C3C, ASKNODE, FLP_, WIN_, XNS_ERROR).  In those 5 the pairs
+    apart are two bytes (7: ACL 0xE44EC6, 0xE47DD8, 0xE4941E, 0xE47916,
+    0xE47922, 0xE46074; XNS_ERROR_$SEND 0xE17B48), two statics stored
+    downwards (FLP_DO_IO 0xE3DE4A, WIN 0xE1955C), and one ascending word
+    pair in the frame, ASKNODE_$SERVER 0xE65A3E `clr.w (-0x296,A6);
+    move.w #0x200,(-0x294,A6)`, while the same segments merge words (ACL
+    0xE4521E, 0xE45C1C `clr.l (0x22,A1)` of owner_slot and group_slot,
+    stored apart at 0xE45384, 0xE45562).  0xE65A3E is not explained by
+    its being two variables (ref 3.15.3 p. 3-57's own example merges two
+    variables); a lead: every merge in the frame (0xE00BA8, 0xE15ABA,
+    0xE178D2, 0xE65EBC, 0xE65ED0, 0xE19D8A) is at a displacement 0 mod
+    4, 0xE65A3E at 2 mod 4 (Uncertain).  Of the 28 ascending word
+    constant pairs apart, 27 are in segments without a merge (TTY_$I_INIT,
+    TPAD, NETLOG, ...) and 1 is 0xE65A3E: for constants this points at a
+    per-unit setting (domain-pascal-qb9q; the -opt question, bead
+    domain-pascal-g728).  Copies do not follow a per-unit switch:
+    RIP_UNWIRED merges route_$port_t's 0x2E..0x31 copy in RIP_$TABLE
+    0xE6905E and keeps the same two words apart in RIP_$TABLE_D 0xE68ECA
+    (both ascending, both at 2 mod 4), and ASKNODE, which merges
+    constants, keeps five ascending word copies apart (ASKNODE_$INTERNET_
+    INFO 0xE647BE..).  So the per-unit lead is for constants only.
   - **Survey** (`tools/storesurvey.py merge [-v]`): in the 1635 compiled
     routines of `tools/regalloc.py`, 420 pairs of stores made one after
     the other (only register set-up between them: no store, call, branch
@@ -11750,8 +11832,10 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     unmerged `clr.w (0x38,A2)` and `clr.w (0x3e,A2)`, 0xE333B6/0xE333C4
     `move.l #0x10001,(88,A2)` and `(158,A2)`, each followed by an
     unmerged `move.w #64`; PROC1_$BIND 0xE14DA6 `move.l
-    #0x10010,(0x56,A2)` (inh_count, sw_bsr in ../source) and 0xE14DD8
-    `move.w #0xa,(0x54,A2)` (the bytes pri_min, pri_max); PROC1_$INIT
+    #0x10010,(0x56,A2)` (inh_count, sw_bsr in ../source; 0xE14DD8
+    `move.w #0xa,(0x54,A2)`, once read as the C's bytes pri_min and
+    pri_max, is the word set flags, `btst.b #0x3,(0x55,A1)` at
+    0xE14D70, proc1/proc1.ins.pas: not a merge); PROC1_$INIT
     0xE2F998 the same longword; ASKNODE_$PROPAGATE_WHO 0xE65EBC `move.l
     #0x100be,(-0x21c,A6)` (two words of a frame record, then the lone
     `clr.w (-0x218,A6)`) and 0xE65ED0 `move.l #0x30046,(-0x200,A6)`;
@@ -11764,12 +11848,13 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     of a record whose word sr is at 0x54 and longword pc at 0x56 (the
     other arm stores them `move.w D1,(0x54,A2); move.l (-0x3e,A6),
     (0x56,A2)`, 0xE0A87A).  Every merge the image shows by itself is of
-    two constants.  Merged copies cannot be told from longword copies
-    there: ../source reads SOCK_$GET 0xE16108 `move.l (0x3e8,A1),
-    (0x2a,A2)` and SOCK_$PUT_INT_INT 0xE1628A as two word assignments
-    merged, since MAC_$DEMUX fills the record's two words apart (0xE0BCB6,
-    0xE0BCBC; pascal-translation-notes finding 75), or one longword field
-    (sock/get.pas, Uncertain).
+    two constants or of a copy.  Merged copies cannot always be told
+    from longword copies: ../source reads SOCK_$GET 0xE16108 `move.l
+    (0x3e8,A1),(0x2a,A2)` and SOCK_$PUT_INT_INT 0xE1628A as two word
+    assignments merged, since MAC_$DEMUX fills the record's two words
+    apart (0xE0BCB6, 0xE0BCBC; pascal-translation-notes finding 75), or
+    one longword field (sock/get.pas, Uncertain); ROUTE_$SHORT_PORT's and
+    HINT_$ADD_NET's overlap (above) shows that some are merged.
   - **No merge of other values found** (a review scan of the compiled
     routines, not kept as a tool): a merged pair with a computed value
     would need the two values put together in a register before one
@@ -11823,7 +11908,13 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     (FIM_$BUILD_DF 0xE0A896 against 0xE14CBC); with the longword the
     lower, merged (split at the longword, as at 0xE0A896) or not they are
     the same two stores, compiled in source order (0xE70B5E `clr.w
-    (0x1a0,A5); clr.l (0x19c,A5)`).
+    (0x1a0,A5); clr.l (0x19c,A5)`).  The refusals stay: neither "never
+    merge" (above) nor "merge when possible" (118 constant pairs apart)
+    holds.  `sites` gives, for each statement of ../source 980aa83a that
+    dpc refuses, what the image does: 25 merged (19 constant, 6 copy),
+    23 apart (20 constant, 3 copy), 3 not a pair in the image (dpc's
+    frame or slots make them adjacent, the original's registers or frame
+    do not).
     Not candidates, and compiled as two stores: a pair with any other
     value (no one reference stores it; the 270 above apart, no merge of
     such values found); two

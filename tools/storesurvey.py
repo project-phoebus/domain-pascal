@@ -47,6 +47,8 @@ usage:
                                                     # bytes; -v lists them
     tools/storesurvey.py merge [-v]                 # adjacent stores and
                                                     # longword constants
+    tools/storesurvey.py sites [-v]                 # merged sites: one
+                                                    # object or two?
 
 `merge' (bead domain-pascal-2m0, codegen-patterns 13 "Store merging"):
 pairs of stores to adjacent memory of one base, made one after the other
@@ -68,6 +70,34 @@ stores is not counted.  Then the candidates for *merged* stores: a
 are all such), and a `move.w #imm' with both bytes non-zero, listed
 for checking against ../source (a `clr.l' of two words cannot be told
 from a longword store and is not listed).
+
+`sites' (bead domain-pascal-2m0): the test of "the compiler never merges
+two statements' stores; every merged site is one assignment of a 4-byte
+(or larger) object".  MERGED_SITES lists the image's stores that ../source
+reads as two or more narrower assignments merged, each with the objects
+it covers (offset, size, name: from Apollo's inserts where the type is a
+system type, else ../source's declarations) and the image instructions
+that reach one of those objects alone (`apart').  The tool checks every
+listed instruction text against the image; the objects, layouts and
+`src' ranges are entered by hand from ../source's and Apollo's
+declarations and are not checked.  It says which declared objects each
+merged store covers (two or more, or part of one), and gives the verdict:
+`two objects' when an access apart is in the image or the layout is
+Apollo's (then no one assignment of the original covers the store: the
+reference has no record constants: "A value must be a real, integer,
+string, char, or set constant expression", ref 2.2.2.2, p. 2-12), else
+`one object possible'; a merged copy whose source range overlaps another
+merged copy's in the same type without being the same is `overlaps' (not
+both can be one object of a type without variants: ROUTE_$SHORT_PORT
+0xE69C16 against HINT_$ADD_NET 0xE49CA6, assuming both copy from the one
+type route_$port_t).  REFUSAL_SITES lists, for
+each statement of ../source (at bead time, ../source 980aa83a) that dpc
+refused as "a store adjacent to the previous statement's store", the
+image's instructions for the pair and whether they are merged.  Then the
+counter-examples the other way: the unmerged constant pairs of `merge'
+(every merge condition holds: one base, adjacent, even, constants, one
+after the other, no branch target between), by map segment, and the
+segments that show both.
 
 `addr' (bead domain-pascal-j28d, codegen-patterns 5.2 "`addr(x)` as a
 value"): addresses used as data in compiled code, over the instructions
@@ -537,6 +567,417 @@ def merge_main(argv):
     return 0
 
 
+# ------------------------------------------------------------- sites
+# `sites' (bead domain-pascal-2m0): see the module doc.  Each merged site:
+# addr, the image's instructions from there, the stores they make
+# (offset, size) from the base, the objects of the declared layout
+# (offset, size, name), where the layout comes from, and the image's
+# accesses of one of the objects alone (addr, instruction).
+APOLLO = 'Apollo'
+_TTY = '../source tty/tty.ins.pas tty_$desc_t'
+_TTY_BUF = ((0x2CA, 2, 'input_head'), (0x2CC, 2, 'input.head'), (0x2CE, 2, 'input.tail'),
+            (0x2D0, 2, 'input.size'), (0x3D2, 2, 'output.head'), (0x3D4, 2, 'output.tail'),
+            (0x3D6, 2, 'output.size'))
+_TTY_I_INIT = tuple((a, 'movew #%d,%%a4@(%d)' % (v, o)) for a, v, o in (
+    (0xE3332E, 1, 0x2CA), (0xE33334, 1, 0x2CC), (0xE3333A, 1, 0x2CE),
+    (0xE33340, 256, 0x2D0), (0xE33346, 1, 0x3D2), (0xE3334C, 1, 0x3D4),
+    (0xE33352, 256, 0x3D6)))
+_ACL_HDR = ((0x22, 2, 'owner_slot'), (0x24, 2, 'group_slot'), (0x26, 2, 'org_slot'))
+_ACL_APART = ((0xE45384, 'movew %d2,%a1@(34)'), (0xE45562, 'movew %d2,%a1@(36)'))
+_OPEN_OPT = ((-40, 2, 'opt.socket'), (-38, 2, 'opt.flags'))
+_HEAD_TAIL = ((0, 2, 'head'), (2, 2, 'tail'))
+_PROC1_PCB = ((0x56, 2, 'inh_count'), (0x58, 2, 'sw_bsr'))
+_PROC1_APART = ((0xE15284, 'movew %d0,%a4@(86)'), (0xE15290, 'movew %d0,%a4@(88)'))
+_NO_PAS = 'unknown (no Pascal in ../source)'
+
+
+def _site(addr, kind, texts, stores, layout, decl, apart=(), note='', src=None):
+    return dict(addr=addr, kind=kind, texts=texts, stores=stores, layout=layout,
+                decl=decl, apart=apart, note=note, src=src)
+
+
+def _PORT(off):
+    return ('route_$port_t', off, 4)
+
+
+# route_$port_t's active (0x2C), port_type (0x2E), socket (0x30) reached
+# alone: MAC_$OPEN tests active's value, MAC_$DEMUX pushes socket and
+# port_type apart.
+_ROUTE_APART = ((0xE0B8FE, 'movew %a3@(2c,%d1:w),%d2'), (0xE0BCFA, 'movew %a3@(48),%sp@-'),
+                (0xE0BCFE, 'movew %a3@(46),%sp@-'))
+
+
+MERGED_SITES = (
+    # constants
+    _site(0xE1BFE4, 'const', ('movel #65537,%a2@(56)',), ((0x38, 4),),
+          ((0x38, 2, 'break_mode.break_type'), (0x3A, 2, 'break_mode.count')),
+          APOLLO + ' sys/ins/tty.ins.pas tty_$input_break_mode_t (tag, count: pinteger)',
+          ((0xE1C04C, 'clrw %a2@(56)'), (0xE1BD86, 'movew %a0@(58),%d2'))),
+    _site(0xE67322, 'const',
+          ('movel #65537,%a2@(714)', 'movel #65792,%a2@(718)',
+           'movel #65537,%a2@(978)', 'movew #256,%a2@(982)'),
+          ((0x2CA, 4), (0x2CE, 4), (0x3D2, 4), (0x3D6, 2)), _TTY_BUF, _TTY, _TTY_I_INIT,
+          'crosses input_head|input.head; one buffer type split tail+size (input) '
+          'and head+tail (output); TTY_$I_INIT stores all seven apart'),
+    _site(0xE67340, 'const', ('clrl %a2@(86)',), ((0x56, 4),),
+          ((0x56, 2, 'saved_input_flags'), (0x58, 2, 'column')), _TTY,
+          ((0xE332CC, 'clrw %a0@(88)'), (0xE332D0, 'clrw %a0@(86)'))),
+    _site(0xE176B0, 'const', ('movel #65537,%a0@',), ((0, 4),), _HEAD_TAIL,
+          '../source log/log.ins.pas',
+          ((0xE176C0, 'movew %a0@,%d1'), (0xE176D8, 'cmpw %a0@(2),%d1'))),
+    _site(0xE3017C, 'const', ('moveq #1,%d0', 'movel %d0,%a0@'), ((0, 4),), _HEAD_TAIL,
+          '../source log/log.ins.pas', ((0xE30172, 'tstw %a0@(2)'),)),
+    _site(0xE33374, 'const', ('clrl %a0@(88)',), ((0x58, 4),),
+          ((0x58, 2, 'term_$tpad_buffer.head'), (0x5A, 2, 'term_$tpad_buffer.tail')),
+          '../source kbd/kbd.ins.pas'),
+    _site(0xE3337C, 'const', ('clrl %a2@(58)',), ((0x3A, 4),),
+          ((0x38, 2, 'state'), (0x3A, 2, 'sub_state'), (0x3C, 2, 'kbd_type_idx'),
+           (0x3E, 2, 'pending_mode')), '../source kbd/kbd.ins.pas',
+          ((0xE1CB20, 'movew %a4@(58),%d4'), (0xE1CBF2, 'movew %d4,%a4@(58)'),
+           (0xE1CE2A, 'movew %a2@(60),%d1')),
+          '0x38 and 0x3E, cleared just before and after, stay apart'),
+    _site(0xE333B6, 'const', ('movel #65537,%a2@(88)', 'movew #64,%a2@(92)'),
+          ((0x58, 4), (0x5C, 2)),
+          ((0x58, 2, 'ring.head'), (0x5A, 2, 'ring.tail'), (0x5C, 2, 'ring.size')),
+          '../source kbd/kbd.ins.pas',
+          ((0xE1CBEE, 'movew %d2,%a4@(88)'), (0xE1CC30, 'movew %a2@(90),%d1'))),
+    _site(0xE333C4, 'const', ('movel #65537,%a2@(158)', 'movew #64,%a2@(162)'),
+          ((0x9E, 4), (0xA2, 2)),
+          ((0x9E, 2, 'txbuf.head'), (0xA0, 2, 'txbuf.tail'), (0xA2, 2, 'txbuf.size')),
+          '../source kbd/kbd.ins.pas'),
+    _site(0xE14DA6, 'const', ('movel #65552,%a2@(86)',), ((0x56, 4),), _PROC1_PCB,
+          '../source proc1/proc1.ins.pas', _PROC1_APART),
+    _site(0xE2F998, 'const', ('movel #65552,%a0@(86)',), ((0x56, 4),), _PROC1_PCB,
+          '../source proc1/proc1.ins.pas', _PROC1_APART),
+    _site(0xE15004, 'const',
+          ('lea %a2@(2),%a0', 'clrl %a0@+', 'clrl %a0@+', 'clrl %a0@+', 'clrw %a0@+'),
+          ((2, 4), (6, 4), (10, 4), (14, 2)),
+          ((2, 2, 'usr'), (4, 4, 'upc'), (8, 4, 'usp'), (12, 4, 'usb')),
+          '../source proc1/proc1.ins.pas',
+          ((0xE14FDA, 'pea %a2@(8)'), (0xE14FDE, 'pea %a2@(12)'),
+           (0xE14FE2, 'pea %a2@(4)'), (0xE14FE6, 'pea %a2@(2)')),
+          '14 bytes cleared l,l,l,w; the fields are w,l,l,l'),
+    _site(0xE65EBC, 'const', ('movel #65726,%fp@(-540)', 'clrw %fp@(-536)'),
+          ((-540, 4), (-536, 2)), (), _NO_PAS),
+    _site(0xE65ED0, 'const', ('movel #196678,%fp@(-512)', 'clrl %fp@(-508)'),
+          ((-512, 4), (-508, 4)), (), _NO_PAS),
+    _site(0xE2F590, 'const', ('movel #65537,%a0@(4)',), ((4, 4),),
+          ((4, 2, 'n_link_addrs'), (6, 2, 'n_net_addrs'), (8, 2, 'n_words')),
+          '../source route/route.ins.pas'),
+    _site(0xE0A896, 'const', ('clrl %a2@(84)', 'clrw %a2@(88)'), ((0x54, 4), (0x58, 2)),
+          ((0x54, 2, 'kernel_sr_pc.sr'), (0x56, 4, 'kernel_sr_pc.pc')),
+          '../source fim/fim.ins.pas fim_$sr_pc_t',
+          ((0xE0A87A, 'movew %d1,%a2@(84)'), (0xE0A87E, 'movel %fp@(-62),%a2@(86)')),
+          'a word and a longword cleared l+w; the other arm stores w, l'),
+    _site(0xE4521E, 'const', ('clrl %a1@(34)', 'clrw %a1@(38)'), ((0x22, 4), (0x26, 2)),
+          _ACL_HDR, '../source acl/acl.pas', _ACL_APART),
+    _site(0xE45C1C, 'const', ('clrl %a1@(34)', 'clrw %a1@(38)'), ((0x22, 4), (0x26, 2)),
+          _ACL_HDR, '../source acl/acl.pas', _ACL_APART,
+          'the bytes 0x28, 0x29 cleared apart after it (0xE45C38, 0xE45C3C)'),
+    _site(0xE44EBE, 'const', ('clrl %a2@(34)', 'clrw %a2@(38)'), ((0x22, 4), (0x26, 2)),
+          _ACL_HDR, '../source acl/acl.pas (acl.ins.pas: reserved_22, integer32)', _ACL_APART),
+    _site(0xE47DD0, 'const', ('clrl %a1@(34)', 'clrw %a1@(38)'), ((0x22, 4), (0x26, 2)),
+          _ACL_HDR, '../source acl/acl.pas (acl.ins.pas: reserved_22, integer32)', _ACL_APART),
+    _site(0xE00BA8, 'const', ('movel #77135874,%fp@(-40)',), ((-40, 4),), _OPEN_OPT,
+          '../source xns/xns.ins.pas', ((0xE00BD8, 'movew %fp@(-38),%a5@(20)'),)),
+    _site(0xE15ABA, 'const', ('movel #65538,%fp@(-40)',), ((-40, 4),), _OPEN_OPT,
+          '../source xns/xns.ins.pas', ((0xE15AE8, 'movew %fp@(-38),%a5@(3172)'),)),
+    _site(0xE178D2, 'const', ('movel #196616,%fp@(-40)',), ((-40, 4),), _OPEN_OPT,
+          '../source xns/xns.ins.pas', ((0xE178F0, 'movew %fp@(-38),%a5@(118)'),)),
+    _site(0xE71032, 'const', ('clrl %a3@(66)',), ((0x42, 4),),
+          ((0x42, 2, 'uppid'), (0x44, 2, 'upgid')), '../source audit/audit.ins.pas',
+          ((0xE71012, 'pea %a3@(66)'), (0xE71016, 'pea %a3@(68)'))),
+    _site(0xE0EA1A, 'const', ('clrl %a4@(1000)',), ((1000, 4),),
+          ((1000, 2, 'data_len'), (1002, 2, 'hdr_len')), '../source netbuf/netbuf.ins.pas',
+          (), 'every access to 1000 is a longword (0xE0EE9A, 0xE16108, 0xE16308)'),
+    _site(0xE59886, 'const', ('movel #65535,%a3@(10)',), ((10, 4),),
+          ((10, 2, 'reserved2'), (12, 2, 'reserved3')), '../source msg/msg.ins.pas'),
+    _site(0xE595EE, 'const', ('movel #65535,%a3@(10)',), ((10, 4),),
+          ((10, 2, 'reserved2'), (12, 2, 'reserved3')), '../source msg/msg.ins.pas'),
+    _site(0xE68EDA, 'const', ('movel #65536,%a2@(18)',), ((18, 4),),
+          ((18, 2, 'port_type'), (20, 2, 'port_socket')), '../source rip/rip.ins.pas',
+          ((0xE68ECA, 'movew %a4@(46),%a2@(18)'), (0xE68ED0, 'movew %a4@(48),%a2@(20)')),
+          'the other arm copies the two words apart'),
+    _site(0xE3E1FC, 'const',
+          ('lea %pc@(0xe3e21e),%a0', 'lea %a3@,%a1', 'movel %a0@+,%a1@+',
+           'movel %a0@+,%a1@+', 'movew %a0@+,%a1@+'),
+          ((0, 4), (4, 4), (8, 2)),
+          ((0, 4, 'l_00'), (4, 2, 'w_04'), (6, 2, 'w_06'), (8, 2, 'w_08')),
+          '../source flp/flp.ins.pas', ((0xE3E208, 'movew #1,%a3@(6)'),),
+          '10 bytes copied from a code constant (0xE3E21E)'),
+    _site(0xE19D8A, 'const',
+          ('clrl %fp@(-24)', 'lea %fp@(-20),%a1', 'clrl %a1@+', 'clrl %a1@+',
+           'clrl %a1@+', 'clrl %a1@+', 'clrw %a1@+'),
+          ((0, 4), (4, 4), (8, 4), (12, 4), (16, 4), (20, 2)),
+          ((0, 4, 'xfer_other'), (4, 4, 'xfer_op2'), (8, 2, 'not_ready'), (10, 2, 'w_0a'),
+           (12, 2, 'seek_errors'), (14, 2, 'equip_checks'), (16, 2, 'w_10'),
+           (18, 2, 'data_checks'), (20, 2, 'dma_overruns')),
+          '../source win/win.ins.pas win_$cnt_t (offsets from the local)',
+          ((0xE1910E, 'addqw #1,%a5@(72)'),), 'WIN_$CNT (A5+0x40) bumps not_ready alone'),
+    # copies: `src' is the source's (type, offset, size)
+    _site(0xE69C16, 'copy', ('movel %a0@(44),%a1@(4)',), ((4, 4),),
+          ((4, 2, 'short_info.status'), (6, 2, 'short_info.port_type')),
+          '../source route/route.ins.pas route_$short_port_t', _ROUTE_APART,
+          src=_PORT(0x2C)),
+    _site(0xE49CA6, 'copy', ('movel %a1@(46),%a0@(8)',), ((8, 4),),
+          ((8, 2, 'port_type'), (10, 2, 'socket')), '../source hint/hint.ins.pas',
+          _ROUTE_APART, src=_PORT(0x2E)),
+    _site(0xE311D8, 'copy', ('movel %a2@(46),%a0@(8)',), ((8, 4),),
+          ((8, 2, 'port_type'), (10, 2, 'socket')), '../source hint/hint.ins.pas',
+          _ROUTE_APART, src=_PORT(0x2E)),
+    _site(0xE6905E, 'copy', ('movel %a4@(46),%fp@(-14)',), ((-14, 4),),
+          ((-14, 2, 'd_buf.port_type'), (-12, 2, 'd_buf.port_socket')),
+          '../source rip/rip.ins.pas', _ROUTE_APART, src=_PORT(0x2E)),
+    _site(0xE16108, 'copy', ('movel %a1@(1000),%a2@(42)',), ((42, 4),),
+          ((42, 2, 'info.data_len'), (44, 2, 'info.hdr_len')), '../source sock/sock.ins.pas',
+          src=('netbuf_$hdr_page_t', 1000, 4)),
+    _site(0xE1628A, 'copy', ('movel %a2@(42),%a0@(1000)',), ((1000, 4),),
+          ((1000, 2, 'data_len'), (1002, 2, 'hdr_len')), '../source netbuf/netbuf.ins.pas',
+          src=('sock info', 42, 4)),
+)
+
+# The statements dpc refused as "a store adjacent to the previous
+# statement's store" in ../source 980aa83a (the second statement's line;
+# rip/table.pas:175 and netlog/log_it.pas:156 are the next pairs of their
+# routines, behind the first refusal), with the
+# image's instructions for the pair: `merged' (one reference, or a block
+# store, for both), `apart', or `not a pair' (the image's values are not
+# a constant or a copy pair: registers, or sources not adjacent, where
+# dpc's frame or slots differ).
+REFUSAL_SITES = (
+    ('acl/convert_image.pas:134', 'const', 0xE44EC6, ('clrb %a2@(40)', 'clrb %a2@(41)'),
+     'apart'),
+    ('acl/copy.pas:202', 'const', 0xE4941E, ('moveb #15,%fp@(-140)', 'moveb #7,%fp@(-139)'),
+     'apart'),
+    ('acl/def_acldata.pas:85', 'const', 0xE47916,
+     ('moveb #16,%a0@(24)', 'moveb #16,%a0@(25)'), 'apart'),
+    ('acl/image_internal.pas:291', 'const', 0xE47DD8, ('clrb %a1@(40)', 'clrb %a1@(41)'),
+     'apart'),
+    ('acl/prim_create_internal.pas:422', 'const', 0xE4521E, ('clrl %a1@(34)',), 'merged'),
+    ('app/std_open.pas:80', 'const', 0xE00BA8, ('movel #77135874,%fp@(-40)',), 'merged'),
+    ('area/init.pas:104', 'const', 0xE2F3C0, ('clrw %a0@(1506)', 'clrw %a0@(1504)'),
+     'apart'),
+    ('audit/log_event_s.pas:253', 'const', 0xE71032, ('clrl %a3@(66)',), 'merged'),
+    ('disk/get_mnt_info.pas:116', 'copy', 0xE6BEFE,
+     ('movew %a3@(-42),%a1@(10)', 'movew %a3@(-34),%a1@(12)'), 'not a pair'),
+    ('disk/pv_mount.pas:55', 'const', 0xE6C9FA, ('movew #1,%fp@(-26)', 'movew #1,%fp@(-24)'),
+     'apart'),
+    ('ec/ec2_wait.pas:551', 'const', 0xE4281C, ('clrw %a0@(6)', 'clrw %a0@(8)'), 'apart'),
+    ('flp/dinit.pas:157', 'const', 0xE3E1FC, ('lea %pc@(0xe3e21e),%a0',), 'merged'),
+    ('flp/flp_do_io.pas:163', 'const', 0xE3DE4A,
+     ('movew #25,%a5@(306)', 'movew #500,%a5@(304)'), 'apart'),
+    ('hint/add_net.pas:53', 'copy', 0xE49CA6, ('movel %a1@(46),%a0@(8)',), 'merged'),
+    ('hint/clear_hintfile.pas:130', 'copy', 0xE311D8, ('movel %a2@(46),%a0@(8)',), 'merged'),
+    ('kbd/init.pas:80', 'const', 0xE33374, ('clrl %a0@(88)',), 'merged'),
+    ('log/add.pas:244', 'const', 0xE176B0, ('movel #65537,%a0@',), 'merged'),
+    ('log/init.pas:357', 'const', 0xE3017C, ('moveq #1,%d0', 'movel %d0,%a0@'), 'merged'),
+    ('mac_os/init.pas:169', 'const', 0xE2F590, ('movel #65537,%a0@(4)',), 'merged'),
+    ('msg/rcv_contig.pas:245', 'const', 0xE59886, ('movel #65535,%a3@(10)',), 'merged'),
+    ('msg/rcv_internal.pas:183', 'const', 0xE595EE, ('movel #65535,%a3@(10)',), 'merged'),
+    ('net_io/create_port.pas:210', 'copy', 0xE5A574,
+     ('movew %d2,%a2@(46)', 'movew %d3,%a2@(48)'), 'not a pair'),
+    ('netbuf/add_pages.pas:200', 'const', 0xE0EA1A, ('clrl %a4@(1000)',), 'merged'),
+    ('netlog/cntl.pas:166', 'const', 0xE719A4, ('clrw %a5@(112)', 'clrw %a5@(114)'), 'apart'),
+    ('netlog/log_it.pas:154', 'copy', 0xE71BF4, ('movew %d5,%a0@(-8)', 'movew %d6,%a0@(-6)'),
+     'not a pair'),
+    ('netlog/log_it.pas:156', 'copy', 0xE71BFC,
+     ('movew %fp@(22),%a0@(-4)', 'movew %fp@(24),%a0@(-2)'), 'apart'),
+    ('pmap/init_timers.pas:74', 'const', 0xE2F8BA,
+     ('clrw %a0@(52)', 'movel #468750,%a0@(54)'), 'apart'),
+    ('pmap/init_ws_scan.pas:80', 'const', 0xE1465E,
+     ('clrw %a2@(48)', 'movel #250000,%a2@(50)'), 'apart'),
+    ('proc1/bind.pas:126', 'const', 0xE14DA6, ('movel #65552,%a2@(86)',), 'merged'),
+    ('proc1/get_info.pas:102', 'const', 0xE15004, ('lea %a2@(2),%a0', 'clrl %a0@+'),
+     'merged'),
+    ('proc1/init_loadav.pas:68', 'const', 0xE14CBC,
+     ('clrw %fp@(-20)', 'movel #1250000,%fp@(-18)'), 'apart'),
+    ('ring/svc_read.pas:161', 'const', 0xE775AE, ('movew #1,%fp@(-126)', 'clrw %fp@(-124)'),
+     'apart'),
+    ('rip/port.pas:160', 'const', 0xE15ABA, ('movel #65538,%fp@(-40)',), 'merged'),
+    ('rip/send.pas:304', 'const', 0xE8711C, ('clrb %a0@(4)', 'moveb #1,%a0@(5)'), 'apart'),
+    ('rip/table.pas:171', 'copy', 0xE68ECA,
+     ('movew %a4@(46),%a2@(18)', 'movew %a4@(48),%a2@(20)'), 'apart'),
+    ('rip/table.pas:175', 'const', 0xE68EDA, ('movel #65536,%a2@(18)',), 'merged'),
+    ('rip/table.pas:342', 'copy', 0xE6905E, ('movel %a4@(46),%fp@(-14)',), 'merged'),
+    ('route/short_port.pas:47', 'copy', 0xE69C16, ('movel %a0@(44),%a1@(4)',), 'merged'),
+    ('sock/get.pas:118', 'copy', 0xE16108, ('movel %a1@(1000),%a2@(42)',), 'merged'),
+    ('sock/put.pas:271', 'copy', 0xE1628A, ('movel %a2@(42),%a0@(1000)',), 'merged'),
+    ('tpad/re_range.pas:111', 'const', 0xE69A68,
+     ('movew #256,%a1@(-30)', 'movew #256,%a1@(-28)'), 'apart'),
+    ('tpad/set_cursor.pas:122', 'const', 0xE69902, ('clrw %a5@(378)', 'clrw %a5@(376)'),
+     'apart'),
+    ('tty/i_init.pas:293', 'const', 0xE332CC, ('clrw %a0@(88)', 'clrw %a0@(86)'), 'apart'),
+    ('tty/i_set_raw_mode.pas:188', 'const', 0xE1BFE4, ('movel #65537,%a2@(56)',), 'merged'),
+    ('tty/k_reset.pas:142', 'const', 0xE67322, ('movel #65537,%a2@(714)',), 'merged'),
+    ('vtoc/old_to_new.pas:120', 'copy', 0xE19DCA,
+     ('moveb %a0@,%a1@', 'moveb %a0@(1),%a1@(1)'), 'apart'),
+    ('win/get_stats.pas:80', 'const', 0xE19D8A, ('clrl %fp@(-24)',), 'merged'),
+    ('win/reinit_drive.pas:156', 'const', 0xE1955C,
+     ('movew #-1,%a5@(116)', 'movew #-1,%a5@(114)'), 'apart'),
+    ('xns/error_send.pas:170', 'const', 0xE178D2, ('movel #196616,%fp@(-40)',), 'merged'),
+    ('xns/idp_init.pas:129', 'const', 0xE302A0, ('movew #225,%a1@(214)', 'clrw %a1@(216)'),
+     'apart'),
+    ('xns/idp_misc.pas:106', 'const', 0xE18F8C, ('movew #225,%a3@(214)', 'clrw %a3@(216)'),
+     'apart'),
+)
+
+
+def covers(layout, off, size):
+    """[(name, 'whole' | 'part')] of the objects of `layout' ((offset,
+    size, name), ...) that the store of `size' bytes at `off' reaches."""
+    res = []
+    for o, n, name in layout:
+        lo, hi = max(o, off), min(o + n, off + size)
+        if lo < hi:
+            res.append((name, 'whole' if (lo, hi) == (o, o + n) else 'part'))
+    return res
+
+
+def one_object(layout, stores):
+    """Whether every store covers exactly one whole object of `layout'
+    (None for an empty, unknown, layout)."""
+    if not layout:
+        return None
+    return all(len(c) == 1 and c[0][1] == 'whole'
+               for c in (covers(layout, o, n) for o, n in stores))
+
+
+def texts_match(ins, texts):
+    """Whether the instructions `ins' ([(addr, len, text)]) begin with
+    `texts'."""
+    return len(ins) >= len(texts) and all(t == x[2] for t, x in zip(texts, ins))
+
+
+def overlapping(sites):
+    """{addr: [addr, ...]}: for each merged copy, the other merged copies
+    whose source range in the same type overlaps its own without being
+    the same (then not both can be one object of that type)."""
+    res = {}
+    for s in sites:
+        if not s.get('src'):
+            continue
+        t, o, n = s['src']
+        for u in sites:
+            if u is s or not u.get('src'):
+                continue
+            t2, o2, n2 = u['src']
+            if t == t2 and (o, n) != (o2, n2) and max(o, o2) < min(o + n, o2 + n2):
+                res.setdefault(s['addr'], []).append(u['addr'])
+    return res
+
+
+def site_verdict(site, apart_ok, overlaps=()):
+    """`two objects' or `one object possible' for a MERGED_SITES entry
+    whose `apart' instructions were found in the image (apart_ok) or not.
+    A merged copy whose source overlaps another's (`overlapping') is
+    `overlaps': not all of them are one object of the source's type."""
+    if site['kind'] == 'copy':
+        return 'overlaps' if overlaps else 'one object possible'
+    if one_object(site['layout'], site['stores']) is False and (
+            (site['apart'] and apart_ok) or site['decl'].startswith(APOLLO)):
+        return 'two objects'
+    return 'one object possible'
+
+
+def segment_rows(merged, apart, seg_of):
+    """{segment: [merged, apart]}: how many of the addresses `merged' and
+    `apart' each segment (seg_of(addr)) holds."""
+    rows = {}
+    for i, addrs in enumerate((merged, apart)):
+        for a in addrs:
+            rows.setdefault(seg_of(a), [0, 0])[i] += 1
+    return rows
+
+
+def sites_main(argv):
+    import sau2map
+    verbose = '-v' in argv
+    m = sau2map.load()
+    _, rs = regalloc.routines()
+
+    def where(a):
+        for seg, r0, r1 in rs:
+            if r0 <= a < r1:
+                names = m.names_at(r0)
+                return names[0] if names else 'module-local 0x%X' % r0
+        return m.describe(a)
+
+    def at(a, n):
+        return loopalign.disasm(a, 0x40)[:n]
+
+    def seg_of(a):
+        s = m.segment_containing(a)
+        return '%s 0x%X' % (s.name, s.addr) if s else '?'
+
+    bad = 0
+    print('merged sites (ref 3.15.3 p. 3-57): the declared objects each store covers')
+    verdicts = Counter()
+    over = overlapping(MERGED_SITES)
+    for s in MERGED_SITES:
+        ok = texts_match(at(s['addr'], len(s['texts'])), s['texts'])
+        apart_ok = all(texts_match(at(a, 1), (t,)) for a, t in s['apart'])
+        bad += (not ok) + (not apart_ok)
+        v = site_verdict(s, apart_ok, over.get(s['addr'], ()))
+        verdicts[s['kind'], v] += 1
+        cov = '; '.join('+'.join('%s%s' % (n, '' if w == 'whole' else '(part)')
+                                 for n, w in covers(s['layout'], o, k)) or '%d..%d' % (o, o + k)
+                        for o, k in s['stores'])
+        print('0x%06X %-5s %-28s mod4=%d %-20s%s' % (
+            s['addr'], s['kind'], where(s['addr']), s['stores'][0][0] % 4, v,
+            '' if ok and apart_ok else ' [IMAGE DIFFERS]'))
+        if verbose:
+            print('    %s' % ' | '.join(s['texts']))
+            print('    covers: %s' % cov)
+            print('    layout: %s' % s['decl'])
+            if s['apart']:
+                print('    apart:  %s' % ', '.join('0x%06X %s' % x for x in s['apart']))
+            if s['src']:
+                print('    source: %s 0x%X..0x%X%s' % (
+                    s['src'][0], s['src'][1], s['src'][1] + s['src'][2] - 1,
+                    '; overlaps ' + ', '.join('0x%06X' % a for a in over[s['addr']])
+                    if s['addr'] in over else ''))
+            if s['note']:
+                print('    note:   %s' % s['note'])
+    print('verdicts: %s' % ', '.join('%s %s %d' % (k + (verdicts[k],))
+                                       for k in sorted(verdicts)))
+    print()
+    print('../source statements dpc refused (980aa83a); the image at the pair:')
+    rc = Counter()
+    for f, kind, a, texts, v in REFUSAL_SITES:
+        ok = texts_match(at(a, len(texts)), texts)
+        bad += not ok
+        rc[kind, v] += 1
+        print('  %-34s %-5s 0x%06X %-10s %s%s' % (f, kind, a, v, ' | '.join(texts),
+                                                '' if ok else '  [IMAGE DIFFERS]'))
+    print('by kind: %s' % ', '.join('%s %s %d' % (k + (rc[k],)) for k in sorted(rc)))
+    print()
+    pairs = []
+    for seg, r0, r1 in rs:
+        ins = [regalloc.Insn(a, k, t) for a, k, t in loopalign.disasm(r0, r1 - r0)]
+        pairs += adjacent_pairs(ins)
+    const = [p for p in pairs if p['mod4'] % 2 == 0
+             and all(x in ('zero', 'const') for x in p['values'].split('+'))]
+    copies = [p for p in pairs if p['mod4'] % 2 == 0 and p['copy']]
+    by = Counter((p['sizes'], p['order']) for p in const)
+    print('unmerged constant pairs, every merge condition met: %d (%s)' % (
+        len(const), ', '.join('%s %s %d' % (k + (by[k],)) for k in sorted(by))))
+    print('unmerged copies of adjacent memory: %d' % len(copies))
+    for title, kind, ap in (('constants', 'const', const), ('copies', 'copy', copies)):
+        rows = segment_rows([s['addr'] for s in MERGED_SITES if s['kind'] == kind],
+                            [p['addr'] for p in ap], seg_of)
+        both = sorted(k for k, (x, y) in rows.items() if x and y)
+        print('%s: segments with a merge %d, with a pair apart %d, with both %d%s' % (
+            title, sum(1 for x, y in rows.values() if x), sum(1 for x, y in rows.values() if y),
+            len(both), (': ' + ', '.join('%s (%d/%d)' % ((k,) + tuple(rows[k])) for k in both))
+            if both else ''))
+        if verbose:
+            for k in sorted(rows):
+                print('    %-26s merged %2d apart %3d' % ((k,) + tuple(rows[k])))
+    if bad:
+        print('%d listed instruction(s) differ from the image' % bad)
+    return 1 if bad else 0
+
+
 _AREG_USES = ('movel', 'addl', 'subl', 'cmpl', 'cmpal', 'moveal')
 _IMM = re.compile(r'(addl|subl|cmpl|addil|subil|cmpil|cmpal) #(0x[0-9a-f]+|-?\d+),(%[ad]\d)$')
 
@@ -654,6 +1095,8 @@ def main(argv):
         return blocks_main(argv[1:])
     if argv and argv[0] == 'merge':
         return merge_main(argv[1:])
+    if argv and argv[0] == 'sites':
+        return sites_main(argv[1:])
     lo, hi, _, argv = regalloc.opts(argv)
     if not argv or argv[0] not in ('summary', 'list'):
         print(__doc__)

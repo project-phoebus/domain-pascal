@@ -5111,12 +5111,20 @@ fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
 /// 0xE67322, KBD_$INIT 0xE333B6, PROC1_$BIND 0xE14DA6) and in the frame
 /// (ASKNODE_$PROPAGATE_WHO 0xE65EBC), and left 118 constant pairs of every
 /// kind of base apart (TTY_$I_INIT 0xE3332E, TPAD_$INIT 0xE3363E,
-/// ASKNODE_$SERVER 0xE65A3E).  So two consecutive stores of constants to adjacent objects
-/// of the same base that fit together in a word or a longword are
-/// rejected rather than guessed at, and so are two copies of adjacent
-/// memory to adjacent memory (a merged one, one `move.l`, cannot be told
-/// from a longword copy in the image; ../source reads SOCK_$GET 0xE16108
-/// as one).  A word and a longword of constants (6 bytes), the word the
+/// ASKNODE_$SERVER 0xE65A3E).  The merged pairs are two statements, not
+/// one 4-byte assignment that ../source's translation splits
+/// (`tools/storesurvey.py sites`): 22 of the 30 merged constant sites
+/// cover two objects that the image also reaches alone, or the tag and a
+/// field of Apollo's tty_$input_break_mode_t (0xE1BFE4, in the
+/// module-local 0xE1BF70).  So two consecutive stores of constants to
+/// adjacent objects of the same base that fit together in a word or a
+/// longword are rejected rather than guessed at, and so are two copies of
+/// adjacent memory to adjacent memory: the image merges such copies too
+/// (ROUTE_$SHORT_PORT 0xE69C16 copies route_$port_t's 0x2C..0x2F as one
+/// longword, HINT_$ADD_NET 0xE49CA6 and RIP_$TABLE 0xE6905E its
+/// 0x2E..0x31, so not every one is one object), and keeps others apart
+/// (RIP_$TABLE_D 0xE68ECA, 19 in all).  A word and a longword of
+/// constants (6 bytes), the word the
 /// lower, are rejected too: FIM_$BUILD_DF 0xE0A896 zeroes a word at 0x54
 /// and a longword at 0x56 as `clr.l (0x54,A2); clr.w (0x58,A2)`, merged
 /// and split at the other boundary, while 0xE14CBC keeps such a pair

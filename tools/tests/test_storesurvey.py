@@ -188,5 +188,81 @@ class AddrSitesTest(unittest.TestCase):
         self.assertEqual([(r['enc'], r['sym']) for r in res], [('i', 'num')])
 
 
+class SitesTest(unittest.TestCase):
+    """`sites' (bead domain-pascal-2m0): merged stores against the
+    declared objects."""
+
+    def test_covers_tty_buffers(self):
+        # TTY_$K_RESET 0xE67322: input_head with the first field of the
+        # input buffer, then tail+size; output head+tail, size alone
+        lay = storesurvey._TTY_BUF
+        self.assertEqual(storesurvey.covers(lay, 0x2CA, 4),
+                         [('input_head', 'whole'), ('input.head', 'whole')])
+        self.assertEqual(storesurvey.covers(lay, 0x3D6, 2), [('output.size', 'whole')])
+        self.assertFalse(storesurvey.one_object(lay, ((0x2CA, 4),)))
+        self.assertTrue(storesurvey.one_object(lay, ((0x3D6, 2),)))
+
+    def test_split_object(self):
+        # FIM_$BUILD_DF 0xE0A896: a word and a longword cleared l+w; the
+        # longword stored in two parts
+        lay = ((0x54, 2, 'sr'), (0x56, 4, 'pc'))
+        self.assertEqual(storesurvey.covers(lay, 0x54, 4), [('sr', 'whole'), ('pc', 'part')])
+        self.assertEqual(storesurvey.covers(lay, 0x58, 2), [('pc', 'part')])
+        self.assertIsNone(storesurvey.one_object((), ((0, 4),)))
+
+    def test_verdict(self):
+        s = storesurvey._site(0x100, 'const', ('movel #65537,%a0@',), ((0, 4),),
+                              storesurvey._HEAD_TAIL, 'x', ((0x200, 'tstw %a0@(2)'),))
+        self.assertEqual(storesurvey.site_verdict(s, True), 'two objects')
+        # the access apart not found, or none listed: not shown
+        self.assertEqual(storesurvey.site_verdict(s, False), 'one object possible')
+        s['apart'] = ()
+        self.assertEqual(storesurvey.site_verdict(s, True), 'one object possible')
+        # Apollo's layout is enough
+        s['decl'] = storesurvey.APOLLO + ' sys/ins/x.ins.pas'
+        self.assertEqual(storesurvey.site_verdict(s, True), 'two objects')
+        # one whole object per store: one object, whatever the evidence
+        s['layout'] = ((0, 4, 'l'),)
+        self.assertEqual(storesurvey.site_verdict(s, True), 'one object possible')
+
+    def test_overlapping_copies(self):
+        # ROUTE_$SHORT_PORT 0xE69C16 copies route_$port_t's 0x2C..0x2F,
+        # HINT_$ADD_NET 0xE49CA6 its 0x2E..0x31: not both one object
+        site = storesurvey._site
+        a = site(0xE69C16, 'copy', ('x',), ((4, 4),), (), 'd', src=('port', 0x2C, 4))
+        b = site(0xE49CA6, 'copy', ('x',), ((8, 4),), (), 'd', src=('port', 0x2E, 4))
+        c = site(0xE6905E, 'copy', ('x',), ((8, 4),), (), 'd', src=('port', 0x2E, 4))
+        d = site(0xE16108, 'copy', ('x',), ((42, 4),), (), 'd', src=('other', 0x2E, 4))
+        over = storesurvey.overlapping([a, b, c, d])
+        self.assertEqual(over, {0xE69C16: [0xE49CA6, 0xE6905E],
+                                0xE49CA6: [0xE69C16], 0xE6905E: [0xE69C16]})
+        self.assertEqual(storesurvey.site_verdict(b, True, over[0xE49CA6]), 'overlaps')
+        self.assertEqual(storesurvey.site_verdict(d, True, ()), 'one object possible')
+
+    def test_texts_match(self):
+        ins = [(0x100, 6, 'movel #65537,%a2@(56)'), (0x106, 4, 'clrw %a2@(60)')]
+        self.assertTrue(storesurvey.texts_match(ins, ('movel #65537,%a2@(56)',)))
+        self.assertFalse(storesurvey.texts_match(ins, ('movel #65537,%a2@(58)',)))
+        self.assertFalse(storesurvey.texts_match(ins[:1], ('movel #65537,%a2@(56)',
+                                                           'clrw %a2@(60)')))
+
+    def test_segment_rows(self):
+        rows = storesurvey.segment_rows([1, 2, 11], [12, 13, 21],
+                                        lambda a: 'S%d' % (a // 10))
+        self.assertEqual(rows, {'S0': [2, 0], 'S1': [1, 2], 'S2': [0, 1]})
+
+    def test_tables_are_consistent(self):
+        # every refused site the image merges is a listed merged site
+        merged = {s['addr'] for s in storesurvey.MERGED_SITES}
+        for f, kind, a, texts, v in storesurvey.REFUSAL_SITES:
+            self.assertIn(v, ('merged', 'apart', 'not a pair'), f)
+            self.assertIn(kind, ('const', 'copy'), f)
+            if v == 'merged':
+                self.assertIn(a, merged, f)
+        for s in storesurvey.MERGED_SITES:
+            self.assertEqual(s['addr'] % 2, 0)
+            self.assertTrue(s['texts'] and s['stores'], hex(s['addr']))
+
+
 if __name__ == '__main__':
     unittest.main()
