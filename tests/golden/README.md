@@ -545,6 +545,12 @@ Tests:
   0xE760F4, RINGLOG_$LOGIT 0xE1A3A0 and 0xE1A3F4), a longword parameter's
   low byte (DISK_IO 0xE3D630), function results stored at the narrow
   width from D0 (RIP_$TABLE_D 0xE68F24, NETWORK 0xE0F526).
+- `expr/element_update` - codegen-patterns 8 ("Array elements"; bead
+  domain-pascal-9pkq): `x[i] := x[i] ± 1` on a word array of the unit's
+  data indexed by another unit's word, loaded, changed and stored within
+  a byte (AUDIT_$CONTROL 0xE715CC), `lea` and `addq`/`subq` in place
+  beyond (ACL_$ENTER_SUPER 0xE46FA4); a field of another unit's array and
+  a byte element in place (PMAP_ 0xE13146, AST_ 0xE00E2C).
 - `nested/static_link` - codegen-patterns 6, 12.5: nested routines in the
   shape of PMAP_$FLUSH 0xE1376C: emitted before their enclosing routine;
   the static link passed in A1 to a routine a sibling also calls

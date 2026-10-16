@@ -2498,10 +2498,15 @@ variables.  Each module's static data is a data segment, addressed off
       statements, one `lea`.  AUDIT_$SUSPEND 0xE70DBA..0xE70DCE places
       the `lea` *between* the index load and its scaling (`move.w
       0xE20608,D0; lea 0xE854D8,A0; add.w D0,D0; move.w
-      (-2,A0,D0.w),D1`); that scheduling is not modelled, so an array
-      element of the unit's data is refused in such a routine
-      (AUDIT_$SUSPEND and AUDIT_$RESUME also need an in-place element
-      update, not supported yet).  Only bodies of assignments without
+      (-2,A0,D0.w),D1`), as another unit's `movea.l #sym` base (5.2,
+      "Another unit's array"): implemented so for that shape only, an
+      element loaded, changed and stored (section 8, "Array elements")
+      as the routine's first static reference, within a byte, the only
+      sites (`isel.rs` `index_ea`, `abs_elem_update`).  Any other element
+      in such a routine is refused, not seen: a plain load or store, an
+      element beyond a byte, one after the block's `lea`, a scaling with
+      `neg`.  Conformance unit `audit_suspend.pas` (bead
+      domain-pascal-9pkq).  Only bodies of assignments without
       calls or branches are accepted, the only shapes seen (where the
       base register would live across a call, or where a branch would
       put the `lea`, is not known).  No site addresses its own block with
@@ -7107,11 +7112,69 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   (0xE00B3E `addq.w #1,abs.l`; ACL_$ENTER_SUPER 0xE46FA8 `addq.w
   #1,(0xb76,A0)`), `addi`/`subi` to memory ×20 (0xE010C4 `addi.l
   #0xc0,(0x3f4,A5)`), `andi`/`ori` to memory ×560 (0xE0086E `andi.l
-  #-0x7f8001,(0x26,A2)`), against 6 plain operands loaded, changed and
-  stored back (0xE025B0).  For an array element both forms occur: 14
-  `addq`/`subq` to an indexed operand (0xE13154 `addq.l
-  #1,(-4,A0,D0.w)`) against 10 load, change, store sequences
-  (AUDIT_$SUSPEND 0xE70DC8..0xE70DCE): rejected.
+  #-0x7f8001,(0x26,A2)`), against 6 operands loaded, changed and
+  stored back, all of them elements or objects through a register set
+  by an earlier statement (NETWORK_ 0xE11880, the element's `lea` made
+  before an `if`; MMAP_ 0xE0C596, 0xE0C742; AST_ 0xE025B0, 0xE02800;
+  PCHIST_$COUNT 0xE1A1DC; below).
+- **Array elements, `x[i] := x[i] ± 1` (survey Verified at the sites;
+  what decides the form not known, bead domain-pascal-1bme; implemented
+  for a narrow gate, bead domain-pascal-9pkq).**  Survey `tools/
+  elemupdate.py summary` / `list` / `plain` (every
+  `addq`/`subq`/`addi`/`subi` of compiled code, reachable instructions
+  of `tools/arithsurvey.py routines`, whose destination is an element
+  operand, `(d,An,Dx)` or `(d,Am)` right after `lea (0,An,Dx),Am`,
+  against `move.<s> E,Dn; op #c,Dn; move.<s> Dn,E` through the same
+  operand E): 49 updates in place against 13 loads, changes and stores
+  (the 5 AST_ `andi; ori` sequences on `(2,An,Dx)`, 0xE03490, are packed
+  fields and left out; so are the `andi`/`ori`/`bset`/`bclr` to elements,
+  which cannot be told from packed-field stores).  Every update is of 1
+  (`addq`/`subq` #1, in place or in the register); no `addi`/`subi` to an
+  element, no other constant: `dpc` refuses every other constant.
+
+  | Base, form | In place | Loaded, changed, stored |
+  |---|---|---|
+  | another unit's array, `movea.l #sym` in the statement, within a byte | 9: PMAP_ 0xE13154, 0xE1323C, 0xE136C6 (A3 held) and NETWORK 0xE11066 (`move.w PROC1_$CURRENT,D0; movea.l #PROC1_$STATS,A0; lsl.w #4,D0; addq.l #1,(-4,A0,D0.w)`), AST_ 0xE00E2C `subq.b` and 2 more (`subq.b`, `addq.b`), REM_FILE_$SERVER 0xE63648, RING_$INT 0xE757C6 | 0 |
+  | another unit's array, `lea (0,An,Dx),Am` beyond a byte (bead domain-pascal-1ibr) | 11: PROC2_ 0xE41F5E ×7, EC2_$WAIT ×2, PMAP_$WS_SCAN_CALLBACK 0xE14552, ACL_$UP 0xE4705C (biased) | 0 |
+  | the unit's data, a word of a word array indexed by another unit's word (`move.w PROC1_$CURRENT,D0; add.w D0,D0`), within a byte | 0 | 7: AUDIT_$SUSPEND 0xE70DC8 (`lea 0xE854D8,A0`, `--a5-absolute`), AUDIT_$RESUME 0xE70DE8, AUDIT_$LOG_EVENT 0xE70E70 and 0xE710B0, AUDIT_$CONTROL 0xE715D4, 0xE7165C, 0xE71688 (off A5) |
+  | the same, beyond a byte (`lea (0,A5,D0.w),A0`) | 18: ACL_$ENTER_SUPER 0xE46FA8 `addq.w #1,(0xb76,A0)`, ACL_$EXIT_SUPER 0xE46FE8, ACL_$PRIM_CREATE, ACL_$SET_RE_ALL_SIDS, ACL_$CONVERT_TO_9ACL, ... (all ACL_, one array) | 0 |
+  | the unit's data, other indices (a register-held value, `.l` after `ext.l` or `clr.l`) or elements | 6: MEM_$PARITY_LOG 0xE0ADD4 `addq.w #1,(8,A5,D1.l)`, 0xE0AE06; ROUTE_$PROCESS 0xE874E6; NETWORK 0xE1075E, RIP_$NET_LOOKUP 0xE15520, XNS_IDP_ 0xE17CF0 (`lea` beyond a byte, or at 100) | 5: NETWORK_$INSTALL_NET 0xE0F224 `move.l (38,A5,D0.l),D4; addq.l #1,D4; move.l D4,(38,A5,D0.l)`, NETWORK_$REMOVE_NET 0xE0F2A4; AST_ 0xE025B0, 0xE02800 (`lea`, the index's register reused for the value); NETLOG_$LOG_IT 0xE71B9C (the `lea` made twice, for the load and for the store) |
+  | through a pointer or a base held from earlier | 5: BAT_$FREE 0xE3B6BE, BAT_$ALLOCATE 0xE3B386, FILE_$FORK_LOCK 0xE742D8 `addq.b`, ROUTE_ 0xE8765A, 0xE87D30 | 1: PCHIST_$COUNT 0xE1A1DC (and the 3 objects through a register set earlier, MMAP_ 0xE0C596, 0xE0C742, NETWORK_ 0xE11880, above) |
+
+  - **Rule (implemented, `isel.rs` `element_update_form`):** another
+    unit's array within a byte: in place (9 sites, no counterexample;
+    beyond a byte 11 in place too, but refused: the `lea`'s register is
+    bead domain-pascal-1ibr, and PCHIST_$COUNT 0xE1A1DC, whose base
+    ../source reads as another unit's variable held from a `with`, loads,
+    changes and stores); a word of a
+    word array of the unit's data indexed by another unit's word
+    variable: loaded, changed and stored within a byte, `lea` and in
+    place beyond (the 25 sites of this shape, reproduced).  The value of
+    the loaded form goes to a new data register, the lowest free (D1 at
+    all 7 AUDIT_ sites).  This gate is not a rule: each of its two forms
+    is one array of one unit (AUDIT_'s suspension counts, ACL_'s
+    super-user counts), and outside it the displacement is contradicted
+    (AST_ 0xE025A8..0xE025B6 loads, changes and stores beyond a byte with
+    a register index; MEM_$PARITY_LOG 0xE0ADD4, 0xE0AE06 and
+    ROUTE_$PROCESS 0xE874E6 update in place within a byte), and the AUDIT_
+    unit never updates anything by 1 in place.  The cause may be per unit
+    or a declaration the image does not show (ref Table 3-6 p. 3-55 gives
+    `atomic` "perform updates with single instruction when possible", so
+    a `volatile` object need not be): bead domain-pascal-1bme.  **The gate
+    must not be widened** until that bead settles it.
+  - **Refused** (specific messages): other elements of the unit's data
+    and elements through pointers or of the frame (both forms, no rule
+    found: MEM_$PARITY_LOG, PCHIST_$COUNT, RIP_$NET_LOOKUP of
+    ../source), a `for` loop's stepped pointer (not seen), volatile
+    elements (not seen), constants other than 1 and operations other
+    than `+`/`-` (not seen on elements); another unit's array beyond a
+    byte (above; PCHIST_$COUNT, ACL_$UP of ../source, the latter also
+    refused by 5.2's overlay rule).
+  - Conformance units `acl_enter_exit_super.pas` (ACL_$ENTER_SUPER,
+    ACL_$EXIT_SUPER) and `audit_suspend.pas` (AUDIT_$SUSPEND,
+    AUDIT_$RESUME, `--a5-absolute`), byte-identical; golden
+    `expr/element_update`; `crates/dpc-m68k/tests/expr.rs`
+    `element_updates`; survey tests `tools/tests/test_elemupdate.py`.
 - **`&` (ref p. 4-33; Verified counts):** with a constant and a variable
   (in memory or held in a register): the constant first, then `and.<s>
   x,Dn` (about 300 with the constant loaded by the instruction just

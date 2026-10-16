@@ -70,6 +70,13 @@ tests/conformance/audit_is_process_audited.pas  AUDIT_$IS_PROCESS_AUDITED  --sec
 # Another unit's array (codegen-patterns 5.2, bead domain-pascal-rlnm):
 # `movea.l #sym,An' between the index's load and its scaling.
 tests/conformance/acl_is_process_type_2.pas  0xE46498:20
+# Array elements updated by a constant (codegen-patterns 8, "Array
+# elements"; bead domain-pascal-9pkq): a word of the unit's data indexed
+# by another unit's word, `lea' and `addq.w'/`subq.w' in place beyond a
+# byte; loaded, changed and stored within a byte, the data addressed
+# absolutely (`lea <block>.l,A0' between the index's load and scaling).
+tests/conformance/acl_enter_exit_super.pas   ACL_$ENTER_SUPER ACL_$EXIT_SUPER  --section-addr .bss.moddata.ACL_=0xE7CF54
+tests/conformance/audit_suspend.pas          AUDIT_$SUSPEND AUDIT_$RESUME  --section-addr .bss.moddata.AUDIT=0xE854D8  a5-absolute=AUDIT_$SUSPEND,AUDIT_$RESUME
 
 # Status out-parameters (codegen-patterns 9): `status.all := ...' through
 # the status slot; by-address slots used once each in a register no

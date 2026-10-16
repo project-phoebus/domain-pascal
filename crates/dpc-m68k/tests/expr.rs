@@ -50,6 +50,7 @@ var
   xh: extern array[100..107] of integer;
   xsr: extern record n: integer; a: array[1..8] of integer; end;
   rs: array[1..8] of rec;
+  vs: extern [volatile] array[1..8] of integer;
 function f(x: integer): integer; options(val_param, extern);
 procedure g(n: integer; var c: integer); options(val_param, extern);
 ";
@@ -176,10 +177,6 @@ fn unsupported_expressions() {
         ));
         assert!(e.contains(want), "{stmt}: {e}");
     }
-    // An array element updated in place: both forms in the image
-    // (AUDIT_$SUSPEND 0xE70DC8; 0xE13154).
-    let e = error("procedure t; internal;\nbegin\n  ws[w] := ws[w] + 1;\nend;\n");
-    assert!(e.contains("updating an array element in place"), "{e}");
     // rshft of a signed word (ref p. 4-171).
     let e = error("function t: integer; internal;\nbegin\n  t := rshft(w, 2);\nend;\n");
     assert!(e.contains("`rshft` of a signed operand"), "{e}");
@@ -863,4 +860,67 @@ fn word_div_mod_narrowed_to_a_byte() {
     );
     let e = error("function t: char; internal;\nbegin\n  t := chr(l mod 10);\nend;\n");
     assert!(e.contains("a longword `div`/`mod` used as a byte"), "{e}");
+}
+
+/// `x[i] := x[i] op c` (codegen-patterns 8, "Array elements"; bead
+/// domain-pascal-9pkq): the settled shapes, and refusals of the others.
+#[test]
+fn element_updates() {
+    let t = |stmt: &str| body(&format!("procedure t; internal;\nbegin\n  {stmt}\nend;\n"));
+    // A word of the unit's data indexed by another unit's word, within a
+    // byte: loaded, changed, stored (AUDIT_$CONTROL 0xE715CC..0xE715DA).
+    assert_eq!(
+        t("ws[w] := ws[w] + 1;"),
+        [
+            "move.w\t(W).l,%d0",
+            "add.w\t%d0,%d0",
+            "move.w\t(-2,%a5,%d0.w),%d1",
+            "addq.w\t#1,%d1",
+            "move.w\t%d1,(-2,%a5,%d0.w)",
+        ]
+    );
+    // Another unit's array: in place (PMAP_ 0xE13146..0xE13154).
+    assert_eq!(
+        t("xs[w] := xs[w] - 1;"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XS,%a0",
+            "add.w\t%d0,%d0",
+            "subq.w\t#1,(-2,%a0,%d0.w)",
+        ]
+    );
+    let refused = [
+        // The unit's data, other indices or elements: both forms.
+        (
+            "ws[ws[1]] := ws[ws[1]] + 1;",
+            "other than a word of a word array indexed by another unit's word variable",
+        ),
+        (
+            "rs[w].a := rs[w].a + 1;",
+            "other than a word of a word array indexed by another unit's word variable",
+        ),
+        // Through a pointer: both forms.
+        ("ip^[w] := ip^[w] + 1;", "of the frame or through a pointer"),
+        // Constants other than 1, operations other than `+`/`-`: not seen.
+        (
+            "ws[w] := ws[w] + 2;",
+            "other than by adding or subtracting 1 ",
+        ),
+        (
+            "xs[w] := xs[w] & 3;",
+            "other than by adding or subtracting 1 ",
+        ),
+        // Another unit's array beyond a byte (bead domain-pascal-1ibr;
+        // PCHIST_$COUNT 0xE1A1DC).
+        (
+            "xh[w] := xh[w] + 1;",
+            "another unit's array at a displacement beyond a byte",
+        ),
+        // A volatile element: not seen.
+        ("vs[w] := vs[w] + 1;", "volatile array"),
+    ];
+    for (stmt, want) in refused {
+        let e = error(&format!("procedure t; internal;\nbegin\n  {stmt}\nend;\n"));
+        assert!(e.contains(want), "{stmt}: {e}");
+    }
 }

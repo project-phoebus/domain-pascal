@@ -43,7 +43,12 @@ module-local routine at 0xE68864, `rip/server.c`'s RIP_$PACKET_LENGTH:
 `acl_is_process_type_2.pas` (the module-local routine at 0xE46498,
 `acl/is_process_type_2.c`: another unit's array, `movea.l
 #PROC1_$TYPE,A0` between the parameter's load and its copy and scaling,
-`(-2,A0,D1.w)`; bead domain-pascal-rlnm); `mmap_avail.pas` (MMAP_$AVAIL
+`(-2,A0,D1.w)`; bead domain-pascal-rlnm); `acl_enter_exit_super.pas`
+(ACL_$ENTER_SUPER, ACL_$EXIT_SUPER 0xE46F90: `x[i] := x[i] ± 1` on a word
+of the unit's data beyond a byte, `lea (0,A5,D0.w),A0; addq.w
+#1,(0xb76,A0)`) and `audit_suspend.pas` (AUDIT_$SUSPEND, AUDIT_$RESUME
+0xE70DB6: the same within a byte, loaded, changed and stored, the data
+addressed absolutely; bead domain-pascal-9pkq); `mmap_avail.pas` (MMAP_$AVAIL
 0xE0CC64: an element of another unit's array as a `with` record live
 across a call, `movea.l #MMAP,A0; move.l D2,D0; lsl.l #4,D0; lea
 (0,A0,D0.l),A2`; bead domain-pascal-o1kl; its `link #-4` the `with`

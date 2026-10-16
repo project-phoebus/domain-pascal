@@ -696,7 +696,27 @@ end;
     );
     assert_eq!(asm.matches("\tlea\t(.Ldata).l,").count(), 1, "{asm}");
     assert!(!asm.contains("%a5"), "{asm}");
-    // only straight-line stores without calls or element indexing
+    // An element loaded, changed and stored as the first static
+    // reference: the `lea` between the index's value and its scaling
+    // (AUDIT_$SUSPEND 0xE70DBA..0xE70DC6; bead domain-pascal-9pkq).
+    let src = "module m;
+var
+  t: array[1..4] of integer;
+  i: extern integer;
+procedure m_$up;
+begin
+  t[i] := t[i] + 1;
+end;
+";
+    let asm = compile_with("a5_absolute_update", src, &["--a5-absolute=m_$up"]).unwrap();
+    assert!(
+        asm.contains(
+            "\tmove.w\t(I).l,%d0\n\tlea\t(.Ldata).l,%a0\n\tadd.w\t%d0,%d0\n\
+             \tmove.w\t(-2,%a0,%d0.w),%d1\n\taddq.w\t#1,%d1\n\tmove.w\t%d1,(-2,%a0,%d0.w)\n"
+        ),
+        "{asm}"
+    );
+    // only straight-line stores without calls, and no other element form
     for (r, what) in [
         ("m_$call", "a statement other than an assignment"),
         ("m_$fcall", "calls or branches"),

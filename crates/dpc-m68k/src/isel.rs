@@ -2989,6 +2989,17 @@ enum Src8 {
     Sym(String),
 }
 
+/// How `x[i] := x[i] op c` updates the element
+/// ([`Selector::element_update_form`]; codegen-patterns 8).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ElementUpdate {
+    /// `addq`/`subq` to the element in memory.
+    InPlace,
+    /// The element loaded into a data register, changed there and stored
+    /// back through the same operand.
+    LoadModifyStore,
+}
+
 /// How [`Selector::block_address`] formed a block's address.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BlockForm {
@@ -5435,6 +5446,10 @@ pub struct Selector {
     /// With `data_absolute`: the address register the area's address was
     /// loaded into, once the first static operand needed it.
     abs_base: Option<u8>,
+    /// With `data_absolute`: an element's operand is being formed for
+    /// [`Self::element_load_modify_store`], the only element form seen
+    /// there ([`Self::index_ea`]).
+    abs_elem_update: bool,
     /// Blocks of the unit's other data sections whose address a register
     /// holds: the Pascal data section and the (virtual) address register
     /// loaded with `movea.l #block,An` ([`Self::other_base`]).  A call
@@ -5705,6 +5720,7 @@ impl Selector {
             unpopped: false,
             data_absolute: false,
             abs_base: None,
+            abs_elem_update: false,
             other_bases: Vec::new(),
             other_base_loads: Vec::new(),
             loops: Vec::new(),
@@ -12091,11 +12107,12 @@ impl Selector {
     /// `addq`/`subq` to memory (0xE00B3E `addq.w #1,abs.l`; ACL_$ENTER_SUPER
     /// 0xE46FA8 `addq.w #1,(0xb76,A0)`), 20 `addi`/`subi` (0xE010C4 `addi.l
     /// #0xc0,(0x3f4,A5)`), 560 `andi`/`ori` (0xE0086E `andi.l
-    /// #-0x7f8001,(0x26,A2)`), against 6 loads, operations and stores back
-    /// of the same plain operand (0xE025B0).  For an array element the
-    /// image does both (14 `addq` to an indexed operand, e.g. 0xE13154;
-    /// 10 load, operation and store, AUDIT_$SUSPEND 0xE70DC8..0xE70DCE):
-    /// refused.  Returns whether the statement was this form.
+    /// #-0x7f8001,(0x26,A2)`), against 3 loads, operations and stores back
+    /// of a plain operand (MMAP_ 0xE0C596, through a pointer held from an
+    /// earlier statement).  For an array element the image does both
+    /// (codegen-patterns 8, "Array elements"); the shapes settled there are
+    /// [`Self::element_update_form`]'s.  Returns whether the statement was
+    /// this form.
     fn update_in_place(&mut self, addr: &Addr, value: &Expr) -> Res<bool> {
         let Expr::Binary { op, lhs, rhs, ty } = value else {
             return Ok(false);
@@ -12116,12 +12133,22 @@ impl Selector {
             BinOp::Or => AluOp::Or,
             _ => return Ok(false),
         };
-        if matches!(addr.unwrap_volatile().0, Addr::Index { .. }) {
-            return Err(unsupported(
-                self.span,
-                "updating an array element in place (`addq` to the element or a load, \
-                 operation and store; the image does both, codegen-patterns 8) is",
-            ));
+        if let (
+            Addr::Index {
+                base,
+                index,
+                scale,
+                offset,
+            },
+            access,
+        ) = addr.unwrap_volatile()
+        {
+            let form =
+                self.element_update_form(base, index, *scale, *offset, access, alu, *c, ty.width)?;
+            if form == ElementUpdate::LoadModifyStore {
+                self.element_load_modify_store(addr, alu, *c, ty.width)?;
+                return Ok(true);
+            }
         }
         if let Addr::Frame(o) = addr {
             if self.pinned(*o).is_some() {
@@ -12150,6 +12177,159 @@ impl Selector {
             },
         });
         Ok(true)
+    }
+
+    /// The form of `x[i] := x[i] op c` (codegen-patterns 8, "Array
+    /// elements"; survey of every `addq`/`subq`/`addi`/`subi` to an
+    /// element operand of compiled code, `(d,An,Dx)` or `(d,Am)` after
+    /// `lea (0,An,Dx),Am`, against loads, operations and stores back
+    /// through the same operand; bead domain-pascal-9pkq):
+    ///
+    /// - another unit's array, the base loaded in the statement (`movea.l
+    ///   #sym,An`, [`Self::other_unit_index`]): in place, all 9 sites
+    ///   within a byte and 11 beyond (PMAP_ 0xE13146..0xE13154 `move.w PROC1_$CURRENT,D0;
+    ///   movea.l #PROC1_$STATS,A0; lsl.w #4,D0; addq.l #1,(-4,A0,D0.w)`,
+    ///   three like it; 0xE00E2C `subq.b`; RING_$INT 0xE757C6; PROC2_
+    ///   0xE41F5E `subq.w #1,(16176,A0)`), none loaded, changed and stored;
+    ///   beyond a byte refused (the `lea`'s register, bead
+    ///   domain-pascal-1ibr; PCHIST_$COUNT 0xE1A1DC loads, changes and
+    ///   stores, its base held from a `with`);
+    /// - a word of a word array of the unit's data indexed by another
+    ///   unit's word variable (`move.w abs.l,D0; add.w D0,D0`): within a
+    ///   byte, loaded, changed and stored (AUDIT_ ×7, AUDIT_$SUSPEND
+    ///   0xE70DC8..0xE70DCE `move.w (-2,A0,D0.w),D1; addq.w #1,D1; move.w
+    ///   D1,(-2,A0,D0.w)`, AUDIT_$CONTROL 0xE715D4 off A5); beyond, `lea`
+    ///   and in place (ACL_ ×18, ACL_$ENTER_SUPER 0xE46FA4..0xE46FA8 `lea
+    ///   (0,A5,D0.w),A0; addq.w #1,(0xb76,A0)`).  Each form is one array of
+    ///   one unit, and the displacement is contradicted outside this gate
+    ///   (AST_ 0xE025A8..0xE025B6 loads, changes and stores beyond a byte
+    ///   with a register index; MEM_$PARITY_LOG 0xE0ADD4, 0xE0AE06 and
+    ///   ROUTE_$PROCESS 0xE874E6 update in place within a byte; the AUDIT_
+    ///   unit never updates by 1 in place): the gate reproduces these 25
+    ///   sites and must not be widened; whether the cause is per unit is
+    ///   bead domain-pascal-1bme;
+    /// - other elements of the unit's data: both forms (in place: MEM_$
+    ///   PARITY_LOG 0xE0ADD4 `addq.w #1,(8,A5,D1.l)`, ROUTE_$PROCESS
+    ///   0xE874E6, RIP_$NET_LOOKUP 0xE15520, XNS_IDP_ 0xE17CF0; loaded,
+    ///   changed and stored: NETWORK_$INSTALL_NET 0xE0F224, NETWORK_$
+    ///   REMOVE_NET 0xE0F2A4, AST_ 0xE025B0 and 0xE02800, NETLOG_$LOG_IT
+    ///   0xE71B9C), no rule found: refused, as are elements of the frame,
+    ///   through pointers (both forms: BAT_$FREE 0xE3B6BE in place,
+    ///   PCHIST_$COUNT 0xE1A1DC not), through a `for` loop's stepped
+    ///   pointer (not seen), of volatile arrays (not seen), and operations
+    ///   other than `addq`/`subq` (the `andi`/`ori` to elements of the
+    ///   image cannot be told from packed-field stores).
+    #[allow(clippy::too_many_arguments)]
+    fn element_update_form(
+        &self,
+        base: &Addr,
+        index: &Expr,
+        scale: u32,
+        offset: i32,
+        access: Option<dpc_ir::Access>,
+        alu: AluOp,
+        c: i64,
+        w: Width,
+    ) -> Res<ElementUpdate> {
+        if access.is_some() {
+            return Err(unsupported(
+                self.span,
+                "updating an element of a volatile array in place (not seen, codegen-patterns \
+                 5.5, 8) is",
+            ));
+        }
+        // Every element update of the image is by 1 (49 `addq`/`subq #1`
+        // to an element, 13 loads, `addq`/`subq #1` and stores; no other
+        // constant, no `addi`/`subi` to an element).
+        if !matches!(alu, AluOp::Add | AluOp::Sub) || imm(c, w) != 1 {
+            return Err(unsupported(
+                self.span,
+                "updating an array element other than by adding or subtracting 1 (`addq`/`subq \
+                 #1`, the only updates of elements seen; `andi`/`ori` to an element cannot be \
+                 told from a packed field's store, codegen-patterns 8) is",
+            ));
+        }
+        if self.stepped_array(base, index, scale).is_some() {
+            return Err(unsupported(
+                self.span,
+                "updating an element in place through a `for` loop's stepped pointer (not seen, \
+                 codegen-patterns 7.4, 8) is",
+            ));
+        }
+        match base {
+            Addr::Symbol { offset: o, .. } if (-128..128).contains(&(o + offset)) => {
+                Ok(ElementUpdate::InPlace)
+            }
+            Addr::Symbol { .. } => Err(unsupported(
+                self.span,
+                "updating an element of another unit's array at a displacement beyond a byte in \
+                 place (`lea` and `addq` at 11 sites, PROC2_ 0xE41F5E, into the base's register \
+                 or another, bead domain-pascal-1ibr; PCHIST_$COUNT 0xE1A1DC loads, changes and \
+                 stores through a base held from an earlier statement; codegen-patterns 8) is",
+            )),
+            Addr::Static(o) => {
+                let other_unit_word = |e: &Expr| {
+                    matches!(
+                        e,
+                        Expr::Load { addr: Addr::Symbol { .. }, ty } if ty.width == Width::Word
+                    )
+                };
+                if w != Width::Word || scale != 2 || !other_unit_word(index) {
+                    return Err(unsupported(
+                        self.span,
+                        "updating an element of the unit's data in place other than a word of a \
+                         word array indexed by another unit's word variable (the image does both \
+                         `addq` to the element, MEM_$PARITY_LOG 0xE0ADD4, and a load, operation \
+                         and store, NETWORK_$INSTALL_NET 0xE0F224, NETLOG_$LOG_IT 0xE71B9C: no \
+                         rule found, codegen-patterns 8) is",
+                    ));
+                }
+                Ok(if (-128..128).contains(&(o + offset)) {
+                    ElementUpdate::LoadModifyStore
+                } else {
+                    ElementUpdate::InPlace
+                })
+            }
+            _ => Err(unsupported(
+                self.span,
+                "updating an element of an array of the frame or through a pointer in place (the \
+                 image does both through pointers, BAT_$FREE 0xE3B6BE `addq.l`, PCHIST_$COUNT \
+                 0xE1A1DC a load, operation and store: no rule found, codegen-patterns 8) is",
+            )),
+        }
+    }
+
+    /// `x[i] := x[i] + 1` (or `- 1`) as a load, an operation
+    /// and a store through one operand ([`Self::element_update_form`]):
+    /// AUDIT_$SUSPEND 0xE70DBA..0xE70DCE `move.w PROC1_$CURRENT,D0; lea
+    /// 0xE854D8,A0; add.w D0,D0; move.w (-2,A0,D0.w),D1; addq.w #1,D1;
+    /// move.w D1,(-2,A0,D0.w)`: the element's operand formed once, the
+    /// value in a new data register (D1, the lowest free).
+    fn element_load_modify_store(&mut self, addr: &Addr, alu: AluOp, c: i64, w: Width) -> Res<()> {
+        let size = size_of(w);
+        self.abs_elem_update = true;
+        let ea = self.ea_of(addr);
+        self.abs_elem_update = false;
+        let ea = ea?;
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size,
+            src: ea.clone(),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        let value = imm(c, w) as u8;
+        let dst = Ea::Reg(Reg::D(d));
+        self.out.push(if alu == AluOp::Add {
+            Insn::Addq { size, value, dst }
+        } else {
+            Insn::Subq { size, value, dst }
+        });
+        self.out.push(Insn::Move {
+            size,
+            src: Ea::Reg(Reg::D(d)),
+            dst: ea,
+        });
+        Ok(())
     }
 
     /// `lhs op rhs` into a new data register (codegen-patterns 8).
@@ -16516,17 +16696,42 @@ impl Selector {
             return Ok(Ea::Disp(offset, p));
         }
         let (areg, disp0) = match base {
-            // AUDIT_$SUSPEND 0xE70DBA..0xE70DC6 loads the base between
-            // the index load and its scaling: not modelled.
-            Addr::Static(_) if self.data_absolute => {
-                return Err(unsupported(
-                    self.span,
-                    "an array element in the unit's data addressed absolutely (--a5-absolute; \
-                     the `lea` is scheduled into the index computation, AUDIT_$SUSPEND \
-                     0xE70DC0) is",
-                ))
+            // The unit's data addressed absolutely (`--a5-absolute`,
+            // codegen-patterns 4), its first reference an element loaded,
+            // changed and stored ([`Self::element_load_modify_store`]): the
+            // `lea <area>.l,An` between the index's value and its scaling,
+            // as another unit's base ([`Self::other_unit_index`]):
+            // AUDIT_$SUSPEND 0xE70DBA..0xE70DC6 `move.w PROC1_$CURRENT,D0;
+            // lea 0xE854D8,A0; add.w D0,D0`, AUDIT_$RESUME 0xE70DDA, both
+            // within a byte (the only two sites; bead domain-pascal-9pkq).
+            // Any other element there (a plain load or store, beyond a
+            // byte, after the base's `lea`, a scaling with `neg`) is not
+            // seen.
+            Addr::Static(o) => {
+                if self.data_absolute {
+                    if !self.abs_elem_update
+                        || self.abs_base.is_some()
+                        || neg_form(scale)
+                        || !(-128..128).contains(&(*o + offset))
+                    {
+                        return Err(unsupported(
+                            self.span,
+                            "an array element in the unit's data addressed absolutely \
+                             (--a5-absolute) other than as the routine's first static reference, \
+                             within a byte, in `x[i] := x[i] ± 1` loaded, changed and stored \
+                             (AUDIT_$SUSPEND 0xE70DC0, the only sites; codegen-patterns 4) is",
+                        ));
+                    }
+                    let mut a = None;
+                    let x = self.index_reg_with(index, scale, &mut |s| {
+                        a = Some(s.static_base()?);
+                        Ok(())
+                    })?;
+                    let a = a.expect("the base is loaded");
+                    return self.element_ea(a, x, index, *o + offset);
+                }
+                (DATA_BASE_A, *o)
             }
-            Addr::Static(o) => (DATA_BASE_A, *o),
             Addr::Frame(o) => (FP, *o),
             Addr::Indirect { base: p, offset: o }
                 if matches!(
