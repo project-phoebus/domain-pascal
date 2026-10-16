@@ -558,6 +558,16 @@ Tests:
   the parameter passed on by address (`move.l (d,A6),-(SP)`, `pea
   (k,An)`); a field stored, `lea (k,An),Am; move.l Am,<dst>`.  Under
   `val_param` an `in` integer32's slot: `pea (d,A6)`, `lea (d,A6),An`.
+- `params/subrange_var_args` - codegen-patterns 1.2, 13, 12.5 (bead
+  domain-pascal-4tm; reference-clarifications Q38): an integer subrange
+  and an integer type of the same size passed to each other's `var`,
+  `out` and `in out` parameters, directly and through a routine pointer,
+  are pushed with the same `pea (d,A6)` as an exactly-typed argument
+  (TONE_$TIME 0xE1732C `pea (-8,A6)`); an integer constant outside an
+  integer subrange is stored, pushed (a byte `val_param` push too),
+  pooled for a by-address argument, loaded into a register-held local or
+  given as a static initial value as its low bytes, and stored to a
+  packed bit field or initialiser as its low bits (no image site).
 - `packed/fields` - codegen-patterns 5.3, 9 (bead domain-pascal-xlm):
   fields of packed records (ref 3.10.7): `status_$t` as Apollo's
   base.ins.pas declares it, `bset #7` for `fail` after `tst.w (2,A0)` of

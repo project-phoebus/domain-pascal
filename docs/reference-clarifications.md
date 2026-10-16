@@ -109,6 +109,13 @@ Question: does integer16 count as a subrange of integer32 for assignment and val
 Owner's answer (2026-10-15): yes, integer16 is a subrange of integer32 for narrowing purposes.
 Consequence: no change; dpc already accepts integer32 where integer16 is expected (assignment, value and `in` arguments, function results) and keeps the low bytes with no check (bead domain-pascal-8td; codegen-patterns 8, "Narrowing and widening").
 
+## Subranges and their base type as var arguments; out-of-range constants (Appendix D pp. D-3; messages 83/84 p. 9-16)
+Asked: 2026-10-14, by the corpus test (open question 38; bead domain-pascal-4tm); asked again 2026-10-15 when ../source's net_io and route needed it (../source "dpc gap 81", 14 routines in srcsurvey)
+Passage: see open question 38.  Appendix D, ISO 6.6.3.5/6.6.3.6, p. D-3: "Domain Pascal treats integer and subrange of integer as identical."  ISO 6.4.6, p. D-3: "You may make an assignment from an integer expression that includes a value outside one of the variables' declared subranges."
+Question: for `var`/`out`/`in out` parameters, are a subrange and its base type (or two subranges of one base type) compatible?  Is an out-of-range constant assigned to a subrange accepted?
+Owner's answer (2026-10-15): "apparently there's a compiler flag about this.  but we need to support the quiet subrange being accepted."  Out-of-range constant: accept, store the low bytes.
+Consequence: by default an integer subrange and an integer type (or two integer subranges) are accepted for each other as `var`/`out`/`in out` arguments, with no message; an out-of-range integer constant assigned to a subrange keeps its low bytes (as question 41's narrowing).  The flag the owner mentions is not identified: the reference's -iso (6.4.18, p. 6-23) and -std (6.4.27) do not name subranges, and dpc has neither, so no strict mode is implemented.  The lead keeps one limit not settled by the ruling: the two types must have the same size, since a by-address argument of 2 bytes for a 4-byte formal would make the callee read or write past it; a size mismatch stays refused.  Implemented under bead domain-pascal-4tm.  Two limits are the lead's reading, from the integer-only wording of Appendix D, p. D-3 ("integer and subrange of integer"; "an integer expression"), and not part of the owner's answer; they are to be confirmed with the owner: (a) both halves are limited to *integer* subranges, so a char, boolean or enumeration subrange and its base type are still refused for each other as `var`/`out`/`in out` arguments, and a char, boolean or enumeration subrange still refuses a constant outside it; (b) `integer16` itself still refuses a constant outside -32768..32767 (`i := 40000`), as it is a type, not a declared subrange (question 41's ruling is about narrowing values, not constants).  A constant for a packed-record field or packed-array element of an integer subrange keeps the field's low bits; a comparison with a constant outside the other operand's type stays refused ("not supported yet").
+
 ## Module heading with an empty code section (7.1.1, p. 7-2; 2.2.1, p. 2-10)
 Asked: 2026-10-15, by the lead (srcsurvey: PCHIST blocked; ../source pascal-translation-notes gap 35)
 Passage: 7.1.1 gives "module name [, code_section_name [, data_section_name]];" and says the module heading "is similar to a program heading"; 2.2.1 shows the program heading's `name, , data_section' form (question 8 accepted it for programs).
@@ -568,7 +575,7 @@ records the files it stops.
     constant legal (with the value `chr(k)`), and for which `k`?
     *Current: refused, "type transfer needs equal sizes" (bead
     domain-pascal-qvy).*
-38. **Messages 83 and 84, p. 9-16 (PDF p. 497); 5.1, p. 5-3.**  "Argument
+38. **Answered 2026-10-15; see Clarifications, "Subranges and their base type as var arguments; out-of-range constants".**  **Messages 83 and 84, p. 9-16 (PDF p. 497); 5.1, p. 5-3.**  "Argument
     n to routine is not compatible with the declared argument type." /
     "Argument n to routine is not within the declared argument subrange."
     / "The data type of each argument must match the data type of its
@@ -584,8 +591,8 @@ records the files it stops.
     array of `ios_$id_t`.  For `var`/`out`/`in out` parameters, are a
     subrange and its base type (or two subranges of one base type)
     compatible?  Is an out-of-range constant assigned to a subrange an
-    error, a warning, or accepted?  *Current: both refused (bead
-    domain-pascal-4tm).*
+    error, a warning, or accepted?  *Current: both accepted quietly for
+    integer subranges of the parameter's size (bead domain-pascal-4tm).*
 39. **Answered 2026-10-14 (refuse for now); see Clarifications, "Rshft, p. 4-171: rshft of a negative constant".**  **"Rshft", p. 4-171; 3.2.3, p. 3-5.**  "if num is negative and is a
     32-bit integer, the result of an rshft is always positive", and
     "Suppose num is 16 bits and equals -9. You perform an rshft with sh

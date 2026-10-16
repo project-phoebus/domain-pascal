@@ -21,3 +21,6 @@ __pycache__/
 .DS_Store
 *.swp
 *~
+
+# agent worktrees (Claude Code isolation)
+.claude/worktrees/

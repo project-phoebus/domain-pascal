@@ -41,13 +41,42 @@ fn type_mismatch_in_assignment() {
 #[test]
 fn constant_out_of_range() {
     assert_err(
-        "module m; type t = 0..9; var v: t; procedure p; begin v := 10 end;",
-        "out of range",
-    );
-    assert_err(
         "module m; var v: integer; procedure p; begin v := 40000 end;",
         "out of range",
     );
+    // Only integer subranges take an out-of-range constant (below); a
+    // char or enumeration subrange does not.
+    assert_err(
+        "module m; type t = 'a'..'f'; var v: t; procedure p; begin v := 'z' end;",
+        "out of range",
+    );
+    assert_err(
+        "module m; type c = (r, g, b, y); t = r..g; var v: t; procedure p; begin v := y end;",
+        "out of range",
+    );
+}
+
+/// Ref Appendix D, ISO 6.4.6, p. D-3: "You may make an assignment from an
+/// integer expression that includes a value outside one of the variables'
+/// declared subranges.  Also, you may pass an integer argument that is
+/// outside the corresponding parameter's declared subrange."
+/// Clarification Q38: accepted quietly, the low bytes kept.  Apollo's
+/// dmwin.pas: `connv[ios_$stderr] := ios_$no_stream;` (16#7FFF into an
+/// array of `ios_$id_t` = 0..127).
+#[test]
+fn out_of_range_constant_into_an_integer_subrange() {
+    let p = ok("module m;
+        const ios_$no_stream = 16#7FFF;
+        type ios_$id_t = 0..127; t = 0..9;
+        var connv: array[0..2] of ios_$id_t; v: t; w: t := 70000;
+        procedure q(x: t); extern;
+        procedure r(x: t); val_param; extern;
+        procedure p;
+        begin connv[2] := ios_$no_stream; v := 10; v := -1; q(12); r(40000) end;");
+    // A static initial value keeps its value; the data emitter keeps the
+    // low bytes of the 2-byte object.
+    let w = var(&p, "w").init.clone().unwrap();
+    assert_eq!(w[0].value, ConstValue::Int(70000));
 }
 
 #[test]
@@ -397,10 +426,10 @@ fn packed_bit_field_initialisers() {
     assert_eq!(x[0].value, ConstValue::Bool(true));
     assert_eq!(x[2].value, ConstValue::Int(-100));
     assert_eq!(x[3].value, ConstValue::Int(16));
-    assert_err(
-        "module m; type e = packed record a: 0..15; b: 0..15 end; var v: e := [a := 16];",
-        "constant 16 is out of range for 0..15",
-    );
+    // An out-of-range constant for an integer-subrange bit field is
+    // accepted (clarification Q38; Appendix D, ISO 6.4.6, p. D-3); the
+    // data emitter keeps the field's low bits.
+    ok("module m; type e = packed record a: 0..15; b: 0..15 end; var v: e := [a := 16];");
 }
 
 #[test]
@@ -1894,4 +1923,117 @@ fn univ_ptr_by_reference_parameters_take_any_pointer() {
          procedure q; var c: cp; begin typed(c) end;",
         "argument type cp does not match parameter type ip",
     );
+}
+
+/// Ref Appendix D, ISO 6.6.3.5/6.6.3.6, p. D-3: "Domain Pascal treats
+/// integer and subrange of integer as identical."  Clarification Q38: an
+/// integer subrange and an integer type, or two integer subranges, are
+/// accepted for each other as `var`, `out` and `in out` arguments, quietly,
+/// when they have the same size.  Sites: ../source net_io/init.pas (an
+/// `integer` for `var socket: pinteger` through a routine pointer);
+/// Apollo's sasc examples (an `integer32` for a `linteger` = 0..2147483647
+/// parameter); dmwin.pas (`ios_$id_t` = 0..127 for an `integer16` `OUT`).
+#[test]
+fn integer_subrange_var_arguments_of_the_same_size() {
+    ok("module m;
+        type pinteger = 0..32767; linteger = 0..2147483647; id_t = 0..127;
+             w = 0..65535;
+             sendp_t = ^procedure(var socket: pinteger; out st: integer32);
+        procedure v16(var x: integer16); extern;
+        procedure vpi(var x: pinteger); extern;
+        procedure vli(var x: linteger); extern;
+        procedure v32(var x: integer32); extern;
+        procedure o16(out x: integer16); extern;
+        procedure iow(in out x: w); extern;
+        procedure q(sp: sendp_t);
+        var i: integer; i16: integer16; i32: integer32; pi: pinteger;
+            li: linteger; id: id_t; st: integer32;
+        begin
+          v16(pi); vpi(i16); vpi(i); vpi(id); vli(i32); v32(li);
+          o16(id); iow(i16); iow(id); sp^(i, st)
+        end;");
+}
+
+/// Q38's limit: the argument is passed by address, so one of another size
+/// would make the callee read or write the wrong bytes.
+#[test]
+fn integer_subrange_var_arguments_of_another_size() {
+    let pre = "module m;
+        type pinteger = 0..32767; linteger = 0..2147483647;
+        procedure v32(var x: integer32); extern;
+        procedure vli(var x: linteger); extern;
+        procedure vpi(out x: pinteger); extern;";
+    assert_err(
+        &format!("{pre} procedure q; var i: integer16; begin vli(i) end;"),
+        "argument type integer16 (2 bytes) does not match parameter type linteger (4 bytes)",
+    );
+    assert_err(
+        &format!("{pre} procedure q; var p: pinteger; begin v32(p) end;"),
+        "argument type pinteger (2 bytes) does not match parameter type integer32 (4 bytes)",
+    );
+    assert_err(
+        &format!("{pre} procedure q; var i: integer32; begin vpi(i) end;"),
+        "must have the parameter's size",
+    );
+    assert_err(
+        "module m; type b = [byte] 0..127; procedure v(var x: integer16); extern;
+         procedure q; var y: b; begin v(y) end;",
+        "argument type b (1 byte) does not match parameter type integer16 (2 bytes)",
+    );
+    // integer16 for integer32 (no subrange) keeps the plain message.
+    assert_err(
+        &format!("{pre} procedure q; var i: integer16; begin v32(i) end;"),
+        "argument type integer16 does not match parameter type integer32",
+    );
+}
+
+/// Q38 covers integers only: enumeration, char and boolean subranges, and
+/// structures, stay refused as `var` arguments of another type.
+#[test]
+fn non_integer_subrange_var_arguments_stay_refused() {
+    let pre = "module m;
+        type col = (r, g, b); rg = r..g; lc = 'a'..'z'; bs = false..true;
+             rec = record a: integer end; rec2 = record a: integer end;
+        procedure vc(var x: col); extern;
+        procedure vch(var x: char); extern;
+        procedure vb(var x: boolean); extern;
+        procedure vr(var x: rec); extern;
+        procedure vi(var x: integer16); extern;";
+    for (decl, call, needle) in [
+        (
+            "v: rg",
+            "vc(v)",
+            "argument type rg does not match parameter type col",
+        ),
+        (
+            "v: lc",
+            "vch(v)",
+            "argument type lc does not match parameter type char",
+        ),
+        (
+            "v: bs",
+            "vb(v)",
+            "argument type bs does not match parameter type boolean",
+        ),
+        (
+            "v: rec2",
+            "vr(v)",
+            "argument type rec2 does not match parameter type rec",
+        ),
+        (
+            "v: rg",
+            "vi(v)",
+            "argument type rg does not match parameter type integer16",
+        ),
+        (
+            "v: char",
+            "vi(v)",
+            "argument type char does not match parameter type integer16",
+        ),
+    ] {
+        assert_err(
+            &format!("{pre} procedure q; var {decl}; begin {call} end;"),
+            needle,
+        );
+    }
 }

@@ -11424,7 +11424,10 @@ impl Selector {
         } else {
             Insn::Move {
                 size: size_of(w),
-                src: Ea::Imm(c),
+                // The low bytes of a constant outside the object's range
+                // (an integer subrange's, ref Appendix D, ISO 6.4.6,
+                // p. D-3; clarification Q38), as a store to memory keeps.
+                src: Ea::Imm(imm(c, w)),
                 dst: Ea::Reg(Reg::D(d)),
             }
         });

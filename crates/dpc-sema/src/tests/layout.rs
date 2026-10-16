@@ -440,11 +440,10 @@ fn unsigned_16_bit_subranges_are_words() {
     let q = routine(&p, "q");
     assert_eq!(q.params[0].conv.slot_size, 2);
     assert_eq!(p.types.size(var(&p, "x").ty), 2);
-    assert_err(
-        "module m; type pinteger = 0..65535; var x: pinteger;
-         procedure t; begin x := 65536 end;",
-        "out of range",
-    );
+    // Out of its range: accepted, the low bytes kept (Appendix D, ISO
+    // 6.4.6, p. D-3; clarification Q38).
+    ok("module m; type pinteger = 0..65535; var x: pinteger;
+        procedure t; begin x := 65536 end;");
 }
 
 // ---------------------------------------------------------------------

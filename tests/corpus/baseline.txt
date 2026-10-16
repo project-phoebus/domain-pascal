@@ -71,12 +71,12 @@ diag	domain_examples/hardcopy/driver/driver_init_ex.pas	the routine option `_` o
 diag	domain_examples/hardcopy/filter/filter_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/hardcopy/filter/filter_init_ex.pas	the routine option `_` on a routine pointer type (only `_` is) is not supported yet
 diag	domain_examples/streams/recno/recno.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
-diag	domain_examples/streams/sasc/imex.pas	argument type T does not match parameter type T
+ok	domain_examples/streams/sasc/imex.pas
 diag	domain_examples/streams/sasc/init.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
-diag	domain_examples/streams/sasc/io.pas	argument type T does not match parameter type T
-diag	domain_examples/streams/sasc/misc.pas	argument type T does not match parameter type T
-diag	domain_examples/streams/sasc/open.pas	argument type T does not match parameter type T
-diag	domain_examples/streams/sasc/seek.pas	argument type T does not match parameter type T
+ok	domain_examples/streams/sasc/io.pas
+ok	domain_examples/streams/sasc/misc.pas
+ok	domain_examples/streams/sasc/open.pas
+ok	domain_examples/streams/sasc/seek.pas
 diag	domain_examples/streams/scramble/enscramble.pas	undefined identifier `_`
 diag	domain_examples/streams/scramble/scramble.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 diag	sys/source/bp1/sbp1_example.pas	passing a field of a packed record that is not a whole byte, word or longword (ref N.N.N) is not supported yet
@@ -86,5 +86,5 @@ diag	sys/source/emt/send_pas_model.pas	expected `_`, found `_`
 diag	sys/source/emt/siorf.pas	expected `_`, found `_`
 diag	sys/source/emt/siotf.pas	expected `_`, found `_`
 diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
-diag	usr/X11/examples/dmwin/dmwin.pas	argument type T does not match parameter type T
+diag	usr/X11/examples/dmwin/dmwin.pas	`_` of a string constant (ref p. N-N) is not supported yet
 diag	usr/X11/examples/pascal/xhw1.pas	an open array bound `_` is not supported yet

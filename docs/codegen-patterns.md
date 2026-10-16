@@ -7037,6 +7037,15 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     volatile object, an element with a computed index and a longword are
     still read whole.  Tests: `dpc-ir` `narrowing_store`; golden
     `expr/narrow`; exec test `narrow`.
+  - *A constant outside an integer subrange* (reference-clarifications
+    "Subranges and their base type as var arguments", Q38; bead
+    domain-pascal-4tm; no image site): its low bytes, as for any
+    constant of the object's width (codegen-patterns 13): `move.w
+    #0x1170` for 70000 into a `0..32767`, stored, pushed by value, pooled
+    for a by-address argument, or loaded into a register-held local (the
+    selector's `const_into` masks the immediate since this bead); a
+    packed field or element keeps its low bits.  Golden
+    `params/subrange_var_args`.
 - **No libgcc-style helpers.** M$ARITH is the whole integer runtime seen so
   far.
 - **Floating point:** not used in the kernel as far as is known.  The

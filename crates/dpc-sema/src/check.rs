@@ -3941,7 +3941,30 @@ impl<'t> Checker<'t> {
                     ParamMode::Var | ParamMode::Out | ParamMode::InOut => {
                         if !x.is_designator() && !self.types.is_error(x.ty) {
                             self.error(a.span, "a variable is needed for this parameter");
-                        } else if !self.same_type(x.ty, ty) && !self.univ_ptr_param(x.ty, ty) {
+                        } else if self.same_type(x.ty, ty)
+                            || self.univ_ptr_param(x.ty, ty)
+                            // ref Appendix D, ISO 6.6.3.5/6.6.3.6, p. D-3;
+                            // clarification Q38: integer and subrange of
+                            // integer, same size, accepted quietly.
+                            || self.integer_subrange_param(x.ty, ty)
+                        {
+                            // Compatible.
+                        } else if self.integer_subrange_mix(x.ty, ty) {
+                            // Q38's mix of another size: the callee would
+                            // read or write the wrong bytes.
+                            self.error(
+                                a.span,
+                                format!(
+                                    "argument type {} ({}) does not match parameter type {} \
+                                     ({}): an integer or subrange argument for a `var`, `out` \
+                                     or `in out` parameter must have the parameter's size",
+                                    self.types.display(x.ty),
+                                    bytes(self.types.size(x.ty)),
+                                    self.types.display(ty),
+                                    bytes(self.types.size(ty))
+                                ),
+                            );
+                        } else {
                             self.error(
                                 a.span,
                                 format!(
@@ -4615,6 +4638,26 @@ impl<'t> Checker<'t> {
         self.types.is_pointer(arg) && self.types.is_pointer(param) && (univ(arg) || univ(param))
     }
 
+    /// An integer subrange and an integer type (`integer`, `integer16`,
+    /// `integer32`), or two integer subranges: the mix the reference allows
+    /// for `var`, `out` and `in out` arguments.  Ref Appendix D, ISO
+    /// 6.6.3.5/6.6.3.6, p. D-3: "Domain Pascal treats integer and subrange
+    /// of integer as identical"; clarification Q38 (accepted quietly).
+    /// Sizes are not compared here: see [`Checker::integer_subrange_param`].
+    fn integer_subrange_mix(&self, arg: TypeId, param: TypeId) -> bool {
+        let sub = |t: TypeId| matches!(self.types.kind(t), TypeKind::Subrange { .. });
+        self.types.is_integer(arg) && self.types.is_integer(param) && (sub(arg) || sub(param))
+    }
+
+    /// [`Checker::integer_subrange_mix`] with the argument's storage size
+    /// equal to the parameter's.  The argument is passed by its address, so
+    /// a 2-byte variable for a 4-byte parameter (or the reverse) would make
+    /// the callee read or write the wrong bytes; that mix stays refused (the
+    /// lead's limit in clarification Q38, not settled by the ruling).
+    fn integer_subrange_param(&self, arg: TypeId, param: TypeId) -> bool {
+        self.integer_subrange_mix(arg, param) && self.types.size(arg) == self.types.size(param)
+    }
+
     /// `nil` and `univ_ptr` are compatible with every pointer (ref 3.13.2
     /// p. 3-50).  Two `^T` types are compatible when they point to the same
     /// type (TODO(ref-question): p. 4-144 says only "compatible pointer";
@@ -4678,8 +4721,17 @@ impl<'t> Checker<'t> {
             if !self.ordinal_compatible(dst, src) {
                 false
             } else {
-                // A constant must lie in the destination's range.
-                if let (Some(k), Some((lo, hi))) = (
+                // A constant must lie in the destination's range, except
+                // for an integer subrange: ref Appendix D, ISO 6.4.6,
+                // p. D-3, "You may make an assignment from an integer
+                // expression that includes a value outside one of the
+                // variables' declared subranges"; clarification Q38: the
+                // destination keeps the constant's low bytes (as Q41's
+                // narrowing).
+                let int_subrange = self.types.is_integer(dst)
+                    && matches!(self.types.kind(dst), TypeKind::Subrange { .. });
+                if let (false, Some(k), Some((lo, hi))) = (
+                    int_subrange,
                     x.value.as_ref().and_then(|v| v.ordinal()),
                     self.types.ordinal_range(dst),
                 ) {
@@ -4721,6 +4773,15 @@ impl<'t> Checker<'t> {
             );
         }
         ok
+    }
+}
+
+/// "1 byte", "2 bytes".
+fn bytes(n: u32) -> String {
+    if n == 1 {
+        "1 byte".into()
+    } else {
+        format!("{n} bytes")
     }
 }
 
