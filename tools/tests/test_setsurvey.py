@@ -32,6 +32,26 @@ class OneMemberTest(unittest.TestCase):
         self.assertEqual(setsurvey.one_sites(ins), [])
 
 
+class RegisterTestTest(unittest.TestCase):
+    def test_constant_set_zero_extended_element(self):
+        # AS_IO_SETUP 0xE6B75C..0xE6B76A
+        ins = insns(['clrl %d0', 'movel #2046,%d1', 'movew %a0@,%d0', 'btst %d0,%d1',
+                     'bnes 0x200'])
+        self.assertEqual(setsurvey.vtest_sites(ins),
+                         [(0x106, 'const.l', 'zext.l', 0, 'branch')])
+
+    def test_constant_set_word_element(self):
+        # TTY_$K_SET_DELAY 0xE67A18..0xE67A1E
+        ins = insns(['movew %a2@,%d0', 'moveq #31,%d1', 'btst %d0,%d1', 'bnes 0x200'])
+        self.assertEqual(setsurvey.vtest_sites(ins), [(0x104, 'const.q', 'w', 0, 'branch')])
+
+    def test_guarded_word_set_variable(self):
+        # AST's module-local 0xE01C0A..0xE01C16
+        ins = insns(['moveq #1,%d3', 'moveq #15,%d0', 'cmpw %d3,%d0', 'bcss 0x200',
+                     'movew %a5@(1056),%d1', 'btst %d3,%d1', 'bhis 0x200'])
+        self.assertEqual(setsurvey.vtest_sites(ins), [(0x10a, 'var.w', 'held', 16, 'branch')])
+
+
 class MemberTest(unittest.TestCase):
     def test_set_of_char(self):
         # The TTY module-local 0xE1B740..0xE1B750

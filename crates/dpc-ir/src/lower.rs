@@ -4457,6 +4457,125 @@ fn set_value(p: &Program, e: &SExpr, ty: Scalar) -> Res<Expr> {
     }
 }
 
+/// `lhs in rhs` for a set of one word or one longword (`set_width`),
+/// tested in a register ([`Expr::SetMember`]; codegen-patterns 5.1).
+///
+/// A set variable, or a constant set of a longword: the element as it is
+/// (TTY_$K_SET_DELAY 0xE67A18 `move.w (A2),D0; moveq #0x1f,D1; btst
+/// D0,D1`; PROC1_$TST_LOCK 0xE148D4), a `0..65535` one too (no site
+/// shows one widened for a longword set).
+///
+/// A constant set of one word with a run-time element (codegen-patterns
+/// 5.1, "`x in c`, a constant register-sized set"; `tools/setsurvey.py
+/// summary`, kind `vtest`):
+/// - a `0..65535` element (a word whose type's host is `integer32`,
+///   Apollo's `pinteger`) of an integer constructor: zero-extended, the
+///   constant a longword.  Image: the 10 `vol_idx in [1..10]` tests of
+///   DISK_, AS_IO_SETUP 0xE6B75C..0xE6B76A `clr.l D0; move.l #0x7fe,D1;
+///   move.w (A0),D0; btst D0,D1; bne.b` (`dpc-sema` types `[1..10]` `set
+///   of 0..10`, one word), the only zero-extended elements of a register
+///   `btst` in compiled code; their volume index is compared unsigned in
+///   DISK_IO 0xE3D528 and DISK_$READ_MULTI 0xE3CFF4.  **Uncertain:** the
+///   element's Pascal type is not visible.  Refused for a constant of a
+///   declared set type (`ws([1..10])`: not seen);
+/// - any other word element: the constant stays a word; the selector
+///   takes it only when `moveq` loads it (`move.w #0xfff` with an
+///   `integer` element at FILE_$PRIV_LOCK 0xE5F110..0xE5F11A, against
+///   the DISK_ `move.l #0x7fe`: not settled);
+/// - a byte element (boolean, char, `[byte]`): refused (no site; a
+///   boolean's true is 0xFF, ref 3.5.3, which `btst` would take as bit
+///   31); a longword element: refused (no site).
+fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Expr> {
+    let set = value_of(p, rhs)?;
+    let mut elem = value_of(p, lhs)?;
+    let Expr::Const { value, .. } = set else {
+        return Ok(Expr::SetMember {
+            elem: Box::new(elem),
+            set: Box::new(set),
+            set_width,
+        });
+    };
+    let runtime = lhs.value.is_none();
+    // Only on a one-word constant: a longword constant keeps the element
+    // as it is (no site shows a `0..65535` element widened for one).
+    let wide = runtime
+        && set_width == Width::Word
+        && elem.ty().width == Width::Word
+        && long_host_word(&p.types, lhs.ty);
+    if set_width == Width::Word && runtime {
+        match elem.ty().width {
+            Width::Byte => {
+                return Err(unsupported(
+                    lhs.span,
+                    "`in` on a one-word constant set with a one-byte element (boolean, char, \
+                     `[byte]`: no site, codegen-patterns 5.1; a boolean's true is 0xFF) is",
+                ))
+            }
+            Width::Long => {
+                return Err(unsupported(
+                    lhs.span,
+                    "`in` on a one-word constant set with a 4-byte element (no site, \
+                     codegen-patterns 5.1) is",
+                ))
+            }
+            Width::Word => {}
+        }
+        if wide && !integer_constructor(p, rhs) {
+            return Err(unsupported(
+                lhs.span,
+                "`in` on a one-word constant set of a declared type with a `0..65535` element \
+                 (`move.l #c` seen for integer constructors only, DISK_ 0xE6B75E; \
+                 codegen-patterns 5.1) is",
+            ));
+        }
+    }
+    let (set, set_width) = if wide {
+        elem = convert(elem, Scalar::unsigned(Width::Long));
+        (
+            Expr::Const {
+                value,
+                ty: Scalar::unsigned(Width::Long),
+            },
+            Width::Long,
+        )
+    } else {
+        (set, set_width)
+    };
+    Ok(Expr::SetMember {
+        elem: Box::new(elem),
+        set: Box::new(set),
+        set_width,
+    })
+}
+
+/// Whether `e` is a set constructor of integers as `dpc-sema` types it
+/// (`set_cons`: `set of 0..hi`, `hi` its largest member), not a constant
+/// of a declared set type (`ws([1..10])`, a named constant of one).
+/// **Limit:** a declared `set of 0..hi` constant whose largest member is
+/// `hi` cannot be told from a constructor.
+fn integer_constructor(p: &Program, e: &SExpr) -> bool {
+    if matches!(e.kind, ExprKind::Transfer(_)) {
+        return false;
+    }
+    let (TypeKind::Set { elem }, Some(ConstValue::Set(members))) = (p.types.kind(e.ty), &e.value)
+    else {
+        return false;
+    };
+    match p.types.kind(*elem) {
+        TypeKind::Subrange { base, lo: 0, hi } => {
+            matches!(p.types.kind(*base), TypeKind::Integer16) && members.iter().max() == Some(hi)
+        }
+        _ => false,
+    }
+}
+
+/// A 2-byte subrange whose host is `integer32` (`0..65535`).
+fn long_host_word(types: &TypeTable, ty: TypeId) -> bool {
+    types.size(ty) == 2
+        && matches!(types.kind(ty), TypeKind::Subrange { base, .. }
+            if matches!(types.kind(*base), TypeKind::Integer32))
+}
+
 /// A run-time set member as a word (ref 3.9.3: ordinals 0..1023): an
 /// enumeration or integer16 value as it is, a char or boolean byte
 /// zero-extended.
@@ -4866,11 +4985,7 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
                 4 => Width::Long,
                 _ => return set_member_at(p, e, lhs, rhs, set_size),
             };
-            return Ok(Expr::SetMember {
-                elem: Box::new(value_of(p, lhs)?),
-                set: Box::new(value_of(p, rhs)?),
-                set_width,
-            });
+            return set_member(p, lhs, rhs, set_width);
         }
         BinOp::Eq
         | BinOp::Ne

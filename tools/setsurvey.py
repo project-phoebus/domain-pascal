@@ -63,6 +63,13 @@ here are the ones that only a set (or a packed boolean) gives:
             another (`new'); whether the tested register is read again
             after the test (`reused').  Also: `btst #7', `#15' or `#31'
             (none).
+    vtest   every `btst Dk,Dn' (a run-time element of a set in a register;
+            bead domain-pascal-bitu): the set's register written by a
+            constant (`moveq', `move.w #', `move.l #': a constant set), a
+            load from memory (a set variable) or not in the block; the
+            element zero-extended (`clr.l; ...; move.w', `clr.w; ...;
+            move.b'), moved, computed or held; a guard `moveq #bits-1,Dx;
+            cmp.w Dk,Dx; bcs' before the set's load; what reads the flags.
 
 usage:
     tools/setsurvey.py summary          # the counts quoted in codegen-patterns 5.1
@@ -80,7 +87,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
-KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc', 'ctest', 'onebit')
+KINDS = ('one', 'memb', 'diff', 'loop', 'regmem', 'andc', 'ctest', 'onebit', 'vtest')
 
 _CLR = re.compile(r'^clr([wl]) %(d\d)$')
 _BITREG = re.compile(r'^b(set|clr|tst) %(d\d),%(d\d)$')
@@ -384,6 +391,84 @@ def onebit_sites(ins, labels=frozenset()):
     return out
 
 
+_CONSTD = re.compile(r'^(moveq|movew|movel) #(-?\d+),%(d\d)$')
+_GUARD = re.compile(r'^cmpw %(d\d),%(d\d)$')
+
+
+def _writer(ins, i, d):
+    """(index, text) of the instruction that last wrote %d before ins[i]
+    in its block, or None."""
+    for j in range(i - 1, max(-1, i - 8), -1):
+        t = ins[j][2]
+        if _STOP.match(t):
+            return None
+        if _writes(t, d) or t == 'clrl %' + d or t == 'clrw %' + d:
+            return j, t
+    return None
+
+
+def vtest_sites(ins):
+    """`btst Dk,Dn' (a run-time element of a register-sized set) ->
+    [(addr, set, element, guard, reader)]:
+
+    set      `const.q/w/l' (`moveq'/`move.w #'/`move.l #' into Dn: a
+             constant set), `var.b/w/l' (Dn loaded from memory), `held'
+             or `op' (computed);
+    element  `zext.l' (`clr.l Dk', later `move.w x,Dk'), `zext.w'
+             (`clr.w Dk', later `move.b x,Dk'), `w'/`b'/`l' (a move into
+             Dk), `const' (`moveq'), `op', `held';
+    guard    the bits (16, 32) when `moveq #bits-1,Dx; cmp.w Dk,Dx; bcs'
+             precedes the set's load (the element's type reaching beyond
+             the set), else 0;
+    reader   `branch', `scc' or `other'."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^btst %(d\d),%(d\d)$', t)
+        if not m:
+            continue
+        dk, dn = m.groups()
+        w = _writer(ins, i, dn)
+        if w is None:
+            sset = 'held'
+        else:
+            c = _CONSTD.match(w[1])
+            ld = _LOADD.match(w[1])
+            if c:
+                sset = 'const.' + {'moveq': 'q', 'movew': 'w', 'movel': 'l'}[c.group(1)]
+            elif ld and ('@' in ld.group(2) or ld.group(2).startswith('0x')):
+                sset = 'var.' + ld.group(1)
+            else:
+                sset = 'op'
+        w = _writer(ins, i, dk)
+        if w is None:
+            elem = 'held'
+        else:
+            j, wt = w
+            ld = _LOADD.match(wt)
+            if _CONSTD.match(wt):
+                elem = 'const'
+            elif ld:
+                elem = ld.group(1)
+                z = _writer(ins, j, dk)
+                if z and z[1] == 'clrl %' + dk and elem == 'w':
+                    elem = 'zext.l'
+                elif z and z[1] == 'clrw %' + dk and elem == 'b':
+                    elem = 'zext.w'
+            else:
+                elem = 'op'
+        guard = 0
+        for j in range(i - 1, max(-1, i - 4), -1):
+            if re.match(r'^bcs[sw]? ', ins[j][2]) and j >= 2:
+                g = _GUARD.match(ins[j - 1][2])
+                c = _CONSTD.match(ins[j - 2][2])
+                if g and g.group(1) == dk and c and c.group(3) == g.group(2):
+                    guard = int(c.group(2)) + 1
+                break
+        rd, _ = _reader(ins, i, dn)
+        out.append((a, sset, elem, guard, rd))
+    return out
+
+
 def scan():
     """{kind: [(routine start, routine name, site...)]}."""
     res = {k: [] for k in KINDS}
@@ -405,6 +490,8 @@ def scan():
             res['andc'].append((r0, name) + s)
         for s in ctest_sites(ins):
             res['ctest'].append((r0, name) + s)
+        for s in vtest_sites(ins):
+            res['vtest'].append((r0, name) + s)
         labels = frozenset(int(b.group(1), 16) for _, _, t in ins
                            for b in [re.search(r' 0x([0-9a-f]+)$', t)] if b)
         for s in onebit_sites(ins, labels):
@@ -439,6 +526,16 @@ def summary(res):
             k[0], k[1], v, first([s for s in andc if (s[3], s[4]) == k])))
     ctest_summary(res['ctest'])
     onebit_summary(res['onebit'])
+    vtest_summary(res['vtest'])
+
+
+def vtest_summary(sites):
+    """The counts of `btst Dk,Dn' (codegen-patterns 5.1, "`x in c`")."""
+    print('register `btst Dk,Dn\' (a run-time element): %d' % len(sites))
+    key = lambda s: (s[3], s[4], s[5], s[6])  # noqa: E731
+    for k, v in sorted(Counter(key(s) for s in sites).items()):
+        sel = [s for s in sites if key(s) == k]
+        print('  set=%-8s elem=%-7s guard=%-2d %-6s %3d  e.g. %s' % (k + (v, first(sel, 6))))
 
 
 def onebit_summary(sites):

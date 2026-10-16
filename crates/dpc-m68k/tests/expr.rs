@@ -183,10 +183,11 @@ fn unsupported_expressions() {
     // rshft of a signed word (ref p. 4-171).
     let e = error("function t: integer; internal;\nbegin\n  t := rshft(w, 2);\nend;\n");
     assert!(e.contains("`rshft` of a signed operand"), "{e}");
-    // `in' on a one-word set with a variable element.
+    // `in' on a one-word set variable with a variable element (guarded
+    // or not, codegen-patterns 5.1: not settled).
     let e = error("function t: boolean; internal;\nbegin\n  t := w in ss;\nend;\n");
     assert!(
-        e.contains("one-word set with an element that is not constant"),
+        e.contains("one-word set variable with an element that is not constant"),
         "{e}"
     );
 }

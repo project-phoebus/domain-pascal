@@ -1136,3 +1136,233 @@ fn one_member_set_as_an_argument() {
         ]
     );
 }
+
+/// Types for the constant-set tests (bead domain-pascal-bitu): Apollo's
+/// `pinteger`, an enumeration of 16 values (a one-word set), a longword
+/// set of integers.
+const CONST_TYPES: &str = "type
+  pinteger = 0..65535;
+  n16 = (f00, f01, f02, f03, f04, f05, f06, f07, f08, f09, f10, f11, f12, f13,
+         f14, f15);
+  s32 = set of 0..31;
+var
+  gs32: extern s32;
+";
+
+/// `k in c` for a constant set of one word or one longword and a
+/// run-time element (codegen-patterns 5.1, "`x in c`"): a `0..65535`
+/// element of an integer constructor zero-extended around the longword
+/// constant's load, a one-word set that `moveq` loads.
+#[test]
+fn constant_sets_with_a_run_time_element() {
+    // `vol_idx in [1..10]`, AS_IO_SETUP 0xE6B75C..0xE6B76A.
+    assert_eq!(
+        body(&format!(
+            "{CONST_TYPES}procedure t(var k: pinteger);
+             begin gw := 0; if not (k in [1..10]) then gw := 1 end;"
+        )),
+        [
+            "clr.w\t(GW).l",
+            "movea.l\t(8,%fp),%a0",
+            "clr.l\t%d0",
+            "move.l\t#0x7fe,%d1",
+            "move.w\t(%a0),%d0",
+            "btst\t%d0,%d1",
+            "bne.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // An `integer` element of a constant `moveq` loads: not extended, the
+    // element first (TTY_$K_SET_DELAY 0xE67A18..0xE67A1C).
+    assert_eq!(
+        body(
+            "procedure t(k: integer); options(val_param);
+             begin gw := 0; if k in [1..6] then gw := 1 end;"
+        ),
+        [
+            "move.w\t(8,%fp),%d0",
+            "clr.w\t(GW).l",
+            "moveq\t#0x7e,%d1",
+            "btst\t%d0,%d1",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // A one-word set of an enumeration, a `moveq` constant.
+    assert_eq!(
+        body(&format!(
+            "{CONST_TYPES}procedure t(e: n16); options(val_param);
+             begin gw := 0; if e in [f01, f03..f06] then gw := 1 end;"
+        )),
+        [
+            "move.w\t(8,%fp),%d0",
+            "clr.w\t(GW).l",
+            "moveq\t#0x7a,%d1",
+            "btst\t%d0,%d1",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // As a value, `sne` in the set's register.
+    assert_eq!(
+        body(
+            "function t(k: integer): boolean; options(val_param);
+             begin t := k in [0, 1, 2, 4, 5] end;"
+        ),
+        [
+            "move.w\t(8,%fp),%d0",
+            "moveq\t#0x37,%d1",
+            "btst\t%d0,%d1",
+            "sne\t%d1",
+            "move.b\t%d1,%d0"
+        ]
+    );
+    // A longword constructor with a `0..65535` element: as it is (no
+    // site shows one widened for a longword constant; dpc's earlier form
+    // kept).
+    assert_eq!(
+        body(&format!(
+            "{CONST_TYPES}function t(k: pinteger): boolean; options(val_param);
+             begin t := k in [1, 31] end;"
+        )),
+        [
+            "move.w\t(8,%fp),%d0",
+            "move.l\t#-0x7ffffffe,%d1",
+            "btst\t%d0,%d1",
+            "sne\t%d1",
+            "move.b\t%d1,%d0"
+        ]
+    );
+    // A `0..65535` element of a longword set variable: as it is (not
+    // extended: no site either way, dpc's earlier form kept).
+    assert_eq!(
+        body(&format!(
+            "{CONST_TYPES}function t(k: pinteger): boolean; options(val_param);
+             begin t := k in gs32 end;"
+        )),
+        [
+            "move.w\t(8,%fp),%d0",
+            "move.l\t(GS32).l,%d1",
+            "btst\t%d0,%d1",
+            "sne\t%d1",
+            "move.b\t%d1,%d0"
+        ]
+    );
+}
+
+#[test]
+fn constant_set_refusals() {
+    let refused = |src: &str, want: &str| {
+        let e = error(&format!("{CONST_TYPES}{src}"));
+        assert!(e.contains(want), "{src}: {e}");
+    };
+    // A boolean element: true is 0xFF, `btst` would take bit 31.
+    refused(
+        "function t(b: boolean): boolean; options(val_param); begin t := b in [true] end;",
+        "one-byte element",
+    );
+    // A one-word constant `moveq` cannot load, with an `integer` element
+    // (`move.w #0xfff` at FILE_$PRIV_LOCK 0xE5F114, `move.l #0x7fe` with
+    // the DISK_ `0..65535` elements) or an enumeration.
+    refused(
+        "function t(k: integer): boolean; options(val_param); begin t := k in [1..10] end;",
+        "`moveq` cannot load",
+    );
+    refused(
+        "procedure t(e: n16); options(val_param); begin if e in [f01, f08] then gw := 1 end;",
+        "`moveq` cannot load",
+    );
+    // A `0..65535` element with a constant `moveq` loads (no site).
+    refused(
+        "function t(k: pinteger): boolean; options(val_param); begin t := k in [1..3] end;",
+        "`moveq` loads with a `0..65535` element",
+    );
+    // A `0..65535` element on a declared one-word set type's constant.
+    refused(
+        "type w16c = set of 0..15;
+         function t(k: pinteger): boolean; options(val_param); begin t := k in w16c([1..10]) end;",
+        "of a declared type with a `0..65535` element",
+    );
+    // A 4-byte element on a one-word constant set (no site).
+    refused(
+        "function t(k: integer32): boolean; options(val_param); begin t := k in [1..3] end;",
+        "4-byte element",
+    );
+    // An array element: the image loads the constant first (MAC_$OPEN
+    // 0xE0B8FC), which dpc's scheduler does not do.
+    refused(
+        "var tab: extern array[0..7] of integer;
+         function t(i: integer): boolean; options(val_param); begin t := tab[i] in [0, 1] end;",
+        "array element",
+    );
+    refused(
+        "var tab: extern array[0..7] of pinteger;
+         function t(i: integer): boolean; options(val_param); begin t := tab[i] in [1..10] end;",
+        "array element",
+    );
+    // An element of a `with` over an array element, its base set just
+    // before (ROUTE_$INCOMING 0xE878F8: the constant before the `lea`).
+    refused(
+        "type pt = record pad: array[1..22] of integer; active: integer; end;
+         var ports: extern array[0..7] of pt;
+         procedure t(i: integer); options(val_param);
+         begin with ports[i] do if active in [0, 1] then gw := 1 end;",
+        "address register set just before",
+    );
+    // A one-word set variable (guarded or not: not settled).
+    let e = error(
+        "procedure t(p: rp; k: integer); options(val_param);
+         begin if k in p^.w then gw := 1 end;",
+    );
+    assert!(e.contains("one-word set variable"), "{e}");
+}
+
+/// The constant-set tests against the bit model, and the original's
+/// modulo 32 for elements above the set (../source's note on
+/// DISK_$FORMAT_WHOLE: `vol_idx` 33..42 pass the test at 0xE3D2B8):
+/// `btst Dk,Dn` takes bit k mod 32, no range check.
+#[test]
+fn constant_sets_take_the_element_mod_32() {
+    let src = format!(
+        "{DECLS}{CONST_TYPES}procedure ti(k: integer); options(val_param);\n\
+         begin gw := 0; if k in [1..6] then gw := 1 end;\n\
+         procedure tu(var k: pinteger);\n\
+         begin gw := 0; if k in [1..10] then gw := 1 end;\n\
+         procedure te(e: n16); options(val_param);\n\
+         begin gw := 0; if e in [f00, f03..f06] then gw := 1 end;\n"
+    );
+    let ti = code(&src, "TI");
+    let tu = code(&src, "TU");
+    let te = code(&src, "TE");
+    for k in (0..100u32).chain([0x7fff, 0x8000, 0xffe1, 0xffff]) {
+        let mut m = Machine::new();
+        m.wr(FP + 8, Size::W, k);
+        m.run(&ti);
+        assert_eq!(
+            m.rd(GW, Size::W) == 1,
+            (1..=6).contains(&(k % 32)),
+            "integer {k:#x}"
+        );
+        m.wr(REC, Size::W, k);
+        m.wr(FP + 8, Size::L, REC);
+        m.run(&tu);
+        assert_eq!(
+            m.rd(GW, Size::W) == 1,
+            (1..=10).contains(&(k % 32)),
+            "pinteger {k:#x}"
+        );
+    }
+    for k in 0..16u32 {
+        let mut m = Machine::new();
+        m.wr(FP + 8, Size::W, k);
+        m.run(&te);
+        assert_eq!(
+            m.rd(GW, Size::W) == 1,
+            [0, 3, 4, 5, 6].contains(&k),
+            "n16 {k}"
+        );
+    }
+}

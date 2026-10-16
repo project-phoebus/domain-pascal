@@ -28,6 +28,9 @@ Tests:
   TTY_$K_SET_INPUT_FLAG 0xE6768E, TTY_$I_RCV 0xE1B98E and 0xE1BACE, the
   module-local 0xE1BF70's 0xE1BF92..0xE1C044, TTY_$K_GET 0xE1C5D4,
   TTY_$K_SET_DELAY 0xE67A18, the module-local 0xE1B716's 0xE1B740.
+- `sets/in_const_set` - codegen-patterns 5.1 ("`x in c`"; bead
+  domain-pascal-bitu): AS_IO_SETUP 0xE6B75C, DISK_$DISMOUNT 0xE6CFF8,
+  TTY_$K_SET_DELAY 0xE67A18, PROC1_$TST_LOCK 0xE148DE.
 - `stores/entry_loads` - codegen-patterns 12.2, 13, 1.3, 2:
   TIME_$Q_INIT_QUEUE 0xE16C5E.
 - `stores/one_stmt_entry_loads` - codegen-patterns 12.2 ("One-statement

@@ -2648,8 +2648,15 @@ this pair.
   (`crates/dpc-m68k/src/isel.rs`, `set_member_reg`).  **Uncertain:**
   whether "address of the right operand before the value of the left
   one" is a general rule of the compiler's binary operators or specific
-  to `in`; and the code for one-word sets held in a register (not seen
-  yet; `dpc` rejects them).
+  to `in`.  One-word set *variables* with a run-time element are seen
+  (`tools/setsurvey.py summary`, kind `vtest`: 17 loaded with `move.w`,
+  e.g. FILE_$CHANGE_LOCK_D 0xE5EABE `move.w (A4),D0; move.w (712,A5),D1;
+  btst D0,D1`; 3 of them guarded, `moveq #15,D0; cmp.w D3,D0; bcs.s;
+  move.w (1056,A5),D1; btst D3,D1; bhi.s`, AST's module-local
+  0xE01C0A..0xE01C16), but which elements are guarded is not settled
+  (the unguarded DISK_ loop 0xE6C792..0xE6C79C `for i := 1 to 10` in
+  ../source's reading, the guarded AST one from `moveq #1,D3` too):
+  `dpc` refuses them (beads domain-pascal-bitu, domain-pascal-h7ex).
 - **Constant member of a one-word or one-longword set (Verified;
   implemented):** see "`in` on sets in memory, constant member" below:
   a set in memory is read only as far as the part holding bit k at the
@@ -2659,8 +2666,8 @@ this pair.
   REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0; btst
   #13,D0; sne D0` (a boolean function, `sne` in the set's register);
   0xE031B2 `btst #14,D5; bne.s`.  `dpc` (`isel.rs`, `set_bit_test`)
-  rejects a non-constant element on a word set (`btst Dn,Dm` takes the
-  bit mod 32, not catalogued for words), and a constant element beyond
+  rejects a non-constant element on a word set variable (above; a
+  constant set: "`x in c`" below), and a constant element beyond
   the set's bits (`20 in s` for a word set would test a bit of the
   register above the loaded word; the value is false, ref 3.9.3, p.
   3-16, but the original's code for it is not catalogued).
@@ -2815,6 +2822,98 @@ model run against the bit model of Figure 3-6).
   in a register and the branch on Z (tty_$i_set_funcs 0xE67228 `btst
   D3,D0; beq.b` on a set parameter held since the entry, 0xE67230
   `move.l (0x20,A0),D4; btst D3,D4; beq.b`).
+
+  **Survey** (`tools/setsurvey.py summary`, kind `vtest`; bead
+  domain-pascal-bitu): of the 108 `btst Dk,Dn` in compiled code, 51 test
+  a constant set (the set's register written by a constant just before):
+  - the constant: `moveq` ×36, `move.l #c` ×14, `move.w #c` ×1.  Every
+    `move.l #c` mask fits in 16 bits (`#0x7fe` ×10, the DISK_ `vol_idx
+    in [1..10]` of ../source's reading, AS_IO_SETUP 0xE6B75E; `#0x3fff`
+    0xE04B3A, `#0x8c0` 0xE052D4, AST attribute types; `#0xa86`
+    SMD_$BORROW_DISPLAY 0xE6F6C8, `#0x220` SMD_$DISPLAY_LOGO 0xE70280,
+    display types).  The one `move.w #c`, FILE_$PRIV_LOCK 0xE5F110..
+    0xE5F11A `move.w (16,A6),D0; move.w #0xfff,D1; btst D0,D1; beq.s`,
+    leaves bits 16..31 of D1 as they were (a `cmpi.w #20,D0; bhi` follows;
+    ../source `file/priv_lock.c` notes the undefined bits); its set's
+    type is not known; its element `lock_mode` is an `integer` in
+    ../source's reading.  **Open question (bead domain-pascal-wdgb):**
+    whether a one-word constant that `moveq` cannot load is `move.w #c`
+    or `move.l #c` is not settled.  The 4 non-DISK_ `move.l #c` sites do
+    not show an integer constructor widened: the AST elements are
+    attribute types 0..0x1B (`ast/set_attribute_internal.c`
+    ATTR_TYPE_COUNT), a set of which is a longword by its type, and the
+    SMD display types' Pascal type is not known.  One reading fits all 15
+    sites: the constant's width follows the element's host type (a
+    `0..65535` element, host `integer32`: `move.l`, the 10 DISK_ sites;
+    an `integer` one: `move.w`, FILE_$PRIV_LOCK).  It rests on one
+    `move.w` site, so `dpc` refuses both forms for other elements.
+  - no constant set is guarded (51 of 51; the guarded forms are all on
+    set variables, above): an element of 32 and more is tested modulo 32
+    (../source's note on DISK_$FORMAT_WHOLE: `vol_idx` 33..42 pass
+    0xE3D2B8), and of 16..31 against the constant's zero bits.
+  - the element: as it is, ×41 (`move.w` ×38, held, computed: MAC_$OPEN
+    0xE0B8FE `move.w (0x2c,A3,D1.w),D2` for `route_$port[port].active
+    in [0, 1]`, an `integer` in ../source's reading), or zero-extended to
+    a longword, `clr.l Dk` first and the word moved in after the
+    constant's load, ×10: exactly the ten `#0x7fe` sites (AS_IO_SETUP
+    0xE6B75C..0xE6B76A `clr.l D0; move.l #0x7fe,D1; move.w (A0),D0; btst
+    D0,D1; bne.b`; DISK_$UNASSIGN 0xE6BDC2..0xE6BDCC from the register
+    the parameter was read into at entry, `move.w D2,D0`; at
+    DISK_$GET_MNT_INFO 0xE6BE5E, DISK_$FORMAT_WHOLE 0xE3D2AC, DISK_$DIAG_IO
+    0xE6BC38 and DISK_$FORMAT 0xE3D3B8 entry loads are interleaved, 12.4
+    R11 "Not explained").  No other `btst Dk,Dn` has a zero-extended
+    element.  DISK_IO and DISK_$READ_MULTI compare their volume index
+    unsigned (0xE3D528 `cmpi.w #0xa,D5; bls`, 0xE3CFF4): the reading
+    taken is that the index is `0..65535` (Apollo's `pinteger`) and that
+    the compiler widens such an element (its host is `integer32`, 2.1)
+    to a longword, as it does for other operations (ref 4.3.1, p. 4-5).
+    **Uncertain:** the Pascal types are not visible; ../source's
+    `disk/*.pas` declare `vol_idx: integer` at these sites (the other
+    DISK_ routines `pinteger`).
+  - the order: the element (when it is not held), then the constant
+    (×32 of the 38 `move.w` elements); the constant before the element's
+    load ×6, each where the load reads a register written just before
+    (MAC_$OPEN 0xE0B8FA `mulu.w D0,D1; moveq #3,D3; move.w
+    (0x2c,A3,D1.w),D2`; ROUTE_$INCOMING 0xE878F8, ROUTE_$OUTGOING
+    0xE87A9C, XNS' module-local 0xE17C2E, after the scaling of an array
+    index; RIP_$FIND_NEXTHOP 0xE156E2, ROUTE_$SERVICE 0xE6A0BC, after
+    the base's load).  `dpc`'s scheduler (12.4 R11) does not produce this
+    order from the element-first one, and ROUTE_$SERVICE 0xE6A1F4..
+    0xE6A1FC `movea.l (12,A6),A0; move.w (4,A0),D1; moveq #62,D3` keeps
+    the element first after a base's load: not settled.
+  - the flags: a branch ×50, `seq` ×1 (0xE6C25E).
+
+  **Implemented** (`crates/dpc-ir/src/lower.rs` `set_member`,
+  `integer_constructor`; `crates/dpc-m68k/src/isel.rs` `set_member_reg`,
+  `word_set_const`), no range check:
+  - a `0..65535` element of an integer constructor of one word
+    (`dpc-sema` types `[1..10]` `set of 0..10`): zero-extended around a
+    longword constant's load, `clr.l Dk; move.l #c,Dn; move.w x,Dk`
+    (the 10 DISK_ sites);
+  - another word element of a one-word constant set: only when `moveq`
+    loads the constant, the element then the `moveq`.
+  Refused: a one-word constant `moveq` cannot load with any other
+  element (the open question above); a `0..65535` element with a
+  constant `moveq` loads (`clr.l; moveq; move.w`: no site), of a declared
+  set type's constant (`ws([1..10])`), computed or converted; a byte
+  element (boolean, char, `[byte]`: no site; true is 0xFF, ref 3.5.3, so
+  `b in [true]` would test bit 31) or a 4-byte one on a one-word constant
+  set; an array element on a one-word constant set or with a `0..65535`
+  element, and on a one-word constant set an element loaded through an
+  address register the instruction just before set (a `with` over an
+  array element, ROUTE_$INCOMING 0xE878F8; a base's `movea`, against
+  0xE6A1F4: the order above not settled; only a `lea`/`movea` into the
+  base register by the instruction right before the load counts, so a
+  base set earlier and held, as TTY_$K_SET_DELAY's parameter pointer
+  0xE67A10, is taken element first).  A set variable and a longword
+  constant set are as before this work (a `0..65535` element as it is,
+  `move.w`; no site shows one widened for a longword set).  Golden
+  `sets/in_const_set`; exec test `const_sets`; tests
+  `crates/dpc-m68k/tests/sets.rs` `constant_sets_with_a_run_time_element`,
+  `constant_set_refusals`, `constant_sets_take_the_element_mod_32` (the
+  68010 model).  ../source's `vol_idx in [1..10]` sites (`vol_idx:
+  integer` there) are refused as an `integer` element of a non-`moveq`
+  word constant; with `pinteger` they would take the DISK_ form.
 - **`in` on a set of more than a longword (Verified, 40 byte-offset
   sites):** `moveq`/`move.w #bits-1,Dx`, the element, the set's address
   with `lea` into a new address register (even `lea (A5),A0`), `sub.w

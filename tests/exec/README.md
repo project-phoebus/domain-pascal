@@ -186,6 +186,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `byte_statics` | bead domain-pascal-yvko: char and boolean module variables and a routine's `static` char one to a word (SIO_IO 0xE2DEB8+0x48 `70 00 60 00`), initialised and not; stores leave the neighbours and pad bytes alone |
 | `byte_ints` | `[byte]` subranges (ref 3.15.5): unsigned and signed bytes at odd offsets, widened for arithmetic and comparisons, transfers between them, by value and by address, a byte result, `&`/`lshft`/`rshft`, byte arrays; boundary values (0, 127, 128, 255; -128, -1) through `-`, `div`, `mod`, `~`, `!`, comparisons, `case`, and `lshft(b, 8) > 5` as a signed `integer` |
 | `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
+| `const_sets` | bead domain-pascal-bitu: `x in [..]` with a run-time element, an integer constructor as a longword constant (`integer` and zero-extended `0..65535` elements, 0..31), a one-word enumeration set by `moveq`; in a condition and as a value |
 | `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |
 | `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |
 | `gotos` | forward and backward `goto`, out of loops, into a `case` arm, from a function |

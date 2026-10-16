@@ -7459,11 +7459,19 @@ impl Selector {
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
                     }
-                    Expr::SetMember { .. } => {
-                        return Err(unsupported(
-                            self.span,
-                            "`in` on a one-word set with an element that is not constant is",
-                        ))
+                    // A one-word constant set that `moveq` loads: the same
+                    // ([`Self::word_set_const`]).
+                    Expr::SetMember {
+                        elem,
+                        set,
+                        set_width: Width::Word,
+                    } => {
+                        self.word_set_const(elem, set)?;
+                        let start = self.out.len();
+                        self.set_member_reg(elem, set)?;
+                        self.word_member_order(start)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
                     }
                     // A set larger than a longword: `btst` on the byte
                     // ([`Self::set_member_at`]; 0xE1B750 `btst D1,(0,A0,D2.w);
@@ -11486,14 +11494,7 @@ impl Selector {
                     return Ok(Val::Tmp(r));
                 }
                 if *set_width != Width::Long {
-                    // `btst Dn,Dm` takes the bit number mod 32: on a word
-                    // set held in a register an element above 15 would test
-                    // a bit outside the set.  What the original did is not
-                    // catalogued.
-                    return Err(unsupported(
-                        self.span,
-                        "`in` on a one-word set with an element that is not constant is",
-                    ));
+                    self.word_set_const(elem, set)?;
                 }
                 if let Expr::Load {
                     addr: Addr::Frame(o),
@@ -11507,7 +11508,11 @@ impl Selector {
                         ));
                     }
                 }
+                let start = self.out.len();
                 let r = self.set_member_reg(elem, set)?;
+                if *set_width != Width::Long {
+                    self.word_member_order(start)?;
+                }
                 self.out.push(Insn::Scc {
                     cond: Cond::Ne,
                     dst: Ea::Reg(Reg::D(r)),
@@ -15127,6 +15132,108 @@ impl Selector {
         )
     }
 
+    /// `in` with a run-time element on a one-word set (codegen-patterns
+    /// 5.1, "`x in c`"; `tools/setsurvey.py summary`, kind `vtest`): only a
+    /// constant that `moveq` loads, which is then the same as a longword's
+    /// (36 of the 51 constant sets tested with `btst Dk,Dn` in compiled code
+    /// are `moveq` loads, e.g. TTY_$K_SET_DELAY 0xE67A1A `moveq #0x1f,D1`),
+    /// with an element whose load needs no address computed for it.
+    /// Refused:
+    /// - a constant `moveq` cannot load: `move.w #c` with an `integer`
+    ///   element in ../source's reading (FILE_$PRIV_LOCK 0xE5F110..0xE5F11A
+    ///   `move.w (16,A6),D0; move.w #0xfff,D1; btst D0,D1`, bits 16..31 of
+    ///   D1 left as they were) or `move.l #c` (the 10 DISK_ `#0x7fe` sites,
+    ///   `0..65535` elements, which lowering widens): whether the element's
+    ///   type decides it is not settled;
+    /// - an element of an array (an index scaled, `mulu`/`muls`): at all 6
+    ///   such sites the constant is loaded before the element (MAC_$OPEN
+    ///   0xE0B8FA..0xE0B8FE `mulu.w D0,D1; moveq #3,D3; move.w
+    ///   (0x2c,A3,D1.w),D2`; ROUTE_$INCOMING 0xE878F8, ROUTE_$OUTGOING
+    ///   0xE87A9C, XNS' module-local 0xE17C2E; RIP_$FIND_NEXTHOP 0xE156E2,
+    ///   ROUTE_$SERVICE 0xE6A0BC after the base's load), which `dpc`'s
+    ///   scheduler does not produce;
+    /// - a set variable (unguarded `move.w; btst` at 0xE5EABE `move.w
+    ///   (A4),D0; move.w (712,A5),D1; btst D0,D1`; guarded `moveq #15,Dx;
+    ///   cmp.w Dk,Dx; bcs.s; move.w; btst; bhi`/`bls` when the element's
+    ///   type reaches beyond the word, AST's module-local 0xE01C0A..0xE01C16,
+    ///   ×3; which elements are guarded is not settled).
+    fn word_set_const(&mut self, elem: &Expr, set: &Expr) -> Res<()> {
+        match set {
+            Expr::Const { .. } if elem_indexed(elem) => Err(Self::indexed_member(self.span)),
+            Expr::Const { value, .. } if (0..128).contains(&(*value & 0xffff)) => Ok(()),
+            Expr::Const { .. } => Err(unsupported(
+                self.span,
+                "`in` with a run-time element on a one-word constant set that `moveq` cannot \
+                 load (`move.w #c` with an `integer` element at FILE_$PRIV_LOCK 0xE5F114, \
+                 `move.l #c` with `0..65535` ones in DISK_: not settled, codegen-patterns \
+                 5.1) is",
+            )),
+            _ => Err(unsupported(
+                self.span,
+                "`in` on a one-word set variable with an element that is not constant \
+                 (unguarded or guarded by the element's range: not settled, codegen-patterns \
+                 5.1) is",
+            )),
+        }
+    }
+
+    /// After [`Self::set_member_reg`] on a one-word constant set (its code
+    /// from `start`): refused when the element's load reads an address
+    /// register that the instruction just before it set (a `with` over an
+    /// array element, `lea`; a base `movea`).  At ROUTE_$INCOMING 0xE878F6..
+    /// 0xE878FE (`with route_$port[index] do`, ../source) the image has
+    /// `muls.w D0,D1; moveq #3,D2; lea (0,A1,D1.l),A0; move.w (44,A0),D1`,
+    /// the constant before the base; ROUTE_$SERVICE 0xE6A0BC and
+    /// RIP_$FIND_NEXTHOP 0xE156E2 likewise after a base's load; but
+    /// ROUTE_$SERVICE 0xE6A1F4..0xE6A1FC `movea.l (12,A6),A0; move.w
+    /// (4,A0),D1; moveq #62,D3` keeps the element first: not settled.
+    /// **Limit:** only a `lea`/`movea` into that register by the
+    /// instruction right before the load counts; a base set earlier and
+    /// held (a parameter's slot loaded at entry, as TTY_$K_SET_DELAY
+    /// 0xE67A10..0xE67A18 `movea.l (0xc,A6),A2; ...; move.w (A2),D0`, or a
+    /// `with` base with other code between) is taken element first.
+    fn word_member_order(&self, start: usize) -> Res<()> {
+        let base = |ea: &Ea| match ea {
+            Ea::Ind(a) | Ea::Disp(_, a) | Ea::Idx(_, a, _, _) => Some(*a),
+            _ => None,
+        };
+        let load = (start..self.out.len()).find_map(|i| match &self.out[i] {
+            Insn::Move {
+                src,
+                dst: Ea::Reg(Reg::D(_)),
+                ..
+            } => base(src).map(|a| (i, a)),
+            _ => None,
+        });
+        let Some((i, a)) = load else {
+            return Ok(());
+        };
+        let set_just_before = i > 0
+            && matches!(&self.out[i - 1],
+                Insn::Lea { dst, .. } | Insn::Movea { dst, .. } if *dst == a);
+        if set_just_before {
+            return Err(unsupported(
+                self.span,
+                "`in` on a one-word constant set with an element through an address register \
+                 set just before (the constant first at ROUTE_$INCOMING 0xE878F8, ROUTE_$SERVICE \
+                 0xE6A0BC; the element first at 0xE6A1F4: not settled, codegen-patterns 5.1) is",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `in` on a constant set with an array element: the constant first
+    /// in the image, not reproduced ([`Self::word_set_const`]).
+    fn indexed_member(span: Span) -> Diagnostic {
+        unsupported(
+            span,
+            "`in` on a constant set with an array element (the constant loaded before the \
+             element at all 6 such sites, MAC_$OPEN 0xE0B8FC, ROUTE_$INCOMING 0xE878F8, \
+             ROUTE_$OUTGOING 0xE87A9C, 0xE17C2E, RIP_$FIND_NEXTHOP 0xE156E2, ROUTE_$SERVICE \
+             0xE6A0BC: not reproduced, codegen-patterns 5.1) is",
+        )
+    }
+
     /// `elem in set` for a variable element and a one-longword set: the
     /// `btst Dn,Dm` that sets Z, in the register that holds the set, which
     /// is returned (a boolean value takes `sne` there, a condition
@@ -15152,7 +15259,19 @@ impl Selector {
     /// - A constant set: the element, then the constant in a register
     ///   (TTY_$K_SET_DELAY 0xE67A18..0xE67A1E `move.w (A2),D0; moveq
     ///   #0x1f,D1; btst D0,D1; bne.b`; tty_$i_wait 0xE1C264 `move.w
-    ///   (0x38,A2),D0; moveq #3,D5; btst D0,D5; bne.b`).
+    ///   (0x38,A2),D0; moveq #3,D5; btst D0,D5; bne.b`).  An array
+    ///   element is refused on a one-word constant ([`Self::word_set_const`]:
+    ///   the image loads the constant before it, which `dpc`'s scheduler
+    ///   does not do).  A `0..65535` element (lowering's zero-extension to a
+    ///   longword) is cleared, then the constant loaded, then the word moved
+    ///   in: AS_IO_SETUP 0xE6B75C..0xE6B766 `clr.l D0; move.l #0x7fe,D1;
+    ///   move.w (A0),D0; btst D0,D1`, from a register DISK_$UNASSIGN
+    ///   0xE6BDC2..0xE6BDCC `clr.l D0; move.l #0x7fe,D1; move.w D2,D0` (7 of
+    ///   the 10 DISK_ sites in this order; at DISK_$GET_MNT_INFO 0xE6BE5E,
+    ///   DISK_$FORMAT_WHOLE 0xE3D2AC, DISK_$DIAG_IO 0xE6BC38 and DISK_$FORMAT
+    ///   0xE3D3B8 the routine's entry loads are interleaved, as 12.4 R11 "Not
+    ///   explained"); with a constant `moveq` loads, an array element or a
+    ///   computed element it is refused (no site).
     fn set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
         let bit_of = |s: &mut Self, e: &Expr| -> Res<u8> {
             match e {
@@ -15168,6 +15287,63 @@ impl Selector {
             }
         };
         let r = match set {
+            // A `0..65535` element zero-extended around the constant's
+            // load (AS_IO_SETUP 0xE6B75C..0xE6B766).
+            Expr::Const { value, .. }
+                if matches!(elem, Expr::Convert { value: w, ty }
+                    if *ty == Scalar::unsigned(Width::Long)
+                        && w.ty() == Scalar::unsigned(Width::Word)) =>
+            {
+                let Expr::Convert { value: word, .. } = elem else {
+                    return Err(unsupported(self.span, "this `in` element is"));
+                };
+                if (-128..128).contains(&(*value as i32 as i64)) {
+                    return Err(unsupported(
+                        self.span,
+                        "`in` on a constant set that `moveq` loads with a `0..65535` element \
+                         (`clr.l; moveq; move.w`: no site, the 10 zero-extended elements are \
+                         tested against `move.l #0x7fe`, codegen-patterns 5.1) is",
+                    ));
+                }
+                if elem_indexed(word) {
+                    return Err(Self::indexed_member(self.span));
+                }
+                let src =
+                    match &**word {
+                        Expr::Load { .. } => match self.eval(word)? {
+                            Val::Mem(ea) => ea,
+                            Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+                            _ => return Err(unsupported(
+                                self.span,
+                                "`in` on a constant set with a `0..65535` element in an address \
+                                 register is",
+                            )),
+                        },
+                        _ => {
+                            return Err(unsupported(
+                                self.span,
+                                "`in` on a constant set with a `0..65535` element that is not a \
+                             variable (computed or converted: no site) is",
+                            ))
+                        }
+                    };
+                let k = self.alloc_d()?;
+                self.out.push(Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::Reg(Reg::D(k)),
+                });
+                let r = self.load_const(*value, Width::Long)?;
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src,
+                    dst: Ea::Reg(Reg::D(k)),
+                });
+                self.out.push(Insn::Btst {
+                    bit: k,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                return Ok(r);
+            }
             Expr::Const { value, .. } => {
                 let bit = bit_of(self, elem)?;
                 let r = self.load_const(*value, Width::Long)?;
@@ -20180,5 +20356,23 @@ mod tests {
         assert!(!w(&p, &Addr::Frame(-4), false));
         assert!(!w(&p, &Addr::Frame(12), false));
         assert!(w(&p, &Addr::Frame(-4), true));
+    }
+}
+
+/// Whether element `e`'s load reaches it through an array index (an
+/// index scaled for its address: `mulu`/`muls`, `(d,An,Dn)`).
+fn elem_indexed(e: &Expr) -> bool {
+    fn addr(a: &Addr) -> bool {
+        match a {
+            Addr::Index { .. } => true,
+            Addr::Indirect { base, .. } => elem_indexed(base),
+            Addr::Volatile { addr: a, .. } => addr(a),
+            _ => false,
+        }
+    }
+    match e {
+        Expr::Load { addr: a, .. } => addr(a),
+        Expr::Convert { value, .. } => elem_indexed(value),
+        _ => false,
     }
 }
