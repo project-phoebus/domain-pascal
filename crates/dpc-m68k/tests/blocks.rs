@@ -221,3 +221,89 @@ end;
         );
     }
 }
+
+/// Blocks that are array elements indexed at run time (codegen-patterns
+/// 5.2, "Block addresses", "Elements"; bead domain-pascal-dsr5): the
+/// shapes the image does not settle are refused with their own messages;
+/// the settled ones are golden `data/block_elements`, `_wide`.
+#[test]
+fn unsettled_element_blocks() {
+    let cases = [
+        // Both blocks elements (NAME_$FORK 0xE73E90).
+        (
+            "tbl[i] := tbl[j];",
+            "two array elements indexed at run time",
+        ),
+        // Another unit's array (ACL_$GET_SID 0xE74C40).
+        ("r := ext[i];", "an element of another unit's array"),
+        ("ext[i] := r;", "an element of another unit's array"),
+        // A frame array (none in compiled code).
+        ("loc[i] := r;", "an element of an array in the frame"),
+        // A computed index (every site's is a variable).
+        ("tbl[i + j] := r;", "whose index is computed"),
+        // A zero-extended byte index (none).
+        ("tc[c] := r;", "a byte index zero-extended"),
+        // The element second with an index of five instructions (x36).
+        ("t36[i] := q36;", "takes more than three instructions"),
+        // The element first in an unrolled copy (none).
+        ("r := tbl[i];", "an unrolled block copy"),
+        // The element first beyond a byte.
+        ("q := big[i];", "or at a displacement beyond a byte"),
+        // The element first with its index read from memory
+        // (NAME_$GET_WDIR_UID 0xE58972 against MAC_OS_$CLOSE 0xE0B4E8).
+        ("q := t32[cur];", "whose index is read from memory"),
+        // The element first through a held pointer.
+        (
+            "q := p^[i]; p^[1].a := 0;",
+            "through a pointer held in an address register",
+        ),
+        // The element second through a held pointer, unrolled (only `dbf`
+        // copies seen: VTOCE_$WRITE 0xE3977C).
+        ("pr^[i] := r; pr^[1].a := 0;", "only `dbf` copies seen"),
+        // The count hoisted above the element's `lea` (VTOC_$MOUNT
+        // 0xE38616..0xE3861A keeps it after).
+        (
+            "t32[i] := q; fl[i] := t32[i].a <> 0;",
+            "would be scheduled above the element's",
+        ),
+        // Arrays of char (no byte copy with an element).
+        ("names[i] := nm;", "a copy of an array of char"),
+    ];
+    for (stmt, want) in cases {
+        let e = compile(&format!(
+            "module m;
+type
+  rec12 = record a, b, c: integer32; end;
+  rec36 = record a: integer32; b: array[1..8] of integer32; end;
+  rec32 = record a: integer32; b: array[1..7] of integer32; end;
+  tab_t = array[1..10] of rec12;
+  tabp = ^tab_t;
+  tab32 = array[1..10] of rec32;
+  tab32p = ^tab32;
+  name_t = array[1..16] of char;
+var
+  tbl: tab_t;
+  t32: tab32;
+  tc: array[char] of rec12;
+  t36: array[1..10] of rec36;
+  fl: array[1..10] of boolean;
+  names: array[1..10] of name_t;
+  cur: integer;
+  pad: array[1..100] of integer32;
+  big: tab32;
+  ext: extern tab_t;
+procedure t(i, j: integer; c: char; in out r: rec12; in out q: rec32;
+            in out q36: rec36; p: tab32p; pr: tabp; in out nm: name_t);
+            options(val_param);
+var loc: tab_t;
+begin
+  loc[1].a := 0;
+  {stmt}
+end;
+"
+        ))
+        .expect_err("refused")
+        .join("\n");
+        assert!(e.contains(want) && e.contains("dsr5"), "{stmt}: {e}");
+    }
+}

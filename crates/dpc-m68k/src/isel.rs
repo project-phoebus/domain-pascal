@@ -1108,6 +1108,13 @@ fn select_body_with(
         .iter()
         .map(|&(k, span)| (s.out[k].clone(), s.out[k + 1].clone(), span))
         .collect();
+    // A block element second of the unit's array and its count's `moveq`
+    // ([`Selector::note_block_count`]).
+    let elem_count_pairs: Vec<(Insn, Insn, Span)> = s
+        .elem_counts
+        .iter()
+        .map(|&(k, c, span)| (s.out[k].clone(), s.out[c].clone(), span))
+        .collect();
     let zext_triples: Vec<([Insn; 3], Span)> = s
         .zext_bases
         .iter()
@@ -1387,6 +1394,21 @@ fn select_body_with(
     for (lea, user, span) in &once_pairs {
         if !out.windows(2).any(|w| w[0] == *lea && w[1] == *user) {
             return Err(unsupported(*span, ONCE_LEA_SCHEDULED));
+        }
+    }
+    for (lea, count, span) in &elem_count_pairs {
+        // The `lea`, then the count later in the same straight-line run.
+        let after = out.iter().enumerate().any(|(i, x)| {
+            x == lea
+                && out[i + 1..]
+                    .iter()
+                    .take_while(|y| {
+                        !matches!(y, Insn::Label(_) | Insn::Branch { .. } | Insn::Dbf { .. })
+                    })
+                    .any(|y| y == count)
+        });
+        if !after {
+            return Err(unsupported(*span, ELEMENT_COUNT_SCHEDULED));
         }
     }
     for (t, span) in &zext_triples {
@@ -2441,6 +2463,135 @@ fn once_elem_lea(
         (true, _) => Err(ONCE_LEA_SHAPE),
     }
 }
+
+/// What a block's two addresses are formed for
+/// ([`Selector::block_addresses`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockUse {
+    /// A record comparison (`cmpm`, with its count's `moveq`).
+    Compare,
+    /// A copy of up to 18 bytes, unrolled, no count.
+    Unrolled,
+    /// A longword `dbf` copy, with its count's `moveq`.
+    Loop,
+    /// An array of char copied by bytes.
+    Chars,
+}
+
+/// Whether `i`, one of an element's index instructions, reads registers
+/// and immediates only ([`Selector::block_addresses`]: an element first).
+fn index_reads_registers(i: &Insn) -> bool {
+    let plain = |e: &Ea| matches!(e, Ea::Reg(_) | Ea::Imm(_));
+    match i {
+        Insn::Moveq { .. } | Insn::Ext { .. } | Insn::Shift { .. } => true,
+        Insn::Move { src, dst, .. } => plain(src) && matches!(dst, Ea::Reg(_)),
+        Insn::Alu { src, .. } | Insn::Mul { src, .. } => plain(src),
+        _ => false,
+    }
+}
+
+/// Whether `i`, one of an element's index instructions, zero-extends a
+/// byte (`clr.w Dn` / `move.b x,Dn`; codegen-patterns 5.2, "Byte
+/// indices").
+fn zero_extends_byte(i: &Insn) -> bool {
+    matches!(i, Insn::Clr { .. } | Insn::Move { size: Size::B, .. })
+}
+
+/// The refusal of a block copy or comparison whose two blocks are both
+/// array elements indexed at run time ([`Selector::block_addresses`]).
+const ELEMENT_BOTH: &str = "a block copy or comparison of two array elements indexed at run \
+     time (both indices, then both `lea`s, in orders and registers not modelled: NAME_$FORK \
+     0xE73E90..0xE73EA0, PCHIST_$UNIX_PROFIL_FORK 0xE5CC6C..0xE5CC8A, ACL_$ALLOC_ASID \
+     0xE73C22..0xE73C48; codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block that is an element of another unit's array or
+/// of one through a pointer loaded for it ([`Selector::element_block`]).
+const ELEMENT_BASE: &str = "a block that is an element of another unit's array or of an \
+     array through a pointer not held in an address register (the base dies at the element's \
+     `lea`; the other address then takes A2 past it at ACL_$GET_SID 0xE74C40 and \
+     ACL_$GET_PID_SID 0xE489FC, the base's own register at ACL_$ENTER_SUBS 0xE46F44 and \
+     0xE54A3C: not settled, codegen-patterns 5.2, \"Block addresses\"; beads \
+     domain-pascal-1ibr, -dsr5) is";
+
+/// The refusal of a block element that is the first address (a copy's
+/// source, a comparison's left operand) whose index takes more than two
+/// instructions or whose displacement is beyond a byte
+/// ([`Selector::block_addresses`]).
+const ELEMENT_FIRST: &str = "a block copy's source or a comparison's left operand that is an \
+     array element whose index takes more than two instructions, or at a displacement beyond a \
+     byte (the second address after the element's `lea` at MAC_OS_$CLOSE 0xE0B4E8 and \
+     0xE0C08E, after the index's load at RING_$PROC2_CLEANUP 0xE76AC6 and RING_$SVC_CLOSE \
+     0xE76EBE: not settled; codegen-patterns 5.2, \"Block addresses\"; bead \
+     domain-pascal-dsr5) is";
+
+/// The refusal of a block copy's source or comparison's left operand
+/// that is an element of an array through a held pointer
+/// ([`Selector::block_addresses`]).
+const ELEMENT_FIRST_HELD: &str = "a block copy's source or a comparison's left operand that is \
+     an element of an array through a pointer held in an address register (seen only with an \
+     index of five instructions, MAC_OS_$CLOSE 0xE0B4DA and RING_$PROC2_CLEANUP 0xE76AC2, whose \
+     orders differ: not settled; codegen-patterns 5.2, \"Block addresses\"; bead \
+     domain-pascal-dsr5) is";
+
+/// The refusal of a block that is an element of a frame array indexed at
+/// run time ([`Selector::element_block`]).
+const ELEMENT_FRAME: &str = "a block that is an element of an array in the frame indexed at \
+     run time (no block copy or `cmpm` of compiled code has one: not catalogued; \
+     codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element whose operand is of a form
+/// [`Selector::element_lea`] does not take.
+const ELEMENT_FORM: &str = "a block that is an array element in this addressing form (not \
+     catalogued, codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element first whose index reads memory.
+const ELEMENT_FIRST_MEMORY: &str = "a block copy's source or a comparison's left operand that \
+     is an array element whose index is read from memory (the second address in the load's \
+     stall at NAME_$GET_WDIR_UID 0xE58972, RING_$PROC2_CLEANUP 0xE76AC6 and RING_$SVC_CLOSE \
+     0xE76EBE, after the element's `lea` at MAC_OS_$CLOSE 0xE0B4E8: not settled; \
+     codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of an unrolled copy from an element.
+const ELEMENT_FIRST_UNROLLED: &str = "an unrolled block copy (up to 18 bytes) from an element of \
+     the unit's array indexed at run time (no such copy with an index held in a register: not \
+     seen; codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element whose index zero-extends a byte.
+const ELEMENT_BYTE_INDEX: &str = "a block that is an array element with a byte index \
+     zero-extended (`clr.w`, `move.b`: no such block in compiled code; codegen-patterns 5.2, \
+     \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element second whose index takes more than
+/// three instructions.
+const ELEMENT_SECOND_LONG: &str = "a block copy's destination or a comparison's right operand \
+     that is an array element whose index takes more than three instructions (the sites have two \
+     or three, KBD_$RCV 0xE1CDD0; not seen; codegen-patterns 5.2, \"Block addresses\"; bead \
+     domain-pascal-dsr5) is";
+
+/// The refusal of a block element second through a held pointer other
+/// than in a longword `dbf` copy.
+const ELEMENT_SECOND_HELD: &str = "a block comparison's right operand, an unrolled copy's \
+     destination or a char copy's that is an element of an array through a pointer held in an \
+     address register (only `dbf` copies seen: VTOCE_$WRITE 0xE3977C, FM_$WRITE 0xE3A55E; \
+     codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element whose index is computed.
+const ELEMENT_COMPUTED: &str = "a block that is an array element whose index is computed (every \
+     site's index is a variable: VTOC_$MOUNT 0xE3860E, KBD_$RCV 0xE1CDD0, NAME_$SET_WDIRUS \
+     0xE5868C; not seen; codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of an array of char copied into or from an element.
+const ELEMENT_CHARS: &str = "a copy of an array of char into or from an array element indexed \
+     at run time (no such byte copy in compiled code; codegen-patterns 5.2, \"Block addresses\", \
+     \"Arrays of char\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of a block element second of the unit's array whose
+/// count's `moveq` the scheduler puts above the element's `lea`
+/// ([`Selector::note_block_count`]).
+const ELEMENT_COUNT_SCHEDULED: &str = "a block copy or comparison into an element of the unit's \
+     array indexed at run time whose count's `moveq` would be scheduled above the element's \
+     `lea` (the image keeps it after, VTOC_$MOUNT 0xE38616..0xE3861A; codegen-patterns 5.2, \
+     \"Block addresses\"; bead domain-pascal-dsr5) is";
 
 /// The refusal of an element address read once whose read the scheduler
 /// moves away from its `lea` ([`once_elem_lea`] decides on the two
@@ -5709,6 +5860,11 @@ pub struct Selector {
     /// instruction that sets the second address, and the statement
     /// ([`Selector::block_addresses`]; checked after allocation).
     held_firsts: Vec<(usize, usize, Span)>,
+    /// The `lea` of a block element second of the unit's array, until
+    /// its count's `moveq` is emitted ([`Selector::note_block_count`]).
+    elem_second_lea: Option<usize>,
+    /// Such `lea`s and their counts, checked after scheduling.
+    elem_counts: Vec<(usize, usize, Span)>,
     /// Copies `(dst, src)` exempt from R2: `dst` may take `src`'s register
     /// where `src` dies at the copy ([`allocate_apart`]'s `coalesce`; a
     /// `for` loop's count copied from its tested bound, [`Selector::for_`]).
@@ -6061,6 +6217,8 @@ impl Selector {
             callee_only: Vec::new(),
             colour_apart: Vec::new(),
             held_firsts: Vec::new(),
+            elem_second_lea: None,
+            elem_counts: Vec::new(),
             colour_coalesce: Vec::new(),
             count_copies: Vec::new(),
             call_stmts: Vec::new(),
@@ -8405,12 +8563,13 @@ impl Selector {
                 ))
             }
         };
-        let (dst, src) = self.block_addresses(lhs, rhs)?;
+        let (dst, src) = self.block_addresses(lhs, rhs, BlockUse::Compare)?;
         let count = self.alloc_d()?;
         self.out.push(Insn::Moveq {
             value: (n - 1) as i8,
             dst: count,
         });
+        self.note_block_count();
         let cmpm = Insn::Cmpm {
             size: unit,
             src,
@@ -9418,7 +9577,12 @@ impl Selector {
         if longs - 1 > 0x7fff {
             return Err(unsupported(self.span, "a block copy this large is"));
         }
-        let (from, to) = self.block_addresses(src, dst)?;
+        let use_ = if bytes <= 18 {
+            BlockUse::Unrolled
+        } else {
+            BlockUse::Loop
+        };
+        let (from, to) = self.block_addresses(src, dst, use_)?;
         let mv = |size| Insn::Move {
             size,
             src: Ea::PostInc(from),
@@ -9444,6 +9608,7 @@ impl Selector {
                     dst: Ea::Reg(Reg::D(count)),
                 }
             });
+            self.note_block_count();
             let head = self.new_label();
             self.out.push(Insn::Align4);
             self.place(head);
@@ -9507,7 +9672,7 @@ impl Selector {
                 ),
             ));
         }
-        let (from, to) = self.block_addresses(src, dst)?;
+        let (from, to) = self.block_addresses(src, dst, BlockUse::Chars)?;
         let mv = Insn::Move {
             size: Size::B,
             src: Ea::PostInc(from),
@@ -9857,20 +10022,13 @@ impl Selector {
     /// pointer loaded through another pointer or through the static link
     /// (XPD_ 0xE5C238 loads both pointers, then `lea (A0),A4; lea
     /// (A1),A2`; nested ACL_ 0xE4515E `movea.l (18,A0),A2` with A1 free,
-    /// RIP_ 0xE158E4 `movea.l (0xc,A1),A2`); an array element whose
-    /// address takes instructions (the index's computation and the
-    /// block's own `lea` interleave, VTOC_$MOUNT 0xE3860E, ACL_$GET_SID
-    /// 0xE74C32; codegen-patterns 5.2, bead domain-pascal-1ibr); another
+    /// RIP_ 0xE158E4 `movea.l (0xc,A1),A2`); another
     /// unit's object at an offset (0xE5CF3A `lea (0xe85c24).l,A0`, in an
     /// overlay section, the one such routine); another data section's
     /// block of the unit (RIP_$INIT 0xE2FC1E, one site).
     fn block_address(&mut self, addr: &Addr) -> Res<(u8, BlockForm)> {
         const OFFSET: &str = "a block at an offset into another unit's object (0xE5CF3A `lea \
                               (0xe85c24).l,A0`, one routine's overlay object; bead domain-pascal-dsr5) is";
-        const ELEMENT: &str = "a block that is an array element whose address takes \
-                               instructions (the index's and the `lea`'s order and registers \
-                               not settled: VTOC_$MOUNT 0xE3860E, ACL_$GET_SID 0xE74C32; \
-                               codegen-patterns 5.2, beads domain-pascal-1ibr, -dsr5) is";
         const POINTER: &str = "a block through a pointer that is not held in a register \
                                (loaded through another pointer or the static link: XPD_ \
                                0xE5C238, ACL_ 0xE4515E, RIP_ 0xE158E4, not settled), or a field \
@@ -9932,7 +10090,10 @@ impl Selector {
                         Ea::Ind(a),
                     ) if dst == a => return Ok((*a, BlockForm::New)),
                     _ if matches!(addr, Addr::Index { .. }) => {
-                        return Err(unsupported(self.span, ELEMENT))
+                        // An element indexed at run time is formed by
+                        // [`Self::block_addresses`]; a stepped one whose
+                        // operand takes instructions is not seen.
+                        return Err(unsupported(self.span, ELEMENT_FORM));
                     }
                     _ => return Err(unsupported(self.span, POINTER)),
                 }
@@ -9956,14 +10117,221 @@ impl Selector {
     /// second address coloured into that dead pointer's register is
     /// refused after allocation ([`Selector::held_firsts`]; bead
     /// domain-pascal-76uw).  Gives the two registers.
-    fn block_addresses(&mut self, first: &Addr, second: &Addr) -> Res<(u8, u8)> {
-        let (a, fa) = self.block_address(first)?;
-        let lea = self.out.len() - 1;
-        let (b, _) = self.block_address(second)?;
+    ///
+    /// One block an array element indexed at run time
+    /// ([`Self::element_block`]; codegen-patterns 5.2, "Block addresses",
+    /// "Elements"; bead domain-pascal-dsr5):
+    ///
+    /// - the element second (a copy's destination, a comparison's right
+    ///   operand): the element's index first, with the `lea (0,An,Dx),Am`
+    ///   of a displacement beyond a byte, then the first address, then the
+    ///   element's `lea` ([`Self::element_lea`]); the scheduler (12.4 R11)
+    ///   then puts the first address in the index's stall.  The order of
+    ///   VTOC_$MOUNT 0xE3860E..0xE3861A `moveq #100,D0; lea (76,A4),A0;
+    ///   mulu.w D2,D0; lea (-84,A5,D0.w),A1`, KBD_$RCV 0xE1CDD0..0xE1CDDC,
+    ///   VOLX_$DISMOUNT 0xE6B412 and 0xE6B46C, NAME_$SET_WDIRUS 0xE5868C
+    ///   `lsl.w #3,D0; lea (A2),A1; lea (0,A5,D0.w),A0; moveq #1,D0; lea
+    ///   (2384,A0),A0` and NAME_$SET_NDIRUS 0xE587BC (the element's base
+    ///   register below the first address's), FM_$WRITE 0xE3A556,
+    ///   VTOCE_$WRITE 0xE39772 (a held pointer, `dbf` copies only; the
+    ///   count before the element's `lea`).  With the unit's array the
+    ///   count stays after the indexed `lea` (VTOC_$MOUNT's `moveq #24,D1`,
+    ///   which R11 would hoist; NAME_$SET_WDIRUS's between the pair's
+    ///   `lea`s): a hoisted count is refused after scheduling
+    ///   ([`Self::note_block_count`]).  An index of more than three
+    ///   instructions is refused (two or three at the sites);
+    /// - the element first (a copy's source, a comparison's left operand),
+    ///   in the unit's data area, in a `dbf` copy or a comparison, its
+    ///   index two instructions at most that read registers only and its
+    ///   displacement within a byte: the index and the `lea` kept
+    ///   together (a scheduler unit), then the second address (VTOC_$
+    ///   DISMOUNT 0xE387C0..0xE387C8 `moveq #100,D0; mulu.w D2,D0; lea
+    ///   (-84,A5,D0.w),A0; lea (76,A4),A1`, VOLX_$DISMOUNT 0xE6B48C..
+    ///   0xE6B494 `move.w D3,D2; lsl.w #5,D2; lea (-16,A5,D2.w),A0;
+    ///   movea.l #UID_$NIL,A1`, VOLX_$GET_INFO 0xE6B602, where R11 alone
+    ///   would pull the second address into the index's stall).  Other
+    ///   first elements are refused: an index loaded from memory puts the
+    ///   second address in the load's stall at NAME_$GET_WDIR_UID 0xE58972
+    ///   and RING_$PROC2_CLEANUP 0xE76AC6 but not at MAC_OS_$CLOSE
+    ///   0xE0B4E8.
+    ///
+    /// The index must be a variable (every site's is), not a zero-extended
+    /// byte; an array of char copied into or from an element is refused
+    /// (no site).
+    fn block_addresses(&mut self, first: &Addr, second: &Addr, use_: BlockUse) -> Res<(u8, u8)> {
+        self.elem_second_lea = None;
+        let (e1, e2) = (self.element_block(first), self.element_block(second));
+        if e1.is_some() && e2.is_some() {
+            return Err(unsupported(self.span, ELEMENT_BOTH));
+        }
+        if let Some(Err(why)) = e1.or(e2) {
+            return Err(unsupported(self.span, why));
+        }
+        if (e1.is_some() || e2.is_some()) && use_ == BlockUse::Chars {
+            return Err(unsupported(self.span, ELEMENT_CHARS));
+        }
+        let (a, fa, lea, b) = if let Some(data) = e1 {
+            if data != Ok(true) {
+                return Err(unsupported(self.span, ELEMENT_FIRST_HELD));
+            }
+            if use_ == BlockUse::Unrolled {
+                return Err(unsupported(self.span, ELEMENT_FIRST_UNROLLED));
+            }
+            // The element first: its index, its `lea`, then the second
+            // address, not interleaved ([`Self::element_block`]).
+            let mark = self.out.len();
+            let ea = self.ea_of(first)?;
+            if self.out.len() - mark > 2 || !matches!(ea, Ea::Idx(..)) {
+                return Err(unsupported(self.span, ELEMENT_FIRST));
+            }
+            if self.out[mark..].iter().any(zero_extends_byte) {
+                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+            }
+            if !self.out[mark..].iter().all(index_reads_registers) {
+                return Err(unsupported(self.span, ELEMENT_FIRST_MEMORY));
+            }
+            let a = self.element_lea(ea)?;
+            self.units.push((mark, self.out.len()));
+            let lea = self.out.len() - 1;
+            let (b, _) = self.block_address(second)?;
+            (a, BlockForm::New, lea, b)
+        } else if let Some(data) = e2 {
+            if data == Ok(false) && use_ != BlockUse::Loop {
+                return Err(unsupported(self.span, ELEMENT_SECOND_HELD));
+            }
+            // The element second: its index (and the `lea (0,An,Dx),Am`
+            // of a displacement beyond a byte) first, then the first
+            // address, then the element's `lea`.
+            let mark = self.out.len();
+            let ea = self.ea_of(second)?;
+            let index = &self.out[mark..];
+            let split = usize::from(matches!(ea, Ea::Disp(..)));
+            if index.iter().any(zero_extends_byte) {
+                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+            }
+            if index.len() > 3 + split {
+                return Err(unsupported(self.span, ELEMENT_SECOND_LONG));
+            }
+            let (a, fa) = self.block_address(first)?;
+            let lea = self.out.len() - 1;
+            let b = self.element_lea(ea)?;
+            if data == Ok(true) {
+                // The count's `moveq` is checked against the indexed
+                // `lea` after scheduling ([`Self::note_block_count`]):
+                // beyond a byte it may come between the two `lea`s
+                // (NAME_$SET_WDIRUS 0xE58690..0xE58696).
+                self.elem_second_lea = self
+                    .out
+                    .iter()
+                    .rposition(|i| matches!(i, Insn::Lea { src: Ea::Idx(..), dst } if *dst == b));
+            }
+            (a, fa, lea, b)
+        } else {
+            let (a, fa) = self.block_address(first)?;
+            let lea = self.out.len() - 1;
+            let (b, _) = self.block_address(second)?;
+            (a, fa, lea, b)
+        };
         if fa == BlockForm::HeldInd {
             self.held_firsts.push((lea, self.out.len() - 1, self.span));
         }
         Ok((a, b))
+    }
+
+    /// After the count's `moveq` of a block loop or comparison (the last
+    /// instruction): where the block's second address is an element of
+    /// the unit's array, the count must stay after the element's `lea`
+    /// once scheduled (VTOC_$MOUNT 0xE38616..0xE3861A `lea
+    /// (-84,A5,D0.w),A1; moveq #24,D1`, where R11 would hoist it; checked
+    /// in [`select_body_with`]).
+    fn note_block_count(&mut self) {
+        if let Some(k) = self.elem_second_lea.take() {
+            self.elem_counts.push((k, self.out.len() - 1, self.span));
+        }
+    }
+
+    /// Whether the block at `a` is an array element indexed at run time
+    /// (its address takes instructions; codegen-patterns 5.2, "Block
+    /// addresses", "Elements"; bead domain-pascal-dsr5): `None` when it is
+    /// not, `Some(Ok(data))` for the bases whose order and registers are
+    /// settled, `Some(Err(why))` for the others.
+    ///
+    /// Settled: an array in the unit's data area (`(d,A5,Dx)`; `data`),
+    /// or through a pointer held in an address register, so that the
+    /// element needs no base register of its own.  Refused: another
+    /// unit's array or one through a pointer loaded for it, whose base
+    /// dies at the element's `lea` and whose other address's register is
+    /// not settled (ACL_$GET_SID 0xE74C40 `movea.l (8,A6),A2` with the
+    /// dying base in A0 and A1 the element's; ACL_$GET_PID_SID 0xE489FC
+    /// the same; ACL_$ENTER_SUBS 0xE46F44 `lea (-80,A6),A1` and the
+    /// module-local 0xE54854 at 0xE54A3C `lea (-16,A6),A0` in the dying
+    /// base's own register); a frame array (no such block in compiled
+    /// code).
+    fn element_block(&self, a: &Addr) -> Option<Result<bool, &'static str>> {
+        let Addr::Index {
+            base, index, scale, ..
+        } = a
+        else {
+            return None;
+        };
+        if self.stepped_array(base, index, *scale).is_some() {
+            return None;
+        }
+        // Every site's index is a variable, widened or not.
+        fn plain(e: &Expr) -> bool {
+            match e {
+                Expr::Load { .. } => true,
+                Expr::Convert { value, .. } => plain(value),
+                _ => false,
+            }
+        }
+        if !plain(index) {
+            return Some(Err(ELEMENT_COMPUTED));
+        }
+        Some(match &**base {
+            Addr::Static(_) if !self.data_absolute => Ok(true),
+            Addr::Indirect { base: p, .. }
+                if matches!(
+                    &**p,
+                    Expr::Load { addr: Addr::Frame(f), .. }
+                        if matches!(self.pinned(*f), Some(Reg::A(_)))
+                ) =>
+            {
+                Ok(false)
+            }
+            Addr::Frame(_) => Err(ELEMENT_FRAME),
+            _ => Err(ELEMENT_BASE),
+        })
+    }
+
+    /// The address of a block that is an array element
+    /// ([`Self::element_block`]) from its operand `ea` ([`Self::ea_of`]):
+    /// `lea (d,An,Dx),Am` into a new register (VTOC_$MOUNT 0xE38616 `lea
+    /// (-84,A5,D0.w),A1`; VOLX_$DISMOUNT 0xE6B41A), or, beyond a byte, the
+    /// `lea (0,An,Dx),Am` already formed and `lea (d,Am),Am` into the same
+    /// register (NAME_$SET_WDIRUS 0xE58690..0xE58696 `lea (0,A5,D0.w),A0;
+    /// moveq #1,D0; lea (2384,A0),A0`; FM_$WRITE 0xE3A55E..0xE3A564).
+    fn element_lea(&mut self, ea: Ea) -> Res<u8> {
+        match ea {
+            Ea::Idx(..) => {
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Lea { src: ea, dst: a });
+                Ok(a)
+            }
+            Ea::Disp(d, am)
+                if self.out.iter().rev().find_map(|i| match i {
+                    Insn::Lea { src, dst } if *dst == am => Some(matches!(src, Ea::Idx(0, ..))),
+                    _ => None,
+                }) == Some(true) =>
+            {
+                self.out.push(Insn::Lea {
+                    src: Ea::Disp(d, am),
+                    dst: am,
+                });
+                Ok(am)
+            }
+            _ => Err(unsupported(self.span, ELEMENT_FORM)),
+        }
     }
 
     /// `d := e`: one move into the destination's effective address.

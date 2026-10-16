@@ -3349,18 +3349,134 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     `movea.l (0xc,A1),A2`, A2 past the link in A1; ACL_ 0xE4515E
     `movea.l (18,A0),A2` with A1 free: the register not settled); a
     field through a pointer in a data register not moved home (not
-    catalogued); an array element whose address takes instructions (41
-    `lea (d,An,Dx)` and the `lea (0,An,Dx),Am; lea (d,Am),Am` pairs:
-    VTOC_$MOUNT 0xE3860E..0xE3861A `moveq #100,D0; lea (76,A4),A0; mulu.w
-    D2,D0; lea (-84,A5,D0.w),A1; moveq #24,D1`, the source's `lea` inside
-    the index's computation; VTOC_$DISMOUNT 0xE387C0 with the count in
-    the index's D0; ACL_$GET_SID 0xE74C32..0xE74C50; NAME_$SET_WDIRUS
-    0xE5868C `lea (A2),A1; lea (0,A5,D0.w),A0; moveq #1,D0; lea
-    (0x950,A0),A0`; KBD_$RCV 0xE1CDD0 a `.l` index; codegen-patterns
-    5.2 above, bead domain-pascal-1ibr).  Golden `data/block_addresses`;
+    catalogued); the array elements of "Elements" (below) that it
+    refuses.  Golden `data/block_addresses`;
     conformance units `cal_get_info.pas`, `disk_get_error_info.pas`.
     Records and arrays of 1, 2 or 4 bytes are moved as scalars
     (Uncertain: not catalogued), except arrays of char (below).
+  - **Elements: a block that is an array element indexed at run time
+    (survey Verified for the orders of the unit's arrays; implemented
+    there; bead domain-pascal-dsr5).**  Ad-hoc survey (`tmp/` script not
+    kept, built on `tools/regalloc.py`'s routine model: every block copy
+    of 8 bytes and more, `(Am)+,(An)+` runs and loops and `(Am)+,<d>`,
+    and every `cmpm` run, in the routines `regalloc.py` analyses, with an
+    address register last set in the straight-line code before it by
+    `lea (d,An,Dx),Am` or by the pair `lea (0,An,Dx),Am; ...; lea
+    (d,Am),Am`; the 47 routines with a computed `jmp` are skipped; KBD_$RCV,
+    not among the 72, read by hand): 72 blocks.  By kind and the element's
+    side (the *first* address being a copy's source or a comparison's
+    left operand, the `cmpm` destination): 8-byte copies `(Am)+,<d>` with
+    the element the source 14 (`copy8`'s, not this entry's: refused
+    there); copies of 10 bytes and more, the element first 16, second
+    10, both 4; comparisons, first 14, second 12, both 2.  By the
+    element's base: the unit's data `(d,A5,Dx)` 15 (8 of them 8-byte
+    copies), another unit's array from `movea.l #sym` (including the
+    ACL_ biased bases, 5.2 "Overlay sections") or through a pointer
+    loaded for it, held in an address register from an earlier statement
+    or loop, or in a data register, the rest.  The orders:
+    - *The element second* (VTOC_$MOUNT 0xE3860E..0xE3861A `moveq #100,D0;
+      lea (76,A4),A0; mulu.w D2,D0; lea (-84,A5,D0.w),A1; moveq #24,D1`;
+      KBD_$RCV 0xE1CDD0..0xE1CDDC `move.w (88,A5),D0; lea (28,A2),A0;
+      ext.l D0; lsl.l #4,D0; lea (92,A5,D0.l),A1`; VOLX_$DISMOUNT
+      0xE6B412..0xE6B41E `move.w D3,D0; lea (-8,A6),A0; lsl.w #5,D0; lea
+      (-24,A5,D0.w),A1; moveq #1,D0` and 0xE6B46C; NAME_$SET_WDIRUS
+      0xE5868C..0xE58696 `lsl.w #3,D0; lea (A2),A1; lea (0,A5,D0.w),A0;
+      moveq #1,D0; lea (2384,A0),A0` and NAME_$SET_NDIRUS 0xE587BC;
+      through a held pointer FM_$WRITE 0xE3A556..0xE3A564 `move.w D6,D0;
+      lea (A4),A1; mulu.w #336,D0; lea (0,A3,D0.l),A0; moveq #31,D0; lea
+      (216,A0),A0` and VTOCE_$WRITE 0xE39772..0xE3977C `move.w D3,D0;
+      movea.l D4,A0; mulu.w #336,D0; moveq #35,D1; lea (8,A2,D0.l),A1`):
+      the order of generating the element's index first (with the `lea
+      (0,An,Dx),Am` of a displacement beyond a byte, whose register is so
+      below the first address's: A0 and A1 at NAME_$SET_WDIRUS, A0 free
+      before), then the first address, then the element's `lea`, under
+      12.4 R11 with its window of 3: the first address lands in the
+      index's first stall.  8 of 8 for the addresses (the sites above).
+      Every index is a variable (loaded, copied or held, widened at
+      KBD_$RCV) of two or three instructions; none is computed, none a
+      zero-extended byte.  The count's `moveq`: with the unit's array,
+      after the element's indexed `lea` at all four (VTOC_$MOUNT's
+      `moveq #24,D1` although the index's D0 lives on into the next
+      statement and R11 would hoist it; NAME_$SET_WDIRUS and _NDIRUS
+      between the two `lea`s of the pair; VOLX_$DISMOUNT reusing the
+      index's D0); through a held pointer, above the element's `lea` at
+      VTOCE_$WRITE (`moveq #35,D1` hoisted, R11's order), between the
+      pair's `lea`s at FM_$WRITE.  Only `dbf` copies are seen through a
+      held pointer; with the unit's array an unrolled copy (KBD_$RCV),
+      a `dbf` copy (VTOC_$MOUNT) and comparisons.
+    - *The element first, in the unit's data, an index of one or two
+      instructions that read registers only:* the index and the
+      element's `lea` together, then the second address, 3 of 3
+      (VTOC_$DISMOUNT 0xE387C0..0xE387CC `moveq #100,D0; mulu.w D2,D0; lea
+      (-84,A5,D0.w),A0; lea (76,A4),A1; moveq #24,D0`; VOLX_$DISMOUNT
+      0xE6B48C..0xE6B49A `move.w D3,D2; lsl.w #5,D2; lea (-16,A5,D2.w),A0;
+      movea.l #UID_$NIL,A1; moveq #1,D0`; the 8-byte copy of VOLX_$GET_INFO
+      0xE6B602..0xE6B60A `move.w D2,D0; lsl.w #5,D0; lea (-32,A5,D0.w),A0;
+      movea.l (12,A6),A1`), where R11 alone would put the second address
+      in the index's stall.  With the index *loaded from memory* the
+      second address goes into the load's stall: NAME_$GET_WDIR_UID
+      0xE5896C..0xE58978 `move.w PROC1_$AS_ID,D0; movea.l (8,A6),A1; lsl.w
+      #3,D0; lea (0,A5,D0.w),A0` (an 8-byte copy, the `s := tbl[cur]`
+      shape) and NAME_$GET_NDIR_UID 0xE5899A, RING_$PROC2_CLEANUP
+      0xE76AC2..0xE76AC6 `move.w (564,A2),D6; lea (168,A0),A4; lsl.w
+      #2,D6; ...` and RING_$SVC_CLOSE 0xE76EBA; against it MAC_OS_$CLOSE
+      0xE0B4DA..0xE0B4E8 and MAC_OS_$PROC2_CLEANUP 0xE0C080 (`move.w
+      (A0),D1`, five instructions, the second address after the `lea`):
+      not settled.  Of the element first in an unrolled copy, beyond a
+      byte, or through a held pointer, no settled site (the held-pointer
+      ones are the MAC_OS_ and RING_ sites).  Another unit's array first
+      interleaves too
+      (0xE46D20..0xE46D36 `move.w D0,D1; movea.l #sym,A0; ext.l D1;
+      movea.l #UID_$NIL,A4; lsl.l #8,D1; moveq #1,D6; lsl.l #2,D1; lea
+      (18,A0,D1.l),A1`; ACL_$SET_ACL_CHECK 0xE47624).
+    - *Registers:* each address the lowest free when it is formed, in the
+      generation order above, at every site of the unit's data and of a
+      held pointer (the image's own registers shifted by what its context
+      holds).  With another unit's array or a pointer loaded for it, the
+      base dies at the element's `lea`, and the other address then takes
+      A2 past the dying base in A0, A1 being the element's (ACL_$GET_SID
+      0xE74C40 `movea.l (8,A6),A2`, ACL_$GET_PID_SID 0xE489FC; ACL_$GET_
+      EXSID 0xE48992 `lea (A0),A2`), or the dying base's own register
+      (ACL_$ENTER_SUBS 0xE46F40..0xE46F44 `lea (0,A1,D1.w),A0; lea
+      (-80,A6),A1`; module-local 0xE54854 at 0xE54A38..0xE54A3C `lea
+      (0,A0,D1.w),A1; lea (-16,A6),A0`): not settled.
+    - *Both blocks elements:* NAME_$FORK 0xE73E90..0xE73EA0 (both indices,
+      both `lea (0,A4,Dx)`, both `lea (d,Am)`), PCHIST_$UNIX_PROFIL_FORK
+      0xE5CC6C..0xE5CC8A, ACL_$ALLOC_ASID 0xE73C22..0xE73C48, ACL_$SET_ACL_
+      CHECK 0xE4758C: not modelled.
+    **Implemented** (`isel.rs` `block_addresses`, `element_block`,
+    `element_lea`, `note_block_count`; for longword copies of 10 bytes
+    and more and record comparisons), with an index that is a variable
+    (loaded, copied or held, widened or not, not a zero-extended byte):
+    - as the second address, in the generation order above, an element
+      of the unit's array (an index of at most three instructions; a
+      `dbf` copy's or a comparison's count `moveq` must stay after the
+      element's indexed `lea` once scheduled, checked after R11, as at
+      VTOC_$MOUNT, refused where R11 would hoist it), or of an array
+      through a pointer held in an address register in a longword `dbf`
+      copy (the count as R11 places it, VTOCE_$WRITE, FM_$WRITE);
+    - as the first address, an element of the unit's array in a `dbf`
+      copy or a comparison, with an index of at most two instructions
+      that read registers only and a displacement within a byte, its
+      index and `lea` a scheduler unit (12.4 R10).
+    **Refused**, each with its own message: both blocks elements;
+    another unit's array or one through a pointer not held in an address
+    register (the other address's register); a frame array (no site); a
+    computed index, a zero-extended byte index (no site); the element
+    second with a longer index, through a held pointer other than in a
+    `dbf` copy, or with its count hoisted; the element first through a
+    held pointer, in an unrolled copy, with its index read from memory,
+    with a longer index or beyond a byte; any copy of an array of char
+    into or from an element (no such byte copy in the survey).  Goldens
+    `data/block_elements` (VTOC_$MOUNT with the index dead after the
+    `lea`, so the count reuses its D0; VTOC_$DISMOUNT, VOLX_$DISMOUNT,
+    NAME_$SET_WDIRUS, FM_$WRITE shapes), `data/block_elements_wide`
+    (KBD_$RCV, order identical); tests `crates/dpc-m68k/tests/blocks.rs`
+    `unsettled_element_blocks`.  Of the 29 such sites in ../source at
+    07614198 none compiles to a routine srcsurvey finds OK: VTOC_$MOUNT,
+    VTOC_$DISMOUNT, NAME_$SET_WDIRUS, VOLX_$DISMOUNT and KBD_$RCV pass
+    this statement and stop at other refusals; the ACL_ sites are
+    another unit's arrays.
   - **Arrays of char (survey Verified; implemented; bead
     domain-pascal-40r2).**  Ad-hoc survey (script not kept: every
     `move.<s> (Am)+,(An)+` of the compiled routines of `tools/regalloc.py
