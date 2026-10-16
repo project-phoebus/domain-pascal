@@ -3469,10 +3469,11 @@ end;
     assert_eq!(cells[4].1, cells[0].1);
 }
 
-/// What `univ` extension is not supported yet (bead domain-pascal-4be):
-/// a constant larger than the parameter, a non-integer constant or a
-/// non-integer parameter of another size, and an expression temporary of
-/// another size than the parameter.
+/// What `univ` extension is not supported yet (beads domain-pascal-4be,
+/// -9286): an integer constant larger than the parameter, a boolean or
+/// enumeration constant of another size, an integer constant for a
+/// non-integer parameter of less than 4 bytes, and an expression
+/// temporary of another size than the parameter.
 #[test]
 fn univ_size_mismatches_are_refused() {
     let cases = [
@@ -3487,9 +3488,39 @@ fn univ_size_mismatches_are_refused() {
             "1-byte constant of this type to a 4-byte `univ` parameter",
         ),
         (
-            "in a: univ r",
+            "in a: univ c3",
             "0",
-            "2-byte constant of this type to a 4-byte `univ` parameter",
+            "2-byte constant of this type to a 3-byte `univ` parameter",
+        ),
+        (
+            "in a: univ c3",
+            "red",
+            "2-byte constant of this type to a 3-byte `univ` parameter",
+        ),
+        (
+            "in a: univ char",
+            "0",
+            "2-byte constant of this type to a 1-byte `univ` parameter",
+        ),
+        (
+            "in a: univ integer32",
+            "'2'",
+            "1-byte constant of this type to a 4-byte `univ` parameter",
+        ),
+        (
+            "in a: univ buf",
+            "-1",
+            "a nonzero integer constant for a 1024-byte non-integer `univ` parameter",
+        ),
+        (
+            "in a: univ buf",
+            "16#12345",
+            "a nonzero integer constant for a 1024-byte non-integer `univ` parameter",
+        ),
+        (
+            "in a: univ buf",
+            "''",
+            "the empty string passed to a `univ` parameter",
         ),
         (
             "in a: univ integer32",
@@ -3501,6 +3532,9 @@ fn univ_size_mismatches_are_refused() {
         let e = errs(&format!(
             "module m;
 type r = record a, b: integer; end;
+  c3 = array[1..3] of char;
+  color = (red, green);
+  buf = array[1..1024] of char;
 var w: extern integer;
 procedure q({param}); extern;
 procedure p;
@@ -3509,10 +3543,69 @@ begin
 end;
 "
         ));
-        assert!(e[0].starts_with("t.pas:7:5: error: "), "{e:?}");
+        assert!(e[0].starts_with("t.pas:10:5: error: "), "{e:?}");
         assert!(e[0].contains(msg), "{e:?}");
         assert!(e[0].ends_with("not supported yet"), "{e:?}");
     }
+}
+
+/// A constant for a `univ` parameter of another size keeps a cell of its
+/// own size (beads domain-pascal-9286, -c5u; codegen-patterns 1.5, "To a
+/// `univ` parameter"): a string its characters, an odd count padded with
+/// a zero byte (0xE2FFD4), whatever the parameter's size (0xE30020, 36
+/// characters for a 4-byte parameter); an integer constant for a
+/// non-integer parameter of 4 bytes or more an integer32 cell (0xE12BB4,
+/// 0xE7508C); a character a word with it in the high byte (0xE333DA).
+#[test]
+fn univ_constants_keep_their_own_size() {
+    let m = lower_src(
+        "module m;
+type buf = array[1..1024] of char;
+  st = record all: integer32; end;
+  arg = [aligned(0)] integer32;
+procedure q(in a: univ buf; in b: univ integer32; in c: univ st; in d: univ buf;
+  in e: univ buf; in f: univ arg);
+  extern;
+procedure p;
+begin
+  q('abc', 'abcd', 0, '2', 0, 0);
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let cells: Vec<(Vec<u8>, u32)> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                slot: 4,
+                writable: false,
+            } => (k.bytes.clone(), k.key),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    let bytes: Vec<&[u8]> = cells.iter().map(|(b, _)| b.as_slice()).collect();
+    assert_eq!(
+        bytes,
+        [
+            &b"abc\0"[..],
+            b"abcd",
+            &[0, 0, 0, 0],
+            &[b'2', 0],
+            &[0, 0, 0, 0],
+            &[0, 0, 0, 0],
+        ]
+    );
+    // The 0s for the record, the buffer and the `[aligned(0)] integer32`
+    // are integer32 cells, one key (0xE2FFFC: VFMT_$WRITE2's argument and
+    // LOG_$ADD's `univ` data share it).
+    assert_eq!(cells[2].1, cells[4].1);
+    assert_eq!(cells[2].1, cells[5].1);
+    assert_ne!(cells[0].1, cells[1].1);
 }
 
 /// Type transfers (ref "Type Transfer Functions", pp. 4-197..4-199): no

@@ -4176,9 +4176,22 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
 /// (codegen-patterns 1.5): the value big-endian in the type's size, a
 /// byte in the high byte of a word (`ff00` for `true`: 17 sites name an
 /// earlier `ff00` cell, e.g. PROC2_$COMPLETE_VFORK's 0xE735F0; ref 3.5.3
-/// p. 3-11).  Scalars of 1, 2 or 4 bytes only; strings, sets, records and
-/// `nil` are not supported yet (`nil` passed by address: no site known).
+/// p. 3-11).  Scalars of 1, 2 or 4 bytes, and a string constant as its
+/// own type (only for a `univ` parameter, [`univ_const_type`]): its
+/// characters, an odd count followed by one zero byte (codegen-patterns
+/// 1.5, "To a `univ` parameter": 43 of the 101 string cells
+/// `tools/pcsurvey.py` finds end in a single `00`, the other 58 in a
+/// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`).  Sets,
+/// records, strings as another type and `nil` are not supported yet
+/// (`nil` passed by address: no site known).
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
+    if let (ConstValue::Str(s), TypeKind::StringLit { .. }) = (v, p.types.kind(ty)) {
+        let mut bytes = s.clone();
+        if bytes.len() % 2 == 1 {
+            bytes.push(0);
+        }
+        return Ok(PoolConst { bytes, key: ty.0 });
+    }
     let size = p.types.size(ty);
     let width = match Width::of_size(size) {
         Some(w) if v.ordinal().is_some() => w,
@@ -4212,40 +4225,98 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         Width::Word => be[2..].to_vec(),
         Width::Long => be.to_vec(),
     };
-    Ok(PoolConst { bytes, key: ty.0 })
+    // Every 4-byte integer cell is keyed as integer32, whatever the
+    // integer type it is held as, so equal values share: the module-local
+    // 0xE2FF7C's 0 for VFMT_$WRITE2's `a2`/`a1` (Apollo's
+    // `vfmt_$generic_signed_arg`, an `[aligned(0)]` integer32) is the cell
+    // 0xE2FFFC that LOG_$INIT 0xE30214 names for LOG_$ADD's `univ` data.
+    let key = if size == 4 && p.types.is_integer(ty) {
+        p.types.builtins.integer32.0
+    } else {
+        ty.0
+    };
+    Ok(PoolConst { bytes, key })
 }
 
 /// The type of the cell of a constant of type `cty` passed by address to
-/// a `univ` parameter of type `fty` (bead domain-pascal-4be).  Ref 5.3.3
-/// p. 5-11 (checked in the PDF): "When you pass an expression argument
-/// (as opposed to a variable argument) to a univ parameter, Domain Pascal
-/// extends the expression to be the same size as the univ parameter",
-/// with the message "Expression passed to UNIV formal NAME was converted
-/// to NEWTYPE" (also diagnostic 246, Appendix B).
+/// a `univ` parameter of type `fty` (beads domain-pascal-4be, -9286,
+/// -c5u).  Ref 5.3.3 p. 5-11 (checked in the PDF): "When you pass an
+/// expression argument (as opposed to a variable argument) to a univ
+/// parameter, Domain Pascal extends the expression to be the same size as
+/// the univ parameter", with the message "Expression passed to UNIV
+/// formal NAME was converted to NEWTYPE" (also diagnostic 246, Appendix
+/// B).  The image does not extend a constant's *cell* to the formal's
+/// size, nor cut it (codegen-patterns 1.5, "To a `univ` parameter"):
 ///
 /// - Equal sizes: the constant's own type (the bytes are the same either
 ///   way; the cell's key stays the constant's type).
 /// - An integer constant for a larger integer parameter: the value as the
-///   parameter's type, i.e. sign-extended to its size ("converted to
-///   NEWTYPE").  A cell of the constant's size would leave the callee
-///   reading past it.
-/// - Anything else is not supported yet: a constant larger than the
-///   parameter (the reference only speaks of extending; p. 5-10/5-11
-///   warns against passing an argument larger than the parameter), and
-///   the extension of a non-integer constant (boolean, character,
-///   enumeration) or to a non-integer parameter (array, record, ...),
-///   whose converted bytes the reference does not give.
-///
-/// Image: no site settles the cell's size against a `univ` formal; the
-/// nearest, LOG_$SHUTDN's `pea (0x66,PC)` at 0xE175A0 of a longword
-/// `0000 0000` cell for LOG_$ADD's data (C `void *data`, length 0), fits
-/// both an `integer32` constant and an extension to a 4-byte formal.
-fn univ_const_type(p: &Program, cty: TypeId, fty: TypeId, span: Span) -> Res<TypeId> {
+///   parameter's type, i.e. sign-extended to its size (VFMT_$WRITE2's
+///   `a2` and `a1`, Apollo's `univ` `[aligned(0)]` integer32, get a
+///   4-byte cell for 0 at the module-local 0xE2FF7C, cell 0xE2FFFC, first
+///   named for `a2` at 0xE2FF8A).  A 4-byte integer cell is keyed as
+///   integer32 ([`pool_const`]).
+/// - An integer constant 0 for a non-integer parameter of 4 bytes or more:
+///   an integer32 cell, the constant's 32-bit representation (ref 3.2.3
+///   p. 3-5: "Domain Pascal internally represents the value as a 32-bit
+///   integer").  Verified: the 0 for a 1024-byte `univ pkt_$bytes_t`
+///   (PKT_$SEND_INTERNET, PKT_$SAR_INTERNET, NET_IO_$SEND,
+///   PKT_$BLD_INTERNET_HDR: cells 0xE12BB4, 0xE2FDEC, 0xE61D18, 0xE658CC,
+///   0xE68E28, 0xE4A584, 0xE1050C, 0xE870D8, each `0000 0000`; three
+///   after a `0x2048` filler, so in the longword group), LOG_$ADD's data
+///   (0xE17608, 0xE2FFFC), XPD_$POST_EVENT's 4-byte `univ status_$t`
+///   (0xE7508C, after the word cell `0003`).  Only the value 0 is seen,
+///   and another value is refused.
+/// - A string constant: its own type, whatever the parameter's size
+///   (0xE2FF7C's 37 and 32 characters for VFMT_$WRITE2's 200-character
+///   format, cells 0xE2FFD4 and 0xE30000; its 36 characters for the
+///   4-byte `a1`, 0xE30020; PCHIST's `'..'` for TERM_$WRITE, 0xE5CA56).
+/// - A character constant for a larger non-integer parameter: its own
+///   type, a word cell with the character in the high byte (Reported:
+///   KBD_$INIT 0xE3338E, cell 0xE333DA `3200`, an array formal in
+///   ../source's reading).
+/// - Anything else is not supported yet (no site known): an integer
+///   constant larger than the parameter, an integer constant for a
+///   non-integer parameter of 1 to 3 bytes other than its own size, a
+///   character for a larger integer parameter, the empty string, a
+///   boolean, enumeration or set constant of another size than the
+///   parameter.
+fn univ_const_type(
+    p: &Program,
+    v: &ConstValue,
+    cty: TypeId,
+    fty: TypeId,
+    span: Span,
+) -> Res<TypeId> {
     let (cs, fs) = (p.types.size(cty), p.types.size(fty));
-    if cs == fs {
+    let int = p.types.is_integer(cty);
+    let fint = p.types.is_integer(fty);
+    if cs == 0 {
+        // `''`, a cell of no bytes: no site known.
+        return Err(unsupported(
+            span,
+            "the empty string passed to a `univ` parameter (a code-section cell of no bytes, no \
+             site known) is",
+        ));
+    }
+    if cs == fs || matches!(p.types.kind(cty), TypeKind::StringLit { .. }) {
         Ok(cty)
-    } else if cs < fs && p.types.is_integer(cty) && p.types.is_integer(fty) {
+    } else if cs < fs && int && fint {
         Ok(fty)
+    } else if cs <= 4 && fs >= 4 && int && v.ordinal() == Some(0) {
+        // Only 0 is seen; for another value a 4-byte cell cannot tell
+        // `0000 0007` from `0007 0000` (the 2-byte value extended or not).
+        Ok(p.types.builtins.integer32)
+    } else if cs <= 4 && fs >= 4 && int {
+        Err(unsupported(
+            span,
+            format!(
+                "a nonzero integer constant for a {fs}-byte non-integer `univ` parameter (only 0 \
+                 is seen, codegen-patterns 1.5) is"
+            ),
+        ))
+    } else if cs < fs && p.types.is_char(cty) && !fint {
+        Ok(cty)
     } else {
         Err(unsupported(
             span,
@@ -6145,7 +6216,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // value as the parameter's type (a `univ` one: see
                     // `univ_const_type`).
                     let ty = if univ {
-                        univ_const_type(p, a.expr.ty, prm_ty, a.expr.span)?
+                        univ_const_type(p, v, a.expr.ty, prm_ty, a.expr.span)?
                     } else {
                         prm_ty
                     };

@@ -673,8 +673,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     scalar constants of 1, 2 or 4 bytes (integers, enumerations,
     booleans, characters) by address; cells laid out as above, labels
     `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
-    Not yet: strings, sets, records, `nil` (no `nil` passed by address
-    is known); `lea (d,PC)`.  Conformance
+    String constants only to a `univ` parameter (below).  Not yet: sets,
+    records, strings to other parameters, `nil` (no `nil` passed by
+    address is known); `lea (d,PC)`.  Conformance
     units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
     (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
     `pchist_interrupt.pas`, `file_set_len.pas`, `asknode_info.pas`,
@@ -682,19 +683,74 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     `calls/const_pool_noalign`.  A unit that is a fragment of a module
     must not name a cell placed after a routine outside it (305 sites
     do); such units are not supported by the harness.
-  - **To a `univ` parameter (reference; bead domain-pascal-4be).**  Ref
+  - **To a `univ` parameter (Verified by survey; implemented; beads
+    domain-pascal-4be, -9286, -c5u).**  Ref
     5.3.3 p. 5-11: "When you pass an expression argument (as opposed to
     a variable argument) to a univ parameter, Domain Pascal extends the
     expression to be the same size as the univ parameter" (message
     "Expression passed to UNIV formal NAME was converted to NEWTYPE").
-    `dpc`: a constant of the parameter's size keeps its own type; an
-    integer constant for a larger integer parameter gets a cell of the
-    parameter's type (`0` for `univ integer32`: `0000 0000`); any other
-    size mismatch (a larger constant, a non-integer constant or
-    parameter) is "not supported yet".  The cell holds the value (a
-    2-byte `0..65535` constant 65535 becomes `0000 ffff`, -2 becomes
-    `ffff fffe`).  `dpc-sema` gives the reference's warning (Appendix B
-    message 246) for an expression smaller than its `univ` formal.
+    **Rule (image): a constant's cell keeps the constant's own size; it
+    is neither extended to the formal's size nor cut to it.**  `dpc`
+    (`univ_const_type`, `pool_const` in `dpc-ir`):
+    - a constant of the parameter's size keeps its own type;
+    - an integer constant for a larger integer parameter gets a cell of
+      the parameter's type (`0` for `univ integer32`: `0000 0000`; a
+      2-byte `0..65535` constant 65535 becomes `0000 ffff`, -2 `ffff
+      fffe`);
+    - an integer constant 0 for a non-integer parameter of 4 bytes or
+      more gets an integer32 cell, the constant's 32-bit representation
+      (ref 3.2.3 p. 3-5).  Survey (`tools/pcsurvey.py` sites, each
+      followed to the next `jsr`/`bsr` by a scratch script, not kept):
+      every `pea (d,PC)` cell whose call is PKT_$SEND_INTERNET,
+      PKT_$SAR_INTERNET, NET_IO_$SEND, PKT_$BLD_INTERNET_HDR or LOG_$ADD
+      is `0000 0000`: 16 such sites naming 10 cells (0xE12BB4 for
+      PKT_$LIKELY_TO_ANSWER 0xE12A92 and PKT_$PING_SERVER 0xE12CFA;
+      0xE2FDEC, 0xE61D18, 0xE658CC ×5, 0xE68E28, 0xE4A584, 0xE1050C ×2,
+      0xE870D8, 0xE17608, 0xE2FFFC).  `tools/pcsurvey.py list` has 25
+      sites naming these 10 cells in all (0xE658CC 6, 0xE1050C 4,
+      0xE61D18 3, 0xE2FFFC 3, 0xE12BB4, 0xE68E28 and 0xE870D8 2 each, the
+      rest 1); the 9 others go to other callees, not examined.  The 16 are
+      data arguments given `0` in ../source's Pascal, whose formals are
+      `univ` buffers there (1024-byte `pkt_$bytes_t`, NET_IO_$SEND's 16
+      bytes, LOG_$ADD's 192: the formals are Reported, the cells
+      Verified).  Each cell is 4 bytes, not 2:
+      0xE2FDEC, 0xE61D18 and 0xE17608 follow a `0x2048` filler (the
+      longword group, below), and the others are followed by the next
+      routine's `link` or by another cell.  XPD_$POST_EVENT's 4-byte `univ
+      status_$t` gets the same (0xE7504E, cell 0xE7508C, after the word
+      cell `0003` of the event type).  The word 0 beside such a cell is a
+      cell of its own (RIP_$SERVER 0xE68E26 `0000`, 0xE68E28 `0000
+      0000`).  Only the value 0 is seen; `dpc` refuses another value
+      (a cell cannot tell `0000 0007`, the value as integer32, from
+      `0007 0000`, a 2-byte value not extended);
+    - every 4-byte integer cell is keyed as integer32, whatever integer
+      type holds it, so equal values share one cell: 0xE2FFFC is named
+      for VFMT_$WRITE2's `a2` (0xE2FF8A, its first use) and `a1`/`a2`
+      (0xE2FFA0, `move.l (SP),-(SP)`), formal `vfmt_$generic_signed_arg`
+      (`[aligned(0)]` integer32 in Apollo's insert), and by LOG_$INIT
+      0xE30214 for LOG_$ADD's `univ` data;
+    - a string constant keeps its own type, whatever the parameter's size:
+      its characters, an odd count followed by one `00` byte (43 of the
+      101 distinct string cells end in a single `00`, the other 58 in a
+      character, none in `00 00`); strings fall in the size groups of the
+      padded size; equal strings share one cell (HINT_$INIT's
+      `` `node_data/hint_file`` 0xE313B4 for three calls, PROC2_$INIT's
+      `/sys/boot_shell` 0xE3090C for six; no repeated string cell);
+    - a character constant for a larger non-integer parameter keeps its
+      own type, a word with the character in the high byte (KBD_$INIT
+      below, an array formal in ../source's reading; Reported);
+    - any other size mismatch is "not supported yet" (no site known): an
+      integer constant larger than its parameter, an integer constant
+      for a non-integer parameter of 1 to 3 bytes other than its own
+      size, a character for a larger integer parameter, the empty string
+      `''` (a cell of no bytes), a boolean, enumeration or set constant
+      of another size.
+    `dpc-sema` gives the reference's warning (Appendix B message 246) for
+    an expression smaller than its `univ` formal.  Golden
+    `calls/univ_consts` (0xE2FF7C's cell order); `tools/srcsurvey.py`
+    against ../source efad41ed2e60, 0e9ad77b8565 and de3d800c84ec:
+    `dtty_$report_error`, `log_$shutdn`, `pchist_$enable_terminal`
+    compile byte-identical, cells included.
     Image (lead: ../source pascal-translation-notes findings 16, 25):
     **constants are not extended to the size of a `univ` formal
     (Verified where the formal is Apollo's own).**  vfmt_$write2's
@@ -719,8 +775,7 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     (4 bytes in ../source's reading; Reported).  So the reference's
     sentence (p. 5-11) does not describe the cells; what message 246's
     "converted" means for a by-address constant is not seen.  `dpc`
-    differs (extends integer constants, refuses the rest; bead
-    domain-pascal-c5u).
+    follows the cells (above).
     **The cell rule above holds at two more routines (Verified; lead:
     finding 25):** LOG_$INIT's 10 cells 0xE3022A..0xE30267 (word group
     22A, 22C, 232, 238, 23A, 23C, 23E, 244; `0x2048` at 0xE3024E; then
