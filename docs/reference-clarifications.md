@@ -143,7 +143,7 @@ Asked: 2026-10-16, by the lead (../source network/network.pas: `network_$rqst_do
 Passage: question 36's ruling permits `addr(...)` in initializers; nothing says whether the variable being declared is in scope in its own initializer.
 Question: is a variable in scope inside its own initializer, so that `addr(itself)` gives its own address?
 Owner's answer (2026-10-16): yes, in scope.  (Variables declared later in the var part are still not visible before their declaration.)
-Consequence: to be implemented (bead filed with this entry).
+Consequence: implemented (bead domain-pascal-i5mf): dpc-sema declares each name of a var declaration (its type and storage settled) before checking its initial value, for unit-level, `static`, `define`d and overlay-section variables and a routine's statics; `addr(itself)` is a relocated long to the variable's own place, as other `addr(...)` initial values (the data area plus an offset, or the overlay section's symbol plus an offset).  Tests: `own_address_initial_value` (crates/dpc-sema/src/tests/checks.rs), golden `data/self_addr`. ../source network/network.pas now compiles; its NETWORK data block (D 0xE248FC, 0x364 bytes) matches the image byte for byte, +0x258 `0000 0000 00e2 4b54 00e2 4b54` and +0x268 likewise.
 
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 

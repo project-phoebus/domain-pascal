@@ -301,6 +301,85 @@ fn addr_initial_values() {
     assert!(e[0].contains("initial value must be a constant"), "{e:#?}");
 }
 
+/// Owner's ruling (docs/reference-clarifications.md "A variable's own
+/// address in its initializer"; bead domain-pascal-i5mf): a variable is
+/// in scope in its own initial value, so `addr(itself)` is its own
+/// address; a variable declared later in the var part is not.  ../source
+/// network/network.pas: `network_$rqst_done_ec: ec_$eventcount_t :=
+/// [value := 0, waiter_list_head := addr(network_$rqst_done_ec), ...]`
+/// (the image's NETWORK D segment at +0x258: `0000 0000 00e2 4b54
+/// 00e2 4b54`).
+#[test]
+fn own_address_initial_value() {
+    let p = module(
+        "type ec = record value: integer32; head: univ_ptr; tail: univ_ptr end;
+         var a: ec := [value := 0, head := addr(a), tail := addr(a.tail)];
+             b: static ec := [value := 0, head := addr(b), tail := addr(b)];
+             c: define univ_ptr := addr(c);
+             m1, m2: univ_ptr := addr(m1);
+             x: extern univ_ptr;
+         var (ov) o: ec := [value := 0, head := addr(o), tail := addr(o)];
+         define d;
+         var d: extern univ_ptr := addr(d);
+         procedure q;
+         var s: static ec := [value := 0, head := addr(s), tail := addr(s)];
+         begin x := nil end;",
+    );
+    let vid = |n: &str| p.find_var(n).unwrap();
+    let at = |n: &str, offset| {
+        InitDatum::Addr(StaticAddr {
+            base: StaticBase::Var(vid(n)),
+            offset,
+        })
+    };
+    let stores = |n: &str| {
+        var(&p, n)
+            .init
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|s| (s.offset, s.value.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        stores("a"),
+        vec![
+            (0, ConstValue::Int(0).into()),
+            (4, at("a", 0)),
+            (8, at("a", 8))
+        ]
+    );
+    for n in ["b", "o", "s"] {
+        assert_eq!(
+            stores(n),
+            vec![(0, ConstValue::Int(0).into()), (4, at(n, 0)), (8, at(n, 0))],
+            "{n}"
+        );
+    }
+    assert_eq!(stores("c"), vec![(0, at("c", 0))]);
+    assert_eq!(stores("d"), vec![(0, at("d", 0))]);
+    // `m1, m2: T := addr(m1)`: each name its own copy, both m1's address.
+    assert_eq!(stores("m1"), vec![(0, at("m1", 0))]);
+    assert_eq!(stores("m2"), vec![(0, at("m1", 0))]);
+    // A routine's static naming itself is no reference by the body.
+    let refs: Vec<_> = routine(&p, "q").static_refs.iter().map(|r| r.0).collect();
+    assert_eq!(refs, vec![vid("x")]);
+
+    // A variable declared later in the var part is not yet visible.
+    assert_err(
+        "module m; var p: univ_ptr := addr(later); later: integer32;",
+        "undefined identifier",
+    );
+    // A routine's ordinary variable still cannot be initialised (one
+    // error; its own name is in scope).
+    let e = errs("module m; procedure q; var l: univ_ptr := addr(l); begin end;");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert!(
+        e[0].contains("can be initialised only if it is static"),
+        "{e:#?}"
+    );
+}
+
 /// Bead domain-pascal-1dn (fuzzer, mutate seed 777): a set initialiser's
 /// range outside the set's type is an error, not enumerated member by
 /// member (`[0..2147483647]` ran for minutes).

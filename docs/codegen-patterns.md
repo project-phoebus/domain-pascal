@@ -9391,8 +9391,17 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     (a routine, another unit's variable) or `.long .Ldata[.<SECT>]+n`
     (the unit's own variables, which may have no symbol), one
     `R_68K_32` relocation each (`dpc_ir::InitValue::Address`; golden
-    `data/addr_init`, exec test `addr_init`).  A later initial value
-    over part of an address is refused.  No conformance or link unit
+    `data/addr_init`, exec test `addr_init`).  A variable's own address
+    in its initial value (owner's ruling, reference-clarifications "A
+    variable's own address in its initializer"; bead domain-pascal-i5mf)
+    is the same relocated long: NETWORK's D segment 0xE248FC holds at
+    +0x258 (0xE24B54) `0000 0000 00e2 4b54 00e2 4b54`, an eventcount
+    whose waiter list points at itself, and at +0x268 the same with
+    0xE24B64; ../source network/network.pas writes them as
+    `addr(network_$rqst_done_ec)` and `addr(network_$rqst_quit_ec)`,
+    and dpc's block for that module equals the image's 0x364 bytes
+    (srcsurvey's conformance link; golden `data/self_addr`).  A later
+    initial value over part of an address is refused.  No conformance or link unit
     has such a section yet, so neither `tools/conform.py` nor
     `tools/linktest.py` has been exercised on one; `linktest.py` refuses
     to compare a block's initial bytes where the dpc object has a

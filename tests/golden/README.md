@@ -164,6 +164,13 @@ Tests:
   routine, another unit's variable plus an offset, the unit's own data
   area plus an offset; FLP_ 0xE7AEF4, WIN_ 0xE2B89C), owner's ruling on
   3.13.4 p. 3-51.
+- `data/self_addr` - codegen-patterns 11 ("Initial values",
+  addresses; bead domain-pascal-i5mf): a variable's own address in its
+  initial value (owner's ruling, reference-clarifications "A variable's
+  own address in its initializer"), unit-level, `static`, `define`d, a
+  routine's static and an overlay section's variable; ../source
+  network/network.pas network_$rqst_done_ec, the image's NETWORK D
+  segment 0xE248FC at +0x258 `0000 0000 00e2 4b54 00e2 4b54`.
 - `data/with` - codegen-patterns 5.2 ("`with`", "`addr(x)` as a
   value"), 1.5: records named in place, a unit pointer held for the
   body, an element through a pointer (NETLOG_$LOG_IT 0xE71BB6..0xE71BFC),

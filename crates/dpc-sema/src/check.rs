@@ -1765,10 +1765,36 @@ impl<'t> Checker<'t> {
                     }
                 }
             };
+            let frame_var = matches!(storage, Storage::Frame { .. });
+            let id = self.add_var(Var {
+                name: name.name.clone(),
+                ty,
+                storage,
+                owner: if frame_var { owner } else { None },
+                init: None,
+                span: name.span,
+            });
+            if let (true, Some(r)) = (frame_var, owner) {
+                self.routines[r.0 as usize].frame_vars.push(id);
+            }
+            if let (Storage::Extern { .. }, Some(sec)) =
+                (&self.vars[id.0 as usize].storage, &overlay)
+            {
+                self.extern_sections.insert(id.0, sec.clone());
+            }
+            vars_out.push(id);
+            // A variable is in scope in its own initial value, so
+            // `addr(itself)` is its own address; a variable declared
+            // later in the var part is not (owner's ruling,
+            // docs/reference-clarifications.md "A variable's own address
+            // in its initializer"; ../source network/network.pas
+            // network_$rqst_done_ec).  Its type and storage are settled
+            // above.
+            self.declare(name, Sym::Var(id));
             let init = match &vd.init {
                 None => None,
                 Some(init) => {
-                    if matches!(storage, Storage::Frame { .. }) {
+                    if frame_var {
                         // ref 3.2.2 p. 3-4: a routine's variable can be
                         // initialised only if it is static.
                         self.error(
@@ -1787,32 +1813,14 @@ impl<'t> Checker<'t> {
                             .last()
                             .map(|c| (c.id, self.routines[c.id.0 as usize].static_refs.len()));
                         self.init(ty, 0, init, &mut stores);
-                        if let Some((id, n)) = refs {
-                            self.routines[id.0 as usize].static_refs.truncate(n);
+                        if let Some((r, n)) = refs {
+                            self.routines[r.0 as usize].static_refs.truncate(n);
                         }
                         Some(stores)
                     }
                 }
             };
-            let frame_var = matches!(storage, Storage::Frame { .. });
-            let id = self.add_var(Var {
-                name: name.name.clone(),
-                ty,
-                storage,
-                owner: if frame_var { owner } else { None },
-                init,
-                span: name.span,
-            });
-            if let (true, Some(r)) = (frame_var, owner) {
-                self.routines[r.0 as usize].frame_vars.push(id);
-            }
-            if let (Storage::Extern { .. }, Some(sec)) =
-                (&self.vars[id.0 as usize].storage, &overlay)
-            {
-                self.extern_sections.insert(id.0, sec.clone());
-            }
-            vars_out.push(id);
-            self.declare(name, Sym::Var(id));
+            self.vars[id.0 as usize].init = init;
         }
     }
 
