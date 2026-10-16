@@ -10195,8 +10195,18 @@ impl Selector {
     ///    directly followed by another one, except at a branch target
     ///    (0xE38B42/0xE38B44): every such pair was merged.  `false`,
     ///    cleared as a word, counts as a word 0 (0xE73FFC).  A run of
-    ///    three word constants (which pair is merged?) is not supported
-    ///    yet.
+    ///    three or more is paired in push order, from its rightmost
+    ///    argument: an odd run's leftmost (last pushed) word stands alone,
+    ///    `move.w #n` / `clr.w` (codegen-patterns 1.5,
+    ///    `tools/pushsurvey.py`: 47 runs of 3..6 in compiled code, 30 of
+    ///    them odd, none paired otherwise; 0xE135D0 `clr.l -(SP); clr.w
+    ///    -(SP)` for NETLOG_$LOG_IT's last three words, 0xE115FC `move.l
+    ///    #0x80400,-(SP); move.l #0x100001,-(SP); move.w #1,-(SP)` for
+    ///    SOCK_$OPEN's five; bead domain-pascal-9pq8).  The pairing does
+    ///    not depend on the alignment of the slots: of the 232 merged
+    ///    pairs, 137 are at 0 mod 4 from the first argument and 95 at 2
+    ///    mod 4.  `true` (`st -(SP)`) is never merged and splits a run
+    ///    (0xE51510 `pea (0x4).w; st -(SP); clr.l -(SP)`).
     /// 3. `jsr (sym).l` to another unit's routine (0xE00EF6), `bsr` to one
     ///    of this section (0xE00F02 `bsr.s`; the size is the emitter's,
     ///    `emit.rs`).
@@ -10311,13 +10321,9 @@ impl Selector {
         while k > 0 {
             let a = &c.args[k - 1];
             if k >= 2 {
+                // Paired from the right, so in a run of three or more the
+                // leftmost of an odd count is left over (above).
                 if let (Some(lo), Some(hi)) = (word_const(a), word_const(&c.args[k - 2])) {
-                    if k >= 3 && word_const(&c.args[k - 3]).is_some() {
-                        return Err(unsupported(
-                            self.span,
-                            "three or more adjacent word constant arguments are",
-                        ));
-                    }
                     let merged = ((hi & 0xffff) << 16) | (lo & 0xffff);
                     self.push_long_const(merged as i32 as i64);
                     k -= 2;
@@ -18269,10 +18275,43 @@ mod tests {
             body_text(&f)[..2],
             ["move.w\t(8,%fp),-(%sp)", "move.w\t#3,-(%sp)"]
         );
-        // Three in a row: which pair merges is not known.
-        let w = || val(konst(1, word()));
-        let f = proc_(0, vec![ext("P", vec![w(), w(), w()], 2)]);
-        assert!(err(&f).starts_with("three or more adjacent word constant"));
+        // Three or more in a row: paired from the right, the leftmost of
+        // an odd run alone (PMAP_$FLUSH 0xE135D0 `clr.l -(SP); clr.w
+        // -(SP)`; SOCK_$OPEN's callers, 0xE115FC; bead domain-pascal-9pq8).
+        let w = |v| val(konst(v, word()));
+        let f = proc_(0, vec![ext("P", vec![w(0), w(0), w(0)], 2)]);
+        assert_eq!(
+            body_text(&f)[..4],
+            [
+                "subq.l\t#2,%sp",
+                "clr.l\t-(%sp)",
+                "clr.w\t-(%sp)",
+                "jsr\t(P).l"
+            ]
+        );
+        let f = proc_(
+            0,
+            vec![ext("P", vec![w(1), w(0x10), w(1), w(8), w(0x400)], 2)],
+        );
+        assert_eq!(
+            body_text(&f)[..5],
+            [
+                "subq.l\t#2,%sp",
+                "move.l\t#0x80400,-(%sp)",
+                "move.l\t#0x100001,-(%sp)",
+                "move.w\t#1,-(%sp)",
+                "jsr\t(P).l"
+            ]
+        );
+        let f = proc_(0, vec![ext("P", vec![w(1), w(1), w(1), w(0x400)], 0)]);
+        assert_eq!(
+            body_text(&f)[..3],
+            [
+                "move.l\t#0x10400,-(%sp)",
+                "move.l\t#0x10001,-(%sp)",
+                "jsr\t(P).l"
+            ]
+        );
         // `false` (a byte 0, cleared as a word) merges with a word constant
         // next to it (FILE_$TRUNCATE_D 0xE73FFC `clr.l -(SP)`); `true`
         // (`st -(SP)`) does not.

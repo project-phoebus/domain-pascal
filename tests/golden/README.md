@@ -150,6 +150,12 @@ Tests:
   the byte in the high half (TTY 0xE1AFC0 chr(254) `move.w #-0x200`),
   chr(0) `clr.w` (0xE1AFD4), a char next to `true` pushed separately
   (SIO_$INIT 0xE32E60/0xE32E62); `[byte]` subranges likewise.
+- `calls/word_const_runs` - codegen-patterns 1.5 (bead
+  domain-pascal-9pq8): runs of three or more word constants paired from
+  the rightmost argument, an odd run's leftmost word alone (SOCK_$OPEN
+  from NETWORK_$PAGE_SERVER 0xE115FA, SOCK_$ALLOCATE_USER from MSG_$SARI
+  0xE59DE0, NETLOG_$LOG_IT 0xE135CE), `false` inside a run and left over
+  (PACCT_$SHUTDN 0xE5A71A, 0xE548BE), `true` splitting one (0xE51510).
 - `loops/align_off_from` - codegen-patterns 7: `dpc
   --loop-align-off-from` (options in `align_off_from.args`); fillers
   before the named routine, none from it on, the module end padded

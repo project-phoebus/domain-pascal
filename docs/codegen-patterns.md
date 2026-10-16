@@ -486,8 +486,53 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     stands unmerged next to `clr.w -(SP)` in 33 adjacent pairs
     (0xE05BFC; whether those `clr.w` are word zeros or `false` is not
     known); `dpc` pushes `true` apart.
-  - **Uncertain:** which pair merges in a run of three word constants
-    (`dpc` rejects it).
+  - **Runs of three or more (Verified; implemented, bead
+    domain-pascal-9pq8; `tools/pushsurvey.py summary` / `list`):** a run
+    of adjacent constant 2-byte slots (word constants, and `false`) is
+    paired in push order, from its rightmost argument; in an odd run the
+    leftmost argument, pushed last, stands alone as `move.w #n` /
+    `clr.w`.  The survey follows every call of compiled code to a
+    compiled callee and tells a merged longword push from a longword
+    argument by the callee's reads of the two halves.  Runs of 3..6
+    slots: 30 odd (19 of three, `L W` in push order; 11 of five, `L L
+    W`) and 17 even (15 of four, 2 of six), all paired so; none `W L`
+    or with two single words.  Five more have one half of a longword
+    push unread by the callee (FILE_$PRIV_UNLOCK reads its `lock_slot`
+    only as the word at 0xE, RIP_$UPDATE_INT 0xE15922's 0x12 not at
+    all; also RING_$SENDP 0xE11D32 `clr.w; clr.l`, its longword at 0x1a
+    unread), consistent either way.  A review scan of every adjacent
+    word-constant push followed by a constant push, whatever the callee
+    (the survey's walk stops at other instructions between pushes, e.g.
+    `lsl.l` at 0xE4BB22), found no `W L` or `W W` besides 0xE38B42.
+    E.g. 0xE135CE `subq.l #2,SP; clr.l
+    -(SP); clr.w -(SP)` for NETLOG_$LOG_IT's last three words (0x14,
+    0x16, 0x18); NETWORK_$PAGE_SERVER 0xE115FA `subq.l #2,SP; move.l
+    #0x80400,-(SP); move.l #0x100001,-(SP); move.w #1,-(SP)` for
+    SOCK_$OPEN(1, 0x10, 1, 8, 0x400) (also 0xE11618, 0xE11954,
+    0xE11970, 0xE1198A, 0xE12BC8, 0xE66432); MSG_$SARI 0xE59DE0 `move.l
+    #0x10400; move.l #0x10001` for SOCK_$ALLOCATE_USER(n, 1, 1, 1,
+    0x400) (RING_$IOCTL 0xE76D26 likewise, 8, 8, 8, 0x400);
+    FILE_$PRIV_LOCK's six from 0x0C (asid, side, lock_mode, `false`,
+    flags, key), `move.l #0x80000` (0xE5A840) or `clr.l` (0xE7178E),
+    then `move.l #0x40000; pea (0x1).w`; five from 0x0E when asid is not
+    constant, `move.l #0x80000` / `#0x880000` / `clr.l`, `move.l
+    #0x40000`, `clr.w` for side 0 (0xE52324, 0xE52D0A, 0xE55CFE,
+    0xE56D2E); three from 0x12 with `false` left over, `move.l
+    #0x880000; clr.w` (0xE548BE; 0xE5EAE2 `#0x440000`).
+    FILE_$PRIV_UNLOCK's four from 0x10 (lock_mode 4, asid 0, `false`,
+    key 0) after two longword zeros: `clr.l; clr.l; clr.l; move.l
+    #0x40000` (PACCT_$SHUTDN 0xE5A71A; 0xE5A804, 0xE5A97C, 0xE717E8,
+    0xE718E2).  The pairing does
+    not depend on alignment: of the 232 merged pairs the survey finds,
+    137 are at 0 mod 4 from the first argument (and from the SP before
+    the pushes) and 95 at 2 mod 4 (NETLOG_$LOG_IT's at 0x16).  `true`
+    (`st -(SP)`) is never part of a pair and splits a run, each side
+    paired by itself: 0xE51510 `pea (0x4).w; st -(SP); clr.l -(SP)`
+    (FILE_$PRIV_LOCK's side 0, lock_mode 4 | local_only | flags, key;
+    the one site with constants on both sides of a `st`).  Golden
+    `calls/word_const_runs`.
+    Still refused: a byte constant other than `true` and 0 next to a
+    word or byte constant (above).
 - **Address of another unit's variable** (by address under the default
   convention, or `addr(x)` by value): `move.l #sym,-(SP)`, 374 sites, 362
   of them a map symbol's own address (UID_$NIL ×36 e.g. 0xE01824,
@@ -4561,7 +4606,7 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   PMAP_$FLUSH (0xE1359C..0xE13A14) needs, in 0xE1359C alone: a run of
   three word constants
   (0xE135D0 `clr.l -(SP); clr.w -(SP)` for three zero words: the
-  rightmost pair merged, one site; 1.5 rejects such runs); `pea (d,An)`
+  rightmost pair merged, as in every run, 1.5; implemented); `pea (d,An)`
   of an object through a pointer loaded from memory (0xE135E2..0xE135EA
   `movea.l (8,A2),A1; movea.l (4,A1),A3; pea (0x10,A3)`); an inner `if`
   whose false branch goes to the epilogue (0xE135CC `bpl.s 0xE13602`,
