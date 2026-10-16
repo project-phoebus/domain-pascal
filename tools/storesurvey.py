@@ -49,6 +49,20 @@ usage:
                                                     # longword constants
     tools/storesurvey.py sites [-v]                 # merged sites: one
                                                     # object or two?
+    tools/storesurvey.py units [-v]                 # the per-unit knob
+
+`units' (bead domain-pascal-qb9q, codegen-patterns 13 "Per unit"): the
+map segments classed for `dpc --merge-constant-stores' (unit_status):
+`merges' (a merged constant site of MERGED_SITES and no pair apart that
+the in-unit rule would merge: two words, ascending, through an address
+register, other than a `device' zero `move #0'), `apart' (such a pair,
+no merge), `conflict' (both); the shapes (sizes, order, base kind) of
+the pairs apart in the segments without a merge, which dpc compiles
+apart without the knob; in the merging segments, the pairs apart by
+shape and the merged sites by base and alignment; and RUNS, the runs of
+word constants in merging units whose words ../source declares, against
+greedy pairing from the first.  merging_segments() gives the statuses
+to tools/srcsurvey.py's build settings.
 
 `merge' (bead domain-pascal-2m0, codegen-patterns 13 "Store merging"):
 pairs of stores to adjacent memory of one base, made one after the other
@@ -714,6 +728,28 @@ MERGED_SITES = (
            (18, 2, 'data_checks'), (20, 2, 'dma_overruns')),
           '../source win/win.ins.pas win_$cnt_t (offsets from the local)',
           ((0xE1910E, 'addqw #1,%a5@(72)'),), 'WIN_$CNT (A5+0x40) bumps not_ready alone'),
+    # bead domain-pascal-qb9q: found by srcsurvey's conformance of the
+    # ../source statements compiled apart
+    _site(0xE7013E, 'const', ('lea %a2@,%a0', 'clrl %a0@+', 'clrl %a0@+', 'clrw %a0@+'),
+          ((0, 4), (4, 4), (8, 2)),
+          ((0, 2, 'display_type'), (2, 2, 'mem_width'), (4, 2, 'mem_height'),
+           (6, 2, 'width'), (8, 2, 'height')),
+          '../source smd/smd.ins.pas smd_disp_info_result_t',
+          ((0xE70172, 'movew %a0@(ffffffffffffffa0,%d1:w),%a2@'),
+           (0xE70190, 'movew %d1,%a2@(6)'), (0xE7019A, 'movew %d1,%a2@(8)')),
+          'SMD_$INQ_DISP_INFO: five words cleared as a block (smd/inq_disp_info.pas)'),
+    _site(0xE6D80E, 'const', ('clrl %a0@(-46)', 'clrw %a0@(-42)'), ((-46, 4), (-42, 2)),
+          ((-46, 2, 'cursor_pos.line'), (-44, 2, 'cursor_pos.column'),
+           (-42, 2, 'cursor_number')),
+          '../source smd/reset_display_globals.pas (smd_$display_com[unit], offsets '
+          'from the element pointer)', (),
+          'smd_$reset_display_globals (module-local at 0xE6D7E2): through a pointer, merged; it keeps '
+          'its A5 word pairs apart (0xE6D824, 0xE6D830)'),
+    _site(0xE30526, 'const', ('clrl %a2@(36)',), ((0x24, 4),),
+          ((0x24, 2, 'first_debug_target_idx'), (0x26, 2, 'debugger_idx')),
+          '../source proc2/proc2.h proc2_info_t (C)',
+          ((0xE41B9C, 'movew %a1@(-190),%d0'),),
+          'PROC2_$INIT; PROC2_$GET_DEBUGGER_PID reads debugger_idx alone'),
     # copies: `src' is the source's (type, offset, size)
     _site(0xE69C16, 'copy', ('movel %a0@(44),%a1@(4)',), ((4, 4),),
           ((4, 2, 'short_info.status'), (6, 2, 'short_info.port_type')),
@@ -978,6 +1014,216 @@ def sites_main(argv):
     return 1 if bad else 0
 
 
+# ------------------------------------------------------------- units
+# `units' (bead domain-pascal-qb9q): the per-unit knob for constant store
+# merging (dpc --merge-constant-stores).  See the module doc.
+
+def const_pairs(rs):
+    """The unmerged pairs of `merge' over the routines RS ((seg, r0, r1)):
+    ([constant pairs with the low address even], [word and longword
+    constant pairs with the word at the low address])."""
+    pairs, six = [], []
+    for _seg, r0, r1 in rs:
+        ins = [regalloc.Insn(a, k, t) for a, k, t in loopalign.disasm(r0, r1 - r0)]
+        pairs += adjacent_pairs(ins)
+        six += adjacent_pairs(ins, (6,))
+    const = [p for p in pairs if p['mod4'] % 2 == 0
+             and all(x in ('zero', 'const') for x in p['values'].split('+'))]
+    wlo = [p for p in six if all(v in ('zero', 'const') for v in p['values'].split('+'))
+           and p['sizes'] == ('2+4' if p['order'] == 'asc' else '4+2')]
+    return const, wlo
+
+
+def pair_shape(p):
+    """A pair's shape: (sizes in statement order, order, base kind)."""
+    return (p['sizes'], p['order'], p['base'])
+
+
+def knob_class(p):
+    """What dpc --merge-constant-stores does with the pair of stores P
+    (an image pair, so a pair kept apart by the original): `merge' for
+    two words, ascending, through an address register (the in-unit
+    rule); `frame' for two words ascending in the frame, which dpc merges
+    or keeps apart by the objects (two word locals apart, a record's
+    words at 0 mod 4 merged), which the image does not show; `device'
+    for a `move #0' (a `device' object's zero, never merged, ref 3.15.3:
+    RING 0xE2FAC4); otherwise `apart or refused' (bytes, descending
+    words, words off A5 or absolute, a word and a longword)."""
+    if p['sizes'] == '2+2' and p['order'] == 'asc' and p['base'] in ('reg', 'a6'):
+        if re.search(r'move[bwl] #0,', p.get('text', '')):
+            return 'device'
+        return 'merge' if p['base'] == 'reg' else 'frame'
+    return 'apart or refused'
+
+
+def site_base(site):
+    """The base kind (`a5', `a6', `abs', `reg', `pc') of a MERGED_SITES
+    entry, from its instructions (a copy from a code constant `pc')."""
+    t = ' '.join(site['texts'])
+    for reg, kind in (('%pc', 'pc'), ('%fp', 'a6'), ('%a5', 'a5')):
+        if reg in t:
+            return kind
+    return 'reg' if '%a' in t else 'abs'
+
+
+def would_merge_shape(p):
+    """Whether the image pair P has a shape the image merges elsewhere:
+    two ascending words through an address register, or in the frame at
+    0 mod 4 (every merge in the frame is at 0 mod 4)."""
+    k = knob_class(p)
+    return k == 'merge' or (k == 'frame' and p['mod4'] == 0)
+
+
+def unit_status(merged, apart, seg_of):
+    """{segment: status} from the merged constant sites MERGED (addresses)
+    and the image's pairs kept apart APART (`merge' dicts): `merges' (a
+    merge, and no pair apart of a merged shape), `apart' (such a pair
+    apart, no merge), `conflict' (both).  The merged shapes kept apart
+    (would_merge_shape) are two ascending words through an address
+    register, and in the frame at 0 mod 4: the frame's merges count as
+    evidence, so its pairs apart at 0 mod 4 do too (NETWORK_$PAGE_SERVER
+    0xE117C6, an array local's two words; PROC2_$INIT 0xE30412, two word
+    locals of the C, which dpc's rule keeps apart, show as a conflict).
+    Segments with neither are left out (not known: no merged site is
+    entered for them and they keep no such pair apart)."""
+    m = {seg_of(a) for a in merged}
+    a = {seg_of(p['addr']) for p in apart if would_merge_shape(p)}
+    out = {}
+    for s in m | a:
+        out[s] = 'conflict' if s in m and s in a else 'merges' if s in m else 'apart'
+    return out
+
+
+def merging_segments():
+    """{segment start address: status} (unit_status) over the image's
+    compiled routines: the build setting tools/srcsurvey.py derives the
+    knob from."""
+    import sau2map
+    m = sau2map.load()
+    _, rs = regalloc.routines()
+    const, _wlo = const_pairs(rs)
+
+    def seg_of(a):
+        s = m.segment_containing(a)
+        return s.addr if s else None
+    st = unit_status([s['addr'] for s in MERGED_SITES if s['kind'] == 'const'], const,
+                     seg_of)
+    st.pop(None, None)
+    return st
+
+
+# The runs of word constants in merging units whose words ../source
+# declares (MERGED_SITES' layouts; the statements in ../source's order),
+# against the image's stores: (addr, image instruction texts, the words'
+# offsets in statement order, source).
+RUNS = (
+    (0xE67322, ('movel #65537,%a2@(714)', 'movel #65792,%a2@(718)'),
+     (0x2CA, 0x2CC, 0x2CE, 0x2D0), 'tty/k_reset.pas input_head, input.head, .tail, .size'),
+    (0xE67332, ('movel #65537,%a2@(978)', 'movew #256,%a2@(982)'),
+     (0x3D2, 0x3D4, 0x3D6), 'tty/k_reset.pas output.head, .tail, .size'),
+    (0xE67340, ('clrl %a2@(86)',), (0x56, 0x58), 'tty/k_reset.pas saved_input_flags, column'),
+    (0xE33378, ('clrw %a2@(56)', 'clrl %a2@(58)', 'clrw %a2@(62)'),
+     (0x38, 0x3A, 0x3C, 0x3E), 'kbd/init.pas state, sub_state, kbd_type_idx, pending_mode'),
+    (0xE333B6, ('movel #65537,%a2@(88)', 'movew #64,%a2@(92)'), (0x58, 0x5A, 0x5C),
+     'kbd/init.pas ring.head, .tail, .size'),
+    (0xE333C4, ('movel #65537,%a2@(158)', 'movew #64,%a2@(162)'), (0x9E, 0xA0, 0xA2),
+     'kbd/init.pas txbuf.head, .tail, .size'),
+    (0xE4521E, ('clrl %a1@(34)', 'clrw %a1@(38)'), (0x22, 0x24, 0x26),
+     'acl/prim_create_internal.pas owner_slot, group_slot, org_slot'),
+    (0xE45C1C, ('clrl %a1@(34)', 'clrw %a1@(38)'), (0x22, 0x24, 0x26),
+     'acl/acl.pas owner_slot, group_slot, org_slot'),
+)
+
+
+def greedy(words):
+    """The stores (offset, size) of words at WORDS (offsets, ascending,
+    adjacent) paired from the first."""
+    out = []
+    for i in range(0, len(words) - 1, 2):
+        out.append((words[i], 4))
+    if len(words) % 2:
+        out.append((words[-1], 2))
+    return out
+
+
+_ST = re.compile(r'^(?:(?:move|clr)([wl]) (?:#-?\d+,)?)%a\d@\((\d+)\)$')
+
+
+def image_stores(texts):
+    """[(offset, size)] of store texts `clrw %a2@(56)', `movel #n,%a2@(88)'."""
+    out = []
+    for t in texts:
+        mm = _ST.match(t)
+        out.append((int(mm.group(2)), 2 if mm.group(1) == 'w' else 4) if mm else None)
+    return out
+
+
+def units_main(argv):
+    import sau2map
+    verbose = '-v' in argv
+    m = sau2map.load()
+    _, rs = regalloc.routines()
+    const, wlo = const_pairs(rs)
+
+    def seg_of(a):
+        s = m.segment_containing(a)
+        return '%s 0x%X' % (s.name, s.addr) if s else '?'
+    merged = [s for s in MERGED_SITES if s['kind'] == 'const']
+    st = unit_status([s['addr'] for s in merged], const, seg_of)
+    merging = {s for s, v in st.items() if v != 'apart'}
+    by = Counter(st.values())
+    print('units (map segments): merges %d, apart %d, conflict %d (the rest show neither)' % (
+        by['merges'], by['apart'], by['conflict']))
+    for s in sorted(st):
+        if st[s] != 'apart' or verbose:
+            print('    %-26s %s' % (s, st[s]))
+    bad = 0
+    print()
+    print('pairs apart in units without a merge, by shape (sizes, order, base); '
+          'what dpc compiles apart without the knob:')
+    for title, rows in (('constant pairs', const), ('word below a longword', wlo)):
+        c, ex = Counter(), {}
+        for p in rows:
+            if seg_of(p['addr']) not in merging:
+                c[pair_shape(p)] += 1
+                ex.setdefault(pair_shape(p), []).append(p['addr'])
+        print('  %s:' % title)
+        for k in sorted(c):
+            print('    %-5s %-4s %-4s %3d  %s' % (k + (c[k], ' '.join(
+                '0x%06X' % a for a in ex[k][:4]))))
+    print()
+    print('in merging units (the knob):')
+    c, ex = Counter(), {}
+    for p in const + wlo:
+        if seg_of(p['addr']) in merging:
+            k = pair_shape(p) + ('mod4=%d' % p['mod4'], knob_class(p))
+            c[k] += 1
+            ex.setdefault(k, []).append(p['addr'])
+    print('  pairs apart:')
+    for k in sorted(c):
+        print('    %-5s %-4s %-4s %s %-16s %2d  %s' % (k + (c[k], ' '.join(
+            '0x%06X' % a for a in ex[k][:6]))))
+    c = Counter((site_base(s), s['stores'][0][0] % 4) for s in merged)
+    print('  merged constant sites by base and low address mod 4: %s' % ', '.join(
+        '%s %d: %d' % (k + (c[k],)) for k in sorted(c)))
+    print('  runs of words (../source order) against greedy pairing from the first:')
+    fit = Counter()
+    for a, texts, words, src in RUNS:
+        ok = texts_match(loopalign.disasm(a, 0x40)[:len(texts)], texts)
+        bad += not ok
+        g = greedy(words) == image_stores(texts)
+        fit[len(words), g] += 1
+        print('    0x%06X %d words %-8s %s%s' % (a, len(words), 'greedy' if g else 'NOT greedy',
+                                                src, '' if ok else '  [IMAGE DIFFERS]'))
+    print('  by run length: %s' % ', '.join(
+        '%d words: %s' % (n, ', '.join('%s %d' % ('greedy' if g else 'not', fit[n, g])
+                                         for g in (True, False) if fit[n, g]))
+        for n in sorted({n for n, _g in fit})))
+    if bad:
+        print('%d listed instruction(s) differ from the image' % bad)
+    return 1 if bad else 0
+
+
 _AREG_USES = ('movel', 'addl', 'subl', 'cmpl', 'cmpal', 'moveal')
 _IMM = re.compile(r'(addl|subl|cmpl|addil|subil|cmpil|cmpal) #(0x[0-9a-f]+|-?\d+),(%[ad]\d)$')
 
@@ -1097,6 +1343,8 @@ def main(argv):
         return merge_main(argv[1:])
     if argv and argv[0] == 'sites':
         return sites_main(argv[1:])
+    if argv and argv[0] == 'units':
+        return units_main(argv[1:])
     lo, hi, _, argv = regalloc.opts(argv)
     if not argv or argv[0] not in ('summary', 'list'):
         print(__doc__)

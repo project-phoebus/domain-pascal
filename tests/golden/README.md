@@ -51,6 +51,18 @@ Tests:
   0xE152FA.
 - `stores/const_stores` - codegen-patterns 13 (clr, st, move #n, byte
   immediates 0..255), 12.2.
+- `stores/const_pairs_apart` - codegen-patterns 13 ("Store merging",
+  bead domain-pascal-qb9q): adjacent constant stores one by one in a
+  unit built without `--merge-constant-stores` (TTY_$I_INIT 0xE3332E,
+  AREA_$INIT 0xE2F3C0, PKT_$BLD_INTERNET_HDR 0xE1217E, NETLOG_$CNTL
+  0xE719A4).
+- `stores/const_pairs_merged` - the same with `--merge-constant-stores`
+  (`.args`): two ascending word constants as one longword, the first two
+  of three (TTY_$K_RESET 0xE67332, 0xE67340; KBD_$INIT 0xE333B6),
+  `moveq` for a merged value in its range (LOG_$INIT 0xE3017C), a frame
+  record's words (APP 0xE00BA8); the shapes merging units keep apart as
+  two stores (SMD 0xE6D824, 0xE6D838 off A5; ACL_ 0xE44EC6 bytes;
+  FLP_DO_IO 0xE3DE4A descending).
 - `stores/nil_stores` - codegen-patterns 13 ("Stores of constants",
   `nil`; bead domain-pascal-j4ip): `nil` stored as `clr.l` to a frame
   local (BAT_$ALLOC_VTOCE 0xE3AEDA), a variable of the unit (BAT_$ALLOCATE

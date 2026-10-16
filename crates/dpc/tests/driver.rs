@@ -3184,26 +3184,63 @@ end;
     assert!(r.contains("\tmove.w\t(8,%fp),%d0\n"), "{r}");
 }
 
-/// Codegen-patterns 13, "Store merging" (bead domain-pascal-2m0): two
-/// constants stored to adjacent words are refused (the original merged
-/// some such pairs, TTY_$K_RESET 0xE67322, and kept others apart,
-/// TTY_$I_INIT 0xE3332E); a constant next to a value read through a
-/// parameter is compiled, as two stores.
+/// Codegen-patterns 13, "Store merging" (beads domain-pascal-2m0,
+/// domain-pascal-qb9q): two constants stored to adjacent words are two
+/// stores in a unit that does not merge (TTY_$I_INIT 0xE3332E) and one
+/// longword with `--merge-constant-stores` (TTY_$K_RESET 0xE67322);
+/// descending words are refused with the knob; a constant next to a value
+/// read through a parameter is two stores either way.
 #[test]
-fn adjacent_constant_stores_refused_other_pairs_compiled() {
-    let dir = scratch("adjacent_constant_stores_refused_other_pairs_compiled");
+fn adjacent_constant_stores_per_unit() {
+    let dir = scratch("adjacent_constant_stores_per_unit");
     let decls = "module m;\ntype r = record a, b: integer; end;\n";
-    let refused = dir.join("k.pas");
+    let k = dir.join("k.pas");
     std::fs::write(
-        &refused,
+        &k,
         format!("{decls}procedure p(var x: r);\nbegin\n  x.a := 1;\n  x.b := 1;\nend;\n"),
     )
     .unwrap();
-    let out = dpc().arg(&refused).output().unwrap();
+    let out = dpc().arg(&k).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let asm = std::fs::read_to_string(dir.join("k.s")).unwrap();
+    assert!(
+        asm.contains("\tmove.w\t#1,(%a0)\n\tmove.w\t#1,(2,%a0)\n"),
+        "{asm}"
+    );
+    let out = dpc()
+        .arg("--merge-constant-stores")
+        .arg(&k)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let asm = std::fs::read_to_string(dir.join("k.s")).unwrap();
+    assert!(asm.contains("\tmove.l\t#0x10001,(%a0)\n"), "{asm}");
+    let d = dir.join("d.pas");
+    std::fs::write(
+        &d,
+        format!("{decls}procedure p(var x: r);\nbegin\n  x.b := 0;\n  x.a := 0;\nend;\n"),
+    )
+    .unwrap();
+    assert!(dpc().arg(&d).output().unwrap().status.success());
+    let out = dpc()
+        .arg("--merge-constant-stores")
+        .arg(&d)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.contains("k.pas:6:3: error: a store adjacent to the previous statement's store"),
+        err.contains(
+            "d.pas:6:3: error: under --merge-constant-stores, a word constant stored just below"
+        ),
         "{err}"
     );
     let ok = dir.join("v.pas");
@@ -3215,15 +3252,21 @@ fn adjacent_constant_stores_refused_other_pairs_compiled() {
         ),
     )
     .unwrap();
-    let out = dpc().arg(&ok).output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let asm = std::fs::read_to_string(dir.join("v.s")).unwrap();
-    assert!(asm.contains("\tclr.w\t(%a0)\n"), "{asm}");
-    assert!(asm.contains(",(2,%a0)\n"), "{asm}");
+    for knob in [false, true] {
+        let mut cmd = dpc();
+        if knob {
+            cmd.arg("--merge-constant-stores");
+        }
+        let out = cmd.arg(&ok).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let asm = std::fs::read_to_string(dir.join("v.s")).unwrap();
+        assert!(asm.contains("\tclr.w\t(%a0)\n"), "{asm}");
+        assert!(asm.contains(",(2,%a0)\n"), "{asm}");
+    }
 }
 
 /// Bead domain-pascal-i1by (codegen-patterns 7.1): a comparison of a

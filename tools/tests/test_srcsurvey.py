@@ -994,6 +994,36 @@ class SettingsTest(unittest.TestCase):
         st[0][3]['interval'] = (0x112, 0x114)            # one does: the nearest option
         self.assertEqual(f(st, r('parent', 0x118), 0x110)[-1], '--loop-align-off-from=PARENT')
 
+    def test_merge_setting(self):
+        # bead domain-pascal-qb9q: on when a section merges and none keeps
+        # pairs apart; TTY-like (both kinds) left off, named
+        st = [s + ('merges',) for s in self.settings()]
+        self.assertEqual(srcsurvey.merge_setting(st), (True, None))
+        opts, problems = srcsurvey.settings_opts(st)
+        self.assertEqual(opts[-1], '--merge-constant-stores')
+        st[1] = st[1][:4] + (None,)                       # not known: still on
+        self.assertEqual(srcsurvey.merge_setting(st), (True, None))
+        self.assertEqual(srcsurvey.merge_opts(st), ['--merge-constant-stores'])
+        r = srcsurvey.Routine('abs')
+        r.addr = 0x310
+        self.assertEqual(srcsurvey.unit_build_opts(st, r, 0x310),
+                         ['--merge-constant-stores', '--a5-absolute=ABS'])
+        r.addr = 0x500                                    # in no section: kept
+        self.assertEqual(srcsurvey.unit_build_opts(st, r, 0x500),
+                         ['--merge-constant-stores'])
+        st[1] = st[1][:4] + ('apart',)
+        on, problem = srcsurvey.merge_setting(st)
+        self.assertFalse(on)
+        self.assertIn('WIRED_PROC 0x100 merge, .TEXT 0x300 keep pairs apart', problem)
+        self.assertNotIn('--merge-constant-stores', srcsurvey.settings_opts(st)[0])
+        self.assertIn(problem, srcsurvey.settings_opts(st)[1])
+        # four-tuples (no status): off
+        self.assertEqual(srcsurvey.merge_setting(self.settings()), (False, None))
+        out = io.StringIO()
+        srcsurvey.report_settings('m.pas', st, out)
+        self.assertIn('stores: merged', out.getvalue())
+        self.assertIn('stores: apart', out.getvalue())
+
     def test_report_quotes_for_a_shell(self):
         st = self.settings()
         st[0][2]['always_from'] = (0x150, 'TTY_$K_FLUSH_INPUT')

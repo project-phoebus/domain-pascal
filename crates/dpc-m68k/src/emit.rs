@@ -179,6 +179,13 @@ pub struct Options {
     /// a harness can check they fit in the owner's object.  The code is
     /// byte for byte the same as without the option.
     pub data_bases: Vec<(String, String)>,
+    /// The unit merges pairs of word constants stored to adjacent words
+    /// into one longword store (`dpc --merge-constant-stores`; ref 3.15.3
+    /// p. 3-57; codegen-patterns 13, "Store merging"; bead
+    /// domain-pascal-qb9q): a per-unit setting, on where the image's
+    /// segment merges (`tools/storesurvey.py units`).  Off, such pairs
+    /// are two stores, as in the units that do not merge.
+    pub merge_constant_stores: bool,
 }
 
 /// For each routine of `module` (indexed as `module.functions`): does it
@@ -413,7 +420,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             // For the driver's internal-error backstop
             // (`diag::set_context`): the routine, up to its pool cells.
             let outer = dpc_syntax::diag::set_context(Some(f.span));
-            match isel::select_in_unit(f, opts.schedule, &overlays) {
+            match isel::select_in_unit(f, opts.schedule, &overlays, opts.merge_constant_stores) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {

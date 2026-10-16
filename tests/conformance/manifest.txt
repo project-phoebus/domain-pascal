@@ -1,6 +1,6 @@
 # Image-conformance manifest, run by `make conform' (tools/conform.py manifest).
 #
-# One unit per line:  FILE SPEC... [--section-addr SEC=0xADDR]... [ALIGN] [A5]...
+# One unit per line:  FILE SPEC... [--section-addr SEC=0xADDR]... [ALIGN] [A5]... [MERGE]
 #   FILE  path from the repository root; a .pas file is compiled with
 #         target/debug/dpc into tmp/conform/FILE/ first (with
 #         --fragment-origin unless the unit is a whole map module), a .s
@@ -19,6 +19,10 @@
 #         ROUTINE,..., each at most once, forwarded to dpc as --a5-...
 #         (.pas units only; README.md, "Module data"; tools/a5survey.py
 #         switch SEG).
+#   MERGE merge-constant-stores (.pas units only, at most once),
+#         forwarded to dpc as --merge-constant-stores: the unit's map
+#         segment merges constant stores (codegen-patterns 13, "Store
+#         merging"; tools/storesurvey.py units).
 #   MODS  module-routines=ITEM,... (.pas fragments only): routines of
 #         the unit's map module outside the unit, declared `extern' in it
 #         and called with `bsr' as the original did; forwarded to dpc as
@@ -272,3 +276,7 @@ tests/conformance/acl_pci_copy_entry.pas     0xE45122:32  enclosing=PRIM_CREATE_
 # `addr' of a parameter passed by address stored from the register that
 # holds its slot (codegen-patterns 5.2; bead domain-pascal-mbtx).
 tests/conformance/ec_init.pas                EC_$INIT
+# Two word constants of a frame record merged into one longword in a unit
+# that merges (codegen-patterns 13, "Store merging"; bead
+# domain-pascal-qb9q).
+tests/conformance/xns_error_open.pas         MAYBE_OPEN_ERROR_SOCKET  --section-addr .bss.moddata.XNS_ERROR.WIRED_DATA=0xE2B29C  merge-constant-stores

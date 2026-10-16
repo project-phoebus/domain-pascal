@@ -7,6 +7,7 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
+//!            [--merge-constant-stores]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -102,6 +103,19 @@
 //! bytes as without the option (`dpc_m68k::emit::Options::data_bases`).
 //! Used to link a unit into `../source`, where a C `MODULE_DATA_DEFINE`
 //! block owns the module's data.
+//!
+//! `--merge-constant-stores` (a per-unit build setting, as the A5 and
+//! loop-alignment options are; bead domain-pascal-qb9q): the unit merges
+//! two consecutive statements that store word constants to adjacent words
+//! in ascending order into one longword store, as the image's merging
+//! units do (TTY_$K_RESET 0xE67322 `move.l #0x10001,(0x2ca,A2)`;
+//! codegen-patterns 13, "Store merging"; `dpc_m68k::emit::Options::
+//! merge_constant_stores`).  Without it such pairs are two stores, as in
+//! the units that do not merge (TTY_$I_INIT 0xE3332E).  Which units merge
+//! is not something the source says: `tools/storesurvey.py units` derives
+//! it from the image, per map segment, and `tools/srcsurvey.py` gives the
+//! option to the ../source modules whose segments merge.  Shapes neither
+//! kind of unit settles are refused either way (`dpc-m68k`, `isel/merge.rs`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -121,6 +135,7 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
+                     [--merge-constant-stores] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
@@ -151,6 +166,7 @@ struct Args {
     module_routines: Vec<ModuleRoutine>,
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
+    merge_constant_stores: bool,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
@@ -266,6 +282,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut module_routines: Vec<ModuleRoutine> = Vec::new();
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
+    let mut merge_constant_stores = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -395,6 +412,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     },
                 });
             }
+            "--merge-constant-stores" => {
+                if merge_constant_stores {
+                    return Err("--merge-constant-stores given more than once".into());
+                }
+                merge_constant_stores = true;
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -431,6 +454,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         module_routines,
         schedule: schedule.unwrap_or_default(),
         data_bases,
+        merge_constant_stores,
     })
 }
 
@@ -497,6 +521,7 @@ fn compile(
         module_routines: args.module_routines.clone(),
         schedule: args.schedule,
         data_bases: args.data_bases.clone(),
+        merge_constant_stores: args.merge_constant_stores,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
 
@@ -1147,6 +1172,22 @@ mod tests {
         ] {
             assert!(args(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn parses_merge_constant_stores() {
+        assert!(!args(&["m.pas"]).unwrap().merge_constant_stores);
+        assert!(
+            args(&["--merge-constant-stores", "m.pas"])
+                .unwrap()
+                .merge_constant_stores
+        );
+        assert!(args(&[
+            "--merge-constant-stores",
+            "--merge-constant-stores",
+            "m.pas"
+        ])
+        .is_err());
     }
 
     #[test]

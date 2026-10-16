@@ -35,6 +35,8 @@ use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp
 use crate::regs::{allocate_apart, call_results_first, RegClass, VRegs, DATA_BASE};
 use crate::sched::Schedule;
 
+mod merge;
+
 /// The register a nested routine's static link is passed in
 /// (codegen-patterns 6: 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
 const STATIC_LINK_A: u8 = 1;
@@ -234,7 +236,7 @@ pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
 /// [`select`] with the body scheduled under `sched` (`sched.rs`); no
 /// overlay sections, as [`select`].
 pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
-    select_in_unit(f, sched, &[])
+    select_in_unit(f, sched, &[], false)
 }
 
 /// The overlay sections of a unit (`dpc_ir::Module::overlays`): each
@@ -244,14 +246,19 @@ pub type Overlays = [(String, u32)];
 
 /// [`select_with`] for a routine of a unit with overlay sections
 /// `overlays`.
+///
+/// `merge`: the unit merges pairs of word constants stored to adjacent
+/// words (`dpc --merge-constant-stores`; [`merge`], codegen-patterns 13,
+/// "Store merging").
 pub fn select_in_unit(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
+    merge: bool,
 ) -> Result<Vec<Insn>, Diagnostic> {
     // For the driver's internal-error backstop (`diag::set_context`).
     let outer = dpc_syntax::diag::set_context(Some(f.span));
-    let insns = select_in_context(f, sched, overlays);
+    let insns = select_in_context(f, sched, overlays, merge);
     dpc_syntax::diag::set_context(outer);
     insns
 }
@@ -260,7 +267,10 @@ fn select_in_context(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
+    merge: bool,
 ) -> Result<Vec<Insn>, Diagnostic> {
+    let (f, merged) = merge::adjacent_stores(f, merge)?;
+    let f: &Function = &f;
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
             // A bare `rts` has no frame for the copy; whether the original
@@ -281,7 +291,7 @@ fn select_in_context(
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_in_unit(f, sched, overlays)?;
+    let body = select_body_in_unit(f, sched, overlays, &merged)?;
     wrap(f, body)
 }
 
@@ -390,7 +400,8 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 /// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12); no overlay
 /// sections, as [`select`].
 pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
-    select_body_in_unit(f, sched, &[])
+    let (f, merged) = merge::adjacent_stores(f, false)?;
+    select_body_in_unit(&f, sched, &[], &merged)
 }
 
 /// [`select_body_scheduled`] for a routine of a unit with overlay sections
@@ -399,23 +410,31 @@ fn select_body_in_unit(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
+    merged: &merge::Merged,
 ) -> Result<Body, Diagnostic> {
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
-    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[], overlays)? {
-        Selected::Body(b, h) => (b, h, Vec::new()),
-        Selected::InA0(in_a0) => {
-            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays)? {
-                Selected::Body(b, h) => (b, h, in_a0),
-                Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
+    let (body, hits, in_a0) =
+        match select_body_with(f, CsePlan::Probe, sched, &[], overlays, merged)? {
+            Selected::Body(b, h) => (b, h, Vec::new()),
+            Selected::InA0(in_a0) => {
+                match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, merged)? {
+                    Selected::Body(b, h) => (b, h, in_a0),
+                    Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
+                }
             }
-        }
-    };
+        };
     if hits.is_empty() {
         return Ok(body);
     }
-    let Selected::Body(body, again) =
-        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0, overlays)?
+    let Selected::Body(body, again) = select_body_with(
+        f,
+        CsePlan::Hold(hits.clone()),
+        sched,
+        &in_a0,
+        overlays,
+        merged,
+    )?
     else {
         unreachable!("an A0-held local is not found again")
     };
@@ -445,8 +464,10 @@ fn select_body_with(
     sched: Schedule,
     in_a0: &[i32],
     overlays: &Overlays,
+    merged: &merge::Merged,
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
+    s.merged = merged.clone();
     s.cse_plan = plan;
     s.overlays = overlays.to_vec();
     s.data_label = crate::emit::data_base_label(&f.data_section);
@@ -544,8 +565,6 @@ fn select_body_with(
                 ));
             }
         }
-        let held: Vec<i32> = register_locals(f).iter().map(|&(o, _)| o).collect();
-        reject_mergeable_stores(&f.body, &held)?;
         // A parameter loaded at entry and live across a call is held in a
         // callee-saved register by the allocator (codegen-patterns 12.4
         // R3: PROC1_$SET_TYPE 0xE152F2 D2, D3 around a `jsr`;
@@ -5137,162 +5156,6 @@ fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
     }
 }
 
-/// Ref 3.15.3, p. 3-57 ("Device"): "By default, the compiler optimizes
-/// certain adjacent references by merging them into one large reference"
-/// (`a := 0; b := 0` on two `integer16`s becomes one 32-bit store).  When
-/// the original merged has not been settled (codegen-patterns 13, "Store
-/// merging"; `tools/storesurvey.py merge`, bead domain-pascal-2m0): it
-/// merged constant pairs through an address register (TTY_$K_RESET
-/// 0xE67322, KBD_$INIT 0xE333B6, PROC1_$BIND 0xE14DA6) and in the frame
-/// (ASKNODE_$PROPAGATE_WHO 0xE65EBC), and left 118 constant pairs of every
-/// kind of base apart (TTY_$I_INIT 0xE3332E, TPAD_$INIT 0xE3363E,
-/// ASKNODE_$SERVER 0xE65A3E).  The merged pairs are two statements, not
-/// one 4-byte assignment that ../source's translation splits
-/// (`tools/storesurvey.py sites`): 22 of the 30 merged constant sites
-/// cover two objects that the image also reaches alone, or the tag and a
-/// field of Apollo's tty_$input_break_mode_t (0xE1BFE4, in the
-/// module-local 0xE1BF70).  So two consecutive stores of constants to
-/// adjacent objects of the same base that fit together in a word or a
-/// longword are rejected rather than guessed at, and so are two copies of
-/// adjacent memory to adjacent memory: the image merges such copies too
-/// (ROUTE_$SHORT_PORT 0xE69C16 copies route_$port_t's 0x2C..0x2F as one
-/// longword, HINT_$ADD_NET 0xE49CA6 and RIP_$TABLE 0xE6905E its
-/// 0x2E..0x31, so not every one is one object), and keeps others apart
-/// (RIP_$TABLE_D 0xE68ECA, 19 in all).  A word and a longword of
-/// constants (6 bytes), the word the
-/// lower, are rejected too: FIM_$BUILD_DF 0xE0A896 zeroes a word at 0x54
-/// and a longword at 0x56 as `clr.l (0x54,A2); clr.w (0x58,A2)`, merged
-/// and split at the other boundary, while 0xE14CBC keeps such a pair
-/// apart.  With the longword the lower, a merge split at the longword
-/// gives the same two stores (0xE70B5E `clr.w (0x1a0,A5); clr.l
-/// (0x19c,A5)`, in source order or merged keeping it).
-///
-/// Not candidates, and so accepted:
-/// - a byte and a word (3 bytes) cannot be one 68000 reference, as at
-///   module-local 0xE32B76, 0xE32BA6/0xE32BAA (`clr.b (0x36,A2); move.w
-///   D2,(0x34,A2)`, a byte and the word below it).  TIME_$Q_INIT_QUEUE's
-///   stores (0..4, 4..8, 8, 10..12) never fit: 0xE16C6E..0xE16C78;
-/// - a pair whose values are not both constants and not both loads of
-///   adjacent memory in the same arrangement (a computed value, a
-///   register, a load from elsewhere): no one reference stores both (a
-///   merge would need the two put together in a register, which no
-///   store in the compiled code shows: codegen-patterns 13), and the
-///   image keeps 270 such adjacent pairs apart (TPAD_$SET_UNIT_MODE
-///   0xE69830..0xE69840, three words from three by-address parameters;
-///   0xE02D40 `move.w D2,(-0x4e,A6); move.w D3,(-0x50,A6)`; 0xE07526);
-/// - two bytes whose lower one is at an odd address, in the frame or the
-///   module's static data (an even base: A6, and A5's block, every `lea
-///   abs.l,A5` target and `D` segment being 4-aligned): a word there is
-///   an odd-address reference, which the 68010 traps.  The image's 13
-///   such pairs at an odd displacement are all apart: MST_$DISKLESS_INIT
-///   0xE30DD2 (absolute, 0xE24353), 0xE62A42 (the frame), 11 through an
-///   address register (0xE04CAC, 0xE19F1A).
-///
-/// The `clr.b` of the adjacent bytes 12 and 13 in XPD_$RESET_PTRACE_OPTS
-/// (0xE5B15E, 0xE5B164) are not consecutive in the image (offsets 12, 0,
-/// 13, 4, 8).  Each statement sequence (a body, an `if` arm, a loop body)
-/// is checked.  An assignment to a register-held local (`held`,
-/// [`register_locals`]) writes no memory.
-fn reject_mergeable_stores(body: &[Stmt], held: &[i32]) -> Res<()> {
-    let mut prev: Option<(&Addr, u32, &Expr)> = None;
-    for st in body {
-        match &st.kind {
-            StmtKind::If { then_, else_, .. } => {
-                reject_mergeable_stores(then_, held)?;
-                reject_mergeable_stores(else_, held)?;
-            }
-            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
-                reject_mergeable_stores(body, held)?
-            }
-            StmtKind::For(l) => reject_mergeable_stores(&l.body, held)?,
-            StmtKind::Case {
-                arms, otherwise, ..
-            } => {
-                for a in arms {
-                    reject_mergeable_stores(&a.body, held)?;
-                }
-                if let Some(o) = otherwise {
-                    reject_mergeable_stores(o, held)?;
-                }
-            }
-            _ => {}
-        }
-        let StmtKind::Store { addr, value } = &st.kind else {
-            prev = None;
-            continue;
-        };
-        if matches!(addr, Addr::Frame(o) if held.contains(o)) {
-            // A register-held local (12.5): no memory is written.
-            prev = None;
-            continue;
-        }
-        let bytes = value.ty().bytes();
-        if let Some((pa, pb, pv)) = prev {
-            if let (Some((k1, o1)), Some((k2, o2))) = (split_addr(pa), split_addr(addr)) {
-                let adjacent = o1 + pb as i32 == o2 || o2 + bytes as i32 == o1;
-                let one = matches!(pb + bytes, 2 | 4)
-                    && one_reference(&k1, o1.min(o2), pb + bytes)
-                    && mergeable_values(pv, value, o2 - o1, held);
-                // A word and, above it, a longword of constants: merged
-                // and split again at the other boundary at FIM_$BUILD_DF
-                // 0xE0A896 (`clr.l (0x54,A2); clr.w (0x58,A2)` for a word
-                // at 0x54 and a longword at 0x56), apart at 0xE14CBC.
-                // With the longword below, merged or not they are the same
-                // two stores (apart in source order at 0xE70B5E).
-                let word_lower = if pb == 2 { o1 < o2 } else { o2 < o1 };
-                let six = pb + bytes == 6
-                    && word_lower
-                    && matches!((pv, value), (Expr::Const { .. }, Expr::Const { .. }));
-                if k1 == k2 && adjacent && (one || six) {
-                    return Err(unsupported(
-                        st.span,
-                        "a store adjacent to the previous statement's store (the original \
-                         compiler may merge them, ref 3.15.3 p. 3-57) is",
-                    ));
-                }
-            }
-        }
-        prev = Some((addr, bytes, value));
-    }
-    Ok(())
-}
-
-/// Whether `bytes` bytes at offset `lo` from the base `base` (a base from
-/// [`split_addr`]) can be one 68000 reference: not a word at an odd
-/// address.  The frame and the module's static data are even (A6 and A5
-/// hold even addresses); the parity of a pointer's or a symbol's target
-/// is not known here, so a pair through one stays a candidate.
-fn one_reference(base: &Addr, lo: i32, bytes: u32) -> bool {
-    let even_base = matches!(base, Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_));
-    !(bytes > 1 && even_base && lo % 2 != 0)
-}
-
-/// Whether the values of two stores to adjacent objects could be stored
-/// by one reference (ref 3.15.3 p. 3-57): both constants, or both loads,
-/// at the stores' widths, of memory of one base whose offsets differ by
-/// `delta`, the difference of the destinations' offsets (a copy of
-/// adjacent memory).  A computed value, a register-held local or a load
-/// from elsewhere is not (codegen-patterns 13, "Store merging": 270 such
-/// pairs in the image, none merged).
-fn mergeable_values(first: &Expr, second: &Expr, delta: i32, held: &[i32]) -> bool {
-    match (first, second) {
-        (Expr::Const { .. }, Expr::Const { .. }) => true,
-        (Expr::Load { addr: a1, .. }, Expr::Load { addr: a2, .. }) => {
-            let held_local = |a: &Addr| matches!(a, Addr::Frame(o) if held.contains(o));
-            if held_local(a1) || held_local(a2) {
-                return false;
-            }
-            match (split_addr(a1), split_addr(a2)) {
-                (Some((b1, s1)), Some((b2, s2))) => b1 == b2 && s2 - s1 == delta,
-                // A load whose address is not a base and an offset (an
-                // element at a run-time index): adjacency is not known.
-                _ => true,
-            }
-        }
-        _ => false,
-    }
-}
-
 /// The frame offset of the parameter (a by-value pointer or a by-address
 /// slot, `o > 0`) that `addr` dereferences, when `addr` is a reference to
 /// a device object through it ([`Addr::Volatile`], [`Access::device`]).
@@ -5738,6 +5601,9 @@ impl Uses<'_> {
 /// Selection state of one routine body.
 pub struct Selector {
     out: Vec<Insn>,
+    /// The stores that stand for two word stores merged
+    /// ([`merge::Merged`]).
+    merged: merge::Merged,
     /// Virtual registers handed out so far (`regs.rs`).
     vregs: VRegs,
     /// Callee-saved registers the body writes outside the allocator (A5,
@@ -6104,6 +5970,7 @@ enum Val {
 impl Selector {
     fn new(span: Span) -> Selector {
         Selector {
+            merged: Vec::new(),
             data_label: DATA_BASE_LABEL.into(),
             overlays: Vec::new(),
             out: Vec::new(),
@@ -10552,6 +10419,23 @@ impl Selector {
             }
             Expr::Const { value: 0, .. } => Src::Zero,
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => Src::True,
+            // Two words merged into one longword in `moveq`'s range: from
+            // a register, LOG_$INIT 0xE3017C `moveq #1,D0; move.l D0,(A0)`
+            // for `head := 0; tail := 1` (the only such merge in the
+            // image).  The image stores small nonzero longword constants
+            // so in general too (37 `moveq #n,Dk; move.l Dk,<mem>` against
+            // 3 `move.l #n`, 0xE2F55E, 0xE30B9E, 0xE311C8: codegen-patterns
+            // 13), where dpc still emits `move.l #n` (bead
+            // domain-pascal-53xi).
+            Expr::Const { value, .. }
+                if (-128..=127).contains(value)
+                    && self
+                        .merged
+                        .iter()
+                        .any(|(sp, a)| *sp == self.span && a == addr) =>
+            {
+                Src::Ea(Ea::Reg(Reg::D(self.load_const(*value, Width::Long)?)))
+            }
             Expr::Const { value, ty } => Src::Ea(Ea::Imm(imm(*value, ty.width))),
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -18983,29 +18867,80 @@ mod tests {
         );
     }
 
-    /// Ref 3.15.3 p. 3-57: the original merged some adjacent stores.
+    /// Ref 3.15.3 p. 3-57: the original merged adjacent constant stores in
+    /// some units only (codegen-patterns 13, "Store merging"; bead
+    /// domain-pascal-qb9q).  Without `--merge-constant-stores` a pair is
+    /// two stores where the units that do not merge show its shape apart
+    /// (TTY_$I_INIT 0xE3332E `move.w #1,(0x2ca,A4); move.w #1,(0x2cc,A4)`;
+    /// `tools/storesurvey.py units`), and refused otherwise.
     #[test]
-    fn adjacent_stores_are_rejected() {
-        let f = func(
-            0,
-            None,
-            vec![
-                store(through(8, 0), konst(0, word())),
-                store(through(8, 2), konst(0, word())),
-            ],
+    fn adjacent_constant_stores_without_merging() {
+        let ptr = [(8, Scalar::POINTER)];
+        let b = Scalar::BOOLEAN;
+        let pair = |a: Addr, x: Expr, c: Addr, y: Expr| {
+            let mut f = func(8, None, vec![store(a, x), store(c, y)]);
+            vparams(&mut f, &ptr);
+            f
+        };
+        let f = pair(
+            through(8, 0),
+            konst(1, word()),
+            through(8, 2),
+            konst(1, word()),
         );
-        assert!(err(&f).starts_with("a store adjacent to the previous"));
-        // Two bytes make a word: rejected too.
-        let mut f = func(
-            0,
-            None,
-            vec![
-                store(through(8, 4), konst(0, Scalar::BOOLEAN)),
-                store(through(8, 5), konst(0, Scalar::BOOLEAN)),
-            ],
+        assert_eq!(
+            text(&f)[1..4],
+            [
+                "movea.l\t(8,%fp),%a0",
+                "move.w\t#1,(%a0)",
+                "move.w\t#1,(2,%a0)"
+            ]
         );
-        vparams(&mut f, &[(8, Scalar::POINTER)]);
-        assert!(err(&f).starts_with("a store adjacent to the previous"));
+        // Bytes ascending (0xE1217E), words descending (AREA_$INIT
+        // 0xE2F3C0), ascending off A5 (NETLOG_$CNTL 0xE719A4): apart.
+        for f in [
+            pair(through(8, 4), konst(0, b), through(8, 5), konst(0, b)),
+            pair(
+                through(8, 2),
+                konst(0, word()),
+                through(8, 0),
+                konst(0, word()),
+            ),
+            pair(
+                Addr::Static(0x70),
+                konst(0, word()),
+                Addr::Static(0x72),
+                konst(0, word()),
+            ),
+            pair(
+                Addr::Frame(-4),
+                konst(0, word()),
+                Addr::Frame(-2),
+                konst(0, word()),
+            ),
+        ] {
+            assert!(select(&f).is_ok(), "{:?}", select(&f));
+        }
+        // Shapes no unit without merging shows apart: two words of another
+        // unit's object ascending, two bytes through a pointer descending,
+        // two bytes off A5 (only in SMD, which merges: 0xE6D838).
+        let sym = |o| Addr::Symbol {
+            name: "X".into(),
+            offset: o,
+        };
+        for f in [
+            pair(sym(0), konst(0, word()), sym(2), konst(0, word())),
+            pair(through(8, 5), konst(0, b), through(8, 4), konst(0, b)),
+            pair(Addr::Static(4), konst(0, b), Addr::Static(5), konst(0, b)),
+        ] {
+            assert!(
+                err(&f).starts_with(
+                    "a store adjacent to the previous statement's store, of two constants"
+                ),
+                "{}",
+                err(&f)
+            );
+        }
         // Not adjacent (a gap), too big together (two longwords), or 3
         // bytes (a byte above a word: module-local 0xE32B76,
         // 0xE32BA6/0xE32BAA): accepted.  A word and a longword: below.
@@ -19085,7 +19020,7 @@ mod tests {
         vparams(&mut f, &ptrs);
         assert!(select(&f).is_ok(), "{:?}", select(&f));
         // Two frame bytes, the lower at an odd address (0xE04CAC,
-        // 0xE19F1A): no word there on the 68010.  At an even one: rejected.
+        // 0xE19F1A): no word there on the 68010, two stores in any unit.
         let b = Scalar::BOOLEAN;
         let f = func(
             8,
@@ -19096,32 +19031,15 @@ mod tests {
             ],
         );
         assert!(select(&f).is_ok(), "{:?}", select(&f));
-        let f = func(
-            8,
-            None,
-            vec![
-                store(Addr::Frame(-4), konst(0, b)),
-                store(Addr::Frame(-3), konst(0, b)),
-            ],
-        );
-        assert!(err(&f).starts_with("a store adjacent to the previous"));
-        // Through a pointer the parity is not known: rejected.
-        let mut f = func(
-            0,
-            None,
-            vec![
-                store(through(8, 5), konst(0, b)),
-                store(through(8, 6), konst(0, b)),
-            ],
-        );
-        vparams(&mut f, &ptrs);
-        assert!(err(&f).starts_with("a store adjacent to the previous"));
+        assert!(select_in_unit(&f, Schedule::default(), &[], true).is_ok());
         // A word and a longword of constants, the word lower
-        // (FIM_$BUILD_DF 0xE0A896, merged and split again): rejected in
-        // either order; the longword lower (0xE70B5E): accepted in either
-        // order; a word and a longword copied (0xE0A478, apart): accepted.
+        // (FIM_$BUILD_DF 0xE0A896, merged and split again; apart at
+        // 0xE1465E, 0xE0C958 in units without a merge): two stores
+        // without the knob; the longword lower (0xE70B5E): two stores
+        // either way; a word and a longword copied (0xE0A478, apart):
+        // two stores.
         let l = Scalar::signed(Width::Long);
-        for (w, lo, ok) in [(0, 2, false), (4, 0, true)] {
+        for (w, lo, ok) in [(0, 2, true), (4, 0, true)] {
             let mut f = func(
                 0,
                 None,
@@ -19133,7 +19051,7 @@ mod tests {
             vparams(&mut f, &ptrs);
             assert_eq!(select(&f).is_ok(), ok, "{w}: {:?}", select(&f));
         }
-        for (lo, w, ok) in [(2, 0, false), (0, 4, true)] {
+        for (lo, w, ok) in [(2, 0, true), (0, 4, true)] {
             let mut f = func(
                 0,
                 None,
@@ -19155,6 +19073,225 @@ mod tests {
         );
         vparams(&mut f, &ptrs);
         assert!(select(&f).is_ok(), "{:?}", select(&f));
+    }
+
+    /// `--merge-constant-stores` (codegen-patterns 13, "Store merging";
+    /// bead domain-pascal-qb9q; `tools/storesurvey.py units`): two word
+    /// constants stored in ascending order are one longword in a merging
+    /// unit; the shapes the merging units do not settle are refused.
+    #[test]
+    fn merging_constant_stores() {
+        let merged = |f: &Function| -> Result<Vec<String>, String> {
+            select_in_unit(f, Schedule::default(), &[], true)
+                .map(|i| i.iter().map(|i| i.to_string()).collect())
+                .map_err(|e| e.message)
+        };
+        let ptr = [(8, Scalar::POINTER)];
+        let words = |stores: &[(Addr, i64)]| {
+            let mut f = func(
+                8,
+                None,
+                stores
+                    .iter()
+                    .map(|(a, v)| store(a.clone(), konst(*v, word())))
+                    .collect(),
+            );
+            vparams(&mut f, &ptr);
+            f
+        };
+        // TTY_$K_RESET 0xE67322 `move.l #0x10001,(0x2ca,A2)`; 0xE67340
+        // `clr.l (0x56,A2)`; LOG_$INIT 0xE3017C `moveq #1,D0; move.l
+        // D0,(A0)`.
+        for (v1, v2, want) in [
+            (1, 1, vec!["move.l\t#0x10001,(%a0)"]),
+            (0, 0, vec!["clr.l\t(%a0)"]),
+            (0, 1, vec!["moveq\t#1,%d0", "move.l\t%d0,(%a0)"]),
+            (-1, -1, vec!["moveq\t#-1,%d0", "move.l\t%d0,(%a0)"]),
+            (2, 0x10, vec!["move.l\t#0x20010,(%a0)"]),
+        ] {
+            let f = words(&[(through(8, 0), v1), (through(8, 2), v2)]);
+            let t = merged(&f).unwrap();
+            let body: Vec<&str> = t
+                .iter()
+                .map(String::as_str)
+                .filter(|i| !i.starts_with("movea") && !i.starts_with("link"))
+                .take(want.len())
+                .collect();
+            assert_eq!(body, want, "{v1} {v2}: {t:?}");
+        }
+        // Three words: the first two merged (KBD_$INIT 0xE333B6 `move.l
+        // #0x10001,(88,A2); move.w #64,(92,A2)`).
+        let f = words(&[(through(8, 0), 1), (through(8, 2), 1), (through(8, 4), 64)]);
+        let t = merged(&f).unwrap();
+        assert!(
+            t.windows(2)
+                .any(|w| w == ["move.l\t#0x10001,(%a0)", "move.w\t#0x40,(4,%a0)"]),
+            "{t:?}"
+        );
+        // Four: not settled (TTY_$K_RESET against KBD_$INIT 0xE33378).
+        let f = words(&[
+            (through(8, 0), 0),
+            (through(8, 2), 0),
+            (through(8, 4), 0),
+            (through(8, 6), 0),
+        ]);
+        assert!(merged(&f).unwrap_err().contains("a fourth word constant"));
+        // Kept apart as the merging units keep them: words off A5 (SMD
+        // 0xE6D824 `clr.w (204,A5); clr.w (206,A5)`), descending off A5
+        // (FLP_DO_IO 0xE3DE4A).
+        for (f, a, b) in [
+            (
+                words(&[(Addr::Static(204), 0), (Addr::Static(206), 0)]),
+                "clr.w\t(0xcc,%a5)",
+                "clr.w\t(0xce,%a5)",
+            ),
+            (
+                words(&[(Addr::Static(306), 25), (Addr::Static(304), 500)]),
+                "move.w\t#0x19,(0x132,%a5)",
+                "move.w\t#0x1f4,(0x130,%a5)",
+            ),
+        ] {
+            let f = with_data(f);
+            let t = merged(&f).unwrap();
+            assert!(t.windows(2).any(|w| w == [a, b]), "{t:?}");
+        }
+        // Descending through a pointer, absolute ascending: refused.
+        let sym = |o| Addr::Symbol {
+            name: "X".into(),
+            offset: o,
+        };
+        for f in [
+            words(&[(through(8, 2), 0), (through(8, 0), 0)]),
+            words(&[(sym(0), 0), (sym(2), 0)]),
+        ] {
+            assert!(
+                merged(&f)
+                    .unwrap_err()
+                    .starts_with("under --merge-constant-stores"),
+                "{:?}",
+                merged(&f)
+            );
+        }
+        // Bytes: ascending through a pointer apart (ACL_ 0xE44EC6 `clr.b
+        // (40,A2); clr.b (41,A2)`), descending through a pointer apart
+        // (ACL_ 0xE46074); descending off A5: refused (no site).
+        let b = Scalar::BOOLEAN;
+        for (x, y, want) in [
+            (4, 5, ["clr.b\t(4,%a0)", "clr.b\t(5,%a0)"]),
+            (5, 4, ["clr.b\t(5,%a0)", "clr.b\t(4,%a0)"]),
+        ] {
+            let mut f = func(
+                8,
+                None,
+                vec![
+                    store(through(8, x), konst(0, b)),
+                    store(through(8, y), konst(0, b)),
+                ],
+            );
+            vparams(&mut f, &ptr);
+            let t = merged(&f).unwrap();
+            assert!(t.windows(2).any(|w| w == want), "{t:?}");
+        }
+        let f = with_data(func(
+            8,
+            None,
+            vec![
+                store(Addr::Static(5), konst(0, b)),
+                store(Addr::Static(4), konst(0, b)),
+            ],
+        ));
+        let e = merged(&f).unwrap_err();
+        assert!(e.contains("two byte constants, descending"), "{e}");
+        // The frame: a record local's words at 0 mod 4 merged (APP
+        // 0xE00BA8 `move.l #0x498fc02,(-40,A6)`), at 2 mod 4 refused; two
+        // word locals apart at 2 mod 4 (ASKNODE_$SERVER 0xE65A3E) and 0
+        // mod 4 (PROC2_$INIT 0xE30412).
+        let f = words(&[(Addr::Frame(-8), 3), (Addr::Frame(-6), 8)]);
+        assert!(merged(&f)
+            .unwrap()
+            .contains(&"move.l\t#0x30008,(-8,%fp)".to_string()));
+        let f = words(&[(Addr::Frame(-6), 3), (Addr::Frame(-4), 8)]);
+        assert!(merged(&f).unwrap_err().contains("at 2 mod 4"));
+        // Two words merged, then a longword above them: two longwords
+        // (XNS_ERROR 0xE178D2 `move.l #0x30008,(-40,A6); clr.l
+        // (-36,A6)`); a lone word below a longword stays refused.
+        let mut f = words(&[(Addr::Frame(-40), 3), (Addr::Frame(-38), 8)]);
+        f.body.push(Stmt {
+            kind: store(Addr::Frame(-36), konst(0, Scalar::signed(Width::Long))),
+            span: span(),
+        });
+        let t = merged(&f).unwrap();
+        assert!(
+            t.windows(2)
+                .any(|w| w == ["move.l\t#0x30008,(-0x28,%fp)", "clr.l\t(-0x24,%fp)"]),
+            "{t:?}"
+        );
+        // Two word locals, passed by address after (so neither is held in
+        // a register).
+        let locals = |lo: i32, v1: i64, v2: i64| {
+            let mut f = words(&[(Addr::Frame(lo), v1), (Addr::Frame(lo + 2), v2)]);
+            f.scalar_locals = [lo, lo + 2]
+                .iter()
+                .map(|&offset| dpc_ir::ValueParam { offset, ty: word() })
+                .collect();
+            f.body.push(Stmt {
+                kind: StmtKind::Call(Call {
+                    callee: Callee::External("G".into()),
+                    args: [lo, lo + 2]
+                        .iter()
+                        .map(|&o| Arg::Address {
+                            addr: Addr::Frame(o),
+                            slot: 4,
+                            writable: true,
+                        })
+                        .collect(),
+                    pad: 0,
+                    link: None,
+                }),
+                span: span(),
+            });
+            f
+        };
+        let t = merged(&locals(-6, 0, 0x200)).unwrap();
+        assert!(
+            t.windows(2)
+                .any(|w| w == ["clr.w\t(-6,%fp)", "move.w\t#0x200,(-4,%fp)"]),
+            "{t:?}"
+        );
+        // PROC2_$INIT 0xE30412 `move.w #16,(-56,A6); move.w #16,(-54,A6)`.
+        let t = merged(&locals(-8, 16, 16)).unwrap();
+        assert!(
+            t.windows(2)
+                .any(|w| w == ["move.w\t#0x10,(-8,%fp)", "move.w\t#0x10,(-6,%fp)"]),
+            "{t:?}"
+        );
+        // A word local next to a record's word: refused.
+        let mut f = locals(-8, 0, 0);
+        f.scalar_locals.truncate(1);
+        assert!(merged(&f)
+            .unwrap_err()
+            .contains("another kind of frame object"));
+        // A word and a longword above it: refused; copies: refused.
+        let mut f = func(
+            8,
+            None,
+            vec![
+                store(through(8, 0), konst(0, word())),
+                store(through(8, 2), konst(0, Scalar::signed(Width::Long))),
+            ],
+        );
+        vparams(&mut f, &ptr);
+        assert!(merged(&f).unwrap_err().contains("a word and a longword"));
+        let mut f = func(
+            8,
+            None,
+            vec![
+                store(through(8, 0), load(through(12, 0), word())),
+                store(through(8, 2), load(through(12, 2), word())),
+            ],
+        );
+        vparams(&mut f, &[(8, Scalar::POINTER), (12, Scalar::POINTER)]);
+        assert!(merged(&f).unwrap_err().contains("copying adjacent memory"));
     }
 
     /// A third value of a class takes D2, callee-saved, without any call

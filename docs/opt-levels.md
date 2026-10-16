@@ -287,7 +287,15 @@ one:
   segment-level lead only (Uncertain; one of 54 tests).  A pair kept
   apart may also be a `device` object (Section 1).  No `-opt` feature
   separates merging from non-merging segments (`pairs`: merges has
-  p < 0.05 only against `cmerges` and `a5always`).
+  p < 0.05 only against `cmerges` and `a5always`).  Implemented as the
+  per-unit knob `dpc --merge-constant-stores` (owner decision
+  2026-10-16, bead domain-pascal-qb9q; codegen-patterns 13, "Per unit"):
+  with the decisive pairs apart limited to the shapes the image merges
+  elsewhere (two words ascending through a register, or in the frame at
+  0 mod 4; not `device` zeros) and three merged sites added (SMD
+  0xE7013E, 0xE6D80E, PROC2 0xE30526), `tools/storesurvey.py units`
+  finds 21 segments that merge, 9 that keep pairs apart and 1 with both
+  (PROC2 0xE303D8, whose pair apart is two word locals).
 - **Loop alignment** (section 7): per routine, in runs; 24 mixed
   segments, far fewer than chance (65.7), as section 7 found.  At
   segment level, aligning segments have fewer invariant loads in

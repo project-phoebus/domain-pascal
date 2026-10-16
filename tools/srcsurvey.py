@@ -95,7 +95,22 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      options a build of the whole module needs (codegen-patterns 4, 7),
      printed at the end ("build settings").  The `-from' routine is the
      first one the image proves; the interval printed with it is where
-     the switch could be put as well.
+     the switch could be put as well.  And the store-merging knob, `dpc
+     --merge-constant-stores' (codegen-patterns 13, "Store merging"; bead
+     domain-pascal-qb9q): on for a module when one of its code sections'
+     map segments merges constant pairs and none keeps apart a pair of a
+     shape merged elsewhere or shows both (tools/storesurvey.py units, per
+     segment: `merges', `apart', `conflict', or not known); a module with
+     both kinds of segment (TTY: 0xE1AED0 and 0xE671DC merge, 0xE3324C
+     keeps its pairs apart; bead domain-pascal-o38r) is left off and
+     named ("not expressible").  A segment not known has no merge in
+     storesurvey's hand-entered MERGED_SITES and keeps no such pair apart
+     (pairs apart are scanned exhaustively, merges are not): it counts for
+     neither side, so it is off in a module of such segments only and on
+     in a module that also has a merging segment, an inconsistency the
+     per-module setting accepts (codegen-patterns 13, "Per unit").  The
+     knob is a whole-unit setting, so it is given to every dpc run of the
+     module (the stages of step 3 and the conformance runs of step 4).
 
 Experiments (not for the baseline): `--dpc-opt OPT' gives OPT to every
 dpc run (with a REV of a scratch clone of ../source, --source, to try a
@@ -132,6 +147,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import a5survey  # noqa: E402
 import loopalign  # noqa: E402
+import storesurvey  # noqa: E402
 
 DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
                      r'(?P<sev>error|warning): (?P<msg>.*)$')
@@ -1085,19 +1101,21 @@ def module_routine_opts(mod, stubbed, linkmap):
     return ['--fragment-origin=%s=0x%X' % kv for kv in sorted(los.items())] + opts
 
 
-def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None):
+def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None, unit_opts=()):
     """Run one stage until the module passes it, stubbing routines.
     The internal routines stubbed so far (STUBBED_BEFORE and this stage's)
     are named to dpc with `--module-routine' at their header address, so
     that their callers still compile (module_routine_opts; LINKMAP gives
-    each its code section).  -> ([(diag, routine)], stubbed names, ok)."""
+    each its code section).  UNIT_OPTS (merge_opts) go to every run.
+    -> ([(diag, routine)], stubbed names, ok)."""
     entries, stubbed = [], []
     fragment_ok = True
     for _round in range(50):
         opts = (module_routine_opts(mod, list(stubbed_before) + stubbed, linkmap)
                 if fragment_ok else [])
         rc, err = run_dpc(dpc, mod.tree, mod.path, check_only=check_only,
-                          out=None if check_only else os.devnull, opts=opts)
+                          out=None if check_only else os.devnull,
+                          opts=list(unit_opts) + opts)
         log.write(err)
         if rc and opts and re.search(r'^dpc: error: --(fragment-origin|module-routine)', err,
                                      re.M):
@@ -1407,23 +1425,26 @@ _SURVEYS = {}
 
 
 def image_surveys():
-    """(map, a5survey routines by start, loopalign per_routine list),
-    computed once."""
+    """(map, a5survey routines by start, loopalign per_routine list,
+    storesurvey merging_segments), computed once."""
     if 'map' not in _SURVEYS:
         m, _sites, _f, routines = loopalign.scan()
         _SURVEYS['pr'] = loopalign.per_routine(_sites, routines)
         rs, ah = a5survey.load()
         _SURVEYS['a5'] = a5survey.analyse(rs, ah, m)
+        _SURVEYS['merge'] = storesurvey.merging_segments()
         _SURVEYS['map'] = m
-    return _SURVEYS['map'], _SURVEYS['a5'], _SURVEYS['pr']
+    return _SURVEYS['map'], _SURVEYS['a5'], _SURVEYS['pr'], _SURVEYS['merge']
 
 
 def module_settings(mod, linkmap):
-    """[(code section name, map segment, a5 dict, loop dict)]
-    for MOD's code sections (the map code segments holding its routines'
-    header addresses), in address order.  Names are the source's (upper
-    case) where it has a routine at the address, else the map's."""
-    m, by_start, pr = image_surveys()
+    """[(code section name, map segment, a5 dict, loop dict, merge
+    status)] for MOD's code sections (the map code segments holding its
+    routines' header addresses), in address order.  Names are the
+    source's (upper case) where it has a routine at the address, else the
+    map's.  The merge status is the segment's in storesurvey.unit_status
+    (`merges', `apart', `conflict'), or None (not known)."""
+    m, by_start, pr, merging = image_surveys()
     src = {r.addr: n.upper() for n, (_i, r) in mod.routines.items() if r.addr is not None}
     segs = {}
     for _n, (_i, r) in mod.routines.items():
@@ -1451,8 +1472,30 @@ def module_settings(mod, linkmap):
                              if r.segaddr == sa and r.has_link and r.sets
                              and not r.uses and r.uses_t]
         out.append((code_section(sa, linkmap) or seg.name, seg, a5,
-                    loop_settings(pr, seg, names, segment_end_aligns(seg))))
+                    loop_settings(pr, seg, names, segment_end_aligns(seg)),
+                    merging.get(sa)))
     return out
+
+
+def merge_setting(settings):
+    """Whether a build of the module gives dpc --merge-constant-stores,
+    from its code sections' merge statuses (module_settings; a 4-tuple
+    has none): on when a section merges and none keeps apart a pair the
+    in-unit rule would merge.  -> (on, problem or None)."""
+    st = [(sect, seg, rest[0] if rest else None) for sect, seg, _a5, _lp, *rest in settings]
+    merges = [x for x in st if x[2] == 'merges']
+    apart = [x for x in st if x[2] in ('apart', 'conflict')]
+    if merges and apart:
+        return False, ('--merge-constant-stores: %s merge, %s keep pairs apart: left off '
+                       '(bead domain-pascal-o38r)' % (
+            ', '.join('%s 0x%X' % (x[0], x[1].addr) for x in merges),
+            ', '.join('%s 0x%X' % (x[0], x[1].addr) for x in apart)))
+    return bool(merges), None
+
+
+def merge_opts(settings):
+    """The dpc options for the module's store-merging setting."""
+    return ['--merge-constant-stores'] if merge_setting(settings)[0] else []
 
 
 def _nm(an):
@@ -1473,7 +1516,7 @@ def settings_opts(settings):
             lists[flag].append(an[1])
         else:
             problems.append('%s: %s needs %s, which has no name' % (sect, flag, _nm(an)))
-    for sect, _seg, a5, lp in settings:
+    for sect, _seg, a5, lp, *_rest in settings:
         if a5['always_from']:
             add('--a5-always-from', sect, a5['always_from'])
         for an in a5['always']:
@@ -1484,21 +1527,26 @@ def settings_opts(settings):
             problems.append('%s: loop alignment: %s' % (sect, lp['error']))
         elif lp['off_from']:
             add('--loop-align-off-from', sect, lp['off_from'])
-    return ['%s=%s' % (f, ','.join(v)) for f, v in lists.items() if v], problems
+    on, problem = merge_setting(settings)
+    if problem:
+        problems.append(problem)
+    return (['%s=%s' % (f, ','.join(v)) for f, v in lists.items() if v]
+            + merge_opts(settings), problems)
 
 
 def report_settings(path, settings, out=sys.stdout):
     """The `build settings' section for one module."""
     opts, problems = settings_opts(settings)
-    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7)'
-          % path, file=out)
+    print('== %s: build settings (A5 mode, codegen-patterns 4; loop alignment, 7; '
+          'store merging, 13)' % path, file=out)
 
     def iv(lo, hi):
         return '(%s, %s]' % ('0x%X' % lo if lo is not None else 'start',
                              '0x%X' % hi if hi is not None else 'end')
-    for sect, seg, a5, lp in settings:
+    for sect, seg, a5, lp, *rest in settings:
         a = a5['always_from']
-        print('  %-14s 0x%X..0x%X  A5: %s%s%s;  loops: %s' % (
+        merge = rest[0] if rest else None
+        print('  %-14s 0x%X..0x%X  A5: %s%s%s;  loops: %s;  stores: %s' % (
             sect, seg.addr, seg.end,
             'always from %s, switch in %s' % (_nm(a), iv(*a5['interval'])) if a
             else 'used mode' if not a5['always'] or a5['interval'][1] is None
@@ -1507,7 +1555,9 @@ def report_settings(path, settings, out=sys.stdout):
             (', absolute: ' + ', '.join(map(_nm, a5['absolute']))) if a5['absolute'] else '',
             ('not expressible: ' + lp['error']) if lp['error']
             else 'off from %s, switch in %s' % (_nm(lp['off_from']), iv(*lp['interval']))
-            if lp['off_from'] else 'aligned (default)'), file=out)
+            if lp['off_from'] else 'aligned (default)',
+            {'merges': 'merged', 'apart': 'apart', 'conflict': 'both (conflict)'}.get(
+                merge, 'not known')), file=out)
     # quoted for a shell: the names have `$'
     print('  dpc %s' % (' '.join(map(shlex.quote, opts)) or '(no options)'), file=out)
     for p in problems:
@@ -1519,12 +1569,13 @@ def unit_build_opts(settings, r, lo):
     from address LO) the A5 mode and loop alignment it has in a build of
     the whole module with SETTINGS' options.  A routine that loads A5
     only for its `bsr' callees (used mode, which the fragment cannot see
-    with the callees stubbed) is given `--a5-always'."""
+    with the callees stubbed) is given `--a5-always'.  The module's
+    store-merging setting (merge_opts) comes first."""
     name = r.name.upper()
-    for _sect, seg, a5, lp in settings:
+    for _sect, seg, a5, lp, *_rest in settings:
         if not seg.contains(r.addr):
             continue
-        opts = []
+        opts = merge_opts(settings)
         if any(n == name for _a, n in a5['always']):
             opts.append('--a5-always=' + name)
         elif any(n == name for _a, n in a5['absolute']):
@@ -1544,7 +1595,9 @@ def unit_build_opts(settings, r, lo):
             elif off[0] <= r.addr:
                 opts.append('--loop-align-off-from=' + name)
         return opts
-    return []
+    # no code section holds R: the module's store-merging setting still
+    # applies (a whole-unit setting)
+    return merge_opts(settings)
 
 
 # ------------------------------------------------------------ baseline
@@ -1684,8 +1737,11 @@ def cmd_run(a):
             all_stubbed = []
             import sau2map
             linkmap = sau2map.load()
+            settings = module_settings(mod, linkmap)
+            unit_opts = [] if a.no_build_settings else merge_opts(settings)
             for stage, co in (('check', True), ('codegen', False)):
-                entries, stubbed, ok = survey_stage(a.dpc, mod, co, all_stubbed, log, linkmap)
+                entries, stubbed, ok = survey_stage(a.dpc, mod, co, all_stubbed, log, linkmap,
+                                                    unit_opts)
                 all_stubbed += stubbed
                 report('%s: %s, routines stubbed: %s' % (path, stage, ', '.join(stubbed) or 'none'),
                        summarise(entries), verbose=a.verbose)
@@ -1694,7 +1750,6 @@ def cmd_run(a):
                           % (path, stage, mod.problem or 'outside any routine'))
                     break
         print('srcsurvey: log %s' % os.path.relpath(logp, ROOT))
-        settings = module_settings(mod, linkmap)
         settings_out.append((path, settings))
         conformed = {}
         if not ok or a.no_conform:
@@ -1720,6 +1775,11 @@ def cmd_run(a):
         results += routine_results(path, mod, ok, conformed)
     for path, settings in settings_out:
         report_settings(path, settings)
+    on = [p for p, st in settings_out if merge_setting(st)[0]]
+    mixed = [p for p, st in settings_out if merge_setting(st)[1]]
+    print('== store merging (--merge-constant-stores): on for %d module(s): %s' % (
+        len(on), ' '.join(on) or '-'))
+    print('== store merging: left off, segments of both kinds: %s' % (' '.join(mixed) or '-'))
     counts = collections.Counter(st for _m, _n, st in results)
     print('== summary: %d routine(s): %s' % (
         len(results), ', '.join('%s %d' % (st, counts[st])

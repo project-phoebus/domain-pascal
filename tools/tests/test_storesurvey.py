@@ -151,6 +151,62 @@ class MergeSurveyTest(unittest.TestCase):
                          [('2+4', 'zero+const', 'asc')])
 
 
+class UnitsTest(unittest.TestCase):
+    """`units' (bead domain-pascal-qb9q): the per-unit store-merging knob."""
+
+    def pair(self, sizes='2+2', order='asc', base='reg', mod4=0, addr=0x100):
+        return {'sizes': sizes, 'order': order, 'base': base, 'mod4': mod4, 'addr': addr}
+
+    def test_knob_class(self):
+        f = storesurvey.knob_class
+        self.assertEqual(f(self.pair()), 'merge')
+        self.assertEqual(f(self.pair(mod4=2)), 'merge')            # TTY_$K_RESET 0xE67322
+        # the frame: by the objects, which the image does not show (APP
+        # 0xE00BA8 merged, PROC2_$INIT 0xE30412 and ASKNODE_$SERVER
+        # 0xE65A3E two locals apart)
+        self.assertEqual(f(self.pair(base='a6')), 'frame')
+        self.assertEqual(f(self.pair(base='a6', mod4=2)), 'frame')
+        # RING 0xE2FAC4: a device's zero
+        self.assertEqual(f(dict(self.pair(), text='movew #0,%a0@; movew #0,%a0@(2)')),
+                         'device')
+        for p in (self.pair(order='desc'), self.pair(sizes='1+1'),
+                  self.pair(base='a5'), self.pair(base='abs'), self.pair(sizes='2+4')):
+            self.assertEqual(f(p), 'apart or refused', p)
+
+    def test_unit_status(self):
+        seg = lambda a: a & ~0xff                                    # noqa: E731
+        apart = [self.pair(addr=0x210), self.pair(sizes='1+1', addr=0x120),
+                 self.pair(addr=0x310)]
+        st = storesurvey.unit_status([0x110, 0x320], apart, seg)
+        # 0x100: a merge and only a byte pair apart; 0x200: a word pair
+        # apart, no merge; 0x300: both
+        self.assertEqual(st, {0x100: 'merges', 0x200: 'apart', 0x300: 'conflict'})
+        # the frame counts both ways at 0 mod 4 (NETWORK_$PAGE_SERVER
+        # 0xE117C6 apart), not at 2 mod 4 (no frame merge there)
+        apart = [self.pair(base='a6', addr=0x410), self.pair(base='a6', mod4=2, addr=0x510)]
+        self.assertEqual(storesurvey.unit_status([], apart, seg), {0x400: 'apart'})
+
+    def test_greedy_and_image_stores(self):
+        # TTY_$K_RESET 0xE67322: four words as two longwords; KBD_$INIT
+        # 0xE33378: not paired from the first
+        self.assertEqual(storesurvey.greedy((0x2CA, 0x2CC, 0x2CE, 0x2D0)),
+                         [(0x2CA, 4), (0x2CE, 4)])
+        self.assertEqual(storesurvey.greedy((0x58, 0x5A, 0x5C)), [(0x58, 4), (0x5C, 2)])
+        self.assertEqual(storesurvey.image_stores(
+            ('clrw %a2@(56)', 'clrl %a2@(58)', 'movel #65537,%a2@(714)')),
+            [(56, 2), (58, 4), (714, 4)])
+        self.assertNotEqual(storesurvey.greedy((0x38, 0x3A, 0x3C, 0x3E)),
+                            storesurvey.image_stores(('clrw %a2@(56)', 'clrl %a2@(58)',
+                                                      'clrw %a2@(62)')))
+
+    def test_site_base(self):
+        self.assertEqual(storesurvey.site_base({'texts': ('moveq #1,%d0', 'movel %d0,%a0@')}),
+                         'reg')
+        self.assertEqual(storesurvey.site_base({'texts': ('movel #1,%fp@(-40)',)}), 'a6')
+        self.assertEqual(storesurvey.site_base({'texts': ('lea %pc@(0xe3e21e),%a0',
+                                                          'lea %a3@,%a1')}), 'pc')
+
+
 def addr_sites(texts, syms=()):
     return storesurvey.addr_sites(FakeRoutine(texts).ins, lambda v: v in syms)
 

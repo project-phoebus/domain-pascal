@@ -431,7 +431,11 @@ A5 mode and loop alignment of its code section, derived from
 `tools/a5survey.py` and `tools/loopalign.py` (bead domain-pascal-xdh.7);
 its "build settings" section lists, per module, the dpc options
 (`--a5-always-from=`, `--a5-always=`, `--a5-absolute=`,
-`--loop-align-off-from=`) a build of the whole module needs.  A
+`--loop-align-off-from=`, `--merge-constant-stores`) a build of the
+whole module needs.  `--merge-constant-stores` is a whole-unit setting
+(bead domain-pascal-qb9q), on for a module whose map segments merge
+constant stores (`tools/storesurvey.py units`) and given to every dpc
+run of the module, the stages that find refusals included.  A
 routine's range is its header's "Original address: 0xADDR, N bytes";
 "N bytes of code" gives the code alone, and the routine is compared up
 to its map extent (the next routine start or map symbol, or its
@@ -449,6 +453,14 @@ module of `../source` (TTY, LOG, KBD, TPAD at present); the per-routine
 statuses are recorded in `tests/srcsurvey/baseline.txt` with the
 `../source` commit, and `make srcsurvey` (not part of `make test`)
 compares with them at that commit.
+
+## Store merging
+
+Some map segments store two word constants to adjacent words as one
+longword, others keep them apart (codegen-patterns 13, "Store merging";
+`tools/storesurvey.py units` classes the segments).  A manifest line for
+a unit of a merging segment carries the token `merge-constant-stores`
+(`.pas` units only), forwarded as `dpc --merge-constant-stores`.
 
 ## Loop alignment on and off
 

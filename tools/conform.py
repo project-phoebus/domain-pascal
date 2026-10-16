@@ -19,7 +19,11 @@ the rest; `tools/loopalign.py switch SEG' shows where), or one of
 `a5-always-from=NAME', `a5-always=NAME,...', `a5-absolute=NAME,...'
 (.pas units only, each at most once), forwarded as `--a5-...' (which
 routines load the data base A5, codegen-patterns 4; `tools/a5survey.py
-switch SEG' shows a segment's modes), or `module-routines=NAME,...' (.pas
+switch SEG' shows a segment's modes), or `merge-constant-stores' (.pas
+units only, at most once), forwarded as `--merge-constant-stores' (the
+unit's segment merges constant pairs, codegen-patterns 13 "Store
+merging"; `tools/storesurvey.py units' lists the segments), or
+`module-routines=NAME,...' (.pas
 fragments only, at most once): routines of the unit's map module outside
 the unit, which the unit declares `extern' and the original reached with
 `bsr'; each is forwarded as `--module-routine=NAME=0xADDR' with its map
@@ -954,6 +958,7 @@ def encoded_calls(src):
         return {m.group(1) for m in map(_ENCODED_BSR.match, f) if m}
 
 
+MERGE_TOKEN = 'merge-constant-stores'
 MODULE_ROUTINES_TOKEN = 'module-routines='
 ENCLOSING_TOKEN = 'enclosing='
 GLOBAL_TOKEN = 'global='
@@ -1059,9 +1064,10 @@ def check_local_sym(n, addr, routines, linkmap, what):
 def run_manifest(path, linkmap, dpc):
     """Each non-comment line: FILE SPEC... [--section-addr SEC=0xADDR]...
     [loop-align=on|off | loop-align-off-from=NAME] [a5-...=NAME,...]...
+    [merge-constant-stores]
     FILE is relative to the repository root; .pas files are compiled with
-    dpc first, with the loop-align and a5 tokens forwarded as dpc
-    options.  Returns (failing
+    dpc first, with the loop-align, a5 and merge-constant-stores tokens
+    forwarded as dpc options.  Returns (failing
     entries, entries with setup errors)."""
     failures = errors = 0
     with open(path) as f:
@@ -1071,6 +1077,7 @@ def run_manifest(path, linkmap, dpc):
             continue
         src = os.path.join(REPO, toks[0])
         specs, sect, align, a5, mods, encl, globs = [], {}, [], [], [], [], []
+        merge = []
         rest = iter(toks[1:])
         for t in rest:
             if t == '--section-addr':
@@ -1080,6 +1087,8 @@ def run_manifest(path, linkmap, dpc):
                 align.append(t)
             elif t.startswith(A5_TOKENS):
                 a5.append(t)
+            elif t == MERGE_TOKEN:
+                merge.append(t)
             elif t.startswith(MODULE_ROUTINES_TOKEN):
                 mods.append(t)
             elif t.startswith(ENCLOSING_TOKEN):
@@ -1098,6 +1107,11 @@ def run_manifest(path, linkmap, dpc):
             if a5opts and not src.endswith('.pas'):
                 raise SetupError('%s: a5 options apply to .pas units only' % toks[0])
             opts += a5opts
+            if len(merge) > 1:
+                raise SetupError('%s: %s given more than once' % (toks[0], MERGE_TOKEN))
+            if merge and not src.endswith('.pas'):
+                raise SetupError('%s: %s applies to .pas units only' % (toks[0], MERGE_TOKEN))
+            opts += ['--' + MERGE_TOKEN] if merge else []
             if mods and not src.endswith('.pas'):
                 raise SetupError('%s: module-routines applies to .pas units only' % toks[0])
             if len(encl) > 1 or encl and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', encl[0]):
