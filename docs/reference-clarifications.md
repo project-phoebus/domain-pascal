@@ -123,6 +123,13 @@ Question: may a module heading leave the code section name empty, `module pchist
 Owner's answer (2026-10-15): yes; the compiler must parse the form without the code section name, which targets .text for the code section.
 Consequence: implemented under the bead filed for it (module heading parse; code in the default section, data in the named one).
 
+## A size attribute on a set type: `[byte] set of 0..7` (3.15.5, p. 3-61; 3.9.3)
+Asked: 2026-10-16, by the lead (../source bca1d04b, its "gap 95": acl's rights sets and app's flags byte as `[byte] set of 0..7` fields; dpc refused them, so 17 modules stopped checking)
+Passage: 3.15.5, p. 3-61: "A size attribute must specify at least the number of bits required for the type to which it is applied" and "A size attribute can specify a number of bits greater than the minimum for integer, boolean, and set data types. If you use a size attribute to specify a size larger than the minimum for a data type, then the compiler uses all of the bits in the larger object to represent the value of an object of that type."  Table 3-7 lists no minimum for sets; 3.9.3 sizes an unpacked set in whole words (`set of 0..7` is 16 bits).
+Question: is `[byte] set of 0..7` legal, a 1-byte set, with element k at bit k of that byte (the big-endian bit string cut to one byte)?
+Owner's answer (2026-10-16): legal, 1 byte.
+Consequence: a set's minimum size for a size attribute is the number of bits its range needs; `[byte]` on a set of at most 8 elements gives a 1-byte set, element k at bit k; as any one-byte object it may sit at an odd offset of an unpacked record (3.10.5.5).  Code for such sets follows the image (bead filed with this entry).
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
