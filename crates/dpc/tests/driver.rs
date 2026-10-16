@@ -1621,7 +1621,9 @@ end;
 fn too_many_address_values_in_one_argument_list() {
     // codegen-patterns 12.4 R4(a): each slot load of an argument list
     // takes a new address register; with more than A0-A4 the original
-    // reuses one (MST_$MAP_AT 0xE42F9C), which is not modelled.
+    // reuses the one written least recently when each holds a dead slot
+    // load (MST_$MAP_AT 0xE42F9C A0 for the sixth; MSG_$SENDI
+    // 0xE59AE0..0xE59AF2; bead domain-pascal-ei42).
     let src = "module m;
 procedure take(a, b, c, d, e, f: integer); val_param; extern;
 procedure m_$six(var a, b, c, d, e, f: integer);
@@ -1629,11 +1631,62 @@ begin
   take(a, b, c, d, e, f);
 end;
 ";
-    let (_, e) = compile_with("six_slot_loads", src, &[]).unwrap_err();
+    let s = compile_with("six_slot_loads", src, &[]).unwrap();
+    let loads: Vec<&str> = s
+        .lines()
+        .filter(|l| l.contains("movea.l\t(") && l.contains(",%fp),"))
+        .map(|l| l.rsplit(',').next().unwrap())
+        .collect();
+    assert_eq!(loads, ["%a0", "%a1", "%a2", "%a3", "%a4", "%a0"], "{s}");
+    // A register to reuse that last held another value (here the pointer
+    // read from the unit's data for the first push): the original's
+    // choice is not settled (0xE59E4E), refused.
+    let src = "module m;
+type ip = ^integer;
+var g: ip;
+procedure take(a, b, c, d, e, f: integer); val_param; extern;
+procedure m_$six(var a, b, c, d, e: integer);
+begin
+  take(a, b, c, d, e, g^);
+end;
+";
+    let (_, e) = compile_with("six_values", src, &[]).unwrap_err();
     assert!(
         e.contains("more address values in one argument list"),
         "{e}"
     );
+}
+
+#[test]
+fn prefix_slot_loads_reuse_only_where_both_rules_agree() {
+    // codegen-patterns 12.4 R4(b) (bead domain-pascal-ei42): a slot load of
+    // the straight-line prefix with every address register dirty reuses
+    // the one written least recently only where that one's last value is
+    // a dead slot load and it also died first.
+    // A register whose last value is another kind (the pointer read from
+    // the unit's data in the same statement): refused.
+    let src = "module m;
+type ip = ^integer;
+var w1, w2, w3, w4, w5: extern integer; gp: extern ip;
+procedure m_$mix(var a, b, c, d, e, z: integer);
+begin
+  w1 := a; w2 := b; w3 := c; w4 := d; w5 := e;
+  z := gp^ + w1;
+end;
+";
+    let (_, e) = compile_with("prefix_mix", src, &[]).unwrap_err();
+    assert!(e.contains("more values live at once"), "{e}");
+    // Least recently written (A0, `a`) and died first (A1, `b`, as `a` is
+    // read again later) differ: no site settles it, refused.
+    let src = "module m;
+var w1, w2, w3, w4, w5, w6: extern integer;
+procedure m_$nm(var a, b, c, d, e, f: integer);
+begin
+  w1 := a; w2 := b; w3 := c; w4 := d; w5 := e; w6 := a; w6 := f;
+end;
+";
+    let (_, e) = compile_with("prefix_nm", src, &[]).unwrap_err();
+    assert!(e.contains("more values live at once"), "{e}");
 }
 
 #[test]

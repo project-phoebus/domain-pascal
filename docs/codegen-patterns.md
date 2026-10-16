@@ -8691,7 +8691,19 @@ stored.
 - **`abnormal`, `noreturn`, cleanup handlers:** the kernel has cleanup
   handlers (`../source/domain_os/proc2/cleanup_handlers_internal.c`,
   FIM_$CLEANUP).  How the compiler treats `options(abnormal)` around them
-  is **Uncertain**.  The reference (5.5.6, 5.5.9) only says that
+  is **Uncertain**, but for one point (Verified; bead
+  domain-pascal-ei42, ad-hoc script on `tools/regalloc.py`'s model, not
+  kept): across a call of FIM_$CLEANUP no register holds a value but its
+  D0 result, in all 23 compiled routines that call it (MAC_OS_$SEND
+  0xE0B5A8, MAC_$SEND 0xE0BB12, MAC_$RECEIVE 0xE0BDB0, the PKT_, XNS_,
+  PROC2, EC2_, ACL_, DIR_, XPD_, PCHIST_, REM_FILE and RING routines),
+  although some hold values across their other calls (MAC_OS_$SEND A4
+  across 0xE0B750, A2 at 0xE0BF10 in MAC_$RECEIVE): the parameters a body
+  needs after it are read again from their slots (MAC_$SEND reads `(0x14)`
+  at 0xE0BB26 for the statements before the call, then at 0xE0BBB2,
+  0xE0BC2A, 0xE0BC3E), a `with` element address is stored to a frame
+  slot (0xE0BB44, read at 0xE0BB9E).  `dpc` does not model it: MAC_$SEND
+  is refused for its registers (bead domain-pascal-uoa1).  The reference (5.5.6, 5.5.9) only says that
   optimisation is suppressed and that the return sequence after a
   `noreturn` call is dropped (compare CRASH_SYSTEM call sites; the
   AREA_$DEACTIVATE_ASTE quirk in `../source/docs/original-quirks.md`).
@@ -10025,6 +10037,44 @@ A pointer held in a data register is dereferenced through a copy,
   XNS_IDP_$REGISTER_ADDR 0xE19018 D2 with A3 and A4 free and no call;
   ACL_$ADD_PROJ is "Afull").  Which pointer gives up the address
   register is not settled.
+- *More pointers live across calls than A2-A4 (bead domain-pascal-ei42;
+  ad-hoc script on `tools/regalloc.py`'s model, not kept).*  No routine
+  of the image holds more than three pointer parameters loaded at entry
+  in address registers across calls (the counts by routine: 0 such in A
+  registers 470 + 40 with D ones, 1 in 309 + 50, 2 in 130 + 49, 3 in 40 +
+  36).  In the 36 routines with three in A2-A4 and more in D registers
+  (TIME_$Q_REENTER_ELEM 0xE16C96..0xE16CA6: `(8)` A3, `(0x12)` A4,
+  `(0x16)` A2, the status `(0x1a)` D3, `movea.l D3,A0` at 0xE16CF0 and
+  0xE16D56; REM_NAME_$FIND_UID 0xE4AE92..0xE4AE9E: `(0xc)` in D2, only
+  passed on, `move.l D2,-(SP)` at 0xE4AED0 and 0xE4AF0C, while `(8)`,
+  also only passed on, takes A4; REM_NAME_$GET_ENTRY, _$FIND_NETWORK,
+  _$DIR_READU; NAME_$RESOLVE_INTERNAL 0xE4A074 `(0x12)` D5;
+  NETWORK_$AST_GET_INFO 0xE10282 `(0x10)` D2; SMD_$INQ_KBD_TYPE 0xE6E12A
+  `(8)` D2; nineteen DIR_ and OLD_DIR_ routines, five of them
+  (0xE505CA, 0xE50C60, 0xE516FC, 0xE517F6, 0xE529EE) `(8)` D2, `(0xc)`
+  A2, `(0x10)` A3, `(0x14)` D3, `(0x18)` A4), no simple priority picks
+  the three A ones: uses over the range's length in instructions 21 of
+  36, the same weighted by loop depth (4 or 10 per level) 11-12, uses
+  over blocks 12, uses alone 8, the shortest range 6.  A `with` element
+  address may give way instead (SMD_$RETURN_DISPLAY 0xE6F73E `move.l
+  A1,D2`, copied to A1 at 0xE6F740, 0xE6F760, 0xE6F7A8, beside the
+  parameters `(8)` in A4 and `(0xc)` in A2 and a pointer local in A3), and a pointer
+  parameter for a `with` element (MAC_OS_$DEMUX 0xE0B828 `(0xc)` in D2,
+  A2 the elements' addresses across the calls).  The original also
+  leaves some in their slots, read again at each use, with data
+  registers free: DISK_$PV_ASSIGN_N `(0x20)` and `(0x24)` (0xE6C88C,
+  0xE6C894, 0xE6C946, 0xE6C94C; D6 and D7 not saved) beside `(0x1c)` A4,
+  `(0x28)` A3, `(0x2c)` A2; TTY_$K_GET's status `(0x18)`, read from its
+  slot eight times (0xE1C3EC..0xE1C600) beside `(0xc)` A4, `(0x14)` A3
+  and a call result in A2; VTOC_$LOOKUP's status `(0xc)` (0xE38FC8..
+  0xE3918A) beside `(8)` A3; NETWORK_$WRITE `(8)`, only passed on, pushed
+  from its slot (`move.l (8,A6),-(SP)` at 0xE0FB0E and 0xE0FB8C) beside
+  `(0x18)` A3, `(0x1c)` A2, `(0x20)` A4.  When a pointer goes to a data
+  register and when it stays in its slot is not settled either.  `dpc`
+  keeps every pointer parameter it loads at entry in an address register
+  and refuses ("more values live at once than there are registers"):
+  21 of `../source`'s routines at srcsurvey baseline 38488233, 17 of
+  them this shape (bead domain-pascal-0b1).
 
 **Implemented** (`crates/dpc-m68k/src/isel.rs`): in a body that loads
 parameters at entry, a by-value pointer or a by-address slot the body
@@ -10430,12 +10480,28 @@ of the remaining misses).**  The corpus misses fall into these groups:
     push, 39 take a new register for each and 4 reuse one, each when
     the address registers run out (MST_$MAP_AT 0xE42F9C reuses A0 for
     the sixth after A0-A4; 0xE59AB6, 0xE59B50, 0xE59E4E with A2-A4 or
-    A3 busy).  **Implemented for address registers** (`isel.rs`,
+    A3 busy).  **When they run out, the least recently written register
+    whose dead value is a parameter slot load** (bead
+    domain-pascal-ei42; Reported, every such site): MST_$MAP_AT A0 for
+    the sixth after A0-A4; MSG_$SENDI 0xE59AE0..0xE59AF2 A0, A1, A2, A3
+    after A0-A4; MSG_$SEND_HW 0xE59B6E..0xE59B8C A2, A0, A1, A4, A2, A0
+    after the clean A0, A1, A4 (A2 the dead entry load of `(8)`, A3 held;
+    after a call, so not emitted: `check_late_slot_loads` refuses it).
+    Not settled where a candidate last held another value: 0xE59E4E
+    takes A0, A2, A1 after A4, with A1 a frame local's load (0xE59E28)
+    and A2 a constant base (0xE59E36), where least recently written gives
+    A0, A1, A2.  **Implemented for address registers** (`isel.rs`,
     `argument_list_loads`: the address values defined in a call's
-    argument list are kept apart, `regs::allocate_apart`; more than
-    A0-A4 is refused; golden `results/pointer_callers`, conformance
-    `mst_maps.pas`).  Data values in an argument list are not covered
-    (not surveyed).
+    argument list are kept apart, `regs::allocate_apart`; a list longer
+    than A0-A4 keeps them apart while a register is free and then takes
+    the least recently written one if each candidate's last value is a
+    dead slot load and it is also the one that died first,
+    `regs::recycled`, else it is refused; emitted only in the
+    straight-line prefix; golden
+    `results/pointer_callers`, `regalloc/slot_lru`, conformance
+    `mst_maps.pas`, execution test `slot_lru`, driver test
+    `too_many_address_values_in_one_argument_list`).  Data values in an
+    argument list are not covered (not surveyed).
   - Against it, registers *are* reused inside one statement:
     `movea.l (8,A2),A0` twice in `p^.f := p^.f - n` (0xE03FEE,
     0xE03FF8).  FIM_$ACKNOWLEDGE reuses A1 for each statement
@@ -10559,11 +10625,14 @@ of the remaining misses).**  The corpus misses fall into these groups:
     `lc` include a dirty A0 reused after an indexed `lea` (0xE161C6,
     0xE38452, 0xE3E1E0; MSG_$TEST_FOR_MESSAGE 0xE5A010 and SMD_$READ_
     CRSR_BITMAP 0xE6FD4E reuse A2 after `lea (0,A2,D1.w),A2`), and
-    the loads where every free register is dirty, where the choice looks
-    round-robin (MSG_$SEND_HW 0xE59B6E..0xE59B8C A2, A0, A1, A4, A2, A0,
-    A3, the dead status, never taken; TPAD_$SET_UNIT_MODE 0xE69834 A4,
-    0xE6983C A0, 0xE6987C A4; PCHIST_$UNIX_PROFIL_CNTL 0xE5CAB6..0xE5CAD2
-    neither round-robin nor most-recent; bead domain-pascal-aerg).  A
+    the loads where every free register is dirty, where the choice fits
+    least recently written and died first (MSG_$SEND_HW
+    0xE59B6E..0xE59B8C A2, A0, A1, A4, A2, A0, A3, the dead status,
+    never taken: not round-robin in register order; TPAD_$SET_UNIT_MODE
+    0xE69834 A4, 0xE6983C A0, 0xE6987C A4; the rule of the straight-line
+    prefix below, bead domain-pascal-ei42, not implemented after a call;
+    PCHIST_$UNIX_PROFIL_CNTL 0xE5CAB6..0xE5CAD2 neither least recently
+    written nor most-recent; bead domain-pascal-aerg).  A
     dirty register reused after an indexed `lea` or other values: bead
     domain-pascal-d0hd.  **What is certain (Verified): when every free
     register below the lowest one reached by nothing (or used up on every
@@ -10601,6 +10670,38 @@ of the remaining misses).**  The corpus misses fall into these groups:
     FILE_$READ_LOCK_ENTRYI 0xE60BC0 A0) (Uncertain).  Copies
     `movea.l Dn,An` of the same shape (same script): 9, 9 hits (0xE09A94
     A1 past A0, 0xE16BC2 A3 past A2, 0xE769AA A3 past A0-A2).
+  - **When every free register is dirty before the first branch, call
+    or label (bead domain-pascal-ei42; ad-hoc script on
+    `tools/regalloc.py`'s model, not kept).**  The slot loads `movea.l
+    (d,A6),An` (d >= 8) of the straight-line prefix whose every candidate
+    register (free over the load's range, `colU`) was written before and
+    not used up: 22 in the whole image.  Where each candidate's last value
+    is a dead parameter slot load (19), the original takes the one written
+    least recently, 19 of 19; equally the one whose value died first
+    (19 of 19) and the next in register order after the last one written
+    (round-robin, 19 of 19); lowest-free fits 10 (review of bead
+    domain-pascal-ei42, ad-hoc script not kept): MSG_$SEND
+    0xE59A30/0xE59A38 A0, A1 after A0-A4 (value-parameter copies, section
+    1.2); MSG_$SENDI 0xE59AE0..0xE59AF2 A0, A1, A2, A3; MST_$MAP_AT
+    0xE42F9C A0; DISK_$PV_ASSIGN_N 0xE6C87A..0xE6C894 A0, A1, A0, A1 (A2-A4
+    held); VOLX_$MOUNT 0xE6B140..0xE6B14E A0, A1, A3; the DIR_ routine at
+    0xE4D0E2 (0xE4D106..0xE4D112 A0, A1, A0); 0xE12372 A3; 0xE32A8A A1.
+    Where one last held another value (a `lea` or `movea.l` of a non-slot
+    value, 3), the original takes that one: the AST_ routine at 0xE03548
+    (0xE035A0 A3, also least recently written), SIO6509_$INIT 0xE33552
+    A3 (least recently written A0) and the SIO_IO routine at 0xE333DC
+    (0xE3347E A3, least recently written A1): not settled.
+    MSG_$SEND_HW 0xE59B6E..0xE59B8C, after a call, separates least
+    recently written from round-robin (A2 after A4, not A0), and no site
+    separates least recently written from died first.  **Implemented**
+    for the 19's shape where both rules agree (`regs::allocate_apart`'s
+    `recycle`, `regs::recycled`: the prefix's pairs of
+    `fresh_slot_loads`; the last value written to each candidate before
+    the load must be such a dead slot load); where they differ, or a
+    candidate's last value is of another kind, it is refused as before.
+    Only the straight-line prefix is covered (after a call
+    `check_late_slot_loads` still refuses).  Golden `regalloc/slot_lru`,
+    execution test `slot_lru`.
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `fresh_slot_loads`,
     `pass_dead_slot_loads`, `check_late_slot_loads`): before the body's first branch, call or
     label, the allocator keeps each such slot apart from the address

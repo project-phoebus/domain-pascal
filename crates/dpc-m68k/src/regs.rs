@@ -633,7 +633,7 @@ pub fn allocate(
     exit: &[Reg],
     holds: &[(usize, Reg)],
 ) -> Result<RegSet, String> {
-    allocate_apart(insns, exit, holds, &[], None, &[], &[])
+    allocate_apart(insns, exit, holds, &[], None, &[], &[], &[])
 }
 
 /// [`allocate`], with each pair of `apart` kept in different registers
@@ -671,6 +671,7 @@ pub fn allocate_apart(
     first: Option<(Reg, Vec<Reg>)>,
     late: &[(Reg, Reg)],
     coalesce: &[(Reg, Reg)],
+    recycle: &[(Reg, Reg)],
 ) -> Result<RegSet, String> {
     let web = first.as_ref().map(|(w, _)| *w);
     let live_out = liveness(insns, exit, holds);
@@ -684,8 +685,14 @@ pub fn allocate_apart(
             adj.entry(RegKey(b)).or_default().insert(RegKey(a));
         }
     };
+    let recycle: BTreeSet<(RegKey, RegKey)> = recycle
+        .iter()
+        .map(|&(a, b)| (RegKey(a), RegKey(b)))
+        .collect();
     for &(a, b) in apart {
-        edge(a, b);
+        if !recycle.contains(&(RegKey(a), RegKey(b))) {
+            edge(a, b);
+        }
     }
     // Virtual registers in the order of their first definition.
     let mut order: Vec<Reg> = Vec::new();
@@ -756,30 +763,52 @@ pub fn allocate_apart(
             order.insert(il, p);
         }
     }
+    // `recycle`'s pairs that are not interference edges too: kept apart
+    // as long as a register is otherwise free (below).
+    let mut soft: HashMap<RegKey, BTreeSet<RegKey>> = HashMap::new();
+    for &(a, b) in &recycle {
+        if a != b && !adj.get(&a).is_some_and(|n| n.contains(&b)) {
+            soft.entry(a).or_default().insert(b);
+            soft.entry(b).or_default().insert(a);
+        }
+    }
+    let def_at = |r: Reg| insns.iter().position(|i| access(i).defs.contains(&r));
     let mut assigned: HashMap<RegKey, Reg> = HashMap::new();
     for v in order {
-        let taken: Vec<Reg> = adj
-            .get(&RegKey(v))
-            .into_iter()
-            .flatten()
-            .filter_map(|u| {
-                if is_virtual(u.0) {
-                    assigned.get(u).copied()
-                } else {
-                    Some(u.0)
-                }
-            })
-            .collect();
-        let pick = match v {
-            Reg::D(_) => ALLOC_D
-                .iter()
-                .map(|&n| Reg::D(n))
-                .find(|r| !taken.contains(r)),
-            Reg::A(_) => ALLOC_A
-                .iter()
-                .map(|&n| Reg::A(n))
-                .find(|r| !taken.contains(r)),
+        let held = |n: Option<&BTreeSet<RegKey>>| -> Vec<Reg> {
+            n.into_iter()
+                .flatten()
+                .filter_map(|u| {
+                    if is_virtual(u.0) {
+                        assigned.get(u).copied()
+                    } else {
+                        Some(u.0)
+                    }
+                })
+                .collect()
         };
+        let hard = held(adj.get(&RegKey(v)));
+        let mut taken = hard.clone();
+        taken.extend(held(soft.get(&RegKey(v))));
+        let class: Vec<Reg> = match v {
+            Reg::D(_) => ALLOC_D.iter().map(|&n| Reg::D(n)).collect(),
+            Reg::A(_) => ALLOC_A.iter().map(|&n| Reg::A(n)).collect(),
+        };
+        let pick = class
+            .iter()
+            .copied()
+            .find(|r| !taken.contains(r))
+            .or_else(|| {
+                recycled(
+                    v,
+                    &class,
+                    &hard,
+                    soft.get(&RegKey(v)),
+                    &assigned,
+                    insns,
+                    &def_at,
+                )
+            });
         let Some(p) = pick else {
             return Err("more values live at once than there are registers".into());
         };
@@ -802,6 +831,88 @@ pub fn allocate_apart(
         }
     }
     Ok(saves)
+}
+
+/// [`allocate_apart`]'s choice for a value `v` that finds no register
+/// free of its interfering values (`hard`) and of the values `recycle`
+/// keeps it apart from (`soft`: for a slot load of the straight-line
+/// prefix, the address values of earlier statements, 12.4 R4(b); for one
+/// of an argument list longer than A0-A4, the list's other loads, R4(a);
+/// [`crate::isel`]).  When the last value written to every register of
+/// the class that `hard` leaves, before `v`, is such an earlier value and
+/// the dead load of a parameter slot (`movea.l (d,A6),An`, d >= 8), the
+/// original takes the one written least recently, which is also the one
+/// whose value died first (Reported; bead domain-pascal-ei42, survey on
+/// `tools/regalloc.py`'s model: 19 of 19 such loads before the first
+/// branch, call or label fit both rules, and round-robin in register
+/// order too; e.g. MSG_$SEND 0xE59A30 A0 and 0xE59A38 A1 after A0-A4,
+/// DISK_$PV_ASSIGN_N 0xE6C87A..0xE6C894 A0, A1, A0, A1 with A2-A4 held;
+/// argument lists MST_$MAP_AT 0xE42F9C A0, MSG_$SENDI 0xE59AE0..0xE59AF2
+/// A0, A1, A2, A3; after a call, MSG_$SEND_HW 0xE59B6E..0xE59B8C fits
+/// least recently written and died first, not round-robin).  Nothing
+/// separates least recently written from died first, so a choice where
+/// they differ is refused (`None`), as is one where a register's last
+/// value was another kind (the original's choice not settled:
+/// SIO6509_$INIT 0xE33552 takes A3, a `lea`'s, where A0 was written least
+/// recently; 0xE59E4E) or is not known yet (a value defined before `v`
+/// and not coloured).
+fn recycled(
+    v: Reg,
+    class: &[Reg],
+    hard: &[Reg],
+    soft: Option<&BTreeSet<RegKey>>,
+    assigned: &HashMap<RegKey, Reg>,
+    insns: &[Insn],
+    def_at: &dyn Fn(Reg) -> Option<usize>,
+) -> Option<Reg> {
+    let soft = soft?;
+    let at_v = def_at(v)?;
+    // The register each instruction before `v` writes in `v`'s class,
+    // physical or as coloured (`None`: a virtual one not coloured yet).
+    let mut writes: Vec<(usize, Option<Reg>, Reg)> = Vec::new();
+    for (k, i) in insns[..at_v].iter().enumerate() {
+        for d in access(i).defs {
+            if std::mem::discriminant(&d) != std::mem::discriminant(&v) {
+                continue;
+            }
+            let r = if is_virtual(d) {
+                assigned.get(&RegKey(d)).copied()
+            } else {
+                Some(d)
+            };
+            writes.push((k, r, d));
+        }
+    }
+    if writes.iter().any(|w| w.1.is_none()) {
+        return None;
+    }
+    let last_use = |u: Reg| insns.iter().rposition(|i| access(i).uses.contains(&u));
+    // (written at, died at, register)
+    let mut cands: Vec<(usize, usize, Reg)> = Vec::new();
+    for &r in class.iter().filter(|r| !hard.contains(r)) {
+        // The last value written to `r` before `v`.
+        let &(k, _, u) = writes.iter().rev().find(|w| w.1 == Some(r))?;
+        if !is_virtual(u) || !soft.contains(&RegKey(u)) {
+            return None;
+        }
+        let Reg::A(n) = u else {
+            return None;
+        };
+        let slot = matches!(
+            &insns[k],
+            Insn::Movea { src: Ea::Disp(d, 6), dst, .. } if *dst == n && *d >= 8
+        );
+        if !slot {
+            return None;
+        }
+        cands.push((k, last_use(u).unwrap_or(k), r));
+    }
+    let lru = cands.iter().min_by_key(|c| c.0)?;
+    let died = cands.iter().min_by_key(|c| c.1)?;
+    if lru.2 != died.2 || cands.iter().filter(|c| c.1 == died.1).count() > 1 {
+        return None;
+    }
+    Some(lru.2)
 }
 
 #[cfg(test)]
@@ -1068,7 +1179,7 @@ mod tests {
         let mut insns = body(false);
         let after = call_results_first(&insns, &[], &[], &[4], &[va(0)]);
         assert_eq!(after, [(va(1), va(0))]);
-        allocate_apart(&mut insns, &[], &[], &[], None, &after, &[]).unwrap();
+        allocate_apart(&mut insns, &[], &[], &[], None, &after, &[], &[]).unwrap();
         let t = text(&insns);
         assert_eq!(t[0], "movea.l\t(0x18,%fp),%a3");
         assert_eq!(t[4], "movea.l\t%a0,%a2");
@@ -1102,7 +1213,7 @@ mod tests {
         assert!(text(&plain).iter().all(|l| !l.contains("%a1")));
         let mut insns = body;
         let apart = [(va(1), va(0)), (va(2), va(0)), (va(2), va(1))];
-        let saves = allocate_apart(&mut insns, &[], &[], &apart, None, &[], &[]).unwrap();
+        let saves = allocate_apart(&mut insns, &[], &[], &apart, None, &[], &[], &[]).unwrap();
         assert_eq!(
             text(&insns),
             [
@@ -1331,11 +1442,11 @@ mod tests {
             ]
         };
         let mut insns = copy();
-        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[(vd(1), vd(0))]).unwrap();
+        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[(vd(1), vd(0))], &[]).unwrap();
         assert_eq!(insns[1].to_string(), "move.w\t%d0,%d0");
         // Without the exemption, R2 keeps them apart.
         let mut insns = copy();
-        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[]).unwrap();
+        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[], &[]).unwrap();
         assert_eq!(insns[1].to_string(), "move.w\t%d0,%d1");
     }
 

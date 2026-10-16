@@ -958,8 +958,20 @@ fn select_body_with(
             }
         }
     }
-    let (mut apart, late) = fresh_slot_loads(&s.out, &s.fresh);
-    apart.extend(argument_list_loads(&s.out, &s.call_stmts)?);
+    let (mut apart, late, prefix) = fresh_slot_loads(&s.out, &s.fresh);
+    let (args_apart, args_soft, long_list) = argument_list_loads(&s.out, &s.call_stmts)?;
+    // The prefix's slot loads, and those of an argument list longer than
+    // the address registers, may reuse the least recently written of the
+    // registers dead slot loads hold when none is otherwise free
+    // ([`crate::regs::allocate_apart`]'s `recycle`); not a pair an
+    // argument list of at most five keeps apart.
+    let mut recycle: Vec<(Reg, Reg)> = prefix
+        .into_iter()
+        .filter(|p| !args_apart.contains(p) && !args_apart.contains(&(p.1, p.0)))
+        .collect();
+    recycle.extend(args_soft.iter().copied());
+    apart.extend(args_apart);
+    apart.extend(args_soft.iter().copied());
     for &d in &s.callee_only {
         apart.extend([(Reg::D(d), Reg::D(0)), (Reg::D(d), Reg::D(1))]);
     }
@@ -1035,8 +1047,39 @@ fn select_body_with(
         first.clone(),
         &after,
         &s.colour_coalesce,
+        &recycle,
     )
-    .map_err(|what| unsupported(f.span, what))?;
+    .map_err(|what| {
+        // The over-long argument list is the cause when the body colours
+        // without its loads kept apart at all.
+        let Some(span) = long_list else {
+            return unsupported(f.span, &what);
+        };
+        let free: Vec<(Reg, Reg)> = apart
+            .iter()
+            .filter(|p| !args_soft.contains(p))
+            .copied()
+            .collect();
+        let rest: Vec<(Reg, Reg)> = recycle
+            .iter()
+            .filter(|p| !args_soft.contains(p))
+            .copied()
+            .collect();
+        let mut out = pre.clone();
+        match allocate_apart(
+            &mut out,
+            exit,
+            &holds,
+            &free,
+            first.clone(),
+            &after,
+            &s.colour_coalesce,
+            &rest,
+        ) {
+            Ok(_) => long_argument_list(span),
+            Err(_) => unsupported(f.span, &what),
+        }
+    })?;
     // A slot loaded late into a register that holds a dead slot load on
     // every path passes over it ([`pass_dead_slot_loads`], 12.4 R4(b));
     // the body is coloured again with the slot kept apart from those loads.
@@ -1073,6 +1116,7 @@ fn select_body_with(
                 first.clone(),
                 &after,
                 &s.colour_coalesce,
+                &recycle,
             )
             .map_err(|_| unsupported(span, ONCE_LEA_NOT_A1))?;
             continue;
@@ -1092,6 +1136,7 @@ fn select_body_with(
             first.clone(),
             &after,
             &s.colour_coalesce,
+            &recycle,
         )
         .map_err(|_| {
             late_slot_refusal(
@@ -2138,9 +2183,9 @@ fn on_every_path(out: &[Insn], i: usize) -> bool {
 fn fresh_slot_loads(
     out: &[Insn],
     fresh: &[(Reg, usize, Span)],
-) -> (Vec<(Reg, Reg)>, LateSlotLoads) {
+) -> (Vec<(Reg, Reg)>, LateSlotLoads, Vec<(Reg, Reg)>) {
     if fresh.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     // The first instruction after which the straight-line rule is not
     // known: a branch, a call, or a label (a loop head, a join).
@@ -2162,6 +2207,7 @@ fn fresh_slot_loads(
     let consumed: Vec<u8> = out.iter().flat_map(autoinc_regs).collect();
     let mut apart = Vec::new();
     let mut late = Vec::new();
+    let mut prefix = Vec::new();
     for &(v, start, span) in fresh {
         let load = out
             .iter()
@@ -2207,12 +2253,13 @@ fn fresh_slot_loads(
                 if let Reg::A(n) = d {
                     if crate::regs::is_virtual(d) && !consumed.contains(&n) {
                         apart.push((v, d));
+                        prefix.push((v, d));
                     }
                 }
             }
         }
     }
-    (apart, late)
+    (apart, late, prefix)
 }
 
 /// The address registers an instruction steps with `(An)+` / `-(An)`
@@ -2759,9 +2806,11 @@ fn pass_dead_slot_loads(
 ///   times and passed over 5 (VTOCE_$LOOKUP_FM 0xE39A9C, SMD_$INVERT_DISP
 ///   0xE703C6 A0 against TTY_$K_SET_FLAG 0xE67454 A1; bead
 ///   domain-pascal-quio), and when every free register holds one the
-///   choice looks round-robin (MSG_$SEND_HW 0xE59B6E..0xE59B8C,
-///   TPAD_$SET_UNIT_MODE 0xE69834 A4, 0xE6983C A0; bead
-///   domain-pascal-aerg).
+///   choice fits least recently written and died first, not round-robin
+///   (MSG_$SEND_HW 0xE59B6E..0xE59B8C, TPAD_$SET_UNIT_MODE 0xE69834 A4,
+///   0xE6983C A0; bead domain-pascal-aerg): the rule of the straight-line
+///   prefix ([`crate::regs::allocate_apart`]'s `recycle`, bead
+///   domain-pascal-ei42), not applied after a call.
 /// - Otherwise the original takes the register when no earlier
 ///   instruction left a value in it on any path to the load (a value used
 ///   up by `(An)+` / `-(An)`, or one a call clobbered after, does not
@@ -3124,10 +3173,23 @@ fn field_pointer(base: &Expr) -> Option<(i32, &Addr)> {
 /// the next push, 39 use a new register for each and 4 reuse one, all four
 /// when the address registers run out (MST_$MAP_AT 0xE42F9C reuses A0
 /// for the sixth slot after A0-A4; 0xE59AB6, 0xE59B50, 0xE59E4E with A2-A4
-/// or A3 busy).  Such a list is refused here: which register the original
-/// reused then is not modelled.
-fn argument_list_loads(out: &[Insn], calls: &[(usize, usize, Span)]) -> Res<Vec<(Reg, Reg)>> {
+/// or A3 busy).  Where the registers run out, the original takes the one
+/// written least recently when each holds the dead load of a parameter
+/// slot (MST_$MAP_AT A0 for the sixth; MSG_$SENDI 0xE59AE0..0xE59AF2 A0,
+/// A1, A2, A3 after A0-A4; MSG_$SEND_HW 0xE59B6E..0xE59B8C A2, A0, A1, A4,
+/// A2, A0 after the clean A0, A1, A4, after a call, where
+/// [`check_late_slot_loads`] still refuses; bead domain-pascal-ei42): such a
+/// list's pairs are returned apart (the second vector) for
+/// [`crate::regs::allocate_apart`]'s `recycle`, with the list's span for
+/// the refusal when that does not apply (0xE59E4E: A2 then A1 after a
+/// constant and a local's load, not the least recently written).
+fn argument_list_loads(
+    out: &[Insn],
+    calls: &[(usize, usize, Span)],
+) -> Res<(Vec<(Reg, Reg)>, Vec<(Reg, Reg)>, Option<Span>)> {
     let mut apart = Vec::new();
+    let mut soft = Vec::new();
+    let mut long = None;
     for &(start, jsr, span) in calls {
         let mut loads: Vec<Reg> = Vec::new();
         for i in &out[start..jsr] {
@@ -3137,20 +3199,33 @@ fn argument_list_loads(out: &[Insn], calls: &[(usize, usize, Span)]) -> Res<Vec<
                 }
             }
         }
-        if loads.len() > crate::regs::ALLOC_A.len() {
-            return Err(unsupported(
-                span,
-                "more address values in one argument list than address registers (the \
-                 original reuses one, MST_$MAP_AT 0xE42F9C; codegen-patterns 12.4 R4(a)) is",
-            ));
+        let over = loads.len() > crate::regs::ALLOC_A.len();
+        if over {
+            long.get_or_insert(span);
         }
         for (k, &a) in loads.iter().enumerate() {
             for &b in &loads[k + 1..] {
-                apart.push((a, b));
+                if over {
+                    soft.push((b, a));
+                } else {
+                    apart.push((a, b));
+                }
             }
         }
     }
-    Ok(apart)
+    Ok((apart, soft, long))
+}
+
+/// The refusal of an argument list whose address values the allocator
+/// could not place ([`argument_list_loads`]).
+fn long_argument_list(span: Span) -> Diagnostic {
+    unsupported(
+        span,
+        "more address values in one argument list than address registers, where a \
+         register to reuse is not the least recently written one holding a dead slot load \
+         (the original's choice then not settled: 0xE59E4E; MST_$MAP_AT 0xE42F9C reuses \
+         the least recently written; codegen-patterns 12.4 R4(a)) is",
+    )
 }
 
 /// The scalar locals of `f` held in a data register rather than in their
