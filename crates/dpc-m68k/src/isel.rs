@@ -839,6 +839,39 @@ fn select_body_with(
             ));
         }
     }
+    // The registers of `with` records' addresses ([`Function::with_temps`]),
+    // those of an array element apart, and of register-held locals (webs
+    // and pinned locals, [`register_locals`]), told apart by
+    // [`held_through_calls`].
+    let with_regs: Vec<Reg> = s
+        .ptr_locals
+        .iter()
+        .filter(|(o, _)| f.with_temps.contains(o))
+        .filter_map(|&(_, a)| a.map(Reg::A))
+        .collect();
+    let with_elem_regs: Vec<Reg> = s
+        .ptr_locals
+        .iter()
+        .filter(|(o, _)| f.with_temps.contains(o) && s.elem_ptrs.contains(o))
+        .filter_map(|&(_, a)| a.map(Reg::A))
+        .collect();
+    let local_regs: Vec<Reg> = s
+        .webs
+        .iter()
+        .map(|&(_, d)| Reg::D(d))
+        .chain(
+            s.pinned
+                .iter()
+                .filter(|(o, _)| s.reg_locals.contains(o))
+                .map(|&(_, r)| r),
+        )
+        .chain(
+            s.ptr_locals
+                .iter()
+                .filter(|(o, _)| !f.with_temps.contains(o))
+                .filter_map(|&(_, a)| a.map(Reg::A)),
+        )
+        .collect();
     let mut holds = held_through_calls(
         &s.out,
         &s.call_stmts,
@@ -849,6 +882,9 @@ fn select_body_with(
             blocks: &blocks,
             params: &s.entry_regs,
             data_ptrs: &s.data_ptr_regs,
+            withs: &with_regs,
+            with_elems: &with_elem_regs,
+            locals: &local_regs,
         },
     )?;
     // A parked local's data register stays the local's until its last
@@ -1605,10 +1641,27 @@ fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Ve
 ///   - a call on every path after a join: its 4 sites are all
 ///     callee-saved, but at each no scratch register is free by
 ///     liveness, so they do not show whether the value is held;
-/// - other values (register-held locals, computed values) are refused in
-///   a body with branches: not surveyed, and DTTY_$TSTART 0xE1D6E0 keeps
-///   the local `current` in D0, a scratch register, for `pea
-///   (5,A3,D0.w)` at 0xE1D6F8 inside an `if`.
+/// - other values, by kind (codegen-patterns 12.4 R4(c), "Other values,
+///   with branches"; bead domain-pascal-ig8d; `tools/regalloc.py
+///   callothers`):
+///   - `with_elems`, a `with` record that is an array element: held, as
+///     21 of the 23 such element addresses are (EC2_$RELEASE_EC1 0xE42B96
+///     A2, `pea (A2)` at 0xE42BB0 in an `else` part; MMAP_$INSTALL_PAGES
+///     0xE0CE28; IO_$DISABLE_DEVICE 0xE1A820, the call register loaded
+///     from it; the two others are not held in a register: FLP_DO_IO
+///     0xE3DDEE keeps the address in D3, AREA_$COPY 0xE09052 in its frame
+///     slot).  Refused where no site shows it: the call before the first
+///     branch, the call on every path after a join, last uses in several
+///     calls' arguments or outside a call's arguments on another path
+///     ([`last_use_calls`]);
+///   - the other `withs`, a record reached through a loaded pointer:
+///     refused (such loads are held at some sites, not at others:
+///     SOCK_$PUT_INT 0xE161C2 A3, SIO6509_$RCV 0xE1D552 A0);
+///   - `locals`, register-held locals: refused (DTTY_$TSTART 0xE1D6F8
+///     keeps `current` in D0, MSG_$SEND_HW 0xE59B92 `port` in D2; NET_$OPEN
+///     calls its routine pointer local through A0 kept from the call that
+///     returned it, 0xE5A1F4, and stores it to its slot);
+///   - any other computed value: refused.
 ///
 /// A value already live across an earlier call (so in a callee-saved
 /// register by R3) is held with branches too: CAL_$SHUTDOWN 0xE3E6E4
@@ -1645,6 +1698,9 @@ fn held_through_calls(
         blocks,
         params,
         data_ptrs,
+        withs,
+        with_elems,
+        locals,
     } = kinds;
     let straight = !out
         .iter()
@@ -1683,16 +1739,79 @@ fn held_through_calls(
                     .iter()
                     .any(|&(_, c, _)| c < start && live_out[c].contains(&crate::regs::RegKey(r)));
                 if !straight && !ptrs.contains(&r) && !crossed {
-                    if !params.contains(&r) {
+                    if with_elems.contains(&r) {
+                        // A `with` record that is an array element: held
+                        // (bead domain-pascal-ig8d; 21 of 23 element
+                        // addresses, `tools/regalloc.py callothers`).
+                        if !after_a_branch(out, call) {
+                            // The survey's one site before the first branch,
+                            // FLP_DO_IO 0xE3DDEE, keeps the address in D3,
+                            // across calls: no held-or-not evidence.
+                            return Err(unsupported(
+                                span,
+                                "in a body with branches, a call before the first branch whose \
+                                 arguments are the last use of a `with` record's element address \
+                                 (held through the call or not: no such site, codegen-patterns \
+                                 12.4 R4(c)) is",
+                            ));
+                        }
+                        if on_every_path(out, call) {
+                            return Err(unsupported(
+                                span,
+                                "a call on every path after a join whose arguments are the last \
+                                 use of a `with` record's element address (held through the \
+                                 call or not: no such site, codegen-patterns 12.4 R4(c)) is",
+                            ));
+                        }
+                        match last_use_calls(out, &live_out, calls, r) {
+                            Some(cs) if cs.len() == 1 => {}
+                            Some(_) => {
+                                return Err(unsupported(
+                                    span,
+                                    "in a body with branches, a `with` record's element address \
+                                     whose last uses are the arguments of several calls (held \
+                                     through them or not: only a site where no scratch register \
+                                     is free, AST_$REMOVE_CORRUPTED_PAGE 0xE072FA; \
+                                     codegen-patterns 12.4 R4(c)) is",
+                                ));
+                            }
+                            None => {
+                                return Err(unsupported(
+                                    span,
+                                    "in a body with branches, a call whose arguments are the \
+                                     last use of a `with` record's element address that is \
+                                     also last used outside a call's arguments on another path \
+                                     (held through the call or not: no such site, \
+                                     codegen-patterns 12.4 R4(c)) is",
+                                ));
+                            }
+                        }
+                    } else if withs.contains(&r) {
                         return Err(unsupported(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
-                             a register-held local or computed value (held through the call or \
-                             not: DTTY_$TSTART 0xE1D6F8 does not hold one; not surveyed, \
-                             codegen-patterns 12.4 R4(c), bead domain-pascal-ig8d) is",
+                             a `with` record's address loaded as a pointer (held through the \
+                             call or not: loaded pointers are held at some sites and not at \
+                             others, SIO6509_$RCV 0xE1D552 A0, SOCK_$PUT_INT 0xE161C2 A3; \
+                             codegen-patterns 12.4 R4(c)) is",
                         ));
-                    }
-                    if data_ptrs.contains(&r) {
+                    } else if locals.contains(&r) {
+                        return Err(unsupported(
+                            span,
+                            "in a body with branches, a call whose arguments are the last use of \
+                             a register-held local (held through the call or not: DTTY_$TSTART \
+                             0xE1D6F8 keeps one in D0, MSG_$SEND_HW 0xE59B92 in D2; a routine \
+                             pointer called is kept in A0 and stored, NET_$OPEN 0xE5A1F4; \
+                             codegen-patterns 12.4 R4(c)) is",
+                        ));
+                    } else if !params.contains(&r) {
+                        return Err(unsupported(
+                            span,
+                            "in a body with branches, a call whose arguments are the last use of \
+                             a value computed in an earlier statement (held through the call or \
+                             not; codegen-patterns 12.4 R4(c)) is",
+                        ));
+                    } else if data_ptrs.contains(&r) {
                         return Err(unsupported(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
@@ -1700,8 +1819,7 @@ fn held_through_calls(
                              EC2_$ADVANCE 0xE42CDA, the only site; codegen-patterns 12.4 R4(c), \
                              bead domain-pascal-b3wz) is",
                         ));
-                    }
-                    if after_a_branch(out, call) && on_every_path(out, call) {
+                    } else if after_a_branch(out, call) && on_every_path(out, call) {
                         return Err(unsupported(
                             span,
                             "a call on every path after a join whose arguments are the last use \
@@ -1718,6 +1836,32 @@ fn held_through_calls(
     Ok(holds)
 }
 
+/// The calls (indices in `out`) whose argument instructions (`calls`: the
+/// statement's first instruction up to the call) hold the last uses of
+/// register `r` (an instruction reading it, after which it is dead); `None`
+/// when one of them lies outside every call's arguments (codegen-patterns
+/// 12.4 R4(c), the survey's "other" paths).
+fn last_use_calls(
+    out: &[Insn],
+    live_out: &[std::collections::BTreeSet<crate::regs::RegKey>],
+    calls: &[(usize, usize, Span)],
+    r: Reg,
+) -> Option<Vec<usize>> {
+    let mut found = Vec::new();
+    for (i, insn) in out.iter().enumerate() {
+        if !crate::regs::access(insn).uses.contains(&r)
+            || live_out[i].contains(&crate::regs::RegKey(r))
+        {
+            continue;
+        }
+        let &(_, c, _) = calls.iter().find(|&&(st, c, _)| st <= i && i <= c)?;
+        if !found.contains(&c) {
+            found.push(c);
+        }
+    }
+    Some(found)
+}
+
 /// The kinds of values [`held_through_calls`] treats apart.
 struct HeldKinds<'a> {
     /// The static link's register.
@@ -1730,6 +1874,12 @@ struct HeldKinds<'a> {
     params: &'a [Reg],
     /// Those of `params` held in a data register although pointers.
     data_ptrs: &'a [Reg],
+    /// The registers of `with` records' addresses.
+    withs: &'a [Reg],
+    /// Those of `withs` that hold an array element's address.
+    with_elems: &'a [Reg],
+    /// The registers of register-held locals.
+    locals: &'a [Reg],
 }
 
 /// A branch, `dbf`, `case` dispatch or branch target comes before
@@ -5181,6 +5331,10 @@ pub struct Selector {
     /// The assignments to those locals: frame offset, index in `out` of
     /// the `movea.l` and its statement's span.
     ptr_defs: Vec<(i32, usize, Span)>,
+    /// The frame offsets of those locals assigned an array element's
+    /// address (`lea (d,An,Dx),Ar`; a `with` statement over an element,
+    /// [`dpc_ir::Function::with_temps`]).
+    elem_ptrs: Vec<i32>,
     /// The `lea (d,An,Dx),Ar` of element addresses of other units'
     /// arrays or through pointers loaded from memory formed as values
     /// ([`Self::lea_into`]): index in `out` and the statement's span.
@@ -5421,6 +5575,7 @@ impl Selector {
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
             ptr_defs: Vec::new(),
+            elem_ptrs: Vec::new(),
             elem_leas: Vec::new(),
             parked: Vec::new(),
             a0_locals: Vec::new(),
@@ -9097,6 +9252,9 @@ impl Selector {
                     // stores go through).
                     self.lea_into(x, a)?;
                     self.ptr_defs.push((*o, self.out.len() - 1, self.span));
+                    if matches!(x, Addr::Index { .. }) {
+                        self.elem_ptrs.push(*o);
+                    }
                     if self.pinned(*o).is_none() {
                         self.pinned.push((*o, Reg::A(a)));
                     }

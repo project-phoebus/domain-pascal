@@ -80,6 +80,14 @@ usage:
                                          # argument push, by call position
                                          # (prefix, conditional part, after
                                          # a join), other paths and class
+    tools/regalloc.py callothers [N] [--min N] [--max N]
+                                         # bead domain-pascal-ig8d: other
+                                         # values (not parameter loads)
+                                         # last used by a later call's
+                                         # arguments, by how they start
+                                         # (other_kind), use (push, feed,
+                                         # call target), position, paths
+                                         # and class (N sites per cell)
     tools/regalloc.py slots [RULE[:KEY]] [--min N] [--max N]
                                          # 12.4 R4(b): the register of slot
                                          # loads under each rule (slot_
@@ -917,6 +925,64 @@ def call_param(rt, v):
     forced = not cand or cand[0] not in SCRATCH
     return ('entry' if load == 'entry' else 'late', 'reload' if reload else 'once',
             call_position(rt, c0), paths, v.reg[0],
+            'scratch' if v.reg in SCRATCH else 'csaved', forced, c0)
+
+
+def other_kind(rt, v):
+    """Bead domain-pascal-ig8d: how a value that is not a parameter load
+    starts, for call_other: 'result' (a call's D0/A0 kept where the call
+    left it, no copy), 'callres' (a copy of D0/A0 right after a call),
+    'elem' (`lea (d,An,Dx),Am': an element's address, e.g. a `with'
+    over an array element), 'lea' (another `lea'), 'arith' (computed by
+    two-address arithmetic on the register: an index, a sum), 'copy'
+    (another register copy), 'load' (from memory: a local, a field),
+    'const'."""
+    if all(rt.ins[d].call for d in v.defs):
+        return 'result'
+    k = def_kind(rt, v)
+    if k == 'lea':
+        return 'elem' if re.search(r',%[ad][0-7]:[wl]\)', rt.ins[v.first].ops[0]) else 'lea'
+    if k in ('load', 'copy', 'const') and any(
+            v.reg in rt.ins[d].upd and v.reg not in rt.ins[d].incdec for d in v.defs):
+        return 'arith'
+    return 'arith' if k == 'other' else k
+
+
+def call_other(rt, v):
+    """Bead domain-pascal-ig8d (12.4 R4(c)): for a value that is not a
+    parameter load (other_kind), crosses no call, and whose last use on
+    some path lies in the argument sequence of a call statement it does
+    not belong to (push_call: a push, a copy into the call register, the
+    `jsr (An)' itself), the tuple (kind, use, position, paths, class,
+    where, forced, call); else None.
+
+    use: 'target' (a last use is the call instruction, `jsr (An)'),
+    'push' (a last use is a push, `pea', `move -(SP)'), 'feed' (another
+    instruction of the sequence: a copy or an operand of a pushed
+    expression).  position, paths, where, forced: as call_param."""
+    if v.param or v.crosses_call:
+        return None
+    lu = last_uses(rt, v)
+    calls = {u: push_call(rt, u) for u in lu}
+    args = [u for u in lu if calls[u] is not None]
+    if not args:
+        return None
+    c0 = min(calls[u] for u in args)
+    if rt.block_of[v.first] == rt.block_of[c0] and v.first >= stmt_start(rt, c0):
+        return None                         # defined inside the call statement
+    if any(rt.ins[u].call for u in args):
+        use = 'target'
+    elif any(is_push(rt.ins[u]) for u in args):
+        use = 'push'
+    else:
+        use = 'feed'
+    if len(args) < len(lu):
+        paths = 'other'
+    else:
+        paths = 'multi' if len({calls[u] for u in args}) > 1 else 'dead'
+    cand = [r for r in v.cls if not interferes_any(rt, v, r, use=True)]
+    forced = not cand or cand[0] not in SCRATCH
+    return (other_kind(rt, v), use, call_position(rt, c0), paths, v.reg[0],
             'scratch' if v.reg in SCRATCH else 'csaved', forced, c0)
 
 
@@ -2162,6 +2228,35 @@ def main(argv):
             print('%-36s ' % '/'.join(key) + ' '.join('%8d' % tot[key, c] for c in cols) +
                   '  ' + ' | '.join(' '.join(ex[key, c][:show]) for c in cols[:2]
                                     if ex[key, c]))
+        return 0
+    if cmd == 'callothers':
+        # bead domain-pascal-ig8d: values other than parameter loads whose
+        # last use is in a later call statement's arguments (call_other),
+        # by kind, use, position, paths, class: callee-saved / scratch,
+        # forced apart; the call results kept in place (rt.livein) are
+        # taken too.  `callothers N' shows N sites per cell.
+        show = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 10
+        tot, ex = Counter(), defaultdict(list)
+        for seg, rt in done:
+            branchy = any(rt.ins[i].kind in ('bcc', 'br', 'db') for i in rt.reach)
+            vals = rt.values + [w for w in rt.livein
+                                if all(rt.ins[d].call for d in w.defs)]
+            for v in vals:
+                k = call_other(rt, v)
+                if k is None:
+                    continue
+                pos = k[2] if branchy else 'straight'
+                key = (k[0], k[1], pos, k[3], k[4])
+                col = k[5] + ('-forced' if k[6] else '')
+                tot[key, col] += 1
+                ex[key, col].append('%06X' % rt.ins[min(v.defs)].addr)
+        cols = ('csaved', 'scratch', 'csaved-forced', 'scratch-forced')
+        print('%-36s ' % 'kind/use/position/paths/class' + ' '.join(
+            '%8s' % c for c in ('csaved', 'scratch', 'cs-forc', 'sc-forc')))
+        for key in sorted({k for k, _ in tot}):
+            print('%-36s ' % '/'.join(key) + ' '.join('%8d' % tot[key, c] for c in cols) +
+                  '  ' + ' | '.join(' '.join(ex[key, c][:show]) for c in cols
+                                    if ex[key, c] and show))
         return 0
     if cmd == 'slots':
         # 12.4 R4(b): which rule picks the register of a slot load.

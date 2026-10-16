@@ -9294,21 +9294,119 @@ of the remaining misses).**  The corpus misses fall into these groups:
     Refused: a call on every path from the entry after a branch
     (`on_every_path`, `after_a_branch`; bead domain-pascal-cs2n); a
     pointer parameter held in a data register (`data_ptr_regs`; bead
-    domain-pascal-b3wz); and any other value, a register-held local or a
-    computed value (not surveyed: DTTY_$TSTART 0xE1D6E0 keeps its local
-    `current` in D0, a scratch register, for `pea (5,A3,D0.w)` at
-    0xE1D6F8 inside an `if`; bead domain-pascal-ig8d; refused so in
-    `../source`'s Pascal at 343e0939: the procedure pointer local
-    `handler` of NET_$OPEN, NET_$CLOSE, NET_$IOCTL, NET_$RCV and
-    NET_$SEND, and locals of DTTY_$TSTART, BAT_$DISMOUNT and
-    MAC_OS_$DEMUX).  Pointer locals assigned from calls and values live
-    across an earlier call stay held as before.  Conformance unit
+    domain-pascal-b3wz); other values, by kind (next item).  Pointer
+    locals assigned from calls and values live across an earlier call
+    stay held as before.  Conformance unit
     `tests/conformance/xpd_fp_int.pas` (XPD_$GET_FP_INT,
     XPD_$PUT_FP_INT, byte-identical); golden
     `regalloc/args_held_branches`; execution test `args_held`; driver
     tests `argument_last_use_in_a_branchy_body_is_refused`,
     `argument_last_use_of_a_data_pointer_or_local_is_refused`; unit test
     `call_positions_for_held_arguments`.
+  - **Other values, with branches (bead domain-pascal-ig8d;
+    `tools/regalloc.py callothers`, kept, with tests).**  The values
+    that are not parameter loads, cross no call, and whose last use on
+    some path lies in the argument sequence of a call statement they are
+    not part of: a push, an instruction feeding one (a copy, an operand
+    of a pushed expression, the load of the call register) or the `jsr
+    (An)` itself.  By how the value starts (`other_kind`): `elem` (`lea
+    (d,An,Dx),Am`, an element's address), `lea` (another `lea`), `load`
+    (from memory: a local or a field), `callres` (a copy of D0/A0 right
+    after a call), `result` (D0/A0 where the call left it), `copy`,
+    `arith`, `const`.  Whole image, routines with branches, the call in
+    any position; "forced" as in the survey above (no scratch register
+    free by liveness; a `result` is always counted forced, the call
+    itself writes its register):
+
+    | kind / class | callee-saved | scratch | forced |
+    |---|---|---|---|
+    | elem / A | 21 | 2 | 4 |
+    | lea / A | 4 | 4 | 4 |
+    | load / A | 22 | 25 | 16 |
+    | load / D | 24 | 31 | 6 |
+    | callres / A | 9 | 0 | 12 |
+    | callres / D | 11 | 8 | 1 |
+    | result / A, D | - | - | 17, 78 |
+    | copy / A | 9 | 9 | 4 |
+    | copy / D | 5 | 0 | 4 |
+    | arith / D | 21 | 35 | 27 |
+    | arith / A, const | 5 | 22 | 3 |
+
+    At the machine level a register-held local and a temporary look
+    alike (a `load` is a local's load as often as a frame slot read for
+    one use, 12.4 R4(b): AST_$TRUNCATE 0xE06094 `movea.l (-256,A6),A0`),
+    so only the kinds `dpc` keeps in a register across statements are
+    read for rules:
+    - *A `with` record that is an array element* (5.2, "`with`";
+      `Function::with_temps`): `elem`, **held in 21 of 23** (EC2_$RELEASE_EC1
+      0xE42B96 A2, `pea (A2)` at 0xE42BB0 in an `else` part;
+      PBU_$ADVANCE_EC_INT 0xE88440 A2; MMAP_$INSTALL_PAGES 0xE0CE28 and
+      MMAP_$INSTALL_LIST 0xE0CDC2 A2, a field read for a pushed difference,
+      `sub.l (60,A2),D0` at 0xE0CE3C; IO_$DISABLE_DEVICE 0xE1A810 A3, 0xE1A820
+      A2, `movea.l (116,A2),A0; jsr (A0)` at 0xE1A82E; IO_$RELEASE
+      0xE1A706; EC2_$WAKEUP 0xE428CA A3; MAC_$RECEIVE 0xE0BDDC; PROC2_$SIGNAL
+      0xE3F000 A4, 0xE3F00A A2; VTOC_$ALLOCATE 0xE38E46; PMAP_$INIT_WS_SCAN
+      0xE14654; ...), plus 4 forced (XPD_$CONTINUE_PROC 0xE5BF0C A2) and
+      MAC_OS_$DEMUX 0xE0B880 A2 (counted `copy`: `lea (0,A5,D1.w),A0;
+      movea.l A0,A2`).  The two scratch sites are not values held in a
+      register: FLP_DO_IO 0xE3DDEE forms the address in A0 and keeps it
+      in D3 (`move.l A0,D3` at 0xE3DDF2), and AREA_$COPY 0xE09052 stores
+      it to its frame slot (`move.l A1,(-40,A6)`, reloaded after the
+      calls at 0xE090F2 and later; A2-A5 taken).  The 21 by position: in
+      an `if` part with no join before it 11 (5 `feed`), after a join
+      inside one 10 (4 `feed`); before the first branch only FLP_DO_IO's
+      (not a register-held value: its address lives in D3 across calls),
+      on every path after a join none; by the other paths: one call 21,
+      several calls only a forced site (AST_$REMOVE_CORRUPTED_PAGE
+      0xE072FA), last used elsewhere none.  **Rule (Reported; 21 of 21 register-held sites):** such
+      an element's address whose last use is in a later call's arguments
+      is held through the call (callee-saved).  **Implemented**
+      (`held_through_calls`, `with_elems` from `Selector::elem_ptrs`, and
+      `last_use_calls`).  Refused, each with its own message, as not
+      settled (no register-held site): the call before the first branch
+      of a body with branches, the call on every path after a join, last
+      uses in several calls' arguments, a last use outside a call's
+      arguments on another path.  Golden `regalloc/with_elem_held`;
+      execution test `with_elem_held`; driver test
+      `with_element_last_use_in_arguments`.  In `../source`'s Pascal at
+      efad41ed this compiles EC2_$RELEASE_EC1, MMAP_$INSTALL_LIST and
+      MMAP_$INSTALL_PAGES (still MISMATCH, A2 as the image: the index
+      temporaries of EC2_$RELEASE_EC1 are in D3/D4, `move.w D2,D3`
+      at 0xE42B86, which `dpc` puts in D0/D1; the MMAP pair's array lies at
+      0x2C in the data area, which the image folds into the field
+      displacements, `lea (0,A5,D0.w),A2; move.l (48,A2),D1`, and `dpc`
+      into the `lea`, `lea (0x2c,A5,D0.w),A2`: of the 423 `lea
+      (d,A5,Dx),An` in the image, 415 have d = 0 and the 8 others form
+      the address of a block copied or compared, 0xE38616).
+    - *A `with` record reached through a loaded pointer* (`with p^.q^`,
+      `with a[i]^`): `load` / A, mixed among the register-held loads
+      not from a frame slot (A3 SOCK_$PUT_INT 0xE161C2, NET_IO_$INIT
+      0xE31CAC; A0 SIO6509_$RCV 0xE1D552, HINT_$SHUTDN 0xE49914; A1
+      SIO2681_$INT 0xE1CF3C): refused.
+    - *Register-held locals* (12.5's webs and pinned locals): refused.
+      The refused sites do not agree: DTTY_$TSTART keeps `current` in
+      D0 for `pea (5,A3,D0.w)` at 0xE1D6F8 inside an `if` (`load` /
+      D, scratch); MSG_$SEND_HW keeps `port`, a function's result, in D2
+      (`move.w D0,D2` at 0xE59B3A, `move.w D2,-(SP)` at 0xE59B92, in the
+      `else` part; `callres` / D, callee-saved, as are all 11 such D copies
+      but the 8 `move.l A0,D0` of 3, "Pointer locals held in D0");
+      BAT_$DISMOUNT keeps `label_addr` in D2 (0xE3B950) but passes the
+      `with` record's copy in A0 (`pea (A0)` at 0xE3B9A0).  A word or
+      long a function returns is also left in D0 and read by a later
+      call's arguments, 78 times (forced by the model), 53 of them pushed
+      from D0, 25 of those ML_$SPIN_LOCK's token pushed for
+      ML_$SPIN_UNLOCK (SOCK_$OPEN 0xE15DC0, `move.w D0,-(SP)` at
+      0xE15DD8), which `dpc` handles apart (3, "Pointer locals held in
+      D0"; `Park`).
+    - *A routine pointer local assigned a pointer function's result and
+      called* (NET_$OPEN, NET_$CLOSE, NET_$IOCTL, NET_$RCV, NET_$SEND,
+      `handler`): the image stores A0 to the local's slot and calls
+      through A0 itself after a test and the pushes (NET_$OPEN 0xE5A1D8
+      `move.l A0,(-4,A6)`, 0xE5A1F4 `jsr (A0)`; section 1.6, the only 5
+      calls through a register defined before the pushes); `dpc` keeps the
+      local in a data register: refused (the local message).
+    - Other computed values (`arith`, `const`, `copy`, `lea`): no rule;
+      refused with their own message.
 - **Mechanical proxies tested and refuted as general rules** (each makes
   the original's own choices conflict elsewhere):
   - free only after the next store or call (`colUS`): 66.5% / 69.0%;
@@ -10005,7 +10103,7 @@ earlier:
 
 | # | Step | Image sites | Support |
 |---|---|---|---|
-| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches, and with branches (bead domain-pascal-9j1z) unless the call lies on every path after a join.  New units: module-local 0xE32B76, PROC1_$SET_ASID |
+| 1 | Value-based allocation (R1–R3) in place of pinned parameters: the entry loads of 12.2 stay; a parameter's register is released after its last use; each new value takes the lowest register free over its whole live range; no coalescing of copies and operator results | 0xE17780..0xE17788, 0xE177A0, 0xE177A6..0xE177AE, 0xE177D2, 0xE177DA..0xE177E4 | R1–R3 Verified as properties of the output; the order of allocation is not (`colQU` 73%, R1).  **Implemented** (bead domain-pascal-g5q.5, `crates/dpc-m68k/src/regs.rs`): address order of first definition; R2 for register operands and `lea` bases, not for loads through a dying base; M$ARITH calls write only D0/A0; R4(c) for parameters a call's arguments read last, in bodies without branches, and with branches (bead domain-pascal-9j1z) unless the call lies on every path after a join; with branches also for `with` records that are array elements (bead domain-pascal-ig8d).  New units: module-local 0xE32B76, PROC1_$SET_ASID |
 | 2 | Global CSE of operator results (here the zero-extension), with the two-address result in the non-CSE operand | 0xE177A6, 0xE177B4, 0xE177D0 | Verified at the sites; kills by survey (R7).  **Implemented** (bead domain-pascal-g5q.7): widenings, scaled indices and constant products of plain variables, no reuse across calls nor into or out of a loop (past one: yes); golden `regalloc/cse` |
 | 3 | `max_len & 16#FFFE` as `moveq #-2,D2; and.w D1,D2` (constant into the result register first) | 0xE177A0 | Same order at 0xE60F4A, 0xE60F52 (R8).  **Implemented** (section 8, `&`; bead domain-pascal-d7i) |
 | 4 | The 32-bit compare against a constant held in a register | 0xE177AE | Speculative (R8: 11 sites) |

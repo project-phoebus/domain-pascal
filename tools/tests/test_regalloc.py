@@ -166,6 +166,45 @@ class CallParamTest(unittest.TestCase):
         self.assertEqual(k[:6], ('entry', 'reload', 'every', 'dead', 'a', 'scratch'))
 
 
+class CallOtherTest(unittest.TestCase):
+    """Bead domain-pascal-ig8d: `callothers' (call_other, other_kind)."""
+
+    def test_element_pushed_in_else(self):
+        # EC2_$RELEASE_EC1 0xE42B96..0xE42BB0's shape: the `with' element's
+        # address in A2, pushed by the call of the `else' part
+        rt = routine(['linkw %fp,#0', 'movew %fp@(8),%d0', 'moveal #100000,%a1',
+                      'lslw #3,%d0', 'lea %a1@(0,%d0:w),%a2', 'tstw %a2@(14)',
+                      'bnes 0x1012', 'clrl 0xe24c98', 'bras 0x1016', 'pea %a2@',
+                      'jsr 0xe20702', 'unlk %fp', 'rts'])
+        v = next(v for v in rt.values if v.reg == 'a2')
+        self.assertEqual(regalloc.call_other(rt, v),
+                         ('elem', 'push', 'cond', 'dead', 'a', 'csaved', False, 10))
+
+    def test_local_pushed_from_d0(self):
+        # DTTY_$TSTART 0xE1D6E0..0xE1D6F8's shape: `current' in D0, read by
+        # an indexed `pea' inside the `if'
+        rt = routine(['linkw %fp,#0', 'moveal %fp@(8),%a3', 'movew %a3@,%d0',
+                      'cmpw %a3@(2),%d0', 'blss 0x1010', 'pea %a3@(5,%d0:w)',
+                      'jsr 0xe1d690', 'addqw #4,%sp', 'unlk %fp', 'rts'])
+        v = next(v for v in rt.values if v.reg == 'd0')
+        self.assertEqual(regalloc.other_kind(rt, v), 'load')
+        self.assertEqual(regalloc.call_other(rt, v)[:7],
+                         ('load', 'push', 'cond', 'dead', 'd', 'scratch', False))
+        # the parameter load is call_param's, not call_other's
+        a3 = next(v for v in rt.values if v.reg == 'a3')
+        self.assertIsNone(regalloc.call_other(rt, a3))
+
+    def test_result_called(self):
+        # NET_$OPEN 0xE5A1D0..0xE5A1F4's shape: the pointer function's A0
+        # kept where the call left it and called through
+        rt = routine(['linkw %fp,#0', 'jsr 0xe5a128', 'tstl 0xe24c98', 'bnes 0x100c',
+                      'jsr %a0@', 'addqw #4,%sp', 'unlk %fp', 'rts'])
+        w = next(w for w in rt.livein if w.reg == 'a0')
+        self.assertEqual(regalloc.other_kind(rt, w), 'result')
+        self.assertEqual(regalloc.call_other(rt, w)[:6],
+                         ('result', 'target', 'cond', 'dead', 'a', 'scratch'))
+
+
 class SlotRuleTest(unittest.TestCase):
     """12.4 R4(b) (bead domain-pascal-178): `slots'."""
 

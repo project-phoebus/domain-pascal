@@ -474,8 +474,8 @@ end;
 /// parameter held in a data register (12.2, "Pointers in data registers")
 /// whose last use is an argument is refused (EC2_$ADVANCE 0xE42CDA pushes
 /// it from D0, not held; the only site, bead domain-pascal-b3wz), and so
-/// is a register-held local (DTTY_$TSTART 0xE1D6F8; not surveyed, bead
-/// domain-pascal-ig8d).
+/// is a register-held local (bead domain-pascal-ig8d: DTTY_$TSTART
+/// 0xE1D6F8 keeps one in D0, MSG_$SEND_HW 0xE59B92 in D2).
 #[test]
 fn argument_last_use_of_a_data_pointer_or_local_is_refused() {
     let (code, err) = compile_with(
@@ -522,9 +522,91 @@ end;
     .unwrap_err();
     assert_eq!(code, Some(1));
     assert!(
-        err.contains("the last use of a register-held local or computed value"),
+        err.contains("the last use of a register-held local (held through the call or not"),
         "{err}"
     );
+}
+
+/// codegen-patterns 12.4 R4(c) (bead domain-pascal-ig8d): in a body with
+/// branches, a `with` record that is an array element, whose address's last
+/// use is in a later call's arguments, is held through the call (A2:
+/// EC2_$RELEASE_EC1 0xE42BB0 `pea (A2)` in an `else` part; golden
+/// regalloc/with_elem_held).  The shapes no site shows are refused: the
+/// call on every path after a join, last uses in two calls' arguments, a
+/// last use outside a call's arguments on another path, the call before
+/// the first branch (FLP_DO_IO 0xE3DDEE, the survey's one such site, keeps
+/// the address in D3 across calls); and so is a `with` record reached
+/// through a loaded pointer (held at some sites, not at others), and any
+/// other value computed in an earlier statement.
+#[test]
+fn with_element_last_use_in_arguments() {
+    let src = |body: &str| {
+        format!(
+            "module m;
+type ec_t = record value: integer32; waiters: integer; end;
+  rec_t = record ec: ec_t; count: integer32; end;
+  rec_p = ^rec_t;
+var table: array[1..8] of rec_t;
+  ptrs: array[1..8] of rec_p;
+  flag: extern boolean;
+  total: extern integer32;
+procedure wake(var e: ec_t); extern;
+procedure trim(n: integer32); options(val_param, extern);
+procedure m_$p(i: integer); options(val_param);
+begin
+{body}
+end;
+"
+        )
+    };
+    let asm = compile_with(
+        "with_element_held",
+        &src("  with table[i] do if flag then wake(ec);"),
+        &[],
+    )
+    .unwrap();
+    assert!(asm.contains("\tlea\t(0,%a5,%d1.w),%a2\n"), "{asm}");
+    assert!(asm.contains("\tpea\t(-0xa,%a2)\n"), "{asm}");
+    for (name, body, want) in [
+        (
+            "with_element_every_path",
+            "  with table[i] do begin\n    if flag then total := 0;\n    wake(ec);\n  end;",
+            "a call on every path after a join whose arguments are the last use of a `with` \
+             record's element address",
+        ),
+        (
+            "with_element_two_calls",
+            "  with table[i] do if flag then wake(ec) else trim(count);",
+            "a `with` record's element address whose last uses are the arguments of several \
+             calls",
+        ),
+        (
+            "with_element_other_path",
+            "  with table[i] do if flag then count := 0 else wake(ec);",
+            "last use of a `with` record's element address that is also last used outside a \
+             call's arguments on another path",
+        ),
+        (
+            "with_pointer",
+            "  with ptrs[i]^ do if flag then wake(ec);",
+            "the last use of a `with` record's address loaded as a pointer",
+        ),
+        (
+            "with_element_before_a_branch",
+            "  with table[i] do begin\n    total := 1;\n    wake(ec);\n  end;\n  if flag then total := 0;",
+            "a call before the first branch whose arguments are the last use of a `with` \
+             record's element address",
+        ),
+        (
+            "computed_value",
+            "  with table[i] do if ec.waiters <> 0 then wake(table[i].ec);",
+            "the last use of a value computed in an earlier statement",
+        ),
+    ] {
+        let (code, err) = compile_with(name, &src(body), &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains(want), "{name}: {err}");
+    }
 }
 
 /// codegen-patterns 4: `--a5-always-from`, `--a5-always`, `--a5-absolute`.
