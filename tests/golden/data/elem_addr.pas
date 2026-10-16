@@ -17,7 +17,7 @@
   instruction addresses (codegen-patterns 2, "Frame size"; bead domain-pascal-s9g0):
   find `link #-8', its word result and the slot (XPD_$FIND_INDEX's), avail
   `link #-4' (MMAP_$AVAIL's).
-  Read once and not across a call: refused (bead domain-pascal-1ibr). }
+  Read once and not across a call: data/elem_once (bead domain-pascal-1ibr). }
 module elad;
 type
   page_t = record

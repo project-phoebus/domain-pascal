@@ -143,6 +143,23 @@ usage:
                                          # where the last read is a
                                          # call's argument, the lowest
                                          # callee-saved free (R4(c))
+    tools/regalloc.py elemonce [N]       # bead domain-pascal-1ibr: the
+                                         # `lea's of elemaddr whose address
+                                         # is read once in no call's range,
+                                         # by the base and Am and the state
+                                         # of A0/A1 at the `lea' (B the
+                                         # base, L not free over the
+                                         # address's range, E clean on
+                                         # every path, O dirty on every
+                                         # path, m mixed), in the "core"
+                                         # shape (read by the next
+                                         # instruction, base read by the
+                                         # `lea' alone, no indexed `lea'
+                                         # before or after, no push
+                                         # between) or not; then the fit of
+                                         # elem_once_rule (base in A0: A1
+                                         # when E, A0 when L or O or the
+                                         # read writes the element back)
 
 --min/--max bound the routine size in bytes (default 0 and 0x10000).
 
@@ -2099,6 +2116,164 @@ def elem_summary(done, show=6):
         print('%-36s %5d  %s' % (' '.join(k), fit[k], ' '.join(ex[k][:show])))
 
 
+# -- bead domain-pascal-1ibr: element addresses read once --------------------
+
+# Memory-destination operations that read and write their operand.
+_RMW = {'add', 'addq', 'addi', 'sub', 'subq', 'subi', 'and', 'andi', 'or', 'ori',
+        'eor', 'eori', 'not', 'neg', 'negx', 'bset', 'bclr', 'bchg', 'addx', 'subx',
+        'lsl', 'lsr', 'asl', 'asr'}
+
+
+def elem_use(x, am):
+    """How instruction x reads the element address in register am:
+    'lea' (another `lea` from it, `lea (d,Am),An` or an indexed one),
+    'pea', 'copy' (`movea.l Am,An' / `move.l Am,Dn'), 'store-addr' (the
+    address stored to memory), 'cmp-addr', 'addr' (other arithmetic on
+    the address), 'load' (`(d,Am)' read into a register), 'store'
+    (written from a register or an immediate), 'mem2mem-src' /
+    'mem2mem-dst', 'blockcopy-src' / 'blockcopy-dst' (`(Am)+'), 'clr',
+    'test' (tst/cmp/btst), 'rmw' (read and written: `addq.w #1,(d,Am)'),
+    'src-op' (the source of an operation into a register), 'other'."""
+    base = x.mn[:-1] if x.mn[-1] in 'bwl' else x.mn
+    ops = x.ops
+    if base == 'lea':
+        return 'lea'
+    if base == 'pea':
+        return 'pea'
+    if '%' + am in ops:
+        if base.startswith('move'):
+            return 'copy' if is_reg(ops[1]) else 'store-addr'
+        return 'cmp-addr' if base.startswith('cmp') else 'addr'
+    ina = [k for k, o in enumerate(ops) if re.search('%' + am + r'@', o)]
+    if not ina:
+        return 'other'
+    if base in ('move', 'movea'):
+        if ina == [0]:
+            if '@+' in ops[0]:
+                return 'blockcopy-src'
+            return 'load' if is_reg(ops[1]) else 'mem2mem-src'
+        if '@+' in ops[1] or '@-' in ops[1]:
+            return 'blockcopy-dst'
+        return 'store' if is_reg(ops[0]) or ops[0].startswith('#') else 'mem2mem-dst'
+    if base == 'clr':
+        return 'clr'
+    if base in ('tst', 'cmp', 'cmpi', 'cmpa', 'btst', 'cmpm'):
+        return 'test'
+    if base in _RMW:
+        return 'rmw' if ina[-1] == len(ops) - 1 else 'src-op'
+    return 'other'
+
+
+CLEAN = {'entry', 'call', 'incdec'}
+
+
+def scratch_state(rt, i, c):
+    """What reaches address register c at instruction i on every path
+    (reach_kind): 'E' clean (never written, last written by a call, or
+    used up by `(An)+'/`-(An)') on every path, 'O' a value left by an
+    earlier instruction on every path ("dirty"), 'm' mixed."""
+    st = {reach_kind(rt, d, c) for d, r in rt.rd_in[i][c]}
+    if st <= CLEAN:
+        return 'E'
+    return 'O' if not (st & CLEAN) else 'm'
+
+
+def elem_once_sites(rt):
+    """[dict] of the indexed `lea's of elem_addr_sites whose address is
+    read once, in no call's range, with the base dying at the `lea'
+    (bead domain-pascal-1ibr): elem_addr_sites' fields and `use'
+    (elem_use of the read), `next' (the read is the next instruction),
+    `chain_in' (the base was itself formed by an indexed `lea'),
+    `chain_out' (the read is an indexed `lea' from the address), `base_once'
+    (the base is read by the `lea' alone), `held' (a push or a call lies
+    between the `lea' and the read), and `states': per A0-A4, 'B' the
+    base, 'L' not free over the address's range (live out of the `lea' or
+    into the read, other than the address itself), else scratch_state."""
+    out = []
+    for s in elem_addr_sites(rt):
+        if s['live'] or elem_class(s['reads'], s['across']) != 'once':
+            continue
+        i = rt.at[s['addr']]
+        an, am = s['an'], s['am']
+        q = next(q for q in rt.reach if q > i and am in rt.ins[q].uses)
+        b = next(k for k in range(i - 1, -1, -1) if an in rt.ins[k].defs)
+        base_reads = [k for k in rt.reach
+                      if an in rt.ins[k].uses and (b, an) in rt.rd_in[k][an]]
+        pts = [p for p in rt.reach
+               if p != i and am in rt.lin[p] and (i, am) in rt.rd_in[p][am]]
+        states = []
+        for c in AREGS:
+            if c == an:
+                states.append('B')
+            elif c != am and (c in rt.lout[i] or any(c in rt.lin[p] for p in pts)):
+                states.append('L')
+            else:
+                states.append(scratch_state(rt, i, c))
+        mid = rt.ins[i + 1:q]
+        s = dict(s)
+        bx = rt.ins[b]
+        s.update(
+            use=elem_use(rt.ins[q], am), next=q == i + 1,
+            # any indexed `lea', A5- and A6-based ones too (0xE17CD4
+            # `lea (0,A5,D2.l),A0; lea (0,A0,D1.w),A0')
+            chain_in=bx.mn == 'lea' and bool(re.search(r'@\([^)]*,%d[0-7]:[wl]\)', bx.ops[0])),
+            chain_out=elem_lea(rt.ins[q]) is not None,
+            base_once=base_reads == [i],
+            held=any(x.call or x.mn == 'pea' or (x.ops and x.ops[-1] == '%sp@-')
+                     for x in mid),
+            states=''.join(states))
+        out.append(s)
+    return out
+
+
+def elem_once_rule(s):
+    """codegen-patterns 5.2, "The element's address as a value", read
+    once (bead domain-pascal-1ibr): for a base in A0, the address goes to
+    A1 when A1 is free over its range and clean on every path, and into
+    A0 itself when A1 is not free or is dirty on every path; a read that
+    also writes the element (`addq.w #1,(d,Am)') goes into A0 itself.
+    None where the rule does not apply (another base register, A1 dirty
+    on some paths only)."""
+    if s['an'] != 'a0':
+        return None
+    if s['use'] == 'rmw':
+        return 'a0'
+    a1 = s['states'][1]
+    if a1 == 'E':
+        return 'a1'
+    if a1 in 'LO':
+        return 'a0'
+    return None
+
+
+def elem_once_summary(done, show=8):
+    """The counts of codegen-patterns 5.2 on the address read once."""
+    tot, ex = Counter(), defaultdict(list)
+    rule, rex = Counter(), defaultdict(list)
+    for seg, rt in done:
+        for s in elem_once_sites(rt):
+            core = (s['next'] and s['base_once'] and not s['chain_in']
+                    and not s['chain_out'] and not s['held'])
+            got = 'own' if s['am'] == s['an'] else s['am']
+            k = ('core' if core else 'other', s['an'],
+                 s['states'][:2], 'rmw' if s['use'] == 'rmw' else '-', got)
+            tot[k] += 1
+            ex[k].append('%06X' % s['addr'])
+            p = elem_once_rule(s)
+            if p is not None:
+                k = ('core' if core else 'other', 'rmw' if s['use'] == 'rmw' else s['states'][1],
+                     'fit' if p == s['am'] else 'miss')
+                rule[k] += 1
+                rex[k].append('%06X' % s['addr'])
+    print('(population: core = read by the next instruction, base read by the '
+          'lea alone, not chained, no push between; base, A0/A1 state, rmw, Am)')
+    for k in sorted(tot):
+        print('%-34s %5d  %s' % (' '.join(k), tot[k], ' '.join(ex[k][:show])))
+    print('(elem_once_rule, base in A0: population, A1 state or rmw, fit)')
+    for k in sorted(rule):
+        print('%-34s %5d  %s' % (' '.join(k), rule[k], ' '.join(rex[k][:show])))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -2386,6 +2561,9 @@ def main(argv):
         return 0
     if cmd == 'elemaddr':
         elem_summary(done, int(argv[1]) if len(argv) > 1 else 6)
+        return 0
+    if cmd == 'elemonce':
+        elem_once_summary(done, int(argv[1]) if len(argv) > 1 else 8)
         return 0
     if cmd in ('orders', 'simmisses'):
         # bead domain-pascal-jjh: allocator orders simulated over colU's

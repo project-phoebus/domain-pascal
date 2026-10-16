@@ -13,8 +13,8 @@
   address formed once, ref "With", p. 4-211), a longword index by
   address with a 56-byte element, the reads in both arms of an `if', a
   call that clobbers the scratch registers between two reads.
-  Not expressed (refused): a record read once and not across a call, an
-  address stored (bead domain-pascal-1ibr).
+  A record read once and not across a call, an address stored: the
+  exec test elem_once (bead domain-pascal-1ibr).
 
   link: elem_bases_data.mod.pas
   call: EB_$FILL

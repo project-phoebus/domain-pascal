@@ -369,18 +369,30 @@ fn other_units_array_elements() {
         ]
     );
     // Refused: in a loop (loaded in the loop or held from before it,
-    // TTY_$K_DRAIN_OUTPUT 0xE67AF0); its address as a value read once
-    // (`lea` into the base's register or another, bead domain-pascal-1ibr;
-    // [`element_addresses_as_values`]).
+    // TTY_$K_DRAIN_OUTPUT 0xE67AF0).
     let e = error("procedure t; internal;\nbegin\n  while w > 0 do l := xs[w];\nend;\n");
     assert!(e.contains("another unit's array in a loop"), "{e}");
-    let e = error("procedure t; internal;\nbegin\n  pp := addr(xs[w]);\nend;\n");
-    assert!(e.contains("read once and not across a call"), "{e}");
+    // A displacement beyond a byte: `lea (0,An,Dx),Am`, then `(d,Am)`; the
+    // base in A0 and A1 free and never written, the address in A1
+    // (NETBUF_$RTN_DAT 0xE0F07A..0xE0F086 `movea.l #MMAP,A0; lsl.l #4,D3;
+    // lea (0,A0,D3.l),A1; move.w (806,A5),(-8186,A1)`; bead
+    // domain-pascal-1ibr, [`element_addresses_as_values`]).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  l := xh[w];\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XH,%a0",
+            "add.w\t%d0,%d0",
+            "lea\t(0,%a0,%d0.w),%a1",
+            "move.w\t(-0xc8,%a1),%d0",
+            "ext.l\t%d0",
+            "move.l\t%d0,(L).l",
+        ]
+    );
     // Refused, review of bead domain-pascal-rlnm: the same array in a
     // later statement with no call between (the base kept, MMAP_$FREE_
     // PAGES 0xE0CF74); an index read from the same variable (SIO_$INIT
-    // 0xE32CA2); a displacement beyond a byte (`lea` into the base's
-    // register or another); a store whose value needs an address register
+    // 0xE32CA2); a store whose value needs an address register
     // (TERM_$CONTROL 0xE66B4C); the first argument pushed after a pad
     // (NAME_$FREE_ASID 0xE74DDE).
     let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  l := xs[u];\nend;\n");
@@ -392,8 +404,6 @@ fn other_units_array_elements() {
     assert!(e.contains("read from the same variable"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  xsr.n := xsr.a[w];\nend;\n");
     assert!(e.contains("another part of the same variable"), "{e}");
-    let e = error("procedure t; internal;\nbegin\n  l := xh[w];\nend;\n");
-    assert!(e.contains("displacement beyond a byte"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  xs[w] := pb^.n;\nend;\n");
     assert!(e.contains("whose value needs a register set up"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  g(w, xs[u]);\nend;\n");
@@ -419,8 +429,12 @@ fn other_units_array_elements() {
 /// (0,A0,D0.l),A2`; the pad of the call's arguments scheduled into the
 /// address as at XPD_$SET_DEBUGGER 0xE5BC98..0xE5BCA4 `subq.l #2,SP; add.w
 /// D2,D1; lea (0,A0,D1.w),A3; move.w #2,-(SP); jsr ML_$LOCK`).  Read once
-/// and not across a call: refused (98 sites take the base's register, 99
-/// another; bead domain-pascal-1ibr).
+/// and not across a call, by the next instruction, the base in A0 (bead
+/// domain-pascal-1ibr; `tools/regalloc.py elemonce`): A1 where A1 is free
+/// and clean on every path (56 of 57: the module-local 0xE1C204 at
+/// 0xE1C242 `lea (0,A0,D0.w),A1; move.l A1,(-80,A6)`), A0 itself where A1
+/// is live or dirty on every path (9 of 9: 0xE32CD6 `lea (78,A0,D3.l),A0;
+/// move.l A0,(-8,A6)`, A1 holding a dead address); otherwise refused.
 #[test]
 fn element_addresses_as_values() {
     assert_eq!(
@@ -475,22 +489,89 @@ fn element_addresses_as_values() {
             "movea.l\t(-0xc,%fp),%a2",
         ]
     );
-    // Read once: a `with` record used once, an address stored (SIO6509_
-    // $INIT 0xE33548 into the base's register, the module-local routine
-    // at 0xE1C204 at 0xE1C242 into another), a byte element through a
-    // loaded pointer stored.
-    for stmt in [
-        "with xrs[w] do b := 0;",
-        "pp := addr(xrs[w]);",
-        "pp := addr(cp^[w]);",
-    ] {
-        let e = error(&format!("procedure t; internal;\nbegin\n  {stmt}\nend;\n"));
-        assert!(e.contains("read once and not across a call"), "{stmt}: {e}");
-    }
+    // Read once, A1 clean: an address stored (the module-local routine
+    // at 0xE1C204 at 0xE1C242), a `with` record used once, an address
+    // after a call (A1 last
+    // written by the call: 0xE01244 `lea (0,A0,D5.l),A1; move.l A1,D6`).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  pp := addr(xs[w]);\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XS,%a0",
+            "add.w\t%d0,%d0",
+            "lea\t(-2,%a0,%d0.w),%a1",
+            "move.l\t%a1,(PP).l",
+        ]
+    );
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  with xrs[w] do b := 0;\nend;\n")[6..],
+        ["lea\t(0,%a0,%d0.w),%a1", "clr.l\t(-8,%a1)"]
+    );
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  w := f(w);\n  pp := addr(xrs[w]);\nend;\n")[10..],
+        ["lea\t(-0xc,%a0,%d0.w),%a1", "move.l\t%a1,(PP).l"]
+    );
+    // A1 dirty on every path (the first statement's address): A0 itself
+    // (0xE32CD6, A1 holding a dead `lea`).
+    let b =
+        body("procedure t; internal;\nbegin\n  pp := addr(xs[w]);\n  pp := addr(xrs[w]);\nend;\n");
+    assert_eq!(b[3..5], ["lea\t(-2,%a0,%d0.w),%a1", "move.l\t%a1,(PP).l"]);
+    assert_eq!(b[11..], ["lea\t(-0xc,%a0,%d0.w),%a0", "move.l\t%a0,(PP).l"]);
+    // Refused: A1 dirty on some paths only (6 sites into A1, 6 into A0);
+    // the base in another register (A0 held for a `with`); the read not
+    // the next instruction (a store through a parameter's pointer).
+    let e = error("procedure t; internal;\nbegin\n  if w > 0 then pp := addr(xs[w]);\n  pp := addr(xrs[w]);\nend;\n");
+    assert!(e.contains("on some paths only"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  with pb^ do begin\n    l := xh[w];\n    n := 0;\n  end;\nend;\n");
+    assert!(e.contains("from a base other than A0"), "{e}");
+    let e = error("procedure t(var c: integer); internal;\nbegin\n  c := xh[w];\nend;\n");
+    assert!(e.contains("other than by the next instruction"), "{e}");
+    // A base in A0 loaded from absolute memory (no such site in A0; the
+    // two of the image, 0xE4999E and 0xE49A6C, are in A1).
+    let e = error("procedure t; internal;\nbegin\n  pp := addr(cp^[w]);\nend;\n");
+    assert!(e.contains("from a symbol, a parameter's slot"), "{e}");
     // Wider elements through a loaded pointer stay refused (bead
     // domain-pascal-nqg1).
     let e = error("procedure t; internal;\nbegin\n  pp := addr(ip^[w]);\nend;\n");
     assert!(e.contains("more than 1 byte"), "{e}");
+}
+
+/// An element address read once (bead domain-pascal-1ibr): A1 used up by
+/// `cmpm.l (A1)+,(A0)+` is clean, the address goes there (0xE5AFE2..
+/// 0xE5AFF4 `cmpm.l (A1)+,(A0)+; bne.s; ...; movea.l #0xEA551C,A0; add.w
+/// D0,D0; lea (0,A0,D0.w),A1`; 0xE5B0C2, 0xE60EE4); an element written
+/// back by `bset`/`bclr` from a base in A0 is refused (the image's three
+/// such sites in A0 are `addq`/`subq`: ACL_$UP 0xE47058, 0xE41F5A,
+/// 0xE42044).
+#[test]
+fn element_addresses_read_once_after_cmpm() {
+    let src = "module m;
+type
+  uid_t = record hi, lo: integer32; end;
+  pr_t = packed record f1: boolean; f2: boolean; pad: 0..16383; end;
+  big_t = record pad: array[1..300] of char; flags: pr_t; n: integer; s: set of 0..15; end;
+var
+  bigs: extern array[0..7] of big_t;
+  u1, u2: extern uid_t;
+  w: extern integer;
+  l: extern integer32;
+";
+    let lines = compile(&format!(
+        "{src}procedure t;\nbegin\n  if u1 = u2 then l := bigs[w].n;\nend;\n"
+    ))
+    .unwrap();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("lea\t(0,%a0,"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(lines[at], "lea\t(0,%a0,%d0.w),%a1", "{lines:?}");
+    assert_eq!(lines[at + 1], "move.w\t(0x12e,%a1),%d0", "{lines:?}");
+    let e = compile(&format!(
+        "{src}procedure t;\nbegin\n  bigs[w].flags.f1 := true;\nend;\n"
+    ))
+    .unwrap_err()
+    .join("\n");
+    assert!(e.contains("other than `addq`/`subq`"), "{e}");
 }
 
 /// Elements through a pointer loaded from memory (codegen-patterns 5.2,

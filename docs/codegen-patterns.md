@@ -3586,11 +3586,12 @@ model run against the bit model of Figure 3-6).
       same variable (0xE19F7A..0xE19F8A, A1 and A2 both loaded with
       0xE7AEF4, `move.l (236,A1),(300,A2)`), where `dpc` reads it
       absolutely; an element at a displacement beyond a byte,
-      `lea (0,An,Dx),Am` into the base's register or another (with the
-      base dead after one use, 84 own, SIO_$INIT 0xE32CB0, against 105
-      another, NETBUF_$ADD_PAGES 0xE0EAD6 `lea (0,A0,D1.l),A1; move.w
-      (806,A5),(-8186,A1)`; 12.4 R2; the address read
-      once, below, bead domain-pascal-1ibr); a store whose value
+      `lea (0,An,Dx),Am`, other than from a base in A0 with A1's state
+      deciding (with the base dead after one use, 84 own, SIO_$INIT
+      0xE32CB0, against 105 another, NETBUF_$ADD_PAGES 0xE0EAD6 `lea
+      (0,A0,D1.l),A1; move.w (806,A5),(-8186,A1)`; 12.4 R2; the address
+      read once, below, bead domain-pascal-1ibr, where the base in A0
+      is implemented); a store whose value
       needs a register set up, when that is an address register or when
       the destination takes more instructions (`dpc` then puts the
       destination first, 12.4 "Stores whose destination and value both
@@ -3621,7 +3622,8 @@ model run against the bit model of Figure 3-6).
       refused (bead domain-pascal-dw25).
     - *The element's address as a value (survey Verified for the
       register choice where the address is read twice or more or lives
-      across a call; implemented there, bead domain-pascal-o1kl).*  The
+      across a call, bead domain-pascal-o1kl, and where it is read once
+      from a base in A0, bead domain-pascal-1ibr; implemented there).*  The
       base and the index as for an operand (above), then `lea
       (d,An,Dx),Am`: a `with` record (5.2, "`with`"), a pointer local
       held in a register, an address stored, compared or returned.
@@ -3664,21 +3666,85 @@ model run against the bit model of Figure 3-6).
         lea (0,A2,D1.l),A2`; AREA_$REMOVE_SEG 0xE099D0);
       - *read once, no call in the range* (an address stored, a `with`
         record or pointer read once, a `lea (0,An,Dx),Am` for one access
-        at a displacement beyond a byte): `col` alone 98 (0xE32CD6
-        `lea (78,A0,D3.l),A0; move.l A0,(-8,A6)`; XPD_$FIND_INDEX
-        0xE5AF72), `colU` alone 99 (the module-local routine at
-        0xE1C204, ../source's tty_$i_wait: 0xE1C242 `lea (0,A0,D0.w),A1;
-        move.l A1,(-80,A6)`; 0xE0085C), both 47, neither 114 (SIO6509_$INIT
-        0xE33548 `lea (-32,A3,D0.w),A3; movea.l (16,A6),A4; move.l
-        A3,(A4)`, the base and Am in A3 while A0 is free).  R4(c) does
-        not help: of 26 with the last read a call's argument, 6 take the
-        lowest callee-saved register (`tools/regalloc.py elemaddr`, last
-        table).  By the base's register (ad-hoc count, not kept): a
-        `movea.l #sym` base in A0, another 81, own 18; any base in A1,
-        own 69, another 58.  No rule found: not settled (bead
-        domain-pascal-1ibr).  The read count is where the survey
-        separates, not a known mechanism: why an address read once
-        follows neither rule is not known.
+        at a displacement beyond a byte; 358 sites): `col` alone 98
+        (0xE32CD6 `lea (78,A0,D3.l),A0; move.l A0,(-8,A6)`;
+        XPD_$FIND_INDEX 0xE5AF72), `colU` alone 99 (the module-local
+        routine at 0xE1C204, ../source's tty_$i_wait: 0xE1C242 `lea
+        (0,A0,D0.w),A1; move.l A1,(-80,A6)`; 0xE0085C), both 47, neither
+        114 (SIO6509_$INIT 0xE33548 `lea (-32,A3,D0.w),A3; movea.l
+        (16,A6),A4; move.l A3,(A4)`, the base and Am in A3 while A0 is
+        free).  The base dies at the `lea` at every one of them, so
+        "coalesce where the base dies" is no rule (180 own, 178
+        another).  **What decides, for a base in A0, is A1's state at
+        the `lea`** (bead domain-pascal-1ibr; `tools/regalloc.py
+        elemonce`, kept, with tests).  The tool takes the "core" sites:
+        the address read by the next instruction, the base set by an
+        instruction of the block and read by the `lea` alone (not the
+        index read through it, SIO_$INIT 0xE32D70), no indexed `lea`
+        forming the base or reading the address (the rows of a 2-D
+        array, 0xE5D1AA..0xE5D1B2 `lea (0,A0,D1.w),A0; ...; lea
+        (0,A0,D1.l),A0`, 0xE17CD4, 0xE43414..0xE43420, into the base's
+        register 7 of 7 with A1 clean), no push between (R4(c), 0xE0CC4C
+        `lea (0,A0,D0.l),A2; move.l D2,-(SP); pea (-8192,A2)`).  With
+        the base in A0 (81 sites):
+        - A1 free over the address's range (not live out of the `lea`)
+          and *clean on every path* (no instruction wrote it, or the
+          last that did is a call or an `(A1)+`/`-(A1)` that used it
+          up, `cmpm.l (A1)+,(A0)+` included, as in 12.4 R4(b)): **the address goes to A1, 56 of 57**
+          (0xE1C242 above; ACL_$IN_SUBSYS 0xE470B2 `lea (0,A0,D0.w),A1;
+          tst.w (-15706,A1)`, A1 never written; NETBUF_$RTN_DAT 0xE0F082
+          `lea (0,A0,D3.l),A1; move.w (806,A5),(-8186,A1)`; PROC2_$COMPLETE_
+          FORK 0xE7360C; 0xE01244 after a call; 0xE0085C after `(A1)+`;
+          0xE5AFF4, 0xE5B0C2, 0xE60EE4 after `cmpm.l (A1)+,(A0)+`).
+          The one against it is not explained: XPD_$PUT_REGISTERS
+          0xE5C388..0xE5C398 `move.w D2,D0; movea.l #0xEA551C,A0; muls.w
+          #228,D0; lea (0,A0,D0.l),A0; move.l (-30,A0),D5`, A1 last
+          written by ML_$UNLOCK, beside the like-shaped 0xE422B8
+          `lea (0,A0,D1.l),A1; move.w (-212,A1),D2` (the same table, a
+          frame status tested before, the same join after).  Outside
+          the core shape the same state gives A1 29 times more and the
+          base's register 7 (the 2-D rows above), the R4(c) site 0xE0CC4C
+          A2.
+        - A1 live over the range (3: MMAP_ 0xE0D2E8, 0xE0D2FA `lea
+          (0,A0,D7.l),A0; move.w D2,(-8182,A0)`; 0xE7398C) or dirty on
+          every path (6: SIO_$INIT 0xE32CD6, A1 holding the dead `lea
+          (-900,A2),A1` of the previous argument; 0xE4718E, 0xE74D56,
+          0xE76DBA, 0xE0D4EC, 0xE0D50E): the base's own A0, 9 of 9.
+        - The address's one read writes the element back with `addq`
+          or `subq`: the base's own A0, 3 of 3 (ACL_$UP 0xE47058 `lea
+          (0,A0,D0.w),A0; addq.w #1,(-15706,A0)` with A1 clean; 0xE42044
+          and 0xE41F5A `subq.w`), as `col` gives for an address used
+          twice (the read and the write).  Other write-backs (`bset`,
+          `bclr`, `or.b Dn,(d,Am)`) occur only with the base in another
+          register (0xE05932 `bset`, 0xE46486 `or.b`, both from A1 into A1).
+        - The base's set-up, of the 81: `movea.l #sym` 70, a parameter's
+          slot `movea.l (d,A6),A0` 3 (0xE1B886, 0xE1C43C, 0xE137E8), a copy
+          `movea.l Dn,A0` 2 (0xE136D2, 0xE74AF8); through another
+          pointer 6 (all A1 dirty on some paths); from absolute memory
+          none (the two such bases of the core, 0xE4999E and 0xE49A6C,
+          are in A1).
+        - A1 dirty on some paths only: 6 into A1, 6 into A0 (not
+          settled).
+        With the base in another register no state decides (core sites):
+        in A1 with A0 live, own 13 and A2 2 (0xE1346C, 0xE5A56A); with A0
+        dirty on every path own 21, A0 3, A2-A3 7; with A0 clean A0 11,
+        A2-A4 8 (0xE7317A, 0xE73274, 0xE7328C `lea (0,A1,D1.w),A4`, A0
+        last written by a call, the A0/A1 asymmetry after calls of 12.4
+        R4(b) again).  Features tested and not separating (the 358
+        sites; ad-hoc scripts over the tool's model, not kept): the use
+        (a load: own 34, another 33; an address stored 15 / 21; a push
+        8 / 12; a test 17 / 8; another `lea` 34 / 30); the base's set-up
+        (`movea.l #`: own 134, another 152); the routine's loop-alignment
+        class (aligning own 59, another 79; not aligning 77 / 67) and its
+        map segment (28 segments have both); "lowest free register not
+        dirty" on any or every path, the base's register otherwise (188 /
+        198 of 358); "lowest clean register of any class, else the
+        base's" (188); the same with a dead indexed `lea`, field `lea`,
+        load or copy counting as clean (172).  A partial one, without
+        a rule: when the lowest register other than the base free over
+        the range is a callee-saved one no other value of the routine
+        uses, the base's register 28 times, that register 3 (the ones
+        held through a call's argument pushes, XPD_$READ_PROC 0xE5B9AC).
       The earlier counts (12 own against 15 another for stores with
       displacement 0; 84 against 105 for single accesses beyond a byte)
       are of this last class.  `dpc`'s allocator does not apply R2 to
@@ -3692,16 +3758,32 @@ model run against the bit model of Figure 3-6).
       pointer" and "`with`"), formed with `index_ea`'s order and
       restrictions, then `lea (d,An,Dx),Ar`, where the address is read
       twice or more after the `lea` or a call lies between the `lea` and
-      its last read; otherwise refused after selection (bead
-      domain-pascal-1ibr), as are wider elements through such pointers
-      (bead domain-pascal-nqg1).  The byte form is reached by no accepted
-      program the review of the bead found (a pointer local's address is
-      copied or stored, so read once, and a record element is more than a
-      byte): its refusal is tested, not its code.  Golden `data/elem_addr`; exec test
-      `elem_addrs`; conformance `mmap_avail.pas` (MMAP_$AVAIL 0xE0CC64,
-      byte-identical, its `link #-4` the `with` temporary's slot, section
-      2 "Frame size", bead domain-pascal-s9g0); test `dpc-m68k`
-      `element_addresses_as_values`.
+      its last read; read once in no call's range (bead
+      domain-pascal-1ibr; `isel.rs` `once_elem_lea`, after allocation),
+      where it is read by the next instruction, before and after
+      scheduling, from a base loaded for it alone from a symbol, a
+      parameter's slot or a data register, and the base is in A0: in A1
+      when A1 is free over the range and clean on every path (the
+      address coloured again kept apart from its base), in A0 when A1
+      is live or dirty on every path or the read writes the element
+      back with `addq`/`subq`; refused otherwise (A1 dirty on some
+      paths, a base in another register or loaded from absolute memory
+      or through another pointer, a write-back by `bset`/`bclr`/`or`,
+      the other shapes).  The
+      same check covers the element operand at a displacement beyond a
+      byte, `lea (0,An,Dx),Am` and `(d,Am)` (`isel.rs`
+      `split_element_ea`: another unit's array, the biased base of a
+      large overlay section, a byte element through a parameter's
+      pointer);
+      the address of such an element as a value (a second `lea`) stays
+      refused.  Wider elements through such pointers are refused (bead
+      domain-pascal-nqg1).  Golden `data/elem_addr`, `data/elem_once`;
+      exec tests `elem_addrs`, `elem_once`; conformance `mmap_avail.pas`
+      (MMAP_$AVAIL 0xE0CC64, byte-identical, its `link #-4` the `with`
+      temporary's slot, section 2 "Frame size", bead
+      domain-pascal-s9g0), `acl_in_subsys.pas` (ACL_$IN_SUBSYS 0xE47098,
+      byte-identical); tests `dpc-m68k` `element_addresses_as_values`,
+      `other_units_array_elements`, `bases_of_a_large_section`.
     **Implemented** (`isel.rs`, `index_ea`, `other_unit_index`,
     `index_reg_with`): the rule above, in straight-line code, one such
     element per statement and per array between calls, at displacements
@@ -3757,9 +3839,12 @@ model run against the bit model of Figure 3-6).
     - *The elements.*  81 of the 82 biased bases are first used by `lea
       (0,An,Dx),Am`, the element then at `(d,Am)` (every displacement is
       beyond a byte): into An itself 48 times (ACL_$UP 0xE47058 `lea
-      (0,A0,D0.w),A0`), into another 33 (ACL_$IN_SUBSYS 0xE470B2), the
-      open question of the rest of this entry (12.4 R2; bead
-      domain-pascal-1ibr).  The 82nd, FILE_$LOCK_INIT 0xE32752, copies its
+      (0,A0,D0.w),A0`), into another 33 (ACL_$IN_SUBSYS 0xE470B2), as
+      for any other unit's array ("The element's address as a value",
+      read once; bead domain-pascal-1ibr: 37 are read once in no call's
+      range, 16 of them from a base in A0, of which the rule fits 14,
+      the 7 of its core shape among them; the misses, outside that
+      shape, a 2-D row, 0xE5D1AA, and 0xE4664A).  The 82nd, FILE_$LOCK_INIT 0xE32752, copies its
       base into two registers for nested loops (`movea.l A0,A1; movea.l
       A0,A2`) and steps both copies in the outer loop
       (0xE3275A..0xE32780: `clr.w (7576,A1)`, the counts at 0x107F8, then
@@ -3780,9 +3865,12 @@ model run against the bit model of Figure 3-6).
     in-place rule for another unit's array (7.4) with the bias, a
     combination no site shows alone (the two stepped sites, ACL_$INIT
     0xE3112A and FILE_$LOCK_INIT 0xE3275A..0xE32780, step a held base or
-    a copy of it).  **Refused**: any element off the biased base outside
-    such a loop (all 81 of the image's are beyond a byte, the `lea`'s
-    register above; one within a byte is not seen); an array between offset 0 and 0x7C00 of
+    a copy of it); an element off the biased base beyond a byte, `lea
+    (0,An,Dx),Am` and `(d,Am)` with Am as for any other unit's array
+    (bead domain-pascal-1ibr; conformance `acl_in_subsys.pas`,
+    ACL_$IN_SUBSYS byte-identical).  **Refused**: an element off the
+    biased base within a byte (not seen); the `lea`'s register where
+    "The element's address as a value" refuses it; an array between offset 0 and 0x7C00 of
     such a section; an array at 0x7C00 or beyond of a section of 0x8000
     bytes or less (no such site; whether that one would be biased is not
     known); an array that is a part of its variable (a field, an element
@@ -4029,8 +4117,8 @@ model run against the bit model of Figure 3-6).
     value that is not an address (NETBUF_$GETVA
     0xE0ECC8..0xE0ECE2 forms the element's address first, `movea.l
     #NETWORK_$BUFPOOL,A0; ...; lea (0,A0,D3.l),A1`, then the masked
-    value, `add.l A1,D3`: one site, its element address read once, the
-    unsettled form of 5.2, bead domain-pascal-1ibr; DIR_$GET_ENTRYU 0xE4D648 `clr.l D0; lea
+    value, `add.l A1,D3`: one site, its element address read once, in
+    A1 as 5.2's rule gives with A1 clean, bead domain-pascal-1ibr; DIR_$GET_ENTRYU 0xE4D648 `clr.l D0; lea
     (12,A2),A0; move.b (1,A2),D0; add.l A0,D0` and the other `add.l
     An,Dn` after a `lea` or `movea.l #`, 8 sites in all, the source's
     operand order unknown); an address formed with a `lea` or an
@@ -9564,8 +9652,13 @@ words, no copy coalescing:
   it is the lowest free over the address's range (129 sites where only
   that fits, 6 where only R2 does; with R4(c) for a last read that is a
   call's argument, 197 of 208), one live across a call a callee-saved
-  register as R3 says; one read once fits either 98 and 99 times.  `dpc`'s allocator applies R2 to the base of `lea (d,An)` and
-  not to that of `lea (d,An,Dx)` (`regs.rs`).
+  register as R3 says; one read once fits either 98 and 99 times, and
+  for a base in A0 A1's state decides (A1 when it is free and clean on
+  every path, 56 of 57; A0 when A1 is live or dirty on every path, 9 of
+  9; `tools/regalloc.py elemonce`, bead domain-pascal-1ibr; implemented
+  after allocation, `isel.rs` `once_elem_lea`), the clean/dirty
+  preference of R4(b).  `dpc`'s allocator applies R2 to the base of
+  `lea (d,An)` and not to that of `lea (d,An,Dx)` (`regs.rs`).
 
 **R3. Calls (Verified).**
 - A value live across a call is in D2–D7/A2–A4.  1834 such values in

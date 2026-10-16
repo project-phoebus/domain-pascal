@@ -646,8 +646,10 @@ fn select_body_with(
     // 0xE0CC80 `lea (0,A0,D0.l),A2`).  Read once in no call's range it fits
     // the first 98 times and R2 99 times (0xE32CD6 `lea (78,A0,D3.l),A0`,
     // stored; 0xE1C242 `lea (0,A0,D0.w),A1`, stored), neither 114
-    // (SIO6509_$INIT 0xE33548 `lea (-32,A3,D0.w),A3`): not settled,
-    // refused.
+    // (SIO6509_$INIT 0xE33548 `lea (-32,A3,D0.w),A3`); what decides is A1's
+    // state with the base in A0, checked after allocation
+    // ([`once_elem_lea`], bead domain-pascal-1ibr).
+    let mut once_leas: Vec<(usize, Span)> = Vec::new();
     for &(k, span) in &s.elem_leas {
         let Insn::Lea { dst, .. } = s.out[k] else {
             unreachable!("an element address's `lea`")
@@ -668,13 +670,8 @@ fn select_body_with(
             call |= matches!(i, Insn::Jsr(_) | Insn::Bsr { .. });
         }
         if reads < 2 && !across {
-            return Err(unsupported(
-                span,
-                "the address of an element of another unit's array or through a pointer loaded \
-                 from memory, read once and not across a call (the `lea` into the base's \
-                 register or another, 98 against 99 sites: not settled, codegen-patterns 5.2; \
-                 bead domain-pascal-1ibr) is",
-            ));
+            once_elem_shape(&s.out, k).map_err(|w| unsupported(span, w))?;
+            once_leas.push((k, span));
         }
     }
     if !s.other_base_loads.is_empty()
@@ -1038,7 +1035,38 @@ fn select_body_with(
     loop {
         let more = pass_dead_slot_loads(&pre, &s.out, &late, &apart);
         if more.is_empty() {
-            break;
+            // An element address read once that the image puts in A1
+            // rather than in its base's A0 ([`once_elem_lea`]): coloured
+            // again with it kept apart from the base, one at a time in
+            // order, since A1 taken by one makes it dirty for the next.
+            let mut elem_more = None;
+            for &(k, span) in &once_leas {
+                if let Some(pair) = once_elem_lea(&pre, &s.out, k, exit, &holds)
+                    .map_err(|w| unsupported(span, w))?
+                {
+                    if apart.contains(&pair) {
+                        return Err(unsupported(span, ONCE_LEA_NOT_A1));
+                    }
+                    elem_more = Some((pair, span));
+                    break;
+                }
+            }
+            let Some((pair, span)) = elem_more else {
+                break;
+            };
+            apart.push(pair);
+            s.out = pre.clone();
+            saves = allocate_apart(
+                &mut s.out,
+                exit,
+                &holds,
+                &apart,
+                first.clone(),
+                &after,
+                &s.colour_coalesce,
+            )
+            .map_err(|_| unsupported(span, ONCE_LEA_NOT_A1))?;
+            continue;
         }
         for (k, pair) in more {
             if !passed.contains(&k) {
@@ -1065,6 +1093,12 @@ fn select_body_with(
         })?;
     }
     check_assigned_flags(&s.out, &s.flag_moves)?;
+    // Each element address read once, with its read: still adjacent after
+    // scheduling, the shape [`once_elem_lea`] decided on.
+    let once_pairs: Vec<(Insn, Insn, Span)> = once_leas
+        .iter()
+        .map(|&(k, span)| (s.out[k].clone(), s.out[k + 1].clone(), span))
+        .collect();
     for &(lea, second, span) in &s.held_firsts {
         // The pointer held for a block's first address dies at its `lea
         // (An),Am` and the second address took An: the image never does
@@ -1333,6 +1367,11 @@ fn select_body_with(
     }
     // Phase 1c: the order inside basic blocks (`sched.rs`).
     crate::sched::schedule(&mut out, &units, &volatile_insns, sched);
+    for (lea, user, span) in &once_pairs {
+        if !out.windows(2).any(|w| w[0] == *lea && w[1] == *user) {
+            return Err(unsupported(*span, ONCE_LEA_SCHEDULED));
+        }
+    }
     Ok(Selected::Body(
         Body {
             insns: out,
@@ -2134,6 +2173,9 @@ fn autoinc_regs(insn: &Insn) -> Vec<u8> {
         Insn::Move { src, dst, .. } => vec![src, dst],
         Insn::Clr { dst, .. } | Insn::Tst { dst, .. } => vec![dst],
         Insn::Cmp { src, .. } | Insn::Alu { src, .. } => vec![src],
+        // `cmpm.l (Ay)+,(Ax)+` uses both up (0xE5AFF4, 0xE5B0C2, 0xE60EE4:
+        // A1 last written by a `cmpm`, the element's `lea` into A1).
+        Insn::Cmpm { src, dst, .. } => return vec![*src, *dst],
         _ => Vec::new(),
     };
     eas.into_iter()
@@ -2247,6 +2289,200 @@ fn passes_dead_slot_loads(out: &[Insn], k: usize) -> bool {
         }
         _ => false,
     }
+}
+
+/// The refusal of an element address read once whose `lea` should go to
+/// A1 and that colouring does not put there ([`once_elem_lea`]).
+const ONCE_LEA_NOT_A1: &str = "an element address of another unit's array or through a pointer \
+     loaded from memory, read once, that the image puts in A1 (its base in A0, A1 free and \
+     clean, codegen-patterns 5.2) where the colouring cannot (bead domain-pascal-1ibr) is";
+
+/// How `insn` writes back the memory operand it reaches through An:
+/// `Some(true)` for `addq`/`subq` (the image's three read-modify-write
+/// sites with the base in A0: ACL_$UP 0xE47058 `addq.w`, 0xE41F5A and
+/// 0xE42044 `subq.w`), `Some(false)` for any other operation that reads
+/// and writes it (`bset`, `bclr`, `or.b Dn,(d,An)`, ...: none with the
+/// base in A0), `None` when it does not write it back.
+fn writes_back_through(insn: &Insn, n: u8) -> Option<bool> {
+    let through = |ea: &Ea| {
+        matches!(ea, Ea::Ind(a) | Ea::Disp(_, a) | Ea::Idx(_, a, _, _)
+            | Ea::PostInc(a) | Ea::PreDec(a) if *a == n)
+    };
+    match insn {
+        Insn::Addq { dst, .. } | Insn::Subq { dst, .. } => through(dst).then_some(true),
+        Insn::AluImm { dst, .. }
+        | Insn::Unary { dst, .. }
+        | Insn::BitImm { dst, .. }
+        | Insn::Bit { dst, .. }
+        | Insn::AluToMem { dst, .. } => through(dst).then_some(false),
+        _ => None,
+    }
+}
+
+/// After allocation: the register of an element address of another
+/// unit's array or through a pointer loaded from memory, formed by `lea
+/// (d,An,Dx),Am` at `k` and read once in no call's range
+/// ([`select_body_with`], `elem_leas`; codegen-patterns 5.2, "The
+/// element's address as a value"; `tools/regalloc.py elemonce`, bead
+/// domain-pascal-1ibr).  `Ok(None)` when the colouring gives the image's
+/// register, `Ok(Some(pair))` for the address and its base to keep apart
+/// in a new colouring (the address then takes A1), `Err` when the shape
+/// is not settled.
+///
+/// Survey (`elemonce`, the image's 81 such `lea`s read by the next
+/// instruction, the base read by the `lea` alone and set by a `movea.l`
+/// for it, no other indexed `lea` before or after, no push between, the
+/// base in A0): with A1 free over the address's range and clean on every
+/// path (no instruction wrote it, or a call or `(A1)+` last did), the
+/// address goes to A1, 56 of 57 (the module-local routine at 0xE1C204,
+/// 0xE1C242 `lea (0,A0,D0.w),A1; move.l A1,(-80,A6)`; ACL_$IN_SUBSYS 0xE470B2
+/// `lea (0,A0,D0.w),A1; tst.w (-15706,A1)`; PROC2_$COMPLETE_FORK 0xE7360C;
+/// against it XPD_$PUT_REGISTERS 0xE5C394 `lea (0,A0,D0.l),A0; move.l
+/// (-30,A0),D5`, not explained); with A1 live over the range (3:
+/// MMAP_ 0xE0D2E8 `lea (0,A0,D7.l),A0; move.w D2,(-8182,A0)`) or dirty
+/// on every path (6: 0xE32CD6 `lea (78,A0,D3.l),A0`, A1 holding a dead
+/// `lea`; 0xE4718E), into A0 itself, 9 of 9; a read that writes the
+/// element back (3: ACL_$UP 0xE47058 `lea (0,A0,D0.w),A0; addq.w
+/// #1,(-15706,A0)`, A1 clean), into A0 itself, 3 of 3.  Refused: A1 dirty
+/// on some paths only (6 into A1, 6 into A0), a base in another register
+/// (in A1: 13 into A1 itself and 2 others with A0 live, 21 and 10 with A0
+/// dirty, 11 into A0 and 8 others with A0 clean), and the other shapes.
+fn once_elem_lea(
+    pre: &[Insn],
+    out: &[Insn],
+    k: usize,
+    exit: &[Reg],
+    holds: &[(usize, Reg)],
+) -> Result<Option<(Reg, Reg)>, &'static str> {
+    const BASE: &str = "an element address of another unit's array or through a pointer \
+         loaded from memory, read once in no call's range, from a base other than A0 (the \
+         `lea` into the base's register or another: in A1, 13 against 2 with A0 live, 21 \
+         against 10 with A0 dirty, 11 into A0 and 8 others with A0 clean; not settled, \
+         codegen-patterns 5.2; bead domain-pascal-1ibr) is";
+    const MIXED: &str = "an element address of another unit's array or through a pointer \
+         loaded from memory, read once in no call's range, from a base in A0 while A1 holds \
+         an earlier value on some paths only (the `lea` into A1 6 times, into A0 6 times: not \
+         settled, codegen-patterns 5.2; bead domain-pascal-1ibr) is";
+    let (
+        Some(Insn::Lea {
+            src: Ea::Idx(_, b, _, _),
+            dst,
+        }),
+        Some(Insn::Lea {
+            src: Ea::Idx(_, vb, _, _),
+            dst: vd,
+        }),
+    ) = (out.get(k), pre.get(k))
+    else {
+        return Err(ONCE_LEA_SHAPE);
+    };
+    let (vb, vd) = (Reg::A(*vb), Reg::A(*vd));
+    once_elem_shape(pre, k)?;
+    if *b != 0 {
+        return Err(BASE);
+    }
+    const WRITE_BACK: &str = "an element of another unit's array or through a pointer \
+         loaded from memory, from a base in A0, written back through its `lea` by an \
+         operation other than `addq`/`subq` (`bset`, `bclr`, `or.b`: no site with the base in \
+         A0, codegen-patterns 5.2; bead domain-pascal-1ibr) is";
+    let own = if let Some(addq) = writes_back_through(&out[k + 1], *dst) {
+        if !addq {
+            return Err(WRITE_BACK);
+        }
+        true
+    } else {
+        let a1 = crate::regs::RegKey(Reg::A(1));
+        let live = crate::regs::liveness(out, exit, holds);
+        let busy = *dst != 1 && live[k].contains(&a1);
+        let reach = reaching_aregs(out);
+        let kinds = match reach.get(k) {
+            Some(Some(r)) => reach_kinds(out, 1, &r[1]),
+            _ => return Err(ONCE_LEA_SHAPE),
+        };
+        let clean = REACH_ENTRY | REACH_CALL | REACH_USED_UP;
+        if busy || kinds & clean == 0 {
+            true
+        } else if kinds & !clean == 0 {
+            false
+        } else {
+            return Err(MIXED);
+        }
+    };
+    match (own, *dst) {
+        (true, 0) | (false, 1) => Ok(None),
+        (false, _) => Ok(Some((vd, vb))),
+        (true, _) => Err(ONCE_LEA_SHAPE),
+    }
+}
+
+/// The refusal of an element address read once whose read the scheduler
+/// moves away from its `lea` ([`once_elem_lea`] decides on the two
+/// adjacent).
+const ONCE_LEA_SCHEDULED: &str = "an element address of another unit's array or through a \
+     pointer loaded from memory, read once, with an instruction scheduled between its `lea` \
+     and its read (the register rule is surveyed with the read next, codegen-patterns 5.2; \
+     bead domain-pascal-1ibr) is";
+
+/// The refusal of an element address read once outside the shape
+/// [`once_elem_lea`] is surveyed for ([`once_elem_shape`]).
+const ONCE_LEA_SHAPE: &str = "an element address of another unit's array or through a pointer \
+     loaded from memory, read once in no call's range, other than by the next instruction or \
+     from a base loaded for it alone from a symbol, a parameter's slot or a data register (the \
+     `lea` into the base's register or another: not surveyed, codegen-patterns 5.2; bead \
+     domain-pascal-1ibr) is";
+
+/// Before allocation: whether the element address of `lea (d,An,Dx),Am`
+/// at `k` of the body `pre`, read once in no call's range, has the shape
+/// [`once_elem_lea`] decides after allocation: read by the next
+/// instruction, which is no other indexed `lea` from it, the base set by
+/// a `movea.l` and read by the `lea` alone.
+fn once_elem_shape(pre: &[Insn], k: usize) -> Result<(), &'static str> {
+    let Some(Insn::Lea {
+        src: Ea::Idx(_, vb, _, _),
+        dst: vd,
+    }) = pre.get(k)
+    else {
+        return Err(ONCE_LEA_SHAPE);
+    };
+    let (vb, vd) = (Reg::A(*vb), Reg::A(*vd));
+    let Some(user) = pre.get(k + 1) else {
+        return Err(ONCE_LEA_SHAPE);
+    };
+    if !crate::regs::access(user).uses.contains(&vd)
+        || matches!(
+            user,
+            Insn::Lea {
+                src: Ea::Idx(..),
+                ..
+            }
+        )
+    {
+        return Err(ONCE_LEA_SHAPE);
+    }
+    let base_reads = pre
+        .iter()
+        .filter(|i| crate::regs::access(i).uses.contains(&vb))
+        .count();
+    let base_set = pre[..k]
+        .iter()
+        .rev()
+        .find(|i| crate::regs::access(i).defs.contains(&vb));
+    // The base: another unit's symbol, a parameter's slot (0xE1B886,
+    // 0xE1C43C) or a copy of a data register (0xE136D2, 0xE74AF8), the
+    // kinds the image shows in A0; a pointer loaded from absolute memory
+    // or through another pointer is not seen there (the two absolute
+    // bases, 0xE4999E and 0xE49A6C, are in A1).
+    let known = matches!(
+        base_set,
+        Some(Insn::Movea {
+            src: Ea::ImmSym(_) | Ea::Reg(Reg::D(_)),
+            ..
+        })
+    ) || matches!(base_set, Some(Insn::Movea { src: Ea::Disp(d, FP), .. }) if *d > 0);
+    if base_reads != 1 || !known {
+        return Err(ONCE_LEA_SHAPE);
+    }
+    Ok(())
 }
 
 /// The `REACH_*` kinds of the definitions `defs` of An ([`reaching_aregs`]).
@@ -14454,12 +14690,28 @@ impl Selector {
             // (0,A0,D1.l),A0`, a `with` record read twice) and another where
             // it is not (MMAP_$AVAIL 0xE0CC76..0xE0CC80 `movea.l #MMAP,A0;
             // ...; lea (0,A0,D0.l),A2`, a callee-saved A2 across the call).
-            // Only an address read twice or more, or live across a call, is
-            // settled; one read once in no call's range is refused after
-            // selection ([`select_body_with`], `elem_leas`).
+            // An address read twice or more, or live across a call, is
+            // settled so; one read once in no call's range is checked after
+            // allocation ([`select_body_with`], `elem_leas`;
+            // [`once_elem_lea`]: from a base in A0, A1 when it is free and
+            // clean, the module-local 0xE1C204 at 0xE1C242 `lea
+            // (0,A0,D0.w),A1; move.l A1,(-80,A6)`).
             _ => {
                 let split = self.split_base(a);
                 let src = self.ea_of(a)?;
+                if split && !matches!(src, Ea::Idx(..)) {
+                    // Beyond a byte the element's operand is `(d,Am)` after
+                    // `lea (0,An,Dx),Am` ([`Self::split_element_ea`]): its
+                    // address as a value would be a second `lea`, whose
+                    // register is not surveyed.
+                    return Err(unsupported(
+                        self.span,
+                        "the address of an element of another unit's array or through a \
+                         pointer loaded from memory at a displacement beyond a byte, as a value \
+                         (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; \
+                         bead domain-pascal-1ibr) is",
+                    ));
+                }
                 self.out.push(Insn::Lea { src, dst: r });
                 if split {
                     self.elem_leas.push((self.out.len() - 1, self.span));
@@ -16744,33 +16996,31 @@ impl Selector {
                 (a, *o)
             }
             Addr::Symbol { name, offset: o } => {
-                if self.symbol_bias(name, *o)? != 0 {
-                    // Off the base 60000 bytes in, other than through a
-                    // `for` loop's stepped pointer ([`Self::step_in_place`]):
-                    // every such element of the image (81, from 82 bases)
-                    // is at a displacement beyond a byte, through `lea
-                    // (0,An,Dx),Am` into the base's register (48, ACL_$UP
-                    // 0xE47058 `lea (0,A0,D0.w),A0`) or another (33,
-                    // ACL_$IN_SUBSYS 0xE470B2 `lea (0,A0,D0.w),A1`, then
-                    // `(-15706,A1)`): not settled; within a byte, not seen.
+                // Off the base 60000 bytes in, other than through a `for`
+                // loop's stepped pointer ([`Self::step_in_place`]): every
+                // such element of the image (81, from 82 bases) is at a
+                // displacement beyond a byte, through `lea (0,An,Dx),Am`
+                // (ACL_$UP 0xE47058 `lea (0,A0,D0.w),A0`; ACL_$IN_SUBSYS
+                // 0xE470B2 `lea (0,A0,D0.w),A1`, then `(-15706,A1)`), Am
+                // as for any other unit's array ([`once_elem_lea`]); within
+                // a byte, not seen.
+                let bias = self.symbol_bias(name, *o)?;
+                let disp = o + offset - bias;
+                if bias != 0 && (-128..128).contains(&disp) {
                     return Err(unsupported(
                         self.span,
-                        "an element of an array of an overlay section of more than 0x8000 bytes \
-                         reached from its base 60000 bytes in, other than through a `for` loop's \
-                         stepped pointer (all the image's are beyond a byte, `lea (0,An,Dx),Am` \
-                         into the base's register or another, not settled: ACL_$IN_SUBSYS \
-                         0xE470B2, ACL_$UP 0xE47058; within a byte not seen; codegen-patterns \
-                         5.2; bead domain-pascal-1ibr, domain-pascal-lnzy) is",
+                        "an element within a byte of the base of an overlay section of more \
+                         than 0x8000 bytes reached from 60000 bytes in (all the image's 81 are \
+                         beyond a byte: not seen, codegen-patterns 5.2) is",
                     ));
                 }
-                self.split_disp(o + offset)?;
-                let (x, a) = self.other_unit_index(name, index, scale)?;
-                return self.element_ea(a, x, index, o + offset);
+                let imm = biased_symbol(name, bias);
+                let (x, a) = self.other_unit_index(name, &imm, index, scale)?;
+                return self.split_element_ea(a, x, index, disp);
             }
             Addr::Indirect { base: p, offset: o } if scale == 1 => {
-                self.split_disp(o + offset)?;
                 let (x, a) = self.pointer_index(p, index)?;
-                return self.element_ea(a, x, index, o + offset);
+                return self.split_element_ea(a, x, index, o + offset);
             }
             Addr::Indirect { .. } => {
                 return Err(unsupported(
@@ -17018,7 +17268,16 @@ impl Selector {
     /// to element operands and `pea`s outside loops, 173 of 210 fit and
     /// one misfit is not explained by a refused shape (PKT_$SAR_INTERNET
     /// 0xE71F36; review of bead domain-pascal-rlnm, codegen-patterns 5.2).
-    fn other_unit_index(&mut self, sym: &str, index: &Expr, scale: u32) -> Res<(u8, u8)> {
+    ///
+    /// `imm` is the base's immediate: `sym`, or `sym+60000` for an array of
+    /// a large overlay section ([`Self::symbol_bias`], [`biased_symbol`]).
+    fn other_unit_index(
+        &mut self,
+        sym: &str,
+        imm: &str,
+        index: &Expr,
+        scale: u32,
+    ) -> Res<(u8, u8)> {
         if self.in_loop() {
             return Err(self.other_unit_in_loop());
         }
@@ -17073,7 +17332,7 @@ impl Selector {
             let a = s.alloc_a()?;
             s.out.push(Insn::Movea {
                 size: Size::L,
-                src: Ea::ImmSym(sym.to_string()),
+                src: Ea::ImmSym(imm.to_string()),
                 dst: a,
             });
             base = Some(a);
@@ -17132,24 +17391,22 @@ impl Selector {
         Ok((x, a))
     }
 
-    /// Refuse an element of another unit's array or through a pointer
-    /// loaded from memory ([`Self::index_ea`]) at a displacement beyond a
-    /// byte: `lea (0,An,Dx),Am` into the base's own register or another,
-    /// for an element used once with the base dead after it 84 against 105
-    /// (`movea.l #` bases; own: SIO_$INIT 0xE32CB0 `lea (0,A1,D0.w),A1`,
-    /// MMAP_ 0xE02912; another: 0xE0CC80 `lea (0,A0,D0.l),A2`, 0xE3E7A4),
-    /// not settled (codegen-patterns 5.2, 12.4 R2).
-    fn split_disp(&self, disp: i32) -> Res<()> {
-        if (-128..128).contains(&disp) {
-            return Ok(());
+    /// The operand of an element of another unit's array or through a
+    /// pointer loaded from memory ([`Self::index_ea`]) at `disp` off the
+    /// base `areg` ([`Self::element_ea`]).  Beyond a byte, `lea
+    /// (0,An,Dx),Am` and `(d,Am)`: the base dies at the `lea`, and whether
+    /// Am is An or another register is checked after allocation
+    /// ([`select_body_with`], `elem_leas`; [`once_elem_lea`]: with the base
+    /// in A0, A1 when it is free and clean, the module-local routine at
+    /// 0xE1C204 at 0xE1C242, ACL_$IN_SUBSYS 0xE470B2; A0 itself when A1 is live or
+    /// dirty, MMAP_ 0xE0D2E8; codegen-patterns 5.2, bead
+    /// domain-pascal-1ibr).
+    fn split_element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
+        let ea = self.element_ea(areg, x, index, disp)?;
+        if !(-128..128).contains(&disp) {
+            self.elem_leas.push((self.out.len() - 1, self.span));
         }
-        Err(unsupported(
-            self.span,
-            "an element of another unit's array or through a pointer loaded from memory at a \
-             displacement beyond a byte (the `lea` into the base's register or another, 84 \
-             against 105 sites: not settled, codegen-patterns 5.2, 12.4 R2; bead \
-             domain-pascal-1ibr, domain-pascal-lnzy) is",
-        ))
+        Ok(ea)
     }
 
     /// Whether `a` is an element of another unit's array or of an array

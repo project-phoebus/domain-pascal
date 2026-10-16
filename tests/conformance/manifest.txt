@@ -239,6 +239,10 @@ tests/conformance/tty_k_flush_int.pas        TTY_$K_FLUSH_INPUT TTY_$K_FLUSH_OUT
 # Two variables in memory compared, the left one loaded (codegen-patterns
 # 7.1; bead domain-pascal-aaj).
 tests/conformance/acl_clear_super.pas        ACL_$CLEAR_SUPER  --section-addr .bss.moddata.ACL_=0xE7CF54
+# An element of a large overlay section's array from the base 60000 bytes
+# in, its address read once into A1 (codegen-patterns 5.2; beads
+# domain-pascal-7pcf, domain-pascal-1ibr).
+tests/conformance/acl_in_subsys.pas          ACL_$IN_SUBSYS  --section-addr .bss.moddata.ACL_=0xE7CF54  a5-always-from=ACL_$IN_SUBSYS
 # Record comparisons (codegen-patterns 7.1, "Records"; bead
 # domain-pascal-aaj): `<>' of two UIDs with `cmpm.l', another unit's
 # object by `movea.l #abs', the result by `sne'.

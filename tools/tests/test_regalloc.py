@@ -472,5 +472,68 @@ class ElemAddrTest(unittest.TestCase):
         self.assertEqual((s['reads'], s['across'], s['held']), (2, False, True))
         self.assertEqual((s['col'], s['r4c']), ('a0', 'a2'))
 
+class ElemOnceTest(unittest.TestCase):
+    """tools/regalloc.py elemonce (bead domain-pascal-1ibr)."""
+
+    def test_use_kinds(self):
+        u = regalloc.elem_use
+        self.assertEqual(u(insn('movew %a1@(-8186),%d2'), 'a1'), 'load')
+        self.assertEqual(u(insn('movew %a5@(806),%a1@(-8186)'), 'a1'), 'mem2mem-dst')
+        self.assertEqual(u(insn('movel %a1,%fp@(-80)'), 'a1'), 'store-addr')
+        self.assertEqual(u(insn('moveal %a1,%a2'), 'a1'), 'copy')
+        self.assertEqual(u(insn('addqw #1,%a0@(-15706)'), 'a0'), 'rmw')
+        self.assertEqual(u(insn('orb %d4,%a1@(-15568)'), 'a1'), 'rmw')
+        self.assertEqual(u(insn('andl %a2@(-8180),%d2'), 'a2'), 'src-op')
+        self.assertEqual(u(insn('tstw %a1@(-15706)'), 'a1'), 'test')
+        self.assertEqual(u(insn('pea %a1@(4768)'), 'a1'), 'pea')
+        self.assertEqual(u(insn('lea %a1@(-28292),%a1'), 'a1'), 'lea')
+
+    def test_clean_a1_takes_the_address(self):
+        # ACL_$IN_SUBSYS 0xE470A4..0xE470B6's shape: A1 never written
+        rt = routine(['linkw %fp,#-4', 'movew 0xe20608,%d0', 'moveal #15299220,%a0',
+                      'addw %d0,%d0', 'lea %a0@(0,%d0:w),%a1', 'tstw %a1@(-15706)',
+                      'sgt %d0', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_once_sites(rt)
+        self.assertEqual((s['an'], s['am'], s['use'], s['next'], s['base_once']),
+                         ('a0', 'a1', 'test', True, True))
+        self.assertEqual(s['states'][:2], 'BE')
+        self.assertEqual(regalloc.elem_once_rule(s), 'a1')
+
+    def test_dirty_a1_keeps_the_base_register(self):
+        # SIO_$INIT 0xE32CC4..0xE32CDA's shape: A1 holds a dead address
+        rt = routine(['linkw %fp,#-12', 'moveal %fp@(8),%a2', 'lea %a2@(-900),%a1',
+                      'movel %a1,%fp@(-12)', 'movel %fp@(12),%d3',
+                      'moveal #14862832,%a0', 'lea %a0@(4e,%d3:l),%a0',
+                      'movel %a0,%fp@(-8)', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_once_sites(rt)
+        self.assertEqual((s['an'], s['am'], s['states'][:2]), ('a0', 'a0', 'BO'))
+        self.assertEqual(regalloc.elem_once_rule(s), 'a0')
+
+    def test_read_and_written_back_keeps_the_base_register(self):
+        # ACL_$UP 0xE4704A..0xE4705C's shape: A1 clean, the element updated
+        rt = routine(['linkw %fp,#0', 'movew 0xe20608,%d0', 'moveal #15299220,%a0',
+                      'addw %d0,%d0', 'lea %a0@(0,%d0:w),%a0', 'addqw #1,%a0@(-15706)',
+                      'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_once_sites(rt)
+        self.assertEqual((s['use'], s['states'][:2]), ('rmw', 'BE'))
+        self.assertEqual(regalloc.elem_once_rule(s), 'a0')
+
+    def test_other_bases_and_mixed_states_are_not_ruled(self):
+        # base in A1 (A0 live): no rule
+        rt = routine(['linkw %fp,#0', 'moveal %fp@(8),%a0', 'movew %fp@(12),%d0',
+                      'moveal #15357212,%a1', 'lslw #3,%d0', 'lea %a1@(0,%d0:w),%a1',
+                      'movew %a1@(16180),%a0@', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_once_sites(rt)
+        self.assertEqual((s['an'], s['states'][:2]), ('a1', 'LB'))
+        self.assertIsNone(regalloc.elem_once_rule(s))
+        # A1 written on one path only: mixed
+        rt = routine(['linkw %fp,#0', 'tstw %fp@(8)', 'beqs 0x1008', 'moveal %fp@(10),%a1',
+                      'movew %fp@(14),%d0', 'moveal #15357212,%a0', 'lslw #3,%d0',
+                      'lea %a0@(0,%d0:w),%a1', 'movel %a1,%fp@(-4)', 'unlk %fp', 'rts'])
+        (s,) = regalloc.elem_once_sites(rt)
+        self.assertEqual(s['states'][1], 'm')
+        self.assertIsNone(regalloc.elem_once_rule(s))
+
+
 if __name__ == '__main__':
     unittest.main()

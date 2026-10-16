@@ -92,6 +92,13 @@ Tests:
   unit's array read twice in the base's own register (XPD_$FIND_INDEX
   0xE5AF60), one live across a call in a callee-saved register with the
   base in A0 (MMAP_$AVAIL 0xE0CC80).
+- `data/elem_once` - codegen-patterns 5.2 ("The element's address as a
+  value", read once), 12.4 R2 (bead domain-pascal-1ibr): from a base in
+  A0, the address in A1 when A1 is free and clean (the module-local
+  0xE1C204 at 0xE1C242, an address stored; NETBUF_$RTN_DAT 0xE0F082 and
+  ACL_$IN_SUBSYS 0xE470B2, elements beyond a byte, the latter off a
+  large overlay section's base 60000 bytes in; 0xE01244 after a call),
+  in A0 itself when A1 holds an earlier address (SIO_$INIT 0xE32CD6).
 - `data/index_mul` - codegen-patterns 5.2 ("Index scaling"), 8
   ("Multiplication by a constant"; bead domain-pascal-r3yy): a constant
   of 1..127 done with a multiply goes first, `moveq #c,Dn; mul<s>.w

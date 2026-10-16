@@ -76,6 +76,24 @@ fn bases_of_a_large_section() {
         lines.contains(&"move.w (%a0),(-0x6e62,%a1)".to_string()),
         "{lines:?}"
     );
+    // At 0x7C00 and beyond, an element at a run-time index: 60000 bytes
+    // in, beyond a byte, `lea (0,A0,Dx),A1` with A1 clean (ACL_$IN_SUBSYS
+    // 0xE470AA..0xE470B6 `movea.l #0xe97294,A0; add.w D0,D0; lea
+    // (0,A0,D0.w),A1; tst.w (-15706,A1)`; bead domain-pascal-1ibr).
+    let lines = compile(&unit(0x7C00, 0x400, "a[n] := 0;")).unwrap();
+    let at = lines
+        .iter()
+        .position(|l| l == "movea.l #SEC+60000,%a0")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(
+        lines[at + 1..at + 4],
+        [
+            "add.w %d0,%d0",
+            "lea (0,%a0,%d0.w),%a1",
+            "clr.w (-0x6e62,%a1)"
+        ],
+        "{lines:?}"
+    );
     // A whole element at a constant index: absolute (FILE_$LOCK_INIT
     // 0xE327AC), wherever it lies.
     let lines = compile(&unit(0x9000, 0, "a[3] := 0;")).unwrap();
@@ -88,13 +106,10 @@ fn bases_of_a_large_section() {
 #[test]
 fn refused_in_a_large_section() {
     let err = |src: String| compile(&src).unwrap_err().join("\n");
-    // From 60000 bytes in at a displacement beyond a byte: the `lea`'s
-    // register is not settled (ACL_$IN_SUBSYS 0xE470B2).
-    let e = err(unit(0x7C00, 0x400, "a[n] := 0;"));
-    assert!(e.contains("reached from its base 60000 bytes in"), "{e}");
-    // ... and within a byte (the array at 60000, `(-2,An,Dx)`): not seen.
+    // From 60000 bytes in within a byte (the array at 60000, `(-2,An,Dx)`):
+    // not seen (all 81 of the image's are beyond a byte).
     let e = err(unit(60000, 0, "a[n] := 0;"));
-    assert!(e.contains("reached from its base 60000 bytes in"), "{e}");
+    assert!(e.contains("reached from 60000 bytes in"), "{e}");
     // Between the start and 0x7C00: not seen.
     let e = err(unit(0x100, 0x8000, "a[n] := 0;"));
     assert!(e.contains("between the start and offset 0x7C00"), "{e}");
