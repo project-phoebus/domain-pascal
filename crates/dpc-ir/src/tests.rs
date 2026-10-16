@@ -4077,8 +4077,53 @@ var p: ip := addr(b);
         e[0].contains("the unit's data section `wired_data` spelt another way"),
         "{e:?}"
     );
-    let e = errs("module m;\nvar (sec) v: array[1..16385] of integer;\n");
-    assert!(e[0].contains("more than 0x8000 bytes"), "{e:?}");
+
+    // A section beyond 0x8000 bytes (ACL_$DATA, 0xAD98; codegen-patterns
+    // 5.2, "Overlay sections of more than 0x8000 bytes"): its variables
+    // offsets into its symbol as in any other; the base of its arrays is
+    // the target's.  An array that is a part of its variable there is
+    // refused (the image's are whole variables, or their first element).
+    let big = "module m;
+type r = record h: integer; a: array[1..8] of integer; end;
+var (sec) c: array[0..30] of array[1..512] of integer;
+  s: array[1..64] of r;
+  q: r;
+procedure p(in i: integer);
+var x: integer;
+begin
+  x := s[2].h;
+  x := s[i].a[3];
+  x := c[0][i];
+  BODY
+end;
+";
+    let m = lower_src(&big.replace("BODY", "")).unwrap();
+    assert_eq!(m.overlays[0].size, 0x7C00 + 64 * 18 + 18);
+    let loads: Vec<&Addr> = m.functions[0]
+        .body
+        .iter()
+        .map(|st| match &st.kind {
+            StmtKind::Store {
+                value: Expr::Load { addr, .. },
+                ..
+            } => addr,
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(loads[0], &at("SEC", 0x7C00 + 18));
+    // `c[0][i]`: the first element's array, at the variable's offset.
+    assert!(
+        matches!(loads[2], Addr::Index { base, .. } if **base == at("SEC", 0)),
+        "{:?}",
+        loads[2]
+    );
+    for body in ["x := q.a[i];", "x := c[1][i];"] {
+        let e = errs(&big.replace("BODY", body));
+        assert!(
+            e[0].contains("a part of its variable") && e[0].contains("more than 0x8000 bytes"),
+            "{body}: {e:?}"
+        );
+    }
 }
 
 /// Bit fields of packed records (ref 3.10.7): the unit that holds each

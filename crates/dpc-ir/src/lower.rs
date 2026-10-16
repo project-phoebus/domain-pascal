@@ -134,11 +134,7 @@ pub fn lower_each(program: &Program) -> (Vec<Function>, Vec<Diagnostic>) {
 /// of the image's overlay sections past its start, `tools/sectsurvey.py
 /// overlays`; whether ROUTE_$PORT at NET_PORT_TABLE's start is one is
 /// not known; an object file cannot define a symbol inside a common
-/// block either), a
-/// section of more than 0x8000 bytes (the image's two such sections are
-/// also reached from a base 60000 bytes in, `movea.l #ACL_$DATA+0xEA60`,
-/// codegen-patterns 5.2, "Another unit's array"; when is not known, bead
-/// domain-pascal-7pcf), a name that is no assembler symbol, or that the
+/// block either), a name that is no assembler symbol, or that the
 /// unit also uses as a symbol (a routine's, an `extern` or `define`d
 /// variable's), or two spellings of one name (also of one of the unit's
 /// data sections).
@@ -328,18 +324,10 @@ fn check_overlay(p: &Program, section: &str, symbols: &[&str], span: Span) -> Re
             ),
         ));
     }
-    let size = p
-        .data_sections
-        .iter()
-        .find(|(n, _)| n == section)
-        .map_or(0, |(_, s)| *s);
-    if size > 0x8000 {
-        return Err(unsupported(
-            span,
-            "an overlay section of more than 0x8000 bytes (the image reaches its larger ones \
-             from a base 60000 bytes in, `movea.l #ACL_$DATA+0xEA60`, codegen-patterns 5.2) is",
-        ));
-    }
+    // A section of more than 0x8000 bytes is allocated like any other;
+    // how its variables are reached from a base register is the target's
+    // (codegen-patterns 5.2, "Overlay sections of more than 0x8000 bytes";
+    // [`addr_of`] refuses the one shape whose base the image leaves open).
     Ok(())
 }
 
@@ -5931,6 +5919,27 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                     ));
                 }
             }
+            // An array that is a part of its variable (a record's field, an
+            // element of an outer array at a constant index other than the
+            // first) in an overlay section of more than 0x8000 bytes: the
+            // base the image takes for such a section's arrays, its start or
+            // 60000 bytes in, is seen only for whole variables (and the
+            // first element of one), at offsets 0 and 0x7C00 and beyond
+            // (codegen-patterns 5.2, "Overlay sections of more than 0x8000
+            // bytes"), so whether it follows the variable's offset or the
+            // array's is not known.
+            if let (Addr::Symbol { offset: ao, .. }, Some((vo, size))) = (&b, overlay_var(p, base))
+            {
+                if size > 0x8000 && i64::from(*ao) != i64::from(vo) {
+                    return Err(unsupported(
+                        e.span,
+                        "an element of an array that is a part of its variable (a field, or an \
+                         element at a constant index) in an overlay section of more than 0x8000 \
+                         bytes (its base, the section's start or 60000 bytes in, is seen only \
+                         for whole variables, codegen-patterns 5.2) is",
+                    ));
+                }
+            }
             let offset = i32::try_from(-lo * *elem_size as i64).map_err(|_| big())?;
             Ok(Addr::Index {
                 base: Box::new(b),
@@ -5940,6 +5949,30 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
             })
         }
         _ => Err(unsupported(e.span, "this designator is")),
+    }
+}
+
+/// The offset of the variable designator `e` is a part of (through fields
+/// and constant indices) and the size of its section, when that variable
+/// is in an overlay section ([`addr_of`]).
+fn overlay_var(p: &Program, e: &SExpr) -> Option<(u32, u32)> {
+    match &e.kind {
+        ExprKind::Var { var, .. } => match &p.var(*var).storage {
+            Storage::Static {
+                offset, section, ..
+            } if is_overlay(p, section) => {
+                let size = p
+                    .data_sections
+                    .iter()
+                    .find(|(n, _)| n == section)
+                    .map_or(0, |(_, s)| *s);
+                Some((*offset, size))
+            }
+            _ => None,
+        },
+        ExprKind::Field { base, .. } => overlay_var(p, base),
+        ExprKind::Index { base, index, .. } if index.value.is_some() => overlay_var(p, base),
+        _ => None,
     }
 }
 

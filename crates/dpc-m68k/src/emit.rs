@@ -275,6 +275,13 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
         }
     }
     let aligns = aligning(module, &opts.loop_align).map_err(|d| vec![d])?;
+    // The overlay sections' symbols and sizes, for the base their arrays
+    // are reached from (`isel::Selector::symbol_bias`).
+    let overlays: Vec<(String, u32)> = module
+        .overlays
+        .iter()
+        .map(|o| (dpc_ir::overlay_symbol(&o.section), o.size))
+        .collect();
     for (i, (sect, _)) in opts.data_bases.iter().enumerate() {
         if opts.data_bases[..i]
             .iter()
@@ -406,7 +413,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             // For the driver's internal-error backstop
             // (`diag::set_context`): the routine, up to its pool cells.
             let outer = dpc_syntax::diag::set_context(Some(f.span));
-            match isel::select_with(f, opts.schedule) {
+            match isel::select_in_unit(f, opts.schedule, &overlays) {
                 Ok(mut i) => {
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {

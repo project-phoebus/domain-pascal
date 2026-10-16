@@ -220,20 +220,45 @@ fn narrows_in_place(value: &Expr, ty: Scalar) -> bool {
 /// MT_$RELEASE 0xE70A4C with its three by-address parameters (the image
 /// has no `link; unlk; rts` at all).  One with locals is refused: no such
 /// frame is seen, and whether it would be kept is not known.
+///
+/// The routine is selected as if its unit had no overlay sections (no
+/// array of one is reached from 60000 bytes in, [`Selector::symbol_bias`]
+/// gives 0): a unit's routines are selected by [`select_in_unit`]
+/// (`emit.rs`).
 pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
     select_with(f, Schedule::default())
 }
 
-/// [`select`] with the body scheduled under `sched` (`sched.rs`).
+/// [`select`] with the body scheduled under `sched` (`sched.rs`); no
+/// overlay sections, as [`select`].
 pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
+    select_in_unit(f, sched, &[])
+}
+
+/// The overlay sections of a unit (`dpc_ir::Module::overlays`): each
+/// section's symbol and its size in the unit, for the base its arrays are
+/// reached from ([`Selector::symbol_bias`]).
+pub type Overlays = [(String, u32)];
+
+/// [`select_with`] for a routine of a unit with overlay sections
+/// `overlays`.
+pub fn select_in_unit(
+    f: &Function,
+    sched: Schedule,
+    overlays: &Overlays,
+) -> Result<Vec<Insn>, Diagnostic> {
     // For the driver's internal-error backstop (`diag::set_context`).
     let outer = dpc_syntax::diag::set_context(Some(f.span));
-    let insns = select_in_context(f, sched);
+    let insns = select_in_context(f, sched, overlays);
     dpc_syntax::diag::set_context(outer);
     insns
 }
 
-fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
+fn select_in_context(
+    f: &Function,
+    sched: Schedule,
+    overlays: &Overlays,
+) -> Result<Vec<Insn>, Diagnostic> {
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
             // A bare `rts` has no frame for the copy; whether the original
@@ -254,7 +279,7 @@ fn select_in_context(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnos
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_scheduled(f, sched)?;
+    let body = select_body_in_unit(f, sched, overlays)?;
     wrap(f, body)
 }
 
@@ -353,27 +378,42 @@ pub struct Body {
 /// (codegen-patterns 12.4 R7, [`Cse`]): the body is selected once to find
 /// which computations a later one can reuse ([`Selector::cse_value`]),
 /// then again holding exactly those.
+///
+/// As [`select`], with no overlay sections ([`Selector::symbol_bias`] 0).
 pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
     select_body_scheduled(f, Schedule::default())
 }
 
 /// [`select_body`] with the body scheduled under `sched` after register
-/// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12).
+/// allocation (`sched.rs`, codegen-patterns 12.4 R9-R12); no overlay
+/// sections, as [`select`].
 pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
+    select_body_in_unit(f, sched, &[])
+}
+
+/// [`select_body_scheduled`] for a routine of a unit with overlay sections
+/// `overlays` ([`select_in_unit`]).
+fn select_body_in_unit(
+    f: &Function,
+    sched: Schedule,
+    overlays: &Overlays,
+) -> Result<Body, Diagnostic> {
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
-    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[])? {
+    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[], overlays)? {
         Selected::Body(b, h) => (b, h, Vec::new()),
-        Selected::InA0(in_a0) => match select_body_with(f, CsePlan::Probe, sched, &in_a0)? {
-            Selected::Body(b, h) => (b, h, in_a0),
-            Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
-        },
+        Selected::InA0(in_a0) => {
+            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays)? {
+                Selected::Body(b, h) => (b, h, in_a0),
+                Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
+            }
+        }
     };
     if hits.is_empty() {
         return Ok(body);
     }
     let Selected::Body(body, again) =
-        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0)?
+        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0, overlays)?
     else {
         unreachable!("an A0-held local is not found again")
     };
@@ -402,9 +442,11 @@ fn select_body_with(
     plan: CsePlan,
     sched: Schedule,
     in_a0: &[i32],
+    overlays: &Overlays,
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
     s.cse_plan = plan;
+    s.overlays = overlays.to_vec();
     s.data_label = crate::emit::data_base_label(&f.data_section);
     if f.loads_data_base {
         s.load_data_base();
@@ -3239,6 +3281,23 @@ fn stmts_call(body: &[Stmt]) -> bool {
     hit
 }
 
+/// The bias of the base of a large overlay section's arrays at 0x7C00 and
+/// beyond: the section's start plus 60000 (`ACL_$DATA+0xEA60` 62 times,
+/// `FILE_$LOT_DATA+0xEA60` 20 times; [`Selector::symbol_bias`]).
+const OVERLAY_BIAS: i32 = 60000;
+
+/// The immediate of a base register loaded with symbol `sym` plus `bias`
+/// ([`Selector::symbol_bias`]): `SYM+60000`, an addend of the symbol's
+/// relocation (ACL_$IN_SUBSYS 0xE470AA `207c 00e9 7294`, ACL_$DATA
+/// 0xE88834 + 60000).
+fn biased_symbol(sym: &str, bias: i32) -> String {
+    if bias == 0 {
+        sym.to_string()
+    } else {
+        format!("{sym}+{bias}")
+    }
+}
+
 /// An array a `for` loop reaches through a pointer stepped by the element
 /// size (codegen-patterns 7.4, "Array indexing by the index"): the
 /// array's address (`base`: an [`Addr::Indirect`] at offset 0, the unit's
@@ -3251,6 +3310,12 @@ struct SteppedArray {
     base: Addr,
     scale: u32,
     form: StepForm,
+    /// For an array of another unit's object ([`Addr::Symbol`]): what its
+    /// pointer's immediate adds to the symbol, 60000 for an array of an
+    /// overlay section of more than 0x8000 bytes at 0x7C00 or beyond
+    /// ([`Selector::symbol_bias`]); set by [`Selector::step_plan`], 0
+    /// until then.
+    bias: i32,
 }
 
 /// How a stepped pointer is formed (codegen-patterns 7.4, "Forming"; bead
@@ -3281,7 +3346,7 @@ impl SteppedArray {
     fn base_offset(&self) -> i32 {
         match &self.base {
             Addr::Static(o) | Addr::Frame(o) => *o,
-            Addr::Symbol { offset, .. } => *offset,
+            Addr::Symbol { offset, .. } => *offset - self.bias,
             _ => 0,
         }
     }
@@ -3441,6 +3506,7 @@ fn stepped_arrays(
             base: (**base).clone(),
             scale: *scale,
             form: StepForm::New,
+            bias: 0,
         };
         if !out.contains(&a) {
             out.push(a);
@@ -5313,6 +5379,8 @@ pub struct Selector {
     /// The label of the routine's data area, the block of its data
     /// section ([`crate::emit::data_base_label`]).
     data_label: String,
+    /// The unit's overlay sections, symbol and size ([`Self::symbol_bias`]).
+    overlays: Vec<(String, u32)>,
     /// The loops being selected, innermost last: the label `next` goes to
     /// (a `while`'s or `repeat`'s test, a `for`'s step) and the label
     /// `exit` goes to (after the loop), once made ([`Self::loop_target`]).
@@ -5533,6 +5601,7 @@ impl Selector {
     fn new(span: Span) -> Selector {
         Selector {
             data_label: DATA_BASE_LABEL.into(),
+            overlays: Vec::new(),
             out: Vec::new(),
             vregs: VRegs::new(),
             clobbered: RegSet::EMPTY,
@@ -6744,6 +6813,11 @@ impl Selector {
     ) -> Res<(Vec<SteppedArray>, Vec<Stmt>)> {
         let span = self.span;
         let off = l.index.offset;
+        for a in arrays.iter_mut() {
+            if let Addr::Symbol { name, offset } = &a.base {
+                a.bias = self.symbol_bias(name, *offset)?;
+            }
+        }
         let temps = stepped_with_temps(&l.body, &arrays, off, &f.with_temps);
         let body = with_rebase(&l.body, &arrays, &temps);
         let fits = |d: i64| (-128..128).contains(&d);
@@ -6911,7 +6985,7 @@ impl Selector {
         let src = match &a.base {
             Addr::Static(_) => Ea::Reg(Reg::A(self.static_base()?)),
             Addr::Frame(_) => Ea::Reg(Reg::A(FP)),
-            Addr::Symbol { name, .. } => Ea::ImmSym(name.clone()),
+            Addr::Symbol { name, .. } => Ea::ImmSym(biased_symbol(name, a.bias)),
             _ => unreachable!("step_plan forms only constant addresses in place"),
         };
         let k = from * a.scale as i64;
@@ -15830,6 +15904,25 @@ impl Selector {
                 (a, *o)
             }
             Addr::Symbol { name, offset: o } => {
+                if self.symbol_bias(name, *o)? != 0 {
+                    // Off the base 60000 bytes in, other than through a
+                    // `for` loop's stepped pointer ([`Self::step_in_place`]):
+                    // every such element of the image (81, from 82 bases)
+                    // is at a displacement beyond a byte, through `lea
+                    // (0,An,Dx),Am` into the base's register (48, ACL_$UP
+                    // 0xE47058 `lea (0,A0,D0.w),A0`) or another (33,
+                    // ACL_$IN_SUBSYS 0xE470B2 `lea (0,A0,D0.w),A1`, then
+                    // `(-15706,A1)`): not settled; within a byte, not seen.
+                    return Err(unsupported(
+                        self.span,
+                        "an element of an array of an overlay section of more than 0x8000 bytes \
+                         reached from its base 60000 bytes in, other than through a `for` loop's \
+                         stepped pointer (all the image's are beyond a byte, `lea (0,An,Dx),Am` \
+                         into the base's register or another, not settled: ACL_$IN_SUBSYS \
+                         0xE470B2, ACL_$UP 0xE47058; within a byte not seen; codegen-patterns \
+                         5.2; bead domain-pascal-1ibr, domain-pascal-lnzy) is",
+                    ));
+                }
                 self.split_disp(o + offset)?;
                 let (x, a) = self.other_unit_index(name, index, scale)?;
                 return self.element_ea(a, x, index, o + offset);
@@ -16008,6 +16101,59 @@ impl Selector {
         between(self)?;
         self.mul_const(d, scale as i64, w)?;
         Ok(d)
+    }
+
+    /// What the base register of an array at `offset` into another unit's
+    /// object `name` adds to the symbol: the register is loaded with
+    /// `movea.l #name+bias,An`, the displacements less `bias`
+    /// (codegen-patterns 5.2, "Overlay sections of more than 0x8000
+    /// bytes"; `tools/sectsurvey.py`'s companion counts in that entry).
+    ///
+    /// - Not an overlay section (a variable's own symbol, another data
+    ///   section's block): 0.
+    /// - An overlay section of more than 0x8000 bytes in the unit: for an
+    ///   array at its start, 0 (43 `movea.l #` loads of the start of
+    ///   ACL_$DATA or FILE_$LOT_DATA, each for its object at offset 0:
+    ///   ACL_$MIN_RIGHTS 0xE469B8 `movea.l #ACL_$DATA,A0; ...; lea
+    ///   (0x34,A0,D1.l),A0`, the image cache; FILE_$CHECK_PROT 0xE5D1C8
+    ///   `movea.l #FILE_$LOT_DATA,A1; ...; move.b (-2,A1,D0.l),D4`, the lock
+    ///   table from entry 1, 0xC400 bytes, beyond 0x8000 itself); for one at
+    ///   0x7C00 or beyond, 60000 (82 loads of `#SECTION+0xEA60`, none for
+    ///   an object below 0x7C00: ACL_$IN_SUBSYS 0xE470AA `movea.l
+    ///   #0xE97294,A0`, ACL_$DATA + 60000, then `(-15706,A1)` for the array
+    ///   at 0xAD08; ACL_$GET_SID 0xE74C38 for the one at 0x7C00, `(-28292,
+    ///   A1)`; FILE_$EXPORT_LK 0xE74200 `movea.l #FILE_$LOT_DATA+0xEA60,A1`
+    ///   for the one at 0x107F8).  Refused in between: no array lies there
+    ///   in either section, so where the image switches is not known.
+    /// - An overlay section of 0x8000 bytes or less: 0 below 0x7C00 (every
+    ///   load of such a section's base, codegen-patterns 11, "Overlay
+    ///   sections"); refused from 0x7C00 (not seen).
+    fn symbol_bias(&self, name: &str, offset: i32) -> Res<i32> {
+        let Some(&(_, size)) = self.overlays.iter().find(|(n, _)| n == name) else {
+            return Ok(0);
+        };
+        Ok(match (size > 0x8000, offset) {
+            (_, 0) => 0,
+            (true, 0x7C00..) => OVERLAY_BIAS,
+            (true, _) => {
+                return Err(unsupported(
+                    self.span,
+                    "an array between the start and offset 0x7C00 of an overlay section of more \
+                     than 0x8000 bytes (reached from the section's start at offset 0 and from \
+                     60000 bytes in at 0x7C00 and beyond, ACL_$DATA and FILE_$LOT_DATA: between, \
+                     not seen; codegen-patterns 5.2) is",
+                ))
+            }
+            (false, 0x7C00..) => {
+                return Err(unsupported(
+                    self.span,
+                    "an array at offset 0x7C00 or beyond of an overlay section of 0x8000 bytes or \
+                     less (from the section's start or 60000 bytes in: not seen, codegen-patterns \
+                     5.2) is",
+                ))
+            }
+            (false, _) => 0,
+        })
     }
 
     /// The scaled index and the base register of an element of another

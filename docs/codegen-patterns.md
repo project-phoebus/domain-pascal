@@ -3197,11 +3197,15 @@ model run against the bit model of Figure 3-6).
       #PROC1_$TYPE,A0; ...; cmpi.w #2,(-2,A0,D1.w)`, a 1-based word array;
       DISK_$REVALIDATE 0xE6C06A `movea.l #DISK_$DVTBL,A0`, `pea
       (-0x48,A0,D0.w)`, ×72 1-based).  The other 85 are the start of a
-      data section plus 60000 (`ACL_$DATA+0xEA60`, 66 sites, ACL_$IN_SUBSYS
+      data section plus 60000 (`ACL_$DATA+0xEA60`, ACL_$IN_SUBSYS
       0xE470AA `movea.l #0xE97294,A0` and `tst.w (-15706,A1)`, although
       ACL_$DATA is only 0xAD98 bytes; `FILE_$LOT_DATA+0xEA60` = 0xEA202C,
-      19 sites, a section of 0x1086C bytes): variables of those
-      sections, which have no map symbols of their own.  (An earlier
+      a section of 0x1086C bytes).  The tool counts indexed operands, 66
+      and 19; they come from 82 loads, 62 of `ACL_$DATA+0xEA60` and 20 of
+      `FILE_$LOT_DATA+0xEA60`, a load counted once per indexed operand it
+      feeds (the load survey below): variables of those
+      sections, which have no map symbols of their own (below, "Overlay
+      sections of more than 0x8000 bytes").  (An earlier
       version of this entry read 0xE4649C's immediate as 0xE2622C; it is
       0xE2612C, PROC1_$TYPE.)  `lea abs.l,An` occurs for the unit's own
       data addressed absolutely (AUDIT_$SUSPEND 0xE70DC0, 4 operands).
@@ -3402,6 +3406,85 @@ model run against the bit model of Figure 3-6).
     `data/other_unit_index`; conformance `acl_is_process_type_2.pas`
     (module-local 0xE46498, byte-identical); exec test
     `elem_bases`; test `dpc-m68k` `other_units_array_elements`.
+  - **Overlay sections of more than 0x8000 bytes (survey Verified for
+    the two sections; the switch point Uncertain; implemented, bead
+    domain-pascal-7pcf).**  The image has two: ACL_$DATA (0xE88834, size
+    0xAD98; ../source acl/acl.pas: the image cache at +0, 0x7C00 bytes,
+    then the per-process tables from +0x7C00 to +0xAD98) and
+    FILE_$LOT_DATA (0xE935CC, size 0x1086C; file/file_internal.h: the
+    lock table from entry 1 at +0, 1792 entries of 0x1C, then the
+    per-process table at +0xC400 and the counts at +0x107F8).  Survey
+    (ad hoc, not kept as a tool: every instruction of compiled code
+    reached from a routine's start, `tools/a5survey.py`'s split, with an
+    operand or immediate inside either section):
+    - *125 base loads, all `movea.l #imm,An`*: 43 of a section's start
+      (ACL_$DATA 13, FILE_$LOT_DATA 30) and 82 of the start plus 60000
+      (`#ACL_$DATA+0xEA60` = 0xE97294 62 times, an address past ACL_$DATA
+      inside FILE_$LOT_DATA; `#FILE_$LOT_DATA+0xEA60` = 0xEA202C 20
+      times).  No other bias, no `lea abs.l,An` base.
+    - *Which objects from which base.*  From the start only the object at
+      offset 0, both sections: the cache's elements at displacements
+      0x00..0x54 (ACL_$MIN_RIGHTS 0xE469B8 `movea.l #0xe88834,A0; ...;
+      lea (0x34,A0,D1.l),A0`), the lock table's at -0x1C..-1 (FILE_$CHECK_PROT
+      0xE5D1C8 `movea.l #0xe935cc,A1; ...; move.b (-2,A1,D0.l),D4`), the
+      lock table being 0xC400 bytes, beyond 0x8000 itself (its indices are
+      `.l`).  From +60000 every other array, ACL's from +0x7C00 (the lowest
+      displacement -28292: element 0 of the table at 0x7C00, 36-byte
+      elements from 1, ACL_$GET_SID 0xE74C4C `lea (0,A0,D0.w),A1`, then
+      `(-28292,A1)`; ACL_$IN_SUBSYS 0xE470AA `movea.l #0xe97294,A0; add.w
+      D0,D0; lea (0,A0,D0.w),A1; tst.w (-15706,A1)`, the table at
+      0xAD08) and FILE's at +0xC400 and +0x107F8 (FILE_$EXPORT_LK 0xE74200
+      `movea.l #0xea202c,A1`, `(7576,A0)`).  No base of either kind
+      reaches an object of the other range.  Neither section has an
+      object between offset 0 and 0x7C00, so where the compiler switches
+      (any offset above 0, or one that a 16-bit displacement from the
+      start would not reach, ...) is **not known**.  The offset that
+      counts is the variable's: every site's array is a whole variable
+      (or its first element, ACL_$INIT's `acl_$proj_uids[1][j]`).
+    - *Whole objects and fields: absolute*, at any offset, the one data
+      operand of the survey (FILE_$LOCK_INIT 0xE327AC `clr.w
+      (0xe9f9c4).l`, FILE_$LOT_DATA+0xC3F8, in the lock table's last
+      entry); by address the start `move.l #0xe88834,-(SP)` (ACL_$INIT
+      0xE310BA), `lea (0xe935cc).l,A0` (0xE310AA) and `sub.l #0xe88834,D0`
+      (0xE310B2), as for any other unit's object (1.5, 11).
+    - *The elements.*  81 of the 82 biased bases are first used by `lea
+      (0,An,Dx),Am`, the element then at `(d,Am)` (every displacement is
+      beyond a byte): into An itself 48 times (ACL_$UP 0xE47058 `lea
+      (0,A0,D0.w),A0`), into another 33 (ACL_$IN_SUBSYS 0xE470B2), the
+      open question of the rest of this entry (12.4 R2; bead
+      domain-pascal-1ibr).  The 82nd, FILE_$LOCK_INIT 0xE32752, copies its
+      base into two registers for nested loops (`movea.l A0,A1; movea.l
+      A0,A2`) and steps both copies in the outer loop
+      (0xE3275A..0xE32780: `clr.w (7576,A1)`, the counts at 0x107F8, then
+      `lea (300,A2),A2; addq.l #2,A1`; A2 the inner loop's base, `lea
+      (0,A2,D2.l),A0; clr.w (-9826,A0)`), a second stepped site.  ACL_$INIT holds the biased base in A2 from 0xE310CC across
+      a `for` loop with a call, two statements after it (`move.l
+      (A0)+,(-0x6e48,A2)`, `acl_$original_sids[1].login_sid`) and a second
+      loop that steps it (0xE3112A `addq.l #8,A2`, `(-0x4d60,A2)`).
+    **Implemented** (`isel.rs` `symbol_bias`, `index_ea`,
+    `step_plan`/`step_in_place`; `dpc-ir` lifts its refusal): in a unit
+    whose overlay section is more than 0x8000 bytes, an array at offset 0
+    is reached from `movea.l #SYM,An` as in any section; one at 0x7C00 or
+    beyond from `movea.l #SYM+60000,An` (the immediate a relocation of the
+    section's symbol with addend 60000, `207c 00e9 7294` at 0xE470AA),
+    every displacement less 60000; whole objects and addresses as before.
+    What compiles of the biased form: a `for` loop's pointer stepped in
+    place (`movea.l #SYM+60000,An; addq.l #k,An`, then `(d,An)`), dpc's
+    in-place rule for another unit's array (7.4) with the bias, a
+    combination no site shows alone (the two stepped sites, ACL_$INIT
+    0xE3112A and FILE_$LOCK_INIT 0xE3275A..0xE32780, step a held base or
+    a copy of it).  **Refused**: any element off the biased base outside
+    such a loop (all 81 of the image's are beyond a byte, the `lea`'s
+    register above; one within a byte is not seen); an array between offset 0 and 0x7C00 of
+    such a section; an array at 0x7C00 or beyond of a section of 0x8000
+    bytes or less (no such site; whether that one would be biased is not
+    known); an array that is a part of its variable (a field, an element
+    at a constant index other than the first) in such a section
+    (`dpc-ir`: the variable's offset and the array's could disagree); a
+    base held across statements (ACL_$INIT, bead domain-pascal-lnzy).
+    Golden `sections/large_overlays`; exec test `large_overlays` (the
+    biased and the absolute forms of one word in two units); tests
+    `dpc-m68k` `overlays`, `dpc-ir` `overlay_sections`.
   - **Bounds checks:** none in the image; the C of FIM_$FREE_ASID
     (`fim/free_asid.c`) notes "the original performs no bounds check".
     `dpc` emits none.
@@ -7771,7 +7854,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
       array at +0; PCHIST_$CNTL 0xE5CE46 `movea.l #0xe85718,A2` for the
       record at +0x50C, `(0x510,A2)`); the only loads of an address
       inside are the large sections' base 60000 bytes in (section 5.2,
-      "Another unit's array"), which the survey lists as 82 loads into
+      "Overlay sections of more than 0x8000 bytes", which `dpc` follows
+      since bead domain-pascal-7pcf), which the survey lists as 82 loads into
       FILE_$LOT_DATA: 20 of `FILE_$LOT_DATA+0xEA60` (FILE_, e.g.
       FILE_$LOCK_INIT 0xE32752) and 62 of `ACL_$DATA+0xEA60` (ACL_,
       e.g. ACL_$IN_SUBSYS 0xE470AA `movea.l #0xE97294,A0`), an address
@@ -7797,7 +7881,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     section's symbol, the name upper-cased (`dpc_ir::overlay_symbol`,
     PCHIST_UNWIRED_D), so the selector treats them as another unit's
     object: absolute operands, `movea.l #sym,An` bases with the offsets
-    in the displacement, `move.l #sym,-(SP)` for the start and `pea
+    in the displacement (`#sym+60000` for an array at 0x7C00 or beyond of
+    a section of more than 0x8000 bytes, section 5.2), `move.l #sym,-(SP)` for the start and `pea
     (sym+d).l` inside by address (section 1.5), `addr(x)` of one as an
     initial value `.long sym+d`.  The section itself is the object
     file's common block, `.comm SYM,size,4` (size rounded to 4), which
@@ -7816,9 +7901,7 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     `.data.overlay.<SYM>` at it (srcsurvey's `data_sections`).
     Refused: a `define`d variable in an overlay section (a `define` of
     an `extern` variable of a `var (name)` part allocates it there, ref
-    3.14 "will be stored in section_name"); a section of more than
-    0x8000 bytes (the 60000-byte base above, when it is used not known;
-    bead domain-pascal-7pcf); a name that is no assembler symbol
+    3.14 "will be stored in section_name"); a name that is no assembler symbol
     (letters, digits, `_`, `$`, not starting with a digit), names a
     routine or variable symbol of the unit, or is spelt two ways
     (`'SEC'` and `sec`; also a spelling of one of the unit's own data
