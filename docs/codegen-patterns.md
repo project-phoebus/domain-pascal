@@ -3152,6 +3152,7 @@ model run against the bit model of Figure 3-6).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `copy`): records and
     arrays that are not 1, 2 or 4 bytes, 10 bytes and more, with A0/A1
     (the lowest free); the addresses as below.  6 and 8 bytes: above.
+    Arrays of char: by bytes ("Arrays of char", below).
   - **Block addresses (survey Verified; implemented in part, bead
     domain-pascal-21xu).**  Ad-hoc survey (script not kept: every
     address register of a block copy of 8 bytes and more, `(Am)+,(An)+`
@@ -3205,13 +3206,8 @@ model run against the bit model of Figure 3-6).
     domain-pascal-76uw; acl_$convert_rights and cal_$write_timezone of
     ../source stub on it).  With `lea (d,An),Am`, the form before this
     entry, dpc is unchanged (it takes the dead register).
-    - *Arrays of char:* copied byte by byte, `moveq #n-1; move.b
-      (A1)+,(A2)+; dbf` (ACL_ 0xE45130, 24 chars, `lea (A0),A2` the
-      held destination; 0xE44F68; 50 `move.b` copy loops in compiled
-      code).  dpc copies them by longwords; refused at the forms of this
-      entry (another unit's object, a held or data-register pointer, a
-      stepped element pointer), unchanged at the others (`dpc-ir`
-      `StmtKind::Copy::chars`; bead domain-pascal-40r2).
+    - *Arrays of char:* the same addresses, then a byte copy ("Arrays
+      of char", below).
     **Implemented** (`isel.rs` `block_address`, for copies and record
     comparisons): the forms above.  **Refused** (bead domain-pascal-dsr5):
     another unit's object
@@ -3236,7 +3232,94 @@ model run against the bit model of Figure 3-6).
     5.2 above, bead domain-pascal-1ibr).  Golden `data/block_addresses`;
     conformance units `cal_get_info.pas`, `disk_get_error_info.pas`.
     Records and arrays of 1, 2 or 4 bytes are moved as scalars
-    (Uncertain: not catalogued).
+    (Uncertain: not catalogued), except arrays of char (below).
+  - **Arrays of char (survey Verified; implemented; bead
+    domain-pascal-40r2).**  Ad-hoc survey (script not kept: every
+    `move.<s> (Am)+,(An)+` of the compiled routines of `tools/regalloc.py
+    routines`, runs and `dbf` loops, with the count's load): 48 byte
+    `dbf` loops and 2 unrolled runs of four `move.b`, against 237
+    longword loops and 117 unrolled longword runs; no word loop.
+    - **The element type decides, not the size, the place or the
+      alignment of the address.**  The only copies whose types Apollo
+      declared (/sys/ins/cal.ins.pas of the SR10.2 install:
+      `cal_$tz_name_t = ARRAY [1..4] OF char`, `cal_$timezone_rec_t =
+      PACKED RECORD utc_delta: integer; tz_name: cal_$tz_name_t; drift:
+      [aligned(1)] time_$clock_t END`, `cal_$write_timezone(IN tz_rec:
+      cal_$timezone_rec_t ...)`, `cal_$get_info(OUT tz_rec:
+      cal_$timezone_rec_t)`): CAL_$WRITE_TIMEZONE copies the record by
+      longwords, `lea (A0),A1; lea (A5),A3; move.l (A1)+,(A3)+` ×3
+      (0xE3E626..0xE3E62E), and, in the same routine, the `tz_name`
+      array alone by bytes, `lea (2,A5),A0; lea (0xe2,A3),A1; move.b
+      (A0)+,(A1)+` ×4 (0xE3E68C..0xE3E69A); CAL_$READ_TIMEZONE the reverse
+      (0xE3E592..0xE3E5A0); CAL_$GET_INFO the record by longwords
+      (0xE68576).  A record holding an array of char is a record.
+      Both byte copies are 4 bytes at even addresses, where one `move.l`
+      would do.  Every byte loop is of an even size at even addresses
+      too (below), so parity is not what decides.  The reference draws
+      the same line in its storage model: ref 3.11.4.2 Table 3-5 (p.
+      3-47; read in the PDF, the OCR scrambles it) gives "Character
+      array: exact number of bytes required; byte aligned", where
+      "Record" and "Array of non-characters" take an "exact number of
+      words required; word aligned" (the table is for packed arrays'
+      elements; it supports the rule, it does not state it).
+    - **Sizes and counts** (the loops' constant `moveq`, bytes): 8 ×1
+      (PROC1_$BIND 0xE14DB6 `moveq #7,D3`, from a code cell: a constant
+      of a byte type, its construct not known), 10 ×1 (0xE40C0C), 12 ×9
+      (DBUF_$GET_BLOCK 0xE3A6E6), 16 ×10 (PKT_$BLD_INTERNET_HDR 0xE12250),
+      24 ×9 (ACL_ 0xE45132, XNS_IDP_$SEND 0xE18B04), 26 ×2 (0xE6045C),
+      28 ×1 (0xE5D934), 32 ×13 (REM_NAME_ 0xE4A630), 48 ×1 (ACL_$SERVER
+      0xE497E6), and one run-time count (DIR_ 0xE51AD0 `move.w D3,D0;
+      subq.w #1,D0; bmi`, a length, its construct not known).  4 bytes:
+      unrolled (the two CAL sites).  No byte copy of 1 to 3 or 5 to 7
+      bytes, none of more than 48, none of an odd size.
+    - **The loop** is a longword copy's (above): the count `moveq #n-1`
+      after both addresses (44 of the 47 constant counts; the other 3 load
+      it before the `lea` of an address off a pointer just moved from a
+      data register: `moveq` at 0xE03DB4, 0xE55A1C, 0xE55AA6), its
+      register spread as the longword loops' (D0 24, D1 15, D2-D6 9;
+      longword loops D0 111, D1 74, D2-D7 52; dpc takes the lowest free,
+      as for longwords), the head aligned in aligning code (13 fillers,
+      0xE12252; codegen-patterns 7).
+    - **Which objects** a byte loop copies, where ../source's C names
+      them: names and strings (REM_NAME_ 0xE4A634, PROC2_ 0xE40B30 a
+      process name, 32 bytes), and objects the C holds as UIDs or
+      records: ACL_ 0xE44F68 three UIDs, PROC2_ 0xE40C10 a UID and a word
+      (10 bytes), DBUF_ 0xE3A6E6 a UID and a hint, where another DBUF path
+      copies the UID by longwords and the hint from a register (0xE3A772
+      `lea (A2),A0; move.l (A0)+,(24,A4); move.l (A0)+,(28,A4)`), XNS_IDP_ 24 bytes that other routines
+      copy as two 12-byte records by longwords.  ../source reads these as
+      arrays of char (dbuf/dbuf.ins.pas, acl/acl.ins.pas,
+      xns/xns.ins.pas); that a record view of the same bytes copies by
+      longwords fits the rule, but the original's types there are not
+      known.
+    - **Not settled** (no copy with a known type): arrays of other
+      one-byte elements (boolean, a `[byte]` subrange, a char subrange),
+      packed arrays of char, arrays of arrays of char, records with an
+      `aligned(0)` attribute; char arrays of 1 to 3 and 5 to 7 bytes, of
+      an odd size, and of more than 48 bytes (a size threshold for
+      another form above 48 cannot be ruled out: the fill of NAME_$INIT
+      below, 256 bytes, is by longwords); the callee's copy of an array of char passed by value (no
+      byte loop of compiled code is an entry copy).  A string constant
+      assigned to an array of char is a fill by longwords, `move.l
+      #'/com',(A0)+` then spaces in a longword `dbf` loop (NAME_$INIT
+      0xE3173A..0xE3174A), not a copy (not implemented).  Bead
+      domain-pascal-4lf1.
+    **Implemented** (`dpc-ir` `lower.rs` `byte_copy`, `copy`;
+    `StmtKind::Copy::chars`; `isel.rs` `copy_chars`): an assignment of an
+    unpacked one-dimensional array of `char` from a variable, at every
+    block address form (`block_address`), of 4 bytes (four `move.b`, also
+    for 4 bytes, which were one `move.l` before) and of an even size
+    from 8 to 48 bytes (the `dbf` loop; Verified: the sizes seen, 8, 10,
+    12, 16, 24, 26, 28, 32, 48, sample that range densely), at any
+    address parity.  Other sizes are refused (bead domain-pascal-4lf1).  Before this, dpc copied such arrays by
+    longwords (and refused them at the forms of bead domain-pascal-21xu);
+    no golden, conformance or exec test had one, and no routine that
+    srcsurvey found OK.  Refused with their own messages: the kinds not
+    settled above (the assignment, and a by-address value parameter of
+    such a type, whose entry copy was a `move.l` copy before).  Golden
+    `data/char_copies`; conformance unit `acl_pci_copy_entry.pas` (the
+    nested routine 0xE45122, byte-identical); `crates/dpc-m68k/tests/
+    blocks.rs`.
 - **1-based arrays (Verified):** the compiler folds the `-1` into the
   displacement, `(-2,A0,Dn.w)` (AUDIT_$SUSPEND 0xE70DC8;
   AUDIT_$IS_PROCESS_AUDITED 0xE70DA8 `tst.w (-2,A5,D0.w)`) or the `lea

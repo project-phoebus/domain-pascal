@@ -151,13 +151,14 @@ begin
 end;",
             "an empty procedure with a value parameter passed by address",
         ),
-        // A size whose copy is not catalogued.
+        // An array of char: no entry copy of one in the image
+        // (codegen-patterns 5.2, "Arrays of char"; beads domain-pascal-40r2, -4lf1).
         (
             "procedure t(s: str3);
 begin
   ext_$w(ord(s[1]));
 end;",
-            "a 3-byte value parameter passed by address",
+            "copying a value parameter that is an array of char",
         ),
         // A block copy after a copy that left its register: only A0 to
         // A1 is seen (XPD_$SET_PTRACE_OPTS 0xE5AFB0).

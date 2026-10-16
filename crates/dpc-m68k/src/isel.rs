@@ -7829,7 +7829,7 @@ impl Selector {
                 ))
             }
         };
-        let (dst, src, _) = self.block_addresses(lhs, rhs)?;
+        let (dst, src) = self.block_addresses(lhs, rhs)?;
         let count = self.alloc_d()?;
         self.out.push(Insn::Moveq {
             value: (n - 1) as i8,
@@ -8821,12 +8821,12 @@ impl Selector {
     /// Address registers: source first, then destination, each the lowest
     /// free (A0, A1 at 0xE14BC6..0xE14BC8; codegen-patterns 12.4 R1).
     ///
-    /// An array of `char` (`chars`) is copied byte by byte in the image
-    /// (ACL_ 0xE45130 `lea (A0),A2; moveq #23,D0; move.b (A1)+,(A2)+;
-    /// dbf`, 24 chars; 50 `move.b` copy loops in compiled code; bead
-    /// domain-pascal-40r2): refused at the addresses of bead
-    /// domain-pascal-21xu, copied by longwords as before at the others.
+    /// An array of `char` (`chars`) is copied byte by byte:
+    /// [`Self::copy_chars`].
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
+        if chars {
+            return self.copy_chars(dst, src, bytes);
+        }
         match bytes {
             6 => return self.copy6(dst, src),
             8 => return self.copy8(dst, src),
@@ -8842,15 +8842,7 @@ impl Selector {
         if longs - 1 > 0x7fff {
             return Err(unsupported(self.span, "a block copy this large is"));
         }
-        let (from, to, new) = self.block_addresses(src, dst)?;
-        if chars && new {
-            return Err(unsupported(
-                self.span,
-                "a copy of an array of char at this kind of address (the original copies it byte \
-                 by byte, `moveq #n-1; move.b (A1)+,(A2)+; dbf`, ACL_ 0xE45130; bead \
-                 domain-pascal-40r2) is",
-            ));
-        }
+        let (from, to) = self.block_addresses(src, dst)?;
         let mv = |size| Insn::Move {
             size,
             src: Ea::PostInc(from),
@@ -8894,6 +8886,81 @@ impl Selector {
             // (codegen-patterns 12.4 R10: 0xE04ADA..0xE04AE2).
             self.units.push((start, self.out.len()));
         }
+        Ok(())
+    }
+
+    /// `d := s` for an unpacked one-dimensional array of `char`
+    /// (codegen-patterns 5.2, "Arrays of char"; bead domain-pascal-40r2).
+    ///
+    /// Survey (every `move.<s> (Am)+,(An)+` of compiled code): 48 byte
+    /// `dbf` loops and 2 runs of four `move.b`, against 237 longword loops
+    /// and 117 unrolled longword runs, and no word loop.  The element type
+    /// decides, not the size or the place: CAL_$WRITE_TIMEZONE copies its
+    /// `cal_$timezone_rec_t` (a packed record with a `cal_$tz_name_t`
+    /// field, Apollo's /sys/ins/cal.ins.pas) by longwords, `lea (A0),A1;
+    /// lea (A5),A3; move.l (A1)+,(A3)+` ×3 (0xE3E626..0xE3E62E), and the
+    /// `cal_$tz_name_t` (`array [1..4] of char`) by bytes, `lea (2,A5),A0;
+    /// lea (0xe2,A3),A1; move.b (A0)+,(A1)+` ×4 (0xE3E68C..0xE3E69A;
+    /// CAL_$READ_TIMEZONE 0xE3E592 the reverse).  The addresses are a
+    /// block copy's ([`Self::block_addresses`]: ACL_ 0xE45130 `lea
+    /// (A0),A2` a held pointer; PKT_$BLD_INTERNET_HDR 0xE12248 `lea
+    /// (0xe,A3),A0; lea (0x4c,A2),A1`), then:
+    ///
+    /// - 4 bytes: four `move.b`, unrolled (the two sites above);
+    /// - 8 to 48 bytes, even: `moveq #n-1,Dk; move.b (Am)+,(An)+; dbf`, the
+    ///   count after both addresses as for longwords (ACL_ 0xE45134
+    ///   `moveq #23,D0`; counts seen 7, 9, 11, 15, 23, 25, 27, 31, 47:
+    ///   8 bytes PROC1_$BIND 0xE14DB6 `moveq #7,D3`, from a code cell; 10
+    ///   bytes 0xE40C0C `moveq #9,D4`), the loop head aligned as any
+    ///   (codegen-patterns 7; 0xE12252 `movea.l A0,A0`).
+    ///
+    /// Refused, not seen: 1, 2, 3 and 5 to 7 bytes (where the unrolled
+    /// form ends is not known), odd sizes (no byte copy has one), more
+    /// than 48 (none seen; a size threshold for another form cannot be
+    /// ruled out: NAME_$INIT 0xE3173A..0xE3174A fills a 256-byte array of
+    /// char by longwords from a string constant).
+    fn copy_chars(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
+        if bytes != 4 && !((8..=48).contains(&bytes) && bytes % 2 == 0) {
+            return Err(unsupported(
+                self.span,
+                format!(
+                    "a copy of an array of {bytes} char (the original copies 4 characters with \
+                     four `move.b` and an even number from 8 to 48 with a `move.b` `dbf` loop; \
+                     other sizes not seen, codegen-patterns 5.2 \"Arrays of char\", bead \
+                     domain-pascal-4lf1) is"
+                ),
+            ));
+        }
+        let (from, to) = self.block_addresses(src, dst)?;
+        let mv = Insn::Move {
+            size: Size::B,
+            src: Ea::PostInc(from),
+            dst: Ea::PostInc(to),
+        };
+        if bytes == 4 {
+            let start = self.out.len();
+            for _ in 0..4 {
+                self.out.push(mv.clone());
+            }
+            // Never interleaved with other code, as an unrolled longword
+            // copy (CAL_$WRITE_TIMEZONE 0xE3E694..0xE3E69A).
+            self.units.push((start, self.out.len()));
+            return Ok(());
+        }
+        let count = self.alloc_d()?;
+        self.out.push(Insn::Moveq {
+            value: (bytes - 1) as i8,
+            dst: count,
+        });
+        let head = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        self.out.push(mv);
+        self.out.push(Insn::Dbf {
+            reg: count,
+            label: head,
+            until: None,
+        });
         Ok(())
     }
 
@@ -9312,16 +9379,15 @@ impl Selector {
     /// `lea (An),Am` of a held pointer, the pair is recorded so that a
     /// second address coloured into that dead pointer's register is
     /// refused after allocation ([`Selector::held_firsts`]; bead
-    /// domain-pascal-76uw).  Gives the registers and whether either
-    /// address is of a form added by bead domain-pascal-21xu.
-    fn block_addresses(&mut self, first: &Addr, second: &Addr) -> Res<(u8, u8, bool)> {
+    /// domain-pascal-76uw).  Gives the two registers.
+    fn block_addresses(&mut self, first: &Addr, second: &Addr) -> Res<(u8, u8)> {
         let (a, fa) = self.block_address(first)?;
         let lea = self.out.len() - 1;
-        let (b, fb) = self.block_address(second)?;
+        let (b, _) = self.block_address(second)?;
         if fa == BlockForm::HeldInd {
             self.held_firsts.push((lea, self.out.len() - 1, self.span));
         }
-        Ok((a, b, fa != BlockForm::Known || fb != BlockForm::Known))
+        Ok((a, b))
     }
 
     /// `d := e`: one move into the destination's effective address.

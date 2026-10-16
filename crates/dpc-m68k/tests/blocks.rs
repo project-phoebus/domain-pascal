@@ -33,6 +33,7 @@ type
 var
   mine: rec12;
   name: chars24;
+  tz: array[1..4] of char;
   other_name: extern chars24;
 ";
 
@@ -61,21 +62,58 @@ end;
     assert!(e.contains("domain-pascal-76uw"), "{e}");
 }
 
-/// Arrays of char at the addresses of bead 21xu are refused (the image
-/// copies them by bytes, ACL_ 0xE45130; bead domain-pascal-40r2); at the
-/// addresses copied before (the data area, a pointer slot) they are
-/// copied by longwords as before.
+/// Arrays of char are copied byte by byte at every address (the image:
+/// ACL_ 0xE45130 `lea (A0),A2; moveq #23,D0; move.b (A1)+,(A2)+; dbf`, a
+/// held pointer; CAL_$WRITE_TIMEZONE 0xE3E694 four `move.b` for a 4-byte
+/// `cal_$tz_name_t`; codegen-patterns 5.2 "Arrays of char", bead
+/// domain-pascal-40r2), a record holding one by longwords (0xE3E62A).
 #[test]
 fn char_arrays() {
-    let e = error(
+    let loop24 = |from: &str, to: &str, l: u32| {
+        vec![
+            "moveq\t#0x17,%d0".to_string(),
+            ".balignw\t4,0x2048".to_string(),
+            format!("{l}:"),
+            format!("move.b\t({from})+,({to})+"),
+            format!("dbf\t%d0,{l}b"),
+        ]
+    };
+    let body = |src: &str| -> Vec<String> {
+        let lines = compile(&format!("{DECLS}{src}")).unwrap();
+        let k = lines.iter().position(|l| l.starts_with("link.w")).unwrap();
+        lines[k + 1..].to_vec()
+    };
+    // Another unit's object, then the pointer slot (refused before).
+    let b = body(
         "procedure t(out c: chars24);
 begin
   c := other_name;
 end;
 ",
     );
-    assert!(e.contains("domain-pascal-40r2"), "{e}");
-    let e = error(
+    assert_eq!(
+        b[..2],
+        ["movea.l\t#OTHER_NAME,%a0", "movea.l\t(8,%fp),%a1"],
+        "{b:?}"
+    );
+    assert_eq!(b[2..7], loop24("%a0", "%a1", 1)[..], "{b:?}");
+    // The data area (copied by longwords before).
+    let b = body(
+        "procedure t(out c: chars24);
+begin
+  c := name;
+end;
+",
+    );
+    assert_eq!(
+        b[2..4],
+        ["lea\t(0xc,%a5),%a0", "movea.l\t(8,%fp),%a1"],
+        "{b:?}"
+    );
+    assert_eq!(b[4..9], loop24("%a0", "%a1", 1)[..], "{b:?}");
+    // A held pointer: `lea (A0),A2`, the destination past the dead A0
+    // (ACL_ 0xE45130; refused before).
+    let b = body(
         "procedure t(in c: chars24; out n: integer);
 begin
   n := 0;
@@ -87,17 +125,99 @@ begin
 end;
 ",
     );
-    assert!(e.contains("domain-pascal-40r2"), "{e}");
-    let lines = compile(&format!(
-        "{DECLS}procedure t(out c: chars24);
+    let k = b
+        .iter()
+        .position(|l| l == "lea\t(%a0),%a2")
+        .expect("lea (A0),A2");
+    assert_eq!(b[k + 1], "lea\t(0xc,%a5),%a3", "{b:?}");
+    assert_eq!(b[k + 2..k + 7], loop24("%a2", "%a3", 2)[..], "{b:?}");
+    // 4 bytes: four `move.b`, not one `move.l` (CAL_$READ_TIMEZONE
+    // 0xE3E592..0xE3E5A0); the record holding them by longwords
+    // (CAL_$WRITE_TIMEZONE 0xE3E626..0xE3E62E).
+    let b = body(
+        "procedure t(out n: integer);
+var l: rec12;
 begin
-  c := name;
+  l := mine;
+  tz := l.b;
+  n := l.a;
+end;
+",
+    );
+    assert_eq!(
+        b[2..7],
+        [
+            "lea\t(%a5),%a0",
+            "lea\t(-0xc,%fp),%a1",
+            "move.l\t(%a0)+,(%a1)+",
+            "move.l\t(%a0)+,(%a1)+",
+            "move.l\t(%a0)+,(%a1)+",
+        ],
+        "{b:?}"
+    );
+    assert_eq!(
+        b[7..13],
+        [
+            "lea\t(-0xa,%fp),%a0",
+            "lea\t(0x24,%a5),%a1",
+            "move.b\t(%a0)+,(%a1)+",
+            "move.b\t(%a0)+,(%a1)+",
+            "move.b\t(%a0)+,(%a1)+",
+            "move.b\t(%a0)+,(%a1)+",
+        ],
+        "{b:?}"
+    );
+}
+
+/// Char-array copies the image does not show, and arrays of other
+/// one-byte elements, are refused (bead domain-pascal-4lf1).
+#[test]
+fn unsettled_byte_copies() {
+    let cases = [
+        ("c6 := c6b;", "an array of 6 char"),
+        ("c2 := c2b;", "an array of 2 char"),
+        ("c9 := c9b;", "an array of 9 char"),
+        ("c50 := c50b;", "an array of 50 char"),
+        ("c200 := c200b;", "an array of 200 char"),
+        (
+            "bools := bools2;",
+            "an array of one-byte elements other than char",
+        ),
+        (
+            "bytes := bytes2;",
+            "an array of one-byte elements other than char",
+        ),
+        ("pk := pk2;", "a packed array of char"),
+        ("two := two2;", "an array of arrays of char"),
+        ("sub := sub2;", "an array of a subrange of char"),
+    ];
+    for (stmt, want) in cases {
+        let e = compile(&format!(
+            "module m;
+type
+  byte_t = [byte] 0..255;
+var
+  c6, c6b: array[1..6] of char;
+  c2, c2b: array[1..2] of char;
+  c200, c200b: array[1..200] of char;
+  c9, c9b: array[1..9] of char;
+  c50, c50b: array[1..50] of char;
+  bools, bools2: array[1..10] of boolean;
+  bytes, bytes2: array[1..4] of byte_t;
+  pk, pk2: packed array[1..16] of char;
+  two, two2: array[1..2] of array[1..8] of char;
+  sub, sub2: array[1..16] of 'a'..'z';
+procedure t;
+begin
+  {stmt}
 end;
 "
-    ))
-    .unwrap();
-    assert!(
-        lines.contains(&"move.l\t(%a0)+,(%a1)+".to_string()),
-        "{lines:?}"
-    );
+        ))
+        .expect_err("refused")
+        .join("\n");
+        assert!(
+            e.contains(want) && e.contains("domain-pascal-4lf1"),
+            "{stmt}: {e}"
+        );
+    }
 }

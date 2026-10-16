@@ -542,13 +542,16 @@ pub enum StmtKind {
         value: bool,
     },
     /// Copy `bytes` bytes from the object at `src` to the object at `dst`:
-    /// `d := s` for a record or array that is not scalar-sized (ref
-    /// "Assignment", p. 4-25).  The objects do not overlap partially (two
-    /// designators of the same type are the same object or disjoint).
-    /// `chars`: the object is an array of `char` (of any dimensions),
-    /// which the original copies byte by byte (codegen-patterns 5.2,
-    /// "Block addresses"; ACL_ 0xE45130 `moveq #23; move.b (A1)+,(A2)+;
-    /// dbf`; bead domain-pascal-40r2).
+    /// `d := s` for a record or array that is not scalar-sized, or for an
+    /// array of char of any size (ref "Assignment", p. 4-25).  The objects
+    /// do not overlap partially (two designators of the same type are the
+    /// same object or disjoint).  `chars`: the object is an unpacked
+    /// one-dimensional array of `char`, which the original copies byte by
+    /// byte, at any address, where it copies a record by longwords
+    /// (codegen-patterns 5.2, "Arrays of char": CAL_$WRITE_TIMEZONE
+    /// 0xE3E694 four `move.b (A0)+,(A1)+`, 0xE3E62A three `move.l
+    /// (A1)+,(A3)+` for the record holding it; ACL_ 0xE45134 `moveq #23;
+    /// move.b (A1)+,(A2)+; dbf`; bead domain-pascal-40r2).
     Copy {
         dst: Addr,
         src: Addr,

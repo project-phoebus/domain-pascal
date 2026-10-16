@@ -141,6 +141,11 @@ Tests:
   (An),Am` (0xE588D8, 0xE3DBBE), in a data register, `movea.l Dn,An`
   (TIME_$Q_SCAN_QUEUE 0xE16EBC); a loop's stepped element pointer, `lea
   (-0x48,An),Am` (DISK_$LVUID_TO_VOLX 0xE6D182).
+- `data/char_copies` - codegen-patterns 5.2 "Arrays of char": an array
+  of char copied byte by byte, 4 bytes as four `move.b (A0)+,(A1)+`
+  (CAL_$READ_TIMEZONE 0xE3E592), 8 bytes and more as a `moveq #n-1;
+  move.b; dbf` loop (ACL_ 0xE45130, PROC1_$BIND 0xE14DB6, 0xE40C0C), a
+  record holding one by longwords (CAL_$WRITE_TIMEZONE 0xE3E626).
 - `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
   address as cells after the routine that first uses them, `pea (d,PC)`,
   `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING

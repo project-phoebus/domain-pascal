@@ -255,6 +255,9 @@ tests/conformance/cal_set_drift.pas          CAL_$SET_DRIFT
 # (codegen-patterns 5.2, "Block addresses"; bead domain-pascal-21xu).
 tests/conformance/cal_get_info.pas           CAL_$GET_INFO
 tests/conformance/disk_get_error_info.pas    DISK_$GET_ERROR_INFO
+# An array of char copied byte by byte, `moveq #23; move.b (A1)+,(A2)+;
+# dbf' (codegen-patterns 5.2, "Arrays of char"; bead domain-pascal-40r2).
+tests/conformance/acl_pci_copy_entry.pas     0xE45122:32  enclosing=PRIM_CREATE_INTERNAL
 # `addr' of a parameter passed by address stored from the register that
 # holds its slot (codegen-patterns 5.2; bead domain-pascal-mbtx).
 tests/conformance/ec_init.pas                EC_$INIT

@@ -2025,6 +2025,19 @@ fn param_copies(p: &Program, r: &Routine) -> Res<Vec<ParamCopy>> {
                  3.15.6.6) is",
             ));
         }
+        // No byte copy of compiled code copies a parameter's argument to
+        // the frame at entry (of the 50 `move.b (Am)+,(An)+` copies of
+        // codegen-patterns 5.2, "Arrays of char", the one at a routine's
+        // start, ACL_ 0xE45134, copies into an `out` parameter), so the
+        // callee's copy of an array of char is not seen.
+        if byte_copy(p, prm.ty) != ByteCopy::No {
+            return Err(unsupported(
+                p.var(prm.var).span,
+                "copying a value parameter that is an array of char or of one-byte elements (the \
+                 original's entry copy of one is not seen: codegen-patterns 5.2 \"Arrays of \
+                 char\", bead domain-pascal-4lf1) is",
+            ));
+        }
         out.push(ParamCopy {
             slot: prm.slot_offset,
             copy,
@@ -2796,7 +2809,9 @@ impl Cx<'_> {
                         "assignment to an enclosing function's result is",
                     ));
                 }
-                SStmtKind::Assign { target, value } if is_block(p, target) => {
+                SStmtKind::Assign { target, value }
+                    if is_block(p, target) || byte_array_copy(p, target, value) =>
+                {
                     out.push(copy(p, s, target, value)?)
                 }
                 SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
@@ -4118,6 +4133,16 @@ fn is_block(p: &Program, target: &SExpr) -> bool {
     ) && Width::of_size(p.types.size(target.ty)).is_none()
 }
 
+/// Whether `d := s` copies an array of one-byte elements from a variable
+/// as a block copy ([`copy`], [`byte_copy`]) whatever its size, where the
+/// caller's [`is_block`] would make one of 1, 2 or 4 bytes a single move:
+/// the image copies a 4-byte `cal_$tz_name_t` with four `move.b
+/// (A0)+,(A1)+` (CAL_$READ_TIMEZONE 0xE3E592..0xE3E5A0,
+/// CAL_$WRITE_TIMEZONE 0xE3E68C..0xE3E69A), not one `move.l`.
+fn byte_array_copy(p: &Program, target: &SExpr, value: &SExpr) -> bool {
+    byte_copy(p, target.ty) != ByteCopy::No && value.is_designator() && value.value.is_none()
+}
+
 /// `d := s` for a record or array `d` that is not scalar-sized (ref
 /// "Assignment", p. 4-25): a block copy of the type's size.  The value
 /// must be a designator; how the original assigned a constant or a
@@ -4150,29 +4175,83 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             "assigning a record or array with volatile or device parts (ref 3.15.1-3.15.3) is",
         ));
     }
+    let chars = match (byte_copy(p, target.ty), byte_copy(p, value.ty)) {
+        (ByteCopy::Chars, ByteCopy::Chars) => true,
+        (ByteCopy::Unsettled(what), _) | (_, ByteCopy::Unsettled(what)) => {
+            return Err(unsupported(
+                s.span,
+                format!(
+                    "assigning {what} (the original copies an array of char byte by byte, a \
+                     record by longwords; how it copies this is not seen, codegen-patterns 5.2 \
+                     \"Arrays of char\", bead domain-pascal-4lf1) is"
+                ),
+            ))
+        }
+        (ByteCopy::Chars, ByteCopy::No) | (ByteCopy::No, ByteCopy::Chars) => {
+            return Err(unsupported(
+                s.span,
+                "assigning between an array of char and a record or array of another kind (which \
+                 copy the original makes, by bytes or by longwords, is not seen; bead \
+                 domain-pascal-4lf1) is",
+            ))
+        }
+        (ByteCopy::No, ByteCopy::No) => false,
+    };
     // A byte-aligned array may lie at an odd address; the block copy
-    // moves words and longwords.
-    check_even(p, target)?;
-    check_even(p, value)?;
+    // moves words and longwords.  An array of char is moved byte by byte.
+    if !chars {
+        check_even(p, target)?;
+        check_even(p, value)?;
+    }
     Ok(Stmt {
         kind: StmtKind::Copy {
             dst: addr_of(p, target)?,
             src: addr_of(p, value)?,
             bytes,
-            chars: char_array(p, target.ty),
+            chars,
         },
         span: s.span,
     })
 }
 
-/// Whether `ty` is an array of `char`, of one dimension or more
-/// ([`StmtKind::Copy`]'s `chars`).
-fn char_array(p: &Program, ty: TypeId) -> bool {
-    match p.types.kind(ty) {
-        TypeKind::Array { elem, .. } => {
-            matches!(p.types.kind(*elem), TypeKind::Char) || char_array(p, *elem)
+/// How the original copies an object of a type, as far as its element
+/// type decides ([`byte_copy`]; codegen-patterns 5.2, "Arrays of char").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ByteCopy {
+    /// Not an array of one-byte elements: a record (whatever its fields:
+    /// CAL_$WRITE_TIMEZONE 0xE3E626 copies a `cal_$timezone_rec_t`, a
+    /// packed record with a `cal_$tz_name_t` field, by longwords) or an
+    /// array of larger elements.
+    No,
+    /// An unpacked array of `char`, one dimension: copied byte by byte
+    /// ([`StmtKind::Copy`]'s `chars`; CAL_$WRITE_TIMEZONE 0xE3E694 four
+    /// `move.b (A0)+,(A1)+` for a `cal_$tz_name_t`, Apollo's
+    /// /sys/ins/cal.ins.pas `array [1..4] of char`).
+    Chars,
+    /// An array whose copy is not seen: what it is.
+    Unsettled(&'static str),
+}
+
+/// [`ByteCopy`] of type `ty`.  The kinds with one-byte elements other
+/// than an unpacked array of `char` are not seen in the image with a
+/// known type (no Apollo interface declares one that a kernel routine
+/// copies), so how the original copies them, by bytes as for char or by
+/// longwords as for a record, is not settled.
+fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
+    let TypeKind::Array { elem, packed, .. } = p.types.kind(ty) else {
+        return ByteCopy::No;
+    };
+    match p.types.kind(*elem) {
+        TypeKind::Char if *packed => ByteCopy::Unsettled("a packed array of char"),
+        TypeKind::Char => ByteCopy::Chars,
+        _ if p.types.is_char(*elem) => ByteCopy::Unsettled("an array of a subrange of char"),
+        TypeKind::Array { .. } if byte_copy(p, *elem) != ByteCopy::No => {
+            ByteCopy::Unsettled("an array of arrays of char or of one-byte elements")
         }
-        _ => false,
+        _ if p.types.size(*elem) == 1 => ByteCopy::Unsettled(
+            "an array of one-byte elements other than char (boolean, a `[byte]` subrange)",
+        ),
+        _ => ByteCopy::No,
     }
 }
 
