@@ -98,9 +98,17 @@ fn golden() {
             std::fs::write(&expected_path, &got).unwrap();
             continue;
         }
-        let want = std::fs::read_to_string(&expected_path)
-            .map(|s| normalise(&s))
+        let stored = std::fs::read_to_string(&expected_path)
             .unwrap_or_else(|e| format!("<cannot read {}: {e}>", expected_path.display()));
+        let want = normalise(&stored);
+        // Expected files are kept normalised, as `DPC_BLESS` writes them,
+        // so that blessing never rewrites an unchanged test.
+        if stored != want {
+            failures.push(format!(
+                "{name}: {} is not normalised (re-bless it with DPC_BLESS=1)",
+                expected_path.display()
+            ));
+        }
         if got != want {
             failures.push(format!("{name}:\n--- expected\n{want}--- got\n{got}"));
         }
