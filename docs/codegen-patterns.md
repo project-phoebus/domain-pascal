@@ -3592,22 +3592,141 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     add.w D1,D1`) and when it was loaded at entry (FIM_$FREE_ASID
     0xE0AA8A `move.w D2,D0; lsl.w #2,D0`).  With element size 1 the index
     register is used as it is.
-  - **Uncertain: `.w` or `.l`.**  Word indices appear as `.w`
-    (all the sites above) and as `.l` after `ext.l` (0xE01D10..0xE01D16
-    `move.w D4,D2; ext.l D2; lsl.l #3,D2; move.l (-56,A6,D2.l),-(SP)`;
-    0xE074E8..0xE074EE; about 177 `ext.l` followed within three
-    instructions by a `.l` index), both on small arrays.  In every `.l` case seen the
-    index is a value held in a register (a register variable); in every
-    `.w` case it was read from memory or is a parameter.  `dpc` holds
-    few local variables in registers (section 12.5) and none as an index
-    so far, so it uses `.w` for word indices and
-    `.l` for longword ones; the rule is not confirmed.  A `.w` index is
-    sign-extended by the 68000, and a word index is scaled at the word's
-    width, so `dpc` takes a word index only when every index × element
-    size of the array's bounds fits in -32768..32767 (an element of a
-    `0..65535`-indexed array of 40001 chars, or of an `array[0..20000] of
-    integer`, would be addressed wrongly); other word indices are
-    rejected (review of bead domain-pascal-5aw.13).
+  - **Word indices used as `.l` (survey Verified for the forms and for
+    "per index, not per array"; the deciding rule partly settled;
+    implemented where the array does not fit, bead domain-pascal-wkg).**
+    `tools/arithsurvey.py wordidx` (`wordidxs` for the sites): every
+    indexed operand `(d,An,Dx)` of compiled code (An not PC) whose index
+    register was formed in its block from a word value (a `move.w` load
+    or copy, through copies; a `clr.l` of the register before it within
+    eight instructions counted as a zero-extension), 1909:
+
+    | Index | How the word becomes the index | Sites |
+    |---|---|---|
+    | `.w` | shifts and adds at a word's width (103 unscaled) | 1094 |
+    | `.w` | `mulu.w` | 93 |
+    | `.w` | a computed word (`addq.w`, `sub.w <mem>`, a mask, `lsr.w`) | 39 |
+    | `.l` | zero-extended, `clr.l Dn; move.w x,Dn` or `andi.l #0xffff`, then shifts at a longword's width (33 unscaled) | 271 |
+    | `.l` | `ext.l`, then shifts at a longword's width (none unscaled) | 240 |
+    | `.l` | `muls.w`, the 32-bit product | 122 |
+    | `.l` | `mulu.w`, the 32-bit product | 47 |
+    | `.l` | not classified (the `clr.l` further back) | 3 |
+
+    Sites: AREA_$DELETE 0xE07C4A..0xE07C5E `clr.l D1; movea.l
+    #0xD94C00,A0; move.w D0,D1; subq.l #2,SP; lsl.l #4,D1; move.l D1,D0;
+    add.l D0,D0; add.l D0,D1; lea (-48,A0,D1.l),A3` (×48, `area_id`, which
+    0xE07C3E compares unsigned, `bls`); 0xE039BA..0xE039CE `clr.l D0;
+    movea.l #0xEC5400,A0; move.w (10,A6),D0; lsl.l #2,D0; ...` (×20, a
+    parameter's slot); MMAP_$WS_SCAN 0xE0D3D0..0xE0D3DE (×128 of a field
+    through a pointer); DXM_WIRED_ 0xE17088..0xE1708C `clr.l D0; move.w
+    D1,D0; move.b (-1,A1,D0.l),D6` (unscaled); AREA_'s module-local
+    0xE075CA at 0xE076DC..0xE076E8 `move.w D2,D3; ext.l D3; lsl.l #4,D3;
+    ...`; module-local 0xE3EB8C, its by-value parameter loaded into D2
+    at entry (0xE3EB94), then 0xE3EBB2..0xE3EBBE `move.w D2,D0; movea.l
+    #0xEA551C,A0; muls.w #228,D0; lea (0,A0,D0.l),A3`; 0xE54D76..0xE54D7C
+    `move.w D1,D2; mulu.w #150,D2`; TPAD_$DATA 0xE691CA..0xE691D4 `moveq #44,D0; ...;
+    muls.w (380,A5),D0; lea (0,A5,D0.l),A2` (the constant first, 20 of 20
+    such `.l` products `muls.w`, above).
+    - *The form is chosen per index expression, not per array.*  The
+      PROC2 table at 0xEA551C (228-byte entries, about 70, the pid map
+      following at +16054) is indexed `mulu.w #228` / `.w` by some values
+      (PROC2_$SIGNAL 0xE3EFF8..0xE3F000, `move.w (16054,A1),D0; mulu.w
+      #228,D0`, an element of the pid map; the entries' links at -198,
+      -208, -210, PROC2_$CREATE 0xE72AA0; PROC1_$CURRENT, PROC2_$SUSPEND
+      0xE412B4) and `muls.w #228` / `.l` by others (PROC2_$ACKNOWLEDGE
+      0xE3F364..0xE3F37C, the same element loaded into D0 and copied: a
+      register local; the by-value parameters of nine module-local
+      routines, 0xE3EB8C, 0xE3ECEA, 0xE3FB34, ...), in one routine too
+      (PROC2_$SIGNAL 0xE3F00A; PROC2_$CREATE): of the ×228 indices of
+      `wordidxs`, 41 `mulu.w`/`.w`, 90 `muls.w`/`.l` and 1 `mulu.w`/`.l`
+      (PROC2_$GET_DEBUGGER_PID 0xE41BAC) into this table, and one
+      `muls.w`/`.l` into another (SIO_$INIT 0xE32C6C).  Of the 26 variables of a
+      unit or at an absolute address read as word indices, none is used
+      both ways (PROC1_$CURRENT `.w` from ×2 up to ×228; SMD's
+      `(7576,A5)` `.l` at ×4, ×96 and ×268).  One value goes `.w` for a
+      smaller element and `.l` for a larger one: SMD_$INQ_DISP_INFO
+      0xE70172 ×96 `.w`, 0xE70182 ×268 `muls.w`/`.l` (its by-address
+      `unit`, loaded once into D0); AST_$PURIFY 0xE05910 ×4 `.w`, 0xE05932
+      ×16 `.l`; AST_$GET_SEG_MAP 0xE06DE4 ×4, 0xE06DBC ×16 (a page
+      number); MMAP_$WS_SCAN 0xE0D436 ×20, 0xE0D3DE ×128 (also module-local
+      0xE1327E, PMAP_$PURIFIER_L 0xE13C1E/0xE13BF6); OLD_DIR's module-local
+      0xE54B9E ×48 0xE54C1A, ×150 `mulu.w` 0xE54C66.  A computed index next
+      to its variable: PEB_UNWIRED's module-local 0xE31DD4 at
+      0xE31E1E..0xE31E36 `ext.l D2; add.l D2,D2; lea (0,A1,D2.l),A1` for
+      the value in D0, `add.w D2,D2; lea (0,A1,D2.w),A1` for it plus 1
+      (the 1 in the displacement; the module-local 0xE31E4E at
+      0xE31E98..0xE31EB0 the same), if D0 is a register local; ../source
+      (`peb/load_wcs.pas`) reads one masked expression in both, which
+      would make one expression go both ways (**Uncertain**); DISK's module-local 0xE3BC40 at 0xE3BD90..
+      0xE3BDA6 the same for `pool[page]` and `pool[page + 1]`; AREA_'s
+      0xE075CA at 0xE076C6..0xE076E8 `areas[id + 1]` zero-extended next to
+      `areas[id]` sign-extended, into the 64512-byte area table.
+    - *What fits the sites:* a word index is `.w` when the range of the
+      index expression's type times the element size fits in 16 bits,
+      and `.l` otherwise (H1); or `.l` also when the array's bounds times
+      the element size do not fit (H2).  Both fit every site above, given
+      types the image does not show (SMD_$INQ_DISP_INFO's `unit` would
+      have a range of 123..341 values, or SMD's table bounds that large);
+      no site has a narrow variable into an array that does not fit,
+      which would separate them.  A variable's extension follows its
+      type's sign as far as its compares show it (AREA_$DELETE's
+      `area_id`, compared `bls` at 0xE07C3E, zero-extended; but FILE_'s
+      module-local 0xE5EB98 zero-extends a word it compares `ble`
+      against another variable at 0xE5EBE0); of the four values that
+      go both ways by element size, three are zero-extended or `mulu.w`
+      (a non-negative subrange) and one `muls.w` (SMD's `unit`).  A
+      computed index is `.w` into an array that fits (39 visible sites;
+      DISK above) and, at the one site into one that does not,
+      zero-extended (AREA_ 0xE076C6, `id + 1` with `id` sign-extended).
+    - *`dpc` (accepted code unchanged):* a word index is `.w` when every
+      index × element size of the array's bounds fits in -32768..32767 (as
+      before; review of bead domain-pascal-5aw.13: a `.w` index is
+      sign-extended).  Where it does not (`dpc-ir` `wide_index`), a
+      variable (one load) whose type's range times the size does not fit
+      either, which both rules make `.l`, is widened by its type's sign
+      and scaled at a longword's width: a `0..65535`-style unsigned word
+      zero-extended (`clr.l Dn; move.w x,Dn`, section 8's widening), a
+      signed one with a negative lower bound (`integer`) with `ext.l`;
+      shifts and adds at the longword's width, or one `mul<s>.w #c`, the
+      constant first for 1..127 (`isel.rs` `wide_mul_index`; `mulu.w` of
+      a variable with the constant first is refused, no site).  The same
+      `mul<s>.w` serves any `.l` index that is a word widened by a
+      transfer, `a[integer32(w)]` into an array that fits too (`muls.w
+      #228`, then `.l`; before, refused): the longword product
+      `integer32(w) * 228` is one `muls.w` already (section 8, the 32-bit
+      product of a signed word), and H1 gives `.l` for it.
+      *The base against a zero-extension* (`tools/arithsurvey.py wordidx`,
+      the `movea.l #sym` bases of zero-extended `.l` indices, by the
+      `move.w`'s source, a scaling with `neg` apart): from a data register
+      with the `clr.l` and the copy adjacent, always between them,
+      `clr.l; movea.l #sym; move.w Dm,Dn` (44 of 44: AREA_$DELETE
+      0xE07C4A); with other instructions between the `clr.l` and the copy,
+      3 between (0xE00DC6) and 4 after (0xE04558..0xE04566, 0xE12A5E..0xE12A6A);
+      from memory both: a parameter's slot 1 between (AST_$TOUCH_AREA
+      0xE039BA) and 3 after (module-local 0xE085A6 at 0xE085B8), through
+      a pointer 19 between (AST_$TOUCH 0xE0316C), 24 after (module-local
+      0xE02898 at 0xE02904) and 3 before the `clr.l`, a local 1 between, 3
+      after and 1 before, an array element 5 between and 2 after; with a
+      `neg` scaling the base after the scaling, 7 of 7.  `dpc` takes only the first: a zero-extended index of another
+      unit's array is refused when the word is not held in a data
+      register (`isel.rs` `other_unit_index`) and, after scheduling, when
+      the three are not `clr.l; movea.l; move.w` together
+      (`ZEXT_BASE_SCHEDULED`); `mulu.w` and `neg` scalings are not
+      affected.  Refused, each with its own message, besides: a variable
+      whose type's range fits (H1 `.w`, H2 `.l`); a non-negative
+      `integer16` subrange (bead domain-pascal-4x2); a computed index; a
+      byte index; a `for` loop's index (its stepped pointer is 7.4's).  Golden `data/wide_index`,
+      exec test `wide_index` (indices whose scaled values pass 32767, to
+      68400), tests `crates/dpc-m68k/tests/expr.rs`
+      (`word_index_wider_than_16_bits`).  **Open:** accepted code follows
+      the array's bounds, which neither rule does: a variable of a type
+      wider than the array's index type into an array that fits is `.l`
+      in the image (PROC2_$ACKNOWLEDGE above) and `.w` in `dpc`; following
+      the index's type instead changes accepted output and needs
+      ../source's declarations to carry the narrow types the image's `.w`
+      sites imply (an `integer` × 2 is `.l` by H1).  The base's place
+      against a zero-extension read from memory, and with the `clr.l`
+      apart from the copy, is not settled (above).
   - **Another unit's array (survey Verified; implemented in straight-line
     code, bead domain-pascal-rlnm).**  `tools/boolsurvey.py summary`
     (kind `ebase`: every indexed operand `(d,An,Dx)` through A0-A4 of

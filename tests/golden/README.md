@@ -117,6 +117,13 @@ Tests:
   parameter, TPAD_$INQUIRE_UNIT 0xE6999C, TPAD_$DATA 0xE691CA, module-local
   0xE383B0 ×100 of a by-value parameter, RIP_$TABLE 0xE6904C ×92 of
   another unit's array, 0xE458CC a word product); ×268 `mulu.w #c`.
+- `data/wide_index` - codegen-patterns 5.2 ("Word indices used as `.l`";
+  bead domain-pascal-wkg): into arrays whose bounds times the element
+  size do not fit in 16 bits, a `pinteger` held in a register
+  zero-extended, the base between the `clr.l` and the copy (AREA_$DELETE
+  0xE07C4A; a parameter and a register local), an `integer` with `ext.l`
+  (AREA_'s 0xE075CA at 0xE076DC), `muls.w #228` / `mulu.w #150`
+  (0xE3EBB2, 0xE54D76), an unscaled `.l` index (0xE17088).
 - `data/static_data` - codegen-patterns 4, 13, 11: `pea (A5)` / `lea` /
   restore around a routine that uses the unit's data (PROC1_$GET_LOADAV
   0xE14BBE..0xE14BD2), `(A5)` / `(d,A5)` operands (XNS_IDP_$GET_STATS

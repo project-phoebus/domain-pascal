@@ -38,6 +38,10 @@ usage:
     tools/arithsurvey.py narrow      # size changes, codegen-patterns 8
                                      # ("Narrowing and widening")
     tools/arithsurvey.py narrows KIND  # the sites of one kind of `narrow'
+    tools/arithsurvey.py wordidx     # word values used as indices, `.w'/`.l'
+                                     # (codegen-patterns 5.2, "Word indices
+                                     # used as `.l'"; bead domain-pascal-wkg)
+    tools/arithsurvey.py wordidxs    # one line per such index
 
 For `narrow' (bead domain-pascal-8td), per routine and per basic block
 (cut at branch targets, branches and calls):
@@ -349,7 +353,7 @@ def scale_sites(ins, labels=frozenset()):
         x = xs[v[1]]
         out.append({'addr': ins[k][0], 'coef': v[2], 'off': v[3], 'form': form, 'mul': mul,
                     'x': x['kind'], 'zext': x['zext'], 'ext': x['ext'], 'idx': idx,
-                    'use': ins[k][2], 'chain': chain})
+                    'size': x.get('size'), 'src': x.get('src'), 'use': ins[k][2], 'chain': chain, 'k': k})
 
     reset(0)
     seen = set()
@@ -382,11 +386,21 @@ def scale_sites(ins, labels=frozenset()):
             elif base == 'move' and sv is not None and sz in 'wl':
                 new, h = sv, hist[src[1:]] + (k,)
                 cont.add(src[1:])
+                if (sz == 'w' and dv == ('c', 0) and sv[0] == 'x' and sv[2] == 1
+                        and sv[3] == 0):
+                    # a word copied into a cleared register: zero-extended
+                    # (SOCK_$OPEN 0xE15DAA..0xE15DB2 `clr.l D1; ...; move.w
+                    # D0,D1; lsl.l #2,D1')
+                    x0 = xs[sv[1]]
+                    new = fresh(x0['kind'], x0['at'])
+                    xs[new[1]].update(zext=True, size='w', src=x0.get('src'))
+                    h = hist[dreg] + hist[src[1:]] + (k,)
             elif base == 'move' and re.fullmatch(r'%a\d', src):
                 new, h = fresh('areg', k), ()
             elif base == 'move' and src:
                 new, h = fresh(mem_kind(src) if src != '%sp@+' else 'pop', k), (k,)
                 xs[new[1]]['size'] = sz
+                xs[new[1]]['src'] = src
                 if sz == 'w' and dv == ('c', 0):
                     xs[new[1]]['zext'] = True
                     h = hist[dreg] + (k,)
@@ -424,6 +438,8 @@ def scale_sites(ins, labels=frozenset()):
                     cont.add(src[1:])
                 elif dv[0] == 'c' and imm is None and not re.fullmatch(r'%[ad]\d', src):
                     x = fresh(mem_kind(src), k)
+                    xs[x[1]]['size'] = 'w'
+                    xs[x[1]]['src'] = src
                     new, h = ('x', x[1], dv[1], 0), h + (k,)
         elif dreg and len(ops) == 1:
             if base == 'clr':
@@ -507,6 +523,200 @@ def scale_scan():
             s['routine'] = (r0, name)
             out.append(s)
     return out
+
+
+# ---------------------------------------------------------------------------
+# `wordidx': word values used as indices, `.w' or `.l' (bead domain-pascal-wkg).
+
+_WORD_ARITH = re.compile(r'^(addq|subq|addi|subi|add|sub|and|andi|or|ori|eor|lsr|asr)w ')
+
+
+def index_chain(ins, k, reg, labels=frozenset()):
+    """The instructions that formed the index register `reg' (`%d0') read
+    by ins[k], in order: walked back in the block (to a branch, a call or
+    a branch target) over the instructions that write it, through copies
+    `move.w Dm,Dn' (to Dm), to the first full write (a load, a `moveq', a
+    `clr'); a `clr.l' of the register before a word load or copy into it
+    within 8 instructions is included (a zero-extension: SOCK_$OPEN
+    0xE15DAA..0xE15DB2 `clr.l D1; ...; move.w D0,D1; lsl.l #2,D1')."""
+    chain, want = [], reg
+    for j in range(k - 1, -1, -1):
+        t = ins[j][2]
+        if _BLOCK_END.match(t):
+            break
+        op, ops = operands(t)
+        if ops and ops[-1] == want and not op.startswith(('cmp', 'tst', 'btst', 'movem')):
+            chain.append(t)
+            src = ops[0] if len(ops) == 2 else None
+            base = re.sub(r'[bwl]$', '', op)
+            if base in ('move', 'moveq'):
+                if op == 'movew':
+                    for jj in range(j - 1, max(-1, j - 8), -1):
+                        tt = ins[jj][2]
+                        if _BLOCK_END.match(tt):
+                            break
+                        if tt == 'clrl ' + want:
+                            chain.append(tt)
+                            break
+                        o2, p2 = operands(tt)
+                        if p2 and p2[-1] == want and not o2.startswith(('cmp', 'tst', 'btst')):
+                            break
+                if chain[-1].startswith('clrl'):
+                    break
+                if base == 'move' and src and re.fullmatch(r'%d\d', src):
+                    want = src
+                    continue
+                break
+            if base == 'clr':
+                break
+        if ins[j][0] in labels:
+            break
+    return chain[::-1]
+
+
+def classify_index(chain):
+    """How a chain of index_chain formed the index: `width' of the value
+    loaded (`w', `l', `b', `q' for a `moveq', `?'), `zext' (a `clr.l' or
+    `andi.l #65535' widening a word), `ext' (an `ext.l'), `mul' (`mulu' /
+    `muls' or None), `computed' (a word operation other than a scaling
+    combines it with something: `addq.w', `sub.w <mem>', a mask, a
+    shift right)."""
+    zext = bool(chain) and chain[0].startswith('clrl')
+    ld = chain[1] if zext and len(chain) > 1 else (chain[0] if chain else '')
+    lop, _ = operands(ld)
+    width = ('q' if lop == 'moveq' else lop[-1] if lop.startswith('move')
+             else 'w' if lop.startswith('mul') else '?')
+    computed = False
+    for c in chain:
+        o, p = operands(c)
+        if not _WORD_ARITH.match(c):
+            continue
+        if o in ('addw', 'subw') and len(p) == 2 and re.fullmatch(r'%d\d', p[0]):
+            continue    # a partial product of a scaling, or x * 2
+        computed = True
+    zext = zext or any(c.startswith('andil #65535,') for c in chain)
+    mul = next((c[:4] for c in chain if c.startswith(('mulu', 'muls'))), None)
+    return {'width': width, 'zext': zext, 'ext': any(c.startswith('extl') for c in chain),
+            'mul': mul, 'computed': computed}
+
+
+def wordidx_scan():
+    """[dict] of every indexed operand `(d,An,Dx.<s>)' (An not PC) of the
+    compiled routines whose index register was formed from a word value in
+    its block: addr, routine, use (the instruction), idx (`w'/`l'),
+    chain, and classify_index's keys."""
+    import boolsurvey
+    out = []
+    for r0, r1, name in routines():
+        ins = a5survey.reached(r0, r1)
+        labels = boolsurvey.branch_targets(ins)
+        for k, (a, _, t) in enumerate(ins):
+            for m in _IDXOP.finditer(t):
+                if m.group(1) == 'pc':
+                    continue
+                chain = index_chain(ins, k, '%' + m.group(3), labels)
+                if not chain:
+                    continue
+                c = classify_index(chain)
+                if c['width'] != 'w':
+                    continue
+                c.update(addr=a, routine=(r0, name), use=t, idx=m.group(4), chain=chain,
+                         base_order=zext_base_order(ins, k, m.group(1), chain)
+                         if c['zext'] and chain[0].startswith('clrl') else None)
+                out.append(c)
+    return out
+
+
+def zext_base_order(ins, k, areg, chain):
+    """For an index zero-extended by `clr.l Dn; ...; move.w x,Dn' (chain
+    from index_chain) read by ins[k] off base register `areg' (`a0'):
+    (source, order, between) when the base is `movea.l #sym,An' set in
+    the chain's span, else None.  source: the `move.w' source's kind
+    (mem_kind, or `reg' for a copy); order: `base-first' (the base before
+    the `clr.l'), `base-between' (after the `clr.l', before the `move.w'),
+    `base-after' (after the `move.w'); between: how many instructions lie
+    between the `clr.l' and the `move.w' other than the base's."""
+    clr, mov = chain[0], chain[1] if len(chain) > 1 else None
+    if not mov:
+        return None
+    jm = next((j for j in range(k - 1, -1, -1) if ins[j][2] == mov), None)
+    jc = next((j for j in range(jm - 1, -1, -1) if ins[j][2] == clr), None) if jm else None
+    if jm is None or jc is None:
+        return None
+    jb = None
+    for j in range(k - 1, max(-1, jc - 6), -1):
+        op, ops = operands(ins[j][2])
+        if ops and ops[-1] == '%' + areg and op.startswith('movea'):
+            jb = j if ops[0].startswith('#') else None
+            break
+    if jb is None:
+        return None
+    src = operands(mov)[1][0]
+    kind = 'reg' if re.fullmatch(r'%d\d', src) else mem_kind(src)
+    order = 'base-first' if jb < jc else 'base-between' if jb < jm else 'base-after'
+    between = sum(1 for j in range(jc + 1, jm) if j != jb)
+    return kind, order, between
+
+
+def zext_order_summary(sites):
+    """The order of a `.l' index's zero-extension and another unit's base
+    (codegen-patterns 5.2, "Word indices used as `.l'"): per source kind
+    (`/neg' for a scaling with `neg', whose base follows the scaling,
+    "Another unit's array"), the orders, and whether the `clr.l' and the
+    `move.w' are adjacent (the base aside), with the sites."""
+    by = {}
+    for s in sites:
+        if s.get('base_order'):
+            kind, order, between = s['base_order']
+            key = (kind + ('/neg' if any(c.startswith('negl') for c in s['chain']) else ''),
+                   order, 'adjacent' if between == 0 else 'apart')
+            by.setdefault(key, []).append(s['addr'])
+    print('zero-extended .l indices off a `movea.l #sym\' base: source, order, clr/move.w')
+    for key in sorted(by):
+        print('  %-10s %-13s %-9s %3d  %s' % (key + (len(by[key]), ' '.join(
+            '0x%X' % a for a in by[key][:6]))))
+
+
+def wordidx_form(s):
+    """The site's form: `.w', or `.l' with how the word was widened."""
+    if s['idx'] == 'w':
+        return 'w ' + ('mulu' if s['mul'] else 'computed' if s['computed'] else 'shifts')
+    how = ('muls' if s['mul'] == 'muls' else 'mulu' if s['mul'] == 'mulu'
+           else 'ext.l' if s['ext'] else 'zext' if s['zext'] else '?')
+    return 'l ' + how + (' computed' if s['computed'] else '')
+
+
+def wordidx_summary(sites):
+    """The counts of codegen-patterns 5.2, "Word indices used as `.l'",
+    and the variables (unit, absolute) read by indexed products of
+    scale_sites with both `.w' and `.l' uses."""
+    c = Counter(wordidx_form(s) for s in sites)
+    print('word indices (%d): form x count e.g.' % len(sites))
+    for f, n in sorted(c.items()):
+        print('  %-18s %5d  0x%X' % (f, n, next(s['addr'] for s in sites
+                                                if wordidx_form(s) == f)))
+    # Per variable: products of scale_sites read from one memory word.
+    seg_of = {}
+    m = sau2map.load()
+    by = {}
+    for s in scale_scan():
+        src = s.get('src')
+        if not s['idx'] or s.get('size') != 'w' or not src or ',%' in src:
+            continue
+        r0 = s['routine'][0]
+        if src.startswith('0x'):
+            key = src
+        elif src.startswith('%a5@('):
+            seg = seg_of.setdefault(r0, m.segment_containing(r0))
+            key = '%s %s' % (seg.name if seg else '?', src)
+        else:
+            continue
+        by.setdefault(key, []).append((s['idx'], abs(s['coef']), s['addr']))
+    mixed = [k for k, v in by.items() if len({x[0] for x in v}) > 1]
+    print('variables of the unit or at an absolute address read as indices: %d, '
+          'used both .w and .l: %d' % (len(by), len(mixed)))
+    for k in sorted(by):
+        print('  %-28s %s' % (k, ' '.join(sorted({'x%d%s' % (x[1], x[0]) for x in by[k]}))))
 
 
 # ---------------------------------------------------------------------------
@@ -679,9 +889,20 @@ def narrow_summary(res):
 
 def main(argv):
     if not argv or argv[0] not in ('calls', 'inline', 'summary', 'scale', 'scales',
-                                   'narrow', 'narrows'):
+                                   'narrow', 'narrows', 'wordidx', 'wordidxs'):
         print(__doc__)
         return 2
+    if argv[0] == 'wordidx':
+        sites = wordidx_scan()
+        wordidx_summary(sites)
+        zext_order_summary(sites)
+        return 0
+    if argv[0] == 'wordidxs':
+        for s in wordidx_scan():
+            print('0x%06X %-16s %-26s %-34s | %s' % (
+                s['addr'], wordidx_form(s), '%06X %s' % s['routine'], s['use'],
+                '; '.join(s['chain'])))
+        return 0
     if argv[0] == 'narrow':
         narrow_summary(narrow_scan())
         return 0

@@ -664,21 +664,107 @@ fn word_arithmetic_widened_is_done_in_32_bits() {
 }
 
 /// `(d,An,Dn.w)' sign-extends the index register: a word index is only
-/// taken when every index x size of the array's bounds fits in 16 bits.
+/// used as a `.w` one when every index x size of the array's bounds fits
+/// in 16 bits.  Otherwise a variable whose type's range does not fit
+/// either is widened by its sign and used as a `.l` index
+/// (codegen-patterns 5.2, "Word indices used as `.l`"; bead
+/// domain-pascal-wkg): AREA_$DELETE 0xE07C4A..0xE07C5E `clr.l D1; ...;
+/// move.w D0,D1; ...; lsl.l #4,D1` for a `pinteger` held in a register
+/// (33 zero-extended `.l` indices of 1-byte elements, 0xE1708C); `ext.l` for an `integer`
+/// (0xE0ADD4 `ext.l; add.l`); `muls.w #228` (0xE3EBBA) and `mulu.w #150`
+/// (0xE54D7C).  The rest is refused.
 #[test]
-fn word_index_must_fit_in_16_bits() {
+fn word_index_wider_than_16_bits() {
     let decls = "type big = array[0..40000] of char; wide = array[0..20000] of integer;
-var bs: big; ws2: wide;
+  r228 = record a: integer32; z: array[1..112] of integer; end;
+  r200 = record a: integer32; z: array[1..98] of integer; end;
+var bs: extern big; ws2: extern wide; xr: extern array[1..300] of r228;
+  cr: extern array[char] of r200; xsm: extern array[1..8] of r228;
 ";
-    for stmt in ["bs[u] := 'a';", "t := ws2[w];"] {
-        let e = compile(&format!(
-            "{DECLS}{decls}procedure t; internal;\nvar t: integer;\nbegin\n  {stmt}\nend;\n"
-        ))
-        .unwrap_err();
-        assert!(
-            e[0].contains("a word index whose scaled value may not fit in 16 bits"),
-            "{stmt}: {e:?}"
-        );
+    let t = |stmt: &str| {
+        let lines = compile(&format!(
+            "{DECLS}{decls}procedure t; internal;\nvar t: integer; t32: integer32;\n\
+             s: 0..100; n: 0..20000; c: char;\nbegin\n  {stmt}\nend;\n"
+        ));
+        lines.map(|ls| {
+            let start = ls.iter().position(|l| l == "T:").unwrap() + 2;
+            let end = start + ls[start..].iter().position(|l| l.starts_with("unlk")).unwrap();
+            ls[start..end].to_vec()
+        })
+    };
+    // Zero-extended: a word held in a register only, the base between
+    // the `clr.l` and the copy (AREA_$DELETE 0xE07C4A..0xE07C52).
+    let held = compile(&format!(
+        "{DECLS}{decls}procedure t(p: pinteger); options(val_param);\nbegin\n  \
+         if p <> 0 then bs[p] := 'a';\nend;\n"
+    ))
+    .unwrap();
+    let start = held.iter().position(|l| l == "clr.l\t%d1").unwrap();
+    assert_eq!(
+        held[start..start + 4],
+        [
+            "clr.l\t%d1",
+            "movea.l\t#BS,%a0",
+            "move.w\t%d0,%d1",
+            "move.b\t#0x61,(0,%a0,%d1.l)",
+        ]
+    );
+    // A `.l` index widened by a transfer, into an array that fits: one
+    // `muls.w`, as for the longword product `integer32(w) * 228` (codegen-
+    // patterns 8, "Products of words used as longwords").
+    assert_eq!(
+        t("t32 := xsm[integer32(w)].a;").unwrap(),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XSM,%a0",
+            "muls.w\t#0xe4,%d0",
+            "lea\t(0,%a0,%d0.l),%a1",
+            "move.l\t(-0xe4,%a1),%d0",
+        ]
+    );
+    assert_eq!(
+        t("t := ws2[w];").unwrap(),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#WS2,%a0",
+            "ext.l\t%d0",
+            "add.l\t%d0,%d0",
+            "move.w\t(0,%a0,%d0.l),%d0",
+        ]
+    );
+    assert_eq!(
+        t("t32 := xr[w].a;").unwrap(),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XR,%a0",
+            "muls.w\t#0xe4,%d0",
+            "lea\t(0,%a0,%d0.l),%a1",
+            "move.l\t(-0xe4,%a1),%d0",
+        ]
+    );
+    assert_eq!(
+        t("t32 := xr[u].a;").unwrap(),
+        [
+            "move.w\t(U).l,%d0",
+            "movea.l\t#XR,%a0",
+            "mulu.w\t#0xe4,%d0",
+            "lea\t(0,%a0,%d0.l),%a1",
+            "move.l\t(-0xe4,%a1),%d0",
+        ]
+    );
+    for (stmt, msg) in [
+        ("bs[w + 1] := 'a';", "a computed word index"),
+        ("bs[u] := 'a';", "a zero-extended `.l` index of another unit's array read from memory"),
+        ("bs[s] := 'a';", "whose type's range times the element size fits"),
+        ("t := ws2[n];", "a non-negative `integer16` subrange"),
+        ("t32 := cr[c].a;", "a byte index"),
+        (
+            "for t := 1 to w do xr[t].a := 0;",
+            "a `for` loop stepping through an array whose bounds",
+        ),
+    ] {
+        let e = t(stmt).unwrap_err();
+        assert!(e[0].contains(msg), "{stmt}: {e:?}");
     }
 }
 

@@ -6414,26 +6414,23 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 // A word index is scaled at the word's width and used as
                 // `(d,An,Dn.w)`, which sign-extends it (MC68000 brief
                 // extension word): right only while every index × size of
-                // the array's bounds fits in -32768..32767.  An index of a
-                // `0..65535` array above 32767, or a scaled index beyond 16
-                // bits, would address the wrong element.  The image scales
-                // with `mulu.w` into a `.l` index too (codegen-patterns 5.2:
-                // 43 sites, 0xE39364); when it did is not catalogued.
+                // the array's bounds fits in -32768..32767.  Otherwise
+                // ([`wide_index`]) a variable whose type's range does not
+                // fit either is widened to a longword and used as a `.l`
+                // index (codegen-patterns 5.2, "Word indices used as `.l`",
+                // bead domain-pascal-wkg).
+                let fits = |r: Option<(i64, i64)>| {
+                    r.is_some_and(|(lo, hi)| {
+                        let s = *elem_size as i64;
+                        lo * s >= -0x8000 && hi * s <= 0x7fff
+                    })
+                };
                 let fits16 = match p.types.kind(base.ty) {
-                    TypeKind::Array { index: it, .. } => {
-                        p.types.ordinal_range(*it).is_some_and(|(alo, ahi)| {
-                            let s = *elem_size as i64;
-                            alo * s >= -0x8000 && ahi * s <= 0x7fff
-                        })
-                    }
+                    TypeKind::Array { index: it, .. } => fits(p.types.ordinal_range(*it)),
                     _ => false,
                 };
                 if !fits16 {
-                    return Err(unsupported(
-                        index.span,
-                        "a word index whose scaled value may not fit in 16 bits (a `.w` index \
-                         sign-extends; the `.l` form is not catalogued, codegen-patterns 5.2) is",
-                    ));
+                    ix = wide_index(p, index, ix, fits(p.types.ordinal_range(index.ty)))?;
                 }
             }
             // An array that is a part of its variable (a record's field, an
@@ -6467,6 +6464,88 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
         }
         _ => Err(unsupported(e.span, "this designator is")),
     }
+}
+
+/// The index `ix` (the value of `index`, a word) of an element of an
+/// array whose bounds times the element size do not fit in 16 bits
+/// ([`addr_of`]), as a `.l` index: widened to a longword, which the
+/// selector scales at that width (codegen-patterns 5.2, "Word indices used
+/// as `.l`"; bead domain-pascal-wkg).  `type_fits`: whether the range of
+/// `index`'s own type times the element size fits.
+///
+/// The image chooses the form per index expression, not per array: the
+/// PROC2 table at 0xEA551C (228-byte entries, about 70 of them) is indexed
+/// `mulu.w #228` / `.w` by some values (PROC2_$SIGNAL 0xE3EFFC, an element
+/// of the pid map; PROC2_$CREATE 0xE72AA0, an entry's `(-198)` link; 41
+/// sites) and `muls.w #228` / `.l` by others (PROC2_$ACKNOWLEDGE 0xE3F378,
+/// the same element held in a register; 90 sites, and 1 `mulu.w` / `.l`,
+/// PROC2_$GET_DEBUGGER_PID 0xE41BAC), and one value goes `.w`
+/// for a smaller element and `.l` for a larger one (SMD_$INQ_DISP_INFO
+/// 0xE70172 ×96, 0xE70182 ×268; MMAP_$WS_SCAN `(-8190,A3)` ×20 at
+/// 0xE0D436, ×128 at 0xE0D3DE).  Whether the array's bounds count too is
+/// not settled; here, where they do not fit, a variable (one load) whose
+/// type's range does not fit either is `.l` by both readings, widened by
+/// its type's sign:
+///
+/// - an unsigned word (a `0..65535`-style subrange): zero-extended,
+///   `clr.l Dn; move.w x,Dn` (AREA_$DELETE 0xE07C4A..0xE07C5E, `area_id:
+///   pinteger` into `areas[1..16#540]` of 48 bytes, compared unsigned at
+///   0xE07C3E `bls`; 271 such `.l` indices), or `mulu.w #c` (47); into
+///   another unit's array the selector takes it from a data register only
+///   (the base's place against a load from memory is not settled,
+///   `dpc-m68k` `other_unit_index`);
+/// - a signed one with a negative lower bound (`integer`): `ext.l` (AREA_'s
+///   module-local 0xE075CA at 0xE076DE; 240), or `muls.w #c` (122).
+///
+/// Refused: a variable whose type's range fits (`.w` by the index's type,
+/// `.l` by the array's bounds: no site separates them); a non-negative
+/// `integer16` subrange (of the four values that go `.w` or `.l` by the
+/// element size, three are zero-extended or `mulu.w`, AST_$PURIFY
+/// 0xE05932, and one `muls.w`, SMD_$INQ_DISP_INFO 0xE7017E: the sign is
+/// bead domain-pascal-4x2's question); a computed index (`.w` at the 39
+/// sites into arrays that fit; zero-extended at the one site into an array
+/// that does not, AREA_'s 0xE075CA at 0xE076C6, `areas[id + 1]` next to
+/// `ext.l` for `areas[id]`, in a `for` loop's stepped pointers); a byte
+/// index (no site).
+fn wide_index(p: &Program, index: &SExpr, ix: Expr, type_fits: bool) -> Res<Expr> {
+    let refuse = |what: &str| {
+        Err(unsupported(
+            index.span,
+            format!(
+                "{what} into an array whose bounds times the element size do not fit in 16 bits \
+                 (codegen-patterns 5.2, \"Word indices used as `.l`\"; bead domain-pascal-wkg) is"
+            ),
+        ))
+    };
+    if p.types.size(index.ty) != 2 {
+        return refuse("a byte index (no site)");
+    }
+    // A variable: its value is one load (a packed record's field at a
+    // byte boundary too).
+    if !matches!(ix, Expr::Load { .. }) {
+        return refuse(
+            "a computed word index (into arrays that fit, `.w` at the 39 sites whose \
+             computation is visible; into one that does not, zero-extended at the one site \
+             known, AREA_'s module-local 0xE075CA at 0xE076C6, `areas[id + 1]` next to `ext.l` \
+             for `areas[id]`)",
+        );
+    }
+    if type_fits {
+        return refuse(
+            "a word index whose type's range times the element size fits in 16 bits (`.w` by \
+             the index's type or `.l` by the array's: not settled)",
+        );
+    }
+    let sign = sign_of(&p.types, index.ty);
+    let negative = p.types.ordinal_range(index.ty).is_some_and(|(lo, _)| lo < 0);
+    if sign == Sign::Signed && !negative {
+        return refuse(
+            "a word index of a non-negative `integer16` subrange (of the four values the image \
+             indexes `.w` or `.l` by the element size, three zero-extended or `mulu.w`, one \
+             `muls.w`: its sign is bead domain-pascal-4x2's question)",
+        );
+    }
+    Ok(convert(ix, Scalar::integer(Width::Long, sign)))
 }
 
 /// The offset of the variable designator `e` is a part of (through fields

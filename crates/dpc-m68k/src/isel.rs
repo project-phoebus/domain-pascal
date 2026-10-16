@@ -1099,6 +1099,11 @@ fn select_body_with(
         .iter()
         .map(|&(k, span)| (s.out[k].clone(), s.out[k + 1].clone(), span))
         .collect();
+    let zext_triples: Vec<([Insn; 3], Span)> = s
+        .zext_bases
+        .iter()
+        .map(|&(c, m, b, span)| ([s.out[c].clone(), s.out[b].clone(), s.out[m].clone()], span))
+        .collect();
     for &(b, k, span) in &s.count_copies {
         count_copy_check(&s.out[b], &s.out[k], span)?;
     }
@@ -1373,6 +1378,16 @@ fn select_body_with(
     for (lea, user, span) in &once_pairs {
         if !out.windows(2).any(|w| w[0] == *lea && w[1] == *user) {
             return Err(unsupported(*span, ONCE_LEA_SCHEDULED));
+        }
+    }
+    for (t, span) in &zext_triples {
+        // A zero-extended `.l` index of another unit's array: the base
+        // between the `clr.l` and the copy, with nothing else between
+        // them (44 of 44 such sites of a word held in a register; apart,
+        // 3 between and 4 after: `tools/arithsurvey.py wordidx`,
+        // codegen-patterns 5.2, "Word indices used as `.l`").
+        if !out.windows(3).any(|w| w == &t[..]) {
+            return Err(unsupported(*span, ZEXT_BASE_SCHEDULED));
         }
     }
     Ok(Selected::Body(
@@ -2425,6 +2440,14 @@ const ONCE_LEA_SCHEDULED: &str = "an element address of another unit's array or 
      pointer loaded from memory, read once, with an instruction scheduled between its `lea` \
      and its read (the register rule is surveyed with the read next, codegen-patterns 5.2; \
      bead domain-pascal-1ibr) is";
+
+/// The refusal of a zero-extended `.l` index of another unit's array
+/// whose `clr.l`, base and copy the scheduler does not leave as `clr.l;
+/// movea.l #sym; move.w` ([`Selector::other_unit_index`]).
+const ZEXT_BASE_SCHEDULED: &str = "a zero-extended `.l` index of another unit's array with an \
+     instruction scheduled between its `clr.l` and its copy (the base between them 3 times, \
+     after them 4: 0xE00DC6, 0xE04568; codegen-patterns 5.2, \"Word indices used as `.l`\"; \
+     bead domain-pascal-wkg) is";
 
 /// The refusal of an element address read once outside the shape
 /// [`once_elem_lea`] is surveyed for ([`once_elem_shape`]).
@@ -3885,6 +3908,18 @@ fn stepped_arrays(
             return;
         };
         if !expr_reads_frame(index, off) && !addr_reads_frame(base, off) {
+            return;
+        }
+        if matches!(&**index, Expr::Convert { value, .. } if is_index(value, off)) {
+            // The `for` index widened to a `.l` one (`dpc-ir`
+            // `wide_index`): AREA_'s module-local 0xE075CA steps two
+            // pointers set up at 0xE076C4..0xE076E8 with `.l` indices
+            // (zero-extended and `ext.l`); not implemented.
+            err.get_or_insert(
+                "a `for` loop stepping through an array whose bounds times the element size do \
+                 not fit in 16 bits (its pointers set up with `.l` indices, AREA_'s 0xE076C4; \
+                 codegen-patterns 5.2, 7.4; bead domain-pascal-wkg) is",
+            );
             return;
         }
         if !is_index(index, off) || addr_reads_frame(base, off) {
@@ -5871,6 +5906,11 @@ pub struct Selector {
     /// arrays or through pointers loaded from memory formed as values
     /// ([`Self::lea_into`]): index in `out` and the statement's span.
     elem_leas: Vec<(usize, Span)>,
+    /// The `clr.l`, `move.w` and base `movea.l #sym` of zero-extended `.l`
+    /// indices of other units' arrays ([`Self::other_unit_index`]): their
+    /// indices in `out` and the statement's span, for the check after
+    /// scheduling that they stay `clr.l; movea.l; move.w`.
+    zext_bases: Vec<(usize, usize, usize, Span)>,
     /// Locals assigned from a call, held in D0 and moved to an address
     /// register where dereferenced ([`Park`]).
     parked: Vec<Park>,
@@ -6114,6 +6154,7 @@ impl Selector {
             ptr_defs: Vec::new(),
             elem_ptrs: Vec::new(),
             elem_leas: Vec::new(),
+            zext_bases: Vec::new(),
             parked: Vec::new(),
             a0_locals: Vec::new(),
             hoist: None,
@@ -17597,6 +17638,13 @@ impl Selector {
         if w == Width::Word && scale < 128 && by_mul_insn(scale as i64) && !in_place(index) {
             return Err(computed_factor(self.span, scale as i64));
         }
+        if let (Width::Long, true, Some(xw)) = (
+            w,
+            by_mul_insn(scale as i64),
+            Self::word_part(index, index.ty().sign),
+        ) {
+            return self.wide_mul_index(&xw, scale as i64, between);
+        }
         let mut v = self.eval(index)?;
         if let (
             Val::Mem(_),
@@ -17614,6 +17662,73 @@ impl Selector {
         let d = self.in_tmp(v, w)?;
         between(self)?;
         self.mul_const(d, scale as i64, w)?;
+        Ok(d)
+    }
+
+    /// A `.l` index that is the word `x` widened ([`Expr::Convert`]; `dpc-ir`
+    /// `wide_index`) scaled by `c`, a constant done with a multiply
+    /// ([`by_mul_insn`]): one `mul<s>.w`, whose 32-bit product is the index,
+    /// `muls.w` for a signed word and `mulu.w` for an unsigned one
+    /// (codegen-patterns 5.2, "Word indices used as `.l`"; bead
+    /// domain-pascal-wkg).  The word is put in a register as for a `.w`
+    /// index ([`Self::scaled_index`]), then `mul<s>.w #c` (module-local
+    /// 0xE3EB8C, its by-value parameter loaded into D2 at entry, then
+    /// 0xE3EBB2..0xE3EBBA `move.w D2,D0; movea.l #0xEA551C,A0; muls.w
+    /// #228,D0`; 0xE54D76..0xE54D7C `move.w D1,D2; mulu.w #150,D2`; 118
+    /// `muls.w #c` and 43 `mulu.w #c` feed `.l` indices).  A constant of
+    /// 1..=127 goes first for a variable, `moveq #c,Dn; muls.w x,Dn`
+    /// ([`Self::mul_const_first`]; TPAD_$DATA 0xE691CA..0xE691D0, RINGLOG_$CNTL
+    /// 0xE722A0; 20 of 20 such `.l` products are `muls.w` of signed words);
+    /// for an unsigned word that form has no site and is refused, as is
+    /// a computed word ([`computed_factor`]).  It serves any `.l` index that
+    /// is a widened word, `a[integer32(w)]` into an array that fits too:
+    /// the longword product `integer32(w) * 228` is one `muls.w` already
+    /// ([`Self::mul`]), and the index-type rule of codegen-patterns 5.2
+    /// ("Word indices used as `.l`") makes it `.l`.
+    fn wide_mul_index(
+        &mut self,
+        x: &Expr,
+        c: i64,
+        between: &mut dyn FnMut(&mut Self) -> Res<()>,
+    ) -> Res<u8> {
+        let signed = x.ty().is_signed();
+        if c < 128 && const_first(x) {
+            if !signed {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a `.l` index of a `0..65535` variable scaled by {c} (`moveq #{c},Dn; \
+                         mulu.w x,Dn`: the 20 such `.l` products of the image are `muls.w` of \
+                         signed words; codegen-patterns 5.2) is"
+                    ),
+                ));
+            }
+            return self.mul_const_first(x, c, true, between);
+        }
+        if c < 128 {
+            return Err(computed_factor(self.span, c));
+        }
+        let mut v = self.eval(x)?;
+        if let (
+            Val::Mem(_),
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            },
+        ) = (&v, x)
+        {
+            if *o > 0 {
+                let r = self.in_tmp(v, Width::Word)?;
+                v = Val::Reg(Reg::D(r));
+            }
+        }
+        let d = self.in_tmp(v, Width::Word)?;
+        between(self)?;
+        self.out.push(Insn::Mul {
+            signed,
+            src: Ea::Imm(c),
+            dst: d,
+        });
         Ok(d)
     }
 
@@ -17705,6 +17820,37 @@ impl Selector {
         if self.in_loop() {
             return Err(self.other_unit_in_loop());
         }
+        if let Expr::Convert { value, ty, .. } = index {
+            // A word zero-extended into a `.l` index, `clr.l Dn; move.w
+            // x,Dn` (`dpc-ir` `wide_index`), not multiplied with `mulu.w`:
+            // where the base goes against the two is settled only for a
+            // word held in a data register, the `clr.l` and the copy
+            // adjacent, `clr.l; movea.l #sym; move.w Dm,Dn` (44 of 44:
+            // AREA_$DELETE 0xE07C4A..0xE07C52; `tools/arithsurvey.py
+            // wordidx`, codegen-patterns 5.2, "Word indices used as `.l`").
+            // From memory both orders occur: a parameter's slot 0xE039BA
+            // (between) and 0xE085B8 (after the `move.w`), through a
+            // pointer 0xE0316C (between, 19) and 0xE02904 (after, 24).
+            // A scaling with `neg` puts the base after it, from memory too
+            // (`tools/arithsurvey.py wordidx`: 7 of 7, 0xE5EBD2).
+            let zext = ty.width == Width::Long
+                && value.ty().width == Width::Word
+                && !value.ty().is_signed()
+                && !by_mul_insn(scale as i64)
+                && !neg_form(scale);
+            let held = matches!(&**value, Expr::Load { addr: Addr::Frame(o), .. }
+                if matches!(self.pinned(*o), Some(Reg::D(_))));
+            if zext && !held {
+                return Err(unsupported(
+                    self.span,
+                    "a zero-extended `.l` index of another unit's array read from memory (the \
+                     base between the `clr.l` and the `move.w` or after them: both seen, \
+                     0xE039BA and 0xE085B8 for a parameter's slot, 0xE0316C and 0xE02904 \
+                     through a pointer; codegen-patterns 5.2, \"Word indices used as `.l`\"; \
+                     bead domain-pascal-wkg) is",
+                ));
+            }
+        }
         let here = (self.stmt_start, self.span);
         if self.other_elem == Some(here) {
             return Err(unsupported(
@@ -17752,8 +17898,11 @@ impl Selector {
         self.other_syms.push(sym.to_string());
         self.split_elems += 1;
         let mut base = None;
+        let mut base_at = 0;
+        let start = self.out.len();
         let mut load = |s: &mut Self| -> Res<()> {
             let a = s.alloc_a()?;
+            base_at = s.out.len();
             s.out.push(Insn::Movea {
                 size: Size::L,
                 src: Ea::ImmSym(imm.to_string()),
@@ -17769,6 +17918,28 @@ impl Selector {
         } else {
             self.index_reg_with(index, scale, &mut load)?
         };
+        if let Expr::Convert { value, ty, .. } = index {
+            if ty.width == Width::Long
+                && value.ty().width == Width::Word
+                && !value.ty().is_signed()
+                && !by_mul_insn(scale as i64)
+                && !neg_form(scale)
+            {
+                // The zero-extension's `clr.l` and copy, checked after
+                // scheduling ([`ZEXT_BASE_SCHEDULED`]).
+                let r = Ea::Reg(Reg::D(x));
+                let clr = (start..base_at).find(|&k| {
+                    matches!(&self.out[k], Insn::Clr { size: Size::L, dst } if *dst == r)
+                });
+                let mov = (start..base_at).rev().find(|&k| {
+                    matches!(&self.out[k], Insn::Move { size: Size::W, dst, .. } if *dst == r)
+                });
+                match (clr, mov) {
+                    (Some(c), Some(m)) if c < m => self.zext_bases.push((c, m, base_at, self.span)),
+                    _ => return Err(unsupported(self.span, ZEXT_BASE_SCHEDULED)),
+                }
+            }
+        }
         Ok((x, base.expect("the base is loaded")))
     }
 

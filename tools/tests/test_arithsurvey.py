@@ -170,5 +170,45 @@ class NarrowTest(unittest.TestCase):
         self.assertEqual(got, [('and', 'load.l', 0x104)])
 
 
+class WordIndexTest(unittest.TestCase):
+    def test_zero_extended_copy(self):
+        # AREA_$DELETE 0xE07C4A..0xE07C5E: the `clr.l' two before the copy
+        ins = insns(['movew %fp@(10),%d0', 'clrl %d1', 'moveal #14240768,%a0',
+                     'movew %d0,%d1', 'subql #2,%sp', 'lsll #4,%d1', 'movel %d1,%d0',
+                     'addl %d0,%d0', 'addl %d0,%d1', 'leal %a0@(-48,%d1:l),%a3'])
+        chain = arithsurvey.index_chain(ins, 9, '%d1')
+        self.assertEqual(chain[:2], ['clrl %d1', 'movew %d0,%d1'])
+        self.assertEqual(arithsurvey.zext_base_order(ins, 9, 'a0', chain),
+                         ('reg', 'base-between', 0))
+        c = arithsurvey.classify_index(chain)
+        self.assertTrue(c['zext'])
+        self.assertFalse(c['computed'])
+
+    def test_base_after_a_slot_load(self):
+        # module-local 0xE085A6 at 0xE085B8..0xE085CC
+        ins = insns(['clrl %d0', 'movew %fp@(8),%d0', 'moveal #14240768,%a0', 'lsll #4,%d0',
+                     'movel %d0,%d1', 'addl %d1,%d1', 'addl %d1,%d0',
+                     'leal %a0@(-48,%d0:l),%a1'])
+        chain = arithsurvey.index_chain(ins, 7, '%d0')
+        self.assertEqual(arithsurvey.zext_base_order(ins, 7, 'a0', chain),
+                         ('param', 'base-after', 0))
+
+    def test_sign_extended_and_multiplied(self):
+        ins = insns(['movew %fp@(8),%d2', 'movew %d2,%d0', 'mulsw #228,%d0',
+                     'leal %a0@(0,%d0:l),%a3'])
+        c = arithsurvey.classify_index(arithsurvey.index_chain(ins, 3, '%d0'))
+        self.assertEqual((c['width'], c['mul'], c['computed']), ('w', 'muls', False))
+        ins = insns(['movew %d4,%d0', 'extl %d0', 'lsll #2,%d0', 'leal %a0@(0,%d0:l),%a1'])
+        c = arithsurvey.classify_index(arithsurvey.index_chain(ins, 3, '%d0'))
+        self.assertTrue(c['ext'])
+
+    def test_computed(self):
+        # 0xE1B73C: `x - 1' as a `.w' index
+        ins = insns(['movew %a3@,%d0', 'subqw #1,%d0', 'leal %a2@(0,%d0:w),%a0'])
+        c = arithsurvey.classify_index(arithsurvey.index_chain(ins, 2, '%d0'))
+        self.assertTrue(c['computed'])
+        self.assertEqual(arithsurvey.wordidx_form(dict(c, idx='w')), 'w computed')
+
+
 if __name__ == '__main__':
     unittest.main()
