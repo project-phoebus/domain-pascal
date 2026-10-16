@@ -138,6 +138,13 @@ Owner's answer (2026-10-16): 32-bit, like rshft: a 16-bit operand is expanded to
 Consequence: implemented under bead domain-pascal-4rfc.
 Implemented: `dpc-sema` types `lshft`/`rshft` as integer32, or as the `0..2147483647` subrange (the type of any unsigned longword) when the operand is an unsigned run-time value; `dpc-ir` widens a 16-bit operand by its sign and shifts in 32 bits (`clr.l; move.w` or `ext.l`, then `lsl.l`/`lsr.l`: AS_$GET_ADDR 0xE58418, UID_$GEN 0xE1A04A, PEB_'s module-local 0xE31DEA), shifting at the word's width only where the result is stored into a 16-bit target and the low word is the same (`lshft`; `rshft` of an unsigned word: module-local 0xE07386); compares, `div` and `mod` of an unsigned shift take the unsigned forms.  The p. 4-109 example: `lshft(i, 7)` of 2000 is 256000 as an integer32 and -6144 stored into `i` (exec test `shift_widen`).  A `[byte] 0..255`'s `lshft` used as a longword (e.g. compared, `lshft(b, 8) > 5`, formerly a 16-bit compare) is refused: the image widens such a word shift through a second register (RING_$GET_ID 0xE2FA66), not implemented; exec test `byte_ints` no longer compares it.  `arshft` is unchanged (p. 4-29's expansion gives the value of the 16-bit `asr` widened by its sign).  Codegen-patterns 8, "Shifts of a 16-bit operand".
 
+## A variable's own address in its initializer (2.2.2.2; 7.2; question 36)
+Asked: 2026-10-16, by the lead (../source network/network.pas: `network_$rqst_done_ec: ec_$eventcount_t := [value := 0, waiter_list_head := addr(network_$rqst_done_ec), waiter_list_tail := addr(network_$rqst_done_ec)]`; the image's data at +0x258 holds the eventcount's own address)
+Passage: question 36's ruling permits `addr(...)` in initializers; nothing says whether the variable being declared is in scope in its own initializer.
+Question: is a variable in scope inside its own initializer, so that `addr(itself)` gives its own address?
+Owner's answer (2026-10-16): yes, in scope.  (Variables declared later in the var part are still not visible before their declaration.)
+Consequence: to be implemented (bead filed with this entry).
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
