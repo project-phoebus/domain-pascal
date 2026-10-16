@@ -611,6 +611,63 @@ pub enum Insn {
     },
 }
 
+impl Insn {
+    /// The effective-address operands of the instruction, in operand
+    /// order; register-number fields (`moveq`'s, `dbf`'s, a data register
+    /// destination of `cmp`/`add`/`mul`, ...) are not [`Ea`]s and are not
+    /// listed.  Exhaustive over the variants, so a new variant must say
+    /// what its operands are.
+    pub fn eas(&self) -> Vec<&Ea> {
+        match self {
+            Insn::Link { .. }
+            | Insn::Unlk
+            | Insn::Rts
+            | Insn::MovemSave { .. }
+            | Insn::MovemRestore { .. }
+            | Insn::Moveq { .. }
+            | Insn::Dbf { .. }
+            | Insn::Cmpm { .. }
+            | Insn::Label(_)
+            | Insn::Bsr { .. }
+            | Insn::Branch { .. }
+            | Insn::CmpaZero(_)
+            | Insn::Ext { .. }
+            | Insn::Shift { .. }
+            | Insn::Swap(_)
+            | Insn::TableIndex { .. }
+            | Insn::TableJump { .. }
+            | Insn::TableEntry { .. }
+            | Insn::SrImm { .. }
+            | Insn::MoveFromSr { .. }
+            | Insn::Align4
+            | Insn::PoolLabel(_)
+            | Insn::Words(_)
+            | Insn::Encoded { .. } => vec![],
+            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::MoveToSr { src: ea } => vec![ea],
+            Insn::Move { src, dst, .. } => vec![src, dst],
+            Insn::Movea { src, .. }
+            | Insn::Lea { src, .. }
+            | Insn::Cmp { src, .. }
+            | Insn::Alu { src, .. }
+            | Insn::Mul { src, .. }
+            | Insn::Div { src, .. } => vec![src],
+            Insn::Addq { dst, .. }
+            | Insn::Subq { dst, .. }
+            | Insn::Clr { dst, .. }
+            | Insn::Btst { dst, .. }
+            | Insn::Scc { dst, .. }
+            | Insn::Tst { dst, .. }
+            | Insn::Cmpi { dst, .. }
+            | Insn::AluImm { dst, .. }
+            | Insn::Unary { dst, .. }
+            | Insn::BtstImm { dst, .. }
+            | Insn::BitImm { dst, .. }
+            | Insn::Bit { dst, .. }
+            | Insn::AluToMem { dst, .. } => vec![dst],
+        }
+    }
+}
+
 /// The assembler label of constant-pool cell `n`: a `.L` local label,
 /// not kept in the object's symbol table.
 pub fn pool_label(n: u32) -> String {

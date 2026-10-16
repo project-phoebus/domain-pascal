@@ -6713,10 +6713,28 @@ scripts besides, not kept, are named as such below; re-check sites with
     tell.  A test
     of `from × size` alone, or of the displacements alone, does worse
     (D0 alone: 106 of 112; the first pass alone: 108).  An absolute base
-    is always adjusted in place, whatever the displacements (HINT_$INIT_
+    is adjusted in place whatever the displacements (HINT_$INIT_
     CACHE 0xE313DA `movea.l #block,A0; moveq #1,D0; lea (12,A0),A0` with
     `(-12..-4,A0)`, where HINT_$LOOKUP_CACHE 0xE49D34 has `lea (12,A5)`
-    for the same array).
+    for the same array), **but not always** (survey of bead
+    domain-pascal-m2m2, below: the table counts a pointer by its own
+    first definition, so `movea.l #abs,An; ...; lea (k,An),Ap` falls in
+    its "pointer in a register" column): of the absolute bases of the
+    `dbf` loops, 28 are adjusted in place and 30 are the pointer itself
+    from 0, against 31 loaded into a register of their own and formed
+    into a new one with `lea (k,An),Ap` or `movea.l An,Ap` (14 of them
+    with the base's register read otherwise, a block held for other
+    statements: AREA_$INIT 0xE2F44A, XNS_IDP_$INIT 0xE3031C).  Among the
+    single-pointer loops with `from × size` non-zero, 23 in place against
+    9 new (EC2_$INIT_S 0xE30978 `movea.l #EC2_$WAIT_ECS,A0; moveq
+    #63,D2; lea (12,A0),A2`; TPAD_$INIT 0xE33596; DISK_$LVUID_TO_VOLX
+    0xE6D166 `movea.l #DISK_$DVTBL,A0; moveq #1,D1; lea (72,A0),A1`
+    where DISK_$DISMOUNT 0xE6D05C has `movea.l #DISK_$DVTBL,A1; moveq
+    #1,D3; lea (72,A1),A1`); a call in the body, a `with` copy at the
+    head, the index register, the count's form and the routine's
+    alignment class do not separate them.  So the in-place form `dpc`
+    uses for an absolute base is the majority's, not a rule: a register
+    question of the kind of bead domain-pascal-1ibr.
   - *Placement:* `lea` after the count and the index, as from a pointer
     (FIND_VOLX 0xE6B0DA `moveq #5,D3; moveq #1,D4; lea (32,A5),A0`; DBUF_$
     INVALIDATE 0xE3AA0C `move.w D0,D4; lea (36,A5),A2`, the count's
@@ -6769,6 +6787,92 @@ scripts besides, not kept, are named as such below; re-check sites with
     loops of the table).  An element passed by address goes through the
     pointer: `pea (d,Ap)` (XPD_$INIT 0xE3236C `pea (1144,A2)`; TIME_$INIT
     0xE2FEA4 `pea (4860,A2)`).
+- **Arrays at an offset from their pointer, of another data section's block,
+  of the enclosing routine's frame, of a row (survey Verified at the sites
+  given; rules fitted; bead domain-pascal-m2m2).**  The sites: the srcsurvey
+  refusals at ../source ec814eec (21) and `tools/loopalign.py`'s stepped
+  pointers of the `dbf` loops, classed by an ad-hoc script (not kept) by the
+  definition of the register a pointer is formed from.
+  - *At an offset from the pointer* (`p^.f[i]`, a record parameter's field):
+    formed as at offset 0, `lea (from × size,An),Ap` off the pointer's
+    register, the array's offset from the pointer in the displacements with
+    the field's, less `lo × size`.  RING_$PROC2_CLEANUP 0xE76A80 `lea
+    (0x8,A2),A3`, the channels at 0x62 of `u^`, 8-byte elements from 1, at
+    `(0x5a,A3)`, `(0x5c,A3)`; XNS_IDP's module-local 0xE17DE0 `lea
+    (0x4,A2),A4`, `pkt.data.pages` at 0x3C, `tst.l (0x38,A4)`;
+    REM_NAME_$READ_REP 0xE4ABE6 `lea (0x12,A1),A0`, 18-byte `reps` at 0x18
+    from 1, `lea (0x6,A0),A4`; MAC_$DEMUX 0xE0BC8C `lea (A2),A1` with
+    `(0x2,A1)` and MAC_$RECEIVE 0xE0BE5C `lea (A3),A1`, arrays at 2 from 0,
+    beside a frame array's `lea (A6),A0`, the source formed first;
+    VTOC_$LOOKUP 0xE3907A and VTOC_$ALLOCATE 0xE389AE `lea (A2),A0` / `lea
+    (A1),A0` off a `with` record's register, `tst.l (0x10,A0)`; RING's
+    module-local 0xE763D2 (a run-time lower bound, the pointers formed from
+    the index) with `(0xb0,A1)`.  An element passed by address is `pea
+    (d,Ap)` as at offset 0 (PEB_$LOAD_WCS 0xE32158 `lea (A2),A3`, `pea
+    (4,A3)`, `header^.entries` at 4 from 0).  One exception: AUDIT's
+    module-local 0xE7131C (../source audit_$load_list), loop at 0xE7140E,
+    forms the pointer to `header^.entries[1]` (0x10, 8-byte elements from 1)
+    *before* the count, as a data computation, `moveq #0x10,D0; add.l A2,D0;
+    movea.l D0,A3`, and passes the element as `pea (A3)` (the rule's `lea
+    (8,A2),A3` and `pea (8,A3)`): no other pointer of the `dbf` loops is
+    formed with `add.l An,Dn`.  Likely (unverified) the original stepped a
+    pointer variable of its own, set by `x + c` pointer arithmetic (the
+    `moveq #c,Dn; add.l An,Dn` shape of section 5.2, "Pointer arithmetic
+    through type transfers", which lists 0xE7140E), rather than indexing
+    `entries[i]`.  `dpc` refuses an element of an array at an offset from
+    its pointer passed by address in a loop from other than 0 (the only such
+    site), and with a run-time bound an array of another data section's
+    block (TPAD_$INIT, below, the only such site).
+  - *The unit's block in another data section* (a routine in OS_INIT_PROC
+    over its module's .DATA or WIRED_DATA, codegen-patterns 11): as another
+    unit's object, `movea.l #block,Ap` with the block's start as the
+    immediate, adjusted in place by `from × size`, the `movea.l` placed as
+    for the other in-place bases; from 0 the pointer itself.  The array's
+    offset in the block goes into the displacements: TIME_$INIT 0xE2FE94
+    `moveq #63,D3; movea.l #0xE29198,A2; moveq #1,D4; lea (12,A2),A2`, `pea
+    (0x12fc,A2)` (the queues at 0x1308); HINT_$INIT_CACHE 0xE313DA (the
+    cache at 0); NETWORK_$INIT 0xE2F688 `movea.l #0xE248FC,A0; moveq #63,D0;
+    addq.l #8,A0`, `(56,A0)`; MSG_$FORK 0xE73F20, MSG_$FREE_ASID 0xE74E3C
+    (the MSG_UNWIRED block); from 0, IO_$INIT 0xE32924 `moveq #4,D2; movea.l
+    #0xE2C368,A3` with `(0x60,A3)`, EC2_$INIT_S 0xE3099E `move.w #0xe0,D1;
+    clr.w D2; movea.l #0xE7C06C,A0`, NETBUF_$INIT 0xE2F64C, DIR_$OLD_INIT
+    0xE31502; all with constant bounds.  The exception (the absolute bases'
+    question above), and the only such loop with a run-time count:
+    TPAD_$INIT 0xE33596 `movea.l #0xE8245C,A0; moveq #1,D3; lea (44,A0),A2`,
+    not explained.  A block already in a register for other statements gives
+    the pointer from that register (XNS_IDP_$INIT 0xE3031C `lea (A0),A2`,
+    AREA_$INIT 0xE2F44A `lea (4,A4),A2`, but FILE_$LOCK_INIT 0xE327C4
+    `movea.l A3,A0` from 0, and ACL_$INIT 0xE3114A `movea.l A0,A1`): not
+    settled.  SOCK_$INIT 0xE2FE02 holds the block in D3 and forms two
+    pointers from it (`movea.l D3,A0; lea (0x1c,A0),A4; addq.l #4,A0;
+    movea.l A0,A3`): not settled (bead domain-pascal-hxwq, its item 3).
+  - *The enclosing routine's frame* (a nested routine's loop over its
+    parent's array, or through its parent's pointer variable): no stepped
+    pointer.  The 7 such loops found step a *scaled index register* instead
+    (and no stepped pointer of the `dbf` loops is formed from a static link
+    or the dynamic link `(A6)`), initialised to `from × size` (`moveq`,
+    `clr.l`) and stepped by `addq.l #size,Dx` before the `dbf`, the element
+    at `lea (0,Al,Dx.l),Ae` off the static link each iteration (or
+    `(d,Al,Dx.l)`): NETWORK_$REPORT_FAILURE's nested routines 0xE10958
+    (`moveq #4,D4`; `lea (0,A2,D4.l),A0; move.l (-244,A0),-(SP)`; A2 the
+    dynamic link `movea.l (A6),A2`), 0xE10B6A, 0xE10BD4, 0xE10C30, 0xE113E8;
+    AST_$GET_DISM_SEQN's 0xE01514 (`clr.l D1`, `cmpi.l #..,(-136,A0)`);
+    RIP_$SERVER's rip_$process_request 0xE688F4 (`moveq #6,D5`; the parent's
+    array and its parent's pointer `payload_va^`, `lea (0,A1,D5.l),A2; lea
+    (0,A0,D5.l),A3`).  The same shape appears outside nested routines (about
+    80 `dbf` loops by a heuristic match: the 2-D rows below,
+    DIR_$OLD_CLEANUP's 48-byte loops, but also an array through a pointer
+    parameter, AST_$GET_ SEG_MAP 0xE06F00 `tst.l (0,A2,D4.l)`, where a
+    stepped pointer is the rule above): what selects it is not known (bead
+    domain-pascal-ga54).
+  - *A row of another array* (`a[j][i]`, `j` left alone by the loop):
+    ACL_$ADD_PROJ 0xE47EE2..0xE47F3E forms the row's address once (`movea.l
+    #block+60000,A1; lsl.w #6,D0; lea (0,A1,D0.w),A1`) and steps a scaled
+    index register (`moveq #8,D2`, `lea (0,A1,D2.l),A0`, `addq.l #8,D2`;
+    ACL_$DELETE_PROJ, ACL_$GET_PROJ_LIST 0xE48080, ACL_$SET_PROJ_LIST the
+    same), while VTOC's module-locals 0xE382D0 and 0xE38354 form the row's
+    address into the base's register (`lsl.l #6,D2; lea (0,A0,D2.l),A0`) and
+    step that as the pointer (`lea (0x10,A0),A0`): not settled.
 - **Run-time bounds.**  The count `hi - lo` is computed into a register
   and guarded before the loop: `subq.w #1,T; bmi EXIT` for `lo = 1`
   (LOG_$READ's worker 0xE177DC; DTTY_$WRITE_STRING 0xE1D6AC), `sub.w
@@ -7000,6 +7104,11 @@ scripts besides, not kept, are named as such below; re-check sites with
     A5|A6|#sym,Ap` with its `addq.l`/`lea` adjustment, the `movea.l`
     placed before the last count or index instruction when adjusted;
     the array's offset in the displacements;
+  - arrays at an offset from their pointer variable, the offset in the
+    displacements, and arrays of the unit's block in another data
+    section, `movea.l #block,Ap` as another unit's object, when no
+    register holds the block (bead domain-pascal-m2m2; `isel.rs`
+    `stepped_arrays`, `step_plan`, `SteppedArray::base_offset`);
   - `with a[i] do` over a stepped element: `movea.l Ap,Aw` where the
     `with` stands, the array's offset in the references (the `with`
     temporary rebased, `with_rebase`); an element passed by address,
@@ -7021,13 +7130,20 @@ or `e - c` (the guard of its value not surveyed), through a pointer (no
 indexed or unheld frame variable (not surveyed); from another constant
 (the `subq.w #k`/`subi.w #k` seen only without a call); an unsigned
 index (`tst.w; beq`, the `subq.w`'s place); a run-time `lo`; run-time
-`downto` (not surveyed); stepped pointers through
-arrays of another data section's block or the enclosing routine's frame
-(not surveyed), from the start of the unit's data area with
+`downto` (not surveyed); arrays of the enclosing routine's frame or
+through its pointer variables, and rows of other arrays (a scaled index
+register, not implemented; bead domain-pascal-ga54); arrays of another
+data section's block that a register already holds (bead
+domain-pascal-hxwq) or with a run-time bound (TPAD_$INIT 0xE33596); an
+element of an array at an offset from its pointer passed by address
+from other than 0 (0xE7140E); two arrays through one pointer variable
+(bead domain-pascal-y1yj); a part of a stepped element at displacement
+0 (a word of a longword element, say: `(An)` or `(An)+`, not seen);
+stepped pointers from the start of the unit's data area with
 displacements in a byte (11 `lea (A5)` against 3 `movea.l A5`), in
 place together with another stepped pointer (order), two arrays of one
 element size in the unit's data or the frame (sharing), the unit's data
-addressed absolutely, at an offset from their pointer, through a
+addressed absolutely, through a
 pointer the body may change, at an index computed from the loop index
 (`a[i + 1]`), or reached at displacement 0 (`(An)+`, 0xE00ED8, 0xE0287A);
 the address of a stepped element other than a `with` record's; the
@@ -7042,8 +7158,10 @@ never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
 
 Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
-`loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`;
+`loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`,
+`loops/stepped_offset.pas`, `loops/stepped_other_section.pas`;
 exec tests `tests/exec/stepped_data.pas`, `tests/exec/stepped_data_more.pas`,
+`tests/exec/stepped_offset.pas`,
 `tests/exec/for_runtime.pas`; tests `crates/dpc-m68k/src/isel.rs`
 (`for_with_index_and_call`, `for_forms`, `for_runtime_upper_bounds`,
 `stepped_pointer_loops`, `constant_address_stepped_loops`,
