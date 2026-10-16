@@ -3695,7 +3695,15 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
         ));
     }
     let x = lhs;
-    let ty = scalar_of(p, x)?;
+    let ty = match scalar_of(p, x)? {
+        // A one-byte set compared with `[]`: widened to a word and
+        // tested there, acl_$prim_create_internal 0xE45270..0xE45278
+        // `clr.w D1; move.b (27,A4),D1; tst.w D1; beq.s` (`prot.
+        // world_rights <> []`, ../source's reading; codegen-patterns 5.1,
+        // "One-byte sets"; the only site).
+        t if t.width == Width::Byte => Scalar::unsigned(Width::Word),
+        t => t,
+    };
     let l = set_value(p, x, ty)?;
     Ok(Cond::Compare {
         op: rel,
@@ -3944,7 +3952,14 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     } else if is_set(p, target.ty) {
         // A set expression takes the target's size (its constructors have
         // their own, ref 3.9.3).
-        set_value(p, value, ty)?
+        if ty.width == Width::Byte
+            && p.types.size(value.ty) == 2
+            && !matches!(value.kind, ExprKind::SetCons(_) | ExprKind::Binary { .. })
+        {
+            byte_set_narrow(p, value)?
+        } else {
+            set_value(p, value, ty)?
+        }
     } else {
         let v = value_of(p, value)?;
         if v.ty().width != ty.width {
@@ -4725,6 +4740,23 @@ fn set_value(p: &Program, e: &SExpr, ty: Scalar) -> Res<Expr> {
         }
         _ => {
             let v = value_of(p, e)?;
+            if v.ty().width == Width::Byte && ty.width == Width::Word {
+                // A one-byte set (`[byte] set of 0..7`) used as a word
+                // set: zero-extended, `clr.w Dn; move.b <ea>,Dn` (member
+                // k stays bit k; codegen-patterns 5.1, "One-byte sets"):
+                // assigned, ACL_$MIN_RIGHTS 0xE4691C (`rights :=
+                // world_rights`, held in D2) and acl_$prim_create_
+                // internal 0xE45850 (D3); a `-` operand, 0xE4692A `clr.w
+                // D3; move.b (-0x14,A6),D3; not.w D3; and.w D3,D2`; a `+`
+                // operand, acl_$eval_acl_entries 0xE462C0 `...; or.w
+                // D5,D1`; a `*` operand, 0xE46222 `clr.w D0; move.b
+                // (0x1c,A2),D0; and.w (0x1a,A0),D0`; compared with `[]`,
+                // 0xE45270 `clr.w D1; move.b (27,A4),D1; tst.w D1`; a
+                // word value argument, 0xE45360 `clr.w D0; move.b
+                // (0x18,A4),D0; move.w D0,-(SP)`.  Into a longword set:
+                // no site, refused below.
+                return Ok(convert(v, ty));
+            }
             if v.ty().width != ty.width {
                 return Err(unsupported(
                     e.span,
@@ -4828,6 +4860,88 @@ fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Ex
         elem: Box::new(elem),
         set: Box::new(set),
         set_width,
+    })
+}
+
+/// A one-word set value `e` assigned to a one-byte set (codegen-patterns
+/// 5.1, "One-byte sets"): its low byte, members 8..15 dropped (a `set of
+/// 0..15` value with such members is outside the target's type; the
+/// image does not check).  A function result, `move.b D0,<ea>`
+/// (acl_$convert_image 0xE44F56 and acl_$expand_default_acl 0xE45A50,
+/// `acl_$rights_t(acl_$convert_rights(...))` in ../source's reading); a
+/// word in memory, its low byte read in place (acl_$find_acl_slot
+/// 0xE45F24 `move.b (2061,A2),(27,A1)`, a unit array element's word field
+/// at 0x80C, through a type transfer).  Refused: any other value (a
+/// computed word set: no site), a volatile word, and a local or value
+/// parameter of the routine (`Addr::Frame`: which of them the selector
+/// holds in a register is decided later, and neither a held one nor one
+/// in the frame has a site).
+fn byte_set_narrow(p: &Program, e: &SExpr) -> Res<Expr> {
+    let v = set_value(p, e, scalar_of(p, e)?)?;
+    let byte = Scalar::unsigned(Width::Byte);
+    let call = |x: &Expr| matches!(x, Expr::Call { .. });
+    match &v {
+        Expr::Load {
+            addr: Addr::Frame(_),
+            ..
+        } => Err(unsupported(
+            e.span,
+            "assigning a one-word set local or value parameter to a one-byte set (held in a \
+             register or in the frame: no site; codegen-patterns 5.1, \"One-byte sets\") is",
+        )),
+        Expr::Load { addr, .. } if !matches!(addr, Addr::Volatile { .. }) => Ok(Expr::Convert {
+            value: Box::new(v),
+            ty: byte,
+            in_place: true,
+        }),
+        x if call(x) || matches!(x, Expr::Convert { value, .. } if call(value)) => {
+            Ok(Expr::Convert {
+                value: Box::new(v),
+                ty: byte,
+                in_place: false,
+            })
+        }
+        _ => Err(unsupported(
+            e.span,
+            "assigning a one-word set that is not a function result or a word in memory to a \
+             one-byte set (no site; codegen-patterns 5.1, \"One-byte sets\") is",
+        )),
+    }
+}
+
+/// `lhs in rhs` for a one-byte set (`[byte] set of 0..7`, ref 3.15.5
+/// p. 3-61 and the owner's ruling, reference-clarifications "A size
+/// attribute on a set type": member k is bit k of the byte): a constant
+/// member, [`Expr::SetMember`] of byte width, which the selector tests
+/// on the byte in memory (`btst #k,(d,An)`, the rule of codegen-patterns
+/// 5.1 "`in` on sets in memory, constant member", whose last byte is here
+/// the whole set).  Image: acl_$setids 0xE46B90 `btst.b #0,(-0x5d,A6)`
+/// (`0 in attrs.obj_flags`), ACL_$MIN_RIGHTS 0xE46922 `btst.b
+/// #4,(-0x14,A6)` (`4 in owner_rights`), APP_$RECEIVE's `btst.b
+/// #3,(7,A3); sne` (`3 in hdr^.rh_flags_07`; ../source app/receive.pas).
+/// A run-time member is refused (its sites, AREA's area_$free_slot_
+/// segments 0xE08328..0xE0832E `clr.w D6; ...; move.b (A2),D6; btst.l
+/// D5,D6`, widen the byte into a register first: not reproduced).
+fn byte_set_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
+    if lhs.value.is_none() {
+        return Err(unsupported(
+            lhs.span,
+            "`in` on a one-byte set with a run-time element (`clr.w; move.b; btst Dk,Dn` at \
+             AREA's area_$free_slot_segments 0xE08328: not reproduced; codegen-patterns 5.1, \
+             \"One-byte sets\") is",
+        ));
+    }
+    if rhs.value.is_some() {
+        return Err(unsupported(
+            rhs.span,
+            "`in` on a one-byte constant set (no site; codegen-patterns 5.1, \"One-byte \
+             sets\") is",
+        ));
+    }
+    Ok(Expr::SetMember {
+        elem: Box::new(value_of(p, lhs)?),
+        set: Box::new(value_of(p, rhs)?),
+        set_width: Width::Byte,
     })
 }
 
@@ -5266,6 +5380,7 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
             // `btst`, MST_$ALLOC_ASID 0xE42D5C) are not implemented yet.
             let set_size = p.types.size(rhs.ty);
             let set_width = match set_size {
+                1 => return byte_set_member(p, lhs, rhs),
                 2 => Width::Word,
                 4 => Width::Long,
                 _ => return set_member_at(p, e, lhs, rhs, set_size),

@@ -660,6 +660,123 @@ fn byte_variables_parameters_and_results() {
 }
 
 #[test]
+fn byte_sets_are_one_byte() {
+    // The owner's ruling (reference-clarifications, "A size attribute on
+    // a set type", on 3.15.5 p. 3-61): `[byte] set of 0..7` is a 1-byte
+    // set, element k at bit k; as any one-byte object it may sit at an
+    // odd offset of an unpacked record (3.10.5.5).  "The compiler uses
+    // all of the bits" of a larger size: `[byte] set of 0..3` too.  A
+    // size equal to the set's own storage changes nothing.
+    let p = module(
+        "type
+           r8 = [byte] set of 0..7;
+           r4 = [byte] set of 0..3;
+           w8 = [word] set of 0..7;
+           l32 = [long] set of 0..31;
+           e = (a0, a1, a2);
+           re = [byte] set of e;",
+    );
+    assert_eq!(size(&p, "r8"), 1);
+    assert_eq!(align(&p, "r8"), 1);
+    assert_eq!(field_align(&p, "r8"), 1);
+    assert_eq!(size(&p, "r4"), 1);
+    assert_eq!(size(&p, "re"), 1);
+    assert_eq!(size(&p, "w8"), 2);
+    assert_eq!(size(&p, "l32"), 4);
+    assert_eq!(p.types.attrs(ty(&p, "r8")).size_bits, Some(8));
+    // Member k is bit k of the byte (ref 3.9.3 Figure 3-6 cut to a byte).
+    assert_eq!(p.types.set_bit_location(ty(&p, "r8"), 5), (0, 5));
+    // The rights byte follows the set's minimum (the bits its range
+    // needs): 9..16 elements need more than a byte (message 300).
+    assert_err(
+        "module m; type t = [byte] set of 0..8;",
+        "Size of 8 bits is invalid for specified type",
+    );
+    assert_err(
+        "module m; type t = [word] set of char;",
+        "Size of 16 bits is invalid for specified type",
+    );
+    // A size larger than the set's storage (`[long] set of 0..7`) or
+    // between a byte and it (`[byte(3)] set of 0..17`, a longword set) is
+    // refused; fewer bits than the range needs is message 300.
+    assert_err(
+        "module m; type t = [long] set of 0..7;",
+        "a size attribute larger than the type's own storage",
+    );
+    assert_err(
+        "module m; type t = [byte(3)] set of 0..17;",
+        "this size attribute",
+    );
+    assert_err(
+        "module m; type t = [long] set of 0..40;",
+        "Size of 32 bits is invalid for specified type",
+    );
+}
+
+#[test]
+fn byte_set_records_take_the_image_offsets() {
+    // ../source bca1d04b acl/acl.ins.pas and app/app.ins.pas (gap 95,
+    // pascal-translation-notes finding 153): the image's displacements
+    // (ACL_$MIN_RIGHTS 0xE46922 `btst.b #4,(-0x14,A6)` on owner_rights at
+    // 0x18 of prot at 0x0C of the record at -0x38; acl_$def_acldata
+    // 0xE47916..0xE47928 `move.b` to 0x18..0x1B; acl_$convert_image
+    // 0xE44FBE `bset #2,(28,A1)` on subsys_rights; acl_$setids 0xE46B90
+    // `btst.b #0,(-0x5d,A6)`, obj_flags at 0x03 of the record at -0x60;
+    // APP_$RECEIVE 0xE00904 `btst.b #3,(7,A3)`).
+    let p = module(
+        "type
+           uid_t = record high: integer32; low: integer32 end;
+           rights_t = [byte] set of 0..7;
+           prot_data_t = record
+             owner: uid_t; group: uid_t; org: uid_t;
+             owner_rights: [byte] set of 0..7;
+             group_rights: [byte] set of 0..7;
+             org_rights: [byte] set of 0..7;
+             world_rights: rights_t;
+             subsys_rights: rights_t;
+             reserved_1d: char; reserved_1e: char; reserved_1f: char;
+             owner_ext: array[1..3] of integer32;
+           end;
+           acl_attr_t = record
+             obj_type: [byte] 0..255;
+             sub_type: [byte] 0..255;
+             attr_02: char;
+             obj_flags: [byte] set of 0..7;
+             default_acl: uid_t;
+             prot: prot_data_t;
+           end;
+           rcv_hdr_t = record
+             unused_00: array[0..6] of char;
+             rh_flags_07: [byte] set of 0..7;
+             rh_node_08: integer32;
+           end;",
+    );
+    for (f, o) in [
+        ("owner_rights", 0x18),
+        ("group_rights", 0x19),
+        ("org_rights", 0x1A),
+        ("world_rights", 0x1B),
+        ("subsys_rights", 0x1C),
+        ("reserved_1f", 0x1F),
+        ("owner_ext", 0x20),
+    ] {
+        assert_eq!(offset(&p, "prot_data_t", f), o, "{f}");
+    }
+    assert_eq!(size(&p, "prot_data_t"), 0x2C);
+    for (f, o) in [
+        ("attr_02", 0x02),
+        ("obj_flags", 0x03),
+        ("default_acl", 0x04),
+        ("prot", 0x0C),
+    ] {
+        assert_eq!(offset(&p, "acl_attr_t", f), o, "{f}");
+    }
+    assert_eq!(size(&p, "acl_attr_t"), 0x38);
+    assert_eq!(offset(&p, "rcv_hdr_t", "rh_flags_07"), 0x07);
+    assert_eq!(offset(&p, "rcv_hdr_t", "rh_node_08"), 0x08);
+}
+
+#[test]
 fn sizes_equal_to_the_storage_change_nothing() {
     // ref 3.15.5 p. 3-60: `(n)` units, 1 by default; "big_number = [long]
     // integer16" reserves 32 bits, so `[byte(2)]` is 16 bits.

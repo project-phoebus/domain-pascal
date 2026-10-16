@@ -3541,6 +3541,24 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
     out
 }
 
+/// Whether the set value `e` is, or combines with `*`, a one-byte set
+/// widened to a word (lowering's `set_value`; codegen-patterns 5.1,
+/// "One-byte sets").
+fn widens_byte_set(e: &Expr) -> bool {
+    match e {
+        Expr::Convert { value, ty, .. } => {
+            value.ty().width == Width::Byte && ty.width == Width::Word
+        }
+        Expr::SetOp {
+            op: SetOp::Inter,
+            lhs,
+            rhs,
+            ..
+        } => widens_byte_set(lhs) || widens_byte_set(rhs),
+        _ => false,
+    }
+}
+
 /// Whether `e` reads the object at `a` (the same address, wrapper
 /// included).
 fn expr_reads_addr(e: &Expr, a: &Addr) -> bool {
@@ -9919,6 +9937,50 @@ impl Selector {
                 });
                 return Ok(());
             }
+            // `s := s - y` / `s := s + y` on a set held in a register:
+            // `y` into a register of its own (`not` for `-`), then `and`
+            // (`or`) into the set's register (codegen-patterns 5.1,
+            // "One-byte sets"): ACL_$MIN_RIGHTS 0xE4692A..0xE46932 `clr.w
+            // D3; move.b (-0x14,A6),D3; not.w D3; and.w D3,D2` (a byte set
+            // widened, ×3) and 0xE469D6..0xE469E0 `move.w (0x1a,A0),D1;
+            // ...; not.w D1; and.w D1,D2` (a word set); acl_$eval_acl_
+            // entries 0xE462C0..0xE462C6 `clr.w D5; move.b (25,A3),D5; or.w
+            // D5,D1` and 0xE4631C..0xE46326 (`accum + (x * y)`).  `+` only
+            // with a byte set widened in its operand: a word operand in
+            // memory might be `or`ed straight in (as an integer's `!` is,
+            // above), no site.
+            Expr::SetOp {
+                op: op @ (SetOp::Diff | SetOp::Union),
+                lhs,
+                rhs,
+                ty: sty,
+            } if matches!(&**lhs, Expr::Load { addr, ty } if *addr == me && ty == sty)
+                && !matches!(**rhs, Expr::Const { .. })
+                && !expr_reads_addr(rhs, &me)
+                && sty.width != Width::Byte
+                && (*op == SetOp::Diff || widens_byte_set(rhs)) =>
+            {
+                let v = self.eval(rhs)?;
+                let d = self.in_tmp(v, w)?;
+                if *op == SetOp::Diff {
+                    self.out.push(Insn::Unary {
+                        op: UnaryOp::Not,
+                        size,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                }
+                self.out.push(Insn::Alu {
+                    op: if *op == SetOp::Diff {
+                        AluOp::And
+                    } else {
+                        AluOp::Or
+                    },
+                    size,
+                    src: Ea::Reg(Reg::D(d)),
+                    dst: web,
+                });
+                return Ok(());
+            }
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => {
                 self.out.push(Insn::Scc { cond: Cond::T, dst });
                 return Ok(());
@@ -11401,6 +11463,40 @@ impl Selector {
         });
     }
 
+    /// A zero-extended argument pushed from `src`, whose code starts at
+    /// `start`: from its `clr` to the push one scheduling unit (12.4 R10,
+    /// [`crate::sched::Unit`]), so that R11 does not pull the `clr` into
+    /// the stall of the push or pad before it.  Survey (bead
+    /// domain-pascal-tq8w; codegen-patterns 5.1, "One-byte sets", and 8,
+    /// "Widening"): of the 66 pushes `clr.<w|l> Dn; move.<b|w> x,Dn;
+    /// move.<w|l> Dn,-(SP)` in the image, 54 have the three adjacent, 25
+    /// of them right after another push (0xE4EA80, 0xE59092, 0xE244C2),
+    /// 7 of those with the call's pad before that push (acl_$prim_create_
+    /// internal 0xE4535A..0xE45366 `subq.l #2,SP; move.l (0x12,A6),-(SP);
+    /// clr.w D0; move.b (0x18,A4),D0; move.w D0,-(SP)`, ×6; 0xE02A06); R11
+    /// alone would hoist the `clr` above every push of such a chain.  The
+    /// other 12 are the early-`clr.l` family (NET's module-local 0xE5A13C;
+    /// bead domain-pascal-sjzf, not reproduced).
+    fn zero_extension_unit(&mut self, start: usize, src: &Ea) {
+        let Ea::Reg(Reg::D(d)) = *src else {
+            return;
+        };
+        let end = self.out.len();
+        let clr = (start..end).find(|&i| {
+            matches!(&self.out[i], Insn::Clr { size: Size::W | Size::L, dst: Ea::Reg(Reg::D(r)) }
+                if *r == d)
+        });
+        let Some(c) = clr else {
+            return;
+        };
+        // The `clr`, the narrower load into the register, the push.
+        if end - c == 3
+            && matches!(&self.out[c + 1], Insn::Move { dst: Ea::Reg(Reg::D(r)), .. } if *r == d)
+        {
+            self.units.push((c, end));
+        }
+    }
+
     /// Push one argument (codegen-patterns 1.3, 1.5).
     ///
     /// By value:
@@ -11568,6 +11664,7 @@ impl Selector {
                     // 0xE1CE56 `move.b D0,-(SP)`; arguments are evaluated in
                     // push order, codegen-patterns 12).
                     e => {
+                        let start = self.out.len();
                         self.in_args = true;
                         let v = self.eval(e);
                         self.in_args = false;
@@ -11582,9 +11679,10 @@ impl Selector {
                         };
                         self.out.push(Insn::Move {
                             size: size_of(e.ty().width),
-                            src,
+                            src: src.clone(),
                             dst,
                         });
+                        self.zero_extension_unit(start, &src);
                     }
                 }
             }
@@ -16131,6 +16229,11 @@ impl Selector {
                     });
                     return Ok((None, Cond::Ne));
                 }
+                if w == Width::Byte {
+                    // A one-byte set (codegen-patterns 5.1, "One-byte
+                    // sets"): only the test in memory has sites.
+                    return Err(Self::byte_set_whole(self.span));
+                }
                 let (ea, lw) = if narrow && w == Width::Long && k < 16 {
                     (self.byte_of(ea, 2)?, Width::Word)
                 } else {
@@ -16147,6 +16250,7 @@ impl Selector {
                 });
                 d
             }
+            _ if w == Width::Byte => return Err(Self::byte_set_whole(self.span)),
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -16154,6 +16258,9 @@ impl Selector {
                 ))
             }
         };
+        if w == Width::Byte {
+            return Err(Self::byte_set_whole(self.span));
+        }
         if matches!(k, 7 | 15 | 31) {
             return Err(Self::sign_member(self.span));
         }
@@ -16162,6 +16269,17 @@ impl Selector {
             dst: Ea::Reg(Reg::D(r)),
         });
         Ok((Some(r), Cond::Ne))
+    }
+
+    /// The refusal of [`Self::set_bit_test`] for a one-byte set that is
+    /// not tested in memory at `(An)`, `(d,An)` or an absolute address.
+    fn byte_set_whole(span: Span) -> Diagnostic {
+        unsupported(
+            span,
+            "`in` on a one-byte set held in a register, indexed or volatile (only `btst \
+             #k,(d,An)` on the byte has sites, ACL_ 0xE46922; codegen-patterns 5.1, \"One-byte \
+             sets\") is",
+        )
     }
 
     /// The refusal of [`Self::set_bit_test`] for bit 7, 15 or 31 of a
@@ -16817,6 +16935,13 @@ impl Selector {
     /// mod 32 (no range check; on a word set a member above 15 is lost
     /// when the word is used, one of 32 and above wraps).
     fn set_of(&mut self, elem: &Expr, w: Width) -> Res<u8> {
+        if w == Width::Byte {
+            return Err(unsupported(
+                self.span,
+                "`[k]` with a run-time member as a one-byte set (AREA 0xE08398 builds it in a \
+                 word: not reproduced; codegen-patterns 5.1, \"One-byte sets\") is",
+            ));
+        }
         let v = self.eval(elem)?;
         let d = self.alloc_d()?;
         self.out.push(Insn::Clr {
@@ -16858,6 +16983,15 @@ impl Selector {
     /// catalogued.
     fn set_op_value(&mut self, op: SetOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
         let w = ty.width;
+        if w == Width::Byte {
+            // A one-byte set is widened to a word when combined with one
+            // (lowering's `set_value`); one-byte operations have no site.
+            return Err(unsupported(
+                self.span,
+                "a set operation on one-byte sets as a value (no site; codegen-patterns 5.1, \
+                 \"One-byte sets\") is",
+            ));
+        }
         let konst = |e: &Expr| matches!(e, Expr::Const { .. });
         match op {
             SetOp::Inter if konst(lhs) || konst(rhs) => self.binary(BinOp::And, lhs, rhs, ty),
@@ -16966,11 +17100,27 @@ impl Selector {
         }
         let w = ty.width;
         let size = size_of(w);
-        let all: u64 = if w == Width::Long {
-            0xffff_ffff
-        } else {
-            0xffff
+        let all: u64 = match w {
+            Width::Long => 0xffff_ffff,
+            Width::Word => 0xffff,
+            // A one-byte set (codegen-patterns 5.1, "One-byte sets"):
+            // `bset`/`bclr #k` on its byte, acl_$convert_image 0xE44FBE
+            // `bset #2,(28,A1)`, acl_$image_internal 0xE47D40..0xE47D58
+            // `bclr #6,(24..28,A3)`, acl_$get_obj_acl_attrs 0xE46084
+            // `bclr #0,(3,A2)`.
+            Width::Byte => 0xff,
         };
+        let one_member = matches!(&**rhs, Expr::Const { value: c, .. }
+            if ((*c as u64) & all).count_ones() == 1);
+        if w == Width::Byte && !one_member {
+            // Only `bset`/`bclr` of one member is seen on a one-byte set.
+            return Err(unsupported(
+                self.span,
+                "updating a one-byte set other than by one constant member (several constant \
+                 members or a set: no site; `s - [k]` at AREA 0xE08398 builds the member in a \
+                 word: not reproduced; codegen-patterns 5.1, \"One-byte sets\") is",
+            ));
+        }
         if let Expr::Const { value: c, .. } = &**rhs {
             let mask = (*c as u64) & all;
             if mask == 0 {

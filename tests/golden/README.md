@@ -31,6 +31,17 @@ Tests:
 - `sets/in_const_set` - codegen-patterns 5.1 ("`x in c`"; bead
   domain-pascal-bitu): AS_IO_SETUP 0xE6B75C, DISK_$DISMOUNT 0xE6CFF8,
   TTY_$K_SET_DELAY 0xE67A18, PROC1_$TST_LOCK 0xE148DE.
+- `sets/byte_sets` - codegen-patterns 5.1 ("One-byte sets"; bead
+  domain-pascal-tq8w): `[byte] set of 0..7` fields as ../source's ACL_
+  and APP_ records have them: `btst #k` on the byte (ACL_$MIN_RIGHTS
+  0xE46922, APP_$RECEIVE 0xE00904), `clr.b`/`move.b #c` stores
+  (acl_$convert_image 0xE44EDC, acl_$def_acldata 0xE47916), `bset`/`bclr`
+  updates (0xE44FBE, acl_$image_internal 0xE47D40), widening into a held
+  word set and its in-place `not; and`/`or` (0xE4691C..0xE46956,
+  acl_$eval_acl_entries 0xE462C0), `<> []` widened (acl_$prim_create_
+  internal 0xE45270), a widened argument after the pad and a push
+  (0xE4535A), narrowing (acl_$expand_default_acl 0xE45A50,
+  acl_$find_acl_slot 0xE45F24).
 - `stores/entry_loads` - codegen-patterns 12.2, 13, 1.3, 2:
   TIME_$Q_INIT_QUEUE 0xE16C5E.
 - `stores/one_stmt_entry_loads` - codegen-patterns 12.2 ("One-statement

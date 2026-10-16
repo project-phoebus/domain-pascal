@@ -2551,7 +2551,7 @@ variables.  Each module's static data is a data segment, addressed off
 | `char` | 1 | |
 | enumeration | 2 | ordinal in a word (ref 3.7.1) |
 | pointer, `univ_ptr` | 4 | |
-| set | ⌈(max ordinal + 1)/16⌉ words | ref 3.9.3; see 5.1.  The high end of the base type decides, whatever the low end: `set of 80..170` is 11 words, `set of 'a'..'z'` 8 words (p. 3-17); checked by `crates/dpc-sema/src/tests/layout.rs` |
+| set | ⌈(max ordinal + 1)/16⌉ words | ref 3.9.3; see 5.1.  The high end of the base type decides, whatever the low end: `set of 80..170` is 11 words, `set of 'a'..'z'` 8 words (p. 3-17); checked by `crates/dpc-sema/src/tests/layout.rs`.  `[byte] set of 0..7` (a size attribute, ref 3.15.5 p. 3-61; owner's ruling, reference-clarifications): 1 byte, byte aligned, at odd offsets in unpacked records (ACL_ 0x19, 0x1B, 0x03; APP_ 0x07; 5.1 "One-byte sets"; `crates/dpc-sema/src/tests/attrs.rs`) |
 | record | ref 3.10.5 (alignment rules: "natural" vs default word alignment; `aligned`/`unaligned` records; attributes and directives: section 5.4) | **Reported: default word alignment** (ref 3.10.5.5: fields longer than a byte on word boundaries, record size even).  `route_$port_stats_t` (`../source/domain_os/route/route.h`) has longwords at 0x2 and 0x6, which natural alignment cannot produce: ROUTE_RTWIRED code `addq.l #1,(0x6,A2)` 0xE87660, `addq.l #1,(0xA,A2,D1.l)` 0xE8765A (seen; that A2 is the record start is the C's claim).  `proc1_t` (`proc1/proc1.h`) also matches word rules.  Field offsets in `_Static_assert`s remain ground truth |
 | arrays | 1-based is common in the kernel; element N at base + (N-lo)*size | |
 
@@ -3041,6 +3041,122 @@ model run against the bit model of Figure 3-6).
     part reused for several tests (PROC1_$SUSPEND, TTY_$I_RCV 0xE1BBC2
     `move.w (22,A2),D1` for members 9, 3 and 4) is not reproduced: `dpc`
     tests each member in memory (bead domain-pascal-ozaq).
+
+#### One-byte sets (Verified at the ACL_ and APP_ sites; implemented, bead domain-pascal-tq8w)
+
+`[byte] set of 0..7` is a one-byte set, member k at bit k (ref 3.15.5
+p. 3-61; the owner's ruling, reference-clarifications "A size attribute
+on a set type"), byte aligned, so it may sit at an odd offset of an
+unpacked record (3.10.5.5).  ../source bca1d04b uses it for ACL_'s five
+rights bytes at 0x18..0x1C of the protection record, its attribute
+record's flags byte at 0x03 and APP_'s received header's flags at 0x07
+(`acl/acl.ins.pas`, `app/app.ins.pas`; its pascal-translation-notes
+finding 153).  The sites, in ../source's reading of the routines (the
+image cannot show that the fields were declared so: a `[byte] 0..255`
+with `&` would give the same code for most of them; the `btst`/`bset`
+forms are the set forms of the word sets above):
+
+- **`k in s`, a constant member:** `btst #k` on the byte, the "constant
+  member in memory" rule above, whose low-order byte is here the whole
+  set: ACL_$MIN_RIGHTS 0xE46922, 0xE46934, 0xE46946 `btst.b
+  #4,(-0x14..-0x12,A6)`; acl_$setids 0xE46B90 `btst.b #0,(-0x5d,A6)`;
+  acl_$prim_create_internal 0xE45244..0xE45268 (×4), acl_$eval_acl_entries
+  0xE4617E, 0xE462A2, 0xE4636C; as a value APP_$RECEIVE 0xE00904 `btst.b
+  #3,(7,A3); sne D0`.  Member 7 is the byte's sign, `tst.b; bmi`: no
+  byte-set site, but the byte-level rule of 5.3 (no `btst #7` on memory
+  in compiled code, 422 sites with k = 0..6) and the word sets' member 7
+  (0xE1B63E) give it.  Refused: a set held in a register, indexed or
+  volatile (no site), and a run-time member.  **Run-time member sites
+  exist** (AREA's area_$free_slot_segments, a one-byte set in a packed
+  record in ../source's reading): 0xE08328..0xE0832E `clr.w D6; ...;
+  move.b (A2),D6; btst.l D5,D6`, the byte widened and tested in a
+  register; `dpc` still refuses them (follow-up bead).
+- **Stores:** `[]` as `clr.b` (acl_$convert_image 0xE44EDC `clr.b
+  (27,A0)`), a constant as `move.b #c` (acl_$def_acldata 0xE47916..
+  0xE47928 `move.b #0x10,(0x18,A0)` ×3, `move.b #0xf,(0x1b,A0)`; ACL_$COPY
+  0xE4941E `move.b #15,(-140,A6); move.b #7,(-139,A6)`), another byte set
+  as `move.b` (0xE4942A `move.b (-139,A6),(-137,A6)`).  The adjacent
+  constant bytes of both routines are kept apart (two more byte pairs
+  for the store-merging survey, 13; `dpc` still refuses such pairs, bead
+  domain-pascal-2m0).
+- **`s := s + [k]`, `s := s - [k]`:** `bset`/`bclr #k` on the byte
+  (acl_$convert_image 0xE44FBE..0xE44FFE `bset #2,(28,A1)`, then #1, #0,
+  #3, #6;
+  acl_$image_internal 0xE47D40..0xE47D58 `bclr #6,(24..28,A3)`;
+  acl_$get_obj_acl_attrs 0xE46084 `bclr #0,(3,A2)`).  Refused: several
+  constant members (`ori.b`/`andi.b`: no site), a set operand, and a
+  run-time member, whose site the same AREA routine has: 0xE08398..
+  0xE083A4 `slot.bits - [bit]` as `clr.w D0; clr.w D1; bset D5,D0;
+  move.b (A2),D1; not.w D0; and.w D1,D0; move.b D0,(A2)` (the member
+  set built in a word, the byte widened, the result stored back as a
+  byte; still refused, follow-up bead).
+- **Widened to a word:** a byte set used with a word set (assigned to
+  one, an operand of `+`, `-`, `*`, compared with `[]`, passed to a word
+  value parameter) is zero-extended, `clr.w Dn; move.b <ea>,Dn`, and then
+  takes the word forms: assigned, ACL_$MIN_RIGHTS 0xE4691C `clr.w D2;
+  move.b (-0x11,A6),D2` (`rights := world_rights`, held in D2),
+  acl_$prim_create_internal 0xE45850 (D3); a function result,
+  acl_$eval_acl_entries 0xE46198, 0xE4638A, 0xE463D4 (`clr.w D0; move.b`;
+  set-valued functions are refused, section 3); `-`, 0xE4692A..0xE46932
+  `clr.w D3; move.b (-0x14,A6),D3; not.w D3; and.w D3,D2` (×3); `+`,
+  acl_$eval_acl_entries 0xE462C0 `clr.w D5; move.b (25,A3),D5; or.w
+  D5,D1`; `*`, 0xE46222 `clr.w D0; move.b (0x1c,A2),D0; and.w
+  (0x1a,A0),D0` and 0xE4631C (`... and.w (26,A0),D5; or.w D5,D1`): the
+  widened operand in the register, the word one `and`ed in from memory,
+  which is `dpc`'s `x * y` rule (above) for the byte set as the *right*
+  operand (../source writes it left: `prot.subsys_rights *
+  entry^.rights`; under `dpc`'s rule that is refused, "left operand is
+  computed"); compared with `[]`, acl_$prim_create_internal
+  0xE45270..0xE45278 `clr.w D1; move.b (27,A4),D1; tst.w D1; beq.s` (the
+  only site; not `tst.b`); a word value argument, 0xE4535A..0xE45366
+  `subq.l #2,SP; move.l (0x12,A6),-(SP); clr.w D0; move.b (0x18,A4),D0;
+  move.w D0,-(SP)` (×6).  Into a longword set: no site, refused.
+- **A held word set updated in place:** `s := s - y` with `s` held in a
+  register is `y` into a register of its own, `not`, `and` into `s`'s
+  register, for a widened byte set (above) and for a word set
+  (ACL_$MIN_RIGHTS 0xE469D6..0xE469E0 `move.w (0x1a,A0),D1; lea
+  (0x20,A0),A0; not.w D1; and.w D1,D2`); `s := s + y` likewise with
+  `or` for a widened byte set (0xE462C6, 0xE46326).  `dpc` (`isel.rs`,
+  `store_web`): `-` for any operand, `+` only for one that widens a byte
+  set (a word operand in memory might be `or`ed straight in, as an
+  integer's `!` is: no site).  Before this, `dpc` formed `s - y` apart
+  and moved it into `s`'s register (no test or golden had one).
+- **Narrowed from a word:** a word set assigned to a byte set is its low
+  byte, a function result `move.b D0,<ea>` (acl_$convert_image 0xE44F56,
+  acl_$expand_default_acl 0xE45A50, ../source `acl_$rights_t(
+  acl_$convert_rights(...))`), a word in memory read in place at its
+  low byte (acl_$find_acl_slot 0xE45F24 `move.b (2061,A2),(27,A1)`,
+  0xE45F2A).  Refused: other values (a computed or held word set).
+- **Argument order:** the zero-extension's three instructions stay
+  together after the push before them.  Of the 66 pushes `clr.<w|l> Dn;
+  move.<b|w> x,Dn; move.<w|l> Dn,-(SP)` in the image, 54 have the three
+  adjacent, 25 of them right after another push (e.g. 0xE4EA80 after
+  `pea; st -(SP); pea (1).w`, 0xE59092, 0xE244C2 after three pushes), 7 of
+  those with the call's pad before that push (the 6 above, 0xE02A06
+  `subq.l #2,SP; pea (A3); clr.l D0`); at 0xE4306C and 0xE430AC the
+  `clr.l` follows a push through an address register just loaded
+  (`movea.l D3,A0; move.l (A0),-(SP)`), a stall it is not pulled into
+  either.  Without the unit, R11 (12.4) hoists the `clr` above every push
+  of such a chain, each push reading the SP the one before wrote (not
+  only into the pad's stall).  The 12 non-adjacent pushes are the
+  early-`clr.l` family (the `clr.l` before the pad or another
+  instruction, NET 0xE5A13C; bead domain-pascal-sjzf), not
+  counterexamples to the unit.  `dpc` makes the three one scheduling
+  unit (`isel.rs`, `zero_extension_unit`; no golden, conformance unit or
+  test changes).
+
+`dpc`: `dpc-sema` `check.rs` `sized` (the size attribute) and
+`types.rs` `sized` (the layout); `dpc-ir` `lower.rs` `byte_set_member`,
+`set_value` (the widening), `byte_set_narrow`, `set_compare`;
+`dpc-m68k` `isel.rs` `set_bit_test`, `set_update`, `set_op_value`,
+`set_of`, `store_web`, `zero_extension_unit`.  Tests: `dpc-sema`
+`tests/attrs.rs` `byte_sets_are_one_byte`,
+`byte_set_records_take_the_image_offsets` (../source's offsets);
+`crates/dpc-m68k/tests/byte_sets.rs`; golden `sets/byte_sets`.  None of
+the ../source routines with these fields compiles whole yet (other
+refusals: set-valued function results, `for` loops through a `with`
+pointer, adjacent byte stores, `pinteger(<byte set>)`, a type transfer
+of unequal sizes, ref p. 4-197), so no conformance unit covers them.
 
 ### 5.2 Records and arrays (Verified / Reported)
 
@@ -7805,7 +7921,8 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     `ext.l Dn; move.l Dn,-(SP)` for a signed one (31; 0xE0B56A),
     `clr.w Dn; move.b x,Dn; move.w Dn,-(SP)` for a `[byte] 0..255` (20;
     SOCK_$CLOSE 0xE16008..0xE1600E).  No `andi.l #0xffff` or `ext.w`
-    before a push.  **Uncertain** (bead domain-pascal-sjzf): the pad is
+    before a push.  The zero-extension's three instructions are one
+    scheduling unit (12.4 R10; 5.1, "One-byte sets", "Argument order").  **Uncertain** (bead domain-pascal-sjzf): the pad is
     scheduled after the `clr.l` at NET's module-local 0xE5A128 at
     0xE5A13C (`clr.l D0; subq.l #2,SP; move.w D2,D0; move.l D0,-(SP)`);
     `dpc` emits the pad first (R11).
@@ -10946,6 +11063,11 @@ survey).**
   changes golden `regalloc/cse` (0xE177A6) and `division_forms`
   (0xE382BE), both toward the image.  Unrolled `(An)+` copies are units
   of the scheduler (stores anyway); multiplications are not (0xE1AA5A).
+  A zero-extended argument, `clr; move; push`, is one unit too (54 of
+  the image's 66 adjacent, 25 right after another push, where R11 would
+  pull the `clr` above the pushes; the other 12 the early-`clr.l` family
+  of bead domain-pascal-sjzf: 5.1, "One-byte sets", "Argument order";
+  bead domain-pascal-tq8w).
 
 **Stores whose destination and value both need a register (survey
 supported, rule Uncertain; implemented, bead domain-pascal-k1sv).**

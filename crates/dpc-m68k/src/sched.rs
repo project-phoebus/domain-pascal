@@ -45,7 +45,10 @@
 //!   among the entry loads; whether the original ordered more is not
 //!   seen).
 //! - units (R10): an unrolled `(An)+` block copy is one node ([`Unit`],
-//!   marked by the selector).  A shift-and-add multiplication is not: the
+//!   marked by the selector).  So is a zero-extended argument, `clr;
+//!   move; push` (acl_$prim_create_internal 0xE4535A..0xE45366: the `clr`
+//!   after the pad and the push before it; `isel.rs`,
+//!   `zero_extension_unit`).  A shift-and-add multiplication is not: the
 //!   ×56 at 0xE1AA50..0xE1AA60 has a `movea.l #` before its last `add`.
 //!
 //! **Policy** (R11, Uncertain): see [`Schedule`].

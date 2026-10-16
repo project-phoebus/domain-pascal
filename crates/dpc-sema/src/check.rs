@@ -1189,12 +1189,17 @@ impl<'t> Checker<'t> {
     /// `[long] integer32`), and `[byte]` on an integer subrange that needs
     /// at most 8 bits (`[byte] 0..255`, `[byte] -128..127`: one byte,
     /// [`crate::types::TypeTable::sized`]; p. 3-62: "[byte] 0..255
-    /// corresponds to the unsigned char data type in Domain/C").  Not
+    /// corresponds to the unsigned char data type in Domain/C"), and
+    /// `[byte]` on a set of at most 8 elements (`[byte] set of 0..7`, a
+    /// one-byte set, member k at bit k: the owner's ruling,
+    /// reference-clarifications "A size attribute on a set type"; a
+    /// set's minimum is the bits its range needs, ordinals 0..hi).  Not
     /// supported yet: a size larger than the type's storage (`[long]
-    /// integer16`, `[long] boolean`, p. 3-60 and 7.5.1 p. 7-15, whose
-    /// values the compiler then represents "using all of the bits"), a
-    /// size attribute on a type without a Table 3-7 minimum (sets,
-    /// pointers, structured types), on a subrange of an enumeration,
+    /// integer16`, `[long] boolean`, `[long] set of 0..7`, p. 3-60 and
+    /// 7.5.1 p. 7-15, whose values the compiler then represents "using
+    /// all of the bits"), a size between a byte and a set's storage
+    /// (`[byte(3)] set of 0..17`), a size attribute on a type without a
+    /// Table 3-7 minimum (pointers, structured types), on a subrange of an enumeration,
     /// boolean or char (an enumeration's minimum is 16 bits, a subrange's
     /// its bits: which applies is not stated), and a second, different
     /// size on a type that has one (p. 9-40, message 299: a warning, the
@@ -1237,6 +1242,22 @@ impl<'t> Checker<'t> {
                      3.15.5 Table 3-7: its minimum is not settled)",
                 );
                 return None;
+            }
+            // Table 3-7 lists no minimum for sets; the owner's ruling
+            // (reference-clarifications, "A size attribute on a set type",
+            // 2026-10-16): the minimum is the bits the set's range needs,
+            // one per ordinal 0..hi (3.9.3: the set is a bit string
+            // indexed by ordinal), and `[byte] set of 0..7` is a 1-byte
+            // set, element k at bit k.  "The compiler uses all of the
+            // bits" of a larger size (p. 3-61), so a set of fewer than 8
+            // elements may be `[byte]` too.  Sizes other than one byte or
+            // the set's own storage are refused below.
+            TypeKind::Set { elem } => {
+                let hi = self
+                    .types
+                    .ordinal_range(elem)
+                    .map_or(0, |(_, hi)| hi.max(0));
+                ((hi + 1).min(u32::MAX as i64) as u32, true)
             }
             _ => {
                 self.unsupported(

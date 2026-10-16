@@ -645,7 +645,13 @@ impl TypeTable {
     /// of storage to be reserved" for variables, formal parameters,
     /// function results, record fields and array components, p. 3-60).
     /// Only a one-byte object changes the layout: an integer subrange
-    /// whose default storage is a word (`[byte] 0..255`, p. 3-62).  It is
+    /// whose default storage is a word (`[byte] 0..255`, p. 3-62), or a
+    /// set of at most 8 elements (`[byte] set of 0..7`, the owner's
+    /// ruling, reference-clarifications "A size attribute on a set type":
+    /// member k at bit k, [`Self::set_bit_location`] of a 1-byte set; at
+    /// the odd offsets 0x19, 0x1B, 0x03, 0x07 of ACL_'s and APP_'s records
+    /// in the image, ACL_$MIN_RIGHTS 0xE46934 `btst.b #4,(-0x13,A6)`,
+    /// APP_$RECEIVE 0xE00904 `btst.b #3,(7,A3)`).  It is
     /// byte aligned freestanding, as a field and naturally, like `char`
     /// and `boolean`, the reference's other one-byte types (Table 3-2,
     /// p. 3-24, gives byte alignment for both; p. 9-41, message 305: "A
@@ -1316,6 +1322,11 @@ impl TypeTable {
         let info = self.get(id);
         if let Some(n) = &info.name {
             return n.clone();
+        }
+        if let (TypeKind::Set { elem }, Some(8)) = (&info.kind, info.attrs.size_bits) {
+            // A one-byte set (`sized`): its size attribute shown, since
+            // `set of 0..7` alone is a word.
+            return format!("[byte] set of {}", self.display(*elem));
         }
         match &info.kind {
             TypeKind::Error => "<error>".into(),
