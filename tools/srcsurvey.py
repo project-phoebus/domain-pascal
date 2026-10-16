@@ -70,7 +70,15 @@ paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
      image by tools/conform.py.  A routine's address and size come from its header
      comment, "Original address: 0xADDR, N bytes" (../source's fragment
      format); nested routines lie between the previous top-level routine's
-     end and the routine's address.  Unless --no-build-settings, each is
+     end and the routine's address.  "N bytes of code" gives the code
+     alone: the routine is compared to its map extent (the next routine
+     start or map symbol, or its segment's end less the module-end
+     filler).  A plain "N bytes" is the whole extent, unless dpc emits
+     more than N bytes but no more than the map extent: then (and only
+     then) the routine is compared again over its map extent, since many
+     headers give the code alone in that form too ("64 bytes (to
+     0xE46FF4; the cell 0xE46FF4 ... after it)").  Only the image range
+     grows: every byte dpc emits is compared either way.  Unless --no-build-settings, each is
      given the A5 mode and loop alignment it has in the image (step 5:
      `--a5-always', `--a5-always-from', `--a5-absolute' for the routine,
      `--loop-align=off' or `--loop-align-off-from').
@@ -130,7 +138,9 @@ DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
 # A routine's header: "Original address: 0xADDR, N bytes" with N decimal
 # or hex ("0x28 bytes"), the routine's extent (its cells included, the
 # module-end filler not), or "N bytes of code", its code alone: the cells
-# after it are not counted (routine_size; bead domain-pascal-0vcm).
+# after it are not counted (routine_size; bead domain-pascal-0vcm).  A
+# plain "N bytes" may give the code alone too ("64 bytes (to 0xE46FF4;
+# the cell ... after it)"): widened_size (bead domain-pascal-styn).
 ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+|\d+)\s*bytes'
                      r'(\s+of\s+code)?')
 
@@ -164,12 +174,19 @@ def code_ok_only(lines):
     """Whether conform.check's failure LINES report data-section
     differences and nothing else (the problem lines, before the
     side-by-side listing)."""
+    probs = problem_lines(lines)
+    return bool(probs) and all(DATA_DIFF_RE.match(p) for p in probs)
+
+
+def problem_lines(lines):
+    """The problem lines of conform.check's failure LINES (indented by
+    two, after the FAIL line, before the side-by-side listing)."""
     probs = []
     for ln in lines[1:]:
         if not ln.startswith('  ') or ln.startswith('   '):
             break
         probs.append(ln)
-    return bool(probs) and all(DATA_DIFF_RE.match(p) for p in probs)
+    return probs
 
 
 def data_diffs(asm, sect, work):
@@ -518,14 +535,23 @@ MODULE_END_FILLER = b'\x20\x48'          # movea.l A0,A0 (codegen-patterns 7)
 def routine_size(r, starts, linkmap, read_image=None):
     """The bytes conform compares for routine R: its header size, or for
     a header that gives the code alone ("0x5E bytes of code and three
-    constant cells", tone/time.pas) the code and the cells after it, to
-    the next routine start (STARTS: header addresses of the module;
+    constant cells", tone/time.pas) its map extent (map_extent).  A plain
+    "N bytes" can still be widened to the map extent when dpc emits more
+    than N bytes (conform_routine; bead domain-pascal-styn)."""
+    if not r.code_only or linkmap is None:
+        return r.size
+    return map_extent(r, starts, linkmap, read_image)
+
+
+def map_extent(r, starts, linkmap, read_image=None):
+    """Routine R's extent by the map: from R's address to the next routine
+    start after its header size (STARTS: header addresses of the module;
     LINKMAP's symbols) or its map segment's end, without the module-end
     filler there (0x2048 words; not compared, as in the headers that
     give the whole extent: DXM_$INIT "0x2A bytes and the 0x2048
-    module-end filler").  READ_IMAGE(va, n) (default conform.read_image)
-    reads the image."""
-    if not r.code_only or linkmap is None:
+    module-end filler"), and never below the header size.  READ_IMAGE(va,
+    n) (default conform.read_image) reads the image."""
+    if linkmap is None:
         return r.size
     end = r.addr + r.size
     seg = linkmap.segment_containing(r.addr)
@@ -544,7 +570,7 @@ def routine_size(r, starts, linkmap, read_image=None):
             read_image = conform.read_image
         while hi - 2 >= end and read_image(hi - 2, 2) == MODULE_END_FILLER:
             hi -= 2
-    return hi - r.addr
+    return max(hi - r.addr, r.size)
 
 
 def routine_spans(text):
@@ -1120,9 +1146,10 @@ def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None):
     return entries, stubbed, False
 
 
-def unit_specs(mod, name, linkmap, table=None):
+def unit_specs(mod, name, linkmap, table=None, size=None):
     """conform.py specs for top-level routine NAME with its nested
-    routines, or None when its address is unknown."""
+    routines, or None when its address is unknown.  SIZE overrides
+    routine_size for NAME (widened_size)."""
     inc, r = mod.routines[name]
     if r.addr is None:
         return None
@@ -1135,8 +1162,41 @@ def unit_specs(mod, name, linkmap, table=None):
     if lo < r.addr:
         specs.append('0x%X:%X' % (lo, r.addr - lo))
     specs.append('%s:%X' % (sym.name if sym and sym.addr == r.addr else '0x%X' % r.addr,
-                            routine_size(r, starts, linkmap)))
+                            size if size is not None else routine_size(r, starts, linkmap)))
     return specs
+
+
+# conform.check's problem line for a routine run of the wrong length
+# (conform.SIZE_PROBLEM)
+SIZE_PROBLEM_RE = re.compile(r'^  size: ours 0x([0-9A-Fa-f]+) bytes, '
+                             r'image range 0x([0-9A-Fa-f]+)\.\.0x([0-9A-Fa-f]+) is ')
+
+
+def widened_size(lines, r, starts, linkmap, read_image=None):
+    """The size to compare routine R with again after conform.check's
+    failure LINES, or None (bead domain-pascal-styn).  A plain "N bytes"
+    header is taken as R's whole extent, but many give the code alone,
+    "64 bytes (to 0xE46FF4; the cell 0xE46FF4 `0023 0003' after it)"
+    (acl/exit_super.pas): when the only reading that can be wrong is
+    that one, i.e. dpc's run ends past the header's end (a `size:'
+    problem for the run ending at R's address + N) but not past R's map
+    extent (map_extent: the next routine start or map symbol, or the
+    segment's end less the module-end filler), R is compared again over
+    its map extent.  That changes only the image range: every byte dpc
+    emits is still compared, and a run shorter than the map extent is
+    still a `size:' problem."""
+    if r.code_only or r.addr is None or linkmap is None:
+        return None
+    end = r.addr + r.size
+    for p in problem_lines(lines):
+        m = SIZE_PROBLEM_RE.match(p)
+        if not m or int(m.group(3), 16) != end:
+            continue
+        ours_end = int(m.group(2), 16) + int(m.group(1), 16)
+        ext = map_extent(r, starts, linkmap, read_image)
+        if end < ours_end <= r.addr + ext:
+            return ext
+    return None
 
 
 def data_sections(asm_text, linkmap):
@@ -1163,6 +1223,35 @@ def data_sections(asm_text, linkmap):
                     if g.kind == 'D' and g.name == unit.upper() and s.contains(g.addr):
                         out[sec] = g.addr
     return out
+
+
+def check_routine(check, mod, name, linkmap, table, specs, out, read_image=None):
+    """CHECK(specs, out) (conform.check of the compiled unit) for top-level
+    routine NAME over SPECS, and for a plain "N bytes" header again over
+    its map extent when dpc emits more (widened_size; bead
+    domain-pascal-styn).  OUT (or None) gets the result lines, and when
+    the re-check fails too, the first check's problem lines.  -> (ok,
+    the deciding check's lines)."""
+    _inc, r = mod.routines[name]
+    lines = []
+    ok = check(specs, lines.append)
+    wide = None if ok else widened_size(lines, r, getattr(mod, 'starts', set()), linkmap,
+                                        read_image)
+    first = lines
+    if wide is not None:
+        lines = []
+        ok = check(unit_specs(mod, name, linkmap, table, size=wide), lines.append)
+    if out:
+        if wide is not None:
+            out('(0x%X: dpc emits more than the header size 0x%X; compared over the '
+                'map extent 0x%X)' % (r.addr, r.size, wide))
+            if not ok:
+                out('(over the header size 0x%X:)' % r.size)
+                for p in problem_lines(first):
+                    out(p)
+        for line in lines:
+            out(line)
+    return ok, lines
 
 
 def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=None,
@@ -1216,14 +1305,10 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
             return 'SETUP: dpc failed alone: ' + (err.strip().splitlines() or ['?'])[0]
         with open(asm) as fh:
             sect = data_sections(fh.read(), linkmap)
-        lines = []
-
-        def keep(line):
-            lines.append(line)
-            if out:
-                out(line)
-        ok = conform.check(asm, specs, linkmap, sect, work=work, name=name,
-                           local_syms=local, quiet=not out, out=keep)
+        ok, lines = check_routine(
+            lambda sp, o: conform.check(asm, sp, linkmap, sect, work=work, name=name,
+                                        local_syms=local, quiet=not out, out=o),
+            mod, name, linkmap, table, specs, out)
         if ok:
             return 'OK'
         # code-only: no problem but data differences, and every

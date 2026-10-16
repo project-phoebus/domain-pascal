@@ -418,6 +418,11 @@ def code_section_of(addr, linkmap):
     raise SetupError('0x%X is in no code section of the map' % addr)
 
 
+# the problem line of a run of the wrong length (tools/srcsurvey.py
+# parses it: SIZE_PROBLEM_RE)
+SIZE_PROBLEM = 'size: ours 0x%X bytes, image range 0x%X..0x%X is 0x%X'
+
+
 def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out=print,
           work=None, name=None, local_syms=None, enclosing=None, required_globals=None):
     """Check one assembly unit.  Returns True on a match.  Raises SetupError
@@ -644,8 +649,7 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
                             % (rlo - rpad, rlo, padbytes.hex()))
         img = read_image(rlo, rhi - rlo)
         if len(ours) != len(img):
-            problems.append('size: ours 0x%X bytes, image range 0x%X..0x%X is 0x%X'
-                            % (len(ours), rlo, rhi, len(img)))
+            problems.append(SIZE_PROBLEM % (len(ours), rlo, rhi, len(img)))
         for i, (x, y) in enumerate(zip(ours, img)):
             if x != y:
                 problems.append('bytes differ first at 0x%X (+0x%X): ours %02x, image %02x'

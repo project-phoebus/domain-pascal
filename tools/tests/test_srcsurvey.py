@@ -187,6 +187,128 @@ class RoutineTest(unittest.TestCase):
         # no map: the code
         self.assertEqual(srcsurvey.routine_size(rt(0xE172FC, 0x5E, True), set(), None), 0x5E)
 
+    def test_widened_size(self):
+        # bead domain-pascal-styn: ACL_$EXIT_SUPER 0xE46FB4, "64 bytes (to
+        # 0xE46FF4; the cell 0xE46FF4 `0023 0003' after it)", next map
+        # symbol ACL_$CLEAR_SUPER 0xE46FF8
+        Seg = DataSectionsTest.Seg
+        seg = Seg('I', 'ACL_', 0xE46000, 0x2000)
+        seg.end = seg.addr + seg.size
+        lm = type('M', (), {})()
+        lm.segment_containing = lambda a: seg if seg.contains(a) else None
+        syms = [0xE46FB4, 0xE46FF8]
+        lm.next_symbol_addr = lambda a: min([s for s in syms if s > a], default=None)
+
+        def read(va, n):
+            return bytes(n)
+
+        def rt(addr, size, code_only=False):
+            r = srcsurvey.Routine('acl_$exit_super')
+            r.addr, r.size, r.code_only = addr, size, code_only
+            return r
+
+        def fail(*probs):
+            return (['FAIL acl_$exit_super (ACL_$EXIT_SUPER, 0xE46FB4..0xE46FF4, 0 relocation(s))']
+                    + ['  ' + p for p in probs]
+                    + ['          ours                                         | image',
+                       '  size: ours 0x44 bytes, image range 0xE46FB4..0xE46FF4 is 0x40'])
+        size44 = 'size: ours 0x44 bytes, image range 0xE46FB4..0xE46FF4 is 0x40'
+        r = rt(0xE46FB4, 64)
+        # the plain size is the extent (routine_size); the map's is 0x44
+        self.assertEqual(srcsurvey.routine_size(r, set(), lm, read), 0x40)
+        self.assertEqual(srcsurvey.map_extent(r, set(), lm, read), 0x44)
+        # dpc emits the cell: compared again over the map extent
+        self.assertEqual(srcsurvey.widened_size(fail(size44), r, set(), lm, read), 0x44)
+        # ... whatever else differs (the recheck compares those bytes too)
+        self.assertEqual(srcsurvey.widened_size(
+            fail('bytes differ first at 0xE46FC0 (+0xC): ours 4e, image 4a', size44),
+            r, set(), lm, read), 0x44)
+        # more than the map extent, or no more than the header: not widened
+        self.assertIsNone(srcsurvey.widened_size(
+            fail('size: ours 0x48 bytes, image range 0xE46FB4..0xE46FF4 is 0x40'),
+            r, set(), lm, read))
+        self.assertIsNone(srcsurvey.widened_size(
+            fail('size: ours 0x3C bytes, image range 0xE46FB4..0xE46FF4 is 0x40'),
+            r, set(), lm, read))
+        # a size problem of another run (a nested routines' span), the
+        # side-by-side listing, or no size problem: not widened
+        self.assertIsNone(srcsurvey.widened_size(
+            fail('size: ours 0x44 bytes, image range 0xE46F70..0xE46FB0 is 0x40'),
+            r, set(), lm, read))
+        self.assertIsNone(srcsurvey.widened_size(fail(), r, set(), lm, read))
+        self.assertIsNone(srcsurvey.widened_size(
+            fail('bytes differ first at 0xE46FC0 (+0xC): ours 4e, image 4a'), r, set(), lm, read))
+        # a header start bounds the extent (a module-local routine at 0xE46FF4)
+        self.assertIsNone(srcsurvey.widened_size(fail(size44), r, {0xE46FF4}, lm, read))
+        # "N bytes of code" is already compared over the map extent
+        self.assertIsNone(srcsurvey.widened_size(fail(size44), rt(0xE46FB4, 64, True),
+                                                 set(), lm, read))
+        # the widened spec (unit_specs SIZE)
+        mod = type('Mod', (), {})()
+        mod.routines = {'acl_$exit_super': ('acl/exit_super.pas', r)}
+        mod.starts = {0xE46FB4}
+        r.nested = []
+        lm.lookup = lambda n: type('S', (), {'name': 'ACL_$EXIT_SUPER', 'addr': 0xE46FB4})()
+        self.assertEqual(srcsurvey.unit_specs(mod, 'acl_$exit_super', lm),
+                         ['ACL_$EXIT_SUPER:40'])
+        self.assertEqual(srcsurvey.unit_specs(mod, 'acl_$exit_super', lm, size=0x44),
+                         ['ACL_$EXIT_SUPER:44'])
+        # the map extent is never below the header size (a header past
+        # the segment's end)
+        self.assertEqual(srcsurvey.map_extent(rt(0xE47FF0, 0x20), set(), lm, read), 0x20)
+
+        # check_routine: the re-check over the map extent, with conform.check
+        # mocked (it records the specs it is given and answers from SIZES:
+        # spec size -> problem lines)
+        def checker(answers):
+            calls = []
+
+            def check(specs, out):
+                calls.append(specs)
+                probs = answers[specs[-1]]
+                if not probs:
+                    out('OK ACL_$EXIT_SUPER')
+                    return True
+                out('FAIL acl_$exit_super')
+                for p in probs:
+                    out('  ' + p)
+                out('          ours | image')
+                return False
+            return check, calls
+        specs = srcsurvey.unit_specs(mod, 'acl_$exit_super', lm)
+        shown = []
+        check, calls = checker({'ACL_$EXIT_SUPER:40': [size44], 'ACL_$EXIT_SUPER:44': []})
+        ok, lines = srcsurvey.check_routine(check, mod, 'acl_$exit_super', lm, None, specs,
+                                            shown.append, read)
+        self.assertTrue(ok)
+        self.assertEqual(calls, [['ACL_$EXIT_SUPER:40'], ['ACL_$EXIT_SUPER:44']])
+        self.assertEqual(lines, ['OK ACL_$EXIT_SUPER'])
+        self.assertIn('compared over the map extent 0x44', shown[0])
+        # the re-check fails too: its lines decide, and the first check's
+        # problems are shown as well
+        shown = []
+        diff = 'bytes differ first at 0xE46FC0 (+0xC): ours 4e, image 4a'
+        check, calls = checker({'ACL_$EXIT_SUPER:40': [size44, diff],
+                                'ACL_$EXIT_SUPER:44': [diff]})
+        ok, lines = srcsurvey.check_routine(check, mod, 'acl_$exit_super', lm, None, specs,
+                                            shown.append, read)
+        self.assertFalse(ok)
+        self.assertEqual(srcsurvey.problem_lines(lines), ['  ' + diff])
+        self.assertIn('  ' + size44, shown)
+        # no size problem: one check
+        check, calls = checker({'ACL_$EXIT_SUPER:40': [diff]})
+        ok, lines = srcsurvey.check_routine(check, mod, 'acl_$exit_super', lm, None, specs,
+                                            None, read)
+        self.assertEqual((ok, len(calls)), (False, 1))
+
+    def test_size_problem_re_matches_conform(self):
+        # SIZE_PROBLEM_RE parses conform.check's own line (conform.SIZE_PROBLEM)
+        import conform
+        line = '  ' + conform.SIZE_PROBLEM % (0x44, 0xE46FB4, 0xE46FF4, 0x40)
+        m = srcsurvey.SIZE_PROBLEM_RE.match(line)
+        self.assertIsNotNone(m)
+        self.assertEqual([int(g, 16) for g in m.groups()], [0x44, 0xE46FB4, 0xE46FF4])
+
     def test_stub(self):
         text, deleted = srcsurvey.stub_text(FRAG, {'m_$glob', 'm_$local'})
         self.assertEqual(deleted, ['m_$glob'])

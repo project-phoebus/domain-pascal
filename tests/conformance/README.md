@@ -432,6 +432,16 @@ A5 mode and loop alignment of its code section, derived from
 its "build settings" section lists, per module, the dpc options
 (`--a5-always-from=`, `--a5-always=`, `--a5-absolute=`,
 `--loop-align-off-from=`) a build of the whole module needs.  A
+routine's range is its header's "Original address: 0xADDR, N bytes";
+"N bytes of code" gives the code alone, and the routine is compared up
+to its map extent (the next routine start or map symbol, or its
+segment's end less the module-end filler).  Many plain "N bytes"
+headers give the code alone as well ("64 bytes (to 0xE46FF4; the cell
+0xE46FF4 ... after it)", ACL_$EXIT_SUPER), so when dpc emits more than
+N bytes but no more than the map extent, the routine is compared again
+over its map extent (bead domain-pascal-styn).  Only the image range
+changes: every byte dpc emits is compared, and a routine shorter or
+longer than the range is still a size mismatch.  A
 routine that loads A5 only for its module-local callees (LOG_$READ for
 its worker 0xE17778) is given `--a5-always` in its fragment, since the
 stubbed callee cannot show dpc that A5 is needed.  It runs over every
