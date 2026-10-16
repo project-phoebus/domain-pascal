@@ -1019,8 +1019,16 @@ fn select_body_with(
         .map(|&(o, _, _)| o)
         .collect();
     let pre = s.out.clone();
-    let mut saves = allocate_apart(&mut s.out, exit, &holds, &apart, first.clone(), &after)
-        .map_err(|what| unsupported(f.span, what))?;
+    let mut saves = allocate_apart(
+        &mut s.out,
+        exit,
+        &holds,
+        &apart,
+        first.clone(),
+        &after,
+        &s.colour_coalesce,
+    )
+    .map_err(|what| unsupported(f.span, what))?;
     // A slot loaded late into a register that holds a dead slot load on
     // every path passes over it ([`pass_dead_slot_loads`], 12.4 R4(b));
     // the body is coloured again with the slot kept apart from those loads.
@@ -1037,15 +1045,22 @@ fn select_body_with(
             apart.push(pair);
         }
         s.out = pre.clone();
-        saves = allocate_apart(&mut s.out, exit, &holds, &apart, first.clone(), &after).map_err(
-            |_| {
-                late_slot_refusal(
-                    late.iter()
-                        .find(|l| passed.contains(&l.0))
-                        .map_or(f.span, |l| l.2),
-                )
-            },
-        )?;
+        saves = allocate_apart(
+            &mut s.out,
+            exit,
+            &holds,
+            &apart,
+            first.clone(),
+            &after,
+            &s.colour_coalesce,
+        )
+        .map_err(|_| {
+            late_slot_refusal(
+                late.iter()
+                    .find(|l| passed.contains(&l.0))
+                    .map_or(f.span, |l| l.2),
+            )
+        })?;
     }
     check_assigned_flags(&s.out, &s.flag_moves)?;
     for &(lea, second, span) in &s.held_firsts {
@@ -5323,6 +5338,10 @@ pub struct Selector {
     /// instruction that sets the second address, and the statement
     /// ([`Selector::block_addresses`]; checked after allocation).
     held_firsts: Vec<(usize, usize, Span)>,
+    /// Copies `(dst, src)` exempt from R2: `dst` may take `src`'s register
+    /// where `src` dies at the copy ([`allocate_apart`]'s `coalesce`; a
+    /// `for` loop's count copied from its tested bound, [`Selector::for_`]).
+    colour_coalesce: Vec<(Reg, Reg)>,
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
@@ -5655,6 +5674,7 @@ impl Selector {
             callee_only: Vec::new(),
             colour_apart: Vec::new(),
             held_firsts: Vec::new(),
+            colour_coalesce: Vec::new(),
             call_stmts: Vec::new(),
             span,
             stmt_start: 0,
@@ -6587,23 +6607,35 @@ impl Selector {
     /// ordinary values for the allocator: across a call in the body they
     /// take callee-saved registers (DISK_$UNASSIGN_ALL D2, D3).
     ///
-    /// **A run-time upper bound** (`to`, from 1, ascending, a signed
+    /// **A run-time upper bound** (`to`, from 0 or 1, ascending, a signed
     /// index), in a body that calls:
     ///
     /// ```text
-    ///         move.w  to,T            ; the bound into a scratch value
-    ///         subq.w  #1,T
+    ///         move.w  e,T             ; to = e or e - c: e into a scratch
+    ///                                 ;   value
+    ///         subq.w  #k,T            ; k = from + c; subi.w above 8
     ///         bmi     EXIT
     ///         move.w  T,Dc            ; the counter, callee-saved
-    ///         moveq   #1,Di
+    ///         moveq   #1,Di           ; clr.w for 0
     /// ```
     ///
-    /// (7.4: 45 of the 46 such guarded loops whose body calls copy the
+    /// (7.4: 48 of the 49 such guarded loops whose body calls copy the
     /// count into a counter of its own; DTTY_$WRITE_STRING 0xE1D6AA..0xE1D6B2
-    /// `move.w (A0),D0; subq.w #1,D0; bmi.s; move.w D0,D3; moveq #1,D2`.)
-    /// Without a call in the body the count is copied 45 times and counted
-    /// down in place 64 times, with no rule found: refused, as are other
-    /// lower bounds and run-time `downto`.
+    /// `move.w (A0),D0; subq.w #1,D0; bmi.s; move.w D0,D3; moveq #1,D2`;
+    /// from 0 to `e - 1`, PEB_$LOAD_WCS 0xE3214A..0xE32154 `move.w
+    /// (2,A2),D0; subq.w #1,D0; bmi.s; move.w D0,D2; clr.w D3`, MAC_OS_$OPEN
+    /// 0xE0B2F8, MST_$FORK 0xE73A3E, MST_$INIT 0xE30C2C.  The constant of
+    /// `e - c` is folded into the one subtraction: no guard of the image
+    /// subtracts twice; DISK_$AS_XFER_MULTI 0xE6BA42 `move.w D3,D0; subq.w
+    /// #2,D0; bmi.w; move.w D0,D2`, a call in the body; DIR_$FIND_NET
+    /// 0xE4EAAE `subq.w #2,D0` with the index from 1, no call.  `c >= 2` is
+    /// Inferred from these; a `subi.w` above 8 as HDR_CHKSUM 0xE762E0
+    /// `subi.w #13` encodes a loop from 13.)  Without a call in the body
+    /// the count is copied 50 times and counted down in place 71 times,
+    /// with no rule found: refused, as are other constant
+    /// lower bounds, run-time lower bounds, run-time `downto` and unsigned
+    /// indices.  From 0 to a variable, with or without a call, the bound
+    /// is tested and copied ([`Self::for_count_tested`]).
     ///
     /// Refused besides: a loop that never runs (no site looked at); an
     /// index read as the index of an array of elements wider than a byte
@@ -6670,39 +6702,99 @@ impl Selector {
                 });
                 (c, a)
             }
-            (Some(1), None) if !l.down && l.index.ty.is_signed() => {
-                if !stmts_call(&l.body) {
+            (Some(from), None) if !l.down && l.index.ty.is_signed() => {
+                // The count `to - from`, the constant of a `to` of the
+                // form `e - c` folded in: `e` into a value of its own,
+                // then `k = from + c` subtracted (codegen-patterns 7.4,
+                // "Run-time bounds": DISK_$AS_XFER_MULTI 0xE6BA44 `subq.w
+                // #2` with a call, DIR_$FIND_NET 0xE4EAAE `subq.w #2` with
+                // the index from 1; no `for` guard of the image subtracts
+                // twice; `c >= 2` Inferred).  `subi.w` above 8: HDR_CHKSUM
+                // 0xE762E0 `subi.w #13`.
+                let (e, c) = match &l.to {
+                    Expr::Binary {
+                        op: BinOp::Sub,
+                        lhs,
+                        rhs,
+                        ..
+                    } if (0..=1).contains(&from) => match konst(rhs) {
+                        Some(c) if c >= 1 => (&**lhs, c),
+                        _ => (&l.to, 0),
+                    },
+                    e => (e, 0),
+                };
+                let k = from + c;
+                let count = if k == 0 {
+                    self.for_count_tested(e, exit, &mut setup)?
+                } else if !(0..=1).contains(&from) {
+                    return Err(unsupported(
+                        span,
+                        "a `for` loop from a constant other than 0 or 1 to a run-time bound (the \
+                         constant subtracted, HDR_CHKSUM 0xE762E0 `subi.w #13` from 13, \
+                         NAME_$INIT 0xE31828 `subi.w #16` from 16, both without a call: the \
+                         count's copy not settled, codegen-patterns 7.4) is",
+                    ));
+                } else if !stmts_call(&l.body) {
                     return Err(unsupported(
                         span,
                         "a `for` loop with a run-time bound and no call in its body (the count \
                          is copied into a counter of its own or not, no rule found, \
                          codegen-patterns 7.4) is",
                     ));
-                }
-                let t = match self.eval(&l.to)? {
-                    Val::Tmp(d) => d,
-                    v => self.in_tmp(v, Width::Word)?,
+                } else {
+                    let t = match self.eval(e)? {
+                        Val::Tmp(d) => d,
+                        v => self.in_tmp(v, Width::Word)?,
+                    };
+                    self.out.push(if k <= 8 {
+                        Insn::Subq {
+                            size: Size::W,
+                            value: k as u8,
+                            dst: Ea::Reg(Reg::D(t)),
+                        }
+                    } else {
+                        Insn::AluImm {
+                            op: AluOp::Sub,
+                            size: Size::W,
+                            imm: k,
+                            dst: Ea::Reg(Reg::D(t)),
+                        }
+                    });
+                    self.jump(Cond::Mi, exit);
+                    let c = self.alloc_d()?;
+                    setup.push(self.out.len());
+                    self.out.push(Insn::Move {
+                        size: Size::W,
+                        src: Ea::Reg(Reg::D(t)),
+                        dst: Ea::Reg(Reg::D(c)),
+                    });
+                    c
                 };
-                self.out.push(Insn::Subq {
-                    size: Size::W,
-                    value: 1,
-                    dst: Ea::Reg(Reg::D(t)),
-                });
-                self.jump(Cond::Mi, exit);
-                let c = self.alloc_d()?;
-                setup.push(self.out.len());
-                self.out.push(Insn::Move {
-                    size: Size::W,
-                    src: Ea::Reg(Reg::D(t)),
-                    dst: Ea::Reg(Reg::D(c)),
-                });
-                (c, 1)
+                (count, from)
             }
-            _ => {
+            _ if l.down => {
                 return Err(unsupported(
                     span,
-                    "a `for` loop with these bounds (a run-time bound other than an ascending \
-                     loop's upper bound from 1, codegen-patterns 7.4) is",
+                    "a `for` loop counting down (`downto`) with a run-time bound (not \
+                     surveyed, codegen-patterns 7.4) is",
+                ))
+            }
+            (Some(_), None) => {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` \
+                     before the `subq.w #1`, which stands among the preheader's other \
+                     instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, 0xE10C30; not \
+                     settled, codegen-patterns 7.4) is",
+                ))
+            }
+            (None, _) => {
+                return Err(unsupported(
+                    span,
+                    "a `for` loop with a run-time lower bound (`sub.w from,T; bmi`, both \
+                     bounds evaluated first and interleaved: 0xE010AC..0xE010B8, \
+                     0xE02BFE..0xE02C0A, KBD's module-local 0xE1CA10..0xE1CA1C; not settled, \
+                     codegen-patterns 7.4) is",
                 ))
             }
         };
@@ -6804,6 +6896,98 @@ impl Selector {
         });
         self.place(exit);
         Ok(())
+    }
+
+    /// The `dbf` count of a `for` loop from 0 to the run-time bound `to`, a
+    /// variable (codegen-patterns 7.4, "Run-time bounds"): the bound
+    /// tested, then copied into the count:
+    ///
+    /// ```text
+    ///         move.w  to,T            ; a bound in memory; a bound held
+    ///                                 ;   in a register is tested there
+    ///         tst.w   T
+    ///         bmi     EXIT
+    ///         move.w  T,Dc
+    /// ```
+    ///
+    /// The 15 `tst.w; bmi` guards of the image's `dbf` loops are all
+    /// followed by such a copy, 2 of them into the bound's own register
+    /// (the module-local 0xE17EBA..0xE17EC2 `move.w (1336,A5),D2; tst.w
+    /// D2; bmi.s; move.w D2,D2`; XNS_IDP_$REGISTER_ADDR 0xE19020..0xE1902A,
+    /// `move.w D0,D0; clr.w D1`), the others from a held bound into the
+    /// lowest free register (DISK_$AS_XFER_MULTI 0xE6BB26 `tst.w D5; bmi.s;
+    /// move.w D5,D3`, a call in the body; VTOC_$GET_UID 0xE39282
+    /// `tst.w D5; bmi; move.w D5,D0; clr.w D1`).  So the copy is not kept
+    /// apart from the bound as R2 keeps other copies (12.4 R2; `regs.rs`,
+    /// `coalesce`), with or without a call in the body.  `setup` gets the
+    /// copy's index in `out`.  The bound is a variable held in a register
+    /// or one of the unit's data (both `tst.w` sites from memory load
+    /// `(0x538,A5)`).  Refused: a bound through a pointer (ROUTE_$READ_USER_
+    /// STATS 0xE6A6C4 `move.w (0x36,A1),D4; bmi.b`, no `tst.w`: one site);
+    /// a frame slot not held, another unit's variable, an absolute or
+    /// indexed one (not surveyed); a bound other than a variable (the guard
+    /// of an expression's value not surveyed).
+    fn for_count_tested(&mut self, to: &Expr, exit: u32, setup: &mut Vec<usize>) -> Res<u8> {
+        let static_ =
+            match to {
+                Expr::Load {
+                    addr: Addr::Static(_),
+                    ..
+                } if !self.data_absolute => true,
+                Expr::Load {
+                    addr: Addr::Frame(_),
+                    ..
+                } => false,
+                Expr::Load {
+                    addr: Addr::Indirect { .. },
+                    ..
+                } => return Err(unsupported(
+                    self.span,
+                    "a `for` loop from 0 to a bound reached through a pointer (no `tst.w`, the \
+                     `bmi` on the load's flags at ROUTE_$READ_USER_STATS 0xE6A6C4 `move.w \
+                     (0x36,A1),D4; bmi.b; move.w D4,D0`: one site, codegen-patterns 7.4) is",
+                )),
+                Expr::Load { .. } => return Err(unsupported(
+                    self.span,
+                    "a `for` loop from 0 to a bound of this kind (another unit's or an absolute \
+                     variable, an array element: its guard not surveyed, codegen-patterns 7.4) \
+                     is",
+                )),
+                _ => {
+                    return Err(unsupported(
+                        self.span,
+                        "a `for` loop from 0 to a run-time bound other than a variable or `e - c` \
+                     (the guard of another expression's value not surveyed, codegen-patterns \
+                     7.4) is",
+                    ))
+                }
+            };
+        let t = match self.eval(to)? {
+            Val::Reg(Reg::D(d)) => d,
+            Val::Tmp(d) if static_ => d,
+            v @ Val::Mem(_) if static_ => self.in_tmp(v, Width::Word)?,
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "a `for` loop from 0 to a local or parameter not held in a register (its \
+                     guard not surveyed, codegen-patterns 7.4) is",
+                ))
+            }
+        };
+        self.out.push(Insn::Tst {
+            size: Size::W,
+            dst: Ea::Reg(Reg::D(t)),
+        });
+        self.jump(Cond::Mi, exit);
+        let c = self.alloc_d()?;
+        setup.push(self.out.len());
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(t)),
+            dst: Ea::Reg(Reg::D(c)),
+        });
+        self.colour_coalesce.push((Reg::D(c), Reg::D(t)));
+        Ok(c)
     }
 
     /// How each of a `for` loop's stepped arrays gets its pointer
@@ -19690,6 +19874,108 @@ mod tests {
         .contains("formed in place"));
     }
 
+    /// Run-time upper bounds from 0 or 1 (codegen-patterns 7.4, "Run-time
+    /// bounds"): `tst.w` for a variable from 0, the count copied into the
+    /// bound's own register where it dies (the module-local 0xE17EBA,
+    /// XNS_IDP_$REGISTER_ADDR 0xE19020, no call); `e - c` folded into one
+    /// subtraction (MST_$INIT 0xE30C2C, a call; 0xE4EAAE `subq.w #2`).
+    #[test]
+    fn for_runtime_upper_bounds() {
+        let minus = |e: Expr, c: i64| Expr::Binary {
+            op: BinOp::Sub,
+            lhs: Box::new(e),
+            rhs: Box::new(konst(c, word())),
+            ty: word(),
+        };
+        let put = || {
+            ext(
+                "EXT_$PUT",
+                vec![Arg::Value {
+                    value: index(),
+                    slot: 2,
+                }],
+                2,
+            )
+        };
+        let n = || load(Addr::Static(8), word());
+        // From 0 to a variable in memory, no call: the self-copy.
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                n(),
+                false,
+                vec![store(sym("W"), index())],
+            )],
+        );
+        assert_eq!(
+            body_text(&f)[..6],
+            [
+                "move.w\t(8,%a5),%d0",
+                "tst.w\t%d0",
+                "bmi.s\t1f",
+                "move.w\t%d0,%d0",
+                "clr.w\t%d1",
+                ".balignw\t4,0x2048",
+            ]
+        );
+        // From 0 to a variable, a call in the body: the count callee-saved.
+        let f = proc_(4, vec![for_loop(konst(0, word()), n(), false, vec![put()])]);
+        assert_eq!(
+            body_text(&f)[1..7],
+            [
+                "move.w\t(8,%a5),%d0",
+                "tst.w\t%d0",
+                "bmi.s\t1f",
+                "move.w\t%d0,%d2",
+                "clr.w\t%d3",
+                ".balignw\t4,0x2048",
+            ]
+        );
+        // From 0 to `n - 1`, a call: `subq.w #1`, no `tst.w`.
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                minus(n(), 1),
+                false,
+                vec![put()],
+            )],
+        );
+        assert_eq!(
+            body_text(&f)[1..6],
+            [
+                "move.w\t(8,%a5),%d0",
+                "subq.w\t#1,%d0",
+                "bmi.s\t1f",
+                "move.w\t%d0,%d2",
+                "clr.w\t%d3",
+            ]
+        );
+        // From 1 to `n - 1`: folded, `subq.w #2`; from 0 to `n - 13`,
+        // `subi.w #13` (0xE762E0).
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(1, word()),
+                minus(n(), 1),
+                false,
+                vec![put()],
+            )],
+        );
+        assert_eq!(body_text(&f)[2], "subq.w\t#2,%d0");
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(0, word()),
+                minus(n(), 13),
+                false,
+                vec![put()],
+            )],
+        );
+        assert_eq!(body_text(&f)[2], "subi.w\t#0xd,%d0");
+    }
+
     /// Refused `for` loops (codegen-patterns 7.4).
     #[test]
     fn unsettled_for_loops() {
@@ -19711,10 +19997,90 @@ mod tests {
             one(konst(1, word()), load(sym("N"), word()), false, vec![w()])
                 .contains("no call in its body")
         );
+        let minus = |e: Expr, c: i64| Expr::Binary {
+            op: BinOp::Sub,
+            lhs: Box::new(e),
+            rhs: Box::new(konst(c, word())),
+            ty: word(),
+        };
+        // From 0 to `n - 1` without a call: copied or in place, unsettled.
+        assert!(one(
+            konst(0, word()),
+            minus(load(sym("N"), word()), 1),
+            false,
+            vec![w()]
+        )
+        .contains("no call in its body"));
+        // From another constant (0xE762E0 `subi.w #13`, no call only).
+        assert!(
+            one(konst(13, word()), load(sym("N"), word()), false, vec![w()])
+                .contains("constant other than 0 or 1")
+        );
+        assert!(
+            one(konst(-1, word()), load(sym("N"), word()), false, vec![w()])
+                .contains("constant other than 0 or 1")
+        );
+        // From 0 to an expression other than `e - c`.
+        let plus = Expr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(load(sym("N"), word())),
+            rhs: Box::new(load(sym("M"), word())),
+            ty: word(),
+        };
+        assert!(one(konst(0, word()), plus, false, vec![w()])
+            .contains("other than a variable or `e - c`"));
+        // From 0 to a bound through a pointer (ROUTE_$READ_USER_STATS
+        // 0xE6A6C4: no `tst.w`), another unit's variable, a frame slot.
+        let field = Addr::Indirect {
+            base: Box::new(load(sym("P"), Scalar::POINTER)),
+            offset: 0x36,
+        };
+        assert!(one(konst(0, word()), load(field, word()), false, vec![w()])
+            .contains("through a pointer"));
         assert!(
             one(konst(0, word()), load(sym("N"), word()), false, vec![w()])
-                .contains("with these bounds")
+                .contains("a bound of this kind")
         );
+        assert!(one(
+            konst(0, word()),
+            load(Addr::Frame(-4), word()),
+            false,
+            vec![w()]
+        )
+        .contains("not held in a register"));
+        // A run-time lower bound; `downto` with a run-time bound; an
+        // unsigned index.
+        assert!(
+            one(load(sym("N"), word()), konst(9, word()), false, vec![w()])
+                .contains("run-time lower bound")
+        );
+        assert!(
+            one(load(sym("N"), word()), konst(0, word()), true, vec![w()])
+                .contains("counting down")
+        );
+        assert!(
+            one(konst(9, word()), load(sym("N"), word()), true, vec![w()])
+                .contains("counting down")
+        );
+        let unsigned = Scalar::unsigned(Width::Word);
+        let f = func(
+            4,
+            None,
+            vec![StmtKind::For(ForLoop {
+                index: dpc_ir::ValueParam {
+                    offset: -2,
+                    ty: unsigned,
+                },
+                from: konst(1, unsigned),
+                to: load(sym("N"), unsigned),
+                down: false,
+                body: vec![Stmt {
+                    kind: store(sym("W"), load(Addr::Frame(-2), unsigned)),
+                    span: span(),
+                }],
+            })],
+        );
+        assert!(err(&f).contains("unsigned index"));
         // An array of words indexed by the index: stepped pointers, only
         // through a pointer variable.
         let elem = |base: Addr, index: Expr| Addr::Index {

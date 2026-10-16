@@ -395,6 +395,14 @@ Tests:
   (DISK_$UNASSIGN_ALL 0xE6BE24), a run-time upper bound with its `subq.w
   #1; bmi` guard and the count copied (DTTY_$WRITE_STRING 0xE1D6AA), a
   count above 127 as `move.w #n`, `exit` and `next`.
+- `loops/for_runtime` - codegen-patterns 7.4 ("Run-time bounds", "The
+  guards by shape"; bead domain-pascal-jnsb): from 0 to a variable,
+  `tst.w; bmi` and the count copied, into the bound's own register
+  without a call (XNS_IDP_$REGISTER_ADDR 0xE19020), callee-saved across
+  one (DISK_$AS_XFER_MULTI 0xE6BB26), the bound of the unit's data; from
+  0 to `e - 1` across a call, `subq.w #1; bmi`, the copy, `clr.w`
+  (PEB_$LOAD_WCS 0xE3214A); the constant of `e - c` folded into one
+  `subq.w` (DISK_$AS_XFER_MULTI 0xE6BA42).
 - `loops/stepped` - codegen-patterns 7.4, 5.2: `for` loops over arrays of
   elements wider than a byte through pointers stepped by the element size:
   formed with `lea (from*size,An),Ap` after the count and the index, the

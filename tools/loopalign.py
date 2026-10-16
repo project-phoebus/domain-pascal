@@ -53,6 +53,14 @@ usage:
                                           # register or memory, index use
                                           # (byte index vs stepped pointer),
                                           # run-time guards (7.4)
+    tools/loopalign.py guards [-v]        # `dbf' loops guarded before the
+                                          # head: how the guard sets its
+                                          # flags (`subq #k', `tst', `sub',
+                                          # `bmi'/`beq'), the count in place
+                                          # or copied, calls in the body,
+                                          # the index's initial value (7.4,
+                                          # "Run-time bounds"); -v one line
+                                          # per loop
     tools/loopalign.py ptrs [-v] [ROOT...] # `dbf' loops: the stepped
                                           # pointers by how the preheader
                                           # forms them (root: `lea A5',
@@ -438,6 +446,130 @@ def fors(m, sites, routines, verbose=False):
         print('  %4d %s' % (v, k))
 
 
+_GUARD_BR = re.compile(r'^(b(?:hi|ls|cc|cs|ne|eq|vc|vs|pl|mi|ge|lt|gt|le))[sw]?\s+0x([0-9a-f]+)')
+
+
+def exit_chain(ins, idx, j):
+    """The addresses a `dbf' at ins[j] leaves to: the next instruction and
+    the targets of the `bra's chained from there."""
+    exits = set()
+    k = j + 1
+    while k < len(ins) and ins[k][0] not in exits:
+        exits.add(ins[k][0])
+        mm = re.match(r'^bra[sw]?\s+0x([0-9a-f]+)', ins[k][2])
+        if not mm:
+            break
+        k = idx.get(int(mm.group(1), 16), len(ins))
+        if k == len(ins):
+            exits.add(int(mm.group(1), 16))
+    if j + 1 >= len(ins):
+        exits.add(ins[j][0] + ins[j][1])
+    return exits
+
+
+def guard_rows(m, sites, routines):
+    """[(head, routine start, branch, before, after, calls, counter)] for
+    every `dbf' loop guarded by a conditional branch to its exit (the
+    instruction after the `dbf', or the target of a chain of `bra's
+    starting there: a guard that jumps past the exit's `bra'), found by
+    walking back from the head (fillers skipped) at most 14 instructions,
+    not past another branch, call or `rts'.  `before': up to 5
+    instructions before the guard;
+    `after': the preheader between the guard and the head, fillers left
+    out; `counter': the `dbf' register."""
+    out = []
+    for t, cls, back, entry, al, r0, src in head_rows(m, sites, routines):
+        if back != 'dbf':
+            continue
+        ins = INSNS[r0]
+        idx = {a: i for i, (a, n, x) in enumerate(ins)}
+        i, j = idx[t], idx[src]
+        exits = exit_chain(ins, idx, j)
+        g = None
+        for k in range(i - 1, max(-1, i - 15), -1):
+            x = ins[k][2]
+            b = _GUARD_BR.match(x)
+            if b and int(b.group(2), 16) in exits:
+                g = k
+                break
+            if b or re.match(r'(bra|jsr|bsr|rts|jmp|db)', x):
+                break
+        if g is None:
+            continue
+        before = [x for _, _, x in ins[max(0, g - 5):g]]
+        after = [x for _, _, x in ins[g + 1:i] if x != 'moveal %a0,%a0']
+        calls = any(x.startswith(('jsr', 'bsr')) for _, _, x in ins[i:j])
+        creg = re.search(r'(%d\d)', ins[j][2]).group(1)
+        out.append((t, r0, ins[g][2].split()[0].rstrip('sw'), before, after,
+                    calls, creg))
+    return out
+
+
+def guard_class(br, before, after, creg):
+    """(how the guard's flags are set, where the count goes, the index's
+    initial value) for one guard_rows() row (codegen-patterns 7.4,
+    "Run-time bounds").  How: `subq #k' / `subi #k' (a constant lower
+    bound or a bound `e - c'), `tst' (from 0), `sub' (a run-time lower
+    bound), with the branch (`bmi', `beq' for unsigned counts), else
+    `other: <insn>'.  Where: `in place' (the instruction setting the flags
+    writes the `dbf' register and no copy follows), `copied' (`move.w
+    T,Dc' after the guard), `self-copy' (`move.w Dc,Dc'), `other'.  The
+    index: `0' for `clr.w', `k' for `moveq #k', `?' when neither follows
+    the guard."""
+    last = before[-1] if before else ''
+    m = re.match(r'(subqw|subiw) #(\d+),(%d\d)$', last)
+    T = None
+    if m:
+        how, T = '%s #%s' % (m.group(1)[:4], m.group(2)), m.group(3)
+    elif re.match(r'tstw %d\d$', last):
+        how, T = 'tst', last.split()[1]
+    elif re.match(r'subw [^,]+,%d\d$', last):
+        how, T = 'sub', last.split(',')[-1]
+    elif last.startswith('tstw '):
+        # a bound in memory tested in place and loaded again (unsigned
+        # counts: `tst.w (d,An); beq; move.w (d,An),Dc')
+        mem = last[5:]
+        return ('%s tst mem' % br,
+                'reloaded' if 'movew %s,%s' % (mem, creg) in after else 'other',
+                _guard_index(after, creg))
+    else:
+        how = 'other: ' + re.sub(r'0x[0-9a-f]+', 'ABS', last)
+    copy = T is not None and 'movew %s,%s' % (T, creg) in after
+    if T is None:
+        where = 'other'
+    elif T == creg:
+        where = 'self-copy' if copy else 'in place'
+    else:
+        where = 'copied' if copy else 'other'
+    return '%s %s' % (br, how), where, _guard_index(after, creg)
+
+
+def _guard_index(after, creg):
+    """The index's initial value in a guarded preheader: the first `clr.w'
+    or `moveq' into a data register other than the counter."""
+    for x in after:
+        mm = re.match(r'(clrw |moveq #(-?\d+),)(%d\d)$', x)
+        if mm and mm.group(3) != creg:
+            return '0' if mm.group(1) == 'clrw ' else mm.group(2)
+    return '?'
+
+
+def guards(m, sites, routines, verbose=False):
+    """`dbf' loop guards by how they test, where the count goes, calls in
+    the body and the index's initial value (codegen-patterns 7.4)."""
+    c = Counter()
+    for t, r0, br, before, after, calls, creg in guard_rows(m, sites, routines):
+        how, where, lo = guard_class(br, before, after, creg)
+        k = (how, where, 'calls' if calls else 'no calls', lo)
+        c[k] += 1
+        if verbose:
+            print('%06X %-28s %-26s %-9s %-8s lo=%-2s | %s || %s' % (
+                t, m.describe(t), how, where, 'calls' if calls else '-', lo,
+                '; '.join(before[-3:]), '; '.join(after)))
+    for k, v in sorted(c.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        print('%4d  %-26s %-9s %-8s from %s' % ((v,) + k))
+
+
 # A pointer step at a loop's bottom: `addq.l/subq.l #s,An' or `lea (s,An),An'.
 _PSTEP = re.compile(r'(addql|subql) #(\d),(%a[0-6])$')
 _PLEA = re.compile(r'lea (%a[0-6])@\((-?\d+)\),(%a[0-6])$')
@@ -717,6 +849,8 @@ def main(argv):
         notest(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'fors':
         fors(m, sites, routines, '-v' in argv[1:])
+    elif argv[0] == 'guards':
+        guards(m, sites, routines, '-v' in argv[1:])
     elif argv[0] == 'ptrs':
         roots = [a for a in argv[1:] if a != '-v']
         ptrs(m, sites, routines, '-v' in argv[1:], roots or None)

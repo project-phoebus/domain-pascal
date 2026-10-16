@@ -6605,10 +6605,13 @@ scripts besides, not kept, are named as such below; re-check sites with
   counter), since `bmi` would be wrong above 32768.  Whether the count
   stays in `T` or is copied into a counter of its own (`fors`, guards):
   with a call in the body it is copied 45 times and kept in place once
-  (DTTY_$WRITE_STRING 0xE1D6B0 `move.w D0,D3`, the counter callee-saved,
-  the scratch `T` not); without one, copied 45 times and kept in place 64
-  times, whether `T` was loaded from memory or copied from a register,
-  with no rule found (LOG_$READ's worker and PKT_$RECENTLY_MISSING keep
+  (48 and 1 in the count of `tools/loopalign.py guards`, below, which
+  also takes guards past the exit's `bra`; DTTY_$WRITE_STRING 0xE1D6B0
+  `move.w D0,D3`, the counter callee-saved, the scratch `T` not);
+  without one, copied 45 times and kept in place 64 times (50 and 71 in
+  `guards`),
+  whether `T` was loaded from memory or copied from a register, with no
+  rule found (LOG_$READ's worker and PKT_$RECENTLY_MISSING keep
   it; 0xE0B1D8 `move.w D0,D1; subq.w #1,D1; bmi; move.w D1,D0` copies it
   back).  By the loop's shape (bead domain-pascal-5aw.17; ad-hoc script
   over the same guards, not kept): without a call, an index register and
@@ -6625,6 +6628,106 @@ scripts besides, not kept, are named as such below; re-check sites with
   a choice made before allocation.  Without a call `T` is live after the
   loop in 5 copies and 2 in-place loops (approximated by a linear scan
   from the exit), so liveness does not decide either.
+- **The guards by shape (survey Verified; bead domain-pascal-jnsb).**
+  `tools/loopalign.py guards [-v]` takes every `dbf` loop with a
+  conditional branch before the head to its exit (the instruction after
+  the `dbf`, or past the `bra`s chained from there: 37 loops guard that
+  way) and classes it by the instruction that sets the branch's flags,
+  where the count goes (`in place`: that instruction writes the `dbf`
+  register; `copied`: `move.w T,Dc` follows; `self-copy`: `move.w
+  Dc,Dc`), a call in the body, and the `clr.w`/`moveq` after the guard
+  (`?` when there is none).  A guard on a `move`'s flags lands in
+  `other` (ROUTE_$READ_USER_STATS 0xE6A6C4 `move.w (0x36,A1),D4;
+  bmi.b`, the TPAD_$INIT boolean below, and others):
+
+  | Guard | With a call: copied / in place | Without: copied / in place |
+  |---|---|---|
+  | `subq.w #1,T; bmi` | 48 / 1 | 50 / 71 |
+  | `subq.w #2,T; bmi` | 1 / 0 | 0 / 1 |
+  | `subq.w #5,T; bmi` | | 0 / 1 |
+  | `subi.w #13` / `#16,T; bmi` | | 2 / 0 |
+  | `tst.w T; bmi` | 5 / 0 | 10 (2 of them self-copies) / 0 |
+  | `sub.w lo,T; bmi` (a run-time `lo`) | 18 / 2 | 15 / 18 |
+  | `tst.w; beq` (unsigned), a register or memory | | (below) |
+
+  After a `subq.w #1` guard the index is `moveq #1` in 12 loops with a
+  call and 63 without, `clr.w` in 5 and 4; 5 more have `moveq #2`, `#4`,
+  `#6` or `#8`, not all lower bounds: ACL_$GET_PROJ_LIST 0xE48080
+  `moveq #8` and RIP_$SEND_UPDATES 0xE688F0 `moveq #6` start a scaled
+  index register (8 × i, 6 × i).
+
+  - *From 0 to `e - 1`* is counted like *from 1 to `e`*: `e` into `T`,
+    `subq.w #1,T`, the `bmi` on its flags (no `tst.w`), then the index
+    `clr.w`.  With a call, copied 5 of 5 (PEB_$LOAD_WCS 0xE3214A..0xE32154
+    `move.w (2,A2),D0; subq.w #1,D0; bmi.s; move.w D0,D2; clr.w D3`, its
+    second loop at 0xE32180; MAC_OS_$OPEN 0xE0B2F8; MST_$INIT 0xE30C2C
+    `move.w (abs).l,D0; lsr.w #6,D0; subq.w #1,D0`; MST_$FORK 0xE73A3E).
+    Without, copied 3 times and in place once, as from 1: the MAC_OS_
+    module-locals 0xE0B1BC (at 0xE0B1C8) and 0xE0B202 (at 0xE0B20C,
+    `move.w (16,A6),D1; move.w D1,D2; subq.w #1,D2; bmi; move.w D2,D1;
+    clr.w D2`), KBD_$INQ_KBD_TYPE 0xE72584 (`move.w (68,A0),D0; subq.w
+    #1,D0; bmi; move.w D0,D1; clr.w D0`) copy; KBD's module-local
+    0xE1CA8C at 0xE1CAA8 (`move.w D0,D1; subq.w #1,D1; bmi; clr.w D2`,
+    the bound's variable live after the loop) keeps it in place.  The
+    copy question stays open without a call (above).
+  - *The constant of `e - c` is folded* into the one subtraction: no
+    guard subtracts twice (no two `subq`/`subi` on `T` before a guard).
+    With a call, DISK_$AS_XFER_MULTI 0xE6BA42 `move.w D3,D0; subq.w
+    #2,D0; bmi.w; move.w D0,D2` (no index register; ../source's reading
+    `for j := 1 to i - 1 do wp_$unwire(...)`); without, DIR_$FIND_NET
+    0xE4EAAA `move.w (-166,A2),D0; subq.w #2,D0; bmi`, then `moveq
+    #1,D1`, from 1 with a count of `e - 2`.  ROUTE_$INCOMING 0xE8796E
+    `subq.w #5,D1` has `moveq #4,D4` after it (an index from 4 or a
+    scaled one: not told).  So `1 to e - 1` is Verified; `0 to e - c`
+    and `1 to e - c` with `c >= 2` are Inferred from these.  A constant
+    above 8 is a `subi.w`: HDR_CHKSUM 0xE762DC `move.w (A1),D0; move.w
+    D0,D2; subi.w #13,D2; bmi; move.w D2,D0; moveq #13,D2` and NAME_$INIT
+    0xE31828 `subi.w #16,D0` are loops from 13 and 16 to a plain bound
+    (the encoding's evidence, not a fold's).
+  - *From 0 to a variable:* `tst.w T; bmi`, `T` the variable's register
+    or a load into a new one, then always a copy (15 of 15, none in
+    place), the count taking the bound's own register where the bound
+    dies there and no lower register is free: the module-local 0xE17EBA
+    `move.w (1336,A5),D2; tst.w D2; bmi.s; move.w D2,D2` (D0 and D1 hold
+    the result and the outer loop's count), XNS_IDP_$REGISTER_ADDR
+    0xE19020 `move.w D0,D0; clr.w D1`.  The other 13 copy into another
+    register: 7 of the 8 without a call into a lower one (VTOC_$GET_UID
+    0xE39282 `tst.w D5; bmi; move.w D5,D0; clr.w D1`; MAC_$OPEN
+    0xE0B9BA), MAC_OS_$PUT_INFO 0xE0C2B2 into a higher one (`tst.w D3;
+    bmi; move.w D3,D4`, D3 decremented before and a value of its own),
+    the 5 with a call into a callee-saved one (DISK_$AS_XFER_MULTI
+    0xE6BB26 `tst.w D5; bmi.s; move.w D5,D3`; AST_$LOAD_AOTE 0xE029A8
+    `move.w D0,D5` after `tst.w D0; bmi`).  So the count takes the lowest free
+    register, R2 (12.4) not applying to this copy: the two self-copies
+    are where R2 would decide.  The only bounds tested from memory are
+    the unit's data (`(0x538,A5)` at both sites); a bound through a
+    pointer is guarded on its load's flags with no `tst.w`
+    (ROUTE_$READ_USER_STATS 0xE6A6C4, one site; refused).  A `tst.w`
+    guard does not mean `lo = 0`: 2 such loops count from 1 and 4
+    (0xE6A9B4, XPD_$PUT_REGISTERS 0xE5C430), their count computed
+    before.  Between the `bmi` and the copy, 2 loops have an in-place
+    pointer's `movea.l` (DISK_$AS_XFER_MULTI 0xE6BAAC, 0xE6BBAC; the rule
+    of "Placement" above), 4 another instruction (PMAP_$FLUSH 0xE137D4
+    `move.w (16,A6),D6`; RING_$SVC_IOCTL 0xE7783E and 0xE77A7C `lea
+    (8,A3),A4`; XPD_$PUT_REGISTERS 0xE5C430 `movea.l D5,A0`), as at
+    0xE02D04 for a `subq.w` guard (`movea.l D6,A0` before the copy): not
+    settled.
+  - *Unsigned counts* (`tst.w; beq` before the `subq.w #1`): the bound
+    tested in its register or in memory and then loaded again (`tst.w
+    (-478,A2); beq; move.w (-478,A2),D3; subq.w #1,D3; moveq #1,D4`,
+    0xE10BD4's preheader), the `subq.w` right after the copy or after
+    other preheader instructions (MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028
+    `move.w D1,D3; move.l #0xeb4800,D5; subq.w #1,D3`, loop invariants
+    between; 0xE10C30 `moveq #4,D2` between), or in place when the bound
+    is a value of its own (NAMEQ 0xE49ED6 `tst.w D1; beq; subq.w #1,D1;
+    moveq #1,D2`).  Not settled.
+  - *A run-time `lo`:* `hi - lo` with `sub.w`, the two bounds evaluated
+    first and their instructions interleaved (0xE02BFE `move.w D2,D1;
+    move.w D3,D0; addq.w #1,D1; sub.w D1,D0; bmi; move.w D0,D3; move.w
+    D1,D0`, the index copied from `lo`'s register), or `lo` subtracted
+    from memory and loaded again for the index (KBD's module-local
+    0xE1C9FC at 0xE1CA10 `move.w (26,A5,D1.w),D2; subq.w #1,D2; sub.w
+    (24,A5,D1.w),D2; bmi; move.w (24,A5,D1.w),D3`).  Not settled.
 - **A guard formed as a boolean (Verified at the site; cause
   Uncertain).**  TPAD_$INIT 0xE33570, `for unit := 1 to smd_$n_devices
   do`, has `jsr SMD_$N_DEVICES; subq.w #1,D0; move.w D0,D2; slt D3;
@@ -6684,9 +6787,16 @@ scripts besides, not kept, are named as such below; re-check sites with
   - constant bounds, N in 1..=65536: count first, index (only when the
     body reads it) `clr.w`/`moveq` (initial value in -128..127 and not
     the count's), step `addq.w`/`subq.w #1`, `dbf`;
-  - a run-time upper bound of an ascending loop from 1 with a signed
-    index, in a body that calls: `move.w hi,T; subq.w #1,T; bmi EXIT;
-    move.w T,Dc; moveq #1,Di`;
+  - a run-time upper bound `hi` of an ascending loop from 0 or 1 with a
+    signed index, in a body that calls: `e` into `T` (`hi` itself, or
+    `e` of `hi = e - c`, `c` a constant), `subq.w #k,T` (`subi.w` above
+    8; `k = from + c`), `bmi EXIT`, `move.w T,Dc`, the index `moveq
+    #1`/`clr.w` (bead domain-pascal-jnsb; `isel.rs`, `for_`; `c >= 2`
+    Inferred, above);
+  - from 0 to a variable held in a register or of the unit's data, with
+    or without a call: `tst.w T; bmi EXIT; move.w T,Dc`, the copy exempt
+    from R2 (`regs.rs`, `allocate_apart`'s `coalesce`; `isel.rs`,
+    `for_count_tested`);
   - a `for` loop of the `Fill` shape stays as in section 7;
   - arrays of elements wider than a byte indexed by the index itself
     and reached through a pointer variable the body leaves unchanged
@@ -6727,8 +6837,15 @@ scripts besides, not kept, are named as such below; re-check sites with
   (12.5, `loop_pointer_locals`).
 
 **Not supported yet** (positioned errors): run-time bounds other than
-the case above (no rule for the copy without calls; `tst.w; beq` for
-unsigned counts; run-time `lo`; `downto`); stepped pointers through
+the cases above, each with its own message (bead domain-pascal-jnsb):
+from 1, or from 0 to `e - c`, without a call in the body (no rule for
+the copy); from 0 to an expression other than a variable
+or `e - c` (the guard of its value not surveyed), through a pointer (no
+`tst.w`, ROUTE_$READ_USER_STATS 0xE6A6C4), or another unit's, absolute,
+indexed or unheld frame variable (not surveyed); from another constant
+(the `subq.w #k`/`subi.w #k` seen only without a call); an unsigned
+index (`tst.w; beq`, the `subq.w`'s place); a run-time `lo`; run-time
+`downto` (not surveyed); stepped pointers through
 arrays of another data section's block or the enclosing routine's frame
 (not surveyed), from the start of the unit's data area with
 displacements in a byte (11 `lea (A5)` against 3 `movea.l A5`), in
@@ -6749,12 +6866,15 @@ never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
 
 Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
-`loops/stepped.pas`, `loops/stepped_data.pas`; exec tests
-`tests/exec/stepped_data.pas`, `tests/exec/stepped_data_more.pas`; tests `crates/dpc-m68k/src/isel.rs`
-(`for_with_index_and_call`, `for_forms`, `stepped_pointer_loops`,
-`constant_address_stepped_loops`, `unsettled_for_loops`, `while_shape`,
-`loop_pointer_local_rule`), `tools/tests/test_loopalign.py`
-(`SteppedPointersTest`),
+`loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`;
+exec tests `tests/exec/stepped_data.pas`, `tests/exec/stepped_data_more.pas`,
+`tests/exec/for_runtime.pas`; tests `crates/dpc-m68k/src/isel.rs`
+(`for_with_index_and_call`, `for_forms`, `for_runtime_upper_bounds`,
+`stepped_pointer_loops`, `constant_address_stepped_loops`,
+`unsettled_for_loops`, `while_shape`, `loop_pointer_local_rule`),
+`crates/dpc-m68k/src/regs.rs` (`coalesced_copy`),
+`tools/tests/test_loopalign.py` (`SteppedPointersTest`,
+`GuardClassTest`),
 `crates/dpc-ir/src/tests.rs` (`for_loops`, `while_exit_next`).
 Conformance (`make conform`): `tests/conformance/disk_unassign_all.pas`
 (DISK_$UNASSIGN_ALL 0xE6BE1C; its `bsr.w` to DISK_$UNASSIGN, outside the

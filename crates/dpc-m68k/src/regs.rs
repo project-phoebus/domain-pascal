@@ -633,7 +633,7 @@ pub fn allocate(
     exit: &[Reg],
     holds: &[(usize, Reg)],
 ) -> Result<RegSet, String> {
-    allocate_apart(insns, exit, holds, &[], None, &[])
+    allocate_apart(insns, exit, holds, &[], None, &[], &[])
 }
 
 /// [`allocate`], with each pair of `apart` kept in different registers
@@ -657,6 +657,12 @@ pub fn allocate(
 ///
 /// `late`: pairs `(l, p)` where `p` is coloured right after `l` instead of
 /// in its own place ([`call_results_first`]).
+///
+/// `coalesce`: copies `(d, s)` exempt from R2: `d` may take the register
+/// of `s` where `s` dies at the copy (a `for` loop's count copied from the
+/// bound it tests, `move.w D2,D2` at the module-local 0xE17EC2 and
+/// `move.w D0,D0` at XNS_IDP_$REGISTER_ADDR 0xE19028; codegen-patterns
+/// 7.4, [`crate::isel`]).
 pub fn allocate_apart(
     insns: &mut [Insn],
     exit: &[Reg],
@@ -664,6 +670,7 @@ pub fn allocate_apart(
     apart: &[(Reg, Reg)],
     first: Option<(Reg, Vec<Reg>)>,
     late: &[(Reg, Reg)],
+    coalesce: &[(Reg, Reg)],
 ) -> Result<RegSet, String> {
     let web = first.as_ref().map(|(w, _)| *w);
     let live_out = liveness(insns, exit, holds);
@@ -698,7 +705,9 @@ pub fn allocate_apart(
             // section 3).
             if is_virtual(d) && Some(d) != web {
                 for &u in &acc.reg_operands {
-                    edge(d, u);
+                    if !coalesce.contains(&(d, u)) {
+                        edge(d, u);
+                    }
                 }
             }
             if is_virtual(d) && !order.contains(&d) {
@@ -1059,7 +1068,7 @@ mod tests {
         let mut insns = body(false);
         let after = call_results_first(&insns, &[], &[], &[4], &[va(0)]);
         assert_eq!(after, [(va(1), va(0))]);
-        allocate_apart(&mut insns, &[], &[], &[], None, &after).unwrap();
+        allocate_apart(&mut insns, &[], &[], &[], None, &after, &[]).unwrap();
         let t = text(&insns);
         assert_eq!(t[0], "movea.l\t(0x18,%fp),%a3");
         assert_eq!(t[4], "movea.l\t%a0,%a2");
@@ -1093,7 +1102,7 @@ mod tests {
         assert!(text(&plain).iter().all(|l| !l.contains("%a1")));
         let mut insns = body;
         let apart = [(va(1), va(0)), (va(2), va(0)), (va(2), va(1))];
-        let saves = allocate_apart(&mut insns, &[], &[], &apart, None, &[]).unwrap();
+        let saves = allocate_apart(&mut insns, &[], &[], &apart, None, &[], &[]).unwrap();
         assert_eq!(
             text(&insns),
             [
@@ -1298,6 +1307,36 @@ mod tests {
         ];
         allocate(&mut chain, &[], &[]).unwrap();
         assert_eq!(chain[1].to_string(), "movea.l\t(4,%a0),%a0");
+    }
+
+    /// A copy exempt from R2 (`coalesce`) may take its dying source's
+    /// register: a `for` loop's count copied from its tested bound,
+    /// XNS_IDP_$REGISTER_ADDR 0xE19020..0xE19028 `move.w (1336,A5),D0;
+    /// tst.w D0; bmi.s; move.w D0,D0`.
+    #[test]
+    fn coalesced_copy() {
+        let copy = || {
+            vec![
+                load(8, vd(0)),
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(vd(0)),
+                    dst: Ea::Reg(vd(1)),
+                },
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(vd(1)),
+                    dst: Ea::Disp(-2, FP),
+                },
+            ]
+        };
+        let mut insns = copy();
+        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[(vd(1), vd(0))]).unwrap();
+        assert_eq!(insns[1].to_string(), "move.w\t%d0,%d0");
+        // Without the exemption, R2 keeps them apart.
+        let mut insns = copy();
+        allocate_apart(&mut insns, &[], &[], &[], None, &[], &[]).unwrap();
+        assert_eq!(insns[1].to_string(), "move.w\t%d0,%d1");
     }
 
     /// A two-address result stays in its operand's register (0xE148DE

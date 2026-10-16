@@ -152,5 +152,51 @@ class SteppedPointersTest(unittest.TestCase):
         self.assertEqual((p['root'], p['offset'], p['disps']), ('movea A5', 8, [5460]))
 
 
+class GuardClassTest(unittest.TestCase):
+    """`guards' (codegen-patterns 7.4, "Run-time bounds")."""
+
+    def test_subq_copied(self):
+        # DTTY_$WRITE_STRING 0xE1D6AA..0xE1D6B2
+        self.assertEqual(loopalign.guard_class(
+            'bmi', ['moveal %fp@(12),%a0', 'movew %a0@,%d0', 'subqw #1,%d0'],
+            ['movew %d0,%d3', 'moveq #1,%d2'], '%d3'),
+            ('bmi subq #1', 'copied', '1'))
+
+    def test_subq_in_place_from_zero(self):
+        # KBD's module-local 0xE1CA8C at 0xE1CAA8..0xE1CAAE
+        self.assertEqual(loopalign.guard_class(
+            'bmi', ['movew %d0,%d1', 'subqw #1,%d1'], ['clrw %d2'], '%d1'),
+            ('bmi subq #1', 'in place', '0'))
+
+    def test_tst_self_copy(self):
+        # XNS_IDP_$REGISTER_ADDR 0xE19020..0xE1902A
+        self.assertEqual(loopalign.guard_class(
+            'bmi', ['movew %a5@(1336),%d0', 'tstw %d0'],
+            ['movew %d0,%d0', 'clrw %d1', 'lea %a5@,%a0'], '%d0'),
+            ('bmi tst', 'self-copy', '0'))
+
+    def test_unsigned_reloaded(self):
+        # 0xE10BD4's preheader: `tst.w (-478,A2); beq; move.w (-478,A2),D3'
+        self.assertEqual(loopalign.guard_class(
+            'beq', ['tstw %a2@(-478)'],
+            ['movew %a2@(-478),%d3', 'subqw #1,%d3', 'moveq #1,%d4'], '%d3'),
+            ('beq tst mem', 'reloaded', '1'))
+
+    def test_exit_chain(self):
+        # a guard may jump past the exit's `bra' (DISK_$AS_XFER_MULTI
+        # 0xE6BA46 `bmi.w 0xe6bb8c')
+        ins = [(0x100, 4, 'dbf %d2,0x0f0'), (0x104, 2, 'bras 0x110'),
+               (0x106, 2, 'clrw %d0'), (0x110, 2, 'rts')]
+        idx = {a: i for i, (a, n, x) in enumerate(ins)}
+        self.assertEqual(loopalign.exit_chain(ins, idx, 0), {0x104, 0x110})
+
+    def test_run_time_lower_bound(self):
+        # 0xE02BFE..0xE02C0A
+        self.assertEqual(loopalign.guard_class(
+            'bmi', ['movew %d2,%d1', 'movew %d3,%d0', 'addqw #1,%d1', 'subw %d1,%d0'],
+            ['movew %d0,%d3', 'movew %d1,%d0'], '%d3'),
+            ('bmi sub', 'copied', '?'))
+
+
 if __name__ == '__main__':
     unittest.main()
