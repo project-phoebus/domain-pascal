@@ -25,11 +25,11 @@ STUB	acl/acl.pas	acl_$rights_check
 STUB	acl/acl.pas	acl_$setids
 STUB	acl/acl.pas	acl_$enter_subs
 OK	acl/acl.pas	acl_$enter_super
-MISMATCH	acl/acl.pas	acl_$exit_super
+OK	acl/acl.pas	acl_$exit_super
 MISMATCH	acl/acl.pas	acl_$clear_super
 STUB	acl/acl.pas	acl_$up
 STUB	acl/acl.pas	acl_$down
-STUB	acl/acl.pas	acl_$in_subsys
+OK	acl/acl.pas	acl_$in_subsys
 STUB	acl/acl.pas	acl_$set_acl_check
 MISMATCH	acl/acl.pas	acl_$default_acl
 STUB	acl/acl.pas	acl_$def_acldata
@@ -176,7 +176,7 @@ STUB	disk/disk_vol.pas	disk_$dismount
 STUB	disk/disk_vol.pas	disk_$lvuid_to_volx
 OK	dma/dma.pas	dma_$init_m68450_channel
 STUB	dma/dma.pas	dma_$init
-STUB	dma/dma.pas	dma_$check
+MISMATCH	dma/dma.pas	dma_$check
 OK	dma/dma.pas	dma_$free_asid
 OK	dtty/dtty.pas	dtty_$get_disp_type
 OK	dtty/dtty.pas	dtty_$clear_window
@@ -415,7 +415,7 @@ STUB	netbuf/netbuf.pas	netbuf_$get_hdr
 MISMATCH	netbuf/netbuf.pas	netbuf_$rtn_hdr
 STUB	netbuf/netbuf.pas	netbuf_$get_dat_cond
 STUB	netbuf/netbuf.pas	netbuf_$get_dat
-STUB	netbuf/netbuf.pas	netbuf_$rtn_dat
+MISMATCH	netbuf/netbuf.pas	netbuf_$rtn_dat
 STUB	netbuf/netbuf.pas	netbuf_$rtn_pkt
 STUB	netbuf/netbuf.pas	netbuf_$init
 STUB	netlog/netlog.pas	netlog_$cntl
