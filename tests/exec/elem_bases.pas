@@ -12,8 +12,9 @@
   a call between (the base loaded again), a store of a computed value.  Element k of
   each array holds a value made from k (elem_bases_data.mod.pas), so a
   wrong index, scale or displacement reads another value.  Not expressed
-  (refused): such elements in loops, two in one statement, the same
-  array in a later statement with no call between, an index read from
+  (refused): such elements in loops, two in one statement (the same
+  array in a later statement with no call between: kept_bases.pas), an
+  index read from
   the same variable, displacements beyond a byte, stores whose value
   needs an address register, a padded call's first argument, and their
   addresses as values.

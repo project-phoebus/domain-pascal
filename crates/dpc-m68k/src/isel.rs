@@ -50,6 +50,13 @@ fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
 }
 
+/// The refusal of a `lea (0,An,Dx),Am` from the base of another unit's
+/// array that an earlier statement loaded ([`Selector::held_other_base`]).
+const KEPT_BASE_LEA: &str = "an element of another unit's array that an earlier statement since \
+     the last call reached too, at a displacement beyond a byte or as an address (`lea \
+     (0,An,Dx),Am` from the kept base: 8 sites, its register not surveyed; codegen-patterns \
+     5.2, \"Base kept across statements\"; bead domain-pascal-lnzy) is";
+
 /// A constant as the immediate of a `w`-sized instruction: a byte as
 /// 0..=255 (see [`Ea::Imm`]), a word or longword as the signed number.
 fn imm(value: i64, w: Width) -> i64 {
@@ -5963,10 +5970,22 @@ pub struct Selector {
     /// The other units' arrays whose elements were addressed since the
     /// routine's entry or the last call ([`Self::other_unit_index`]).
     other_syms: Vec<String>,
+    /// The bases of other units' arrays loaded since the routine's entry
+    /// or the last call, for a later statement to read again
+    /// ([`Self::held_other_base`]): the array's symbol, the base's
+    /// immediate, its register and the index in `out` of its load.
+    other_held: Vec<(String, String, u8, usize)>,
+    /// Whether the last [`Self::other_unit_index`] read a base an earlier
+    /// statement loaded ([`Self::held_other_base`]).
+    base_reused: bool,
     /// How many elements of another unit's array or through a pointer
     /// loaded from memory were addressed ([`Self::split_base`]): a call
     /// checks whether its first pushed argument formed one.
     split_elems: usize,
+    /// How many call arguments are being pushed ([`Self::call`]): a base
+    /// an earlier statement loaded is not read again for one
+    /// ([`Self::held_other_base`]).
+    arg_pushes: u32,
     /// By-address slots loaded for one use in a body of several
     /// statements: the register, the start of its statement in `out`, and
     /// the statement ([`fresh_slot_loads`]).
@@ -6301,7 +6320,10 @@ impl Selector {
             stmt_start: 0,
             other_elem: None,
             other_syms: Vec::new(),
+            other_held: Vec::new(),
+            base_reused: false,
             split_elems: 0,
+            arg_pushes: 0,
             fresh: Vec::new(),
             ptr_copies: Vec::new(),
             pinned: Vec::new(),
@@ -11863,7 +11885,10 @@ impl Selector {
                      constant (merged into one longword push?) is",
                 ));
             }
-            self.push(a)?;
+            self.arg_pushes += 1;
+            let pushed = self.push(a);
+            self.arg_pushes -= 1;
+            pushed?;
             if k == c.args.len() && c.pad == 2 && self.split_elems > split0 {
                 // The first pushed argument formed an element of another
                 // unit's array or through a loaded pointer, after the pad:
@@ -11924,6 +11949,7 @@ impl Selector {
         // across one; [`Self::other_unit_index`]).
         self.other_bases.clear();
         self.other_syms.clear();
+        self.other_held.clear();
         let n = c.bytes();
         if !no_pop && n > 0 {
             self.out.push(if n <= 8 {
@@ -14851,6 +14877,7 @@ impl Selector {
         self.out.push(Insn::Jsr(Ea::AbsL(name.to_string(), 0)));
         self.other_bases.clear();
         self.other_syms.clear();
+        self.other_held.clear();
         if self.call_no_pop && self.marith_depth == 0 {
             self.unpopped = true;
         } else {
@@ -15716,7 +15743,11 @@ impl Selector {
             // (0,A0,D0.w),A1; move.l A1,(-80,A6)`).
             _ => {
                 let split = self.split_base(a);
+                self.base_reused = false;
                 let src = self.ea_of(a)?;
+                if split && self.base_reused {
+                    return Err(unsupported(self.span, KEPT_BASE_LEA));
+                }
                 if split && !matches!(src, Ea::Idx(..)) {
                     // Beyond a byte the element's operand is `(d,Am)` after
                     // `lea (0,An,Dx),Am` ([`Self::split_element_ea`]): its
@@ -18086,6 +18117,9 @@ impl Selector {
                 }
                 let imm = biased_symbol(name, bias);
                 let (x, a) = self.other_unit_index(name, &imm, index, scale)?;
+                if self.base_reused && !(-128..128).contains(&disp) {
+                    return Err(unsupported(self.span, KEPT_BASE_LEA));
+                }
                 return self.split_element_ea(a, x, index, disp);
             }
             Addr::Indirect { base: p, offset: o } if scale == 1 => {
@@ -18422,6 +18456,7 @@ impl Selector {
         index: &Expr,
         scale: u32,
     ) -> Res<(u8, u8)> {
+        self.base_reused = false;
         if self.in_loop() {
             return Err(self.other_unit_in_loop());
         }
@@ -18468,20 +18503,11 @@ impl Selector {
         }
         self.other_elem = Some(here);
         if self.other_syms.iter().any(|s| s == sym) {
-            // Within a run without calls the image keeps the base for the
-            // next statement: of 78 `movea.l #` bases of indexed operands
-            // used again in their block, none is loaded a second time while
-            // a register holds it (MMAP_$FREE_PAGES 0xE0CF5C..0xE0CF74,
-            // `(0,A1,D2.l)` in two statements; module-local 0xE5B744
-            // ..0xE5B756 `clr.l (0,A1,D2.w); ...; clr.l (0,A1,D3.w)`).
-            // `dpc` loads it again; across a branch target not seen.
-            return Err(unsupported(
-                self.span,
-                "an element of another unit's array that an earlier statement since the last \
-                 call reached too (the original keeps the base's register for it, \
-                 MMAP_$FREE_PAGES 0xE0CF74, 0xE5B756; codegen-patterns 5.2; bead \
-                 domain-pascal-lnzy) is",
-            ));
+            let a = self.held_other_base(sym, imm, index)?;
+            self.split_elems += 1;
+            let x = self.index_reg(index, scale)?;
+            self.base_reused = true;
+            return Ok((x, a));
         }
         let mut sym_read = false;
         walk_expr(index, &mut |n| {
@@ -18502,6 +18528,7 @@ impl Selector {
         }
         self.other_syms.push(sym.to_string());
         self.split_elems += 1;
+        let held_at = self.other_held.len();
         let mut base = None;
         let mut base_at = 0;
         let start = self.out.len();
@@ -18545,17 +18572,177 @@ impl Selector {
                 }
             }
         }
-        Ok((x, base.expect("the base is loaded")))
+        let a = base.expect("the base is loaded");
+        self.other_held
+            .insert(held_at, (sym.to_string(), imm.to_string(), a, base_at));
+        Ok((x, a))
+    }
+
+    /// The base of another unit's array `sym` that an earlier statement
+    /// since the last call loaded, read again by a later statement
+    /// (codegen-patterns 5.2, "Base kept across statements", Reported;
+    /// `tools/basesurvey.py pairs`).  Across statements, after an element
+    /// operand `(d,An,Dx)` of the earlier one, no call and no address
+    /// register given a value between, the image keeps the base 21 times
+    /// and loads it again none (module-local 0xE5B704 at 0xE5B756 `clr.l
+    /// (0,A1,D3.w)` after `clr.l (0,A1,D2.w)`; KBD_$GET_DESC 0xE1AA74
+    /// `cmpi.w #1,(52,A1,D3.w)` after `tst.l (44,A1,D3.w)` and the `if`
+    /// it ends; SIO_$I_GET_DESC 0xE66808).  Read again only where:
+    ///
+    /// - the earlier statement reached the element as an operand (after
+    ///   a `lea (0,An,Dx),Am` from the base, across statements, the base
+    ///   is loaded again 29 times, the `lea` into the base's own
+    ///   register, and kept 31 times, the `lea` into another: which, is
+    ///   not explained);
+    /// - its load dominates here: no label between is the target of a
+    ///   branch from before it (as for [`Self::cse_valid`]; kept after a
+    ///   conditional branch 4 times, past an `if ... else` join at the
+    ///   module-local 0xE3ECEA's 0xE3ED8A);
+    /// - no back edge lies between (no such pair);
+    /// - no call lies between ([`Self::call`] forgets the bases; after a
+    ///   call 146 bases are loaded again, 33 kept in a callee-saved
+    ///   register, rule not found);
+    /// - no address register is given a value between (the 2 reloads
+    ///   after an operand follow one that took the base's register,
+    ///   0xE12F5A, SIO2681_$INIT 0xE33432; 4 kept with one in another);
+    /// - the element is not a call's argument nor an M$ARITH operand (its
+    ///   last read a push, 12.4 R4(c) would give the base a callee-saved
+    ///   register; not seen);
+    /// - the index is not a zero-extended word (not seen).
+    ///
+    /// The element itself must be an operand within a byte too
+    /// ([`Self::index_ea`], [`Self::lea_into`]: the register of a `lea`
+    /// from a kept base is not surveyed; [`once_elem_lea`]'s rule is for
+    /// a base loaded for the `lea` alone).
+    fn held_other_base(&mut self, sym: &str, imm: &str, index: &Expr) -> Res<u8> {
+        let refuse = |s: &Self, why: &str| {
+            unsupported(
+                s.span,
+                format!(
+                    "an element of another unit's array that an earlier statement since the \
+                     last call reached too, {why} (codegen-patterns 5.2, \"Base kept across \
+                     statements\"; bead domain-pascal-lnzy) is"
+                ),
+            )
+        };
+        let Some(&(_, _, a, at)) = self
+            .other_held
+            .iter()
+            .rev()
+            .find(|h| h.0 == sym && h.1 == imm)
+        else {
+            // Reached since the last call without a base of its own kept
+            // (another immediate, the biased base of a large overlay
+            // section; or a base not recorded, as in a loop).
+            return Err(refuse(self, "whose earlier base is not one dpc keeps"));
+        };
+        if self.arg_pushes > 0 || self.marith_depth > 0 {
+            // The base's last read would be an argument push, and such a
+            // value takes a callee-saved register (12.4 R4(c)); the image
+            // has no element operand followed by a later call's argument
+            // off the kept base, and a constant base kept into a later
+            // call's arguments is in A0 (FILE_$LOCK_INIT 0xE327EE,
+            // XNS_IDP_$INIT 0xE3027C, 0xE2F928, NETWORK_$INIT 0xE2F71E).
+            return Err(refuse(
+                self,
+                "as an argument of a call (pushed or by address; the kept base's register for it \
+                 not seen)",
+            ));
+        }
+        if matches!(index, Expr::Convert { value, ty, .. }
+            if ty.width == Width::Long && value.ty().width == Width::Word && !value.ty().is_signed())
+        {
+            return Err(refuse(self, "with a zero-extended word index (not seen)"));
+        }
+        let region = &self.out[at..];
+        let inside: Vec<u32> = region
+            .iter()
+            .filter_map(|i| match i {
+                Insn::Label(l) => Some(*l),
+                _ => None,
+            })
+            .collect();
+        let from_before = self.out[..at].iter().any(|i| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => inside.contains(label),
+            Insn::TableJump { targets, .. } => targets.iter().any(|l| inside.contains(l)),
+            Insn::TableEntry { target, .. } => inside.contains(target),
+            _ => false,
+        });
+        if from_before {
+            return Err(refuse(
+                self,
+                "where the base's load does not dominate (a branch from before it to a label \
+                 after it: not seen)",
+            ));
+        }
+        let back = region.iter().enumerate().any(|(k, i)| match i {
+            Insn::Branch { label, .. } | Insn::Dbf { label, .. } => region[..k]
+                .iter()
+                .any(|j| matches!(j, Insn::Label(l) if l == label)),
+            _ => false,
+        });
+        if back {
+            return Err(refuse(
+                self,
+                "past a loop (no such pair in tools/basesurvey.py pairs)",
+            ));
+        }
+        for i in &region[1..] {
+            if matches!(
+                i,
+                Insn::Jsr(_) | Insn::Bsr { .. } | Insn::Words(_) | Insn::Encoded { .. }
+            ) {
+                return Err(refuse(self, "past a call or an inline sequence"));
+            }
+            if matches!(i, Insn::Lea { src: Ea::Idx(_, b, _, _), .. } if *b == a) {
+                return Err(refuse(
+                    self,
+                    "after the earlier element's `lea (0,An,Dx),Am` (across statements 29 \
+                     reloads, the `lea` into the base's register, against 31 bases kept, the \
+                     `lea` into another: not explained)",
+                ));
+            }
+            if crate::regs::access(i)
+                .defs
+                .iter()
+                .any(|r| matches!(r, Reg::A(n) if *n != a))
+            {
+                // The image may give such a value the base's register and
+                // load the base again (0xE12F5A `lea (16,A2),A1` while A0
+                // is dead, K again at 0xE12F66; SIO2681_$INIT 0xE33432,
+                // the channel's pointer in the base's A4, K again at
+                // 0xE33468); `dpc` would keep both, the pointer in another
+                // register, with no site.
+                return Err(refuse(
+                    self,
+                    "with an address register given a value between (the image may give it the \
+                     base's register and load the base again, 0xE12F5A/0xE12F66, SIO2681_$INIT \
+                     0xE33432/0xE33468)",
+                ));
+            }
+        }
+        Ok(a)
     }
 
     /// The refusal of an element of another unit's array in a loop
-    /// ([`Self::other_unit_index`]).
+    /// ([`Self::other_unit_index`]).  `tools/basesurvey.py loops`: per
+    /// outermost loop and array with elements in its body, the base held
+    /// in a register from before the loop (TTY_$K_DRAIN_OUTPUT 0xE67AF0
+    /// `move.l #FIM_$QUIT_VALUE,D7`, `movea.l D7,A1` in the loop;
+    /// NETBUF_$ADD_PAGES 0xE0EA98, the base in A0 and each element's
+    /// `lea` into A3) 56 times, 49 of them loaded for the loop alone, and
+    /// loaded in the body 115 times (KBD_$FETCH_KEY 0xE1CBAA; MMAP_$GET_
+    /// IMPURE 0xE0D722, a `dbf` loop); both 2.  By the loop's kind: `dbf`
+    /// loops 34 held against 12 loaded, other loops 22 against 103; calls
+    /// in the body do not separate them (held 38 / loaded 85 with calls,
+    /// 18 / 30 without).  Not settled.
     fn other_unit_in_loop(&self) -> Diagnostic {
         unsupported(
             self.span,
             "an element of another unit's array in a loop (its address loaded in the loop or \
-             held from before it, TTY_$K_DRAIN_OUTPUT 0xE67AF0: not settled, codegen-patterns \
-             5.2; bead domain-pascal-dw25) is",
+             held from before it, TTY_$K_DRAIN_OUTPUT 0xE67AF0: per loop and array, held 34 and \
+             loaded 12 in `dbf` loops, held 22 and loaded 103 in others, no rule found; \
+             `tools/basesurvey.py loops`, codegen-patterns 5.2; bead domain-pascal-dw25) is",
         )
     }
 

@@ -394,17 +394,65 @@ fn other_units_array_elements() {
             "move.l\t%d0,(L).l",
         ]
     );
-    // Refused, review of bead domain-pascal-rlnm: the same array in a
-    // later statement with no call between (the base kept, MMAP_$FREE_
-    // PAGES 0xE0CF74); an index read from the same variable (SIO_$INIT
-    // 0xE32CA2); a store whose value needs an address register
-    // (TERM_$CONTROL 0xE66B4C); the first argument pushed after a pad
-    // (NAME_$FREE_ASID 0xE74DDE).
-    let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  l := xs[u];\nend;\n");
-    assert!(
-        e.contains("an earlier statement since the last call"),
-        "{e}"
+    // The same array in a later statement with no call between: the
+    // base's register read again (module-local 0xE5B704 at 0xE5B756
+    // `clr.l (0,A1,D3.w)` after `clr.l (0,A1,D2.w)`; bead
+    // domain-pascal-lnzy, `tools/basesurvey.py pairs`), also after an
+    // `if` its load dominates (KBD_$GET_DESC 0xE1AA74).
+    assert_eq!(
+        body("procedure t; internal;\nbegin\n  l := xs[w];\n  l := xs[u];\nend;\n"),
+        [
+            "move.w\t(W).l,%d0",
+            "movea.l\t#XS,%a0",
+            "add.w\t%d0,%d0",
+            "move.w\t(-2,%a0,%d0.w),%d0",
+            "ext.l\t%d0",
+            "move.l\t%d0,(L).l",
+            "move.w\t(U).l,%d0",
+            "add.w\t%d0,%d0",
+            "move.w\t(-2,%a0,%d0.w),%d0",
+            "ext.l\t%d0",
+            "move.l\t%d0,(L).l",
+        ]
     );
+    let held = body(
+        "procedure t; internal;\nbegin\n  if xs[w] = 0 then l := 0;\n  l := xs[u];\nend;\n",
+    );
+    assert_eq!(held.iter().filter(|i| i.starts_with("movea.l\t#XS,")).count(), 1, "{held:?}");
+    // Refused: the earlier load not dominating (in a `then` part); the
+    // earlier element through `lea (0,An,Dx),Am` (49 reloads against 75
+    // bases kept); a `lea` from the kept base (8 sites, not settled).
+    let e = error(
+        "procedure t; internal;\nbegin\n  if w = 0 then l := xs[w];\n  l := xs[u];\nend;\n",
+    );
+    assert!(e.contains("does not dominate"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  l := xh[w];\n  l := xh[u];\nend;\n");
+    assert!(e.contains("after the earlier element's `lea"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  pp := addr(xs[u]);\nend;\n");
+    assert!(e.contains("from the kept base"), "{e}");
+    // Refused: the later element a call's argument, pushed or by address
+    // (its last read a push: 12.4 R4(c) would give the base a
+    // callee-saved register; a kept base for a later call's arguments is
+    // A0 in the image, FILE_$LOCK_INIT 0xE327EE); past a loop; with an
+    // address register given a value between (0xE12F5A, SIO2681_$INIT
+    // 0xE33432).
+    for routine in [
+        "procedure t; internal;\nbegin\n  l := xs[w];\n  g(xs[u], w);\nend;\n",
+        "procedure t; internal;\nbegin\n  l := xs[w];\n  g(w, xs[u]);\nend;\n",
+    ] {
+        let e = error(routine);
+        assert!(e.contains("as an argument of a call"), "{routine}: {e}");
+    }
+    let e = error(
+        "procedure t; internal;\nbegin\n  l := xs[w];\n  while w > 0 do w := w - 1;\n  l := xs[u];\nend;\n",
+    );
+    assert!(e.contains("past a loop"), "{e}");
+    let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  w := ip^[2];\n  l := xs[u];\nend;\n");
+    assert!(e.contains("an address register given a value between"), "{e}");
+    // Refused, review of bead domain-pascal-rlnm: an index read from the
+    // same variable (SIO_$INIT 0xE32CA2); a store whose value needs an
+    // address register (TERM_$CONTROL 0xE66B4C); the first argument pushed
+    // after a pad (NAME_$FREE_ASID 0xE74DDE).
     let e = error("procedure t; internal;\nbegin\n  if xsr.a[xsr.n] = 0 then l := 0;\nend;\n");
     assert!(e.contains("read from the same variable"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  xsr.n := xsr.a[w];\nend;\n");

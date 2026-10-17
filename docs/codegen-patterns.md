@@ -3932,18 +3932,22 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       base after the shift (the previous statement's `addq` in between),
       where R11 from "value, base, scaling" puts it before the shift.
     - *Refused besides* (the same review): the same array in a later
-      statement with no call between, where the image keeps the base (of
-      the 78 `movea.l #` bases that indexed operands of their block use
-      again, none is loaded a second time while a register holds it:
-      MMAP_$FREE_PAGES 0xE0CF5C..0xE0CF74, 0xE5B744..0xE5B756 `clr.l
-      (0,A1,D2.w); move.w (8,A6),D3; lsl.w #2,D3; clr.l (0,A1,D3.w)`;
-      after a call it is loaded again, 27 against 3 held; across a branch
-      target not seen); an index read from the same variable, through the
-      base (SIO_$INIT 0xE32C9C..0xE32CB4 `movea.l #0xE2C9F0,A1; move.w
-      (5000,A1),D0; ...`), or a store that reaches another part of the
-      same variable (0xE19F7A..0xE19F8A, A1 and A2 both loaded with
-      0xE7AEF4, `move.l (236,A1),(300,A2)`), where `dpc` reads it
-      absolutely; an element at a displacement beyond a byte,
+      statement with no call between, other than the shape below
+      ("Base kept across statements"); an index read from the same
+      variable, through the base (SIO_$INIT 0xE32C9C..0xE32CB4 `movea.l
+      #0xE2C9F0,A1; move.w (5000,A1),D0; ...`), or a store that reaches
+      another part of the same variable (0xE19F7A..0xE19F8A, A1 and A2
+      both loaded with 0xE7AEF4, `move.l (236,A1),(300,A2)`), where
+      `dpc` reads it absolutely (`tools/basesurvey.py`, review of bead
+      domain-pascal-lnzy: of the bases loaded for an element whose
+      register reads another part of the variable first, 16, none has
+      that part read absolutely in the statement or the 8 instructions
+      before the load, a `pea abs.l` argument aside, PCHIST_ 0xE5CEF6;
+      where each part goes, `(d,An)` off the base or a second `lea`, is
+      the shape of each site: PROC2_$SET_TTY 0xE41C10..0xE41C2A `movea.l
+      #0xEA551C,A0; add.w D0,D0; lea (0,A0,D0.w),A1; move.w (16054,A1),D0;
+      mulu.w #228,D0; lea (0,A0,D0.w),A1`, not modelled); an element at
+      a displacement beyond a byte,
       `lea (0,An,Dx),Am`, other than from a base in A0 with A1's state
       deciding (with the base dead after one use, 84 own, SIO_$INIT
       0xE32CB0, against 105 another, NETBUF_$ADD_PAGES 0xE0EAD6 `lea
@@ -3972,12 +3976,116 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       one base (PROC2_$FORK 0xE72EE2), one has the value's index from
       before (0xE614C2).  Not modelled: refused (bead
       domain-pascal-0r1v, with the in-place `add.l` above).
-    - *In loops:* such bases are loaded in the loop (202 operands,
-      KBD_$FETCH_KEY 0xE1CBAA `movea.l #SMD_$KTT,A0`) and also held in a
-      register from before the loop (TTY_$K_DRAIN_OUTPUT 0xE67AF0
-      `move.l #FIM_$QUIT_VALUE,D7`, `movea.l D7,A1` in the loop, with
-      FIM_$QUIT_EC, PROC1_$AS_ID and two field addresses).  Not settled:
-      refused (bead domain-pascal-dw25).
+    - *Base kept across statements (survey Reported, 2 counterexamples;
+      implemented for element operands within a byte, bead
+      domain-pascal-lnzy).*  `tools/basesurvey.py` (csesurvey's symbolic
+      model, 1588 routines: each `movea.l #K,An`/`move.l #K,Dn`/`lea
+      K.l,An` of a data address, each memory reference through a register
+      holding K, with the events since the previous reference of K).
+      `pairs` takes an earlier and a later element reference of one
+      array, no call between, outside loops, and tells one statement from
+      two by an instruction-level heuristic (`same_statement`: a boundary
+      where a store other than a push or a branch target lies between,
+      or where the earlier reference is itself a store, except a block
+      copy's two `(Am)+` halves and a second write of the same operand;
+      not exact: two stores with nothing between cannot be told from a
+      copy's halves without the `(Am)+`).  It also marks the pairs with
+      an address register given a value between other than by a base's
+      load (`Adef`: a pointer, a `lea`).
+      Within one statement each operand has its own base, even while a
+      register holds it: 7 loads of K while a register holds it with no
+      call or back edge between, 4 of them two operands of one statement
+      (FLP_$INT 0xE19F78/0xE19F82 above; NAME_$FORK 0xE73EAC/0xE73EB2
+      `lea (40,A3,D1.w),A3; lea (40,A4,D0.w),A4; move.l (A3)+,(A4)+`, and
+      0xE73EDE; ACL_$MIN_RIGHTS 0xE469C0; the refusal "two elements in one
+      statement" below), 3 two registers given K before a loop (the
+      module-local 0xE196AA at 0xE196CA/0xE196D0 `move.l
+      #TIME_$CLOCKH_EC,D6; movea.l #TIME_$CLOCKH_EC,A3`; WIN_$DO_IO
+      0xE19800/0xE19806; PROC2_$SUSPEND 0xE412FE); one element read and
+      written, or two halves of one copy, share it (23 such pairs:
+      AUDIT_$SUSPEND 0xE70DCE, PROC2_$FORK 0xE72B0E, the operands of an
+      `and then` UNMAP_CASE+0x660 0xE54788).
+      Across statements (the heuristic's "two"), by the earlier element's
+      form:
+      | earlier | `Adef` between | kept | loaded again |
+      |---|---|---|---|
+      | operand `(d,An,Dx)` | no | 21 (14 to an operand) | 0 |
+      | operand | yes | 4 | 2 |
+      | `lea (0,An,Dx),Am`, Am another | no / yes | 13 / 18 | 0 / 5 |
+      | `lea (0,An,Dx),An`, into the base | no / yes | 0 | 12 / 17 |
+      After an operand, with no address register given a value between,
+      the base is kept every time: the module-local 0xE5B704 at
+      0xE5B744..0xE5B756 `movea.l #FIM_$TRACE_STS,A1; lsl.w #2,D2; clr.l
+      (0,A1,D2.w); move.w (8,A6),D3; lsl.w #2,D3; clr.l (0,A1,D3.w)` (and
+      0xE5B866); KBD_$GET_DESC 0xE1AA62/0xE1AA74, `tst.l (44,A1,D3.w)` in
+      an `if` whose `then` part returns, `cmpi.w #1,(52,A1,D3.w)` after;
+      SIO_$I_GET_DESC 0xE667FA/0xE66808; 0xE2F1B4, 0xE30B62, SIO2681_$INIT
+      0xE3342C, TIME_$RELEASE 0xE58BA8, 0xE747D6.  The 2 reloads both
+      follow an address register given the base's register: the
+      module-local 0xE12E5E at 0xE12F5A `lea (16,A2),A1` for a record
+      copy while A0 is dead, K again at 0xE12F66; SIO2681_$INIT 0xE33432
+      `movea.l (16,A6),A4`, K again at 0xE33468.  The 4 kept with one
+      between have it in another register (0xE7370E, XPD_$SET_DEBUGGER
+      0xE5BD94, the module-local 0xE3ECEA at 0xE3ED8A, ROUTE_$GET_EC
+      0xE69C7E).  Which, is not known; `dpc` keeps the base live, so its
+      allocator would give such a value another register, refused.
+      Past an `if`: 4 kept after a conditional branch the earlier
+      reference dominates (above), 1 past an `if ... else` join (0xE3ED8A,
+      FIM_$QUIT_INH loaded at 0xE3ED1A for `tst.b (0,A0,D1.w)`, `st
+      (0,A0,D1.w)` after both parts load another array), and 9 past joins
+      after a `lea` into another register (ACL_$SET_ACL_CHECK 0xE46D48);
+      none reloaded at a join where the base survives.
+      After a `lea` the base survives when the `lea` went into another
+      register and dies when it went into the base's own; which register
+      the `lea` takes when the base is used again later is not explained
+      (the same source shape both ways: MMAP_$FREE_PAGES 0xE0CF64..0xE0CFC8,
+      the base kept in A1, against the nested mmap_$move_pages_to_wsl_type
+      0xE0D2E0..0xE0D346, reloaded into A0 and A2, ../source
+      mmap/free_pages.pas and mmap/ws_scan.pas).  Past a loop: no pair.
+      After a call (`summary`, all references; not refused, as before:
+      `dpc` loads again) 146 bases are loaded again, 117 of them from a
+      scratch register, and 33 kept in a callee-saved one (PARITY_$CHK
+      0xE0AEAC, a `with` record's fields): rule not found.  A constant
+      base kept into a later call's arguments is A0 (FILE_$LOCK_INIT
+      0xE327EE, XNS_IDP_$INIT 0xE3027C, 0xE2F928, NETWORK_$INIT 0xE2F71E);
+      no site has an element operand followed by a later call's argument
+      off the kept base.
+      **Implemented** (`isel.rs` `held_other_base`, called by
+      `other_unit_index`): a later statement's element of the same array
+      (the same symbol and immediate) reads the base's register, the
+      index formed as before without the base, where no call lies
+      between, the load dominates (no label between targeted by a branch
+      from before it, as for R7), no back edge lies between, no `lea`
+      from the base and no other address register's value lies between,
+      the index is not a zero-extended word (not seen), the element is
+      not a call's argument (pushed or by address: as the base's last
+      read, 12.4 R4(c) would give it a callee-saved register, not seen)
+      nor an M$ARITH operand, and it is an operand within a byte (not a
+      `lea`: `KEPT_BASE_LEA`).  Refused otherwise, with the reason.  A
+      call in one arm of an `if` forgets the base for the other arm too
+      (`dpc` clears it path-insensitively: XPD_$SET_DEBUGGER 0xE5BD94
+      keeps it in the `else` part; bead domain-pascal-cise).  Golden
+      `data/kept_base`; exec test `kept_bases`; test `dpc-m68k`
+      `other_units_array_elements`.  No conformance unit: SIO_$I_GET_DESC
+      and KBD_$GET_DESC also reuse, past the `if`, the ×56 of a local
+      held in a register (12.5), which R7 as implemented does not reuse
+      (its leaves exclude register-held locals), and keep the result in
+      its frame slot.
+    - *In loops (survey Reported; refused, bead domain-pascal-dw25).*
+      Such bases are loaded in the loop (KBD_$FETCH_KEY 0xE1CBAA
+      `movea.l #SMD_$KTT,A0`) and also held in a register from before
+      the loop (TTY_$K_DRAIN_OUTPUT 0xE67AF0 `move.l #FIM_$QUIT_VALUE,D7`,
+      `movea.l D7,A1` in the loop, with FIM_$QUIT_EC, PROC1_$AS_ID and two
+      field addresses).  `tools/basesurvey.py loops`, per outermost loop
+      and array with element references in its body (173): held from
+      before the loop 56 (49 loaded for the loop alone, 5 used before it
+      too, 2 not seen loaded), loaded in the body 115, both 2.  By the
+      loop's kind: `dbf` loops held 34, loaded 12; other loops held 22,
+      loaded 103 (TTY_$K_DRAIN_OUTPUT's `repeat` is one of the 22).
+      Calls in the body do not separate (held 38 / loaded 85 with calls,
+      18 / 30 without), nor the routine (the module-local 0xE00D46's
+      loop at 0xE00D6C holds one array and loads two).  Not settled:
+      refused.
     - *The element's address as a value (survey Verified for the
       register choice where the address is read twice or more or lives
       across a call, bead domain-pascal-o1kl, and where it is read once
@@ -4144,7 +4252,8 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       `other_units_array_elements`, `bases_of_a_large_section`.
     **Implemented** (`isel.rs`, `index_ea`, `other_unit_index`,
     `index_reg_with`): the rule above, in straight-line code, one such
-    element per statement and per array between calls, at displacements
+    element per statement, a later statement's element of the same
+    array between calls only as "Base kept across statements" gives, at displacements
     within a byte, with any index dpc forms that does not read the same
     variable, less the stores and padded calls refused above (test
     `dpc-m68k` `other_units_array_elements` has one case of each).  A scaled index held from earlier (12.4 R7) is

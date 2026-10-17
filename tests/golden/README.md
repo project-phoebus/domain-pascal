@@ -110,6 +110,14 @@ Tests:
   (module-local 0xE4649C, byte-identical; TTY_$I_WAIT 0xE1C22E ×12),
   after a `neg` scaling (0xE1AA50 ×56), in a byte index's stall
   (KBD_$FETCH_KEY 0xE1CBAA, 0xE1CB8A for a pointer loaded from memory).
+- `data/kept_base` - codegen-patterns 5.2 ("Base kept across
+  statements"), 12.4 R7 (bead domain-pascal-lnzy; `tools/basesurvey.py
+  pairs`): another unit's array's base read again by a later statement,
+  no call, loop or other address register's value between, its load
+  dominating: one base for two statements' elements (the module-local
+  0xE5B704 at 0xE5B744..0xE5B756, other index registers there), past an
+  `if` that returns (SIO_$I_GET_DESC 0xE667E8..0xE66808), past an `if`'s
+  join (the module-local 0xE3ECEA at 0xE3ED8A).
 - `data/elem_addr` - codegen-patterns 5.2 ("The element's address as a
   value"), 12.4 R2 (bead domain-pascal-o1kl): a `with` record of another
   unit's array read twice in the base's own register (XPD_$FIND_INDEX
