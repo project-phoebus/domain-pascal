@@ -233,3 +233,43 @@ class SelectTest(unittest.TestCase):
                      'cmpw %d1,%d0', 'bles 0x110', 'movew %d1,%d0', 'nop', 'nop',
                      'cmpw %d1,%d0', 'bles 0x118', 'movew %d3,%d0', 'nop'])
         self.assertEqual(cmpsurvey.select_sites(ins), [])
+
+
+class HeldTest(unittest.TestCase):
+    def test_register_against_memory_and_loaded(self):
+        # AST_$TRUNCATE 0xE05DFC (form A) and 0xE05E12..0xE05E1C (form B,
+        # then D6 against D0 after the branch, D0 counted as `blk')
+        ins = insns(['moveal %a0@(4),%a4', 'cmpw %a4@(12),%d6', 'bhiw 0x300',
+                     'tstw %a4@(18)', 'bpls 0x10c', 'nop',
+                     'movew %a4@(12),%d0', 'cmpw %d6,%d0', 'bhis 0x300',
+                     'cmpw %d0,%d6', 'bnes 0x300'])
+        self.assertEqual(cmpsurvey.held_sites(ins), [
+            (0x102, 'w', 'held', 'mem', 'bhi'),
+            (0x10e, 'w', 'load', 'reg:held', 'bhi'),
+            (0x112, 'w', 'held', 'reg:blk', 'bne')])
+
+    def test_two_held_and_a_widened_load(self):
+        # audit_$log_dir_op 0xE4BE34 (`clr.w D2' is a constant); 0xE04D34
+        ins = insns(['clrw %d2', 'cmpw %d1,%d2', 'bges 0x200',
+                     'clrw %d0', 'moveb %a2@(13),%d0', 'cmpw %d3,%d0', 'beqs 0x200',
+                     'movew %a0@,%d4', 'cmpw %d4,%d5', 'sne %d1'])
+        self.assertEqual(cmpsurvey.held_sites(ins), [
+            (0x102, 'w', 'imm', 'reg:blk', 'bge'),
+            (0x10a, 'w', 'wload', 'reg:held', 'beq'),
+            (0x110, 'w', 'held', 'reg:rload', 'sne')])
+
+    def test_join_and_immediate_not_sites(self):
+        # A branch target stops the look back; `cmpi' and `cmpa' are not
+        # sites; a compare not followed by a condition is not one.
+        ins = insns(['movew %a0@,%d0', 'bras 0x106', 'nop', 'cmpw %d2,%d0', 'beqs 0x200',
+                     'cmpiw #3,%d0', 'beqs 0x200', 'cmpw %a1@,%d3', 'movew %d3,%d4'])
+        self.assertEqual(cmpsurvey.held_sites(ins), [(0x106, 'w', 'blk', 'reg:held', 'beq')])
+
+    def test_forms(self):
+        self.assertEqual(cmpsurvey.held_form('held', 'mem'), 'A')
+        self.assertEqual(cmpsurvey.held_form('blk', 'mem'), 'A')
+        self.assertEqual(cmpsurvey.held_form('load', 'reg:held'), 'B')
+        self.assertEqual(cmpsurvey.held_form('load', 'reg:blk'), 'B')
+        self.assertEqual(cmpsurvey.held_form('held', 'reg:blk'), 'C')
+        self.assertIsNone(cmpsurvey.held_form('wload', 'reg:held'))
+        self.assertIsNone(cmpsurvey.held_form('load', 'mem'))

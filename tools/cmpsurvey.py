@@ -97,6 +97,18 @@ address order).  Kinds:
             smaller (`min'), `bge'/`bcc' the larger (`max'), `bhi'/`bcs'
             the same with the move taken on equality.  Evidence for `min'
             and `max' (codegen-patterns 10.1; bead domain-pascal-bzkf).
+    held    `cmp.<s> X,Dn' (X memory or a data register) followed by a
+            conditional branch or `s<cc>': where Dn's value, and X's when
+            it is a register, came from within the instruction's
+            straight-line run (reg_origin: held in the register, D2-D7
+            or D0/D1, loaded right before, widened, computed, ...), the
+            size and the condition.  Forms (held_form): A, a held
+            register compared with memory; B, memory loaded into D0/D1
+            right before and compared with a held register; C, two held
+            registers.  Evidence for which operand a compare of a
+            variable with a register-held one loads, and which register
+            two held ones compare into (codegen-patterns 7.1; bead
+            domain-pascal-5xnz).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -115,7 +127,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor', 'opflags', 'loadflags', 'select')
+         'andor', 'opflags', 'loadflags', 'select', 'held')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -666,6 +678,99 @@ def select_sites(ins):
     return out
 
 
+_REGCMP = re.compile(r'^cmp([bwl]) (.*),%(d\d)$')
+
+
+def reg_origin(ins, i, r, targets, size):
+    """How data register `r' got the value a `cmp.<size>' at ins[i]
+    reads, looking back within ins[i]'s straight-line run (stopping at a
+    branch, `jmp', `rts' or a branch target):
+
+        held   not written in the run, D2-D7: a variable kept in the
+               register (a parameter loaded at entry, a register local)
+        blk    not written in the run, D0/D1 (a value from before a
+               join, or a by-value parameter of a register convention)
+        load   `move.<size> M,Dr' (M memory) right before the compare,
+               D0/D1: a temporary loaded for the compare
+        wload  a narrower load into D0/D1 right before it, `clr' first
+               (a byte or word widened)
+        rload  either load into D2-D7 (a register variable assigned)
+        early  another load from memory earlier in the run
+        call   D0/D1 written by a call
+        copy, imm, op
+               a register copy, a constant, another computation"""
+    for j in range(i - 1, -1, -1):
+        t = ins[j][2]
+        if _FLOW.match(t + ' '):
+            break
+        if _CALL.match(t):
+            if r in ('d0', 'd1'):
+                return 'call'
+            continue
+        if writes(t, r):
+            m = _LOAD.match(t)
+            if m and re.match(r'^%[da]\d$', m.group(2)):
+                return 'copy'
+            if (m and m.group(2).startswith('#')) or _MOVEQ.match(t) or re.match(
+                    r'^clr[bwl] %' + r + '$', t):
+                return 'imm'
+            if m:
+                if j == i - 1:
+                    if r not in ('d0', 'd1'):
+                        return 'rload'
+                    return 'load' if m.group(1) == size else 'wload'
+                return 'early'
+            return 'op'
+        if ins[j][0] in targets:
+            break
+    return 'blk' if r in ('d0', 'd1') else 'held'
+
+
+def held_form(dst, src):
+    """The form of a `held' site from its two origins: 'A' (a register
+    variable compared with memory, `cmp.<s> M,Dheld'), 'B' (memory loaded
+    into D0/D1 right before and compared with a held register, `move.<s>
+    M,Dn; cmp.<s> Dheld,Dn'), 'C' (two held registers), or None.  Held
+    is `held' (D2-D7) or `blk' (D0/D1 not written in the run)."""
+    held = ('held', 'blk')
+    if dst in held and src == 'mem':
+        return 'A'
+    if dst == 'load' and src[4:] in held:
+        return 'B'
+    if dst in held and src[4:] in held:
+        return 'C'
+    return None
+
+
+def held_sites(ins):
+    """[(addr, size, destination origin, source, use)] of `cmp.<s>
+    X,Dn' followed by a conditional branch or `s<cc>' (X memory or a
+    data register; see `held' in the module docstring).  The source is
+    `mem' or `reg:' and the register's origin (reg_origin)."""
+    targets = set()
+    for _, _, t in ins:
+        m = re.match(r'^(?:b[a-z]{2,3}[sw]?|db[a-z]{1,2}) (?:%d\d,)?0x([0-9a-f]+)$', t)
+        if m:
+            targets.add(int(m.group(1), 16))
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _REGCMP.match(t)
+        if not m or m.group(2).startswith('#') or re.match(r'^%a\d$', m.group(2)):
+            continue
+        size, x, dn = m.groups()
+        c = _COND.match(ins[i + 1][2]) if i + 1 < len(ins) else None
+        if not c:
+            continue
+        use = ('b' if c.group(1) else 's') + (c.group(1) or c.group(2))
+        dst = reg_origin(ins, i, dn, targets, size)
+        if re.match(r'^%d\d$', x):
+            src = 'reg:' + reg_origin(ins, i, x[1:], targets, size)
+        else:
+            src = 'mem'
+        out.append((a, size, dst, src, use))
+    return out
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -683,6 +788,7 @@ def scan():
         res['callcmp'] += [(r0, name) + s for s in callcmp_sites(ins)]
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
         res['select'] += [(r0, name) + s for s in select_sites(ins)]
+        res['held'] += [(r0, name) + s for s in held_sites(ins)]
         if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
             res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
             res['loadflags'] += [(r0, name) + s for s in loadflags_sites(ins)]
@@ -726,6 +832,12 @@ def summary(res):
            'join)', res['opflags'], lambda s: s[3:])
     counts('  ... by operation, relation, form, sizes and join', res['opflags'],
            lambda s: opflags_class(s[2:]))
+    hs = res['held']
+    counts('`cmp.<s> X,Dn\' branched or set (Dn origin, X)', hs, lambda s: (s[4], s[5]))
+    counts('  ... by form (A: a held register against memory; B: memory loaded '
+           'into D0/D1 against a held one; C: two held; size, relation)',
+           [s for s in hs if held_form(s[4], s[5])],
+           lambda s: (held_form(s[4], s[5]), s[3], _REL[s[6][1:]]))
     lf = res['loadflags']
     counts('loads tested next (form, context, source, same size|size, relation)', lf,
            lambda s: (s[5], s[9], s[4], 'same' if s[3] == s[6] else 'size', _REL[s[7]]))

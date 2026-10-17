@@ -9174,13 +9174,68 @@ impl Selector {
                         Addr::Frame(o) => self.pinned(*o),
                         _ => None,
                     };
+                    if let Some(Reg::D(r)) = rheld {
+                        // A variable in memory against one held in a data
+                        // register (codegen-patterns 7.1, "A variable in
+                        // memory against a register-held one"; bead
+                        // domain-pascal-5xnz; `tools/cmpsurvey.py held`).
+                        if matches!(op, Rel::Eq | Rel::Ne) {
+                            // `=`/`<>`: the memory operand compared into
+                            // the held register, `cmp.<s> M,Dr`, the
+                            // operands exchanged (XPD_$FIND_DEBUGGER_INDEX
+                            // 0xE5BAF8 `cmp.w (0x484,A1),D2; bne.s`,
+                            // ../source `xpd_$debuggers[slot].asid =
+                            // asid`; KBD_$GET_MODE 0xE1CA70; find_volx
+                            // 0xE6B0E6; DBUF_$INVALIDATE 0xE3AA22: all 12
+                            // such ../source sites).  No equality compare
+                            // of a variable in memory with a held one in
+                            // compiled code loads the memory operand
+                            // (`tools/cmpsurvey.py held`, form B: the one
+                            // `=` site, 0xE044C6, is a local assigned and
+                            // then compared, its load read again by the
+                            // next compare; form A has 181 `=`/`<>`).
+                            let src = self.operand(addr)?;
+                            if matches!(src, Ea::Reg(_)) {
+                                return Err(unsupported(
+                                    self.span,
+                                    "comparing a variable with one held in a register when the \
+                                     left one's operand is a register is",
+                                ));
+                            }
+                            self.out.push(Insn::Cmp { size, src, dst: r });
+                            return Ok(rel_cond(op, signed));
+                        }
+                        if ty == Scalar::POINTER {
+                            return Err(unsupported(
+                                self.span,
+                                "an ordering comparison of a pointer variable with one held in \
+                                 a register (not catalogued) is",
+                            ));
+                        }
+                        // An ordering relation: the left operand loaded
+                        // into a new data register and compared with the
+                        // held one, the relation as written, as for two
+                        // variables in memory (name_$parse_component
+                        // 0xE4A036 `move.w (A1),D1; cmp.w D0,D1; bhi.b`,
+                        // ../source `next_pos <= path_len`; AST_$TRUNCATE
+                        // 0xE05E12 `move.w (12,A4),D0; cmp.w D6,D0;
+                        // bhi.s` after 0xE05DFC `cmp.w (12,A4),D6; bhi.w`;
+                        // the AST_ module-local 0xE064B0 at 0xE064EA).  The
+                        // form follows the source order, not the reuse of
+                        // the value: 0xE382F0 and 0xE4A028 are form A
+                        // with the value reloaded after them, 0xE064EA
+                        // form B in the same min/max idiom (Uncertain at
+                        // any one site; codegen-patterns 7.1).  The image
+                        // keeps the loaded value for later statements
+                        // (0xE4A040 `move.w D1,(A3)`), dpc reloads it
+                        // (bead domain-pascal-n3u8).
+                        return self.compare_computed(op, lhs, rhs);
+                    }
                     if rheld.is_some() {
-                        // `move.<s> lhs,Dn; cmp.<s> Dr,Dn`, or `cmp.<s>
-                        // lhs,Dr` with the relation reversed?  Not seen.
                         return Err(unsupported(
                             self.span,
-                            "comparing a variable in memory with one held in a register (which \
-                             one the original loaded is not known) is",
+                            "comparing a variable in memory with one held in an address register \
+                             (not catalogued) is",
                         ));
                     }
                     if ty == Scalar::POINTER {
@@ -9203,12 +9258,29 @@ impl Selector {
                     return self.compare_computed(op, lhs, rhs);
                 };
                 let src = self.operand(raddr)?;
-                if matches!(src, Ea::Reg(_)) {
+                if let Ea::Reg(Reg::A(_)) = src {
                     return Err(unsupported(
                         self.span,
-                        "comparing two values held in registers (operand order not known) is",
+                        "comparing a value held in a data register with one held in an address \
+                         register (not catalogued) is",
                     ));
                 }
+                // Two values held in data registers: the left one's
+                // register is the destination, `cmp.<s> Dright,Dleft`, the
+                // relation as written, for `=`/`<>` too (codegen-patterns
+                // 7.1, "Two values held in registers"; bead
+                // domain-pascal-5xnz): DISK_$SPIN_DOWN 0xE3DB34 `cmp.w
+                // D0,D2; bge.s`, ../source `max_time < t`; audit_$log_dir_op
+                // 0xE4BE36 `cmp.w D1,D2; bge.s`, `len < name_len`;
+                // dir_$old_chain_unlink 0xE54D88 `cmp.w D2,D1; bne.s`,
+                // `prev_link = next_link`, and dir_$old_free_slot 0xE551C8
+                // `cmp.w D3,D2; bne.s`, `next_link = prev_link` (the two
+                // orders of `=`); name_$split_path 0xE49E72;
+                // network_$get_pkt_size 0xE0FACC; ordered, 12 of 12
+                // ../source-cited sites.  For `=`/`<>` a convention (the
+                // order cannot be observed): 8 of 9 `=` sites agree with
+                // ../source's order, not 0xE418F0 `cmp.w D1,D0` for
+                // `current_idx = proc_idx` (current_idx in D1).
                 self.out.push(Insn::Cmp {
                     size,
                     src: src.clone(),

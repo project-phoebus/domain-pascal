@@ -269,16 +269,6 @@ begin
 end;",
             "whose lowest free register an earlier statement left a value in",
         ),
-        // A variable in memory against a parameter held in a register:
-        // which one the original loaded is not known.
-        (
-            "(x: integer); internal;
-begin
-  r := x;
-  if w < x then r := 0;
-end;",
-            "comparing a variable in memory with one held in a register",
-        ),
         // A0 after a call, A1 written before (A0 or A1 in the image).
         (
             "(var x, y, z: integer); internal;
@@ -864,6 +854,56 @@ end;
             "bge.s\t2f",
             "move.w\t#1,(R).l",
             "2:",
+        ]
+    );
+}
+
+/// A variable in memory against a parameter held in a register
+/// (codegen-patterns 7.1; bead domain-pascal-5xnz): `=`/`<>` compare the
+/// memory operand into the held register (XPD_$FIND_DEBUGGER_INDEX
+/// 0xE5BAF8 `cmp.w (0x484,A1),D2`), an ordering relation loads the left
+/// operand (name_$parse_component 0xE4A036 `move.w (A1),D1; cmp.w D0,D1;
+/// bhi.b`); with the held one on the left, the memory one is the operand
+/// (0xE4A028 `cmp.w (A1),D0`).  Two held values: the left one's register
+/// is the destination (audit_$log_dir_op 0xE4BE36 `cmp.w D1,D2`).
+#[test]
+fn variable_against_a_held_one() {
+    let b = body(
+        "procedure t(x, y: integer); internal;
+begin
+  r := y;
+  if w = x then r := 0;
+  if w < x then r := 1;
+  if x < w then r := 2;
+  if y > x then r := 3;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "move.l\t%d2,-(%sp)",
+            "move.w\t(8,%fp),%d0",
+            "move.w\t(0xa,%fp),%d1",
+            "move.w\t%d1,(R).l",
+            "cmp.w\t(W).l,%d0",
+            "bne.s\t1f",
+            "clr.w\t(R).l",
+            "1:",
+            "move.w\t(W).l,%d2",
+            "cmp.w\t%d0,%d2",
+            "bge.s\t2f",
+            "move.w\t#1,(R).l",
+            "2:",
+            "cmp.w\t(W).l,%d0",
+            "bge.s\t3f",
+            "move.w\t#2,(R).l",
+            "3:",
+            "cmp.w\t%d0,%d1",
+            "ble.s\t4f",
+            "move.w\t#3,(R).l",
+            "4:",
+            "move.l\t(-8,%fp),%d2",
         ]
     );
 }

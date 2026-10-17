@@ -5880,12 +5880,94 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   **Implemented** (bead domain-pascal-aaj; `isel.rs`, `compare` and
   `compare_computed`): the left operand loaded into a new data register
   (Uncertain: the image cannot say which source operand that was), the
-  right one the `cmp` operand.  Refused: a variable in memory against one
-  held in a register (load the left one, or `cmp` against the held one
-  with the relation reversed?); two pointer variables (20 `movea.l M1,An;
-  cmpa.l M2,An` in compiled code, e.g. 0xE01A7E, against `move.l; cmp.l`
-  pairs that may be integers or pointers: not told apart).  Conformance
-  unit `acl_clear_super.pas` (byte-identical).
+  right one the `cmp` operand.  Refused: two pointer variables (20
+  `movea.l M1,An; cmpa.l M2,An` in compiled code, e.g. 0xE01A7E, against
+  `move.l; cmp.l` pairs that may be integers or pointers: not told
+  apart).  Conformance unit `acl_clear_super.pas` (byte-identical).
+- **A variable in memory against a register-held one, and two held
+  values (Verified at the sites; survey; implemented, bead
+  domain-pascal-5xnz).**  A held value is a parameter loaded at entry or
+  a local kept in a register (12.2, 12.5).  `tools/cmpsurvey.py summary`
+  (kind `held`) takes every `cmp.<s> X,Dn` (X memory or a data
+  register) followed by a conditional branch or `s<cc>` in compiled code
+  and classifies where Dn's (and X's) value came from within the
+  straight-line run: 1378 sites.  Three forms: **A**, a held register
+  compared with memory, `cmp.<s> M,Dheld`: 353 (181 `=`/`<>`, 172
+  ordered); **B**, memory loaded into D0/D1 right before and compared
+  with a held register, `move.<s> M,Dn; cmp.<s> Dheld,Dn`: 5 by the
+  survey, of which 3 are compares of a variable in memory (0xE05E16,
+  0xE064EE, 0xE4A038, all ordered); the other 2 (0xE044C6, `=`, and
+  0xE0A8E2, ordered) are a local assigned and then compared, its load
+  read again by the next compare (0xE044CA `cmpi.l #1,D0`), so no
+  equality site is of this form; **C**, two held registers: 71.  Which
+  source operand is which is taken from ../source's translations at the
+  cited addresses:
+  - *The held one on the left:* `cmp.<s> M,Dheld`, the relation as
+    written (already the rule for a register-held left operand):
+    name_$parse_component 0xE4A028 `cmp.w (A1),D0; bcs.b`, `path_len >=
+    next_pos`; ASKNODE_$WHO_REMOTE 0xE663A8.
+  - *The memory one on the left, `=`/`<>`:* the operands exchanged, the
+    memory operand compared into the held register, `cmp.<s> M,Dheld`:
+    XPD_$FIND_DEBUGGER_INDEX 0xE5BAF8 `cmp.w (0x484,A1),D2; bne.s`
+    (`xpd_$debuggers[slot].asid = asid`), KBD_$GET_MODE 0xE1CA70
+    `cmp.b (0,A5,D1.w),D2` (`kbd_$mode_table[i] = ch`), find_volx
+    0xE6B0E6 (`e_lv_num = lv_num`), DBUF_$INVALIDATE 0xE3AA22 `cmp.l
+    (A3),D2` (`e_block = block`), DBUF_$SET_BUFF 0xE3A8E4 `cmp.l
+    (8,A3),D2` (a pointer, `e^.e_data = buffer`), and the other XPD
+    sites (0xE5BB5C, 0xE74FAA), AREA's three `remote_uid` searches
+    (0xE07A50, 0xE07D74, 0xE0800C, `cmp.l (32,An),Dn`), MMAP_$FREE_WSL
+    0xE0D194, network_$install_net 0xE0F20C: all 12 such ../source
+    sites; no equality compare of a variable in memory with a held one
+    is of form B in the image (above).
+  - *The memory one on the left, an ordering relation:* the left operand
+    loaded into a new data register, `move.<s> M,Dn; cmp.<s> Dheld,Dn`,
+    the relation as written, as for two variables in memory:
+    name_$parse_component 0xE4A036 `move.w (A1),D1; cmp.w D0,D1; bhi.b`
+    (`next_pos <= path_len`, unsigned, beside 0xE4A028's other order);
+    AST_$TRUNCATE 0xE05E12 `move.w (12,A4),D0; cmp.w D6,D0; bhi.s`
+    after 0xE05DFC `cmp.w (12,A4),D6; bhi.w`, and the AST_ module-local
+    0xE064B0 at 0xE064EA after 0xE064DE.  Those pairs only show that
+    both forms occur for the same two operands.  The argument that the
+    form follows the source order: the reuse of the loaded value does
+    not pick the form.  0xE382F0 `cmp.w (14,A0),D0; bcc.s` is form A and
+    the value is reloaded after it (0xE382F8 `move.w (14,A0),D0`), as at
+    0xE4A028 (reloaded at 0xE4A02C), while 0xE064EA is form B in the same
+    min/max idiom (`move.w D0,D3` after it); so the source operand order
+    is the explanation left.  **Uncertain** at any single site: the
+    original's operand order is not known anywhere.  ../source's Pascal
+    follows this convention by construction (pmap/purifier_l.pas lines
+    425-427: "where one is already in a data register it is written on
+    the left"), so it is not independent evidence; its C writes 5 ordered
+    form-A sites with the memory operand on the left and the relation
+    reversed (0xE13E0A, 0xE13E9A, 0xE382F0, 0xE3AF46, 0xE141FA).  Ordered
+    form-B evidence: 3 sites (0xE05E16, 0xE064EE, 0xE4A038).  Not done:
+    the image keeps the loaded left operand for later statements
+    (name_$parse_component 0xE4A040 `move.w D1,(A3)`, `comp_start :=
+    next_pos`), where dpc reloads it (bead domain-pascal-n3u8).
+  - *Two held values:* the left one's register is the destination,
+    `cmp.<s> Dright,Dleft`, the relation as written, for `=`/`<>` too:
+    DISK_$SPIN_DOWN 0xE3DB34 `cmp.w D0,D2; bge.s` (`max_time < t`);
+    audit_$log_dir_op 0xE4BE36 `cmp.w D1,D2; bge.s` (`len < name_len`;
+    audit_$log_link_op 0xE4BD6A, audit_$log_cname_op 0xE4BEF0
+    unsigned); dir_$old_chain_unlink 0xE54D88 `cmp.w D2,D1; bne.s`
+    (`prev_link = next_link`) and dir_$old_free_slot 0xE551C8 `cmp.w
+    D3,D2; bne.s` (`next_link = prev_link`), the two orders of `=`;
+    name_$split_path 0xE49E72 `cmp.w D0,D1; bhi.b`;
+    network_$get_pkt_size 0xE0FACC (`sz > size`, `bls`); the notes of
+    ../source's pascal-translation-notes gap 58.  Ordered form-C sites
+    the ../source translations cite: 12 of 12 agree (0xE033D8,
+    0xE038DA, ...).  For `=`/`<>` the rule is a convention, as the
+    operand order cannot be observed: 8 of the 9 `=` sites agree with
+    ../source's order; the one that does not is
+    proc2/debug_unlink_from_list.pas:113 `if current_idx = proc_idx`
+    (current_idx in D1, proc_idx in D0), `cmp.w D1,D0` at 0xE418F0, the
+    right operand's register the destination.
+  **Implemented** (`isel.rs`, `compare`): the three rules above; a
+  pointer only with `=`/`<>`.  Refused: a value held in an address
+  register against a variable or a data register, and an ordering
+  relation of a pointer against a held one (not catalogued).  Golden
+  `control/compares_held`; `dpc-m68k` test `variable_against_a_held_one`;
+  execution test `tests/exec/held_compares.pas`.
 - **Mixed widths and signs (Verified at the sites; survey; implemented,
   bead domain-pascal-aaj).**  Ref 4.3.1 p. 4-5 ("computes operands smaller
   than 32 bits with 32 bits of precision when necessary to achieve correct
