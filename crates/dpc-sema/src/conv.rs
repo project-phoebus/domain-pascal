@@ -166,9 +166,21 @@ pub enum ResultReg {
     /// the register at the end (PEB_$GET_STATUS 0xE5AE52, VOLX_$SHUTDOWN
     /// 0xE6B5B2).
     Record,
-    /// Not known yet: sets, reals, records of other sizes than 4 bytes,
-    /// and a 4-byte record under `a0_return` (codegen-patterns 3,
-    /// Uncertain).  The declaration is accepted, so that Apollo's inserts
+    /// A record of more than 4 bytes: through a hidden first argument, the
+    /// address of a place for the result that the caller pushes last
+    /// (after the arguments, with no pad) and the callee stores through;
+    /// no register carries it back (codegen-patterns 3, "Record results
+    /// over 4 bytes": ACL_$DEFAULT_ACL 0xE4787E and NAME_$GET_NODE_UID
+    /// 0xE589DE store a `uid_$t` through `(8,A6)`, the module-local
+    /// 0xE58C3A a 6-byte `time_$clock_t`; their 21 compiled calls push a
+    /// frame temporary's address last and copy the record from it, or
+    /// pass the temporary on by address).  The callee's result variable is
+    /// that place ([`crate::Storage::HiddenResult`]), so it has no frame
+    /// slot (ACL_$DEFAULT_ACL `link #0`).
+    Hidden,
+    /// Not known yet: sets, reals, records of fewer than 4 bytes, and
+    /// records under `a0_return`, `d0_return` or `c_param`
+    /// (codegen-patterns 3, Uncertain).  The declaration is accepted, so that Apollo's inserts
     /// that declare such functions check (bead domain-pascal-qia); a
     /// definition or a call is refused when lowered (`dpc-ir`), with
     /// [`unknown_result_message`].
@@ -228,6 +240,23 @@ pub fn result_reg(
         && !opts.a0_return
     {
         return Ok(ResultReg::Record);
+    }
+    // A larger record: through a hidden address (codegen-patterns 3,
+    // "Record results over 4 bytes"; seen for 6- and 8-byte records,
+    // `time_$clock_t` and `uid_$t`, and taken for every record over 4
+    // bytes, Uncertain for other sizes).  Under `a0_return` ("Puts into
+    // A0 any values returned from that routine that should go into a
+    // register", 5.5.11 p. 5-20), `d0_return` (5.5.10) or `c_param`
+    // ("returns results in D0", 5.2 p. 5-3): no site, left unknown.
+    // TODO(target): an ABI decision of Apollo's m68k compiler, to move
+    // into the target description (bead domain-pascal-wiue).
+    if matches!(types.kind(ty), TypeKind::Record(_))
+        && types.size(ty) > target.val_param_max_size()
+        && !opts.a0_return
+        && !opts.d0_return
+        && !opts.c_param
+    {
+        return Ok(ResultReg::Hidden);
     }
     // Sets, reals, other records: how they are returned is not yet
     // observed (codegen-patterns 3, Uncertain).

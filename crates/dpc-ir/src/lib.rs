@@ -893,13 +893,27 @@ pub enum Arg {
     /// pea (-8,A6)`).  The temporary lies below the routine's other frame
     /// objects (`lower.rs`, `assign_temps`).
     Temp { value: Expr, offset: i32, slot: u32 },
+    /// The result of `call`, a call of a function whose record result goes
+    /// through a hidden address (`dpc_sema::conv::ResultReg::Hidden`),
+    /// passed by address to a value or `in` parameter: `call` is made
+    /// where the argument is pushed, after the arguments to its right, and
+    /// popped; then its result temporary's address (`call`'s first
+    /// argument, an [`Arg::Address`] of a frame temporary) is pushed
+    /// (codegen-patterns 3, "Record results over 4 bytes": TIME_$SET_ITIMER
+    /// 0xE58E9E..0xE58ECA `subq.l #2,SP; pea (A4); pea (A2); pea (A3);
+    /// move.l D3,-(SP); pea (-0x8,A6); bsr.w 0xE58C3A; addq.w #8,SP; pea
+    /// (-0x8,A6); ...`; dir_$old_create_obj 0xE54698..0xE546B0).
+    Call { call: Box<Call>, slot: u32 },
 }
 
 impl Arg {
     /// Bytes the argument occupies in the caller's push.
     pub fn slot(&self) -> u32 {
         match self {
-            Arg::Value { slot, .. } | Arg::Address { slot, .. } | Arg::Temp { slot, .. } => *slot,
+            Arg::Value { slot, .. }
+            | Arg::Address { slot, .. }
+            | Arg::Temp { slot, .. }
+            | Arg::Call { slot, .. } => *slot,
         }
     }
 }

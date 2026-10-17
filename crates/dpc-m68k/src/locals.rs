@@ -260,6 +260,7 @@ impl Walk<'_> {
                     self.whole = false;
                 }
                 Arg::Address { addr, .. } => self.other(addr),
+                Arg::Call { call, .. } => self.call(call),
             }
         }
         self.in_arg = outer;

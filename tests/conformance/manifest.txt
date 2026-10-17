@@ -284,3 +284,8 @@ tests/conformance/ec_init.pas                EC_$INIT
 # that merges (codegen-patterns 13, "Store merging"; bead
 # domain-pascal-qb9q).
 tests/conformance/xns_error_open.pas         MAYBE_OPEN_ERROR_SOCKET  --section-addr .bss.moddata.XNS_ERROR.WIRED_DATA=0xE2B29C  merge-constant-stores
+# A function whose 6-byte record result goes through a hidden address
+# (codegen-patterns 3, "Record results over 4 bytes"; bead
+# domain-pascal-ytu3): its temporary's address pushed last, the record
+# copied from it after the call.
+tests/conformance/time_get_itimer.pas        TIME_$GET_ITIMER  module-routines=TIME_$GET_ITIMER_INTERNAL=0xE58C74,TIME_$CLOCK_TO_ITIMER=0xE58C02

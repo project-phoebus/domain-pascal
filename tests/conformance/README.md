@@ -149,7 +149,16 @@ is lifted the original keeps the descriptor in D0 before `movea.l
 D0,A2`; its manifest line would be `tests/conformance/pending/
 tty_k_enable_func.pas TTY_$K_ENABLE_FUNC --section-addr
 .bss.moddata.TTY=0xE8242C a5-always=TTY_$K_ENABLE_FUNC
-module-routines=SET_DFL_FUNCS=0xE6726E`).
+module-routines=SET_DFL_FUNCS=0xE6726E`), and
+`pending/proc2_upgid_to_uid.pas` (PROC2_$UPGID_TO_UID 0xE4100C, a call
+of a function whose record result goes through a hidden address,
+codegen-patterns 3; refused for its last statement's slot load,
+`movea.l (0x10,A6),A0` at 0xE41064 after ML_$UNLOCK with A1 written
+before it, 12.4 R4(b): the image takes A0 there; its manifest line
+would be `tests/conformance/pending/proc2_upgid_to_uid.pas
+PROC2_$UPGID_TO_UID --section-addr .bss.moddata.PROC2=0xE7BE84
+a5-always=PROC2_$UPGID_TO_UID
+module-routines=PROC2_$UPGID_TO_UID_INTERNAL=0xE4232A`).
 
 Constants and expressions passed by address (codegen-patterns 1.5; bead
 domain-pascal-5aw.9; "Constants in the code section" below):

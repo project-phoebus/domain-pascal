@@ -741,7 +741,7 @@ end;
              convention unknown)",
         ),
         (
-            "type two = record a, b: integer32; end;
+            "type two = record a: integer; end;
 function g(var s: two): two; begin g := s; end;",
             "functions returning two are not supported yet",
         ),
@@ -753,6 +753,182 @@ begin s := f^; end;",
     ];
     for (src, want) in refused {
         let src = format!("{STATUS}var r: cleanup_rec_t;\n{src}\n");
+        let e = errs(&src);
+        assert_eq!(e.len(), 1, "{src}: {e:?}");
+        assert!(e[0].contains(want), "{src}: {e:?}");
+    }
+}
+
+/// codegen-patterns 3, "Record results over 4 bytes": a larger record goes
+/// through a hidden first argument, the address of a place for it.  The
+/// callee copies into the object that slot points to and has no result
+/// register; the caller passes a frame temporary's address last and copies
+/// the record out of it, or passes the temporary on by address.
+#[test]
+fn hidden_address_record_results() {
+    const UID: &str = "module m;
+type uid_$t = record high, low: integer32; end;
+var root: uid_$t;
+";
+    // The callee (ACL_$DEFAULT_ACL 0xE4787E, NAME_$GET_ROOT_UID 0xE589BC).
+    let m = lower_src(&format!(
+        "{UID}function g(in k: integer): uid_$t;
+begin
+  if k = 0 then g := root;
+end;
+"
+    ))
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(f.result, None);
+    assert_eq!(f.result_slot, None);
+    assert_eq!(f.address_params, [8, 0xc]);
+    assert_eq!(f.frame_size, 0);
+    let StmtKind::If { then_, .. } = &f.body[0].kind else {
+        panic!("{:#?}", f.body)
+    };
+    let StmtKind::Copy {
+        dst: Addr::Indirect { base, offset: 0 },
+        src: Addr::Static(0),
+        bytes: 8,
+        chars: false,
+    } = &then_[0].kind
+    else {
+        panic!("{then_:#?}")
+    };
+    assert!(matches!(
+        &**base,
+        Expr::Load {
+            addr: Addr::Frame(8),
+            ..
+        }
+    ));
+
+    // The caller: `pea temp; bsr; pop; copy' (PROC2_$UPGID_TO_UID
+    // 0xE41030..0xE41046), the temporary below the locals at a multiple
+    // of 4, no pad for a word argument.
+    let m = lower_src(&format!(
+        "{UID}function h(w: integer): uid_$t; options(val_param, extern);
+procedure p(in x: integer);
+var u: uid_$t; v: integer;
+begin
+  v := x;
+  u := h(v);
+end;
+"
+    ))
+    .unwrap();
+    let f = &m.functions[0];
+    assert_eq!(f.frame_size, 20);
+    let StmtKind::Call(c) = &f.body[1].kind else {
+        panic!("{:#?}", f.body)
+    };
+    assert_eq!(c.pad, 0);
+    assert_eq!(c.bytes(), 6);
+    assert!(matches!(
+        &c.args[0],
+        Arg::Address {
+            addr: Addr::Frame(-20),
+            slot: 4,
+            writable: true
+        }
+    ));
+    assert!(matches!(
+        &f.body[2].kind,
+        StmtKind::Copy {
+            dst: Addr::Frame(-8),
+            src: Addr::Frame(-20),
+            bytes: 8,
+            chars: false
+        }
+    ));
+
+    // Passed on by address: the inner call is an argument, its temporary
+    // its first argument (TIME_$SET_ITIMER 0xE58E9E..0xE58ECA: two at -8
+    // and -0x10).
+    let m = lower_src(&format!(
+        "{UID}function h(in w: integer): uid_$t; extern;
+procedure q(in a: uid_$t; in b: uid_$t); extern;
+procedure p;
+begin
+  q(h(1), h(2));
+end;
+"
+    ))
+    .unwrap();
+    let f = &m.functions[0];
+    let StmtKind::Call(c) = &f.body[0].kind else {
+        panic!("{:#?}", f.body)
+    };
+    let temp = |a: &Arg| match a {
+        Arg::Call { call, slot: 4 } => match &call.args[0] {
+            Arg::Address {
+                addr: Addr::Frame(o),
+                ..
+            } => *o,
+            a => panic!("{a:?}"),
+        },
+        a => panic!("{a:?}"),
+    };
+    // Pushed right to left: b's first.
+    assert_eq!((temp(&c.args[1]), temp(&c.args[0])), (-8, -16));
+    assert_eq!(f.frame_size, 16);
+
+    // Refused: the forms the image does not show.
+    let refused = [
+        (
+            "function g: uid_$t; extern; function k: uid_$t; begin k := g; end;",
+            "a record function result assigned other than a record variable",
+        ),
+        (
+            "function g: uid_$t; extern; procedure p; begin discard(g); end;",
+            "a call of a function whose record result goes through a hidden address",
+        ),
+        (
+            "function g: uid_$t; extern; procedure p; begin if g = root then root.low := 0; end;",
+            "a call of a function whose record result goes through a hidden address",
+        ),
+        (
+            "function g: uid_$t; extern; function k: integer; extern;
+var t: array[1..2] of uid_$t;
+procedure p; begin t[k] := g; end;",
+            "a record function result assigned to a designator whose address needs a call",
+        ),
+        (
+            "function g: uid_$t; options(extern, a0_return); procedure p; begin root := g; end;",
+            "functions returning uid_$t are not supported yet",
+        ),
+        (
+            "type fp = ^function: uid_$t; procedure q(in u: uid_$t); extern;
+procedure p(f: fp); begin q(f^); end;",
+            "functions returning uid_$t are not supported yet",
+        ),
+    ];
+    // A nested one: the definition and the calls refused, assigned or
+    // passed on (the routine's first error is reported).
+    for call in ["g := f", "q(f)"] {
+        let e = errs(&format!(
+            "{UID}procedure q(in u: uid_$t); extern;
+procedure p;
+var g: uid_$t;
+  function f: uid_$t;
+  begin
+    f := root;
+  end;
+begin
+  {call};
+end;
+"
+        ));
+        assert_eq!(e.len(), 2, "{e:?}");
+        assert!(
+            e.iter().all(|m| m
+                .contains("a nested function whose record result goes through a hidden address")),
+            "{e:?}"
+        );
+    }
+    for (src, want) in refused {
+        let src = format!("{UID}{src}\n");
         let e = errs(&src);
         assert_eq!(e.len(), 1, "{src}: {e:?}");
         assert!(e[0].contains(want), "{src}: {e:?}");
@@ -3438,7 +3614,7 @@ end;
         .iter()
         .map(|a| match a {
             Arg::Address { writable, .. } => *writable,
-            Arg::Value { .. } | Arg::Temp { .. } => panic!("{a:?}"),
+            Arg::Value { .. } | Arg::Temp { .. } | Arg::Call { .. } => panic!("{a:?}"),
         })
         .collect();
     assert_eq!(w, [true, true, true, false, false]);
@@ -3510,7 +3686,7 @@ end;
         .iter()
         .map(|a| match a {
             Arg::Address { writable, .. } => *writable,
-            Arg::Value { .. } | Arg::Temp { .. } => panic!("{a:?}"),
+            Arg::Value { .. } | Arg::Temp { .. } | Arg::Call { .. } => panic!("{a:?}"),
         })
         .collect();
     assert_eq!(w, [true, true, true, false, false]);

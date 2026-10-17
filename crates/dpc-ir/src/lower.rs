@@ -384,7 +384,7 @@ fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, Strin
                 section: section.clone(),
                 offset: *o as i32 + offset,
             },
-            Storage::Frame { .. } | Storage::Param { .. } => {
+            Storage::Frame { .. } | Storage::Param { .. } | Storage::HiddenResult { .. } => {
                 return Err("an address of a routine's variable as an initial value is".into())
             }
         },
@@ -767,6 +767,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             match a {
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, out),
                 Arg::Address { addr: a, .. } => addr(a, 1, out),
+                Arg::Call { call: c, .. } => call(c, out),
             }
         }
         if let Some(x) = c.pointer() {
@@ -941,6 +942,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             match a {
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, f),
                 Arg::Address { addr: a, .. } => addr(a, f),
+                Arg::Call { call: c, .. } => call(c, f),
             }
         }
         if let Some(x) = c.pointer_mut() {
@@ -1090,35 +1092,81 @@ pub(crate) fn with_slots(frame: u32, n: usize) -> u32 {
 /// `tools/pcsurvey.py temps`).  The temporaries of a call made inside
 /// another call's arguments go below the outer call's.  Uncertain: where
 /// temporaries go when the frame has a gap; whether a call nested in the
-/// arguments reuses the outer call's slots.
-fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
-    fn call(c: &mut Call, mut size: u32, max: &mut u32) {
+/// arguments reuses the outer call's slots; the order in which later
+/// calls reuse them (bead domain-pascal-tf4x).
+///
+/// The temporaries receiving hidden-address results (`results`, by
+/// number, [`RESULT_TEMPS`]) are placed the same way, as their call's
+/// first argument, and so is a call passed on by address ([`Arg::Call`])
+/// with its own temporaries, at its place in the outer call's push order;
+/// their pseudo offsets, in the calls and in the copies out of them, are
+/// replaced once all are placed.
+fn assign_temps(body: &mut [Stmt], frame: u32, results: &[u32]) -> u32 {
+    /// The frame size so far with temporaries, and the hidden-address
+    /// result temporaries ([`RESULT_TEMPS`]): their sizes and where they
+    /// are placed.
+    struct St<'r> {
+        max: u32,
+        results: &'r [u32],
+        placed: Vec<Option<i32>>,
+    }
+    /// Places `c`'s temporaries below `size`; returns the size below
+    /// them.
+    fn call(c: &mut Call, mut size: u32, st: &mut St) -> u32 {
         for a in c.args.iter_mut().rev() {
-            if let Arg::Temp { value, offset, .. } = a {
-                let n = value.ty().bytes();
-                let align = if n >= 4 { 4 } else { 2 };
-                size = (size + n).div_ceil(align) * align;
-                *offset = -(size as i32);
-                *max = (*max).max(size);
+            match a {
+                Arg::Temp { value, offset, .. } => {
+                    let n = value.ty().bytes();
+                    let align = if n >= 4 { 4 } else { 2 };
+                    size = (size + n).div_ceil(align) * align;
+                    *offset = -(size as i32);
+                    st.max = st.max.max(size);
+                }
+                // The temporary of a hidden-address result (`call`), the
+                // call's first argument: placed as the others, in push
+                // order, at a multiple of 4 (TIME_$SET_ITIMER
+                // 0xE58EA8, 0xE58EB8: two 6-byte results at -8 and
+                // -0x10).  The pseudo offset stays until every call is
+                // placed, the last placement standing (below).
+                Arg::Address {
+                    addr: Addr::Frame(o),
+                    ..
+                } if result_temp_index(*o).is_some() => {
+                    let k = result_temp_index(*o).unwrap();
+                    size = (size + st.results[k]).div_ceil(4) * 4;
+                    st.placed[k] = Some(-(size as i32));
+                    st.max = st.max.max(size);
+                }
+                // A hidden-address result passed on by address: the
+                // inner call's temporaries, its result's among them, are
+                // the outer call's at this point of the push order, so
+                // that two such arguments get two places (TIME_$SET_ITIMER
+                // 0xE58EA8 -8, 0xE58EB8 -0x10).
+                Arg::Call { call: ic, .. } => size = call(ic, size, st),
+                _ => {}
             }
         }
         for a in c.args.iter_mut() {
             match a {
-                Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, size, max),
-                Arg::Address { addr: a, .. } => addr(a, size, max),
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => {
+                    expr(value, size, st);
+                }
+                Arg::Address { addr: a, .. } => addr(a, size, st),
+                Arg::Call { .. } => {}
             }
         }
         if let Some(x) = c.pointer_mut() {
-            expr(x, size, max);
+            expr(x, size, st);
         }
+        size
     }
-    fn addr(a: &mut Addr, size: u32, max: &mut u32) {
+    fn addr(a: &mut Addr, size: u32, st: &mut St) {
         match a {
-            Addr::Volatile { addr: a, .. } => addr(a, size, max),
-            Addr::Indirect { base, .. } => expr(base, size, max),
+            Addr::Volatile { addr: a, .. } => addr(a, size, st),
+            Addr::Indirect { base, .. } => expr(base, size, st),
             Addr::Index { base, index, .. } => {
-                addr(base, size, max);
-                expr(index, size, max);
+                addr(base, size, st);
+                expr(index, size, st);
             }
             Addr::Frame(_)
             | Addr::Enclosing(_)
@@ -1128,19 +1176,19 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
             | Addr::Const(_) => {}
         }
     }
-    fn expr(e: &mut Expr, size: u32, max: &mut u32) {
+    fn expr(e: &mut Expr, size: u32, st: &mut St) {
         match e {
             Expr::Const { .. } => {}
             Expr::Load { addr: a, .. } | Expr::Bits { addr: a, .. } | Expr::AddrOf(a) => {
-                addr(a, size, max)
+                addr(a, size, st)
             }
             Expr::SetMember {
                 elem: x, set: y, ..
             }
             | Expr::Binary { lhs: x, rhs: y, .. }
             | Expr::SetOp { lhs: x, rhs: y, .. } => {
-                expr(x, size, max);
-                expr(y, size, max);
+                expr(x, size, st);
+                expr(y, size, st);
             }
             Expr::SetMemberAt { elem, set: a, .. }
             | Expr::BitElem {
@@ -1148,43 +1196,103 @@ fn assign_temps(body: &mut [Stmt], frame: u32) -> u32 {
                 array: a,
                 ..
             } => {
-                expr(elem, size, max);
-                addr(a, size, max);
+                expr(elem, size, st);
+                addr(a, size, st);
             }
             Expr::Unary { operand: x, .. }
             | Expr::Convert { value: x, .. }
             | Expr::SetSr(x)
-            | Expr::SetOf { elem: x, .. } => expr(x, size, max),
-            Expr::Call { call: c, .. } => call(c, size, max),
-            Expr::Test(c) => cond(c, size, max),
+            | Expr::SetOf { elem: x, .. } => expr(x, size, st),
+            Expr::Call { call: c, .. } => {
+                call(c, size, st);
+            }
+            Expr::Test(c) => cond(c, size, st),
         }
     }
-    fn cond(c: &mut Cond, size: u32, max: &mut u32) {
+    fn cond(c: &mut Cond, size: u32, st: &mut St) {
         match c {
             Cond::Compare { lhs, rhs, .. } => {
-                expr(lhs, size, max);
-                expr(rhs, size, max);
+                expr(lhs, size, st);
+                expr(rhs, size, st);
             }
-            Cond::Test(e) | Cond::Odd(e) => expr(e, size, max),
-            Cond::Not(x) => cond(x, size, max),
+            Cond::Test(e) | Cond::Odd(e) => expr(e, size, st),
+            Cond::Not(x) => cond(x, size, st),
             Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
-                cond(a, size, max);
-                cond(b, size, max);
+                cond(a, size, st);
+                cond(b, size, st);
             }
             Cond::Block { lhs, rhs, .. } => {
-                addr(lhs, size, max);
-                addr(rhs, size, max);
+                addr(lhs, size, st);
+                addr(rhs, size, st);
             }
         }
     }
-    let mut max = frame;
+    let mut st = St {
+        max: frame,
+        results,
+        placed: vec![None; results.len()],
+    };
     for s in body.iter_mut() {
         // `stmt_calls_mut` visits a call nested in another's arguments
         // before the outer one, which then places it again, below its own
         // temporaries: the last placement stands.
-        stmt_calls_mut(s, &mut |c| call(c, frame, &mut max));
+        stmt_calls_mut(s, &mut |c| {
+            call(c, frame, &mut st);
+        });
     }
-    max
+    // The result temporaries' pseudo offsets replaced: in the calls and in
+    // the copies out of them.
+    fn place(o: &mut i32, placed: &[Option<i32>]) {
+        if let Some(k) = result_temp_index(*o) {
+            *o = placed[k].expect("a result temporary is placed with its call");
+        }
+    }
+    fn copies(body: &mut [Stmt], placed: &[Option<i32>]) {
+        for s in body.iter_mut() {
+            stmt_calls_mut(s, &mut |c| {
+                for a in &mut c.args {
+                    if let Arg::Address {
+                        addr: Addr::Frame(o),
+                        ..
+                    } = a
+                    {
+                        place(o, placed);
+                    }
+                }
+            });
+        }
+        for s in body {
+            match &mut s.kind {
+                StmtKind::Copy {
+                    src: Addr::Frame(o),
+                    ..
+                } => place(o, placed),
+                StmtKind::If { then_, else_, .. } => {
+                    copies(then_, placed);
+                    copies(else_, placed);
+                }
+                StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
+                    copies(body, placed)
+                }
+                StmtKind::For(l) => copies(&mut l.body, placed),
+                StmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    for a in arms {
+                        copies(&mut a.body, placed);
+                    }
+                    if let Some(o) = otherwise {
+                        copies(o, placed);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !results.is_empty() {
+        copies(body, &st.placed);
+    }
+    st.max
 }
 
 /// Lower one routine.  `uplevel`: the objects of its frame that its nested
@@ -1249,8 +1357,17 @@ fn lower_routine_in_context(
             errors.push(unsupported(r.span, format!("{name} is")));
         }
     }
+    // A result through a hidden address (codegen-patterns 3, "Record
+    // results over 4 bytes") comes back in no register: for the selector
+    // the function is a procedure whose first argument slot holds the
+    // result's address (listed in [`Function::address_params`]).
+    let hidden = is_hidden_result(r);
+    if hidden && r.parent.is_some() {
+        errors.push(unsupported(r.span, HIDDEN_NESTED));
+    }
     let result = match &r.result {
         None => None,
+        Some(_) if hidden => None,
         Some(res) => match result_spec(p, r, res) {
             Ok(s) => Some(s),
             Err(d) => {
@@ -1261,18 +1378,23 @@ fn lower_routine_in_context(
     };
     // A function whose result type was just reported is not lowered
     // further: its result assignment would only repeat that error.
-    let (mut body, with_temps, elem_temps) = if r.result.is_some() && result.is_none() {
-        (Vec::new(), Vec::new(), 0)
-    } else {
-        match lower_body(p, id, r, result, uplevel) {
-            Ok(b) => b,
-            Err(d) => {
-                errors.push(d);
-                (Vec::new(), Vec::new(), 0)
+    let (mut body, with_temps, elem_temps, result_temps) =
+        if r.result.is_some() && result.is_none() && !hidden {
+            (Vec::new(), Vec::new(), 0, Vec::new())
+        } else {
+            match lower_body(p, id, r, result, uplevel) {
+                Ok(b) => b,
+                Err(d) => {
+                    errors.push(d);
+                    (Vec::new(), Vec::new(), 0, Vec::new())
+                }
             }
-        }
-    };
-    let frame_size = assign_temps(&mut body, with_slots(r.frame_size, elem_temps));
+        };
+    let frame_size = assign_temps(
+        &mut body,
+        with_slots(r.frame_size, elem_temps),
+        &result_temps,
+    );
     set_call_sections(p, &r.code_section, &mut body);
     let param_copies = param_copies(p, r).unwrap_or_else(|d| {
         errors.push(d);
@@ -1298,11 +1420,22 @@ fn lower_routine_in_context(
         loads_data_base: false,
         data_absolute: false,
         value_params: value_params(p, r),
+        // The hidden result address first: it is argument 1.
         address_params: r
-            .params
-            .iter()
-            .filter(|prm| prm.passing() == Passing::ByAddress)
-            .map(|prm| prm.slot_offset)
+            .result
+            .as_ref()
+            .and_then(|res| res.var)
+            .and_then(|v| match p.var(v).storage {
+                dpc_sema::Storage::HiddenResult { slot } => Some(slot),
+                _ => None,
+            })
+            .into_iter()
+            .chain(
+                r.params
+                    .iter()
+                    .filter(|prm| prm.passing() == Passing::ByAddress)
+                    .map(|prm| prm.slot_offset),
+            )
             .collect(),
         scalar_locals: scalar_locals(p, r, uplevel),
         nesting: r.parent.map(|pid| Nesting {
@@ -1724,6 +1857,10 @@ fn call_arg_calls<'a>(c: &'a Call, out: &mut Vec<&'a Call>) {
         match a {
             Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_calls(value, out),
             Arg::Address { addr, .. } => addr_calls(addr, out),
+            Arg::Call { call, .. } => {
+                out.push(call);
+                call_arg_calls(call, out);
+            }
         }
     }
     if let Some(x) = c.pointer() {
@@ -1872,6 +2009,7 @@ fn call_uses_static(c: &Call) -> bool {
     c.args.iter().any(|a| match a {
         Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_uses_static(value),
         Arg::Address { addr, .. } => addr_uses_static(addr),
+        Arg::Call { call, .. } => call_uses_static(call),
     }) || c.pointer().is_some_and(expr_uses_static)
 }
 
@@ -2085,6 +2223,9 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
         // "Record results"); the result variable stays in its frame slot
         // ([`record_result_assignment`]).
         ResultReg::Record => ResultClass::Data,
+        // Through a hidden address, no register (`lower_routine_in_context`
+        // gives such a function no [`ResultSpec`]).
+        ResultReg::Hidden => unreachable!("a hidden-address result has no result register"),
         ResultReg::Unknown => {
             return Err(Diagnostic::error(
                 r.span,
@@ -2118,8 +2259,9 @@ fn lower_body(
     r: &Routine,
     result: Option<ResultSpec>,
     uplevel: &[(i32, u32)],
-) -> Res<(Vec<Stmt>, Vec<i32>, usize)> {
+) -> Res<(Vec<Stmt>, Vec<i32>, usize, Vec<u32>)> {
     let block = r.body.as_ref().expect("routine with a body");
+    RESULT_TEMPS.with(|t| t.borrow_mut().clear());
     let labels = routine_labels(&block.stmts)?;
     let cx = Cx {
         p,
@@ -2130,17 +2272,19 @@ fn lower_body(
         uplevel,
         with_temps: Default::default(),
         with_elem_temps: Default::default(),
+        hidden_assigned: Default::default(),
     };
     let out = cx.seq(&block.stmts)?;
     let with_temps = cx.with_temps.into_inner();
     let elem_temps = cx.with_elem_temps.get();
+    let result_temps = RESULT_TEMPS.with(|t| t.take());
     check_uplevel_indices(&out, uplevel)?;
     check_for_indices(&out)?;
     if r.result.is_some() {
         // ISO requires an assignment to the function variable (the
         // reference's error "No assignment to function variable"); a body
         // with none is not compiled.
-        let mut assigned = false;
+        let mut assigned = cx.hidden_assigned.get();
         crate::visit_stmts(&out, &mut |s| {
             assigned |= matches!(s.kind, StmtKind::SetResult(_));
         });
@@ -2154,7 +2298,7 @@ fn lower_body(
             check_record_result(&out, r.span)?;
         }
     }
-    Ok((out, with_temps, elem_temps))
+    Ok((out, with_temps, elem_temps, result_temps))
 }
 
 /// No `for` loop of `body` has an index that a nested routine reaches
@@ -2403,6 +2547,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         ..
                     } if self.active.contains(o) => {}
                     Arg::Address { addr, .. } => self.addr(addr, 1)?,
+                    Arg::Call { call, .. } => self.call(call)?,
                 }
             }
             if let Some(x) = c.pointer() {
@@ -2632,6 +2777,9 @@ struct Cx<'a> {
     /// How many of [`Self::with_temps`] hold an array element's address
     /// (the ones given a frame slot: [`with_slots`]).
     with_elem_temps: std::cell::Cell<usize>,
+    /// The body assigns its hidden-address result
+    /// ([`hidden_result_assignment`]).
+    hidden_assigned: std::cell::Cell<bool>,
 }
 
 thread_local! {
@@ -2967,7 +3115,10 @@ impl Cx<'_> {
         for s in &flat {
             match &s.kind {
                 SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) => {
-                    if is_record_result(self.r) {
+                    if is_hidden_result(self.r) {
+                        out.push(hidden_result_assignment(p, self.r, s, value)?);
+                        self.hidden_assigned.set(true);
+                    } else if is_record_result(self.r) {
                         out.extend(record_result_assignment(p, self.r, s, value)?);
                     } else {
                         out.push(result_assignment(p, s, value, self.result)?);
@@ -2980,6 +3131,9 @@ impl Cx<'_> {
                         target.span,
                         "assignment to an enclosing function's result is",
                     ));
+                }
+                SStmtKind::Assign { target, value } if hidden_call(p, value).is_some() => {
+                    out.extend(self.hidden_call_assignment(s, target, value)?)
                 }
                 SStmtKind::Assign { target, value }
                     if is_block(p, target) || byte_array_copy(p, target, value) =>
@@ -3188,6 +3342,80 @@ impl Cx<'_> {
     ///   each reference (NETLOG_$LOG_IT 0xE71BC6..0xE71BFC: `movea.l
     ///   (116,A5),A0; lea (0,A0,D1.w),A0`, then eleven field stores
     ///   `(-26,A0)` .. `(-2,A0)`, the 1-based array's `-26` in each).
+    /// `d := f(args)` for a function `f` whose result goes through a
+    /// hidden address ([`ResultReg::Hidden`]; codegen-patterns 3, "Record
+    /// results over 4 bytes"): the call with a frame temporary's address
+    /// as its first argument, pushed last, then a record copy from the
+    /// temporary into `d`.  Every compiled call of such a function stores
+    /// into a temporary, never into the destination itself (17 calls
+    /// whose result is assigned: PROC2_$UPGID_TO_UID 0xE41030..0xE41046
+    /// `move.w (-0xa,A6),-(SP); pea (-0x14,A6); bsr.w 0xE4232A; addq.w
+    /// #6,SP; lea (-0x14,A6),A0; move.l (A0)+,(-0x8,A6); move.l
+    /// (A0)+,(-0x4,A6)`; TIME_$SET_ITIMER 0xE58ED2..0xE58EE4 `pea (A3); pea
+    /// (-0x10,A6); bsr.w 0xE58C02; addq.w #8,SP; move.l (-0x10,A6),(A3);
+    /// move.w (-0xc,A6),(0x4,A3)`, the destination its own argument;
+    /// ASKNODE_$INTERNET_INFO 0xE648AC..0xE648C4 into a field through a
+    /// parameter's pointer).  The temporary is placed as an expression's
+    /// passed by address ([`assign_temps`]).  The pop follows the
+    /// procedure-call rule: skipped when only the copy and the epilogue
+    /// follow (DIR_$OLD_GET_DEFAULT_ACL 0xE56560, TIME_$SET_ITIMER
+    /// 0xE58EEE, TIME_$GET_ITIMER 0xE58F4C).
+    ///
+    /// A destination whose address needs a call (the order of the two
+    /// calls is not seen) is refused.
+    fn hidden_call_assignment(&self, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Vec<Stmt>> {
+        let p = self.p;
+        let c = hidden_call(p, value).expect("a call of a hidden-result function");
+        let SCallee::Routine(id) = &c.callee else {
+            unreachable!("hidden_call accepts routines only")
+        };
+        let bytes = p
+            .types
+            .size(p.routine(*id).result.as_ref().expect("a function").ty);
+        if p.types.size(target.ty) != bytes {
+            return Err(unsupported(
+                value.span,
+                "assigning a record or array of another size is",
+            ));
+        }
+        if volatile_access(p, target).is_some() || p.types.has_volatile_part(target.ty) {
+            return Err(unsupported(
+                s.span,
+                "assigning a record or array with volatile or device parts (ref 3.15.1-3.15.3) is",
+            ));
+        }
+        check_even(p, target)?;
+        let call = call(p, c, value.span)?;
+        let Some(Arg::Address { addr: tmp, .. }) = call.args.first().cloned() else {
+            unreachable!("`call` passes a hidden-address result's temporary first")
+        };
+        let copy = Stmt {
+            kind: StmtKind::Copy {
+                dst: addr_of(p, target)?,
+                src: tmp,
+                bytes,
+                chars: false,
+            },
+            span: s.span,
+        };
+        let mut inner = Vec::new();
+        stmt_calls(&copy, &mut inner);
+        if !inner.is_empty() {
+            return Err(unsupported(
+                target.span,
+                "a record function result assigned to a designator whose address needs a call \
+                 (the order of the calls is not seen) is",
+            ));
+        }
+        Ok(vec![
+            Stmt {
+                kind: StmtKind::Call(call),
+                span: s.span,
+            },
+            copy,
+        ])
+    }
+
     fn with_stmt(
         &self,
         items: &[(dpc_sema::WithId, SExpr)],
@@ -3442,6 +3670,10 @@ impl Cx<'_> {
     /// - Any other expression: what the original emitted (nothing, or the
     ///   evaluation) is not known.
     fn discard(&self, s: &SStmt, x: &SExpr) -> Res<Stmt> {
+        if hidden_call(self.p, x).is_some() {
+            // The call with a temporary of its own would do; no site.
+            return Err(unsupported(x.span, HIDDEN_CALL_USE));
+        }
         let kind = match &x.kind {
             ExprKind::Call(c) if x.value.is_none() => StmtKind::Call(call(self.p, c, x.span)?),
             ExprKind::Builtin {
@@ -3992,6 +4224,130 @@ fn is_record_result(r: &Routine) -> bool {
     r.result
         .as_ref()
         .is_some_and(|res| res.reg == ResultReg::Record)
+}
+
+/// Whether `r` returns its result through a hidden address
+/// ([`ResultReg::Hidden`]: a record of more than 4 bytes).
+fn is_hidden_result(r: &Routine) -> bool {
+    r.result
+        .as_ref()
+        .is_some_and(|res| res.reg == ResultReg::Hidden)
+}
+
+/// The call in `e`, if `e` is a call of a routine whose result goes
+/// through a hidden address ([`ResultReg::Hidden`]).
+fn hidden_call<'e>(p: &Program, e: &'e SExpr) -> Option<&'e SCall> {
+    match &e.kind {
+        ExprKind::Call(c) => match &c.callee {
+            SCallee::Routine(id) if is_hidden_result(p.routine(*id)) => Some(c),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The refusal of a call of a function whose result goes through a hidden
+/// address ([`ResultReg::Hidden`]) used other than in the two forms the
+/// image shows (codegen-patterns 3, "Record results over 4 bytes"):
+/// assigned to a variable ([`Cx::hidden_call_assignment`]) and passed by
+/// address ([`Arg::Call`]).  Not seen: `discard`, a comparison, a field of
+/// the result, the result as a `with` record.
+const HIDDEN_CALL_USE: &str = "a call of a function whose record result goes through a hidden \
+     address, other than assigned to a variable or passed by address (codegen-patterns 3, \
+     \"Record results over 4 bytes\"), is";
+
+/// The refusal of a nested function whose result goes through a hidden
+/// address, its definition and its calls: no nested routine of the image
+/// returns one, so where the address goes beside the static link in A1
+/// (codegen-patterns 6) is not seen.
+const HIDDEN_NESTED: &str = "a nested function whose record result goes through a hidden \
+     address (where the address goes beside the static link is not seen, codegen-patterns 3, \
+     \"Record results over 4 bytes\") is";
+
+/// The pseudo frame offset of the `n`th result temporary of a routine
+/// ([`Cx::result_temps`]) until [`assign_temps`] places it: outside any
+/// frame, below the `with` temporaries' ([`WITH_TEMP_BASE`]).
+const RESULT_TEMP_BASE: i32 = -0x6000_0000;
+
+thread_local! {
+    /// The frame temporaries of the routine being lowered that receive
+    /// the results of calls of functions whose result goes through a
+    /// hidden address, by number: their sizes.  Until [`assign_temps`]
+    /// places them, each is `Addr::Frame(result_temp(n))` ([`call`]).
+    static RESULT_TEMPS: std::cell::RefCell<Vec<u32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn result_temp(n: usize) -> i32 {
+    RESULT_TEMP_BASE - n as i32
+}
+
+/// A new result temporary of `bytes` bytes ([`RESULT_TEMPS`]).
+fn new_result_temp(bytes: u32) -> Addr {
+    RESULT_TEMPS.with(|t| {
+        let mut t = t.borrow_mut();
+        t.push(bytes);
+        Addr::Frame(result_temp(t.len() - 1))
+    })
+}
+
+/// The number of the result temporary at pseudo offset `o`, if `o` is one
+/// ([`result_temp`]).
+fn result_temp_index(o: i32) -> Option<usize> {
+    (o <= RESULT_TEMP_BASE && o > RESULT_TEMP_BASE - 0x1000_0000)
+        .then(|| (RESULT_TEMP_BASE - o) as usize)
+}
+
+/// `f := r` inside `f`, for a result through a hidden address
+/// ([`ResultReg::Hidden`]; codegen-patterns 3, "Record results over 4
+/// bytes"): a record copy into the object the first argument slot points
+/// to, as into an `out` parameter's (the module-local 0xE58C3A
+/// 0xE58C62..0xE58C6A `movea.l (0x8,A6),A1; move.l (-0xc,A6),(A1); move.w
+/// (-0x8,A6),(0x4,A1)`; NAME_$GET_NODE_DATA_UID 0xE58A0C..0xE58A14
+/// `movea.l (0x8,A6),A1; lea (A5),A0; move.l (A0)+,(A1); move.l
+/// (A0)+,(0x4,A1)`; the module-local 0xE4232A 0xE42344..0xE4234E).  The
+/// store is the assignment, with nothing at the epilogue: no image
+/// caller reads a register after such a call, and the callees leave D0
+/// and A0 as their body left them, so an assignment may come anywhere and
+/// more than once (ACL_$DEFAULT_ACL 0xE4787E assigns on three paths).
+///
+/// Only a record variable is accepted as the value (all the sites); a
+/// function's result (`f := g(x)`) is not seen.
+fn hidden_result_assignment(p: &Program, r: &Routine, s: &SStmt, value: &SExpr) -> Res<Stmt> {
+    let res = r.result.as_ref().expect("a function");
+    let var = res
+        .var
+        .expect("a function with a body has a result variable");
+    if !value.is_designator() || value.value.is_some() {
+        return Err(unsupported(
+            value.span,
+            "a record function result assigned other than a record variable (a function's \
+             result: no site seen, codegen-patterns 3, \"Record results over 4 bytes\") is",
+        ));
+    }
+    let bytes = p.types.size(res.ty);
+    if p.types.size(value.ty) != bytes {
+        return Err(unsupported(
+            value.span,
+            "assigning a record of another size to a record function result is",
+        ));
+    }
+    if volatile_access(p, value).is_some() || p.types.has_volatile_part(value.ty) {
+        return Err(unsupported(
+            value.span,
+            "a record function result assigned from a volatile or device record (ref              3.15.1-3.15.3) is",
+        ));
+    }
+    check_even(p, value)?;
+    Ok(Stmt {
+        kind: StmtKind::Copy {
+            dst: var_addr(p, var, s.span)?,
+            src: addr_of(p, value)?,
+            bytes,
+            chars: false,
+        },
+        span: s.span,
+    })
 }
 
 /// `f := r` inside `f`, for a 4-byte record result ([`ResultReg::Record`];
@@ -4576,6 +4932,10 @@ fn byte_array_copy(p: &Program, target: &SExpr, value: &SExpr) -> bool {
 /// function result to a record has not been catalogued.  The selector
 /// decides the instructions (codegen-patterns 5.2).
 fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
+    // A record function result whose convention is not known: said so.
+    if let ExprKind::Call(c) = &value.kind {
+        refuse_unknown_result(p, c, value.span)?;
+    }
     if !value.is_designator() || value.value.is_some() {
         return Err(unsupported(
             value.span,
@@ -5383,6 +5743,9 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
             offset: 0,
         })),
         ExprKind::Transfer(x) => transfer(p, e, x),
+        ExprKind::Call(_) if hidden_call(p, e).is_some() => {
+            Err(unsupported(e.span, HIDDEN_CALL_USE))
+        }
         ExprKind::Call(c) => {
             // A pointer result comes back in A0 (ref 5.5.10, p. 5-20;
             // codegen-patterns 3, "Pointer results"); the caller reads it
@@ -6607,8 +6970,11 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
                         Some(true)
                     }
                 }
-                // Another unit's object: aligned as its type says.
-                Storage::Extern { .. } => (p.types.get(e.ty).align >= 2).then_some(true),
+                // Another unit's object, or the caller's place for a hidden
+                // result: aligned as its type says.
+                Storage::Extern { .. } | Storage::HiddenResult { .. } => {
+                    (p.types.get(e.ty).align >= 2).then_some(true)
+                }
             },
             _ => None,
         }
@@ -6781,6 +7147,9 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
         ExprKind::Transfer(x) => {
             transfer_view(p, e, x)?;
             addr_of(p, x)
+        }
+        ExprKind::Call(_) if hidden_call(p, e).is_some() => {
+            Err(unsupported(e.span, HIDDEN_CALL_USE))
         }
         _ => Err(unsupported(e.span, "this designator is")),
     }
@@ -6990,6 +7359,19 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
             offset: 0,
         }),
         Storage::Frame { offset } => Ok(Addr::Frame(*offset)),
+        // The result's place, through the hidden address in the first
+        // argument slot, as an `out` parameter's object (ACL_$DEFAULT_ACL
+        // 0xE478C8 `movea.l (0x8,A6),A2; move.l (A1)+,(A2)`).
+        Storage::HiddenResult { slot } => Ok(Addr::Indirect {
+            base: Box::new(Expr::Load {
+                addr: Addr::Frame(*slot),
+                ty: Scalar {
+                    pointer: true,
+                    ..Scalar::unsigned(Width::Long)
+                },
+            }),
+            offset: 0,
+        }),
         Storage::Param { index } => {
             let owner = v.owner.expect("a parameter has an owner routine");
             let prm = &p.routine(owner).params[*index];
@@ -7251,6 +7633,28 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                          as a copy: no site known) is",
                     ));
                 }
+                if let ExprKind::Call(ic) = &a.expr.kind {
+                    refuse_unknown_result(p, ic, a.expr.span)?;
+                }
+                if let Some(inner) = hidden_call(p, &a.expr) {
+                    // A function result through a hidden address, passed
+                    // on by address: the inner call made among the
+                    // pushes, its temporary's address the argument
+                    // ([`Arg::Call`]; codegen-patterns 3, "Record results
+                    // over 4 bytes").  Only value and `in` parameters take
+                    // a call (`dpc-sema`).
+                    if !univ && p.types.size(a.expr.ty) != p.types.size(prm_ty) {
+                        return Err(unsupported(
+                            a.expr.span,
+                            "passing a record function result to a parameter of another size is",
+                        ));
+                    }
+                    args.push(Arg::Call {
+                        call: Box::new(call(p, inner, a.expr.span)?),
+                        slot,
+                    });
+                    continue;
+                }
                 if !a.expr.is_designator() {
                     // An expression: stored into a frame temporary, whose
                     // address is passed (codegen-patterns 1.5, TONE_$ENABLE
@@ -7317,6 +7721,28 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 }
             }
         });
+    }
+    // A result through a hidden address (codegen-patterns 3, "Record
+    // results over 4 bytes"): the address of a new frame temporary is the
+    // first argument, pushed last (PROC2_$UPGID_TO_UID 0xE41034 `pea
+    // (-0x14,A6)'); its slot is what the routine's arguments take beyond
+    // its parameters' (`dpc-sema` adds it).
+    if let SCallee::Routine(id) = &c.callee {
+        let r = p.routine(*id);
+        if is_hidden_result(r) && r.parent.is_some() {
+            return Err(unsupported(span, HIDDEN_NESTED));
+        }
+        if let Some(res) = r.result.as_ref().filter(|res| res.reg == ResultReg::Hidden) {
+            let slot = r.arg_bytes - r.params.iter().map(|q| q.conv.slot_size).sum::<u32>();
+            args.insert(
+                0,
+                Arg::Address {
+                    addr: new_result_temp(p.types.size(res.ty)),
+                    slot,
+                    writable: true,
+                },
+            );
+        }
     }
     Ok(Call {
         callee,

@@ -344,14 +344,13 @@ last parameter, and the caller's pop includes it.
   the MAC_OS driver "open" call that note describes pushes word + long +
   long.  Function results come back in registers (section 3).  Before
   trusting any "result slot" claim, add up the bytes that are pushed.
-- **Exception (Uncertain):** PROC2_$UPGID_TO_UID 0xE41030..0xE4103C
-  pushes 6 bytes with no pad: `move.w (-0xa,A6),-(SP); pea (-0x14,A6);
-  bsr.w 0xE4232A; addq.w #6,SP`.  The module-local 0xE4232A stores 8
-  bytes through its `(8,A6)` and the caller then copies them from
-  `(-0x14,A6)`: perhaps a function returning a record through a hidden
-  address, which would then not be padded.  `dpc` pads every list of
-  2 mod 4 bytes and has no record-valued functions but 4-byte ones,
-  returned in D0 (section 3, "Record results").
+- **Exception (Verified, one site):** PROC2_$UPGID_TO_UID
+  0xE41030..0xE4103C pushes 6 bytes with no pad: `move.w
+  (-0xa,A6),-(SP); pea (-0x14,A6); bsr.w 0xE4232A; addq.w #6,SP`.  The
+  module-local 0xE4232A is a function returning an 8-byte record
+  through a hidden address (section 3, "Record results over 4 bytes"),
+  and such a call is not padded; `dpc` pushes no pad for one (one site:
+  every other such call has 4 or 8 bytes).
 
 ### 1.5 Constant arguments (Verified / Reported)
 
@@ -2230,14 +2229,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     frame (12.5, the pointer-local divergence).  (`../source`'s Pascal
     returns `integer32` there: `peb_$get_status := st.all` compiles to
     `move.l (-8,A6),D0`, one of the reasons it is MISMATCH.)
-  - Not seen: records of other sizes (PROC2_$UPGID_TO_UID 0xE41030
-    hints at an 8-byte result through a hidden address, section 1.4),
-    sets, reals; a 4-byte record under `a0_return`; a record result
-    through a routine pointer; in the callee, `f := g(x)`, several
-    assignments, an assignment before other statements or a `return`
-    (where the slot is loaded is not seen), a value parameter as the
-    value (beads domain-pascal-e2ei for other sizes, -jnze for the 4-byte
-    forms).
+  - Not seen: records of fewer than 4 bytes, sets, reals (records of
+    more than 4 bytes: next item); a 4-byte record under `a0_return`; a
+    record result through a routine pointer; in the callee, `f :=
+    g(x)`, several assignments, an assignment before other statements or
+    a `return` (where the slot is loaded is not seen), a value parameter
+    as the value (beads domain-pascal-e2ei for other sizes, -jnze for the
+    4-byte forms).
   **Implemented** (`dpc-sema` `conv::result_reg`, `ResultReg::Record`:
   a record of exactly 4 bytes, extended from `status_$t` to every
   4-byte record, Uncertain for the others; `dpc-ir`
@@ -2250,6 +2248,111 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   convention unknown").  Golden `tests/golden/results/record_results`;
   driver test `four_byte_record_function_results`; exec test
   `record_results`; `dpc-ir` test `four_byte_record_results`.
+- **Record results over 4 bytes (Verified by survey: 7 callees, all 21
+  compiled calls; implemented; bead domain-pascal-ytu3).**  The result
+  goes through a **hidden first argument**: the address of a place for
+  it, which the caller pushes **last** (after the arguments, so the
+  callee finds it at `(8,A6)` and its parameters from `(0xc,A6)` on)
+  and the callee **stores through**; no register carries anything back.
+  Survey (ad-hoc script over `tools/nestsurvey.py`'s routines, not
+  kept: every call whose last push is `pea (-k,A6)` followed, after the
+  pop, by a copy out of `(-k,A6)` or by `pea (-k,A6)` again, then the
+  callees read; re-check the sites with `tools/imgdis.sh`):
+
+  | Callee | Result | Callee stores | Calls |
+  |---|---|---|---|
+  | ACL_$DEFAULT_ACL 0xE4787E | `uid_$t`, 8 | 0xE478C8 `movea.l (0x8,A6),A2; move.l (A1)+,(A2); move.l (A1)+,(0x4,A2)` (three paths, merged tails), `link #0` | 5 |
+  | NAME_$GET_ROOT_UID 0xE589BC, _$GET_NODE_UID 0xE589DE, _$GET_NODE_DATA_UID 0xE58A00 | `uid_$t`, 8 | 0xE58A0C `movea.l (0x8,A6),A1; lea (A5),A0; move.l (A0)+,(A1); move.l (A0)+,(0x4,A1)`, `link #0` | 2 + 4 + 2 |
+  | module-local 0xE4232A | `uid_$t`, 8 | 0xE42344 `lea (-0x10,A6),A0; movea.l (0x8,A6),A1; ...`; word parameter at `(0xc,A6)` | 1 |
+  | module-locals 0xE58C02, 0xE58C3A | `time_$clock_t`, 6 | 0xE58C28 `movea.l (0x8,A6),A1; move.l (-0xc,A6),(A1); move.w (-0x8,A6),(0x4,A1)`; parameter at `(0xc,A6)` | 4 + 3 |
+
+  `../source`'s C writes each as a `void` routine whose first parameter
+  points to a `uid_t` or `clock_t` (its Pascal, after the merge sweep,
+  as functions for ACL_$DEFAULT_ACL and the TIME_ and PROC2 ones); the
+  callers settle that the first argument is a result rather than an
+  `out` parameter, which a caller passes as the destination's own
+  address: **all 21 calls pass a frame temporary, never the destination
+  itself**, and use it in one of two ways.
+  - *Assigned* (17 calls): after the pop, a record copy from the
+    temporary into the destination, the copy any record assignment
+    makes (section 5.2): PROC2_$UPGID_TO_UID 0xE41030..0xE41046 `move.w
+    (-0xa,A6),-(SP); pea (-0x14,A6); bsr.w 0xE4232A; addq.w #6,SP; lea
+    (-0x14,A6),A0; move.l (A0)+,(-0x8,A6); move.l (A0)+,(-0x4,A6)`;
+    into a field through a parameter's pointer, ASKNODE_$INTERNET_INFO
+    0xE648AC..0xE648C4 `pea (-0x16c,A6); jsr NAME_$GET_ROOT_UID; addq.w
+    #4,SP; lea (-0x16c,A6),A0; movea.l (0x1c,A6),A1; move.l
+    (A0)+,(0x8,A1); move.l (A0)+,(0xc,A1)`; into the argument itself,
+    TIME_$SET_ITIMER 0xE58ED2..0xE58EE4 `pea (A3); pea (-0x10,A6); bsr.w
+    0xE58C02; addq.w #8,SP; move.l (-0x10,A6),(A3); move.w
+    (-0xc,A6),(0x4,A3)`.  The other 14: 0xE32442 (module-local
+    0xE323E6), 0xE4A0D8 and 0xE4A0F2 (module-local 0xE4A060), DIR_$OLD_
+    SET_DEFAULT_ACL 0xE562C6, 0xE562F2, DIR_$OLD_GET_DEFAULT_ACL
+    0xE56560, TIME_$SET_ITIMER 0xE58EEE, TIME_$GET_ITIMER 0xE58F36,
+    0xE58F4C, TIME_$SET_CPU_LIMIT 0xE58FA0, ASKNODE_$INTERNET_INFO
+    0xE648A4, 0xE64A70, 0xE64A98, 0xE64AC0.  The pop follows section
+    1.1: skipped where no push, call or conditional branch comes before
+    the epilogue (0xE58EEE, 0xE58F4C: the copy, then the epilogue;
+    0xE56560: the copy after a `bra`); 0xE648A4 and 0xE648B0, the two arms of an `if`,
+    share the pop and the copy after the join (merged tails, as at
+    ACL_$DEFAULT_ACL).
+  - *Passed on by address* (4 calls): the inner call is made where the
+    outer call's argument is pushed, after the arguments to its right,
+    popped at once, and the temporary's address is the argument:
+    dir_$old_create_obj (module-local 0xE54546) 0xE54698..0xE546BC
+    `pea (-0xc,A6); pea (0x90,PC); pea (-0x30,A6); jsr ACL_$DEFAULT_ACL;
+    addq.w #8,SP; pea (-0x30,A6); move.l #...,-(SP); pea (A3); bsr.w
+    DIR_$OLD_SET_DEFAULT_ACL; lea (0x10,SP),SP` (also 0xE546CC);
+    TIME_$SET_ITIMER 0xE58E9E..0xE58ECA, two in one call, each in a
+    temporary of its own (-8, then -0x10, in push order), the outer
+    call's pad first.
+  - *No pad (Verified at one site; Uncertain as a rule)*:
+    PROC2_$UPGID_TO_UID's 6 bytes (a word value argument and the
+    address) are pushed without one (the call at 0xE41038, the only
+    compiled call followed by a pop of 2 mod 4 bytes, section 1.1); the
+    other 20 calls push 4 or 8 bytes.  So at that site the pad is not
+    computed over the arguments, nor over the arguments and the
+    address; whether no hidden-result call is ever padded is not
+    settled by one site.  `dpc` pads none.
+  - *The temporary* is placed as an expression's passed by address
+    (section 1.5): below the locals, at a multiple of 4, a 6-byte
+    record in an 8-byte place (TIME_$SET_ITIMER `link #-0x10`, -8 and
+    -0x10; PROC2_$UPGID_TO_UID -0x14 below a word at -0xa; TIME_$GET_
+    ITIMER -8 for both calls).  Unlike `dpc`, TIME_$SET_ITIMER's later
+    single calls take -0x10, not -8: the reuse order of temporaries is
+    not dpc's (bead domain-pascal-tf4x).
+  - *The callee* has no result variable of its own: `f := r` is a
+    record copy through the address, as into an `out` parameter, at
+    each assignment (ACL_$DEFAULT_ACL assigns on three paths, the copy
+    shared by merged tails); nothing at the epilogue; no frame slot
+    (ACL_$DEFAULT_ACL and the NAME_ routines `link #0`; 0xE58C3A `link
+    #-0xc`, the reserved slot and its 6-byte local only).  The
+    reference says nothing of it (5.5.10/5.5.11 p. 5-20 speak of results
+    "that should go into a register").
+  - Not seen: a record of other sizes (`dpc` takes every record over 4
+    bytes, Uncertain); under `a0_return`, `d0_return` or `c_param`;
+    through a routine pointer; a nested function (where the address
+    goes beside the static link in A1, section 6, is not seen: its
+    definition and its calls are refused); in the caller,
+    `discard`, a comparison, a field of the result, a destination whose
+    address needs a call; in the callee, `f := g(x)`.
+  **Implemented** (`dpc-sema` `conv::result_reg`, `ResultReg::Hidden`,
+  `Storage::HiddenResult`: the parameters shifted by the address's
+  slot, no pad, no frame slot; these ABI decisions are to move into
+  the target description, bead domain-pascal-wiue; `dpc-ir` `hidden_result_assignment`,
+  `Cx::hidden_call_assignment`, `call` (the temporary as the first
+  argument), `Arg::Call` for a result passed on, `assign_temps`): for
+  the selector the callee is a procedure whose first argument slot is a
+  by-address parameter (`Function::address_params`).  The forms in "Not
+  seen" are refused.  Conformance `time_get_itimer.pas` (TIME_$GET_
+  ITIMER: two calls, the second not popped) and `name_uid_getters.pas`
+  (the three NAME_ routines, now functions); the callees 0xE58C02 and
+  0xE58C3A match from the result's copy on (0xE58C28..0xE58C38,
+  0xE58C62..0xE58C72) and differ before it in the register of the
+  second statement (D1 in the image, D0 in `dpc`);
+  `pending/proc2_upgid_to_uid.pas` is refused for a slot load (12.4
+  R4(b)).  Golden `tests/golden/results/hidden_results`; exec test
+  `hidden_results`; `dpc-ir` test `hidden_address_record_results`;
+  `dpc-sema` test `hidden_result_slot`.
 - **Constant results (Verified at the sites):** `clr.<s> D0` for 0
   (PARITY_$CHK_IO 0xE0B1AA `clr.w D0`; IO_$ALLOC 0xE1A9CC `clr.l D0`),
   `moveq` for -128..127 (0xE0B19C `moveq #1,D0`, 0xE0B23A `moveq #-1,D0`,

@@ -3667,6 +3667,7 @@ fn walk_call<'a>(c: &'a Call, v: &mut dyn FnMut(Node<'a>)) {
         match a {
             Arg::Value { value, .. } | Arg::Temp { value, .. } => walk_expr(value, v),
             Arg::Address { addr, .. } => walk_addr(addr, v),
+            Arg::Call { call, .. } => walk_call(call, v),
         }
     }
     if let Some(x) = c.pointer() {
@@ -4931,6 +4932,7 @@ fn call_addrs_mut(c: &mut Call, f: &mut dyn FnMut(&mut Addr)) {
         match a {
             Arg::Value { value, .. } | Arg::Temp { value, .. } => expr_addrs_mut(value, f),
             Arg::Address { addr, .. } => addr_mut(addr, f),
+            Arg::Call { call, .. } => call_addrs_mut(call, f),
         }
     }
     if let Some(x) = c.pointer_mut() {
@@ -6229,6 +6231,7 @@ impl Uses<'_> {
                     ..
                 } if addr_value(base).is_some() => self.address(addr_value(base).unwrap()),
                 Arg::Address { addr, .. } => self.address(addr),
+                Arg::Call { call, .. } => self.call_args(call),
             }
         }
         // A routine pointer that is a by-value parameter itself is read
@@ -12970,7 +12973,9 @@ impl Selector {
             } = a
             {
                 if let Some(d) = self.for_reg(*o) {
-                    let mut inner = false;
+                    // A hidden-address result among the arguments is a
+                    // call too ([`Arg::Call`]).
+                    let mut inner = c.args.iter().any(|b| matches!(b, Arg::Call { .. }));
                     for b in &c.args {
                         let mut v = |n: Node| inner |= matches!(n, Node::Expr(Expr::Call { .. }));
                         match b {
@@ -12978,6 +12983,7 @@ impl Selector {
                                 walk_expr(value, &mut v)
                             }
                             Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                            Arg::Call { .. } => {}
                         }
                     }
                     if inner || stored.contains(o) {
@@ -13070,7 +13076,9 @@ impl Selector {
                 // as it was.
                 Arg::Value { value, .. } => addr_value(value)
                     .filter(|a| !slot_root(a).is_some_and(|o| self.is_address_slot(o))),
-                Arg::Temp { .. } => None,
+                // A frame temporary's address (the inner call's own
+                // arguments are its own call's business).
+                Arg::Temp { .. } | Arg::Call { .. } => None,
             };
             // `T(addr(x))^` by address is x's push (below): the pointer x
             // is reached through, if any.
@@ -13099,6 +13107,7 @@ impl Selector {
                 match a {
                     Arg::Value { value, .. } | Arg::Temp { value, .. } => walk_expr(value, &mut v),
                     Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                    Arg::Call { call, .. } => walk_call(call, &mut v),
                 }
             }
             if n > 1 {
@@ -13312,6 +13321,7 @@ impl Selector {
                                 walk_expr(value, &mut v)
                             }
                             Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                            Arg::Call { call, .. } => walk_call(call, &mut v),
                         }
                     }
                 }
@@ -13959,6 +13969,29 @@ impl Selector {
                 self.out.push(Insn::Pea(tmp));
             }
             Arg::Temp { .. } => {
+                return Err(unsupported(self.span, "an address slot of this size is"))
+            }
+            // A hidden-address result passed on by address (codegen-
+            // patterns 3, "Record results over 4 bytes"): the inner call
+            // where the argument is pushed, popped at once (more pushes
+            // follow), then its temporary's address (TIME_$SET_ITIMER
+            // 0xE58EA6..0xE58EB2 `move.l D3,-(SP); pea (-0x8,A6); bsr.w
+            // 0xE58C3A; addq.w #8,SP; pea (-0x8,A6)`; dir_$old_create_obj
+            // 0xE546A0..0xE546AC, the outer call's last argument pushed
+            // before it).
+            Arg::Call { call, slot: 4 } => {
+                let Some(Arg::Address {
+                    addr: Addr::Frame(o),
+                    ..
+                }) = call.args.first()
+                else {
+                    unreachable!("a hidden-address call passes its temporary first")
+                };
+                let o = *o;
+                self.call(call, false)?;
+                self.out.push(Insn::Pea(Ea::Disp(o, FP)));
+            }
+            Arg::Call { .. } => {
                 return Err(unsupported(self.span, "an address slot of this size is"))
             }
         }

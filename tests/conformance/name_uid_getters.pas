@@ -14,13 +14,23 @@
          (`movea.l (8,A6),A1'), the source's address after it into A0
          (`lea (0x38,A5),A0'; `lea (A5),A0' for offset 0 at 0xE58A10),
          then `move.l (A0)+,(A1); move.l (A0)+,(4,A1)' (bead
-         domain-pascal-fbg).
+         domain-pascal-fbg);
+  - 3    the same as the result of a function returning a uid_$t through
+         a hidden address ("Record results over 4 bytes"): the result's
+         place is the object the first argument slot points to, with no
+         frame slot (`link #0').
 
   Reconstructed (not known from the original): the names of the data
   (NAME_$NODE_DATA_UID is the map's; the others ../source's), uid_$t as
   two integer32 fields (../source uid_t's high and low), the bytes
-  between the UIDs as one stand-in array; `out' as the mode (written,
-  never read). }
+  between the UIDs as one stand-in array.  Functions, not procedures with
+  an `out' parameter (which compile to the same bytes): all 8 compiled
+  calls pass the address of a frame temporary and copy the UID out of it
+  after the call (ASKNODE_$INTERNET_INFO 0xE648A4, 0xE648AC..0xE648C4,
+  0xE64A70, 0xE64A98, 0xE64AC0; the module-local 0xE323E6 at 0xE32442;
+  the module-local 0xE4A060 at 0xE4A0D8 and 0xE4A0F2), where an `out'
+  argument would be the destination's own address (codegen-patterns 3,
+  "Record results over 4 bytes"). }
 module name;
 type
   uid_$t = record
@@ -33,17 +43,17 @@ var
   node_uid: uid_$t;                       { +0x30 }
   root_uid: uid_$t;                       { +0x38 }
 
-procedure name_$get_root_uid(out uid: uid_$t);
+function name_$get_root_uid: uid_$t;
 begin
-  uid := root_uid;
+  name_$get_root_uid := root_uid;
 end;
 
-procedure name_$get_node_uid(out uid: uid_$t);
+function name_$get_node_uid: uid_$t;
 begin
-  uid := node_uid;
+  name_$get_node_uid := node_uid;
 end;
 
-procedure name_$get_node_data_uid(out uid: uid_$t);
+function name_$get_node_data_uid: uid_$t;
 begin
-  uid := node_data_uid;
+  name_$get_node_data_uid := node_data_uid;
 end;

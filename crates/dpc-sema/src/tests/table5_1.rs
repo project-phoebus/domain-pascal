@@ -501,18 +501,69 @@ fn result_registers() {
         )),
         Unknown
     );
-    // Other sizes: not known.
+    // Smaller records: not known.
     assert_eq!(
         result_reg("type r = record a: integer; end; function f: r; extern;"),
         Unknown
     );
+    // Larger ones through a hidden address (codegen-patterns 3, "Record
+    // results over 4 bytes": uid_$t at ACL_$DEFAULT_ACL 0xE4787E,
+    // time_$clock_t at the module-local 0xE58C02), except under a0_return,
+    // d0_return and c_param (no site).
     assert_eq!(
         result_reg("type r = record a, b: integer32; end; function f: r; extern;"),
-        Unknown
+        Hidden
     );
+    assert_eq!(
+        result_reg("type r = record a: integer32; b: integer; end; function f: r; extern;"),
+        Hidden
+    );
+    for opt in ["a0_return", "d0_return", "c_param"] {
+        assert_eq!(
+            result_reg(&format!(
+                "type r = record a, b: integer32; end; function f: r; options(extern, {opt});"
+            )),
+            Unknown,
+            "{opt}"
+        );
+    }
     // A 4-byte array is no record.
     assert_eq!(
         result_reg("type a = array[1..2] of integer; function f: a; extern;"),
         Unknown
     );
+}
+
+/// A result through a hidden address takes the first argument slot: the
+/// parameters follow it, the caller pushes no pad whatever the total
+/// (PROC2_$UPGID_TO_UID 0xE41030..0xE4103C, a word and the address, 6
+/// bytes), and the result variable is that slot's object, with no frame
+/// space (ACL_$DEFAULT_ACL 0xE4787E `link #0`).
+#[test]
+fn hidden_result_slot() {
+    let p = ok("module m; type r = record a, b: integer32; end; var v: r;
+        function f(w: integer): r; internal;
+        begin f := v; end;");
+    let f = &p.routines[0];
+    assert_eq!(f.params[0].slot_offset, 0xc);
+    assert_eq!(f.params[0].value_offset, 0xc);
+    assert_eq!(f.arg_bytes, 6);
+    assert_eq!(f.arg_pad, 0);
+    let res = f.result.as_ref().unwrap();
+    assert_eq!(res.reg, ResultReg::Hidden);
+    assert_eq!(
+        p.vars[res.var.unwrap().0 as usize].storage,
+        crate::program::Storage::HiddenResult { slot: 8 }
+    );
+    // The frame: the reserved slot of an `internal` routine only.
+    assert_eq!(f.frame_size, 4);
+    let p = ok("module m; type r = record a, b: integer32; end;
+        function g(in x: integer32; in y: r): r; begin g := y; end;");
+    let g = &p.routines[0];
+    assert_eq!(
+        g.params.iter().map(|q| q.slot_offset).collect::<Vec<_>>(),
+        [0xc, 0x10]
+    );
+    assert_eq!((g.arg_bytes, g.arg_pad), (12, 0));
+    assert_eq!(g.frame_size, 0);
 }

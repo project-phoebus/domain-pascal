@@ -1971,11 +1971,13 @@ impl<'t> Checker<'t> {
                     base: StaticBase::Var(*var),
                     offset: 0,
                 }),
-                Storage::Frame { .. } | Storage::Param { .. } => Err(format!(
-                    "`addr` of `{}` is not a valid initial value: a routine's variable or \
-                     parameter has no static address (ref 3.13.4, p. 3-51)",
-                    self.vars[var.0 as usize].name
-                )),
+                Storage::Frame { .. } | Storage::Param { .. } | Storage::HiddenResult { .. } => {
+                    Err(format!(
+                        "`addr` of `{}` is not a valid initial value: a routine's variable or \
+                         parameter has no static address (ref 3.13.4, p. 3-51)",
+                        self.vars[var.0 as usize].name
+                    ))
+                }
             },
             // A packed record's field that is a whole byte, word or
             // longword has an address, `offset` (ref 3.10.7; as
@@ -2569,6 +2571,27 @@ impl<'t> Checker<'t> {
             };
             (t, reg)
         });
+        // A result through a hidden address (codegen-patterns 3, "Record
+        // results over 4 bytes"): the address is the first argument, at the
+        // first argument offset (ACL_$DEFAULT_ACL 0xE4788C reads its
+        // parameter at (0xc,A6), 0xE478C8 the result's address at
+        // (0x8,A6)), pushed last; the parameters follow it.  No pad,
+        // whatever the total: PROC2_$UPGID_TO_UID 0xE41030..0xE4103C
+        // `move.w (-0xa,A6),-(SP); pea (-0x14,A6); bsr.w; addq.w #6,SP`, 6
+        // bytes (one site, 0xE41038: the only pop of 2 mod 4 bytes in
+        // compiled code; every other such call has 4 or 8 bytes;
+        // Uncertain as a rule).  TODO(target): ABI decisions, to move
+        // into the target description (bead domain-pascal-wiue).
+        let (arg_bytes, arg_pad) = if matches!(result, Some((_, conv::ResultReg::Hidden))) {
+            let shift = self.target.pointer_size() as i32;
+            for prm in &mut params {
+                prm.slot_offset += shift;
+                prm.value_offset += shift;
+            }
+            (arg_bytes + shift as u32, 0)
+        } else {
+            (arg_bytes, arg_pad)
+        };
         let rt = &mut self.routines[id.0 as usize];
         rt.params = params;
         rt.arg_bytes = arg_bytes;
@@ -2627,21 +2650,38 @@ impl<'t> Checker<'t> {
         // #-8', and SIO_$I_ERR 0xE67D9C, the result in the middle).  The
         // variable is created here, so that nested routines can name it,
         // and placed after the declarations.
+        // A result through a hidden address is that address's object, at
+        // the first argument offset, and takes no frame space
+        // (ACL_$DEFAULT_ACL 0xE4787E `link #0`, its three assignments
+        // `movea.l (0x8,A6),A2; move.l (A1)+,(A2); move.l (A1)+,(0x4,A2)`;
+        // codegen-patterns 3, "Record results over 4 bytes").
         let result_var = if let Some(res) = self.routines[id.0 as usize].result.clone() {
             let name = self.routines[id.0 as usize].name.clone();
             let span = self.routines[id.0 as usize].span;
+            let hidden = res.reg == conv::ResultReg::Hidden;
+            let storage = if hidden {
+                Storage::HiddenResult {
+                    slot: self.target.first_arg_offset(),
+                }
+            } else {
+                Storage::Frame { offset: 0 }
+            };
             let var = self.add_var(Var {
                 name,
                 ty: res.ty,
-                storage: Storage::Frame { offset: 0 },
+                storage,
                 owner: Some(id),
                 init: None,
                 span,
             });
             let rt = &mut self.routines[id.0 as usize];
             rt.result.as_mut().unwrap().var = Some(var);
-            rt.frame_vars.push(var);
-            Some((var, res.ty))
+            if hidden {
+                None
+            } else {
+                rt.frame_vars.push(var);
+                Some((var, res.ty))
+            }
         } else {
             None
         };

@@ -122,6 +122,11 @@ pub enum Storage {
     Frame { offset: i32 },
     /// A parameter: see [`Routine::params`]`[index]`.
     Param { index: usize },
+    /// The result variable of a function whose result goes through a
+    /// hidden address ([`crate::conv::ResultReg::Hidden`]): the object at
+    /// the address in the argument slot at frame offset `slot` (the first
+    /// argument's, below the parameters).
+    HiddenResult { slot: i32 },
 }
 
 /// One store of an initialiser: `value` at byte `offset` of the variable,
