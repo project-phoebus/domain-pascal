@@ -1492,6 +1492,7 @@ fn select_body_with(
             return Err(unsupported(*span, ZEXT_BASE_SCHEDULED));
         }
     }
+    copy_repeated_constants(&mut out);
     Ok(Selected::Body(
         Body {
             insns: out,
@@ -3838,6 +3839,64 @@ fn addr_value(e: &Expr) -> Option<&Addr> {
         Expr::AddrOf(a) => Some(a),
         Expr::Convert { value, ty, .. } if value.ty().width == ty.width => addr_value(value),
         _ => None,
+    }
+}
+
+/// The right operand of a comparison with a computed value, held for a
+/// later reuse ([`Selector::compare_two_computed`]).
+const HELD_FOR_REUSE: &str = "comparing a computed value with one held for a later reuse \
+     (PMAP_$PURIFIER_L 0xE13B7A compares the held one into the other: not settled, \
+     codegen-patterns 7.1) is";
+
+/// A comparison of two computed values while a value held for a later
+/// reuse is live ([`Selector::compare_two_computed`]).
+const SPILLED_OPERAND: &str = "comparing two computed values while a register holds a value \
+     kept for a later reuse (the OLD_DIR module-local 0xE57CE0 at 0xE57ECC stores one operand \
+     into the frame's lowest slot then: not modelled, bead domain-pascal-1mlp) is";
+
+/// `if v > e then v := e` and the like: a compare of a variable with a
+/// computed value whose `then` part assigns the variable the same
+/// expression ([`Selector::if_`]).
+const REUSED_RIGHT_OPERAND: &str = "an `if` comparing a variable with a computed value whose \
+     `then` part assigns the variable that value (the image reuses the compared register, \
+     0xE0B552, 0xE0BD5A, 0xE18C8C `cmp.l D1,D5; ble.s; move.l D1,D5`: not modelled, \
+     codegen-patterns 7.1) is";
+
+/// A longword constant loaded into a data register right after the same
+/// constant was loaded into another one is copied from it, `move.l
+/// #k,Dx; move.l Dx,Dy` (codegen-patterns 7.1, "Two computed values";
+/// bead domain-pascal-o1v0).  In compiled code every such adjacent pair
+/// is a copy: 9 of 9 (`(x & 16#FFFFF) = (y & 16#FFFFF)`, HINT_$ADDU
+/// 0xE49C26 `move.l #0xfffff,D0; move.l D0,D1; and.l (4,A2),D0; and.l
+/// (4,A3),D1`; 0xE15868, 0xE4C1C8, 0xE4C1FA, 0xE4D250, 0xE4E540,
+/// 0xE502B8, 0xE57DE0, 0xE58154), none loads it twice; with an
+/// instruction between them it is loaded again (FILE_$UNLOCK_PROC
+/// 0xE60F4A `move.l #0xfffff,D0; movea.l D3,A0; move.l #0xfffff,D1`, the
+/// one such pair).  `moveq` is not copied (SIO_$K_SET_PARAM 0xE680F6
+/// `moveq #1,D1; moveq #1,D0`, 7 sites).  Word constants: no adjacent
+/// pair either way.
+fn copy_repeated_constants(out: &mut [Insn]) {
+    for i in 1..out.len() {
+        if let (
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Imm(k),
+                dst: Ea::Reg(Reg::D(x)),
+            },
+            Insn::Move {
+                size: Size::L,
+                src: Ea::Imm(k2),
+                dst: Ea::Reg(Reg::D(y)),
+            },
+        ) = (&out[i - 1], &out[i])
+        {
+            if k == k2 && x != y {
+                let x = *x;
+                if let Insn::Move { src, .. } = &mut out[i] {
+                    *src = Ea::Reg(Reg::D(x));
+                }
+            }
+        }
     }
 }
 
@@ -7223,6 +7282,22 @@ impl Selector {
         next: Tail,
     ) -> Res<()> {
         let span = self.span;
+        if let (
+            IrCond::Compare {
+                lhs: Expr::Load { addr, .. },
+                rhs,
+                ..
+            },
+            Some(Stmt {
+                kind: StmtKind::Store { addr: a, value },
+                ..
+            }),
+        ) = (cond, then_.first())
+        {
+            if a == addr && value == rhs && !matches!(rhs, Expr::Const { .. } | Expr::Load { .. }) {
+                return Err(unsupported(self.span, REUSED_RIGHT_OPERAND));
+            }
+        }
         if !else_.is_empty() && !next.clean {
             if let (Some(a), Some(b)) = (call_bytes(then_.last()), call_bytes(else_.last())) {
                 if a == b {
@@ -9443,10 +9518,61 @@ impl Selector {
                 });
                 Ok(rel_cond(op, signed))
             }
-            _ => Err(unsupported(
+            _ if matches!(rhs, Expr::AddrOf(_)) || ty == Scalar::POINTER => Err(unsupported(
                 self.span,
-                "a comparison with this kind of value is",
+                "comparing a pointer variable with a computed pointer (`addr(...)`; the TIME_Q_ \
+                 module-local 0xE16B70 at 0xE16BA6 `cmpa.l (12,A6),A0`: not catalogued) is",
             )),
+            _ => {
+                let held = match addr {
+                    Addr::Frame(o) => self.pinned(*o),
+                    _ => None,
+                };
+                match held {
+                    // A variable held in a data register against a computed
+                    // value: its register the destination
+                    // ([`Self::compare_two_computed`]; PKT_$DUMP_DATA
+                    // 0xE12812 `cmp.l D1,D4; ble.s`, ../source `len <= (i -
+                    // 1) * 1024`; MST_$VA_TO_SEGNO 0xE0DCEE `cmp.l D3,D1`;
+                    // codegen-patterns 7.1, "Two computed values").  The
+                    // MAC_OS_ module-local 0xE0B522 at 0xE0B54E `cmp.l
+                    // D1,D5; ble.s; move.l D1,D5` and its twins 0xE0BD56,
+                    // 0xE18C88 reuse the computed value in the `then`
+                    // part: refused in [`Self::if_`].
+                    Some(Reg::D(d)) => {
+                        if expr_has_call(rhs) {
+                            return Err(unsupported(
+                                self.span,
+                                "a comparison of a variable with a value whose evaluation calls \
+                                 (a function, M$ARITH, `min`/`max`: not catalogued) is",
+                            ));
+                        }
+                        self.compare_two_computed(op, d, rhs, size, signed)
+                    }
+                    Some(Reg::A(_)) => Err(unsupported(
+                        self.span,
+                        "comparing a variable held in an address register with a computed value \
+                         (not catalogued) is",
+                    )),
+                    // A variable in memory on the left: AST_$INVALIDATE
+                    // 0xE066C6..0xE066D4 computes the right operand and
+                    // compares the variable into it, the relation reversed
+                    // (`move.l (32,A0),D1; subq.l #1,D1; lsr.l #8,D1; lsr.l
+                    // #2,D1; cmp.l (12,A6),D1; bcs.s`, ../source C
+                    // `start_page <= ((aote->length - 1) >> 10)`, no Pascal
+                    // translation), while BAT_$ALLOCATE 0xE3B126..0xE3B13E
+                    // keeps the computed right operand in a frame temporary
+                    // and loads the left one (`alloc_count > free_blocks -
+                    // 11`, alloc_count widened).  Not settled.
+                    None => Err(unsupported(
+                        self.span,
+                        "comparing a variable in memory with a computed value (AST_$INVALIDATE \
+                         0xE066D0 compares the variable into the computed value, BAT_$ALLOCATE \
+                         0xE3B13A keeps the computed one in a frame temporary: not settled, \
+                         codegen-patterns 7.1) is",
+                    )),
+                }
+            }
         }
     }
 
@@ -12113,6 +12239,19 @@ impl Selector {
             return Ok(Val::Reg(Reg::D(d)));
         }
         Ok(Val::Tmp(d))
+    }
+
+    /// Whether a value held for a later reuse (12.4 R7) is in a register
+    /// here and read again after this point: one held by [`Self::cse_value`]
+    /// whose reuse has not been selected yet.
+    fn cse_held_across(&self) -> bool {
+        let CsePlan::Hold(hits) = &self.cse_plan else {
+            return false;
+        };
+        self.cse.iter().any(|c| {
+            self.cse_regs.contains(&c.reg)
+                && hits.iter().any(|h| h.1 == c.id && h.0 >= self.cse_next)
+        })
     }
 
     /// Whether the computation `c` still holds its value here, for every
@@ -16867,6 +17006,7 @@ impl Selector {
             return self.compare_computed_zero(op, lhs);
         }
         let lv = self.eval(lhs)?;
+        let lheld = matches!(lv, Val::Reg(_));
         let d = match lv {
             Val::Reg(Reg::D(r)) => r,
             v => self.in_tmp(v, ty.width)?,
@@ -16904,8 +17044,121 @@ impl Selector {
                     dst: d,
                 });
             }
-            _ => return Err(unsupported(self.span, "comparing two computed values is")),
+            _ => {
+                if expr_has_call(lhs) {
+                    return Err(unsupported(
+                        self.span,
+                        "a comparison of a value whose evaluation calls (a function, M$ARITH, \
+                         `min`/`max`) with a computed value (not catalogued, codegen-patterns \
+                         7.1) is",
+                    ));
+                }
+                if lheld {
+                    // The left operand a value held for a later reuse
+                    // (12.4 R7): BAT_$ALLOCATE 0xE3B126..0xE3B13E computes
+                    // the right operand first and keeps it in a frame
+                    // temporary, `move.l (-560,A2),D0; subi.l #11,D0; move.l
+                    // D0,(-68,A6); move.w (14,A6),D0; ext.l D0; cmp.l
+                    // (-68,A6),D0` (../source `alloc_count > free_blocks -
+                    // 11`, the widened alloc_count read again at 0xE3B150):
+                    // one site, not modelled.
+                    return Err(unsupported(
+                        self.span,
+                        "comparing a computed value held for a later reuse with another computed \
+                         value (BAT_$ALLOCATE 0xE3B126 keeps the right one in a frame \
+                         temporary: not modelled, codegen-patterns 7.1) is",
+                    ));
+                }
+                return self.compare_two_computed(op, d, rhs, size, signed);
+            }
         }
+        Ok(rel_cond(op, signed))
+    }
+
+    /// `lhs op rhs` with the left operand already computed into data
+    /// register `dl` (or a variable held there) and a right operand that
+    /// is neither a constant nor a variable: the right one computed into a
+    /// register of its own after the left one, `cmp.<s> Dr,Dl`, the
+    /// relation as written (codegen-patterns 7.1, "Two computed values";
+    /// bead domain-pascal-o1v0; `tools/cmpsurvey.py summary`, kind
+    /// `two`).
+    ///
+    /// - Both computed: MSG_$$SEND 0xE0DAE0..0xE0DAF8 `clr.l D0; move.w
+    ///   D6,D1; move.w D2,D0; ext.l D1; add.l D1,D0; clr.l D1; move.w
+    ///   (2,A0),D1; addi.l #256,D1; cmp.l D1,D0; ble.s` (../source
+    ///   msg/send_internal.pas `data_len + hdr_len > drv^.max_data_len +
+    ///   16#100`); HINT_$ADDU 0xE49C26..0xE49C36 `(target_uid.low &
+    ///   16#FFFFF) = (source_uid.low & 16#FFFFF)`, `cmp.l D1,D0`; the
+    ///   module-local 0xE0F86C at 0xE0F9D8 (../source network/do_request.pas
+    ///   `resp_buf.op <> cmd_buf.op + 1`, both sides widened there);
+    ///   the DIR module-local 0xE4B340 at 0xE4B362; the other ../source-cited sites: the
+    ///   left operand's register the destination at every one.  Of the 50
+    ///   `cmp.<s> Dm,Dn` in compiled code whose two registers are D0 and
+    ///   D1, both computed in the straight-line run before it, 45 start
+    ///   the destination's computation first (the 5 others: a constant
+    ///   loaded into the destination, `moveq #15,D1` at 0xE0228A, 0xE022BC,
+    ///   0xE02316, 0xE02444, and a register local, 0xE1458E).
+    /// - A variable held in a data register on the left: its register the
+    ///   destination (PKT_$DUMP_DATA 0xE12808..0xE12812 `clr.l D1; move.w
+    ///   D3,D1; subq.l #1,D1; lsl.l #8,D1; lsl.l #2,D1; cmp.l D1,D4; ble.s`,
+    ///   ../source `len <= (i - 1) * 1024`; MST_$VA_TO_SEGNO 0xE0DCEE
+    ///   `cmp.l D3,D1; bcc.s`, `segno >= mst_$seg_mem_top`, the word
+    ///   widened; the MAC_OS_ module-local 0xE0B522 at 0xE0B54E `cmp.l
+    ///   D1,D5; ble.s`, `chunk > copy_chain^.length - copy_offset`, and
+    ///   its twins 0xE0BD56 and 0xE18C88, whose `then` parts assign the
+    ///   same expression and reuse D1 for it: refused, [`Self::if_`]).
+    ///
+    /// Refused: an operand that calls (a function, M$ARITH, `min`/`max`:
+    /// no site sorted out); a right operand held for a later reuse
+    /// (PMAP_$PURIFIER_L 0xE13B7A `cmp.l D6,D2; shi D3`, `total <
+    /// pmap_$mid_thresh` with the widened threshold kept in D2 for
+    /// 0xE13BA6: the held one is the source there); a value held for a
+    /// later reuse live across the compare (the OLD_DIR module-local
+    /// 0xE57CE0 at 0xE57ECC..0xE57EE4, D1 holding `slot_type`, zero-extended
+    /// at 0xE57E8C and read again at 0xE57EEA: the left operand is stored
+    /// into the frame's lowest slot, `move.l D0,(-128,A6)`, and the right
+    /// one computed into the same D0, where dpc takes another register;
+    /// bead domain-pascal-1mlp); pointers and booleans (not catalogued).
+    fn compare_two_computed(
+        &mut self,
+        op: Rel,
+        dl: u8,
+        rhs: &Expr,
+        size: Size,
+        signed: bool,
+    ) -> Res<Cond> {
+        let ty = rhs.ty();
+        if ty == Scalar::POINTER || ty == Scalar::BOOLEAN {
+            return Err(unsupported(
+                self.span,
+                "comparing two computed pointers or booleans (not catalogued) is",
+            ));
+        }
+        if expr_has_call(rhs) {
+            return Err(unsupported(
+                self.span,
+                "a comparison of a computed value with one whose evaluation calls (a function, \
+                 M$ARITH, `min`/`max`: not catalogued, codegen-patterns 7.1) is",
+            ));
+        }
+        let r = match self.eval(rhs)? {
+            Val::Tmp(r) => r,
+            Val::Reg(Reg::D(_)) => return Err(unsupported(self.span, HELD_FOR_REUSE)),
+            _ => {
+                return Err(unsupported(
+                    self.span,
+                    "comparing a computed value with this kind of value is",
+                ))
+            }
+        };
+        if self.cse_held_across() {
+            return Err(unsupported(self.span, SPILLED_OPERAND));
+        }
+        self.out.push(Insn::Cmp {
+            size,
+            src: Ea::Reg(Reg::D(r)),
+            dst: dl,
+        });
         Ok(rel_cond(op, signed))
     }
 

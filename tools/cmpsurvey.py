@@ -109,6 +109,24 @@ address order).  Kinds:
             variable with a register-held one loads, and which register
             two held ones compare into (codegen-patterns 7.1; bead
             domain-pascal-5xnz).
+    two     `cmp.<s> Dm,Dn' (two data registers) followed by a
+            conditional branch or `s<cc>', each register classified by
+            reg_origin: `two' when neither is held (both computed or
+            loaded in the straight-line run), `held-dst' / `held-src'
+            when one is, `both-held'.  For each register the instructions
+            of the run that compute its value (its writes back to the
+            one that starts it, and the registers they read, followed
+            the same way): which register's computation starts first
+            (`dst-first' / `src-first') and whether the two are
+            interleaved (`inter') or one after the other (`seq'); the
+            register pair.  Evidence for comparisons of two computed
+            values (codegen-patterns 7.1; bead domain-pascal-o1v0).
+    kcopy   a constant loaded into a data register (`move.<s> #k,Dx')
+            followed within five instructions of its run by a copy of
+            that register (`move.<s> Dx,Dy': `copy') or by a load of the
+            same constant into another register (`twice'): adjacent
+            (`adj') or with instructions between (`gapN'), and the two
+            instructions after the second (bead domain-pascal-o1v0).
 
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
@@ -127,7 +145,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor', 'opflags', 'loadflags', 'select', 'held')
+         'andor', 'opflags', 'loadflags', 'select', 'held', 'two', 'kcopy')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -771,6 +789,132 @@ def held_sites(ins):
     return out
 
 
+_REGS = re.compile(r'%(d\d)\b')
+
+
+def _reads_own(t, r):
+    """Whether `t', which writes register `r', also reads it: anything but
+    a plain longword move, `moveq', `clr' or `s<cc>' into it (a `move.w'
+    or `move.b' keeps the upper bits)."""
+    m = re.match(r'^(\w+) (.*)$', t)
+    if not m:
+        return False
+    op, ops = m.groups()
+    parts = ops.rsplit(',', 1)
+    if len(parts) == 2 and re.search(r'%' + r + r'\b', parts[0]):
+        return True
+    if op.startswith(('clr', 'moveq')) or op in ('movel', 'moveal'):
+        return False
+    return not re.match(r'^s(' + '|'.join(_CONDS) + r'|t|f)$', op)
+
+
+def value_insns(ins, i, r, lo, other):
+    """The indices in ins[lo:i] of the instructions that compute register
+    `r''s value at ins[i]: its writes back to the one that starts the
+    value, and, followed the same way, the writes of the registers those
+    read (not `other', the compare's other register)."""
+    idx, seen, need = set(), set(), [(r, i)]
+    while need:
+        reg, upto = need.pop()
+        if (reg, upto) in seen:
+            continue
+        seen.add((reg, upto))
+        for j in range(upto - 1, lo - 1, -1):
+            t = ins[j][2]
+            if not (writes(t, reg) or t == 'extl %' + reg or t == 'extw %' + reg):
+                continue
+            idx.add(j)
+            m = re.match(r'^\w+ (.*),%' + reg + '$', t)
+            if m:
+                need += [(x, j) for x in _REGS.findall(m.group(1)) if x != other]
+            if not _reads_own(t, reg):
+                break
+    return idx
+
+
+def _run_start(ins, i, targets):
+    for j in range(i - 1, -1, -1):
+        t = ins[j][2]
+        if _FLOW.match(t + ' ') or _CALL.match(t):
+            return j + 1
+        if ins[j][0] in targets:
+            return j
+    return 0
+
+
+def two_sites(ins):
+    """[(addr, size, dst, src, kind, order, layout, use)] of `cmp.<s>
+    Dm,Dn' followed by a conditional branch or `s<cc>' (kind `two' in
+    the module docstring)."""
+    targets = _targets(ins)
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = re.match(r'^cmp([bwl]) %(d\d),%(d\d)$', t)
+        if not m or i + 1 >= len(ins):
+            continue
+        c = _COND.match(ins[i + 1][2])
+        if not c:
+            continue
+        use = ('b' if c.group(1) else 's') + (c.group(1) or c.group(2))
+        size, src, dst = m.groups()
+        held = ('held', 'blk')
+        hd = reg_origin(ins, i, dst, targets, size) in held
+        hs = reg_origin(ins, i, src, targets, size) in held
+        kind = {(True, True): 'both-held', (True, False): 'held-dst',
+                (False, True): 'held-src', (False, False): 'two'}[(hd, hs)]
+        lo = _run_start(ins, i, targets)
+        cd = value_insns(ins, i, dst, lo, src)
+        cs = value_insns(ins, i, src, lo, dst)
+        if cd and cs:
+            order = 'dst-first' if min(cd) < min(cs) else 'src-first'
+            lay = 'seq' if max(cd) < min(cs) or max(cs) < min(cd) else 'inter'
+        else:
+            order = lay = '-'
+        out.append((a, size, dst, src, kind, order, lay, use))
+    return out
+
+
+_IMMLOAD = re.compile(r'^move([wl]) #(-?\d+),%(d\d)$')
+
+
+def kcopy_sites(ins):
+    """[(addr, size, form, distance, next two mnemonics)] of a constant
+    loaded into a data register and then copied or loaded again into
+    another one (kind `kcopy')."""
+    out = []
+    for i, (a, _, t) in enumerate(ins):
+        m = _IMMLOAD.match(t)
+        if not m:
+            continue
+        s, k, dx = m.groups()
+        for j in range(i + 1, min(len(ins), i + 6)):
+            tj = ins[j][2]
+            if _FLOW.match(tj + ' ') or _CALL.match(tj):
+                break
+            m2 = _IMMLOAD.match(tj)
+            if re.match(r'^move' + s + r' %' + dx + r',%d\d$', tj):
+                form = 'copy'
+            elif m2 and m2.group(1) == s and m2.group(2) == k and m2.group(3) != dx:
+                form = 'twice'
+            else:
+                if writes(tj, dx):
+                    break
+                continue
+            nxt = ' '.join(x[2].split(' ')[0] for x in ins[j + 1:j + 3])
+            out.append((a, s, form, 'adj' if j == i + 1 else 'gap%d' % (j - i - 1), nxt))
+            break
+    return out
+
+
+def _targets(ins):
+    targets = set()
+    for _, _, t in ins:
+        m = re.match(r'^(?:b[a-z]{2,3}[sw]?|db[a-z]{1,2}) (?:%d\d,)?0x([0-9a-f]+)$', t)
+        if m:
+            targets.add(int(m.group(1), 16))
+    return targets
+
+
 def scan():
     res = {k: [] for k in KINDS}
     for r0, r1, name in arithsurvey.routines():
@@ -789,6 +933,8 @@ def scan():
         res['andor'] += [(r0, name) + s for s in andor_sites(ins)]
         res['select'] += [(r0, name) + s for s in select_sites(ins)]
         res['held'] += [(r0, name) + s for s in held_sites(ins)]
+        res['two'] += [(r0, name) + s for s in two_sites(ins)]
+        res['kcopy'] += [(r0, name) + s for s in kcopy_sites(ins)]
         if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
             res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
             res['loadflags'] += [(r0, name) + s for s in loadflags_sites(ins)]
@@ -838,6 +984,14 @@ def summary(res):
            'into D0/D1 against a held one; C: two held; size, relation)',
            [s for s in hs if held_form(s[4], s[5])],
            lambda s: (held_form(s[4], s[5]), s[3], _REL[s[6][1:]]))
+    tw = res['two']
+    counts('`cmp.<s> Dm,Dn\' branched or set (kind, which starts first, layout)', tw,
+           lambda s: (s[6], s[7], s[8]))
+    counts('  ... kind `two\' with D0 and D1 (order, layout, Dn<-Dm, relation)',
+           [s for s in tw if s[6] == 'two' and {s[4], s[5]} == {'d0', 'd1'}],
+           lambda s: (s[7], s[8], s[4] + '<-' + s[5], _REL[s[9][1:]]))
+    counts('constants copied or loaded again (size, form, distance, next)', res['kcopy'],
+           lambda s: s[3:])
     lf = res['loadflags']
     counts('loads tested next (form, context, source, same size|size, relation)', lf,
            lambda s: (s[5], s[9], s[4], 'same' if s[3] == s[6] else 'size', _REL[s[7]]))

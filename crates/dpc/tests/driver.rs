@@ -3413,6 +3413,74 @@ fn adjacent_constant_stores_per_unit() {
     }
 }
 
+/// Comparisons of two computed values (codegen-patterns 7.1, "Two
+/// computed values"; bead domain-pascal-o1v0): the shapes the image does
+/// not settle are refused with their own messages.
+#[test]
+fn unsettled_computed_compares_are_refused() {
+    let unit = |body: &str| {
+        format!(
+            "module m;
+var u: integer; w: integer32; p: ^integer;
+function n: integer; extern;
+procedure m_$p(k: integer); options(val_param);
+begin
+  {body}
+end;
+"
+        )
+    };
+    let refused = [
+        // BAT_$ALLOCATE 0xE3B126: the widened left operand read again.
+        (
+            "cc_reused",
+            "if k > w - 11 then u := 0; if k > w then u := 1;",
+            "held for a later reuse with another computed value",
+        ),
+        // AST_$INVALIDATE 0xE066D0 against BAT_$ALLOCATE 0xE3B13A.
+        (
+            "cc_memory",
+            "if u > k + 1 then u := 0;",
+            "comparing a variable in memory with a computed value",
+        ),
+        (
+            "cc_call",
+            "if k + 1 > n + 1 then u := 0;",
+            "with one whose evaluation calls",
+        ),
+        (
+            "cc_pointer",
+            "if p = addr(u) then u := 0;",
+            "a computed pointer",
+        ),
+        // The OLD_DIR module-local 0xE57CE0 at 0xE57ECC: a value kept for
+        // a later reuse live across the compare (bead domain-pascal-1mlp).
+        (
+            "cc_live_cse",
+            "w := k; if (w + 1) > (u - 3) then u := 0; w := k;",
+            "a register holds a value kept for a later reuse",
+        ),
+        // 0xE0B54E..0xE0B552 `cmp.l D1,D5; ble.s; move.l D1,D5`.
+        (
+            "cc_min_reuse",
+            "w := k; if w > u - 1 then w := u - 1; u := w;",
+            "whose `then` part assigns the variable that value",
+        ),
+    ];
+    for (name, body, what) in refused {
+        let (code, err) = compile_with(name, &unit(body), &[]).unwrap_err();
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains(what), "{name}: {err}");
+    }
+    // The settled shape: the left one first, `cmp.<s> Dr,Dl` (MSG_$$SEND
+    // 0xE0DAF6).
+    let asm = compile_with("cc_both", &unit("if k + 1 > w - 1 then u := 0;"), &[]).unwrap();
+    assert!(
+        asm.contains("\taddq.l\t#1,%d1\n\tcmp.l\t%d0,%d1\n\tble.s\t"),
+        "{asm}"
+    );
+}
+
 /// Bead domain-pascal-i1by (codegen-patterns 7.1): a comparison of a
 /// function's result with a variable compiles only as the right operand
 /// of a plain `and`/`or` in a condition (`s<cc>` into the lowest

@@ -6172,6 +6172,125 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   relation of a pointer against a held one (not catalogued).  Golden
   `control/compares_held`; `dpc-m68k` test `variable_against_a_held_one`;
   execution test `tests/exec/held_compares.pas`.
+- **Two computed values (Verified at the sites; survey; implemented,
+  bead domain-pascal-o1v0).**  `tools/cmpsurvey.py summary`, kind `two`:
+  every `cmp.<s> Dm,Dn` in compiled code followed by a conditional
+  branch or `s<cc>` (407), each register classified by where its value
+  came from in the straight-line run (`reg_origin`, as for `held`), and,
+  for each, the instructions that compute it (its writes back to the one
+  that starts the value, and the registers those read).  Kinds: both
+  computed or loaded in the run 159 (`two`), one held 138 + 39, both held
+  71.  Of the `two` sites the destination's computation starts first at
+  132, the source's at 25; with D0 and D1 the two registers (50 sites),
+  45 against 5, the 5 being a constant loaded into the destination
+  (`moveq #15,D1; ... cmp.w D0,D1`, 0xE0228A, 0xE022BC, 0xE02316,
+  0xE02444: a byte against 15) and a register local (PMAP_$WS_SCAN_CALLBACK
+  0xE1458E, `now := time_$clockh`).  The 25 source-first sites by hand:
+  a constant loaded into the destination, 13 (0xE02290, 0xE022C2,
+  0xE0231C, 0xE0244A, 0xE02584, 0xE48056, 0xE5ABEE, 0xE5B3B8, 0xE5B3DE,
+  0xE4BD6C, 0xE4BE36, 0xE4BEF2, 0xE4BFAC); a register variable assigned
+  in the run, 5 (0xE30EB6, 0xE17D62, 0xE17E26, 0xE1459A, 0xE13B7A);
+  `min`-like clips, 4 (0xE0EC1C, 0xE61280, 0xE87BA2, 0xE032AE); artefacts
+  of the tracing, the destination's computation in fact first, 3
+  (0xE4B362, an entry load counted; 0xE1B058, 0xE61330).  The source operand order, from
+  ../source's translations at the cited addresses:
+  - *Both computed:* the left one first, into a data register, then the
+    right one into another, `cmp.<s> Dr,Dl`, the relation as written:
+    MSG_$$SEND 0xE0DAE0..0xE0DAF8 `clr.l D0; move.w D6,D1; move.w D2,D0;
+    ext.l D1; add.l D1,D0; clr.l D1; move.w (2,A0),D1; addi.l #256,D1;
+    cmp.l D1,D0; ble.s` (msg/send_internal.pas `data_len + hdr_len >
+    drv^.max_data_len + 16#100`); the AST_ module-local 0xE00D46 at
+    0xE00E74..0xE00E8E (`... + mmap_$wsl[2].page_count <
+    pmap_$low_thresh`, the word widened, `bcc`); the module-local 0xE0F86C
+    at 0xE0F9CC..0xE0F9D8 (`resp_buf.op <> cmd_buf.op + 1`, both widened
+    there: the 7 widened word sums of section 8, "Widening"; bead
+    domain-pascal-9js); the DIR module-local 0xE4B340 (../source dir/map_page.pas) at
+    0xE4B350..0xE4B362 `cmp.l
+    D0,D3` (`handle.map.slot[handle.cur_slot].group = page div 32`, the
+    left in D3); FILE_$LOCATEI 0xE606E6..0xE606F4 `clr.w D0; clr.w D1;
+    move.b (-39,A6),D0; move.b (0xe173f5).l,D1; cmp.w D1,D0; bne.s`, two
+    `[byte] 0..255` fields; area/alloc_resources.pas 0xE075F6,
+    area/find_entry_by_uid.pas 0xE0940C, 0xE09428; and the `(x &
+    16#FFFFF) = (y & 16#FFFFF)` sites below: the left operand's register
+    the destination at every one.  The registers are the allocator's
+    (12.4): the left one is D1 at 0xE57DE0 and SIO_$K_SET_PARAM
+    0xE680F6..0xE68100 (7 sites, `copy.flags1 * [0] <> params.flags1 *
+    [0]`, `moveq #1,D1; moveq #1,D0; and.l (-24,A6),D1; and.l (A2),D0;
+    cmp.l D0,D1`), D0 at the others.
+  - *The same longword mask on both sides* (`kcopy`): the constant
+    loaded once and copied, `move.l #k,D0; move.l D0,D1; and.l x,D0;
+    and.l y,D1; cmp.l D1,D0` (HINT_$ADDU 0xE49C26..0xE49C36,
+    `(target_uid.low & 16#FFFFF) = (source_uid.low & 16#FFFFF)`;
+    the RIP_WIRED module-local 0xE15830 at 0xE15868, DIR_$DO_OP 0xE4C1C8, 0xE4C1FA;
+    DIR and OLD_DIR module-locals at 0xE4D250, 0xE4E540, 0xE502B8, 0xE57DE0; DIR_$OLD_VALIDATE_ROOT_ENTRY
+    0xE58154).  Every `move.l #k,Dx` directly followed by `move.l #k,Dy`
+    in compiled code is so: 9 copies, no second load; the one repeat with
+    an instruction between is loaded again (FILE_$UNLOCK_PROC 0xE60F4A
+    `move.l #0xfffff,D0; movea.l D3,A0; move.l #0xfffff,D1`).  `moveq`
+    is not copied (SIO_$K_SET_PARAM above); for words no adjacent pair
+    is seen (the survey's one `w copy adj`, 0xE66642, spans a label: an
+    artefact of the scan, not a copy of a constant).
+  - *A variable held in a data register on the left:* its register the
+    destination, the right operand computed into another, the relation
+    as written: PKT_$DUMP_DATA 0xE12808..0xE12812 `clr.l D1; move.w
+    D3,D1; subq.l #1,D1; lsl.l #8,D1; lsl.l #2,D1; cmp.l D1,D4; ble.s`
+    (`len <= (i - 1) * 1024`; `len`'s widening, 0xE127FE `move.w D0,D4;
+    ext.l D4`, is hoisted out of the loop there, not reproduced); the
+    MAC_OS_ module-local 0xE0B522 at 0xE0B54E `cmp.l D1,D5; ble.s`
+    (`chunk > copy_chain^.length - copy_offset`) and its twins
+    0xE0BD56 (mac/receive.pas) and 0xE18C88 (xns/idp_receive.pas), whose
+    `then` parts assign the variable the same expression and reuse the
+    compared register for it, `move.l D1,D5` (0xE0B552, 0xE0BD5A,
+    0xE18C8C: 3 of 3; dpc would compute it again, so that `if` is
+    refused); MST_$VA_TO_SEGNO
+    0xE0DCEE `cmp.l D3,D1; bcc.s` (`segno >= mst_$seg_mem_top`, the word
+    widened into D3), MST_$TOUCH 0xE0DD66; dir/alloc_split_page.pas
+    0xE4EC06.  Counterexample: PMAP_$PURIFIER_L 0xE13B7A `cmp.l D6,D2; shi
+    D3`, `below := total < pmap_$mid_thresh` with `total` in D6: the
+    widened threshold is the destination, and it is kept in D2 for the
+    same compare at 0xE13BA6.
+  - *A variable in memory on the left* (not settled; bead
+    domain-pascal-1mlp): AST_$INVALIDATE 0xE066C6..0xE066D4 computes the
+    right operand and compares the variable into it, the relation
+    reversed (`move.l (32,A0),D1; subq.l #1,D1; lsr.l #8,D1; lsr.l #2,D1;
+    cmp.l (12,A6),D1; bcs.s`, ../source C `start_page <= ((aote->length -
+    1) >> 10)`, no Pascal translation); BAT_$ALLOCATE 0xE3B126..0xE3B13E
+    computes the right operand, stores it into the frame's lowest slot
+    and compares that with the widened left one (`move.l (-560,A2),D0;
+    subi.l #11,D0; move.l D0,(-68,A6); move.w (14,A6),D0; ext.l D0; cmp.l
+    (-68,A6),D0; sgt D1`, `alloc_count > free_blocks - 11`, D0 read again
+    at 0xE3B150).  The lowest slot is a temporary elsewhere too (0xE3B322
+    `32 - bit_offset`; the module-local 0xE57CE0 at 0xE57ECC..0xE57EE4,
+    `(dir_uid.low & 16#FFFFF) <> (found.low & 16#FFFFF)`, the left one
+    stored to (-128,A6), the right one computed into the same D0, `cmp.l
+    (-128,A6),D0`, D1 holding `slot_type`, zero-extended at 0xE57E8C and
+    read again at 0xE57EEA): when is not known; dpc keeps both in
+    registers, and refuses a comparison of two computed values while a
+    value held for a later reuse (12.4 R7) is live across it.
+  For `=` with a computed left operand and a held right one, dpc's form
+  (`cmp.<s> Dheld,Dcomputed`, above) is the image's majority (AST_$DISMOUNT
+  0xE06A6C, 0xE086C6, AREA_$COPY 0xE091E4, MAC_OS_$PROC2_CLEANUP 0xE0C01A)
+  with one exception, the AREA_ module-local 0xE07370 at 0xE073A0 `cmp.l
+  D3,D2` (`area_$rpmap_slots[i].group = seg_group`, D2 held).
+  **Implemented** (`isel.rs`, `compare_computed`, `compare_two_computed`,
+  `copy_repeated_constants`): both computed, and a variable held in a
+  data register against a computed value, as above; the copy of a
+  longword constant loaded right after the same one (a pass after
+  scheduling).  Refused: a variable in memory against a computed value
+  (above); an operand that calls (a function, M$ARITH, `min`/`max`: no
+  site sorted out); an operand held for a later reuse (12.4 R7:
+  PMAP_$PURIFIER_L above, and BAT_$ALLOCATE's widened left one), or
+  another such value live across the compare (0xE57ECC above; bead
+  domain-pascal-1mlp); an `if` whose `then` part starts by assigning the
+  compared variable the computed right operand (`if v > e then v := e`:
+  0xE0B552, 0xE0BD5A, 0xE18C8C reuse the register, `Selector::if_`); a
+  pointer against `addr(...)` or another computed pointer (the TIME_Q_
+  module-local 0xE16B70 at 0xE16BA6 `cmpa.l (12,A6),A0`, `cur = addr(elem)`: not
+  catalogued); computed booleans.  Golden
+  `control/compares_computed`; driver test
+  `unsettled_computed_compares_are_refused`; execution test
+  `tests/exec/computed_compares.pas`.  srcsurvey: HINT_$ADDU
+  byte-identical.
 - **Mixed widths and signs (Verified at the sites; survey; implemented,
   bead domain-pascal-aaj).**  Ref 4.3.1 p. 4-5 ("computes operands smaller
   than 32 bits with 32 bits of precision when necessary to achieve correct
@@ -6858,8 +6977,9 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   all of the above that is Verified, with `not`, `and then`, `or else`.
   A computed left operand (an expression, a function result, an array
   element's value) is compared in its register with `cmpi #c,Dn` (0xE1216E
-  `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`);
-  against 0 the branch reads the operation's flags, or `tst` comes first
+  `add.l D6,D7; cmpi.l #0x500,D7`) or `cmp.<s> x,Dn` (`compare_computed`),
+  or against another computed value `cmp.<s> Dr,Dn` ("Two computed
+  values" above; bead domain-pascal-o1v0); against 0 the branch reads the operation's flags, or `tst` comes first
   ("A computed value against 0" above; bead domain-pascal-qlzu).
   A function's result against a variable is refused outside the right
   operand of a plain `and`/`or` (formed as a boolean at all 14 sites,
@@ -6871,7 +6991,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   (`b = true`: compiled code tests booleans with `tst.b`, and has two
   `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
   a constant on the left of a comparison; the refusals of "Two
-  variables", "Mixed widths and signs" and "Records" above; unsigned
+  variables", "Two computed values", "Mixed widths and signs" and
+  "Records" above; unsigned
   ordering against 0; a test right
   after a load of its register at the test's size (above); an `if` with an empty `then`
   part; a `return` at the
@@ -11919,7 +12040,10 @@ the sites).**
     one arm of an `if`; 0xE43228 after `cmpi.l`.
   - 0xE60F52 (and 0xE60F4A) load the mask 16#FFFFF and AND memory into
     it, constant first.  0xE177A0 `moveq #-2,D2; and.w D1,D2` has the
-    same order.
+    same order.  The same mask loaded for the other operand of a compare
+    right after is copied instead, `move.l D0,D1` (7.1, "Two computed
+    values": 9 of 9 adjacent pairs; FILE_$UNLOCK_PROC 0xE60F4A, with an
+    instruction between, loads it again).
   - 0xE177AE is the eleventh: `move.l #0x400,D3; ...; cmp.l D3,D2`.
     - Its only other long use would be `0x400 - offset` at 0xE177C4,
       done as `move.w #0x400,D3` in the same register.

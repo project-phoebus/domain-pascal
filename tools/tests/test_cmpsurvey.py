@@ -273,3 +273,34 @@ class HeldTest(unittest.TestCase):
         self.assertEqual(cmpsurvey.held_form('held', 'reg:blk'), 'C')
         self.assertIsNone(cmpsurvey.held_form('wload', 'reg:held'))
         self.assertIsNone(cmpsurvey.held_form('load', 'mem'))
+
+
+class TwoComputedTest(unittest.TestCase):
+    def test_both_computed_left_first(self):
+        # MSG_$$SEND 0xE0DAE0..0xE0DAF8: the destination's sum first, D1
+        # its scratch register, then the source's.
+        ins = insns(['clrl %d0', 'movew %d6,%d1', 'movew %d2,%d0', 'extl %d1',
+                     'addl %d1,%d0', 'clrl %d1', 'movew %a0@(2),%d1', 'addil #256,%d1',
+                     'cmpl %d1,%d0', 'bles 0x200'])
+        self.assertEqual(cmpsurvey.two_sites(ins),
+                         [(0x110, 'l', 'd0', 'd1', 'two', 'dst-first', 'seq', 'ble')])
+
+    def test_interleaved_and_held(self):
+        # HINT_$ADDU 0xE49C26: the constant copied, the two `and's
+        # interleaved; PKT_$DUMP_DATA 0xE12812, D4 held.
+        ins = insns(['movel #1048575,%d0', 'movel %d0,%d1', 'andl %a2@(4),%d0',
+                     'andl %a3@(4),%d1', 'cmpl %d1,%d0', 'beqs 0x200',
+                     'clrl %d1', 'movew %d3,%d1', 'subql #1,%d1', 'cmpl %d1,%d4', 'bles 0x200'])
+        self.assertEqual(cmpsurvey.two_sites(ins), [
+            (0x108, 'l', 'd0', 'd1', 'two', 'dst-first', 'inter', 'beq'),
+            (0x112, 'l', 'd4', 'd1', 'held-dst', '-', '-', 'ble')])
+
+    def test_constant_copies(self):
+        ins = insns(['movel #1048575,%d0', 'movel %d0,%d1', 'andl %a2@(4),%d0',
+                     'andl %a3@(4),%d1',
+                     'movel #1048575,%d0', 'moveal %d3,%a0', 'movel #1048575,%d1',
+                     'andl %fp@(-28),%d0', 'andl %a0@(4),%d1',
+                     'moveq #1,%d1', 'moveq #1,%d0'])
+        self.assertEqual(cmpsurvey.kcopy_sites(ins), [
+            (0x100, 'l', 'copy', 'adj', 'andl andl'),
+            (0x108, 'l', 'twice', 'gap1', 'andl andl')])
