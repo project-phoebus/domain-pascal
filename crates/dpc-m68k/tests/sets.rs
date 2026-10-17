@@ -231,6 +231,48 @@ fn empty_set_tests() {
 }
 
 #[test]
+fn set_comparisons() {
+    // `=`/`<>` of register-sized sets: the integer comparison of their
+    // values (bead domain-pascal-2i6f).  `s * c1 = c2`: PROC1_$SET_PRIORITY
+    // 0xE152AC `moveq #11,D0; and.w (84,A4),D0; cmpi.w #8,D0; bne.s`; a
+    // set against a constant, `cmpi`; two intersections, SIO_$K_SET_PARAM
+    // 0xE680F6 `moveq; moveq; and.l; and.l; cmp.l D0,D1; beq.s` (the image
+    // has the left operand in D1, dpc in D0 as the integer 0xE49C2E: the
+    // register depends on the context and is not reproduced there).
+    assert_eq!(
+        body(
+            "procedure t(p: rp); options(val_param);
+             begin
+               if p^.w * [0, 1, 3] = [3] then gw := 1;
+               if p^.w2 <> [2, 4] then gw := 2;
+               if p^.l * [e00] <> p^.l2 * [e00] then gw := 3;
+             end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "moveq\t#0xb,%d0",
+            "and.w\t(%a0),%d0",
+            "cmpi.w\t#8,%d0",
+            "bne.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:",
+            "cmpi.w\t#0x14,(0x2e,%a0)",
+            "beq.s\t2f",
+            "move.w\t#2,(GW).l",
+            "2:",
+            "moveq\t#1,%d0",
+            "moveq\t#1,%d1",
+            "and.l\t(2,%a0),%d0",
+            "and.l\t(0x30,%a0),%d1",
+            "cmp.l\t%d1,%d0",
+            "beq.s\t3f",
+            "move.w\t#3,(GW).l",
+            "3:"
+        ]
+    );
+}
+
+#[test]
 fn membership() {
     // A constant set in a register (TTY_$K_SET_DELAY 0xE67A18..0xE67A1E).
     assert_eq!(
@@ -463,15 +505,24 @@ fn refusals() {
         "procedure t(p: rp; k: integer); options(val_param); begin p^.w := p^.w + [0..k] end;"
     )
     .contains("run-time range"));
-    // Set comparisons other than with `[]`.
-    assert!(
-        error("procedure t(p: rp); options(val_param); begin if p^.w = [1] then gw := 1 end;")
-            .contains("set comparison")
-    );
+    // Set comparisons with no site: subset, superset, a constant on the
+    // left, sets of more than a longword.
     assert!(error(
         "procedure t(p: rp); options(val_param); begin if p^.w <= p^.w2 then gw := 1 end;"
     )
-    .contains("set comparison"));
+    .contains("subset or superset"));
+    assert!(error(
+        "procedure t(p: rp); options(val_param); begin if p^.l >= [e01] then gw := 1 end;"
+    )
+    .contains("subset or superset"));
+    assert!(
+        error("procedure t(p: rp); options(val_param); begin if [1] = p^.w then gw := 1 end;")
+            .contains("constant left operand")
+    );
+    assert!(error(
+        "procedure t(p: rp); options(val_param); begin if p^.b64 = [1] then gw := 1 end;"
+    )
+    .contains("more than a longword"));
     // A union as a value.
     assert!(error(
         "procedure t(p: rp); options(val_param); begin gw := 0; p^.w2 := p^.w + p^.w2 end;"

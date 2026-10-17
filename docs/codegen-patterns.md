@@ -802,9 +802,10 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     scalar constants of 1, 2 or 4 bytes (integers, enumerations,
     booleans, characters) by address; cells laid out as above, labels
     `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
-    String constants only to a `univ` parameter (below).  Not yet: sets,
-    records, strings to other parameters, `nil` (no `nil` passed by
-    address is known); `lea (d,PC)`.  Conformance
+    String constants only to a `univ` parameter (below); set constants of
+    one word or one longword (below).  Not yet: other sets, records,
+    strings to other parameters, `nil` (no `nil` passed by address is
+    known); `lea (d,PC)`.  Conformance
     units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
     (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
     `pchist_interrupt.pas`, `file_set_len.pas`, `asknode_info.pas`,
@@ -914,6 +915,40 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     and `false` in ../source's reading), more evidence that a cell's
     identity is more than its bytes.  The constant 36 has a word cell
     (0xE3022A) and a longword one (0xE30044).
+  - **Set constants (Verified at the sites; implemented, bead
+    domain-pascal-2i6f).**  A set constant passed by address (ref 5.2,
+    Table 5-1: an `in` set parameter) is a cell of the set's size
+    holding its bit mask big-endian (ref 3.9.3 p. 3-16, Figure 3-6), in
+    the size group and order of the cells above.  Word sets: TERM_$READ
+    0xE66864 and 0xE66870 name 0xE66896 `0001` ([0]) and 0xE66898 `0000`
+    ([]), its two cells after its `rts` in first-use order, for
+    TTY_$K_GET's `tty_$flags16_t` options (../source term/read.pas);
+    TERM_$READ_COND 0xE668B0 names 0xE66896 again and TERM_$WRITE 0xE668F4
+    names 0xE66898 (TTY_$K_PUT, the same type: shared); ROUTE_$SHUTDOWN
+    0xE6A61A and 0xE6A63A, cells 0xE6A65A `0008` ([3]) and 0xE6A65C `0002`
+    ([1]); NET_IO_$CLEANUP_NIL 0xE74F0A, 0xE74F1C `0008` ([3]), named
+    again by NET_IO_$CLEANUP_USER 0xE74F68.  Longword sets: TERM_$INQUIRE's
+    twelve one-member masks for SIO_$K_INQ_PARAM, 0xE671AC `0000 0001`
+    ([0], first named at 0xE66FAE) to 0xE671D8 `0000 0010` ([4]), after
+    the routine's `rts` at 0xE671AA (../source term/inquire.pas).
+    **Uncertain: sharing across types.**  `dpc` keys a set cell by the
+    set type, as the scalar cells by theirs, but in ../source's readings
+    set cells are shared with constants of other types: TERM_$CONTROL
+    names TERM_$READ's 0xE66898 and 0xE66896 for enumeration constants
+    (tty_$func_erase and tty_$if_echo, 0; tty_$of_nl_to_crnl and
+    tty_$if_ixoff, 1; ../source term/control.pas), and DIR_$DROPU 0xE516D2
+    passes its [] as 0xE50C5A, dir_$do_op_add_bak's `0000` cell for
+    ACL_$RIGHTS' option word (an `integer` in ../source).  Either ../source's
+    types are not the original's or the cell key is not the type (the
+    bytes and the constant's size would fit these and LOG_$INIT's pair
+    above): bead domain-pascal-r9sv.  So the type key contradicts
+    DIR_$DROPU in ../source's reading: `dpc` emits a `0000` cell of its
+    own after DIR_$DROPU's `rts` (0xE516FA) where the image names
+    dir_$do_op_add_bak's 0xE50C5A.  Accepted for now, consistent with the
+    scalar cells.  Refused (no site known): a one-byte
+    set (`[byte] set of 0..7`) and sets of more than a longword.  `dpc`:
+    `dpc-ir` `pool_const`; golden `sets/set_compares`; exec test
+    `set_compares`.
 - **Expression by address (Verified at the sites; implemented).**  A
   non-variable, non-constant actual passed by address is first stored in a
   frame temporary, and that temporary's address is pushed, right where
@@ -3004,7 +3039,9 @@ this pair.
   operand is its bit mask in an immediate (`move.l #0x1ffef,(0x20,A0)`,
   TTY_$I_INIT 0xE33290; `moveq #0x1f,D1`, TTY_$K_SET_DELAY 0xE67A1A);
   larger constant sets used by `in` are cells in the code, reached with
-  `lea (d,PC)` (UNMAP_CASE 0xE54170, NAME_$INIT 0xE31842).
+  `lea (d,PC)` (UNMAP_CASE 0xE54170, NAME_$INIT 0xE31842).  A set
+  constant passed by address is a code-section cell like any constant
+  (1.5, "Set constants").
 
 #### Set operators (survey Verified; implemented, bead domain-pascal-7qo)
 
@@ -3100,8 +3137,64 @@ model run against the bit model of Figure 3-6).
   (-0x1e,A6)`).  `s <> []` / `s = []`: `tst` of the set (TTY_$K_GET
   0xE1C5D4 `tst.w (10,A2)`); of an intersection or difference, the flags
   of its `and` (0xE1BFFE `...; and.w (8,A2),D1; beq.s`; 0xE3FACC).
-  Other set comparisons (`=` with a non-empty set, `<=`, `>=`) have no
-  catalogued site: refused.
+  Other comparisons: next item.
+- **Set comparisons `=`, `<>` (Verified at the sites below; implemented,
+  bead domain-pascal-2i6f).**  Ref "Set Operations", p. 4-176: `=` is
+  true when both sets hold the same members.  A register-sized set is
+  compared as the integer it is, with the integer comparison's code
+  (7.1): the left operand's value in a data register, then `cmpi #mask`
+  against a constant, `cmp Dr,Dl` against a run-time right operand.  The
+  sites, all from ../source's Pascal (sets in its reading; the image
+  cannot show a type):
+  - `s * c1 = c2`, a word: PROC1_$SET_PRIORITY 0xE152AC..0xE152B6 and
+    PROC1_$INIT 0xE2F9A8..0xE2F9B2 `moveq #11,D0; and.w (84,An),D0;
+    cmpi.w #8,D0; bne.s` (`flags * [waiting, suspended, bound] =
+    [bound]`, ../source proc1/set_priority.pas, proc1/init.pas); as a
+    value, OS_$INIT 0xE339EC..0xE33A12 `move.w (-34,A6),D0; ...; andi.w
+    #-0x7ffc,D0; ...; cmpi.w #4,D0; seq D0; move.b D0,(-0x1f0,A6)`
+    (`boot.flags * [2, 15] = [2]`, os/init.pas, scheduled among another
+    statement's instructions);
+  - a held set against a constant: RING_$SENDP 0xE75C38 `cmpi.w
+    #0x14,D7; bne.s` (`hw_status = [2, 4]`, ring/sendp.pas);
+  - two run-time sets: SIO_$K_SET_PARAM 0xE680F6..0xE68102 `moveq #1,D1;
+    moveq #1,D0; and.l (-24,A6),D1; and.l (A2),D0; cmp.l D0,D1; beq.s`
+    (`copy.flags1 * [0] <> params.flags1 * [0]`, sio/k_set_param.pas),
+    7 times in the routine (0xE68100, 0xE68128, 0xE68152, 0xE6817C,
+    0xE681A6, 0xE681D0, 0xE681FA), the right operand's register (D0)
+    reused by the statement after (`(copy.flags1 - [0]) + (params.flags1
+    * [0])`, 0xE68104 `moveq #-2,D1; and.l (-24,A6),D1; or.l D1,D0`).
+    The left operand is in D1 there; `dpc` puts it in D0, as the integer
+    0xE49C2E below does: the register depends on the context and is not
+    reproduced at SIO's sites;
+  - two set variables (Verified at one site): SIO_$K_SET_PARAM 0xE682DC
+    `move.l (8,A2),D1; cmp.l (-0x10,A6),D1; bne.s` (`params.break_mask =
+    copy.break_mask`, sio/k_set_param.pas:219), the left operand loaded,
+    the right compared from memory (the register may differ by context).
+  Image survey (`tmp`-only scripts over `a5survey.reached` routines, not
+  kept): 17 `and; and; cmp.l Dm,Dn` (SIO's 7, the rest UID node masks in
+  ../source's reading, e.g. 0xE49C2E `and.l (4,A2),D0; and.l (4,A3),D1;
+  cmp.l D1,D0`, left operand in D0), 21 `and`/`andi` then `cmpi` on the
+  register (0xE0C196..0xE0C19E `move.w (6,A1),D0; andi.w #-0x100,D0;
+  cmpi.w #0x1e00,D0`, type not known).  Of the `&` of a memory operand
+  and a constant `moveq` cannot load followed by a compare, 14 load the
+  constant first and 5 load the operand and `andi` (OS_$INIT's is a
+  sixth): `dpc` keeps section 8's majority form (constant first), so
+  OS_$INIT's `andi` is not reproduced (Uncertain, as in 8).
+  **Uncertain:** a set in memory against a constant has no set site; it
+  is taken from the integer comparison, `cmpi #mask,<ea>` with no load
+  (0xE4FE90 `cmpi.w #4,(18,A6)`, 0xE58624 `cmpi.l #0x230001,(A0)`,
+  0xE4BAE0 `cmpi.l #0x400,(16,A3)`), as `tst <ea>` is for `[]` (TTY_$K_GET
+  0xE1C5D4 `tst.w (10,A2)`).  **Refused** (specific messages): sets of more than a
+  longword (776 `cmpm` in compiled code, 773 `cmpm.l`, mostly UID pairs:
+  no set's identified; MSG_$CLOSEI's `tst.l (A1)+` per longword for
+  `[]`), subset `<=` and superset `>=` (no site known: `s <= t` would be
+  `s - t = []`, whose code, above, cannot be told from a difference
+  tested for `[]`), a constant left operand (`[2] = s`: no site), and a
+  one-byte set, on either side, against anything but `[]` (a word set
+  or a constant: no site).  `dpc`: `dpc-ir`
+  `lower.rs` `set_compare`; golden `sets/set_compares`; exec test
+  `set_compares`; `crates/dpc-m68k/tests/sets.rs` `set_comparisons`,
+  `refusals`.
 - **`x in c`, a constant register-sized set (Verified):** the element,
   then the constant in a register, `btst Dk,Dn` (TTY_$K_SET_DELAY
   0xE67A18..0xE67A1E `move.w (A2),D0; moveq #0x1f,D1; btst D0,D1;

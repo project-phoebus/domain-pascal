@@ -2138,7 +2138,7 @@ end;
     assert!(e[0].contains("a variable is needed"), "{e:?}");
     let e = errs(
         "module m;
-type s = set of 0..15;
+type s = set of 0..63;
 procedure q(in v: s); extern;
 procedure p;
 begin
@@ -2147,7 +2147,25 @@ end;
 ",
     );
     assert!(
-        e[0].ends_with("a 2-byte set constant passed by address is not supported yet"),
+        e[0].ends_with(
+            "a 8-byte set constant passed by address (no site known) is not supported yet"
+        ),
+        "{e:?}"
+    );
+    let e = errs(
+        "module m;
+type s = [byte] set of 0..7;
+procedure q(in v: s); extern;
+procedure p;
+begin
+  q([1]);
+end;
+",
+    );
+    assert!(
+        e[0].ends_with(
+            "a 1-byte set constant passed by address (no site known) is not supported yet"
+        ),
         "{e:?}"
     );
     let e = errs(

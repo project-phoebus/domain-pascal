@@ -4098,16 +4098,47 @@ fn covers(p: &Program, ty: TypeId, size: u32) -> bool {
     }
 }
 
-/// `s = []` and `s <> []` (ref "Set Operations", p. 4-176) for a
-/// register-sized set: the set's value against 0.  Image: `tst.w` of a
-/// set variable (TTY_$K_GET 0xE1C5D4 `tst.w (10,A2); beq`), the flags of
-/// the `and` for an intersection or a difference (TTY 0xE1BFFE `moveq
-/// #7,D1; and.w (8,A2),D1; beq.s`; PROC2_$SIGPAUSE 0xE3FAC6 `move.l
-/// (-108,A4),D1; not.l D1; and.l (-100,A4),D1; beq.s`).  Other set
-/// comparisons (`=` with a non-empty set, subset `<=`, superset `>=`) are
-/// not catalogued.
+/// `s = t` and `s <> t` (ref "Set Operations", p. 4-176) for a
+/// register-sized set: the two sets' values compared as integers of the
+/// set's size (codegen-patterns 5.1, "Set comparisons"; bead
+/// domain-pascal-2i6f).
+///
+/// - `s = []`, `s <> []`: the set's value against 0, `tst` of a set
+///   variable (TTY_$K_GET 0xE1C5D4 `tst.w (10,A2); beq`), the flags of the
+///   `and` for an intersection or a difference (TTY 0xE1BFFE `moveq
+///   #7,D1; and.w (8,A2),D1; beq.s`; PROC2_$SIGPAUSE 0xE3FAC6 `move.l
+///   (-108,A4),D1; not.l D1; and.l (-100,A4),D1; beq.s`).
+/// - Against a non-empty constant: `cmpi #mask` on the left operand's
+///   value: PROC1_$SET_PRIORITY 0xE152AC..0xE152B6 and PROC1_$INIT
+///   0xE2F9A8..0xE2F9B2 `moveq #11,D0; and.w (84,An),D0; cmpi.w #8,D0;
+///   bne.s` (`flags * [0, 1, 3] = [3]` in ../source's reading); OS_$INIT
+///   0xE339EC..0xE33A10 `move.w (-34,A6),D0; andi.w #-0x7ffc,D0; ...;
+///   cmpi.w #4,D0; seq D0` (`boot.flags * [2, 15] = [2]` as a value);
+///   RING_$SENDP 0xE75C38 `cmpi.w #0x14,D7; bne.s` (a held set, `= [2,
+///   4]`).
+/// - Two run-time sets: `cmp Dr,Dl`, the left operand's value in Dl:
+///   SIO_$K_SET_PARAM 0xE680F6..0xE68102 `moveq #1,D1; moveq #1,D0; and.l
+///   (-24,A6),D1; and.l (A2),D0; cmp.l D0,D1; beq.s` (`copy.flags1 * [0]
+///   <> params.flags1 * [0]`, 7 times in that routine; the image has the
+///   left operand in D1, `dpc` in D0, as 0xE49C2E's integer `and.l; and.l;
+///   cmp.l D1,D0`: the register depends on the context, not reproduced
+///   there); two set variables, SIO_$K_SET_PARAM 0xE682DC `move.l
+///   (8,A2),D1; cmp.l (-0x10,A6),D1; bne.s` (`params.break_mask =
+///   copy.break_mask`; the register may differ by context).
+/// - **Uncertain:** a set in memory against a constant, `cmpi #mask,<ea>`
+///   with no load, has no set site; it is the integer comparison's form
+///   (0xE4FE90 `cmpi.w #4,(18,A6)`, 0xE58624 `cmpi.l #0x230001,(A0)`,
+///   0xE4BAE0 `cmpi.l #0x400,(16,A3)`), as `tst <ea>` is for `[]`
+///   (TTY_$K_GET 0xE1C5D4).
+///
+/// In each the code is the integer comparison's (codegen-patterns 7.1),
+/// and `dpc` lowers the set comparison as one.  Refused: a set of more
+/// than a longword (no `cmpm` loop of a set identified), subset `<=` and
+/// superset `>=` (no site known: the image cannot tell `s - t = []` from
+/// `s <= t`), a constant left operand, and a one-byte set against
+/// anything but `[]` (no site).
 fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
-    if p.types.size(lhs.ty) > 4 {
+    if p.types.size(lhs.ty) > 4 || p.types.size(rhs.ty) > 4 {
         // MSG_$CLOSEI 0xE59490..0xE5949C: `tst.l (A1)+; bne` per longword.
         return Err(unsupported(
             e.span,
@@ -4115,28 +4146,65 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
              codegen-patterns 5.1) is",
         ));
     }
-    let empty = |x: &SExpr| matches!(&x.value, Some(ConstValue::Set(m)) if m.is_empty());
-    if !matches!(rel, Rel::Eq | Rel::Ne) || !empty(rhs) || lhs.value.is_some() {
+    if !matches!(rel, Rel::Eq | Rel::Ne) {
         return Err(unsupported(
             e.span,
-            "a set comparison other than `s = []` / `s <> []` is",
+            "a set subset or superset comparison (`<=`, `>=`: no site known, \
+             codegen-patterns 5.1) is",
         ));
     }
-    let x = lhs;
-    let ty = match scalar_of(p, x)? {
+    if lhs.value.is_some() {
+        return Err(unsupported(
+            e.span,
+            "a set comparison with a constant left operand (no site known, \
+             codegen-patterns 5.1) is",
+        ));
+    }
+    let empty = |x: &SExpr| matches!(&x.value, Some(ConstValue::Set(m)) if m.is_empty());
+    // A one-byte set against anything but `[]`, on either side (against a
+    // word set too, which `set_value` would widen it for): no site.
+    let byte_set = |x: &SExpr| x.value.is_none() && p.types.size(x.ty) == 1;
+    if (byte_set(lhs) || byte_set(rhs)) && !empty(rhs) {
+        return Err(unsupported(
+            e.span,
+            "comparing a one-byte set with a set other than `[]` (no site known, \
+             codegen-patterns 5.1) is",
+        ));
+    }
+    // The operation's type: the left operand's, or a wider run-time right
+    // operand's (a constructor's own type is sized by its high end, ref
+    // 3.9.3 p. 3-16; [`set_value`]).
+    let base = if rhs.value.is_none() && p.types.size(rhs.ty) > p.types.size(lhs.ty) {
+        rhs
+    } else {
+        lhs
+    };
+    let ty = match scalar_of(p, base)? {
         // A one-byte set compared with `[]`: widened to a word and
         // tested there, acl_$prim_create_internal 0xE45270..0xE45278
         // `clr.w D1; move.b (27,A4),D1; tst.w D1; beq.s` (`prot.
         // world_rights <> []`, ../source's reading; codegen-patterns 5.1,
         // "One-byte sets"; the only site).
-        t if t.width == Width::Byte => Scalar::unsigned(Width::Word),
+        t if t.width == Width::Byte && empty(rhs) => Scalar::unsigned(Width::Word),
+        t if t.width == Width::Byte => {
+            return Err(unsupported(
+                e.span,
+                "comparing a one-byte set with a set other than `[]` (no site known, \
+                 codegen-patterns 5.1) is",
+            ))
+        }
         t => t,
     };
-    let l = set_value(p, x, ty)?;
+    let l = set_value(p, lhs, ty)?;
+    let r = if empty(rhs) {
+        Expr::Const { value: 0, ty }
+    } else {
+        set_value(p, rhs, ty)?
+    };
     Ok(Cond::Compare {
         op: rel,
         lhs: l,
-        rhs: Expr::Const { value: 0, ty },
+        rhs: r,
     })
 }
 
@@ -5066,6 +5134,38 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         return Ok(PoolConst { bytes, key: ty.0 });
     }
     let size = p.types.size(ty);
+    if let (ConstValue::Set(_), TypeKind::Set { .. }) = (v, p.types.kind(ty)) {
+        // A set constant: its bit mask big-endian in the set's size (ref
+        // 3.9.3 p. 3-16, Figure 3-6), in the size group of a scalar cell
+        // of that size (codegen-patterns 1.5, "Set constants"; bead
+        // domain-pascal-2i6f).  Word sets: TERM_$READ 0xE66864/0xE66870
+        // `pea (d,PC)` of 0xE66896 `0001` ([0]) and 0xE66898 `0000` ([]),
+        // TTY_$K_GET's options; ROUTE_$SHUTDOWN 0xE6A61A/0xE6A63A, 0xE6A65A
+        // `0008` ([3]) and 0xE6A65C `0002` ([1]); NET_IO_$CLEANUP_NIL
+        // 0xE74F0A, 0xE74F1C `0008`.  Longword sets: TERM_$INQUIRE's twelve
+        // one-member masks for SIO_$K_INQ_PARAM, 0xE671AC `0000 0001` ([0])
+        // .. 0xE671D8 `0000 0010` ([4]), first named at 0xE66FAE (../source's
+        // reading of the types).  A one-byte set (`[byte] set of 0..7`)
+        // and sets of more than a longword: no site known.
+        let width = match Width::of_size(size) {
+            Some(w @ (Width::Word | Width::Long)) => w,
+            _ => {
+                return Err(unsupported(
+                    span,
+                    format!("a {size}-byte set constant passed by address (no site known) is"),
+                ))
+            }
+        };
+        let Expr::Const { value, .. } = const_of(v, Scalar::unsigned(width), span)? else {
+            unreachable!("const_of gives a constant")
+        };
+        let be = (value as u32).to_be_bytes();
+        let bytes = match width {
+            Width::Word => be[2..].to_vec(),
+            _ => be.to_vec(),
+        };
+        return Ok(PoolConst { bytes, key: ty.0 });
+    }
     let width = match Width::of_size(size) {
         Some(w) if v.ordinal().is_some() => w,
         _ if *v == ConstValue::Nil => {

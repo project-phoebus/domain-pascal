@@ -210,7 +210,20 @@ fn refusals() {
     );
     r(
         "procedure t(p: rp); options(val_param); begin if p^.a = p^.b then gn := 1 end;",
-        "a set comparison other than",
+        "comparing a one-byte set with a set other than `[]`",
+    );
+    // ... against a word set, on either side, and against a constant.
+    r(
+        "procedure t(p: rp); options(val_param); begin if p^.a <> p^.w then gn := 1 end;",
+        "comparing a one-byte set with a set other than `[]`",
+    );
+    r(
+        "procedure t(p: rp); options(val_param); begin if p^.w * [1, 2] = p^.a then gn := 1 end;",
+        "comparing a one-byte set with a set other than `[]`",
+    );
+    r(
+        "procedure t(p: rp); options(val_param); begin if p^.a = [1] then gn := 1 end;",
+        "comparing a one-byte set with a set other than `[]`",
     );
     // A one-byte set held in a register, less another (`move.b; not.b;
     // and.b`: no site).
