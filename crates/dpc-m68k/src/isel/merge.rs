@@ -226,6 +226,11 @@ struct Ctx<'f> {
     /// Register-held locals ([`register_locals`]): a store to one writes
     /// no memory.
     held: Vec<i32>,
+    /// The slots of the by-value parameters: a store to one is to the
+    /// parameter's register when it is loaded at entry, and no site
+    /// settles a run of stores to slots (codegen-patterns 12.2, "Assigned
+    /// parameters"): never part of a run.
+    params: Vec<i32>,
     /// The frame objects known to be scalars, as (offset, bytes): the
     /// scalar locals, the function result variable, the copies of value
     /// parameters and the objects nested routines reach of 4 bytes or
@@ -255,6 +260,7 @@ impl<'f> Ctx<'f> {
             f,
             merge,
             held,
+            params: f.value_params.iter().map(|p| p.offset).collect(),
             scalars,
         }
     }
@@ -291,7 +297,8 @@ impl<'f> Ctx<'f> {
     fn mem_store<'a>(&self, st: &'a Stmt) -> Option<(&'a Addr, &'a Expr)> {
         match &st.kind {
             StmtKind::Store { addr, value } => {
-                if matches!(addr, Addr::Frame(o) if self.held.contains(o)) {
+                if matches!(addr, Addr::Frame(o) if self.held.contains(o) || self.params.contains(o))
+                {
                     None
                 } else {
                     Some((addr, value))

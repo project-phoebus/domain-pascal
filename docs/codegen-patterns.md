@@ -10437,6 +10437,96 @@ kinds from the C in `../source/domain_os`.
   one-statement function, loads its parameter into D0 and doubles it in
   place (`add.w D0,D0`): an operand of arithmetic is not copied.
   **Uncertain:** why an index is and an operand is not.
+- *Assigned parameters* (`x := ...` for a by-value parameter `x`; bead
+  domain-pascal-jyba; Verified at the sites below, survey counts by an
+  ad-hoc script over `tools/nestsurvey.py`'s routines, not kept).  A
+  value parameter passed by address (the default convention) is assigned
+  in its copy (section 1.2); an `in` parameter cannot be assigned (ref
+  5.3.2 p. 5-7; `dpc-sema`).  A parameter passed by value lives where the
+  rules above put it, and an assignment does not move it:
+  - **loaded at entry: assigned in that register**, as a register-held
+    local is (12.5), and read from it after.  The 14 assignments of
+    `../source`'s Pascal that `dpc` refused (srcsurvey at `../source`
+    baa985bd), 13 of them parameters loaded at entry: `x := x op c` in
+    place (mst_$set_mstes 0xE43E36 `ori.w #2,D0`; NETBUF_$RTN_PKT
+    0xE0F10A `subi.w #0x400,D2` in a loop; pacct_$compress 0xE5A9F2
+    `addq.l #1,D0`), `x := x op y` (MMAP_$ALLOC_PURE 0xE0D7F0 `sub.w
+    D6,D2`; ast_$allocate_pages 0xE00D82 `sub.w D0,D2; beq.w`, the test
+    on the operation's flags, 7.1; PKT_$DAT_COPY 0xE128A8 `add.l D2,D4`),
+    a constant (audit_$log_link_op 0xE4BD7C `clr.w D2`; RIP_$UPDATE_INT
+    0xE1594A `moveq #0x11,D0`; tty_$i_calc_column 0xE1B500 `clr.w D2`),
+    `min` as a select (MSG_$$RCV_INTERNAL 0xE5961C `cmp.w (2,A2),D2; bls;
+    move.w (2,A2),D2`), and **a value computed from the parameter itself
+    is computed in its register, without a copy** (area_$internal_create
+    0xE077FE `addi.l #0x7fff,D2; andi.l #-0x8000,D2`; PROC1_$ALLOC_STACK
+    0xE15040 `addi.w #0x3ff,D2; andi.w #-0x400,D2`; tty_$i_calc_column
+    0xE1B4DE `andi.l #0xffff,D2; addq.l #7,D2; lsr.l #3,D2; lsl.l #3,D2`,
+    the widening in place; pacct_$compress 0xE5A9E4 `lsr.l #3,D0`), a
+    narrowed operation at the parameter's width (tty_$i_rcv 0xE1B966
+    `andi.b #0x7f,D3` for `ch := chr(ord(ch) & 16#7F)`).  Computing in a
+    copy and moving back is rare in compiled code: 6 sequences `move
+    Dm,Dn; <op> Dn; move Dn,Dm` in all of it, none of them such an
+    assignment.
+  - **in its slot: assigned there, as a frame object is.**  Only 8
+    stores to a by-value parameter's slot in compiled code, none an
+    in-place update (frame locals: 238 `addq`/`subq`/`addi`/`subi`/
+    `andi`/`ori`/`eori` to `(-d,A6)`, no load, operation and store back;
+    `dpc` updates a slot the same way): area_$resize 0xE0883C..0xE0884C
+    `move.l (0xe,A6),D0; addi.l #0x7fff,D0; andi.l #-0x8000,D0; move.l
+    D0,(0xe,A6)` and 0xE08850..0xE0885E (the 14th site: read by its
+    nested routine, 0xE087C4 `move.l (0xe,A2),D2`); AST_$GET_SEG_MAP
+    0xE06BC6 `clr.l (0x10,A6)` (only pushed, 0xE06BD2).  The others are
+    parameters the rules above would load at entry, in routines that save
+    most of D2-D7: area_$alloc_resources 0xE07600 `move.w D1,(8,A6)`,
+    AREA_$INVALIDATE 0xE08EEA, AST_$TRUNCATE 0xE05C7A `clr.l (0xc,A6)`,
+    DISK_$ADD_QUE 0xE3C790 (a pointer), and AST_$PURIFY 0xE05B28 `move.w
+    D5,(0xc,A6)`, which holds the parameter in D5, changes it there
+    (0xE05AA8 `andi.w #0x7fff,D5`) and stores it back before passing the
+    slot by address (0xE05B36 `pea (0xc,A6)`).  **Not settled** (bead
+    domain-pascal-r0ag).
+  - *Working hypothesis (Uncertain; 13 sites against 3, review of bead
+    domain-pascal-jyba):* each of the 13 parameters held in the entry
+    register has an assignment whose value reads the parameter (`x :=
+    f(x)`, `min(x, y)`, `chr(ord(x) & c)`) or a clamp, `if x relop c then
+    x := c` (0xE4BD78, 0xE1594A); none of the three kept in the slot
+    where the entry-load rules would load them has one
+    (area_$alloc_resources 0xE07600 `count := maxe - first`, read back
+    from the slot at 0xE07604, 0xE0772E; AST_$TRUNCATE 0xE05C7A `loc :=
+    0` under a test of another parameter, slot reads 0xE05C7E, 0xE05C98;
+    AREA_$INVALIDATE 0xE08EEA `off := mx & 16#1F`).  Register pressure
+    (all three save most of D2-D7) is not excluded.  **Counterexample
+    found:** vtoc_$fm_traverse (nested, 0xE397D0; ../source
+    vtoc/lookup_fm.pas) loads `hint` into D2 at entry (0xE397E0) and
+    assigns it there only from other values (0xE3997A `move.l
+    (-0x14,A2),D2`, 0xE3998C `clr.l D2`, 0xE399AC `move.l (A1),D2`),
+    saving D2-D7 too.  So the class "no assignment reads it or clamps
+    it" holds both forms (1 in the register, 3 in the slot) and what
+    decides is not known: `dpc` refuses a parameter loaded at entry whose
+    assignments do neither (bead domain-pascal-r0ag).
+
+  **Implemented** (`isel.rs`, `Selector::entry_loads`, `store`,
+  `store_web`, `take_consumed`, `check_slot_param_store`): a parameter
+  loaded at entry that the body assigns keeps the entry load's register
+  as a web (12.5) for the whole body: every assignment writes it, in
+  place for the forms above, a value read from the parameter once and
+  starting with its copy computed in the register itself, other values
+  computed apart and moved (as for a local; not seen); a test right
+  after such an assignment's `move` reads its flags, as for a local
+  (7.1, "Flags of a load").  One in its slot (read by a nested routine,
+  only pushed) is stored as a frame object.  A store to a parameter is
+  never part of a run of adjacent stores (13, "Store merging"; no site).
+  Refused: a parameter loaded at entry none of whose assignments reads
+  it or clamps it (the working hypothesis above,
+  `assigned_from_itself_or_clamped`), a pointer parameter loaded at entry (none held in a register
+  is seen assigned), a parameter whose slot is passed by address or
+  taken with `addr` (AST_$PURIFY), one the routine never reads, an
+  assignment in a body of one simple statement, to part of a parameter,
+  or to an enclosing routine's parameter (none seen).  Not reproduced:
+  the parameters the original leaves in their slots (above), and the
+  in-place computation for register-held locals (`dpc` copies, bead
+  domain-pascal-jfr6).  Golden `tests/golden/params/assigned`; exec test
+  `param_assign` (the caller's variable unchanged, both conventions);
+  driver test `params.rs` `assigned_by_value_parameters`.
 
 **Implemented** (`crates/dpc-m68k/src/isel.rs`, `select_body`,
 `Selector::entry_loads`): a *procedure* body of two or more statements,
@@ -10511,7 +10601,8 @@ in D0.  A pointer parameter also used as an integer is held in a data
 register ("Pointers in data registers" below).  Reported as not
 supported yet: storing
 a parameter that was not loaded at entry (one-statement bodies);
-assigning to a parameter; in a body with branches, a parameter whose
+assigning to a parameter in the shapes "Assigned parameters" above
+refuses; in a body with branches, a parameter whose
 last use is an argument of a call that lies on every path after a join,
 or a pointer parameter held in a data register whose last use is one
 (12.4 R4(c); beads domain-pascal-cs2n, -b3wz).  Otherwise a parameter

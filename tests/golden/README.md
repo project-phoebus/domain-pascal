@@ -672,6 +672,17 @@ Tests:
   the parameter passed on by address (`move.l (d,A6),-(SP)`, `pea
   (k,An)`); a field stored, `lea (k,An),Am; move.l Am,<dst>`.  Under
   `val_param` an `in` integer32's slot: `pea (d,A6)`, `lea (d,A6),An`.
+- `params/assigned` - codegen-patterns 12.2 ("Assigned parameters"), 12.5
+  (bead domain-pascal-jyba): by-value parameters assigned in the register
+  of their entry load: in place (mst_$set_mstes 0xE43E36 `ori.w #2,D0`;
+  MMAP_$ALLOC_PURE 0xE0D7F0 `sub.w D6,D2`), constants (0xE4BD7C,
+  0xE1594A), `min` (0xE5961C), a computation from the parameter made in
+  its register (area_$internal_create 0xE077FE; PROC1_$ALLOC_STACK
+  0xE15040 and its `subi.w #0x400,D2; bne`, 0xE150EA; pacct_$compress
+  0xE5A9E4), a narrowed `&` at the character's width (tty_$i_rcv
+  0xE1B966 `andi.b #0x7f,D3`); in their slots: read by a nested routine
+  (area_$resize 0xE0883C..0xE0884C), only pushed (AST_$GET_SEG_MAP
+  0xE06BC6 `clr.l (0x10,A6)`).
 - `params/subrange_var_args` - codegen-patterns 1.2, 13, 12.5 (bead
   domain-pascal-4tm; reference-clarifications Q38): an integer subrange
   and an integer type of the same size passed to each other's `var`,

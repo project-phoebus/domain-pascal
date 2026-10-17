@@ -242,3 +242,145 @@ end;",
         ]
     );
 }
+
+/// Assignments to by-value parameters (codegen-patterns 12.2, "Assigned
+/// parameters"; bead domain-pascal-jyba): loaded at entry, the parameter
+/// is assigned in its register (mst_$set_mstes 0xE43E36 `ori.w #2,D0`),
+/// a computation from itself made in it (area_$internal_create 0xE077FE);
+/// the shapes no site settles are refused.
+#[test]
+fn assigned_by_value_parameters() {
+    let lines = routine(
+        "procedure t(w: integer); options(val_param);
+begin
+  w := w ! 2;
+  ext_$w(w);
+  w := (w + 16#7FFF) & 16#FF;
+  ext_$w(w);
+end;",
+    );
+    assert_eq!(lines[1..3], ["move.l %d2,-(%sp)", "move.w (8,%fp),%d2"]);
+    assert!(
+        lines.contains(&"ori.w #2,%d2".to_string())
+            && lines.contains(&"addi.w #0x7fff,%d2".to_string())
+            && lines.contains(&"andi.w #0xff,%d2".to_string()),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains(",(8,%fp)")), "{lines:?}");
+    let cases = [
+        (
+            "procedure t(w: integer); options(val_param);
+begin
+  w := 1;
+end;",
+            "assigning to a by-value parameter in a body of one simple statement",
+        ),
+        (
+            "procedure t(w: integer); options(val_param);
+begin
+  w := 1;
+  ext_$w(2);
+end;",
+            "assigning to a by-value parameter the routine never reads",
+        ),
+        (
+            "procedure ext_$v(var w: integer); extern;
+procedure t(w: integer); options(val_param);
+begin
+  ext_$v(w);
+  w := w + 1;
+  ext_$w(w);
+end;",
+            "assigning to a by-value parameter whose slot is passed by address",
+        ),
+        (
+            "type ip = ^integer;
+procedure t(p: ip); options(val_param);
+begin
+  ext_$w(p^);
+  p := nil;
+  ext_$w(p^);
+end;",
+            "assigning to a pointer parameter loaded at entry",
+        ),
+        (
+            "procedure t(w: integer); options(val_param);
+  procedure n;
+  begin
+    w := 0;
+  end;
+begin
+  n;
+  ext_$w(w);
+end;",
+            "assigning to an enclosing routine's parameter",
+        ),
+        // The original keeps these in their slots where the entry-load
+        // rules would load them (bead domain-pascal-r0ag): no assignment
+        // reads the parameter or clamps it.  Like area_$alloc_resources
+        // 0xE07600 (`move.w D1,(8,A6)`, read back at 0xE07604, 0xE0772E).
+        (
+            "type pinteger = 0..65535;
+var gw, maxe, nfree: pinteger;
+procedure ext_$b; extern;
+function t(count: pinteger): boolean; options(val_param);
+var first, last: pinteger;
+begin
+  first := gw;
+  if first >= maxe then
+    t := false
+  else begin
+    t := true;
+    if count + first > maxe then
+      count := maxe - first;
+    last := count + first;
+    ext_$w(last);
+    ext_$b;
+    nfree := nfree + count;
+  end;
+end;",
+            "none of whose assignments reads it or clamps it",
+        ),
+        // Like AST_$TRUNCATE 0xE05C7A (`clr.l (0xc,A6)`, read from the
+        // slot at 0xE05C7E, 0xE05C98).
+        (
+            "var g: integer32;
+procedure ext_$b; extern;
+procedure t(loc: integer32; flags: integer); options(val_param);
+var full: boolean;
+begin
+  full := (flags & 1) <> 0;
+  if full then
+    loc := 0;
+  g := loc;
+  ext_$b;
+  g := loc;
+end;",
+            "none of whose assignments reads it or clamps it",
+        ),
+        // Like AREA_$INVALIDATE 0xE08EEA (`move.w D2,(0xe,A6)`, read from
+        // the slot after).
+        (
+            "type pinteger = 0..65535;
+var g: integer32;
+procedure ext_$b; extern;
+procedure t(seg: pinteger; off: pinteger; mx: integer32); options(val_param);
+var start: integer32;
+begin
+  ext_$b;
+  ext_$b;
+  start := seg * 32 + off;
+  if start > mx then
+    off := mx & 16#1F;
+  if off <> 0 then
+    g := start;
+  g := off;
+end;",
+            "none of whose assignments reads it or clamps it",
+        ),
+    ];
+    for (src, want) in cases {
+        let e = error(src);
+        assert!(e.contains(want), "{src}\n{e}");
+    }
+}

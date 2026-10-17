@@ -6,9 +6,9 @@
   char (KBD_$RCV's nested 0xE1CC64), a `for' bounded by one (DBUF_$UPDATE_VOL
   0xE3AAA2), a `while' and a `repeat' stepping by one.  Not expressed
   (refused by dpc for reasons of their own): a parameter compared with
-  another or with a variable in memory, a `for' from a parameter,
-  assigning to a parameter, a parameter assigned to the result of a
-  one-statement function (bead domain-pascal-0zo8).
+  another or with a variable in memory, a `for' from a parameter, a
+  parameter assigned to the result of a one-statement function (bead
+  domain-pascal-0zo8).  Assigning to a parameter: tests/exec/param_assign.pas.
 
   call: ONE_STMT_PARAMS_$ENABLE @l:0 b:65 b:255
   call: ONE_STMT_PARAMS_$ENABLE @l:0 b:65 b:0

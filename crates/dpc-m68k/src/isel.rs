@@ -491,6 +491,21 @@ fn select_body_with(
     s.uplevel = f.uplevel_refs.clone();
     s.escaped = escaped_frame_objects(f);
     s.address_slots = f.address_params.clone();
+    s.assigned_params = assigned_params(f);
+    s.partial_params = partly_read_params(f);
+    s.unread_assigned = s
+        .assigned_params
+        .iter()
+        .copied()
+        .filter(|&o| {
+            let n = f
+                .value_params
+                .iter()
+                .find(|p| p.offset == o)
+                .map_or(4, |p| p.ty.bytes());
+            !param_read(f, o, n as i32)
+        })
+        .collect();
     // Labels emit nothing: a body is its other statements.
     let stmts: Vec<&Stmt> = f
         .body
@@ -4101,6 +4116,93 @@ fn partly_read_params(f: &Function) -> Vec<i32> {
     out
 }
 
+/// The by-value parameters (frame offsets) that `f`'s body assigns as a
+/// whole (`x := ...`; codegen-patterns 12.2, "Assigned parameters").
+fn assigned_params(f: &Function) -> Vec<i32> {
+    let mut out = Vec::new();
+    dpc_ir::visit_stmts(&f.body, &mut |st| {
+        if let StmtKind::Store { addr, .. } = &st.kind {
+            if let Addr::Frame(o) = addr.unwrap_volatile().0 {
+                if f.value_params.iter().any(|p| p.offset == *o) && !out.contains(o) {
+                    out.push(*o);
+                }
+            }
+        }
+    });
+    out
+}
+
+/// Whether some assignment of by-value parameter `o` in `f`'s body reads
+/// the parameter itself (`x := f(x)`, `x := min(x, y)`, `x :=
+/// chr(ord(x) & c)`), or is a clamp, `if x relop c then x := c` alone
+/// in its `then` part, no `else` (audit_$log_link_op 0xE4BD78,
+/// RIP_$UPDATE_INT 0xE1594A): what every assigned parameter that the
+/// image holds in its entry register has, and none it keeps in its slot
+/// has (codegen-patterns 12.2, "Assigned parameters"; a working
+/// hypothesis, bead domain-pascal-r0ag).
+fn assigned_from_itself_or_clamped(f: &Function, o: i32) -> bool {
+    let me = Addr::Frame(o);
+    let peel = |mut e: &Expr| {
+        while let Expr::Convert { value, .. } = e {
+            e = value;
+        }
+        e.clone()
+    };
+    let mut found = false;
+    dpc_ir::visit_stmts(&f.body, &mut |st| match &st.kind {
+        StmtKind::Store { addr, value } if *addr == me => {
+            found |= expr_reads_addr(value, &me);
+        }
+        StmtKind::If {
+            cond: IrCond::Compare { lhs, rhs, .. },
+            then_,
+            else_,
+        } if else_.is_empty() && then_.len() == 1 => {
+            let (l, r) = (peel(lhs), peel(rhs));
+            let c = match (&l, &r) {
+                (Expr::Load { addr, .. }, Expr::Const { value, .. }) if *addr == me => *value,
+                (Expr::Const { value, .. }, Expr::Load { addr, .. }) if *addr == me => *value,
+                _ => return,
+            };
+            if let StmtKind::Store { addr, value } = &then_[0].kind {
+                found |=
+                    *addr == me && matches!(peel(value), Expr::Const { value: v, .. } if v == c);
+            }
+        }
+        _ => {}
+    });
+    found
+}
+
+/// Whether `f`'s body, or a nested routine of it, reads by-value
+/// parameter `o` (`bytes` long) at all, a push of it as an argument
+/// included.
+fn param_read(f: &Function, o: i32, bytes: i32) -> bool {
+    let mut read = f
+        .uplevel_refs
+        .iter()
+        .any(|&(p, m)| p < o + bytes && o < p + m as i32);
+    walk(&f.body, &mut |n| match n {
+        Node::Expr(Expr::Load {
+            addr: Addr::Frame(p),
+            ..
+        }) => read |= o <= *p && *p < o + bytes,
+        Node::Call(c) => {
+            for a in &c.args {
+                if let Arg::Address {
+                    addr: Addr::Frame(p),
+                    ..
+                } = a
+                {
+                    read |= o <= *p && *p < o + bytes;
+                }
+            }
+        }
+        _ => {}
+    });
+    read
+}
+
 /// Whether the set value `e` is, or combines with `*`, a one-byte set
 /// widened to a word (lowering's `set_value`; codegen-patterns 5.1,
 /// "One-byte sets").
@@ -4129,6 +4231,64 @@ fn expr_reads_addr(e: &Expr, a: &Addr) -> bool {
         }
     });
     hit
+}
+
+/// `value`, assigned to the object at `me`, as `me op c` at the object's
+/// own width when it is that operation made at a wider width and narrowed
+/// back (`chr(ord(x) & c)`: `Convert(Binary(op, Convert(x), c))`), for an
+/// operation whose low bits depend only on the operands' low bits (`&`,
+/// `!`, `xor`, `+`, `-`).
+fn narrowed_update(value: &Expr, me: &Addr) -> Option<Expr> {
+    let Expr::Convert {
+        value: inner, ty, ..
+    } = value
+    else {
+        return None;
+    };
+    let Expr::Binary {
+        op,
+        lhs,
+        rhs,
+        ty: bty,
+    } = &**inner
+    else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Add | BinOp::Sub
+    ) {
+        return None;
+    }
+    let Expr::Convert { value: x, .. } = &**lhs else {
+        return None;
+    };
+    let (Expr::Load { addr, ty: xty }, Expr::Const { value: c, .. }) = (&**x, &**rhs) else {
+        return None;
+    };
+    if addr != me || xty.width != ty.width || bty.bytes() <= xty.bytes() {
+        return None;
+    }
+    Some(Expr::Binary {
+        op: *op,
+        lhs: x.clone(),
+        rhs: Box::new(Expr::Const {
+            value: imm(*c, xty.width),
+            ty: *xty,
+        }),
+        ty: *xty,
+    })
+}
+
+/// How many times `e` reads the object at `a`.
+fn reads_addr_count(e: &Expr, a: &Addr) -> usize {
+    let mut n = 0;
+    walk_expr(e, &mut |x| {
+        if let Node::Expr(Expr::Load { addr, .. } | Expr::Bits { addr, .. }) = x {
+            n += usize::from(addr == a);
+        }
+    });
+    n
 }
 
 /// Whether `e` reads the frame object at `off` as a value.
@@ -6239,6 +6399,26 @@ pub struct Selector {
     /// variable in the whole body; every assignment writes it
     /// ([`Selector::store_web`]).
     webs: Vec<(i32, u8)>,
+    /// The by-value parameters loaded at entry that the body assigns
+    /// ([`Selector::entry_loads`]; codegen-patterns 12.2, "Assigned
+    /// parameters"): frame offset and the register of the entry load,
+    /// which every assignment writes as [`Self::store_web`] writes a
+    /// web's.  Also in `pinned`, as any parameter loaded at entry.
+    param_webs: Vec<(i32, u8)>,
+    /// The by-value parameters the body assigns as a whole
+    /// ([`assigned_params`]).
+    assigned_params: Vec<i32>,
+    /// The by-value parameters the body reads in part
+    /// ([`partly_read_params`]).
+    partial_params: Vec<i32>,
+    /// The parameters of `assigned_params` the body never reads.
+    unread_assigned: Vec<i32>,
+    /// While a value assigned to a parameter held in a register is
+    /// computed ([`Self::store_web`]): that register and the index in
+    /// `out` where the computation starts; a computation whose first
+    /// instruction would copy it starts in it instead
+    /// ([`Self::take_consumed`]).
+    consume: Option<(u8, usize)>,
     /// The statement being selected is in a body of several statements
     /// and does not directly follow a call there: a slot it uses once is
     /// loaded into a fresh register ([`Self::eval_a`],
@@ -6577,6 +6757,11 @@ impl Selector {
             pinned: Vec::new(),
             reg_locals: Vec::new(),
             webs: Vec::new(),
+            param_webs: Vec::new(),
+            assigned_params: Vec::new(),
+            partial_params: Vec::new(),
+            unread_assigned: Vec::new(),
+            consume: None,
             multi: false,
             multi_body: false,
             copied: false,
@@ -9898,9 +10083,48 @@ impl Selector {
             // module-local 0xE32B76 (`sio/init_dtte.c`), 0xE32B7E `movea.l
             // (8,A6),A2` and 0xE32B82 `move.w (0xc,A6),D2` around three
             // `jsr EC_$INIT`).
+            // A by-value parameter the body assigns is assigned in the
+            // register it was loaded into at entry (codegen-patterns 12.2,
+            // "Assigned parameters"): every site is an integer, character
+            // or boolean in a data register (mst_$set_mstes 0xE43E36 `ori.w
+            // #2,D0`, PKT_$DAT_COPY 0xE128A8 `add.l D2,D4`).  A pointer
+            // assigned in a register is not seen (DISK_$ADD_QUE 0xE3C790
+            // keeps its pointer in the slot, `move.l A0,(0x12,A6)`).
+            let assigned = self.assigned_params.contains(&offset);
+            if assigned && (class != RegClass::Data || ty.is_none_or(|t| t.pointer)) {
+                return Err(unsupported(
+                    f.span,
+                    "assigning to a pointer parameter loaded at entry (no site holds one in a \
+                     register: DISK_$ADD_QUE 0xE3C790 stores it to its slot; codegen-patterns \
+                     12.2, \"Assigned parameters\") is",
+                ));
+            }
+            // A parameter whose assignments neither read it nor clamp it
+            // is kept in its slot at the three sites found
+            // (area_$alloc_resources 0xE07600 `move.w D1,(8,A6)`, read
+            // back at 0xE07604, 0xE0772E; AREA_$INVALIDATE 0xE08EEA `move.w
+            // D2,(0xe,A6)`; AST_$TRUNCATE 0xE05C7A `clr.l (0xc,A6)`, read
+            // at 0xE05C7E, 0xE05C98), where the rules above would load it
+            // at entry; every one held in its register has such an
+            // assignment (13 sites against 3: a working hypothesis, not
+            // a settled rule; vtoc_$fm_traverse 0xE397D0 holds `hint` in
+            // D2 from entry and assigns it only other values, 0xE3997A,
+            // 0xE3998C, 0xE399AC; bead domain-pascal-r0ag).
+            if assigned && !assigned_from_itself_or_clamped(f, offset) {
+                return Err(unsupported(
+                    f.span,
+                    "assigning to a by-value parameter loaded at entry none of whose assignments \
+                     reads it or clamps it (kept in its slot at 0xE07600, 0xE08EEA, 0xE05C7A, in \
+                     its register at 0xE3997A; not settled, codegen-patterns 12.2, \"Assigned \
+                     parameters\", bead domain-pascal-r0ag) is",
+                ));
+            }
             let r = self.alloc(class)?;
             if class == RegClass::Data && (ty.is_none() || mine.contains(&ParamUse::Base)) {
                 self.data_ptr_regs.push(r);
+            }
+            if let (true, Reg::D(d)) = (assigned, r) {
+                self.param_webs.push((offset, d));
             }
             let src = Ea::Disp(offset, FP);
             self.out.push(match r {
@@ -11196,10 +11420,25 @@ impl Selector {
     ///   the computation reads the local itself after it starts writing
     ///   its result, the result is computed apart and moved (not seen).
     fn store_web(&mut self, o: i32, web: u8, value: &Expr) -> Res<()> {
+        let me = Addr::Frame(o);
+        // A parameter's `x := chr(ord(x) & c)` (an operation at a wider
+        // width, narrowed back): the operation at the parameter's own
+        // width, in place (tty_$i_rcv 0xE1B966 `andi.b #0x7f,D3`;
+        // codegen-patterns 12.2, "Assigned parameters").
+        let narrowed;
+        let value = match self.param_webs.contains(&(o, web)) {
+            true => match narrowed_update(value, &me) {
+                Some(e) => {
+                    narrowed = e;
+                    &narrowed
+                }
+                None => value,
+            },
+            false => value,
+        };
         let ty = value.ty();
         let w = ty.width;
         let size = size_of(w);
-        let me = Addr::Frame(o);
         let dst = Ea::Reg(Reg::D(web));
         match value {
             // `x := min(x, y)` / `max`: the select in x's register
@@ -11407,10 +11646,31 @@ impl Selector {
             }
         }
         let start = self.out.len();
+        // A parameter's value computed from itself is computed in its
+        // register ([`Self::take_consumed`]) when the value reads it once.
+        let param = self.param_webs.contains(&(o, web));
+        if param && reads_addr_count(value, &me) == 1 {
+            self.consume = Some((web, start));
+        }
         let v = match a0_call(value) {
-            Some(c) => Val::Reg(Reg::A(self.call_a0(c)?)),
-            None => self.eval(value)?,
+            Some(c) => self.call_a0(c).map(|a| Val::Reg(Reg::A(a))),
+            None => self.eval(value),
         };
+        let consumed = param && self.consume.is_none() && reads_addr_count(value, &me) == 1;
+        self.consume = None;
+        let v = v?;
+        if consumed {
+            if !matches!(v, Val::Tmp(t) if t == web) {
+                // `x := y - (x + 1)`: the parameter's register changed in
+                // the middle of the computation (not seen).
+                return Err(unsupported(
+                    self.span,
+                    "a value assigned to a parameter held in a register that is computed partly \
+                     in that register (codegen-patterns 12.2, \"Assigned parameters\") is",
+                ));
+            }
+            return Ok(());
+        }
         let src = match v {
             // A virtual register the computation wrote; not M$ARITH's
             // result, `Val::Tmp(0)` (physical D0, written by the `jsr`
@@ -11439,6 +11699,59 @@ impl Selector {
         Ok(())
     }
 
+    /// Refuse an assignment to by-value parameter slot `o` (a parameter
+    /// not loaded at entry) where its code is not known.  A parameter in
+    /// its slot is assigned as a frame object is (codegen-patterns 12.2,
+    /// "Assigned parameters"): area_$resize 0xE0883C..0xE0884C `move.l
+    /// (0xe,A6),D0; addi.l #0x7fff,D0; andi.l #-0x8000,D0; move.l
+    /// D0,(0xe,A6)` (read by its nested routine, 0xE087C4); AST_$GET_SEG_MAP
+    /// 0xE06BC6 `clr.l (0x10,A6)` (only pushed, 0xE06BD2).
+    fn check_slot_param_store(&self, o: i32) -> Res<()> {
+        let refuse = |what: &str| Err(unsupported(self.span, what));
+        if !self.assigned_params.contains(&o) {
+            return refuse(
+                "assigning to part of a by-value parameter (no site, codegen-patterns 12.2, \
+                 \"Assigned parameters\") is",
+            );
+        }
+        if !self.multi_body {
+            return refuse(
+                "assigning to a by-value parameter in a body of one simple statement (no site, \
+                 codegen-patterns 12.2, \"Assigned parameters\") is",
+            );
+        }
+        if self.pinned(o).is_some() {
+            return refuse(
+                "assigning to a by-value parameter loaded at entry that is not held as a variable is",
+            );
+        }
+        if self.escaped.contains(&o) {
+            // AST_$PURIFY holds its `(0xc,A6)` in D5, changes it there
+            // (0xE05AA8 `andi.w #0x7fff,D5`) and stores it back to the slot
+            // before passing the slot by address (0xE05B28 `move.w
+            // D5,(0xc,A6)`, 0xE05B36 `pea (0xc,A6)`), where `dpc` reads
+            // such a parameter from its slot at every use.
+            return refuse(
+                "assigning to a by-value parameter whose slot is passed by address or taken \
+                 with `addr` (held in a register and stored back before the `pea` at \
+                 AST_$PURIFY 0xE05B28; codegen-patterns 12.2, \"Assigned parameters\") is",
+            );
+        }
+        if self.partial_params.contains(&o) {
+            return refuse(
+                "assigning to a by-value parameter the body also reads in part (no site, \
+                 codegen-patterns 12.2, \"Assigned parameters\") is",
+            );
+        }
+        if self.unread_assigned.contains(&o) {
+            return refuse(
+                "assigning to a by-value parameter the routine never reads (no site, \
+                 codegen-patterns 12.2, \"Assigned parameters\") is",
+            );
+        }
+        Ok(())
+    }
+
     fn store(&mut self, addr: &Addr, value: &Expr) -> Res<()> {
         let ty = value.ty();
         let size = size_of(ty.width);
@@ -11448,8 +11761,26 @@ impl Selector {
         let peeled = self.addr_peeled(value);
         let value: &Expr = &peeled;
         let (plain, access) = addr.unwrap_volatile();
-        if matches!(plain, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
-            return Err(unsupported(self.span, "assigning to a parameter is"));
+        if let Addr::Frame(o) = plain {
+            if *o > 0 {
+                if let Some(&(_, web)) = self.param_webs.iter().find(|&&(p, _)| p == *o) {
+                    if access.is_none() {
+                        return self.store_web(*o, web, value);
+                    }
+                }
+                self.check_slot_param_store(*o)?;
+            }
+        }
+        if matches!(plain, Addr::Enclosing(o) if *o > 0) {
+            // No nested routine of the image is known to assign its
+            // parent's parameter (the uplevel parameters of
+            // codegen-patterns 6 are read: area_$resize's nested 0xE087C4
+            // `move.l (0xe,A2),D2`).
+            return Err(unsupported(
+                self.span,
+                "assigning to an enclosing routine's parameter (no site, codegen-patterns 12.2, \
+                 \"Assigned parameters\") is",
+            ));
         }
         let device = access.is_some_and(|a| a.device);
         if access.is_some_and(|a| a.atomic) {
@@ -12122,6 +12453,7 @@ impl Selector {
             return;
         };
         let held = self.webs.contains(&(*o, *d))
+            || self.param_webs.contains(&(*o, *d))
             || (self.reg_locals.contains(o) && self.pinned.contains(&(*o, Reg::D(*d))));
         if held {
             self.assigned_move = Some(self.out.len() - 1);
@@ -12308,10 +12640,12 @@ impl Selector {
         let escaped = !self.escaped.is_empty();
         // A store statement since the computation that may write the
         // variable, whatever it emitted: one to a variable held in a
-        // register writes no memory (no such store reaches here today:
-        // register-held locals are not leaves, and [`Self::store`]
-        // refuses assignments to parameters, which may be loaded at
-        // entry).
+        // register writes no memory, but is recorded here all the same:
+        // register-held locals are not leaves, and an assignment to a
+        // parameter (in its slot or in the register of its entry load,
+        // codegen-patterns 12.2, "Assigned parameters") is followed by
+        // [`Self::wrote`] with its address, so a computation from the
+        // parameter made before it is not reused after it.
         if self
             .writes
             .iter()
@@ -14013,6 +14347,9 @@ impl Selector {
     /// - memory: `move.<w> ea,Dn` (0xE148D4);
     /// - a constant: [`Self::load_const`].
     fn in_tmp(&mut self, v: Val, w: Width) -> Res<u8> {
+        if let Some(r) = self.take_consumed(&v) {
+            return Ok(r);
+        }
         let src = match v {
             Val::Tmp(d) => return Ok(d),
             Val::Imm(c) => return self.load_const(c, w),
@@ -14026,6 +14363,23 @@ impl Selector {
             dst: Ea::Reg(Reg::D(d)),
         });
         Ok(d)
+    }
+
+    /// The register of an assigned parameter ([`Self::consume`]) when `v`
+    /// is its value and the computation of the value assigned to it starts
+    /// here: the computation is made in it rather than in a copy
+    /// (codegen-patterns 12.2, "Assigned parameters": area_$internal_create
+    /// 0xE077FE `addi.l #0x7fff,D2; andi.l #-0x8000,D2`; tty_$i_calc_column
+    /// 0xE1B4DE `andi.l #0xffff,D2; addq.l #7,D2; lsr.l #3,D2; lsl.l
+    /// #3,D2`).
+    fn take_consumed(&mut self, v: &Val) -> Option<u8> {
+        match (self.consume, v) {
+            (Some((r, at)), Val::Reg(Reg::D(d))) if r == *d && at == self.out.len() => {
+                self.consume = None;
+                Some(r)
+            }
+            _ => None,
+        }
     }
 
     /// The operand `v` as an effective address (a constant as an
@@ -14060,6 +14414,7 @@ impl Selector {
     fn held_local(&self, o: i32) -> bool {
         self.reg_locals.contains(&o)
             || self.webs.iter().any(|&(p, _)| p == o)
+            || self.param_webs.iter().any(|&(p, _)| p == o)
             || self.ptr_locals.iter().any(|&(p, _)| p == o)
             || self.a0_locals.contains(&o)
             || self.parked.iter().any(|p| p.off == o)
@@ -16285,6 +16640,10 @@ impl Selector {
         match (from.width, ty.width) {
             (Width::Word, Width::Long) | (Width::Byte, Width::Word) if unsigned => {
                 let v = self.eval(value)?;
+                let v = match self.take_consumed(&v) {
+                    Some(r) => Val::Tmp(r),
+                    None => v,
+                };
                 if let Val::Tmp(d) = v {
                     let mask = if from.width == Width::Word {
                         0xffff
@@ -21425,9 +21784,16 @@ mod tests {
             "{t:?}"
         );
         assert!(t.contains(&"move.w\t(%a0),(%a1)".to_string()), "{t:?}");
-        // Assigning to a parameter.
-        let f = func(0, None, vec![store(Addr::Frame(8), konst(1, word()))]);
-        assert_eq!(err(&f), "assigning to a parameter is not supported yet");
+        // Assigning to a by-value parameter in a body of one simple
+        // statement (no site; codegen-patterns 12.2, "Assigned
+        // parameters").
+        let mut f = func(0, None, vec![store(Addr::Frame(8), konst(1, word()))]);
+        vparams(&mut f, &[(8, word())]);
+        assert!(
+            err(&f).starts_with("assigning to a by-value parameter in a body of one simple"),
+            "{}",
+            err(&f)
+        );
     }
 
     /// Memory to memory: a local into the object a pointer parameter
@@ -23927,7 +24293,7 @@ mod tests {
             vec![store(Addr::Enclosing(8), konst(0, word()))],
         );
         assert!(
-            err(&f).starts_with("assigning to a parameter"),
+            err(&f).starts_with("assigning to an enclosing routine's parameter"),
             "{}",
             err(&f)
         );
