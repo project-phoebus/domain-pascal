@@ -1574,9 +1574,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
 - **Pointer results** come back in **A0** by default (reference 5.5.10
   `d0_return`, 5.5.11 `a0_return`; `ARCH_RESULT_A0` in
   `../source/domain_os/arch/m68k/arch.h`).  "Pointer results" below has
-  the survey.  (TIME_$RTE_INT / TIME_$VT_INT, cited here before, end
-  with `movea.l #0,A0` at 0xE163D6 / 0xE16426, but no compiled caller
-  reads their A0 and `../source` has them as procedures: not evidence.)
+  the survey.  (TIME_$RTE_INT / TIME_$VT_INT end with `movea.l #0,A0`
+  at 0xE163D6 / 0xE16426; no compiled caller reads their A0, but the
+  hand-written PROC1_$INT_EXIT loop that calls them does, `move.l
+  %a0,%d0; beq` (`../source` proc1/sau2/int_handler.s, time/time.ins.pas):
+  pointer functions, "`nil` results" below.)
 - **Procedures** leave D0/A0 as whatever the body left.  Callers never read
   them.
 - **Result assignment as the last statement (Verified, one site):** in
@@ -1680,9 +1682,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   moved to A0 at the start of the epilogue, dropped when it is A0
   itself (DISK_$GET_BLOCK: conformance
   `tests/conformance/disk_get_block.pas`; golden
-  `results/pointer_callers`).  Refused: a computed value, `nil`
-  (`suba.l`; or the result slot cleared and reloaded, NET_$FIND_HANDLER
-  0xE5A178; bead domain-pascal-bdi0) and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
+  `results/pointer_callers`); `nil`, below.  Refused: a computed value
+  and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
   as pointer results, `d0_return`/`c_param` pointer results, and
   `a0_return` on a non-pointer result (no site).  Also refused: a
   register-held pointer result variable that the allocator would put in
@@ -1691,6 +1692,93 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   assignment, the one with none is in D0 (0xE6C21A: `move.l A0,D0` at
   0xE6C244, `clr.l D0` on another path, `movea.l D0,A0` at 0xE6C2AA),
   others are in their frame slot (TTY_$I_GET_DESC 0xE667BA).
+- **`nil` results (Verified at the sites; implemented in part; bead
+  domain-pascal-bdi0).**  Every function of `../source`'s Pascal (at
+  116a82b6) with a `f := nil`, against the image (`tools/nilsurvey.py
+  areg` for the register forms); 20 functions:
+  - *`suba.l An,An` into the register that holds the result variable*,
+    14, in A0 where no call follows (ROUTE_$FIND_PORTP 0xE15B84,
+    DISK_$GET_DRTE 0xE3DA36, `ring_$process_rx_packet` 0xE75720, and the
+    AST module-locals 0xE020EE, 0xE02550, 0xE0236C, 0xE070D2 (in
+    AST_$LOCATE_ASTE), 0xE02FA6 (AST_$MSTE_ACTIVATE_AND_WIRE)), in A2 or
+    A4 where one does (0xE09D44 in the AREA module-local 0xE09D2E,
+    0xE0303A in AST_$ACTIVATE_AND_WIRE, 0xE027D8, DBUF_$GET_BLOCK
+    0xE3A832, EC2_$REGISTER_EC1 0xE4299C `95ca`, EC2_$ALLOCATE_EC1
+    0xE42A6C `99cc`).  Each of the 14 has an assignment of the result
+    that is not *last* (followed by `return`, `goto` or other statements,
+    or inside a loop): ROUTE_$FIND_PORTP's `f := port; return` in its
+    `for`, then the final `f := nil`; DISK_$GET_DRTE's `f := nil` first.
+    Two `nil` paths are one `suba.l` (AST_$MSTE_ACTIVATE_AND_WIRE's two
+    `f := nil; return`, the `beq` at 0xE02F78 to 0xE02FA6); there the
+    `suba.l` is emitted although A0 was just tested `= nil` (0xE02FA0),
+    and the final `f := aste`, `aste` in A0, emits nothing (0xE02FAA
+    falls into the epilogue).  So do RIP_$NET_LOOKUP 0xE155B4
+    and EC2_$GET_EC1_ADDR 0xE42AAA, which `../source` writes as `integer32`
+    results `:= 0` (the image returns them in A0).
+  - *`movea.l #0,A0`* with no RELOC cell, 2: TIME_$RTE_INT 0xE163D6 and
+    TIME_$VT_INT 0xE16426, where `f := nil` is the only assignment and
+    the body's last statement, after calls; the frame slot (`link #-0x10`,
+    the result variable below the locals) is not written.
+  - *The result slot cleared*, 3: NET_$FIND_HANDLER 0xE5A178 `clr.l
+    (-0x10,A6)` (both of its `nil`s, the last statements of two paths of
+    its final `if`, as one), then `movea.l (-0x10,A6),A0` at the join
+    0xE5A184, where its third path stores from memory (`move.l
+    (A1),(-0x10,A6)` at 0xE5A180): every assignment last, no call after,
+    and A0 free from 0xE5A164 (the shape of KBD_$GET_DESC 0xE1AA92,
+    TTY_$I_GET_DESC 0xE667B0, SIO_$I_GET_DESC 0xE66808 above); MST_$REMAP_PRIVI
+    0xE43A26 `clr.l (-0x10,A6)` (the first statement, reloaded at
+    0xE43B2C) and BAT_$ALLOC_VTOCE 0xE3AEDA `clr.l (-0x14,A6)` (the
+    Pascal's local `result`), both with a call after and A2-A5 all
+    saved: no callee-saved address register free.
+  - *`clr.l D0`*, 1: `disk_$validate_pv_label` 0xE6C21A, nested in
+    `disk_$pv_mount_internal`, whose local `pv_label` (a call's A0
+    moved to D0, returned at the end) holds the result too.
+  So `nil` takes the form of the result variable's other assignments:
+  `suba.l` (never `movea.l #0` or `clr.l`) when the variable is in an
+  address register, `clr.l` of the slot when it is in the frame.  The
+  rule for where the variable is held, as far as these sites show: in a
+  register when some assignment is not last, A0 when no call follows
+  (12.4), a callee-saved one when a call does, the frame when none is
+  free; with every assignment last, the slot (NET_$FIND_HANDLER), or
+  for a lone last `f := nil`, A0 directly (TIME_$RTE_INT).  The
+  positions are those of `../source`'s Pascal, a reconstruction: the
+  image alone allows other readings (NET_$FIND_HANDLER's `nil`s as
+  `f := nil; return` would be "not last"; AST_$LOCATE_ASTE's final
+  `if` as two `f := ...; return`), so the classification of those
+  sites rests on how `../source` wrote them (Uncertain).  No `suba.l`
+  site is compiled end to end yet: each of the 14 is still stopped by
+  another refusal in `make srcsurvey` (a `for` stepping from A5, a
+  computed address, packed fields, ...); only TIME_$RTE_INT and
+  TIME_$VT_INT (`movea.l #0,A0`) compile byte-identical.
+  **Implemented** (`dpc-ir` `result_assignment`; `isel.rs`
+  `set_pointer_result_web`, `result_positions`, `Insn::SubaSelf`):
+  `suba.l An,An` into the result variable's register when the body has
+  an assignment of the result that is not last; `movea.l #0,A0` for the
+  only assignment as the last statement of a body of several
+  statements.  Refused: `nil` where every assignment is last on several
+  paths (the slot, NET_$FIND_HANDLER), a body of the one statement `f
+  := nil` (no site), `nil` as the only assignment other than last
+  (`f := nil; if k > 0 then count := 3`: no site, each `suba.l`
+  function has another assignment), a `suba.l` the next assignment
+  overwrites before any branch or use (`f := nil; f := x`: no site), a
+  test right after the `suba.l` (no image `suba.l` is followed by a
+  branch on earlier flags; the one followed by a test, VTOC_$GET_UID
+  0xE392AA `suba.l A2,A2; tst.l D6; bne.s`, tests a value formed
+  before: whether an entry load's or a store's flags are used across
+  it is not seen), `nil` right before a call's pad (the image has it
+  after the pad, 0xE09D42 `subq.l #2,SP; suba.l A2,A2; move.w
+  #18,-(SP)`, EC2_$ALLOCATE_EC1 0xE42A6A; bead domain-pascal-ncac), and,
+  as before, a register-held pointer result variable that would be in
+  A1 (0xE6C21A's D0 form; a loop whose pointer local the image keeps
+  in A0 with the result, the AST module-local 0xE0250C) or that finds no
+  callee-saved register (the frame, MST_$REMAP_PRIVI).  Golden
+  `tests/golden/results/nil_results`; `make srcsurvey`: TIME_$RTE_INT and
+  TIME_$VT_INT byte-identical.  Not modelled: the slot form of a
+  pointer result variable whose assignments are all last, for memory
+  values too (KBD_$GET_DESC, TTY_$I_GET_DESC, SIO_$I_GET_DESC: dpc's
+  register web puts the value in A0 directly, `movea.l mem,A0`; such a
+  body is refused when allocation gives A1, accepted in A0; bead
+  domain-pascal-yqsm).
 - **Callers of pointer functions (Verified by survey; implemented; bead
   domain-pascal-ae9).**  `tools/resultsurvey.py callers` takes the 234
   calls of A0 functions after which the caller reads A0, and classes the
@@ -12998,16 +13086,17 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     which `dpc` stores with `move.l #0` (section 5.5), has no site.  An
     odd-address `clr.l` cannot arise: a 4-byte field may not cross two
     word boundaries (3.10.5.5 p. 3-26), so `[aligned(0)]` moves it to an
-    even offset (section 5.4).  Refused: `nil` into an address register
-    (`suba.l An,An` 24 sites, e.g. ROUTE_$FIND_PORTP 0xE15B84,
-    DBUF_$GET_BLOCK 0xE3A832; of the 17 `movea.l #0,An`, 15 are
-    relocated addresses of a symbol at 0, section 1.5 "Zero", and the
-    other two end TIME_$RTE_INT 0xE163D6 and TIME_$VT_INT 0xE16426, whose
-    A0 no caller reads, section 3; `tools/nilsurvey.py areg`) and `nil`
-    as a pointer function's result (`suba.l A0,A0` before the epilogue,
-    ROUTE_$FIND_PORTP; the result slot cleared and reloaded,
-    NET_$FIND_HANDLER 0xE5A178), bead domain-pascal-bdi0; `nil` passed
-    by address (no site known).  `nil` passed by value is `clr.l -(SP)`
+    even offset (section 5.4).  `nil` as a pointer function's result:
+    section 3, "`nil` results" (`suba.l An,An` into the result
+    variable's register, ROUTE_$FIND_PORTP 0xE15B84; `movea.l #0,A0` as
+    the lone last assignment, TIME_$RTE_INT 0xE163D6 and TIME_$VT_INT
+    0xE16426, the only two of the 17 `movea.l #0,An` that are not a
+    relocated address of a symbol at 0, section 1.5 "Zero";
+    `tools/nilsurvey.py areg`; bead domain-pascal-bdi0).  Refused: `nil`
+    into a pointer local held in an address register (`suba.l An,An`
+    at those of the 24 `suba.l` that are not results; no routine of
+    `make srcsurvey` reaches the refusal) and `nil` passed by address (no
+    site known).  `nil` passed by value is `clr.l -(SP)`
     (section 1.5, "Zero"; implemented, bead domain-pascal-73sx);
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
     a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the

@@ -450,6 +450,67 @@ fn select_body_in_unit(
     Ok(body)
 }
 
+/// Where a function body assigns its result (codegen-patterns 3, "`nil`
+/// results"; bead domain-pascal-bdi0).  An assignment is *last* when
+/// nothing but the epilogue follows it in the text: it is the last
+/// statement of the body (labels after it aside), or the last of a part
+/// of an `if` or a `case` that is itself last.  One followed by `return`,
+/// by other statements, or inside a loop is not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ResultPositions {
+    /// Every `f := e` of the body.
+    all: usize,
+    /// Those that are last.
+    last: usize,
+    /// The body's own last statement (labels aside) is `f := e`.
+    top_last: bool,
+}
+
+/// [`ResultPositions`] of `body`.
+fn result_positions(body: &[Stmt]) -> ResultPositions {
+    fn walk(stmts: &[Stmt], last: bool, p: &mut ResultPositions) {
+        let end = stmts
+            .iter()
+            .rposition(|st| !matches!(st.kind, StmtKind::Label(_)));
+        for (i, st) in stmts.iter().enumerate() {
+            let here = last && Some(i) == end;
+            match &st.kind {
+                StmtKind::SetResult(_) => {
+                    p.all += 1;
+                    p.last += usize::from(here);
+                }
+                StmtKind::If { then_, else_, .. } => {
+                    walk(then_, here, p);
+                    walk(else_, here, p);
+                }
+                StmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    for a in arms {
+                        walk(&a.body, here, p);
+                    }
+                    if let Some(o) = otherwise {
+                        walk(o, here, p);
+                    }
+                }
+                k => {
+                    for b in k.bodies() {
+                        walk(b, false, p);
+                    }
+                }
+            }
+        }
+    }
+    let mut p = ResultPositions::default();
+    walk(body, true, &mut p);
+    p.top_last = body
+        .iter()
+        .rev()
+        .find(|st| !matches!(st.kind, StmtKind::Label(_)))
+        .is_some_and(|st| matches!(st.kind, StmtKind::SetResult(_)));
+    p
+}
+
 /// What [`select_body_with`] gives: the body and the reuses found, or the
 /// pointer locals to select again held in A0 ([`Selector::a0_locals`]).
 enum Selected {
@@ -620,6 +681,7 @@ fn select_body_with(
         // variable"; [`Selector::set_result_web`]).
         s.result_web = f.result.is_some();
     }
+    s.result_positions = result_positions(&f.body);
     s.load_link(f)?;
     s.param_copies(f)?;
     let reg_locals = register_locals(f);
@@ -1072,6 +1134,20 @@ fn select_body_with(
         &recycle,
     )
     .map_err(|what| {
+        // A pointer result variable with no callee-saved address register
+        // free is in its frame slot in the image (BAT_$ALLOC_VTOCE
+        // 0xE3AEDA `clr.l (-0x14,A6)` and MST_$REMAP_PRIVI 0xE43A26 `clr.l
+        // (-0x10,A6)` for `nil`, A2-A5 saved; codegen-patterns 3, "`nil`
+        // results"), which `dpc` does not model.
+        let what = if !s.nil_results.is_empty() && long_list.is_none() {
+            format!(
+                "{what} (a pointer result variable is in its frame slot where no callee-saved \
+                 address register is free: BAT_$ALLOC_VTOCE 0xE3AEDA, MST_$REMAP_PRIVI \
+                 0xE43A26)"
+            )
+        } else {
+            what
+        };
         // The over-long argument list is the cause when the body colours
         // without its loads kept apart at all.
         let Some(span) = long_list else {
@@ -1376,6 +1452,53 @@ fn select_body_with(
             ));
         }
     }
+    // The `suba.l`s keep their order (each in its own statement and run,
+    // [`crate::sched`]), so the j-th in the scheduled body is the j-th
+    // selected: their spans, for the check after scheduling.
+    let suba_spans: Vec<Span> = s
+        .nil_results
+        .iter()
+        .filter(|&&(k, _)| matches!(s.out[k], Insn::SubaSelf(_)))
+        .map(|&(_, span)| span)
+        .collect();
+    for &(k, span) in &s.nil_results {
+        // A `suba.l` that the next assignment overwrites in straight-line
+        // code (`f := nil; f := x`): no site.
+        if let Insn::SubaSelf(a) = s.out[k] {
+            let r = Reg::A(a);
+            for i in &s.out[k + 1..] {
+                if matches!(
+                    i,
+                    Insn::Label(_)
+                        | Insn::Branch { .. }
+                        | Insn::Dbf { .. }
+                        | Insn::TableJump { .. }
+                        | Insn::Rts
+                ) {
+                    break;
+                }
+                let acc = crate::regs::access(i);
+                if acc.uses.contains(&r) {
+                    break;
+                }
+                if acc.defs.contains(&r) {
+                    return Err(unsupported(
+                        span,
+                        "`nil` as a pointer result overwritten by the next assignment before \
+                         any path or use (no site; codegen-patterns 3, \"`nil` results\") is",
+                    ));
+                }
+            }
+        }
+        // The last statement's `movea.l #0` is into A0 itself (TIME_$RTE_INT
+        // 0xE163D6), never moved.
+        if matches!(s.out[k], Insn::Movea { src: Ea::Imm(0), dst, .. } if dst != 0) {
+            return Err(unsupported(
+                span,
+                "a last-statement `nil` result the allocator would not put in A0 is",
+            ));
+        }
+    }
     // After the checks above, whose refusals are the more basic ones (a
     // pointer local in A1 writes A1 before a slot load, TTY_$K_*).
     check_late_slot_loads(&s.out, &late, &passed, exit, &holds)?;
@@ -1463,6 +1586,39 @@ fn select_body_with(
     }
     // Phase 1c: the order inside basic blocks (`sched.rs`).
     crate::sched::schedule(&mut out, &units, &volatile_insns, sched);
+    if !suba_spans.is_empty() {
+        // A `nil` right before a call's pad: the image has it after the
+        // pad (0xE09D42 `subq.l #2,SP; suba.l A2,A2; move.w #18,-(SP)`,
+        // EC2_$ALLOCATE_EC1 0xE42A6A; 11 of the 12 register constants
+        // right before a padded call's first push in straight-line code
+        // are after the pad, `clr.b D2` at 0xE04B14, 0xE0728A, ...), where
+        // the selector's order, kept by R11 (12.4), has it first (bead
+        // domain-pascal-ncac).
+        let pad = |i: &Insn| {
+            matches!(
+                i,
+                Insn::Subq {
+                    size: Size::L,
+                    value: 2,
+                    dst: Ea::Reg(Reg::A(7)),
+                }
+            )
+        };
+        let before_pad = out
+            .iter()
+            .filter(|i| matches!(i, Insn::SubaSelf(_)))
+            .zip(suba_spans.iter())
+            .zip(out.windows(2).filter(|w| matches!(w[0], Insn::SubaSelf(_))))
+            .find(|(_, w)| pad(&w[1]))
+            .map(|((_, span), _)| *span);
+        if let Some(span) = before_pad {
+            return Err(unsupported(
+                span,
+                "`nil` into an address register right before a call's pad (after the pad in \
+                 the image, 0xE09D44, 0xE42A6C; bead domain-pascal-ncac) is",
+            ));
+        }
+    }
     for (lea, user, span) in &once_pairs {
         if !out.windows(2).any(|w| w[0] == *lea && w[1] == *user) {
             return Err(unsupported(*span, ONCE_LEA_SCHEDULED));
@@ -6658,6 +6814,12 @@ pub struct Selector {
     /// The same for a pointer result, in an address register
     /// ([`Self::set_pointer_result_web`]).
     web_a: Option<u8>,
+    /// Where the body assigns its result ([`result_positions`]).
+    result_positions: ResultPositions,
+    /// The `nil`s selected into an address register: the instruction's
+    /// index in `out` and the statement's span, checked after allocation
+    /// and scheduling ([`select_body_with`]).
+    nil_results: Vec<(usize, Span)>,
     /// Stores of a register into a local's frame slot: offset, size,
     /// register, and the index in `out` after the store
     /// ([`Self::forwarded`]).
@@ -6901,6 +7063,8 @@ impl Selector {
             result_web: false,
             web: None,
             web_a: None,
+            result_positions: ResultPositions::default(),
+            nil_results: Vec::new(),
             entry_regs: Vec::new(),
             data_ptr_regs: Vec::new(),
             entry_end: None,
@@ -9338,6 +9502,20 @@ impl Selector {
     /// byte widened to a word (`clr.w; move.b`), tested; other sizes,
     /// refused.
     fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
+        if matches!(self.out.last(), Some(Insn::SubaSelf(_))) {
+            // A `nil` result between the test and the instruction whose
+            // flags it might use (an entry load, a store): `suba.l` leaves
+            // the flags, but whether the branch then uses them or tests is
+            // not seen (the one `suba.l` followed by a test, VTOC_$GET_UID
+            // 0xE392AA `suba.l A2,A2; tst.l D6; bne.s`, tests a value
+            // formed earlier; codegen-patterns 3, "`nil` results").
+            return Err(unsupported(
+                self.span,
+                "a test right after `nil` into an address register (whether it uses the \
+                 flags of the instruction before the `suba.l` is not seen; codegen-patterns \
+                 3, \"`nil` results\") is",
+            ));
+        }
         if self.volatile_eas.iter().any(|(v, _)| *v == ea) {
             // A volatile object is read again, whatever the last store
             // left in the flags (ref 3.15.1).
@@ -14146,9 +14324,10 @@ impl Selector {
     /// `tools/resultsurvey.py callers` whose call is not popped).
     ///
     /// Refused: other values (a computed one is stored and moved,
-    /// 0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`; `nil` as `suba.l
-    /// A0,A0` at five sites, ROUTE_$FIND_PORTP 0xE15B84) and a
-    /// non-pointer result in A0 (`a0_return`, ref 5.5.11; no site known).
+    /// 0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`; `nil`, of which no
+    /// one-statement body is seen, [`Self::set_pointer_result_web`] for
+    /// the others) and a non-pointer result in A0 (`a0_return`, ref
+    /// 5.5.11; no site known).
     /// In a body of several statements: [`Self::set_pointer_result_web`].
     fn set_pointer_result(&mut self, f: &Function, e: &Expr) -> Res<()> {
         let res = f.result.expect("SetResult in a function");
@@ -14176,6 +14355,18 @@ impl Selector {
             });
             return Ok(());
         }
+        if matches!(e, Expr::Const { .. }) {
+            // A body of the one statement `f := nil`: no site (the two
+            // last-statement `nil`s, TIME_$RTE_INT 0xE163D6 `movea.l
+            // #0,A0` and TIME_$VT_INT 0xE16426, follow other statements;
+            // codegen-patterns 3, "`nil` results").
+            return Err(unsupported(
+                self.span,
+                "a pointer function body of the one statement `f := nil` (no site; `movea.l \
+                 #0,A0` where it follows other statements, TIME_$RTE_INT 0xE163D6; \
+                 codegen-patterns 3, \"`nil` results\") is",
+            ));
+        }
         let src = match e {
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -14188,7 +14379,7 @@ impl Selector {
             return Err(unsupported(
                 self.span,
                 "a pointer result other than one read from memory or a pointer function's \
-                 result (a computed value, `nil`: codegen-patterns 3, \"Pointer results\") is",
+                 result (a computed value: codegen-patterns 3, \"Pointer results\") is",
             ));
         };
         self.out.push(Insn::Move {
@@ -14215,10 +14406,73 @@ impl Selector {
     /// 0xE3BBBC `movea.l A0,A2` after DBUF_$GET_BLOCK, ML_$UNLOCK at
     /// 0xE3BBC4, `movea.l A2,A0` at 0xE3BBCA).  Assigned from a pointer
     /// function's result (copied from A0) or from memory (`movea.l`,
-    /// EC2_$GET_EC1_ADDR 0xE42AC4 `movea.l (0xa8c,A1),A2`); other values
-    /// (`nil`, `suba.l A2,A2` at 0xE42AAA; a computed address, `lea` at
-    /// 0xE42B0A) are refused.
+    /// EC2_$GET_EC1_ADDR 0xE42AC4 `movea.l (0xa8c,A1),A2`), or `nil`
+    /// (codegen-patterns 3, "`nil` results"): `suba.l An,An` when some
+    /// assignment of the body is not last ([`ResultPositions`]; 14 of 14
+    /// such bodies, EC2_$REGISTER_EC1 0xE4299C `suba.l A2,A2`,
+    /// ROUTE_$FIND_PORTP 0xE15B84 `suba.l A0,A0`), `movea.l #0,A0` as the
+    /// only assignment and the body's last statement (TIME_$RTE_INT
+    /// 0xE163D6, TIME_$VT_INT 0xE16426); refused when every assignment is
+    /// last on several paths (the result slot, NET_$FIND_HANDLER
+    /// 0xE5A178) and right before a call's pad (bead domain-pascal-ncac).
+    /// A computed address (`lea` at 0xE42B0A) is refused.
     fn set_pointer_result_web(&mut self, e: &Expr) -> Res<()> {
+        let pos = self.result_positions;
+        if let Expr::Const { value, .. } = e {
+            if *value != 0 {
+                return Err(unsupported(
+                    self.span,
+                    "a pointer result assigned a constant other than `nil` is",
+                ));
+            }
+            if pos.all == 1 && pos.top_last {
+                // The only assignment, the last statement: `movea.l
+                // #0,A0` with no RELOC cell, the frame slot untouched
+                // (TIME_$RTE_INT 0xE163D6, TIME_$VT_INT 0xE16426: 2 of the
+                // 2 such bodies; codegen-patterns 3, "`nil` results").  The
+                // variable's register is A0 there, checked after
+                // allocation ([`select_body_with`]).
+                let web = match self.web_a {
+                    Some(a) => a,
+                    None => {
+                        let a = self.alloc_a()?;
+                        self.web_a = Some(a);
+                        a
+                    }
+                };
+                self.nil_results.push((self.out.len(), self.span));
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Imm(0),
+                    dst: web,
+                });
+                return Ok(());
+            }
+            if pos.all == 1 {
+                // The only assignment, not last (`f := nil` before other
+                // statements, no other value): no site; each of the 14
+                // `suba.l` functions has another assignment.
+                return Err(unsupported(
+                    self.span,
+                    "`nil` as the only assignment of a pointer result, other than as the last \
+                     statement (no site; codegen-patterns 3, \"`nil` results\") is",
+                ));
+            }
+            if pos.last == pos.all {
+                // Every assignment last, on several paths: the result
+                // slot cleared and reloaded where the paths join
+                // (NET_$FIND_HANDLER 0xE5A178 `clr.l (-0x10,A6)`, 0xE5A184
+                // `movea.l (-0x10,A6),A0`; its memory assignment too goes
+                // through the slot, 0xE5A180, as at KBD_$GET_DESC 0xE1AA92,
+                // TTY_$I_GET_DESC 0xE667B0, SIO_$I_GET_DESC 0xE66808).
+                return Err(unsupported(
+                    self.span,
+                    "`nil` as a pointer result where every assignment of the result is the \
+                     last statement of a path (the result slot cleared and reloaded, \
+                     NET_$FIND_HANDLER 0xE5A178; codegen-patterns 3, \"`nil` results\") is",
+                ));
+            }
+        }
         let web = match self.web_a {
             Some(a) => a,
             None => {
@@ -14227,6 +14481,23 @@ impl Selector {
                 a
             }
         };
+        if matches!(e, Expr::Const { .. }) {
+            // An assignment that is not last makes the result variable a
+            // register's, and `nil` is `suba.l An,An` into it (all 14 such
+            // functions of `../source`'s Pascal: A0 with no call after,
+            // ROUTE_$FIND_PORTP 0xE15B84, DISK_$GET_DRTE 0xE3DA36,
+            // 0xE75720, the AST module-locals' 0xE020EE, 0xE02550,
+            // 0xE0236C, AST_$LOCATE_ASTE 0xE070D2,
+            // AST_$MSTE_ACTIVATE_AND_WIRE 0xE02FA6; A2 or A4 where a call
+            // follows, EC2_$REGISTER_EC1 0xE4299C, DBUF_$GET_BLOCK
+            // 0xE3A832, AST_$ACTIVATE_AND_WIRE 0xE0303A, 0xE027D8,
+            // 0xE09D44, EC2_$ALLOCATE_EC1 0xE42A6C; in the frame only with
+            // no callee-saved address register free, MST_$REMAP_PRIVI
+            // 0xE43A26, BAT_$ALLOC_VTOCE 0xE3AEDA).
+            self.nil_results.push((self.out.len(), self.span));
+            self.out.push(Insn::SubaSelf(web));
+            return Ok(());
+        }
         let src = match e {
             e if a0_call(e).is_some() => Ea::Reg(Reg::A(self.call_a0(a0_call(e).unwrap())?)),
             Expr::Load { addr, .. } if !matches!(addr, Addr::Frame(o) if *o > 0) => {
@@ -14236,8 +14507,8 @@ impl Selector {
                 return Err(unsupported(
                     self.span,
                     "a pointer result in a body of several statements assigned other than a \
-                     pointer function's result or a variable (`nil`, a computed address: \
-                     codegen-patterns 3) is",
+                     pointer function's result, a variable or `nil` (a computed address, `lea` \
+                     at EC2_$GET_EC1_ADDR 0xE42B0A: codegen-patterns 3) is",
                 ))
             }
         };
@@ -21260,10 +21531,11 @@ mod tests {
                 "rts",
             ]
         );
-        // Not from memory, or in a body of several statements: refused.
+        // `nil` as the one statement: no site, refused (codegen-patterns
+        // 3, "`nil` results").
         let mut g = func(8, res, vec![StmtKind::SetResult(konst(0, Scalar::POINTER))]);
         g.result_slot = Some(-8);
-        assert!(err(&g).starts_with("a pointer result other than one read from memory"));
+        assert!(err(&g).starts_with("a pointer function body of the one statement `f := nil`"));
         let mut h = func(
             8,
             res,
@@ -21294,7 +21566,69 @@ mod tests {
             ],
         );
         k.result_slot = Some(-8);
-        assert!(err(&k).starts_with("a pointer result in a body of several statements"));
+        // `nil` as the only assignment and the last statement: `movea.l
+        // #0,A0` (TIME_$RTE_INT 0xE163D6), the slot untouched.
+        assert_eq!(
+            text(&k),
+            [
+                "link.w\t%fp,#-8",
+                "clr.w\t(%a5)",
+                "movea.l\t#0,%a0",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        // Another constant: refused.
+        let mut c = func(
+            8,
+            res,
+            vec![
+                store(Addr::Static(0), konst(0, word())),
+                StmtKind::SetResult(konst(16, Scalar::POINTER)),
+            ],
+        );
+        c.result_slot = Some(-8);
+        assert!(err(&c).starts_with("a pointer result assigned a constant other than `nil`"));
+    }
+
+    /// Codegen-patterns 3, "`nil` results": which assignments of the
+    /// result are last (NET_$FIND_HANDLER's final `if`: all of them;
+    /// ROUTE_$FIND_PORTP's `f := port; return` in a loop: not).
+    #[test]
+    fn result_positions_last_assignments() {
+        let st = |kind| Stmt {
+            kind,
+            span: span(),
+        };
+        let set = || st(StmtKind::SetResult(konst(0, Scalar::POINTER)));
+        let cond = || IrCond::Test(load(Addr::Static(0), Scalar::BOOLEAN));
+        let if_ = |t: Vec<Stmt>, e: Vec<Stmt>| {
+            st(StmtKind::If {
+                cond: cond(),
+                then_: t,
+                else_: e,
+            })
+        };
+        let pos = |all, last, top_last| ResultPositions {
+            all,
+            last,
+            top_last,
+        };
+        // `if c then f := nil else f := x`, then a label.
+        let body = vec![if_(vec![set()], vec![set()]), st(StmtKind::Label(0))];
+        assert_eq!(result_positions(&body), pos(2, 2, false));
+        // `f := nil; return` in a `then`, and a final `f := nil`.
+        let body = vec![
+            if_(vec![set(), st(StmtKind::Return)], vec![]),
+            set(),
+        ];
+        assert_eq!(result_positions(&body), pos(2, 1, true));
+        // In a loop: not last.
+        let body = vec![st(StmtKind::While {
+            cond: cond(),
+            body: vec![set()],
+        })];
+        assert_eq!(result_positions(&body), pos(1, 0, false));
     }
 
     /// IO_$ALLOC 0xE1A9C2..0xE1A9D0: a status store, then a constant

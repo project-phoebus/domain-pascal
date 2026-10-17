@@ -383,22 +383,26 @@ fn nil_passed_by_value_is_the_pointer_zero() {
     }
 }
 
-/// `nil` passed by address and as a function result: each refused with
-/// the forms the image shows (bead domain-pascal-bdi0; codegen-patterns
-/// 13, "`nil`").
+/// `nil` passed by address is refused (no site; codegen-patterns 13,
+/// "`nil`"); as a function result it is the pointer 0, whose form the
+/// selector decides (codegen-patterns 3, "`nil` results"; bead
+/// domain-pascal-bdi0).
 #[test]
-fn nil_other_than_stored_or_pushed_is_refused() {
+fn nil_passed_by_address_is_refused_nil_result_lowered() {
     let decls = "module m;\ntype p = ^integer32;\n\
                  procedure byref(in x: p); extern;\n";
     let e = errs(&format!(
         "{decls}procedure q;\nbegin\n  byref(nil);\nend;\n"
     ));
     assert!(e[0].contains("`nil` passed by address"), "{e:?}");
-    let e = errs(&format!(
-        "{decls}function f: p;\nbegin\n  f := nil;\nend;\n"
-    ));
-    assert!(e[0].contains("`nil` as a function result"), "{e:?}");
-    assert!(e[0].contains("domain-pascal-bdi0"), "{e:?}");
+    let m = lower_src(&format!("{decls}function f: p;\nbegin\n  f := nil;\nend;\n")).unwrap();
+    assert_eq!(
+        m.functions[0].body[0].kind,
+        StmtKind::SetResult(Expr::Const {
+            value: 0,
+            ty: Scalar::POINTER
+        })
+    );
 }
 
 #[test]

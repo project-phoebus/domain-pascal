@@ -294,6 +294,8 @@ fn fx(insn: &Insn) -> Fx {
             f.address_taken(src);
             f.def(Reg::A(*dst));
         }
+        // `suba.l An,An` leaves the condition codes alone, as `movea` does.
+        Insn::SubaSelf(a) => f.def(Reg::A(*a)),
         Insn::Moveq { dst, .. } => {
             f.def(Reg::D(*dst));
             f.cc_set = true;

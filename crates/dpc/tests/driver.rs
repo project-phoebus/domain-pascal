@@ -1563,6 +1563,120 @@ end;
 }
 
 #[test]
+fn nil_results_the_image_does_not_settle_are_refused() {
+    // codegen-patterns 3, "`nil` results" (bead domain-pascal-bdi0);
+    // the accepted shapes are golden `results/nil_results`.
+    let decls = "module m;
+type
+  status_$t = record case integer of 1: (all: integer32); end;
+  recp = ^integer32;
+var
+  tab: array[0..7] of recp;
+procedure ml_$lock(id: integer); val_param; extern;
+procedure scan(var s: status_$t); extern;
+function get(k: integer): recp; val_param; extern;
+";
+    let refused = |name: &str, body: &str, what: &str| {
+        let src = format!("{decls}{body}");
+        let (_, e) = compile_with(name, &src, &[]).unwrap_err();
+        assert!(e.contains(what), "{name}: {e}");
+    };
+    // A body of the one statement `f := nil`: no site.
+    refused(
+        "nil_only_statement",
+        "function f: recp;\nbegin\n  f := nil;\nend;\n",
+        "body of the one statement `f := nil`",
+    );
+    // Every assignment last on several paths: the result slot cleared
+    // and reloaded (NET_$FIND_HANDLER 0xE5A178).
+    refused(
+        "nil_all_last",
+        "function f(k: integer; var s: status_$t): recp; val_param;
+begin
+  if tab[k] = nil then begin
+    s.all := 5;
+    f := nil;
+  end
+  else begin
+    s.all := 0;
+    f := tab[k];
+  end;
+end;
+",
+        "every assignment of the result is the last statement of a path",
+    );
+    // Right before a call's pad: after the pad in the image (0xE09D44).
+    refused(
+        "nil_before_pad",
+        "function f(k: integer): recp; val_param;
+begin
+  f := nil;
+  ml_$lock(18);
+  if k <> 0 then f := tab[k];
+  ml_$lock(19);
+end;
+",
+        "domain-pascal-ncac",
+    );
+    // A test right after the `suba.l`: whether it branches on the entry
+    // load's flags across it is not seen.
+    refused(
+        "nil_then_test",
+        "function f(k: integer): recp; val_param;
+begin
+  f := nil;
+  if k <> 0 then f := tab[k];
+end;
+",
+        "a test right after `nil` into an address register",
+    );
+    // The only assignment, not last: no site.
+    refused(
+        "nil_lone",
+        "function f(k: integer): recp; val_param;
+begin
+  f := nil;
+  ml_$lock(k);
+end;
+",
+        "`nil` as the only assignment of a pointer result",
+    );
+    // Overwritten before any branch or use: no site.
+    refused(
+        "nil_dead",
+        "function f(k: integer): recp; val_param;
+begin
+  ml_$lock(k);
+  f := nil;
+  f := tab[k];
+end;
+",
+        "overwritten by the next assignment",
+    );
+    // No callee-saved address register free: the frame in the image
+    // (MST_$REMAP_PRIVI 0xE43A26, BAT_$ALLOC_VTOCE 0xE3AEDA).
+    refused(
+        "nil_pressure",
+        "function f(a, b, c: recp; var s: status_$t): recp; val_param;
+begin
+  f := nil;
+  scan(s);
+  if s.all <> 0 then return;
+  a^ := 1;
+  b^ := 2;
+  c^ := 3;
+  f := get(4);
+  scan(s);
+  a^ := 1;
+  b^ := 2;
+  c^ := 3;
+end;
+",
+        "no callee-saved address register is free",
+    );
+}
+
+#[test]
 fn module_routine_unnamed_by_the_map() {
     // A module-local routine outside a fragment, which the map does not
     // name (bead domain-pascal-3h9): declared `internal; extern', named

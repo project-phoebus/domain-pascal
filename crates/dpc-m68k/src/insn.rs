@@ -457,6 +457,12 @@ pub enum Insn {
     /// sites, `b6fc 0000` at 0xE38EC0 for A3; 0xE3CCE4 `b2fc 0000` for A1,
     /// a `while p <> nil` test).
     CmpaZero(u8),
+    /// `suba.l %an,%an` (`91c8` + n << 9): `nil` into an address
+    /// register (codegen-patterns 3, "`nil` results"; 24 sites,
+    /// `tools/nilsurvey.py areg`: ROUTE_$FIND_PORTP 0xE15B84 `91c8`,
+    /// EC2_$REGISTER_EC1 0xE4299C `95ca`).  It writes An only: the old
+    /// value is not read, and the condition codes are left alone.
+    SubaSelf(u8),
     /// `cmp.<size> src,%dn`.
     Cmp {
         size: Size,
@@ -631,6 +637,7 @@ impl Insn {
             | Insn::Bsr { .. }
             | Insn::Branch { .. }
             | Insn::CmpaZero(_)
+            | Insn::SubaSelf(_)
             | Insn::Ext { .. }
             | Insn::Shift { .. }
             | Insn::Swap(_)
@@ -810,6 +817,7 @@ impl fmt::Display for Insn {
                 write!(f, "cmpi.{size}\t#{},{dst}", num(*imm))
             }
             Insn::CmpaZero(a) => write!(f, "cmpa.w\t#0,{}", Reg::A(*a)),
+            Insn::SubaSelf(a) => write!(f, "suba.l\t{},{}", Reg::A(*a), Reg::A(*a)),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
             // A symbol's address added or subtracted: the immediate-EA
             // encodings `d0bc`/`90bc` (+ the register's number << 9),
@@ -956,6 +964,7 @@ impl Insn {
             Insn::Tst { size, dst } => 2 + dst.ext_len(*size),
             Insn::Cmpi { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::CmpaZero(_) => 4,
+            Insn::SubaSelf(_) => 2,
             Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
             Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::Unary { size, dst, .. } => 2 + dst.ext_len(*size),

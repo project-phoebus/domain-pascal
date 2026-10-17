@@ -4183,14 +4183,17 @@ fn result_assignment(
     let res = result.expect("lower_routine skips the body when the result type failed");
     let vsize = p.types.size(value.ty);
     if let Some(ConstValue::Nil) = &value.value {
-        // `suba.l A0,A0` before the epilogue (ROUTE_$FIND_PORTP 0xE15B84),
-        // or `clr.l` of the result slot and a reload (NET_$FIND_HANDLER
-        // 0xE5A178): not settled (bead domain-pascal-bdi0).
-        return Err(unsupported(
-            value.span,
-            "`nil` as a function result (`suba.l A0,A0` at ROUTE_$FIND_PORTP 0xE15B84, the \
-             result slot cleared at NET_$FIND_HANDLER 0xE5A178; bead domain-pascal-bdi0) is",
-        ));
+        // `nil`, the pointer 0 (ref 3.13.4, p. 3-51): the selector decides
+        // its form by the shape of the body (codegen-patterns 3, "`nil`
+        // results"; bead domain-pascal-bdi0): `suba.l An,An` into a
+        // result variable held in a register (ROUTE_$FIND_PORTP
+        // 0xE15B84), `movea.l #0,A0` as the only assignment and last
+        // statement (TIME_$RTE_INT 0xE163D6); the result slot cleared
+        // (NET_$FIND_HANDLER 0xE5A178) is refused there.
+        return Ok(Stmt {
+            kind: StmtKind::SetResult(stored_const(&ConstValue::Nil, res.ty, value.span)?),
+            span: s.span,
+        });
     }
     if let Some(v) = &value.value {
         return Ok(Stmt {

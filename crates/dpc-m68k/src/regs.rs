@@ -304,6 +304,8 @@ pub fn access(insn: &Insn) -> Access {
             a.use_(Reg::D(*dst));
         }
         Insn::CmpaZero(r) => a.use_(Reg::A(*r)),
+        // `nil` into An: a write only (the old value is not needed).
+        Insn::SubaSelf(r) => a.def(Reg::A(*r)),
         Insn::Cmpm { src, dst, .. } => {
             a.read(&Ea::PostInc(*src));
             a.read(&Ea::PostInc(*dst));
@@ -395,7 +397,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fa(dst);
         }
         Insn::Moveq { dst, .. } => fd(dst),
-        Insn::CmpaZero(a) => fa(a),
+        Insn::CmpaZero(a) | Insn::SubaSelf(a) => fa(a),
         Insn::Cmpm { src, dst, .. } => {
             fa(src);
             fa(dst);
