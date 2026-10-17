@@ -1,617 +1,459 @@
-"""Tests for tools/linktest.py's logic that need no kernel build.
+"""Tests for tools/linktest.py (no ../source, image or real dpc needed).
 
-The full run (`make linktest') rebuilds a scratch copy of ../source and
-takes about 20 s; it is not part of `make test'.
+The full run (`make linktest') exports ../source and compiles its Pascal
+tree with dpc; it is not part of `make test'.  The end-to-end tests here
+use a fake ../source (a git repository made in a temporary directory)
+and a fake dpc (a shell script).
 """
 
+import contextlib
+import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 import linktest  # noqa: E402
-import sau2map  # noqa: E402
+
+REFUSAL = 'not supported yet'
 
 
-class ManifestTest(unittest.TestCase):
-    def test_plain_unit(self):
-        u = linktest.parse_manifest_line(
-            ['tests/conformance/iic.pas', 'IIC_$INIT', 'IIC_$ACQUIRE'])
-        self.assertEqual(u.specs, ['IIC_$INIT', 'IIC_$ACQUIRE'])
-        self.assertEqual(u.dpc_opts, [])
-        self.assertEqual(u.stem, 'iic')
+def diag(path, line, msg, sev='error'):
+    return '%s:%d:5: %s: %s\n' % (path, line, sev, msg)
 
-    def test_options_forwarded(self):
-        u = linktest.parse_manifest_line(
-            ['x.pas', '0xE3CCCE:20', 'loop-align=off', 'a5-always=FOO'])
-        self.assertEqual(u.specs, ['0xE3CCCE:20'])
-        self.assertEqual(u.dpc_opts, ['--loop-align=off', '--a5-always=FOO'])
 
-    def test_module_routines_kept(self):
-        u = linktest.parse_manifest_line(
-            ['x.pas', 'DISK_$UNASSIGN_ALL', 'module-routines=DISK_$UNASSIGN'])
-        self.assertEqual(u.mods, ['module-routines=DISK_$UNASSIGN'])
-        self.assertEqual(u.dpc_opts, [])
+def R(module, status, kinds=()):
+    return linktest.Result(module, status, len(kinds), kinds)
 
-    def test_code_section_addr_ignored(self):
-        u = linktest.parse_manifest_line(
-            ['scsi.pas', 'SCSI_$CINIT', '--section-addr', '.text.SCSI_.SCSI_WIRED_PROC=0xE88800'])
-        self.assertEqual(u.specs, ['SCSI_$CINIT'])
 
-    def test_data_section_addr_kept(self):
-        u = linktest.parse_manifest_line(
-            ['x.pas', 'PROC1_$GET_LOADAV', '--section-addr',
-             '.bss.moddata.PROC1_.WIRED_DATA=0xE254E8'])
-        self.assertEqual(u.specs, ['PROC1_$GET_LOADAV'])
-        self.assertEqual(u.data_addrs, {'.bss.moddata.PROC1_.WIRED_DATA': 0xE254E8})
+class DpcResultTest(unittest.TestCase):
+    def test_ok(self):
+        r = linktest.dpc_result('a/a.pas', 0, diag('a/x.pas', 3, 'unused', 'warning'))
+        self.assertEqual((r.status, r.errors, r.kinds, r.first_kind), ('OK', 0, [], '-'))
 
-    def test_refused(self):
-        for toks in (['x.s', 'FOO'],
-                     ['x.pas'],
-                     ['x.pas', 'FOO', '--section-addr', '.data.X=0xE7BE84'],
-                     ['x.pas', 'FOO', '--section-addr', '.bss.moddata.P=0xE7BE84',
-                      '--section-addr', '.bss.moddata.P=0xE7BE84'],
-                     ['x.pas', 'FOO', 'module-routines=BAR,LOCAL=0xE43182'],
-                     ['x.pas', '0xE76470:2E', 'enclosing=RECEIVE_PACKET']):
-            with self.assertRaises(linktest.SetupError, msg=toks):
-                linktest.parse_manifest_line(toks)
+    def test_refused_counts_errors_and_distinct_kinds(self):
+        err = (diag('a/x.pas', 10, 'comparing `FOO` with 3 is ' + REFUSAL) +
+               diag('a/x.pas', 12, 'comparing `BAR` with 70 is ' + REFUSAL) +
+               diag('a/y.pas', 4, 'two function calls in one statement are ' + REFUSAL) +
+               diag('a/y.pas', 9, 'just a warning', 'warning') +
+               'some context line\n')
+        r = linktest.dpc_result('a/a.pas', 1, err)
+        self.assertEqual(r.status, 'REFUSED')
+        self.assertEqual(r.errors, 3)
+        self.assertEqual(r.kinds, ['comparing `X` with N is ' + REFUSAL,
+                                   'two function calls in one statement are ' + REFUSAL])
+        self.assertEqual(r.first, 'a/x.pas:10:5: comparing `FOO` with 3 is ' + REFUSAL)
 
-    def test_refused_lines_collected(self):
-        d = tempfile.mkdtemp(prefix='linktest-manifest-', dir=_tmp())
+    def test_plain_error_is_a_kind_too(self):
+        r = linktest.dpc_result('r/r.pas', 1, diag('r/server.pas', 822, 'index out of range'))
+        self.assertEqual((r.status, r.kinds), ('REFUSED', ['index out of range']))
+
+    def test_type_phrases_folded(self):
+        # every spelling TypeTable::display gives, named or spelled out
+        for ty in ('acl_$rights_word_t', 'proc2_$sig_set_t', 'set of 0..7',
+                   '[byte] set of 0..7', 'array[1..4] of char', '^foo_t', '(a, b)'):
+            self.assertEqual(linktest.kind_of('functions returning %s are %s (codegen-patterns 3: '
+                                              'result convention unknown)' % (ty, REFUSAL)),
+                             'functions returning T are %s (codegen-patterns N: result '
+                             'convention unknown)' % REFUSAL, ty)
+            self.assertEqual(linktest.kind_of('a packed field of type %s that is not a whole '
+                                              'byte, word or longword is %s' % (ty, REFUSAL)),
+                             'a packed field of type T that is not a whole byte, word or '
+                             'longword is ' + REFUSAL, ty)
+        k = linktest.kind_of('argument type integer16 (2 bytes) does not match parameter type '
+                             'integer32 (4 bytes): an integer ...')
+        self.assertTrue(k.startswith('argument type T (N bytes) does not match parameter type T ('),
+                        k)
+        self.assertEqual(linktest.kind_of('argument type ^x_t does not match parameter type '
+                                          'array[1..2] of char'),
+                         'argument type T does not match parameter type T')
+        self.assertEqual(linktest.kind_of('Assignment statement expression is not compatible '
+                                          'with the assignment variable ((a, b) := 0..7)'),
+                         'Assignment statement expression is not compatible with the '
+                         'assignment variable (T := T)')
+        self.assertEqual(linktest.kind_of('type transfer needs equal sizes: set of 0..7 is 2 '
+                                          'bytes, integer32 is 4'),
+                         'type transfer needs equal sizes: T is N bytes, T is N')
+        self.assertEqual(linktest.kind_of('constant 300 is out of range for 0..255'),
+                         'constant N is out of range for T')
+        self.assertEqual(linktest.kind_of('this initial value of a ^t is ' + REFUSAL),
+                         'this initial value of a T is ' + REFUSAL)
+        # other messages: srcsurvey.kind_of alone (names in the text kept)
+        self.assertIn('ROUTE_$FIND_PORTP', linktest.kind_of('at ROUTE_$FIND_PORTP 0x10'))
+        self.assertEqual(linktest.kind_of('a set of 0..7 here'), 'a set of 0..7 here')
+
+    def test_panic(self):
+        err = ("thread 'main' panicked at crates/dpc-m68k/src/sel.rs:120:9:\n"
+               "index out of bounds: the len is 3 but the index is 7\n"
+               "note: run with `RUST_BACKTRACE=1'\n")
+        r = linktest.dpc_result('m/m.pas', 101, err)
+        self.assertEqual(r.status, 'FAILED')
+        self.assertEqual(r.kinds, ['dpc panic: index out of bounds: the len is N but the index is N'])
+
+    def test_signal_timeout_and_silence(self):
+        self.assertEqual(linktest.dpc_result('m', -11, '').kinds, ['dpc: signal 11'])
+        self.assertEqual(linktest.dpc_result('m', None, '').kinds, ['dpc: timeout'])
+        self.assertEqual(linktest.dpc_result('m', 2, '').kinds, ['dpc: exit status N'])
+        self.assertEqual(linktest.dpc_result('m', 2, 'dpc: cannot read x.pas\n').kinds,
+                         ['dpc: dpc: cannot read x.pas'])
+
+    def test_asm(self):
+        err = ("build/a.s: Assembler messages:\n"
+               "build/a.s:12: Error: operand 1 out of range\n"
+               "build/a.s:40: Error: operand 1 out of range\n")
+        r = linktest.asm_result('a/a.pas', err)
+        self.assertEqual((r.status, r.errors), ('ASM', 2))
+        self.assertEqual(r.kinds, ['as: operand N out of range'])
+
+
+class RankingTest(unittest.TestCase):
+    RESULTS = [R('a.pas', 'OK'),
+               R('b.pas', 'REFUSED', ['k1']),
+               R('c.pas', 'REFUSED', ['k1', 'k2']),
+               R('d.pas', 'REFUSED', ['k2', 'k3']),
+               R('e.pas', 'REFUSED', ['k3']),
+               R('f.pas', 'REFUSED', ['k3', 'k2']),
+               R('g.pas', 'ASM', ['as: x'])]
+
+    def test_rank(self):
+        self.assertEqual(linktest.rank_kinds(self.RESULTS),
+                         [('k3', 1, 3), ('k1', 1, 2), ('as: x', 1, 1), ('k2', 0, 3)])
+
+    def test_summary(self):
+        self.assertEqual(linktest.summary_line(self.RESULTS),
+                         '1 of 7 module files compile; 5 refused by dpc, 1 not assembled')
+        self.assertEqual(linktest.summary_line([R('a', 'OK')]), '1 of 1 module files compile')
+
+    def test_format_limit(self):
+        lines = linktest.format_ranking(linktest.rank_kinds(self.RESULTS), 2)
+        self.assertEqual(len(lines), 4)
+        self.assertIn('2 more kind(s)', lines[-1])
+
+
+class BaselineTest(unittest.TestCase):
+    def read(self, text):
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as fh:
+            fh.write(text)
         try:
-            m = os.path.join(d, 'm.txt')
-            with open(m, 'w') as f:
-                f.write('# comment\n'
-                        'a.pas FOO\n'
-                        'b.pas 0xE76470:2E enclosing=RECEIVE_PACKET\n'
-                        'c.pas BAR module-routines=X=0xE43182\n')
-            with self.assertRaises(linktest.SetupError):
-                linktest.read_manifest(m)
-            refused = []
-            units = linktest.read_manifest(m, refused)
-            self.assertEqual([u.path for u in units], ['a.pas'])
-            self.assertEqual([r[0] for r in refused], ['b.pas', 'c.pas'])
-            self.assertIn('enclosing', refused[0][1])
+            return linktest.read_baseline(fh.name)
         finally:
-            shutil.rmtree(d)
+            os.remove(fh.name)
 
-    def test_checked_in_manifest_parses(self):
-        units = linktest.read_manifest(linktest.MANIFEST)
-        self.assertTrue(units)
-        for u in units:
-            self.assertTrue(os.path.exists(os.path.join(linktest.REPO, u.path)), u.path)
+    def test_round_trip(self):
+        res = [R('a/a.pas', 'OK'), R('b/b.pas', 'REFUSED', ['x is ' + REFUSAL, 'y'])]
+        text = linktest.format_baseline('abc123', res, 'b23a505d')
+        self.assertIn('# source: abc123\n# dpc: b23a505d\n', text)
+        self.assertIn('REFUSED\tb/b.pas\tx is %s\n' % REFUSAL, text)
+        meta, base = self.read(text)
+        self.assertEqual(meta, {'source': 'abc123', 'dpc': 'b23a505d'})
+        self.assertEqual(base, {'a/a.pas': ('OK', '-'), 'b/b.pas': ('REFUSED', 'x is ' + REFUSAL)})
 
-    def test_data_addresses_agree_with_conformance(self):
-        # a block's image address is the one the conformance gate proves
-        conf = {}
-        with open(os.path.join(linktest.REPO, 'tests', 'conformance', 'manifest.txt')) as f:
-            for line in f:
-                toks = line.split('#', 1)[0].split()
-                for i, tok in enumerate(toks[:-1]):
-                    if tok == '--section-addr':
-                        conf.setdefault(toks[0], {})[toks[i + 1]] = True
-        units = linktest.read_manifest(linktest.MANIFEST)
-        self.assertTrue(any(u.data_addrs for u in units))
-        for u in units:
-            for sec, addr in u.data_addrs.items():
-                self.assertIn('%s=0x%X' % (sec, addr), conf.get(u.path, {}), u.path)
+    def test_malformed(self):
+        for text, what in (('MAYBE\ta.pas\t-\n', "unknown status 'MAYBE'"),
+                           ('# x\nOK a.pas -\n', ':2: malformed line'),
+                           ('OK\ta.pas\n', ':1: malformed line'),
+                           ('OK\ta.pas\t-\nOK\ta.pas\t-\n', ':2: module a.pas listed twice')):
+            with self.assertRaises(linktest.BaselineError) as cm:
+                self.read(text)
+            self.assertIn(what, str(cm.exception))
+
+    def test_compare(self):
+        base = {'a.pas': ('OK', '-'), 'b.pas': ('REFUSED', 'k1'), 'c.pas': ('OK', '-'),
+                'd.pas': ('REFUSED', 'k1'), 'gone.pas': ('OK', '-'), 'same.pas': ('OK', '-'),
+                'e.pas': ('REFUSED', 'k1'), 'f.pas': ('FAILED', 'p'), 'g.pas': ('ASM', 'as: x'),
+                'gone2.pas': ('REFUSED', 'k1')}
+        now = [R('a.pas', 'REFUSED', ['k9']), R('b.pas', 'OK'), R('c.pas', 'ASM', ['as: x']),
+               R('d.pas', 'REFUSED', ['k2']), R('new.pas', 'REFUSED', ['k1']),
+               R('same.pas', 'OK'), R('e.pas', 'FAILED', ['dpc panic: p']),
+               R('f.pas', 'REFUSED', ['k1']), R('g.pas', 'REFUSED', ['k3'])]
+        lines, worse = linktest.compare_baseline(base, now)
+        text = '\n'.join(lines)
+        self.assertIn('WORSE a.pas: OK -> REFUSED (k9)', text)
+        self.assertIn('FIXED b.pas: REFUSED (k1) -> OK', text)
+        self.assertIn('WORSE c.pas: OK -> ASM (as: x)', text)
+        self.assertIn('diff  d.pas: REFUSED (k1) -> REFUSED (k2)', text)
+        # any drop in rank, not only from OK
+        self.assertIn('WORSE e.pas: REFUSED (k1) -> FAILED (dpc panic: p)', text)
+        self.assertIn('WORSE g.pas: ASM (as: x) -> REFUSED (k3)', text)
+        self.assertIn('better f.pas: FAILED (p) -> REFUSED (k1)', text)
+        # a module that compiled and is gone counts; one that did not, not
+        self.assertIn('GONE  gone.pas: OK -> none', text)
+        self.assertIn('gone  gone2.pas: REFUSED (k1) -> none', text)
+        self.assertIn('new   new.pas: none -> REFUSED (k1)', text)
+        self.assertNotIn('same.pas', text)
+        self.assertEqual(worse, 5)          # a, c, e, g, gone
+        # restricted to some modules (--only)
+        lines, worse = linktest.compare_baseline(base, now[:2], {'a.pas', 'b.pas'})
+        self.assertEqual((len(lines), worse), (2, 1))
 
 
-NM = """\
-build/sau2/proc1/tst_lock.o:00000000 T PROC1_$TST_LOCK
-build/sau2/proc1/get_locks.o:00000000 T PROC1_$GET_LOCKS
-build/sau2/tone/time.o:00000000 T TONE_$TIME
-build/sau2/tone/time.o:00000004 b tone_wait_type
-build/sau2/xpd/ptrace_opts.o:00000000 T XPD_$RESET_PTRACE_OPTS
-build/sau2/xpd/ptrace_opts.o:00000010 T XPD_$SET_PTRACE_OPTS
-build/sau2/proc1/sau2/set_lock.o:00000000 T PROC1_$SET_LOCK
-build/sau2/misc/zero_page.o:00000000 T ZERO_PAGE
-build/sau2/misc/zero_page.o:00000000 W weakling
+class MakeLogTest(unittest.TestCase):
+    def test_errors(self):
+        log = textwrap.dedent("""\
+            [AS] x.s
+            asm_compare: note: run atomic_op_error ends at image 0xE209FA
+            m68k-elf-ld: the fixup table must start past the split
+            m68k-elf-ld:sau2.ld:264: undefined symbol `MMAP_$MMAPE' referenced in expression
+            build/a.o: in function `F': undefined reference to `G_$H'
+            build/b.o: in function `F2': undefined reference to `G_$H'
+            make: *** [build/sau2/domain_os.elf] Error 1
+            check_rfc: FAIL header
+            """)
+        lines, undef = linktest.make_errors(log)
+        self.assertEqual(lines, ['m68k-elf-ld: the fixup table must start past the split',
+                                 'make: *** [build/sau2/domain_os.elf] Error 1',
+                                 'check_rfc: FAIL header'])
+        self.assertEqual(dict(undef), {'MMAP_$MMAPE': 1, 'G_$H': 2})
+
+
+class PathsTest(unittest.TestCase):
+    def test_outputs(self):
+        self.assertEqual(linktest.outputs('pbu/ec2_pbu.pas'),
+                         ('build/sau2/pascal/pbu/ec2_pbu.s', 'build/sau2/pascal/pbu/ec2_pbu.o'))
+
+    def test_rsync_keeps_scratch_build(self):
+        cmd = linktest.rsync_cmd('/s/domain_os', '/t/domain_os/')
+        self.assertEqual(cmd[-2:], ['/s/domain_os/', '/t/domain_os/'])
+        for x in ('--delete', '--exclude=/build', '--exclude=/dist', '-rlpc'):
+            self.assertIn(x, cmd)
+
+
+# ---------------------------------------------------------------- fakes
+
+FAKE_PASCAL_MODULES = """\
+import os, sys
+root = sys.argv[1] if len(sys.argv) > 1 else '.'
+for d in sorted(os.listdir(root)):
+    if os.path.isfile(os.path.join(root, d, d + '.pas')):
+        print('%s/%s.pas' % (d, d))
+"""
+
+# A fake dpc: refuses a module whose text has REFUSE, panics on PANIC,
+# else writes an empty assembly file to the -o path.
+FAKE_DPC = """\
+#!/bin/sh
+out=""; src=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2;;
+    *) src=$1; shift;;
+  esac
+done
+if grep -q REFUSE "$src"; then
+  echo "$src:2:3: error: a thing is not supported yet" >&2
+  echo "$src:4:3: error: another thing of 12 bytes is not supported yet" >&2
+  echo "partial" > "$out"
+  exit 1
+fi
+if grep -q PANIC "$src"; then
+  echo "thread 'main' panicked at x.rs:1:1:" >&2; echo "boom" >&2; exit 101
+fi
+printf '\\t.text\\n' > "$out"
 """
 
 
-class RuntimeTest(unittest.TestCase):
-    RT = {'M$MIS$LLL': 'T', 'M$OIS$LLL': 'T', 'M$OIU$LLL': 'T'}
-
-    def test_one_owner_with_the_same_globals(self):
-        defs = {'build/sau2/math/sau2/arith.o': dict(self.RT),
-                'build/sau2/tone/time.o': {'TONE_$TIME': 'T'}}
-        self.assertEqual(linktest.plan_runtime(self.RT, defs),
-                         ('build/sau2/math/sau2/arith.o', []))
-
-    def test_owner_with_other_globals(self):
-        defs = {'a.o': dict(self.RT, M_HELPER='T')}
-        obj, errs = linktest.plan_runtime(self.RT, defs)
-        self.assertIsNone(obj)
-        self.assertIn('defines M_HELPER besides', errs[0])
-
-    def test_owner_missing_a_global(self):
-        defs = {'a.o': {'M$MIS$LLL': 'T', 'M$OIS$LLL': 'T'}}
-        obj, errs = linktest.plan_runtime(self.RT, defs)
-        self.assertIsNone(obj)
-        self.assertIn('does not define M$OIU$LLL', errs[0])
-
-    def test_several_owners_or_none(self):
-        defs = {'a.o': {'M$MIS$LLL': 'T'}, 'b.o': {'M$OIS$LLL': 'T', 'M$OIU$LLL': 'T'}}
-        self.assertIn('a.o, b.o', linktest.plan_runtime(self.RT, defs)[1][0])
-        self.assertIn('no object', linktest.plan_runtime(self.RT, {})[1][0])
-
-    def test_members_each_replace_their_owner(self):
-        sb = {'PAS_$SET_BUILD': 'T'}
-        defs = {'build/sau2/runtime/m_arith.o': dict(self.RT),
-                'build/sau2/pas/set_build.o': dict(sb),
-                'build/sau2/tone/time.o': {'TONE_$TIME': 'T'}}
-        rt = {'linktest/runtime/m_arith.o': self.RT,
-              'linktest/runtime/pas_set_build.o': sb}
-        self.assertEqual(linktest.plan_runtime_members(rt, defs),
-                         (['build/sau2/runtime/m_arith.o', 'build/sau2/pas/set_build.o'], []))
-
-    def test_member_errors_name_the_member(self):
-        rt = {'linktest/runtime/m_arith.o': self.RT,
-              'linktest/runtime/pas_set_build.o': {'PAS_$SET_BUILD': 'T'}}
-        drops, errs = linktest.plan_runtime_members(rt, {'a.o': dict(self.RT)})
-        self.assertEqual(drops, ['a.o'])
-        self.assertEqual(len(errs), 1)
-        self.assertTrue(errs[0].startswith('pas_set_build.o: '), errs[0])
-        self.assertIn('no object', errs[0])
-
-    def test_two_members_one_owner(self):
-        a, b = {'M$MIS$LLL': 'T'}, {'M$OIS$LLL': 'T'}
-        drops, errs = linktest.plan_runtime_members(
-            {'x.o': a, 'y.o': b}, {'arith.o': dict(a, **b)})
-        self.assertEqual(drops, [])
-        self.assertEqual(len(errs), 2)
-        # two members with the same globals: each passes plan_runtime alone
-        drops, errs = linktest.plan_runtime_members(
-            {'x.o': a, 'y.o': dict(a)}, {'arith.o': dict(a)})
-        self.assertEqual(drops, ['arith.o'])
-        self.assertEqual(errs, ['y.o: arith.o is replaced by another member too'])
+def write(path, text, mode=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.write(text)
+    if mode:
+        os.chmod(path, mode)
 
 
-class DropTest(unittest.TestCase):
+def git(repo, *args):
+    subprocess.run(['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t',
+                    '-c', 'commit.gpgsign=false'] + list(args),
+                   check=True, capture_output=True)
+
+
+@unittest.skipUnless(shutil.which('git') and shutil.which('rsync'), 'needs git and rsync')
+class EndToEndTest(unittest.TestCase):
     def setUp(self):
-        self.defs = linktest.parse_nm(NM)
+        self.tmp = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmp, 'source')
+        dom = os.path.join(self.src, 'domain_os')
+        write(os.path.join(dom, 'tools', 'pascal_modules.py'), FAKE_PASCAL_MODULES)
+        write(os.path.join(dom, 'aa', 'aa.pas'), 'module aa;\n')
+        write(os.path.join(dom, 'bb', 'bb.pas'), 'module bb; REFUSE\n')
+        write(os.path.join(dom, 'cc', 'cc.pas'), 'module cc;\n')
+        git(self.src, 'init', '-q')
+        git(self.src, 'add', '-A')
+        git(self.src, 'commit', '-q', '-m', 'one')
+        self.dpc = os.path.join(self.tmp, 'bin', 'dpc')
+        write(self.dpc, FAKE_DPC, stat.S_IRWXU)
+        self.work = os.path.join(self.tmp, 'work')
+        self.base = os.path.join(self.tmp, 'baseline.txt')
+        self.old_as = linktest.AS
+        linktest.AS = 'true'            # an `assembler' that is always there
 
+    def tearDown(self):
+        linktest.AS = self.old_as
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_tool(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = linktest.main(['run', '--source', self.src, '--dpc', self.dpc,
+                                '--work', self.work, '--baseline', self.base, '--no-make',
+                                '-j', '2'] + list(extra))
+        return rc, out.getvalue()
+
+    def test_update_then_regression(self):
+        rc, out = self.run_tool('--update')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('2 of 3 module files compile; 1 refused by dpc', out)
+        with open(self.base) as fh:
+            text = fh.read()
+        self.assertIn('OK\taa/aa.pas\t-', text)
+        self.assertIn('REFUSED\tbb/bb.pas\ta thing is not supported yet', text)
+        tree = os.path.join(self.work, 'source', 'domain_os')
+        self.assertTrue(os.path.exists(os.path.join(tree, 'build/sau2/pascal/aa/aa.s')))
+        # a refused module leaves no assembly behind (make would take it)
+        self.assertFalse(os.path.exists(os.path.join(tree, 'build/sau2/pascal/bb/bb.s')))
+        with open(os.path.join(self.work, 'report.txt')) as fh:
+            rep = fh.read()
+        self.assertIn('REFUSED  bb/bb.pas: 2 error(s); first: bb/bb.pas:2:3: a thing', rep)
+        self.assertIn('another thing of N bytes is not supported yet', rep)
+
+        # an uncommitted edit in ../source is not picked up (HEAD export)
+        write(os.path.join(self.src, 'domain_os', 'aa', 'aa.pas'), 'module aa; PANIC\n')
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn('0 regression(s)', out)
+
+        # committed: a regression, exit 1
+        git(self.src, 'commit', '-q', '-am', 'two')
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('WORSE aa/aa.pas: OK -> FAILED (dpc panic: boom)', out)
+        self.assertIn('the baseline is at ../source', out)
+
+        # a refused module that now crashes dpc is a regression too
+        write(os.path.join(self.src, 'domain_os', 'aa', 'aa.pas'), 'module aa;\n')
+        git(self.src, 'commit', '-q', '-am', 'three')
+        self.assertEqual(self.run_tool('--update')[0], 0)
+        write(os.path.join(self.src, 'domain_os', 'bb', 'bb.pas'), 'module bb; PANIC\n')
+        git(self.src, 'commit', '-q', '-am', 'four')
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('WORSE bb/bb.pas: REFUSED (a thing is not supported yet) -> FAILED', out)
+
+        # a module that compiled and is gone (renamed, removed) is one too
+        git(self.src, 'rm', '-q', '-r', 'domain_os/cc')
+        git(self.src, 'commit', '-q', '-m', 'five')
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('GONE  cc/cc.pas: OK -> none', out)
+        git(self.src, 'revert', '--no-edit', 'HEAD')
+
+        # the working tree, on request
+        rc, out = self.run_tool('--working-tree', '--only', 'aa/aa.pas')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('1 of 1 module files compile', out)
+
+    def test_make(self):
+        dom = os.path.join(self.src, 'domain_os')
+        write(os.path.join(dom, 'Makefile'),
+              'PAS_MODULES := all\n'
+              'domain_os:\n\t@echo "dpc=$(DPC) mods=$(PAS_MODULES)"\n'
+              'check:\n\t@test -z "$(FAILCHECK)" || { echo "check_rfc: FAIL x"; exit 1; }\n')
+        git(self.src, 'add', '-A')
+        git(self.src, 'commit', '-q', '-m', 'mk')
+        if True:
+            def run(*extra):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    rc = linktest.main(['run', '--source', self.src, '--dpc', self.dpc,
+                                        '--work', self.work, '--baseline', self.base,
+                                        '-j', '2'] + list(extra))
+                with open(os.path.join(self.work, 'make.log')) as fh:
+                    return rc, out.getvalue(), fh.read()
+            # bb is refused: no make unless --link-anyway, which links the others
+            os.makedirs(self.work, exist_ok=True)
+            write(os.path.join(self.work, 'make.log'), '')
+            rc, out, _log = run()
+            self.assertEqual(rc, 0, out)
+            self.assertIn('make domain_os check: not run, 1 module file(s)', out)
+            rc, out, log = run('--link-anyway')
+            self.assertEqual(rc, 0, out)
+            self.assertIn('mods=aa/aa.pas cc/cc.pas', log)
+            self.assertIn('-k', log.splitlines()[0])
+            # every module compiles: the real make, and its failure is exit 1
+            write(os.path.join(dom, 'bb', 'bb.pas'), 'module bb;\n')
+            git(self.src, 'commit', '-q', '-am', 'fixed')
+            rc, out, log = run()
+            self.assertEqual(rc, 0, out)
+            self.assertIn('make domain_os check: OK', out)
+            self.assertIn('dpc=%s mods=all' % self.dpc, log)
+            rc, out, log = run('--make-var', 'FAILCHECK=1')
+            self.assertEqual(rc, 1, out)
+            self.assertIn('check_rfc: FAIL x', out)
+
+    def test_update_refused(self):
+        self.assertEqual(self.run_tool('--update', '--working-tree')[0], 2)
+        self.assertEqual(self.run_tool('--update', '--only', 'aa/aa.pas')[0], 2)
+        linktest.AS = 'no-such-assembler-here'
+        self.assertEqual(self.run_tool('--update')[0], 2)
+        self.assertFalse(os.path.exists(self.base))
+
+    def test_bad_baseline(self):
+        write(self.base, 'OK aa/aa.pas\n')
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = linktest.main(['run', '--source', self.src, '--dpc', self.dpc,
+                                '--work', self.work, '--baseline', self.base, '--no-make'])
+        self.assertEqual(rc, 2)
+        self.assertIn('baseline.txt:1: malformed line', err.getvalue())
+
+    def test_unknown_only(self):
+        rc, _out = self.run_tool('--only', 'zz/zz.pas')
+        self.assertEqual(rc, 2)
+
+    def test_source_left_alone(self):
+        self.run_tool()
+        p = subprocess.run(['git', '-C', self.src, 'status', '--porcelain'],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout, '')
+
+
+@unittest.skipUnless(shutil.which('git'), 'needs git')
+class WorktreeDefaultsTest(unittest.TestCase):
+    def test_main_checkout_of_a_worktree(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            main = os.path.join(tmp, 'domain-pascal')
+            write(os.path.join(main, 'f'), 'x\n')
+            git(main, 'init', '-q')
+            git(main, 'add', '-A')
+            git(main, 'commit', '-q', '-m', 'one')
+            wt = os.path.join(main, '.claude', 'worktrees', 'agent-x')
+            git(main, 'worktree', 'add', '-q', wt)
+            real = os.path.realpath(main)
+            self.assertEqual(os.path.realpath(linktest.main_checkout(wt)), real)
+            self.assertEqual(os.path.realpath(linktest.main_checkout(main)), real)
+            # not a repository at all: itself
+            self.assertEqual(linktest.main_checkout(tmp), tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_defaults_follow_main_checkout(self):
+        main = linktest.main_checkout()
+        self.assertEqual(linktest.default_dpc(),
+                         os.path.join(main, 'target', 'stable', 'bin', 'dpc'))
+        self.assertEqual(linktest.default_source(),
+                         os.path.abspath(os.path.join(main, '..', 'source')))
+
+
+class ModsurveyCompatTest(unittest.TestCase):
     def test_parse_nm(self):
-        self.assertEqual(self.defs['build/sau2/tone/time.o'], {'TONE_$TIME': 'T'})
-        self.assertEqual(self.defs['build/sau2/misc/zero_page.o'], {'ZERO_PAGE': 'T'})
-
-    def test_whole_objects(self):
-        drops, errs, notes = linktest.plan_drops(
-            {'PROC1_$TST_LOCK': 'T', 'PROC1_$GET_LOCKS': 'T'}, self.defs)
-        self.assertEqual(sorted(drops), ['build/sau2/proc1/get_locks.o',
-                                         'build/sau2/proc1/tst_lock.o'])
-        self.assertEqual((errs, notes), ([], []))
-
-    def test_local_symbols_do_not_block(self):
-        drops, errs, _ = linktest.plan_drops({'TONE_$TIME': 'T'}, self.defs)
-        self.assertEqual((drops, errs), (['build/sau2/tone/time.o'], []))
-
-    def test_object_with_other_globals(self):
-        drops, errs, _ = linktest.plan_drops({'XPD_$RESET_PTRACE_OPTS': 'T'}, self.defs)
-        self.assertEqual(drops, [])
-        self.assertIn('XPD_$SET_PTRACE_OPTS', errs[0])
-
-    def test_hand_assembly(self):
-        drops, errs, _ = linktest.plan_drops(
-            {'PROC1_$SET_LOCK': 'T'}, self.defs, {'build/sau2/proc1/sau2/set_lock.o'})
-        self.assertEqual(drops, [])
-        self.assertIn('hand-written assembly', errs[0])
-
-    def test_added(self):
-        drops, errs, notes = linktest.plan_drops({'IO_$ALLOC': 'T'}, self.defs)
-        self.assertEqual((drops, errs), ([], []))
-        self.assertIn('IO_$ALLOC', notes[0])
-
-
-# A made-up module M with map routines M_$A, M_$B (the unit) and C helpers
-# without map names: m_$tail (in a definer), m_$shared (its own object,
-# used only by the module), m_$util (its own object, also used outside).
-NM_WHOLE = """\
-build/sau2/m/a.o:00000000 T M_$A
-build/sau2/m/a.o:00000020 T m_$tail
-build/sau2/m/b.o:00000000 T M_$B
-build/sau2/m/shared.o:00000000 T m_$shared
-build/sau2/m/util.o:00000000 T m_$util
-build/sau2/m/other.o:00000000 T M_$ELSEWHERE
-build/sau2/m/other.o:00000010 T m_$other_helper
-build/sau2/n/user.o:00000000 T N_$USER
-build/sau2/n/nhelp.o:00000000 T n_$help
-"""
-NM_U = """\
-build/sau2/m/a.o:         U m_$shared
-build/sau2/m/a.o:         U m_$util
-build/sau2/m/b.o:         U m_$tail
-build/sau2/m/b.o:         U CRASH_SYSTEM
-build/sau2/n/user.o:         U m_$util
-build/sau2/n/user.o:         U n_$help
-"""
-MAP_NAMES = {'M_$A', 'M_$B', 'M_$ELSEWHERE', 'N_$USER', 'CRASH_SYSTEM'}
-
-
-class WholeModuleDropTest(unittest.TestCase):
-    def setUp(self):
-        self.defs = linktest.parse_nm(NM_WHOLE)
-        self.refs = linktest.parse_nm_undefined(NM_U)
-        self.whole = (self.refs, MAP_NAMES.__contains__)
-
-    def test_parse_nm_undefined(self):
-        self.assertEqual(self.refs['build/sau2/m/b.o'], {'m_$tail', 'CRASH_SYSTEM'})
-        self.assertNotIn('build/sau2/m/shared.o', self.refs)
-
-    def test_fragment_keeps_refusal(self):
-        _, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, self.defs)
-        self.assertEqual(len(errs), 1)
-        self.assertIn('m_$tail', errs[0])
-
-    def test_helpers_dropped(self):
-        drops, errs, notes = linktest.plan_drops(
-            {'M_$A': 'T', 'M_$B': 'T'}, self.defs, (), self.whole)
-        self.assertEqual(errs, [])
-        # a.o with its helper, b.o, and shared.o (used only by a.o); not
-        # util.o (n/user.o uses it), nor other.o (a map name), nor
-        # n/nhelp.o (another directory)
-        self.assertEqual(sorted(drops), ['build/sau2/m/a.o', 'build/sau2/m/b.o',
-                                         'build/sau2/m/shared.o'])
-        self.assertTrue(any('m_$tail' in n for n in notes))
-        self.assertTrue(any('m_$shared' in n for n in notes))
-
-    def test_helper_still_referenced(self):
-        defs = dict(self.defs)
-        refs = dict(self.refs)
-        refs['build/sau2/n/user.o'] = refs['build/sau2/n/user.o'] | {'m_$tail'}
-        _, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, defs, (),
-                                         (refs, MAP_NAMES.__contains__))
-        self.assertEqual(len(errs), 1)
-        self.assertIn('build/sau2/n/user.o still references', errs[0])
-
-    def test_map_name_outside_unit_refused(self):
-        drops, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T',
-                                              'm_$other_helper': 'T'},
-                                             self.defs, (), self.whole)
-        self.assertNotIn('build/sau2/m/other.o', drops)
-        self.assertTrue(any('M_$ELSEWHERE' in e and 'map names' in e for e in errs))
-
-    def test_hand_assembly_never_dropped(self):
-        drops, _, _ = linktest.plan_drops(
-            {'M_$A': 'T', 'M_$B': 'T'}, self.defs, {'build/sau2/m/shared.o'}, self.whole)
-        self.assertNotIn('build/sau2/m/shared.o', drops)
-
-    def test_chain_of_helpers(self):
-        # shared.o's own helper, in a fourth object, goes too
-        defs = linktest.parse_nm(NM_WHOLE + 'build/sau2/m/deep.o:00000000 T m_$deep\n')
-        refs = linktest.parse_nm_undefined(NM_U + 'build/sau2/m/shared.o:   U m_$deep\n')
-        drops, errs, _ = linktest.plan_drops({'M_$A': 'T', 'M_$B': 'T'}, defs, (),
-                                             (refs, MAP_NAMES.__contains__))
-        self.assertEqual(errs, [])
-        self.assertIn('build/sau2/m/deep.o', drops)
-
-
-NM_S = """\
-build/sau2/proc1/proc1_data.o:00000000 00000cc4 B PROC1_$DATA
-build/sau2/cal/cal_data.o:00000000 0000000c B CAL_$TIMEZONE
-build/sau2/term/term_data.o:00000000 00001398 D TERM_$DATA
-build/sau2/proc1/tst_lock.o:00000000 0000001c T PROC1_$TST_LOCK
-build/sau2/mst/mst_data.o:00000000 00000030 D MST_$PAGE_AVAIL_BITMAP
-"""
-
-SYMTAB = """\
-
-linktest/scsi.o:     file format elf32-m68k
-
-SYMBOL TABLE:
-00000000 l    df *ABS*\t00000000 scsi.pas
-00000000 l    d  .bss.moddata.SCSI_.SCSI_WIRED_DATA\t00000000 .bss.moddata.SCSI_.SCSI_WIRED_DATA
-00000012 l       *ABS*\t00000000 __dpc_data_size.SCSI_WIRED_DATA
-00000000 g       .text.SCSI_.OS_INIT_PROC\t00000000 SCSI_$CINIT
-00000004 g       .bss.moddata.SCSI_.SCSI_WIRED_DATA\t00000000 SCSI_$PRESENT
-00000000         *UND*\t00000000 PROC1_$DATA
-"""
-
-
-class DataTest(unittest.TestCase):
-    def setUp(self):
-        self.c_data = linktest.parse_nm_sizes(NM_S)
-
-    def test_pascal_data_section(self):
-        self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC2'), '.data')
-        self.assertEqual(linktest.pascal_data_section('.bss.moddata.PROC1_.WIRED_DATA'),
-                         'WIRED_DATA')
-        self.assertEqual(linktest.pascal_data_section('.moddata.FIM_'), '.data')
-        self.assertEqual(linktest.pascal_data_section('.moddata.TTY.WIRED_DATA'),
-                         'WIRED_DATA')
-        with self.assertRaises(linktest.SetupError):
-            linktest.pascal_data_section('.data.X')
-        self.assertEqual(linktest.data_size_symbol('.data'), '__dpc_data_size')
-        self.assertEqual(linktest.data_size_symbol('wired_data'),
-                         '__dpc_data_size.WIRED_DATA')
-
-    def test_initial_bytes_mismatch(self):
-        f = linktest.initial_bytes_mismatch
-        sec, o, obj = '.moddata.FIM_', 'FIM_$DATA', 'build/sau2/fim/fim_data.o'
-        self.assertIsNone(f(sec, b'\0\x08\x0c', o, obj, b'\0\x08\x0c\x77', set()))
-        self.assertIn('first at +0x2: dpc 0c, C 0d (1 byte(s) differ)',
-                      f(sec, b'\0\x08\x0c', o, obj, b'\0\x08\x0d', set()))
-        self.assertIn('the unit declares 0x3, FIM_$DATA (%s) has 0x2' % obj,
-                      f(sec, b'\0\x08\x0c', o, obj, b'\0\x08', set()))
-        self.assertIn('has a relocation at +0x1',
-                      f(sec, b'\0\0\0', o, obj, b'\0\0\0', {1, 2, 3, 4}))
-        # a relocation past the declared bytes does not matter
-        self.assertIsNone(f(sec, b'\0', o, obj, b'\0\0', {1}))
-
-    def test_relocated_offsets(self):
-        # a dpc block with an address initial value (bead domain-pascal-bjz):
-        # its relocated bytes are zeros in the object, not comparable
-        if shutil.which('m68k-elf-as') is None:
-            self.skipTest('m68k-elf-as not found')
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, 'a.s'), 'w') as f:
-                f.write('\t.section ".moddata.A","aw",@progbits\n.Ldata:\n'
-                        '\t.byte 0,7\n\t.space 2\n\t.long X+4\n\t.long .Ldata\n')
-            subprocess.run(['m68k-elf-as', '-m68010', '-o', 'a.o', 'a.s'], cwd=d, check=True)
-            self.assertEqual(linktest.relocated_offsets(d, 'a.o', '.moddata.A', 0, 12),
-                             set(range(4, 12)))
-            self.assertEqual(linktest.relocated_offsets(d, 'a.o', '.moddata.A', 4, 6),
-                             set(range(0, 6)))
-
-    def test_parse_nm_sizes(self):
-        self.assertEqual(self.c_data['PROC1_$DATA'],
-                         ('build/sau2/proc1/proc1_data.o', 0xCC4))
-        self.assertEqual(self.c_data['TERM_$DATA'][1], 0x1398)
-        self.assertNotIn('PROC1_$TST_LOCK', self.c_data)     # code
-
-    def test_anchor_symbols(self):
-        self.assertEqual(linktest.anchor_symbols({'.data.TERM_$DATA': 0xE2C9F0,
-                                                  '.bss.NAME_$DATA': 0xE80264,
-                                                  '.text.FOO': 1}),
-                         {'TERM_$DATA': 0xE2C9F0, 'NAME_$DATA': 0xE80264})
-
-    def test_owner_block(self):
-        self.assertEqual(linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
-                                             [], self.c_data),
-                         ('PROC1_$DATA', 'MODULE_DATA_DEFINE'))
-
-    def test_owner_map_name(self):
-        self.assertEqual(linktest.data_owner(0xE7B030, {}, {}, ['CAL_$TIMEZONE'],
-                                             self.c_data),
-                         ('CAL_$TIMEZONE', 'map name'))
-
-    def test_owner_anchor(self):
-        self.assertEqual(linktest.data_owner(0xE2C9F0, {}, {'TERM_$DATA': 0xE2C9F0},
-                                             [], self.c_data),
-                         ('TERM_$DATA', 'DATA_ANCHORS'))
-
-    def test_owner_none(self):
-        # a map name no C object defines (SCSI_$DATA_START is a link mark),
-        # a block whose C object is not linked, a C object with no image
-        # address (MST_$PAGE_AVAIL_BITMAP: placed by its users)
-        owner, why = linktest.data_owner(0xE88804, {'GONE': 0xE88804}, {},
-                                         ['SCSI_$DATA_START'], self.c_data)
-        self.assertIsNone(owner)
-        self.assertIn('0xE88804', why)
-
-    def test_owner_ambiguous(self):
-        owner, why = linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
-                                         ['CAL_$TIMEZONE'], self.c_data)
-        self.assertIsNone(owner)
-        self.assertIn('CAL_$TIMEZONE', why)
-
-    def test_same_owner_found_twice(self):
-        self.assertEqual(linktest.data_owner(0xE254E8, {'PROC1_$DATA': 0xE254E8}, {},
-                                             ['PROC1_$DATA'], self.c_data)[0],
-                         'PROC1_$DATA')
-
-    def test_extent(self):
-        self.assertIsNone(linktest.extent_error('s', 0xE254E8, 0xC, 'PROC1_$DATA', 'o', 0xCC4))
-        self.assertIsNone(linktest.extent_error('s', 0xE254E8, 0xCC4, 'PROC1_$DATA', 'o', 0xCC4))
-        e = linktest.extent_error('s', 0xE7B030, 0x12, 'CAL_$TIMEZONE', 'o', 0xC)
-        self.assertIn('0x12', e)
-
-    def test_symtab(self):
-        st = linktest.parse_symtab(SYMTAB)
-        self.assertIn(('SCSI_$PRESENT', 4, 'g', '.bss.moddata.SCSI_.SCSI_WIRED_DATA'), st)
-        self.assertIn(('PROC1_$DATA', 0, '', '*UND*'), st)
-        defines, declared = linktest.unit_data(st, {'.bss.moddata.SCSI_.SCSI_WIRED_DATA': 4})
-        self.assertEqual(defines, {'.bss.moddata.SCSI_.SCSI_WIRED_DATA': {'SCSI_$PRESENT': 4}})
-        self.assertEqual(declared, {'__dpc_data_size.SCSI_WIRED_DATA': 0x12})
-
-    def test_define_mismatches(self):
-        where = {'A': [(0x1004, 'B')], 'B': [(0x1010, 'B')]}
-        errs, unnamed = linktest.define_mismatches({'A': 4, 'B': 8, 'C': 2}, 0x1000, where)
-        self.assertEqual(unnamed, ['C'])
-        self.assertEqual(len(errs), 1)
-        self.assertIn('B', errs[0])
-
-    def test_a5_offsets(self):
-        asm = ("PKT_$NEXT_ID:\n\tlink.w\t%fp,#-4\n\tpea\t(%a5)\n"
-               "\tlea\t(.Ldata).l,%a5\n\tpea\t(0x50,%a5)\n"
-               "\tmove.w\t(0x5c,%a5),%d2\n\tmove.l\t(0x3c,%a5,%d0.w),%d0\n"
-               "\tlea\t(%a5),%a0\t| var at 0\n\tmovem.l\t(-0xc,%fp),%d2/%a5\n"
-               "\tmovea.l\t(-4,%fp),%a5\n")
-        self.assertEqual(linktest.a5_offsets(asm), {0x50, 0x5C, 0x3C, 0})
-        # the save alone is no data operand
-        self.assertEqual(linktest.a5_offsets(
-            "\tpea\t(%a5)\n\tlea\t(.Ldata.WIRED_DATA).l,%a5\n"), set())
-        # but a `pea (%a5)' that passes the variable at offset 0 is
-        self.assertEqual(linktest.a5_offsets("\tpea\t(%a5)\n\tjsr\tX\n"), {0})
-
-    def test_reloc_addends(self):
-        text = ("\t\t\t4: R_68K_32\tPKT_$DATA+0x50\n\t\t\ta: R_68K_32\tML_$SPIN_LOCK\n"
-                "\t\t\t10: R_68K_32\tPKT_$DATA+0x5c\n\t\t\t12: R_68K_32\tPKT_$DATA\n"
-                "\t\t\t14: R_68K_32\tPKT_$DATA_X+0x4\n")
-        self.assertEqual(linktest.reloc_addends(text, 'PKT_$DATA'), {0x50, 0x5C, 0})
-        self.assertEqual(linktest.offset_evidence({0x3C, 0x50}, {0, 0x50}),
-                         ([0x50], [0x3C]))
-
-    def test_unverified_count(self):
-        self.assertEqual(linktest.unverified_count(
-            'asm_compare: 3 object(s) ... 7 resolved to the image operand, 0 unverified; 1'), 0)
-        self.assertEqual(linktest.unverified_count('x, 2 unverified; y'), 2)
-        self.assertIsNone(linktest.unverified_count('crashed'))
-
-
-class FakeMap:
-    def __init__(self, syms):
-        self.syms = {n: sau2map.Symbol(n, a) for n, a in syms.items()}
-
-    def lookup(self, name):
-        return self.syms.get(name)
-
-
-class AbsoluteTest(unittest.TestCase):
-    def test_plan(self):
-        lm = FakeMap({'AST_$ZERO_BUFF': 0xFF8C00, 'ML_$LOCK': 0xE20B12})
-        absdefs, errs = linktest.plan_absolutes(
-            {'AST_$ZERO_BUFF', 'ML_$LOCK', 'MMU_$INSTALL', 'NOWHERE'},
-            {'MMU_$INSTALL'}, lm)
-        self.assertEqual(absdefs, {'AST_$ZERO_BUFF': 0xFF8C00})
-        self.assertEqual(len(errs), 2)
-        self.assertTrue(any('ML_$LOCK' in e and '0xE20B12' in e for e in errs))
-
-    def test_source(self):
-        s = linktest.absdefs_s({'AST_$ZERO_BUFF': 0xFF8C00})
-        self.assertIn('.globl  AST_$ZERO_BUFF', s)
-        self.assertIn('.equ    AST_$ZERO_BUFF, 0x00FF8C00', s)
-
-
-MAKEFILE = """\
-OBJS :=
-OBJS += a.o b.o
-ALL_SUBSYSTEM_OBJS := $(OBJS) c.o
-
-# Main target
-link: $(ALL_SUBSYSTEM_OBJS)
-\t@echo $^
-show:
-\t@echo $(ALL_SUBSYSTEM_OBJS)
-"""
-
-
-def _tmp():
-    t = os.path.join(linktest.REPO, 'tmp')
-    return t if os.path.isdir(t) else None
-
-
-def _snapshot(root):
-    """{relative path: (mtime, bytes)} of every file under root."""
-    snap = {}
-    for dp, dns, fns in os.walk(root):
-        for n in fns:
-            p = os.path.join(dp, n)
-            with open(p, 'rb') as f:
-                snap[os.path.relpath(p, root)] = (os.stat(p).st_mtime_ns, f.read())
-    return snap
-
-
-class RefreshTest(unittest.TestCase):
-    """The scratch copy is written; ../source (here a fake one) is only
-    read, in both the working-tree and the --rev mode."""
-
-    def test_rsync_direction(self):
-        cmd = linktest.rsync_cmd('/src/domain_os', '/work/source/domain_os')
-        self.assertEqual(cmd[-2:], ['/src/domain_os/', '/work/source/domain_os/'])
-        self.assertIn('--delete', cmd)
-        self.assertIn('--exclude=/build', cmd)
-        self.assertNotIn('--delete-excluded', cmd)
-        self.assertEqual(cmd[1], '-rlpc')    # no -t: changed files get a new mtime
-
-    @unittest.skipIf(shutil.which('rsync') is None or shutil.which('git') is None,
-                     'no rsync or git')
-    def test_source_untouched(self):
-        d = tempfile.mkdtemp(prefix='linktest-refresh-', dir=_tmp())
-        try:
-            src = os.path.join(d, 'source')
-            os.makedirs(os.path.join(src, 'domain_os', 'build'))
-            with open(os.path.join(src, 'domain_os', 'Makefile'), 'w') as f:
-                f.write(MAKEFILE)
-            with open(os.path.join(src, 'domain_os', 'a.c'), 'w') as f:
-                f.write('int a;\n')
-            with open(os.path.join(src, 'domain_os', 'build', 'a.o'), 'w') as f:
-                f.write('object\n')
-            git = ['git', '-C', src, '-c', 'user.name=t', '-c', 'user.email=t@t']
-            subprocess.run(git + ['init', '-q'], check=True)
-            subprocess.run(git + ['add', 'domain_os/Makefile', 'domain_os/a.c'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'x'], check=True)
-            with open(os.path.join(src, 'domain_os', 'a.c'), 'w') as f:
-                f.write('int a = 1; /* uncommitted */\n')
-            before = _snapshot(src)
-            work = os.path.join(d, 'work')
-            os.makedirs(work)
-
-            root = linktest.refresh(src, work)
-            self.assertTrue(root.startswith(work))
-            with open(os.path.join(root, 'a.c')) as f:
-                self.assertIn('uncommitted', f.read())
-            self.assertIn('-include linktest.mk', open(os.path.join(root, 'Makefile')).read())
-            self.assertFalse(os.path.exists(os.path.join(root, 'build', 'a.o')))
-            # scratch build/ survives a refresh
-            os.makedirs(os.path.join(root, 'build'), exist_ok=True)
-            open(os.path.join(root, 'build', 'keep.o'), 'w').close()
-
-            root = linktest.refresh(src, work, rev='HEAD')
-            with open(os.path.join(root, 'a.c')) as f:
-                self.assertEqual(f.read(), 'int a;\n')
-            self.assertEqual(_snapshot(src), before)
-            # back to the working tree: the older working-tree a.c must come
-            # out newer than an object built from the HEAD version
-            obj = os.path.join(root, 'build', 'a.o')
-            open(obj, 'w').close()
-            os.utime(os.path.join(src, 'domain_os', 'a.c'), (1, 1))
-            before = _snapshot(src)
-            root = linktest.refresh(src, work)
-            self.assertGreaterEqual(os.stat(os.path.join(root, 'a.c')).st_mtime_ns,
-                                    os.stat(obj).st_mtime_ns)
-            self.assertTrue(os.path.exists(os.path.join(root, 'build', 'keep.o')))
-            self.assertEqual(_snapshot(src), before)
-        finally:
-            shutil.rmtree(d)
-
-
-class HookTest(unittest.TestCase):
-    def test_patch_idempotent(self):
-        once = linktest.patch_makefile(MAKEFILE)
-        self.assertIn('-include linktest.mk', once)
-        self.assertLess(once.index('-include linktest.mk'), once.index('# Main target'))
-        self.assertEqual(linktest.patch_makefile(once), once)
-
-    def test_patch_needs_anchor(self):
-        with self.assertRaises(linktest.SetupError):
-            linktest.patch_makefile(MAKEFILE.replace('# Main target', '# Main'))
-
-    def test_check_swap(self):
-        self.assertEqual(linktest.check_swap(['a.o', 'x.o'], ['b.o'], ['x.o']), [])
-        self.assertEqual(len(linktest.check_swap(['a.o', 'b.o'], ['b.o'], ['x.o'])), 2)
-
-    @unittest.skipIf(shutil.which('make') is None, 'no make')
-    def test_hook_under_make(self):
-        """The hook swaps objects both in prerequisites and in recipes."""
-        d = tempfile.mkdtemp(prefix='linktest-hook-',
-                             dir=os.path.join(linktest.REPO, 'tmp')
-                             if os.path.isdir(os.path.join(linktest.REPO, 'tmp')) else None)
-        try:
-            for n in ('a.o', 'b.o', 'c.o', 'x.o'):
-                open(os.path.join(d, n), 'w').close()
-            with open(os.path.join(d, 'Makefile'), 'w') as f:
-                f.write(linktest.patch_makefile(MAKEFILE))
-
-            def make(target):
-                return subprocess.run(['make', '-s', target], cwd=d, capture_output=True,
-                                      text=True, check=True).stdout.split()
-            # without linktest.mk (-include): unchanged
-            self.assertEqual(make('link'), ['a.o', 'b.o', 'c.o'])
-            with open(os.path.join(d, 'linktest.mk'), 'w') as f:
-                f.write(linktest.linktest_mk(['b.o'], ['x.o']))
-            self.assertEqual(make('link'), ['a.o', 'c.o', 'x.o'])
-            self.assertEqual(make('show'), ['a.o', 'c.o', 'x.o'])
-            self.assertEqual(make('linktest-objs'), [])
-            self.assertEqual(linktest.make_var(d, 'LINKTEST_ALL_OBJS'), ['a.o', 'b.o', 'c.o'])
-            self.assertEqual(linktest.make_var(d, 'ALL_SUBSYSTEM_OBJS'), ['a.o', 'c.o', 'x.o'])
-        finally:
-            shutil.rmtree(d)
+        d = linktest.parse_nm('a.o:00000000 T FOO\na.o:00000004 t bar\nb.o:         U FOO\n')
+        self.assertEqual(d, {'a.o': {'FOO': 'T'}, 'b.o': {}})
 
 
 if __name__ == '__main__':

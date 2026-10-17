@@ -94,16 +94,30 @@ corpus: build
 conform: build
 	$(PYTHON) tools/conform.py manifest tests/conformance/manifest.txt
 
-# Link test (CLAUDE.md section 6.4; tests/link/README.md): the units of
-# tests/link/manifest.txt swapped for their C objects in a scratch copy of
-# ../source (tmp/linktest/), whose `make check' must pass.  About 20 s, so
-# not part of `make test'.  It exports a committed ../source revision
-# (LINKTEST_REV, default HEAD) so other agents' uncommitted edits there
-# cannot affect it; for the working tree run tools/linktest.py without --rev.
+# Link test (CLAUDE.md section 6.4; tests/link/README.md): ../source's
+# kernel is built from its Domain Pascal tree with dpc, so a module dpc
+# refuses does not link.  tools/linktest.py exports ../source at
+# LINKTEST_REV (default HEAD; `git archive', so other agents' uncommitted
+# edits there cannot affect it) into tmp/linktest/source, compiles every
+# module file of its tools/pascal_modules.py with LINKTEST_DPC as its
+# Makefile would (`dpc -o'), ranks the refusal kinds, and compares the
+# per-module statuses with tests/link/baseline.txt (exit 1 when a module's
+# status got worse, or a module that compiled is gone).  When every module
+# compiles it also runs ../source's `make domain_os check' in the scratch
+# copy.  The default dpc is the stable build of the committed HEAD (`make
+# stable') of the main checkout, also from a git worktree of it (which has
+# no stable build of its own); LINKTEST_DPC=target/debug/dpc tests the
+# working tree.  A few seconds (more once `make check' runs), and it
+# depends on another repository, so not part of `make test'.  The report
+# is tmp/linktest/report.txt; refresh the baseline with `python3
+# tools/linktest.py run --update'.
 LINKTEST_REV ?= HEAD
+LINKTEST_MAIN = $(dir $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null))
+LINKTEST_DPC ?= $(LINKTEST_MAIN)target/stable/bin/dpc
 
-linktest: build
-	$(PYTHON) tools/linktest.py run --rev $(LINKTEST_REV) tests/link/manifest.txt
+linktest:
+	@if [ ! -x $(LINKTEST_DPC) ]; then echo "linktest: $(LINKTEST_DPC) not built (make stable)"; exit 2; fi
+	$(PYTHON) tools/linktest.py run --rev $(LINKTEST_REV) --dpc $(LINKTEST_DPC)
 
 # Source survey (tools/srcsurvey.py; tests/conformance/README.md): dpc over
 # ../source's Pascal modules, each compiled routine compared with the

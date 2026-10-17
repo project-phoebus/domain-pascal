@@ -119,29 +119,14 @@ global and that the selector's source does not name it.
   (`tests/conformance/manifest.txt`).
 - `make exectest`: the execution tests link the archive
   (`tests/exec/README.md`).
-- `make linktest`: the kernel in a scratch copy of `../source` is linked
-  with this runtime: each member replaces the `../source` object that
-  defines its globals (`m_arith.o` the one `../source` extracts from this
-  archive, `pas_set_build.o` the C stand-in `pas/set_build.o`;
-  `tests/link/README.md`).
+- `make linktest`: once every module file of `../source`'s Pascal tree
+  compiles (or with `--link-anyway`), its kernel is linked in a scratch
+  copy with both members, extracted from the archive of the dpc under
+  test by `../source`'s own Makefile (`tests/link/README.md`).
 
 ## For `../source`
 
-`../source`'s Makefile extracts `m_arith.o` by name from the archive `dpc
---print-runtime=m68k` names, so the second member changes nothing there
-until it asks for it too.  A note to paste there:
-
-> dpc's runtime archive (`dpc --print-runtime=m68k`) now has a second
-> member, `pas_set_build.o`: PAS_$SET_BUILD (`I E11FA8 PAS_$SET_BUILD
-> size = 4C`), transcribed from the image instruction for instruction
-> (domain-pascal `runtime/m68k/pas_set_build.s`; the image's 0x4C bytes,
-> the zero word after the `rts` included).  Its section is
-> `.text.PAS_$SET_BUILD` and its only global is `PAS_$SET_BUILD`, as with
-> `pas/set_build.c`'s object.  To link the image's bytes instead of the C
-> stand-in, extract it as `m_arith.o` is (`$(AR) x $(DPC_RUNTIME)
-> pas_set_build.o`; name it explicitly: nothing references the symbol, so
-> an archive link would drop the member) and leave `pas/set_build.c` out
-> of the m68k link; keep the C and `pas/test/test_set_build.c` for the
-> host build.  domain-pascal's `make linktest` already links a scratch
-> copy of the kernel that way, and `make check` passes.
-
+`../source`'s Makefile extracts both members by name from the archive `dpc
+--print-runtime=m68k` names (`RUNTIME_OBJS`: `m_arith.o`,
+`pas_set_build.o`; read 2026-10-17), and links them like hand-written
+routines; its `check-asm` compares M$ARITH with the image.
