@@ -3874,6 +3874,43 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
     out
 }
 
+/// The by-value parameters (frame offsets) that `f`'s body reads in part:
+/// a load at another offset inside the parameter or of another width, a
+/// bit field of it, an element of it (`dpc-ir` `transfer_view`: a field
+/// or element of a type transfer of the parameter).
+fn partly_read_params(f: &Function) -> Vec<i32> {
+    let owner = |o: i32| {
+        f.value_params
+            .iter()
+            .find(|p| p.offset <= o && o < p.offset + p.ty.bytes() as i32)
+    };
+    let mut out = Vec::new();
+    walk(&f.body, &mut |n| {
+        let hit = match n {
+            Node::Expr(Expr::Load {
+                addr: Addr::Frame(o),
+                ty,
+            }) => owner(*o).filter(|p| p.offset != *o || p.ty.width != ty.width),
+            Node::Expr(Expr::Bits {
+                addr: Addr::Frame(o),
+                ..
+            }) => owner(*o),
+            Node::Addr(Addr::Index { base, .. }) => match **base {
+                Addr::Frame(o) => owner(o),
+                _ => None,
+            },
+            Node::Addr(Addr::Frame(o)) => owner(*o).filter(|p| p.offset != *o),
+            _ => None,
+        };
+        if let Some(p) = hit {
+            if !out.contains(&p.offset) {
+                out.push(p.offset);
+            }
+        }
+    });
+    out
+}
+
 /// Whether the set value `e` is, or combines with `*`, a one-byte set
 /// widened to a word (lowering's `set_value`; codegen-patterns 5.1,
 /// "One-byte sets").
@@ -9350,8 +9387,17 @@ impl Selector {
         // is loaded into D5 at entry, 0xE1377A.  RIP_$UPDATE_INT 0xE15922
         // likewise loads `(8)`, `(0x10)` and `(0x16)` but tests its byte
         // `(0x14,A6)`, read by its nested 0xE15888 as `(0x14,A1)`, in the
-        // frame, 0xE15962 and 0xE159C4).
-        params.retain(|&(o, _)| !self.is_uplevel(o));
+        // frame, 0xE15962 and 0xE159C4).  Any part of it counts: a nested
+        // routine may read one word of a longword through a type transfer
+        // (`args_t(a).lo`, an uplevel object at `a + 2`; bead
+        // domain-pascal-w0rj), as `dpc-ir`'s `scalar_locals` treats locals.
+        params.retain(|&(o, ty)| {
+            let n = ty.map_or(4, |t| t.bytes() as i32);
+            !self
+                .uplevel
+                .iter()
+                .any(|&(p, m)| p < o + n && o < p + m as i32)
+        });
         // A parameter whose address the body passes to a `var`, `out` or
         // `in out` parameter, or takes with `addr`, may change behind a
         // register: it is read from the frame at each use (bead
@@ -9369,6 +9415,14 @@ impl Selector {
             let n = ty.map_or(4, |t| t.bytes() as i32);
             !escaped.iter().any(|&e| o <= e && e < o + n)
         });
+        // A parameter read in part, through a type transfer to a record or
+        // array (`args_t(p).w`): read from its slot at each use, never
+        // loaded at entry (PROC1_$CREATE_P 0xE15156 `move.w (0xe,A6),D2`,
+        // 0xE15162 `move.w (0xc,A6),-(SP)`: both words of its longword,
+        // the longword never loaded; codegen-patterns 5.2, "Fields of a
+        // type-transferred variable").
+        let partial = partly_read_params(f);
+        params.retain(|(o, _)| !partial.contains(o));
         for (offset, ty) in params {
             let mine: Vec<ParamUse> = uses
                 .iter()
@@ -20382,6 +20436,48 @@ mod tests {
         );
     }
 
+    /// A by-value parameter read in part (a field of a type transfer of
+    /// it, `dpc-ir` `transfer_view`) is never loaded at entry: its whole
+    /// value in a register would give the wrong word (PROC1_$CREATE_P
+    /// 0xE15156, 0xE15162 read both words of its longword from the slot;
+    /// bead domain-pascal-w0rj).
+    #[test]
+    fn partly_read_params_stay_in_their_slots() {
+        let long = Scalar::signed(Width::Long);
+        let mut f = func(
+            0,
+            None,
+            vec![
+                store(Addr::Static(0), param(8, word())),
+                store(Addr::Static(2), param(10, word())),
+                store(Addr::Static(4), param(12, long)),
+                store(Addr::Static(8), param(12, long)),
+                store(
+                    Addr::Static(12),
+                    load(
+                        Addr::Index {
+                            base: Box::new(Addr::Frame(16)),
+                            index: Box::new(param(12, word())),
+                            scale: 2,
+                            offset: 0,
+                        },
+                        word(),
+                    ),
+                ),
+            ],
+        );
+        vparams(&mut f, &[(8, long), (12, long), (16, long)]);
+        // 8: a word at its offset and one inside; 12: whole only (and
+        // as a word at its offset: in part); 16: an element of it.
+        let mut got = partly_read_params(&f);
+        got.sort();
+        assert_eq!(got, [8, 12, 16]);
+        f.body.remove(4);
+        f.body.remove(1);
+        f.body.remove(0);
+        assert!(partly_read_params(&f).is_empty());
+    }
+
     #[test]
     fn unsettled_one_statement_stores_are_rejected() {
         // The value is a parameter that was not loaded at entry.
@@ -22906,6 +23002,26 @@ mod tests {
         let t = body_text(&f);
         assert_eq!(t[..2], ["move.w\t(0xa,%fp),%d0", "move.w\t%d0,(W).l"]);
         assert!(t.contains(&"cmpi.w\t#3,(8,%fp)".to_string()), "{t:?}");
+        // A part of a longword parameter reached by a nested routine (its
+        // low word through a type transfer, bead domain-pascal-w0rj): the
+        // whole parameter stays in its slot.
+        let body = || {
+            vec![
+                store(sym("W"), load(Addr::Frame(8), Scalar::signed(Width::Long))),
+                store(sym("X"), load(Addr::Frame(8), Scalar::signed(Width::Long))),
+            ]
+        };
+        let mut f = proc_(0, body());
+        vparams(&mut f, &[(8, Scalar::signed(Width::Long))]);
+        assert_eq!(body_text(&f)[0], "move.l\t(8,%fp),%d0");
+        let mut f = proc_(0, body());
+        vparams(&mut f, &[(8, Scalar::signed(Width::Long))]);
+        f.uplevel_refs = vec![(10, 2)];
+        // Not loaded: each store reads the slot, which is not settled.
+        assert_eq!(
+            err(&f),
+            "storing a parameter that was not loaded at entry is not supported yet"
+        );
     }
 
     /// Bead domain-pascal-s4a5: a body of one `if` (or `case` or loop)

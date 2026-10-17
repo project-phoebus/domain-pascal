@@ -6391,6 +6391,8 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
             // word aligned 4-byte integer"): even unless byte aligned.
             ExprKind::Deref(_) => (p.types.get(e.ty).align >= 2).then_some(true),
             ExprKind::WithRecord(w) => even(p, &with_binding(*w).0),
+            // `T(v)` seen in place ([`transfer_view`]): `v`'s address.
+            ExprKind::Transfer(x) => even(p, x),
             ExprKind::Var { var, .. } => match &p.var(*var).storage {
                 Storage::Static { offset, .. } => Some(offset % 2 == 0),
                 Storage::Frame { .. } => Some(true),
@@ -6424,7 +6426,9 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
             return true;
         }
         match &e.kind {
-            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => byte_aligned(p, base),
+            ExprKind::Field { base, .. }
+            | ExprKind::Index { base, .. }
+            | ExprKind::Transfer(base) => byte_aligned(p, base),
             ExprKind::WithRecord(w) => byte_aligned(p, &with_binding(*w).0),
             _ => false,
         }
@@ -6576,8 +6580,79 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 offset,
             })
         }
+        // `T(v)` with a field or element selected from it (`T(v).f`,
+        // `T(v)[i]`; [`transfer_view`]): `v`'s own storage seen as `T`.
+        ExprKind::Transfer(x) => {
+            transfer_view(p, e, x)?;
+            addr_of(p, x)
+        }
         _ => Err(unsupported(e.span, "this designator is")),
     }
+}
+
+/// Whether `e` reaches memory in place: a designator ([`SExpr::
+/// is_designator`]), or a field or element of a type transfer of one
+/// (`T(v).f`, [`transfer_view`]), or such a transfer itself.
+fn in_place(e: &SExpr) -> bool {
+    match &e.kind {
+        ExprKind::Transfer(x) => in_place(x),
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => in_place(base),
+        _ => e.is_designator(),
+    }
+}
+
+/// Check type transfer `e`, `T(x)`, as the base of a field or element
+/// selection (`T(v).f`, `T(v)[i]`): `x`'s storage read in place as type
+/// `T` ([`addr_of`]).
+///
+/// Ref "Type Transfer Functions", p. 4-197: "Domain Pascal type transfer
+/// functions enable you to change the type of a variable or expression
+/// within a statement"; "the type transfer function does not change any
+/// bits in the argument.  Domain Pascal just 'sees' the argument as a
+/// value of the new type" (also C.3.19, p. C-11).  The reference shows
+/// no selector after a transfer, but a value of a record or array type
+/// has its fields and elements, and with no bits changed they are the
+/// bytes of `x` at the field's offset.  The image reads them there, with
+/// no copy (codegen-patterns 5.2, "Fields of a type-transferred
+/// variable"): PROC1_$CREATE_P 0xE15156 `move.w (0xe,A6),D2` and 0xE15162
+/// `move.w (0xc,A6),-(SP)`, the two words of its longword value
+/// parameter; FILE_$SET_ACL 0xE5E08A `and.w (-0x44,A6),D0`, the third
+/// word of a UID copy at (-0x48,A6); the module-local 0xE09A6A's argument
+/// at AREA_$COPY 0xE092DE `move.w (-0xa,A6),-(SP)`, the low word of the
+/// integer32 local at (-0xc,A6).
+///
+/// The reference says nothing of a transfer as a variable (an assignment
+/// target, a `var` argument, `addr`, a `with` record; open question 46 in
+/// docs/reference-clarifications.md): `dpc-sema` keeps such a selection a
+/// value ([`SExpr::is_designator`] is false), so it is refused there, and
+/// passing one by address (in place, or a copy as for an expression:
+/// codegen-patterns 1.5) is refused here, no site being known
+/// ([`call`]).  Refused too: a transfer of a value that is not
+/// in memory (a function result, an expression: its temporary is not
+/// seen), of another size (the integer-subrange exception, p. 4-197: the
+/// bytes kept are then not `x`'s own), and of a volatile or device
+/// object (no site).
+fn transfer_view(p: &Program, e: &SExpr, x: &SExpr) -> Res<()> {
+    if !in_place(x) {
+        return Err(unsupported(
+            e.span,
+            "a field or element of a type transfer of a value that is not a variable (a \
+             function result, an expression) is",
+        ));
+    }
+    if p.types.size(x.ty) != p.types.size(e.ty) {
+        return Err(unsupported(
+            e.span,
+            "a field or element of a type transfer between integer types of different sizes is",
+        ));
+    }
+    if volatile_access(p, x).is_some() {
+        return Err(unsupported(
+            e.span,
+            "a field or element of a type transfer of a volatile or device object is",
+        ));
+    }
+    Ok(())
 }
 
 /// The index `ix` (the value of `index`, a word) of an element of an
@@ -6680,7 +6755,7 @@ fn overlay_var(p: &Program, e: &SExpr) -> Option<(u32, u32)> {
             }
             _ => None,
         },
-        ExprKind::Field { base, .. } => overlay_var(p, base),
+        ExprKind::Field { base, .. } | ExprKind::Transfer(base) => overlay_var(p, base),
         ExprKind::Index { base, index, .. } if index.value.is_some() => overlay_var(p, base),
         _ => None,
     }
@@ -6969,6 +7044,16 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                         writable: false,
                     });
                     continue;
+                }
+                // `T(v).f` by address: whether the original passed `v`'s
+                // bytes in place or a copy, as for an expression, is not
+                // seen ([`transfer_view`]).
+                if !matches!(a.expr.kind, ExprKind::Transfer(_)) && a.expr.selects_transfer() {
+                    return Err(unsupported(
+                        a.expr.span,
+                        "a field or element of a type transfer passed by address (in place or \
+                         as a copy: no site known) is",
+                    ));
                 }
                 if !a.expr.is_designator() {
                     // An expression: stored into a frame temporary, whose

@@ -2880,6 +2880,17 @@ impl<'t> Checker<'t> {
         if self.types.is_error(t.ty) {
             return t;
         }
+        if !t.is_designator() && t.transfers_variable() {
+            // Ref p. 4-197 says nothing of a transfer as a variable (open
+            // question 46); no ../source site assigns to one (bead
+            // domain-pascal-w0rj).
+            self.unsupported(
+                target.span,
+                "assigning to a type transfer of a variable or a field or element of one \
+                 (whether it is a variable: open question 46, ref p. 4-197)",
+            );
+            return self.error_expr(target.span);
+        }
         if !t.is_designator() {
             self.error(
                 target.span,
@@ -3071,7 +3082,14 @@ impl<'t> Checker<'t> {
                     None
                 }
             };
-            if !r.is_designator() && !self.types.is_error(r.ty) {
+            if !r.is_designator() && r.transfers_variable() {
+                // Open question 46 ([`Self::assign_target`]).
+                self.unsupported(
+                    it.record.span,
+                    "`with` over a type transfer of a variable or a field or element of one \
+                     (whether it is a variable: open question 46, ref p. 4-197)",
+                );
+            } else if !r.is_designator() && !self.types.is_error(r.ty) {
                 self.error(it.record.span, "with needs a record variable");
             }
             let mut scope = Scope::default();
@@ -4004,7 +4022,15 @@ impl<'t> Checker<'t> {
                     // ref 5.3.1 p. 5-6: "You must pass a variable as an
                     // argument to a variable parameter."
                     ParamMode::Var | ParamMode::Out | ParamMode::InOut => {
-                        if !x.is_designator() && !self.types.is_error(x.ty) {
+                        if !x.is_designator() && x.transfers_variable() {
+                            // As for an assignment ([`Self::assign_target`]).
+                            self.unsupported(
+                                a.span,
+                                "a type transfer of a variable or a field or element of one \
+                                 passed to a `var`, `out` or `in out` parameter (whether it is \
+                                 a variable: open question 46, ref p. 4-197)",
+                            );
+                        } else if !x.is_designator() && !self.types.is_error(x.ty) {
                             self.error(a.span, "a variable is needed for this parameter");
                         } else if self.same_type(x.ty, ty)
                             || self.univ_ptr_param(x.ty, ty)
@@ -4249,6 +4275,15 @@ impl<'t> Checker<'t> {
             Builtin::Addr => {
                 if matches!(xs[0].value, Some(ConstValue::Str(_) | ConstValue::Char(_))) {
                     self.unsupported(span, "`addr` of a string constant (ref p. 4-13)");
+                    return self.error_expr(span);
+                }
+                if !xs[0].is_designator() && xs[0].transfers_variable() {
+                    // Open question 46 ([`Self::assign_target`]).
+                    self.unsupported(
+                        span,
+                        "`addr` of a type transfer of a variable or a field or element of one \
+                         (whether it is a variable: open question 46, ref p. 4-197)",
+                    );
                     return self.error_expr(span);
                 }
                 if !xs[0].is_designator() {

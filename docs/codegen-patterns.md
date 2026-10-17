@@ -4455,6 +4455,47 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   address-register sites above all put the constant first, as do two with
   5 and 8).  Golden `tests/golden/expr/transfer`; test `dpc-ir`
   `type_transfers`.
+- **Fields of a type-transferred variable (Verified at three sites;
+  implemented, bead domain-pascal-w0rj).**  `T(v).f`, `T(v)[i]`: a
+  field or element selected from a type transfer of a variable, e.g.
+  `file_$uid_view_t(acl_uid).w2`, `proc1_$create_args_t(proc_type).
+  proc_type` in ../source.  Ref "Type Transfer Functions", p. 4-197 (PDF
+  p. 330, checked): a transfer changes "the data type of a variable or
+  expression"; "the type transfer function does not change any bits in
+  the argument.  Domain Pascal just 'sees' the argument as a value of the
+  new type" (also C.3.19, p. C-11).  So the field is the bytes of `v` at
+  the field's offset, and the image reads them there, with no copy:
+  - PROC1_$CREATE_P 0xE15156 `move.w (0xe,A6),D2` and 0xE15162 `move.w
+    (0xc,A6),-(SP)`: the two words of its longword `val_param` parameter
+    (../source reads them through `proc1_$create_args_t`); the longword
+    is never loaded whole, nor at entry;
+  - FILE_$SET_ACL 0xE5E08A `and.w (-0x44,A6),D0`: the third word of the
+    callee's copy of the UID value parameter at (-0x48,A6);
+  - AREA_$COPY 0xE092DE `move.w (-0xa,A6),-(SP)`: the low word of the
+    integer32 local at (-0xc,A6), passed by value to the module-local
+    0xE09A6A.
+
+  `dpc` (`dpc-ir` `lower.rs`, `addr_of` / `transfer_view`): the address
+  of `T(x)`, where `x` is a designator (or a field or element of another
+  such transfer), is `x`'s, so the field's offset or the element's index
+  applies to it; the alignment and overlay checks look through it.  A
+  by-value parameter read in part is never loaded at entry (`isel.rs`
+  `partly_read_params`; a scalar local read in part already stays in its
+  slot, 12.5 `other`), and neither is one any part of which a nested
+  routine reads (a word of it through a transfer: the PMAP_$FLUSH rule
+  of 12.2, by overlap, as for locals).  Refused (no site): a transfer of a value not in
+  memory (a function result, an expression: a temporary is not seen); a
+  transfer between integer types of different sizes (p. 4-197's subrange
+  exception); a volatile or device `x`; such a field passed by address
+  (in place, or copied as an expression is, 1.5: not seen).  The
+  reference does not say whether a transfer is a variable (open question
+  46, reference-clarifications), and no ../source site assigns to one,
+  passes one to a `var` parameter, takes its `addr` or opens a `with` on
+  it: `dpc-sema` refuses those as not supported yet
+  (`Expr::transfers_variable`).
+  Golden `tests/golden/expr/transfer_fields`; exec test
+  `transfer_fields`; tests `dpc-ir` `fields_of_type_transfers`, `isel`
+  `partly_read_params_stay_in_their_slots`.
 - **`with` (ref "With", pp. 4-211..4-214; C.3.18; the evaluation
   Verified at one site, the rest Uncertain; implemented, bead
   domain-pascal-5aw.19).**  P. 4-212: "Domain Pascal evaluates the

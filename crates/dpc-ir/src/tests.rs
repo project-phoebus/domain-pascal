@@ -3736,6 +3736,98 @@ end;
     assert_ne!(cells[0].1, cells[1].1);
 }
 
+/// A field or element of a type transfer of a variable (`T(v).f`,
+/// `T(v)[i]`; ref "Type Transfer Functions", p. 4-197, no bits changed)
+/// is a load of `v`'s own bytes at the field's offset, no copy
+/// (PROC1_$CREATE_P 0xE15156 `move.w (0xe,A6),D2`; FILE_$SET_ACL 0xE5E08A
+/// `and.w (-0x44,A6),D0`; bead domain-pascal-w0rj).
+#[test]
+fn fields_of_type_transfers() {
+    let src = "module m;
+type
+  uid_t = record high, low: integer32; end;
+  view_t = record
+    case integer of
+      1: (uid: uid_t);
+      2: (w0, w1: integer; w2: 0..65535; w3: integer);
+      3: (b0, b1: char);
+  end;
+  args_t = record stack_size, proc_type: integer; end;
+  arr_t = array[0..1] of integer;
+  tbl_t = array[1..4] of uid_t;
+var
+  w: integer;
+  c: char;
+  l: integer32;
+  tbl: tbl_t;
+procedure s(a: integer32; u: uid_t; var r: uid_t; i: integer);
+begin
+  w := args_t(a).proc_type;
+  w := view_t(u).w2;
+  c := view_t(r).b1;
+  w := arr_t(l)[1];
+  w := view_t(tbl[3]).w3;
+  w := view_t(tbl[i]).w1;
+  w := arr_t(view_t(u).uid.low)[0];
+end;";
+    let m = lower_src(src).unwrap();
+    let f = &m.functions[0];
+    let load = |i: usize| match &f.body[i].kind {
+        StmtKind::Store {
+            value: Expr::Load { addr, ty },
+            ..
+        } => (addr.clone(), *ty),
+        k => panic!("not a load stored: {k:?}"),
+    };
+    let word = Scalar::signed(Width::Word);
+    // The callee's copy of the longword value parameter (at -4): its
+    // second word.
+    assert_eq!(load(0), (Addr::Frame(-2), word));
+    // The UID's copy (at -12): its third word, a `0..65535`.
+    assert_eq!(load(1), (Addr::Frame(-8), Scalar::unsigned(Width::Word)));
+    // Through a `var` parameter's slot, at offset 1.
+    assert!(matches!(load(2), (Addr::Indirect { offset: 1, .. }, ty)
+        if ty == Scalar::unsigned(Width::Byte)));
+    // An element of the unit's longword (at 4): its second word.
+    assert_eq!(load(3), (Addr::Static(6), word));
+    // A constant element of the table (at 8), its last word: 8 + 2 * 8 + 6.
+    assert_eq!(load(4), (Addr::Static(30), word));
+    // A run-time element: indexed, the field folded into the offset.
+    assert!(matches!(
+        load(5).0,
+        Addr::Index {
+            scale: 8,
+            offset: -6,
+            ..
+        }
+    ));
+    // A transfer of a field of a transfer: the copy's `low` (at -8).
+    assert_eq!(load(6), (Addr::Frame(-8), word));
+    // Not designators (ref p. 4-197 does not say a transfer is a
+    // variable): refused where one is needed; and a transfer of a value
+    // not in memory (its temporary is not seen).
+    let refused = |stmt: &str| {
+        errs(&src.replace("begin\n  w :=", &format!("begin\n  {stmt}\n  w :="))).join("\n")
+    };
+    // Open question 46: assignment, `var` argument, `addr`, `with`.
+    assert!(refused("args_t(l).stack_size := 1;")
+        .contains("assigning to a type transfer of a variable"));
+    assert!(refused("view_t(u).uid := u;").contains("open question 46"));
+    assert!(refused("w := ord(addr(args_t(l).proc_type) = nil);")
+        .contains("`addr` of a type transfer of a variable"));
+    assert!(refused("with args_t(a) do w := proc_type;")
+        .contains("`with` over a type transfer of a variable"));
+    // Not of a variable: still the plain errors.
+    assert!(
+        refused("with args_t(l + 1) do w := proc_type;").contains("with needs a record variable")
+    );
+    assert!(refused("w := args_t(l + 1).proc_type;")
+        .contains("type transfer of a value that is not a variable"));
+    assert!(refused("s(args_t(l).proc_type, u, r, i);").contains("type transfer passed by address"));
+    assert!(refused("s(a, u, view_t(u).uid, i);")
+        .contains("passed to a `var`, `out` or `in out` parameter"));
+}
+
 /// Type transfers (ref "Type Transfer Functions", pp. 4-197..4-199): no
 /// code between types of one size (a load or a constant retyped, anything
 /// else in a same-width [`Expr::Convert`]); between integers a conversion

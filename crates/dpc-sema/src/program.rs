@@ -490,6 +490,36 @@ impl Expr {
             _ => false,
         }
     }
+
+    /// A type transfer (`T(v)`) or a field or element selected from one
+    /// (`T(v).f`, `T(v)[i].g`).  Ref "Type Transfer Functions", p. 4-197:
+    /// "Domain Pascal just 'sees' the argument as a value of the new type";
+    /// the reference does not say whether such a selection may be
+    /// assigned to, passed to a `var` parameter or have its address taken,
+    /// so it is no designator.  A field of one is read in place
+    /// (`dpc-ir` `transfer_view`).
+    pub fn selects_transfer(&self) -> bool {
+        match &self.kind {
+            ExprKind::Transfer(_) => true,
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => base.selects_transfer(),
+            _ => false,
+        }
+    }
+
+    /// A type transfer of a variable (`T(v)`, `T(v.g)`, `T(U(v).f)`) or a
+    /// field or element selected from one: whether it is itself a variable
+    /// (an assignment target, a `var` argument, `addr`'s operand, a `with`
+    /// record) is open question 46 (docs/reference-clarifications.md;
+    /// ref p. 4-197 does not say).
+    pub fn transfers_variable(&self) -> bool {
+        match &self.kind {
+            ExprKind::Transfer(x) => x.is_designator() || x.transfers_variable(),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                base.transfers_variable()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Predeclared routines implemented so far.
