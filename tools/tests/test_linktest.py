@@ -16,6 +16,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
@@ -420,6 +421,284 @@ class EndToEndTest(unittest.TestCase):
         p = subprocess.run(['git', '-C', self.src, 'status', '--porcelain'],
                            capture_output=True, text=True)
         self.assertEqual(p.stdout, '')
+
+
+# A fake dpc with phases, like the real one: `SEMA:word' in a file of the
+# unit (the module file or a file it includes) is a sema refusal, reported
+# by --check-only and by a full compile; `ISEL:word' is a codegen refusal,
+# reported by a full compile only and only when there is no sema error
+# (dpc stops at the first phase that fails); `PANIC' panics in codegen,
+# `SEGV' dies of SIGSEGV there and `HANG' sleeps for a minute;
+# `CALLS:g' is dpc's sema error for a call of an internal routine with no
+# body when g has an `extern' heading (stubbed, not named with
+# --module-routine).
+FAKE_PHASED_DPC = r"""#!PYTHON
+import os, re, sys
+args = sys.argv[1:]
+src, check = args[-1], '--check-only' in args
+out = args[args.index('-o') + 1] if '-o' in args else None
+files = [src] + [f for f in re.findall(r"(?m)^\s*%include\s+'([^']+)'", open(src).read())
+                 if os.path.exists(f)]
+def scan(phase):
+    return ['%s:%d:3: error: %s %s is not supported yet' % (f, n, phase.lower(), m.group(1))
+            for f in files for n, ln in enumerate(open(f), 1)
+            for m in re.finditer(phase + r':(\w+)', ln)]
+ext = {n for f in files for n in re.findall(r'procedure (\w+);[^\n]*\bextern;', open(f).read())}
+calls = ['%s:%d:3: error: call of internal routine `%s`, which has no body in this unit '
+         '(ref 5.2 p. 5-4; name it with --module-routine)' % (f, n, m.group(1).upper())
+         for f in files for n, ln in enumerate(open(f), 1)
+         for m in re.finditer(r'CALLS:(\w+)', ln) if m.group(1) in ext]
+errs = (scan('SEMA') + calls) or ([] if check else scan('ISEL'))
+if errs:
+    sys.stderr.write('\n'.join(errs) + '\n')
+    sys.exit(1)
+if not check and any('PANIC' in open(f).read() for f in files):
+    sys.stderr.write("thread 'main' panicked at x.rs:1:1:\nboom\n")
+    sys.exit(101)
+if not check and any('SEGV' in open(f).read() for f in files):
+    import signal
+    os.kill(os.getpid(), signal.SIGSEGV)
+if not check and any('HANG' in open(f).read() for f in files):
+    import time
+    time.sleep(60)
+if out:
+    open(out, 'w').write('\t.text\n')
+""".replace('PYTHON', sys.executable)
+
+# module -> {file: text}: x hides a codegen refusal behind a sema one; y
+# has the sema one alone, z the codegen one alone (in two routines); w
+# stops at a declaration; v panics in codegen; u compiles
+PHASED = {
+    'x/x.pas': {'x/x.pas': "module x;\n%include 'x/f.pas';\n",
+                'x/f.pas': 'procedure p;\nbegin\n  SEMA:alpha;\nend;\n'
+                           'procedure q;\nbegin\n  ISEL:beta;\nend;\n'},
+    'y/y.pas': {'y/y.pas': "module y;\n%include 'y/f.pas';\n",
+                'y/f.pas': 'procedure r;\nbegin\n  SEMA:alpha;\nend;\n'},
+    'z/z.pas': {'z/z.pas': "module z;\n%include 'z/f.pas';\n",
+                'z/f.pas': 'procedure s;\nbegin\n  ISEL:beta;\nend;\n'
+                           'procedure t;\nbegin\n  ISEL:beta;\nend;\n'},
+    'w/w.pas': {'w/w.pas': "module w;\nconst c = SEMA:decl;\n%include 'w/f.pas';\n",
+                'w/f.pas': 'procedure o;\nbegin\n  ISEL:gamma;\nend;\n'},
+    'v/v.pas': {'v/v.pas': "module v;\n%include 'v/f.pas';\n",
+                'v/f.pas': 'procedure n;\nbegin\n  PANIC;\nend;\n'},
+    'u/u.pas': {'u/u.pas': "module u;\n%include 'u/f.pas';\n",
+                'u/f.pas': 'procedure m;\nbegin\nend;\n'},
+}
+
+SEMA_ALPHA = 'sema alpha is ' + REFUSAL
+ISEL_BETA = 'isel beta is ' + REFUSAL
+
+
+def phased_tree(root):
+    for files in PHASED.values():
+        for f, text in files.items():
+            write(os.path.join(root, f), text)
+
+
+def snapshot(root):
+    out = {}
+    for d, _dirs, files in os.walk(root):
+        for f in files:
+            with open(os.path.join(d, f)) as fh:
+                out[os.path.relpath(os.path.join(d, f), root)] = fh.read()
+    return out
+
+
+class DeepPassTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.tree = os.path.join(self.tmp, 'domain_os')
+        phased_tree(self.tree)
+        write(os.path.join(self.tree, 'build', 'junk.s'), 'x\n')
+        self.dpc = os.path.join(self.tmp, 'dpc')
+        write(self.dpc, FAKE_PHASED_DPC, stat.S_IRWXU)
+        self.work = os.path.join(self.tmp, 'work')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_overlay(self):
+        dst = os.path.join(self.tmp, 'ov')
+        linktest.overlay_tree(self.tree, dst, {'x/x.pas', 'x/f.pas', 'x/gone.pas'})
+        self.assertFalse(os.path.islink(os.path.join(dst, 'x')))
+        self.assertFalse(os.path.islink(os.path.join(dst, 'x', 'f.pas')))
+        self.assertTrue(os.path.islink(os.path.join(dst, 'y')))
+        self.assertFalse(os.path.lexists(os.path.join(dst, 'build')))
+        self.assertFalse(os.path.lexists(os.path.join(dst, 'x', 'gone.pas')))
+        with open(os.path.join(dst, 'y', 'f.pas')) as fh:
+            self.assertIn('SEMA:alpha', fh.read())
+
+    def test_module_compile_sees_the_first_phase_only(self):
+        r, _err = linktest.compile_module(self.dpc, self.tree, 'x/x.pas', assemble=False)
+        self.assertEqual((r.status, r.kinds), ('REFUSED', [SEMA_ALPHA]))
+
+    def test_deep_pass_sees_every_phase(self):
+        before = snapshot(self.tree)
+        d = linktest.deep_pass(self.dpc, self.tree, 'x/x.pas', self.work)
+        self.assertEqual(d.kinds, {SEMA_ALPHA: ['p'], ISEL_BETA: ['q']})
+        self.assertEqual((d.stubbed, d.problem), (['p', 'q'], None))
+        self.assertEqual(snapshot(self.tree), before)      # the tree is only read
+        self.assertTrue(os.path.exists(linktest.deep_dir(self.work, 'x/x.pas') + '.log'))
+        d = linktest.deep_pass(self.dpc, self.tree, 'z/z.pas', self.work)
+        self.assertEqual((d.kinds, d.stubbed), ({ISEL_BETA: ['s', 't']}, ['s', 't']))
+
+    def test_deep_pass_stops_short(self):
+        d = linktest.deep_pass(self.dpc, self.tree, 'w/w.pas', self.work)
+        self.assertEqual(d.kinds, {'sema decl is ' + REFUSAL: ['-']})
+        self.assertEqual(d.problem, 'check stage, stops at an error outside any routine')
+        d = linktest.deep_pass(self.dpc, self.tree, 'v/v.pas', self.work)
+        self.assertEqual(d.kinds, {'dpc panic: boom': ['-']})
+        self.assertEqual(d.problem, 'codegen stage, dpc failed without an error')
+
+    def one_routine_module(self, name, body):
+        write(os.path.join(self.tree, name, name + '.pas'),
+              "module %s;\n%%include '%s/f.pas';\n" % (name, name))
+        write(os.path.join(self.tree, name, 'f.pas'), 'procedure k;\nbegin\n  %s;\nend;\n' % body)
+        return '%s/%s.pas' % (name, name)
+
+    def test_deep_pass_signal_and_timeout(self):
+        d = linktest.deep_pass(self.dpc, self.tree, self.one_routine_module('sg', 'SEGV'),
+                               self.work)
+        self.assertEqual(d.kinds, {'dpc: signal 11': ['-']})
+        self.assertEqual(d.problem, 'codegen stage, dpc died of signal 11')
+        old = linktest.DPC_TIMEOUT
+        linktest.DPC_TIMEOUT = 3
+        try:
+            d = linktest.deep_pass(self.dpc, self.tree, self.one_routine_module('hg', 'HANG'),
+                                   self.work)
+        finally:
+            linktest.DPC_TIMEOUT = old
+        self.assertEqual(d.kinds, {'dpc: timeout': ['-']})
+        self.assertEqual(d.problem, 'codegen stage, dpc timed out (3 s)')
+
+    def test_deep_pass_exception_is_recorded(self):
+        with unittest.mock.patch.object(linktest.srcsurvey, 'Module',
+                                        side_effect=RuntimeError('a bug')):
+            d = linktest.deep_pass(self.dpc, self.tree, 'x/x.pas', self.work)
+        self.assertEqual(d.problem, 'the deep pass failed: RuntimeError: a bug')
+        self.assertFalse(d.complete)
+
+    def test_stop_reasons(self):
+        def mod(problem=None, rc=1):
+            m = type('Mod', (), {})()
+            m.problem, m.last_rc = problem, rc
+            return m
+        loc = lambda path, line: 'p' if path == 'in.pas' else None   # noqa: E731
+        f = linktest.stop_reason
+        self.assertEqual(f('check', mod('after 50 dpc runs of stubbing (gave up)'), '', loc),
+                         ('check stage, after 50 dpc runs of stubbing (gave up)', None))
+        self.assertEqual(f('codegen', mod(rc=101), "thread 'main' panicked at a:1:1:\nboom\n",
+                           loc),
+                         ('codegen stage, dpc failed without an error', 'dpc panic: boom'))
+        self.assertEqual(f('codegen', mod(rc=-6), '', loc),
+                         ('codegen stage, dpc died of signal 6', 'dpc: signal 6'))
+        self.assertEqual(f('codegen', mod(rc=None), '', loc)[1], 'dpc: timeout')
+        self.assertEqual(f('check', mod(), diag('out.pas', 2, 'x'), loc),
+                         ('check stage, stops at an error outside any routine', None))
+        self.assertEqual(f('check', mod(), diag('in.pas', 2, 'x'), loc)[0],
+                         'check stage, nothing new to stub (the errors fall in routines '
+                         'stubbed already)')
+
+    def test_call_of_a_stubbed_routine_is_no_kind(self):
+        # g has no header address, so srcsurvey cannot name it with
+        # --module-routine once stubbed: h is charged with calling it
+        write(os.path.join(self.tree, 't', 't.pas'), "module t;\n%include 't/f.pas';\n")
+        write(os.path.join(self.tree, 't', 'f.pas'),
+              'procedure g; internal;\nbegin\n  SEMA:alpha;\nend;\n'
+              'procedure h;\nbegin\n  CALLS:g;\nend;\n')
+        d = linktest.deep_pass(self.dpc, self.tree, 't/t.pas', self.work)
+        self.assertEqual(d.kinds, {SEMA_ALPHA: ['g']})
+        self.assertEqual((d.stubbed, d.unseen, d.problem), (['g', 'h'], [('h', 'G')], None))
+        self.assertFalse(d.complete)
+        r = linktest.Result('t/t.pas', 'REFUSED', 1, [SEMA_ALPHA])
+        r.deep = d
+        self.assertEqual(linktest.rank_kinds([r]), [(SEMA_ALPHA, 0, 1)])   # not `only'
+        self.assertIn('INCOMPLETE: 1 routine(s) stubbed for a call of a stubbed internal '
+                      'routine', '\n'.join(linktest.module_lines([r])))
+
+    def test_rankings_and_closest(self):
+        mods = sorted(PHASED)
+        results = linktest.compile_all(self.dpc, self.tree, mods, 2, assemble=False)
+        # dpc's own runs: alpha alone blocks x and y, beta z
+        self.assertEqual(linktest.rank_kinds(results, False),
+                         [(SEMA_ALPHA, 2, 2), ('dpc panic: boom', 1, 1), (ISEL_BETA, 1, 1),
+                          ('sema decl is ' + REFUSAL, 1, 1)])
+        linktest.deep_all(self.dpc, self.tree, results, self.work, 2)
+        by = {r.module: r for r in results}
+        self.assertEqual(by['x/x.pas'].all_kinds, [SEMA_ALPHA, ISEL_BETA])
+        self.assertEqual(by['x/x.pas'].kinds, [SEMA_ALPHA])     # the status's kinds stay
+        self.assertEqual(by['x/x.pas'].status, 'REFUSED')
+        self.assertIsNone(by['u/u.pas'].deep)
+        self.assertFalse(by['w/w.pas'].complete)
+        # over every phase: x is blocked by both; w stopped short, no `only'
+        rank = linktest.rank_kinds(results)
+        self.assertEqual(rank, [(ISEL_BETA, 1, 2), (SEMA_ALPHA, 1, 2), ('dpc panic: boom', 0, 1),
+                                ('sema decl is ' + REFUSAL, 0, 1)])
+        self.assertEqual([r.module for r in linktest.closest(results)],
+                         ['y/y.pas', 'z/z.pas', 'v/v.pas', 'w/w.pas', 'x/x.pas'])
+        lines = linktest.format_closest(results, 2)
+        self.assertIn('  %5d  %8s  y/y.pas: %s' % (1, 1, SEMA_ALPHA), lines)
+        self.assertIn('3 more module(s)', lines[-1])
+        self.assertIn('w/w.pas (incomplete)', '\n'.join(linktest.format_closest(results)))
+        text = '\n'.join(linktest.module_lines(results))
+        self.assertIn('all phases: 2 kind(s), 2 routine(s) stubbed\n'
+                      '           * %s  [p]\n           * %s  [q]' % (SEMA_ALPHA, ISEL_BETA),
+                      text)
+        self.assertIn('INCOMPLETE: check stage, stops at an error outside any routine', text)
+
+
+@unittest.skipUnless(shutil.which('git') and shutil.which('rsync'), 'needs git and rsync')
+class DeepEndToEndTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmp, 'source')
+        dom = os.path.join(self.src, 'domain_os')
+        write(os.path.join(dom, 'tools', 'pascal_modules.py'), FAKE_PASCAL_MODULES)
+        phased_tree(dom)
+        git(self.src, 'init', '-q')
+        git(self.src, 'add', '-A')
+        git(self.src, 'commit', '-q', '-m', 'one')
+        self.dpc = os.path.join(self.tmp, 'bin', 'dpc')
+        write(self.dpc, FAKE_PHASED_DPC, stat.S_IRWXU)
+        self.work = os.path.join(self.tmp, 'work')
+        self.base = os.path.join(self.tmp, 'baseline.txt')
+        self.old_as = linktest.AS
+        linktest.AS = 'true'
+
+    def tearDown(self):
+        linktest.AS = self.old_as
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_tool(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = linktest.main(['run', '--source', self.src, '--dpc', self.dpc,
+                                '--work', self.work, '--baseline', self.base, '--no-make',
+                                '-j', '2'] + list(extra))
+        with open(os.path.join(self.work, 'report.txt')) as fh:
+            return rc, out.getvalue(), fh.read()
+
+    def test_run(self):
+        rc, out, rep = self.run_tool('--update')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('1 of 6 module files compile; 4 refused by dpc, 1 dpc failure(s)', out)
+        self.assertRegex(out, r'linktest: compile \d+\.\d s, deep pass \d+\.\d s \(-j 2\)')
+        self.assertIn('error kinds over every phase', out)
+        self.assertIn('     1      2  ' + ISEL_BETA, out)
+        self.assertIn('closest to compiling', out)
+        self.assertIn('      1         1  y/y.pas: ' + SEMA_ALPHA, out)
+        self.assertIn('* %s  [q]' % ISEL_BETA, rep)
+        self.assertIn('== error kinds of the module compiles alone', rep)
+        # the baseline is the module compiles' (status, first kind), as before
+        with open(self.base) as fh:
+            self.assertIn('REFUSED\tx/x.pas\t%s\n' % SEMA_ALPHA, fh.read())
+        # without the deep pass: dpc's own runs, as before
+        rc, out, rep = self.run_tool('--no-deep')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('deep pass', out)
+        self.assertIn('first failing phase only', out)
+        self.assertIn('     2      2  ' + SEMA_ALPHA, out)
+        self.assertNotIn('all phases', rep)
 
 
 @unittest.skipUnless(shutil.which('git'), 'needs git')

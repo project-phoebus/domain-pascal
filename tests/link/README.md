@@ -15,11 +15,15 @@ test builds that tree with our dpc, in a **scratch copy**, the way
     python3 tools/linktest.py run [--rev REV | --working-tree] [--dpc DPC] [-j N]
                                   [--only MODULE ...] [--update] [--link-anyway]
                                   [--no-make] [--make-var VAR=VALUE ...] [--top N]
+                                  [--closest N] [--no-deep]
 
-A run takes a few seconds (the 109 module files compile in about 2 s in
-parallel), so it is not part of `make test`, which runs the harness's
-unit tests (`tools/tests/test_linktest.py`: a fake `../source` git
-repository and a fake dpc, no kernel needed).
+A run takes from seconds to minutes; both times are printed.  The 109
+module files compile in under a second in parallel.  The deep pass of
+step 5 took about 6 s with 12 jobs on an idle machine, and 83-102 s
+under load (ast/ast.pas alone took about 22 s), so `make linktest` can
+take about 1.5 minutes.  It is not part of `make test`, which runs the harness's unit tests
+(`tools/tests/test_linktest.py`: a fake `../source` git repository and
+fake dpcs, one of them with phases, no kernel needed).
 
 ## How ../source builds the kernel
 
@@ -95,14 +99,69 @@ Read from `../source/domain_os/Makefile` and `tools/pascal_modules.py`
    are listed in `linktest.TYPE_PHRASES` (`functions returning T are not
    supported yet`, `a packed field of type T that is not a whole byte ...`,
    the initial-value refusals, the type-mismatch errors), so one refusal is
-   one kind whatever the type.  dpc reports at most one refusal per statement and
-   may stop early, so a module's kinds are the ones it reported this run,
-   not necessarily all it has.
-5. **Ranking.**  Per kind: *only*, the modules where it is the only kind
-   left (fixing it lets those modules compile, as far as dpc reported),
-   and *total*, the modules it appears in; sorted by only, then total.
-   The top `--top` (20) are printed; all are in the report.
-6. **Baseline** `tests/link/baseline.txt`: a header with the `../source`
+   one kind whatever the type.  These kinds are only those of dpc's
+   first failing phase: a sema or IR error stops dpc before isel, so a
+   module's codegen refusals are not reported while it has one (bead
+   domain-pascal-ngbd: fixing a kind that "alone blocked 3 of 4
+   modules" by this count unblocked none of them).
+5. **Deep pass** (`--no-deep` skips it).  Every module dpc refused (or
+   failed on, other than a timeout) is compiled again the way
+   `tools/srcsurvey.py`'s stages "check" (`dpc --check-only`) and
+   "codegen" do it, by srcsurvey's own code (`survey_stage`): each
+   routine a diagnostic falls in is stubbed and dpc is run again, until
+   the module passes; stubbed internal routines are named with
+   `--module-routine` (their code sections from the SAU2 map, as
+   srcsurvey does), so their callers still compile.  So every routine is
+   charged with the errors of the first run that rejects it, and the
+   module gets its kinds over **all phases**, each with the routines
+   charged with it.  The module file and its fragments are copied into an
+   overlay of the scratch tree, `tmp/linktest/deep/<m>/` (everything
+   else a symbolic link; dpc's stderr of every run in `<m>.log`), so the
+   scratch tree and the step 3 results are untouched: the **module
+   status stays the one of step 3**, the real gate.  Each dpc run has the
+   300 s timeout of step 3.  The pass stops short (`INCOMPLETE` in the
+   report; the kinds then are those seen so far) in these cases:
+   - an error outside any routine (a declaration);
+   - an error in a routine srcsurvey cannot stub;
+   - errors only in routines already stubbed ("nothing new to stub");
+   - still failing after 50 dpc runs ("gave up");
+   - dpc fails without an error: a panic, signal N or a timeout, each
+     with its kind;
+   - an exception in the pass itself.  It is recorded for that module,
+     and the run goes on.
+
+   A
+   stubbed internal routine whose header gives no address srcsurvey can
+   read ("Original address: 0xADDR, N bytes"; e.g. `ast/update_aste.pas`
+   names a nested routine's address first) cannot be named with
+   `--module-routine`, so its callers fail with dpc's `call of internal
+   routine ..., which has no body in this unit`, an error the Makefile
+   build never gives: that error is no kind; the callers are listed
+   (`INCOMPLETE: N routine(s) stubbed for a call of a stubbed internal
+   routine ...`), and their own kinds are not seen (bead
+   domain-pascal-626x).  The module file's
+   `forward; internal;` headings make a routine internal too (srcsurvey
+   `Module.internal_forwards`; `area/area.pas`).  An
+   `ASM` module's kinds are gas's (dpc compiled it).  It is still a lower
+   bound per routine: a routine stubbed for a sema refusal hides its own
+   codegen refusals.  No option is given that the Makefile does not give
+   (no srcsurvey build settings, no `--merge-constant-stores`).
+6. **Ranking.**  Per kind over all phases:
+   - *only*: the modules where it is the only kind seen.  A module whose
+     pass is `INCOMPLETE` does not count.  Fixing that kind does not
+     guarantee that those modules compile, because the deep pass is a
+     lower bound per routine (above): a routine refused for this kind may
+     still hold refusals of a later phase.
+   - *total*: the modules it appears in.
+
+   Kinds are sorted by only, then total.
+   Then **closest to compiling**: the modules that do not compile, fewest
+   distinct kinds first, then fewest routines stubbed.  The top `--top`
+   (20) kinds and `--closest` (10) modules are printed; all are in the
+   report, with each module's kinds of both passes and, for comparison,
+   the ranking of step 4's kinds alone (`--no-deep` ranks those only, as
+   before the deep pass).
+7. **Baseline** `tests/link/baseline.txt`: a header with the `../source`
    commit and the dpc (its stable commit, or its path), then one line per
    module, `status<TAB>module<TAB>first kind` (`-` for OK).  Statuses rank
    OK > ASM > REFUSED > FAILED.  Regressions, exit 1:
@@ -121,7 +180,7 @@ Read from `../source/domain_os/Makefile` and `tools/pascal_modules.py`
    `--only`, with `--working-tree` and without `m68k-elf-as`, so the
    baseline always records a complete run at a commit.  With `--only`,
    only those modules are compared and no make is run.
-7. **make.**  When every module compiles: `make -jN DPC=<our dpc,
+8. **make.**  When every module compiles: `make -jN DPC=<our dpc,
    absolute> domain_os check` in the scratch copy (after removing
    `domain_os.elf`, `layout.ld` and `layout-check.elf`, so it always
    relinks), log `tmp/linktest/make.log`; its failure is exit 1 and its
@@ -132,15 +191,49 @@ Read from `../source/domain_os/Makefile` and `tools/pascal_modules.py`
    first link errors and the undefined symbols, informational only.  No
    make without `m68k-elf-as`, with `--only` or with `--no-make`.
 
-`tmp/linktest/report.txt` has the header, every module with its kinds,
-the full ranking, the baseline comparison, the make result and the
-summary line.
+`tmp/linktest/report.txt` has the header and the timings, every module
+with its kinds (step 4's, `-`, and over all phases with their routines,
+`*`), the full ranking over all phases, the closest modules, step 4's
+ranking, the baseline comparison, the make result and the summary line.
+The baseline's format is unchanged: it records step 3's status and
+first kind.
 
 ## Result (2026-10-17)
 
-`../source` 992f96b1, dpc stable b23a505d (bead domain-pascal-bdi0's
-`nil` function results included): **23 of 109 module files compile; 86
-refused by dpc**, 125 error kinds.  Top of the ranking (only / total):
+`../source` 6f0a1493, dpc stable b23a505d, with the deep pass (bead
+domain-pascal-ngbd): **23 of 109 module files compile; 86 refused by
+dpc** (the baseline unchanged), 188 error kinds over all phases (125 in
+the module compiles alone).  Every deep pass reached the end; five
+modules are `INCOMPLETE` for bead domain-pascal-626x (ast, dir,
+mst_unwired, proc2, ring).  Top of the ranking (only / total):
+
+| only | total | kind |
+|---:|---:|---|
+| 2 | 17 | a pointer or by-address parameter used once after a branch or a call, its lowest free register taken on some path (codegen-patterns 12.4 R4(b)) |
+| 2 | 14 | a block through a pointer that is not held in a register (bead domain-pascal-dsr5) |
+| 1 | 14 | an element of more than N byte of an array through a pointer loaded from memory (bead domain-pascal-nqg1) |
+| 1 | 6 | a condition other than a comparison as a value |
+| 1 | 6 | this predeclared function is not supported yet |
+| 1 | 5 | a `for` index variable that is not a word |
+| 0 | 17 | more values live at once than there are registers |
+| 0 | 16 | in a body with branches, a call whose arguments are the last use of a register-held local |
+
+Closest to compiling, one kind over all phases: app, cal/os_cal_wired,
+ec/ec2u, flop, mem, mmap/mmap_unwired, msg/msg_wired, parity,
+pbu/ec2_pbu, suma (one routine each), route/route_wired, xpd/xpd_ker
+(two routines).
+
+Against the module compiles' own ranking, the modules a single kind
+blocks drop from 39 to 12: `this predeclared function` 4/6 -> 1/6 (bead
+domain-pascal-g6xa), the set comparisons 3/4 -> 0/4 and the 2-byte set
+constants by address 2/4 -> 0/4 (bead domain-pascal-2i6f), the packed
+fields 3/7 -> 0/7; the codegen refusals behind them grow (`more values
+live at once than there are registers` 6 -> 17 modules, the
+register-held local's last use 4 -> 16).
+
+Before the deep pass (`../source` 992f96b1, the same dpc; bead
+domain-pascal-bdi0's `nil` function results included), 125 error kinds;
+top of the ranking (only / total):
 
 | only | total | kind |
 |---:|---:|---|

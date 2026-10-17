@@ -975,14 +975,20 @@ def report(title, summary, out=sys.stdout, verbose=False):
 EXTRA_DPC_OPTS = []
 
 
-def run_dpc(dpc, tree, src, check_only=False, out=None, opts=()):
+def run_dpc(dpc, tree, src, check_only=False, out=None, opts=(), timeout=None):
+    """-> (dpc's exit status, its stderr); (None, its stderr so far) when
+    it ran longer than TIMEOUT seconds (None: no limit)."""
     cmd = [dpc, '-I', '.'] + EXTRA_DPC_OPTS + list(opts)
     if check_only:
         cmd.append('--check-only')
     if out:
         cmd += ['-o', out]
     cmd.append(src)
-    p = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
+    try:
+        p = subprocess.run(cmd, cwd=tree, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        err = e.stderr or ''
+        return None, err.decode(errors='replace') if isinstance(err, bytes) else err
     return p.returncode, p.stderr
 
 
@@ -998,11 +1004,17 @@ class Module:
         self.fragments = []                 # include paths holding routine bodies
         self.frag_text = {}                 # include path -> its text
         # routines with a `forward' heading in the module file
-        self.forwards = {r.name for r in parse_routines(self.text) if 'forward' in r.options}
+        heads = [r for r in parse_routines(self.text) if 'forward' in r.options]
+        self.forwards = {r.name for r in heads}
+        # routines made `internal' by their `forward' heading (area/area.pas:
+        # `forward; internal;', the body's heading without options): module
+        # routines too, named with --module-routine when stubbed
+        self.internal_forwards = {r.name for r in heads if r.internal}
         self.routines = {}                  # name -> (fragment, Routine)
         self.dsect = {}                     # name -> data section (lower case) or None
         self.stubbed = set()
         self.problem = None                 # why a stage stopped (survey_stage)
+        self.last_rc = None                 # the last dpc run's exit status (survey_stage)
         self.starts = set()                 # header addresses, nested routines' too
         self.no_hoist = set()             # stubbed routines whose statics are dropped
         for inc in module_includes(self.text):
@@ -1073,7 +1085,8 @@ def code_section(addr, linkmap):
 
 def module_routine_opts(mod, stubbed, linkmap):
     """dpc options naming MOD's STUBBED internal routines as module
-    routines, with the fragment origins dpc wants alongside (compile
+    routines (internal by their own heading or by the module file's
+    `forward' one), with the fragment origins dpc wants alongside (compile
     only: no byte is compared).  A module with one code section: the
     lowest routine address as the origin.  Several (by the map's output
     section of each routine's header address): one origin per section that
@@ -1083,9 +1096,10 @@ def module_routine_opts(mod, stubbed, linkmap):
     sects = {n: code_section(r.addr, linkmap) for n, (_i, r) in mod.routines.items()
              if r.addr is not None}
     several = len(set(sects.values()) - {None}) > 1
+    internal = getattr(mod, 'internal_forwards', set())
     for n in stubbed:
         _inc, r = mod.routines[n]
-        if r.internal and r.addr is not None:
+        if (r.internal or n in internal) and r.addr is not None:
             sect = sects[n] + ':' if several and sects[n] else ''
             opts.append('--module-routine=%s%s=0x%X' % (sect, n.upper(), r.addr))
     if not opts:
@@ -1101,12 +1115,17 @@ def module_routine_opts(mod, stubbed, linkmap):
     return ['--fragment-origin=%s=0x%X' % kv for kv in sorted(los.items())] + opts
 
 
-def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None, unit_opts=()):
+def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None, unit_opts=(),
+                 note=print, timeout=None):
     """Run one stage until the module passes it, stubbing routines.
     The internal routines stubbed so far (STUBBED_BEFORE and this stage's)
     are named to dpc with `--module-routine' at their header address, so
     that their callers still compile (module_routine_opts; LINKMAP gives
     each its code section).  UNIT_OPTS (merge_opts) go to every run.
+    NOTE takes the stage's remarks (print; tools/linktest.py collects
+    them per module); TIMEOUT limits each dpc run (run_dpc).  The last
+    run's exit status is left in MOD.last_rc (None: timed out); a stage
+    that still fails after 50 runs sets MOD.problem.
     -> ([(diag, routine)], stubbed names, ok)."""
     entries, stubbed = [], []
     fragment_ok = True
@@ -1115,15 +1134,16 @@ def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None, unit_o
                 if fragment_ok else [])
         rc, err = run_dpc(dpc, mod.tree, mod.path, check_only=check_only,
                           out=None if check_only else os.devnull,
-                          opts=list(unit_opts) + opts)
+                          opts=list(unit_opts) + opts, timeout=timeout)
+        mod.last_rc = rc
         log.write(err)
         if rc and opts and re.search(r'^dpc: error: --(fragment-origin|module-routine)', err,
                                      re.M):
             # dpc refused the fragment options (a section's origin cannot
             # be given, say): the stubbed internal routines' callers get
             # charged with their calls instead
-            print('srcsurvey: %s: %s' % (mod.path, err.strip().splitlines()[-1]))
-            print('srcsurvey: %s: so no --module-routine: the callers of stubbed internal '
+            note('srcsurvey: %s: %s' % (mod.path, err.strip().splitlines()[-1]))
+            note('srcsurvey: %s: so no --module-routine: the callers of stubbed internal '
                   'routines are stubbed too' % mod.path)
             fragment_ok = False
             continue
@@ -1154,13 +1174,14 @@ def survey_stage(dpc, mod, check_only, stubbed_before, log, linkmap=None, unit_o
                            "file's fragments: cannot stub" % ', '.join(unknown))
             return entries, stubbed, False
         if unhoist:
-            print('srcsurvey: %s: the static data of %s does not compile at unit level; '
+            note('srcsurvey: %s: the static data of %s does not compile at unit level; '
                   'left out (the data after it moves)' % (mod.path, ', '.join(sorted(unhoist))))
             mod.no_hoist |= unhoist
         if not names and not unhoist:
             return entries, stubbed, False
         mod.stub(set(names))
         stubbed += names
+    mod.problem = 'after 50 dpc runs of stubbing (gave up)'
     return entries, stubbed, False
 
 

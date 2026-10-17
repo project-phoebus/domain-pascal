@@ -10,6 +10,7 @@ the kernel is from linking.
     linktest.py run [--source DIR] [--rev REV | --working-tree] [--dpc DPC]
                     [--jobs N] [--only MODULE ...] [--baseline FILE]
                     [--update] [--link-anyway] [--no-make] [--make-var V=X ...]
+                    [--no-deep] [--top N] [--closest N]
 
 Steps (tests/link/README.md has the why of each):
 
@@ -34,16 +35,31 @@ Steps (tests/link/README.md has the why of each):
      does (srcsurvey.kind_of), with the type phrases of dpc's messages
      folded to `T' first (fold_types).  The default dpc is the main
      checkout's target/stable/bin/dpc, also from a git worktree.
-  4. tmp/linktest/report.txt: every module, the ranking of error kinds,
-     the baseline comparison and the make result.  The kinds are ranked
-     by the number of modules where the kind is the ONLY one left (fixing
-     it would let them compile), then by the modules it affects.
-  5. tests/link/baseline.txt (one line per module: status, module, first
+  4. The deep pass (unless --no-deep; deep_pass): dpc stops at the first
+     phase that fails, so a sema or IR refusal hides every codegen
+     refusal of the module.  Each module dpc refused is compiled again
+     the way tools/srcsurvey.py's "check" and "codegen" stages do it
+     (survey_stage, reused: the routines a diagnostic falls in are
+     stubbed and dpc is run again until the module passes), in an overlay
+     of the scratch tree (tmp/linktest/deep/), in parallel.  So each
+     routine is charged with the refusals of the first run that rejects
+     it, and the module gets every kind over all phases.  The module's
+     status (step 3) is not changed by it: that is the gate.
+  5. tmp/linktest/report.txt: every module with its kinds (those of the
+     module compile, and over every phase with the routines charged with
+     each), the ranking of error kinds, the modules closest to compiling,
+     the baseline comparison and the make result.  The kinds over every
+     phase are ranked by the number of modules where the kind is the ONLY
+     one left (a module whose deep pass stopped short does not count
+     there), then by the modules it affects; the closest modules are the
+     ones with the fewest distinct kinds.  The module compiles' own
+     ranking follows, for comparison.
+  6. tests/link/baseline.txt (one line per module: status, module, first
      error kind; header: the ../source commit and the dpc): a module whose
      status ranks lower (STATUS_RANK), or that compiled there and is gone,
      is a regression, exit 1.  --update rewrites it (refused with --only,
      --working-tree or no m68k-elf-as); a malformed baseline is exit 2.
-  6. When every module compiles, `make domain_os check' in the scratch
+  7. When every module compiles, `make domain_os check' in the scratch
      copy with DPC=<our dpc> (absolute; ../source's Makefile also takes
      SAU2_MAP and SAU2_IMAGE from $HOME, --make-var overrides): the full
      link, the RFC image and ../source's own checks.  Its failure is exit
@@ -60,6 +76,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -121,10 +138,24 @@ class Result:
         self.errors = errors        # error diagnostics (dpc) or lines (gas)
         self.kinds = list(kinds)    # distinct kinds, in order of appearance
         self.first = first          # the first error message, verbatim
+        self.deep = None            # Deep: the kinds over every phase (deep_pass)
 
     @property
     def first_kind(self):
         return self.kinds[0] if self.kinds else '-'
+
+    @property
+    def all_kinds(self):
+        """The kinds over every phase (the deep pass), or, without one,
+        the module compile's."""
+        return list(self.deep.kinds) if self.deep is not None else self.kinds
+
+    @property
+    def complete(self):
+        """Whether all_kinds covers every routine: the deep pass reached
+        the end of both stages and charged no routine with a call to a
+        stubbed routine only (Deep.complete), or dpc compiled it (ASM)."""
+        return self.status == 'OK' or (self.deep is not None and self.deep.complete)
 
     def __repr__(self):
         return 'Result(%r, %r, %d, %r)' % (self.module, self.status, self.errors, self.kinds)
@@ -227,20 +258,49 @@ def asm_result(module, stderr):
                   _distinct('as: ' + kind_of(m) for m in msgs), msgs[0])
 
 
-def rank_kinds(results):
+def rank_kinds(results, deep=True):
     """[(kind, only, total)]: per error kind, the modules where it is the
     only kind left, and the modules it appears in; most `only' first, then
-    most `total', then by name."""
+    most `total', then by name.  DEEP: the kinds over every phase
+    (Result.all_kinds), and a module counts for `only' unless its deep
+    pass is incomplete (Deep.complete); else the module compile's kinds
+    (dpc's first failing phase only)."""
     only, total = collections.Counter(), collections.Counter()
     for r in results:
         if r.status == 'OK':
             continue
-        for k in r.kinds:
+        ks = r.all_kinds if deep else r.kinds
+        for k in ks:
             total[k] += 1
-        if len(r.kinds) == 1:
-            only[r.kinds[0]] += 1
+        if len(ks) == 1 and (not deep or r.deep is None or r.deep.complete):
+            only[ks[0]] += 1
     return sorted(((k, only[k], total[k]) for k in total),
                   key=lambda t: (-t[1], -t[2], t[0]))
+
+
+def closest(results):
+    """The modules that do not compile, fewest distinct kinds over every
+    phase first; then those whose deep pass reached the end, fewest
+    routines refused, by name."""
+    return sorted((r for r in results if r.status != 'OK'),
+                  key=lambda r: (len(r.all_kinds), not r.complete,
+                                 len(r.deep.stubbed) if r.deep else 0, r.module))
+
+
+def format_closest(results, limit=None):
+    rs = closest(results)
+    lines = ['  kinds  routines  module: kinds']
+    for r in rs[:limit]:
+        lines.append('  %5d  %8s  %s%s: %s' % (
+            len(r.all_kinds), len(r.deep.stubbed) if r.deep else '-', r.module,
+            '' if r.complete else ' (incomplete)', '; '.join(_short(k) for k in r.all_kinds)))
+    if limit is not None and len(rs) > limit:
+        lines.append('  ... %d more module(s) in the report' % (len(rs) - limit))
+    return lines
+
+
+def _short(kind, n=90):
+    return kind if len(kind) <= n else kind[:n - 3] + '...'
 
 
 def counts(results):
@@ -439,6 +499,216 @@ def compile_all(dpc, tree, modules, jobs, assemble=True):
         return [f.result()[0] for f in futs]
 
 
+# ------------------------------------------------------------ deep pass
+
+class Deep:
+    """A module's refusals over every phase: what tools/srcsurvey.py's
+    check and codegen stages charge its routines with (deep_pass)."""
+
+    def __init__(self):
+        self.kinds = {}         # kind -> routines charged with it ('-': outside any)
+        self.stubbed = []       # the routines stubbed, in order
+        self.problem = None     # why the pass stopped short of the end, or None
+        self.notes = []         # srcsurvey's remarks
+        self.unseen = []        # (routine, callee): stubbed for calling a stubbed routine
+
+    @property
+    def complete(self):
+        return self.problem is None and not self.unseen
+
+    def add(self, kind, routine):
+        at = self.kinds.setdefault(kind, [])
+        r = routine or '-'
+        if r not in at:
+            at.append(r)
+
+    def __repr__(self):
+        return 'Deep(%r, %r)' % (self.kinds, self.problem)
+
+
+class _Log:
+    """A log for srcsurvey.survey_stage that keeps every dpc stderr."""
+
+    def __init__(self):
+        self.runs = []
+
+    def write(self, text):
+        self.runs.append(text)
+
+    @property
+    def last(self):
+        return self.runs[-1] if self.runs else ''
+
+
+def overlay_tree(src, dst, writable):
+    """DST as a copy of the tree SRC in which only WRITABLE (paths
+    relative to SRC) are files of their own, copied; every other entry is
+    a symbolic link to SRC's (a directory with nothing writable in it, as
+    one link).  build/ and dist/ are left out.  The deep pass stubs
+    routines in the writable files only, so SRC is never written."""
+    src = os.path.abspath(src)
+    need = set()
+    for w in writable:
+        d = os.path.dirname(w)
+        while d:
+            need.add(d)
+            d = os.path.dirname(d)
+    os.makedirs(dst)
+
+    def walk(rel):
+        for name in sorted(os.listdir(os.path.join(src, rel))):
+            r = os.path.join(rel, name) if rel else name
+            if not rel and name in ('build', 'dist'):
+                continue
+            if r in writable and os.path.isfile(os.path.join(src, r)):
+                shutil.copyfile(os.path.join(src, r), os.path.join(dst, r))
+            elif r in need and os.path.isdir(os.path.join(src, r)):
+                os.mkdir(os.path.join(dst, r))
+                walk(r)
+            else:
+                os.symlink(os.path.join(src, r), os.path.join(dst, r))
+    walk('')
+
+
+def deep_dir(work, module):
+    return os.path.join(work, 'deep', module[:-len('.pas')] if module.endswith('.pas') else module)
+
+
+# dpc's error for a call of an internal routine whose body is not in the
+# unit (dpc-sema): after stubbing, a call of a stubbed internal routine
+# srcsurvey had no address for (module_routine_opts needs the header's
+# "Original address: 0xADDR, N bytes"; bead domain-pascal-626x)
+STUB_CALL_RE = re.compile(r'^call of internal routine `([^`]+)`, which has no body in this unit')
+
+
+def stop_reason(stage, mod, err, loc):
+    """Why srcsurvey's STAGE stopped short for MOD (survey_stage returned
+    not ok), from its last dpc run (exit status MOD.last_rc, stderr ERR;
+    LOC: the srcsurvey.Locator of the tree) -> (Deep.problem, the kind of
+    a dpc failure or None)."""
+    errs = [d for d in srcsurvey.parse_diags(err) if d['sev'] == 'error']
+    rc = getattr(mod, 'last_rc', 1)
+    if mod.problem:
+        return '%s stage, %s' % (stage, mod.problem), None
+    if not errs:
+        k = failure_kind(rc, err)
+        what = 'dpc timed out (%d s)' % DPC_TIMEOUT if rc is None else \
+            'dpc died of signal %d' % -rc if rc < 0 else 'dpc failed without an error'
+        return '%s stage, %s' % (stage, what), k
+    if any(loc(d['file'], d['line']) is None for d in errs):
+        return '%s stage, stops at an error outside any routine' % stage, None
+    return ('%s stage, nothing new to stub (the errors fall in routines stubbed already)'
+            % stage), None
+
+
+def deep_pass(dpc, tree, module, work, linkmap=None):
+    """deep_pass_unit, with any exception it raises (a bug, an unreadable
+    file) recorded in Deep.problem, so one module does not stop the run."""
+    deep = Deep()
+    try:
+        deep_pass_unit(deep, dpc, tree, module, work, linkmap)
+    except Exception as e:      # noqa: BLE001 - per module, reported
+        deep.problem = 'the deep pass failed: %s: %s' % (type(e).__name__, e)
+    return deep
+
+
+def deep_pass_unit(deep, dpc, tree, module, work, linkmap=None):
+    """MODULE's refusals over every phase, into DEEP.  dpc stops at the first
+    phase that fails (a sema or IR refusal hides every codegen one), so
+    the module is compiled as tools/srcsurvey.py's stages "check" (`dpc
+    --check-only') and "codegen" do it (survey_stage): every routine a
+    diagnostic falls in is stubbed and dpc is run again until the module
+    passes (the stubbed internal routines named with --module-routine,
+    their code sections from LINKMAP, the SAU2 map).  Each routine is
+    charged with the errors of the first stage and run that rejects it.
+    The module and its fragments are copied into an overlay of TREE
+    (overlay_tree, under WORK/deep/), so TREE is left as it is.  The pass
+    stops short (Deep.problem) at an error outside any routine (a
+    declaration) or in a routine srcsurvey cannot stub, or when dpc fails
+    without an error.  A routine charged only with a call of a stubbed
+    internal routine that srcsurvey could not name with --module-routine
+    (STUB_CALL_RE) is listed in Deep.unseen, not as a kind: the module's
+    kinds are then incomplete too (Deep.complete).  Each dpc run has
+    DPC_TIMEOUT, as the module compile.  Fills DEEP."""
+    dst = deep_dir(work, module)
+    if os.path.lexists(dst):
+        shutil.rmtree(dst)
+    try:
+        with open(os.path.join(tree, module)) as fh:
+            text = fh.read()
+    except OSError as e:
+        deep.problem = 'cannot read the module file: %s' % e
+        return deep
+    frags = [i for i in srcsurvey.module_includes(text) if not i.endswith('.ins.pas')]
+    overlay_tree(tree, dst, {module} | set(frags))
+    log = _Log()
+    try:
+        try:
+            mod = srcsurvey.Module(dst, module)
+        except (OSError, ValueError) as e:
+            deep.problem = 'srcsurvey cannot read the module: %s' % e
+            return deep
+        done = []
+        for stage, check_only in (('check', True), ('codegen', False)):
+            entries, stubbed, ok = srcsurvey.survey_stage(dpc, mod, check_only, done, log,
+                                                          linkmap, note=deep.notes.append,
+                                                          timeout=DPC_TIMEOUT)
+            done += stubbed
+            for d, r in entries:
+                if d['sev'] != 'error':
+                    continue
+                m = STUB_CALL_RE.match(d['msg'])
+                if m and m.group(1).lower() in mod.stubbed:
+                    # srcsurvey could not name the stubbed callee with
+                    # --module-routine (no address in its header): an
+                    # artifact of the stubbing, not a kind of the module
+                    if (r or '-', m.group(1)) not in deep.unseen:
+                        deep.unseen.append((r or '-', m.group(1)))
+                    continue
+                deep.add(kind_of(d['msg']), r)
+            if ok:
+                continue
+            deep.problem, k = stop_reason(stage, mod, log.last, srcsurvey.Locator(dst))
+            if k:
+                deep.add(k, None)
+            break
+        deep.stubbed = done
+    finally:
+        with open(dst + '.log', 'w') as fh:
+            fh.write(''.join(log.runs))
+    return deep
+
+
+def deep_all(dpc, tree, results, work, jobs, linkmap=None):
+    """Result.deep for every module of RESULTS that dpc refused or failed
+    on (deep_pass, in parallel); an ASM module's kinds are gas's, all of
+    them (dpc compiled it); a dpc timeout is not run again."""
+    if os.path.isdir(os.path.join(work, 'deep')):
+        shutil.rmtree(os.path.join(work, 'deep'))      # no stale module left
+    todo = []
+    for r in results:
+        if r.status == 'ASM':
+            r.deep = Deep()
+            for k in r.kinds:
+                r.deep.add(k, None)
+        elif r.status == 'FAILED' and r.kinds == ['dpc: timeout']:
+            r.deep = Deep()
+            r.deep.add(r.kinds[0], None)
+            r.deep.problem = 'not run again (dpc timed out)'
+        elif r.status in ('REFUSED', 'FAILED'):
+            todo.append(r)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        futs = [(r, ex.submit(deep_pass, dpc, tree, r.module, work, linkmap)) for r in todo]
+        for r, f in futs:
+            r.deep = f.result()
+            # the module compile's kinds are the deep pass's first run's;
+            # one that is not (the stages' `--check-only', `-I .') is kept
+            for k in r.kinds:
+                if k not in r.deep.kinds:
+                    r.deep.add(k, '?')
+                    r.deep.notes.append('linktest: %r: from the module compile only' % k)
+
+
 # ------------------------------------------------------------ make
 
 # a line of ../source's make output that reports a failure: the linker's
@@ -496,6 +766,10 @@ def dpc_commit(dpc):
 
 
 def module_lines(results):
+    """Per module: the status, the module compile's error count, first
+    error and kinds (`-'); then, from the deep pass, every kind over all
+    phases with the routines charged with it (`*'), and why the pass
+    stopped short, if it did."""
     out = []
     for r in results:
         if r.status == 'OK':
@@ -504,6 +778,20 @@ def module_lines(results):
         out.append('%-8s %s: %d error(s); first: %s' % (r.status, r.module, r.errors, r.first))
         for k in r.kinds:
             out.append('           - %s' % k)
+        d = r.deep
+        if d is None:
+            continue
+        out.append('           all phases: %d kind(s), %d routine(s) stubbed%s' % (
+            len(d.kinds), len(d.stubbed), '' if d.problem is None else
+            '; INCOMPLETE: %s' % d.problem))
+        for k, at in d.kinds.items():
+            out.append('           * %s  [%s]' % (k, ', '.join(at)))
+        if d.unseen:
+            out.append('           INCOMPLETE: %d routine(s) stubbed for a call of a stubbed '
+                       'internal routine srcsurvey has no address for, their own kinds not seen: '
+                       '%s' % (len(d.unseen), ', '.join('%s (%s)' % u for u in d.unseen)))
+        for n in d.notes:
+            out.append('           note: %s' % n)
     return out
 
 
@@ -543,11 +831,35 @@ def cmd_run(a):
         print(ln)
     sys.stdout.flush()
 
+    t0 = time.monotonic()
     results = compile_all(dpc, tree, modules, a.jobs, assemble)
-    ranking = rank_kinds(results)
-    rep = list(head) + ['', '== modules'] + module_lines(results)
-    rep += ['', '== error kinds, by modules they alone block (only) and modules affected (total)']
-    rep += format_ranking(ranking)
+    t1 = time.monotonic()
+    timing = 'compile %.1f s' % (t1 - t0)
+    deep = not a.no_deep
+    if deep:
+        try:
+            import sau2map
+            linkmap = sau2map.load()
+        except OSError as e:
+            linkmap = None
+            head.append('linktest: no SAU2 map (%s): the deep pass gives a module of several '
+                        'code sections one fragment origin' % e)
+        deep_all(dpc, tree, results, a.work, a.jobs, linkmap)
+        timing += ', deep pass %.1f s' % (time.monotonic() - t1)
+    timing += ' (-j %d)' % a.jobs
+    print('linktest: %s' % timing)
+    ranking = rank_kinds(results, deep)
+    title = ('== error kinds over every phase, by modules they alone block (only) and modules '
+             'affected (total)' if deep else
+             '== error kinds (dpc\'s first failing phase only: --no-deep), by modules they alone '
+             'block (only) and modules affected (total)')
+    rep = list(head) + ['linktest: %s' % timing, '', '== modules'] + module_lines(results)
+    rep += ['', title] + format_ranking(ranking)
+    if deep:
+        rep += ['', '== closest to compiling: fewest distinct kinds over every phase']
+        rep += format_closest(results)
+        rep += ['', '== error kinds of the module compiles alone (dpc stops at the first '
+                'failing phase), for comparison'] + format_ranking(rank_kinds(results, False))
 
     rc = 0
     cmp_lines = []
@@ -607,8 +919,13 @@ def cmd_run(a):
 
     print(summary_line(results))
     if ranking:
-        print('error kinds, by modules they alone block (only) and modules affected (total):')
+        print('error kinds%s, by modules they alone block (only) and modules affected (total):'
+              % (' over every phase' if deep else ' (first failing phase only)'))
         for ln in format_ranking(ranking, a.top):
+            print(ln)
+    if deep and ranking:
+        print('closest to compiling (fewest distinct kinds over every phase):')
+        for ln in format_closest(results, a.closest):
             print(ln)
     for ln in cmp_lines + make_lines:
         print(ln)
@@ -638,6 +955,11 @@ def main(argv=None):
     r.add_argument('--make-var', action='append', default=[], metavar='VAR=VALUE',
                    help="a variable for ../source's make (e.g. SAU2_MAP=...); repeatable")
     r.add_argument('--top', type=int, default=20, help='error kinds to print (all in the report)')
+    r.add_argument('--closest', type=int, default=10,
+                   help='modules closest to compiling to print (all in the report)')
+    r.add_argument('--no-deep', action='store_true',
+                   help="no deep pass: rank the module compiles' kinds (dpc's first failing "
+                        'phase) alone')
     r.add_argument('--work', default=SCRATCH, help=argparse.SUPPRESS)
     r.add_argument('--report', default=None, help='default WORK/report.txt')
     a = ap.parse_args(argv)

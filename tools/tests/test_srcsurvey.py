@@ -640,6 +640,23 @@ class ModuleRoutineOptsTest(unittest.TestCase):
         self.assertEqual(f(m, ['b'], None),
                          ['--fragment-origin', '0xE1AED0', '--module-routine=B=0xE1AEE4'])
 
+    def test_internal_by_forward_heading(self):
+        # area/area.pas: `forward; internal;' in the module file, the
+        # body's heading without options (bead domain-pascal-ngbd)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm.pas'), 'w') as fh:
+                fh.write("module m;\n{ body: m/f.pas }\nprocedure g; forward; internal;\n"
+                         "%include 'm/f.pas';\n")
+            with open(os.path.join(d, 'm/f.pas'), 'w') as fh:
+                fh.write('{ Original address: 0x00E1AED0, 0x10 bytes }\nprocedure g;\n'
+                         'begin\nend;\n{ Original address: 0x00E1AEE0, 0x10 bytes }\n'
+                         'procedure h;\nbegin\n  g;\nend;\n')
+            mod = srcsurvey.Module(d, 'm.pas')
+            self.assertEqual(mod.internal_forwards, {'g'})
+            self.assertEqual(srcsurvey.module_routine_opts(mod, ['g'], None),
+                             ['--fragment-origin', '0xE1AED0', '--module-routine=G=0xE1AED0'])
+
     def test_several_sections(self):
         m = self.mod([('lock', 0xE1AED0, True), ('put', 0xE1AF0A, False),
                       ('init', 0xE3324C, False),
