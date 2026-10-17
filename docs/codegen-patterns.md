@@ -3267,6 +3267,120 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     test, `regalloc/late_slot_pass` with it.
     TTY_$K_SET_INPUT_BREAK_MODE compiles, its copy byte-identical, and
     differs only in the test after it (bead domain-pascal-0g98).
+  - **8 bytes from an array element indexed at run time (survey Verified
+    for the unit's data; implemented there, bead domain-pascal-zrug).**
+    `tools/storesurvey.py blocks 8 -v`, the post-incremented runs whose
+    source register is last set, in the run's statement, by an indexed
+    `lea (d,An,Dx),Am` or by the pair `lea (0,An,Dx),Am; ...; lea
+    (d,Am),Ak` (ad-hoc filter over the listing, not kept): 31 copies.
+    By the element's base: the unit's data (A5) 14, `movea.l #imm`
+    (another unit's array, another data section's block) 10, a pointer in
+    an address register 7.
+    - *The unit's data, the address:* the pair's second `lea` into the
+      first's register at 10 of 12 pairs (the other 2: a row address
+      shared by two copies, 0xE58938 `lea (0,A5,D0.l),A1; lea
+      (2384,A1),A2`, then `lea (992,A1),A2`; a `with` record, VOLX_$GET_
+      UIDS 0xE6B67E); a single `lea (d,A5,Dx),Am` within a byte 2
+      (0xE12934, 0xE6B606).
+    - *Into a destination needing no register* (the frame, a held
+      pointer): the element alone, 7 of 7 (DIR_ 0xE5720E..0xE57222
+      `move.w PROC1_$CURRENT,D0; lsl.w #3,D0; lea (0,A5,D0.w),A0; lea
+      (696,A0),A0; move.l (A0)+,(-8,A6); move.l (A0)+,(-4,A6)`;
+      0xE4E48A, 0xE53448, 0xE5345E, 0xE6E696, 0xE1292C; 0xE5473C with
+      a parameter's entry load in the index's stall, 12.2's "not
+      explained").
+    - *Into a pointer slot's object:* with the index loaded from memory
+      and the pair, the slot's `movea.l` in the load's stall, 3 of 3
+      (NAME_$GET_WDIR_UID 0xE5896C..0xE58982 `move.w PROC1_$AS_ID,D0;
+      movea.l (8,A6),A1; lsl.w #3,D0; lea (0,A5,D0.w),A0; lea
+      (2384,A0),A0; move.l (A0)+,(A1); move.l (A0)+,(4,A1)`;
+      NAME_$GET_NDIR_UID 0xE5899A; 0xE5892C, the shared row above, a
+      frame word index `ext.l`'d); with an index of two instructions from
+      registers within a byte, the index and the `lea` together, then the
+      slot, 1 (VOLX_$GET_INFO 0xE6B602..0xE6B60A `move.w D2,D0; lsl.w
+      #5,D0; lea (-32,A5,D0.w),A0; movea.l (12,A6),A1`; the order of
+      the longer copies, "Elements" below, 3 of 3); with three from
+      registers, the slot in the stall of the index's copy, 1
+      (0xE4DED4..0xE4DEE2 `move.w D0,D1; movea.l (-292,A6),A2; ext.l D1;
+      lsl.l #3,D1; lea; lea`); a destination through a pointer's field
+      after the `lea`s, 1 (0xE4CC3E `movea.l (22,A2),A4`).  The source's
+      register is coloured first where the image's context leaves A0/A1
+      free (0xE5896C, 0xE5899A, 0xE6B602).
+    - *Another unit's array, another data section's block:* the pair's
+      registers vary: the first `lea` into another register than the
+      base's, the second into the first's (0xE73D20 `movea.l
+      #0xE80264,A0; ...; lea (0,A0,D0.w),A1; lea (2384,A1),A1`, NAME_'s
+      block reached from NAME_$INIT_ASID's section; 0xE73DAC from a
+      base in A1 into A0), or into the base's and the second into another
+      (0xE60AE8 `lea (0,A0,D0.l),A0; lea (-16,A0),A1`; 0xE6FF08 A2 then
+      A4); within a byte 0xE7354E, 0xE5BE96.  Not settled.
+    - *Through a held pointer:* SMD_ 0xE6E4F4 `clr.l D0; move.w D2,D0;
+      lsl.l #3,D0; lea (-8,A2,D0.l),A0` into the frame (a word
+      zero-extended, codegen-patterns 5.2 "Word indices used as `.l`");
+      the others are `with` records (0xE39326, 0xE39362, 0xE55600,
+      0xE55638, the pair into another register beyond a byte) or not
+      classified (0xE46D4C, 0xE735AA).
+    - *Not elements* (the other sources `copy8` refused): another data
+      section's block at its start, `movea.l #block,An` as for another
+      unit's object (LOG_$INIT 0xE300B2 `movea.l #0xe2b280,A0; move.l
+      (A0)+,(-24,A6); move.l (A0)+,(-20,A6)`, LOG_$LOGFILE_UID, the block's
+      first variable, into the frame); a field of another unit's record
+      whose address a register holds across statements (AS_$INIT
+      0xE31528..0xE31546 `movea.l #AS_$INFO,A0`, then `lea (4,A0),A1;
+      move.l (A1)+,(0xc,A0)` ×2), which dpc does not hold.
+    **Implemented** (`isel.rs` `copy8_element`; `copy8_source` for
+    another data section's block): an element of the unit's data or
+    through a pointer held in an address register within a byte, into
+    the frame or a held pointer's object, the element's own instructions
+    (`element_lea`), beyond a byte only with the index formed in the
+    statement; an element of the unit's data into a pointer slot's
+    object itself (not a field of it), with an index of one or two
+    instructions from registers within a byte (index and `lea` one
+    unit, then the slot) or a `move` from memory and at most two more
+    beyond a byte (generated as the index, the slot, the second `lea`;
+    R11 puts the slot in the load's stall); another
+    data section's block at offset 0 with no register holding it, into a
+    destination needing no register.  **Refused**, each with its own
+    message: another unit's array and another data section's block as
+    an element's base (the pair's registers above); a frame array (one
+    8-byte site, 0xE5F922 `lea (-48,A6,D2.l),A0`, its index formed
+    before the statement); a computed
+    index; a zero-extended byte index (none); through a held pointer
+    beyond a byte or into a slot's object; into a slot, the other index
+    shapes (0xE4DED4, whose slot follows the index's first instruction,
+    so also a word zero-extended by `clr.l` first; a loaded index within
+    a byte; an index of an earlier statement: not seen); into a field of
+    a slot's object (not seen); beyond a byte, the scaled index of an
+    earlier statement (the image keeps the row's address, 0xE58938..
+    0xE58946, not modelled); a copy from the row (the base without its
+    offset, the index, the scale: `wdir_uid[i]` then `ndir_uid[i]`
+    share `(0,A5,Dx)`) of the copy of the statement just before, when
+    the index reads a variable in memory rather than a register holding
+    it: the image keeps the row for the second copy at 0xE5892C..0xE58946
+    (a frame-local index, the stores through `out` pointers) but
+    reloads the index and recomputes the row at 0xE53448..0xE5346C (a
+    store through a pointer into the unit's data between the two); that
+    the possible aliasing of the index decides is a hypothesis,
+    unverified.  An index held in a register and reused within a byte
+    stays accepted (VOLX_$DISMOUNT 0xE6B4B0..0xE6B4E8, `(d,A5,D2.w)`
+    across statements; test `held_index_reused_by_element_copies8`);
+    the data area, an absolute address and any
+    other destination (not seen); a field of another unit's variable or
+    of another data section's block.  Golden `data/element_copy8` (NAME_$GET_WDIR_UID,
+    DIR_ 0xE5720E, VOLX_$GET_INFO and SMD_ shapes), `sections/
+    other_section_copy8` (LOG_$INIT); conformance `name_get_wdir_uid.pas`
+    (NAME_$GET_WDIR_UID, _GET_NDIR_UID, byte-identical); test `dpc-m68k`
+    `blocks.rs` `unsettled_element_copies8`.  Of the 12 srcsurvey sites
+    of the earlier refusal at ../source bfed7e0c ("an 8-byte copy from
+    this kind of address"), NAME_$GET_WDIR_UID and _GET_NDIR_UID are OK;
+    the DIR_ (name/unlock_dir.pas, dir/old_create_diru.pas), SMD_ and
+    VTOC_ (vtoc/get_uid.pas, through a `with` record's held pointer)
+    copies and LOG_$INIT's pass and stop at other refusals; VOLX_$GET_INFO
+    stays refused (dpc reads the index from the parameter's frame copy,
+    the image from D2, so the slot's place is the unseen loaded-within-
+    a-byte shape), as do NAME_$INIT_ASID (another data section's block,
+    an element), PROC2_$GET_TTY_DATA and PROC2_$WHO_AM_I (another
+    unit's array) and AS_$INIT.
   - **Displacement moves of 12 and 16 bytes** are rare: XNS_IDP_$GET_STATS
     0xE18FE6 `move.l (A5),(A0); move.l (4,A5),(4,A0); move.l
     (8,A5),(8,A0)` and 0xE1ABEA (16 bytes) against 59 + 42 `(An)+`
@@ -3366,8 +3480,9 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     not among the 72, read by hand): 72 blocks.  By kind and the element's
     side (the *first* address being a copy's source or a comparison's
     left operand, the `cmpm` destination): 8-byte copies `(Am)+,<d>` with
-    the element the source 14 (`copy8`'s, not this entry's: refused
-    there); copies of 10 bytes and more, the element first 16, second
+    the element the source 14 (`copy8`'s, not this entry's: "8 bytes
+    from an array element indexed at run time" above, bead
+    domain-pascal-zrug); copies of 10 bytes and more, the element first 16, second
     10, both 4; comparisons, first 14, second 12, both 2.  By the
     element's base: the unit's data `(d,A5,Dx)` 15 (8 of them 8-byte
     copies), another unit's array from `movea.l #sym` (including the

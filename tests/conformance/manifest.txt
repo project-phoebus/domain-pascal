@@ -260,6 +260,10 @@ tests/conformance/ec2_init.pas               EC2_$INIT
 # statements up to a call, loaded again after it; no A5.
 tests/conformance/suma_init.pas              SUMA_$INIT  --section-addr .bss.moddata.BITPAD.WIRED_DATA=0xE2DD88
 tests/conformance/dxm_init.pas               DXM_$INIT  --section-addr .bss.moddata.DXM_WIRED_.WIRED_DATA=0xE2A7C0
+# 8-byte copies from an element of the unit's array beyond a byte, the
+# slot's load in the index load's stall (codegen-patterns 5.2, "6 and 8
+# bytes"; bead domain-pascal-zrug).
+tests/conformance/name_get_wdir_uid.pas      NAME_$GET_WDIR_UID NAME_$GET_NDIR_UID  --section-addr .bss.moddata.NAME=0xE80264
 tests/conformance/name_uid_getters.pas       NAME_$GET_ROOT_UID NAME_$GET_NODE_UID NAME_$GET_NODE_DATA_UID  --section-addr .bss.moddata.NAME=0xE80264
 tests/conformance/tty_k_set_pgroup.pas       TTY_$K_SET_PGROUP  --section-addr .bss.moddata.TTY=0xE8242C  a5-always=TTY_$K_SET_PGROUP
 # A slot loaded after the status test passes over the dead entry load of

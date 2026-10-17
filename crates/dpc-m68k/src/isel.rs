@@ -2551,6 +2551,19 @@ fn zero_extends_byte(i: &Insn) -> bool {
     matches!(i, Insn::Clr { .. } | Insn::Move { size: Size::B, .. })
 }
 
+/// Whether `i`, one of an element's index instructions, zero-extends a
+/// byte (`clr.w Dn; move.b x,Dn`), not a word (`clr.l Dn; move.w x,Dn`,
+/// SMD_ 0xE6E4F4 for an 8-byte copy's source; [`Selector::copy8_element`]).
+fn widens_byte(i: &Insn) -> bool {
+    matches!(
+        i,
+        Insn::Clr {
+            size: Size::B | Size::W,
+            ..
+        } | Insn::Move { size: Size::B, .. }
+    )
+}
+
 /// The refusal of a block copy or comparison whose two blocks are both
 /// array elements indexed at run time ([`Selector::block_addresses`]).
 const ELEMENT_BOTH: &str = "a block copy or comparison of two array elements indexed at run \
@@ -2633,6 +2646,84 @@ const ELEMENT_SECOND_HELD: &str = "a block comparison's right operand, an unroll
 const ELEMENT_COMPUTED: &str = "a block that is an array element whose index is computed (every \
      site's index is a variable: VTOC_$MOUNT 0xE3860E, KBD_$RCV 0xE1CDD0, NAME_$SET_WDIRUS \
      0xE5868C; not seen; codegen-patterns 5.2, \"Block addresses\"; bead domain-pascal-dsr5) is";
+
+/// The refusal of an 8-byte copy from an element of an array through a
+/// held pointer into a pointer slot's object ([`Selector::copy8_element`]).
+const ELEM8_HELD_SLOT: &str = "an 8-byte copy from an element of an array through a pointer \
+     held in an address register into the object a pointer slot points to (no such copy in \
+     compiled code: not catalogued; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
+     domain-pascal-zrug) is";
+
+/// The refusal of an 8-byte copy from an element through a held pointer
+/// at a displacement beyond a byte.
+const ELEM8_HELD_WIDE: &str = "an 8-byte copy from an element of an array through a pointer \
+     held in an address register at a displacement beyond a byte (the sites are `with` records, \
+     the pair's second `lea` into another register: 0xE55608, 0xE39370; not settled, \
+     codegen-patterns 5.2, \"6 and 8 bytes\"; bead domain-pascal-zrug) is";
+
+/// The refusal of an 8-byte copy from an element of another unit's array
+/// or one through a pointer not held ([`Selector::copy8_element`]).
+const ELEM8_BASE: &str = "an 8-byte copy from an element of another unit's array, of another \
+     data section's block or of an array through a pointer not held in an address register \
+     (beyond a byte the pair's first `lea` into another register than the base's and the second \
+     into the first's at 0xE73D20 and 0xE73DAC, the first into the base's and the second into \
+     another at 0xE60AE8 and 0xE6FF08: not settled, codegen-patterns 5.2, \"6 and 8 bytes\"; \
+     beads domain-pascal-zrug, -1ibr) is";
+
+/// The refusal of an 8-byte copy from an element of the unit's array into
+/// a pointer slot's object with an index of another shape.
+const ELEM8_SLOT_INDEX: &str = "an 8-byte copy from an element of the unit's array into the \
+     object a pointer slot points to, with an index other than one of at most two instructions \
+     that read registers (within a byte) or a load and at most two more (beyond a byte) (the \
+     slot after a three-instruction index from registers, in the copy's stall, at 0xE4DED4; a \
+     loaded index within a byte not seen; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
+     domain-pascal-zrug) is";
+
+/// The refusal of an 8-byte copy from an element into a destination that
+/// is not the frame, a held pointer's object or a pointer slot's object.
+const ELEM8_DEST: &str = "an 8-byte copy from an array element indexed at run time into a \
+     destination other than the frame, the object of a pointer held in a register or of a \
+     pointer slot (the data area, an absolute address, one set up by other instructions: not \
+     seen; codegen-patterns 5.2, \"6 and 8 bytes\"; bead domain-pascal-zrug) is";
+
+/// The refusal of an 8-byte copy from an element into a field of a
+/// pointer slot's object.
+const ELEM8_SLOT_FIELD: &str = "an 8-byte copy from an array element indexed at run time into a \
+     field of the object a pointer slot points to (every site copies into the object itself, \
+     0xE5896C, 0xE5899A, 0xE6B602; not seen; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
+     domain-pascal-zrug) is";
+
+/// The row an element's base gives, its offset dropped: two elements of
+/// the unit's data with one index and scale share `(0,A5,Dx)`
+/// ([`Selector::copy8_element`]; 0xE58938).
+fn row_base(base: &Addr) -> Addr {
+    match base {
+        Addr::Static(_) => Addr::Static(0),
+        Addr::Indirect { base, .. } => Addr::Indirect {
+            base: base.clone(),
+            offset: 0,
+        },
+        a => a.clone(),
+    }
+}
+
+/// The refusal of an 8-byte copy from an element of the row (base and
+/// scaled index) of the copy of the statement just before, the index
+/// read from memory.
+const ELEM8_SAME_ROW: &str = "an 8-byte copy from an array element with the base and the index \
+     (read from memory) of the copy of the statement just before (the row's address kept for \
+     the second copy at 0xE5892C..0xE58946, a frame-local index, the stores through `out` \
+     pointers; the index reloaded and the row recomputed at 0xE53448..0xE5346C, a store \
+     through a pointer into the unit's data between: whether the possible aliasing of the \
+     index decides is unverified; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
+     domain-pascal-zrug) is";
+
+/// The refusal of an 8-byte copy from an element beyond a byte whose
+/// scaled index an earlier statement formed.
+const ELEM8_ROW_KEPT: &str = "an 8-byte copy from an array element beyond a byte whose scaled \
+     index an earlier statement formed (the image keeps the row's address for the second copy, \
+     0xE58938..0xE58946 `lea (0,A5,D0.l),A1; lea (2384,A1),A2; ...; lea (992,A1),A2`: not \
+     modelled; codegen-patterns 5.2, \"6 and 8 bytes\"; bead domain-pascal-zrug) is";
 
 /// The refusal of an array of char copied into or from an element.
 const ELEMENT_CHARS: &str = "a copy of an array of char into or from an array element indexed \
@@ -6104,6 +6195,10 @@ pub struct Selector {
     /// loaded with `movea.l #block,An` ([`Self::other_base`]).  A call
     /// ends them.
     other_bases: Vec<(String, u8)>,
+    /// The row of the last 8-byte copy from an array element
+    /// ([`Selector::copy8_element`]): its base (offset dropped), index and
+    /// scale, and where in `out` the copy ended.
+    elem8_row: Option<(Addr, Expr, u32, usize)>,
     /// The indices in `out` of those loads.
     other_base_loads: Vec<usize>,
     /// The label of the routine's data area, the block of its data
@@ -6384,6 +6479,7 @@ impl Selector {
             abs_base: None,
             abs_elem_update: false,
             other_bases: Vec::new(),
+            elem8_row: None,
             other_base_loads: Vec::new(),
             loops: Vec::new(),
             stepped: Vec::new(),
@@ -10016,9 +10112,16 @@ impl Selector {
     ///   (0xc,A6),A3; lea (0x38,A0),A1`, A3 since A1 is the source's and
     ///   A2 holds the status; TTY_$K_INQ_PGROUP 0xE6796C the same).
     ///
+    /// A source that is an array element indexed at run time: see
+    /// [`Self::copy8_element`].  The start of another data section's block
+    /// of the unit: `movea.l #block,An` as for another unit's object, into
+    /// a destination needing no register (LOG_$INIT 0xE300B2).
+    ///
     /// Refused: a destination indexed at run time (11 sites, `(d,An,Dn)`,
     /// which side is set up first is not settled), one whose operand takes
     /// other instructions, a source through another pointer expression,
+    /// a field of another unit's variable or of another data section's
+    /// block (AS_$INIT 0xE3153E, the base held across statements),
     /// volatile objects (not seen).
     fn copy8(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
         if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
@@ -10028,21 +10131,18 @@ impl Selector {
             ));
         }
         let start = self.out.len();
-        let slot = match dst {
-            Addr::Indirect { base, offset } if (-0x8000..0x7ffc).contains(offset) => {
-                match &**base {
-                    Expr::Load {
-                        addr: Addr::Frame(o),
-                        ty:
-                            Scalar {
-                                width: Width::Long, ..
-                            },
-                    } if self.pinned(*o).is_none() => Some((*o, *offset)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
+        let slot = self.copy8_slot(dst);
+        if let Some(e) = self.element_block(src) {
+            return self.copy8_element(dst, src, e, slot);
+        }
+        if slot.is_some() && matches!(src, Addr::OtherStatic { .. }) {
+            return Err(unsupported(
+                self.span,
+                "an 8-byte copy from another data section's block of the unit into the object \
+                 a pointer slot points to (which address is loaded first not seen; \
+                 codegen-patterns 5.2, \"6 and 8 bytes\"; bead domain-pascal-zrug) is",
+            ));
+        }
         let (from, to) = if let Some((o, k)) = slot {
             // The source through a parked pointer local moved to its
             // address register at this statement's start ([`Self::park_home`]).
@@ -10123,6 +10223,226 @@ impl Selector {
         Ok(())
     }
 
+    /// The pointer slot `(o,A6)` and the displacement `k` of an 8-byte
+    /// copy's destination that is the object (or a field of the object) a
+    /// pointer in the frame points to ([`Self::copy8`]).
+    fn copy8_slot(&self, dst: &Addr) -> Option<(i32, i32)> {
+        match dst {
+            Addr::Indirect { base, offset } if (-0x8000..0x7ffc).contains(offset) => {
+                match &**base {
+                    Expr::Load {
+                        addr: Addr::Frame(o),
+                        ty:
+                            Scalar {
+                                width: Width::Long, ..
+                            },
+                    } if self.pinned(*o).is_none() => Some((*o, *offset)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `d := a[i]` for an 8-byte element indexed at run time (a UID
+    /// most often; codegen-patterns 5.2, "6 and 8 bytes", "Elements"; bead
+    /// domain-pascal-zrug): the element's address formed as a block's
+    /// ([`Self::element_lea`]: `lea (d,An,Dx),Am`, or beyond a byte `lea
+    /// (0,An,Dx),Am; lea (d,Am),Am` in one register), then `move.l
+    /// (Am)+,<d>; move.l (Am)+,<d+4>`.  Survey (`tools/storesurvey.py
+    /// blocks 8 -v`, the 8-byte runs whose source register is set by an
+    /// indexed `lea`): the destination
+    ///
+    /// - needing no register (the frame, a held pointer's object):
+    ///   the element alone, the pair's two `lea`s in one register (DIR_
+    ///   0xE5720E..0xE57222 `move.w PROC1_$CURRENT,D0; lsl.w #3,D0; lea
+    ///   (0,A5,D0.w),A0; lea (696,A0),A0; move.l (A0)+,(-8,A6)` ×2;
+    ///   0xE4E48A, 0xE5345E, 0xE53448, 0xE6E696; 0xE5473C with an entry
+    ///   load in the index's stall, 12.2; within a byte 0xE1292C `lea
+    ///   (-8,A5,D6.l),A2`; through a held pointer SMD_ 0xE6E4F4 `clr.l D0;
+    ///   move.w D2,D0; lsl.l #3,D0; lea (-8,A2,D0.l),A0`).  Of the 12
+    ///   pairs of the unit's data, 10 so; the others a row address shared
+    ///   by two copies (0xE58938) and a `with` record (0xE6B67E);
+    /// - a pointer slot, an element of the unit's data: with an index of
+    ///   at most two instructions that read registers, within a byte, the
+    ///   index and the `lea` together, then the slot (VOLX_$GET_INFO
+    ///   0xE6B602..0xE6B60A `move.w D2,D0; lsl.w #5,D0; lea
+    ///   (-32,A5,D0.w),A0; movea.l (12,A6),A1`; the rule of the longer
+    ///   copies, VTOC_$DISMOUNT 0xE387C0); with the index loaded from
+    ///   memory, beyond a byte, the slot in the load's stall
+    ///   (NAME_$GET_WDIR_UID 0xE5896C..0xE5897C `move.w PROC1_$AS_ID,D0;
+    ///   movea.l (8,A6),A1; lsl.w #3,D0; lea (0,A5,D0.w),A0; lea
+    ///   (2384,A0),A0`, NAME_$GET_NDIR_UID 0xE5899A; the order also at
+    ///   0xE5892C, whose row address is shared by two copies): generated
+    ///   as the index, the slot, the `lea`s, which R11 orders so (12.4).
+    ///   The source's register is coloured first at all three.
+    ///
+    /// Refused: the bases [`Self::element_block`] refuses (another unit's
+    /// array or another data section's block: beyond a byte the pair's
+    /// first `lea` into another register than the base's and the second
+    /// into the first's at 0xE73D20 and 0xE73DAC, the first into the
+    /// base's and the second into another at 0xE60AE8 and 0xE6FF08; a
+    /// computed index), an index zero-extending a byte (no site), an element
+    /// through a held pointer beyond a byte or into a slot's object (no
+    /// site), into a slot the other index shapes (an index of three
+    /// instructions from registers, the slot in the copy's stall at
+    /// 0xE4DED4, after the `lea`s at 0xE4CC30 (another pointer); loaded
+    /// within a byte, no site; an index not formed in the statement), a
+    /// field of a slot's object (no site), beyond a byte an index formed
+    /// by an earlier statement (the image keeps the row, 0xE58938), any
+    /// other destination (the data area, absolute: not seen).
+    fn copy8_element(
+        &mut self,
+        dst: &Addr,
+        src: &Addr,
+        e: Result<bool, &'static str>,
+        slot: Option<(i32, i32)>,
+    ) -> Res<()> {
+        let data = e.map_err(|why| {
+            unsupported(
+                self.span,
+                if why == ELEMENT_BASE { ELEM8_BASE } else { why },
+            )
+        })?;
+        // The same row as the copy of the statement just before, with the
+        // index read from memory (not held in a register).
+        let row = match src {
+            Addr::Index {
+                base, index, scale, ..
+            } => Some((row_base(base), (**index).clone(), *scale)),
+            _ => None,
+        };
+        if let (Some((b, i, sc)), Some((pb, pi, psc, end))) = (&row, &self.elem8_row) {
+            if *end == self.stmt_start && b == pb && i == pi && sc == psc && self.index_in_memory(i)
+            {
+                return Err(unsupported(self.span, ELEM8_SAME_ROW));
+            }
+        }
+        let start = self.out.len();
+        let (from, to, unit) = if let Some((o, k)) = slot {
+            if !data {
+                return Err(unsupported(self.span, ELEM8_HELD_SLOT));
+            }
+            if k != 0 {
+                return Err(unsupported(self.span, ELEM8_SLOT_FIELD));
+            }
+            let mark = self.out.len();
+            let ea = self.ea_of(src)?;
+            let index = &self.out[mark..];
+            if index.iter().any(widens_byte) {
+                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+            }
+            let load_d = |d| Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(o, FP),
+                dst: d,
+            };
+            match ea {
+                Ea::Idx(..) => {
+                    // An index formed in this statement (an empty one, a
+                    // scaled index of an earlier statement: no site).
+                    if !(1..=2).contains(&index.len()) || !index.iter().all(index_reads_registers) {
+                        return Err(unsupported(self.span, ELEM8_SLOT_INDEX));
+                    }
+                    // One unit with the moves (below), as R10 takes the
+                    // index and its `lea` for the longer copies.
+                    let s = self.element_lea(ea)?;
+                    let d = self.alloc_a()?;
+                    self.fresh.push((Reg::A(d), self.stmt_start, self.span));
+                    self.out.push(load_d(d));
+                    (s, if k == 0 { Ea::Ind(d) } else { Ea::Disp(k, d) }, true)
+                }
+                Ea::Disp(..) => {
+                    // The index's instructions before the pair's first
+                    // `lea`: a load from memory (a `move`, not a `clr.l`
+                    // zero-extension: 0xE4DED4 puts the slot after the
+                    // index's first instruction whatever it is), then up
+                    // to two that read registers (a widening, the scaling).
+                    let n = index.len().saturating_sub(1);
+                    let loads = |i: &Insn| {
+                        matches!(i, Insn::Move { src, dst: Ea::Reg(_), .. }
+                            if !matches!(src, Ea::Reg(_) | Ea::Imm(_)))
+                    };
+                    let shaped = (2..=3).contains(&n)
+                        && matches!(
+                            index.last(),
+                            Some(Insn::Lea {
+                                src: Ea::Idx(0, ..),
+                                ..
+                            })
+                        )
+                        && loads(&index[0])
+                        && index[1..n].iter().all(index_reads_registers);
+                    if !shaped {
+                        return Err(unsupported(self.span, ELEM8_SLOT_INDEX));
+                    }
+                    let d = self.alloc_a()?;
+                    self.fresh.push((Reg::A(d), self.stmt_start, self.span));
+                    self.out.push(load_d(d));
+                    let s = self.element_lea(ea)?;
+                    // Left to R11: the slot goes into the load's stall.
+                    (s, if k == 0 { Ea::Ind(d) } else { Ea::Disp(k, d) }, false)
+                }
+                _ => return Err(unsupported(self.span, ELEMENT_FORM)),
+            }
+        } else {
+            let mark = self.out.len();
+            let to = self.ea_of(dst)?;
+            // The frame or a held pointer (the 7 sites); the data area and
+            // absolute destinations are not seen.
+            if self.out.len() != mark
+                || !matches!(to, Ea::Ind(r) | Ea::Disp(_, r) if r != DATA_BASE_A)
+            {
+                return Err(unsupported(self.span, ELEM8_DEST));
+            }
+            let ea = self.ea_of(src)?;
+            if self.out[mark..].iter().any(widens_byte) {
+                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+            }
+            if !data && !matches!(ea, Ea::Idx(..)) {
+                return Err(unsupported(self.span, ELEM8_HELD_WIDE));
+            }
+            // Beyond a byte, an index formed in this statement: with the
+            // row of an earlier statement's index the image keeps the row's
+            // address (0xE58938..0xE58946 `lea (0,A5,D0.l),A1; lea
+            // (2384,A1),A2; ...; lea (992,A1),A2`), which dpc does not.
+            if matches!(ea, Ea::Disp(..)) && self.out.len() - mark < 2 {
+                return Err(unsupported(self.span, ELEM8_ROW_KEPT));
+            }
+            let s = self.element_lea(ea)?;
+            (s, to, true)
+        };
+        let Some(to2) = ea_plus(&to, 4) else {
+            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+        };
+        let moves = self.out.len();
+        for d in [to, to2] {
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::PostInc(from),
+                dst: d,
+            });
+        }
+        self.units
+            .push((if unit { start } else { moves }, self.out.len()));
+        self.elem8_row = row.map(|(b, i, sc)| (b, i, sc, self.out.len()));
+        Ok(())
+    }
+
+    /// Whether the index `e` of an element reads a variable in memory
+    /// rather than a register that holds it ([`Self::copy8_element`]).
+    fn index_in_memory(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Convert { value, .. } => self.index_in_memory(value),
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } => self.pinned(*o).is_none(),
+            Expr::Load { .. } => true,
+            _ => false,
+        }
+    }
+
     /// How an 8-byte copy's source register is loaded ([`Self::copy8`]);
     /// a pointer held in a data register is copied to an address register
     /// here ([`Self::copy_to_a`]).
@@ -10162,6 +10482,44 @@ impl Selector {
                     ));
                 }
                 Src8::Lea(ea)
+            }
+            // The start of another data section's block of the unit, no
+            // register holding it: `movea.l #block,An`, as for another
+            // unit's object (LOG_$INIT 0xE300B2 `movea.l #0xe2b280,A0;
+            // move.l (A0)+,(-24,A6); move.l (A0)+,(-20,A6)`, its first
+            // reference of LOG_'s WIRED_DATA block; bead domain-pascal-zrug).
+            Addr::OtherStatic { section, offset: 0 }
+                if !self.other_bases.iter().any(|(s, _)| s == section) =>
+            {
+                Src8::Sym(crate::emit::data_base_label(section))
+            }
+            Addr::OtherStatic { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "an 8-byte copy from another data section's block of the unit at an \
+                     offset, or while a register holds the block's address (RIP_$INIT \
+                     0xE2FC1E `lea (0xc68,A0),A1` off the block's register, a longer copy, \
+                     one site: not settled; codegen-patterns 5.2, \"Block addresses\"; bead \
+                     domain-pascal-zrug) is",
+                ))
+            }
+            Addr::Symbol { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "an 8-byte copy from a field of another unit's variable (every `movea.l \
+                     #imm` block address of compiled code is a map symbol; AS_$INIT 0xE3153E \
+                     `lea (4,A0),A1` off AS_$INFO's address held across the statements, which \
+                     dpc does not hold: not settled; codegen-patterns 5.2, \"Block \
+                     addresses\"; bead domain-pascal-zrug) is",
+                ))
+            }
+            Addr::Index { .. } => {
+                return Err(unsupported(
+                    self.span,
+                    "an 8-byte copy from an array element through a `for` loop's stepped \
+                     pointer (not catalogued; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
+                     domain-pascal-zrug) is",
+                ))
             }
             _ => {
                 return Err(unsupported(

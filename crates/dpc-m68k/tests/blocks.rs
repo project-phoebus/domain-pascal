@@ -307,3 +307,132 @@ end;
         assert!(e.contains(want) && e.contains("dsr5"), "{stmt}: {e}");
     }
 }
+
+/// 8-byte copies (UIDs) from an array element indexed at run time
+/// (codegen-patterns 5.2, "6 and 8 bytes"; bead domain-pascal-zrug): the
+/// shapes the image does not settle are refused with their own messages;
+/// the settled ones are golden `data/element_copy8`.
+#[test]
+fn unsettled_element_copies8() {
+    let cases = [
+        // Another unit's array (the pair's registers differ: 0xE73D20,
+        // 0xE60AE8).
+        (
+            "u := ext[i];",
+            "another unit's array, of another data section",
+        ),
+        // A frame array.
+        ("u := loc[i];", "an element of an array in the frame"),
+        // A computed index.
+        ("u := tbl[i + 1];", "whose index is computed"),
+        // A zero-extended byte index (none).
+        ("u := tc[c];", "a byte index zero-extended"),
+        // Through a held pointer into a slot's object (none).
+        (
+            "u := p^[i]; p^[1].high := 0;",
+            "into the object a pointer slot",
+        ),
+        // Through a held pointer beyond a byte (`with` records only).
+        (
+            "w := pb^.t[i]; pb^.pad[1] := w.low;",
+            "at a displacement beyond a byte",
+        ),
+        // Into a slot, an index loaded from memory within a byte (none).
+        ("u := tbl[cur];", "a loaded index within a byte not seen"),
+        // Into a destination set up by other instructions.
+        ("pp^^ := tbl[i];", "one set up by other instructions"),
+        // Into the data area or an absolute address (not seen).
+        ("tbl[1] := tbl[i];", "the data area, an absolute address"),
+        ("ext[1] := tbl[i];", "the data area, an absolute address"),
+        // Into a field of a slot's object (not seen).
+        ("r.u := tbl[i];", "a field of the object a pointer slot"),
+        // Into a slot, beyond a byte, an index zero-extended first (the
+        // load rule needs a `move` from memory; 0xE4DED4).
+        ("u := huge[k];", "a loaded index within a byte not seen"),
+        // Into a slot, an index formed by an earlier statement.
+        (
+            "ext1(i); u := tbl[i]; u2 := tbl[i];",
+            "a loaded index within a byte not seen",
+        ),
+        // The row of the copy just before, the index read from memory
+        // (0xE5892C keeps the row, 0xE5345E recomputes it).
+        (
+            "w := wd[cur]; x := nd[cur]; u := w; u2 := x;",
+            "of the copy of the statement just before",
+        ),
+        (
+            "u := wd[cur]; u2 := nd[cur];",
+            "of the copy of the statement just before",
+        ),
+        // Beyond a byte, the scaled index of an earlier statement held in
+        // a register (the image keeps the row, 0xE58938).
+        (
+            "ext1(i); w := wd[i]; x := nd[i]; u := w; u2 := x;",
+            "whose scaled index an earlier statement formed",
+        ),
+    ];
+    for (stmt, want) in cases {
+        let e = compile(&format!(
+            "module m;
+type
+  uid_t = record high, low: integer32; end;
+  tab_t = array[1..10] of uid_t;
+  tabp = ^tab_t;
+  big_t = record pad: array[1..100] of integer32; t: tab_t; end;
+  bigp = ^big_t;
+  uidp = ^uid_t;
+  uidpp = ^uidp;
+  rec_t = record a: integer32; u: uid_t; end;
+  cnt_t = 0..65535;
+var
+  tbl: tab_t;
+  tc: array[char] of uid_t;
+  cur: integer;
+  wd: tab_t;
+  nd: tab_t;
+  huge: array[1..5000] of uid_t;
+  ext: extern tab_t;
+procedure ext1(i: integer); options(val_param); extern;
+procedure t(i, j: integer; c: char; out u: uid_t; v: uidp; p: tabp;
+            pb: bigp; pp: uidpp; out r: rec_t; k: cnt_t; out u2: uid_t);
+            options(val_param);
+var loc: tab_t; w, x: uid_t;
+begin
+  loc[1].high := 0;
+  {stmt}
+end;
+"
+        ))
+        .expect_err("refused")
+        .join("\n");
+        assert!(e.contains(want), "{stmt}: {e}");
+    }
+}
+
+/// Within a byte, a scaled index held in a register reused by the next
+/// statement's element copy is accepted (VOLX_$DISMOUNT 0xE6B4B0..0xE6B4E8
+/// reuses `(d,A5,D2.w)` across statements; bead domain-pascal-zrug).
+#[test]
+fn held_index_reused_by_element_copies8() {
+    let asm = compile(
+        "module m;
+type uid_t = record high, low: integer32; end;
+  ent_t = record dev: integer32; a, b: uid_t; end;
+var tbl: array[1..6] of ent_t;
+procedure ext1(i: integer); options(val_param); extern;
+procedure show(in u: uid_t); extern;
+procedure t(i: integer); options(val_param);
+var a, b: uid_t;
+begin
+  ext1(i);
+  a := tbl[i].a;
+  b := tbl[i].b;
+  show(a);
+  show(b);
+end;
+",
+    )
+    .expect("compiles");
+    let leas = asm.iter().filter(|l| l.ends_with(",%d0.w),%a0")).count();
+    assert_eq!(leas, 2, "{asm:?}");
+}
