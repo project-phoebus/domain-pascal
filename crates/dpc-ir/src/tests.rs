@@ -1826,6 +1826,7 @@ end;
 fn for_loops() {
     let pre = "module m;
 var buf: extern array[0..15] of integer32; j: extern integer;
+procedure q; extern;
 procedure p;
 var i: integer; b: char;
 begin
@@ -1860,19 +1861,63 @@ begin
     );
     let e = one("for b := 'a' to 'z' do j := 0;").unwrap_err();
     assert!(e[0].contains("that is not a word"), "{e:?}");
-    // The index is the loop's register only (ref p. 4-89): no reads
-    // outside its loops, no assignments or addresses inside them.
+    // The index is kept in a register (codegen-patterns 7.4): read after a
+    // loop of constant bounds in the statements that follow it; passed by
+    // address to a value or `in` parameter inside it; never assigned in its
+    // loop (ref p. 4-89) nor anywhere else.
     for stmt in [
         "for i := 0 to 15 do j := 0; j := i;",
-        "for i := 0 to 15 do i := 3;",
-        "for i := 0 to 15 do for i := 1 to 2 do j := 0;",
+        "for i := 0 to 15 do if buf[i] = 0 then exit; if i > 15 then j := i;",
+        "for i := 0 to 15 do j := 0; for i := 1 to 2 do j := i; j := i;",
+        "for i := 0 to 15 do j := 0; while j = 0 do j := i;",
+    ] {
+        one(stmt).unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+    }
+    for (stmt, msg) in [
+        (
+            "j := i; for i := 0 to 15 do j := 0;",
+            "read before its loop",
+        ),
+        (
+            "if j = 0 then for i := 0 to 15 do j := 0; j := i;",
+            "read before its loop",
+        ),
+        (
+            "for i := 0 to j do j := 0; j := i;",
+            "with a run-time bound read after",
+        ),
+        (
+            "for i := 0 to 15 do j := 0; if j = 1 then for i := 1 to 2 do j := 0; j := i;",
+            "another loop over it",
+        ),
+        ("for i := 0 to 15 do j := 0; i := 2;", "outside its loops"),
+        ("for i := 0 to 15 do i := 3;", "in its loop"),
+        (
+            "for i := 1 to 15 do if buf[i] = 0 then exit; for i := 1 to i do j := 0;",
+            "bound reads its own index",
+        ),
+        (
+            "for i := 1 to 15 do if buf[i] = 0 then exit; for i := i to 15 do q;",
+            "bound reads its own index",
+        ),
+        (
+            "for i := 0 to 15 do for i := 1 to 2 do j := 0;",
+            "of an enclosing `for` loop",
+        ),
     ] {
         let e = one(stmt).unwrap_err();
-        assert!(
-            e[0].contains("the index variable of a `for` loop read outside the loop"),
-            "{stmt}: {e:?}"
-        );
+        assert!(e[0].contains(msg), "{stmt}: {e:?}");
     }
+    // A label after the loop that a `goto` from before it reaches.
+    let lab = |stmt: &str| {
+        lower_src(&format!(
+            "module m;\nvar j: extern integer;\nprocedure p;\nlabel 1;\nvar i: integer;\nbegin\n  \
+             {stmt}\nend;\n"
+        ))
+    };
+    lab("for i := 0 to 15 do if j = i then goto 1; j := 0; 1: j := i;").unwrap();
+    let e = lab("if j = 0 then goto 1; for i := 0 to 15 do j := 0; 1: j := i;").unwrap_err();
+    assert!(e[0].contains("past a label"), "{e:?}");
     let e = one("for i := 3 to 2 do buf[i] := 0;").unwrap_err();
     assert!(
         e[0].ends_with("a `for` loop that never runs is not supported yet"),

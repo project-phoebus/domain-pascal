@@ -7523,10 +7523,141 @@ scripts besides, not kept, are named as such below; re-check sites with
   pea (-6,A6); bsr.w DISK_$UNASSIGN; addq.w #8,SP`, then `addq.w #1,D3;
   dbf D2` (Verified; reproduced, `tests/conformance/disk_unassign_all.pas`).
   SMD_$FREE_ASID 0xE75278 and MSG_$FREE_ASID 0xE74E5C store their index
-  register to a frame word the same way before passing it by address.
-  Whether that word is the index's own slot or another local (`vol :=
-  i`) cannot be seen; `dpc` takes the second reading (the C of
-  DISK_$UNASSIGN_ALL has a separate `vol_idx`).
+  register to a frame word the same way before passing it by address
+  ("The index passed by address", below).
+- **The index passed by address (survey Verified, 8 of 8; the frame word
+  Uncertain; implemented; bead domain-pascal-h1io).**  Ad-hoc script over the index-register
+  `dbf` loops (not kept): every `move.w Di,(d,A6)` of the index register
+  in a body followed by a `pea (d,A6)` before a call is the store of an
+  argument passed by address, made **before all of the call's pushes**,
+  the register not reloaded after the call: DISK_$UNASSIGN_ALL 0xE6BE28
+  `move.w D3,(-6,A6); pea (-4,A6); pea (-6,A6)`; ASKNODE_$INTERNET_INFO
+  0xE64D64 `move.w D4,(-316,A6); pea (-292,A6); pea (-112,A6); pea
+  (pc); pea (-316,A6); jsr DISK_$GET_MNT_INFO`; 0xE65472 and 0xE6549A
+  (`movea.l (28,A6),A1` for another argument between); SMD_$FREE_ASID
+  0xE75278; SMD_$N_DEVICES 0xE70038; TPAD_$INIT 0xE335A6; MSG_$FREE_ASID
+  0xE74E5C.  None has a pad, a function call among the arguments or the
+  index twice.  Which word: the variable's own slot in
+  dpc's layout of ../source's declarations at SMD_$FREE_ASID (-6),
+  SMD_$N_DEVICES (-4) and TPAD_$INIT (-0x16), but not at
+  ASKNODE_$INTERNET_INFO, whose -0x13C dpc's layout of ../source's
+  reconstruction does not give (`vol` at -0x96 there; a temporary below
+  the locals, or a frame the reconstruction does not match: not settled,
+  bead domain-pascal-p68b).  The image cannot tell the own slot from a
+  separate local assigned from the index either (the C of
+  DISK_$UNASSIGN_ALL has a `vol_idx`).  The 15 other
+  stores of an index register to the frame are assignments `x := i`
+  (most before a `bra` out of the loop).  `dpc`: the index passed to a
+  value or `in` parameter by address is stored to its own slot (the
+  reading of the three sites above) before the call's pushes; to a `var`, `out` or `in out` one it is refused (the
+  callee could assign it; ref p. 4-89), as is a call with a pad, with a
+  function call among its arguments, or passing the index twice (not
+  seen).
+- **The index read after its loop (survey Verified, 6 routines; the
+  colouring Inferred; implemented for constant bounds; bead
+  domain-pascal-h1io).**  Ref p. 4-90 names `exit`, `goto` and `return`
+  as the ways out of a loop before the index reaches the bound; after
+  normal termination Domain Pascal "forbids the use of the value of the
+  index-variable" and the compiler only warns (message 235, Diagnostic
+  Messages p. 9-31, "Potential illegal use of FOR index variable
+  (identifier) outside of FOR stmt": "if a for loop has no premature exits (exit or goto) and
+  the value of the index-variable is used outside the loop"), so the
+  value is not defined there by the reference.  Ad-hoc script
+  (`tmp/forafter.py`, not kept: the index-register loops whose index is
+  set by `moveq`/`clr.w` in the preheader and not written in the body,
+  256; a linear scan from the `dbf`'s fall-through and from each branch
+  out of the body to the first read or write of the index register): 8
+  read it after normal termination and 5 after an early exit; with the
+  counters that step in an `if` (0xE01514, RING_$SVC_IOCTL 0xE77780)
+  left out, 6 routines: PROC2_$PGROUP_SET 0xE41F0E `cmpi.w #70,D0` (the
+  ../source `for new_idx := 1 to 70 do if ... then exit; if new_idx > 70
+  then`), CAL_$DECODE_TIME 0xE68850 `move.w D0,(2,A2)` (`month :=
+  month_no`), ACL_$CHECK_DEBUG_RIGHTS 0xE48BBC `cmpi.w #8,D1`,
+  MST_$ALLOC_ASID 0xE42D7C (`move.w D2,-(SP)` after a `goto` out) and
+  0xE42E2C, XNS_IDP_$REGISTER_ADDR 0xE1905E `cmpi.w #4,D1`, VTOC's
+  0xE3846E (a cross-jump into the first loop's `then` part).  At every
+  site the index stays in its register and the read takes it from
+  there: after normal termination one step past the bound, the index
+  stepped before the `dbf` (`if new_idx > 70` is true there), after an
+  exit the value at the exit.  Nothing stores it to the frame.  The
+  index is set up although the body does not read it (PROC2_$PGROUP_SET
+  0xE41EF2 `moveq #69,D1; movea.l #abs,A0; moveq #1,D0; addq.l #8,A0`,
+  the elements reached through the stepped A0 only; CAL_$DECODE_TIME
+  0xE6882E `moveq #11,D2; moveq #1,D0`).  Its register: below the count
+  at the four sites where both were free to take the lower register
+  (PROC2_$PGROUP_SET index D0, count D1; CAL_$DECODE_TIME D0, D2;
+  ACL_$CHECK_DEBUG_RIGHTS's inner loop D1, D2, with a scaled index
+  register in D0; VTOC's 0xE38494 `moveq #7,D2; clr.w D0`), where the
+  index lies above the count in 38 of the 39 in-place loops of "The
+  count's register" (indices not read after); callee-saved where a call
+  follows (MST_$ALLOC_ASID D2, the count D0).  So an index read after
+  its loop is coloured before the count (Inferred, four sites, no
+  counterexample).  XNS_IDP_$REGISTER_ADDR's loop has a run-time bound
+  (`tst.w D0; bmi.s 0xE1905E`): its guard jumps to the read with D1,
+  the index, not yet set (`clr.w D1` at 0xE1902A, after the guard).
+  `dpc`: an index read after a loop of constant bounds, in the
+  statements after it in the same sequence (no other loop over it nested
+  among them, no label there that a `goto` from elsewhere reaches, the
+  variable assigned and addressed nowhere outside its loops), is set up
+  in a register, coloured before the count (`regs.rs` `late`), and held
+  there until the end of that sequence (`dpc-ir`'s `ForLoop` states what
+  a target must give there).  Refused: a run-time bound (the guard's
+  path, not modelled); a later loop over the same variable whose bound
+  reads it (`for i := 1 to i`, no site); a read before the loop or
+  elsewhere; the
+  variable assigned outside its loops (another live range in another
+  register: AREA_$FREE_SEGMENTS 0xE0863C `move.w D3,D2` for `n :=
+  first_n` after its loop over n in D5; PROC2_$PGROUP_SET assigns
+  `new_idx` a call's result in the other arm of an `if`).
+- **A longword bound (survey Verified, 10 of 10; implemented; bead
+  domain-pascal-h1io).**  A word index's bound that is a longword
+  variable is read as its low word in place, as an assignment narrows it
+  (section 8; reference-clarifications Q41): the eight DIR_ loops over
+  DIR_$MTTAB's count, a longword at 0x1558 of DIR's data (DIR_$FIND_UID
+  0xE4E46A `move.w (0x155a,A5),D0; subq.w #1,D0; bmi.s`; DIR_$DELETE
+  0xE51422, DIR_$CNAME 0xE519DE, DIR_$DROP_DIR 0xE527D2, DIR_$ADD_MOUNT
+  0xE532A0, DIR_$DROP_MOUNT 0xE53404, DIR_$DIR_READU 0xE4DEAA,
+  DIR_$GET_ENTRYU), EC2_$REGISTER_EC1 0xE42960 `move.w (0xe9a,A5),D0`
+  (`ec2_$max_registered`), VTOC_$TRUNCATE 0xE3A12C `move.w
+  (-0x32,A6),(-0x3e,A6)` (a run-time lower bound, a longword local at
+  -0x34).  All ten are variables of the unit's data or the frame and none
+  has a call in its body (so the count stays in place or is copied by the
+  colouring order, "The count's register": the DIR_ and EC2_ loops keep
+  it in D0).  `dpc`: the bound narrowed in place, then counted as a word
+  bound.  It accepts any longword load so, as an assignment narrows one
+  (section 8), although the image shows only variables of the unit's
+  data and the frame: a pointer's target, an element, a parameter
+  passed by address or by value (`val_param`) as the bound are not seen.
+  A longword expression or function result as a bound is refused (no
+  site).  A longword index is refused as before (no `dbf` loop with
+  a longword index is catalogued).
+- **An index read through an element (survey of the srcsurvey sites,
+  bead domain-pascal-h1io; implemented).**  An element whose index reads
+  the loop index only as the index of another element (`a[b[i]]`,
+  `a[p[i]^.f]`) is not strength-reduced: its index is evaluated each
+  pass as any run-time index, `b[i]` reached as the loop's own element:
+  TTY_$I_SET_DFL_FUNCS 0xE6723A `clr.w D4; move.b (24,A0,D3.w),D4; add.w
+  D4,D4; lea (0,A0,D4.w),A2; move.w (A1),(164,A2)`; PROC1_$GET_LIST
+  0xE153CA; DIR_$NEXT_PAGE 0xE4D832; MAC_OS_$OPEN 0xE0B32E (`a[i + v]`,
+  `v` loaded each pass) likewise.  Three sites and one alike, no
+  counterexample.  The other computed indices of the srcsurvey (13
+  sites at ../source baa985bd) are not settled: a byte `a[i + k]` with
+  `k - lo` in the displacement of the index register (FILE_$MAP_CASE
+  0xE53F30 `(-1,A4,D2.w)`, `(0,A4,D2.w)`, `(1,A4,D2.w)`; one site: of
+  135 byte base registers at `(d,An,Di.w)` in the `dbf` loops, the only
+  one with several displacements); `a[i + 1]` through a stepped pointer
+  with `(k - lo) × size` in the displacement (MMAP_$FREE_PAGES 0xE0CEA2
+  `lea (4,A4),A2` with `(A2)`), but DIR_$INIT 0xE31428 forms a pointer of
+  its own for `addr(lock_tab[i + 1])` (`lea (0x1690,A4)` where
+  `lock_tab[i].next` is `(0x1680,A3)`), with seven induction values for
+  its references (as PROC1_$GET_LIST has five for `pcbs[i]` and the
+  module-local 0xE38258 three stepped pointers for one array: one per
+  reference, not per array, all from an absolute base); the
+  `(j - 1) * 144 + i` of 0xE55778 (the invariant hoisted into D0); rows
+  and non-linear indices (ga54 shapes).  PKT_$RECENTLY_MISSING 0xE128CC
+  and PKT_$NOTE_VISIBLE 0xE1290C fit `for i := 1 to n ... a[i]` better
+  than ../source's `for i := 0 to n - 1 ... a[i + 1]` (the pointer `lea
+  (8,A5),A0` and `(-8,A0)`).
 - **Array indexing by the index** (`fors`, index use of the register-index
   loops): byte arrays are indexed with the index register itself, `(d,
   An,Di.w)` (84 loops whose direct uses are all byte operations or `lea`:
@@ -8104,9 +8235,14 @@ scripts besides, not kept, are named as such below; re-check sites with
 - `while` as above, with the 0x2048 filler in aligning routines;
   `cmpa.w #0,An` for `=`/`<>` `nil` on a pointer held in an address
   register.
-- `for` with a word index variable of the routine itself, never read
-  outside loops over it nor assigned or addressed in them (ref p. 4-89;
-  `dpc` keeps it in a register for the loop only):
+- `for` with a word index variable of the routine itself, never
+  assigned in loops over it (ref p. 4-89) nor assigned or addressed
+  outside them, read outside them only after a loop of constant bounds
+  ("The index read after its loop"), and passed by address only to value
+  and `in` parameters ("The index passed by address"); a longword
+  variable as a bound read as its low word ("A longword bound"); an
+  element at an index read through an element at the loop index
+  ("An index read through an element"):
   - constant bounds, N in 1..=65536: count first, index (only when the
     body reads it) `clr.w`/`moveq` (initial value in -128..127 and not
     the count's), step `addq.w`/`subq.w #1`, `dbf`;
@@ -8192,25 +8328,32 @@ place together with another stepped pointer (order), two arrays of one
 element size in the unit's data or the frame (sharing), the unit's data
 addressed absolutely, through a
 pointer the body may change, at an index computed from the loop index
-(`a[i + 1]`), or reached at displacement 0 (`(An)+`, 0xE00ED8, 0xE0287A);
+other than through an element (`a[i + 1]`, `a[2 * i]`; "An index read
+through an element"), or reached at displacement 0 (`(An)+`, 0xE00ED8,
+0xE0287A);
 the address of a stepped element other than a `with` record's; the
 in-place forming from a pointer (0xE7632C, 0xE6FCC6); an index initial value
 outside -128..127 or equal to the count; byte or longword indices; an
 index of another scope (0xE721F8, a nested routine's loop over its
 parent's variable) or one a nested routine reaches (RINGLOG_$CNTL
-0xE72296, the index stepped in the frame; section 6) or read after its
-loop (MST_$ALLOC_ASID
-0xE42D7C pushes D2 after leaving the loop with a `goto`); a loop that
+0xE72296, the index stepped in the frame; section 6); an index read
+after a loop with a run-time bound, or assigned outside its loops ("The
+index read after its loop"); a loop whose bound reads its own index
+variable; an index passed by address to a call with a pad, with a
+function call among its arguments or twice, or to a `var`-like
+parameter; a longword expression or function result as a bound; a loop
+that
 never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
 
 Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
-`loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`,
+`loops/for_index.pas`, `loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`,
 `loops/stepped_offset.pas`, `loops/stepped_other_section.pas`;
 exec tests `tests/exec/stepped_data.pas`, `tests/exec/stepped_data_more.pas`,
 `tests/exec/stepped_offset.pas`,
-`tests/exec/for_runtime.pas`; tests `crates/dpc-m68k/src/isel.rs`
-(`for_with_index_and_call`, `for_forms`, `for_runtime_upper_bounds`,
+`tests/exec/for_runtime.pas`, `tests/exec/for_index.pas`; tests
+`crates/dpc-m68k/src/isel.rs` (`for_with_index_and_call`,
+`for_index_by_address_and_after`, `for_forms`, `for_runtime_upper_bounds`,
 `stepped_pointer_loops`, `constant_address_stepped_loops`,
 `unsettled_for_loops`, `while_shape`, `loop_pointer_local_rule`),
 `crates/dpc-m68k/src/regs.rs` (`coalesced_copy`),

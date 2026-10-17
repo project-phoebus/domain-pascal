@@ -3809,6 +3809,67 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
+/// Whether the statements `rest` after a `for` loop over the index at
+/// frame offset `off` read the index the loop leaves (`dpc-ir`,
+/// `check_for_indices`): in each sequence up to the next loop over it
+/// there, whose bounds do not read it (`dpc-ir` refuses that) and whose
+/// own value the statements after it read.
+fn read_after_loop(rest: &[Stmt], off: i32) -> bool {
+    fn hits_expr(e: &Expr, off: i32) -> bool {
+        let mut hit = false;
+        walk_expr(e, &mut |n| {
+            hit |= matches!(n, Node::Addr(Addr::Frame(o)) if *o == off)
+        });
+        hit
+    }
+    fn hits_cond(c: &IrCond, off: i32) -> bool {
+        let mut hit = false;
+        walk_cond(c, &mut |n| {
+            hit |= matches!(n, Node::Addr(Addr::Frame(o)) if *o == off)
+        });
+        hit
+    }
+    /// A sequence, up to its first loop over the index.
+    fn reads(body: &[Stmt], off: i32) -> bool {
+        for st in body {
+            let hit = match &st.kind {
+                StmtKind::For(l) if l.index.offset == off => return false,
+                StmtKind::For(l) => {
+                    hits_expr(&l.from, off) || hits_expr(&l.to, off) || reads(&l.body, off)
+                }
+                StmtKind::If { cond, then_, else_ } => {
+                    hits_cond(cond, off) || reads(then_, off) || reads(else_, off)
+                }
+                StmtKind::Repeat { body, until } => {
+                    reads(body, off) || until.as_ref().is_some_and(|u| hits_cond(u, off))
+                }
+                StmtKind::While { cond, body } => hits_cond(cond, off) || reads(body, off),
+                StmtKind::Case {
+                    selector,
+                    arms,
+                    otherwise,
+                } => {
+                    hits_expr(selector, off)
+                        || arms.iter().any(|a| reads(&a.body, off))
+                        || otherwise.as_ref().is_some_and(|o| reads(o, off))
+                }
+                _ => {
+                    let mut hit = false;
+                    walk(std::slice::from_ref(st), &mut |n| {
+                        hit |= matches!(n, Node::Addr(Addr::Frame(o)) if *o == off)
+                    });
+                    hit
+                }
+            };
+            if hit {
+                return true;
+            }
+        }
+        false
+    }
+    reads(rest, off)
+}
+
 /// The object `x` when `e` is `addr(x)`, or a type transfer of it to
 /// another 4-byte type (`integer32(addr(x))`: ref "Type Transfer
 /// Functions", p. 4-197, "does not change any bits"; `dpc-ir` wraps it in
@@ -4551,9 +4612,20 @@ fn stepped_arrays(
             );
             return;
         }
+        if !addr_reads_frame(base, off) && index_through_elements(index, off) {
+            // `a[b[i]]`: an ordinary run-time index, evaluated each pass,
+            // `b[i]` reached as the loop's own element (codegen-patterns
+            // 7.4, "An index read through an element"): TTY_$I_SET_DFL_
+            // FUNCS 0xE6723A `clr.w D4; move.b (24,A0,D3.w),D4; add.w
+            // D4,D4; lea (0,A0,D4.w),A2`; PROC1_$GET_LIST 0xE153CA;
+            // DIR_$NEXT_PAGE 0xE4D832.
+            return;
+        }
         if !is_index(index, off) || addr_reads_frame(base, off) {
             err.get_or_insert(
-                "an element at an index computed from a `for` index (strength reduction, \
+                "an element at an index computed from a `for` index other than through an \
+                 element at the index itself (`a[i + 1]`, `a[2 * i]`, a row `a[i][j]`: a \
+                 pointer of its own, a displacement or a scaled index register, not settled; \
                  codegen-patterns 7.4) is",
             );
             return;
@@ -4647,6 +4719,21 @@ const ENCLOSING_ARRAY: &str = "a `for` loop over an array of the enclosing routi
      (0,Al,Dx.l),Ae` each iteration, 7 of 7 nested-routine sites: NETWORK_$REPORT_FAILURE's \
      0xE10958, RIP_$SERVER's 0xE688F4; not implemented, codegen-patterns 7.4; bead \
      domain-pascal-1ibr, domain-pascal-ga54) is";
+
+/// Whether `index` reads the `for` index at frame offset `off` only as the
+/// index of elements (`b[i]`, `p[i]^.f`), at least once ([`stepped_arrays`]).
+fn index_through_elements(index: &Expr, off: i32) -> bool {
+    let (mut reads, mut through) = (0, 0);
+    walk_expr(index, &mut |n| match n {
+        Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) if *o == off => reads += 1,
+        Node::Addr(Addr::Index { index, .. }) if is_index(index, off) => through += 1,
+        _ => {}
+    });
+    reads > 0 && reads == through
+}
 
 /// Whether `a` reads the frame object at `off` as a value.
 fn addr_reads_frame(a: &Addr, off: i32) -> bool {
@@ -5022,10 +5109,9 @@ fn step_displacements(
 fn index_read_unstepped(body: &[Stmt], off: i32) -> bool {
     let (mut reads, mut stepped) = (0, 0);
     walk(body, &mut |n| match n {
-        Node::Expr(Expr::Load {
-            addr: Addr::Frame(o),
-            ..
-        }) if *o == off => reads += 1,
+        // A load of the index, or its address passed to a call
+        // ([`Selector::call`]); every load's address is walked too.
+        Node::Addr(Addr::Frame(o)) if *o == off => reads += 1,
         Node::Addr(Addr::Index { index, scale, .. }) if *scale > 1 && is_index(index, off) => {
             stepped += 1
         }
@@ -6399,6 +6485,14 @@ pub struct Selector {
     /// variable in the whole body; every assignment writes it
     /// ([`Selector::store_web`]).
     webs: Vec<(i32, u8)>,
+    /// The `for` indices held in a register ([`Self::for_`]): frame
+    /// offset and the (virtual) data register, while the register holds
+    /// the variable (its loop, and after it when read there).
+    for_regs: Vec<(i32, u8)>,
+    /// The `for` indices the statements after their loop read
+    /// ([`Self::for_`]), held in the loop's register until the end of the
+    /// loop's sequence ([`Self::seq`]).
+    held_after: Vec<i32>,
     /// The by-value parameters loaded at entry that the body assigns
     /// ([`Selector::entry_loads`]; codegen-patterns 12.2, "Assigned
     /// parameters"): frame offset and the register of the entry load,
@@ -6757,6 +6851,8 @@ impl Selector {
             pinned: Vec::new(),
             reg_locals: Vec::new(),
             webs: Vec::new(),
+            for_regs: Vec::new(),
+            held_after: Vec::new(),
             param_webs: Vec::new(),
             assigned_params: Vec::new(),
             partial_params: Vec::new(),
@@ -7056,6 +7152,7 @@ impl Selector {
     /// A statement sequence whose continuation is `tail`.
     fn seq(&mut self, f: &Function, body: &[Stmt], tail: Tail) -> Res<()> {
         let mut after_call = false;
+        let held = self.held_after.len();
         for (i, st) in body.iter().enumerate() {
             self.span = st.span;
             self.stmt_start = self.out.len();
@@ -7162,7 +7259,7 @@ impl Selector {
                     self.repeat(f, body, until.as_ref())?
                 }
                 StmtKind::While { cond, body } => self.while_(f, cond, body)?,
-                StmtKind::For(l) => self.for_(f, l)?,
+                StmtKind::For(l) => self.for_(f, l, read_after_loop(rest, l.index.offset))?,
                 StmtKind::Exit | StmtKind::Next => {
                     let exit = matches!(st.kind, StmtKind::Exit);
                     if !reached_after_jump(rest) {
@@ -7275,6 +7372,12 @@ impl Selector {
                 }
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
+        }
+        // The `for` indices read after their loops are read only in this
+        // sequence (`dpc-ir`, `check_for_indices`).
+        for o in self.held_after.split_off(held) {
+            self.pinned.retain(|&(p, _)| p != o);
+            self.for_regs.retain(|&(p, _)| p != o);
         }
         Ok(())
     }
@@ -7787,12 +7890,28 @@ impl Selector {
     /// PKT_$DUMP_DATA 0xE12800, LOG_$READ's worker 0xE177E0); an index
     /// whose initial value is the count's (0xE6A8BC `moveq #19,D2; move.w
     /// D2,D1`: the constant is copied, not reloaded).
-    fn for_(&mut self, f: &Function, l: &ForLoop) -> Res<()> {
+    fn for_(&mut self, f: &Function, l: &ForLoop, after: bool) -> Res<()> {
         let span = self.span;
         let off = l.index.offset;
         let arrays =
             stepped_arrays(&l.body, off, &f.uplevel_refs).map_err(|m| unsupported(span, m))?;
-        let uses_index = index_read_unstepped(&l.body, off);
+        // An index the statements after the loop read is set up in a
+        // register whether or not the body reads it (PROC2_$PGROUP_SET
+        // 0xE41EFA `moveq #1,D0`, the body reaching its elements through
+        // a stepped pointer; CAL_$DECODE_TIME 0xE68830; codegen-patterns
+        // 7.4, "The index read after its loop").  A register an earlier
+        // loop over the same variable left it in is given up.
+        let uses_index = index_read_unstepped(&l.body, off) || after;
+        if after && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. })) {
+            return Err(unsupported(
+                span,
+                "the index variable of a `for` loop with a run-time bound read after the loop \
+                 (codegen-patterns 7.4) is",
+            ));
+        }
+        self.pinned.retain(|&(o, _)| o != off);
+        self.for_regs.retain(|&(o, _)| o != off);
+        self.held_after.retain(|&o| o != off);
         let konst = |e: &Expr| match e {
             Expr::Const { value, .. } => Some(*value),
             _ => None,
@@ -7985,6 +8104,7 @@ impl Selector {
                 }
             });
             self.pinned.push((off, Reg::D(d)));
+            self.for_regs.push((off, d));
             Some(d)
         } else {
             None
@@ -8027,6 +8147,13 @@ impl Selector {
         (self.span, self.multi) = (span, multi);
         (self.call_no_pop, self.called) = (false, false);
         self.place(step);
+        if let (true, Some(d)) = (after, index) {
+            // Coloured before the count (PROC2_$PGROUP_SET 0xE41EF2 `moveq
+            // #69,D1; ...; moveq #1,D0`, CAL_$DECODE_TIME 0xE6882E `moveq
+            // #11,D2; moveq #1,D0`, D0 free at both; codegen-patterns 7.4,
+            // "The index read after its loop").
+            self.colour_after.push((Reg::D(d), Reg::D(count)));
+        }
         if let Some(d) = index {
             let step = Insn::Addq {
                 size: Size::W,
@@ -8042,7 +8169,16 @@ impl Selector {
             } else {
                 step
             });
-            self.pinned.retain(|&(o, _)| o != off);
+            if after {
+                // The register holds the variable after the loop: one step
+                // past the last value after normal termination, the value
+                // at an `exit` (ACL_$CHECK_DEBUG_RIGHTS 0xE48BBC `cmpi.w
+                // #8,D1`; CAL_$DECODE_TIME 0xE68850 `move.w D0,(2,A2)`).
+                self.held_after.push(off);
+            } else {
+                self.pinned.retain(|&(o, _)| o != off);
+                self.for_regs.retain(|&(o, _)| o != off);
+            }
         }
         // The pointers after the index, in the reverse order of their
         // forming (codegen-patterns 7.4: 29 of 30 loops; 0xE177EE `addq.l
@@ -9888,6 +10024,16 @@ impl Selector {
     /// address ([`dpc_ir::Function::address_params`]).
     fn is_address_slot(&self, o: i32) -> bool {
         self.address_slots.contains(&o)
+    }
+
+    /// The register of the `for` index at frame offset `o`, while one
+    /// holds it ([`Self::for_regs`]).
+    fn for_reg(&self, o: i32) -> Option<u8> {
+        self.for_regs
+            .iter()
+            .rev()
+            .find(|&&(p, _)| p == o)
+            .map(|&(_, d)| d)
     }
 
     fn pinned(&self, o: i32) -> Option<Reg> {
@@ -12804,6 +12950,61 @@ impl Selector {
         // the allocator (codegen-patterns 12.4 R3), and so may a value the
         // arguments read ([`held_through_calls`]).
         let start = self.out.len();
+        // A `for` index passed by address (to a value or `in` parameter,
+        // [`Arg::Address::writable`] false): its register stored to the
+        // variable's frame slot before the call's pushes, the slot's
+        // address pushed in its place (codegen-patterns 7.4, "The index
+        // passed by address": 8 of 8 sites, DISK_$UNASSIGN_ALL 0xE6BE28
+        // `move.w D3,(-6,A6); pea (-4,A6); pea (-6,A6)`, ASKNODE_$INTERNET_
+        // INFO 0xE64D64 `move.w D4,(-316,A6)` before three other pushes,
+        // SMD_$FREE_ASID 0xE75278, SMD_$N_DEVICES 0xE70038, TPAD_$INIT
+        // 0xE335A6, MSG_$FREE_ASID 0xE74E5C, 0xE65472, 0xE6549A); the
+        // register is not reloaded after the call.  No site has a pad, a
+        // function call among the arguments, or the index passed twice.
+        let mut stored: Vec<i32> = Vec::new();
+        for a in &c.args {
+            if let Arg::Address {
+                addr: Addr::Frame(o),
+                writable: false,
+                ..
+            } = a
+            {
+                if let Some(d) = self.for_reg(*o) {
+                    let mut inner = false;
+                    for b in &c.args {
+                        let mut v = |n: Node| inner |= matches!(n, Node::Expr(Expr::Call { .. }));
+                        match b {
+                            Arg::Value { value, .. } | Arg::Temp { value, .. } => {
+                                walk_expr(value, &mut v)
+                            }
+                            Arg::Address { addr, .. } => walk_addr(addr, &mut v),
+                        }
+                    }
+                    if inner || stored.contains(o) {
+                        return Err(unsupported(
+                            self.span,
+                            "a `for` index passed by address to a call with a function call \
+                             among its arguments, or passed twice (the index's store against \
+                             the inner call or a second store not seen, codegen-patterns 7.4) is",
+                        ));
+                    }
+                    stored.push(*o);
+                    if c.pad != 0 {
+                        return Err(unsupported(
+                            self.span,
+                            "a `for` index passed by address to a call with an argument pad (the \
+                             index's store against the pad's `subq.l #2,SP` not seen, \
+                             codegen-patterns 7.4) is",
+                        ));
+                    }
+                    self.out.push(Insn::Move {
+                        size: Size::W,
+                        src: Ea::Reg(Reg::D(d)),
+                        dst: Ea::Disp(*o, FP),
+                    });
+                }
+            }
+        }
         match c.pad {
             0 => {}
             2 => self.out.push(Insn::Subq {
@@ -13491,6 +13692,11 @@ impl Selector {
                         slot: 4,
                         writable: *writable,
                     });
+                }
+                // A `for` index held in a register: its frame slot, which
+                // [`Self::call`] stored it to.
+                Addr::Frame(o) if self.for_reg(*o).is_some() => {
+                    self.out.push(Insn::Pea(Ea::Disp(*o, FP)));
                 }
                 // An enclosing routine's object: `pea (d,An)` off the
                 // static link (0xE13648 `pea (-0x40,A4)` in 0xE1360C).
@@ -23312,6 +23518,128 @@ mod tests {
                 "addq.w\t#1,%d3",
                 "dbf\t%d2,2b",
                 "movem.l\t(-0x10,%fp),%d2-%d3",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+    }
+
+    /// codegen-patterns 7.4, "The index passed by address" and "The index
+    /// read after its loop" (bead domain-pascal-h1io): the index's register
+    /// stored to its slot before the call's pushes (DISK_$UNASSIGN_ALL
+    /// 0xE6BE28), refused with a pad (not seen); an index read after its
+    /// loop set up although the body does not read it, coloured before the
+    /// count, and read from its register after the loop (PROC2_$PGROUP_SET
+    /// 0xE41EF2..0xE41F0E).
+    #[test]
+    fn for_index_by_address_and_after() {
+        let by_addr = |pad: u32| {
+            proc_(
+                8,
+                vec![for_loop(
+                    konst(1, word()),
+                    konst(10, word()),
+                    false,
+                    vec![ext(
+                        "EXT_$GET",
+                        vec![
+                            Arg::Address {
+                                addr: Addr::Frame(-2),
+                                slot: 4,
+                                writable: false,
+                            },
+                            Arg::Address {
+                                addr: Addr::Frame(-8),
+                                slot: 4,
+                                writable: true,
+                            },
+                        ],
+                        pad,
+                    )],
+                )],
+            )
+        };
+        assert_eq!(
+            text(&by_addr(0)),
+            [
+                "link.w\t%fp,#-8",
+                "movem.l\t%d2-%d3,-(%sp)",
+                "moveq\t#9,%d2",
+                "moveq\t#1,%d3",
+                ".balignw\t4,0x2048",
+                "2:",
+                "move.w\t%d3,(-2,%fp)",
+                "pea\t(-8,%fp)",
+                "pea\t(-2,%fp)",
+                "jsr\t(EXT_$GET).l",
+                "addq.w\t#8,%sp",
+                "addq.w\t#1,%d3",
+                "dbf\t%d2,2b",
+                "movem.l\t(-0x10,%fp),%d2-%d3",
+                "unlk\t%fp",
+                "rts",
+            ]
+        );
+        assert!(err(&by_addr(2)).contains("argument pad"));
+        let idx_arg = || Arg::Address {
+            addr: Addr::Frame(-2),
+            slot: 4,
+            writable: false,
+        };
+        let twice = proc_(
+            4,
+            vec![for_loop(
+                konst(1, word()),
+                konst(10, word()),
+                false,
+                vec![ext("EXT_$PUT2", vec![idx_arg(), idx_arg()], 0)],
+            )],
+        );
+        assert!(err(&twice).contains("or passed twice"));
+        // The reads after a later loop over the index, in a nested
+        // sequence too, are that loop's (review of bead h1io).
+        let st = |kind| Stmt { kind, span: span() };
+        let seq = |body: Vec<StmtKind>| StmtKind::Repeat {
+            body: body.into_iter().map(st).collect(),
+            until: None,
+        };
+        let again = || {
+            for_loop(
+                konst(1, word()),
+                konst(3, word()),
+                false,
+                vec![store(sym("V"), konst(0, word()))],
+            )
+        };
+        let read = || store(sym("W"), index());
+        assert!(read_after_loop(&[st(seq(vec![read()]))], -2));
+        assert!(!read_after_loop(&[st(seq(vec![again(), read()]))], -2));
+        assert!(!read_after_loop(&[st(again()), st(read())], -2));
+        assert!(read_after_loop(&[st(seq(vec![again()])), st(read())], -2));
+        let after = proc_(
+            4,
+            vec![
+                for_loop(
+                    konst(1, word()),
+                    konst(70, word()),
+                    false,
+                    vec![store(sym("V"), konst(0, word()))],
+                ),
+                store(sym("W"), index()),
+            ],
+        );
+        assert_eq!(
+            text(&after),
+            [
+                "link.w\t%fp,#-4",
+                "moveq\t#0x45,%d1",
+                "moveq\t#1,%d0",
+                ".balignw\t4,0x2048",
+                "2:",
+                "clr.w\t(V).l",
+                "addq.w\t#1,%d0",
+                "dbf\t%d1,2b",
+                "move.w\t%d0,(W).l",
                 "unlk\t%fp",
                 "rts",
             ]

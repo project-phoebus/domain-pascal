@@ -2202,19 +2202,64 @@ fn check_uplevel_indices(body: &[Stmt], uplevel: &[(i32, u32)]) -> Res<()> {
 }
 
 /// The index variables of the [`StmtKind::For`] loops of `body` are read
-/// only inside loops over them, whole, and never assigned or addressed
-/// there (ref p. 4-89: "You may not assign a value to index_variable
-/// within the body of the for loop").  The selector keeps an index in a
-/// register for its loop only (codegen-patterns 7.4); reading it after
-/// the loop (legal after `exit`, ref p. 4-90; MST_$ALLOC_ASID 0xE42D7C
-/// pushes D2 after leaving its loop) is not supported yet.
+/// only inside loops over them, whole, or after one, and never assigned or
+/// addressed outside them (ref p. 4-89: "You may not assign a value to
+/// index_variable within the body of the for loop").  The selector keeps an
+/// index in a register (codegen-patterns 7.4); inside its loop it may also
+/// be passed by address to a value or `in` parameter (its register stored
+/// to its slot first, "The index passed by address").
+///
+/// A read after the loop (legal after `exit`, `goto` or `return`, ref p.
+/// 4-90; after normal termination Domain Pascal "forbids the use of the
+/// value" and warns, message 235, "Potential illegal use of FOR index
+/// variable", Diagnostic Messages p. 9-31) reads the register the loop
+/// left: the image keeps the
+/// index there, one step past the last value after normal termination
+/// (codegen-patterns 7.4, "The index read after its loop").  Accepted
+/// where the loop has constant bounds (so it runs and sets the register)
+/// and the read lies in the statements after it in the same sequence, with
+/// no other loop over the index nested among them and no label there that
+/// a `goto` from elsewhere reaches.
 fn check_for_indices(body: &[Stmt]) -> Res<()> {
+    /// A loop whose index the statements after it may read
+    /// ([`Check::after`]).
+    struct After {
+        offset: i32,
+        /// Constant bounds.
+        konst: bool,
+        /// The [`Check::depth`] of the sequence holding the loop.
+        depth: usize,
+        /// The labels every `goto` to which lies in the loop or after it.
+        labels: Vec<u32>,
+        /// Why a read here is refused, once something between the loop
+        /// and the read makes it so.
+        taint: Option<&'static str>,
+    }
     struct Check {
         /// Every `for` index of the body.
         all: Vec<ValueParam>,
         /// The indices of the loops being walked.
         active: Vec<i32>,
+        /// The loops the statement being walked follows in a sequence.
+        after: Vec<After>,
+        /// Nesting of statement sequences.
+        depth: usize,
+        /// `(label, gotos)` of the routine.
+        gotos: Vec<(u32, usize)>,
+        /// The index of the loop whose bounds are being walked.
+        bounding: Vec<i32>,
         span: Span,
+    }
+    /// The `goto`s of `body`, by label.
+    fn gotos_of(body: &[Stmt], out: &mut Vec<(u32, usize)>) {
+        crate::visit_stmts(body, &mut |s| {
+            if let StmtKind::Goto(l) = s.kind {
+                match out.iter_mut().find(|e| e.0 == l) {
+                    Some(e) => e.1 += 1,
+                    None => out.push((l, 1)),
+                }
+            }
+        });
     }
     impl Check {
         fn hit(&self, o: i32, size: u32) -> bool {
@@ -2225,13 +2270,61 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         fn bad(&self) -> Diagnostic {
             unsupported(
                 self.span,
-                "the index variable of a `for` loop read outside the loop, assigned or \
-                 addressed (it is kept in a register for the loop only, codegen-patterns 7.4) \
-                 is",
+                "the index variable of a `for` loop assigned, addressed or read in part outside \
+                 its loops \
+                 (another live range of the variable, in another register: AREA_$FREE_\
+                 SEGMENTS 0xE0863C `move.w D3,D2` for `n := first_n` after a loop over n in \
+                 D5; not modelled, codegen-patterns 7.4) is",
             )
+        }
+        /// A whole read of the index at `o` outside its loops.
+        fn read(&self, o: i32) -> Res<()> {
+            if self.bounding.contains(&o) {
+                // `for i := 1 to i do` after an earlier loop over i: the
+                // bound would read the register that loop left while the
+                // new loop takes the variable over (no site seen).
+                return Err(unsupported(
+                    self.span,
+                    "a `for` loop whose bound reads its own index variable (the value an earlier \
+                     loop left; no site seen, codegen-patterns 7.4) is",
+                ));
+            }
+            let Some(a) = self.after.iter().rev().find(|a| a.offset == o) else {
+                return Err(unsupported(
+                    self.span,
+                    "the index variable of a `for` loop read before its loop or outside the \
+                     statements that follow the loop in its sequence (codegen-patterns 7.4) is",
+                ));
+            };
+            if !a.konst {
+                return Err(unsupported(
+                    self.span,
+                    "the index variable of a `for` loop with a run-time bound read after the \
+                     loop (its guard may skip the loop and leave the index's register unset: \
+                     XNS_IDP_$REGISTER_ADDR 0xE1905E reads D1, set at 0xE1902A after the \
+                     guard; not modelled, codegen-patterns 7.4) is",
+                ));
+            }
+            match a.taint {
+                Some(m) => Err(unsupported(self.span, m)),
+                None => Ok(()),
+            }
         }
         fn addr(&self, a: &Addr, size: u32) -> Res<()> {
             match a {
+                Addr::Frame(o)
+                    if self
+                        .active
+                        .iter()
+                        .any(|&l| *o < l + 2 && l < *o + size as i32) =>
+                {
+                    Err(unsupported(
+                        self.span,
+                        "the index variable of a `for` loop assigned, addressed or read in part \
+                         in its loop (ref p. 4-89: \"You may not assign a value to \
+                         index_variable within the body of the for loop\") is",
+                    ))
+                }
                 Addr::Frame(o) if self.hit(*o, size) => Err(self.bad()),
                 Addr::Frame(_)
                 | Addr::Enclosing(_)
@@ -2254,6 +2347,12 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     addr: Addr::Frame(o),
                     ty,
                 } if self.active.contains(o) && ty.width == Width::Word => Ok(()),
+                Expr::Load {
+                    addr: Addr::Frame(o),
+                    ty,
+                } if ty.width == Width::Word && self.all.iter().any(|l| l.offset == *o) => {
+                    self.read(*o)
+                }
                 Expr::Load { addr, ty } => self.addr(addr, ty.bytes()),
                 Expr::Bits { addr, field, .. } => self.addr(addr, field.unit.bytes()),
                 Expr::AddrOf(a) => self.addr(a, 1),
@@ -2291,6 +2390,18 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
             for a in &c.args {
                 match a {
                     Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value)?,
+                    // The index of a loop being walked passed to a value or
+                    // `in` parameter by address: the selector stores its
+                    // register to the variable's slot first
+                    // (codegen-patterns 7.4, "The index passed by
+                    // address").  To a `var`, `out` or `in out` one the
+                    // callee could assign it (ref p. 4-89: "You may not
+                    // assign a value to index_variable within the body").
+                    Arg::Address {
+                        addr: Addr::Frame(o),
+                        writable: false,
+                        ..
+                    } if self.active.contains(o) => {}
                     Arg::Address { addr, .. } => self.addr(addr, 1)?,
                 }
             }
@@ -2318,7 +2429,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
             }
         }
         fn stmts(&mut self, body: &[Stmt]) -> Res<()> {
-            for st in body {
+            self.depth += 1;
+            let base = self.after.len();
+            for (k, st) in body.iter().enumerate() {
                 self.span = st.span;
                 match &st.kind {
                     StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e)?,
@@ -2368,16 +2481,68 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         self.stmts(body)?;
                     }
                     StmtKind::For(l) => {
-                        self.expr(&l.from)?;
-                        self.expr(&l.to)?;
+                        self.bounding.push(l.index.offset);
+                        let bounds = self.expr(&l.from).and_then(|()| self.expr(&l.to));
+                        self.bounding.pop();
+                        bounds?;
                         if self.active.contains(&l.index.offset) {
                             // A loop over the index of an enclosing loop
                             // assigns it.
-                            return Err(self.bad());
+                            return Err(unsupported(
+                                self.span,
+                                "a `for` loop over the index of an enclosing `for` loop (an \
+                                 assignment of its index, ref p. 4-89) is",
+                            ));
                         }
-                        self.active.push(l.index.offset);
+                        let off = l.index.offset;
+                        // A loop over the index among the statements after
+                        // an earlier loop over it: a read after both may be
+                        // reached from either (refused); a later loop of
+                        // the same sequence replaces the earlier.
+                        let depth = self.depth;
+                        self.after.retain(|a| a.offset != off || a.depth != depth);
+                        for a in &mut self.after {
+                            if a.offset == off {
+                                a.taint.get_or_insert(
+                                    "the index variable of a `for` loop read after it where \
+                                     another loop over it, nested among the statements \
+                                     between, may have set it (two live ranges meeting; not \
+                                     modelled, codegen-patterns 7.4) is",
+                                );
+                            }
+                        }
+                        self.active.push(off);
                         self.stmts(&l.body)?;
                         self.active.pop();
+                        let konst = matches!(l.from, Expr::Const { .. })
+                            && matches!(l.to, Expr::Const { .. });
+                        let mut mine = Vec::new();
+                        gotos_of(&l.body, &mut mine);
+                        gotos_of(&body[k + 1..], &mut mine);
+                        let labels = mine
+                            .iter()
+                            .filter(|(lab, n)| self.gotos.contains(&(*lab, *n)))
+                            .map(|&(lab, _)| lab)
+                            .collect();
+                        self.after.push(After {
+                            offset: off,
+                            konst,
+                            depth,
+                            labels,
+                            taint: None,
+                        });
+                    }
+                    StmtKind::Label(lab) => {
+                        for a in &mut self.after {
+                            if !a.labels.contains(lab) {
+                                a.taint.get_or_insert(
+                                    "the index variable of a `for` loop read after it past a \
+                                     label a `goto` from before the loop reaches (the index \
+                                     not set on that path; not modelled, codegen-patterns 7.4) \
+                                     is",
+                                );
+                            }
+                        }
                     }
                     StmtKind::Case {
                         selector,
@@ -2397,10 +2562,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     | StmtKind::Enable
                     | StmtKind::Exit
                     | StmtKind::Next
-                    | StmtKind::Label(_)
                     | StmtKind::Goto(_) => {}
                 }
             }
+            self.after.truncate(base);
+            self.depth -= 1;
             Ok(())
         }
     }
@@ -2435,9 +2601,15 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
     if all.is_empty() {
         return Ok(());
     }
+    let mut gotos = Vec::new();
+    gotos_of(body, &mut gotos);
     Check {
         all,
         active: Vec::new(),
+        after: Vec::new(),
+        depth: 0,
+        gotos,
+        bounding: Vec::new(),
         span: body[0].span,
     }
     .stmts(body)
@@ -3207,10 +3379,34 @@ impl Cx<'_> {
                         Ok(v)
                     } else if v.ty().bytes() < 2 && p.types.is_integer(e.ty) {
                         Ok(convert(v, ty))
-                    } else {
-                        narrow(&v, ty).ok_or_else(|| {
-                            unsupported(e.span, "a `for` bound of another width than the index is")
+                    } else if let Some(n) = narrow(&v, ty) {
+                        Ok(n)
+                    } else if matches!(&v, Expr::Load { addr, .. }
+                        if !matches!(addr, Addr::Volatile { .. }))
+                        && v.ty().bytes() == 4
+                        && p.types.is_integer(e.ty)
+                    {
+                        // A longword variable read as its low word, in
+                        // place, as an assignment reads it ([`store_narrow`];
+                        // codegen-patterns 7.4, "A longword bound"): 10 of
+                        // 10 sites, `move.w (0x155a,A5),D0; subq.w #1,D0;
+                        // bmi` for DIR_$MTTAB's count at 0x1558 (DIR_$
+                        // FIND_UID 0xE4E46A and seven more DIR_ routines),
+                        // EC2_$REGISTER_EC1 0xE42960 `move.w (0xe9a,A5),D0`,
+                        // VTOC_$TRUNCATE 0xE3A12C `move.w (-0x32,A6),...`
+                        // (a longword at -0x34).
+                        Ok(Expr::Convert {
+                            value: Box::new(v),
+                            ty,
+                            in_place: true,
                         })
+                    } else {
+                        Err(unsupported(
+                            e.span,
+                            "a `for` bound of another width than the index, other than a \
+                             longword variable read as its low word (a longword expression or \
+                             function result narrowed: no site seen, codegen-patterns 7.4) is",
+                        ))
                     }
                 }
             }

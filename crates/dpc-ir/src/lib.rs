@@ -672,16 +672,29 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 /// `for index := from to|downto to do body` (ref "For", pp. 4-88..4-90).
 ///
 /// The index variable is a local of the routine (a word in its frame,
-/// [`Self::index`]) that nothing outside the bodies of `for` loops over it
-/// reads, that the body does not assign, and whose address is never taken
-/// (`lower.rs`, `for_loop`): the target may keep it in a register only
-/// (codegen-patterns 7.4: the frame slot stays allocated and is never
-/// written).  The body reads it as `Expr::Load { addr: Addr::Frame(..) }`.
+/// [`Self::index`]) that the body does not assign, that nothing assigns or
+/// addresses outside the bodies of `for` loops over it, and that is read
+/// outside them only by the statements after a loop of constant bounds in
+/// the loop's own sequence (`lower.rs`, `for_loop`, `check_for_indices`):
+/// the target may keep it in a register for the loop and those statements
+/// (codegen-patterns 7.4: the frame slot stays allocated; the body may
+/// pass the index by address to a value or `in` parameter,
+/// `Arg::Address` not `writable`, for which the target stores the register
+/// to the slot first).  The body reads it as `Expr::Load { addr:
+/// Addr::Frame(..) }`.
 /// `from` and `to` have the index's type.  Ref p. 4-90: "If you set up a
 /// meaningless relationship between the start_exp and the stop_exp ...
 /// Pascal does not execute the loop even once"; the value of the index
-/// after a loop that ends normally is not defined (warning "Potential
-/// illegal use of FOR index variable", ref p. 9-31).
+/// after a loop that ends normally is not defined (message 235,
+/// "Potential illegal use of FOR index variable", ref p. 9-31).
+///
+/// What a target must give a read after the loop: after an `exit`,
+/// `goto` or `return` out of the body (ref p. 4-90), the index's value
+/// there; after normal termination, one step past the last value (`to +
+/// 1`, or `to - 1` for `downto`), as Apollo's compiler leaves it
+/// (codegen-patterns 7.4, "The index read after its loop": ACL_$CHECK_
+/// DEBUG_RIGHTS 0xE48BBC, PROC2_$PGROUP_SET 0xE41F0E), which kernel code
+/// relies on (`if new_idx > 70`) and `tests/exec/for_index.pas` checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForLoop {
     /// The index variable: its frame offset and IR type (a word).
