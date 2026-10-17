@@ -1,7 +1,7 @@
 # tools/srcsurvey.py baseline: status, module, routine (top level).
 # Regenerate with `python3 tools/srcsurvey.py run --update` and say why
 # in the commit.  `make srcsurvey` compares at the commit below.
-# source: 07614198fd4fa19b0f715bca7fdf7220eb2eb98f
+# source: af35fc69bf14250aab294c0b1600b937b239f00a
 STUB	acl/acl.pas	acl_$init
 MISMATCH	acl/acl.pas	acl_$cache_list_insert
 STUB	acl/acl.pas	acl_$cache_list_remove
@@ -191,6 +191,14 @@ STUB	dir/dir.pas	dir_$read_linku
 STUB	dir/dir.pas	dir_$next_page
 STUB	dir/dir.pas	dir_$do_op_dir_readu
 STUB	dir/dir.pas	dir_$dir_readu
+STUB	dir/dir.pas	dir_$do_op_find_uid
+STUB	dir/dir.pas	dir_$find_uid_internal
+MISMATCH	dir/dir.pas	dir_$find_uid
+MISMATCH	dir/dir.pas	dir_$find_net
+MISMATCH	dir/dir.pas	dir_$truncate_pages
+STUB	dir/dir.pas	dir_$add_entry
+STUB	dir/dir.pas	dir_$do_op_add_entry
+STUB	dir/dir.pas	dir_$add_entry_internal
 SETUP	dir/old_dir.pas	dir_$old_init
 STUB	dir/old_dir.pas	map_case
 STUB	dir/old_dir.pas	unmap_case
@@ -713,6 +721,23 @@ STUB	proc1/proc1.pas	proc1_$get_list
 MISMATCH	proc1/proc1.pas	proc1_$get_any_cput
 STUB	proc1/proc1.pas	proc1_$get_any_cpu_usage
 STUB	proc1/proc1.pas	proc1_$init
+STUB	proc2/proc2.pas	proc2_$log_signal_event
+OK	proc2/proc2.pas	proc2_$cleanup_handlers_internal
+STUB	proc2/proc2.pas	proc2_$awaken_guardian
+STUB	proc2/proc2.pas	proc2_$set_name
+STUB	proc2/proc2.pas	proc2_$name_to_uid
+STUB	proc2/proc2.pas	proc2_$deliver_signal_internal
+STUB	proc2/proc2.pas	proc2_$deliver_pending_internal
+STUB	proc2/proc2.pas	proc2_$deliver_fim
+MISMATCH	proc2/proc2.pas	proc2_$get_next_pending_signal
+STUB	proc2/proc2.pas	proc2_$signal
+STUB	proc2/proc2.pas	proc2_$signal_os
+OK	proc2/proc2.pas	proc2_$quit
+STUB	proc2/proc2.pas	proc2_$signal_pgroup_internal
+STUB	proc2/proc2.pas	proc2_$signal_pgroup
+STUB	proc2/proc2.pas	proc2_$signal_pgroup_os
+STUB	proc2/proc2.pas	proc2_$acknowledge
+STUB	proc2/proc2.pas	proc2_$deliver_pending
 OK	rem_name/rem_name.pas	rem_name_server_local
 STUB	rem_name/rem_name.pas	locate_server
 OK	rem_name/rem_name.pas	rem_name_$register_server
