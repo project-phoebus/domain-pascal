@@ -773,6 +773,18 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     every static variable at its type's freestanding alignment (at least
     2), overlay sections included: y at offset 4.*
 
+46. **"Type Transfer Functions", p. 4-197 (PDF p. 330, checked); C.3.19,
+    p. C-11.**  "Domain Pascal type transfer functions enable you to
+    change the type of a variable or expression within a statement" and
+    "{Type transfer functions are functions.}"; the argument is "An
+    expression."  The entry never says whether a transfer of a variable
+    is itself a variable.  Can `T(v).f` (or `T(v)`) be an assignment
+    target, be passed to a `var`/`out`/`in out` parameter, or have
+    `addr` taken?  Nothing in ../source needs it yet (bead
+    domain-pascal-w0rj).  *Current: reading `T(v).f` is the bytes of v
+    at f's offset, read in place (PROC1_$CREATE_P 0xE15156); the three
+    uses above are refused ("not supported yet").*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`
