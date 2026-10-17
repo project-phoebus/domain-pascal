@@ -1167,6 +1167,11 @@ fn select_body_with(
         .iter()
         .map(|&(k, c, span)| (s.out[k].clone(), s.out[c].clone(), span))
         .collect();
+    let elem_value_triples: Vec<(Insn, Insn, Span)> = s
+        .elem_value_bases
+        .iter()
+        .map(|&(m, p, span)| (s.out[m].clone(), s.out[p].clone(), span))
+        .collect();
     let zext_triples: Vec<([Insn; 3], Span)> = s
         .zext_bases
         .iter()
@@ -1461,6 +1466,20 @@ fn select_body_with(
         });
         if !after {
             return Err(unsupported(*span, ELEMENT_COUNT_SCHEDULED));
+        }
+    }
+    for (movea, pea, span) in &elem_value_triples {
+        // `addr` of another unit's element by value: no push between its
+        // base's load and its `pea` ([`ELEM_BASE_ABOVE_PUSH`]).
+        let ok = out.iter().enumerate().any(|(i, x)| {
+            x == movea
+                && out[i + 1..]
+                    .iter()
+                    .position(|y| y == pea)
+                    .is_some_and(|j| !out[i + 1..i + 1 + j].iter().any(is_push))
+        });
+        if !ok {
+            return Err(unsupported(*span, ELEM_BASE_ABOVE_PUSH));
         }
     }
     for (t, span) in &zext_triples {
@@ -2754,6 +2773,15 @@ const ZEXT_BASE_SCHEDULED: &str = "a zero-extended `.l` index of another unit's 
      after them 4: 0xE00DC6, 0xE04568; codegen-patterns 5.2, \"Word indices used as `.l`\"; \
      bead domain-pascal-wkg) is";
 
+/// The refusal of `addr` of an element of another unit's array pushed by
+/// value whose base `movea.l #sym,An` the scheduler moves above an
+/// earlier push of the argument list ([`Selector::push`]).
+const ELEM_BASE_ABOVE_PUSH: &str = "`addr` of an element of another unit's array passed by \
+     value with its base's `movea.l #sym` scheduled above an earlier push of the argument \
+     list (never in the image: TIME_$WAIT 0xE165C6..0xE165D8 and SMD_$EOF_WAIT \
+     0xE6F42A..0xE6F436 load the index and the base after the pushes; bead \
+     domain-pascal-tzx7) is";
+
 /// The refusal of an element address read once outside the shape
 /// [`once_elem_lea`] is surveyed for ([`once_elem_shape`]).
 const ONCE_LEA_SHAPE: &str = "an element address of another unit's array or through a pointer \
@@ -3231,6 +3259,18 @@ fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
             dropped.sort_unstable();
             return dropped;
         }
+    }
+}
+
+/// Whether `i` pushes onto the stack (an argument, a pad).
+fn is_push(i: &Insn) -> bool {
+    match i {
+        Insn::Pea(_) => true,
+        Insn::Subq {
+            dst: Ea::Reg(Reg::A(7)),
+            ..
+        } => true,
+        _ => i.to_string().ends_with("-(%sp)"),
     }
 }
 
@@ -5876,6 +5916,13 @@ impl Uses<'_> {
                     ..
                 } => self.address(addr),
                 Arg::Value { value, .. } | Arg::Temp { value, .. } => self.expr(value),
+                // `T(addr(x))^` passed by address is `x` passed by address
+                // ([`Selector::push`]; the module-local 0xE32B76 holds its
+                // `dtte` slot in A2 for three such arguments, 0xE32B7E).
+                Arg::Address {
+                    addr: Addr::Indirect { base, .. },
+                    ..
+                } if addr_value(base).is_some() => self.address(addr_value(base).unwrap()),
                 Arg::Address { addr, .. } => self.address(addr),
             }
         }
@@ -6237,6 +6284,16 @@ pub struct Selector {
     /// indices in `out` and the statement's span, for the check after
     /// scheduling that they stay `clr.l; movea.l; move.w`.
     zext_bases: Vec<(usize, usize, usize, Span)>,
+    /// Set while [`Self::push`] pushes `addr` of an element by value as
+    /// the element by address: its base `movea.l #sym,An` and its `pea`
+    /// are recorded in [`Self::elem_value_bases`].
+    elem_by_value: bool,
+    /// The base `movea.l #sym,An` and the `pea` of elements of other
+    /// units' arrays whose `addr` is pushed by value (indices in `out`,
+    /// the statement's span), for the check after scheduling that no
+    /// push of the argument list falls between them
+    /// ([`ELEM_BASE_ABOVE_PUSH`]).
+    elem_value_bases: Vec<(usize, usize, Span)>,
     /// Locals assigned from a call, held in D0 and moved to an address
     /// register where dereferenced ([`Park`]).
     parked: Vec<Park>,
@@ -6489,6 +6546,8 @@ impl Selector {
             elem_ptrs: Vec::new(),
             elem_leas: Vec::new(),
             zext_bases: Vec::new(),
+            elem_by_value: false,
+            elem_value_bases: Vec::new(),
             parked: Vec::new(),
             a0_locals: Vec::new(),
             hoist: None,
@@ -9463,6 +9522,55 @@ impl Selector {
         }
     }
 
+    /// The refusal of an object reached through the pointer `base` that
+    /// [`Self::push`] has no form for, by address (or `addr` of it by
+    /// value), named by the pointer's kind (bead domain-pascal-hs92;
+    /// codegen-patterns 1.5).
+    fn pointer_target_refusal(&self, base: &Expr, by_value: bool) -> Diagnostic {
+        let what = match base {
+            Expr::Load {
+                addr: Addr::Index { .. },
+                ..
+            } => {
+                "an object reached through a pointer that is an array element (RIP_$INIT 0xE2FC6E \
+                 and ASKNODE_$WHO_NOTOPO 0xE660F8 `lea (0,A0,Dn.l),An; movea.l (-4,An),Am; pea \
+                 (Am)`, the element's address kept for a later statement; VFMT_$MAIN 0xE6ACA2 \
+                 `move.l (A4)+,-(SP)` off a stepped pointer: not modelled) passed by address is"
+            }
+            Expr::Load {
+                addr: Addr::Symbol { .. },
+                ..
+            } => {
+                "the target of another unit's pointer passed by address (`move.l abs.l,-(SP)` \
+                 or `movea.l abs.l,An; pea (d,An)`? no site told apart, bead \
+                 domain-pascal-royb) is"
+            }
+            Expr::Load {
+                addr: Addr::Indirect { .. },
+                ..
+            } => {
+                "an object reached through a pointer that is itself reached through a pointer \
+                 (a chain: `movea.l (d,Am),An; movea.l (k,An),Ak; pea (d',Ak)`, the registers \
+                 A1/A3 at 0xE135E2 and 0xE01546, A3/A4 at 0xE02C86, A0/A2 at PMAP_$FLUSH \
+                 0xE139CA; the choice not settled) passed by address is"
+            }
+            _ => "passing this kind of object reached through a pointer by address is",
+        };
+        if by_value {
+            // The same push as by address (above), so the same refusal.
+            return unsupported(self.span, format!("`addr` of it by value, as {what}"));
+        }
+        unsupported(self.span, what)
+    }
+
+    /// Whether `base`, the pointer an object is reached through, is a
+    /// parameter's slot or a local held in an address register
+    /// (codegen-patterns 12.2, 12.5): the object is `(d,An)` off it.
+    fn held_pointer(&self, base: &Expr) -> bool {
+        matches!(base, Expr::Load { addr: Addr::Frame(o), .. }
+            if matches!(self.pinned(*o), Some(Reg::A(_))))
+    }
+
     /// The register a by-value parameter at frame offset `o` was loaded
     /// into at entry, if it was.
     /// Whether frame offset `o` is the slot of a parameter passed by
@@ -12275,20 +12383,41 @@ impl Selector {
         // the argument list: the original loads it once for both
         // (0xE74706 `movea.l (-0xbc,A6),A1; pea (-0x38,A1); pea
         // (-0x34,A1)`; 0xE3CA4E, 0xE748A4), `dpc` would load it twice.
+        // `addr` of such an object by value likewise (pushed as it,
+        // [`Self::push`]): the DISK module-local 0xE3C9FE
+        // (disk/wait_io.pas) at 0xE3CA4E `movea.l (-0x10,A6),A0; pea
+        // (0x384,A0); pea (0x378,A0)` to EC_$WAIT, `addr(io_ec),
+        // addr(err_ec)` of a `with` record.
         for a in &c.args {
-            let Arg::Address {
-                addr: Addr::Indirect { base, offset },
-                ..
-            } = a
-            else {
+            let target = match a {
+                Arg::Address { addr, .. } => Some(addr),
+                // Not `addr` of a by-address parameter's part, which was
+                // pushed so before (bead domain-pascal-mbtx) and is left
+                // as it was.
+                Arg::Value { value, .. } => addr_value(value)
+                    .filter(|a| !slot_root(a).is_some_and(|o| self.is_address_slot(o))),
+                Arg::Temp { .. } => None,
+            };
+            // `T(addr(x))^` by address is x's push (below): the pointer x
+            // is reached through, if any.
+            let target = match target {
+                Some(Addr::Indirect { base, offset }) => match addr_value(base) {
+                    Some(x) if *offset == 0 || !matches!(x, Addr::Const(_)) => {
+                        Some(x.clone().offset_by(*offset))
+                    }
+                    _ => target.cloned(),
+                },
+                t => t.cloned(),
+            };
+            let Some(Addr::Indirect { base, offset }) = target else {
                 continue;
             };
-            if !self.reloaded_pointer(base, *offset) {
+            if !self.reloaded_pointer(&base, offset) {
                 continue;
             }
             let mut n = 0;
             let mut v = |node: Node| {
-                if matches!(node, Node::Expr(e) if e == &**base) {
+                if matches!(node, Node::Expr(e) if *e == *base) {
                     n += 1;
                 }
             };
@@ -12757,6 +12886,70 @@ impl Selector {
                             writable: false,
                         });
                     }
+                    // `addr(x)` by value of an element, of an object inside
+                    // another unit's, or of one reached through a pointer
+                    // held in an address register or loaded by the push at
+                    // a displacement other than 0: the push of x by
+                    // address, as for the objects above (codegen-patterns
+                    // 1.5, bead domain-pascal-hs92; each callee below takes
+                    // a pointer by value, `val_param` or `internal`):
+                    // - elements: MSG_$RCV_CONTIGI 0xE59908 `pea
+                    //   (0,A3,D1.w)` to PKT_$DAT_COPY; PROC2_$GET_EC
+                    //   0xE4012A `pea (0,A1,D0.w)` and TERM_$GET_EC
+                    //   0xE72418 `pea (0xc,A0,D0.l)` to EC2_$REGISTER_EC1;
+                    //   SMD 0xE6F444 `pea (0,A0,D4.w)` and TIME_$WAIT
+                    //   0xE165E0 `pea (0,A1,D3.w)` to EC_$WAIT;
+                    // - inside another unit's object: DMA_$INIT 0xE0A36C,
+                    //   0xE0A37C, 0xE0A39A `pea (DMA+d).l` (`move.l
+                    //   #DMA,-(SP)` for its first element, 0xE0A38A);
+                    // - through a held pointer: SMD 0xE6EBD4 `pea (4,A3)`
+                    //   to EC_$WAIT; XNS_IDP_$OPEN 0xE189AE `pea (A4)`, a
+                    //   pointer local held in A4, to EC2_$REGISTER_EC1;
+                    // - through a pointer the push loads: the DISK
+                    //   module-local 0xE3C9FE at 0xE3CA4E `movea.l
+                    //   (-0x10,A6),A0; pea (0x384,A0)`
+                    //   (refused there, the pointer read twice, above).
+                    Expr::AddrOf(a @ (Addr::Symbol { .. } | Addr::Index { .. })) => {
+                        // Checked after scheduling: TIME_$WAIT 0xE165C6
+                        // and SMD_$EOF_WAIT 0xE6F42A keep the base's load
+                        // below the pushes before it, which `dpc` does not
+                        // always (bead domain-pascal-tzx7).
+                        self.elem_by_value = true;
+                        let r = self.push(&Arg::Address {
+                            addr: a.clone(),
+                            slot: 4,
+                            writable: false,
+                        });
+                        self.elem_by_value = false;
+                        return r;
+                    }
+                    Expr::AddrOf(a @ Addr::Indirect { base, offset })
+                        if self.held_pointer(base)
+                            || (*offset != 0 && self.reloaded_pointer(base, *offset)) =>
+                    {
+                        return self.push(&Arg::Address {
+                            addr: a.clone(),
+                            slot: 4,
+                            writable: false,
+                        });
+                    }
+                    // `addr(p^)` (or of a field at 0) of a pointer in memory:
+                    // `movea.l <p>,An; pea (An)` at PKT_$PING_SERVER 0xE12C34
+                    // (to EC_$WAIT), but A0 was loaded with the same pointer
+                    // before the loop (0xE12BFE), as at 6 of the 7 sites of
+                    // bead domain-pascal-mrsu, and `move.l <p>,-(SP)` pushes
+                    // the same address elsewhere; the trigger is not known.
+                    Expr::AddrOf(Addr::Indirect { offset: 0, .. }) => {
+                        return Err(unsupported(
+                            self.span,
+                            "`addr(p^)` by value of a pointer in memory (`move.l <p>,-(SP)` or \
+                             `movea.l <p>,An; pea (An)`? trigger not known, PKT_$PING_SERVER \
+                             0xE12C34, bead domain-pascal-mrsu) is",
+                        ))
+                    }
+                    Expr::AddrOf(Addr::Indirect { base, .. }) => {
+                        return Err(self.pointer_target_refusal(base, true))
+                    }
                     Expr::AddrOf(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
                     }
@@ -12797,7 +12990,35 @@ impl Selector {
                     }
                 }
             }
-            Arg::Address { addr, slot: 4, .. } => match addr {
+            Arg::Address {
+                addr,
+                slot: 4,
+                writable,
+            } => match addr {
+                // The target of a type transfer of `addr(x)`, `T(addr(x))^`
+                // (or a field of it): `x` itself.  A type transfer "does
+                // not change any bits in the argument" (ref "Type Transfer
+                // Functions", pp. 4-197..4-198), so the pointer is x's
+                // address and its target x's storage; the push is x's
+                // (codegen-patterns 1.5, bead domain-pascal-hs92):
+                // ASKNODE_$WHO_NOTOPO 0xE661BE `move.l #TIME_$CLOCKH,-(SP)`
+                // to EC_$READ and DIR_$SERVER 0xE58378 `move.l
+                // #UID_$NIL,-(SP)` to ACL_$SET_PROJ_LIST (another unit's
+                // variable); the module-local 0xE32B76 (sio/init_dtte.pas)
+                // 0xE32B86 `pea (0xc,A2)`, 0xE32B92 `pea (0x18,A2)` to
+                // EC_$INIT (a field of a parameter held in A2); SMD's
+                // 0xE6E94E `move.l #DTTE,-(SP)` to EC_$ADVANCE.
+                Addr::Indirect { base, offset }
+                    if addr_value(base)
+                        .is_some_and(|x| *offset == 0 || !matches!(x, Addr::Const(_))) =>
+                {
+                    let x = addr_value(base).unwrap().clone().offset_by(*offset);
+                    return self.push(&Arg::Address {
+                        addr: x,
+                        slot: 4,
+                        writable: *writable,
+                    });
+                }
                 // An enclosing routine's object: `pea (d,An)` off the
                 // static link (0xE13648 `pea (-0x40,A4)` in 0xE1360C).
                 Addr::Frame(_) | Addr::Enclosing(_) | Addr::Static(_) => {
@@ -12839,6 +13060,17 @@ impl Selector {
                 // The enclosing routine's by-address parameter passed on:
                 // its slot through the static link, 0xE135B8 `move.l
                 // (8,A2),-(SP)` in 0xE1359C.
+                // The target `p^` of a pointer in the unit's data: the
+                // pointer, `move.l (d,A5),-(SP)` (bead domain-pascal-hs92;
+                // ad-hoc survey of compiled code, codegen-patterns 1.5: 9
+                // such pushes to callees taking the object by address,
+                // AUDIT 0xE70D58 (the module-local 0xE70D38,
+                // audit/stop_logging.pas), 0xE70D0C, 0xE71448 `move.l
+                // (0x198,A5),-(SP)` to EC_$ADVANCE, 0xE70B76 to
+                // EC_$INIT, WIN 0xE19828, 0xE19C9A to its SEEK, DISK
+                // 0xE0AADA, 0xE0AAEA and RING_INTERRUPT 0xE0AB18 to a
+                // driver routine through a pointer; no `movea.l (d,A5),An;
+                // pea (An)` in compiled code).
                 Addr::Indirect { base, offset: 0 }
                     if matches!(
                         &**base,
@@ -12852,7 +13084,7 @@ impl Selector {
                     ) || matches!(
                         &**base,
                         Expr::Load {
-                            addr: Addr::Enclosing(_),
+                            addr: Addr::Enclosing(_) | Addr::Static(_),
                             ty: Scalar {
                                 width: Width::Long,
                                 ..
@@ -12975,9 +13207,7 @@ impl Selector {
                 // loaded as a base (codegen-patterns 12.4: kept apart from
                 // the argument list's other address values, a slot read
                 // once in a register no earlier statement left a value in).
-                // The pointer's own target through the unit's data, and
-                // pointers reached through other pointers: not catalogued,
-                // refused below.
+                // Pointers reached through other pointers: refused below.
                 Addr::Indirect { base, offset } if self.reloaded_pointer(base, *offset) => {
                     let ea = self.ea_of(addr)?;
                     self.out.push(Insn::Pea(ea));
@@ -12987,9 +13217,19 @@ impl Selector {
                 // (0,An,Dn.l),Am` for a displacement beyond 8 bits
                 // (MMAP_$UNAVAIL_REMOV 0xE0CC4C..0xE0CC52).
                 Addr::Index { .. } => {
+                    let start = self.out.len();
                     let ea = self.ea_of(addr)?;
+                    if self.elem_by_value {
+                        let base = (start..self.out.len()).find(|&k| {
+                            matches!(&self.out[k], Insn::Movea { src: Ea::ImmSym(_), .. })
+                        });
+                        if let Some(m) = base {
+                            self.elem_value_bases.push((m, self.out.len(), self.span));
+                        }
+                    }
                     self.out.push(Insn::Pea(ea));
                 }
+                Addr::Indirect { base, .. } => return Err(self.pointer_target_refusal(base, false)),
                 _ => {
                     return Err(unsupported(
                         self.span,
@@ -21728,7 +21968,20 @@ mod tests {
         // original loads it once, 0xE74706).
         let f = proc_(4, vec![ext("P", vec![addr(local(4)), addr(local(8))], 0)]);
         assert!(err(&f).starts_with("an argument list that reads twice a pointer"));
-        // The target of a pointer in the unit's data: not catalogued.
+        // Likewise through `T(addr(p^.f))^`, x's push (bead
+        // domain-pascal-hs92 review).
+        let transferred = |offset| {
+            addr(Addr::Indirect {
+                base: Box::new(Expr::AddrOf(local(offset))),
+                offset: 0,
+            })
+        };
+        let f = proc_(4, vec![ext("P", vec![transferred(4), transferred(8)], 0)]);
+        assert!(err(&f).starts_with("an argument list that reads twice a pointer"));
+        // The target of a pointer in the unit's data: the pointer pushed
+        // (AUDIT 0xE70D58 in the module-local 0xE70D38,
+        // audit/stop_logging.pas: `move.l (0x198,A5),-(SP)`; bead
+        // domain-pascal-hs92).
         let f = proc_(
             0,
             vec![ext(
@@ -21740,7 +21993,53 @@ mod tests {
                 0,
             )],
         );
-        assert!(err(&f).starts_with("passing this kind of object by address"));
+        assert_eq!(body_text(&f), ["move.l\t(8,%a5),-(%sp)", "jsr\t(P).l"]);
+        // The target of another unit's pointer, of a pointer element and
+        // of a pointer reached through a pointer: refused, each named.
+        let target = |base: Expr| {
+            proc_(
+                0,
+                vec![ext(
+                    "P",
+                    vec![addr(Addr::Indirect {
+                        base: Box::new(base),
+                        offset: 0x10,
+                    })],
+                    0,
+                )],
+            )
+        };
+        let f = target(load(sym("PTR"), Scalar::POINTER));
+        assert!(err(&f).starts_with("the target of another unit's pointer"));
+        let f = target(load(
+            Addr::Index {
+                base: Box::new(sym("PTRS")),
+                index: Box::new(load(Addr::Frame(8), word())),
+                scale: 4,
+                offset: -4,
+            },
+            Scalar::POINTER,
+        ));
+        let msg = "an object reached through a pointer that is an array element";
+        assert!(err(&f).starts_with(msg));
+        let f = target(load(through(8, 4), Scalar::POINTER));
+        assert!(err(&f).starts_with("an object reached through a pointer that is itself"));
+        // `T(addr(x))^` by address: x's push (ASKNODE_$WHO_NOTOPO 0xE661BE
+        // `move.l #TIME_$CLOCKH,-(SP)`; 0xE32B86 `pea (0xc,A2)`).
+        let f = target(Expr::AddrOf(sym("X")));
+        assert_eq!(body_text(&f), ["pea\t(X+0x10).l", "jsr\t(P).l"]);
+        let f = proc_(
+            0,
+            vec![ext(
+                "P",
+                vec![addr(Addr::Indirect {
+                    base: Box::new(Expr::AddrOf(sym("X"))),
+                    offset: 0,
+                })],
+                0,
+            )],
+        );
+        assert_eq!(body_text(&f), ["move.l\t#X,-(%sp)", "jsr\t(P).l"]);
     }
 
     #[test]
@@ -21804,6 +22103,8 @@ mod tests {
             vec![ext("P", vec![val(Expr::AddrOf(Addr::Frame(-4)))], 0)],
         );
         assert_eq!(body_text(&f), ["pea\t(-4,%fp)", "jsr\t(P).l"]);
+        // `addr(x)` by value inside another unit's object: as by address,
+        // `pea (sym+d).l` (DMA_$INIT 0xE0A36C; bead domain-pascal-hs92).
         let f = proc_(
             4,
             vec![ext(
@@ -21815,7 +22116,56 @@ mod tests {
                 0,
             )],
         );
-        assert!(err(&f).starts_with("this argument value"));
+        assert_eq!(body_text(&f), ["pea\t(X+4).l", "jsr\t(P).l"]);
+        // `addr(p^.f)` by value through a pointer local: as by address,
+        // `movea.l; pea (d,An)`; `addr(p^)` itself refused (bead
+        // domain-pascal-mrsu).
+        let target = |offset| {
+            proc_(
+                4,
+                vec![ext(
+                    "P",
+                    vec![val(Expr::AddrOf(Addr::Indirect {
+                        base: Box::new(load(Addr::Frame(-4), Scalar::POINTER)),
+                        offset,
+                    }))],
+                    0,
+                )],
+            )
+        };
+        assert_eq!(
+            body_text(&target(8)),
+            ["movea.l\t(-4,%fp),%a0", "pea\t(8,%a0)", "jsr\t(P).l"]
+        );
+        assert!(err(&target(0)).starts_with("`addr(p^)` by value of a pointer in memory"));
+        // `addr` of another unit's element by value: refused when the
+        // scheduler moves the element's base above an earlier push (bead
+        // domain-pascal-tzx7); after one push it stays below (TIME_$WAIT
+        // 0xE165C6..0xE165D2).
+        let elem = || {
+            val(Expr::AddrOf(Addr::Index {
+                base: Box::new(sym("QUIT_EC")),
+                index: Box::new(load(sym("AS_ID"), word())),
+                scale: 4,
+                offset: 0,
+            }))
+        };
+        let long = |v| val(konst(v, long()));
+        let f = proc_(0, vec![ext("P", vec![elem(), long(0x10000), long(0)], 0)]);
+        let msg = "`addr` of an element of another unit's array passed by value";
+        assert!(err(&f).starts_with(msg));
+        let f = proc_(0, vec![ext("P", vec![elem(), long(0)], 0)]);
+        assert_eq!(
+            body_text(&f),
+            [
+                "clr.l\t-(%sp)",
+                "move.w\t(AS_ID).l,%d0",
+                "movea.l\t#QUIT_EC,%a0",
+                "lsl.w\t#2,%d0",
+                "pea\t(0,%a0,%d0.w)",
+                "jsr\t(P).l",
+            ]
+        );
     }
 
     #[test]

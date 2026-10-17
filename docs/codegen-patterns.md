@@ -557,6 +557,63 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   the same push as the object by address (no compiled site can be told
   from that one; implemented, bead domain-pascal-5aw.19; `addr` stored
   as a value: section 5.2).
+- **`addr(x)` by value of other objects: the push of x by address too**
+  (Verified at the sites given, callees taking a pointer by value;
+  implemented, bead domain-pascal-hs92):
+  - *an element*, `pea (d,An,Dn)`: MSG_$RCV_CONTIGI 0xE59908 `pea
+    (0,A3,D1.w)` to PKT_$DAT_COPY (an element of a by-address
+    parameter, `integer32(addr(data_buf[data_len + 1]))`); PROC2_$GET_EC
+    0xE4012A `pea (0,A1,D0.w)` and TERM_$GET_EC 0xE72418 `pea
+    (0xc,A0,D0.l)` to EC2_$REGISTER_EC1; SMD 0xE6F444 `pea (0,A0,D4.w)`
+    and TIME_$WAIT 0xE165E0 `pea (0,A1,D3.w)` to EC_$WAIT (another
+    unit's arrays of 12-byte eventcounts).  In both the index and the
+    base are loaded after the pushes before them (0xE165CC..0xE165D2,
+    0xE6F430..0xE6F436); `dpc`'s scheduler moves the base's `movea.l
+    #sym,An` above an earlier push once two arguments precede it (bead
+    domain-pascal-tzx7), so `addr` of another unit's element by value is
+    refused where that happens (checked after scheduling;
+    the register choices there, D3/D4 and A1, are not checked either);
+  - *inside another unit's object*, `pea (sym+d).l`, and the object at
+    the symbol `move.l #sym,-(SP)`: DMA_$INIT 0xE0A36C, 0xE0A37C,
+    0xE0A39A `pea (DMA+0xc0).l` .. and 0xE0A38A `move.l #DMA,-(SP)`
+    (`addr(dma[n])`; conformance unit `dma_init_m68450_channel.pas`);
+  - *through a pointer held in an address register*, `pea (d,An)`: SMD
+    0xE6EBD4 `pea (4,A3)` to EC_$WAIT; XNS_IDP_$OPEN 0xE189AE `pea (A4)`
+    (a pointer local the original holds in A4; `dpc` keeps that local in
+    the frame there and refuses, below);
+  - *through a pointer the push loads, at a displacement other than 0*,
+    `movea.l <p>,An; pea (d,An)`: the DISK module-local 0xE3C9FE
+    (disk/wait_io.pas) at 0xE3CA4E `movea.l (-0x10,A6),A0; pea
+    (0x384,A0); pea (0x378,A0)`, `addr(io_ec), addr(err_ec)` of a `with`
+    record, the pointer loaded once for both (refused as below, bead
+    domain-pascal-ux1w; `dpc` holds such a `with` record's address in a
+    register instead, section 5.2).
+  **Refused:** `addr(p^)` (or of a field at offset 0) of a pointer in
+  memory.  PKT_$PING_SERVER 0xE12C34 `movea.l (0xe28de4).l,A0; pea (A0)`
+  (`addr(sock_$socket_ptr[13]^.ec)` to EC_$WAIT) and the chain at
+  the NETWORK module-local 0xE0F746 (network/wait_response.pas) at
+  0xE0F7AA have the `pea (An)` form, but A0 held the same pointer from
+  0xE12BFE, as at 6 of the 7 `pea (An)` sites of bead
+  domain-pascal-mrsu, and a pointer local's value goes to the same
+  callee positions as `move.l (d,A6),-(SP)` elsewhere: the trigger is
+  not known.  An object reached through a pointer that is itself an
+  element or reached through another pointer, as by address (below).
+- **The target of a type transfer of `addr(x)`, `T(addr(x))^` (or a
+  field of it), passed by address is x passed by address** (Verified;
+  implemented, bead domain-pascal-hs92).  A type transfer "does not
+  change any bits in the argument" (ref "Type Transfer Functions",
+  pp. 4-197..4-198), so the pointer is x's address and its target x's
+  storage.  ASKNODE_$WHO_NOTOPO 0xE661BE `move.l #TIME_$CLOCKH,-(SP)` to
+  EC_$READ (`ec_$eventcount_ptr_t(addr(time_$clockh))^`); DIR_$SERVER
+  0xE58378 `move.l #UID_$NIL,-(SP)` to ACL_$SET_PROJ_LIST; SMD 0xE6E94E
+  `move.l #DTTE,-(SP)` to EC_$ADVANCE; the module-local 0xE32B76
+  (sio/init_dtte.pas) 0xE32B86 `pea (0xc,A2)`, 0xE32B92 `pea (0x18,A2)`,
+  0xE32B9E `pea (A2)` to EC_$INIT, its slot held in A2 for the three
+  (srcsurvey OK).  The use analysis of 12.2 counts the argument as x
+  by address too.  `dpc` peels the transfer only there: loads and
+  stores through `T(addr(x))^` keep their forms (section 5.2,
+  "Fields of a type-transferred variable").  Golden
+  `calls/address_args`.
 - **A by-address parameter passed on by address** is its slot, pushed
   with `move.l (d,A6),-(SP)` (Verified: LOG_$READ 0xE1780C `actual_len`,
   0xE17818 `buffer`, both passed on to the worker 0xE17778).
@@ -605,13 +662,41 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   domain-pascal-0os2).
   **Not modelled, refused:** one argument list reading the same loaded
   pointer twice: the original loads it once (0xE74706 `movea.l
-  (-0xbc,A6),A1; pea (-0x38,A1); pea (-0x34,A1)`, 0xE3CA4E, 0xE748A4; bead domain-pascal-ux1w);
-  the target `p^` of a pointer in the unit's data or of another unit's
-  pointer (no site told apart from a pointer pushed by value; bead
-  domain-pascal-royb).
+  (-0xbc,A6),A1; pea (-0x38,A1); pea (-0x34,A1)`, 0xE3CA4E, 0xE748A4;
+  bead domain-pascal-ux1w); the target `p^` of another unit's pointer
+  (no site told apart from a pointer pushed by value; bead
+  domain-pascal-royb); an object reached through a pointer that is an
+  array element (RIP_$INIT 0xE2FC6E..0xE2FC76 and ASKNODE_$WHO_NOTOPO
+  0xE660F8..0xE66100 `lea (0,A0,Dn.l),A2; movea.l (-4,A2),A3; pea (A3)`
+  to EC_$READ, the element's address kept for a later statement;
+  VFMT_$MAIN 0xE6ACA2 `move.l (A4)+,-(SP)` off a pointer stepped through
+  the array); one reached through a pointer that is itself reached
+  through a pointer, a chain `movea.l (d,Am),An; movea.l (k,An),Ak; pea
+  (d',Ak)`: the form is the same at the 4 such pushes with a
+  displacement in compiled code (NETLOG_$LOG_IT's callers 0xE135E2,
+  0xE01546, 0xE02C86, PMAP_$FLUSH 0xE139CA; the first is the
+  `aste.aote^.uid` of pmap/flush.pas), the registers are not: A1 then A3
+  at 0xE135E2 and 0xE01546 (A2 the static link), A3 then A4 at 0xE02C86
+  with A1 free, A0 then A2 at 0xE139CA (the last register never A1).
   Implemented (`isel.rs`, `Selector::push`, `reloaded_pointer`,
   `field_pointer`); golden `calls/pointer_targets`, exec test
   `pointer_targets`.
+- **The target `p^` of a pointer in the unit's data** (Verified; bead
+  domain-pascal-hs92; ad-hoc survey of compiled code, script not kept):
+  the pointer is pushed, `move.l (d,A5),-(SP)`, as for a pointer local
+  (below): AUDIT 0xE70D58 (the module-local 0xE70D38,
+  audit/stop_logging.pas), 0xE70D0C, 0xE71448 `move.l (0x198,A5),-(SP)`
+  to EC_$ADVANCE (`audit_$wired^.ec`, the eventcount at 0), 0xE70B76 to
+  EC_$INIT; WIN 0xE19828, 0xE19C9A to its module-local SEEK
+  (`win_cur_req^`); DISK 0xE0AADA, 0xE0AAEA and RING_INTERRUPT 0xE0AB18
+  to a driver routine through a pointer (`type1_do_io^(type1_dcte^)`): 9
+  pushes to callees taking the object by address.  Compiled code has no
+  `movea.l (d,A5),An; pea (An)` at all (51 `movea.l <mem>,An; pea (An)`:
+  39 from the frame, 11 through another register, 1 absolute, none from
+  A5).  srcsurvey OK: the AUDIT module-locals 0xE70C78 and 0xE70D38
+  (audit/start_logging.pas, stop_logging.pas); RING_INTERRUPT matches
+  but for its frame (MISMATCH, `link #-4`).  Golden
+  `calls/address_args`.
 - **A pointer local's own target `p^`** (Verified; review of bead
   domain-pascal-s9j, ad-hoc survey of the compiled routines with a
   `link`, script not kept): the pointer is pushed, `move.l
@@ -4760,8 +4845,9 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     `lea` are not seen.
 
   Refused besides: an address inside another unit's object or a constant
-  stored or pushed (`move.l #sym+d` / `pea abs.l` for arguments, 1.5:
-  not settled), and into a register-held data local.  `dpc-sema` gives
+  stored (pushed by value it is `pea abs.l`, as by address: DMA_$INIT
+  0xE0A36C, 1.5, bead domain-pascal-hs92), and into a register-held
+  data local.  `dpc-sema` gives
   `addr` the type `univ_ptr` (p. 4-13).  Golden `data/with`,
   `expr/addr_arith`; exec tests `withs`, `addr_values`; driver test
   `addr_values_in_sums_and_differences`.
@@ -4864,14 +4950,17 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   - **Refused:** the whole object's address stored where those stores
     decide the slot's entry load (above; bead domain-pascal-m2w3); an
     enclosing routine's parameter's, stored (the generic form would be
-    `lea (An),Am; move.l Am`, which has no `addr` site, above; `addr(p^)`
-    of a pointer still takes that form, unverified, bead
-    domain-pascal-ucss); a
-    part reached through a slot held in a data register,
-    passed by value (as by address, 1.5); an element at a run-time index
-    passed by value; the target of a type transfer of it,
-    `T(addr(x))^[i]` (PKT_$BRK_INTERNET_HDR 0xE12478, PKT_$BLD_INTERNET_HDR
-    0xE12300 `pea (-0x1,A2,D3.l)`; bead domain-pascal-u7gg).
+    `lea (An),Am; move.l Am`, which has no `addr` site, above;
+    `addr(p^)` of a pointer still takes that form, unverified, bead
+    domain-pascal-ucss); a part reached through a slot held in a data
+    register, passed by value (as by address, 1.5); an element of the
+    target of a type transfer of it, `T(addr(x))^[i]`
+    (PKT_$BRK_INTERNET_HDR 0xE12478, PKT_$BLD_INTERNET_HDR 0xE12300 `pea
+    (-0x1,A2,D3.l)`; bead
+    domain-pascal-u7gg; the target itself or a field of it passed by
+    address is x's push, 1.5, bead domain-pascal-hs92).  An element at
+    a run-time index passed by value is the element's push by address
+    (MSG_$RCV_CONTIGI 0xE59908 `pea (0,A3,D1.w)`, 1.5).
   Implemented (`dpc-sema` `Checker::builtin_fn`; `isel.rs`
   `Selector::store`, `Selector::push`, `entry_loads`); golden
   `params/addr_in`, exec test `addr_in`, conformance unit `ec_init.pas`,
