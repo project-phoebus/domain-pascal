@@ -4030,6 +4030,11 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
     if matches!(p.types.kind(lhs.ty), TypeKind::Record(_)) {
         return record_compare(p, e, rel, lhs, rhs);
     }
+    if matches!(p.types.kind(lhs.ty), TypeKind::Array { .. })
+        || matches!(p.types.kind(rhs.ty), TypeKind::Array { .. })
+    {
+        return array_compare(p, e, rel, lhs, rhs);
+    }
     let comparable = |x: &SExpr| p.types.is_ordinal(x.ty) || p.types.is_pointer(x.ty);
     if !comparable(lhs) || !comparable(rhs) {
         return Err(unsupported(
@@ -4246,6 +4251,70 @@ fn record_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) ->
         op: rel,
         lhs: addr_of(p, lhs)?,
         rhs: addr_of(p, rhs)?,
+        size,
+    })
+}
+
+/// `lhs = rhs` / `lhs <> rhs` of two arrays, or of an array of `char` and
+/// a string constant of its length (ref Table 4-1, p. 4-2: `=` and `<>`
+/// apply to "All types"), compared in memory as records are
+/// ([`record_compare`]; codegen-patterns 7.1, "Records"): DISK_IO
+/// 0xE3D846 `lea (-0x78,A6),A0; lea (0x20,A3),A1; moveq #7,D1; cmpm.l
+/// (A1)+,(A0)+; dbne` for `verify_info.l <> req^.header.l`, two arrays of
+/// 8 longwords; the module-local DISK_ routine at 0xE6C266 `lea (2,A0),A1;
+/// lea (0x44,PC),A3; moveq #5,D2; cmpm.b (A3)+,(A1)+; dbne` for `apollo <>
+/// 'APOLLO'`, the constant's cell in the code section (codegen-patterns
+/// 1.5), compared in bytes (bead domain-pascal-yqf6).
+fn array_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    let string = |x: &SExpr| {
+        matches!(
+            (&x.value, p.types.kind(x.ty)),
+            (Some(ConstValue::Str(_)), TypeKind::StringLit { .. })
+        )
+    };
+    if !string(lhs) && !string(rhs) {
+        // Two arrays: in longwords from 32 bytes as DISK_IO's (0xE3D846);
+        // otherwise in the record forms, whose unit (`cmpm.w` for 6 bytes,
+        // `cmpm.l` for 8) the image's array compares are not shown to use
+        // (an array of `char` against a constant is a `cmpm.b` loop,
+        // 0xE6C278).
+        let size = p.types.size(lhs.ty);
+        let elem = match p.types.kind(lhs.ty) {
+            TypeKind::Array { elem, .. } => Some(p.types.size(*elem)),
+            _ => None,
+        };
+        if !(elem == Some(4) && size >= 32 && size % 4 == 0) {
+            best_effort(
+                e.span,
+                "comparing arrays other than of longwords from 32 bytes (in the record forms; \
+                 the unit of the image's array loops by element size is not surveyed, \
+                 codegen-patterns 7.1) is",
+            )?;
+        }
+        return record_compare(p, e, rel, lhs, rhs);
+    }
+    let (var, lit) = if string(rhs) { (lhs, rhs) } else { (rhs, lhs) };
+    let size = p.types.size(var.ty);
+    let TypeKind::Array { elem, .. } = p.types.kind(var.ty) else {
+        return Err(unsupported(e.span, "comparing a string constant with a non-array is"));
+    };
+    if !p.types.is_char(*elem) || var.value.is_some() || p.types.size(lit.ty) != size {
+        return Err(unsupported(
+            e.span,
+            "comparing a string constant with other than an array of `char` of its length is",
+        ));
+    }
+    if !matches!(rel, Rel::Eq | Rel::Ne) {
+        return Err(unsupported(e.span, "ordering arrays is"));
+    }
+    check_even(p, var)?;
+    let cell = Addr::Const(pool_const(p, lit.value.as_ref().unwrap(), lit.ty, lit.span)?);
+    let v = addr_of(p, var)?;
+    let (lhs, rhs) = if string(rhs) { (v, cell) } else { (cell, v) };
+    Ok(Cond::Block {
+        op: rel,
+        lhs,
+        rhs,
         size,
     })
 }
@@ -8110,6 +8179,24 @@ fn store_bits_set_update(
 /// dereferenced, the system applies any attributes of their base type"
 /// (p. 3-77).  `atomic` is the object's own (ref 3.15.2: scalar variables
 /// only).
+/// The variable `x` of a pointer `ptr` of the form `addr(x)`, through any
+/// type transfers (`T(addr(x))`): its dereference `T(addr(x))^` is the
+/// object `x` itself, viewed as the pointer's base type (SIO_$INIT_LINE
+/// 0xE32B40 `lea (692,A2),A0` for `sio_$tty_handlers_ptr_t(addr(tty.
+/// xmit_callback))^ := ...`, tty in A2; RIP_$FIND_NEXTHOP 0xE156B6 `lea
+/// (A2),A1` for `rip_$nexthop_ptr_t(addr(addr_info))^`; bead
+/// domain-pascal-yqf6).
+fn viewed(ptr: &SExpr) -> Option<&SExpr> {
+    match &ptr.kind {
+        ExprKind::Transfer(x) => viewed(x),
+        ExprKind::Builtin {
+            builtin: Builtin::Addr,
+            args,
+        } => args.first(),
+        _ => None,
+    }
+}
+
 fn volatile_access(p: &Program, e: &SExpr) -> Option<Access> {
     fn inherited(p: &Program, e: &SExpr) -> (bool, bool) {
         let a = p.types.attrs(e.ty);
@@ -8123,6 +8210,14 @@ fn volatile_access(p: &Program, e: &SExpr) -> Option<Access> {
             let (bv, bd) = inherited(p, &with_binding(*w).0);
             v |= bv;
             d |= bd;
+        }
+        // `T(addr(x))^` is `x` ([`viewed`]): volatile when `x` is.
+        if let ExprKind::Deref(ptr) = &e.kind {
+            if let Some(x) = viewed(ptr) {
+                let (bv, bd) = inherited(p, x);
+                v |= bv;
+                d |= bd;
+            }
         }
         (v, d)
     }
@@ -8158,6 +8253,7 @@ fn check_device_access(p: &Program, e: &SExpr, read: bool) -> Res<()> {
         match &x.kind {
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => x = base,
             ExprKind::WithRecord(w) => return check_device_access(p, &with_binding(*w).0, read),
+            ExprKind::Deref(ptr) if viewed(ptr).is_some() => x = viewed(ptr).unwrap(),
             _ => return Ok(()),
         }
     }
@@ -8317,10 +8413,30 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
         ExprKind::Field { base, offset, .. } => Ok(addr_of(p, base)?.offset_by(*offset as i32)),
         // The record of an enclosing `with` ([`Cx::with_stmt`]).
         ExprKind::WithRecord(w) => Ok(with_binding(*w).1),
-        ExprKind::Deref(ptr) => Ok(Addr::Indirect {
-            base: Box::new(value_of(p, ptr)?),
-            offset: 0,
-        }),
+        // `T(addr(x))^`, a view of `x` through a pointer type transfer:
+        // the object `x` itself (SIO_$INIT_LINE 0xE32B40 `lea (692,A2),A0`
+        // for `sio_$tty_handlers_ptr_t(addr(tty.xmit_callback))^ := ...`,
+        // tty in A2; RIP_$FIND_NEXTHOP 0xE156B6 `lea (A2),A1` for
+        // `rip_$nexthop_ptr_t(addr(addr_info))^`; bead domain-pascal-yqf6).
+        // [`viewed`]: whether `x` is volatile or a device is asked of
+        // the whole designator ([`volatile_access`],
+        // [`check_device_access`] see through the view).
+        ExprKind::Deref(ptr) => match viewed(ptr) {
+            // A part of `x` volatile, not the whole: the view's type does
+            // not say which bytes are.
+            Some(x) if p.types.has_volatile_part(x.ty) && volatile_access(p, x).is_none() => {
+                Err(unsupported(
+                    e.span,
+                    "a view through a pointer type transfer (`T(addr(x))^`) of an object with a \
+                     volatile or device part is",
+                ))
+            }
+            Some(x) => addr_of(p, x),
+            None => Ok(Addr::Indirect {
+                base: Box::new(value_of(p, ptr)?),
+                offset: 0,
+            }),
+        },
         // `a[i]`: the element at `(i - lo) * size` bytes into the array
         // (codegen-patterns 5.2).  A constant index is folded into the
         // displacement; otherwise the lower bound is (`(-2,A5,D0.w)` for

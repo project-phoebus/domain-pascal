@@ -2428,13 +2428,30 @@ end;
     assert!(e[0].contains("bytes no field covers"), "{e:?}");
     let e = errs(&src("if a < b then w := 0;"));
     assert!(e[0].contains("ordering records"), "{e:?}");
-    // Arrays: accepted by the checker (Table 4-1, "All types"), refused
-    // here (the unit of the image's array loops is not settled, 0xE6C278
-    // `cmpm.b`).
+    // Arrays (Table 4-1, "All types"): compared as records are, best
+    // effort below 32 bytes of longwords (the unit of the image's array
+    // loops is not settled, 0xE6C278 `cmpm.b`; bead domain-pascal-yqf6).
     let e = errs(&src("if v1 = v2 then w := 0;"));
+    assert!(e[0].contains("comparing arrays other than"), "{e:?}");
+    let strict = dpc_syntax::diag::set_strict(false);
+    let m = lower_src(&src("if v1 = v2 then w := 0;"));
+    dpc_syntax::diag::set_strict(strict);
+    let w = dpc_syntax::diag::take_best_effort();
     assert!(
-        e[0].contains("comparing values other than ordinals and pointers"),
-        "{e:?}"
+        w.iter().any(|d| d.message.contains("comparing arrays other than")),
+        "{w:?}"
+    );
+    let StmtKind::If { cond, .. } = &m.unwrap().functions[0].body[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        *cond,
+        Cond::Block {
+            op: Rel::Eq,
+            lhs: at("V1"),
+            rhs: at("V2"),
+            size: 8
+        }
     );
 }
 
@@ -5058,6 +5075,35 @@ procedure x(var z: integer); extern;
             atomic: true
         })
     );
+    // A view through a pointer type transfer, `T(addr(x))^`, is `x`:
+    // volatile when `x` is (bead domain-pascal-yqf6).
+    let view = "type ip = ^integer; rp = ^regs; var d: extern [device] integer; dr: extern regs;";
+    assert_eq!(
+        vol(&format!("{view} procedure p; begin ip(addr(d))^ := 0 end;")),
+        Some(Access {
+            device: true,
+            atomic: false
+        })
+    );
+    assert_eq!(
+        vol(&format!("{view} procedure p; begin rp(addr(dr))^.csr := 'a' end;")),
+        Some(Access {
+            device: true,
+            atomic: false
+        })
+    );
+    assert_eq!(
+        vol(&format!("{view} procedure p; begin ip(addr(q.key))^ := 0 end;")),
+        Some(dflt)
+    );
+    assert_eq!(
+        vol(&format!("{view} procedure p; begin ip(addr(i))^ := 0 end;")),
+        None
+    );
+    // Of a record with a volatile part: refused (the view's type does not
+    // say which bytes are volatile).
+    let e = errs(&format!("{types}{view} procedure p; begin ip(addr(q))^ := 0 end;"));
+    assert!(e[0].contains("volatile or device part"), "{e:?}");
     // A load as well.
     match only_stmt(&format!("{types}procedure p; begin i := q.key end;")) {
         StmtKind::Store {

@@ -60,6 +60,53 @@ fn best_effort(span: Span, what: impl std::fmt::Display) -> Res<()> {
     dpc_syntax::diag::best_effort(unsupported(span, what))
 }
 
+/// The instructions over which the value register `v`, defined at `k`
+/// and last read at `last`, is live, as a range `lo..=hi` of `out`: the
+/// straight run from `k` to `last`, widened by loops (a branch back to a
+/// label at or before it).  A loop the value enters, defined before it
+/// and read in it, holds it to its back branch; one in which it is read
+/// before its definition (round the loop) holds it from its head.
+fn live_range(out: &[Insn], v: Reg, k: usize, last: usize) -> (usize, usize) {
+    let at = |l: u32| out.iter().position(|i| matches!(i, Insn::Label(m) if *m == l));
+    let loops: Vec<(usize, usize)> = out
+        .iter()
+        .enumerate()
+        .flat_map(|(b, i)| {
+            let targets: Vec<u32> = match i {
+                Insn::Branch { label, .. } | Insn::Dbf { label, .. } => vec![*label],
+                Insn::TableJump { targets, .. } => targets.clone(),
+                _ => Vec::new(),
+            };
+            targets
+                .into_iter()
+                .filter_map(at)
+                .filter(move |&t| t <= b)
+                .map(move |t| (t, b))
+        })
+        .collect();
+    let reads = |from: usize, to: usize| {
+        out[from..to]
+            .iter()
+            .any(|i| crate::regs::access(i).uses.contains(&v))
+    };
+    let (mut lo, mut hi) = (k, last.max(k));
+    loop {
+        let (l0, h0) = (lo, hi);
+        for &(t, b) in &loops {
+            if t < lo && lo <= b && reads(t, lo) {
+                lo = t;
+                hi = hi.max(b);
+            }
+            if lo < t && t <= hi && hi < b {
+                hi = b;
+            }
+        }
+        if (lo, hi) == (l0, h0) {
+            return (lo, hi);
+        }
+    }
+}
+
 /// The refusal of a `lea (0,An,Dx),Am` from the base of another unit's
 /// array that an earlier statement loaded ([`Selector::held_other_base`]).
 const KEPT_BASE_LEA: &str = "an element of another unit's array that an earlier statement since \
@@ -1396,9 +1443,18 @@ fn select_body_with(
             else {
                 return false;
             };
-            !s.out[k + 1..=last].iter().any(|i| {
-                matches!(i, Insn::Jsr(_) | Insn::Bsr { .. })
-                    || crate::regs::access(i).defs.contains(&Reg::A(0))
+            // In a loop the copy's range is not the straight run from it
+            // to its last use ([`live_range`]; a use before the copy,
+            // reached round the loop, panicked here before bead
+            // domain-pascal-yqf6's review).
+            let (lo, hi) = live_range(&s.out, v, k, last);
+            if hi < last {
+                return false;
+            }
+            !s.out[lo..=hi].iter().enumerate().any(|(j, i)| {
+                lo + j != k
+                    && (matches!(i, Insn::Jsr(_) | Insn::Bsr { .. })
+                        || crate::regs::access(i).defs.contains(&Reg::A(0)))
             })
         })
         .map(|&(o, _, _)| o)
@@ -1794,13 +1850,17 @@ fn select_body_with(
         if let Insn::Movea { dst, .. } = s.out[k] {
             if call_ptrs.contains(&o) && dst < 2 {
                 if !parkable_pointer_local(f, o) || !a0_free.contains(&o) {
-                    return Err(unsupported(
+                    // Best effort (not byte-identical): the local kept in
+                    // the register allocation gave it, its copy from A0
+                    // kept (bead domain-pascal-yqf6).
+                    best_effort(
                         span,
                         "a pointer local assigned from a call that no call follows, assigned \
                          more than once, inside a statement, read other than dereferenced, or \
                          with A0 written before its last use (A0 or A1 in the image; not \
                          settled) is",
-                    ));
+                    )?;
+                    continue;
                 }
                 if !to_a0.contains(&o) {
                     to_a0.push(o);
@@ -10692,7 +10752,14 @@ impl Selector {
     /// the unrolled form the first `bne` goes to `differ`; gives the count
     /// register and whether the form is unrolled.
     fn block_flags(&mut self, lhs: &Addr, rhs: &Addr, size: u32, differ: u32) -> Res<(u8, bool)> {
+        let string = matches!(lhs, Addr::Const(_)) || matches!(rhs, Addr::Const(_));
         let (unit, n) = match size {
+            // An array of `char` against a string constant's cell (the
+            // only constant compared in memory, dpc-ir's `array_compare`):
+            // a `cmpm.b` loop, the module-local DISK_ routine at 0xE6C266
+            // `moveq #5,D2; cmpm.b (A3)+,(A1)+; dbne` for `apollo <>
+            // 'APOLLO'` (bead domain-pascal-yqf6).
+            s if string && (2..=128).contains(&s) => (Size::B, s),
             8 => (Size::L, 2),
             6 => (Size::W, 3),
             s if s % 4 == 0 && (32..=512).contains(&s) => (Size::L, s / 4),
@@ -12847,6 +12914,11 @@ impl Selector {
                 best_effort(self.span, OTHER_SECTION)?;
                 (self.ea_of(addr)?, BlockForm::New)
             }
+            // A string constant's cell compared with an array of `char`
+            // (dpc-ir's `array_compare`): `lea (d,PC),An` (the module-local
+            // DISK_ routine at 0xE6C26C `lea (0x44,PC),A3`; bead
+            // domain-pascal-yqf6).
+            Addr::Const(_) => (self.ea_of(addr)?, BlockForm::Known),
             _ => {
                 const KIND: &str =
                     "a block (record or array copy or comparison) at this kind of address is";
@@ -14024,6 +14096,7 @@ impl Selector {
                 };
                 self.ptr_copies.iter_mut().for_each(moved);
                 self.a0_bases.iter_mut().for_each(|(p, _)| moved(p));
+                self.elem_leas.iter_mut().for_each(|(p, _)| moved(p));
                 self.cse.iter_mut().for_each(|c| moved(&mut c.at));
             }
         }
@@ -15884,11 +15957,15 @@ impl Selector {
     /// 0xE43974, MST_$REMAP 0xE439FE: the five map-named wrappers of
     /// `tools/resultsurvey.py callers` whose call is not popped).
     ///
-    /// Refused: other values (a computed one is stored and moved,
-    /// 0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`; `nil`, of which no
-    /// one-statement body is seen, [`Self::set_pointer_result_web`] for
-    /// the others) and a non-pointer result in A0 (`a0_return`, ref
-    /// 5.5.11; no site known).
+    /// An address, `f := addr(x)`: `lea` straight into A0, the slot not
+    /// used (GET_WIRED 0xE1D8E8 `lea (A5),A0`).  A computed value (best
+    /// effort): stored and moved from its data register, as 0xE4D5A6
+    /// `move.l D0,(-12,A6); movea.l D0,A0` (bead domain-pascal-yqf6).
+    ///
+    /// Refused: `nil` (no one-statement body is seen;
+    /// [`Self::set_pointer_result_web`] for the others), a by-value
+    /// parameter or register-held value, and a non-pointer result in A0
+    /// (`a0_return`, ref 5.5.11; no site known).
     /// In a body of several statements: [`Self::set_pointer_result_web`].
     fn set_pointer_result(&mut self, f: &Function, e: &Expr) -> Res<()> {
         let res = f.result.expect("SetResult in a function");
@@ -15927,6 +16004,36 @@ impl Selector {
                  #0,A0` where it follows other statements, TIME_$RTE_INT 0xE163D6; \
                  codegen-patterns 3, \"`nil` results\") is",
             ));
+        }
+        if let Expr::AddrOf(a) = e {
+            // An address: formed straight into A0, the slot not used
+            // (GET_WIRED 0xE1D8E8 `lea (A5),A0`; bead domain-pascal-yqf6).
+            return self.lea_into(a, 0);
+        }
+        if e.ty().width == Width::Long && !matches!(e, Expr::Load { .. } | Expr::Call { .. }) {
+            // Best effort (not byte-identical, bead domain-pascal-yqf6): a
+            // computed value stored into the slot and moved to A0 from its
+            // data register (0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`,
+            // the last statement of a longer body; the register is the
+            // allocator's).
+            best_effort(
+                self.span,
+                "a computed pointer result (in a data register, then `movea.l Dn,An`; \
+                 codegen-patterns 3, \"Computed pointer results\") is",
+            )?;
+            let v = self.eval(e)?;
+            let d = self.in_tmp(v, Width::Long)?;
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(Reg::D(d)),
+                dst: Ea::Disp(slot, FP),
+            });
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Reg(Reg::D(d)),
+                dst: 0,
+            });
+            return Ok(());
         }
         let src = match e {
             Expr::Load {
@@ -15975,8 +16082,9 @@ impl Selector {
     /// only assignment and the body's last statement (TIME_$RTE_INT
     /// 0xE163D6, TIME_$VT_INT 0xE16426); refused when every assignment is
     /// last on several paths and none reads memory (no site) and right
-    /// before a call's pad (bead domain-pascal-ncac).  A computed address
-    /// (`lea` at 0xE42B0A) is refused.
+    /// before a call's pad (bead domain-pascal-ncac).  An address: `lea`
+    /// into the variable's register (0xE42B0A); a computed value, best
+    /// effort, from a data register (bead domain-pascal-yqf6).
     ///
     /// Where every assignment is last and one reads memory, the variable
     /// is in its frame slot instead ([`pointer_result_in_slot`]): memory
@@ -16128,6 +16236,34 @@ impl Selector {
             e if a0_call(e).is_some() => Ea::Reg(Reg::A(self.call_a0(a0_call(e).unwrap())?)),
             Expr::Load { addr, .. } if !matches!(addr, Addr::Frame(o) if *o > 0) => {
                 self.operand(addr)?
+            }
+            // An address: `lea <ea>,An` into the result's register
+            // (EC2_$GET_EC1_ADDR 0xE42B0A `lea (0,A1,D2.w),A2`, A2 as a
+            // call follows; DISK_$GET_DRTE, AREA_$RPMAP_GET; bead
+            // domain-pascal-yqf6).
+            Expr::AddrOf(a) => return self.lea_into(a, web),
+            // Best effort (not byte-identical): a computed pointer
+            // (`univ_ptr(integer32(p) + 1)`, DIR_$MAP_LINK_PAGE; EC2_$
+            // ALLOCATE_EC1) into a data register, then `movea.l Dn,An`
+            // into the result's register; whether the image computes it
+            // in the address register is not surveyed (codegen-patterns
+            // 3, "Computed pointer results").
+            e if e.ty().width == Width::Long
+                && !matches!(
+                    e,
+                    Expr::Call {
+                        reg: ResultClass::Address,
+                        ..
+                    } | Expr::Load { .. }
+                ) =>
+            {
+                best_effort(
+                    self.span,
+                    "a computed pointer result (in a data register, then `movea.l Dn,An`; \
+                     codegen-patterns 3, \"Computed pointer results\") is",
+                )?;
+                let v = self.eval(e)?;
+                Self::ea_val(&v)
             }
             _ => {
                 return Err(unsupported(
@@ -22606,6 +22742,39 @@ impl Selector {
                 )?;
                 (self.other_base(section)?, *o)
             }
+            // Best effort (not byte-identical, bead domain-pascal-yqf6): an
+            // element of an array that is itself an element (a row,
+            // `a[i, j]`, `a[i].f[j]`) or in the enclosing routine's frame:
+            // the array's operand formed first, its register the base
+            // (`(d,An)`), or its `lea` into a new one for an indexed
+            // operand; then the index.  The image's forms (the row's
+            // scaled index added to the column's, one `lea`, or a `lea`
+            // per level) are not surveyed (codegen-patterns 5.2, "Rows and
+            // nested elements").
+            Addr::Index { .. } | Addr::Enclosing(_) => {
+                best_effort(
+                    self.span,
+                    "an element of an array that is an element itself or in the enclosing \
+                     routine's frame (the array's address formed first, then the index; \
+                     codegen-patterns 5.2, \"Rows and nested elements\") is",
+                )?;
+                match self.ea_of(base)? {
+                    Ea::Ind(a) => (a, 0),
+                    Ea::Disp(d, a) => (a, d),
+                    ea @ (Ea::Idx(..) | Ea::AbsL(..)) => {
+                        let a = self.alloc_a()?;
+                        self.out.push(Insn::Lea { src: ea, dst: a });
+                        (a, 0)
+                    }
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "an element of an array at this kind of address (codegen-patterns \
+                             5.2) is",
+                        ))
+                    }
+                }
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -23368,6 +23537,46 @@ impl Selector {
             // DIR module-local 0xE4B340; VFMT_$MAIN 0xE6AD10 `move.w
             // (2,A0),D7` after the module-local 0xE6AA38).
             e if a0_call(e).is_some() => self.call_a0(a0_call(e).unwrap()),
+            // Best effort (not byte-identical): an address as a pointer,
+            // `lea <ea>,An` as for `addr(x)` stored ([`Self::addr_into_a`]);
+            // a computed pointer (`ptr_t(integer32(p) + n)^`, DIR_$CREATE_
+            // DIR_OBJ, ROUTE_$PROCESS; `ptr_t(-v)^`, DISK_$PV_ASSIGN) into
+            // a data register, then `movea.l Dn,An`.  Where the image forms
+            // the address in an address register (`adda`) is not surveyed
+            // (codegen-patterns 5.2, "Computed pointers"; bead
+            // domain-pascal-yqf6).
+            Expr::AddrOf(a) => {
+                best_effort(
+                    self.span,
+                    "the address of a variable as a pointer dereferenced (`lea` into a register \
+                     of its own; codegen-patterns 5.2) is",
+                )?;
+                self.addr_into_a(a)
+            }
+            e if e.ty().width == Width::Long
+                && !matches!(
+                    e,
+                    Expr::Call {
+                        reg: ResultClass::Address,
+                        ..
+                    }
+                ) =>
+            {
+                best_effort(
+                    self.span,
+                    "a computed pointer dereferenced (the value in a data register, then \
+                     `movea.l Dn,An`; codegen-patterns 5.2, \"Computed pointers\") is",
+                )?;
+                let v = self.eval(e)?;
+                let src = Self::ea_val(&v);
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src,
+                    dst: a,
+                });
+                Ok(a)
+            }
             _ => Err(unsupported(self.span, "this pointer expression is")),
         }
     }

@@ -1783,9 +1783,20 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `tests/conformance/disk_get_block.pas`; golden
   `results/pointer_callers`); where every assignment is last and one
   reads memory, the slot instead ("Every assignment last" below); `nil`,
-  below.  Refused: a computed value
-  and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
-  as pointer results, `d0_return`/`c_param` pointer results, and
+  below.  An address, `f := addr(x)`, is a `lea`: as the only
+  statement straight into A0, the slot not used (GET_WIRED 0xE1D8E8
+  `lea (A5),A0`); in a body of several statements into the result
+  variable's register (EC2_$GET_EC1_ADDR 0xE42B0A `lea (0,A1,D2.w),A2`,
+  A2 as a call follows; bead domain-pascal-yqf6).  **Computed pointer
+  results (best effort, not byte-identical; bead domain-pascal-yqf6):**
+  `f := univ_ptr(integer32(p) + 1)` (DIR_$MAP_LINK_PAGE,
+  EC2_$ALLOCATE_EC1) is computed in a data register; as the only
+  statement it is stored into the slot and moved, `move.l Dn,(-k,A6);
+  movea.l Dn,A0` (the shape of 0xE4D5A6, a last statement), in a body of
+  several statements moved into the variable's register, `movea.l
+  Dn,An`; the register is the allocator's, and the image's form for
+  these sites is not surveyed.  Refused: `d0_return`/`c_param` pointer
+  results, and
   `a0_return` on a non-pointer result (no site in the image's terms;
   `../source` reads TTY_$I_GET_DESC and SIO_$I_GET_DESC so, bead
   domain-pascal-u52h).  Also refused: a
@@ -2054,7 +2065,13 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   (R3); a call whose arguments use it last holds it through that call
   in a body with branches too (12.4 R4(c): the 13 such copies are all
   callee-saved).  A local that no call follows: see "Pointer locals
-  held in D0" below.  Conformance `tests/conformance/cal_shutdown.pas`
+  held in D0" below.  **Best effort (not byte-identical; bead
+  domain-pascal-yqf6):** one that no call follows and that is assigned
+  more than once, inside a statement, read other than dereferenced (a
+  `nil` test: NET_$FIND_HANDLER, NET_IO_$DEVICE_STAT), or with A0
+  written before its last use keeps the scratch register the allocator
+  gives it, A0 or A1 (its `movea.l A0,An` kept); the image's A0 or A1
+  for these is not settled.  Test `tests/exec/be_ptr_views.pas`.  Conformance `tests/conformance/cal_shutdown.pas`
   (CAL_$SHUTDOWN 0xE3E714 `movea.l A0,A3`, `pea (A3)` at 0xE3E730);
   golden `results/pointer_locals`.
   **Pointer locals held in D0 (Verified at the sites; implemented as
@@ -4494,6 +4511,17 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     (0,A0,D0.l),A2; ...; pea (-0x2000,A2)`).  Two accesses to one element
     share the `lea` even with a small displacement (0xE71BCA..0xE71BD2,
     `(-26,A0)` and `(-25,A0)`): `dpc` has no such CSE.
+  - **Rows and nested elements (best effort, not byte-identical; bead
+    domain-pascal-yqf6).**  An element of an array that is itself an
+    element (`ast_pmaps[seg][off]`, PMAP_$WRITE_PAGE;
+    `file_$lock_table[asid, slot]`, FILE_$CHECK_PROT; `mste_pages[mst[i]][j]`,
+    MST_$VA_TO_PTE; `handle^.blocks[i].slots[j]`, DIR_$OLD_READ_ENTRIES)
+    or in the enclosing routine's frame (VFMT_$MAIN's `spec[i]`): the
+    array's operand formed first, its register the base (`(d,An)`, the
+    displacements added), or a `lea` of an indexed operand into a new
+    register; then the column's index as for any element.  The image's
+    forms (the row's scaled index added to the column's, one `lea`; or a
+    `lea` per level) are not surveyed.  Test `tests/exec/be_rows.pas`.
   - the index register: an index read from memory (a variable of the
     unit or of another unit) is scaled in place (0xE0AA10..0xE0AA16
     `move.w PROC1_$AS_ID,D0; lsl.w #2,D0`; 0xE70DA0..0xE70DA6); a
@@ -5244,6 +5272,24 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   address-register sites above all put the constant first, as do two with
   5 and 8).  Golden `tests/golden/expr/transfer`; test `dpc-ir`
   `type_transfers`.
+- **Views through a pointer transfer, `T(addr(x))^` (Verified at two
+  sites; implemented, bead domain-pascal-yqf6).**  The object `x`
+  itself, no pointer formed: SIO_$INIT_LINE 0xE32B40 `lea (692,A2),A0`
+  for the destination of `sio_$tty_handlers_ptr_t(addr(tty.
+  xmit_callback))^ := handlers.tty` (tty in A2, the field at 692);
+  RIP_$FIND_NEXTHOP 0xE156B6 `lea (A2),A1` for the source of `nexthop :=
+  rip_$nexthop_ptr_t(addr(addr_info))^`, the parameter's pointer held in
+  A2.  `dpc-ir` folds the dereference of an `addr` into its operand
+  (`addr_of`, `ExprKind::Deref`, `viewed`); the view of a volatile or
+  device object is a volatile reference as the object is
+  (`volatile_access`, `check_device_access` see through it), and the
+  view of an object with only a volatile part is refused.
+- **Computed pointers dereferenced (best effort, not byte-identical;
+  bead domain-pascal-yqf6).**  `T(integer32(p) + n)^` (DIR_$CREATE_DIR_OBJ,
+  ROUTE_$PROCESS, DIR_$VALIDATE_PAGES) and `T(-v)^` (DISK_$PV_ASSIGN):
+  the value computed in a data register as above, then `movea.l Dn,An`,
+  the shape the survey above finds most; for each use the operand order
+  is not checked against the image.  Test `tests/exec/be_ptr_views.pas`.
 - **Fields of a type-transferred variable (Verified at three sites;
   implemented, bead domain-pascal-w0rj).**  `T(v).f`, `T(v)[i]`: a
   field or element selected from a type transfer of a variable, e.g.
@@ -7045,8 +7091,16 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   of a pointer held in an address register, `lea (An),Am`, ACL_ 0xE44DD0;
   in a data register, `movea.l Dn,An`, TIME_$Q_SCAN_QUEUE 0xE16EC0; a
   loop's stepped element pointer, 0xE6D182; bead domain-pascal-21xu).
-  Refused: other sizes (12..28 bytes not seen), arrays and
-  strings (the `cmpm.b` site), records with bytes no field covers
+  Arrays (bead domain-pascal-yqf6): two arrays as records are, image
+  form for longword elements from 32 bytes (DISK_IO 0xE3D846, `verify_info.l
+  <> req^.header.l`), best effort (not byte-identical) otherwise, the
+  unit by element size not surveyed; an array of `char` against a string
+  constant of its length, a `cmpm.b` loop from the constant's cell,
+  `lea (d,PC),An` (the module-local DISK_ routine at 0xE6C266..0xE6C27E
+  `lea (2,A0),A1; lea (0x44,PC),A3; moveq #5,D2; cmpm.b (A3)+,(A1)+;
+  dbne`, `apollo <> 'APOLLO'`).  Test `tests/exec/arr_cmp.pas`.
+  Refused: other sizes (12..28 bytes not seen), a string constant of
+  another length than the array's, records with bytes no field covers
   (padding: the image compares every byte, and the reference gives no
   rule for padding; packed records count their fields' bits), ordering
   records.  Conformance unit `pacct_on.pas` (byte-identical); golden
