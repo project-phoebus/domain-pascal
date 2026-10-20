@@ -3,38 +3,38 @@
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
 # source: 39f0fe4d6feb313c6b8f36c1bba699ae724fa4e7
-# dpc: ea10c446434e002aad76e3550adfb2f50257e499
-# 78 of 110 module files compile; 32 refused by dpc
-REFUSED	acl/acl.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+# dpc: 9ceb23e4667a2a58e57363686977da8693015539
+# 108 of 110 module files compile; 2 refused by dpc
+OK	acl/acl.pas	-
 OK	acl/acl_wired.pas	-
 OK	app/app.pas	-
-REFUSED	area/area.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	area/area.pas	-
 OK	as/as.pas	-
 OK	asknode/asknode.pas	-
-REFUSED	ast/ast.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
+OK	ast/ast.pas	-
 OK	audit/audit.pas	-
 OK	audit/audit_wired.pas	-
-REFUSED	bat/bat.pas	an unsigned ordering comparison with N is not supported yet
+OK	bat/bat.pas	-
 OK	cal/os_cal_unwired.pas	-
 OK	cal/os_cal_wired.pas	-
 OK	ct/ct.pas	-
-REFUSED	dbuf/dbuf.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
-REFUSED	dir/dir.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
+OK	dbuf/dbuf.pas	-
+REFUSED	dir/dir.pas	a call or branch beyond the reach of a 16-bit displacement is not supported yet
 OK	dir/dir_server.pas	-
 OK	dir/dir_wired.pas	-
 OK	dir/old_dir.pas	-
-REFUSED	disk/disk.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+OK	disk/disk.pas	-
 OK	disk/chksum.pas	-
 OK	disk/disk_dev.pas	-
-REFUSED	disk/disk_vol.pas	`in` on a one-word set variable with an element that is not constant (unguarded or guarded by the element's range: not settled, codegen-patterns 5.1) is not supported yet
+OK	disk/disk_vol.pas	-
 OK	dma/dma.pas	-
 OK	dtty/dtty.pas	-
 OK	dxm/dxm.pas	-
-REFUSED	ec/ec2.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	ec/ec2.pas	-
 OK	ec/ec2u.pas	-
-REFUSED	file/file.pas	`in` on a one-word set variable with an element that is not constant (unguarded or guarded by the element's range: not settled, codegen-patterns 5.1) is not supported yet
+OK	file/file.pas	-
 OK	file/file_wired.pas	-
-REFUSED	fim/fim.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
+OK	fim/fim.pas	-
 OK	flop/flop.pas	-
 OK	flp/flp.pas	-
 OK	gpu/gpu.pas	-
@@ -45,26 +45,26 @@ OK	io/io.pas	-
 OK	io/dctes.pas	-
 OK	kbd/kbd.pas	-
 OK	log/log.pas	-
-REFUSED	mac_os/mac_os.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	mac_os/mac_os.pas	-
 OK	mem/mem.pas	-
 OK	misc/misc.pas	-
 OK	misc/print_build_time_.pas	-
-REFUSED	mmap/mmap.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+OK	mmap/mmap.pas	-
 OK	mmap/mmap_unwired.pas	-
 OK	msg/msg_unwired.pas	-
 OK	msg/msg_wired.pas	-
-REFUSED	mst/mst_unwired.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	mst/mst_unwired.pas	-
 OK	mst/mst_wired.pas	-
 OK	mt/mt.pas	-
-REFUSED	name/name.pas	assigning a record or array that is not a variable is not supported yet
+OK	name/name.pas	-
 OK	name/nameu.pas	-
 OK	net/net.pas	-
 OK	net_io/net_io.pas	-
-REFUSED	net_io/net_io_unwired.pas	a comparison with a function's result in the right operand of a plain `and`/`or` other than with a constant or with a variable held in a register or read through a held address (codegen-patterns 7.1) is not supported yet
-REFUSED	netbuf/netbuf.pas	an address that needs an address register and a value that is not one (the order is not settled: NETBUF_$GETVA N, one site; bead domain-pascal-awzk) (codegen-patterns 5.2, "X": no form catalogued) is not supported yet
+OK	net_io/net_io_unwired.pas	-
+OK	netbuf/netbuf.pas	-
 OK	netlog/netlog.pas	-
-REFUSED	network/network.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
-REFUSED	os/os.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	network/network.pas	-
+OK	os/os.pas	-
 OK	os/os_wired_start.pas	-
 OK	osinfo/osinfo.pas	-
 OK	pacct/pacct.pas	-
@@ -75,25 +75,25 @@ OK	pchist/pchist.pas	-
 OK	peb/peb_parity.pas	-
 OK	peb/peb_unwired.pas	-
 OK	peb/peb_wired.pas	-
-REFUSED	pkt/pkt.pas	an unsigned ordering comparison with N is not supported yet
-REFUSED	pmap/pmap.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+OK	pkt/pkt.pas	-
+OK	pmap/pmap.pas	-
 OK	proc1/proc1.pas	-
-REFUSED	proc2/proc2.pas	assigning a record or array that is not a variable is not supported yet
-REFUSED	rem_file/rem_file.pas	assigning a record or array that is not a variable is not supported yet
+OK	proc2/proc2.pas	-
+OK	rem_file/rem_file.pas	-
 OK	rem_name/rem_name.pas	-
-REFUSED	ring/ring.pas	assigning a record or array that is not a variable is not supported yet
+OK	ring/ring.pas	-
 OK	ring/ring_wired.pas	-
 OK	ring/ringlog_.pas	-
 OK	rip/rip_rtwired.pas	-
 OK	rip/rip_unwired.pas	-
-REFUSED	rip/rip_wired.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	rip/rip_wired.pas	-
 OK	route/route_rtwired.pas	-
-REFUSED	route/route_unwired.pas	an address minus a value that is not an address (codegen-patterns 5.2, "X": no form catalogued) is not supported yet
+OK	route/route_unwired.pas	-
 OK	route/route_wired.pas	-
 OK	scsi/scsi.pas	-
 OK	sio/sio.pas	-
-REFUSED	sio2681/sio2681.pas	comparing boolean values is not supported yet
-REFUSED	smd/smd.pas	comparing boolean values is not supported yet
+REFUSED	sio2681/sio2681.pas	an array index of a signed byte type (no `ext.w` index in the image, codegen-patterns 5.2) is not supported yet
+OK	smd/smd.pas	-
 OK	sock/sock.pas	-
 OK	suma/suma.pas	-
 OK	sysbus/atbus_.pas	-
@@ -101,8 +101,8 @@ OK	tape/tape.pas	-
 OK	term/os_term.pas	-
 OK	term/os_term_init.pas	-
 OK	time/time.pas	-
-REFUSED	time/time_q_.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
-REFUSED	time/time_unwired.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+OK	time/time_q_.pas	-
+OK	time/time_unwired.pas	-
 OK	tone/tone.pas	-
 OK	tpad/tpad.pas	-
 OK	tty/tty.pas	-
@@ -112,6 +112,6 @@ OK	volx/volx.pas	-
 OK	vtoc/vtoc.pas	-
 OK	win/win.pas	-
 OK	xns/xns_error.pas	-
-REFUSED	xns/xns_idp.pas	a comparison with a function's result in the right operand of a plain `and`/`or` other than with a constant or with a variable held in a register or read through a held address (codegen-patterns 7.1) is not supported yet
-REFUSED	xpd/xpd.pas	`in` on a one-word set variable with an element that is not constant (unguarded or guarded by the element's range: not settled, codegen-patterns 5.1) is not supported yet
+OK	xns/xns_idp.pas	-
+OK	xpd/xpd.pas	-
 OK	xpd/xpd_ker.pas	-
