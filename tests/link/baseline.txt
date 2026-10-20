@@ -3,8 +3,8 @@
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
 # source: 39f0fe4d6feb313c6b8f36c1bba699ae724fa4e7
-# dpc: 9ceb23e4667a2a58e57363686977da8693015539
-# 108 of 110 module files compile; 2 refused by dpc
+# dpc: 9562c1753ccebe7f29419d5a67c8e021117db17b
+# 110 of 110 module files compile
 OK	acl/acl.pas	-
 OK	acl/acl_wired.pas	-
 OK	app/app.pas	-
@@ -19,7 +19,7 @@ OK	cal/os_cal_unwired.pas	-
 OK	cal/os_cal_wired.pas	-
 OK	ct/ct.pas	-
 OK	dbuf/dbuf.pas	-
-REFUSED	dir/dir.pas	a call or branch beyond the reach of a 16-bit displacement is not supported yet
+OK	dir/dir.pas	-
 OK	dir/dir_server.pas	-
 OK	dir/dir_wired.pas	-
 OK	dir/old_dir.pas	-
@@ -92,7 +92,7 @@ OK	route/route_unwired.pas	-
 OK	route/route_wired.pas	-
 OK	scsi/scsi.pas	-
 OK	sio/sio.pas	-
-REFUSED	sio2681/sio2681.pas	an array index of a signed byte type (no `ext.w` index in the image, codegen-patterns 5.2) is not supported yet
+OK	sio2681/sio2681.pas	-
 OK	smd/smd.pas	-
 OK	sock/sock.pas	-
 OK	suma/suma.pas	-
