@@ -2,8 +2,8 @@
 # Regenerate with `python3 tools/linktest.py run --update` and say why
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
-# source: 39f0fe4d6feb313c6b8f36c1bba699ae724fa4e7
-# dpc: 9562c1753ccebe7f29419d5a67c8e021117db17b
+# source: 52d8d305d0ee62d22a9b53b72eb4fa51e8ad50f4
+# dpc: cc64772ddd53e1779acc95547bebb68ca8356fc6
 # 110 of 110 module files compile
 OK	acl/acl.pas	-
 OK	acl/acl_wired.pas	-
