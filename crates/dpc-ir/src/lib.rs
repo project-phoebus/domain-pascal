@@ -1118,6 +1118,13 @@ pub enum UnOp {
     Neg,
     /// `~x` (ref p. 4-33): the bits complemented.
     Not,
+    /// `abs(x)` ("Abs", p. 4-12): `x` when its sign bit is clear, `-x`
+    /// otherwise, at the operand's width (the most negative value gives
+    /// itself, read as `ty`, which is unsigned: codegen-patterns 8,
+    /// "abs").  The operand is a signed integer of `ty`'s width.  Not
+    /// arithmetic modulo 2^bits: lowering's `narrow` takes it to a
+    /// narrower width only where `convert` widened it from one.
+    Abs,
 }
 
 impl Expr {

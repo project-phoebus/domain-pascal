@@ -3919,6 +3919,26 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         _ => (operand(lhs, None)?, operand(rhs, None)?),
     };
     let (l, r) = widen_operands(e, l, r)?;
+    // `abs(x) > 0` (`<=`, and with the 0 on the left): unsigned, so the
+    // same as `abs(x) <> 0` (`=`), which is how it is compared; best
+    // effort (not checked against the image: no such site; an unsigned
+    // ordering against 0 is refused by the selector).  `abs(x) >= 0` and
+    // `abs(x) < 0` stay refused (constant conditions).
+    let unsigned_abs = |x: &Expr| {
+        let mut x = x;
+        while let Expr::Convert { value, .. } = x {
+            x = value;
+        }
+        matches!(x, Expr::Unary { op: IrUnOp::Abs, .. }) && x.ty().sign == Sign::Unsigned
+    };
+    let zero = |x: &Expr| matches!(x, Expr::Const { value: 0, .. });
+    let rel = match rel {
+        Rel::Gt if zero(&r) && unsigned_abs(&l) && l.ty().sign == Sign::Unsigned => Rel::Ne,
+        Rel::Le if zero(&r) && unsigned_abs(&l) && l.ty().sign == Sign::Unsigned => Rel::Eq,
+        Rel::Lt if zero(&l) && unsigned_abs(&r) && r.ty().sign == Sign::Unsigned => Rel::Ne,
+        Rel::Ge if zero(&l) && unsigned_abs(&r) && r.ty().sign == Sign::Unsigned => Rel::Eq,
+        rel => rel,
+    };
     Ok(Cond::Compare {
         op: rel,
         lhs: l,
@@ -3963,6 +3983,22 @@ fn widen_operands(e: &SExpr, l: Expr, r: Expr) -> Res<(Expr, Expr)> {
         return Ok((l, r));
     }
     let long = Scalar::signed(Width::Long);
+    // `abs` of a word (`0..32767`, unsigned) against a signed word: a word
+    // compare, signed (TPAD_$DATA 0xE69250 `cmp.w (-0x12,A2),D5w; bge.b`
+    // and 0xE692DA, `abs(delta_x) < hysteresis` with an `integer`
+    // hysteresis; codegen-patterns 8, "abs"), not the widening of a
+    // `0..65535` word below: the values fit the signed word.
+    let abs16 = |x: &Expr| {
+        matches!(x, Expr::Unary { op: IrUnOp::Abs, ty, .. }
+            if ty.width == Width::Word && ty.sign == Sign::Unsigned && !ty.pointer)
+    };
+    let signed_word = |t: Scalar| t == Scalar::signed(Width::Word);
+    if abs16(&l) && signed_word(rt) {
+        return Ok((reinterpret(l, rt), r));
+    }
+    if abs16(&r) && signed_word(lt) {
+        return Ok((l, reinterpret(r, lt)));
+    }
     match (lt.width, rt.width) {
         (Width::Word, Width::Word) => return Ok((convert(l, long), convert(r, long))),
         (Width::Word, Width::Long) if rt.sign == Sign::Signed || lt.sign == rt.sign => {
@@ -4636,6 +4672,32 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
             }
             Some(Expr::Const { value: v, ty })
         }
+        // `abs` is not arithmetic modulo 2^bits (the low word of `abs` of a
+        // longword in 32768..65535 is not `abs` of its low word): only the
+        // `abs` of a word sum, difference or product that [`convert`]
+        // widened (its same-type mark) is taken back to the word (the
+        // only width [`convert`] widens it from), where the operation's
+        // Pascal type was (TPAD_$DATA 0xE69624..0xE69638,
+        // SMD_$BLT 0xE6EDA2: word `muls.w`/`sub.w` under a word `abs`).
+        // Any other `abs` is computed at its width and its low bytes
+        // used ([`assign_convert`]).
+        Expr::Convert {
+            value,
+            ty: t,
+            ..
+        } if value.ty() == *t
+            && ty.width == Width::Word
+            && matches!(&**value, Expr::Unary { op: IrUnOp::Abs, .. }) =>
+        {
+            let Expr::Unary { operand, .. } = &**value else {
+                unreachable!()
+            };
+            Some(Expr::Unary {
+                op: IrUnOp::Abs,
+                operand: Box::new(narrow(operand, ty)?),
+                ty,
+            })
+        }
         // A value read with another sign ([`reinterpret`], as a shift's
         // result): the same bits.
         Expr::Convert { value, ty: t, .. } if value.ty().width == t.width => narrow(value, ty),
@@ -4709,6 +4771,9 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
                 ty,
             })
         }
+        Expr::Unary {
+            op: IrUnOp::Abs, ..
+        } => None,
         Expr::Unary { op, operand, .. } => Some(Expr::Unary {
             op: *op,
             operand: Box::new(narrow(operand, ty)?),
@@ -5498,9 +5563,17 @@ fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Ex
         });
     };
     let runtime = lhs.value.is_none();
+    // `abs` of a word (`0..32767`, unsigned in the IR): tested as a signed
+    // word, an `integer`'s form; best effort, not checked against the
+    // image (no `abs` set member seen; codegen-patterns 8, "abs").
+    let abs = matches!(elem, Expr::Unary { op: IrUnOp::Abs, ty, .. } if ty.width == Width::Word);
+    if abs {
+        elem = reinterpret(elem, Scalar::signed(Width::Word));
+    }
     // Only on a one-word constant: a longword constant keeps the element
     // as it is (no site shows a `0..65535` element widened for one).
     let wide = runtime
+        && !abs
         && set_width == Width::Word
         && elem.ty().width == Width::Word
         && long_host_word(&p.types, lhs.ty);
@@ -5666,6 +5739,13 @@ fn long_host_word(types: &TypeTable, ty: TypeId) -> bool {
 fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
     let v = value_of(p, x)?;
     match v.ty().width {
+        // `abs` of a word (unsigned, codegen-patterns 8, "abs"): as a
+        // signed word, an `integer`'s form (its values 0..32767 are the
+        // same); best effort, not checked against the image (no `abs` set
+        // member seen).
+        Width::Word if matches!(v, Expr::Unary { op: IrUnOp::Abs, .. }) => {
+            Ok(reinterpret(v, Scalar::signed(Width::Word)))
+        }
         Width::Word => Ok(v),
         Width::Byte => Ok(convert(v, Scalar::unsigned(Width::Word))),
         Width::Long => Err(unsupported(
@@ -6010,6 +6090,49 @@ fn convert(v: Expr, ty: Scalar) -> Expr {
             operand: Box::new(convert(*operand, ty)),
             ty,
         },
+        // `abs` of a sum, difference or product, widened: the operation
+        // computed at the wider width and `abs` there (SUMA_$RCV
+        // 0xE1ADCA..0xE1ADDA `clr.l D3; move.b (0x20,A5),D3b; clr.l D0;
+        // move.b (0x10,A5),D0b; sub.l D3,D0; bpl.b; neg.l D0`, the same at
+        // 0xE1ADF6..0xE1AE06: `abs` of a difference of two bytes compared
+        // with a longword; codegen-patterns 8, "abs"), as for `-x` above.
+        // The image's operand order there (the subtrahend first) and its
+        // bytes zero-extended straight to longwords are not reproduced:
+        // best effort, bead domain-pascal-r7hn.  [`narrow`] takes it back
+        // to the narrower width (TPAD_$DATA 0xE69624..0xE69638, SMD_$BLT
+        // 0xE6EDA2: word `muls.w`/`sub.w` under a word `abs`).  `abs` of
+        // any other value is widened after it, by the result's sign
+        // (zeros: TPAD_$DATA 0xE69284 `clr.l D0; ...; move.w D5w,D0w`).
+        Expr::Unary {
+            op: IrUnOp::Abs,
+            operand,
+            ty: t,
+        } if ty.bytes() > t.bytes()
+            && matches!(
+                *operand,
+                Expr::Binary {
+                    op: IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul,
+                    ..
+                }
+            ) =>
+        {
+            let wide = Scalar {
+                width: ty.width,
+                ..operand.ty()
+            };
+            // The provenance mark [`narrow`] needs to take it back: a
+            // same-type [`Expr::Convert`] (which [`reinterpret`] never
+            // makes) around the widened `abs`.
+            Expr::Convert {
+                value: Box::new(Expr::Unary {
+                    op: IrUnOp::Abs,
+                    operand: Box::new(convert(*operand, wide)),
+                    ty,
+                }),
+                ty,
+                in_place: false,
+            }
+        }
         v => Expr::Convert {
             value: Box::new(v),
             ty,
@@ -6432,8 +6555,52 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
             }
             Ok(Expr::Test(Box::new(Cond::Odd(x))))
         }
+        Builtin::Abs => abs_value(p, e, &args[0]),
         _ => Err(unsupported(e.span, "this predeclared function is")),
     }
+}
+
+/// `abs(x)` of a run-time integer ("Abs", p. 4-12: "the number if it is
+/// nonnegative, and the negative of the number if it is negative";
+/// codegen-patterns 8, "abs"): [`IrUnOp::Abs`] at `x`'s width, of the
+/// non-negative type `dpc-sema` gives it (`0..32767` stored in a word,
+/// `0..2147483647`; unsigned in the IR).  Image: 17 sites in compiled
+/// code, `x` a signed word or longword (`integer`, `integer32`, a word
+/// difference, product or quotient, a longword difference).
+///
+/// **Best effort (not checked against the image)**, no site: `x`
+/// unsigned (`0..65535`, `linteger`, a sum of unsigned values), whose
+/// `abs` is `x` itself, converted to the result's type with no code of
+/// its own; `x` one byte, widened to a word by its sign and `abs` there.
+fn abs_value(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
+    let ty = scalar_of(p, e)?;
+    let v = value_of(p, x)?;
+    let xt = v.ty();
+    if xt.pointer || xt.sign == Sign::Unsigned {
+        // Best effort (not checked against the image): non-negative already.
+        return Ok(if xt.width == ty.width {
+            reinterpret(v, ty)
+        } else {
+            convert(v, ty)
+        });
+    }
+    let v = if xt.width == Width::Byte && ty.width == Width::Word {
+        // Best effort (not checked against the image): `ext.w` first.
+        convert(v, Scalar::signed(Width::Word))
+    } else {
+        v
+    };
+    if v.ty().width != ty.width {
+        return Err(unsupported(
+            e.span,
+            "`abs` with a result of another width than its argument is",
+        ));
+    }
+    Ok(Expr::Unary {
+        op: IrUnOp::Abs,
+        operand: Box::new(v),
+        ty,
+    })
 }
 
 /// `in_range(x)` ("In_range", p. 4-104) of an integer subrange `lo..hi`

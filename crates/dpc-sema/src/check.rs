@@ -178,6 +178,10 @@ pub(crate) struct Checker<'t> {
     /// shift of an unsigned operand ([`Checker::shift_result`]): an
     /// `integer32` subrange `0..2147483647`, made when first needed.
     unsigned32: Option<TypeId>,
+    /// The type of `abs` of a 16-bit integer ([`Checker::abs_result`]):
+    /// an `integer32` subrange `0..32767` stored in a word, made when
+    /// first needed.
+    abs16: Option<TypeId>,
 }
 
 fn upper(name: &str) -> String {
@@ -213,6 +217,7 @@ impl<'t> Checker<'t> {
             label_defs: HashMap::new(),
             label_gotos: Vec::new(),
             unsigned32: None,
+            abs16: None,
         };
         c.predeclare();
         c
@@ -3644,6 +3649,12 @@ impl<'t> Checker<'t> {
         if x.value.is_some() || !self.types.unsigned_integer(x.ty) {
             return bi.integer32;
         }
+        self.shift_result_unsigned()
+    }
+
+    /// The `integer32` subrange `0..2147483647` of [`Self::unsigned32`].
+    fn shift_result_unsigned(&mut self) -> TypeId {
+        let bi = self.types.builtins;
         match self.unsigned32 {
             Some(t) => t,
             None => {
@@ -3653,6 +3664,39 @@ impl<'t> Checker<'t> {
                     hi: 0x7fff_ffff,
                 });
                 self.unsigned32 = Some(t);
+                t
+            }
+        }
+    }
+
+    /// The type of `abs(x)` of a run-time integer `x` ("Abs", p. 4-12:
+    /// "an integer value"): a non-negative subrange, which the image
+    /// treats as unsigned (codegen-patterns 8, "abs"; the "Max"/"Min"
+    /// entries, pp. 4-111, 4-113: "The unsigned scalar data types are
+    /// non-negative subranges of integers").  Of a 32-bit `x`,
+    /// `0..2147483647` (p. 4-12: "number cannot be -2147483648"), compared
+    /// unsigned with constants and unsigned longwords (TIME_$ADJUST_TIME_
+    /// OF_DAY 0xE168FA `cmpi.l #8000,D0; bls`, LOCATE_SERVER 0xE4A44E
+    /// `cmp.l (0x20,A5),D0; bls`).  Of a 16-bit `x`, `0..32767` stored in
+    /// a word with an `integer32` host, unsigned as `0..65535` is (its
+    /// sums in 32 bits, zero-extended: TPAD_$DATA 0xE69284 `clr.l D0;
+    /// ...; move.w D5w,D0w; addi.l #0xa,D0`, 0xE6976A..0xE69778; compared
+    /// unsigned with a constant, 0xE69674 `cmpi.w #0x5,D0w; bls`); its
+    /// compare with a signed word is `dpc-ir`'s (`widen_operands`).
+    fn abs_result(&mut self, x: TypeId) -> TypeId {
+        let bi = self.types.builtins;
+        if self.int_result(x, bi.integer16) == bi.integer32 {
+            return self.shift_result_unsigned();
+        }
+        match self.abs16 {
+            Some(t) => t,
+            None => {
+                let t = self.new_type(TypeKind::Subrange {
+                    base: bi.integer32,
+                    lo: 0,
+                    hi: 32767,
+                });
+                self.abs16 = Some(t);
                 t
             }
         }
@@ -4387,15 +4431,20 @@ impl<'t> Checker<'t> {
                 }
                 bi.boolean
             }
+            // "Abs", p. 4-12: "an integer value if number is an integer";
+            // reals are out of scope (CLAUDE.md 1).
             Builtin::Abs => {
                 if !self.types.is_integer(xs[0].ty) {
-                    self.error(span, "`abs` needs an integer argument");
+                    self.error(
+                        span,
+                        "`abs` needs an integer argument (reals are not supported)",
+                    );
                     return self.error_expr(span);
                 }
                 if let Some(ConstValue::Int(v)) = &xs[0].value {
                     return self.int_const(v.abs(), span);
                 }
-                self.int_result(xs[0].ty, bi.integer16)
+                self.abs_result(xs[0].ty)
             }
             // "Sqr", p. 4-184: "returns an integer if n is an integer";
             // "calculates n * n".  Reals are out of scope (CLAUDE.md 1).

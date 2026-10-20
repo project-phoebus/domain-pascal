@@ -2928,7 +2928,12 @@ but the image cannot tell a `0..100` word from a `0..65535` one (after a
 word compare: 518 unsigned ordered branches, 336 signed, `ord`), and
 what the original did for such a word against an `integer` (both
 widened to longwords, as for `0..65535`, or a word compare, as the
-range allows) is not catalogued (bead domain-pascal-4x2).  Booleans, which
+range allows) is not catalogued (bead domain-pascal-4x2).  A lead:
+`abs` of a word (section 8, "abs"), whose values the compiler knows to
+be 0..32767, is compared unsigned with a constant (TPAD_$DATA 0xE69674
+`bls`), zero-extended, and compared with an `integer` as a word, signed
+(0xE69250 `cmp.w; bge`), the "word compare, as the range allows" form;
+`dpc` gives `abs` alone that treatment.  Booleans, which
 the same entries call unsigned, are `Scalar::BOOLEAN` (signed) for the
 `tst.b; bmi` tests; no ordered compare of booleans is supported.
 One enumeration compare is catalogued in the image (no survey for
@@ -8877,26 +8882,145 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
 - **`-x`, `~x`:** `neg.<s>`, `not.<s>` on the value in a register (`neg.w`
   ×97, many from the multiplications below; `not.w` ×13, `not.l` ×46,
   `not.b` ×43).
-- **`abs(x)` (ref "Abs", p. 4-12; Verified at the sites, one routine;
-  not implemented):** a copy, then `bpl.s` over `neg.w`, on the flags
-  of the instruction that formed the value: `move.w D2,D5; bpl.s; neg.w
-  D5` (TPAD_$DATA 0xE6924A, 0xE6927E; into D3 at 0xE69764; `move.w
-  D1,D0` at 0xE692D4), a `muls.w` (0xE69624
-  `move.w D2,D5; muls.w (-0x10,A2),D5; bpl.s; neg.w D5`: the 32-bit
-  product's sign, only the low word negated), or a `tst.w` after
-  `divs.w` (0xE6966E).  The result is then treated as a non-negative
-  word: compared signed with an integer variable (0xE69250 `cmp.w
-  (-0x12,A2),D5; bge.s`), unsigned with a constant (0xE69674 `cmpi.w
-  #5,D0; bls.s`), and zero-extended where it enters longword arithmetic
-  (0xE69284 `clr.l D0; ...; move.w D5,D0; addi.l #10,D0`, then a call of
-  M$MIS$LLW, not the `muls.w` of two signed words; 0xE6976A..0xE69778
-  `clr.l D5; move.w D3,D5; ...; clr.l D6; move.w D3,D6; add.l D6,D5`,
-  compared `cmp.l` with an `ext.l` word).  As if the result's type were
-  a non-negative subrange (the forms agree for 0..32767; abs(-32768) is
-  the one value where they do not).  One routine; Reported as a general
-  rule (lead: ../source pascal-translation-notes finding 37).  dpc folds
-  `abs` of a constant (dpc-sema) and refuses a run-time one (dpc-ir,
-  "this predeclared function is ..."; bead domain-pascal-1che).
+- **`abs(x)` (ref "Abs", p. 4-12; survey Verified, 17 sites in 6
+  routines; implemented, bead domain-pascal-g6xa; `dpc-sema`
+  `abs_result`, `dpc-ir` `abs_value`, `dpc-m68k` `Selector::abs`).**
+  Reference: "returns ... an integer value if number is an integer"; "the
+  number if it is nonnegative, and the negative of the number if it is
+  negative.  Note that number cannot be -2147483648".  Reals are out of
+  scope.  The form:
+
+  ```text
+          <x into Dn>             ; a load, a copy of a held variable, or computed there
+          tst.<s> Dn              ; only when that left no flags of x
+          bpl.s   L
+          neg.<s> Dn
+  L:
+  ```
+
+  `tools/cmpsurvey.py list abs` (a `neg.<s> Dn` skipped by a branch to
+  the next instruction; summary under "skipped by a branch"): 24 sites.
+  17 are `abs`, every one `bpl` (no `bge`, no `tst; bge`):
+
+  | Width | Value formed by | Sites | Then |
+  |---|---|---|---|
+  | word | a load through a slot | PROC2_$WAIT 0xE3FE5E `move.w (A3),D1w` | pushed by value after the pad (`subq.l #2,SP` first, 0xE3FE5C) |
+  | word | a copy of a register-held `integer` | TPAD_$DATA 0xE6924A, 0xE6927E, 0xE692D4, 0xE6930A, 0xE69764, 0xE6976E | `cmp.w (-0x12,A2),D5w; bge` (0xE69250, 0xE692DA); `clr.l Dm; move.w Dn,Dm` (0xE69284, 0xE69310, 0xE6976A, 0xE69774) |
+  | word | `sub.w` | SMD_$BLT 0xE6EDA6, 0xE6EDC2 | `moveq #-1,D0; sub.w D1w,D0w` |
+  | word | `muls.w` (flags of the 32-bit product) | TPAD_$DATA 0xE69626, 0xE69630 | `add.w D0w,D5w` into a word |
+  | word | `divs.w`, then `tst.w` | TPAD_$DATA 0xE6966E | `cmpi.w #0x5,D0w; bls` |
+  | long | a load | TIME_$ADJUST_TIME_OF_DAY 0xE168F4 `move.l (A2),D0` | `cmpi.l #0x1f40,D0; bls` |
+  | long | a copy of a held `integer32` | 0xE1692C `move.l D2,D1` | `cmpi.l #0x3d090,D1; bls` |
+  | long | `sub.l` | LOCATE_SERVER 0xE4A444; SUMA_$RCV 0xE1ADD6, 0xE1AE02 | `cmp.l (0x20,A5),D0; bls` (a `linteger`); `cmp.l D1,D0; bhi` |
+
+  The other 7: `tst.l D2; bpl; neg.w D3` (0xE16944, a conditional
+  negation of another register: `if delta_ticks < 0 then skew :=
+  -skew`), and six `sub.w; blt.s; neg.w; subq.w #1` (`-abs(x) - 1`) in
+  SMD_UTILS 0xE70396 and 0xE706C6, hand assembly (no `link` before the
+  `movem`, A5 from A0; ../source smd/README-pascal.md), not a model.
+
+  The value's type is a non-negative subrange, unsigned (the "Max"/"Min"
+  entries, pp. 4-111, 4-113: "The unsigned scalar data types are
+  non-negative subranges of integers"): `0..2147483647` for a 32-bit
+  `x`, `0..32767` stored in a word (with an `integer32` host, so unsigned
+  like `0..65535`) for a 16-bit one.  That gives the image's uses:
+  - compared with a constant, unsigned (0xE168FA, 0xE16932 `bls`;
+    0xE69674 `cmpi.w #5; bls`), and with an unsigned longword (0xE4A452
+    `bls`, ../source's `linteger` timeout);
+  - widened, with zeros, into a new register (`clr.l Dm; move.w Dn,Dm`,
+    not the in-place `andi.l #0xffff` of other computed unsigned words),
+    so `abs(dx) + abs(dy)` is a 32-bit sum compared signed with an
+    `ext.l` word (0xE6976A..0xE69780 `add.l D6,D5; move.w (-0x4,A2),D3w;
+    ext.l D3; cmp.l D3,D5; blt`) and `abs(dx) + 10` a longword (0xE69284
+    `addi.l #0xa,D0`, multiplied by a word with M$MIS$LLW);
+  - stored into a word, computed at word width (narrowing, "Narrowing
+    and widening" below: 0xE69638 `add.w`);
+  - **compared with a signed word at word width, signed** (0xE69250
+    `cmp.w (-0x12,A2),D5w; bge.b`, `abs(delta_x) < hysteresis` with an
+    `integer` field), where a `0..65535` word against an `integer` is
+    widened (7.1, "Mixed widths and signs"): the values fit the signed
+    word.  `dpc-ir` `widen_operands` makes that exception for an `abs`
+    word.
+  - `abs` of a word sum, difference or product used as a longword: the
+    operation widened first and `abs` taken in 32 bits (`dpc-ir`
+    `convert`, as for `-x`; SUMA_$RCV 0xE1ADCA..0xE1ADDA `clr.l D3;
+    move.b (0x20,A5),D3b; clr.l D0; move.b (0x10,A5),D0b; sub.l D3,D0;
+    bpl.b; neg.l D0`, a byte difference against a longword); narrowed
+    back where a word is stored (0xE69638, SMD_$BLT 0xE6EDA2).
+    **Best effort** in the operand order and the bytes' widening (`dpc`
+    loads the minuend first and widens bytes through words; bead
+    domain-pascal-r7hn).
+  The most negative value gives itself (`neg` of 16#8000 is 16#8000):
+  read unsigned it is 32768 (2^31 for a longword), against a signed word
+  -32768 (`tests/exec/abs.pas` checks both).
+
+  **Best effort (not checked against the image; owner's priority
+  2026-10-17: semantically correct forms where no site settles one):**
+  - `abs` of an unsigned value (`0..65535`, `linteger`, an unsigned
+    sum): the value itself, no code; of a byte: widened to a word by its
+    sign, then the word form (abs(-128) = 128);
+  - an `abs` value stored or made a function's result as it is (`y :=
+    abs(x)`: none of the 17 is stored directly): computed in a register
+    and stored;
+  - narrowing: only the `abs` of a word sum, difference or product that
+    `convert` widened (its Pascal type a word, as at TPAD_$DATA 0xE69624
+    and SMD_$BLT 0xE6EDA2) is computed back at word width (`dpc-ir`
+    `narrow`, by a same-type `Expr::Convert` mark); any other `abs`
+    narrowed is computed at its own width and its low bytes kept
+    (reference-clarifications 41): `gu := abs(w + v)` with `v` a
+    `0..65535` word is the longword sum's `abs`, low word stored
+    (39999 for -1 + 40000), not `abs` of the low word;
+  - a word product by a constant under `abs`: `muls.w #c` (the plain
+    product's `mulu.w #c` or shifts would test the low word's sign), so
+    the flags are the 32-bit product's, as at 0xE69626: `abs(-50 *
+    1000)` is 50000 in a `0..65535` word.  A word sum or difference of
+    `integer`s overflowing 16 bits is not widened (integer16 arithmetic
+    "does not detect an overflow", Appendix D, ISO 6.7.2.2, p. D-4;
+    SMD_$BLT's `sub.w`): `gu := abs(x + y)` for x = y = -30000 is 5536;
+  - `c - abs(x)`: the image's order (`abs`, then the constant, SMD_$BLT
+    0xE6EDA2..0xE6EDB0) with `dpc`'s registers (the image has `abs` in
+    D1 and the constant in D0, `dpc` the reverse; bead
+    domain-pascal-qfnb);
+  - the zero-extension into a new register of a widened quotient's or
+    call result's `abs`; `abs` right after a call whose pop is skipped
+    (`f := abs(g(x))`: the branch joins before the epilogue);
+  - `abs(x) > 0` / `<= 0`: compared
+    `<> 0` / `= 0` (`dpc-ir` `compare`; an unsigned ordering against 0
+    is otherwise refused);
+  - `max` of an `abs` value, unsigned: `bcc` (which of `bhi`/`bcc` the
+    original used is bead domain-pascal-ckzr);
+  - `abs(x) in s`: the element tested as a signed word, an `integer`'s
+    form;
+  - `case abs(x) of`: dispatched as any computed selector (the `case`
+    refusal is for calls in the selector: `dpc-m68k` `expr_calls`, which
+    leaves out the branches of `abs`, a signed `div` by a power of two
+    and `min`/`max`).
+
+  **Still refused:** a store whose destination needs a register of an
+  `abs` value (as for `min`/`max`, 10.1); `abs(x) > -1`, `abs(x) >= 0`,
+  `abs(x) < 0` (a constant outside the unsigned type, or a constant
+  condition); the constant on the left, `0 < abs(x)`, `0 >= abs(x)`
+  ("a comparison whose left operand is not a variable");
+  `100000 - abs(x - y)` ("a constant minus a computed value": the
+  `c - abs` path does not take a widened word `abs`); `abs(i) mod 4`
+  (an unsigned `mod` by a power of two); `abs(x) in s` for a set
+  variable (an element that is not constant, or whose type reaches
+  past the set).  General refusals that `abs` meets: a longword `*`, `div`
+  or `mod` with a computed word operand (`abs(i) * j`; 12.4 R9, bead
+  domain-pascal-91zm); `-abs(x) < 0` (a test right after a `neg`, bead
+  domain-pascal-0q5z); `for i := 1 to abs(n)` (a computed `for` bound,
+  bead domain-pascal-fbah); an `abs` of a longword passed by address to
+  a word `in` parameter ("passing a 4-byte expression by address to a
+  2-byte parameter").  The `muls.w` flags are used for `abs` only
+  (`Selector::abs`); no other branch on a `muls.w` is seen
+  (`tools/cmpsurvey.py`, opflags: the two are these).  Tests:
+  `tests/golden/expr/abs`, `tests/exec/abs.pas` (the image's forms),
+  `tests/exec/abs_more.pas` (the best-effort ones; both with negative
+  values, zero and the most negative value), `crates/dpc/tests/driver.rs`
+  `g6xa_abs_shapes`.  In ../source, LOCATE_SERVER now compiles; it
+  differs only by a constant stored twice through D0 (0xE4A458, bead
+  domain-pascal-0i6n).  The other routines with `abs` stop at other
+  refusals.
 - **`odd(x)` (ref "Odd", p. 4-128; register form Verified at two sites;
   memory form read off 9 sites, Uncertain; implemented, beads
   domain-pascal-5aw.19, domain-pascal-3xwx).**  `btst #0` on the integer

@@ -94,6 +94,13 @@ Tests:
   unsigned (MMAP_$GET_IMPURE 0xE0D624, NET_IO_$COPY_PACKET 0xE0E612), a
   constant second operand (PKT_$DAT_COPY 0xE12850), `max(x, 0)` on the
   flags (NETBUF_$DEL_PAGES 0xE0EB64).
+- `expr/abs` - codegen-patterns 8, "abs" (bead domain-pascal-g6xa):
+  `bpl.s` over `neg` on the flags of a load (PROC2_$WAIT 0xE3FE5E, an
+  argument; TIME_$ADJUST_TIME_OF_DAY 0xE168F4), a `sub.l` (LOCATE_SERVER
+  0xE4A440), a copy, a `muls.w` and after `tst.w` (TPAD_$DATA 0xE6924A,
+  0xE69624, 0xE6966E); compared unsigned with constants and `linteger`s,
+  signed at word width with an `integer`, zero-extended into a new
+  register for a longword sum (0xE69764).
 - `stores/store_from_memory` - codegen-patterns 13 (memory to memory in a
   one-statement body): PROC2_$GET_BOOT_FLAGS 0xE41B62.
 - `stores/volatile` - ref 3.15.1-3.15.3; codegen-patterns 13 (device

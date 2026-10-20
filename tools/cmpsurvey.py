@@ -128,6 +128,23 @@ address order).  Kinds:
             (`adj') or with instructions between (`gapN'), and the two
             instructions after the second (bead domain-pascal-o1v0).
 
+    abs     `neg.<s> Dn' (a data register only: a `neg' of memory or of
+            an address register is not matched) directly after a
+            conditional branch that skips just it (`b<cc>.s' to the next
+            instruction): `abs' when the
+            branch tests Dn's own value (form `flags': the instruction
+            before the branch wrote Dn, the operation given; `tst': a
+            `tst.<s> Dn' after the operation), `other' when the tested
+            value is another register's (a conditional negation); the
+            branch, the size, and the use of Dn by the first of the
+            next four instructions that reads it (`cmp' with an
+            immediate, memory or a register, `push', `zext': `clr.l
+            Dm; move.w Dn,Dm', a zero extension into another register,
+            `move', or the operation's mnemonic).  SMD_UTILS
+            (hand assembly, see `opflags') is reported apart as `hand'.
+            Evidence for `abs' (codegen-patterns 8, "abs"; bead
+            domain-pascal-g6xa).
+
 usage:
     tools/cmpsurvey.py summary          # the counts quoted in codegen-patterns
     tools/cmpsurvey.py list KIND        # one line per site of KIND
@@ -145,7 +162,7 @@ import a5survey  # noqa: E402
 import arithsurvey  # noqa: E402
 
 KINDS = ('bidx', 'mem2', 'both', 'widen', 'widen1', 'cmpm', 'cmpb', 'ord', 'callcmp',
-         'andor', 'opflags', 'loadflags', 'select', 'held', 'two', 'kcopy')
+         'andor', 'opflags', 'loadflags', 'select', 'held', 'two', 'kcopy', 'abs')
 
 _IDX = re.compile(r'%a\d@\((-?\d+),%(d\d):([wl])\)')
 _SCALE = re.compile(r'^(?:add([wl]) %(d\d),%(d\d)|ls[l]([wl]) #(\d),%(d\d)'
@@ -484,6 +501,64 @@ def op_of(t):
 # arguments: hand assembly by codegen-patterns section 0's signs, though
 # loopalign.HAND_ASM does not list it.
 _OPFLAGS_SKIP = (0xE702F4, 0xE707FC)
+
+_NEG = re.compile(r'^neg([bwl]) %(d\d)$')
+
+
+def _use_of(ins, j, dn):
+    """How the first of the four instructions from ins[j] that reads
+    register `dn' uses it, right after an `abs'."""
+    for k in range(j, min(j + 4, len(ins))):
+        t = ins[k][2]
+        if not re.search(r'%' + dn + r'\b', t):
+            continue
+        m = re.match(r'^(cmpi?[bwl]) (.*),%' + dn + '$', t)
+        if m:
+            x = m.group(2)
+            kind = 'imm' if x.startswith('#') else 'reg' if re.match(r'^%d\d$', x) else 'mem'
+            return 'cmp-' + kind
+        if re.match(r'^move[bwl] %' + dn + r',%sp@-$', t):
+            return 'push'
+        if re.match(r'^movew %' + dn + r',%d\d$', t) and re.match(
+                r'^clrl ' + t.split(',')[1] + '$', ins[k - 1][2]):
+            return 'zext'
+        if re.match(r'^move[bwl] %' + dn + ',', t):
+            return 'move'
+        return t.split()[0]
+    return 'none'
+
+
+def abs_sites(ins, hand):
+    """[(addr, kind, cond, size, form, op, use)] of `neg' skipped by a
+    branch (see `abs' in the module docstring); addr is the neg's."""
+    out = []
+    for i in range(2, len(ins) - 1):
+        m = _NEG.match(ins[i][2])
+        b = _BCC.match(ins[i - 1][2])
+        if not m or not b:
+            continue
+        tgt = re.search(r'0x([0-9a-f]+)$', ins[i - 1][2])
+        if not tgt or int(tgt.group(1), 16) != ins[i + 1][0]:
+            continue
+        size, dn = m.groups()
+        cond = b.group(1)[1:]
+        prev = ins[i - 2][2]
+        form, op = 'other', prev.split()[0]
+        if prev == 'tst%s %%%s' % (size, dn):
+            form = 'tst'
+            op = ins[i - 3][2].split()[0] if i >= 3 else ''
+        else:
+            o = op_of(prev)
+            if o and o[2] == dn:
+                form = 'flags'
+                op = o[0]
+                if o[0] == 'move':
+                    src = prev.split()[1].split(',')[0]
+                    op = 'copy' if re.match(r'^%d\d$', src) else 'load'
+        kind = 'hand' if hand else ('abs' if form != 'other' else 'other')
+        out.append((ins[i][0], kind, cond, size, form, op, _use_of(ins, i + 1, dn)))
+    return out
+
 
 _REL = {'eq': 'eq/ne', 'ne': 'eq/ne', 'mi': 'mi/pl', 'pl': 'mi/pl', 'lt': 'signed', 'ge': 'signed',
         'le': 'signed', 'gt': 'signed', 'cs': 'unsigned', 'cc': 'unsigned', 'hi': 'unsigned',
@@ -935,6 +1010,8 @@ def scan():
         res['held'] += [(r0, name) + s for s in held_sites(ins)]
         res['two'] += [(r0, name) + s for s in two_sites(ins)]
         res['kcopy'] += [(r0, name) + s for s in kcopy_sites(ins)]
+        hand = _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]
+        res['abs'] += [(r0, name) + s for s in abs_sites(ins, hand)]
         if not _OPFLAGS_SKIP[0] <= r0 < _OPFLAGS_SKIP[1]:
             res['opflags'] += [(r0, name) + s for s in opflags_sites(ins)]
             res['loadflags'] += [(r0, name) + s for s in loadflags_sites(ins)]
@@ -992,6 +1069,10 @@ def summary(res):
            lambda s: (s[7], s[8], s[4] + '<-' + s[5], _REL[s[9][1:]]))
     counts('constants copied or loaded again (size, form, distance, next)', res['kcopy'],
            lambda s: s[3:])
+    counts('`neg` skipped by a branch (kind, branch, size, form, operation)', res['abs'],
+           lambda s: s[3:8])
+    counts('  ... `abs` by size and use of the value', [s for s in res['abs'] if s[3] == 'abs'],
+           lambda s: (s[5], s[8]))
     lf = res['loadflags']
     counts('loads tested next (form, context, source, same size|size, relation)', lf,
            lambda s: (s[5], s[9], s[4], 'same' if s[3] == s[6] else 'size', _REL[s[7]]))

@@ -5933,6 +5933,8 @@ fn expr_has_call(e: &Expr) -> bool {
             };
             arith_calls(*op, lhs, rhs, *ty, true) || expr_has_call(lhs) || expr_has_call(rhs)
         }
+        // The branch over the negation ([`Selector::abs`]).
+        Expr::Unary { op: UnOp::Abs, .. } => true,
         Expr::Unary { operand: x, .. }
         | Expr::Convert { value: x, .. }
         | Expr::SetSr(x)
@@ -5940,6 +5942,26 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Call { .. } => true,
         Expr::Test(c) => cond_has_call(c),
     }
+}
+
+/// Whether evaluating `e` calls a function or an M$ARITH entry, as
+/// [`expr_has_call`] but not counting the branches of `abs`, a signed
+/// `div` by a power of two or `min`/`max` (a `case` selector,
+/// [`Selector::case`]).
+fn expr_calls(e: &Expr) -> bool {
+    let mut hit = false;
+    walk_expr(e, &mut |n| match n {
+        Node::Call(_) | Node::Expr(Expr::Call { .. }) => hit = true,
+        Node::Expr(Expr::Binary { op, lhs, rhs, ty }) => {
+            let pow2 = matches!(**rhs, Expr::Const { value: c, .. } if c > 1 && c & (c - 1) == 0);
+            let branch_only = matches!(op, BinOp::Min | BinOp::Max) || (*op == BinOp::Div && pow2);
+            if !branch_only && arith_calls(*op, lhs, rhs, *ty, false) {
+                hit = true;
+            }
+        }
+        _ => {}
+    });
+    hit
 }
 
 /// Whether the selector computes `lhs op rhs` of type `ty` with an
@@ -8903,11 +8925,16 @@ impl Selector {
         next: Tail,
     ) -> Res<()> {
         let span = self.span;
-        if expr_has_call(selector) {
+        if expr_calls(selector) {
             // CAL_$WEEKDAY 0xE686F6 dispatches on D0 after `move.w D0,D1`:
             // what the copy is for is not known.
             return Err(unsupported(span, "a function call in a `case` selector is"));
         }
+        // A selector that only branches inside (`abs`, a signed `div` by a
+        // power of two, `min`/`max`) is computed and dispatched on as any
+        // other: best effort (not checked against the image, no such
+        // selector seen).
+
         let labels: Vec<(i64, usize)> = arms
             .iter()
             .enumerate()
@@ -12343,14 +12370,14 @@ impl Selector {
         let moveq = !device && self.const_form == ConstForm::Moveq && moveq_const(value);
         let both = self.addr_needs_reg(addr) && (moveq || self.value_needs_reg(value));
         let mut select = false;
-        walk_expr(value, &mut |n| {
-            if let Node::Expr(Expr::Binary {
+        let mut abs = false;
+        walk_expr(value, &mut |n| match n {
+            Node::Expr(Expr::Binary {
                 op: BinOp::Min | BinOp::Max,
                 ..
-            }) = n
-            {
-                select = true;
-            }
+            }) => select = true,
+            Node::Expr(Expr::Unary { op: UnOp::Abs, .. }) => abs = true,
+            _ => {}
         });
         if both && select {
             // The compare-and-select's branch (codegen-patterns 10.1)
@@ -12358,6 +12385,15 @@ impl Selector {
             return Err(unsupported(
                 self.span,
                 "a store whose destination needs a register of a `max` or `min` value (the \
+                 destination's register before or after the branch: not seen) is",
+            ));
+        }
+        if both && abs {
+            // `abs`'s branch (codegen-patterns 8, "abs") before or after
+            // the destination's register: not seen.
+            return Err(unsupported(
+                self.span,
+                "a store whose destination needs a register of an `abs` value (the \
                  destination's register before or after the branch: not seen) is",
             ));
         }
@@ -14692,6 +14728,11 @@ impl Selector {
                 self.cse_value(key, leaf, |s| s.binary(BinOp::Mul, lhs, rhs, *ty))
             }
             Expr::Binary { op, lhs, rhs, ty } => Ok(Val::Tmp(self.binary(*op, lhs, rhs, *ty)?)),
+            Expr::Unary {
+                op: UnOp::Abs,
+                operand,
+                ty,
+            } => Ok(Val::Tmp(self.abs(operand, ty.width)?)),
             Expr::Unary { op, operand, ty } => {
                 // `neg.<s>` / `not.<s>` on the operand in a register (negw
                 // ×97, notw ×13, notl ×46 in compiled code).
@@ -14700,6 +14741,7 @@ impl Selector {
                     op: match op {
                         UnOp::Neg => UnaryOp::Neg,
                         UnOp::Not => UnaryOp::Not,
+                        UnOp::Abs => unreachable!("abs is selected above"),
                     },
                     size: size_of(ty.width),
                     dst: Ea::Reg(Reg::D(d)),
@@ -15527,6 +15569,26 @@ impl Selector {
             // `min`'s operands, NETBUF_$ADD_PAGES 0xE0E95C..0xE0E96A,
             // REM_FILE_$SERVER 0xE637AE..0xE637BC.  Other computed values
             // are refused (not seen).
+            // `c - abs(x)`: `abs` first, then the constant loaded and
+            // `abs` subtracted (SMD_$BLT 0xE6EDA2..0xE6EDB0 `move.w
+            // (0x16,A2),D1w; sub.w (0xe,A2),D1w; bpl.b; neg.w D1w; moveq
+            // #-0x1,D0; sub.w D1w,D0w`, and 0xE6EDB6..0xE6EDCA; codegen-
+            // patterns 8, "abs").  There `abs` is in D1 and the constant in
+            // D0 with both free; `dpc`'s allocator (12.4 R1) gives the
+            // reverse, as for `c - <widened word>` (0xE10000, below): the
+            // registers are best effort (not checked against the image),
+            // bead domain-pascal-qfnb.
+            if matches!(rhs, Expr::Unary { op: UnOp::Abs, .. }) {
+                let xv = self.eval(rhs)?;
+                let d = self.load_const(imm(c, w), w)?;
+                self.out.push(Insn::Alu {
+                    op: alu,
+                    size,
+                    src: Self::ea_val(&xv),
+                    dst: d,
+                });
+                return Ok(d);
+            }
             if matches!(rhs, Expr::Convert { value, ty: t, .. }
                 if value.ty().width == Width::Word && t.width == Width::Long)
             {
@@ -16293,10 +16355,16 @@ impl Selector {
     fn min_max(&mut self, op: BinOp, a: &Expr, b: &Expr, ty: Scalar, into: Option<u8>) -> Res<u8> {
         let w = ty.width;
         let size = size_of(w);
+        let is_abs = |e: &Expr| matches!(e, Expr::Unary { op: UnOp::Abs, .. });
         let keep = match (op, ty.sign == Sign::Signed) {
             (BinOp::Min, true) => Cond::Le,
             (BinOp::Min, false) => Cond::Ls,
             (_, true) => Cond::Ge,
+            // An unsigned `max` of an `abs` value (codegen-patterns 8,
+            // "abs": unsigned): `bcc`, keep `a` when `a >= b` unsigned.
+            // Best effort (not checked against the image; which of `bhi`
+            // and `bcc` the original used is bead domain-pascal-ckzr).
+            (_, false) if is_abs(a) || is_abs(b) => Cond::Cc,
             (_, false) => {
                 return Err(unsupported(
                     self.span,
@@ -16366,6 +16434,87 @@ impl Selector {
                 dst,
             }),
         }
+        self.place(l);
+        Ok(d)
+    }
+
+    /// `abs(x)` at width `w` (`dpc-ir` `abs_value`; codegen-patterns 8,
+    /// "abs"): `x` evaluated into a new data register, then a branch on
+    /// its sign over a negation:
+    ///
+    /// ```text
+    ///         <x into Dn>             ; a copy, a load, or computed there
+    ///         tst.<s> Dn              ; only when that left no flags of x
+    ///         bpl.s   L
+    ///         neg.<s> Dn
+    /// L:
+    /// ```
+    ///
+    /// The 17 sites of compiled code: on the flags of a load (PROC2_$WAIT
+    /// 0xE3FE5E `move.w (A3),D1w; bpl.b; neg.w D1w`; TIME_$ADJUST_TIME_OF_
+    /// DAY 0xE168F4 `move.l (A2),D0; bpl.b; neg.l D0`), of a copy of a
+    /// register-held variable (TPAD_$DATA 0xE6924A `move.w D2w,D5w; bpl.b;
+    /// neg.w D5w`, 0xE6927E, 0xE692D4, 0xE6930A, 0xE69764, 0xE6976E;
+    /// 0xE1692C `move.l D2,D1`), of a subtraction (SMD_$BLT 0xE6EDA6
+    /// `sub.w (0xe,A2),D1w; bpl.b; neg.w D1w`, 0xE6EDC2; SUMA_$RCV 0xE1ADD6,
+    /// 0xE1AE02 and LOCATE_SERVER 0xE4A444, `sub.l`), of a `muls.w`
+    /// (TPAD_$DATA 0xE69626, 0xE69630: the 32-bit product's sign, though
+    /// the word is negated), and after a `tst.w` for a `divs.w` quotient
+    /// (0xE6966E: the quotient's flags are not its sign).  Every branch is
+    /// `bpl.b` (no `bge`); the join is not aligned (a forward target,
+    /// codegen-patterns 7), as [`Self::div_pow2`]'s.
+    fn abs(&mut self, x: &Expr, w: Width) -> Res<u8> {
+        let size = size_of(w);
+        // A word product by a constant: `muls.w #c` (best effort, not
+        // checked against the image: no `abs` of a product by a constant
+        // is seen), so that the flags are the 32-bit product's, as at
+        // 0xE69626, and the low word negated is that of the product's
+        // `abs` (the `mulu.w #c` or shifts of a plain product would test
+        // the low word's sign).
+        let d = match x {
+            Expr::Binary {
+                op: BinOp::Mul,
+                lhs,
+                rhs,
+                ty,
+            } if w == Width::Word
+                && ty.width == Width::Word
+                && (matches!(**lhs, Expr::Const { .. }) || matches!(**rhs, Expr::Const { .. })) =>
+            {
+                let (v, c) = match (&**lhs, &**rhs) {
+                    (v, Expr::Const { value, .. }) => (v, *value),
+                    (Expr::Const { value, .. }, v) => (v, *value),
+                    _ => unreachable!(),
+                };
+                let d = self.eval_d(v)?;
+                self.out.push(Insn::Mul {
+                    signed: true,
+                    src: Ea::Imm(imm(c, Width::Word)),
+                    dst: d,
+                });
+                d
+            }
+            _ => self.eval_d(x)?,
+        };
+        let muls = w == Width::Word
+            && matches!(self.out.last(), Some(Insn::Mul { signed: true, dst, .. }) if *dst == d);
+        if !self.sets_flags(d, w) && !muls {
+            self.out.push(Insn::Tst {
+                size,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+        }
+        // After a call whose pop was skipped (`f := abs(g(x))` before the
+        // epilogue): the branch joins right after the `neg`, so the
+        // unpopped arguments are harmless; best effort (not checked
+        // against the image, no such site seen).
+        let l = self.new_label();
+        self.jump(Cond::Pl, l);
+        self.out.push(Insn::Unary {
+            op: UnaryOp::Neg,
+            size,
+            dst: Ea::Reg(Reg::D(d)),
+        });
         self.place(l);
         Ok(d)
     }
@@ -17148,6 +17297,34 @@ impl Selector {
         let from = value.ty();
         let unsigned = from.sign == Sign::Unsigned;
         match (from.width, ty.width) {
+            // `abs` of a word widened: zero-extended into a new register,
+            // not in place (TPAD_$DATA 0xE69284..0xE69288 `bpl.b; neg.w
+            // D5w; clr.l D0; subq.l #0x2,SP; move.w D5w,D0w`, 0xE69310,
+            // 0xE6976A `clr.l D5; move.w D3w,D5w`, 0xE69774 `clr.l D6;
+            // move.w D3w,D6w`, each `abs` of a register-held `integer`;
+            // codegen-patterns 8, "abs").  A word sum, difference or
+            // product is widened before its `abs` (`dpc-ir` `convert`);
+            // of another computed word (a quotient, a call's result) the
+            // same form is best effort (not checked against the image).
+            (Width::Word, Width::Long)
+                if unsigned && matches!(value, Expr::Unary { op: UnOp::Abs, .. }) =>
+            {
+                let Expr::Unary { operand, .. } = value else {
+                    unreachable!()
+                };
+                let t = self.abs(operand, Width::Word)?;
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(Reg::D(t)),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(Val::Tmp(d))
+            }
             (Width::Word, Width::Long) | (Width::Byte, Width::Word) if unsigned => {
                 let v = self.eval(value)?;
                 let v = match self.take_consumed(&v) {

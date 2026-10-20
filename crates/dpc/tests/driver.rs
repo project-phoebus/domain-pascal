@@ -3154,6 +3154,49 @@ end;
 }
 
 #[test]
+fn g6xa_abs_shapes() {
+    // Bead domain-pascal-g6xa (codegen-patterns 8, "abs"): the best-effort
+    // forms compile; `tests/exec/abs.pas` checks their values.
+    let ok = "module m;
+type pinteger = 0..65535; sbyte = [byte] -128..127;
+var w, v: integer; h: pinteger; sb: sbyte; l: integer32;
+define p;
+procedure p;
+begin
+  w := abs(h) + 1;
+  w := abs(sb) + 1;
+  w := abs(w);
+  w := -1 - abs(w - v);
+  if abs(w - v) > l then w := 0;
+  if abs(w div v) > l then w := 0;
+end;
+";
+    let asm = compile_with("g6xa_ok", ok, &[]).unwrap();
+    // `c - abs(x)`: `abs` first, then the constant (SMD_$BLT 0xE6EDA2).
+    assert!(asm.contains("bpl.s\t"), "{asm}");
+    assert!(asm.contains("moveq\t#-1,"), "{asm}");
+    // A word difference compared with a longword: computed in 32 bits
+    // and `abs` there (SUMA_$RCV 0xE1ADD6 `sub.l; bpl.b; neg.l`).
+    assert!(asm.contains("neg.l\t"), "{asm}");
+    // What stays refused: a destination that needs a register.
+    let src = "module m;
+type ip = ^integer;
+var w: integer;
+procedure p(q: ip); options(val_param);
+begin
+  q^ := abs(w) + 1;
+end;
+";
+    let (code, err) = compile_with("g6xa_refusals", src, &[]).unwrap_err();
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("a store whose destination needs a register of an `abs` value")
+            && err.contains("not supported yet"),
+        "{err}"
+    );
+}
+
+#[test]
 fn with_and_or_odd_refusals() {
     // Bead domain-pascal-5aw.19: what stays refused around `with`, plain
     // `and`/`or` and `odd` (codegen-patterns 5.2, 7.1, 8).
