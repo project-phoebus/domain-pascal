@@ -1984,11 +1984,14 @@ fn select_body_once(
         // domain-pascal-500).  A0 itself (only memory loads assigned, no
         // call after) is kept as before.
         if *a == 1 {
-            return Err(unsupported(
+            // Best effort (not byte-identical): held in A1 as allocated,
+            // which no call clobbers before the epilogue's `movea.l A1,A0`
+            // (bead domain-pascal-ogf8).
+            best_effort(
                 f.span,
                 "a pointer result variable held in a register that no call follows (D0 at \
                  0xE6C21A, the frame elsewhere; not settled) is",
-            ));
+            )?;
         }
     }
     // The `suba.l`s keep their order (each in its own statement and run,
@@ -2332,10 +2335,24 @@ fn thread_branches(
                 *back = pos[&t] < k;
             }
             Insn::Dbf { label, .. } if succ.contains_key(label) => {
-                return Err(refused(*label, "a `dbf`"));
+                // Best effort (not byte-identical): the `dbf` left on its
+                // label, whose `bra` stays (bead domain-pascal-ogf8).
+                best_effort(
+                    span_of(*label),
+                    "a `dbf` whose target a `bra` follows (compiled code has no branch to a \
+                     `bra`; only branches are seen threaded, codegen-patterns 7.1) is",
+                )?;
             }
             Insn::TableEntry { target, .. } if succ.contains_key(target) => {
-                return Err(refused(*target, "a `case` table entry"));
+                // Best effort (not byte-identical): the entry left on the
+                // arm, whose `bra` stays (no table entry in the image goes
+                // to the epilogue unless its default does; bead
+                // domain-pascal-r4yn).
+                best_effort(
+                    span_of(*target),
+                    "a `case` table entry whose target a `bra` follows (compiled code has no \
+                     branch to a `bra`; only branches are seen threaded, codegen-patterns 7.1) is",
+                )?;
             }
             _ => {}
         }
@@ -10505,9 +10522,17 @@ impl Selector {
             .flat_map(|(i, a)| a.labels.iter().map(move |&l| (l, i)))
             .collect();
         let n = labels.len() as i64;
-        if n < 2 {
-            // A single label is not told apart from an `if` in the image.
-            return Err(unsupported(span, "a `case` with one label is"));
+        if n < 1 {
+            return Err(unsupported(span, "a `case` with no label is"));
+        }
+        // A single label is not told apart from an `if` in the image: as
+        // an `if`'s test, the branch on the other label to the `otherwise`
+        // part or the join, the arm falling in (REM_NAME's 0xE4A89A
+        // `cmpi.w #1,D0; bne.s 0xE4A8B8`, read as a `case` by ../source's
+        // rem_name/get_entry_by_node_id.pas).
+        let single = n == 1 && !arms[labels[0].1].body.is_empty();
+        if n == 1 {
+            best_effort(span, "a `case` with one label (formed as an `if`) is")?;
         }
         let nonempty: Vec<usize> = (0..arms.len())
             .filter(|&i| !arms[i].body.is_empty())
@@ -10665,7 +10690,7 @@ impl Selector {
                 )?;
             }
             let first_code = nonempty.first().map(|&i| arm_label[i]).or(l_other);
-            if Some(arm_label[labels[labels.len() - 1].1]) == first_code {
+            if !single && Some(arm_label[labels[labels.len() - 1].1]) == first_code {
                 best_effort(
                     span,
                     "a compare-chain `case` whose last label belongs to its first arm (a `beq` \
@@ -10701,9 +10726,15 @@ impl Selector {
                         dst: dreg.clone(),
                     });
                 }
-                self.jump(Cond::Eq, arm_label[i]);
+                if single {
+                    self.jump(Cond::Ne, l_default);
+                } else {
+                    self.jump(Cond::Eq, arm_label[i]);
+                }
             }
-            self.jump(Cond::T, l_default);
+            if !single {
+                self.jump(Cond::T, l_default);
+            }
         }
         let last = nonempty.last().copied();
         for &i in &nonempty {
@@ -11423,12 +11454,20 @@ impl Selector {
             // `max`, 0xE3DB34).  Which relation a loop test forms, and the
             // register outside a chain, are not settled (codegen-patterns
             // 7.1; bead domain-pascal-l78t).
-            return Err(unsupported(
+            // Best effort (not byte-identical): branched on the compare
+            // of D0 with the variable, `cmp.<s> v,D0; b<cc>`, the
+            // relation swapped for a call on the right.
+            best_effort(
                 self.span,
                 "a comparison of a function's result with a variable other than in the right \
                  operand of a plain `and`/`or` (formed as a boolean, the relation and register \
                  not settled: codegen-patterns 7.1) is",
-            ));
+            )?;
+            return if d0_call(lhs) {
+                self.compare_computed(op, lhs, rhs)
+            } else {
+                self.compare_computed(swap_rel(op), rhs, lhs)
+            };
         }
         let Expr::Load { addr, .. } = lhs else {
             return self.compare_computed(op, lhs, rhs);
@@ -12099,12 +12138,10 @@ impl Selector {
             // keeps its pointer in the slot, `move.l A0,(0x12,A6)`).
             let assigned = self.assigned_params.contains(&offset);
             if assigned && (class != RegClass::Data || ty.is_none_or(|t| t.pointer)) {
-                return Err(unsupported(
-                    f.span,
-                    "assigning to a pointer parameter loaded at entry (no site holds one in a \
-                     register: DISK_$ADD_QUE 0xE3C790 stores it to its slot; codegen-patterns \
-                     12.2, \"Assigned parameters\") is",
-                ));
+                // Kept in its slot, read and written there at each use
+                // (DISK_$ADD_QUE 0xE3C78A `cmpa.l (0x12,A6),A1`, 0xE3C790
+                // `move.l A0,(0x12,A6)`).
+                continue;
             }
             // A parameter whose assignments neither read it nor clamp it
             // is kept in its slot at the three sites found
@@ -16794,14 +16831,41 @@ impl Selector {
             // it (codegen-patterns 3, "Callers of pointer functions";
             // [`a0_call`]): a store, a copy into a register-held local, a
             // base, a test against `nil`, the caller's own pointer result.
+            // Any other use, in an expression: A0 parked in D0 after the
+            // call and its pop, `move.l A0,D0` (PROC2_$GET_CR_REC 0xE40186,
+            // an integer32 `a0_return` result then `sub.l #imm,D0`; the
+            // callers of TTY_$I_GET_DESC and EC2_$GET_EC1_ADDR, ec/ec.ins.
+            // pas), and read from D0 as a D0 result is ([`Self::expr_call`]).
             Expr::Call {
                 reg: ResultClass::Address,
-                ..
-            } => Err(unsupported(
-                self.span,
-                "this use of the value of a function whose result is in A0 (passed as an \
-                 argument, or in an expression: no compiled site, codegen-patterns 3) is",
-            )),
+                call,
+                ty,
+            } => {
+                if ty.pointer {
+                    // A pointer function's value in an expression or
+                    // pushed: no compiled site (codegen-patterns 3,
+                    // "Callers of pointer functions"); parked as an
+                    // integer result is.
+                    best_effort(
+                        self.span,
+                        "this use of the value of a pointer function (passed as an argument, \
+                         or in an expression: no compiled site, codegen-patterns 3) is",
+                    )?;
+                }
+                self.call_value(call)?;
+                let d = if self.call_mode().save {
+                    best_effort(self.span, SAVED_RESULT)?;
+                    self.alloc_d()?
+                } else {
+                    0
+                };
+                self.out.push(Insn::Move {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(0)),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(if d == 0 { Val::Reg(Reg::D(0)) } else { Val::Tmp(d) })
+            }
             Expr::Call { call, .. } => self.expr_call(call),
             Expr::Test(c) => Ok(Val::Tmp(self.test_value(c)?)),
             Expr::SetMember {

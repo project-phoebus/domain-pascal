@@ -530,25 +530,39 @@ fn check_section_name(name: &str, span: Span) -> Res<()> {
 /// one, as declaration order requires: PMAP_$FLUSH's 0xE1359C, then
 /// 0xE1360C, which calls it).
 ///
-/// Only one level of nesting is supported: the image's deeper routines
-/// reach outer frames through chains (DIR 0xE4F034 `movea.l (A6),A0;
-/// movea.l (A0),A0; movea.l (-4,A0),A2`; the level-1 routine 0xE4F3BA
-/// stores its static link at `(-4,A6)` for them, 0xE4F3C2), not
-/// implemented.  A nested routine declared `forward` is refused: whether
-/// it is emitted at its heading or at its body is not seen.
+/// Deeper nesting (ref 2.4 allows any depth): a routine reaches the
+/// frame of a routine two or more levels out through a chain of static
+/// links, each nested routine with nested routines that reach past it
+/// storing its own static link in its frame's link slot `(-4,A6)` at
+/// entry (DIR's level-1 0xE4F3BA `move.l A1,(-4,A6)` at 0xE4F3C2, read by
+/// its children as `movea.l (A6),A0; movea.l (-4,A0),A2`, 0xE4EF8C; the
+/// level-3 0xE4F034 `movea.l (A6),A0; movea.l (A0),A0; movea.l
+/// (-4,A0),A2`; codegen-patterns 6, "Deeper nesting").  Best effort (not
+/// byte-identical): where the image keeps a second link in the deeper
+/// routine's own frame (0xE4DFFE `move.l (A6),(-0x1a4,A6); movea.l
+/// (-0x1a4,A6),A0; move.l (A0),(-4,A6)`, a display) `dpc` walks the chain
+/// at each reference ([`outer`]).  A nested routine declared `forward` is
+/// refused: whether it is emitted at its heading or at its body is not
+/// seen.
 fn lower_family(p: &Program, id: RoutineId, out: &mut Vec<Function>, errors: &mut Vec<Diagnostic>) {
+    lower_tree(p, id, out, errors);
+}
+
+/// Lower routine `id` after the routines nested in it (recursively),
+/// into `out`.  Returns the frame objects of the routines enclosing `id`
+/// that `id` and the routines nested in it reach: (levels out from `id`,
+/// frame offset, bytes), 1 for `id`'s parent.
+fn lower_tree(
+    p: &Program,
+    id: RoutineId,
+    out: &mut Vec<Function>,
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<(u32, i32, u32)> {
     let r = p.routine(id);
     let mut uplevel: Vec<(i32, u32)> = Vec::new();
+    let mut up: Vec<(u32, i32, u32)> = Vec::new();
     for &n in &r.nested {
         let nr = p.routine(n);
-        if let Some(&g) = nr.nested.first() {
-            errors.push(unsupported(
-                p.routine(g).span,
-                "a routine nested in a nested routine (outer frames reached through a chain of \
-                 links, DIR 0xE4F034, codegen-patterns 6) is",
-            ));
-            continue;
-        }
         if nr.body.is_none() {
             errors.push(unsupported(nr.span, "a nested routine without a body is"));
             continue;
@@ -561,21 +575,120 @@ fn lower_family(p: &Program, id: RoutineId, out: &mut Vec<Function>, errors: &mu
             ));
             continue;
         }
-        match lower_routine(p, n, &[]) {
-            Ok(f) => {
-                for st in &f.body {
-                    stmt_enclosing(st, &mut uplevel);
-                }
-                out.push(f);
+        for (l, o, b) in lower_tree(p, n, out, errors) {
+            if l == 1 {
+                uplevel.push((o, b));
+            } else {
+                up.push((l - 1, o, b));
             }
-            Err(d) => errors.extend(d),
         }
     }
+    // A nested routine whose link slot a deeper routine reads ([`outer`])
+    // stores its static link there first.
+    let store_link = r.parent.is_some() && uplevel.iter().any(|&(o, _)| o == LINK_SLOT);
+    if store_link {
+        best_effort(
+            r.span,
+            "a routine nested in a nested routine (the outer frames reached through the chain \
+             of links at each reference, where DIR 0xE4DFFE keeps them in its frame; \
+             codegen-patterns 6, \"Deeper nesting\") is",
+        )
+        .unwrap_or_else(|d| errors.push(d));
+    }
+    // The address of the enclosing frame itself (the link stored) is no
+    // object of it.
+    uplevel.retain(|&(o, _)| o != 0);
     uplevel.sort_unstable();
     uplevel.dedup();
+    OUTER_REFS.with(|o| o.borrow_mut().clear());
     match lower_routine(p, id, &uplevel) {
-        Ok(f) => out.push(f),
+        Ok(mut f) => {
+            if store_link {
+                f.body.insert(
+                    0,
+                    Stmt {
+                        kind: StmtKind::Store {
+                            addr: Addr::Frame(LINK_SLOT),
+                            value: Expr::AddrOf(Addr::Enclosing(0)),
+                        },
+                        span: f.span,
+                    },
+                );
+            }
+            if r.parent.is_some() {
+                let mut own = Vec::new();
+                for st in &f.body {
+                    stmt_enclosing(st, &mut own);
+                }
+                up.extend(own.into_iter().map(|(o, b)| (1, o, b)));
+                up.extend(OUTER_REFS.with(|o| o.borrow_mut().split_off(0)));
+            }
+            out.push(f);
+        }
         Err(d) => errors.extend(d),
+    }
+    up
+}
+
+/// The slot of a nested routine's frame that holds its static link when
+/// a deeper routine needs it (codegen-patterns 6, "Frame: a 4-byte
+/// static-link slot": 0xE4F3BA `move.l A1,(-4,A6)`).
+const LINK_SLOT: i32 = -4;
+
+thread_local! {
+    /// The frame objects of routines two or more levels out that the
+    /// routine being lowered reaches ([`outer`]): (levels out, frame
+    /// offset, bytes), the link slots of the routines between included.
+    static OUTER_REFS: std::cell::RefCell<Vec<(u32, i32, u32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `a`, an address in the terms of the routine `levels` (2 or more)
+/// out, as seen from a routine nested in it: through the chain of links,
+/// the parent's link slot, then each one's (codegen-patterns 6, "Deeper
+/// nesting": DIR 0xE4EF8C `movea.l (A6),A0; movea.l (-4,A0),A2`).
+/// Records what it reaches in [`OUTER_REFS`].
+fn outer(a: Addr, levels: u32, var_bytes: u32) -> Addr {
+    let mut chain = Expr::Load {
+        addr: Addr::Enclosing(LINK_SLOT),
+        ty: Scalar::POINTER,
+    };
+    for l in 2..levels {
+        OUTER_REFS.with(|o| o.borrow_mut().push((l, LINK_SLOT, 4)));
+        chain = Expr::Load {
+            addr: Addr::Indirect {
+                base: Box::new(chain),
+                offset: LINK_SLOT,
+            },
+            ty: Scalar::POINTER,
+        };
+    }
+    let at = |o: i32| Addr::Indirect {
+        base: Box::new(chain.clone()),
+        offset: o,
+    };
+    match a {
+        Addr::Frame(o) => {
+            OUTER_REFS.with(|r| r.borrow_mut().push((levels, o, var_bytes)));
+            at(o)
+        }
+        Addr::Indirect { base, offset } => match *base {
+            Expr::Load {
+                addr: Addr::Frame(s),
+                ty,
+            } => {
+                OUTER_REFS.with(|r| r.borrow_mut().push((levels, s, 4)));
+                Addr::Indirect {
+                    base: Box::new(Expr::Load { addr: at(s), ty }),
+                    offset,
+                }
+            }
+            b => Addr::Indirect {
+                base: Box::new(b),
+                offset,
+            },
+        },
+        other => other,
     }
 }
 
@@ -2312,10 +2425,18 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
     let size = p.types.size(res.ty);
     let width = Width::of_size(size)
         .ok_or_else(|| unsupported(r.span, format!("a {size}-byte function result is")))?;
-    Ok(ResultSpec {
-        class,
-        ty: scalar_of_type(&p.types, res.ty, width),
-    })
+    let mut ty = scalar_of_type(&p.types, res.ty, width);
+    // A 4-byte integer result in A0 (`a0_return`, ref 5.5.11 p. 5-20:
+    // "Puts into A0 any values returned from that routine that should go
+    // into a register"): returned as the selector returns a pointer.  The
+    // image's TTY_$I_GET_DESC 0xE667B0 and SIO_$I_GET_DESC 0xE66808 (read
+    // as integer32 `a0_return` functions by ../source, after their callers'
+    // `move.l A0,D0` parking) end with the pointer-result form
+    // (codegen-patterns 3, "Pointer results").
+    if class == ResultClass::Address && !ty.pointer && width == Width::Long {
+        ty = Scalar::POINTER;
+    }
+    Ok(ResultSpec { class, ty })
 }
 
 /// The statements of `r`'s body.
@@ -4375,11 +4496,9 @@ impl Cx<'_> {
         otherwise: Option<&[SStmt]>,
     ) -> Res<Stmt> {
         let p = self.p;
-        if expr.value.is_some() {
-            // SMD_$INIT 0xE34D50 `clr.w D0; cmpi.w #4,D0`: a constant
-            // selector is dispatched at run time there, but one site.
-            return Err(unsupported(expr.span, "a constant `case` selector is"));
-        }
+        // A constant selector is dispatched at run time like any other
+        // (SMD_$INIT 0xE34D50 `clr.w D0; cmpi.w #4,D0; bcc`, a jump table
+        // on the constant 0).
         let mut selector = value_of(p, expr)?;
         let ty = selector.ty();
         match (ty.width, ty.sign) {
@@ -5573,6 +5692,16 @@ fn result_assignment(
             span: s.span,
         });
     }
+    if is_set(p, value.ty) {
+        // A set result of one word or one longword (codegen-patterns 3,
+        // "Set results"): the value as a set of the result's width, a
+        // one-byte set widened (acl_$eval_acl_entries 0xE4617A's `f :=
+        // prot.owner_rights`, [`set_value`]).
+        return Ok(Stmt {
+            kind: StmtKind::SetResult(set_value(p, value, res.ty)?),
+            span: s.span,
+        });
+    }
     if let Some(v) = &value.value {
         return Ok(Stmt {
             kind: StmtKind::SetResult(const_of(v, res.ty, value.span)?),
@@ -5759,12 +5888,70 @@ fn record_result_assignment(p: &Program, r: &Routine, s: &SStmt, value: &SExpr) 
             _ => None,
         })
         .ok_or_else(|| unsupported(r.span, "a record result without a frame slot is"))?;
+    if let Some(c) = value.value.as_ref().filter(|_| p.types.size(value.ty) == 4) {
+        // A constant (`f := status_$t(integer32(status_$...))`): stored
+        // into the result slot as a longword, which is loaded at the end,
+        // MST_$ALLOC_TABLE_PAGE 0xE43F72 `move.l #0x4000e,(-0xc,A6); bra`
+        // to the epilogue.
+        let ty = scalar_of_type(&p.types, res.ty, Width::Long);
+        return Ok(vec![
+            Stmt {
+                kind: StmtKind::Store {
+                    addr: Addr::Frame(slot),
+                    value: const_of(c, ty, value.span)?,
+                },
+                span: s.span,
+            },
+            Stmt {
+                kind: StmtKind::SetResult(Expr::Load {
+                    addr: Addr::Frame(slot),
+                    ty,
+                }),
+                span: s.span,
+            },
+        ]);
+    }
     if !value.is_designator() || value.value.is_some() {
-        return Err(unsupported(
-            value.span,
-            "a record function result assigned other than a record variable (a function's \
-             result: no site seen, codegen-patterns 3, \"Record results\") is",
-        ));
+        if value.value.is_some() || p.types.size(value.ty) != 4 {
+            return Err(unsupported(
+                value.span,
+                "a record function result assigned other than a record variable (a function's \
+                 result: no site seen, codegen-patterns 3, \"Record results\") is",
+            ));
+        }
+        // A type transfer of a constant (`status_$t(integer32(k))`) is
+        // the constant's form above.  Best effort (not byte-identical)
+        // otherwise, a function's result or a type transfer of a computed
+        // longword (`f := g(x)`): no site; the value stored into the
+        // result slot as a longword, as a constant is
+        // (MST_$ALLOC_TABLE_PAGE 0xE43F72), and the slot loaded at the
+        // end.
+        let v = value_of(p, value)?;
+        if !matches!(v, Expr::Const { .. }) {
+            best_effort(
+                value.span,
+                "a record function result assigned other than a record variable or a \
+                 constant (a function's result: no site seen, codegen-patterns 3, \"Record \
+                 results\") is",
+            )?;
+        }
+        let ty = v.ty();
+        return Ok(vec![
+            Stmt {
+                kind: StmtKind::Store {
+                    addr: Addr::Frame(slot),
+                    value: v,
+                },
+                span: s.span,
+            },
+            Stmt {
+                kind: StmtKind::SetResult(Expr::Load {
+                    addr: Addr::Frame(slot),
+                    ty,
+                }),
+                span: s.span,
+            },
+        ]);
     }
     if p.types.size(value.ty) != p.types.size(res.ty) {
         return Err(unsupported(
@@ -6622,9 +6809,13 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
 ///   type, a word cell with the character in the high byte (Reported:
 ///   KBD_$INIT 0xE3338E, cell 0xE333DA `3200`, an array formal in
 ///   ../source's reading).
+/// - A 4-byte integer constant for a non-integer parameter of 1 to 3
+///   bytes: its own type, a 4-byte cell (PROC2's 0xE419E8 and 0xE41A7C,
+///   cells 0xE41A1C and 0xE41ABC, for XPD_$WRITE's one-byte buffer).
 /// - Anything else is not supported yet (no site known): an integer
-///   constant larger than the parameter, an integer constant for a
-///   non-integer parameter of 1 to 3 bytes other than its own size, a
+///   constant larger than an integer parameter, a 1- or 2-byte integer
+///   constant for a non-integer parameter of 1 to 3 bytes other than its
+///   own size, a
 ///   character for a larger integer parameter, the empty string, a
 ///   boolean, enumeration or set constant of another size than the
 ///   parameter.
@@ -6639,12 +6830,10 @@ fn univ_const_type(
     let int = p.types.is_integer(cty);
     let fint = p.types.is_integer(fty);
     if cs == 0 {
-        // `''`, a cell of no bytes: no site known.
-        return Err(unsupported(
-            span,
-            "the empty string passed to a `univ` parameter (a code-section cell of no bytes, no \
-             site known) is",
-        ));
+        // `''`, a cell of no bytes: DIR_$DO_OP 0xE4C310 `pea (0x6d2,PC)`
+        // for dir_$do_op_add_entry's link text, the cell 0xE4C9E4 after
+        // the routine's `rts`, where the next routine's `link` follows.
+        return Ok(cty);
     }
     if cs == fs || matches!(p.types.kind(cty), TypeKind::StringLit { .. }) {
         Ok(cty)
@@ -6663,6 +6852,14 @@ fn univ_const_type(
             ),
         ))
     } else if cs < fs && p.types.is_char(cty) && !fint {
+        Ok(cty)
+    } else if cs == 4 && cs > fs && int && !fint {
+        // A 4-byte integer constant for a smaller non-integer parameter: its
+        // own type, not cut (PROC2's debug_setup_internal 0xE419E8 passes
+        // `integer32(-1)` to XPD_$WRITE's one-byte `univ xpd_$bytes_t`
+        // buffer as the 4-byte cell 0xE41A1C `ffff ffff`, its
+        // debug_clear_internal 0xE41A7C `integer32(0)` as 0xE41ABC `0000
+        // 0000`).
         Ok(cty)
     } else {
         Err(unsupported(
@@ -8968,11 +9165,7 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
             match uplevel {
                 0 => Ok(a),
                 1 => Ok(enclosing(a)),
-                _ => Err(unsupported(
-                    e.span,
-                    "a reference to a variable more than one routine out (a chain of links, \
-                     DIR 0xE4F034, codegen-patterns 6) is",
-                )),
+                l => Ok(outer(a, *l as u32, p.types.size(p.var(*var).ty))),
             }
         }
         ExprKind::Field { base, offset, .. } => Ok(addr_of(p, base)?.offset_by(*offset as i32)),
@@ -9674,7 +9867,18 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // address is passed (codegen-patterns 1.5, TONE_$ENABLE
                     // 0xE1ACFC); the offset is assigned once the body is
                     // lowered (`assign_temps`).
-                    let width = Width::of_size(p.types.size(prm_ty)).ok_or_else(|| {
+                    // An integer expression to a larger `univ` parameter
+                    // of no scalar size: a temporary of the expression's
+                    // own size (NETLOG_$SEND_PAGE 0xE71D2E..0xE71D44
+                    // `move.l D1,(-0x20,A6); pea (-0x20,A6)`, `lshft(...)`
+                    // for NET_IO_$SEND's 16-byte `univ` data_pages).
+                    let own = (univ
+                        && p.types.is_integer(a.expr.ty)
+                        && Width::of_size(p.types.size(prm_ty)).is_none()
+                        && p.types.size(prm_ty) > p.types.size(a.expr.ty))
+                    .then(|| Width::of_size(p.types.size(a.expr.ty)))
+                    .flatten();
+                    let width = own.or_else(|| Width::of_size(p.types.size(prm_ty))).ok_or_else(|| {
                         unsupported(
                             a.expr.span,
                             format!(

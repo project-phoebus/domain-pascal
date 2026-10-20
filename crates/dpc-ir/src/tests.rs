@@ -585,14 +585,16 @@ fn unknown_result_conventions_are_refused_when_used() {
     // declarations (Apollo's inserts have them, bead domain-pascal-qia); a
     // definition and a call are refused here, and an unused extern
     // declaration is not.
-    lower_src("module m; type s = set of 0..7; function f: s; extern; function g: real; extern;")
+    lower_src("module m; type s = record a: integer; end; function f: s; extern; function g: real; extern;")
         .unwrap();
     let e = errs(
         "module m;
-type s = set of 0..7;
+type s = record a: integer; end;
 function f: s;
+var r: s;
 begin
-  f := [1];
+  r.a := 1;
+  f := r;
 end;
 ",
     );
@@ -602,7 +604,7 @@ end;
     );
     let e = errs(
         "module m;
-type s = set of 0..7;
+type s = record a: integer; end;
 function f: s; extern;
 procedure p;
 var x: s;
@@ -618,7 +620,7 @@ end;
     // ... and through a routine pointer.
     let e = errs(
         "module m;
-type s = set of 0..7;
+type s = record a: integer; end;
   fp = ^function: s;
 procedure p(q: fp);
 var x: s;
@@ -639,7 +641,7 @@ end;
         ("var q: ^function: s;", "q^"),
     ] {
         let e = errs(&format!(
-            "module m;\ntype s = set of 0..7;\n{decl}\nprocedure p;\nbegin\n  discard({call});\nend;\n"
+            "module m;\ntype s = record a: integer; end;\n{decl}\nprocedure p;\nbegin\n  discard({call});\nend;\n"
         ));
         assert_eq!(e.len(), 1, "{decl}: {e:?}");
         assert!(
@@ -2604,7 +2606,6 @@ fn unsettled_case_statements_are_rejected() {
     };
     assert!(one("case b of true: w := 1; false: w := 2; end;")
         .contains("a signed byte (boolean, `-128..127`) `case` selector"));
-    assert!(one("case 3 of 1: w := 1; 3: w := 2; end;").contains("a constant `case` selector"));
     assert!(
         one("case w of 1: w := 1; 2: w := 2; otherwise end;").contains("an empty `otherwise` part")
     );
@@ -3483,25 +3484,8 @@ end;
 
 #[test]
 fn unsupported_nesting() {
-    // Two levels: outer frames through a chain of links (DIR 0xE4F034).
-    let e = errs(
-        "module m;
-procedure p;
-  procedure q;
-    procedure r;
-    begin
-    end;
-  begin
-  end;
-begin
-end;
-",
-    );
-    assert_eq!(e.len(), 1, "{e:?}");
-    assert!(
-        e[0].starts_with("t.pas:4:5: error: a routine nested in a nested routine"),
-        "{e:?}"
-    );
+    // Two levels and more are lowered (bead domain-pascal-ogf8; the
+    // chain of links, `tests/exec/ogf8_nested.pas`).
     // A nested routine declared `forward`.
     let e = errs(
         "module m;
@@ -3958,11 +3942,6 @@ fn univ_size_mismatches_are_refused() {
             "in a: univ buf",
             "16#12345",
             "a nonzero integer constant for a 1024-byte non-integer `univ` parameter",
-        ),
-        (
-            "in a: univ buf",
-            "''",
-            "the empty string passed to a `univ` parameter",
         ),
         (
             "in a: univ integer32",

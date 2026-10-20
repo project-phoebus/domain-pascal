@@ -229,6 +229,19 @@ pub fn result_reg(
             ResultReg::Data
         });
     }
+    // A set of one word or one longword: in D0, sized to the type, like
+    // an ordinal (codegen-patterns 3, "Set results"): ACL_$MIN_RIGHTS's
+    // `set of 0..15` `moveq #0xf,D0; and.w D2w,D0w` (0xE469F2), read by
+    // its caller from D0 (`move.w D0w,D2w`, DIR's 0xE4CF6x); PROC2_$
+    // SIGBLOCK's `set of 0..31` `move.l D2,D0` (0xE3F6B4), with no hidden
+    // argument (its two slots are its two parameters).  Under `a0_return`:
+    // no site, left unknown.
+    if matches!(types.kind(ty), TypeKind::Set { .. })
+        && matches!(types.size(ty), 2 | 4)
+        && !opts.a0_return
+    {
+        return Ok(ResultReg::Data);
+    }
     // A 4-byte record: in D0 (codegen-patterns 3, "Record results"; seen
     // for `status_$t` only, a packed record with a variant, base.ins.pas).
     // `a0_return` ("Puts into A0 any values returned from that routine

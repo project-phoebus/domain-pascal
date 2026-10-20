@@ -421,10 +421,6 @@ fn unsettled_cases_are_rejected() {
         "an empty `otherwise` part",
     );
     has(
-        "case 3 of 1: x := 1; 3: x := 2; end;",
-        "a constant `case` selector",
-    );
-    has(
         "case b of true: x := 1; false: x := 2; end;",
         "a signed byte",
     );

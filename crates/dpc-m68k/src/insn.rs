@@ -788,6 +788,9 @@ impl fmt::Display for Insn {
                 }
                 write!(f, "\t| {text}")
             }
+            // A cell of no bytes (the empty string, DIR_$DO_OP 0xE4C310):
+            // its label alone.
+            Insn::Words(w) if w.is_empty() => f.write_str("| a cell of no bytes"),
             Insn::Words(w) => {
                 f.write_str(".short\t")?;
                 for (i, x) in w.iter().enumerate() {

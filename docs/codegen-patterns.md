@@ -1046,6 +1046,20 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   catalogued.  `dpc-sema` marks such an argument `needs_temp` and
   `dpc-ir` rejects it ("not supported yet").
 
+**More `univ` arguments (bead domain-pascal-ogf8).**  A 4-byte integer
+constant for a smaller non-integer `univ` parameter keeps its own 4-byte
+cell (PROC2 0xE419E8 and 0xE41A7C, cells 0xE41A1C `ffff ffff` and
+0xE41ABC `0000 0000`, for XPD_$WRITE's one-byte buffer); the empty
+string is a cell of no bytes (DIR_$DO_OP 0xE4C310, cell 0xE4C9E4 after
+the routine's `rts`); an integer expression for a larger `univ`
+parameter of no scalar size goes into a temporary of its own size
+(NETLOG_$SEND_PAGE 0xE71D2E `move.l D1,(-0x20,A6); pea (-0x20,A6)`).  A
+pointer parameter passed by value and assigned is kept in its slot
+(DISK_$ADD_QUE 0xE3C78A, 0xE3C790; section 12.2).  A function's result
+compared with a variable outside a plain `and`/`or` branches on `cmp
+v,D0` (best effort; the image forms a boolean, 7.1).
+`tests/exec/ogf8_args.pas`.
+
 ### 1.6 Call instructions (Verified)
 
 - **Same module and section:** `bsr.s` or `bsr.w` (0xE00F02, 0xE1781C).
@@ -2545,6 +2559,22 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   convention unknown").  Golden `tests/golden/results/record_results`;
   driver test `four_byte_record_function_results`; exec test
   `record_results`; `dpc-ir` test `four_byte_record_results`.
+- **Set results (Verified at the sites given; bead domain-pascal-ogf8).**
+  A set of one word or one longword comes back in D0 like an ordinal:
+  ACL_$MIN_RIGHTS' `set of 0..15` `moveq #0xf,D0; and.w D2w,D0w`
+  (0xE469F2), read by DIR's caller as `move.w D0w,D2w` (0xE4CF6x);
+  PROC2_$SIGBLOCK's `set of 0..31` `move.l D2,D0` (0xE3F6B4), with no
+  hidden argument.  A one-byte set assigned to a word result is widened
+  (acl_$eval_acl_entries).  Larger sets stay unknown.  Also (same bead):
+  an integer32 `a0_return` result (ref 5.5.11) is returned as a pointer
+  result is (TTY_$I_GET_DESC 0xE667B0), and any A0 result used in an
+  expression is parked in D0, `move.l A0,D0` (PROC2_$GET_CR_REC
+  0xE40186; best effort for a pointer function's value, no site); a
+  4-byte record result assigned a constant is stored into its slot,
+  `move.l #imm,(-0xc,A6)` (MST_$ALLOC_TABLE_PAGE 0xE43F72), and one
+  assigned a function's result likewise (best effort); a pointer result
+  variable that no call follows may be held in A1 (best effort).
+  `tests/exec/ogf8_results.pas`.
 - **Record results over 4 bytes (Verified by survey: 7 callees, all 21
   compiled calls; implemented; bead domain-pascal-ytu3).**  The result
   goes through a **hidden first argument**: the address of a place for
@@ -6278,9 +6308,16 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   0xE4F2E2 through D5); the level-3 0xE4F034 walks `movea.l (A6),A0; movea.l
   (A0),A0; movea.l (-4,A0),A2`; a child of an `(A6)`-linked level-1
   routine uses that routine's dynamic link, `move.l (A6),(-0x1a4,A6);
-  movea.l (-0x1a4,A6),A0; move.l (A0),(-4,A6)` (0xE4DFFE).  `dpc`
-  refuses a routine nested in a nested routine and a reference more than
-  one routine out.
+  movea.l (-0x1a4,A6),A0; move.l (A0),(-4,A6)` (0xE4DFFE).
+  **Implemented, best effort** (bead domain-pascal-ogf8; `dpc-ir`
+  `lower_tree`, `outer`): a nested routine whose link slot a deeper
+  routine reads stores its static link at `(-4,A6)` at entry (as
+  0xE4F3BA; `dpc` forms it `lea (0,An),Ax; move.l Ax,(-4,A6)`), and a
+  reference k levels out walks the chain at each use (`movea.l (-4,An),Am`
+  per level) where 0xE4DFFE keeps a display in its own frame; the outer
+  routines keep the objects reached in memory (`uplevel_refs`).  A call
+  of a nested routine from outside its parent's family stays refused.
+  `tests/exec/ogf8_nested.pas`.
 - **Conformance: one nested routine alone; no whole family** (beads
   domain-pascal-5aw.3, -5aw.18).  A family (its nested routines, then the
   parent, contiguous) is the natural unit, and every family in the image
@@ -8098,6 +8135,15 @@ unit's other blockers: bead domain-pascal-2q2); then `btst #5,(1,A1)`
 on a byte in memory (5.1, not catalogued), `while` loops (7.2), local
 variables in registers (12.4), and the `asid` selection repeated in
 three arms with `cmpi.w #0x40; bls` joins.
+
+**One label, constant selectors (bead domain-pascal-ogf8).**  A `case`
+of one label is formed as an `if` (best effort: indistinguishable from
+one in the image): `cmpi.w #k,Dn; bne` to the `otherwise` part or the
+join (REM_NAME's 0xE4A89A, read as a `case` by ../source).  A constant
+selector is dispatched at run time like any other (SMD_$INIT 0xE34D50
+`clr.w D0; cmpi.w #4,D0; bcc`).  A table entry or a `dbf` whose target a
+`bra` follows is left on that label (best effort; no such entry or
+`dbf` in the image).  `tests/exec/ogf8_cases.pas`.
 
 ### 7.4 Loops: `while`, `for`, `exit`/`next` (Verified shapes and counts; implemented in part)
 

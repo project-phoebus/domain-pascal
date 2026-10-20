@@ -250,6 +250,19 @@ end;",
 /// the shapes no site settles are refused.
 #[test]
 fn assigned_by_value_parameters() {
+    // A pointer assigned: kept in its slot (DISK_$ADD_QUE 0xE3C790
+    // `move.l A0,(0x12,A6)`; bead domain-pascal-ogf8).
+    let lines = routine(
+        "type ip = ^integer;
+procedure t(p: ip); options(val_param);
+begin
+  ext_$w(p^);
+  p := nil;
+  ext_$w(p^);
+end;",
+    );
+    assert!(lines.contains(&"clr.l (8,%fp)".to_string()), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with("movea.l (8,%fp),%a2")), "{lines:?}");
     let lines = routine(
         "procedure t(w: integer); options(val_param);
 begin
@@ -292,16 +305,6 @@ begin
   ext_$w(w);
 end;",
             "assigning to a by-value parameter whose slot is passed by address",
-        ),
-        (
-            "type ip = ^integer;
-procedure t(p: ip); options(val_param);
-begin
-  ext_$w(p^);
-  p := nil;
-  ext_$w(p^);
-end;",
-            "assigning to a pointer parameter loaded at entry",
         ),
         (
             "procedure t(w: integer); options(val_param);

@@ -465,11 +465,21 @@ fn result_registers() {
         result_reg("function f: integer; options(extern, a0_return);"),
         Address
     );
-    // Sets, reals and records other than 4-byte ones: not known yet; the
-    // declaration is accepted (Apollo's inserts declare such functions),
-    // and `dpc-ir` refuses definitions and calls.
+    // Sets of one word or one longword: in D0 (codegen-patterns 3, "Set
+    // results": ACL_$MIN_RIGHTS 0xE469F2, PROC2_$SIGBLOCK 0xE3F6B4).
     assert_eq!(
         result_reg("type s = set of 0..7; function f: s; extern;"),
+        Data
+    );
+    assert_eq!(
+        result_reg("type s = set of 0..31; function f: s; extern;"),
+        Data
+    );
+    // Larger sets, reals and records other than 4-byte ones: not known
+    // yet; the declaration is accepted (Apollo's inserts declare such
+    // functions), and `dpc-ir` refuses definitions and calls.
+    assert_eq!(
+        result_reg("type s = set of 0..63; function f: s; extern;"),
         Unknown
     );
     assert_eq!(result_reg("function f: real; extern;"), Unknown);

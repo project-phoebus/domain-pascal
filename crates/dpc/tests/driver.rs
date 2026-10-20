@@ -246,14 +246,14 @@ fn unsupported_constructs_are_diagnosed_not_compiled() {
     let src = dir.join("u.pas");
     std::fs::write(
         &src,
-        "module u;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n",
+        "module u;\nprocedure p(var x: integer); options(abnormal);\nbegin\n  x := 2;\nend;\n",
     )
     .unwrap();
     let out = dpc().arg(&src).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.contains("u.pas:4:3: error: a `case` with one label is not supported yet"),
+        err.contains("u.pas:2:1: error: options(abnormal) is not supported yet"),
         "{err}"
     );
     assert!(!dir.join("u.s").exists());
@@ -1561,8 +1561,15 @@ begin
   take(second);
 end;
 ";
+    // Passed as an argument (bead domain-pascal-ogf8, best effort: no
+    // compiled site): parked in D0 as an integer `a0_return` result is
+    // in an expression (PROC2_$GET_CR_REC 0xE40186), then pushed.
     let (_, e) = compile_with("pointer_call_argument", src, &[]).unwrap_err();
-    assert!(e.contains("whose result is in A0"), "{e}");
+    assert!(e.contains("value of a pointer function"), "{e}");
+    let (_, s, e) = compile_default("pointer_call_argument_be", src, &[]);
+    assert!(e.contains("warning: best effort"), "{e}");
+    let s = s.unwrap();
+    assert!(s.contains("jsr\t(SECOND).l\n\tmove.l\t%a0,%d0\n\tmove.l\t%d0,-(%sp)\n"), "{s}");
 }
 
 #[test]
@@ -4638,12 +4645,12 @@ end;
     // An unimplemented construct stays an error by default.
     let (code, _, err) = compile_default(
         "be_unimpl",
-        "module u;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n",
+        "module u;\nprocedure p(var x: integer); options(abnormal);\nbegin\n  x := 2;\nend;\n",
         &[],
     );
     assert_eq!(code, Some(1), "{err}");
     assert!(
-        err.contains("error: a `case` with one label is not supported yet"),
+        err.contains("error: options(abnormal) is not supported yet"),
         "{err}"
     );
 }
