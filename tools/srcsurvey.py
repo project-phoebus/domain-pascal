@@ -1249,11 +1249,14 @@ def data_sections(asm_text, linkmap):
     """`--section-addr' pairs for the module data sections of an .s,
     and for its overlay sections with initial values."""
     out = {}
-    # an overlay section with initial values, `.data.overlay.<NAME>'
-    # (emit.rs, overlay_area): the map's overlay section NAME (one with
-    # no initial values is a common symbol, which conform.py resolves)
-    for sec in re.findall(r'\.section\s+"?(\.data\.overlay\.[^",\s]+)', asm_text):
-        ov = linkmap.overlay(sec[len('.data.overlay.'):])
+    # an overlay section the unit defines (emit.rs, overlay_area):
+    # `.data.overlay.<NAME>' with initial values, `.bss.overlay.<NAME>'
+    # (NOBITS) with `define'd variables and none (bead
+    # domain-pascal-m15q): the map's overlay section NAME (one the unit
+    # does not define is a common symbol, which conform.py resolves)
+    for sec in re.findall(r'\.section\s+"?(\.(?:data|bss)\.overlay\.[^",\s]+)',
+                          asm_text):
+        ov = linkmap.overlay(sec.split('.overlay.', 1)[1])
         if ov is not None:
             out[sec] = ov.addr
     # dpc: `.bss.moddata.<UNIT>[.<SECT>]', or `.moddata.<UNIT>[.<SECT>]'

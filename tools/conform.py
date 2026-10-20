@@ -109,7 +109,10 @@ Steps:
      A common symbol (dpc's overlay section, `var (name)', ref 3.14) is
      resolved to the map's overlay section of that name, a data section
      with no module segment (PCHIST_UNWIRED_D 0xE85718); a common larger
-     than that section is a failure.  Non-code
+     than that section is a failure.  So is dpc's NOBITS overlay section
+     `.bss.overlay.<NAME>' (a unit `define's variables in it): placed
+     there unless `--section-addr' says otherwise, and a failure if it is
+     placed elsewhere or is larger.  Non-code
      sections are placed with `--section-addr SEC=0xADDR', or else at an
      address outside the image (references to them then fail step 4).
   3. The linked code is compared byte for byte with the image, and so is
@@ -477,6 +480,21 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
     for s in section_addrs:
         if s not in other and s not in code:
             raise SetupError('--section-addr %s: no such section with contents' % s)
+    # dpc's overlay section defined by a unit with `define'd variables and
+    # no initial values (`.bss.overlay.<NAME>', NOBITS; emit.rs,
+    # overlay_area, bead domain-pascal-m15q): placed, like a common
+    # symbol, at the map's overlay section NAME unless --section-addr says
+    # otherwise (gas relocates the unit's own references against the
+    # section, so it must be placed); checked below
+    nobits_overlays = {}
+    for s, n, fl in secs:
+        if s in other and s.startswith('.bss.overlay.'):
+            ov = linkmap.overlay(s[len('.bss.overlay.'):])
+            if ov is None:
+                raise SetupError('%s: section %s names no overlay section of the map'
+                                 % (src, s))
+            nobits_overlays[s] = (ov, n)
+            section_addrs.setdefault(s, ov.addr)
     # code sections with --section-addr: a unit's other code sections
     # (a module with routines in several Pascal code sections, which the
     # map has as segments of different output sections), each linked at
@@ -628,6 +646,13 @@ def check(src, specs, linkmap, section_addrs=None, length=None, quiet=False, out
 
     # 3. bytes, region by region
     problems = list(common_problems)
+    for s, (ov, size) in sorted(nobits_overlays.items()):
+        if section_addrs[s] != ov.addr:
+            problems.append('overlay section %s at 0x%X: not the map\'s overlay section '
+                            '%s 0x%X' % (s, section_addrs[s], ov.name, ov.addr))
+        elif size > ov.size:
+            problems.append('overlay section %s: ours 0x%X bytes, map section 0x%X..0x%X '
+                            'is 0x%X' % (s, size, ov.addr, ov.end, ov.size))
     region_bytes = []           # [(lo, hi, ours, image)]
     for k, (rsecs, rlo, rhi, rpad) in enumerate(regions):
         binpath = os.path.join(work, 'code.bin' if k == 0 else 'code%d.bin' % k)

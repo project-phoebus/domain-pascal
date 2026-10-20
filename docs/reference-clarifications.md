@@ -742,8 +742,11 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     others' common symbols resolve to it, and two defining units fail to
     link ("multiple definition"); sizes: the linker's common-block rule,
     the largest common size, but a defining unit's size when there is
-    one, with a warning if a common is larger (codegen-patterns 11,
-    "Overlay sections").*
+    one, even if a common is larger (GNU ld says nothing when the
+    definition comes first in link order, "size of symbol ... changed"
+    when a larger common comes first; "common of ... overridden by
+    definition" only with `--warn-common`; codegen-patterns 11, "Overlay
+    sections").*
 44. **3.14, p. 3-52; 7.1.1, p. 7-2; 5.7.1, p. 5-24.**  3.14: "To
     specify an overlay data section, place the section name inside a set
     of parentheses after the reserved word var"; 7.1.1 and 5.7.1 name
@@ -825,6 +828,26 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `sub.w from,T; bcs` for a `0..65535` index, so `for i := lo to k - 1`
     with lo = 0 and an `integer` k of 0 also runs 65536 passes.*  Awaiting
     the owner.
+
+48. **3.14, p. 3-52; 7.2.2, Method 2, p. 7-4; 7.2.4, Method 4, p. 7-7.**
+    3.14: "All the variables named in all the identifier_lists will be
+    stored in section_name" and "Domain Pascal allocates variables
+    defined in a var declaration part sequentially within the specified
+    section"; 7.2 (p. 7-3): `extern` "tells Pascal to not allocate the
+    variable"; Method 4 shares a section between units by position.
+    Neither says where an `extern` member of a `var (section_name)` part
+    lies: does it reserve its slot at its declaration (so `var (s) a:
+    extern integer; b: integer;` puts b at +2 in every unit, whether or
+    not the unit `define`s a), or does it take no slot until a `define`
+    allocates it (b at +0 in a unit that only references a, and a placed
+    after b, in `define` order, in one that defines it)?  *Current
+    (bead domain-pascal-m15q): dpc allocates a `define`d `extern` member
+    at the `define`, in `define` order, and refuses a unit whose overlay
+    members would then not lie in their declaration-order slots (an
+    `extern` member before others that are allocated, or `define`s out
+    of declaration order); an undefined `extern` member after all the
+    allocated ones, or one alone in its part (../source's planned
+    ROUTE_$PORT in NET_PORT_TABLE), is accepted.  Awaiting the owner.*
 
 ## Reference errata noticed (no ruling needed)
 

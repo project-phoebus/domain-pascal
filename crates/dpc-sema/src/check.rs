@@ -156,6 +156,11 @@ pub(crate) struct Checker<'t> {
     /// section_name"), by [`VarId`]: where a later `define` of it
     /// allocates it (ref 7.2.2, Method 2).
     extern_sections: HashMap<u32, String>,
+    /// The members of `var (section_name)` parts, (section, variable,
+    /// span), in declaration order, and the order they were allocated
+    /// in (ref 3.14, p. 3-52; [`Checker::check_overlay_order`]).
+    overlay_decls: Vec<(String, VarId, Span)>,
+    overlay_allocs: Vec<(String, VarId)>,
     next_with: u32,
     /// The `with` records ([`WithId`]) that are, or are part of, an `in`
     /// parameter ([`Checker::in_param_part`]).
@@ -215,6 +220,8 @@ impl<'t> Checker<'t> {
             pre_defined: HashSet::new(),
             defines: Vec::new(),
             extern_sections: HashMap::new(),
+            overlay_decls: Vec::new(),
+            overlay_allocs: Vec::new(),
             next_with: 0,
             in_withs: HashSet::new(),
             loop_depth: 0,
@@ -468,6 +475,7 @@ impl<'t> Checker<'t> {
             }
         }
         self.check_defines();
+        self.check_overlay_order();
         for r in &self.routines {
             if r.options.forward && r.body.is_none() {
                 self.errors.push(Diagnostic::error(
@@ -1798,6 +1806,12 @@ impl<'t> Checker<'t> {
             {
                 self.extern_sections.insert(id.0, sec.clone());
             }
+            if let Some(sec) = &overlay {
+                self.overlay_decls.push((sec.clone(), id, name.span));
+                if matches!(self.vars[id.0 as usize].storage, Storage::Static { .. }) {
+                    self.overlay_allocs.push((sec.clone(), id));
+                }
+            }
             vars_out.push(id);
             // A variable is in scope in its own initial value, so
             // `addr(itself)` is its own address; a variable declared
@@ -1837,6 +1851,62 @@ impl<'t> Checker<'t> {
                 }
             };
             self.vars[id.0 as usize].init = init;
+        }
+    }
+
+    /// Once the unit is complete: every overlay section's members must
+    /// have been allocated in declaration order, those not allocated (an
+    /// `extern` never `define`d here) after all the others.  ref 3.14
+    /// (p. 3-52) allocates the variables of a `var (section_name)` part
+    /// "sequentially within the specified section", and another unit
+    /// shares the section by position (7.2.4, Method 4, p. 7-7); but an
+    /// `extern` member takes its slot only when a `define` allocates it
+    /// (`define_item`, ref 7.2.2), so an `extern` before other members, or
+    /// `define`s out of declaration order, would place the members
+    /// elsewhere than another unit's view of the same declarations does.
+    /// Whether an `extern` member reserves its slot at its declaration is
+    /// an open question (docs/reference-clarifications.md, question 48);
+    /// until it is ruled, such a unit is refused (bead domain-pascal-m15q).
+    /// A `var (name)` naming one of the unit's own data sections is the
+    /// unit's block, which no other unit shares: not checked.
+    fn check_overlay_order(&mut self) {
+        let decls = std::mem::take(&mut self.overlay_decls);
+        let allocs = std::mem::take(&mut self.overlay_allocs);
+        let own = |c: &Self, n: &str| {
+            n == c.data_section || c.routines.iter().any(|r| r.data_section == n)
+        };
+        let mut done: Vec<&str> = Vec::new();
+        for (sec, _, _) in &decls {
+            if done.contains(&sec.as_str()) || own(self, sec) {
+                continue;
+            }
+            done.push(sec);
+            let decl: Vec<(VarId, Span)> = decls
+                .iter()
+                .filter(|(s, _, _)| s == sec)
+                .map(|&(_, v, sp)| (v, sp))
+                .collect();
+            let alloc: Vec<VarId> = allocs
+                .iter()
+                .filter(|(s, _)| s == sec)
+                .map(|&(_, v)| v)
+                .collect();
+            // The first member out of place; none, or only past the
+            // allocated ones (an unallocated `extern` tail), is fine.
+            let first = (0..decl.len()).find(|&i| alloc.get(i) != Some(&decl[i].0));
+            if let Some(i) = first.filter(|&i| i < alloc.len()) {
+                let (v, span) = decl[i];
+                let name = self.vars[v.0 as usize].name.clone();
+                self.unsupported(
+                    span,
+                    &format!(
+                        "overlay section `{sec}` member `{name}` out of its slot in declaration \
+                         order (an `extern` member takes no slot until a `define` allocates it, \
+                         so another unit's view of the section would disagree; ref 3.14 p. 3-52, \
+                         docs/reference-clarifications.md question 48)"
+                    ),
+                );
+            }
         }
     }
 
@@ -1906,12 +1976,17 @@ impl<'t> Checker<'t> {
                     .cloned()
                     .unwrap_or_else(|| self.data_section.clone());
                 let new = match storage {
-                    Storage::Extern { symbol } => Storage::Static {
-                        offset: self.alloc_static(&section, ty),
-                        symbol,
-                        global: true,
-                        section,
-                    },
+                    Storage::Extern { symbol } => {
+                        if self.extern_sections.contains_key(&v.0) {
+                            self.overlay_allocs.push((section.clone(), v));
+                        }
+                        Storage::Static {
+                            offset: self.alloc_static(&section, ty),
+                            symbol,
+                            global: true,
+                            section,
+                        }
+                    }
                     Storage::Static {
                         symbol,
                         section,

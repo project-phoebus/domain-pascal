@@ -161,12 +161,13 @@ pub fn lower_each(program: &Program) -> (Vec<Function>, Vec<Diagnostic>) {
 /// another unit's object ([`var_addr`]; codegen-patterns 11, "Overlay
 /// sections").
 ///
+/// An overlay section's `define`d variables are its area's `globals`
+/// (ref 3.14: a `define` of an `extern` variable of a `var (name)` part
+/// allocates it in the section); the target defines the section then
+/// (an object file cannot define a symbol inside a common block).
+///
 /// Rejected: the initial values [`init_value`] cannot encode; in an
-/// overlay section, a `define`d variable (no map symbol lies inside any
-/// of the image's overlay sections past its start, `tools/sectsurvey.py
-/// overlays`; whether ROUTE_$PORT at NET_PORT_TABLE's start is one is
-/// not known; an object file cannot define a symbol inside a common
-/// block either), a name that is no assembler symbol, or that the
+/// overlay section, a name that is no assembler symbol, or that the
 /// unit also uses as a symbol (a routine's, an `extern` or `define`d
 /// variable's), or two spellings of one name (also of one of the unit's
 /// data sections).
@@ -201,16 +202,14 @@ fn data_area(p: &Program) -> Result<(Vec<DataArea>, Vec<DataArea>), Vec<Diagnost
             continue;
         };
         if is_overlay(p, section) {
+            // A `define`d variable here (ref 3.14 p. 3-52: a `define` of
+            // an `extern` variable of a `var (name)` part "will be stored
+            // in section_name") is one of the area's `globals`: the
+            // target defines the section with its symbol at its offset
+            // (codegen-patterns 11, "Overlay sections"; bead
+            // domain-pascal-m15q).
             if let Err(d) = check_overlay(p, section, &symbols, v.span) {
                 errors.push(d);
-            }
-            if *global {
-                errors.push(unsupported(
-                    v.span,
-                    "a `define`d variable in an overlay section (`var (name)`, ref 3.14 p. 3-52; \
-                     no map symbol lies inside the image's overlay sections past their start, \
-                     codegen-patterns 11) is",
-                ));
             }
         } else if let Err(d) = check_section_name(section, v.span) {
             errors.push(d);

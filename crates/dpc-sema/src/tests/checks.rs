@@ -580,7 +580,7 @@ fn overlay_section_layout() {
          var (pchist_unwired_d)
            histogram: hist;
            wired_count: integer;
-         var (sec) e: extern integer; f: char;
+         var (sec) f: char; e: extern integer;
          define e;
          procedure p; var (sec) g: integer32; begin g := 0 end;",
     );
@@ -600,7 +600,8 @@ fn overlay_section_layout() {
     assert_eq!(at("histogram").1, 0x50C);
     assert_eq!(at("wired_count").1, 0x936);
     assert_eq!(at("x"), (".data".into(), 0, false));
-    // f first (offset 0), then e when the define allocates it, then g.
+    // f first (offset 0), then e when the define allocates it (its
+    // declaration-order slot), then g.
     assert_eq!(at("f"), ("sec".into(), 0, false));
     assert_eq!(at("e"), ("sec".into(), 2, true));
     assert_eq!(at("g"), ("sec".into(), 4, false));
@@ -612,6 +613,32 @@ fn overlay_section_layout() {
             ("sec".to_string(), 8)
         ]
     );
+}
+
+/// An overlay section's members must lie in their declaration-order
+/// slots (ref 3.14, p. 3-52; reference-clarifications question 48; bead
+/// domain-pascal-m15q): an `extern` member takes no slot until a
+/// `define` allocates it, in `define` order, so one before allocated
+/// members, or `define`s out of declaration order, is refused.  An
+/// undefined `extern` tail, a defined `extern` alone in its part, and
+/// the unit's own data section named in `var (name)` are accepted.
+#[test]
+fn overlay_members_in_declaration_order() {
+    let msg = "out of its slot in declaration order";
+    let e = errs("module m; var (s) a: extern integer; b: integer;");
+    assert!(e.len() == 1 && e[0].contains("member `a`") && e[0].contains(msg), "{e:?}");
+    let e = errs(
+        "module m; var (s) a: extern integer; c: extern integer; b: integer; define c, a;",
+    );
+    assert!(e.len() == 1 && e[0].contains("member `a`"), "{e:?}");
+    let e = errs("module m; var (s) a: extern integer; c: extern integer; define c, a;");
+    assert!(e.len() == 1 && e[0].contains("member `a`"), "{e:?}");
+    ok("module m; var (s) a: define integer; b: integer;");
+    ok("module m; var (s) b: integer; a: extern integer; c: extern integer;");
+    ok("module m; var (s) a: extern integer; c: extern integer; define a, c;");
+    ok("module m; var (s) a: extern integer; c: extern integer; define a;");
+    ok("module m; var (net_port_table) p: extern array[0..7] of integer32; define p;");
+    ok("module m, , d; var (d) a: extern integer; b: integer; define a;");
 }
 
 /// Static objects are at least word aligned: a byte variable takes the

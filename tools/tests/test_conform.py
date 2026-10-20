@@ -182,6 +182,33 @@ class ConformTest(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('data section %s at 0x%X: not the start of' % (sec, at), out)
 
+    def test_nobits_overlay_section_placement(self):
+        # `.bss.overlay.<NAME>' (dpc's overlay section a unit defines for
+        # its `define'd variables, NOBITS; bead domain-pascal-m15q):
+        # placed at the map's overlay section NAME by default, so the
+        # unit's own references to it resolve there; elsewhere, larger,
+        # or a name the map lacks, a failure
+        sec = '.bss.overlay.PCHIST_UNWIRED_D'
+        body = ('\t.section\t"%s","aw",@nobits\n\t.globl\tPCHIST_UNWIRED_D\n'
+                'PCHIST_UNWIRED_D:\n\t.space\t%d\n\t.text\n\trts\t')
+        good = self.variant('proc1_tst_lock.s', 'tst_lock_ovbss.s', '\trts\t',
+                            body % (sec, 0x938))
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'])
+        self.assertTrue(ok, out)
+        ok, out = self.run_check(good, ['PROC1_$TST_LOCK'], section_addrs={sec: 0xE2E3FC})
+        self.assertFalse(ok)
+        self.assertIn('overlay section %s at 0xE2E3FC: not the map' % sec, out)
+        big = self.variant('proc1_tst_lock.s', 'tst_lock_ovbss_big.s', '\trts\t',
+                           body % (sec, 0x93C))
+        ok, out = self.run_check(big, ['PROC1_$TST_LOCK'])
+        self.assertFalse(ok)
+        self.assertIn('ours 0x93C bytes', out)
+        bad = self.variant('proc1_tst_lock.s', 'tst_lock_ovbss_bad.s', '\trts\t',
+                           body.replace('PCHIST_UNWIRED_D', 'WIRED_DATA')
+                           % ('.bss.overlay.WIRED_DATA', 4))
+        with self.assertRaisesRegex(conform.SetupError, 'names no overlay section'):
+            self.run_check(bad, ['PROC1_$TST_LOCK'])
+
     def test_lowercase_external_is_an_error(self):
         # external names are upper-cased; the map lookup must be exact
         path = self.variant('proc1_tst_lock.s', 'tst_lock_lower.s',

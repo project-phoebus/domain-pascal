@@ -602,6 +602,12 @@ class DataSectionsTest(unittest.TestCase):
                '\t.section\t".data.overlay.WIRED_DATA","aw",@progbits\n')
         self.assertEqual(srcsurvey.data_sections(asm, lm),
                          {'.data.overlay.PCHIST_UNWIRED_D': 0xE85718})
+        # one defined for its `define'd variables, NOBITS (bead
+        # domain-pascal-m15q)
+        asm = ('\t.section\t".bss.overlay.PCHIST_UNWIRED_D","aw",@nobits\n'
+               '\t.section\t".bss.overlay.WIRED_DATA","aw",@nobits\n')
+        self.assertEqual(srcsurvey.data_sections(asm, lm),
+                         {'.bss.overlay.PCHIST_UNWIRED_D': 0xE85718})
 
 
 class ModuleRoutineOptsTest(unittest.TestCase):

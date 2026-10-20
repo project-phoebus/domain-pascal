@@ -10956,7 +10956,7 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     RELOC (also a zero-sized section), VTOC_CACHE at INT_STACK_BASE,
     AUDIT_LIST at OS_PAGE_END (markers).  Whether ROUTE_$PORT or
     NETWORK_$ME name a variable at +0 of NET_PORT_TABLE (a `define` in
-    the section, which `dpc` refuses, below) is not known.  PCHIST_UNWIRED_D's size
+    the section, which `dpc` emits since bead domain-pascal-m15q, below) is not known.  PCHIST_UNWIRED_D's size
     is the end of the last variable PCHIST reaches (+0x936, a word;
     ../source `pchist/pchist.pas`), and its 0x42A-byte record lies at
     +0x50C, 4 mod 8: laid out as a data block (section 5; byte variables
@@ -11019,8 +11019,11 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     the linker merges by name with every other unit's, the largest size
     winning; a unit that gives it initial values defines SYM instead,
     in `.data.overlay.<SYM>` with the section's bytes (and `.size`), and
-    the other units' commons resolve to that, at its size (GNU ld warns
-    "size of symbol ... changed" when a common is larger).  Two units that both give initial
+    the other units' commons resolve to that, at its size, even when a
+    common is larger (GNU ld says nothing when the definition comes first
+    in link order, "size of symbol ... changed" when a larger common comes
+    first, and "common of ... overridden by definition" either way only
+    with `--warn-common`).  Two units that both give initial
     values fail to link ("multiple definition"): what the Domain binder
     did is not known (reference-clarifications question 43).  The units
     share the name with the linker's namespace of symbols: a routine or
@@ -11028,10 +11031,45 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     (Domain's binder keeps sections apart from symbols; not checked
     across units).  `tools/conform.py` resolves a common symbol to the
     map's overlay section of that name (`--defsym`), and places a
-    `.data.overlay.<SYM>` at it (srcsurvey's `data_sections`).
-    Refused: a `define`d variable in an overlay section (a `define` of
-    an `extern` variable of a `var (name)` part allocates it there, ref
-    3.14 "will be stored in section_name"); a name that is no assembler symbol
+    `.data.overlay.<SYM>` or `.bss.overlay.<SYM>` at it (srcsurvey's
+    `data_sections`; conform.py places a `.bss.overlay.<SYM>` there by
+    itself too, since gas relocates the defining unit's own references
+    against the section).
+    A `define`d variable in an overlay section (a `define` of an
+    `extern` variable of a `var (name)` part allocates it there, ref
+    3.14 "will be stored in section_name"; bead domain-pascal-m15q):
+    the unit defines the section, SYM and each such variable's symbol
+    global labels at their offsets, in `.data.overlay.<SYM>` with
+    initial values and otherwise in the NOBITS `.bss.overlay.<SYM>`
+    (zeros); its routines still address the variables as offsets into
+    SYM.  An object file cannot define a symbol inside a common block
+    (gas: "`X' can't be equated to common symbol `SEC'").  Best effort
+    (not byte-identical): no map symbol lies inside an overlay section
+    past its start, and which unit defined NET_PORT_TABLE, whose start
+    is the map symbol ROUTE_$PORT 0xE2E0A0, is not known.  It raises
+    no `best_effort` warning (so `--strict` accepts it): the code's
+    bytes are those of the common form, only the object file's container
+    of the section differs.  An `extern` member of a `var (name)` part
+    takes no slot until a `define` allocates it (`dpc-sema`
+    `define_item`), in `define` order: `dpc-sema` refuses a unit whose
+    overlay members would then not lie in their declaration-order slots
+    (an `extern` member before others that are allocated, or `define`s
+    out of declaration order), since another unit's view of the same
+    declarations would place them elsewhere; an `extern` member left
+    undefined after all the allocated ones, or one alone in its part as
+    ROUTE_$PORT would be, is accepted.  Whether an `extern` member
+    reserves its slot at its declaration: reference-clarifications
+    question 48.  Two units
+    that define one section (variables or initial values) fail to link
+    ("multiple definition"), as above.  ../source's
+    `tools/gen_layout_ld.py` keys such a section like a C data or bss
+    object, by the map symbol it defines (`.bss.overlay.NET_PORT_TABLE`
+    at ROUTE_$PORT's 0xE2E0A0), but it also defines SYM at the map
+    segment for any other unit's COMMON of the name: with both, the
+    script's SYM and the defining unit's labels are two places (GNU ld
+    lets the script's assignment win for the commons' references).
+    Golden `sections/overlay_define`; exec test `overlay_define`.
+    Refused: a name that is no assembler symbol
     (letters, digits, `_`, `$`, not starting with a digit), names a
     routine or variable symbol of the unit, or is spelt two ways
     (`'SEC'` and `sec`; also a spelling of one of the unit's own data

@@ -1151,8 +1151,11 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
 /// values defines the symbol instead, in the section
 /// `.data.overlay.<SYM>` with its contents (zeros where no initial value
 /// is given), and the other units' common symbols resolve to it (with
-/// the definition's size: the linker warns when a common block is
-/// larger); two units that both do are a link error ("multiple
+/// the definition's size, even when a common block is larger: GNU ld
+/// says nothing when the definition comes first in link order, "size of
+/// symbol ... changed" when a larger common comes first, and "common of
+/// ... overridden by definition" either way only with `--warn-common`);
+/// two units that both do are a link error ("multiple
 /// definition"): which unit's values the Domain binder kept is not
 /// known (docs/reference-clarifications.md, question 43).
 ///
@@ -1162,27 +1165,61 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
 /// five start at 4 mod 8).  The code never names a section of it
 /// (codegen-patterns 11, "Overlay sections"); for a conformance link
 /// the symbol is the map section's address (`tools/conform.py`).
+///
+/// A unit that `define`s a variable in the section (ref 3.14, p. 3-52:
+/// a `define` of an `extern` variable of a `var (name)` part "will be
+/// stored in section_name") defines the symbol too, with each such
+/// variable's symbol a global label at its offset: `.data.overlay.<SYM>`
+/// with initial values, else the NOBITS `.bss.overlay.<SYM>` (zeros).
+/// An object file cannot define a symbol inside a common block (gas:
+/// "can't be equated to common symbol").  Best effort (not
+/// byte-identical): no map symbol lies inside the image's overlay
+/// sections past their start, and which unit defined NET_PORT_TABLE,
+/// whose start is ROUTE_$PORT's map address, is not known
+/// (codegen-patterns 11, "Overlay sections"; bead domain-pascal-m15q).
+/// No `best_effort` warning: the code's bytes are the same in either
+/// form, only the object file's container of the section differs.
 fn overlay_area(data: &dpc_ir::DataArea) -> String {
     let sym = dpc_ir::overlay_symbol(&data.section);
     let size = data.size.div_ceil(4) * 4;
-    if data.init.is_empty() {
+    if data.init.is_empty() && data.globals.is_empty() {
         return format!("\n\t.comm\t{sym},{size},4\n");
     }
-    // `.size`: the linker warns when another unit's common block is
-    // larger ("size of symbol ... changed"), which it does not honour.
+    let (prefix, kind) = if data.init.is_empty() {
+        (".bss", "@nobits")
+    } else {
+        (".data", "@progbits")
+    };
+    // `.size`: GNU ld compares it with a larger common block of another
+    // unit only when that common comes first in link order ("size of
+    // symbol ... changed"); the definition's size wins either way.
     let mut out = format!(
-        "\n\t.section\t\".data.overlay.{sym}\",\"aw\",@progbits\n\t.balign\t4\n\
+        "\n\t.section\t\"{prefix}.overlay.{sym}\",\"aw\",{kind}\n\t.balign\t4\n\
          \t.globl\t{sym}\n\t.type\t{sym},@object\n\t.size\t{sym},{size}\n{sym}:\n"
     );
-    let (bytes, mut addrs) = data_bytes(data, size);
-    addrs.sort_by_key(|&(off, _)| off);
+    let (bytes, addrs) = data_bytes(data, size);
+    // Labels of `define`d variables and addresses, in offset order (a
+    // label before the address at its offset), as in [`data_area`].
+    let mut marks: Vec<(u32, Option<&str>, Option<&dpc_ir::InitAddr>)> = data
+        .globals
+        .iter()
+        .map(|(s, off)| (*off, Some(s.as_str()), None))
+        .chain(addrs.iter().map(|(off, a)| (*off, None, Some(*a))))
+        .collect();
+    marks.sort_by_key(|&(off, _, a)| (off, a.is_some()));
     let mut at = 0;
-    for (off, a) in addrs {
+    for (off, label, addr) in marks {
         if off > at {
             out.push_str(&data_run(&bytes[at as usize..off as usize]));
+            at = off;
         }
-        out.push_str(&format!("\t.long\t{}\n", init_addr_operand(a)));
-        at = off + 4;
+        if let Some(label) = label {
+            out.push_str(&format!("\t.globl\t{label}\n{label}:\n"));
+        }
+        if let Some(a) = addr {
+            out.push_str(&format!("\t.long\t{}\n", init_addr_operand(a)));
+            at = off + 4;
+        }
     }
     if size > at {
         out.push_str(&data_run(&bytes[at as usize..size as usize]));
@@ -1581,6 +1618,54 @@ mod tests {
              \n\t.section\t\".data.overlay.SEC\",\"aw\",@progbits\n\t.balign\t4\n\
              \t.globl\tSEC\n\t.type\tSEC,@object\n\t.size\tSEC,8\nSEC:\n\
              \t.byte\t0x00,0x05\n\t.space\t2\n\t.long\tX+2\n"
+        );
+    }
+
+    /// An overlay section with `define`d variables (ref 3.14; bead
+    /// domain-pascal-m15q): the unit defines the section's symbol, each
+    /// variable's a global label at its offset; NOBITS without initial
+    /// values, in `.data.overlay.<SYM>` with them.
+    #[test]
+    fn overlay_section_with_defined_variables() {
+        let mut m = module(&[".text"]);
+        m.overlays = vec![
+            dpc_ir::DataArea {
+                section: "net_port_table".into(),
+                size: 0x2E0,
+                globals: vec![("ROUTE_$PORT".into(), 0), ("B".into(), 0x10)],
+                init: vec![],
+            },
+            dpc_ir::DataArea {
+                section: "sec".into(),
+                size: 10,
+                globals: vec![("A".into(), 4), ("C".into(), 8)],
+                init: vec![
+                    dpc_ir::DataInit {
+                        offset: 4,
+                        value: dpc_ir::InitValue::Address(dpc_ir::InitAddr::Symbol {
+                            name: "X".into(),
+                            offset: 0,
+                        }),
+                    },
+                    dpc_ir::DataInit {
+                        offset: 0,
+                        value: dpc_ir::InitValue::Int { size: 2, value: 5 },
+                    },
+                ],
+            },
+        ];
+        let s = emit(&m, "m.pas", &Options::default()).unwrap();
+        let tail = s.split("filler\n").nth(1).unwrap();
+        assert_eq!(
+            tail,
+            "\n\t.section\t\".bss.overlay.NET_PORT_TABLE\",\"aw\",@nobits\n\t.balign\t4\n\
+             \t.globl\tNET_PORT_TABLE\n\t.type\tNET_PORT_TABLE,@object\n\
+             \t.size\tNET_PORT_TABLE,736\nNET_PORT_TABLE:\n\
+             \t.globl\tROUTE_$PORT\nROUTE_$PORT:\n\t.space\t16\n\t.globl\tB\nB:\n\t.space\t720\n\
+             \n\t.section\t\".data.overlay.SEC\",\"aw\",@progbits\n\t.balign\t4\n\
+             \t.globl\tSEC\n\t.type\tSEC,@object\n\t.size\tSEC,12\nSEC:\n\
+             \t.byte\t0x00,0x05\n\t.space\t2\n\t.globl\tA\nA:\n\t.long\tX\n\
+             \t.globl\tC\nC:\n\t.space\t4\n"
         );
     }
 

@@ -70,8 +70,10 @@ pub struct Module {
     /// that declares it; its variables are [`Addr::Symbol`] offsets into
     /// it (codegen-patterns 11, "Overlay sections").  `size`: the bytes
     /// this unit declares there; `init`: its initial values (ref 7.2.4's
-    /// example initialises them); `globals` is always empty (a `define`d
-    /// variable in an overlay section is refused).
+    /// example initialises them); `globals`: its `define`d variables (ref
+    /// 3.14: a `define` of an `extern` variable of a `var (name)` part
+    /// allocates it in the section), which make the unit define the
+    /// section (codegen-patterns 11, bead domain-pascal-m15q).
     pub overlays: Vec<DataArea>,
     /// Calls of `internal` routines with no body in the unit (declared
     /// `internal; extern`): symbol and the innermost statement holding

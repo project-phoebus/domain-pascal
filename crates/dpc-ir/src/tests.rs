@@ -529,13 +529,6 @@ fn unsupported_constructs_have_positions() {
         e,
         vec!["t.pas:5:3: error: an `if` with an empty `then` part is not supported yet"]
     );
-    // A `define`d variable in an overlay section.
-    let e = errs("module m;\nvar (sect) v: define integer;\n");
-    assert_eq!(
-        e,
-        vec!["t.pas:2:12: error: a `define`d variable in an overlay section (`var (name)`, ref 3.14 p. 3-52; no map symbol lies inside the image's overlay sections past their start, codegen-patterns 11) is not supported yet"]
-    );
-
     // A 16-byte set tested with a char element, which may lie beyond its
     // 128 bits (the guarded form, codegen-patterns 5.1; an `integer`
     // element is tested unguarded, MSG_$FORK 0xE73F2E).
@@ -4569,6 +4562,37 @@ var p: ip := addr(b);
                 offset: 4
             })
         }]
+    );
+
+    // `define`d variables (ref 3.14: a `define` of an `extern` variable
+    // of a `var (name)` part allocates it there; bead domain-pascal-m15q):
+    // the area's globals, at their offsets; addressed through the
+    // section's symbol like the others.
+    let m = lower_src(
+        "module m;
+var (sec) a: integer; b: define integer32; c: extern integer;
+define c;
+procedure p;
+begin
+  c := 1;
+end;
+",
+    )
+    .unwrap();
+    assert_eq!(
+        m.overlays[0].globals,
+        [("B".to_string(), 4), ("C".to_string(), 8)]
+    );
+    assert_eq!(m.overlays[0].size, 10);
+    match &m.functions[0].body[0].kind {
+        StmtKind::Store { addr, .. } => assert_eq!(addr, &at("SEC", 8)),
+        k => panic!("{k:?}"),
+    }
+    // the section named like a `define`d variable of the unit
+    let e = errs("module m;\nvar (v) v: define integer;\n");
+    assert!(
+        e[0].contains("named like a routine or variable symbol of the unit (`V`)"),
+        "{e:?}"
     );
 
     // Refused: names that are no assembler symbol, or the unit's own
