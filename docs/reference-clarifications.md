@@ -785,6 +785,27 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     at f's offset, read in place (PROC1_$CREATE_P 0xE15156); the three
     uses above are refused ("not supported yet").*
 
+47. **"For", pp. 4-89..4-90 (PDF pp. 222-223, checked).**
+    "start_exp: An expression matching the type of the index_variable";
+    "If you set up a meaningless relationship between the start_exp and
+    the stop_exp (for example, for x := 8 to 5 or for x := 10 downto 20),
+    Pascal does not execute the loop even once."  The entry does not say
+    what happens when a bound lies outside the index's type, as in `for
+    b := 0 to n - 1` with `b: [byte] 0..255` and n = 0 (stop_exp -1), or
+    `for i := 0 to n - 1` with `i: 0..2147483647` and an `integer32` n of
+    0.  ISO 7185 6.8.3.9 compares the bounds' values and runs no pass.
+    The image guards a `0..65535` index against a bound of the same width
+    unsigned (PCHIST_$CNTL's nested 0xE5CD1A `tst.w; beq`, the bound
+    declared `integer` in ../source's reconstruction), so a bound of -1
+    there would run 65536 passes.  *Current (best effort, bead
+    domain-pascal-1mtr): a run-time bound wider than the index is
+    compared in a type holding both (no pass); a bound of the index's
+    width in the index's sign, as the image (so `0..65535` against an
+    `integer` -1 runs 65536 passes), except a `0..2147483647` index
+    against a signed longword, compared signed.  Word indices held in a
+    register, signed, are unchanged (the bound narrowed as an assignment
+    narrows it).*  Awaiting the owner.
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

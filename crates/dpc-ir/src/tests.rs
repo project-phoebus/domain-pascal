@@ -2031,16 +2031,20 @@ begin
         assert_eq!(l.index.ty, Scalar::signed(Width::Word), "{stmt}");
         assert!(!l.body.is_empty(), "{stmt}");
     }
-    let e = one("for j := 0 to 15 do buf[j] := 0;").unwrap_err();
-    assert!(
-        e[0].ends_with(
-            "a `for` index variable that is not a local of the routine (ref p. 4-89) is not \
-             supported yet"
-        ),
-        "{e:?}"
-    );
-    let e = one("for b := 'a' to 'z' do j := 0;").unwrap_err();
-    assert!(e[0].contains("that is not a word"), "{e:?}");
+    // An index of another scope (ref p. 4-89): kept in memory, its home
+    // the unit's variable (bead domain-pascal-1mtr).
+    let m = one("for j := 0 to 15 do buf[j] := 0;").unwrap();
+    let StmtKind::For(l) = &m.functions[0].body[0].kind else {
+        panic!("{:?}", m.functions[0].body)
+    };
+    assert!(matches!(l.home, Some(Addr::Symbol { .. })), "{:?}", l.home);
+    // A byte index (bead domain-pascal-1mtr).
+    let m = one("for b := 'a' to 'z' do j := 0;").unwrap();
+    let StmtKind::For(l) = &m.functions[0].body[0].kind else {
+        panic!("{:?}", m.functions[0].body)
+    };
+    assert_eq!(l.index.ty.width, Width::Byte);
+    assert_eq!(l.home, None);
     // The index is kept in a register (codegen-patterns 7.4): read after a
     // loop of constant bounds in the statements that follow it; passed by
     // address to a value or `in` parameter inside it; never assigned in its
@@ -3475,10 +3479,13 @@ end;
 ",
     );
     assert!(e[0].contains("two routines named `H` in one unit"), "{e:?}");
-    // A `for` index a nested routine reaches (RINGLOG_$CNTL 0xE72296: kept
-    // in the frame, not implemented).
-    let e = errs(
-        "module m;
+    // A `for` index a nested routine reaches, and a nested routine's loop
+    // over the enclosing routine's variable: kept in memory, in the frame
+    // (RINGLOG_$CNTL 0xE72296) and through the static link (0xE721F0);
+    // bead domain-pascal-1mtr.
+    for (src, home) in [
+        (
+            "module m;
 var w: extern integer;
 procedure p;
 var i: integer;
@@ -3490,15 +3497,10 @@ begin
   for i := 1 to 5 do q;
 end;
 ",
-    );
-    assert!(
-        e[0].starts_with("t.pas:10:3: error: a `for` loop whose index a nested routine reaches"),
-        "{e:?}"
-    );
-    // A nested routine's loop over the enclosing routine's variable
-    // (0xE721F0, through the static link).
-    let e = errs(
-        "module m;
+            Addr::Frame(-2),
+        ),
+        (
+            "module m;
 var w: extern integer;
 procedure p;
 var i: integer;
@@ -3510,11 +3512,20 @@ begin
   q;
 end;
 ",
-    );
-    assert!(
-        e[0].contains("a `for` index variable that is not a local"),
-        "{e:?}"
-    );
+            Addr::Enclosing(-2),
+        ),
+    ] {
+        let m = lower_src(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut found = None;
+        for f in &m.functions {
+            crate::visit_stmts(&f.body, &mut |s| {
+                if let StmtKind::For(l) = &s.kind {
+                    found = Some((l.home.clone(), l.index.offset));
+                }
+            });
+        }
+        assert_eq!(found, Some((Some(home), 0)), "{src}");
+    }
 }
 
 /// Constants passed by address (codegen-patterns 1.5, bead

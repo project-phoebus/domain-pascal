@@ -8774,7 +8774,8 @@ or `e - c` (the guard of its value not surveyed), through a pointer (no
 `tst.w`, ROUTE_$READ_USER_STATS 0xE6A6C4), or another unit's, absolute,
 indexed or unheld frame variable (not surveyed); from another constant
 (the `subq.w #k`/`subi.w #k` seen only without a call); an unsigned
-index (`tst.w; beq`, the `subq.w`'s place); a run-time `lo`; run-time
+index other than from a constant up to a run-time bound (that one best
+effort, below); a run-time `lo`; run-time
 `downto` (not surveyed); arrays of the enclosing routine's frame or
 through its pointer variables, and rows of other arrays (a scaled index
 register, not implemented; bead domain-pascal-ga54); arrays of another
@@ -8795,10 +8796,9 @@ through an element"), or reached at displacement 0 (`(An)+`, 0xE00ED8,
 0xE0287A);
 the address of a stepped element other than a `with` record's; the
 in-place forming from a pointer (0xE7632C, 0xE6FCC6); an index initial value
-outside -128..127 or equal to the count; byte or longword indices; an
-index of another scope (0xE721F8, a nested routine's loop over its
-parent's variable) or one a nested routine reaches (RINGLOG_$CNTL
-0xE72296, the index stepped in the frame; section 6); an index read
+outside -128..127 or equal to the count (word indices; byte and
+longword indices below); a boolean index (`true` is 0xFF, not `false` +
+1); an index read
 after a loop with a run-time bound, or assigned outside its loops ("The
 index read after its loop"); a loop whose bound reads its own index
 variable; an index passed by address to a call with a pad, with a
@@ -8807,6 +8807,81 @@ parameter; a longword expression or function result as a bound; a loop
 that
 never runs; an empty loop body; an `exit`/`next` that would branch to the
 next instruction.
+
+**Byte and longword indices** (bead domain-pascal-1mtr; `isel.rs`,
+`Selector::for_wide`).  A `char`, a `[byte]` subrange, an `integer32` or
+a `linteger` index: a `dbf` loop over a count, the index in a register
+stepped at the bottom (`addq.b`/`addq.l`, `subq` for `downto`), as for a
+word.  Image-backed (longword indices): constant bounds with the count a
+word loaded before the index, NETBUF_$INIT 0xE2F644 `move.w #191,D0; clr.l
+D1`, MMAP_$INIT 0xE319BE..0xE319C8 `move.w #3583,D5; ...; move.l
+#512,D2`, `addq.l #1,D2` before `dbf D5` at 0xE31AF2; a run-time count a
+longword, `dbf` extended by `clr.w Dc; subq.l #1,Dc; bcc` (MST_$WIRE_AREA
+0xE44C24, MMAP_$TRIM_WSL 0xE0C87C..0xE0C884); a constant count above
+65536 passes is a longword too (`move.l #n-1`; not seen).  **Best effort
+(not byte-identical)**:
+- the run-time guard is `to - from` (`from - to` for `downto`) into the
+  count, then `blt` (`bcs` for an unsigned index; `tst; bmi` from a signed
+  0; none from an unsigned 0).  The image tests a `linteger` bound from 1
+  with `beq` before `move.l; subq.l #1,Dc` (MST_$WIRE_AREA 0xE44BDC,
+  MMAP_$TRIM_WSL 0xE0C7AE);
+- arrays indexed by the index are reached with the index register each
+  pass, not through a stepped pointer (NETBUF_$INIT `move.l D2,(A0)+`);
+- byte indices: no site looked at; a run-time count is widened with
+  `andi.w #0xff`;
+- the word loops' colouring hints are not given.
+
+The count, not the index, ends the loop, so a loop to the type's last
+value (`for c := chr(0) to chr(255)`) ends; a constant loop that never
+runs emits nothing.  A narrower bound is widened to the index.  A
+run-time integer bound wider than the index keeps its width (`dpc-ir`),
+and the guard and the count are computed in a type holding both
+(`isel.rs`, `for_domain`): the bound's width, signed unless the index and
+the bounds all are unsigned, a longword when an unsigned type of that
+width would not fit; so `for b := 0 to n - 1` over a `[byte] 0..255` with
+n = 0 runs no pass (ref p. 4-90, ISO 7185 6.8.3.9; reference-
+clarifications question 47).  A bound of the index's width is compared in
+the index's sign, as PCHIST_$CNTL's nested 0xE5CD1A guards a `0..65535`
+index against an `integer` bound (`tst.w; beq`; the bound's declared type
+is ../source's reconstruction), except a `0..2147483647` index with a
+signed longword bound, compared signed (the type holding both).  Best
+effort (not byte-identical): no site looked at for the wider bounds.
+
+An unsigned word index held in a register, from a constant up to a
+run-time bound, takes this form too (best effort, not byte-identical: the
+image's, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028 `tst.w; beq` before the
+`subq.w #1` among the preheader's other instructions, is not settled):
+`subq.w #from,Dc; bcs`, no stepped pointers.  Exec test
+`tests/exec/for_wide.pas`.
+
+Each best-effort form above (a byte index; a run-time bound's guard on
+this path; an array indexed by a byte or longword index; the unsigned
+word index) is a `best_effort` warning, and a refusal under `dpc
+--strict` (bead domain-pascal-5kgg).
+
+**An index kept in memory** (bead domain-pascal-1mtr; `dpc-ir`
+`ForLoop::home`).  Ref p. 4-89: "Domain Pascal permits the index_variable
+to be declared in a scope other than the scope of the routine immediately
+containing the for loop".  Such an index (a unit variable, the enclosing
+routine's local, a `var` parameter's target) and a local that a nested
+routine reaches stay in memory: `from` is stored there, the body reads it
+there, and it is stepped there after each pass, beside the `dbf` count in
+a register.  Image: RINGLOG_$CNTL's nested 0xE721CC (`move.w (48,A0),D0;
+subq.w #1,D0; bmi; move.w D0,D2; move.w #1,(-2,A2)`, `move.w (-2,A2),D0`
+in the body, `addq.w #1,(-2,A2); dbf D2` at 0xE7220A), PCHIST_$CNTL's
+nested 0xE5CD0C (`addq.w #1,(-24,A2)` at 0xE5CD4E), RINGLOG_$CNTL itself
+at 0xE72296..0xE722B0 (`clr.w (-2,A6)`, `addq.w #1,(-2,A6)`, the count in
+D0).  **Best effort (not byte-identical)**: the guard as above (`subq.w #1,Dc; blt` into
+the count's own register for the image's `subq.w #1,D0; bmi; move.w
+D0,D2`); a run-time `from`
+is kept in a register while `to` is evaluated (a bound may read the
+variable: `for g := f(lo) to g`) and stored once the guard passes, as the
+constant is at 0xE721F0 after the `bmi` (no site with a run-time `from`
+looked at); the stores are made as the body's own `x := e` and `x := x +
+1` are.  An empty range leaves the variable as it was.  The index is an
+ordinary variable outside its loop; only a loop over it nested in a loop
+over it is refused (`check_for_indices`, keyed by the home).  Exec test
+`tests/exec/for_home.pas`.
 
 Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
 `loops/for_index.pas`, `loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`,

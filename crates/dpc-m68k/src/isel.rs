@@ -4234,6 +4234,9 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 walk(body, v);
             }
             StmtKind::For(l) => {
+                if let Some(h) = &l.home {
+                    walk_addr(h, v);
+                }
                 walk_expr(&l.from, v);
                 walk_expr(&l.to, v);
                 walk(&l.body, v);
@@ -4286,7 +4289,7 @@ fn read_after_loop(rest: &[Stmt], off: i32) -> bool {
     fn reads(body: &[Stmt], off: i32) -> bool {
         for st in body {
             let hit = match &st.kind {
-                StmtKind::For(l) if l.index.offset == off => return false,
+                StmtKind::For(l) if l.home.is_none() && l.index.offset == off => return false,
                 StmtKind::For(l) => {
                     hits_expr(&l.from, off) || hits_expr(&l.to, off) || reads(&l.body, off)
                 }
@@ -4995,6 +4998,9 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
             StmtKind::For(l) => {
                 walk_expr(&l.from, v);
                 walk_expr(&l.to, v);
+                if let Some(h) = &l.home {
+                    walk_addr(h, v);
+                }
                 walk_eval(&l.body, v);
             }
             StmtKind::Case {
@@ -5045,6 +5051,91 @@ fn neg_form(c: u32) -> bool {
     let plus = m > 1 && (m - 1).is_power_of_two();
     let minus = m > 3 && (m + 1).is_power_of_two();
     minus && !plus
+}
+
+/// Whether [`Selector::for_`] makes `l` with [`Selector::for_wide`]: a
+/// byte or longword index, an index kept in memory ([`ForLoop::home`]), or
+/// an unsigned word index from a constant up to a run-time bound (the
+/// image's form, `tst.w; beq` before the `subq.w #1` among the preheader's
+/// other instructions, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, is not
+/// settled: best effort, bead domain-pascal-1mtr).
+fn for_wide_loop(l: &ForLoop) -> bool {
+    l.index.ty.width != Width::Word
+        || l.home.is_some()
+        || (!l.index.ty.is_signed()
+            && !l.down
+            && matches!(l.from, Expr::Const { .. })
+            && !matches!(l.to, Expr::Const { .. }))
+}
+
+/// The type [`Selector::for_wide`] computes a `for` loop's guard and count
+/// in: the index's, or a type holding a wider run-time bound's values too,
+/// so that an empty range runs no pass (ref p. 4-90: "Pascal does not
+/// execute the loop even once"; ISO 7185 6.8.3.9 compares the bounds'
+/// values; reference-clarifications question 47).
+///
+/// - No run-time bound wider than the index: the index's type, as the
+///   image guards a `0..65535` index against an `integer` bound unsigned
+///   (PCHIST_$CNTL's nested 0xE5CD1A `tst.w; beq`).  Except an unsigned
+///   longword index (`0..2147483647`, all of whose values a signed
+///   longword holds) with a signed bound: signed.
+/// - Otherwise the widest bound's width, unsigned when the index and the
+///   bounds all are, else signed, a longword when an unsigned type of
+///   that width would not fit (best effort: no site looked at).
+fn for_domain(index: Scalar, from: &Expr, to: &Expr) -> Scalar {
+    let bounds: Vec<Scalar> = [from, to]
+        .into_iter()
+        .filter(|e| !matches!(e, Expr::Const { .. }))
+        .map(|e| e.ty())
+        .collect();
+    let width = bounds
+        .iter()
+        .map(|t| t.width)
+        .fold(index.width, |a, b| if b.bytes() > a.bytes() { b } else { a });
+    let any_signed = index.is_signed() || bounds.iter().any(|t| t.is_signed());
+    if width == index.width {
+        return if width == Width::Long && any_signed {
+            Scalar::signed(Width::Long)
+        } else {
+            index
+        };
+    }
+    if !any_signed {
+        return Scalar {
+            width,
+            sign: Sign::Unsigned,
+            pointer: false,
+        };
+    }
+    let unsigned_full = std::iter::once(index)
+        .chain(bounds.iter().copied())
+        .any(|t| !t.is_signed() && t.width == width);
+    Scalar::signed(if unsigned_full { Width::Long } else { width })
+}
+
+/// `e` as a value of `ty` ([`for_domain`]), widened a width at a time.
+fn widen_to(e: Expr, ty: Scalar) -> Expr {
+    match e {
+        Expr::Const { value, .. } => Expr::Const { value, ty },
+        e if e.ty().bytes() >= ty.bytes() => e,
+        e => {
+            let t = e.ty();
+            let next = match t.width {
+                Width::Byte => Width::Word,
+                _ => Width::Long,
+            };
+            let step = Expr::Convert {
+                value: Box::new(e),
+                ty: Scalar {
+                    width: next,
+                    sign: t.sign,
+                    pointer: false,
+                },
+                in_place: false,
+            };
+            widen_to(step, ty)
+        }
+    }
 }
 
 /// Whether `index` is the plain `for` index at frame offset `off`.
@@ -5348,6 +5439,9 @@ fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
                 addrs_mut(body, f);
             }
             StmtKind::For(l) => {
+                if let Some(h) = &mut l.home {
+                    addr_mut(h, f);
+                }
                 expr_addrs_mut(&mut l.from, f);
                 expr_addrs_mut(&mut l.to, f);
                 addrs_mut(&mut l.body, f);
@@ -6839,7 +6933,12 @@ impl Uses<'_> {
                 StmtKind::For(l) => {
                     self.expr(&l.from);
                     self.expr(&l.to);
-                    let arrays = stepped_arrays(&l.body, l.index.offset, &self.f.uplevel_refs);
+                    // [`Selector::for_wide`] steps no pointer.
+                    let arrays = if for_wide_loop(l) {
+                        Err("")
+                    } else {
+                        stepped_arrays(&l.body, l.index.offset, &self.f.uplevel_refs)
+                    };
                     if let Ok(arrays) = &arrays {
                         for a in arrays {
                             self.address(&a.base);
@@ -6847,6 +6946,10 @@ impl Uses<'_> {
                         self.stepped.push(l.index.offset);
                     }
                     let start = self.out.len();
+                    if let Some(h) = &l.home {
+                        // Stored to, and stepped each pass ([`Selector::for_wide`]).
+                        self.address(h);
+                    }
                     self.stmts(&l.body);
                     self.twice(start);
                     if arrays.is_ok() {
@@ -7011,6 +7114,9 @@ pub struct Selector {
     /// offset and the (virtual) data register, while the register holds
     /// the variable (its loop, and after it when read there).
     for_regs: Vec<(i32, u8)>,
+    /// The size of each byte or longword `for` index ([`Self::for_wide`]),
+    /// by frame offset; a `for` index not listed is a word.
+    for_sizes: Vec<(i32, Size)>,
     /// The `for` indices the statements after their loop read
     /// ([`Self::for_`]), held in the loop's register until the end of the
     /// loop's sequence ([`Self::seq`]).
@@ -7392,6 +7498,7 @@ impl Selector {
             reg_locals: Vec::new(),
             webs: Vec::new(),
             for_regs: Vec::new(),
+            for_sizes: Vec::new(),
             held_after: Vec::new(),
             param_webs: Vec::new(),
             assigned_params: Vec::new(),
@@ -7813,7 +7920,10 @@ impl Selector {
                     self.repeat(f, body, until.as_ref())?
                 }
                 StmtKind::While { cond, body } => self.while_(f, cond, body)?,
-                StmtKind::For(l) => self.for_(f, l, read_after_loop(rest, l.index.offset))?,
+                StmtKind::For(l) => {
+                    let after = l.home.is_none() && read_after_loop(rest, l.index.offset);
+                    self.for_(f, l, after)?
+                }
                 StmtKind::Exit | StmtKind::Next => {
                     let exit = matches!(st.kind, StmtKind::Exit);
                     if !reached_after_jump(rest) {
@@ -8439,6 +8549,18 @@ impl Selector {
     /// whose initial value is the count's (0xE6A8BC `moveq #19,D2; move.w
     /// D2,D1`: the constant is copied, not reloaded).
     fn for_(&mut self, f: &Function, l: &ForLoop, after: bool) -> Res<()> {
+        if for_wide_loop(l) {
+            if l.index.ty.width == Width::Word && l.home.is_none() {
+                best_effort(
+                    self.span,
+                    "a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` \
+                     before the `subq.w #1`, which stands among the preheader's other \
+                     instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, 0xE10C30; not \
+                     settled, codegen-patterns 7.4) is",
+                )?;
+            }
+            return self.for_wide(f, l, after);
+        }
         let span = self.span;
         let off = l.index.offset;
         let arrays =
@@ -8766,6 +8888,431 @@ impl Selector {
             label: head,
             until: None,
         });
+        self.place(exit);
+        Ok(())
+    }
+
+    /// A `for` loop whose index is a byte (`char`, a `[byte]` subrange)
+    /// or a longword (`integer32`, `linteger`), or is kept in memory ([`ForLoop`];
+    /// ref "For", pp. 4-88..4-90; bead domain-pascal-1mtr): a `dbf` loop
+    /// over a count, the index in a register stepped at the bottom, as
+    /// [`Self::for_`] makes one for a word index (codegen-patterns 7.4,
+    /// "Byte and longword indices"):
+    ///
+    /// ```text
+    ///         <the count into Dc>     ; constant: moveq|move.w #n-1, or
+    ///                                 ;   move.l #n-1 above 65536 passes;
+    ///                                 ;   run time: to - from, guarded
+    ///         <from into Di>          ; only when the index is read
+    ///         <filler>
+    /// HEAD:   body
+    /// STEP:   addq.b|addq.l #1,Di     ; subq for downto
+    ///         dbf     Dc,HEAD
+    ///         clr.w   Dc              ; a longword count only
+    ///         subq.l  #1,Dc
+    ///         bcc     HEAD
+    /// EXIT:
+    /// ```
+    ///
+    /// Image-backed (longword indices): constant bounds, the count a word
+    /// loaded before the index, NETBUF_$INIT 0xE2F644 `move.w #191,D0; clr.l
+    /// D1`, MMAP_$INIT 0xE319BE..0xE319C8 `move.w #3583,D5; ...; move.l
+    /// #512,D2`, the index stepped `addq.l #1,D2` before `dbf D5` at
+    /// 0xE31AF2; a run-time count in a longword, `dbf` extended by `clr.w
+    /// Dc; subq.l #1,Dc; bcc` (MST_$WIRE_AREA 0xE44C24, MMAP_$TRIM_WSL
+    /// 0xE0C87C..0xE0C884).
+    ///
+    /// Best effort (not byte-identical):
+    /// - the run-time guard: `to - from` (`from - to` for `downto`), then
+    ///   `blt` (`bcs` for an unsigned index; `tst; bmi` from a signed 0,
+    ///   none from an unsigned 0).  The image tests a `linteger` bound
+    ///   from 1 with `beq` before `move.l; subq.l #1` (MST_$WIRE_AREA
+    ///   0xE44BDC, MMAP_$TRIM_WSL 0xE0C7AE);
+    /// - arrays indexed by the index are reached with the index register
+    ///   each pass, not through a stepped pointer (NETBUF_$INIT `move.l
+    ///   D2,(A0)+`);
+    /// - byte indices: no site looked at; the count is widened to a word
+    ///   (`andi.w #0xff`);
+    /// - the order of the registers ([`Self::for_`]'s colouring hints are
+    ///   not given).
+    ///
+    /// An index kept in memory ([`ForLoop::home`], any width): no index
+    /// register; `from` stored to it, then `addq #1` there after each pass
+    /// (RINGLOG_$CNTL's nested 0xE721CC: `move.w #1,(-2,A2)` after the
+    /// count, `addq.w #1,(-2,A2)` before `dbf D2`; PCHIST_$CNTL's nested
+    /// 0xE5CD4E).  Best effort (not byte-identical): the guard as above
+    /// (`blt` for the image's `bmi`, the count not copied); a run-time
+    /// `from` kept in a register and stored once both bounds are
+    /// evaluated and the guard passed (no site looked at; the store after
+    /// the guard as at 0xE721EC..0xE721F0).
+    ///
+    /// The guard and the count are computed in [`for_domain`]'s type: a
+    /// run-time bound wider than the index (which `dpc-ir` keeps at its
+    /// width for these loops) widened, `from` and `to` widened to it, so
+    /// that `for b := 0 to n - 1` over a byte with n = 0 runs no pass.
+    ///
+    /// Also an unsigned word index from a constant up to a run-time bound
+    /// ([`for_wide_loop`]): the image's form there is not settled
+    /// (MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028 `tst.w; beq` before the
+    /// `subq.w #1` among the preheader's other instructions).  Best effort
+    /// (not byte-identical): `subq.w #from; bcs`, no stepped pointers.
+    ///
+    /// The count, not the index, ends the loop, so a loop to the type's
+    /// last value (`for c := 0 to 255` over a byte) ends.  The bounds are
+    /// evaluated once, `from` first; an empty range runs no pass (ref p.
+    /// 4-90); a constant one emits nothing but the index's initial value
+    /// when the statements after the loop read it.
+    fn for_wide(&mut self, f: &Function, l: &ForLoop, after: bool) -> Res<()> {
+        let span = self.span;
+        let off = l.index.offset;
+        let w = l.index.ty.width;
+        let z = size_of(w);
+        let konst = |e: &Expr| match e {
+            Expr::Const { value, .. } => Some(*value),
+            _ => None,
+        };
+        // An index kept in memory ([`ForLoop::home`]): `home := e` and
+        // `home := home ± 1` as the body's own stores are made.
+        let home = l.home.clone();
+        let store_home = |s: &mut Self, value: Expr| -> Res<()> {
+            let st = Stmt {
+                kind: StmtKind::Store {
+                    addr: home.clone().expect("a home"),
+                    value,
+                },
+                span,
+            };
+            s.seq(
+                f,
+                std::slice::from_ref(&st),
+                Tail {
+                    end: false,
+                    clean: false,
+                },
+            )?;
+            s.span = span;
+            Ok(())
+        };
+        if home.is_none() {
+            self.pinned.retain(|&(o, _)| o != off);
+            self.for_regs.retain(|&(o, _)| o != off);
+            self.held_after.retain(|&o| o != off);
+            if !self.for_sizes.iter().any(|&(o, _)| o == off) {
+                self.for_sizes.push((off, z));
+            }
+        }
+        let uses_index = home.is_none() && (index_read_unstepped(&l.body, off) || after);
+        // Where the image's form is not settled or not followed: a warning,
+        // a refusal under `--strict` (bead domain-pascal-5kgg).
+        if w == Width::Byte {
+            best_effort(
+                span,
+                "a `for` loop over a byte index (no site looked at; codegen-patterns 7.4, \
+                 \"Byte and longword indices\") is",
+            )?;
+        }
+        if konst(&l.from).is_none() || konst(&l.to).is_none() {
+            best_effort(
+                span,
+                "the guard of a `for` loop over a byte or longword index, or one kept in \
+                 memory, with a run-time bound (`to - from` and `blt`/`bcs` for the image's \
+                 `beq` or `bmi`: MST_$WIRE_AREA 0xE44BDC, RINGLOG_$CNTL's nested 0xE721EC; \
+                 codegen-patterns 7.4) is",
+            )?;
+        }
+        let mut stepped = false;
+        walk(&l.body, &mut |n| {
+            if let Node::Addr(Addr::Index { index, scale, .. }) = n {
+                stepped |= *scale > 1 && home.is_none() && expr_reads_frame(index, off);
+            }
+        });
+        if stepped {
+            best_effort(
+                span,
+                "an array indexed by a byte or longword `for` index (reached with the index \
+                 register each pass, not a stepped pointer as NETBUF_$INIT 0xE2F650 `move.l \
+                 D2,(A0)+`; codegen-patterns 7.4) is",
+            )?;
+        }
+        // A run-time `from` is kept in a register for the index or its home.
+        let keep = uses_index || home.is_some();
+        // The type the guard and the count are computed in ([`for_domain`]).
+        let dom = for_domain(l.index.ty, &l.from, &l.to);
+        let (dw, dz, dsigned) = (dom.width, size_of(dom.width), dom.is_signed());
+        let exit = self.new_label();
+        // `to - from` (or `from - to`) in `c`, less the constant `k` when
+        // given, and the branch to `exit` when the range is empty.
+        let guard = |s: &mut Self, c: u8, k: Option<i64>| {
+            let dst = Ea::Reg(Reg::D(c));
+            match k {
+                Some(0) if !dsigned => return,
+                Some(0) => {
+                    s.out.push(Insn::Tst { size: dz, dst });
+                    s.jump(Cond::Mi, exit);
+                    return;
+                }
+                Some(k @ 1..=8) => s.out.push(Insn::Subq {
+                    size: dz,
+                    value: k as u8,
+                    dst,
+                }),
+                Some(k) => s.out.push(Insn::AluImm {
+                    op: AluOp::Sub,
+                    size: dz,
+                    imm: imm(k, dw),
+                    dst,
+                }),
+                None => {}
+            }
+            s.jump(if dsigned { Cond::Lt } else { Cond::Cs }, exit);
+        };
+        let (count, long, from_reg) = match (konst(&l.from), konst(&l.to)) {
+            (Some(a), Some(b)) => {
+                let n = if l.down { a - b + 1 } else { b - a + 1 };
+                if n < 1 {
+                    // Never runs: the constants need no evaluation.
+                    let mut label = false;
+                    dpc_ir::visit_stmts(&l.body, &mut |s| {
+                        label |= matches!(s.kind, StmtKind::Label(_))
+                    });
+                    if label {
+                        return Err(unsupported(
+                            span,
+                            "a `for` loop that never runs with a label in its body is",
+                        ));
+                    }
+                    if after && home.is_none() {
+                        let d = self.alloc_d()?;
+                        self.const_into(a, w, d);
+                        self.pinned.push((off, Reg::D(d)));
+                        self.for_regs.push((off, d));
+                        self.held_after.push(off);
+                    }
+                    return Ok(());
+                }
+                let m = n - 1;
+                let c = self.alloc_d()?;
+                let dst = Ea::Reg(Reg::D(c));
+                self.out.push(match m {
+                    0 => Insn::Clr { size: Size::W, dst },
+                    1..=127 => Insn::Moveq {
+                        value: m as i8,
+                        dst: c,
+                    },
+                    128..=0xFFFF => Insn::Move {
+                        size: Size::W,
+                        src: Ea::Imm(imm(m, Width::Word)),
+                        dst,
+                    },
+                    _ => Insn::Move {
+                        size: Size::L,
+                        src: Ea::Imm(imm(m, Width::Long)),
+                        dst,
+                    },
+                });
+                (c, m > 0xFFFF, None)
+            }
+            (ka, kb) => {
+                // Both bounds are evaluated, `from` first, before the index
+                // or its home is set: a bound may read the variable (`for g
+                // := f(x) to g`, ref p. 4-89: the loop "initializes the
+                // index_variable to the value of the start_exp").  A run-time
+                // `from` goes into a register of its own when it is kept,
+                // when `downto` computes the count in it, or when `to`
+                // calls (its operand read after the call otherwise).
+                let from_d = widen_to(l.from.clone(), dom);
+                let to_d = widen_to(l.to.clone(), dom);
+                let vf = match ka {
+                    Some(_) => None,
+                    None => {
+                        let v = self.eval(&from_d)?;
+                        Some(if keep || l.down || expr_has_call(&to_d) {
+                            Val::Tmp(self.in_tmp(v, dw)?)
+                        } else {
+                            v
+                        })
+                    }
+                };
+                let vt = self.eval(&to_d)?;
+                let c = if !l.down {
+                    let c = self.in_tmp(vt, dw)?;
+                    match &vf {
+                        Some(v) => {
+                            self.out.push(Insn::Alu {
+                                op: AluOp::Sub,
+                                size: dz,
+                                src: Self::ea_val(v),
+                                dst: c,
+                            });
+                            guard(self, c, None);
+                        }
+                        None => guard(self, c, ka),
+                    }
+                    c
+                } else {
+                    let c = match &vf {
+                        Some(Val::Tmp(d)) if keep => {
+                            let c = self.alloc_d()?;
+                            self.out.push(Insn::Move {
+                                size: dz,
+                                src: Ea::Reg(Reg::D(*d)),
+                                dst: Ea::Reg(Reg::D(c)),
+                            });
+                            c
+                        }
+                        Some(Val::Tmp(d)) => *d,
+                        Some(_) => unreachable!("a `downto` `from` in a register of its own"),
+                        None => self.load_const(ka.expect("a constant `from`"), dw)?,
+                    };
+                    match kb {
+                        Some(b) => guard(self, c, Some(b)),
+                        None => {
+                            self.out.push(Insn::Alu {
+                                op: AluOp::Sub,
+                                size: dz,
+                                src: Self::ea_val(&vt),
+                                dst: c,
+                            });
+                            guard(self, c, None);
+                        }
+                    }
+                    c
+                };
+                if dw == Width::Byte {
+                    // The count, 0..255, as the word `dbf` counts.
+                    self.out.push(Insn::AluImm {
+                        op: AluOp::And,
+                        size: Size::W,
+                        imm: 0xff,
+                        dst: Ea::Reg(Reg::D(c)),
+                    });
+                }
+                let from_reg = match vf {
+                    Some(Val::Tmp(d)) if keep => Some(d),
+                    _ => None,
+                };
+                (c, dw == Width::Long, from_reg)
+            }
+        };
+        // The index's register: `from`'s (its low bytes when the count is
+        // computed wider), or the constant.
+        let mut index = None;
+        if uses_index {
+            let d = match from_reg {
+                Some(d) => d,
+                None => {
+                    let d = self.alloc_d()?;
+                    self.const_into(konst(&l.from).expect("a constant `from`"), w, d);
+                    d
+                }
+            };
+            self.pinned.push((off, Reg::D(d)));
+            self.for_regs.push((off, d));
+            index = Some(d);
+        }
+        if let Some(h) = &home {
+            match from_reg {
+                // The run-time `from`, set once the bounds are evaluated.
+                Some(d) => {
+                    let dst = self.operand(h)?;
+                    self.out.push(Insn::Move {
+                        size: z,
+                        src: Ea::Reg(Reg::D(d)),
+                        dst,
+                    });
+                }
+                // RINGLOG_$CNTL's nested 0xE721F0 `move.w #1,(-2,A2)` after
+                // the count.
+                None => store_home(
+                    self,
+                    Expr::Const {
+                        value: konst(&l.from).expect("a constant `from`"),
+                        ty: l.index.ty,
+                    },
+                )?,
+            }
+        }
+        let multi = self.multi;
+        let head = self.new_label();
+        let step = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        self.loops.push((Some(step), Some(exit)));
+        self.seq(
+            f,
+            &l.body,
+            Tail {
+                end: false,
+                clean: false,
+            },
+        )?;
+        self.loops.pop();
+        (self.span, self.multi) = (span, multi);
+        (self.call_no_pop, self.called) = (false, false);
+        self.place(step);
+        if let Some(h) = &home {
+            // 0xE7220A `addq.w #1,(-2,A2)`.
+            store_home(
+                self,
+                Expr::Binary {
+                    op: if l.down { BinOp::Sub } else { BinOp::Add },
+                    lhs: Box::new(Expr::Load {
+                        addr: h.clone(),
+                        ty: l.index.ty,
+                    }),
+                    rhs: Box::new(Expr::Const {
+                        value: 1,
+                        ty: l.index.ty,
+                    }),
+                    ty: l.index.ty,
+                },
+            )?;
+            (self.call_no_pop, self.called) = (false, false);
+        }
+        if let Some(d) = index {
+            let dst = Ea::Reg(Reg::D(d));
+            self.out.push(if l.down {
+                Insn::Subq {
+                    size: z,
+                    value: 1,
+                    dst,
+                }
+            } else {
+                Insn::Addq {
+                    size: z,
+                    value: 1,
+                    dst,
+                }
+            });
+            if after {
+                // As [`Self::for_`]: the register holds the variable after
+                // the loop, one step past the last value after normal
+                // termination.
+                self.held_after.push(off);
+            } else {
+                self.pinned.retain(|&(o, _)| o != off);
+                self.for_regs.retain(|&(o, _)| o != off);
+            }
+        }
+        self.out.push(Insn::Dbf {
+            reg: count,
+            label: head,
+            until: None,
+        });
+        if long {
+            // A longword count: its high word counted down too (MST_$WIRE_
+            // AREA 0xE44C24 `dbf D2; clr.w D2; subq.l #1,D2; bcc`).
+            self.out.push(Insn::Clr {
+                size: Size::W,
+                dst: Ea::Reg(Reg::D(count)),
+            });
+            self.out.push(Insn::Subq {
+                size: Size::L,
+                value: 1,
+                dst: Ea::Reg(Reg::D(count)),
+            });
+            self.jump(Cond::Cc, head);
+        }
         self.place(exit);
         Ok(())
     }
@@ -10631,6 +11178,14 @@ impl Selector {
             .rev()
             .find(|&&(p, _)| p == o)
             .map(|&(_, d)| d)
+    }
+
+    /// The size of the `for` index at frame offset `o` ([`Self::for_sizes`]).
+    fn for_size(&self, o: i32) -> Size {
+        self.for_sizes
+            .iter()
+            .find(|&&(p, _)| p == o)
+            .map_or(Size::W, |&(_, z)| z)
     }
 
     fn pinned(&self, o: i32) -> Option<Reg> {
@@ -13741,7 +14296,7 @@ impl Selector {
                         )?;
                     }
                     self.out.push(Insn::Move {
-                        size: Size::W,
+                        size: self.for_size(*o),
                         src: Ea::Reg(Reg::D(d)),
                         dst: Ea::Disp(*o, FP),
                     });
@@ -24909,6 +25464,7 @@ mod tests {
                 offset: -2,
                 ty: word(),
             },
+            home: None,
             from,
             to,
             down,
@@ -25637,6 +26193,7 @@ mod tests {
                     offset: -2,
                     ty: unsigned,
                 },
+                home: None,
                 from: konst(1, unsigned),
                 to: load(sym("N"), unsigned),
                 down: false,
@@ -25646,7 +26203,17 @@ mod tests {
                 }],
             })],
         );
+        // Refused under `--strict`; best effort otherwise (bead
+        // domain-pascal-1mtr, `for_wide`): the count `to - 1` guarded
+        // unsigned.
         assert!(err(&f).contains("unsigned index"));
+        let was = dpc_syntax::diag::set_strict(false);
+        let out = select(&f);
+        dpc_syntax::diag::set_strict(was);
+        dpc_syntax::diag::take_best_effort();
+        let out = out.unwrap();
+        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
+        assert!(out.iter().any(|i| matches!(i, Insn::Dbf { .. })), "{out:?}");
         // An array of words indexed by the index: stepped pointers, only
         // through a pointer variable.
         let elem = |base: Addr, index: Expr| Addr::Index {

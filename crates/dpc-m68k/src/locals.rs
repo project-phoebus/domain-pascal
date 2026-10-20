@@ -369,8 +369,14 @@ impl Walk<'_> {
                 // The index is the loop's own register (`Selector::for_`);
                 // its reads count as reads of a local with no store.
                 StmtKind::For(l) => {
-                    if let Some(k) = self.exact(l.index.offset, l.index.ty.width) {
-                        self.out.locals[k].for_index = true;
+                    if let Some(h) = &l.home {
+                        // Kept in memory (`Selector::for_wide`).
+                        self.other(h);
+                    }
+                    if l.home.is_none() {
+                        if let Some(k) = self.exact(l.index.offset, l.index.ty.width) {
+                            self.out.locals[k].for_index = true;
+                        }
                     }
                     self.expr(&l.from);
                     self.expr(&l.to);

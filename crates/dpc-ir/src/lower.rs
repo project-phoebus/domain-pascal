@@ -884,6 +884,9 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             }
         }
         StmtKind::For(l) => {
+            if let Some(h) = &l.home {
+                addr(h, l.index.ty.bytes(), out);
+            }
             expr(&l.from, out);
             expr(&l.to, out);
             for st in &l.body {
@@ -1994,7 +1997,8 @@ fn stmt_uses_static(s: &Stmt) -> bool {
             cond_uses_static(cond) || body.iter().any(stmt_uses_static)
         }
         StmtKind::For(l) => {
-            expr_uses_static(&l.from)
+            l.home.as_ref().is_some_and(addr_uses_static)
+                || expr_uses_static(&l.from)
                 || expr_uses_static(&l.to)
                 || l.body.iter().any(stmt_uses_static)
         }
@@ -2341,8 +2345,9 @@ fn lower_body(
 /// the same variable through the static link (0xE721F0 `move.w
 /// #1,(-2,A2)`, 0xE7220A `addq.w #1,(-2,A2)`), steps its loop at
 /// 0xE72296..0xE722B0 in memory (`clr.w (-2,A6)`, `muls.w (-2,A6),D1`,
-/// `addq.w #1,(-2,A6)`, beside the `dbf` count in D0): that form is not
-/// implemented.
+/// `addq.w #1,(-2,A6)`, beside the `dbf` count in D0): `Cx::for_loop`
+/// gives such a loop a [`ForLoop::home`], so this holds by construction
+/// (a check kept for the loops of the register form).
 fn check_uplevel_indices(body: &[Stmt], uplevel: &[(i32, u32)]) -> Res<()> {
     if uplevel.is_empty() {
         return Ok(());
@@ -2350,7 +2355,7 @@ fn check_uplevel_indices(body: &[Stmt], uplevel: &[(i32, u32)]) -> Res<()> {
     for st in body {
         let inner: Vec<&[Stmt]> = match &st.kind {
             StmtKind::For(l) => {
-                if overlaps(uplevel, l.index.offset, 2) {
+                if l.home.is_none() && overlaps(uplevel, l.index.offset, l.index.ty.bytes()) {
                     return Err(unsupported(
                         st.span,
                         "a `for` loop whose index a nested routine reaches (kept in the frame, \
@@ -2424,6 +2429,9 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         gotos: Vec<(u32, usize)>,
         /// The index of the loop whose bounds are being walked.
         bounding: Vec<i32>,
+        /// The homes of the loops being walked whose index is kept in
+        /// memory ([`ForLoop::home`]).
+        homes: Vec<Addr>,
         span: Span,
     }
     /// The `goto`s of `body`, by label.
@@ -2441,7 +2449,21 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         fn hit(&self, o: i32, size: u32) -> bool {
             self.all
                 .iter()
-                .any(|l| o < l.offset + 2 && l.offset < o + size as i32)
+                .any(|l| o < l.offset + l.ty.bytes() as i32 && l.offset < o + size as i32)
+        }
+        /// The size of the `for` index at `o` (a byte, a word or a
+        /// longword).
+        fn index_bytes(&self, o: i32) -> i32 {
+            self.all
+                .iter()
+                .find(|l| l.offset == o)
+                .map_or(2, |l| l.ty.bytes() as i32)
+        }
+        /// Whether a load of `ty` at `o` reads a `for` index whole.
+        fn whole(&self, o: i32, ty: &Scalar) -> bool {
+            self.all
+                .iter()
+                .any(|l| l.offset == o && l.ty.width == ty.width)
         }
         fn bad(&self) -> Diagnostic {
             unsupported(
@@ -2492,7 +2514,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     if self
                         .active
                         .iter()
-                        .any(|&l| *o < l + 2 && l < *o + size as i32) =>
+                        .any(|&l| *o < l + self.index_bytes(l) && l < *o + size as i32) =>
                 {
                     Err(unsupported(
                         self.span,
@@ -2522,11 +2544,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                 Expr::Load {
                     addr: Addr::Frame(o),
                     ty,
-                } if self.active.contains(o) && ty.width == Width::Word => Ok(()),
+                } if self.active.contains(o) && self.whole(*o, ty) => Ok(()),
                 Expr::Load {
                     addr: Addr::Frame(o),
                     ty,
-                } if ty.width == Width::Word && self.all.iter().any(|l| l.offset == *o) => {
+                } if self.whole(*o, ty) => {
                     self.read(*o)
                 }
                 Expr::Load { addr, ty } => self.addr(addr, ty.bytes()),
@@ -2657,6 +2679,30 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         self.cond(cond)?;
                         self.stmts(body)?;
                     }
+                    // An index kept in memory: its bounds are evaluated
+                    // before it is set (`Selector::for_wide`), it is read
+                    // in memory after the loop; only a loop over it nested
+                    // in another one is refused, as below.
+                    StmtKind::For(ForLoop {
+                        home: Some(h),
+                        from,
+                        to,
+                        body: inner,
+                        ..
+                    }) => {
+                        self.expr(from)?;
+                        self.expr(to)?;
+                        if self.homes.contains(h) {
+                            return Err(unsupported(
+                                self.span,
+                                "a `for` loop over the index of an enclosing `for` loop (an \
+                                 assignment of its index, ref p. 4-89) is",
+                            ));
+                        }
+                        self.homes.push(h.clone());
+                        self.stmts(inner)?;
+                        self.homes.pop();
+                    }
                     StmtKind::For(l) => {
                         self.bounding.push(l.index.offset);
                         let bounds = self.expr(&l.from).and_then(|()| self.expr(&l.to));
@@ -2751,7 +2797,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         for st in body {
             match &st.kind {
                 StmtKind::For(l) => {
-                    out.push(l.index);
+                    // An index kept in memory ([`ForLoop::home`]) is an
+                    // ordinary variable outside its loop.
+                    if l.home.is_none() {
+                        out.push(l.index);
+                    }
                     collect(&l.body, out);
                 }
                 StmtKind::If { then_, else_, .. } => {
@@ -2775,7 +2825,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
     }
     let mut all = Vec::new();
     collect(body, &mut all);
-    if all.is_empty() {
+    let mut homes = false;
+    crate::visit_stmts(body, &mut |s| {
+        homes |= matches!(&s.kind, StmtKind::For(l) if l.home.is_some())
+    });
+    if all.is_empty() && !homes {
         return Ok(());
     }
     let mut gotos = Vec::new();
@@ -2787,6 +2841,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         depth: 0,
         gotos,
         bounding: Vec::new(),
+        homes: Vec::new(),
         span: body[0].span,
     }
     .stmts(body)
@@ -3567,14 +3622,15 @@ impl Cx<'_> {
     /// [`StmtKind::Fill`] shape when it is one (`fill`), else a
     /// [`StmtKind::For`].
     ///
-    /// The index variable must be a word-sized local of this routine,
-    /// other than the function result variable: the selector keeps it in
+    /// The index variable must be a byte, word or longword local of this
+    /// routine, other than the function result variable: the selector keeps it in
     /// a register for the loop and never stores it (codegen-patterns 7.4:
     /// 307 of 320 `dbf` loops with an index step it in a register; the
     /// other 13, `addq.w #1,(d,A6)` or through a static link, are not
     /// reproduced).  Ref p. 4-89 lets the index be declared in another
-    /// scope; such loops (0xE721F8, through the parent's frame) are not
-    /// supported yet.  Whether the index is read outside its loops, or
+    /// scope; such an index, and a local a nested routine reaches, is kept
+    /// in memory ([`ForLoop::home`]; 0xE721F8, through the parent's
+    /// frame).  Whether the index is read outside its loops, or
     /// assigned or addressed inside them, is checked over the whole body
     /// afterwards ([`check_for_indices`]).
     fn for_loop(
@@ -3594,43 +3650,88 @@ impl Cx<'_> {
         if let Some(st) = fill(p, s, var, from, dir, to, body)? {
             return Ok(st);
         }
-        let ExprKind::Var {
-            var: index,
-            uplevel: 0,
-        } = var.kind
-        else {
+        let vty = var.ty;
+        let result = self.r.result.as_ref().and_then(|res| res.var);
+        // A local of this routine that no nested routine reaches: held in
+        // a register.  Any other index (ref p. 4-89 lets it be declared in
+        // another scope) is kept in memory, `ForLoop::home` (RINGLOG_$CNTL
+        // 0xE72296..0xE722B0 for its own frame's index, which its nested
+        // 0xE721CC reaches and loops over through the static link).
+        let local = match var.kind {
+            ExprKind::Var {
+                var: index,
+                uplevel: 0,
+            } => match p.var(index).storage {
+                Storage::Frame { offset }
+                    if self.r.frame_vars.contains(&index)
+                        && Some(index) != result
+                        && !overlaps(&self.uplevel, offset, p.types.size(vty)) =>
+                {
+                    Some(offset)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let (offset, home) = match local {
+            Some(o) => (o, None),
+            None => match addr_of(p, var)? {
+                Addr::Volatile { .. } => {
+                    return Err(unsupported(var.span, "a volatile `for` index variable is"))
+                }
+                a => (0, Some(a)),
+            },
+        };
+        // A byte (`char`, a `[byte]` subrange) or longword
+        // (`integer32`, `linteger`) index: the target's own loop form
+        // (bead domain-pascal-1mtr; codegen-patterns 7.4, "Byte and
+        // longword indices").
+        let Some(width) = Width::of_size(p.types.size(vty)) else {
             return Err(unsupported(
                 var.span,
-                "a `for` index variable that is not a local of the routine (ref p. 4-89) is",
+                "a `for` index variable that is not a byte, a word or a longword is",
             ));
         };
-        let result = self.r.result.as_ref().and_then(|res| res.var);
-        let offset =
-            match p.var(index).storage {
-                Storage::Frame { offset }
-                    if self.r.frame_vars.contains(&index) && Some(index) != result =>
-                {
-                    offset
-                }
-                _ => return Err(unsupported(
-                    var.span,
-                    "a `for` index variable that is not a local of the routine (ref p. 4-89) is",
-                )),
-            };
-        let vty = p.var(index).ty;
-        if p.types.size(vty) != 2 {
-            // `dbf` counts a word; byte and longword indices are not
-            // catalogued.
-            return Err(unsupported(
-                var.span,
-                "a `for` index variable that is not a word (integer16 or a subrange stored \
-                 in a word) is",
-            ));
+        if p.types.is_boolean(vty) {
+            // `true` is stored 0xFF, not `false` + 1 (ref 3.5.3, p. 3-11):
+            // stepping the index is not an increment.  No site.
+            return Err(unsupported(var.span, "a boolean `for` index variable is"));
         }
-        let ty = scalar_of_type(&p.types, vty, Width::Word);
+        let ty = scalar_of_type(&p.types, vty, width);
         let bound = |e: &SExpr| -> Res<Expr> {
             match &e.value {
                 Some(c) => const_of(c, ty, e.span),
+                // An index other than a signed word held in a register: an
+                // integer bound wider than the index is kept at its own
+                // width, the target computing the guard and the count there
+                // so that a bound outside the index's type gives an empty
+                // range rather than a wrapped one (ref p. 4-90; ISO 7185
+                // 6.8.3.9; reference-clarifications question 47).
+                None if (width != Width::Word || home.is_some() || !ty.is_signed())
+                    && p.types.is_integer(e.ty)
+                    && p.types.size(e.ty) > ty.bytes() =>
+                {
+                    value_of(p, e)
+                }
+                // A byte or longword index: the bound converted as an
+                // assignment converts it (`assign_convert`, `store_narrow`).
+                None if width != Width::Word => {
+                    let v = value_of(p, e)?;
+                    let k = v.ty().bytes();
+                    if let Some(x) = assign_convert(p, e, v.clone(), ty) {
+                        Ok(x)
+                    } else if let Some(x) = store_narrow(p, e, v, ty) {
+                        x.map_err(|m| unsupported(e.span, m))
+                    } else {
+                        Err(unsupported(
+                            e.span,
+                            format!(
+                                "a `for` bound of {k} bytes for an index of {} bytes is",
+                                ty.bytes()
+                            ),
+                        ))
+                    }
+                }
                 // The bound is converted to the index's type as in an
                 // assignment (`store`).
                 None => {
@@ -3680,6 +3781,7 @@ impl Cx<'_> {
         Ok(Stmt {
             kind: StmtKind::For(ForLoop {
                 index: ValueParam { offset, ty },
+                home,
                 from,
                 to,
                 down: dir == ForDir::Downto,

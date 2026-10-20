@@ -671,7 +671,8 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 
 /// `for index := from to|downto to do body` (ref "For", pp. 4-88..4-90).
 ///
-/// The index variable is a local of the routine (a word in its frame,
+/// The index variable is a local of the routine (a byte, word or longword
+/// in its frame,
 /// [`Self::index`]) that the body does not assign, that nothing assigns or
 /// addresses outside the bodies of `for` loops over it, and that is read
 /// outside them only by the statements after a loop of constant bounds in
@@ -682,7 +683,13 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 /// `Arg::Address` not `writable`, for which the target stores the register
 /// to the slot first).  The body reads it as `Expr::Load { addr:
 /// Addr::Frame(..) }`.
-/// `from` and `to` have the index's type.  Ref p. 4-90: "If you set up a
+/// `from` and `to` have the index's type, except that for an index other
+/// than a signed word held in a register (a byte or longword index, an
+/// unsigned one, one with a [`Self::home`]) a run-time integer bound wider
+/// than the index keeps its own type: the target computes the guard and
+/// the count in a type holding the values of both, so that a bound outside
+/// the index's type gives an empty range (reference-clarifications
+/// question 47).  Ref p. 4-90: "If you set up a
 /// meaningless relationship between the start_exp and the stop_exp ...
 /// Pascal does not execute the loop even once"; the value of the index
 /// after a loop that ends normally is not defined (message 235,
@@ -697,8 +704,21 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 /// relies on (`if new_idx > 70`) and `tests/exec/for_index.pas` checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForLoop {
-    /// The index variable: its frame offset and IR type (a word).
+    /// The index variable: its frame offset and IR type (a byte, a word or
+    /// a longword).  With [`Self::home`], only the type counts and the
+    /// offset is 0 (no variable's: the saved frame pointer).
     pub index: ValueParam,
+    /// Where the loop keeps the index in memory, when it does: an index of
+    /// another scope (ref p. 4-89: "Domain Pascal permits the
+    /// index_variable to be declared in a scope other than the scope of
+    /// the routine immediately containing the for loop"; a unit variable,
+    /// the enclosing routine's, a `var` parameter's target) or a local a
+    /// nested routine reaches.  The target stores `from` there, steps it
+    /// there after each pass, and the body reads it there as any variable
+    /// (RINGLOG_$CNTL's nested 0xE721CC: `move.w #1,(-2,A2)`, `addq.w
+    /// #1,(-2,A2)`, the `dbf` count in D2; codegen-patterns 7.4, "An index
+    /// kept in memory").  `None`: a local held in a register as above.
+    pub home: Option<Addr>,
     pub from: Expr,
     pub to: Expr,
     /// `downto`: the index decreases.
