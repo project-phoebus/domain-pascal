@@ -428,7 +428,9 @@ class EndToEndTest(unittest.TestCase):
 # by --check-only and by a full compile; `ISEL:word' is a codegen refusal,
 # reported by a full compile only and only when there is no sema error
 # (dpc stops at the first phase that fails); `PANIC' panics in codegen,
-# `SEGV' dies of SIGSEGV there and `HANG' sleeps for a minute;
+# `SEGV' dies of a signal there (SIGKILL, not SIGSEGV: a real SIGSEGV
+# makes macOS's crash reporter open a dialog) and `HANG' sleeps for a
+# minute;
 # `CALLS:g' is dpc's sema error for a call of an internal routine with no
 # body when g has an `extern' heading (stubbed, not named with
 # --module-routine).
@@ -457,7 +459,7 @@ if not check and any('PANIC' in open(f).read() for f in files):
     sys.exit(101)
 if not check and any('SEGV' in open(f).read() for f in files):
     import signal
-    os.kill(os.getpid(), signal.SIGSEGV)
+    os.kill(os.getpid(), signal.SIGKILL)
 if not check and any('HANG' in open(f).read() for f in files):
     import time
     time.sleep(60)
@@ -559,8 +561,8 @@ class DeepPassTest(unittest.TestCase):
     def test_deep_pass_signal_and_timeout(self):
         d = linktest.deep_pass(self.dpc, self.tree, self.one_routine_module('sg', 'SEGV'),
                                self.work)
-        self.assertEqual(d.kinds, {'dpc: signal 11': ['-']})
-        self.assertEqual(d.problem, 'codegen stage, dpc died of signal 11')
+        self.assertEqual(d.kinds, {'dpc: signal 9': ['-']})
+        self.assertEqual(d.problem, 'codegen stage, dpc died of signal 9')
         old = linktest.DPC_TIMEOUT
         linktest.DPC_TIMEOUT = 3
         try:
