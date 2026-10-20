@@ -145,6 +145,34 @@ Question: is a variable in scope inside its own initializer, so that `addr(itsel
 Owner's answer (2026-10-16): yes, in scope.  (Variables declared later in the var part are still not visible before their declaration.)
 Consequence: implemented (bead domain-pascal-i5mf): dpc-sema declares each name of a var declaration (its type and storage settled) before checking its initial value, for unit-level, `static`, `define`d and overlay-section variables and a routine's statics; `addr(itself)` is a relocated long to the variable's own place, as other `addr(...)` initial values (the data area plus an offset, or the overlay section's symbol plus an offset).  Tests: `own_address_initial_value` (crates/dpc-sema/src/tests/checks.rs), golden `data/self_addr`. ../source network/network.pas now compiles; its NETWORK data block (D 0xE248FC, 0x364 bytes) matches the image byte for byte, +0x258 `0000 0000 00e2 4b54 00e2 4b54` and +0x268 likewise.
 
+## A -config name no %var declares (6.4.8, p. 6-12; PDF p. 393)
+Asked: 2026-10-20, by the zf19 agent (bead domain-pascal-zf19; docs/compiler-options.md)
+Passage: "-config var1 [... varN] where var must be a conditional variable declared with %var."
+Question: the reference does not say what happens when a `-config` name is never declared with `%var`.  Error, warning, or nothing?
+Owner's answer (2026-10-20): warn.  The unit compiles, with a warning naming the name.
+Consequence: after preprocessing, each `-config` name that no compiled `%var` declared gets one warning without a position, "-config variable `x` is not declared with %var" (crates/dpc-syntax/src/preprocess.rs; tests `config_does_not_declare`, options.rs `accepted_noted_and_refused`).  The name stays undeclared: `%ifdef` of it is false and `%if` of it is an error (p. 4-50).  `-nwarn` hides the warning like any other.
+
+## Commas between %var and %enable names (Figure 6-2, p. 6-13; 4.7, p. 4-50; PDF pp. 394, 183)
+Asked: 2026-10-20, by the zf19 agent
+Passage: Figure 6-2 writes "%VAR first, second, third"; 4.7 writes "%VAR code.old code.new", "%VAR color mono" and "%ENABLE code.sr9 code.sr7", without commas.
+Question: are commas allowed between the names of `%var` (and `%enable`)?
+Owner's answer (2026-10-20): yes.  Names may be separated by blanks, commas, or both.
+Consequence: the preprocessor's name list (`names`) takes an optional `,` between two names; a `,` must stand between two names (`%var a,` and `%var a,, b` are errors).  The list still ends at the end of the directive's line (open question 2).  Tests: `var_and_enable_lists_with_commas`; Figure 6-2 as printed in crates/dpc/tests/options.rs.
+
+## %warning('string') and %error('string') (4.7 "%config", p. 4-51; PDF p. 184)
+Asked: 2026-10-20, by the zf19 agent
+Passage: the %config example writes "%warning('You did not set color or mono to true.');", while the directive is given as "%warning 'string'" (and "%error 'string'") on the same page.
+Question: is the parenthesised form valid?
+Owner's answer (2026-10-20): accept both forms, `%warning 'x'` and `%warning('x')`, and the same for `%error`.
+Consequence: `%error` and `%warning` take an optional `(` before the string and then need its `)` (preprocess.rs; tests `error_and_warning_in_parentheses`, `reference_color_mono_examples`).  The erratum entry for pp. 4-50/4-51 below is superseded.
+
+## The default of -msgs (6.4.21, p. 6-25; Table 6-2, p. 6-8; PDF pp. 406, 389)
+Asked: 2026-10-20, by the zf19 agent
+Passage: 6.4.21: "The -msgs option is the default."  Table 6-2 stars "-nmsgs" as the default.
+Question: which is the default?
+Owner's answer (2026-10-20): `-nmsgs` stays dpc's default: no summary unless `-msgs` is given.  Evidence noted by the reviewer, which the ruling does not follow: the reference's transcripts show the summary line without `-msgs` on the command line ("No errors, no warnings, Pascal Rev n.nn" after "$ pas config_example", p. 6-14; "1 error, no warnings, Pascal Rev n.nn", p. 4-51; "No errors, 1 warning, Pascal Rev n.nn", p. 4-52), which fits the text's `-msgs` default.
+Consequence: none beyond the implementation: `-msgs` prints the report on stderr (crates/dpc/src/main.rs, `Counts::report`); by default nothing is printed.
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -858,7 +886,9 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
   `%pop_alignment`.  The prose on p. 4-58 is followed: push saves, pop
   restores.
 - **pp. 4-50/4-51**: the OCR of the `%warning` example is garbled.
-  `%warning` takes a plain `'string'`, as Table 4-11 shows.
+  `%warning` takes a plain `'string'`, as Table 4-11 shows.  *Superseded
+  (2026-10-20):* the PDF shows `%warning('...');`, and the owner ruled
+  both forms valid ("%warning('string') and %error('string')" above).
 - **3.11.1.4, p. 3-41**: the example `[3..4 := 2, 7 := -1 1 := 3]` (checked
   in the PDF) lacks a comma after `-1`.  The parser requires commas between
   initialiser items, as every other example does.
@@ -879,3 +909,11 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
 - **3.10.5.7, p. 3-29**: "there are 4 bytes of gaps" in record FOO, but
   Figure 3-12 (PDF p. 85) shows two 1-byte gaps.  The figure's offsets are
   followed.
+- **4.7 "%warning", p. 4-52** (PDF p. 185): the example's string
+  "'You forgot to use the -CONFIG color option." has no closing quote, and
+  the text after it says "prints out the following error message" for a
+  warning.  The tests close the quote (bead domain-pascal-zf19).
+- **Table 6-2, p. 6-8** (PDF p. 389): `-std` "Issue warning messages when
+  nonstandard language elements are encountered"; 6.4.27 (p. 6-35) and
+  6.4.18 (p. 6-23) say error messages.  No consequence: dpc does not
+  implement `-std` (docs/compiler-options.md).

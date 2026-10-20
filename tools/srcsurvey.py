@@ -14,7 +14,9 @@ image (bead domain-pascal-xdh.3).
 archive' into WORK/export (default tmp/srcsurvey; ../source itself is only
 read) and works on that copy.  For each module file (default: every
 `.pas' under domain_os/ whose first word after comments is `module';
-paths relative to domain_os/), compiled with `dpc -I .' from domain_os/:
+paths relative to domain_os/), compiled with `dpc $(DPC_FLAGS) -I .'
+from domain_os/ (DPC_FLAGS, e.g. `-config sau2', from the exported
+Makefile: tools/dpcflags.py; none when it has none):
 
   0. Preparation.  Only the *incompleteness* handling of ../source's
      tools/pascal_check.sh is mirrored, never its workarounds for dpc
@@ -146,6 +148,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import a5survey  # noqa: E402
+import dpcflags  # noqa: E402
 import loopalign  # noqa: E402
 import storesurvey  # noqa: E402
 
@@ -982,10 +985,18 @@ EXTRA_DPC_OPTS = []
 DPC_STRICT = True
 
 
+# The options ../source's Makefile gives every dpc run, its DPC_FLAGS
+# (`-config sau2'; tools/dpcflags.py), set by `run' (and by
+# tools/linktest.py) from the exported tree's Makefile.  They come first,
+# as in the Makefile's rule `$(DPC) $(DPC_FLAGS) -o $@ $<': a list option
+# ends at the next option, here `-I'.
+SOURCE_DPC_FLAGS = []
+
+
 def run_dpc(dpc, tree, src, check_only=False, out=None, opts=(), timeout=None):
     """-> (dpc's exit status, its stderr); (None, its stderr so far) when
     it ran longer than TIMEOUT seconds (None: no limit)."""
-    cmd = [dpc, '-I', '.'] + (['--strict'] if DPC_STRICT else []) + EXTRA_DPC_OPTS + list(opts)
+    cmd = [dpc] + SOURCE_DPC_FLAGS + ['-I', '.'] +(['--strict'] if DPC_STRICT else []) + EXTRA_DPC_OPTS + list(opts)
     if check_only:
         cmd.append('--check-only')
     if out:
@@ -1721,6 +1732,9 @@ def cmd_run(a):
         a.rev = base_commit or 'HEAD'
     tree, commit = export_rev(os.path.abspath(a.source), a.rev, work)
     print('srcsurvey: %s at %s (%s)' % (os.path.normpath(a.source), a.rev, commit[:12]))
+    flags, how = dpcflags.dpc_flags(tree)
+    SOURCE_DPC_FLAGS[:] = flags
+    print('srcsurvey: DPC_FLAGS %s (%s)' % (' '.join(flags) or '(none)', how))
     mods = a.modules or find_modules(tree)
     settings_out = []
     results = []

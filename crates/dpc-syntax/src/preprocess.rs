@@ -13,7 +13,8 @@
 //! |---|---|
 //! | `%include 'p';` | tokens of file `p` are spliced in (p. 4-55; search order ref 6.4.13, p. 6-20) |
 //! | `%if`/`%ifdef`/`%elseif`/`%elseifdef` *pred* `%then`, `%else`, `%endif` | conditional compilation (pp. 4-45..4-50) |
-//! | `%var n...`, `%enable n...` | declare / set conditional variables (p. 4-50); the predeclared ones come from [`Options::predeclared`] (p. 4-46) and cannot be enabled or set with `-config` (p. 4-48) or declared again (p. 4-49) |
+//! | `%var n...`, `%enable n...` | declare / set conditional variables (p. 4-50); the predeclared ones come from [`Options::predeclared`] (p. 4-46) and cannot be enabled or set with `-config` (p. 4-48) or declared again (p. 4-49); the `-config` names ([`Options::config`]) are true once declared (ref 6.4.8, p. 6-12) |
+//! | `%config` (in a predicate) | true iff `-config` was given (p. 4-50) |
 //! | `%error 's'`, `%warning 's'` | a diagnostic (pp. 4-51..4-52) |
 //! | `%exit` | stop reading the current file (p. 4-52) |
 //! | `%debug;` | without [`Options::cond`], drop the rest of the line (pp. 4-54..4-55; ref 6.4.7, p. 6-12) |
@@ -47,6 +48,9 @@ pub struct Options {
     /// `-cond`: compile `%debug` lines (ref 6.4.7, p. 6-12).  Default off
     /// (`-ncond`).
     pub cond: bool,
+    /// `-comchk`: warn of unbalanced comments (ref 6.4.5, p. 6-11;
+    /// [`Lexer::set_comchk`]).  Default off (`-ncomchk`).
+    pub comchk: bool,
     /// The predeclared conditional variables and their values (p. 4-46),
     /// e.g. `_ISP__M68K` true.  They depend on the target, so the driver
     /// fills this from `dpc_target::Target::predeclared_cond_vars`
@@ -92,24 +96,36 @@ pub fn preprocess(sm: &mut SourceMap, file: FileId, opts: &Options) -> Output {
             },
         );
     }
-    let config: HashSet<String> = opts
-        .config
-        .iter()
-        .flatten()
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
-    // p. 4-48: "Since _ISP__M68K and _ISP__A88K are predeclared, you cannot
-    // use the %enable directive or the -config option with them."
+    // -config (ref 6.4.8, p. 6-12): the names are set to true, and become
+    // so when `%var` declares them (p. 4-50: "%Enable and the -config
+    // compiler option perform the same function").  A name is not
+    // declared by -config ("var must be a conditional variable declared
+    // with %var", p. 6-12), so `%ifdef` of a name only -config gives is
+    // false and `%if` of it is an error (p. 4-50).  Names are
+    // case-insensitive like every conditional variable.
+    let mut config: HashSet<String> = HashSet::new();
     let mut diags = Vec::new();
     for n in opts.config.iter().flatten() {
-        if vars.contains_key(&n.to_ascii_lowercase()) {
+        let folded = n.to_ascii_lowercase();
+        if vars.contains_key(&folded) {
+            // p. 4-48: "Since _ISP__M68K and _ISP__A88K are predeclared,
+            // you cannot use the %enable directive or the -config option
+            // with them."
             diags.push(Diagnostic::error_nopos(format!(
                 "predeclared conditional variable `{n}` cannot be set with -config"
+            )));
+        } else if !config.insert(folded) {
+            // p. 4-50: "The compiler preprocessor issues an error message
+            // if you attempt to set (with %enable or -config) the same
+            // variable to true more than once."
+            diags.push(Diagnostic::error_nopos(format!(
+                "conditional variable `{n}` is set to true more than once by -config"
             )));
         }
     }
     let key = std::fs::canonicalize(&sm.file(file).path).ok();
-    let lexer = Lexer::new(sm, file);
+    let mut lexer = Lexer::new(sm, file);
+    lexer.set_comchk(opts.comchk);
     let mut pp = Pp {
         sm,
         opts,
@@ -122,6 +138,21 @@ pub fn preprocess(sm: &mut SourceMap, file: FileId, opts: &Options) -> Output {
         debug_skip: None,
     };
     pp.run();
+    // A -config name that no compiled `%var` declared: p. 6-12 says it
+    // "must be a conditional variable declared with %var"; the owner
+    // ruled (2026-10-20, docs/reference-clarifications.md) that it
+    // compiles, with a warning naming it.
+    let mut warned = HashSet::new();
+    for n in opts.config.iter().flatten() {
+        let folded = n.to_ascii_lowercase();
+        if !pp.vars.contains_key(&folded) && warned.insert(folded) {
+            pp.diags.push(Diagnostic {
+                severity: crate::diag::Severity::Warning,
+                span: None,
+                message: format!("-config variable `{n}` is not declared with %var"),
+            });
+        }
+    }
     Output {
         tokens: pp.out,
         diagnostics: pp.diags,
@@ -387,8 +418,23 @@ impl Pp<'_> {
                 self.semi(lx, false, in_comment, &name, span);
             }
             "error" | "warning" => {
-                // pp. 4-51..4-52.
-                if let Some(s) = self.expect_str(lx, &name, span) {
+                // pp. 4-51..4-52: `%error 'string'`.  The %config example
+                // (p. 4-51) writes `%warning('...');`; the owner ruled
+                // both forms valid, for %error too (2026-10-20,
+                // docs/reference-clarifications.md).
+                let paren = lx.peek().kind == TokenKind::LParen;
+                if paren {
+                    lx.next_token();
+                }
+                let s = self.expect_str(lx, &name, span);
+                if paren && s.is_some() {
+                    if lx.peek().kind == TokenKind::RParen {
+                        lx.next_token();
+                    } else {
+                        self.error(span, format!("missing `)` after %{name}('string'"));
+                    }
+                }
+                if let Some(s) = s {
                     self.diags.push(if name == "error" {
                         Diagnostic::error(span, s)
                     } else {
@@ -496,7 +542,8 @@ impl Pp<'_> {
         match self.sm.load(path) {
             Ok(id) => {
                 self.sm.set_included_from(id, span);
-                let lexer = Lexer::new(self.sm, id);
+                let mut lexer = Lexer::new(self.sm, id);
+                lexer.set_comchk(self.opts.comchk);
                 self.files.push(FileState { lexer, key });
             }
             Err(e) => self.error(span, format!("cannot read {}: {e}", path.display())),
@@ -593,17 +640,32 @@ impl Pp<'_> {
         let line = self.sm.line_of(span);
         let mut out = Vec::new();
         lx.set_cond_names(true);
+        // Names are separated by blanks, commas or both: Figure 6-2
+        // (p. 6-13) writes `%VAR first, second, third`, 4.7 (p. 4-50)
+        // `%VAR code.old code.new`; the owner ruled both valid
+        // (2026-10-20, docs/reference-clarifications.md).  A comma must
+        // stand between two names.
+        let mut after_comma: Option<Span> = None;
         loop {
             let t = lx.peek();
+            let here = self.sm.line_of(t.span) == line;
             match t.kind {
-                TokenKind::Ident(n) if self.sm.line_of(t.span) == line => {
+                TokenKind::Ident(n) if here => {
                     lx.next_token();
                     out.push((n, t.span));
+                    after_comma = None;
+                }
+                TokenKind::Comma if here && !out.is_empty() && after_comma.is_none() => {
+                    lx.next_token();
+                    after_comma = Some(t.span);
                 }
                 _ => break,
             }
         }
         lx.set_cond_names(false);
+        if let Some(c) = after_comma {
+            self.error(c, format!("%{name}: a variable name must follow `,`"));
+        }
         if out.is_empty() {
             self.error(span, format!("%{name} needs at least one variable name"));
         }
@@ -1340,12 +1402,265 @@ mod tests {
                 ..opts()
             };
             assert_eq!(
-                run_opts("x", &o).diags(),
+                run_opts("%var other\nx", &o).diags(),
                 [format!(
                     "dpc: error: predeclared conditional variable `{n}` cannot be set with -config"
                 )]
             );
         }
+    }
+
+    fn with_config(names: &[&str]) -> Options {
+        Options {
+            config: Some(names.iter().map(|s| s.to_string()).collect()),
+            ..opts()
+        }
+    }
+
+    #[test]
+    fn config_sets_several_names() {
+        // Figure 6-2, p. 6-13, with its run "-config first third"
+        // (p. 6-14), its %VAR list with blanks (the figure's commas:
+        // `var_and_enable_lists_with_commas`), statements replaced by
+        // markers.
+        let src = "%VAR first second third\n\
+                   %IF first %THEN x5 %ENDIF\n\
+                   %IF second %THEN y10 %ENDIF\n\
+                   %IF third %THEN z15 %ENDIF\nend_marker";
+        assert_eq!(clean(src), ["end_marker"]);
+        let r = run_opts(src, &with_config(&["first", "third"]));
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["x5", "z15", "end_marker"]);
+    }
+
+    #[test]
+    fn config_names_are_case_insensitive() {
+        let src = "%var Color mono\n%if COLOR %then c %else m %endif";
+        let r = run_opts(src, &with_config(&["cOLOR"]));
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["c"]);
+        // Dotted names (p. 4-50).
+        let src = "%VAR code.sr9 code.sr8\n%IF code.SR8 %THEN a %ELSE b %ENDIF";
+        assert_eq!(run_opts(src, &with_config(&["CODE.sr8"])).idents(), ["a"]);
+    }
+
+    #[test]
+    fn config_does_not_declare() {
+        // p. 6-12: "var must be a conditional variable declared with
+        // %var"; -config sets, %var declares (p. 4-50).
+        let o = with_config(&["color"]);
+        let undeclared = "dpc: warning: -config variable `color` is not declared with %var";
+        // %ifdef asks "declared with %var" (p. 4-49): not by -config.  A
+        // name no %var declares compiles, with a warning (owner,
+        // 2026-10-20).
+        let r = run_opts("%ifdef color %then d %else u %endif", &o);
+        assert_eq!(r.diags(), [undeclared]);
+        assert!(!r.out.has_errors());
+        assert_eq!(r.idents(), ["u"]);
+        // %if of an undeclared name is an error (p. 4-50), -config or not.
+        let r = run_opts("%if color %then d %endif", &o);
+        assert!(
+            r.diags()[0].contains("`color` is not declared with %var"),
+            "{:?}",
+            r.diags()
+        );
+        // The name takes effect when %var declares it, also in an
+        // include-file guard (p. 4-49).
+        let r = run_opts(
+            "%ifdef not(color) %then\n%var color\n%endif\n%if color %then c %endif",
+            &o,
+        );
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["c"]);
+        // A name never declared: one warning per name, whatever its case.
+        let r = run_opts(
+            "%var a\n%if a %then x %else y %endif",
+            &with_config(&["color", "b"]),
+        );
+        assert_eq!(
+            r.diags(),
+            [
+                undeclared,
+                "dpc: warning: -config variable `b` is not declared with %var"
+            ]
+        );
+        assert_eq!(r.idents(), ["y"]);
+        // A %var in a region not compiled declares nothing.
+        let r = run_opts(
+            "%var a\n%if a %then\n%var color\n%endif\n%ifdef color %then d %else u %endif",
+            &o,
+        );
+        assert_eq!(r.diags(), [undeclared]);
+        assert_eq!(r.idents(), ["u"]);
+    }
+
+    #[test]
+    fn config_sets_true_once() {
+        // p. 4-50: setting the same variable to true more than once, with
+        // %enable or -config, is an error.
+        let r = run_opts("%var a\n%enable a", &with_config(&["a"]));
+        assert_eq!(
+            r.diags(),
+            ["t.pas:2:9: error: conditional variable `a` is already set to true"]
+        );
+        let r = run_opts("%var a\n%if a %then x %endif", &with_config(&["a", "A"]));
+        assert_eq!(
+            r.diags(),
+            ["dpc: error: conditional variable `A` is set to true more than once by -config"]
+        );
+    }
+
+    #[test]
+    fn config_directive_follows_the_option() {
+        // p. 4-50: %config is true iff the command line has -config.
+        let src = "%if %config %then on %else off %endif";
+        assert_eq!(clean(src), ["off"]);
+        assert_eq!(run_opts(src, &with_config(&["x"])).idents(), ["on"]);
+        // ... and "you cannot declare %config in a %var directive"
+        // (p. 4-51): `%var %config` has no name to declare.
+        assert!(errs("%var %config")[0].contains("at least one variable"));
+    }
+
+    /// The reference's color/mono examples for %error (p. 4-51) and
+    /// %warning (p. 4-52), compiled without and with -config.
+    #[test]
+    fn reference_color_mono_examples() {
+        let error_example = "%VAR color mono\n\
+                             %IF color %THEN\n\
+                             {Code for color node.}\n\
+                             %ELSEIF mono %THEN\n\
+                             %ERROR 'I have not finished the code for a monochromatic node.'\n\
+                             %ENDIF\n";
+        assert!(run(error_example).diags().is_empty());
+        assert!(run_opts(error_example, &with_config(&["color"]))
+            .diags()
+            .is_empty());
+        let r = run_opts(error_example, &with_config(&["mono"]));
+        assert_eq!(
+            r.diags(),
+            ["t.pas:5:1: error: I have not finished the code for a monochromatic node."]
+        );
+        assert!(r.out.has_errors());
+        // p. 4-52 prints the string without its closing quote (an
+        // erratum); here it is closed.
+        let warning_example = "%VAR color mono\n\
+                               %IF color %THEN\n\
+                               {Code for color node.}\n\
+                               %ELSE\n\
+                               %WARNING 'You forgot to use the -CONFIG color option.'\n\
+                               %ENDIF\n";
+        let r = run(warning_example);
+        assert_eq!(
+            r.diags(),
+            ["t.pas:5:1: warning: You forgot to use the -CONFIG color option."]
+        );
+        assert!(!r.out.has_errors());
+        assert_eq!(
+            run_opts(warning_example, &with_config(&["mono"])).diags(),
+            ["t.pas:5:1: warning: You forgot to use the -CONFIG color option."]
+        );
+        assert!(run_opts(warning_example, &with_config(&["color"]))
+            .diags()
+            .is_empty());
+        // The %config example (pp. 4-50..4-51), with `%warning 'string'`
+        // for the page's `%warning('...')` (a form 4.7 does not define).
+        let config_example = "%VAR color mono\n\
+                              %IF color %THEN\n\
+                              {This is the code for color nodes.}\n\
+                              %ELSEIF mono %THEN\n\
+                              {This is the code for monochromatic nodes.}\n\
+                              %ELSEIF %config %THEN\n\
+                              %warning 'You did not set color or mono to true.';\n\
+                              %ENDIF\n";
+        assert!(run(config_example).diags().is_empty());
+        assert!(run_opts(config_example, &with_config(&["mono"]))
+            .diags()
+            .is_empty());
+        let r = run_opts(config_example, &with_config(&["other"]));
+        assert_eq!(
+            r.diags(),
+            [
+                "t.pas:7:1: warning: You did not set color or mono to true.",
+                "dpc: warning: -config variable `other` is not declared with %var"
+            ]
+        );
+        // ... and as printed, `%warning('...');` (owner, 2026-10-20).
+        let printed = config_example.replace(
+            "%warning 'You did not set color or mono to true.';",
+            "%warning('You did not set color or mono to true.');",
+        );
+        assert_ne!(printed, config_example);
+        let r = run_opts(&printed, &with_config(&["other"]));
+        assert_eq!(
+            r.diags()[0],
+            "t.pas:7:1: warning: You did not set color or mono to true."
+        );
+        assert_eq!(r.diags().len(), 2, "{:?}", r.diags());
+    }
+
+    #[test]
+    fn error_and_warning_in_parentheses() {
+        // Owner, 2026-10-20: `%warning('x')` and `%error('x')` as well as
+        // `%warning 'x'` (p. 4-51).
+        let r = run("%warning('w'); a %error('e')\nb %warning 'v'; c");
+        assert_eq!(
+            r.diags(),
+            [
+                "t.pas:1:1: warning: w",
+                "t.pas:1:18: error: e",
+                "t.pas:2:3: warning: v"
+            ]
+        );
+        assert_eq!(r.idents(), ["a", "b", "c"]);
+        assert!(errs("%warning('w';")[0].contains("missing `)`"));
+        assert!(errs("%warning(w)")[0].contains("needs a quoted string"));
+    }
+
+    #[test]
+    fn var_and_enable_lists_with_commas() {
+        // Figure 6-2 (p. 6-13) `%VAR first, second, third`; owner,
+        // 2026-10-20: blanks, commas or both.
+        for list in ["a, b, c", "a,b,c", "a b, c", "a ,b c"] {
+            let src = format!("%var {list}\n%enable c, a\n%if a and c and not b %then t %endif");
+            assert_eq!(clean(&src), ["t"], "{list}");
+        }
+        // Figure 6-2 itself, with -config first third.
+        let src = "%VAR first, second, third\n\
+                   %IF first %THEN x5 %ENDIF\n%IF second %THEN y10 %ENDIF\n\
+                   %IF third %THEN z15 %ENDIF";
+        let r = run_opts(src, &with_config(&["first", "third"]));
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        assert_eq!(r.idents(), ["x5", "z15"]);
+        // A comma stands between two names.
+        assert!(errs("%var a,\nx")[0].contains("a variable name must follow `,`"));
+        assert!(errs("%var a,, b")[0].contains("a variable name must follow `,`"));
+        assert!(errs("%var , a")[0].contains("at least one variable"));
+    }
+
+    #[test]
+    fn comment_checking() {
+        // ref 6.4.5, p. 6-11, the reference's fragment.
+        let src = "{This comment should be closed, but I forgot to do it!\n\
+                   x := 0; {We need this statement. }\ny";
+        assert_eq!(clean(src), ["y"]);
+        let o = Options {
+            comchk: true,
+            ..opts()
+        };
+        let r = run_opts(src, &o);
+        assert_eq!(
+            r.diags(),
+            ["t.pas:2:9: warning: Unbalanced comment; another comment start found before end."]
+        );
+        assert_eq!(r.idents(), ["y"]);
+        // Only the comment's own kind is looked for; one warning per
+        // extra left delimiter; included files are checked too.
+        let r = run_opts("(* { (* x (* *) { { (* } a \"(*\" b", &o);
+        assert_eq!(r.diags().len(), 3, "{:?}", r.diags());
+        assert_eq!(r.idents(), ["a", "b"]);
+        // Not in a region that is not compiled.
+        let r = run_opts("%var v\n%if v %then { { } %endif c", &o);
+        assert!(r.diags().is_empty(), "{:?}", r.diags());
     }
 
     #[test]

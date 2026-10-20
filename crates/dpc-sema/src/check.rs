@@ -512,6 +512,13 @@ impl<'t> Checker<'t> {
         })
     }
 
+    /// The alignment environment at the start of the unit: natural with
+    /// `-natural` (ref 6.4.22, p. 6-26), as if `%natural_alignment`
+    /// came first.
+    pub(crate) fn set_natural(&mut self, natural: bool) {
+        self.natural = natural;
+    }
+
     fn pragma(&mut self, p: &ast::PragmaMark) {
         match p.pragma {
             Pragma::NaturalAlignment => self.natural = true,

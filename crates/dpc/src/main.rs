@@ -10,6 +10,19 @@
 //!            [--merge-constant-stores] [--strict]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
+//! The reference's compiler options (ref 6.4, Table 6-2, pp. 6-6..6-8:
+//! `-config var...`, `-cond`, `-idir dir...`, `-nwarn`, `-msgs`, `-b
+//! [pathname]`, `-nb`, `-natural`, `-comchk`, `-version`, ...) are
+//! accepted too; `refopts` and `docs/compiler-options.md` say what dpc
+//! does with each.  Precedence: an argument spelt exactly as a reference
+//! option (one dash, lower case) is that option; otherwise dpc's own
+//! options are tried (`-I`, `-Idir`, `-o`, `-h`, `--...`); any other
+//! argument beginning with `-` is an error.  No reference option is spelt
+//! like one of dpc's (`-idir` is not `-I` + `dir`: `-I` is upper case).
+//! The reference's list options take the arguments up to the next one
+//! beginning with `-`, so the source file goes first (`dpc m.pas -config
+//! a b`) or after `--` (`dpc -config a b -- m.pas`).
+//!
 //! `--parse-only` stops after parsing (syntax errors are reported with
 //! their positions); `--dump-ast` also prints the AST to stdout;
 //! `--check-only` stops after semantic analysis.  `--dump-locals` lowers
@@ -128,8 +141,12 @@
 //! The conformance harness, the golden tests and `tools/srcsurvey.py` use
 //! `--strict`; `tools/linktest.py` and ../source's build do not.
 
+mod refopts;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use refopts::{Binary, RefOptions};
 
 use dpc_ir::DataBaseOptions;
 use dpc_m68k::emit::{FragmentSection, LoopAlign, ModuleRoutine};
@@ -147,7 +164,11 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
                      [--merge-constant-stores] [--strict] \
-                     [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
+                     [--parse-only | --dump-ast | --check-only | --dump-locals] \
+                     [reference options: -config var..., -cond, -idir dir..., -nwarn, -msgs, \
+                     -b [pathname], -nb, -natural, -comchk, ... (docs/compiler-options.md)] \
+                     [--] file.pas\n       \
+                     dpc -version";
 
 /// Where to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +187,11 @@ enum Stop {
 
 #[derive(Debug)]
 struct Args {
+    /// `-I` and `-idir` directories, in command-line order.
     include_dirs: Vec<PathBuf>,
+    /// The reference's options (`refopts`); its `include_dirs` are
+    /// merged into `include_dirs`, its `-b pathname` into `output`.
+    refs: RefOptions,
     root: Option<PathBuf>,
     output: Option<PathBuf>,
     input: PathBuf,
@@ -279,7 +304,9 @@ fn fragment_sections(
     Ok(out)
 }
 
-fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
+fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
+    let mut argv = argv.peekable();
+    let mut refs = RefOptions::default();
     let mut include_dirs = Vec::new();
     let mut root = None;
     let mut output = None;
@@ -299,7 +326,24 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut merge_constant_stores = false;
     let mut strict = false;
     while let Some(arg) = argv.next() {
+        // The reference's options first, by their exact spellings
+        // (`refopts`; none is spelt like one of dpc's own).
+        if let Some(r) = refopts::parse(&arg, &mut argv, &mut refs) {
+            r?;
+            // `-idir` and `-I` directories are searched in the order given.
+            include_dirs.append(&mut refs.include_dirs);
+            continue;
+        }
         match arg.as_str() {
+            // The end of the options: what follows is the input file.
+            "--" => {
+                for a in argv.by_ref() {
+                    if input.is_some() {
+                        return Err("more than one input file".into());
+                    }
+                    input = Some(PathBuf::from(a));
+                }
+            }
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
             "--root" => {
                 if root.is_some() {
@@ -454,13 +498,31 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             }
         }
     }
-    let input = input.ok_or("no input file")?;
+    let input = input.ok_or_else(|| {
+        if refs.took_operands.is_empty() {
+            "no input file".to_string()
+        } else {
+            format!(
+                "no input file ({} took the arguments after it; give the source file \
+                 first, as in `pas source [options]` (ref 6.3, p. 6-4), or after `--`)",
+                refs.took_operands.join(", ")
+            )
+        }
+    })?;
+    // -b pathname / -nb (ref 6.4.3, p. 6-9) and -o name the same file.
+    match (&refs.binary, &output) {
+        (Binary::Path(p), None) => output = Some(p.clone()),
+        (Binary::Path(_), Some(_)) => return Err("-b pathname and -o do not mix".into()),
+        (Binary::Suppress, Some(_)) => return Err("-nb and -o do not mix".into()),
+        _ => {}
+    }
     let fragment = fragment_sections(&origins, &ends)?;
     if !module_routines.is_empty() && fragment.is_empty() {
         return Err("--module-routine needs --fragment-origin".into());
     }
     Ok(Args {
         include_dirs,
+        refs,
         root,
         output,
         input,
@@ -497,6 +559,9 @@ fn compile(
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
         root: args.root.clone(),
+        config: args.refs.config.clone(),
+        cond: args.refs.cond,
+        comchk: args.refs.comchk,
         predeclared: target
             .predeclared_cond_vars()
             .iter()
@@ -518,7 +583,10 @@ fn compile(
             return Ok(());
         }
     }
-    let program = dpc_sema::analyze(&unit, &target)?;
+    let sema = dpc_sema::Options {
+        natural: args.refs.natural,
+    };
+    let program = dpc_sema::analyze_with(&unit, &target, &sema)?;
     warnings.extend(program.warnings.iter().cloned());
     if args.stop == Stop::AfterCheck {
         return Ok(());
@@ -546,6 +614,10 @@ fn compile(
         merge_constant_stores: args.merge_constant_stores,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
+    // -nb (ref 6.4.3, p. 6-9): compiled, but no output file.
+    if args.refs.binary == Binary::Suppress {
+        return Ok(());
+    }
 
     let out = args
         .output
@@ -743,6 +815,11 @@ fn main() -> ExitCode {
         };
         return print_runtime(t);
     }
+    // `pas -version` (ref 6.4.29, p. 6-35): alone, without a file name.
+    if argv.len() == 1 && argv[0] == "-version" {
+        println!("{PROG} {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let args = match parse_args(argv.into_iter()) {
         Ok(a) => a,
         Err(msg) => {
@@ -779,6 +856,11 @@ fn main() -> ExitCode {
 /// Compile `args.input`, report, and give the exit status: 0, 1 with
 /// diagnostics, 3 on an internal error ([`backstop`]).
 fn run(args: &Args) -> ExitCode {
+    // Options accepted although dpc does not give what the reference
+    // describes (`refopts`): one note each.
+    for n in &args.refs.notes {
+        eprintln!("{PROG}: note: {n}");
+    }
     let mut sm = SourceMap::new();
     let mut warnings = Vec::new();
     let panic_now = test_panic_setup();
@@ -792,20 +874,70 @@ fn run(args: &Args) -> ExitCode {
     // The refusals taken on a best-effort path (not `--strict`), as
     // warnings: the output is correct but not checked against the image.
     warnings.extend(dpc_syntax::diag::take_best_effort());
-    for d in &warnings {
+    let mut counts = Counts::default();
+    // -nwarn (ref 6.4.30, p. 6-35) suppresses warning messages, "though
+    // it does report on the total number of warnings that would have been
+    // issued" (in the -msgs report).
+    let mut report = |d: &Diagnostic| {
+        if d.is_error() {
+            counts.errors += 1;
+        } else if d.severity == dpc_syntax::diag::Severity::Warning {
+            counts.warnings += 1;
+            if !args.refs.warn {
+                return;
+            }
+        }
         eprintln!("{}", d.render_with_source(&sm, PROG));
-    }
-    match result {
+    };
+    warnings.iter().for_each(&mut report);
+    let code = match result {
         Ok(Ok(())) => ExitCode::SUCCESS,
         Ok(Err(diags)) => {
-            for d in &diags {
-                eprintln!("{}", d.render_with_source(&sm, PROG));
-            }
+            diags.iter().for_each(&mut report);
             ExitCode::FAILURE
         }
         Err(panic) => {
             eprintln!("{}", internal_error(args, &sm, &panic));
+            counts.errors += 1;
             ExitCode::from(3)
+        }
+    };
+    if args.refs.msgs {
+        eprintln!("{}", counts.report());
+    }
+    code
+}
+
+/// The messages of one compilation, for the `-msgs` report.
+#[derive(Debug, Default)]
+struct Counts {
+    errors: usize,
+    warnings: usize,
+}
+
+impl Counts {
+    /// The final compilation report of `-msgs` (ref 6.4.21, p. 6-25):
+    /// "xx errors, yy warnings, zz info msgs, Pascal compiler variant Rev
+    /// n.n", the counts "either `no` or a number" (singular for one, as in
+    /// the examples "1 error, no warnings" and "No errors, 1 warning",
+    /// p. 4-51, p. 4-52), with dpc's name and version for the compiler's.
+    /// dpc issues no information messages.
+    fn report(&self) -> String {
+        let n = |k: usize, one: &str, many: &str| match k {
+            0 => format!("no {many}"),
+            1 => format!("1 {one}"),
+            k => format!("{k} {many}"),
+        };
+        let line = format!(
+            "{}, {}, no info msgs, {PROG} {}",
+            n(self.errors, "error", "errors"),
+            n(self.warnings, "warning", "warnings"),
+            env!("CARGO_PKG_VERSION")
+        );
+        let mut c = line.chars();
+        match c.next() {
+            Some(f) => f.to_uppercase().chain(c).collect(),
+            None => line,
         }
     }
 }
@@ -1198,6 +1330,60 @@ mod tests {
         ] {
             assert!(args(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// The reference's options beside dpc's own (`refopts`).
+    #[test]
+    fn parses_reference_options() {
+        let a = args(&[
+            "m.pas", "-I", "a", "-idir", "b", "c", "-Id", "-config", "x", "y", "--strict",
+        ])
+        .unwrap();
+        assert_eq!(a.input, PathBuf::from("m.pas"));
+        assert_eq!(a.include_dirs, ["a", "b", "c", "d"].map(PathBuf::from));
+        assert_eq!(a.refs.config, Some(vec!["x".into(), "y".into()]));
+        assert!(a.strict);
+        // `--` ends the options.
+        let a = args(&["-config", "x", "--", "m.pas"]).unwrap();
+        assert_eq!(a.input, PathBuf::from("m.pas"));
+        assert!(args(&["--", "a.pas", "b.pas"]).is_err());
+        let a = args(&["--", "-odd.pas"]).unwrap();
+        assert_eq!(a.input, PathBuf::from("-odd.pas"));
+        // A list takes the file name: a usage error with a hint.
+        let e = args(&["-config", "x", "m.pas"]).unwrap_err();
+        assert!(e.starts_with("no input file (-config took"), "{e}");
+        // -b pathname gives the output; it and -nb do not mix with -o.
+        let a = args(&["m.pas", "-b", "out"]).unwrap();
+        assert_eq!(a.output, Some(PathBuf::from("out.s")));
+        assert!(args(&["m.pas", "-b", "out", "-o", "x.s"]).is_err());
+        assert!(args(&["m.pas", "-nb", "-o", "x.s"]).is_err());
+        assert_eq!(args(&["m.pas", "-nb"]).unwrap().output, None);
+        // Upper case is not a reference option: `-IDIR` is `-I` + `DIR`.
+        let a = args(&["m.pas", "-IDIR"]).unwrap();
+        assert_eq!(a.include_dirs, [PathBuf::from("DIR")]);
+        assert!(args(&["m.pas", "-CONFIG", "x"]).is_err());
+    }
+
+    #[test]
+    fn msgs_report_counts() {
+        let v = env!("CARGO_PKG_VERSION");
+        let c = |errors, warnings| Counts { errors, warnings }.report();
+        assert_eq!(
+            c(0, 0),
+            format!("No errors, no warnings, no info msgs, dpc {v}")
+        );
+        assert_eq!(
+            c(1, 0),
+            format!("1 error, no warnings, no info msgs, dpc {v}")
+        );
+        assert_eq!(
+            c(0, 1),
+            format!("No errors, 1 warning, no info msgs, dpc {v}")
+        );
+        assert_eq!(
+            c(3, 2),
+            format!("3 errors, 2 warnings, no info msgs, dpc {v}")
+        );
     }
 
     #[test]

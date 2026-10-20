@@ -24,8 +24,10 @@ Steps (tests/link/README.md has the why of each):
   2. The module files: ../source's own tools/pascal_modules.py, run in the
      scratch copy (the Makefile's PAS_MODULES).
   3. Each module file is compiled from the scratch domain_os/ with
-     `DPC -o build/sau2/pascal/<m>.s <m>.pas', the Makefile's rule and
-     flags, and assembled with `m68k-elf-as -m68010' (PAS_ASFLAGS), in
+     `DPC $(DPC_FLAGS) -o build/sau2/pascal/<m>.s <m>.pas', the
+     Makefile's rule and flags (DPC_FLAGS, e.g. `-config sau2', read from
+     the scratch copy's Makefile by tools/dpcflags.py; none if it has no
+     DPC_FLAGS; `--make-var DPC_FLAGS=...' overrides), and assembled with `m68k-elf-as -m68010' (PAS_ASFLAGS), in
      parallel (--jobs).  A module dpc refuses leaves no .s/.o behind (as
      `make pascal-report' does), so the next `make' does not take a stale
      one.  Per module: OK, REFUSED (dpc reported errors), FAILED (dpc
@@ -86,6 +88,7 @@ REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import srcsurvey  # noqa: E402
 import dispcheck  # noqa: E402
+import dpcflags  # noqa: E402
 
 
 
@@ -491,16 +494,17 @@ def outputs(module):
     return stem + '.s', stem + '.o'
 
 
-def compile_module(dpc, tree, module, assemble=True):
+def compile_module(dpc, tree, module, assemble=True, flags=()):
     """Compile (and assemble) MODULE as ../source's Makefile does, from
-    TREE (the scratch domain_os) -> (Result, dpc stderr)."""
+    TREE (the scratch domain_os), with its DPC_FLAGS FLAGS (put before
+    `-o', as the Makefile's rule does) -> (Result, dpc stderr)."""
     s, o = outputs(module)
     os.makedirs(os.path.join(tree, os.path.dirname(s)), exist_ok=True)
     for f in (s, o):
         if os.path.exists(os.path.join(tree, f)):
             os.remove(os.path.join(tree, f))
     try:
-        p = subprocess.run([dpc, '-o', s, module], cwd=tree, capture_output=True, text=True,
+        p = subprocess.run([dpc] + list(flags) + ['-o', s, module], cwd=tree, capture_output=True, text=True,
                            timeout=DPC_TIMEOUT)
         rc, err = p.returncode, p.stderr
     except subprocess.TimeoutExpired:
@@ -527,9 +531,9 @@ def compile_module(dpc, tree, module, assemble=True):
     return r, err
 
 
-def compile_all(dpc, tree, modules, jobs, assemble=True):
+def compile_all(dpc, tree, modules, jobs, assemble=True, flags=()):
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(compile_module, dpc, tree, m, assemble) for m in modules]
+        futs = [ex.submit(compile_module, dpc, tree, m, assemble, flags) for m in modules]
         return [f.result()[0] for f in futs]
 
 
@@ -862,8 +866,13 @@ def cmd_run(a):
         modules = [m for m in modules if m in a.only]
     dc = dpc_commit(dpc)
     dpc_id = dc or dpc
+    # the Makefile's DPC_FLAGS (-config ...), for these compiles and the
+    # deep pass's (srcsurvey.SOURCE_DPC_FLAGS)
+    flags, how = dpcflags.dpc_flags(tree, a.make_var)
+    srcsurvey.SOURCE_DPC_FLAGS[:] = flags
     head = ['linktest: ../source %s%s' % (commit, '' if a.working_tree else ' (%s)' % a.rev),
-            'linktest: dpc %s%s' % (dpc, ' (stable build of %s)' % dc[:12] if dc else '')]
+            'linktest: dpc %s%s' % (dpc, ' (stable build of %s)' % dc[:12] if dc else ''),
+            'linktest: DPC_FLAGS %s (%s)' % (' '.join(flags) or '(none)', how)]
     if not assemble:
         head.append('linktest: %s not found: modules are compiled, not assembled; no make'
                     % AS)
@@ -872,7 +881,7 @@ def cmd_run(a):
     sys.stdout.flush()
 
     t0 = time.monotonic()
-    results = compile_all(dpc, tree, modules, a.jobs, assemble)
+    results = compile_all(dpc, tree, modules, a.jobs, assemble, flags)
     t1 = time.monotonic()
     timing = 'compile %.1f s' % (t1 - t0)
     deep = not a.no_deep

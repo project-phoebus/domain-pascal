@@ -250,16 +250,23 @@ for d in sorted(os.listdir(root)):
 """
 
 # A fake dpc: refuses a module whose text has REFUSE, panics on PANIC,
-# else writes an empty assembly file to the -o path.
+# refuses one with NEEDSAU2 unless given `-config sau2' (as a list ended
+# by the next option), else writes an empty assembly file to the -o path.
 FAKE_DPC = """\
 #!/bin/sh
-out=""; src=""
+out=""; src=""; cfg=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2;;
+    -config) shift
+       while [ $# -gt 0 ]; do case "$1" in -*) break;; esac; cfg="$cfg $1"; shift; done;;
     *) src=$1; shift;;
   esac
 done
+if grep -q NEEDSAU2 "$src" && [ "$cfg" != " sau2" ]; then
+  echo "$src:1:1: error: built without -config sau2 is not supported yet" >&2
+  exit 1
+fi
 if grep -q REFUSE "$src"; then
   echo "$src:2:3: error: a thing is not supported yet" >&2
   echo "$src:4:3: error: another thing of 12 bytes is not supported yet" >&2
@@ -409,6 +416,30 @@ class EndToEndTest(unittest.TestCase):
             rc, out, log = run('--make-var', 'FAILCHECK=1')
             self.assertEqual(rc, 1, out)
             self.assertIn('check_rfc: FAIL x', out)
+
+    @unittest.skipUnless(shutil.which('make'), 'needs make')
+    def test_makefile_dpc_flags(self):
+        # ../source's Makefile passes DPC_FLAGS (`$(DPC) $(DPC_FLAGS) -o $@
+        # $<'); the link test passes the same (tools/dpcflags.py).
+        dom = os.path.join(self.src, 'domain_os')
+        write(os.path.join(dom, 'dd', 'dd.pas'), 'module dd; NEEDSAU2\n')
+        git(self.src, 'add', '-A')
+        git(self.src, 'commit', '-q', '-m', 'dd')
+        rc, out = self.run_tool('--only', 'dd/dd.pas')
+        self.assertIn('linktest: DPC_FLAGS (none) (none)', out)
+        self.assertIn('0 of 1 module files compile', out)
+        write(os.path.join(dom, 'Makefile'),
+              'DPC_FLAGS := -config sau2\n'
+              'pascal:\n\t$(DPC) $(DPC_FLAGS) -o x.s x.pas\n')
+        git(self.src, 'add', '-A')
+        git(self.src, 'commit', '-q', '-m', 'mk')
+        rc, out = self.run_tool('--only', 'dd/dd.pas')
+        self.assertIn('linktest: DPC_FLAGS -config sau2 (make)', out)
+        self.assertIn('1 of 1 module files compile', out)
+        # --make-var overrides it, as it does for make.
+        rc, out = self.run_tool('--only', 'dd/dd.pas', '--make-var', 'DPC_FLAGS=-config other')
+        self.assertIn('linktest: DPC_FLAGS -config other (command line)', out)
+        self.assertIn('0 of 1 module files compile', out)
 
     def test_update_refused(self):
         self.assertEqual(self.run_tool('--update', '--working-tree')[0], 2)

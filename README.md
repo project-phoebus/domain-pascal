@@ -22,7 +22,9 @@ driver writes an assembly file that holds just a comment header.
 - `crates/dpc-ir`: the target-neutral, per-routine IR.
 - `crates/dpc-target`: the target description trait.
 - `crates/dpc-m68k`: the m68k backend and gas-syntax emitter.
-- `crates/dpc`: the driver, `dpc [-I dir]... [-o out.s] file.pas`.
+- `crates/dpc`: the driver, `dpc [-I dir]... [-o out.s] file.pas`; it
+  also takes the reference's compiler options (`dpc file.pas -config
+  color mono -cond -idir dir ...`; `docs/compiler-options.md`).
 - `runtime/`: the run-time library dpc ships, as gcc ships libgcc: for
   m68k, Apollo's `M$ARITH` (`runtime/m68k/m_arith.s`) and
   `PAS_$SET_BUILD` (`runtime/m68k/pas_set_build.s`, which dpc never

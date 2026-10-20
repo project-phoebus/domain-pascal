@@ -28,5 +28,25 @@ pub use program::*;
 /// carries any warnings; on failure every error is returned, with its
 /// source position.
 pub fn analyze(unit: &CompilationUnit, target: &dyn Target) -> Result<Program, Vec<Diagnostic>> {
-    check::Checker::new(target).unit(unit)
+    analyze_with(unit, target, &Options::default())
+}
+
+/// Compiler options that semantic analysis follows.
+#[derive(Debug, Default, Clone)]
+pub struct Options {
+    /// `-natural` (ref 6.4.22, pp. 6-25..6-26): the unit starts in natural
+    /// alignment, "the same effect as the %natural_alignment compiler
+    /// directive" (p. 6-26) at its start.  Default off (`-nnatural`).
+    pub natural: bool,
+}
+
+/// [`analyze`] with compiler options.
+pub fn analyze_with(
+    unit: &CompilationUnit,
+    target: &dyn Target,
+    opts: &Options,
+) -> Result<Program, Vec<Diagnostic>> {
+    let mut c = check::Checker::new(target);
+    c.set_natural(opts.natural);
+    c.unit(unit)
 }

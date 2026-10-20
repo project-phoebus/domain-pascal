@@ -245,6 +245,9 @@ pub struct Lexer {
     pos: usize,
     end: usize,
     cond_names: bool,
+    /// `-comchk` (ref 6.4.5, p. 6-11): warn of another left delimiter of
+    /// a comment's own kind inside it.
+    comchk: bool,
     diags: Vec<Diagnostic>,
 }
 
@@ -274,6 +277,7 @@ impl Lexer {
             pos: lo,
             end: hi,
             cond_names: false,
+            comchk: false,
             diags: Vec::new(),
         }
     }
@@ -300,6 +304,17 @@ impl Lexer {
     /// p. 4-46) and contain `.` (`code.old`, `code.sr9`, p. 4-50).
     pub fn set_cond_names(&mut self, on: bool) {
         self.cond_names = on;
+    }
+
+    /// Comment checking, the `-comchk` compiler option (ref 6.4.5,
+    /// p. 6-11; default off, `-ncomchk`): "the compiler returns a warning
+    /// for every additional left comment delimiter" found before the
+    /// comment's end, looking "only for the same kind of left comment
+    /// delimiter" (a `{` inside `(* *)` is not flagged).  A `" "` comment
+    /// cannot hold another of its kind: its left and right delimiters are
+    /// the same character.
+    pub fn set_comchk(&mut self, on: bool) {
+        self.comchk = on;
     }
 
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
@@ -390,6 +405,19 @@ impl Lexer {
         };
         let close_at = body + rel;
         self.pos = close_at + close.len();
+        if self.comchk && close != "\"" {
+            let left = &self.text[lo..body];
+            let mut from = body;
+            while let Some(k) = self.text[from..close_at].find(left) {
+                let at = from + k;
+                // ref 6.4.5, p. 6-11: the reference's message.
+                self.diags.push(Diagnostic::warning(
+                    self.span(at, at + left.len()),
+                    "Unbalanced comment; another comment start found before end.",
+                ));
+                from = at + left.len();
+            }
+        }
         // Ref 4.7, p. 4-43: "If you specify a directive within a comment,
         // the percent sign must be the first character after the delimiter
         // (where spaces count as characters)."
