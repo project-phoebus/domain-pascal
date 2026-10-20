@@ -675,6 +675,21 @@ pub fn allocate_apart(
     coalesce: &[(Reg, Reg)],
     recycle: &[(Reg, Reg)],
 ) -> Result<RegSet, String> {
+    allocate_blame(insns, exit, holds, apart, first, late, coalesce, recycle).map_err(|(w, _)| w)
+}
+
+/// [`allocate_apart`], which on failure also names the value that found
+/// no register (for spilling, `crate::spill`).
+pub(crate) fn allocate_blame(
+    insns: &mut [Insn],
+    exit: &[Reg],
+    holds: &[(usize, Reg)],
+    apart: &[(Reg, Reg)],
+    first: Option<(Reg, Vec<Reg>)>,
+    late: &[(Reg, Reg)],
+    coalesce: &[(Reg, Reg)],
+    recycle: &[(Reg, Reg)],
+) -> Result<RegSet, (String, Option<Reg>)> {
     let web = first.as_ref().map(|(w, _)| *w);
     let live_out = liveness(insns, exit, holds);
     // Interference edges: a definition against what is live after it
@@ -725,7 +740,7 @@ pub fn allocate_apart(
         }
         for &u in &acc.uses {
             if is_virtual(u) && !order.contains(&u) {
-                return Err(format!("internal: {u} used before it is defined"));
+                return Err((format!("internal: {u} used before it is defined"), None));
             }
         }
     }
@@ -812,7 +827,10 @@ pub fn allocate_apart(
                 )
             });
         let Some(p) = pick else {
-            return Err("more values live at once than there are registers".into());
+            return Err((
+                "more values live at once than there are registers".into(),
+                Some(v),
+            ));
         };
         assigned.insert(RegKey(v), p);
     }

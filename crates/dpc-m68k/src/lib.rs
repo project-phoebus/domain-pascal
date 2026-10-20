@@ -21,6 +21,7 @@ pub mod locals;
 pub mod regs;
 pub mod runtime;
 pub mod sched;
+pub mod spill;
 
 use dpc_target::Target;
 

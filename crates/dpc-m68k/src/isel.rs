@@ -373,7 +373,13 @@ fn select_in_context(
 /// codegen-patterns 7.2).  The prologue still saves the registers the body
 /// writes (0xE171E8 `movem.l D2/A2-A4,-(SP)`).
 pub fn wrap(f: &Function, body: Body) -> Result<Vec<Insn>, Diagnostic> {
-    let frame = frame_for(f.frame_size, body.saves, f.span)?;
+    // Spill slots below the locals' rounded `link` area ([`crate::spill`]).
+    let raw = if body.spill > 0 {
+        crate::M68k::link_size(f.frame_size) + body.spill
+    } else {
+        f.frame_size
+    };
+    let frame = frame_for(raw, body.saves, f.span)?;
     let mut out = frame.prologue();
     let reached = end_reached(&body.insns);
     out.extend(body.insns);
@@ -415,6 +421,9 @@ fn end_reached(body: &[Insn]) -> bool {
 pub struct Body {
     pub insns: Vec<Insn>,
     pub saves: RegSet,
+    /// Frame bytes for spilled values below the locals ([`crate::spill`];
+    /// 0 but where the body does not colour otherwise).
+    pub spill: u32,
 }
 
 /// Phase 1: the body of `f`, without prologue and epilogue.
@@ -1314,7 +1323,7 @@ fn select_body_with(
             }
         }
     }
-    let (mut apart, late, prefix) = fresh_slot_loads(&s.out, &s.fresh);
+    let (mut apart, mut late, prefix) = fresh_slot_loads(&s.out, &s.fresh);
     let (args_apart, args_soft, long_list) = argument_list_loads(&s.out, &s.call_stmts)?;
     // The prefix's slot loads, and those of an argument list longer than
     // the address registers, may reuse the least recently written of the
@@ -1395,6 +1404,11 @@ fn select_body_with(
         .map(|&(o, _, _)| o)
         .collect();
     let pre = s.out.clone();
+    // A body coloured with spills ([`crate::spill`]): the reloads before
+    // and the stores after each of its instructions, spliced in when the
+    // body is put together below, and the frame bytes they take.
+    let mut spills: Option<(Vec<Vec<Insn>>, Vec<Vec<Insn>>)> = None;
+    let mut spill_bytes = 0;
     let first_try = allocate_apart(
         &mut s.out,
         exit,
@@ -1472,8 +1486,8 @@ fn select_body_with(
         // Best effort: coloured without the constraints of form (values
         // kept apart, recycled, coloured first or after another), then
         // also without the holds through calls (which only lengthen live
-        // ranges); every colouring of the live ranges is correct.  There is
-        // no spilling: a body that does not colour even so stays refused.
+        // ranges); every colouring of the live ranges is correct.  A body
+        // that does not colour even so has values spilled (below).
         Err(refusal) => {
             s.out = pre.clone();
             let mut got = allocate_apart(
@@ -1502,8 +1516,28 @@ fn select_body_with(
                     holds.clear();
                 }
             }
-            let Ok(v) = got else {
-                return Err(refusal);
+            let v = match got {
+                Ok(v) => v,
+                // Best effort (not byte-identical): values spilled to frame
+                // temporaries below the locals (`crate::spill`, bead
+                // domain-pascal-qea9); the original has no such spills
+                // (bead domain-pascal-ei42).
+                Err(_) => {
+                    let Ok(sp) = crate::spill::allocate_spilling(
+                        &pre,
+                        exit,
+                        &s.colour_coalesce,
+                        crate::M68k::link_size(f.frame_size),
+                        &s.address_slots,
+                    ) else {
+                        return Err(refusal);
+                    };
+                    holds.clear();
+                    s.out = sp.insns;
+                    spill_bytes = sp.bytes;
+                    spills = Some((sp.before, sp.after));
+                    sp.saves
+                }
             };
             dpc_syntax::diag::best_effort(refusal)?;
             apart.clear();
@@ -1520,7 +1554,23 @@ fn select_body_with(
     // Best effort (bead domain-pascal-5kgg): the once-read element
     // addresses whose A1 colouring is given up, the previous colouring kept.
     let mut once_skip: Vec<usize> = Vec::new();
+    // A spilled body ([`crate::spill`]): the checks below that compare
+    // the registers of its instructions (fidelity checks of forms the
+    // image shows) are skipped where a spilled value's reloads and stores
+    // take other registers than the selector expects; the code is correct
+    // either way.
+    let spilled = spills.is_some();
+    if spilled {
+        // A spilled body is not coloured again for these forms (which
+        // colour `pre`, without the spills), nor checked for the late slot
+        // loads' registers: best effort already.
+        once_leas.clear();
+        late.clear();
+    }
     loop {
+        if spilled {
+            break;
+        }
         let more = pass_dead_slot_loads(&pre, &s.out, &late, &apart);
         if more.is_empty() {
             // An element address read once that the image puts in A1
@@ -1632,7 +1682,10 @@ fn select_body_with(
         .iter()
         .map(|&(c, m, b, span)| ([s.out[c].clone(), s.out[b].clone(), s.out[m].clone()], span))
         .collect();
-    for &(b, k, span) in &s.count_copies {
+    // Not in a spilled body: the count's two moves name the reload and
+    // store values of a spilled count, not one register.
+    let count_copies: &[(usize, usize, Span)] = if spilled { &[] } else { &s.count_copies };
+    for &(b, k, span) in count_copies {
         count_copy_check(&s.out[b], &s.out[k], span)?;
     }
     for &(lea, second, span) in &s.held_firsts {
@@ -1684,7 +1737,13 @@ fn select_body_with(
             )?;
         }
     }
-    let dropped = reuse_pointer_copies(&mut s.out, &s.ptr_copies);
+    // Not in a spilled body: the copies' dataflow does not see the
+    // spills' reloads (keeping a copy is correct).
+    let dropped = if spills.is_some() {
+        Vec::new()
+    } else {
+        reuse_pointer_copies(&mut s.out, &s.ptr_copies)
+    };
     if !dropped.is_empty() {
         // A register only a dropped copy took is not saved.
         let mut used = RegSet::of(&[Reg::A(5)]);
@@ -1716,7 +1775,10 @@ fn select_body_with(
         }
     }
     let mut to_a0 = Vec::new();
-    for &(o, k, span) in &s.ptr_defs {
+    // Not in a spilled body: a pointer local there stays where it was
+    // coloured (selecting again with it in A0 could spill it again).
+    let ptr_defs: &[(i32, usize, Span)] = if spilled { &[] } else { &s.ptr_defs };
+    for &(o, k, span) in ptr_defs {
         // A pointer local assigned from calls that no call follows, in A0
         // or A1 by allocation: kept in A0 itself, the copy dropped
         // (TTY_$I_INQ_RAW 0xE67414 `move.b (1241,A0),(A1)`, the out
@@ -1793,7 +1855,7 @@ fn select_body_with(
     if let Some(Insn::Movea {
         src: Ea::Reg(Reg::A(a)),
         ..
-    }) = web_a_move.map(|k| &s.out[k])
+    }) = web_a_move.filter(|_| !spilled).map(|k| &s.out[k])
     {
         // A pointer result variable that no call follows: of the 16
         // register-held ones (`tools/resultsurvey.py pointer`), the 12 in
@@ -1825,7 +1887,8 @@ fn select_body_with(
         .filter(|&&(k, _)| matches!(s.out[k], Insn::SubaSelf(_)))
         .map(|&(_, span)| span)
         .collect();
-    for &(k, span) in &s.nil_results {
+    let nil_results: &[(usize, Span)] = if spilled { &[] } else { &s.nil_results };
+    for &(k, span) in nil_results {
         // A `suba.l` that the next assignment overwrites in straight-line
         // code (`f := nil; f := x`): no site.
         if let Insn::SubaSelf(a) = s.out[k] {
@@ -1880,28 +1943,49 @@ fn select_body_with(
                 && !dropped.contains(&k)
         })
         .collect();
-    // The units in the kept instructions' indices.
+    // The units in the kept instructions' indices.  In a spilled body,
+    // each instruction's reloads go before it and its stores after it
+    // ([`crate::spill`]), and a unit starts with its first instruction's
+    // reloads.
     let mut new_index = Vec::with_capacity(keep.len() + 1);
+    let mut group_start = Vec::with_capacity(keep.len() + 1);
     let mut n = 0;
-    for &k in &keep {
+    for (j, &k) in keep.iter().enumerate() {
+        group_start.push(n);
+        if let Some((before, _)) = &spills {
+            n += before[j].len();
+        }
         new_index.push(n);
         n += usize::from(k);
+        if let Some((_, after)) = &spills {
+            n += after[j].len();
+        }
     }
     new_index.push(n);
+    group_start.push(n);
     let units: Vec<crate::sched::Unit> = s
         .units
         .iter()
-        .map(|&(a, b)| (new_index[a], new_index[b]))
+        .map(|&(a, b)| (group_start[a], group_start[b]))
         .filter(|(a, b)| b - a > 1)
         .collect();
     let mut volatile_insns: Vec<usize> = volatile_insns.iter().map(|&k| new_index[k]).collect();
-    let mut out: Vec<Insn> = s
-        .out
-        .into_iter()
-        .zip(keep)
-        .filter(|(_, k)| *k)
-        .map(|(i, _)| i)
-        .collect();
+    let mut out: Vec<Insn> = match spills.take() {
+        None => s
+            .out
+            .into_iter()
+            .zip(keep)
+            .filter(|(_, k)| *k)
+            .map(|(i, _)| i)
+            .collect(),
+        Some((before, after)) => s
+            .out
+            .into_iter()
+            .zip(keep)
+            .zip(before.into_iter().zip(after))
+            .flat_map(|((i, k), (b, a))| b.into_iter().chain(k.then_some(i)).chain(a))
+            .collect(),
+    };
     // A parked local's `movea.l D0,An` selected before an `if` whose two
     // parts dereference it moves down to the condition's branch (bead
     // domain-pascal-dgb; TTY_$K_SET_INPUT_FLAG 0xE67684..0xE6768C
@@ -1912,7 +1996,10 @@ fn select_body_with(
     // just before the branch, where the scheduler lists it after the
     // condition's first load (12.4 R11).  Only the condition's own
     // instructions lie between, and none of them may touch D0 or An.
-    for &(m, b, span) in &s.hoists {
+    // Not in a spilled body: the move stays where it was selected (correct;
+    // the spills' reloads may lie between).
+    let hoists: &[(usize, usize, Span)] = if spilled { &[] } else { &s.hoists };
+    for &(m, b, span) in hoists {
         let (m, b) = (new_index[m], new_index[b]);
         let Insn::Movea {
             src: Ea::Reg(src),
@@ -2032,6 +2119,7 @@ fn select_body_with(
         Body {
             insns: out,
             saves: saves.union(s.clobbered),
+            spill: spill_bytes,
         },
         s.cse_hits,
     ))
@@ -23683,7 +23771,7 @@ mod tests {
         ];
         let saves = crate::regs::allocate(&mut insns, &[], &[]).unwrap();
         insns.truncate(1);
-        let text: Vec<String> = wrap(&f, Body { insns, saves })
+        let text: Vec<String> = wrap(&f, Body { insns, saves, spill: 0 })
             .unwrap()
             .iter()
             .map(|i| i.to_string())

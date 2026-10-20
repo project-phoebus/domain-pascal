@@ -463,7 +463,7 @@ fn depends(i: &Fx, j: &Fx, between_defs: RegSet) -> bool {
 /// How an instruction treats the condition codes: (reads them, sets
 /// them).  A call clobbers them; `andi`/`ori` to SR read and write them;
 /// `move.w SR,Dn` reads them.
-fn cc_effect(insn: &Insn) -> (bool, bool) {
+pub(crate) fn cc_effect(insn: &Insn) -> (bool, bool) {
     match insn {
         Insn::Branch { cond, .. } => (*cond != Cond::T, false),
         Insn::Dbf { until, .. } => (until.is_some(), false),
@@ -481,7 +481,7 @@ fn cc_effect(insn: &Insn) -> (bool, bool) {
 /// Whether the condition codes are live after each instruction of `body`
 /// (backward over the body's control flow, `regs::successors`; nothing is
 /// live at the end of the body).
-fn cc_live_out(body: &[Insn]) -> Vec<bool> {
+pub(crate) fn cc_live_out(body: &[Insn]) -> Vec<bool> {
     let succ = crate::regs::successors(body);
     let eff: Vec<(bool, bool)> = body.iter().map(cc_effect).collect();
     let mut live_in = vec![false; body.len()];

@@ -13426,6 +13426,41 @@ set value and its boolean are one virtual register; the move of a value
 into D0 for a function result is not subject to R2 (PROC1_$GET_LOCKS
 0xE148F0 loads the result straight into D0).
 
+#### Spilling (best effort, not byte-identical; bead domain-pascal-qea9)
+
+The original has no conventional spills: where `dpc` runs out of
+registers, which values the original reloads from memory instead of
+holding is bead domain-pascal-ei42's question, not settled.  Until it is,
+a body that does not colour even without its constraints of form and
+without its holds through calls is coloured with values spilled
+(`crates/dpc-m68k/src/spill.rs`; `dpc --strict` still refuses it, "more
+values live at once than there are registers"):
+
+- the value spilled is the one that found no register or one of its
+  class live where it is, the one live longest per instruction naming it;
+- an address loaded once from a by-address parameter's slot is loaded
+  from that slot again before each use (no store; the slot is never
+  written);
+- another address value is parked in a data value, `move.l An,Dn` after
+  each write and `movea.l Dn,An` before each read, where data registers
+  look free over its range (the image keeps address values in data
+  registers, 12.2 "Pointers in data registers"; msg_$openi's `with`
+  temporary is in D2 across SOCK_$OPEN in the image, Reported);
+- any other value gets a 4-byte frame slot of its own, below the
+  locals' rounded `link` area (so the `link` grows by 4 per slot, and
+  the save area moves down with it): `move.l Rn,(d,A6)` after each
+  write, `move.l (d,A6),Dn` / `movea.l (d,A6),An` before each read, a
+  partial write (`move.w`, `move.b`) that an earlier write may reach
+  preceded by a reload so the rest of the register is kept (an `s<cc>`
+  reads the flags, so no reload can go before it: its destination is
+  spilled only where no earlier write reaches it);
+- the condition codes are kept (no data reload where they are live; a
+  store where they are live only after a `move`/`moveq`/`clr` into the
+  data register, then `tst` of it again); `dbf` counters and `case`
+  dispatch registers are not spilled.
+
+Exec test: `tests/exec/be_spill.pas`.
+
 ### 12.5 Local variables held in registers (rule Verified on the TTY Pascal, 41 of 43 locals; supported by the C corpus; implemented)
 
 Ref 6.4.24, p. 6-29 (`-opt 3`): "Global register allocation allows local
