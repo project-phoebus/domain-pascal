@@ -2,9 +2,9 @@
 # Regenerate with `python3 tools/linktest.py run --update` and say why
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
-# source: 52d8d305d0ee62d22a9b53b72eb4fa51e8ad50f4
-# dpc: cc64772ddd53e1779acc95547bebb68ca8356fc6
-# 110 of 110 module files compile
+# source: 266bf1ef07a1522c6f6b4cb7f2c48844546e58f6
+# dpc: ad6652ee8c3ce631fec747ad31d19d93acc67109
+# 114 of 114 module files compile
 OK	acl/acl.pas	-
 OK	acl/acl_wired.pas	-
 OK	app/app.pas	-
@@ -17,6 +17,9 @@ OK	audit/audit_wired.pas	-
 OK	bat/bat.pas	-
 OK	cal/os_cal_unwired.pas	-
 OK	cal/os_cal_wired.pas	-
+OK	color4/color4.pas	-
+OK	color5/color5.pas	-
+OK	color7/color7.pas	-
 OK	ct/ct.pas	-
 OK	dbuf/dbuf.pas	-
 OK	dir/dir.pas	-
@@ -32,6 +35,7 @@ OK	dtty/dtty.pas	-
 OK	dxm/dxm.pas	-
 OK	ec/ec2.pas	-
 OK	ec/ec2u.pas	-
+OK	ethernet/ethernet.pas	-
 OK	file/file.pas	-
 OK	file/file_wired.pas	-
 OK	fim/fim.pas	-
