@@ -1587,8 +1587,9 @@ function get(k: integer): recp; val_param; extern;
         "function f: recp;\nbegin\n  f := nil;\nend;\n",
         "body of the one statement `f := nil`",
     );
-    // Every assignment last on several paths: the result slot cleared
-    // and reloaded (NET_$FIND_HANDLER 0xE5A178).
+    // Every assignment last on several paths, all `nil`: no site (with
+    // memory on another path the result slot, NET_$FIND_HANDLER 0xE5A178,
+    // golden `results/pointer_slot`).
     refused(
         "nil_all_last",
         "function f(k: integer; var s: status_$t): recp; val_param;
@@ -1599,7 +1600,7 @@ begin
   end
   else begin
     s.all := 0;
-    f := tab[k];
+    f := nil;
   end;
 end;
 ",
@@ -1673,6 +1674,89 @@ begin
 end;
 ",
         "no callee-saved address register is free",
+    );
+}
+
+#[test]
+fn pointer_result_slots_the_image_does_not_settle() {
+    // codegen-patterns 3, "Pointer results", "Every assignment last"
+    // (bead domain-pascal-yqsm); the slot shapes are golden
+    // `results/pointer_slot`.  Shapes with no site keep the output dpc
+    // gave them before (best effort, not byte-identical) or its refusal.
+    let decls = "module m;
+type
+  status_$t = record case integer of 1: (all: integer32); end;
+  recp = ^integer32;
+var
+  tab: array[0..7] of recp;
+procedure scan(var s: status_$t); extern;
+function get(k: integer): recp; val_param; extern;
+";
+    let refused = |name: &str, body: &str, what: &str| {
+        let src = format!("{decls}{body}");
+        let (_, e) = compile_with(name, &src, &[]).unwrap_err();
+        assert!(e.contains(what), "{name}: {e}");
+    };
+    let best_effort = |name: &str, body: &str, tail: &str| {
+        let src = format!("{decls}{body}");
+        let s = compile_with(name, &src, &[]).unwrap();
+        assert!(!s.contains(",%fp),%a0\n"), "{name}: no slot reload: {s}");
+        assert!(s.contains(tail), "{name}: {s}");
+    };
+    // A pointer function's result, every assignment last (no site; the
+    // slot as the only statement, MST_$MAP 0xE438BE): the register-held
+    // variable, moved to A0 at the join.
+    best_effort(
+        "slot_call",
+        "function f(k: integer; var s: status_$t): recp; val_param;
+begin
+  scan(s);
+  if s.all <> 0 then return;
+  f := get(k);
+end;
+",
+        "\tmovea.l\t%a0,%a3\n1:\n\tmovea.l\t%a3,%a0\n",
+    );
+    // A register-held local and memory, every assignment last (no site):
+    // selected again without the slot, each value into A0.
+    best_effort(
+        "slot_register_local",
+        "function f(k: integer; var s: status_$t): recp; val_param;
+var p: recp;
+begin
+  p := get(k);
+  scan(s);
+  if s.all <> 0 then f := p
+  else f := tab[k];
+end;
+",
+        "\tmovea.l\t(0,%a5,%d0.w),%a0\n2:\n",
+    );
+    // The same with `nil` on the other path: refused, as before.
+    refused(
+        "slot_register_local_nil",
+        "function f(k: integer; var s: status_$t): recp; val_param;
+var p: recp;
+begin
+  p := get(k);
+  scan(s);
+  if s.all <> 0 then f := nil
+  else f := p;
+end;
+",
+        "every assignment of the result is the last statement of a path",
+    );
+    // A parameter and memory, every assignment last: refused, as before.
+    refused(
+        "slot_parameter",
+        "function f(q: recp; k: integer; var s: status_$t): recp; val_param;
+begin
+  scan(s);
+  if k = 0 then f := q
+  else f := tab[k];
+end;
+",
+        "assigned other than a pointer function's result, a variable or `nil`",
     );
 }
 

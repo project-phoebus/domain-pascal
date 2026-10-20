@@ -1717,10 +1717,14 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   moved to A0 at the start of the epilogue, dropped when it is A0
   itself (DISK_$GET_BLOCK: conformance
   `tests/conformance/disk_get_block.pas`; golden
-  `results/pointer_callers`); `nil`, below.  Refused: a computed value
+  `results/pointer_callers`); where every assignment is last and one
+  reads memory, the slot instead ("Every assignment last" below); `nil`,
+  below.  Refused: a computed value
   and a computed address (`lea`, EC2_$GET_EC1_ADDR 0xE42B0A)
   as pointer results, `d0_return`/`c_param` pointer results, and
-  `a0_return` on a non-pointer result (no site).  Also refused: a
+  `a0_return` on a non-pointer result (no site in the image's terms;
+  `../source` reads TTY_$I_GET_DESC and SIO_$I_GET_DESC so, bead
+  domain-pascal-u52h).  Also refused: a
   register-held pointer result variable that the allocator would put in
   A1 (assigned a call's A0, no call after; bead domain-pascal-500): the
   12 in A2 and the one in A3 all have a call after their first
@@ -1790,9 +1794,11 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `suba.l An,An` into the result variable's register when the body has
   an assignment of the result that is not last; `movea.l #0,A0` for the
   only assignment as the last statement of a body of several
-  statements.  Refused: `nil` where every assignment is last on several
-  paths (the slot, NET_$FIND_HANDLER), a body of the one statement `f
-  := nil` (no site), `nil` as the only assignment other than last
+  statements; `clr.l` of the result slot where every assignment is
+  last and another reads memory ("Every assignment last" below,
+  NET_$FIND_HANDLER).  Refused: `nil` where every assignment is last on
+  several paths and none reads memory (no site), a body of the one
+  statement `f := nil` (no site), `nil` as the only assignment other than last
   (`f := nil; if k > 0 then count := 3`: no site, each `suba.l`
   function has another assignment), a `suba.l` the next assignment
   overwrites before any branch or use (`f := nil; f := x`: no site), a
@@ -1808,12 +1814,99 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   in A0 with the result, the AST module-local 0xE0250C) or that finds no
   callee-saved register (the frame, MST_$REMAP_PRIVI).  Golden
   `tests/golden/results/nil_results`; `make srcsurvey`: TIME_$RTE_INT and
-  TIME_$VT_INT byte-identical.  Not modelled: the slot form of a
-  pointer result variable whose assignments are all last, for memory
-  values too (KBD_$GET_DESC, TTY_$I_GET_DESC, SIO_$I_GET_DESC: dpc's
-  register web puts the value in A0 directly, `movea.l mem,A0`; such a
-  body is refused when allocation gives A1, accepted in A0; bead
-  domain-pascal-yqsm).
+  TIME_$VT_INT byte-identical.
+- **Every assignment last (Verified at the sites; implemented for
+  memory and `nil`; bead domain-pascal-yqsm).**  Every pointer function
+  of the image (the 40 of `tools/resultsurvey.py pointer` less the three
+  procedures whose callers read A0 for another reason, 0xE00F7C,
+  PKT_$DUMP_DATA, PROC2_$ZOMBIE_LIST; the five more whose epilogue
+  writes A0, MST_$MAP_CANNED, MST_$MAP_AREA, EC2_$ALLOCATE_EC1,
+  TIME_$RTE_INT, TIME_$VT_INT; and DISK_$GET_DRTE, IO_$GET_DCTE,
+  MST_$MAP_TOP, MST_$MAP_GLOBAL, MST_$REMAP, whose callers do not read
+  A0 at once: 47 functions, every one with a pointer or `a0_return`
+  result in `../source`'s Pascal at 992f96b1; PROC2_$INIT, `univ_ptr`
+  there, returns in D0, 0xE30884), classed by where that Pascal assigns
+  the result ("`nil` results" above: *last* when only the epilogue
+  follows):
+  - *Some assignment not last*, 26: held in a register (A0, A2-A4; D0
+    at 0xE6C21A, D1 at DIR_$MAP_PAGE 0xE4B438) in 24, in the frame in 2
+    with no callee-saved address register free (MST_$REMAP_PRIVI
+    0xE43B2C, MST_$ALLOC_SEGS 0xE435FE); "`nil` results" above.
+  - *Every assignment last, the only statement*, 7: memory into the
+    slot and reloaded (the module-local 0xE6AA38), a call's A0 stored
+    into the slot and left (MST_$MAP, MST_$MAP_TOP, MST_$MAP_GLOBAL,
+    MST_$MAPS, MST_$REMAP), an address formed into A0 (GET_WIRED
+    0xE1D8E8 `lea (A5),A0`).
+  - *Every assignment last, several statements*, 13 (and BAT_$ALLOC_VTOCE,
+    below):
+    - memory, 4: stored into the slot, `move.l <mem>,(-k,A6)`, and
+      reloaded at the start of the epilogue, `movea.l (-k,A6),A0`, where
+      the `return`s branch to with the slot unwritten: KBD_$GET_DESC
+      0xE1AA92/0xE1AA98, TTY_$I_GET_DESC 0xE667B0/0xE667B6,
+      SIO_$I_GET_DESC 0xE66808/0xE6680E (one assignment after two or
+      three `return`s), NET_$FIND_HANDLER 0xE5A180/0xE5A184, whose two
+      `nil`s are `clr.l (-0x10,A6)` (0xE5A178, the two paths' tails
+      merged, "Identical ends", bead domain-pascal-sggk);
+    - a local in the frame, 1: copied, MST_$MAP_AREA 0xE43BF0 `move.l
+      (-0x14,A6),(-0x20,A6)`, 0xE43BF6 the reload (its `va`, a call's A0
+      stored at 0xE43BCA; a `return` joins);
+    - a computed value, 2: stored, MST_$MAP_CANNED 0xE30F98 `move.l
+      D3,(-4,A6)` in a final `if`'s `then` part, reloaded at the join
+      0xE30F9C; DIR_$MAP_LINK_PAGE 0xE4D5A6 `move.l D0,(-12,A6)` then
+      `movea.l D0,A0` where no path joins;
+    - a register-held local, 4: moved from its register, no slot:
+      AST_$ACTIVATE_ASTE_CANNED 0xE2F398, AST_$ALLOCATE_AOTE 0xE01F0C,
+      AST_$ALLOCATE_ASTE 0xE02092 (`movea.l A2,A0`), IO_$GET_DCTE (its
+      `found` in D2, already in A0 from the test at 0xE1A48C);
+    - `nil` alone, 2: `movea.l #0,A0`, no slot (TIME_$RTE_INT 0xE163D6,
+      TIME_$VT_INT 0xE16426);
+    - a pointer function's result: no site.
+  BAT_$ALLOC_VTOCE reads both ways: `../source` assigns a local
+  `result` and returns it last, but the image's `movea.l (-0x14,A6),A0`
+  (0xE3B0C8) reloads the slot both assignments write, as for the result
+  variable itself held in the frame (its assignments then not last,
+  "`nil` results"), not copied as MST_$MAP_AREA's local is.
+  So where every assignment is last, the result variable is in its
+  slot unless every value is already in a register or `nil` alone: the
+  8 bodies with a memory, frame-local or computed value all store into
+  the slot (the 5 one-statement calls too), the 7 of them with a memory
+  or frame value reload it (6 where a path joins, and 0xE6AA38 where
+  none does), and no `movea.l <memory>,A0` falls into the epilogue of
+  any pointer function.  What the epilogue does after a register's
+  store where no path joins (`movea.l D0,A0`, the call's A0 left) is
+  seen at DIR_$MAP_LINK_PAGE and the MST_$MAP wrappers only.
+  **Implemented** (`isel.rs`, `pointer_result_in_slot`,
+  `set_pointer_result_web`): in a body of several statements whose
+  every assignment of the result is last and one reads memory (the
+  unit's data, another unit's, through a pointer, an element, a local
+  whose address is taken, or a local selection finds in its frame slot:
+  the body is then selected again), every assignment stores into the
+  slot, `nil` as `clr.l`, and the epilogue starts with `movea.l
+  (-k,A6),A0`.  This changes the output of bodies dpc accepted before
+  (`movea.l <memory>,A0` into the register-held variable); none in the
+  goldens, the conformance units or `make srcsurvey`'s OK routines.
+  Two MISMATCH routines of `make srcsurvey` change: KBD_$GET_DESC now
+  has the image's slot form (still MISMATCH: bead domain-pascal-gg57,
+  the slot's place, the merged error tails of bead domain-pascal-sggk),
+  and AST_$ALLOCATE_AOTE, whose local `aote` dpc keeps in its frame slot
+  where the image holds it in A2, now copies it into the result slot
+  (the frame-local form) where it loaded A0 from it; held in A2 it
+  would be `movea.l A2,A0`, the image's 0xE01F0C.
+  Best effort (not byte-identical; no site): a body whose every
+  assignment is last and that also assigns a pointer function's result
+  (the slot as the only statement, MST_$MAP), a parameter or a computed
+  value, or a register-held local beside memory or `nil` (found in slot
+  mode, the body then selected again without it), keeps the
+  register-held variable dpc gave it before, and with it the earlier
+  output or the earlier refusal (a parameter, a computed value, `nil`
+  on several paths: refused as before).  Unchanged: a
+  register-held local alone (`movea.l An,A0`), `nil` alone (`movea.l
+  #0,A0`).  Not modelled: computed values (`move.l Dn,(-k,A6)`, then
+  the reload or `movea.l Dn,A0`), refused as before.  Golden
+  `tests/golden/results/pointer_slot`; `tests/conformance/pending/
+  sio_i_get_desc.pas` matches the image but for an element offset
+  computed again (bead domain-pascal-gg57) and the slot's place in the
+  frame (section 2, "Frame size").
 - **Callers of pointer functions (Verified by survey; implemented; bead
   domain-pascal-ae9).**  `tools/resultsurvey.py callers` takes the 234
   calls of A0 functions after which the caller reads A0, and classes the

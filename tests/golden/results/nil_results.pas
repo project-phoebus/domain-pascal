@@ -18,9 +18,11 @@
     `suba.l A0,A0' falling into the epilogue (ROUTE_$FIND_PORTP 0xE15B84,
     0xE15B7A `movea.l A1,A0; bra.s' on the other path, its `f := port;
     return' in a loop; the AST module-local 0xE0209E, 0xE020EE).
-  Refused, in driver tests: every assignment last on several paths (the
-  result slot, NET_$FIND_HANDLER 0xE5A178), a body of the one statement
-  `f := nil', `nil' right before a call's pad (bead domain-pascal-ncac). }
+  Refused, in driver tests: every assignment last on several paths, all
+  `nil' (no site; with memory on another path the result slot,
+  NET_$FIND_HANDLER 0xE5A178, golden `results/pointer_slot'), a body of
+  the one statement `f := nil', `nil' right before a call's pad (bead
+  domain-pascal-ncac). }
 module nilres;
 type
   status_$t = record case integer of 1: (all: integer32); end;

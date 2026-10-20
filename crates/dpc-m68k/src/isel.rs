@@ -418,22 +418,39 @@ fn select_body_in_unit(
     sched: Schedule,
     overlays: &Overlays,
 ) -> Result<Body, Diagnostic> {
+    // A pointer result variable whose every assignment is last is kept
+    // in its frame slot when one assignment reads memory, found for a
+    // local only when selection sees it in the frame
+    // ([`pointer_result_in_slot`]): the body is selected again so.
+    let mut slot = SlotMode::Auto;
+    let mut first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot)?;
+    while let Selected::Reslot(mode) = first {
+        slot = mode;
+        first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot)?;
+    }
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
-    let (body, hits, in_a0) = match select_body_with(f, CsePlan::Probe, sched, &[], overlays)? {
+    let (body, hits, in_a0) = match first {
         Selected::Body(b, h) => (b, h, Vec::new()),
         Selected::InA0(in_a0) => {
-            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays)? {
+            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, slot)? {
                 Selected::Body(b, h) => (b, h, in_a0),
-                Selected::InA0(..) => unreachable!("an A0-held local is not found again"),
+                _ => unreachable!("an A0-held local is not found again"),
             }
         }
+        Selected::Reslot(..) => unreachable!("selected again until settled"),
     };
     if hits.is_empty() {
         return Ok(body);
     }
-    let Selected::Body(body, again) =
-        select_body_with(f, CsePlan::Hold(hits.clone()), sched, &in_a0, overlays)?
+    let Selected::Body(body, again) = select_body_with(
+        f,
+        CsePlan::Hold(hits.clone()),
+        sched,
+        &in_a0,
+        overlays,
+        slot,
+    )?
     else {
         unreachable!("an A0-held local is not found again")
     };
@@ -511,11 +528,139 @@ fn result_positions(body: &[Stmt]) -> ResultPositions {
     p
 }
 
+/// The value assigned by a pointer result's `f := e`, as
+/// [`pointer_result_in_slot`] tells them apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointerValue {
+    /// Read from memory: the unit's data, another unit's, through a
+    /// pointer, an element, or a local whose address is taken
+    /// ([`escaped_frame_objects`]).
+    Memory,
+    /// Another local: in memory or in a register, as selection holds it.
+    Local,
+    /// `nil`.
+    Nil,
+    /// Anything else: a parameter, a pointer function's result, a
+    /// computed value.
+    Other,
+}
+
+/// [`PointerValue`] of `e`; `escaped` as [`escaped_frame_objects`].
+fn pointer_value(e: &Expr, escaped: &[i32]) -> PointerValue {
+    match e {
+        Expr::Const { value: 0, .. } => PointerValue::Nil,
+        Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        } if *o > 0 => PointerValue::Other,
+        Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        } if !escaped.contains(o) => PointerValue::Local,
+        Expr::Load { .. } => PointerValue::Memory,
+        _ => PointerValue::Other,
+    }
+}
+
+/// Whether a pointer function body of several statements keeps its result
+/// variable in its frame slot (codegen-patterns 3, "Pointer results",
+/// "Every assignment last"; bead domain-pascal-yqsm): when every
+/// assignment of the result is last ([`ResultPositions`]) and one of them
+/// reads memory: [`PointerValue::Memory`], or a local that selection
+/// finds in its frame slot (`slot`: selected again so,
+/// [`Selector::slot_wanted`]).  Each assignment then stores into the slot
+/// (`move.l <mem>,(-k,A6)`; `nil` as `clr.l (-k,A6)`), and the epilogue
+/// starts with `movea.l (-k,A6),A0`, where a `return` branches to as well
+/// (KBD_$GET_DESC 0xE1AA92/0xE1AA98, TTY_$I_GET_DESC 0xE667B0/0xE667B6,
+/// SIO_$I_GET_DESC 0xE66808/0xE6680E, NET_$FIND_HANDLER
+/// 0xE5A178/0xE5A180/0xE5A184, MST_$MAP_AREA 0xE43BF0/0xE43BF6 for a local
+/// in the frame: 5 of the 5 such bodies; no `movea.l <memory>,A0` falls
+/// into the epilogue of any pointer function, `tools/resultsurvey.py
+/// pointer`).  A register-held local's value is moved from its register
+/// instead, the variable held in A0 (AST_$ACTIVATE_ASTE_CANNED 0xE2F398
+/// `movea.l A2,A0`, AST_$ALLOCATE_AOTE 0xE01F0C; the register-held
+/// variable of [`Selector::set_pointer_result_web`]).
+///
+/// Gives the slot's offset when the body is selected with it (`None`
+/// for the register-held variable) and whether the slot may still be
+/// asked for (every assignment last, none a [`PointerValue::Other`]).
+///
+/// Best effort (not byte-identical): a body whose every assignment is
+/// last that also assigns a pointer function's result (no site; the slot
+/// as the only statement, MST_$MAP 0xE438BE `move.l A0,(-4,A6)`), a
+/// parameter or a computed value beside memory (no site), or a
+/// register-held local beside memory ([`SlotMode::Off`]; no site), keeps
+/// the register-held variable dpc gave it before bead domain-pascal-yqsm
+/// (those it refused then, a parameter or a computed value, it still
+/// refuses there).
+fn pointer_result_in_slot(
+    f: &Function,
+    escaped: &[i32],
+    pos: ResultPositions,
+    mode: SlotMode,
+) -> Result<(Option<i32>, bool), Diagnostic> {
+    let Some(res) = f.result else {
+        return Ok((None, false));
+    };
+    if mode == SlotMode::Off
+        || res.class != ResultClass::Address
+        || pos.all == 0
+        || pos.last != pos.all
+    {
+        return Ok((None, false));
+    }
+    let mut values = Vec::new();
+    let mut call = false;
+    dpc_ir::visit_stmts(&f.body, &mut |st| {
+        if let StmtKind::SetResult(e) = &st.kind {
+            values.push(pointer_value(e, escaped));
+            call |= a0_call(e).is_some();
+        }
+    });
+    if call || values.contains(&PointerValue::Other) {
+        // Best effort (not byte-identical): the register-held variable, as
+        // before bead domain-pascal-yqsm (no site of these shapes; the
+        // slot is the image's where every value is memory or `nil`,
+        // KBD_$GET_DESC 0xE1AA92, NET_$FIND_HANDLER 0xE5A178, and as the
+        // only statement for a call's A0, MST_$MAP 0xE438BE).
+        return Ok((None, false));
+    }
+    if mode == SlotMode::Auto && !values.contains(&PointerValue::Memory) {
+        let local = values.contains(&PointerValue::Local);
+        return Ok((None, local && f.result_slot.is_some()));
+    }
+    match f.result_slot {
+        Some(slot) => Ok((Some(slot), false)),
+        None => Err(unsupported(
+            f.span,
+            "a pointer result without a frame slot is",
+        )),
+    }
+}
+
 /// What [`select_body_with`] gives: the body and the reuses found, or the
 /// pointer locals to select again held in A0 ([`Selector::a0_locals`]).
 enum Selected {
     Body(Body, Vec<(u32, u32)>),
     InA0(Vec<i32>),
+    /// Select again with the pointer result variable in its frame slot,
+    /// or without it ([`Selector::slot_wanted`]).
+    Reslot(SlotMode),
+}
+
+/// Whether a body keeps its pointer result variable in its frame slot
+/// ([`pointer_result_in_slot`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SlotMode {
+    /// As its assignments' values say; a local in its frame slot asks
+    /// for [`SlotMode::Force`].
+    Auto,
+    /// In the slot: a local found there on the first selection.
+    Force,
+    /// Not in the slot: a register-held local found in slot mode; the
+    /// register-held variable of `main` before bead domain-pascal-yqsm
+    /// (best effort).
+    Off,
 }
 
 fn select_body_with(
@@ -524,6 +669,7 @@ fn select_body_with(
     sched: Schedule,
     in_a0: &[i32],
     overlays: &Overlays,
+    slot: SlotMode,
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
     s.cse_plan = plan;
@@ -682,6 +828,10 @@ fn select_body_with(
         s.result_web = f.result.is_some();
     }
     s.result_positions = result_positions(&f.body);
+    if s.result_web {
+        (s.ptr_slot, s.slot_allowed) =
+            pointer_result_in_slot(f, &s.escaped, s.result_positions, slot)?;
+    }
     s.load_link(f)?;
     s.param_copies(f)?;
     let reg_locals = register_locals(f);
@@ -723,7 +873,11 @@ fn select_body_with(
             s.ptr_locals.push((o, None));
         }
     }
-    s.seq(f, &f.body, Tail::END)?;
+    let body = s.seq(f, &f.body, Tail::END);
+    if let Some(mode) = s.slot_wanted {
+        return Ok(Selected::Reslot(mode));
+    }
+    body?;
     // An element address of another unit's array or through a loaded
     // pointer formed as a value ([`Selector::lea_into`]): read twice or
     // more, or live across a call, the allocator's choice of its register
@@ -836,7 +990,17 @@ fn select_body_with(
         });
     }
     let mut web_a_move = None;
-    if let Some(web) = s.web_a {
+    if let Some(slot) = s.ptr_slot {
+        // A pointer result variable in its frame slot, into A0 at the start
+        // of the epilogue, where a `return` branches to (KBD_$GET_DESC
+        // 0xE1AA98 `movea.l (-8,A6),A0`, the error paths' `bra.s` at
+        // 0xE1AA44 and 0xE1AA6E; codegen-patterns 3, "Pointer results").
+        s.out.push(Insn::Movea {
+            size: Size::L,
+            src: Ea::Disp(slot, FP),
+            dst: 0,
+        });
+    } else if let Some(web) = s.web_a {
         web_a_move = Some(s.out.len());
         // A pointer result variable into A0 at the start of the epilogue
         // (DISK_$GET_BLOCK 0xE3BBCA `movea.l A2,A0`; codegen-patterns 3,
@@ -6838,6 +7002,18 @@ pub struct Selector {
     web_a: Option<u8>,
     /// Where the body assigns its result ([`result_positions`]).
     result_positions: ResultPositions,
+    /// A pointer result variable kept in its frame slot, this offset, in
+    /// a body of several statements whose every assignment of it is last
+    /// and one is from memory ([`pointer_result_in_slot`]).
+    ptr_slot: Option<i32>,
+    /// The body may keep its pointer result variable in the slot
+    /// ([`pointer_result_in_slot`]) though it was not selected so.
+    slot_allowed: bool,
+    /// An assignment found a local in its frame slot where `slot_allowed`
+    /// (the body is selected again with the slot), or a register-held
+    /// local in slot mode (selected again without it;
+    /// [`Selected::Reslot`]).
+    slot_wanted: Option<SlotMode>,
     /// The `nil`s selected into an address register: the instruction's
     /// index in `out` and the statement's span, checked after allocation
     /// and scheduling ([`select_body_with`]).
@@ -7086,6 +7262,9 @@ impl Selector {
             web: None,
             web_a: None,
             result_positions: ResultPositions::default(),
+            ptr_slot: None,
+            slot_allowed: false,
+            slot_wanted: None,
             nil_results: Vec::new(),
             entry_regs: Vec::new(),
             data_ptr_regs: Vec::new(),
@@ -14449,11 +14628,68 @@ impl Selector {
     /// ROUTE_$FIND_PORTP 0xE15B84 `suba.l A0,A0`), `movea.l #0,A0` as the
     /// only assignment and the body's last statement (TIME_$RTE_INT
     /// 0xE163D6, TIME_$VT_INT 0xE16426); refused when every assignment is
-    /// last on several paths (the result slot, NET_$FIND_HANDLER
-    /// 0xE5A178) and right before a call's pad (bead domain-pascal-ncac).
-    /// A computed address (`lea` at 0xE42B0A) is refused.
+    /// last on several paths and none reads memory (no site) and right
+    /// before a call's pad (bead domain-pascal-ncac).  A computed address
+    /// (`lea` at 0xE42B0A) is refused.
+    ///
+    /// Where every assignment is last and one reads memory, the variable
+    /// is in its frame slot instead ([`pointer_result_in_slot`]): memory
+    /// moved into it, `nil` cleared, reloaded into A0 at the start of the
+    /// epilogue; a local found in its frame slot here asks for that
+    /// selection ([`Selector::slot_wanted`]).
     fn set_pointer_result_web(&mut self, e: &Expr) -> Res<()> {
         let pos = self.result_positions;
+        if let Some(slot) = self.ptr_slot {
+            // The result variable in its frame slot ([`pointer_result_in_slot`]):
+            // memory moved into it (KBD_$GET_DESC 0xE1AA92 `move.l
+            // (0x2c,A1,D3.w),(-8,A6)`; NET_$FIND_HANDLER 0xE5A180 `move.l
+            // (A1),(-0x10,A6)`; MST_$MAP_AREA 0xE43BF0 `move.l
+            // (-0x14,A6),(-0x20,A6)`), `nil` cleared (NET_$FIND_HANDLER
+            // 0xE5A178 `clr.l (-0x10,A6)`); reloaded into A0 at the start of
+            // the epilogue ([`select_body_with`]).
+            let dst = Ea::Disp(slot, FP);
+            match e {
+                Expr::Const { .. } => self.out.push(Insn::Clr { size: Size::L, dst }),
+                Expr::Load { addr, .. } => {
+                    let src = self.operand(addr)?;
+                    if matches!(src, Ea::Reg(_)) {
+                        // Best effort (not byte-identical): a register-held
+                        // local where another assignment reads memory or is
+                        // `nil`, every one last (no site; the register's
+                        // value is moved to A0 where it is the only
+                        // assignment, AST_$ACTIVATE_ASTE_CANNED 0xE2F398):
+                        // the body selected again with the register-held
+                        // variable of before bead domain-pascal-yqsm
+                        // ([`SlotMode::Off`]).
+                        self.slot_wanted = Some(SlotMode::Off);
+                        return Err(unsupported(self.span, "a result slot given up is"));
+                    }
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src,
+                        dst,
+                    });
+                }
+                _ => unreachable!("pointer_result_in_slot admits memory, locals and nil"),
+            }
+            return Ok(());
+        }
+        if self.slot_allowed {
+            if let Expr::Load {
+                addr: addr @ Addr::Frame(_),
+                ..
+            } = e
+            {
+                if !matches!(self.operand(addr)?, Ea::Reg(_)) {
+                    // A local in its frame slot, every assignment last: the
+                    // result slot (MST_$MAP_AREA 0xE43BF0 `move.l
+                    // (-0x14,A6),(-0x20,A6)`), the body selected again so
+                    // ([`pointer_result_in_slot`]).
+                    self.slot_wanted = Some(SlotMode::Force);
+                    return Err(unsupported(self.span, "a result slot asked for is"));
+                }
+            }
+        }
         if let Expr::Const { value, .. } = e {
             if *value != 0 {
                 return Err(unsupported(
@@ -14493,6 +14729,14 @@ impl Selector {
                     "`nil` as the only assignment of a pointer result, other than as the last \
                      statement (no site; codegen-patterns 3, \"`nil` results\") is",
                 ));
+            }
+            if pos.last == pos.all && self.slot_allowed {
+                // A local assigned on another path: in the slot where it is
+                // in its frame slot (NET_$FIND_HANDLER, MST_$MAP_AREA), the
+                // body selected again so ([`pointer_result_in_slot`]); held
+                // in a register, refused there.
+                self.slot_wanted = Some(SlotMode::Force);
+                return Err(unsupported(self.span, "a result slot asked for is"));
             }
             if pos.last == pos.all {
                 // Every assignment last, on several paths: the result
@@ -21722,14 +21966,17 @@ mod tests {
             ],
         );
         h.result_slot = Some(-8);
-        // In a body of several statements the result variable is a
-        // register, A0 itself when no call follows (`set_pointer_result_web`).
+        // In a body of several statements whose every assignment of the
+        // result is last, one from memory, the slot too (KBD_$GET_DESC
+        // 0xE1AA92/0xE1AA98; `pointer_result_in_slot`, bead
+        // domain-pascal-yqsm).
         assert_eq!(
             text(&h),
             [
                 "link.w\t%fp,#-8",
                 "clr.w\t(%a5)",
-                "movea.l\t(4,%a5),%a0",
+                "move.l\t(4,%a5),(-8,%fp)",
+                "movea.l\t(-8,%fp),%a0",
                 "unlk\t%fp",
                 "rts",
             ]

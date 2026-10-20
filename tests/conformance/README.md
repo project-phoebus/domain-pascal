@@ -158,7 +158,14 @@ before it, 12.4 R4(b): the image takes A0 there; its manifest line
 would be `tests/conformance/pending/proc2_upgid_to_uid.pas
 PROC2_$UPGID_TO_UID --section-addr .bss.moddata.PROC2=0xE7BE84
 a5-always=PROC2_$UPGID_TO_UID
-module-routines=PROC2_$UPGID_TO_UID_INTERNAL=0xE4232A`).
+module-routines=PROC2_$UPGID_TO_UID_INTERNAL=0xE4232A`), and
+`pending/sio_i_get_desc.pas` (SIO_$I_GET_DESC 0xE667C6, a pointer result
+whose every assignment is last kept in its frame slot, codegen-patterns
+3, bead domain-pascal-yqsm; compiled, but the element offset is computed
+again where the image reuses it, bead domain-pascal-gg57, and the slot is
+below the local's where the image has it above, codegen-patterns 2,
+"Frame size"; its manifest line would be
+`tests/conformance/pending/sio_i_get_desc.pas SIO_$I_GET_DESC:56`).
 
 Constants and expressions passed by address (codegen-patterns 1.5; bead
 domain-pascal-5aw.9; "Constants in the code section" below):
