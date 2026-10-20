@@ -12009,7 +12009,7 @@ impl Selector {
             // value into a data register first (an index, a loaded word),
             // whether the `s<cc>` goes into that register and is moved, or
             // the whole computation into the local's register, is not
-            // seen: refused.
+            // seen: the former, best effort (below).
             Expr::Test(c) => {
                 let start = self.out.len();
                 let d = self.test_value(c)?;
@@ -12022,12 +12022,24 @@ impl Selector {
                     || !crate::regs::is_virtual(Reg::D(d))
                     || !matches!(self.out[last], Insn::Scc { .. })
                 {
-                    return Err(unsupported(
-                        self.span,
-                        "storing a computed boolean whose compare computes into a data register \
-                         to a register-held local (the `s<cc>` register not seen, \
-                         codegen-patterns 3) is",
-                    ));
+                    // Formed in a register of its own and moved, as a
+                    // plain `and`/`or` is (PKT_$LIKELY_TO_ANSWER
+                    // 0xE12A26..0xE12A28 `not.b D0; move.b D0,D2`, the
+                    // function's result held in D2; bead
+                    // domain-pascal-2lse).  Best effort (not
+                    // byte-identical) for `and then`/`or else`, and for a
+                    // compare that computes into a data register first:
+                    // the `s<cc>` into that register, as for a store to
+                    // memory (PARITY_$CHK 0xE0AF18..0xE0AF22 `moveq
+                    // #15,D0; and.b (-18,A6),D0; cmpi.w #15,D0; seq D0`,
+                    // to a local not held), then moved; the original's
+                    // form for a register-held local is not seen.
+                    self.out.push(Insn::Move {
+                        size: Size::B,
+                        src: Ea::Reg(Reg::D(d)),
+                        dst,
+                    });
+                    return Ok(());
                 }
                 crate::regs::rename(&mut self.out[last], &|r| {
                     if r == Reg::D(d) {
@@ -17673,7 +17685,8 @@ impl Selector {
     /// index register of the `lea` before; module-local 0xE464AA..0xE464B0
     /// `cmpi.w #2,(-2,A0,D1.w); sne D1`; PROC1_$TST_LOCK 0xE148DC..0xE148DE
     /// `btst D0,D1; sne D1`, the set's register).  **Uncertain:** the rule
-    /// is read off these four sites.  Only comparisons are supported.
+    /// is read off these four sites.  Other conditions: [`Self::not_value`],
+    /// [`Self::short_circuit_value`], [`Self::bool_into_reg`].
     fn test_value(&mut self, c: &IrCond) -> Res<u8> {
         if let IrCond::Block { op, lhs, rhs, size } = c {
             // `sne`/`seq` into the count register, the first `bne` of the
@@ -17708,6 +17721,17 @@ impl Selector {
         }
         if let IrCond::And(..) | IrCond::Or(..) = c {
             return self.logic_value(c);
+        }
+        // Bead domain-pascal-2lse: `not`, `and then`, `or else` and a
+        // boolean variable, field or function result as a value.
+        if let IrCond::Not(x) = c {
+            return self.not_value(x);
+        }
+        if let IrCond::AndThen(..) | IrCond::OrElse(..) = c {
+            return self.short_circuit_value(c);
+        }
+        if let IrCond::Test(_) = c {
+            return self.bool_into_reg(c);
         }
         let IrCond::Compare { op, lhs, rhs } = c else {
             return Err(unsupported(
@@ -17761,6 +17785,79 @@ impl Selector {
             cond: cc,
             dst: Ea::Reg(Reg::D(d)),
         });
+        Ok(d)
+    }
+
+    /// `not x` as a boolean value (ref "Not", p. 4-126; 0xFF true, 0
+    /// false, ref 3.5.3), bead domain-pascal-2lse:
+    ///
+    /// - a value formed by a final `s<cc>` (a comparison, `odd`, a one-bit
+    ///   field, a block compare): the opposite `s<cc>`.  0xE725EC..0xE725F0
+    ///   `btst #8,D2; seq D2` for `cts := not ipr.cts_a` (../source
+    ///   sio2681/inq_line.pas); otherwise not seen for a comparison, but no
+    ///   `s<cc> Dn` in the image is followed by `not.b Dn` (a scan of
+    ///   0xE00800..0xE88834).  Best effort (not byte-identical): the operand
+    ///   is loaded as `bits_value` and the compares load it, not as the
+    ///   image's `move.w (-2,A6),D2` first.
+    /// - anything else (a boolean variable, a function's result, a plain
+    ///   `and`/`or`, `and then`/`or else`): the value in a register of its
+    ///   own ([`Self::bool_into_reg`]), then `not.b` (0xE19610 `move.b
+    ///   D5,D0; not.b D0`, a register-held variable; 0xE0B616 `move.b
+    ///   (40,A4),D1; not.b D1`, a field; 0xE6F8B2 `move.b (A2),D0; not.b
+    ///   D0`, a parameter; 0xE12A26 `bsr; not.b D0`, a function's result;
+    ///   0xE0AED6 `or.b D1,D0; not.b D0`, a plain `or`).
+    /// - `not not x`: `x`.  Best effort: not seen.
+    fn not_value(&mut self, x: &IrCond) -> Res<u8> {
+        if let IrCond::Not(y) = x {
+            return self.test_value(y);
+        }
+        let start = self.out.len();
+        let d = self.bool_into_reg(x)?;
+        if self.out.len() > start {
+            if let Some(Insn::Scc {
+                cond,
+                dst: Ea::Reg(Reg::D(r)),
+            }) = self.out.last_mut()
+            {
+                if *r == d && *cond != Cond::T {
+                    *cond = cond.negate();
+                    return Ok(d);
+                }
+            }
+        }
+        self.out.push(Insn::Unary {
+            op: UnaryOp::Not,
+            size: Size::B,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// `a and then b` / `a or else b` as a boolean value (ref "And Then",
+    /// pp. 4-18..4-19; "Or Else", p. 4-134), bead domain-pascal-2lse:
+    /// jumping code to a false label ([`Self::branch`]), true on the fall
+    /// through, `st Dn; bra.s <join>; <false>: clr.b Dn; <join>:`.  The
+    /// image's one known site, PKT_$LIKELY_TO_ANSWER 0xE129F4..0xE12A18
+    /// (`need_ping := (hops = 0) and then (...)`, ../source
+    /// pkt/likely_to_answer.pas), has this shape with `move.b D2,D0` for
+    /// the true, D2 holding a `true` stored before.  Best effort (not
+    /// byte-identical): `st` for the true, the register the allocator's.
+    fn short_circuit_value(&mut self, c: &IrCond) -> Res<u8> {
+        let f = self.new_label();
+        let j = self.new_label();
+        self.branch(c, false, f)?;
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Scc {
+            cond: Cond::T,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.jump(Cond::T, j);
+        self.place(f);
+        self.out.push(Insn::Clr {
+            size: Size::B,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.place(j);
         Ok(d)
     }
 
@@ -18149,11 +18246,22 @@ impl Selector {
                 }
             }
             IrCond::Compare { .. } | IrCond::Block { .. } | IrCond::Odd(_) => self.test_value(c),
-            _ => Err(unsupported(
-                self.span,
-                "this operand of a plain `and`/`or` (`not` of a computed boolean, `and then`, \
-                 `or else`: not catalogued) is",
-            )),
+            // Bead domain-pascal-2lse.  Best effort (not byte-identical):
+            // `not` of a computed boolean, `and then`, `or else` as an
+            // operand are not catalogued; formed as values of their own
+            // ([`Self::not_value`], [`Self::short_circuit_value`]).
+            IrCond::Not(_) | IrCond::AndThen(..) | IrCond::OrElse(..) => self.test_value(c),
+            // Any other boolean expression: its value if `eval` forms one
+            // in a register of its own (best effort); `eval` itself refuses
+            // what it cannot form (an element of a packed boolean array, a
+            // member of a set larger than a longword, as values).
+            IrCond::Test(e) => match self.eval(e)? {
+                Val::Tmp(d) => Ok(d),
+                _ => Err(unsupported(
+                    self.span,
+                    "this boolean value is",
+                )),
+            },
         }
     }
 

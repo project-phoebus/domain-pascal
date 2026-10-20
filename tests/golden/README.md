@@ -74,6 +74,12 @@ Tests:
   into a data register and `move.b` (TTY_$K_GET 0xE1C506), into a
   register-held local's register (0xE1C42E), to a frame local, and passed
   by value right before its push (0xE1C54E).
+- `stores/not_values` - codegen-patterns 3 ("Other conditions as boolean
+  values"; bead domain-pascal-2lse): `not` of a variable, a field, a
+  function's result and a plain `or` as `not.b` (0xE19610, 0xE0B616,
+  0xE12A26, 0xE0AED6), of a one-bit field as the opposite `s<cc>`
+  (0xE725EC); best effort: `not` of a comparison, `and then`/`or else`
+  values (the shape of 0xE129F4..0xE12A18).
 - `stores/both_regs` - codegen-patterns 12.4 ("Stores whose destination
   and value both need a register"), 10.1 (bead domain-pascal-k1sv): the
   side with more instructions first, the value on a tie (TTY_$K_SET_DELAY

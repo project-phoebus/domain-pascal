@@ -3085,13 +3085,6 @@ end;
             "b := in_range(g);",
             "`in_range` of a value other than an enumeration or an integer subrange",
         ),
-        // A comparison that computes into a data register, assigned to a
-        // register-held local.
-        (
-            "i := 0; repeat c := i + 1 = 3; if c then g := 1; if not c then g := 2; \
-             i := i + 1 until i > 5;",
-            "storing a computed boolean whose compare computes into a data register",
-        ),
         // A destination and a value that both need a register, with a call.
         (
             "q^.a[g] := f(g);",
@@ -3291,11 +3284,6 @@ fn with_and_or_odd_refusals() {
             "b := odd(g);",
             "`odd` of a variable in memory as a boolean value",
         ),
-        // An `and then` inside a plain `and`.
-        (
-            "if b and ((g = 1) and then (g = 2)) then g := 1;",
-            "this operand of a plain `and`/`or`",
-        ),
         // A `goto` into a `with` statement (ref p. 4-95).
         (
             "goto 1; with r do begin 1: a := 1 end;",
@@ -3321,6 +3309,71 @@ end;
             "{body}: {err}"
         );
     }
+}
+
+#[test]
+fn lse2_other_conditions_as_values() {
+    // Bead domain-pascal-2lse (best effort, codegen-patterns 3, "Other
+    // conditions as boolean values"): once refused by
+    // `k1sv_forms_and_refusals` and `with_and_or_odd_refusals`.  A
+    // comparison that computes into a data register, assigned to a
+    // register-held local: `s<cc>` into the computed register, then moved;
+    // an `and then` inside a plain `and`: jumping code to `st; bra; clr.b`,
+    // then `and.b`.
+    let src = "module m;
+var g: integer; b: boolean;
+procedure p;
+var c: boolean; i: integer;
+begin
+  i := 0;
+  repeat c := i + 1 = 3; if c then g := 1; if not c then g := 2; i := i + 1 until i > 5;
+  if b and ((g = 1) and then (g = 2)) then g := 1;
+end;
+";
+    let asm = compile_with("lse2_values", src, &[]).unwrap();
+    // The shapes, data registers and local labels left open: each `%dN`
+    // reads `%d?`, each local label `L`.
+    let shape: String = asm
+        .lines()
+        .map(|l| {
+            let mut out = String::new();
+            let mut cs = l.chars().peekable();
+            while let Some(c) = cs.next() {
+                if c == '%' && cs.peek() == Some(&'d') {
+                    cs.next();
+                    cs.next();
+                    out.push_str("%d?");
+                } else if c.is_ascii_digit()
+                    && (out.is_empty() || out.ends_with('\t'))
+                    && l.contains(['f', 'b', ':'])
+                {
+                    let mut t = c.to_string();
+                    while let Some(&d) = cs.peek().filter(|d| d.is_ascii_digit()) {
+                        t.push(d);
+                        cs.next();
+                    }
+                    match cs.peek() {
+                        Some('f') | Some('b') | Some(':') => {
+                            cs.next();
+                            out.push('L');
+                        }
+                        _ => out.push_str(&t),
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out + "\n"
+        })
+        .collect();
+    assert!(
+        shape.contains("cmpi.w\t#3,%d?\n\tseq\t%d?\n\tmove.b\t%d?,%d?\n"),
+        "{shape}"
+    );
+    assert!(
+        shape.contains("bne.s\tL\n\tst\t%d?\n\tbra.s\tL\nL\n\tclr.b\t%d?\nL\n\tand.b\t%d?,%d?\n"),
+        "{shape}"
+    );
 }
 
 /// Bead domain-pascal-1dn: a panic in the compiler (driven here by the

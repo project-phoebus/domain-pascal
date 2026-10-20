@@ -2582,9 +2582,39 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   index register of the `lea` before); module-local 0xE464AA..0xE464B2
   `cmpi.w #2,(-2,A0,D1.w); sne D1; move.b D1,D0`; PROC1_$TST_LOCK
   `btst D0,D1; sne D1` (the set's register).  A compare that reads no data
-  register gets a new one.  **Implemented** (`isel.rs`, `test_value`) for
-  comparisons only; `not`, `and then`, `or else` and boolean variables as
-  values are rejected (not catalogued).
+  register gets a new one.  **Implemented** (`isel.rs`, `test_value`);
+  for other conditions see the next item.
+- **Other conditions as boolean values (Verified at the sites given;
+  best effort elsewhere; implemented, bead domain-pascal-2lse).**
+  - `not` of a boolean variable, a field, a function's result or a plain
+    `and`/`or`: the value in a data register of its own, then `not.b`
+    (0xE19610 `move.b D5,D0; not.b D0; move.b D0,(118,A5)`, a
+    register-held variable, `win_flag := not wait`; 0xE0B616 `move.b
+    (40,A4),D1; not.b D1`, a field; 0xE6F8B2 `move.b (A2),D0; not.b D0`;
+    0xE12A26 `bsr; not.b D0; move.b D0,D2`, a function's result into the
+    held function result; 0xE0AED6 `or.b D1,D0; not.b D0`).
+  - `not` of a one-bit packed field: the opposite `s<cc>` (0xE725EC
+    `btst #8,D2; seq D2`, `cts := not ipr.cts_a`).  **Best effort (not
+    byte-identical):** the image loads the field's word into a register
+    first; dpc tests it in memory as for the field's own value (5.3).
+  - `not` of a comparison, `odd`, a block compare: the opposite
+    `s<cc>`.  **Best effort:** not seen, but no `s<cc> Dn` in compiled
+    code is followed by `not.b Dn` (a scan of 0xE00800..0xE88834).
+    `not not x` is `x` (not seen).
+  - `not` of an `and then` / `or else` value: the value formed as below,
+    then `not.b`.  **Best effort:** not seen.
+  - `a and then b`, `a or else b`: jumping code to a false label (as in
+    a condition, 7.1), then `st Dn; bra.s <join>; <false>: clr.b Dn;
+    <join>:`.  The one known site, PKT_$LIKELY_TO_ANSWER
+    0xE129F4..0xE12A18 (`need_ping := (hops = 0) and then (...)` in
+    ../source), has this shape with `move.b D2,D0` for the true, D2
+    holding a `true` stored earlier.  **Best effort:** `st` for the
+    true; RING_$POLL_STICKY_BPHERR 0xE762A4..0xE762C0 forms its last
+    operand's value with `sne` instead of branching, but ../source writes
+    that routine as an `if`, so the source is not known.
+  - As operands of a plain `and`/`or`, each is formed as above in a
+    register of its own (**best effort**, not catalogued).
+  - Tests: `tests/golden/stores/not_values`, `tests/exec/bool_values.pas`.
 - **Computed booleans stored and pushed (survey Verified; implemented,
   bead domain-pascal-k1sv).**  `tools/boolsurvey.py summary`, kind
   `scc`: of the 462 `s<cc>` other than `st`/`sf` in compiled code, none
@@ -2606,8 +2636,14 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   break_mode_flag; a set member, 0xE1C41E `btst.b #1,(1,A4); sne D4`);
   when it does (a loaded word, an index), whether the `s<cc>` goes into
   that register and is moved, or everything into the local's register,
-  is not seen: refused.  Tests: `tests/golden/stores/bool_stores`,
-  `tests/exec/bool_stores.pas`.
+  is not seen.  **Best effort (not byte-identical; bead
+  domain-pascal-2lse):** the former, the `s<cc>` into the computed
+  register as for a store to memory (PARITY_$CHK 0xE0AF18..0xE0AF22
+  `moveq #15,D0; and.b (-18,A6),D0; cmpi.w #15,D0; seq D0`, a local not
+  held), then `move.b` into the local's register; so too a value
+  `not.b` or jumping code forms (above).  Tests:
+  `tests/golden/stores/bool_stores`, `tests/exec/bool_stores.pas`,
+  `tests/exec/bool_values.pas`.
 - **Function calls in expressions (Verified):** the call sequence of a
   procedure call (section 1), then the result read from D0: 0xE04700..
   0xE04704 `bsr.w; move.l D0,(A3)` (not popped: a `bra` to a join and the
