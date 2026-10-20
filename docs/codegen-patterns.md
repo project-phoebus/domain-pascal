@@ -3224,7 +3224,7 @@ this pair.
   0xE01C0A..0xE01C16), but which elements are guarded is not settled
   (the unguarded DISK_ loop 0xE6C792..0xE6C79C `for i := 1 to 10` in
   ../source's reading, the guarded AST one from `moveq #1,D3` too):
-  `dpc` refuses them (beads domain-pascal-bitu, domain-pascal-h7ex).
+  `dpc` guards every one, best effort (12.6).
 - **Constant member of a one-word or one-longword set (Verified;
   implemented):** see "`in` on sets in memory, constant member" below:
   a set in memory is read only as far as the part holding bit k at the
@@ -7056,7 +7056,7 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   0xE0B552, 0xE0BD5A, 0xE18C8C reuse the register, `Selector::if_`); a
   pointer against `addr(...)` or another computed pointer (the TIME_Q_
   module-local 0xE16B70 at 0xE16BA6 `cmpa.l (12,A6),A0`, `cur = addr(elem)`: not
-  catalogued); computed booleans.  Golden
+  catalogued; best effort since, 12.6); computed booleans.  Golden
   `control/compares_computed`; driver test
   `unsettled_computed_compares_are_refused`; execution test
   `tests/exec/computed_compares.pas`.  srcsurvey: HINT_$ADDU
@@ -7765,9 +7765,10 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   settled: "A plain `or`/`and` whose right operand calls a function"
   above; bead domain-pascal-l78t).  A
   function's boolean result is tested with `tst.b D0` (section 3); `k in
-  s` for a constant k with `btst #k` (section 5.1).  Not supported yet: comparing booleans
+  s` for a constant k with `btst #k` (section 5.1).  Comparing booleans
   (`b = true`: compiled code tests booleans with `tst.b`, and has two
-  `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans);
+  `cmpi.b #0xFF` only, 0xE1B96C, 0xE53FDE, not shown to be booleans):
+  as bytes, best effort (12.6).  Not supported yet:
   a constant on the left of a comparison; the refusals of "Two
   variables", "Two computed values", "Mixed widths and signs" and
   "Records" above; unsigned
@@ -13992,6 +13993,73 @@ read or assignment (`register_locals`), or an addressed reference
 index that is addressed is refused (`dpc-ir` `check_for_indices`).  So
 such a local is read from its slot after the call (driver test
 `local_passed_to_var_is_reread`).  For parameters see 12.2.
+
+### 12.6 Best-effort forms of the link test's refusals (bead domain-pascal-uaq7)
+
+Each is a warning `best effort (not byte-identical): ...` (a refusal
+under `--strict`), correct code where the image's form is unknown or not
+followed; execution test `be_u_kinds`.
+
+- **The address of an element of another unit's array, or through a
+  pointer loaded from memory, at a displacement beyond a byte, as a
+  value** (5.2): `lea (0,An,Dx),Am; lea (d,Am),Ar`, Ar the allocator's.
+  DBUF_$INIT 0xE3AC48 steps a pointer instead (`movea.l D6,A0; lea
+  (-0x400,A0),A1`).
+- **A pointer variable against a computed pointer** (7.1): both in data
+  registers, `cmp.l Dr,Dl` (TIME_Q_ 0xE16BA6 `cmpa.l (12,A6),A0`).
+  `addr(x)` as a value in a comparison or another expression than
+  `+`/`-`: `move.l #sym,Dn`, `move.l (d,A6),Dn` for a by-address
+  parameter, or `lea; move.l An,Dn`.
+- **`addr(x)` in arithmetic** (5.2, "`addr(x)` as a value"): a value
+  plus or minus an address that needs a `lea` in NETBUF_$GETVA's order,
+  the address first (0xE0ECC8..0xE0ECE2 `lea (0,A0,D3.l),A1; ...;
+  andi.l #0x3ff,D3; add.l A1,D3`, one site; the address on the left
+  best effort); an address and a constant in a sum, an address minus a
+  value, and the other shapes the generic operator forms, the address a
+  value in a data register (`&`, `!`, `xor` with a constant: FLP_$DINIT's
+  form, bead domain-pascal-sq4a).
+- **A pointer result of a one-statement body that is computed** (3,
+  "Pointer results"): an address straight into A0 (GET_WIRED 0xE1D8E8
+  `lea (A5),A0`, which dpc then matches); another value stored into the
+  result's slot and moved, `move.l Dn,(d,A6); movea.l Dn,A0` (0xE4D5A6).
+- **A comparison with a function's result in the right operand of a
+  plain `and`/`or`** (7.1) with a widened result, a pointer function's
+  result, or a computed other operand: the operand that calls first,
+  copied into a data register, the other into another, `cmp`, then
+  `s<cc>` into a callee-saved register and `tst.b` as at the settled
+  sites.
+- **`in` on a one-word set variable with a run-time element** (5.1):
+  always guarded as at AST's module-local 0xE01C0A (`moveq #15,Dx; cmp.w
+  Dk,Dx; bcs.s; move.w set,Ds; btst Dk,Ds; bhi`/`bls`), so that an
+  element outside 0..15 is no member (ref 3.9.3); as a value the set
+  is loaded first (a `move` clears C), then `moveq; cmp; btst; shi`.
+  The image tests some unguarded (0xE5EABE).
+- **An unsigned ordering against 0** (7.1).  A type whose values fit the
+  signed range of its width (`0..32767`, `linteger` `0..2147483647`): a
+  sign test, as the image makes it (Verified at two sites: BAT_$FREE
+  0xE3B5B0..0xE3B5B6 `sub.l; bmi.s` for `rel < 0`, rel a linteger;
+  PKT_$BLD_INTERNET_HDR 0xE122D6 `tst.w; ble` for `template_len > 0`, a
+  pinteger); `dpc-ir` `compare` sees the operand as signed, so `<`/`>=`
+  are `bmi`/`bpl` and `>`/`<=` `bgt`/`ble`.  **Conflict:**
+  AUDIT_$LOG_CNAME_OP 0xE4BEFE has `tst.w; bne` for `new_name_len <= 0`,
+  the `=`-form, against PKT's `ble`: not explained.  A type that uses the
+  top bit (`0..65535`), best effort, no site: `x > 0` as `x <> 0`, `x <=
+  0` as `x = 0`; `x < 0` and `x >= 0` by `tst` (or `cmpa.w #0`), then
+  `bcs`/`bcc` on the clear carry.
+- **A record or array selected from a type transfer of a variable,
+  assigned** (5.2): copied as a block from the variable's bytes, in place
+  (ref p. 4-197).  **A string constant assigned to a longer array of
+  char**: a byte copy from a code-section cell of the text padded with
+  blanks (ref p. 4-204); NAME_$INIT 0xE31738..0xE3174A stores the text
+  with `move.l #...,(A0)+` and fills the blanks by longwords in a `dbf`
+  loop.
+- **Comparing booleans** (7.1): as bytes (SMD_$SHOW_CURSOR 0xE6E32E
+  `cmp.b (0x38,A4),D1`, SIO2681_$SET_LINE 0xE1D30C `cmp.b D5,D1; seq`);
+  `true` is 0xFF, and an ordering (`false < true`) is the reversed
+  signed relation, a boolean being a signed byte in the IR.
+- **A longword `div`/`mod` used as a byte** (8): the longword quotient
+  or remainder (M$ARITH or a shift), its low byte read, as an
+  assignment narrows (correct modulo 256; no site looked at).
 
 ---
 

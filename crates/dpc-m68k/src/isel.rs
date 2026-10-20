@@ -189,6 +189,29 @@ fn rel_cond(op: Rel, signed: bool) -> Cond {
     }
 }
 
+/// The warning of an unsigned ordering comparison with 0
+/// ([`unsigned_zero_rel`]).
+const UNSIGNED_ZERO: &str = "an unsigned ordering comparison with 0 (no form catalogued, \
+     codegen-patterns 7.1) is";
+
+/// An unsigned `x op 0` for an ordering `op`: `x <= 0` is `x = 0` and `x >
+/// 0` is `x <> 0`; `x < 0` is never true and `x >= 0` always, kept as
+/// `Lt`/`Ge`, which the callers test with `tst` (C clear) and
+/// `bcs`/`bcc`.  `None` for a signed `x` or `=`/`<>`.  Only types that
+/// use the top bit (`0..65535`) reach here: `dpc-ir` `compare` makes an
+/// unsigned type whose values fit the signed range a sign test, as the
+/// image does (BAT_$FREE 0xE3B5B0, PKT_$BLD_INTERNET_HDR 0xE122D6).  Best
+/// effort (not byte-identical; bead domain-pascal-uaq7): no compiled form
+/// of a top-bit type against 0 is catalogued.
+fn unsigned_zero_rel(op: Rel, signed: bool) -> Option<Rel> {
+    match (op, signed) {
+        (_, true) | (Rel::Eq | Rel::Ne, _) => None,
+        (Rel::Le, false) => Some(Rel::Eq),
+        (Rel::Gt, false) => Some(Rel::Ne),
+        (o, false) => Some(o),
+    }
+}
+
 /// The relation `r` with its operands exchanged: `a r b` = `b (swap_rel
 /// r) a`.
 fn swap_rel(r: Rel) -> Rel {
@@ -10941,6 +10964,19 @@ impl Selector {
                         elem,
                         set,
                         set_width: Width::Word,
+                    } if !matches!(**set, Expr::Const { .. }) => {
+                        // A set variable: the element's range guarded
+                        // ([`Self::word_set_var`]).
+                        let skip = self.new_label();
+                        self.word_set_var(elem, set, Some(if when { skip } else { l }))?;
+                        self.jump(if when { Cond::Hi } else { Cond::Ls }, l);
+                        self.place(skip);
+                        return Ok(());
+                    }
+                    Expr::SetMember {
+                        elem,
+                        set,
+                        set_width: Width::Word,
                     } => {
                         self.word_set_const(elem, set)?;
                         let start = self.out.len();
@@ -11519,6 +11555,23 @@ impl Selector {
         }
         match rhs {
             Expr::Const { value: 0, .. } => {
+                let op = match unsigned_zero_rel(op, signed) {
+                    Some(o) => {
+                        best_effort(self.span, UNSIGNED_ZERO)?;
+                        o
+                    }
+                    None => op,
+                };
+                if !signed && matches!(op, Rel::Lt | Rel::Ge) {
+                    // Never / always: the operand tested, C clear after
+                    // it, `bcs`/`bcc` ([`unsigned_zero_rel`]).
+                    let ea = self.operand(addr)?;
+                    self.out.push(match ea {
+                        Ea::Reg(Reg::A(a)) => Insn::CmpaZero(a),
+                        ea => Insn::Tst { size, dst: ea },
+                    });
+                    return Ok(rel_cond(op, false));
+                }
                 let cc = match (op, signed) {
                     (Rel::Eq, _) => Cond::Eq,
                     (Rel::Ne, _) => Cond::Ne,
@@ -11526,12 +11579,7 @@ impl Selector {
                     (Rel::Ge, true) => Cond::Pl,
                     (Rel::Le, true) => Cond::Le,
                     (Rel::Gt, true) => Cond::Gt,
-                    _ => {
-                        return Err(unsupported(
-                            self.span,
-                            "an unsigned ordering comparison with 0 is",
-                        ))
-                    }
+                    _ => unreachable!("an unsigned relation with 0 made `=`/`<>`"),
                 };
                 let ea = self.operand(addr)?;
                 if let Ea::Reg(Reg::A(a)) = ea {
@@ -11726,11 +11774,21 @@ impl Selector {
                 });
                 Ok(rel_cond(op, signed))
             }
-            _ if matches!(rhs, Expr::AddrOf(_)) || ty == Scalar::POINTER => Err(unsupported(
-                self.span,
-                "comparing a pointer variable with a computed pointer (`addr(...)`; the TIME_Q_ \
-                 module-local 0xE16B70 at 0xE16BA6 `cmpa.l (12,A6),A0`: not catalogued) is",
-            )),
+            _ if matches!(rhs, Expr::AddrOf(_)) || ty == Scalar::POINTER => {
+                // Best effort (not byte-identical; bead domain-pascal-uaq7):
+                // both pointers in data registers, `cmp.l Dr,Dl`, as for
+                // two computed values ([`Self::compare_computed`]).  The
+                // image compares an address register with the variable,
+                // the TIME_Q_ module-local 0xE16B70 at 0xE16BA6 `cmpa.l
+                // (12,A6),A0` (`cur = addr(elem)`, cur held in A0).
+                best_effort(
+                    self.span,
+                    "comparing a pointer variable with a computed pointer (`addr(...)`; the \
+                     TIME_Q_ module-local 0xE16B70 at 0xE16BA6 `cmpa.l (12,A6),A0`: not \
+                     catalogued) is",
+                )?;
+                self.compare_computed(op, lhs, rhs)
+            }
             _ => {
                 let held = match addr {
                     Addr::Frame(o) => self.pinned(*o),
@@ -13263,7 +13321,9 @@ impl Selector {
             // A string constant's cell compared with an array of `char`
             // (dpc-ir's `array_compare`): `lea (d,PC),An` (the module-local
             // DISK_ routine at 0xE6C26C `lea (0x44,PC),A3`; bead
-            // domain-pascal-yqf6).
+            // domain-pascal-yqf6); the source of a string constant
+            // assigned to a longer array of char (`string_assign`, bead
+            // domain-pascal-uaq7).
             Addr::Const(_) => (self.ea_of(addr)?, BlockForm::Known),
             _ => {
                 const KIND: &str =
@@ -16391,11 +16451,49 @@ impl Selector {
             _ => None,
         };
         let Some(src) = src else {
-            return Err(unsupported(
+            // Best effort (bead domain-pascal-uaq7): an address formed
+            // straight into A0, the slot not used (GET_WIRED 0xE1D8E8 `lea
+            // (A5),A0`, `get_wired := addr(wired)`); another value in a
+            // data register, stored into the slot and moved to A0
+            // (0xE4D5A6 `move.l D0,(-12,A6); movea.l D0,A0`); a pointer
+            // held in an address register moved to A0.
+            best_effort(
                 self.span,
                 "a pointer result other than one read from memory or a pointer function's \
                  result (a computed value: codegen-patterns 3, \"Pointer results\") is",
-            ));
+            )?;
+            if let Some(a) = addr_value(e).filter(|a| self.held_addr(a).is_none()) {
+                let r = self.addr_into_a(a)?;
+                self.result_moves.push(self.out.len());
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(r)),
+                    dst: 0,
+                });
+                return Ok(());
+            }
+            let r = match self.eval(e)? {
+                Val::Reg(Reg::A(a)) => {
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Reg(Reg::A(a)),
+                        dst: 0,
+                    });
+                    return Ok(());
+                }
+                v => self.in_tmp(v, Width::Long)?,
+            };
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(Reg::D(r)),
+                dst: Ea::Disp(slot, FP),
+            });
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Reg(Reg::D(r)),
+                dst: 0,
+            });
+            return Ok(());
         };
         self.out.push(Insn::Move {
             size: Size::L,
@@ -16897,6 +16995,17 @@ impl Selector {
                     });
                     return Ok(Val::Tmp(r));
                 }
+                if *set_width == Width::Word && !matches!(**set, Expr::Const { .. }) {
+                    // A one-word set variable, the element's range guarded
+                    // ([`Self::word_set_var`]): `shi` after the `btst`.
+                    self.word_set_var(elem, set, None)?;
+                    let r = self.alloc_d()?;
+                    self.out.push(Insn::Scc {
+                        cond: Cond::Hi,
+                        dst: Ea::Reg(Reg::D(r)),
+                    });
+                    return Ok(Val::Tmp(r));
+                }
                 if *set_width != Width::Long {
                     self.word_set_const(elem, set)?;
                 }
@@ -16964,12 +17073,37 @@ impl Selector {
             // form is catalogued (`cmp.l #sym,Dn` and `cmpa.l #sym,An`
             // are seen for comparisons, codegen-patterns 5.2; bead
             // domain-pascal-awzk).
-            Expr::AddrOf(_) => Err(unsupported(
-                self.span,
-                "an address (`addr`) in a comparison, in an expression other than `+`/`-`, or \
-                 into or with a register-held local (no form catalogued, codegen-patterns 5.2) \
-                 is",
-            )),
+            // Best effort (not byte-identical; bead domain-pascal-uaq7):
+            // the address into a data register, `move.l #sym,Dn` for
+            // another unit's object, `move.l (d,A6),Dn` for a parameter
+            // passed by address, otherwise `lea` into an address register
+            // ([`Self::addr_into_a`]) and `move.l An,Dn`.
+            Expr::AddrOf(a) => {
+                best_effort(
+                    self.span,
+                    "an address (`addr`) in a comparison, in an expression other than `+`/`-`, \
+                     or into or with a register-held local (no form catalogued, \
+                     codegen-patterns 5.2) is",
+                )?;
+                let src = match a {
+                    Addr::Symbol { name, offset: 0 } => Ea::ImmSym(name.clone()),
+                    _ if by_address_slot(a).is_some_and(|o| self.is_address_slot(o)) => {
+                        let o = by_address_slot(a).unwrap();
+                        match self.pinned(o) {
+                            Some(r) => Ea::Reg(r),
+                            None => Ea::Disp(o, FP),
+                        }
+                    }
+                    _ => Ea::Reg(Reg::A(self.addr_into_a(a)?)),
+                };
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: Size::L,
+                    src,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(Val::Tmp(d))
+            }
             Expr::SetSr(x) => Ok(Val::Tmp(self.set_sr(x)?)),
         }
     }
@@ -17529,7 +17663,9 @@ impl Selector {
             .iter()
             .any(|e| addr_value(e).is_some_and(|a| self.held_addr(a).is_none()))
         {
-            return self.addr_arith(alu, lhs, rhs, ty);
+            if let Some(d) = self.addr_arith(alu, lhs, rhs, ty)? {
+                return Ok(d);
+            }
         }
         // A constant operand: on the right for `-`; either side otherwise.
         let (x, c) = match (konst(lhs), konst(rhs)) {
@@ -17857,15 +17993,27 @@ impl Selector {
     /// site; its element address is read once, bead domain-pascal-1ibr), the
     /// sum of two addresses, a constant minus an address, `&`, `!`,
     /// `xor`, a width other than a longword (bead domain-pascal-awzk).
-    fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+    /// Best effort (not byte-identical; bead domain-pascal-uaq7): a value
+    /// plus or minus an address that needs a `lea` in NETBUF_$GETVA's
+    /// order, the address first ([`Self::value_addr_arith`]); the other
+    /// shapes `Ok(None)`, for [`Self::binary`]'s generic forms, the
+    /// address a value in a data register there ([`Self::eval`]).
+    fn addr_arith(
+        &mut self,
+        alu: AluOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        ty: Scalar,
+    ) -> Res<Option<u8>> {
         let refuse = |s: &Self, what: &str| {
-            Err(unsupported(
+            best_effort(
                 s.span,
                 format!(
                     "{what} (codegen-patterns 5.2, \"`addr(x)` as a value\": no form \
                      catalogued) is"
                 ),
-            ))
+            )
+            .map(|()| None)
         };
         // `&` of an address and a constant: the address in a new data
         // register ([`Self::addr_into_d`]), then the immediate operation
@@ -17896,7 +18044,7 @@ impl Selector {
                     imm: imm(c, Width::Long),
                     dst: Ea::Reg(Reg::D(d)),
                 });
-                return Ok(d);
+                return Ok(Some(d));
             }
         }
         if !matches!(alu, AluOp::Add | AluOp::Sub) || ty.width != Width::Long {
@@ -17932,7 +18080,7 @@ impl Selector {
                 let x = if ra.is_some() { lhs } else { rhs };
                 if let Expr::Const { value, .. } = x {
                     let a = la.or(ra).unwrap();
-                    return self.addr_plus_const(alu, a, *value);
+                    return self.addr_plus_const(alu, a, *value).map(Some);
                 }
                 let v = self.eval(x)?;
                 let d = self.in_tmp(v, Width::Long)?;
@@ -17948,13 +18096,13 @@ impl Selector {
                 let Expr::Const { value, .. } = rhs else {
                     unreachable!()
                 };
-                return self.addr_plus_const(alu, a, *value);
+                return self.addr_plus_const(alu, a, *value).map(Some);
             }
             (None, Some(a)) if matches!(lhs, Expr::Const { .. }) && alu == AluOp::Add => {
                 let Expr::Const { value, .. } = lhs else {
                     unreachable!()
                 };
-                return self.addr_plus_const(alu, a, *value);
+                return self.addr_plus_const(alu, a, *value).map(Some);
             }
             (None, Some(_)) if matches!(lhs, Expr::Const { .. }) => {
                 return refuse(self, "a constant minus an address");
@@ -17977,14 +18125,41 @@ impl Selector {
                 return refuse(self, "an address minus a value that is not an address")
             }
             _ => {
-                return refuse(
+                refuse(
                     self,
                     "an address that needs an address register and a value that is not one \
                      (the order is not settled: NETBUF_$GETVA 0xE0ECC8, one site; bead \
                      domain-pascal-awzk)",
-                )
+                )?;
+                return self.value_addr_arith(alu, lhs, rhs).map(Some);
             }
         };
+        Ok(Some(d))
+    }
+
+    /// `v + addr(x)`, `addr(x) + v` or `v - addr(x)`, `x` an object that
+    /// needs a `lea` and `v` neither a constant nor an address
+    /// ([`Self::addr_arith`]): NETBUF_$GETVA's order, 0xE0ECC8..0xE0ECE2
+    /// `movea.l #0xd64c00,A0; ...; lea (0x0,A0,D3*0x1),A1; move.l D2,D3;
+    /// ...; andi.l #0x3ff,D3; add.l A1,D3` (../source netbuf/getva.pas
+    /// `(ppn_shifted & 16#3FF) + addr(...)`): the address formed first,
+    /// then the value into a data register of its own, `add.l An,Dn` /
+    /// `sub.l An,Dn`.  One site; the address on the left is best effort.
+    fn value_addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr) -> Res<u8> {
+        let (a, v) = match (addr_value(lhs), addr_value(rhs)) {
+            (None, Some(a)) => (a, lhs),
+            (Some(a), None) if alu == AluOp::Add => (a, rhs),
+            _ => unreachable!("an address and a value"),
+        };
+        let r = self.addr_into_a(a)?;
+        let x = self.eval(v)?;
+        let d = self.in_tmp(x, Width::Long)?;
+        self.out.push(Insn::Alu {
+            op: alu,
+            size: Size::L,
+            src: Ea::Reg(Reg::A(r)),
+            dst: d,
+        });
         Ok(d)
     }
 
@@ -19456,10 +19631,14 @@ impl Selector {
                     return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
                 }
                 if ty.width != Width::Word {
-                    return Err(unsupported(
-                        self.span,
-                        "a longword `div`/`mod` used as a byte is",
-                    ));
+                    // Best effort (not byte-identical; bead
+                    // domain-pascal-uaq7): the longword quotient or
+                    // remainder (M$ARITH or a shift, [`Self::div`]), its
+                    // low byte read, as an assignment narrows (correct
+                    // modulo 256; no site looked at).
+                    best_effort(self.span, "a longword `div`/`mod` used as a byte is")?;
+                    let v = self.div(*op, lhs, rhs, *t, false)?;
+                    return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
                 }
                 let v = self.div(*op, lhs, rhs, *t, true)?;
                 return Ok(Val::Tmp(self.in_tmp(v, from.width)?));
@@ -20238,15 +20417,20 @@ impl Selector {
                 if split && !matches!(src, Ea::Idx(..)) {
                     // Beyond a byte the element's operand is `(d,Am)` after
                     // `lea (0,An,Dx),Am` ([`Self::split_element_ea`]): its
-                    // address as a value would be a second `lea`, whose
-                    // register is not surveyed.
-                    return Err(unsupported(
+                    // address as a value is a second `lea`, whose register
+                    // is not surveyed.  Best effort (not byte-identical;
+                    // bead domain-pascal-uaq7): `lea (d,Am),Ar`, Ar the
+                    // allocator's (DBUF_$INIT 0xE3AC48 steps a pointer
+                    // instead, `movea.l D6,A0; lea (-0x400,A0),A1`).
+                    best_effort(
                         self.span,
                         "the address of an element of another unit's array or through a \
                          pointer loaded from memory at a displacement beyond a byte, as a value \
                          (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; \
                          bead domain-pascal-1ibr) is",
-                    ));
+                    )?;
+                    self.out.push(Insn::Lea { src, dst: r });
+                    return Ok(());
                 }
                 self.out.push(Insn::Lea { src, dst: r });
                 if split {
@@ -20342,10 +20526,17 @@ impl Selector {
         } else if d0_call(rhs) {
             (swap_rel(*op), rhs, lhs)
         } else {
-            return Err(unsupported(self.span, OTHER));
+            return self.call_compare_generic(*op, lhs, rhs, when, l, OTHER);
         };
         if expr_has_call(other) {
             return Err(unsupported(self.span, OTHER));
+        }
+        if !matches!(other, Expr::Const { .. } | Expr::Load { .. }) {
+            // (`op` as the source has it, for the source's operands.)
+            let IrCond::Compare { op: op0, .. } = c else {
+                unreachable!()
+            };
+            return self.call_compare_generic(*op0, lhs, rhs, when, l, OTHER);
         }
         let ty = call.ty();
         let size = size_of(ty.width);
@@ -20410,6 +20601,78 @@ impl Selector {
             // D5`, D3 live after; no site where it dies).
             self.colour_apart.push((Reg::D(d), Reg::D(r)));
         }
+        self.out.push(Insn::Scc {
+            cond: rel_cond(op, ty.sign == Sign::Signed),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.out.push(Insn::Tst {
+            size: Size::B,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+        Ok(())
+    }
+
+    /// Best effort (not byte-identical; bead domain-pascal-uaq7): the
+    /// shapes of [`Self::call_compare_test`] that no site settles, the
+    /// call's operand a widened result or a pointer function's (A0), the
+    /// other a computed value.  The operand that calls first, its value
+    /// copied into a data register of its own; the other operand, which
+    /// may not call, into another; `cmp.<s>`; then `s<cc>` into a
+    /// callee-saved register and `tst.b`, as there.  The ROUTE_ caller of
+    /// NET_IO_$CREATE_PORT's `route_$find_portp(...) = nil` and
+    /// XNS_IDP_$OS_DEMUX 0xE184FA (`cmp.w (A2),D0`, a word compare of an
+    /// integer with a 0..65535 field that the IR widens here).
+    fn call_compare_generic(
+        &mut self,
+        op: Rel,
+        lhs: &Expr,
+        rhs: &Expr,
+        when: bool,
+        l: u32,
+        what: &'static str,
+    ) -> Res<()> {
+        let (op, call, other) = match (expr_has_call(lhs), expr_has_call(rhs)) {
+            (true, false) => (op, lhs, rhs),
+            (false, true) => (swap_rel(op), rhs, lhs),
+            _ => return Err(unsupported(self.span, what)),
+        };
+        best_effort(self.span, what)?;
+        let ty = call.ty();
+        let size = size_of(ty.width);
+        let src = if let Some(c) = a0_call(call) {
+            Ea::Reg(Reg::A(self.call_a0(c)?))
+        } else {
+            match self.eval(call)? {
+                Val::Mem(ea) => ea,
+                Val::Reg(r) => Ea::Reg(r),
+                Val::Tmp(d) => Ea::Reg(Reg::D(d)),
+                _ => return Err(unsupported(self.span, what)),
+            }
+        };
+        let cd = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: if matches!(src, Ea::Reg(Reg::A(_))) { Size::L } else { size },
+            src,
+            dst: Ea::Reg(Reg::D(cd)),
+        });
+        match other {
+            Expr::Const { value: 0, .. } => self.out.push(Insn::Tst {
+                size,
+                dst: Ea::Reg(Reg::D(cd)),
+            }),
+            _ => {
+                let v = self.eval(other)?;
+                let od = self.in_tmp(v, ty.width)?;
+                self.out.push(Insn::Cmp {
+                    size,
+                    src: Ea::Reg(Reg::D(od)),
+                    dst: cd,
+                });
+            }
+        }
+        let d = self.alloc_d()?;
+        self.callee_only.push(d);
         self.out.push(Insn::Scc {
             cond: rel_cond(op, ty.sign == Sign::Signed),
             dst: Ea::Reg(Reg::D(d)),
@@ -20847,19 +21110,37 @@ impl Selector {
     fn compare_computed_zero(&mut self, op: Rel, lhs: &Expr) -> Res<Cond> {
         let ty = lhs.ty();
         let size = size_of(ty.width);
-        let cc = match (op, ty.sign == Sign::Signed) {
+        let signed = ty.sign == Sign::Signed;
+        let op = match unsigned_zero_rel(op, signed) {
+            Some(o) => {
+                best_effort(self.span, UNSIGNED_ZERO)?;
+                o
+            }
+            None => op,
+        };
+        if !signed && matches!(op, Rel::Lt | Rel::Ge) {
+            // Never / always: the value in a data register, `tst` (C
+            // clear), `bcs`/`bcc` ([`unsigned_zero_rel`]).
+            let v = self.eval(lhs)?;
+            let dst = match v {
+                Val::Reg(Reg::A(a)) => {
+                    self.out.push(Insn::CmpaZero(a));
+                    return Ok(rel_cond(op, false));
+                }
+                Val::Mem(ea) => ea,
+                v => Ea::Reg(Reg::D(self.in_tmp(v, ty.width)?)),
+            };
+            self.out.push(Insn::Tst { size, dst });
+            return Ok(rel_cond(op, false));
+        }
+        let cc = match (op, signed) {
             (Rel::Eq, _) => Cond::Eq,
             (Rel::Ne, _) => Cond::Ne,
             (Rel::Lt, true) => Cond::Mi,
             (Rel::Ge, true) => Cond::Pl,
             (Rel::Le, true) => Cond::Le,
             (Rel::Gt, true) => Cond::Gt,
-            _ => {
-                return Err(unsupported(
-                    self.span,
-                    "an unsigned ordering comparison with 0 is",
-                ))
-            }
+            _ => unreachable!("an unsigned relation with 0 made `=`/`<>`"),
         };
         if let (
             Expr::Binary {
@@ -21845,6 +22126,69 @@ impl Selector {
                  5.1) is",
             )),
         }
+    }
+
+    /// `elem in set` for a variable element and a one-word set variable
+    /// (ref 3.9.3: `in` is false for an element outside the set's base
+    /// type; the register `btst` takes the bit mod 32, and the bits above
+    /// the word are not the set's): the element's range guarded, as the
+    /// AST module-local 0xE01C0A..0xE01C16 does, `moveq #15,Dx; cmp.w
+    /// Dk,Dx; bcs.s <not a member>; move.w <set>,Ds; btst Dk,Ds`, then
+    /// `bhi` (a member: C clear, Z clear) or `bls` (codegen-patterns 5.1).
+    /// With `out`, the `bcs` to it, for a condition.  Without (a value),
+    /// the set loaded before the guard, since a `move` clears C, and no
+    /// branch: the caller's `shi` reads both flags.  Best effort (not
+    /// byte-identical; bead domain-pascal-uaq7): the guard everywhere; the
+    /// image tests an element whose type fits the word unguarded
+    /// (0xE5EABE `move.w (A4),D0; move.w (712,A5),D1; btst D0,D1`), and
+    /// which elements are guarded is not settled.  Returns the register
+    /// the `btst` read the set in.
+    fn word_set_var(&mut self, elem: &Expr, set: &Expr, out: Option<u32>) -> Res<u8> {
+        best_effort(
+            self.span,
+            "`in` on a one-word set variable with an element that is not constant \
+             (unguarded or guarded by the element's range: not settled, codegen-patterns \
+             5.1) is",
+        )?;
+        let held = |s: &Self, e: &Expr| match e {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } => match s.pinned(*o) {
+                Some(Reg::D(n)) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        };
+        let load_set = |s: &mut Self| -> Res<u8> {
+            match held(s, set) {
+                Some(n) => Ok(n),
+                None => s.eval_d(set),
+            }
+        };
+        let k = match held(self, elem) {
+            Some(n) => n,
+            None => self.eval_d(elem)?,
+        };
+        let early = if out.is_none() { Some(load_set(self)?) } else { None };
+        let x = self.load_const(15, Width::Word)?;
+        self.out.push(Insn::Cmp {
+            size: size_of(elem.ty().width),
+            src: Ea::Reg(Reg::D(k)),
+            dst: x,
+        });
+        if let Some(lbl) = out {
+            self.jump(Cond::Cs, lbl);
+        }
+        let s = match early {
+            Some(s) => s,
+            None => load_set(self)?,
+        };
+        self.out.push(Insn::Btst {
+            bit: k,
+            dst: Ea::Reg(Reg::D(s)),
+        });
+        Ok(s)
     }
 
     /// After [`Self::set_member_reg`] on a one-word constant set (its code

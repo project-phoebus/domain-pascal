@@ -4657,13 +4657,33 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
             "comparing values other than ordinals and pointers is",
         ));
     }
-    if p.types.is_boolean(lhs.ty) || p.types.is_boolean(rhs.ty) {
-        // `b = true`, `b1 <> b2`: compiled code tests booleans with
-        // `tst.b` and the sign (codegen-patterns 7); a compare of a byte
-        // with 0xFF occurs twice (0xE1B96C, 0xE53FDE, not shown to be
-        // booleans), so what the original did here is not catalogued.
-        return Err(unsupported(e.span, "comparing boolean values is"));
+    // `b = true`, `b1 <> b2`: compiled code tests booleans with `tst.b`
+    // and the sign (codegen-patterns 7); a compare of a byte with 0xFF
+    // occurs twice (0xE1B96C, 0xE53FDE, not shown to be booleans).  Two
+    // booleans are compared as bytes: SMD_$SHOW_CURSOR 0xE6E32A..0xE6E32E
+    // `move.b (-0x1c,A6),D1; cmp.b (0x38,A4),D1; bne` (`visible =
+    // cur_hw^.cursor_visible`), SIO2681_$SET_LINE 0xE1D302..0xE1D30E `sne
+    // D1; ...; smi D5; cmp.b D5,D1; seq D1` (two comparisons compared).
+    // Best effort (not byte-identical; bead domain-pascal-uaq7): as bytes
+    // everywhere, the constant `true` as 0xFF (ref 3.5.3).  A boolean is a
+    // signed byte here (0xFF is -1), so an ordering (ref: `false < true`,
+    // the order of the type's two values) is made by the reversed signed
+    // relation.
+    let flip = p.types.is_boolean(lhs.ty) || p.types.is_boolean(rhs.ty);
+    if flip {
+        best_effort(e.span, "comparing boolean values is")?;
     }
+    let rel = if flip {
+        match rel {
+            Rel::Lt => Rel::Gt,
+            Rel::Le => Rel::Ge,
+            Rel::Gt => Rel::Lt,
+            Rel::Ge => Rel::Le,
+            r => r,
+        }
+    } else {
+        rel
+    };
     let operand = |x: &SExpr, other: Option<Scalar>| -> Res<Expr> {
         match (&x.value, other) {
             (Some(ConstValue::Nil), _) => Ok(Expr::Const {
@@ -4783,6 +4803,49 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         Rel::Lt if zero(&l) && unsigned_abs(&r) && r.ty().sign == Sign::Unsigned => Rel::Ne,
         Rel::Ge if zero(&l) && unsigned_abs(&r) && r.ty().sign == Sign::Unsigned => Rel::Eq,
         rel => rel,
+    };
+    // An ordering against 0 of an unsigned operand whose type's values all
+    // fit the signed range of its width (`0..32767`, `linteger`
+    // `0..2147483647`): a sign test, as the image makes it (BAT_$FREE
+    // 0xE3B5B0..0xE3B5B6 `sub.l; bmi.s`, `rel < 0` of a linteger;
+    // PKT_$BLD_INTERNET_HDR 0xE122D6 `tst.w; ble`, `template_len > 0` of
+    // a pinteger; bead domain-pascal-uaq7).  The operand is seen as signed:
+    // a load retyped, another value through a conversion of its width.
+    // Types that use the top bit (`0..65535`) keep the unsigned relation,
+    // which the selector makes `=`/`<>` or a never/always test.
+    let (l, r) = if matches!(rel, Rel::Lt | Rel::Le | Rel::Gt | Rel::Ge) {
+        let fits = |x: &Expr, s: &SExpr| {
+            let t = x.ty();
+            let max = match t.width {
+                Width::Byte => 0x7f,
+                Width::Word => 0x7fff,
+                Width::Long => 0x7fff_ffff,
+            };
+            t.sign == Sign::Unsigned
+                && matches!(p.types.ordinal_range(s.ty), Some((lo, hi)) if lo >= 0 && hi <= max)
+        };
+        let signed = |x: Expr| -> Expr {
+            let t = Scalar::signed(x.ty().width);
+            match x {
+                Expr::Load { addr, .. } => Expr::Load { addr, ty: t },
+                x => Expr::Convert {
+                    value: Box::new(x),
+                    ty: t,
+                    in_place: false,
+                },
+            }
+        };
+        let zero_of = |x: &Expr| Expr::Const {
+            value: 0,
+            ty: Scalar::signed(x.ty().width),
+        };
+        match (zero(&l), zero(&r)) {
+            (false, true) if fits(&l, lhs) => (signed(l), zero_of(&r)),
+            (true, false) if fits(&r, rhs) => (zero_of(&l), signed(r)),
+            _ => (l, r),
+        }
+    } else {
+        (l, r)
     };
     Ok(Cond::Compare {
         op: rel,
@@ -6566,13 +6629,38 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     if let ExprKind::Call(c) = &value.kind {
         refuse_unknown_result(p, c, value.span)?;
     }
-    if !value.is_designator() || value.value.is_some() {
-        return Err(unsupported(
-            value.span,
-            "assigning a record or array that is not a variable is",
-        ));
-    }
     let bytes = p.types.size(target.ty);
+    if let (Some(ConstValue::Str(text)), ByteCopy::Chars) =
+        (&value.value, byte_copy(p, target.ty))
+    {
+        if text.len() as u32 <= bytes
+            && volatile_access(p, target).is_none()
+            && !p.types.has_volatile_part(target.ty)
+        {
+            return string_assign(p, s, target, text, bytes);
+        }
+    }
+    if !value.is_designator() || value.value.is_some() {
+        if value.value.is_none() && in_place(value) {
+            // A record or array selected from a type transfer of a
+            // variable (`T(v).f`, ref p. 4-197): its bytes in place, as
+            // a scalar field of one is read ([`transfer_view`],
+            // codegen-patterns 5.2, "Fields of a type-transferred
+            // variable"), copied as a block.  Best effort (not
+            // byte-identical; bead domain-pascal-uaq7): no such copy is
+            // catalogued (REM_FILE_$CREATE_TYPE's `rem_file_$loc_view_t(
+            // loc).addr`, RING_$OPEN_OS's `ring_$pkt_range_t(...)`).
+            best_effort(
+                value.span,
+                "assigning a record or array that is not a variable is",
+            )?;
+        } else {
+            return Err(unsupported(
+                value.span,
+                "assigning a record or array that is not a variable is",
+            ));
+        }
+    }
     if p.types.size(value.ty) != bytes {
         return Err(unsupported(
             value.span,
@@ -6628,6 +6716,42 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             src: addr_of(p, value)?,
             bytes,
             chars,
+        },
+        span: s.span,
+    })
+}
+
+/// `d := 'text'` for an unpacked array of char `d` of `bytes` bytes that
+/// is not scalar-sized ([`copy`]): the characters, then blanks to the
+/// array's end (ref "Variable-Length String Operations", p. 4-204: for
+/// arrays of char "unassigned chars are padded with spaces").  The
+/// image stores the text and fills the rest with longwords of blanks,
+/// NAME_$INIT 0xE31738..0xE3174A `lea (A5),A0; move.l #0x2f636f6d,(A0)+;
+/// move.l #0x20202020,D1; moveq #0x3e,D0; move.l D1,(A0)+; dbf D0`
+/// (`path_buf := '/com'`, 256 bytes).  Best effort (not byte-identical;
+/// bead domain-pascal-uaq7): a byte copy from a code-section cell of the
+/// padded text ([`StmtKind::Copy`] from [`Addr::Const`]).
+fn string_assign(p: &Program, s: &SStmt, target: &SExpr, text: &[u8], bytes: u32) -> Res<Stmt> {
+    best_effort(
+        s.span,
+        "assigning a string constant to an array of char longer than a longword (NAME_$INIT \
+         0xE31738 stores the text and fills the blanks by longwords; not modelled, \
+         codegen-patterns 5.2) is",
+    )?;
+    let mut cell = text.to_vec();
+    cell.resize(bytes as usize, b' ');
+    if cell.len() % 2 == 1 {
+        cell.push(0);
+    }
+    Ok(Stmt {
+        kind: StmtKind::Copy {
+            dst: addr_of(p, target)?,
+            src: Addr::Const(PoolConst {
+                bytes: cell,
+                key: target.ty.0,
+            }),
+            bytes,
+            chars: true,
         },
         span: s.span,
     })
