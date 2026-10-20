@@ -700,8 +700,11 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 /// in its frame,
 /// [`Self::index`]) that the body does not assign, that nothing assigns or
 /// addresses outside the bodies of `for` loops over it, and that is read
-/// outside them only by the statements after a loop of constant bounds in
-/// the loop's own sequence (`lower.rs`, `for_loop`, `check_for_indices`):
+/// outside them only by the statements after a loop in the loop's own
+/// sequence (`lower.rs`, `for_loop`, `check_for_indices`; a loop with a
+/// run-time bound too, the target setting the index before its guard; an
+/// index used otherwise is kept in memory, [`Self::home`], bead
+/// domain-pascal-trdz):
 /// the target may keep it in a register for the loop and those statements
 /// (codegen-patterns 7.4: the frame slot stays allocated; the body may
 /// pass the index by address to a value or `in` parameter,
@@ -710,8 +713,10 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
 /// Addr::Frame(..) }`.
 /// `from` and `to` have the index's type, except that for an index other
 /// than a signed word held in a register (a byte or longword index, an
-/// unsigned one, one with a [`Self::home`]) a run-time integer bound wider
-/// than the index keeps its own type: the target computes the guard and
+/// unsigned one, one with a [`Self::home`]), and for a signed word one
+/// whose bound is a longword expression or function result (not a
+/// longword variable, read as its low word), a run-time integer bound
+/// wider than the index keeps its own type: the target computes the guard and
 /// the count in a type holding the values of both, so that a bound outside
 /// the index's type gives an empty range (reference-clarifications
 /// question 47).  Ref p. 4-90: "If you set up a

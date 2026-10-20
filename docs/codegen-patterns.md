@@ -9066,6 +9066,59 @@ scripts besides, not kept, are named as such below; re-check sites with
     whose initial value is outside -128..127: `move.w #init,Di` (not
     catalogued; one equal to the count is set up apart from it, not as
     0xE6A8BC's copy).  `tests/exec/indexed_for.pas`.
+  - **Best effort (not byte-identical; bead domain-pascal-trdz;
+    `best_effort` warnings, refused as before under `dpc --strict`;
+    `tests/exec/for_tail.pas`):**
+    - a row of another array at an index the loop leaves alone
+      (`a[j][i]`; the image steps a scaled index register, ACL_$ADD_PROJ
+      0xE47EF8, or the row's address, VTOC's 0xE382D0) and an array of
+      the enclosing routine's frame or through its pointer (the image's
+      scaled index register `lea (0,Al,Dx.l),Ae`, 7 of 7 nested sites):
+      indexed as above, no pointer stepped;
+    - `downto` with a run-time bound: `for_wide`'s loop (`from - to`,
+      `blt`; arrays indexed).  DIR_$NEXT_PAGE 0xE4D7C8..0xE4D7D8 `move.w
+      D4,D1; subq.w #1,D1; bmi.w` with the count and the index copied
+      after and a pointer stepped: one site looked at;
+    - from 0 to a bound that is not a held variable or one of the unit's
+      (through a pointer, ROUTE_$READ_USER_STATS 0xE6A6C4 `move.w
+      (0x36,A1),D4; bmi.b` with no `tst.w`; a frame slot, another unit's
+      variable, an expression): evaluated into a register, `tst.w; bmi`;
+    - from a constant other than 0 or 1 to a run-time bound: the
+      constant (and `c` of `e - c`) subtracted as from 1 (HDR_CHKSUM
+      0xE762E0 `subi.w #13`, NAME_$INIT 0xE31828 `subi.w #16`; the count's
+      copy not settled), guarded with `blt`, exact for every `to`, where
+      the image has `bmi` (which runs a loop whose `to` lies below -32768
+      + k).  A negative `from` is added, `addq.w` or `subi.w #-k`.  From
+      0 or 1 the image's `subq.w #k; bmi` stays: its edge (a `to` of
+      -32768 + c - 1 or below wrapping) is the original's behaviour;
+    - a bound of a signed word index that is a longword expression or a
+      longword function's result: kept at its width, the loop made by
+      `for_wide` in `for_domain`'s type, as for the other index kinds (a
+      bound of -40000 runs no pass).  MST_$INIT 0xE30BF8 `move.w
+      D2w,D0w; subq.w #1,D0w` computes `words - 1`, a longword
+      expression, at the word's width with no guard: not followed (the
+      word form stays for a longword variable read as its low word);
+    - `for_wide` sets up the index's register for any read of the index,
+      an element `a[i]` too (it steps no pointer): the word index of a
+      `downto` loop with a run-time bound, an unsigned word index up to a
+      run-time bound (bead domain-pascal-1mtr's path, which left it unset
+      when only elements read it);
+    - the index read after a loop with a run-time bound: the index's
+      register set before the guard (`clr.w`/`moveq`), so that a loop
+      the guard skips leaves it `from`; the image sets it after the
+      guard and reads it unset then (XNS_IDP_$REGISTER_ADDR
+      0xE19024..0xE1902A, D1 read at 0xE1905E);
+    - an index assigned, addressed or read in part outside its loops,
+      read before its loop, or read after it past another loop over it
+      or a label (`dpc-ir` `check_for_indices`): every loop over it keeps
+      it in memory, at its own slot ([`ForLoop::home`], "An index kept
+      in memory"); the image holds such a variable in a register per
+      live range (AREA_$FREE_SEGMENTS 0xE0863C `move.w D3,D2` for `n :=
+      first_n` after a loop over n in D5);
+    - a register-held local read before the code first assigns it (12.5):
+      `moveq #0` into its register at entry, the body selected again
+      (Pascal leaves the value undefined; TERM_$INQUIRE's image reads a
+      frame word nothing clears, 0xE6713C).
 - `exit`, `next`, and `if c then exit|next` as one conditional branch.
 - A slot used inside a loop body is loaded at entry like one used more
   than once (12.2: 0xE3CCD6; NAME_$VALIDATE's module-local 0xE4A004 loads

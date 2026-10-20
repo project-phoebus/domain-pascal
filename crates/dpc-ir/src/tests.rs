@@ -2050,15 +2050,31 @@ begin
     // loop of constant bounds in the statements that follow it; passed by
     // address to a value or `in` parameter inside it; never assigned in its
     // loop (ref p. 4-89) nor anywhere else.
+    // A loop with a run-time bound too: the target sets the index before
+    // its guard (bead domain-pascal-trdz).
+    let homes = |m: &crate::Module| {
+        let mut h = Vec::new();
+        crate::visit_stmts(&m.functions[0].body, &mut |s| {
+            if let StmtKind::For(l) = &s.kind {
+                h.push(l.home.clone());
+            }
+        });
+        h
+    };
     for stmt in [
         "for i := 0 to 15 do j := 0; j := i;",
         "for i := 0 to 15 do if buf[i] = 0 then exit; if i > 15 then j := i;",
         "for i := 0 to 15 do j := 0; for i := 1 to 2 do j := i; j := i;",
         "for i := 0 to 15 do j := 0; while j = 0 do j := i;",
+        "for i := 0 to j do j := 0; j := i;",
     ] {
-        one(stmt).unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+        let m = one(stmt).unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+        assert!(homes(&m).iter().all(Option::is_none), "{stmt}");
     }
-    for (stmt, msg) in [
+    // An index used outside its loops other than so: refused under
+    // `--strict`; else every loop over it keeps it in memory, at its own
+    // slot (best effort, bead domain-pascal-trdz).
+    let rehomed = [
         (
             "j := i; for i := 0 to 15 do j := 0;",
             "read before its loop",
@@ -2068,15 +2084,10 @@ begin
             "read before its loop",
         ),
         (
-            "for i := 0 to j do j := 0; j := i;",
-            "with a run-time bound read after",
-        ),
-        (
             "for i := 0 to 15 do j := 0; if j = 1 then for i := 1 to 2 do j := 0; j := i;",
             "another loop over it",
         ),
         ("for i := 0 to 15 do j := 0; i := 2;", "outside its loops"),
-        ("for i := 0 to 15 do i := 3;", "in its loop"),
         (
             "for i := 1 to 15 do if buf[i] = 0 then exit; for i := 1 to i do j := 0;",
             "bound reads its own index",
@@ -2085,11 +2096,17 @@ begin
             "for i := 1 to 15 do if buf[i] = 0 then exit; for i := i to 15 do q;",
             "bound reads its own index",
         ),
+    ];
+    for (stmt, msg) in [
+        ("for i := 0 to 15 do i := 3;", "in its loop"),
         (
             "for i := 0 to 15 do for i := 1 to 2 do j := 0;",
             "of an enclosing `for` loop",
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(rehomed)
+    {
         let e = one(stmt).unwrap_err();
         assert!(e[0].contains(msg), "{stmt}: {e:?}");
     }
@@ -2100,9 +2117,34 @@ begin
              {stmt}\nend;\n"
         ))
     };
-    lab("for i := 0 to 15 do if j = i then goto 1; j := 0; 1: j := i;").unwrap();
-    let e = lab("if j = 0 then goto 1; for i := 0 to 15 do j := 0; 1: j := i;").unwrap_err();
+    let m = lab("for i := 0 to 15 do if j = i then goto 1; j := 0; 1: j := i;").unwrap();
+    assert_eq!(homes(&m), vec![None]);
+    let past = "if j = 0 then goto 1; for i := 0 to 15 do j := 0; 1: j := i;";
+    let e = lab(past).unwrap_err();
     assert!(e[0].contains("past a label"), "{e:?}");
+    let was = dpc_syntax::diag::set_strict(false);
+    for (stmt, _) in rehomed {
+        let m = one(stmt).unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+        let h = homes(&m);
+        assert!(
+            !h.is_empty() && h.iter().all(|h| matches!(h, Some(Addr::Frame(_)))),
+            "{stmt}: {h:?}"
+        );
+    }
+    let m = lab(past).unwrap();
+    assert!(matches!(homes(&m)[..], [Some(Addr::Frame(_))]));
+    for (stmt, msg) in [
+        ("for i := 0 to 15 do i := 3;", "in its loop"),
+        (
+            "for i := 0 to 15 do for i := 1 to 2 do j := 0;",
+            "of an enclosing `for` loop",
+        ),
+    ] {
+        let e = one(stmt).unwrap_err();
+        assert!(e[0].contains(msg), "{stmt}: {e:?}");
+    }
+    let _ = dpc_syntax::diag::take_best_effort();
+    dpc_syntax::diag::set_strict(was);
     let e = one("for i := 3 to 2 do buf[i] := 0;").unwrap_err();
     assert!(
         e[0].ends_with("a `for` loop that never runs is not supported yet"),

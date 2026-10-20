@@ -593,6 +593,7 @@ fn select_body_moded(
             }
         }
         Selected::Reslot(..) => unreachable!("selected again until settled"),
+        Selected::Predefine(..) => unreachable!("selected again by select_body_with"),
     };
     if hits.is_empty() {
         return Ok(body);
@@ -801,6 +802,10 @@ enum Selected {
     /// Select again with the pointer result variable in its frame slot,
     /// or without it ([`Selector::slot_wanted`]).
     Reslot(SlotMode),
+    /// Select again with these register-held locals (frame offsets), read
+    /// before the code first assigns them, set to 0 at entry (best effort;
+    /// [`select_body_with`] only).
+    Predefine(Vec<i32>),
 }
 
 /// Whether a body keeps its pointer result variable in its frame slot
@@ -818,6 +823,9 @@ enum SlotMode {
     Off,
 }
 
+/// [`select_body_once`], selected again with the register-held locals it
+/// finds read before they are assigned given a value at entry
+/// ([`Selected::Predefine`]).
 fn select_body_with(
     f: &Function,
     plan: CsePlan,
@@ -826,6 +834,42 @@ fn select_body_with(
     overlays: &Overlays,
     slot: SlotMode,
     modes: &[(Span, CallMode)],
+) -> Result<Selected, Diagnostic> {
+    let mut predef: Vec<i32> = Vec::new();
+    loop {
+        let got = select_body_once(
+            f,
+            plan.clone(),
+            sched,
+            in_a0,
+            overlays,
+            slot,
+            modes,
+            &predef,
+        )?;
+        match got {
+            Selected::Predefine(o) if o.iter().any(|x| !predef.contains(x)) => predef.extend(o),
+            Selected::Predefine(_) => return Err(unsupported(f.span, UNASSIGNED_LOCAL)),
+            got => return Ok(got),
+        }
+    }
+}
+
+/// The refusal of a register-held local read before the code first assigns
+/// it, under `--strict` ([`Selected::Predefine`]).
+const UNASSIGNED_LOCAL: &str = "a register-held local read before the code first assigns it (in \
+     a loop, assigned later in its body; or not yet assigned; codegen-patterns 12.5) is";
+
+#[allow(clippy::too_many_arguments)]
+fn select_body_once(
+    f: &Function,
+    plan: CsePlan,
+    sched: Schedule,
+    in_a0: &[i32],
+    overlays: &Overlays,
+    slot: SlotMode,
+    modes: &[(Span, CallMode)],
+    predef: &[i32],
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
     s.call_modes = modes.to_vec();
@@ -1000,6 +1044,12 @@ fn select_body_with(
         if web {
             let d = s.alloc_d()?;
             s.webs.push((o, d));
+            if predef.contains(&o) {
+                // Read before the code first assigns it: 0 at entry, a
+                // defined value for a variable Pascal leaves undefined
+                // ([`Selected::Predefine`]).
+                s.out.push(Insn::Moveq { value: 0, dst: d });
+            }
         }
     }
     s.ptr_locals = loop_pointer_locals(f, &s.reg_locals)
@@ -1391,9 +1441,12 @@ fn select_body_with(
     // A register-held local read before the first instruction that
     // assigns it (a read the loop's back edge reaches, or of a local not
     // yet assigned): its register is live into the body.  Where the
-    // original colours such a value is not known; refused rather than
-    // reported as the allocator's internal check.
-    for &(_, d) in &s.webs {
+    // original colours such a value is not known.  Best effort (not
+    // byte-identical; bead domain-pascal-trdz): selected again with the
+    // local set to 0 at entry (Pascal leaves its value undefined; TERM_
+    // $INQUIRE's image reads a frame word nothing clears, 0xE6713C).
+    let mut unassigned = Vec::new();
+    for &(o, d) in &s.webs {
         let r = Reg::D(d);
         let first = s.out.iter().find_map(|i| {
             let a = crate::regs::access(i);
@@ -1406,12 +1459,12 @@ fn select_body_with(
             }
         });
         if first == Some(true) {
-            return Err(unsupported(
-                f.span,
-                "a register-held local read before the code first assigns it (in a loop, \
-                 assigned later in its body; or not yet assigned; codegen-patterns 12.5) is",
-            ));
+            unassigned.push(o);
         }
+    }
+    if !unassigned.is_empty() {
+        best_effort(f.span, UNASSIGNED_LOCAL)?;
+        return Ok(Selected::Predefine(unassigned));
     }
     let mut first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     // A pointer local assigned a call's result before a parameter that
@@ -5308,7 +5361,9 @@ fn neg_form(c: u32) -> bool {
 /// an unsigned word index from a constant up to a run-time bound (the
 /// image's form, `tst.w; beq` before the `subq.w #1` among the preheader's
 /// other instructions, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, is not
-/// settled: best effort, bead domain-pascal-1mtr).
+/// settled: best effort, bead domain-pascal-1mtr), or a run-time bound
+/// wider than the index, which `dpc-ir` keeps at its width ([`for_domain`];
+/// best effort, bead domain-pascal-trdz).
 fn for_wide_loop(l: &ForLoop) -> bool {
     l.index.ty.width != Width::Word
         || l.home.is_some()
@@ -5316,6 +5371,9 @@ fn for_wide_loop(l: &ForLoop) -> bool {
             && !l.down
             && matches!(l.from, Expr::Const { .. })
             && !matches!(l.to, Expr::Const { .. }))
+        || [&l.from, &l.to]
+            .iter()
+            .any(|e| !matches!(e, Expr::Const { .. }) && e.ty().bytes() > l.index.ty.bytes())
 }
 
 /// The type [`Selector::for_wide`] computes a `for` loop's guard and count
@@ -5421,15 +5479,17 @@ fn is_index(index: &Expr, off: i32) -> bool {
 ///   a variable of the unit or of another unit when the body neither
 ///   calls nor assigns it; a frame object a nested routine reaches,
 ///   `uplevel` ([`Function::uplevel_refs`]), only when the body makes no
-///   call: a nested routine called in the body may assign it).
+///   call: a nested routine called in the body may assign it);
+/// - an array of the enclosing routine's frame or through a pointer
+///   variable of it, and a row of another array at an index the loop
+///   leaves alone (the image steps a scaled index register, or the row's
+///   address, instead of a pointer: not implemented, beads
+///   domain-pascal-1ibr, domain-pascal-ga54; indexed since bead
+///   domain-pascal-trdz).
 ///
 /// `Err` (a message for "... is not supported yet") when an element is
 /// reached in a way not implemented, met before the last of those: an
-/// array of the enclosing routine's frame or through a pointer variable of
-/// it, and a row of another array at an index the loop leaves alone (a
-/// scaled index register instead of a stepped pointer; beads
-/// domain-pascal-1ibr, domain-pascal-ga54); an array at another kind of
-/// address.  Arrays through a pointer (at any offset from it), in the
+/// array at another kind of address.  Arrays through a pointer (at any offset from it), in the
 /// unit's data area ([`Addr::Static`]), in the frame ([`Addr::Frame`]),
 /// in another unit's object ([`Addr::Symbol`]) or in the unit's block in
 /// another data section ([`Addr::OtherStatic`]) are accepted here; how
@@ -5524,21 +5584,25 @@ fn stepped_arrays(
                 // 0xE113E8; AST_$GET_DISM_SEQN's 0xE01514; RIP_$SERVER's
                 // rip_$process_request 0xE688F4 `moveq #6,D5`, `lea
                 // (0,A0,D5.l),A3`).  Not implemented; the `lea`'s register
-                // is bead domain-pascal-1ibr's question.
-                Addr::Enclosing(_) => return Err(ENCLOSING_ARRAY),
+                // is bead domain-pascal-1ibr's question.  Best effort (not
+                // byte-identical): the loop's elements indexed, the index
+                // in a register (bead domain-pascal-trdz).
+                Addr::Enclosing(_) => return Ok(Err(ENCLOSING_ARRAY)),
                 // A row of another array at an index the loop leaves alone
                 // (`a[j][i]`): ACL_$ADD_PROJ 0xE47EF8 steps a scaled index
                 // register (`moveq #8,D2`, `lea (0,A1,D2.l),A0`, `addq.l
                 // #8,D2`), VTOC's module-local 0xE382D0 the row's own
                 // address (`lea (0,A0,D2.l),A0` into the base's register,
-                // then `lea (16,A0),A0`): not settled.
+                // then `lea (16,A0),A0`): not settled.  Best effort (not
+                // byte-identical): the loop's elements indexed, the row's
+                // address formed for each (bead domain-pascal-trdz).
                 Addr::Index { .. } => {
-                    return Err(
+                    return Ok(Err(
                         "a `for` loop over a row of another array (`a[j][i]`: a scaled index \
                          register, ACL_$ADD_PROJ 0xE47EF8, or the row's address stepped in the \
                          base's register, VTOC's 0xE382D0; not settled, codegen-patterns 7.4; \
                          bead domain-pascal-1ibr, domain-pascal-ga54) is",
-                    )
+                    ))
                 }
                 _ => {
                     return Err(
@@ -5551,7 +5615,8 @@ fn stepped_arrays(
         // Through a pointer variable of the enclosing routine: RIP_$SERVER's
         // rip_$process_request 0xE688F4 indexes its parent's payload_va^
         // with the same scaled index register as its parent's array
-        // (`movea.l (-0x4f0,A0),A1; lea (0,A1,D5.l),A2`).
+        // (`movea.l (-0x4f0,A0),A1; lea (0,A1,D5.l),A2`).  Best effort
+        // (not byte-identical): indexed, as above (bead domain-pascal-trdz).
         if matches!(
             &**p,
             Expr::Load {
@@ -5559,7 +5624,7 @@ fn stepped_arrays(
                 ..
             }
         ) {
-            return Err(ENCLOSING_ARRAY);
+            return Ok(Err(ENCLOSING_ARRAY));
         }
         if !loop_invariant_pointer(p, body, uplevel) {
             // Best effort (not byte-identical): the loop's elements
@@ -5976,6 +6041,19 @@ fn step_displacements(
         _ => {}
     });
     out
+}
+
+/// Whether `body` reads the index variable at frame offset `off` at all:
+/// a load, its address passed to a call, an element's index
+/// ([`Selector::for_wide`], which steps no pointer).
+fn expr_reads_index(body: &[Stmt], off: i32) -> bool {
+    let mut reads = false;
+    walk(body, &mut |n| {
+        if matches!(n, Node::Addr(Addr::Frame(o)) if *o == off) {
+            reads = true;
+        }
+    });
+    reads
 }
 
 /// Whether `body` reads the `for` index at `off` other than as the index
@@ -8918,7 +8996,7 @@ impl Selector {
     /// D2,D1`: the constant is copied, not reloaded).
     fn for_(&mut self, f: &Function, l: &ForLoop, after: bool) -> Res<()> {
         if for_wide_loop(l) {
-            if l.index.ty.width == Width::Word && l.home.is_none() {
+            if l.index.ty.width == Width::Word && l.home.is_none() && !l.index.ty.is_signed() {
                 best_effort(
                     self.span,
                     "a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` \
@@ -8930,6 +9008,21 @@ impl Selector {
             return self.for_wide(f, l, after);
         }
         let span = self.span;
+        if l.down && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. }))
+        {
+            // Best effort (not byte-identical; bead domain-pascal-trdz):
+            // [`Self::for_wide`]'s loop, `from - to` guarded with `blt`,
+            // the arrays indexed.  DIR_$NEXT_PAGE 0xE4D7C8..0xE4D7D8 `move.w
+            // D4,D1; subq.w #1,D1; bmi.w` (from `last` down to 1), the count
+            // and the index copied after, a pointer stepped: one site looked
+            // at.
+            best_effort(
+                span,
+                "a `for` loop counting down (`downto`) with a run-time bound (not surveyed, \
+                 codegen-patterns 7.4) is",
+            )?;
+            return self.for_wide(f, l, after);
+        }
         let off = l.index.offset;
         let arrays =
             stepped_arrays(&l.body, off, &f.uplevel_refs).map_err(|m| unsupported(span, m))?;
@@ -8974,6 +9067,20 @@ impl Selector {
         // reaches by the index are indexed rather than stepped.
         let mut rt_from: Option<Ea> = None;
         let mut rt_indexed = false;
+        // An index the statements after the loop read, with a run-time
+        // bound: set before the guard, so that a loop the guard skips
+        // leaves it `from` (one step past the last value of an empty range
+        // `from..from - 1`).  The image sets it after the guard and reads
+        // the register unset when the guard skips (XNS_IDP_$REGISTER_ADDR
+        // 0xE19024..0xE1902A `tst.w D0; bmi.s; move.w D0,D0; clr.w D1`,
+        // D1 read at 0xE1905E).  Best effort (not byte-identical; bead
+        // domain-pascal-trdz).
+        let early = match konst(&l.from) {
+            Some(init) if after && konst(&l.to).is_none() => {
+                Some(self.for_index_init(span, off, init, &mut setup)?)
+            }
+            _ => None,
+        };
         let (count, init) = match (konst(&l.from), konst(&l.to)) {
             (Some(a), Some(b)) => {
                 let n = if l.down { a - b + 1 } else { b - a + 1 };
@@ -9027,15 +9134,18 @@ impl Selector {
                 // #2` with a call, DIR_$FIND_NET 0xE4EAAE `subq.w #2` with
                 // the index from 1; no `for` guard of the image subtracts
                 // twice; `c >= 2` Inferred).  `subi.w` above 8: HDR_CHKSUM
-                // 0xE762E0 `subi.w #13`.
+                // 0xE762E0 `subi.w #13`.  From another constant (best
+                // effort, bead domain-pascal-trdz) `c` is folded in too.
                 let (e, c) = match &l.to {
                     Expr::Binary {
                         op: BinOp::Sub,
                         lhs,
                         rhs,
                         ..
-                    } if (0..=1).contains(&from) => match konst(rhs) {
-                        Some(c) if c >= 1 => (&**lhs, c),
+                    } => match konst(rhs) {
+                        Some(c) if c >= 1 && ((0..=1).contains(&from) || from + c <= 0x7fff) => {
+                            (&**lhs, c)
+                        }
                         _ => (&l.to, 0),
                     },
                     e => (e, 0),
@@ -9043,15 +9153,23 @@ impl Selector {
                 let k = from + c;
                 let count = if k == 0 {
                     self.for_count_tested(e, exit, &mut setup)?
-                } else if !(0..=1).contains(&from) {
-                    return Err(unsupported(
-                        span,
-                        "a `for` loop from a constant other than 0 or 1 to a run-time bound (the \
-                         constant subtracted, HDR_CHKSUM 0xE762E0 `subi.w #13` from 13, \
-                         NAME_$INIT 0xE31828 `subi.w #16` from 16, both without a call: the \
-                         count's copy not settled, codegen-patterns 7.4) is",
-                    ));
                 } else {
+                    if !(0..=1).contains(&from) {
+                        // Best effort (bead domain-pascal-trdz): the count's
+                        // copy as from 1 below, guarded with `blt` (exact for
+                        // every `to`, as sq4a's run-time `from`; the image's
+                        // `bmi` after `subi.w #13`, HDR_CHKSUM 0xE762E0, runs
+                        // a loop whose `to` lies below -32768 + 13, and one
+                        // from -1 would skip a count above 32767).  A
+                        // negative `from` is added.
+                        best_effort(
+                            span,
+                            "a `for` loop from a constant other than 0 or 1 to a run-time bound \
+                             (the constant subtracted, HDR_CHKSUM 0xE762E0 `subi.w #13` from \
+                             13, NAME_$INIT 0xE31828 `subi.w #16` from 16, both without a \
+                             call: the count's copy not settled, codegen-patterns 7.4) is",
+                        )?;
+                    }
                     let calls = stmts_call(&l.body);
                     let v = self.eval(e)?;
                     // Without a call, only a bound variable held in a data
@@ -9078,21 +9196,31 @@ impl Selector {
                         Val::Tmp(d) => d,
                         v => self.in_tmp(v, Width::Word)?,
                     };
-                    self.out.push(if k <= 8 {
-                        Insn::Subq {
+                    self.out.push(match k {
+                        1..=8 => Insn::Subq {
                             size: Size::W,
                             value: k as u8,
                             dst: Ea::Reg(Reg::D(t)),
-                        }
-                    } else {
-                        Insn::AluImm {
+                        },
+                        -8..=-1 => Insn::Addq {
+                            size: Size::W,
+                            value: -k as u8,
+                            dst: Ea::Reg(Reg::D(t)),
+                        },
+                        // `subi.w #k` for a `k` below -8 too: `to - k`'s
+                        // flags give `blt` (an `addi.w #-k` of -32768 would
+                        // not).
+                        _ => Insn::AluImm {
                             op: AluOp::Sub,
                             size: Size::W,
                             imm: k,
                             dst: Ea::Reg(Reg::D(t)),
-                        }
+                        },
                     });
-                    self.jump(Cond::Mi, exit);
+                    // From 0 or 1 the image's `bmi` (its edge, a `to` of
+                    // -32768 less `c` wrapping, is the original's).
+                    let exact = !(0..=1).contains(&from);
+                    self.jump(if exact { Cond::Lt } else { Cond::Mi }, exit);
                     let c = self.alloc_d()?;
                     setup.push(self.out.len());
                     if !calls {
@@ -9118,13 +9246,7 @@ impl Selector {
                 };
                 (count, from)
             }
-            _ if l.down => {
-                return Err(unsupported(
-                    span,
-                    "a `for` loop counting down (`downto`) with a run-time bound (not \
-                     surveyed, codegen-patterns 7.4) is",
-                ))
-            }
+            _ if l.down => unreachable!("a run-time `downto` loop is `for_wide`'s"),
             (Some(_), None) => {
                 return Err(unsupported(
                     span,
@@ -9206,44 +9328,22 @@ impl Selector {
             }
         };
         let uses_index = uses_index || rt_indexed;
-        let index = if uses_index {
-            let d = self.alloc_d()?;
-            setup.push(self.out.len());
-            self.out.push(match init {
-                _ if rt_from.is_some() => Insn::Move {
+        let index = match (early, rt_from.clone()) {
+            (Some(d), _) => Some(d),
+            (None, Some(fea)) if uses_index => {
+                let d = self.alloc_d()?;
+                setup.push(self.out.len());
+                self.out.push(Insn::Move {
                     size: Size::W,
-                    src: rt_from.clone().expect("a run-time lower bound"),
+                    src: fea,
                     dst: Ea::Reg(Reg::D(d)),
-                },
-                0 => Insn::Clr {
-                    size: Size::W,
-                    dst: Ea::Reg(Reg::D(d)),
-                },
-                -128..=127 => Insn::Moveq {
-                    value: init as i8,
-                    dst: d,
-                },
-                _ => {
-                    // Best effort (not byte-identical; bead
-                    // domain-pascal-kaxz): `move.w #init,Di`, as the count's
-                    // own `move.w` above 127.
-                    best_effort(
-                        span,
-                        "a `for` index whose initial value is outside -128..127 (not \
-                         catalogued, codegen-patterns 7.4) is",
-                    )?;
-                    Insn::Move {
-                        size: Size::W,
-                        src: Ea::Imm(imm(init, Width::Word)),
-                        dst: Ea::Reg(Reg::D(d)),
-                    }
-                }
-            });
-            self.pinned.push((off, Reg::D(d)));
-            self.for_regs.push((off, d));
-            Some(d)
-        } else {
-            None
+                });
+                self.pinned.push((off, Reg::D(d)));
+                self.for_regs.push((off, d));
+                Some(d)
+            }
+            (None, None) if uses_index => Some(self.for_index_init(span, off, init, &mut setup)?),
+            (None, _) => None,
         };
         let (arrays, body) = self.step_plan(f, l, arrays, init)?;
         let ptrs = self.stepped_pointers(&arrays, init, &setup)?;
@@ -9349,6 +9449,48 @@ impl Selector {
         });
         self.place(exit);
         Ok(())
+    }
+
+    /// [`Self::for_`]'s index register, set to `init` (`clr.w`, `moveq`)
+    /// and held for the variable at `off`; `setup` gets the instruction's
+    /// index in `out`.
+    fn for_index_init(
+        &mut self,
+        span: Span,
+        off: i32,
+        init: i64,
+        setup: &mut Vec<usize>,
+    ) -> Res<u8> {
+        let d = self.alloc_d()?;
+        setup.push(self.out.len());
+        self.out.push(match init {
+            0 => Insn::Clr {
+                size: Size::W,
+                dst: Ea::Reg(Reg::D(d)),
+            },
+            -128..=127 => Insn::Moveq {
+                value: init as i8,
+                dst: d,
+            },
+            _ => {
+                // Best effort (not byte-identical; bead
+                // domain-pascal-kaxz): `move.w #init,Di`, as the count's
+                // own `move.w` above 127.
+                best_effort(
+                    span,
+                    "a `for` index whose initial value is outside -128..127 (not \
+                     catalogued, codegen-patterns 7.4) is",
+                )?;
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(imm(init, Width::Word)),
+                    dst: Ea::Reg(Reg::D(d)),
+                }
+            }
+        });
+        self.pinned.push((off, Reg::D(d)));
+        self.for_regs.push((off, d));
+        Ok(d)
     }
 
     /// A `for` loop whose index is a byte (`char`, a `[byte]` subrange)
@@ -9460,7 +9602,11 @@ impl Selector {
                 self.for_sizes.push((off, z));
             }
         }
-        let uses_index = home.is_none() && (index_read_unstepped(&l.body, off) || after);
+        // Every read of the index counts, an element `a[i]` too: this loop
+        // steps no pointer (bead domain-pascal-trdz review; the word index
+        // of a `downto` loop with a run-time bound, an unsigned one up to
+        // a run-time bound).
+        let uses_index = home.is_none() && (expr_reads_index(&l.body, off) || after);
         // Where the image's form is not settled or not followed: a warning,
         // a refusal under `--strict` (bead domain-pascal-5kgg).
         if w == Width::Byte {
@@ -9524,6 +9670,17 @@ impl Selector {
                 None => {}
             }
             s.jump(if dsigned { Cond::Lt } else { Cond::Cs }, exit);
+        };
+        // An index read after the loop, from a constant to a run-time
+        // bound: set before the guard, as [`Self::for_`] sets it (best
+        // effort, bead domain-pascal-trdz).
+        let early = match konst(&l.from) {
+            Some(a) if uses_index && after && konst(&l.to).is_none() => {
+                let d = self.alloc_d()?;
+                self.const_into(a, w, d);
+                Some(d)
+            }
+            _ => None,
         };
         let (count, long, from_reg) = match (konst(&l.from), konst(&l.to)) {
             (Some(a), Some(b)) => {
@@ -9657,9 +9814,10 @@ impl Selector {
         // computed wider), or the constant.
         let mut index = None;
         if uses_index {
-            let d = match from_reg {
-                Some(d) => d,
-                None => {
+            let d = match (from_reg, early) {
+                (_, Some(d)) => d,
+                (Some(d), None) => d,
+                (None, None) => {
                     let d = self.alloc_d()?;
                     self.const_into(konst(&l.from).expect("a constant `from`"), w, d);
                     d
@@ -9800,56 +9958,72 @@ impl Selector {
     /// `coalesce`), with or without a call in the body.  `setup` gets the
     /// copy's index in `out`.  The bound is a variable held in a register
     /// or one of the unit's data (both `tst.w` sites from memory load
-    /// `(0x538,A5)`).  Refused: a bound through a pointer (ROUTE_$READ_USER_
-    /// STATS 0xE6A6C4 `move.w (0x36,A1),D4; bmi.b`, no `tst.w`: one site);
-    /// a frame slot not held, another unit's variable, an absolute or
-    /// indexed one (not surveyed); a bound other than a variable (the guard
-    /// of an expression's value not surveyed).
+    /// `(0x538,A5)`).
+    ///
+    /// Best effort (not byte-identical; bead domain-pascal-trdz): any other
+    /// bound is evaluated into a register of its own and tested there, as
+    /// a unit variable is: a bound through a pointer (the image tests the
+    /// load's own flags, ROUTE_$READ_USER_STATS 0xE6A6C4 `move.w
+    /// (0x36,A1),D4; bmi.b; move.w D4,D0`: one site, no `tst.w`); a frame
+    /// slot not held, another unit's variable, an absolute or indexed one
+    /// (not surveyed); a bound other than a variable (the guard of an
+    /// expression's value not surveyed).  `tst.w; bmi` skips the loop
+    /// exactly when `to < 0`, whatever the bound.
     fn for_count_tested(&mut self, to: &Expr, exit: u32, setup: &mut Vec<usize>) -> Res<u8> {
-        let static_ =
-            match to {
-                Expr::Load {
-                    addr: Addr::Static(_),
-                    ..
-                } if !self.data_absolute => true,
-                Expr::Load {
-                    addr: Addr::Frame(_),
-                    ..
-                } => false,
-                Expr::Load {
-                    addr: Addr::Indirect { .. },
-                    ..
-                } => return Err(unsupported(
+        let static_ = match to {
+            Expr::Load {
+                addr: Addr::Static(_),
+                ..
+            } if !self.data_absolute => true,
+            Expr::Load {
+                addr: Addr::Frame(_),
+                ..
+            } => false,
+            Expr::Load {
+                addr: Addr::Indirect { .. },
+                ..
+            } => {
+                best_effort(
                     self.span,
                     "a `for` loop from 0 to a bound reached through a pointer (no `tst.w`, the \
                      `bmi` on the load's flags at ROUTE_$READ_USER_STATS 0xE6A6C4 `move.w \
                      (0x36,A1),D4; bmi.b; move.w D4,D0`: one site, codegen-patterns 7.4) is",
-                )),
-                Expr::Load { .. } => return Err(unsupported(
+                )?;
+                true
+            }
+            Expr::Load { .. } => {
+                best_effort(
                     self.span,
                     "a `for` loop from 0 to a bound of this kind (another unit's or an absolute \
                      variable, an array element: its guard not surveyed, codegen-patterns 7.4) \
                      is",
-                )),
-                _ => {
-                    return Err(unsupported(
-                        self.span,
-                        "a `for` loop from 0 to a run-time bound other than a variable or `e - c` \
+                )?;
+                true
+            }
+            _ => {
+                best_effort(
+                    self.span,
+                    "a `for` loop from 0 to a run-time bound other than a variable or `e - c` \
                      (the guard of another expression's value not surveyed, codegen-patterns \
                      7.4) is",
-                    ))
-                }
-            };
+                )?;
+                true
+            }
+        };
         let t = match self.eval(to)? {
             Val::Reg(Reg::D(d)) => d,
             Val::Tmp(d) if static_ => d,
             v @ Val::Mem(_) if static_ => self.in_tmp(v, Width::Word)?,
-            _ => {
-                return Err(unsupported(
+            v => {
+                best_effort(
                     self.span,
                     "a `for` loop from 0 to a local or parameter not held in a register (its \
                      guard not surveyed, codegen-patterns 7.4) is",
-                ))
+                )?;
+                match v {
+                    Val::Tmp(d) => d,
+                    v => self.in_tmp(v, Width::Word)?,
+                }
             }
         };
         self.out.push(Insn::Tst {

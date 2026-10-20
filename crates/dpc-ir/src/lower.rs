@@ -2340,12 +2340,12 @@ fn lower_body(
         with_elem_temps: Default::default(),
         hidden_assigned: Default::default(),
     };
-    let out = cx.seq(&block.stmts)?;
+    let mut out = cx.seq(&block.stmts)?;
     let with_temps = cx.with_temps.into_inner();
     let elem_temps = cx.with_elem_temps.get();
     let result_temps = RESULT_TEMPS.with(|t| t.take());
     check_uplevel_indices(&out, uplevel)?;
-    check_for_indices(&out)?;
+    check_for_indices(&mut out)?;
     if r.result.is_some() {
         // ISO requires an assignment to the function variable (the
         // reference's error "No assignment to function variable"); a body
@@ -2427,17 +2427,18 @@ fn check_uplevel_indices(body: &[Stmt], uplevel: &[(i32, u32)]) -> Res<()> {
 /// left: the image keeps the
 /// index there, one step past the last value after normal termination
 /// (codegen-patterns 7.4, "The index read after its loop").  Accepted
-/// where the loop has constant bounds (so it runs and sets the register)
-/// and the read lies in the statements after it in the same sequence, with
-/// no other loop over the index nested among them and no label there that
-/// a `goto` from elsewhere reaches.
-fn check_for_indices(body: &[Stmt]) -> Res<()> {
+/// where the read lies in the statements after it in the same sequence,
+/// with no other loop over the index nested among them and no label there
+/// that a `goto` from elsewhere reaches; a loop with a run-time bound has
+/// the target set the index before its guard (bead domain-pascal-trdz).
+///
+/// The refusal, and the index it is about when keeping that index in
+/// memory makes the use an ordinary one ([`check_for_indices`]).
+fn check_for_indices_once(body: &[Stmt]) -> Result<(), (Diagnostic, Option<i32>)> {
     /// A loop whose index the statements after it may read
     /// ([`Check::after`]).
     struct After {
         offset: i32,
-        /// Constant bounds.
-        konst: bool,
         /// The [`Check::depth`] of the sequence holding the loop.
         depth: usize,
         /// The labels every `goto` to which lies in the loop or after it.
@@ -2463,6 +2464,10 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         /// memory ([`ForLoop::home`]).
         homes: Vec<Addr>,
         span: Span,
+        /// The index whose use outside its loops the last refusal was
+        /// about, when keeping it in memory instead serves
+        /// ([`check_for_indices`]).
+        culprit: std::cell::Cell<Option<i32>>,
     }
     /// The `goto`s of `body`, by label.
     fn gotos_of(body: &[Stmt], out: &mut Vec<(u32, usize)>) {
@@ -2495,7 +2500,13 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                 .iter()
                 .any(|l| l.offset == o && l.ty.width == ty.width)
         }
-        fn bad(&self) -> Diagnostic {
+        fn bad(&self, o: i32, size: u32) -> Diagnostic {
+            self.culprit.set(
+                self.all
+                    .iter()
+                    .find(|l| o < l.offset + l.ty.bytes() as i32 && l.offset < o + size as i32)
+                    .map(|l| l.offset),
+            );
             unsupported(
                 self.span,
                 "the index variable of a `for` loop assigned, addressed or read in part outside \
@@ -2507,6 +2518,15 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         }
         /// A whole read of the index at `o` outside its loops.
         fn read(&self, o: i32) -> Res<()> {
+            // Every refusal of [`Self::read_at`] is of a read that an index
+            // kept in memory makes an ordinary one.
+            let r = self.read_at(o);
+            if r.is_err() {
+                self.culprit.set(Some(o));
+            }
+            r
+        }
+        fn read_at(&self, o: i32) -> Res<()> {
             if self.bounding.contains(&o) {
                 // `for i := 1 to i do` after an earlier loop over i: the
                 // bound would read the register that loop left while the
@@ -2524,15 +2544,11 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                      statements that follow the loop in its sequence (codegen-patterns 7.4) is",
                 ));
             };
-            if !a.konst {
-                return Err(unsupported(
-                    self.span,
-                    "the index variable of a `for` loop with a run-time bound read after the \
-                     loop (its guard may skip the loop and leave the index's register unset: \
-                     XNS_IDP_$REGISTER_ADDR 0xE1905E reads D1, set at 0xE1902A after the \
-                     guard; not modelled, codegen-patterns 7.4) is",
-                ));
-            }
+            // A loop with a run-time bound: the target sets the index
+            // before the guard, so that a loop the guard skips leaves it
+            // `from` (XNS_IDP_$REGISTER_ADDR 0xE1905E reads D1, which the
+            // image sets at 0xE1902A after the guard; best effort, the
+            // target's warning; bead domain-pascal-trdz).
             match a.taint {
                 Some(m) => Err(unsupported(self.span, m)),
                 None => Ok(()),
@@ -2553,7 +2569,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                          index_variable within the body of the for loop\") is",
                     ))
                 }
-                Addr::Frame(o) if self.hit(*o, size) => Err(self.bad()),
+                Addr::Frame(o) if self.hit(*o, size) => Err(self.bad(*o, size)),
                 Addr::Frame(_)
                 | Addr::Enclosing(_)
                 | Addr::Static(_)
@@ -2775,8 +2791,6 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         self.active.push(off);
                         self.stmts(&l.body)?;
                         self.active.pop();
-                        let konst = matches!(l.from, Expr::Const { .. })
-                            && matches!(l.to, Expr::Const { .. });
                         let mut mine = Vec::new();
                         gotos_of(&l.body, &mut mine);
                         gotos_of(&body[k + 1..], &mut mine);
@@ -2787,7 +2801,6 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                             .collect();
                         self.after.push(After {
                             offset: off,
-                            konst,
                             depth,
                             labels,
                             taint: None,
@@ -2872,7 +2885,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
     }
     let mut gotos = Vec::new();
     gotos_of(body, &mut gotos);
-    Check {
+    let mut check = Check {
         all,
         active: Vec::new(),
         after: Vec::new(),
@@ -2881,8 +2894,72 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
         bounding: Vec::new(),
         homes: Vec::new(),
         span: body[0].span,
+        culprit: Default::default(),
+    };
+    check.stmts(body).map_err(|d| (d, check.culprit.get()))
+}
+
+/// [`check_for_indices_once`] until it holds: an index used outside its
+/// loops in a way the check refuses for an index held in a register
+/// (assigned, addressed or read in part there, as AREA_$FREE_SEGMENTS's
+/// `n := first_n` after a loop over n; read before its loop, or after it
+/// where another loop over it or a label intervenes) is kept in memory by
+/// every loop over it instead ([`ForLoop::home`]), where any use of it is
+/// an ordinary variable's.  Best effort (not byte-identical; bead
+/// domain-pascal-trdz): the image holds such a variable in registers, one
+/// per live range (AREA_$FREE_SEGMENTS 0xE0863C `move.w D3,D2` for `n :=
+/// first_n` after a loop over n in D5), which `dpc` does not model.
+fn check_for_indices(body: &mut [Stmt]) -> Res<()> {
+    loop {
+        match check_for_indices_once(body) {
+            Ok(()) => return Ok(()),
+            Err((d, Some(o))) => {
+                if !rehome_index(body, o) {
+                    return Err(d);
+                }
+                dpc_syntax::diag::best_effort(d)?;
+            }
+            Err((d, None)) => return Err(d),
+        }
     }
-    .stmts(body)
+}
+
+/// Keep the index of every `for` loop of `body` over the local at frame
+/// offset `off` in memory, at its own slot ([`check_for_indices`]);
+/// whether there was one.
+fn rehome_index(body: &mut [Stmt], off: i32) -> bool {
+    let mut hit = false;
+    for s in body {
+        match &mut s.kind {
+            StmtKind::For(l) => {
+                if l.home.is_none() && l.index.offset == off {
+                    l.home = Some(Addr::Frame(off));
+                    l.index.offset = 0;
+                    hit = true;
+                }
+                hit |= rehome_index(&mut l.body, off);
+            }
+            StmtKind::If { then_, else_, .. } => {
+                hit |= rehome_index(then_, off);
+                hit |= rehome_index(else_, off);
+            }
+            StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => {
+                hit |= rehome_index(body, off)
+            }
+            StmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                for a in arms {
+                    hit |= rehome_index(&mut a.body, off);
+                }
+                if let Some(o) = otherwise {
+                    hit |= rehome_index(o, off);
+                }
+            }
+            _ => {}
+        }
+    }
+    hit
 }
 
 /// What statement lowering needs to know about the routine.
@@ -4204,12 +4281,27 @@ impl Cx<'_> {
                             in_place: true,
                         })
                     } else {
-                        Err(unsupported(
-                            e.span,
-                            "a `for` bound of another width than the index, other than a \
-                             longword variable read as its low word (a longword expression or \
-                             function result narrowed: no site seen, codegen-patterns 7.4) is",
-                        ))
+                        // Best effort (not byte-identical; bead
+                        // domain-pascal-trdz): a longword expression or
+                        // function result is kept at its own width, as for
+                        // the other index kinds above, the target computing
+                        // the guard and the count there (`Selector::
+                        // for_wide`, `for_domain`): a bound outside the
+                        // index's type gives an empty range rather than a
+                        // wrapped one (ref p. 4-90; reference-clarifications
+                        // question 47).  MST_$INIT 0xE30BF8..0xE30C00
+                        // `move.w D2w,D0w; subq.w #1,D0w` computes `words -
+                        // 1`, a longword expression, at the word's width
+                        // (and has no guard): not followed.
+                        let why = "a `for` bound of another width than the index, other than a \
+                                   longword variable read as its low word (a longword \
+                                   expression or function result narrowed: no site seen, \
+                                   codegen-patterns 7.4) is";
+                        if !p.types.is_integer(e.ty) || v.ty().pointer {
+                            return Err(unsupported(e.span, why));
+                        }
+                        best_effort(e.span, why)?;
+                        Ok(v)
                     }
                 }
             }
