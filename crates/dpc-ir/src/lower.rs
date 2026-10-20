@@ -4168,11 +4168,18 @@ fn covers(p: &Program, ty: TypeId, size: u32) -> bool {
 ///   (TTY_$K_GET 0xE1C5D4).
 ///
 /// In each the code is the integer comparison's (codegen-patterns 7.1),
-/// and `dpc` lowers the set comparison as one.  Refused: a set of more
-/// than a longword (no `cmpm` loop of a set identified), subset `<=` and
-/// superset `>=` (no site known: the image cannot tell `s - t = []` from
-/// `s <= t`), a constant left operand, and a one-byte set against
-/// anything but `[]` (no site).
+/// and `dpc` lowers the set comparison as one.
+///
+/// Best effort (not byte-identical; bead domain-pascal-61fd, no site
+/// known for any of these):
+/// - subset `s <= t` and superset `s >= t` ([`set_inclusion`]);
+/// - a constant left operand of `=`/`<>` (`[2] = s`): the operands
+///   swapped, `s = [2]` (the relations are symmetric);
+/// - a one-byte set against a set other than `[]`: both widened to a
+///   word, as for `[]` (acl_$prim_create_internal 0xE45270).
+///
+/// Refused: a set of more than a longword (no `cmpm` loop of a set
+/// identified).
 fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
     if p.types.size(lhs.ty) > 4 || p.types.size(rhs.ty) > 4 {
         // MSG_$CLOSEI 0xE59490..0xE5949C: `tst.l (A1)+; bne` per longword.
@@ -4182,31 +4189,22 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
              codegen-patterns 5.1) is",
         ));
     }
-    if !matches!(rel, Rel::Eq | Rel::Ne) {
-        return Err(unsupported(
-            e.span,
-            "a set subset or superset comparison (`<=`, `>=`: no site known, \
-             codegen-patterns 5.1) is",
-        ));
+    if matches!(rel, Rel::Le | Rel::Ge) {
+        return set_inclusion(p, rel, lhs, rhs);
     }
+    if !matches!(rel, Rel::Eq | Rel::Ne) {
+        return Err(unsupported(e.span, "this comparison of sets is"));
+    }
+    // Best effort (not byte-identical): `c = s` as `s = c`, no site.
+    let (lhs, rhs) = if lhs.value.is_some() && rhs.value.is_none() {
+        (rhs, lhs)
+    } else {
+        (lhs, rhs)
+    };
     if lhs.value.is_some() {
-        return Err(unsupported(
-            e.span,
-            "a set comparison with a constant left operand (no site known, \
-             codegen-patterns 5.1) is",
-        ));
+        return Err(unsupported(e.span, "a comparison of two constant sets is"));
     }
     let empty = |x: &SExpr| matches!(&x.value, Some(ConstValue::Set(m)) if m.is_empty());
-    // A one-byte set against anything but `[]`, on either side (against a
-    // word set too, which `set_value` would widen it for): no site.
-    let byte_set = |x: &SExpr| x.value.is_none() && p.types.size(x.ty) == 1;
-    if (byte_set(lhs) || byte_set(rhs)) && !empty(rhs) {
-        return Err(unsupported(
-            e.span,
-            "comparing a one-byte set with a set other than `[]` (no site known, \
-             codegen-patterns 5.1) is",
-        ));
-    }
     // The operation's type: the left operand's, or a wider run-time right
     // operand's (a constructor's own type is sized by its high end, ref
     // 3.9.3 p. 3-16; [`set_value`]).
@@ -4221,14 +4219,9 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
         // `clr.w D1; move.b (27,A4),D1; tst.w D1; beq.s` (`prot.
         // world_rights <> []`, ../source's reading; codegen-patterns 5.1,
         // "One-byte sets"; the only site).
-        t if t.width == Width::Byte && empty(rhs) => Scalar::unsigned(Width::Word),
-        t if t.width == Width::Byte => {
-            return Err(unsupported(
-                e.span,
-                "comparing a one-byte set with a set other than `[]` (no site known, \
-                 codegen-patterns 5.1) is",
-            ))
-        }
+        // Best effort (not byte-identical): a one-byte set against a set
+        // other than `[]` (no site) is widened the same way.
+        t if t.width == Width::Byte => Scalar::unsigned(Width::Word),
         t => t,
     };
     let l = set_value(p, lhs, ty)?;
@@ -4241,6 +4234,44 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
         op: rel,
         lhs: l,
         rhs: r,
+    })
+}
+
+/// Subset `s <= t` and superset `s >= t` of register-sized sets (ref "Set
+/// Operations", p. 4-176: `s <= t` is true when every member of `s` is
+/// one of `t`, `s >= t` when every member of `t` is one of `s`).
+///
+/// Best effort (not byte-identical; bead domain-pascal-61fd): no site is
+/// known (the image cannot tell `s <= t` from `s - t = []`), so `s <= t`
+/// is lowered as `s - t = []` and `s >= t` as `t - s = []`, the
+/// difference's code (codegen-patterns 5.1, "Values") tested for `[]` on
+/// the flags of its `and` (PROC2_$SIGPAUSE 0xE3FAC6 `move.l (-108,A4),D1;
+/// not.l D1; and.l (-100,A4),D1; beq.s`).  A one-byte set is widened to a
+/// word, as for `[]` (acl_$prim_create_internal 0xE45270).
+fn set_inclusion(p: &Program, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    let (sub, sup) = if rel == Rel::Le { (lhs, rhs) } else { (rhs, lhs) };
+    // The operation's type: a run-time operand's, the wider one's if both
+    // are (constants take the operation's type, [`set_value`]).
+    let base = if sub.value.is_some()
+        || (sup.value.is_none() && p.types.size(sup.ty) > p.types.size(sub.ty))
+    {
+        sup
+    } else {
+        sub
+    };
+    let ty = match scalar_of(p, base)? {
+        t if t.width == Width::Byte => Scalar::unsigned(Width::Word),
+        t => t,
+    };
+    Ok(Cond::Compare {
+        op: Rel::Eq,
+        lhs: Expr::SetOp {
+            op: SetOp::Diff,
+            lhs: Box::new(set_value(p, sub, ty)?),
+            rhs: Box::new(set_value(p, sup, ty)?),
+            ty,
+        },
+        rhs: Expr::Const { value: 0, ty },
     })
 }
 

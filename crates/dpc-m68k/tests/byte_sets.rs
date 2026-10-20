@@ -166,6 +166,53 @@ fn narrowed_from_a_word() {
 }
 
 #[test]
+fn compared_with_sets_best_effort() {
+    // Best effort (bead domain-pascal-61fd; no site): a one-byte set
+    // against a set other than `[]` is widened to a word as against `[]`
+    // (acl_$prim_create_internal 0xE45270 `clr.w D1; move.b (27,A4),D1`),
+    // then compared as one.
+    assert_eq!(
+        body("procedure t(p: rp); options(val_param); begin if p^.a = p^.b then gn := 1 end;"),
+        [
+            "movea.l (8,%fp),%a0",
+            "clr.w %d0",
+            "clr.w %d1",
+            "move.b (%a0),%d0",
+            "move.b (1,%a0),%d1",
+            "cmp.w %d1,%d0",
+            "bne.s 1f",
+            "move.w #1,(GN).l",
+            "1:"
+        ]
+    );
+    // ... against a word set, and against a constant.
+    assert_eq!(
+        body("procedure t(p: rp); options(val_param); begin if p^.a <> p^.w then gn := 1 end;"),
+        [
+            "movea.l (8,%fp),%a0",
+            "clr.w %d0",
+            "move.b (%a0),%d0",
+            "cmp.w (4,%a0),%d0",
+            "beq.s 1f",
+            "move.w #1,(GN).l",
+            "1:"
+        ]
+    );
+    assert_eq!(
+        body("procedure t(p: rp); options(val_param); begin if p^.a = [1] then gn := 1 end;"),
+        [
+            "movea.l (8,%fp),%a0",
+            "clr.w %d0",
+            "move.b (%a0),%d0",
+            "cmpi.w #2,%d0",
+            "bne.s 1f",
+            "move.w #1,(GN).l",
+            "1:"
+        ]
+    );
+}
+
+#[test]
 fn refusals() {
     let r = |src: &str, needle: &str| {
         let e = error(src);
@@ -207,23 +254,6 @@ fn refusals() {
     r(
         "procedure t(p: rp); options(val_param); begin takes_in(p^.a) end;",
         "passing a variable of another size to a value or `in` parameter",
-    );
-    r(
-        "procedure t(p: rp); options(val_param); begin if p^.a = p^.b then gn := 1 end;",
-        "comparing a one-byte set with a set other than `[]`",
-    );
-    // ... against a word set, on either side, and against a constant.
-    r(
-        "procedure t(p: rp); options(val_param); begin if p^.a <> p^.w then gn := 1 end;",
-        "comparing a one-byte set with a set other than `[]`",
-    );
-    r(
-        "procedure t(p: rp); options(val_param); begin if p^.w * [1, 2] = p^.a then gn := 1 end;",
-        "comparing a one-byte set with a set other than `[]`",
-    );
-    r(
-        "procedure t(p: rp); options(val_param); begin if p^.a = [1] then gn := 1 end;",
-        "comparing a one-byte set with a set other than `[]`",
     );
     // A one-byte set held in a register, less another (`move.b; not.b;
     // and.b`: no site).

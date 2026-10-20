@@ -19419,7 +19419,20 @@ impl Selector {
                 });
                 d
             }
+            // A set held in a register, as a value: `btst #k` on it, the
+            // boolean in a new register (PROC1_$SUSPEND 0xE14842..0xE14846
+            // `btst #1,D1; sne D0`, `proc1_flag_suspended in f` with `f`
+            // held in D1, ../source proc1/suspend.pas; bead
+            // domain-pascal-61fd).
+            Val::Reg(Reg::D(r)) if w != Width::Byte && !matches!(k, 7 | 15 | 31) => {
+                self.out.push(Insn::BtstImm {
+                    bit: k as u8,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                return Ok((None, Cond::Ne));
+            }
             _ if w == Width::Byte => return Err(Self::byte_set_whole(self.span)),
+            Val::Reg(Reg::D(_)) => return Err(Self::sign_member(self.span)),
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -20148,8 +20161,26 @@ impl Selector {
     ///   D1; and.l (-100,A4),D1`; PROC2_$SET_SIG_MASK 0xE3F9C6;
     ///   PROC2_$SIGSETMASK 0xE3F70E; 0xE3EC54 with the left operand in D4).
     ///
-    /// `x + y` and `x - c` as values (not stored back into `x`) are not
-    /// catalogued.
+    /// - `x - c`, a constant: as the integer `x & ~c` (above): PROC1_$TRY_
+    ///   TO_SUSPEND 0xE1474C `moveq #-5,D0; and.w (84,A2),D0` (`pcb.flags
+    ///   - [2]`, ../source proc1/try_to_suspend.pas), SIO's 0xE1C89E
+    ///   `moveq #-2,D0; movea.l (8,A6),A0; and.w (116,A0),D0` (`desc^.state
+    ///   - [0]`, sio/i_tstart.pas; the constant before the pointer's load
+    ///   there, after it in `dpc`).
+    /// - `x + y` with `x` computed: `x` in its register, then `or` of `y`:
+    ///   `ori #c` for a constant (0xE14752 `ori.w #2,D0` for `... + [1]`,
+    ///   0xE1C8A8 `ori.w #16,D0`), `or` from memory otherwise
+    ///   (PROC2_$SET_SIG_MASK 0xE3F850..0xE3F85E `move.l (-64,A6),D0; not.l
+    ///   D0; and.l (-112,A2),D0; or.l (-32,A6),D0; move.l D0,(-112,A2)`,
+    ///   `(s - a) + b`, four times to 0xE3F894).
+    ///
+    /// Best effort (not byte-identical; bead domain-pascal-61fd), no site
+    /// known: `x + c` of a variable (loaded, then `ori`, one of the two
+    /// orders of the integer `!`, section 8), `x + y` of two variables (the
+    /// integer `!`'s form, [`Self::binary`]), `c - x` (`x` loaded,
+    /// complemented, then `andi #c`), and `x * y` / `x - y` with `x`
+    /// computed (the right operand first as above, then `and` of the
+    /// left one's register).
     fn set_op_value(&mut self, op: SetOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
         let w = ty.width;
         if w == Width::Byte {
@@ -20176,10 +20207,24 @@ impl Selector {
                 let src = match self.eval(lhs)? {
                     Val::Mem(ea) => ea,
                     Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+                    // Best effort (not byte-identical): a computed left
+                    // operand `and`ed from its register (no site).
+                    Val::Tmp(l) => Ea::Reg(Reg::D(l)),
+                    // Best effort (not byte-identical): `c - x`, the
+                    // constant `andi`ed into `~x` (no site).
+                    Val::Imm(c) => {
+                        self.out.push(Insn::AluImm {
+                            op: AluOp::And,
+                            size: size_of(w),
+                            imm: c,
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        return Ok(d);
+                    }
                     _ => {
                         return Err(unsupported(
                             self.span,
-                            "an intersection or difference whose left operand is computed is",
+                            "an intersection or difference with this left operand is",
                         ))
                     }
                 };
@@ -20191,14 +20236,43 @@ impl Selector {
                 });
                 Ok(d)
             }
-            SetOp::Diff => Err(unsupported(
-                self.span,
-                "a set minus a constant as a value (not stored back into the set) is",
-            )),
-            SetOp::Union => Err(unsupported(
-                self.span,
-                "the union of sets as a value (not `s := s + x`) is",
-            )),
+            SetOp::Diff => {
+                // `x - c` as `x & ~c` (PROC1_$TRY_TO_SUSPEND 0xE1474C, SIO
+                // 0xE1C89E; above).
+                let Expr::Const { value, ty: cty } = rhs else {
+                    unreachable!("a run-time right operand is the second arm's")
+                };
+                let mask: i64 = if w == Width::Long { 0xffff_ffff } else { 0xffff };
+                let not_c = Expr::Const {
+                    value: !value & mask,
+                    ty: *cty,
+                };
+                self.binary(BinOp::And, lhs, &not_c, ty)
+            }
+            SetOp::Union => {
+                let (x, c) = match (lhs, rhs) {
+                    (_, Expr::Const { value, .. }) => (lhs, Some(*value)),
+                    (Expr::Const { value, .. }, _) => (rhs, Some(*value)),
+                    _ => (lhs, None),
+                };
+                let Some(c) = c else {
+                    // Best effort for two variables (the integer `!`'s
+                    // form); a computed left operand as at 0xE3F85A.
+                    return self.binary(BinOp::Or, lhs, rhs, ty);
+                };
+                // A computed `x` has `ori` in place (0xE14752, 0xE1C8A8);
+                // best effort (not byte-identical) for a variable: loaded,
+                // then `ori` (no site).
+                let xv = self.eval(x)?;
+                let d = self.in_tmp(xv, w)?;
+                self.out.push(Insn::AluImm {
+                    op: AluOp::Or,
+                    size: size_of(w),
+                    imm: imm(c, w),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(d)
+            }
             SetOp::Inter => unreachable!("a constant operand is the first arm's"),
         }
     }
@@ -20233,9 +20307,14 @@ impl Selector {
     ///   not.l D1; and.l D1,(0x14,A2)`; TTY_$I_RCV 0xE1BACE `move.w D4,D1;
     ///   andi.w #0x80,D1; or.w D1,(8,A2)` for `s + (t * [7])`).
     ///
-    /// `s := s * x` is refused: the image has `andi` to memory, but also
-    /// the mask in a register `and`ed into the set (0xE1C006 `moveq #-8,D1;
-    /// and.w D1,(8,A2)`), and which source gave which is not settled.
+    /// `s := s * x` is not done in place: the image has `andi` to memory,
+    /// but also the mask in a register `and`ed into the set (0xE1C006
+    /// `moveq #-8,D1; and.w D1,(8,A2)`), and which source gave which is not
+    /// settled; best effort, the value `s * x` stored (bead
+    /// domain-pascal-61fd).  Nor is a set whose address contains a call
+    /// (in an index or a pointer base): `s` is then read and written
+    /// through two evaluations of the call, which the in-place form would
+    /// merge into one.
     fn set_update(&mut self, addr: &Addr, value: &Expr) -> Res<bool> {
         let Expr::SetOp { op, lhs, rhs, ty } = value else {
             return Ok(false);
@@ -20243,22 +20322,21 @@ impl Selector {
         let Expr::Load { addr: a, .. } = &**lhs else {
             return Ok(false);
         };
-        if a != addr {
+        if a != addr || addr_has_call(addr) {
             return Ok(false);
         }
         if *op == SetOp::Inter {
-            return Err(unsupported(
-                self.span,
-                "`s := s * x` in place (`andi` to memory, or the mask in a register and `and` to \
-                 memory as at 0xE1C006: not settled) is",
-            ));
+            // Best effort (not byte-identical; bead domain-pascal-61fd):
+            // `s := s * x` is not done in place (`andi` to memory, or the
+            // mask in a register and `and` to memory as at 0xE1C006: not
+            // settled) but as the value `s * x` ([`Self::set_op_value`])
+            // stored.
+            return Ok(false);
         }
-        if matches!(addr, Addr::Index { .. }) {
-            return Err(unsupported(
-                self.span,
-                "updating a set that is an array element in place is",
-            ));
-        }
+        // An array element is updated in place through its operand: DIR_
+        // $OLD_FIND_OVERFLOW_SLOT 0xE55006..0xE5500A `lea (0,A0,D6.w),A4;
+        // bclr #7,(868,A4)` (`slots[j].flags := slots[j].flags - [15]`,
+        // ../source dir/old_find_overflow_slot.pas; bead domain-pascal-61fd).
         if let Addr::Frame(o) = addr {
             if self.pinned(*o).is_some() {
                 return Err(unsupported(
@@ -20362,6 +20440,7 @@ impl Selector {
             Ea::Ind(a) => Ea::Disp(off, a),
             Ea::Disp(d, a) if (-0x8000..0x8000).contains(&(d + off)) => Ea::Disp(d + off, a),
             Ea::AbsL(s, o) => Ea::AbsL(s, o + off),
+            Ea::Idx(d, a, x, l) if (-0x80..0x80).contains(&(d + off)) => Ea::Idx(d + off, a, x, l),
             _ => {
                 return Err(unsupported(
                     self.span,

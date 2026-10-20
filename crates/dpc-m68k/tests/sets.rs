@@ -489,12 +489,78 @@ fn constant_members_in_memory() {
 }
 
 #[test]
-fn refusals() {
-    // `s := s * c` in place: `andi` or the mask in a register (0xE1C006).
-    assert!(
-        error("procedure t(p: rp); options(val_param); begin p^.w := p^.w * [1, 2] end;")
-            .contains("`s := s * x` in place")
+fn values_and_inclusion() {
+    // Bead domain-pascal-61fd.  `s - [c] + [d]`: PROC1_$TRY_TO_SUSPEND
+    // 0xE1474C `moveq #-5,D0; and.w (84,A2),D0; ori.w #2,D0; move.w
+    // D0,(84,A2)`.  `(s - a) + b`: PROC2_$SET_SIG_MASK 0xE3F850 `move.l;
+    // not.l; and.l; or.l; move.l`.
+    assert_eq!(
+        body(
+            "procedure t(p: rp); options(val_param);
+             begin p^.w := p^.w - [2] + [1]; p^.l := (p^.l - p^.l2) + p^.l end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "moveq\t#-5,%d0",
+            "and.w\t(%a0),%d0",
+            "ori.w\t#2,%d0",
+            "move.w\t%d0,(%a0)",
+            "move.l\t(0x30,%a0),%d0",
+            "not.l\t%d0",
+            "and.l\t(2,%a0),%d0",
+            "or.l\t(2,%a0),%d0",
+            "move.l\t%d0,(2,%a0)"
+        ]
     );
+    // Best effort (no site): `s := s * c` not in place but as a value
+    // stored; `x + y` and `c - x` as values; subset `<=` as `x - y = []`,
+    // superset `>=` as `y - x = []`; a constant left operand swapped.
+    assert_eq!(
+        body(
+            "procedure t(p: rp); options(val_param);
+             begin
+               p^.w := p^.w * [1, 2];
+               p^.w2 := p^.w + p^.w2;
+               p^.w2 := [0, 5] - p^.w;
+               if p^.w <= p^.w2 then gw := 1;
+               if p^.l >= [e01] then gw := 2;
+               if [1] = p^.w then gw := 3;
+             end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "moveq\t#6,%d0",
+            "and.w\t(%a0),%d0",
+            "move.w\t%d0,(%a0)",
+            "move.w\t(%a0),%d0",
+            "or.w\t(0x2e,%a0),%d0",
+            "move.w\t%d0,(0x2e,%a0)",
+            "move.w\t(%a0),%d0",
+            "not.w\t%d0",
+            "andi.w\t#0x21,%d0",
+            "move.w\t%d0,(0x2e,%a0)",
+            "move.w\t(0x2e,%a0),%d0",
+            "not.w\t%d0",
+            "and.w\t(%a0),%d0",
+            "bne.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:",
+            "move.l\t(2,%a0),%d0",
+            "not.l\t%d0",
+            "andi.l\t#2,%d0",
+            "bne.s\t2f",
+            "move.w\t#2,(GW).l",
+            "2:",
+            "cmpi.w\t#2,(%a0)",
+            "bne.s\t3f",
+            "move.w\t#3,(GW).l",
+            "3:"
+        ]
+    );
+}
+
+#[test]
+fn refusals() {
     // `[k]` assigned: built in memory with a guard (AST_$GET_SEG_MAP).
     assert!(
         error("procedure t(p: rp; k: integer); options(val_param); begin p^.w := [k] end;")
@@ -505,29 +571,23 @@ fn refusals() {
         "procedure t(p: rp; k: integer); options(val_param); begin p^.w := p^.w + [0..k] end;"
     )
     .contains("run-time range"));
-    // Set comparisons with no site: subset, superset, a constant on the
-    // left, sets of more than a longword.
-    assert!(error(
-        "procedure t(p: rp); options(val_param); begin if p^.w <= p^.w2 then gw := 1 end;"
-    )
-    .contains("subset or superset"));
-    assert!(error(
-        "procedure t(p: rp); options(val_param); begin if p^.l >= [e01] then gw := 1 end;"
-    )
-    .contains("subset or superset"));
-    assert!(
-        error("procedure t(p: rp); options(val_param); begin if [1] = p^.w then gw := 1 end;")
-            .contains("constant left operand")
-    );
+    // A set whose address contains a call is not updated in place: the
+    // call runs once for the read and once for the write (bead
+    // domain-pascal-61fd review); the value-then-store path refuses it.
+    for stmt in ["ga[nx] := ga[nx] + [0]", "np^.w := np^.w + [0]", "np^.w := np^.w - [3]"] {
+        let e = error(&format!(
+            "var ga: array[1..4] of w16;
+             function nx: integer; extern;
+             function np: rp; extern;
+             procedure t; begin {stmt} end;"
+        ));
+        assert!(e.contains("with a call on either side"), "{stmt}: {e}");
+    }
+    // Comparing sets of more than a longword.
     assert!(error(
         "procedure t(p: rp); options(val_param); begin if p^.b64 = [1] then gw := 1 end;"
     )
     .contains("more than a longword"));
-    // A union as a value.
-    assert!(error(
-        "procedure t(p: rp); options(val_param); begin gw := 0; p^.w2 := p^.w + p^.w2 end;"
-    )
-    .contains("union of sets as a value"));
     // A constant member beyond the set's bits.
     assert!(
         error("procedure t(p: rp); options(val_param); begin p^.w := p^.w + [20] end;")

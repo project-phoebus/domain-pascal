@@ -3122,7 +3122,11 @@ this pair.
   the set's value in a data register, then `btst #k` on it:
   REM_NAME_SERVER_LOCAL 0xE4A412..0xE4A41A `move.w (22,A0),D0; btst
   #13,D0; sne D0` (a boolean function, `sne` in the set's register);
-  0xE031B2 `btst #14,D5; bne.s`.  `dpc` (`isel.rs`, `set_bit_test`)
+  0xE031B2 `btst #14,D5; bne.s`; a held set as a value, the boolean in
+  a new register, PROC1_$SUSPEND 0xE14842..0xE14846 `btst #1,D1; sne D0`
+  (`proc1_flag_suspended in f`, `f` held in D1, ../source
+  proc1/suspend.pas; implemented, bead domain-pascal-61fd).  `dpc`
+  (`isel.rs`, `set_bit_test`)
   rejects a non-constant element on a word set variable (above; a
   constant set: "`x in c`" below), and a constant element beyond
   the set's bits (`20 in s` for a word set would test a bit of the
@@ -3222,8 +3226,19 @@ model run against the bit model of Figure 3-6).
   `&= 0x3F`, ../source `rip/table.c`; 0xE3225E, `peb/load_wcs.c`), but
   `andi`/`ori` to memory with a `moveq` constant is common too (e.g.
   `andi.l #15` ×8, 0xE09CE4).  So `dpc`'s `andi.w #-8,(8,A2)` for `s := s
-  - [0, 1, 2]` does not match 0xE1C006.  `dpc` refuses `s := s * x` in
-  place.
+  - [0, 1, 2]` does not match 0xE1C006.  `s := s * x` is not done in
+  place by `dpc`: **best effort (not byte-identical; bead
+  domain-pascal-61fd)**, the value `s * x` (below) stored.
+- **An array element updated in place (Verified once):** the element's
+  operand takes the forms above: DIR_$OLD_FIND_OVERFLOW_SLOT
+  0xE55006..0xE5500A `lea (0,A0,D6.w),A4; bclr #7,(868,A4)`
+  (`slots[j].flags := slots[j].flags - [15]`, ../source
+  dir/old_find_overflow_slot.pas).  `dpc` forms the element's operand as
+  any element's (5.2), e.g. `bclr #7,(-4,A5,D1.w)` (bead
+  domain-pascal-61fd).  Not in place: a set whose address holds a call
+  (`a[f] := a[f] + [0]`, `f^.s := f^.s + [0]`), which Pascal evaluates
+  twice; the value-then-store path refuses it (a call on either side of
+  a store whose destination and value need registers).
 - **`[k]`, one run-time member (Verified, 46 sites):** the register
   cleared at the set's size, then `bset Dk,Dn` (mod 32: no range check).
   The element is evaluated first when computed (DBUF_$GET_BLOCK 0xE3A726
@@ -3264,8 +3279,27 @@ model run against the bit model of Figure 3-6).
   PROC2_$SIGPAUSE 0xE3FAC6 `move.l (-108,A4),D1; not.l D1; and.l
   (-100,A4),D1; beq.s`, PROC2_$SET_SIG_MASK 0xE3F9C6, PROC2_$SIGSETMASK
   0xE3F70E; whether these are sets or `x & ~y` integers is not known:
-  the code is the same).  `x + y` and `x - c` as values are not
-  catalogued: refused.
+  the code is the same).  `x - c` as `x * ~c` (the constant first):
+  PROC1_$TRY_TO_SUSPEND 0xE1474C `moveq #-5,D0; and.w (84,A2),D0`
+  (`pcb.flags - [2]`, ../source proc1/try_to_suspend.pas), SIO's
+  0xE1C89E `moveq #-2,D0; movea.l (8,A6),A0; and.w (116,A0),D0`
+  (`desc^.state - [0]`, sio/i_tstart.pas; the constant before the
+  pointer's load, which `dpc` puts first).  `x + y` with `x` computed: in
+  its register, then `ori #c` (0xE14752 `ori.w #2,D0` for `... + [1]`,
+  0xE1C8A8 `ori.w #16,D0`) or `or` from memory (PROC2_$SET_SIG_MASK
+  0xE3F850..0xE3F85E `move.l (-64,A6),D0; not.l D0; and.l (-112,A2),D0;
+  or.l (-32,A6),D0; move.l D0,(-112,A2)` for `(s - a) + b`, four times to
+  0xE3F894); at SIO_$K_SET_PARAM 0xE68104 `moveq #-2,D1; and.l
+  (-24,A6),D1; or.l D1,D0` the right operand, left in D0 by the
+  comparison before, takes the `or` (not reproduced: `dpc` forms it
+  again).  **Best effort (not byte-identical; bead
+  domain-pascal-61fd), no site known:** `x + c` of a variable (loaded,
+  then `ori`: one of the integer `!`'s two orders, section 8), `x + y` of
+  two variables (the left loaded, the right `or`ed in), `c - x` (`x`
+  loaded, `not`, `andi #c`), `x * y` and `x - y` with a computed left
+  operand (the right first as above, then `and` of the left's register).
+  `dpc`: `isel.rs` `set_op_value`; golden `sets/set_values`; exec test
+  `set_values`.
 - **`[]` (Verified):** `clr` of the set (TTY_$I_INIT 0xE3325E `clr.w
   (8,A0)`; 0xE1C044 `clr.l (0x18,A2)`; tty_$i_wait 0xE1C282 `clr.w
   (-0x1e,A6)`).  `s <> []` / `s = []`: `tst` of the set (TTY_$K_GET
@@ -3318,17 +3352,20 @@ model run against the bit model of Figure 3-6).
   is taken from the integer comparison, `cmpi #mask,<ea>` with no load
   (0xE4FE90 `cmpi.w #4,(18,A6)`, 0xE58624 `cmpi.l #0x230001,(A0)`,
   0xE4BAE0 `cmpi.l #0x400,(16,A3)`), as `tst <ea>` is for `[]` (TTY_$K_GET
-  0xE1C5D4 `tst.w (10,A2)`).  **Refused** (specific messages): sets of more than a
-  longword (776 `cmpm` in compiled code, 773 `cmpm.l`, mostly UID pairs:
-  no set's identified; MSG_$CLOSEI's `tst.l (A1)+` per longword for
-  `[]`), subset `<=` and superset `>=` (no site known: `s <= t` would be
-  `s - t = []`, whose code, above, cannot be told from a difference
-  tested for `[]`), a constant left operand (`[2] = s`: no site), and a
-  one-byte set, on either side, against anything but `[]` (a word set
-  or a constant: no site).  `dpc`: `dpc-ir`
-  `lower.rs` `set_compare`; golden `sets/set_compares`; exec test
-  `set_compares`; `crates/dpc-m68k/tests/sets.rs` `set_comparisons`,
-  `refusals`.
+  0xE1C5D4 `tst.w (10,A2)`).  **Best effort (not byte-identical; bead
+  domain-pascal-61fd), no site known:** subset `s <= t` (ref p. 4-176)
+  as `s - t = []` and superset `s >= t` as `t - s = []`, the difference
+  above tested on the flags of its `and` (the image cannot tell `s <= t`
+  from such a difference); a constant left operand of `=`/`<>` (`[2] =
+  s`) swapped to the right; a one-byte set, on either side, against a
+  set other than `[]`, widened to a word as against `[]`.  **Refused**
+  (specific messages): sets of more than a longword (776 `cmpm` in
+  compiled code, 773 `cmpm.l`, mostly UID pairs: no set's identified;
+  MSG_$CLOSEI's `tst.l (A1)+` per longword for `[]`).  `dpc`: `dpc-ir`
+  `lower.rs` `set_compare`, `set_inclusion`; goldens `sets/set_compares`,
+  `sets/set_values`; exec tests `set_compares`, `set_values`;
+  `crates/dpc-m68k/tests/sets.rs` `set_comparisons`,
+  `values_and_inclusion`, `refusals`.
 - **`x in c`, a constant register-sized set (Verified):** the element,
   then the constant in a register, `btst Dk,Dn` (TTY_$K_SET_DELAY
   0xE67A18..0xE67A1E `move.w (A2),D0; moveq #0x1f,D1; btst D0,D1;
