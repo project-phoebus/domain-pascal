@@ -118,6 +118,7 @@ directives:
   call: NAME_$ENTRY w:5 @l:-7! b:200 -> w
   link: other.mod.pas
   dpc: --loop-align=off
+  warns: best effort (not byte-identical)
   xfail: why (a known miscompile)
   expect:
     one expected output line per line
@@ -144,6 +145,10 @@ The directives:
   and fail: `XPASS` is an error, so remove the line once the compiler is
   fixed, and so is dpc (or a tool) refusing the test.  The expected output
   stays the **correct** one.
+- `warns: TEXT`: dpc's messages (stderr) must contain TEXT; any number.
+  A test of a best-effort path (bead domain-pascal-5kgg) names its
+  warning, `warns: best effort (not byte-identical): ...`, so it fails if
+  dpc stops taking that path.  Tests run dpc without `--strict`.
 - `expect:` must come last.  The rest of the comment is the expected
   output.
 
@@ -226,3 +231,4 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `park_int_if` | bead domain-pascal-1j61: an integer local held in D0 moved to an address register in the one `if` part that refers to it (`then`; `else` after a `then` ending in `return`) and first in an `if` whose condition dereferences it; both sides of each test |
 | `park_int_if_edge` | bead domain-pascal-1j61: the same, with D0 held over a compound condition, statements, a loop and a nested `if` before the move, an out parameter written after the `if`, and a condition reading the local with arithmetic |
 | `transfer_fields` | bead domain-pascal-w0rj: fields and elements of type transfers of variables (`args_t(a).w`, `view_t(u).b1`, `words_t(l)[2]`): a longword `val_param` read as two words from its slot (four reads, never loaded whole), a UID local, a `var` longword, a table element at a run-time index, a transfer of a field of a transfer |
+| `be_*` | bead domain-pascal-5kgg: the best-effort paths (dpc without `--strict`), each test naming its warnings with `warns:`: `be_merge*` store merging kept apart; `be_params`, `be_blocks`, `be_andor`, `be_cmp`, `be_misc`, `be_onebit`, `be_packed`, `be_sets` and `be_x_*` the selector's (register and order choices, holds, late slot loads, element updates, block and 8-byte copies, comparisons, flags, `for` pointers, M$ARITH order, pushes, dead code); `be_l_*` the lowering's (narrowings, record results, set narrowing, converted copies, copy kinds) |

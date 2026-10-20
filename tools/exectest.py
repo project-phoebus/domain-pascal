@@ -9,6 +9,9 @@ directives (tests/exec/README.md):
     call: NAME [ARG]... [-> KIND]    a call of an entry routine (any number)
     link: FILE.mod.pas...            more modules (in tests/exec/) linked in
     dpc: OPTION...                   extra dpc options (all modules)
+    warns: TEXT                      dpc's stderr must contain TEXT (any
+                                     number; e.g. a best-effort warning,
+                                     so the test runs the best-effort path)
     xfail: REASON                    a known miscompile: must fail
     expect:                          the rest of the comment, one line each,
                                      is the expected output
@@ -68,6 +71,7 @@ class TestSpec:
         self.links = []
         self.xfail = None
         self.expect = []
+        self.warns = []
 
 
 class SpecError(Exception):
@@ -96,7 +100,7 @@ def parse_spec(path, text=None):
     while i < len(lines):
         s = lines[i].strip()
         i += 1
-        m = re.match(r'(call|link|dpc|xfail|expect):\s*(.*)$', s)
+        m = re.match(r'(call|link|dpc|warns|xfail|expect):\s*(.*)$', s)
         if not m:
             continue
         key, rest = m.group(1), m.group(2)
@@ -125,6 +129,10 @@ def parse_spec(path, text=None):
                 spec.links.append(os.path.join(os.path.dirname(path), f))
         elif key == 'dpc':
             spec.dpc_opts += rest.split()
+        elif key == 'warns':
+            if not rest:
+                raise SpecError('%s: empty warns:' % path)
+            spec.warns.append(rest)
         elif key == 'xfail':
             spec.xfail = rest or 'xfail'
         elif key == 'expect':
@@ -230,12 +238,31 @@ class Result:
         self.ran = ran          # built and run: an xfail must get this far
 
 
+def missing_warnings(spec, stderr):
+    """The texts of SPEC's `warns:' lines that dpc's messages STDERR do not
+    contain (a message is one line)."""
+    return [w for w in spec.warns if w not in stderr]
+
+
+def outcome(spec, res):
+    """How a test counts: 'pass', 'fail', 'xfail' (an expected failure:
+    built, run and wrong), 'xpass' or 'notrun' (an xfail that did not get
+    to run: dpc refusing it, a tool failing, a `warns:' text missing;
+    counted as a failure)."""
+    if spec.xfail:
+        if res.ok:
+            return 'xpass'
+        return 'xfail' if res.ran else 'notrun'
+    return 'pass' if res.ok else 'fail'
+
+
 def run_test(spec, runner, trace=False):
     work = os.path.join(WORK, spec.name)
     os.makedirs(work, exist_ok=True)
     elf = os.path.join(work, spec.name + '.elf')
     binf = os.path.join(work, spec.name + '.bin')
     objs = []
+    stderr = ''
     for src in [spec.path] + spec.links:
         stem = os.path.basename(src)[:-len('.pas')]
         asm = os.path.join(work, stem + '.s')
@@ -243,10 +270,16 @@ def run_test(spec, runner, trace=False):
         p = run([DPC, '-I', TESTDIR] + spec.dpc_opts + ['-o', asm, src])
         if p.returncode:
             return Result(False, [], 'dpc failed:\n' + p.stderr)
+        stderr += p.stderr
         p = run([AS, '-m68010', asm, '-o', obj])
         if p.returncode:
             return Result(False, [], 'as failed:\n' + p.stderr)
         objs.append(obj)
+    missing = missing_warnings(spec, stderr)
+    if missing:
+        # not run (`ran' false): for an xfail too, a failure, not the
+        # expected one
+        return Result(False, [], 'dpc did not warn: %s\n%s' % ('; '.join(missing), stderr))
     p = run([LD, '-T', os.path.join(TOOLDIR, 'link.ld'), '-o', elf] + objs +
             [os.path.join(BUILD, 'stubs.o'), runtime_path()])
     if p.returncode:
@@ -320,11 +353,12 @@ def main(argv=None):
         if a.trace and res.detail:
             sys.stderr.write(res.detail)
         rel = os.path.relpath(path, ROOT)
+        kind = outcome(spec, res)
         if spec.xfail:
-            if res.ok:
+            if kind == 'xpass':
                 print('XPASS %s (remove its xfail: %s)' % (rel, spec.xfail))
                 nfail += 1
-            elif not res.ran:
+            elif kind == 'notrun':
                 # an xfail documents a miscompile: dpc refusing the test,
                 # or a tool failing, is not the expected failure
                 print('FAIL  %s (xfail, but not run)' % rel)

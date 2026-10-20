@@ -81,6 +81,13 @@ Read from `../source/domain_os/Makefile` and `tools/pascal_modules.py`
    committed HEAD (`make stable`; `target/stable/COMMIT` is printed and
    recorded), also when run from a git worktree, which has no stable build
    of its own (the Makefile's `LINKTEST_DPC` default does the same).
+   dpc runs in its default, non-strict mode, as ../source's build does: a
+   refusal of a form the image does not settle, at a place where dpc has a
+   correct code path, is a warning `best effort (not byte-identical): ...`
+   and the module compiles (bead domain-pascal-5kgg).  An `OK` line counts
+   its module's best-effort warnings, and the report ranks their kinds
+   (`== best-effort warnings`), the fidelity work left once the kernel
+   links.
 4. **Per module.**  The status:
    - `OK`: compiled and assembled;
    - `REFUSED`: dpc reported errors (its "not supported yet" refusals, or

@@ -50,12 +50,32 @@ fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
 }
 
+/// The refusal `unsupported(span, what)` of a shape dpc has a correct
+/// code path for, refused only because the image's exact form (register
+/// choice, instruction order, hold or reload, which of two seen forms) is
+/// not settled: an error under `dpc --strict`, else a best-effort warning
+/// and `Ok`, and the caller goes on with its path
+/// ([`dpc_syntax::diag::best_effort`]; bead domain-pascal-5kgg).
+fn best_effort(span: Span, what: impl std::fmt::Display) -> Res<()> {
+    dpc_syntax::diag::best_effort(unsupported(span, what))
+}
+
 /// The refusal of a `lea (0,An,Dx),Am` from the base of another unit's
 /// array that an earlier statement loaded ([`Selector::held_other_base`]).
 const KEPT_BASE_LEA: &str = "an element of another unit's array that an earlier statement since \
      the last call reached too, at a displacement beyond a byte or as an address (`lea \
      (0,An,Dx),Am` from the kept base: 8 sites, its register not surveyed; codegen-patterns \
      5.2, \"Base kept across statements\"; bead domain-pascal-lnzy) is";
+
+/// Whether `ea` is a memory operand `lea` takes (a control addressing
+/// mode, MC68000 PRM 2.2): a best-effort block address ([`Selector::
+/// block_address`]; bead domain-pascal-5kgg).
+fn is_memory_ea(ea: &Ea) -> bool {
+    matches!(
+        ea,
+        Ea::Ind(_) | Ea::Disp(..) | Ea::Idx(..) | Ea::AbsL(..) | Ea::AbsW(_)
+    )
+}
 
 /// A constant as the immediate of a `w`-sized instruction: a byte as
 /// 0..=255 (see [`Ea::Imm`]), a word or longword as the signed number.
@@ -283,18 +303,18 @@ fn select_in_context(
             // A bare `rts` has no frame for the copy; whether the original
             // copied an unused parameter is not visible (codegen-patterns
             // 1.2, 2).
-            return Err(unsupported(
+            best_effort(
                 pc.span,
                 "an empty procedure with a value parameter passed by address (a bare `rts` \
                  in the image, so not copied; codegen-patterns 1.2, 2) is",
-            ));
+            )?;
         }
         if f.frame_size > 0 {
-            return Err(unsupported(
+            best_effort(
                 f.span,
                 "an empty procedure with locals (a bare `rts` or a frame: not seen, \
                  codegen-patterns 2) is",
-            ));
+            )?;
         }
         return Ok(vec![Insn::Rts]);
     }
@@ -458,11 +478,11 @@ fn select_body_in_unit(
         // The second selection must find the reuses the first one did:
         // the validity of a reuse depends only on labels, calls and
         // stores, which holding a value does not change.
-        return Err(unsupported(
+        best_effort(
             f.span,
             "a body whose reusable computed values change when they are held (codegen-patterns \
              12.4 R7) is",
-        ));
+        )?;
     }
     Ok(body)
 }
@@ -686,6 +706,9 @@ fn select_body_with(
             .iter()
             .find(|st| !matches!(st.kind, StmtKind::Store { .. }))
         {
+            // Refused, also as best effort: a branch or a call would hit the
+            // refusal after selection anyway (the absolute base is not
+            // loaded again past them; review of bead domain-pascal-5kgg).
             return Err(unsupported(
                 st.span,
                 "in a routine that addresses its unit's data absolutely (--a5-absolute), a \
@@ -776,12 +799,12 @@ fn select_body_with(
                 }
             });
             if copies_param {
-                return Err(unsupported(
+                best_effort(
                     f.body[0].span,
                     "a function body of one `if`, `case` or loop statement that assigns a \
                      by-value parameter to the result (kept apart at 0xE1CCBA, shared at \
                      0xE15222; not settled, codegen-patterns 12.2) is",
-                ));
+                )?;
             }
         }
         // A parameter loaded at entry and live across a call is held in a
@@ -811,12 +834,12 @@ fn select_body_with(
         if s.pinned.len() > pinned
             && first.is_some_and(|st| first_other_static(st).is_none() && mentions_other_static(st))
         {
-            return Err(unsupported(
+            best_effort(
                 first.unwrap().span,
                 "a first statement that reaches another data section's block other than by a \
                  constant store, in a routine that loads parameters at entry (which the \
                  original loaded first is not seen, codegen-patterns 11) is",
-            ));
+            )?;
         }
         s.entry_regs = s.pinned.iter().map(|&(_, r)| r).collect();
         if s.pinned.len() > pinned {
@@ -917,8 +940,12 @@ fn select_body_with(
             call |= matches!(i, Insn::Jsr(_) | Insn::Bsr { .. });
         }
         if reads < 2 && !across {
-            once_elem_shape(&s.out, k).map_err(|w| unsupported(span, w))?;
-            once_leas.push((k, span));
+            match once_elem_shape(&s.out, k) {
+                Ok(()) => once_leas.push((k, span)),
+                // Best effort (bead domain-pascal-5kgg): the allocator's
+                // register for the address.
+                Err(w) => best_effort(span, w)?,
+            }
         }
     }
     if !s.other_base_loads.is_empty()
@@ -931,11 +958,11 @@ fn select_body_with(
         // 0xE335A4) and loads it again (AST_$ACTIVATE_ASTE_CANNED 0xE2F266,
         // NAME_$INIT 0xE317C0, NET_IO_$BOOT_DEVICE 0xE31C66): not settled
         // (codegen-patterns 11).
-        return Err(unsupported(
+        best_effort(
             f.span,
             "a routine that reaches another data section's block and branches (where the \
              block's address is loaded again is not settled, codegen-patterns 11) is",
-        ));
+        )?;
     }
     if f.data_absolute
         && s.out.iter().any(|i| {
@@ -1047,10 +1074,10 @@ fn select_body_with(
             .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
             .any(|i| matches!(i, Insn::Label(l) if *l == label));
         if next {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "an `exit` or `next` that would branch to the next instruction is",
-            ));
+            )?;
         }
     }
     // Likewise a `goto` to the next instruction (`goto L; L: ...`, or
@@ -1069,10 +1096,10 @@ fn select_body_with(
             .take_while(|i| matches!(i, Insn::Label(_) | Insn::Align4))
             .any(|i| matches!(i, Insn::Label(l) if *l == label));
         if next {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a `goto` that would branch to the next instruction is",
-            ));
+            )?;
         }
     }
     // References to volatile objects (ref 3.15.1-3.15.3): the
@@ -1130,11 +1157,11 @@ fn select_body_with(
                 .iter()
                 .any(|&r| live_out[c].contains(&crate::regs::RegKey(r)))
         }) {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "another data section's block reached on both sides of a call in one statement \
                  (where the original loads the block is not seen, codegen-patterns 11) is",
-            ));
+            )?;
         }
     }
     // The registers of `with` records' addresses ([`Function::with_temps`]),
@@ -1249,7 +1276,7 @@ fn select_body_with(
             ));
         }
     }
-    let first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
+    let mut first = s.web.map(|w| (Reg::D(w), s.entry_regs.clone()));
     // A pointer local assigned a call's result before a parameter that
     // dies in the same block (codegen-patterns 12.4 R1b, `regs.rs`).
     let results: Vec<usize> = s
@@ -1287,7 +1314,7 @@ fn select_body_with(
         .map(|&(o, _, _)| o)
         .collect();
     let pre = s.out.clone();
-    let mut saves = allocate_apart(
+    let first_try = allocate_apart(
         &mut s.out,
         exit,
         &holds,
@@ -1296,8 +1323,11 @@ fn select_body_with(
         &after,
         &s.colour_coalesce,
         &recycle,
-    )
-    .map_err(|what| {
+    );
+    // The over-long argument list's colouring, when that is the cause
+    // (below): the body, `apart` and `recycle` without the list's pairs.
+    let mut long_out: Option<(Vec<Insn>, RegSet, Vec<(Reg, Reg)>, Vec<(Reg, Reg)>)> = None;
+    let first_try = first_try.map_err(|what| {
         // A pointer result variable with no callee-saved address register
         // free is in its frame slot in the image (BAT_$ALLOC_VTOCE
         // 0xE3AEDA `clr.l (-0x14,A6)` and MST_$REMAP_PRIVI 0xE43A26 `clr.l
@@ -1338,14 +1368,77 @@ fn select_body_with(
             &s.colour_coalesce,
             &rest,
         ) {
-            Ok(_) => long_argument_list(span),
+            Ok(v) => {
+                long_out = Some((out, v, free, rest));
+                long_argument_list(span)
+            }
             Err(_) => unsupported(f.span, &what),
         }
-    })?;
+    });
+    let mut saves = match first_try {
+        Ok(v) => v,
+        Err(refusal) if dpc_syntax::diag::is_strict() => return Err(refusal),
+        // Best effort (bead domain-pascal-5kgg): the argument list's loads
+        // not kept apart (the order of their registers is not settled).
+        Err(refusal) if long_out.is_some() => {
+            dpc_syntax::diag::best_effort(refusal)?;
+            let (out, v, free, rest) = long_out.take().unwrap();
+            s.out = out;
+            apart = free;
+            recycle = rest;
+            v
+        }
+        // Best effort: coloured without the constraints of form (values
+        // kept apart, recycled, coloured first or after another), then
+        // also without the holds through calls (which only lengthen live
+        // ranges); every colouring of the live ranges is correct.  There is
+        // no spilling: a body that does not colour even so stays refused.
+        Err(refusal) => {
+            s.out = pre.clone();
+            let mut got = allocate_apart(
+                &mut s.out,
+                exit,
+                &holds,
+                &[],
+                None,
+                &[],
+                &s.colour_coalesce,
+                &[],
+            );
+            if got.is_err() {
+                s.out = pre.clone();
+                got = allocate_apart(
+                    &mut s.out,
+                    exit,
+                    &[],
+                    &[],
+                    None,
+                    &[],
+                    &s.colour_coalesce,
+                    &[],
+                );
+                if got.is_ok() {
+                    holds.clear();
+                }
+            }
+            let Ok(v) = got else {
+                return Err(refusal);
+            };
+            dpc_syntax::diag::best_effort(refusal)?;
+            apart.clear();
+            recycle.clear();
+            after.clear();
+            first = None;
+            v
+        }
+    };
     // A slot loaded late into a register that holds a dead slot load on
     // every path passes over it ([`pass_dead_slot_loads`], 12.4 R4(b));
     // the body is coloured again with the slot kept apart from those loads.
     let mut passed: Vec<usize> = Vec::new();
+    // Best effort (bead domain-pascal-5kgg): the once-read element
+    // addresses whose A1 colouring is given up, the previous colouring kept.
+    let mut once_skip: Vec<usize> = Vec::new();
     loop {
         let more = pass_dead_slot_loads(&pre, &s.out, &late, &apart);
         if more.is_empty() {
@@ -1355,22 +1448,31 @@ fn select_body_with(
             // order, since A1 taken by one makes it dirty for the next.
             let mut elem_more = None;
             for &(k, span) in &once_leas {
-                if let Some(pair) = once_elem_lea(&pre, &s.out, k, exit, &holds)
-                    .map_err(|w| unsupported(span, w))?
-                {
-                    if apart.contains(&pair) {
-                        return Err(unsupported(span, ONCE_LEA_NOT_A1));
+                if once_skip.contains(&k) {
+                    continue;
+                }
+                let got = match once_elem_lea(&pre, &s.out, k, exit, &holds) {
+                    Ok(p) => p,
+                    Err(w) => {
+                        best_effort(span, w)?;
+                        None
                     }
-                    elem_more = Some((pair, span));
+                };
+                if let Some(pair) = got {
+                    if apart.contains(&pair) {
+                        best_effort(span, ONCE_LEA_NOT_A1)?;
+                        continue;
+                    }
+                    elem_more = Some((pair, span, k));
                     break;
                 }
             }
-            let Some((pair, span)) = elem_more else {
+            let Some((pair, span, k)) = elem_more else {
                 break;
             };
             apart.push(pair);
-            s.out = pre.clone();
-            saves = allocate_apart(
+            let prev = std::mem::replace(&mut s.out, pre.clone());
+            match allocate_apart(
                 &mut s.out,
                 exit,
                 &holds,
@@ -1379,18 +1481,27 @@ fn select_body_with(
                 &after,
                 &s.colour_coalesce,
                 &recycle,
-            )
-            .map_err(|_| unsupported(span, ONCE_LEA_NOT_A1))?;
+            ) {
+                Ok(v) => saves = v,
+                Err(_) => {
+                    // Best effort: the colouring before, which is correct.
+                    best_effort(span, ONCE_LEA_NOT_A1)?;
+                    apart.pop();
+                    s.out = prev;
+                    once_skip.push(k);
+                }
+            }
             continue;
         }
+        let before = apart.len();
         for (k, pair) in more {
             if !passed.contains(&k) {
                 passed.push(k);
             }
             apart.push(pair);
         }
-        s.out = pre.clone();
-        saves = allocate_apart(
+        let prev = std::mem::replace(&mut s.out, pre.clone());
+        match allocate_apart(
             &mut s.out,
             exit,
             &holds,
@@ -1399,14 +1510,22 @@ fn select_body_with(
             &after,
             &s.colour_coalesce,
             &recycle,
-        )
-        .map_err(|_| {
-            late_slot_refusal(
-                late.iter()
-                    .find(|l| passed.contains(&l.0))
-                    .map_or(f.span, |l| l.2),
-            )
-        })?;
+        ) {
+            Ok(v) => saves = v,
+            Err(_) => {
+                // Best effort (bead domain-pascal-5kgg): the colouring
+                // before, which is correct; the dead slot loads stay passed
+                // over.
+                dpc_syntax::diag::best_effort(late_slot_refusal(
+                    late.iter()
+                        .find(|l| passed.contains(&l.0))
+                        .map_or(f.span, |l| l.2),
+                ))?;
+                apart.truncate(before);
+                s.out = prev;
+                break;
+            }
+        }
     }
     check_assigned_flags(&s.out, &s.flag_moves)?;
     // Each element address read once, with its read: still adjacent after
@@ -1452,13 +1571,13 @@ fn select_body_with(
             _ => None,
         };
         if held.is_some() && held == taken {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a block's second address in the register of the pointer held for its first, \
                  which dies at the first's `lea (An),Am` (the image passes it over, 17 of 17: \
                  0xE44E0A, 0xE3E628; the register it takes is not modelled, bead \
                  domain-pascal-76uw) is",
-            ));
+            )?;
         }
     }
     if let Some(range) = hoisted {
@@ -1476,12 +1595,12 @@ fn select_body_with(
                 .iter()
                 .any(|r| matches!(r, Reg::A(0) | Reg::A(1)))
         }) {
-            return Err(unsupported(
+            best_effort(
                 f.span,
                 "a parameter loaded at entry into A0 or A1 after another data section's block \
                  (which of the two takes the lower register is not settled, codegen-patterns 11) \
                  is",
-            ));
+            )?;
         }
     }
     let dropped = reuse_pointer_copies(&mut s.out, &s.ptr_copies);
@@ -1507,12 +1626,12 @@ fn select_body_with(
         let from_a0 = matches!(s.out.get(k), Some(Insn::Movea { dst: 0, .. }));
         let into_a1 = matches!(s.out.get(k + 1), Some(Insn::Lea { dst: 1, .. }));
         if !(from_a0 && into_a1) {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a block copy of a value parameter passed by address while an earlier copy or \
                  an entry load holds A0 or A1 (only `A0` to `A1` is seen, codegen-patterns 1.2) \
                  is",
-            ));
+            )?;
         }
     }
     let mut to_a0 = Vec::new();
@@ -1583,11 +1702,11 @@ fn select_body_with(
             }
         );
         if !(in_d0 && (in_a0 || callee_saved)) {
-            return Err(unsupported(
+            best_effort(
                 f.span,
                 "a local assigned an `a0_return` result held in D0, where D0 or A0 is busy \
                  (A1 in the image, 0xE4D7FC; not settled) is",
-            ));
+            )?;
         }
     }
     if let Some(Insn::Movea {
@@ -1776,16 +1895,16 @@ fn select_body_with(
             .find(|(_, w)| pad(&w[1]))
             .map(|((_, span), _)| *span);
         if let Some(span) = before_pad {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "`nil` into an address register right before a call's pad (after the pad in \
                  the image, 0xE09D44, 0xE42A6C; bead domain-pascal-ncac) is",
-            ));
+            )?;
         }
     }
     for (lea, user, span) in &once_pairs {
         if !out.windows(2).any(|w| w[0] == *lea && w[1] == *user) {
-            return Err(unsupported(*span, ONCE_LEA_SCHEDULED));
+            best_effort(*span, ONCE_LEA_SCHEDULED)?;
         }
     }
     for (lea, count, span) in &elem_count_pairs {
@@ -1800,7 +1919,7 @@ fn select_body_with(
                     .any(|y| y == count)
         });
         if !after {
-            return Err(unsupported(*span, ELEMENT_COUNT_SCHEDULED));
+            best_effort(*span, ELEMENT_COUNT_SCHEDULED)?;
         }
     }
     for (movea, pea, span) in &elem_value_triples {
@@ -1814,7 +1933,7 @@ fn select_body_with(
                     .is_some_and(|j| !out[i + 1..i + 1 + j].iter().any(is_push))
         });
         if !ok {
-            return Err(unsupported(*span, ELEM_BASE_ABOVE_PUSH));
+            best_effort(*span, ELEM_BASE_ABOVE_PUSH)?;
         }
     }
     for (t, span) in &zext_triples {
@@ -1824,7 +1943,7 @@ fn select_body_with(
         // 3 between and 4 after: `tools/arithsurvey.py wordidx`,
         // codegen-patterns 5.2, "Word indices used as `.l`").
         if !out.windows(3).any(|w| w == &t[..]) {
-            return Err(unsupported(*span, ZEXT_BASE_SCHEDULED));
+            best_effort(*span, ZEXT_BASE_SCHEDULED)?;
         }
     }
     copy_repeated_constants(&mut out);
@@ -2068,11 +2187,11 @@ fn thread_branches(
             }
         }
         if to.is_some() && !dead.is_empty() {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a branch that would go to the next instruction once a `bra` no longer reached \
                  is dropped (not seen, codegen-patterns 7.1) is",
-            ));
+            )?;
         }
     }
     // A loop head that a `bra` still follows (a `repeat`, or a backward
@@ -2097,12 +2216,12 @@ fn thread_branches(
         });
         let next = rest().next();
         if matches!(next, Some(Insn::Branch { cond: Cond::T, .. })) {
-            return Err(unsupported(
+            best_effort(
                 head.map_or(span, span_of),
                 "a `repeat` or a backward `goto`'s label right before a `while` (the back edge \
                  goes to the `while`'s test; whether the head, falling into the opening `bra`, \
                  stays aligned is not seen, codegen-patterns 7.1) is",
-            ));
+            )?;
         }
     }
     Ok(())
@@ -2303,12 +2422,12 @@ fn held_through_calls(
                     continue;
                 }
                 if !straight && Some(r) == link {
-                    return Err(unsupported(
+                    best_effort(
                         span,
                         "in a body with branches, a call whose arguments are the last use of the \
                          static link (held through the call or not, codegen-patterns 6, 12.4 \
                          R4(c)) is",
-                    ));
+                    )?;
                 }
                 // A value live across an earlier call is in a callee-saved
                 // register whatever this call does (12.4 R3); the survey
@@ -2327,86 +2446,86 @@ fn held_through_calls(
                             // The survey's one site before the first branch,
                             // FLP_DO_IO 0xE3DDEE, keeps the address in D3,
                             // across calls: no held-or-not evidence.
-                            return Err(unsupported(
+                            best_effort(
                                 span,
                                 "in a body with branches, a call before the first branch whose \
                                  arguments are the last use of a `with` record's element address \
                                  (held through the call or not: no such site, codegen-patterns \
                                  12.4 R4(c)) is",
-                            ));
+                            )?;
                         }
                         if on_every_path(out, call) {
-                            return Err(unsupported(
+                            best_effort(
                                 span,
                                 "a call on every path after a join whose arguments are the last \
                                  use of a `with` record's element address (held through the \
                                  call or not: no such site, codegen-patterns 12.4 R4(c)) is",
-                            ));
+                            )?;
                         }
                         match last_use_calls(out, &live_out, calls, r) {
                             Some(cs) if cs.len() == 1 => {}
                             Some(_) => {
-                                return Err(unsupported(
+                                best_effort(
                                     span,
                                     "in a body with branches, a `with` record's element address \
                                      whose last uses are the arguments of several calls (held \
                                      through them or not: only a site where no scratch register \
                                      is free, AST_$REMOVE_CORRUPTED_PAGE 0xE072FA; \
                                      codegen-patterns 12.4 R4(c)) is",
-                                ));
+                                )?;
                             }
                             None => {
-                                return Err(unsupported(
+                                best_effort(
                                     span,
                                     "in a body with branches, a call whose arguments are the \
                                      last use of a `with` record's element address that is \
                                      also last used outside a call's arguments on another path \
                                      (held through the call or not: no such site, \
                                      codegen-patterns 12.4 R4(c)) is",
-                                ));
+                                )?;
                             }
                         }
                     } else if withs.contains(&r) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
                              a `with` record's address loaded as a pointer (held through the \
                              call or not: loaded pointers are held at some sites and not at \
                              others, SIO6509_$RCV 0xE1D552 A0, SOCK_$PUT_INT 0xE161C2 A3; \
                              codegen-patterns 12.4 R4(c)) is",
-                        ));
+                        )?;
                     } else if locals.contains(&r) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
                              a register-held local (held through the call or not: DTTY_$TSTART \
                              0xE1D6F8 keeps one in D0, MSG_$SEND_HW 0xE59B92 in D2; a routine \
                              pointer called is kept in A0 and stored, NET_$OPEN 0xE5A1F4; \
                              codegen-patterns 12.4 R4(c)) is",
-                        ));
+                        )?;
                     } else if !params.contains(&r) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
                              a value computed in an earlier statement (held through the call or \
                              not; codegen-patterns 12.4 R4(c)) is",
-                        ));
+                        )?;
                     } else if data_ptrs.contains(&r) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "in a body with branches, a call whose arguments are the last use of \
                              a pointer parameter held in a data register (not held at \
                              EC2_$ADVANCE 0xE42CDA, the only site; codegen-patterns 12.4 R4(c), \
                              bead domain-pascal-b3wz) is",
-                        ));
+                        )?;
                     } else if after_a_branch(out, call) && on_every_path(out, call) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "a call on every path after a join whose arguments are the last use \
                              of a parameter loaded at entry (held through the call or not: no \
                              site with a scratch register free, codegen-patterns 12.4 R4(c), \
                              bead domain-pascal-cs2n) is",
-                        ));
+                        )?;
                     }
                 }
                 holds.push((call, r));
@@ -3406,7 +3525,10 @@ fn check_late_slot_loads(
             }
         }
         if passed.contains(&k) {
-            return Err(late_slot_refusal(span));
+            // Best effort: the register the colouring gave (bead
+            // domain-pascal-5kgg).
+            dpc_syntax::diag::best_effort(late_slot_refusal(span))?;
+            continue;
         }
         let st = inn[k].unwrap_or_default();
         // The registers written since the call the load follows in
@@ -3421,15 +3543,16 @@ fn check_late_slot_loads(
         });
         let below = (1u8 << dst) - 1;
         if st.dirty & (1 << dst) != 0 || (st.dirty & below & local != 0 && st.dirty & !local != 0) {
-            return Err(late_slot_refusal(span));
+            dpc_syntax::diag::best_effort(late_slot_refusal(span))?;
+            continue;
         }
         if *dst == 0 && st.call && st.written & 2 != 0 {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "in a body of several statements, a pointer parameter or by-address parameter \
                  used once after a call, in A0 while A1 was written before (A0 or A1 in the \
                  original, codegen-patterns 12.4 R4(b)), is",
-            ));
+            )?;
         }
     }
     Ok(())
@@ -3819,31 +3942,40 @@ fn count_copy_check(bound: &Insn, copy: &Insn, span: Span) -> Res<()> {
         },
     ) = (bound, copy)
     else {
-        return Err(unsupported(span, "internal: a `for` count's moves not found"));
+        return Err(unsupported(
+            span,
+            "internal: a `for` count's moves not found",
+        ));
     };
     if t0 != t {
-        return Err(unsupported(span, "internal: a `for` count's moves not found"));
+        return Err(unsupported(
+            span,
+            "internal: a `for` count's moves not found",
+        ));
     }
     match () {
         // Back into the bound variable's register, below the count (the
         // 6 R2 sites).
         _ if c < t && c == v => Ok(()),
-        _ if c < t => Err(unsupported(
+        // Best effort (bead domain-pascal-5kgg): the copy `move.w Dt,Dc`
+        // is right wherever the counter lands (with c == t, a move of a
+        // register to itself).
+        _ if c < t => best_effort(
             span,
             "a `for` loop with a run-time bound and no call in its body whose counter \
              would land below the count in another register than the bound variable's \
              (not seen: at the 6 sites of a bound variable dying at the bound the \
              counter takes its register, codegen-patterns 7.4, bead domain-pascal-fbah) \
              is",
-        )),
-        _ => Err(unsupported(
+        ),
+        _ => best_effort(
             span,
             "a `for` loop with a run-time bound and no call in its body whose counter \
              would take the count's own register (in place where the counter is \
              coloured before the index and the body's values, 70 sites; copied where \
              the index or a body value takes that register first, 27: the order is \
              not settled, codegen-patterns 7.4, bead domain-pascal-fbah) is",
-        )),
+        ),
     }
 }
 
@@ -3877,12 +4009,12 @@ fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> 
             return Err(Selector::assigned_ordered(span));
         }
         if call && *n < 2 {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a function's result assigned to a local in a scratch register and tested next \
                  (the original tests D0 and copies it after the branch, XPD_$CONTINUE_PROC \
                  0xE5BEF8; not reproduced, bead domain-pascal-59gz) is",
-            ));
+            )?;
         }
         let again = match out.get(k + 2) {
             Some(Insn::Tst { dst, .. } | Insn::Cmpi { dst, .. }) => *dst == Ea::Reg(*r),
@@ -3890,12 +4022,12 @@ fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> 
             _ => false,
         };
         if again && !call {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a local assigned a load and compared twice right after (on the load's flags \
                  or after a `tst`: both seen, no rule found, codegen-patterns 7.1, bead \
                  domain-pascal-rmse) is",
-            ));
+            )?;
         }
     }
     Ok(())
@@ -4464,7 +4596,12 @@ fn escaped_frame_objects(f: &Function) -> Vec<i32> {
 /// The by-value parameters (frame offsets) that `f`'s body reads in part:
 /// a load at another offset inside the parameter or of another width, a
 /// bit field of it, an element of it (`dpc-ir` `transfer_view`: a field
-/// or element of a type transfer of the parameter).
+/// or element of a type transfer of the parameter).  A store of part of
+/// one counts too, also at the parameter's own offset (the first field of
+/// a record, narrower than the record): the parameter then stays in its
+/// slot, as for any other part (bead domain-pascal-5kgg review: a word
+/// stored at offset 0 of a 4-byte record held in a register was taken for
+/// the whole parameter).
 fn partly_read_params(f: &Function) -> Vec<i32> {
     let owner = |o: i32| {
         f.value_params
@@ -4495,17 +4632,57 @@ fn partly_read_params(f: &Function) -> Vec<i32> {
             }
         }
     });
+    // The statements that write into a parameter's slot other than as one
+    // whole store of its width at its offset ([`assigned_params`], which
+    // the register a parameter is loaded into at entry follows): a part
+    // stored, a bit field, a packed element, a fill, a block copy (even a
+    // whole one, which no register web models).
+    dpc_ir::visit_stmts(&f.body, &mut |st| {
+        let part = |addr: &Addr| match addr.unwrap_volatile().0 {
+            Addr::Frame(o) => owner(*o),
+            Addr::Index { base, .. } => match base.unwrap_volatile().0 {
+                Addr::Frame(o) => owner(*o),
+                _ => None,
+            },
+            _ => None,
+        };
+        let hit = match &st.kind {
+            StmtKind::Store { addr, value } => match addr.unwrap_volatile().0 {
+                Addr::Frame(o) => {
+                    owner(*o).filter(|p| p.offset != *o || p.ty.width != value.ty().width)
+                }
+                a => part(a),
+            },
+            StmtKind::StoreBits { addr, .. } => part(addr),
+            StmtKind::StoreBitElem { array, .. } => part(array),
+            StmtKind::Copy { dst, .. } => part(dst),
+            StmtKind::Fill { start, .. } => part(start),
+            _ => None,
+        };
+        if let Some(p) = hit {
+            if !out.contains(&p.offset) {
+                out.push(p.offset);
+            }
+        }
+    });
     out
 }
 
 /// The by-value parameters (frame offsets) that `f`'s body assigns as a
-/// whole (`x := ...`; codegen-patterns 12.2, "Assigned parameters").
+/// whole (`x := ...`; codegen-patterns 12.2, "Assigned parameters"): a
+/// store at the parameter's offset of the parameter's width (a narrower
+/// one, the first field of a record, is a part: [`partly_read_params`]).
 fn assigned_params(f: &Function) -> Vec<i32> {
     let mut out = Vec::new();
     dpc_ir::visit_stmts(&f.body, &mut |st| {
-        if let StmtKind::Store { addr, .. } = &st.kind {
+        if let StmtKind::Store { addr, value } = &st.kind {
             if let Addr::Frame(o) = addr.unwrap_volatile().0 {
-                if f.value_params.iter().any(|p| p.offset == *o) && !out.contains(o) {
+                if f
+                    .value_params
+                    .iter()
+                    .any(|p| p.offset == *o && p.ty.width == value.ty().width)
+                    && !out.contains(o)
+                {
                     out.push(*o);
                 }
             }
@@ -7486,6 +7663,15 @@ impl Selector {
     fn place(&mut self, l: u32) {
         self.out.push(Insn::Label(l));
         self.placed.push(l);
+        // A block's register loaded before a branch target does not reach
+        // it on every path: the block is loaded again after the label
+        // (best effort, bead domain-pascal-5kgg).  Under --strict a routine
+        // with such a block and a label is refused after selection
+        // ([`select_body_with`]); the registers are kept there so that the
+        // refusal reported stays the one before.
+        if !dpc_syntax::diag::is_strict() {
+            self.other_bases.clear();
+        }
     }
 
     /// Branch to label `l` when `cond` holds (`bra` for [`Cond::T`]).  The
@@ -7618,11 +7804,11 @@ impl Selector {
                         // review): dead code, eliminated at `-opt 1` and
                         // above (ref 6.4.24, p. 6-27); the image's 6 such
                         // loops end their routines (codegen-patterns 7.2).
-                        return Err(unsupported(
+                        best_effort(
                             rest[0].span,
                             "a statement after a `repeat ... until false` loop that no `exit` \
                              leaves (not reached) is",
-                        ));
+                        )?;
                     }
                     self.repeat(f, body, until.as_ref())?
                 }
@@ -7631,10 +7817,10 @@ impl Selector {
                 StmtKind::Exit | StmtKind::Next => {
                     let exit = matches!(st.kind, StmtKind::Exit);
                     if !reached_after_jump(rest) {
-                        return Err(unsupported(
+                        best_effort(
                             rest[0].span,
                             "a statement after `exit` or `next` (not reached) is",
-                        ));
+                        )?;
                     }
                     let l = self.loop_target(exit);
                     let at = self.out.len();
@@ -7672,10 +7858,7 @@ impl Selector {
                 // a `return` is one to the epilogue (codegen-patterns 7.5).
                 StmtKind::Goto(id) => {
                     if !reached_after_jump(rest) {
-                        return Err(unsupported(
-                            rest[0].span,
-                            "a statement after `goto` (not reached) is",
-                        ));
+                        best_effort(rest[0].span, "a statement after `goto` (not reached) is")?;
                     }
                     let l = self.user_label(*id);
                     let at = self.out.len();
@@ -7684,10 +7867,7 @@ impl Selector {
                 }
                 StmtKind::Return => {
                     if !reached_after_jump(rest) {
-                        return Err(unsupported(
-                            rest[0].span,
-                            "a statement after `return` (not reached) is",
-                        ));
+                        best_effort(rest[0].span, "a statement after `return` (not reached) is")?;
                     }
                     if next.end {
                         // The routine's last statement: the epilogue follows
@@ -7731,12 +7911,12 @@ impl Selector {
                     })
                     .any(|i| matches!(i, Insn::Moveq { .. }));
                 if moveq {
-                    return Err(unsupported(
+                    best_effort(
                         st.span,
                         "a constant loaded with `moveq` right after a run of constant stores \
                          from registers (a register apart from the run's at NETWORK_$INIT \
                          0xE2F7D6, not modelled; codegen-patterns 13) is",
-                    ));
+                    )?;
                 }
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
@@ -7951,17 +8131,17 @@ impl Selector {
         ) = (cond, then_.first())
         {
             if a == addr && value == rhs && !matches!(rhs, Expr::Const { .. } | Expr::Load { .. }) {
-                return Err(unsupported(self.span, REUSED_RIGHT_OPERAND));
+                best_effort(self.span, REUSED_RIGHT_OPERAND)?;
             }
         }
         if !else_.is_empty() && !next.clean {
             if let (Some(a), Some(b)) = (call_bytes(then_.last()), call_bytes(else_.last())) {
                 if a == b {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "an `if` whose two parts end in calls with the same argument bytes \
                          (the original shares the pop at the join, codegen-patterns 1.1) is",
-                    ));
+                    )?;
                 }
             }
         }
@@ -8080,7 +8260,7 @@ impl Selector {
     /// ends in an `if c then exit` or a jump leaves no `bra` (also there).
     fn repeat(&mut self, f: &Function, body: &[Stmt], until: Option<&IrCond>) -> Res<()> {
         if body.is_empty() {
-            return Err(unsupported(self.span, "an empty `repeat` loop is"));
+            best_effort(self.span, "an empty `repeat` loop is")?;
         }
         // The test is selected under the `repeat` statement's own rules
         // (span, register policy), not those of the body's last statement.
@@ -8271,11 +8451,11 @@ impl Selector {
         // loop over the same variable left it in is given up.
         let uses_index = index_read_unstepped(&l.body, off) || after;
         if after && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. })) {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "the index variable of a `for` loop with a run-time bound read after the loop \
                  (codegen-patterns 7.4) is",
-            ));
+            )?;
         }
         self.pinned.retain(|&(o, _)| o != off);
         self.for_regs.retain(|&(o, _)| o != off);
@@ -8301,11 +8481,11 @@ impl Selector {
                     ));
                 }
                 if uses_index && a == n - 1 {
-                    return Err(unsupported(
+                    best_effort(
                         span,
                         "a `for` index whose initial value equals the `dbf` count (the original \
                          copies the count's register, 0xE6A8BC; codegen-patterns 7.4) is",
-                    ));
+                    )?;
                 }
                 let c = self.alloc_d()?;
                 let n = n - 1;
@@ -8374,8 +8554,11 @@ impl Selector {
                     // (codegen-patterns 7.4, "The count's register": 6 of
                     // 6, 0xE0B1C8, 0xE0B20C, 0xE76436).
                     let bound_move = self.out.len();
-                    if !calls && !matches!(v, Val::Reg(Reg::D(_))) {
-                        return Err(unsupported(
+                    let bound_held = matches!(v, Val::Reg(Reg::D(_)));
+                    if !calls && !bound_held {
+                        // Best effort (bead domain-pascal-5kgg): the count
+                        // copied by the colouring order.
+                        best_effort(
                             span,
                             "a `for` loop with a run-time bound and no call in its body, the \
                              bound not a variable held in a data register (the count copied \
@@ -8383,7 +8566,7 @@ impl Selector {
                              sites; loads and expressions in place or copied by the \
                              colouring order, codegen-patterns 7.4, bead domain-pascal-fbah) \
                              is",
-                        ));
+                        )?;
                     }
                     let t = match v {
                         Val::Tmp(d) => d,
@@ -8414,7 +8597,11 @@ impl Selector {
                         // (codegen-patterns 7.4, "The count's register";
                         // checked after allocation, [`count_copy_check`]).
                         self.colour_coalesce.push((Reg::D(c), Reg::D(t)));
-                        self.count_copies.push((bound_move, self.out.len(), span));
+                        // A bound that is not a held variable (best effort):
+                        // no check of the copy, right wherever it lands.
+                        if bound_held {
+                            self.count_copies.push((bound_move, self.out.len(), span));
+                        }
                     }
                     self.out.push(Insn::Move {
                         size: Size::W,
@@ -8506,11 +8693,11 @@ impl Selector {
                 .iter()
                 .any(|ea| matches!(ea, Ea::Disp(0, r) if ptrs.contains(r)))
         }) {
-            return Err(unsupported(
+            best_effort(
                 span,
                 "a part of an element of a stepped array at displacement 0 (`(An)` or `(An)+`, \
                  codegen-patterns 7.4) is",
-            ));
+            )?;
         }
         (self.span, self.multi) = (span, multi);
         (self.call_no_pop, self.called) = (false, false);
@@ -8765,23 +8952,23 @@ impl Selector {
                 Addr::OtherStatic { section, .. } => {
                     if !matches!(l.from, Expr::Const { .. }) || !matches!(l.to, Expr::Const { .. })
                     {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "a `for` loop with a run-time bound stepping a pointer through an \
                              array of another data section's block (the one such site, TPAD_$INIT \
                              0xE33596, forms it in a new register: `movea.l #block,A0; moveq \
                              #1,D3; lea (44,A0),A2`; codegen-patterns 7.4; bead \
                              domain-pascal-m2m2) is",
-                        ));
+                        )?;
                     }
                     if self.other_bases.iter().any(|(x, _)| x == section) {
-                        return Err(unsupported(
+                        best_effort(
                             span,
                             "a `for` loop stepping a pointer through an array of another data \
                              section's block held in a register (`lea (k,An),Ap` or `movea.l \
                              An,Ap`: XNS_IDP_$INIT 0xE3031C, FILE_$LOCK_INIT 0xE327C4; not \
                              settled, codegen-patterns 7.4; bead domain-pascal-hxwq) is",
-                        ));
+                        )?;
                     }
                     StepForm::InPlace
                 }
@@ -8803,13 +8990,13 @@ impl Selector {
                 }
             };
             if form == StepForm::New && start == 0 && matches!(a.base, Addr::Static(_)) {
-                return Err(unsupported(
+                best_effort(
                     span,
                     "a `for` loop stepping a pointer from the start of the unit's data area \
                      (`lea (A5),An` 11 times, `movea.l A5,An` 3 times with displacements in a \
                      byte: ROUTE_$FIND_PORT 0xE15B12, 0xE17EAE; codegen-patterns 7.4; bead \
                      domain-pascal-s9tx) is",
-                ));
+                )?;
             }
             if form == StepForm::InPlace && start < 0 {
                 return Err(unsupported(
@@ -8821,12 +9008,14 @@ impl Selector {
             arrays[k].form = form;
         }
         if arrays.len() > 1 && arrays.iter().any(|a| a.form == StepForm::InPlace) {
-            return Err(unsupported(
+            // Best effort (bead domain-pascal-5kgg): the pointers formed in
+            // place first ([`Self::stepped_pointers`]).
+            best_effort(
                 span,
                 "a `for` loop stepping a pointer formed in place (`movea.l A5|A6|#sym,An`) and \
                  another pointer (their order not settled: 0xE6BB2C, 0xE0E37A; codegen-patterns \
                  7.4; bead domain-pascal-883c) is",
-            ));
+            )?;
         }
         for (k, a) in arrays.iter().enumerate() {
             // Two arrays through one pointer variable: one stepped pointer
@@ -8837,12 +9026,12 @@ impl Selector {
                 let through =
                     |b: &SteppedArray| matches!(&b.base, Addr::Indirect { base: q, .. } if q == p);
                 if arrays[..k].iter().any(through) {
-                    return Err(unsupported(
+                    best_effort(
                         span,
                         "a `for` loop over two arrays through one pointer variable (one stepped \
                          pointer for both or two: not settled, codegen-patterns 7.4; bead \
                          domain-pascal-y1yj) is",
-                    ));
+                    )?;
                 }
                 // An element of an array at an offset from its pointer, from
                 // a start other than 0, passed by address: the one site,
@@ -8872,14 +9061,14 @@ impl Selector {
                     }
                 });
                 if *offset != 0 && by_address {
-                    return Err(unsupported(
+                    best_effort(
                         span,
                         "an element of an array at an offset from its pointer passed by address \
                          in a `for` loop from other than 0 (AUDIT's module-local 0xE7131C at \
                          0xE7140E forms the pointer to the first element, `moveq #0x10,D0; add.l \
                          A2,D0; movea.l D0,A3`, and passes `pea (A3)`; codegen-patterns 7.4; bead \
                          domain-pascal-m2m2) is",
-                    ));
+                    )?;
                 }
                 continue;
             }
@@ -8891,12 +9080,12 @@ impl Selector {
                     )
             };
             if arrays[..k].iter().any(same) {
-                return Err(unsupported(
+                best_effort(
                     span,
                     "a `for` loop over two arrays of one element size in the unit's data or the \
                      frame (one pointer for both, MSG_$$SEND 0xE0DB80, or two, RIP_$SERVER \
                      0xE68D64: not settled, codegen-patterns 7.4; bead domain-pascal-y1yj) is",
-                ));
+                )?;
             }
         }
         Ok((arrays, body))
@@ -8940,17 +9129,30 @@ impl Selector {
                 return Ok(vec![self.step_in_place(a, from, setup)?]);
             }
         }
+        // Several pointers, some formed in place (best effort, their order
+        // not settled, [`Self::step_plan`]): those first, each as alone.
+        let mut ptrs: Vec<Option<u8>> = Vec::new();
+        for a in arrays {
+            ptrs.push(if a.form == StepForm::InPlace {
+                Some(self.step_in_place(a, from, setup)?)
+            } else {
+                None
+            });
+        }
         let mut bases = Vec::new();
         for a in arrays {
             bases.push(match &a.base {
+                _ if a.form == StepForm::InPlace => FP,
                 Addr::Indirect { base, .. } => self.eval_a(base)?,
                 Addr::Static(_) => self.static_base()?,
                 Addr::Frame(_) => FP,
                 _ => unreachable!("step_plan forms other arrays' pointers in place"),
             });
         }
-        let mut ptrs = Vec::new();
-        for (a, &b) in arrays.iter().zip(&bases) {
+        for (k, (a, &b)) in arrays.iter().zip(&bases).enumerate() {
+            if ptrs[k].is_some() {
+                continue;
+            }
             let d = from * a.scale as i64;
             if !(-0x8000..0x8000).contains(&d) {
                 return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
@@ -8964,9 +9166,12 @@ impl Selector {
                 },
                 dst: r,
             });
-            ptrs.push(r);
+            ptrs[k] = Some(r);
         }
-        Ok(ptrs)
+        Ok(ptrs
+            .into_iter()
+            .map(|p| p.expect("every pointer formed"))
+            .collect())
     }
 
     /// A stepped pointer formed in place ([`StepForm::InPlace`]): `movea.l
@@ -9107,7 +9312,7 @@ impl Selector {
         if expr_calls(selector) {
             // CAL_$WEEKDAY 0xE686F6 dispatches on D0 after `move.w D0,D1`:
             // what the copy is for is not known.
-            return Err(unsupported(span, "a function call in a `case` selector is"));
+            best_effort(span, "a function call in a `case` selector is")?;
         }
         // A selector that only branches inside (`abs`, a signed `div` by a
         // power of two, `min`/`max`) is computed and dispatched on as any
@@ -9128,7 +9333,7 @@ impl Selector {
             .filter(|&i| !arms[i].body.is_empty())
             .collect();
         if nonempty.is_empty() && otherwise.is_none() {
-            return Err(unsupported(span, "a `case` without statements is"));
+            best_effort(span, "a `case` without statements is")?;
         }
         let lo = labels.iter().map(|l| l.0).min().unwrap();
         let hi = labels.iter().map(|l| l.0).max().unwrap();
@@ -9159,11 +9364,11 @@ impl Selector {
                 .filter_map(|b| call_bytes(b.last()))
                 .collect();
             if (1..ends.len()).any(|k| ends[..k].contains(&ends[k])) {
-                return Err(unsupported(
+                best_effort(
                     span,
                     "a `case` whose parts end in calls with the same argument bytes (the \
                      original may share the pop at the join, codegen-patterns 1.1) is",
-                ));
+                )?;
             }
         }
         let w = selector.ty().width;
@@ -9273,19 +9478,19 @@ impl Selector {
                 // Every label to the join and the final `bra` to the
                 // `otherwise` part right after it (a `bra.w` of
                 // displacement 2): not seen.
-                return Err(unsupported(
+                best_effort(
                     span,
                     "a compare-chain `case` whose arms are all empty (its `bra` to the \
                      `otherwise` part right after it, not seen) is",
-                ));
+                )?;
             }
             let first_code = nonempty.first().map(|&i| arm_label[i]).or(l_other);
             if Some(arm_label[labels[labels.len() - 1].1]) == first_code {
-                return Err(unsupported(
+                best_effort(
                     span,
                     "a compare-chain `case` whose last label belongs to its first arm (a `beq` \
                      over the `bra`, not seen) is",
-                ));
+                )?;
             }
             for (k, &(l, i)) in labels.iter().enumerate() {
                 if l == 0 {
@@ -9298,11 +9503,11 @@ impl Selector {
                     // (39,A0),D0; tst.w D0`).
                     if k > 0 || !moved {
                         if k == 0 && !zext {
-                            return Err(unsupported(
+                            best_effort(
                                 span,
                                 "label 0 tested first on a computed `case` selector (`tst` or \
                                  the flags of the computation?) is",
-                            ));
+                            )?;
                         }
                         self.out.push(Insn::Tst {
                             size,
@@ -9389,11 +9594,11 @@ impl Selector {
                 if !matches!(**a, IrCond::Compare { .. }) {
                     // E5DE5A's left operand is a chain of jumping tests:
                     // a nested plain `and`, or `and then`?  Not settled.
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "a plain `and`/`or` with a call in its right operand and a left operand \
                          other than a comparison (codegen-patterns 7.1) is",
-                    ));
+                    )?;
                 }
                 let short = matches!(c, IrCond::Or(..));
                 if when == short {
@@ -9715,12 +9920,12 @@ impl Selector {
             // not seen (the one `suba.l` followed by a test, VTOC_$GET_UID
             // 0xE392AA `suba.l A2,A2; tst.l D6; bne.s`, tests a value
             // formed earlier; codegen-patterns 3, "`nil` results").
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a test right after `nil` into an address register (whether it uses the \
                  flags of the instruction before the `suba.l` is not seen; codegen-patterns \
                  3, \"`nil` results\") is",
-            ));
+            )?;
         }
         if self.volatile_eas.iter().any(|(v, _)| *v == ea) {
             // A volatile object is read again, whatever the last store
@@ -9746,12 +9951,12 @@ impl Selector {
         {
             if d == k && *k < 0 && *s == size {
                 if !matches!(cc, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "an ordered test of a local right after its store (only \
                          `beq`/`bne`/`bmi`/`bpl` on a store's flags are seen, \
                          codegen-patterns 7.1) is",
-                    ));
+                    )?;
                 }
                 return Ok(());
             }
@@ -9784,12 +9989,12 @@ impl Selector {
                 )
             {
                 if !matches!(cc, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "an ordered test of a parameter right after its entry load (only \
                          `beq`/`bne`/`bmi`/`bpl` on the load's flags are seen, \
                          codegen-patterns 12.2) is",
-                    ));
+                    )?;
                 }
                 return Ok(());
             }
@@ -9817,12 +10022,12 @@ impl Selector {
                 return self.assigned_flags(src.clone(), cc);
             }
             if d == r && !(*s == Size::B && size == Size::W) {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "testing a register the previous instruction loaded other than by an \
                      assignment to a local (its flags or a `tst`: not settled, codegen-patterns \
                      7.1) is",
-                ));
+                )?;
             }
         }
         self.out.push(Insn::Tst {
@@ -9867,12 +10072,12 @@ impl Selector {
     fn assigned_flags(&mut self, src: Ea, cc: Cond) -> Res<()> {
         if src == Ea::Reg(Reg::D(0)) {
             if !matches!(cc, Cond::Eq | Cond::Ne) {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "an ordered test of a function's result right after its assignment to a \
                      local (only `beq`/`bne` on the copy's flags are seen, codegen-patterns 7.1) \
                      is",
-                ));
+                )?;
             }
             self.flag_moves.push((self.out.len() - 1, self.span, true));
             return Ok(());
@@ -10009,11 +10214,11 @@ impl Selector {
                     return Ok(cc);
                 }
                 if self.a0_holds(*o) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "testing a pointer local against nil while A0 still holds it, not right \
                          after the store (A0 or the slot: not seen) is",
-                    ));
+                    )?;
                 }
             }
         }
@@ -10144,11 +10349,11 @@ impl Selector {
                             return Ok(rel_cond(op, signed));
                         }
                         if ty == Scalar::POINTER {
-                            return Err(unsupported(
+                            best_effort(
                                 self.span,
                                 "an ordering comparison of a pointer variable with one held in \
                                  a register (not catalogued) is",
-                            ));
+                            )?;
                         }
                         // An ordering relation: the left operand loaded
                         // into a new data register and compared with the
@@ -10170,21 +10375,21 @@ impl Selector {
                         return self.compare_computed(op, lhs, rhs);
                     }
                     if rheld.is_some() {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "comparing a variable in memory with one held in an address register \
                              (not catalogued) is",
-                        ));
+                        )?;
                     }
                     if ty == Scalar::POINTER {
                         // `movea.l p,An; cmpa.l q,An` (20 sites, 0xE01A7E)
                         // or `move.l p,Dn; cmp.l q,Dn`: an integer32 and a
                         // pointer look alike in the image.
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "comparing two pointer variables (`cmpa.l` or `cmp.l`: not \
                              catalogued) is",
-                        ));
+                        )?;
                     }
                     // Two variables in memory: the left one loaded into a
                     // new data register, the right one its operand
@@ -10271,14 +10476,19 @@ impl Selector {
                     // translation), while BAT_$ALLOCATE 0xE3B126..0xE3B13E
                     // keeps the computed right operand in a frame temporary
                     // and loads the left one (`alloc_count > free_blocks -
-                    // 11`, alloc_count widened).  Not settled.
-                    None => Err(unsupported(
-                        self.span,
-                        "comparing a variable in memory with a computed value (AST_$INVALIDATE \
-                         0xE066D0 compares the variable into the computed value, BAT_$ALLOCATE \
-                         0xE3B13A keeps the computed one in a frame temporary: not settled, \
-                         codegen-patterns 7.1) is",
-                    )),
+                    // 11`, alloc_count widened).  Not settled.  Best effort
+                    // (bead domain-pascal-5kgg): the variable loaded and
+                    // compared with the computed value.
+                    None => {
+                        best_effort(
+                            self.span,
+                            "comparing a variable in memory with a computed value \
+                             (AST_$INVALIDATE 0xE066D0 compares the variable into the computed \
+                             value, BAT_$ALLOCATE 0xE3B13A keeps the computed one in a frame \
+                             temporary: not settled, codegen-patterns 7.1) is",
+                        )?;
+                        self.compare_computed(op, lhs, rhs)
+                    }
                 }
             }
         }
@@ -10564,13 +10774,13 @@ impl Selector {
             if ty.is_none() && mine.contains(&ParamUse::Stored) {
                 let others = mine.iter().filter(|&&u| u != ParamUse::Stored).count();
                 if others < 2 && mine.len() >= 2 {
-                    return Err(unsupported(
+                    best_effort(
                         f.span,
                         "`addr` of a parameter passed by address stored, its slot used less \
                          than twice besides (loaded at entry at 0xE32A6C, read in place \
                          at MAC_OS_$PUT_INFO 0xE0C322; not settled, codegen-patterns 12.2, bead \
                          domain-pascal-m2w3) is",
-                    ));
+                    )?;
                 }
             }
             if mine.is_empty() || (ty.is_none() && mine.len() < 2) {
@@ -10594,12 +10804,12 @@ impl Selector {
                 && mine.contains(&ParamUse::Base)
                 && !mine.contains(&ParamUse::Data)
             {
-                return Err(unsupported(
+                best_effort(
                     f.span,
                     "a pointer parameter compared with `nil` or 0 and dereferenced (an address \
                      register at 0xE09EAC, a data register at 0xE0E270; not settled, \
                      codegen-patterns 12.2) is",
-                ));
+                )?;
             }
             // A store of the whole pointer is not such a use
             // ([`ParamUse::Stored`]: EC_$INIT 0xE15202 holds its pointer
@@ -10644,13 +10854,13 @@ impl Selector {
             // D2 from entry and assigns it only other values, 0xE3997A,
             // 0xE3998C, 0xE399AC; bead domain-pascal-r0ag).
             if assigned && !assigned_from_itself_or_clamped(f, offset) {
-                return Err(unsupported(
+                best_effort(
                     f.span,
                     "assigning to a by-value parameter loaded at entry none of whose assignments \
                      reads it or clamps it (kept in its slot at 0xE07600, 0xE08EEA, 0xE05C7A, in \
                      its register at 0xE3997A; not settled, codegen-patterns 12.2, \"Assigned \
                      parameters\", bead domain-pascal-r0ag) is",
-                ));
+                )?;
             }
             let r = self.alloc(class)?;
             if class == RegClass::Data && (ty.is_none() || mine.contains(&ParamUse::Base)) {
@@ -10717,11 +10927,11 @@ impl Selector {
             return Ok(());
         }
         if f.nesting.is_some() {
-            return Err(unsupported(
+            best_effort(
                 f.param_copies[0].span,
                 "a value parameter passed by address to a nested routine (its copy is not \
                  catalogued, codegen-patterns 1.2) is",
-            ));
+            )?;
         }
         let mut refs: Vec<i32> = Vec::new();
         walk(&f.body, &mut |n| {
@@ -10739,11 +10949,11 @@ impl Selector {
                     .iter()
                     .any(|&(o, n)| o < hi && lo < o + n as i32);
             if !used {
-                return Err(unsupported(
+                best_effort(
                     pc.span,
                     "a value parameter passed by address that the routine never uses (whether \
                      the original copied it is not visible, codegen-patterns 1.2) is",
-                ));
+                )?;
             }
             self.stmt_start = self.out.len();
             let from = Addr::Indirect {
@@ -10972,7 +11182,7 @@ impl Selector {
     /// char by longwords from a string constant).
     fn copy_chars(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
         if bytes != 4 && !((8..=48).contains(&bytes) && bytes % 2 == 0) {
-            return Err(unsupported(
+            let refusal = unsupported(
                 self.span,
                 format!(
                     "a copy of an array of {bytes} char (the original copies 4 characters with \
@@ -10980,7 +11190,13 @@ impl Selector {
                      other sizes not seen, codegen-patterns 5.2 \"Arrays of char\", bead \
                      domain-pascal-4lf1) is"
                 ),
-            ));
+            );
+            if bytes == 0 || bytes - 1 > 0x7fff {
+                return Err(refusal);
+            }
+            // Best effort (bead domain-pascal-5kgg): the `move.b` `dbf`
+            // loop for any size.
+            dpc_syntax::diag::best_effort(refusal)?;
         }
         let (from, to) = self.block_addresses(src, dst, BlockUse::Chars)?;
         let mv = Insn::Move {
@@ -10999,9 +11215,18 @@ impl Selector {
             return Ok(());
         }
         let count = self.alloc_d()?;
-        self.out.push(Insn::Moveq {
-            value: (bytes - 1) as i8,
-            dst: count,
+        let n = bytes - 1;
+        self.out.push(if n <= 127 {
+            Insn::Moveq {
+                value: n as i8,
+                dst: count,
+            }
+        } else {
+            Insn::Move {
+                size: Size::W,
+                src: Ea::Imm(n as i64),
+                dst: Ea::Reg(Reg::D(count)),
+            }
         });
         let head = self.new_label();
         self.out.push(Insn::Align4);
@@ -11029,6 +11254,10 @@ impl Selector {
     /// 0xE05104, 0xE1542A, 0xE65184, 0xE747FC, 0xE74828; the destination
     /// at 0xE16DF8, a slot loaded into callee-saved A2).
     fn copy6(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
+        // Refused, also as best effort: the copy's `(An)+` accesses are not
+        // marked volatile for the scheduler (review of bead
+        // domain-pascal-5kgg; `dpc-ir` refuses record copies with
+        // volatile parts before this).
         if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
             return Err(unsupported(
                 self.span,
@@ -11115,6 +11344,10 @@ impl Selector {
     /// block (AS_$INIT 0xE3153E, the base held across statements),
     /// volatile objects (not seen).
     fn copy8(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
+        // Refused, also as best effort: the copy's `(An)+` accesses are not
+        // marked volatile for the scheduler (review of bead
+        // domain-pascal-5kgg; `dpc-ir` refuses record copies with
+        // volatile parts before this).
         if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
             return Err(unsupported(
                 self.span,
@@ -11123,16 +11356,24 @@ impl Selector {
         }
         let start = self.out.len();
         let slot = self.copy8_slot(dst);
-        if let Some(e) = self.element_block(src) {
-            return self.copy8_element(dst, src, e, slot);
+        match self.element_block(src) {
+            // Best effort (bead domain-pascal-5kgg): an element whose form
+            // is not settled as any other source, `lea` of its operand
+            // ([`Self::copy8_source`]).
+            Some(Err(why)) => best_effort(
+                self.span,
+                if why == ELEMENT_BASE { ELEM8_BASE } else { why },
+            )?,
+            Some(e) => return self.copy8_element(dst, src, e, slot),
+            None => {}
         }
         if slot.is_some() && matches!(src, Addr::OtherStatic { .. }) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "an 8-byte copy from another data section's block of the unit into the object \
                  a pointer slot points to (which address is loaded first not seen; \
                  codegen-patterns 5.2, \"6 and 8 bytes\"; bead domain-pascal-zrug) is",
-            ));
+            )?;
         }
         let (from, to) = if let Some((o, k)) = slot {
             // The source through a parked pointer local moved to its
@@ -11185,12 +11426,15 @@ impl Selector {
                     ..
                 }]
             );
+            const MSG: &str = "an 8-byte copy into this kind of destination (indexed, or set \
+                               up by several instructions) is";
+            if !is_memory_ea(&to) {
+                return Err(unsupported(self.span, MSG));
+            }
+            // Best effort (bead domain-pascal-5kgg): the two moves to the
+            // operand however it is set up.
             if !simple || !matches!(to, Ea::Ind(_) | Ea::Disp(..) | Ea::AbsL(..)) {
-                return Err(unsupported(
-                    self.span,
-                    "an 8-byte copy into this kind of destination (indexed, or set up by \
-                     several instructions) is",
-                ));
+                best_effort(self.span, MSG)?;
             }
             let from = self.copy8_source(src)?;
             let s = self.alloc_a()?;
@@ -11306,22 +11550,22 @@ impl Selector {
         if let (Some((b, i, sc)), Some((pb, pi, psc, end))) = (&row, &self.elem8_row) {
             if *end == self.stmt_start && b == pb && i == pi && sc == psc && self.index_in_memory(i)
             {
-                return Err(unsupported(self.span, ELEM8_SAME_ROW));
+                best_effort(self.span, ELEM8_SAME_ROW)?;
             }
         }
         let start = self.out.len();
         let (from, to, unit) = if let Some((o, k)) = slot {
             if !data {
-                return Err(unsupported(self.span, ELEM8_HELD_SLOT));
+                best_effort(self.span, ELEM8_HELD_SLOT)?;
             }
             if k != 0 {
-                return Err(unsupported(self.span, ELEM8_SLOT_FIELD));
+                best_effort(self.span, ELEM8_SLOT_FIELD)?;
             }
             let mark = self.out.len();
             let ea = self.ea_of(src)?;
             let index = &self.out[mark..];
             if index.iter().any(widens_byte) {
-                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+                best_effort(self.span, ELEMENT_BYTE_INDEX)?;
             }
             let load_d = |d| Insn::Movea {
                 size: Size::L,
@@ -11333,7 +11577,7 @@ impl Selector {
                     // An index formed in this statement (an empty one, a
                     // scaled index of an earlier statement: no site).
                     if !(1..=2).contains(&index.len()) || !index.iter().all(index_reads_registers) {
-                        return Err(unsupported(self.span, ELEM8_SLOT_INDEX));
+                        best_effort(self.span, ELEM8_SLOT_INDEX)?;
                     }
                     // One unit with the moves (below), as R10 takes the
                     // index and its `lea` for the longer copies.
@@ -11365,7 +11609,7 @@ impl Selector {
                         && loads(&index[0])
                         && index[1..n].iter().all(index_reads_registers);
                     if !shaped {
-                        return Err(unsupported(self.span, ELEM8_SLOT_INDEX));
+                        best_effort(self.span, ELEM8_SLOT_INDEX)?;
                     }
                     let d = self.alloc_a()?;
                     self.fresh.push((Reg::A(d), self.stmt_start, self.span));
@@ -11384,21 +11628,26 @@ impl Selector {
             if self.out.len() != mark
                 || !matches!(to, Ea::Ind(r) | Ea::Disp(_, r) if r != DATA_BASE_A)
             {
-                return Err(unsupported(self.span, ELEM8_DEST));
+                if !is_memory_ea(&to) {
+                    return Err(unsupported(self.span, ELEM8_DEST));
+                }
+                // Best effort (bead domain-pascal-5kgg): the moves to the
+                // operand however it is set up.
+                best_effort(self.span, ELEM8_DEST)?;
             }
             let ea = self.ea_of(src)?;
             if self.out[mark..].iter().any(widens_byte) {
-                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+                best_effort(self.span, ELEMENT_BYTE_INDEX)?;
             }
             if !data && !matches!(ea, Ea::Idx(..)) {
-                return Err(unsupported(self.span, ELEM8_HELD_WIDE));
+                best_effort(self.span, ELEM8_HELD_WIDE)?;
             }
             // Beyond a byte, an index formed in this statement: with the
             // row of an earlier statement's index the image keeps the row's
             // address (0xE58938..0xE58946 `lea (0,A5,D0.l),A1; lea
             // (2384,A1),A2; ...; lea (992,A1),A2`), which dpc does not.
             if matches!(ea, Ea::Disp(..)) && self.out.len() - mark < 2 {
-                return Err(unsupported(self.span, ELEM8_ROW_KEPT));
+                best_effort(self.span, ELEM8_ROW_KEPT)?;
             }
             let s = self.element_lea(ea)?;
             (s, to, true)
@@ -11466,11 +11715,15 @@ impl Selector {
                         ..
                     }]
                 );
+                const MSG: &str =
+                    "an 8-byte copy from a pointer not held in an address register is";
+                if !is_memory_ea(&ea) {
+                    return Err(unsupported(self.span, MSG));
+                }
+                // Best effort (bead domain-pascal-5kgg): `lea` of the
+                // operand after the instructions that set it up.
                 if !ok || !matches!(ea, Ea::Ind(_) | Ea::Disp(..)) {
-                    return Err(unsupported(
-                        self.span,
-                        "an 8-byte copy from a pointer not held in an address register is",
-                    ));
+                    best_effort(self.span, MSG)?;
                 }
                 Src8::Lea(ea)
             }
@@ -11485,40 +11738,57 @@ impl Selector {
                 Src8::Sym(crate::emit::data_base_label(section))
             }
             Addr::OtherStatic { .. } => {
-                return Err(unsupported(
+                // Best effort (bead domain-pascal-5kgg), as below.
+                best_effort(
                     self.span,
                     "an 8-byte copy from another data section's block of the unit at an \
                      offset, or while a register holds the block's address (RIP_$INIT \
                      0xE2FC1E `lea (0xc68,A0),A1` off the block's register, a longer copy, \
                      one site: not settled; codegen-patterns 5.2, \"Block addresses\"; bead \
                      domain-pascal-zrug) is",
-                ))
+                )?;
+                self.copy8_lea_source(src, None)?
             }
             Addr::Symbol { .. } => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "an 8-byte copy from a field of another unit's variable (every `movea.l \
                      #imm` block address of compiled code is a map symbol; AS_$INIT 0xE3153E \
                      `lea (4,A0),A1` off AS_$INFO's address held across the statements, which \
                      dpc does not hold: not settled; codegen-patterns 5.2, \"Block \
                      addresses\"; bead domain-pascal-zrug) is",
-                ))
+                )?;
+                self.copy8_lea_source(src, None)?
             }
-            Addr::Index { .. } => {
-                return Err(unsupported(
-                    self.span,
+            Addr::Index { .. } => self.copy8_lea_source(
+                src,
+                Some(
                     "an 8-byte copy from an array element through a `for` loop's stepped \
                      pointer (not catalogued; codegen-patterns 5.2, \"6 and 8 bytes\"; bead \
                      domain-pascal-zrug) is",
-                ))
-            }
-            _ => {
-                return Err(unsupported(
-                    self.span,
-                    "an 8-byte copy from this kind of address is",
-                ))
-            }
+                ),
+            )?,
+            _ => self.copy8_lea_source(src, Some("an 8-byte copy from this kind of address is"))?,
         })
+    }
+
+    /// Best effort (bead domain-pascal-5kgg): an 8-byte copy's source as
+    /// `lea` of its operand, a memory operand ([`Self::copy8_source`]),
+    /// after the warning `what` (none: given already).
+    fn copy8_lea_source(&mut self, src: &Addr, what: Option<&str>) -> Res<Src8> {
+        let ea = self.ea_of(src)?;
+        if let Some(what) = what {
+            if !is_memory_ea(&ea) {
+                return Err(unsupported(self.span, what));
+            }
+            best_effort(self.span, what)?;
+        } else if !is_memory_ea(&ea) {
+            return Err(unsupported(
+                self.span,
+                "an 8-byte copy from this kind of address is",
+            ));
+        }
+        Ok(Src8::Lea(ea))
     }
 
     /// Load an 8-byte copy's source register `a`: `lea <ea>,An` (`lea
@@ -11639,7 +11909,12 @@ impl Selector {
                 });
                 return Ok((a, BlockForm::New));
             }
-            Addr::Symbol { .. } => return Err(unsupported(self.span, OFFSET)),
+            // Best effort (bead domain-pascal-5kgg): `lea` of the
+            // operand's address, whatever its form.
+            Addr::Symbol { .. } => {
+                best_effort(self.span, OFFSET)?;
+                (self.ea_of(addr)?, BlockForm::New)
+            }
             Addr::Indirect { .. } | Addr::Index { .. } => {
                 let mark = self.out.len();
                 let ea = self.ea_of(addr)?;
@@ -11661,21 +11936,43 @@ impl Selector {
                         }],
                         Ea::Ind(a),
                     ) if dst == a => return Ok((*a, BlockForm::New)),
-                    _ if matches!(addr, Addr::Index { .. }) => {
-                        // An element indexed at run time is formed by
-                        // [`Self::block_addresses`]; a stepped one whose
-                        // operand takes instructions is not seen.
-                        return Err(unsupported(self.span, ELEMENT_FORM));
+                    // An element indexed at run time is formed by
+                    // [`Self::block_addresses`]; a stepped one whose
+                    // operand takes instructions is not seen.  Best effort
+                    // for a memory operand: `lea` of it, after the
+                    // instructions that set it up.
+                    _ => {
+                        let what = if matches!(addr, Addr::Index { .. }) {
+                            ELEMENT_FORM
+                        } else {
+                            POINTER
+                        };
+                        if !is_memory_ea(&ea) {
+                            return Err(unsupported(self.span, what));
+                        }
+                        best_effort(self.span, what)?;
+                        (ea, BlockForm::New)
                     }
-                    _ => return Err(unsupported(self.span, POINTER)),
                 }
             }
-            Addr::OtherStatic { .. } => return Err(unsupported(self.span, OTHER_SECTION)),
+            Addr::OtherStatic { .. } => {
+                best_effort(self.span, OTHER_SECTION)?;
+                (self.ea_of(addr)?, BlockForm::New)
+            }
             _ => {
-                return Err(unsupported(
-                    self.span,
-                    "a block (record or array copy or comparison) at this kind of address is",
-                ))
+                const KIND: &str =
+                    "a block (record or array copy or comparison) at this kind of address is";
+                // A volatile block stays refused: the block's `(An)+`
+                // accesses are not marked volatile for the scheduler.
+                if matches!(addr, Addr::Volatile { .. }) {
+                    return Err(unsupported(self.span, KIND));
+                }
+                let ea = self.ea_of(addr)?;
+                if !is_memory_ea(&ea) {
+                    return Err(unsupported(self.span, KIND));
+                }
+                best_effort(self.span, KIND)?;
+                (ea, BlockForm::New)
             }
         };
         let a = self.alloc_a()?;
@@ -11732,35 +12029,40 @@ impl Selector {
     /// (no site).
     fn block_addresses(&mut self, first: &Addr, second: &Addr, use_: BlockUse) -> Res<(u8, u8)> {
         self.elem_second_lea = None;
-        let (e1, e2) = (self.element_block(first), self.element_block(second));
+        let (mut e1, mut e2) = (self.element_block(first), self.element_block(second));
+        // Best effort (bead domain-pascal-5kgg): two elements, or one whose
+        // form is not settled, as plain blocks, `lea` of each operand
+        // ([`Self::block_address`]).
         if e1.is_some() && e2.is_some() {
-            return Err(unsupported(self.span, ELEMENT_BOTH));
+            best_effort(self.span, ELEMENT_BOTH)?;
+            (e1, e2) = (None, None);
         }
         if let Some(Err(why)) = e1.or(e2) {
-            return Err(unsupported(self.span, why));
+            best_effort(self.span, why)?;
+            (e1, e2) = (None, None);
         }
         if (e1.is_some() || e2.is_some()) && use_ == BlockUse::Chars {
-            return Err(unsupported(self.span, ELEMENT_CHARS));
+            best_effort(self.span, ELEMENT_CHARS)?;
         }
         let (a, fa, lea, b) = if let Some(data) = e1 {
             if data != Ok(true) {
-                return Err(unsupported(self.span, ELEMENT_FIRST_HELD));
+                best_effort(self.span, ELEMENT_FIRST_HELD)?;
             }
             if use_ == BlockUse::Unrolled {
-                return Err(unsupported(self.span, ELEMENT_FIRST_UNROLLED));
+                best_effort(self.span, ELEMENT_FIRST_UNROLLED)?;
             }
             // The element first: its index, its `lea`, then the second
             // address, not interleaved ([`Self::element_block`]).
             let mark = self.out.len();
             let ea = self.ea_of(first)?;
             if self.out.len() - mark > 2 || !matches!(ea, Ea::Idx(..)) {
-                return Err(unsupported(self.span, ELEMENT_FIRST));
+                best_effort(self.span, ELEMENT_FIRST)?;
             }
             if self.out[mark..].iter().any(zero_extends_byte) {
-                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+                best_effort(self.span, ELEMENT_BYTE_INDEX)?;
             }
             if !self.out[mark..].iter().all(index_reads_registers) {
-                return Err(unsupported(self.span, ELEMENT_FIRST_MEMORY));
+                best_effort(self.span, ELEMENT_FIRST_MEMORY)?;
             }
             let a = self.element_lea(ea)?;
             self.units.push((mark, self.out.len()));
@@ -11769,7 +12071,7 @@ impl Selector {
             (a, BlockForm::New, lea, b)
         } else if let Some(data) = e2 {
             if data == Ok(false) && use_ != BlockUse::Loop {
-                return Err(unsupported(self.span, ELEMENT_SECOND_HELD));
+                best_effort(self.span, ELEMENT_SECOND_HELD)?;
             }
             // The element second: its index (and the `lea (0,An,Dx),Am`
             // of a displacement beyond a byte) first, then the first
@@ -11779,10 +12081,10 @@ impl Selector {
             let index = &self.out[mark..];
             let split = usize::from(matches!(ea, Ea::Disp(..)));
             if index.iter().any(zero_extends_byte) {
-                return Err(unsupported(self.span, ELEMENT_BYTE_INDEX));
+                best_effort(self.span, ELEMENT_BYTE_INDEX)?;
             }
             if index.len() > 3 + split {
-                return Err(unsupported(self.span, ELEMENT_SECOND_LONG));
+                best_effort(self.span, ELEMENT_SECOND_LONG)?;
             }
             let (a, fa) = self.block_address(first)?;
             let lea = self.out.len() - 1;
@@ -12109,10 +12411,10 @@ impl Selector {
                     // 0xE149A4 `move.w #-1,D2` (PROC1_$SET_VT): a word
                     // `moveq` cannot tell from `move.w`; 12 such `move.w`
                     // of -1 in the image against 57 negative `moveq`s.
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "a constant outside -128..127 that `moveq` could load (`move.w #-1` at                          0xE149A4, `moveq` elsewhere; not settled) assigned to a register-held                          local is",
-                    ));
+                    )?;
                 }
                 self.const_into(*c, w, web);
                 return Ok(());
@@ -12148,11 +12450,19 @@ impl Selector {
                     if let Expr::Const { value: c, .. } = y {
                         let c = imm(*c, w);
                         self.out.push(match alu {
+                            // Best effort (bead domain-pascal-5kgg):
+                            // `addi`/`subi` of the signed constant.
                             AluOp::Add | AluOp::Sub if c < 0 => {
-                                return Err(unsupported(
+                                best_effort(
                                     self.span,
                                     "adding or subtracting a negative constant is",
-                                ))
+                                )?;
+                                Insn::AluImm {
+                                    op: alu,
+                                    size,
+                                    imm: c,
+                                    dst,
+                                }
                             }
                             AluOp::Add if (1..=8).contains(&c) => Insn::Addq {
                                 size,
@@ -12253,17 +12563,21 @@ impl Selector {
     /// 0xE06BC6 `clr.l (0x10,A6)` (only pushed, 0xE06BD2).
     fn check_slot_param_store(&self, o: i32) -> Res<()> {
         let refuse = |what: &str| Err(unsupported(self.span, what));
+        // Best effort (bead domain-pascal-5kgg): the slot stored and read
+        // as a frame object's, which these parameters are (none is loaded
+        // at entry).
+        let soft = |what: &str| best_effort(self.span, what);
         if !self.assigned_params.contains(&o) {
-            return refuse(
+            soft(
                 "assigning to part of a by-value parameter (no site, codegen-patterns 12.2, \
                  \"Assigned parameters\") is",
-            );
+            )?;
         }
         if !self.multi_body {
-            return refuse(
+            soft(
                 "assigning to a by-value parameter in a body of one simple statement (no site, \
                  codegen-patterns 12.2, \"Assigned parameters\") is",
-            );
+            )?;
         }
         if self.pinned(o).is_some() {
             return refuse(
@@ -12276,23 +12590,23 @@ impl Selector {
             // before passing the slot by address (0xE05B28 `move.w
             // D5,(0xc,A6)`, 0xE05B36 `pea (0xc,A6)`), where `dpc` reads
             // such a parameter from its slot at every use.
-            return refuse(
+            soft(
                 "assigning to a by-value parameter whose slot is passed by address or taken \
                  with `addr` (held in a register and stored back before the `pea` at \
                  AST_$PURIFY 0xE05B28; codegen-patterns 12.2, \"Assigned parameters\") is",
-            );
+            )?;
         }
         if self.partial_params.contains(&o) {
-            return refuse(
+            soft(
                 "assigning to a by-value parameter the body also reads in part (no site, \
                  codegen-patterns 12.2, \"Assigned parameters\") is",
-            );
+            )?;
         }
         if self.unread_assigned.contains(&o) {
-            return refuse(
+            soft(
                 "assigning to a by-value parameter the routine never reads (no site, \
                  codegen-patterns 12.2, \"Assigned parameters\") is",
-            );
+            )?;
         }
         Ok(())
     }
@@ -12321,11 +12635,11 @@ impl Selector {
             // parent's parameter (the uplevel parameters of
             // codegen-patterns 6 are read: area_$resize's nested 0xE087C4
             // `move.l (0xe,A2),D2`).
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "assigning to an enclosing routine's parameter (no site, codegen-patterns 12.2, \
                  \"Assigned parameters\") is",
-            ));
+            )?;
         }
         let device = access.is_some_and(|a| a.device);
         if access.is_some_and(|a| a.atomic) {
@@ -12499,11 +12813,11 @@ impl Selector {
             // `bset D0,(0,A1,D5.w)` (also FILE_$GET_SEG_MAP 0xE740CE,
             // REM_FILE_$GET_SEG_MAP 0xE62044); when the guard is left out is
             // not catalogued (codegen-patterns 5.1).
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "assigning `[x]` with a run-time member to a set (built in memory, \
                  codegen-patterns 5.1) is",
-            ));
+            )?;
         }
         if !device && self.update_in_place(addr, value)? {
             return Ok(());
@@ -12544,12 +12858,12 @@ impl Selector {
             .iter()
             .any(|e| syms.iter().filter(|s| *s == e).count() > 1)
         {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a store reaching an element of another unit's array and another part of the \
                  same variable (through a register loaded with the same symbol, 0xE19F82; \
                  codegen-patterns 5.2; bead domain-pascal-lnzy) is",
-            ));
+            )?;
         }
         // A longword constant stored from a register needs one like any
         // computed value: the destination's set-up first when it has more
@@ -12570,30 +12884,39 @@ impl Selector {
             Node::Expr(Expr::Unary { op: UnOp::Abs, .. }) => abs = true,
             _ => {}
         });
+        // Best effort (bead domain-pascal-5kgg) for the two shapes below:
+        // the value's instructions first, never rotated below the
+        // destination's (their branches and calls stay in the plain order
+        // of selection, which is correct).
+        let mut keep_order = false;
         if both && select {
             // The compare-and-select's branch (codegen-patterns 10.1)
             // before or after the destination's register: not seen.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a store whose destination needs a register of a `max` or `min` value (the \
                  destination's register before or after the branch: not seen) is",
-            ));
+            )?;
+            keep_order = true;
         }
         if both && abs {
             // `abs`'s branch (codegen-patterns 8, "abs") before or after
-            // the destination's register: not seen.
-            return Err(unsupported(
+            // the destination's register: not seen.  Best effort (bead
+            // domain-pascal-5kgg), as for `max`/`min` above.
+            best_effort(
                 self.span,
                 "a store whose destination needs a register of an `abs` value (the \
                  destination's register before or after the branch: not seen) is",
-            ));
+            )?;
+            keep_order = true;
         }
         if both && (expr_has_call(value) || addr_has_call(addr)) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a store whose destination and value both need a register, with a call on \
                  either side, is",
-            ));
+            )?;
+            keep_order = true;
         }
         let start = self.out.len();
         enum Src {
@@ -12626,11 +12949,13 @@ impl Selector {
                 ..
             } if *o > 0 || self.pinned(*o).is_some() => match self.pinned(*o) {
                 Some(r) => Src::Ea(Ea::Reg(r)),
+                // Best effort (bead domain-pascal-5kgg): read from its slot.
                 None => {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "storing a parameter that was not loaded at entry is",
-                    ))
+                    )?;
+                    Src::Ea(self.ea_of(&Addr::Frame(*o))?)
                 }
             },
             Expr::Load { addr: a, .. } => Src::Ea(self.ea_of(a)?),
@@ -12686,13 +13011,16 @@ impl Selector {
             // (An),Am` of the generic form below has no `addr` site in
             // compiled code (codegen-patterns 5.2, "`addr` of a
             // parameter"; bead domain-pascal-ucss).
-            Expr::AddrOf(Addr::Indirect { base, offset: 0 }) if matches!(&**base, Expr::Load { addr: Addr::Enclosing(o), .. } if *o > 0) =>
+            Expr::AddrOf(a @ Addr::Indirect { base, offset: 0 }) if matches!(&**base, Expr::Load { addr: Addr::Enclosing(o), .. } if *o > 0) =>
             {
-                return Err(unsupported(
+                // Best effort: the generic `lea` below (bead
+                // domain-pascal-5kgg).
+                best_effort(
                     self.span,
                     "`addr` of an enclosing routine's parameter passed by address, stored (no \
                      site, codegen-patterns 5.2; bead domain-pascal-ucss) is",
-                ));
+                )?;
+                Src::Ea(Ea::Reg(Reg::A(self.addr_into_a(a)?)))
             }
             // `addr(x)` of an object of this unit's data or frame, or one
             // reached through a pointer or an index: `lea` into an address
@@ -12758,49 +13086,53 @@ impl Selector {
             // puts the destination first; with the value first, an
             // address register's set-up is not seen (review of bead
             // domain-pascal-rlnm; codegen-patterns 5.2).
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a store into an element of another unit's array or through a pointer loaded \
                  from memory whose value needs a register set up (the value before the base, \
                  TERM_$CONTROL 0xE66B4C; codegen-patterns 5.2; bead domain-pascal-lnzy) is",
-            ));
+            )?;
         }
-        if both && self.out.len() - mid > mid - start {
+        if both && !keep_order && self.out.len() - mid > mid - start {
             // The destination's instructions first, unless they read what
             // the value's wrote (a shared base: not seen).
             let defs: Vec<Reg> = self.out[start..mid]
                 .iter()
                 .flat_map(|i| crate::regs::access(i).defs)
                 .collect();
-            if self.out[mid..]
+            let reads = self.out[mid..]
                 .iter()
                 .flat_map(|i| crate::regs::access(i).uses)
-                .any(|r| defs.contains(&r))
-            {
-                return Err(unsupported(
+                .any(|r| defs.contains(&r));
+            if reads {
+                // Best effort (bead domain-pascal-5kgg): not rotated, the
+                // value's instructions first.
+                best_effort(
                     self.span,
                     "a store whose destination, set up by more instructions than the value, \
                      reads a register the value's instructions wrote is",
-                ));
+                )?;
             }
             let (n_src, end) = (mid - start, self.out.len());
-            self.out[start..].rotate_left(n_src);
-            // The indices into `out` recorded while the two sides were
-            // selected move with their instructions (an index equal to
-            // `mid` is taken as the destination's first instruction: for
-            // a position after the value's last one, [`Cse::at`], that
-            // is earlier than it now is, which only makes
-            // [`Self::cse_valid`] check more).
-            let moved = |p: &mut usize| {
-                if (start..mid).contains(p) {
-                    *p += end - mid;
-                } else if (mid..end).contains(p) {
-                    *p -= n_src;
-                }
-            };
-            self.ptr_copies.iter_mut().for_each(moved);
-            self.a0_bases.iter_mut().for_each(|(p, _)| moved(p));
-            self.cse.iter_mut().for_each(|c| moved(&mut c.at));
+            if !reads {
+                self.out[start..].rotate_left(n_src);
+                // The indices into `out` recorded while the two sides were
+                // selected move with their instructions (an index equal to
+                // `mid` is taken as the destination's first instruction: for
+                // a position after the value's last one, [`Cse::at`], that
+                // is earlier than it now is, which only makes
+                // [`Self::cse_valid`] check more).
+                let moved = |p: &mut usize| {
+                    if (start..mid).contains(p) {
+                        *p += end - mid;
+                    } else if (mid..end).contains(p) {
+                        *p -= n_src;
+                    }
+                };
+                self.ptr_copies.iter_mut().for_each(moved);
+                self.a0_bases.iter_mut().for_each(|(p, _)| moved(p));
+                self.cse.iter_mut().for_each(|c| moved(&mut c.at));
+            }
         }
         self.out.push(match &src {
             Src::Zero => Insn::Clr {
@@ -13392,21 +13724,21 @@ impl Selector {
                         }
                     }
                     if inner || stored.contains(o) {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a `for` index passed by address to a call with a function call \
                              among its arguments, or passed twice (the index's store against \
                              the inner call or a second store not seen, codegen-patterns 7.4) is",
-                        ));
+                        )?;
                     }
                     stored.push(*o);
                     if c.pad != 0 {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a `for` index passed by address to a call with an argument pad (the \
                              index's store against the pad's `subq.l #2,SP` not seen, \
                              codegen-patterns 7.4) is",
-                        ));
+                        )?;
                     }
                     self.out.push(Insn::Move {
                         size: Size::W,
@@ -13516,11 +13848,11 @@ impl Selector {
                 }
             }
             if n > 1 {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "an argument list that reads twice a pointer it loads to pass an object by \
                      address (one load for both, 0xE74706; not modelled) is",
-                ));
+                )?;
             }
         }
         let mut k = c.args.len();
@@ -13580,11 +13912,11 @@ impl Selector {
                     .flatten()
                     .any(|b| word_const(b).is_some() || other_byte(b))
             {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "a byte constant argument other than `true` and 0 next to a word or byte \
                      constant (merged into one longword push?) is",
-                ));
+                )?;
             }
             self.arg_pushes += 1;
             let pushed = self.push(a);
@@ -13598,13 +13930,13 @@ impl Selector {
                 // pea (40,A1,D2.w)`; MSG_$RCV_CONTIGI 0xE59900 `movea.l
                 // (44,A6),A3; move.w (A4),D1; subq.l #2,SP; pea
                 // (0,A3,D1.w)`; review of bead domain-pascal-rlnm).
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "a call with a pad whose first pushed argument is an element of another \
                      unit's array or through a pointer loaded from memory (set up before the \
                      pad, NAME_$FREE_ASID 0xE74DDE; codegen-patterns 1.4, 5.2; bead \
                      domain-pascal-lnzy) is",
-                ));
+                )?;
             }
             k -= 1;
         }
@@ -13731,11 +14063,11 @@ impl Selector {
                     }
                 }
                 if shared {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "a call through a routine pointer reached through a parameter slot the \
                          arguments also read (one load for both, TTY_$I_ERR 0xE1BE14) is",
-                    ));
+                    )?;
                 }
             }
         }
@@ -13761,10 +14093,10 @@ impl Selector {
                     ))
                 }
                 None if *o < 0 && self.a0_holds(*o) => {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "a call through a routine pointer still held in A0 is",
-                    ))
+                    )?;
                 }
                 None => {}
             }
@@ -14028,16 +14360,28 @@ impl Selector {
                     // before the loop (0xE12BFE), as at 6 of the 7 sites of
                     // bead domain-pascal-mrsu, and `move.l <p>,-(SP)` pushes
                     // the same address elsewhere; the trigger is not known.
-                    Expr::AddrOf(Addr::Indirect { offset: 0, .. }) => {
-                        return Err(unsupported(
+                    // Best effort (bead domain-pascal-5kgg): the pointer's
+                    // value pushed, which is the address.
+                    Expr::AddrOf(Addr::Indirect { base, offset: 0 }) => {
+                        best_effort(
                             self.span,
                             "`addr(p^)` by value of a pointer in memory (`move.l <p>,-(SP)` or \
                              `movea.l <p>,An; pea (An)`? trigger not known, PKT_$PING_SERVER \
                              0xE12C34, bead domain-pascal-mrsu) is",
-                        ))
+                        )?;
+                        return self.push(&Arg::Value {
+                            value: (**base).clone(),
+                            slot: 4,
+                        });
                     }
-                    Expr::AddrOf(Addr::Indirect { base, .. }) => {
-                        return Err(self.pointer_target_refusal(base, true))
+                    // Best effort: `pea` of the object's operand.
+                    Expr::AddrOf(a @ Addr::Indirect { base, .. }) => {
+                        dpc_syntax::diag::best_effort(self.pointer_target_refusal(base, true))?;
+                        let ea = self.ea_of(a)?;
+                        if !is_memory_ea(&ea) {
+                            return Err(self.pointer_target_refusal(base, true));
+                        }
+                        self.out.push(Insn::Pea(ea));
                     }
                     Expr::AddrOf(_) => {
                         return Err(unsupported(self.span, "this argument value is"))
@@ -14217,18 +14561,25 @@ impl Selector {
                         unreachable!()
                     };
                     if *offset != 0 {
-                        return Err(unsupported(
-                            self.span,
-                            "passing by address a part of an object reached through a pointer \
-                             held in a data register (not seen, codegen-patterns 12.2) is",
-                        ));
+                        // Best effort (bead domain-pascal-5kgg): `pea` of
+                        // the part's operand.
+                        const PART: &str = "passing by address a part of an object reached \
+                                            through a pointer held in a data register (not \
+                                            seen, codegen-patterns 12.2) is";
+                        best_effort(self.span, PART)?;
+                        let ea = self.ea_of(addr)?;
+                        if !is_memory_ea(&ea) {
+                            return Err(unsupported(self.span, PART));
+                        }
+                        self.out.push(Insn::Pea(ea));
+                    } else {
+                        let r = self.pinned(*o).unwrap();
+                        self.out.push(Insn::Move {
+                            size: Size::L,
+                            src: Ea::Reg(r),
+                            dst,
+                        });
                     }
-                    let r = self.pinned(*o).unwrap();
-                    self.out.push(Insn::Move {
-                        size: Size::L,
-                        src: Ea::Reg(r),
-                        dst,
-                    });
                 }
                 // An object reached through a pointer held in an address
                 // register since the entry: `pea (d,An)`, `pea (An)`
@@ -14315,7 +14666,13 @@ impl Selector {
                     let ea = self.ea_of(addr)?;
                     if self.elem_by_value {
                         let base = (start..self.out.len()).find(|&k| {
-                            matches!(&self.out[k], Insn::Movea { src: Ea::ImmSym(_), .. })
+                            matches!(
+                                &self.out[k],
+                                Insn::Movea {
+                                    src: Ea::ImmSym(_),
+                                    ..
+                                }
+                            )
                         });
                         if let Some(m) = base {
                             self.elem_value_bases.push((m, self.out.len(), self.span));
@@ -14323,7 +14680,16 @@ impl Selector {
                     }
                     self.out.push(Insn::Pea(ea));
                 }
-                Addr::Indirect { base, .. } => return Err(self.pointer_target_refusal(base, false)),
+                // Best effort (bead domain-pascal-5kgg): `pea` of the
+                // object's operand.
+                Addr::Indirect { base, .. } => {
+                    dpc_syntax::diag::best_effort(self.pointer_target_refusal(base, false))?;
+                    let ea = self.ea_of(addr)?;
+                    if !is_memory_ea(&ea) {
+                        return Err(self.pointer_target_refusal(base, false));
+                    }
+                    self.out.push(Insn::Pea(ea));
+                }
                 _ => {
                     return Err(unsupported(
                         self.span,
@@ -14363,11 +14729,21 @@ impl Selector {
                             dst: tmp.clone(),
                         });
                     }
-                    Expr::AddrOf(_) => {
-                        return Err(unsupported(
+                    // Best effort (bead domain-pascal-5kgg): `lea` of it as
+                    // above.
+                    Expr::AddrOf(a) => {
+                        best_effort(
                             self.span,
                             "`addr` of another unit's or a constant's object passed by address is",
-                        ))
+                        )?;
+                        let src = self.ea_of(a)?;
+                        let r = self.alloc_a()?;
+                        self.out.push(Insn::Lea { src, dst: r });
+                        self.out.push(Insn::Move {
+                            size: Size::L,
+                            src: Ea::Reg(Reg::A(r)),
+                            dst: tmp.clone(),
+                        });
                     }
                     v => self.store(&Addr::Frame(*offset), v)?,
                 }
@@ -15128,10 +15504,10 @@ impl Selector {
                 } if self.pinned(*o).is_some() => Ea::Reg(self.pinned(*o).unwrap()),
                 Expr::Load { addr, .. } if !self.addr_needs_reg(addr) => {
                     if matches!(addr, Addr::Frame(o) if *o > 0) {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a `set_sr` argument that is a parameter not loaded at entry is",
-                        ));
+                        )?;
                     }
                     self.ea_of(addr)?
                 }
@@ -15300,12 +15676,12 @@ impl Selector {
                 found
             });
         if again {
-            return Err(unsupported(
+            best_effort(
                 st.span,
                 "a longword constant in `moveq`'s range stored, its value used again by a later \
                  statement's expression (the `moveq` register kept for it at NETWORK_$INIT \
                  0xE2F782 and XPD_$GET_REGISTERS 0xE5C25C; codegen-patterns 13) is",
-            ));
+            )?;
         }
         let Some((base, off, _, _)) = self.run_item(st) else {
             return Ok(ConstForm::Moveq);
@@ -15330,12 +15706,12 @@ impl Selector {
         }
         if let Some((b, o, bytes, v)) = i.checked_sub(1).and_then(|j| self.run_item(&body[j])) {
             if b == base && o + bytes as i32 == off && !(v == n && bytes == 4) {
-                return Err(unsupported(
+                best_effort(
                     st.span,
                     "a longword constant in `moveq`'s range stored just above the previous \
                      statement's other constant (not seen: MST_$INIT 0xE30B9E's `clr.l; move.l \
                      #1` is one 8-byte set; codegen-patterns 13) is",
-                ));
+                )?;
             }
         }
         Ok(ConstForm::Moveq)
@@ -15514,42 +15890,51 @@ impl Selector {
         c: i64,
         w: Width,
     ) -> Res<ElementUpdate> {
+        // Best effort (bead domain-pascal-5kgg) for every shape refused
+        // below: the update in place, one instruction to the element
+        // ([`Self::update_in_place`]), whatever the operation and constant.
         if access.is_some() {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "updating an element of a volatile array in place (not seen, codegen-patterns \
                  5.5, 8) is",
-            ));
+            )?;
+            return Ok(ElementUpdate::InPlace);
         }
         // Every element update of the image is by 1 (49 `addq`/`subq #1`
         // to an element, 13 loads, `addq`/`subq #1` and stores; no other
         // constant, no `addi`/`subi` to an element).
         if !matches!(alu, AluOp::Add | AluOp::Sub) || imm(c, w) != 1 {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "updating an array element other than by adding or subtracting 1 (`addq`/`subq \
                  #1`, the only updates of elements seen; `andi`/`ori` to an element cannot be \
                  told from a packed field's store, codegen-patterns 8) is",
-            ));
+            )?;
+            return Ok(ElementUpdate::InPlace);
         }
         if self.stepped_array(base, index, scale).is_some() {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "updating an element in place through a `for` loop's stepped pointer (not seen, \
                  codegen-patterns 7.4, 8) is",
-            ));
+            )?;
+            return Ok(ElementUpdate::InPlace);
         }
         match base {
             Addr::Symbol { offset: o, .. } if (-128..128).contains(&(o + offset)) => {
                 Ok(ElementUpdate::InPlace)
             }
-            Addr::Symbol { .. } => Err(unsupported(
-                self.span,
-                "updating an element of another unit's array at a displacement beyond a byte in \
-                 place (`lea` and `addq` at 11 sites, PROC2_ 0xE41F5E, into the base's register \
-                 or another, bead domain-pascal-1ibr; PCHIST_$COUNT 0xE1A1DC loads, changes and \
-                 stores through a base held from an earlier statement; codegen-patterns 8) is",
-            )),
+            Addr::Symbol { .. } => {
+                best_effort(
+                    self.span,
+                    "updating an element of another unit's array at a displacement beyond a byte in \
+                     place (`lea` and `addq` at 11 sites, PROC2_ 0xE41F5E, into the base's register \
+                     or another, bead domain-pascal-1ibr; PCHIST_$COUNT 0xE1A1DC loads, changes and \
+                     stores through a base held from an earlier statement; codegen-patterns 8) is",
+                )?;
+                Ok(ElementUpdate::InPlace)
+            }
             Addr::Static(o) => {
                 let other_unit_word = |e: &Expr| {
                     matches!(
@@ -15558,14 +15943,15 @@ impl Selector {
                     )
                 };
                 if w != Width::Word || scale != 2 || !other_unit_word(index) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "updating an element of the unit's data in place other than a word of a \
                          word array indexed by another unit's word variable (the image does both \
                          `addq` to the element, MEM_$PARITY_LOG 0xE0ADD4, and a load, operation \
                          and store, NETWORK_$INSTALL_NET 0xE0F224, NETLOG_$LOG_IT 0xE71B9C: no \
                          rule found, codegen-patterns 8) is",
-                    ));
+                    )?;
+                    return Ok(ElementUpdate::InPlace);
                 }
                 Ok(if (-128..128).contains(&(o + offset)) {
                     ElementUpdate::LoadModifyStore
@@ -15573,12 +15959,15 @@ impl Selector {
                     ElementUpdate::InPlace
                 })
             }
-            _ => Err(unsupported(
-                self.span,
-                "updating an element of an array of the frame or through a pointer in place (the \
-                 image does both through pointers, BAT_$FREE 0xE3B6BE `addq.l`, PCHIST_$COUNT \
-                 0xE1A1DC a load, operation and store: no rule found, codegen-patterns 8) is",
-            )),
+            _ => {
+                best_effort(
+                    self.span,
+                    "updating an element of an array of the frame or through a pointer in place (the \
+                     image does both through pointers, BAT_$FREE 0xE3B6BE `addq.l`, PCHIST_$COUNT \
+                     0xE1A1DC a load, operation and store: no rule found, codegen-patterns 8) is",
+                )?;
+                Ok(ElementUpdate::InPlace)
+            }
         }
     }
 
@@ -15699,11 +16088,18 @@ impl Selector {
                 // constant after a load).  Otherwise the value in a register
                 // and `addi`/`subi` (0xE08840 `addi.l`, 0xE0B6E2 `subi.w
                 // #0x400,D2`; `x - c` for c in 9..127: 13 `subi` after a load).
+                // Best effort (bead domain-pascal-5kgg): the value in a
+                // register, `addi`/`subi` of the signed constant.
                 AluOp::Add | AluOp::Sub if c < 0 => {
-                    return Err(unsupported(
-                        self.span,
-                        "adding or subtracting a negative constant is",
-                    ))
+                    best_effort(self.span, "adding or subtracting a negative constant is")?;
+                    let d = self.in_tmp(xv, w)?;
+                    self.out.push(Insn::AluImm {
+                        op: alu,
+                        size,
+                        imm: c,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(d);
                 }
                 AluOp::Add | AluOp::Sub if c == 0 => return self.in_tmp(xv, w),
                 AluOp::Add | AluOp::Sub if c <= 8 => {
@@ -15726,11 +16122,11 @@ impl Selector {
                 }
                 AluOp::Add if c <= 127 && !matches!(xv, Val::Tmp(_)) => {
                     if let Val::Reg(_) = xv {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "adding a constant of 9..127 to a value held in a register (`moveq` \
                              and `add`, or a copy and `addi`: 11 sites each) is",
-                        ));
+                        )?;
                     }
                     let d = self.load_const(c, w)?;
                     self.out.push(Insn::Alu {
@@ -15861,10 +16257,7 @@ impl Selector {
             let d = self.load_const(imm(c, w), w)?;
             let xv = self.eval(rhs)?;
             if let Val::Tmp(_) = xv {
-                return Err(unsupported(
-                    self.span,
-                    "a constant minus a computed value is",
-                ));
+                best_effort(self.span, "a constant minus a computed value is")?;
             }
             self.out.push(Insn::Alu {
                 op: alu,
@@ -15893,11 +16286,14 @@ impl Selector {
             (Val::Mem(_), Val::Reg(Reg::D(r))) if op.commutative() && self.cse_regs.contains(r) => {
                 (self.in_tmp(rv.clone(), w)?, lv)
             }
+            // Best effort (bead domain-pascal-5kgg): the variable copied
+            // after the computed value, as below.
             (_, Val::Tmp(_)) => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "a variable minus a computed value (evaluation order not catalogued) is",
-                ))
+                )?;
+                (self.in_tmp(lv.clone(), w)?, rv)
             }
             _ => (self.in_tmp(lv.clone(), w)?, rv),
         };
@@ -16166,14 +16562,14 @@ impl Selector {
         if let Some((x, c)) = factor {
             if w == Width::Word && c < 128 && by_mul_insn(c) && const_first(x) {
                 if !signed || !x.ty().is_signed() {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         format!(
                             "a word product of a `0..65535` variable and {c} (`moveq #{c},Dn; \
                              mul<s>.w x,Dn`: the one such word product, module-local 0xE4519C \
                              at 0xE458D2, is `muls.w` of a signed word; codegen-patterns 8) is"
                         ),
-                    ));
+                    )?;
                 }
                 return self.mul_const_first(x, c, true, &mut |_| Ok(()));
             }
@@ -16198,14 +16594,14 @@ impl Selector {
                     // 0xE691D0; codegen-patterns 5.2).  An unsigned word:
                     // no site.
                     if !signed {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             format!(
                                 "a longword product of a `0..65535` variable and {c} (`moveq \
                                  #{c},Dn; mul<s>.w x,Dn`: the 20 such products, `.l` indices, \
                                  are `muls.w` of signed words; codegen-patterns 5.2) is"
                             ),
-                        ));
+                        )?;
                     }
                     return self.mul_const_first(&xw, c, signed, &mut |_| Ok(()));
                 }
@@ -16368,10 +16764,10 @@ impl Selector {
                         return Ok(Val::Tmp(d));
                     }
                     if !signed {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "an unsigned `mod` by a power of two (mask or division?) is",
-                        ));
+                        )?;
                     }
                     if op == BinOp::Div {
                         return self.div_pow2(lhs, c, Width::Word);
@@ -16436,10 +16832,10 @@ impl Selector {
                 }
                 let bw = Self::word_part(rhs, ty.sign);
                 if pow2.is_some() && !signed && op == BinOp::Mod {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "an unsigned `div`/`mod` by a power of two (shift or mask?) is",
-                    ));
+                    )?;
                 }
                 if op == BinOp::Div {
                     // A power of two is shifted even when the quotient is
@@ -16455,10 +16851,7 @@ impl Selector {
                     }
                     if let (true, Some(b)) = (narrow, &bw) {
                         if c.is_some_and(|c| c < 0) {
-                            return Err(unsupported(
-                                self.span,
-                                "a division by a negative constant is",
-                            ));
+                            best_effort(self.span, "a division by a negative constant is")?;
                         }
                         let d = self.eval_d(lhs)?;
                         let src = match c {
@@ -16501,11 +16894,11 @@ impl Selector {
                     return Ok(Val::Tmp(d));
                 }
                 if signed && Self::word_part(lhs, ty.sign).is_some() {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "a word `mod` a longword (`M$OIS$WWL`, which no compiled code calls, or \
                          `M$OIS$LLL`) is",
-                    ));
+                    )?;
                 }
                 let name = self.marith_name("OI", signed, "LLL")?;
                 self.marith(name, lhs, rhs)?;
@@ -16675,10 +17068,10 @@ impl Selector {
             }
         };
         if self.unpopped {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a conditional branch after a call whose pop was skipped (codegen-patterns 1.1) is",
-            ));
+            )?;
         }
         let l = self.new_label();
         self.jump(cond, l);
@@ -16805,10 +17198,10 @@ impl Selector {
             });
         }
         if self.unpopped {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a conditional branch after a call whose pop was skipped (codegen-patterns 1.1) is",
-            ));
+            )?;
         }
         let l = self.new_label();
         self.jump(Cond::Pl, l);
@@ -16958,11 +17351,19 @@ impl Selector {
         let bv = self.eval(b)?;
         self.marith_depth -= 1;
         let (a_code, b_code) = (mid > start, self.out.len() > mid);
+        // Best effort (bead domain-pascal-5kgg) where neither operand
+        // calls: both values are in registers or operands of their own
+        // (a call's D0 could be overwritten by the other operand).
+        let calls = self.out[start..]
+            .iter()
+            .any(|i| matches!(i, Insn::Jsr(_) | Insn::Bsr { .. }));
         if a_code && b_code {
-            return Err(unsupported(
-                self.span,
-                "an M$ARITH call with both operands computed (evaluation order not settled) is",
-            ));
+            const BOTH: &str =
+                "an M$ARITH call with both operands computed (evaluation order not settled) is";
+            if calls {
+                return Err(unsupported(self.span, BOTH));
+            }
+            best_effort(self.span, BOTH)?;
         }
         let is_d0 = |v: &Val| matches!(v, Val::Tmp(0) | Val::Reg(Reg::D(0)));
         let pad = b.ty().width == Width::Word;
@@ -16973,11 +17374,14 @@ impl Selector {
                 _ => false,
             };
             if b_code || !ends_in_call || !is_d0(&av) {
-                return Err(unsupported(
-                    self.span,
-                    "an M$ARITH call with a word argument and a computed operand (the pad is \
-                     scheduled into the computation, codegen-patterns 8, 12.4 R9) is",
-                ));
+                const PAD: &str = "an M$ARITH call with a word argument and a computed operand \
+                                   (the pad is scheduled into the computation, codegen-patterns \
+                                   8, 12.4 R9) is";
+                if calls {
+                    return Err(unsupported(self.span, PAD));
+                }
+                // Best effort: the pad after the computation.
+                best_effort(self.span, PAD)?;
             }
         }
         if (pre_called || self.called) && !is_d0(&av) && !is_d0(&bv) {
@@ -17424,10 +17828,10 @@ impl Selector {
             // `dpc-ir` divides a word sum in 32 bits and narrows the result
             // (codegen-patterns 8); widened again, would the original have
             // used the longword quotient (M$ARITH) or the word one?
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a word `div`/`mod` of a sum, difference or product used as a longword is",
-            ));
+            )?;
         }
         // (`dpc-ir` reads a shift of an unsigned operand back as the
         // `integer` result, a same-width [`Expr::Convert`].)
@@ -17929,12 +18333,15 @@ impl Selector {
             Addr::Symbol { .. } | Addr::Const(_) => {
                 // 6 `lea abs.l,An; move.l An,Dn` (0xE310AA), and `move.l
                 // #sym+d` / `pea abs.l` for arguments (codegen-patterns 1.5):
-                // not settled.
-                return Err(unsupported(
+                // not settled.  Best effort (bead domain-pascal-5kgg): `lea
+                // abs.l,Ar` / `lea (d,PC),Ar`.
+                best_effort(
                     self.span,
                     "the address of a constant or of a part of another unit's object as a value \
                      is",
-                ));
+                )?;
+                let src = self.ea_of(a)?;
+                self.out.push(Insn::Lea { src, dst: r });
             }
             Addr::Index {
                 base,
@@ -18042,11 +18449,11 @@ impl Selector {
             // the TPAD sites of codegen-patterns 7.1), never combined with
             // `and.b`/`or.b` (`tools/cmpsurvey.py callcmp`).  As a value,
             // or under `not`: not seen.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a plain `and`/`or` with a call in its right operand outside a condition, or \
                  under `not` (codegen-patterns 7.1; bead domain-pascal-1rwo) is",
-            ));
+            )?;
         }
         let d = self.bool_into_reg(a)?;
         let src = self.bool_operand(b)?;
@@ -18127,24 +18534,24 @@ impl Selector {
             Expr::Load { addr, .. } => {
                 match addr {
                     Addr::Static(_) | Addr::OtherStatic { .. } => {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a comparison of a function's result with a static variable in the \
                              right operand of a plain `and`/`or` (`s<cc>` into D0, the call's \
                              register, at the two sites, not explained; codegen-patterns 7.1) is",
-                        ))
+                        )?;
                     }
                     Addr::Enclosing(_) => {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a comparison of a function's result with an enclosing routine's \
                              variable in the right operand of a plain `and`/`or` (`s<cc>` into \
                              D1 at the two sites, not explained; codegen-patterns 7.1) is",
-                        ))
+                        )?;
                     }
                     Addr::Indirect { .. } => {}
                     Addr::Frame(o) if matches!(self.pinned(*o), Some(Reg::D(_))) => {}
-                    _ => return Err(unsupported(self.span, OTHER)),
+                    _ => best_effort(self.span, OTHER)?,
                 }
                 let start = self.out.len();
                 let src = self.operand(addr)?;
@@ -18154,7 +18561,7 @@ impl Selector {
                     _ => false,
                 };
                 if !seen || self.out.len() != start {
-                    return Err(unsupported(self.span, OTHER));
+                    best_effort(self.span, OTHER)?;
                 }
                 held = match src {
                     Ea::Reg(Reg::D(r)) => Some(r),
@@ -18330,20 +18737,28 @@ impl Selector {
                 });
                 return Ok((d, false, Cond::Cs));
             }
-            Val::Mem(_) if value => {
-                return Err(unsupported(
+            // Best effort (bead domain-pascal-5kgg): loaded into a register
+            // of its own, then `btst #0` (below), whose Z the caller's
+            // `sne` or branch reads.
+            Val::Mem(ea) => {
+                best_effort(
                     self.span,
-                    "`odd` of a variable in memory as a boolean value (`lsr.b #1; scs` into \
-                     another register at 0xE052FE and 0xE70E9C: not settled, bead \
-                     domain-pascal-uwfe) is",
-                ))
-            }
-            Val::Mem(_) => {
-                return Err(unsupported(
-                    self.span,
-                    "`odd` of a byte variable in memory (no `lsr.b #1` after a byte load in \
-                     compiled code) is",
-                ))
+                    if value {
+                        "`odd` of a variable in memory as a boolean value (`lsr.b #1; scs` into \
+                         another register at 0xE052FE and 0xE70E9C: not settled, bead \
+                         domain-pascal-uwfe) is"
+                    } else {
+                        "`odd` of a byte variable in memory (no `lsr.b #1` after a byte load in \
+                         compiled code) is"
+                    },
+                )?;
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: size_of(x.ty().width),
+                    src: ea,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                (d, false)
             }
             _ => return Err(unsupported(self.span, "`odd` of a constant here is")),
         };
@@ -18366,10 +18781,10 @@ impl Selector {
         if let Expr::Const { .. } = lhs {
             // A constant on the left (`3 < w`): whether the original
             // swapped the operands is not catalogued.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a comparison whose left operand is not a variable is",
-            ));
+            )?;
         }
         if matches!(rhs, Expr::Const { value: 0, .. }) {
             if let (Expr::SetOp { ty, .. }, Rel::Eq | Rel::Ne) = (lhs, op) {
@@ -18383,10 +18798,12 @@ impl Selector {
                     _ => unreachable!("a set operation's value is a new register"),
                 };
                 if !self.sets_flags(d, ty.width) {
-                    return Err(unsupported(
-                        self.span,
-                        "comparing this set value with `[]` is",
-                    ));
+                    // Best effort (bead domain-pascal-5kgg): a `tst`.
+                    best_effort(self.span, "comparing this set value with `[]` is")?;
+                    self.out.push(Insn::Tst {
+                        size: size_of(ty.width),
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
                 }
                 return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
             }
@@ -18443,15 +18860,19 @@ impl Selector {
                 });
             }
             _ => {
-                if expr_has_call(lhs) {
-                    return Err(unsupported(
+                let lcalls = expr_has_call(lhs);
+                if lcalls {
+                    // Best effort (bead domain-pascal-5kgg): the right
+                    // operand computed after the call, the left one live
+                    // across it.
+                    best_effort(
                         self.span,
                         "a comparison of a value whose evaluation calls (a function, M$ARITH, \
                          `min`/`max`) with a computed value (not catalogued, codegen-patterns \
                          7.1) is",
-                    ));
+                    )?;
                 }
-                if lheld {
+                if lheld && !lcalls {
                     // The left operand a value held for a later reuse
                     // (12.4 R7): BAT_$ALLOCATE 0xE3B126..0xE3B13E computes
                     // the right operand first and keeps it in a frame
@@ -18460,12 +18881,13 @@ impl Selector {
                     // (-68,A6),D0` (../source `alloc_count > free_blocks -
                     // 11`, the widened alloc_count read again at 0xE3B150):
                     // one site, not modelled.
-                    return Err(unsupported(
+                    // Best effort: compared from its register.
+                    best_effort(
                         self.span,
                         "comparing a computed value held for a later reuse with another computed \
                          value (BAT_$ALLOCATE 0xE3B126 keeps the right one in a frame \
                          temporary: not modelled, codegen-patterns 7.1) is",
-                    ));
+                    )?;
                 }
                 return self.compare_two_computed(op, d, rhs, size, signed);
             }
@@ -18527,21 +18949,29 @@ impl Selector {
     ) -> Res<Cond> {
         let ty = rhs.ty();
         if ty == Scalar::POINTER || ty == Scalar::BOOLEAN {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "comparing two computed pointers or booleans (not catalogued) is",
-            ));
+            )?;
         }
-        if expr_has_call(rhs) {
-            return Err(unsupported(
+        let calls = expr_has_call(rhs);
+        if calls {
+            // Best effort (bead domain-pascal-5kgg): the left operand,
+            // computed before the call and live across it, in a
+            // callee-saved register (12.4 R3); the call's D0 compared.
+            best_effort(
                 self.span,
                 "a comparison of a computed value with one whose evaluation calls (a function, \
                  M$ARITH, `min`/`max`: not catalogued, codegen-patterns 7.1) is",
-            ));
+            )?;
         }
         let r = match self.eval(rhs)? {
             Val::Tmp(r) => r,
-            Val::Reg(Reg::D(_)) => return Err(unsupported(self.span, HELD_FOR_REUSE)),
+            Val::Reg(Reg::D(0)) if calls => 0,
+            Val::Reg(Reg::D(r)) => {
+                best_effort(self.span, HELD_FOR_REUSE)?;
+                r
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -18550,7 +18980,7 @@ impl Selector {
             }
         };
         if self.cse_held_across() {
-            return Err(unsupported(self.span, SPILLED_OPERAND));
+            best_effort(self.span, SPILLED_OPERAND)?;
         }
         self.out.push(Insn::Cmp {
             size,
@@ -18681,54 +19111,56 @@ impl Selector {
     /// beads domain-pascal-kqa2, domain-pascal-9js).
     fn one_bit_test(&mut self, x: &Expr, k: u8) -> Res<()> {
         if matches!(k, 7 | 15 | 31) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "testing bit 7, 15 or 31 alone (no `btst #7`/`#15`/`#31` exists in compiled \
                  code; lead: 0xE1910A `tst.b` of a loaded word; bead domain-pascal-fhd4) is",
-            ));
+            )?;
         }
         match x {
             Expr::Call { .. } => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "testing one bit of a function's result (`btst` on D0 after a call is not \
                      seen in compiled code) is",
-                ))
+                )?;
             }
             Expr::Convert { value, .. } if value.ty().width == Width::Byte => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "testing one bit of a byte widened for the `&` (`btst` on the byte in \
                      memory, or `clr.w; move.b` first: not settled, bead domain-pascal-kqa2) is",
-                ))
+                )?;
             }
             Expr::Convert { .. } => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "testing one bit of a word widened to a longword for the `&` (an unsigned \
                      word with an integer mask: `clr.l; move.w; btst` is not seen in compiled \
                      code; beads domain-pascal-kqa2, domain-pascal-9js) is",
-                ))
+                )?;
             }
             _ => {}
         }
         let r = match self.eval(x)? {
             Val::Reg(Reg::D(r)) | Val::Tmp(r) => r,
-            Val::Mem(_) if x.ty().width == Width::Byte => {
-                return Err(unsupported(
-                    self.span,
-                    "testing one bit of a byte variable in memory (`btst` on the byte, or the \
-                     byte loaded first: not settled, bead domain-pascal-kqa2) is",
-                ))
-            }
-            Val::Mem(_) if self.test_as_value => {
-                return Err(unsupported(
-                    self.span,
-                    "one bit of a variable in memory as a boolean value (which register takes \
-                     the `s<cc>` after the load is not settled, bead domain-pascal-uwfe) is",
-                ))
-            }
             Val::Mem(ea) => {
+                // Best effort (bead domain-pascal-5kgg): loaded, then
+                // `btst` in the register.
+                if x.ty().width == Width::Byte {
+                    best_effort(
+                        self.span,
+                        "testing one bit of a byte variable in memory (`btst` on the byte, or \
+                         the byte loaded first: not settled, bead domain-pascal-kqa2) is",
+                    )?;
+                } else if self.test_as_value {
+                    best_effort(
+                        self.span,
+                        "one bit of a variable in memory as a boolean value (which register \
+                         takes the `s<cc>` after the load is not settled, bead \
+                         domain-pascal-uwfe) is",
+                    )?;
+                }
                 let d = self.alloc_d()?;
                 self.out.push(Insn::Move {
                     size: size_of(x.ty().width),
@@ -18842,7 +19274,9 @@ impl Selector {
             // bpl.s; neg.w`, no `tst.w`): refused, not re-tested.
             Some(Insn::Mul { dst, .. }) if *dst == d => {
                 if size != Size::L {
-                    return Err(self.flags_refusal());
+                    // Best effort (bead domain-pascal-5kgg): a `tst`.
+                    dpc_syntax::diag::best_effort(self.flags_refusal())?;
+                    return Ok(true);
                 }
                 (Op::Nz, Size::L)
             }
@@ -18856,7 +19290,12 @@ impl Selector {
         match (op, cc) {
             (Op::AddSub | Op::Nz, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl) => Ok(false),
             (Op::AddSub, Cond::Le | Cond::Gt) => Ok(true),
-            _ => Err(self.flags_refusal()),
+            // Best effort (bead domain-pascal-5kgg): a `tst` (N and Z of
+            // the value, V and C clear), right for every relation with 0.
+            _ => {
+                dpc_syntax::diag::best_effort(self.flags_refusal())?;
+                Ok(true)
+            }
         }
     }
 
@@ -18938,7 +19377,7 @@ impl Selector {
         }
         let unit = field.unit;
         if field.width == 8 * unit.bytes() {
-            return Err(unsupported(self.span, Self::FILLS_UNIT));
+            best_effort(self.span, Self::FILLS_UNIT)?;
         }
         let top = field.shift + field.width == 8 * unit.bytes();
         if top && ty.width == unit {
@@ -19016,10 +19455,10 @@ impl Selector {
             return Err(unsupported(self.span, "assigning to a parameter is"));
         }
         if self.addr_needs_reg(addr) && self.value_needs_reg(value) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a store whose destination and value both need a register is",
-            ));
+            )?;
         }
         let unit = field.unit;
         let usize_ = size_of(unit);
@@ -19032,7 +19471,7 @@ impl Selector {
             ));
         }
         if !boolean && field.width == 8 * unit.bytes() {
-            return Err(unsupported(self.span, Self::FILLS_UNIT));
+            best_effort(self.span, Self::FILLS_UNIT)?;
         }
         let and_mem = |s: &mut Self, dst: &Ea, keep: i64| {
             s.out.push(Insn::AluImm {
@@ -19055,10 +19494,10 @@ impl Selector {
             if field.width == 1 {
                 // A one-bit field of another type: `bset`/`bclr` or
                 // `andi`/`ori`, not catalogued.
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "a constant stored into a one-bit packed field that is not a boolean is",
-                ));
+                )?;
             }
             let v = (c << field.shift) & m;
             if v != m {
@@ -19249,10 +19688,10 @@ impl Selector {
                         // (0xE19DE6 `andi.b #-97,(2,A1); move.b (2,A0),D0;
                         // andi.b #96,D0; or.b D0,(2,A1)`); the general
                         // form of a copy is not catalogued.
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "copying a packed field that is not a boolean into another is",
-                        ));
+                        )?;
                     }
                     if value.ty().bytes() < unit.bytes() {
                         return Err(unsupported(
@@ -19400,8 +19839,10 @@ impl Selector {
                 }
                 if w == Width::Byte {
                     // A one-byte set (codegen-patterns 5.1, "One-byte
-                    // sets"): only the test in memory has sites.
-                    return Err(Self::byte_set_whole(self.span));
+                    // sets"): only the test in memory has sites.  Best
+                    // effort (bead domain-pascal-5kgg): the byte loaded,
+                    // `btst #k` on it.
+                    dpc_syntax::diag::best_effort(Self::byte_set_whole(self.span))?;
                 }
                 let (ea, lw) = if narrow && w == Width::Long && k < 16 {
                     (self.byte_of(ea, 2)?, Width::Word)
@@ -19409,7 +19850,8 @@ impl Selector {
                     (ea, w)
                 };
                 if matches!(k, 7 | 15 | 31) {
-                    return Err(Self::sign_member(self.span));
+                    // Best effort: `btst #k` like any other member.
+                    dpc_syntax::diag::best_effort(Self::sign_member(self.span))?;
                 }
                 let d = self.alloc_d()?;
                 self.out.push(Insn::Move {
@@ -19431,8 +19873,22 @@ impl Selector {
                 });
                 return Ok((None, Cond::Ne));
             }
+            // A held one-byte set, or member 7, 15 or 31 of a held set, as
+            // a value: best effort (bead domain-pascal-5kgg), `btst #k` on
+            // the register as above.
+            Val::Reg(Reg::D(r)) => {
+                if w == Width::Byte {
+                    dpc_syntax::diag::best_effort(Self::byte_set_whole(self.span))?;
+                } else {
+                    dpc_syntax::diag::best_effort(Self::sign_member(self.span))?;
+                }
+                self.out.push(Insn::BtstImm {
+                    bit: k as u8,
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                return Ok((None, Cond::Ne));
+            }
             _ if w == Width::Byte => return Err(Self::byte_set_whole(self.span)),
-            Val::Reg(Reg::D(_)) => return Err(Self::sign_member(self.span)),
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -19441,10 +19897,10 @@ impl Selector {
             }
         };
         if w == Width::Byte {
-            return Err(Self::byte_set_whole(self.span));
+            dpc_syntax::diag::best_effort(Self::byte_set_whole(self.span))?;
         }
         if matches!(k, 7 | 15 | 31) {
-            return Err(Self::sign_member(self.span));
+            dpc_syntax::diag::best_effort(Self::sign_member(self.span))?;
         }
         self.out.push(Insn::BtstImm {
             bit: k as u8,
@@ -19501,15 +19957,27 @@ impl Selector {
     ///   ×3; which elements are guarded is not settled).
     fn word_set_const(&mut self, elem: &Expr, set: &Expr) -> Res<()> {
         match set {
-            Expr::Const { .. } if elem_indexed(elem) => Err(Self::indexed_member(self.span)),
-            Expr::Const { value, .. } if (0..128).contains(&(*value & 0xffff)) => Ok(()),
-            Expr::Const { .. } => Err(unsupported(
-                self.span,
-                "`in` with a run-time element on a one-word constant set that `moveq` cannot \
-                 load (`move.w #c` with an `integer` element at FILE_$PRIV_LOCK 0xE5F114, \
-                 `move.l #c` with `0..65535` ones in DISK_: not settled, codegen-patterns \
-                 5.1) is",
-            )),
+            Expr::Const { value, .. } => {
+                if elem_indexed(elem) {
+                    // Best effort (bead domain-pascal-5kgg): the element
+                    // first, then the constant.
+                    dpc_syntax::diag::best_effort(Self::indexed_member(self.span))?;
+                }
+                const MOVEQ: &str = "`in` with a run-time element on a one-word constant set \
+                                     that `moveq` cannot load (`move.w #c` with an `integer` \
+                                     element at FILE_$PRIV_LOCK 0xE5F114, `move.l #c` with \
+                                     `0..65535` ones in DISK_: not settled, codegen-patterns \
+                                     5.1) is";
+                if (0..128).contains(&(*value & 0xffff)) {
+                    Ok(())
+                } else if (0..=0xffff).contains(value) {
+                    // Best effort: `move.l #c` ([`Self::set_member_reg`]'s
+                    // load), bits 16..31 clear.
+                    best_effort(self.span, MOVEQ)
+                } else {
+                    Err(unsupported(self.span, MOVEQ))
+                }
+            }
             _ => Err(unsupported(
                 self.span,
                 "`in` on a one-word set variable with an element that is not constant \
@@ -19554,12 +20022,12 @@ impl Selector {
             && matches!(&self.out[i - 1],
                 Insn::Lea { dst, .. } | Insn::Movea { dst, .. } if *dst == a);
         if set_just_before {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "`in` on a one-word constant set with an element through an address register \
                  set just before (the constant first at ROUTE_$INCOMING 0xE878F8, ROUTE_$SERVICE \
                  0xE6A0BC; the element first at 0xE6A1F4: not settled, codegen-patterns 5.1) is",
-            ));
+            )?;
         }
         Ok(())
     }
@@ -19640,12 +20108,12 @@ impl Selector {
                     return Err(unsupported(self.span, "this `in` element is"));
                 };
                 if (-128..128).contains(&(*value as i32 as i64)) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "`in` on a constant set that `moveq` loads with a `0..65535` element \
                          (`clr.l; moveq; move.w`: no site, the 10 zero-extended elements are \
                          tested against `move.l #0x7fe`, codegen-patterns 5.1) is",
-                    ));
+                    )?;
                 }
                 if elem_indexed(word) {
                     return Err(Self::indexed_member(self.span));
@@ -20118,11 +20586,11 @@ impl Selector {
     /// when the word is used, one of 32 and above wraps).
     fn set_of(&mut self, elem: &Expr, w: Width) -> Res<u8> {
         if w == Width::Byte {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "`[k]` with a run-time member as a one-byte set (AREA 0xE08398 builds it in a \
                  word: not reproduced; codegen-patterns 5.1, \"One-byte sets\") is",
-            ));
+            )?;
         }
         let v = self.eval(elem)?;
         let d = self.alloc_d()?;
@@ -20186,11 +20654,11 @@ impl Selector {
         if w == Width::Byte {
             // A one-byte set is widened to a word when combined with one
             // (lowering's `set_value`); one-byte operations have no site.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a set operation on one-byte sets as a value (no site; codegen-patterns 5.1, \
                  \"One-byte sets\") is",
-            ));
+            )?;
         }
         let konst = |e: &Expr| matches!(e, Expr::Const { .. });
         match op {
@@ -20361,20 +20829,17 @@ impl Selector {
             if ((*c as u64) & all).count_ones() == 1);
         if w == Width::Byte && !one_member {
             // Only `bset`/`bclr` of one member is seen on a one-byte set.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "updating a one-byte set other than by one constant member (several constant \
                  members or a set: no site; `s - [k]` at AREA 0xE08398 builds the member in a \
                  word: not reproduced; codegen-patterns 5.1, \"One-byte sets\") is",
-            ));
+            )?;
         }
         if let Expr::Const { value: c, .. } = &**rhs {
             let mask = (*c as u64) & all;
             if mask == 0 {
-                return Err(unsupported(
-                    self.span,
-                    "adding or removing the empty set `[]` is",
-                ));
+                best_effort(self.span, "adding or removing the empty set `[]` is")?;
             }
             let dst = self.ea_of(addr)?;
             if mask.count_ones() == 1 {
@@ -20491,11 +20956,11 @@ impl Selector {
             // #3,A2`), which `dpc` does not do.
             let offset = o + offset;
             if offset == 0 {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "an element of a stepped array at displacement 0 (`(An)+`, \
                      codegen-patterns 7.4) is",
-                ));
+                )?;
             }
             if !(-0x8000..0x8000).contains(&offset) {
                 return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
@@ -20521,13 +20986,13 @@ impl Selector {
                         || neg_form(scale)
                         || !(-128..128).contains(&(*o + offset))
                     {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "an array element in the unit's data addressed absolutely \
                              (--a5-absolute) other than as the routine's first static reference, \
                              within a byte, in `x[i] := x[i] ± 1` loaded, changed and stored \
                              (AUDIT_$SUSPEND 0xE70DC0, the only sites; codegen-patterns 4) is",
-                        ));
+                        )?;
                     }
                     let mut a = None;
                     let x = self.index_reg_with(index, scale, &mut |s| {
@@ -20562,40 +21027,45 @@ impl Selector {
                 let bias = self.symbol_bias(name, *o)?;
                 let disp = o + offset - bias;
                 if bias != 0 && (-128..128).contains(&disp) {
-                    return Err(unsupported(
+                    best_effort(
                         self.span,
                         "an element within a byte of the base of an overlay section of more \
                          than 0x8000 bytes reached from 60000 bytes in (all the image's 81 are \
                          beyond a byte: not seen, codegen-patterns 5.2) is",
-                    ));
+                    )?;
                 }
                 let imm = biased_symbol(name, bias);
                 let (x, a) = self.other_unit_index(name, &imm, index, scale)?;
                 if self.base_reused && !(-128..128).contains(&disp) {
-                    return Err(unsupported(self.span, KEPT_BASE_LEA));
+                    best_effort(self.span, KEPT_BASE_LEA)?;
                 }
                 return self.split_element_ea(a, x, index, disp);
             }
-            Addr::Indirect { base: p, offset: o } if scale == 1 => {
-                let (x, a) = self.pointer_index(p, index)?;
+            Addr::Indirect { base: p, offset: o } => {
+                if scale != 1 {
+                    // Best effort (bead domain-pascal-5kgg): the index
+                    // scaled first, then the pointer's load, as for bytes.
+                    best_effort(
+                        self.span,
+                        "an element of more than 1 byte of an array through a pointer loaded from \
+                         memory (the pointer's load between the index's value and its scaling or \
+                         after the scaling, no rule found: tools/boolsurvey.py ebase, \
+                         codegen-patterns 5.2; bead domain-pascal-nqg1) is",
+                    )?;
+                }
+                let (x, a) = self.pointer_index(p, index, scale)?;
                 return self.split_element_ea(a, x, index, o + offset);
             }
-            Addr::Indirect { .. } => {
-                return Err(unsupported(
-                    self.span,
-                    "an element of more than 1 byte of an array through a pointer loaded from \
-                     memory (the pointer's load between the index's value and its scaling or \
-                     after the scaling, no rule found: tools/boolsurvey.py ebase, \
-                     codegen-patterns 5.2; bead domain-pascal-nqg1) is",
-                ))
-            }
-            Addr::OtherStatic { .. } => {
-                return Err(unsupported(
+            Addr::OtherStatic { section, offset: o } => {
+                // Best effort (bead domain-pascal-5kgg): the block's base
+                // as for its scalars ([`Self::other_base`]).
+                best_effort(
                     self.span,
                     "an element of an array in another data section's block (each element's \
                      block load, NAME_$FORK 0xE73EAC, and the block's register across branch \
                      targets: not settled, codegen-patterns 11; bead domain-pascal-hxwq) is",
-                ))
+                )?;
+                (self.other_base(section)?, *o)
             }
             _ => {
                 return Err(unsupported(
@@ -20912,7 +21382,9 @@ impl Selector {
     ) -> Res<(u8, u8)> {
         self.base_reused = false;
         if self.in_loop() {
-            return Err(self.other_unit_in_loop());
+            // Best effort (bead domain-pascal-5kgg): the base loaded for the
+            // element, in the loop.
+            dpc_syntax::diag::best_effort(self.other_unit_in_loop())?;
         }
         if let Expr::Convert { value, ty, .. } = index {
             // A word zero-extended into a `.l` index, `clr.l Dn; move.w
@@ -20935,33 +21407,39 @@ impl Selector {
             let held = matches!(&**value, Expr::Load { addr: Addr::Frame(o), .. }
                 if matches!(self.pinned(*o), Some(Reg::D(_))));
             if zext && !held {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "a zero-extended `.l` index of another unit's array read from memory (the \
                      base between the `clr.l` and the `move.w` or after them: both seen, \
                      0xE039BA and 0xE085B8 for a parameter's slot, 0xE0316C and 0xE02904 \
                      through a pointer; codegen-patterns 5.2, \"Word indices used as `.l`\"; \
                      bead domain-pascal-wkg) is",
-                ));
+                )?;
             }
         }
         let here = (self.stmt_start, self.span);
         if self.other_elem == Some(here) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "a statement with two elements of other units' arrays (FIM_$ACKNOWLEDGE \
                  0xE0A972..0xE0A994 and 10 like it: the value's index in full, the \
                  destination's index load, the value's base, then the destination's scaling \
                  and base; not modelled, codegen-patterns 5.2; bead domain-pascal-0r1v) is",
-            ));
+            )?;
         }
         self.other_elem = Some(here);
         if self.other_syms.iter().any(|s| s == sym) {
-            let a = self.held_other_base(sym, imm, index)?;
-            self.split_elems += 1;
-            let x = self.index_reg(index, scale)?;
-            self.base_reused = true;
-            return Ok((x, a));
+            match self.held_other_base(sym, imm, index) {
+                Ok(a) => {
+                    self.split_elems += 1;
+                    let x = self.index_reg(index, scale)?;
+                    self.base_reused = true;
+                    return Ok((x, a));
+                }
+                // Best effort (bead domain-pascal-5kgg): a base of its own,
+                // loaded below, which is always correct.
+                Err(d) => dpc_syntax::diag::best_effort(d)?,
+            }
         }
         let mut sym_read = false;
         walk_expr(index, &mut |n| {
@@ -20973,12 +21451,12 @@ impl Selector {
             // SIO_$INIT 0xE32C9C..0xE32CB4 `movea.l #0xE2C9F0,A1; move.w
             // (5000,A1),D0; ...; lea (0,A1,D0.w),A1`: the base first, the
             // index read through it (8 operands); `dpc` reads it absolutely.
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "an element of another unit's array whose index is read from the same variable \
                  (through the base's register, SIO_$INIT 0xE32CA2; codegen-patterns 5.2; bead \
                  domain-pascal-lnzy) is",
-            ));
+            )?;
         }
         self.other_syms.push(sym.to_string());
         self.split_elems += 1;
@@ -21014,15 +21492,15 @@ impl Selector {
                 // The zero-extension's `clr.l` and copy, checked after
                 // scheduling ([`ZEXT_BASE_SCHEDULED`]).
                 let r = Ea::Reg(Reg::D(x));
-                let clr = (start..base_at).find(|&k| {
-                    matches!(&self.out[k], Insn::Clr { size: Size::L, dst } if *dst == r)
-                });
-                let mov = (start..base_at).rev().find(|&k| {
-                    matches!(&self.out[k], Insn::Move { size: Size::W, dst, .. } if *dst == r)
-                });
+                let clr = (start..base_at).find(
+                    |&k| matches!(&self.out[k], Insn::Clr { size: Size::L, dst } if *dst == r),
+                );
+                let mov = (start..base_at).rev().find(
+                    |&k| matches!(&self.out[k], Insn::Move { size: Size::W, dst, .. } if *dst == r),
+                );
                 match (clr, mov) {
                     (Some(c), Some(m)) if c < m => self.zext_bases.push((c, m, base_at, self.span)),
-                    _ => return Err(unsupported(self.span, ZEXT_BASE_SCHEDULED)),
+                    _ => best_effort(self.span, ZEXT_BASE_SCHEDULED)?,
                 }
             }
         }
@@ -21218,16 +21696,16 @@ impl Selector {
     /// read through the same pointer, loaded once for both (0xE1B2E0
     /// `movea.l (8,A6),A0; move.w (980,A0),D1; lea (0,A0,D1.w),A1`;
     /// 0xE4DE58), is refused.
-    fn pointer_index(&mut self, p: &Expr, index: &Expr) -> Res<(u8, u8)> {
+    fn pointer_index(&mut self, p: &Expr, index: &Expr, scale: u32) -> Res<(u8, u8)> {
         if shares_pointer(index, p) {
-            return Err(unsupported(
+            best_effort(
                 self.span,
                 "an element of an array through a pointer that its index is read through too \
                  (the pointer loaded once for both, 0xE1B2E0; codegen-patterns 5.2) is",
-            ));
+            )?;
         }
         self.split_elems += 1;
-        let x = self.index_reg(index, 1)?;
+        let x = self.index_reg(index, scale)?;
         let a = self.eval_a(p)?;
         Ok((x, a))
     }
@@ -22207,10 +22685,7 @@ mod tests {
     /// ROUTE_$FIND_PORTP's `f := port; return` in a loop: not).
     #[test]
     fn result_positions_last_assignments() {
-        let st = |kind| Stmt {
-            kind,
-            span: span(),
-        };
+        let st = |kind| Stmt { kind, span: span() };
         let set = || st(StmtKind::SetResult(konst(0, Scalar::POINTER)));
         let cond = || IrCond::Test(load(Addr::Static(0), Scalar::BOOLEAN));
         let if_ = |t: Vec<Stmt>, e: Vec<Stmt>| {
@@ -22229,10 +22704,7 @@ mod tests {
         let body = vec![if_(vec![set()], vec![set()]), st(StmtKind::Label(0))];
         assert_eq!(result_positions(&body), pos(2, 2, false));
         // `f := nil; return` in a `then`, and a final `f := nil`.
-        let body = vec![
-            if_(vec![set(), st(StmtKind::Return)], vec![]),
-            set(),
-        ];
+        let body = vec![if_(vec![set(), st(StmtKind::Return)], vec![]), set()];
         assert_eq!(result_positions(&body), pos(2, 1, true));
         // In a loop: not last.
         let body = vec![st(StmtKind::While {

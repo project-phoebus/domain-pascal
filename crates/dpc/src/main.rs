@@ -7,7 +7,7 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
-//!            [--merge-constant-stores]
+//!            [--merge-constant-stores] [--strict]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! `--parse-only` stops after parsing (syntax errors are reported with
@@ -116,6 +116,17 @@
 //! it from the image, per map segment, and `tools/srcsurvey.py` gives the
 //! option to the ../source modules whose segments merge.  Shapes neither
 //! kind of unit settles are refused either way (`dpc-m68k`, `isel/merge.rs`).
+//!
+//! `--strict`: every refusal is an error.  Without it (the default, owner
+//! 2026-10-17, bead domain-pascal-5kgg) a refusal that only guards the
+//! image's exact form (a register choice, an instruction order, a hold or
+//! a reload, which of two seen forms), at a site where dpc has a correct
+//! code path, is reported as a warning `best effort (not byte-identical):
+//! ...` and that path is taken (`dpc_syntax::diag::best_effort`): the
+//! output computes the right values but is not checked against the image.
+//! Refusals of constructs dpc does not implement stay errors either way.
+//! The conformance harness, the golden tests and `tools/srcsurvey.py` use
+//! `--strict`; `tools/linktest.py` and ../source's build do not.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -135,7 +146,7 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
-                     [--merge-constant-stores] \
+                     [--merge-constant-stores] [--strict] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas";
 
 /// Where to stop.
@@ -167,6 +178,9 @@ struct Args {
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
     merge_constant_stores: bool,
+    /// `--strict`: every refusal is an error, also those with a
+    /// best-effort path (`dpc_syntax::diag::best_effort`).
+    strict: bool,
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
@@ -283,6 +297,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
     let mut merge_constant_stores = false;
+    let mut strict = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-I" => include_dirs.push(argv.next().ok_or("-I needs a directory")?.into()),
@@ -418,6 +433,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 merge_constant_stores = true;
             }
+            "--strict" => {
+                if strict {
+                    return Err("--strict given more than once".into());
+                }
+                strict = true;
+            }
             "-h" | "--help" => return Err(String::new()),
             "--parse-only" => stop = Stop::AfterParse,
             "--dump-ast" => stop = Stop::DumpAst,
@@ -455,6 +476,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         schedule: schedule.unwrap_or_default(),
         data_bases,
         merge_constant_stores,
+        strict,
     })
 }
 
@@ -760,12 +782,16 @@ fn run(args: &Args) -> ExitCode {
     let mut sm = SourceMap::new();
     let mut warnings = Vec::new();
     let panic_now = test_panic_setup();
+    dpc_syntax::diag::set_strict(args.strict);
     let result = backstop(|| {
         if panic_now {
             panic!("DPC_INTERNAL_PANIC_FOR_TEST");
         }
         compile(args, &mut sm, &mut warnings)
     });
+    // The refusals taken on a best-effort path (not `--strict`), as
+    // warnings: the output is correct but not checked against the image.
+    warnings.extend(dpc_syntax::diag::take_best_effort());
     for d in &warnings {
         eprintln!("{}", d.render_with_source(&sm, PROG));
     }

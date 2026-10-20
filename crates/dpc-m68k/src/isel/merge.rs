@@ -73,7 +73,7 @@ use std::borrow::Cow;
 use dpc_ir::{Addr, Expr, Function, Scalar, Stmt, StmtKind, Width};
 use dpc_syntax::Span;
 
-use super::{expr_has_call, register_locals, split_addr, unsupported, Res};
+use super::{best_effort, expr_has_call, register_locals, split_addr, Res};
 
 /// The stores that stand for two statements' word stores merged (the
 /// first statement's span and the longword's address).
@@ -338,13 +338,16 @@ impl<'f> Ctx<'f> {
             match pair {
                 Pair::No => self.end_run(&stmts, &mut run, &mut merge_at, &mut drop)?,
                 Pair::Copy => {
-                    return Err(unsupported(
+                    // Best effort: the two copies apart, in the source's
+                    // order (bead domain-pascal-5kgg).
+                    best_effort(
                         span,
                         "a store adjacent to the previous statement's store, both copying \
                          adjacent memory (one longword: merged at ROUTE_$SHORT_PORT 0xE69C16, \
                          apart at RIP_$TABLE_D 0xE68ECA in the same kind of unit; ref 3.15.3 \
                          p. 3-57, codegen-patterns 13), is",
-                    ))
+                    )?;
+                    self.end_run(&stmts, &mut run, &mut merge_at, &mut drop)?;
                 }
                 Pair::Consts {
                     first,
@@ -353,7 +356,8 @@ impl<'f> Ctx<'f> {
                     base,
                 } if !self.merge => {
                     if !apart_without_merging(first, second, ascending, base) {
-                        return Err(unsupported(
+                        // Best effort: apart (bead domain-pascal-5kgg).
+                        best_effort(
                             span,
                             format!(
                                 "a store adjacent to the previous statement's store, of two \
@@ -363,7 +367,7 @@ impl<'f> Ctx<'f> {
                                 if ascending { "ascending" } else { "descending" },
                                 base_words(base)
                             ),
-                        ));
+                        )?;
                     }
                 }
                 Pair::Consts {
@@ -417,10 +421,8 @@ impl<'f> Ctx<'f> {
                               and split again at FIM_$BUILD_DF 0xE0A896, apart at 0xE14CBC)"
                             .to_string(),
                     };
-                    return Err(unsupported(
-                        span,
-                        format!("under --merge-constant-stores, {what} is"),
-                    ));
+                    // Best effort: apart (bead domain-pascal-5kgg).
+                    best_effort(span, format!("under --merge-constant-stores, {what} is"))?;
                 }
             }
             prev = Some(k);
@@ -512,12 +514,14 @@ impl<'f> Ctx<'f> {
             // KBD_$INIT 0xE33378 stores 0x38..0x3E as `clr.w (0x38,A2);
             // clr.l (0x3a,A2); clr.w (0x3e,A2)` (the original's order is
             // not known).
-            return Err(unsupported(
+            // Best effort: the first two as decided, the rest apart (bead
+            // domain-pascal-5kgg).
+            best_effort(
                 stmts[r[3]].span,
                 "under --merge-constant-stores, a fourth word constant stored above three \
                  (runs of four words pair from the first at TTY_$K_RESET 0xE67322, not at \
                  KBD_$INIT 0xE33378; not settled, bead domain-pascal-qb9q) is",
-            ));
+            )?;
         }
         match decision {
             Decision::Merge => {
@@ -529,11 +533,12 @@ impl<'f> Ctx<'f> {
                 drop[r[1]] = true;
             }
             Decision::Apart if r.len() == 3 => {
-                return Err(unsupported(
+                // Best effort: all three apart (bead domain-pascal-5kgg).
+                best_effort(
                     stmts[r[2]].span,
                     "under --merge-constant-stores, a third word constant after two kept \
                      apart (not seen) is",
-                ));
+                )?;
             }
             Decision::Apart => {}
         }
@@ -581,15 +586,18 @@ impl<'f> Ctx<'f> {
     fn decide(&self, s1: &Stmt, s2: &Stmt) -> Res<Decision> {
         let (a1, _) = self.mem_store(s1).unwrap();
         let (a2, _) = self.mem_store(s2).unwrap();
-        let refuse = |what: &str| {
-            Err(unsupported(
+        // Best effort: apart, the source's own stores (bead
+        // domain-pascal-5kgg).
+        let refuse = |what: &str| -> Res<Decision> {
+            best_effort(
                 s2.span,
                 format!(
                     "under --merge-constant-stores, two word constants stored to adjacent \
                      words {what} (no such pair in a merging unit, codegen-patterns 13; bead \
                      domain-pascal-qb9q) is"
                 ),
-            ))
+            )?;
+            Ok(Decision::Apart)
         };
         if a1.unwrap_volatile().1.is_some() || a2.unwrap_volatile().1.is_some() {
             return refuse("of a volatile object");

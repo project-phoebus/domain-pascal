@@ -294,7 +294,10 @@ fn compile_with(name: &str, src: &str, opts: &[&str]) -> Result<String, (Option<
     let path = dir.join("m.pas");
     std::fs::write(&path, src).unwrap();
     let out = dir.join("m.s");
+    // `--strict`: these tests pin the image's forms and the refusals
+    // (bead domain-pascal-5kgg; `compile_default` for the default mode).
     let run = dpc()
+        .arg("--strict")
         .args(opts)
         .arg("-o")
         .arg(&out)
@@ -3669,6 +3672,7 @@ fn adjacent_constant_stores_per_unit() {
     .unwrap();
     assert!(dpc().arg(&d).output().unwrap().status.success());
     let out = dpc()
+        .arg("--strict")
         .arg("--merge-constant-stores")
         .arg(&d)
         .output()
@@ -4433,6 +4437,80 @@ end;
     let (_, err) = compile_with("d59a_unit", unit, &[]).unwrap_err();
     assert!(
         err.contains("narrowing a longword local, unit or enclosing routine's variable to a byte"),
+        "{err}"
+    );
+}
+
+/// Compile `src` in the default (not `--strict`) mode with `opts`: the
+/// exit code, the output text when it succeeded, and stderr.
+fn compile_default(name: &str, src: &str, opts: &[&str]) -> (Option<i32>, Option<String>, String) {
+    let dir = scratch(name);
+    let path = dir.join("m.pas");
+    std::fs::write(&path, src).unwrap();
+    let out = dir.join("m.s");
+    let run = dpc()
+        .args(opts)
+        .arg("-o")
+        .arg(&out)
+        .arg(&path)
+        .output()
+        .unwrap();
+    let asm = run
+        .status
+        .success()
+        .then(|| std::fs::read_to_string(&out).unwrap());
+    (
+        run.status.code(),
+        asm,
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+    )
+}
+
+/// Bead domain-pascal-5kgg: a refusal with a best-effort path is an error
+/// under `--strict` and a warning by default, where the unit compiles; a
+/// refusal of a construct dpc does not implement is an error either way.
+#[test]
+fn best_effort_warns_by_default_and_strict_refuses() {
+    // Two byte constants stored to adjacent bytes off A5 in a unit that
+    // does not merge (codegen-patterns 13): kept apart by default.
+    let src = "module m;
+type bytes_t = record x: char; y: char; end;
+var bb: bytes_t;
+procedure p;
+begin
+  bb.x := 'a';
+  bb.y := 'b';
+end;
+";
+    let what = "a store adjacent to the previous statement's store, of two constants";
+    let (_, err) = compile_with("be_strict", src, &[]).unwrap_err();
+    assert!(err.contains(&format!("m.pas:7:3: error: {what}")), "{err}");
+    assert!(!err.contains("best effort"), "{err}");
+    let (code, asm, err) = compile_default("be_default", src, &[]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        err.contains(&format!(
+            "m.pas:7:3: warning: best effort (not byte-identical): {what}"
+        )),
+        "{err}"
+    );
+    assert_eq!(err.matches("warning: best effort").count(), 1, "{err}");
+    let asm = asm.unwrap();
+    assert!(asm.contains("\tmove.b\t#0x61,(%a5)\n"), "{asm}");
+    assert!(asm.contains("\tmove.b\t#0x62,(1,%a5)\n"), "{asm}");
+    // `--strict` twice is a usage error.
+    let (code, _, err) = compile_default("be_twice", src, &["--strict", "--strict"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("--strict given more than once"), "{err}");
+    // An unimplemented construct stays an error by default.
+    let (code, _, err) = compile_default(
+        "be_unimpl",
+        "module u;\nprocedure p(var x: integer);\nbegin\n  case x of 1: x := 2; end;\nend;\n",
+        &[],
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("error: a `case` with one label is not supported yet"),
         "{err}"
     );
 }

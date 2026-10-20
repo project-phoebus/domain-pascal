@@ -237,7 +237,9 @@ def cmd_run(a):
         fh.write(text)
     print('localsurvey: %s at %s (%s), %s' % (os.path.normpath(a.source), a.rev, commit[:12],
                                              a.module))
-    res = subprocess.run([a.dpc, '-I', '.', '--dump-locals', a.module], cwd=tree,
+    # --strict: a fidelity survey; best-effort lowering paths are not the
+    # image's (bead domain-pascal-5kgg)
+    res = subprocess.run([a.dpc, '-I', '.', '--strict', '--dump-locals', a.module], cwd=tree,
                          capture_output=True, text=True)
     if res.returncode != 0:
         sys.stderr.write(res.stderr)

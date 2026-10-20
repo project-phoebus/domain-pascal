@@ -12,6 +12,13 @@ Every entry carries a **status**:
   (agent notes, C comments, `docs/pascal-abi.md`) but not re-disassembled
   for this file.  Re-check before relying on it.
 - **Uncertain**: a hypothesis, or a question that is still open.
+- **Best effort**: not a status of the image's patterns but of dpc's
+  output where an entry is Uncertain or a choice is not settled: dpc
+  (without `--strict`) emits code that computes the right values with a
+  form of its own choosing, prints `best effort (not byte-identical): ...`,
+  and the form is not checked against the image (owner 2026-10-17, bead
+  domain-pascal-5kgg).  `dpc --strict` refuses such shapes instead; the
+  golden tests, the conformance runs and `tools/srcsurvey.py` are strict.
 
 Addresses are SR10.2 SAU2 virtual addresses.  Names come from
 `~/src/domainos-archeology/sau2-maps/domain_os.10.2.map`.  A routine the map

@@ -79,7 +79,10 @@ fn golden() {
             .join(name.replace(['/', '\\'], "_"))
             .with_extension("s");
         let extra = std::fs::read_to_string(src.with_extension("args")).unwrap_or_default();
+        // `--strict`: the expected outputs are the image's forms, never a
+        // best-effort path (bead domain-pascal-5kgg).
         let run = Command::new(env!("CARGO_BIN_EXE_dpc"))
+            .arg("--strict")
             .args(extra.split_whitespace())
             .arg("-o")
             .arg(&out_path)

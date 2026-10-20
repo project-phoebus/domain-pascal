@@ -33,7 +33,10 @@ Steps (tests/link/README.md has the why of each):
      ASM (gas rejected dpc's output); the error count; the distinct kinds
      of its errors, normalised as tools/srcsurvey.py's refusal histogram
      does (srcsurvey.kind_of), with the type phrases of dpc's messages
-     folded to `T' first (fold_types).  The default dpc is the main
+     folded to `T' first (fold_types).  dpc runs without --strict, as
+     ../source's build does: its best-effort warnings (a form the image
+     does not settle, compiled with a correct one of dpc's own) are
+     counted per module and ranked in the report.  The default dpc is the main
      checkout's target/stable/bin/dpc, also from a git worktree.
   4. The deep pass (unless --no-deep; deep_pass): dpc stops at the first
      phase that fails, so a sema or IR refusal hides every codegen
@@ -139,6 +142,7 @@ class Result:
         self.kinds = list(kinds)    # distinct kinds, in order of appearance
         self.first = first          # the first error message, verbatim
         self.deep = None            # Deep: the kinds over every phase (deep_pass)
+        self.best_effort = []       # kinds of dpc's best-effort warnings
 
     @property
     def first_kind(self):
@@ -210,12 +214,36 @@ def _distinct(seq):
     return out
 
 
+# The prefix of dpc's best-effort warnings: a refusal of a form the image
+# does not settle, compiled anyway with a correct form of dpc's own
+# (`dpc --strict' refuses it; dpc_syntax::diag::best_effort, bead
+# domain-pascal-5kgg).  The link test runs dpc without --strict, as
+# ../source's build does.
+BEST_EFFORT = 'best effort (not byte-identical): '
+
+
+def best_effort_ranking(results):
+    """[(kind, modules, warnings)] of the best-effort warnings of the
+    modules that compile: most modules first."""
+    mods, total = collections.Counter(), collections.Counter()
+    for r in results:
+        for k in r.best_effort:
+            total[k] += 1
+        for k in set(r.best_effort):
+            mods[k] += 1
+    return sorted(((k, mods[k], total[k]) for k in total), key=lambda t: (-t[1], -t[2], t[0]))
+
+
 def dpc_result(module, returncode, stderr):
     """dpc's exit status and stderr for MODULE -> Result (status OK only
     when dpc succeeded; the caller assembles)."""
-    errs = [d for d in srcsurvey.parse_diags(stderr) if d['sev'] == 'error']
+    diags = srcsurvey.parse_diags(stderr)
+    errs = [d for d in diags if d['sev'] == 'error']
     if returncode == 0:
-        return Result(module, 'OK')
+        r = Result(module, 'OK')
+        r.best_effort = [kind_of(d['msg'][len(BEST_EFFORT):]) for d in diags
+                         if d['sev'] == 'warning' and d['msg'].startswith(BEST_EFFORT)]
+        return r
     if errs:
         return Result(module, 'REFUSED', len(errs),
                       _distinct(kind_of(d["msg"]) for d in errs),
@@ -679,10 +707,15 @@ def deep_pass_unit(deep, dpc, tree, module, work, linkmap=None):
     return deep
 
 
-def deep_all(dpc, tree, results, work, jobs, linkmap=None):
+def deep_all(dpc, tree, results, work, jobs, linkmap=None, strict=False):
     """Result.deep for every module of RESULTS that dpc refused or failed
     on (deep_pass, in parallel); an ASM module's kinds are gas's, all of
-    them (dpc compiled it); a dpc timeout is not run again."""
+    them (dpc compiled it); a dpc timeout is not run again.  STRICT: dpc
+    --strict for srcsurvey's stages (srcsurvey.DPC_STRICT); the link test
+    runs without it, as its own compiles and ../source's build do, so the
+    ranking is what still blocks after best effort (bead
+    domain-pascal-5kgg)."""
+    srcsurvey.DPC_STRICT = strict
     if os.path.isdir(os.path.join(work, 'deep')):
         shutil.rmtree(os.path.join(work, 'deep'))      # no stale module left
     todo = []
@@ -773,7 +806,8 @@ def module_lines(results):
     out = []
     for r in results:
         if r.status == 'OK':
-            out.append('OK       %s' % r.module)
+            n = len(r.best_effort)
+            out.append('OK       %s%s' % (r.module, ' (%d best-effort warning(s))' % n if n else ''))
             continue
         out.append('%-8s %s: %d error(s); first: %s' % (r.status, r.module, r.errors, r.first))
         for k in r.kinds:
@@ -860,6 +894,11 @@ def cmd_run(a):
         rep += format_closest(results)
         rep += ['', '== error kinds of the module compiles alone (dpc stops at the first '
                 'failing phase), for comparison'] + format_ranking(rank_kinds(results, False))
+    be = best_effort_ranking(results)
+    if be:
+        rep += ['', '== best-effort warnings (not byte-identical) of the modules that compile, '
+                'by modules and warnings']
+        rep += ['  %4d  %5d  %s' % (m, n, k) for k, m, n in be]
 
     rc = 0
     cmp_lines = []

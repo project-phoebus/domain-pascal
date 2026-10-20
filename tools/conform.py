@@ -901,7 +901,9 @@ def compile_pas(src, dpc, work, fragment=()):
         raise SetupError('%s not found (run `make build`)' % dpc)
     stem = os.path.splitext(os.path.basename(src))[0]
     out = os.path.join(work, stem + '.s')
-    run([dpc, '-o', out] + list(fragment) + [src])
+    # --strict: conformance never takes a best-effort path (bead
+    # domain-pascal-5kgg).
+    run([dpc, '--strict', '-o', out] + list(fragment) + [src])
     return out
 
 

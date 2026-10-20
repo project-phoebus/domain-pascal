@@ -975,10 +975,17 @@ def report(title, summary, out=sys.stdout, verbose=False):
 EXTRA_DPC_OPTS = []
 
 
+# `--strict' for every dpc run: the survey measures the refusals,
+# best-effort ones included (bead domain-pascal-5kgg).  tools/linktest.py's
+# deep pass, which runs the survey's stages, sets it False: the link test
+# ranks what still blocks after best effort, as ../source's build sees it.
+DPC_STRICT = True
+
+
 def run_dpc(dpc, tree, src, check_only=False, out=None, opts=(), timeout=None):
     """-> (dpc's exit status, its stderr); (None, its stderr so far) when
     it ran longer than TIMEOUT seconds (None: no limit)."""
-    cmd = [dpc, '-I', '.'] + EXTRA_DPC_OPTS + list(opts)
+    cmd = [dpc, '-I', '.'] + (['--strict'] if DPC_STRICT else []) + EXTRA_DPC_OPTS + list(opts)
     if check_only:
         cmd.append('--check-only')
     if out:

@@ -31,6 +31,38 @@ fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
 }
 
+/// The refusal `unsupported(span, what)` of a shape the lowering has a
+/// correct path for, refused only because the image's exact form is not
+/// settled: an error under `dpc --strict`, else a best-effort warning and
+/// `Ok` ([`dpc_syntax::diag::best_effort`]; bead domain-pascal-5kgg).
+fn best_effort(span: Span, what: impl std::fmt::Display) -> Res<()> {
+    dpc_syntax::diag::best_effort(unsupported(span, what))
+}
+
+/// The best-effort narrowing of an integer value `v` of the expression `e`
+/// to the narrower `ty` where [`assign_convert`] has no catalogued form:
+/// the low bytes of the value computed at its own width (the selector's
+/// narrowing [`Expr::Convert`], not in place: a register's low part, or
+/// the whole object read at its size), after the warning `what`; `None`
+/// when `e` is not an integer narrowed (bead domain-pascal-5kgg).
+fn narrow_best_effort(
+    p: &Program,
+    e: &SExpr,
+    v: Expr,
+    ty: Scalar,
+    span: Span,
+    what: impl std::fmt::Display,
+) -> Option<Res<Expr>> {
+    if !p.types.is_integer(e.ty) || v.ty().pointer || v.ty().bytes() <= ty.bytes() {
+        return None;
+    }
+    Some(best_effort(span, what).map(|()| Expr::Convert {
+        value: Box::new(v),
+        ty,
+        in_place: false,
+    }))
+}
+
 /// Lower `program` to IR with the default data-base policy
 /// ([`DataBaseOptions`]).
 pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
@@ -3174,13 +3206,13 @@ impl Cx<'_> {
                         (else_branch, sole_stmt(then_branch).map(|t| &t.kind))
                     {
                         if narrowing_select(p, cond, target, value) {
-                            return Err(unsupported(
+                            best_effort(
                                 s.span,
                                 "a select `if a < b then a := b` that narrows `b` into `a` (the \
                                  compare and the store at the wider width in `a`'s register, \
                                  XNS_ERROR_$SEND 0xE17A04 `move.l (A3),D5`; codegen-patterns 8, \
                                  bead domain-pascal-dzad) is",
-                            ));
+                            )?;
                         }
                     }
                     let then_ = self.seq(std::slice::from_ref(then_branch))?;
@@ -3260,7 +3292,7 @@ impl Cx<'_> {
                     let body = self.seq(std::slice::from_ref(body))?;
                     if body.is_empty() {
                         // No such loop has been looked for in the image.
-                        return Err(unsupported(s.span, "a `while` loop with an empty body is"));
+                        best_effort(s.span, "a `while` loop with an empty body is")?;
                     }
                     out.push(Stmt {
                         kind: StmtKind::While {
@@ -3430,10 +3462,10 @@ impl Cx<'_> {
                 a
             } else {
                 if volatile_access(p, rec).is_some() {
-                    return Err(unsupported(
+                    best_effort(
                         rec.span,
                         "a `with` statement over a volatile record reached at run time is",
-                    ));
+                    )?;
                 }
                 let (value, offset) = match a {
                     // A pointer's temporary: no frame slot (HINT_$ADD_NET
@@ -3643,7 +3675,7 @@ impl Cx<'_> {
         let to = bound(to)?;
         let body = self.seq(std::slice::from_ref(body))?;
         if body.is_empty() {
-            return Err(unsupported(s.span, "a `for` loop with an empty body is"));
+            best_effort(s.span, "a `for` loop with an empty body is")?;
         }
         Ok(Stmt {
             kind: StmtKind::For(ForLoop {
@@ -4341,15 +4373,15 @@ fn result_assignment(
         v
     } else {
         // Widened or narrowed as for a store (`store`, [`assign_convert`]).
-        assign_convert(p, value, v, res.ty).ok_or_else(|| {
-            unsupported(
-                value.span,
-                format!(
-                    "assigning a {vsize}-byte value to a {}-byte function result is",
-                    res.ty.bytes()
-                ),
-            )
-        })?
+        let what = format!(
+            "assigning a {vsize}-byte value to a {}-byte function result is",
+            res.ty.bytes()
+        );
+        match assign_convert(p, value, v.clone(), res.ty) {
+            Some(c) => c,
+            None => narrow_best_effort(p, value, v, res.ty, value.span, &what)
+                .unwrap_or_else(|| Err(unsupported(value.span, &what)))?,
+        }
     };
     Ok(Stmt {
         kind: StmtKind::SetResult(v),
@@ -4538,11 +4570,11 @@ fn record_result_assignment(p: &Program, r: &Routine, s: &SStmt, value: &SExpr) 
     }
     let v = value_of(p, value)?;
     if matches!(&v, Expr::Load { addr: Addr::Frame(o), .. } if *o > 0) {
-        return Err(unsupported(
+        best_effort(
             value.span,
             "a record function result assigned from a parameter passed by value (no site \
              seen) is",
-        ));
+        )?;
     }
     let ty = v.ty();
     Ok(vec![
@@ -4579,14 +4611,26 @@ fn check_record_result(body: &[Stmt], span: Span) -> Res<()> {
     });
     let last = matches!(body.last().map(|s| &s.kind), Some(StmtKind::SetResult(_)));
     if sets != 1 || !last || returns {
-        return Err(unsupported(
+        // Best effort: each assignment stores the slot and sets the
+        // result from it, a longword result as any other (bead
+        // domain-pascal-5kgg).
+        best_effort(
             span,
             "a record function result assigned other than once, by the last statement of the \
              body with no `return` (where the result slot is loaded is not seen, \
              codegen-patterns 3, \"Record results\") is",
-        ));
+        )?;
     }
     Ok(())
+}
+
+/// The copy of `bytes` bytes a best-effort assignment makes where which
+/// copy the original made is not seen (bead domain-pascal-5kgg): byte by
+/// byte (no alignment needed; the selector's `move.b` `dbf` loop, any
+/// size up to 0x8000), else by longwords (the even-address checks then
+/// apply).
+fn best_effort_chars(bytes: u32) -> bool {
+    (1..=0x8000).contains(&bytes)
 }
 
 /// `d := e` for a scalar designator `d` (ref "Assignment", p. 4-25).
@@ -4659,14 +4703,14 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             let (vb, tb) = (v.ty().bytes(), ty.bytes());
             match assign_convert(p, value, v.clone(), ty) {
                 Some(c) => c,
-                None => match store_narrow(p, value, v, ty) {
+                None => match store_narrow(p, value, v.clone(), ty) {
                     Some(Ok(c)) => c,
-                    Some(Err(why)) => return Err(unsupported(value.span, why)),
+                    Some(Err(why)) => narrow_best_effort(p, value, v, ty, value.span, &why)
+                        .unwrap_or_else(|| Err(unsupported(value.span, &why)))?,
                     None => {
-                        return Err(unsupported(
-                            value.span,
-                            format!("assigning a {vb}-byte value to a {tb}-byte object is"),
-                        ))
+                        let what = format!("assigning a {vb}-byte value to a {tb}-byte object is");
+                        narrow_best_effort(p, value, v, ty, value.span, &what)
+                            .unwrap_or_else(|| Err(unsupported(value.span, &what)))?
                     }
                 },
             }
@@ -5132,22 +5176,24 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     let chars = match (byte_copy(p, target.ty), byte_copy(p, value.ty)) {
         (ByteCopy::Chars, ByteCopy::Chars) => true,
         (ByteCopy::Unsettled(what), _) | (_, ByteCopy::Unsettled(what)) => {
-            return Err(unsupported(
+            best_effort(
                 s.span,
                 format!(
                     "assigning {what} (the original copies an array of char byte by byte, a \
                      record by longwords; how it copies this is not seen, codegen-patterns 5.2 \
                      \"Arrays of char\", bead domain-pascal-4lf1) is"
                 ),
-            ))
+            )?;
+            best_effort_chars(bytes)
         }
         (ByteCopy::Chars, ByteCopy::No) | (ByteCopy::No, ByteCopy::Chars) => {
-            return Err(unsupported(
+            best_effort(
                 s.span,
                 "assigning between an array of char and a record or array of another kind (which \
                  copy the original makes, by bytes or by longwords, is not seen; bead \
                  domain-pascal-4lf1) is",
-            ))
+            )?;
+            best_effort_chars(bytes)
         }
         (ByteCopy::No, ByteCopy::No) => false,
     };
@@ -5627,12 +5673,12 @@ fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Ex
             Width::Word => {}
         }
         if wide && !integer_constructor(p, rhs) {
-            return Err(unsupported(
+            best_effort(
                 lhs.span,
                 "`in` on a one-word constant set of a declared type with a `0..65535` element \
                  (`move.l #c` seen for integer constructors only, DISK_ 0xE6B75E; \
                  codegen-patterns 5.1) is",
-            ));
+            )?;
         }
     }
     let (set, set_width) = if wide {
@@ -5672,14 +5718,22 @@ fn byte_set_narrow(p: &Program, e: &SExpr) -> Res<Expr> {
     let byte = Scalar::unsigned(Width::Byte);
     let call = |x: &Expr| matches!(x, Expr::Call { .. });
     match &v {
+        // Best effort (bead domain-pascal-5kgg): the word's low byte,
+        // members 0..7, read whole (not in place: the local may be held in
+        // a register).
         Expr::Load {
             addr: Addr::Frame(_),
             ..
-        } => Err(unsupported(
+        } => best_effort(
             e.span,
             "assigning a one-word set local or value parameter to a one-byte set (held in a \
              register or in the frame: no site; codegen-patterns 5.1, \"One-byte sets\") is",
-        )),
+        )
+        .map(|()| Expr::Convert {
+            value: Box::new(v.clone()),
+            ty: byte,
+            in_place: false,
+        }),
         Expr::Load { addr, .. } if !matches!(addr, Addr::Volatile { .. }) => Ok(Expr::Convert {
             value: Box::new(v),
             ty: byte,
@@ -5692,11 +5746,16 @@ fn byte_set_narrow(p: &Program, e: &SExpr) -> Res<Expr> {
                 in_place: false,
             })
         }
-        _ => Err(unsupported(
+        _ => best_effort(
             e.span,
             "assigning a one-word set that is not a function result or a word in memory to a \
              one-byte set (no site; codegen-patterns 5.1, \"One-byte sets\") is",
-        )),
+        )
+        .map(|()| Expr::Convert {
+            value: Box::new(v.clone()),
+            ty: byte,
+            in_place: false,
+        }),
     }
 }
 
@@ -5715,12 +5774,12 @@ fn byte_set_narrow(p: &Program, e: &SExpr) -> Res<Expr> {
 /// D5,D6`, widen the byte into a register first: not reproduced).
 fn byte_set_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
     if lhs.value.is_none() {
-        return Err(unsupported(
+        best_effort(
             lhs.span,
             "`in` on a one-byte set with a run-time element (`clr.w; move.b; btst Dk,Dn` at \
              AREA's area_$free_slot_segments 0xE08328: not reproduced; codegen-patterns 5.1, \
              \"One-byte sets\") is",
-        ));
+        )?;
     }
     if rhs.value.is_some() {
         return Err(unsupported(
@@ -5779,10 +5838,17 @@ fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
         }
         Width::Word => Ok(v),
         Width::Byte => Ok(convert(v, Scalar::unsigned(Width::Word))),
-        Width::Long => Err(unsupported(
+        // Best effort: the low word, the ordinal of a member 0..1023 (bead
+        // domain-pascal-5kgg).
+        Width::Long => best_effort(
             x.span,
             "a set member of a 4-byte type (narrowed to a word: not catalogued) is",
-        )),
+        )
+        .map(|()| Expr::Convert {
+            value: Box::new(v),
+            ty: Scalar::unsigned(Width::Word),
+            in_place: false,
+        }),
     }
 }
 
@@ -6029,16 +6095,22 @@ fn transfer(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
         if v.ty().bytes() < ty.bytes() {
             return Ok(convert(v, ty));
         }
-        return narrow(&v, ty).ok_or_else(|| {
-            unsupported(
-                e.span,
-                format!(
-                    "a type transfer of a {}-byte integer to a {}-byte one (narrowing, as in an \
-                     assignment) is",
-                    v.ty().bytes(),
-                    ty.bytes()
-                ),
-            )
+        if let Some(n) = narrow(&v, ty) {
+            return Ok(n);
+        }
+        best_effort(
+            e.span,
+            format!(
+                "a type transfer of a {}-byte integer to a {}-byte one (narrowing, as in an \
+                 assignment) is",
+                v.ty().bytes(),
+                ty.bytes()
+            ),
+        )?;
+        return Ok(Expr::Convert {
+            value: Box::new(v),
+            ty,
+            in_place: false,
         });
     }
     Ok(reinterpret(v, ty))
@@ -6223,11 +6295,11 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
                     if args[1].value.as_ref().and_then(|v| v.ordinal()) == Some(8))
         };
         if (by8(lhs) && rhs.value.is_some()) || (by8(rhs) && lhs.value.is_some()) {
-            return Err(unsupported(
+            best_effort(
                 e.span,
                 "`rshft(w, 8) & c` of a `0..65535` word (its high byte read, 0xE6C55C, or the \
                  word shifted, 0xE1101E: not settled) is",
-            ));
+            )?;
         }
     }
     let op = match op {
@@ -6621,11 +6693,18 @@ fn abs_value(p: &Program, e: &SExpr, x: &SExpr) -> Res<Expr> {
     } else {
         v
     };
+    const OTHER_WIDTH: &str = "`abs` with a result of another width than its argument is";
+    let v = if v.ty().width.bytes() < ty.width.bytes() {
+        // Best effort (bead domain-pascal-5kgg): the argument widened by
+        // its sign, then `abs` at the result's width (the same value: the
+        // wider type holds every absolute value of the narrower one).
+        best_effort(e.span, OTHER_WIDTH)?;
+        convert(v, Scalar::signed(ty.width))
+    } else {
+        v
+    };
     if v.ty().width != ty.width {
-        return Err(unsupported(
-            e.span,
-            "`abs` with a result of another width than its argument is",
-        ));
+        return Err(unsupported(e.span, OTHER_WIDTH));
     }
     Ok(Expr::Unary {
         op: IrUnOp::Abs,
@@ -6747,10 +6826,10 @@ fn min_max(p: &Program, e: &SExpr, b: Builtin, x: &SExpr, y: &SExpr) -> Res<Expr
     let (vx, vy) = (runtime(x)?, runtime(y)?);
     let vals: Vec<&Expr> = [&vx, &vy].into_iter().flatten().collect();
     if vals.iter().any(|v| v.ty().width == Width::Byte) {
-        return Err(unsupported(
+        best_effort(
             e.span,
             "`max` or `min` of a one-byte integer (no image site, codegen-patterns 10.1) is",
-        ));
+        )?;
     }
     let non_negative = |s: &SExpr| {
         s.value
@@ -7076,16 +7155,18 @@ fn store_bits(
         // volatile object the field form writes the unit twice (`andi`
         // then `ori`), and whether the original did so for one is not
         // known.
-        return Err(unsupported(
-            s.span,
-            if a.device {
+        if a.device {
+            return Err(unsupported(
+                s.span,
                 "storing into a packed field of a device record (a read-modify-write of its \
-                 unit, ref 3.15.3) is"
-            } else {
-                "storing into a packed field of a volatile record (its unit read and written \
-                 back, perhaps twice; not seen, ref 3.15.1) is"
-            },
-        ));
+                 unit, ref 3.15.3) is",
+            ));
+        }
+        best_effort(
+            s.span,
+            "storing into a packed field of a volatile record (its unit read and written \
+             back, perhaps twice; not seen, ref 3.15.1) is",
+        )?;
     }
     let (v, mask) = if let Some(c) = &value.value {
         (const_of(c, ty, value.span)?, false)
@@ -7383,13 +7464,25 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 // (a boolean) would need `ext.w`, which no byte index of the
                 // image has.
                 if ix.ty().sign != Sign::Unsigned {
-                    return Err(unsupported(
+                    // Best effort for a signed integer byte, sign-extended
+                    // (bead domain-pascal-5kgg); a boolean's true is 0xFF,
+                    // which neither extension makes its ordinal 1.
+                    if p.types.is_boolean(index.ty) {
+                        return Err(unsupported(
+                            index.span,
+                            "an array index of a signed byte type (no `ext.w` index in the image, \
+                             codegen-patterns 5.2) is",
+                        ));
+                    }
+                    best_effort(
                         index.span,
                         "an array index of a signed byte type (no `ext.w` index in the image, \
                          codegen-patterns 5.2) is",
-                    ));
+                    )?;
+                    ix = convert(ix, Scalar::signed(Width::Word));
+                } else {
+                    ix = convert(ix, Scalar::unsigned(Width::Word));
                 }
-                ix = convert(ix, Scalar::unsigned(Width::Word));
             }
             if ix.ty().width == Width::Word {
                 // A word index is scaled at the word's width and used as
@@ -7592,7 +7685,10 @@ fn wide_index(p: &Program, index: &SExpr, ix: Expr, type_fits: bool) -> Res<Expr
         );
     }
     let sign = sign_of(&p.types, index.ty);
-    let negative = p.types.ordinal_range(index.ty).is_some_and(|(lo, _)| lo < 0);
+    let negative = p
+        .types
+        .ordinal_range(index.ty)
+        .is_some_and(|(lo, _)| lo < 0);
     if sign == Sign::Signed && !negative {
         return refuse(
             "a word index of a non-negative `integer16` subrange (of the four values the image \
@@ -7837,11 +7933,11 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                             .filter_map(|j| c.args.get(j))
                             .any(is_const)
                         {
-                            return Err(unsupported(
+                            best_effort(
                                 a.expr.span,
                                 "`nil` passed by value next to another constant argument (no \
                                  site; NET_IO_$PUT_IN_SOCK 0xE0E4CC has none beside it) is",
-                            ));
+                            )?;
                         }
                         stored_const(&ConstValue::Nil, ty, a.expr.span)?
                     }
@@ -7862,26 +7958,52 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     None => {
                         let v = value_of(p, &a.expr)?;
                         let vb = v.ty().bytes();
-                        assign_convert(p, &a.expr, v, ty).ok_or_else(|| {
-                            unsupported(
-                                a.expr.span,
-                                format!(
-                                    "passing a {vb}-byte value to a {}-byte parameter is",
-                                    width.bytes()
-                                ),
-                            )
-                        })?
+                        let what = format!(
+                            "passing a {vb}-byte value to a {}-byte parameter is",
+                            width.bytes()
+                        );
+                        match assign_convert(p, &a.expr, v.clone(), ty) {
+                            Some(c) => c,
+                            None => narrow_best_effort(p, &a.expr, v, ty, a.expr.span, &what)
+                                .unwrap_or_else(|| Err(unsupported(a.expr.span, &what)))?,
+                        }
                     }
                 };
                 Arg::Value { value, slot }
             }
             Passing::ByAddress => {
                 if a.needs_temp && a.expr.is_designator() {
-                    return Err(unsupported(
-                        a.expr.span,
-                        "passing a variable of another size to a value or `in` parameter (a \
-                         converted copy, codegen-patterns 1.5) is",
-                    ));
+                    let what = "passing a variable of another size to a value or `in` parameter \
+                                (a converted copy, codegen-patterns 1.5) is";
+                    // Best effort for integers (bead domain-pascal-5kgg):
+                    // the value converted as in an assignment into a frame
+                    // temporary of the parameter's size, whose address is
+                    // passed, as for an expression.
+                    let width = Width::of_size(p.types.size(prm_ty));
+                    let (Some(width), true, true) = (
+                        width,
+                        p.types.is_integer(a.expr.ty),
+                        p.types.is_integer(prm_ty),
+                    ) else {
+                        return Err(unsupported(a.expr.span, what));
+                    };
+                    best_effort(a.expr.span, what)?;
+                    let ty = Scalar::integer(width, sign_of(&p.types, prm_ty));
+                    let v = value_of(p, &a.expr)?;
+                    let value = match assign_convert(p, &a.expr, v.clone(), ty) {
+                        Some(c) => c,
+                        None => Expr::Convert {
+                            value: Box::new(v),
+                            ty,
+                            in_place: false,
+                        },
+                    };
+                    args.push(Arg::Temp {
+                        value,
+                        offset: 0,
+                        slot,
+                    });
+                    continue;
                 }
                 // A variable of another size than its `var`, `out` or `in
                 // out` parameter: a record whose size an alignment
@@ -7928,11 +8050,12 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 // bytes in place or a copy, as for an expression, is not
                 // seen ([`transfer_view`]).
                 if !matches!(a.expr.kind, ExprKind::Transfer(_)) && a.expr.selects_transfer() {
-                    return Err(unsupported(
+                    // Best effort: in place (bead domain-pascal-5kgg).
+                    best_effort(
                         a.expr.span,
                         "a field or element of a type transfer passed by address (in place or \
                          as a copy: no site known) is",
-                    ));
+                    )?;
                 }
                 if let ExprKind::Call(ic) = &a.expr.kind {
                     refuse_unknown_result(p, ic, a.expr.span)?;
@@ -7996,14 +8119,38 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // ref 5.3.2 p. 5-7) needs a conversion whose code is
                     // not catalogued (bead domain-pascal-4be).
                     if value.ty().width != width {
-                        return Err(unsupported(
-                            a.expr.span,
-                            format!(
-                                "passing a {}-byte expression by address to a {}-byte parameter is",
-                                value.ty().bytes(),
-                                width.bytes()
-                            ),
-                        ));
+                        let what = format!(
+                            "passing a {}-byte expression by address to a {}-byte parameter is",
+                            value.ty().bytes(),
+                            width.bytes()
+                        );
+                        // Best effort for integers (bead domain-pascal-5kgg):
+                        // converted as in an assignment, widened by the
+                        // value's sign or narrowed to its low bytes.  To a
+                        // `univ` parameter too: ref 5.3.3 p. 5-11, "When you
+                        // pass an expression argument (as opposed to a
+                        // variable argument) to a univ parameter, Domain
+                        // Pascal extends the expression to be the same size
+                        // as the univ parameter" and reports it "converted
+                        // to NEWTYPE" -- a conversion of the value, where a
+                        // variable argument passes its own bytes.
+                        if !(p.types.is_integer(a.expr.ty)
+                            && p.types.is_integer(prm_ty)
+                            && !value.ty().pointer)
+                        {
+                            return Err(unsupported(a.expr.span, what));
+                        }
+                        best_effort(a.expr.span, &what)?;
+                        let t = Scalar::integer(width, sign_of(&p.types, prm_ty));
+                        value = if value.ty().bytes() < width.bytes() {
+                            convert(value, t)
+                        } else {
+                            Expr::Convert {
+                                value: Box::new(value),
+                                ty: t,
+                                in_place: false,
+                            }
+                        };
                     }
                     args.push(Arg::Temp {
                         value,

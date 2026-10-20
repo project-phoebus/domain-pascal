@@ -59,6 +59,61 @@ pub fn context() -> Option<Span> {
     CONTEXT.with(Cell::get)
 }
 
+thread_local! {
+    static STRICT: Cell<bool> = const { Cell::new(true) };
+    static BEST_EFFORT: std::cell::RefCell<Vec<Diagnostic>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The prefix of a best-effort warning ([`best_effort`]).
+pub const BEST_EFFORT_PREFIX: &str = "best effort (not byte-identical): ";
+
+/// Sets strict mode on this thread and returns the mode before.  Strict
+/// (the library default, and `dpc --strict`): every refusal is an error.
+/// Not strict (the driver's default; owner 2026-10-17, bead
+/// domain-pascal-5kgg): a refusal that only guards the image's exact form
+/// ([`best_effort`]) is a warning and the existing, correct code path runs.
+pub fn set_strict(strict: bool) -> bool {
+    STRICT.with(|s| s.replace(strict))
+}
+
+/// Whether this thread is in strict mode ([`set_strict`]).
+pub fn is_strict() -> bool {
+    STRICT.with(Cell::get)
+}
+
+/// The best-effort path of a refusal `refusal` (an error diagnostic, the
+/// "... not supported yet" a phase would return) at a site where dpc has a
+/// correct code path and refuses only because the image's exact form
+/// (register choice, instruction order, hold or reload, which of two seen
+/// forms) is not settled.  In strict mode it is returned as the error,
+/// unchanged.  Otherwise it is recorded as a warning `best effort (not
+/// byte-identical): <message>` ([`take_best_effort`]) and `Ok` lets the
+/// caller go on.  The same warning is recorded once.
+pub fn best_effort(refusal: Diagnostic) -> Result<(), Diagnostic> {
+    if is_strict() {
+        return Err(refusal);
+    }
+    let w = Diagnostic {
+        severity: Severity::Warning,
+        span: refusal.span,
+        message: format!("{BEST_EFFORT_PREFIX}{}", refusal.message),
+    };
+    BEST_EFFORT.with(|b| {
+        let mut b = b.borrow_mut();
+        if !b.contains(&w) {
+            b.push(w);
+        }
+    });
+    Ok(())
+}
+
+/// The best-effort warnings recorded on this thread since the last call
+/// ([`best_effort`]), in order.
+pub fn take_best_effort() -> Vec<Diagnostic> {
+    BEST_EFFORT.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
 /// A message, optionally tied to a source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -191,6 +246,31 @@ fn snippet(file: &SourceFile, span: Span) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn best_effort_strict_and_not() {
+        let mut sm = SourceMap::new();
+        let f = sm.add("m.pas", "module m;\n".to_string());
+        let span = Span::new(f, 1, 2);
+        let refusal = Diagnostic::error(span, "an odd shape not supported yet");
+        assert!(is_strict(), "the library default is strict");
+        assert_eq!(best_effort(refusal.clone()), Err(refusal.clone()));
+        assert!(take_best_effort().is_empty());
+        let before = set_strict(false);
+        assert!(before);
+        assert_eq!(best_effort(refusal.clone()), Ok(()));
+        assert_eq!(best_effort(refusal.clone()), Ok(()));
+        let w = take_best_effort();
+        set_strict(true);
+        assert_eq!(w.len(), 1, "recorded once");
+        assert_eq!(w[0].severity, Severity::Warning);
+        assert_eq!(w[0].span, Some(span));
+        assert_eq!(
+            w[0].message,
+            "best effort (not byte-identical): an odd shape not supported yet"
+        );
+        assert!(take_best_effort().is_empty());
+    }
 
     #[test]
     fn render_with_and_without_position() {

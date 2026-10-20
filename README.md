@@ -50,5 +50,21 @@ To find your way around:
   are unclear or badly OCR'd.
 - `tools/imgdis.sh`: disassembles a range of the SR10.2 SAU2 kernel image.
 
+**Strict and best-effort compilation** (owner 2026-10-17, bead
+domain-pascal-5kgg).  dpc refuses, with an "... is not supported yet"
+error, what it cannot yet compile as Apollo's compiler did.  Some of those
+refusals guard only the image's exact form (a register choice, an
+instruction order, a hold or a reload, which of two forms seen in the
+image) at a place where dpc already has a correct code path.  By default
+dpc takes that path and prints a warning `best effort (not
+byte-identical): ...`: the code computes the right values but is not
+checked against the image (status "Best effort" in
+`docs/codegen-patterns.md`).  `dpc --strict` makes every refusal an
+error again.  The golden tests, `make conform` (`tools/conform.py`) and
+`tools/srcsurvey.py` use `--strict`, so their expected outputs are the
+image's forms; `tools/linktest.py` and ../source's kernel build use the
+default.  Refusals of constructs dpc does not implement are errors in
+both modes.
+
 Only m68k is targeted for now; aarch64 may follow later for native test
 runs.  LLVM is not used.

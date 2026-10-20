@@ -38,6 +38,20 @@ class DpcResultTest(unittest.TestCase):
         r = linktest.dpc_result('a/a.pas', 0, diag('a/x.pas', 3, 'unused', 'warning'))
         self.assertEqual((r.status, r.errors, r.kinds, r.first_kind), ('OK', 0, [], '-'))
 
+    def test_ok_counts_best_effort_warnings(self):
+        err = (diag('a/x.pas', 3, linktest.BEST_EFFORT + 'a shape at 0xE1234 is ' + REFUSAL,
+                    'warning') +
+               diag('a/x.pas', 9, 'unused', 'warning') +
+               diag('a/y.pas', 4, linktest.BEST_EFFORT + 'a shape at 0xE5678 is ' + REFUSAL,
+                    'warning'))
+        r = linktest.dpc_result('a/a.pas', 0, err)
+        self.assertEqual(r.status, 'OK')
+        self.assertEqual(r.best_effort, ['a shape at N is ' + REFUSAL] * 2)
+        self.assertEqual(linktest.best_effort_ranking([r, R('b', 'OK')]),
+                         [('a shape at N is ' + REFUSAL, 1, 2)])
+        self.assertEqual(linktest.module_lines([r]),
+                         ['OK       a/a.pas (2 best-effort warning(s))'])
+
     def test_refused_counts_errors_and_distinct_kinds(self):
         err = (diag('a/x.pas', 10, 'comparing `FOO` with 3 is ' + REFUSAL) +
                diag('a/x.pas', 12, 'comparing `BAR` with 70 is ' + REFUSAL) +
@@ -572,6 +586,19 @@ class DeepPassTest(unittest.TestCase):
             linktest.DPC_TIMEOUT = old
         self.assertEqual(d.kinds, {'dpc: timeout': ['-']})
         self.assertEqual(d.problem, 'codegen stage, dpc timed out (3 s)')
+
+    def test_deep_all_runs_dpc_without_strict(self):
+        # the deep pass ranks what still blocks after best effort (bead
+        # domain-pascal-5kgg): srcsurvey's stages run dpc without --strict
+        old = linktest.srcsurvey.DPC_STRICT
+        try:
+            linktest.srcsurvey.DPC_STRICT = True
+            linktest.deep_all(self.dpc, self.tree, [], self.work, 1)
+            self.assertFalse(linktest.srcsurvey.DPC_STRICT)
+            linktest.deep_all(self.dpc, self.tree, [], self.work, 1, strict=True)
+            self.assertTrue(linktest.srcsurvey.DPC_STRICT)
+        finally:
+            linktest.srcsurvey.DPC_STRICT = old
 
     def test_deep_pass_exception_is_recorded(self):
         with unittest.mock.patch.object(linktest.srcsurvey, 'Module',

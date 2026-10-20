@@ -43,6 +43,32 @@ class SpecTest(unittest.TestCase):
         s = self.parse('xfail: known\ncall: X\nexpect:\n  1\n')
         self.assertEqual(s.xfail, 'known')
 
+    def test_warns(self):
+        s = self.parse('call: X\nwarns: best effort (not byte-identical): a b\n'
+                       'warns: another one\nexpect:\n  1\n')
+        self.assertEqual(s.warns, ['best effort (not byte-identical): a b', 'another one'])
+        self.assertEqual(self.parse('call: X\nexpect:\n  1\n').warns, [])
+        with self.assertRaises(exectest.SpecError):
+            self.parse('call: X\nwarns:\nexpect:\n  1\n')
+
+    def test_missing_warnings(self):
+        s = self.parse('call: X\nwarns: odd shape\nwarns: other\nexpect:\n  1\n')
+        err = 'm.pas:3:1: warning: best effort (not byte-identical): an odd shape is\n'
+        self.assertEqual(exectest.missing_warnings(s, err), ['other'])
+        self.assertEqual(exectest.missing_warnings(s, err + 'x: other\n'), [])
+
+    def test_outcome(self):
+        plain = self.parse('call: X\nexpect:\n  1\n')
+        xf = self.parse('xfail: known\ncall: X\nwarns: w\nexpect:\n  1\n')
+        R = exectest.Result
+        self.assertEqual(exectest.outcome(plain, R(True, [], ran=True)), 'pass')
+        self.assertEqual(exectest.outcome(plain, R(False, [], ran=True)), 'fail')
+        self.assertEqual(exectest.outcome(xf, R(True, [], ran=True)), 'xpass')
+        self.assertEqual(exectest.outcome(xf, R(False, [], ran=True)), 'xfail')
+        # a missing `warns:' text stops the test before it runs: for an
+        # xfail, a failure, not the expected one
+        self.assertEqual(exectest.outcome(xf, R(False, [], 'dpc did not warn: w')), 'notrun')
+
     def test_refused(self):
         for h in ('expect:\n 1\n',                      # no call
                   'call: X\n',                          # no expect
