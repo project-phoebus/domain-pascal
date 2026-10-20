@@ -77,6 +77,44 @@ fn is_memory_ea(ea: &Ea) -> bool {
     )
 }
 
+/// The refusal of a second call while a function's (or M$ARITH's) result
+/// may still be needed in D0 or A0 ([`Selector::call_value`],
+/// [`Selector::marith`]): the statement is selected again in
+/// [`CallMode::save`].
+const TWO_CALLS: &str = "two function calls in one statement are";
+
+/// The best-effort form of [`CallMode::save`] ([`Selector::save_result`]).
+const SAVED_RESULT: &str = "a call whose result is still needed at a later call of its statement \
+     (the result copied out of D0 or A0 into a register of its own; PACCT_$CLOCK_TO_COMP \
+     0xE5AA6C keeps one in a frame temporary, the right operand first: the rule not known, \
+     codegen-patterns 1.1, bead domain-pascal-ej8m) is";
+
+/// The best-effort form of an M$ARITH call among another call's arguments
+/// ([`Selector::marith`]).
+const MARITH_IN_ARGS: &str = "an M$ARITH call among another call's arguments (popped at once, \
+     as a function call there: not catalogued, codegen-patterns 1.1) is";
+
+/// How the calls of one statement are selected when the first selection
+/// refused them ([`select_body_in_unit`]; bead domain-pascal-ej8m).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CallMode {
+    /// Every call of the statement is popped right after it, as the
+    /// image pops every call that a push, a call or a conditional branch
+    /// follows (codegen-patterns 1.1); best effort for the statement's
+    /// last call, which the image may leave unpopped.
+    pop: bool,
+    /// Each call's result is copied out of D0 / A0 into a register of its
+    /// own right after the call (and its pop), so that a later call of
+    /// the statement does not overwrite it; the allocator gives one live
+    /// across a call a callee-saved register (codegen-patterns 12.4 R3).
+    /// Best effort (not byte-identical): PACCT_$CLOCK_TO_COMP
+    /// 0xE5AA3A..0xE5AA86 evaluates the right operand of `+` first and
+    /// keeps its M$ARITH result in a frame temporary (`move.l
+    /// D0,(-0x18,A6)` ... `add.l (-0x18,A6),D0`), which `dpc` does not
+    /// model (one site; the rule for the order is not known).
+    save: bool,
+}
+
 /// A constant as the immediate of a `w`-sized instruction: a byte as
 /// 0..=255 (see [`Ea::Imm`]), a word or longword as the signed number.
 fn imm(value: i64, w: Width) -> i64 {
@@ -438,22 +476,62 @@ fn select_body_in_unit(
     sched: Schedule,
     overlays: &Overlays,
 ) -> Result<Body, Diagnostic> {
+    // A statement whose calls are refused as they are first selected (a
+    // second call while a result is still needed) is selected again with
+    // its calls popped and their results saved ([`CallMode`]); the other
+    // statements keep the form they had.
+    let mut modes: Vec<(Span, CallMode)> = Vec::new();
+    loop {
+        let err = match select_body_moded(f, sched, overlays, &modes) {
+            Err(e) => e,
+            ok => return ok,
+        };
+        let Some(span) = err.span else {
+            return Err(err);
+        };
+        let want = if err.message == format!("{TWO_CALLS} not supported yet") {
+            CallMode {
+                pop: true,
+                save: true,
+            }
+        } else {
+            return Err(err);
+        };
+        match modes.iter_mut().find(|(s, _)| *s == span) {
+            Some((_, m)) if (m.pop || !want.pop) && (m.save || !want.save) => return Err(err),
+            Some((_, m)) => {
+                m.pop |= want.pop;
+                m.save |= want.save;
+            }
+            None => modes.push((span, want)),
+        }
+    }
+}
+
+/// [`select_body_in_unit`] with the statements of `modes` selected in
+/// their [`CallMode`].
+fn select_body_moded(
+    f: &Function,
+    sched: Schedule,
+    overlays: &Overlays,
+    modes: &[(Span, CallMode)],
+) -> Result<Body, Diagnostic> {
     // A pointer result variable whose every assignment is last is kept
     // in its frame slot when one assignment reads memory, found for a
     // local only when selection sees it in the frame
     // ([`pointer_result_in_slot`]): the body is selected again so.
     let mut slot = SlotMode::Auto;
-    let mut first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot)?;
+    let mut first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes)?;
     while let Selected::Reslot(mode) = first {
         slot = mode;
-        first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot)?;
+        first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes)?;
     }
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
     let (body, hits, in_a0) = match first {
         Selected::Body(b, h) => (b, h, Vec::new()),
         Selected::InA0(in_a0) => {
-            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, slot)? {
+            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, slot, modes)? {
                 Selected::Body(b, h) => (b, h, in_a0),
                 _ => unreachable!("an A0-held local is not found again"),
             }
@@ -470,6 +548,7 @@ fn select_body_in_unit(
         &in_a0,
         overlays,
         slot,
+        modes,
     )?
     else {
         unreachable!("an A0-held local is not found again")
@@ -690,8 +769,10 @@ fn select_body_with(
     in_a0: &[i32],
     overlays: &Overlays,
     slot: SlotMode,
+    modes: &[(Span, CallMode)],
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
+    s.call_modes = modes.to_vec();
     s.cse_plan = plan;
     s.overlays = overlays.to_vec();
     s.data_label = crate::emit::data_base_label(&f.data_section);
@@ -6421,6 +6502,18 @@ fn expr_calls(e: &Expr) -> bool {
     hit
 }
 
+/// Whether evaluating condition `c` calls a function or an M$ARITH entry
+/// ([`expr_calls`]).
+fn cond_calls(c: &IrCond) -> bool {
+    let mut hit = false;
+    walk_cond(c, &mut |n| match n {
+        Node::Call(_) => hit = true,
+        Node::Expr(e) => hit |= expr_calls(e),
+        _ => {}
+    });
+    hit
+}
+
 /// Whether the selector computes `lhs op rhs` of type `ty` with an
 /// M$ARITH call or a conditional branch (the choices of [`Selector::mul`]
 /// and [`Selector::div`]); `narrowed`: a longword quotient used as a word.
@@ -7200,10 +7293,19 @@ pub struct Selector {
     /// for a branch ([`Self::test_value`]): the one-bit tests of a
     /// variable in memory are refused there ([`Self::one_bit_test`]).
     test_as_value: bool,
-    /// Arguments of a call are being pushed (a function call there is
-    /// refused: its pop is merged with the outer call's, codegen-patterns
-    /// 1.1, 0xE69FF6).
+    /// An argument of a call is being evaluated for its push: a call there
+    /// is popped at once, since the outer call's pushes follow
+    /// (PROC2_$SIGNAL_PGROUP_OS 0xE3F296 `bsr.w PROC2_$UID_TO_PGROUP_INDEX;
+    /// addq.w #4,SP; move.w D0,-(SP)`; codegen-patterns 1.1).
     in_args: bool,
+    /// The statements selected again with their calls in another
+    /// [`CallMode`], by span ([`select_body_in_unit`]).
+    call_modes: Vec<(Span, CallMode)>,
+    /// With `in_args`: the value of a by-address argument's frame
+    /// temporary is being stored ([`Self::push`], `Arg::Temp`), where an
+    /// M$ARITH call compiled before bead domain-pascal-ej8m and is no best
+    /// effort ([`Self::marith`]).
+    in_temp: bool,
     /// The statement already called a function whose result (in D0) may
     /// still be needed.
     called: bool,
@@ -7211,6 +7313,9 @@ pub struct Selector {
     /// ([`Self::marith`]): a call there is followed by the outer one's
     /// pushes, so it is popped.
     marith_depth: u32,
+    /// The register of the last M$ARITH call's result ([`Self::marith`]):
+    /// D0, or its copy in [`CallMode::save`].
+    marith_reg: u8,
     /// A call of the statement being selected skipped its pop
     /// (codegen-patterns 1.1): nothing after it in the statement may
     /// branch conditionally.
@@ -7543,8 +7648,11 @@ impl Selector {
             call_no_pop: false,
             test_as_value: false,
             in_args: false,
+            call_modes: Vec::new(),
+            in_temp: false,
             called: false,
             marith_depth: 0,
+            marith_reg: 0,
             unpopped: false,
             data_absolute: false,
             abs_base: None,
@@ -7881,8 +7989,9 @@ impl Selector {
             // followed only by the move of its result: popped unless the
             // statement's continuation is clean (codegen-patterns 1.1;
             // 0xE04700 `bsr.w; move.l D0,(A3); bra.w` with no pop).
-            self.call_no_pop =
-                matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. }) && next.clean;
+            self.call_no_pop = matches!(st.kind, StmtKind::SetResult(_) | StmtKind::Store { .. })
+                && next.clean
+                && !self.call_mode().pop;
             self.called = false;
             self.unpopped = false;
             self.park_home(f, body, st, rest)?;
@@ -10230,12 +10339,24 @@ impl Selector {
             IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
                 // `and then` short-circuits on false, `or else` on true.
                 let short = matches!(c, IrCond::OrElse(..));
+                // A call in `a` is consumed by `a`'s branch: a call in `b`
+                // does not overwrite a result still needed (DIR_$OLD_CNAMEU
+                // 0xE57578..0xE575BE, two NAME_$VALIDATE_LEAF calls under
+                // `or else`), and is followed by that branch: popped
+                // (codegen-patterns 1.1).
+                let called = self.called;
+                let no_pop = self.call_no_pop;
+                if cond_calls(b) {
+                    self.call_no_pop = false;
+                }
                 if when == short {
                     self.branch(a, when, l)?;
+                    (self.called, self.call_no_pop) = (called, no_pop);
                     self.branch(b, when, l)
                 } else {
                     let skip = self.new_label();
                     self.branch(a, short, skip)?;
+                    (self.called, self.call_no_pop) = (called, no_pop);
                     self.branch(b, when, l)?;
                     self.place(skip);
                     Ok(())
@@ -10252,6 +10373,8 @@ impl Selector {
                     Expr::Load { addr, .. } => self.operand(addr)?,
                     Expr::Call { .. } => match self.eval(e)? {
                         Val::Reg(r) => Ea::Reg(r),
+                        // Its copy ([`CallMode::save`]).
+                        Val::Tmp(d) => Ea::Reg(Reg::D(d)),
                         _ => unreachable!("a call's value is its result register"),
                     },
                     // `k in s` for a constant k and a set of one word or one
@@ -13275,8 +13398,13 @@ impl Selector {
             if self.a0_locals.contains(o) {
                 // Held in A0 itself: no copy ([`Self::a0_locals`]).
                 let c = a0_call(value).expect("an A0-held local is assigned a call's A0");
-                let a = self.call_a0(c)?;
-                self.pinned.push((*o, Reg::A(a)));
+                // The physical A0: the statement `p := f(...)` makes no
+                // other call (its value is the call, its destination a
+                // frame local), so no second call refuses it and it is
+                // never selected in [`CallMode::save`].
+                debug_assert!(!self.call_mode().save);
+                self.call_value(c)?;
+                self.pinned.push((*o, Reg::A(0)));
                 return Ok(());
             }
             if let Some(k) = self.parked.iter().position(|p| p.off == *o) {
@@ -15003,9 +15131,15 @@ impl Selector {
                     // push order, codegen-patterns 12).
                     e => {
                         let start = self.out.len();
-                        self.in_args = true;
+                        // A call in the argument is popped at once and its
+                        // result consumed by the push ([`Self::call_value`]).
+                        let outer = std::mem::replace(&mut self.in_args, true);
+                        let temp = std::mem::replace(&mut self.in_temp, false);
+                        let called = self.called;
                         let v = self.eval(e);
-                        self.in_args = false;
+                        self.in_args = outer;
+                        self.in_temp = temp;
+                        self.called = called;
                         let src = match v? {
                             Val::Reg(r) => Ea::Reg(r),
                             // The low bytes of a variable, pushed from
@@ -15346,7 +15480,19 @@ impl Selector {
                             dst: tmp.clone(),
                         });
                     }
-                    v => self.store(&Addr::Frame(*offset), v)?,
+                    // A call in the value is popped at once, its result
+                    // consumed by the store (0xE748E6..0xE748F0;
+                    // [`Self::call_value`]).
+                    v => {
+                        let outer = std::mem::replace(&mut self.in_args, true);
+                        let temp = std::mem::replace(&mut self.in_temp, true);
+                        let called = self.called;
+                        let r = self.store(&Addr::Frame(*offset), v);
+                        self.in_args = outer;
+                        self.in_temp = temp;
+                        self.called = called;
+                        r?
+                    }
                 }
                 self.out.push(Insn::Pea(tmp));
             }
@@ -17263,7 +17409,7 @@ impl Selector {
                 return Ok(d);
             }
             self.marith_op("MI", ty, x, &b)?;
-            return Ok(0);
+            return Ok(self.marith_reg);
         }
         if w == Width::Word {
             return self.mul_words(lhs, rhs, signed);
@@ -17273,11 +17419,11 @@ impl Selector {
             (Some(_), None) => {
                 // The word is argument 2 of `M$MI*$LLW`.
                 self.marith_op("MI", ty, rhs, lhs)?;
-                Ok(0)
+                Ok(self.marith_reg)
             }
             _ => {
                 self.marith_op("MI", ty, lhs, rhs)?;
-                Ok(0)
+                Ok(self.marith_reg)
             }
         }
     }
@@ -17512,13 +17658,13 @@ impl Selector {
                         return Ok(Val::Tmp(d));
                     }
                     self.marith_op("DI", ty, lhs, rhs)?;
-                    return Ok(Val::Tmp(0));
+                    return Ok(Val::Tmp(self.marith_reg));
                 }
                 if let Some(b) = bw {
                     let name = self.marith_name("OI", signed, "WLW")?;
                     self.marith(name, lhs, &b)?;
                     if narrow {
-                        return Ok(Val::Tmp(0));
+                        return Ok(Val::Tmp(self.marith_reg));
                     }
                     if signed {
                         return Err(unsupported(
@@ -17534,7 +17680,7 @@ impl Selector {
                     });
                     self.out.push(Insn::Move {
                         size: Size::W,
-                        src: Ea::Reg(Reg::D(0)),
+                        src: Ea::Reg(Reg::D(self.marith_reg)),
                         dst: Ea::Reg(Reg::D(d)),
                     });
                     return Ok(Val::Tmp(d));
@@ -17548,7 +17694,7 @@ impl Selector {
                 }
                 let name = self.marith_name("OI", signed, "LLL")?;
                 self.marith(name, lhs, rhs)?;
-                Ok(Val::Tmp(0))
+                Ok(Val::Tmp(self.marith_reg))
             }
         }
     }
@@ -17978,14 +18124,14 @@ impl Selector {
     /// 0xE686B0, or after it, 0xE0920C: codegen-patterns 12.4 R9), except
     /// another M$ARITH call's result as `a` (0xE16962..0xE16970: the inner
     /// call and its pop, then the outer pad); a second call while a
-    /// result in D0 is still needed; a call among another call's
-    /// arguments.
+    /// result in D0 is still needed, except in [`CallMode::save`], where
+    /// the result is copied out of D0 ([`Self::save_result`]).
     fn marith(&mut self, name: &'static str, a: &Expr, b: &Expr) -> Res<()> {
-        if self.in_args {
-            return Err(unsupported(
-                self.span,
-                "an M$ARITH call among another call's arguments is",
-            ));
+        // Among another call's arguments: popped at once, as a function
+        // call there ([`Self::call_value`]; best effort, not
+        // byte-identical: no such M$ARITH call is catalogued).
+        if self.in_args && !self.in_temp {
+            best_effort(self.span, MARITH_IN_ARGS)?;
         }
         let pre_called = self.called;
         let start = self.out.len();
@@ -18006,35 +18152,43 @@ impl Selector {
         if a_code && b_code {
             const BOTH: &str =
                 "an M$ARITH call with both operands computed (evaluation order not settled) is";
-            if calls {
+            if calls && !self.call_mode().save {
                 return Err(unsupported(self.span, BOTH));
             }
             best_effort(self.span, BOTH)?;
         }
+        // In [`CallMode::save`] an inner M$ARITH call's result is its copy
+        // ([`Self::save_result`]), the instruction after the call.
+        let copied = |v: &Val, code: &[Insn]| {
+            matches!((v, code.last()), (Val::Tmp(r), Some(Insn::Move {
+                src: Ea::Reg(Reg::D(0)),
+                dst: Ea::Reg(Reg::D(d)),
+                ..
+            })) if r == d)
+        };
+        let a_copied = copied(&av, &self.out[start..mid]);
         let is_d0 = |v: &Val| matches!(v, Val::Tmp(0) | Val::Reg(Reg::D(0)));
         let pad = b.ty().width == Width::Word;
         if pad && (a_code || b_code) {
-            let ends_in_call = match &self.out[start..mid] {
+            let a_end = if a_copied { mid - 1 } else { mid };
+            let ends_in_call = match &self.out[start..a_end] {
                 [.., Insn::Jsr(Ea::AbsL(s, _)), Insn::Addq { .. }]
                 | [.., Insn::Jsr(Ea::AbsL(s, _))] => s.starts_with("M$"),
                 _ => false,
             };
-            if b_code || !ends_in_call || !is_d0(&av) {
+            if b_code || !ends_in_call || !(is_d0(&av) || a_copied) {
                 const PAD: &str = "an M$ARITH call with a word argument and a computed operand \
                                    (the pad is scheduled into the computation, codegen-patterns \
                                    8, 12.4 R9) is";
-                if calls {
+                if calls && !self.call_mode().save {
                     return Err(unsupported(self.span, PAD));
                 }
                 // Best effort: the pad after the computation.
                 best_effort(self.span, PAD)?;
             }
         }
-        if (pre_called || self.called) && !is_d0(&av) && !is_d0(&bv) {
-            return Err(unsupported(
-                self.span,
-                "two function calls in one statement are",
-            ));
+        if (pre_called || self.called) && !is_d0(&av) && !is_d0(&bv) && !self.call_mode().save {
+            return Err(unsupported(self.span, TWO_CALLS));
         }
         if pad {
             self.out.push(Insn::Subq {
@@ -18061,7 +18215,7 @@ impl Selector {
         self.other_bases.clear();
         self.other_syms.clear();
         self.other_held.clear();
-        if self.call_no_pop && self.marith_depth == 0 {
+        if self.call_no_pop && self.marith_depth == 0 && !self.in_args {
             self.unpopped = true;
         } else {
             self.out.push(Insn::Addq {
@@ -18071,6 +18225,11 @@ impl Selector {
             });
         }
         self.called = true;
+        self.marith_reg = if self.call_mode().save {
+            self.save_result()?
+        } else {
+            0
+        };
         Ok(())
     }
 
@@ -18682,13 +18841,38 @@ impl Selector {
     /// the call sequence of a procedure call ([`Self::call`]), then the
     /// result in D0, read from there (0xE04704 `move.l D0,(A3)`; 0xE0082E
     /// `tst.b D0`; 0xE01BA4 `move.w D0,D1` before arithmetic).  The pop
-    /// follows the procedure-call rule ([`Self::call_no_pop`]).  Not
-    /// supported yet: a call among another call's arguments (the two pops
-    /// are merged, 0xE69FF6, 0xE748E6), two calls in one statement (the
-    /// first result would have to be saved), results in A0.
+    /// follows the procedure-call rule ([`Self::call_no_pop`]).  In a
+    /// statement selected in [`CallMode::save`] the result is copied into
+    /// a register of its own ([`Self::save_result`]).
     fn expr_call(&mut self, c: &Call) -> Res<Val> {
         self.call_value(c)?;
+        if self.call_mode().save {
+            return Ok(Val::Tmp(self.save_result()?));
+        }
         Ok(Val::Reg(Reg::D(0)))
+    }
+
+    /// D0 copied into a new data register right after a call (and its
+    /// pop) of a statement in [`CallMode::save`], `move.l D0,Dn`: a later
+    /// call of the statement writes D0 again.  The whole register, so
+    /// that a byte or word result reads the same from the copy.
+    fn save_result(&mut self) -> Res<u8> {
+        best_effort(self.span, SAVED_RESULT)?;
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::L,
+            src: Ea::Reg(Reg::D(0)),
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(d)
+    }
+
+    /// The [`CallMode`] of the statement being selected.
+    fn call_mode(&self) -> CallMode {
+        self.call_modes
+            .iter()
+            .find(|(s, _)| *s == self.span)
+            .map_or(CallMode::default(), |&(_, m)| m)
     }
 
     /// A call of a function whose result is in A0 (a pointer, ref 5.5.10,
@@ -18701,27 +18885,48 @@ impl Selector {
     /// argument.
     fn call_a0(&mut self, c: &Call) -> Res<u8> {
         self.call_value(c)?;
+        if self.call_mode().save {
+            // As [`Self::save_result`]: `movea.l A0,An`.
+            best_effort(self.span, SAVED_RESULT)?;
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Reg(Reg::A(0)),
+                dst: a,
+            });
+            return Ok(a);
+        }
         Ok(0)
     }
 
     /// The call of [`Self::expr_call`] / [`Self::call_a0`].
+    ///
+    /// A call among another call's arguments is made where its argument is
+    /// reached, right to left, and popped at once; then its result is
+    /// pushed (PROC2_$SIGNAL_PGROUP_OS 0xE3F28A..0xE3F29C `move.l
+    /// (-0x18,A6),-(SP); ...; pea (-0x8,A6); bsr.w
+    /// PROC2_$UID_TO_PGROUP_INDEX; addq.w #4,SP; move.w D0,-(SP)` inside
+    /// the outer list; PROC2_$SIGNAL_PGROUP 0xE3F30C; KBD_$RCV 0xE1CE48,
+    /// the inner call's own pad after the outer one's, and a byte).  14
+    /// sites in compiled code pop the inner call before the push of its
+    /// result; none leaves its pop to the outer call: the inner calls
+    /// pushed unpopped at 0xE69FF6 and 0xE748E6 have no arguments
+    /// (PKT_$NEXT_ID, ACL_$USED_SUSER).  By address, the result is stored
+    /// into the argument's frame temporary and that is pushed (0xE748EC
+    /// `move.b D0,(-0xd2,A6); pea (-0xd2,A6)`; [`Self::push`]).
+    ///
+    /// A second call while the first one's result may still be needed in
+    /// D0 is refused here, and the statement selected again in
+    /// [`CallMode::save`] ([`select_body_in_unit`]); a call whose result
+    /// was consumed (pushed, or tested by a branch) does not count
+    /// ([`Self::push`], [`Self::branch`]).
     fn call_value(&mut self, c: &Call) -> Res<()> {
-        if self.in_args {
-            return Err(unsupported(
-                self.span,
-                "a function call among another call's arguments (pops merged, \
-                 codegen-patterns 1.1) is",
-            ));
+        if self.called && !self.call_mode().save {
+            return Err(unsupported(self.span, TWO_CALLS));
         }
-        if self.called {
-            return Err(unsupported(
-                self.span,
-                "two function calls in one statement are",
-            ));
-        }
-        // Inside an M$ARITH call's operands the outer call's pushes follow:
-        // popped.
-        let no_pop = self.call_no_pop && self.marith_depth == 0;
+        // Inside an M$ARITH call's operands, or another call's arguments,
+        // the outer call's pushes follow: popped.
+        let no_pop = self.call_no_pop && self.marith_depth == 0 && !self.in_args;
         self.call(c, no_pop)?;
         self.unpopped |= no_pop;
         self.called = true;

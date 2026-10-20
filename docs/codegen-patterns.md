@@ -149,9 +149,12 @@ COMPUTER INC.").
     bra.s 0xE06194`, with `addq.w #4,SP` at 0xE06194 after the other
     call).  The 45 such pairs with *different* sizes pop separately
     (0xE01A38); none of the same size does.
-  - Two calls inside the argument list of another call (0xE69FF6,
-    0xE748E6) have their pops merged with the outer call's: not
-    statement-level, outside this rule.
+  - Calls inside the argument list of another call: not statement-level,
+    outside this rule; see "Calls among the arguments of a call" below.
+    (This entry said that the inner calls at 0xE69FF6 and 0xE748E6 have
+    their pops merged with the outer call's.  Refuted: both inner
+    callees, PKT_$NEXT_ID and ACL_$USED_SUSER, take no arguments, so
+    there is nothing to pop.)
   - **Implemented** (bead domain-pascal-bzl; `crates/dpc-m68k/src/isel.rs`,
     `Selector::call` with `Tail` / `seq_clean`): the no-pop rule.  The
     shared pop is rejected ("not supported yet").  Goldens
@@ -160,6 +163,60 @@ COMPUTER INC.").
   pad, right-to-left pushes, `jsr`/`bsr`, `addq.w`/`lea` pop, the no-pop
   rule above.  Byte-identical in `make conform`:
   `tests/conformance/ast_page_zero.pas` (0xE00EB0 + AST_$PAGE_ZERO).
+
+#### Calls among the arguments of a call (Verified; implemented, bead domain-pascal-ej8m)
+
+- The inner call is made where its argument is reached in the
+  right-to-left pushes, after the outer pad and the pushes of the
+  arguments to its right.  It is **popped at once**, and then its result is
+  pushed:
+  - PROC2_$SIGNAL_PGROUP_OS 0xE3F282..0xE3F2A2: `subq.l #2,SP; pea
+    (-0x14,A6); st -(SP); move.l (-0x18,A6),-(SP); move.w
+    (-0x1e,A6),-(SP); pea (-0x8,A6); bsr.w PROC2_$UID_TO_PGROUP_INDEX;
+    addq.w #4,SP; move.w D0,-(SP); bsr.w <outer>; lea (0x10,SP),SP`;
+    PROC2_$SIGNAL_PGROUP 0xE3F30C has the same shape.
+  - KBD_$RCV 0xE1CE48..0xE1CE5E: the outer pad, the inner call's own pad,
+    a byte argument, `bsr.w 0xE1CC64; addq.w #4,SP; move.b D0,-(SP)`.
+  - A survey of compiled code (ad-hoc script, not kept; re-check with
+    `tools/imgdis.sh`): 14 calls are followed by their pop and then a push
+    of D0 (0xE1CE50, 0xE3474E, 0xE3F296, 0xE3F30C, 0xE6139E, ...).  Two are
+    followed by a push of D0 with no pop: ROUTE_$SERVICE 0xE69FF6 and
+    PROC2_$DELETE's 0xE748E6.  Both inner callees take no arguments
+    (PKT_$NEXT_ID, ACL_$USED_SUSER).  A third such call, at 0xE2E872, is
+    hand-written code (IO_$TBLS, a D segment).
+  - By address (a value or `in` parameter), the result is stored into the
+    argument's frame temporary, and the temporary's address is pushed:
+    0xE748EC `move.b D0,(-0xd2,A6); pea (-0xd2,A6)`.
+- `dpc` does the same.  Best effort (not byte-identical): an M$ARITH
+  call among the arguments is popped at once too.  No such site is
+  catalogued.
+
+#### Two calls in one statement (implemented, best effort; bead domain-pascal-ej8m)
+
+- A call whose result is consumed before the next call needs nothing
+  more:
+  - a result pushed as an argument (above);
+  - a result tested by the left operand of `and then` / `or else`.
+    DIR_$OLD_CNAMEU 0xE57578..0xE575B6 has two NAME_$VALIDATE_LEAF calls
+    under `or else`.  Each is popped (`lea (0x10,SP),SP`), then tested
+    (`tst.b D0; bpl.s`).  SMD_$BORROW_DISPLAY 0xE6F59E is the same, with
+    `addq.w #4,SP`.
+- Where an earlier result is still needed when the next call is made
+  (`f(x) + g(y)`, `f(x) < g(y)`, two M$ARITH products added), `dpc`
+  selects the statement again:
+  - every call of the statement is popped;
+  - each result is copied out of D0 (or A0) right after the call,
+    `move.l D0,Dn`.  The allocator gives a copy that is live across a
+    later call a callee-saved register (12.4 R3).
+- This form is not the image's.  PACCT_$CLOCK_TO_COMP 0xE5AA3A..0xE5AA8A
+  (`lshft(h div k, 16) + (lshft(h mod k, 16) + l) div k`) evaluates the
+  right operand first.  It keeps that M$ARITH result in a frame temporary
+  (`move.l D0,(-0x18,A6)` at 0xE5AA6C), then makes the left call and adds
+  (`add.l (-0x18,A6),D0` at 0xE5AA86).  That is one site, and the rule for
+  the order is not known.  The reference fixes the order only for `and
+  then` / `or else` (C.3.3, p. C-6).
+- Tests: `tests/exec/two_calls.pas`; `crates/dpc-m68k/tests/expr.rs`
+  `two_calls_in_one_statement`.
 
 ### 1.2 By reference vs. by value: the routine's options decide (Verified + reference)
 

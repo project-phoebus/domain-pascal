@@ -152,8 +152,6 @@ fn unsupported_expressions() {
             "t := (w + 9) mod 12;",
             "a word `div`/`mod` of a sum, difference or product used as a longword",
         ),
-        // Two M$ARITH results in one expression.
-        ("t := l * l + l * l;", "two function calls in one statement"),
         // An unsigned `mod` by a power of two: mask or division?
         ("t := u mod 4;", "unsigned `mod` by a power of two"),
         // A signed `M$OIS$WLW' remainder used as a longword: no site.
@@ -166,8 +164,6 @@ fn unsupported_expressions() {
         // Two elements of other units' arrays in one statement
         // (FIM_$ACKNOWLEDGE 0xE0A994: not modelled).
         ("t := xs[w] + xs[w];", "two elements of other units' arrays"),
-        // Two calls in one statement.
-        ("t := f(w) + f(w);", "two function calls in one statement"),
         // `!' of a variable and a constant: both orders in the image.
         ("t := w ! 4;", "`!`/`xor` of a variable and a constant"),
     ];
@@ -199,6 +195,73 @@ fn unsupported_expressions() {
 /// `tools/arithsurvey.py scale`): the constant first, `moveq #c,Dn;
 /// mul<s>.w x,Dn` (TPAD_$SET_UNIT_MODE 0xE69824 `moveq #44,D2; mulu.w
 /// (A4),D2`); 128 and more: `mul<s>.w #c` on the loaded value.
+/// Two calls in one statement (bead domain-pascal-ej8m; isel `CallMode`):
+/// the statement is selected again with each call popped and its result
+/// copied out of D0, into a callee-saved register when another call
+/// follows (best effort: PACCT_$CLOCK_TO_COMP 0xE5AA6C keeps an M$ARITH
+/// result in a frame temporary instead).
+#[test]
+fn two_calls_in_one_statement() {
+    // A best-effort form: refused under `--strict`.
+    let src = "function t: integer32; internal;\nbegin\n  t := f(w) + f(w);\nend;\n";
+    assert!(error(src).contains("a call whose result is still needed at a later call"));
+    // An M$ARITH result stored into a by-address argument's temporary
+    // compiles under `--strict`, as before (review of the bead, S1).
+    let b = body(
+        "procedure h(in v: integer32); extern;\nprocedure t; internal;\nbegin\n  h(l * l);\nend;\n",
+    );
+    assert!(b.contains(&"pea\t(-8,%fp)".to_string()), "{b:?}");
+    let strict = dpc_syntax::diag::set_strict(false);
+    assert_eq!(
+        body("function t: integer32; internal;\nbegin\n  t := f(w) + f(w);\nend;\n"),
+        [
+            "move.l\t%d2,-(%sp)",
+            "subq.l\t#2,%sp",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(F).l",
+            "addq.w\t#4,%sp",
+            "move.l\t%d0,%d2",
+            "subq.l\t#2,%sp",
+            "ext.l\t%d2",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(F).l",
+            "addq.w\t#4,%sp",
+            "move.l\t%d0,%d1",
+            "ext.l\t%d1",
+            "add.l\t%d1,%d2",
+            "move.l\t%d2,%d0",
+            "move.l\t(-0xc,%fp),%d2",
+        ]
+    );
+    // Two M$ARITH results: the first kept in D1, which M$ARITH preserves
+    // (codegen-patterns 12.4 R3; PROC1_$LOADAV_CALLBACK 0xE14C56..0xE14C84
+    // holds D1 across `jsr M$DIS$LLL`).
+    let b = body("function t: integer32; internal;\nbegin\n  t := l * l + l * l;\nend;\n");
+    assert_eq!(
+        b.iter()
+            .filter(|l| l.starts_with("jsr\t(M$MIS$LLL)"))
+            .count(),
+        2,
+        "{b:?}"
+    );
+    assert!(b.contains(&"move.l\t%d0,%d1".to_string()), "{b:?}");
+    // A call among another call's arguments: made where its argument is
+    // pushed and popped at once (PROC2_$SIGNAL_PGROUP_OS 0xE3F296).
+    assert_eq!(
+        body("function t: integer; internal;\nbegin\n  t := f(f(w));\nend;\n"),
+        [
+            "subq.l\t#2,%sp",
+            "subq.l\t#2,%sp",
+            "move.w\t(W).l,-(%sp)",
+            "jsr\t(F).l",
+            "addq.w\t#4,%sp",
+            "move.w\t%d0,-(%sp)",
+            "jsr\t(F).l",
+        ]
+    );
+    dpc_syntax::diag::set_strict(strict);
+}
+
 #[test]
 fn products_with_the_constant_first() {
     let src = |routine: &str| {
