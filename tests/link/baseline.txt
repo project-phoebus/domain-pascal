@@ -3,8 +3,8 @@
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
 # source: 39f0fe4d6feb313c6b8f36c1bba699ae724fa4e7
-# dpc: dec7646452abc48a0cc4c2286c935e146046cf64
-# 47 of 110 module files compile; 63 refused by dpc
+# dpc: ac9d42bec3b2bcd13720f8f5dd0d214016e6b01e
+# 51 of 110 module files compile; 59 refused by dpc
 REFUSED	acl/acl.pas	functions returning T are not supported yet (codegen-patterns N: result convention unknown)
 OK	acl/acl_wired.pas	-
 OK	app/app.pas	-
@@ -14,7 +14,7 @@ REFUSED	asknode/asknode.pas	a `for` loop from N to a bound reached through a poi
 REFUSED	ast/ast.pas	comparing with a constant outside the other operand's type is not supported yet
 REFUSED	audit/audit.pas	a pointer result other than one read from memory or a pointer function's result (a computed value: codegen-patterns N, "X") is not supported yet
 OK	audit/audit_wired.pas	-
-REFUSED	bat/bat.pas	more values live at once than there are registers not supported yet
+REFUSED	bat/bat.pas	an unsigned ordering comparison with N is not supported yet
 OK	cal/os_cal_unwired.pas	-
 OK	cal/os_cal_wired.pas	-
 OK	ct/ct.pas	-
@@ -45,13 +45,13 @@ OK	io/io.pas	-
 OK	io/dctes.pas	-
 REFUSED	kbd/kbd.pas	a `for` loop with a run-time lower bound (`X`X's module-local 0xE1CA10..0xE1CA1C; not settled, codegen-patterns 7.4) is not supported yet
 OK	log/log.pas	-
-REFUSED	mac_os/mac_os.pas	more values live at once than there are registers not supported yet
+REFUSED	mac_os/mac_os.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
 OK	mem/mem.pas	-
 OK	misc/misc.pas	-
 OK	misc/print_build_time_.pas	-
 REFUSED	mmap/mmap.pas	a `for`X`subi.w #13`X`subi.w #16` from N, both without a call: the count's copy not settled, codegen-patterns 7.4) is not supported yet
 OK	mmap/mmap_unwired.pas	-
-REFUSED	msg/msg_unwired.pas	more values live at once than there are registers not supported yet
+OK	msg/msg_unwired.pas	-
 OK	msg/msg_wired.pas	-
 REFUSED	mst/mst_unwired.pas	a `for` bound of another width than the index, other than a longword variable read as its low word (a longword expression or function result narrowed: no site seen, codegen-patterns 7.4) is not supported yet
 REFUSED	mst/mst_wired.pas	a `goto` into a `for`, `while`, `repeat`, `with` or `case` statement from outside it (illegal by ref p. 4-95, permitted by Appendix D p. D-4: open question N) is not supported yet
@@ -59,16 +59,16 @@ OK	mt/mt.pas	-
 REFUSED	name/name.pas	assigning a record or array that is not a variable is not supported yet
 REFUSED	name/nameu.pas	a `for` loop with a run-time lower bound (`X`X's module-local 0xE1CA10..0xE1CA1C; not settled, codegen-patterns 7.4) is not supported yet
 REFUSED	net/net.pas	a pointer local assigned from a call that no call follows, assigned more than once, inside a statement, read other than dereferenced, or with A0 written before its last use (A0 or A1 in the image; not settled) is not supported yet
-REFUSED	net_io/net_io.pas	more values live at once than there are registers not supported yet
+OK	net_io/net_io.pas	-
 REFUSED	net_io/net_io_unwired.pas	a pointer local assigned from a call that no call follows, assigned more than once, inside a statement, read other than dereferenced, or with A0 written before its last use (A0 or A1 in the image; not settled) is not supported yet
 REFUSED	netbuf/netbuf.pas	a `for` loop with a run-time lower bound (`X`X's module-local 0xE1CA10..0xE1CA1C; not settled, codegen-patterns 7.4) is not supported yet
 REFUSED	netlog/netlog.pas	a 16-byte expression passed by address is not supported yet
-REFUSED	network/network.pas	more values live at once than there are registers not supported yet
+REFUSED	network/network.pas	a signed `mod` by a word used as a longword (the N `X` results in the image are all used as words) is not supported yet
 REFUSED	os/os.pas	the index variable of a `for`X`move.w D3,D2` for `n := first_n` after a loop over n in D5; not modelled, codegen-patterns 7.4) is not supported yet
 OK	os/os_wired_start.pas	-
-REFUSED	osinfo/osinfo.pas	more values live at once than there are registers not supported yet
+REFUSED	osinfo/osinfo.pas	a `for`X`subi.w #13`X`subi.w #16` from N, both without a call: the count's copy not settled, codegen-patterns 7.4) is not supported yet
 REFUSED	pacct/pacct.pas	a `for` loop with a run-time lower bound (`X`X's module-local 0xE1CA10..0xE1CA1C; not settled, codegen-patterns 7.4) is not supported yet
-REFUSED	parity/parity.pas	more values live at once than there are registers not supported yet
+OK	parity/parity.pas	-
 OK	pbu/pbu.pas	-
 OK	pbu/ec2_pbu.pas	-
 OK	pchist/pchist.pas	-
@@ -108,7 +108,7 @@ OK	tpad/tpad.pas	-
 REFUSED	tty/tty.pas	a byte constant argument with all bits set other than `true` (st or move.w #-0x100?) is not supported yet
 OK	uid/uid.pas	-
 REFUSED	vfmt/vfmt.pas	a signed `mod` by a word used as a longword (the N `X` results in the image are all used as words) is not supported yet
-REFUSED	volx/volx.pas	more values live at once than there are registers not supported yet
+OK	volx/volx.pas	-
 REFUSED	vtoc/vtoc.pas	a `for` loop over a row of another array (`a[j][i]`X's address stepped in the base's register, VTOC's N; not settled, codegen-patterns 7.4; bead domain-pascal-1ibr, domain-pascal-ga54) is not supported yet
 REFUSED	win/win.pas	an M$ARITH call with both operands computed (evaluation order not settled) is not supported yet
 OK	xns/xns_error.pas	-
