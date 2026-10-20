@@ -15624,7 +15624,9 @@ impl Selector {
     /// byte (`movea.l #sym`, as DISK_$GET_ERROR_INFO 0xE6C090 loads another
     /// unit's object for a copy), cleared with `clr`.  Arrays elsewhere are
     /// best effort, the count first (below; refused under `--strict`).
-    /// Storing other constants is not supported yet.
+    /// Storing other constants is refused: the lowering leaves such loops
+    /// `For`s, whose stepped pointer is the image's form for them
+    /// (`lower.rs`, `fill`; bead domain-pascal-1owb).
     fn fill(&mut self, start: &Addr, count: u32, value: &Expr) -> Res<()> {
         let Expr::Const { value: 0, ty } = value else {
             return Err(unsupported(

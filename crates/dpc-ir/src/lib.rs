@@ -586,7 +586,9 @@ pub enum StmtKind {
     /// Store `value` (a constant of the element type) into `count`
     /// consecutive objects of `value`'s type, the first at `start`: a
     /// `for` loop over an array whose index is used for nothing else
-    /// (`lower.rs`, `fill`).  `count` >= 1.
+    /// (`lower.rs`, `fill`).  `count` >= 1.  The lowering forms it only
+    /// for a `value` of 0; a loop storing another constant is a
+    /// [`StmtKind::For`] (bead domain-pascal-1owb).
     Fill {
         start: Addr,
         count: u32,

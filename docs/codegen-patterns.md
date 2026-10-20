@@ -6462,6 +6462,31 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   at 0xE6D2CE): not reproduced, the IR's `Fill` keeps neither the lower
   bound nor `from` (bead domain-pascal-lwga).  A `best_effort` warning;
   refused as before under `dpc --strict`.  `tests/exec/indexed_for.pas`.
+- **Loops storing a constant other than 0 (Verified at the sites given;
+  bead domain-pascal-1owb):** not `clr`-style fills but the stepped
+  pointers of 7.4, the constant stored with `move.<s> #c,(d,Ap)` and the
+  pointer stepped by `addq.l #s,Ap`, count first: MMAP_$INIT
+  0xE3199E..0xE319B2 `moveq #55,D0; lea (4,A2),A0; move.l
+  #0xfff,(-4,A0); addq.l #4,A0; dbf` (`for i := 1 to 56 do table[i] :=
+  16#FFF`, ../source mmap/init.pas, then a `move.l A0,(-60,A6)` after
+  the `lea` that dpc does not emit); RIP_$SEND 0xE8720A..0xE87218 `moveq
+  #2,D0; movea.l (8,A6),A0; move.w #-1,(4,A0); addq.l #2,A0; dbf`
+  (`addr_info.host[k] := 16#FFFF`, k 0..2); MAC_OS_$ARP
+  0xE0C15A..0xE0C164 `moveq #2,D0; lea (A2),A0; move.w D3,(2,A0)`, the
+  constant from the register an earlier compare loaded it into.  A scan
+  of every `dbf` loop with a body of at most 14 bytes finds no `for`
+  loop storing a constant with `(An)+`: only OS_$DATA_ZERO 0xE11F9E
+  `move.b #0,(A1)+` (the byte tail of a block clear, after `move.w
+  #0,(A1)+`) and the blank padding of a string assignment at 0xE31748
+  `move.l D1,(A0)+`, the blanks in D1.  **Implemented:** `lower.rs` `fill` leaves such
+  loops `For`s, and the stepped-pointer selection forms them; dpc gives
+  RIP_$SEND's loop a new register (`lea (A0),A1`) where the original
+  steps A0 (the "in place" case of 7.4).  Byte elements are indexed with
+  the index register (7.4, "Array indexing by the index"); `true` is `st`.
+  **Uncertain:** a longword constant in `moveq`'s range is loaded by
+  `moveq` into a data register on every pass (the plain-store rule,
+  section 13); no `for` loop storing such a constant was found.
+  `tests/exec/const_fill.pas`.
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
   loop (0xE177DC..0xE177F2); the other guards, and when the count is
   copied into a counter of its own: section 7.4.

@@ -9140,10 +9140,11 @@ fn routine_pointer(p: &Program, x: &SExpr) -> Res<Expr> {
     }
 }
 
-/// `for v := lo to hi do a[v] := c` where `v` is a local variable used
-/// for nothing but the index, `lo`, `hi` and `c` are constants and the
-/// element is a scalar: [`StmtKind::Fill`] of `hi - lo + 1` elements
-/// from `a[lo]`.
+/// `for v := lo to hi do a[v] := 0` where `v` is a local variable used
+/// for nothing but the index, `lo` and `hi` are constants and the element
+/// is a scalar (`0` any constant stored as 0: `false`, `nil`, the first
+/// enumeration value, `[]`): [`StmtKind::Fill`] of `hi - lo + 1` elements
+/// from `a[lo]`.  Another constant stays a [`StmtKind::For`] (below).
 ///
 /// Image: module-local 0xE00EB0 (`misc/zero_page.c`), 0xE00ECC..0xE00EDA
 /// `movea.l #AST_$ZERO_BUFF,A0; move.w #0xFF,D0; movea.l A0,A0; clr.l
@@ -9223,6 +9224,22 @@ fn fill(
     if ty.bytes() != *elem_size {
         return Ok(None);
     }
+    let stored = stored_const(c, ty, value.span)?;
+    if !matches!(stored, Expr::Const { value: 0, .. }) {
+        // A constant other than 0 (bead domain-pascal-1owb): a `For`, whose
+        // stepped pointer is the image's form for such loops, the store
+        // `move.<s> #c,(d,Ap)` and `addq.l #s,Ap`, the pointer from `base +
+        // from * size` and `-lo * size` (and the field offset) in the
+        // displacement (codegen-patterns 7.4): MMAP_$INIT 0xE3199E..0xE319B2
+        // `moveq #55,D0; lea (4,A2),A0; move.l #0xfff,(-4,A0); addq.l
+        // #4,A0; dbf` (`for i := 1 to 56 do table[i] := 16#FFF`), RIP_$SEND
+        // 0xE8720A..0xE87218 `moveq #2,D0; movea.l (8,A6),A0; move.w
+        // #-1,(4,A0); addq.l #2,A0; dbf`, MAC_OS_$ARP 0xE0C15A..0xE0C164
+        // (the constant from a register that holds it already).  No
+        // compiled loop stores a constant with `(An)+` (only clears do,
+        // 0xE00ED8).
+        return Ok(None);
+    }
     if hi < lo {
         // The body never runs; what the original emitted is not known.
         return Err(unsupported(s.span, "a `for` loop that never runs is"));
@@ -9237,7 +9254,7 @@ fn fill(
         kind: StmtKind::Fill {
             start: addr_of(p, base)?.offset_by(first),
             count,
-            value: stored_const(c, ty, value.span)?,
+            value: stored,
         },
         span: s.span,
     }))
