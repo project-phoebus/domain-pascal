@@ -6367,9 +6367,13 @@ fn byte_set_narrow(p: &Program, e: &SExpr) -> Res<Expr> {
 /// (`0 in attrs.obj_flags`), ACL_$MIN_RIGHTS 0xE46922 `btst.b
 /// #4,(-0x14,A6)` (`4 in owner_rights`), APP_$RECEIVE's `btst.b
 /// #3,(7,A3); sne` (`3 in hdr^.rh_flags_07`; ../source app/receive.pas).
-/// A run-time member is refused (its sites, AREA's area_$free_slot_
-/// segments 0xE08328..0xE0832E `clr.w D6; ...; move.b (A2),D6; btst.l
-/// D5,D6`, widen the byte into a register first: not reproduced).
+/// A run-time member: the same node, which the selector tests with the
+/// byte widened into a register (AREA's area_$free_slot_segments
+/// 0xE08328..0xE0832E `clr.w D6; ...; move.b (A2),D6; btst.l D5,D6`), a
+/// word element there.  Best effort (not byte-identical): a one-byte
+/// element (char, `[byte]` subrange) is zero-extended to a word first, so
+/// the register `btst` (bit mod 32) reads its value and not the bits
+/// above it (no byte element of a byte set seen).
 fn byte_set_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
     if lhs.value.is_none() {
         best_effort(
@@ -6378,6 +6382,29 @@ fn byte_set_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
              AREA's area_$free_slot_segments 0xE08328: not reproduced; codegen-patterns 5.1, \
              \"One-byte sets\") is",
         )?;
+        if rhs.value.is_some() {
+            return Err(unsupported(
+                rhs.span,
+                "`in` on a one-byte constant set (no site; codegen-patterns 5.1, \"One-byte \
+                 sets\") is",
+            ));
+        }
+        if p.types.is_boolean(lhs.ty) {
+            // A boolean's true is 0xFF (ref 3.5.3), not its ordinal 1.
+            return Err(unsupported(
+                lhs.span,
+                "`in` on a one-byte set with a boolean element is",
+            ));
+        }
+        let mut elem = value_of(p, lhs)?;
+        if elem.ty().width == Width::Byte {
+            elem = convert(elem, Scalar::unsigned(Width::Word));
+        }
+        return Ok(Expr::SetMember {
+            elem: Box::new(elem),
+            set: Box::new(value_of(p, rhs)?),
+            set_width: Width::Byte,
+        });
     }
     if rhs.value.is_some() {
         return Err(unsupported(
@@ -6390,6 +6417,59 @@ fn byte_set_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
         elem: Box::new(value_of(p, lhs)?),
         set: Box::new(value_of(p, rhs)?),
         set_width: Width::Byte,
+    })
+}
+
+/// `lhs in rhs` for a set field `rhs` of a packed record that is a bit
+/// field ([`bit_field`]; ref 3.10.7 Table 3-3, p. 3-36: one bit per
+/// element, member k at bit k of the field's value).  Best effort (not
+/// byte-identical; bead domain-pascal-eoc6; no site seen):
+/// - a constant member k: the member's bit read as a one-bit boolean
+///   field, `btst #b` on the byte that holds it (the boolean field's form,
+///   0xE16F0C `btst #4,(19,A2); sne D0`; bit 7 `tst.b`, 0xE066B2); a
+///   member outside the field's bits is false;
+/// - a run-time member: the field's value extracted into a register
+///   ([`Expr::Bits`]) and `btst Dk,Dn` on it, as a one-byte set's
+///   (AREA's area_$free_slot_segments 0xE0832E `btst D5,D6`); a byte
+///   element zero-extended to a word first.
+fn bit_field_member(p: &Program, lhs: &SExpr, rhs: &SExpr) -> Res<Expr> {
+    let (addr, field) = bit_field(p, rhs)?.expect("a bit field");
+    check_device_access(p, rhs, true)?;
+    let ty = bit_field_type(p, rhs)?;
+    if let Some(k) = lhs.value.as_ref().and_then(|v| v.ordinal()) {
+        if k < 0 || k >= i64::from(field.width) {
+            return Ok(Expr::Const {
+                value: 0,
+                ty: Scalar::BOOLEAN,
+            });
+        }
+        let u = field.shift + k as u32;
+        let byte = field.unit.bytes() - 1 - u / 8;
+        return Ok(Expr::Bits {
+            addr: addr.offset_by(byte as i32),
+            field: BitField {
+                unit: Width::Byte,
+                shift: u % 8,
+                width: 1,
+            },
+            ty: Scalar::BOOLEAN,
+        });
+    }
+    if p.types.is_boolean(lhs.ty) {
+        // A boolean's true is 0xFF (ref 3.5.3), not its ordinal 1.
+        return Err(unsupported(
+            lhs.span,
+            "`in` on a packed set field with a boolean element is",
+        ));
+    }
+    let mut elem = value_of(p, lhs)?;
+    if elem.ty().width == Width::Byte {
+        elem = convert(elem, Scalar::unsigned(Width::Word));
+    }
+    Ok(Expr::SetMember {
+        elem: Box::new(elem),
+        set: Box::new(Expr::Bits { addr, field, ty }),
+        set_width: ty.width,
     })
 }
 
@@ -6658,11 +6738,36 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     }
     if let Some((addr, field)) = bit_field(p, e)? {
         check_device_access(p, e, true)?;
-        return Ok(Expr::Bits {
-            addr,
-            field,
-            ty: bit_field_type(p, e)?,
-        });
+        let ty = bit_field_type(p, e)?;
+        let bits = Expr::Bits { addr, field, ty };
+        if p.types.ordinal_range(e.ty).is_some_and(|(lo, _)| lo < 0) {
+            // Best effort (not byte-identical; bead domain-pascal-eoc6): a
+            // field of a subrange with negative values (ref Figure 3-17,
+            // p. 3-37: two's complement, `-100..40`) has no site.  Its
+            // bits zero-extended, then shifted to the top of the value
+            // and arithmetically back, `lsl` then `asr` (ref p. 4-29
+            // `arshft`), which extends the field's sign bit.
+            let n = 8 * ty.bytes() - field.width;
+            if n == 0 {
+                return Ok(bits);
+            }
+            let count = Expr::Const {
+                value: i64::from(n),
+                ty: Scalar::signed(Width::Word),
+            };
+            return Ok(Expr::Binary {
+                op: IrBinOp::Ashr,
+                lhs: Box::new(Expr::Binary {
+                    op: IrBinOp::Shl,
+                    lhs: Box::new(bits),
+                    rhs: Box::new(count.clone()),
+                    ty,
+                }),
+                rhs: Box::new(count),
+                ty,
+            });
+        }
+        return Ok(bits);
     }
     match &e.kind {
         ExprKind::Var { .. }
@@ -6995,6 +7100,9 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
         BinOp::Mod => IrBinOp::Mod,
         BinOp::BitAnd => IrBinOp::And,
         BinOp::BitOr => IrBinOp::Or,
+        BinOp::In if bit_field(p, rhs)?.is_some() => {
+            return bit_field_member(p, lhs, rhs);
+        }
         BinOp::In => {
             // codegen-patterns 5.1: a set that fits in a register (one
             // word or one longword) is tested in a register (PROC1_$TST_LOCK
@@ -7782,21 +7890,38 @@ fn bit_element(p: &Program, e: &SExpr) -> Res<Option<(Addr, u32, Expr, i64)>> {
 
 /// The value type of bit field `e` ([`bit_field`]): a boolean of one bit,
 /// or an ordinal of non-negative values (an enumeration, a subrange with a
-/// low bound of 0 or more), zero-extended.  A subrange with negative
-/// values (`-100..40`, ref Figure 3-17) would need its sign extended
-/// (not catalogued), a set field is not an operand yet.
+/// low bound of 0 or more), zero-extended.  Best effort (not
+/// byte-identical; bead domain-pascal-eoc6): a subrange with negative
+/// values (`-100..40`, ref Figure 3-17) is its signed type, its sign
+/// extended by the selector (no site seen); a set (ref 3.10.7 Table 3-3,
+/// p. 3-36: one bit per element of 0..hi, member k at bit k of the
+/// field's value, as an unpacked set's bit string) is its unsigned set
+/// value, the field's bits zero-extended.
 fn bit_field_type(p: &Program, e: &SExpr) -> Res<Scalar> {
     let t = &p.types;
     if t.is_boolean(e.ty) {
         return Ok(Scalar::BOOLEAN);
     }
+    if is_set(p, e.ty) && t.size(e.ty) <= 4 {
+        best_effort(
+            e.span,
+            format!(
+                "a packed field of type {} that is not a whole byte, word or longword is",
+                t.display(e.ty)
+            ),
+        )?;
+        return scalar_of(p, e);
+    }
     match t.ordinal_range(e.ty) {
         Some((lo, _)) if lo >= 0 => scalar_of(p, e),
-        Some(_) => Err(unsupported(
-            e.span,
-            "a packed field of a subrange with negative values (its sign extension is not \
-             catalogued) is",
-        )),
+        Some(_) => {
+            best_effort(
+                e.span,
+                "a packed field of a subrange with negative values (its sign extension is not \
+                 catalogued) is",
+            )?;
+            scalar_of(p, e)
+        }
         None => Err(unsupported(
             e.span,
             format!(
@@ -7853,12 +7978,17 @@ fn store_bits(
              back, perhaps twice; not seen, ref 3.15.1) is",
         )?;
     }
+    if let Some(st) = store_bits_set_update(p, s, target, value, &addr, field, ty)? {
+        return Ok(st);
+    }
     let (v, mask) = if let Some(c) = &value.value {
         (const_of(c, ty, value.span)?, false)
     } else {
         let v = value_of(p, value)?;
         let v = if v.ty().bytes() < ty.bytes() {
-            if !p.types.is_integer(value.ty) {
+            // A one-byte set into a set field of a word: zero-extended, as
+            // an integer (its members at the same bits).
+            if !p.types.is_integer(value.ty) && !is_set(p, value.ty) {
                 return Err(unsupported(
                     value.span,
                     format!(
@@ -7885,6 +8015,88 @@ fn store_bits(
         },
         span: s.span,
     })
+}
+
+/// `f := f + c`, `f := f - c`, `f := f * c` for a set field `f` that is a
+/// bit field ([`bit_field`]) and a constant set `c`, or `None` for any
+/// other store.  Best effort (not byte-identical; bead
+/// domain-pascal-eoc6; no site seen): one member added or removed is its
+/// bit set or cleared as a one-bit boolean field's, `bset`/`bclr #b` on
+/// the byte that holds it (the in-place form of a set in memory,
+/// TTY_$K_SET_FLAG 0xE6745C `bset #4,(9,A2)`, 0xE6747C `bclr`); any other
+/// is the field's value combined with the constant as an integer (`!`
+/// for `+`, `&` of the complement for `-`, `&` for `*`) and merged back
+/// under the field's mask.
+fn store_bits_set_update(
+    p: &Program,
+    s: &SStmt,
+    target: &SExpr,
+    value: &SExpr,
+    addr: &Addr,
+    field: BitField,
+    ty: Scalar,
+) -> Res<Option<Stmt>> {
+    let ExprKind::Binary { op, lhs, rhs } = &value.kind else {
+        return Ok(None);
+    };
+    if !is_set(p, target.ty) || value.value.is_some() {
+        return Ok(None);
+    }
+    let Some(ConstValue::Set(members)) = &rhs.value else {
+        return Ok(None);
+    };
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+        || bit_field(p, lhs)? != Some((addr.clone(), field))
+    {
+        return Ok(None);
+    }
+    let width = i64::from(field.width);
+    let bits: Vec<i64> = members
+        .iter()
+        .copied()
+        .filter(|k| (0..width).contains(k))
+        .collect();
+    let c = bits.iter().fold(0i64, |m, k| m | (1 << k));
+    let all = if width >= 63 { -1 } else { (1i64 << width) - 1 };
+    let stmt = |kind| Stmt { kind, span: s.span };
+    if bits.len() == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+        let u = field.shift + bits[0] as u32;
+        let byte = field.unit.bytes() - 1 - u / 8;
+        return Ok(Some(stmt(StmtKind::StoreBits {
+            addr: addr.clone().offset_by(byte as i32),
+            field: BitField {
+                unit: Width::Byte,
+                shift: u % 8,
+                width: 1,
+            },
+            value: Expr::Const {
+                value: if *op == BinOp::Add { -1 } else { 0 },
+                ty: Scalar::BOOLEAN,
+            },
+            mask: false,
+        })));
+    }
+    let (iop, k) = match op {
+        BinOp::Add => (IrBinOp::Or, c),
+        BinOp::Sub => (IrBinOp::And, all & !c),
+        _ => (IrBinOp::And, c),
+    };
+    let old = Expr::Bits {
+        addr: addr.clone(),
+        field,
+        ty,
+    };
+    Ok(Some(stmt(StmtKind::StoreBits {
+        addr: addr.clone(),
+        field,
+        value: Expr::Binary {
+            op: iop,
+            lhs: Box::new(old),
+            rhs: Box::new(Expr::Const { value: k, ty }),
+            ty,
+        },
+        mask: true,
+    })))
 }
 
 /// How designator `e` is referenced when it is volatile (ref
@@ -8657,7 +8869,12 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 Arg::Value { value, slot }
             }
             Passing::ByAddress => {
-                if a.needs_temp && a.expr.is_designator() {
+                // A bit field of a packed record has no address (ref
+                // 3.10.3): passed as an expression, its value in a frame
+                // temporary (below).  Best effort (not byte-identical; bead
+                // domain-pascal-eoc6): no site.
+                let bits = bit_field(p, &a.expr)?.is_some();
+                if a.needs_temp && a.expr.is_designator() && !bits {
                     let what = "passing a variable of another size to a value or `in` parameter \
                                 (a converted copy, codegen-patterns 1.5) is";
                     // Best effort for integers (bead domain-pascal-5kgg):
@@ -8764,7 +8981,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     });
                     continue;
                 }
-                if !a.expr.is_designator() {
+                if !a.expr.is_designator() || bits {
                     // An expression: stored into a frame temporary, whose
                     // address is passed (codegen-patterns 1.5, TONE_$ENABLE
                     // 0xE1ACFC); the offset is assigned once the body is

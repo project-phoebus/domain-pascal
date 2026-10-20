@@ -80,6 +80,18 @@ fn body(routine: &str) -> Vec<String> {
     lines[start..end].to_vec()
 }
 
+/// [`body`] with the best-effort forms taken (not `--strict`; bead
+/// domain-pascal-5kgg), and their warnings, which contain `warns`.
+fn lax_body(routine: &str, warns: &str) -> Vec<String> {
+    let was = dpc_syntax::diag::set_strict(false);
+    let b = std::panic::catch_unwind(|| body(routine));
+    dpc_syntax::diag::set_strict(was);
+    let w = dpc_syntax::diag::take_best_effort();
+    let b = b.unwrap_or_else(|e| std::panic::resume_unwind(e));
+    assert!(w.iter().any(|d| d.message.contains(warns)), "{w:?}");
+    b
+}
+
 fn error(routine: &str) -> String {
     let e = compile(&format!("{DECLS}{routine}")).unwrap_err();
     assert_eq!(e.len(), 1, "{e:?}");
@@ -212,7 +224,9 @@ fn multi_bit_constants() {
     );
     // Nor is one with a zero low byte whose bits lie in both halves
     // (0xE4A834 `andi.l #255,(50,A0)`, 0xE4A83C `ori.l
-    // #0x8001e00,(50,A0)`); bits in one half only are refused.
+    // #0x8001e00,(50,A0)`); bits in one half only are refused under
+    // `--strict`, `ori.l` too otherwise (best effort, bead
+    // domain-pascal-eoc6).
     assert_eq!(
         body("procedure t(var x: r); begin x.l20 := 16#2020 end;"),
         [
@@ -222,6 +236,17 @@ fn multi_bit_constants() {
         ]
     );
     assert!(error("procedure t(var x: r); begin x.l20 := 16#2000 end;").contains("lie in one half"));
+    assert_eq!(
+        lax_body(
+            "procedure t(var x: r); begin x.l20 := 16#2000 end;",
+            "lie in one half"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "andi.l\t#-0x7ffff9,(6,%a0)",
+            "ori.l\t#0x10000,(6,%a0)"
+        ]
+    );
 }
 
 #[test]
@@ -340,17 +365,107 @@ fn refusals() {
         "type br = packed record a: 0..1; b: 0..1 end;\nprocedure t(var x: br); begin x.b := 1 end;"
     )
     .contains("one-bit packed field that is not a boolean"));
-    // An 8-bit field of a word type on a byte boundary: the general forms
-    // would give `andi.b #0,M` (absent from the image) and `move.w
-    // #255,Dn; and.b M,Dn`; not catalogued.
+    let set = "type sr = packed record a: boolean; s: set of 0..3 end;\n";
+    assert!(error(&format!(
+        "{set}procedure t(var x: sr); begin x.s := [1] end;"
+    ))
+    .contains("not a whole byte, word or longword"));
+}
+
+/// An 8-bit field of a word type on a byte boundary is the byte as a
+/// `[byte] 0..255` (bead domain-pascal-eoc6; DBUF 0xE3AC6A `clr.b
+/// (13,A2)`; `status_$t.modc` 0xE1AAB8 `clr.w D0; move.b (1,A0),D0`).
+#[test]
+fn byte_fields() {
     let fill = "type yr = packed record x: 0..255; y: 0..255 end;\n";
-    for body in [
-        "procedure t(var x: yr); begin x.y := 5 end;",
-        "procedure t(var x: yr); begin x.y := gw end;",
-        "procedure t(var x: yr); begin gw := x.y end;",
-    ] {
-        assert!(error(&format!("{fill}{body}")).contains("8 bits on a byte boundary"));
-    }
+    assert_eq!(
+        body(&format!(
+            "{fill}procedure t(var x: yr); begin x.y := 0 end;"
+        )),
+        ["movea.l\t(8,%fp),%a0", "clr.b\t(1,%a0)"]
+    );
+    assert_eq!(
+        body(&format!(
+            "{fill}procedure t(var x: yr); begin gw := x.y end;"
+        )),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "clr.w\t%d0",
+            "move.b\t(1,%a0),%d0",
+            "move.w\t%d0,(GW).l"
+        ]
+    );
+}
+
+/// Forms accepted best effort, refused under `--strict` (above; bead
+/// domain-pascal-eoc6): no site; their meaning is checked by
+/// tests/exec/bit_fields.pas.
+#[test]
+fn best_effort_forms() {
+    // A copy between bit fields: the value extracted, merged (5kgg's
+    // form, unmasked: the value is zero-extended from its bits).
+    assert_eq!(
+        lax_body(
+            "procedure t; var x, y: r; begin x.n3 := y.n3; gw := x.i end;",
+            "copying a packed field"
+        )[..4],
+        [
+            "moveq\t#7,%d0",
+            "and.b\t(-0x20,%fp),%d0",
+            "andi.b\t#0xf8,(-0x10,%fp)",
+            "or.b\t%d0,(-0x10,%fp)"
+        ]
+    );
+    // A field of negative values: zero-extended, then `lsl`/`asr`.
+    assert_eq!(
+        lax_body(
+            "type sr = packed record s: -8..7 end;\nprocedure t(var x: sr); begin gw := x.s end;",
+            "negative values"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t#0xf0,%d0",
+            "and.b\t(%a0),%d0",
+            "lsr.w\t#4,%d0",
+            "lsl.w\t#8,%d0",
+            "lsl.w\t#4,%d0",
+            "asr.w\t#8,%d0",
+            "asr.w\t#4,%d0",
+            "move.w\t%d0,(GW).l"
+        ]
+    );
+    // A set field: a constant member as a boolean field's bit, a
+    // run-time one on the value extracted (a `moveq` mask: the register
+    // all clear above it).
+    let set = "type sr = packed record a: boolean; s: set of 0..3 end;\n";
+    assert_eq!(
+        lax_body(
+            &format!("{set}procedure t(var x: sr); begin gb := 2 in x.s end;"),
+            "set of 0..3"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "btst\t#5,(%a0)",
+            "sne\t%d0",
+            "move.b\t%d0,(GB).l"
+        ]
+    );
+    assert_eq!(
+        lax_body(
+            &format!("{set}procedure t(var x: sr); begin gb := gw in x.s end;"),
+            "set of 0..3"
+        ),
+        [
+            "move.w\t(GW).l,%d0",
+            "movea.l\t(8,%fp),%a0",
+            "moveq\t#0x78,%d1",
+            "and.b\t(%a0),%d1",
+            "lsr.w\t#3,%d1",
+            "btst\t%d0,%d1",
+            "sne\t%d1",
+            "move.b\t%d1,(GB).l"
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------

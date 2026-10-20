@@ -3744,11 +3744,14 @@ forms are the set forms of the word sets above):
   byte-set site, but the byte-level rule of 5.3 (no `btst #7` on memory
   in compiled code, 422 sites with k = 0..6) and the word sets' member 7
   (0xE1B63E) give it.  Refused: a set held in a register, indexed or
-  volatile (no site), and a run-time member.  **Run-time member sites
-  exist** (AREA's area_$free_slot_segments, a one-byte set in a packed
-  record in ../source's reading): 0xE08328..0xE0832E `clr.w D6; ...;
+  volatile (no site).  **A run-time member** (AREA's
+  area_$free_slot_segments, a one-byte set in a packed record in
+  ../source's reading): 0xE08328..0xE0832E `clr.w D6; and.w D4,D5;
   move.b (A2),D6; btst.l D5,D6`, the byte widened and tested in a
-  register; `dpc` still refuses them (follow-up bead).
+  register; implemented in that order (the clear, the element, the
+  byte, the `btst`; isel `byte_set_member_reg`, bead domain-pascal-eoc6).
+  Best effort (not byte-identical): a one-byte element (char, `[byte]`
+  subrange; no site) is zero-extended to a word first.
 - **Stores:** `[]` as `clr.b` (acl_$convert_image 0xE44EDC `clr.b
   (27,A0)`), a constant as `move.b #c` (acl_$def_acldata 0xE47916..
   0xE47928 `move.b #0x10,(0x18,A0)` ×3, `move.b #0xf,(0x1b,A0)`; ACL_$COPY
@@ -5772,7 +5775,7 @@ same `bset #c mod 8` on the member's byte).
   (`lsr.l #8; lsr.l #7`).  A field at the top of a unit as wide as the
   value: `move.U M,Dn; lsr.U #s,Dn` (0xE08434, 0xE0A232).  Against 0, the
   branch reads the flags of the `and` or the shift (0xE1BFFE, 0xE5BFBE).
-  Fields of negative values (sign extension) are refused: not catalogued.
+  Fields of negative values: **best effort** (below).
 - **Wider field, constant:** `andi.U #~mask,M; ori #c<<s,M` (0xE158CE);
   the `andi` alone for 0 (0xE1565E), the `ori` alone when every bit is set
   (0xE15656).  The `ori` is unit-wide (0xE0A1DE `ori.l #16,(8,A0)`;
@@ -5781,8 +5784,8 @@ same `bset #c mod 8` on the member's byte).
   longword's with a zero low byte stays an `ori.l` when it has bits in
   both halves, which no narrower `ori` could set (0xE4A83C `ori.l
   #0x8001e00,(50,A0)` after 0xE4A834 `andi.l #255,(50,A0)`; one site);
-  with bits in one half only it is refused (not catalogued); so is a
-  constant into a one-bit field that is not a boolean.  A lead for the
+  with bits in one half only, and a constant into a one-bit field that is
+  not a boolean: **best effort** (below).  A lead for the
   unit (site Verified, reading Uncertain): KBD_$RCV 0xE1CD32 `moveq
   #15,D0; or.w D0,(A3)` sets the low 4 bits of byte 1 of a 2-byte
   record, the "every bit set" `or` but on the record's word and through
@@ -5792,12 +5795,23 @@ same `bset #c mod 8` on the member's byte).
   packed field (`next_state := 15`), its C as an integer `|= 0xF` (5.1,
   the six constant `and`/`or` through a register; beads
   domain-pascal-iv5, domain-pascal-d89) (lead: ../source
-  pascal-translation-notes finding 31).  An 8-bit field
-  of a wider type on a byte boundary (`0..255`) is refused: the general
-  forms would give `andi.b #0,M`, which the image never has, and how
-  the original read and wrote it is not catalogued (a lead:
-  0xE15894..0xE15898 `clr.w D0; move.b (15,A0),D0; cmp.w`, a byte of
-  unknown type next to RIP's packed `state` byte).
+  pascal-translation-notes finding 31).
+- **An 8-bit field of a wider type on a byte boundary** (an integer
+  subrange `0..255` or `-128..127`, a `set of 0..7`; implemented, bead
+  domain-pascal-eoc6) is the byte as an object of its type with a size
+  attribute of a byte (`[byte] 0..255`, `[byte] set of 0..7`, ref 3.15.5;
+  `dpc-sema` `byte_field_type`), read and written as one, not a bit field:
+  a subrange `clr.w Dn; move.b M,Dn` (`status_$t.modc`, 0xE1AAB8 `clr.w
+  D0; move.b (1,A0),D0`), `clr.b M` for 0 (DBUF's init, 0xE3AC6A `clr.b
+  (0xd,A2)` for `e_flags.block_type := 0`); a set the one-byte set forms
+  of 5.1 (XPD_$RESET_PTRACE_OPTS 0xE5B15E `clr.b (12,A0)` for `opts.flags
+  := []`, XPD_$INHERIT_PTRACE_OPTIONS 0xE5B17C `btst #3,(13,A0); sne D0`
+  for `3 in opts.flags2`; the fields of `proc2_$ptrace_opts_t`, ../source
+  `proc2/proc2_data.ins.pas`).  A static initial value of such a set is
+  the byte's (member k at bit k).  `sizeof` of such a field stays the
+  size of its declared type (2), as for any packed field.  The general
+  forms would give `andi.b #0,M`, which the image never has.  An enumeration of 129..256 values
+  (no site) is still refused.
 - **Wider field, value:** `andi.U #~mask,M`, the value shifted up (`lsl`
   split at 8, `add` for 1), `or.U Dn,M`.  A variable is read only as wide
   as the field needs (a byte up to 8 bits, a word up to 16), at its low
@@ -5812,7 +5826,7 @@ same `bset #c mod 8` on the member's byte).
   move.b`, 0xE00994, 0xE0F216; byte to longword `move.b; andi.l #255`,
   0xE0086E; word to longword `clr.l; move.w`, 0xE0E346).  A computed value
   is used at its own width or wider (0xE106A0: a longword merged into a
-  byte); narrower ones are refused.  **Masking (Uncertain):** the shifted
+  byte); narrower ones: **best effort** (below).  **Masking (Uncertain):** the shifted
   value is and-ed with the field mask when its type admits negative
   values (0xE31DF2: `ext.w`, then `lsl.w #4; andi.w #0x3f0`), not when it
   is non-negative however wide (PACCT 0xE5AA14: an unsigned longword,
@@ -5826,20 +5840,61 @@ same `bset #c mod 8` on the member's byte).
   `addq.w #1,D1`) of unknown type, into 3 bits unmasked (0xE5AA06
   `move.b D1,D3; lsl.b #5,D3; or.b`); if that counter is an `integer`,
   the rule is wrong.
+- **Best effort (not byte-identical; bead domain-pascal-eoc6; no site
+  for any of these, correctness checked by `tests/exec/bit_fields.pas`;
+  each a `best effort` warning, `dpc --strict` refuses them with the old
+  message):**
+  - a note for translators: a field-to-field copy, or a store of an
+    unsigned variable, is not masked to the destination's bits (as at
+    0xE1817A: only a source type that admits negative values is
+    masked), so a value outside the destination's type spills into the
+    neighbouring bits.  Pascal makes that a range error; C code that
+    relies on bit-field truncation must mask explicitly;
+  - a field of negative values (ref Figure 3-17, `-100..40`): its bits
+    zero-extended as above, then `lsl` to the top of the value and `asr`
+    back (`dpc-ir` builds `arshft(lshft(f, n), n)`, n = value bits -
+    field bits), which extends the field's sign;
+  - a set field that is a bit field (`set of 0..3`, `set of 0..5`; member
+    k at bit k of the field's value, Table 3-3 p. 3-36): read as its
+    unsigned value (the general form above); `k in f` for a constant k is
+    the member's bit read as a one-bit boolean field (`btst #b,M; sne` or
+    the branch, bit 7 `tst.b`; a member outside the field is false); a
+    run-time member is the field's value in a register, cleared with
+    `clr.l` first unless its mask is a `moveq` (so members up to 31
+    outside the field test false), and `btst Dk,Dn` (the one-byte set's
+    form, 5.1); `f := f + [k]` / `f := f - [k]` is
+    `bset`/`bclr #b` on the member's byte; with several members (or `*`)
+    the value `f ! c`, `f & ~c`, `f & c` merged back under the mask; a set
+    constant stored as an integer constant (the forms above); a static
+    initial value likewise, its members as the bits of the field's value
+    (`dpc-sema` `init_bits`);
+  - a constant into a one-bit field that is not a boolean (`0..1`): the
+    boolean's `bset`/`bclr #k,M` by the constant's low bit;
+  - a constant into a longword unit with a zero low byte and bits in one
+    half: `ori.l`;
+  - a copy of another bit field, a computed value narrower than the
+    unit, a signed variable narrower than the field: the value computed
+    into a register and always masked to the field before the `or`, so
+    nothing outside the field reaches the neighbouring bits;
+  - a bit field passed to a value or `in` parameter (ref 3.10.3 p. 3-21
+    forbids it; accepted so that ../source compiles): its value, by
+    value in the slot or in a frame temporary whose address is passed,
+    as any expression (1.5).
 - **Refused:** a packed field passed to `var`/`out`/`in out` or to
   `addr` (ref 3.10.3 p. 3-21: "you cannot pass a field from a packed
-  record as an argument"; an error), passed by value (not seen), copied
-  into another field (the image copies at the same position through the
-  unit, masked in place: 0xE19DE6 `move.b (2,A0),D0; andi.b #96,D0; or.b
-  D0,(2,A1)`; the general form is not catalogued), a destination and a
-  value that both need a register (the order of 12.4 "Stores whose
-  destination and value both need a register" is not applied to bit
-  fields: not seen), set fields as
-  operands.  Packed arrays of bit elements: 5.2, "Packed arrays".
+  record as an argument"; an error), a destination and a value that both
+  need a register (the order of 12.4 "Stores whose destination and value
+  both need a register" is not applied to bit fields: not seen), a store
+  into a volatile or device record's bit field (a read-modify-write of
+  its unit, 5.5), a boolean element of `in` on a set field (true is
+  0xFF), set operations on set fields other than the updates above.
+  Packed arrays of bit elements: 5.2, "Packed arrays".
 - Tests: `crates/dpc-m68k/tests/packed.rs` (the forms, the refusals, and
   a model of the instructions run over random records: stores keep the
   neighbouring bits, loads give the value), `crates/dpc-ir/src/tests.rs`
-  (`packed_field_units`), golden `tests/golden/packed/fields`.
+  (`packed_field_units`, `packed_signed_field_sign_extended`), golden
+  `tests/golden/packed/fields`, execution `tests/exec/packed_fields.pas`
+  and `tests/exec/bit_fields.pas`.
 
 ### 5.4 Alignment attributes and environments (ref 3.10.5, 3.10.6, 3.15.6, 4.7; layout from the reference's figures; implemented, bead domain-pascal-l9p)
 

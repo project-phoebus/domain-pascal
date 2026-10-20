@@ -10447,6 +10447,14 @@ impl Selector {
                         self.jump(if when { cc } else { cc.negate() }, l);
                         return Ok(());
                     }
+                    // A variable element of a packed record's set field:
+                    // the field's value, `btst Dk,Dn`, the branch on Z
+                    // ([`Self::bits_set_member_reg`]).
+                    Expr::SetMember { elem, set, .. } if matches!(**set, Expr::Bits { .. }) => {
+                        self.bits_set_member_reg(elem, set)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
                     // A variable element of a one-longword set: `btst Dn,Dm`
                     // and the branch on Z ([`Self::set_member_reg`]:
                     // tty_$i_set_funcs 0xE67228 `btst D3,D0; beq.b`;
@@ -10457,6 +10465,18 @@ impl Selector {
                         set_width: Width::Long,
                     } => {
                         self.set_member_reg(elem, set)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
+                    // A variable element of a one-byte set: the byte
+                    // widened, `btst Dk,Dn`, the branch on Z
+                    // ([`Self::byte_set_member_reg`]).
+                    Expr::SetMember {
+                        elem,
+                        set,
+                        set_width: Width::Byte,
+                    } => {
+                        self.byte_set_member_reg(elem, set)?;
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
                     }
@@ -16265,6 +16285,18 @@ impl Selector {
                     });
                     return Ok(Val::Tmp(r));
                 }
+                if *set_width == Width::Byte || matches!(**set, Expr::Bits { .. }) {
+                    let r = if *set_width == Width::Byte {
+                        self.byte_set_member_reg(elem, set)?
+                    } else {
+                        self.bits_set_member_reg(elem, set)?
+                    };
+                    self.out.push(Insn::Scc {
+                        cond: Cond::Ne,
+                        dst: Ea::Reg(Reg::D(r)),
+                    });
+                    return Ok(Val::Tmp(r));
+                }
                 if *set_width != Width::Long {
                     self.word_set_const(elem, set)?;
                 }
@@ -20478,13 +20510,18 @@ impl Selector {
                     Width::Long if v & 0xffff != 0 && v >> 16 != 0 => {
                         (Size::L, imm(v, Width::Long), dst)
                     }
+                    // Best effort (not byte-identical; bead
+                    // domain-pascal-eoc6): low byte 0, bits in one half of
+                    // the longword; the width of the original's `ori` is not
+                    // catalogued: `ori.l`, which sets the same bits.
                     Width::Long => {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "a constant stored into a packed field of a longword whose low \
                              byte it leaves 0 and whose bits lie in one half of it (the width \
                              of its `ori` is not catalogued) is",
-                        ))
+                        )?;
+                        (Size::L, imm(v, Width::Long), dst)
                     }
                 };
                 self.out.push(Insn::AluImm {
@@ -20514,6 +20551,29 @@ impl Selector {
             }
         };
         let src = if boolean { None } else { var(value) };
+        // Best effort (not byte-identical; bead domain-pascal-eoc6): the
+        // values whose forms are not catalogued (a signed variable
+        // narrower than the field, a computed value narrower than the
+        // unit) are computed into a register and always masked to the
+        // field's bits before the `or`, so bits of the register outside
+        // the field (a narrower value's, or a widening's sign) cannot
+        // reach the neighbouring fields.  A copy of another bit field
+        // (zero-extended from its bits) is not masked (5kgg's form).
+        let mut mask = mask;
+        let src = match src {
+            Some((_, w, true))
+                if !boolean && w.bytes() < field.width.div_ceil(8).next_power_of_two() =>
+            {
+                best_effort(
+                    self.span,
+                    "storing a signed variable narrower than the field into a packed field \
+                     (its widening is not catalogued) is",
+                )?;
+                mask = true;
+                None
+            }
+            s => s,
+        };
         let held = |s: &Self, a: &Addr| matches!(a, Addr::Frame(o) if s.pinned(*o).is_some());
         let d;
         let dst;
@@ -20636,31 +20696,30 @@ impl Selector {
                         and_mem(self, &dst, !m);
                     }
                 }
-                Some(_) => {
-                    return Err(unsupported(
-                        self.span,
-                        "storing a signed variable narrower than the field into a packed field \
-                         (its widening is not catalogued) is",
-                    ))
-                }
+                Some(_) => unreachable!("taken as a computed value above"),
                 None => {
+                    // The image copies a field into one at the same place
+                    // through the unit, masked in place (0xE19DE6 `andi.b
+                    // #-97,(2,A1); move.b (2,A0),D0; andi.b #96,D0; or.b
+                    // D0,(2,A1)`); the general form of a copy is not
+                    // catalogued, nor the zero-extension of a computed
+                    // value narrower than the unit: masked (above).
                     if matches!(value, Expr::Bits { .. }) {
-                        // The image copies a field into one at the same
-                        // place through the unit, masked in place
-                        // (0xE19DE6 `andi.b #-97,(2,A1); move.b (2,A0),D0;
-                        // andi.b #96,D0; or.b D0,(2,A1)`); the general
-                        // form of a copy is not catalogued.
+                        // Its value is zero-extended from its own bits:
+                        // not masked again (a value of the destination's
+                        // type fits its bits).
                         best_effort(
                             self.span,
                             "copying a packed field that is not a boolean into another is",
                         )?;
                     }
                     if value.ty().bytes() < unit.bytes() {
-                        return Err(unsupported(
+                        best_effort(
                             self.span,
                             "storing a computed value narrower than the field's unit into a \
                              packed field (its zero-extension is not catalogued) is",
-                        ));
+                        )?;
+                        mask = true;
                     }
                     d = self.eval_d(value)?;
                     dst = self.ea_of(addr)?;
@@ -21164,6 +21223,110 @@ impl Selector {
             }
         };
         let bit = bit_of(self, elem)?;
+        self.out.push(Insn::Btst {
+            bit,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        Ok(r)
+    }
+
+    /// `elem in s` for a run-time element and a one-byte set (`[byte] set
+    /// of 0..7`, or a packed record's set field of 8 bits on a byte
+    /// boundary; member k at bit k of the byte): the byte widened into a
+    /// new register and tested with `btst Dk,Dn`, which sets Z; the register
+    /// is returned.  Image: AREA's area_$free_slot_segments 0xE08328..
+    /// 0xE0832E `clr.w D6; and.w D4,D5; move.b (A2),D6; btst D5,D6; beq.w`
+    /// (the clear, the element, the byte, the test: the order kept here
+    /// for an element loaded or computed into its own register; a held
+    /// element is tested where it is).  The register `btst` takes the
+    /// element mod 32 (as a longword set's, [`Self::set_member_reg`]).
+    /// Only the low word is cleared, as at the site, and before the
+    /// element is evaluated: an element 8..15 reads 0 when nothing between
+    /// (an element that is a call, which may leave the register as it
+    /// pleases if the allocator gives it a scratch one) changes it, an
+    /// element 16..31 reads whatever the high word holds.  Such elements
+    /// are outside the set's type `0..7`; ref 3.9.3 gives false for them,
+    /// which is not guaranteed here (as at the site).
+    fn byte_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
+        let r = self.alloc_d()?;
+        self.out.push(Insn::Clr {
+            size: Size::W,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        let bit = self.member_bit(elem)?;
+        let src = match self.eval(set)? {
+            Val::Mem(ea) => ea,
+            Val::Reg(x) => Ea::Reg(x),
+            Val::Tmp(x) => Ea::Reg(Reg::D(x)),
+            Val::Imm(_) => {
+                return Err(unsupported(
+                    self.span,
+                    "`in` on a one-byte constant set with a run-time element is",
+                ))
+            }
+        };
+        self.out.push(Insn::Move {
+            size: Size::B,
+            src,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        self.out.push(Insn::Btst {
+            bit,
+            dst: Ea::Reg(Reg::D(r)),
+        });
+        Ok(r)
+    }
+
+    /// The register holding a run-time `in` element for a register `btst`:
+    /// a held one where it is (`btst` only reads it), any other loaded or
+    /// computed into a new one.
+    fn member_bit(&mut self, elem: &Expr) -> Res<u8> {
+        match elem {
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if matches!(self.pinned(*o), Some(Reg::D(_))) => match self.pinned(*o) {
+                Some(Reg::D(n)) => Ok(n),
+                _ => unreachable!(),
+            },
+            e => self.eval_d(e),
+        }
+    }
+
+    /// `elem in f` for a run-time element and a set field `f` of a packed
+    /// record that is a bit field ([`Expr::Bits`], `dpc-ir`'s
+    /// `bit_field_member`): the element in a register, the field's value
+    /// extracted into a new one ([`Self::bits_value`], zero-extended),
+    /// `btst Dk,Dn`, which sets Z; that register is returned.  Best effort
+    /// (not byte-identical; bead domain-pascal-eoc6): no site seen; the
+    /// register `btst` is a one-byte set's (AREA's area_$free_slot_segments
+    /// 0xE0832E `btst D5,D6`), bit mod 32.  The register is cleared with
+    /// `clr.l` before the value is formed in it, so an element outside the
+    /// field (up to 31) tests 0; 32 and above wrap, as at every register
+    /// `btst` (TTY_$K_SET_DELAY 0xE67A1C).
+    fn bits_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
+        let Expr::Bits { addr, field, ty } = set else {
+            unreachable!("a bit field set")
+        };
+        let bit = self.member_bit(elem)?;
+        let start = self.out.len();
+        let r = self.bits_value(addr, *field, *ty)?;
+        // The value is formed at its own width (a word mask `move.w`, a
+        // word `and`): the register cleared first, so that an element
+        // beyond it (16..31; outside the set's type) tests 0; a mask that
+        // `moveq` loads clears it already.
+        let moveq = self.out[start..]
+            .iter()
+            .any(|i| matches!(i, Insn::Moveq { dst, .. } if *dst == r));
+        if ty.width != Width::Long && !moveq {
+            self.out.insert(
+                start,
+                Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::Reg(Reg::D(r)),
+                },
+            );
+        }
         self.out.push(Insn::Btst {
             bit,
             dst: Ea::Reg(Reg::D(r)),

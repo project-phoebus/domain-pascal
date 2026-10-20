@@ -182,6 +182,9 @@ pub(crate) struct Checker<'t> {
     /// an `integer32` subrange `0..32767` stored in a word, made when
     /// first needed.
     abs16: Option<TypeId>,
+    /// One-byte views of the types of packed fields that fill a byte
+    /// ([`Checker::byte_field_type`]), by field type.
+    byte_fields: HashMap<TypeId, TypeId>,
 }
 
 fn upper(name: &str) -> String {
@@ -218,6 +221,7 @@ impl<'t> Checker<'t> {
             label_gotos: Vec::new(),
             unsigned32: None,
             abs16: None,
+            byte_fields: HashMap::new(),
         };
         c.predeclare();
         c
@@ -2273,19 +2277,41 @@ impl<'t> Checker<'t> {
             ast::Init::Expr(e) => e.span,
             ast::Init::List { span, .. } => *span,
         };
-        if matches!(self.types.kind(ty), TypeKind::Set { .. }) {
-            return self.unsupported(
-                span,
-                "initialising a set field of a packed record that is not whole bytes \
-                 (where its elements lie is not stated, ref 3.10.7 Table 3-3)",
-            );
+        let set = matches!(self.types.kind(ty), TypeKind::Set { .. });
+        if set && bits.whole_bytes() == Some(1) {
+            // A set of 0..7 in one byte: the byte as a `[byte] set of
+            // 0..7`, member k at bit k, as its reads and writes
+            // ([`Self::byte_field_type`]; XPD_$INHERIT_PTRACE_OPTIONS
+            // 0xE5B17C `btst #3,(13,A0)` for `3 in opts.flags2`).
+            let t = self.byte_field_type(ty);
+            return self.init(t, byte, init, out);
         }
-        let ast::Init::Expr(_) = init else {
+        if set {
+            // Best effort (not byte-identical; bead domain-pascal-eoc6):
+            // member k at bit k of the field's value, as the code reads
+            // and writes it (codegen-patterns 5.3).
+            if let Err(d) = dpc_syntax::diag::best_effort(Diagnostic::error(
+                span,
+                "initialising a set field of a packed record that is not whole bytes (where its \
+                 elements lie is not stated, ref 3.10.7 Table 3-3) is not supported yet",
+            )) {
+                self.errors.push(d);
+                return;
+            }
+        }
+        if !set && !matches!(init, ast::Init::Expr(_)) {
             return self.error(span, "a packed record's bit field needs a single value");
-        };
+        }
         let mut one = Vec::new();
         self.init(ty, byte, init, &mut one);
         for mut st in one {
+            if let InitDatum::Const(ConstValue::Set(members)) = &st.value {
+                let mask = members
+                    .iter()
+                    .filter(|&&k| (0..i64::from(bits.width)).contains(&k))
+                    .fold(0i64, |m, k| m | (1 << k));
+                st.value = InitDatum::Const(ConstValue::Int(mask));
+            }
             if !matches!(&st.value, InitDatum::Const(c) if c.ordinal().is_some()) {
                 return self.unsupported(span, "this initial value of a packed bit field");
             }
@@ -3433,6 +3459,10 @@ impl<'t> Checker<'t> {
         match rec.field(&field.name) {
             Some(f) => {
                 let (ty, offset, bits) = (f.ty, f.offset, f.bits);
+                let ty = match bits {
+                    Some(b) if b.whole_bytes() == Some(1) => self.byte_field_type(ty),
+                    _ => ty,
+                };
                 Expr {
                     kind: ExprKind::Field {
                         base: Box::new(base),
@@ -3450,6 +3480,33 @@ impl<'t> Checker<'t> {
                 self.error_expr(span)
             }
         }
+    }
+
+    /// The type of a packed record field of type `ty` that takes the 8
+    /// bits of one byte (ref 3.10.7 Table 3-3, p. 3-36): a set of 0..7
+    /// (`set of 0..7` alone is a word, 3.9.3), an integer subrange of 8
+    /// bits (`0..255`, `-128..127`, stored in a word unpacked, 3.8.1).
+    /// It is the byte as an object of `ty` with a size attribute of a byte
+    /// (`[byte] set of 0..7`, `[byte] 0..255`; [`TypeTable::sized`],
+    /// compatible with `ty`), read and written as one, member k of a set
+    /// at bit k.  Image: a set, XPD_$RESET_PTRACE_OPTS 0xE5B15E `clr.b
+    /// (12,A0)`, XPD_$INHERIT_PTRACE_OPTIONS 0xE5B17C `btst #3,(13,A0)`;
+    /// a subrange, `status_$t.modc` read as `clr.w D0; move.b (1,A0),D0`
+    /// (0xE1AAB8), DBUF's `e_flags.block_type := 0` as `clr.b (13,A2)`
+    /// (0xE3AC6A).  Any other type keeps its own (a char is a byte; an
+    /// enumeration of 129..256 values is not seen).
+    fn byte_field_type(&mut self, ty: TypeId) -> TypeId {
+        if self.types.size(ty) <= 1
+            || !(matches!(self.types.kind(ty), TypeKind::Set { .. }) || self.types.is_integer(ty))
+        {
+            return ty;
+        }
+        if let Some(&t) = self.byte_fields.get(&ty) {
+            return t;
+        }
+        let t = self.types.sized(ty, 8);
+        self.byte_fields.insert(ty, t);
+        t
     }
 
     fn index(&mut self, base: Expr, ix: &ast::Expr, span: Span) -> Expr {
@@ -4093,13 +4150,19 @@ impl<'t> Checker<'t> {
                         "a field of a packed record that is not a whole byte, word or longword \
                          cannot be passed to a `var`, `out` or `in out` parameter (ref 3.10.3)",
                     );
-                } else {
-                    self.unsupported(
-                        a.span,
-                        "passing a field of a packed record that is not a whole byte, word or \
-                         longword (ref 3.10.3)",
-                    );
+                } else if let Err(d) = dpc_syntax::diag::best_effort(Diagnostic::error(
+                    a.span,
+                    "passing a field of a packed record that is not a whole byte, word or \
+                     longword (ref 3.10.3) is not supported yet",
+                )) {
+                    self.errors.push(d);
                 }
+                // A value or `in` parameter takes the field's value, as it
+                // takes any expression's: by value in its slot, or by
+                // address of a copy (Table 5-1, p. 5-5).  Best effort (not
+                // byte-identical; bead domain-pascal-eoc6): ref 3.10.3
+                // forbids it, the image has no site; accepted so that the
+                // kernel's translation compiles.
             }
             if !univ {
                 match mode {
@@ -4685,7 +4748,18 @@ impl<'t> Checker<'t> {
                     self.error(span, format!("`{name}` needs a type name or a variable"));
                     return self.error_expr(span);
                 }
-                (x.ty, x.value)
+                // A packed field that fills a byte has the one-byte view
+                // of its type ([`Self::byte_field_type`]); `sizeof` of it
+                // stays the size of the declared type, as for any other
+                // packed field (a bit field's is its type's too).
+                let declared = match &x.kind {
+                    ExprKind::Field { bits: Some(_), .. } => self
+                        .byte_fields
+                        .iter()
+                        .find_map(|(&t, &v)| (v == x.ty).then_some(t)),
+                    _ => None,
+                };
+                (declared.unwrap_or(x.ty), x.value)
             }
         };
         if self.types.is_error(ty) {

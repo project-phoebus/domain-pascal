@@ -3,9 +3,9 @@
   8-bit field of a word type on a byte boundary read and written (a
   constant, a variable), a constant into a one-bit field that is not a
   boolean, a field copied into another.  The neighbours must be kept
-  (ref 3.10.7).
+  (ref 3.10.7).  (The 8-bit fields are no longer best effort: the byte
+  as a `[byte] 0..255', bead domain-pascal-eoc6, codegen-patterns 5.3.)
 
-  warns: best effort (not byte-identical): a packed field of 8 bits on a byte boundary
   warns: best effort (not byte-identical): a constant stored into a one-bit packed field
   warns: best effort (not byte-identical): copying a packed field that is not a boolean
   call: BE_PACKED_$FILL w:200

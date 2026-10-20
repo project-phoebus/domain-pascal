@@ -4699,6 +4699,62 @@ fn packed_fields_refused() {
 }
 
 #[test]
+fn packed_signed_field_sign_extended() {
+    // Best effort (bead domain-pascal-eoc6; refused under `--strict`,
+    // above): a field of negative values, its bits zero-extended, then
+    // `lshft`/`arshft` by 16 - 4.
+    let was = dpc_syntax::diag::set_strict(false);
+    let m = lower_src(
+        "module m;
+         type r = packed record a: boolean; s: -8..7 end;
+         var g: extern integer;
+         procedure t(var q: r); begin g := q.s end;",
+    );
+    dpc_syntax::diag::set_strict(was);
+    let w = dpc_syntax::diag::take_best_effort();
+    assert!(
+        w.iter().any(|d| d.message.contains("negative values")),
+        "{w:?}"
+    );
+    let m = m.unwrap();
+    let StmtKind::Store { value, .. } = &m.functions[0].body[0].kind else {
+        panic!("a store")
+    };
+    let Expr::Binary {
+        op: BinOp::Ashr,
+        lhs,
+        rhs,
+        ..
+    } = value
+    else {
+        panic!("{value:?}")
+    };
+    assert!(matches!(**rhs, Expr::Const { value: 12, .. }), "{rhs:?}");
+    let Expr::Binary {
+        op: BinOp::Shl,
+        lhs: bits,
+        ..
+    } = &**lhs
+    else {
+        panic!("{lhs:?}")
+    };
+    assert!(
+        matches!(
+            **bits,
+            Expr::Bits {
+                field: BitField {
+                    unit: Width::Byte,
+                    shift: 3,
+                    width: 4
+                },
+                ..
+            }
+        ),
+        "{bits:?}"
+    );
+}
+
+#[test]
 fn initial_values_of_module_data() {
     // ref 3.2.2, 3.5.1, 3.6.2, 3.7, 3.9.2, 3.10.4, 3.11.1, 3.13.4: each
     // store of the flattened initialiser, at its offset in the block.

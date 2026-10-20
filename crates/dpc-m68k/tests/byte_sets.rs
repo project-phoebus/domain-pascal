@@ -213,6 +213,37 @@ fn compared_with_sets_best_effort() {
 }
 
 #[test]
+fn run_time_member() {
+    // AREA's area_$free_slot_segments 0xE08328..0xE0832E `clr.w D6; and.w
+    // D4,D5; move.b (A2),D6; btst D5,D6; beq.w` (bead domain-pascal-eoc6).
+    // Best effort (refused under `--strict`, below; bead
+    // domain-pascal-5kgg).
+    let was = dpc_syntax::diag::set_strict(false);
+    let b = std::panic::catch_unwind(|| {
+        body("procedure t(p: rp; k: integer); options(val_param); begin if k in p^.a then gn := 1 end;")
+    });
+    dpc_syntax::diag::set_strict(was);
+    let w = dpc_syntax::diag::take_best_effort();
+    assert!(
+        w.iter().any(|d| d.message.contains("run-time element")),
+        "{w:?}"
+    );
+    assert_eq!(
+        b.unwrap_or_else(|e| std::panic::resume_unwind(e)),
+        [
+            "movea.l (8,%fp),%a0",
+            "move.w (0xc,%fp),%d0",
+            "clr.w %d1",
+            "move.b (%a0),%d1",
+            "btst %d0,%d1",
+            "beq.s 1f",
+            "move.w #1,(GN).l",
+            "1:",
+        ]
+    );
+}
+
+#[test]
 fn refusals() {
     let r = |src: &str, needle: &str| {
         let e = error(src);
