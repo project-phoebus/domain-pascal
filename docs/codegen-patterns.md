@@ -3542,17 +3542,84 @@ model run against the bit model of Figure 3-6).
   beyond the set's bits a `bcs` after the `sub.w` skips the `btst`, and
   the branch is `ble`/`bgt` (N set by the borrow, or Z): 14 sites, all on
   constant sets in the code (NAME_$INIT 0xE31836..0xE3184A, UNMAP_CASE
-  0xE54166..0xE54178); refused.  **Uncertain:** the `lea` comes after the
-  `lsr` for a set in a record reached through a register (MSG_$CLOSEI
-  0xE59432, MSG_$FORK 0xE73F38); `in` on a large set as a value (no site).
-- **Sets of more than a longword as operands (Reported, not implemented):**
-  built and combined in frame temporaries: `[k]` as `lea (-20,A6),A0;
-  clr.l (A0)+; clr.l (A0)+` and the byte `bset Dk,(0,A0,Dx.w)` (6 sites,
-  MSG_$OPENI 0xE59248..0xE59260), `s - [k]` as a `dbf` loop `move.l
-  (A3)+,D0; not.l D0; and.l (A1)+,D0; move.l D0,(A4)+` into a second
-  temporary, then a copy back (MSG_$CLOSEI 0xE59454..0xE5948C; 12 such
-  loops); `s = []` as `tst.l (A1)+; bne` per longword (0xE59496).
-  Refused.  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
+  0xE54166..0xE54178 `clr.w D2; moveq #95,D3; move.b D0,D2; sub.w D2,D3;
+  bcs.s; lsr.w #3,D3; lea (0xe543e0,PC),A3; btst D2,(0,A3,D3.w); ble.s`,
+  the cell of the constructor's own size, 12 bytes for `['A'..'Z']`).
+  `dpc` reproduces it for a one-byte element (chars, the sites) of a
+  constant set of more than a longword, the cell sized by the
+  constructor's high end (ref 3.9.3), `bgt`/`ble` (or `sgt` as a value,
+  best effort) on the flags; a wider element stays refused, since the
+  `ble` reads N, the borrow only while the subtraction cannot overflow
+  (bead domain-pascal-g6l7).  An `integer` element of a set
+  *variable* is tested unguarded (MSG_$FORK 0xE73F2E..0xE73F40 `movea.l
+  D4,A2; moveq #63,D1; move.w (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea
+  (0x1d8,A0),A3; btst D5,(0,A3,D1.w)`, its `in parent_asid: integer`;
+  MSG_$CLOSEI, MSG_$SHARE_SOCKET likewise): `dpc` takes an `integer`
+  element (or an integer subrange's) of a set variable unguarded, any
+  other element type that reaches beyond the bits stays refused (bead
+  domain-pascal-g6l7).  As in the original, an element outside the set's
+  bits then tests a byte outside the set (before it for an element above
+  the bits, after it for a negative one).  The image does not show the
+  element's Pascal type, so the form is a best-effort warning, refused
+  under `--strict`, unless the element's subrange fits the set.  **Uncertain:** the `lea` comes after the `lsr`
+  for a set in a record reached through a register (MSG_$CLOSEI
+  0xE59432, MSG_$FORK 0xE73F38).  `in` on a large set as a value: no
+  site; `dpc` puts `sne` after the `btst`, into the byte offset's
+  register (best effort, not byte-identical).  A constant member of a
+  large set: no site; `dpc` tests its bit on its byte as a boolean field
+  (`btst #k mod 8`, `tst.b` for bit 7: the rule of the constant member of
+  a set in memory below; best effort).  A computed element: no site;
+  evaluated first, then the constant (the order of a computed member of
+  `[k]`; best effort).
+- **Sets of more than a longword as operands (Reported; implemented best
+  effort, bead domain-pascal-g6l7):** the image builds and combines them
+  in frame temporaries: `[k]` as `lea (-20,A6),A0; clr.l (A0)+; clr.l
+  (A0)+` and the byte `bset Dk,(0,A0,Dx.w)` (6 sites, MSG_$OPENI
+  0xE59248..0xE59260), then copied into the set (0xE59264 `move.l
+  (A0)+,(472,A1); move.l (A0)+,(476,A1)`); `s + [k]` `or`ed into the set
+  in place by a `dbf` loop (MSG_$FORK 0xE73F62..0xE73F6C `moveq #1,D5;
+  move.l (A4)+,D1; or.l D1,(A2)+; dbf`); `s - [k]` as a `dbf` loop
+  `move.l (A3)+,D0; not.l D0; and.l (A1)+,D0; move.l D0,(A4)+` into the
+  same temporary (A3 and A4 both `lea (-0x10,A6)`), then a copy back
+  (MSG_$CLOSEI 0xE59454..0xE5948C; 12 such loops); `[k] + s` into the
+  temporary too (MSG_$SHARE_SOCKET 0xE5A0D6); `s = []` as `lea; moveq
+  #longwords-1,Dc; tst.l (A1)+; bne` per longword, the count unused
+  (MSG_$OPENI 0xE5920A, MSG_$CLOSEI 0xE59490..0xE5949C); a constant
+  stored a longword at a time, `move.l #imm`/`clr.l` (MSG_$INIT
+  0xE31BD4 `move.l #0x4000000,(0x1e0,A0); clr.l (0x1e4,A0)` for `[58]`,
+  MST_$INIT 0xE30B98 `clr.l; move.l #1` for `[0]`, no `moveq`).  `dpc`
+  (lowering `large_set_store`, `large_set_compare`; selection
+  `store_set_const`, `store_set_member`, `set_empty_branch`; exec test
+  `tests/exec/large_sets.pas`, tests `crates/dpc-m68k/tests/sets.rs`
+  `large_sets_in_memory`):
+  - constants, `= []`/`<> []` in a condition: the image's forms;
+  - `[k]`, `s + [k]`, `[k] + s`, `s - [k]` with a run-time member:
+    **best effort (not byte-identical)**, no frame temporary: the set
+    itself cleared by `clr.l (An)+` (for `[k]`) and the member's byte
+    `bset`/`bclr Dk,(0,An,Dx.w)` in the image's order; `t + [k]`, `t -
+    [k]` of another set `t`: `t` copied into the set first; constant
+    members of `+`/`-` by `bset`/`bclr #k mod 8` on their bytes; a
+    constructor of constant and run-time members: the constant stored,
+    then each run-time member set;
+  - `s := t`: the block copy of a record of that size (5.2);
+  - `+`, `*`, `-` of set variables and constants: each longword (and a
+    last word) of the destination stored from the operation on the
+    operands' same units, as on longword sets (above); `x + y` into a
+    third set is formed unit by unit too, never as a copy of `x` with
+    `y` `or`ed in (`y` may be the destination under another address, a
+    `var` parameter or a pointer's target).  Best effort;
+  - `s = t` of two set variables: the record comparison (`cmpm`, 7.1)
+    for the sizes catalogued there, else unit by unit with `and then`;
+    against a non-empty constant unit by unit (best effort; no site);
+  - `s = []` as a value: `seq`/`sne` into the count's register, the
+    `bne`s going to it, as for an unrolled record comparison (best
+    effort; no site);
+  - `s <= t`, `s >= t`: each unit of the difference against 0, `and
+    then`, as `s - t = []` on longword sets (best effort; no site).
+  - Sizes other than 8 bytes (6, 16, 32: the TTY `set of char`) have no
+    site for these forms: a 6-byte set's last word by `clr.w`/`tst.w`/
+    `move.w`.
+  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
   `bset` each member of a range clamped to it) has no compiled caller: a
   run-time range `[a..b]` is refused.  dpc ships the routine in its
   runtime for kernel links (`runtime/m68k/pas_set_build.s`, transcribed

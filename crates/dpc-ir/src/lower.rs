@@ -822,6 +822,7 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
                 addr(lhs, *size, out);
                 addr(rhs, *size, out);
             }
+            Cond::SetEmpty { set, size } => addr(set, *size, out),
         }
     }
     match &s.kind {
@@ -844,10 +845,17 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             bytes,
             index,
             ..
+        }
+        | StmtKind::StoreSetMember {
+            set: a,
+            bytes,
+            elem: index,
+            ..
         } => {
             addr(a, *bytes, out);
             expr(index, out);
         }
+        StmtKind::StoreSetConst { set: a, bits } => addr(a, bits.len() as u32, out),
         StmtKind::Copy {
             dst, src, bytes, ..
         } => {
@@ -1001,6 +1009,7 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
                 addr(lhs, f);
                 addr(rhs, f);
             }
+            Cond::SetEmpty { set, .. } => addr(set, f),
         }
     }
     match &mut s.kind {
@@ -1011,10 +1020,16 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             array: a,
             index: value,
             ..
+        }
+        | StmtKind::StoreSetMember {
+            set: a,
+            elem: value,
+            ..
         } => {
             addr(a, f);
             expr(value, f);
         }
+        StmtKind::StoreSetConst { set: a, .. } => addr(a, f),
         StmtKind::Copy { dst, src, .. } => {
             addr(dst, f);
             addr(src, f);
@@ -1260,6 +1275,7 @@ fn assign_temps(body: &mut [Stmt], frame: u32, results: &[u32]) -> u32 {
                 addr(lhs, size, st);
                 addr(rhs, size, st);
             }
+            Cond::SetEmpty { set, .. } => addr(set, size, st),
         }
     }
     let mut st = St {
@@ -1819,10 +1835,16 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             array: addr,
             index: value,
             ..
+        }
+        | StmtKind::StoreSetMember {
+            set: addr,
+            elem: value,
+            ..
         } => {
             addr_calls(addr, out);
             e(value, out);
         }
+        StmtKind::StoreSetConst { set, .. } => addr_calls(set, out),
         StmtKind::Copy { dst, src, .. } => {
             addr_calls(dst, out);
             addr_calls(src, out);
@@ -1919,6 +1941,7 @@ fn cond_calls<'a>(c: &'a Cond, out: &mut Vec<&'a Call>) {
             addr_calls(lhs, out);
             addr_calls(rhs, out);
         }
+        Cond::SetEmpty { set, .. } => addr_calls(set, out),
     }
 }
 
@@ -1983,7 +2006,13 @@ fn stmt_uses_static(s: &Stmt) -> bool {
             array: addr,
             index: value,
             ..
+        }
+        | StmtKind::StoreSetMember {
+            set: addr,
+            elem: value,
+            ..
         } => addr_uses_static(addr) || expr_uses_static(value),
+        StmtKind::StoreSetConst { set, .. } => addr_uses_static(set),
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
         StmtKind::Call(c) => call_uses_static(c),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
@@ -2034,6 +2063,7 @@ fn cond_uses_static(c: &Cond) -> bool {
             cond_uses_static(a) || cond_uses_static(b)
         }
         Cond::Block { lhs, rhs, .. } => addr_uses_static(lhs) || addr_uses_static(rhs),
+        Cond::SetEmpty { set, .. } => addr_uses_static(set),
     }
 }
 
@@ -2625,6 +2655,7 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                     self.addr(lhs, *size)?;
                     self.addr(rhs, *size)
                 }
+                Cond::SetEmpty { set, size } => self.addr(set, *size),
             }
         }
         fn stmts(&mut self, body: &[Stmt]) -> Res<()> {
@@ -2649,10 +2680,17 @@ fn check_for_indices(body: &[Stmt]) -> Res<()> {
                         bytes,
                         index,
                         ..
+                    }
+                    | StmtKind::StoreSetMember {
+                        set: array,
+                        bytes,
+                        elem: index,
+                        ..
                     } => {
                         self.addr(array, *bytes)?;
                         self.expr(index)?;
                     }
+                    StmtKind::StoreSetConst { set, bits } => self.addr(set, bits.len() as u32)?,
                     StmtKind::Copy {
                         dst, src, bytes, ..
                     } => {
@@ -3226,6 +3264,11 @@ impl Cx<'_> {
                     if is_block(p, target) || byte_array_copy(p, target, value) =>
                 {
                     out.push(copy(p, s, target, value)?)
+                }
+                SStmtKind::Assign { target, value }
+                    if is_set(p, target.ty) && p.types.size(target.ty) > 4 =>
+                {
+                    out.extend(large_set_store(p, s, target, value)?)
                 }
                 SStmtKind::Assign { target, value } => out.push(store(p, s, target, value)?),
                 SStmtKind::Call(c) => out.push(Stmt {
@@ -4312,16 +4355,10 @@ fn covers(p: &Program, ty: TypeId, size: u32) -> bool {
 /// - a one-byte set against a set other than `[]`: both widened to a
 ///   word, as for `[]` (acl_$prim_create_internal 0xE45270).
 ///
-/// Refused: a set of more than a longword (no `cmpm` loop of a set
-/// identified).
+/// A set of more than a longword: [`large_set_compare`].
 fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
     if p.types.size(lhs.ty) > 4 || p.types.size(rhs.ty) > 4 {
-        // MSG_$CLOSEI 0xE59490..0xE5949C: `tst.l (A1)+; bne` per longword.
-        return Err(unsupported(
-            e.span,
-            "comparing a set of more than a longword (`tst.l (An)+` per longword, \
-             codegen-patterns 5.1) is",
-        ));
+        return large_set_compare(p, e, rel, lhs, rhs);
     }
     if matches!(rel, Rel::Le | Rel::Ge) {
         return set_inclusion(p, rel, lhs, rhs);
@@ -4407,6 +4444,465 @@ fn set_inclusion(p: &Program, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
         },
         rhs: Expr::Const { value: 0, ty },
     })
+}
+
+/// The units a set of `bytes` bytes (more than a longword, a whole number
+/// of words, ref 3.9.3) is handled in: its offset and width, longwords
+/// first, a last word for a size that is not a multiple of 4.
+fn large_set_units(bytes: u32) -> Vec<(i32, Width)> {
+    let mut units: Vec<(i32, Width)> = (0..bytes / 4).map(|i| (4 * i as i32, Width::Long)).collect();
+    if bytes % 4 != 0 {
+        units.push((4 * (bytes / 4) as i32, Width::Word));
+    }
+    units
+}
+
+/// The bytes of the set constant `members` in a set of `bytes` bytes (ref
+/// 3.9.3 p. 3-16, Figure 3-6: member k is bit k mod 8 of the byte
+/// `(bytes*8 - 1 - k) div 8`).
+fn large_set_bytes(members: &[i64], bytes: u32, span: Span) -> Res<Vec<u8>> {
+    let bits = bytes as i64 * 8;
+    let mut out = vec![0u8; bytes as usize];
+    for &k in members {
+        if !(0..bits).contains(&k) {
+            return Err(unsupported(
+                span,
+                format!("a set constant with a member outside the {bits} bits of its set is"),
+            ));
+        }
+        out[((bits - 1 - k) / 8) as usize] |= 1 << (k % 8);
+    }
+    Ok(out)
+}
+
+/// The unit of `w` at offset `o` of the set constant `b` ([`large_set_bytes`])
+/// as a constant of that unit.
+fn large_set_unit_const(b: &[u8], o: i32, w: Width) -> Expr {
+    let ty = Scalar::unsigned(w);
+    let bits = b[o as usize..(o as u32 + w.bytes()) as usize]
+        .iter()
+        .fold(0u64, |v, &x| (v << 8) | x as u64);
+    Expr::Const {
+        value: imm_value(bits, ty),
+        ty,
+    }
+}
+
+/// Whether `x` is a set constructor or a set constant (a constructor of
+/// constant members is folded into one).
+fn cons_like(x: &SExpr) -> bool {
+    matches!(x.kind, ExprKind::SetCons(_)) || matches!(x.value, Some(ConstValue::Set(_)))
+}
+
+/// The members of a set constructor (ref "Set Operations", p. 4-173): the
+/// constant ones (single members and ranges with constant bounds) and the
+/// run-time single members.  A run-time range is refused (PAS_$SET_BUILD
+/// 0xE11FA8, never called from compiled code, codegen-patterns 5.1).
+fn large_set_cons_members<'a>(
+    items: &'a [(SExpr, Option<SExpr>)],
+    span: Span,
+) -> Res<(Vec<i64>, Vec<&'a SExpr>)> {
+    let mut konst = Vec::new();
+    let mut run = Vec::new();
+    for (x, hi) in items {
+        let lo = x.value.as_ref().and_then(|v| v.ordinal());
+        match hi {
+            None => match lo {
+                Some(k) => konst.push(k),
+                None => run.push(x),
+            },
+            Some(h) => match (lo, h.value.as_ref().and_then(|v| v.ordinal())) {
+                (Some(a), Some(b)) => konst.extend(a..=b),
+                _ => {
+                    return Err(unsupported(
+                        span,
+                        "a set constructor with a run-time range (codegen-patterns 5.1: \
+                         PAS_$SET_BUILD 0xE11FA8 is never called from compiled code) is",
+                    ))
+                }
+            },
+        }
+    }
+    Ok((konst, run))
+}
+
+/// `d := e` for a set `d` of more than a longword (ref "Assignment", p.
+/// 4-25; "Set Operations", pp. 4-173..4-175; layout ref 3.9.3), as stores
+/// into `d` itself:
+///
+/// - a constant: [`StmtKind::StoreSetConst`], a store of each longword (a
+///   last word for a size that is not a multiple of 4), `move.l
+///   #imm`/`clr.l`: MSG_$INIT 0xE31BD4
+///   `move.l #0x4000000,(0x1e0,A0); clr.l (0x1e4,A0)` (`[58]` of a
+///   64-bit set), MST_$INIT 0xE30B98 `clr.l (MST_$ASID_LIST).l; move.l
+///   #1,(MST_$ASID_LIST+4).l` (`[0]`);
+/// - a set variable: a block copy ([`StmtKind::Copy`]);
+/// - `[k]`, `s + [k]`, `[k] + s`, `s - [k]` with run-time members:
+///   [`StmtKind::StoreSetMember`] on `d` after the rest is assigned;
+///   constant members of `+`/`-` too, each set or cleared on its byte;
+///   the rest of
+///   `t + [k]` (`t` another set) copied into `d` first;
+/// - `+`, `*`, `-` of set variables and constants: each longword (and
+///   last word) of `d` stored from the operation on the same units of the
+///   operands, as on register-sized sets ([`Expr::SetOp`]): MSG_$FORK
+///   0xE73F68 `move.l (A4)+,D1; or.l D1,(A2)+` per longword.  Never a copy
+///   of one operand followed by the other `or`ed in: an operand may be
+///   `d` itself under another address (a `var` parameter, a pointer's
+///   target), which the copy would overwrite before it is read.
+///
+/// Best effort (not byte-identical): the image forms `[k]` and the
+/// operations in a frame temporary and copies it into `d` (MSG_$OPENI
+/// 0xE59248..0xE5926E, MSG_$CLOSEI 0xE59454..0xE5948C, MSG_$FORK
+/// 0xE73F42..0xE73F6C; codegen-patterns 5.1); `dpc` has no such
+/// temporary.  The result is the same: the operands are the same object
+/// as `d` or disjoint from it, each unit of `d` is formed from the same
+/// unit of the operands, and a run-time member is evaluated after the
+/// stores before it (a member's value cannot depend on `d`'s bits but
+/// through `in`, which no kernel site does).
+fn large_set_store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Vec<Stmt>> {
+    if volatile_access(p, target).is_some()
+        || p.types.has_volatile_part(target.ty)
+        || volatile_access(p, value).is_some()
+    {
+        return Err(unsupported(
+            s.span,
+            "an assignment to or from a volatile set of more than a longword (ref \
+             3.15.1-3.15.3) is",
+        ));
+    }
+    check_even(p, target)?;
+    let bytes = p.types.size(target.ty);
+    let dst = addr_of(p, target)?;
+    let mut out = Vec::new();
+    large_set_into(p, s.span, &dst, bytes, value, &mut out)?;
+    Ok(out)
+}
+
+/// The statements of [`large_set_store`] that make the set of `bytes`
+/// bytes at `dst` hold `value`, appended to `out`.
+fn large_set_into(
+    p: &Program,
+    span: Span,
+    dst: &Addr,
+    bytes: u32,
+    value: &SExpr,
+    out: &mut Vec<Stmt>,
+) -> Res<()> {
+    let stmt = |kind| Stmt { kind, span };
+    if let Some(v) = &value.value {
+        let ConstValue::Set(members) = v else {
+            return Err(unsupported(value.span, "this set value is"));
+        };
+        out.push(stmt(StmtKind::StoreSetConst {
+            set: dst.clone(),
+            bits: large_set_bytes(members, bytes, value.span)?,
+        }));
+        return Ok(());
+    }
+    if value.is_designator() {
+        if !is_set(p, value.ty) || p.types.size(value.ty) != bytes {
+            return Err(unsupported(
+                value.span,
+                "assigning a set of another size is",
+            ));
+        }
+        if volatile_access(p, value).is_some() {
+            return Err(unsupported(
+                value.span,
+                "assigning a volatile set of more than a longword is",
+            ));
+        }
+        check_even(p, value)?;
+        let src = addr_of(p, value)?;
+        if src != *dst {
+            out.push(stmt(StmtKind::Copy {
+                dst: dst.clone(),
+                src,
+                bytes,
+                chars: false,
+            }));
+        }
+        return Ok(());
+    }
+    match &value.kind {
+        ExprKind::SetCons(items) => {
+            let (konst, run) = large_set_cons_members(items, value.span)?;
+            if !run.is_empty() {
+                best_effort(
+                    value.span,
+                    "a set of more than a longword built or updated in place (the image forms it in a frame \
+                 temporary and copies it, MSG_$OPENI 0xE59248, MSG_$CLOSEI 0xE59454; codegen-patterns \
+                 5.1) is",
+                )?;
+            }
+            let mut run = run.into_iter();
+            if konst.is_empty() {
+                let first = run.next().expect("a constructor that is not constant");
+                out.push(stmt(StmtKind::StoreSetMember {
+                    set: dst.clone(),
+                    bytes,
+                    elem: set_element(p, first)?,
+                    value: true,
+                    only: true,
+                }));
+            } else {
+                out.push(stmt(StmtKind::StoreSetConst {
+                    set: dst.clone(),
+                    bits: large_set_bytes(&konst, bytes, value.span)?,
+                }));
+            }
+            for x in run {
+                out.push(stmt(StmtKind::StoreSetMember {
+                    set: dst.clone(),
+                    bytes,
+                    elem: set_element(p, x)?,
+                    value: true,
+                    only: false,
+                }));
+            }
+            Ok(())
+        }
+        ExprKind::Binary {
+            op: op @ (BinOp::Add | BinOp::Sub),
+            lhs,
+            rhs,
+        } if is_set(p, value.ty)
+            && (cons_like(rhs) || (*op == BinOp::Add && cons_like(lhs)))
+            && (rhs.value.is_none() || lhs.value.is_none()) =>
+        {
+            best_effort(
+                value.span,
+                "a set of more than a longword built or updated in place (the image forms it in a frame \
+                 temporary and copies it, MSG_$OPENI 0xE59248, MSG_$CLOSEI 0xE59454; codegen-patterns \
+                 5.1) is",
+            )?;
+            // `x + [..]`, `[..] + x`, `x - [..]`: `x` into the set, then
+            // the constructor's members set or cleared, each by its bit
+            // (`bset`/`bclr #k mod 8` on its byte for a constant one, as on
+            // a word set: TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39E `bclr
+            // #0,(9,A2)`; codegen-patterns 5.1).
+            let (rest, cons) = if cons_like(rhs) { (lhs, rhs) } else { (rhs, lhs) };
+            let (konst, run) = match (&cons.value, &cons.kind) {
+                (Some(ConstValue::Set(m)), _) => (m.clone(), Vec::new()),
+                (_, ExprKind::SetCons(items)) => large_set_cons_members(items, cons.span)?,
+                _ => unreachable!("a constructor or a set constant"),
+            };
+            large_set_bytes(&konst, bytes, cons.span)?;
+            large_set_into(p, span, dst, bytes, rest, out)?;
+            let add = *op == BinOp::Add;
+            for k in konst {
+                out.push(stmt(StmtKind::StoreSetMember {
+                    set: dst.clone(),
+                    bytes,
+                    elem: Expr::Const {
+                        value: k,
+                        ty: Scalar::signed(Width::Word),
+                    },
+                    value: add,
+                    only: false,
+                }));
+            }
+            for x in run {
+                out.push(stmt(StmtKind::StoreSetMember {
+                    set: dst.clone(),
+                    bytes,
+                    elem: set_element(p, x)?,
+                    value: add,
+                    only: false,
+                }));
+            }
+            Ok(())
+        }
+        ExprKind::Binary {
+            op: BinOp::Add | BinOp::Mul | BinOp::Sub,
+            ..
+        } if is_set(p, value.ty) => {
+            best_effort(
+                value.span,
+                "a set of more than a longword built or updated in place (the image forms it in a frame \
+                 temporary and copies it, MSG_$OPENI 0xE59248, MSG_$CLOSEI 0xE59454; codegen-patterns \
+                 5.1) is",
+            )?;
+            for (o, w) in large_set_units(bytes) {
+                let v = large_set_unit(p, value, bytes, o, w)?;
+                out.push(stmt(StmtKind::Store {
+                    addr: dst.clone().offset_by(o),
+                    value: v,
+                }));
+            }
+            Ok(())
+        }
+        _ => Err(unsupported(
+            value.span,
+            "this value of a set of more than a longword (codegen-patterns 5.1) is",
+        )),
+    }
+}
+
+/// The unit of width `w` at offset `o` of the set value `e` of `bytes`
+/// bytes ([`large_set_into`]): of a variable, its load; of a constant, its
+/// bits; of `+`, `*`, `-`, the operation on the operands' units.  A
+/// run-time constructor is refused here (it has no units in memory).
+fn large_set_unit(p: &Program, e: &SExpr, bytes: u32, o: i32, w: Width) -> Res<Expr> {
+    let ty = Scalar::unsigned(w);
+    if let Some(v) = &e.value {
+        let ConstValue::Set(members) = v else {
+            return Err(unsupported(e.span, "this set value is"));
+        };
+        let b = large_set_bytes(members, bytes, e.span)?;
+        return Ok(large_set_unit_const(&b, o, w));
+    }
+    if e.is_designator() {
+        if !is_set(p, e.ty) || p.types.size(e.ty) != bytes {
+            return Err(unsupported(e.span, "a set operation on sets of other sizes is"));
+        }
+        if volatile_access(p, e).is_some() {
+            return Err(unsupported(
+                e.span,
+                "a volatile set of more than a longword as an operand is",
+            ));
+        }
+        check_even(p, e)?;
+        return Ok(Expr::Load {
+            addr: addr_of(p, e)?.offset_by(o),
+            ty,
+        });
+    }
+    match &e.kind {
+        ExprKind::Binary {
+            op: op @ (BinOp::Add | BinOp::Mul | BinOp::Sub),
+            lhs,
+            rhs,
+        } if is_set(p, e.ty) => Ok(Expr::SetOp {
+            op: match op {
+                BinOp::Add => SetOp::Union,
+                BinOp::Mul => SetOp::Inter,
+                _ => SetOp::Diff,
+            },
+            lhs: Box::new(large_set_unit(p, lhs, bytes, o, w)?),
+            rhs: Box::new(large_set_unit(p, rhs, bytes, o, w)?),
+            ty,
+        }),
+        _ => Err(unsupported(
+            e.span,
+            "this operand of an operation on sets of more than a longword (a run-time \
+             constructor: no unit in memory) is",
+        )),
+    }
+}
+
+/// `lhs = rhs`, `lhs <> rhs` for sets of more than a longword (ref "Set
+/// Operations", p. 4-176):
+///
+/// - against `[]`: [`Cond::SetEmpty`] (`tst.l (An)+` per longword,
+///   MSG_$OPENI 0xE5920A, MSG_$CLOSEI 0xE59490);
+/// - two set variables: [`Cond::Block`], as records of that size (ref
+///   Table 4-1, p. 4-2) for the sizes whose `cmpm` form is catalogued
+///   (codegen-patterns 7.1, "Records"; 6, 8 and multiples of 4 from 32
+///   bytes);
+/// - otherwise, and against a non-empty constant: the units compared one
+///   by one, `and then` (best effort, not byte-identical: no site);
+/// - subset `s <= t` and superset `s >= t`: each unit of `s - t` (`t - s`)
+///   against 0, `and then`, as `s - t = []` for register-sized sets
+///   ([`set_inclusion`]; best effort, no site).
+///
+/// Refused: a constant left operand of `=`/`<>`, a computed operand
+/// (other than of `<=`/`>=`).
+fn large_set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    if matches!(rel, Rel::Le | Rel::Ge) {
+        best_effort(
+            e.span,
+            "a subset or superset comparison of sets of more than a longword (no site; \
+             codegen-patterns 5.1) is",
+        )?;
+        let (sub, sup) = if rel == Rel::Le { (lhs, rhs) } else { (rhs, lhs) };
+        let bytes = p.types.size(lhs.ty).max(p.types.size(rhs.ty));
+        let mut c: Option<Cond> = None;
+        for (o, w) in large_set_units(bytes) {
+            let ty = Scalar::unsigned(w);
+            let unit = Cond::Compare {
+                op: Rel::Eq,
+                lhs: Expr::SetOp {
+                    op: SetOp::Diff,
+                    lhs: Box::new(large_set_unit(p, sub, bytes, o, w)?),
+                    rhs: Box::new(large_set_unit(p, sup, bytes, o, w)?),
+                    ty,
+                },
+                rhs: Expr::Const { value: 0, ty },
+            };
+            c = Some(match c {
+                None => unit,
+                Some(prev) => Cond::AndThen(Box::new(prev), Box::new(unit)),
+            });
+        }
+        return Ok(c.expect("a set has units"));
+    }
+    if !matches!(rel, Rel::Eq | Rel::Ne) {
+        return Err(unsupported(e.span, "this comparison of sets is"));
+    }
+    if lhs.value.is_some() || !lhs.is_designator() {
+        return Err(unsupported(
+            e.span,
+            "comparing a set of more than a longword that is not a variable (no site known, \
+             codegen-patterns 5.1) is",
+        ));
+    }
+    if volatile_access(p, lhs).is_some() || volatile_access(p, rhs).is_some() {
+        return Err(unsupported(
+            e.span,
+            "comparing a volatile set of more than a longword is",
+        ));
+    }
+    check_even(p, lhs)?;
+    let bytes = p.types.size(lhs.ty);
+    let set = addr_of(p, lhs)?;
+    let wrap = |c: Cond| if rel == Rel::Ne { Cond::Not(Box::new(c)) } else { c };
+    if matches!(&rhs.value, Some(ConstValue::Set(m)) if m.is_empty()) {
+        return Ok(wrap(Cond::SetEmpty { set, size: bytes }));
+    }
+    if rhs.value.is_none() {
+        if !rhs.is_designator() || !is_set(p, rhs.ty) || p.types.size(rhs.ty) != bytes {
+            return Err(unsupported(
+                e.span,
+                "comparing a set of more than a longword with a computed set or one of another \
+                 size (no site known, codegen-patterns 5.1) is",
+            ));
+        }
+        check_even(p, rhs)?;
+        if bytes == 6 || bytes == 8 || (bytes % 4 == 0 && (32..=512).contains(&bytes)) {
+            best_effort(
+                e.span,
+                "comparing two sets of more than a longword (as records of that size: no set \
+                 site; codegen-patterns 5.1, 7.1) is",
+            )?;
+            return Ok(Cond::Block {
+                op: rel,
+                lhs: set,
+                rhs: addr_of(p, rhs)?,
+                size: bytes,
+            });
+        }
+    }
+    best_effort(
+        e.span,
+        "comparing a set of more than a longword unit by unit (no site; codegen-patterns 5.1) is",
+    )?;
+    let mut c: Option<Cond> = None;
+    for (o, w) in large_set_units(bytes) {
+        let unit = Cond::Compare {
+            op: Rel::Eq,
+            lhs: Expr::Load {
+                addr: set.clone().offset_by(o),
+                ty: Scalar::unsigned(w),
+            },
+            rhs: large_set_unit(p, rhs, bytes, o, w)?,
+        };
+        c = Some(match c {
+            None => unit,
+            Some(prev) => Cond::AndThen(Box::new(prev), Box::new(unit)),
+        });
+    }
+    Ok(wrap(c.expect("a set has units")))
 }
 
 fn sign_name(t: Scalar) -> &'static str {
@@ -5959,16 +6455,59 @@ fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
 /// `(bits-1 - k) >> 3` and `btst k` on it, MST_$ALLOC_ASID 0xE42D5C for 64
 /// bits, the TTY module-local 0xE1B740..0xE1B750 for a `set of char`).
 ///
-/// Only when every value of the element's type is a member of the set's
-/// bits (ref 3.9.3, p. 3-16: one bit per ordinal 0..bits-1): the image
-/// tests such elements unguarded (a `char` in a 256-bit set at 0xE1B750,
-/// an ASID in a 64-bit one at 0xE42D64), but guards the others with `bcs`
-/// on the subtraction and branches with `ble`/`bgt` after the `btst`
+/// The image tests unguarded the elements whose every value is a member
+/// of the set's bits (ref 3.9.3, p. 3-16: one bit per ordinal
+/// 0..bits-1; a `char` in a 256-bit set at 0xE1B750, an ASID in a 64-bit
+/// one at 0xE42D64), and an `integer` element of a set variable too
+/// (MSG_$FORK 0xE73F2E..0xE73F40 `movea.l D4,A2; moveq #63,D1; move.w
+/// (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea (0x1d8,A0),A3; btst
+/// D5,(0,A3,D1.w)`, its `in parent_asid: integer`, ../source
+/// msg/fork.pas), but guards the elements of constant sets with `bcs` on
+/// the subtraction and branches with `ble`/`bgt` after the `btst`
 /// (NAME_$INIT 0xE31836..0xE3184A on a 96-bit set; UNMAP_CASE
-/// 0xE54166..0xE54178): that form is refused.  A constant set of more
-/// than a longword (a cell in the code, UNMAP_CASE's `lea (d,PC)`) is
-/// refused too.
+/// 0xE54166..0xE54178): a constant set of more than a longword (a cell
+/// in the code, UNMAP_CASE's `lea (d,PC)`) is refused.  Refused also: an
+/// element of another type that reaches beyond the set's bits (no
+/// site).
 fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -> Res<Expr> {
+    if let (Some(ConstValue::Set(members)), None) = (&rhs.value, &lhs.value) {
+        // A constant set: a cell in the code of the constructor's own size
+        // (its high end, ref 3.9.3 p. 3-16), the test guarded by `bcs` on
+        // the subtraction and the branch `ble`/`bgt` ([`Expr::SetMemberAt`]
+        // on an [`Addr::Const`]): UNMAP_CASE 0xE54164..0xE54178 `clr.w D2;
+        // moveq #95,D3; move.b D0,D2; sub.w D2,D3; bcs.s; lsr.w #3,D3; lea
+        // (0xe543e0,PC),A3; btst D2,(0,A3,D3.w); ble.s` (a char in a
+        // 96-bit constant), NAME_$INIT 0xE31836..0xE3184A.  Only a
+        // one-byte element (all the sites: chars): the `ble`/`bgt` after
+        // the borrow reads N, which is the borrow only while the
+        // subtraction cannot overflow (codegen-patterns 5.1).
+        if p.types.size(lhs.ty) != 1 {
+            return Err(unsupported(
+                e.span,
+                "`in` on a constant set of more than a longword with an element of more than a \
+                 byte (the guarded test's `ble` reads N: no site, codegen-patterns 5.1) is",
+            ));
+        }
+        let Some(&hi) = members.iter().max() else {
+            return Err(unsupported(e.span, "`in` on the constant `[]` is"));
+        };
+        let size = 2 * ((hi as u32 + 1).div_ceil(16));
+        if size <= 4 {
+            return Err(unsupported(
+                e.span,
+                "`in` on a constant set of a word or a longword with a byte element (no site, \
+                 codegen-patterns 5.1) is",
+            ));
+        }
+        return Ok(Expr::SetMemberAt {
+            elem: Box::new(set_element(p, lhs)?),
+            set: Addr::Const(PoolConst {
+                bytes: large_set_bytes(members, size, rhs.span)?,
+                key: rhs.ty.0,
+            }),
+            bytes: size,
+        });
+    }
     if rhs.value.is_some()
         || !matches!(
             rhs.kind,
@@ -5990,8 +6529,23 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
         ));
     }
     let bits = bytes as i64 * 8;
+    let integer = matches!(p.types.kind(lhs.ty), TypeKind::Integer16)
+        || matches!(p.types.kind(lhs.ty), TypeKind::Subrange { base, .. }
+            if matches!(p.types.kind(*base), TypeKind::Integer16));
     match p.types.ordinal_range(lhs.ty) {
         Some((lo, hi)) if lo >= 0 && hi < bits => {}
+        // Unguarded, as MSG_$FORK 0xE73F2E: an element outside the set's
+        // bits reads a byte outside the set, as the original does.  The
+        // image does not show the element's Pascal type, so the form stays
+        // tracked under `--strict`.
+        _ if integer => best_effort(
+            e.span,
+            format!(
+                "`in` on a {bytes}-byte set with an `integer` element that may lie beyond its \
+                 {bits} bits (unguarded, MSG_$FORK 0xE73F2E; an element outside reads outside \
+                 the set; codegen-patterns 5.1) is"
+            ),
+        )?,
         _ => {
             return Err(unsupported(
                 e.span,
@@ -6002,6 +6556,35 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
                 ),
             ))
         }
+    }
+    if let Some(k) = lhs.value.as_ref().and_then(|v| v.ordinal()) {
+        // A constant member: its bit on the byte that holds it, as a
+        // boolean field (`btst #k mod 8`, `tst.b` for bit 7), the rule of
+        // a constant member of a set in memory (codegen-patterns 5.1, "`in`
+        // on sets in memory, constant member": the byte that holds bit k,
+        // never renumbered; tty_$i_kill_line 0xE1B6B6 `btst
+        // #2,(0x1f,A2)`).  Best effort (not byte-identical): no site on a
+        // set of more than a longword.
+        if !(0..bits).contains(&k) {
+            return Err(unsupported(
+                e.span,
+                format!("`in` of a constant outside a {bytes}-byte set's {bits} bits is"),
+            ));
+        }
+        best_effort(
+            e.span,
+            "`in` of a constant member of a set of more than a longword (no site; \
+             codegen-patterns 5.1) is",
+        )?;
+        return Ok(Expr::Bits {
+            addr: addr_of(p, rhs)?.offset_by(((bits - 1 - k) / 8) as i32),
+            field: BitField {
+                unit: Width::Byte,
+                shift: (k % 8) as u32,
+                width: 1,
+            },
+            ty: Scalar::BOOLEAN,
+        });
     }
     Ok(Expr::SetMemberAt {
         elem: Box::new(set_element(p, lhs)?),
@@ -8413,6 +8996,11 @@ fn fill(
     }
     // The elements of a byte-aligned array may lie at odd addresses, as
     // for a store to one of them ([`access_of`]).
+    if is_set(p, target.ty) && p.types.size(target.ty) > 4 {
+        // A set of more than a longword is no scalar: the loop stores it
+        // as any set assignment ([`large_set_store`]).
+        return Ok(None);
+    }
     check_even(p, target)?;
     let ty = scalar_of(p, target)?;
     if ty.bytes() != *elem_size {

@@ -536,12 +536,13 @@ fn unsupported_constructs_have_positions() {
         vec!["t.pas:2:12: error: a `define`d variable in an overlay section (`var (name)`, ref 3.14 p. 3-52; no map symbol lies inside the image's overlay sections past their start, codegen-patterns 11) is not supported yet"]
     );
 
-    // A 6-byte set tested with an integer element, which may lie beyond
-    // its 48 bits (the guarded form, codegen-patterns 5.1).
+    // A 16-byte set tested with a char element, which may lie beyond its
+    // 128 bits (the guarded form, codegen-patterns 5.1; an `integer`
+    // element is tested unguarded, MSG_$FORK 0xE73F2E).
     let e = errs(
         "module m;
-type s16 = set of 0..40;
-function f(k: integer; var s: s16): boolean; options(val_param);
+type s16 = set of 'a'..'z';
+function f(k: char; var s: s16): boolean; options(val_param);
 begin
   f := k in s;
 end;
@@ -550,8 +551,8 @@ end;
     assert_eq!(
         e,
         vec![
-            "t.pas:5:8: error: `in` on a 6-byte set with an element whose type reaches beyond \
-             the set's 48 bits (the guarded test, NAME_$INIT 0xE3183E, codegen-patterns 5.1) is \
+            "t.pas:5:8: error: `in` on a 16-byte set with an element whose type reaches beyond \
+             the set's 128 bits (the guarded test, NAME_$INIT 0xE3183E, codegen-patterns 5.1) is \
              not supported yet"
         ]
     );

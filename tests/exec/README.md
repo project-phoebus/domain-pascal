@@ -195,6 +195,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `sets` | `+`, `-`, `*`, `in`, `<> []` on a word set; `in` on a 128-bit set |
 | `const_sets` | bead domain-pascal-bitu: `x in [..]` with a run-time element, an integer constructor as a longword constant (`integer` and zero-extended `0..65535` elements, 0..31), a one-word enumeration set by `moveq`; in a condition and as a value |
 | `set_compares` | bead domain-pascal-2i6f: `=`/`<>` of word and longword sets (an intersection against a constant, in a condition and as a value; a held set against a constant across a call; two intersections; two sets), set constants passed by address (word and longword cells, a cell named twice) |
+| `large_sets` | bead domain-pascal-g6l7: sets of 6, 8, 16 and 32 bytes in memory: constants, `[k]`, `s + [k]`, `[k] + t`, `s - [k]` (run-time members at both ends and at word and longword boundaries), `= []`/`<> []` in a condition and as a value, `=` of two sets, `in` as a value, copies, constant members added and removed, `+`/`*`/`-` into a third set, `s := s + t`, mixed constructors; an array of records of one 8-byte set by a run-time index and through `with` (msg's ownership table), a frame set through a pointer, a `set of char` with a char member |
 | `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |
 | `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |
 | `gotos` | forward and backward `goto`, out of loops, into a `case` arm, from a function |

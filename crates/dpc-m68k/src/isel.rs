@@ -4224,6 +4224,7 @@ fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
             walk_addr(lhs, v);
             walk_addr(rhs, v);
         }
+        IrCond::SetEmpty { set, .. } => walk_addr(set, v),
     }
 }
 
@@ -4286,10 +4287,16 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 array: addr,
                 index: value,
                 ..
+            }
+            | StmtKind::StoreSetMember {
+                set: addr,
+                elem: value,
+                ..
             } => {
                 walk_addr(addr, v);
                 walk_expr(value, v);
             }
+            StmtKind::StoreSetConst { set, .. } => walk_addr(set, v),
             StmtKind::Copy { dst, src, .. } => {
                 walk_addr(dst, v);
                 walk_addr(src, v);
@@ -5053,10 +5060,16 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 walk_addr(addr, v);
             }
             // The index is read first ([`Selector::store_bit_elem`]).
-            StmtKind::StoreBitElem { array, index, .. } => {
+            StmtKind::StoreBitElem { array, index, .. }
+            | StmtKind::StoreSetMember {
+                set: array,
+                elem: index,
+                ..
+            } => {
                 walk_expr(index, v);
                 walk_addr(array, v);
             }
+            StmtKind::StoreSetConst { set, .. } => walk_addr(set, v),
             StmtKind::Copy { dst, src, .. } => {
                 walk_addr(src, v);
                 walk_addr(dst, v);
@@ -5489,7 +5502,9 @@ fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bo
         }
         StmtKind::StoreBitElem {
             array: a, bytes, ..
-        } => ok &= !hits(a, Some(*bytes as i32)),
+        }
+        | StmtKind::StoreSetMember { set: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
+        StmtKind::StoreSetConst { set: a, bits } => ok &= !hits(a, Some(bits.len() as i32)),
         StmtKind::Copy { dst: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Fill {
             start: a,
@@ -5513,10 +5528,16 @@ fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
                 array: addr,
                 index: value,
                 ..
+            }
+            | StmtKind::StoreSetMember {
+                set: addr,
+                elem: value,
+                ..
             } => {
                 addr_mut(addr, f);
                 expr_addrs_mut(value, f);
             }
+            StmtKind::StoreSetConst { set, .. } => addr_mut(set, f),
             StmtKind::Copy { dst, src, .. } => {
                 addr_mut(dst, f);
                 addr_mut(src, f);
@@ -5650,6 +5671,7 @@ fn cond_addrs_mut(c: &mut IrCond, f: &mut dyn FnMut(&mut Addr)) {
             addr_mut(lhs, f);
             addr_mut(rhs, f);
         }
+        IrCond::SetEmpty { set, .. } => addr_mut(set, f),
     }
 }
 
@@ -5892,6 +5914,7 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 addr(lhs, off, st);
                 addr(rhs, off, st);
             }
+            IrCond::SetEmpty { set, .. } => addr(set, off, st),
         }
     }
     fn addr(a: &Addr, off: i32, st: &mut St) {
@@ -5919,10 +5942,16 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     array: a,
                     index: value,
                     ..
+                }
+                | StmtKind::StoreSetMember {
+                    set: a,
+                    elem: value,
+                    ..
                 } => {
                     addr(a, off, st);
                     exprs(value, off, st);
                 }
+                StmtKind::StoreSetConst { set, .. } => addr(set, off, st),
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => exprs(e, off, st),
                 StmtKind::Copy { dst, src, .. } => {
                     addr(src, off, st);
@@ -6350,6 +6379,7 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool, labels: &[bool]) -> bool {
             | StmtKind::Store { value: e, .. }
             | StmtKind::StoreBits { value: e, .. }
             | StmtKind::StoreBitElem { index: e, .. }
+            | StmtKind::StoreSetMember { elem: e, .. }
                 if expr_has_call(e) =>
             {
                 return false
@@ -6357,7 +6387,9 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool, labels: &[bool]) -> bool {
             StmtKind::SetResult(_)
             | StmtKind::Store { .. }
             | StmtKind::StoreBits { .. }
-            | StmtKind::StoreBitElem { .. } => {}
+            | StmtKind::StoreBitElem { .. }
+            | StmtKind::StoreSetMember { .. }
+            | StmtKind::StoreSetConst { .. } => {}
             StmtKind::Discard(e) if expr_has_call(e) => return false,
             StmtKind::Discard(_) | StmtKind::Disable | StmtKind::Enable => {}
             // Up to 18 bytes the copy is unrolled; from 20 it is a `dbf`
@@ -6570,6 +6602,7 @@ fn cond_has_call(c: &IrCond) -> bool {
             cond_has_call(a) || cond_has_call(b)
         }
         IrCond::Block { lhs, rhs, .. } => addr_has_call(lhs) || addr_has_call(rhs),
+        IrCond::SetEmpty { set, .. } => addr_has_call(set),
     }
 }
 
@@ -7008,6 +7041,7 @@ impl Uses<'_> {
                 self.address(lhs);
                 self.address(rhs);
             }
+            IrCond::SetEmpty { set, .. } => self.address(set),
         }
     }
 
@@ -7112,10 +7146,16 @@ impl Uses<'_> {
                 }
                 // The index is read first ([`Selector::bit_elem_test`],
                 // [`Selector::store_bit_elem`]).
-                StmtKind::StoreBitElem { array, index, .. } => {
+                StmtKind::StoreBitElem { array, index, .. }
+                | StmtKind::StoreSetMember {
+                    set: array,
+                    elem: index,
+                    ..
+                } => {
                     self.expr(index);
                     self.address(array);
                 }
+                StmtKind::StoreSetConst { set, .. } => self.address(set),
                 StmtKind::Copy { dst, src, .. } => {
                     self.address(src);
                     self.address(dst);
@@ -8020,6 +8060,20 @@ impl Selector {
                 } => {
                     self.store_bit_elem(array, index, *lo, *value)?;
                     self.wrote(array, *bytes);
+                }
+                StmtKind::StoreSetMember {
+                    set,
+                    bytes,
+                    elem,
+                    value,
+                    only,
+                } => {
+                    self.store_set_member(set, *bytes, elem, *value, *only)?;
+                    self.wrote(set, *bytes);
+                }
+                StmtKind::StoreSetConst { set, bits } => {
+                    self.store_set_const(set, bits)?;
+                    self.wrote(set, bits.len() as u32);
                 }
                 StmtKind::Copy {
                     dst,
@@ -10425,7 +10479,8 @@ impl Selector {
                     // beq.b`).
                     Expr::SetMemberAt { elem, set, bytes } => {
                         self.set_member_at(elem, set, *bytes)?;
-                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        let cc = Self::set_member_cc(set);
+                        self.jump(if when { cc } else { cc.negate() }, l);
                         return Ok(());
                     }
                     // An element of a packed array of booleans: `btst` on
@@ -10479,6 +10534,7 @@ impl Selector {
             IrCond::Block { op, lhs, rhs, size } => {
                 self.block_compare(*op, lhs, rhs, *size, when, l)
             }
+            IrCond::SetEmpty { set, size } => self.set_empty_branch(set, *size, when, l),
         }
     }
 
@@ -16235,11 +16291,24 @@ impl Selector {
                 });
                 Ok(Val::Tmp(r))
             }
-            Expr::SetMemberAt { .. } => Err(unsupported(
-                self.span,
-                "`in` on a set larger than a longword, as a value (`s<cc>` after the byte \
-                 `btst`: not catalogued), is",
-            )),
+            // Best effort (not byte-identical): `sne` after the byte
+            // `btst` into the byte offset's register, free after it (no
+            // site of `in` on a large set as a value; PROC1_$TST_LOCK
+            // 0xE148DE materialises a register set's test in the set's
+            // register, codegen-patterns 5.1).
+            Expr::SetMemberAt { elem, set, bytes } => {
+                best_effort(
+                    self.span,
+                    "`in` on a set of more than a longword as a value (`s<cc>` after the byte \
+                     `btst`: no site, codegen-patterns 5.1) is",
+                )?;
+                let r = self.set_member_at(elem, set, *bytes)?;
+                self.out.push(Insn::Scc {
+                    cond: Self::set_member_cc(set),
+                    dst: Ea::Reg(Reg::D(r)),
+                });
+                Ok(Val::Tmp(r))
+            }
             // As a function result: [`Self::set_result`].
             Expr::BitElem { .. } => Err(unsupported(
                 self.span,
@@ -18960,6 +19029,33 @@ impl Selector {
             });
             return Ok(count);
         }
+        // `s = []`, `s <> []` of a set of more than a longword: `seq`/`sne`
+        // into the count's register, the `bne`s going to it, as for an
+        // unrolled block comparison (above).  Best effort (not
+        // byte-identical): no site of the test as a value.
+        let set_empty = match c {
+            IrCond::SetEmpty { set, size } => Some((set, *size, true)),
+            IrCond::Not(x) => match &**x {
+                IrCond::SetEmpty { set, size } => Some((set, *size, false)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((set, size, empty)) = set_empty {
+            best_effort(
+                self.span,
+                "`= []` of a set of more than a longword as a value (no site, codegen-patterns \
+                 5.1) is",
+            )?;
+            let nonempty = self.new_label();
+            let count = self.set_empty_flags(set, size, nonempty)?;
+            self.place(nonempty);
+            self.out.push(Insn::Scc {
+                cond: if empty { Cond::Eq } else { Cond::Ne },
+                dst: Ea::Reg(Reg::D(count)),
+            });
+            return Ok(count);
+        }
         if let IrCond::Odd(x) = c {
             // `btst #0; sne`: into the tested register when it held a value
             // computed for the test, as `in` does (REM_NAME_SERVER_LOCAL
@@ -19515,7 +19611,10 @@ impl Selector {
                     )),
                 }
             }
-            IrCond::Compare { .. } | IrCond::Block { .. } | IrCond::Odd(_) => self.test_value(c),
+            IrCond::Compare { .. }
+            | IrCond::Block { .. }
+            | IrCond::SetEmpty { .. }
+            | IrCond::Odd(_) => self.test_value(c),
             // Bead domain-pascal-2lse.  Best effort (not byte-identical):
             // `not` of a computed boolean, `and then`, `or else` as an
             // operand are not catalogued; formed as values of their own
@@ -21098,9 +21197,97 @@ impl Selector {
     /// element in memory).  **Uncertain:** the `lea` of a set in a record
     /// reached through a register comes after the `lsr` at MSG_$CLOSEI
     /// 0xE59432 and MSG_$FORK 0xE73F38 (`lea (472,A0),A1`).
-    fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<()> {
+    fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<u8> {
         let top = bytes as i64 * 8 - 1;
-        let (k, c) = match elem {
+        let (k, c) = self.large_set_elem(elem, top)?;
+        if let Addr::Const(_) = set {
+            // A constant set in the code: guarded, `bcs` past the `btst`
+            // when the element lies above the set's bits (UNMAP_CASE
+            // 0xE54166..0xE54178 `moveq #95,D3; move.b D0,D2; sub.w D2,D3;
+            // bcs.s; lsr.w #3,D3; lea (d,PC),A3; btst D2,(0,A3,D3.w)`);
+            // the test is then `bgt`/`ble` ([`Self::set_member_cc`]).
+            self.out.push(Insn::Alu {
+                op: AluOp::Sub,
+                size: Size::W,
+                src: Ea::Reg(Reg::D(k)),
+                dst: c,
+            });
+            let skip = self.new_label();
+            self.jump(Cond::Cs, skip);
+            self.out.push(Insn::Shift {
+                op: ShiftOp::Lsr,
+                size: Size::W,
+                count: ShiftCount::Imm(3),
+                dst: c,
+            });
+            let src = self.large_set_ea(set)?;
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Lea { src, dst: a });
+            self.out.push(Insn::Btst {
+                bit: k,
+                dst: Ea::Idx(0, a, c, false),
+            });
+            self.place(skip);
+            return Ok(c);
+        }
+        let src = self.large_set_ea(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        self.out.push(Insn::Alu {
+            op: AluOp::Sub,
+            size: Size::W,
+            src: Ea::Reg(Reg::D(k)),
+            dst: c,
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: c,
+        });
+        self.out.push(Insn::Btst {
+            bit: k,
+            dst: Ea::Idx(0, a, c, false),
+        });
+        Ok(c)
+    }
+
+    /// The operand of a set of more than a longword in memory at `set`, one
+    /// that `lea` and displacements take (not a stepped `(An)+`).
+    fn large_set_ea(&mut self, set: &Addr) -> Res<Ea> {
+        let ea = self.ea_of(set)?;
+        if matches!(ea, Ea::PostInc(_) | Ea::PreDec(_) | Ea::Reg(_) | Ea::Imm(_)) {
+            return Err(unsupported(
+                self.span,
+                "a set of more than a longword at this kind of operand is",
+            ));
+        }
+        Ok(ea)
+    }
+
+    /// The condition under which [`Self::set_member_at`] found the element
+    /// a member: Z clear, `bne`; on a constant set, whose guard leaves N set
+    /// by the borrow, `bgt` (UNMAP_CASE 0xE54178 `ble.s` for not a
+    /// member).
+    fn set_member_cc(set: &Addr) -> Cond {
+        if let Addr::Const(_) = set {
+            Cond::Gt
+        } else {
+            Cond::Ne
+        }
+    }
+
+    /// The element of [`Self::set_member_at`] and [`Self::store_set_member`]
+    /// in a data register `k`, and the constant `top` (the set's bits - 1)
+    /// in another, `c`, in the image's order: the constant first, then the
+    /// element (a byte zero-extended around the constant's load), or the
+    /// element's register when it is held.  A computed element (no site
+    /// on a set of more than a longword) is evaluated first, then the
+    /// constant: the order of a computed member of `[k]` (DBUF_$GET_BLOCK
+    /// 0xE3A726, [`Self::set_of`]).  Best effort (not byte-identical): the
+    /// computed element's order is not seen on a large set.
+    fn large_set_elem(&mut self, elem: &Expr, top: i64) -> Res<(u8, u8)> {
+        Ok(match elem {
             // A byte element zero-extended around the constant's load.
             Expr::Convert { value, ty, .. } if *ty == Scalar::unsigned(Width::Word) => {
                 let Expr::Load {
@@ -21158,13 +21345,185 @@ impl Selector {
                 (k, c)
             }
             _ => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
-                    "`in` on a large set with a computed element is",
-                ))
+                    "a computed member of a set of more than a longword (its order against \
+                     the constant: no site, codegen-patterns 5.1) is",
+                )?;
+                let k = self.computed_elem(elem)?;
+                (k, self.load_const(top, Width::Word)?)
             }
+        })
+    }
+
+    /// A computed set element (a word) in a data register: its own
+    /// register when the value is in one, else a copy.
+    fn computed_elem(&mut self, elem: &Expr) -> Res<u8> {
+        match self.eval(elem)? {
+            Val::Reg(Reg::D(r)) | Val::Tmp(r) => Ok(r),
+            Val::Imm(_) => Err(unsupported(
+                self.span,
+                "a constant member here (lowering gives it as a constant set) is",
+            )),
+            v => self.in_tmp(v, Width::Word),
+        }
+    }
+
+    /// The forms of [`Self::large_set_elem`] that load or reuse the
+    /// element after the constant (the image's order): a variable, a byte
+    /// variable zero-extended, a held one.
+    fn plain_large_set_elem(elem: &Expr) -> bool {
+        match elem {
+            Expr::Convert { value, ty, .. } if *ty == Scalar::unsigned(Width::Word) => matches!(
+                &**value,
+                Expr::Load {
+                    ty: Scalar {
+                        width: Width::Byte,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            Expr::Load { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The set of `bytes` bytes at `set` cleared, `lea <set>,An` and
+    /// `clr.l (An)+` per longword (a `clr.w (An)+` for a last word): the
+    /// image's clearing of an 8-byte set temporary (MSG_$OPENI
+    /// 0xE59248..0xE5924E `lea (-20,A6),A0; clr.l (A0)+; clr.l (A0)+`;
+    /// MSG_$CLOSEI 0xE59454, MSG_$FORK 0xE73F42).  The word of a 6-byte
+    /// set: best effort (not byte-identical), no site.
+    fn clear_large_set(&mut self, set: &Addr, bytes: u32) -> Res<()> {
+        let src = self.large_set_ea(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        for _ in 0..bytes / 4 {
+            self.out.push(Insn::Clr {
+                size: Size::L,
+                dst: Ea::PostInc(a),
+            });
+        }
+        if bytes % 4 != 0 {
+            self.out.push(Insn::Clr {
+                size: Size::W,
+                dst: Ea::PostInc(a),
+            });
+        }
+        Ok(())
+    }
+
+    /// `s := c` for a constant `c` of a set of more than a longword at
+    /// `set` ([`StmtKind::StoreSetConst`]): each longword stored, `clr.l`
+    /// for a zero one, `move.l #imm` otherwise, a last word likewise
+    /// (MSG_$INIT 0xE31BD4 `move.l #0x4000000,(0x1e0,A0); clr.l
+    /// (0x1e4,A0)`, `[58]` of a 64-bit set; MST_$INIT 0xE30B98 `clr.l
+    /// (0xE24384).l; move.l #1,(0xE24388).l`, `[0]`: no `moveq`).  A
+    /// destination whose operand cannot be displaced (an indexed one
+    /// beyond a byte's displacement) is reached through `lea` into an
+    /// address register: best effort (not byte-identical), no site.
+    fn store_set_const(&mut self, set: &Addr, bits: &[u8]) -> Res<()> {
+        let n = bits.len() as i32;
+        let mut ea = self.large_set_ea(set)?;
+        if ea_plus(&ea, n).is_none() {
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Lea { src: ea, dst: a });
+            ea = Ea::Ind(a);
+        }
+        let mut o = 0;
+        while o < n {
+            let (size, w) = if n - o >= 4 {
+                (Size::L, Width::Long)
+            } else {
+                (Size::W, Width::Word)
+            };
+            let v = bits[o as usize..(o + w.bytes() as i32) as usize]
+                .iter()
+                .fold(0i64, |v, &x| (v << 8) | x as i64);
+            let dst = if o == 0 { ea.clone() } else { ea_plus(&ea, o).expect("checked") };
+            self.out.push(if v == 0 {
+                Insn::Clr { size, dst }
+            } else {
+                Insn::Move {
+                    size,
+                    src: Ea::Imm(imm(v, w)),
+                    dst,
+                }
+            });
+            o += w.bytes() as i32;
+        }
+        Ok(())
+    }
+
+    /// `s := [k]` (`only`), `s := s + [k]` (`value`), `s := s - [k]`
+    /// (not `value`) for a set of `bytes` bytes in memory at `set`, more
+    /// than a register holds, `k` a run-time member
+    /// ([`StmtKind::StoreSetMember`]; ref 3.9.3, Figure 3-6): the byte
+    /// `(bits-1 - k) >> 3` and `bset`/`bclr Dk` on it, as `in` tests it
+    /// ([`Self::set_member_at`]).  The image builds `[k]` in a frame
+    /// temporary, cleared, then (MSG_$OPENI 0xE59250..0xE59260):
+    ///
+    /// ```text
+    /// moveq   #63,D0
+    /// move.w  (PROC1_$AS_ID).l,D1
+    /// lea     (-20,A6),A0
+    /// sub.w   D1,D0
+    /// lsr.w   #3,D0
+    /// bset    D1,(0,A0,D0.w)
+    /// ```
+    ///
+    /// and then copies the temporary into the set (`s := [k]`, 0xE59264),
+    /// `or`s it in by longwords (`s := s + [k]`, MSG_$FORK 0xE73F62..
+    /// 0xE73F6C `move.l (A4)+,D1; or.l D1,(A2)+; dbf`), or forms the
+    /// difference in the temporary and copies it back (`s := s - [k]`,
+    /// MSG_$CLOSEI 0xE5946A..0xE5948C).  Best effort (not byte-identical):
+    /// `dpc` has no frame temporary for it and works on the set itself,
+    /// the same instructions on the set's address (`bclr` for `-`); the
+    /// result is the same.  No range check (as the image's).
+    fn store_set_member(
+        &mut self,
+        set: &Addr,
+        bytes: u32,
+        elem: &Expr,
+        value: bool,
+        only: bool,
+    ) -> Res<()> {
+        let top = bytes as i64 * 8 - 1;
+        if let (Expr::Const { value: k, .. }, false) = (elem, only) {
+            // A constant member: `bset`/`bclr #k mod 8` on the byte that
+            // holds it, as on a word set (TTY_$I_OUTPUT_BUFFER_DRAINED
+            // 0xE1B39E `bclr #0,(9,A2)`; codegen-patterns 5.1), through an
+            // `lea` when the operand cannot be displaced (best effort, not
+            // byte-identical: no site of either on a set of more than a
+            // longword).
+            let byte = ((top - k) / 8) as i32;
+            let mut ea = self.large_set_ea(set)?;
+            if ea_plus(&ea, bytes as i32).is_none() {
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Lea { src: ea, dst: a });
+                ea = Ea::Ind(a);
+            }
+            let dst = if byte == 0 { ea } else { ea_plus(&ea, byte).expect("checked") };
+            self.out.push(Insn::BitImm {
+                op: if value { BitOp::Set } else { BitOp::Clr },
+                bit: (k % 8) as u8,
+                dst,
+            });
+            return Ok(());
+        }
+        let (k, c) = if only && Self::plain_large_set_elem(elem) {
+            self.clear_large_set(set, bytes)?;
+            self.large_set_elem(elem, top)?
+        } else if only {
+            // A computed member first: it may read the set.
+            let k = self.computed_elem(elem)?;
+            self.clear_large_set(set, bytes)?;
+            (k, self.load_const(top, Width::Word)?)
+        } else {
+            self.large_set_elem(elem, top)?
         };
-        let src = self.ea_of(set)?;
+        let src = self.large_set_ea(set)?;
         let a = self.alloc_a()?;
         self.out.push(Insn::Lea { src, dst: a });
         self.out.push(Insn::Alu {
@@ -21179,11 +21538,75 @@ impl Selector {
             count: ShiftCount::Imm(3),
             dst: c,
         });
-        self.out.push(Insn::Btst {
+        self.out.push(Insn::Bit {
+            op: if value { BitOp::Set } else { BitOp::Clr },
             bit: k,
             dst: Ea::Idx(0, a, c, false),
         });
         Ok(())
+    }
+
+    /// A branch to `l` when the set of `size` bytes at `set` (more than a
+    /// register holds) is empty (`when`) or not (`!when`)
+    /// ([`IrCond::SetEmpty`]): its address in a new address register, a
+    /// count that no loop uses, `moveq #longwords-1`, then `tst.l (An)+`
+    /// and a branch per longword (MSG_$OPENI 0xE5920A..0xE59216 `lea
+    /// (0x1d8,A0),A1; moveq #1,D0; tst.l (A1)+; bne.b; tst.l (A1)+;
+    /// bne.b`; MSG_$CLOSEI 0xE59490..0xE5949C), as the unrolled `cmpm.l`
+    /// of an 8-byte record has its count ([`Self::block_flags`]).  Other
+    /// sizes than 8: best effort (not byte-identical), the same form
+    /// unrolled, a last word tested with `tst.w (An)+`; no site.
+    fn set_empty_branch(&mut self, set: &Addr, size: u32, when: bool, l: u32) -> Res<()> {
+        if when {
+            let nonempty = self.new_label();
+            self.set_empty_flags(set, size, nonempty)?;
+            self.jump(Cond::Eq, l);
+            self.place(nonempty);
+        } else {
+            self.set_empty_flags(set, size, l)?;
+            self.jump(Cond::Ne, l);
+        }
+        Ok(())
+    }
+
+    /// The test of [`Self::set_empty_branch`] up to the flags of its last
+    /// `tst` (Z set when the set is empty), each `tst` but the last
+    /// followed by `bne` to `nonempty`; gives the count's register.
+    fn set_empty_flags(&mut self, set: &Addr, size: u32, nonempty: u32) -> Res<u8> {
+        if size != 8 {
+            best_effort(
+                self.span,
+                format!(
+                    "`= []` of a {size}-byte set (the 8-byte form, MSG_$OPENI 0xE5920A, \
+                     unrolled; no site, codegen-patterns 5.1) is"
+                ),
+            )?;
+        }
+        let src = self.large_set_ea(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        let longs = size / 4;
+        let count = self.alloc_d()?;
+        self.out.push(Insn::Moveq {
+            value: (longs.max(1) - 1) as i8,
+            dst: count,
+        });
+        let mut units: Vec<Size> = (0..longs).map(|_| Size::L).collect();
+        if size % 4 != 0 {
+            units.push(Size::W);
+        }
+        // Not empty as soon as a unit is not zero.
+        let n = units.len();
+        for (i, u) in units.into_iter().enumerate() {
+            self.out.push(Insn::Tst {
+                size: u,
+                dst: Ea::PostInc(a),
+            });
+            if i + 1 < n {
+                self.jump(Cond::Ne, nonempty);
+            }
+        }
+        Ok(count)
     }
 
     /// The byte of the array at `array` (the unit's data) that the bit

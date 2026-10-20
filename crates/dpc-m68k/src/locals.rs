@@ -289,6 +289,7 @@ impl Walk<'_> {
                 self.other(lhs);
                 self.other(rhs);
             }
+            Cond::SetEmpty { set, .. } => self.other(set),
         }
         self.in_cond = outer;
     }
@@ -337,10 +338,16 @@ impl Walk<'_> {
                     array: addr,
                     index: value,
                     ..
+                }
+                | StmtKind::StoreSetMember {
+                    set: addr,
+                    elem: value,
+                    ..
                 } => {
                     self.other(addr);
                     self.expr(value);
                 }
+                StmtKind::StoreSetConst { set, .. } => self.other(set),
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Copy { dst, src, .. } => {
                     self.other(src);

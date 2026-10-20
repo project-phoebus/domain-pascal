@@ -541,6 +541,29 @@ pub enum StmtKind {
         lo: i64,
         value: bool,
     },
+    /// Member `elem` (a word, run-time) of the set of `bytes` bytes (more
+    /// than 4: not register-sized) in memory at `set` set (`value` true)
+    /// or cleared (false); with `only`, every other member is cleared
+    /// first: `s := s + [k]`, `s := s - [k]`, `s := [k]` (ref "Set
+    /// Operations", pp. 4-173..4-175; layout ref 3.9.3, Figure 3-6: member
+    /// k is bit k mod 8 of the byte at `(bytes*8 - 1 - k) div 8`, as for
+    /// [`Expr::SetMemberAt`]).  No range check: a member beyond the set's
+    /// bits is not one of the set's values (ref 3.9.3).
+    StoreSetMember {
+        set: Addr,
+        bytes: u32,
+        elem: Expr,
+        value: bool,
+        only: bool,
+    },
+    /// The constant `bits` (the set's bytes, big-endian, ref 3.9.3 Figure
+    /// 3-6) stored into the set of `bits.len()` bytes (more than 4: not
+    /// register-sized) at `set`: `s := c`.  Kept apart from scalar
+    /// [`StmtKind::Store`]s, whose neighbouring constants the selector
+    /// merges or loads by `moveq` (codegen-patterns 13): a set constant is
+    /// stored a longword at a time with `move.l #imm` (MST_$INIT 0xE30B98
+    /// `clr.l; move.l #1`, MSG_$INIT 0xE31BD4).
+    StoreSetConst { set: Addr, bits: Vec<u8> },
     /// Copy `bytes` bytes from the object at `src` to the object at `dst`:
     /// `d := s` for a record or array that is not scalar-sized, or for an
     /// array of char of any size (ref "Assignment", p. 4-25).  The objects
@@ -775,6 +798,11 @@ pub enum Cond {
         rhs: Addr,
         size: u32,
     },
+    /// The set of `size` bytes (more than 4: not register-sized) in
+    /// memory at `set` is empty, `s = []` (ref "Set Operations", p. 4-176;
+    /// codegen-patterns 5.1: `tst.l (An)+` per longword, MSG_$OPENI
+    /// 0xE5920A, MSG_$CLOSEI 0xE59490).
+    SetEmpty { set: Addr, size: u32 },
 }
 
 /// A relational operator (ref Table 4-1, p. 4-3).

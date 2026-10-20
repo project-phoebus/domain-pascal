@@ -583,9 +583,9 @@ fn refusals() {
         ));
         assert!(e.contains("with a call on either side"), "{stmt}: {e}");
     }
-    // Comparing sets of more than a longword.
+    // Comparing a set of more than a longword with a computed one.
     assert!(error(
-        "procedure t(p: rp); options(val_param); begin if p^.b64 = [1] then gw := 1 end;"
+        "procedure t(p: rp); options(val_param); begin if p^.b64 = p^.b64 + [1] then gw := 1 end;"
     )
     .contains("more than a longword"));
     // A constant member beyond the set's bits.
@@ -593,19 +593,129 @@ fn refusals() {
         error("procedure t(p: rp); options(val_param); begin p^.w := p^.w + [20] end;")
             .contains("outside the 16 bits")
     );
-    // `in` on a large set with an element that may lie beyond it (the
-    // guarded form, NAME_$INIT 0xE3183E).
+    // `in` on a large set with an element other than an `integer` that
+    // may lie beyond it (the guarded form, NAME_$INIT 0xE3183E).
     assert!(error(
-        "procedure t(p: rp; k: integer); options(val_param);
-         begin if k in p^.b64 then gw := 1 end;"
+        "procedure t(c: char); options(val_param);
+         type cs = set of 'a'..'z';
+         var s: cs;
+         begin if c in s then gw := 1 end;"
     )
     .contains("guarded test"));
-    // ... and as a value.
+}
+
+#[test]
+fn large_sets_in_memory() {
+    // Strict (the library default): the forms without an image site
+    // (bead domain-pascal-5kgg) are refused, the image's forms are not.
     assert!(error(
-        "function t(p: rp; c: char): boolean; options(val_param);
-         begin t := c in p^.big end;"
+        "procedure t(p: rp; k: integer); options(val_param);
+         begin p^.b64 := [k] end;"
     )
-    .contains("as a value"));
+    .contains("frame temporary"));
+    assert_eq!(
+        body("procedure t(p: rp); options(val_param); begin p^.b64 := [58] end;").len(),
+        3
+    );
+    // The best-effort forms, as `dpc` without `--strict`.
+    dpc_syntax::diag::set_strict(false);
+    // `in` with an `integer` element, unguarded (MSG_$FORK 0xE73F30..0xE73F3C
+    // `moveq #63,D1; move.w (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea
+    // (0x1d8,A0),A3; btst D5,(0,A3,D1.w)`).
+    assert_eq!(
+        body(
+            "procedure t(p: rp; k: integer); options(val_param);
+             begin if k in p^.b64 then gw := 1 end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t(0xc,%fp),%d0",
+            "moveq\t#0x3f,%d1",
+            "lea\t(0x26,%a0),%a1",
+            "sub.w\t%d0,%d1",
+            "lsr.w\t#3,%d1",
+            "btst\t%d0,(0,%a1,%d1.w)",
+            "beq.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // A constant: longword stores (MSG_$INIT 0xE31BD4 `move.l
+    // #0x4000000,(0x1e0,A0); clr.l (0x1e4,A0)`).
+    assert_eq!(
+        body("procedure t(p: rp); options(val_param); begin p^.b64 := [58] end;"),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "move.l\t#0x4000000,(0x26,%a0)",
+            "clr.l\t(0x2a,%a0)"
+        ]
+    );
+    // `[k]`: cleared by longwords, then `bset` on the byte (MSG_$OPENI
+    // 0xE59248..0xE59260, there in a frame temporary).
+    assert_eq!(
+        body(
+            "procedure t(p: rp; k: integer); options(val_param);
+             begin p^.b64 := [k] end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "lea\t(0x26,%a0),%a1",
+            "clr.l\t(%a1)+",
+            "clr.l\t(%a1)+",
+            "moveq\t#0x3f,%d0",
+            "move.w\t(0xc,%fp),%d1",
+            "movea.l\t(8,%fp),%a0",
+            "sub.w\t%d1,%d0",
+            "lea\t(0x26,%a0),%a1",
+            "lsr.w\t#3,%d0",
+            "bset\t%d1,(0,%a1,%d0.w)"
+        ]
+    );
+    // `s - [k]`: `bclr` on the byte; `s = []`: `tst.l (An)+` per longword
+    // after an unused count (MSG_$CLOSEI 0xE59490..0xE5949C).
+    assert_eq!(
+        body(
+            "procedure t(p: rp; k: integer); options(val_param);
+             begin p^.b64 := p^.b64 - [k]; if p^.b64 = [] then gw := 1 end;"
+        ),
+        [
+            "movea.l\t(8,%fp),%a0",
+            "move.w\t(0xc,%fp),%d0",
+            "moveq\t#0x3f,%d1",
+            "lea\t(0x26,%a0),%a1",
+            "sub.w\t%d0,%d1",
+            "lsr.w\t#3,%d1",
+            "bclr\t%d0,(0,%a1,%d1.w)",
+            "lea\t(0x26,%a0),%a1",
+            "moveq\t#1,%d0",
+            "tst.l\t(%a1)+",
+            "bne.s\t1f",
+            "tst.l\t(%a1)+",
+            "bne.s\t1f",
+            "move.w\t#1,(GW).l",
+            "1:"
+        ]
+    );
+    // `in` as a value: `sne` after the byte `btst`, into the offset's
+    // register.
+    assert_eq!(
+        body(
+            "function t(p: rp; c: char): boolean; options(val_param);
+             begin t := c in p^.big end;"
+        ),
+        [
+            "clr.w\t%d0",
+            "move.w\t#0xff,%d1",
+            "move.b\t(0xc,%fp),%d0",
+            "movea.l\t(8,%fp),%a0",
+            "sub.w\t%d0,%d1",
+            "lea\t(6,%a0),%a1",
+            "lsr.w\t#3,%d1",
+            "btst\t%d0,(0,%a1,%d1.w)",
+            "sne\t%d1",
+            "move.b\t%d1,%d0"
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------
