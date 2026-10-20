@@ -843,6 +843,17 @@ impl fmt::Display for Insn {
             Insn::Alu { op, size, src, dst } => {
                 write!(f, "{}.{size}\t{src},{}", op.name(), Reg::D(*dst))
             }
+            // `adda.l #imm,An` (SMD_$RESET_UNIT_DISPLAY 0xE6D7B8 `d7fc 0001
+            // fff0`, `adda.l #131056,A3`): `adda`, as `addi` takes no
+            // address register.
+            Insn::AluImm {
+                op: op @ (AluOp::Add | AluOp::Sub),
+                size,
+                imm,
+                dst: dst @ Ea::Reg(Reg::A(_)),
+            } => {
+                write!(f, "{}a.{size}\t#{},{dst}", op.name(), num(*imm))
+            }
             Insn::AluImm { op, size, imm, dst } => {
                 write!(f, "{}i.{size}\t#{},{dst}", op.name(), num(*imm))
             }

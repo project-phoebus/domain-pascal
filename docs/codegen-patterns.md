@@ -13553,6 +13553,45 @@ values live at once than there are registers"):
 
 Exec test: `tests/exec/be_spill.pas`.
 
+#### Link-test long tail (bead domain-pascal-h4ba)
+
+Forms the image shows (no warning):
+
+- ×26 bit by bit, `add.w D1,D1; move.w D1,D0; lsl.w #2,D0; add.w D0,D1;
+  add.w D0,D0; add.w D0,D1` (NETLOG_$LOG_IT 0xE71BBA, Verified): the copy
+  shifted up to each further bit of the odd part and added;
+- an element beyond 16 bits through a pointer, `lea (0,An,Dx),Am; adda.l
+  #d,Am`, then `(Am)` (SMD_$RESET_UNIT_DISPLAY 0xE6D7B4..0xE6D7BE,
+  Verified);
+- a `0..2147483647` against a constant it does not hold (-1,
+  16#80000000): the constant's 32 bits, compared unsigned
+  (FILE_$SET_REFCNT 0xE5E410 `cmpi.l #-1`; AST_$UPDATE_ASTE's nested
+  routine 0xE01518 `cmpi.l #-0x80000000; bcs`, Verified);
+- a byte constant argument with all bits set, `st -(SP)` (TTY
+  0xE1BD1E, `chr(255)`, Verified).
+
+Best effort (not byte-identical; `--strict` refuses): other odd parts of
+three bits bit by bit (word) or M$ARITH (longword); a longword times a
+multiply constant bit by bit (HINT_$GET_HINTS 0xE4998E has `muls.w` of a
+mask's word); a computed `div<s>.w` divisor after the dividend; an
+unsigned `max` with `bhi` (DISK_$GROW_QBLK_POOL 0xE3BC52, 6 more; `bcc`
+once, 0xE5C7C6); `!`/`xor` of a variable and a constant loaded, then
+`ori`/`eori`; records of other sizes in a `cmpm` loop of the largest
+unit dividing the size; a word against a constant beyond its type
+compared as longwords (the reference folds it, p. 9-32 message 250);
+an ordered test right after an assignment on the move's flags or after a
+`tst`; the address of an element through a pointer beyond 8 bits, `lea
+(0,An,Dx),Ar; lea (d,Ar),Ar`; a computed word index into an array that
+does not fit 16 bits widened by its sign; another unit's packed array of
+booleans through `movea.l #sym,An; lea (0,An,Do.w),Aa`, a computed value
+stored as `if v then bset else bclr`; a D0-held local first dereferenced
+in a loop or other statement of the routine's own statement part moved
+to an address register before it; `addr(x) ± c` as the address in a data
+register, then `addi.l`/`subi.l`; the kept base's `lea` into a register
+the allocator picks; a longword in a register narrowed to a byte read at
+the byte's width; a constant index past the array as `addr`'s operand.
+Exec tests: `tests/exec/be_h4ba_{arith,mem,flow,misc}.pas`.
+
 ### 12.5 Local variables held in registers (rule Verified on the TTY Pascal, 41 of 43 locals; supported by the C corpus; implemented)
 
 Ref 6.4.24, p. 6-29 (`-opt 3`): "Global register allocation allows local

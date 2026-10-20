@@ -4465,10 +4465,58 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
                     unreachable!()
                 };
                 if !fits(value, ty) {
-                    return Err(unsupported(
-                        x.span,
-                        "comparing with a constant outside the other operand's type is",
-                    ));
+                    let what = "comparing with a constant outside the other operand's type is";
+                    // A longword against a constant of 32 bits that its
+                    // type does not hold: the constant's 32 bits, compared
+                    // with the operand's sign, as the image does
+                    // (FILE_$SET_REFCNT 0xE5E410 `cmpi.l #-0x1,D0; bne.b`,
+                    // a `0..2147483647` against -1; AST_$UPDATE_ASTE's
+                    // nested routine at 0xE01518 `cmpi.l #-0x80000000,
+                    // (-0x88,A0); bcs.b`, the same type `>= 16#80000000`,
+                    // unsigned).
+                    // Any other ordered relation of an unsigned longword
+                    // and a negative constant is signed (ref 4.3.3, pp.
+                    // 4-6..4-7, clarification 32: unsigned only against a
+                    // constant in 0..2147483647): the constant as an
+                    // `integer32`, both operands then read signed
+                    // ([`widen_operands`]), the unsigned values being the
+                    // same signed.  Best effort (not byte-identical): no
+                    // site.
+                    let ordered = !matches!(rel, Rel::Eq | Rel::Ne);
+                    if ty.width == Width::Long
+                        && ty.sign == Sign::Unsigned
+                        && ordered
+                        && value < 0
+                        && value != -(1i64 << 31)
+                    {
+                        best_effort(x.span, what)?;
+                        return Ok(Expr::Const {
+                            value,
+                            ty: Scalar::signed(Width::Long),
+                        });
+                    }
+                    if ty.width == Width::Long && (-(1i64 << 31)..(1i64 << 32)).contains(&value)
+                    {
+                        let bits = value & 0xffff_ffff;
+                        let value = match ty.sign {
+                            Sign::Unsigned => bits,
+                            Sign::Signed => bits as u32 as i32 as i64,
+                        };
+                        return Ok(Expr::Const { value, ty });
+                    }
+                    // A word against a constant beyond it: both compared
+                    // as longwords (ref 4.3.1, p. 4-5: the smaller operand
+                    // is expanded), so the result is the one the values
+                    // give.  Best effort (not byte-identical): the
+                    // reference's compiler folds such a test to its
+                    // constant result and emits no code for it (p. 9-32,
+                    // message 250, `x: 0..65535; IF x = -1`); no site.
+                    let long = Scalar::signed(Width::Long);
+                    if ty.width == Width::Word && !ty.pointer && fits(value, long) {
+                        best_effort(x.span, what)?;
+                        return Ok(Expr::Const { value, ty: long });
+                    }
+                    return Err(unsupported(x.span, what));
                 }
                 Ok(c)
             }
@@ -5717,12 +5765,33 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         // in a frame byte (ACL_$INHERIT_SUBSYS 0xE4914C..0xE49182,
         // ACL_$OVERRIDE_LOCAL_LOCKSMITH 0xE4928C..0xE492BC), not modelled.
         let Some(ConstValue::Bool(b)) = &value.value else {
-            return Err(unsupported(
+            // Best effort (not byte-identical): `if v then a[i] := true
+            // else a[i] := false`, each part the constant's `bset`/`bclr`.
+            best_effort(
                 value.span,
                 "storing a value other than the constant `true` or `false` into an element of \
                  a packed array of booleans (the bit number kept in a frame byte, \
                  codegen-patterns 5.2) is",
-            ));
+            )?;
+            let cond = cond_of(p, value)?;
+            let part = |value: bool| Stmt {
+                kind: StmtKind::StoreBitElem {
+                    array: array.clone(),
+                    bytes,
+                    index: index.clone(),
+                    lo,
+                    value,
+                },
+                span: s.span,
+            };
+            return Ok(Stmt {
+                kind: StmtKind::If {
+                    cond,
+                    then_: vec![part(true)],
+                    else_: vec![part(false)],
+                },
+                span: s.span,
+            });
         };
         return Ok(Stmt {
             kind: StmtKind::StoreBitElem {
@@ -9088,12 +9157,19 @@ fn wide_index(p: &Program, index: &SExpr, ix: Expr, type_fits: bool) -> Res<Expr
     // A variable: its value is one load (a packed record's field at a
     // byte boundary too).
     if !matches!(ix, Expr::Load { .. }) {
-        return refuse(
+        // Best effort (not byte-identical): the word computed, then
+        // widened by its own sign (zero-extended as at AREA_'s 0xE076C6
+        // for an unsigned one, `ext.l` for a signed one).
+        if let Err(e) = refuse(
             "a computed word index (into arrays that fit, `.w` at the 39 sites whose \
              computation is visible; into one that does not, zero-extended at the one site \
              known, AREA_'s module-local 0xE075CA at 0xE076C6, `areas[id + 1]` next to `ext.l` \
              for `areas[id]`)",
-        );
+        ) {
+            dpc_syntax::diag::best_effort(e)?;
+        }
+        let sign = ix.ty().sign;
+        return Ok(convert(ix, Scalar::integer(Width::Long, sign)));
     }
     if type_fits {
         return refuse(

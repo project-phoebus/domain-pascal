@@ -4235,7 +4235,15 @@ fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> 
             )
         };
         if !seen {
-            return Err(Selector::assigned_ordered(span));
+            // The branch (or an `s<cc>`) right after the move reads the
+            // move's flags, which are those a `tst` of the value would set
+            // (N and Z from the value, V and C cleared): right for every
+            // condition.  Best effort (not byte-identical): not seen.
+            let reads = matches!(out.get(k + 1), Some(Insn::Branch { .. } | Insn::Scc { .. }));
+            if !reads {
+                return Err(Selector::assigned_ordered(span));
+            }
+            dpc_syntax::diag::best_effort(Selector::assigned_ordered(span))?;
         }
         if call && *n < 2 {
             best_effort(
@@ -8492,6 +8500,28 @@ impl Selector {
                 k if is_simple(st) && !matches!(k, StmtKind::Return) => Some(false),
                 _ => None,
             };
+            // Best effort (not byte-identical): in the routine's own
+            // statement part, the move as the statement's first
+            // instruction, whatever the statement (a loop, a `case`, an
+            // `if` of another shape): it runs once, before any reference
+            // or call of the statement, and the address register holds the
+            // local from there on.
+            let hoist = match hoist {
+                None if top && !matches!(st.kind, StmtKind::Return) => {
+                    best_effort(
+                        st.span,
+                        "the first dereference of a local held in D0 (or the first call after \
+                         its assignment) inside a statement, a loop or `case`, or an `if` other \
+                         than one test reading it, one test with both parts dereferencing it, a \
+                         `then` part alone dereferencing it with no `else`, or an `else` part \
+                         after a `then` ending in `return` and calling nothing, with nothing \
+                         after it (where the original moves it to an address register is not \
+                         seen) is",
+                    )?;
+                    Some(false)
+                }
+                h => h,
+            };
             let Some(hoist) = hoist else {
                 return Err(unsupported(
                     st.span,
@@ -10835,6 +10865,26 @@ impl Selector {
             8 => (Size::L, 2),
             6 => (Size::W, 3),
             s if s % 4 == 0 && (32..=512).contains(&s) => (Size::L, s / 4),
+            // Best effort (not byte-identical): other sizes in a `cmpm`
+            // loop of the largest unit that divides the size (longwords,
+            // words, bytes), as the 6-byte and 32-byte forms are; the
+            // count is `moveq`'s.
+            s if s >= 1 && (s % 4 == 0 && s / 4 <= 128 || s % 2 == 0 && s / 2 <= 128 || s <= 128) => {
+                best_effort(
+                    self.span,
+                    format!(
+                        "comparing records of {size} bytes (only 6, 8 and multiples of 4 from \
+                         32 are catalogued, codegen-patterns 7.1) is"
+                    ),
+                )?;
+                if s % 4 == 0 {
+                    (Size::L, s / 4)
+                } else if s % 2 == 0 {
+                    (Size::W, s / 2)
+                } else {
+                    (Size::B, s)
+                }
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -11038,7 +11088,14 @@ impl Selector {
         ) = (&ea, self.out.last())
         {
             if d == r && *s == size && self.assigned_move == Some(self.out.len() - 1) {
-                return self.assigned_flags(src.clone(), cc);
+                if self.assigned_flags(src.clone(), cc)? {
+                    return Ok(());
+                }
+                self.out.push(Insn::Tst {
+                    size,
+                    dst: ea.clone(),
+                });
+                return Ok(());
             }
             if d == r && !(*s == Size::B && size == Size::W) {
                 best_effort(
@@ -11088,7 +11145,12 @@ impl Selector {
     ///   the 24 copy a `case` selector into D1; every other is into D2..D7.
     ///   A local in a scratch register is refused after allocation
     ///   ([`check_assigned_flags`]); other branches are refused here.
-    fn assigned_flags(&mut self, src: Ea, cc: Cond) -> Res<()> {
+    ///
+    /// Gives whether the branch reads the move's flags; `false`: a `tst`
+    /// is wanted first (an ordered branch other than `ble`/`bgt`: best
+    /// effort, not byte-identical; a `move` and a `tst` leave the same
+    /// flags, so either is right).
+    fn assigned_flags(&mut self, src: Ea, cc: Cond) -> Res<bool> {
         if src == Ea::Reg(Reg::D(0)) {
             if !matches!(cc, Cond::Eq | Cond::Ne) {
                 best_effort(
@@ -11099,16 +11161,17 @@ impl Selector {
                 )?;
             }
             self.flag_moves.push((self.out.len() - 1, self.span, true));
-            return Ok(());
+            return Ok(true);
         }
         if !matches!(
             cc,
             Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl | Cond::Le | Cond::Gt
         ) {
-            return Err(Self::assigned_ordered(self.span));
+            dpc_syntax::diag::best_effort(Self::assigned_ordered(self.span))?;
+            return Ok(false);
         }
         self.flag_moves.push((self.out.len() - 1, self.span, false));
-        Ok(())
+        Ok(true)
     }
 
     fn assigned_ordered(span: Span) -> Diagnostic {
@@ -15286,12 +15349,13 @@ impl Selector {
                         // the first is not in compiled code and an `st`
                         // cannot be told from `true` without the callee's
                         // type, so not known (bead domain-pascal-3f6h).
+                        // A byte with all bits set other than `true`:
+                        // `st -(SP)` as for `true` (tty_$i_store_parity's
+                        // `tty_$i_buf_insert(chr(255), ...)`, 0xE1BD1E
+                        // `st -(SP)`; the byte in the high half of its
+                        // slot is 0xFF either way).
                         Width::Byte if *v & 0xff == 0xff => {
-                            return Err(unsupported(
-                                self.span,
-                                "a byte constant argument with all bits set other than `true` \
-                                 (st or move.w #-0x100?) is",
-                            ))
+                            self.out.push(Insn::Scc { cond: Cond::T, dst })
                         }
                         Width::Byte => self.out.push(Insn::Move {
                             size: Size::W,
@@ -17383,11 +17447,19 @@ impl Selector {
                 // On a variable the image has both orders (4 constant-first
                 // `or`s, 5 loads and `ori`): not settled.
                 AluOp::Or | AluOp::Eor => {
-                    let Val::Tmp(d) = xv else {
-                        return Err(unsupported(
-                            self.span,
-                            "`!`/`xor` of a variable and a constant (operand order not settled) is",
-                        ));
+                    let d = match xv {
+                        Val::Tmp(d) => d,
+                        // Best effort (not byte-identical): a variable
+                        // loaded, then `ori`/`eori` (5 of the 9 sites;
+                        // `eor` takes no memory source anyway).
+                        v => {
+                            best_effort(
+                                self.span,
+                                "`!`/`xor` of a variable and a constant (operand order not \
+                                 settled) is",
+                            )?;
+                            self.in_tmp(v, w)?
+                        }
                     };
                     self.out.push(Insn::AluImm {
                         op: alu,
@@ -17620,8 +17692,9 @@ impl Selector {
                 if alu == AluOp::Add || ra.is_some() =>
             {
                 let x = if ra.is_some() { lhs } else { rhs };
-                if matches!(x, Expr::Const { .. }) {
-                    return refuse(self, "an address and a constant in a sum or difference");
+                if let Expr::Const { value, .. } = x {
+                    let a = la.or(ra).unwrap();
+                    return self.addr_plus_const(alu, a, *value);
                 }
                 let v = self.eval(x)?;
                 let d = self.in_tmp(v, Width::Long)?;
@@ -17633,18 +17706,20 @@ impl Selector {
                 });
                 d
             }
-            (Some(_), None) if matches!(rhs, Expr::Const { .. }) => {
-                return refuse(self, "an address and a constant in a sum or difference")
+            (Some(a), None) if matches!(rhs, Expr::Const { .. }) => {
+                let Expr::Const { value, .. } = rhs else {
+                    unreachable!()
+                };
+                return self.addr_plus_const(alu, a, *value);
+            }
+            (None, Some(a)) if matches!(lhs, Expr::Const { .. }) && alu == AluOp::Add => {
+                let Expr::Const { value, .. } = lhs else {
+                    unreachable!()
+                };
+                return self.addr_plus_const(alu, a, *value);
             }
             (None, Some(_)) if matches!(lhs, Expr::Const { .. }) => {
-                return refuse(
-                    self,
-                    if alu == AluOp::Add {
-                        "an address and a constant in a sum or difference"
-                    } else {
-                        "a constant minus an address"
-                    },
-                );
+                return refuse(self, "a constant minus an address");
             }
             // The other operand the address a by-address slot holds in a
             // data register since the entry ([`Self::held_addr`]): with an
@@ -17672,6 +17747,30 @@ impl Selector {
                 )
             }
         };
+        Ok(d)
+    }
+
+    /// `addr(x) + c`, `c + addr(x)` or `addr(x) - c` (a longword,
+    /// [`Self::addr_arith`]): the address in a new data register
+    /// ([`Self::addr_into_d`]), then `addi.l`/`subi.l #c`.  Best effort
+    /// (not byte-identical): no form catalogued (OS_$START_PROC2
+    /// 0xE6D25C's `integer32(addr(os_init_end)) + 16#7FFF` in ../source's
+    /// Pascal).
+    fn addr_plus_const(&mut self, alu: AluOp, a: &Addr, c: i64) -> Res<u8> {
+        best_effort(
+            self.span,
+            "an address and a constant in a sum or difference (codegen-patterns 5.2, \"`addr(x)` \
+             as a value\": no form catalogued) is",
+        )?;
+        let d = self.addr_into_d(a)?;
+        if c != 0 {
+            self.out.push(Insn::AluImm {
+                op: alu,
+                size: Size::L,
+                imm: c,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+        }
         Ok(d)
     }
 
@@ -17805,7 +17904,10 @@ impl Selector {
                 return Ok(d);
             }
             if (1..=0xffff).contains(&c) && !by_mul_insn(c) {
-                return Err(three_bit_odd_part(self.span, c));
+                // Best effort (not byte-identical): as a constant done
+                // with a multiply, `mul<s>.w` of two words or M$ARITH
+                // ([`arith_calls`] counts the call the same way).
+                dpc_syntax::diag::best_effort(three_bit_odd_part(self.span, c))?;
             }
             let b = Expr::Const { value: c, ty };
             if let (Some(xw), Some(_)) = (Self::word_part(x, ty.sign), Self::word_part(&b, ty.sign))
@@ -18150,18 +18252,25 @@ impl Selector {
     /// evaluation order against the dividend is not catalogued) is refused.
     fn divisor(&mut self, e: &Expr) -> Res<Ea> {
         let start = self.out.len();
+        let what = "a divisor of `div<s>.w` that takes instructions (computed, or reached \
+                    through a register loaded for it: before or after the dividend?) is";
+        if expr_calls(e) {
+            return Err(unsupported(self.span, what));
+        }
         let v = self.eval(e)?;
         if self.out.len() > start {
-            return Err(unsupported(
-                self.span,
-                "a divisor of `div<s>.w` that takes instructions (computed, or reached through a \
-                 register loaded for it: before or after the dividend?) is",
-            ));
+            // Best effort (not byte-identical): the divisor after the
+            // dividend, which its register keeps (DISK_$FORMAT
+            // 0xE3D454..0xE3D460 divides by `(158,A2)`, an element whose
+            // address an earlier statement left in A2; no computed divisor
+            // is catalogued).  No call: the dividend's register survives.
+            best_effort(self.span, what)?;
         }
         match v {
             Val::Imm(c) => Ok(Ea::Imm(c)),
             Val::Mem(ea) => Ok(ea),
             Val::Reg(r @ Reg::D(_)) => Ok(Ea::Reg(r)),
+            Val::Tmp(d) => Ok(Ea::Reg(Reg::D(d))),
             _ => Err(unsupported(self.span, "this divisor is")),
         }
     }
@@ -18252,11 +18361,18 @@ impl Selector {
             // Best effort (not checked against the image; which of `bhi`
             // and `bcc` the original used is bead domain-pascal-ckzr).
             (_, false) if is_abs(a) || is_abs(b) => Cond::Cc,
+            // An unsigned `max`: `bhi`, keep `a` when `a > b` unsigned (b
+            // moved when equal: the same value), as at DISK_$GROW_QBLK_POOL
+            // 0xE3BC52..0xE3BC58 `moveq #33,D1; cmp.w D0,D1; bhi.s; move.w
+            // D0,D1` (`max(16#21, count)`) and 6 more sites, among them
+            // module-local at 0xE6C2BC; `bcc` once, 0xE5C7C6.  Best effort
+            // (bead domain-pascal-ckzr: the one `bcc` not explained).
             (_, false) => {
-                return Err(unsupported(
+                best_effort(
                     self.span,
                     "an unsigned `max` (`bhi` or `bcc`: not settled, codegen-patterns 10.1) is",
-                ))
+                )?;
+                Cond::Hi
             }
         };
         let d = match into {
@@ -18268,6 +18384,8 @@ impl Selector {
         };
         let dst = Ea::Reg(Reg::D(d));
         let (src, cond) = match b {
+            // An unsigned `max(x, 0)` is `x` (best effort, above).
+            Expr::Const { value: 0, .. } if op == BinOp::Max && keep == Cond::Hi => return Ok(d),
             Expr::Const { value: 0, .. } if op == BinOp::Max => {
                 if !self.sets_flags(d, w) {
                     self.out.push(Insn::Tst {
@@ -18846,13 +18964,28 @@ impl Selector {
         let minus = m > 3 && (m + 1).is_power_of_two();
         if m != 1 && !plus && !minus {
             if !by_mul_insn(c as i64) {
-                return Err(three_bit_odd_part(self.span, c as i64));
+                // An odd part of three bits not seen with a multiply: bit
+                // by bit ([`Self::mul_bits`]), the image's form for ×26
+                // (NETLOG_$LOG_IT 0xE71BBA..0xE71BC4).  Best effort (not
+                // byte-identical) for the others: shifts or `mul<s>.w`
+                // not settled (bead domain-pascal-irb4).
+                if c != 26 {
+                    dpc_syntax::diag::best_effort(three_bit_odd_part(self.span, c as i64))?;
+                }
+                return self.mul_bits(d, s, m, w);
             }
             if w != Width::Word {
-                return Err(unsupported(
+                // Best effort (not byte-identical): a longword times a
+                // constant done with a multiply (`mul<s>.w` gives a 32-bit
+                // product of two words only; HINT_$GET_HINTS
+                // 0xE4998E..0xE4999A multiplies a mask's word by `muls.w`):
+                // bit by bit, right for every longword.
+                best_effort(
                     self.span,
-                    "a 32-bit multiplication by a constant with `mul<s>.w` is",
-                ));
+                    "a 32-bit multiplication by a constant with `mul<s>.w` (a longword not known \
+                     to be a word: shifts and adds) is",
+                )?;
+                return self.mul_bits(d, s, m, w);
             }
             self.out.push(Insn::Mul {
                 signed: false,
@@ -18888,6 +19021,39 @@ impl Selector {
             src: Ea::Reg(Reg::D(u)),
             dst: d,
         });
+        Ok(())
+    }
+
+    /// The value in data register `d` times 2^`s` × `m` (`m` odd), in place,
+    /// bit by bit: the 2^s part, a copy, then for each further bit of `m`
+    /// from the low end the copy shifted up to it and added (NETLOG_$LOG_IT
+    /// 0xE71BBA..0xE71BC4, ×26: `add.w D1,D1; move.w D1,D0; lsl.w #2,D0;
+    /// add.w D0,D1; add.w D0,D0; add.w D0,D1`; for m = 2^k + 1 this is
+    /// [`Self::mul_const`]'s form).  The low `w` bits of the product are
+    /// right for either sign.
+    fn mul_bits(&mut self, d: u8, s: u32, m: u32, w: Width) -> Res<()> {
+        let size = size_of(w);
+        self.shift_left(d, s, w);
+        let u = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size,
+            src: Ea::Reg(Reg::D(d)),
+            dst: Ea::Reg(Reg::D(u)),
+        });
+        let mut prev = 0;
+        for k in 1..32 {
+            if m & (1 << k) == 0 {
+                continue;
+            }
+            self.shift_left(u, k - prev, w);
+            self.out.push(Insn::Alu {
+                op: AluOp::Add,
+                size,
+                src: Ea::Reg(Reg::D(u)),
+                dst: d,
+            });
+            prev = k;
+        }
         Ok(())
     }
 
@@ -19177,11 +19343,20 @@ impl Selector {
             }),
             Val::Reg(Reg::D(d)) if k < 3 => Ok(Val::Reg(Reg::D(d))),
             Val::Reg(Reg::A(a)) if ty.width == Width::Word => Ok(Val::Reg(Reg::A(a))),
-            Val::Reg(_) => Err(unsupported(
-                self.span,
-                "a longword held in a register narrowed to a byte (not catalogued, \
-                 codegen-patterns 8) is",
-            )),
+            // Best effort (not byte-identical): the register's low byte (a
+            // data register read at the byte's width; an address register,
+            // which has no byte access, copied to a data register first).
+            Val::Reg(r) => {
+                best_effort(
+                    self.span,
+                    "a longword held in a register narrowed to a byte (not catalogued, \
+                     codegen-patterns 8) is",
+                )?;
+                match r {
+                    Reg::D(d) => Ok(Val::Reg(Reg::D(d))),
+                    Reg::A(_) => Ok(Val::Tmp(self.in_tmp(Val::Reg(r), Width::Long)?)),
+                }
+            }
             _ => Err(unsupported(
                 self.span,
                 "an in-place narrowing of a load the selector computes (no site seen, \
@@ -19766,7 +19941,26 @@ impl Selector {
                 });
                 let disp = o + offset;
                 if !(-128..128).contains(&disp) {
-                    return Err(unsupported(self.span, "a displacement beyond 8 bits is"));
+                    // Best effort (not byte-identical): `lea (0,An,Dx),Ar`,
+                    // then the displacement added, `lea (d,Ar),Ar` (no site
+                    // catalogued; a 16-bit one only).
+                    if !(-0x8000..0x8000).contains(&disp) {
+                        return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+                    }
+                    best_effort(
+                        self.span,
+                        "the address of an element through a pointer at a displacement beyond \
+                         8 bits (`lea (0,An,Dx),Ar; lea (d,Ar),Ar`) is",
+                    )?;
+                    self.out.push(Insn::Lea {
+                        src: Ea::Idx(0, b, x, long),
+                        dst: r,
+                    });
+                    self.out.push(Insn::Lea {
+                        src: Ea::Disp(disp, r),
+                        dst: r,
+                    });
+                    return Ok(());
                 }
                 self.out.push(Insn::Lea {
                     src: Ea::Idx(disp, b, x, long),
@@ -19799,7 +19993,9 @@ impl Selector {
                 self.base_reused = false;
                 let src = self.ea_of(a)?;
                 if split && self.base_reused {
-                    return Err(unsupported(self.span, KEPT_BASE_LEA));
+                    // Best effort (not byte-identical): the `lea` off the
+                    // kept base into a register the allocator picks.
+                    best_effort(self.span, KEPT_BASE_LEA)?;
                 }
                 if split && !matches!(src, Ea::Idx(..)) {
                     // Beyond a byte the element's operand is `(d,Am)` after
@@ -22191,12 +22387,24 @@ impl Selector {
         let o = match array {
             Addr::Static(o) if !self.data_absolute && (0..0x8000).contains(o) => *o,
             _ => {
-                return Err(unsupported(
+                // Best effort (not byte-identical): the array's address in
+                // an address register (`movea.l #sym,An` for another
+                // unit's, as ACL_$ALLOC_ASID 0xE73CAE and ACL_$USED_SUSER
+                // 0xE492EE do; `lea` otherwise), then `lea (0,An,Do.w),Aa`
+                // into a register the allocator picks.
+                best_effort(
                     self.span,
                     "an element of a packed array of booleans that is not in the unit's data \
                      reached through A5 (other units\' arrays: the `lea` register not settled, \
                      codegen-patterns 5.2) is",
-                ))
+                )?;
+                let b = self.addr_into_a(array)?;
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Lea {
+                    src: Ea::Idx(0, b, offset, false),
+                    dst: a,
+                });
+                return Ok(Ea::Ind(a));
             }
         };
         let base = self.static_base()?;
@@ -22973,14 +23181,25 @@ impl Selector {
         if (-128..128).contains(&disp) {
             return Ok(Ea::Idx(disp, areg, x, long));
         }
-        if !(-0x8000..0x8000).contains(&disp) {
-            return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
-        }
         let a = self.alloc_a()?;
         self.out.push(Insn::Lea {
             src: Ea::Idx(0, areg, x, long),
             dst: a,
         });
+        if !(-0x8000..0x8000).contains(&disp) {
+            // Beyond 16 bits: the displacement added to the `lea`'s
+            // register, `adda.l #d,Am`, then `(Am)` (SMD_$RESET_UNIT_DISPLAY
+            // 0xE6D7B0..0xE6D7BE `movea.l (20,A0),A2; lea (0,A2,D0.w),A3;
+            // adda.l #131056,A3; clr.w (A3)`, row 1023 of a display
+            // memory through a pointer).
+            self.out.push(Insn::AluImm {
+                op: AluOp::Add,
+                size: Size::L,
+                imm: disp as i64,
+                dst: Ea::Reg(Reg::A(a)),
+            });
+            return Ok(Ea::Ind(a));
+        }
         Ok(if disp == 0 {
             Ea::Ind(a)
         } else {
@@ -23608,9 +23827,12 @@ impl Selector {
     /// dirty, MMAP_ 0xE0D2E8; codegen-patterns 5.2, bead
     /// domain-pascal-1ibr).
     fn split_element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
+        // The `lea` is the first instruction [`Self::element_ea`] emits
+        // (an `adda.l` may follow it).
+        let at = self.out.len();
         let ea = self.element_ea(areg, x, index, disp)?;
         if !(-128..128).contains(&disp) {
-            self.elem_leas.push((self.out.len() - 1, self.span));
+            self.elem_leas.push((at, self.span));
         }
         Ok(ea)
     }
@@ -25887,9 +26109,13 @@ mod tests {
             ],
         );
         assert_eq!(body_text(&f)[1], "move.w\t#-0x200,-(%sp)");
-        // All bits set other than `true`: st or move.w #-0x100?  Not known.
-        let f = proc_(0, vec![ext("P", vec![val(byte(255))], 2)]);
-        assert!(err(&f).starts_with("a byte constant argument with all bits set"));
+        // All bits set other than `true`: `st -(SP)` (tty_$i_store_parity
+        // 0xE1BD1E, `chr(255)`).
+        let f = proc_(
+            0,
+            vec![ext("P", vec![val(byte(255))], 2), ext("Q", vec![], 0)],
+        );
+        assert_eq!(body_text(&f)[1], "st\t-(%sp)");
         // Next to a word constant or another such byte: merged?  Not known.
         let f = proc_(
             0,

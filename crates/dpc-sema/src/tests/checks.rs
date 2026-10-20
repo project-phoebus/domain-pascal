@@ -2116,3 +2116,27 @@ fn non_integer_subrange_var_arguments_stay_refused() {
         );
     }
 }
+
+#[test]
+fn constant_index_out_of_range_under_addr_only() {
+    // Best effort (bead domain-pascal-h4ba): one past the array as the
+    // operand of `addr` is accepted (a warning); an access is not, nor an
+    // index that is not the operand's last.
+    let src = "module m; var a: array[1..8] of char; p: univ_ptr;
+        procedure q; begin p := addr(a[9]) end;";
+    assert_err(src, "index out of range"); // strict, the library default
+    let before = dpc_syntax::diag::set_strict(false);
+    ok(src);
+    dpc_syntax::diag::take_best_effort();
+    dpc_syntax::diag::set_strict(before);
+    assert_err(
+        "module m; var a: array[1..8] of char; c: char; procedure q; begin c := a[9] end;",
+        "index out of range",
+    );
+    assert_err(
+        "module m; type r = record b: array[1..2] of integer; end;
+         var a: array[1..8] of r; p: univ_ptr;
+         procedure q; begin p := addr(a[9].b[1]) end;",
+        "index out of range",
+    );
+}

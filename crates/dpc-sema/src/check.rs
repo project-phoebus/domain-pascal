@@ -185,6 +185,11 @@ pub(crate) struct Checker<'t> {
     /// One-byte views of the types of packed fields that fill a byte
     /// ([`Checker::byte_field_type`]), by field type.
     byte_fields: HashMap<TypeId, TypeId>,
+    /// The operand of the `addr` being checked ([`Checker::builtin_fn`]),
+    /// and whether the next [`Checker::index`] is its last index: a
+    /// constant index out of range there is only a best-effort warning.
+    addr_operand: Option<Span>,
+    lenient_index: bool,
 }
 
 fn upper(name: &str) -> String {
@@ -222,6 +227,8 @@ impl<'t> Checker<'t> {
             unsigned32: None,
             abs16: None,
             byte_fields: HashMap::new(),
+            addr_operand: None,
+            lenient_index: false,
         };
         c.predeclare();
         c
@@ -3272,8 +3279,13 @@ impl<'t> Checker<'t> {
             E::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, span),
             E::Call { callee, args } => self.call_expr(callee, args, span),
             E::Index { base, indices } => {
+                let at_addr = self.addr_operand == Some(span);
+                if at_addr {
+                    self.addr_operand = None;
+                }
                 let mut b = self.expr(base);
-                for ix in indices {
+                for (k, ix) in indices.iter().enumerate() {
+                    self.lenient_index = at_addr && k + 1 == indices.len();
                     b = self.index(b, ix, span);
                 }
                 b
@@ -3510,6 +3522,7 @@ impl<'t> Checker<'t> {
     }
 
     fn index(&mut self, base: Expr, ix: &ast::Expr, span: Span) -> Expr {
+        let lenient = std::mem::take(&mut self.lenient_index);
         let i = self.expr(ix);
         let (index, elem) = match self.types.kind(base.ty) {
             TypeKind::Array { index, elem, .. } => (*index, *elem),
@@ -3530,7 +3543,22 @@ impl<'t> Checker<'t> {
         if let Some(k) = i.value.as_ref().and_then(|v| v.ordinal()) {
             if let Some((lo, hi)) = self.types.ordinal_range(index) {
                 if k < lo || k > hi {
-                    self.error(ix.span, "index out of range");
+                    // Best effort: the last index of `addr`'s operand (a
+                    // C-style end pointer, `addr(a[hi + 1])`,
+                    // rem_file/server.pas): the address computed from the
+                    // index as for any other; no element is accessed.
+                    // Any access stays an error, as does `--strict`.
+                    let warned = lenient
+                        && dpc_syntax::diag::best_effort(Diagnostic::error(
+                            ix.span,
+                            "a constant index out of range in the operand of `addr` (an \
+                             address past the array, computed from the index) is not \
+                             supported yet",
+                        ))
+                        .is_ok();
+                    if !warned {
+                        self.error(ix.span, "index out of range");
+                    }
                 }
             }
         }
@@ -4409,7 +4437,12 @@ impl<'t> Checker<'t> {
                 }
             }
         }
+        let saved = self.addr_operand.take();
+        if b == Builtin::Addr && args.len() == 1 {
+            self.addr_operand = Some(args[0].span);
+        }
         let xs: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
+        self.addr_operand = saved;
         if xs.iter().any(|x| self.types.is_error(x.ty)) {
             return self.error_expr(span);
         }

@@ -359,9 +359,26 @@ var
         body("function t: integer32;\nbegin\n  t := k * 44;\nend;\n")[2..],
         ["moveq\t#0x2c,%d0", "muls.w\t(0xf50,%a5),%d0"]
     );
+    // ×26 (odd part 13): bit by bit, the image's form at NETLOG_$LOG_IT
+    // 0xE71BBA..0xE71BC4 (bead domain-pascal-h4ba).
+    assert_eq!(
+        body("function t: integer;\nbegin\n  t := c26s[k].a;\nend;\n"),
+        [
+            "pea\t(%a5)",
+            "lea\t(.Ldata).l,%a5",
+            "move.w\t(0xf50,%a5),%d0",
+            "add.w\t%d0,%d0",
+            "move.w\t%d0,%d1",
+            "lsl.w\t#2,%d1",
+            "add.w\t%d1,%d0",
+            "add.w\t%d1,%d1",
+            "add.w\t%d1,%d0",
+            "lea\t(0,%a5,%d0.w),%a0",
+            "move.w\t(0x400,%a0),%d0",
+        ]
+    );
     // Refused: an unsigned word product (no site); an index read from an
-    // array element (no site); ×26 (odd part 13, done bit by bit at
-    // 0xE71BBA, bead domain-pascal-irb4).
+    // array element (no site).
     assert!(
         error("function t: integer;\nbegin\n  t := pk * 44;\nend;\n")
             .contains("a word product of a `0..65535` variable")
@@ -369,10 +386,6 @@ var
     assert!(
         error("function t: integer;\nbegin\n  t := cfgs[ks[k]].a;\nend;\n")
             .contains("another unit's variable, an array element")
-    );
-    assert!(
-        error("function t: integer;\nbegin\n  t := c26s[k].a;\nend;\n")
-            .contains("odd parts of three bits")
     );
     // Refused: a computed value other than a zero-extended byte (a mask
     // has the constant first, HINT_$GET_HINTS 0xE4998E; bead
