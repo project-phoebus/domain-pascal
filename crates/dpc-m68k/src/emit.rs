@@ -466,7 +466,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .collect();
         pool_labels = pool.next;
         if !failed {
-            if let Err(d) = size_branches(&mut routines, base, &outside) {
+            if let Err(d) = size_branches(&mut routines, base, &outside, &mut pool_labels) {
                 errors.push(d);
             } else {
                 encode_outside_short_calls(&mut routines, base, &outside);
@@ -771,29 +771,50 @@ fn size_branches(
     routines: &mut [(&dpc_ir::Function, Vec<Insn>)],
     base: u32,
     outside: &[(String, i64)],
+    next_cell: &mut u32,
 ) -> Result<(), Diagnostic> {
     use std::collections::HashMap;
     enum Target {
         Routine(String),
         Label(u32),
     }
-    loop {
+    // Copies of constant cells made for routines out of the first cell's
+    // reach: (routine, original cell) -> the copy's label; and each
+    // copy's original.
+    let mut copies: HashMap<(usize, u32), u32> = HashMap::new();
+    let mut origin: HashMap<u32, u32> = HashMap::new();
+    'layout: loop {
         let mut at = HashMap::new();
         // (routine, label) -> position
         let mut labels = HashMap::new();
         let mut sites = Vec::new();
         // `case` table entries: (routine, table label, target label).
         let mut entries = Vec::new();
+        // Constant cells: label -> (routine, index, position); and the
+        // `(d,PC)` references to them: (routine, index, extension word's
+        // position, label).
+        let mut cells = HashMap::new();
+        let mut cell_refs = Vec::new();
         let mut pos = base;
         for (ri, (f, insns)) in routines.iter().enumerate() {
             at.insert(f.symbol.clone(), pos);
             for (ii, i) in insns.iter().enumerate() {
+                if let Some(n) = pool_ref(i) {
+                    cell_refs.push((ri, ii, pos + 2, n));
+                }
                 match i {
+                    Insn::PoolLabel(n) => {
+                        cells.insert(*n, (ri, ii, pos));
+                    }
                     Insn::Bsr { target, short } => {
                         sites.push((ri, ii, pos, Target::Routine(target.clone()), *short))
                     }
                     Insn::Branch { label, short, .. } => {
                         sites.push((ri, ii, pos, Target::Label(*label), *short))
+                    }
+                    // A `dbf`'s displacement is 16 bits, never short.
+                    Insn::Dbf { label, .. } => {
+                        sites.push((ri, ii, pos, Target::Label(*label), false))
                     }
                     Insn::Label(l) => {
                         labels.insert((ri, *l), pos);
@@ -836,10 +857,143 @@ fn size_branches(
                 }
                 changed = true;
             } else if !short && !(-0x8000..0x8000).contains(&disp) {
-                return Err(Diagnostic::error(
+                // Out of a 16-bit displacement's reach (bead
+                // domain-pascal-pxov).  A call: `jsr abs.l`, as DIR's own
+                // calls of its module-local routines more than 32K away
+                // (DIR_$CLEANUP 0xE535FE `jsr 0xe4b340`, dir_$map_page;
+                // DIR's .TEXT segment is 0x8FD0 bytes).  The distance is
+                // the unit's own layout here; the image's may differ, so
+                // which calls take `jsr` follows dpc's layout.  A
+                // conditional branch (no site: a routine of more than
+                // 32K): inverted around `jmp abs.l` to its label, best
+                // effort.  A `dbf` (a loop body of more than 32K):
+                // `dbf Dn,1f; bra.s 2f; 1: jmp (head).l; 2:`, which keeps
+                // the flags as `dbf` does (gas would otherwise lengthen
+                // it unseen, and the layout here would drift).
+                let fresh = |insns: &[Insn]| {
+                    insns
+                        .iter()
+                        .filter_map(|i| match i {
+                            Insn::Label(n) => Some(*n),
+                            _ => None,
+                        })
+                        .max()
+                        .map_or(1, |n| n + 1)
+                };
+                let insns = &mut routines[ri].1;
+                match insns[ii].clone() {
+                    Insn::Dbf { reg, label, until } => {
+                        dpc_syntax::diag::best_effort(Diagnostic::error(
+                            routines[ri].0.span,
+                            "a `dbf` beyond the reach of a 16-bit displacement (to a `jmp` after \
+                             it: no site) is not supported yet",
+                        ))?;
+                        let insns = &mut routines[ri].1;
+                        let (t1, t2) = (fresh(insns), fresh(insns) + 1);
+                        let with = vec![
+                            Insn::DbfFwd {
+                                reg,
+                                label: t1,
+                                until,
+                            },
+                            Insn::Branch {
+                                cond: crate::insn::Cond::T,
+                                label: t2,
+                                short: true,
+                                back: false,
+                            },
+                            Insn::Label(t1),
+                            Insn::Jmp(crate::insn::Ea::AbsL(format!("{label}b"), 0)),
+                            Insn::Label(t2),
+                        ];
+                        insns.splice(ii..=ii, with);
+                    }
+                    Insn::Bsr { target, .. } => {
+                        insns[ii] = Insn::Jsr(crate::insn::Ea::AbsL(target, 0));
+                    }
+                    Insn::Branch {
+                        cond, label, back, ..
+                    } => {
+                        dpc_syntax::diag::best_effort(Diagnostic::error(
+                            routines[ri].0.span,
+                            "a branch beyond the reach of a 16-bit displacement (inverted \
+                             around a `jmp`: no site) is not supported yet",
+                        ))?;
+                        let insns = &mut routines[ri].1;
+                        let target = crate::insn::Ea::AbsL(
+                            format!("{label}{}", if back { "b" } else { "f" }),
+                            0,
+                        );
+                        let mut with = Vec::new();
+                        let skip = fresh(insns);
+                        if cond != crate::insn::Cond::T {
+                            with.push(Insn::Branch {
+                                cond: cond.negate(),
+                                label: skip,
+                                short: true,
+                                back: false,
+                            });
+                        }
+                        with.push(Insn::Jmp(target));
+                        if cond != crate::insn::Cond::T {
+                            with.push(Insn::Label(skip));
+                        }
+                        insns.splice(ii..=ii, with);
+                    }
+                    _ => unreachable!(),
+                }
+                // The layout is redone: positions and indices moved.
+                continue 'layout;
+            }
+        }
+        // A constant cell out of a 16-bit displacement's reach (a unit of
+        // more than 32K, DIR's .TEXT, 0x8FD0 bytes): a copy of the cell
+        // after the referring routine (best effort, not byte-identical;
+        // bead domain-pascal-pxov).  The image keeps its references in
+        // reach in its own layout (DIR_$SET_ACL's 0xE52D00 `pea
+        // (0xe4b33c,PC)`, displacement -0x79c6); dpc's layout differs.
+        // A copy is made once per routine and original cell; a reference
+        // its routine's copy does not reach either (a routine of more
+        // than 32K) is refused.
+        if !changed {
+            for &(ri, ii, at_ext, n) in &cell_refs {
+                let Some(&(ci, cii, cpos)) = cells.get(&n) else {
+                    continue;
+                };
+                let d = cpos as i64 - at_ext as i64;
+                if (-0x8000..0x8000).contains(&d) {
+                    continue;
+                }
+                dpc_syntax::diag::best_effort(Diagnostic::error(
                     routines[ri].0.span,
-                    "a call or branch beyond the reach of a 16-bit displacement is not supported yet",
-                ));
+                    "a constant cell beyond the reach of a 16-bit displacement (copied after \
+                     the routine: not seen) is not supported yet",
+                ))?;
+                let orig = origin.get(&n).copied().unwrap_or(n);
+                let m = match copies.get(&(ri, orig)) {
+                    Some(&m) if m == n => {
+                        return Err(Diagnostic::error(
+                            routines[ri].0.span,
+                            "a constant cell that no copy after its routine reaches (a routine \
+                             of more than 32K) is not supported yet",
+                        ))
+                    }
+                    Some(&m) => m,
+                    None => {
+                        let Some(Insn::Words(w)) = routines[ci].1.get(cii + 1).cloned() else {
+                            unreachable!("a constant cell's words follow its label")
+                        };
+                        let m = *next_cell;
+                        *next_cell += 1;
+                        routines[ri].1.push(Insn::PoolLabel(m));
+                        routines[ri].1.push(Insn::Words(w));
+                        copies.insert((ri, orig), m);
+                        origin.insert(m, orig);
+                        m
+                    }
+                };
+                set_pool_ref(&mut routines[ri].1[ii], m);
+                continue 'layout;
             }
         }
         if !changed {
@@ -856,6 +1010,37 @@ fn size_branches(
             }
             return Ok(());
         }
+    }
+}
+
+/// The constant cell an instruction reads by `(d,PC)` ([`Pool::place`]).
+fn pool_ref(i: &Insn) -> Option<u32> {
+    match i {
+        Insn::Pea(crate::insn::Ea::PoolLabel(n))
+        | Insn::Lea {
+            src: crate::insn::Ea::PoolLabel(n),
+            ..
+        }
+        | Insn::Move {
+            src: crate::insn::Ea::PoolLabel(n),
+            ..
+        }
+        | Insn::Movea {
+            src: crate::insn::Ea::PoolLabel(n),
+            ..
+        } => Some(*n),
+        _ => None,
+    }
+}
+
+/// Point an instruction's `(d,PC)` operand at cell `m` ([`pool_ref`]).
+fn set_pool_ref(i: &mut Insn, m: u32) {
+    match i {
+        Insn::Pea(ea)
+        | Insn::Lea { src: ea, .. }
+        | Insn::Move { src: ea, .. }
+        | Insn::Movea { src: ea, .. } => *ea = crate::insn::Ea::PoolLabel(m),
+        _ => unreachable!("a constant cell's reference"),
     }
 }
 

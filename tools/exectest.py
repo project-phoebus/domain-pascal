@@ -41,6 +41,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dispcheck  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTDIR = os.path.join(ROOT, 'tests', 'exec')
 TOOLDIR = os.path.join(ROOT, 'tools', 'exectest')
@@ -271,9 +274,13 @@ def run_test(spec, runner, trace=False):
         if p.returncode:
             return Result(False, [], 'dpc failed:\n' + p.stderr)
         stderr += p.stderr
-        p = run([AS, '-m68010', asm, '-o', obj])
+        # Every displacement checked against its target (gas wraps an
+        # out-of-reach one silently; tools/dispcheck.py).
+        p, bad = dispcheck.assemble_checked(asm, obj, ['-m68010'], as_cmd=AS)
         if p.returncode:
             return Result(False, [], 'as failed:\n' + p.stderr)
+        if bad:
+            return Result(False, [], 'dispcheck: bad displacement(s):\n' + '\n'.join(bad))
         objs.append(obj)
     missing = missing_warnings(spec, stderr)
     if missing:

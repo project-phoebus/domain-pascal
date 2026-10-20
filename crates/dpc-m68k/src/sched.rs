@@ -263,6 +263,8 @@ fn fx(insn: &Insn) -> Fx {
         | Insn::PoolLabel(_)
         | Insn::Words(_)
         | Insn::Encoded { .. }
+        | Insn::Jmp(_)
+        | Insn::DbfFwd { .. }
         | Insn::Rts => f.boundary = true,
         Insn::Link { .. }
         | Insn::Unlk

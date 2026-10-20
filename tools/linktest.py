@@ -85,6 +85,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import srcsurvey  # noqa: E402
+import dispcheck  # noqa: E402
 
 
 
@@ -512,11 +513,16 @@ def compile_module(dpc, tree, module, assemble=True):
             os.remove(os.path.join(tree, s))
         return r, err
     if assemble:
-        a = subprocess.run([AS] + AS_FLAGS + ['-o', o, s], cwd=tree, capture_output=True,
-                           text=True)
-        if a.returncode:
+        # Every displacement checked against its target (gas wraps an
+        # out-of-reach one silently; tools/dispcheck.py): a bad one is an
+        # assembly failure.
+        a, bad = dispcheck.assemble_checked(s, o, AS_FLAGS, cwd=tree, as_cmd=AS)
+        if a.returncode or bad:
             if os.path.exists(os.path.join(tree, o)):
                 os.remove(os.path.join(tree, o))
+            if bad:
+                return Result(module, 'ASM', len(bad), ['dispcheck: bad displacement'],
+                              'dispcheck: bad displacement: ' + bad[0]), err
             return asm_result(module, a.stderr), err
     return r, err
 

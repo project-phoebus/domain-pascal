@@ -380,6 +380,15 @@ pub enum Insn {
         label: u32,
         until: Option<Cond>,
     },
+    /// `dbf %dn,<label>f` (`db<cc>` with `until`): a [`Insn::Dbf`] whose
+    /// loop head is out of a 16-bit displacement's reach, branching to a
+    /// `jmp` right after it (`emit.rs`, `size_branches`; bead
+    /// domain-pascal-pxov).  Formed only after allocation.
+    DbfFwd {
+        reg: u8,
+        label: u32,
+        until: Option<Cond>,
+    },
     /// `cmpm.<size> (%ay)+,(%ax)+`: compare the destination's element
     /// with the source's (`(Ax) - (Ay)`), both registers advanced.
     Cmpm {
@@ -404,6 +413,11 @@ pub enum Insn {
     },
     /// `jsr <ea>`.
     Jsr(Ea),
+    /// `jmp <ea>`: only a conditional branch out of a 16-bit
+    /// displacement's reach, inverted around it by the emitter's layout
+    /// (`emit.rs`, `size_branches`; bead domain-pascal-pxov).  Never
+    /// selected, so the allocator and the scheduler do not see it.
+    Jmp(Ea),
     /// `bsr.s` (`short`) or `bsr.w` to a routine of the same section.
     /// The size is decided by the emitter's layout (`emit.rs`): `.s`
     /// whenever the target is in reach, as the original (1800 `bsr.w`,
@@ -632,6 +646,7 @@ impl Insn {
             | Insn::MovemRestore { .. }
             | Insn::Moveq { .. }
             | Insn::Dbf { .. }
+            | Insn::DbfFwd { .. }
             | Insn::Cmpm { .. }
             | Insn::Label(_)
             | Insn::Bsr { .. }
@@ -650,7 +665,9 @@ impl Insn {
             | Insn::PoolLabel(_)
             | Insn::Words(_)
             | Insn::Encoded { .. } => vec![],
-            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::MoveToSr { src: ea } => vec![ea],
+            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Jmp(ea) | Insn::MoveToSr { src: ea } => {
+                vec![ea]
+            }
             Insn::Move { src, dst, .. } => vec![src, dst],
             Insn::Movea { src, .. }
             | Insn::Lea { src, .. }
@@ -760,6 +777,16 @@ impl fmt::Display for Insn {
                 label,
                 until: Some(c),
             } => write!(f, "db{c}\t{},{label}b", Reg::D(*reg)),
+            Insn::DbfFwd {
+                reg,
+                label,
+                until: None,
+            } => write!(f, "dbf\t{},{label}f", Reg::D(*reg)),
+            Insn::DbfFwd {
+                reg,
+                label,
+                until: Some(c),
+            } => write!(f, "db{c}\t{},{label}f", Reg::D(*reg)),
             Insn::Cmpm { size, src, dst } => write!(
                 f,
                 "cmpm.{size}\t{},{}",
@@ -770,6 +797,7 @@ impl fmt::Display for Insn {
             Insn::Addq { size, value, dst } => write!(f, "addq.{size}\t#{value},{dst}"),
             Insn::Subq { size, value, dst } => write!(f, "subq.{size}\t#{value},{dst}"),
             Insn::Jsr(ea) => write!(f, "jsr\t{ea}"),
+            Insn::Jmp(ea) => write!(f, "jmp\t{ea}"),
             Insn::Bsr { target, short } => {
                 write!(f, "bsr.{}\t{target}", if *short { "s" } else { "w" })
             }
@@ -950,7 +978,9 @@ impl Insn {
             Insn::PoolLabel(_) => 0,
             Insn::Words(w) | Insn::Encoded { words: w, .. } => 2 * w.len() as u32,
             Insn::Unlk | Insn::Rts | Insn::Moveq { .. } | Insn::Cmpm { .. } => 2,
-            Insn::Link { .. } | Insn::Dbf { .. } | Insn::MovemSave { .. } => 4,
+            Insn::Link { .. } | Insn::Dbf { .. } | Insn::DbfFwd { .. } | Insn::MovemSave { .. } => {
+                4
+            }
             Insn::MovemRestore { .. } => 6,
             Insn::Bsr { short, .. } => {
                 if *short {
@@ -959,7 +989,9 @@ impl Insn {
                     4
                 }
             }
-            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Lea { src: ea, .. } => 2 + ea.ext_len(Size::L),
+            Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Jmp(ea) | Insn::Lea { src: ea, .. } => {
+                2 + ea.ext_len(Size::L)
+            }
             Insn::Move { size, src, dst } => 2 + src.ext_len(*size) + dst.ext_len(*size),
             Insn::Movea { size, src, .. } => 2 + src.ext_len(*size),
             Insn::Addq { size, dst, .. }

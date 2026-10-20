@@ -1096,7 +1096,8 @@ v,D0` (best effort; the image forms a boolean, 7.1).
   an unnamed routine of PROC1_ in WIRED_PROC called from OS_INIT_PROC).
   **Implemented** (`dpc_ir::Callee::Section`; section 11).  Inside one
   segment, `jsr abs.l` only where `bsr.w` cannot reach (DIR 0xE535FE,
-  0x82BE bytes back; not implemented).
+  0x82BE bytes back; implemented, bead domain-pascal-pxov: dpc's own
+  layout decides, `size_branches`).
 - **Procedure variables:** `movea.l ...,An; jsr (An)` (0xE0B3F0, 0xE1CE5E).
   **Survey (Verified; `tools/indcallsurvey.py summary|list|addr`; bead
   domain-pascal-5aw.8).**  84 `jsr (An)` in 0xE00800..0xE88834, 3 in hand
@@ -10797,8 +10798,8 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   The unnamed callees are module-local routines reached by absolute
   address.  23 more `jsr abs.l` stay inside one segment, all in DIR
   (0xE535FE `jsr 0xE4B340`, 0x82BE bytes back): the segment is 0x8FD0
-  bytes, beyond `bsr.w`'s reach (not implemented: no unit is that
-  large).
+  bytes, beyond `bsr.w`'s reach (implemented, bead domain-pascal-pxov,
+  section 12.6).
 - **Data per section (Verified at the sites and by survey; reload rule
   across branch targets Uncertain; implemented for straight-line
   routines).**  A routine's A5 is its
@@ -14060,6 +14061,28 @@ followed; execution test `be_u_kinds`.
 - **A longword `div`/`mod` used as a byte** (8): the longword quotient
   or remainder (M$ARITH or a shift), its low byte read, as an
   assignment narrows (correct modulo 256; no site looked at).
+- **A unit longer than a 16-bit displacement reaches** (1.6, 7; bead
+  domain-pascal-pxov).  DIR's .TEXT is 0x8FD0 bytes.  A call of a
+  routine of the unit out of `bsr.w`'s reach is `jsr abs.l`, as DIR
+  calls its own module-local routines (Verified: DIR_$CLEANUP 0xE535FE
+  `jsr 0xe4b340`, dir_$map_page, 0x82BE bytes back from the
+  instruction).  Which calls take
+  it follows dpc's layout of the unit (`emit.rs`, `size_branches`),
+  which may differ from the image's.  Best effort, no site: a
+  conditional branch out of reach inverted around `jmp abs.l`, and a
+  constant cell out of a `(d,PC)` reference's reach copied after the
+  referring routine (the image keeps its references in reach: DIR_$SET_ACL's
+  0xE52D00 `pea (0xe4b33c,PC)`, -0x79c6), refused where the copy does not
+  reach either (a routine of more than 32K); a `dbf` out of reach,
+  `dbf Dn,1f; bra.s 2f; 1: jmp (head).l; 2:`.  `tools/dispcheck.py`
+  checks every 16-bit displacement of what exectest and linktest
+  assemble, gas wrapping out-of-range ones silently.  Execution test
+  `be_far`.
+- **An array index of boolean type** (5.2; bead domain-pascal-pxov): the
+  ordinal from the top bit, `lsr.b #7`, then the byte widened to the
+  word index (SIO2681_$SET_LINE 0xE1D2F0..0xE1D2FC `smi D1; clr.w D5;
+  lsr.b #7,D1; move.b D1,D5; add.w D5,D5`; dpc widens with `andi.w
+  #0xff`, best effort).  Execution test `be_bool_index`.
 
 ---
 

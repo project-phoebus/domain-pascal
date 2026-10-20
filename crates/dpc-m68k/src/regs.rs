@@ -290,6 +290,12 @@ pub fn access(insn: &Insn) -> Access {
                 a.def(r);
             }
         }
+        // Formed only after allocation (`emit.rs`, `size_branches`).
+        Insn::Jmp(ea) => a.ea_address(ea),
+        Insn::DbfFwd { reg, .. } => {
+            a.use_(Reg::D(*reg));
+            a.def(Reg::D(*reg));
+        }
         Insn::Clr { dst, .. } => a.dst(dst),
         Insn::Btst { bit, dst } => {
             a.use_(Reg::D(*bit));
@@ -383,7 +389,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         Insn::MoveFromSr { dst } => fd(dst),
         Insn::MoveToSr { src } => fe(src),
         Insn::TableIndex { reg, .. } | Insn::TableJump { reg, .. } => fd(reg),
-        Insn::Pea(ea) | Insn::Jsr(ea) => fe(ea),
+        Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Jmp(ea) => fe(ea),
         Insn::Move { src, dst, .. } => {
             fe(src);
             fe(dst);
@@ -402,7 +408,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fa(src);
             fa(dst);
         }
-        Insn::Dbf { reg, .. } => fd(reg),
+        Insn::Dbf { reg, .. } | Insn::DbfFwd { reg, .. } => fd(reg),
         Insn::Addq { dst, .. }
         | Insn::Subq { dst, .. }
         | Insn::Clr { dst, .. }

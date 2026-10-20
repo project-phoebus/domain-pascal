@@ -9363,18 +9363,43 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                     // (bead domain-pascal-5kgg); a boolean's true is 0xFF,
                     // which neither extension makes its ordinal 1.
                     if p.types.is_boolean(index.ty) {
-                        return Err(unsupported(
+                        // A boolean (0 or 0xFF, ref 3.5.3) made its
+                        // ordinal, 0 or 1, by its top bit: `lsr.b #7`, the
+                        // byte then zero-extended to the word index
+                        // (SIO2681_$SET_LINE 0xE1D2F0..0xE1D2FC `smi D1;
+                        // clr.w D5; lsr.b #7,D1; move.b D1,D5; add.w D5,D5`,
+                        // `baud_masks[chip^.config1.w < 0]`).  Best effort
+                        // (not byte-identical; bead domain-pascal-pxov):
+                        // the zero-extension's form is the selector's.
+                        best_effort(
                             index.span,
-                            "an array index of a signed byte type (no `ext.w` index in the image, \
-                             codegen-patterns 5.2) is",
-                        ));
+                            "an array index of boolean type (`lsr.b #7`, then the byte widened: \
+                             SIO2681_$SET_LINE 0xE1D2F0, one site; codegen-patterns 5.2) is",
+                        )?;
+                        let ub = Scalar::unsigned(Width::Byte);
+                        let v = match ix {
+                            Expr::Load { addr, .. } => Expr::Load { addr, ty: ub },
+                            x => Expr::Convert {
+                                value: Box::new(x),
+                                ty: ub,
+                                in_place: false,
+                            },
+                        };
+                        let bit = Expr::Binary {
+                            op: IrBinOp::Shr,
+                            lhs: Box::new(v),
+                            rhs: Box::new(Expr::Const { value: 7, ty: ub }),
+                            ty: ub,
+                        };
+                        ix = convert(bit, Scalar::unsigned(Width::Word));
+                    } else {
+                        best_effort(
+                            index.span,
+                            "an array index of a signed byte type (no `ext.w` index in the \
+                             image, codegen-patterns 5.2) is",
+                        )?;
+                        ix = convert(ix, Scalar::signed(Width::Word));
                     }
-                    best_effort(
-                        index.span,
-                        "an array index of a signed byte type (no `ext.w` index in the image, \
-                         codegen-patterns 5.2) is",
-                    )?;
-                    ix = convert(ix, Scalar::signed(Width::Word));
                 } else {
                     ix = convert(ix, Scalar::unsigned(Width::Word));
                 }

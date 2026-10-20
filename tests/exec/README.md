@@ -35,7 +35,9 @@ and exits 0.
 
 1. `target/debug/dpc -I tests/exec` compiles `NAME.pas`, and any `link:`
    modules.
-2. `m68k-elf-as -m68010` assembles the output.
+2. `m68k-elf-as -m68010` assembles the output, and `tools/dispcheck.py`
+   checks every displacement in its listing against its target (gas
+   wraps an out-of-reach 16-bit one silently); a bad one fails the test.
 3. The objects are linked with `tools/exectest/stubs.s` and the M$ARITH
    archive by
    `tools/exectest/link.ld`: code at 0x10000, then data, then bss.

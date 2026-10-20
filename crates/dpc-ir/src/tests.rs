@@ -2846,7 +2846,7 @@ end;
 ",
     );
     assert!(
-        e[0].contains("an array index of a signed byte type"),
+        e[0].contains("an array index of boolean type"),
         "{e:?}"
     );
     // A `char` index is zero-extended to a word (codegen-patterns 5.2,
