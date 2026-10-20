@@ -5152,33 +5152,46 @@ fn is_index(index: &Expr, off: i32) -> bool {
 /// `cmpi.b`, `lea` with `(d,An,Di.w)`; KBD's module-local 0xE1CA70 `cmp.b
 /// (0,A5,D1.w),D2`) and are not listed.
 ///
-/// `Err` (a message for "... is not supported yet") when an element is
-/// reached in a way not implemented:
+/// `Ok(Err(why))` when the loop's stepping is not modelled, `why` the
+/// refusal's message ("... is not supported yet"): a best-effort loop
+/// whose elements are reached by index instead ([`Selector::for_`]: no
+/// pointer stepped, the index kept in a register; bead
+/// domain-pascal-kaxz), refused as before under `--strict`.  **Best effort
+/// (not byte-identical)**: the image strength-reduces these loops in forms
+/// not settled, and indexing each element is correct whatever the index's
+/// expression or the pointer's changes; such a loop steps no pointer at
+/// all, its other arrays indexed too.  It is the first of these met:
 ///
 /// - an index that is an expression of the loop index (`a[i + 1]`), or an
-///   array whose address depends on it;
-/// - an array of the enclosing routine's frame or through a pointer
-///   variable of it, and a row of another array (a scaled index register
-///   instead of a stepped pointer; bead domain-pascal-ga54); an array at
-///   another kind of address.  Arrays through a pointer (at any offset
-///   from it), in the unit's data area ([`Addr::Static`]), in the frame
-///   ([`Addr::Frame`]), in another unit's object ([`Addr::Symbol`]) or in
-///   the unit's block in another data section ([`Addr::OtherStatic`]) are
-///   accepted here; how their pointers are formed, and what is refused of
-///   them, is [`Selector::step_plan`]'s;
+///   array whose address depends on it (a row `a[i][j]`);
+/// - a `.l` index (an array whose bounds times the element size do not fit
+///   in 16 bits; bead domain-pascal-wkg);
 /// - an array whose pointer is not a variable that the body leaves
 ///   unchanged (a frame object never assigned or addressed in the body;
 ///   a variable of the unit or of another unit when the body neither
 ///   calls nor assigns it; a frame object a nested routine reaches,
 ///   `uplevel` ([`Function::uplevel_refs`]), only when the body makes no
 ///   call: a nested routine called in the body may assign it).
+///
+/// `Err` (a message for "... is not supported yet") when an element is
+/// reached in a way not implemented, met before the last of those: an
+/// array of the enclosing routine's frame or through a pointer variable of
+/// it, and a row of another array at an index the loop leaves alone (a
+/// scaled index register instead of a stepped pointer; beads
+/// domain-pascal-1ibr, domain-pascal-ga54); an array at another kind of
+/// address.  Arrays through a pointer (at any offset from it), in the
+/// unit's data area ([`Addr::Static`]), in the frame ([`Addr::Frame`]),
+/// in another unit's object ([`Addr::Symbol`]) or in the unit's block in
+/// another data section ([`Addr::OtherStatic`]) are accepted here; how
+/// their pointers are formed, and what is refused of them, is
+/// [`Selector::step_plan`]'s.
 fn stepped_arrays(
     body: &[Stmt],
     off: i32,
     uplevel: &[(i32, u32)],
-) -> Result<Vec<SteppedArray>, &'static str> {
+) -> Result<Result<Vec<SteppedArray>, &'static str>, &'static str> {
     let mut out: Vec<SteppedArray> = Vec::new();
-    let mut err = None;
+    let mut indexed = None;
     walk_eval(body, &mut |n| {
         let Node::Addr(Addr::Index {
             base, index, scale, ..
@@ -5193,8 +5206,10 @@ fn stepped_arrays(
             // The `for` index widened to a `.l` one (`dpc-ir`
             // `wide_index`): AREA_'s module-local 0xE075CA steps two
             // pointers set up at 0xE076C4..0xE076E8 with `.l` indices
-            // (zero-extended and `ext.l`); not implemented.
-            err.get_or_insert(
+            // (zero-extended and `ext.l`); not implemented.  Best effort
+            // (not byte-identical): the elements indexed, the `.l` index
+            // formed from the index's register (bead domain-pascal-kaxz).
+            indexed.get_or_insert(
                 "a `for` loop stepping through an array whose bounds times the element size do \
                  not fit in 16 bits (its pointers set up with `.l` indices, AREA_'s 0xE076C4; \
                  codegen-patterns 5.2, 7.4; bead domain-pascal-wkg) is",
@@ -5211,7 +5226,12 @@ fn stepped_arrays(
             return;
         }
         if !is_index(index, off) || addr_reads_frame(base, off) {
-            err.get_or_insert(
+            // An element at an index computed from the `for` index (`a[i +
+            // 1]`, `a[2 * i]`, a row `a[i][j]`: a pointer of its own, a
+            // displacement or a scaled index register, not settled;
+            // codegen-patterns 7.4).  Best effort (not byte-identical):
+            // the loop's elements indexed (bead domain-pascal-kaxz).
+            indexed.get_or_insert(
                 "an element at an index computed from a `for` index other than through an \
                  element at the index itself (`a[i + 1]`, `a[2 * i]`, a row `a[i][j]`: a \
                  pointer of its own, a displacement or a scaled index register, not settled; \
@@ -5232,8 +5252,8 @@ fn stepped_arrays(
             out.push(a);
         }
     });
-    if let Some(e) = err {
-        return Err(e);
+    if let Some(why) = indexed {
+        return Ok(Err(why));
     }
     for a in &out {
         let Addr::Indirect { base: p, .. } = &a.base else {
@@ -5292,13 +5312,15 @@ fn stepped_arrays(
             return Err(ENCLOSING_ARRAY);
         }
         if !loop_invariant_pointer(p, body, uplevel) {
-            return Err(
+            // Best effort (not byte-identical): the loop's elements
+            // indexed, the pointer read at each (bead domain-pascal-kaxz).
+            return Ok(Err(
                 "a `for` loop stepping a pointer through an array whose pointer is not a \
                  variable the body leaves unchanged (codegen-patterns 7.4) is",
-            );
+            ));
         }
     }
-    Ok(out)
+    Ok(Ok(out))
 }
 
 /// [`stepped_arrays`]'s refusal of an array of the enclosing routine's
@@ -6933,11 +6955,16 @@ impl Uses<'_> {
                 StmtKind::For(l) => {
                     self.expr(&l.from);
                     self.expr(&l.to);
-                    // [`Selector::for_wide`] steps no pointer.
+                    // [`Selector::for_wide`] steps no pointer; nor does an
+                    // indexed loop (`Ok(Err(_))`): every element at each
+                    // use, as outside a loop.
                     let arrays = if for_wide_loop(l) {
-                        Err("")
+                        Err(())
                     } else {
                         stepped_arrays(&l.body, l.index.offset, &self.f.uplevel_refs)
+                            .ok()
+                            .and_then(Result::ok)
+                            .ok_or(())
                     };
                     if let Ok(arrays) = &arrays {
                         for a in arrays {
@@ -8565,13 +8592,24 @@ impl Selector {
         let off = l.index.offset;
         let arrays =
             stepped_arrays(&l.body, off, &f.uplevel_refs).map_err(|m| unsupported(span, m))?;
+        // Best effort (not byte-identical): a loop whose stepping is not
+        // modelled reaches its elements by index, the index in a register
+        // ([`stepped_arrays`]'s `Ok(Err(_))`; bead domain-pascal-kaxz).
+        let indexed = arrays.is_err();
+        let arrays = match arrays {
+            Ok(a) => a,
+            Err(why) => {
+                best_effort(span, why)?;
+                Vec::new()
+            }
+        };
         // An index the statements after the loop read is set up in a
         // register whether or not the body reads it (PROC2_$PGROUP_SET
         // 0xE41EFA `moveq #1,D0`, the body reaching its elements through
         // a stepped pointer; CAL_$DECODE_TIME 0xE68830; codegen-patterns
         // 7.4, "The index read after its loop").  A register an earlier
         // loop over the same variable left it in is given up.
-        let uses_index = index_read_unstepped(&l.body, off) || after;
+        let uses_index = indexed || index_read_unstepped(&l.body, off) || after;
         if after && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. })) {
             best_effort(
                 span,
@@ -8773,11 +8811,19 @@ impl Selector {
                     dst: d,
                 },
                 _ => {
-                    return Err(unsupported(
+                    // Best effort (not byte-identical; bead
+                    // domain-pascal-kaxz): `move.w #init,Di`, as the count's
+                    // own `move.w` above 127.
+                    best_effort(
                         span,
                         "a `for` index whose initial value is outside -128..127 (not \
                          catalogued, codegen-patterns 7.4) is",
-                    ))
+                    )?;
+                    Insn::Move {
+                        size: Size::W,
+                        src: Ea::Imm(imm(init, Width::Word)),
+                        dst: Ea::Reg(Reg::D(d)),
+                    }
                 }
             });
             self.pinned.push((off, Reg::D(d)));
@@ -15350,12 +15396,13 @@ impl Selector {
     /// The count is `moveq` up to 127, else `move.w` (as in the copy
     /// loops, 0xE01494, 0xE3B97A).  Other clearing loops in the image
     /// load the count *before* the address (0xE0277A `moveq #31,D0; lea
-    /// (A3),A0`; 0xE09C98; ROUTE_ 0xE69D12 `move.w #128,D0; movea.l
-    /// #abs,A0`), with no rule found; so only this shape is supported:
-    /// another unit's array from its first byte (`movea.l #sym`, as
-    /// DISK_$GET_ERROR_INFO 0xE6C090 loads another unit's object for a
-    /// copy), cleared with `clr`.  Storing other constants, and arrays
-    /// elsewhere, are not supported yet.
+    /// (A3),A0`; 0xE09C98; ROUTE_$GET_EC 0xE69D12 (ROUTE_UNWIRED)
+    /// `move.w #128,D0; movea.l #abs,A0`), with no rule found; so this
+    /// shape is the one reproduced: another unit's array from its first
+    /// byte (`movea.l #sym`, as DISK_$GET_ERROR_INFO 0xE6C090 loads another
+    /// unit's object for a copy), cleared with `clr`.  Arrays elsewhere are
+    /// best effort, the count first (below; refused under `--strict`).
+    /// Storing other constants is not supported yet.
     fn fill(&mut self, start: &Addr, count: u32, value: &Expr) -> Res<()> {
         let Expr::Const { value: 0, ty } = value else {
             return Err(unsupported(
@@ -15364,10 +15411,54 @@ impl Selector {
             ));
         };
         let Addr::Symbol { name, offset: 0 } = start else {
-            return Err(unsupported(
+            // Best effort (not byte-identical; bead domain-pascal-kaxz): the
+            // count, then the first element's address in a new register, as
+            // the image's clears through a pointer (0xE0277A `moveq #31,D0;
+            // lea (A3),A0; clr.l (A0)+; dbf`, 0xE09C98 `moveq #31,D1; lea
+            // (A1),A0`) and of another unit's array at ROUTE_$GET_EC
+            // 0xE69D12 (`move.w #128,D0; movea.l #abs,A0`); whether those
+            // are `for` loops, and the order for the unit's data and the
+            // frame, are not known.
+            best_effort(
                 self.span,
                 "a `for` loop over an array other than another unit's, from its first byte, is",
-            ));
+            )?;
+            let d = self.alloc_d()?;
+            let n = count as i64 - 1;
+            self.out.push(if n <= 127 {
+                Insn::Moveq {
+                    value: n as i8,
+                    dst: d,
+                }
+            } else {
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Imm(imm(n, Width::Word)),
+                    dst: Ea::Reg(Reg::D(d)),
+                }
+            });
+            let a = self.alloc_a()?;
+            match start {
+                Addr::Symbol { name, offset } => self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::ImmSym(biased_symbol(name, *offset)),
+                    dst: a,
+                }),
+                _ => self.lea_into(start, a)?,
+            }
+            let head = self.new_label();
+            self.out.push(Insn::Align4);
+            self.place(head);
+            self.out.push(Insn::Clr {
+                size: size_of(ty.width),
+                dst: Ea::PostInc(a),
+            });
+            self.out.push(Insn::Dbf {
+                reg: d,
+                label: head,
+                until: None,
+            });
+            return Ok(());
         };
         let a = self.alloc_a()?;
         self.out.push(Insn::Movea {
@@ -18855,11 +18946,23 @@ impl Selector {
                 // A2,A3`, then `(-8,A3)`, `(A3)`; DISK_$REGISTER 0xE3D9EC,
                 // XNS_IDP_$OS_DEMUX 0xE185BC, PROC2_$PGROUP_INFO 0xE42244).
                 if o + offset != 0 {
-                    return Err(unsupported(
+                    // Best effort (not byte-identical; bead
+                    // domain-pascal-kaxz): `lea (d,Ap),Ar`, the element's
+                    // operand ([`Self::index_ea`]) as an address.
+                    best_effort(
                         self.span,
                         "the address of a stepped element other than a `with` record's \
                          (`lea (d,Ap)` not catalogued, codegen-patterns 7.4) is",
-                    ));
+                    )?;
+                    let d = o + offset;
+                    if !(-0x8000..0x8000).contains(&d) {
+                        return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+                    }
+                    self.out.push(Insn::Lea {
+                        src: Ea::Disp(d, p),
+                        dst: r,
+                    });
+                    return Ok(());
                 }
                 self.out.push(Insn::Movea {
                     size: Size::L,
@@ -25031,6 +25134,90 @@ mod tests {
             }],
         );
         assert!(err(&f).starts_with("a `for` loop over an array other than"));
+    }
+
+    /// Bead domain-pascal-kaxz, not strict: the best-effort `for` forms
+    /// (refused in strict mode, the tests' default: [`fill_forms`],
+    /// [`unsettled_for_loops`]), each warned once.
+    #[test]
+    fn indexed_for_best_effort() {
+        let before = dpc_syntax::diag::set_strict(false);
+        let _ = dpc_syntax::diag::take_best_effort();
+        let warned = |what: &str| {
+            dpc_syntax::diag::take_best_effort()
+                .iter()
+                .any(|w| w.message.contains(what))
+        };
+        // A clear of the unit's data: the count, then `lea`.
+        let fill = |start| {
+            body_text(&proc_(
+                0,
+                vec![StmtKind::Fill {
+                    start,
+                    count: 4,
+                    value: konst(0, long()),
+                }],
+            ))
+        };
+        assert_eq!(
+            fill(Addr::Static(4)),
+            [
+                "moveq\t#3,%d0",
+                "lea\t(4,%a5),%a0",
+                ".balignw\t4,0x2048",
+                "1:",
+                "clr.l\t(%a0)+",
+                "dbf\t%d0,1b",
+            ]
+        );
+        assert!(warned("other than another unit's, from its first byte"));
+        assert_eq!(
+            fill(Addr::Symbol {
+                name: "BUF".into(),
+                offset: 8
+            })[1],
+            "movea.l\t#BUF+8,%a0"
+        );
+        // `a[i + 1]` of the unit's words: indexed, the index in a register,
+        // no pointer stepped.
+        let plus = Expr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(index()),
+            rhs: Box::new(konst(1, word())),
+            ty: word(),
+        };
+        let a = |index: Expr| Addr::Index {
+            base: Box::new(Addr::Static(0x10)),
+            index: Box::new(index),
+            scale: 2,
+            offset: -2,
+        };
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(1, word()),
+                konst(4, word()),
+                false,
+                vec![store(a(plus), load(a(index()), word()))],
+            )],
+        );
+        let t = body_text(&f);
+        assert!(t.iter().any(|l| l.contains("(0xe,%a5,%d")), "{t:?}");
+        assert!(!t.iter().any(|l| l.starts_with("addq.l")), "{t:?}");
+        assert!(warned("an element at an index computed from a `for` index"));
+        // An initial value beyond a byte: `move.w #init`.
+        let f = proc_(
+            4,
+            vec![for_loop(
+                konst(200, word()),
+                konst(210, word()),
+                false,
+                vec![store(sym("W"), index())],
+            )],
+        );
+        assert!(body_text(&f).iter().any(|l| l.starts_with("move.w\t#0xc8,%d")));
+        assert!(warned("initial value is outside -128..127"));
+        dpc_syntax::diag::set_strict(before);
     }
 
     /// Registers around calls (codegen-patterns 12.4 R3): a value that dies

@@ -6255,7 +6255,8 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   rule found.  Address first: 0xE00ECC `movea.l #AST_$ZERO_BUFF,A0;
   move.w #0xFF,D0`; 0xE40A0E `lea (0xc,A2),A0; moveq #5,D0`.  Count
   first: 0xE0277A `moveq #31,D0; lea (A3),A0`; 0xE09C98; 0xE06B36;
-  ROUTE_ 0xE69D12 `move.w #128,D0; movea.l #abs,A0`; 0xE6200E.  Whether
+  ROUTE_$GET_EC 0xE69D12 (ROUTE_UNWIRED) `move.w #128,D0; movea.l
+  #abs,A0`; 0xE6200E.  Whether
   these are source `for` loops or something else (a record or array
   assignment of zeros?) cannot be told from the image.
 - **Implemented** (`crates/dpc-ir/src/lower.rs`, `fill`;
@@ -6268,6 +6269,20 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   `movea.l #sym,A0`, the count, the filler, `clr.<s> (A0)+`, `dbf`.  Other
   `for` loops: section 7.4.  Byte-identical in
   `make conform` (`tests/conformance/ast_page_zero.pas`).
+- **Best effort (not byte-identical; bead domain-pascal-kaxz):** the same
+  loop over any other array (the unit's data, the frame, through a
+  pointer or a `var` parameter, another unit's array from an element
+  other than its first, `movea.l #sym+d,An`): the count first, then the
+  first element's address in a new register (`lea <ea>,An`), the filler,
+  `clr.<s> (An)+`, `dbf`; the count-first order of 0xE0277A `moveq
+  #31,D0; lea (A3),A0` and ROUTE_$GET_EC 0xE69D12, which may not be `for`
+  loops.  Where the image does show such `for` loops over the frame it
+  steps a pointer with a displacement instead, `movea.l A6,A0; moveq
+  #35,D0; addq.l #4,A0; clr.l (-180,A0); addq.l #4,A0; dbf`
+  (OS_$INSTALL_DISPLAY_ASTE 0xE6D2BE, then `moveq #7,D0; lea (4,A6),A0`
+  at 0xE6D2CE): not reproduced, the IR's `Fill` keeps neither the lower
+  bound nor `from` (bead domain-pascal-lwga).  A `best_effort` warning;
+  refused as before under `dpc --strict`.  `tests/exec/indexed_for.pas`.
 - **Run-time count:** `subq.w #1,Dn; bmi skip` before entering the `dbf`
   loop (0xE177DC..0xE177F2); the other guards, and when the count is
   copied into a counter of its own: section 7.4.
@@ -8756,6 +8771,24 @@ scripts besides, not kept, are named as such below; re-check sites with
     `with` stands, the array's offset in the references (the `with`
     temporary rebased, `with_rebase`); an element passed by address,
     `pea (d,Ap)`.
+  - **Best effort (not byte-identical; bead domain-pascal-kaxz;
+    `isel.rs` `stepped_arrays`'s `Ok(Err(_))`, `for_`; `best_effort`
+    warnings, refused as before under `dpc --strict`):** a loop with an
+    element at an index computed from the loop index other than through
+    an element (`a[i + 1]`, `a[2 * i]`, a row `a[i][j]`), an array
+    through a pointer the body may change, or a `.l` index (an array
+    whose bounds times the element size do not fit in 16 bits) steps no
+    pointer at all: the index is kept in a register and every element of
+    the body is reached by index as outside a loop (`(d,An,Dx)` with the
+    scaled index, the pointer read at each element).  The image's forms
+    for these are not settled (AREA_'s module-local 0xE075CA sets up
+    pointers with `.l` indices at 0xE076C4); indexing is correct whatever
+    the index's expression or the pointer's changes.  The address of a
+    stepped element other than a `with` record's, as a value: `lea
+    (d,Ap),Ar` (not catalogued).  An index the body needs in a register
+    whose initial value is outside -128..127: `move.w #init,Di` (not
+    catalogued; one equal to the count is set up apart from it, not as
+    0xE6A8BC's copy).  `tests/exec/indexed_for.pas`.
 - `exit`, `next`, and `if c then exit|next` as one conditional branch.
 - A slot used inside a loop body is loaded at entry like one used more
   than once (12.2: 0xE3CCD6; NAME_$VALIDATE's module-local 0xE4A004 loads
@@ -8789,16 +8822,12 @@ stepped pointers from the start of the unit's data area with
 displacements in a byte (11 `lea (A5)` against 3 `movea.l A5`), in
 place together with another stepped pointer (order), two arrays of one
 element size in the unit's data or the frame (sharing), the unit's data
-addressed absolutely, through a
-pointer the body may change, at an index computed from the loop index
-other than through an element (`a[i + 1]`, `a[2 * i]`; "An index read
-through an element"), or reached at displacement 0 (`(An)+`, 0xE00ED8,
-0xE0287A);
-the address of a stepped element other than a `with` record's; the
-in-place forming from a pointer (0xE7632C, 0xE6FCC6); an index initial value
-outside -128..127 or equal to the count (word indices; byte and
-longword indices below); a boolean index (`true` is 0xFF, not `false` +
-1); an index read
+addressed absolutely, or reached at displacement 0 (`(An)+`, 0xE00ED8,
+0xE0287A); the
+in-place forming from a pointer (0xE7632C, 0xE6FCC6); under `--strict`,
+an index initial value outside -128..127 or equal to the count (word
+indices; byte and longword indices below); a boolean index (`true` is
+0xFF, not `false` + 1); an index read
 after a loop with a run-time bound, or assigned outside its loops ("The
 index read after its loop"); a loop whose bound reads its own index
 variable; an index passed by address to a call with a pad, with a
@@ -8887,7 +8916,7 @@ Goldens `tests/golden/loops/while.pas`, `loops/for.pas`,
 `loops/for_index.pas`, `loops/for_runtime.pas`, `loops/stepped.pas`, `loops/stepped_data.pas`,
 `loops/stepped_offset.pas`, `loops/stepped_other_section.pas`;
 exec tests `tests/exec/stepped_data.pas`, `tests/exec/stepped_data_more.pas`,
-`tests/exec/stepped_offset.pas`,
+`tests/exec/stepped_offset.pas`, `tests/exec/indexed_for.pas`,
 `tests/exec/for_runtime.pas`, `tests/exec/for_index.pas`; tests
 `crates/dpc-m68k/src/isel.rs` (`for_with_index_and_call`,
 `for_index_by_address_and_after`, `for_forms`, `for_runtime_upper_bounds`,
