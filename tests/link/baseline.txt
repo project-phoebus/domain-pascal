@@ -2,115 +2,116 @@
 # Regenerate with `python3 tools/linktest.py run --update` and say why
 # in the commit.  `make linktest` compares with it (exit 1 when a
 # module's status got worse or a module that compiled is gone).
-# source: 992f96b1b81c917bcf33620c0d8c0e6b142a0036
-# dpc: b23a505d56b5eae9f9696d0dc27c3c974d716577
-# 23 of 109 module files compile; 86 refused by dpc
+# source: 39f0fe4d6feb313c6b8f36c1bba699ae724fa4e7
+# dpc: 7dc35cf2921f3dbb9a093e390ae0d317c2fe0e25
+# 40 of 110 module files compile; 70 refused by dpc
 REFUSED	acl/acl.pas	functions returning T are not supported yet (codegen-patterns N: result convention unknown)
 OK	acl/acl_wired.pas	-
-REFUSED	app/app.pas	an element of more than N byte of an array through a pointer loaded from memory (the pointer's load between the index's value and its scaling or after the scaling, no rule found: tools/boolsurvey.py ebase, codegen-patterns 5.2; bead domain-pascal-nqg1) is not supported yet
+OK	app/app.pas	-
 REFUSED	area/area.pas	a computed word index (into arrays that fit, `.w`X`areas[id + N]` next to `ext.l` for `areas[id]`X`.l`"; bead domain-pascal-wkg) is not supported yet
-REFUSED	as/as.pas	an 8-byte copy from a field of another unit's variable (every `movea.l #imm`X`lea (N,A0),A1`X's address held across the statements, which dpc does not hold: not settled; codegen-patterns 5.2, "X"; bead domain-pascal-zrug) is not supported yet
-REFUSED	asknode/asknode.pas	an `if` whose two parts end in calls with the same argument bytes (the original shares the pop at the join, codegen-patterns 1.1) is not supported yet
+OK	as/as.pas	-
+REFUSED	asknode/asknode.pas	a `for` loop stepping a pointer through an array whose pointer is not a variable the body leaves unchanged (codegen-patterns 7.4) is not supported yet
 REFUSED	ast/ast.pas	comparing with a constant outside the other operand's type is not supported yet
 REFUSED	audit/audit.pas	a pointer result other than one read from memory or a pointer function's result (a computed value: codegen-patterns N, "X") is not supported yet
 OK	audit/audit_wired.pas	-
-REFUSED	bat/bat.pas	a `for` loop with a run-time bound and no call in its body, the bound not a variable held in a data register (the count copied below its register only after `X` at the image's sites; loads and expressions in place or copied by the colouring order, codegen-patterns 7.4, bead domain-pascal-fbah) is not supported yet
-REFUSED	cal/os_cal_unwired.pas	passing a 2-byte expression by address to a 4-byte parameter is not supported yet
-REFUSED	cal/os_cal_wired.pas	a block through a pointer that is not held in a register (loaded through another pointer or the static link: XPD_ N, ACL_ N, RIP_ N, not settled), or a field through one in a data register (not catalogued; bead domain-pascal-dsr5), is not supported yet
+REFUSED	bat/bat.pas	more values live at once than there are registers not supported yet
+OK	cal/os_cal_unwired.pas	-
+OK	cal/os_cal_wired.pas	-
 OK	ct/ct.pas	-
-REFUSED	dbuf/dbuf.pas	a packed field of N bits on a byte boundary whose type is wider than a byte (its access is not catalogued) is not supported yet
-REFUSED	dir/dir.pas	passing a variable of another size to a value or `in` parameter (a converted copy, codegen-patterns 1.5) is not supported yet
+REFUSED	dbuf/dbuf.pas	a `for` loop stepping through an array whose bounds times the element size do not fit in N bits (its pointers set up with `.l`X's N; codegen-patterns 5.2, 7.4; bead domain-pascal-wkg) is not supported yet
+REFUSED	dir/dir.pas	the empty string passed to a `univ` parameter (a code-section cell of no bytes, no site known) is not supported yet
 OK	dir/dir_server.pas	-
 OK	dir/dir_wired.pas	-
 REFUSED	dir/old_dir.pas	`in` on a 32-byte set that is not a variable is not supported yet
-REFUSED	disk/disk.pas	assigning a 4-byte value to a 1-byte object is not supported yet
+REFUSED	disk/disk.pas	comparing values other than ordinals and pointers is not supported yet
 OK	disk/chksum.pas	-
 REFUSED	disk/disk_dev.pas	a pointer result in a body of several statements assigned other than a pointer function's result, a variable or `nil` (a computed address, `lea` at EC2_$GET_EC1_ADDR N: codegen-patterns N) is not supported yet
 REFUSED	disk/disk_vol.pas	comparing values other than ordinals and pointers is not supported yet
 OK	dma/dma.pas	-
-REFUSED	dtty/dtty.pas	in a body with branches, a call whose arguments are the last use of a register-held local (held through the call or not: DTTY_$TSTART N keeps one in D0, MSG_$SEND_HW N in D2; a routine pointer called is kept in A0 and stored, NET_$OPEN N; codegen-patterns 12.4 R4(c)) is not supported yet
+OK	dtty/dtty.pas	-
 REFUSED	dxm/dxm.pas	a `for` loop stepping a pointer through an array whose pointer is not a variable the body leaves unchanged (codegen-patterns 7.4) is not supported yet
-REFUSED	ec/ec2.pas	a `for` loop with a run-time bound and no call in its body, the bound not a variable held in a data register (the count copied below its register only after `X` at the image's sites; loads and expressions in place or copied by the colouring order, codegen-patterns 7.4, bead domain-pascal-fbah) is not supported yet
-REFUSED	ec/ec2u.pas	in a body with branches, a call whose arguments are the last use of a pointer parameter held in a data register (not held at EC2_$ADVANCE N, the only site; codegen-patterns 12.4 R4(c), bead domain-pascal-b3wz) is not supported yet
-REFUSED	file/file.pas	a type transfer of a 4-byte integer to a 2-byte one (narrowing, as in an assignment) is not supported yet
+REFUSED	ec/ec2.pas	an address (`addr`) in a comparison, in an expression other than `+`/`-`, or into or with a register-held local (no form catalogued, codegen-patterns 5.2) is not supported yet
+OK	ec/ec2u.pas	-
+REFUSED	file/file.pas	comparing with a constant outside the other operand's type is not supported yet
 OK	file/file_wired.pas	-
 REFUSED	fim/fim.pas	an empty `otherwise` part is not supported yet
-REFUSED	flop/flop.pas	in a body of several statements, a pointer parameter or by-address parameter used once after a branch or a call, whose lowest free register an earlier statement left a value in on some path (the original's choice there is not known, codegen-patterns 12.4 R4(b)), is not supported yet
-REFUSED	flp/flp.pas	a `with` statement over a volatile record reached at run time is not supported yet
+OK	flop/flop.pas	-
+REFUSED	flp/flp.pas	an address (`addr`) in an operation other than a longword `+` or `-` (codegen-patterns 5.2, "X": no form catalogued) is not supported yet
 OK	gpu/gpu.pas	-
-REFUSED	hint/hint.pas	a store adjacent to the previous statement's store, both copying adjacent memory (one longword: merged at ROUTE_$SHORT_PORT N, apart at RIP_$TABLE_D N in the same kind of unit; ref 3.15.3 p. 3-57, codegen-patterns N), is not supported yet
+REFUSED	hint/hint.pas	an element at an index computed from a `for` index other than through an element at the index itself (`a[i + N]`, `a[N * i]`, a row `a[i][j]`: a pointer of its own, a displacement or a scaled index register, not settled; codegen-patterns 7.4) is not supported yet
 OK	hint/hint_wired.pas	-
 OK	iic/iic.pas	-
-REFUSED	io/io.pas	an element of another unit's array in a loop (its address loaded in the loop or held from before it, TTY_$K_DRAIN_OUTPUT N: per loop and array, held N and loaded N in `dbf` loops, held N and loaded N in others, no rule found; `tools/basesurvey.py loops`, codegen-patterns 5.2; bead domain-pascal-dw25) is not supported yet
+OK	io/io.pas	-
+OK	io/dctes.pas	-
 REFUSED	kbd/kbd.pas	a `for` loop with a run-time lower bound (`X`X's module-local 0xE1CA10..0xE1CA1C; not settled, codegen-patterns 7.4) is not supported yet
-REFUSED	log/log.pas	an element of more than N byte of an array through a pointer loaded from memory (the pointer's load between the index's value and its scaling or after the scaling, no rule found: tools/boolsurvey.py ebase, codegen-patterns 5.2; bead domain-pascal-nqg1) is not supported yet
-REFUSED	mac_os/mac_os.pas	an empty procedure with locals (a bare `rts` or a frame: not seen, codegen-patterns N) is not supported yet
-REFUSED	mem/mem.pas	updating an element of the unit's data in place other than a word of a word array indexed by another unit's word variable (the image does both `addq` to the element, MEM_$PARITY_LOG N, and a load, operation and store, NETWORK_$INSTALL_NET N, NETLOG_$LOG_IT N: no rule found, codegen-patterns N) is not supported yet
+OK	log/log.pas	-
+REFUSED	mac_os/mac_os.pas	an element at an index computed from a `for` index other than through an element at the index itself (`a[i + N]`, `a[N * i]`, a row `a[i][j]`: a pointer of its own, a displacement or a scaled index register, not settled; codegen-patterns 7.4) is not supported yet
+OK	mem/mem.pas	-
 OK	misc/misc.pas	-
 OK	misc/print_build_time_.pas	-
 REFUSED	mmap/mmap.pas	a `for` index variable that is not a word (integer16 or a subrange stored in a word) is not supported yet
 REFUSED	mmap/mmap_unwired.pas	a `for` index variable that is not a word (integer16 or a subrange stored in a word) is not supported yet
 REFUSED	msg/msg_unwired.pas	an assignment to a set of more than a longword (frame temporaries and `dbf` loops, codegen-patterns 5.1) is not supported yet
-REFUSED	msg/msg_wired.pas	an element of another unit's array that an earlier statement since the last call reached too, where the base's load does not dominate (a branch from before it to a label after it: not seen) (codegen-patterns 5.2, "X"; bead domain-pascal-lnzy) is not supported yet
+OK	msg/msg_wired.pas	-
 REFUSED	mst/mst_unwired.pas	an assignment to a set of more than a longword (frame temporaries and `dbf` loops, codegen-patterns 5.1) is not supported yet
 REFUSED	mst/mst_wired.pas	a `goto` into a `for`, `while`, `repeat`, `with` or `case` statement from outside it (illegal by ref p. 4-95, permitted by Appendix D p. D-4: open question N) is not supported yet
 OK	mt/mt.pas	-
 REFUSED	name/name.pas	assigning a record or array that is not a variable is not supported yet
 REFUSED	name/nameu.pas	a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` before the `subq.w #1`, which stands among the preheader's other instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, N; not settled, codegen-patterns 7.4) is not supported yet
-REFUSED	net/net.pas	`nil`X`nil` results") is not supported yet
+REFUSED	net/net.pas	a pointer local assigned from a call that no call follows, assigned more than once, inside a statement, read other than dereferenced, or with A0 written before its last use (A0 or A1 in the image; not settled) is not supported yet
 REFUSED	net_io/net_io.pas	a packed field of type T that is not a whole byte, word or longword is not supported yet
-REFUSED	net_io/net_io_unwired.pas	a 2-byte set constant passed by address is not supported yet
+REFUSED	net_io/net_io_unwired.pas	a pointer local assigned from a call that no call follows, assigned more than once, inside a statement, read other than dereferenced, or with A0 written before its last use (A0 or A1 in the image; not settled) is not supported yet
 REFUSED	netbuf/netbuf.pas	a `for` index variable that is not a word (integer16 or a subrange stored in a word) is not supported yet
 REFUSED	netlog/netlog.pas	a 16-byte expression passed by address is not supported yet
-REFUSED	network/network.pas	`rshft(w, N) & c` of a `0..65535` word (its high byte read, N, or the word shifted, N: not settled) is not supported yet
-REFUSED	os/os.pas	a set comparison other than `s = []` / `s <> []` is not supported yet
+REFUSED	network/network.pas	more values live at once than there are registers not supported yet
+REFUSED	os/os.pas	the index variable of a `for`X`move.w D3,D2` for `n := first_n` after a loop over n in D5; not modelled, codegen-patterns 7.4) is not supported yet
 OK	os/os_wired_start.pas	-
-REFUSED	osinfo/osinfo.pas	a `for` loop with a run-time bound and no call in its body, the bound not a variable held in a data register (the count copied below its register only after `X` at the image's sites; loads and expressions in place or copied by the colouring order, codegen-patterns 7.4, bead domain-pascal-fbah) is not supported yet
-REFUSED	pacct/pacct.pas	an 8-byte copy into this kind of destination (indexed, or set up by several instructions) is not supported yet
-REFUSED	parity/parity.pas	a condition other than a comparison as a value (`not`, `and then`, a boolean variable) is not supported yet
+REFUSED	osinfo/osinfo.pas	a `for` loop stepping through an array whose bounds times the element size do not fit in N bits (its pointers set up with `.l`X's N; codegen-patterns 5.2, 7.4; bead domain-pascal-wkg) is not supported yet
+REFUSED	pacct/pacct.pas	two function calls in one statement are not supported yet
+REFUSED	parity/parity.pas	more values live at once than there are registers not supported yet
 OK	pbu/pbu.pas	-
-REFUSED	pbu/ec2_pbu.pas	in a body of several statements, a pointer parameter or by-address parameter used once after a branch or a call, whose lowest free register an earlier statement left a value in on some path (the original's choice there is not known, codegen-patterns 12.4 R4(b)), is not supported yet
+OK	pbu/ec2_pbu.pas	-
 REFUSED	pchist/pchist.pas	a `for` index variable that is not a local of the routine (ref p. 4-89) is not supported yet
 OK	peb/peb_parity.pas	-
 REFUSED	peb/peb_unwired.pas	a `for` loop over an array other than another unit's, from its first byte, is not supported yet
-REFUSED	peb/peb_wired.pas	an 8-byte copy from a pointer not held in an address register is not supported yet
+REFUSED	peb/peb_wired.pas	a `for` loop over an array other than another unit's, from its first byte, is not supported yet
 REFUSED	pkt/pkt.pas	a packed field of type T that is not a whole byte, word or longword is not supported yet
-REFUSED	pmap/pmap.pas	passing a 4-byte value to a 2-byte parameter is not supported yet
-REFUSED	proc1/proc1.pas	a set comparison other than `s = []` / `s <> []` is not supported yet
+REFUSED	pmap/pmap.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
+OK	proc1/proc1.pas	-
 REFUSED	proc2/proc2.pas	functions returning T are not supported yet (codegen-patterns N: result convention unknown)
 REFUSED	rem_file/rem_file.pas	index out of range
-REFUSED	rem_name/rem_name.pas	this predeclared function is not supported yet
+REFUSED	rem_name/rem_name.pas	a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` before the `subq.w #1`, which stands among the preheader's other instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, N; not settled, codegen-patterns 7.4) is not supported yet
 REFUSED	ring/ring.pas	a packed field of type T that is not a whole byte, word or longword is not supported yet
 OK	ring/ring_wired.pas	-
 REFUSED	ring/ringlog_.pas	a `for` index variable that is not a local of the routine (ref p. 4-89) is not supported yet
-REFUSED	rip/rip_rtwired.pas	in a body with branches, a call whose arguments are the last use of the static link (held through the call or not, codegen-patterns N, 12.4 R4(c)) is not supported yet
+REFUSED	rip/rip_rtwired.pas	a `for` loop storing a constant other than N is not supported yet
 REFUSED	rip/rip_unwired.pas	a `for` loop over an array of the enclosing routine's frame or through a pointer of it (a scaled index register stepped by the element size and `X`X's N, RIP_$SERVER's N; not implemented, codegen-patterns 7.4; bead domain-pascal-1ibr, domain-pascal-ga54) is not supported yet
-REFUSED	rip/rip_wired.pas	updating an element of the unit's data in place other than a word of a word array indexed by another unit's word variable (the image does both `addq` to the element, MEM_$PARITY_LOG N, and a load, operation and store, NETWORK_$INSTALL_NET N, NETLOG_$LOG_IT N: no rule found, codegen-patterns N) is not supported yet
-REFUSED	route/route_rtwired.pas	a function call in a `case` selector is not supported yet
-REFUSED	route/route_unwired.pas	a 2-byte set constant passed by address is not supported yet
-REFUSED	route/route_wired.pas	a `for` loop stepping a pointer from the start of the unit's data area (`X` N times, `X` N times with displacements in a byte: ROUTE_$FIND_PORT N, N; codegen-patterns 7.4; bead domain-pascal-s9tx) is not supported yet
+REFUSED	rip/rip_wired.pas	a non-pointer result in A0 (`a0_return`, ref 5.5.11) is not supported yet
+REFUSED	route/route_rtwired.pas	this pointer expression is not supported yet
+REFUSED	route/route_unwired.pas	an element of another unit's array that an earlier statement since the last call reached too, at a displacement beyond a byte or as an address (`X` from the kept base: N sites, its register not surveyed; codegen-patterns 5.2, "X"; bead domain-pascal-lnzy) is not supported yet
+OK	route/route_wired.pas	-
 OK	scsi/scsi.pas	-
-REFUSED	sio/sio.pas	a set comparison other than `s = []` / `s <> []` is not supported yet
+REFUSED	sio/sio.pas	the first dereference of a local held in D0 (or the first call after its assignment) inside a statement, a loop or `case`, or an `if` other than one test reading it, one test with both parts dereferencing it, a `then` part alone dereferencing it with no `else`, or an `else` part after a `then` ending in `return` and calling nothing, with nothing after it (where the original moves it to an address register is not seen) is not supported yet
 REFUSED	sio2681/sio2681.pas	a packed field of type T that is not a whole byte, word or longword is not supported yet
 REFUSED	smd/smd.pas	a computed word index (into arrays that fit, `.w`X`areas[id + N]` next to `ext.l` for `areas[id]`X`.l`"; bead domain-pascal-wkg) is not supported yet
-REFUSED	sock/sock.pas	a store adjacent to the previous statement's store, both copying adjacent memory (one longword: merged at ROUTE_$SHORT_PORT N, apart at RIP_$TABLE_D N in the same kind of unit; ref 3.15.3 p. 3-57, codegen-patterns N), is not supported yet
-REFUSED	suma/suma.pas	this predeclared function is not supported yet
+OK	sock/sock.pas	-
+REFUSED	suma/suma.pas	widening a byte to a longword (`clr.l; move.b` or `move.b; andi.l #0xff`) is not supported yet
 OK	sysbus/atbus_.pas	-
 OK	tape/tape.pas	-
-REFUSED	term/os_term.pas	a 2-byte set constant passed by address is not supported yet
-REFUSED	term/os_term_init.pas	`addr` of a parameter passed by address stored, its slot used less than twice besides (loaded at entry at N, read in place at MAC_OS_$PUT_INFO N; not settled, codegen-patterns 12.2, bead domain-pascal-m2w3) is not supported yet
-REFUSED	time/time.pas	this predeclared function is not supported yet
-REFUSED	time/time_q_.pas	passing a 4-byte expression by address to a 2-byte parameter is not supported yet
+REFUSED	term/os_term.pas	a non-pointer result in A0 (`a0_return`, ref 5.5.11) is not supported yet
+REFUSED	term/os_term_init.pas	this pointer expression is not supported yet
+REFUSED	time/time.pas	a signed `mod` by a word used as a longword (the N `X` results in the image are all used as words) is not supported yet
+REFUSED	time/time_q_.pas	comparing a pointer variable with a computed pointer (`addr(...)`X`cmpa.l (N,A6),A0`: not catalogued) is not supported yet
 REFUSED	time/time_unwired.pas	the address of an element of another unit's array or through a pointer loaded from memory at a displacement beyond a byte, as a value (two `lea`s; the second's register not surveyed, codegen-patterns 5.2; bead domain-pascal-1ibr) is not supported yet
 OK	tone/tone.pas	-
-REFUSED	tpad/tpad.pas	this predeclared function is not supported yet
-REFUSED	tty/tty.pas	a `case` whose parts end in calls with the same argument bytes (the original may share the pop at the join, codegen-patterns 1.1) is not supported yet
+OK	tpad/tpad.pas	-
+REFUSED	tty/tty.pas	a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` before the `subq.w #1`, which stands among the preheader's other instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, N; not settled, codegen-patterns 7.4) is not supported yet
 OK	uid/uid.pas	-
-REFUSED	vfmt/vfmt.pas	a `for` index whose initial value equals the `dbf` count (the original copies the count's register, N; codegen-patterns 7.4) is not supported yet
+REFUSED	vfmt/vfmt.pas	a signed `mod` by a word used as a longword (the N `X` results in the image are all used as words) is not supported yet
 REFUSED	volx/volx.pas	more values live at once than there are registers not supported yet
-REFUSED	vtoc/vtoc.pas	a store adjacent to the previous statement's store, both copying adjacent memory (one longword: merged at ROUTE_$SHORT_PORT N, apart at RIP_$TABLE_D N in the same kind of unit; ref 3.15.3 p. 3-57, codegen-patterns N), is not supported yet
-REFUSED	win/win.pas	an empty `repeat` loop is not supported yet
-REFUSED	xns/xns_error.pas	a select `if a < b then a := b` that narrows `b` into `a` (the compare and the store at the wider width in `a`X`move.l (A3),D5`; codegen-patterns N, bead domain-pascal-dzad) is not supported yet
+REFUSED	vtoc/vtoc.pas	a `for` loop over an array other than another unit's, from its first byte, is not supported yet
+REFUSED	win/win.pas	an M$ARITH call with both operands computed (evaluation order not settled) is not supported yet
+REFUSED	xns/xns_error.pas	two function calls in one statement are not supported yet
 REFUSED	xns/xns_idp.pas	the index variable of a `for` loop with a run-time bound read after the loop (its guard may skip the loop and leave the index's register unset: XNS_IDP_$REGISTER_ADDR N reads D1, set at N after the guard; not modelled, codegen-patterns 7.4) is not supported yet
 REFUSED	xpd/xpd.pas	a packed field of type T that is not a whole byte, word or longword is not supported yet
-REFUSED	xpd/xpd_ker.pas	a block through a pointer that is not held in a register (loaded through another pointer or the static link: XPD_ N, ACL_ N, RIP_ N, not settled), or a field through one in a data register (not catalogued; bead domain-pascal-dsr5), is not supported yet
+REFUSED	xpd/xpd_ker.pas	a `for` loop stepping a pointer through an array whose pointer is not a variable the body leaves unchanged (codegen-patterns 7.4) is not supported yet
