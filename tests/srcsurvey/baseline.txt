@@ -13,7 +13,7 @@ MISMATCH	acl/acl.pas	acl_$alloc_cache_slot
 STUB	acl/acl.pas	acl_$expand_default_acl
 STUB	acl/acl.pas	acl_$load_acl_image
 STUB	acl/acl.pas	acl_$find_acl_slot
-STUB	acl/acl.pas	acl_$get_obj_acl_attrs
+MISMATCH	acl/acl.pas	acl_$get_obj_acl_attrs
 STUB	acl/acl.pas	acl_$eval_acl_entries
 STUB	acl/acl.pas	acl_$check_suser_pid
 OK	acl/acl.pas	acl_$is_process_type_2
@@ -53,8 +53,8 @@ STUB	acl/acl.pas	acl_$check_fault_rights
 STUB	acl/acl.pas	acl_$check_debug_rights
 STUB	acl/acl.pas	acl_$set_def_acl_check
 STUB	acl/acl.pas	acl_$convert_to_9acl
-STUB	acl/acl.pas	acl_$convert_to_10acl
-STUB	acl/acl.pas	acl_$convert_from_9acl
+MISMATCH	acl/acl.pas	acl_$convert_to_10acl
+MISMATCH	acl/acl.pas	acl_$convert_from_9acl
 STUB	acl/acl.pas	acl_$convert_funky_acl
 STUB	acl/acl.pas	acl_$inherit_subsys
 STUB	acl/acl.pas	acl_$set_local_locksmith
@@ -180,7 +180,7 @@ STUB	ast/ast.pas	ast_$remove_corrupted_page
 MISMATCH	ast/ast.pas	ast_$init
 STUB	ast/ast.pas	ast_$activate_aote_canned
 STUB	ast/ast.pas	ast_$activate_aste_canned
-STUB	audit/audit.pas	get_wired
+OK	audit/audit.pas	get_wired
 STUB	audit/audit.pas	audit_$init
 OK	audit/audit.pas	audit_$start_logging
 OK	audit/audit.pas	audit_$shutdown
@@ -224,7 +224,7 @@ OK	ct/ct.pas	ct_$release
 STUB	dbuf/dbuf.pas	dbuf_$get_block
 STUB	dbuf/dbuf.pas	dbuf_$set_buff
 MISMATCH	dbuf/dbuf.pas	dbuf_$invalidate
-STUB	dbuf/dbuf.pas	dbuf_$update_vol
+MISMATCH	dbuf/dbuf.pas	dbuf_$update_vol
 STUB	dbuf/dbuf.pas	dbuf_$init
 STUB	dir/dir.pas	dir_$init
 STUB	dir/dir.pas	audit_$log_prot_op
@@ -239,7 +239,7 @@ STUB	dir/dir.pas	dir_$alloc_handle
 MISMATCH	dir/dir.pas	dir_$free_handle
 MISMATCH	dir/dir.pas	dir_$release_handle
 STUB	dir/dir.pas	dir_$open_dir
-STUB	dir/dir.pas	dir_$is_retryable_status
+MISMATCH	dir/dir.pas	dir_$is_retryable_status
 MISMATCH	dir/dir.pas	dir_$update_hint
 MISMATCH	dir/dir.pas	audit_$log_mount_op
 MISMATCH	dir/dir.pas	audit_$log_link_op
@@ -358,12 +358,12 @@ OK	dir/old_dir.pas	dir_$old_root_addu
 MISMATCH	dir/old_dir.pas	name_$old_drop_entry
 OK	dir/old_dir.pas	dir_$old_dropu
 OK	dir/old_dir.pas	dir_$old_drop_hard_linku
-STUB	dir/old_dir.pas	name_$old_delete_entryu
+MISMATCH	dir/old_dir.pas	name_$old_delete_entryu
 STUB	dir/old_dir.pas	dir_$old_add_baku
 OK	dir/old_dir.pas	dir_$old_delete_fileu
 STUB	dir/old_dir.pas	dir_$old_create_diru
 STUB	dir/old_dir.pas	dir_$old_drop_diru
-STUB	dir/old_dir.pas	dir_$old_cnameu
+MISMATCH	dir/old_dir.pas	dir_$old_cnameu
 MISMATCH	dir/old_dir.pas	dir_$old_add_linku
 STUB	dir/old_dir.pas	dir_$old_read_linku
 OK	dir/old_dir.pas	dir_$old_drop_linku
@@ -496,7 +496,7 @@ MISMATCH	file/file.pas	file_$set_dtu_f
 OK	file/file.pas	file_$set_dtu
 MISMATCH	file/file.pas	file_$set_devno
 MISMATCH	file/file.pas	file_$set_mgr_attr
-STUB	file/file.pas	file_$set_refcnt
+MISMATCH	file/file.pas	file_$set_refcnt
 STUB	file/file.pas	file_$check_same_volume
 MISMATCH	file/file.pas	file_$neighbors
 OK	file/file.pas	file_$purify
@@ -620,7 +620,7 @@ STUB	mac_os/mac_os.pas	mac_$send
 STUB	mac_os/mac_os.pas	mac_$demux
 STUB	mac_os/mac_os.pas	mac_$receive
 STUB	mac_os/mac_os.pas	mac_os_$proc2_cleanup
-STUB	mac_os/mac_os.pas	mac_os_$arp
+MISMATCH	mac_os/mac_os.pas	mac_os_$arp
 STUB	mac_os/mac_os.pas	mac_os_$put_info
 STUB	mac_os/mac_os.pas	mac_$net_to_port_num
 STUB	mac_os/mac_os.pas	mac_os_$init
@@ -652,7 +652,7 @@ MISMATCH	mmap/mmap.pas	mmap_$install_pages
 STUB	mmap/mmap.pas	mmap_$free_pages
 STUB	mmap/mmap.pas	mmap_$release_pages
 MISMATCH	mmap/mmap.pas	mmap_$purge
-STUB	mmap/mmap.pas	mmap_$free_wsl
+MISMATCH	mmap/mmap.pas	mmap_$free_wsl
 STUB	mmap/mmap.pas	mmap_$set_ws_index
 STUB	mmap/mmap.pas	mmap_$ws_scan
 STUB	mmap/mmap.pas	mmap_$get_impure
@@ -808,7 +808,7 @@ MISMATCH	netbuf/netbuf.pas	netbuf_$rtn_pkt
 STUB	netbuf/netbuf.pas	netbuf_$init
 STUB	netlog/netlog.pas	netlog_$cntl
 STUB	netlog/netlog.pas	netlog_$log_it
-STUB	netlog/netlog.pas	netlog_$send_page
+MISMATCH	netlog/netlog.pas	netlog_$send_page
 MISMATCH	network/network.pas	network_$phys_copy
 STUB	network/network.pas	network_$install_net
 STUB	network/network.pas	network_$remove_net
@@ -816,7 +816,7 @@ MISMATCH	network/network.pas	network_$get_net
 MISMATCH	network/network.pas	get_chksum
 MISMATCH	network/network.pas	network_$gethdr
 STUB	network/network.pas	network_$rtnhdr
-STUB	network/network.pas	network_$set_service
+MISMATCH	network/network.pas	network_$set_service
 STUB	network/network.pas	network_$send_request
 STUB	network/network.pas	network_$wait_response
 STUB	network/network.pas	network_$do_request
@@ -841,7 +841,7 @@ MISMATCH	os/os.pas	os_$boot_errchk
 OK	os/os.pas	os_$print_init_error
 MISMATCH	os/os.pas	vtop_or_crash
 SETUP	os/os.pas	os_$free_ppn
-STUB	os/os.pas	os_$free_va_page
+SETUP	os/os.pas	os_$free_va_page
 STUB	os/os.pas	os_$start_proc2
 STUB	os/os.pas	os_$install_display_aste
 MISMATCH	os/os.pas	dummy_interrupt_handler
@@ -916,9 +916,9 @@ STUB	pmap/pmap.pas	pmap_$ws_scan_callback
 MISMATCH	pmap/pmap.pas	pmap_$init_ws_scan
 STUB	pmap/pmap.pas	pmap_$purge_ws
 STUB	pmap/pmap.pas	pmap_$init_timers
-STUB	proc1/proc1.pas	proc1_$try_to_suspend
+OK	proc1/proc1.pas	proc1_$try_to_suspend
 MISMATCH	proc1/proc1.pas	proc1_$resume
-STUB	proc1/proc1.pas	proc1_$suspend
+MISMATCH	proc1/proc1.pas	proc1_$suspend
 MISMATCH	proc1/proc1.pas	proc1_$suspendp
 OK	proc1/proc1.pas	proc1_$tst_lock
 OK	proc1/proc1.pas	proc1_$get_locks
@@ -1239,7 +1239,7 @@ MISMATCH	smd/smd.pas	smd_$enqueue_event
 OK	smd/smd.pas	smd_$set_tp_cursor
 STUB	smd/smd.pas	smd_$loc_event
 MISMATCH	smd/smd.pas	smd_$stop_tp_cursor
-STUB	smd/smd.pas	smd_$acq_display
+MISMATCH	smd/smd.pas	smd_$acq_display
 MISMATCH	smd/smd.pas	smd_$rel_display
 STUB	smd/smd.pas	smd_$blt
 OK	smd/smd.pas	smd_$inq_mm_blt
@@ -1259,7 +1259,7 @@ STUB	smd/smd.pas	smd_$borrow_display
 STUB	smd/smd.pas	smd_$return_display
 MISMATCH	smd/smd.pas	smd_$set_disp_unit
 OK	smd/smd.pas	smd_$init_state
-STUB	smd/smd.pas	smd_$video_ctl
+MISMATCH	smd/smd.pas	smd_$video_ctl
 MISMATCH	smd/smd.pas	smd_$map_display_u
 STUB	smd/smd.pas	smd_$unmap_display_u
 MISMATCH	smd/smd.pas	smd_$cond_input_u
@@ -1273,7 +1273,7 @@ MISMATCH	smd/smd.pas	smd_$set_clip_window
 MISMATCH	smd/smd.pas	smd_$write_string
 MISMATCH	smd/smd.pas	smd_$blink_cursor_callback
 OK	smd/smd.pas	smd_$clear_screen
-STUB	smd/smd.pas	smd_$n_devices
+MISMATCH	smd/smd.pas	smd_$n_devices
 OK	smd/smd.pas	smd_$inq_disp_uid
 OK	smd/smd.pas	smd_$map_display_memory
 OK	smd/smd.pas	smd_$unmap_display_memory
@@ -1302,10 +1302,10 @@ OK	sysbus/atbus_.pas	sysbus_$define_int
 OK	tape/tape.pas	tape_$boot
 MISMATCH	term/os_term.pas	term_$get_real_line
 MISMATCH	term/os_term.pas	kbd_$get_desc
-STUB	term/os_term.pas	term_$status_convert
+MISMATCH	term/os_term.pas	term_$status_convert
 MISMATCH	term/os_term.pas	term_$send_kbd_string
-STUB	term/os_term.pas	tty_$i_get_desc
-STUB	term/os_term.pas	sio_$i_get_desc
+MISMATCH	term/os_term.pas	tty_$i_get_desc
+MISMATCH	term/os_term.pas	sio_$i_get_desc
 STUB	term/os_term.pas	term_$read
 MISMATCH	term/os_term.pas	term_$read_cond
 MISMATCH	term/os_term.pas	term_$write
@@ -1474,7 +1474,7 @@ STUB	win/win.pas	win_$sense_general_status
 STUB	win/win.pas	win_$check_disk_status
 MISMATCH	win/win.pas	read_or_write_disk_record
 STUB	win/win.pas	win_$reinit_drive
-STUB	win/win.pas	seek
+MISMATCH	win/win.pas	seek
 STUB	win/win.pas	win_$format_track
 STUB	win/win.pas	win_$do_io
 STUB	win/win.pas	disk_init
@@ -1514,8 +1514,8 @@ STUB	xpd/xpd.pas	xpd_$init
 STUB	xpd/xpd.pas	xpd_$find_index
 STUB	xpd/xpd.pas	xpd_$set_ptrace_opts
 STUB	xpd/xpd.pas	xpd_$inq_ptrace_opts
-STUB	xpd/xpd.pas	xpd_$reset_ptrace_opts
-STUB	xpd/xpd.pas	xpd_$inherit_ptrace_options
+OK	xpd/xpd.pas	xpd_$reset_ptrace_opts
+OK	xpd/xpd.pas	xpd_$inherit_ptrace_options
 STUB	xpd/xpd.pas	xpd_$capture_fault
 STUB	xpd/xpd.pas	xpd_$restart
 STUB	xpd/xpd.pas	xpd_$copy_memory
@@ -1535,7 +1535,7 @@ STUB	xpd/xpd.pas	xpd_$get_fp
 STUB	xpd/xpd.pas	xpd_$put_fp
 STUB	xpd/xpd.pas	xpd_$get_target_info
 STUB	xpd/xpd.pas	xpd_$unregister_debugger
-STUB	xpd/xpd.pas	xpd_$cleanup
+OK	xpd/xpd.pas	xpd_$cleanup
 STUB	xpd/xpd.pas	xpd_$post_event
 STUB	xpd/xpd_ker.pas	xpd_$get_registers
 STUB	xpd/xpd_ker.pas	xpd_$put_registers
