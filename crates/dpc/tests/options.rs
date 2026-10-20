@@ -362,12 +362,17 @@ fn msgs_report() {
 
 #[test]
 fn version() {
-    let out = dpc().arg("-version").output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        format!("dpc {}\n", env!("CARGO_PKG_VERSION"))
-    );
+    // The version and the commit the binary was built from (build.rs);
+    // `--version` is the same.
+    for flag in ["-version", "--version"] {
+        let out = dpc().arg(flag).output().unwrap();
+        assert!(out.status.success());
+        let s = String::from_utf8_lossy(&out.stdout).into_owned();
+        let head = format!("dpc {} (commit ", env!("CARGO_PKG_VERSION"));
+        assert!(s.starts_with(&head) && s.ends_with(")\n"), "{flag}: {s}");
+        let commit = &s[head.len()..s.len() - 2];
+        assert!(!commit.is_empty() && !commit.contains(' '), "{flag}: {s}");
+    }
     // "do not include the filename" (ref 6.4.29, p. 6-35).
     let r = run("version_file", "module m;\n", &["-version"]);
     assert_eq!(r.code, Some(2));

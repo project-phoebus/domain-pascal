@@ -56,7 +56,7 @@ stable:
 	@rev=$$(git rev-parse --verify HEAD) && \
 	rm -rf $(STABLE)/src && mkdir -p $(STABLE)/src $(STABLE)/bin && \
 	git archive HEAD | tar -x -C $(STABLE)/src && \
-	( cd $(STABLE)/src && $(CARGO) build --release --quiet ) && \
+	( cd $(STABLE)/src && DPC_COMMIT=$$rev $(CARGO) build --release --quiet ) && \
 	$(MAKE) --no-print-directory -C $(STABLE)/src runtime RUNTIME_OUT=$(CURDIR)/$(STABLE)/runtime/m68k && \
 	cp $(STABLE)/src/target/release/dpc $(STABLE)/bin/dpc.new && \
 	mv $(STABLE)/bin/dpc.new $(STABLE)/bin/dpc && \

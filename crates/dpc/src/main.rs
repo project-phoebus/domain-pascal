@@ -168,7 +168,7 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [reference options: -config var..., -cond, -idir dir..., -nwarn, -msgs, \
                      -b [pathname], -nb, -natural, -comchk, ... (docs/compiler-options.md)] \
                      [--] file.pas\n       \
-                     dpc -version";
+                     dpc -version | --version";
 
 /// Where to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -816,8 +816,10 @@ fn main() -> ExitCode {
         return print_runtime(t);
     }
     // `pas -version` (ref 6.4.29, p. 6-35): alone, without a file name.
-    if argv.len() == 1 && argv[0] == "-version" {
-        println!("{PROG} {}", env!("CARGO_PKG_VERSION"));
+    // `--version` is the same: the build's commit lets a measurement
+    // record which compiler it was made with (build.rs).
+    if argv.len() == 1 && (argv[0] == "-version" || argv[0] == "--version") {
+        println!("{PROG} {} (commit {})", env!("CARGO_PKG_VERSION"), env!("DPC_COMMIT"));
         return ExitCode::SUCCESS;
     }
     let args = match parse_args(argv.into_iter()) {
