@@ -377,6 +377,18 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
     // Cell labels are numbered across the code sections: each section has
     // its own cells, but all share the one assembly file.
     let mut pool_labels = 0;
+    // The header cells of the data blocks (`size_branches`), and which
+    // routines may use them: those with their data block's base in A5,
+    // a block this unit lays out.
+    let mut a5_cells = A5Cells::default();
+    let a5_ok = |f: &dpc_ir::Function| {
+        f.has_data_base
+            && module.data.iter().any(|d| d.section == f.data_section)
+            && !opts
+                .data_bases
+                .iter()
+                .any(|(s, _)| s.eq_ignore_ascii_case(&f.data_section))
+    };
     for sec in sections {
         out.push('\n');
         out.push_str(&section_directive(&module.name, sec));
@@ -466,7 +478,14 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .collect();
         pool_labels = pool.next;
         if !failed {
-            if let Err(d) = size_branches(&mut routines, base, &outside, &mut pool_labels) {
+            if let Err(d) = size_branches(
+                &mut routines,
+                base,
+                &outside,
+                &mut pool_labels,
+                &mut a5_cells,
+                &a5_ok,
+            ) {
                 errors.push(d);
             } else {
                 encode_outside_short_calls(&mut routines, base, &outside);
@@ -507,7 +526,7 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .iter()
             .any(|(s, _)| s.eq_ignore_ascii_case(&data.section))
         {
-            out.push_str(&data_area(&module.name, data));
+            out.push_str(&data_area(&module.name, data, a5_cells.of(&data.section)));
         }
     }
     for (sect, sym) in &opts.data_bases {
@@ -772,6 +791,8 @@ fn size_branches(
     base: u32,
     outside: &[(String, i64)],
     next_cell: &mut u32,
+    a5_cells: &mut A5Cells,
+    a5_ok: &dyn Fn(&dpc_ir::Function) -> bool,
 ) -> Result<(), Diagnostic> {
     use std::collections::HashMap;
     enum Target {
@@ -783,6 +804,10 @@ fn size_branches(
     // copy's original.
     let mut copies: HashMap<(usize, u32), u32> = HashMap::new();
     let mut origin: HashMap<u32, u32> = HashMap::new();
+    // References turned into header-cell reads: (routine, index, data
+    // section, original cell); their displacements are set once the
+    // layout is final (by the cells' addresses, below).
+    let mut a5_sites: Vec<(usize, usize, String, u32)> = Vec::new();
     'layout: loop {
         let mut at = HashMap::new();
         // (routine, label) -> position
@@ -906,7 +931,13 @@ fn size_branches(
                             Insn::Jmp(crate::insn::Ea::AbsL(format!("{label}b"), 0)),
                             Insn::Label(t2),
                         ];
+                        let grow = with.len() - 1;
                         insns.splice(ii..=ii, with);
+                        for site in a5_sites.iter_mut() {
+                            if site.0 == ri && site.1 > ii {
+                                site.1 += grow;
+                            }
+                        }
                     }
                     Insn::Bsr { target, .. } => {
                         insns[ii] = Insn::Jsr(crate::insn::Ea::AbsL(target, 0));
@@ -938,7 +969,13 @@ fn size_branches(
                         if cond != crate::insn::Cond::T {
                             with.push(Insn::Label(skip));
                         }
+                        let grow = with.len() - 1;
                         insns.splice(ii..=ii, with);
+                        for site in a5_sites.iter_mut() {
+                            if site.0 == ri && site.1 > ii {
+                                site.1 += grow;
+                            }
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -947,14 +984,44 @@ fn size_branches(
             }
         }
         // A constant cell out of a 16-bit displacement's reach (a unit of
-        // more than 32K, DIR's .TEXT, 0x8FD0 bytes): a copy of the cell
-        // after the referring routine (best effort, not byte-identical;
-        // bead domain-pascal-pxov).  The image keeps its references in
-        // reach in its own layout (DIR_$SET_ACL's 0xE52D00 `pea
-        // (0xe4b33c,PC)`, displacement -0x79c6); dpc's layout differs.
-        // A copy is made once per routine and original cell; a reference
-        // its routine's copy does not reach either (a routine of more
-        // than 32K) is refused.
+        // more than 32K, DIR's .TEXT, 0x8FD0 bytes).
+        //
+        // The image's form (bead domain-pascal-kplu; codegen-patterns 4,
+        // "What A5 points at"): the cell's address is kept in a longword
+        // of a header in front of the unit's data block, below A5, and
+        // the reference reads it from there.  DIR's block 0xE7DBF8 holds
+        // 0xE4B33C (a zero long) and 0xE4B230 (0x000E0025), A5 =
+        // 0xE7DC00, and DIR_$CLEANUP pushes the constant with `move.l
+        // (-4,A5),-(SP)` (0xE5365A, 0xE53678, 0xE536D4, 0xE5388E; `2f2d
+        // fffc`) and `move.l (-8,A5),-(SP)` (0xE539DC; the module-local
+        // routine at 0xE53A18, which inherits A5, at 0xE53E62), 0x842A
+        // and more bytes from the cells, where a nearer routine still
+        // has `pea (d,PC)` (DIR_$SET_ACL 0xE52D00 `pea (0xe4b33c,PC)`,
+        // -0x79C6).  So: one header cell per constant cell, shared by
+        // every far reference of the routines with that block in A5,
+        // numbered by the constant cells' addresses, the lowest at -4
+        // (0xE4B230 at -4, 0xE4B33C at -8).  Uncertain: in the image's
+        // layout the order of first far use agrees (0xE4B230's at
+        // 0xE5365A, 0xE4B33C's at 0xE539DC), in dpc's it does not (there
+        // DIR_$SET_ACL's `pea` of the zero long is out of reach and comes
+        // first); the address order gives the image's header in both.
+        // `pea` becomes `move.l (-k,A5),-(SP)` (same length, so the
+        // layout does not move); `lea` becomes `movea.l (-k,A5),An` (not
+        // seen: best effort).  Unlike `pea`, `move.l` sets the condition
+        // codes (N and Z from the address, V and C cleared): no compiled
+        // sequence reads them after an argument push (the selector does
+        // not; a scan of the 110 ../source kernel units' dpc output found
+        // no consumer).  `movea` leaves them, as `lea` does.  Which
+        // references are far follows dpc's layout, which may not be the
+        // image's.
+        //
+        // Otherwise (no data base in the routine, the block owned by
+        // another object with `--data-base`, or a read of the constant's
+        // value): a copy of the cell after the referring routine (best
+        // effort, not byte-identical; bead domain-pascal-pxov).  A copy
+        // is made once per routine and original cell; a reference its
+        // routine's copy does not reach either (a routine of more than
+        // 32K) is refused.
         if !changed {
             for &(ri, ii, at_ext, n) in &cell_refs {
                 let Some(&(ci, cii, cpos)) = cells.get(&n) else {
@@ -964,12 +1031,43 @@ fn size_branches(
                 if (-0x8000..0x8000).contains(&d) {
                     continue;
                 }
+                let orig = origin.get(&n).copied().unwrap_or(n);
+                let f = routines[ri].0;
+                let by_address = matches!(routines[ri].1[ii], Insn::Pea(_) | Insn::Lea { .. });
+                if by_address && a5_ok(f) {
+                    if matches!(routines[ri].1[ii], Insn::Lea { .. }) {
+                        dpc_syntax::diag::best_effort(Diagnostic::error(
+                            f.span,
+                            "a constant's address beyond the reach of a 16-bit displacement \
+                             loaded into an address register (`movea.l` from a data-block \
+                             header cell: not seen) is not supported yet",
+                        ))?;
+                    }
+                    // A placeholder displacement of the final length:
+                    // the cell's offset is set when the layout is final.
+                    a5_sites.push((ri, ii, f.data_section.clone(), orig));
+                    let src = crate::insn::Ea::Disp(-4, DATA_BASE_REG);
+                    let insn = &mut routines[ri].1[ii];
+                    *insn = match insn {
+                        Insn::Pea(_) => Insn::Move {
+                            size: crate::insn::Size::L,
+                            src,
+                            dst: crate::insn::Ea::PreDec(7),
+                        },
+                        Insn::Lea { dst, .. } => Insn::Movea {
+                            size: crate::insn::Size::L,
+                            src,
+                            dst: *dst,
+                        },
+                        _ => unreachable!(),
+                    };
+                    continue 'layout;
+                }
                 dpc_syntax::diag::best_effort(Diagnostic::error(
                     routines[ri].0.span,
                     "a constant cell beyond the reach of a 16-bit displacement (copied after \
                      the routine: not seen) is not supported yet",
                 ))?;
-                let orig = origin.get(&n).copied().unwrap_or(n);
                 let m = match copies.get(&(ri, orig)) {
                     Some(&m) if m == n => {
                         return Err(Diagnostic::error(
@@ -1008,8 +1106,76 @@ fn size_branches(
                     ));
                 }
             }
+            // The header cells: per data section, the constant cells in
+            // address order, the lowest at -4 (see above).
+            let mut order: Vec<(String, u32)> = Vec::new();
+            for (_, _, sect, orig) in &a5_sites {
+                if !order.iter().any(|(s, o)| s == sect && o == orig) {
+                    order.push((sect.clone(), *orig));
+                }
+            }
+            order.sort_by_key(|(_, o)| cells[o].2);
+            for (sect, orig) in &order {
+                a5_cells.cell(sect, *orig);
+            }
+            for (ri, ii, sect, orig) in &a5_sites {
+                let k = a5_cells.cell(sect, *orig);
+                match &mut routines[*ri].1[*ii] {
+                    Insn::Move {
+                        src: crate::insn::Ea::Disp(d, DATA_BASE_REG),
+                        ..
+                    }
+                    | Insn::Movea {
+                        src: crate::insn::Ea::Disp(d, DATA_BASE_REG),
+                        ..
+                    } => *d = -4 * (k as i32 + 1),
+                    _ => unreachable!("a header cell's reference"),
+                }
+            }
             return Ok(());
         }
+    }
+}
+
+/// The address register of the data base (codegen-patterns 4).
+const DATA_BASE_REG: u8 = 5;
+
+/// The header cells of the unit's data blocks ([`size_branches`]): per
+/// Pascal data section, the constant cells whose addresses the header
+/// holds, in order of allocation (the first at `(-4,A5)`); allocated in
+/// the constant cells' address order (`size_branches`).
+#[derive(Default)]
+struct A5Cells {
+    by_section: Vec<(String, Vec<u32>)>,
+}
+
+impl A5Cells {
+    /// The index of constant cell `label`'s header cell in data section
+    /// `section`'s block, allocated on first use.
+    fn cell(&mut self, section: &str, label: u32) -> usize {
+        let i = match self.by_section.iter().position(|(s, _)| s == section) {
+            Some(i) => i,
+            None => {
+                self.by_section.push((section.to_string(), Vec::new()));
+                self.by_section.len() - 1
+            }
+        };
+        let v = &mut self.by_section[i].1;
+        match v.iter().position(|&l| l == label) {
+            Some(k) => k,
+            None => {
+                v.push(label);
+                v.len() - 1
+            }
+        }
+    }
+
+    /// The header cells of data section `section`, in allocation order.
+    fn of(&self, section: &str) -> &[u32] {
+        self.by_section
+            .iter()
+            .find(|(s, _)| s == section)
+            .map_or(&[], |(_, v)| v.as_slice())
     }
 }
 
@@ -1102,14 +1268,27 @@ pub fn data_base_label(sect: &str) -> String {
 /// size (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the
 /// binder rounded is not known; the rounding bytes are zero (TTY's
 /// OS_INIT_DATA 0xE351B0, `00 00` at +0x3A after its last datum).
-fn data_area(unit: &str, data: &dpc_ir::DataArea) -> String {
-    let initialised = !data.init.is_empty();
+///
+/// `header`: the constant cells whose addresses the block's header holds
+/// ([`A5Cells`], allocation order).  The header comes first, the last
+/// allocated lowest, and the block's label (A5) after it, so cell `k` is
+/// at `-4(k+1)` from it: DIR's block 0xE7DBF8 starts `00e4 b33c 00e4
+/// b230` and its A5 is 0xE7DC00 (codegen-patterns 4).  A block with a
+/// header has contents (the addresses are relocated).
+fn data_area(unit: &str, data: &dpc_ir::DataArea, header: &[u32]) -> String {
+    let initialised = !data.init.is_empty() || !header.is_empty();
     let mut out = format!(
-        "\n\t.section\t\"{}\",\"aw\",{}\n\t.balign\t4\n{}:\n",
+        "\n\t.section\t\"{}\",\"aw\",{}\n\t.balign\t4\n",
         data_section_name(unit, &data.section, initialised),
         if initialised { "@progbits" } else { "@nobits" },
-        data_base_label(&data.section)
     );
+    for &n in header.iter().rev() {
+        out.push_str(&format!(
+            "\t.long\t{}\t| header cell: a far constant's address\n",
+            crate::insn::pool_label(n)
+        ));
+    }
+    out.push_str(&format!("{}:\n", data_base_label(&data.section)));
     let size = data.size.div_ceil(4) * 4;
     let (bytes, addrs) = data_bytes(data, size);
     // Labels of `define`d variables and addresses, in offset order (a
@@ -1364,6 +1543,7 @@ mod tests {
             frame_size: 0,
             result: None,
             loads_data_base: false,
+            has_data_base: false,
             data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),
@@ -1576,6 +1756,37 @@ mod tests {
              \t.space\t6\n\t.globl\tPROC1_$Y\nPROC1_$Y:\n\
              \t.space\t8\n"
         );
+    }
+
+    /// A block with header cells (bead domain-pascal-kplu): the far
+    /// constants' addresses first, the last allocated lowest, then the
+    /// block's label, so the first allocated is at `(-4,A5)` (DIR
+    /// 0xE7DBF8: `00e4 b33c 00e4 b230`, A5 = 0xE7DC00); with contents.
+    #[test]
+    fn data_area_header_cells_sit_below_the_label() {
+        let data = dpc_ir::DataArea {
+            section: ".data".into(),
+            size: 6,
+            globals: vec![("DIR_$X".into(), 2)],
+            init: vec![],
+        };
+        assert_eq!(
+            data_area("dir", &data, &[7, 3]),
+            "\n\t.section\t\".moddata.DIR\",\"aw\",@progbits\n\t.balign\t4\n\
+             \t.long\t.Lc3\t| header cell: a far constant's address\n\
+             \t.long\t.Lc7\t| header cell: a far constant's address\n\
+             .Ldata:\n\
+             \t.space\t2\n\t.globl\tDIR_$X\nDIR_$X:\n\
+             \t.space\t6\n"
+        );
+        let mut cells = A5Cells::default();
+        assert_eq!(cells.cell(".data", 7), 0);
+        assert_eq!(cells.cell("wired_data", 9), 0);
+        assert_eq!(cells.cell(".data", 3), 1);
+        assert_eq!(cells.cell(".data", 7), 0);
+        assert_eq!(cells.of(".data"), &[7, 3]);
+        assert_eq!(cells.of("wired_data"), &[9]);
+        assert!(cells.of("other").is_empty());
     }
 
     /// An overlay section (ref 3.14): a common symbol of the section's

@@ -1581,6 +1581,7 @@ fn lower_routine_in_context(
         }),
         // Decided once every routine is lowered (`set_loads_data_base`).
         loads_data_base: false,
+        has_data_base: false,
         data_absolute: false,
         value_params: value_params(p, r),
         // The hidden result address first: it is argument 1.
@@ -1873,6 +1874,12 @@ fn set_loads_data_base(
         } else {
             uses[i] || (always_mode[i] && has[i])
         };
+        // A routine that inherits the base and uses the data has callers
+        // that use it too (`uses` is closed over the calls of inheriting
+        // callees), so each of them has it: by induction, the loading
+        // routine up the chain has loaded it.
+        f.has_data_base =
+            f.loads_data_base || (uses[i] && has[i] && !absolute[i] && !f.is_empty_procedure());
     }
     Ok(())
 }

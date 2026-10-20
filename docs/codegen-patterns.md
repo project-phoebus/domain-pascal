@@ -2850,8 +2850,33 @@ variables.  Each module's static data is a data segment, addressed off
       `(-8,A5)` and `(-4,A5)` hold the addresses of two constants in
       DIR's code (0xE4B33C: a zero long; 0xE4B230: 0x000E0025) and are
       pushed as by-address arguments (`move.l (-4,A5),-(SP)` for
-      CRASH_SYSTEM at 0xE5365A).  DIR's code is 0x8FD0 bytes,
-      more than `pea (d16,PC)` reaches, which may be why (Uncertain).
+      CRASH_SYSTEM at 0xE5365A).  **Verified as the far form of `pea
+      (d,PC)`** (bead domain-pascal-kplu): the six reads of the header
+      are all `move.l (-k,A5),-(SP)` (`2f2d fffc` at 0xE5365A, 0xE53678,
+      0xE536D4, 0xE5388E in DIR_$CLEANUP; `2f2d fff8` at 0xE539DC and,
+      in the module-local routine at 0xE53A18, which inherits A5, at
+      0xE53E62), each 0x842A or more bytes after its constant, beyond
+      `(d16,PC)`; references in reach keep `pea (d,PC)` (DIR_$SET_ACL
+      0xE52D00, `pea (0xe4b33c,PC)`, -0x79C6, and the earlier `pea
+      (0xe4b230,PC)` at 0xE4B032..0xE4B824).  One header cell per
+      constant, shared by the far references; -4 holds 0xE4B230, -8
+      0xE4B33C.  **Uncertain** which rule numbers them: the constants'
+      address order (lowest at -4) and the order of first far use in
+      code order (0xE4B230's at 0xE5365A before 0xE4B33C's at 0xE539DC)
+      agree in the image's layout, but not in dpc's, where DIR_$SET_ACL's
+      `pea` of the zero long is out of reach too and comes first.
+      **Implemented** (`emit.rs`, `size_branches` and `data_area`): a
+      far `pea` in a routine whose data block is in A5 (it loads it, or
+      inherits it and uses the data: `dpc_ir::Function::has_data_base`)
+      reads a header cell, numbered in the constants' address order,
+      which gives the image's header under both layouts; the block's
+      section starts with the cells, the highest-numbered first, and its
+      label (A5) follows them.  `move.l` sets the condition codes where
+      `pea` does not; no consumer follows an argument push (a scan of
+      the 110 ../source units' dpc output found none).  Which references
+      are far follows dpc's layout of the unit; for ../source's DIR it
+      gives the image's two cells (the zero long at block+0, i.e. -8,
+      0x000E0025 at -4), so the block is the map's 0x212C bytes.
     - Why the 4-byte blocks exist and why A5 sits after them is
       Uncertain.  In DIR, too, A5 sits after a header reached at negative
       offsets; whether the 4-byte blocks are an empty such header is a
@@ -11167,7 +11192,19 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
 - **Module data blocks (Verified from the map):** all 161 `D` segments
   start at a multiple of 4 and have a size that is a multiple of 4
   (PROC1_ 0xE254E8, size 0xCC4).  Whether the compiler or the binder
-  rounded is not known.
+  rounded is not known.  The rounding is to 4, not 8: 87 of the 161
+  sizes are 4 mod 8 (and 75 starts), with no regard to what the block
+  holds (bead domain-pascal-2u4o).  dpc rounds the end of the last
+  variable up to 4 (`emit.rs`, `data_area`); `tools/blocksizes.py`
+  compares every block of a dpc build with its map segment (../source
+  52d8d305: 98 of 100 the map's size).  The two longer ones, FLP_ (0x140
+  against 0x13C) and MST_WIRED (0x168 against 0x164), come from
+  ../source's stand-ins for the rounding bytes after a trailing boolean
+  (`flp_pad_139: array[1..3] of char` at +0x139, `unused_163: char` at
+  +0x163), which dpc places at the next word, as it does every byte
+  variable (below, "Byte-sized module variables"), so they end at
+  +0x13D and +0x165.  Without them the blocks are 0x13C and 0x164 (the
+  boolean ends the block at +0x139 and +0x163, rounded to 4).
 - **Defined and other variables interleave in a block (Verified from
   the map and the code; lead: ../source pascal-translation-notes
   finding 26).**  LOG_ 0xE2B280 (WIRED_DATA, size 0x1C) has the map
@@ -14106,16 +14143,21 @@ followed; execution test `be_u_kinds`.
   `jsr 0xe4b340`, dir_$map_page, 0x82BE bytes back from the
   instruction).  Which calls take
   it follows dpc's layout of the unit (`emit.rs`, `size_branches`),
-  which may differ from the image's.  Best effort, no site: a
+  which may differ from the image's.  A constant cell out of a `pea
+  (d,PC)` reference's reach, in a routine with its data block in A5:
+  the image's header cell below A5 (Verified, bead domain-pascal-kplu;
+  section 4, "What A5 points at": DIR_$CLEANUP 0xE5365A `move.l
+  (-4,A5),-(SP)`, while DIR_$SET_ACL 0xE52D00, in reach, keeps `pea
+  (0xe4b33c,PC)`, -0x79C6); a `lea (d,PC),An` out of reach becomes
+  `movea.l (-k,A5),An` (best effort, no site).  Best effort, no site: a
   conditional branch out of reach inverted around `jmp abs.l`, and a
-  constant cell out of a `(d,PC)` reference's reach copied after the
-  referring routine (the image keeps its references in reach: DIR_$SET_ACL's
-  0xE52D00 `pea (0xe4b33c,PC)`, -0x79c6), refused where the copy does not
-  reach either (a routine of more than 32K); a `dbf` out of reach,
+  constant cell out of reach of a routine with no data base, or read for
+  its value, copied after the referring routine, refused where the copy
+  does not reach either (a routine of more than 32K); a `dbf` out of reach,
   `dbf Dn,1f; bra.s 2f; 1: jmp (head).l; 2:`.  `tools/dispcheck.py`
   checks every 16-bit displacement of what exectest and linktest
-  assemble, gas wrapping out-of-range ones silently.  Execution test
-  `be_far`.
+  assemble, gas wrapping out-of-range ones silently.  Execution tests
+  `be_far`, `be_far_a5`.
 - **An array index of boolean type** (5.2; bead domain-pascal-pxov): the
   ordinal from the top bit, `lsr.b #7`, then the byte widened to the
   word index (SIO2681_$SET_LINE 0xE1D2F0..0xE1D2FC `smi D1; clr.w D5;

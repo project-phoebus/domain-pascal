@@ -24753,6 +24753,7 @@ mod tests {
             frame_size,
             result,
             loads_data_base: false,
+            has_data_base: false,
             data_absolute: false,
             value_params: Vec::new(),
             address_params: Vec::new(),

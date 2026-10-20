@@ -213,6 +213,17 @@ pub struct Function {
     /// need it.  The rule is in `lower.rs` (`set_loads_data_base`), with
     /// [`DataBaseOptions`].
     pub loads_data_base: bool,
+    /// The unit's data area of [`Self::data_section`] is addressable in
+    /// the routine for its whole body: it loads the base
+    /// ([`Self::loads_data_base`]), or inherits it and uses the data
+    /// (directly or through an `internal` callee that inherits it), so
+    /// every caller has made it addressable too.  False for a routine
+    /// that neither loads nor needs the base: the register then holds
+    /// its caller's value, whatever that is.  The target may reach
+    /// header cells of the area through it (m68k: DIR's `(-4,A5)`,
+    /// codegen-patterns 4; bead domain-pascal-kplu).  Set with
+    /// [`Self::loads_data_base`] (`lower.rs`, `set_loads_data_base`).
+    pub has_data_base: bool,
     /// The routine does not load the data base but addresses the unit's
     /// data area from its absolute address (codegen-patterns 4:
     /// AUDIT_$SUSPEND 0xE70DC0, REM_NAME_$REGISTER_SERVER 0xE4A4B2 `lea
