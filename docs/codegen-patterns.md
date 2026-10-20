@@ -5467,7 +5467,13 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     operand order unknown); an address formed with a `lea` or an
     immediate together with the address a by-address parameter's slot
     holds in a data register since the entry (12.2; no site seen); the
-    sum of two addresses; `&`, `!`, `xor`, `*`, shifts.
+    sum of two addresses; `*`, shifts; `&`, `!`, `xor` other than with a
+    constant.
+  - **`&` with a constant** (bead domain-pascal-sq4a): the address in a
+    new data register, then `andi.l` (FLP_$DINIT 0xE3E17A..0xE3E180
+    `lea (0x80,A5),A0; move.l A0,D1; andi.l #0x3ff,D1`, its one site);
+    `!` and `xor` with a constant the same form, **best effort** (no
+    site; exec test `be_sq4a`).
   - **Comparisons** with an address: not implemented (refused; bead
     domain-pascal-awzk).  The image compares a symbol's address as an
     immediate operand, `cmp.l
@@ -8063,7 +8069,9 @@ widening); a constant selector (SMD_$INIT's, one site); a signed byte
 selector (boolean); a function call in the selector (CAL_$WEEKDAY
 0xE686F6 compares D0 after `move.w D0,D1`, not explained); a table on a
 longword selector not starting at 0, or whose lowest label is below -8;
-an empty `otherwise` part; parts ending in calls of the same argument
+an empty `otherwise` part (**best effort**, bead domain-pascal-sq4a: the
+`case` without `otherwise`, FIM_$BUILD_DF's one site not compared);
+parts ending in calls of the same argument
 bytes when a pop is needed (shared pop, 1.1); arms that are only a jump
 in a jump table (`return`: its entry would name a `bra`, and no threaded
 table entry is seen, 7.1 "Branch threading"; in a compare chain the
@@ -8993,6 +9001,17 @@ scripts besides, not kept, are named as such below; re-check sites with
     or without a call: `tst.w T; bmi EXIT; move.w T,Dc`, the copy exempt
     from R2 (`regs.rs`, `allocate_apart`'s `coalesce`; `isel.rs`,
     `for_count_tested`);
+  - a run-time lower bound, ascending: **best effort (not
+    byte-identical; bead domain-pascal-sq4a)**, `to` into `T`, `sub.w
+    from,T`, `blt EXIT` (the image's `bmi`, which would skip a count
+    above 32767; `bcs` for an unsigned index, no site), `move.w
+    T,Dc`, the index `move.w from,Di` (`from` read a second time, as
+    KBD's module-local 0xE1CA10..0xE1CA1C; a volatile `from`, or one
+    with a call, is read once into a data register both use, no site
+    looked at); the image interleaves the
+    two bounds (0xE010AC, 0xE02BFE) and keeps the count in `T` at KBD's
+    site, not modelled.  Arrays the body reaches by the index
+    are indexed each iteration, not stepped (exec test `be_for_rtfrom`);
   - a `for` loop of the `Fill` shape stays as in section 7;
   - arrays of elements wider than a byte indexed by the index itself
     and reached through a pointer variable the body leaves unchanged
@@ -9249,8 +9268,16 @@ and `tools/loopalign.py`'s `head_rows`, not kept):
   routine, one statement per label, a `goto`'s label prefixes a
   statement);
 - lowering: `L: s` is `Label(L)` then `s` in the same sequence; jumps
-  into loops, `with` and `case` from outside are refused (question 30),
-  as are non-local `goto`s;
+  into loops, `with` and `case` from outside are **best effort (bead
+  domain-pascal-sq4a; question 30 pending)**: a plain jump to the label,
+  the statement entered not set up, as the original compiler evidently
+  accepted (MST_$TOUCH 0xE0DD68 `bcc.w 0xE0DF12` into a `with`;
+  MST_$INVALIDATE, MST_$FORK), refused where the code at the label can
+  run on to an entered `for` loop's end (its `dbf` or step on a count
+  never loaded) or reads an entered `with`'s record (`routine_labels`,
+  `entry_unset`; the kernel's three sites do neither); a `while` or
+  `repeat` reached at its end tests its condition (accepted);
+  non-local `goto`s are refused;
 - selection: `goto` a `bra`; `if c then goto L` and `if c then T else
   goto L` as above; a label that a `goto` selected later still branches
   to gets the loop head's `Align4` (dropped in non-aligning routines),
@@ -9647,7 +9674,8 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     refuses any word left shift used as a longword).  Stored as a word,
     the byte's shift is a word shift (TPAD_$DATA 0xE69376 `lsl.w #6`).
     Other shifts of a byte used as a longword need the byte widened to a
-    longword (`move.b; andi.l #0xff`): refused, as before.
+    longword (`move.b; andi.l #0xff`): best effort (bead
+    domain-pascal-sq4a, "Widening and narrowing" below).
   - A count of 16 or more into a 16-bit target (`w := lshft(w, 16)`,
     `v := rshft(v, 16)` of a `0..65535`): the narrowed word shift leaves
     only zeros; no site: refused with its own message.  An `integer`'s
@@ -9785,14 +9813,19 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     computed operand with a pad, except an M$ARITH result as `a`, whose
     call and pop come first (0xE1695C..0xE16970: `M$DIS$LLW`, `addq.w`,
     then the pad and `move.l D0,-(SP)` for `M$MIS$LLW`).  Two computed
-    operands are refused: the order differs (0xE10A86..0xE10A98 `b` first,
-    0xE69560..0xE69572 `a` first);
+    operands: the order differs (0xE10A86..0xE10A98 `b` first,
+    0xE69560..0xE69572 `a` first); **best effort** (beads
+    domain-pascal-5kgg, and -sq4a with calls in them), `a` first, then
+    `b`, then the pushes; refused only when `b` calls while `a`'s value
+    is a call's result in D0;
   - the result is used in D0 and modified there (0xE39C3E `add.l
     (14,A6),D0`; 0xE14C0A `tst.l D0; bpl; addi.l #255,D0`; CAL_$WEEKDAY
     0xE686C8 `muls.w #153,D0`); an unsigned `M$OIU$WLW` remainder used as a
     longword is zero-extended into a new register (0xE07FF6 `clr.l D1;
     move.w D0,D1`; 0xE07A3A, 0xE07DD2, 0xE5AA4C); the 16 `M$OIS$WLW`
-    results are all used as words (`dpc` refuses one used as a longword);
+    results are all used as words; one used as a longword is **best
+    effort** (bead domain-pascal-sq4a): copied and sign-extended, `move.w
+    D0,Dn; ext.l Dn`, as the unsigned one is zero-extended;
   - a non-M$ARITH word result kept in a register is widened the same
     way: of 71 `jsr ML_$SPIN_LOCK` sites, 68 store `move.w D0,(d,A6)`
     and the 3 that keep the token in a register zero-extend it, `clr.l
@@ -9953,7 +9986,12 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   (0xE177A6..0xE177AC), or `andi.l #0xffff` on a value already in a
   register (0xE11818); a `char` widened to a word with `clr.w Dn; move.b
   x,Dn` (0xE0E316..0xE0E318).  A byte widened to a longword occurs as
-  `move.b; andi.l #0xff` (0xE00864..0xE00868): rejected.
+  `move.b; andi.l #0xff` (0xE00864..0xE00868) and as `clr.l Dn; move.b
+  x,Dn` (MST_$LOOKUP_OBJECT 0xE43D52..0xE43D54), both from memory, no
+  rule found: **best effort (bead domain-pascal-sq4a)**, `clr.l; move.b`
+  from memory or a register, `andi.l #0xff` on a byte computed in a new
+  register (exec test `be_sq4a`); a signed byte, `ext.w; ext.l`, no
+  site.
   **A word sum, difference, product or negation used as a longword is
   computed in 32 bits, its operands widened first** (ref 4.3.1, p. 4-5:
   "The compiler computes operands smaller than 32 bits with 32 bits of

@@ -3195,18 +3195,417 @@ fn routine_labels(stmts: &[SStmt]) -> Res<Vec<String>> {
                 entered = &entered[1..];
             }
         }
-        // TODO(ref-question): open question 30 (p. 4-95 against p. D-4);
-        // refused until the owner rules.
+        // TODO(ref-question): open question 30 (p. 4-95 against p. D-4).
+        // Best effort pending the owner's ruling (bead domain-pascal-sq4a;
+        // docs/reference-clarifications.md, question 30): a plain jump to
+        // the label, as the original compiler evidently accepted (MST_$TOUCH
+        // 0xE0DD68 `bcc.w 0xE0DF12`, a `goto` into a `with`; MST_$INVALIDATE
+        // 0xE442B8 likewise).  The statement entered is not set up: a loop's
+        // counter and a `with`'s base are whatever they hold, so code at the
+        // label that reads them, or reaches the loop's end, is undefined, as
+        // the reference leaves it.
         if entered.iter().any(|p| p.kind != Entered::If) {
-            return Err(unsupported(
+            // Refused where that undefined state is reached: the code at
+            // the label can run on to a `for` loop's end (its `dbf` or
+            // step on a count never loaded) or read an entered `with`'s
+            // record (its base never evaluated).  The kernel's jumps
+            // (MST_$TOUCH, MST_$FORK: leave by `goto` or `return`;
+            // MST_$INVALIDATE: into a `with` only, leaving by `exit`) do
+            // neither.  A `while` or `repeat` reached at its end tests its
+            // condition, which needs no set up; a `case` arm none.
+            for p in entered {
+                if let Some(why) = entry_unset(stmts, p, name) {
+                    return Err(unsupported(*span, why));
+                }
+            }
+            best_effort(
                 *span,
                 "a `goto` into a `for`, `while`, `repeat`, `with` or `case` statement from \
                  outside it (illegal by ref p. 4-95, permitted by Appendix D p. D-4: open \
                  question 30) is",
-            ));
+            )?;
         }
     }
     Ok(defs.into_iter().map(|(n, _)| n).collect())
+}
+
+/// Whether a `goto` to `label` entering statement part `p` from outside
+/// ([`routine_labels`]) reaches state the entered statement sets up: for
+/// a `for`, the code from the label may run on to the loop's end (the
+/// count and index never loaded); for a `with`, it may read one of the
+/// statement's records (the base never evaluated).  The reason, or `None`.
+/// A `goto` to a label inside the statement is followed (the code from
+/// that label is taken too); conservative otherwise: a statement other
+/// than `goto`, `return` or `exit` may complete; a loop inside holding
+/// the label is taken from the label, then whole (and on after it) when
+/// that code may reach its end or leave it by `exit` (MST_$FORK's `fail`
+/// in a `with` in a `for` in a `for`, left by `return`).
+fn entry_unset(stmts: &[SStmt], p: &Part, label: &str) -> Option<&'static str> {
+    fn find(stmts: &[SStmt], id: usize) -> Option<&SStmt> {
+        stmts.iter().find_map(|s| find_one(s, id))
+    }
+    fn find_one(s: &SStmt, id: usize) -> Option<&SStmt> {
+        if s as *const SStmt as usize == id {
+            return Some(s);
+        }
+        match &s.kind {
+            SStmtKind::Labeled { stmt, .. }
+            | SStmtKind::While { body: stmt, .. }
+            | SStmtKind::For { body: stmt, .. }
+            | SStmtKind::With { body: stmt, .. } => find_one(stmt, id),
+            SStmtKind::Compound(b) => find(&b.stmts, id),
+            SStmtKind::Repeat { body, .. } => find(body, id),
+            SStmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => find_one(then_branch, id).or_else(|| else_branch.as_ref().and_then(|e| find_one(e, id))),
+            SStmtKind::Case {
+                arms, otherwise, ..
+            } => arms
+                .iter()
+                .find_map(|a| find_one(&a.stmt, id))
+                .or_else(|| otherwise.as_ref().and_then(|o| find(o, id))),
+            _ => None,
+        }
+    }
+    let s = find(stmts, p.stmt)?;
+    let (SStmtKind::For { body, .. } | SStmtKind::With { body, .. }) = &s.kind else {
+        return None;
+    };
+    let mut inner = Vec::new();
+    labels_in(std::slice::from_ref(s), &mut inner);
+    let mut tail = Tail {
+        label: label.to_string(),
+        seen: Vec::new(),
+        loops: 0,
+        next: false,
+    };
+    // The labels reached so far, and whether the code from one runs on
+    // to the end of the statement's body.
+    let (mut todo, mut done, mut end) = (vec![label.to_string()], Vec::new(), false);
+    while let Some(l) = todo.pop() {
+        if done.contains(&l) {
+            continue;
+        }
+        tail.label = l.clone();
+        done.push(l);
+        end |= tail.enter(body) == Some(true);
+        let mut gotos = Vec::new();
+        for t in &tail.seen {
+            gotos_in(t, &mut gotos);
+        }
+        todo.extend(gotos.into_iter().filter(|g| inner.contains(g) && !done.contains(g)));
+    }
+    match &s.kind {
+        SStmtKind::For { .. } => (end || tail.next).then_some(
+            "a `goto` into a `for` statement whose code at the label can reach the loop's end \
+             (its count and index never set up; open question 30) is",
+        ),
+        SStmtKind::With { items, .. } => {
+            let reads = tail.seen.iter().any(|t| {
+                stmt_any(t, &|e| {
+                    matches!(&e.kind, ExprKind::WithRecord(w) if items.iter().any(|(i, _)| i == w))
+                })
+            });
+            reads.then_some(
+                "a `goto` into a `with` statement whose code at the label reads its record (the \
+                 record never evaluated; open question 30) is",
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The labels `goto` statements in `s` name, at any depth.
+fn gotos_in(s: &SStmt, out: &mut Vec<String>) {
+    match &s.kind {
+        SStmtKind::Goto(l) => out.push(l.clone()),
+        SStmtKind::Labeled { stmt, .. }
+        | SStmtKind::While { body: stmt, .. }
+        | SStmtKind::For { body: stmt, .. }
+        | SStmtKind::With { body: stmt, .. } => gotos_in(stmt, out),
+        SStmtKind::Compound(b) => b.stmts.iter().for_each(|t| gotos_in(t, out)),
+        SStmtKind::Repeat { body, .. } => body.iter().for_each(|t| gotos_in(t, out)),
+        SStmtKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            gotos_in(then_branch, out);
+            if let Some(e) = else_branch {
+                gotos_in(e, out);
+            }
+        }
+        SStmtKind::Case {
+            arms, otherwise, ..
+        } => {
+            arms.iter().for_each(|a| gotos_in(&a.stmt, out));
+            if let Some(o) = otherwise {
+                o.iter().for_each(|t| gotos_in(t, out));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The labels defined in `stmts`, at any depth.
+fn labels_in(stmts: &[SStmt], out: &mut Vec<String>) {
+    for s in stmts {
+        match &s.kind {
+            SStmtKind::Labeled { label, stmt } => {
+                out.push(label.clone());
+                labels_in(std::slice::from_ref(stmt), out);
+            }
+            SStmtKind::While { body, .. }
+            | SStmtKind::For { body, .. }
+            | SStmtKind::With { body, .. } => labels_in(std::slice::from_ref(body), out),
+            SStmtKind::Compound(b) => labels_in(&b.stmts, out),
+            SStmtKind::Repeat { body, .. } => labels_in(body, out),
+            SStmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                labels_in(std::slice::from_ref(then_branch), out);
+                if let Some(e) = else_branch {
+                    labels_in(std::slice::from_ref(e), out);
+                }
+            }
+            SStmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                for a in arms {
+                    labels_in(std::slice::from_ref(&a.stmt), out);
+                }
+                if let Some(o) = otherwise {
+                    labels_in(o, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The code a jump to `label` runs inside a statement ([`entry_unset`]):
+/// [`Tail::enter`] collects the whole statements it may run in `seen`; a
+/// `goto` ends the code there (the code from a label inside the entered
+/// statement is taken separately, [`entry_unset`]).
+struct Tail<'s> {
+    label: String,
+    seen: Vec<&'s SStmt>,
+    /// The loops inside the entered statement that hold the label and
+    /// enclose the code taken: an `exit` there leaves only such a loop.
+    loops: usize,
+    /// A `next` outside such loops was taken: it goes to the entered
+    /// loop's end (its step and `dbf`).
+    next: bool,
+}
+
+impl<'s> Tail<'s> {
+    /// From the label, inside `s`: `None` when `s` does not contain it,
+    /// otherwise whether control may complete `s`.
+    fn enter(&mut self, s: &'s SStmt) -> Option<bool> {
+        match &s.kind {
+            SStmtKind::Labeled { label, stmt } if *label == self.label => {
+                self.take(stmt);
+                Some(self.completes(stmt))
+            }
+            SStmtKind::Labeled { stmt, .. } => self.enter(stmt),
+            SStmtKind::Compound(b) => self.seq(&b.stmts),
+            SStmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self
+                .enter(then_branch)
+                .or_else(|| else_branch.as_ref().and_then(|e| self.enter(e))),
+            SStmtKind::Case {
+                arms, otherwise, ..
+            } => arms
+                .iter()
+                .find_map(|a| self.enter(&a.stmt))
+                .or_else(|| otherwise.as_ref().and_then(|o| self.seq(o))),
+            SStmtKind::With { body, .. } => self.enter(body),
+            // A loop inside holding the label: the code from it, and when
+            // that may run on to the loop's end (or leave it by `exit`),
+            // the whole loop again and what follows it.
+            SStmtKind::While { body, .. } | SStmtKind::For { body, .. } => {
+                self.loops += 1;
+                let r = self.enter(body);
+                self.loops -= 1;
+                self.again(s, r?)
+            }
+            SStmtKind::Repeat { body, .. } => {
+                self.loops += 1;
+                let r = self.seq(body);
+                self.loops -= 1;
+                self.again(s, r?)
+            }
+            _ => None,
+        }
+    }
+
+    /// Statement `s` may run: into [`Tail::seen`], and a `next` in it
+    /// outside its loops noted ([`Tail::next`]) when no loop inside the
+    /// entered statement encloses it.
+    fn take(&mut self, s: &'s SStmt) {
+        fn free_next(s: &SStmt) -> bool {
+            match &s.kind {
+                SStmtKind::Next => true,
+                SStmtKind::Labeled { stmt, .. } | SStmtKind::With { body: stmt, .. } => {
+                    free_next(stmt)
+                }
+                SStmtKind::Compound(b) => b.stmts.iter().any(free_next),
+                SStmtKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => free_next(then_branch) || else_branch.as_ref().is_some_and(|e| free_next(e)),
+                SStmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    arms.iter().any(|a| free_next(&a.stmt))
+                        || otherwise.as_ref().is_some_and(|o| o.iter().any(free_next))
+                }
+                _ => false,
+            }
+        }
+        if self.loops == 0 && free_next(s) {
+            self.next = true;
+        }
+        self.seen.push(s);
+    }
+
+    /// [`Tail::enter`] of loop `s` once the code from the label in its
+    /// body may complete (`completes`).
+    fn again(&mut self, s: &'s SStmt, completes: bool) -> Option<bool> {
+        if completes {
+            self.seen.push(s);
+        }
+        Some(completes)
+    }
+
+    /// [`Tail::enter`] for a statement sequence: the statement holding the
+    /// label, then those after it while each may complete.
+    fn seq(&mut self, stmts: &'s [SStmt]) -> Option<bool> {
+        let i = stmts.iter().position(|s| {
+            let mut l = Vec::new();
+            labels_in(std::slice::from_ref(s), &mut l);
+            l.iter().any(|n| *n == self.label)
+        })?;
+        if !self.enter(&stmts[i])? {
+            return Some(false);
+        }
+        for t in &stmts[i + 1..] {
+            self.take(t);
+            if !self.completes(t) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
+    /// Whether control may leave `s` at its end (conservative).
+    fn completes(&self, s: &SStmt) -> bool {
+        match &s.kind {
+            SStmtKind::Goto(_) | SStmtKind::Return => false,
+            // Out of a loop inside holding the label: on after that loop.
+            SStmtKind::Exit => self.loops > 0,
+            SStmtKind::Labeled { stmt, .. } | SStmtKind::With { body: stmt, .. } => {
+                self.completes(stmt)
+            }
+            SStmtKind::Compound(b) => b.stmts.iter().all(|t| self.completes(t)),
+            SStmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.completes(then_branch)
+                    || else_branch.as_ref().is_none_or(|e| self.completes(e))
+            }
+            SStmtKind::Case {
+                arms, otherwise, ..
+            } => {
+                arms.iter().any(|a| self.completes(&a.stmt))
+                    || otherwise
+                        .as_ref()
+                        .is_none_or(|o| o.iter().all(|t| self.completes(t)))
+            }
+            _ => true,
+        }
+    }
+}
+
+/// Whether `pred` holds of an expression in `s`, at any depth.
+fn stmt_any(s: &SStmt, pred: &dyn Fn(&SExpr) -> bool) -> bool {
+    fn expr(e: &SExpr, f: &dyn Fn(&SExpr) -> bool) -> bool {
+        f(e) || match &e.kind {
+            ExprKind::Const
+            | ExprKind::Var { .. }
+            | ExprKind::Result { .. }
+            | ExprKind::WithRecord(_)
+            | ExprKind::RoutineAddr(_) => false,
+            ExprKind::Field { base, .. } => expr(base, f),
+            ExprKind::Index { base, index, .. } => expr(base, f) || expr(index, f),
+            ExprKind::Deref(x) | ExprKind::Unary { operand: x, .. } | ExprKind::Transfer(x) => {
+                expr(x, f)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => expr(lhs, f) || expr(rhs, f),
+            ExprKind::SetCons(items) => items
+                .iter()
+                .any(|(a, b)| expr(a, f) || b.as_ref().is_some_and(|b| expr(b, f))),
+            ExprKind::Call(c) => call(c, f),
+            ExprKind::Builtin { args, .. } => args.iter().any(|a| expr(a, f)),
+        }
+    }
+    fn call(c: &SCall, f: &dyn Fn(&SExpr) -> bool) -> bool {
+        c.args.iter().any(|a| expr(&a.expr, f))
+            || matches!(&c.callee, SCallee::Pointer(x) if expr(x, f))
+    }
+    let all = |ss: &[SStmt]| ss.iter().any(|t| stmt_any(t, pred));
+    match &s.kind {
+        SStmtKind::Empty
+        | SStmtKind::Goto(_)
+        | SStmtKind::Exit
+        | SStmtKind::Next
+        | SStmtKind::Return => false,
+        SStmtKind::Labeled { stmt, .. } => stmt_any(stmt, pred),
+        SStmtKind::Assign { target, value } => expr(target, pred) || expr(value, pred),
+        SStmtKind::Call(c) => call(c, pred),
+        SStmtKind::Builtin { args, .. } => args.iter().any(|a| expr(a, pred)),
+        SStmtKind::Compound(b) => all(&b.stmts),
+        SStmtKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr(cond, pred)
+                || stmt_any(then_branch, pred)
+                || else_branch.as_ref().is_some_and(|e| stmt_any(e, pred))
+        }
+        SStmtKind::Case {
+            expr: x,
+            arms,
+            otherwise,
+        } => {
+            expr(x, pred)
+                || arms.iter().any(|a| stmt_any(&a.stmt, pred))
+                || otherwise.as_ref().is_some_and(|o| all(o))
+        }
+        SStmtKind::While { cond, body } => expr(cond, pred) || stmt_any(body, pred),
+        SStmtKind::Repeat { body, cond } => all(body) || expr(cond, pred),
+        SStmtKind::For {
+            var,
+            from,
+            to,
+            body,
+            ..
+        } => expr(var, pred) || expr(from, pred) || expr(to, pred) || stmt_any(body, pred),
+        SStmtKind::With { items, body } => {
+            items.iter().any(|(_, r)| expr(r, pred)) || stmt_any(body, pred)
+        }
+    }
 }
 
 /// The statements of a statement sequence, with `begin ... end` blocks
@@ -3929,10 +4328,15 @@ impl Cx<'_> {
                 let o = self.seq(ss)?;
                 if o.is_empty() {
                     // Whether the original dispatched to the end, and how
-                    // the last arm ended, is not seen.
-                    return Err(unsupported(s.span, "an empty `otherwise` part is"));
+                    // the last arm ended, is not seen.  Best effort (not
+                    // byte-identical): it does nothing, so it is the `case`
+                    // without `otherwise`, an unmatched selector on to the
+                    // end (ref "Case", pp. 4-36..4-37).
+                    best_effort(s.span, "an empty `otherwise` part is")?;
+                    None
+                } else {
+                    Some(o)
                 }
-                Some(o)
             }
             None => None,
         };

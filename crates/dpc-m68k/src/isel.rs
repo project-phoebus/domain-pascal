@@ -8907,7 +8907,7 @@ impl Selector {
         // modelled reaches its elements by index, the index in a register
         // ([`stepped_arrays`]'s `Ok(Err(_))`; bead domain-pascal-kaxz).
         let indexed = arrays.is_err();
-        let arrays = match arrays {
+        let mut arrays = match arrays {
             Ok(a) => a,
             Err(why) => {
                 best_effort(span, why)?;
@@ -8939,6 +8939,11 @@ impl Selector {
         // The count's and the index's set-up instructions (an in-place
         // pointer's `movea.l` goes before the last of them, [`Self::step_in_place`]).
         let mut setup = Vec::new();
+        // A run-time lower bound's operand, the index's initial value
+        // (the `(None, _)` arm below), and whether the arrays the body
+        // reaches by the index are indexed rather than stepped.
+        let mut rt_from: Option<Ea> = None;
+        let mut rt_indexed = false;
         let (count, init) = match (konst(&l.from), konst(&l.to)) {
             (Some(a), Some(b)) => {
                 let n = if l.down { a - b + 1 } else { b - a + 1 };
@@ -9100,19 +9105,86 @@ impl Selector {
                 ))
             }
             (None, _) => {
-                return Err(unsupported(
+                // Best effort (not byte-identical; bead domain-pascal-sq4a):
+                // `to` into a value T of its own, `sub.w from,T; blt EXIT`
+                // (`bcs` for an unsigned index), the count copied into a
+                // counter of its own and the index loaded from `from`, read
+                // a second time (KBD's module-local 0xE1CA10..0xE1CA1C
+                // `move.w (0x1a,A5,D1.w),D2; subq.w #1,D2; sub.w
+                // (0x18,A5,D1.w),D2; bmi.s; move.w (0x18,A5,D1.w),D3`;
+                // 0xE02BFE..0xE02C0E `sub.w D1,D0; bmi.s; move.w D0,D3;
+                // move.w D1,D0`; 0xE010AC..0xE010BC; codegen-patterns 7.4,
+                // "Run-time lower bounds").  The image interleaves the two
+                // bounds' evaluation and keeps the count in T at KBD's
+                // site: not settled.  The image's `bmi` would take a
+                // signed count above 32767 for negative; `blt` runs it (as
+                // [`Self::for_wide`]; ref p. 4-90).  Arrays the body
+                // reaches by the index are indexed, not stepped (the
+                // stepped pointer's start would need `from` scaled at run
+                // time: no site looked at).
+                best_effort(
                     span,
                     "a `for` loop with a run-time lower bound (`sub.w from,T; bmi`, both \
                      bounds evaluated first and interleaved: 0xE010AC..0xE010B8, \
                      0xE02BFE..0xE02C0A, KBD's module-local 0xE1CA10..0xE1CA1C; not settled, \
                      codegen-patterns 7.4) is",
-                ))
+                )?;
+                if !arrays.is_empty() {
+                    best_effort(
+                        span,
+                        "a `for` loop with a run-time lower bound over an array reached by its \
+                         index (indexed, not stepped through a pointer: codegen-patterns 7.4) is",
+                    )?;
+                    arrays.clear();
+                    rt_indexed = true;
+                }
+                let t = self.eval_d(&l.to)?;
+                // `from` is read twice, by the `sub.w` and by the index's
+                // `move.w`.  A volatile object (ref 3.15.1, p. 3-56: every
+                // reference reads it) or a bound with a call is read once,
+                // into a data register both use (best effort, as above:
+                // no such site looked at).
+                let mut once = expr_calls(&l.from);
+                walk_expr(&l.from, &mut |n| {
+                    if matches!(n, Node::Addr(Addr::Volatile { .. })) {
+                        once = true;
+                    }
+                });
+                let fea = if once {
+                    Ea::Reg(Reg::D(self.eval_d(&l.from)?))
+                } else {
+                    let fv = self.eval(&l.from)?;
+                    Self::ea_val(&fv)
+                };
+                self.out.push(Insn::Alu {
+                    op: AluOp::Sub,
+                    size: Size::W,
+                    src: fea.clone(),
+                    dst: t,
+                });
+                let signed = l.index.ty.is_signed();
+                self.jump(if signed { Cond::Lt } else { Cond::Cs }, exit);
+                let c = self.alloc_d()?;
+                setup.push(self.out.len());
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(Reg::D(t)),
+                    dst: Ea::Reg(Reg::D(c)),
+                });
+                rt_from = Some(fea);
+                (c, 0)
             }
         };
+        let uses_index = uses_index || rt_indexed;
         let index = if uses_index {
             let d = self.alloc_d()?;
             setup.push(self.out.len());
             self.out.push(match init {
+                _ if rt_from.is_some() => Insn::Move {
+                    size: Size::W,
+                    src: rt_from.clone().expect("a run-time lower bound"),
+                    dst: Ea::Reg(Reg::D(d)),
+                },
                 0 => Insn::Clr {
                     size: Size::W,
                     dst: Ea::Reg(Reg::D(d)),
@@ -17485,6 +17557,38 @@ impl Selector {
                 ),
             ))
         };
+        // `&` of an address and a constant: the address in a new data
+        // register ([`Self::addr_into_d`]), then the immediate operation
+        // (FLP_$DINIT 0xE3E17A..0xE3E180 `lea (0x80,A5),A0; move.l A0,D1;
+        // andi.l #0x3ff,D1`, `integer32(addr(flp_io_buffer)) & 16#3FF`).
+        // `!` and `xor` take the same form: best effort (not
+        // byte-identical), no site seen.
+        if matches!(alu, AluOp::And | AluOp::Or | AluOp::Eor) && ty.width == Width::Long {
+            let la = addr_value(lhs).filter(|a| self.held_addr(a).is_none());
+            let ra = addr_value(rhs).filter(|a| self.held_addr(a).is_none());
+            let ac = match (la, ra, lhs, rhs) {
+                (Some(a), None, _, Expr::Const { value, .. })
+                | (None, Some(a), Expr::Const { value, .. }, _) => Some((a, *value)),
+                _ => None,
+            };
+            if let Some((a, c)) = ac {
+                if alu != AluOp::And {
+                    best_effort(
+                        self.span,
+                        "`!` or `xor` of an address (`addr`) and a constant (`&`'s form, \
+                         FLP_$DINIT 0xE3E17A; no site seen) is",
+                    )?;
+                }
+                let d = self.addr_into_d(a)?;
+                self.out.push(Insn::AluImm {
+                    op: alu,
+                    size: Size::L,
+                    imm: imm(c, Width::Long),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                return Ok(d);
+            }
+        }
         if !matches!(alu, AluOp::Add | AluOp::Sub) || ty.width != Width::Long {
             return refuse(
                 self,
@@ -17993,14 +18097,29 @@ impl Selector {
                     if narrow {
                         return Ok(Val::Tmp(self.marith_reg));
                     }
+                    let d = self.alloc_d()?;
                     if signed {
-                        return Err(unsupported(
+                        // Best effort (not byte-identical): the word
+                        // result copied and sign-extended, as the unsigned
+                        // one is copied and zero-extended (`M$OIS$WLW`
+                        // leaves M$OIS$LLL's longword in D0, but its
+                        // result is a word: runtime/m68k/m_arith.s).
+                        best_effort(
                             self.span,
                             "a signed `mod` by a word used as a longword (the 16 `M$OIS$WLW` \
                              results in the image are all used as words) is",
-                        ));
+                        )?;
+                        self.out.push(Insn::Move {
+                            size: Size::W,
+                            src: Ea::Reg(Reg::D(0)),
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        self.out.push(Insn::Ext {
+                            size: Size::L,
+                            dst: d,
+                        });
+                        return Ok(Val::Tmp(d));
                     }
-                    let d = self.alloc_d()?;
                     self.out.push(Insn::Clr {
                         size: Size::L,
                         dst: Ea::Reg(Reg::D(d)),
@@ -18445,8 +18564,10 @@ impl Selector {
     /// The same operand as `a` and `b` is pushed once and copied, `move.l
     /// (SP),-(SP)` (OS_$SHUTDOWN 0xE6D604, one site).
     ///
-    /// Refused: both operands computed (the order differs, 0xE10A86..0xE10A98
-    /// against 0xE69560..0xE69572); a computed operand with a pad (the
+    /// Best effort (not byte-identical): both operands computed (the order
+    /// differs, 0xE10A86..0xE10A98 against 0xE69560..0xE69572), `a` first;
+    /// refused when `b` calls and `a`'s value is a call's result in D0.
+    /// Refused: a computed operand with a pad (the
     /// pad is scheduled into the computation, 22 calls, e.g. CAL_$WEEKDAY
     /// 0xE686B0, or after it, 0xE0920C: codegen-patterns 12.4 R9), except
     /// another M$ARITH call's result as `a` (0xE16962..0xE16970: the inner
@@ -18479,8 +18600,30 @@ impl Selector {
         if a_code && b_code {
             const BOTH: &str =
                 "an M$ARITH call with both operands computed (evaluation order not settled) is";
-            if calls && !self.call_mode().save {
-                return Err(unsupported(self.span, BOTH));
+            // Best effort with calls too (`a`, then `b`, then the pushes):
+            // a value of `a` in a virtual register is kept across a call
+            // of `b`'s by the allocator (R3, `crate::regs`), but not one
+            // in physical D0 (a call's result), which `b`'s call would
+            // overwrite: refused.  A pointer function's result in A0 is
+            // not checked here: [`TWO_CALLS`] refuses `b`'s call while it
+            // is needed, and the statement is selected again in
+            // [`CallMode::save`], which copies it out of A0 (as it copies a
+            // D0 result, [`Self::save_result`]); save mode is what
+            // protects it.
+            let b_calls = self.out[mid..]
+                .iter()
+                .any(|i| matches!(i, Insn::Jsr(_) | Insn::Bsr { .. }));
+            let a_d0 = match &av {
+                Val::Tmp(0) | Val::Reg(Reg::D(0)) => true,
+                Val::Mem(Ea::Idx(_, _, 0, _)) => true,
+                _ => false,
+            };
+            if calls && b_calls && a_d0 {
+                return Err(unsupported(
+                    self.span,
+                    "an M$ARITH call whose first operand is a call's result and whose second \
+                     calls (D0 overwritten) is",
+                ));
             }
             best_effort(self.span, BOTH)?;
         }
@@ -19117,7 +19260,24 @@ impl Selector {
                 });
                 Ok(Val::Tmp(d))
             }
-            (Width::Word, Width::Long) | (Width::Byte, Width::Word) if unsigned => {
+            // An unsigned byte widened to a longword takes the word's
+            // forms with a byte mask, both seen from memory: `clr.l D1;
+            // move.b (-0xc,A6),D1` (MST_$LOOKUP_OBJECT 0xE43D52..0xE43D54)
+            // and `move.b (0x15,A4),D0; andi.l #0xff,D0` (0xE00864..
+            // 0xE00868); which the original chooses when is not settled.
+            // Best effort (not byte-identical): memory takes the first, a
+            // new register the mask (codegen-patterns 8, "Widening and
+            // narrowing").
+            (Width::Word, Width::Long) | (Width::Byte, Width::Word) | (Width::Byte, Width::Long)
+                if unsigned =>
+            {
+                if from.width == Width::Byte && ty.width == Width::Long {
+                    best_effort(
+                        self.span,
+                        "widening a byte to a longword (`clr.l; move.b` at 0xE43D52 or `move.b; \
+                         andi.l #0xff` at 0xE00864: which one not settled) is",
+                    )?;
+                }
                 let v = self.eval(value)?;
                 let v = match self.take_consumed(&v) {
                     Some(r) => Val::Tmp(r),
@@ -19153,6 +19313,25 @@ impl Selector {
                 let d = self.eval_d(value)?;
                 self.out.push(Insn::Ext {
                     size: size_of(ty.width),
+                    dst: d,
+                });
+                Ok(Val::Tmp(d))
+            }
+            // A signed byte widened to a longword: `ext.w; ext.l` (the
+            // 68010 has no `extb.l`).  Best effort (not byte-identical):
+            // no compiled site seen.
+            (Width::Byte, Width::Long) => {
+                best_effort(
+                    self.span,
+                    "widening a signed byte to a longword (`ext.w; ext.l`: no site seen) is",
+                )?;
+                let d = self.eval_d(value)?;
+                self.out.push(Insn::Ext {
+                    size: Size::W,
+                    dst: d,
+                });
+                self.out.push(Insn::Ext {
+                    size: Size::L,
                     dst: d,
                 });
                 Ok(Val::Tmp(d))

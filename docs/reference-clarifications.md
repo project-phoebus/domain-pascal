@@ -499,12 +499,28 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     of another."  Is a `goto` from one structured statement into a loop,
     `with` or `case` arm of another legal?  And is jumping into a
     compound statement (`begin ... end`, not in p. 4-95's list) from
-    outside it legal?  *Current (bead domain-pascal-o4q): a jump into a
-    `for`, `while`, `repeat`, `with` or `case` from outside it is refused
-    ("not supported yet", `crates/dpc-ir/src/lower.rs`,
-    `routine_labels`); jumps between the arms of one `case` (p. D-4) and
-    into `if` parts (p. 6-23, `-niso`) are accepted; a compound statement
-    is transparent (accepted).*
+    outside it legal?  *Current (bead domain-pascal-sq4a, 2026-10-19;
+    before it, bead domain-pascal-o4q refused it): **best effort pending
+    the owner's ruling**.  A jump into a `for`, `while`, `repeat`, `with`
+    or `case` from outside it compiles as a plain jump to the label,
+    with the warning `best effort (not byte-identical): a `goto` into a
+    ...` (an error under `dpc --strict`; `crates/dpc-ir/src/lower.rs`,
+    `routine_labels`).  The original compiler evidently accepted such
+    jumps: ../source's MST_$TOUCH (0xE0DD68 `bcc.w 0xE0DF12`, `goto
+    illegal` into a `with`), MST_$INVALIDATE (0xE442B8, `goto no_entry`
+    into a `with` in a `repeat`) and MST_$FORK (0xE73A7C, `goto fail`
+    into a `with` in two `for` loops) are read so from the image.  The
+    statement entered is not set up (a loop's counter, a `with`'s base):
+    code at the label that reads it, or a loop end reached from it, is
+    undefined, as p. 4-95 leaves it; at the three kernel sites the code
+    at the label leaves the statement first.  So dpc refuses a jump
+    whose code at the label can run on to an entered `for` loop's end
+    (the `dbf` on a count never loaded) or reads an entered `with`'s
+    record (a `while` or `repeat` reached at its end only tests its
+    condition: accepted).  Jumps between the arms of
+    one `case` (p. D-4) and into `if` parts (p. 6-23, `-niso`) are
+    accepted; a compound statement is transparent (accepted).  Exec test
+    `be_sq4a`.*
 
 31. **4.3.1 p. 4-5 vs "Type Transfer Functions" p. 4-198 vs the image
     (word arithmetic in comparisons).**  p. 4-198: for `x + y > 5` on
@@ -804,7 +820,11 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `integer` -1 runs 65536 passes), except a `0..2147483647` index
     against a signed longword, compared signed.  Word indices held in a
     register, signed, are unchanged (the bound narrowed as an assignment
-    narrows it).*  Awaiting the owner.
+    narrows it).  A run-time lower bound (bead domain-pascal-sq4a,
+    codegen-patterns 7.4 "Run-time lower bounds") takes the same path:
+    `sub.w from,T; bcs` for a `0..65535` index, so `for i := lo to k - 1`
+    with lo = 0 and an `integer` k of 0 also runs 65536 passes.*  Awaiting
+    the owner.
 
 ## Reference errata noticed (no ruling needed)
 

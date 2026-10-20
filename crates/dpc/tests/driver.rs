@@ -2925,6 +2925,129 @@ end;
     }
 }
 
+/// A `goto` into a structured statement (open question 30; bead
+/// domain-pascal-sq4a): a plain jump by default (best effort), refused
+/// even then where the code at the label can run on to a `for` loop's
+/// end or reads an entered `with`'s record, neither set up.
+#[test]
+fn goto_into_statements_best_effort() {
+    let into = "a `goto` into a `for`, `while`, `repeat`, `with` or `case`";
+    for (body, what) in [
+        // Runs on to the `for`'s `dbf`.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    ext_$p(i);\n  1:\n    ext_$p(w);\n  end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        // `next` reaches the step too; an `if` leaving one way only.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n  1:\n    if b then return;\n    next;\n  end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        // Reads the `with` record.
+        (
+            "if w = 0 then goto 1;\n  with r do begin\n    a := 1;\n  1:\n    ext_$p(a);\n  end;",
+            Some("a `goto` into a `with` statement whose code at the label reads its record"),
+        ),
+        // Into a `with` inside a `for`, the `for` left by `return`: reads
+        // the record.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do\n    with r do begin\n    1:\n      a := 2;\n      return;\n    end;",
+            Some("a `goto` into a `with` statement whose code at the label reads its record"),
+        ),
+        // A `goto` to a label inside the `for` is followed: on from there
+        // to the loop's end.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    if b then begin\n    1:\n      ext_$p(w);\n      goto 2;\n    end;\n    ext_$p(i);\n  2:\n    ext_$p(0);\n  end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        // Followed into a `with` (MST_$TOUCH's `illegal` to
+        // `zero_result`), past code reading the record it does not run:
+        // accepted.
+        (
+            "if w = 0 then goto 1;\n  with r do begin\n    a := 1;\n    goto 2;\n  1:\n    w := 5;\n    goto 3;\n  2:\n    a := 2;\n  3:\n    ext_$p(w);\n  end;",
+            None,
+        ),
+        // A `next` of the entered `for` goes to its end (from an `if`
+        // and from a `case` arm), though the code falls through to a
+        // `return`.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    ext_$p(i);\n  1: ext_$p(w);\n    if w = 0 then next;\n    return;\n  end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    ext_$p(i);\n  1: case w of 0: next; 1: return; end;\n    return;\n  end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        // A `next` of a loop inside, the label in it, left by `return`
+        // otherwise: accepted.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    ext_$p(i);\n    while b do begin\n    1: ext_$p(w);\n      if w = 0 then next;\n      return;\n    end;\n    return;\n  end;",
+            None,
+        ),
+        // Into a `with` in a `for` in a `for`, left by `return`
+        // (MST_$FORK's `fail`): accepted.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do\n    for j := 1 to 2 do\n      with r do begin\n        a := i;\n        if b then begin\n        1:\n          ext_$p(w);\n          return;\n        end;\n      end;",
+            None,
+        ),
+        // The same left by `exit` from the inner loop: on to the outer
+        // loop's end.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do\n    for j := 1 to 2 do\n      with r do begin\n        a := i;\n        if b then begin\n        1:\n          ext_$p(w);\n          exit;\n        end;\n      end;",
+            Some("a `goto` into a `for` statement whose code at the label can reach the loop's end"),
+        ),
+        // Leaves the `for` by `return`, `exit` and `goto` (MST_$TOUCH,
+        // MST_$FORK): accepted.
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n    ext_$p(i);\n    if b then begin\n    1:\n      ext_$p(w);\n      return;\n    end;\n  end;",
+            None,
+        ),
+        (
+            "if w = 0 then goto 1;\n  for i := 1 to 3 do begin\n  1:\n    ext_$p(w);\n    if b then exit else goto 2;\n  end;\n2:\n  ext_$p(0);",
+            None,
+        ),
+        // Into a `with`, not reading it, then on to its end
+        // (MST_$INVALIDATE): accepted.
+        (
+            "if w = 0 then goto 1;\n  with r do begin\n    a := 1;\n  1:\n    ext_$p(w);\n  end;",
+            None,
+        ),
+        // A `while` reached at its end tests its condition: accepted.
+        (
+            "if w = 0 then goto 1;\n  while b do begin\n    w := w - 1;\n  1:\n    ext_$p(w);\n  end;",
+            None,
+        ),
+    ] {
+        let src = format!(
+            "module m;
+type rt = record a: integer; end;
+var w: extern integer; b: extern boolean; r: rt;
+procedure ext_$p(x: integer); options(val_param, extern);
+procedure m_$t;
+label 1, 2, 3;
+var i, j: integer;
+begin
+  {body}
+end;
+"
+        );
+        let (code, _, err) = compile_default("goto_into", &src, &[]);
+        match what {
+            Some(what) => {
+                assert_eq!(code, Some(1), "{body}: {err}");
+                assert!(
+                    err.contains(what) && err.contains("not supported yet") && !err.contains("warning"),
+                    "{body}: {err}"
+                );
+            }
+            None => {
+                assert_eq!(code, Some(0), "{body}: {err}");
+                assert!(err.contains(&format!("warning: best effort (not byte-identical): {into}")), "{body}: {err}");
+            }
+        }
+    }
+}
+
 /// A `goto` to a label that a `bra` follows goes to the `bra`'s target
 /// (codegen-patterns 7.1, "Branch threading"; compiled code has no
 /// branch to a `bra`).
@@ -3287,10 +3410,11 @@ fn with_and_or_odd_refusals() {
             "b := odd(g);",
             "`odd` of a variable in memory as a boolean value",
         ),
-        // A `goto` into a `with` statement (ref p. 4-95).
+        // A `goto` into a `with` statement (ref p. 4-95) whose code at
+        // the label reads its record: refused even by default.
         (
             "goto 1; with r do begin 1: a := 1 end;",
-            "a `goto` into a `for`, `while`, `repeat`, `with` or `case`",
+            "a `goto` into a `with` statement whose code at the label reads its record",
         ),
     ];
     for (body, msg) in cases {
@@ -3884,9 +4008,16 @@ begin
   g := integer32(addr(loc[2])) - integer32(addr(loc));
   g := integer32(addr(l));
   q(integer32(addr(loc)));
+  g := integer32(addr(w)) & 16#3FF;
 end;
 ";
     let asm = compile_with("addr_values_ok", ok, &[]).unwrap();
+    // `&` with a constant (FLP_$DINIT 0xE3E17A..0xE3E180 `lea (0x80,A5),A0;
+    // move.l A0,D1; andi.l #0x3ff,D1`; bead domain-pascal-sq4a).
+    assert!(
+        asm.contains("lea\t(4,%a5),%a0\n\tmove.l\t%a0,%d0\n\tandi.l\t#0x3ff,%d0\n"),
+        "{asm}"
+    );
     assert!(
         asm.contains(
             "lea\t(O+8).l,%a0\n\tmove.l\t%a0,%d1\n\t.short\t0x92bc\t| sub.l #O,%d1\n\t.long\tO\n\
@@ -3937,8 +4068,10 @@ end;
             "g := integer32(addr(l)) + integer32(addr(loc));",
             "the sum of two addresses",
         ),
+        // With a constant it compiles (FLP_$DINIT 0xE3E17A, bead
+        // domain-pascal-sq4a); with a variable no form is catalogued.
         (
-            "g := integer32(addr(l)) & 16#FF;",
+            "g := integer32(addr(l)) & g;",
             "an operation other than a longword `+` or `-`",
         ),
         (
