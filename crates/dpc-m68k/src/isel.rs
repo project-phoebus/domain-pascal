@@ -14950,26 +14950,8 @@ impl Selector {
                      reads a register the value's instructions wrote is",
                 )?;
             }
-            let (n_src, end) = (mid - start, self.out.len());
             if !reads {
-                self.out[start..].rotate_left(n_src);
-                // The indices into `out` recorded while the two sides were
-                // selected move with their instructions (an index equal to
-                // `mid` is taken as the destination's first instruction: for
-                // a position after the value's last one, [`Cse::at`], that
-                // is earlier than it now is, which only makes
-                // [`Self::cse_valid`] check more).
-                let moved = |p: &mut usize| {
-                    if (start..mid).contains(p) {
-                        *p += end - mid;
-                    } else if (mid..end).contains(p) {
-                        *p -= n_src;
-                    }
-                };
-                self.ptr_copies.iter_mut().for_each(moved);
-                self.a0_bases.iter_mut().for_each(|(p, _)| moved(p));
-                self.elem_leas.iter_mut().for_each(|(p, _)| moved(p));
-                self.cse.iter_mut().for_each(|c| moved(&mut c.at));
+                self.rotate_out(start, mid);
             }
         }
         self.out.push(match &src {
@@ -14996,6 +14978,228 @@ impl Selector {
             }
         }
         Ok(())
+    }
+
+    /// Puts `out[mid..]` before `out[start..mid]` ([`Self::store`]: the
+    /// destination's instructions before the value's), and moves every
+    /// index into `out` recorded so far with the instruction it names
+    /// (bead domain-pascal-c7kh).  The destructuring names every field of
+    /// [`Selector`], so a field added later has to be sorted here too.
+    ///
+    /// - An instruction's index moves with that instruction.  One equal to
+    ///   `mid` names the destination's first instruction.  [`Cse::at`],
+    ///   the position after the value's last instruction, is mapped the
+    ///   same way: `mid` then lands on `start`, earlier than it now is,
+    ///   which only makes [`Self::cse_valid`] check more.
+    /// - A position after an instruction follows that instruction.  One at
+    ///   or before `start` (the start of the statement being selected, say)
+    ///   does not move.
+    /// - A range of `out` that encloses the rotated instructions does not
+    ///   move.  Any other range is its first instruction and the position
+    ///   after its last.
+    fn rotate_out(&mut self, start: usize, mid: usize) {
+        let end = self.out.len();
+        let n_src = mid - start;
+        self.out[start..].rotate_left(n_src);
+        let at = |p: &mut usize| {
+            if (start..mid).contains(p) {
+                *p += end - mid;
+            } else if (mid..end).contains(p) {
+                *p -= n_src;
+            }
+        };
+        let after = |p: &mut usize| {
+            if *p > start && *p <= end {
+                let mut last = *p - 1;
+                at(&mut last);
+                *p = last + 1;
+            }
+        };
+        let range = |a: &mut usize, b: &mut usize| {
+            if !(*a <= start && *b >= end) {
+                at(a);
+                after(b);
+            }
+        };
+        let Selector {
+            // Instruction indices.
+            result_moves,
+            held_firsts,
+            elem_second_lea,
+            elem_counts,
+            count_copies,
+            call_stmts,
+            other_held,
+            ptr_copies,
+            copy_blocks,
+            other_base_loads,
+            loop_jumps,
+            ptr_defs,
+            elem_leas,
+            zext_bases,
+            elem_value_bases,
+            parked,
+            hoist,
+            hoists,
+            nil_results,
+            nil_locals,
+            a0_bases,
+            assigned_move,
+            flag_moves,
+            cse,
+            goto_jumps,
+            // Positions after an instruction.
+            stmt_start,
+            other_elem,
+            fresh,
+            consume,
+            elem8_row,
+            stored,
+            // Ranges.
+            units,
+            writes,
+            entry_end,
+            // No index into `out`.
+            out: _,
+            const_form: _,
+            const_chain: _,
+            vregs: _,
+            clobbered: _,
+            colour_after: _,
+            callee_only: _,
+            colour_apart: _,
+            colour_coalesce: _,
+            span: _,
+            other_syms: _,
+            base_reused: _,
+            split_elems: _,
+            arg_pushes: _,
+            pinned: _,
+            reg_locals: _,
+            webs: _,
+            for_regs: _,
+            for_sizes: _,
+            held_after: _,
+            param_webs: _,
+            assigned_params: _,
+            partial_params: _,
+            unread_assigned: _,
+            multi: _,
+            multi_body: _,
+            copied: _,
+            next_label: _,
+            placed: _,
+            epilogue: _,
+            before_bra: _,
+            call_no_pop: _,
+            test_as_value: _,
+            in_args: _,
+            call_modes: _,
+            in_temp: _,
+            called: _,
+            marith_depth: _,
+            marith_reg: _,
+            unpopped: _,
+            data_absolute: _,
+            abs_base: _,
+            abs_elem_update: _,
+            other_bases: _,
+            data_label: _,
+            overlays: _,
+            loops: _,
+            stepped: _,
+            ptr_locals: _,
+            elem_ptrs: _,
+            elem_by_value: _,
+            a0_locals: _,
+            // `(offset, part, statement count)`.
+            park_parts: _,
+            link: _,
+            result_web: _,
+            web: _,
+            web_a: _,
+            result_positions: _,
+            ptr_slot: _,
+            slot_allowed: _,
+            slot_wanted: _,
+            escaped: _,
+            address_slots: _,
+            volatile_eas: _,
+            entry_regs: _,
+            data_ptr_regs: _,
+            label_flags: _,
+            uplevel: _,
+            cse_plan: _,
+            cse_next: _,
+            cse_hits: _,
+            cse_regs: _,
+            user_labels: _,
+            gotos_total: _,
+            gotos_seen: _,
+            open_back: _,
+            label_clean: _,
+        } = self;
+        result_moves.iter_mut().for_each(at);
+        held_firsts.iter_mut().for_each(|(l, s, _)| {
+            at(l);
+            at(s);
+        });
+        elem_second_lea.iter_mut().for_each(at);
+        elem_counts.iter_mut().for_each(|(k, c, _)| {
+            at(k);
+            at(c);
+        });
+        count_copies.iter_mut().for_each(|(b, k, _)| {
+            at(b);
+            at(k);
+        });
+        call_stmts.iter_mut().for_each(|(s, c, _)| {
+            at(s);
+            at(c);
+        });
+        other_held.iter_mut().for_each(|(_, _, _, p)| at(p));
+        ptr_copies.iter_mut().for_each(at);
+        copy_blocks.iter_mut().for_each(|(p, _)| at(p));
+        other_base_loads.iter_mut().for_each(at);
+        loop_jumps.iter_mut().for_each(|(p, _)| at(p));
+        ptr_defs.iter_mut().for_each(|(_, p, _)| at(p));
+        elem_leas.iter_mut().for_each(|(p, _)| at(p));
+        zext_bases.iter_mut().for_each(|(c, m, b, _)| {
+            at(c);
+            at(m);
+            at(b);
+        });
+        elem_value_bases.iter_mut().for_each(|(m, p, _)| {
+            at(m);
+            at(p);
+        });
+        parked.iter_mut().for_each(|k| {
+            k.d.iter_mut().for_each(|(_, p)| at(p));
+            k.home.iter_mut().for_each(|(_, p)| at(p));
+        });
+        hoist.iter_mut().for_each(at);
+        hoists.iter_mut().for_each(|(m, b, _)| {
+            at(m);
+            at(b);
+        });
+        nil_results.iter_mut().for_each(|(p, _)| at(p));
+        nil_locals.iter_mut().for_each(|(p, _)| at(p));
+        a0_bases.iter_mut().for_each(|(p, _)| at(p));
+        assigned_move.iter_mut().for_each(at);
+        flag_moves.iter_mut().for_each(|(p, _, _)| at(p));
+        cse.iter_mut().for_each(|c| at(&mut c.at));
+        goto_jumps.iter_mut().for_each(|(p, _)| at(p));
+        after(stmt_start);
+        other_elem.iter_mut().for_each(|(p, _)| after(p));
+        fresh.iter_mut().for_each(|(_, p, _)| after(p));
+        consume.iter_mut().for_each(|(_, p)| after(p));
+        elem8_row.iter_mut().for_each(|(_, _, _, p)| after(p));
+        stored.iter_mut().for_each(|(_, _, _, p)| after(p));
+        units.iter_mut().for_each(|(a, b)| range(a, b));
+        writes.iter_mut().for_each(|(a, b, _, _)| range(a, b));
+        entry_end
+            .iter_mut()
+            .for_each(|r| range(&mut r.start, &mut r.end));
     }
 
     /// The register that still holds the value the body last stored into
