@@ -2119,6 +2119,7 @@ fn select_body_once(
         .filter(|(a, b)| b - a > 1)
         .collect();
     let mut volatile_insns: Vec<usize> = volatile_insns.iter().map(|&k| new_index[k]).collect();
+    let mut next_label = s.next_label;
     let mut out: Vec<Insn> = match spills.take() {
         None => s
             .out
@@ -2184,6 +2185,10 @@ fn select_body_once(
             }
         }
     }
+    // The instructions that reference volatile objects, for
+    // [`thread_past_tests`] after scheduling (by value: equal instructions
+    // count as volatile too).
+    let volatile_set: Vec<Insn> = volatile_insns.iter().map(|&k| out[k].clone()).collect();
     // Phase 1c: the order inside basic blocks (`sched.rs`).
     crate::sched::schedule(&mut out, &units, &volatile_insns, sched);
     if !suba_spans.is_empty() {
@@ -2263,6 +2268,7 @@ fn select_body_once(
             best_effort(*span, ZEXT_BASE_SCHEDULED)?;
         }
     }
+    thread_past_tests(&mut out, &mut next_label, &volatile_set);
     copy_repeated_constants(&mut out);
     Ok(Selected::Body(
         Body {
@@ -2272,6 +2278,119 @@ fn select_body_once(
         },
         s.cse_hits,
     ))
+}
+
+/// A `bra` right after a store goes past a test of the stored object at
+/// its target (codegen-patterns 7.1, "A branch past the test of a store";
+/// ../source pascal-translation-notes 374): a `move.<s>` or `clr.<s>`
+/// into memory sets N and Z from the value and clears V and C, as `tst.<s>`
+/// of it would, so the `bra` lands on what follows the `tst`.  After a
+/// `clr`, whose flags are known, a conditional branch there that cannot
+/// be taken is passed over too.  `tools/resultsurvey.py storebra`, the
+/// 51 `bra`s right after a `move`/`clr` into memory whose target is at a
+/// `tst` of that object, right after it, or right after the branch that
+/// follows it:
+/// - 34 land after the `tst` (io_$check_unit 0xE1A4BE `move.l
+///   #0x100008,(A0); bra.s` to the `seq D0` past `tst.l (A0)`; IO_$ACQUIRE
+///   0xE1A5FE to the `bne.w` past `tst.l (A4)`; 0xE17F46 `bne`, 0xE4B4B2
+///   `beq`, 0xE38482 from a register);
+/// - 8 after a `clr` pass the `tst` and a `bne`/`bmi` that cannot be
+///   taken (IO_$ACQUIRE 0xE1A566 `clr.l (A4); bra.b 0xE1A576` past `tst.l
+///   (A4); bne.w`; XNS_IDP_$OS_OPEN 0xE17FC2; DXM_$ADD_CALLBACK 0xE1709A
+///   `clr.b (-36,A6)` past `tst.b; bmi`); 4 more pass a branch whose
+///   outcome the store does not give (0xE4BABA, 0xE4BB3E: a label after
+///   the test, not this rule);
+/// - 5 land on the `tst`: a `bra` into a loop's test at the bottom
+///   (FILE_$PRIV_LOCK 0xE5F26C, `bgt.w` back), a `clr` before a `beq` that
+///   is always taken (0xE3E446), and 0xE5F134, ASKNODE_$SERVER 0xE65B76,
+///   0xE6133A (not explained).
+/// So not done for a test that branches back, nor after a `clr` before a
+/// branch that is always taken, nor for volatile objects (`volatile`, as
+/// selected).  A `st`/`sf` sets no flags (0xE4DF9C lands on the `tst`).
+fn thread_past_tests(out: &mut Vec<Insn>, next_label: &mut u32, volatile: &[Insn]) {
+    use std::collections::HashMap;
+    let at: HashMap<u32, usize> = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, x)| match x {
+            Insn::Label(l) => Some((*l, i)),
+            _ => None,
+        })
+        .collect();
+    // (index of the `bra`, position its new target is before).
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for i in 1..out.len() {
+        let Insn::Branch {
+            cond: Cond::T,
+            label,
+            ..
+        } = &out[i]
+        else {
+            continue;
+        };
+        let (size, ea, cleared) = match &out[i - 1] {
+            Insn::Move { size, dst, .. } => (*size, dst, false),
+            Insn::Clr { size, dst } => (*size, dst, true),
+            _ => continue,
+        };
+        if matches!(
+            ea,
+            Ea::Reg(_) | Ea::PreDec(_) | Ea::PostInc(_) | Ea::Imm(_) | Ea::ImmSym(_)
+        ) || volatile.contains(&out[i - 1])
+        {
+            continue;
+        }
+        let Some(&p) = at.get(label) else { continue };
+        let mut q = p;
+        while matches!(out.get(q), Some(Insn::Label(_))) {
+            q += 1;
+        }
+        match out.get(q) {
+            Some(Insn::Tst { size: s, dst }) if *s == size && dst == ea => {}
+            _ => continue,
+        }
+        if volatile.contains(&out[q]) {
+            continue;
+        }
+        let mut t = q + 1;
+        match out.get(t) {
+            Some(Insn::Branch { back: true, .. }) => continue,
+            // After `clr` (Z set, N, V, C clear): past a branch that cannot
+            // be taken; at the `tst` before one that always is (0xE3E446).
+            Some(Insn::Branch { cond, .. }) if cleared => match cond {
+                Cond::Ne | Cond::Mi | Cond::Gt | Cond::Lt | Cond::Hi | Cond::Cs => t += 1,
+                _ => continue,
+            },
+            _ => {}
+        }
+        moves.push((i, t));
+    }
+    if moves.is_empty() {
+        return;
+    }
+    // A label already there, or a new one, per target.
+    let mut new_at: Vec<(usize, u32)> = Vec::new();
+    for &(i, t) in &moves {
+        let l = match out.get(t) {
+            Some(Insn::Label(l)) => *l,
+            _ => match new_at.iter().find(|(p, _)| *p == t) {
+                Some(&(_, l)) => l,
+                None => {
+                    let l = *next_label;
+                    *next_label += 1;
+                    new_at.push((t, l));
+                    l
+                }
+            },
+        };
+        if let Insn::Branch { label, .. } = &mut out[i] {
+            *label = l;
+        }
+    }
+    new_at.sort_by(|a, b| b.0.cmp(&a.0));
+    for (t, l) in new_at {
+        out.insert(t, Insn::Label(l));
+    }
 }
 
 /// Branch threading (codegen-patterns 7.1, "Branch threading"; bead
@@ -3781,6 +3900,28 @@ fn check_late_slot_loads(
             _ => m,
         })
     };
+    // A1 loaded with a routine pointer that the next instruction to read
+    // it calls through, `movea.l (d,A0),A1; jsr (A1)`, is not counted as
+    // written: in the image a slot used once after such a call takes A0 at
+    // all 8 sites whose A1 was written only so (`tools/regalloc.py slota1`;
+    // IO_$MAP_CSR 0xE1A900, IO_$UNMAP_CSR 0xE1A960, TTY_$I_ERR 0xE1BE38,
+    // 0xE1BE84, 0xE1BE92, SIO_$I_TSTART 0xE1C7E2, 0xE1C804, 0xE1C932; bead
+    // domain-pascal-do4s).
+    // The other sites of the 62 above, A1 written otherwise too, stay
+    // refused.
+    let call_target_a1: Vec<bool> = (0..out.len())
+        .map(|i| {
+            crate::regs::access(&out[i]).defs.contains(&Reg::A(1))
+                && !matches!(out[i], Insn::Jsr(_) | Insn::Bsr { .. })
+                && out[i + 1..]
+                    .iter()
+                    .find(|x| {
+                        let a = crate::regs::access(x);
+                        a.uses.contains(&Reg::A(1)) || a.defs.contains(&Reg::A(1))
+                    })
+                    .is_some_and(|x| matches!(x, Insn::Jsr(Ea::Ind(1))))
+        })
+        .collect();
     let succ = crate::regs::successors(out);
     let mut inn: Vec<Option<State>> = vec![None; out.len()];
     if !out.is_empty() {
@@ -3792,6 +3933,7 @@ fn check_late_slot_loads(
             let Some(st) = inn[i] else { continue };
             let acc = crate::regs::access(&out[i]);
             let defs = amask(&acc.defs);
+            let written_defs = if call_target_a1[i] { defs & !2 } else { defs };
             let o = if matches!(out[i], Insn::Jsr(_) | Insn::Bsr { .. }) {
                 State {
                     dirty: st.dirty & !defs,
@@ -3806,7 +3948,7 @@ fn check_late_slot_loads(
                         .fold(0u8, |m, &n| if n < 5 { m | 1 << n } else { m });
                 State {
                     dirty: (st.dirty | defs) & !used_up,
-                    written: st.written | defs,
+                    written: st.written | written_defs,
                     call: st.call,
                 }
             };
@@ -16462,6 +16604,58 @@ impl Selector {
                     )?;
                 }
                 None => {}
+            }
+        }
+        // A routine pointer in an element of the unit's own array: the
+        // element's address first, `lea (0,A5,Dx),Am`, then the pointer
+        // through it into another register, `movea.l (d,Am),An`, the
+        // array's offset and the field's in `d` (IO_$MAP_CSR
+        // 0xE1A8C0..0xE1A8C8 `lea (0,A5,D0.w),A0; movea.l (0x64,A0),A1;
+        // jsr (A1)`; IO_$UNMAP_CSR 0xE1A938, IO_$DEVICE_INTERRUPTING
+        // 0xE1A784, IO_$CLEAR_PENDING 0xE1A7D4, IO_$RELEASE 0xE1A730,
+        // IO_$XLATE_IOVA 0xE1A9AE, IO_$ACQUIRE 0xE1A656, DXM_$ADD_SIGNAL_CALLBACK
+        // 0xE721B8 `lea (0,A5,D1.w),A1; movea.l (A1),A3`,
+        // SMD_$BLINK_CURSOR_CALLBACK 0xE6FF84 `lea (0,A5,D0.l),A0; movea.l
+        // (7584,A0),A1`: every call through an indexed element in
+        // `tools/indcallsurvey.py list`, none `movea.l (d,A5,Dx),An`;
+        // codegen-patterns 1.6; ../source pascal-translation-notes 378).
+        if let Expr::Load {
+            addr: a @ Addr::Index { base, .. },
+            ..
+        } = x
+        {
+            if matches!(&**base, Addr::Static(_)) && self.element_block(a) == Some(Ok(true)) {
+                let (elem, d) = match self.ea_of(a)? {
+                    Ea::Idx(d, ar, xr, long) => {
+                        let e = self.alloc_a()?;
+                        self.out.push(Insn::Lea {
+                            src: Ea::Idx(0, ar, xr, long),
+                            dst: e,
+                        });
+                        (e, d)
+                    }
+                    // Beyond a byte the `lea (0,A5,Dx),Am` is formed
+                    // already ([`Self::element_ea`]).
+                    Ea::Disp(d, e) => (e, d),
+                    Ea::Ind(e) => (e, 0),
+                    _ => {
+                        return Err(unsupported(
+                            self.span,
+                            "a call through a routine pointer in an array element at this kind \
+                             of address is",
+                        ))
+                    }
+                };
+                let p = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: if d == 0 { Ea::Ind(elem) } else { Ea::Disp(d, elem) },
+                    dst: p,
+                });
+                // Never the element's register, though it dies there (all
+                // nine sites; IO_$ACQUIRE 0xE1A656 A0 and A4).
+                self.colour_apart.push((Reg::A(elem), Reg::A(p)));
+                return Ok(p);
             }
         }
         self.eval_a(x)

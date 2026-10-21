@@ -93,6 +93,14 @@ usage:
                                          # loads under each rule (slot_
                                          # predictions), by routine shape;
                                          # with RULE, its misses
+    tools/regalloc.py slota1 [--min N] [--max N]
+                                         # bead domain-pascal-do4s: slot
+                                         # loads whose lowest free register
+                                         # is A0 after a call with A1
+                                         # written before: the register
+                                         # taken, by whether every A1 write
+                                         # was a pointer only a `jsr (A1)'
+                                         # read
     tools/regalloc.py slotpass [N] [--min N] [--max N]
                                          # bead domain-pascal-i24w: single
                                          # slot loads after the first
@@ -2432,6 +2440,31 @@ def main(argv):
             print('%-36s ' % '/'.join(key) + ' '.join('%8d' % tot[key, c] for c in cols) +
                   '  ' + ' | '.join(' '.join(ex[key, c][:show]) for c in cols
                                     if ex[key, c] and show))
+        return 0
+    if cmd == 'slota1':
+        tot, ex = Counter(), defaultdict(list)
+        for rt, v, shape, pos, use, p in slot_survey(done):
+            w = written_sets(rt).get(v.first, frozenset())
+            if 'call' not in w or 'a1' not in w or p['colU'] != 'a0':
+                continue
+            kinds = set()
+            for i in range(v.first):
+                x = rt.ins[i]
+                if 'a1' not in x.defs or x.call:
+                    continue
+                nxt = None
+                for y in rt.ins[i + 1:]:
+                    if 'a1' in y.uses:
+                        nxt = y.text
+                        break
+                    if 'a1' in y.defs:
+                        break
+                kinds.add('jsr' if nxt and nxt.startswith('jsr %a1@') else 'other')
+            k = ('call-target-only' if kinds == {'jsr'} else 'other', v.reg)
+            tot[k] += 1
+            ex[k].append('%06X' % rt.ins[v.first].addr)
+        for k in sorted(tot):
+            print('%-18s %-3s %4d  %s' % (k + (tot[k], ' '.join(ex[k][:10]))))
         return 0
     if cmd == 'slots':
         # 12.4 R4(b): which rule picks the register of a slot load.

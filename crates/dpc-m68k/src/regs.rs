@@ -586,6 +586,30 @@ pub fn liveness(insns: &[Insn], exit: &[Reg], holds: &[(usize, Reg)]) -> Vec<BTr
     }
 }
 
+/// Per instruction, whether a definition of `r` reaches the point after
+/// it on some path from the start of the body.
+pub fn defined_after(insns: &[Insn], r: Reg) -> Vec<bool> {
+    let succ = successors(insns);
+    let defs: Vec<bool> = insns.iter().map(|i| access(i).defs.contains(&r)).collect();
+    let mut into = vec![false; insns.len()];
+    let mut out = vec![false; insns.len()];
+    loop {
+        let mut changed = false;
+        for i in 0..insns.len() {
+            if !out[i] && (into[i] || defs[i]) {
+                out[i] = true;
+                changed = true;
+                for &j in succ[i].iter().flatten() {
+                    into[j] = true;
+                }
+            }
+        }
+        if !changed {
+            return out;
+        }
+    }
+}
+
 /// Pairs `(l, p)` for [`allocate_apart`]'s `late` (codegen-patterns 12.4
 /// R1b; bead domain-pascal-ue7; Uncertain, a shape fitted to the image):
 /// a pointer local `l` assigned a pointer function's result (`movea.l
@@ -763,7 +787,22 @@ pub(crate) fn allocate_blame(
     recycle: &[(Reg, Reg)],
 ) -> Result<RegSet, (String, Option<Reg>)> {
     let web = first.as_ref().map(|(w, _)| *w);
-    let live_out = liveness(insns, exit, holds);
+    let mut live_out = liveness(insns, exit, holds);
+    if let Some(w) = web {
+        // The result variable is not live where no assignment reaches: on
+        // a path that leaves it unset the result is undefined, whatever
+        // its register holds (IO_$DEVICE_INTERRUPTING 0xE1A788..0xE1A78E,
+        // IO_$XLATE_IOVA 0xE1A9B2..0xE1A9B8: the bus routine's D0 left as
+        // the result after `jsr (A1)`, the path past the failed check
+        // returning the check's D0; codegen-patterns 3, "Result
+        // variable"; ../source pascal-translation-notes 373).
+        let reached = defined_after(insns, w);
+        for (out, r) in live_out.iter_mut().zip(reached) {
+            if !r {
+                out.remove(&RegKey(w));
+            }
+        }
+    }
     // Interference edges: a definition against what is live after it
     // (Chaitin), and against the register operands of its own instruction
     // (R2).
@@ -1069,6 +1108,53 @@ mod tests {
 
     fn text(insns: &[Insn]) -> Vec<String> {
         insns.iter().map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn result_unset_on_a_path_is_not_live_there() {
+        // IO_$DEVICE_INTERRUPTING's shape: a call, a branch past the
+        // assignment, the result assigned from a second call's D0, the
+        // result moved to D0 at the end.  Live from the entry the result
+        // would take a callee-saved register; not live before its
+        // assignment, it shares the call's D0 (0xE1A788..0xE1A78E).
+        let mut insns = vec![
+            jsr(),
+            Insn::Tst {
+                size: Size::B,
+                dst: Ea::Reg(d(0)),
+            },
+            Insn::Branch {
+                cond: Cond::Pl,
+                label: 1,
+                short: true,
+                back: false,
+            },
+            jsr(),
+            Insn::Move {
+                size: Size::B,
+                src: Ea::Reg(d(0)),
+                dst: Ea::Reg(vd(0)),
+            },
+            Insn::Label(1),
+            Insn::Move {
+                size: Size::B,
+                src: Ea::Reg(vd(0)),
+                dst: Ea::Reg(d(0)),
+            },
+        ];
+        assert_eq!(
+            defined_after(&insns, vd(0)),
+            vec![false, false, false, false, true, true, true]
+        );
+        let saves =
+            allocate_apart(&mut insns, &[d(0)], &[], &[], Some((vd(0), vec![])), &[], &[], &[])
+                .unwrap();
+        assert_eq!(text(&insns[4..5]), text(&[Insn::Move {
+            size: Size::B,
+            src: Ea::Reg(d(0)),
+            dst: Ea::Reg(d(0)),
+        }]));
+        assert!(saves.is_empty());
     }
 
     #[test]

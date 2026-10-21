@@ -323,6 +323,14 @@ Tests:
   `var` parameter of the type re-read after the call (bead
   domain-pascal-5aw.16), `addr` of a routine stored as `move.l #sym`
   (MAC_OS 0xE0B9A8).
+- `calls/elem_routine_pointers` - codegen-patterns 1.6 ("Through an
+  element of the unit's array"), 3 ("Not live where it is unset"), 7.1
+  ("A branch past the test of a store"); bead domain-pascal-do4s: the IO_
+  module's io_$check_unit, IO_$CLEAR_PENDING, IO_$DEVICE_INTERRUPTING,
+  IO_$XLATE_IOVA and IO_$ACQUIRE's first loop: `lea (0,A5,D0.w),A0;
+  movea.l (d,A0),A1; jsr (A1)` (0xE1A7D4, 0xE1A784, 0xE1A9AE), the
+  result left in D0 (0xE1A788), the `bra` past `tst.l (A0)` (0xE1A4BE)
+  and past `tst.l; bne` after `clr.l` (0xE1A566).
 - `calls/pop_branches` - codegen-patterns 1.1: the pop rule with
   branches (no pop when every path to the epilogue is free of pushes,
   calls and conditional branches; 0xE01166, 0xE00BCA).

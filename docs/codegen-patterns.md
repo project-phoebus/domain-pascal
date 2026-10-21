@@ -1420,6 +1420,30 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     Apollo include file: not evidence for the syntax).  The
     meaning of `extern` there, and whether `default_routine_options`
     (5.6.4) apply to such a type, are not stated.
+  - **Through an element of the unit's array** (Verified; bead
+    domain-pascal-do4s, ../source pascal-translation-notes 378): the
+    element's address first, `lea (0,A5,Dx),Am`, then the pointer
+    through it into another register, `movea.l (d,Am),An; jsr (An)`, the
+    array's offset and the field's in `d`.  All 9 calls through an
+    indexed element in `tools/indcallsurvey.py list`: IO_$MAP_CSR
+    0xE1A8C0..0xE1A8C8 `lea (0,A5,D0.w),A0; movea.l (0x64,A0),A1; jsr
+    (A1)`, IO_$UNMAP_CSR 0xE1A938, IO_$DEVICE_INTERRUPTING 0xE1A784,
+    IO_$CLEAR_PENDING 0xE1A7D4, IO_$RELEASE 0xE1A730, IO_$XLATE_IOVA
+    0xE1A9AE (A1, A2), IO_$ACQUIRE 0xE1A656 (A0, A4),
+    DXM_$ADD_SIGNAL_CALLBACK 0xE721B8 `lea (0,A5,D1.w),A1; movea.l
+    (A1),A3`, SMD_$BLINK_CURSOR_CALLBACK 0xE6FF84 `lea (0,A5,D0.l),A0;
+    movea.l (7584,A0),A1`; none `movea.l (d,A5,Dx),An`, though 7 of the
+    9 displacements fit a byte.  The pointer's register is never the
+    element's.  **Implemented** (`Selector::call_target`, the pointer
+    kept apart from the element's register; a body coloured with spills,
+    IO_$ACQUIRE's, may still reuse it); golden
+    `tests/golden/calls/elem_routine_pointers`, execution test
+    `elem_ptr_calls`.  Not done: the element's address shared by an
+    `if`'s test and the call in its `then` part (IO_$DISABLE_DEVICE
+    0xE1A814..0xE1A82E `lea (0,A5,D0.w),A2; tst.l (0x74,A2); beq; ...;
+    movea.l (0x74,A2),A0; jsr (A0)`; IO_$ENABLE_DEVICE 0xE1A86A,
+    IO_$RELEASE 0xE1A6FA; pascal-translation-notes 372): `dpc` forms it
+    twice, the test indexed.
   - **Implemented** (beads domain-pascal-5aw.8, -5aw.16): routine pointer
     types with `val_param` (short or `options(...)` form) after the type
     in `type`, `var` and record field declarations (`dpc-syntax`
@@ -2069,6 +2093,19 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     (`st D0` at 0xE14886, `sne D0` at 0xE148BC, status stores after it);
     the early exits of 0xE0B202, 0xE7630C, 0xE76352, 0xE76422 (`move.w
     D2,D0` or `st D0`, then a `bra` to the epilogue from inside a loop).
+  - *Not live where it is unset* (bead domain-pascal-do4s; ../source
+    pascal-translation-notes 373): a result assigned only after a call,
+    on one path, is left in D0, though a call comes before the
+    assignment and another path reaches the epilogue without it
+    (IO_$DEVICE_INTERRUPTING 0xE1A788..0xE1A78E `jsr (A1)` then the
+    epilogue, the failed check's path returning the check's D0;
+    IO_$XLATE_IOVA 0xE1A9B2..0xE1A9B8).  PROC2_$GET_PID above fits it
+    too (its call follows the assignment).  Of the 73 `list reg`
+    functions, every one held in a callee-saved register has a call
+    between the register's first write and the end.  **Implemented**
+    (`regs::defined_after`: the variable is taken out of the live sets
+    where no assignment reaches); golden
+    `tests/golden/calls/elem_routine_pointers`.
   - *From a frame slot* (the 18): a local returned by a final `f :=
     local` fits every one (see section 2, "Not decisive"): its address is
     taken at BAT_$ALLOC_FM 0xE3AD20 and 0xE062FA, only callees write it
@@ -8451,6 +8488,42 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   statement right after it (a `repeat`'s `until`, a `while` test after
   its body: dpc tests).  Golden `control/label_flags`;
   exec test `dec_flags`.
+- **A branch past the test of a store (Verified by survey;
+  implemented; bead domain-pascal-do4s; ../source
+  pascal-translation-notes 374).**  A `bra` right after `move.<s>
+  x,<mem>` or `clr.<s> <mem>` whose target is a `tst.<s>` of that object
+  lands after the `tst`: the store's flags are the test's (N and Z from
+  the value, V and C clear).  After a `clr` it also passes a branch there
+  that cannot be taken.  `tools/resultsurvey.py storebra`, the 51 such
+  `bra`s whose target is at the `tst`, right after it, or right after
+  the branch that follows it:
+  - 34 land after the `tst`: io_$check_unit 0xE1A4BE `move.l
+    #0x100008,(A0); bra.s 0xE1A4D6` to the `seq D0` past `tst.l (A0)`;
+    IO_$ACQUIRE 0xE1A5FE `move.l #0x10000d,(A4); bra.b 0xE1A628` to the
+    `bne.w` past `tst.l (A4)`; 0xE17F46 (`bne`), 0xE4B4B2 (`beq`),
+    0xE38482 (a register stored), 0xE588F2 (memory to memory).  A
+    constant other than 0 does not take the `bra` past a `beq` that
+    cannot be taken (0xE4B4B2..0xE4B524, 4 sites): only `clr`'s value
+    is known.
+  - 8 after a `clr` pass the `tst` and a `bne`/`bmi` too: IO_$ACQUIRE
+    0xE1A566 `clr.l (A4); bra.b 0xE1A576` past `tst.l (A4); bne.w`
+    (the `exit` of its first loop); XNS_IDP_$OS_OPEN 0xE17FC2;
+    DXM_$ADD_CALLBACK 0xE1709A `clr.b (-36,A6)` past `tst.b; bmi`.  4
+    more pass a branch whose outcome the store does not give (0xE4BABA,
+    0xE4BB3E: a label after the test, not this rule).
+  - 5 land on the `tst`: a `bra` into a loop's test at its bottom
+    (FILE_$PRIV_LOCK 0xE5F26C, `bgt.w` back), a `clr` before a `beq`
+    that is always taken (0xE3E446), and 0xE5F134, ASKNODE_$SERVER
+    0xE65B76, 0xE6133A (not explained).  `st`/`sf` set no flags; the one
+    such `bra` lands on the `tst` (0xE4DF9C).
+  A fall-through store before the `tst` is tested again (io_$check_unit
+  0xE1A4CE..0xE1A4D4).  **Implemented** (`isel.rs` `thread_past_tests`,
+  after scheduling): not for a test that branches back, after a `clr`
+  before a branch that is always taken, or for volatile objects.
+  Uncertain: a `clr` before an ordered branch that cannot be taken
+  (`bgt`, `blt`, `bhi`, `bcs`) passes it too (no site).  Golden
+  `tests/golden/calls/elem_routine_pointers`; execution test
+  `elem_ptr_calls`.
 - **`if c then T else E`:** a branch on the negated condition to `E`
   (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
   `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.
@@ -11501,11 +11574,12 @@ stored.
   XNS_IDP_$GET_STATS 0xE18FF4 A1; MMAP_$ALLOC_CONTIG 0xE0D902 A1).
 - **A status store, then a constant result:** IO_$ALLOC 0xE1A9C6..
   0xE1A9CC `clr.l (A0); clr.l D0`; IIC_$RECEIVE_CHECK 0xE70AE6..0xE70AEC
-  `move.l #0x2c000a,(A0); clr.b D0`.  **Uncertain:** module-local
-  0xE1A4A4 returns `status.all = status_$ok` as a boolean, and its error
-  path branches past the `tst.l (A0)` straight to the `seq D0`
+  `move.l #0x2c000a,(A0); clr.b D0`.  The module-local 0xE1A4A4
+  (io_$check_unit) returns `status.all = status_$ok` as a boolean, and
+  its error path branches past the `tst.l (A0)` straight to the `seq D0`
   (0xE1A4BE `bra.s 0xE1A4D6`), using the flags of the store `move.l
-  #0x100008,(A0)`: not supported.
+  #0x100008,(A0)`: section 7.1, "A branch past the test of a store"
+  (Verified by survey; implemented, bead domain-pascal-do4s).
 - **Implemented** (`crates/dpc-m68k/src/isel.rs`): the stores, tests and
   pushes above through the existing patterns; `if c then return` as one
   branch to the epilogue (`Selector::if_`; an `else` part follows the
@@ -13709,7 +13783,10 @@ of the remaining misses).**  The corpus misses fall into these groups:
     call that writes it and by `(An)+`/`-(An)`), unless a lower dirty
     register was passed over while a register dirty from before that
     call remains, and unless it is A0 after a call with A1 written
-    before.  A register reached only by dead slot loads is passed over
+    before (A1 loaded with a routine pointer only for the `jsr (A1)`
+    that reads it next is not counted: A0 at all 8 such sites, IO_$MAP_CSR
+    0xE1A900, IO_$UNMAP_CSR 0xE1A960, TTY_$I_ERR 0xE1BE38, SIO_$I_TSTART
+    0xE1C932; `tools/regalloc.py slota1`; bead domain-pascal-do4s).  A register reached only by dead slot loads is passed over
     (bead domain-pascal-i24w, `pass_dead_slot_loads`: the slot is kept
     apart from those loads and the body coloured again), and the load is
     then accepted only in the `pass` rule's shape (every free register

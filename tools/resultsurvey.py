@@ -54,6 +54,12 @@ usage:
                                           # then the value tested: on the
                                           # store's flags, the register or
                                           # the memory
+    tools/resultsurvey.py storebra [-v]   # a `bra' right after a store to
+                                          # memory whose target is at a
+                                          # `tst' of the object: lands on
+                                          # the `tst', past it, or past the
+                                          # branch after it too (-v: every
+                                          # site)
 
 `pushes' looks at every `move.<s> Dn,(-k,A6)' into the `link' area and
 follows the instructions after it in address order up to a push `move.<s>
@@ -583,6 +589,63 @@ def storetest(rs):
         print('%-3s %-7s %-9s %3d  %s' % (k + (v, ' '.join(ex[k][:6]))))
 
 
+def storebra(rs, verbose):
+    """A `bra' right after `move.<s> X,<mem>', `clr.<s> <mem>' or `st'/`sf
+    <mem>' (no push), whose target is a `tst.<s> <mem>' of that object
+    (`to-tst'), the instruction after one (`past-tst'), or the one after a
+    conditional branch that follows one (`past-branch'): by the store's
+    kind (clr, imm, reg, mem, scc) and the branch the `tst' is followed by
+    (bead domain-pascal-do4s, codegen-patterns 7.1)."""
+    c, ex = Counter(), {}
+    for r in rs:
+        ins = sorted(r.insns)
+        at = {a: i for i, (a, n, t) in enumerate(ins)}
+        for i, (a, n, t) in enumerate(ins):
+            mn, ops = operands(t)
+            if not re.fullmatch(r'bra[sw]?', mn) or i == 0:
+                continue
+            pm, po = operands(ins[i - 1][2])
+            m = re.fullmatch(r'(move|clr)([bwl])|(st|sf)', pm)
+            if not m or not po:
+                continue
+            ea = po[-1]
+            if re.fullmatch(r'%[ad]\d', ea) or ea == '%sp@-':
+                continue
+            if m.group(3):
+                kind = 'scc'
+            elif m.group(1) == 'clr':
+                kind = 'clr'
+            elif po[0].startswith('#'):
+                kind = 'imm'
+            elif re.fullmatch(r'%[ad]\d', po[0]):
+                kind = 'reg'
+            else:
+                kind = 'mem'
+            j = at.get(int(ops[0], 16))
+            if j is None:
+                continue
+
+            def is_tst(k):
+                if k < 0:
+                    return False
+                mm, oo = operands(ins[k][2])
+                return mm.startswith('tst') and oo == [ea]
+            if is_tst(j):
+                cls, after = 'to-tst', operands(ins[j + 1][2])[0] if j + 1 < len(ins) else ''
+            elif is_tst(j - 1):
+                cls, after = 'past-tst', operands(ins[j][2])[0]
+            elif is_tst(j - 2) and re.fullmatch(r'b(?!ra|sr)[a-z]{2}[sw]?', operands(ins[j - 1][2])[0]):
+                cls, after = 'past-branch', operands(ins[j - 1][2])[0]
+            else:
+                continue
+            key = (kind, cls, re.sub(r'[sw]$', '', after) if after.startswith('b') else after)
+            c[key] += 1
+            ex.setdefault(key, []).append('0x%06X' % a)
+    for k, v in sorted(c.items()):
+        e = ex[k] if verbose else ex[k][:6]
+        print('%-4s %-12s %-6s %3d  %s' % (k + (v, ' '.join(e))))
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -611,6 +674,8 @@ def main(argv):
             print('0x%06X %s' % (a, by_start[a].name or ''))
     elif cmd == 'storetest':
         storetest(rs)
+    elif cmd == 'storebra':
+        storebra(rs, '-v' in argv[1:])
     else:
         print(__doc__)
         return 2
