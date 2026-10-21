@@ -1792,6 +1792,9 @@ fn select_body_once(
         }
     }
     check_assigned_flags(&s.out, &s.flag_moves)?;
+    // After allocation, which renames registers in place and keeps the
+    // indices (the flags model, `sched::cc_effect`, takes physical ones).
+    check_kept_flags(&s.out, &s.kept_flags)?;
     // Each element address read once, with its read: still adjacent after
     // scheduling, the shape [`once_elem_lea`] decided on.
     let once_pairs: Vec<(Insn, Insn, Span)> = once_leas
@@ -4367,6 +4370,54 @@ fn check_assigned_flags(out: &[Insn], moves: &[(usize, Span, bool)]) -> Res<()> 
                  or after a `tst`: both seen, no rule found, codegen-patterns 7.1, bead \
                  domain-pascal-rmse) is",
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// Check, once the body is allocated, every test left to the flags of an
+/// earlier instruction ([`Selector::kept_flags`]; bead domain-pascal-x6a1):
+/// the first instruction from the noted position on that reads or sets
+/// the flags must read them, and still follow the one that set them,
+/// with no other flags setter and no label between.  Selection moves
+/// code after the decision (a store's destination before its value,
+/// [`Selector::store`]); the scheduler and the spiller, which run later,
+/// order instructions by their own model of the flags (`sched.rs`,
+/// `spill.rs`).  A test that no longer sees its flags is refused, not
+/// emitted wrong.
+fn check_kept_flags(out: &[Insn], kept: &[(usize, usize, Span)]) -> Res<()> {
+    use crate::sched::cc_effect;
+    for &(last, at, span) in kept {
+        let reader = out.get(at..).and_then(|rest| {
+            rest.iter()
+                .position(|i| {
+                    let (reads, sets) = cc_effect(i);
+                    reads || sets
+                })
+                .map(|k| at + k)
+        });
+        // The instruction that set them: the last to set them (or a label)
+        // at or before the one selected last before the test.
+        let setter = out.get(..=last).and_then(|o| {
+            o.iter()
+                .rposition(|i| matches!(i, Insn::Label(_)) || cc_effect(i).1)
+        });
+        let sees = match (setter, reader) {
+            (Some(s), Some(r)) => {
+                cc_effect(&out[r]).0
+                    && s < r
+                    && out[s + 1..r]
+                        .iter()
+                        .all(|i| !matches!(i, Insn::Label(_)) && !cc_effect(i).1)
+            }
+            _ => false,
+        };
+        if !sees {
+            return Err(unsupported(
+                span,
+                "internal: a test left to the flags of an earlier instruction whose reader no \
+                 longer reads them (code moved between the two; bead domain-pascal-x6a1) is",
+            ));
         }
     }
     Ok(())
@@ -7848,6 +7899,17 @@ pub struct Selector {
     /// result out of D0: checked once the body is selected
     /// ([`check_assigned_flags`]).
     flag_moves: Vec<(usize, Span, bool)>,
+    /// Every test left to the flags an earlier instruction set (a `tst`
+    /// [`Self::tst`] skipped, or one after an operation that
+    /// [`Self::sets_flags`] or a `case`'s selector load made): the index
+    /// in `out` of the last instruction selected before the test (that
+    /// instruction or the last flags setter before it, past `movea`s, set
+    /// them; a label, for the flags an `if`'s paths enter it with), the
+    /// position the test's reader was to be selected at, and the test's
+    /// span.  Checked once the body is allocated, so that no code motion
+    /// during selection puts another flags setter between the two
+    /// ([`check_kept_flags`]; bead domain-pascal-x6a1).
+    kept_flags: Vec<(usize, usize, Span)>,
     /// The flags on entry to an `if`'s label, when every path into it
     /// leaves the flags of one object in memory against 0: the label,
     /// the object's operand and size, and whether they are a `tst`'s
@@ -8076,6 +8138,7 @@ impl Selector {
             entry_end: None,
             assigned_move: None,
             flag_moves: Vec::new(),
+            kept_flags: Vec::new(),
             label_flags: None,
             stored: Vec::new(),
             escaped: Vec::new(),
@@ -11049,6 +11112,8 @@ impl Selector {
                             size,
                             dst: dreg.clone(),
                         });
+                    } else {
+                        self.note_kept_flags();
                     }
                 } else {
                     self.out.push(Insn::Cmpi {
@@ -11538,7 +11603,30 @@ impl Selector {
     /// load the condition makes: not met in `../source`'s Pascal yet); a
     /// byte widened to a word (`clr.w; move.b`), tested; other sizes,
     /// refused.
+    ///
+    /// A test left to earlier flags is noted for [`check_kept_flags`]
+    /// (bead domain-pascal-x6a1).
     fn tst(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
+        let n = self.out.len();
+        self.tst_or_flags(size, ea, cc)?;
+        if self.out.len() == n {
+            self.note_kept_flags();
+        }
+        Ok(())
+    }
+
+    /// Note that the reader to be selected next reads the flags the last
+    /// instruction to set them left (past instructions that leave them,
+    /// `movea` among the entry loads), or those an `if`'s label is entered
+    /// with ([`Self::kept_flags`]).
+    fn note_kept_flags(&mut self) {
+        let n = self.out.len();
+        if n > 0 {
+            self.kept_flags.push((n - 1, n, self.span));
+        }
+    }
+
+    fn tst_or_flags(&mut self, size: Size, ea: Ea, cc: Cond) -> Res<()> {
         if matches!(self.out.last(), Some(Insn::SubaSelf(_))) {
             // A `nil` result between the test and the instruction whose
             // flags it might use (an entry load, a store): `suba.l` leaves
@@ -11911,7 +11999,9 @@ impl Selector {
                     // routines above; 0xE554A8 `tst.w D0` at a join), 11
                     // test the memory, none of A0 (bead
                     // domain-pascal-500, `tools/resultsurvey.py
-                    // storetest`).
+                    // storetest`).  A test left to the store's flags
+                    // (bead domain-pascal-x6a1).
+                    self.note_kept_flags();
                     return Ok(cc);
                 }
                 if self.a0_holds(*o) {
@@ -14950,7 +15040,32 @@ impl Selector {
                      reads a register the value's instructions wrote is",
                 )?;
             }
-            if !reads {
+            // A test of the value left to flags set before it (a skipped
+            // `tst`, [`Self::kept_flags`]: `g[p * 4 + h] := i = 0` on the
+            // entry load of `i`), or one of the destination left to the
+            // value's: rotated, the other side's instructions would come
+            // between (bead domain-pascal-x6a1).  The image has no `s<cc>`
+            // on an entry load's flags or after a `tst` of an entry-loaded
+            // register (a survey of every `s<cc>` of compiled code: the
+            // flags come from a compare, a `tst` of memory, a `btst` or an
+            // operation of the value), so which the original kept, the
+            // order of the sides or the shortcut, is not seen.  Best
+            // effort (not byte-identical): not rotated, the value's
+            // instructions first, which keeps the flags they read.
+            let end = self.out.len();
+            let flags = self.kept_flags.iter().any(|&(last, p, _)| {
+                (last < start && (start..mid).contains(&p))
+                    || (last < mid && (mid..end).contains(&p))
+            });
+            if flags && !reads {
+                best_effort(
+                    self.span,
+                    "a store whose destination is set up by more instructions than the value, \
+                     the value tested on flags set before it (an entry load's, an assignment's; \
+                     not seen with an `s<cc>`, bead domain-pascal-x6a1) is",
+                )?;
+            }
+            if !reads && !flags {
                 self.rotate_out(start, mid);
             }
         }
@@ -15046,6 +15161,7 @@ impl Selector {
             a0_bases,
             assigned_move,
             flag_moves,
+            kept_flags,
             cse,
             goto_jumps,
             // Positions after an instruction.
@@ -15139,6 +15255,43 @@ impl Selector {
             open_back: _,
             label_clean: _,
         } = self;
+        // The positions after an instruction recorded so far are at or
+        // before the statement's start (the store's value and destination
+        // record none), and no range ends inside one of the two rotated
+        // blocks while starting outside it: such a range would come apart
+        // (review of bead domain-pascal-c7kh).
+        debug_assert!(*stmt_start <= start, "stmt_start inside a rotated store");
+        debug_assert!(
+            other_elem.iter().all(|&(p, _)| p <= start),
+            "other_elem inside a rotated store"
+        );
+        debug_assert!(
+            fresh.iter().all(|&(_, p, _)| p <= start),
+            "fresh inside a rotated store"
+        );
+        debug_assert!(
+            consume.iter().all(|&(_, p)| p <= start),
+            "consume inside a rotated store"
+        );
+        let whole = |a: usize, b: usize| {
+            (a <= start && b >= end)
+                || b <= start
+                || a >= end
+                || (start <= a && b <= mid)
+                || (mid <= a && b <= end)
+        };
+        debug_assert!(
+            units.iter().all(|&(a, b)| whole(a, b)),
+            "a unit partly inside a rotated store"
+        );
+        debug_assert!(
+            writes.iter().all(|&(a, b, _, _)| whole(a, b)),
+            "a write range partly inside a rotated store"
+        );
+        debug_assert!(
+            entry_end.as_ref().is_none_or(|r| whole(r.start, r.end)),
+            "the entry loads partly inside a rotated store"
+        );
         result_moves.iter_mut().for_each(at);
         held_firsts.iter_mut().for_each(|(l, s, _)| {
             at(l);
@@ -15187,6 +15340,12 @@ impl Selector {
         a0_bases.iter_mut().for_each(|(p, _)| at(p));
         assigned_move.iter_mut().for_each(at);
         flag_moves.iter_mut().for_each(|(p, _, _)| at(p));
+        // The reader's position is the index of the instruction selected
+        // there (or `end`, past the span, when none was yet).
+        kept_flags.iter_mut().for_each(|(k, p, _)| {
+            at(k);
+            at(p);
+        });
         cse.iter_mut().for_each(|c| at(&mut c.at));
         goto_jumps.iter_mut().for_each(|(p, _)| at(p));
         after(stmt_start);
@@ -19541,6 +19700,8 @@ impl Selector {
                         size,
                         dst: dst.clone(),
                     });
+                } else {
+                    self.note_kept_flags();
                 }
                 (Val::Imm(0), Cond::Pl)
             }
@@ -19657,6 +19818,8 @@ impl Selector {
                 size,
                 dst: Ea::Reg(Reg::D(d)),
             });
+        } else {
+            self.note_kept_flags();
         }
         // After a call whose pop was skipped (`f := abs(g(x))` before the
         // epilogue): the branch joins right after the `neg`, so the
@@ -19701,6 +19864,8 @@ impl Selector {
                 size,
                 dst: Ea::Reg(Reg::D(d)),
             });
+        } else {
+            self.note_kept_flags();
         }
         if self.unpopped {
             best_effort(
@@ -21658,6 +21823,8 @@ impl Selector {
                         size: size_of(ty.width),
                         dst: Ea::Reg(Reg::D(d)),
                     });
+                } else {
+                    self.note_kept_flags();
                 }
                 return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
             }
@@ -21669,6 +21836,7 @@ impl Selector {
                     // `move.w #480,D1; and.w (16,A0),D1; lsr.w #5,D1;
                     // beq.s`).
                     self.eval(lhs)?;
+                    self.note_kept_flags();
                     return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
                 }
             }
@@ -25705,6 +25873,48 @@ mod tests {
     fn span() -> Span {
         let f = SourceMap::new().add("t.pas", String::new());
         Span::new(f, 0, 0)
+    }
+
+    /// [`check_kept_flags`] (bead domain-pascal-x6a1): an `s<cc>` left to
+    /// an entry load's flags, past a `movea`, is accepted; with an `add`
+    /// moved between them (a store's destination rotated before its
+    /// value) it is refused, as are a label between them and a test whose
+    /// reader is gone.
+    #[test]
+    fn kept_flags_still_seen() {
+        let load = Insn::Move {
+            size: Size::W,
+            src: Ea::Disp(10, FP),
+            dst: Ea::Reg(Reg::D(1)),
+        };
+        let movea = Insn::Movea {
+            size: Size::L,
+            src: Ea::Disp(12, FP),
+            dst: 0,
+        };
+        let add = Insn::Alu {
+            op: AluOp::Add,
+            size: Size::W,
+            src: Ea::AbsL("H".into(), 0),
+            dst: 2,
+        };
+        let seq = Insn::Scc {
+            cond: Cond::Eq,
+            dst: Ea::Reg(Reg::D(3)),
+        };
+        // The test noted after the `movea` (index 1), its reader at 2.
+        let ok = vec![load.clone(), movea.clone(), seq.clone()];
+        assert!(check_kept_flags(&ok, &[(1, 2, span())]).is_ok());
+        // Rotated: the `add` between the load and the `s<cc>`.
+        let moved = vec![load.clone(), movea.clone(), add, seq.clone()];
+        assert!(check_kept_flags(&moved, &[(1, 3, span())]).is_err());
+        // The flags set again where the reader was to be: none reads them.
+        assert!(check_kept_flags(&moved, &[(1, 2, span())]).is_err());
+        let joined = vec![load, movea, Insn::Label(1), seq.clone()];
+        assert!(check_kept_flags(&joined, &[(1, 3, span())]).is_err());
+        // An `if`'s label entered with the flags, the reader right after.
+        let label = vec![Insn::Label(1), seq];
+        assert!(check_kept_flags(&label, &[(0, 1, span())]).is_ok());
     }
 
     /// [`Selector::check_device_updates`]' refusal (codegen-patterns 5.5,

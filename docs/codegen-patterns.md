@@ -14618,6 +14618,23 @@ supported, rule Uncertain; implemented, bead domain-pascal-k1sv).**
   `tests/golden/stores/both_regs`, `tests/exec/store_order.pas`.
   TTY_$K_SET_DELAY and TTY_$K_INQ_DELAY compile byte-identical in
   `make srcsurvey`.
+- *A value tested on flags set before it* (bead domain-pascal-x6a1):
+  a value whose test was left to the flags of an instruction before the
+  statement (no `tst`: a parameter's entry load, 12.2; an `addq`/`subq`
+  of the variable in memory, a local's store, the operation or the
+  assignment `move` that formed a register-held local, 7.1), as in
+  `g[p * 4 + h] := i = 0` right after the entry loads.  Moved below the
+  destination's instructions, its `s<cc>` would read the destination's
+  `add`.  The image settles neither order here: of its `s<cc>`s none
+  reads an entry load's flags and none follows a `tst` of a register an
+  entry load set (the flags come from a compare, a `tst` of memory, a
+  `btst` or an operation of the value; a scan of every `s<cc>` of
+  compiled code, SAU2).  Best effort (not byte-identical): not rotated,
+  the value's instructions first (`tests/exec/store_kept_flags.pas`).
+  Every test left to earlier flags is checked again once the body is
+  allocated, so that code moved during selection cannot separate it from
+  them (`check_kept_flags`); the scheduler and the spiller order
+  instructions by their own model of the flags.
 
 **R12. Registers are chosen before scheduling (Uncertain; supported;
 implemented: the scheduler runs after allocation).**
