@@ -793,6 +793,13 @@ Tests:
   the mask, `and.b`, `lsr.w` and set with `andi`/`ori` (RIP 0xE158B6),
   a word variable's low byte merged into a longword unit (APP_$RECEIVE
   0xE00864).
+- `packed/bool_unreduced` - codegen-patterns 5.3 ("A boolean constant";
+  bead domain-pascal-6zdt): a boolean field set or cleared on an indexed
+  or absolute operand with the bit's number in the word (`bclr #15`,
+  VTOCE_$TRUNCATE 0xE3A07A and 0xE3A0AE), through a pointer with the
+  bit's number in its byte (PROC2_$INIT 0xE30560); a boolean in the low
+  byte on an indexed operand, `bclr #k` on its byte (best effort: the
+  image's `andi.w` on the word, VTOCE_$WRITE 0xE39786).
 - `packed/bool_arrays` - codegen-patterns 5.2 ("Packed arrays"; bead
   domain-pascal-51e): PCHIST's `packed array[1..64] of boolean` at +0x18
   of its data: tests on the index's low byte (PCHIST_$COUNT 0xE1A156,

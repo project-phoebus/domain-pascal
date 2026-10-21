@@ -3527,15 +3527,42 @@ model run against the bit model of Figure 3-6).
     MMAP_$INIT 0xE330AE/0xE330B6 `bset #15`, 0xE330BE `bset #13`; sau2
     MMAP_$INIT 0xE31B56..0xE31B66, MMAP_$SET_WS_INDEX 0xE0D254 `bset
     #15,(0x2c,A5,D0.w)`, MMAP_$FREE_WSL 0xE0D1B2 `bclr #15,(0x2c,A5,D0.w)`,
-    AST_$ACTIVATE_ASTE_CANNED 0xE2F2E0 `bclr #13,(-0x80,A1,D1.l)`, PKT_
-    $PING_SERVER 0xE12DFC `bset #13,(-2,A3,D3.l)`.  A scan of every static
+    AST_$ACTIVATE_ASTE_CANNED 0xE2F2E0 `bclr #13,(-0x80,A1,D1.l)`, the
+    PMAP_ module-local 0xE12D84 (../source pmap/write_complete.pas) at
+    0xE12DFC `bset #13,(-2,A3,D3.l)`.  A scan of every static
     `bset`/`bclr` to memory in the code segments of both images: on
     absolute and indexed operands all have a number of 8 and above (sau2
-    11, sau5 17); on `(An)`, `(d,An)`, `(An)+`, `-(An)` none has (sau2 668,
-    sau5 746).  The CPU takes the number modulo 8 on a byte, so both
-    forms set the same bit.  `dpc` keeps a word set's number unreduced on
-    `abs.l` and `(d,An,Dn)`; a member below 8 is the same either way.  A
-    longword set's members 8 and above there: no site, reduced.
+    11, sau5 17), at an even address or displacement; on `(An)`,
+    `(d,An)`, `(An)+`, `-(An)` none has (sau2 668, sau5 746).  The sau2
+    11 (re-scanned for bead domain-pascal-6zdt, the routines'
+    reachable instructions): the 9 word-set sites above (MMAP_$INIT
+    0xE31B56, 0xE31B5E, 0xE31B66; MMAP 0xE0D1B2, 0xE0D254; AST 0xE2F2E0,
+    0xE2F2F2, 0xE2F304; PMAP_ 0xE12DFC) and VTOCE_$TRUNCATE's two packed
+    booleans 0xE3A07A, 0xE3A0AE (5.3, "Boolean field, constant").  The
+    CPU takes the number modulo 8 on a byte, so both forms set the same
+    bit.  `dpc` keeps a word set's number unreduced on `abs.l` and
+    `(d,An,Dn)` (`isel.rs` `word_bit_number`, shared with packed
+    booleans); a member below 8 is the same either way (the image's form
+    for one there, by VTOCE_$WRITE 0xE39786's packed boolean, may be
+    `andi.w`/`ori.w` on the word: no set site, 5.3).  A longword set's
+    members 8 and above there: no site, reduced; a set larger than a
+    longword (`store_set_member`): no site, reduced.
+  - **`btst #k` on memory is never unreduced (Verified, sau2; bead
+    domain-pascal-6zdt):** compiled code has no `btst #k` with k of 8 and
+    above on any memory operand (sau2: 411 through an address register,
+    11 absolute, none indexed; the one `btst #13,(28,SP)` at 0xE21952 is
+    hand assembly).  The absolute ones are on bytes: NETWORK_$ALLOWED_
+    SERVICE's word set (../source network/network.ins.pas) members 0 and
+    1 at its low byte, `btst #0,(0xe24c3f).l` (module-local 0xE6100C,
+    ASKNODE_$INTERNET_INFO 0xE65520, ASKNODE_$WHO_REMOTE 0xE663B0; `#1`
+    at REM_FILE_$SERVER 0xE637FA), on the odd address (no `bset`,
+    `bclr`, `andi` or `ori` on these operands is); device bytes (PARITY_$CHK
+    0xE0AE96 `btst #1,(0xffb403).l`, PEB_$TEST_PARITY_ERR 0xE1200A, the
+    RING_ module-local 0xE75400's DMA `csr` chars at 0xE75462..0xE754A8).
+    A member of 8 and above is loaded and tested in a register ("`in` on
+    sets in memory, constant member", below), so no site shows whether a
+    `btst` on such an operand would keep it unreduced.  `dpc`'s `btst #k`
+    stays reduced (sets, packed boolean tests).
 - **Several constant members (Verified once):** `andi #~mask` to memory
   for `-` (TTY_$I_RCV 0xE1B98E `andi.w #-0xe1,(8,A2)`, `- [5, 6, 7]`),
   `ori #mask` for `+` (PROC2_$INIT 0xE3065A `ori.w #0x180,(42,A2)`, two
@@ -6114,6 +6141,44 @@ same `bset #c mod 8` on the member's byte).
   smi Dn` (0xE066B2, 0xE025E4).
 - **Boolean field, constant:** `bset #k,M` / `bclr #k,M` (0xE41444,
   0xE00E02, 0xE5DF08 in FILE_$SET_PROT).
+  - **On an absolute or indexed operand k is the bit's number in the
+    word, unreduced (Verified, one routine; bead domain-pascal-6zdt):**
+    VTOCE_$TRUNCATE 0xE3A07A `bclr #15,(0xa,A2,D0.l)` and 0xE3A0AE `bclr
+    #15,(6,A2,D0.l)` (sau2 and sau5, the same addresses; `in_use`, bit 7
+    of byte 2 of the longword packed record ../source
+    vtoc/vtoc.ins.pas `vtoce_$hdr_t`).  Through an address register the
+    number is the bit's in its byte (PROC2_$INIT 0xE30560 `bclr
+    #5,(42,A2)`, 0xE30566 `bset #7,(42,A2)`).  The same addressing rule
+    as a word set's member (5.1, "On an absolute or indexed operand"):
+    the scan there covers both (every static `bset`/`bclr` on an absolute
+    or indexed operand in compiled code has a number of 8 and above, at
+    an even address or displacement).  `dpc` gives a boolean in a byte
+    at an even displacement or address on these operands 8 more than its
+    bit (`isel.rs` `word_bit_number`).  Not seen: a packed boolean on an
+    absolute operand, and one in byte 0 or 1 of a longword record, where
+    the word's number (8..15, 0..7) and the longword's (24..31, 16..23)
+    differ; `dpc` gives the word's (the image's `ori.w
+    #0x40,(-0x80,A1,D1.l)` at AST_$ACTIVATE_ASTE_CANNED 0xE2F328, `bit_22
+    := 1` on byte 1 of a longword record, is the word's form).
+  - **A boolean in the word's low byte on an indexed operand: best
+    effort (not byte-identical).**  The image clears it with `andi.w` on
+    the even word, not `bclr` on its byte: VTOCE_$WRITE 0xE39786 `andi.w
+    #-3,(0xa,A2,D0.l)` (`read_only`, bit 1 of byte 3), RINGLOG_$CNTL
+    0xE722A6 `andi.w #-5,(0xa,A0,D1.l)` (`valid`, bit 2 of byte 0xb; ../source
+    ring/ringlog.ins.pas, whose RINGLOG_$LOGIT sets it through A2 with
+    `bset #2,(0xb,A2)`); one-bit integer fields there are `ori.w` (AST
+    0xE2F328 above; FIM_'s `fim_$trace_sts_t` 0xE5B85A `ori.w
+    #0x80,(0,A0,D0.w)`).  So on these operands the original addresses
+    the even word that holds the field, never an odd byte: every
+    `andi`/`ori`/`and`/`or` to an absolute or indexed operand in sau2's
+    compiled code is at an even address or displacement (28 sites;
+    `andi.b` only on a high byte, XPD_$SET_DEBUGGER 0xE5BD6E).  `dpc`
+    keeps `bclr`/`bset #k` on the field's byte (correct: a byte access):
+    the word access needs the record to be word aligned, which the
+    selector does not know (`lower.rs` `bit_field` gives a one-bit field a
+    byte unit; exec test `packed_bool_unreduced`).  Not implemented: a
+    boolean (or a one-bit or byte-unit field) in an odd byte on an
+    indexed or absolute operand as `andi.w`/`ori.w` on its word.
 - **Boolean field, value:** bit 7: `andi.b #0x7f,M; andi.b #0x80,Dn; or.b
   Dn,M` with the value computed first (0xE00892..0xE008A4 `btst; sne D0;
   andi.b #127,(39,A2); andi.b #-128,D0; or.b`; OS_$GET_EC 0xE6D6DE `tst.l
@@ -6250,8 +6315,9 @@ same `bset #c mod 8` on the member's byte).
   a model of the instructions run over random records: stores keep the
   neighbouring bits, loads give the value), `crates/dpc-ir/src/tests.rs`
   (`packed_field_units`, `packed_signed_field_sign_extended`), golden
-  `tests/golden/packed/fields`, execution `tests/exec/packed_fields.pas`
-  and `tests/exec/bit_fields.pas`.
+  `tests/golden/packed/fields` and `tests/golden/packed/bool_unreduced`,
+  execution `tests/exec/packed_fields.pas`, `tests/exec/bit_fields.pas`
+  and `tests/exec/packed_bool_unreduced.pas`.
 
 ### 5.4 Alignment attributes and environments (ref 3.10.5, 3.10.6, 3.15.6, 4.7; layout from the reference's figures; implemented, bead domain-pascal-l9p)
 

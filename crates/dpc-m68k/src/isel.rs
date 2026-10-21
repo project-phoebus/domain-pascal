@@ -22048,7 +22048,10 @@ impl Selector {
     /// codegen-patterns 5.3), `M` its unit.  Image forms:
     ///
     /// - A boolean constant: `bset #k,M` / `bclr #k,M` (PROC2_$RESUME
-    ///   0xE41444 `bset #7,(-0x4,A6)`; 0xE00E02 `bclr #6,(-128,A2)`).
+    ///   0xE41444 `bset #7,(-0x4,A6)`; 0xE00E02 `bclr #6,(-128,A2)`); on an
+    ///   absolute or indexed operand k is the bit's number in the word,
+    ///   unreduced (VTOCE_$TRUNCATE 0xE3A07A `bclr #15,(0xa,A2,D0.l)`;
+    ///   [`Self::word_bit_number`]).
     /// - Another constant: the field cleared, `andi #~mask,M`, then its
     ///   bits set, `ori #c<<k,M` (0xE158CE..0xE158D4 `andi.b #63,(16,A0);
     ///   ori.b #-128,(16,A0)`); only the `andi` for 0 (0xE1565E `andi.b
@@ -22150,9 +22153,38 @@ impl Selector {
                 return Ok(());
             }
             if boolean {
+                // On an absolute or an indexed operand the number is the
+                // bit's in the word whose byte the field's is, as a word
+                // set's member ([`Self::word_bit_number`]; bead
+                // domain-pascal-6zdt): 8 more in the word's high byte, the
+                // byte at an even displacement or address.  VTOCE_$TRUNCATE
+                // 0xE3A07A `bclr #15,(0xa,A2,D0.l)` and 0xE3A0AE `bclr
+                // #15,(6,A2,D0.l)` (sau2 and sau5; `in_use`, bit 7 of byte 2
+                // of a longword packed record, ../source vtoc/vtoc.ins.pas
+                // vtoce_$hdr_t).  Through an address register the bit's in
+                // its byte (0xE00E02 `bclr #6,(-128,A2)`; PROC2_$INIT
+                // 0xE30560 `bclr #5,(42,A2)`).  Not seen: such a boolean on
+                // an absolute operand, or in byte 0 or 1 of a longword
+                // packed record (which the word's number, 8..15 and 0..7,
+                // and the longword's, 24..31 and 16..23, would tell
+                // apart); the word's number is used (the image's `ori.w
+                // #0x40,(-0x80,A1,D1.l)` at AST_$ACTIVATE_ASTE_CANNED
+                // 0xE2F328 for a longword's bit 22 is the word's).  Best
+                // effort (not byte-identical): a boolean in the word's low
+                // byte (an odd displacement or address) is `bset`/`bclr`
+                // on its byte; the image clears one with `andi.w` on the
+                // even word (VTOCE_$WRITE 0xE39786 `andi.w
+                // #-3,(0xa,A2,D0.l)`, RINGLOG_$CNTL 0xE722A6 `andi.w
+                // #-5,(0xa,A0,D1.l)`), a word access that needs the
+                // record's alignment, which the selector does not know.
+                let even = match &dst {
+                    Ea::AbsL(_, o) | Ea::Idx(o, ..) => o & 1 == 0,
+                    _ => false,
+                };
+                let k = field.shift + if even { 8 } else { 0 };
                 self.out.push(Insn::BitImm {
                     op: if *c != 0 { BitOp::Set } else { BitOp::Clr },
-                    bit: field.shift as u8,
+                    bit: Self::word_bit_number(&dst, k),
                     dst,
                 });
                 return Ok(());
@@ -23394,7 +23426,11 @@ impl Selector {
             // 0xE1B39E `bclr #0,(9,A2)`; codegen-patterns 5.1), through an
             // `lea` when the operand cannot be displaced (best effort, not
             // byte-identical: no site of either on a set of more than a
-            // longword).
+            // longword).  The number is reduced on any operand: a word
+            // set's is not on an absolute or indexed one
+            // ([`Self::word_bit_number`]), but for a larger set no static
+            // `bset`/`bclr` site tells which number (in the byte, the word
+            // or the set) the original gave.
             let byte = ((top - k) / 8) as i32;
             let mut ea = self.large_set_ea(set)?;
             if ea_plus(&ea, bytes as i32).is_none() {
@@ -24072,16 +24108,20 @@ impl Selector {
                 // 668, sau5 746): through an address register the number is
                 // reduced (MT_$ACQUIRE 0xE75E46 `bset #7,(0x32,A4)`, member 15).  A
                 // member below 8 is the same either way; a longword set's
-                // members 8 and above on these operands: no site, reduced.
-                let unreduced =
-                    w == Width::Word && matches!(dst, Ea::AbsL(..) | Ea::Idx(..));
+                // members 8 and above on these operands: no site, reduced
+                // ([`Self::word_bit_number`]).
+                let bit = if w == Width::Word {
+                    Self::word_bit_number(&dst, k)
+                } else {
+                    (k % 8) as u8
+                };
                 self.out.push(Insn::BitImm {
                     op: if *op == SetOp::Union {
                         BitOp::Set
                     } else {
                         BitOp::Clr
                     },
-                    bit: if unreduced { k as u8 } else { (k % 8) as u8 },
+                    bit,
                     dst,
                 });
             } else if w == Width::Word && !device && mask != 0 && mask & 0xff == 0 {
@@ -24154,6 +24194,27 @@ impl Selector {
             dst,
         });
         Ok(true)
+    }
+
+    /// The number of `bset`/`bclr #n,dst` for bit `k` (0..15) of a word,
+    /// `dst` the word's byte that holds it (`k div 8` chose it): on an
+    /// absolute or an indexed operand `k` itself, unreduced; through an
+    /// address register, `(An)` or `(d,An)`, `k mod 8`.  The CPU takes the
+    /// number modulo 8 on a byte, so both forms set the same bit
+    /// (codegen-patterns 5.1, 5.3; beads domain-pascal-fozq,
+    /// domain-pascal-6zdt).  In both images every static `bset`/`bclr` on
+    /// an absolute or indexed operand in compiled code has a number of 8
+    /// and above, on the byte at an even address or displacement (sau2
+    /// 11, sau5 17: word sets, MMAP_$SET_WS_INDEX 0xE0D254 `bset
+    /// #15,(0x2c,A5,D0.w)`, sau5 MT_$WAIT 0xE76A1A `bclr #13,(0xe90cc0).l`;
+    /// a packed boolean, VTOCE_$TRUNCATE 0xE3A07A `bclr #15,(0xa,A2,D0.l)`),
+    /// and none through an address register has (sau2 668, sau5 746).
+    fn word_bit_number(dst: &Ea, k: u32) -> u8 {
+        if matches!(dst, Ea::AbsL(..) | Ea::Idx(..)) {
+            k as u8
+        } else {
+            (k % 8) as u8
+        }
     }
 
     /// The byte `off` bytes into the object at `ea`.
