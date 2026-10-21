@@ -79,7 +79,7 @@ ok	domain_examples/streams/sasc/open.pas
 ok	domain_examples/streams/sasc/seek.pas
 diag	domain_examples/streams/scramble/enscramble.pas	undefined identifier `_`
 diag	domain_examples/streams/scramble/scramble.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
-diag	sys/source/bp1/sbp1_example.pas	passing a field of a packed record that is not a whole byte, word or longword (ref N.N.N) is not supported yet
+ok	sys/source/bp1/sbp1_example.pas
 diag	sys/source/emt/emt.pas	type transfer needs equal sizes: ...
 diag	sys/source/emt/rcv_pas_model.pas	expected `_`, found `_`
 diag	sys/source/emt/send_pas_model.pas	expected `_`, found `_`
