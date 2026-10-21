@@ -383,18 +383,38 @@ fn nil_passed_by_value_is_the_pointer_zero() {
     }
 }
 
-/// `nil` passed by address is refused (no site; codegen-patterns 13,
-/// "`nil`"); as a function result it is the pointer 0, whose form the
-/// selector decides (codegen-patterns 3, "`nil` results"; bead
-/// domain-pascal-bdi0).
+/// `nil` passed by address is a longword 0 cell keyed as an integer32 0,
+/// so it shares with integer32 0 and with `p(0)` (codegen-patterns 1.5;
+/// SAU5 PBU 0xE594B0, bead domain-pascal-dtbg); as a function result it
+/// is the pointer 0, whose form the selector decides (codegen-patterns 3,
+/// "`nil` results"; bead domain-pascal-bdi0).
 #[test]
-fn nil_passed_by_address_is_refused_nil_result_lowered() {
+fn nil_passed_by_address_is_a_cell_nil_result_lowered() {
     let decls = "module m;\ntype p = ^integer32;\n\
-                 procedure byref(in x: p); extern;\n";
-    let e = errs(&format!(
-        "{decls}procedure q;\nbegin\n  byref(nil);\nend;\n"
-    ));
-    assert!(e[0].contains("`nil` passed by address"), "{e:?}");
+                 procedure byref(in x: p); extern;\n\
+                 procedure byref32(in x: integer32); extern;\n";
+    let m = lower_src(&format!(
+        "{decls}procedure q;\nbegin\n  byref(nil);\n  byref32(0);\n  byref(p(0));\nend;\n"
+    ))
+    .unwrap();
+    let cells: Vec<(Vec<u8>, u32)> = func(&m, "Q")
+        .body
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Call(c) => match &c.args[..] {
+                [Arg::Address {
+                    addr: Addr::Const(k),
+                    slot: 4,
+                    writable: false,
+                }] => (k.bytes.clone(), k.key),
+                a => panic!("{a:?}"),
+            },
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(cells[0].0, [0, 0, 0, 0]);
+    assert_eq!(cells[1], cells[0]);
+    assert_eq!(cells[2], cells[0]);
     let m = lower_src(&format!("{decls}function f: p;\nbegin\n  f := nil;\nend;\n")).unwrap();
     assert_eq!(
         m.functions[0].body[0].kind,

@@ -285,6 +285,12 @@ Tests:
   domain-pascal-73sx): `nil` passed by value, `clr.l -(SP)`, pushed after
   word values and `st -(SP)` (NET_IO_$PUT_IN_SOCK_INT 0xE0E506,
   0xE0E4FC).
+- `calls/nil_by_address` - codegen-patterns 1.5, "`nil` by address"
+  (bead domain-pascal-dtbg): one longword 0 cell, `pea (d,PC)`, for the
+  module's `nil`s (SAU5 PBU_$RELEASE_INT 0xE59498, PBU_$SHUTDOWN
+  0xE59BE0, PBU_$FREE_ASID 0xE5A77A: the cell 0xE594B0), shared with
+  integer32 0 and `p(0)` (Uncertain for `nil`; a pointer constant sharing with
+  an equal integer32 is Verified, OS_$INIT 0xE34AA0).
 - `calls/pointer_targets` - codegen-patterns 1.5 (bead domain-pascal-s9j):
   objects reached through a pointer passed by address: `p.f^` with the
   record held, `move.l (d,A2),-(SP)` (0xE1CC52 in KBD_$RCV's nested

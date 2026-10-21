@@ -6862,8 +6862,8 @@ fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
 /// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`); a
 /// string constant as an unpacked array of char, padded with blanks to
 /// its size (below).  Sets other than of a word or a longword, records,
-/// strings as another type and `nil` are not supported yet (`nil` passed
-/// by address: no site known).
+/// strings as another type are not supported yet.  `nil` is a longword 0
+/// cell keyed as an integer32 0 (below).
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
     if let (ConstValue::Str(s), TypeKind::StringLit { .. }) = (v, p.types.kind(ty)) {
         let mut bytes = s.clone();
@@ -6946,14 +6946,25 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
             symbol: None,
         });
     }
+    if *v == ConstValue::Nil && size == 4 {
+        // `nil` by address (bead domain-pascal-dtbg): a longword 0 cell.
+        // SAU5 PBU: PBU_$RELEASE_INT 0xE59498, PBU_$SHUTDOWN 0xE59BE0
+        // and PBU_$FREE_ASID 0xE5A77A pass `nil` to PBU_$SETDOWN with
+        // `pea (d,PC)` of one cell, 0xE594B0 `0000 0000`, placed after
+        // PBU_$RELEASE_INT (its first user) behind a `0x2048` filler.
+        // Keyed as integer32 0, as a pointer constant is keyed as its
+        // integer32 (below, Verified at OS_$INIT), so a module's `nil` and
+        // integer32 0 by address share one cell (Uncertain for `nil`: no
+        // module is known to pass it and another longword 0 by address;
+        // codegen-patterns 1.5).
+        return Ok(PoolConst {
+            bytes: vec![0; 4],
+            key: p.types.builtins.integer32.0,
+            symbol: None,
+        });
+    }
     let width = match Width::of_size(size) {
         Some(w) if v.ordinal().is_some() => w,
-        _ if *v == ConstValue::Nil => {
-            return Err(unsupported(
-                span,
-                "`nil` passed by address (a code-section cell; no site known) is",
-            ))
-        }
         _ => {
             return Err(unsupported(
                 span,
@@ -6983,7 +6994,12 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
     // 0xE2FF7C's 0 for VFMT_$WRITE2's `a2`/`a1` (Apollo's
     // `vfmt_$generic_signed_arg`, an `[aligned(0)]` integer32) is the cell
     // 0xE2FFFC that LOG_$INIT 0xE30214 names for LOG_$ADD's `univ` data.
-    let key = if size == 4 && p.types.is_integer(ty) {
+    // A pointer constant (`p(n)`, a type transfer of an integer constant)
+    // is keyed so too (bead domain-pascal-dtbg): SAU2 OS_$INIT 0xE34130
+    // passes `univ_ptr(16#FC0000)` and 0xE3414E the integer32 16#FC0000
+    // with `pea` of one cell, 0xE34AA0 `00fc 0000` (Verified;
+    // codegen-patterns 1.5).  So `nil` (above) and `p(0)` are one cell.
+    let key = if size == 4 && (p.types.is_integer(ty) || p.types.is_pointer(ty)) {
         p.types.builtins.integer32.0
     } else {
         ty.0

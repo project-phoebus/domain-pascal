@@ -888,6 +888,26 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     module ends with the zero-word pad of non-aligning code.  So the
     loop-alignment switch also governs the cells (`tools/pcsurvey.py
     align`).
+  - **`nil` by address (Verified at the sites; implemented; bead
+    domain-pascal-dtbg).**  A longword 0 cell: SAU5 PBU_$RELEASE_INT
+    0xE59498, PBU_$SHUTDOWN 0xE59BE0 and PBU_$FREE_ASID 0xE5A77A pass
+    `nil` (the C's NULL DDF pointer) to PBU_$SETDOWN with `pea (d,PC)` of
+    one cell, 0xE594B0 `0000 0000`, in PBU_$RELEASE_INT's cells after
+    its `0x2048` filler; the two later routines name it again (the only
+    references to it in the PBU segment).  `dpc` keys the cell as an
+    integer32 0, and a pointer constant (`p(n)`, a type transfer) as the
+    integer32 n.  **A pointer constant and an equal integer32 share one
+    cell (Verified):** SAU2 OS_$INIT passes testpage's location
+    `univ_ptr(16#FC0000)` at 0xE34130 and OS_$INSTALL_DISPLAY_ASTE's
+    integer32 va 16#FC0000 at 0xE3414E (../source os/init.pas, the
+    types from the callees), both `pea (0xE34AA0,PC)`, one cell `00fc
+    0000`; with this keying ../source's os/os.s has 56 cells instead of
+    57.  That `nil` shares with integer32 0 (and with `p(0)`) follows
+    from it but is **Uncertain**: no module is known to pass `nil` and
+    another longword 0 by address; PBU has no integer32 0 by address.
+    ../source's pbu translations, written `nil`, compile
+    to the same output as their `pbu_$ddf_ptr_t(0)` workaround.  Golden
+    `calls/nil_by_address`.
   - **The same cell twice in a row** is pushed the second time with
     `move.l (SP),-(SP)` (`2f17`): TERM_$SEND_KBD_STRING 0xE1AB0C `pea
     (0x18,PC)`, 0xE1AB10 `move.l (SP),-(SP)`; all 33 `pea (d,PC)`
@@ -902,8 +922,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
     String constants to a `univ` parameter and to an unpacked array of
     char (below); set constants of one word or one longword (below).
-    Not yet: other sets, records, strings to other parameters, `nil` (no `nil` passed by address is
-    known); `lea (d,PC)`.  Conformance
+    `nil` (below).  Not yet: other sets, records, strings to other
+    parameters; `lea (d,PC)`.  Conformance
     units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
     (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
     `pchist_interrupt.pas`, `file_set_len.pas`, `asknode_info.pas`,
@@ -14654,8 +14674,8 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     `tools/nilsurvey.py areg`; bead domain-pascal-bdi0).  Refused: `nil`
     into a pointer local held in an address register (`suba.l An,An`
     at those of the 24 `suba.l` that are not results; no routine of
-    `make srcsurvey` reaches the refusal) and `nil` passed by address (no
-    site known).  `nil` passed by value is `clr.l -(SP)`
+    `make srcsurvey` reaches the refusal).  `nil` passed by address: a
+    longword 0 cell (section 1.5, "`nil` by address").  `nil` passed by value is `clr.l -(SP)`
     (section 1.5, "Zero"; implemented, bead domain-pascal-73sx);
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
     a boolean per `smd/smd_internal.h`; about 150 `st` to memory in the
