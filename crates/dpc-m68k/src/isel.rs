@@ -11320,18 +11320,26 @@ impl Selector {
                     // #1,(-47,A6); beq.s`); the field in bit 7 is the sign
                     // of its byte, tested like a whole boolean
                     // (`tst.b`/`bpl`, below; no `btst #7` on memory exists
-                    // in compiled code).
+                    // in compiled code).  The top bit of a byte at an even
+                    // offset comes as the word's top bit (`dpc-ir`
+                    // `word_sign_field`): the word's sign, `tst.w` (sau5
+                    // MT_$ACQUIRE 0xE75CFE `tst.w (0x00e91970).l; bmi.s`;
+                    // sau2 MSG_$$SEND 0xE0DBBA `tst.w (0x2,A3); bmi.w`).
                     Expr::Bits { addr, field, ty } if *ty == Scalar::BOOLEAN => {
                         let ea = self.ea_of(addr)?;
-                        if field.shift != 7 {
+                        if field.shift + 1 != 8 * field.unit.bytes() {
+                            let dst = self.bit_operand(ea, *field)?;
                             self.out.push(Insn::BtstImm {
                                 bit: field.shift as u8,
-                                dst: ea,
+                                dst,
                             });
                             self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                             return Ok(());
                         }
-                        ea
+                        let cc = if when { Cond::Mi } else { Cond::Pl };
+                        self.tst(size_of(field.unit), ea, cc)?;
+                        self.jump(cc, l);
+                        return Ok(());
                     }
                     _ => {
                         return Err(unsupported(
@@ -21958,6 +21966,23 @@ impl Selector {
         "a packed field of 8 bits on a byte boundary whose type is wider than a byte (its \
          access is not catalogued) is";
 
+    /// The operand of a `btst #k` of boolean bit field `field` at `ea`: the
+    /// byte itself, or a word unit (`dpc-ir` `word_sign_field`: another
+    /// unit's record, bits 14..8) loaded into a new data register (sau5
+    /// PBU_$WIRE_PBU 0xE5A436 `move.w (0x00e91970).l,D0; btst #14,D0`).
+    fn bit_operand(&mut self, ea: Ea, field: BitField) -> Res<Ea> {
+        if field.unit == Width::Byte {
+            return Ok(ea);
+        }
+        let d = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: size_of(field.unit),
+            src: ea,
+            dst: Ea::Reg(Reg::D(d)),
+        });
+        Ok(Ea::Reg(Reg::D(d)))
+    }
+
     /// The value of a bit field of a packed record in a new data register
     /// (ref 3.10.7; codegen-patterns 5.3).  `M` is the field's unit
     /// (`field.unit`, the byte, word or longword that holds it):
@@ -21965,7 +21990,9 @@ impl Selector {
     /// - a boolean field (one bit): `btst #k,M; sne Dn` (0xE16F0C `btst
     ///   #4,(19,A2); sne D0`; 0xE03368); in bit 7 `tst.b M; smi Dn`
     ///   (0xE066B2 `tst.b (185,A0); smi D0`): no `btst #7` on memory
-    ///   exists in compiled code;
+    ///   exists in compiled code; a word unit (`dpc-ir` `word_sign_field`)
+    ///   in bit 15 `tst.w M; smi Dn`, in another bit loaded first, `move.w
+    ///   M,Dn; btst #k,Dn; sne Dn`;
     /// - a field that fills the top of a unit as wide as its value: the
     ///   unit, shifted down, the zeros shifted in clearing the rest
     ///   (0xE08434 `move.l (8,A3),D6; lsr.l #4,D6`; 0xE0A232);
@@ -21988,9 +22015,14 @@ impl Selector {
         let ea = self.ea_of(addr)?;
         let d = self.alloc_d()?;
         if ty == Scalar::BOOLEAN && field.width == 1 {
-            if field.shift == 7 {
+            // The top bit of its unit: the unit's sign; a word's for the
+            // top bit of a byte at an even offset (`dpc-ir`
+            // `word_sign_field`; sau5 PBU_$UNWIRE_USER_PAGES 0xE59D90
+            // `tst.w (0x00e91970).l; smi D0`; sau2 BAT_$MOUNT 0xE3B77A
+            // `tst.w (0x3c,A0); smi D0`).
+            if field.shift + 1 == 8 * field.unit.bytes() {
                 self.out.push(Insn::Tst {
-                    size: Size::B,
+                    size: size_of(field.unit),
                     dst: ea,
                 });
                 self.out.push(Insn::Scc {
@@ -21998,9 +22030,22 @@ impl Selector {
                     dst: Ea::Reg(Reg::D(d)),
                 });
             } else {
+                let dst = if field.unit == Width::Byte {
+                    ea
+                } else {
+                    // The word into the result's register first (sau5
+                    // PBU_$UNWIRE_USER_PAGES 0xE59D98 `move.w
+                    // (0x00e91970).l,D1; btst #12,D1; sne D1`).
+                    self.out.push(Insn::Move {
+                        size: size_of(field.unit),
+                        src: ea,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    Ea::Reg(Reg::D(d))
+                };
                 self.out.push(Insn::BtstImm {
                     bit: field.shift as u8,
-                    dst: ea,
+                    dst,
                 });
                 self.out.push(Insn::Scc {
                     cond: Cond::Ne,

@@ -7975,6 +7975,7 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
     if let Some((addr, field)) = bit_field(p, e)? {
         check_device_access(p, e, true)?;
         let ty = bit_field_type(p, e)?;
+        let field = word_sign_field(p, e, &addr, field, ty);
         let bits = Expr::Bits { addr, field, ty };
         if p.types.ordinal_range(e.ty).is_some_and(|(lo, _)| lo < 0) {
             // Best effort (not byte-identical; bead domain-pascal-eoc6): a
@@ -9067,6 +9068,68 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
     )))
 }
 
+/// The field a boolean bit field `e` ([`bit_field`]) is *read* through: a
+/// boolean in the top bit of a byte at an even offset in its record, the
+/// top bit of the word there, is that word's sign (`unit` the word,
+/// `shift` 15; the selector's `tst.w` and `bmi`/`bpl`/`smi`), where the
+/// byte rule would give `tst.b` of the byte.  Stores keep the byte (sau5
+/// PBU_$INIT 0xE5A680 `andi.b #127,(0x00e91970).l; ...; or.b
+/// D0,(0x00e91970).l` for `pbu_$mcb.present := mbus_$present`, then
+/// 0xE5A6B0 `tst.w (0x00e91970).l; bmi`).  Survey of both images
+/// (codegen-patterns 5.3, "Boolean field, test"; bead domain-pascal-g9kx):
+/// sau5 PBU_$MCB (a word packed record, ../source pbu/pbu.ins.pas) 13
+/// `tst.w (0x00e91970).l` (MT_$ACQUIRE 0xE75CFE, PBU_$SETUP 0xE5976C,
+/// SM_$CINIT 0xE6F2C8, ...); through an address register MSG_$$SEND
+/// 0xE0DBBA `tst.w (0x2,A3); bmi` beside the same bit's value store
+/// 0xE0DBAC `andi.b #127,(0x2,A3)`, MST_$TOUCH 0xE0DFE2, BAT_$MOUNT
+/// 0xE3B77A `tst.w (0x3c,A0); smi`, DBUF_$GET_BLOCK 0xE3A634, both images.
+/// The low byte's top bit stays `tst.b` (AST_$INVALIDATE 0xE066B2 `tst.b
+/// (185,A0)`).
+///
+/// Another unit's record (an absolute operand) is read through the word
+/// for the other bits of that byte too, bits 14..8 of the word, which the
+/// selector loads and tests in a register: sau5 PBU_$WIRE_PBU 0xE5A436
+/// `move.w (0x00e91970).l,D0; btst #14,D0; bne`, PBU2_$ASSOC 0xE58D0E
+/// (#13), PBU_$UNWIRE_USER_PAGES 0xE59D98 `move.w (0x00e91970).l,D1; btst
+/// #12,D1; sne D1`, PBU_$SETUP 0xE59B1E (#11); no compiled `btst #k` on an
+/// even absolute address outside device registers in either image.  Through
+/// an address register those bits stay a `btst` of the byte (MST_$TOUCH
+/// 0xE0DFE8 `btst #3,(-0x3f6,A4)`, bit 11 of the word whose bit 15 is
+/// 0xE0DFE2's `tst.w`).
+///
+/// Not for a volatile field (its byte is referenced as written, 5.5) nor a
+/// record that may lie at an odd address: a byte-aligned one (`aligned(0)`
+/// on the record or on what holds it, [`byte_aligned`]) keeps the byte
+/// unless a static or frame offset proves its address even ([`even`],
+/// strict: through a pointer, a parameter passed by address or another
+/// unit's object its type's alignment does not tell).
+fn word_sign_field(p: &Program, e: &SExpr, addr: &Addr, field: BitField, ty: Scalar) -> BitField {
+    let ExprKind::Field {
+        base,
+        bits: Some(b),
+        ..
+    } = &e.kind
+    else {
+        return field;
+    };
+    let even_byte = field.unit == Width::Byte && (b.bit / 8) % 2 == 0;
+    let absolute = matches!(addr, Addr::Symbol { .. });
+    if ty != Scalar::BOOLEAN
+        || field.width != 1
+        || !even_byte
+        || !(field.shift == 7 || absolute)
+        || matches!(addr, Addr::Volatile { .. })
+        || (byte_aligned(p, base) && even(p, base, true) != Some(true))
+    {
+        return field;
+    }
+    BitField {
+        unit: Width::Word,
+        shift: field.shift + 8,
+        width: 1,
+    }
+}
+
 /// `e` as an element of a packed array of booleans (one bit each, ref
 /// 3.11.4.2 Table 3-5 p. 3-47; [`Expr::BitElem`]): the array's address
 /// and size, the index (a word) and the array's lower bound; `None` when `e` is no
@@ -9511,6 +9574,89 @@ fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
     Ok(wrap_volatile(p, e, addr_of(p, e)?))
 }
 
+/// The parity of `e`'s address: `Some(true)` even, `Some(false)` odd,
+/// `None` not known ([`check_even`]).  With `strict`, an object reached
+/// through a pointer, a parameter passed by address or another unit's
+/// object whose type is byte aligned by attribute (`aligned(0)`, ref
+/// 3.15.6.3 p. 3-69) is of unknown parity: `TypeTable::attributed` gives
+/// such a record an alignment of 2 (its size stays a multiple of 2), so
+/// its `align` does not tell.
+fn even(p: &Program, e: &SExpr, strict: bool) -> Option<bool> {
+    // Aligned as the type says.
+    let typed = |e: &SExpr| {
+        (p.types.get(e.ty).align >= 2 && !(strict && p.types.attrs(e.ty).align == Some(1)))
+            .then_some(true)
+    };
+    match &e.kind {
+        ExprKind::Field { base, offset, .. } => Some(even(p, base, strict)? == (offset % 2 == 0)),
+        // An element of a packed array of bits has no address.
+        ExprKind::Index {
+            elem_bits: Some(_), ..
+        } => None,
+        ExprKind::Index {
+            base,
+            index,
+            lo,
+            elem_size,
+            elem_bits: None,
+        } => {
+            let b = even(p, base, strict)?;
+            if elem_size % 2 == 0 {
+                return Some(b);
+            }
+            let i = index.value.as_ref().and_then(ConstValue::ordinal)?;
+            Some(b == ((i - lo) % 2 == 0))
+        }
+        // The target is aligned as the pointer's base type says (ref
+        // 3.15.6.7 pp. 3-75..3-76: `iptr: ^word_int32` "points to a
+        // word aligned 4-byte integer"): even unless byte aligned.
+        ExprKind::Deref(_) => typed(e),
+        ExprKind::WithRecord(w) => even(p, &with_binding(*w).0, strict),
+        // `T(v)` seen in place ([`transfer_view`]): `v`'s address.
+        ExprKind::Transfer(x) => even(p, x, strict),
+        ExprKind::Var { var, .. } => match &p.var(*var).storage {
+            Storage::Static { offset, .. } => Some(offset % 2 == 0),
+            Storage::Frame { .. } => Some(true),
+            // An argument passed by address, used in place (no local
+            // copy): the caller's object, which the callee may assume
+            // only as aligned as the parameter's type says (ref
+            // 3.15.6.8 p. 3-76; owner ruling "5.1 Attribute lists on
+            // parameter types", `[aligned(0)] error_$integer32`).  A
+            // value slot or local copy is in the frame.
+            Storage::Param { index } => {
+                let owner = p.var(*var).owner.expect("a parameter has an owner routine");
+                let prm = &p.routine(owner).params[*index];
+                if prm.passing() == Passing::ByAddress && prm.copy_offset.is_none() {
+                    typed(e)
+                } else {
+                    Some(true)
+                }
+            }
+            // Another unit's object, or the caller's place for a hidden
+            // result: aligned as its type says.
+            Storage::Extern { .. } | Storage::HiddenResult { .. } => typed(e),
+        },
+        _ => None,
+    }
+}
+
+/// Whether `e` or an array or record it is an element or a field of
+/// (up to a dereference) is byte aligned: an element of a byte-aligned
+/// array (`x: [aligned(0)] array[1..2] of integer16` after a char)
+/// may lie at an odd address although its own type has no attribute.
+fn byte_aligned(p: &Program, e: &SExpr) -> bool {
+    if p.types.attrs(e.ty).align == Some(1) {
+        return true;
+    }
+    match &e.kind {
+        ExprKind::Field { base, .. }
+        | ExprKind::Index { base, .. }
+        | ExprKind::Transfer(base) => byte_aligned(p, base),
+        ExprKind::WithRecord(w) => byte_aligned(p, &with_binding(*w).0),
+        _ => false,
+    }
+}
+
 /// Refuse a reference to an object of more than one byte that an
 /// alignment attribute lets lie at an odd address (`aligned(0)`, ref
 /// 3.15.6.3 p. 3-69: `b, c: [ALIGNED(0)] integer16` at offsets 1 and 3),
@@ -9528,80 +9674,7 @@ fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
 /// "Byte-sized module variables").  An object inside a byte-aligned array
 /// or record counts too.
 fn check_even(p: &Program, e: &SExpr) -> Res<()> {
-    /// The parity of `e`'s address: `Some(true)` even, `Some(false)` odd,
-    /// `None` not known.
-    fn even(p: &Program, e: &SExpr) -> Option<bool> {
-        match &e.kind {
-            ExprKind::Field { base, offset, .. } => Some(even(p, base)? == (offset % 2 == 0)),
-            // An element of a packed array of bits has no address.
-            ExprKind::Index {
-                elem_bits: Some(_), ..
-            } => None,
-            ExprKind::Index {
-                base,
-                index,
-                lo,
-                elem_size,
-                elem_bits: None,
-            } => {
-                let b = even(p, base)?;
-                if elem_size % 2 == 0 {
-                    return Some(b);
-                }
-                let i = index.value.as_ref().and_then(ConstValue::ordinal)?;
-                Some(b == ((i - lo) % 2 == 0))
-            }
-            // The target is aligned as the pointer's base type says (ref
-            // 3.15.6.7 pp. 3-75..3-76: `iptr: ^word_int32` "points to a
-            // word aligned 4-byte integer"): even unless byte aligned.
-            ExprKind::Deref(_) => (p.types.get(e.ty).align >= 2).then_some(true),
-            ExprKind::WithRecord(w) => even(p, &with_binding(*w).0),
-            // `T(v)` seen in place ([`transfer_view`]): `v`'s address.
-            ExprKind::Transfer(x) => even(p, x),
-            ExprKind::Var { var, .. } => match &p.var(*var).storage {
-                Storage::Static { offset, .. } => Some(offset % 2 == 0),
-                Storage::Frame { .. } => Some(true),
-                // An argument passed by address, used in place (no local
-                // copy): the caller's object, which the callee may assume
-                // only as aligned as the parameter's type says (ref
-                // 3.15.6.8 p. 3-76; owner ruling "5.1 Attribute lists on
-                // parameter types", `[aligned(0)] error_$integer32`).  A
-                // value slot or local copy is in the frame.
-                Storage::Param { index } => {
-                    let owner = p.var(*var).owner.expect("a parameter has an owner routine");
-                    let prm = &p.routine(owner).params[*index];
-                    if prm.passing() == Passing::ByAddress && prm.copy_offset.is_none() {
-                        (p.types.get(e.ty).align >= 2).then_some(true)
-                    } else {
-                        Some(true)
-                    }
-                }
-                // Another unit's object, or the caller's place for a hidden
-                // result: aligned as its type says.
-                Storage::Extern { .. } | Storage::HiddenResult { .. } => {
-                    (p.types.get(e.ty).align >= 2).then_some(true)
-                }
-            },
-            _ => None,
-        }
-    }
-    /// Whether `e` or an array or record it is an element or a field of
-    /// (up to a dereference) is byte aligned: an element of a byte-aligned
-    /// array (`x: [aligned(0)] array[1..2] of integer16` after a char)
-    /// may lie at an odd address although its own type has no attribute.
-    fn byte_aligned(p: &Program, e: &SExpr) -> bool {
-        if p.types.attrs(e.ty).align == Some(1) {
-            return true;
-        }
-        match &e.kind {
-            ExprKind::Field { base, .. }
-            | ExprKind::Index { base, .. }
-            | ExprKind::Transfer(base) => byte_aligned(p, base),
-            ExprKind::WithRecord(w) => byte_aligned(p, &with_binding(*w).0),
-            _ => false,
-        }
-    }
-    if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e) != Some(true) {
+    if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e, false) != Some(true) {
         return Err(unsupported(
             e.span,
             "a reference to a byte-aligned object (`aligned(0)`) of more than one byte at an \

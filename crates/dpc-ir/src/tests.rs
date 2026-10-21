@@ -4851,13 +4851,16 @@ fn packed_field_units() {
     let StmtKind::If { cond, then_, .. } = &f.body[0].kind else {
         panic!("{:?}", f.body[0].kind)
     };
-    // `fail`: bit 7 of the first byte.
+    // `fail`: bit 7 of the first byte, read as the sign of the word at 0
+    // (vtoc_$search_volumes 0xE01C2C `tst.w (A3); bpl.s`; bead
+    // domain-pascal-g9kx).
     assert!(matches!(
         cond,
         Cond::Test(Expr::Bits {
+            addr: Addr::Indirect { offset: 0, .. },
             field: BitField {
-                unit: Width::Byte,
-                shift: 7,
+                unit: Width::Word,
+                shift: 15,
                 width: 1
             },
             ty: Scalar::BOOLEAN,

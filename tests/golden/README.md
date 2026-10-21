@@ -805,6 +805,14 @@ Tests:
   bit's number in its byte (PROC2_$INIT 0xE30560); a boolean in the low
   byte on an indexed operand, `bclr #k` on its byte (best effort: the
   image's `andi.w` on the word, VTOCE_$WRITE 0xE39786).
+- `packed/word_sign` - codegen-patterns 5.3 ("Boolean field, test"; bead
+  domain-pascal-g9kx): a boolean in bit 15 of a word of its record tested
+  as the word's sign, `tst.w`/`bmi`, `smi` as a value, on another unit's
+  record (sau5 MT_$ACQUIRE 0xE75CFE, PBU_$UNWIRE_USER_PAGES 0xE59D90),
+  through a pointer (MSG_$$SEND 0xE0DBBA) and for `status_$t.fail`
+  (0xE01C2C); bits 14..8 of another unit's record loaded, `move.w;
+  btst #k,Dn` (PBU_$WIRE_PBU 0xE5A436, 0xE59D98); stores keep the byte
+  (PBU_$INIT 0xE5A680); the low byte's top bit stays `tst.b` (0xE066B2).
 - `packed/bool_arrays` - codegen-patterns 5.2 ("Packed arrays"; bead
   domain-pascal-51e): PCHIST's `packed array[1..64] of boolean` at +0x18
   of its data: tests on the index's low byte (PCHIST_$COUNT 0xE1A156,

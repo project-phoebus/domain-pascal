@@ -6135,10 +6135,94 @@ same `bset #c mod 8` on the member's byte).
 - **Boolean field, test:** `btst #k,M` and `beq`/`bne` (0xE0088A); bit 7
   as the sign, `tst.b M` and `bpl`/`bmi` (no `btst #7` on memory in
   compiled code: k = 0..6 only, 422 sites).
+  - **The top bit of a byte at an even offset is the sign of the word
+    there, `tst.w` (Verified, both images; bead domain-pascal-g9kx).**
+    A boolean in bit 15 of a word of the record is tested `tst.w M;
+    bmi`/`bpl` (`smi` as a value), whatever the operand, while stores of
+    it keep the byte (below).  With Apollo's own declaration
+    (`status_$t`, base.ins.pas, 0.1): `if status.fail then` in
+    vtoc_$search_volumes (AST_'s module-local 0xE01BEE) is 0xE01C2C
+    `tst.w (A3); bpl.s`.  Sites where the same bit is a packed boolean (a
+    value stored with the packed form, which a set member never has):
+    sau5 PBU_$MCB (../source pbu/pbu.ins.pas, a word record
+    of six booleans), `present` stored at PBU_$INIT 0xE5A680 `andi.b
+    #127,(0x00e91970).l; move.b (0x00e236ae).l,D0; andi.b #-128,D0; or.b
+    D0,(0x00e91970).l` and tested `tst.w (0x00e91970).l` at 13 sites
+    (MT_$ACQUIRE 0xE75CFE `bmi`, the bead's finding; PBU_$INIT 0xE5A6B0,
+    PBU_$SETDOWN 0xE5950C, PBU_$SETUP 0xE5976C, PBU2_$ASSOC 0xE58CC0 and
+    0xE58D2C, PBU_$UNWIRE_USER_PAGES 0xE59D90 `smi D0`, SM_$CINIT
+    0xE6F2C8, SM_C_$CINIT 0xE74EB2, IO_$GET_CONFIG 0xE7950E, the
+    module-locals 0xE58B96 and 0xE5908E); MSG_$$SEND 0xE0DBBA `tst.w
+    (0x2,A3); bmi.w` beside 0xE0DBAC `andi.b #127,(0x2,A3); ...; or.b
+    D0,(0x2,A3)` (both images).  In records with other packed-only forms
+    on the same word: BAT_$MOUNT 0xE3B77A `tst.w (0x3c,A0); smi D0` (bit
+    12 stored by the packed merge, 0xE3B79A..0xE3B7A6), MST_$TOUCH
+    0xE0DFE2 `tst.w (-0x3f6,A4)` (a 9-bit field merged with `andi.w
+    #-512`, 0xE0DFB0), DBUF_$GET_BLOCK 0xE3A634 `tst.w (0xc,A4)` (a 4-bit
+    merge, 0xE3A762), XPD_$POST_EVENT 0xE750BE (sau5 0xE7C25E) `tst.w
+    (0x10,A2)` (`andi.w #-481`), the module-local 0xE732E4 at 0xE733C8
+    (sau5 0xE7A484 at 0xE7A568) `tst.w (0x2a,A3)`.  Survey (ad-hoc scripts
+    over the reachable instructions of both images' compiled routines,
+    not kept): `tst.<s> <mem>` followed by `bmi`/`bpl`/`smi`/`spl`, sau2
+    and sau5: `tst.w` on memory 119 and 141 (abs 2 and 14: the PEB device
+    register 0xFF7000 and PBU_$MCB), `tst.l` 1 and 2 (integer signs);
+    the `tst.w` ones with bit operations on the same word in the same
+    routine, 37 and 40, are all packed records or word sets (the
+    segment map's flags, AST's flags at 0x12; the two cannot be told
+    apart there, 5.1).  `tst.b` of an even byte with bit operations on its
+    word: 12 and 10, all bytes the ../source reconstruction reads as
+    one-byte sets or byte objects (XPD_$CAPTURE_FAULT 0xE5B362, FLP_$INT
+    0xE19FA4's device register, SIO2681_$INT 0xE1D074's byte local) or as
+    `pkt_$hdr_flags_t`'s byte 4 (0xE0E2EE, NET_IO_$SEND 0xE0E7C0,
+    RING_$SENDP 0xE759BC), which the ring driver tests as a set of 8
+    (`btst #0/#1/#4` on the byte) and PKT_$BLD_INTERNET_HDR writes whole
+    (0xE1206A `move.b (0x1,A3),(0x4,A2)`): no packed boolean of bit 15
+    is tested `tst.b`.  The top bit of an odd byte, bit 7 of a word,
+    stays `tst.b` (AST_$INVALIDATE 0xE066B2 `tst.b (185,A0); smi D0`).
+    No `tst.l` of a packed boolean is seen: the top bit of a longword
+    record is the first word's sign (the segment map entries, AST_$TOUCH
+    0xE03214 `tst.w (A0)`, whose low 23 bits are merged with `andi.l
+    #-8388608`, AST_$TRUNCATE 0xE05F42).
+  - **Another unit's record (an absolute operand): bits 14..8 too are
+    read through the word, `move.w M,Dn; btst #k,Dn` (Verified, sau5;
+    bead domain-pascal-g9kx).**  PBU_$WIRE_PBU 0xE5A436 `move.w
+    (0x00e91970).l,D0; btst #14,D0; bne.s` (`if not pbu_$mcb.wired`),
+    PBU2_$ASSOC 0xE58D0E (#13, D4), PBU_$SETUP 0xE59B1E (#11, D0),
+    PBU_$UNWIRE_USER_PAGES 0xE59D98 `move.w (0x00e91970).l,D1; btst
+    #12,D1; sne D1; or.b D1,D0` (the result's register loaded).  The
+    word set MT_$PRESENT 0xE7651E `move.w (0x00e90cc0).l,D0; btst #14`
+    and the device registers (VME_$INT 0xE0AB42, COLOR_$LOAD_CRSR
+    0xE73006) are read so too; no compiled `btst #k` on an even absolute
+    address exists in either image except sau2's device registers at
+    0xFFA000/0xFFA040 (module-local code at 0xE75462..0xE754A8).  Through
+    an address register the high byte's bits stay a `btst` of the byte
+    (MST_$TOUCH 0xE0DFE8 `btst #3,(-0x3f6,A4)`, bit 11 of the word whose
+    sign 0xE0DFE2 tests), though BAT_$MOUNT 0xE3B76E reads its bit 12
+    `move.w (0x3c,A0),D0; btst #12,D0`, the split 5.1 records for word
+    sets ("The exceptions"), not reproduced.  The register is `dpc`'s
+    next free one (PBU2_$ASSOC's D4 is not reproduced).
+  - `dpc` (`dpc-ir` `word_sign_field`; `isel.rs` the condition's
+    `Expr::Bits` arm, `bits_value`, `bit_operand`): a boolean read in the
+    top bit of a byte at an even offset of its record, or in any bit of
+    such a byte of another unit's record, is read through the word
+    (unit `Word`, bit + 8); not a volatile field (5.5) nor one of a
+    record that may lie at an odd address, which keep the byte: a record
+    byte aligned by attribute (`aligned(0)` on it or on what holds it)
+    unless a static or frame offset proves its address even (through a
+    pointer, a parameter passed by address or another unit's object its
+    type's alignment does not tell: `dpc-sema` gives an attributed record
+    an alignment of 2; exec test `packed_word_sign_odd`).  Stores are unchanged: `andi.b`/`or.b` of the byte for a value,
+    `bset`/`bclr` for a constant.  Golden `packed/word_sign`, exec test
+    `packed_word_sign`.  A translation note for ../source: a field that
+    the original reads `tst.b` at an even offset (`pkt_$hdr_flags_t`'s
+    `broadcast`) is not a packed boolean there; a `[byte]` set or byte
+    keeps that form (5.1).
 - **Boolean field, value:** `btst #k,M; sne Dn` (0xE16F0C; XPD_$INHERIT_
   PTRACE_OPTIONS 0xE5B17C, conformance unit
   `tests/conformance/xpd_inherit_ptrace_options.pas`); bit 7 `tst.b M;
-  smi Dn` (0xE066B2, 0xE025E4).
+  smi Dn` (0xE066B2, 0xE025E4), at an odd offset; at an even one the
+  word's, `tst.w M; smi Dn` (PBU_$UNWIRE_USER_PAGES 0xE59D90, BAT_$MOUNT
+  0xE3B77A; above).
 - **Boolean field, constant:** `bset #k,M` / `bclr #k,M` (0xE41444,
   0xE00E02, 0xE5DF08 in FILE_$SET_PROT).
   - **On an absolute or indexed operand k is the bit's number in the

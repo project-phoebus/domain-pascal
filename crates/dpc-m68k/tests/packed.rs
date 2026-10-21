@@ -119,7 +119,9 @@ fn boolean_fields() {
         body("function t(p: rp): boolean; options(val_param); begin t := p^.b0 end;"),
         ["movea.l\t(8,%fp),%a0", "tst.b\t(5,%a0)", "smi\t%d0"]
     );
-    // Conditions: `btst; beq` (0xE0088A), `tst.b; bpl` for bit 7.
+    // Conditions: `btst; beq` (0xE0088A); bit 7 of an even byte, the
+    // word's sign, `tst.w; bmi` (vtoc_$search_volumes 0xE01C2C `tst.w
+    // (A3); bpl.s` for `status.fail`; bead domain-pascal-g9kx).
     assert_eq!(
         body("procedure t(var x: r); begin if x.b3 then gw := 1 end;"),
         [
@@ -134,7 +136,7 @@ fn boolean_fields() {
         body("procedure t(var x: r); begin if not x.b7 then gw := 1 end;"),
         [
             "movea.l\t(8,%fp),%a0",
-            "tst.b\t(%a0)",
+            "tst.w\t(%a0)",
             "bmi.s\t1f",
             "move.w\t#1,(GW).l",
             "1:"
