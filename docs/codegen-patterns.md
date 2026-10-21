@@ -7355,8 +7355,13 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **Signed or unsigned:** `blt`/`ble`/`bgt`/`bge` for signed values,
   `bcs`/`bls`/`bhi`/`bcc` for unsigned ones (0xE1779E `bcc` skips the
   `then` part of an unsigned `<`; 0xE177BE `bls` of an unsigned `>`).
-  **Against 0, always the signed condition (Verified; bead
-  domain-pascal-wkm5).**  An unsigned word that uses the top bit
+  **A word variable or field against the constant 0: the signed
+  condition (Verified; bead domain-pascal-wkm5; owner ruling 2026-10-21,
+  reference-clarifications "An unsigned word compared with 0").**  A
+  computed unsigned word (`(u & 6) > 0`) keeps the best-effort unsigned
+  form (exec test be_u_kinds).  A subrange wholly in the top half
+  (`16#8000..16#FFFF`) is not seen; dpc gives it the same rule, so its
+  `h > 0` is always false.  An unsigned word that uses the top bit
   (pinteger, `0..65535`) is tested with `tst.w` (or on its load's
   flags) and `ble`/`bgt`/`bmi`/`bpl`, so that 16#8000..16#FFFF count as
   below 0, unlike ref 4.3.3 (p. 4-6), which makes an unsigned run-time
