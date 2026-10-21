@@ -37,7 +37,9 @@ Makefile: tools/dpcflags.py; none when it has none):
      code generation.  Every routine that a diagnostic falls in is
      *stubbed* (its body removed: a global routine is deleted, as its
      `extern' heading is in an insert file, and dropped from every `define'
-     part, lists included (bead domain-pascal-g6ky); an `internal' one
+     part, lists included (bead domain-pascal-g6ky), and items after a
+     conditional directive (`%endif'; bead domain-pascal-7h9m); an
+     `internal' one
      becomes an `internal; extern' heading, or,
      when the module file has its `forward' heading, that heading becomes
      `extern') and
@@ -88,7 +90,14 @@ Makefile: tools/dpcflags.py; none when it has none):
      grows: every byte dpc emits is compared either way.  Unless --no-build-settings, each is
      given the A5 mode and loop alignment it has in the image (step 5:
      `--a5-always', `--a5-always-from', `--a5-absolute' for the routine,
-     `--loop-align=off' or `--loop-align-off-from').
+     `--loop-align=off' or `--loop-align-off-from').  Options that cannot
+     apply to the unit are not given (bead domain-pascal-4x8e): when dpc
+     refuses an A5 option because the unit has no static data (the
+     image's A5 points past a 4-byte block, codegen-patterns 4), the
+     routine is compiled again without `--a5-always'/`--a5-always-from'
+     and reported MISMATCH with that said, unless it matches; a unit that
+     is a whole map segment but calls module routines gets the fragment
+     origin `--module-routine' needs (whole_segment_origin).
   5. Build settings: for each code section of the module (each map code
      segment holding one of its routines), the A5 mode from
      tools/a5survey.py (`switch': always mode from the first exported
@@ -127,8 +136,12 @@ retired with the integer reading of TTY_$I_GET_DESC (codegen-patterns 3,
 "Pointer locals held in D0"; bead domain-pascal-78n2).
 
 The run ends with a summary of the top-level routines by status (OK,
-CODE-OK, MISMATCH, SETUP, STUB: stubbed for a diagnostic, BLOCKED: the
-module stops outside any routine).  `--update' writes them to the
+CODE-OK, MISMATCH, SETUP, ABSENT: compiled, but not in the SAU2 image,
+its "Image addresses:" rows being other SAUs' only (`sau5  0x00E1E69C
+COLOR_$VIDEO_CTL'; COLOR_, GPU_, PBU_ ...), so nothing to compare,
+STUB: stubbed for a diagnostic, BLOCKED: the module stops outside any
+routine).  A routine with no address at all, no sau2 row and no other
+SAU's, is still SETUP.  `--update' writes them to the
 baseline, tests/srcsurvey/baseline.txt, with the ../source commit;
 `--baseline' compares with it, at that commit unless --rev is given, so
 that only dpc changes the result (`make srcsurvey'), and exits 1 when a
@@ -175,11 +188,18 @@ ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+|\
 # extent is the map's (map_extent).  Data lines ("TTY data (WIRED_DATA,
 # 0x28 bytes)", "ROUTE_$PORT (NET_PORT_TABLE, 0x2E0 bytes)") do not match.
 # One routine row per line, `sau2  0xADDR  NAME [(nested|module-local...)]',
-# possibly closing its comment on the same line (`}' or `*)').  A line
+# possibly closing its comment on the same line (`}' or `*)'); the note
+# may go on over the next lines (pbu/map_check_unit.pas `(module-local;
+# the map's\n PBU_$PAGE_END marks its address)').  A line
 # carrying several SAUs' addresses is not read (none exist; such a routine
 # would show as SETUP, not pass).
 IMAGE_ADDR_RE = re.compile(r'^[ \t]*sau2[ \t]+0x([0-9A-Fa-f]+)[ \t]+([A-Za-z_$][\w$]*)'
-                           r'(?:[ \t]+\((?:nested|module-local)[^)\n]*\))?[ \t]*(?:\}|\*\))?[ \t]*$', re.M)
+                           r'(?:[ \t]+\((?:nested|module-local)[^)]*\))?[ \t]*(?:\}|\*\))?[ \t]*$', re.M)
+# The same rows for any SAU (`sau5  0x00E1E69C  COLOR_$VIDEO_CTL'): a
+# routine whose table has rows for other SAUs only is not in the SAU2
+# image: status ABSENT (conform_routine; bead domain-pascal-4x8e).
+SAU_ROW_RE = re.compile(r'^[ \t]*(sau\d+)[ \t]+0x([0-9A-Fa-f]+)[ \t]+([A-Za-z_$][\w$]*)'
+                        r'(?:[ \t]+\((?:nested|module-local)[^)]*\))?[ \t]*(?:\}|\*\))?[ \t]*$', re.M)
 
 # Workarounds for refusals in declarations (stage 2).  Each: (name, what
 # dpc refuses, files it applies to, pattern, replacement, a string or a
@@ -576,6 +596,15 @@ def image_addresses(text):
     return {m.group(2).lower(): int(m.group(1), 16) for m in IMAGE_ADDR_RE.finditer(text)}
 
 
+def image_saus(text):
+    """{routine name (lower case): {SAU}} of TEXT's "Image addresses:"
+    rows for every SAU (SAU_ROW_RE): which images have the routine."""
+    out = {}
+    for m in SAU_ROW_RE.finditer(text):
+        out.setdefault(m.group(3).lower(), set()).add(m.group(1).lower())
+    return out
+
+
 def parse_size(s):
     """A header's size: hex with `0x', else decimal."""
     return int(s[2:], 16) if s.lower().startswith('0x') else int(s, 10)
@@ -822,6 +851,44 @@ def extern_forwards(text, names):
     return ''.join(out)
 
 
+# The conditional-compilation directives (ref 4.7, p. 4-43): `%if COND
+# %then', `%ifdef NAME %then', `%elseif COND %then', `%elseifdef NAME
+# %then' (to their `%then'), `%else', `%endif'.
+DIRECTIVE_OPEN = {'if', 'ifdef', 'elseif', 'elseifdef'}
+DIRECTIVE_ALONE = {'else', 'endif'}
+
+
+def directive_end(toks, k):
+    """The index after the conditional directive at TOKS[K] (tokenize:
+    `%' and its word), or None when none starts there."""
+    if not (k + 1 < len(toks) and toks[k][1] == '%' and toks[k + 1][0] == 'word'):
+        return None
+    w = toks[k + 1][1]
+    if w in DIRECTIVE_ALONE:
+        return k + 2
+    if w not in DIRECTIVE_OPEN:
+        return None
+    j = k + 2
+    while j + 1 < len(toks) and not (toks[j][1] == '%' and toks[j + 1][1] == 'then'):
+        j += 1
+    return j + 2 if j + 1 < len(toks) else None
+
+
+def directive_texts(text):
+    """The conditional directives of TEXT, each as written (`%if x
+    %then'), in order (directive_end)."""
+    toks = tokenize(text)
+    out, k = [], 0
+    while k < len(toks):
+        e = directive_end(toks, k)
+        if e is None:
+            k += 1
+            continue
+        out.append(text[toks[k][2]:toks[e - 1][3]])
+        k = e
+    return out
+
+
 def define_items(text):
     """The `define' parts of TEXT (ref 7.2.2, p. 7-5): [(define token,
     [item])], an item (start, end, [(name, start, end)], initialised)
@@ -829,19 +896,31 @@ def define_items(text):
     and the list form `a, b, c;' (docs/reference-clarifications.md
     "7.2.2 Lists in the define statement"); comments and strings are
     skipped (tokenize).  A part is the word `define' at a declaration's
-    start (after `;' or at the top) and the items that follow it."""
+    start (after `;', after a conditional directive, or at the top) and
+    the items that follow it, conditional directives between them
+    skipped (io/io.pas: `%if pbu_driver %then io_$attr_cntl; %endif
+    io_$alloc; ...'; bead domain-pascal-7h9m)."""
     toks = tokenize(text)
     parts = []
     k = 0
     while k < len(toks):
         t = toks[k]
-        if not (t[0] == 'word' and t[1] == 'define' and (k == 0 or toks[k - 1][1] == ';')):
+        after_directive = (k >= 2 and toks[k - 2][1] == '%'
+                           and toks[k - 1][1] in DIRECTIVE_ALONE | {'then'})
+        if not (t[0] == 'word' and t[1] == 'define'
+                and (k == 0 or toks[k - 1][1] == ';' or after_directive)):
             k += 1
             continue
         items = []
         k += 1
-        while k + 1 < len(toks) and toks[k][0] == 'word' and toks[k][1] not in DECL_WORDS \
-                and toks[k + 1][1] in (',', ';', ':='):
+        while True:
+            e = directive_end(toks, k)
+            while e is not None:
+                k = e
+                e = directive_end(toks, k)
+            if not (k + 1 < len(toks) and toks[k][0] == 'word' and toks[k][1] not in DECL_WORDS
+                    and toks[k + 1][1] in (',', ';', ':=')):
+                break
             start = toks[k][2]
             names = []
             while True:
@@ -882,7 +961,9 @@ def drop_defines(text, names):
     an item whose names all go is removed (its line too when nothing else
     is on it), a list keeps the others (`b, c;', with any comment inside
     it after the `;'); a part left empty goes whole, the word `define'
-    and the comments between its items too."""
+    and the comments between its items too, but not the conditional
+    directives between them (`%if x %then', `%endif'): they stay, one
+    per line, so every `%if' keeps its `%endif'."""
     if not names:
         return text
     lower = {n.lower() for n in names}
@@ -905,7 +986,10 @@ def drop_defines(text, names):
         if not left and items:
             # the whole part, `define' to its last item's `;'
             del edits[mark:]
-            edits.append(_cut_line(text, d[2], items[-1][1]) + ('',))
+            gaps = [text[d[3]:items[0][0]]] + [text[a[1]:b[0]]
+                                               for a, b in zip(items, items[1:])]
+            kept = ''.join(x + '\n' for g in gaps for x in directive_texts(g))
+            edits.append(_cut_line(text, d[2], items[-1][1]) + (kept,))
     for a, b, r in sorted(edits, reverse=True):
         text = text[:a] + r + text[b:]
     return text
@@ -1102,6 +1186,11 @@ class Module:
         for inc in self.fragments:
             rows.update(image_addresses(self.frag_text[inc]))
         self.starts |= set(rows.values())
+        # the SAUs each routine's rows name (ABSENT: other SAUs' only)
+        self.saus = image_saus(self.text)
+        for inc in self.fragments:
+            for n, ss in image_saus(self.frag_text[inc]).items():
+                self.saus.setdefault(n, set()).update(ss)
         for _inc, r in self.routines.values():
             if r.addr is None:
                 set_image_addr(r, rows)
@@ -1365,6 +1454,36 @@ def check_routine(check, mod, name, linkmap, table, specs, out, read_image=None)
     return ok, lines
 
 
+# dpc's refusal of an A5 option for a unit with no static data
+# (dpc-ir lower.rs: "--a5-always: the unit has no static data in the data
+# section of `X`"; bead domain-pascal-4x8e)
+A5_NO_DATA_RE = re.compile(r'error: --a5-always(?:-from)?: the unit has no static data')
+
+
+def without_a5_opts(opts):
+    """OPTS without the A5 options that load A5 (`--a5-always',
+    `--a5-always-from'): (kept, dropped)."""
+    kept, dropped = [], []
+    for o in opts:
+        (dropped if re.match(r'--a5-always(?:-from)?=', o) else kept).append(o)
+    return kept, dropped
+
+
+def whole_segment_origin(opts, mopts, lo):
+    """The fragment options OPTS (conform.fragment_args) for a unit whose
+    module routines are MOPTS (conform.module_routine_args): a unit that is
+    a whole map segment has none (dpc compiles it as a module), but dpc
+    takes `--module-routine' only with a fragment origin ("--module-routine
+    needs --fragment-origin"; PEB_$PROC_CLEANUP 0xE752BC, the whole
+    PEB_WIRED segment of PROC2_DELETE_PRO, calls PEB_WIRED's routines in
+    WIRED_PROC): it is then given as the fragment that starts at LO and
+    ends its module (`--fragment-origin LO --fragment-ends-module': the
+    module-end padding is emitted, as for the module).  Else OPTS."""
+    if mopts and not opts:
+        return ['--fragment-origin', '0x%X' % lo, '--fragment-ends-module']
+    return opts
+
+
 def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=None,
                     data_changed=()):
     """Compile top-level routine NAME alone and compare it with the
@@ -1382,7 +1501,14 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
     except conform.SetupError as e:          # reading the image (routine_size)
         return 'SETUP: %s' % e
     if specs is None:
-        return 'SETUP: no "Original address" in the header'
+        others = sorted(getattr(mod, 'saus', {}).get(name.lower(), set()) - {'sau2'})
+        if others:
+            # an "Image addresses:" table with other SAUs' rows only: the
+            # routine is not in the SAU2 image (color/video_ctl.pas
+            # `sau5  0x00E1E69C  COLOR_$VIDEO_CTL'), nothing to compare
+            return 'ABSENT: not in the SAU2 image (address rows for %s only)' % ', '.join(others)
+        return ('SETUP: no address in the header (no "Original address", no sau2 row '
+                'in an "Image addresses:" table)')
     unit = os.path.join(mod.tree, '_unit_%s.pas' % name.replace('$', '_'))
     with open(unit, 'w') as fh:
         fh.write(mod.unit_text(name))
@@ -1407,11 +1533,20 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
             items.append(sym.name if sym else '%s=0x%X' % (other, o.addr))
         mopts, local = conform.module_routine_args(
             ['module-routines=' + ','.join(items)] if items else [], routines, linkmap)
-        asm = os.path.join(work, os.path.basename(unit)[:-4] + '.s')
         lo = routines[0].addr
+        opts = whole_segment_origin(opts, mopts, lo)
+        asm = os.path.join(work, os.path.basename(unit)[:-4] + '.s')
         bopts = unit_build_opts(settings, r, lo) if settings else []
         rc, err = run_dpc(dpc, mod.tree, os.path.basename(unit), out=asm,
                           opts=opts + mopts + bopts)
+        dropped = []
+        if rc and A5_NO_DATA_RE.search(err):
+            # the unit has no static data, so no A5 option can apply
+            # (dpc refuses them; codegen-patterns 4): compiled in used
+            # mode, the image's A5 load past a 4-byte block is a mismatch
+            bopts, dropped = without_a5_opts(bopts)
+            rc, err = run_dpc(dpc, mod.tree, os.path.basename(unit), out=asm,
+                              opts=opts + mopts + bopts)
         if rc:
             # the first error, not a warning before it (`-config variable
             # sau2 is not declared')
@@ -1426,6 +1561,9 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
             mod, name, linkmap, table, specs, out)
         if ok:
             return 'OK'
+        if dropped:
+            return 'MISMATCH: the unit has no static data, so compiled without %s' % (
+                ' '.join(dropped))
         # code-only: no problem but data differences, and every
         # differing data byte one a workaround in DATA_CHANGED changed
         if data_changed and code_ok_only(lines):
@@ -1703,11 +1841,14 @@ BASELINE = os.path.join(ROOT, 'tests', 'srcsurvey', 'baseline.txt')
 
 # per top-level routine, best first: compiled and byte-identical; code
 # identical, data changed by a DATA_WORKAROUNDS rewrite; compiled, not
-# identical; conformance not set up; stubbed (a diagnostic in it); not
-# reached (the module stops outside any routine); compiled, conformance
-# not run (--no-conform)
+# identical; conformance not set up; compiled, not in the SAU2 image
+# (ABSENT: other SAUs' address rows only, nothing to compare; ranked
+# with SETUP, so a routine that loses its sau2 row is worse than
+# MISMATCH, and one that only gains the classification is not); stubbed
+# (a diagnostic in it); not reached (the module stops outside any
+# routine); compiled, conformance not run (--no-conform)
 STATUS_RANK = {'OK': 5, 'CODE-OK': 4, 'COMPILED': 3, 'MISMATCH': 3, 'SETUP': 2,
-               'STUB': 1, 'BLOCKED': 0}
+               'ABSENT': 2, 'STUB': 1, 'BLOCKED': 0}
 
 
 def format_baseline(commit, results):
@@ -1869,7 +2010,7 @@ def cmd_run(a):
             _i, r = mod.routines[name]
             print('  %-9s %-36s %s' % (res.split(':')[0], name,
                                        ('0x%X' % r.addr) if r.addr else '?')
-                  + (('  ' + res[7:]) if res.startswith('SETUP') else '')
+                  + (('  ' + res.split(': ', 1)[1]) if ': ' in res else '')
                   + (('  (data differs: workaround %s)' % ', '.join(data_changed))
                      if res == 'CODE-OK' else ''))
         results += routine_results(path, mod, ok, conformed)

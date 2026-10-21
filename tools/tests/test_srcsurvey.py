@@ -426,6 +426,83 @@ var z: integer;
         self.assertEqual(srcsurvey.define_items(t), [])
         self.assertIn('{ define a; }\nvar z: integer;\n', t)
 
+    # io/io.pas's define parts (bead domain-pascal-7h9m): conditional
+    # directives between the items, and parts that start after one
+    IO_DEFINES = """module io_, wired_proc, wired_data;
+define
+  chk;
+  io_$xlate_iova;
+%if pbu_driver %then
+  io_$attr_cntl;
+%endif
+  io_$alloc;
+%if pbu_driver and not x %then
+  io_$free;
+%else
+  io_$free2;
+%endif
+  io_$init;
+  io_$get_config;
+
+const
+  n = 8;
+
+%if pbu_driver %then
+define
+  pbu_$exclusion_lock;
+%endif
+
+define
+  io_$in_init;
+"""
+
+    def test_define_items_across_directives(self):
+        names = [[n for n, _a, _b in nms] for _d, items in srcsurvey.define_items(self.IO_DEFINES)
+                 for _s, _e, nms, _i in items]
+        self.assertEqual(names, [['chk'], ['io_$xlate_iova'], ['io_$attr_cntl'], ['io_$alloc'],
+                                 ['io_$free'], ['io_$free2'], ['io_$init'], ['io_$get_config'],
+                                 ['pbu_$exclusion_lock'], ['io_$in_init']])
+        self.assertEqual(srcsurvey.directive_texts(self.IO_DEFINES),
+                         ['%if pbu_driver %then', '%endif', '%if pbu_driver and not x %then',
+                          '%else', '%endif', '%if pbu_driver %then', '%endif'])
+
+    def test_drop_defines_after_directives(self):
+        # the names after `%endif' go too (io_$init, io_$get_config were
+        # left: "named in a define statement but has no body"), and one
+        # inside a conditional
+        t = srcsurvey.drop_defines(self.IO_DEFINES, ['io_$init', 'IO_$GET_CONFIG',
+                                                      'io_$attr_cntl', 'io_$free2'])
+        self.assertEqual(t, self.IO_DEFINES.replace('  io_$init;\n  io_$get_config;\n', '')
+                         .replace('  io_$attr_cntl;\n', '').replace('  io_$free2;\n', ''))
+        # a part left empty goes, its directives stay (every `%if' keeps
+        # its `%endif')
+        every = [n for _d, items in srcsurvey.define_items(self.IO_DEFINES)
+                 for _s, _e, nms, _i in items for n, _a, _b in nms]
+        t = srcsurvey.drop_defines(self.IO_DEFINES, every[:8])
+        self.assertEqual(t, """module io_, wired_proc, wired_data;
+%if pbu_driver %then
+%endif
+%if pbu_driver and not x %then
+%else
+%endif
+
+const
+  n = 8;
+
+%if pbu_driver %then
+define
+  pbu_$exclusion_lock;
+%endif
+
+define
+  io_$in_init;
+""")
+        t = srcsurvey.drop_defines(self.IO_DEFINES, every)
+        self.assertNotIn('define', t)
+        self.assertEqual(srcsurvey.directive_texts(t),
+                         srcsurvey.directive_texts(self.IO_DEFINES))
+        self.assertIn('%if pbu_driver %then\n%endif\n\n', t)
+
 
 class HeaderFormatTest(unittest.TestCase):
     """Both of ../source's header formats (bead domain-pascal-zlnu): the
@@ -586,6 +663,139 @@ end;
                               'route_$validate_port': 0xE65904, 'm_$b': 0xE00100})
             # every row is a routine start, a name the files lack too
             self.assertEqual(mod.starts, {0xE154A4, 0xE154C4, 0xE65904, 0xE00100})
+
+
+class OtherSauTest(unittest.TestCase):
+    """Routines with other SAUs' rows only (bead domain-pascal-4x8e):
+    color/video_ctl.pas, a SAU5 routine, and a module data row."""
+
+    MOD = """\
+{ color/color.pas - the COLOR module.
+
+  Image addresses:
+    sau5  0x00E8C324  COLOR data (.DATA, 0x8C bytes)
+}
+module color;
+%include 'color/video_ctl.pas';
+%include 'color/both.pas';
+%include 'color/none.pas';
+"""
+    VIDEO_CTL = """\
+{ COLOR_$VIDEO_CTL - set the video control.
+
+  Image addresses:
+    sau5  0x00E1E69C  COLOR_$VIDEO_CTL
+}
+procedure color_$video_ctl;
+begin
+end;
+"""
+    BOTH = """\
+{ COLOR_$BOTH - a routine of both images.
+
+  Image addresses:
+    sau2  0x00E00100  COLOR_$BOTH
+    sau5  0x00E00200  COLOR_$BOTH
+}
+procedure color_$both;
+begin
+end;
+"""
+    NONE = """\
+{ COLOR_$NONE - no table. }
+procedure color_$none;
+begin
+end;
+"""
+
+    def module(self, d):
+        os.makedirs(os.path.join(d, 'color'))
+        for n, t in (('color', self.MOD), ('video_ctl', self.VIDEO_CTL), ('both', self.BOTH),
+                     ('none', self.NONE)):
+            with open(os.path.join(d, 'color', n + '.pas'), 'w') as fh:
+                fh.write(t)
+        return srcsurvey.Module(d, 'color/color.pas')
+
+    def test_image_saus(self):
+        self.assertEqual(srcsurvey.image_saus(self.VIDEO_CTL), {'color_$video_ctl': {'sau5'}})
+        self.assertEqual(srcsurvey.image_saus(self.BOTH), {'color_$both': {'sau2', 'sau5'}})
+        # data rows are not routines; no sau2 address from a sau5 row
+        self.assertEqual(srcsurvey.image_saus(self.MOD), {})
+        self.assertEqual(srcsurvey.image_addresses(self.VIDEO_CTL), {})
+        # a note that goes on over the next line (pbu/map_check_unit.pas)
+        wrapped = ("{ pbu_map_check_unit - find a PBU unit's DCTE.\n\n  Image addresses:\n"
+                   "    sau5  0x00E91F70  pbu_map_check_unit (module-local; the map's\n"
+                   "                      PBU_$PAGE_END marks its address)\n\n  More.\n}\n")
+        self.assertEqual(srcsurvey.image_saus(wrapped), {'pbu_map_check_unit': {'sau5'}})
+        self.assertEqual(srcsurvey.image_addresses(wrapped.replace('sau5', 'sau2')),
+                         {'pbu_map_check_unit': 0xE91F70})
+
+    def test_absent_not_setup(self):
+        with tempfile.TemporaryDirectory() as d:
+            mod = self.module(d)
+            self.assertEqual({n: r.addr for n, (_i, r) in mod.routines.items()},
+                             {'color_$video_ctl': None, 'color_$both': 0xE00100,
+                              'color_$none': None})
+            f = srcsurvey.conform_routine
+            res = f(mod, 'color_$video_ctl', 'dpc', None, d, None)
+            self.assertEqual(res, 'ABSENT: not in the SAU2 image (address rows for sau5 only)')
+            # no row at all: still a setup problem
+            self.assertTrue(f(mod, 'color_$none', 'dpc', None, d, None).startswith(
+                'SETUP: no address in the header'))
+            res = srcsurvey.routine_results('color/color.pas', mod, True, {
+                'color_$video_ctl': res, 'color_$both': 'OK'})
+            self.assertEqual([st for _m, _n, st in res], ['ABSENT', 'OK', 'COMPILED'])
+
+    def test_absent_in_the_baseline(self):
+        k = ('color/color.pas', 'color_$video_ctl')
+        # SETUP -> ABSENT is a reclassification, not a regression; a
+        # routine that loses its sau2 row is worse than MISMATCH
+        self.assertEqual(srcsurvey.compare_baseline({k: 'SETUP'}, [k + ('ABSENT',)])[1], 0)
+        self.assertEqual(srcsurvey.compare_baseline({k: 'STUB'}, [k + ('ABSENT',)])[1], 0)
+        self.assertEqual(srcsurvey.compare_baseline({k: 'MISMATCH'}, [k + ('ABSENT',)])[1], 1)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'b.txt')
+            with open(p, 'w') as fh:
+                fh.write(srcsurvey.format_baseline('abc', [k + ('ABSENT',)]))
+            self.assertEqual(srcsurvey.read_baseline(p), ('abc', {k: 'ABSENT'}))
+
+
+class UnitOptsTest(unittest.TestCase):
+    """Options that cannot apply to a unit (bead domain-pascal-4x8e)."""
+
+    # dpc-ir lower.rs's refusals, as dpc prints them
+    REFUSALS = [
+        'dpc: error: --a5-always: the unit has no static data in the data section of '
+        '`XPD_$READ`, so there is no data area to load (a unit without data that loads A5 '
+        'points it past a 4-byte block, codegen-patterns 4; not supported)',
+        'dpc: error: --a5-always-from: the unit has no static data in the data section of '
+        '`DIR_$OLD_INIT`, so there is no data area to load (a unit without data that loads '
+        'A5 points it past a 4-byte block, codegen-patterns 4; not supported)']
+
+    def test_a5_no_data_re(self):
+        for e in self.REFUSALS:
+            self.assertTrue(srcsurvey.A5_NO_DATA_RE.search(e), e)
+        self.assertFalse(srcsurvey.A5_NO_DATA_RE.search(
+            'dpc: error: --a5-always: no routine `X` in this unit'))
+
+    def test_without_a5_opts(self):
+        opts = ['--merge-constant-stores', '--a5-always=XPD_$READ', '--loop-align=off']
+        self.assertEqual(srcsurvey.without_a5_opts(opts),
+                         (['--merge-constant-stores', '--loop-align=off'],
+                          ['--a5-always=XPD_$READ']))
+        self.assertEqual(srcsurvey.without_a5_opts(['--a5-always-from=DIR_$OLD_INIT',
+                                                    '--a5-absolute=X']),
+                         (['--a5-absolute=X'], ['--a5-always-from=DIR_$OLD_INIT']))
+
+    def test_whole_segment_origin(self):
+        m = ['--module-routine=WIRED_PROC:PEB_$TOUCH=0xE70810']
+        # PEB_$PROC_CLEANUP 0xE752BC, the whole PEB_WIRED segment
+        self.assertEqual(srcsurvey.whole_segment_origin([], m, 0xE752BC),
+                         ['--fragment-origin', '0xE752BC', '--fragment-ends-module'])
+        # no module routine: compiled as a module, as before
+        self.assertEqual(srcsurvey.whole_segment_origin([], [], 0xE752BC), [])
+        frag = ['--fragment-origin', '0xE00100']
+        self.assertEqual(srcsurvey.whole_segment_origin(frag, m, 0xE00100), frag)
 
 
 class DiagTest(unittest.TestCase):
