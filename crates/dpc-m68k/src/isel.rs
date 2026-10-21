@@ -16323,6 +16323,19 @@ impl Selector {
             },
             Callee::Pointer(x) => Insn::Jsr(Ea::Ind(self.call_target(c, x)?)),
         };
+        // ref 5.5.8, p. 5-19: an `options(nosave)` callee does not
+        // preserve D2-D7/A2-A4 (the call writes them, `regs::access`), so
+        // this routine saves them for its own caller.  Best effort (not
+        // byte-identical): no call of a `nosave` routine is identified in
+        // the image (bead domain-pascal-7c4j).
+        if matches!(&insn, Insn::Jsr(ea) if crate::regs::is_nosave_call(ea)) {
+            best_effort(
+                self.span,
+                "a call of an options(nosave) routine (D2-D7/A2-A4 saved at entry, no value \
+                 held in a register across it; no such call identified in the image) is",
+            )?;
+            self.clobbered = self.clobbered.union(crate::regs::nosave_clobbers());
+        }
         self.out.push(insn);
         self.call_stmts.push((start, self.out.len() - 1, self.span));
         // The block of another data section is loaded again after a call

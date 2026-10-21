@@ -389,6 +389,9 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                 .iter()
                 .any(|(s, _)| s.eq_ignore_ascii_case(&f.data_section))
     };
+    // Calls of the unit's `options(nosave)` routines write every
+    // allocatable register (ref 5.5.8, p. 5-19; `regs::is_nosave_call`).
+    let _nosave = crate::regs::NosaveScope::enter(&module.nosave_callees);
     for sec in sections {
         out.push('\n');
         out.push_str(&section_directive(&module.name, sec));

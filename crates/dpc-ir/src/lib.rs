@@ -83,6 +83,15 @@ pub struct Module {
     /// told where the routine is (`--module-routine`, test scaffolding
     /// for a fragment of a module; bead domain-pascal-3h9).
     pub outside_internal_calls: Vec<(String, Span)>,
+    /// The symbols of the routines declared `options(nosave)` (ref 5.5.8,
+    /// p. 5-19: such a routine does not preserve the registers the calling
+    /// convention has a callee preserve, only the data base and the frame
+    /// pointer).  A call of one clobbers them all, so the caller keeps no
+    /// value in one across it and preserves them itself for its own
+    /// caller (the target; bead domain-pascal-7c4j).  None has a body in
+    /// the unit (defining one is refused, `lower.rs`), so each is called
+    /// as [`Callee::External`].
+    pub nosave_callees: Vec<String>,
 }
 
 /// A unit's static data area in one data section: one block, reached as

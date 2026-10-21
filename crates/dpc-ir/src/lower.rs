@@ -110,12 +110,20 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
     }
     if errors.is_empty() {
         let outside_internal_calls = outside_internal_calls(program, &functions);
+        // ref 5.5.8, p. 5-19 ([`Module::nosave_callees`]).
+        let nosave_callees = program
+            .routines
+            .iter()
+            .filter(|r| r.options.nosave && r.body.is_none())
+            .map(|r| r.symbol.clone())
+            .collect();
         Ok(Module {
             name: program.name.clone(),
             functions,
             data,
             overlays,
             outside_internal_calls,
+            nosave_callees,
         })
     } else {
         Err(errors)

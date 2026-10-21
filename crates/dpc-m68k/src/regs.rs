@@ -227,6 +227,58 @@ fn is_marith(ea: &Ea) -> bool {
     matches!(ea, Ea::AbsL(s, _) if s.starts_with("M$"))
 }
 
+thread_local! {
+    /// The `options(nosave)` routines of the unit being selected
+    /// ([`NosaveScope`]).
+    static NOSAVE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While alive, calls of the symbols it was entered with are calls of
+/// `options(nosave)` routines ([`is_nosave_call`]): the unit's
+/// `dpc_ir::Module::nosave_callees`, for the selection of its routines
+/// (`emit.rs`).
+pub struct NosaveScope {
+    outer: Vec<String>,
+}
+
+impl NosaveScope {
+    pub fn enter(symbols: &[String]) -> NosaveScope {
+        let outer = NOSAVE.with(|n| std::mem::replace(&mut *n.borrow_mut(), symbols.to_vec()));
+        NosaveScope { outer }
+    }
+}
+
+impl Drop for NosaveScope {
+    fn drop(&mut self) {
+        let outer = std::mem::take(&mut self.outer);
+        NOSAVE.with(|n| *n.borrow_mut() = outer);
+    }
+}
+
+/// Whether a `jsr` to `ea` calls an `options(nosave)` routine (ref 5.5.8,
+/// p. 5-19: it "does not preserve" D2-D7, A2-A4 and FP2-FP7; it preserves
+/// A5 and A6).  Such a call writes every register the allocator hands
+/// out ([`access`]), so no value stays in a register across it (one live
+/// there is spilled, `crate::spill`), and the caller saves D2-D7/A2-A4
+/// for its own caller ([`nosave_clobbers`]; `isel.rs`).  Only a direct
+/// call: `dpc-sema` refuses `nosave` on a routine pointer type.  No call
+/// of a `nosave` routine is identified in the image (bead
+/// domain-pascal-7c4j), so this form is best effort.
+pub fn is_nosave_call(ea: &Ea) -> bool {
+    match ea {
+        Ea::AbsL(s, _) => NOSAVE.with(|n| n.borrow().iter().any(|x| x == s)),
+        _ => false,
+    }
+}
+
+/// The callee-saved registers a call of an `options(nosave)` routine
+/// writes (ref 5.5.8, p. 5-19): D2-D7 and A2-A4.
+pub fn nosave_clobbers() -> RegSet {
+    let mut s = callee_saved();
+    s.remove(DATA_BASE);
+    s
+}
+
 /// The registers `insn` reads and writes.  A call writes the scratch
 /// registers it does not preserve (R3).
 pub fn access(insn: &Insn) -> Access {
@@ -277,8 +329,17 @@ pub fn access(insn: &Insn) -> Access {
         Insn::Addq { dst, .. } | Insn::Subq { dst, .. } => a.dst_rmw(dst),
         Insn::Jsr(ea) => {
             a.ea_address(ea);
+            let all: Vec<Reg>;
             let clobbered: &[Reg] = if is_marith(ea) {
                 &[Reg::D(0), Reg::A(0)]
+            } else if is_nosave_call(ea) {
+                // ref 5.5.8, p. 5-19: D0-D7 and A0-A4 ([`is_nosave_call`]).
+                all = ALLOC_D
+                    .iter()
+                    .map(|&n| Reg::D(n))
+                    .chain(ALLOC_A.iter().map(|&n| Reg::A(n)))
+                    .collect();
+                &all
             } else {
                 &[Reg::D(0), Reg::D(1), Reg::A(0), Reg::A(1)]
             };
@@ -1033,6 +1094,21 @@ mod tests {
         assert_eq!(access(&jsr()).defs, [d(0), d(1), a(0), a(1)]);
         let m = access(&Insn::Jsr(Ea::AbsL("M$MIS$LLL".into(), 0)));
         assert_eq!(m.defs, [d(0), a(0)]);
+        // A call of an options(nosave) routine writes D0-D7 and A0-A4
+        // (ref 5.5.8, p. 5-19), only while its symbol is in scope.
+        {
+            let _n = NosaveScope::enter(&["X".to_string()]);
+            let all: Vec<Reg> = (0..8).map(d).chain((0..5).map(a)).collect();
+            assert_eq!(access(&jsr()).defs, all);
+            assert!(is_nosave_call(&Ea::AbsL("X".into(), 0)));
+            assert!(!is_nosave_call(&Ea::AbsL("Y".into(), 0)));
+            assert!(!is_nosave_call(&Ea::Ind(0)));
+        }
+        assert_eq!(access(&jsr()).defs, [d(0), d(1), a(0), a(1)]);
+        assert_eq!(
+            nosave_clobbers().iter().collect::<Vec<_>>(),
+            [d(2), d(3), d(4), d(5), d(6), d(7), a(2), a(3), a(4)]
+        );
         // A load through a base is not a register operand (R2); a copy is.
         assert!(access(&load(8, vd(0))).reg_operands.is_empty());
         let c = access(&Insn::Movea {

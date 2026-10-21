@@ -5,7 +5,7 @@
 
 	.section	".text.exec_stubs","ax",@progbits
 	.balign	2
-	.irp	n,LOG_L,LOG_W,LOG_UW,LOG_C,LOG_BOOL,LOG_X,LOG_MEM,LOGV_L,LOGV_W,LOGV_C,ID_L,ID_W,ID_BOOL,ID_P,CLOBBER,MARK
+	.irp	n,LOG_L,LOG_W,LOG_UW,LOG_C,LOG_BOOL,LOG_X,LOG_MEM,LOGV_L,LOGV_W,LOGV_C,ID_L,ID_W,ID_BOOL,ID_P,CLOBBER,MARK,NOSAVE,NOSAVE_W,NOSAVE_ID_L
 	.globl	EXEC_$\n
 EXEC_$\n:
 	illegal

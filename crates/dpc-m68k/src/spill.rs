@@ -30,7 +30,9 @@
 //!   `clr` into the data register, whose flags a `tst` of that register
 //!   after the store sets again; a value that would need either
 //!   elsewhere, a `dbf` counter and a `case` dispatch's register are not
-//!   spilled;
+//!   spilled (a `dbf` counter is, to a slot it counts in, where nothing
+//!   else can be: across a call of an `options(nosave)` routine,
+//!   [`spill_form_dbf`]);
 //! - the body is coloured again, until it colours (each spill removes one
 //!   value of the body; the reloads' and stores' values are never
 //!   spilled; a parked value may go to a slot later).
@@ -316,6 +318,7 @@ fn frame_touched(insns: &[Insn], d: i32) -> bool {
 /// How `v` can be spilled in `insns`, or `None`: every reload and store
 /// it needs keeps the condition codes, and no instruction that names it is
 /// a `dbf` or a `case` dispatch.
+#[cfg(test)]
 fn spill_form(
     insns: &[Insn],
     v: Reg,
@@ -324,16 +327,44 @@ fn spill_form(
     live_out: &[BTreeSet<RegKey>],
     remat: &[i32],
 ) -> Option<Form> {
+    spill_form_dbf(insns, v, cc_in, cc_out, live_out, remat, false)
+}
+
+/// [`spill_form`]; with `dbf`, also a `dbf` counter, to a frame slot
+/// ([`Form::Slot`]): its `dbf`s become `subq.w #1,(d+2,A6); bcc` (the
+/// same test: `dbf` branches unless the word was 0, where `subq` borrows),
+/// where the condition codes are dead.  Best effort (not byte-identical):
+/// only where nothing else can be spilled (a counter live across a call
+/// of an `options(nosave)` routine, `regs::is_nosave_call`); no site.
+fn spill_form_dbf(
+    insns: &[Insn],
+    v: Reg,
+    cc_in: &[bool],
+    cc_out: &[bool],
+    live_out: &[BTreeSet<RegKey>],
+    remat: &[i32],
+    dbf: bool,
+) -> Option<Form> {
     if !is_virtual(v) {
         return None;
     }
     let mut defs: Vec<usize> = Vec::new();
+    let mut counts = false;
     let written = written_before(insns, v);
     for (j, insn) in insns.iter().enumerate() {
         let a = access(insn);
         let (u, d) = (a.uses.contains(&v), a.defs.contains(&v));
         if !u && !d {
             continue;
+        }
+        if let Insn::Dbf {
+            reg, until: None, ..
+        } = insn
+        {
+            if dbf && Reg::D(*reg) == v && !cc_in[j] && !cc_out[j] {
+                counts = true;
+                continue;
+            }
         }
         if matches!(
             insn,
@@ -349,6 +380,14 @@ fn spill_form(
         if reload && matches!(v, Reg::D(_)) && cc_in[j] {
             return None;
         }
+    }
+    for &j in &defs {
+        if counts && cc_out[j] && retest(&insns[j], v).is_none() {
+            return None;
+        }
+    }
+    if counts {
+        return Some(Form::Slot);
     }
     // A parameter slot's address loaded once, at full width.
     if let [j] = defs[..] {
@@ -391,7 +430,13 @@ fn data_free(insns: &[Insn], v: Reg, live_out: &[BTreeSet<RegKey>]) -> bool {
             return true;
         }
         let n = out.iter().filter(|r| matches!(r.0, Reg::D(_))).count();
-        let limit = if matches!(i, Insn::Jsr(_) | Insn::Bsr { .. }) { 6 } else { 8 };
+        // None across a call of an `options(nosave)` routine, which writes
+        // them all (`regs::is_nosave_call`).
+        let limit = match i {
+            Insn::Jsr(ea) if crate::regs::is_nosave_call(ea) => 0,
+            Insn::Jsr(_) | Insn::Bsr { .. } => 6,
+            _ => 8,
+        };
         n < limit
     })
 }
@@ -434,19 +479,27 @@ fn choose(
         }
     }
     let mut best: Option<(u64, RegKey, Form)> = None;
-    for &r in &near {
-        if !same_class(r.0, failed) || temps.contains(&r) {
-            continue;
+    // A `dbf` counter only where no other value can go
+    // ([`spill_form_dbf`]).
+    for dbf in [false, true] {
+        for &r in &near {
+            if !same_class(r.0, failed) || temps.contains(&r) {
+                continue;
+            }
+            let Some(form) = spill_form_dbf(insns, r.0, &cc_in, &cc_out, &live_out, remat, dbf)
+            else {
+                continue;
+            };
+            // Live instructions per naming instruction, scaled to compare
+            // as integers; ties go to the first in register order.
+            let score = (span.get(&r).copied().unwrap_or(0) as u64 * 1024)
+                / names.get(&r).copied().unwrap_or(1).max(1) as u64;
+            if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
+                best = Some((score, r, form));
+            }
         }
-        let Some(form) = spill_form(insns, r.0, &cc_in, &cc_out, &live_out, remat) else {
-            continue;
-        };
-        // Live instructions per naming instruction, scaled to compare as
-        // integers; ties go to the first in register order.
-        let score = (span.get(&r).copied().unwrap_or(0) as u64 * 1024)
-            / names.get(&r).copied().unwrap_or(1).max(1) as u64;
-        if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
-            best = Some((score, r, form));
+        if best.is_some() {
+            break;
         }
     }
     best.map(|(_, r, form)| (r.0, form))
@@ -484,6 +537,38 @@ fn spill(
         let k = match *tag {
             Tag::Orig(k) | Tag::Spill(k) => k,
         };
+        // A `dbf` counter in its slot ([`spill_form_dbf`]): the low word
+        // decremented in memory, then the branch while it did not borrow.
+        if let (
+            Insn::Dbf {
+                reg,
+                label,
+                until: None,
+            },
+            Form::Slot,
+        ) = (insn, form)
+        {
+            if Reg::D(*reg) == v {
+                out.push((
+                    *tag,
+                    Insn::Subq {
+                        size: Size::W,
+                        value: 1,
+                        dst: Ea::Disp(off + 2, crate::frame::FP),
+                    },
+                ));
+                out.push((
+                    Tag::Spill(k),
+                    Insn::Branch {
+                        cond: crate::insn::Cond::Cc,
+                        label: *label,
+                        short: true,
+                        back: true,
+                    },
+                ));
+                continue;
+            }
+        }
         let t = next.take(v)?;
         temps.insert(RegKey(t));
         let to_t = |i: &Insn| {
@@ -816,5 +901,40 @@ mod tests {
             "{t:?}"
         );
         assert!(t[k + 2].starts_with("tst.w\t%d"), "{t:?}");
+    }
+
+    /// A `dbf` counter live across a call of an options(nosave) routine,
+    /// which writes every register (bead domain-pascal-7c4j): it goes to
+    /// a slot, its `dbf` becomes `subq.w #1,(d+2,A6); bcc` back.
+    #[test]
+    fn dbf_counter_across_nosave_call() {
+        let _n = crate::regs::NosaveScope::enter(&["X".to_string()]);
+        let body = vec![
+            Insn::Moveq {
+                value: 3,
+                dst: VBASE,
+            },
+            Insn::Label(1),
+            jsr(),
+            Insn::Dbf {
+                reg: VBASE,
+                label: 1,
+                until: None,
+            },
+        ];
+        let s = allocate_spilling(&body, &[], &[], 8, &[]).unwrap();
+        assert!(physical(&s));
+        assert_eq!(s.bytes, 4);
+        assert_eq!(
+            spliced(&s),
+            [
+                "moveq\t#3,%d0",
+                "move.l\t%d0,(-0xc,%fp)",
+                "1:",
+                "jsr\t(X).l",
+                "subq.w\t#1,(-0xa,%fp)",
+                "bcc.s\t1b",
+            ]
+        );
     }
 }

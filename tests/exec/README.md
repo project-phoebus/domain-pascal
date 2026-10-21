@@ -105,6 +105,7 @@ A word or byte result has junk in the bits above it.
 | `exec_$id_l` / `_w` / `_bool (in v)` | nothing; returns v in D0 |
 | `exec_$id_p(in v: univ_ptr)` | nothing; returns v in A0 (also a way to get `addr(x)` into a pointer) |
 | `exec_$clobber` | nothing |
+| `exec_$nosave` / `exec_$nosave_w(v)` / `exec_$nosave_id_l(in v)` | `options(nosave)` (ref 5.5.8): also clobber D2-D7 and A2-A4; nothing / the `val_param` word / returns v in D0 |
 
 `exec_$counter` is a word that acts as a device register: each word read
 returns the next value, and a store sets it (see `volatile.pas`).
@@ -254,3 +255,4 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `index_parts` | bead domain-pascal-69fe: the index's constant part in the displacement (`a[i + 1]`, `a[3 + i]`, `a[i - 2]`), computed longword indices into arrays that fit narrowed to `.w` (`rshft(x, 10)`, with `+ 1`, MMAP_$INIT's `div 1024 + 1`) at both ends of a 1024-entry table, a longword variable kept `.l`, a word with a constant part into arrays beyond 32K bytes zero-extended (`pinteger`) and sign-extended (best effort, from -999) |
 | `store_kept_flags` | bead domain-pascal-x6a1: booleans stored into elements whose index takes more instructions than the value, the value a test left to flags set before the statement (a parameter's entry load, a `subq` in memory, a local's store, the `add` that formed a register-held local, the `move` of an assignment to one): the value's instructions kept first, so the `s<cc>` reads them, both outcomes |
 | `store_kept_flags_ptr` | bead domain-pascal-x6a1 (review): a pointer local stored from A0 and tested against `nil` on the store's flags, stored into an element whose index takes more instructions: the test noted, the store kept in order |
+| `nosave` | bead domain-pascal-7c4j: calls of `options(nosave)` routines (ref 5.5.8), whose stubs clobber D2-D7/A2-A4: a `val_param` parameter loaded at entry (the bead's repro), by-address slots, value-parameter copies, register-held locals and a `for` counter in a loop, a nosave function's result, an M$ARITH product kept; the caller's D2-D7/A2-A4 given back |

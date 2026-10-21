@@ -15226,6 +15226,24 @@ followed; execution test `be_u_kinds`.
   word index (SIO2681_$SET_LINE 0xE1D2F0..0xE1D2FC `smi D1; clr.w D5;
   lsr.b #7,D1; move.b D1,D5; add.w D5,D5`; dpc widens with `andi.w
   #0xff`, best effort).  Execution test `be_bool_index`.
+- **A call of an `options(nosave)` routine** (2, 12.4; bead
+  domain-pascal-7c4j).  Ref 5.5.8, p. 5-19: such a routine does not
+  preserve D2-D7, A2-A4 (or FP2-FP7) and preserves A5 and A6.  For the
+  allocator the call writes D0-D7 and A0-A4 (`regs::is_nosave_call`),
+  so a value live across it (an entry load, a slot address, a held
+  value-parameter copy, a register-held local, a `for` counter) goes to
+  a frame slot (`crate::spill`, `move.l` store and reloads; a `dbf`
+  counter so spilled counts in memory, `subq.w #1,(d+2,A6); bcc` back),
+  and the caller saves D2-D7/A2-A4 in its prologue for its own caller.
+  Best effort, no site: ../source declares no routine `nosave`, and the
+  hand-assembly routines that compiled code calls preserve the
+  callee-saved registers they use (CHKSUM_$GET_CHKSUM 0xE0A314 uses
+  none; MMU_$SET_PROT 0xE2422A `move.l D3,-(SP)`, CAL_$CLOCK_TO_SEC
+  0xE817C4 `move.l D2,-(SP)`, CAL_$WRITE_CALENDAR 0xE8167C `movem.l
+  D2-D7,-(SP)`, EC_$WAITN 0xE2063E `move.l A3,-(SP); move.l
+  A4,-(SP)`), so their callers show the ordinary convention.  Only
+  direct calls: `dpc-sema` refuses `nosave` on a routine pointer type.
+  Execution test `nosave` (its stubs clobber D0-D7/A0-A4).
 
 ---
 

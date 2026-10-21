@@ -25,7 +25,9 @@
  *
  *   - at a stub (a symbol of stubs.s, named by --stub), the stub is run in
  *     C: it logs its argument and returns as a Pascal-called routine
- *     would, clobbering D0/D1/A0/A1 (except its result) and the CCR;
+ *     would, clobbering D0/D1/A0/A1 (except its result) and the CCR
+ *     (an EXEC_$NOSAVE* stub also D2-D7/A2-A4, as an options(nosave)
+ *     routine may);
  *   - at RET_SENTINEL the call is complete: D2-D7/A2-A6 must hold the
  *     canaries loaded before the call, SP must be just above the return
  *     address (the caller pops the arguments), and a guard area above
@@ -217,6 +219,11 @@ static struct stub stubs[] = {
     { "EXEC_$ID_P" },     /* (in v: univ_ptr): univ_ptr, in A0 */
     { "EXEC_$CLOBBER" },  /* no arguments */
     { "EXEC_$MARK" },     /* (v: integer); val_param: prints `mark N' */
+    /* options(nosave) (ref 5.5.8, p. 5-19): these also clobber D2-D7 and
+       A2-A4, which such a routine does not preserve (A5 and A6 kept) */
+    { "EXEC_$NOSAVE" },   /* no arguments */
+    { "EXEC_$NOSAVE_W" }, /* (v: integer); val_param: prints the value */
+    { "EXEC_$NOSAVE_ID_L" }, /* (in v: integer32): integer32 */
     { "EXEC_$COUNTER" },  /* data, not a routine: a word "device register";
                              each read.w returns the next value, a write.w
                              sets it */
@@ -244,7 +251,8 @@ static void run_stub(struct stub *s)
        and a word or longword at an even address (a real callee's access
        would take an address error): the stubs read in setup mode, so
        check here what the CPU would have. */
-    if (strncmp(n, "LOGV_", 5) && strcmp(n, "MARK") && strcmp(n, "CLOBBER")) {
+    if (strncmp(n, "LOGV_", 5) && strcmp(n, "MARK") && strcmp(n, "CLOBBER") &&
+        strcmp(n, "NOSAVE") && strcmp(n, "NOSAVE_W")) {
         unsigned sz = (!strcmp(n, "LOG_C") || !strcmp(n, "LOG_BOOL") ||
                        !strcmp(n, "ID_BOOL") || !strcmp(n, "LOG_MEM")) ? 1 :
                       (!strcmp(n, "LOG_W") || !strcmp(n, "LOG_UW") ||
@@ -293,6 +301,9 @@ static void run_stub(struct stub *s)
     else if (!strcmp(n, "ID_BOOL")) { res = R_D0B; rv = rd8(a1); }
     else if (!strcmp(n, "ID_P")) { res = R_A0; rv = rd32(a1); }
     else if (!strcmp(n, "CLOBBER")) { }
+    else if (!strcmp(n, "NOSAVE")) { }
+    else if (!strcmp(n, "NOSAVE_W")) printf("%d\n", (int16_t)w1);
+    else if (!strcmp(n, "NOSAVE_ID_L")) { res = R_D0L; rv = rd32(a1); }
     else fail("unknown stub %s", s->name);
     in_setup = 0;
 
@@ -301,6 +312,14 @@ static void run_stub(struct stub *s)
     setreg(M68K_REG_D1, garbage());
     setreg(M68K_REG_A0, garbage());
     setreg(M68K_REG_A1, garbage());
+    if (!strncmp(n, "NOSAVE", 6)) {
+        static const m68k_register_t nosave[] = {
+            M68K_REG_D2, M68K_REG_D3, M68K_REG_D4, M68K_REG_D5, M68K_REG_D6,
+            M68K_REG_D7, M68K_REG_A2, M68K_REG_A3, M68K_REG_A4,
+        };
+        for (unsigned i = 0; i < sizeof nosave / sizeof nosave[0]; i++)
+            setreg(nosave[i], garbage());
+    }
     switch (res) {
     case R_D0L: setreg(M68K_REG_D0, rv); break;
     case R_D0W: setreg(M68K_REG_D0, (garbage() & 0xffff0000u) | rv); break;

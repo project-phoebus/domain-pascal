@@ -32,6 +32,13 @@ function exec_$id_p(in v: univ_ptr): univ_ptr; extern;
 { a call that does nothing but clobber the scratch registers }
 procedure exec_$clobber; extern;
 
+{ options(nosave) routines (ref 5.5.8, p. 5-19): they also clobber D2-D7
+  and A2-A4 (not A5, A6); exec_$nosave_w logs its value parameter,
+  exec_$nosave_id_l returns its argument in D0 }
+procedure exec_$nosave; options(nosave); extern;
+procedure exec_$nosave_w(v: integer); options(val_param, nosave); extern;
+function exec_$nosave_id_l(in v: integer32): integer32; options(nosave); extern;
+
 { a device register: each read returns the next value (0, 1, 2, ...),
   a store sets it }
 var
