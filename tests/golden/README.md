@@ -595,6 +595,13 @@ Tests:
   a frame local stored from a data register and tested next, the branch
   on the store's flags (0xE19BE6, 0xE6B180, 0xE4F09C); `tst` after a
   join and for the unit's data (0xE02806).
+- `control/label_flags` - codegen-patterns 7.1 ("Flags across an
+  `if`'s labels"; bead domain-pascal-nzs4): `n := n - 1; if n < 0` on
+  the `subq`'s flags (SAU5 0xE75B9E, 0xE59682); the `else if n = 0`
+  after it (SAU5 0xE75BAA) and the `if n = 0` after `if n < 0 then n :=
+  0` (SAU5 0xE5968C) on the flags their label is entered with; an `else
+  if` after a `tst` (SAU2 0xE3FE3E); `tst` for `=` right after the
+  `subq`, for `>`, and after a compare with another constant (0xE4D9F0).
 - `control/computed_zero` - codegen-patterns 7.1 ("A computed value
   against 0"; bead domain-pascal-qlzu): `=`/`<>`/`<`/`>=` on the flags of
   the add, sub, and, or that formed the value (SOCK_$ALLOCATE 0xE15EFA,

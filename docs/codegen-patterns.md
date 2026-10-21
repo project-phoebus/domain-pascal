@@ -7916,6 +7916,65 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `one_bit_mask_is_btst`, `one_bit_of_memory_is_a_whole_load`,
   `odd_of_memory_is_lsr`, `one_bit_test_refusals`,
   `assigned_register_against_zero_on_the_operation_flags`.
+- **Flags across an `if`'s labels, and of an add or sub in memory
+  (Verified at the sites given; implemented for those shapes; bead
+  domain-pascal-nzs4):** an ad-hoc scan of compiled code (SAU2 and SAU5,
+  the routines `tools/arithsurvey.py` splits; scripts not kept) for an
+  `addq`/`subq`/`addi`/`subi`/`add`/`sub` whose destination is memory,
+  directly followed by a branch or by `tst` of that memory and a branch.
+  Left out the `subq.w #1,(d,A6); bcc` of `for` loops (the carry, 18
+  sites):
+
+  | relation | on the operation's flags | `tst` first |
+  |---|---|---|
+  | `<`, `>=` (`bmi`/`bpl`) | 3: SAU5 0xE75B9E, 0xE59682 `subq.w #1,(2,A3); bpl.s`; SAU2 0xE169C0 `add.l D0,(-20,A6); bpl.s` | none |
+  | `=`, `<>` | SAU2 6: 0xE0CD4E `subq.b`, 0xE17930 `subq.w #1,(116,A5); bne.s`, 0xE17CF0, 0xE42048, 0xE04D52 `sub.w D3,(128,A2)`, 0xE0D74A | SAU2 4: 0xE3A99C `subq.w #1,(14,A3); tst.w (14,A3); bne.s`, 0xE0DBE6 `addq.w`, 0xE0D6D0, 0xE179A2; SAU5 also 0xE738A0 `subq.l` |
+
+  No rule is found for `=`/`<>` (0xE0CD4E and 0xE3A99C are both `x :=
+  x - 1; if (x = 0) and then ...` in ../source, mmap/unwire.pas and
+  dbuf/set_buff.pas).  The flags then live on across the branch:
+  - **The `else` label** of `if c then T else E`, entered only by the
+    branch (`T` ends in a `bra` or a jump), is entered with the flags
+    the branch was made on.  When they are those of one object against
+    0, `E`'s first test of that object branches on them: after the
+    `subq` (mt_$release_unit, SAU5 0xE75B9E..0xE75BAA `subq.w
+    #1,(0x30,A3); bpl.s; clr.w (0x30,A3); bra.s; bne.s`, ../source
+    mt/release_unit.pas `if n_acquired < 0 then n_acquired := 0 else if
+    n_acquired = 0`); after a `tst` (SAU2 0xE3FE3E `tst.w (A3); ble.s
+    0xE3FE4A; ...; bra.s; 0xE3FE4A: bne.s`, `> 0` then `= 0`; a
+    register, SAU2 0xE19CB0 `tst.l D0; bne.s 0xE19CC0; ...; bra.s;
+    0xE19CC0: ble.s`).  No such label in SAU2 or SAU5 has a `tst` of
+    the object the branch's flags are of.  After a compare with another
+    value the object is tested (0xE4D9F0 below).
+  - **The join** after `if m < 0 then m := 0`, with no `else` part: the
+    branch leaves the `subq`'s flags, the `then` part ends in `clr.<s>
+    m`, both of `m` against 0, and the next `if m = 0` branches on them
+    (PBU_$SETDOWN, SAU5 0xE59682..0xE5968C `subq.w #1,(2,A3); bpl.s;
+    clr.w (2,A3); bne.s`, ../source pbu/setdown.pas).  At a join after
+    a compare with another value, the object is tested again (SAU2
+    0xE4D9F0 `cmpi.w #32,(-254,A6); ...; clr.w (-254,A6); tst.w
+    (-254,A6); bne.w`; 0xE324DE, 0xE40D5A, 0xE573FA, 0xE60FB2: `cmpi.l`
+    then `clr.l` and `tst.l`).  Only these two paths into a join are seen
+    giving one object's flags.
+
+  **Implemented** (`isel.rs`, `Selector::tst`, `if_`, `branch_flags`):
+  `m < 0`/`m >= 0` right after an `addq`/`subq` of `m` in memory, at the
+  same size, branches on its flags (dpc selects no other add or sub into
+  memory: `addi`/`subi` of a larger constant keep the `tst`, not seen);
+  `=`/`<>` and `>`/`<=` (which read V) there keep the `tst`.  The first
+  test of an `if` right after an `else` label entered only by one
+  branch made right after a `tst` of an object in memory (any relation)
+  or right after such an `addq`/`subq` (`=`, `<>`, `<`, `>=`) branches on
+  the flags when it tests that object at that size; so does the first
+  test of an `if` right after an `if m < 0 then` ... join whose branch
+  was on the `addq`/`subq` and whose `then` part ends in `clr.<s> m`
+  (after a `tst` instead: not seen, tested).  A volatile object is
+  read again (ref 3.15.1).  Not done (not seen or not settled): a
+  register's flags across an `else` label (0xE19CB0; dpc tests again);
+  any other statement after the label, and a test made outside a
+  statement right after it (a `repeat`'s `until`, a `while` test after
+  its body: dpc tests).  Golden `control/label_flags`;
+  exec test `dec_flags`.
 - **`if c then T else E`:** a branch on the negated condition to `E`
   (or past `T`), `T`, a `bra` to the join, `E`.  0xE177BA..0xE177CC
   `cmpi.w #0x400,D0; bls.s 0xE177C4; clr.w (A0); bra.s 0xE177CC; <E>`.

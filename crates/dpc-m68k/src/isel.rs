@@ -7847,6 +7847,13 @@ pub struct Selector {
     /// result out of D0: checked once the body is selected
     /// ([`check_assigned_flags`]).
     flag_moves: Vec<(usize, Span, bool)>,
+    /// The flags on entry to an `if`'s label, when every path into it
+    /// leaves the flags of one object in memory against 0: the label,
+    /// the object's operand and size, and whether they are a `tst`'s
+    /// (every relation) or an `add`/`sub`'s (N and Z only).  A test of
+    /// that object by the `if` right after the label branches on them
+    /// ([`Self::tst`], [`Self::if_`]; bead domain-pascal-nzs4).
+    label_flags: Option<(u32, Ea, Size, bool)>,
     /// The frame objects nested routines reach
     /// ([`Function::uplevel_refs`]): never held in a register.
     uplevel: Vec<(i32, u32)>,
@@ -8068,6 +8075,7 @@ impl Selector {
             entry_end: None,
             assigned_move: None,
             flag_moves: Vec::new(),
+            label_flags: None,
             stored: Vec::new(),
             escaped: Vec::new(),
             address_slots: Vec::new(),
@@ -8412,6 +8420,11 @@ impl Selector {
             self.called = false;
             self.unpopped = false;
             self.park_home(f, body, st, rest)?;
+            // The flags an `if`'s label is entered with are used only by
+            // an `if` right after it (bead domain-pascal-nzs4).
+            if !matches!(st.kind, StmtKind::If { .. }) {
+                self.label_flags = None;
+            }
             let start = self.out.len();
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
@@ -8600,6 +8613,10 @@ impl Selector {
             }
             after_call = matches!(st.kind, StmtKind::Call(_));
         }
+        // Nor by a test made after the sequence, outside any statement
+        // (a `repeat`'s `until`, a `while` test after its body): not seen
+        // (bead domain-pascal-nzs4).
+        self.label_flags = None;
         // The `for` indices read after their loops are read only in this
         // sequence (`dpc-ir`, `check_for_indices`).
         for o in self.held_after.split_off(held) {
@@ -8916,10 +8933,29 @@ impl Selector {
             return self.seq(f, then_, next);
         }
         let l_else = self.new_label();
+        let at = self.out.len();
         self.branch(cond, false, l_else)?;
+        let flags = self.branch_flags(at, l_else);
         if else_.is_empty() {
             self.seq(f, then_, next)?;
+            // `if m < 0 then m := 0` right after an `add`/`sub` of `m` in
+            // memory: the join is entered with the flags of the `add`/`sub`
+            // (the branch) or of the `clr.<s> m` (the `then` part's last
+            // instruction), both of `m` against 0, and an `if` right after
+            // it tests `m` on them (PBU_$SETDOWN, SAU5 0xE59682..0xE5968C
+            // `subq.w #1,(2,A3); bpl.s; clr.w (2,A3); bne.s`, ../source
+            // pbu/setdown.pas `if pbu_$mcb.setups = 0`; codegen-patterns
+            // 7.1, "Flags across an `if`'s labels"; bead
+            // domain-pascal-nzs4).  After a `tst` the join is not seen.
+            let cleared = match (&flags, self.out.last()) {
+                (Some((m, s, false)), Some(Insn::Clr { size, dst })) => dst == m && size == s,
+                _ => false,
+            };
             self.place(l_else);
+            if cleared {
+                let (m, s, _) = flags.expect("matched above");
+                self.label_flags = Some((l_else, m, s, false));
+            }
             return Ok(());
         }
         // The `then` part continues with the `bra` to the join, then
@@ -8938,9 +8974,55 @@ impl Selector {
             self.jump(Cond::T, l_join);
         }
         self.place(l_else);
+        // The `else` label is entered only by the branch: with its flags,
+        // and an `if` right after it (`else if`) tests the same object on
+        // them, after a `tst` (0xE3FE3E `tst.w (A3); ble.s 0xE3FE4A; ...;
+        // bra.s; 0xE3FE4A: bne.s`, SAU2) or after an `add`/`sub` in memory
+        // (mt_$release_unit, SAU5 0xE75B9E..0xE75BAA `subq.w #1,(0x30,A3);
+        // bpl.s; clr.w (0x30,A3); bra.s; bne.s`, ../source
+        // mt/release_unit.pas `else if n_acquired = 0`).  No such label of
+        // compiled code (SAU2, SAU5) is followed by a `tst` of the object
+        // the branch's flags are of (codegen-patterns 7.1, "Flags across
+        // an `if`'s labels"; bead domain-pascal-nzs4).
+        if let Some((m, s, full)) = flags {
+            self.label_flags = Some((l_else, m, s, full));
+        }
         self.seq(f, else_, next)?;
         self.place(l_join);
         Ok(())
+    }
+
+    /// The flags `if_`'s branch to `l` (selected from `out[at..]`) is made
+    /// on, when it is one branch made right after the `tst` of an object
+    /// in memory (`true`: every relation with 0 reads them) or right after
+    /// an `addq`/`subq` of one in place (`false`: N and Z only,
+    /// [`Self::tst`]):
+    /// its operand and size.  `None` for anything else (a compare with
+    /// another value, several branches to `l`, a register).
+    fn branch_flags(&self, at: usize, l: u32) -> Option<(Ea, Size, bool)> {
+        let n = self.out.len();
+        if n < 2 || at >= n {
+            return None;
+        }
+        match &self.out[n - 1] {
+            Insn::Branch { cond, label, .. } if *label == l && *cond != Cond::T => {}
+            _ => return None,
+        }
+        if self.out[at..n - 1]
+            .iter()
+            .any(|i| matches!(i, Insn::Branch { label, .. } if *label == l))
+        {
+            return None;
+        }
+        let (size, dst, full) = match &self.out[n - 2] {
+            Insn::Tst { size, dst } => (*size, dst, true),
+            Insn::Addq { size, dst, .. } | Insn::Subq { size, dst, .. } => (*size, dst, false),
+            _ => return None,
+        };
+        if matches!(dst, Ea::Reg(_) | Ea::PreDec(_) | Ea::PostInc(_) | Ea::Imm(_)) {
+            return None;
+        }
+        Some((dst.clone(), size, full))
     }
 
     /// `repeat body until until` (ref "Repeat/Until", p. 4-161): the body,
@@ -11467,6 +11549,41 @@ impl Selector {
             // left in the flags (ref 3.15.1).
             self.out.push(Insn::Tst { size, dst: ea });
             return Ok(());
+        }
+        // Right after an `if`'s label entered with this object's flags
+        // ([`Self::if_`]): the branch reads them (bead domain-pascal-nzs4).
+        if let (Some(Insn::Label(l)), Some((ll, m, s, full))) = (self.out.last(), &self.label_flags)
+        {
+            if l == ll
+                && *m == ea
+                && *s == size
+                && (*full || matches!(cc, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl))
+            {
+                return Ok(());
+            }
+        }
+        // `m < 0` / `m >= 0` right after an `addq`/`subq` of `m` in place,
+        // at the test's size: `bmi`/`bpl` on the operation's flags.  An
+        // add or sub of memory is followed by `bmi`/`bpl` 3 times in
+        // compiled code, never with a `tst` between (SAU5 0xE75B9E
+        // `subq.w #1,(0x30,A3); bpl.s`, SAU5 0xE59682 `subq.w #1,(2,A3);
+        // bpl.s`; TIME_$ADJUST_TIME_OF_DAY, SAU2 0xE169C0 `add.l
+        // D0,(-20,A6); bpl.s`, a form dpc does not select).  N is the sign
+        // of the result whatever V is, as after a `tst` (codegen-patterns
+        // 7.1, "A computed value against 0": the original trusts N and Z
+        // of an add or sub, not V).  `=`/`<>` there are tested again or
+        // not, by a rule not known (SAU2 0xE17930 `subq.w #1,(116,A5);
+        // bne.s`, 0xE3A99C `subq.w #1,(14,A3); tst.w (14,A3); bne.s`):
+        // `tst`, as before; so are `>`/`<=` (which read V) and `addi`/
+        // `subi` (not seen; bead domain-pascal-nzs4).
+        if !matches!(ea, Ea::Reg(_)) && matches!(cc, Cond::Mi | Cond::Pl) {
+            if let Some(Insn::Addq { size: s, dst, .. } | Insn::Subq { size: s, dst, .. }) =
+                self.out.last()
+            {
+                if *dst == ea && *s == size {
+                    return Ok(());
+                }
+            }
         }
         if let Ea::Reg(Reg::D(d)) = ea {
             // Right after the operation that formed the register's value:
