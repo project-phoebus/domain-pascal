@@ -203,12 +203,20 @@ def score(rows):
 
 def routine_ranges(tree, path):
     """{routine name (lower case): (address, size)} of the module's
-    routines with a header address (srcsurvey's fragment parse)."""
+    routines with a header address (srcsurvey's fragment parse; the map
+    extent for a routine whose "Image addresses:" row gives no size, bead
+    domain-pascal-zlnu)."""
     import srcsurvey
     mod = srcsurvey.Module(tree, path)
     out = {}
+    linkmap = None
     for name, (_inc, r) in mod.routines.items():
-        if r.addr and r.size:
+        if r.addr and r.size is None:
+            if linkmap is None:
+                import sau2map
+                linkmap = sau2map.load()
+            out[name.lower()] = (r.addr, srcsurvey.routine_size(r, mod.starts, linkmap))
+        elif r.addr and r.size:
             out[name.lower()] = (r.addr, r.size)
     return out, mod
 

@@ -427,6 +427,167 @@ var z: integer;
         self.assertIn('{ define a; }\nvar z: integer;\n', t)
 
 
+class HeaderFormatTest(unittest.TestCase):
+    """Both of ../source's header formats (bead domain-pascal-zlnu): the
+    "Original address: 0xADDR, N bytes" sentence of 39f0fe4d and before,
+    and HEAD's "Image addresses:" table (../source docs/comment-style.md,
+    "The address table").  Snippets from tty/i_err.pas, rip/lock.pas,
+    route/validate_port.pas, tty/tty.pas, route/route_wired.pas and
+    pchist/pchist.pas."""
+
+    OLD = """\
+{ TTY_$I_ERR - take a receive error: store a marker in the input, or flag
+  the error and wake the waiters.
+
+  Original address: 0x00E1BE08, 160 bytes, tty.pas, section WIRED_PROC;
+  global: map symbol TTY_$I_ERR.  No call names it; its address is in
+  TERM_$DATA (0xE2CA18) and SIO_$I_RCV calls the line's handlers
+  (tty.ins.pas gives the pushes).  The nested tty_$i_store_parity is
+  0x00E1BCFC, 268 bytes, just before it.
+}
+
+[section(wired_proc, wired_data)]
+procedure tty_$i_err(var tty: tty_$desc_t; ch: char);
+
+  procedure tty_$i_store_parity;
+  begin
+  end;
+
+begin
+end;
+"""
+
+    NEW = """\
+{ TTY_$I_ERR - take a receive error: store a marker in the input, or flag
+  the error and wake the waiters.
+
+  Image addresses:
+    sau2  0x00E1BCFC  tty_$i_store_parity (nested)
+    sau2  0x00E1BE08  TTY_$I_ERR
+
+  The routine asks the line's status handler (with clear true) what went
+  wrong.
+}
+
+[section(wired_proc, wired_data)]
+procedure tty_$i_err(var tty: tty_$desc_t; ch: char);
+
+  procedure tty_$i_store_parity;
+  begin
+  end;
+
+begin
+end;
+"""
+
+    LOCAL = """\
+{ rip_$lock - take the RIP lock.
+
+  Image addresses:
+    sau2  0x00E154A4  rip_$lock (module-local)
+
+  The routine takes the process lock 16#0E and then enters the routing
+  table's exclusion record.
+}
+
+procedure rip_$lock; internal;
+begin
+end;
+
+{ rip_$unlock - give back the RIP lock.
+
+  Image addresses:
+    sau2  0x00E154C4  rip_$unlock (module-local)
+
+  The reverse of rip_$lock.
+}
+
+procedure rip_$unlock; internal;
+begin
+end;
+
+{ route_$validate_port - ...
+
+  Image addresses:
+    sau2  0x00E65904  route_$validate_port (module-local, ASKNODE)
+    sau5  0x00123456  route_$validate_port
+}
+
+function route_$validate_port(routing_key: integer32): integer;
+begin
+end;
+"""
+
+    def test_old_format(self):
+        r, = srcsurvey.parse_routines(self.OLD)
+        self.assertEqual((r.name, r.addr, r.size, r.code_only),
+                         ('tty_$i_err', 0xE1BE08, 160, False))
+        self.assertEqual(srcsurvey.header_addrs(self.OLD), {0xE1BE08})
+        self.assertEqual(srcsurvey.image_addresses(self.OLD), {})
+
+    def test_new_format(self):
+        r, = srcsurvey.parse_routines(self.NEW)
+        # no size: compared over the map extent (routine_size)
+        self.assertEqual((r.name, r.addr, r.size, r.code_only),
+                         ('tty_$i_err', 0xE1BE08, None, True))
+        self.assertEqual(srcsurvey.header_addrs(self.NEW), {0xE1BCFC, 0xE1BE08})
+
+    def test_module_local_rows(self):
+        rs = srcsurvey.parse_routines(self.LOCAL)
+        # the sau2 row, not another SAU's
+        self.assertEqual([(r.name, r.addr) for r in rs],
+                         [('rip_$lock', 0xE154A4), ('rip_$unlock', 0xE154C4),
+                          ('route_$validate_port', 0xE65904)])
+
+    def test_data_rows_are_not_routines(self):
+        text = """\
+{ tty/tty.pas - the TTY module.
+
+  Image addresses:
+    sau2  0x00E2DDB4  TTY data (WIRED_DATA, 0x28 bytes)
+    sau2  0x00E2E0A0  ROUTE_$PORT (NET_PORT_TABLE, 0x2E0 bytes)
+    sau2  0x00E85718  PCHIST_UNWIRED_D (overlay section, 0x938 bytes)
+}
+"""
+        self.assertEqual(srcsurvey.image_addresses(text), {})
+
+    def test_new_format_size_is_the_map_extent(self):
+        Seg = DataSectionsTest.Seg
+        seg = Seg('I', 'TTY', 0xE1AED0, 0x1750)
+        seg.end = seg.addr + seg.size
+        lm = type('M', (), {})()
+        lm.segment_containing = lambda a: seg if seg.contains(a) else None
+        # TTY_$I_ERR 0xE1BE08, then TTY_$I_INTERRUPT 0xE1BEA8 (the map's)
+        lm.next_symbol_addr = lambda a: 0xE1BEA8 if a < 0xE1BEA8 else None
+        r, = srcsurvey.parse_routines(self.NEW)
+        zeros = lambda va, n: bytes(n)        # noqa: E731
+        self.assertEqual(srcsurvey.routine_size(r, srcsurvey.header_addrs(self.NEW), lm, zeros),
+                         0xA0)
+        # a module-local routine's row before the next map symbol bounds
+        # it (RING_$SENDP 0xE75916 ends at rcv_from_unit_priv 0xE75DE4)
+        self.assertEqual(srcsurvey.routine_size(r, {0xE1BE08, 0xE1BE50}, lm, zeros), 0x48)
+        # not widened again (widened_size)
+        self.assertIsNone(srcsurvey.widened_size([], r, set(), lm))
+
+    def test_module_rows_from_another_file(self):
+        # a routine whose row sits in another file of the module
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'm'))
+            with open(os.path.join(d, 'm', 'm.pas'), 'w') as fh:
+                fh.write("{ m.pas\n\n  Image addresses:\n"
+                         "    sau2  0x00E00100  m_$b\n}\n"
+                         "module m;\n%include 'm/a.pas';\n")
+            with open(os.path.join(d, 'm', 'a.pas'), 'w') as fh:
+                fh.write(self.LOCAL.replace('rip_$unlock (module-local)', 'x')
+                         + 'procedure m_$b; begin end;\n')
+            mod = srcsurvey.Module(d, 'm/m.pas')
+            self.assertEqual({n: r.addr for n, (_i, r) in mod.routines.items()},
+                             {'rip_$lock': 0xE154A4, 'rip_$unlock': None,
+                              'route_$validate_port': 0xE65904, 'm_$b': 0xE00100})
+            # every row is a routine start, a name the files lack too
+            self.assertEqual(mod.starts, {0xE154A4, 0xE154C4, 0xE65904, 0xE00100})
+
+
 class DiagTest(unittest.TestCase):
     ERR = """\
 m/frag.pas:27:3: error: this operator on sets is not supported yet

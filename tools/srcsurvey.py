@@ -71,7 +71,12 @@ Makefile: tools/dpcflags.py; none when it has none):
      `bsr' within its own, `jsr abs.l' from another) and compared with the
      image by tools/conform.py.  A routine's address and size come from its header
      comment, "Original address: 0xADDR, N bytes" (../source's fragment
-     format); nested routines lie between the previous top-level routine's
+     format to 39f0fe4d), or its address alone from its name's row in an
+     "Image addresses:" table, "sau2  0xADDR  NAME [(nested)|(module-local)]"
+     (../source docs/comment-style.md, "The address table"; any file of
+     the module; bead domain-pascal-zlnu): such a routine is compared over
+     its map extent, as for "N bytes of code" below, and every row is a
+     routine start.  Nested routines lie between the previous top-level routine's
      end and the routine's address.  "N bytes of code" gives the code
      alone: the routine is compared to its map extent (the next routine
      start or map symbol, or its segment's end less the module-end
@@ -162,6 +167,19 @@ DIAG_RE = re.compile(r'^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): '
 # the cell ... after it)"): widened_size (bead domain-pascal-styn).
 ADDR_RE = re.compile(r'Original address:\s*0x([0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+|\d+)\s*bytes'
                      r'(\s+of\s+code)?')
+# HEAD's header (../source's comment sweep, after 39f0fe4d; bead
+# domain-pascal-zlnu): an "Image addresses:" list at the top of the
+# fragment, one line per routine, "sau2  0xADDR  NAME", with "(nested)"
+# or "(module-local)" (", SEGMENT" may follow) after a routine the map has
+# no symbol for, and no size.  The routine is found by its name, so its
+# extent is the map's (map_extent).  Data lines ("TTY data (WIRED_DATA,
+# 0x28 bytes)", "ROUTE_$PORT (NET_PORT_TABLE, 0x2E0 bytes)") do not match.
+# One routine row per line, `sau2  0xADDR  NAME [(nested|module-local...)]',
+# possibly closing its comment on the same line (`}' or `*)').  A line
+# carrying several SAUs' addresses is not read (none exist; such a routine
+# would show as SETUP, not pass).
+IMAGE_ADDR_RE = re.compile(r'^[ \t]*sau2[ \t]+0x([0-9A-Fa-f]+)[ \t]+([A-Za-z_$][\w$]*)'
+                           r'(?:[ \t]+\((?:nested|module-local)[^)\n]*\))?[ \t]*(?:\}|\*\))?[ \t]*$', re.M)
 
 # Workarounds for refusals in declarations (stage 2).  Each: (name, what
 # dpc refuses, files it applies to, pattern, replacement, a string or a
@@ -520,12 +538,17 @@ class _Parser:
         return out
 
 
-def parse_routines(text):
+def parse_routines(text, image_addrs=None):
     """The top-level routines of a fragment's TEXT, each with its nested
-    routines and the address and size of its header comment (the last
+    routines and the address and size of its header comment: the last
     "Original address: 0xADDR, N bytes" between the previous routine and
-    its heading)."""
+    its heading (the format to ../source 39f0fe4d), else the address of
+    its name in an "Image addresses:" line (HEAD's; IMAGE_ADDRS, default
+    TEXT's own, image_addresses), with no size: the routine is then
+    compared over its map extent (code_only, routine_size)."""
     rs = _Parser(text).top()
+    if image_addrs is None:
+        image_addrs = image_addresses(text)
     prev = 0
     for r in rs:
         ms = list(ADDR_RE.finditer(text, prev, r.start))
@@ -533,8 +556,24 @@ def parse_routines(text):
             m = ms[-1]
             r.addr, r.size = int(m.group(1), 16), parse_size(m.group(2))
             r.code_only = bool(m.group(3))
+        else:
+            set_image_addr(r, image_addrs)
         prev = r.end
     return rs
+
+
+def set_image_addr(r, image_addrs):
+    """Give routine R the address of its name in IMAGE_ADDRS (name in lower
+    case -> address), with no size (code_only: its map extent)."""
+    a = image_addrs.get(r.name.lower())
+    if a is not None:
+        r.addr, r.size, r.code_only = a, None, True
+
+
+def image_addresses(text):
+    """{routine name (lower case): address} of TEXT's "Image addresses:"
+    lines (IMAGE_ADDR_RE), nested and module-local routines' too."""
+    return {m.group(2).lower(): int(m.group(1), 16) for m in IMAGE_ADDR_RE.finditer(text)}
 
 
 def parse_size(s):
@@ -545,7 +584,8 @@ def parse_size(s):
 def header_addrs(text):
     """The addresses of every routine header of TEXT (nested routines'
     too): the places where a routine starts."""
-    return {int(m.group(1), 16) for m in ADDR_RE.finditer(text)}
+    return ({int(m.group(1), 16) for m in ADDR_RE.finditer(text)}
+            | set(image_addresses(text).values()))
 
 
 MODULE_END_FILLER = b'\x20\x48'          # movea.l A0,A0 (codegen-patterns 7)
@@ -556,7 +596,8 @@ def routine_size(r, starts, linkmap, read_image=None):
     a header that gives the code alone ("0x5E bytes of code and three
     constant cells", tone/time.pas) its map extent (map_extent).  A plain
     "N bytes" can still be widened to the map extent when dpc emits more
-    than N bytes (conform_routine; bead domain-pascal-styn)."""
+    than N bytes (conform_routine; bead domain-pascal-styn).
+    A header with no size (HEAD's "Image addresses:" lines) is code_only."""
     if not r.code_only or linkmap is None:
         return r.size
     return map_extent(r, starts, linkmap, read_image)
@@ -572,7 +613,8 @@ def map_extent(r, starts, linkmap, read_image=None):
     n) (default conform.read_image) reads the image."""
     if linkmap is None:
         return r.size
-    end = r.addr + r.size
+    size = r.size or 0                   # None: no size in the header
+    end = r.addr + max(size, 1)
     seg = linkmap.segment_containing(r.addr)
     bounds = [a for a in starts if a >= end]
     nxt = linkmap.next_symbol_addr(end - 1)
@@ -589,7 +631,7 @@ def map_extent(r, starts, linkmap, read_image=None):
             read_image = conform.read_image
         while hi - 2 >= end and read_image(hi - 2, 2) == MODULE_END_FILLER:
             hi -= 2
-    return max(hi - r.addr, r.size)
+    return max(hi - r.addr, size)
 
 
 def routine_spans(text):
@@ -1054,6 +1096,15 @@ class Module:
                 self.routines[r.name] = (inc, r)
                 d = data_section_of(self.frag_text[inc], r)
                 self.dsect[r.name] = d.lower() if d else None
+        # a routine whose row is in another file's "Image addresses:" list
+        # (the module file's, or a fragment that includes others)
+        rows = image_addresses(self.text)
+        for inc in self.fragments:
+            rows.update(image_addresses(self.frag_text[inc]))
+        self.starts |= set(rows.values())
+        for _inc, r in self.routines.values():
+            if r.addr is None:
+                set_image_addr(r, rows)
 
     def keep_sections(self, bodies):
         """The named data sections of the routines BODIES (lower case)."""
@@ -1362,7 +1413,11 @@ def conform_routine(mod, name, dpc, linkmap, work, out, table=None, settings=Non
         rc, err = run_dpc(dpc, mod.tree, os.path.basename(unit), out=asm,
                           opts=opts + mopts + bopts)
         if rc:
-            return 'SETUP: dpc failed alone: ' + (err.strip().splitlines() or ['?'])[0]
+            # the first error, not a warning before it (`-config variable
+            # sau2 is not declared')
+            errs = err.strip().splitlines()
+            return 'SETUP: dpc failed alone: ' + ([e for e in errs if ': error:' in e or e.startswith('error:')] or errs
+                                                   or ['?'])[0]
         with open(asm) as fh:
             sect = data_sections(fh.read(), linkmap)
         ok, lines = check_routine(
