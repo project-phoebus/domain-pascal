@@ -21927,7 +21927,11 @@ impl Selector {
                 // #-9,(0xff9431).l` on VME_CTL's byte 0x31; a boolean or
                 // a one-bit field alike.
                 let bit = 1i64 << field.shift;
-                let (op, v) = if *c != 0 {
+                // A boolean is set by any true value; a one-bit integer
+                // field takes the constant's low bit, as the non-device
+                // path's mask does.
+                let set = if boolean { *c != 0 } else { *c & 1 != 0 };
+                let (op, v) = if set {
                     (AluOp::Or, bit)
                 } else {
                     (AluOp::And, !bit)
