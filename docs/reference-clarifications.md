@@ -895,6 +895,29 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     of declaration order); an undefined `extern` member after all the
     allocated ones, or one alone in its part (../source's planned
     ROUTE_$PORT in NET_PORT_TABLE), is accepted.  Awaiting the owner.*
+49. **3.15.3, p. 3-57 (device read-modify-write).**  "The device
+    attribute also prevents the compiler from generating gratuitous
+    read-modify-write references for device registers.  That is,
+    specifying a variable as device causes the compiler to avoid using
+    instructions that do unnecessary reads."  The SR10.2 SAU5 image
+    updates device registers in place with read-modify-write
+    instructions: MBUS_$ENABLE_DEV 0xE0AD5E `or.w D0,(0xff7c02).l`,
+    MBUS_$DISABLE_DEV 0xE0AD76 `and.w D0,(0xff7c02).l`, VME_$INT
+    0xE0ABCC `andi.w #-0x4001,(0xff7c00).l` on PBU_CTL, which MBUS_$INIT
+    stores with `move.w #0` (not `clr`); SM_$CB's packed unit field
+    `andi.b #-4,(0x31,A0); ...; or.b D3,(0x31,A0)` (sm_$command
+    0xE6F1A2).  Is a read the statement needs (`x := x op c`, a packed
+    field's neighbouring bits) "gratuitous"?  *Current (bead
+    domain-pascal-eaw7): not gratuitous: a device object is updated in
+    place with the ordinary forms, and a packed field of a device record
+    is stored with the field forms; only `clr`/`st`, which read an
+    operand nothing needs, are never used on a device, and a
+    read-modify-write instruction in a statement that does not read the
+    object is refused.  A store into a packed field of a `device(write)`
+    record (it reads the unit; p. 3-59 makes reading such an object an
+    error) is refused.  The image shows the code, not the declarations,
+    so whether the original declared these objects `[device]` is
+    inferred from their `move #0` stores (codegen-patterns 5.5).*
 
 ## Reference errata noticed (no ruling needed)
 

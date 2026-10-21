@@ -5308,8 +5308,8 @@ procedure x(var z: integer); extern;
 }
 
 /// ref 3.15.3 p. 3-59: `device(read)` objects may not be written,
-/// `device(write)` ones not read; a device record's packed field is not
-/// stored into (a read-modify-write of its unit).  A record with volatile
+/// `device(write)` ones not read; a device record's packed field is stored
+/// with the field form unless write-only.  A record with volatile
 /// parts is block-copied, its side wrapped in [`Addr::Volatile`]
 /// (codegen-patterns 5.5; bead domain-pascal-e07e).
 #[test]
@@ -5332,8 +5332,30 @@ var
     let e = errs(&format!("{types}procedure x; begin c := w end;"));
     assert!(e[0].contains("reading a write-only device object"), "{e:?}");
     lower_src(&format!("{types}procedure x; begin c := r; w := c end;")).unwrap();
-    let e = errs(&format!("{types}procedure x; begin p.a := 1 end;"));
-    assert!(e[0].contains("packed field of a device record"), "{e:?}");
+    // A device record's packed field is stored with the field form, its
+    // unit's address wrapped (bead domain-pascal-eaw7); a write-only one
+    // is refused (the form reads the unit), a read-only one is an error.
+    let m = lower_src(&format!("{types}procedure x; begin p.a := 1 end;")).unwrap();
+    let StmtKind::StoreBits {
+        addr: Addr::Volatile { access, .. },
+        ..
+    } = &m.functions[0].body[0].kind
+    else {
+        panic!("{:#?}", m.functions[0].body)
+    };
+    assert!(access.device);
+    let wo_rec = "module m;
+type
+  pw = [device(write)] packed record a: 0..15; b: 0..15 end;
+  pr = [device(read)] packed record a: 0..15; b: 0..15 end;
+var
+  w: extern pw;
+  r: extern pr;
+";
+    let e = errs(&format!("{wo_rec}procedure x; begin w.a := 1 end;"));
+    assert!(e[0].contains("packed field of a write-only device record"), "{e:?}");
+    let e = errs(&format!("{wo_rec}procedure x; begin r.a := 1 end;"));
+    assert!(e[0].contains("writing a read-only device object"), "{e:?}");
     let m = lower_src(&format!("{types}procedure x; begin v1 := v2 end;")).unwrap();
     let StmtKind::Copy {
         dst: Addr::Volatile { access: da, .. },

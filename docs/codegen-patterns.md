@@ -6146,8 +6146,9 @@ same `bset #c mod 8` on the member's byte).
   record as an argument"; an error), a destination and a value that both
   need a register (the order of 12.4 "Stores whose destination and value
   both need a register" is not applied to bit fields: not seen), a store
-  into a volatile or device record's bit field (a read-modify-write of
-  its unit, 5.5), a boolean element of `in` on a set field (true is
+  into a write-only (`device(write)`) record's bit field (the forms read
+  the unit, 5.5; a device record's other bit fields take the forms
+  above, a volatile one's are best effort), a boolean element of `in` on a set field (true is
   0xFF), set operations on set fields other than the updates above.
   Packed arrays of bit elements: 5.2, "Packed arrays".
 - Tests: `crates/dpc-m68k/tests/packed.rs` (the forms, the refusals, and
@@ -6297,11 +6298,80 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
 - **device:** a zero is stored with `move.<s> #0` and `true` with `move.b
   #0xff`, never `clr`/`st` (which read their operand on the 68000/68010;
   section 13 "device registers": WIN_ 0xE19112, RING 0xE758E2, 0xE0A33E);
-  no in-place update (`addq`, `addi`, `andi`, `ori`, `bset`/`bclr` to
-  memory): `x := x + 1` is a load, an add and a store (**Uncertain**: no
-  image site of an update of a device register is catalogued); a
-  read-modify-write instruction on a device operand is refused after
-  selection, so no path can produce one silently; two adjacent device
+  a `clr` or `s<cc>` on a device operand is refused after selection, so
+  no path can produce one silently;
+- **device updates in place (Verified at the sites below; bead
+  domain-pascal-eaw7):** a statement that reads the device object it
+  stores takes the ordinary in-place forms, one read-modify-write
+  instruction where any object has one, at the object's own width: `x
+  := x op c` (`addq`/`subq`, `addi`/`subi`, `andi`, `ori` to memory,
+  section 8), `s := s + x` / `s := s - x` on a register-sized set
+  (`bset`/`bclr #k` on the member's byte for one constant member,
+  `ori`/`andi` of a mask for several, `[k]` built in a register then
+  `or`/`not`+`and` into the set, 5.1), and a store into a packed field,
+  whose forms (5.3) read the unit to keep its other fields (`andi` then
+  `or`/`ori`, `bset`/`bclr` for a boolean).  The sau5 image (`sau5/
+  domain_os`, map `sau5/domain_os.map`):
+  - PBU_CTL, the Multibus adapter's registers (`[device]` in ../source's
+    mbus/mbus.ins.pas; MBUS_$INIT 0xE30950 stores its word 2 with `move.w
+    #0,(2,A2)`, the device form, beside `st (0x80,A1)` to plain data):
+    MBUS_$ENABLE_DEV 0xE0AD56..0xE0AD5E `clr.w D0; move.w (8,A6),D1;
+    bset D1,D0; or.w D0,(0xff7c02).l`, MBUS_$DISABLE_DEV
+    0xE0AD6C..0xE0AD76 the same with `not.w D0; and.w D0,(0xff7c02).l`
+    (`s + [n]`, `s - [n]`; dpc's are byte-identical but for the
+    relocation, golden `data/device_updates`); VME_$INT 0xE0ABA6..
+    0xE0ABAC `move.w (-0x1c,A6),D3; not.w D3; and.w D3,(0xff7c02).l` and
+    0xE0ABF8..0xE0ABFC `move.w (-0x1c,A6),D1; or.w D1,(0xff7c02).l` (the
+    set `[mlevel]` built once in a frame word, range-checked; dpc builds
+    it in a register each time, a separate difference), 0xE0ABCC
+    `andi.w #-0x4001,(0xff7c00).l` (`w := w & ~16#4000`).  Word
+    accesses, one instruction per statement;
+  - SM_$CB, the storage module's command block (../source sm/sm.ins.pas
+    declares it plain; its flag bytes are stored `move.b #0` / `move.b
+    #-1`, sm_$command 0xE6F1B6, the device form, and with `[device]`
+    restored in a scratch copy every site compiles): the unit's 2-bit
+    field from a variable, sm_$command 0xE6F1A2..0xE6F1AE `andi.b
+    #-4,(0x31,A0); move.b D1,D3; andi.b #3,D3; or.b D3,(0x31,A0)`, then
+    the command byte `move.b D0,(0x30,A0)` (a whole byte: a plain
+    store), the same at sm_$reset 0xE6EF42 and sm_$check_status
+    0xE6F094 (there `andi.b #3` absent from dpc's, its local being a
+    non-negative subrange: 5.3 "Masking", not a device matter); the
+    counters `addq.w #1,(0x82,A2)` (sm_$check_status), `(0x84,A2)`
+    (sm_$seek); the wired flag `ori.b #-0x80,(0x44,A2)` (sm_$wire
+    0xE6EFEE), tested as the word's sign `tst.w (0x44,A2); bmi`
+    (0xE6EF92): dpc's boolean field gives `bset #7` and `tst.b`, the
+    original's declaration (a set, a field of a word unit) is not
+    known.  Two read-modify-write instructions to the unit for a
+    variable into a multi-bit field, byte accesses (the unit);
+  - a lead: OS_$SHUTDOWN 0xE6ED30 `andi.b #-9,(0xff9431).l`, bit 3 of
+    VME_CTL's byte 0x31 (`[device]` in ../source's vme/vme.ins.pas) after
+    `disable`: a byte-wide in-place `and` on a device page, declaration
+    not known.
+
+  **Rule.**  Ref 3.15.3 p. 3-57 says the attribute "prevents the
+  compiler from generating gratuitous read-modify-write references ...
+  [it] causes the compiler to avoid using instructions that do
+  unnecessary reads" (docs/reference-clarifications.md, question 49).
+  The image updates device registers in place, so dpc reads "gratuitous"
+  as a read the statement does not need: `clr`/`st` (they read an
+  operand whose old value nothing uses) are never used on a device;
+  a read-modify-write instruction is used only in a statement that reads
+  the object itself (an update, `expr` reading the destination) or a
+  store into a packed field, a bit element or one set member (which keep
+  the unit's other bits); any other statement producing one is refused
+  (`isel.rs` `check_device_updates`).  Each update is one instruction
+  where the image has one, the object's ordinary width (a byte of the
+  unit for a field, the member's byte for one constant set member: no
+  device site of `bset`/`bclr #k`, **Uncertain**).  `x := x ! c`: no
+  device site; `ori.w` as for any word (PARITY_$CHK 0xE0B2C8 `ori.w
+  #0x40,(0xffb406).l`, a register PARITY_$CHK also clears with `clr.w`,
+  so not a device).  The instructions are marked volatile for the
+  scheduler, the member's byte too.  `device(read)`: any store is an
+  error (p. 3-59); `device(write)`: reading is an error, so `x := x op
+  c` is one, and a store into a packed field of a write-only record,
+  which reads the unit without a read in the source, is refused (what
+  the original did is not known);
+- two adjacent device
   stores are not a merging candidate (the refusal of section 13, "Store
   merging", does not apply); a `for` fill of device elements falls back
   to the loop, storing `move.<s> #0` per element;
@@ -6323,8 +6393,9 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
 - **atomic:** `x := x op c` (`+`, `-`, `&`, `!` with a constant) is the
   one-instruction in-place update (`addq`, `subi`, `andi`, `ori` to
   memory); any other assignment whose right side reads the variable is
-  refused (what the original did "when not possible" is not known), as
-  is an atomic device update.  No image site of `atomic` is known.
+  refused (what the original did "when not possible" is not known).  An
+  atomic device object takes the same one instruction (a device is
+  updated in place, above).  No image site of `atomic` is known.
 - **record and array copies (Verified at the sites below; bead
   domain-pascal-e07e):** an assignment of a record or array with a
   device or volatile side is the ordinary copy of section 5.2, with the
@@ -6390,10 +6461,10 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   the block form through a pointer in the frame at an offset is refused
   as for any copy (bead domain-pascal-dsr5).  Golden
   `data/device_copies`; exec test `tests/exec/device_copies.pas`.
-- **refused:** a store into a packed field of a volatile or device
-  record (the field form reads its unit and writes it back, twice for a
-  field of several bits: `andi` then `ori`; for a device a gratuitous
-  read-modify-write, for a volatile object a shape not seen); copying a
+- **refused:** a store into a packed field of a write-only device
+  record (the field form reads its unit, above; a volatile record's that
+  is not a device is best effort, the field form, a shape not seen for
+  one); copying a
   record or array with volatile or device parts as a value parameter's
   copy on entry (no such entry copy is seen), as a record function's
   result, or from a function that returns it through a hidden address
@@ -14604,6 +14675,9 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     #0`, and `move.b #0xff` for `true` (`st` reads its operand too);
     0xE0A328 (five `move.b #n` stores to `device` registers, among them
     0xE0A33E `move.b #-1,(A0)`) is a byte-identical conformance unit.
+    The same image updates device registers in place (`or.w D0,
+    (0xff7c02).l`, MBUS_$ENABLE_DEV 0xE0AD5E): a read the statement
+    needs is not "gratuitous" (section 5.5, "device updates in place").
 - **Store merging (reference; merges and non-merges Verified by survey;
   constants merged across statements Verified; copies merged across
   statements Verified assuming route_$port_t is one type without variants

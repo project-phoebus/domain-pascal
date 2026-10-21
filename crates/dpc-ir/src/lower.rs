@@ -9073,23 +9073,33 @@ fn store_bits(
     if let Some(a) = volatile_access(p, target) {
         check_device_access(p, target, false)?;
         // The other bits of the unit are read and written back (`and`/`or`
-        // into memory, `bset`/`bclr`): for a device, ref 3.15.3 p. 3-57
-        // forbids "gratuitous read-modify-write references"; for any
-        // volatile object the field form writes the unit twice (`andi`
-        // then `ori`), and whether the original did so for one is not
-        // known.
+        // into memory, `bset`/`bclr`).  For a device that read is not
+        // "gratuitous" (ref 3.15.3 p. 3-57): the neighbouring fields must
+        // be kept, and the sau5 image updates a device record's packed
+        // field in place with the ordinary field form (sm_$command
+        // 0xE6F1A2..0xE6F1AE `andi.b #-4,(0x31,A0); move.b D1,D3; andi.b
+        // #3,D3; or.b D3,(0x31,A0)` into SM_$CB's 2-bit unit field;
+        // codegen-patterns 5.5, bead domain-pascal-eaw7).  A write-only
+        // device cannot be read (ref 3.15.3 p. 3-59): its fields' stores
+        // are refused, what the original did not being known.  For a
+        // volatile object that is not a device the field form writes the
+        // unit twice (`andi` then `ori`), and whether the original did so
+        // for one is not known.
         if a.device {
-            return Err(unsupported(
+            if check_device_access(p, target, true).is_err() {
+                return Err(unsupported(
+                    s.span,
+                    "storing into a packed field of a write-only device record (`device(write)`: \
+                     the field form reads its unit, ref 3.15.3 p. 3-59) is",
+                ));
+            }
+        } else {
+            best_effort(
                 s.span,
-                "storing into a packed field of a device record (a read-modify-write of its \
-                 unit, ref 3.15.3) is",
-            ));
+                "storing into a packed field of a volatile record (its unit read and written \
+                 back, perhaps twice; not seen, ref 3.15.1) is",
+            )?;
         }
-        best_effort(
-            s.span,
-            "storing into a packed field of a volatile record (its unit read and written \
-             back, perhaps twice; not seen, ref 3.15.1) is",
-        )?;
     }
     if let Some(st) = store_bits_set_update(p, s, target, value, &addr, field, ty)? {
         return Ok(st);

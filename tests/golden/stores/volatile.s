@@ -31,9 +31,7 @@ move.w #0,(DW).l
 move.w #0,(DW2).l
 move.b #0xff,(DF).l
 st (VB).l
-move.w (DW).l,%d0
-addq.w #1,%d0
-move.w %d0,(DW).l
+addq.w #1,(DW).l
 unlk %fp
 rts
 .globl LOCAL_V

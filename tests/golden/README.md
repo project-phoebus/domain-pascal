@@ -217,6 +217,11 @@ Tests:
   way (sau5 WIN_ RESTORE 0xE19A1E/0xE19A50, SEEK 0xE19B14/0xE19B50), a
   copy between two device sides, a 2-byte field as one `move.w`
   (win_$ecc_correct 0xE19898).
+- `data/device_updates` - codegen-patterns 5.5 (bead domain-pascal-eaw7):
+  `[device]` objects updated in place, the sau5 MBUS_$ENABLE_DEV
+  0xE0AD52 and MBUS_$DISABLE_DEV 0xE0AD68 (`or.w`/`and.w Dn` into
+  PBU_CTL), VME_$INT's `andi.w #-0x4001` (0xE0ABCC), sm_$command's packed
+  unit field and command byte (0xE6F1A2..0xE6F1B2), a counter `addq.w`.
 - `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
   address as cells after the routine that first uses them, `pea (d,PC)`,
   `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING

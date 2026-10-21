@@ -8,10 +8,11 @@
     `move.b #0xff', never `clr'/`st', which read their operand on the
     68000 (WIN_ 0xE19112, RING 0xE758E2, 0xE0A33E); two adjacent device
     words are stored one by one (ref 3.15.3 p. 3-57: device suppresses
-    merging); a device word is updated by a load, an add and a store,
-    not `addq' to memory (ref 3.15.3: no "gratuitous read-modify-write
-    references"; the shape is Uncertain, no image site catalogued); a
-    volatile boolean that is not device is still set with `st'.
+    merging); a device word is updated in place, `addq' to memory, as
+    any other (the statement reads it, so the read is not "gratuitous",
+    ref 3.15.3; SM_$CB's counters at sm_$check_status, the sau5 image;
+    golden data/device_updates, bead domain-pascal-eaw7); a volatile
+    boolean that is not device is still set with `st'.
   - local_v: a volatile local (ref 3.15.1's `i: [volatile] integer') is
     not held in a register (12.5) and is read again after its store
     (no test of the store's flags, 7.1).

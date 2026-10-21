@@ -2601,15 +2601,20 @@ fn read_modify_write_operand(i: &Insn) -> Option<&Ea> {
 /// The indices in `out` of the instructions that reference a volatile
 /// object (`eas`, the operands [`Selector::ea_of`] gave for
 /// [`Addr::Volatile`] addresses; virtual registers name one value each,
-/// so an operand names one object).  A read-modify-write instruction on
-/// a device object is refused (ref 3.15.3 p. 3-57, "the compiler [avoids]
-/// using instructions that do unnecessary reads"; codegen-patterns 13):
-/// the selector does not choose one for a device ([`Selector::store`]), so
-/// one here comes from a form it has no device variant of.
+/// so an operand names one object).  A `clr` or `s<cc>` on a device
+/// object is refused (ref 3.15.3 p. 3-57, "the compiler [avoids] using
+/// instructions that do unnecessary reads"; codegen-patterns 5.5, 13):
+/// they read an operand they do not need, the selector does not choose
+/// one for a device ([`Selector::store`]), so one here comes from a form
+/// it has no device variant of.  The other read-modify-write
+/// instructions need the old value, and are allowed in the statements
+/// that read it ([`Selector::check_device_updates`]).
 fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Vec<usize>> {
     let mut v = Vec::new();
     for (k, i) in out.iter().enumerate() {
-        if let Some(d) = read_modify_write_operand(i) {
+        if let Some(d) = read_modify_write_operand(i).filter(|_| {
+            matches!(i, Insn::Clr { .. } | Insn::Scc { .. })
+        }) {
             if eas.iter().any(|(e, a)| a.device && e == d) {
                 return Err(unsupported(
                     span,
@@ -8287,6 +8292,45 @@ impl Selector {
         });
     }
 
+    /// Refuse a read-modify-write instruction on a device object in the
+    /// instructions `out[start..]` of statement `st`, unless the statement
+    /// reads that object: an update (`x := x op c`, `s := s + x`; the
+    /// value reads the destination) or a store into a packed field, a bit
+    /// element or one member of a set, which keeps the unit's other bits.
+    /// Those read the object of necessity; any other read would be one of
+    /// the "instructions that do unnecessary reads" a device forbids (ref
+    /// 3.15.3 p. 3-57; codegen-patterns 5.5, bead domain-pascal-eaw7).
+    /// A compound statement's own statements are checked by their own
+    /// sequence.
+    fn check_device_updates(&self, st: &Stmt, start: usize) -> Res<()> {
+        let reads = match &st.kind {
+            StmtKind::If { .. }
+            | StmtKind::Repeat { .. }
+            | StmtKind::While { .. }
+            | StmtKind::For(_)
+            | StmtKind::Case { .. } => return Ok(()),
+            StmtKind::Store { addr, value } => expr_reads_addr(value, addr),
+            StmtKind::StoreBits { .. } | StmtKind::StoreBitElem { .. } => true,
+            StmtKind::StoreSetMember { only, .. } => !only,
+            _ => false,
+        };
+        if reads {
+            return Ok(());
+        }
+        for i in &self.out[start..] {
+            if let Some(d) = read_modify_write_operand(i) {
+                if self.volatile_eas.iter().any(|(e, a)| a.device && e == d) {
+                    return Err(unsupported(
+                        st.span,
+                        "a read-modify-write instruction on a device object in a statement that \
+                         does not read it (ref 3.15.3 p. 3-57) is",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A statement sequence whose continuation is `tail`.
     fn seq(&mut self, f: &Function, body: &[Stmt], tail: Tail) -> Res<()> {
         let mut after_call = false;
@@ -8337,6 +8381,7 @@ impl Selector {
             self.called = false;
             self.unpopped = false;
             self.park_home(f, body, st, rest)?;
+            let start = self.out.len();
             match &st.kind {
                 StmtKind::SetResult(e) => self.set_result(f, e)?,
                 StmtKind::Store { addr, value } => {
@@ -8492,6 +8537,7 @@ impl Selector {
                     }
                 }
             }
+            self.check_device_updates(st, start)?;
             if after_run {
                 // NETWORK_$INIT 0xE2F7D6 `moveq #60,D1; add.l
                 // TIME_$CLOCKH,D1` after the run 0xE2F7C2 stored from D0:
@@ -14227,16 +14273,10 @@ impl Selector {
             // instruction when possible".  The single instruction is the
             // in-place update (`addq`, `addi`, `subi`, `andi`, `ori` to
             // memory); what the compiler did when there is none is not
-            // known, nor how `device` combines with it (no image site
-            // known).
+            // known (no image site known).  An atomic device object takes
+            // the same one instruction: a device is updated in place too
+            // (below; bead domain-pascal-eaw7).
             if expr_reads_addr(value, addr) {
-                if device {
-                    return Err(unsupported(
-                        self.span,
-                        "updating an atomic device object (one instruction, ref 3.15.2, or no \
-                         read-modify-write, ref 3.15.3) is",
-                    ));
-                }
                 if self.update_in_place(addr, value)? {
                     return Ok(());
                 }
@@ -14380,13 +14420,21 @@ impl Selector {
                 return Ok(());
             }
         }
-        // A device object is not updated in place: ref 3.15.3 p. 3-57,
-        // "specifying a variable as device causes the compiler to avoid
-        // using instructions that do unnecessary reads" (`bset`/`bclr`,
-        // `addq`, `ori` ... on memory read it first).  The value is
-        // computed in a register and stored (Uncertain: no image site of
-        // an update of a device register is catalogued).
-        if !device && self.set_update(addr, value)? {
+        // A device object is updated in place as any other (`x := x op
+        // c`, `s := s + x`, `s := s - x`): the statement reads it, so the
+        // read of the read-modify-write instruction is not one of ref
+        // 3.15.3's (p. 3-57) "instructions that do unnecessary reads".
+        // The sau5 image: MBUS_$ENABLE_DEV 0xE0AD5E `or.w D0,(0xff7c02).l`
+        // and MBUS_$DISABLE_DEV 0xE0AD76 `and.w D0,(0xff7c02).l` (`[n]`
+        // built in D0), VME_$INT 0xE0ABAC `and.w D3,(0xff7c02).l`,
+        // 0xE0ABCC `andi.w #-0x4001,(0xff7c00).l`, 0xE0ABFC `or.w
+        // D1,(0xff7c02).l` on PBU_CTL, which MBUS_$INIT stores with the
+        // device form (`move.w #0`); SM_$CB's counters `addq.w #1,(d,A2)`
+        // (sm_$check_status); codegen-patterns 5.5, bead
+        // domain-pascal-eaw7.  A store whose value does not read the
+        // object takes no read-modify-write instruction ([`Self::seq`]'s
+        // check, [`volatile_references`]).
+        if self.set_update(addr, value)? {
             return Ok(());
         }
         if let Expr::SetOf { .. } = value {
@@ -14401,7 +14449,7 @@ impl Selector {
                  codegen-patterns 5.1) is",
             )?;
         }
-        if !device && self.update_in_place(addr, value)? {
+        if self.update_in_place(addr, value)? {
             return Ok(());
         }
         // A destination and a value that both need a register: the side
@@ -23763,7 +23811,24 @@ impl Selector {
     }
 
     /// The byte `off` bytes into the object at `ea`.
-    fn byte_of(&self, ea: Ea, off: u32) -> Res<Ea> {
+    /// A byte of a volatile object is a reference to it, marked for the
+    /// scheduler as the object's operand is ([`volatile_references`]).
+    fn byte_of(&mut self, ea: Ea, off: u32) -> Res<Ea> {
+        let access = self
+            .volatile_eas
+            .iter()
+            .find(|(e, _)| *e == ea)
+            .map(|&(_, a)| a);
+        let byte = self.byte_of_ea(ea, off)?;
+        if let Some(a) = access {
+            if !self.volatile_eas.iter().any(|(e, _)| *e == byte) {
+                self.volatile_eas.push((byte.clone(), a));
+            }
+        }
+        Ok(byte)
+    }
+
+    fn byte_of_ea(&self, ea: Ea, off: u32) -> Res<Ea> {
         let off = off as i32;
         Ok(match ea {
             Ea::Ind(a) if off == 0 => Ea::Ind(a),
@@ -26592,6 +26657,53 @@ mod tests {
             vec![copy(Addr::Frame(-0x20c), through(8, 0), 0x20c)],
         );
         assert_eq!(text(&f)[3], "move.w\t#0x82,%d0");
+    }
+
+    /// A read-modify-write instruction that needs the old value is a
+    /// device reference like any (MBUS_$ENABLE_DEV 0xE0AD5E `or.w
+    /// D0,(0xff7c02).l`; bead domain-pascal-eaw7), marked for the
+    /// scheduler; `clr` and `s<cc>`, which read an operand nothing needs,
+    /// are refused on a device and allowed on a volatile object that is
+    /// not one.
+    #[test]
+    fn device_read_modify_write_references() {
+        let reg = Ea::AbsL("PBU_CTL".into(), 2);
+        let eas = |device| {
+            vec![(
+                reg.clone(),
+                Access {
+                    device,
+                    atomic: false,
+                },
+            )]
+        };
+        let or = Insn::AluToMem {
+            op: AluOp::Or,
+            size: Size::W,
+            src: 0,
+            dst: reg.clone(),
+        };
+        let andi = Insn::AluImm {
+            op: AluOp::And,
+            size: Size::W,
+            imm: -0x4001,
+            dst: reg.clone(),
+        };
+        let marked = volatile_references(&[or, andi], &eas(true), span()).unwrap();
+        assert_eq!(marked, vec![0, 1]);
+        for i in [
+            Insn::Clr {
+                size: Size::W,
+                dst: reg.clone(),
+            },
+            Insn::Scc {
+                cond: Cond::Ne,
+                dst: reg.clone(),
+            },
+        ] {
+            assert!(volatile_references(&[i.clone()], &eas(true), span()).is_err());
+            assert_eq!(volatile_references(&[i], &eas(false), span()).unwrap(), vec![0]);
+        }
     }
 
     /// A copy with a volatile or device side ([`Addr::Volatile`]): the
