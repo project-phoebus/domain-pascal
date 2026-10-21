@@ -34,14 +34,14 @@ rts
 WRUNS_$UNLOCK:
 link.w %fp,#-0x10
 movea.l (8,%fp),%a0
-move.l (%a0),(-4,%fp)
-pea (-0x10,%fp)
+move.l (%a0),(-0x10,%fp)
 pea (-0xc,%fp)
+pea (-8,%fp)
 clr.l -(%sp)
 clr.l -(%sp)
 clr.l -(%sp)
 move.l #0x40000,-(%sp)
-move.l (-4,%fp),-(%sp)
+move.l (-0x10,%fp),-(%sp)
 move.l #ANY_UID,-(%sp)
 jsr (FILE_$PRIV_UNLOCK).l
 move.b %d0,(OK).l
@@ -51,11 +51,11 @@ rts
 WRUNS_$LOCK:
 link.w %fp,#-0x10
 movea.l (8,%fp),%a0
-move.w (%a0),(-2,%fp)
+move.w (%a0),(-0xe,%fp)
 subq.l #2,%sp
-pea (-0x10,%fp)
-pea (-0xa,%fp)
-pea (-8,%fp)
+pea (-0xc,%fp)
+pea (-6,%fp)
+pea (-4,%fp)
 clr.w -(%sp)
 pea (.Lc0,%pc)
 clr.l -(%sp)
@@ -63,16 +63,16 @@ clr.l -(%sp)
 clr.l -(%sp)
 move.l #0x880000,-(%sp)
 clr.w -(%sp)
-move.w (-2,%fp),-(%sp)
+move.w (-0xe,%fp),-(%sp)
 move.w #1,-(%sp)
 move.w (ASID_V).l,-(%sp)
 move.l #ANY_UID,-(%sp)
 jsr (FILE_$PRIV_LOCK).l
 lea (0x30,%sp),%sp
 subq.l #2,%sp
-pea (-0x10,%fp)
-pea (-0xa,%fp)
-pea (-8,%fp)
+pea (-0xc,%fp)
+pea (-6,%fp)
+pea (-4,%fp)
 clr.w -(%sp)
 pea (.Lc0,%pc)
 clr.l -(%sp)

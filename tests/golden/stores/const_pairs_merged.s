@@ -18,9 +18,9 @@ unlk %fp
 rts
 .globl OPEN
 OPEN:
-link.w %fp,#-0x28
-move.l #0x498fc02,(-0x28,%fp)
-pea (-0x28,%fp)
+link.w %fp,#-0x2c
+move.l #0x498fc02,(-0x2c,%fp)
+pea (-0x2c,%fp)
 jsr (USE_OPT).l
 unlk %fp
 rts

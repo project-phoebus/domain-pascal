@@ -3,19 +3,19 @@
 SCON_$CHECK:
 link.w %fp,#-8
 movea.l (8,%fp),%a0
-move.l (%a0),(-4,%fp)
+move.l (%a0),(-8,%fp)
 movea.l (0xc,%fp),%a1
-move.l (%a1),(-8,%fp)
+move.l (%a1),(-4,%fp)
 pea (.Lc0,%pc)
 jsr (EXT_$PRINT).l
 addq.w #4,%sp
-pea (-8,%fp)
 pea (-4,%fp)
+pea (-8,%fp)
 pea (.Lc1,%pc)
 jsr (VFMT_$WRITE2).l
 lea (0xc,%sp),%sp
-pea (-4,%fp)
 pea (-8,%fp)
+pea (-4,%fp)
 pea (.Lc2,%pc)
 jsr (VFMT_$WRITE2).l
 unlk %fp

@@ -30,9 +30,9 @@ move.w %d0,%d1
 neg.w %d0
 lsl.w #3,%d1
 add.w %d1,%d0
-move.l (0x28,%a0,%d0.w),(-8,%fp)
+move.l (0x28,%a0,%d0.w),(-4,%fp)
 1:
-movea.l (-8,%fp),%a0
+movea.l (-4,%fp),%a0
 movem.l (-0x10,%fp),%d2/%a2
 unlk %fp
 rts

@@ -258,7 +258,7 @@ What the image shows:
   C tree's prototypes (`../source/domain_os/*/*.h`) tell you, routine by
   routine, which convention the image uses.
 
-#### Value parameters passed by address: the callee's copy (survey Verified; frame position Uncertain; implemented; bead domain-pascal-5aw.12)
+#### Value parameters passed by address: the callee's copy (survey Verified; frame position Verified by survey, section 2; implemented; bead domain-pascal-5aw.12)
 
 Ref 5.2 Table 5-1 (p. 5-5), "no mode", default convention: the caller
 "Passes address", the callee "Creates local copies of arguments and makes
@@ -323,22 +323,30 @@ Survey (`tools/framesurvey.py copies`: every compiled routine of
   These may be `in` parameters read once at entry, or value parameters
   whose copy lives in a register (as a local can, 12.5); the image cannot
   tell.  `dpc` copies every value parameter into the frame.
-- **Frame position (Uncertain):** of the 8-byte entry copies in
-  map-named routines, 29 sit at the top of the frame (`(-8,A6)`, nothing
-  above: DIR_$GET_ENTRYU `link #-8`; PROC2_$DEBUG, XPD_$READ_PROC with
-  their status local at -12 below), 34 below other frame objects
+- **Frame position (rule Verified by survey; implemented; bead
+  domain-pascal-67c):** the copies go where section 2, "Where the
+  compiler's objects go", puts the compiler's objects: in front of the
+  first declared local that takes fewer frame bytes than they do, or
+  after all the locals, the larger first, those of one size at rising
+  addresses in parameter order, 8 bytes or more at multiples of 8.  This
+  explains the sites that no fixed order fitted: of the 8-byte entry
+  copies in map-named routines, 29 sit at the top of the frame
+  (`(-8,A6)`: DIR_$GET_ENTRYU `link #-8`; PROC2_$DEBUG, XPD_$READ_PROC
+  with their status local at -12 below), 34 below other frame objects
   (FILE_$LOCATE 0xE60620 at -40, FILE_$READ_LOCK_ENTRY 0xE608EC at the
-  bottom, -48, below a 26-byte local), 1 below nothing it addresses
-  (MST_$UNMAP_PRIVI).  Several copies are not in parameter order in the
-  frame: FILE_$INVALIDATE has the UID at -8, its status local at -12,
-  then the third parameter at -16, the second at -20, the fourth (a
-  byte) at -22; MST_$GET_UID_ASID 0xE44010 copies its word to -4 with
-  locals at -2, -6 and -8; XPD_$SET_DEBUGGER 0xE5BBD8 puts its first
-  parameter's copy (-16) below its second's (-8).  No order fits every
-  site (as for the result variable, section 2).  `dpc` allocates the
-  copies first, from the top, in parameter order, before the locals;
-  this fits the top sites and SMD_$SET_TP_CURSOR (-4 then -6), not the
-  others.
+  bottom, -48, below a 26-byte local), every one of the 72 8-byte entry
+  copies at a multiple of 8.  FILE_$INVALIDATE 0xE75158: the UID's copy
+  at -8 above its status local at -12, then the third parameter's at
+  -16, the second's at -20, the fourth's (a byte) at -22 (the longwords
+  before the word, the two longwords at rising addresses in parameter
+  order); MSG_$SEND 0xE599FC's six word copies at -0x34 .. -0x2A,
+  parameter 2 lowest, below its longword parameter 1's at -0x28 (section
+  2); XPD_$SET_DEBUGGER 0xE5BBD8 its first parameter's copy (-16) below
+  its second's (-8).  Over ../source's Pascal (`-config sau2`, every
+  module file), the 17 routines whose image copies two or more
+  parameters at entry all have the image's relative order (13 the image's
+  offsets), against 7 in parameter order from the top; the frames as a
+  whole, see section 2.
 
 **Implemented** (`dpc-sema` `Param::copy_offset`; `dpc-ir`
 `Function::param_copies`, `var_addr`; `dpc-m68k` `isel.rs`,
@@ -1403,20 +1411,22 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     `(-2,A6)` (0xE124A8) and its word result variable share `link #-4`
     (one site; the Uncertain point stays open).
   - **Frame size (model; items 1 and 3's slot Verified by survey, item
-    4 by ../source's Pascal, the result's and item 4's positions
-    Uncertain; beads domain-pascal-9mr, -s9g0):**
+    4 by ../source's Pascal, the copies' and the result's positions by
+    survey, item 4's position Uncertain; beads domain-pascal-9mr, -s9g0,
+    -67c):**
     the frame holds, from the top down,
     1. a **4-byte slot for a routine that is not a global symbol**
        (nested, or `internal`: unnamed in the map), never addressed except
        by nested routines that store a static link there (section 6,
        "Frame");
-    2. local copies of value parameters (place Uncertain: at the top in
-       29 routines, below other objects in 34, not always in parameter
-       order; section 1.2, "Value parameters passed by address"; `dpc`
-       puts them first, in parameter order) and the locals, whether or
-       not the code ever keeps them in memory ("Untouched frames" below);
-    3. a function's **result variable**, below the locals (its place is
-       Uncertain: sites both ways, see below);
+    2. the locals in declaration order, whether or not the code ever
+       keeps them in memory ("Untouched frames" below), and among them
+       the local copies of value parameters (section 1.2, "Value
+       parameters passed by address"), each in front of the first local
+       that takes fewer frame bytes than it, or after all the locals
+       ("Where the compiler's objects go" below);
+    3. a function's **result variable**, placed among item 2's objects
+       by the same rule;
     4. a **4-byte slot for each `with` temporary of an array element's
        address** (section 5.2, "`with`"), longword aligned, though the
        code mostly holds the temporary in an address register and never
@@ -1457,12 +1467,22 @@ v,D0` (best effort; the image forms a boolean, 7.1).
       may well be a procedure).  The 72 unnamed, not nested functions
       and the 11 nested ones all have `link #-8` or more (slot + result),
       while 31 and 10 of the others have just `#-4` (the slot).
-    - Where the result variable goes is **Uncertain** (bead
-      domain-pascal-67c): no fixed place in declaration order fits every
-      site, and `dpc` keeps the majority, below the locals.  Sites where
-      the link size and the C's locals force the order (the result held
-      in a register, its slot never addressed; a byte takes a word,
-      "Frame layout" below):
+    - **Where the compiler's objects go (rule Verified by survey,
+      Uncertain in its details; implemented; bead domain-pascal-67c).**
+      The value parameters' copies and the result variable are placed
+      among the declared locals, which keep declaration order: each in
+      front of the first local that takes fewer frame bytes than it (a
+      byte counts as the word it takes, "Frame layout" below), or after
+      all of them; where several go to one place, the larger first, and
+      those of one size at rising addresses in parameter order, the
+      result variable after the copies (its order among copies of its
+      size is not seen).  It reads as a list built in declaration order
+      into which the compiler inserts its own objects, last parameter
+      first, each before the first smaller object.  Sites where the link
+      size and the C's locals force the result's place (the result held
+      in a register, its slot never addressed), all ten fitting the
+      rule (lead: ../source pascal-translation-notes, the near-miss
+      repro tmp/nearmiss/pkt_next_long_id.pas):
       - *Result below a local* (a local at the top of the frame, so the
         result is not first): PKT_$NEXT_ID 0xE1248E (token `move.w
         D0,(-2,A6)`, word result in D2, `link #-4` = 2 + 2);
@@ -1505,16 +1525,36 @@ v,D0` (best effort; the image forms a boolean, 7.1).
         place.  FLP_$CINIT fits "locals, result, then temporaries" if
         `(-4,A6)` is a local status: the gap at -24..-21 for the result
         and the `addr(...)` temporary at `(-28,A6)` passed by address.
-      Six forced sites put the result below, two above and two in the
-      middle.  Possible causes not settled: declarations the C does not
-      show; a result variable without a slot of its own (it would fit
-      NETBUF_$RTNVA with a 4-byte local first, but not the functions with
-      no locals and `link #-4`, TST_LOCK, nor the 0 of 83 unnamed
-      functions with only the reserved slot); an order the compiler does
-      not take from the source (a symbol-table walk).  Allocating upward
-      from the bottom (hypothesis b) is the same as allocating downward
-      in reverse declaration order, except for where the rounding pad
-      goes, and fits these sites no better.
+      The ten forced sites: below every local where none is smaller
+      than the result (the six above), above or in the middle where one
+      is (NETBUF_$RTNVA's word token, SIO_$I_ERR's token below its
+      longword, TTY_$I_GET_DESC's and SIO_$I_GET_DESC's register-held
+      word line).  ../source's MST_$REMAP_PRIVI keeps a stand-in for the
+      image's result between a pointer and a word local, where the rule
+      puts it.  Wider (../source's Pascal at 266bf1ef, every module file
+      compiled with `-config sau2`, 1630 routines with an image address,
+      each one's `link` and set of `(d,A6)` offsets compared with the
+      image's; tmp scripts, not kept): against 8-alignment alone, the
+      result rule changes 43 routines' frames, 14 toward the image, 12
+      away and 17 neither, those away through stand-ins or declaration
+      orders its translators chose for the old rule (RIP_$NET_LOOKUP's
+      `array[1..2] of integer32`, EXCS's `which` and `st3`); the copy
+      rule then changes 63, 54 toward, 4 away (SMD_$WRITE_STRING fits it
+      with its `unit` declared after `saved_clip`); neither changes a
+      routine OK in `tests/srcsurvey/baseline.txt`.  Together with
+      8-alignment: `link` as the image's in 1135 routines (1073 before),
+      the offsets exactly the image's in 1054 (943), 4492 offsets in
+      both against 1429 in dpc's alone (3690 and 2231).  The sites of
+      FILE_'s frames (bead domain-pascal-1edl, finding 6's repro):
+      FILE_$SET_TYPE 0xE5E176 and FILE_$SET_DIRPTR 0xE5E1B2 (`link
+      #-0x40`) have their UID copies at -0x40 below the 0x34-byte local
+      at -0x38, as the rule puts them.  `dpc` (`dpc-sema`
+      `Checker::alloc_local`, `place_pending`) follows the rule; the
+      earlier model (copies first, from the top, in parameter order;
+      the result last) fitted six of the ten forced sites.
+      Allocating upward from the bottom (hypothesis b) is the same as
+      allocating downward in reverse declaration order, except for where
+      the rounding pad goes, and fits these sites no better.
     - Image sites the model explains with no stand-in locals: 0xE32B76
       `link #-4` (internal, no locals), 0xE68864 `#-8` (internal, word
       result), 0xE3CCCE `#-8` (internal, one pointer local held in A1),
@@ -1525,8 +1565,8 @@ v,D0` (best effort; the image forms a boolean, 7.1).
       `#-16` (slot + pointer + index = 12; 4 unexplained).
 
     **Implemented** (`dpc-sema` `routine_body`: the frame of a routine that
-    is not `global` starts at 4; the result variable is allocated after
-    the declarations; test `frame_size_model` in
+    is not `global` starts at 4; the copies and the result variable are
+    placed by `alloc_local` and `place_pending` (above); test `frame_size_model` in
     `crates/dpc-sema/src/tests/table5_1.rs`; the `with` slots, `dpc-ir`
     `with_slots`, test `with_temporaries_keep_frame_slots`).  The
     conformance units that declared stand-in locals for 0xE32B76,
@@ -1692,7 +1732,8 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     map-named routines have a lone byte or word object above a lone
     longword, 105 have every longword above them.  Declaration order is
     the natural reading but cannot be checked without the sources;
-    `dpc` allocates downward in declaration order.
+    `dpc` allocates downward in declaration order, the compiler's own
+    objects among the locals ("Where the compiler's objects go" above).
     **Implemented** (`dpc-sema` `alloc_frame`, `FRAME_MIN_ALIGN`): each
     object at `round_up(frame + size, max(align, 2))`, longword
     alignment from the freestanding alignment of 4-byte scalars and
@@ -1715,29 +1756,79 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     0xE43590 and 0xE443E8 a `bne` on the flags of the store follows (the
     value tested as well as stored), elsewhere the reason is not seen
     (ad-hoc survey, not kept).  The ACL_ ones need bit-array stores.
-  - **Objects of 8 bytes or more at multiples of 8 (Reported; rule
-    Uncertain; lead: ../source pascal-translation-notes finding 6; bead
-    domain-pascal-1edl).**  Module-local 0xE1C204 (../source
+  - **Objects of 8 bytes or more at multiples of 8 (Verified by survey;
+    implemented; lead: ../source pascal-translation-notes findings 6,
+    101, 123, 129; bead domain-pascal-1edl).**  A frame object of 8 bytes
+    or more, declared local, value parameter's copy or result variable,
+    record or array alike, lies at a multiple of 8 from A6; the total is
+    still rounded to 4 only.  Module-local 0xE1C204 (../source
     tty_$i_wait, `link #-108`): an eventcount (12 bytes) at -0x10, a
     time queue element (26 bytes) at -0x30, the two 3-element
-    EC_$WAITN lists at -0x40 and -0x50; each object right below the one
-    above it under longword alignment would give -0xC, -0x2C, -0x3C and
-    -0x4C.  The 6-byte clocks below (-0x58, -0x60) are longword placed.
-    (Every 8+-byte object there is also at a multiple of 16; the routine
-    cannot tell 8 from 16.)  The module-local 0xE4232A (`link #-16`)
-    has its 8-byte result at -0x10..-0x9 (`move.l (A0)+` to -0x10 and
-    -0xC, 0xE42338) with nothing at -8..-1.
-    Temporaries do not follow it: MSG_$SHARE_SOCKET 0xE5A02C (`link
-    #-12`, an 8-byte set at -0xC, nothing else addressed),
-    PROC2_$UPGID_TO_UID 0xE4100C (an 8-byte temporary at -0x14).  An
-    ad-hoc survey (not kept) of 8-byte copies into the frame (exactly
-    two `move.l (An)+,(d,A6)`): d mod 8 = 0 at 154 map-named and 97
-    unnamed sites, 4 at 69 and 9, 2 or 6 at 15 and 1; copies out of the
-    frame 28 at 0, 26 at 4.  Many off-rule sites are runs 8 apart
-    (elements or fields, e.g. 0xE4AF52 -44/-36/-28), but some are not
-    explained: VTOC_$DISMOUNT 0xE387E0 (-12, words at -4 and -2 above),
-    VTOC_$MOUNT 0xE38658 (-20), the module-local 0xE323E6 (a source at
-    -52).  Not modelled: `dpc` aligns frame objects to at most 4.
+    EC_$WAITN lists (arrays) at -0x40 and -0x50; each object right below
+    the one above it under longword alignment would give -0xC, -0x2C,
+    -0x3C and -0x4C.  The 6-byte clocks below (-0x58, -0x60) are
+    longword placed.  The module-local 0xE4232A (`link #-16`) has its
+    8-byte result at -0x10..-0x9 (`move.l (A0)+` to -0x10 and -0xC,
+    0xE42338) with nothing at -8..-1.  FILE_$SET_TROUBLE 0xE5DC42,
+    FILE_$MK_IMMUTABLE 0xE5DBC0, FILE_$SET_AUDITED 0xE5DBE8 and
+    FILE_$SET_DEVNO 0xE5E362 (`link #-0x38`): the 0x34-byte attribute
+    value at -0x38 under 4 bytes nothing addresses; FILE_$OLD_AP
+    0xE5E100 the same under two longwords.  The frame total does not
+    decide it: VTOC_$MOUNT 0xE38658 (`link #-0x4c`, not a multiple of
+    8) has its 0x32-byte record at -0x38.  Every 8-byte value parameter
+    copied at entry is at a multiple of 8 (72 sites, 34 below other
+    objects; `framesurvey.py copies` rows, offsets mod 8).
+    - *The counter-candidates are fields*: VTOC_$DISMOUNT's 8-byte copy
+      to -12 (0xE387E0) is the UID field at +0x24 of its 0x30-byte
+      audit record at -0x30; VTOC_$MOUNT's to -20 the same field of its
+      record at -0x38; the 8-byte objects of the runs 8 apart (0xE4AF52
+      -44/-36/-28) elements or fields.  The nested flop_$mount_floppy
+      0xE323E6 has an 8-byte object at -0x34: the temporary of
+      NAME_$GET_NODE_UID's result, a function's through a hidden address
+      (`pea (-0x34,A6)`, 0xE3243E; section 3), which ../source declares
+      as a local `node_uid_tmp`; its declared UIDs at -0x10, -0x18 and
+      -0x20 are 8-aligned below the reserved slot, so its stand-in
+      `unused_8` is not needed under this rule (flop/mount.pas's TODO).
+    - *Temporaries are exempt*: MSG_$SHARE_SOCKET 0xE5A02C (`link
+      #-12`, an 8-byte set temporary at -0xC), PROC2_$UPGID_TO_UID
+      0xE4100C (an 8-byte function result temporary at -0x14); `dpc`'s
+      temporaries are the IR's (`assign_temps`), longword aligned.
+    - *Objects under 8 bytes keep their type's alignment*: a 4-byte
+      alignment for every object of 4 to 7 bytes (a reading of finding
+      101's clocks) loses against the type's alignment in the survey
+      below (13 routines away from the image, none toward), and
+      WIN_$CINIT 0xE30340 passes the address `(-0xA,A6)` under a
+      longword at -4 (../source's 6-byte probe data; its size is the
+      translators').
+    - *Survey* (../source's Pascal at 266bf1ef, every module file with
+      `-config sau2`, 1630 routines with an image address, each one's
+      `link` and `(d,A6)` offsets against the image's): 8-alignment
+      alone takes the `link` to the image's in 1133 routines against
+      1073 and the offset sets in 1018 against 943 (4293 offsets shared
+      with the image, 3690 before); 180 routines move toward the image,
+      50 away, those away through stand-ins of 8 bytes or more
+      (`unused_c: array[1..2] of integer32` and the like: KBD_$PUT,
+      KBD_$SET_KBD_MODE, PROC2_$GET_REGS, FILE_$DELETE_OBJ, the four
+      baseline-OK routines it changes) or sizes the translators chose
+      (FLP_$CINIT's 10-byte probe data, TESTPAGE reading one byte).
+      Exempting arrays scores higher only through those stand-ins: it
+      loses TTY_$I_WAIT, NAME_$OLD_ADD_LINK_LOCAL, NAME_$OLD_DROP_ENTRY,
+      NETWORK_$DO_REQUEST, PROC2_$INFO and SERVER_UNMAP_NAME, exact
+      with arrays 8-aligned.
+    **Implemented** (`dpc-sema` `alloc_frame`, `FRAME_BIG_SIZE`,
+    `FRAME_BIG_ALIGN`; tests `frame_big_objects_8_aligned`,
+    `compiler_objects_before_smaller_locals` in
+    `crates/dpc-sema/src/tests/table5_1.rs`; goldens `frame/big_objects`,
+    `frame/compiler_objects`; exec test `tests/exec/frame_layout.pas`).
+    Of the eight FILE_ routines of the lead, ../source's file module
+    compiled with `-config sau2` now gives the image's `link` and frame
+    offsets for seven (FILE_$SET_TROUBLE, _$MK_IMMUTABLE, _$SET_AUDITED,
+    _$SET_DEVNO, _$SET_TYPE, _$SET_DIRPTR, _$OLD_AP); FILE_$SET_REFCNT
+    0xE5E3F4 (`link #-0x44`) keeps 4 bytes at -0x40 nothing addresses
+    between del_status at -0x3C and the byte at -0x42, the place the
+    rule gives the copy of a 4-byte value parameter (its `refcnt`, held
+    in D0, is `in` in ../source).
+
   - **Untouched frames are ordinary (Verified counts; cause Uncertain).**
     Of the compiled routines that end in `rts` (survey as in 1.5), 306
     without any loop have a `link` area they never address (143 of

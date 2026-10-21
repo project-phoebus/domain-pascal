@@ -1,7 +1,10 @@
 { Value parameters under the default convention: passed by address, copied
   by the callee on entry (ref 5.2 Table 5-1, p. 5-5; bead
   domain-pascal-5aw.12).  codegen-patterns 1.2, "Value parameters passed by
-  address", and 2 (the copies at the top of the frame, in parameter order).
+  address", and 2, "Where the compiler's objects go" (with no locals the
+  copies are the whole frame, the larger first, those of one size at
+  rising addresses in parameter order; 8 bytes or more at multiples of
+  8).
 
   - vc_$scalars: byte, word and longword copies, `move.<s> (An),(d,A6)'
     (FILE_$INVALIDATE 0xE75166..0xE75186: A0, A1, A2 for three slots, each

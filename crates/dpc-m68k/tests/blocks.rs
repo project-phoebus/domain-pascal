@@ -148,7 +148,7 @@ end;
         b[2..7],
         [
             "lea\t(%a5),%a0",
-            "lea\t(-0xc,%fp),%a1",
+            "lea\t(-0x10,%fp),%a1",
             "move.l\t(%a0)+,(%a1)+",
             "move.l\t(%a0)+,(%a1)+",
             "move.l\t(%a0)+,(%a1)+",
@@ -158,7 +158,7 @@ end;
     assert_eq!(
         b[7..13],
         [
-            "lea\t(-0xa,%fp),%a0",
+            "lea\t(-0xe,%fp),%a0",
             "lea\t(0x24,%a5),%a1",
             "move.b\t(%a0)+,(%a1)+",
             "move.b\t(%a0)+,(%a1)+",

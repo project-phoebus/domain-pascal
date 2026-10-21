@@ -3,9 +3,9 @@
 NW_$DEMUX:
 link.w %fp,#-0x18
 movea.l (8,%fp),%a0
-move.w (0x1a,%a0),(-2,%fp)
+move.w (0x1a,%a0),(-4,%fp)
 subq.l #2,%sp
-move.w (-2,%fp),-(%sp)
+move.w (-4,%fp),-(%sp)
 jsr (Q).l
 unlk %fp
 rts

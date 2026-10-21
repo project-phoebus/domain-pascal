@@ -495,9 +495,10 @@ end;
         .iter()
         .map(|c| (c.slot, c.copy, c.bytes))
         .collect();
-    // `u` at (8,A6) copied to -8..-1, `n` at (0x10,A6) to -10; the `in`
-    // parameter `k` is not copied; the local `l` comes after the copies.
-    assert_eq!(copies, vec![(8, -8, 8), (16, -10, 2)]);
+    // `u` at (8,A6) copied to -8..-1, above the smaller local `l` (-10),
+    // `n` at (0x10,A6) to -12, after it (codegen-patterns 2, "Where the
+    // compiler's objects go"); the `in` parameter `k` is not copied.
+    assert_eq!(copies, vec![(8, -8, 8), (16, -12, 2)]);
     assert_eq!(f.address_params, vec![8, 12, 16]);
     let w = Scalar::signed(Width::Word);
     let ld = |o| Expr::Load {
@@ -508,10 +509,10 @@ end;
     assert_eq!(
         f.body[0].kind,
         StmtKind::Store {
-            addr: Addr::Frame(-10),
+            addr: Addr::Frame(-12),
             value: Expr::Binary {
                 op: BinOp::Add,
-                lhs: Box::new(ld(-10)),
+                lhs: Box::new(ld(-12)),
                 rhs: Box::new(Expr::Const { value: 1, ty: w }),
                 ty: w,
             },
@@ -520,8 +521,8 @@ end;
     assert_eq!(
         f.body[1].kind,
         StmtKind::Store {
-            addr: Addr::Frame(-12),
-            value: ld(-10),
+            addr: Addr::Frame(-10),
+            value: ld(-12),
         }
     );
     // Passed on by address: the copy's address.
@@ -536,7 +537,7 @@ end;
             _ => panic!("by address"),
         })
         .collect();
-    assert_eq!(addrs, vec![&Addr::Frame(-8), &Addr::Frame(-10)]);
+    assert_eq!(addrs, vec![&Addr::Frame(-8), &Addr::Frame(-12)]);
 }
 
 #[test]
@@ -4226,11 +4227,12 @@ end;";
         k => panic!("not a load stored: {k:?}"),
     };
     let word = Scalar::signed(Width::Word);
-    // The callee's copy of the longword value parameter (at -4): its
-    // second word.
-    assert_eq!(load(0), (Addr::Frame(-2), word));
-    // The UID's copy (at -12): its third word, a `0..65535`.
-    assert_eq!(load(1), (Addr::Frame(-8), Scalar::unsigned(Width::Word)));
+    // The callee's copy of the longword value parameter (at -12, below
+    // the UID's: the larger first, codegen-patterns 2, "Where the
+    // compiler's objects go"): its second word.
+    assert_eq!(load(0), (Addr::Frame(-10), word));
+    // The UID's copy (at -8): its third word, a `0..65535`.
+    assert_eq!(load(1), (Addr::Frame(-4), Scalar::unsigned(Width::Word)));
     // Through a `var` parameter's slot, at offset 1.
     assert!(matches!(load(2), (Addr::Indirect { offset: 1, .. }, ty)
         if ty == Scalar::unsigned(Width::Byte)));
@@ -4247,8 +4249,8 @@ end;";
             ..
         }
     ));
-    // A transfer of a field of a transfer: the copy's `low` (at -8).
-    assert_eq!(load(6), (Addr::Frame(-8), word));
+    // A transfer of a field of a transfer: the copy's `low` (at -4).
+    assert_eq!(load(6), (Addr::Frame(-4), word));
     // Not designators (ref p. 4-197 does not say a transfer is a
     // variable): refused where one is needed; and a transfer of a value
     // not in memory (its temporary is not seen).

@@ -1,11 +1,11 @@
 .section ".text.LOG.OS_INIT_PROC","ax",@progbits
 .globl LOG_$INIT
 LOG_$INIT:
-link.w %fp,#-0x14
+link.w %fp,#-0x18
 movea.l #.Ldata.WIRED_DATA,%a0
+move.l (%a0)+,(-0x10,%fp)
 move.l (%a0)+,(-0xc,%fp)
-move.l (%a0)+,(-8,%fp)
-pea (-0x14,%fp)
+pea (-0x18,%fp)
 jsr (GET_ATTRIBUTES).l
 unlk %fp
 rts

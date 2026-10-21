@@ -39,10 +39,10 @@ move.l (0x80,%a0),%d0
 unlk %fp
 rts
 FRAME_ELEM:
-link.w %fp,#-0x10
+link.w %fp,#-0x14
 move.w (I).l,%d0
 add.w %d0,%d0
-move.w (-0xe,%fp,%d0.w),%d0
+move.w (-0x12,%fp,%d0.w),%d0
 unlk %fp
 rts
 STORES:

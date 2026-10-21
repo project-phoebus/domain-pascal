@@ -218,7 +218,10 @@ end;",
 }
 
 /// A block copy from A0 into A1 after an 8-byte copy that used A0 up
-/// with `(A0)+` (XPD_$SET_PTRACE_OPTS 0xE5AFA4..0xE5AFBE).
+/// with `(A0)+` (XPD_$SET_PTRACE_OPTS 0xE5AFA4..0xE5AFBE), and the
+/// copies' places there: the 14-byte one at -0x10, the UID's below it at
+/// -0x18 (the larger first, codegen-patterns 2, "Where the compiler's
+/// objects go"; both at multiples of 8).
 #[test]
 fn block_copy_after_postincrement_copy() {
     assert_eq!(
@@ -232,10 +235,10 @@ end;",
         [
             "link.w %fp,#-0x18",
             "movea.l (8,%fp),%a0",
-            "move.l (%a0)+,(-8,%fp)",
-            "move.l (%a0)+,(-4,%fp)",
+            "move.l (%a0)+,(-0x18,%fp)",
+            "move.l (%a0)+,(-0x14,%fp)",
             "movea.l (0xc,%fp),%a0",
-            "lea (-0x18,%fp),%a1",
+            "lea (-0x10,%fp),%a1",
             "move.l (%a0)+,(%a1)+",
             "move.l (%a0)+,(%a1)+",
             "move.l (%a0)+,(%a1)+",

@@ -25,6 +25,21 @@ use crate::types::{
 /// layout"; Verified by survey, bead domain-pascal-ek7).
 const FRAME_MIN_ALIGN: u32 = 2;
 
+/// Frame objects of this many bytes or more are placed at a multiple of
+/// [`FRAME_BIG_ALIGN`] from the frame pointer (codegen-patterns 2, "Objects
+/// of 8 bytes or more at multiples of 8"; bead domain-pascal-1edl): the
+/// module-local 0xE1C204 (tty_$i_wait, `link #-108`) has its time queue
+/// element and its two EC_$WAITN lists at -0x30, -0x40 and -0x50, where
+/// longword alignment would give -0x2C, -0x3C and -0x4C; FILE_$SET_TROUBLE
+/// 0xE5DC42 its 0x34-byte attribute value at -0x38 under 4 bytes nothing
+/// addresses (`link #-0x38`).  Every 8-byte value parameter copied at
+/// entry is at a multiple of 8 (72 sites, 34 below other objects).  The
+/// IR's temporaries do not follow it (MSG_$SHARE_SOCKET 0xE5A02C, an
+/// 8-byte set at -0xC), nor do objects under 8 bytes (WIN_$CINIT
+/// 0xE30340 passes the address (-0xA,A6) below a longword at -4).
+const FRAME_BIG_SIZE: u32 = 8;
+const FRAME_BIG_ALIGN: u32 = 8;
+
 /// Smallest alignment of a static object (a unit-level, `define` or
 /// `static` variable) in its data section, in bytes: the original
 /// compiler word-aligns byte variables there too, one to a word
@@ -121,6 +136,19 @@ struct RoutineCtx {
     level: u32,
     /// Bytes allocated below the frame pointer so far.
     frame: u32,
+    /// The frame objects the compiler makes (value parameters' copies, the
+    /// function result variable) that are not placed yet, in the order
+    /// they are taken up ([`Checker::alloc_local`]).
+    pending: Vec<(PendingObject, TypeId)>,
+}
+
+/// A frame object the compiler makes rather than the declarations.
+#[derive(Clone, Copy)]
+enum PendingObject {
+    /// The local copy of the routine's parameter with this index.
+    Copy(usize),
+    /// The function result variable.
+    Result(VarId),
 }
 
 /// A pointer type whose target was not yet declared (ref 3.13.1).
@@ -387,11 +415,19 @@ impl<'t> Checker<'t> {
     /// objects in the image's frames, all at even offsets, e.g.
     /// FILE_$REMOVE_WHEN_UNLOCKED 0xE5FC8E `pea (-2,A6)` in `link #-4`;
     /// 4-byte scalars keep their longword alignment, 659 lone longwords
-    /// all at 0 mod 4; `tools/framesurvey.py align`).
+    /// all at 0 mod 4; `tools/framesurvey.py align`).  An object of
+    /// [`FRAME_BIG_SIZE`] bytes or more is placed at a multiple of
+    /// [`FRAME_BIG_ALIGN`] (bead domain-pascal-1edl): declared locals,
+    /// value parameters' copies and the result variable alike.
     fn alloc_frame(&mut self, ty: TypeId) -> i32 {
         let (size, align) = {
             let i = self.types.get(ty);
             (i.size.max(1), i.align.max(FRAME_MIN_ALIGN))
+        };
+        let align = if size >= FRAME_BIG_SIZE {
+            align.max(FRAME_BIG_ALIGN)
+        } else {
+            align
         };
         let ctx = self
             .ctx
@@ -400,6 +436,52 @@ impl<'t> Checker<'t> {
         // Saturates; an oversized frame is reported by `routine_body`.
         ctx.frame = round_up(ctx.frame.saturating_add(size), align);
         -(ctx.frame as i32)
+    }
+
+    /// The frame bytes an object of type `ty` takes: its size, a byte
+    /// counting as the word it takes.
+    fn frame_bytes(&self, ty: TypeId) -> u32 {
+        self.types.get(ty).size.max(FRAME_MIN_ALIGN)
+    }
+
+    /// Allocate a declared local of type `ty` in the frame.  The objects
+    /// the compiler makes go in front of the first declared local that
+    /// takes fewer frame bytes than they do, or after all of them
+    /// ([`Checker::place_pending`]; bead domain-pascal-67c;
+    /// codegen-patterns 2, "Where the compiler's objects go", Uncertain).
+    /// NETBUF_$RTNVA 0xE0ED26 (`link #-8`): the 4-byte result variable
+    /// above the word token at (-6,A6); PKT_$NEXT_ID 0xE1248E (`link
+    /// #-4`): the word result below the word token at (-2,A6);
+    /// FILE_$SET_TYPE 0xE5E176 (`link #-0x40`): the 8-byte copy of
+    /// `type_uid` at -0x40, below the 0x34-byte local at -0x38.
+    fn alloc_local(&mut self, ty: TypeId) -> i32 {
+        let bytes = self.frame_bytes(ty);
+        self.place_pending(Some(bytes));
+        self.alloc_frame(ty)
+    }
+
+    /// Place the pending compiler objects that take more than `above`
+    /// frame bytes (all of them for None), the larger first, in the order
+    /// they were taken up among those of one size.
+    fn place_pending(&mut self, above: Option<u32>) {
+        let pending = std::mem::take(&mut self.ctx.last_mut().unwrap().pending);
+        let (mut now, later): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|&(_, ty)| above.is_none_or(|n| self.frame_bytes(ty) > n));
+        now.sort_by_key(|&(_, ty)| std::cmp::Reverse(self.frame_bytes(ty)));
+        let id = self.ctx.last().unwrap().id;
+        for (obj, ty) in now {
+            let offset = self.alloc_frame(ty);
+            match obj {
+                PendingObject::Copy(i) => {
+                    self.routines[id.0 as usize].params[i].copy_offset = Some(offset)
+                }
+                PendingObject::Result(var) => {
+                    self.vars[var.0 as usize].storage = Storage::Frame { offset }
+                }
+            }
+        }
+        self.ctx.last_mut().unwrap().pending = later;
     }
 
     /// Allocate `ty` in static data section `section`, in declaration
@@ -1791,7 +1873,7 @@ impl<'t> Checker<'t> {
                         }
                     } else {
                         Storage::Frame {
-                            offset: self.alloc_frame(ty),
+                            offset: self.alloc_local(ty),
                         }
                     }
                 }
@@ -2756,20 +2838,27 @@ impl<'t> Checker<'t> {
         } else {
             self.target.pointer_size()
         };
-        self.ctx.push(RoutineCtx { id, level, frame });
+        self.ctx.push(RoutineCtx {
+            id,
+            level,
+            frame,
+            pending: Vec::new(),
+        });
         self.scopes.push(Scope::default());
 
         // Frame order (codegen-patterns 2, "Frame size"): the slot above,
         // then local copies of value parameters (their place is
-        // Uncertain), then locals, and the function result variable last,
-        // below the locals (Uncertain, bead domain-pascal-67c: six sites
-        // whose link size forces it below a local, e.g. PKT_$NEXT_ID
-        // 0xE1248E, a word local at (-2,A6) in `link #-4', the result in
-        // D2, and PROC2_$GET_PID 0xE40CBA; against it NETBUF_$RTNVA
-        // 0xE0ED26, a token at (-6,A6) under a 4-byte result in `link
-        // #-8', and SIO_$I_ERR 0xE67D9C, the result in the middle).  The
-        // variable is created here, so that nested routines can name it,
-        // and placed after the declarations.
+        // Uncertain), then locals in declaration order, the function
+        // result variable in front of the first local smaller than it, or
+        // after them all (`alloc_local`; Uncertain, bead
+        // domain-pascal-67c: it fits the ten sites whose link size forces
+        // the order, below a local in PKT_$NEXT_ID 0xE1248E, a word local
+        // at (-2,A6) in `link #-4', the word result in D2, and
+        // PROC2_$GET_PID 0xE40CBA; above one in NETBUF_$RTNVA 0xE0ED26, a
+        // token at (-6,A6) under a 4-byte result in `link #-8'; in the
+        // middle in SIO_$I_ERR 0xE67D9C).  The variable is created here,
+        // so that nested routines can name it, and placed during or after
+        // the declarations.
         // A result through a hidden address is that address's object, at
         // the first argument offset, and takes no frame space
         // (ACL_$DEFAULT_ACL 0xE4787E `link #0`, its three assignments
@@ -2806,14 +2895,14 @@ impl<'t> Checker<'t> {
             None
         };
         let nparams = self.routines[id.0 as usize].params.len();
+        let mut pending = Vec::new();
         for i in 0..nparams {
             let (var, ty, copy) = {
                 let p = &self.routines[id.0 as usize].params[i];
                 (p.var, p.ty, p.conv.local_copy)
             };
             if copy {
-                let off = self.alloc_frame(ty);
-                self.routines[id.0 as usize].params[i].copy_offset = Some(off);
+                pending.push((PendingObject::Copy(i), ty));
             }
             let (name, span) = {
                 let v = &self.vars[var.0 as usize];
@@ -2821,14 +2910,23 @@ impl<'t> Checker<'t> {
             };
             self.declare(&ast::Ident { name, span }, Sym::Var(var));
         }
+        // The copies are taken up last parameter first: those of one size
+        // lie at rising addresses in parameter order (MSG_$SEND 0xE599FC:
+        // its six word copies at -0x34 .. -0x2A, parameter 2 lowest; the
+        // 17 routines with two or more entry copies, ../source's Pascal
+        // compiled with `-config sau2`, all agree, against 7 taking them
+        // in parameter order).  The result variable after them (its order
+        // among copies of its size is not seen).
+        pending.reverse();
+        if let Some((var, ty)) = result_var {
+            pending.push((PendingObject::Result(var), ty));
+        }
 
         let mut locals = Vec::new();
+        self.ctx.last_mut().unwrap().pending = pending;
         // Nested routines are recorded in Routine::nested by heading().
         self.decls(&body.decls, Some(id), &mut locals);
-        if let Some((var, ty)) = result_var {
-            let offset = self.alloc_frame(ty);
-            self.vars[var.0 as usize].storage = Storage::Frame { offset };
-        }
+        self.place_pending(None);
         let block = self.block(&body.block);
 
         self.scopes.pop();

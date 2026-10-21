@@ -242,14 +242,17 @@ fn local_copies_get_frame_slots() {
          begin l := x; end;",
     );
     let r = routine(&p, "p");
-    assert_eq!(r.params[0].copy_offset, Some(-2));
-    assert_eq!(r.params[1].copy_offset, Some(-12));
+    // The copies go in front of the first local smaller than they are
+    // (codegen-patterns 2, "Where the compiler's objects go"): y's above
+    // l, at a multiple of 8 (bead domain-pascal-1edl); x's after it.
+    assert_eq!(r.params[0].copy_offset, Some(-14));
+    assert_eq!(r.params[1].copy_offset, Some(-8));
     assert_eq!(r.params[2].copy_offset, None);
     assert_eq!(
         var(&p, "l").storage,
-        crate::program::Storage::Frame { offset: -16 }
+        crate::program::Storage::Frame { offset: -12 }
     );
-    assert_eq!(r.frame_size, 16);
+    assert_eq!(r.frame_size, 14);
 }
 
 /// The frame-size model of codegen-patterns 2 ("Frame size"): a 4-byte
@@ -375,10 +378,12 @@ fn frame_min_align_composites_and_copies() {
         .collect();
     assert_eq!(slots, vec![(8, 2, None), (10, 2, None)]);
     assert_eq!(var(&p, "x").storage, frame(-2));
-    // Default convention: by address, the callee's copy word aligned.
+    // Default convention: by address, the callee's copy word aligned,
+    // after the local of its own size (codegen-patterns 2, "Where the
+    // compiler's objects go").
     let r = routine(&p, "dflt");
-    assert_eq!(r.params[0].copy_offset, Some(-2));
-    assert_eq!(var(&p, "y").storage, frame(-4));
+    assert_eq!(r.params[0].copy_offset, Some(-4));
+    assert_eq!(var(&p, "y").storage, frame(-2));
     assert_eq!(r.frame_size, 4);
 }
 
@@ -429,6 +434,125 @@ fn frame_objects_do_not_overlap() {
         var(&p, "deep").storage,
         crate::program::Storage::Frame { offset: -6 }
     );
+}
+
+/// Frame objects of 8 bytes or more lie at multiples of 8 from the frame
+/// pointer (codegen-patterns 2, "Objects of 8 bytes or more at multiples
+/// of 8"; bead domain-pascal-1edl), smaller ones keep their type's
+/// alignment, and the total is not rounded to 8.
+#[test]
+fn frame_big_objects_8_aligned() {
+    let p = module(
+        "type value_t = record raw: array[1..16#34] of char end;
+              ec_t = record v, a, t: integer32 end;
+              q_t = record x: array[1..13] of integer end;
+              list_t = array[1..3] of integer32;
+              clock_t = record high: integer32; low: integer end;
+              six_t = array[1..6] of char;
+              uid_$t = record high, low: integer32 end;
+         procedure set_trouble; var value: value_t; begin end;
+         procedure i_wait; internal;
+         var ec: ec_t; q: q_t; l1, l2: list_t; c1, c2: clock_t;
+         begin end;
+         procedure mount; var rec: record r: array[1..16#32] of char end;
+           st: integer32; bst: integer32; flags: integer;
+         begin end;
+         function small: integer32; var w: integer; s: six_t; begin small := 0 end;
+         function uid_fn(n: integer): uid_$t; internal;
+         var u: uid_$t; begin uid_fn := u end;",
+    );
+    let frame = |off| crate::program::Storage::Frame { offset: off };
+    // FILE_$SET_TROUBLE 0xE5DC42: 0x34 bytes at -0x38, `link #-0x38`.
+    assert_eq!(var(&p, "value").storage, frame(-0x38));
+    assert_eq!(routine(&p, "set_trouble").frame_size, 0x38);
+    // tty_$i_wait 0xE1C204: below the reserved slot, -0x10, -0x30, -0x40,
+    // -0x50; the 6-byte clocks longword placed, -0x58 and -0x60.
+    let offs: Vec<_> = ["ec", "q", "l1", "l2", "c1", "c2"]
+        .iter()
+        .map(|n| var(&p, n).storage.clone())
+        .collect();
+    let want: Vec<_> = [-0x10, -0x30, -0x40, -0x50, -0x58, -0x60]
+        .into_iter()
+        .map(frame)
+        .collect();
+    assert_eq!(offs, want);
+    // VTOC_$MOUNT 0xE38658 (`link #-0x4c`): the 0x32-byte record at
+    // -0x38, the statuses below it longword placed; the total is a
+    // multiple of 4, not of 8.
+    assert_eq!(var(&p, "rec").storage, frame(-0x38));
+    assert_eq!(var(&p, "st").storage, frame(-0x3c));
+    assert_eq!(var(&p, "bst").storage, frame(-0x40));
+    assert_eq!(routine(&p, "mount").frame_size, 0x42);
+    // A 6-byte array of char stays word aligned (WIN_$CINIT 0xE30340:
+    // the address (-0xA,A6) passed under a longword at -4); here the
+    // result variable goes above the word local.
+    assert_eq!(var(&p, "s").storage, frame(-12));
+    // The module-local 0xE4232A (`link #-16`): an 8-byte local at -0x10
+    // below the reserved slot.
+    assert_eq!(var(&p, "u").storage, frame(-0x10));
+}
+
+/// The objects the compiler makes, value parameters' copies and the
+/// function result variable, go in front of the first declared local
+/// that takes fewer frame bytes than they do, or after all of them; the
+/// larger first, and the copies of one size at rising addresses in
+/// parameter order (codegen-patterns 2, "Where the compiler's objects
+/// go"; bead domain-pascal-67c).
+#[test]
+fn compiler_objects_before_smaller_locals() {
+    let p = module(
+        "type uid_$t = record high, low: integer32 end;
+              opts_t = record a, b, c: integer32; d: integer end;
+              tmpl_t = record w: array[1..15] of integer end;
+              v_t = record raw: array[1..16#34] of char end;
+         function rtnva: integer32; var token: integer;
+         begin rtnva := 0 end;
+         function next_id: integer; var token2: integer;
+         begin next_id := 0 end;
+         function get_pid: integer; var st: integer32; ix: integer;
+         begin get_pid := 0 end;
+         procedure send(a: integer32; b, c, d: integer);
+         var tmpl: tmpl_t; l: integer32; begin end;
+         procedure ptrace(u: uid_$t; o: opts_t); var n: integer32; begin end;
+         procedure set_type(t: uid_$t); var value: v_t; begin end;",
+    );
+    let frame = |off| crate::program::Storage::Frame { offset: off };
+    let res = |name: &str| {
+        let r = routine(&p, name);
+        p.var(r.result.as_ref().unwrap().var.unwrap())
+            .storage
+            .clone()
+    };
+    let copies = |name: &str| -> Vec<Option<i32>> {
+        routine(&p, name)
+            .params
+            .iter()
+            .map(|q| q.copy_offset)
+            .collect()
+    };
+    // NETBUF_$RTNVA 0xE0ED26: the 4-byte result above the word token.
+    assert_eq!(res("rtnva"), frame(-4));
+    assert_eq!(var(&p, "token").storage, frame(-6));
+    // PKT_$NEXT_ID 0xE1248E: a word result below the word token.
+    assert_eq!(var(&p, "token2").storage, frame(-2));
+    assert_eq!(res("next_id"), frame(-4));
+    // PROC2_$GET_PID 0xE40CBA: status, index, the word result last.
+    assert_eq!(res("get_pid"), frame(-8));
+    // MSG_$SEND 0xE599FC: after the locals, the longword's copy, then the
+    // words', parameter 2 lowest.
+    assert_eq!(var(&p, "tmpl").storage, frame(-0x20));
+    assert_eq!(var(&p, "l").storage, frame(-0x24));
+    assert_eq!(
+        copies("send"),
+        vec![Some(-0x28), Some(-0x2e), Some(-0x2c), Some(-0x2a)]
+    );
+    // XPD_$SET_PTRACE_OPTS 0xE5AF9E: the 14-byte copy at -0x10, the
+    // UID's at -0x18, both above the longword local at -0x1C.
+    assert_eq!(copies("ptrace"), vec![Some(-0x18), Some(-0x10)]);
+    assert_eq!(var(&p, "n").storage, frame(-0x1c));
+    // FILE_$SET_TYPE 0xE5E176: the UID's copy below the 0x34-byte local.
+    assert_eq!(var(&p, "value").storage, frame(-0x38));
+    assert_eq!(copies("set_type"), vec![Some(-0x40)]);
 }
 
 // --- Function results (codegen-patterns 3; ref 5.5.10, 5.5.11) ----------

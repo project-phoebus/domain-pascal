@@ -30,13 +30,13 @@ lea (.Ldata).l,%a5
 pea (%a5)
 jsr (ML_$SPIN_LOCK).l
 addq.w #4,%sp
-move.w %d0,(-2,%fp)
+move.w %d0,(-6,%fp)
 move.l (8,%fp),-(%sp)
 jsr (WORKER).l
 addq.w #4,%sp
 move.l %d0,%d2
 subq.l #2,%sp
-move.w (-2,%fp),-(%sp)
+move.w (-6,%fp),-(%sp)
 pea (%a5)
 jsr (ML_$SPIN_UNLOCK).l
 move.l %d2,%d0

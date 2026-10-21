@@ -4,14 +4,14 @@ VC_$SCALARS:
 link.w %fp,#-8
 pea (%a2)
 movea.l (8,%fp),%a0
-move.b (%a0),(-2,%fp)
+move.b (%a0),(-8,%fp)
 movea.l (0xc,%fp),%a1
-move.w (%a1),(-4,%fp)
+move.w (%a1),(-6,%fp)
 movea.l (0x10,%fp),%a2
-move.l (%a2),(-8,%fp)
-move.l (-8,%fp),-(%sp)
-move.w (-4,%fp),-(%sp)
-move.b (-2,%fp),-(%sp)
+move.l (%a2),(-4,%fp)
+move.l (-4,%fp),-(%sp)
+move.w (-6,%fp),-(%sp)
+move.b (-8,%fp),-(%sp)
 jsr (VC_$TAKE).l
 movea.l (-0xc,%fp),%a2
 unlk %fp
@@ -76,20 +76,20 @@ rts
 VC_$BLOCKS:
 link.w %fp,#-0x28
 movea.l (8,%fp),%a0
-lea (-0x10,%fp),%a1
+lea (-0x28,%fp),%a1
 move.l (%a0)+,(%a1)+
 move.l (%a0)+,(%a1)+
 move.l (%a0)+,(%a1)+
 move.w (%a0)+,(%a1)+
 movea.l (0xc,%fp),%a0
-lea (-0x28,%fp),%a1
+lea (-0x18,%fp),%a1
 moveq #5,%d0
 .balignw 4,0x2048
 1:
 move.l (%a0)+,(%a1)+
 dbf %d0,1b
+pea (-0x18,%fp)
 pea (-0x28,%fp)
-pea (-0x10,%fp)
 jsr (VC_$OPTS_OP).l
 unlk %fp
 rts

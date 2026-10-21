@@ -63,7 +63,7 @@ procedure use_opt(var o: opt_t); extern;
 procedure open;
 var
   pad: array [1..18] of integer;
-  opt: opt_t;                          { -40 }
+  opt: opt_t;                          { -44: the pad 8-aligned above it }
 begin
   opt.socket := 1176;
   opt.flags := -1022;

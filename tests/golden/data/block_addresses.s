@@ -24,9 +24,9 @@ unlk %fp
 rts
 .globl PUT_BIG
 PUT_BIG:
-link.w %fp,#-0x20c
-clr.l (-0x20c,%fp)
-lea (-0x20c,%fp),%a0
+link.w %fp,#-0x210
+clr.l (-0x210,%fp)
+lea (-0x210,%fp),%a0
 movea.l #OTHER_BIG,%a1
 move.w #0x82,%d0
 .balignw 4,0x2048

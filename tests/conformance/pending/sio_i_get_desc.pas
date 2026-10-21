@@ -18,12 +18,12 @@
   - 8    the element offset `real_line * 0x38' as 64x - 8x (0xE667E8).
 
   Pending: dpc compiles it, and the slot store and reload match the
-  image, but two things differ (tools/conform.py check --routine
-  SIO_$I_GET_DESC:56): the element offset is computed again for the
-  assignment (0xE66808 reuses D0 and A0 from the test; bead
-  domain-pascal-gg57), and the result variable is at -8, below
-  real_line's slot (-2), where the image has it at -4, above real_line
-  at -6 (codegen-patterns 2, "Frame size": its place is Uncertain).
+  image, but the element offset is computed again for the assignment
+  (tools/conform.py check --routine SIO_$I_GET_DESC:56; 0xE66808 reuses
+  D0 and A0 from the test; bead domain-pascal-gg57).  The result
+  variable is at -4, above real_line's slot (-6), as in the image
+  (codegen-patterns 2, "Where the compiler's objects go"; bead
+  domain-pascal-67c).
   Its manifest line would be `tests/conformance/pending/sio_i_get_desc.pas
   SIO_$I_GET_DESC:56'.
 

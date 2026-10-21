@@ -66,7 +66,7 @@ unlk %fp
 rts
 .globl SMALL
 SMALL:
-link.w %fp,#-0x24
+link.w %fp,#-0x30
 lea (-0x10,%fp),%a0
 lea (-8,%fp),%a1
 moveq #7,%d0
@@ -74,8 +74,8 @@ moveq #7,%d0
 1:
 move.b (%a0)+,(%a1)+
 dbf %d0,1b
-lea (-0x24,%fp),%a0
-lea (-0x1a,%fp),%a1
+lea (-0x30,%fp),%a0
+lea (-0x20,%fp),%a1
 moveq #9,%d0
 .balignw 4,0x2048
 2:

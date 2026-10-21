@@ -12,15 +12,15 @@ movea.l (-4,%fp),%a5
 unlk %fp
 rts
 FROM_LOCAL:
-link.w %fp,#-0xc
+link.w %fp,#-0x10
 move.w (0xc,%fp),%d0
 movea.l #UID_$NIL,%a0
+move.l (%a0)+,(-0x10,%fp)
 move.l (%a0)+,(-0xc,%fp)
-move.l (%a0)+,(-8,%fp)
 move.w %d0,%d1
 ext.l %d1
-move.l %d1,(-8,%fp)
-lea (-0xc,%fp),%a0
+move.l %d1,(-0xc,%fp)
+lea (-0x10,%fp),%a0
 movea.l (8,%fp),%a1
 move.l (%a0)+,(%a1)
 move.l (%a0)+,(4,%a1)
