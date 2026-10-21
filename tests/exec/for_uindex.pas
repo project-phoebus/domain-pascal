@@ -328,9 +328,12 @@ var
     exec_$logv_l(cnt);
   end;
 
+  { `<> 0', not `> 0': a pinteger against 0 takes the original
+    compiler's signed condition, which counts 16#8000..16#FFFF as below
+    0 (bead domain-pascal-wkm5; exec test top_bit_zero). }
   procedure forui_idx;
   begin
-    if j > 0 then
+    if j <> 0 then
       cnt := cnt + 1;
   end;
 
