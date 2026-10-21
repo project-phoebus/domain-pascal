@@ -579,7 +579,13 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     "Signedness", with image sites).  Not changed: 2-byte `integer16`
     subranges such as `0..100`, and booleans, which the same sentence
     calls unsigned: the image cannot tell which words had such types, so
-    the code for them is not settled (bead domain-pascal-4x2).*
+    the code for them is not settled (bead domain-pascal-4x2).  The
+    ruling is for 4-byte subranges; `for` guards of an `integer` index
+    against `0..65535` (`pinteger`) bounds (question 47, bead
+    domain-pascal-3iws) apply the same 4.3.3 rule to 2-byte unsigned
+    words, relying on dpc-ir's existing treatment of `0..65535` (a
+    subrange of `integer32` stored in 2 bytes) as unsigned, not on this
+    ruling.*
 
 Raised by the front-end corpus test (bead domain-pascal-qia,
 `tools/corpus.py`: `dpc --check-only` over Apollo's SR10.2 inserts and
@@ -851,7 +857,15 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `integer` -1 runs 65536 passes), except a `0..2147483647` index
     against a signed longword, compared signed.  Word indices held in a
     register, signed, are unchanged (the bound narrowed as an assignment
-    narrows it).  A run-time lower bound (bead domain-pascal-sq4a,
+    narrows it), except against unsigned-word bounds (bead
+    domain-pascal-3iws): an `integer` index whose run-time bounds are all
+    unsigned words (`0..65535`, `pinteger`) and whose constant bound is
+    non-negative is guarded unsigned (ref 4.3.3; question 32), as the
+    image's flp_format_track 0xE3DC9E (`tst.w; beq`), so `for i := 1 to
+    n` with n = 40000 runs 40000 passes; a bound computed from unsigned
+    words whose value may leave the word (`n - 1`, `a + 1`) is kept at 32
+    bits and compared there; from a negative constant the guard stays
+    signed (codegen-patterns 7.4).  A run-time lower bound (bead domain-pascal-sq4a,
     codegen-patterns 7.4 "Run-time lower bounds") takes the same path:
     `sub.w from,T; bcs` for a `0..65535` index, so `for i := lo to k - 1`
     with lo = 0 and an `integer` k of 0 also runs 65536 passes.*  Awaiting

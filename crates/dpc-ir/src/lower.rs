@@ -4344,6 +4344,13 @@ impl Cx<'_> {
             return Err(unsupported(var.span, "a boolean `for` index variable is"));
         }
         let ty = scalar_of_type(&p.types, vty, width);
+        // The constant lower bound of a loop counting up, for the
+        // selector's fold of `to = x - c` below.
+        let up_from = match (&from.value, dir) {
+            (Some(c), ForDir::To) => c.ordinal(),
+            _ => None,
+        };
+        let is_to = |e: &SExpr| std::ptr::eq(e, to);
         let bound = |e: &SExpr| -> Res<Expr> {
             match &e.value {
                 Some(c) => const_of(c, ty, e.span),
@@ -4382,6 +4389,33 @@ impl Cx<'_> {
                 // assignment (`store`).
                 None => {
                     let v = value_of(p, e)?;
+                    // A signed word index (held in a register) to a bound
+                    // computed from unsigned words (`n - 1`, `a + 1` of a
+                    // `pinteger`, an `integer32` computation of words):
+                    // kept at its own width, as for the other index kinds
+                    // above, so that the guard and the count are computed
+                    // in a type holding its value (`Selector::for_wide`,
+                    // `for_domain`) and `for i := 32767 to n - 1` or `for
+                    // i := n - 1 downto 0` run their passes, `a + 1 to b`
+                    // with a = 65535 none (bead domain-pascal-3iws).
+                    // Except `to = x - c` of an unsigned word variable from
+                    // a constant the selector folds `c` into exactly
+                    // (`subq.w #k; bcs`, `Selector::for_`).  Best effort:
+                    // no site looked at.
+                    if ty.is_signed()
+                        && home.is_none()
+                        && v.ty().width == Width::Long
+                        && unsigned_word_arith(&v)
+                        && !(is_to(e) && folds_exactly(&v, up_from))
+                    {
+                        best_effort(
+                            e.span,
+                            "a `for` bound computed from unsigned words for a signed word index \
+                             (computed at its own width, the guard and the count there: no site \
+                             looked at, codegen-patterns 7.4) is",
+                        )?;
+                        return Ok(v);
+                    }
                     if v.ty().width == Width::Word {
                         Ok(v)
                     } else if v.ty().bytes() < 2 && p.types.is_integer(e.ty) {
@@ -9566,6 +9600,116 @@ fn transfer_view(p: &Program, e: &SExpr, x: &SExpr) -> Res<()> {
         ));
     }
     Ok(())
+}
+
+/// Whether `v`, a longword value, is computed from words only, one of
+/// them unsigned, and may lie outside -32768..32767 (a `pinteger`
+/// variable's `n - 1` or `a + 1`, but not `n div 2`, whose low word is its
+/// value; `for` bounds, bead domain-pascal-3iws): every variable it reads
+/// is a word or a byte, it is an operation (not a variable read or a
+/// constant), and the interval its operations give it (a range not
+/// known counting as not fitting) leaves the signed word's.
+fn unsigned_word_arith(v: &Expr) -> bool {
+    fn leaves(e: &Expr, unsigned: &mut bool) -> bool {
+        match e {
+            Expr::Const { .. } => true,
+            Expr::Load { ty, .. } => {
+                if ty.width == Width::Word && !ty.is_signed() && !ty.pointer {
+                    *unsigned = true;
+                }
+                ty.bytes() <= 2
+            }
+            // A function result or a packed field, by its type's
+            // width (as a variable).
+            Expr::Call { ty, .. } | Expr::Bits { ty, .. } => {
+                if ty.width == Width::Word && !ty.is_signed() && !ty.pointer {
+                    *unsigned = true;
+                }
+                ty.bytes() <= 2 && !ty.pointer
+            }
+            Expr::Convert { value, .. } => leaves(value, unsigned),
+            Expr::Unary { operand, .. } => leaves(operand, unsigned),
+            Expr::Binary { lhs, rhs, .. } => leaves(lhs, unsigned) && leaves(rhs, unsigned),
+            _ => false,
+        }
+    }
+    fn range(e: &Expr) -> Option<(i64, i64)> {
+        match e {
+            Expr::Const { value, .. } => Some((*value, *value)),
+            Expr::Load { ty, .. } | Expr::Call { ty, .. } | Expr::Bits { ty, .. } => {
+                let bits = ty.bytes() as u32 * 8;
+                Some(if ty.is_signed() {
+                    (-(1i64 << (bits - 1)), (1i64 << (bits - 1)) - 1)
+                } else {
+                    (0, (1i64 << bits) - 1)
+                })
+            }
+            Expr::Convert { value, ty, .. } if ty.bytes() >= value.ty().bytes() => range(value),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let (a, b) = (range(lhs)?, range(rhs)?);
+                // Checked: an overflow is a range not known.
+                match op {
+                    IrBinOp::Add => Some((a.0.checked_add(b.0)?, a.1.checked_add(b.1)?)),
+                    IrBinOp::Sub => Some((a.0.checked_sub(b.1)?, a.1.checked_sub(b.0)?)),
+                    IrBinOp::Mul => {
+                        let p = [
+                            a.0.checked_mul(b.0)?,
+                            a.0.checked_mul(b.1)?,
+                            a.1.checked_mul(b.0)?,
+                            a.1.checked_mul(b.1)?,
+                        ];
+                        Some((*p.iter().min()?, *p.iter().max()?))
+                    }
+                    IrBinOp::Div if b.0 == b.1 && b.0 > 0 => Some((a.0 / b.0, a.1 / b.0)),
+                    IrBinOp::And if b.0 == b.1 && b.0 >= 0 && a.0 >= 0 => Some((0, b.0.min(a.1))),
+                    IrBinOp::Shr if b.0 == b.1 && (0..32).contains(&b.0) && a.0 >= 0 => {
+                        Some((a.0 >> b.0, a.1 >> b.0))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    let mut unsigned = false;
+    matches!(v, Expr::Binary { .. } | Expr::Unary { .. })
+        && leaves(v, &mut unsigned)
+        && unsigned
+        && !range(v).is_some_and(|(lo, hi)| lo >= -0x8000 && hi <= 0x7fff)
+}
+
+/// Whether the selector folds the `for` bound `to = x - c` (`v`, before
+/// narrowing) into its count exactly from the constant `from`
+/// (`Selector::for_`: `x` an unsigned word variable, `c >= 1`, `from` 0 or
+/// 1 or `from + c` within a word; then `subq.w #from + c; bcs`).
+fn folds_exactly(v: &Expr, from: Option<i64>) -> bool {
+    let Some(from) = from else { return false };
+    let Expr::Binary {
+        op: IrBinOp::Sub,
+        lhs,
+        rhs,
+        ..
+    } = v
+    else {
+        return false;
+    };
+    let x = match &**lhs {
+        Expr::Convert { value, .. } => &**value,
+        x => x,
+    };
+    let unsigned_var = matches!(x, Expr::Load { ty, .. }
+        if ty.width == Width::Word && !ty.is_signed() && !ty.pointer);
+    match &**rhs {
+        // `c` within a word: the selector sees it narrowed, and a larger
+        // one would wrap negative (no fold, a signed guard).
+        Expr::Const { value: c, .. } => {
+            unsigned_var
+                && (1..=0x7fff).contains(c)
+                && from >= 0
+                && ((0..=1).contains(&from) || from + c <= 0x7fff)
+        }
+        _ => false,
+    }
 }
 
 /// The index `ix` (the value of `index`, a word) of an element of an

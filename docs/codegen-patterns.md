@@ -9331,6 +9331,73 @@ is ../source's reconstruction), except a `0..2147483647` index with a
 signed longword bound, compared signed (the type holding both).  Best
 effort (not byte-identical): no site looked at for the wider bounds.
 
+A signed word index (`integer`) whose run-time bounds are all unsigned
+words (`pinteger`, a `0..65535`-style subrange), any constant bound
+non-negative, is guarded unsigned (bead domain-pascal-3iws): `from <=
+to` compares an unsigned run-time value with a constant of the positive
+subrange, or two unsigned values, unsigned (ref 4.3.3, pp. 4-6..4-7, the
+rule question 32 of reference-clarifications records for 4-byte
+subranges; dpc-ir already takes `0..65535` as unsigned, bead 4x2).
+Image sites (types as ../source reconstructs them):
+
+- from 1: flp_format_track 0xE3DC9E..0xE3DCA8 `tst.w (0x20,A0); beq.b;
+  move.w (0x20,A0),D0; subq.w #1,D0` for `for sector := 1 to
+  vol.sec_per_track`, an `integer` index to a `pinteger` field (the
+  unsigned counts' form above).  dpc: `tst.w` of the bound's operand
+  where it is (a register or memory), `beq`, the load, `subq.w #1`, the
+  load and the `subq.w` kept adjacent (one scheduling unit; also
+  disk_$pv_mount_internal 0xE6C54A..0xE6C54C).  A
+  volatile bound (ref 3.15.1, p. 3-56) is loaded once and tested in the
+  register (best effort, no site).
+- from 0: no guard (`0 <= n` always holds): DIR_$DO_OP_FIX_DIR
+  0xE53AE0..0xE53AEA, ASKNODE_$INTERNET_INFO 0xE6533E..0xE6534E (`move.w
+  (8,A1),D0; ...; dbf D0`).  dpc: the count copied, no test (best
+  effort).
+- from another constant k: `cmpi.w #k,<bound>; bcs`, then the load and
+  `subq.w #k` (OSINFO_$GET_MMAP 0xE5C9AC `cmpi.w #5,(abs).l; bcs; move.w
+  (abs).l,D0; ...; subq.w #5,D0`; disk_$pv_mount_internal 0xE6C542
+  `cmpi.w #2,D7; bcs.w; move.w D7,D1; subq.w #2,D1`).  dpc: that form.
+  To `x - c` the image computes `x - c` first and compares that
+  (mmap_$add_pages_to_wsl 0xE0C608..0xE0C612 `move.w D2,D0; subq.w #1,D0;
+  cmpi.w #2,D0; bcs; subq.w #2,D0`, which runs 65534 passes for x = 0);
+  dpc folds `c` into k as for a signed bound (`cmpi.w #k`, exact; best
+  effort).
+- signed forms despite a `pinteger` bound in ../source: name_$validate_leaf
+  0xE54478 `subq.w #2,D1; move.w D1,D0; bmi`; ROUTE_$INCOMING 0xE8796C
+  `move.w (A2),D1; subq.w #5,D1; bmi`; area_$alloc_resources 0xE0765E
+  `sub.w D4,D0; bmi` and 0xE076BE `subq.w #1,D0; sub.w D4,D0; bmi`.
+  Either ../source's types there or the rule differs (not settled); dpc
+  now emits the unsigned forms at them.
+
+A run-time `lo` (both bounds unsigned) is guarded `sub.w lo,T; bcs`
+(best effort), `downto` (`for_wide`) `bcs`.  A bound computed from
+unsigned words whose value may leave -32768..32767 (`n - 1`, `a + 1`;
+not `n div 2`, LOG_$READ's worker 0xE177DC `subq.w #1; bmi` for `1 to
+actual_len div 2`) is kept at 32 bits by `dpc-ir` and the loop computed
+in `for_wide`'s longword domain, so `for i := 32767 to n - 1`, `n - 1
+downto 0`, `a to b - 1` and `a + 1 to b` run exactly their passes (best
+effort, no site looked at); a function result or a packed field counts
+by its type's width as a variable does, and a range that overflows 64
+bits as not fitting; `to x - c` of an unsigned word variable from a
+constant, c in 1..32767, stays the fold above (a larger c is widened).
+Run-time bounds that mix an unsigned word with a signed value (`a to
+n`, a: `0..65535`, n: `integer`) fit no word type: `for_domain` takes
+the signed longword and the loop goes through `for_wide` (best effort).
+The image does not: it keeps a word-sized signed guard at both mixed
+sites looked at, ast_$read_area_pages 0xE02C00..06 (`for i :=
+pages_read + 1 to allocated`, integer to pinteger: `move.w D3,D0; addq.w
+#1,D1; sub.w D1,D0; bmi`) and AST_$PURIFY 0xE05782 (`sub.w
+(-194,A6),D0; bmi`); either ../source's types differ from the
+original's there or the original compared mixed bounds as signed words
+(exact only while both fit 0..32767).  dpc keeps the exact longword
+loop (correct code first); bead domain-pascal-3iws, a fidelity question
+for the owner.  The signed `subq.w; bmi` ran no pass
+for a bound above 16#7FFF.  From a negative constant the guard stays
+signed (`subq`/`addq`, `blt`): exact while the bound is at most 32767,
+and an unsigned compare would skip small bounds (`-1 <= 5` holds); a
+bound above 16#7FFF there runs no pass (not changed).  Exec test
+`tests/exec/for_ubound.pas`.
+
 An unsigned word index held in a register, from a constant up to a
 run-time bound, takes this form too (best effort, not byte-identical: the
 image's, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028 `tst.w; beq` before the

@@ -5414,6 +5414,7 @@ fn for_wide_loop(l: &ForLoop) -> bool {
         || [&l.from, &l.to]
             .iter()
             .any(|e| !matches!(e, Expr::Const { .. }) && e.ty().bytes() > l.index.ty.bytes())
+        || for_domain(l.index.ty, &l.from, &l.to).width != l.index.ty.width
 }
 
 /// The type [`Selector::for_wide`] computes a `for` loop's guard and count
@@ -5426,7 +5427,12 @@ fn for_wide_loop(l: &ForLoop) -> bool {
 ///   image guards a `0..65535` index against an `integer` bound unsigned
 ///   (PCHIST_$CNTL's nested 0xE5CD1A `tst.w; beq`).  Except an unsigned
 ///   longword index (`0..2147483647`, all of whose values a signed
-///   longword holds) with a signed bound: signed.
+///   longword holds) with a signed bound: signed; and a signed word index
+///   whose run-time bound is an unsigned word, the other bound a
+///   non-negative constant: unsigned (ref 4.3.3, pp. 4-6..4-7, an unsigned
+///   run-time value against a constant of the positive subrange;
+///   flp_format_track 0xE3DC9E, [`Selector::for_`]; bead
+///   domain-pascal-3iws).
 /// - Otherwise the widest bound's width, unsigned when the index and the
 ///   bounds all are, else signed, a longword when an unsigned type of
 ///   that width would not fit (best effort: no site looked at).
@@ -5442,6 +5448,28 @@ fn for_domain(index: Scalar, from: &Expr, to: &Expr) -> Scalar {
         .fold(index.width, |a, b| if b.bytes() > a.bytes() { b } else { a });
     let any_signed = index.is_signed() || bounds.iter().any(|t| t.is_signed());
     if width == index.width {
+        let unsigned_bound = width == Width::Word
+            && index.is_signed()
+            && !bounds.is_empty()
+            && bounds.iter().all(|t| !t.is_signed() && !t.pointer)
+            && [from, to].into_iter().all(|e| match e {
+                Expr::Const { value, .. } => *value >= 0,
+                _ => true,
+            });
+        if unsigned_bound {
+            return Scalar::unsigned(Width::Word);
+        }
+        // A signed word index whose run-time bounds mix an unsigned word
+        // with a signed value (`a to n`, a: `0..65535`, n: `integer`): no
+        // word type holds both, so the longword (bead
+        // domain-pascal-3iws; best effort, no site looked at).
+        if width == Width::Word
+            && index.is_signed()
+            && bounds.iter().any(|t| !t.is_signed() && !t.pointer)
+            && bounds.iter().any(|t| t.is_signed())
+        {
+            return Scalar::signed(Width::Long);
+        }
         return if width == Width::Long && any_signed {
             Scalar::signed(Width::Long)
         } else {
@@ -9191,10 +9219,39 @@ impl Selector {
                     e => (e, 0),
                 };
                 let k = from + c;
+                // An unsigned word bound (`pinteger`, a `0..65535`-style
+                // subrange) from a non-negative constant: `from <= to`
+                // compares an unsigned run-time value with a constant of
+                // the positive subrange, unsigned (ref 4.3.3, pp. 4-6..4-7;
+                // reference-clarifications question 32), so the guard is
+                // unsigned and a bound above 16#7FFF runs its passes as the
+                // image's do: flp_format_track 0xE3DC9E..0xE3DCA8 `tst.w
+                // (0x20,A0); beq.b; move.w (0x20,A0),D0; subq.w #1,D0`, an
+                // `integer` index to a `pinteger` field (bead
+                // domain-pascal-3iws).  The signed `subq.w; bmi` would run
+                // no pass for such a bound.
+                let unsigned_to = from >= 0 && {
+                    let t = e.ty();
+                    t.width == Width::Word && !t.is_signed() && !t.pointer
+                };
                 let count = if k == 0 {
-                    self.for_count_tested(e, exit, &mut setup)?
+                    self.for_count_tested(e, exit, &mut setup, !unsigned_to)?
                 } else {
-                    if !(0..=1).contains(&from) {
+                    if unsigned_to && c != 0 {
+                        // The image computes `x - c` first and compares
+                        // that (mmap_$add_pages_to_wsl 0xE0C608..0xE0C612
+                        // `move.w D2,D0; subq.w #1,D0; cmpi.w #2,D0; bcs;
+                        // subq.w #2,D0`, which runs 65534 passes for x =
+                        // 0): `c` folded here, as for a signed bound.
+                        best_effort(
+                            span,
+                            "a `for` loop over a signed word index to an unsigned word bound \
+                             less a constant (`c` folded into the guard; the image computes \
+                             `x - c` first, mmap_$add_pages_to_wsl 0xE0C608; codegen-patterns \
+                             7.4) is",
+                        )?;
+                    }
+                    if !unsigned_to && !(0..=1).contains(&from) {
                         // Best effort (bead domain-pascal-trdz): the count's
                         // copy as from 1 below, guarded with `blt` (exact for
                         // every `to`, as sq4a's run-time `from`; the image's
@@ -9211,7 +9268,54 @@ impl Selector {
                         )?;
                     }
                     let calls = stmts_call(&l.body);
-                    let v = self.eval(e)?;
+                    let mut v = self.eval(e)?;
+                    // An unsigned bound from 1 (above): `tst.w; beq`, then
+                    // the count `to - 1` (flp_format_track 0xE3DC9E).  A
+                    // volatile bound is read once (ref 3.15.1, p. 3-56:
+                    // every reference reads it), into the count's register
+                    // first and tested there (best effort: no site).
+                    if unsigned_to && k >= 1 && matches!(v, Val::Mem(_)) {
+                        let mut volatile = false;
+                        walk_expr(e, &mut |n| {
+                            if matches!(n, Node::Addr(Addr::Volatile { .. })) {
+                                volatile = true;
+                            }
+                        });
+                        if volatile {
+                            v = Val::Tmp(self.in_tmp(v, Width::Word)?);
+                        }
+                    }
+                    // From another constant k: `cmpi.w #k; bcs` (OSINFO_$GET_MMAP
+                    // 0xE5C9AC `cmpi.w #5,(abs).l; bcs; move.w (abs).l,D0;
+                    // ...; subq.w #5,D0`; disk_$pv_mount_internal 0xE6C542
+                    // `cmpi.w #2,D7; bcs.w; move.w D7,D1; subq.w #2,D1`).
+                    let tested = unsigned_to && k >= 1 && {
+                        let ea = match &v {
+                            Val::Tmp(d) | Val::Reg(Reg::D(d)) => Some(Ea::Reg(Reg::D(*d))),
+                            Val::Mem(ea) => Some(ea.clone()),
+                            _ => None,
+                        };
+                        match ea {
+                            Some(ea) if k == 1 => {
+                                self.out.push(Insn::Tst {
+                                    size: Size::W,
+                                    dst: ea,
+                                });
+                                self.jump(Cond::Eq, exit);
+                                true
+                            }
+                            Some(ea) if k <= 0x7fff => {
+                                self.out.push(Insn::Cmpi {
+                                    size: Size::W,
+                                    imm: k,
+                                    dst: ea,
+                                });
+                                self.jump(Cond::Cs, exit);
+                                true
+                            }
+                            _ => false,
+                        }
+                    };
                     // Without a call, only a bound variable held in a data
                     // register is surveyed with a copy below the count: it
                     // dies at `move.w Dv,T` and the counter takes it back
@@ -9232,10 +9336,12 @@ impl Selector {
                              is",
                         )?;
                     }
+                    let load_at = self.out.len();
                     let t = match v {
                         Val::Tmp(d) => d,
                         v => self.in_tmp(v, Width::Word)?,
                     };
+                    let loaded = self.out.len() == load_at + 1;
                     self.out.push(match k {
                         1..=8 => Insn::Subq {
                             size: Size::W,
@@ -9257,10 +9363,28 @@ impl Selector {
                             dst: Ea::Reg(Reg::D(t)),
                         },
                     });
+                    // The tested form's load and `subq.w #k` stay adjacent,
+                    // one scheduling unit (flp_format_track 0xE3DCA4..0xE3DCA8,
+                    // disk_$pv_mount_internal 0xE6C54A..0xE6C54C).
+                    if tested && loaded {
+                        self.units.push((load_at, self.out.len()));
+                    }
                     // From 0 or 1 the image's `bmi` (its edge, a `to` of
                     // -32768 less `c` wrapping, is the original's).
                     let exact = !(0..=1).contains(&from);
-                    self.jump(if exact { Cond::Lt } else { Cond::Mi }, exit);
+                    if !tested {
+                        // An unsigned bound: `bcs`, `to < k` unsigned.
+                        self.jump(
+                            if unsigned_to {
+                                Cond::Cs
+                            } else if exact {
+                                Cond::Lt
+                            } else {
+                                Cond::Mi
+                            },
+                            exit,
+                        );
+                    }
                     let c = self.alloc_d()?;
                     setup.push(self.out.len());
                     if !calls {
@@ -9354,7 +9478,9 @@ impl Selector {
                     src: fea.clone(),
                     dst: t,
                 });
-                let signed = l.index.ty.is_signed();
+                // Unsigned for an unsigned index, or for unsigned bounds
+                // ([`for_domain`]; bead domain-pascal-3iws).
+                let signed = for_domain(l.index.ty, &l.from, &l.to).is_signed();
                 self.jump(if signed { Cond::Lt } else { Cond::Cs }, exit);
                 let c = self.alloc_d()?;
                 setup.push(self.out.len());
@@ -10009,7 +10135,25 @@ impl Selector {
     /// (not surveyed); a bound other than a variable (the guard of an
     /// expression's value not surveyed).  `tst.w; bmi` skips the loop
     /// exactly when `to < 0`, whatever the bound.
-    fn for_count_tested(&mut self, to: &Expr, exit: u32, setup: &mut Vec<usize>) -> Res<u8> {
+    ///
+    /// `signed` false: an unsigned bound (from 0, `0 <= to` always holds,
+    /// ref 4.3.3, pp. 4-6..4-7; bead domain-pascal-3iws): no guard, the
+    /// count copied as above.  Best effort (not byte-identical): no site
+    /// looked at.
+    fn for_count_tested(
+        &mut self,
+        to: &Expr,
+        exit: u32,
+        setup: &mut Vec<usize>,
+        signed: bool,
+    ) -> Res<u8> {
+        if !signed {
+            best_effort(
+                self.span,
+                "a `for` loop over a signed word index from 0 to an unsigned word bound (no \
+                 guard; no site looked at, codegen-patterns 7.4) is",
+            )?;
+        }
         let static_ = match to {
             Expr::Load {
                 addr: Addr::Static(_),
@@ -10066,11 +10210,13 @@ impl Selector {
                 }
             }
         };
-        self.out.push(Insn::Tst {
-            size: Size::W,
-            dst: Ea::Reg(Reg::D(t)),
-        });
-        self.jump(Cond::Mi, exit);
+        if signed {
+            self.out.push(Insn::Tst {
+                size: Size::W,
+                dst: Ea::Reg(Reg::D(t)),
+            });
+            self.jump(Cond::Mi, exit);
+        }
         let c = self.alloc_d()?;
         setup.push(self.out.len());
         self.out.push(Insn::Move {
