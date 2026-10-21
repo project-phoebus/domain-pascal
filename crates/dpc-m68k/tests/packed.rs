@@ -612,6 +612,10 @@ impl Machine {
                     self.flags(v, *size);
                 }
                 Insn::BitImm { op, bit, dst } => {
+                    // The 68010 takes the number mod 8 on a byte in memory
+                    // (an unreduced #15 on abs.l or indexed operands, bead
+                    // domain-pascal-6zdt).
+                    let bit = if matches!(dst, Ea::Reg(_)) { *bit } else { *bit % 8 };
                     let a = self.get(dst, Size::B);
                     self.z = a & (1 << bit) == 0;
                     let v = match op {
@@ -621,6 +625,7 @@ impl Machine {
                     self.put(dst, Size::B, v);
                 }
                 Insn::BtstImm { bit, dst } => {
+                    let bit = if matches!(dst, Ea::Reg(_)) { *bit } else { *bit % 8 };
                     self.z = self.get(dst, Size::B) & (1 << bit) == 0;
                 }
                 Insn::Tst { size, dst } => {
