@@ -15476,6 +15476,26 @@ impl Selector {
         self.eval_a(x)
     }
 
+    /// Push a value from `src` at `size`: `move.<s> src,-(SP)`, except
+    /// that a longword held in an address register is pushed with `pea
+    /// (An)`, which pushes the same 32 bits (codegen-patterns 1.5, "A
+    /// longword held in an address register"; bead domain-pascal-6wsg).
+    /// Survey of the compiled code: 2190 `pea (An)` and a single
+    /// `move.l An,-(SP)`, a save (A5 at VFMT_$FORMATN 0xE6B078); among
+    /// the argument pushes, by-value pointer parameters (`val_param`) get
+    /// `pea (An)` 98 times, e.g. DBUF_$SET_BUFF's `buffer` 27 times
+    /// (pea at 0xE09C3C, 0xE0A15C), EC_$WAIT's eventcount pointers 39,
+    /// SIO_$I_TSTART 6 (SIO_$I_XMIT_DONE 0xE1C6C4 `pea (A2)`).  A pointer
+    /// in memory or a data register is `move.l` (0xE38A0A `move.l
+    /// (-8,A6),-(SP)`, 0xE39688 `move.l D6,-(SP)`).
+    fn push_from(&mut self, size: Size, src: Ea) {
+        let dst = Ea::PreDec(SP);
+        self.out.push(match src {
+            Ea::Reg(Reg::A(n)) if size == Size::L && n != SP => Insn::Pea(Ea::Ind(n)),
+            src => Insn::Move { size, src, dst },
+        });
+    }
+
     /// Push a longword constant (codegen-patterns 1.5): zero with `clr.l
     /// -(SP)` (374 sites in compiled code, e.g. 0xE135D0; 19 `move.l
     /// #0,-(SP)` remain unexplained), a value that sign-extends from 16
@@ -15644,11 +15664,7 @@ impl Selector {
                             }
                             _ => self.ea_of(addr)?,
                         };
-                        self.out.push(Insn::Move {
-                            size: size_of(ty.width),
-                            src: src.clone(),
-                            dst,
-                        });
+                        self.push_from(size_of(ty.width), src);
                     }
                     Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => self.out.push(Insn::Move {
                         size: Size::L,
@@ -15793,11 +15809,7 @@ impl Selector {
                             Val::Mem(ea) => ea,
                             v => Ea::Reg(Reg::D(self.in_tmp(v, e.ty().width)?)),
                         };
-                        self.out.push(Insn::Move {
-                            size: size_of(e.ty().width),
-                            src: src.clone(),
-                            dst,
-                        });
+                        self.push_from(size_of(e.ty().width), src.clone());
                         self.zero_extension_unit(start, &src);
                     }
                 }
@@ -19250,11 +19262,7 @@ impl Selector {
                 src: Ea::Imm(imm(c, Width::Word)),
                 dst,
             }),
-            (v, w) => self.out.push(Insn::Move {
-                size: size_of(w),
-                src: Self::ea_val(&v),
-                dst,
-            }),
+            (v, w) => self.push_from(size_of(w), Self::ea_val(&v)),
         }
         Ok(())
     }

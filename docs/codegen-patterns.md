@@ -686,6 +686,40 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   `sio/init_dtte.c`, 0xE32B86 `pea (0xc,A2)`, 0xE32B92 `pea (0x18,A2)`,
   0xE32B9E `pea (A2)`; also `pea (A2)` at 0xE1BEB2, 0xE1D59E, 0xE3DB8C).
   Implemented; conformance unit `tests/conformance/sio_init_dtte.pas`.
+- **A longword held in an address register, by value: `pea (An)`,
+  never `move.l An,-(SP)`** (Verified by survey; implemented, bead
+  domain-pascal-6wsg).  `pea (An)` pushes An's 32 bits, so a pointer
+  passed by value from a register is pushed as the object it points to
+  would be by address.  Ad-hoc survey of the compiled code (script not
+  kept; the 1682 routines of `tools/pcsurvey.py`'s split): 2190 `pea
+  (An)` (A0 59, A1 20, A2 984, A3 622, A4 250, A5 255) against one
+  `move.l An,-(SP)`, and that one is a save, not an argument (VFMT_$FORMATN
+  0xE6B078 `link.w A6,#0; move.l A5,-(SP); movea.l A0,A5`).  Of the `pea
+  (An)`: 183 the A5 save before `lea <data>,A5` (section 4), 1834
+  argument pushes reached by `tools/pushsurvey.py`'s backward walk from
+  a call, the other 173 entry saves of one register (`link; pea (A2)`,
+  SIO_$I_XMIT_DONE 0xE1C6B8, section 2) and arguments the walk does not
+  reach.  The argument pushes classed by the callee's declaration in
+  `../source` (a rough parse of its `.pas`/`.ins.pas`; 1202 whose
+  declaration was found, 236 of them at slots the parse cannot place):
+  867 by-address slots (the object `p^`, above); 98 by-value pointer
+  slots of `val_param` routines (EC_$WAIT's eventcounts 39, DBUF_$SET_BUFF's
+  `buffer` 27 (pea at 0xE09C3C, 0xE0A15C), SIO_$I_TSTART 6 (SIO_$I_XMIT_DONE
+  0xE1C6C4 `pea (A2)`), DISK_$SET_BUFF 6, MMU_$INSTALL 4,
+  EC2_$REGISTER_EC1 4, AST_$PMAP_ASSOC 3, 9 others; A2 40, A3 25, A4 19,
+  A0 7, A1 5, A5 2); one `integer32` slot, XNS_IDP_$CHECKSUM's `data` at
+  0xE17D82, which receives an address (`lea (2,A3),A0`).  No integer
+  value held in an address register was found pushed.  The same by-value
+  pointer slots from memory or a data register are `move.l`: `move.l
+  (d,A6),-(SP)` 40 (DBUF_$SET_BUFF 0xE38A0A, 0xE3916A, 0xE39E08 `move.l
+  (-8,A6),-(SP)`), `move.l Dn,-(SP)` 21 (0xE39688 `move.l D6,-(SP)`),
+  `move.l (d,An),-(SP)` 16, `move.l (d,A5),-(SP)` among them (0xE3B2B8,
+  0xE3B608 `move.l (3384,A5),-(SP)`), `move.l #sym,-(SP)` 67.  **Implemented**
+  (`isel.rs`, `Selector::push_from`): every longword push of an address
+  register, an argument (a parameter or local held in a register, a
+  computed pointer) or an M$ARITH operand, is `pea (An)`; the form is
+  the same with and without `--strict`.  Golden
+  `calls/held_pointer_push`.
 - **The target of a pointer field of a record held in an address
   register, `p.f^`** (Verified; bead domain-pascal-s9j): the pointer
   field itself is pushed, `move.l (d,An),-(SP)`: 0xE1CC52 `move.l
