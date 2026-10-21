@@ -6789,6 +6789,7 @@ fn string_assign(p: &Program, s: &SStmt, target: &SExpr, text: &[u8], bytes: u32
             src: Addr::Const(PoolConst {
                 bytes: cell,
                 key: target.ty.0,
+                symbol: None,
             }),
             bytes,
             chars: true,
@@ -6856,7 +6857,11 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         if bytes.len() % 2 == 1 {
             bytes.push(0);
         }
-        return Ok(PoolConst { bytes, key: ty.0 });
+        return Ok(PoolConst {
+            bytes,
+            key: ty.0,
+            symbol: None,
+        });
     }
     let size = p.types.size(ty);
     if let (ConstValue::Set(_), TypeKind::Set { .. }) = (v, p.types.kind(ty)) {
@@ -6889,7 +6894,11 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
             Width::Word => be[2..].to_vec(),
             _ => be.to_vec(),
         };
-        return Ok(PoolConst { bytes, key: ty.0 });
+        return Ok(PoolConst {
+            bytes,
+            key: ty.0,
+            symbol: None,
+        });
     }
     let width = match Width::of_size(size) {
         Some(w) if v.ordinal().is_some() => w,
@@ -6933,7 +6942,41 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
     } else {
         ty.0
     };
-    Ok(PoolConst { bytes, key })
+    Ok(PoolConst {
+        bytes,
+        key,
+        symbol: None,
+    })
+}
+
+/// Whether `e` is `addr(x)` of a part of an `extern` variable (another
+/// unit's object) or `addr(r)` of a routine, also through a type transfer
+/// (`integer32(addr(x))`): the candidates for an address cell
+/// ([`symbol_address`]; not an overlay section's variable, whose address
+/// is a symbol too).
+fn extern_address(p: &Program, e: &SExpr) -> bool {
+    match &e.kind {
+        ExprKind::RoutineAddr(_) => true,
+        ExprKind::Transfer(x) => extern_address(p, x),
+        ExprKind::Builtin {
+            builtin: Builtin::Addr,
+            args,
+        } => root_var(&args[0])
+            .is_some_and(|v| matches!(p.var(v).storage, Storage::Extern { .. })),
+        _ => false,
+    }
+}
+
+/// The symbol and offset whose address `e` is: `addr(x)` of another
+/// unit's object or of a routine ([`Addr::Symbol`]), also through a type
+/// transfer of the same width (`integer32(addr(x))`).  A link-time
+/// constant, passed by address as a cell ([`PoolConst::address`]).
+fn symbol_address(e: &Expr) -> Option<(String, i32)> {
+    match e {
+        Expr::AddrOf(Addr::Symbol { name, offset }) => Some((name.clone(), *offset)),
+        Expr::Convert { value, ty, .. } if value.ty().width == ty.width => symbol_address(value),
+        _ => None,
+    }
 }
 
 /// The type of the cell of a constant of type `cty` passed by address to
@@ -7607,6 +7650,7 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
             set: Addr::Const(PoolConst {
                 bytes: large_set_bytes(members, size, rhs.span)?,
                 key: rhs.ty.0,
+                symbol: None,
             }),
             bytes: size,
         });
@@ -9959,7 +10003,8 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   at the parameter's width (a constant takes the parameter's type);
 ///   by address, the address of a designator; a constant by address is
 ///   its cell in the code section ([`Addr::Const`], `pea (d,PC)`; for a
-///   `univ` parameter see `univ_const_type`), an
+///   `univ` parameter see `univ_const_type`), the address of a symbol
+///   a cell holding it ([`PoolConst::address`], [`symbol_address`]), an
 ///   expression by address its frame temporary ([`Arg::Temp`]):
 ///   codegen-patterns 1.5 (TERM_$SEND_KBD_STRING 0xE1AB0C, TONE_$ENABLE
 ///   0xE1ACFC).  A variable of another size than its value or `in`
@@ -10190,6 +10235,37 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     continue;
                 }
                 if !a.expr.is_designator() || bits {
+                    // The address of a symbol (another unit's object, a
+                    // routine), `addr(x)` or `integer32(addr(x))`, for a
+                    // parameter of 4 bytes or more: a link-time constant,
+                    // passed as a constant is, a 4-byte cell holding the
+                    // address (codegen-patterns 1.5, "Address of a symbol
+                    // by address").  The cell keeps the address's own 4
+                    // bytes whatever the parameter's size, as constants'
+                    // cells do (ref 5.3.3 p. 5-11 extends an expression to
+                    // a `univ` parameter's size; the image does not): SAU5
+                    // VME_$INT 0xE0ABBE `pea (0x80,PC)` for LOG_$ADD's
+                    // 192-byte `univ` data, the cell 0xE0AC40 `00ff 7c00`
+                    // (PBU_CTL), the next routine at 0xE0AC44 (bead
+                    // domain-pascal-68tc); SAU2 PEB_$LOAD_WCS 0xE32216
+                    // for MST_$WIRE_AREA's `univ_ptr`s, cells 0xE322E4,
+                    // 0xE322E8.
+                    // Only another unit's object (`extern`) or a routine: a
+                    // variable of an overlay section is a symbol plus an
+                    // offset too ([`var_addr`]), but the unit's own data
+                    // stays a temporary (PCHIST_$CNTL 0xE5CF06 `lea
+                    // (0x934,A2),A0; move.l A0,(-40,A6); pea (-40,A6)`).
+                    if p.types.size(prm_ty) >= 4 && extern_address(p, &a.expr) {
+                        let value = value_of(p, &a.expr)?;
+                        if let Some((name, offset)) = symbol_address(&value) {
+                            args.push(Arg::Address {
+                                addr: Addr::Const(PoolConst::address(name, offset)),
+                                slot,
+                                writable: false,
+                            });
+                            continue;
+                        }
+                    }
                     // An expression: stored into a frame temporary, whose
                     // address is passed (codegen-patterns 1.5, TONE_$ENABLE
                     // 0xE1ACFC); the offset is assigned once the body is

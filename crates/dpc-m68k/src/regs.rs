@@ -241,6 +241,7 @@ pub fn access(insn: &Insn) -> Access {
         | Insn::Align4
         | Insn::PoolLabel(_)
         | Insn::Words(_)
+        | Insn::AddrCell { .. }
         | Insn::Encoded { .. }
         | Insn::Branch { .. } => {}
         Insn::Pea(ea) => a.ea_address(ea),
@@ -381,6 +382,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::Align4
         | Insn::PoolLabel(_)
         | Insn::Words(_)
+        | Insn::AddrCell { .. }
         | Insn::Encoded { .. }
         | Insn::Branch { .. }
         | Insn::Bsr { .. }

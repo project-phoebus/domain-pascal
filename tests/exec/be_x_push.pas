@@ -3,8 +3,9 @@
   to its slot once), a byte constant next to a word constant (each in
   its own slot), `addr(p^)' by value (the pointer's value pushed), an
   object reached through a chain of pointers, and `addr' of another
-  unit's object passed by address (stored into a frame temporary with
-  `lea').
+  unit's object passed by address (once stored into a frame temporary
+  with `lea', a best effort; now a code cell holding the address, as in
+  the image: bead domain-pascal-68tc, golden calls/univ_symbol_addr).
 
   call: EB_$FILL
   call: BX_PUSH_$TWICE
@@ -17,7 +18,6 @@
   warns: best effort (not byte-identical): a byte constant argument other than `true` and 0 next to a word or byte constant
   warns: best effort (not byte-identical): `addr(p^)` by value of a pointer in memory
   warns: best effort (not byte-identical): an object reached through a pointer that is itself reached through a pointer
-  warns: best effort (not byte-identical): `addr` of another unit's or a constant's object passed by address
   expect:
     11
     22

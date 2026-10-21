@@ -621,6 +621,13 @@ pub enum Insn {
     /// Pseudo-instruction: words of data, `.short` (a constant-pool
     /// cell, codegen-patterns 1.5: `0000` at 0xE1AB26).
     Words(Vec<u16>),
+    /// Pseudo-instruction: a constant-pool cell holding the address of
+    /// `symbol` + `offset`, `.long` (codegen-patterns 1.5, "Address of a
+    /// symbol by address": SAU5 VME_$INT's cell 0xE0AC40, PBU_CTL).
+    AddrCell {
+        symbol: String,
+        offset: i32,
+    },
     /// An instruction written as its encoding, `.short` with the mnemonic
     /// in a comment, where gas cannot produce it (CLAUDE.md 4.4): a
     /// `bsr.s` to a routine outside a fragment, whose 8-bit displacement
@@ -664,6 +671,7 @@ impl Insn {
             | Insn::Align4
             | Insn::PoolLabel(_)
             | Insn::Words(_)
+            | Insn::AddrCell { .. }
             | Insn::Encoded { .. } => vec![],
             Insn::Pea(ea) | Insn::Jsr(ea) | Insn::Jmp(ea) | Insn::MoveToSr { src: ea } => {
                 vec![ea]
@@ -819,6 +827,8 @@ impl fmt::Display for Insn {
             // A cell of no bytes (the empty string, DIR_$DO_OP 0xE4C310):
             // its label alone.
             Insn::Words(w) if w.is_empty() => f.write_str("| a cell of no bytes"),
+            Insn::AddrCell { symbol, offset: 0 } => write!(f, ".long\t{symbol}"),
+            Insn::AddrCell { symbol, offset } => write!(f, ".long\t{symbol}{offset:+}"),
             Insn::Words(w) => {
                 f.write_str(".short\t")?;
                 for (i, x) in w.iter().enumerate() {
@@ -977,6 +987,7 @@ impl Insn {
             Insn::Align4 => (4 - pos % 4) % 4,
             Insn::PoolLabel(_) => 0,
             Insn::Words(w) | Insn::Encoded { words: w, .. } => 2 * w.len() as u32,
+            Insn::AddrCell { .. } => 4,
             Insn::Unlk | Insn::Rts | Insn::Moveq { .. } | Insn::Cmpm { .. } => 2,
             Insn::Link { .. } | Insn::Dbf { .. } | Insn::DbfFwd { .. } | Insn::MovemSave { .. } => {
                 4

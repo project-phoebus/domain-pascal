@@ -262,6 +262,7 @@ fn fx(insn: &Insn) -> Fx {
         | Insn::Align4
         | Insn::PoolLabel(_)
         | Insn::Words(_)
+        | Insn::AddrCell { .. }
         | Insn::Encoded { .. }
         | Insn::Jmp(_)
         | Insn::DbfFwd { .. }

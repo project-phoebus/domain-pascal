@@ -1000,6 +1000,25 @@ pub struct PoolConst {
     /// Uncertain: SMD has two `0001` cells, 0xE6D92A and 0xE6DFF8, both
     /// used by later routines).
     pub key: u32,
+    /// An address cell: the cell holds this symbol's address plus the
+    /// offset, 4 bytes the linker fills (`bytes` is then four zeros),
+    /// rather than `bytes` (codegen-patterns 1.5, "Address of a symbol
+    /// by address": SAU5 VME_$INT 0xE0ABBE `pea (0x80,PC)`, the cell
+    /// 0xE0AC40 holding PBU_CTL's address; bead domain-pascal-68tc).
+    pub symbol: Option<(String, i32)>,
+}
+
+impl PoolConst {
+    /// The cell holding the address of `name` + `offset`
+    /// ([`PoolConst::symbol`]).  Such cells are keyed by the symbol and
+    /// offset alone.
+    pub fn address(name: String, offset: i32) -> PoolConst {
+        PoolConst {
+            bytes: vec![0; 4],
+            key: u32::MAX,
+            symbol: Some((name, offset)),
+        }
+    }
 }
 
 /// A value.

@@ -1065,6 +1065,63 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     set (`[byte] set of 0..7`) and sets of more than a longword.  `dpc`:
     `dpc-ir` `pool_const`; golden `sets/set_compares`; exec test
     `set_compares`.
+- **Address of a symbol by address (Verified at the sites; implemented,
+  bead domain-pascal-68tc).**  `addr(x)` of another unit's object or of
+  a routine, a link-time constant, passed by address is a constant: a
+  4-byte cell in the code section holding the address (relocated),
+  pushed with `pea (d,PC)`, not a frame temporary.  The cell has the
+  address's own 4 bytes whatever the parameter's size, as constants'
+  cells do (above, "To a `univ` parameter").
+  - SAU5 VME_$INT 0xE0ABBA: `move.w #6,-(SP); pea (0x80,PC); move.w
+    #6,-(SP); jsr LOG_$ADD` (`log_$add(6, addr(pbu_ctl), 6)` in the
+    ../source session's reading; LOG_$ADD's data is a 192-byte `univ
+    log_$data_t` there, Reported).  The cell 0xE0AC40 is `00ff 7c00`,
+    PBU_CTL's address in the SAU5 map; the next routine, VME_$USER_INT,
+    starts at 0xE0AC44, so the cell is 4 bytes, not 192.  It follows the
+    CRASH_SYSTEM status cell 0xE0AC3C (first used) and a `0x2048`
+    filler, the cell order above.  **The original reads past the cell:**
+    the data length is 6 (`move.w #6,-(SP)`, the first push), and
+    LOG_$ADD (SAU5 0xE17C8A; `move.w (14,A6),D1`, then (len+1)/2 words,
+    0xE17CA8..0xE17CB2) copies 3 words, so the entry logs `00ff 7c00
+    4e56`, the cell and VME_$USER_INT's `link` word.  `dpc` lays out the
+    same 4-byte cell and so reproduces the read (an original quirk,
+    passed to the owner for ../source's original-quirks.md).
+  - SAU2 (scratch scan, not kept: every `pea (d,PC)` cell whose 4 bytes
+    are a map symbol's address): 28 sites.  MST_$WIRE_AREA's `in
+    univ_ptr` pairs (../source's reading): PEB_$LOAD_WCS 0xE32216,
+    0xE3221A (cells 0xE322E8 PEB_$WIRED_PROC_END, 0xE322E4
+    PEB_$WIRED_PROC_START) and 0xE32244, 0xE32248 (the data markers);
+    NETLOG_$PROC_START 0xE719EC..0xE71A1E (cells 0xE71B28..0xE71B34, laid
+    out in the order of the cell rule above); OS_$SHUTDOWN
+    0xE6D540..0xE6D562; DISK 0xE6B6F4..0xE6B716; ROUTE 0xE69BEA, 0xE69BEE;
+    RING_$RCV1 0xE766DE.  Routines' addresses: AST_$SAVE_CLOBBERED_UID
+    0xE0725A (AST_$SET_TROUBLE), DXM_$ADD_SIGNAL 0xE172B6
+    (DXM_$ADD_SIGNAL_CALLBACK), SUMA_$RCV 0xE1AE90 and KBD_$RCV 0xE1CE04
+    (TERM_$ENQUEUE_TPAD), TTY_$I_SIGNAL 0xE1B892.  Others: PMAP 0xE12D60
+    (AST_$PMAP_IN_TRANS_EC, for EC_$WAITN), PEB_$INIT 0xE31D7A
+    (PEB_$M_CTRL_PAGE), OS_$INIT 0xE34130 and 0xE3414E (DISP1_MEM, one
+    cell named twice).  More cells hold addresses that are no map
+    symbol's (XPD_$INIT 0xE3231E, 0xE32322; RINGLOG_$CNTL 0xE722D4;
+    RING_$RCV1 0xE766A8..0xE766DA): a symbol plus an offset, or objects
+    the map does not name (not examined).
+  - A unit's own data reached through a register stays a temporary
+    (TONE_$ENABLE 0xE1ACFC `lea (0x1268,A5),A0`, PCHIST_$CNTL 0xE5CF06
+    `lea (0x934,A2),A0`, below).
+  - **Implemented** (`dpc-ir` `call`, `extern_address`,
+    `symbol_address`, `PoolConst::address`; `dpc-m68k` `Insn::AddrCell`,
+    `.long sym[+off]`): `addr(x)` and `integer32(addr(x))` of a part of
+    an `extern` variable (another unit's object, plus a field's offset)
+    or of a routine, for a parameter of 4 bytes or more.  A variable of
+    the unit's own overlay section, which `dpc` also addresses as a
+    symbol plus an offset, keeps the temporary (PCHIST_$CNTL above;
+    exec test `univ_symbol_addr`, `dpc-ir` test
+    `symbol_addresses_by_address_are_cells`).  Cells are shared by
+    symbol and offset, whatever the parameter's type, and placed with the
+    other cells (1.5, order and alignment); the same cell twice in a row
+    is `move.l (SP),-(SP)`.  A symbol plus an offset (`addr(r.f)`) is
+    not checked against a site.  Golden `calls/univ_symbol_addr`, exec
+    test `univ_symbol_addr`.  For a parameter under 4 bytes (a 1- to
+    3-byte `univ` formal) the temporary below remains (no site).
 - **Expression by address (Verified at the sites; implemented).**  A
   non-variable, non-constant actual passed by address is first stored in a
   frame temporary, and that temporary's address is pushed, right where
@@ -1082,7 +1139,8 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     temps`; some of these may be declared locals).
   - **Implemented** (`dpc-ir` `Arg::Temp`, `assign_temps`; `dpc-m68k`
     `Selector::push`): `addr(x)` of a frame or static object as `lea;
-    move.l An,(d,A6); pea (d,A6)`, other values computed and stored;
+    move.l An,(d,A6); pea (d,A6)` (another unit's object or a routine:
+    a cell, above), other values computed and stored;
     each word aligned, longwords longword aligned.  Uncertain: the
     order of temporaries for a call nested in another call's arguments
     (dpc puts them below the outer call's).  An expression of another

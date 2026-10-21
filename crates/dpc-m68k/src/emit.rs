@@ -760,12 +760,19 @@ impl Pool {
             rest.reverse();
             for (c, n) in std::iter::once(first).chain(rest) {
                 insns.push(Insn::PoolLabel(n));
-                insns.push(Insn::Words(
-                    c.bytes
-                        .chunks(2)
-                        .map(|w| u16::from_be_bytes([w[0], w[1]]))
-                        .collect(),
-                ));
+                insns.push(match &c.symbol {
+                    // An address: the linker's (SAU5 0xE0AC40).
+                    Some((symbol, offset)) => Insn::AddrCell {
+                        symbol: symbol.clone(),
+                        offset: *offset,
+                    },
+                    None => Insn::Words(
+                        c.bytes
+                            .chunks(2)
+                            .map(|w| u16::from_be_bytes([w[0], w[1]]))
+                            .collect(),
+                    ),
+                });
             }
         }
     }
@@ -1078,13 +1085,15 @@ fn size_branches(
                     }
                     Some(&m) => m,
                     None => {
-                        let Some(Insn::Words(w)) = routines[ci].1.get(cii + 1).cloned() else {
+                        let Some(w @ (Insn::Words(_) | Insn::AddrCell { .. })) =
+                            routines[ci].1.get(cii + 1).cloned()
+                        else {
                             unreachable!("a constant cell's words follow its label")
                         };
                         let m = *next_cell;
                         *next_cell += 1;
                         routines[ri].1.push(Insn::PoolLabel(m));
-                        routines[ri].1.push(Insn::Words(w));
+                        routines[ri].1.push(w);
                         copies.insert((ri, orig), m);
                         origin.insert(m, orig);
                         m
@@ -2396,10 +2405,12 @@ mod tests {
         let w = |v: u8| PoolConst {
             bytes: vec![0, v],
             key: 1,
+            symbol: None,
         };
         let l = |v: u8| PoolConst {
             bytes: vec![0, 0, 0, v],
             key: 2,
+            symbol: None,
         };
         let pea = |c: PoolConst| Insn::Pea(Ea::Pool(c));
         let mut pool = Pool::default();
@@ -2440,6 +2451,7 @@ mod tests {
             pea(PoolConst {
                 bytes: vec![0, 2],
                 key: 7,
+                symbol: None,
             }),
             pea(l(4)),
             Insn::Rts,
@@ -2499,6 +2511,7 @@ mod tests {
                     call(PoolConst {
                         bytes: vec![0; cell],
                         key: 0,
+                        symbol: None,
                     })
                 })
                 .collect();
@@ -2534,6 +2547,7 @@ mod tests {
                         addr: Addr::Const(PoolConst {
                             bytes: vec![0, 1],
                             key: 0,
+                            symbol: None,
                         }),
                         slot: 4,
                         writable: false,

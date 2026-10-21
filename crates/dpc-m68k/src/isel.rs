@@ -16267,7 +16267,9 @@ impl Selector {
                         });
                     }
                     // Best effort (bead domain-pascal-5kgg): `lea` of it as
-                    // above.
+                    // above.  For a parameter of 4 bytes or more a symbol's
+                    // address is a cell (`dpc-ir`, bead domain-pascal-68tc);
+                    // this is a smaller `univ` one or a constant's object.
                     Expr::AddrOf(a) => {
                         best_effort(
                             self.span,

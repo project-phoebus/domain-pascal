@@ -3963,6 +3963,71 @@ end;
     .is_ok());
 }
 
+/// `addr(x)` of another unit's object passed by address, to a 192-byte
+/// `univ` parameter and to a `univ_ptr`, is a cell holding the address
+/// (bead domain-pascal-68tc; SAU5 VME_$INT 0xE0ABBE, cell 0xE0AC40).
+#[test]
+fn symbol_addresses_by_address_are_cells() {
+    let m = lower_src(
+        "module m;
+type big = array[1..96] of integer;
+  r = record a, b: integer; end;
+var x: extern r;
+procedure q(in a: univ big; in b: univ_ptr; in c: integer32); extern;
+procedure p;
+begin
+  q(addr(x), addr(x.b), integer32(addr(x)));
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let cells: Vec<PoolConst> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                slot: 4,
+                writable: false,
+            } => k.clone(),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            PoolConst::address("X".into(), 0),
+            PoolConst::address("X".into(), 2),
+            PoolConst::address("X".into(), 0)
+        ]
+    );
+
+    // A variable of the unit's own overlay section, a symbol plus an
+    // offset too, stays a frame temporary (SAU2 PCHIST_$CNTL 0xE5CF06).
+    let m = lower_src(
+        "module m;
+var (ov_d) pages: array[1..3] of integer32; count: integer;
+procedure q(in a: univ_ptr); extern;
+procedure p;
+begin
+  q(addr(count));
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(&c.args[..], [Arg::Temp { slot: 4, .. }]),
+        "{:?}",
+        c.args
+    );
+}
+
 /// What `univ` extension is not supported yet (beads domain-pascal-4be,
 /// -9286): an integer constant larger than the parameter, a boolean or
 /// enumeration constant of another size, an integer constant for a
