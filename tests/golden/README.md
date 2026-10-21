@@ -671,6 +671,11 @@ Tests:
   only its parent calls (0xE13616); uplevel slots, objects and locals
   through the link register (0xE135B8, 0xE135DA, 0xE1362E); the 4-byte
   link slot of nested frames; the parent's uplevel local in its frame.
+- `nested/uplevel_index_mul` - codegen-patterns 8, 5.2, 6 (bead
+  domain-pascal-dctl): another unit's array of 46-byte records indexed by
+  the enclosing routine's local, `moveq #46,D0; movea.l #sym,An; mulu.w
+  (-d,A2),D0` through the link (sau5 MT_$ACQUIRE's nested routine
+  0xE75C14..0xE75C22), and `muls.w` for a `.l` index of the same local.
 - `nested/recursion` - codegen-patterns 6, 4: a recursive nested routine
   passing its own link (0xE397D0), a nested function reading the
   enclosing local through `(A6)`, A5 inherited by nested routines.

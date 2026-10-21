@@ -19786,8 +19786,11 @@ impl Selector {
     /// zero-extended byte in place, RIP_$BROADCAST 0xE872F8 `mulu.w #92,D5`
     /// ([`Self::mul_const`]).  Constants of 128 and more: the value
     /// in a register, then `mul<s>.w #c` (261 of 261; no `move.w #c,Dn`
-    /// multiplied by the value).  A multiplicand at an absolute or indexed
-    /// address is refused (no site).
+    /// multiplied by the value).  An enclosing routine's local is read
+    /// through the static link (sau5 0xE75C1E `mulu.w (-0x2a,A2),D0`, bead
+    /// domain-pascal-dctl).  A multiplicand at an absolute or indexed
+    /// address is refused (no `mul<s>.w` from such an operand in the sau2
+    /// or sau5 image).
     fn mul_const_first(
         &mut self,
         x: &Expr,
@@ -19804,13 +19807,36 @@ impl Selector {
                 addr: Addr::Static(_) | Addr::Indirect { .. },
                 ..
             } => false,
+            // An enclosing routine's local, in its frame through the static
+            // link (MT_$ACQUIRE's nested routine at 0xE75C0C, sau5:
+            // 0xE75C14..0xE75C22 `movea.l (A6),A2; moveq #46,D0; movea.l
+            // #MT_$SCB,A3; mulu.w (-0x2a,A2),D0; lea (0,A3,D0.w),A4`).  An
+            // enclosing routine's by-value parameter has no site.
+            Expr::Load {
+                addr: Addr::Enclosing(o),
+                ..
+            } if *o < 0 => false,
+            Expr::Load {
+                addr: Addr::Enclosing(_),
+                ..
+            } => {
+                return Err(unsupported(
+                    self.span,
+                    format!(
+                        "a multiplication by {c} of an enclosing routine's by-value parameter \
+                         (`moveq #{c},Dn; mul<s>.w x,Dn` with such an operand: no site, \
+                         codegen-patterns 8) is"
+                    ),
+                ))
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
                     format!(
-                        "a multiplication by {c} of another unit's variable, an array element or \
-                         an enclosing routine's variable (`moveq #{c},Dn; mul<s>.w x,Dn` with \
-                         such an operand: no site, codegen-patterns 8) is"
+                        "a multiplication by {c} of another unit's variable or an array element \
+                         (`moveq #{c},Dn; mul<s>.w x,Dn` with such an operand: no `mul<s>.w` \
+                         from an absolute or indexed operand in the sau2 or sau5 image, \
+                         codegen-patterns 8) is"
                     ),
                 ))
             }

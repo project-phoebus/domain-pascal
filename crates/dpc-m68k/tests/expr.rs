@@ -140,7 +140,7 @@ fn unsupported_expressions() {
         ("t := w * 13;", "odd parts of three bits"),
         ("t := w * 38;", "odd parts of three bits"),
         // The constant first with another unit's variable: no site.
-        ("t := w * 44;", "another unit's variable, an array element"),
+        ("t := w * 44;", "another unit's variable or an array element"),
         // M$ARITH with a word argument and a computed operand: the pad is
         // scheduled into the computation (CAL_$WEEKDAY 0xE686B0).
         (
@@ -385,7 +385,7 @@ var
     );
     assert!(
         error("function t: integer;\nbegin\n  t := cfgs[ks[k]].a;\nend;\n")
-            .contains("another unit's variable, an array element")
+            .contains("another unit's variable or an array element")
     );
     // Refused: a computed value other than a zero-extended byte (a mask
     // has the constant first, HINT_$GET_HINTS 0xE4998E; bead

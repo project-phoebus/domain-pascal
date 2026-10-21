@@ -4679,10 +4679,21 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       (a unit variable, a local, a by-address parameter's object or a
       pointer's target, a parameter or register-held value); a
       zero-extended byte in place.  The longword product of a signed word
-      (`.l` index evidence, TPAD_$DATA 0xE691D0) the same way.  Refused (no
-      site): an index or factor that is another unit's variable, an array
-      element or an enclosing routine's variable; a word or longword
-      product of an unsigned word by such a constant.  Refused (not
+      (`.l` index evidence, TPAD_$DATA 0xE691D0) the same way.  An
+      enclosing routine's local, read through the static link (Verified,
+      one site; bead domain-pascal-dctl): sau5 MT_$ACQUIRE's nested
+      routine 0xE75C0C at 0xE75C14..0xE75C22 `movea.l (A6),A2; moveq
+      #46,D0; movea.l #MT_$SCB,A3; mulu.w (-0x2a,A2),D0; lea
+      (0,A3,D0.w),A4` (`with mt_$scb, units[u]`, `u` the parent's local;
+      a `.w` index, so `mulu.w`, as for any variable; a `.l` one of a
+      signed local `muls.w`, as for a local of the routine itself, no
+      site).  Refused (no site): an index or factor that is another
+      unit's variable or an array element (no `mul<s>.w` from an
+      absolute or indexed operand anywhere in the sau2 or sau5 image, a
+      scan of every `mul<s>.w <ea>,Dn`), an enclosing routine's by-value
+      parameter; a word or longword product of an unsigned word by such
+      a constant.  Golden `nested/uplevel_index_mul`, exec test
+      `uplevel_index_mul`.  Refused (not
       settled): other computed values (`i + 1`, a mask; the masks above
       have the constant first, scheduled with the mask's own `moveq`;
       bead domain-pascal-q322).  Golden `data/index_mul`, exec test
