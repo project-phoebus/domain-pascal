@@ -6502,7 +6502,12 @@ same `bset #c mod 8` on the member's byte).
   aligned (3.10.5.6) when it is 4 bytes or more; a 2-byte one is of
   unknown parity, since `layout_fields` leaves a byte-aligned 2-byte field
   at an odd offset (exec test `packed_word_sign_holder`).  No ../source
-  module changes status by it.
+  module changes status by it.  The entry copy of a value parameter of
+  such a record type (an `aligned(0)` of its own, or a 2-byte one that
+  inherits it) is refused like a scalar's (bead domain-pascal-cr4a: it
+  was `move.w (A0),(-2,A6)` from an odd argument; no byte copy of a
+  parameter at entry is seen in compiled code; `dpc-ir` test
+  `byte_aligned_record_value_parameters_are_refused`).
 - More `%push_alignment` than `%pop_alignment` directives is an error
   (ref 9 p. 9-45, "Unmatched %PUSH_ALIGNMENT directive"), as is the
   reverse ("Alignment stack underflow").

@@ -2332,13 +2332,16 @@ fn param_copies(p: &Program, r: &Routine) -> Res<Vec<ParamCopy>> {
         }
         // The copy moves words and longwords from the argument's address
         // ([`ParamCopy`]), which a byte-aligned parameter type lets be odd
-        // (ref 3.15.6.8 p. 3-76; the 68010 traps; see [`check_even`]).
-        // A record is word aligned whatever its attribute (ref 3.10.5.5 p.
-        // 3-26; [`dpc_sema::types::TypeTable::attributed`]), as for a
-        // reference through the parameter.
+        // (ref 3.15.6.8 p. 3-76; the 68010 traps; see [`check_even`]):
+        // a scalar, and a record with an `aligned(0)` of its own or a
+        // 2-byte one that inherits it ([`type_is_even`], as for a
+        // reference through the parameter; bead domain-pascal-cr4a: an
+        // `[aligned(0)]` packed record argument at an odd offset was
+        // copied with `move.w (A0),(-2,A6)`).  No byte copy of a parameter
+        // at entry is seen (below), so these are refused.
         if p.types.size(prm.ty) > 1
-            && p.types.attrs(prm.ty).align == Some(1)
-            && p.types.get(prm.ty).align < 2
+            && (p.types.attrs(prm.ty).align == Some(1) || p.types.get(prm.ty).align_attr == Some(1))
+            && !type_is_even(p, prm.ty)
         {
             return Err(unsupported(
                 p.var(prm.var).span,
@@ -9593,11 +9596,7 @@ fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
 /// [aligned(0)] pb_t end`: w at 1), so that one is of unknown parity.
 fn even(p: &Program, e: &SExpr) -> Option<bool> {
     // Aligned as the type says.
-    let typed = |e: &SExpr| {
-        let t = p.types.get(e.ty);
-        let inherited_odd = t.attrs.align == Some(1) && t.size < 4;
-        (t.align >= 2 && t.align_attr != Some(1) && !inherited_odd).then_some(true)
-    };
+    let typed = |e: &SExpr| type_is_even(p, e.ty).then_some(true);
     match &e.kind {
         ExprKind::Field { base, offset, .. } => Some(even(p, base)? == (offset % 2 == 0)),
         // An element of a packed array of bits has no address.
@@ -9649,6 +9648,16 @@ fn even(p: &Program, e: &SExpr) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+/// Whether an object of type `ty` whose place only its type tells (a
+/// pointer's target, an argument passed by address, another unit's object)
+/// is at an even address ([`even`]): its alignment is 2 or more, it has no
+/// `aligned(0)` of its own, and it does not inherit one at 2 bytes.
+fn type_is_even(p: &Program, ty: TypeId) -> bool {
+    let t = p.types.get(ty);
+    let inherited_odd = t.attrs.align == Some(1) && t.size < 4;
+    t.align >= 2 && t.align_attr != Some(1) && !inherited_odd
 }
 
 /// Whether `e` or an array or record it is an element or a field of

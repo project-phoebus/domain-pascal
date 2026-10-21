@@ -512,7 +512,12 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     error_$integer32`, error.ins.pas): a word or longword reference
     through it, and the entry copy of a value parameter of such a type
     (bead domain-pascal-lmw).  A record comparison (`cmpm`) and a packed
-    field's word or longword unit are refused at such addresses too.
+    field's word or longword unit are refused at such addresses too, as
+    are a field or compare of a record type with `[aligned(0)]` passed by
+    address (or reached through a pointer, or another unit's object; bead
+    domain-pascal-epjn), and the entry copy of a value parameter of such
+    a record type, or of a 2-byte record that inherits a field's
+    `[aligned(0)]` (bead domain-pascal-cr4a).
 26. **3.15.3, p. 3-57 (device record assignment).**  Is assigning or
     pushing a whole 4-byte `[device]` record as one 32-bit reference
     allowed, or does "The device attribute prevents this optimization"

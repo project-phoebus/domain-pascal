@@ -5683,6 +5683,39 @@ procedure v(a: [aligned(0)] integer32); val_param; begin g := a end;"
     .unwrap();
 }
 
+/// The entry copy of a value parameter of a record type that may lie at
+/// an odd address (bead domain-pascal-cr4a; the review's rv_entry: an
+/// `[aligned(0)] packed record` argument at offset 1 was copied with
+/// `move.w (A0),(-2,A6)`, an address error): an `aligned(0)` of the
+/// record's own, or a 2-byte record that inherits one, is refused; a
+/// record of 4 bytes or more that only inherits it is word aligned (ref
+/// 3.10.5.6) and copied.
+#[test]
+fn byte_aligned_record_value_parameters_are_refused() {
+    let types = "module m;
+type
+  pb_t = packed record a: boolean; b: 0..127 end;
+  ab_t = [aligned(0)] pb_t;
+  w_t = record f: ab_t end;
+  holder_t = record c: char; f: ab_t; d: char; x: integer end;
+  uid_t = record hi, lo: integer32 end;
+  buid = [aligned(0)] uid_t;
+var ok: boolean; g: integer; g32: integer32;
+";
+    for body in [
+        "procedure p(r: ab_t); begin ok := r.a end;",
+        "procedure p(r: w_t); begin ok := r.f.a end;",
+        "procedure p(a: buid); begin g32 := a.lo end;",
+    ] {
+        let e = errs(&format!("{types}{body}"));
+        assert!(e[0].contains("byte-aligned type"), "{body}: {e:?}");
+    }
+    lower_src(&format!(
+        "{types}procedure p(h: holder_t); begin g := h.x end;"
+    ))
+    .unwrap();
+}
+
 /// Every word or longword path through a byte-aligned object is refused
 /// unless its address is known to be even (bead domain-pascal-lmw review):
 /// a record comparison (`cmpm`) and a packed field's word or longword
