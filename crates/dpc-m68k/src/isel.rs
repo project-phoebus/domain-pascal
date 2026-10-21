@@ -23746,7 +23746,7 @@ impl Selector {
     ///   0xE6745C `bset #4,(9,A2)` and 0xE6747C `bclr #4,(9,A2)` on the word
     ///   at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
     ///   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`; members of 8 and
-    ///   above, sau5 MT_$ACQUIRE `bset #7,(0x32,A4)` (member 15; PROC2_$FORK
+    ///   above, sau5 MT_$ACQUIRE 0xE75E46 `bset #7,(0x32,A4)` (member 15; PROC2_$FORK
     ///   0xE732B4 `bclr #0,(-186,A2)` on the high byte of a flag word whose
     ///   type is not known).  On an absolute or indexed operand a word
     ///   set's member number is not reduced (sau5 MT_$WAIT 0xE76A1A
@@ -23865,7 +23865,7 @@ impl Selector {
                 // indexed operand has a number of 8 and above (sau2 11,
                 // sau5 17), and none on `(An)`, `(d,An)`, `(An)+` does (sau2
                 // 668, sau5 746): through an address register the number is
-                // reduced (MT_$ACQUIRE `bset #7,(0x32,A4)`, member 15).  A
+                // reduced (MT_$ACQUIRE 0xE75E46 `bset #7,(0x32,A4)`, member 15).  A
                 // member below 8 is the same either way; a longword set's
                 // members 8 and above on these operands: no site, reduced.
                 let unreduced =

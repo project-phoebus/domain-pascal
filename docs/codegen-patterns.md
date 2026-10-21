@@ -3516,7 +3516,7 @@ model run against the bit model of Figure 3-6).
   at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`; tty_$i_put_chars 0xE1B362
   `bset #0,(9,A0)`.  The same narrowing as packed booleans (5.3).
-  Members of 8 and above (Verified, sau5): MT_$ACQUIRE `bset #7,(0x32,A4)`
+  Members of 8 and above (Verified, sau5): MT_$ACQUIRE 0xE75E46 `bset #7,(0x32,A4)`
   (member 15 of MT_$SCB's flag word through A4); PROC2_$FORK 0xE732B4
   `bclr #0,(-186,A2)` is bit 8 of a flag word of unknown type.
   - **On an absolute or indexed operand the member number is not reduced
@@ -3541,7 +3541,8 @@ model run against the bit model of Figure 3-6).
   `ori #mask` for `+` (PROC2_$INIT 0xE3065A `ori.w #0x180,(42,A2)`, two
   members of the flag word, type not known).
   - **Every member in a word set's high byte: `ori.b`/`andi.b` of that
-    byte (Verified, sau5; bead domain-pascal-wrzd):** mt_$queue_request
+    byte (Verified, sau5 and sau2; bead domain-pascal-wrzd):** sau2
+    MMAP_$INIT 0xE3196E `andi.b #7,(A1)` (`flags - [11..15]`, a range); mt_$queue_request
     0xE759CE `ori.b #-0x60,(0x4,A3)` (`pb^.flags + [15, 13]`), init_unit
     0xE75C46 `andi.b #-0x39,(0x44,A4)` (`- [13, 12, 11]`), MT_$WAIT
     0xE76A78 `andi.b #-0x19,(0x44,A2)` (`- [12, 11]`); also mt_$shutdown
