@@ -119,3 +119,65 @@ fn refused_in_a_large_section() {
     let e = err(unit(0x7C00, 0x100, "for i := 1 to 64 do a[i] := n;"));
     assert!(e.contains("0x8000 bytes or less"), "{e}");
 }
+
+/// A unit with overlay section `sec` holding `pad` bytes, the array `a`
+/// of 64 4-byte records from 1, then `more` bytes, and routine `t` with
+/// body `body`.
+fn rec_unit(pad: u32, more: u32, body: &str) -> String {
+    let chars = |name: &str, n: u32| {
+        if n == 0 {
+            String::new()
+        } else {
+            format!("  {name}: array[1..{n}] of char;\n")
+        }
+    };
+    let (pad, tail) = (chars("pad", pad), chars("tail", more));
+    format!(
+        "module m;
+type e = record x: integer; y: integer; end;
+var (sec)
+{pad}  a: array[1..64] of e;
+{tail}define t;
+procedure t(in n: integer);
+begin
+  {body}
+end;
+"
+    )
+}
+
+/// A `with` over an element of an overlay section's array (bead
+/// domain-pascal-3m13): the array's offset is not folded into the
+/// fields' displacements where the selector biases the base or refuses
+/// the array (`Selector::symbol_bias`), so both still apply.
+#[test]
+fn with_elements_of_overlay_arrays() {
+    let body = "with a[n] do begin x := n; y := n end;";
+    // At 0x7C00 and beyond of a large section: 60000 bytes in (the
+    // element's address as a value beyond a byte is a best-effort form,
+    // bead domain-pascal-1ibr: not strict for this one).
+    let strict = dpc_syntax::diag::set_strict(false);
+    let lines = compile(&rec_unit(0x7C00, 0x400, body));
+    dpc_syntax::diag::set_strict(strict);
+    let lines = lines.unwrap();
+    assert!(
+        lines.iter().any(|l| l.starts_with("movea.l #SEC+60000,")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("#SEC,")), "{lines:?}");
+    // Between the start and 0x7C00 of a large section: refused.
+    let e = compile(&rec_unit(0x100, 0x8000, body))
+        .unwrap_err()
+        .join("\n");
+    assert!(e.contains("between the start and offset 0x7C00"), "{e}");
+    // At 0x7C00 or beyond of a section of 0x8000 bytes or less: refused.
+    let e = compile(&rec_unit(0x7C00, 0x100, body))
+        .unwrap_err()
+        .join("\n");
+    assert!(e.contains("0x8000 bytes or less"), "{e}");
+    // Below 0x7C00 of a small section: folded, the symbol itself and the
+    // array's offset in the fields (0x100 - 4 for `x`).
+    let lines = compile(&rec_unit(0x100, 0x100, body)).unwrap();
+    assert!(lines.contains(&"lea (0,%a1,%d0.w),%a1".to_string()), "{lines:?}");
+    assert!(lines.contains(&"move.w (%a0),(0xfc,%a1)".to_string()), "{lines:?}");
+}

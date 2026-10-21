@@ -2465,6 +2465,7 @@ fn lower_body(
         uplevel,
         with_temps: Default::default(),
         with_elem_temps: Default::default(),
+        for_indices: Default::default(),
         hidden_assigned: Default::default(),
     };
     let mut out = cx.seq(&block.stmts)?;
@@ -3106,6 +3107,9 @@ struct Cx<'a> {
     /// How many of [`Self::with_temps`] hold an array element's address
     /// (the ones given a frame slot: [`with_slots`]).
     with_elem_temps: std::cell::Cell<usize>,
+    /// The frame offsets of the indices of the `for` loops whose bodies
+    /// are being lowered ([`Cx::with_stmt`]).
+    for_indices: std::cell::RefCell<Vec<i32>>,
     /// The body assigns its hidden-address result
     /// ([`hidden_result_assignment`]).
     hidden_assigned: std::cell::Cell<bool>,
@@ -3143,6 +3147,22 @@ thread_local! {
     /// references to the record stand for ([`Cx::with_stmt`]).
     static WITHS: std::cell::RefCell<Vec<(u32, SExpr, Addr)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Address `a` split into the address with no constant displacement and
+/// that displacement, for an array's base under a `with` element
+/// ([`Cx::with_stmt`]): a frame, data-area, symbol or pointer base.  An
+/// element of an outer array and a volatile wrapper are kept whole.
+fn base_displacement(a: Addr) -> (Addr, i32) {
+    match a {
+        Addr::Frame(o) => (Addr::Frame(0), o),
+        Addr::Enclosing(o) => (Addr::Enclosing(0), o),
+        Addr::Static(o) => (Addr::Static(0), o),
+        Addr::OtherStatic { section, offset } => (Addr::OtherStatic { section, offset: 0 }, offset),
+        Addr::Symbol { name, offset } => (Addr::Symbol { name, offset: 0 }, offset),
+        Addr::Indirect { base, offset } => (Addr::Indirect { base, offset: 0 }, offset),
+        a => (a, 0),
+    }
 }
 
 /// The designator and address bound to `with` record `w`
@@ -4074,7 +4094,10 @@ impl Cx<'_> {
     ///   ([`Function::with_temps`]), the constant displacements folded into
     ///   each reference (NETLOG_$LOG_IT 0xE71BC6..0xE71BFC: `movea.l
     ///   (116,A5),A0; lea (0,A0,D1.w),A0`, then eleven field stores
-    ///   `(-26,A0)` .. `(-2,A0)`, the 1-based array's `-26` in each).
+    ///   `(-26,A0)` .. `(-2,A0)`, the 1-based array's `-26` in each; the
+    ///   array's own offset in its record or variable too, SAU5
+    ///   MT_PURGE_UCB 0xE75786 `lea (0x0,A0,D0.w),A3` with the units'
+    ///   +0x3C in `(0x44,A3)`).
     /// `d := f(args)` for a function `f` whose result goes through a
     /// hidden address ([`ResultReg::Hidden`]; codegen-patterns 3, "Record
     /// results over 4 bytes"): the call with a frame temporary's address
@@ -4185,9 +4208,77 @@ impl Cx<'_> {
                         offset,
                     } => {
                         self.with_elem_temps.set(self.with_elem_temps.get() + 1);
+                        // The array's own place in its variable (a field's
+                        // offset, the variable's in its data area or frame)
+                        // is a constant displacement too: the base's
+                        // register alone, `(0,An,Dx)`, every field's
+                        // displacement carrying it (SAU5 MT_PURGE_UCB
+                        // 0xE75770..0xE757CA, `with mt_$scb.units[u]` with
+                        // `units` at +0x3C: `movea.l #MT_$SCB,A0; mulu.w
+                        // (A2),D0; lea (0x0,A0,D0.w),A3; bset.b
+                        // #0x2,(0x44,A3)`, `pea (0x3c,A3)`, `tst.l
+                        // (0x3c,A3)`; the same at 0xE75870, 0xE75B36,
+                        // 0xE75C22, 0xE762BC, 0xE767C4, 0xE769A0; bead
+                        // domain-pascal-3m13).  Kept in the base when the
+                        // folded displacements would not fit 16 bits, and
+                        // for an element at an enclosing `for` loop's
+                        // index: the selector matches such a temporary to
+                        // the loop's stepped array by its base and moves
+                        // the array's offset into the references itself
+                        // (`dpc-m68k` `with_rebase`, DBUF_$INVALIDATE
+                        // 0xE3AA12).
+                        let rec_bytes = i64::from(p.types.size(rec.ty));
+                        let at_for_index = matches!(&*index,
+                            Expr::Load { addr: Addr::Frame(o), .. }
+                            if self.for_indices.borrow().contains(o));
+                        // An array of an overlay section that the selector
+                        // reaches through a biased base or refuses at its
+                        // offset ([`Selector::symbol_bias`]: 60000 bytes in
+                        // for 0x7C00 and beyond of a section of more than
+                        // 0x8000 bytes; between, or 0x7C00 and beyond of a
+                        // smaller one, refused): the offset kept in the
+                        // base, so that the bias and the refusals apply.
+                        let (b, d) = base_displacement(*base);
+                        let biased = || {
+                            let mut x = rec;
+                            loop {
+                                match &x.kind {
+                                    ExprKind::Field { base, .. } | ExprKind::Transfer(base) => {
+                                        x = base
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            let ExprKind::Index { base: arr, .. } = &x.kind else {
+                                return true;
+                            };
+                            match overlay_var(p, &**arr) {
+                                Some((_, size)) if size > 0x8000 => d != 0,
+                                Some(_) => d >= 0x7C00,
+                                None => false,
+                            }
+                        };
+                        let total = i64::from(d) + i64::from(offset);
+                        let fits = i16::try_from(total).is_ok()
+                            && i16::try_from(total + rec_bytes).is_ok();
+                        let fold = d != 0 && !at_for_index && !(matches!(b, Addr::Symbol { .. }) && biased());
+                        if fold && !fits {
+                            // Best effort (not byte-identical): no image site
+                            // of a `with` element whose folded displacements
+                            // pass 16 bits; the offset kept in the base.
+                            best_effort(
+                                rec.span,
+                                "a `with` over an element of an array whose offset in its \
+                                 variable, folded into the fields' displacements, would not fit \
+                                 16 bits (the offset kept in the `lea`: no site seen, \
+                                 codegen-patterns 5.2, \"`with`\") is",
+                            )?;
+                        }
+                        let (base, offset) =
+                            if fold && fits { (b, total as i32) } else { (b.offset_by(d), offset) };
                         (
                             Expr::AddrOf(Addr::Index {
-                                base,
+                                base: Box::new(base),
                                 index,
                                 scale,
                                 offset: 0,
@@ -4473,7 +4564,10 @@ impl Cx<'_> {
         };
         let from = bound(from)?;
         let to = bound(to)?;
-        let body = self.seq(std::slice::from_ref(body))?;
+        self.for_indices.borrow_mut().push(offset);
+        let body = self.seq(std::slice::from_ref(body));
+        self.for_indices.borrow_mut().pop();
+        let body = body?;
         if body.is_empty() {
             best_effort(s.span, "a `for` loop with an empty body is")?;
         }

@@ -5641,7 +5641,38 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     register for the body (a callee-saved one across calls, 12.4 R3) and
     never stores, the constant displacements in each reference; an
     element through a pointer in memory as at NETLOG_$LOG_IT (index,
-    pointer, `lea`).
+    pointer, `lea`).  **The array's own offset is part of the constant
+    displacement** (Verified, SAU5; bead domain-pascal-3m13): an array
+    that is a field at a nonzero offset of its record (or a variable at
+    an offset of the unit's data or the frame) has its element's address
+    formed from the base register alone, `lea (0,An,Dx),Am`, and the
+    array's offset in every field's displacement.  SAU5 MT_PURGE_UCB
+    0xE75770..0xE757CA, `with mt_$scb.units[u]`, the 0x2E-byte units at
+    +0x3C of MT_$SCB 0xE90C8E: `movea.l #MT_$SCB,A0; mulu.w (A2),D0; lea
+    (0x0,A0,D0.w),A3`, then `bset #2,(0x44,A3)`, `pea (0x3c,A3)`,
+    `tst.l (0x3c,A3)`; the same at 0xE75870, 0xE75B36, 0xE75C22,
+    0xE762BC, 0xE767C4, 0xE769A0 (every indexed `lea` of SAU5's MT module
+    has displacement 0 but MT_$SIO's 0xE76B8C `lea (0x3c,A4,D1.l),A1`,
+    an address taken as a value, `addr(...)`, which keeps the whole
+    address in the `lea` as below).  SAU2 has no counter-example: of its
+    1540 indexed `lea (d,An,Dx),Am` with An one of A0-A5, 1426 have
+    d = 0; of the 46 with a positive d, the only ones whose Am serves two or more memory operands
+    after it are loop-stepped pointers (0xE469CA, 0xE65052), the rest an
+    address stored or passed.  ../source's `with` records that the rule
+    brings to the image's displacements: DISK_$READ 0xE3CF84 `lea
+    (0,A5,D0.w),A0; move.w (144,A0),D1` (dpc before: `lea (0xc4,A0),A1;
+    cmpi.w #3,(-0x34,A1)`); MMAP_$FREE_PAGES 0xE0CEEC `lea (0,A5,D0.w),A0`,
+    0xE0CF18 `cmp.l (56,A0),D2` (before: `lea (0x2c,A5,D0.w)`, `(0xc,A0)`);
+    VTOC_$GET_UID 0xE39260 `lea (0,A5,D6.w),A1`, 0xE39282 `cmp.w
+    (-60,A0),D2`, and through a pointer 0xE39368 `lea (0,A2,D1.l),A0; lea
+    (8,A0),A1; ...; tst.w (6,A0)` (before: `lea (4,A0,D1.w),A0; lea
+    (4,A0),A1`, `(2,A0)`).  `dpc` keeps the offset in the
+    base when the folded displacements would not fit 16 bits (best
+    effort: no site seen), for an array of an overlay section whose
+    base the selector biases or refuses at that offset (60000 bytes in,
+    "Overlay sections of more than 0x8000 bytes"), and for an
+    element at an enclosing `for` loop's index, whose stepped pointer
+    takes the array's offset into the references itself (7.4, "`with`").
   An element's temporary keeps a 4-byte frame slot that no instruction
   addresses (survey Verified on ../source's Pascal; implemented; section
   2, "Frame size", item 4; bead domain-pascal-s9g0): NETLOG_$LOG_IT's

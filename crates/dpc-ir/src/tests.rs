@@ -5980,8 +5980,10 @@ fn with_statements() {
     // the one of the start (p. 4-212, "changing p does not affect access").
     let a = f("lp := p;\nwith lp^ do begin a := 1; lp := p; b := 2 end;");
     assert_eq!(a.with_temps.len(), 1);
-    // An element: its address without the lower bound, which goes into
-    // the references.
+    // An element: its address without the lower bound or the array's
+    // offset in the unit's data, which go into the references (SAU5
+    // MT_PURGE_UCB 0xE75786 `lea (0x0,A0,D0.w),A3`, the array's +0x3C in
+    // `(0x44,A3)`; bead domain-pascal-3m13).
     let a = f("with arr[i] do b := 2;");
     assert_eq!(a.with_temps.len(), 1);
     // Its 4-byte slot below the locals, never addressed (bead
@@ -5990,6 +5992,7 @@ fn with_statements() {
     let StmtKind::Store {
         value:
             Expr::AddrOf(Addr::Index {
+                base,
                 offset: 0,
                 scale: 6,
                 ..
@@ -5999,13 +6002,48 @@ fn with_statements() {
     else {
         panic!("{:?}", a.body[0])
     };
-    assert!(matches!(
-        &a.body[1].kind,
-        StmtKind::Store {
-            addr: Addr::Indirect { offset: -4, .. },
-            ..
-        }
-    ));
+    assert_eq!(**base, Addr::Static(0));
+    // `arr` at 0xC of the data (g 6 bytes, p 4 at 8), from 1: 0xC - 6 + 2.
+    assert!(
+        matches!(
+            &a.body[1].kind,
+            StmtKind::Store {
+                addr: Addr::Indirect { offset: 8, .. },
+                ..
+            }
+        ),
+        "{:?}",
+        a.body[1]
+    );
+    // An element at a `for` loop's index keeps the array's offset in its
+    // base, for the selector's stepped pointer (`dpc-m68k` `with_rebase`).
+    let a = lower_src(
+        "module w;\ntype r = record a: integer; b: integer32; end;\n\
+         var g: r; arr: array[1..4] of r;\nprocedure t;\nvar j: integer;\nbegin\n\
+         for j := 1 to 4 do with arr[j] do b := 2;\nend;\n",
+    )
+    .unwrap()
+    .functions[0]
+        .clone();
+    let StmtKind::For(l) = &a.body[0].kind else {
+        panic!("{:?}", a.body[0])
+    };
+    let StmtKind::Store {
+        value: Expr::AddrOf(Addr::Index { base, .. }),
+        ..
+    } = &l.body[0].kind
+    else {
+        panic!("{:?}", l.body[0])
+    };
+    assert_eq!(**base, Addr::Static(6));
+    // An array whose offset, folded, would pass 16 bits: a best-effort
+    // form (no site seen), refused when strict.
+    let far = "module w;\ntype r = record a: integer; b: integer32; end;\n\
+               s_t = record pad: array[1..16384] of integer; units: array[0..9] of r; end;\n\
+               var s: extern s_t; i: integer;\nprocedure t;\nbegin\n\
+               with s.units[i] do b := 2;\nend;\n";
+    let e = lower_src(far).unwrap_err().join("\n");
+    assert!(e.contains("would not fit 16 bits"), "{e}");
     // Nested: `with g, ...` resolves the second record in the first.
     let a = lower_src(
         "module w;\ntype s = record x: integer; end;\n  r = record a: integer; sub: s; end;\n\

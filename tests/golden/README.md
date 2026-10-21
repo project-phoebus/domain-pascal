@@ -196,6 +196,10 @@ Tests:
   value"), 1.5: records named in place, a unit pointer held for the
   body, an element through a pointer (NETLOG_$LOG_IT 0xE71BB6..0xE71BFC),
   a stable pointer parameter, `lea; move.l`, `pea`.
+- `data/with_field_array` - codegen-patterns 5.2 ("`with`"; bead
+  domain-pascal-3m13): an element of an array at +0x3C of another unit's
+  record, `lea (0,A0,D0.w),A3`, the 0x3C in every field's displacement
+  (SAU5 MT_PURGE_UCB 0xE75770..0xE757CA).
 - `data/block_copy` - codegen-patterns 5.2, 7: block copies of 12 and 14
   bytes unrolled (0xE14BC6, 0xE419B0), of 144 and 22 bytes as `dbf`
   loops (0xE01494, 0xE19DA2).
