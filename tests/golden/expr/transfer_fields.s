@@ -44,13 +44,13 @@ rts
 .globl TF_$WORD
 TF_$WORD:
 link.w %fp,#-0x10
-pea (%a5)
+movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 movea.l (8,%fp),%a0
 move.l (%a0)+,(-8,%fp)
 move.l (%a0)+,(-4,%fp)
 movea.l (0x10,%fp),%a0
-move.w (%a0),(-0xe,%fp)
+move.w (%a0),%d2
 move.w (-4,%fp),(%a5)
 movea.l (0xc,%fp),%a1
 move.b (1,%a1),(2,%a5)
@@ -58,10 +58,10 @@ move.l #0x10002,(-0xc,%fp)
 subq.l #2,%sp
 move.w (-0xa,%fp),-(%sp)
 jsr (TF_$TAKE).l
-move.w (-0xe,%fp),%d0
+move.w %d2,%d0
 lsl.w #3,%d0
 move.w (0,%a5,%d0.w),(%a5)
-movea.l (-0x14,%fp),%a5
+movem.l (-0x18,%fp),%d2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048

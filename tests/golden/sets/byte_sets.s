@@ -122,22 +122,22 @@ rts
 .globl NARROW
 NARROW:
 link.w %fp,#-4
-pea (%a5)
+movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 movea.l (0xc,%fp),%a0
-move.w (%a0),(-2,%fp)
+move.w (%a0),%d2
 move.l (8,%fp),-(%sp)
 pea (.Lc0,%pc)
 jsr (CONVERT).l
 move.b %d0,(0x53,%a5)
-move.w (-2,%fp),%d0
+move.w %d2,%d0
 add.w %d0,%d0
 move.w %d0,%d1
 neg.w %d0
 lsl.w #3,%d1
 add.w %d1,%d0
 move.b (0xd,%a5,%d0.w),(0x54,%a5)
-movea.l (-8,%fp),%a5
+movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048

@@ -1064,6 +1064,9 @@ fn select_body_once(
     s.param_copies(f)?;
     let reg_locals = register_locals(f);
     s.reg_locals = reg_locals.iter().map(|&(o, _)| o).collect();
+    // The value-parameter copies held in a register stand for their
+    // variable as a register-held local does ([`held_param_copies`]).
+    s.reg_locals.extend(held_param_copies(f));
     for &(o, web) in &reg_locals {
         if web {
             let d = s.alloc_d()?;
@@ -4207,6 +4210,123 @@ fn register_locals(f: &Function) -> Vec<(i32, bool)> {
             (l.offset, !narrow)
         })
         .collect()
+}
+
+/// The copies of value parameters passed by address ([`Function::
+/// param_copies`]) that `f` holds in a data register rather than in their
+/// frame slot, by the copy's frame offset (codegen-patterns 1.2, "Held in
+/// a register instead"; bead domain-pascal-gfnj).  The slot stays
+/// reserved: FILE_$SET_REFCNT 0xE5E3F4 `link #-0x44` has its count's copy
+/// place at -0x40 and never addresses it, loading the value through the
+/// argument slot into D0 (0xE5E40A `movea.l (0xc,A6),A0; move.l (A0),D0`)
+/// for its three tests.
+///
+/// Survey (`tools/localsurvey.py params`, over ../source's Pascal with
+/// `-config sau2`: the copies of 1, 2 or 4 bytes whose routine's frame
+/// is the image's, or that the image copies): of 41 in SAU2, 5 are held
+/// in a register (also PROC2_$SET_SERVER 0xE4147C `move.b (A0),D2`,
+/// SMD_$INQ_DISP_TYPE 0xE6DE28 `move.w (A0),D2`, SMD_$SET_TP_REPORTING
+/// 0xE6E4C0 `move.w (A0),D0`, MSG_$SEND's set), 36 copied.  The rule
+/// fits all 41 (and the 7 of SAU5): a copy is held in a register when
+/// the body only reads it as a whole (never assigns it, takes its
+/// address, reads part of it or dereferences it), not every read is a
+/// call argument pushed as it is (the frame then, as for a local, 12.5:
+/// SMD_$SET_TP_CURSOR 0xE6E976, FILE_$INVALIDATE 0xE75166), no read lies
+/// in a loop (DISK_$REGISTER 0xE3D9AC, EC2_$WAIT 0xE42358, SMD_$FREE_HDM
+/// 0xE6DA3A copy theirs; all three save six or more registers, so this
+/// may be register pressure rather than the loop: Uncertain), it is not a
+/// pointer (SET_LITES_LOC 0xE0C4EC copies its pointer and tests the copy,
+/// 0xE0C4F4), and no nested routine reaches it (read through the frame,
+/// codegen-patterns 6).  No assigned copy is decided by the survey: those
+/// stay in the frame, as do a set tested with `in` and a copy the first
+/// statement tests against zero ([`zero_tested_first`]).
+fn held_param_copies(f: &Function) -> Vec<i32> {
+    if f.nesting.is_some() {
+        return Vec::new();
+    }
+    let (idx, uses) = crate::locals::param_copy_uses(f);
+    // Pointers, and sets tested with `in` (in a register some members'
+    // tests are refused, codegen-patterns 5.1; no such copy is in the
+    // survey): kept in the frame.
+    let mut pointer: Vec<i32> = Vec::new();
+    walk(&f.body, &mut |n| match n {
+        Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ty,
+        }) if ty.pointer => pointer.push(*o),
+        Node::Expr(Expr::SetMember { set, .. }) => {
+            let mut s: &Expr = set;
+            while let Expr::Convert { value, .. } = s {
+                s = value;
+            }
+            if let Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } = s
+            {
+                pointer.push(*o);
+            }
+        }
+        _ => {}
+    });
+    idx.iter()
+        .zip(&uses.locals)
+        .filter(|&(&k, l)| {
+            let pc = &f.param_copies[k];
+            let (lo, hi) = (pc.copy, pc.copy + pc.bytes as i32);
+            let only_pushed = l.loads.iter().all(|r| r.whole);
+            !l.loads.is_empty()
+                && l.stores.is_empty()
+                && !l.deref
+                && !l.other
+                && !l.for_index
+                && !only_pushed
+                && l.loads.iter().all(|r| r.at.lp.is_none())
+                && !pointer.contains(&pc.copy)
+                && !f
+                    .uplevel_refs
+                    .iter()
+                    .any(|&(o, n)| o < hi && lo < o + n as i32)
+                && !zero_tested_first(f, pc.copy)
+        })
+        .map(|(&k, _)| f.param_copies[k].copy)
+        .collect()
+}
+
+/// Whether the first statement of `f` starts by testing the frame object
+/// at `copy` against zero (`if w > 0`, `while b`), which right after a
+/// load into a register would test the load's flags or `tst` it.  Which
+/// the original does there is not settled (codegen-patterns 7.1; after
+/// `movea.l (d,A6),An; move.<s> (An),Dn` the image branches on the move's
+/// flags 14 times, PROC2_ 0xE48122 `bpl.s`, and tests the register 3
+/// times, DIR_$GET_ENTRYU 0xE4D51E `tst.w D0`), so [`held_param_copies`]
+/// leaves such a copy in the frame, as before.
+fn zero_tested_first(f: &Function, copy: i32) -> bool {
+    fn is_copy(e: &Expr, copy: i32) -> bool {
+        let mut e = e;
+        while let Expr::Convert { value, .. } = e {
+            e = value;
+        }
+        matches!(e, Expr::Load { addr: Addr::Frame(o), .. } if *o == copy)
+    }
+    fn first(c: &IrCond, copy: i32) -> bool {
+        match c {
+            IrCond::Compare { lhs, rhs, .. } => {
+                (is_copy(lhs, copy) && matches!(rhs, Expr::Const { value: 0, .. }))
+                    || (is_copy(rhs, copy) && matches!(lhs, Expr::Const { value: 0, .. }))
+            }
+            IrCond::Test(e) => is_copy(e, copy),
+            IrCond::Not(x) => first(x, copy),
+            IrCond::AndThen(a, _) | IrCond::OrElse(a, _) | IrCond::And(a, _) | IrCond::Or(a, _) => {
+                first(a, copy)
+            }
+            IrCond::Odd(_) | IrCond::Block { .. } | IrCond::SetEmpty { .. } => false,
+        }
+    }
+    match f.body.first().map(|s| &s.kind) {
+        Some(StmtKind::If { cond, .. } | StmtKind::While { cond, .. }) => first(cond, copy),
+        _ => false,
+    }
 }
 
 /// A node [`walk`] visits.
@@ -12776,10 +12896,39 @@ impl Selector {
                 refs.push(*o);
             }
         });
+        let held = held_param_copies(f);
         let multi = self.multi;
         self.multi = true;
         for pc in &f.param_copies {
             self.span = pc.span;
+            if held.contains(&pc.copy) {
+                // Held in a data register: loaded through the slot like
+                // a copy, into a new register that the body's reads use;
+                // the frame slot stays reserved ([`held_param_copies`];
+                // FILE_$SET_REFCNT 0xE5E40A `movea.l (0xc,A6),A0; move.l
+                // (A0),D0`).
+                self.stmt_start = self.out.len();
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Disp(pc.slot, FP),
+                    dst: a,
+                });
+                self.fresh.push((Reg::A(a), self.stmt_start, self.span));
+                let d = self.alloc_d()?;
+                let size = match pc.bytes {
+                    1 => Size::B,
+                    2 => Size::W,
+                    _ => Size::L,
+                };
+                self.out.push(Insn::Move {
+                    size,
+                    src: Ea::Ind(a),
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                self.pinned.push((pc.copy, Reg::D(d)));
+                continue;
+            }
             let (lo, hi) = (pc.copy, pc.copy + pc.bytes as i32);
             let used = refs.iter().any(|&o| lo <= o && o < hi)
                 || f.uplevel_refs

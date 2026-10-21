@@ -390,3 +390,54 @@ end;",
         assert!(e.contains(want), "{src}\n{e}");
     }
 }
+
+/// A copy only read, not every read pushed, is held in a data register
+/// loaded through the slot where the copy would be made; its frame slot
+/// stays reserved (`link #-4`): FILE_$SET_REFCNT 0xE5E40A `movea.l
+/// (0xc,A6),A0; move.l (A0),D0`, then `cmpi.l #-1,D0` (codegen-patterns
+/// 1.2, "Held in a register instead"; bead domain-pascal-gfnj).  Copied as
+/// before when every read pushes it, when it is assigned, or when a read
+/// lies in a loop.
+#[test]
+fn copies_held_in_a_register() {
+    let lines = routine(
+        "procedure t(l: integer32; out w: integer);
+begin
+  if l = -1 then
+    w := 0
+  else
+    w := l;
+end;",
+    );
+    assert_eq!(lines[0], "link.w %fp,#-4", "{lines:?}");
+    // A1: the `out` slot's entry load took A0 (0xE5E402 takes A2 and A3
+    // for the slots used twice, then A0 for the count's)
+    assert!(lines.iter().any(|l| l == "move.l (%a1),%d0"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "cmpi.l #-1,%d0"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("(-4,%fp)")), "{lines:?}");
+    for src in [
+        "procedure t(w: integer);
+begin
+  ext_$w(w);
+end;",
+        "procedure t(w: integer);
+begin
+  w := w + 1;
+  ext_$w(w + 1);
+end;",
+        "var g: integer;
+procedure t(w: integer);
+var i: integer;
+begin
+  i := 0;
+  repeat i := i + 1 until i = w;
+  g := i;
+end;",
+    ] {
+        let lines = routine(src);
+        assert!(
+            lines.iter().any(|l| l.starts_with("move.w (%a0),(-")),
+            "{src}\n{lines:?}"
+        );
+    }
+}

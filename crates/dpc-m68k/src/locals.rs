@@ -98,15 +98,38 @@ impl BodyUses {
 
 /// The uses of `f`'s scalar locals.
 pub fn body_uses(f: &Function) -> BodyUses {
+    let objs: Vec<(i32, Width)> = f
+        .scalar_locals
+        .iter()
+        .map(|l| (l.offset, l.ty.width))
+        .collect();
+    uses_of(f, &objs)
+}
+
+/// The uses of `f`'s value-parameter copies of 1, 2 or 4 bytes
+/// ([`Function::param_copies`]), as if each were a local; the copy made
+/// at entry is not among the assignments (codegen-patterns 1.2, "Held in
+/// a register instead").  With each one's index in `param_copies`.
+pub fn param_copy_uses(f: &Function) -> (Vec<usize>, BodyUses) {
+    let (idx, objs): (Vec<usize>, Vec<(i32, Width)>) = f
+        .param_copies
+        .iter()
+        .enumerate()
+        .filter_map(|(k, pc)| Width::of_size(pc.bytes).map(|w| (k, (pc.copy, w))))
+        .unzip();
+    (idx, uses_of(f, &objs))
+}
+
+/// The uses of the frame objects `objs` (offset, width) in `f`'s body.
+fn uses_of(f: &Function, objs: &[(i32, Width)]) -> BodyUses {
     let mut w = Walk {
-        f,
+        objs,
         out: BodyUses {
-            locals: f
-                .scalar_locals
+            locals: objs
                 .iter()
-                .map(|l| LocalUse {
-                    offset: l.offset,
-                    width: l.ty.width,
+                .map(|&(offset, width)| LocalUse {
+                    offset,
+                    width,
                     stores: Vec::new(),
                     loads: Vec::new(),
                     deref: false,
@@ -132,7 +155,8 @@ pub fn body_uses(f: &Function) -> BodyUses {
 }
 
 struct Walk<'a> {
-    f: &'a Function,
+    /// The objects followed: frame offset and width.
+    objs: &'a [(i32, Width)],
     out: BodyUses,
     site: Site,
     /// The next statement number.
@@ -146,17 +170,13 @@ struct Walk<'a> {
 impl Walk<'_> {
     /// The local whose object covers frame offset `o`.
     fn local(&self, o: i32) -> Option<usize> {
-        self.f
-            .scalar_locals
+        self.objs
             .iter()
-            .position(|l| o >= l.offset && o < l.offset + l.ty.bytes() as i32)
+            .position(|&(off, w)| o >= off && o < off + w.bytes() as i32)
     }
 
     fn exact(&self, o: i32, w: Width) -> Option<usize> {
-        self.f
-            .scalar_locals
-            .iter()
-            .position(|l| l.offset == o && l.ty.width == w)
+        self.objs.iter().position(|&(off, ow)| off == o && ow == w)
     }
 
     fn other(&mut self, a: &Addr) {

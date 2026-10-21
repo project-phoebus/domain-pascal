@@ -696,9 +696,12 @@ fn local_facts_json(program: &dpc_sema::Program, f: &dpc_ir::Function) -> String
         write!(o, "{}{{{}}}", if k > 0 { "," } else { "" }, site(c)).unwrap();
     }
     o.push_str("],\"locals\":[");
-    for (k, l) in uses.locals.iter().enumerate() {
-        let v = var_at(l.offset);
-        write!(
+    let write_uses = |o: &mut String,
+                      uses: &dpc_m68k::locals::BodyUses,
+                      vars: &[Option<&dpc_sema::Var>]| {
+        for (k, l) in uses.locals.iter().enumerate() {
+            let v = vars[k];
+            write!(
             o,
             "{}{{\"name\":\"{}\",\"type\":\"{}\",\"offset\":{},\"bytes\":{},\"deref\":{},\"other\":{},\"for_index\":{},\"across_call\":{},\"stores\":[",
             if k > 0 { "," } else { "" },
@@ -712,31 +715,57 @@ fn local_facts_json(program: &dpc_sema::Program, f: &dpc_ir::Function) -> String
             uses.across_call(l)
         )
         .unwrap();
-        for (j, s) in l.stores.iter().enumerate() {
-            write!(
-                o,
-                "{}{{{},\"const\":{},\"call\":{}}}",
-                if j > 0 { "," } else { "" },
-                site(&s.at),
-                s.konst,
-                s.call
-            )
-            .unwrap();
+            for (j, s) in l.stores.iter().enumerate() {
+                write!(
+                    o,
+                    "{}{{{},\"const\":{},\"call\":{}}}",
+                    if j > 0 { "," } else { "" },
+                    site(&s.at),
+                    s.konst,
+                    s.call
+                )
+                .unwrap();
+            }
+            o.push_str("],\"loads\":[");
+            for (j, r) in l.loads.iter().enumerate() {
+                write!(
+                    o,
+                    "{}{{{},\"arg\":{},\"whole\":{},\"cond\":{}}}",
+                    if j > 0 { "," } else { "" },
+                    site(&r.at),
+                    r.arg,
+                    r.whole,
+                    r.cond
+                )
+                .unwrap();
+            }
+            o.push_str("]}");
         }
-        o.push_str("],\"loads\":[");
-        for (j, r) in l.loads.iter().enumerate() {
-            write!(
-                o,
-                "{}{{{},\"arg\":{},\"whole\":{},\"cond\":{}}}",
-                if j > 0 { "," } else { "" },
-                site(&r.at),
-                r.arg,
-                r.whole,
-                r.cond
-            )
-            .unwrap();
-        }
-        o.push_str("]}");
+    };
+    let vars: Vec<_> = uses.locals.iter().map(|l| var_at(l.offset)).collect();
+    write_uses(&mut o, &uses, &vars);
+    // The value parameters' copies of 1, 2 or 4 bytes (codegen-patterns
+    // 1.2, "Held in a register instead"; bead domain-pascal-gfnj).
+    let (pidx, puses) = dpc_m68k::locals::param_copy_uses(f);
+    let vars: Vec<_> = puses
+        .locals
+        .iter()
+        .map(|l| {
+            routine.and_then(|r| {
+                r.params
+                    .iter()
+                    .find(|p| p.copy_offset == Some(l.offset))
+                    .map(|p| program.var(p.var))
+            })
+        })
+        .collect();
+    o.push_str("],\"params\":[");
+    write_uses(&mut o, &puses, &vars);
+    // Each copy's argument slot, in the order of "params".
+    o.push_str("],\"param_slots\":[");
+    for (k, &i) in pidx.iter().enumerate() {
+        let slot = f.param_copies[i].slot;
+        write!(o, "{}{slot}", if k > 0 { "," } else { "" }).unwrap();
     }
     o.push_str("]}");
     o

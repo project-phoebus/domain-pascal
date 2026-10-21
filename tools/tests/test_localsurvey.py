@@ -54,6 +54,43 @@ class ImageTests(unittest.TestCase):
             [(0, 4, 'linkw %fp,#-4'), (4, 2, 'movel %d2,%sp@-')]), {'d2'})
 
 
+class ParamCopyTests(unittest.TestCase):
+    # FILE_$SET_REFCNT 0xE5E40A (held in D0) and SMD_$SET_TP_CURSOR
+    # 0xE6E972.. (copied), as objdump prints them
+    HELD = [(0xE5E3F4, 4, 'linkw %fp,#-68'),
+            (0xE5E40A, 4, 'moveal %fp@(12),%a0'),
+            (0xE5E40E, 2, 'movel %a0@,%d0')]
+    COPIED = [(0xE6E964, 4, 'linkw %fp,#-8'),
+              (0xE6E972, 4, 'moveal %fp@(12),%a0'),
+              (0xE6E976, 4, 'movel %a0@,%fp@(-4)'),
+              (0xE6E97A, 4, 'moveal %fp@(16),%a1'),
+              (0xE6E97E, 4, 'movew %a1@,%fp@(-6)')]
+
+    def test_image_copy(self):
+        self.assertIsNone(localsurvey.image_copy(self.HELD, 12))
+        self.assertEqual(localsurvey.image_copy(self.COPIED, 12), -4)
+        self.assertEqual(localsurvey.image_copy(self.COPIED, 16), -6)
+        self.assertEqual(localsurvey.slot_loads(self.HELD, 12), 1)
+        self.assertEqual(localsurvey.slot_loads(self.HELD, 8), 0)
+
+    def test_rules(self):
+        rules = dict(localsurvey.PARAM_RULES)
+        rule = rules['unless every read pushes it, or a pointer']
+        f = localsurvey.features({'calls': []}, local([], [ld(0, 0, cond=True)]))
+        self.assertTrue(rule(f))
+        f = localsurvey.features({'calls': []}, local([], [ld(0, 0, arg=True, whole=True)]))
+        self.assertFalse(rule(f))
+        f = localsurvey.features({'calls': []}, local([], [ld(0, 0)], type='pointer'))
+        self.assertFalse(rule(f))
+        dpc = rules['never assigned, not every read pushes it, no pointer, no read in a loop']
+        f = localsurvey.features({'calls': []}, local([], [ld(0, 1, loop=[0, 2])]))
+        self.assertFalse(dpc(f))
+        f = localsurvey.features({'calls': []}, local([st(0, 0)], [ld(1, 1)]))
+        self.assertFalse(dpc(f))
+        f = localsurvey.features({'calls': []}, local([], [ld(1, 1)]))
+        self.assertTrue(dpc(f))
+
+
 class SourceTests(unittest.TestCase):
     def test_decl_notes(self):
         text = """procedure p(x: integer);

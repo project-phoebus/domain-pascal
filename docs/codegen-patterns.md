@@ -316,13 +316,74 @@ Survey (`tools/framesurvey.py copies`: every compiled routine of
   length, passed on with `move.l (d,A6),-(SP)`) is taken to be `in`.
   Whether an *unused* value parameter is copied cannot be seen (an empty
   procedure is a bare `rts`, section 2).
-- **Held in a register instead (Uncertain):** 189 by-address slots are
-  dereferenced into a data register before the first branch or call
+- **Held in a register instead (rule Verified by survey on ../source's
+  Pascal; implemented; bead domain-pascal-gfnj):** 189 by-address slots
+  are dereferenced into a data register before the first branch or call
   (`movea.l (8,A6),A0; move.w (A0),D2`: FIM_$FREE_ASID 0xE0AA6C,
   VOLX_$MOUNT 0xE6B118 four words into D4..D7), with no frame copy.
-  These may be `in` parameters read once at entry, or value parameters
-  whose copy lives in a register (as a local can, 12.5); the image cannot
-  tell.  `dpc` copies every value parameter into the frame.
+  From the code alone these may be `in` parameters read once at entry,
+  or value parameters whose copy lives in a register (as a local can,
+  12.5); the frame tells them apart, since a value parameter's copy keeps
+  its place (section 2's rule) even when no instruction addresses it.
+  FILE_$SET_REFCNT 0xE5E3F4: `link #-0x44` exact only with the count's
+  4-byte copy at -0x40..-0x3D, never addressed; 0xE5E40A `movea.l
+  (0xc,A6),A0; move.l (A0),D0`, after the entry loads of the other two
+  slots, then `cmpi.l #-1,D0` (0xE5E410), `cmpi.l #0xfff5,D0`, `move.w
+  D0,(-0x38,A6)`.
+  - **Survey** (`tools/localsurvey.py params`: every module file of
+    ../source 73379e5f compiled with `-config sau2 --dump-locals`, the
+    value-parameter copies of 1, 2 or 4 bytes; a copy is *in the frame*
+    when the image copies the slot, `movea.l (d,A6),An` with `move.<s>
+    (An),(k,A6)` among the next two instructions, or addresses dpc's
+    place for it, and *in a register* when it does neither in a routine
+    whose `link` size is dpc's frame size, the slot reserved; SAU5 at
+    the addresses of the fragments' `sau5` rows): SAU2 41 copies, 5 in a
+    register, 36 in the frame; SAU5 7, 2 and 5.  In a register:
+    FILE_$SET_REFCNT; PROC2_$SET_SERVER 0xE41476..0xE4147C (`movea.l
+    (0xc,A6),A0; subq.l #2,SP; move.b (A0),D2`, a boolean read after the
+    ML_$LOCK call); SMD_$INQ_DISP_TYPE 0xE6DE22..0xE6DE28 (`move.w
+    (A0),D2`, pushed, then read again after the call), both images;
+    SMD_$SET_TP_REPORTING 0xE6E4BC..0xE6E4C2 (`move.w (A0),D0; move.w
+    D0,(0xde,A5)`), both images; MSG_$SEND's set 0xE59A22..0xE59A2C
+    (`movea.l (0x14,A6),A3; movea.l (0x18,A6),A4; move.w (A3),D0; move.w
+    (A4),(-46,A6)`: the load into D0 after the next copy's slot load).
+    Outside the decided set (dpc's frame there is not the image's):
+    DISK_$PV_ASSIGN_N 0xE6C86C..0xE6C886 holds its first and fourth
+    parameters, `move.w (A0),D3` and `move.w (A1),D2`, between the frame
+    copies of the second and third, as the rule does (dpc: D0 and D2, the
+    first's register a best-effort choice, 12.4 R4(c)).
+  - **The rule** (41 of 41, 7 of 7): a copy is held in a data register
+    when the body only reads it as a whole (never assigns it, takes its
+    address, reads part of it or dereferences it), not every read is a
+    call argument pushed as it is, no read lies in a loop, it is not a
+    pointer, and no nested routine reaches it.  Every read pushed: the
+    frame, as for a local (12.5; SMD_$SET_TP_CURSOR 0xE6E976, FILE_$
+    INVALIDATE, MSG_$SEND's six words, VOLX_$DISMOUNT, VOLX_$GET_UIDS,
+    ...: 32 copies).  A pointer: SET_LITES_LOC 0xE0C4EC `move.l
+    (A0),(-4,A6)`, tested and stored from the copy (0xE0C4F4, 0xE0C506).
+    A read in a loop: DISK_$REGISTER 0xE3D9AC, EC2_$WAIT 0xE42358,
+    SMD_$FREE_HDM 0xE6DA3A (both images) copy theirs, but all three save
+    six or more registers, so register pressure (12.5) may be the cause
+    rather than the loop (**Uncertain**).  No assigned copy that is
+    otherwise plain is in the survey.  The locals' rule alone (12.5,
+    "unless every read pushes it") fits 37 of 41.
+  - **Implemented** (`dpc-m68k` `isel.rs`, `held_param_copies`;
+    `crate::locals::param_copy_uses` for the facts, also printed by `dpc
+    --dump-locals` as "params"): such a copy is loaded where its copy
+    would be made, `movea.l (slot,A6),An; move.<s> (An),Dn`, into a new
+    virtual data register that every read uses (the allocator places it:
+    D0 at FILE_$SET_REFCNT, D2 when live across a call); its frame slot
+    stays allocated.  Kept in the frame as before: the cases above, and a
+    copy that the body's first statement tests against zero (`if w > 0`,
+    `while b`), where the test would follow the load and which form the
+    original uses there is not settled (7.1: after `movea.l (d,A6),An;
+    move.<s> (An),Dn` the image branches on the move's flags 14 times,
+    PROC2_ 0xE48122 `bpl.s`, and tests the register 3 times,
+    DIR_$GET_ENTRYU 0xE4D51E `tst.w D0`), and a set tested with `in`
+    (in a register some members' tests are refused, 5.1; none in the
+    survey).  Golden
+    `tests/golden/params/held_copies`; exec test
+    `tests/exec/held_copies.pas`.
 - **Frame position (rule Verified by survey; implemented; bead
   domain-pascal-67c):** the copies go where section 2, "Where the
   compiler's objects go", puts the compiler's objects: in front of the

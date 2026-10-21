@@ -8,6 +8,15 @@ domain-pascal-iyd; docs/codegen-patterns.md 12.5).
     localsurvey.py c [--rev REV] [--source DIR] [--work DIR] [-v] [--misses]
                      [--dump FILE] [FILE.c ...]
     localsurvey.py onestmt [--rev REV] [--source DIR] [--work DIR] [FILE.c ...]
+    localsurvey.py params [--rev REV] [--source DIR] [--work DIR] [--dpc DPC]
+                          [--sau2-only] [--dump FILE] [-v] [MODULE.pas ...]
+
+`params' (bead domain-pascal-gfnj; codegen-patterns 1.2, "Held in a
+register instead"): every module file (or those given), `dpc
+--dump-locals' facts of the value-parameter copies of 1, 2 or 4 bytes,
+each classed against the SAU2 image (and SAU5, at the fragments' `sau5'
+rows) as copied into the frame or held in a register, and scored by
+PARAM_RULES; see the comment above cmd_params.
 
 `run' exports ../source's domain_os/ at REV (default HEAD; as
 tools/srcsurvey.py does, into WORK/export, default tmp/localsurvey; the
@@ -1022,6 +1031,178 @@ def cmd_onestmt(a):
     return 0
 
 
+# --- value-parameter copies ---------------------------------------------------
+#
+# A value parameter passed by address (the default convention, ref 5.2
+# Table 5-1 p. 5-5) gets a frame slot for its copy (dpc-sema
+# Param::copy_offset, codegen-patterns 2).  `params' asks, for every such
+# copy of 1, 2 or 4 bytes in a routine of ../source's Pascal whose frame
+# size is the image's, whether the image addresses the copy's slot (the
+# copy in the frame) or not (held in a register, its slot reserved;
+# FILE_$SET_REFCNT 0xE5E40A `movea.l (0xc,A6),A0; move.l (A0),D0', its
+# copy's place -0x40 never addressed; bead domain-pascal-gfnj), with the
+# facts of `dpc --dump-locals' ("params").
+
+_SLOT_LOAD = re.compile(r'^moveal %fp@\((\d+)\),%a(\d)$')
+
+PARAM_RULES = [
+    ('every copy in a register', lambda f: True),
+    ('never assigned', lambda f: f['stores'] == 0),
+    ('unless every read pushes it (12.5)', lambda f: not f['only_pushed']),
+    ('never assigned, unless every read pushes it',
+     lambda f: f['stores'] == 0 and not f['only_pushed']),
+    ('unless every read pushes it, or a pointer',
+     lambda f: not f['only_pushed'] and f['type'] != 'pointer'),
+    # dpc's (isel.rs held_param_copies)
+    ('never assigned, not every read pushes it, no pointer, no read in a loop',
+     lambda f: (f['stores'] == 0 and not f['only_pushed'] and f['type'] != 'pointer'
+                and not f['loop_load'])),
+    ('unless some read pushes it', lambda f: not f['pushed']),
+    ('read once', lambda f: f['loads'] == 1),
+    ('not live across a call', lambda f: not f['across_call']),
+]
+
+
+_COPY_MOVE = re.compile(r'^move[bwl] %a(\d)@\+?,%fp@\((-\d+)\)$')
+
+
+def image_copy(insns, slot):
+    """The frame offset the image copies the argument of slot SLOT to
+    (`movea.l (slot,A6),An' with a `move.<s> (An)[+],(k,A6)' among the
+    next two instructions: codegen-patterns 1.2), or None."""
+    for k, (_a, _n, t) in enumerate(insns):
+        m = _SLOT_LOAD.match(t)
+        if not m or int(m.group(1)) != slot:
+            continue
+        for _b, _m, u in insns[k + 1:k + 3]:
+            c = _COPY_MOVE.match(u)
+            if c and c.group(1) == m.group(2):
+                return int(c.group(2))
+    return None
+
+
+def slot_loads(insns, slot):
+    """How many instructions load the argument slot SLOT (`movea.l
+    (slot,A6),An')."""
+    return sum(1 for _a, _n, t in insns
+               if (lambda m: m and int(m.group(1)) == slot)(_SLOT_LOAD.match(t)))
+
+
+SAU_IMAGES = {
+    s: os.path.expanduser('~/src/domainos-archeology/sr10.2-install/install/'
+                          'ri.apollo.os.v.10.2/%s/domain_os' % s)
+    for s in ('sau2', 'sau5')}
+
+
+def param_rows(facts, images):
+    """[(routine, param, sau, features, image class, offset, address)]
+    for the copies of FACTS (parse_facts) in the routines IMAGES places
+    ({sau: {routine (lower case): (address, size)}}) whose `link' size is
+    dpc's frame size."""
+    import a5survey
+    import loopalign
+    rows = []
+    for sau, rng in images.items():
+        loopalign.IMG, loopalign._image = SAU_IMAGES[sau], None
+        for r in facts:
+            where = rng.get(r['routine'].lower())
+            if where is None:
+                continue
+            ps = [(p, s) for p, s in zip(r.get('params', []), r.get('param_slots', []))
+                  if p['loads'] or p['stores']]
+            if not ps:
+                continue
+            insns = a5survey.reached(where[0], where[0] + where[1])
+            same = link_size(insns) == (r['frame'] + 3) // 4 * 4
+            for p, slot in ps:
+                at = image_copy(insns, slot)
+                if at is not None or (same and slot_used(insns, p['offset'], p['bytes'])):
+                    img = 'frame'
+                elif same:
+                    img = 'register'
+                else:
+                    # dpc's frame is not the image's: whether the slot
+                    # is reserved, i.e. the parameter a value one, is
+                    # not known
+                    continue
+                f = features(r, p)
+                f['image_offset'] = at
+                f['slot_loads'] = slot_loads(insns, slot)
+                f['saved'] = sorted(saved_regs(insns))
+                f['deref'] = p['deref']
+                f['other'] = p['other']
+                f['short'] = short(p)
+                rows.append((r['routine'], p['name'], sau, f, img, p['offset'], where[0]))
+    loopalign.IMG, loopalign._image = SAU_IMAGES['sau2'], None
+    return rows
+
+
+def cmd_params(a):
+    import dpcflags
+    import srcsurvey
+    work = os.path.abspath(a.work)
+    tree, commit = srcsurvey.export_rev(os.path.abspath(a.source), a.rev, work)
+    print('localsurvey params: %s at %s (%s)' % (os.path.normpath(a.source), a.rev, commit[:12]))
+    flags, _how = dpcflags.dpc_flags(tree)
+    mods = a.modules or srcsurvey.find_modules(tree)
+    facts, sau2, sau5 = [], {}, {}
+    for m in mods:
+        p = os.path.join(tree, m)
+        with open(p) as fh:
+            text, _d = srcsurvey.prepare_text(fh.read(),
+                                              lambda q: os.path.exists(os.path.join(tree, q)))
+        with open(p, 'w') as fh:
+            fh.write(text)
+        res = subprocess.run([a.dpc] + flags + ['-I', '.', '--dump-locals', m], cwd=tree,
+                             capture_output=True, text=True)
+        if res.returncode != 0:
+            print('  %s: dpc failed, left out' % m)
+            continue
+        fs = parse_facts(res.stdout)
+        facts.extend(fs)
+        rng, mod = routine_ranges(tree, m)
+        sau2.update(rng)
+        for t in [mod.text] + list(mod.frag_text.values()):
+            for mm in srcsurvey.SAU_ROW_RE.finditer(t):
+                if mm.group(1).lower() == 'sau5':
+                    name = mm.group(3).lower()
+                    # its extent: the SAU2 one's, with room to spare (the
+                    # walk follows the flow and stops at the `rts')
+                    size = rng.get(name, (0, 0x200))[1] + 0x100
+                    sau5[name] = (int(mm.group(2), 16), size)
+    images = {'sau2': sau2}
+    if not a.sau2_only:
+        images['sau5'] = sau5
+    rows = param_rows(facts, images)
+    print('%-28s %-12s %-4s %5s %-8s %-6s %-8s %-16s %-5s %-3s %-9s %s' %
+          ('routine', 'param', 'sau', 'off', 'type', 'image', 'stores', 'loads', 'xcall',
+           'sl', 'address', 'saved'))
+    for rn, pn, sau, f, img, off, addr in rows:
+        st, ld = f['short']
+        kind = 'deref' if f['deref'] else 'other' if f['other'] else f['type']
+        io = f['image_offset']
+        print('%-28s %-12s %-4s %5s %-8s %-6s %-8s %-16s %-5s %-3d 0x%-7X %s' %
+              (rn, pn, sau, off if io in (None, off) else '%d/%d' % (off, io), kind, img, st,
+               ld, 'yes' if f['across_call'] else '-', f['slot_loads'], addr,
+               ','.join(f['saved'])))
+    if a.dump:
+        with open(a.dump, 'w') as fh:
+            json.dump(rows, fh)
+    for sau in images:
+        dec = [x for x in rows if x[2] == sau and not x[3]['deref'] and not x[3]['other']]
+        nreg = sum(1 for x in dec if x[4] == 'register')
+        print()
+        print('%s: plain copies decided: %d (%d in a register, %d in the frame)'
+              % (sau, len(dec), nreg, len(dec) - nreg))
+        for name, pred in PARAM_RULES:
+            miss = [x for x in dec if (x[4] == 'register') != bool(pred(x[3]))]
+            print('  %-50s %3d/%d' % (name, len(dec) - len(miss), len(dec)))
+            if a.verbose:
+                for x in miss:
+                    print('      miss: %s %s (image: %s)' % (x[0], x[1], x[4]))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -1045,8 +1226,18 @@ def main(argv=None):
     o.add_argument('--source', default=os.path.join(ROOT, '..', 'source'))
     o.add_argument('--work', default=os.path.join(ROOT, 'tmp', 'localsurvey'))
     o.add_argument('files', nargs='*')
+    q = sub.add_parser('params')
+    q.add_argument('--rev', default='HEAD')
+    q.add_argument('--source', default=os.path.join(ROOT, '..', 'source'))
+    q.add_argument('--work', default=os.path.join(ROOT, 'tmp', 'localsurvey'))
+    q.add_argument('--dpc', default=os.path.join(ROOT, 'target', 'debug', 'dpc'))
+    q.add_argument('--sau2-only', action='store_true')
+    q.add_argument('--dump', help='write the rows as JSON to this file')
+    q.add_argument('-v', '--verbose', action='store_true')
+    q.add_argument('modules', nargs='*')
     a = ap.parse_args(argv)
-    return {'run': cmd_run, 'c': cmd_c, 'onestmt': cmd_onestmt}[a.cmd](a)
+    return {'run': cmd_run, 'c': cmd_c, 'onestmt': cmd_onestmt,
+            'params': cmd_params}[a.cmd](a)
 
 
 if __name__ == '__main__':
