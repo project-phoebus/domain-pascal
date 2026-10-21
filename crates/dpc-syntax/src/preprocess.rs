@@ -12,7 +12,7 @@
 //! | directive | effect |
 //! |---|---|
 //! | `%include 'p';` | tokens of file `p` are spliced in (p. 4-55; search order ref 6.4.13, p. 6-20) |
-//! | `%if`/`%ifdef`/`%elseif`/`%elseifdef` *pred* `%then`, `%else`, `%endif` | conditional compilation (pp. 4-45..4-50) |
+//! | `%if`/`%ifdef`/`%elseif`/`%elseifdef` *pred* `%then`, `%else`, `%endif` | conditional compilation (pp. 4-45..4-50); a `;` right after `%then`, `%else` or `%endif` is passed on as [`TokenKind::CondSemi`] (owner ruling 2026-10-21: the parser decides by context) |
 //! | `%var n...`, `%enable n...` | declare / set conditional variables (p. 4-50); the predeclared ones come from [`Options::predeclared`] (p. 4-46) and cannot be enabled or set with `-config` (p. 4-48) or declared again (p. 4-49); the `-config` names ([`Options::config`]) are true once declared (ref 6.4.8, p. 6-12) |
 //! | `%config` (in a predicate) | true iff `-config` was given (p. 4-50) |
 //! | `%error 's'`, `%warning 's'` | a diagnostic (pp. 4-51..4-52) |
@@ -333,6 +333,7 @@ impl Pp<'_> {
                     active: active && v,
                     seen_else: false,
                 });
+                self.cond_semi(lx);
             }
             "elseif" | "elseifdef" => {
                 let fi = self.frame_here(depth, span, &name);
@@ -349,6 +350,7 @@ impl Pp<'_> {
                     f.active = eval && v;
                     f.taken |= f.active;
                 }
+                self.cond_semi(lx);
             }
             "else" => {
                 if let Some(i) = self.frame_here(depth, span, "else") {
@@ -360,14 +362,15 @@ impl Pp<'_> {
                     f.taken = true;
                     f.seen_else = true;
                 }
+                self.cond_semi(lx);
             }
             "endif" => {
                 if self.frame_here(depth, span, "endif").is_some() {
                     self.frames.pop();
                 }
-                // The reference writes `%ENDIF;` (p. 4-47); the `;` belongs
-                // to the directive.
-                self.semi(lx, false, in_comment, &name, span);
+                // The reference writes `%ENDIF;` and `%ENDIF ;` (pp. 4-47,
+                // 4-48); the parser decides what the `;` is.
+                self.cond_semi(lx);
             }
             // Everything else has no effect in a skipped region (p. 4-52
             // for %exit, p. 4-55 for %include).
@@ -609,6 +612,26 @@ impl Pp<'_> {
             .into_iter()
             .find(|p| p.is_file())
             .ok_or_else(|| format!("include file `{name}` not found"))
+    }
+
+    /// A `;` right after `%then`, `%else` or `%endif` (pp. 4-47..4-49):
+    /// passed on as [`TokenKind::CondSemi`] when the code after the
+    /// directive is compiled, for the parser to decide.  Owner ruling
+    /// 2026-10-21 (docs/reference-clarifications.md): where a `;` is
+    /// accepted it is that `;` (the statement separator in `x := 1 %if b
+    /// %then else x := 2 %endif ; x := 4`); where a stray `;` would be an
+    /// error it belongs to the directive.  The preprocessor cannot tell
+    /// the two apart, so it keeps the `;`.
+    fn cond_semi(&mut self, lx: &mut Lexer) {
+        if lx.peek().kind == TokenKind::Semi {
+            let t = lx.next_token();
+            if self.active() {
+                self.out.push(Token {
+                    kind: TokenKind::CondSemi,
+                    span: t.span,
+                });
+            }
+        }
     }
 
     /// Consume a `;` after a directive.  `required` lists the directives the
@@ -947,6 +970,26 @@ mod tests {
         assert_eq!(r.idents(), ["b", "d"]);
         let src2 = "%var color mono\n%enable color\n%if color %then a %elseif mono %then b %else c %endif d";
         assert_eq!(clean(src2), ["a", "d"]);
+    }
+
+    /// Owner ruling 2026-10-21: the `;` after %then/%else/%endif is kept,
+    /// as `CondSemi`, for the parser to decide; only in a compiled region.
+    #[test]
+    fn semi_after_conditional_is_kept() {
+        let r = run("%var b\n%if b %then; a %else; c %endif; d");
+        assert!(r.out.diagnostics.is_empty(), "{:?}", r.diags());
+        let k = r.kinds();
+        assert_eq!(
+            k,
+            [
+                K::CondSemi,
+                K::Ident("c".into()),
+                K::CondSemi,
+                K::Ident("d".into())
+            ]
+        );
+        // `%var`'s `;` still belongs to the directive.
+        assert_eq!(run("%var b;\nx").kinds(), [K::Ident("x".into())]);
     }
 
     #[test]

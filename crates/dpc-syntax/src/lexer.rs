@@ -183,6 +183,15 @@ pub enum TokenKind {
     },
     /// A layout or inlining directive passed through by the preprocessor.
     Pragma(Pragma),
+    /// A `;` written right after a conditional directive (`%then`,
+    /// `%else`, `%endif`, ref 4.7 pp. 4-47..4-49).  The lexer never
+    /// produces it; the preprocessor passes such a `;` on as this token and
+    /// the parser decides by context (owner ruling 2026-10-21,
+    /// docs/reference-clarifications.md): it is a `;` where the parser
+    /// accepts one (a statement, declaration, parameter, field or variant
+    /// separator); elsewhere, where a stray `;` would be an error, it
+    /// belongs to the directive and is dropped.
+    CondSemi,
 
     // Operators (Table 4-1, p. 4-3; Bit Operators, p. 4-33).
     Plus,

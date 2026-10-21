@@ -127,7 +127,7 @@ fn punct(k: &T) -> &'static str {
         T::Ge => ">=",
         T::Assign => ":=",
         T::Colon => ":",
-        T::Semi => ";",
+        T::Semi | T::CondSemi => ";",
         T::Comma => ",",
         T::Dot => ".",
         T::DotDot => "..",
@@ -179,17 +179,63 @@ impl<'a> Parser<'a> {
     // Token cursor
     // -----------------------------------------------------------------
 
+    /// Index in `toks` of the `n`th token from the cursor.  The cursor
+    /// does not see a [`T::CondSemi`] (a `;` written right after a
+    /// conditional directive): it counts as a `;` only where the parser
+    /// eats or expects one ([`Parser::eat`], [`Parser::expect`]), and is
+    /// dropped everywhere else.  Owner ruling 2026-10-21
+    /// (docs/reference-clarifications.md "4.7 A `;` after a conditional
+    /// directive"): "where a stray `;` is an error, it belongs to the
+    /// directive".
+    fn index(&self, n: usize) -> usize {
+        let last = self.toks.len() - 1;
+        let mut i = self.pos;
+        let mut k = 0;
+        while i < last {
+            if !matches!(self.toks[i].kind, T::CondSemi) {
+                if k == n {
+                    break;
+                }
+                k += 1;
+            }
+            i += 1;
+        }
+        i.min(last)
+    }
+
     fn peek(&self) -> &'a T {
-        &self.toks[self.pos].kind
+        &self.toks[self.index(0)].kind
     }
 
     fn peek_at(&self, n: usize) -> &'a T {
-        let i = (self.pos + n).min(self.toks.len() - 1);
-        &self.toks[i].kind
+        &self.toks[self.index(n)].kind
+    }
+
+    /// Where a `;` is accepted and the next token is not one: consume a
+    /// [`T::CondSemi`] before it, if any, as that `;` (see
+    /// [`Parser::index`]).  A real `;` is taken first: the CondSemi before
+    /// it is then dropped, and so is one right after a `;` (`1: s; %endif;
+    /// 2: t` in a case-arm list, or before `end`).
+    fn eat_cond_semi(&mut self) -> Option<Span> {
+        if self.cond_semi_pending() {
+            let t = self.toks[self.pos];
+            self.pos += 1;
+            Some(t.span)
+        } else {
+            None
+        }
+    }
+
+    /// A [`T::CondSemi`] at the cursor that would be a `;` where one is
+    /// accepted: not right after a `;` ([`Parser::eat_cond_semi`]).
+    fn cond_semi_pending(&self) -> bool {
+        let after_semi =
+            self.pos > 0 && matches!(self.toks[self.pos - 1].kind, T::Semi | T::CondSemi);
+        !after_semi && self.pos < self.index(0)
     }
 
     fn span(&self) -> Span {
-        self.toks[self.pos].span
+        self.toks[self.index(0)].span
     }
 
     /// Span of the last consumed token.
@@ -203,9 +249,12 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> &'a Token {
-        let t = self.toks[self.pos];
+        let i = self.index(0);
+        let t = self.toks[i];
         if !matches!(t.kind, T::Eof) {
-            self.pos += 1;
+            self.pos = i + 1;
+        } else {
+            self.pos = i;
         }
         t
     }
@@ -227,7 +276,7 @@ impl<'a> Parser<'a> {
             self.bump();
             true
         } else {
-            false
+            *k == T::Semi && self.eat_cond_semi().is_some()
         }
     }
 
@@ -303,6 +352,8 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, k: &T) -> PResult<Span> {
         if self.at(k) {
             Ok(self.bump().span)
+        } else if let Some(span) = (*k == T::Semi).then(|| self.eat_cond_semi()).flatten() {
+            Ok(span)
         } else {
             self.expected(&format!("`{}`", punct(k)))
         }
@@ -486,7 +537,7 @@ impl<'a> Parser<'a> {
                 // A module has no main action part and no final `end.`: it
                 // ends after its last routine's `end;` (ref 7.1 Figure 7-1
                 // and the module examples, pp. 7-2, 7-9, 7-10).
-                let span = join(self.span(), self.toks[self.pos + 1].span);
+                let span = join(self.span(), self.toks[self.index(1)].span);
                 self.error_at(
                     span,
                     "a module has no final `end.`; it ends after its last routine (ref 7.1, p. 7-2)",
@@ -1680,6 +1731,18 @@ impl<'a> Parser<'a> {
     }
 
     fn stmt_inner(&mut self) -> PResult<Stmt> {
+        if self.cond_semi_pending() {
+            // A `;` after a conditional directive where a statement
+            // begins (`if c then %if a %then x := 1 %endif; y := 2` without
+            // `a`): it ends an empty statement here and is then eaten as
+            // the separator, `if c then ; y := 2` (owner ruling 2026-10-21;
+            // review of bead domain-pascal-bj6d).
+            let s = self.toks[self.pos].span;
+            return Ok(Stmt {
+                kind: StmtKind::Empty,
+                span: Span::new(s.file, s.lo, s.lo),
+            });
+        }
         let start = self.span();
         // `label: stmt` (p. 4-188: "A statement can be preceded by a label").
         if matches!(self.peek(), T::Int(_) | T::Ident(_)) && matches!(self.peek_at(1), T::Colon) {

@@ -1687,3 +1687,165 @@ fn long_chains_still_parse() {
         parse_on_compiler_stack(src).unwrap();
     }
 }
+
+/// Owner ruling 2026-10-21 (bead domain-pascal-bj6d,
+/// docs/reference-clarifications.md "4.7 A `;` after a conditional
+/// directive"): in a statement part, a `;` after `%endif` (or `%then`,
+/// `%else`) is the statement separator.  The SAU5 SMD source shape.
+#[test]
+fn semi_after_conditional_directive_in_statements() {
+    for (enable, has_else) in [("", false), ("%enable b\n", true)] {
+        let s = stmts(&format!(
+            "%var b\n{enable}\
+             if x = 0 then x := 1 %if b %then else x := 2 %endif ; x := 4;"
+        ));
+        let kinds: Vec<_> = s.iter().map(|s| &s.kind).collect();
+        match kinds.as_slice() {
+            [StmtKind::If { else_branch, .. }, StmtKind::Assign { .. }, StmtKind::Empty] => {
+                assert_eq!(else_branch.is_some(), has_else, "{s:#?}");
+            }
+            _ => panic!("{s:#?}"),
+        }
+    }
+    // After %then and %else too: the `;` after %else, where a statement
+    // begins, ends an empty statement and separates it.
+    let s = stmts("%var b\n%if b %then; x := 1 %else; x := 2 %endif; x := 3");
+    let kinds: Vec<_> = s.iter().map(|s| &s.kind).collect();
+    assert!(
+        matches!(
+            kinds.as_slice(),
+            [
+                StmtKind::Empty,
+                StmtKind::Assign { .. },
+                StmtKind::Assign { .. }
+            ]
+        ),
+        "{s:#?}"
+    );
+}
+
+/// The same ruling where a statement begins (re-review of bead
+/// domain-pascal-bj6d): the `;` ends an empty statement there and
+/// separates it, so without `a` `if c then %if a %then x := 1 %endif;
+/// y := 2` is `if c then ; y := 2`, not `if c then y := 2`.
+#[test]
+fn semi_after_conditional_directive_where_a_statement_begins() {
+    fn body(s: &Stmt) -> &StmtKind {
+        match &s.kind {
+            StmtKind::If {
+                else_branch: Some(e),
+                ..
+            } => &e.kind,
+            StmtKind::If { then_branch, .. } => &then_branch.kind,
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => &body.kind,
+            k => panic!("{k:?}"),
+        }
+    }
+    for (enable, on) in [("", false), ("%enable a\n", true)] {
+        let pre = format!("%var a\n{enable}");
+        for shape in [
+            "if c then %if a %then x := 1 %endif; y := 2;",
+            "while c do %if a %then x := 1 %endif; y := 2;",
+            "for i := 1 to 2 do %if a %then x := 1 %endif; y := 2;",
+            "if c then x := 0 else %if a %then x := 1 %endif; y := 2;",
+        ] {
+            let s = stmts(&format!("{pre}{shape}"));
+            assert_eq!(s.len(), 3, "{shape}: {s:#?}");
+            assert!(matches!(s[1].kind, StmtKind::Assign { .. }), "{shape}: {s:#?}");
+            let b = body(&s[0]);
+            if on {
+                assert!(matches!(b, StmtKind::Assign { .. }), "{shape}: {s:#?}");
+            } else {
+                assert!(matches!(b, StmtKind::Empty), "{shape}: {s:#?}");
+            }
+        }
+        // A case arm: `1: ;` without `a`.
+        let s = stmt(&format!(
+            "{pre}case x of 1: %if a %then y := 1 %endif; 2: y := 2 end"
+        ));
+        let StmtKind::Case { arms, .. } = &s else {
+            panic!("{s:#?}")
+        };
+        assert_eq!(arms.len(), 2, "{arms:#?}");
+        assert_eq!(
+            matches!(arms[0].stmt.kind, StmtKind::Empty),
+            !on,
+            "{arms:#?}"
+        );
+    }
+}
+
+/// The same ruling, where a `;` would be an error (review of bead
+/// domain-pascal-bj6d): the `;` after the directive is dropped.  In a
+/// statement part: right after another `;` in a case-arm list (also
+/// before `otherwise`), and before `else`.
+#[test]
+fn semi_after_conditional_directive_where_a_semi_is_an_error() {
+    for enable in ["", "%enable a\n"] {
+        let pre = format!("%var a\n{enable}");
+        for body in [
+            "case x of 1: y := 1; %if a %then 2: y := 2; %endif; 3: y := 3 end",
+            "case x of 1: y := 1; %if a %then 2: y := 2; %endif; otherwise y := 3 end",
+            "if c then y := 1 %if a %then + 1 %endif; else y := 2",
+        ] {
+            let s = stmts(&format!("{pre}{body}"));
+            assert_eq!(s.len(), 1, "{body}: {s:#?}");
+        }
+    }
+}
+
+/// The same ruling in declarations: a `;` after `%then` or `%else` that
+/// separates parameters, record fields or variant arms is that `;`
+/// (review of bead domain-pascal-bj6d; main took it so).
+#[test]
+fn semi_after_conditional_directive_as_a_declaration_separator() {
+    for enable in ["", "%enable a\n"] {
+        let pre = format!("%var a\n{enable}");
+        for src in [
+            "procedure p(x: integer %if a %then ; y: integer %endif); extern;",
+            "type r = record f: integer %if a %then ; g: integer %endif end;",
+            "type r = record f: integer %if a %then ; g: integer %else ; h: char %endif end;",
+            "type r = record case integer of 1: (f: integer) %if a %then ; 2: (g: char) %endif end;",
+        ] {
+            let d = decls(&format!("{pre}{src}"));
+            assert_eq!(d.len(), 1, "{src}: {d:#?}");
+        }
+    }
+    // Both branches give two fields.
+    for enable in ["", "%enable a\n"] {
+        let d = decls(&format!(
+            "%var a\n{enable}type r = record f: integer \
+             %if a %then ; g: integer %else ; h: char %endif end;"
+        ));
+        let Decl::Type(t) = &d[0] else {
+            panic!("{d:#?}")
+        };
+        let TypeKind::Record { fields, .. } = &t.defs[0].ty.kind else {
+            panic!("{d:#?}")
+        };
+        assert_eq!(fields.len(), 2, "{fields:#?}");
+    }
+}
+
+/// The same ruling: outside a statement part the `;` belongs to the
+/// directive, as in the reference's `%ENDIF ;` and `%ENDIF;` after
+/// declarations (4.7, pp. 4-47..4-49).
+#[test]
+fn semi_after_conditional_directive_in_declarations() {
+    for enable in ["", "%enable c\n"] {
+        // p. 4-48: `%IF _ISP__M68K %THEN PROCEDURE do_68K ... %ELSEIF
+        // _ISP__A88K %THEN PROCEDURE do_10000 ... %ENDIF;`.
+        let d = decls(&format!(
+            "%var c d\n{enable}\
+             %IF c %THEN PROCEDURE do_68K; begin end;\n\
+             %ELSEIF d %THEN PROCEDURE do_10000; begin end;\n\
+             %ENDIF;\n\
+             %if c %then var x: integer; %else; var y: integer; %endif ;\n\
+             %if c %then; type t = integer; %endif;\n\
+             type r = record a: integer; %if c %then b: integer; %endif; end;\n\
+             procedure p(a: integer; %if c %then b: integer; %endif; e: integer);\n\
+             begin x := 1 end;"
+        ));
+        assert!(matches!(d.last(), Some(Decl::Routine(_))), "{d:#?}");
+    }
+}
