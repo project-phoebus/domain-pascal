@@ -6317,8 +6317,8 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   instruction where any object has one, at the object's own width: `x
   := x op c` (`addq`/`subq`, `addi`/`subi`, `andi`, `ori` to memory,
   section 8), `s := s + x` / `s := s - x` on a register-sized set
-  (`bset`/`bclr #k` on the member's byte for one constant member,
-  `ori`/`andi` of a mask for several, `[k]` built in a register then
+  (`ori`/`andi` of the mask at the set's width for one or several
+  constant members, below, `[k]` built in a register then
   `or`/`not`+`and` into the set, 5.1), and a store into a packed field,
   whose forms (5.3) read the unit to keep its other fields (`andi` then
   `or`/`ori`, `bset`/`bclr` for a boolean).  The sau5 image (`sau5/
@@ -6372,8 +6372,27 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   the unit's other bits); any other statement producing one is refused
   (`isel.rs` `check_device_updates`).  Each update is one instruction
   where the image has one, the object's ordinary width (a byte of the
-  unit for a field, the member's byte for one constant set member: no
-  device site of `bset`/`bclr #k`, **Uncertain**).  `x := x ! c`: no
+  unit for a field).  **One constant set member (Verified at the sites
+  below; bead domain-pascal-791y):** on a device set it is `ori`/`andi`
+  of the mask at the set's own width, `.w` for a word set, `.b` for a
+  `[byte]` one, `.l` for a longword one, never `bset`/`bclr #k` on one
+  of its bytes (which a set that is not a device keeps, 5.1).  The sau5
+  image's hardware control words: KOLOR_CTL's ctl, COLOR2_$ENABLE_GPU_INT
+  0xE7355C `andi.w #-5,(0xf9700c).l`, 0xE73564 `ori.w
+  #0x80,(0xf9700c).l`, COLOR2_$DISABLE_GPU_INT 0xE7357A `andi.w
+  #-0x81,(0xf9700c).l`, COLOR2_$VIDEO_CTL 0xE1E6D8 `ori.w #8`, 0xE1E6E2
+  `andi.w #-9`, COLOR2_$COLD_INIT 0xE731D6 `ori.w #8`; its copy
+  COLOR3_$CR_CONTENTS, COLOR2_$BUSY_WAIT 0xE734DE `ori.w
+  #1,(0xe2804c).l`, 0xE734FE `andi.w #-2`, COLOR2_$VIDEO_CTL 0xE1E6FA,
+  0xE1E704, COLOR2_$COLD_INIT 0xE73204 (and KOLOR_CTL's cr written from
+  it); COLOR_SUP's int_ctl, COLOR_$INQ_DONE_WAIT 0xE730C8 `ori.w
+  #2,(0xa0,A3)`, 0xE73128 `andi.w #-3,(0xa0,A3)`.  ../source declares
+  these words integers (`! 16#8`, `& 16#FFF7`), which give the same
+  instructions; a set declaration must too.  No device site of a byte
+  or longword set: the same rule.  Golden `data/device_set_members`,
+  exec test `device_set_members`.  A device set of more than a longword
+  is refused, as any assignment to or from a volatile set of more than
+  a longword is.  `x := x ! c`: no
   device site; `ori.w` as for any word (PARITY_$CHK 0xE0B2C8 `ori.w
   #0x40,(0xffb406).l`, a register PARITY_$CHK also clears with `clr.w`,
   so not a device).  The instructions are marked volatile for the

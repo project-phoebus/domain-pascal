@@ -23806,7 +23806,18 @@ impl Selector {
                 best_effort(self.span, "adding or removing the empty set `[]` is")?;
             }
             let dst = self.ea_of(addr)?;
-            if mask.count_ones() == 1 {
+            // A device's set takes one member, too, with `ori`/`andi` of the
+            // mask at the set's own width, never `bset`/`bclr` on one of its
+            // bytes (codegen-patterns 5.5; bead domain-pascal-791y): the sau5
+            // image updates its hardware control words word-wide in place,
+            // COLOR2_$ENABLE_GPU_INT 0xE7355C `andi.w #-5,(0xf9700c).l`,
+            // 0xE73564 `ori.w #0x80,(0xf9700c).l` (KOLOR_CTL's ctl),
+            // COLOR2_$DISABLE_GPU_INT 0xE7357A `andi.w #-0x81`, COLOR2_
+            // $BUSY_WAIT 0xE734DE `ori.w #1,(COLOR3_$CR_CONTENTS).l` and
+            // 0xE734FE `andi.w #-2`, COLOR_$INQ_DONE_WAIT 0xE730C8 `ori.w
+            // #2,(0xa0,A3)` and 0xE73128 `andi.w #-3` (COLOR_SUP's int_ctl).
+            let device = addr.unwrap_volatile().1.is_some_and(|a| a.device);
+            if mask.count_ones() == 1 && !device {
                 let k = mask.trailing_zeros();
                 let dst = self.byte_of(dst, w.bytes() - 1 - k / 8)?;
                 self.out.push(Insn::BitImm {

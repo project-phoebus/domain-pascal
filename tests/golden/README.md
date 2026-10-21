@@ -222,6 +222,13 @@ Tests:
   0xE0AD52 and MBUS_$DISABLE_DEV 0xE0AD68 (`or.w`/`and.w Dn` into
   PBU_CTL), VME_$INT's `andi.w #-0x4001` (0xE0ABCC), sm_$command's packed
   unit field and command byte (0xE6F1A2..0xE6F1B2), a counter `addq.w`.
+- `data/device_set_members` - codegen-patterns 5.5 (bead
+  domain-pascal-791y): one constant member added to or removed from a
+  `[device]` set with `ori`/`andi` of the mask at the set's width, the
+  sau5 COLOR2_$ENABLE_GPU_INT 0xE7355C/0xE73564 (KOLOR_CTL's ctl),
+  COLOR2_$BUSY_WAIT 0xE734DE/0xE734FE (COLOR3_$CR_CONTENTS),
+  COLOR_$INQ_DONE_WAIT 0xE730C8/0xE73128 (COLOR_SUP's int_ctl); byte and
+  longword sets the same; a set that is not a device keeps `bset`/`bclr`.
 - `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
   address as cells after the routine that first uses them, `pea (d,PC)`,
   `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING
