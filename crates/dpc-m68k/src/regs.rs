@@ -261,7 +261,10 @@ impl Drop for NosaveScope {
 /// out ([`access`]), so no value stays in a register across it (one live
 /// there is spilled, `crate::spill`), and the caller saves D2-D7/A2-A4
 /// for its own caller ([`nosave_clobbers`]; `isel.rs`).  Only a direct
-/// call: `dpc-sema` refuses `nosave` on a routine pointer type.  No call
+/// call is recognised (`jsr` to the routine's symbol): `dpc-sema` refuses
+/// `nosave` on a routine pointer type, and refuses `addr` of a `nosave`
+/// routine, the only way to its address (so no call through `jsr (An)`
+/// can reach one; bead domain-pascal-n18d).  No call
 /// of a `nosave` routine is identified in the image (bead
 /// domain-pascal-7c4j), so this form is best effort.
 pub fn is_nosave_call(ea: &Ea) -> bool {

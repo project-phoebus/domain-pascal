@@ -1831,6 +1831,68 @@ fn addr_of_routines() {
 }
 
 #[test]
+fn addr_of_nosave_routines() {
+    // ref 5.5.8 p. 5-19: a call of a nosave routine clobbers D2-D7/A2-A4,
+    // which dpc compiles for direct calls only.  Its address is refused
+    // whatever it goes to (bead domain-pascal-n18d): a routine pointer
+    // (the bead's repro), a univ_ptr (unchecked, p. 4-146), a type
+    // transfer, an argument, an initial value (3.13.4).
+    const NS: &str = "the address of an `options(nosave)` routine (ref 5.5.8, p. 5-19; calls \
+                      through a routine pointer do not clobber D2-D7/A2-A4) is not supported yet";
+    let decls = "type pp = ^procedure; pf = ^function: integer32;
+                 procedure ns; options(nosave); extern;
+                 function nf: integer32; options(nosave, extern);
+                 procedure take(in q: univ_ptr); extern;
+                 procedure takep(in q: pp); extern;";
+    for (vars, body) in [
+        ("p: pp", "p := addr(ns); p^"),
+        ("q: pf", "q := addr(nf)"),
+        ("u: univ_ptr", "u := addr(ns)"),
+        ("u: univ_ptr", "u := addr(nf)"),
+        ("p: pp", "p := pp(addr(ns))"),
+        ("u: univ_ptr", "u := univ_ptr(addr(ns))"),
+        ("", "take(addr(ns))"),
+        ("", "takep(addr(ns))"),
+        ("b: boolean", "b := addr(ns) = nil"),
+    ] {
+        let vars = if vars.is_empty() {
+            String::new()
+        } else {
+            format!("var {vars};")
+        };
+        let e = errs(&format!(
+            "module m; {decls}
+             procedure hole4_$t(in out b2: integer32; in out c: integer32); {vars}
+             begin {body} end;"
+        ));
+        assert_eq!(e.len(), 1, "{body}: {e:#?}");
+        assert!(e[0].contains(NS), "{body}: {e:#?}");
+    }
+    for init in [
+        "v: pp := addr(ns);",
+        "v: univ_ptr := addr(ns);",
+        "v: pf := addr(nf);",
+        "r: record a: pp; end := [a := addr(ns)];",
+    ] {
+        let e = errs(&format!("module m; {decls} var {init}"));
+        assert!(e.iter().any(|m| m.contains(NS)), "{init}: {e:#?}");
+    }
+    // A routine parameter (5.4, p. 5-13), the other way to pass a
+    // routine, is refused for every routine.
+    assert_err(
+        &format!("module m; {decls} procedure caller(procedure callee); extern;"),
+        "a routine parameter (ref 5.4) is not supported yet",
+    );
+    // Direct calls and the address of a routine without nosave stay
+    // accepted.
+    module(&format!(
+        "{decls} procedure plain; extern;
+         var u: univ_ptr; p: pp; i: integer32;
+         procedure r; begin ns; i := nf; u := addr(plain); p := addr(plain) end;"
+    ));
+}
+
+#[test]
 fn parameter_types_must_be_named() {
     // ref 5.1 p. 5-2: "Procedure range(small_range : 0..10); {WRONG!}".
     assert_err(

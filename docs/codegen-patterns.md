@@ -15242,8 +15242,14 @@ followed; execution test `be_u_kinds`.
   0xE817C4 `move.l D2,-(SP)`, CAL_$WRITE_CALENDAR 0xE8167C `movem.l
   D2-D7,-(SP)`, EC_$WAITN 0xE2063E `move.l A3,-(SP); move.l
   A4,-(SP)`), so their callers show the ordinary convention.  Only
-  direct calls: `dpc-sema` refuses `nosave` on a routine pointer type.
-  Execution test `nosave` (its stubs clobber D0-D7/A0-A4).
+  direct calls (`jsr` to the routine's symbol) are recognised; a call
+  through `jsr (An)` would keep values in D2-D7/A2-A4 across it.  So
+  `dpc-sema` refuses `nosave` on a routine pointer type, and refuses
+  `addr` of a `nosave` routine as not supported yet (bead
+  domain-pascal-n18d), whatever it is assigned, passed, converted
+  (`univ_ptr`, a type transfer) or used as an initial value: `addr` is
+  the only way to a routine's address, routine parameters (5.4) being
+  refused.  Execution test `nosave` (its stubs clobber D0-D7/A0-A4).
 
 ---
 

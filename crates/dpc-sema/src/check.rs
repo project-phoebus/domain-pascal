@@ -4259,6 +4259,31 @@ impl<'t> Checker<'t> {
             );
             return self.error_expr(span);
         }
+        if rt.options.nosave {
+            // ref 5.5.8 p. 5-19: a nosave routine does not preserve
+            // D2-D7/A2-A4, and only a direct call of one is compiled as
+            // clobbering them (dpc-m68k `regs::is_nosave_call`).  Its
+            // address would let it be called through a routine pointer
+            // with nothing clobbered: assigned or passed to a routine
+            // pointer (whose type cannot be `nosave`,
+            // [`Checker::signature_options`]), or to a `univ_ptr`, which
+            // the reference leaves unchecked (p. 4-146, "If, however, the
+            // assignment is to a univ_ptr ... the compiler cannot do this
+            // extra type checking") and which a type transfer or an
+            // initial value (3.13.4) can turn into one.  `addr` is the
+            // only way to a routine's address here (routine parameters,
+            // 5.4, are refused), so refusing it covers every route.
+            // TODO(ref-question): whether the p. 4-146 "must exactly
+            // match the template" check (Appendix B message 344,
+            // "Incompatible routine OPTIONS", p. 9-44) covers `nosave`,
+            // so that `pptr := addr(ns)` is an error rather than allowed.
+            self.unsupported(
+                span,
+                "the address of an `options(nosave)` routine (ref 5.5.8, p. 5-19; calls \
+                 through a routine pointer do not clobber D2-D7/A2-A4)",
+            );
+            return self.error_expr(span);
+        }
         Expr {
             kind: ExprKind::RoutineAddr(r),
             ty: self.types.builtins.univ_ptr,
