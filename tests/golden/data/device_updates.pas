@@ -20,9 +20,13 @@
     D3,(0x31,A0)', then the command's byte `move.b D0,(0x30,A0)' (the
     image reaches SM_$CB through A0; here by its absolute address);
   - counters and flags: sm_$check_status's `addq.w #1,(0x82,A2)';
-    sm_$wire's flag set in place (0xE6EFEE `ori.b #-0x80,(0x44,A2)'; dpc
-    gives a boolean field `bset #7', the original's declaration is not
-    known); a constant into the unit field (`andi.b', `ori.b'). }
+    sm_$wire's flag set in place (0xE6EFEE `ori.b #-0x80,(0x44,A2)': a
+    device's one bit with `ori'/`andi' of its mask at the unit's width,
+    bead domain-pascal-pjh6; the original's declaration is not known); a
+    constant into the unit field (`andi.b', `ori.b');
+  - shutdown: OS_$SHUTDOWN 0xE6ED30 `andi.b #-9,(0xff9431).l', bit 3 of
+    VME_CTL's byte 0x31 cleared (a one-bit field here; the original's
+    declaration is not known). }
 module device_updates;
 type
   io_$int_id_t = record vector: integer; end;
@@ -48,9 +52,21 @@ type
     count: integer;                       { 0x46 }
   end;
 
+  vme_$ctl_word_t = packed record
+    unused_15_8: 0..255;
+    unused_7_4: 0..15;
+    run: 0..1;
+    unused_2_0: 0..7;
+  end;
+  vme_$ctl_t = [device] record
+    unused_00: array[1..24] of integer;
+    w30: vme_$ctl_word_t;                 { 0x30 }
+  end;
+
 var
   pbu_ctl: extern mbus_$ctl_t;
   sm_$cb: extern sm_$cb_t;
+  vme_ctl: extern vme_$ctl_t;
 
 procedure enable_dev(id: io_$int_id_t); options(val_param);
 begin
@@ -81,4 +97,10 @@ begin
   sm_$cb.count := sm_$cb.count + 1;
   sm_$cb.flags.wired := true;
   sm_$cb.cmd_word.unit := 2;
+end;
+
+procedure shutdown;
+begin
+  disable;
+  vme_ctl.w30.run := 0;
 end;

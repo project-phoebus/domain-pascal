@@ -221,7 +221,10 @@ Tests:
   `[device]` objects updated in place, the sau5 MBUS_$ENABLE_DEV
   0xE0AD52 and MBUS_$DISABLE_DEV 0xE0AD68 (`or.w`/`and.w Dn` into
   PBU_CTL), VME_$INT's `andi.w #-0x4001` (0xE0ABCC), sm_$command's packed
-  unit field and command byte (0xE6F1A2..0xE6F1B2), a counter `addq.w`.
+  unit field and command byte (0xE6F1A2..0xE6F1B2), a counter `addq.w`;
+  one bit of a device with `ori`/`andi` of its mask (bead
+  domain-pascal-pjh6): sm_$wire's `ori.b #-0x80,(0x44,A2)` (0xE6EFEE),
+  OS_$SHUTDOWN's `andi.b #-9,(0xff9431).l` (0xE6ED30).
 - `data/device_set_members` - codegen-patterns 5.5 (bead
   domain-pascal-791y): one constant member added to or removed from a
   `[device]` set with `ori`/`andi` of the mask at the set's width, the

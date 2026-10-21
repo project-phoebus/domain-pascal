@@ -21917,6 +21917,29 @@ impl Selector {
         };
         if let Expr::Const { value: c, .. } = value {
             let dst = self.ea_of(addr)?;
+            if field.width == 1 && addr.unwrap_volatile().1.is_some_and(|a| a.device) {
+                // A device's one bit is set or cleared with `ori`/`andi` of
+                // the mask at the unit's width, never `bset`/`bclr #k`
+                // (codegen-patterns 5.5; bead domain-pascal-pjh6): sau5
+                // sm_$wire 0xE6EFEE `ori.b #-0x80,(0x44,A2)` on SM_$CB's
+                // wired flag (tested as the word's sign, 0xE6EF92 `tst.w
+                // (0x44,A2); bmi`), OS_$SHUTDOWN 0xE6ED30 `andi.b
+                // #-9,(0xff9431).l` on VME_CTL's byte 0x31; a boolean or
+                // a one-bit field alike.
+                let bit = 1i64 << field.shift;
+                let (op, v) = if *c != 0 {
+                    (AluOp::Or, bit)
+                } else {
+                    (AluOp::And, !bit)
+                };
+                self.out.push(Insn::AluImm {
+                    op,
+                    size: usize_,
+                    imm: imm(v, unit),
+                    dst,
+                });
+                return Ok(());
+            }
             if boolean {
                 self.out.push(Insn::BitImm {
                     op: if *c != 0 { BitOp::Set } else { BitOp::Clr },
@@ -25090,6 +25113,103 @@ mod tests {
     fn span() -> Span {
         let f = SourceMap::new().add("t.pas", String::new());
         Span::new(f, 0, 0)
+    }
+
+    /// [`Selector::check_device_updates`]' refusal (codegen-patterns 5.5,
+    /// beads domain-pascal-eaw7, -pjh6): no Pascal source reaches it (every
+    /// read-modify-write form dpc selects belongs to a statement that reads
+    /// its object), so the selector's output is built by hand.  A
+    /// read-modify-write instruction on a device operand is refused in a
+    /// statement that does not read the object, and accepted in an update
+    /// that reads it, in a packed-field store (which keeps the unit's
+    /// other bits), on an operand that is volatile but not a device, and
+    /// before the statement's first instruction.
+    #[test]
+    fn device_read_modify_write_outside_an_update_is_refused() {
+        let word = Scalar::signed(Width::Word);
+        let reg = Addr::Volatile {
+            addr: Box::new(Addr::Symbol {
+                name: "R".into(),
+                offset: 0,
+            }),
+            access: Access {
+                device: true,
+                atomic: false,
+            },
+        };
+        let ea = Ea::AbsL("R".into(), 0);
+        let ori = Insn::AluImm {
+            op: AluOp::Or,
+            size: Size::W,
+            imm: 0x80,
+            dst: ea.clone(),
+        };
+        let stmt = |kind: StmtKind| Stmt { kind, span: span() };
+        let plain = stmt(StmtKind::Store {
+            addr: reg.clone(),
+            value: Expr::Const { value: 1, ty: word },
+        });
+        let update = stmt(StmtKind::Store {
+            addr: reg.clone(),
+            value: Expr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(load(reg.clone(), word)),
+                rhs: Box::new(Expr::Const {
+                    value: 0x80,
+                    ty: word,
+                }),
+                ty: word,
+            },
+        });
+        let field = stmt(StmtKind::StoreBits {
+            addr: reg.clone(),
+            field: BitField {
+                unit: Width::Word,
+                shift: 7,
+                width: 1,
+            },
+            value: Expr::Const { value: 1, ty: word },
+            mask: false,
+        });
+        let selector = |device: bool, out: Vec<Insn>| {
+            let mut s = Selector::new(span());
+            s.volatile_eas.push((
+                ea.clone(),
+                Access {
+                    device,
+                    atomic: false,
+                },
+            ));
+            s.out = out;
+            s
+        };
+        let s = selector(true, vec![ori.clone()]);
+        let d = s.check_device_updates(&plain, 0).unwrap_err();
+        assert!(
+            d.message
+                .starts_with("a read-modify-write instruction on a device object in a statement"),
+            "{}",
+            d.message
+        );
+        // A `clr` is a read-modify-write instruction on the 68010 too.
+        let clr = Insn::Clr {
+            size: Size::W,
+            dst: ea.clone(),
+        };
+        assert!(selector(true, vec![clr]).check_device_updates(&plain, 0).is_err());
+        assert!(s.check_device_updates(&update, 0).is_ok());
+        assert!(s.check_device_updates(&field, 0).is_ok());
+        assert!(s.check_device_updates(&plain, 1).is_ok());
+        assert!(selector(false, vec![ori.clone()])
+            .check_device_updates(&plain, 0)
+            .is_ok());
+        // A store into the device with no read-modify-write instruction.
+        let mov = Insn::Move {
+            size: Size::W,
+            src: Ea::Imm(1),
+            dst: ea.clone(),
+        };
+        assert!(selector(true, vec![mov]).check_device_updates(&plain, 0).is_ok());
     }
 
     fn func(frame_size: u32, result: Option<ResultSpec>, body: Vec<StmtKind>) -> Function {

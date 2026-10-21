@@ -51,9 +51,16 @@ rts
 COUNTERS:
 link.w %fp,#0
 addq.w #1,(SM_$CB+0x46).l
-bset #7,(SM_$CB+0x44).l
+ori.b #0x80,(SM_$CB+0x44).l
 andi.b #0xfc,(SM_$CB+0x31).l
 ori.b #2,(SM_$CB+0x31).l
+unlk %fp
+rts
+.globl SHUTDOWN
+SHUTDOWN:
+link.w %fp,#0
+ori.w #0x700,%sr
+andi.b #0xf7,(VME_CTL+0x31).l
 unlk %fp
 rts
 .balignw 4,0x2048

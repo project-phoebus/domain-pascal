@@ -6321,7 +6321,9 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   constant members, below, `[k]` built in a register then
   `or`/`not`+`and` into the set, 5.1), and a store into a packed field,
   whose forms (5.3) read the unit to keep its other fields (`andi` then
-  `or`/`ori`, `bset`/`bclr` for a boolean).  The sau5 image (`sau5/
+  `or`/`ori`; a constant into one bit, a boolean or a one-bit field,
+  `ori`/`andi` of its mask at the unit's width, never `bset`/`bclr #k`,
+  below).  The sau5 image (`sau5/
   domain_os`, map `sau5/domain_os.map`):
   - PBU_CTL, the Multibus adapter's registers (`[device]` in ../source's
     mbus/mbus.ins.pas; MBUS_$INIT 0xE30950 stores its word 2 with `move.w
@@ -6350,14 +6352,30 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
     counters `addq.w #1,(0x82,A2)` (sm_$check_status), `(0x84,A2)`
     (sm_$seek); the wired flag `ori.b #-0x80,(0x44,A2)` (sm_$wire
     0xE6EFEE), tested as the word's sign `tst.w (0x44,A2); bmi`
-    (0xE6EF92): dpc's boolean field gives `bset #7` and `tst.b`, the
-    original's declaration (a set, a field of a word unit) is not
-    known.  Two read-modify-write instructions to the unit for a
+    (0xE6EF92): dpc's boolean field gives the `ori.b` (bead
+    domain-pascal-pjh6, below) and `tst.b`; the original's declaration
+    (a set, a field of a word unit) is not known.  Two read-modify-write
+    instructions to the unit for a
     variable into a multi-bit field, byte accesses (the unit);
-  - a lead: OS_$SHUTDOWN 0xE6ED30 `andi.b #-9,(0xff9431).l`, bit 3 of
-    VME_CTL's byte 0x31 (`[device]` in ../source's vme/vme.ins.pas) after
+  - OS_$SHUTDOWN 0xE6ED30 `andi.b #-9,(0xff9431).l`, bit 3 of VME_CTL's
+    byte 0x31 (`[device]` in ../source's vme/vme.ins.pas) cleared after
     `disable`: a byte-wide in-place `and` on a device page, declaration
     not known.
+
+  **One bit of a device (Verified at the two sites above; bead
+  domain-pascal-pjh6):** a constant stored into a boolean or a one-bit
+  field of a device's packed record is `ori` (true, 1) or `andi` (false,
+  0) of the bit's mask at the field's unit width (dpc's unit, 5.3: the
+  byte that holds the bit, as in both sites), never `bset`/`bclr #k`
+  (sm_$wire 0xE6EFEE `ori.b #-0x80,(0x44,A2)`, OS_$SHUTDOWN 0xE6ED30
+  `andi.b #-9,(0xff9431).l`; no device site of `bset`/`bclr #k` is
+  known).  Records that are not devices keep `bset`/`bclr` (5.3).  A
+  device's packed array of booleans is refused, as any volatile one is
+  (`dpc-ir`), so it has no bit-element form yet.  Golden
+  `data/device_updates` (`counters`, `shutdown`), exec test
+  `device_one_bit`; `check_device_updates`' refusal, which no source
+  reaches, has a unit test on hand-built selector output (`isel.rs`,
+  `device_read_modify_write_outside_an_update_is_refused`).
 
   **Rule.**  Ref 3.15.3 p. 3-57 says the attribute "prevents the
   compiler from generating gratuitous read-modify-write references ...
