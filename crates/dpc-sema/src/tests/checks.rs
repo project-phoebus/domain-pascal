@@ -1455,11 +1455,23 @@ fn integer_constant_to_pointer_transfer() {
         var(&p, "e").init.as_ref().unwrap()[0].value,
         InitDatum::from(ConstValue::Int(0))
     );
-    // A negative constant: the reference does not say what it means.
-    assert_err(
-        "module m; type t = ^integer32; var x: t; procedure p; begin x := t(-1) end;",
-        "negative constant -1",
+    // A negative constant: a 32-bit integer (owner ruling 2026-10-21,
+    // "Allow, 32-bit"; ref 3.2.3 p. 3-5; bead domain-pascal-j1bt), the
+    // same constant as `t(integer32(-1))`.
+    let p = module(
+        "type t = ^integer32;
+         const none = -1;
+         var x: t;
+         procedure p; begin x := t(-1); x := t(none); x := t(integer32(-1)) end;",
     );
+    let stmts = &routine(&p, "p").body.as_ref().unwrap().stmts;
+    for s in stmts {
+        let StmtKind::Assign { value, .. } = &s.kind else {
+            panic!("assignment expected: {:?}", s.kind)
+        };
+        assert!(p.types.is_pointer(value.ty));
+        assert_eq!(value.value, Some(ConstValue::Int(-1)));
+    }
     // A run-time integer16 of another size stays refused (p. 4-197).
     assert_err(
         "module m; type t = ^integer32; var x: t; i: integer;

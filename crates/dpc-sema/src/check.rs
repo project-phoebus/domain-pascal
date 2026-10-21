@@ -4406,9 +4406,13 @@ impl<'t> Checker<'t> {
         // Functions" (p. 4-197): integer constant to a pointer type; bead
         // domain-pascal-gqp): Apollo's `ec2_$ptr_t( ec2_$always_ready_ec )`
         // (streams/sasc misc.pas), the constant 1 a sentinel.  The value
-        // is known, so the pointer is that address.  The reference says
-        // nothing of a negative constant (no bits to keep, p. 4-197, once
-        // the sizes differ): refused.  A run-time integer of another size
+        // is known, so the pointer is that address.  A negative constant
+        // too, as a 32-bit integer (owner ruling 2026-10-21, "Allow,
+        // 32-bit"; reference-clarifications "Type transfer of a negative
+        // constant to a pointer type"; ref 3.2.3 p. 3-5, an integer
+        // constant is represented as a 32-bit integer; bead
+        // domain-pascal-j1bt): `p(-1)` is 16#FFFFFFFF, as
+        // `p(integer32(-1))`.  A run-time integer of another size
         // stays refused (the p. 4-197 size rule).  An integer32 constant
         // (equal sizes, p. 4-197: the bits are kept, negative or not) is
         // a pointer constant too, so that `ptr_t(16#20000)` goes where
@@ -4418,18 +4422,6 @@ impl<'t> Checker<'t> {
             _ => None,
         };
         if let Some(v) = int_const.filter(|_| self.types.is_pointer(t)) {
-            if v < 0 && self.types.size(x.ty) != self.types.size(t) {
-                self.error(
-                    span,
-                    format!(
-                        "a type transfer of the negative constant {v} to the pointer type {} \
-                         (the reference does not say what it means; only constants >= 0 are \
-                         accepted, ref p. 4-197)",
-                        self.types.display(t)
-                    ),
-                );
-                return self.error_expr(span);
-            }
             // A constant, so that it goes where constants go (a stored
             // immediate, a code-section cell passed by address,
             // codegen-patterns 1.5).

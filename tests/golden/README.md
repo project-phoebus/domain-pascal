@@ -638,6 +638,12 @@ Tests:
   bead domain-pascal-gqp): `ec2_$ptr_t(1)` stored, passed by address and
   by value as a 4-byte constant (codegen-patterns 13, 1.5).  No image
   site identified.
+- `expr/transfer_neg_const_ptr` - ref 3.2.3 p. 3-5, p. 4-197 with the
+  owner's ruling of 2026-10-21 ("Allow, 32-bit"; bead domain-pascal-j1bt):
+  `p(-1)` is 16#FFFFFFFF, stored into a pointer field, passed by address
+  (a `ffff ffff` cell) and by value (`pea (-1).w`), and compared as
+  `p(integer32(-1))` is (`cmpi.l #-1`, the form of SAU5 PBU_$SETUP
+  0xE59842).
 - `expr/addr_arith` - ref p. 4-13, p. 4-197, codegen-patterns 5.2
   ("`addr(x)` as a value"), 13 (bead domain-pascal-j28d): an address
   inside another unit's record minus the record's address (NET_$OPEN

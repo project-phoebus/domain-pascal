@@ -93,7 +93,7 @@ Passage: "With one exception, the size of the argument must be the same as the s
 Question: is a type transfer from an integer constant to a pointer type of a different size allowed?
 Owner's answer (2026-10-14): yes, allow it; the constant is a sentinel value expanded to a pointer so that type checking works.
 Consequence: to be implemented under bead domain-pascal-gqp.  The lead reads the ruling as covering integer *constants* (the value is known, so the widening is exact); a run-time integer16 transferred to a pointer stays refused until something needs it.  Related: open question 37 (`char(16#9E)`), the narrowing counterpart.  Side note: 2.2.2.2 (p. 2-12) lists "A type transfer function" among the terms a const value may contain but names `nil` as the only pointer value, which may be why Apollo declared the sentinel as an integer and transferred it at each use.
-Implemented (domain-pascal-gqp): `dpc-sema` (`Checker::transfer`) accepts a type transfer of an integer constant >= 0 to a pointer type of another size; the result is a pointer-typed constant with that value (an address), so it is stored as `move.l #n`, passed by address as a code-section cell and by value as `pea (n).w`, like a 4-byte integer constant (golden `expr/transfer_const_ptr`; no image site identified).  A negative constant is refused: p. 4-197 says nothing once the sizes differ.  A run-time integer16 stays refused (the p. 4-197 size rule).  In a const declaration (`c = ptr_t(1)`) the transfer is refused as before, now with its own message: 2.2.2.2 (p. 2-12) names `nil` as the only pointer value.  A static variable's initial value (`p: ptr_t := ptr_t(1)`) is accepted and emitted as the 4-byte value.  An integer32 constant transferred to a pointer type (equal sizes, so p. 4-197 already allowed it, negative or not) is a pointer constant in the same way, so `ptr_t(16#20000)` is also accepted as an initial value.
+Implemented (domain-pascal-gqp): `dpc-sema` (`Checker::transfer`) accepts a type transfer of an integer constant >= 0 to a pointer type of another size; the result is a pointer-typed constant with that value (an address), so it is stored as `move.l #n`, passed by address as a code-section cell and by value as `pea (n).w`, like a 4-byte integer constant (golden `expr/transfer_const_ptr`; no image site identified).  A negative constant is refused: p. 4-197 says nothing once the sizes differ (superseded 2026-10-21 by the owner's "Allow, 32-bit", below: `p(-1)` is 16#FFFFFFFF).  A run-time integer16 stays refused (the p. 4-197 size rule).  In a const declaration (`c = ptr_t(1)`) the transfer is refused as before, now with its own message: 2.2.2.2 (p. 2-12) names `nil` as the only pointer value.  A static variable's initial value (`p: ptr_t := ptr_t(1)`) is accepted and emitted as the 4-byte value.  An integer32 constant transferred to a pointer type (equal sizes, so p. 4-197 already allowed it, negative or not) is a pointer constant in the same way, so `ptr_t(16#20000)` is also accepted as an initial value.
 
 ## "Rshft", p. 4-171: rshft of a negative constant (3.2.3, p. 3-5)
 Asked: 2026-10-14, by the lead agent (open question 39; bead domain-pascal-95c)
@@ -172,6 +172,13 @@ Passage: 6.4.21: "The -msgs option is the default."  Table 6-2 stars "-nmsgs" as
 Question: which is the default?
 Owner's answer (2026-10-20): `-nmsgs` stays dpc's default: no summary unless `-msgs` is given.  Evidence noted by the reviewer, which the ruling does not follow: the reference's transcripts show the summary line without `-msgs` on the command line ("No errors, no warnings, Pascal Rev n.nn" after "$ pas config_example", p. 6-14; "1 error, no warnings, Pascal Rev n.nn", p. 4-51; "No errors, 1 warning, Pascal Rev n.nn", p. 4-52), which fits the text's `-msgs` default.
 Consequence: none beyond the implementation: `-msgs` prints the report on stderr (crates/dpc/src/main.rs, `Counts::report`); by default nothing is printed.
+
+## Type transfer of a negative constant to a pointer type ("Type Transfer Functions", p. 4-197, PDF p. 330; 3.2.3, p. 3-5)
+Asked: 2026-10-21, by the lead agent (formerly open question 50; bead domain-pascal-j1bt)
+Passage: p. 4-197: "With one exception, the size of the argument must be the same as the size of the destination type. ... This size equality is required because the type transfer function does not change any bits in the argument. ... The one exception is that integer subranges are always compatible regardless of their sizes."  3.2.3: "When you declare an integer constant, Domain Pascal internally represents the value as a 32-bit integer."  The gqp ruling (above, "integer constant to a pointer type") allowed a small constant "expanded to a pointer", but was asked of `1`.
+Question: is a negative constant allowed (`univ_ptr(-1)`, `p(pbu_no_handler)` with `pbu_no_handler = -1`), and are its bits 16#FFFFFFFF (the 32-bit representation of 3.2.3) or 16#0000FFFF (a 16-bit -1 widened with zeros)?  Image: the SAU5 PBU DDF handler fields hold 16#FFFFFFFF (PBU_$ACQUIRE_INT 0xE588D4 `movea.l #-1,A1` stored into each of the 16 handlers, `move.l A1,(-0x48,A0)` 0xE588DA; PBU_$SETUP 0xE59842 `cmpi.l #-1,(0x40,A3)`), which cannot show the source spelling.
+Owner's answer (2026-10-21): "Allow, 32-bit".  A type transfer of an integer constant to a pointer type is accepted; the constant is a 32-bit integer (3.2.3), so -1 becomes 16#FFFFFFFF, the same as `p(integer32(-1))`.
+Consequence: implemented under bead domain-pascal-j1bt: `dpc-sema` (`Checker::transfer`) no longer refuses a negative constant; the result is the pointer constant -1, the same value `p(integer32(-1))` already gave, so it takes the paths of a 4-byte constant: `moveq #-1` and `move.l` stores, a `ffff ffff` code-section cell by address, `pea (-1).w` by value, `cmpi.l #-1` in a comparison.  Tests: sema `integer_constant_to_pointer_transfer`, golden `expr/transfer_neg_const_ptr`.  The gqp entry's "A negative constant is refused" is superseded.
 
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
@@ -919,7 +926,7 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     so whether the original declared these objects `[device]` is
     inferred from their `move #0` stores (codegen-patterns 5.5).*
 
-50. **"Type Transfer Functions", p. 4-197 (PDF p. 330, checked); 3.2.3,
+50. **Answered 2026-10-21; see Clarifications, "Type transfer of a negative constant to a pointer type".**  **"Type Transfer Functions", p. 4-197 (PDF p. 330, checked); 3.2.3,
     p. 3-5.**  p. 4-197: "With one exception, the size of the argument
     must be the same as the size of the destination type. ... This size
     equality is required because the type transfer function does not
@@ -935,9 +942,9 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     bits of a 16-bit -1 kept and widened with zeros)?  The SAU5 PBU DDF
     handler fields hold 16#FFFFFFFF (PBU_$SETUP, PBU_$ACQUIRE_INT), but
     the image cannot show the source spelling (bead domain-pascal-j1bt).
-    *Current: refused ("only constants >= 0 are accepted"); an integer32
-    constant has the pointer's size, so `p(integer32(-1))` is accepted
-    and is 16#FFFFFFFF.*
+    *Before the ruling: refused ("only constants >= 0 are accepted");
+    `p(integer32(-1))` was accepted and was 16#FFFFFFFF.  Now `p(-1)` is
+    the same constant.*
 
 ## Reference errata noticed (no ruling needed)
 
