@@ -40,7 +40,7 @@ rts
 NOT_DEVICE:
 link.w %fp,#0
 bset #7,(PLAIN+1).l
-bclr #4,(PLAIN).l
+bclr #12,(PLAIN).l
 unlk %fp
 rts
 .balignw 4,0x2048

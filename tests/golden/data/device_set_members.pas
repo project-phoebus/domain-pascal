@@ -17,7 +17,9 @@
   - byte and longword sets of a device: `ori.b'/`andi.b',
     `ori.l'/`andi.l' (no site; the same rule);
   - plain: a set that is not a device keeps `bset #k' on the member's
-    byte (TTY_$K_SET_FLAG 0xE6745C, codegen-patterns 5.1). }
+    byte (TTY_$K_SET_FLAG 0xE6745C, codegen-patterns 5.1), the member
+    number unreduced on an absolute operand (sau5 MT_$WAIT 0xE76A1A
+    `bclr #13,(0xe90cc0).l'; bead domain-pascal-fozq). }
 module device_set_members;
 type
   kolor_ctl_t = [device] record

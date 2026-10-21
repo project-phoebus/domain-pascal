@@ -3516,13 +3516,45 @@ model run against the bit model of Figure 3-6).
   at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`; tty_$i_put_chars 0xE1B362
   `bset #0,(9,A0)`.  The same narrowing as packed booleans (5.3).
-  **Uncertain:** no member of 8 and above is known to be a set's (the
-  TTY sets use members 0..7); PROC2_$FORK 0xE732B4 `bclr #0,(-186,A2)` is
-  bit 8 of a flag word of unknown type.  `dpc` narrows every member so.
+  Members of 8 and above (Verified, sau5): MT_$ACQUIRE `bset #7,(0x32,A4)`
+  (member 15 of MT_$SCB's flag word through A4); PROC2_$FORK 0xE732B4
+  `bclr #0,(-186,A2)` is bit 8 of a flag word of unknown type.
+  - **On an absolute or indexed operand the member number is not reduced
+    (Verified; bead domain-pascal-fozq):** sau5 MT_$WAIT 0xE76A1A `bclr
+    #13,(0xe90cc0).l` (MT_$SCB+0x32, `- [13]`), PBU2_$ASSOC 0xE58CCA `bclr
+    #15` and 0xE58D34 `bset #10`, PBU_$SETUP 0xE59B34 `bset #12`,
+    PBU_$WIRE_PBU 0xE5A45E `bset #14`, PBU_$INIT 0xE5A72C `bset #11`,
+    MMAP_$INIT 0xE330AE/0xE330B6 `bset #15`, 0xE330BE `bset #13`; sau2
+    MMAP_$INIT 0xE31B56..0xE31B66, MMAP_$SET_WS_INDEX 0xE0D254 `bset
+    #15,(0x2c,A5,D0.w)`, MMAP_$FREE_WSL 0xE0D1B2 `bclr #15,(0x2c,A5,D0.w)`,
+    AST_$ACTIVATE_ASTE_CANNED 0xE2F2E0 `bclr #13,(-0x80,A1,D1.l)`, PKT_
+    $PING_SERVER 0xE12DFC `bset #13,(-2,A3,D3.l)`.  A scan of every static
+    `bset`/`bclr` to memory in the code segments of both images: on
+    absolute and indexed operands all have a number of 8 and above (sau2
+    11, sau5 17); on `(An)`, `(d,An)`, `(An)+`, `-(An)` none has (sau2 668,
+    sau5 746).  The CPU takes the number modulo 8 on a byte, so both
+    forms set the same bit.  `dpc` keeps a word set's number unreduced on
+    `abs.l` and `(d,An,Dn)`; a member below 8 is the same either way.  A
+    longword set's members 8 and above there: no site, reduced.
 - **Several constant members (Verified once):** `andi #~mask` to memory
   for `-` (TTY_$I_RCV 0xE1B98E `andi.w #-0xe1,(8,A2)`, `- [5, 6, 7]`),
   `ori #mask` for `+` (PROC2_$INIT 0xE3065A `ori.w #0x180,(42,A2)`, two
-  members of the flag word, type not known).  One exception: the TTY
+  members of the flag word, type not known).
+  - **Every member in a word set's high byte: `ori.b`/`andi.b` of that
+    byte (Verified, sau5; bead domain-pascal-wrzd):** mt_$queue_request
+    0xE759CE `ori.b #-0x60,(0x4,A3)` (`pb^.flags + [15, 13]`), init_unit
+    0xE75C46 `andi.b #-0x39,(0x44,A4)` (`- [13, 12, 11]`), MT_$WAIT
+    0xE76A78 `andi.b #-0x19,(0x44,A2)` (`- [12, 11]`); also mt_$shutdown
+    0xE75720 `andi.b #-0x71,(0x32,A2)` (../source reads a packed field).
+    No `ori.w`/`andi.w` to memory touching only the high byte is a set's
+    in either image (a scan of both: the real sites are integer `!`/`&`,
+    AST_$COPY_AREA 0xE03BF2 `ori.w #0x6000` and AST_$PURIFY 0xE0591E
+    `andi.w #-0x4001` in ../source's reading).  The low byte alone stays
+    word-wide (TTY_$I_RCV above), as do both bytes (PROC2_$INIT above).  A
+    reading (not verified): the immediate's low byte is dropped only where
+    the address stays the same.  A longword set: no site; `dpc` keeps it longword-wide.
+    Not for a `[device]` set (5.5).
+  One exception: the TTY
   module-local 0xE1C006 `moveq #-8,D1; and.w D1,(8,A2)` (the ../source
   reading `- [0, 1, 2]`), one of 6 sites with a constant `and`/`or`ed
   into memory through a register (0xE1557C, 0xE1CD32, 0xE3225E, 0xE68E52,

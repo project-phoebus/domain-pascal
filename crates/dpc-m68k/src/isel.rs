@@ -23745,14 +23745,19 @@ impl Selector {
     ///   TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39E `bclr #0,(9,A2)`, TTY_$K_SET_FLAG
     ///   0xE6745C `bset #4,(9,A2)` and 0xE6747C `bclr #4,(9,A2)` on the word
     ///   at 8; TTY_$I_RCV 0xE1B952 `bset #1,(0xb,A2)` on the word at 0xA;
-    ///   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`.  **Uncertain:** no
-    ///   site with a member of 8 and above is known to be a set (PROC2_$FORK
+    ///   TTY_$K_INQ_FLAGS 0xE674C2 `bset #0,(1,A1)`; members of 8 and
+    ///   above, sau5 MT_$ACQUIRE `bset #7,(0x32,A4)` (member 15; PROC2_$FORK
     ///   0xE732B4 `bclr #0,(-186,A2)` on the high byte of a flag word whose
-    ///   type is not known).
+    ///   type is not known).  On an absolute or indexed operand a word
+    ///   set's member number is not reduced (sau5 MT_$WAIT 0xE76A1A
+    ///   `bclr #13,(0xe90cc0).l`; sau2 MMAP_$SET_WS_INDEX 0xE0D254 `bset
+    ///   #15,(0x2c,A5,D0.w)`; bead domain-pascal-fozq).
     /// - Several constant members: `ori`/`andi` of the mask (its
     ///   complement for `-`) on the set (TTY_$I_RCV 0xE1B98E `andi.w
     ///   #-0xe1,(8,A2)` for `- [5, 6, 7]`; `ori.w #0x180,(42,A2)` at
-    ///   PROC2_$INIT 0xE3065A on a flag word, type not known).
+    ///   PROC2_$INIT 0xE3065A on a flag word, type not known); on a word
+    ///   set's high byte alone when every member is there (sau5 0xE759CE
+    ///   `ori.b #-0x60,(0x4,A3)` for `+ [15, 13]`; bead domain-pascal-wrzd).
     /// - `[k]`, one run-time member ([`Self::set_of`]), then `or` (for `-`
     ///   `not` and `and`) into the set: TTY_$K_SET_INPUT_FLAG 0xE6768E..
     ///   0xE676A2 `clr.l D1; move.w (A2),D2; bset D2,D1; or.l D1,(0x14,A0)`
@@ -23847,13 +23852,60 @@ impl Selector {
             if mask.count_ones() == 1 && !device {
                 let k = mask.trailing_zeros();
                 let dst = self.byte_of(dst, w.bytes() - 1 - k / 8)?;
+                // A word set's member on an absolute or an indexed operand
+                // keeps its number unreduced (the CPU takes it modulo 8 on
+                // a byte; bead domain-pascal-fozq): sau5 MT_$WAIT 0xE76A1A
+                // `bclr #13,(0xe90cc0).l` (MT_$SCB+0x32), PBU2_$ASSOC
+                // 0xE58CCA `bclr #15` and 0xE58D34 `bset #10`, PBU_$SETUP
+                // 0xE59B34 `bset #12`, MMAP_$INIT 0xE330AE `bset #15`; sau2
+                // MMAP_$INIT 0xE31B56..0xE31B66 `bset #15`, `bset #13`,
+                // MMAP_$SET_WS_INDEX 0xE0D254 `bset #15,(0x2c,A5,D0.w)`,
+                // MMAP_$FREE_WSL 0xE0D1B2 `bclr #15,(0x2c,A5,D0.w)`.  In
+                // both images every static `bset`/`bclr` on an absolute or
+                // indexed operand has a number of 8 and above (sau2 11,
+                // sau5 17), and none on `(An)`, `(d,An)`, `(An)+` does (sau2
+                // 668, sau5 746): through an address register the number is
+                // reduced (MT_$ACQUIRE `bset #7,(0x32,A4)`, member 15).  A
+                // member below 8 is the same either way; a longword set's
+                // members 8 and above on these operands: no site, reduced.
+                let unreduced =
+                    w == Width::Word && matches!(dst, Ea::AbsL(..) | Ea::Idx(..));
                 self.out.push(Insn::BitImm {
                     op: if *op == SetOp::Union {
                         BitOp::Set
                     } else {
                         BitOp::Clr
                     },
-                    bit: (k % 8) as u8,
+                    bit: if unreduced { k as u8 } else { (k % 8) as u8 },
+                    dst,
+                });
+            } else if w == Width::Word && !device && mask != 0 && mask & 0xff == 0 {
+                // Several members of a word set, all in its high byte (the
+                // byte at the set's own address): `ori.b`/`andi.b` of that
+                // byte (bead domain-pascal-wrzd).  sau5 mt_$queue_request
+                // 0xE759CE `ori.b #-0x60,(0x4,A3)` (`+ [15, 13]`), init_unit
+                // 0xE75C46 `andi.b #-0x39,(0x44,A4)` (`- [13, 12, 11]`),
+                // MT_$WAIT 0xE76A78 `andi.b #-0x19,(0x44,A2)` (`- [12,
+                // 11]`), mt_$shutdown 0xE75720 `andi.b #-0x71,(0x32,A2)`
+                // (bits 14..12; ../source keeps a packed field there).  No
+                // `ori.w`/`andi.w` touching only a high byte is a set in
+                // either image (the sau2 and sau5 sites are integer `!`/`&`,
+                // AST_$COPY_AREA 0xE03BF2 `ori.w #0x6000`).  Members in the
+                // low byte only stay word-wide (TTY_$I_RCV 0xE1B98E `andi.w
+                // #-0xe1,(8,A2)`, `- [5, 6, 7]`), as do members in both
+                // bytes (PROC2_$INIT 0xE3065A `ori.w #0x180`).  A longword
+                // set: no site, longword-wide (unchanged).
+                let dst = self.byte_of(dst, 0)?;
+                let hi = mask >> 8;
+                let (alu, m) = if *op == SetOp::Union {
+                    (AluOp::Or, hi)
+                } else {
+                    (AluOp::And, !hi & 0xff)
+                };
+                self.out.push(Insn::AluImm {
+                    op: alu,
+                    size: Size::B,
+                    imm: imm(m as i64, Width::Byte),
                     dst,
                 });
             } else {

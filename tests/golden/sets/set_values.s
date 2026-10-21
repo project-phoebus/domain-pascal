@@ -32,7 +32,7 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,%d1
 lsl.w #2,%d1
-bclr #7,(-4,%a5,%d1.w)
+bclr #15,(-4,%a5,%d1.w)
 movea.l (-4,%fp),%a5
 unlk %fp
 rts

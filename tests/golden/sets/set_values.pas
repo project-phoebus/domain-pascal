@@ -8,7 +8,10 @@
     (PROC2_$SET_SIG_MASK 0xE3F850..0xE3F85E);
   - OVF: an array element updated in place, `bclr #7' on the element's
     high byte (DIR_$OLD_FIND_OVERFLOW_SLOT 0xE5500A `bclr #7,(868,A4)'
-    after its `lea'; dpc's index form is its own);
+    after its `lea'; dpc's index form is its own, with the member
+    number unreduced as at the images' indexed sites, sau2
+    MMAP_$FREE_WSL 0xE0D1B2 `bclr #15,(0x2c,A5,D0.w)'; bead
+    domain-pascal-fozq);
   - SUSP: `k in f' with `f' held in a register, as a function result,
     `btst #1,D2; sne D0' (PROC1_$SUSPEND 0xE14842 `btst #1,D1; sne D0':
     the held register differs);
