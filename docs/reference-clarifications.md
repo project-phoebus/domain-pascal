@@ -919,6 +919,26 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     so whether the original declared these objects `[device]` is
     inferred from their `move #0` stores (codegen-patterns 5.5).*
 
+50. **"Type Transfer Functions", p. 4-197 (PDF p. 330, checked); 3.2.3,
+    p. 3-5.**  p. 4-197: "With one exception, the size of the argument
+    must be the same as the size of the destination type. ... This size
+    equality is required because the type transfer function does not
+    change any bits in the argument. ... The one exception is that
+    integer subranges are always compatible regardless of their sizes."
+    3.2.3: "When you declare an integer constant, Domain Pascal
+    internally represents the value as a 32-bit integer."  The gqp
+    ruling (above, "integer constant to a pointer type") allows a small
+    constant "expanded to a pointer", but it was asked of `1`.  Is a
+    negative constant allowed (`univ_ptr(-1)`, `p(pbu_no_handler)` with
+    `pbu_no_handler = -1`), and are its bits 16#FFFFFFFF (the 32-bit
+    representation of 3.2.3, i.e. sign extension) or 16#0000FFFF (the
+    bits of a 16-bit -1 kept and widened with zeros)?  The SAU5 PBU DDF
+    handler fields hold 16#FFFFFFFF (PBU_$SETUP, PBU_$ACQUIRE_INT), but
+    the image cannot show the source spelling (bead domain-pascal-j1bt).
+    *Current: refused ("only constants >= 0 are accepted"); an integer32
+    constant has the pointer's size, so `p(integer32(-1))` is accepted
+    and is 16#FFFFFFFF.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`
