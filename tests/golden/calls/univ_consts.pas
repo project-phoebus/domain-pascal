@@ -10,7 +10,9 @@
   - an integer constant for a non-integer parameter: a longword, the
     integer32 (PKT_$LIKELY_TO_ANSWER 0xE12A92 `pea (0x120,PC)', cell
     0xE12BB4 `0000 0000', for a 1024-byte buffer; XPD's 0xE7504E, cell
-    0xE7508C, for a 4-byte status), only for the value 0;
+    0xE7508C, for a 4-byte status); for a parameter of more than 4
+    bytes only for the value 0 (any value for a 4-byte one:
+    calls/univ_small_const);
   - every 4-byte integer cell is keyed as integer32, so the 0 for an
     `[aligned(0)] integer32' parameter and the 0 for a non-integer one
     share a cell (0xE2FFFC, first named for VFMT_$WRITE2's a2 at

@@ -3888,6 +3888,81 @@ end;
     assert_eq!(cells[4].1, cells[0].1);
 }
 
+/// An integer constant for a 4-byte non-integer `univ` parameter (bead
+/// domain-pascal-45yc; ref 5.3.3 p. 5-11, 3.2.3 p. 3-5): an integer32
+/// cell, the value sign-extended, big-endian, keyed as integer32 (SAU5
+/// MBUS_$UNDEF_INT 0xE0AA10, cell 0xE0AA20 `0000 002a` for
+/// CRASH_SYSTEM's status).
+#[test]
+fn univ_small_constants_for_a_4_byte_record() {
+    let m = lower_src(
+        "module m;
+type r = record a, b: integer; end;
+  u = 0..65535;
+const c = 16#2A;
+procedure q(in a: univ r; in b: univ r; in d: univ r; in e: univ integer32);
+  extern;
+procedure p;
+begin
+  q(c, -1, lastof(u), 42);
+end;
+",
+    )
+    .unwrap();
+    let StmtKind::Call(c) = &func(&m, "P").body[0].kind else {
+        panic!()
+    };
+    let cells: Vec<(Vec<u8>, u32)> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            Arg::Address {
+                addr: Addr::Const(k),
+                slot: 4,
+                writable: false,
+            } => (k.bytes.clone(), k.key),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    let bytes: Vec<&[u8]> = cells.iter().map(|(b, _)| b.as_slice()).collect();
+    assert_eq!(
+        bytes,
+        [
+            &[0, 0, 0, 0x2a][..],
+            &[0xff, 0xff, 0xff, 0xff],
+            &[0, 0, 0xff, 0xff],
+            &[0, 0, 0, 0x2a]
+        ]
+    );
+    // All keyed as integer32: 16#2A for the record and for the integer32
+    // parameter share one cell.
+    assert!(cells.iter().all(|(_, k)| *k == cells[0].1));
+
+    // A real formal: a nonzero integer constant stays refused (converted
+    // or its bits: not settled); 0 is the same bytes either way.
+    let err = lower_src(
+        "module m;
+procedure q(in x: univ real); extern;
+procedure p;
+begin
+  q(7);
+end;
+",
+    )
+    .unwrap_err();
+    assert!(err.iter().any(|e| e.contains("real `univ` parameter")), "{err:?}");
+    assert!(lower_src(
+        "module m;
+procedure q(in x: univ real); extern;
+procedure p;
+begin
+  q(0);
+end;
+",
+    )
+    .is_ok());
+}
+
 /// What `univ` extension is not supported yet (beads domain-pascal-4be,
 /// -9286): an integer constant larger than the parameter, a boolean or
 /// enumeration constant of another size, an integer constant for a

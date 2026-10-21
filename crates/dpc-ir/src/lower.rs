@@ -6929,8 +6929,17 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
 ///   0xE68E28, 0xE4A584, 0xE1050C, 0xE870D8, each `0000 0000`; three
 ///   after a `0x2048` filler, so in the longword group), LOG_$ADD's data
 ///   (0xE17608, 0xE2FFFC), XPD_$POST_EVENT's 4-byte `univ status_$t`
-///   (0xE7508C, after the word cell `0003`).  Only the value 0 is seen,
-///   and another value is refused.
+///   (0xE7508C, after the word cell `0003`).
+/// - Any other integer constant for a 4-byte non-integer parameter: the
+///   same integer32 cell, the value sign-extended to 32 bits, big-endian
+///   (bead domain-pascal-45yc).  Ref 5.3.3 p. 5-11 extends the constant
+///   to the parameter's 4 bytes, and 3.2.3 p. 3-5 makes it a 32-bit
+///   integer: both give the integer32 value.  Verified in SAU5:
+///   MBUS_$UNDEF_INT 0xE0AA10 `pea (0xe,PC); jsr CRASH_SYSTEM` (a `univ
+///   status_$t` in ../source's reading), cell 0xE0AA20 `0000 002a`.  For
+///   a larger parameter (a 1024-byte buffer) only 0 is seen, and the
+///   cell is 4 bytes there, not the parameter's size as 5.3.3 would
+///   have it; another value is refused.
 /// - A string constant: its own type, whatever the parameter's size
 ///   (0xE2FF7C's 37 and 32 characters for VFMT_$WRITE2's 200-character
 ///   format, cells 0xE2FFD4 and 0xE30000; its 36 characters for the
@@ -6945,8 +6954,8 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
 /// - Anything else is not supported yet (no site known): an integer
 ///   constant larger than an integer parameter, a 1- or 2-byte integer
 ///   constant for a non-integer parameter of 1 to 3 bytes other than its
-///   own size, a
-///   character for a larger integer parameter, the empty string, a
+///   own size, a nonzero integer constant for a non-integer parameter of
+///   more than 4 bytes, a character for a larger integer parameter, a
 ///   boolean, enumeration or set constant of another size than the
 ///   parameter.
 fn univ_const_type(
@@ -6969,11 +6978,30 @@ fn univ_const_type(
         Ok(cty)
     } else if cs < fs && int && fint {
         Ok(fty)
-    } else if cs <= 4 && fs >= 4 && int && v.ordinal() == Some(0) {
-        // Only 0 is seen; for another value a 4-byte cell cannot tell
-        // `0000 0007` from `0007 0000` (the 2-byte value extended or not).
+    } else if cs <= 4
+        && v.ordinal() != Some(0)
+        && matches!(p.types.kind(fty), TypeKind::Real { .. })
+        && int
+    {
+        // A real formal: whether Apollo converted the value (7 to 7.0,
+        // 0x40E00000) or passed its integer bits is not shown by the image,
+        // and reals are out of scope (CLAUDE.md 1); 0 is the same bytes
+        // either way.
+        Err(unsupported(
+            span,
+            "a nonzero integer constant for a real `univ` parameter (the value converted or \
+             its bits: not settled) is"
+                .to_string(),
+        ))
+    } else if cs <= 4 && (fs == 4 || fs > 4 && v.ordinal() == Some(0)) && int {
+        // The integer32 value (ref 5.3.3 p. 5-11; 3.2.3 p. 3-5): SAU5
+        // MBUS_$UNDEF_INT's `0000 002a` for CRASH_SYSTEM's 4-byte status;
+        // the 0 for a 1024-byte buffer is a 4-byte cell too.
         Ok(p.types.builtins.integer32)
-    } else if cs <= 4 && fs >= 4 && int {
+    } else if cs <= 4 && fs > 4 && int {
+        // Only 0 is seen for a parameter larger than 4 bytes, in a 4-byte
+        // cell, which is not the extension 5.3.3 describes; another value
+        // is not settled.
         Err(unsupported(
             span,
             format!(

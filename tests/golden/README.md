@@ -221,6 +221,11 @@ Tests:
 - `calls/const_pool_noalign` - codegen-patterns 1.5, 7: with
   `--loop-align=off` the longword cell follows the word cell at 2 mod 4,
   no filler (ACL_$SET_ACL_CHECK 0xE4787A).
+- `calls/univ_small_const` - codegen-patterns 1.5, "To a `univ`
+  parameter" (bead domain-pascal-45yc): an integer constant for a 4-byte
+  non-integer `univ` parameter is its integer32 value in a 4-byte cell
+  (SAU5 MBUS_$UNDEF_INT 0xE0AA0C, cell 0xE0AA20 `0000 002a`), shared
+  with an integer32 parameter's cell of the same value.
 - `calls/calls` - codegen-patterns 1.1, 1.3, 1.4, 1.5, 1.6, 12.2: pushes
   of constants (`clr`, `pea (n).w`, `move.l #n`, merged word pairs, `st`),
   values and addresses, pads, `addq.w`/`lea` pops, no pop when no push

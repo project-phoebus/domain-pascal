@@ -948,9 +948,27 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
       status_$t` gets the same (0xE7504E, cell 0xE7508C, after the word
       cell `0003` of the event type).  The word 0 beside such a cell is a
       cell of its own (RIP_$SERVER 0xE68E26 `0000`, 0xE68E28 `0000
-      0000`).  Only the value 0 is seen; `dpc` refuses another value
-      (a cell cannot tell `0000 0007`, the value as integer32, from
-      `0007 0000`, a 2-byte value not extended);
+      0000`).  For a parameter of more than 4 bytes only the value 0
+      is seen, and `dpc` refuses another value (the 4-byte cell is not
+      the extension to the parameter's size that 5.3.3 describes, so
+      what another value gets is not settled);
+    - any integer constant for a 4-byte non-integer parameter gets the
+      same integer32 cell, its value sign-extended to 32 bits,
+      big-endian (**Verified in SAU5; bead domain-pascal-45yc**): ref
+      5.3.3 p. 5-11 extends the constant to the parameter's 4 bytes and
+      3.2.3 p. 3-5 makes it a 32-bit integer, which agree; SAU5's
+      MBUS_$UNDEF_INT 0xE0AA0C `pea (0xe,PC)` (0xE0AA10), `jsr
+      CRASH_SYSTEM`, names the cell 0xE0AA20 `0000 002a`, right after
+      the routine's `rts` (CRASH_SYSTEM's `in status: univ status_$t`
+      in ../source's reading: the formal is Reported, the cell
+      Verified).  In SAU2 every CRASH_SYSTEM status cell is a 4-byte
+      status code (78 cells, `tools/pcsurvey.py list`, `next=jsr
+      0xe1e700`), and the only one below 16#10000 is OS_$INIT's 0
+      (0xE33774); the other small-valued 4-byte cells in the survey go
+      to integer32 formals in ../source's reading (ACL_$RIGHTS' mask,
+      MST_$MAP_AREA_AT, VFMT_$WRITE10, XPD_$WRITE's count 0xE41A20 `0000
+      0001`) and hold the value the same way.  Golden
+      `calls/univ_small_const`, exec test `univ_small_const`;
     - every 4-byte integer cell is keyed as integer32, whatever integer
       type holds it, so equal values share one cell: 0xE2FFFC is named
       for VFMT_$WRITE2's `a2` (0xE2FF8A, its first use) and `a1`/`a2`
