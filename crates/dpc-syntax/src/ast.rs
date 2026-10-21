@@ -681,7 +681,12 @@ pub struct SetElem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
+    /// A decimal integer literal's magnitude (ref 2.1.2, p. 2-2).
     Int(u64),
+    /// A `base#digits` literal's value as written (ref 2.1.2, p. 2-2).
+    /// Apart from [`ExprKind::Int`]: ref 3.4 NOTE, p. 3-10 gives the two
+    /// different ranges.
+    BasedInt(u64),
     /// As written; reals are out of scope for code generation.
     Real(String),
     /// A string literal.  Usually one `Text` part.

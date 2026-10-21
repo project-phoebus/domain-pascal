@@ -103,7 +103,7 @@ fn list(v: &[Expr]) -> String {
 /// S-expression rendering of an expression.
 fn sx(e: &Expr) -> String {
     match &e.kind {
-        ExprKind::Int(n) => n.to_string(),
+        ExprKind::Int(n) | ExprKind::BasedInt(n) => n.to_string(),
         ExprKind::Real(s) => s.clone(),
         ExprKind::Str(parts) => {
             let p: Vec<String> = parts

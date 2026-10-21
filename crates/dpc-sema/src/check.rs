@@ -3437,16 +3437,36 @@ impl<'t> Checker<'t> {
         let span = e.span;
         match &e.kind {
             E::Int(v) => {
-                // ref 3.4 NOTE p. 3-10: a based constant with the sign bit
-                // set (16#FFFFFFFF) is negative.
-                let v = if *v > i32::MAX as u64 && *v <= u32::MAX as u64 {
-                    *v as u32 as i32 as i64
-                } else if *v > u32::MAX as u64 {
-                    i64::MAX
-                } else {
-                    *v as i64
-                };
-                self.int_const(v, span)
+                // ref 3.2.3 p. 3-5: "You can specify an integer constant
+                // anywhere in the range -2147483648 to +2147483647"; ref
+                // 3.4 NOTE p. 3-10: "constants larger than 2147483647 are
+                // not valid".  `-2147483648` is [`Checker::unary`]'s.
+                if *v > i32::MAX as u64 {
+                    self.error(
+                        span,
+                        "integer constant out of range: constants larger than \
+                         2147483647 are not valid (ref 3.2.3 p. 3-5; 3.4 p. 3-10)",
+                    );
+                    return self.error_expr(span);
+                }
+                self.int_const(*v as i64, span)
+            }
+            E::BasedInt(v) => {
+                // ref 3.4 NOTE p. 3-10: "constants with an explicit base
+                // with the signed bit set ... the compiler treats them as
+                // negative numbers (for example, 16#FFFFFFFF)": the
+                // literal is a 32-bit pattern.  One wider than 32 bits has
+                // no such reading and is larger than 2147483647, which
+                // the same NOTE says is not valid.
+                if *v > u32::MAX as u64 {
+                    self.error(
+                        span,
+                        "integer constant out of range: a based constant wider than \
+                         32 bits (ref 3.2.3 p. 3-5; 3.4 p. 3-10)",
+                    );
+                    return self.error_expr(span);
+                }
+                self.int_const(*v as u32 as i32 as i64, span)
             }
             E::Real(_) => {
                 self.unsupported(span, "a real constant");
@@ -3840,8 +3860,13 @@ impl<'t> Checker<'t> {
     }
 
     fn unary(&mut self, op: UnOp, operand: &ast::Expr, span: Span) -> Expr {
-        // `-2147483648` (ref 3.4 p. 3-9: `signed_32 = -2147483648..
-        // 2147483647`): the literal alone does not fit 32 bits.
+        // `-2147483648` (ref 3.2.3 p. 3-5, the least integer constant;
+        // 3.4 p. 3-10: `signed_32 = -2147483648..2147483647`): the
+        // decimal literal alone does not fit 32 bits (ref 2.1.2 p. 2-2:
+        // "The first character of an integer must be a positive sign (+),
+        // a negative sign (-), or a digit").  A based `16#80000000` is
+        // already -2147483648 (3.4 NOTE), so `-16#80000000` is
+        // +2147483648, out of range like any other overflow.
         if let (UnOp::Neg, ast::ExprKind::Int(v)) = (op, &operand.kind) {
             if *v == 1 << 31 {
                 return self.int_const(i32::MIN as i64, span);

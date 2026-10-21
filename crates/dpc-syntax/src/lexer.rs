@@ -165,10 +165,16 @@ pub enum TokenKind {
     Ident(String),
     /// Reserved word (Table A-1, p. A-1).
     Keyword(Keyword),
-    /// Unsigned integer literal, decimal or `base#digits` (ref 2.1.2,
-    /// p. 2-2).  The value is the literal's magnitude; range checks against
-    /// `integer16`/`integer32` are the semantic phase's job.
+    /// Unsigned decimal integer literal (ref 2.1.2, p. 2-2).  The value is
+    /// the literal's magnitude; range checks against `integer16`/
+    /// `integer32` are the semantic phase's job.
     Int(u64),
+    /// Unsigned `base#digits` integer literal (ref 2.1.2, p. 2-2), its
+    /// value as written.  Kept apart from [`TokenKind::Int`] because the
+    /// two have different ranges (ref 3.4 NOTE, p. 3-10: a decimal
+    /// constant above 2147483647 is not valid, a based one with the
+    /// sign bit set is negative); the semantic phase checks them.
+    BasedInt(u64),
     /// Real literal (ref 2.1.3, pp. 2-2..2-3), as written.  Reals are out of
     /// scope for code generation (CLAUDE.md section 1) but are tokenised so
     /// the front end can diagnose them properly.
@@ -641,11 +647,11 @@ impl Lexer {
         self.pos = p;
         if !(2..=16).contains(&base) {
             self.error(lo, hash, "integer base must be from 2 to 16");
-            return self.tok(TokenKind::Int(0), lo);
+            return self.tok(TokenKind::BasedInt(0), lo);
         }
         if p == start {
             self.error(lo, p, format!("missing digits after `{base}#`"));
-            return self.tok(TokenKind::Int(0), lo);
+            return self.tok(TokenKind::BasedInt(0), lo);
         }
         let mut v: Option<u64> = Some(0);
         for (i, ch) in self.text[start..p].chars().enumerate() {
@@ -654,7 +660,7 @@ impl Lexer {
                 None => {
                     let at = start + i;
                     self.error(at, at + 1, format!("`{ch}` is not a base-{base} digit"));
-                    return self.tok(TokenKind::Int(0), lo);
+                    return self.tok(TokenKind::BasedInt(0), lo);
                 }
             }
         }
@@ -662,7 +668,7 @@ impl Lexer {
             self.error(lo, p, "integer literal too large");
             0
         });
-        self.tok(TokenKind::Int(v), lo)
+        self.tok(TokenKind::BasedInt(v), lo)
     }
 }
 
@@ -786,17 +792,32 @@ mod tests {
     }
 
     #[test]
+    fn decimal_and_based_kept_apart() {
+        // Same magnitude, different tokens: ref 3.4 NOTE, p. 3-10 gives
+        // them different ranges (checked by the semantic phase).
+        assert_eq!(kinds("2147483648"), vec![K::Int(1 << 31)]);
+        assert_eq!(kinds("16#80000000"), vec![K::BasedInt(1 << 31)]);
+        assert_eq!(kinds("4294967295"), vec![K::Int(u32::MAX as u64)]);
+        assert_eq!(kinds("16#FFFFFFFF"), vec![K::BasedInt(u32::MAX as u64)]);
+        assert_eq!(kinds("10#5"), vec![K::BasedInt(5)]);
+        assert!(errors("4294967295 16#FFFFFFFF").is_empty());
+    }
+
+    #[test]
     fn based_integers_every_base() {
         // ref 2.1.2, p. 2-2 examples.
-        assert_eq!(kinds("16#1c6"), vec![K::Int(0x1c6)]);
-        assert_eq!(kinds("16#1C6"), vec![K::Int(0x1c6)]);
-        assert_eq!(kinds("2#10010"), vec![K::Int(18)]);
-        assert_eq!(kinds("8#723"), vec![K::Int(0o723)]);
+        assert_eq!(kinds("16#1c6"), vec![K::BasedInt(0x1c6)]);
+        assert_eq!(kinds("16#1C6"), vec![K::BasedInt(0x1c6)]);
+        assert_eq!(kinds("2#10010"), vec![K::BasedInt(18)]);
+        assert_eq!(kinds("8#723"), vec![K::BasedInt(0o723)]);
         // Every base 2..16: the largest digit, then "10" = base.
         for base in 2u32..=16 {
             let d = char::from_digit(base - 1, 16).unwrap();
-            assert_eq!(kinds(&format!("{base}#{d}")), vec![K::Int(base as u64 - 1)]);
-            assert_eq!(kinds(&format!("{base}#10")), vec![K::Int(base as u64)]);
+            assert_eq!(
+                kinds(&format!("{base}#{d}")),
+                vec![K::BasedInt(base as u64 - 1)]
+            );
+            assert_eq!(kinds(&format!("{base}#10")), vec![K::BasedInt(base as u64)]);
             let bad = char::from_digit(base % 16, 16).unwrap();
             if base < 16 {
                 let e = errors(&format!("{base}#{bad}"));
@@ -1023,7 +1044,7 @@ mod tests {
         let mut lx = Lexer::new(&sm, f);
         assert_eq!(lx.peek().kind, id("a"));
         let a = lx.next_token();
-        assert_eq!(lx.peek().kind, K::Int(0));
+        assert_eq!(lx.peek().kind, K::BasedInt(0));
         assert!(lx.take_diagnostics().is_empty(), "peek drops diagnostics");
         lx.next_token();
         assert_eq!(lx.take_diagnostics().len(), 1);

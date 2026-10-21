@@ -99,7 +99,7 @@ fn describe(k: &T) -> String {
     match k {
         T::Ident(s) => format!("identifier `{s}`"),
         T::Keyword(kw) => format!("`{}`", kw.as_str()),
-        T::Int(_) => "integer".into(),
+        T::Int(_) | T::BasedInt(_) => "integer".into(),
         T::Real(_) => "real number".into(),
         T::Str(_) => "string".into(),
         T::Directive { name, .. } => format!("directive `%{name}`"),
@@ -789,7 +789,7 @@ impl<'a> Parser<'a> {
     /// A label: an unsigned integer or an identifier (ref 2.2.2.1, p. 2-11).
     fn label(&mut self) -> PResult<Label> {
         match self.peek() {
-            T::Int(n) => {
+            T::Int(n) | T::BasedInt(n) => {
                 let span = self.bump().span;
                 Ok(Label::Int(*n, span))
             }
@@ -1745,7 +1745,9 @@ impl<'a> Parser<'a> {
         }
         let start = self.span();
         // `label: stmt` (p. 4-188: "A statement can be preceded by a label").
-        if matches!(self.peek(), T::Int(_) | T::Ident(_)) && matches!(self.peek_at(1), T::Colon) {
+        if matches!(self.peek(), T::Int(_) | T::BasedInt(_) | T::Ident(_))
+            && matches!(self.peek_at(1), T::Colon)
+        {
             let label = self.label()?;
             self.bump();
             let stmt = self.stmt()?;
@@ -2216,6 +2218,10 @@ impl<'a> Parser<'a> {
             T::Int(n) => {
                 self.bump();
                 ExprKind::Int(*n)
+            }
+            T::BasedInt(n) => {
+                self.bump();
+                ExprKind::BasedInt(*n)
             }
             T::Real(s) => {
                 self.bump();

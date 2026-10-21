@@ -116,6 +116,75 @@ fn constant_folding() {
     );
 }
 
+/// Ref 3.2.3, p. 3-5: "You can specify an integer constant anywhere in
+/// the range -2147483648 to +2147483647."  Ref 3.4 NOTE, p. 3-10:
+/// "constants larger than 2147483647 are not valid.  You cannot get around
+/// this restriction by using constants with an explicit base with the
+/// signed bit set because the compiler treats them as negative numbers
+/// (for example, 16#FFFFFFFF)."  Bead domain-pascal-8m0q: the decimal
+/// literals used to wrap (4294967295 was -1).
+#[test]
+fn integer_literal_range() {
+    let p = module(
+        "const lo = -2147483648; hi = 2147483647; m1 = 16#FFFFFFFF;
+               sb = 16#80000000; nb = -16#7FFFFFFF; n1 = -16#FFFFFFFF;
+               lo2 = -2147483647 - 1;
+         var v1: integer32 := lo; v2: integer32 := hi; v3: integer32 := m1;
+             v4: integer32 := sb; v5: integer32 := nb; v6: integer32 := n1;
+             v7: integer32 := lo2;
+             r: -2147483648..2147483647;",
+    );
+    let v = |n: &str| var(&p, n).init.clone().unwrap()[0].value.clone();
+    assert_eq!(v("v1"), ConstValue::Int(i32::MIN as i64));
+    assert_eq!(v("v2"), ConstValue::Int(i32::MAX as i64));
+    assert_eq!(v("v3"), ConstValue::Int(-1));
+    assert_eq!(v("v4"), ConstValue::Int(i32::MIN as i64));
+    assert_eq!(v("v5"), ConstValue::Int(-(i32::MAX as i64)));
+    assert_eq!(v("v6"), ConstValue::Int(1));
+    assert_eq!(v("v7"), ConstValue::Int(i32::MIN as i64));
+    // Decimal literals above 2147483647 are refused, not wrapped.
+    for c in [
+        "4294967295",
+        "2147483648",
+        "2147483649",
+        "-2147483649",
+        "+2147483648",
+    ] {
+        let e = errs(&format!("module m; const c = {c};"));
+        assert_eq!(e.len(), 1, "{c}: {e:?}");
+        assert!(
+            e[0].contains("constants larger than 2147483647 are not valid"),
+            "{c}: {e:?}"
+        );
+    }
+    assert_err(
+        "module m; var v: integer32; procedure p; begin v := 4294967295 end;",
+        "not valid",
+    );
+    assert_err(
+        "module m; procedure q(x: integer32); val_param; extern;
+         procedure p; begin q(4294967295) end;",
+        "not valid",
+    );
+    // A based literal wider than 32 bits is refused too.
+    assert_err("module m; const c = 16#100000000;", "wider than 32 bits");
+    assert_err(
+        "module m; const c = 2#111111111111111111111111111111111;",
+        "wider than 32 bits",
+    );
+    // Constant expressions out of the 32-bit range are refused, not wrapped.
+    for c in [
+        "2147483647 + 1",
+        "-2147483647 - 2",
+        "16#7FFFFFFF * 2",
+        "-(-2147483647 - 1)",
+        "-16#80000000",
+        "65536 * 65536",
+    ] {
+        assert_err(&format!("module m; const c = {c};"), "out of range");
+    }
+}
+
 #[test]
 fn enumeration_constants() {
     let p = module(
