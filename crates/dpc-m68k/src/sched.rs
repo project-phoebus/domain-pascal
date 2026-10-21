@@ -334,7 +334,7 @@ fn fx(insn: &Insn) -> Fx {
             f.src(dst, *size);
             f.cc_set = true;
         }
-        Insn::CmpaZero(a) => {
+        Insn::CmpaZero(a) | Insn::CmpaImm(_, a) => {
             f.use_(Reg::A(*a));
             f.cc_set = true;
         }
@@ -1384,6 +1384,10 @@ mod tests {
                 Insn::CmpaZero(a) => {
                     let r = self.a[*a as usize];
                     self.addsub(Size::L, r, 0, true);
+                }
+                Insn::CmpaImm(n, a) => {
+                    let r = self.a[*a as usize];
+                    self.addsub(Size::L, r, *n as u32, true);
                 }
                 Insn::Scc { cond, dst } => {
                     let v = if self.cond(*cond) { 0xff } else { 0 };

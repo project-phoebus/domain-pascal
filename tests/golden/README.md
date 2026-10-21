@@ -69,6 +69,16 @@ Tests:
   0xE3B2EE), another unit's variable (HINT_$SHUTDN 0xE49924), two
   adjacent longwords through a pointer (MAC_OS_$CLOSE 0xE0B506), a local
   in a data register (IO_$GET_DCTE 0xE1A466).
+- `stores/pointer_consts` - codegen-patterns 13 ("Pointer constants";
+  bead domain-pascal-gw19): a pointer constant in `moveq`'s range stored
+  from an address register, `movea.l #n,An; move.l An,<ea>`, in a `dbf`
+  loop over a frame record's handlers (SAU5 PBU_$ACQUIRE_INT 0xE588D4)
+  and through a pointer; one outside it stored directly, `move.l #n`
+  (PEB_$LOAD_REGS 0xE5AE6A); compared in memory, `cmpi.l` (SAU5
+  PBU_$SETUP 0xE59842); a loop's pointer local in an address register
+  assigned a constant, `movea.l #n,An` (PEB_$GET_STATUS 0xE5ADD6), and
+  `nil`, `suba.l An,An` (DISK_ 0xE3C620), and compared with a constant,
+  `cmpa.l #n,An` (FIM_$BUILD_DF 0xE0A552's form with an address).
 - `stores/bool_stores` - codegen-patterns 3 ("Computed booleans stored
   and pushed"; bead domain-pascal-k1sv): a comparison stored with `s<cc>`
   into a data register and `move.b` (TTY_$K_GET 0xE1C506), into a
@@ -640,11 +650,13 @@ Tests:
 - `expr/transfer_const_ptr` - ref p. 4-197 with the owner's ruling
   (docs/reference-clarifications.md, integer constant to a pointer type;
   bead domain-pascal-gqp): `ec2_$ptr_t(1)` stored, passed by address and
-  by value as a 4-byte constant (codegen-patterns 13, 1.5).  No image
-  site identified.
+  by value as a 4-byte constant (codegen-patterns 13, 1.5); stored from
+  an address register, `movea.l #1,An` (codegen-patterns 13, "Pointer
+  constants", bead domain-pascal-gw19).  No image site identified.
 - `expr/transfer_neg_const_ptr` - ref 3.2.3 p. 3-5, p. 4-197 with the
   owner's ruling of 2026-10-21 ("Allow, 32-bit"; bead domain-pascal-j1bt):
-  `p(-1)` is 16#FFFFFFFF, stored into a pointer field, passed by address
+  `p(-1)` is 16#FFFFFFFF, stored into a pointer field (`movea.l #-1,An`,
+  SAU5 PBU_$ACQUIRE_INT 0xE588D4's form; bead domain-pascal-gw19), passed by address
   (a `ffff ffff` cell) and by value (`pea (-1).w`), and compared as
   `p(integer32(-1))` is (`cmpi.l #-1`, the form of SAU5 PBU_$SETUP
   0xE59842).

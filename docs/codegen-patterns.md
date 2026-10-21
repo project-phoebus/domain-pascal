@@ -14735,10 +14735,12 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     the lone last assignment, TIME_$RTE_INT 0xE163D6 and TIME_$VT_INT
     0xE16426, the only two of the 17 `movea.l #0,An` that are not a
     relocated address of a symbol at 0, section 1.5 "Zero";
-    `tools/nilsurvey.py areg`; bead domain-pascal-bdi0).  Refused: `nil`
-    into a pointer local held in an address register (`suba.l An,An`
-    at those of the 24 `suba.l` that are not results; no routine of
-    `make srcsurvey` reaches the refusal).  `nil` passed by address: a
+    `tools/nilsurvey.py areg`; bead domain-pascal-bdi0).  `nil` into a
+    pointer local held in an address register: `suba.l An,An`, as at
+    the 10 of the 24 `suba.l` that are not results (DISK_ 0xE3C620 and
+    0xE3C6A4 `suba.l A2,A2`, the previous-element pointer of a list
+    walk; implemented for the loops' pointer locals, bead
+    domain-pascal-gw19, "Pointer constants" below).  `nil` passed by address: a
     longword 0 cell (section 1.5, "`nil` by address").  `nil` passed by value is `clr.l -(SP)`
     (section 1.5, "Zero"; implemented, bead domain-pascal-73sx);
   - boolean true: `st <ea>` (SMD_$ENABLE_TRACKING 0xE6E468 `st (0xe0,A5)`,
@@ -14807,6 +14809,55 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     #n` 300 times, and no `moveq` read by word or byte stores alone in
     straight-line code.  Nor pushes: `pea (n).w` 100 times (section 1.5),
     no `move.l #n,-(SP)`.  Golden `stores/small_long_consts`;
+  - **Pointer constants** other than `nil` (a type transfer of an
+    integer constant to a pointer type, ref p. 4-197 and the owner's
+    rulings in docs/reference-clarifications.md; Verified at the sites
+    given, implemented, bead domain-pascal-gw19).  Survey of both
+    images (SAU2 and SAU5, every `movea`/`cmpa` with an immediate, the
+    binder's RELOC table telling an address from a literal, as
+    `tools/nilsurvey.py` does; hand assembly left out):
+    - into an address register, `movea.l #n,An`, a long immediate even
+      in `moveq`'s range: of the `movea.l #imm,An` in the images' code
+      (SAU2 1734, SAU5 1876, hand assembly included), all but 6 / 7 have
+      a relocated immediate (an address); the literals of compiled code
+      are TIME_$RTE_INT 0xE163D6 and
+      TIME_$VT_INT 0xE16426 `movea.l #0,A0` (`nil` results, section 3),
+      PEB_$GET_STATUS 0xE5ADD6 `movea.l #0x7000,A0` (`regs :=
+      peb_$regs_ptr_t(16#7000)`, a local held in A0; the other path
+      `movea.l #PEB_$M_DCMD_PAGE,A0`), and in SAU5 PBU_$ACQUIRE_INT
+      0xE588D4 `movea.l #-1,A1; move.l A1,(-0x48,A0)` in its `dbf`
+      loop (`ddf.handlers[i] := univ_ptr(pbu_no_handler)`, the
+      handlers `univ_ptr`s, `pbu_no_handler = -1`); the other 3 are
+      hand assembly (OS_$DATA_ZERO 0xE11F50, STOP_$WATCH 0xE818D8 and
+      0xE8197C, `movea.l #0,An`).  No
+      pointer constant in `moveq`'s range is formed in a data register
+      at a site whose ../source Pascal is a pointer: the corpus's pointer
+      constants are PBU's -1 and addresses outside the range (PEB
+      16#7000, COLOR 16#6000, OS_ and DISK_ 16#FC0000, 16#FF8400, ...).
+      So dpc: a pointer constant in `moveq`'s range stored to memory is
+      `movea.l #n,An; move.l An,<ea>` (not the integer's `moveq #n,Dk;
+      move.l Dk`, above; the same register again for the same constant
+      in a run, as the integer's, is best effort: no site); assigned
+      to a pointer local held in an address register, `movea.l #n,An`,
+      and `nil` `suba.l An,An` (above).
+    - stored directly outside `moveq`'s range, `move.l #n,<ea>`, as
+      any longword: PEB_$LOAD_REGS 0xE5AE6A and PEB_$UNLOAD_REGS
+      0xE5AEB0 `move.l #0x7000,(-4,A6)` (peb/regs.pas `regs :=
+      peb_$regs_ptr_t(16#7000)`, a frame local); unchanged;
+    - compared in memory, `cmpi.l #n,<ea>`: SAU5 PBU_$SETUP 0xE59842
+      `cmpi.l #-1,(0x40,A3)` (`d^.handlers[sub] =
+      univ_ptr(pbu_no_handler)`); unchanged;
+    - compared in an address register: `cmpa.w #0,An` for `nil` (SAU2
+      151, SAU5 168 in the images; section 7.1); `cmpa.l #imm,An` otherwise, compiled
+      only with an address, FIM_$BUILD_DF 0xE0A552 `cmpa.l #sym,A3`
+      (SAU2 and SAU5 alike; the literal MMU_$REMOVE_VIRTUAL 0xE23ED0
+      `cmpa.l #0x800000,A2` is hand assembly, mmu/m68k/remove_virtual.s
+      in ../source).  dpc: `cmpa.l #n,An` for a pointer held in an
+      address register (a loop's pointer local, a pointer function's
+      result in A0) against a constant other than `nil`; best effort
+      for a constant in a word's range (`cmpa.w`, as `nil`, or
+      `cmpa.l`: not seen) and for a function's result (no site).
+    Golden `stores/pointer_consts`, exec test `pointer_consts`;
   - others: `move.<s> #n,<ea>`:
     module-local 0xE0A328 at 0xE0A334 `move.b #0x10,(7,A0)`,
     MMAP_$ALLOC_CONTIG 0xE0D906 `move.l #0x6000e,(A1)`, 0xE758D8

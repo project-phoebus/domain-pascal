@@ -3,9 +3,9 @@
 TN_$CLEAR:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-moveq #-1,%d0
+movea.l #-1,%a1
 movea.l (%a0),%a0
-move.l %d0,(2,%a0)
+move.l %a1,(2,%a0)
 pea (.Lc0,%pc)
 jsr (TN_$TAKE).l
 addq.w #4,%sp

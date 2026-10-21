@@ -2020,12 +2020,15 @@ fn select_body_once(
     // The `suba.l`s keep their order (each in its own statement and run,
     // [`crate::sched`]), so the j-th in the scheduled body is the j-th
     // selected: their spans, for the check after scheduling.
-    let suba_spans: Vec<Span> = s
+    let mut subas: Vec<(usize, Span)> = s
         .nil_results
         .iter()
+        .chain(s.nil_locals.iter())
         .filter(|&&(k, _)| matches!(s.out[k], Insn::SubaSelf(_)))
-        .map(|&(_, span)| span)
+        .copied()
         .collect();
+    subas.sort_by_key(|&(k, _)| k);
+    let suba_spans: Vec<Span> = subas.into_iter().map(|(_, span)| span).collect();
     let nil_results: &[(usize, Span)] = if spilled { &[] } else { &s.nil_results };
     for &(k, span) in nil_results {
         // A `suba.l` that the next assignment overwrites in straight-line
@@ -7509,7 +7512,7 @@ pub struct Selector {
     /// The small longword constants the current run of constant stores
     /// holds in data registers, `(value, register)` ([`Self::seq`],
     /// [`Self::const_reg`]).
-    const_chain: Vec<(i64, u8)>,
+    const_chain: Vec<(i64, Reg)>,
     /// Virtual registers handed out so far (`regs.rs`).
     vregs: VRegs,
     /// Callee-saved registers the body writes outside the allocator (A5,
@@ -7803,6 +7806,10 @@ pub struct Selector {
     /// index in `out` and the statement's span, checked after allocation
     /// and scheduling ([`select_body_with`]).
     nil_results: Vec<(usize, Span)>,
+    /// The `nil`s selected into a pointer local held in an address
+    /// register ([`loop_pointer_locals`]), as [`Self::nil_results`] (for
+    /// the pad check after scheduling only).
+    nil_locals: Vec<(usize, Span)>,
     /// Stores of a register into a local's frame slot: offset, size,
     /// register, and the index in `out` after the store
     /// ([`Self::forwarded`]).
@@ -8055,6 +8062,7 @@ impl Selector {
             slot_allowed: false,
             slot_wanted: None,
             nil_results: Vec::new(),
+            nil_locals: Vec::new(),
             entry_regs: Vec::new(),
             data_ptr_regs: Vec::new(),
             entry_end: None,
@@ -8367,7 +8375,7 @@ impl Selector {
             // constant the next statement loads with `moveq` is checked
             // below.
             let after_run = i > 0
-                && !self.const_chain.is_empty()
+                && self.const_chain.iter().any(|&(_, r)| matches!(r, Reg::D(_)))
                 && !self.chain_member(st)
                 && !matches!(st.kind, StmtKind::For(_));
             if !(i > 0 && self.chain_member(st) && self.chain_member(&body[i - 1])) {
@@ -11678,16 +11686,35 @@ impl Selector {
             // after the call and its pop (codegen-patterns 3, "Callers of
             // pointer functions": 12 sites, e.g. the NET module-local 0xE5A128
             // at 0xE5A150 after ROUTE_$FIND_PORTP, AST_$LOAD_AOTE 0xE023BA).
-            // Only `=`/`<>` with `nil` are seen.
-            if !matches!(rhs, Expr::Const { value: 0, .. }) || !matches!(op, Rel::Eq | Rel::Ne) {
-                return Err(unsupported(
+            // Only `=`/`<>` with `nil` are seen.  Another pointer
+            // constant: `cmpa.l #n,A0`, as any pointer held in an address
+            // register (below; no site, bead domain-pascal-gw19).
+            let n = match rhs {
+                Expr::Const { value, .. } if matches!(op, Rel::Eq | Rel::Ne) => {
+                    imm(*value, Width::Long)
+                }
+                _ => {
+                    return Err(unsupported(
+                        self.span,
+                        "comparing the value of a function whose result is in A0 other than `=` \
+                         / `<>` with a constant is",
+                    ))
+                }
+            };
+            if n != 0 {
+                best_effort(
                     self.span,
-                    "comparing the value of a function whose result is in A0 other than `= nil` \
-                     / `<> nil` is",
-                ));
+                    "comparing a pointer function's result with a pointer constant other than \
+                     `nil` (`cmpa.l #n,A0`; no site, codegen-patterns 13, \"Pointer constants\"; \
+                     bead domain-pascal-gw19) is",
+                )?;
             }
             let a = self.call_a0(c)?;
-            self.out.push(Insn::CmpaZero(a));
+            self.out.push(if n == 0 {
+                Insn::CmpaZero(a)
+            } else {
+                Insn::CmpaImm(n, a)
+            });
             return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
         }
         if (d0_call(lhs) && matches!(rhs, Expr::Load { .. }))
@@ -11818,11 +11845,29 @@ impl Selector {
             }
             Expr::Const { value, .. } => {
                 let mut ea = self.operand(addr)?;
-                if let Ea::Reg(Reg::A(_)) = ea {
-                    return Err(unsupported(
-                        self.span,
-                        "comparing an address register with a constant is",
-                    ));
+                if let Ea::Reg(Reg::A(a)) = ea {
+                    // A pointer held in an address register against a
+                    // pointer constant other than `nil`: `cmpa.l #n,An`
+                    // (codegen-patterns 13, "Pointer constants"; bead
+                    // domain-pascal-gw19).  The compiled form with an
+                    // address is FIM_$BUILD_DF 0xE0A552 `cmpa.l #sym,A3`;
+                    // no compiled site compares a literal so (in memory
+                    // the literal is `cmpi.l`, PBU_$SETUP SAU5 0xE59842
+                    // `cmpi.l #-1,(0x40,A3)`), and whether a constant in a
+                    // word's range takes `cmpa.w`, as `nil` does, is not
+                    // seen.
+                    let n = imm(*value, Width::Long);
+                    if (-0x8000..0x8000).contains(&n) {
+                        best_effort(
+                            self.span,
+                            "comparing a pointer held in an address register with a constant in \
+                             a word's range other than `nil` (`cmpa.l` or `cmpa.w`: not seen; \
+                             codegen-patterns 13, \"Pointer constants\"; bead \
+                             domain-pascal-gw19) is",
+                        )?;
+                    }
+                    self.out.push(Insn::CmpaImm(n, a));
+                    return Ok(rel_cond(op, signed));
                 }
                 // Right after a store of a data register into a local's
                 // frame slot, at the compare's size, the register is
@@ -14389,21 +14434,28 @@ impl Selector {
                         // RTE_INT 0xE163D6 and TIME_$VT_INT 0xE16426 a
                         // literal 0, both pointer results
                         // (`tools/nilsurvey.py areg`).
+                        // `suba.l An,An` writes the register (DISK_ 0xE3C620
+                        // `suba.l A2,A2`, a list's previous-element pointer
+                        // in ../source disk/init_que.pas's module; the 10 of
+                        // the 24 that are not results; bead
+                        // domain-pascal-gw19).
                         Val::Imm(0) => {
-                            return Err(unsupported(
-                                self.span,
-                                "`nil` (the pointer 0) assigned to a pointer held in an \
-                                 address register (`suba.l An,An`, `tools/nilsurvey.py \
-                                 areg`; bead domain-pascal-bdi0) is",
-                            ))
+                            self.nil_locals.push((self.out.len(), self.span));
+                            self.out.push(Insn::SubaSelf(a));
+                            if self.pinned(*o).is_none() {
+                                self.pinned.push((*o, Reg::A(a)));
+                            }
+                            return Ok(());
                         }
-                        Val::Imm(_) => {
-                            return Err(unsupported(
-                                self.span,
-                                "a constant assigned to a pointer held in an address \
-                                 register is",
-                            ))
-                        }
+                        // Another pointer constant: `movea.l #n,An`, a long
+                        // immediate whatever its value (PEB_$GET_STATUS
+                        // 0xE5ADD6 `movea.l #0x7000,A0`, `regs :=
+                        // peb_$regs_ptr_t(16#7000)`; PBU_$ACQUIRE_INT SAU5
+                        // 0xE588D4 `movea.l #-1,A1`, no `moveq`; the only
+                        // compiled `movea.l` of a literal other than 0 in
+                        // either image; codegen-patterns 13, "Pointer
+                        // constants"; bead domain-pascal-gw19).
+                        Val::Imm(n) => Ea::Imm(n),
                     },
                 };
                 self.ptr_defs.push((*o, self.out.len(), self.span));
@@ -14597,7 +14649,11 @@ impl Selector {
             // A longword in `moveq`'s range: from a data register
             // ([`ConstForm`]; DISK_$PV_MOUNT 0xE6C9F4 `moveq #18,D0;
             // move.l D0,(-20,A6)`; LOG_$INIT 0xE3017C, two words merged).
-            Expr::Const { value, .. } if moveq => Src::Ea(Ea::Reg(Reg::D(self.const_reg(*value)?))),
+            // A pointer constant there: from an address register, `movea.l
+            // #n,An` ([`Self::const_reg`]; PBU_$ACQUIRE_INT SAU5 0xE588D4).
+            Expr::Const { value, ty } if moveq => {
+                Src::Ea(Ea::Reg(self.const_reg(*value, ty.pointer)?))
+            }
             Expr::Const { value, ty } => Src::Ea(Ea::Imm(imm(*value, ty.width))),
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -17506,16 +17562,48 @@ impl Selector {
     /// ([`ConstForm::Moveq`]): the one the current run of constant stores
     /// already holds it in, or a new one kept apart from the run's other
     /// constants.
-    fn const_reg(&mut self, value: i64) -> Res<u8> {
-        if let Some(&(_, d)) = self.const_chain.iter().find(|&&(v, _)| v == value) {
-            return Ok(d);
+    ///
+    /// A pointer constant is formed in an address register, `movea.l #n,An`
+    /// (a long immediate, though `moveq`'s range), and stored from it:
+    /// PBU_$ACQUIRE_INT SAU5 0xE588D4 `movea.l #-1,A1; move.l A1,(-0x48,A0)`
+    /// (`ddf.handlers[i] := univ_ptr(pbu_no_handler)`, the handlers
+    /// `univ_ptr`s; codegen-patterns 13, "Pointer constants"; bead
+    /// domain-pascal-gw19).  The same pointer constant again in a run
+    /// takes the register again, as an integer's does (no pointer site).
+    fn const_reg(&mut self, value: i64, pointer: bool) -> Res<Reg> {
+        if let Some(&(_, r)) = self
+            .const_chain
+            .iter()
+            .find(|&&(v, r)| v == value && matches!(r, Reg::A(_)) == pointer)
+        {
+            if pointer {
+                best_effort(
+                    self.span,
+                    "a pointer constant in `moveq`'s range stored again in a run of constant \
+                     stores (its address register again, as an integer's data register at \
+                     NETWORK_$INIT 0xE2F7C2: no pointer site; codegen-patterns 13) is",
+                )?;
+            }
+            return Ok(r);
         }
-        let d = self.load_const(value, Width::Long)?;
+        let r = if pointer {
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Imm(imm(value, Width::Long)),
+                dst: a,
+            });
+            Reg::A(a)
+        } else {
+            Reg::D(self.load_const(value, Width::Long)?)
+        };
         for &(_, e) in &self.const_chain {
-            self.colour_apart.push((Reg::D(d), Reg::D(e)));
+            if matches!(e, Reg::A(_)) == pointer {
+                self.colour_apart.push((r, e));
+            }
         }
-        self.const_chain.push((value, d));
-        Ok(d)
+        self.const_chain.push((value, r));
+        Ok(r)
     }
 
     /// Whether a frame offset is a local held in a register (a store to

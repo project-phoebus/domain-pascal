@@ -6,8 +6,10 @@
   `ddf_handler_t(integer32(-1))'.  SAU5 PBU's DDF handler fields hold
   16#FFFFFFFF: PBU_$ACQUIRE_INT 0xE588D4 `movea.l #-1,A1' stored into
   each handler, PBU_$SETUP 0xE59842 `cmpi.l #-1,(0x40,A3)'.  This test
-  covers the forms of a 4-byte constant (codegen-patterns 13 stores,
-  1.5 cells and `pea (n).w'); it does not reproduce those two routines. }
+  covers the forms of a pointer constant (codegen-patterns 13 stores,
+  `movea.l #-1,An' as at 0xE588D4, "Pointer constants", bead
+  domain-pascal-gw19; 1.5 cells and `pea (n).w'); it does not reproduce
+  those two routines. }
 module tn;
 type
   ddf_handler_t = ^integer32;

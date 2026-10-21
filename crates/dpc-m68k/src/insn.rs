@@ -471,6 +471,12 @@ pub enum Insn {
     /// sites, `b6fc 0000` at 0xE38EC0 for A3; 0xE3CCE4 `b2fc 0000` for A1,
     /// a `while p <> nil` test).
     CmpaZero(u8),
+    /// `cmpa.l #imm,%an`: a pointer held in an address register against a
+    /// pointer constant other than `nil` (`b1fc` + n << 9; codegen-patterns
+    /// 13, "Pointer constants": FIM_$BUILD_DF 0xE0A552 `cmpa.l #sym,A3`
+    /// is the compiled form with an address; no compiled site with a
+    /// literal, bead domain-pascal-gw19).
+    CmpaImm(i64, u8),
     /// `suba.l %an,%an` (`91c8` + n << 9): `nil` into an address
     /// register (codegen-patterns 3, "`nil` results"; 24 sites,
     /// `tools/nilsurvey.py areg`: ROUTE_$FIND_PORTP 0xE15B84 `91c8`,
@@ -659,6 +665,7 @@ impl Insn {
             | Insn::Bsr { .. }
             | Insn::Branch { .. }
             | Insn::CmpaZero(_)
+            | Insn::CmpaImm(..)
             | Insn::SubaSelf(_)
             | Insn::Ext { .. }
             | Insn::Shift { .. }
@@ -858,6 +865,7 @@ impl fmt::Display for Insn {
                 write!(f, "cmpi.{size}\t#{},{dst}", num(*imm))
             }
             Insn::CmpaZero(a) => write!(f, "cmpa.w\t#0,{}", Reg::A(*a)),
+            Insn::CmpaImm(n, a) => write!(f, "cmpa.l\t#{},{}", num(*n), Reg::A(*a)),
             Insn::SubaSelf(a) => write!(f, "suba.l\t{},{}", Reg::A(*a), Reg::A(*a)),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
             // A symbol's address added or subtracted: the immediate-EA
@@ -1021,6 +1029,7 @@ impl Insn {
             Insn::Tst { size, dst } => 2 + dst.ext_len(*size),
             Insn::Cmpi { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::CmpaZero(_) => 4,
+            Insn::CmpaImm(..) => 6,
             Insn::SubaSelf(_) => 2,
             Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
             Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),

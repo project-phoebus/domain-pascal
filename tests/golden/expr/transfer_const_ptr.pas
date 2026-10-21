@@ -5,9 +5,10 @@
   `ecp := ec2_$ptr_t( ec2_$always_ready_ec )' with ec2.ins.pas
   `ec2_$always_ready_ec = 1'.  No image site identified: the constant
   takes the paths of a 4-byte integer constant: codegen-patterns 13
-  (`move.l #n' stores, as golden stores/const_stores) and 1.5 (a
-  code-section cell passed by address; `pea (n).w' for a long by
-  value). }
+  (stores; in `moveq''s range from an address register, `movea.l #n,An',
+  as a pointer constant, "Pointer constants", bead domain-pascal-gw19)
+  and 1.5 (a code-section cell passed by address; `pea (n).w' for a long
+  by value). }
 module tp;
 type
   ec2_$ptr_t = ^integer32;
