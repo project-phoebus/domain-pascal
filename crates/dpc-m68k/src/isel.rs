@@ -197,12 +197,13 @@ const UNSIGNED_ZERO: &str = "an unsigned ordering comparison with 0 (no form cat
 /// An unsigned `x op 0` for an ordering `op`: `x <= 0` is `x = 0` and `x >
 /// 0` is `x <> 0`; `x < 0` is never true and `x >= 0` always, kept as
 /// `Lt`/`Ge`, which the callers test with `tst` (C clear) and
-/// `bcs`/`bcc`.  `None` for a signed `x` or `=`/`<>`.  Only types that
-/// use the top bit (`0..65535`) reach here: `dpc-ir` `compare` makes an
-/// unsigned type whose values fit the signed range a sign test, as the
-/// image does (BAT_$FREE 0xE3B5B0, PKT_$BLD_INTERNET_HDR 0xE122D6).  Best
-/// effort (not byte-identical; bead domain-pascal-uaq7): no compiled form
-/// of a top-bit type against 0 is catalogued.
+/// `bcs`/`bcc`.  `None` for a signed `x` or `=`/`<>`.  Only byte types
+/// that use the top bit (`0..255`) reach here: `dpc-ir` `compare` makes
+/// an unsigned type whose values fit the signed range, and any unsigned
+/// word, a sign test, as the image does (BAT_$FREE 0xE3B5B0,
+/// PKT_$BLD_INTERNET_HDR 0xE122D6; bead domain-pascal-wkm5).  Best effort
+/// (not byte-identical; bead domain-pascal-uaq7): no compiled form of a
+/// top-bit byte against 0 is catalogued.
 fn unsigned_zero_rel(op: Rel, signed: bool) -> Option<Rel> {
     match (op, signed) {
         (_, true) | (Rel::Eq | Rel::Ne, _) => None,

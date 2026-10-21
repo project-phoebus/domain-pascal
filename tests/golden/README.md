@@ -610,6 +610,11 @@ Tests:
   0xE6F25C) and after a call, a divide or a widened byte (SOCK_$PUT_INT
   0xE161EA, 0xE11BF4, SOCK_$CLOSE 0xE15FBE), `btst` for one bit
   (pacct_$compress 0xE5A9DE).
+- `control/top_bit_zero` - codegen-patterns 7.1 ("Signed or unsigned";
+  bead domain-pascal-wkm5): a pinteger (`0..65535`) against 0 with
+  `tst.w` and the signed condition, its other bound unsigned
+  (MT_$ACQUIRE SAU5 0xE760B6, SAU5 0xE75916, SOCK_$PUT_INT 0xE161AA,
+  PKT_$BLD_INTERNET_HDR 0xE122D6, PBU_$GET_DCTE SAU5 0xE59212).
 - `control/one_bit` - codegen-patterns 7.1 ("One bit"), 8 (`odd`), 5.1
   (bead domain-pascal-3xwx): a word or longword in memory loaded whole,
   then `btst #k` (tty_$i_put_chars 0xE1B01E, 0xE1B0E6; module-local

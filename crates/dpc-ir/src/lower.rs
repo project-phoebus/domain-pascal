@@ -4945,18 +4945,31 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
     // An ordering against 0 of an unsigned operand whose type's values all
     // fit the signed range of its width (`0..32767`, `linteger`
     // `0..2147483647`): a sign test, as the image makes it (BAT_$FREE
-    // 0xE3B5B0..0xE3B5B6 `sub.l; bmi.s`, `rel < 0` of a linteger;
-    // PKT_$BLD_INTERNET_HDR 0xE122D6 `tst.w; ble`, `template_len > 0` of
-    // a pinteger; bead domain-pascal-uaq7).  The operand is seen as signed:
+    // 0xE3B5B0..0xE3B5B6 `sub.l; bmi.s`, `rel < 0` of a linteger; bead
+    // domain-pascal-uaq7).  The operand is seen as signed:
     // a load retyped, another value through a conversion of its width.
-    // Types that use the top bit (`0..65535`) keep the unsigned relation,
-    // which the selector makes `=`/`<>` or a never/always test.
+    //
+    // A word type that uses the top bit (`0..65535`, pinteger) is tested
+    // so too: the original compiler branches on the load's or `tst.w`'s
+    // flags with the signed condition, so that 16#8000..16#FFFF count as
+    // below 0 (bead domain-pascal-wkm5; the operand is unsigned by its
+    // `cmpi.w #c; bhi/bls` bound and its zero-extension, `clr.l; move.w`
+    // or `andi.l #0xffff`): `x <= 0` `ble` (MT_PURGE_UCB's module-local
+    // neighbor, SAU5 0xE75916; MT_$ACQUIRE, SAU5 0xE760B6; SOCK_$PUT_INT,
+    // SAU2 0xE161AA, SAU5 0xE167F6), `x > 0` `ble` around the part
+    // (PKT_$BLD_INTERNET_HDR 0xE122D6), `x < 0` `bmi` (WIN_$DINIT SAU5
+    // 0xE19EDE, PBU_$GET_DCTE SAU5 0xE59212).  No `tst`/load of a word is
+    // followed by `bhi`/`bls`/`bcs`/`bcc` in either image's compiled code.
+    // One clamp has the `=` form instead (audit_$log_cname_op 0xE4BEFE
+    // `tst.w D2; bne`, read `<= 0` by ../source).  Bytes that use the top
+    // bit (`0..255`) keep the unsigned relation (no site), which the
+    // selector makes `=`/`<>` or a never/always test.
     let (l, r) = if matches!(rel, Rel::Lt | Rel::Le | Rel::Gt | Rel::Ge) {
         let fits = |x: &Expr, s: &SExpr| {
             let t = x.ty();
             let max = match t.width {
                 Width::Byte => 0x7f,
-                Width::Word => 0x7fff,
+                Width::Word => 0xffff,
                 Width::Long => 0x7fff_ffff,
             };
             t.sign == Sign::Unsigned

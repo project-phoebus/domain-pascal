@@ -113,7 +113,7 @@
     => 1000
     => 10
     => 170
-    => 153
+    => 150
     => 169
     => 153
     => 426
@@ -437,9 +437,13 @@ begin
 end;
 
 { An unsigned ordering comparison with 0 of a type that uses the top bit
-  (0..65535): `x > 0' is `x <> 0', `x <= 0' is `x = 0', `x < 0' never
-  and `x >= 0' always holds (`tst', then `bcs'/`bcc' on the clear C).  A
-  variable and a computed value, 65535 among the arguments (a negative
+  (0..65535).  The variable: the original compiler's signed condition
+  (bead domain-pascal-wkm5; MT_$ACQUIRE SAU5 0xE760B6, SOCK_$PUT_INT
+  0xE161AA, PKT_$BLD_INTERNET_HDR 0xE122D6), so 65535 is `<= 0' and `<
+  0' (the image's semantics, not ref 4.3.3's; exec test top_bit_zero).
+  The computed value (best effort): `x > 0' is `x <> 0', `x <= 0' is `x
+  = 0', `x < 0' never and `x >= 0' always holds (`tst', then
+  `bcs'/`bcc' on the clear C).  65535 among the arguments (a negative
   word).  Types whose values fit the signed range: a sign test, below
   (bu_$szero). }
 function bu_$uzero(u: pint): integer;

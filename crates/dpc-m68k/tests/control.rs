@@ -96,6 +96,56 @@ end;
     );
 }
 
+/// A pinteger (`0..65535`, the top bit used) against 0: the signed
+/// condition on the `tst.w` (bead domain-pascal-wkm5): `x <= 0` `ble`
+/// (MT_$ACQUIRE SAU5 0xE760B6 `move.w (A0),D1w; ble; cmpi.w
+/// #0x4000,D1w; bls`; SOCK_$PUT_INT SAU2 0xE161AA), `x > 0` `ble` around
+/// the part (PKT_$BLD_INTERNET_HDR 0xE122D6), `x < 0` `bmi`
+/// (PBU_$GET_DCTE SAU5 0xE59212), `x >= 0` `bpl`; no warning.
+#[test]
+fn top_bit_word_against_zero_is_signed() {
+    for (cond, br) in [
+        ("u <= 0", "bgt.s"),
+        ("u > 0", "ble.s"),
+        ("u < 0", "bpl.s"),
+        ("u >= 0", "bmi.s"),
+    ] {
+        let b = body(&format!(
+            "procedure t; internal;\nbegin\n  if {cond} then r := 0;\nend;\n"
+        ));
+        assert_eq!(
+            b,
+            ["tst.w\t(U).l", &format!("{br}\t1f"), "clr.w\t(R).l", "1:"],
+            "{cond}"
+        );
+    }
+    let b = body(
+        "procedure t(in length: pinteger; out st: integer32);
+begin
+  if (length <= 0) or else (length > 16#4000) then st := 16#220003
+  else st := 0;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
+            "movea.l\t(8,%fp),%a0",
+            "movea.l\t(0xc,%fp),%a1",
+            "tst.w\t(%a0)",
+            "ble.s\t2f",
+            "cmpi.w\t#0x4000,(%a0)",
+            "bls.s\t1f",
+            "2:",
+            "move.l\t#0x220003,(%a1)",
+            "bra.s\t3f",
+            "1:",
+            "clr.l\t(%a1)",
+            "3:",
+        ]
+    );
+}
+
 #[test]
 fn repeat_head_is_aligned_and_branched_back_to() {
     let b = body(
@@ -209,13 +259,6 @@ end;",
   r := 1;
 end;",
             "left operand is not a variable",
-        ),
-        (
-            "begin
-  if u > 0 then r := 0;
-  r := 1;
-end;",
-            "an unsigned ordering comparison with 0",
         ),
     ];
     for (b, want) in cases {

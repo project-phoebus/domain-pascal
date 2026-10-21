@@ -7355,6 +7355,36 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **Signed or unsigned:** `blt`/`ble`/`bgt`/`bge` for signed values,
   `bcs`/`bls`/`bhi`/`bcc` for unsigned ones (0xE1779E `bcc` skips the
   `then` part of an unsigned `<`; 0xE177BE `bls` of an unsigned `>`).
+  **Against 0, always the signed condition (Verified; bead
+  domain-pascal-wkm5).**  An unsigned word that uses the top bit
+  (pinteger, `0..65535`) is tested with `tst.w` (or on its load's
+  flags) and `ble`/`bgt`/`bmi`/`bpl`, so that 16#8000..16#FFFF count as
+  below 0, unlike ref 4.3.3 (p. 4-6), which makes an unsigned run-time
+  value against a constant in 0..2147483647 an unsigned compare.  The
+  operand is unsigned at each site by its other bound (`cmpi.w #c` then
+  `bhi`/`bls`) and its zero-extension (`clr.l; move.w` or `andi.l
+  #0xffff`): `(x <= 0) or else (x > c)` at MT_$ACQUIRE SAU5 0xE760B6
+  (`move.w (A0),D1w; ble; cmpi.w #0x4000,D1w; bls`), the module-local
+  after MT_PURGE_UCB SAU5 0xE75916 (`move.w (0x16,A6),D1w; ble.b; cmpi.w
+  #0x4000,D1w; bhi.b`), SOCK_$PUT_INT SAU2 0xE161AA / SAU5 0xE167F6
+  (`tst.w D0w; ble.b; cmpi.w #0xe0,D0w; bls.b`); `x > 0` at
+  PKT_$BLD_INTERNET_HDR 0xE122D6 (`tst.w D2w; ble.b` around the part);
+  `(x < 0) or else (x > c)` at PBU_$GET_DCTE SAU5 0xE59212 (`move.w
+  (A0),D1w; bmi.b; cmpi.w #0xf,D1w; bls.b`) and WIN_$DINIT SAU5
+  0xE19EDE (`tst.w D4w; bmi.b; cmpi.w #1,D4w; bls.b`).  A signed
+  variable's upper bound is signed at the same shape (SAU2: `ble; cmpi;
+  ble` 10, `bmi; cmpi; ble` 5, `ble; cmpi; bgt` 2), so the compiler does
+  not narrow by flow; and no `tst` or load of a word is followed by
+  `bhi`/`bls`/`bcs`/`bcc` in either image's compiled code.  The other
+  unsigned range tests have `beq` below (SAU2: `beq; cmpi.w; bls` 24,
+  `beq; cmpi.w; bhi` 15, e.g. PROC1_$SET_PRIORITY 0xE15254), read `=
+  0` by ../source.  One clamp has the `=` form for a reading `<= 0`:
+  audit_$log_cname_op 0xE4BEFE (SAU5 0xE4B632) `tst.w D2w; bne.s;
+  clr.w D2w` for ../source's `if new_name_len <= 0 then new_name_len :=
+  0`; with the signed rule that source is `= 0` (both images).
+  **Implemented** in `dpc-ir` `compare` for words; an unsigned byte that
+  uses the top bit (`0..255`) keeps the best-effort `=`/`<>` form (no
+  site).  Golden `control/top_bit_zero`, exec test `top_bit_zero`.
 - **Two variables:** `cmp.<s> <ea>,Dn` with one of them in a register
   (0xE6A9B4 `move.w (A1),D5; cmp.w (0x14,A6),D5`).  Which operand of the
   source went to the register cannot be seen in the image.  Survey
@@ -14747,15 +14777,17 @@ followed; execution test `be_u_kinds`.
 - **An unsigned ordering against 0** (7.1).  A type whose values fit the
   signed range of its width (`0..32767`, `linteger` `0..2147483647`): a
   sign test, as the image makes it (Verified at two sites: BAT_$FREE
-  0xE3B5B0..0xE3B5B6 `sub.l; bmi.s` for `rel < 0`, rel a linteger;
-  PKT_$BLD_INTERNET_HDR 0xE122D6 `tst.w; ble` for `template_len > 0`, a
-  pinteger); `dpc-ir` `compare` sees the operand as signed, so `<`/`>=`
-  are `bmi`/`bpl` and `>`/`<=` `bgt`/`ble`.  **Conflict:**
-  AUDIT_$LOG_CNAME_OP 0xE4BEFE has `tst.w; bne` for `new_name_len <= 0`,
-  the `=`-form, against PKT's `ble`: not explained.  A type that uses the
-  top bit (`0..65535`), best effort, no site: `x > 0` as `x <> 0`, `x <=
-  0` as `x = 0`; `x < 0` and `x >= 0` by `tst` (or `cmpa.w #0`), then
-  `bcs`/`bcc` on the clear carry.
+  0xE3B5B0..0xE3B5B6 `sub.l; bmi.s` for `rel < 0`, rel a linteger);
+  `dpc-ir` `compare` sees the operand as signed, so `<`/`>=` are
+  `bmi`/`bpl` and `>`/`<=` `bgt`/`ble`.  A word type that uses the top
+  bit (`0..65535`) is tested so too: Verified at seven sites, 7.1
+  "Signed or unsigned" (bead domain-pascal-wkm5; PKT_$BLD_INTERNET_HDR
+  0xE122D6, MT_$ACQUIRE SAU5 0xE760B6, SOCK_$PUT_INT 0xE161AA, ...);
+  the `=`-form at audit_$log_cname_op 0xE4BEFE is ../source's `<= 0`
+  for an `= 0`.  A byte type that uses the top bit (`0..255`), best
+  effort, no site: `x > 0` as `x <> 0`, `x <= 0` as `x = 0`; `x < 0`
+  and `x >= 0` by `tst` (or `cmpa.w #0`), then `bcs`/`bcc` on the clear
+  carry.
 - **A record or array selected from a type transfer of a variable,
   assigned** (5.2): copied as a block from the variable's bytes, in place
   (ref p. 4-197).  **A string constant assigned to a longer array of
