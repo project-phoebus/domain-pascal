@@ -35,8 +35,8 @@ LOCKED:
 link.w %fp,#-4
 movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.w (8,%fp),%d2
 subq.l #2,%sp
+move.w (8,%fp),%d2
 move.w #6,-(%sp)
 jsr (ML_$LOCK).l
 addq.w #4,%sp

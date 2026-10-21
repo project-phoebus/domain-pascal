@@ -19,10 +19,11 @@
     (IO_$ACQUIRE 0xE1A566 `clr.l (A4); bra.b 0xE1A576'); the fall-through
     store tested again (0xE1A4CE..0xE1A4D4).
 
-  Not as the image: the parameter's entry load before the call's pad
-  (the image loads it after, 0xE1A756), and the tag tested with `tst.w'
-  where io_$check_unit loads it (0xE1A4C8; pascal-translation-notes
-  375). }
+  - The parameter's entry load after the call's pad (0xE1A756; 12.4
+    R11, "The pad and the last entry load", bead domain-pascal-dfjh).
+
+  Not as the image: the tag tested with `tst.w' where io_$check_unit
+  loads it (0xE1A4C8; pascal-translation-notes 375). }
 module eptr;
 
 type

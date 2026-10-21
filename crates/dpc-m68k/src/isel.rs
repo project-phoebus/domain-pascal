@@ -1110,6 +1110,7 @@ fn select_body_once(
             s.ptr_locals.push((o, None));
         }
     }
+    s.entry_tail = s.out.len().checked_sub(1);
     let body = s.seq(f, &f.body, Tail::END);
     if let Some(mode) = s.slot_wanted {
         return Ok(Selected::Reslot(mode));
@@ -2119,6 +2120,9 @@ fn select_body_once(
         .filter(|(a, b)| b - a > 1)
         .collect();
     let mut volatile_insns: Vec<usize> = volatile_insns.iter().map(|&k| new_index[k]).collect();
+    // The last instruction before the first statement
+    // ([`pad_above_entry_load`]).
+    let entry_tail = s.entry_tail.filter(|&k| keep[k]).map(|k| new_index[k]);
     let mut next_label = s.next_label;
     let mut out: Vec<Insn> = match spills.take() {
         None => s
@@ -2136,6 +2140,7 @@ fn select_body_once(
             .flat_map(|((i, k), (b, a))| b.into_iter().chain(k.then_some(i)).chain(a))
             .collect(),
     };
+    let entry_tail: Option<Insn> = entry_tail.map(|k| out[k].clone());
     // A parked local's `movea.l D0,An` selected before an `if` whose two
     // parts dereference it moves down to the condition's branch (bead
     // domain-pascal-dgb; TTY_$K_SET_INPUT_FLAG 0xE67684..0xE6768C
@@ -2191,6 +2196,9 @@ fn select_body_once(
     let volatile_set: Vec<Insn> = volatile_insns.iter().map(|&k| out[k].clone()).collect();
     // Phase 1c: the order inside basic blocks (`sched.rs`).
     crate::sched::schedule(&mut out, &units, &volatile_insns, sched);
+    if let Some(last) = &entry_tail {
+        pad_above_entry_load(&mut out, last);
+    }
     if !suba_spans.is_empty() {
         // A `nil` right before a call's pad: the image has it after the
         // pad (0xE09D42 `subq.l #2,SP; suba.l A2,A2; move.w #18,-(SP)`,
@@ -4197,6 +4205,91 @@ fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
             dropped.sort_unstable();
             return dropped;
         }
+    }
+}
+
+/// A call's pad goes above the routine's last entry load (bead
+/// domain-pascal-dfjh; codegen-patterns 12.4 R11, "The pad and the last
+/// entry load").  When the body's first statement starts with a call's
+/// pad, `subq.l #2,SP`, right after the loads made at entry (`last` is the
+/// last of them), and the instruction after the pad pushes with `move`
+/// to `-(SP)` an operand that does not read the register `last` loaded,
+/// the pad is placed before that load: IO_$DEVICE_INTERRUPTING 0xE1A756
+/// `subq.l #2,SP; move.w (8,A6),D2; move.l (10,A6),-(SP); move.w
+/// D2,-(SP)` (and the five other IO_ routines with it), AREA_$FREE_ASID
+/// 0xE07E8E, PMAP_$PURGE_WS 0xE146C2 `move.w (8,A6),D2; subq.l #2,SP;
+/// move.b (10,A6),D3; move.w #20,-(SP)`, 0xE13614 (the static link
+/// `movea.l (A6),A4`), PROC2_$SET_SERVER 0xE4147A (a held copy, `move.b
+/// (A0),D2`).  It stays below the load when that push reads the load's
+/// register (TTY_$K_FLUSH_INPUT 0xE1C092 `movea.l (12,A6),A2; subq.l
+/// #2,SP; pea (A2)`; TTY_$K_DRAIN_OUTPUT 0xE67ABC `move.l (12,A6),D3;
+/// subq.l #2,SP; move.l D3,-(SP)`) or is a `pea` (0xE56A10 `movea.l
+/// (24,A6),A3; subq.l #2,SP; pea (-50,A6)`).  Survey (`tools/padsurvey.py
+/// rule`): of the 130 first blocks with a pad next to a parameter slot's
+/// or the static link's load, 46 have the pad above the load and 84 below
+/// it, all as this rule says.  A call without a pad never has its first
+/// push above an entry load (0xE02AF6, 0xE59DD4: a load does not pass a
+/// push, R10).  A `clr.<s> -(SP)` after the pad is not seen there, nor a
+/// load into a scratch register: left below the load.
+fn pad_above_entry_load(out: &mut [Insn], last: &Insn) {
+    let end = out
+        .iter()
+        .position(|i| {
+            matches!(
+                i,
+                Insn::Label(_)
+                    | Insn::Branch { .. }
+                    | Insn::Dbf { .. }
+                    | Insn::Jsr(_)
+                    | Insn::Bsr { .. }
+            )
+        })
+        .unwrap_or(out.len());
+    let Some(p) = out[..end].iter().position(|i| {
+        matches!(
+            i,
+            Insn::Subq {
+                size: Size::L,
+                value: 2,
+                dst: Ea::Reg(Reg::A(7)),
+            }
+        )
+    }) else {
+        return;
+    };
+    if p == 0 || p + 1 >= end || out[p - 1] != *last {
+        return;
+    }
+    // A load from a frame slot, the static link or through a pointer
+    // into a register.
+    let loaded = match &out[p - 1] {
+        Insn::Move {
+            src: Ea::Disp(_, b) | Ea::Ind(b),
+            dst: Ea::Reg(r),
+            ..
+        } if *b != 7 => *r,
+        Insn::Movea {
+            src: Ea::Disp(_, b) | Ea::Ind(b),
+            dst,
+            ..
+        } if *b != 7 => Reg::A(*dst),
+        _ => return,
+    };
+    // Only a callee-saved destination, a value held across the call: an
+    // entry load into D0/D1/A0/A1 next to a pad (one an M$ARITH call
+    // keeps, codegen-patterns 12.4 R3) is not seen there.
+    if !matches!(loaded, Reg::D(2..=7) | Reg::A(2..=4)) {
+        return;
+    }
+    let push = matches!(
+        &out[p + 1],
+        Insn::Move {
+            dst: Ea::PreDec(7),
+            ..
+        }
+    );
+    if push && !crate::regs::access(&out[p + 1]).uses.contains(&loaded) {
+        out.swap(p - 1, p);
     }
 }
 
@@ -8151,6 +8244,11 @@ pub struct Selector {
     /// register load among them loaded branches on that load's flags
     /// ([`Self::tst`]).
     entry_end: Option<std::ops::Range<usize>>,
+    /// The index in `out` of the last instruction made before the body's
+    /// first statement (the entry loads, the static link, the copies of
+    /// value parameters), when there is one: a call's pad right after it
+    /// may be placed above it ([`pad_above_entry_load`]).
+    entry_tail: Option<usize>,
     /// The index in `out` of the `move` an assignment statement just made
     /// into the data register of a register-held local (`x := y`): a test
     /// of that register right after it branches on the move's flags
@@ -8398,6 +8496,7 @@ impl Selector {
             entry_regs: Vec::new(),
             data_ptr_regs: Vec::new(),
             entry_end: None,
+            entry_tail: None,
             assigned_move: None,
             flag_moves: Vec::new(),
             kept_flags: Vec::new(),
@@ -15466,6 +15565,7 @@ impl Selector {
             units,
             writes,
             entry_end,
+            entry_tail,
             // No index into `out`.
             out: _,
             const_form: _,
@@ -15650,6 +15750,7 @@ impl Selector {
         entry_end
             .iter_mut()
             .for_each(|r| range(&mut r.start, &mut r.end));
+        entry_tail.iter_mut().for_each(at);
     }
 
     /// The register that still holds the value the body last stored into

@@ -330,7 +330,14 @@ Tests:
   IO_$XLATE_IOVA and IO_$ACQUIRE's first loop: `lea (0,A5,D0.w),A0;
   movea.l (d,A0),A1; jsr (A1)` (0xE1A7D4, 0xE1A784, 0xE1A9AE), the
   result left in D0 (0xE1A788), the `bra` past `tst.l (A0)` (0xE1A4BE)
-  and past `tst.l; bne` after `clr.l` (0xE1A566).
+  and past `tst.l; bne` after `clr.l` (0xE1A566), the parameter loaded
+  after the pad (0xE1A756).
+- `calls/pad_entry_load` - codegen-patterns 12.4 R11 ("The pad and the
+  last entry load"; bead domain-pascal-dfjh): a first call's pad above
+  the last entry load when the first push is a `move` to `-(SP)` that
+  does not read it (IO_$DEVICE_INTERRUPTING 0xE1A756, PMAP_$PURGE_WS
+  0xE146C2, the static link at 0xE13614), below it when the push reads
+  it (TTY_$K_FLUSH_INPUT 0xE1C092) or is a `pea` (0xE56A10).
 - `calls/pop_branches` - codegen-patterns 1.1: the pop rule with
   branches (no pop when every path to the epilogue is free of pushes,
   calls and conditional branches; 0xE01166, 0xE00BCA).

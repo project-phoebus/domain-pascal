@@ -33,8 +33,8 @@ TESTED:
 link.w %fp,#0
 movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-movea.l (8,%fp),%a2
 subq.l #2,%sp
+movea.l (8,%fp),%a2
 move.w (%a5),-(%sp)
 jsr (GETW).l
 addq.w #4,%sp

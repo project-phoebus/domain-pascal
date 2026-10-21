@@ -12775,7 +12775,9 @@ kinds from the C in `../source/domain_os`.
   scheduler does not reproduce these, 12.4 R11 "Not explained"): `movea.l #imm,A0`
   between two parameter loads (PARITY_$CHK_IO 0xE0B184; NET_IO_$BOOT_DEVICE
   0xE31C1E; 0xE758CC); the call pad `subq.l #2,SP` before a parameter
-  load (AREA_$FREE_ASID 0xE07E8E; PMAP_$PURGE_WS 0xE146C6); stores to
+  load (AREA_$FREE_ASID 0xE07E8E; PMAP_$PURGE_WS 0xE146C6; the rule
+  is settled and implemented, 12.4 R11, "The pad and the last entry
+  load"); stores to
   one record in non-source order (XPD_$RESET_PTRACE_OPTS 0xE5B15E..
   0xE5B16C: offsets 12, 0, 13, 4, 8).
 - *Not loaded at entry:* a by-value parameter that is only pushed as an
@@ -14588,7 +14590,7 @@ happens).**
   0xE0B184; module-local 0xE758C4 at 0xE758CC; PMAP_$PURGE_WS
   0xE146C6.
 - The pad before the parameter load: AREA_$FREE_ASID 0xE07E8E; before
-  the static link's load, 0xE13614.
+  the static link's load, 0xE13614.  Rule: 12.4 R11, "The pad and the last entry load".
 - A zero-extension's `clr.l` in a load's stall: 0xE382BE.
 - A base `movea.l #` inside a ×56: 0xE1AA5A (R10).
 
@@ -14695,6 +14697,59 @@ survey).**
   bottom-up; interlocks `raw`, `mem`, `rawmem`; W = 2, 3, all) found no
   variant that reproduces more than 15 of the 263 blocks the order needs
   to change.
+- *The pad and the last entry load* (Verified by survey; implemented,
+  bead domain-pascal-dfjh).  The pad part of the paragraph above has a
+  rule of its own.  When the first statement starts with a call's pad
+  right after the entry loads, the pad goes **above the last entry
+  load** if the instruction after the pad is a `move` to `-(SP)` that
+  does not read the register that load writes.  Otherwise it stays
+  below.
+  - *Survey* (`tools/padsurvey.py rule`; 730 routines whose first block
+    ends in a call, 320 of them with a pad): a direct load into D2-D7
+    or A2-A4 of a parameter slot (`move.<s> (d,A6),Dn`, `movea.l (d,A6),An`) or of
+    the static link (`movea.l (A6),An`) next to the pad.  46 have the
+    pad above the load (19 data, 26 address, 1 static link); all of
+    them have a `move` push that does not read it next.  84 have the
+    pad below the load; in every one the next instruction reads the
+    register (59 `pea (An)`, e.g. TTY_$K_FLUSH_INPUT 0xE1C092;
+    TTY_$K_DRAIN_OUTPUT 0xE67ABC `move.l (12,A6),D3; subq.l #2,SP; move.l D3,-(SP)`), is
+    a `pea` of a frame address (0xE56A10 `pea (-50,A6)`, 8 sites), or
+    is not a push (`clr.b D2`, `movea.l (8,A6),A0`, ...).  0
+    contradictions.
+  - *Examples*: IO_$DEVICE_INTERRUPTING 0xE1A756 `subq.l #2,SP; move.w
+    (8,A6),D2; move.l (10,A6),-(SP); move.w D2,-(SP)`, with the five
+    other IO_ routines that call `io_$check_unit`; AREA_$FREE_ASID
+    0xE07E8E; PMAP_$PURGE_WS 0xE146C2 `move.w (8,A6),D2; subq.l #2,SP;
+    move.b (10,A6),D3; move.w #20,-(SP)` (only the last load moves);
+    the static link at 0xE13614.
+  - *Held copies* (`move.<s> (An),Dn` through a slot loaded just
+    before) mostly follow the rule: PROC2_$SET_SERVER 0xE4147A
+    `movea.l (12,A6),A0; subq.l #2,SP; move.b (A0),D2; move.w
+    #4,-(SP)`, 5 of 6 that the rule moves.  4 sites do not fit.
+    FIM_$INIT_ASID 0xE0AA2E, FIM_$FREE_ASID and SMD_$INQ_DISP_TYPE
+    0xE6DE26 (`subq.l #2,SP; move.w (A0),D2; move.w D2,-(SP)`) load
+    the value their first push reads after the pad, probably as that
+    argument.  AREA_$DEACTIVATE_ASTE 0xE09F0E loads one before the
+    pad, after a store.  `dpc` applies the rule to whatever entry load
+    comes last, held copies included.
+  - *Not covered*: a call without a pad.  Its first push never passes
+    an entry load (5 sites where the rule's shape would allow it:
+    0xE02AF6, 0xE59DD4, ...), because a load does not pass a push (R10).
+    Pads of other sizes do not occur in first blocks.  The A5 base is
+    above the pad in all 202 first blocks that have both.  Other
+    instructions right before a pad (a register constant, a `lea`) are
+    not entry loads and are left alone (bead domain-pascal-ncac covers
+    the constants).  A `clr.<s> -(SP)` as the first push after an entry
+    load does not occur, nor an entry load into D0/D1/A0/A1 next to a
+    pad followed by a `move` push (the survey counts loads into
+    D2-D7/A2-A4, values held across the call): both left below.
+  - *Mechanism* (a reading, Uncertain): a bottom-up list scheduler would
+    place the pad, the latest generated instruction, above the push if
+    the push did not name SP.  It takes the load instead when the load
+    does not feed the push.  It does not count a `pea`'s implicit SP,
+    and a load cannot pass a push.  This is not built as a scheduler
+    (R11 above): `isel.rs`, `pad_above_entry_load`, swaps the pad and the
+    last entry load after scheduling.
 - *Alternating memory accesses* (a candidate of the earlier review) fits
   PARITY_$CHK_IO, 0xE758C4 and PMAP_$PURGE_WS, but not AREA_$FREE_ASID.
 - *What `dpc`'s units say* (bead domain-pascal-g5q.8): little.  Under

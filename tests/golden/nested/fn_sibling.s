@@ -15,8 +15,8 @@ rts
 USE:
 link.w %fp,#-4
 pea (%a2)
-movea.l (%fp),%a2
 subq.l #2,%sp
+movea.l (%fp),%a2
 move.w #2,-(%sp)
 movea.l %a2,%a1
 bsr.s GET

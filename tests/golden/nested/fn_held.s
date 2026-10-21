@@ -2,8 +2,8 @@
 GET:
 link.w %fp,#-8
 movem.l %d2/%a2,-(%sp)
-movea.l (%fp),%a2
 subq.l #2,%sp
+movea.l (%fp),%a2
 move.w (8,%fp),-(%sp)
 jsr (EXT_$F).l
 addq.w #4,%sp

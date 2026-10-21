@@ -27,8 +27,8 @@ CLEAR_PENDING:
 link.w %fp,#-4
 movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.w (8,%fp),%d2
 subq.l #2,%sp
+move.w (8,%fp),%d2
 move.l (0xa,%fp),-(%sp)
 move.w %d2,-(%sp)
 bsr.s CHECK_UNIT
@@ -56,8 +56,8 @@ DEVICE_INTERRUPTING:
 link.w %fp,#-8
 movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.w (8,%fp),%d2
 subq.l #2,%sp
+move.w (8,%fp),%d2
 move.l (0xa,%fp),-(%sp)
 move.w %d2,-(%sp)
 bsr.w CHECK_UNIT
@@ -85,8 +85,8 @@ XLATE_IOVA:
 link.w %fp,#-8
 movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.w (8,%fp),%d2
 subq.l #2,%sp
+move.w (8,%fp),%d2
 move.l (0xe,%fp),-(%sp)
 move.w %d2,-(%sp)
 bsr.w CHECK_UNIT
