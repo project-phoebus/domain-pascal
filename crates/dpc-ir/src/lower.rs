@@ -9100,9 +9100,9 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
 /// Not for a volatile field (its byte is referenced as written, 5.5) nor a
 /// record that may lie at an odd address: a byte-aligned one (`aligned(0)`
 /// on the record or on what holds it, [`byte_aligned`]) keeps the byte
-/// unless a static or frame offset proves its address even ([`even`],
-/// strict: through a pointer, a parameter passed by address or another
-/// unit's object its type's alignment does not tell).
+/// unless a static or frame offset proves its address even ([`even`]:
+/// through a pointer, a parameter passed by address or another unit's
+/// object its type's alignment does not tell).
 fn word_sign_field(p: &Program, e: &SExpr, addr: &Addr, field: BitField, ty: Scalar) -> BitField {
     let ExprKind::Field {
         base,
@@ -9119,7 +9119,7 @@ fn word_sign_field(p: &Program, e: &SExpr, addr: &Addr, field: BitField, ty: Sca
         || !even_byte
         || !(field.shift == 7 || absolute)
         || matches!(addr, Addr::Volatile { .. })
-        || (byte_aligned(p, base) && even(p, base, true) != Some(true))
+        || (byte_aligned(p, base) && even(p, base) != Some(true))
     {
         return field;
     }
@@ -9575,20 +9575,31 @@ fn access_of(p: &Program, e: &SExpr, read: bool) -> Res<Addr> {
 }
 
 /// The parity of `e`'s address: `Some(true)` even, `Some(false)` odd,
-/// `None` not known ([`check_even`]).  With `strict`, an object reached
-/// through a pointer, a parameter passed by address or another unit's
-/// object whose type is byte aligned by attribute (`aligned(0)`, ref
-/// 3.15.6.3 p. 3-69) is of unknown parity: `TypeTable::attributed` gives
-/// such a record an alignment of 2 (its size stays a multiple of 2), so
-/// its `align` does not tell.
-fn even(p: &Program, e: &SExpr, strict: bool) -> Option<bool> {
+/// `None` not known ([`check_even`]).  An object reached through a
+/// pointer, a parameter passed by address or another unit's object whose
+/// type is byte aligned by an attribute of its own (`aligned(0)`, ref
+/// 3.15.6.3 p. 3-69; [`dpc_sema::types::TypeInfo::align_attr`]) is of
+/// unknown parity: `TypeTable::attributed` gives such a record an
+/// alignment of 2 (its size stays a multiple of 2), so its `align` does
+/// not tell (bead domain-pascal-epjn: a word-unit bit field of one was
+/// read at an odd address).  A record that only inherits a field's
+/// `aligned(0)` (ref 3.15.6.2 pp. 3-67..3-68) is word aligned (ref
+/// 3.10.5.6: "Domain Pascal always allocates a record on at least a word
+/// boundary") when it is 4 bytes or more: `layout_fields` aligns a field
+/// on its type's specification, inherited ones included, and moves a
+/// byte-aligned field of 4 bytes or more to the next word (it would cross
+/// two word boundaries at an odd offset, p. 3-26), but a 2-byte one stays
+/// at an odd offset (`record c: char; w: w_t end`, `w_t = record f:
+/// [aligned(0)] pb_t end`: w at 1), so that one is of unknown parity.
+fn even(p: &Program, e: &SExpr) -> Option<bool> {
     // Aligned as the type says.
     let typed = |e: &SExpr| {
-        (p.types.get(e.ty).align >= 2 && !(strict && p.types.attrs(e.ty).align == Some(1)))
-            .then_some(true)
+        let t = p.types.get(e.ty);
+        let inherited_odd = t.attrs.align == Some(1) && t.size < 4;
+        (t.align >= 2 && t.align_attr != Some(1) && !inherited_odd).then_some(true)
     };
     match &e.kind {
-        ExprKind::Field { base, offset, .. } => Some(even(p, base, strict)? == (offset % 2 == 0)),
+        ExprKind::Field { base, offset, .. } => Some(even(p, base)? == (offset % 2 == 0)),
         // An element of a packed array of bits has no address.
         ExprKind::Index {
             elem_bits: Some(_), ..
@@ -9600,7 +9611,7 @@ fn even(p: &Program, e: &SExpr, strict: bool) -> Option<bool> {
             elem_size,
             elem_bits: None,
         } => {
-            let b = even(p, base, strict)?;
+            let b = even(p, base)?;
             if elem_size % 2 == 0 {
                 return Some(b);
             }
@@ -9611,9 +9622,9 @@ fn even(p: &Program, e: &SExpr, strict: bool) -> Option<bool> {
         // 3.15.6.7 pp. 3-75..3-76: `iptr: ^word_int32` "points to a
         // word aligned 4-byte integer"): even unless byte aligned.
         ExprKind::Deref(_) => typed(e),
-        ExprKind::WithRecord(w) => even(p, &with_binding(*w).0, strict),
+        ExprKind::WithRecord(w) => even(p, &with_binding(*w).0),
         // `T(v)` seen in place ([`transfer_view`]): `v`'s address.
-        ExprKind::Transfer(x) => even(p, x, strict),
+        ExprKind::Transfer(x) => even(p, x),
         ExprKind::Var { var, .. } => match &p.var(*var).storage {
             Storage::Static { offset, .. } => Some(offset % 2 == 0),
             Storage::Frame { .. } => Some(true),
@@ -9674,7 +9685,7 @@ fn byte_aligned(p: &Program, e: &SExpr) -> bool {
 /// "Byte-sized module variables").  An object inside a byte-aligned array
 /// or record counts too.
 fn check_even(p: &Program, e: &SExpr) -> Res<()> {
-    if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e, false) != Some(true) {
+    if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e) != Some(true) {
         return Err(unsupported(
             e.span,
             "a reference to a byte-aligned object (`aligned(0)`) of more than one byte at an \

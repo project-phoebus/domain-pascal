@@ -347,6 +347,14 @@ pub struct TypeInfo {
     pub natural_align: u32,
     /// Attributes (ref 3.15).
     pub attrs: TypeAttrs,
+    /// The alignment attribute given to this type itself (`aligned(n)`,
+    /// `natural`; ref 3.15.6.1 p. 3-63), through [`TypeTable::attributed`],
+    /// in bytes; not the specification a record inherits from its fields
+    /// ([`TypeAttrs::align`], ref 3.15.6.2 pp. 3-67..3-68).  A record is
+    /// always allocated on at least a word boundary (ref 3.10.5.6), so only
+    /// an attribute of its own lets it lie at an odd address (bead
+    /// domain-pascal-epjn).
+    pub align_attr: Option<u32>,
     /// The type this one is for compatibility: itself, or for a type
     /// made by attributes ([`TypeTable::attributed`]) the type the
     /// attributes were given to.  ref 3.15.7 p. 3-76: `semaphore =
@@ -456,6 +464,7 @@ impl TypeTable {
             field_align,
             natural_align,
             attrs: TypeAttrs::default(),
+            align_attr: None,
             canon: id,
         });
         id
@@ -515,6 +524,7 @@ impl TypeTable {
             field_align,
             natural_align,
             attrs,
+            align_attr: None,
             canon: id,
         });
         id
@@ -617,6 +627,7 @@ impl TypeTable {
                 align: attrs.align.or(b.attrs.align),
                 size_bits: attrs.size_bits.or(b.attrs.size_bits),
             },
+            align_attr: attrs.align.or(b.align_attr),
             ..b
         };
         if let Some(a) = attrs.align {

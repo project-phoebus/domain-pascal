@@ -5582,6 +5582,65 @@ procedure p; begin x := y end;",
     assert!(e[0].contains("byte-aligned object"), "{e:?}");
 }
 
+/// A byte-aligned packed record (`[aligned(0)]`, ref 3.15.6.3 p. 3-69)
+/// reached through a var parameter, a pointer or as another unit's
+/// object: its type's `align` is 2 (`TypeTable::attributed`), but it may
+/// lie at an odd address, so a word-unit bit field of it is refused (bead
+/// domain-pascal-epjn: `and.w (A0)` raised an address error); a static one
+/// at an even offset, and a byte-unit field anywhere, are accepted.
+#[test]
+fn word_unit_fields_of_byte_aligned_packed_records_are_refused() {
+    let types = "module m;
+type
+  pw_t = packed record a: 0..15; b: 0..4095 end;
+  aw_t = [aligned(0)] pw_t;
+  awp = ^aw_t;
+var
+  sx: aw_t;
+  ex: extern aw_t;
+  i: integer;
+";
+    for body in [
+        "procedure p(var r: aw_t); begin i := r.b end;",
+        "procedure p(q: awp); options(val_param); begin i := q^.b end;",
+        "procedure p(q: awp); options(val_param); begin with q^ do i := b end;",
+        "procedure p; begin i := ex.b end;",
+    ] {
+        let e = errs(&format!("{types}{body}"));
+        assert!(e[0].contains("byte-aligned object"), "{body}: {e:?}");
+    }
+    lower_src(&format!("{types}procedure p; begin i := sx.b end;")).unwrap();
+    lower_src(&format!(
+        "{types}procedure p(var r: aw_t); begin i := r.a end;"
+    ))
+    .unwrap();
+    // A record that only inherits a field's `aligned(0)` (ref 3.15.6.2) is
+    // word aligned when it is 4 bytes or more (ref 3.10.5.6; the review's
+    // d5b): its word field and its copy through a pointer or a var
+    // parameter are accepted.  A 2-byte one may lie at an odd offset
+    // (`layout_fields`), so its word-unit field through a pointer is not.
+    let holders = "module m;
+type
+  pb_t = packed record a: boolean; b: 0..127 end;
+  ab_t = [aligned(0)] pb_t;
+  holder_t = record c: char; f: ab_t; d: char; x: integer end;
+  hp = ^holder_t;
+  pw_t = packed record a: 0..15; b: 0..4095 end;
+  w_t = record f: [aligned(0)] pw_t end;
+  wp = ^w_t;
+var g: integer; gh: holder_t;
+";
+    lower_src(&format!(
+        "{holders}procedure t1(q: hp); options(val_param); begin g := q^.x end;
+procedure t2(var h: holder_t); begin g := h.x; gh := h end;"
+    ))
+    .unwrap();
+    let e = errs(&format!(
+        "{holders}procedure t3(q: wp); options(val_param); begin g := q^.f.b end;"
+    ));
+    assert!(e[0].contains("byte-aligned object"), "{e:?}");
+}
+
 /// A parameter whose type carries an alignment attribute (owner ruling,
 /// docs/reference-clarifications.md "5.1 Attribute lists on parameter
 /// types"; ref 3.15.6.8 p. 3-76): an argument passed by address may be
@@ -5628,9 +5687,11 @@ procedure v(a: [aligned(0)] integer32); val_param; begin g := a end;"
 /// unless its address is known to be even (bead domain-pascal-lmw review):
 /// a record comparison (`cmpm`) and a packed field's word or longword
 /// unit, for an element of a byte-aligned array reached through a
-/// parameter (ref 3.15.6.8 p. 3-76).  A record with `[aligned(0)]` is
-/// still word aligned (ref 3.10.5.5 p. 3-26), so its own fields and its
-/// entry copy are accepted.
+/// parameter (ref 3.15.6.8 p. 3-76).  A record with `[aligned(0)]` passed
+/// by address is of unknown parity too (bead domain-pascal-epjn): dpc's
+/// layout places such a record at an odd offset of a record holding it
+/// (`record c: char; f: [aligned(0)] pr end`, f at 1), so the callee may
+/// not assume it even, and its fields' word references are refused.
 #[test]
 fn byte_aligned_parameters_refuse_every_word_path() {
     let types = "module m;
@@ -5648,6 +5709,8 @@ var g: integer32; gw: integer16; gu: uid_t;
         "procedure p(in a: bap); begin gw := a[1].b end;",
         "procedure p(var a: bap); begin a[1].b := 3 end;",
         "procedure p(in a: bau); begin with a[1] do g := hi end;",
+        "procedure p(in a: buid); begin g := a.hi end;",
+        "procedure p(in a: buid); begin if a = gu then g := 1 end;",
     ] {
         let e = errs(&format!("{types}{body}"));
         assert!(e[0].contains("byte-aligned object"), "{body}: {e:?}");
@@ -5655,12 +5718,6 @@ var g: integer32; gw: integer16; gu: uid_t;
     // A byte unit is never odd-trapped.
     lower_src(&format!(
         "{types}procedure p(in a: bap); begin gw := a[1].a end;"
-    ))
-    .unwrap();
-    // `[aligned(0)]` on a record: still word aligned.
-    lower_src(&format!(
-        "{types}procedure p(in a: buid); begin g := a.hi; if a = gu then g := 1 end;
-procedure v(a: buid); begin g := a.lo end;"
     ))
     .unwrap();
 }

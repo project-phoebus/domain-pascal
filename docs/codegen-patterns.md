@@ -6489,6 +6489,20 @@ same `bset #c mod 8` on the member's byte).
   attribute), and a target reached through a pointer whose base type is
   byte aligned (ref 3.15.6.7 pp. 3-75..3-76); objects passed by address
   are assumed naturally aligned by the callee (ref 3.15.6.8 p. 3-76).
+  A record whose type is byte aligned by an attribute of its own
+  (`dpc-sema` `TypeInfo::align_attr`) counts as of unknown parity through
+  a pointer, a parameter passed by address and as another unit's object,
+  although `dpc-sema` gives it an alignment of 2 (its size stays a
+  multiple of 2): a word- or longword-unit bit field of an `[aligned(0)]
+  packed record` reached so is refused, as are a field or a comparison of
+  such a record type passed by address (bead domain-pascal-epjn; it was
+  read with `and.w (A0)` and trapped at an odd address; `dpc-ir` test
+  `word_unit_fields_of_byte_aligned_packed_records_are_refused`).  A
+  record that only inherits a field's `aligned(0)` (3.15.6.2) is word
+  aligned (3.10.5.6) when it is 4 bytes or more; a 2-byte one is of
+  unknown parity, since `layout_fields` leaves a byte-aligned 2-byte field
+  at an odd offset (exec test `packed_word_sign_holder`).  No ../source
+  module changes status by it.
 - More `%push_alignment` than `%pop_alignment` directives is an error
   (ref 9 p. 9-45, "Unmatched %PUSH_ALIGNMENT directive"), as is the
   reverse ("Alignment stack underflow").

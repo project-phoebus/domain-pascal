@@ -201,6 +201,7 @@ Expected values come from the Pascal semantics, never from dpc's output:
 | `packed_fields` | bit-field stores keep neighbours; a field across a byte boundary |
 | `packed_word_sign` | a boolean in bit 15 of a word tested as the word's sign (`tst.w`), bit 14 of another unit's record through a register, the low byte's sign unaffected (bead domain-pascal-g9kx) |
 | `packed_word_sign_odd` | the same boolean in a byte-aligned (`aligned(0)`) record at an odd address, through a var parameter, a pointer and `with p^`: still `tst.b` (no odd word access) |
+| `packed_word_sign_holder` | records that only inherit a field's `aligned(0)`: word fields and copies through a pointer or var parameter, `tst.w` at an even offset; a 2-byte one at an odd offset still `tst.b` (bead domain-pascal-epjn) |
 | `cases` | jump table with a gap and out-of-range values, compare chain, negative labels, chars |
 | `ogf8_results` | bead domain-pascal-ogf8: integer32 `a0_return` results (stored, parked in D0 in expressions and arguments), one-word and longword set results (a byte set widened, a run-time member, a difference), 4-byte record results assigned a constant and a function's result, a pointer result held in A1 |
 | `ogf8_nested` | bead domain-pascal-ogf8: routines nested three and four deep, the outer frames through the chain of saved links (parameters by value and `var`, locals, a run-time-indexed array), a level-2 routine called by its sibling and recursively |
