@@ -5402,24 +5402,47 @@ fn neg_form(c: u32) -> bool {
 }
 
 /// Whether [`Selector::for_`] makes `l` with [`Selector::for_wide`]: a
-/// byte or longword index, an index kept in memory ([`ForLoop::home`]), or
-/// an unsigned word index from a constant up to a run-time bound (the
-/// image's form, `tst.w; beq` before the `subq.w #1` among the preheader's
-/// other instructions, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, is not
-/// settled: best effort, bead domain-pascal-1mtr), or a run-time bound
-/// wider than the index, which `dpc-ir` keeps at its width ([`for_domain`];
-/// best effort, bead domain-pascal-trdz).
+/// byte or longword index, an index kept in memory ([`ForLoop::home`]), an
+/// unsigned word index from a constant up to a run-time bound of the form
+/// `e - c` or from a constant above 16#7FFF (no site looked at; best
+/// effort, bead domain-pascal-1mtr), or a run-time bound wider than the
+/// index, which `dpc-ir` keeps at its width ([`for_domain`]; best effort,
+/// bead domain-pascal-trdz).  An unsigned word index from a constant in
+/// 0..16#7FFF up to another run-time word bound is [`Selector::for_`]'s,
+/// guarded unsigned as an `integer` index to a `pinteger` bound is
+/// (MMAP_$RELEASE_PAGES 0xE0D01A `tst.w D1; beq.w` for `for i := 1 to
+/// count` of two `pinteger`s, its pointer stepped; bead domain-pascal-e9gw).
 fn for_wide_loop(l: &ForLoop) -> bool {
     l.index.ty.width != Width::Word
         || l.home.is_some()
         || (!l.index.ty.is_signed()
             && !l.down
-            && matches!(l.from, Expr::Const { .. })
-            && !matches!(l.to, Expr::Const { .. }))
+            && match (&l.from, &l.to) {
+                (_, Expr::Const { .. }) => false,
+                (Expr::Const { value, .. }, to) => {
+                    !(0..=0x7fff).contains(value) || sub_const(to).is_some()
+                }
+                _ => false,
+            })
         || [&l.from, &l.to]
             .iter()
             .any(|e| !matches!(e, Expr::Const { .. }) && e.ty().bytes() > l.index.ty.bytes())
         || for_domain(l.index.ty, &l.from, &l.to).width != l.index.ty.width
+}
+
+/// `c` of a bound `e - c`, `c` a constant.
+fn sub_const(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Binary {
+            op: BinOp::Sub,
+            rhs,
+            ..
+        } => match **rhs {
+            Expr::Const { value, .. } => Some(value),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The type [`Selector::for_wide`] computes a `for` loop's guard and count
@@ -9113,10 +9136,9 @@ impl Selector {
             if l.index.ty.width == Width::Word && l.home.is_none() && !l.index.ty.is_signed() {
                 best_effort(
                     self.span,
-                    "a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` \
-                     before the `subq.w #1`, which stands among the preheader's other \
-                     instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, 0xE10C30; not \
-                     settled, codegen-patterns 7.4) is",
+                    "a `for` loop over an unsigned word index to a run-time bound `e - c` or one \
+                     computed at 32 bits, or from a constant above 16#7FFF (`to - from` and `bcs`; no site looked at, \
+                     codegen-patterns 7.4) is",
                 )?;
             }
             return self.for_wide(f, l, after);
@@ -9240,7 +9262,10 @@ impl Selector {
                 });
                 (c, a)
             }
-            (Some(from), None) if !l.down && l.index.ty.is_signed() => {
+            // An unsigned word index (from 0..16#7FFF, `to` no `e - c`,
+            // [`for_wide_loop`]) too: its guard unsigned below (bead
+            // domain-pascal-e9gw).
+            (Some(from), None) if !l.down => {
                 // The count `to - from`, the constant of a `to` of the
                 // form `e - c` folded in: `e` into a value of its own,
                 // then `k = from + c` subtracted (codegen-patterns 7.4,
@@ -9276,9 +9301,17 @@ impl Selector {
                 // `integer` index to a `pinteger` field (bead
                 // domain-pascal-3iws).  The signed `subq.w; bmi` would run
                 // no pass for such a bound.
+                // An unsigned word index compares in its own type, an
+                // `integer` bound too (PCHIST_$CNTL's nested 0xE5CD1A
+                // `tst.w; beq`, [`for_domain`]): MMAP_$RELEASE_PAGES
+                // 0xE0D01A..0xE0D028 `tst.w D1; beq.w; move.w D1,D3; ...;
+                // subq.w #1,D3` for `for i := 1 to count`, both `pinteger`
+                // (bead domain-pascal-e9gw).
                 let unsigned_to = from >= 0 && {
                     let t = e.ty();
-                    t.width == Width::Word && !t.is_signed() && !t.pointer
+                    t.width == Width::Word
+                        && !t.pointer
+                        && (!t.is_signed() || !l.index.ty.is_signed())
                 };
                 let count = if k == 0 {
                     self.for_count_tested(e, exit, &mut setup, !unsigned_to)?
@@ -9457,15 +9490,7 @@ impl Selector {
                 (count, from)
             }
             _ if l.down => unreachable!("a run-time `downto` loop is `for_wide`'s"),
-            (Some(_), None) => {
-                return Err(unsupported(
-                    span,
-                    "a `for` loop with a run-time bound and an unsigned index (`tst.w; beq` \
-                     before the `subq.w #1`, which stands among the preheader's other \
-                     instructions: MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028, 0xE10C30; not \
-                     settled, codegen-patterns 7.4) is",
-                ))
-            }
+            (Some(_), None) => unreachable!("a run-time `downto` loop is `for_wide`'s"),
             (None, _) => {
                 // Best effort (not byte-identical; bead domain-pascal-sq4a):
                 // `to` into a value T of its own, `sub.w from,T; blt EXIT`
@@ -10196,8 +10221,8 @@ impl Selector {
         if !signed {
             best_effort(
                 self.span,
-                "a `for` loop over a signed word index from 0 to an unsigned word bound (no \
-                 guard; no site looked at, codegen-patterns 7.4) is",
+                "a `for` loop from 0 over a word index to an unsigned word bound, or over an \
+                 unsigned word index (no guard; no site looked at, codegen-patterns 7.4) is",
             )?;
         }
         let static_ = match to {
@@ -28851,17 +28876,52 @@ mod tests {
                 }],
             })],
         );
-        // Refused under `--strict`; best effort otherwise (bead
-        // domain-pascal-1mtr, `for_wide`): the count `to - 1` guarded
-        // unsigned.
-        assert!(err(&f).contains("unsigned index"));
+        // As an `integer` index to a `pinteger` bound (bead
+        // domain-pascal-e9gw; MMAP_$RELEASE_PAGES 0xE0D01A): `tst.w; beq`,
+        // then the count `to - 1`; refused under `--strict` for the
+        // bound not held in a register, best effort otherwise.
+        assert!(err(&f).contains("no call in its body"));
         let was = dpc_syntax::diag::set_strict(false);
         let out = select(&f);
         dpc_syntax::diag::set_strict(was);
         dpc_syntax::diag::take_best_effort();
         let out = out.unwrap();
-        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
+        assert!(out.iter().any(|i| matches!(i, Insn::Tst { size: Size::W, .. })), "{out:?}");
+        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Eq, .. })), "{out:?}");
+        assert!(!out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
         assert!(out.iter().any(|i| matches!(i, Insn::Dbf { .. })), "{out:?}");
+        // To `e - c` (`for_wide`, bead domain-pascal-1mtr): the count
+        // guarded unsigned with `bcs`, refused under `--strict`.
+        let g = func(
+            4,
+            None,
+            vec![StmtKind::For(ForLoop {
+                index: dpc_ir::ValueParam {
+                    offset: -2,
+                    ty: unsigned,
+                },
+                home: None,
+                from: konst(1, unsigned),
+                to: Expr::Binary {
+                    op: BinOp::Sub,
+                    lhs: Box::new(load(sym("N"), word())),
+                    rhs: Box::new(konst(1, word())),
+                    ty: word(),
+                },
+                down: false,
+                body: vec![Stmt {
+                    kind: store(sym("W"), load(Addr::Frame(-2), unsigned)),
+                    span: span(),
+                }],
+            })],
+        );
+        assert!(err(&g).contains("unsigned word index"));
+        let was = dpc_syntax::diag::set_strict(false);
+        let out = select(&g);
+        dpc_syntax::diag::set_strict(was);
+        dpc_syntax::diag::take_best_effort();
+        let out = out.unwrap();
+        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
         // An array of words indexed by the index: stepped pointers, only
         // through a pointer variable.
         let elem = |base: Addr, index: Expr| Addr::Index {

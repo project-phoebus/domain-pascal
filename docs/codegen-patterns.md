@@ -9464,8 +9464,8 @@ scripts besides, not kept, are named as such below; re-check sites with
     - `for_wide` sets up the index's register for any read of the index,
       an element `a[i]` too (it steps no pointer): the word index of a
       `downto` loop with a run-time bound, an unsigned word index up to a
-      run-time bound (bead domain-pascal-1mtr's path, which left it unset
-      when only elements read it);
+      run-time `e - c` (bead domain-pascal-1mtr's path, which left it
+      unset when only elements read it);
     - the index read after a loop with a run-time bound: the index's
       register set before the guard (`clr.w`/`moveq`), so that a loop
       the guard skips leaves it `from`; the image sets it after the
@@ -9500,8 +9500,8 @@ or `e - c` (the guard of its value not surveyed), through a pointer (no
 `tst.w`, ROUTE_$READ_USER_STATS 0xE6A6C4), or another unit's, absolute,
 indexed or unheld frame variable (not surveyed); from another constant
 (the `subq.w #k`/`subi.w #k` seen only without a call); an unsigned
-index other than from a constant up to a run-time bound (that one best
-effort, below); a run-time `lo`; run-time
+index other than from a constant up to a run-time bound (that one as the
+`integer` index's form or best effort, below); a run-time `lo`; run-time
 `downto` (not surveyed); arrays of the enclosing routine's frame or
 through its pointer variables, and rows of other arrays (a scaled index
 register, not implemented; bead domain-pascal-ga54); arrays of another
@@ -9636,12 +9636,32 @@ and an unsigned compare would skip small bounds (`-1 <= 5` holds); a
 bound above 16#7FFF there runs no pass (not changed).  Exec test
 `tests/exec/for_ubound.pas`.
 
-An unsigned word index held in a register, from a constant up to a
-run-time bound, takes this form too (best effort, not byte-identical: the
-image's, MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028 `tst.w; beq` before the
-`subq.w #1` among the preheader's other instructions, is not settled):
-`subq.w #from,Dc; bcs`, no stepped pointers.  Exec test
-`tests/exec/for_wide.pas`.
+An unsigned word index held in a register, from a constant in
+0..16#7FFF up to a run-time word bound that is not `e - c`, is made as an
+`integer` index to a `pinteger` bound is (`isel.rs`, `for_`; bead
+domain-pascal-e9gw), compared in the index's type whatever the bound's
+sign (PCHIST_$CNTL's nested 0xE5CD1A, above): from 1 `tst.w; beq`, the
+load and `subq.w #1`, from k `cmpi.w #k; bcs`, from 0 no guard, the
+arrays the body reaches by the index stepped.  The image's
+MMAP_$RELEASE_PAGES 0xE0D01A..0xE0D028 (`for i := 1 to count`, both
+`pinteger` in ../source, `tst.w D1; beq.w; move.w D1,D3; move.l
+#0xeb4800,D5; subq.w #1,D3`, the pointer `lea (0x4,A0),A3`) now matches
+in the guard and the stepped pointer; the `subq.w`'s place among the
+preheader's other instructions is not settled (as above).  Before, dpc
+made these with `for_wide` (`subq.w #from,Dc; bcs`, no stepped pointers):
+correct counts, the image's form not followed.  The SAU5 CT driver's
+loops (ct_transfer 0xE7732A `tst.w (-0x1e,A6); beq.w` and 0xE77484
+`tst.w D3; beq.s`, an `integer` index to `pinteger` bounds in
+../source; ct_touch_pages 0xE76EC2 and ct_unwire_pages 0xE76F28 `subq.w
+#1; bmi` for `integer` bounds) already had the image's guards.  An
+unsigned word index to `e - c`, to a bound computed at 32 bits, or from a
+constant above 16#7FFF stays `for_wide`'s (best effort, no site looked
+at).  Exec tests `tests/exec/for_wide.pas`, `tests/exec/for_uindex.pas`
+(the edges 0, 1, 16#7FFF, 16#8000 and 16#FFFF in each shape: a bound in
+a register, the unit's data, through a pointer, under a `with`, a `var`
+parameter, a frame slot, an array element, a function result, `n div 2`,
+`n - 1`, from 0 and 2, `downto`, both bounds at run time, a nested
+routine's bound and index, an index of the unit, an `integer` bound).
 
 Each best-effort form above (a byte index; a run-time bound's guard on
 this path; an array indexed by a byte or longword index; the unsigned
