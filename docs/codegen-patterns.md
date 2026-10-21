@@ -900,9 +900,9 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     scalar constants of 1, 2 or 4 bytes (integers, enumerations,
     booleans, characters) by address; cells laid out as above, labels
     `.Lc<n>`, `pea (.Lc<n>,%pc)`; the branch sizer counts the cells.
-    String constants only to a `univ` parameter (below); set constants of
-    one word or one longword (below).  Not yet: other sets, records,
-    strings to other parameters, `nil` (no `nil` passed by address is
+    String constants to a `univ` parameter and to an unpacked array of
+    char (below); set constants of one word or one longword (below).
+    Not yet: other sets, records, strings to other parameters, `nil` (no `nil` passed by address is
     known); `lea (d,PC)`.  Conformance
     units (`make conform`): `term_send_kbd_string.pas`, `mst_maps.pas`
     (MST_$REMAP), `mst_set_touch_ahead_cnt.pas`, `sysbus_define_int.pas`,
@@ -1065,6 +1065,49 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
     set (`[byte] set of 0..7`) and sets of more than a longword.  `dpc`:
     `dpc-ir` `pool_const`; golden `sets/set_compares`; exec test
     `set_compares`.
+  - **A string constant to an array of char (Verified at the sites;
+    implemented, bead domain-pascal-jgtd).**  A string constant passed
+    by address to a value or `in` parameter that is an unpacked array of
+    char, not `univ`, is a cell of the parameter's size: the characters,
+    then blanks, as an assignment to a variable of the parameter's type
+    pads (ref "Variable-Length String Operations", p. 4-204: arrays of
+    char are "padded with spaces"; "Passing Variable-Length Parameters",
+    p. 4-207: compatibility "the same as if the argument were being
+    assigned to a variable of the parameter's type", said of varying
+    formals: an analogy here; no parameter rule for arrays of char is
+    found, and the image settles it, below).  Unlike a `univ`
+    formal's string cell, it is extended.
+    - SAU5 TAPE_$BOOT's nested tape_$check_block (0xE33EC2): `pea
+      (0x8c,PC)` at 0xE33F12, then `bsr.w` tape_$print (0xE33C8C, `in
+      msg: vfmt_$string_t` in ../source's reading, Reported), names
+      0xE33FA0..0xE34068: the 80 characters of `'tape error: UID in
+      block header does not match those read from earlier blocks.%.'`
+      and 120 blanks, 200 bytes exactly; the next cell, 0xE34068, is the
+      `univ` string of VFMT_$WRITE10 that follows, at its own 52 bytes.
+      The routine's three cells are in the order of the cell rule above
+      (0xE33F72 the 46-byte `univ` string, 2 mod 4, first; then the
+      200-byte cell, used first, then the 52-byte one).  So the cell
+      is the formal's size, not the string's with the callee reading
+      past it (as VME_$INT's is, below).
+    - SAU5 TAPE_$BOOT 0xE344C0, 0xE344D4, 0xE344E4: `subq.l #2,SP; move.w
+      #0x10,-(SP); pea (d,PC); bsr.w` to tape_$find_entry, tape_$upcase,
+      tape_$find_entry (`in name: tape_$name_t`, 16 characters, and a
+      word by value: `val_param`, Reported), all three naming 0xE346DE,
+      the 16 characters `bscom/rbak_shell` (a constant of the formal's
+      size: no padding), after the string cell that ends at 0xE346DE and
+      before the `0012 0000` cell 0xE346EE.  One cell for the three, as
+      for any equal constant.  tape_$upcase writes the bytes through its
+      parameter's address (`move.b D3b,(-0x1,A0,D1.w)`), so the cell in
+      OS_INIT_PROC's code is changed in place (an original quirk,
+      ../source tape/boot.codegen.md).
+    - **Implemented** (`dpc-ir` `pool_const`): the padded cell, an odd
+      size followed by one zero byte (as a string's own cell, above;
+      no site of an odd-sized array), keyed by the parameter's type.
+      **Uncertain:** whether an equal-sized string's cell is shared with
+      the same string passed to a `univ` formal (keyed by the string's
+      own type; no site).  Arrays of char that are packed or of a
+      subrange of char stay refused (their copies are not seen, 5.2).
+      Golden `calls/str_const_args`, exec test `str_const_arg`.
 - **Address of a symbol by address (Verified at the sites; implemented,
   bead domain-pascal-68tc).**  `addr(x)` of another unit's object or of
   a routine, a link-time constant, passed by address is a constant: a

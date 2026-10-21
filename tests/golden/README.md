@@ -232,6 +232,12 @@ Tests:
   non-integer `univ` parameter is its integer32 value in a 4-byte cell
   (SAU5 MBUS_$UNDEF_INT 0xE0AA0C, cell 0xE0AA20 `0000 002a`), shared
   with an integer32 parameter's cell of the same value.
+- `calls/str_const_args` - codegen-patterns 1.5, "A string constant to
+  an array of char" (bead domain-pascal-jgtd): a string constant for a
+  value or `in` array of char that is not `univ` is a cell of the
+  parameter's size, padded with blanks (SAU5 tape_$check_block 0xE33F12,
+  cell 0xE33FA0, 200 bytes), one cell for equal constants (SAU5
+  TAPE_$BOOT 0xE344C0/0xE344D4/0xE344E4, cell 0xE346DE).
 - `calls/univ_symbol_addr` - codegen-patterns 1.5, "Address of a symbol
   by address" (bead domain-pascal-68tc): `addr(x)` of another unit's
   object or of a routine passed by address is a 4-byte code cell holding

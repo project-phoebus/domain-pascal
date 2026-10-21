@@ -6859,9 +6859,11 @@ fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
 /// characters, an odd count followed by one zero byte (codegen-patterns
 /// 1.5, "To a `univ` parameter": 43 of the 101 string cells
 /// `tools/pcsurvey.py` finds end in a single `00`, the other 58 in a
-/// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`).  Sets,
-/// records, strings as another type and `nil` are not supported yet
-/// (`nil` passed by address: no site known).
+/// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`); a
+/// string constant as an unpacked array of char, padded with blanks to
+/// its size (below).  Sets other than of a word or a longword, records,
+/// strings as another type and `nil` are not supported yet (`nil` passed
+/// by address: no site known).
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
     if let (ConstValue::Str(s), TypeKind::StringLit { .. }) = (v, p.types.kind(ty)) {
         let mut bytes = s.clone();
@@ -6875,6 +6877,39 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         });
     }
     let size = p.types.size(ty);
+    if let (ConstValue::Str(s), ByteCopy::Chars) = (v, byte_copy(p, ty)) {
+        // A string constant as an unpacked array of char that is not
+        // `univ` (bead domain-pascal-jgtd): the value an assignment to a
+        // variable of the parameter's type gives (ref "Passing
+        // Variable-Length Parameters", p. 4-207: "the same as if the
+        // argument were being assigned to a variable of the parameter's
+        // type", said of varying formals and applied here by analogy: the
+        // image settles it, below; for an array of char "unassigned chars are padded with
+        // spaces", "Variable-Length String Operations", p. 4-204), so the
+        // characters and blanks to the type's size, an odd size followed
+        // by one zero byte as a string's own cell (above).  SAU5
+        // TAPE_$BOOT's tape_$check_block 0xE33F12 `pea (0x8c,PC)` names
+        // 0xE33FA0..0xE34068, 80 characters and 120 blanks for an `in
+        // vfmt_$string_t` (200 bytes); one of the formal's own size is
+        // its characters, the cell 0xE346DE that TAPE_$BOOT names for the
+        // three calls with a 16-character `in` array of char (0xE344C0,
+        // 0xE344D4, 0xE344E4: one cell, shared as any equal constant).
+        // Keyed by the parameter's type (Uncertain whether a cell of
+        // equal bytes for a `univ` parameter, keyed by the string's own
+        // type, would be shared: no site).
+        if s.len() as u32 <= size {
+            let mut bytes = s.clone();
+            bytes.resize(size as usize, b' ');
+            if bytes.len() % 2 == 1 {
+                bytes.push(0);
+            }
+            return Ok(PoolConst {
+                bytes,
+                key: ty.0,
+                symbol: None,
+            });
+        }
+    }
     if let (ConstValue::Set(_), TypeKind::Set { .. }) = (v, p.types.kind(ty)) {
         // A set constant: its bit mask big-endian in the set's size (ref
         // 3.9.3 p. 3-16, Figure 3-6), in the size group of a scalar cell
