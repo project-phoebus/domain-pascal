@@ -1394,6 +1394,7 @@ fn select_body_once(
         .iter()
         .filter(|(o, _)| f.with_temps.contains(o) && s.elem_ptrs.contains(o))
         .filter_map(|&(_, a)| a.map(Reg::A))
+        .chain(s.held_elem_regs.iter().map(|&a| Reg::A(a)))
         .collect();
     let local_regs: Vec<Reg> = s
         .webs
@@ -7950,6 +7951,17 @@ pub struct Selector {
     /// The `lea` of a block element second of the unit's array, until
     /// its count's `moveq` is emitted ([`Selector::note_block_count`]).
     elem_second_lea: Option<usize>,
+    /// The element an `if`'s test forms with `lea` while it is selected,
+    /// for the call that begins its `then` part ([`Selector::elem_hold`]).
+    elem_hold_req: Option<ElemHold>,
+    /// That element's address, once the test formed it, until the `then`
+    /// part's first statement is selected ([`Selector::call_target`]).
+    held_elem: Option<HeldElem>,
+    /// The registers of those addresses that a call read: held through
+    /// the call as a `with` record's element address is
+    /// ([`held_through_calls`]'s `with_elems`; 12.4 R4(c) counts
+    /// IO_$DISABLE_DEVICE 0xE1A820 among those).
+    held_elem_regs: Vec<u8>,
     /// Such `lea`s and their counts, checked after scheduling.
     elem_counts: Vec<(usize, usize, Span)>,
     /// Copies `(dst, src)` exempt from R2: `dst` may take `src`'s register
@@ -8388,6 +8400,30 @@ struct Cse {
     at: usize,
 }
 
+/// An element of the unit's array whose address an `if`'s test forms
+/// with `lea` for the call through a routine pointer in it that begins
+/// the `then` part ([`Selector::elem_hold`]).
+#[derive(Clone, Debug)]
+struct ElemHold {
+    /// The array's address, the element's index and its size.
+    base: Addr,
+    index: Expr,
+    scale: u32,
+    /// The call (its address: the `then` part's first statement).
+    call: usize,
+}
+
+/// The address of an [`ElemHold`] element, less the array's offset and
+/// the field's, as the test formed it: `lea (0,A5,Dx),Am`.
+#[derive(Clone, Debug)]
+struct HeldElem {
+    elem: ElemHold,
+    /// The address register.
+    reg: u8,
+    /// The index of the `lea` in `out`.
+    at: usize,
+}
+
 /// An operand as [`Selector::eval`] leaves it.
 #[derive(Clone, Debug)]
 enum Val {
@@ -8419,6 +8455,9 @@ impl Selector {
             colour_apart: Vec::new(),
             held_firsts: Vec::new(),
             elem_second_lea: None,
+            elem_hold_req: None,
+            held_elem: None,
+            held_elem_regs: Vec::new(),
             elem_counts: Vec::new(),
             colour_coalesce: Vec::new(),
             count_copies: Vec::new(),
@@ -9252,6 +9291,132 @@ impl Selector {
     /// `bsr.w; bra.s 0xE06194` with `addq.w #4,SP` at 0xE06194; 45 pairs
     /// of different sizes pop separately, none of the same size does): not
     /// supported yet.
+    /// The element of the unit's array whose address an `if`'s test
+    /// forms with `lea` and holds for the call through a routine pointer
+    /// in the same element that begins the `then` part (codegen-patterns
+    /// 1.6, "Held across an `if`'s test"; bead domain-pascal-59st):
+    /// IO_$ENABLE_DEVICE 0xE1A876..0xE1A888 `lea (0,A5,D0.w),A2; tst.l
+    /// (0x70,A2); beq.s; move.l (0x118,A3),-(SP); movea.l (0x70,A2),A0;
+    /// jsr (A0)`, IO_$DISABLE_DEVICE 0xE1A820..0xE1A832, IO_$RELEASE
+    /// 0xE1A706..0xE1A718 (`if v[i].p <> nil then v[i].p^(...)`, ../source
+    /// io/enable_device.pas).  Every call through an element is made
+    /// through the element's `lea` (call_target); at these three, the
+    /// only tests of such an element right before such a call
+    /// (`tools/elemholdsurvey.py`, the 15 `jsr (An)` through an element's
+    /// `lea`), the test reads through the same `lea`.  An element read
+    /// in the `then` part without a `lea` keeps its scaled index instead
+    /// (NETWORK_$GET_NET 0xE0F2F4..0xE0F2FA `tst.l (0x3c,A5,D1.w); beq.s;
+    /// move.l (0x3c,A5,D1.w),(A0)`, 12.4 R7).  The address is not kept
+    /// past the `then` part: IO_$RELEASE's next statement forms it again
+    /// (0xE1A724..0xE1A730), after the call.
+    ///
+    /// Only when nothing between the test's `lea` and the call's load of
+    /// the pointer can change the element's address: the test (the index
+    /// and the other operand) reads no volatile object and calls
+    /// nothing, nor do the call's arguments (a function there could
+    /// change the index's variable).  A
+    /// `while` test, an `else` part's call and the elements of other
+    /// units' arrays are not seen (`tools/elemholdsurvey.py`): not held.
+    /// Nor any shape the three sites do not have: each is an `if` with
+    /// no `else` part, outside any loop, whose word index is a field of
+    /// an enclosing `with` record that is an array element (`with
+    /// io_$dctes[unit] do ... io_$bus_epv[bus]`, 0xE1A866/0xE1A86A).
+    /// Elsewhere the element is formed twice, as before (review of bead
+    /// domain-pascal-59st).
+    fn elem_hold(&self, cond: &IrCond, then_: &[Stmt], else_: &[Stmt]) -> Option<ElemHold> {
+        let IrCond::Compare {
+            lhs:
+                lhs @ Expr::Load {
+                    addr:
+                        Addr::Index {
+                            base, index, scale, ..
+                        },
+                    ..
+                },
+            rhs,
+            ..
+        } = cond
+        else {
+            return None;
+        };
+        if !matches!(&**base, Addr::Static(_))
+            || self.data_absolute
+            || !else_.is_empty()
+            || self.in_loop()
+            || index.ty().width != Width::Word
+            || !self.with_elem_field(index)
+        {
+            return None;
+        }
+        let Some(Stmt {
+            kind: StmtKind::Call(c),
+            ..
+        }) = then_.first()
+        else {
+            return None;
+        };
+        let Callee::Pointer(x) = &c.callee else {
+            return None;
+        };
+        let Expr::Load {
+            addr:
+                a @ Addr::Index {
+                    base: b2,
+                    index: i2,
+                    scale: s2,
+                    ..
+                },
+            ..
+        } = &**x
+        else {
+            return None;
+        };
+        if b2 != base || i2 != index || s2 != scale || self.element_block(a) != Some(Ok(true)) {
+            return None;
+        }
+        let mut calls = 0;
+        let mut volatile = false;
+        let mut v = |n: Node| match n {
+            Node::Call(_) => calls += 1,
+            Node::Addr(Addr::Volatile { .. }) => volatile = true,
+            _ => {}
+        };
+        walk_call(c, &mut v);
+        walk_expr(lhs, &mut v);
+        walk_expr(rhs, &mut v);
+        if calls != 1 || volatile {
+            return None;
+        }
+        Some(ElemHold {
+            base: (**base).clone(),
+            index: (**index).clone(),
+            scale: *scale,
+            call: c as *const Call as usize,
+        })
+    }
+
+    /// Whether `index` is a field of a `with` record that is an array
+    /// element, read through the `with`'s address register
+    /// ([`Selector::elem_ptrs`]; IO_$ENABLE_DEVICE 0xE1A86A `move.w
+    /// (0x12e,A3),D0`).
+    fn with_elem_field(&self, index: &Expr) -> bool {
+        let Expr::Load {
+            addr: Addr::Indirect { base, .. },
+            ..
+        } = index
+        else {
+            return false;
+        };
+        let Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        } = &**base
+        else {
+            return false;
+        };
+        self.elem_ptrs.contains(o) && self.ptr_locals.iter().any(|&(p, r)| p == *o && r.is_some())
+    }
+
     fn if_(
         &mut self,
         f: &Function,
@@ -9359,10 +9524,15 @@ impl Selector {
         }
         let l_else = self.new_label();
         let at = self.out.len();
-        self.branch(cond, false, l_else)?;
+        self.elem_hold_req = self.elem_hold(cond, then_, else_);
+        let tested = self.branch(cond, false, l_else);
+        self.elem_hold_req = None;
+        tested?;
         let flags = self.branch_flags(at, l_else);
         if else_.is_empty() {
-            self.seq(f, then_, next)?;
+            let then_done = self.seq(f, then_, next);
+            self.held_elem = None;
+            then_done?;
             // `if m < 0 then m := 0` right after an `add`/`sub` of `m` in
             // memory: the join is entered with the flags of the `add`/`sub`
             // (the branch) or of the `clr.<s> m` (the `then` part's last
@@ -9385,14 +9555,16 @@ impl Selector {
         }
         // The `then` part continues with the `bra` to the join, then
         // whatever follows the `if`.
-        self.seq(
+        let then_done = self.seq(
             f,
             then_,
             Tail {
                 end: false,
                 clean: next.clean,
             },
-        )?;
+        );
+        self.held_elem = None;
+        then_done?;
         let l_join = self.new_label();
         if !ends_in_jump(then_) {
             self.span = span;
@@ -15531,6 +15703,7 @@ impl Selector {
             result_moves,
             held_firsts,
             elem_second_lea,
+            held_elem,
             elem_counts,
             count_copies,
             call_stmts,
@@ -15568,6 +15741,8 @@ impl Selector {
             entry_tail,
             // No index into `out`.
             out: _,
+            elem_hold_req: _,
+            held_elem_regs: _,
             const_form: _,
             const_chain: _,
             vregs: _,
@@ -15689,6 +15864,7 @@ impl Selector {
             at(s);
         });
         elem_second_lea.iter_mut().for_each(at);
+        held_elem.iter_mut().for_each(|h| at(&mut h.at));
         elem_counts.iter_mut().for_each(|(k, c, _)| {
             at(k);
             at(c);
@@ -16726,6 +16902,43 @@ impl Selector {
         } = x
         {
             if matches!(&**base, Addr::Static(_)) && self.element_block(a) == Some(Ok(true)) {
+                // The address the `if`'s test formed, held for this call
+                // ([`Self::elem_hold`]; IO_$ENABLE_DEVICE 0xE1A884
+                // `movea.l (0x70,A2),A0; jsr (A0)`).
+                let held = self.held_elem.take().filter(|h| {
+                    let lea = matches!(
+                        self.out.get(h.at),
+                        Some(Insn::Lea { dst, .. }) if *dst == h.reg
+                    );
+                    lea && h.elem.call == c as *const Call as usize
+                });
+                if let (
+                    Some(h),
+                    Addr::Index {
+                        base: b, offset, ..
+                    },
+                ) = (held, a)
+                {
+                    let Addr::Static(o) = &**b else {
+                        unreachable!("matched above")
+                    };
+                    let d = o + offset;
+                    if (-0x8000..0x8000).contains(&d) {
+                        let p = self.alloc_a()?;
+                        self.out.push(Insn::Movea {
+                            size: Size::L,
+                            src: if d == 0 {
+                                Ea::Ind(h.reg)
+                            } else {
+                                Ea::Disp(d, h.reg)
+                            },
+                            dst: p,
+                        });
+                        self.colour_apart.push((Reg::A(h.reg), Reg::A(p)));
+                        self.held_elem_regs.push(h.reg);
+                        return Ok(p);
+                    }
+                }
                 let (elem, d) = match self.ea_of(a)? {
                     Ea::Idx(d, ar, xr, long) => {
                         let e = self.alloc_a()?;
@@ -25340,6 +25553,48 @@ impl Selector {
             }
         };
         let x = self.index_reg(index, scale)?;
+        // The test of an element whose address the `then` part's call
+        // reads: `lea (0,A5,Dx),Am` and `(d,Am)` within a byte too
+        // (IO_$ENABLE_DEVICE 0xE1A876 `lea (0,A5,D0.w),A2; tst.l
+        // (0x70,A2)`; [`Self::elem_hold`]).
+        if let Some(h) = self
+            .elem_hold_req
+            .as_ref()
+            .filter(|h| h.base == *base && h.index == *index && h.scale == scale)
+            .cloned()
+        {
+            let disp = disp0 + offset;
+            if (-0x8000..0x8000).contains(&disp) {
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Lea {
+                    src: Ea::Idx(0, areg, x, index.ty().width == Width::Long),
+                    dst: a,
+                });
+                self.held_elem = Some(HeldElem {
+                    elem: h,
+                    reg: a,
+                    at: self.out.len() - 1,
+                });
+                // Coloured before the address an enclosing `with` holds
+                // for an element: A2, the `with`'s A3 (IO_$ENABLE_DEVICE
+                // 0xE1A866/0xE1A876, IO_$DISABLE_DEVICE 0xE1A810/0xE1A820,
+                // IO_$RELEASE 0xE1A6F6/0xE1A706).
+                let withs: Vec<u8> = self
+                    .ptr_locals
+                    .iter()
+                    .filter(|(o, _)| self.elem_ptrs.contains(o))
+                    .filter_map(|&(_, r)| r)
+                    .collect();
+                for w in withs {
+                    self.colour_after.push((Reg::A(a), Reg::A(w)));
+                }
+                return Ok(if disp == 0 {
+                    Ea::Ind(a)
+                } else {
+                    Ea::Disp(disp, a)
+                });
+            }
+        }
         self.element_ea(areg, x, index, disp0 + offset)
     }
 

@@ -1438,12 +1438,55 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     kept apart from the element's register; a body coloured with spills,
     IO_$ACQUIRE's, may still reuse it); golden
     `tests/golden/calls/elem_routine_pointers`, execution test
-    `elem_ptr_calls`.  Not done: the element's address shared by an
-    `if`'s test and the call in its `then` part (IO_$DISABLE_DEVICE
-    0xE1A814..0xE1A82E `lea (0,A5,D0.w),A2; tst.l (0x74,A2); beq; ...;
-    movea.l (0x74,A2),A0; jsr (A0)`; IO_$ENABLE_DEVICE 0xE1A86A,
-    IO_$RELEASE 0xE1A6FA; pascal-translation-notes 372): `dpc` forms it
-    twice, the test indexed.
+    `elem_ptr_calls`.
+  - **Held across an `if`'s test** (Verified at the sites; the rule
+    Reported from them; bead domain-pascal-59st, pascal-translation-notes
+    372): `if v[i].p <> nil then v[i].p^(...)` forms the element's
+    address once, with `lea` before the test, tests through it, and
+    reads the pointer through the same register for the call:
+    IO_$DISABLE_DEVICE 0xE1A820..0xE1A832 `lea (0,A5,D0.w),A2; tst.l
+    (0x74,A2); beq.s; move.l (0x118,A3),-(SP); movea.l (0x74,A2),A0; jsr
+    (A0)`, IO_$ENABLE_DEVICE 0xE1A876..0xE1A888 (0x70), IO_$RELEASE
+    0xE1A706..0xE1A718.  The pointer then goes to A0 (the held address
+    is in A2, the enclosing `with`'s element in A3: 0xE1A810, 0xE1A866,
+    0xE1A6F6).  The next statement forms the address again, after the
+    call (IO_$RELEASE 0xE1A724..0xE1A730, `lea (0,A5,D1.w),A0`).
+    Survey (`tools/elemholdsurvey.py`, every conditional branch on a
+    `tst`/`cmp`/`btst` of an element in the 1588 compiled routines it
+    models, and the code after it): these three are the only tests of
+    an element whose `then` part begins with a call through it.  Of the
+    15 `jsr (An)` whose pointer is read from an element (`calls`; none
+    from an indexed operand), 9 read it right after the element's
+    `lea`, 6 through an address formed earlier: these three, and
+    0xE0B8B2, 0xE18658, 0xE32E88, at displacements beyond a byte (1952,
+    160, 4024: a `lea` anyway), the first two tested on the way
+    (0xE0B882, 0xE185F2) and called on the branch's target path after
+    stores.  An element the `then` part
+    only reads or writes is addressed again with its scaled index held
+    (12.4 R7; NETWORK_$GET_NET 0xE0F2F4..0xE0F2FA `tst.l (0x3c,A5,D1.w);
+    beq.s; move.l (0x3c,A5,D1.w),(A0)`; PCHIST_$COUNT 0xE1A176..0xE1A17C;
+    OS_PROC_SHUTWIRED 0xE5D0D8; NETWORK_$REMOVE_NET 0xE0F29E): 5 such
+    sites in the unit's data within a byte, against 17 tests through a
+    fresh `lea` followed by uses of it in the `then` part, which a
+    `with` in the source may explain as well (no source to tell).  Not
+    seen: a `while` test, a call in the `else` part, another unit's
+    array.  **Implemented** (`Selector::elem_hold`, `index_ea`,
+    `call_target`): the element of the unit's array (`(d,A5,Dx)`) that
+    an `if`'s comparison reads and whose routine pointer the `then`
+    part's first statement calls, in the three sites' shape only: no
+    `else` part, outside any loop, a word index that is a field of an
+    enclosing `with` record over an array element; and when the test
+    reads nothing volatile and neither it nor the call's arguments call
+    a function (which could change the index's variable between the
+    two).  Any other shape forms the element twice, as before; the held
+    address is coloured before an enclosing `with`'s element address
+    and held through the call as one (12.4 R4(c)); not kept past the
+    `then` part.  Conformance unit `tests/conformance/io_enable_device`
+    (IO_$DISABLE_DEVICE, IO_$ENABLE_DEVICE), golden
+    `tests/golden/calls/elem_held_test`, execution test
+    `elem_held_test`.  Not as the image: IO_$RELEASE's second index in
+    D1, its temporary D0 (0xE1A724..0xE1A72E), where `dpc` has them the
+    other way round.
   - **Implemented** (beads domain-pascal-5aw.8, -5aw.16): routine pointer
     types with `val_param` (short or `options(...)` form) after the type
     in `type`, `var` and record field declarations (`dpc-syntax`
@@ -14483,6 +14526,10 @@ emitted (a store to a register-held variable writes no memory).
 Stores to other variables do not count (FIM_$ACKNOWLEDGE).  Everything
 else is computed again, as before (where the image reuses after a call
 or into a loop, `dpc` diverges: not refused, since no rule is known).
+An element's address is held only from an `if`'s test into a call
+through a routine pointer in it that begins the `then` part (1.6, "Held
+across an `if`'s test"; IO_$ENABLE_DEVICE 0xE1A876; bead
+domain-pascal-59st).
 Golden `tests/golden/regalloc/cse` (FIM_$ACKNOWLEDGE's ×12 with unit
 data, LOG_$READ's worker to 0xE177CA plus a sum with the held value);
 driver test `computed_values_are_reused_only_while_valid` (operand

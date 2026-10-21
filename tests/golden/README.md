@@ -332,6 +332,12 @@ Tests:
   result left in D0 (0xE1A788), the `bra` past `tst.l (A0)` (0xE1A4BE)
   and past `tst.l; bne` after `clr.l` (0xE1A566), the parameter loaded
   after the pad (0xE1A756).
+- `calls/elem_held_test` - codegen-patterns 1.6 ("Held across an `if`'s
+  test"; bead domain-pascal-59st): IO_$ENABLE_DEVICE, IO_$DISABLE_DEVICE
+  and IO_$RELEASE: `lea (0,A5,D0.w),A2; tst.l (d,A2); beq.s; ...;
+  movea.l (d,A2),A0; jsr (A0)` (0xE1A876..0xE1A888, 0xE1A820..0xE1A832),
+  the `with`'s element in A3, the address formed again for the next
+  statement (0xE1A724..0xE1A730).
 - `calls/pad_entry_load` - codegen-patterns 12.4 R11 ("The pad and the
   last entry load"; bead domain-pascal-dfjh): a first call's pad above
   the last entry load when the first push is a `move` to `-(SP)` that

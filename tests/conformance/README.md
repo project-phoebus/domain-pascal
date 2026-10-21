@@ -72,7 +72,10 @@ a bare `rts`, then status stubs with by-address slots used once in A0,
 A1, A2, a status store then a constant boolean result), `xns_idp_get_stats.pas`
 (XNS_IDP_$GET_STATS 0xE18FD6: the status slot in A1 after the dead A0)
 and `io_alloc.pas` (IO_$ALLOC 0xE1A9C2: a status cleared, then `clr.l
-D0`).  Comparisons (codegen-patterns 7.1; bead domain-pascal-aaj):
+D0`).  `io_enable_device.pas` (IO_$DISABLE_DEVICE 0xE1A7E8,
+IO_$ENABLE_DEVICE 0xE1A83E: an element's address held across an `if`'s
+test for the call through a routine pointer in it, codegen-patterns
+1.6; bead domain-pascal-59st).  Comparisons (codegen-patterns 7.1; bead domain-pascal-aaj):
 `acl_clear_super.pas` (ACL_$CLEAR_SUPER 0xE46FF8: two variables in
 memory, the left one loaded, `cmp.w (0xb72,A5),D0`) and `pacct_on.pas`
 (PACCT_$ON 0xE5A9A4: `<>` of two UIDs with `cmpm.l`, UID_$NIL by

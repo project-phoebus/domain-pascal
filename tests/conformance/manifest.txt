@@ -90,6 +90,9 @@ tests/conformance/audit_suspend.pas          AUDIT_$SUSPEND AUDIT_$RESUME  --sec
 tests/conformance/iic.pas                    IIC_$INIT IIC_$ACQUIRE IIC_$RELEASE IIC_$STATISTICS IIC_$SELF_TEST IIC_$SEND IIC_$EXISTS IIC_$RECEIVE IIC_$RECEIVE_CHECK
 tests/conformance/xns_idp_get_stats.pas      XNS_IDP_$GET_STATS  --section-addr .bss.moddata.XNS_IDP=0xE2B314
 tests/conformance/io_alloc.pas               IO_$ALLOC
+# An element's address held across an `if''s test for the call through a
+# routine pointer in it (codegen-patterns 1.6; bead domain-pascal-59st).
+tests/conformance/io_enable_device.pas       IO_$DISABLE_DEVICE IO_$ENABLE_DEVICE  --section-addr .bss.moddata.IO_.WIRED_DATA=0xE2C368  module-routines=IO_$CHECK_UNIT=0xE1A4A4
 
 # Which routines load A5 (codegen-patterns 4): always mode from a routine
 # on, per routine, and the unit's data addressed absolutely; empty
