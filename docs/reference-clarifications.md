@@ -187,6 +187,13 @@ Question: is a negative constant allowed (`univ_ptr(-1)`, `p(pbu_no_handler)` wi
 Owner's answer (2026-10-21): "Allow, 32-bit".  A type transfer of an integer constant to a pointer type is accepted; the constant is a 32-bit integer (3.2.3), so -1 becomes 16#FFFFFFFF, the same as `p(integer32(-1))`.
 Consequence: implemented under bead domain-pascal-j1bt: `dpc-sema` (`Checker::transfer`) no longer refuses a negative constant; the result is the pointer constant -1, the same value `p(integer32(-1))` already gave, so it takes the paths of a 4-byte constant: `moveq #-1` and `move.l` stores, a `ffff ffff` code-section cell by address, `pea (-1).w` by value, `cmpi.l #-1` in a comparison.  Tests: sema `integer_constant_to_pointer_transfer`, golden `expr/transfer_neg_const_ptr`.  The gqp entry's "A negative constant is refused" is superseded.
 
+## An unsigned word compared with 0 (4.3.3, p. 4-6)
+Asked: 2026-10-21, by the lead agent (bead domain-pascal-wkm5)
+Passage: 4.3.3: ">, >=, <, <=, max, div and mod" are interpreted as signed "except under the following circumstances: Both operands are unsigned run-time values.  One operand is an unsigned run-time value and the other is a constant in the positive subrange 0..2147483647.  For these two cases, the compiler uses unsigned operations."
+Question: the image compares an unsigned word (a 0..65535-style subrange, zero-extended when widened, its other bound compared unsigned) with 0 by signed branches: sau5 MT 0xE75916 `move.w (22,A6),D1; ble; cmpi.w #0x4000,D1; bhi` (`(length <= 0) or else (length > 16#4000)`), sau2 SOCK_$PUT_INT 0xE161AA `tst.w D0; ble; cmpi.w #224,D0; bls`, and `>`/`<` forms at PKT_$BLD_INTERNET_HDR 0xE122D6, WIN_$DINIT 0xE19EDE and PBU_$GET_DCTE 0xE59212 (sau5).  Under 4.3.3 these would be unsigned (16#8000..16#FFFF above 0).  Does dpc follow the reference or the image?
+Owner's answer (2026-10-21): "Reproduce image".  An unsigned word compared with the constant 0 by `<=`, `>`, `<` or `>=` takes the signed branch (`ble`/`bgt`/`bmi`/`bpl`), so 16#8000..16#FFFF count as below 0, as in the original; comparisons with other constants and between unsigned values keep 4.3.3's unsigned forms.  A byte (0..255) against 0 is unchanged (no site).  This departs from the reference: a candidate entry for ../source/docs/original-quirks.md (not ours to edit; the owner was told).
+Consequence: implemented under bead domain-pascal-wkm5 (`dpc-ir` `compare`); codegen-patterns 7.1 "Signed or unsigned".
+
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
