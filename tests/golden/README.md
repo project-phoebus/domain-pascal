@@ -645,6 +645,10 @@ Tests:
   for booleans, a call's result copied into it (NETBUF_$RTNVA 0xE0ED4E),
   a stored local pushed from D0 or reloaded after a call, a pointer result
   through its frame slot into A0 (0xE6AA38).
+- `results/bool_const_one` - codegen-patterns 3 ("Boolean constants";
+  bead domain-pascal-u9vq): a boolean function whose body is `f :=
+  true`, `st D0` (DUMMY_INTERRUPT_HANDLER 0xE6D46C), or `f := false`,
+  `clr.b D0` (IIC_$EXISTS 0xE70AB0).
 - `sysprog/interrupts` - codegen-patterns 10, 12.5, 1.1: `disable` /
   `enable` as `ori.w #0x700,SR` / `andi.w #0xF8FF,SR` (TIME_$GET_ADJUST
   0xE16AB0, 0xE16ABA), `set_sr` as `move.w SR,Dn; move.w newsr,SR`

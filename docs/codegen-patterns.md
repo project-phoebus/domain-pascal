@@ -1875,6 +1875,21 @@ v,D0` (best effort; the image forms a boolean, 7.1).
   room for a result variable (`link #-4`), but the slot is never written
   or read.  `dpc` compiles a function body of one simple statement this
   way.
+- **Boolean constants (Verified by survey; bead domain-pascal-u9vq).**
+  A boolean constant result is `st`/`clr.b` into D0, never `moveq` or
+  `move.b #`, in every shape.  One-statement bodies: DUMMY_INTERRUPT_HANDLER
+  0xE6D46C `link #-4; st D0; unlk; rts` (`f := true`), IIC_$EXISTS
+  0xE70AB0 `link #-4; clr.b D0; unlk; rts` (`f := false`); SAU5 has the
+  same two bodies and no `link; moveq #-1,D0 / moveq #0,D0 / move.b
+  #-1,D0; unlk; rts`.  In the SAU2 routines that set D0 with `st`/`sf`/
+  `clr.b`/`move.b` or whose callers read D0.b, the D0 constants are: `st`
+  45 (1 the whole body, 4 the last statement, 9 the last statement as a
+  branch target, 13 followed by a `bra` to the epilogue, 18 elsewhere),
+  `clr.b` 47 (1, 5, 10, 12, 19); `sf`, `moveq #-1`, `moveq #0`, `move.b
+  #-1` none (the one `moveq #-1,D0` there, ROUTE_$FIND_PORT 0xE15B3A, is
+  its word result).  `dpc` uses `st` for `true` in a body of one
+  statement and in the result variable of a longer one (below); `false`
+  is `clr.b`.  Golden `results/bool_const_one`.
 - **Result variable (Verified by survey; implemented; beads
   domain-pascal-5aw.11, -8aj).**  `tools/resultsurvey.py` classes the
   epilogue of every *D0 function* (a routine some compiled caller reads

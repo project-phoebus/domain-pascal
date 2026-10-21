@@ -16807,6 +16807,26 @@ impl Selector {
             });
             return Ok(());
         }
+        // `true`: `st`, as in a body of several statements
+        // ([`Self::set_result_web`]).  DUMMY_INTERRUPT_HANDLER 0xE6D46C
+        // `link #-4; st D0; unlk; rts`, its one statement `f := true` (the
+        // same in SAU5); no byte function of SAU2 sets D0 with `moveq
+        // #-1` or `move.b #-1` (st 45 sites, clr.b 47 for `false`;
+        // codegen-patterns 3, "Boolean constants").
+        if matches!(e, Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN) {
+            let d = self.alloc_d()?;
+            self.out.push(Insn::Scc {
+                cond: Cond::T,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            self.result_moves.push(self.out.len());
+            self.out.push(Insn::Move {
+                size: Size::B,
+                src: Ea::Reg(Reg::D(d)),
+                dst: Ea::Reg(Reg::D(0)),
+            });
+            return Ok(());
+        }
         // A function result in D0 already (the tail wrapper `F :=
         // G(args)`: the call, then the epilogue, codegen-patterns 3,
         // ACL_$IS_SUSER), a held value or a computed one.
