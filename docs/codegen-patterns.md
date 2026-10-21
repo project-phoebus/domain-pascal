@@ -4982,6 +4982,111 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       sites imply (an `integer` × 2 is `.l` by H1).  The base's place
       against a zero-extension read from memory, and with the `clr.l`
       apart from the copy, is not settled (above).
+    - *A word variable into an array that fits: the rules against
+      ../source's types (survey 2026-10-21, beads domain-pascal-tulq,
+      -69fe; not settled, codegen unchanged).*  Each rule was put into
+      `dpc` as an experiment and ../source (at the baseline's commit,
+      `--strict` off, 1414 units conformed) compiled with it; the index
+      operands `(d,An,Dx.<s>)` of each unit were paired in order with the
+      image's where the unit and the image have as many, and each site
+      where the rule's size differs from the bounds rule's (`dpc`'s) was
+      scored by the image's size:
+
+      | Rule for a word variable (array fits) | Image agrees with the rule | with the bounds rule | ../source OK routines lost |
+      |---|---|---|---|
+      | H1: `.l` unless the type's range × size fits | 220 | 421 | 15 |
+      | sign: `.l` for a type with a negative lower bound | 149 | 270 | 5 |
+      | sign: `.l` for any signed type (non-negative subranges too) | 149 | 412 | 11 |
+
+      Split by the scaling `dpc` gives the site: of H1's 220, 115 are
+      shifts and 93 `mulu.w`; of the bounds rule's 421, 350 shifts and
+      47 `mulu.w`.  No rule separates the sites with ../source's
+      declarations: those are reconstructions (`integer` for most
+      locals), so a site where the image is `.w` and the type is wide is
+      as likely a wrong declaration as a wrong rule.  What the image
+      alone shows still holds: one value, one type, two forms by element
+      size (SMD_$INQ_DISP_INFO 0xE70172 ×96 `.w`, 0xE70182 ×268
+      `muls.w`/`.l`) excludes every rule by the type's sign alone and by
+      the bounds alone; H1 fits it only with a range of 123..341 values
+      (or so) for SMD_$INQ_DISP_INFO's `unit`, and SMD_$INQ_DISP_TYPE
+      0xE6DE42..0xE6DE4C (`ext.l`, ×96 `.l` into the same table) has
+      Apollo's own heading, `unit: integer` (H1 `.l`).  So H1 stays the
+      reading that fits the image, and the bounds rule the one that fits
+      ../source.  Deciding sites: a word variable whose declaration is
+      Apollo's (an insert file of Apollo's, as smd.ins.pas's
+      SMD_$INQ_DISP_TYPE) indexing an array that fits, with an element
+      size that makes its range not fit; PROC2's pid map's element type
+      (PROC2_$SIGNAL 0xE3EFF8 `mulu.w #228`, `.w`: H1 needs a range of at
+      most 143 values, ../source has `pinteger`); and for H1 against H2,
+      as before, a narrow variable into an array that does not fit.
+  - **The index's constant part (survey Verified; implemented, bead
+    domain-pascal-69fe).**  `a[x + k]`, `a[k + x]`, `a[x - k]` with `k`
+    constant: `x` is the index register and `k` × size goes into the
+    displacement with the lower bound.  MMAP_$INIT 0xE31A44..0xE31A50
+    `asr.l #2,D0; move.w D0,D1; lsl.w #2,D1; clr.l (0,A0,D1.w)`
+    (`table[... div 1024 + 1]`, 1-based); PEB_UNWIRED's module-local
+    0xE31DD4 at 0xE31E2C..0xE31E36 (`x + 1`, `.w`, the 1 in the
+    displacement);
+    DISK's module-local 0xE3BC40 at 0xE3BD90 (`pool[page + 1]`); AREA_'s
+    module-local 0xE075CA at 0xE076C6..0xE076D8 (`areas[id + 1]`,
+    `lea (0,A3,D3.l)`, the element `id + 1` reached at offset 0 of a
+    1-based table); TTY_$K_PUT 0xE67C68..0xE67C6E (`clr.l D1; ...; move.w
+    D3,D1; pea (0,A0,D1.l)`, `buffer[chars_written + 1]`); SAU5
+    MT_$GET_IOVA 0xE76DFE `or.l (0x1a,A0,D1.w),D0` (`s.cfg[... + 1]`).
+    None of the 1909 word-index chains of `tools/arithsurvey.py wordidxs`
+    has an `addq`/`subq`/`addi`/`subi` before its scaling but conditional
+    values (0xE1B738, `if x = 1 then 256 else x - 1`) and bit numbers
+    (`(pid - 1) div 8`, 0xE310F8).  In the experiment above, folding
+    changed the displacement of 18 paired sites, all to the image's (3
+    others matched neither).  The run-time part is then indexed as a
+    *computed* index (below), its range the bounds less `k`.  Not folded
+    where the displacement with the element's size would pass 16 bits
+    (`a[k + 1000]` of 48-byte records: the sum is computed, as before;
+    no site), nor for a signed byte (`t[s - 2]`, `s` a `[byte]
+    -128..127`: the sum is a word, a byte index would need `ext.w`, which
+    no byte index of the image has).  A word variable
+    with a constant part into an array that does not fit is widened by
+    the sign of that range (zero-extended when it cannot be negative,
+    AREA_ above; sign-extended otherwise, **best effort**, no site).
+    Inside `for` loops `a[i + 1]` is now `a[i]` with a displacement and is
+    stepped as 7.4 steps `a[i]` (NETBUF_$ADD_PAGES 0xE0EAA2 steps
+    `pages[j + 1]` so).  Golden `data/index_parts`, exec test
+    `index_parts`; `expr/narrow_store` (NETBUF_$ADD_PAGES's `pages[j +
+    1]` now with its 1 folded).
+  - **Computed indices (survey Verified for the forms; implemented for
+    longword values and element sizes that are powers of two, bead
+    domain-pascal-69fe).**  A computed index (an expression, or a
+    variable with a constant part) is taken at the array's index type: a
+    longword one into an array whose bounds times the element size fit in
+    16 bits is scaled at the word's width from its low word and used
+    `.w`, its constant part folded: SAU5 mt_$set_iomap 0xE75CBA
+    (`move.l D1,D2; lsr.l #8,D2; lsr.l #2,D2; lsl.w #2,D2; move.l
+    D0,(0,A0,D2.w)`, `iomap[rshft(iova, 10)]`, 0..1023 of longwords),
+    SAU5 MT_$GET_IOVA 0xE76DDA, SAU5 SM_C_$CINIT 0xE74FAA, MMAP_$INIT
+    0xE31A44 (above).  A longword *variable* stays `.l`:
+    EC2_$REGISTER_EC1 0xE429A4..0xE429AA `move.l (3736,A5),D0; lsl.l
+    #2,D0; lea (0,A5,D0.l),A0` (`ec2_$registered_ec1s[ec2_$max_registered]`,
+    0..256 of pointers; the same in SAU5 at 0xE420D8), DIR's module-local
+    0xE533E6 at 0xE5337E..0xE5347A (`dir_$mttab.mount_tgt[dir_$mttab.count]`,
+    five sites), with a constant part too: audit_$log_cname_op
+    0xE4BF0E `lea (0,A6,D3.l),A0; lea (-527,A0),A2`
+    (`addr(data.names[n1 + 1])`, `n1` a longword; also
+    audit_$log_link_op 0xE4BD90), so only an expression is narrowed, not
+    a variable with a constant part.  A word computed index into an array that does not fit
+    is zero-extended where it cannot be negative (AREA_ 0xE076C6 above).
+    The experiment's score (paired sites where the size changed): 20 to
+    the image's, 2 not, one of them TTY_$K_PUT 0xE67C6E (`.l`, where
+    ../source declares the buffer `univ array[1..1] of char`, which fits:
+    the original's buffer type is not known; the other a loop whose
+    operands pair badly, DIR_$OLD_ADD_LINK_ENTRY).  Not this form: a
+    product, HINT_$GET_HINTS 0xE4998E..0xE4999E and 0xE49A5C..0xE49A6C
+    (`key & 16#3F`, `key` a longword: `and.w` at the word's width, then
+    `muls.w D3,D5` and `.l` into 65 buckets of 84 bytes), so `dpc`
+    narrows only for element sizes that are powers of two (a product of
+    a computed value stays bead domain-pascal-q322's refusal).  Not
+    surveyed: a computed longword index scaled by shifts and adds (×12,
+    ×20; `dpc` leaves it `.l`).  Golden `data/index_parts`, exec test
+    `index_parts`.
   - **Another unit's array (survey Verified; implemented in straight-line
     code, bead domain-pascal-rlnm).**  `tools/boolsurvey.py summary`
     (kind `ebase`: every indexed operand `(d,An,Dx)` through A0-A4 of

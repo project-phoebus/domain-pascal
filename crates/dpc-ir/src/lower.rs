@@ -9785,7 +9785,50 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 let d = i32::try_from((i - lo) * *elem_size as i64).map_err(|_| big())?;
                 return Ok(b.offset_by(d));
             }
+            // A constant part of the index, `x + k`, `k + x` or `x - k`,
+            // goes into the displacement with the lower bound: `x` is
+            // the index register (MMAP_$INIT 0xE31A4C..0xE31A50 `move.w
+            // D0,D1; lsl.w #2,D1; clr.l (0,A0,D1.w)`, `table[... div 1024
+            // + 1]` of a 1-based table; PEB_UNWIRED's module-local
+            // 0xE31DD4 at 0xE31E2C..0xE31E36, `x + 1`; TTY_$K_PUT 0xE67C68..0xE67C6E
+            // `clr.l D1; ...; move.w D3,D1; pea (0,A0,D1.l)`,
+            // `buffer[chars_written + 1]` of a 1-based buffer;
+            // codegen-patterns 5.2, "The index's constant part").  `x` is
+            // then within `lo - k ..  hi - k`.
+            // Not folded where the displacement, with the element's size,
+            // would pass 16 bits (`a[k + 1000]` of 48-byte records: the
+            // sum computed, as before), nor for a signed byte, which would
+            // be indexed as a byte (no `ext.w` index in the image) where
+            // the sum is a word.
+            let (index, k) = match index_constant_part(index) {
+                (x, k) if k != 0 => {
+                    let d = -(lo - k) * *elem_size as i64;
+                    let near = i16::try_from(d).is_ok()
+                        && i16::try_from(d + *elem_size as i64).is_ok();
+                    let signed_byte =
+                        p.types.size(x.ty) == 1 && sign_of(&p.types, x.ty) != Sign::Unsigned;
+                    if near && !signed_byte {
+                        (x, k)
+                    } else {
+                        (&**index, 0)
+                    }
+                }
+                other => other,
+            };
+            let lo = lo - k;
             let mut ix = value_of(p, index)?;
+            let s = *elem_size as i64;
+            let fits = |r: Option<(i64, i64)>| {
+                r.is_some_and(|(lo, hi)| lo * s >= -0x8000 && hi * s <= 0x7fff)
+            };
+            // The range of the index register: the bounds less the constant
+            // part.
+            let core_range = match p.types.kind(base.ty) {
+                TypeKind::Array { index: it, .. } => {
+                    p.types.ordinal_range(*it).map(|(l, h)| (l - k, h - k))
+                }
+                _ => None,
+            };
             if ix.ty().width == Width::Byte {
                 // A byte index of an unsigned type (`char`, a char
                 // subrange) is zero-extended to a word, `clr.w Dn; move.b
@@ -9851,18 +9894,64 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 // fit either is widened to a longword and used as a `.l`
                 // index (codegen-patterns 5.2, "Word indices used as `.l`",
                 // bead domain-pascal-wkg).
-                let fits = |r: Option<(i64, i64)>| {
-                    r.is_some_and(|(lo, hi)| {
-                        let s = *elem_size as i64;
-                        lo * s >= -0x8000 && hi * s <= 0x7fff
-                    })
-                };
-                let fits16 = match p.types.kind(base.ty) {
-                    TypeKind::Array { index: it, .. } => fits(p.types.ordinal_range(*it)),
-                    _ => false,
-                };
-                if !fits16 {
-                    ix = wide_index(p, index, ix, fits(p.types.ordinal_range(index.ty)))?;
+                if !fits(core_range) {
+                    if k != 0 && matches!(ix, Expr::Load { .. }) {
+                        // A variable with a constant part, taken at the
+                        // index type: widened by the sign of its range
+                        // there, zero-extended when it cannot be negative
+                        // (AREA_'s module-local 0xE075CA at 0xE076C6..
+                        // 0xE076D8 `clr.l D3; movea.l #sym,A3; move.w
+                        // D2,D3; lsl.l #4,D3; ...`, `areas[id + 1]` of the
+                        // 1-based area table next to `ext.l` for
+                        // `areas[id]`; TTY_$K_PUT 0xE67C68, above).
+                        let unsigned = ix.ty().sign == Sign::Unsigned
+                            || core_range.is_some_and(|(l, _)| l >= 0);
+                        if !unsigned {
+                            // Best effort (not byte-identical): a register
+                            // that may be negative is sign-extended; no
+                            // site.
+                            dpc_syntax::diag::best_effort(unsupported(
+                                index.span,
+                                "a computed word index (a variable with a constant part) that \
+                                 may be negative, into an array whose bounds times the element \
+                                 size do not fit in 16 bits (`ext.l`: no site; the one site, \
+                                 AREA_'s module-local 0xE075CA at 0xE076C6, zero-extends one \
+                                 that cannot be; codegen-patterns 5.2, \"The index's constant \
+                                 part\") is",
+                            ))?;
+                        }
+                        let sign = if unsigned { Sign::Unsigned } else { Sign::Signed };
+                        ix = convert(ix, Scalar::integer(Width::Long, sign));
+                    } else {
+                        ix = wide_index(p, index, ix, fits(p.types.ordinal_range(index.ty)))?;
+                    }
+                }
+            } else if !matches!(ix, Expr::Load { .. })
+                && fits(core_range)
+                && (*elem_size).is_power_of_two()
+            {
+                // A computed longword index into an array whose bounds
+                // times the element size fit in 16 bits: its low word,
+                // scaled at the word's width and used as a `.w` index
+                // (codegen-patterns 5.2, "Computed indices"; bead
+                // domain-pascal-69fe): MMAP_$INIT 0xE31A44..0xE31A50 (`div
+                // 1024 + 1`, above), SAU5 MT_$GET_IOVA 0xE76DDA (`lsr.l
+                // #8; lsr.l #2; lsl.w #2,D1; or.l (0x1a,A0,D1.w),D0`,
+                // `rshft(...) + 1`, the 1 in the displacement), SAU5's
+                // mt_$set_iomap 0xE75CBA and SM_C_$CINIT 0xE74FAA; a
+                // longword variable stays `.l` (EC2_$REGISTER_EC1
+                // 0xE429A4..0xE429AA `move.l (3736,A5),D0; lsl.l #2,D0`
+                // into a 257-entry table; DIR's module-local 0xE533E6 at
+                // 0xE5337E), with a constant part too (AUDIT's
+                // audit_$log_cname_op 0xE4BF0E `lea (0,A6,D3.l),A0; lea
+                // (-527,A0),A2`, `data.names[n1 + 1]` of a longword `n1`;
+                // audit_$log_link_op 0xE4BD90).  Only for an element size that is a power of
+                // two: the one product seen, HINT_$GET_HINTS 0xE4998E
+                // (`and.w`, then `muls.w D3,D5` and `.l`), is not this
+                // form.
+                let sign = ix.ty().sign;
+                if ix.ty().width == Width::Long {
+                    ix = convert(ix, Scalar::integer(Width::Word, sign));
                 }
             }
             // An array that is a part of its variable (a record's field, an
@@ -9886,7 +9975,7 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                     ));
                 }
             }
-            let offset = i32::try_from(-lo * *elem_size as i64).map_err(|_| big())?;
+            let offset = i32::try_from(-lo * s).map_err(|_| big())?;
             Ok(Addr::Index {
                 base: Box::new(b),
                 index: Box::new(ix),
@@ -10082,6 +10171,30 @@ fn folds_exactly(v: &Expr, from: Option<i64>) -> bool {
     }
 }
 
+/// `index` split into its run-time part and the constant added to it
+/// ([`addr_of`], `a[x + k]`): `x + k`, `k + x` and `x - k` of integers
+/// (nested too), `(index, 0)` for any other expression.
+fn index_constant_part(index: &SExpr) -> (&SExpr, i64) {
+    let ExprKind::Binary { op, lhs, rhs } = &index.kind else {
+        return (index, 0);
+    };
+    let constant = |x: &SExpr| x.value.as_ref().and_then(ConstValue::ordinal);
+    let (x, k) = match op {
+        BinOp::Add => match (constant(lhs), constant(rhs)) {
+            (None, Some(k)) => (&**lhs, k),
+            (Some(k), None) => (&**rhs, k),
+            _ => return (index, 0),
+        },
+        BinOp::Sub => match constant(rhs) {
+            Some(k) if constant(lhs).is_none() => (&**lhs, -k),
+            _ => return (index, 0),
+        },
+        _ => return (index, 0),
+    };
+    let (x, j) = index_constant_part(x);
+    (x, j + k)
+}
+
 /// The index `ix` (the value of `index`, a word) of an element of an
 /// array whose bounds times the element size do not fit in 16 bits
 /// ([`addr_of`]), as a `.l` index: widened to a longword, which the
@@ -10121,8 +10234,9 @@ fn folds_exactly(v: &Expr, from: Option<i64>) -> bool {
 /// bead domain-pascal-4x2's question); a computed index (`.w` at the 39
 /// sites into arrays that fit; zero-extended at the one site into an array
 /// that does not, AREA_'s 0xE075CA at 0xE076C6, `areas[id + 1]` next to
-/// `ext.l` for `areas[id]`, in a `for` loop's stepped pointers); a byte
-/// index (no site).
+/// `ext.l` for `areas[id]`, in a `for` loop's stepped pointers: a variable
+/// with a constant part, which [`addr_of`] widens itself); a byte index
+/// (no site).
 fn wide_index(p: &Program, index: &SExpr, ix: Expr, type_fits: bool) -> Res<Expr> {
     let refuse = |what: &str| {
         Err(unsupported(

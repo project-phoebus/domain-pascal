@@ -17,9 +17,8 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 clr.l (-0x40,%fp)
 move.w %d0,%d1
-addq.w #1,%d1
 lsl.w #2,%d1
-move.w (-0x42,%fp,%d1.w),(0x10,%a5)
+move.w (-0x3e,%fp,%d1.w),(0x10,%a5)
 movea.l (-0x44,%fp),%a5
 unlk %fp
 rts

@@ -323,8 +323,9 @@ fn unsettled_element_copies8() {
         ),
         // A frame array.
         ("u := loc[i];", "an element of an array in the frame"),
-        // A computed index.
-        ("u := tbl[i + 1];", "whose index is computed"),
+        // A computed index (`tbl[i + 1]` is `tbl[i]` with the 1 in the
+        // displacement, codegen-patterns 5.2, "The index's constant part").
+        ("u := tbl[i + j];", "whose index is computed"),
         // A zero-extended byte index (none).
         ("u := tc[c];", "a byte index zero-extended"),
         // Through a held pointer into a slot's object (none).

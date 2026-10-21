@@ -390,9 +390,11 @@ var
     // Refused: a computed value other than a zero-extended byte (a mask
     // has the constant first, HINT_$GET_HINTS 0xE4998E; bead
     // domain-pascal-q322), as an index or a factor; a longword product of
-    // an unsigned word (the `.l` indices are all `muls.w`).
+    // an unsigned word (the `.l` indices are all `muls.w`).  (`cfgs[k +
+    // 1]` is `cfgs[k]` with the 1 in the displacement, codegen-patterns
+    // 5.2, "The index's constant part".)
     for routine in [
-        "function t: integer;\nbegin\n  t := cfgs[k + 1].a;\nend;\n",
+        "function t: integer;\nbegin\n  t := cfgs[k + ks[1]].a;\nend;\n",
         "function t: integer;\nbegin\n  t := c84s[k & 7].a;\nend;\n",
         "function t: integer;\nbegin\n  t := (k + 1) * 44;\nend;\n",
     ] {

@@ -10,7 +10,9 @@
   in 16 bits) with a call and `downto', an index computed in a call's
   argument, the index read after an `exit', two passes from 1 (the
   index's initial value the `dbf' count's), an index from 200 (beyond a
-  `moveq').  Then the clearing loops
+  `moveq').  (`a[i + 1]' and `a[i - 1]' are now `a[i]' with the constant
+  in the displacement, codegen-patterns 5.2 "The index's constant part",
+  stepped like it where 7.4 steps `a[i]'.)  Then the clearing loops
   (`StmtKind::Fill') from other than another unit's first byte: the unit's
   data from its third element, a frame array, through a by-value pointer
   and a `var' parameter, another unit's array from its third element, a
@@ -264,8 +266,11 @@ var
   i: integer;
 begin
   ixf_$init;
+  { `wa[i + 1]' would be `wa[i]' with the 1 in the displacement, a
+    stepped pointer (codegen-patterns 5.2, "The index's constant part"):
+    a computed index keeps the index in its register }
   for i := 1 to 2 do
-    wa[i + 1] := wb[i];
+    wa[2 * i - i + 1] := wb[i];
   exec_$log_mem(wa, 8);
 end;
 

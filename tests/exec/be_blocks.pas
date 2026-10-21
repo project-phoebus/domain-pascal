@@ -188,7 +188,7 @@ end;
 
 procedure bb_$computed(in i: integer; out x: r12);
 begin
-  x := bb_$oarr12[i + 1];
+  x := bb_$oarr12[i + i - 1];   { computed: i + i, the 1 in the displacement }
 end;
 
 { an unrolled (12-byte) copy from an element of the unit's array }
