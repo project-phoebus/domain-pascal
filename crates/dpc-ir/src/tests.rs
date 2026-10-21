@@ -5309,8 +5309,9 @@ procedure x(var z: integer); extern;
 
 /// ref 3.15.3 p. 3-59: `device(read)` objects may not be written,
 /// `device(write)` ones not read; a device record's packed field is not
-/// stored into (a read-modify-write of its unit); a record with volatile
-/// parts is not block-copied.
+/// stored into (a read-modify-write of its unit).  A record with volatile
+/// parts is block-copied, its side wrapped in [`Addr::Volatile`]
+/// (codegen-patterns 5.5; bead domain-pascal-e07e).
 #[test]
 fn device_access_restrictions() {
     let types = "module m;
@@ -5333,8 +5334,75 @@ var
     lower_src(&format!("{types}procedure x; begin c := r; w := c end;")).unwrap();
     let e = errs(&format!("{types}procedure x; begin p.a := 1 end;"));
     assert!(e[0].contains("packed field of a device record"), "{e:?}");
-    let e = errs(&format!("{types}procedure x; begin v1 := v2 end;"));
-    assert!(e[0].contains("volatile or device parts"), "{e:?}");
+    let m = lower_src(&format!("{types}procedure x; begin v1 := v2 end;")).unwrap();
+    let StmtKind::Copy {
+        dst: Addr::Volatile { access: da, .. },
+        src: Addr::Volatile { access: sa, .. },
+        bytes: 12,
+        chars: false,
+    } = &m.functions[0].body[0].kind
+    else {
+        panic!("{:#?}", m.functions[0].body)
+    };
+    assert!(!da.device && !sa.device, "{da:?} {sa:?}");
+}
+
+/// A record or array copy with a volatile or device side (ref
+/// 3.15.1-3.15.3; bead domain-pascal-e07e): that side's address wrapped in
+/// [`Addr::Volatile`], `device` for a device or a record with a device
+/// part, the other side plain (the sau5 WIN_ RESTORE 0xE19A1E copies the
+/// window's descriptor into a plain local).  A part that denies the
+/// access is an error: a record with a `device(write)` field is not read
+/// whole, one with a `device(read)` field not written whole (a record
+/// with both inherits `device(read, write)`, ref 3.15.7, so its own
+/// attribute does not say); a `device(read)` record is read, a
+/// `device(write)` one written.
+#[test]
+fn device_record_copies() {
+    let types = "module m;
+type
+  desc = record cyl: integer; hs: integer; phys: integer32; page: integer; drive: integer end;
+  regs = [device] record go: integer; desc: array[1..2] of desc end;
+  ro = [device(read)] integer;
+  wo = [device(write)] integer;
+  wpart = record a: wo; b: integer; c: integer32 end;
+  rpart = record a: ro; b: integer; c: integer32 end;
+  plain = record a, b, c: integer32 end;
+  ror = [device(read)] plain;
+  wor = [device(write)] plain;
+var
+  rp: extern ^regs;
+  d: extern desc;
+  wp1, wp2: extern wpart;
+  rp1, rp2: extern rpart;
+  mr: extern ror;
+  mw: extern wor;
+  pl: extern plain;
+";
+    for (stmt, dst_dev, src_dev) in [
+        ("d := rp^.desc[1]", None, Some(true)),
+        ("rp^.desc[2] := d", Some(true), None),
+        ("rp^.desc[2] := rp^.desc[1]", Some(true), Some(true)),
+        ("pl := mr", None, Some(true)),
+        ("mw := pl", Some(true), None),
+    ] {
+        let m = lower_src(&format!("{types}procedure x; begin {stmt} end;"))
+            .unwrap_or_else(|e| panic!("{stmt}: {e:?}"));
+        let StmtKind::Copy { dst, src, .. } = &m.functions[0].body[0].kind else {
+            panic!("{stmt}: {:#?}", m.functions[0].body)
+        };
+        let dev = |a: &Addr| a.unwrap_volatile().1.map(|a| a.device);
+        assert_eq!((dev(dst), dev(src)), (dst_dev, src_dev), "{stmt}");
+    }
+    for (stmt, what) in [
+        ("wp1 := wp2", "reading a record or array with a write-only device part"),
+        ("rp1 := rp2", "writing a record or array with a read-only device part"),
+        ("mr := pl", "writing a read-only device object"),
+        ("pl := mw", "reading a write-only device object"),
+    ] {
+        let e = errs(&format!("{types}procedure x; begin {stmt} end;"));
+        assert!(e[0].contains(what), "{stmt}: {e:?}");
+    }
 }
 
 /// Only locals of an ordinal, set or pointer type are register
@@ -5635,8 +5703,9 @@ fn volatile_function_results_are_refused() {
 }
 
 /// A value parameter that is a record with device or volatile parts is
-/// not copied on entry (a block copy merges device references, ref 3.15.3
-/// p. 3-57), as its assignment is not; a volatile scalar one is.
+/// not copied on entry (no entry copy of one is seen; an assignment of
+/// one is block-copied, `device_record_copies`); a volatile scalar one
+/// is.
 #[test]
 fn volatile_record_value_parameters_are_not_copied() {
     let types = "module m;

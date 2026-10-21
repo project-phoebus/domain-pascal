@@ -2308,10 +2308,10 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
 /// its frame slot (`Param::copy_offset`); the body refers to the copy
 /// ([`var_addr`]).
 ///
-/// A record or array with volatile or device parts is refused, as its
-/// assignment is ([`copy`]): the copy moves longwords, merging device
-/// references (ref 3.15.3 p. 3-57), and its shape for such objects is
-/// not seen.
+/// A record or array with volatile or device parts is refused: no entry
+/// copy of one is seen, and [`ParamCopy`] has no volatile marking for
+/// the selector.  (An assignment of one is the ordinary block copy, its
+/// moves marked volatile, [`copy`]; codegen-patterns 5.5.)
 fn param_copies(p: &Program, r: &Routine) -> Res<Vec<ParamCopy>> {
     let mut out = Vec::new();
     for prm in &r.params {
@@ -4112,9 +4112,13 @@ impl Cx<'_> {
             ));
         }
         if volatile_access(p, target).is_some() || p.types.has_volatile_part(target.ty) {
+            // The temporary's copy into the target would be [`copy`]'s,
+            // but its selection marks no volatile references here, and no
+            // such assignment is seen.
             return Err(unsupported(
                 s.span,
-                "assigning a record or array with volatile or device parts (ref 3.15.1-3.15.3) is",
+                "assigning a function's record result to a record or array with volatile or \
+                 device parts (not seen; ref 3.15.1-3.15.3) is",
             ));
         }
         check_even(p, target)?;
@@ -6707,19 +6711,19 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             "assigning a record or array of another size is",
         ));
     }
-    if volatile_access(p, target).is_some()
-        || volatile_access(p, value).is_some()
-        || p.types.has_volatile_part(target.ty)
-        || p.types.has_volatile_part(value.ty)
-    {
-        // A block copy (`move.l (An)+,(Am)+`, a `dbf` loop) of an object
-        // with volatile or device parts: how the original copied those is
-        // not seen.
-        return Err(unsupported(
-            s.span,
-            "assigning a record or array with volatile or device parts (ref 3.15.1-3.15.3) is",
-        ));
-    }
+    // A side with volatile or device parts (ref 3.15.1-3.15.3) is copied
+    // with the ordinary block copy's moves, its address wrapped in
+    // [`Addr::Volatile`] so that the selector marks each move as a
+    // volatile reference ([`copy_side`]).  The sau5 image copies the
+    // `[device]` WIN_ window's 12-byte descriptor as three `move.l
+    // (An)+,(Am)+` each way (RESTORE 0xE19A1E..0xE19A2A and
+    // 0xE19A50..0xE19A5C, SEEK 0xE19B14..0xE19B20 and 0xE19B50..0xE19B5C),
+    // its 2-byte ECC pattern with one `move.w` (win_$ecc_correct
+    // 0xE19898), as any record (codegen-patterns 5.5).  A part that denies
+    // the access (`device(read)` for the destination, `device(write)` for
+    // the source) is an error ([`check_device_access`]).
+    check_device_access(p, target, false)?;
+    check_device_access(p, value, true)?;
     let chars = match (byte_copy(p, target.ty), byte_copy(p, value.ty)) {
         (ByteCopy::Chars, ByteCopy::Chars) => true,
         (ByteCopy::Unsettled(what), _) | (_, ByteCopy::Unsettled(what)) => {
@@ -6752,13 +6756,20 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
     }
     Ok(Stmt {
         kind: StmtKind::Copy {
-            dst: addr_of(p, target)?,
-            src: addr_of(p, value)?,
+            dst: copy_side(p, target)?,
+            src: copy_side(p, value)?,
             bytes,
             chars,
         },
         span: s.span,
     })
+}
+
+/// The address of one side `e` of a record or array copy ([`copy`]),
+/// wrapped in [`Addr::Volatile`] when `e` is volatile or has a volatile
+/// or device part ([`wrap_volatile`]).
+fn copy_side(p: &Program, e: &SExpr) -> Res<Addr> {
+    Ok(wrap_volatile(p, e, addr_of(p, e)?))
 }
 
 /// `d := 'text'` for an unpacked array of char `d` of `bytes` bytes that
@@ -9229,8 +9240,42 @@ fn volatile_access(p: &Program, e: &SExpr) -> Option<Access> {
 /// The `device(read)` / `device(write)` restriction of `e` (ref 3.15.3 p.
 /// 3-59: "if you attempt to write to this variable, the compiler flags the
 /// attempt as invalid"; reading a write-only one likewise), the nearest
-/// one up to a dereference.
+/// one up to a dereference.  A record or array is referenced whole by a
+/// copy ([`copy`]), so a part of it that denies the access is an error
+/// too: a record with a `device(write)` field and a `device(read)` one
+/// inherits `device(read, write)` (ref 3.15.7 p. 3-77,
+/// [`dpc_sema::types::TypeTable`]'s inheritance), but copying it reads
+/// the one and writes the other.
 fn check_device_access(p: &Program, e: &SExpr, read: bool) -> Res<()> {
+    fn denied(t: &TypeTable, ty: TypeId, read: bool) -> bool {
+        if let Some(d) = t.attrs(ty).device {
+            if (read && !d.read) || (!read && !d.write) {
+                return true;
+            }
+        }
+        match t.kind(ty) {
+            TypeKind::Record(r) => r.all_fields().iter().any(|f| denied(t, f.ty, read)),
+            TypeKind::Array { elem, .. } => denied(t, *elem, read),
+            _ => false,
+        }
+    }
+    let parts = match p.types.kind(e.ty) {
+        TypeKind::Record(r) => r.all_fields().iter().any(|f| denied(&p.types, f.ty, read)),
+        TypeKind::Array { elem, .. } => denied(&p.types, *elem, read),
+        _ => false,
+    };
+    if parts {
+        return Err(Diagnostic::error(
+            e.span,
+            if read {
+                "reading a record or array with a write-only device part (`device(write)`, ref \
+                 3.15.3, p. 3-59)"
+            } else {
+                "writing a record or array with a read-only device part (`device(read)`, ref \
+                 3.15.3, p. 3-59)"
+            },
+        ));
+    }
     let mut x = e;
     loop {
         if let Some(d) = p.types.attrs(x.ty).device {
@@ -9258,14 +9303,34 @@ fn check_device_access(p: &Program, e: &SExpr, read: bool) -> Res<()> {
 }
 
 /// `addr`, the address of designator `e`, wrapped in [`Addr::Volatile`]
-/// when `e` is volatile.
+/// when `e` is volatile, or is a record or array with a volatile or
+/// device part: a volatile field does not make its record volatile (ref
+/// 3.15.7 p. 3-77), but a reference to the whole record (a copy,
+/// [`copy`]; one of 1, 2 or 4 bytes moved as a scalar) references that
+/// field too.  `device` when `e` or a part is a device (a device part
+/// makes its record a device, ref 3.15.7 p. 3-77, so the type's own
+/// attribute says).
 fn wrap_volatile(p: &Program, e: &SExpr, addr: Addr) -> Addr {
-    match volatile_access(p, e) {
-        Some(access) => Addr::Volatile {
-            addr: Box::new(addr),
-            access,
+    let whole = volatile_access(p, e);
+    let parts = matches!(
+        p.types.kind(e.ty),
+        TypeKind::Record(_) | TypeKind::Array { .. }
+    ) && p.types.has_volatile_part(e.ty);
+    let access = match whole {
+        Some(a) if parts => Access {
+            device: a.device || p.types.attrs(e.ty).device.is_some(),
+            ..a
         },
-        None => addr,
+        Some(a) => a,
+        None if parts => Access {
+            device: p.types.attrs(e.ty).device.is_some(),
+            atomic: false,
+        },
+        None => return addr,
+    };
+    Addr::Volatile {
+        addr: Box::new(addr),
+        access,
     }
 }
 

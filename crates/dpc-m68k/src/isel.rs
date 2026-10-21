@@ -12583,7 +12583,80 @@ impl Selector {
     ///
     /// An array of `char` (`chars`) is copied byte by byte:
     /// [`Self::copy_chars`].
+    ///
+    /// A side with volatile or device parts ([`Addr::Volatile`], `dpc-ir`'s
+    /// `copy_side`; ref 3.15.1-3.15.3) is copied with the same moves, each
+    /// unit read and written once, in ascending order, and never by a
+    /// read-modify-write instruction (no `clr`): the sau5 image copies the
+    /// `[device]` WIN_ window's 12-byte descriptor out and back with three
+    /// `move.l (An)+,(Am)+` each way, as any 12-byte record (RESTORE
+    /// 0xE19A1E..0xE19A2A `lea (0x80,A3),A1; lea (-0x10,A6),A4; move.l
+    /// (A1)+,(A4)+` ×3, 0xE19A50..0xE19A5C the reverse; SEEK
+    /// 0xE19B14..0xE19B20, 0xE19B50..0xE19B5C; codegen-patterns 5.5).
+    /// Each move of the copy is marked as a volatile reference, so that the
+    /// scheduler keeps it in order with the routine's other volatile
+    /// references.  A device side reached through a pointer parameter is
+    /// read from its slot (as a scalar reference is, [`device_param_base`]),
+    /// which the copy's address set-up does; a parameter also used
+    /// otherwise is refused, as there.
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
+        let (d, dacc) = dst.unwrap_volatile();
+        let (s, sacc) = src.unwrap_volatile();
+        if dacc.is_none() && sacc.is_none() {
+            return self.copy_plain(dst, src, bytes, chars);
+        }
+        for a in [dst, src] {
+            if let Some(o) = device_param_base(a) {
+                if self.pinned(o).is_some() {
+                    return Err(unsupported(
+                        self.span,
+                        "a parameter that is both the pointer to a device object and otherwise \
+                         used (reloaded for each device reference at 0xE0A328; not seen \
+                         together) is",
+                    ));
+                }
+            }
+        }
+        let start = self.out.len();
+        // A 6-byte copy is a longword store and a word move
+        // ([`Self::copy6`]): the store marks its own operands.
+        if bytes == 6 && !chars {
+            self.copy6(dst, src)?;
+        } else {
+            self.copy_plain(d, s, bytes, chars)?;
+        }
+        // The copy's memory-to-memory moves: the source operand belongs to
+        // the source, the destination operand to the destination.  The
+        // `(An)+` operands name a register of the copy's own, so marking
+        // them marks the copy's moves alone.
+        let mem = |e: &Ea| is_memory_ea(e) || matches!(e, Ea::PostInc(_));
+        let mut marks = Vec::new();
+        for i in &self.out[start..] {
+            if let Insn::Move {
+                src: ms, dst: md, ..
+            } = i
+            {
+                if !mem(ms) || !mem(md) {
+                    continue;
+                }
+                if let Some(a) = sacc {
+                    marks.push((ms.clone(), a));
+                }
+                if let Some(a) = dacc {
+                    marks.push((md.clone(), a));
+                }
+            }
+        }
+        for m in marks {
+            if !self.volatile_eas.contains(&m) {
+                self.volatile_eas.push(m);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::copy`] of objects with no volatile part.
+    fn copy_plain(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
         if chars {
             return self.copy_chars(dst, src, bytes);
         }
@@ -12758,17 +12831,11 @@ impl Selector {
     /// more set-up first, the value on a tie: the source first at
     /// 0xE05104, 0xE1542A, 0xE65184, 0xE747FC, 0xE74828; the destination
     /// at 0xE16DF8, a slot loaded into callee-saved A2).
+    ///
+    /// A volatile side ([`Addr::Volatile`]) is passed on to the store,
+    /// which marks the longword's operand; [`Self::copy`] marks the word
+    /// move's.
     fn copy6(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
-        // Refused, also as best effort: the copy's `(An)+` accesses are not
-        // marked volatile for the scheduler (review of bead
-        // domain-pascal-5kgg; `dpc-ir` refuses record copies with
-        // volatile parts before this).
-        if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
-            return Err(unsupported(
-                self.span,
-                "a 6-byte copy of a volatile object (not seen) is",
-            ));
-        }
         let start = self.out.len();
         let long = Scalar::signed(Width::Long);
         self.store(
@@ -12849,10 +12916,8 @@ impl Selector {
     /// block (AS_$INIT 0xE3153E, the base held across statements),
     /// volatile objects (not seen).
     fn copy8(&mut self, dst: &Addr, src: &Addr) -> Res<()> {
-        // Refused, also as best effort: the copy's `(An)+` accesses are not
-        // marked volatile for the scheduler (review of bead
-        // domain-pascal-5kgg; `dpc-ir` refuses record copies with
-        // volatile parts before this).
+        // [`Self::copy`] passes a volatile side's address unwrapped and
+        // marks the moves itself; a wrapped one here would not be marked.
         if matches!(dst, Addr::Volatile { .. }) || matches!(src, Addr::Volatile { .. }) {
             return Err(unsupported(
                 self.span,
@@ -26527,6 +26592,56 @@ mod tests {
             vec![copy(Addr::Frame(-0x20c), through(8, 0), 0x20c)],
         );
         assert_eq!(text(&f)[3], "move.w\t#0x82,%d0");
+    }
+
+    /// A copy with a volatile or device side ([`Addr::Volatile`]): the
+    /// ordinary moves (the sau5 WIN_ RESTORE 0xE19A26..0xE19A2A, three
+    /// `move.l (A1)+,(A4)+` from the `[device]` window), each marked as a
+    /// volatile reference for the scheduler, at every size form (6, 8,
+    /// unrolled, the `dbf` loop, characters); the address set-up is not.
+    #[test]
+    fn volatile_block_copies_are_marked() {
+        let device = Access {
+            device: true,
+            atomic: false,
+        };
+        let vol = |a: Addr| Addr::Volatile {
+            addr: Box::new(a),
+            access: device,
+        };
+        let ptr = Addr::Static;
+        for (bytes, chars, moves) in [
+            (6, false, 2),
+            (8, false, 2),
+            (12, false, 3),
+            (14, false, 4),
+            (22, false, 2),
+            (8, true, 1),
+        ] {
+            for out in [false, true] {
+                let (dst, src) = if out {
+                    (Addr::Frame(-0x30), vol(ptr(0x80)))
+                } else {
+                    (vol(ptr(0x80)), Addr::Frame(-0x30))
+                };
+                let mut s = Selector::new(span());
+                s.copy(&dst, &src, bytes, chars).unwrap();
+                let marked = volatile_references(&s.out, &s.volatile_eas, span()).unwrap();
+                let copies: Vec<usize> = (0..s.out.len())
+                    .filter(|&k| {
+                        matches!(&s.out[k], Insn::Move { src, dst, .. }
+                            if !matches!(src, Ea::Reg(_) | Ea::Imm(_))
+                                && !matches!(dst, Ea::Reg(_)))
+                    })
+                    .collect();
+                assert_eq!(copies.len(), moves, "{bytes} {chars} {out}: {:?}", s.out);
+                assert_eq!(marked, copies, "{bytes} {chars} {out}: {:?}", s.out);
+            }
+        }
+        // Without a volatile side nothing is marked.
+        let mut s = Selector::new(span());
+        s.copy(&Addr::Frame(-0x30), &ptr(0x80), 12, false).unwrap();
+        assert!(s.volatile_eas.is_empty());
     }
 
     /// 8 bytes: the source post-incremented, the destination by

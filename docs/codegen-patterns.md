@@ -6217,7 +6217,8 @@ same `bset #c mod 8` on the member's byte).
   the variable is done so that other processes cannot change it in
   between; Table 3-6: "perform updates with single instruction when
   possible".
-- `device`: implies volatile; also no merging of adjacent references
+- `device`: implies volatile; also no merging of adjacent references (but
+  see below: a whole-record copy merges, as the image does)
   ("the compiler optimizes the two 16-bit assignments by merging them
   into one 32-bit assignment") and no "gratuitous read-modify-write
   references ... instructions that do unnecessary reads"; `device(read)`
@@ -6281,14 +6282,79 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   memory); any other assignment whose right side reads the variable is
   refused (what the original did "when not possible" is not known), as
   is an atomic device update.  No image site of `atomic` is known.
+- **record and array copies (Verified at the sites below; bead
+  domain-pascal-e07e):** an assignment of a record or array with a
+  device or volatile side is the ordinary copy of section 5.2, with the
+  same widths, order and forms as any: longwords ascending through
+  `(An)+`, unrolled from 10 to 18 bytes and a `dbf` loop from 20, a
+  final word with `move.w`; 6 and 8 bytes as there; a record of 1, 2 or
+  4 bytes one scalar move; an array of one-byte elements by bytes, as
+  there.  Each unit is read and written once, so a device's
+  adjacent fields are merged into longwords, against the letter of ref
+  3.15.3 p. 3-57 ("merging ... two 16-bit assignments into one 32-bit
+  assignment"), as the image does.  Sites, all in the sau5 image
+  (`sau5/domain_os`, its map `sau5/domain_os.map`):
+  - WIN_ RESTORE 0xE199EC saves the window's (`[device]` in ../source's
+    reconstruction: the image shows the copy, not the declaration) first 12-byte
+    descriptor (../source `win/restore.pas`, `win/win.ins.pas`'s
+    `win_$regs_t`, `win_$desc_t`: words, bytes and a longword) as `lea
+    (0x80,A3),A1; lea (-0x10,A6),A4; move.l (A1)+,(A4)+` ×3
+    (0xE19A1E..0xE19A2A) and puts it back as `lea (-0x10,A6),A4; lea
+    (0x80,A3),A0; move.l (A4)+,(A0)+` ×3 (0xE19A50..0xE19A5C); SEEK
+    0xE19AE6 the same (0xE19B14..0xE19B20, 0xE19B50..0xE19B5C), so it
+    is the 12-byte unrolled form of PROC1_$GET_LOADAV 0xE14BC6.  Between
+    them the window's fields are stored by displacement (`move.w
+    (A1),(0x8a,A3)`, `move.b #1,(4,A0)`, 0xE19A30..0xE19A34);
+  - win_$ecc_correct 0xE19878 copies the window's 2-byte ECC pattern as
+    one `move.w (0x28,A0),(-0xe,A6)` (0xE19898).  ../source declares
+    it an array of `[byte] 0..255`, whose copy dpc makes byte by byte
+    (best effort, bead domain-pascal-4lf1); a 2-byte record copies with
+    the `move.w`.  The original's type is not known, so the site does
+    not settle 4lf1;
+  - SM_$GET_STATS 0xE6F5D0 copies 22 bytes of the storage module's
+    command block, memory the controller shares (`lea (0x74,A1),A1;
+    movea.l (0xc,A6),A2; moveq #4,D1; movea.l A0,A0; move.l
+    (A1)+,(A2)+; dbf; move.w (A1)+,(A2)+`, 0xE6F5F0..0xE6F606): the
+    loop form with its word tail.  ../source (`sm/sm.ins.pas`) declares
+    only one field of the block `[volatile]` and the copied drive record
+    plain, so the site shows the form, not that the original declared
+    the memory volatile or device.
+
+  Odd sizes follow section 5.2: a record is padded to whole words (a
+  record of three `[byte]` fields is 4 bytes, one `move.l`), an array
+  of `char` of an odd size takes the byte loop's best-effort path, and
+  other odd-sized arrays are refused.  Whether the original copied a
+  `[volatile]` (not device) record differently cannot be told from the
+  image, which does not show declarations; dpc copies it the same way.
+  The image has no copy with a `device(read)` or `device(write)` part:
+  dpc refuses reading a record or array with a `device(write)` part
+  (or a write-only one) and writing one with a `device(read)` part (or
+  a read-only one), ref 3.15.3 p. 3-59; a record with both kinds of
+  field inherits `device(read, write)` (3.15.7), so its parts are
+  checked (`dpc-ir` `check_device_access`).
+
+  **Implementation.**  `dpc-ir` wraps the address of a side that is
+  volatile, or a record or array with a volatile or device part, in
+  `Addr::Volatile` (`wrap_volatile`, `copy_side`; `device` when the
+  type, or an enclosing record or array, is a device); the selector
+  (`isel.rs` `copy`) makes the ordinary copy from the unwrapped
+  addresses and marks every memory-to-memory move of it as a volatile
+  reference for the scheduler (its `(An)+` operands, the displacements
+  of the 6- and 8-byte forms; not the address set-up), so the copy keeps
+  its place among the routine's other volatile references.  A device
+  side through a pointer parameter is read from its slot, as a scalar
+  reference is (above); a parameter also used otherwise is refused, and
+  the block form through a pointer in the frame at an offset is refused
+  as for any copy (bead domain-pascal-dsr5).  Golden
+  `data/device_copies`; exec test `tests/exec/device_copies.pas`.
 - **refused:** a store into a packed field of a volatile or device
   record (the field form reads its unit and writes it back, twice for a
   field of several bits: `andi` then `ori`; for a device a gratuitous
   read-modify-write, for a volatile object a shape not seen); copying a
-  record or array with volatile or device parts
-  (the block copy's shape for them is not seen), by assignment or as a
-  value parameter's copy on entry (`move.l (A0)+` would merge device
-  references), `in` on a volatile set
+  record or array with volatile or device parts as a value parameter's
+  copy on entry (no such entry copy is seen), as a record function's
+  result, or from a function that returns it through a hidden address
+  (not seen), `in` on a volatile set
   of more than 4 bytes in memory, a volatile `for` index, `address`
   (3.15.4) and the size attributes (3.15.5).
 - `device(read)` / `device(write)` violations are errors (`dpc-ir`,

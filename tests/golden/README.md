@@ -211,6 +211,12 @@ Tests:
   (CAL_$READ_TIMEZONE 0xE3E592), 8 bytes and more as a `moveq #n-1;
   move.b; dbf` loop (ACL_ 0xE45130, PROC1_$BIND 0xE14DB6, 0xE40C0C), a
   record holding one by longwords (CAL_$WRITE_TIMEZONE 0xE3E626).
+- `data/device_copies` - codegen-patterns 5.5, 5.2 (bead
+  domain-pascal-e07e): a `[device]` window's 12-byte descriptor saved and
+  restored by the ordinary block copy, three `move.l (An)+,(Am)+` each
+  way (sau5 WIN_ RESTORE 0xE19A1E/0xE19A50, SEEK 0xE19B14/0xE19B50), a
+  copy between two device sides, a 2-byte field as one `move.w`
+  (win_$ecc_correct 0xE19898).
 - `calls/const_pool` - codegen-patterns 1.5, 11, 2: constants passed by
   address as cells after the routine that first uses them, `pea (d,PC)`,
   `move.l (SP),-(SP)` for the same cell twice (TERM_$SEND_KBD_STRING

@@ -495,8 +495,13 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
 26. **3.15.3, p. 3-57 (device record assignment).**  Is assigning or
     pushing a whole 4-byte `[device]` record as one 32-bit reference
     allowed, or does "The device attribute prevents this optimization"
-    forbid it?  *Current: a 4-byte device record moves as one `move.l`;
-    larger ones are refused.*
+    forbid it?  *Current: a device (or volatile) record or array copy
+    is the ordinary block copy, longwords ascending, each unit read and
+    written once (bead domain-pascal-e07e): the SAU5 image copies
+    WIN_'s window descriptor this way, merging its word, byte and
+    longword fields into three `move.l` (RESTORE 0xE19A1E..2A and
+    0xE19A50..5C, SEEK 0xE19B14 / 0xE19B50), whatever its original
+    declaration was (the image does not show it).*
 27. **Table 3-6 p. 3-55 / 3.15.2 p. 3-57 (atomic "when possible").**
     "perform updates with single instruction when possible"; the value is
     "not changed by other processes while it completes" the assignment.
