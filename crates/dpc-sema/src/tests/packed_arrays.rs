@@ -87,7 +87,12 @@ fn packed_element_classes() {
         "type
            e17 = (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16);
            byte = [byte] 0..255;
-           s17 = 0..100000;",
+           s17 = 0..100000;
+           s8 = set of 0..7;
+           s5 = set of 0..4;
+           s4 = set of 0..3;
+           s16 = set of 0..15;
+           s64 = set of 0..63;",
     );
     let t = &p.types;
     let b = p.types.builtins;
@@ -104,6 +109,14 @@ fn packed_element_classes() {
     assert!(t.packed_array_elem(ty(&p, "e17")).is_err());
     // Footnote 2 (over 16 bits): refused.
     assert!(t.packed_array_elem(ty(&p, "s17")).is_err());
+    // Sets (bead domain-pascal-nb0x): 5 to 8 members a byte (SAU9
+    // SCSI_$PPN_OWNERS), 9 to 16 a word and more whole words as unpacked,
+    // up to 4 (bit elements) refused.
+    assert_eq!(t.packed_array_elem(ty(&p, "s8")), Ok(PackedElem::Byte));
+    assert_eq!(t.packed_array_elem(ty(&p, "s5")), Ok(PackedElem::Byte));
+    assert_eq!(t.packed_array_elem(ty(&p, "s16")), Ok(PackedElem::Unpacked));
+    assert_eq!(t.packed_array_elem(ty(&p, "s64")), Ok(PackedElem::Unpacked));
+    assert!(t.packed_array_elem(ty(&p, "s4")).is_err());
 }
 
 #[test]
@@ -114,9 +127,12 @@ fn packed_arrays_refused() {
         "module m; type a = packed array[1..4] of 0..100000;",
         "packed array of 17-bit elements",
     );
+    // A set of up to 4 members is a 1-, 2- or 4-bit element whose bit
+    // order is not settled; 5 to 8 members are a byte (bead
+    // domain-pascal-nb0x).
     assert_err(
-        "module m; type a = packed array[1..4] of set of 0..7;",
-        "packed array of sets",
+        "module m; type a = packed array[1..4] of set of 0..3;",
+        "packed array of sets of 4 bits",
     );
     assert_err(
         "module m; type e = (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, \

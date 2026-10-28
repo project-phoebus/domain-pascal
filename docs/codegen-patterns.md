@@ -4275,6 +4275,25 @@ model run against the bit model of Figure 3-6).
 
 #### One-byte sets (Verified at the ACL_ and APP_ sites; implemented, bead domain-pascal-tq8w)
 
+**Elements of a packed array** (bead domain-pascal-nb0x; ref 3.11.4.2
+Table 3-5 footnote 1, a set element takes its bits padded to a power of
+2): a `set of 0..7` element is one byte, laid out as `[byte] set of
+0..7` (`crates/dpc-sema/src/types.rs` `packed_array_elem`; 9 to 16
+members a word, more whole words, 1 to 4 members refused, their bit
+order not settled).  The SAU9 SCSI driver's SCSI_$PPN_OWNERS, `packed
+array[16#10000..16#1FFFF] of set of 0..7` (../source
+scsi/scsi_c90.ins.pas): the element is read into a word, `move.b
+M,(-14,A6); clr.w D4; move.b (-14,A6),D4` through a frame copy of the
+`owners` local (scsi_wire_page 0x3C4A67E2; dpc holds the local in a
+register, no frame copy), tested with `btst Dd,Dn` on a run-time member
+without a range guard (0x3C4A6808), a member added with `clr.w D0; bset
+Dd,D0; or.w Dn,D0` (0x3C4A6814), taken away with `clr.w D3; bset Dd,D3;
+not.w D3; and.w Dn,D3` (scsi_unwire_page 0x3C4A686A), the low byte
+stored back with `move.b` (0x3C4A6824), and compared with `[]` by
+`tst.w` (0x3C4A67F0).  Golden `packed/set_elements` (the verified read,
+compare and `clr.b` forms); the member tests and the stores are best
+effort in dpc (bead domain-pascal-bkjm).
+
 `[byte] set of 0..7` is a one-byte set, member k at bit k (ref 3.15.5
 p. 3-61; the owner's ruling, reference-clarifications "A size attribute
 on a set type"), byte aligned, so it may sit at an odd offset of an
@@ -9091,7 +9110,9 @@ T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
   subtract a lower bound whose label goes to the default).
 - **n >= 4:** tables have r/n <= 2.71 (module-local 0xE63376 19/7,
   module-local 0xE6A766 59/22, 0xE1077A 15/6; most are near 1); chains
-  have r/n >= 4.33 (TTY_$I_SIGNAL 26/6, REM_FILE_$SERVER 0xE6429A 139/29,
+  have r/n >= 4.17 (SAU9 SCSI_$C90_INT 0x3C4A59CE 25/6, `cmpi.w #2 ..
+  #24` on a frame copy of the selector; in the SAU2 image >= 4.33:
+  TTY_$I_SIGNAL 26/6, REM_FILE_$SERVER 0xE6429A 139/29,
   0xE63A02 139/26, module-local 0xE1CC70 48/8, ASKNODE_$INTERNET_INFO
   0xE655D8 72/12, 0xE657DA 25/4, ...) **except one:** the 41-label chain
   of ASKNODE_$INTERNET_INFO 0xE6463E over 2..91 (r/n 2.20) where a table
@@ -15518,7 +15539,11 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     0xE311C8 `move.l #7,(A0); clr.l (4,A0)` (hint_$clear_hintfile,
     `version := 7; net_port := 0`), MST_$INIT 0xE30B9E `clr.l abs;
     move.l #1,abs+4` (one statement: an 8-byte set, MST_$ASID_LIST).  No
-    D register was short at any of the three.  12 more `moveq` values
+    D register was short at any of the three.  Below another nonzero
+    constant the SAU9 image also has `move.l #n` for both (SCSI_$GET_INFO
+    0x3C4A575C `move.l #1,(A4); move.l #32768,(4,A4)`, `version := 1;
+    max_transfer := ...`; no SAU2 site: dpc emits the same, best effort,
+    bead domain-pascal-nb0x).  12 more `moveq` values
     are stored at a join of tail-merged arms (NETWORK_$REPORT_FAILURE
     0xE10428/0xE1042C `moveq #1,D0; bra; moveq #3,D0; move.l
     D0,(772,A5)`; TERM_$CONTROL 0xE66C24 `moveq #2,D0; bra.s` back to the
@@ -16130,6 +16155,16 @@ In place of the M$ARITH calls of section 8:
   `move.l D2,D5; divul.l #11,D4:D5`, the low word of D4 the `M$OIU$WLW`
   result (77 sites).  `M$ARITH` is not called at all in the SAU9 image's
   compiled code.
+
+### Symbols far from an array's first element (Verified at the SCSI_ sites)
+
+An element displacement beyond 16 bits (an array whose index starts at
+16#10000) is absorbed by the symbol: `movea.l #SCSI_$PPN_OWNERS-60000,A0;
+move.b (-0x15a0,A0,D3.l),(-14,A6)` (scsi_wire_page 0x3C4A67DC: -0x10000
++ 60000; the module-local 0x3C4A6836, 0x3C4A68A2, 0x3C4A4E3C), the
+60000 of section 5.2's overlay sections.  dpc does this in MC68020 mode
+(`isel.rs` `index_ea`, `Addr::Symbol`); the MC68010 form stays `lea
+(0,An,Dx),Am; adda.l #d,Am` (no symbol site in the SAU2 image).
 
 ### Register saves (Verified)
 

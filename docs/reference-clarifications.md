@@ -786,7 +786,12 @@ records the files it stops.
     boundary (32 bits apart), or 32 bits?  *Current: refused (bead
     domain-pascal-51e; `crates/dpc-sema/src/types.rs`,
     `packed_array_elem`); a subrange of 32 bits (also an unsigned one of
-    31, ref 3.4 p. 3-10) is stored as unpacked.*
+    31, ref 3.4 p. 3-10) is stored as unpacked.  Sets (the row "Set",
+    the same footnotes): 5 to 8 members one byte (SAU9 SCSI_$PPN_OWNERS,
+    `packed array[...] of set of 0..7`, one byte per element in the
+    image; codegen-patterns 5.1 "One-byte sets"; bead domain-pascal-nb0x),
+    9 to 16 a word and more whole words as unpacked; 1 to 4 members (1,
+    2 or 4 bits) refused, their bit order not settled.*
 
 Raised by the overlay-section work (bead domain-pascal-raxl):
 

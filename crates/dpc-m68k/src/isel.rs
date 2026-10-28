@@ -5666,6 +5666,8 @@ const OVERLAY_BIAS: i32 = 60000;
 fn biased_symbol(sym: &str, bias: i32) -> String {
     if bias == 0 {
         sym.to_string()
+    } else if bias < 0 {
+        format!("{sym}-{}", -bias)
     } else {
         format!("{sym}+{bias}")
     }
@@ -11504,7 +11506,9 @@ impl Selector {
             false
         } else if 7 * range <= 19 * n {
             true
-        } else if 3 * range >= 13 * n {
+        } else if 6 * range >= 25 * n {
+            // The densest compare chain: SAU9 SCSI_$C90_INT 0x3C4A59CE, 6
+            // labels over 0..24 (`cmpi.w #2 .. #24`, codegen-patterns 7.3).
             false
         } else {
             return Err(unsupported(
@@ -18944,14 +18948,19 @@ impl Selector {
                     (0, 2 | 4) => return Ok(ConstForm::Imm),
                     (v, 4) if v == n => {}
                     _ => {
-                        return Err(unsupported(
+                        // Another constant above: `move.l #n` for both,
+                        // as below a zero (SAU9 SCSI_$GET_INFO 0x3C4A575C
+                        // `move.l #1,(A4); move.l #32768,(4,A4)`; the
+                        // MC68010 image has no site: best effort there,
+                        // bead domain-pascal-nb0x).
+                        best_effort(
                             st.span,
                             "a longword constant in `moveq`'s range stored just below the next \
                              statement's constant other than a zero word or longword or the \
-                             same longword (`move.l #n` below a zero, MAC_OS_$INIT 0xE2F55E, \
-                             0xE311C8; one register for the same longword, NETWORK_$INIT \
-                             0xE2F7C2; other constants above: not seen; codegen-patterns 13) is",
-                        ))
+                             same longword (`move.l #n` for both at SAU9 SCSI_$GET_INFO \
+                             0x3C4A575C; no MC68010 site; codegen-patterns 13) is",
+                        )?;
+                        return Ok(ConstForm::Imm);
                     }
                 }
             }
@@ -25723,8 +25732,25 @@ impl Selector {
                 // 0xE470B2 `lea (0,A0,D0.w),A1`, then `(-15706,A1)`), Am
                 // as for any other unit's array ([`once_elem_lea`]); within
                 // a byte, not seen.
-                let bias = self.symbol_bias(name, *o)?;
-                let disp = o + offset - bias;
+                let mut bias = self.symbol_bias(name, *o)?;
+                let mut disp = o + offset - bias;
+                if bias == 0 && self.cpu.is_68020() && !(-0x8000..0x8000).contains(&disp) {
+                    // MC68020: a displacement beyond 16 bits (an array
+                    // whose index starts far from 0) has the symbol biased
+                    // by a multiple of 60000 so that the rest fits the
+                    // operand's word displacement, as an overlay section's
+                    // arrays are reached from 60000 bytes in
+                    // ([`Self::symbol_bias`]): SAU9 scsi_wire_page
+                    // 0x3C4A67DC `movea.l #SCSI_$PPN_OWNERS-60000,A0;
+                    // move.b (-0x15a0,A0,D3.l),(-14,A6)` for `packed
+                    // array[16#10000..16#1FFFF]` (-0x10000 + 60000); the
+                    // module-local 0x3C4A6836, 0x3C4A68A2, 0x3C4A4E3C
+                    // (bead domain-pascal-nb0x).  The MC68010 code keeps
+                    // `lea (0,An,Dx),Am; adda.l #d,Am` ([`Self::element_ea`]:
+                    // no symbol site; a pointer's at SMD_$RESET_UNIT_DISPLAY).
+                    bias = (disp + OVERLAY_BIAS / 2).div_euclid(OVERLAY_BIAS) * OVERLAY_BIAS;
+                    disp -= bias;
+                }
                 if bias != 0 && (-128..128).contains(&disp) {
                     best_effort(
                         self.span,

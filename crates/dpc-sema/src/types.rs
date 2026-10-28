@@ -890,8 +890,10 @@ impl TypeTable {
     ///   implemented), a subrange of 17 to 31 bits (footnote 2, "If the
     ///   element size is greater than 16 bits, then the elements are word
     ///   aligned", does not say how many bits each element then takes),
-    ///   sets (as in packed records, where the elements lie is not
-    ///   settled), varying strings (not in the table), and a type with a
+    ///   sets of up to 4 members (1, 2 or 4 bits: their bit order is not
+    ///   settled; 5 to 8 members are a byte each, more a word or whole
+    ///   words as unpacked), varying strings (not in the table), and a
+    ///   type with a
     ///   size attribute that changes its size (ref 3.15.5: `[bit (4)]
     ///   0..1` makes 4-bit elements, `dpc` has no bit sizes).
     pub fn packed_array_elem(&self, elem: TypeId) -> Result<PackedElem, String> {
@@ -919,12 +921,30 @@ impl TypeTable {
                     (if n == 31 && *lo >= 0 { 32 } else { n }, true)
                 }
             },
-            TypeKind::Set { .. } => {
-                return Err(
-                    "a packed array of sets (where the elements lie is not settled, \
-                     ref 3.11.4.2 Table 3-5 footnotes 1 and 2)"
-                        .into(),
-                )
+            TypeKind::Set { elem: e } => {
+                // Table 3-5 "Set: Exact number of bits required; bit
+                // aligned", one bit per member up to the base type's high
+                // end (3.9.3; the size computation above), padded to a
+                // power of 2 below 16 bits (footnote 1): 5 to 8 members a
+                // byte, the one-byte set of `[byte] set of 0..7` (SAU9
+                // SCSI_$PPN_OWNERS, `packed array[16#10000..16#1FFFF] of
+                // set of 0..7`, one byte per page: scsi_wire_page
+                // 0x3C4A67B8 reads it with `move.b`; ../source
+                // docs/pascal-translation-notes.md gap 300; bead
+                // domain-pascal-nb0x); 9 to 16 members a word, 17 or
+                // more whole words, word aligned (footnote 2): as
+                // unpacked.  Up to 4 members (1, 2 or 4 bits): where the
+                // bits of such an element lie is not settled: refused.
+                let bits = self.ordinal_range(*e).map_or(0, |(_, hi)| hi.max(0)) as u32 + 1;
+                return match bits {
+                    1..=4 => Err(format!(
+                        "a packed array of sets of {bits} bits (ref 3.11.4.2 Table 3-5 \
+                         footnote 1: {}-bit elements, their bit order not settled)",
+                        bits.next_power_of_two()
+                    )),
+                    5..=8 => Ok(PackedElem::Byte),
+                    _ => Ok(PackedElem::Unpacked),
+                };
             }
             TypeKind::Varying { .. } => {
                 return Err(
