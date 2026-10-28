@@ -25,6 +25,36 @@ pub mod spill;
 
 use dpc_target::Target;
 
+/// The processor the code is generated for (ref 6.4.9 `-cpu`, Table 6-3,
+/// p. 6-16; `docs/compiler-options.md`).
+///
+/// The SR10.2 kernels come in two families: SAU2..SAU5 are MC68010 code
+/// (CLAUDE.md 3.16), SAU6..SAU9 MC68020-class code, the same sources
+/// compiled with the processor-specific instructions of Table 6-3's
+/// `mathchip` group (measured over the SR10.2 images with
+/// `../source/domain_os/tools/sau_catalog.py`; bead domain-pascal-vzzh;
+/// codegen-patterns 14).  dpc's default is the MC68010: the kernel build
+/// that is checked byte for byte (SAU2) must not change under an option
+/// the reference defaults differently (`-cpu mathlib_sr10`, p. 6-14, is
+/// the reference's default and selects MC68020 code here).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Cpu {
+    /// MC68010 instructions only: SAU2..SAU5.
+    #[default]
+    M68010,
+    /// MC68020 instructions: scaled and base-displacement indexed
+    /// operands, bit-field instructions, 32-bit multiply and divide:
+    /// SAU6..SAU9 (codegen-patterns 14).
+    M68020,
+}
+
+impl Cpu {
+    /// Whether MC68020 instructions may be generated.
+    pub fn is_68020(self) -> bool {
+        self == Cpu::M68020
+    }
+}
+
 /// The m68k target as used by the SR10.2 kernel (68010 instructions only,
 /// CLAUDE.md 3.16).
 #[derive(Debug, Default, Clone, Copy)]

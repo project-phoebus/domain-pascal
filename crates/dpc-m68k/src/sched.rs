@@ -127,16 +127,21 @@ fn loc(ea: &Ea, size: Size) -> Option<Loc> {
         Ea::Reg(_) | Ea::Imm(_) | Ea::ImmSym(_) => return None,
         Ea::Ind(6) => Loc::Frame(r(0)),
         Ea::Disp(d, 6) => Loc::Frame(r(*d)),
-        Ea::Idx(_, 6, ..) => Loc::Frame(None),
+        Ea::Idx(_, 6, ..) | Ea::Idx2(_, 6, ..) => Loc::Frame(None),
         Ea::Ind(5) => Loc::Static(r(0)),
         Ea::Disp(d, 5) => Loc::Static(r(*d)),
-        Ea::Idx(_, 5, ..) => Loc::Static(None),
-        Ea::Ind(SP) | Ea::Disp(_, SP) | Ea::Idx(_, SP, ..) | Ea::PreDec(SP) | Ea::PostInc(SP) => {
-            Loc::Stack
-        }
+        Ea::Idx(_, 5, ..) | Ea::Idx2(_, 5, ..) => Loc::Static(None),
+        Ea::Ind(SP)
+        | Ea::Disp(_, SP)
+        | Ea::Idx(_, SP, ..)
+        | Ea::Idx2(_, SP, ..)
+        | Ea::PreDec(SP)
+        | Ea::PostInc(SP) => Loc::Stack,
         Ea::Ind(a) => Loc::Ptr(*a, r(0)),
         Ea::Disp(d, a) => Loc::Ptr(*a, r(*d)),
-        Ea::Idx(_, a, ..) | Ea::PreDec(a) | Ea::PostInc(a) => Loc::Ptr(*a, None),
+        Ea::Idx(_, a, ..) | Ea::Idx2(_, a, ..) | Ea::PreDec(a) | Ea::PostInc(a) => {
+            Loc::Ptr(*a, None)
+        }
         Ea::AbsL(s, o) => Loc::Abs(s.clone(), *o, *o + n),
         Ea::AbsW(v) => Loc::Abs(String::new(), *v, *v + n),
         Ea::Pool(_) | Ea::PoolLabel(_) => Loc::Const,
@@ -176,7 +181,7 @@ impl Fx {
     fn address(&mut self, ea: &Ea) {
         match ea {
             Ea::Ind(a) | Ea::Disp(_, a) => self.use_(Reg::A(*a)),
-            Ea::Idx(_, a, x, _) => {
+            Ea::Idx(_, a, x, _) | Ea::Idx2(_, a, x, ..) => {
                 self.use_(Reg::A(*a));
                 self.use_(Reg::D(*x));
             }
@@ -356,6 +361,33 @@ fn fx(insn: &Insn) -> Fx {
         Insn::Mul { src, dst, .. } | Insn::Div { src, dst, .. } => {
             f.src(src, Size::W);
             f.rmw(&Ea::Reg(Reg::D(*dst)), Size::L);
+            f.cc_set = true;
+        }
+        Insn::MulL { src, dst, .. } => {
+            f.src(src, Size::L);
+            f.rmw(&Ea::Reg(Reg::D(*dst)), Size::L);
+            f.cc_set = true;
+        }
+        Insn::DivL { src, rem, dst, .. } => {
+            f.src(src, Size::L);
+            f.rmw(&Ea::Reg(Reg::D(*dst)), Size::L);
+            if let Some(r) = rem {
+                f.def(Reg::D(*r));
+            }
+            f.cc_set = true;
+        }
+        Insn::Bfins { src, dst, .. } => {
+            f.use_(Reg::D(*src));
+            f.rmw(dst, Size::L);
+            f.cc_set = true;
+        }
+        Insn::Bfextu { src, dst, .. } => {
+            f.src(src, Size::L);
+            f.def(Reg::D(*dst));
+            f.cc_set = true;
+        }
+        Insn::Bftst { dst, .. } => {
+            f.src(dst, Size::L);
             f.cc_set = true;
         }
         Insn::AluImm { size, dst, .. } | Insn::Unary { size, dst, .. } => {

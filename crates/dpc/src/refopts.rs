@@ -36,6 +36,8 @@
 use std::iter::Peekable;
 use std::path::PathBuf;
 
+use dpc_m68k::Cpu;
+
 /// The object (here: assembly) file, `-b [pathname]` / `-nb` (ref 6.4.3,
 /// pp. 6-9..6-10).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -69,6 +71,10 @@ pub struct RefOptions {
     pub msgs: bool,
     /// `-b [pathname]` / `-nb`.
     pub binary: Binary,
+    /// `-cpu id` (ref 6.4.9, pp. 6-14..6-17): the processor whose code is
+    /// generated.  Default MC68010 (not the reference's `mathlib_sr10`:
+    /// see `dpc_m68k::Cpu`).
+    pub cpu: Cpu,
     /// `-idir dir1 ... dirN` (ref 6.4.13, pp. 6-20..6-21), in order.
     pub include_dirs: Vec<PathBuf>,
     /// One line each for options accepted although dpc does not give what
@@ -91,6 +97,7 @@ impl Default for RefOptions {
             warn: true,
             msgs: false,
             binary: Binary::Default,
+            cpu: Cpu::M68010,
             include_dirs: Vec::new(),
             notes: Vec::new(),
             took_operands: Vec::new(),
@@ -104,14 +111,20 @@ impl Default for RefOptions {
 const MAX_IDIRS: usize = 63;
 
 /// The `-cpu` arguments (ref 6.4.9, Table 6-3, p. 6-16) that ask for
-/// generic MC680x0 code or are the MC680x0 default: dpc's code is generic
-/// MC68010 code, so they need no note.
-const CPU_GENERIC: [&str; 3] = ["mathlib_sr10", "any", "m68k"];
+/// generic MC680x0 code, or for the MC68010-class workstations (DSP160,
+/// DN460, DN660; the PEB machines DN100..DN600): dpc's MC68010 code, the
+/// SAU2..SAU5 kernels' (CLAUDE.md 3.16).
+const CPU_68010: [&str; 6] = ["any", "m68k", "160", "460", "660", "peb"];
 
-/// The other MC680x0 `-cpu` arguments of Table 6-3: accepted with a note.
-const CPU_SPECIFIC: [&str; 14] = [
-    "mathlib", "mathchip", "3000", "580", "570", "560", "330", "90", "160", "460", "660", "fpa1",
-    "fpx", "peb",
+/// The `-cpu` arguments of Table 6-3 that ask for code for an MC68020 or
+/// later (the `mathchip` group, "MC68020 or MC68030 microprocessor and an
+/// MC68881 or MC68882", p. 6-15; `mathlib_sr10` and `mathlib`, "MC68040,
+/// or MC68020 or MC68030"; `fpa1` and `fpx`, the DN3000/DN4000/DN4500 and
+/// DN5xx accelerators): dpc's MC68020 code, the SAU6..SAU9 kernels'
+/// (`dpc_m68k::Cpu`, codegen-patterns 14).  Noted, since the floating-point
+/// side of each argument has nothing to select in dpc (no reals).
+const CPU_68020: [&str; 11] = [
+    "mathlib_sr10", "mathlib", "mathchip", "3000", "580", "570", "560", "330", "90", "fpa1", "fpx",
 ];
 
 /// The names of every reference option: Table 6-2 (pp. 6-6..6-8), plus
@@ -340,13 +353,15 @@ fn parse_known<I: Iterator<Item = String>>(
                 .ok_or("-cpu needs an argument (ref 6.4.9, Table 6-3, p. 6-16)")?;
             o.took_operands.push(arg.to_string());
             let lower = id.to_ascii_lowercase();
-            if CPU_GENERIC.contains(&lower.as_str()) {
+            if CPU_68010.contains(&lower.as_str()) {
+                o.cpu = Cpu::M68010;
                 Ok(())
-            } else if CPU_SPECIFIC.contains(&lower.as_str()) {
+            } else if CPU_68020.contains(&lower.as_str()) {
+                o.cpu = Cpu::M68020;
                 o.note(
                     &format!("-cpu {id}"),
-                    "dpc generates the same MC68010 code for every -cpu, not this \
-                         argument's processor-specific code",
+                    "dpc generates MC68020 integer code for this argument; it has no \
+                         floating-point code to select",
                     "6.4.9, Table 6-3, p. 6-16",
                 );
                 Ok(())
@@ -704,12 +719,18 @@ mod tests {
 
     #[test]
     fn cpu_arguments() {
-        for id in CPU_GENERIC {
-            assert!(parse_all(&["-cpu", id]).unwrap().0.notes.is_empty(), "{id}");
+        assert_eq!(parse_all(&[]).unwrap().0.cpu, Cpu::M68010);
+        for id in CPU_68010 {
+            let (o, _) = parse_all(&["-cpu", id]).unwrap();
+            assert!(o.notes.is_empty(), "{id}");
+            assert_eq!(o.cpu, Cpu::M68010, "{id}");
         }
-        for id in CPU_SPECIFIC {
-            assert_eq!(parse_all(&["-cpu", id]).unwrap().0.notes.len(), 1, "{id}");
+        for id in CPU_68020 {
+            let (o, _) = parse_all(&["-cpu", id]).unwrap();
+            assert_eq!(o.notes.len(), 1, "{id}");
+            assert_eq!(o.cpu, Cpu::M68020, "{id}");
         }
+        assert_eq!(parse_all(&["-cpu", "MathChip"]).unwrap().0.cpu, Cpu::M68020);
         assert!(parse_all(&["-cpu", "a88k"])
             .unwrap_err()
             .contains("not supported"));

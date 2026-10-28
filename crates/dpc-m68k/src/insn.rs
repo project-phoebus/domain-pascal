@@ -176,6 +176,17 @@ pub enum Ea {
     /// 68010; codegen-patterns 5.2, 13).  Fields: displacement, address
     /// register, index data register, index is a longword.
     Idx(i32, u8, u8, bool),
+    /// `(d,An,Dn.w*s)` / `(d,An,Dn.l*s)`: address register indirect with
+    /// index, a scale and a displacement of up to 16 bits (MC68020: the
+    /// brief extension word's scale bits when `d` fits 8 bits, else the
+    /// full extension word with a word base displacement; codegen-patterns
+    /// 14).  Fields: displacement, address register, index data register,
+    /// index is a longword, scale (1, 2, 4 or 8).  SAU9 FIM_$GET_FIM_ADDR
+    /// 0x3C40C396 `move.l (0x3c,A5,D1.w*4),D0` (`2035 143c`);
+    /// PROC1_$GET_TYPE 0x3C4175D4 `move.w (0xc42,A5,D2.w*2),(A0)` (`30b5
+    /// 2320 0c42`); TIME_$VT_INT 0x3C418496 `pea (0x12fc,A5,D0.w)` (`4875
+    /// 0120 12fc`, scale 1 with a word displacement).
+    Idx2(i32, u8, u8, bool, u8),
     /// `(sym+off).l`: absolute long.
     AbsL(String, i32),
     /// `(n).w`: absolute short, a 16-bit address the CPU sign-extends.
@@ -215,6 +226,12 @@ impl Ea {
             // `Insn::len_at` equal to what gas emits if one slips through.
             Ea::Disp(0, _) => 0,
             Ea::Disp(..) | Ea::AbsW(_) | Ea::Idx(..) | Ea::Pool(_) | Ea::PoolLabel(_) => 2,
+            // The brief format with scale bits, or the full format with a
+            // word base displacement (gas picks the brief one whenever the
+            // displacement fits a byte, as the image's encodings have it:
+            // 0x3C40C396 `2035 143c` against 0x3C4175D4 `30b5 2320 0c42`).
+            Ea::Idx2(d, ..) if i8::try_from(*d).is_ok() => 2,
+            Ea::Idx2(..) => 4,
             Ea::AbsL(..) | Ea::ImmSym(_) => 4,
             Ea::Imm(_) => match size {
                 Size::B | Size::W => 2,
@@ -249,6 +266,20 @@ impl fmt::Display for Ea {
                 Reg::D(*x),
                 if *long { "l" } else { "w" }
             ),
+            Ea::Idx2(d, a, x, long, scale) => {
+                write!(
+                    f,
+                    "({},{},{}.{}",
+                    num(*d as i64),
+                    Reg::A(*a),
+                    Reg::D(*x),
+                    if *long { "l" } else { "w" }
+                )?;
+                if *scale != 1 {
+                    write!(f, "*{scale}")?;
+                }
+                write!(f, ")")
+            }
             Ea::AbsL(s, 0) => write!(f, "({s}).l"),
             Ea::AbsL(s, o) if *o < 0 => write!(f, "({s}-{}).l", num(-(*o as i64))),
             Ea::AbsL(s, o) => write!(f, "({s}+{}).l", num(*o as i64)),
@@ -536,6 +567,51 @@ pub enum Insn {
         src: Ea,
         dst: u8,
     },
+    /// `muls.l src,%dn` / `mulu.l src,%dn` (32 x 32 -> 32; MC68020,
+    /// codegen-patterns 14): SAU9 BAT_$ALLOCATE `muls.l (-528,A4),D2`,
+    /// PCHIST_$CNTL `mulu.l D3,D1`.
+    MulL {
+        signed: bool,
+        src: Ea,
+        dst: u8,
+    },
+    /// `divs.l src,%dq` / `divu.l src,%dq` (32 / 32 -> 32 quotient in Dq,
+    /// no remainder) when `rem` is `None`; `divsl.l src,%dr:%dq` /
+    /// `divul.l src,%dr:%dq` (the quotient in Dq, the remainder in Dr)
+    /// when it is `Some(dr)` (MC68020, codegen-patterns 14): SAU9
+    /// TIME_$GET_ADJUST 0x3C418B20 `divs.l #250000,D1` (`4c7c 1801 ...`,
+    /// Dr = Dq) and 0x3C418B2A `divsl.l #250000,D2:D0`; AREA_$CREATE_FROM
+    /// 0x3C40905C `divul.l #11,D4:D5`.
+    DivL {
+        signed: bool,
+        src: Ea,
+        rem: Option<u8>,
+        dst: u8,
+    },
+    /// `bfins %dn,dst{#offset:#width}`: the low `width` bits of Dn into
+    /// the field `offset` bits from the most significant bit of the byte
+    /// at `dst` (MC68020, codegen-patterns 14): SAU9 UID_$INIT 0x3C4369A6
+    /// `bfins D0,(4,A0){12:20}`, MAC_$OPEN `bfins D1,(1970,A0){7:1}`.
+    Bfins {
+        src: u8,
+        dst: Ea,
+        offset: u8,
+        width: u8,
+    },
+    /// `bfextu src{#offset:#width},%dn`: the field zero-extended into Dn
+    /// (MC68020): SAU9 DIR_$ADD_LINKU 0x3C457F42 `bfextu (A0){5:3},D0`.
+    Bfextu {
+        src: Ea,
+        offset: u8,
+        width: u8,
+        dst: u8,
+    },
+    /// `bftst dst{#offset:#width}`: Z set when the field is 0 (MC68020).
+    Bftst {
+        dst: Ea,
+        offset: u8,
+        width: u8,
+    },
     /// `swap %dn`.
     Swap(u8),
     /// `btst #bit,dst` (immediate bit number; mod 8 on memory, mod 32 on a
@@ -689,7 +765,11 @@ impl Insn {
             | Insn::Cmp { src, .. }
             | Insn::Alu { src, .. }
             | Insn::Mul { src, .. }
-            | Insn::Div { src, .. } => vec![src],
+            | Insn::Div { src, .. }
+            | Insn::MulL { src, .. }
+            | Insn::DivL { src, .. }
+            | Insn::Bfextu { src, .. } => vec![src],
+            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } => vec![dst],
             Insn::Addq { dst, .. }
             | Insn::Subq { dst, .. }
             | Insn::Clr { dst, .. }
@@ -944,6 +1024,48 @@ impl fmt::Display for Insn {
                 if *signed { "divs" } else { "divu" },
                 Reg::D(*dst)
             ),
+            Insn::MulL { signed, src, dst } => write!(
+                f,
+                "{}.l\t{src},{}",
+                if *signed { "muls" } else { "mulu" },
+                Reg::D(*dst)
+            ),
+            Insn::DivL {
+                signed,
+                src,
+                rem: None,
+                dst,
+            } => write!(
+                f,
+                "{}.l\t{src},{}",
+                if *signed { "divs" } else { "divu" },
+                Reg::D(*dst)
+            ),
+            Insn::DivL {
+                signed,
+                src,
+                rem: Some(r),
+                dst,
+            } => write!(
+                f,
+                "{}l.l\t{src},{}:{}",
+                if *signed { "divs" } else { "divu" },
+                Reg::D(*r),
+                Reg::D(*dst)
+            ),
+            Insn::Bfins {
+                src,
+                dst,
+                offset,
+                width,
+            } => write!(f, "bfins\t{},{dst}{{#{offset}:#{width}}}", Reg::D(*src)),
+            Insn::Bfextu {
+                src,
+                offset,
+                width,
+                dst,
+            } => write!(f, "bfextu\t{src}{{#{offset}:#{width}}},{}", Reg::D(*dst)),
+            Insn::Bftst { dst, offset, width } => write!(f, "bftst\t{dst}{{#{offset}:#{width}}}"),
             Insn::Swap(d) => write!(f, "swap\t{}", Reg::D(*d)),
             Insn::SrImm { op, imm } => write!(f, "{}i.w\t#{},%sr", op.name(), num(*imm)),
             Insn::MoveFromSr { dst } => write!(f, "move.w\t%sr,{}", Reg::D(*dst)),
@@ -1038,6 +1160,11 @@ impl Insn {
             Insn::SrImm { .. } => 4,
             Insn::MoveToSr { src } => 2 + src.ext_len(Size::W),
             Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
+            // Two opcode words (`4c3c`/`4c7c` + the register word, `efe8`
+            // + the offset/width word), then the operand's extension.
+            Insn::MulL { src, .. } | Insn::DivL { src, .. } => 4 + src.ext_len(Size::L),
+            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } => 4 + dst.ext_len(Size::L),
+            Insn::Bfextu { src, .. } => 4 + src.ext_len(Size::L),
             Insn::BtstImm { dst, .. } | Insn::BitImm { dst, .. } => 4 + dst.ext_len(Size::B),
             Insn::AluToMem { size, dst, .. } => 2 + dst.ext_len(*size),
             // One opcode word and the brief extension word.
@@ -1053,11 +1180,177 @@ mod tests {
 
     const FP_FOR_TEST: u8 = 6;
 
+    /// The MC68020 lengths against the SAU9 image's encodings: `2035
+    /// 143c` (brief format with scale), `30b5 2320 0c42` (full format, a
+    /// word base displacement), `efee 0314 fff6`, `e9d0 0143`, `4c7c 1801
+    /// 0003 d090`, `4c2c 2800 fdf0`, `4c03 1000`.
+    #[test]
+    fn m68020_lengths() {
+        let at = |i: &Insn| i.len_at(0);
+        assert_eq!(
+            at(&Insn::Move {
+                size: Size::L,
+                src: Ea::Idx2(0x3c, 5, 1, false, 4),
+                dst: Ea::Reg(Reg::D(0)),
+            }),
+            4
+        );
+        assert_eq!(
+            at(&Insn::Move {
+                size: Size::W,
+                src: Ea::Idx2(0xc42, 5, 2, false, 2),
+                dst: Ea::Ind(0),
+            }),
+            6
+        );
+        assert_eq!(
+            at(&Insn::Bfins {
+                src: 0,
+                dst: Ea::Disp(-10, FP_FOR_TEST),
+                offset: 12,
+                width: 20,
+            }),
+            6
+        );
+        assert_eq!(
+            at(&Insn::Bfextu {
+                src: Ea::Ind(0),
+                offset: 5,
+                width: 3,
+                dst: 0,
+            }),
+            4
+        );
+        assert_eq!(
+            at(&Insn::DivL {
+                signed: true,
+                src: Ea::Imm(250000),
+                rem: None,
+                dst: 1,
+            }),
+            8
+        );
+        assert_eq!(
+            at(&Insn::MulL {
+                signed: true,
+                src: Ea::Disp(-528, 4),
+                dst: 2,
+            }),
+            6
+        );
+        assert_eq!(
+            at(&Insn::MulL {
+                signed: false,
+                src: Ea::Reg(Reg::D(3)),
+                dst: 1,
+            }),
+            4
+        );
+    }
+
     #[test]
     fn renders_gas_syntax() {
         let cases: Vec<(Insn, &str)> = vec![
             (Insn::Link { disp: -4 }, "link.w\t%fp,#-4"),
             (Insn::Link { disp: -0x20 }, "link.w\t%fp,#-0x20"),
+            // MC68020 forms (codegen-patterns 14): SAU9 FIM_$GET_FIM_ADDR
+            // 0x3C40C396, PROC1_$GET_TYPE 0x3C4175D4, TIME_$VT_INT
+            // 0x3C418496, UID_$INIT 0x3C4369A6, DIR_$ADD_LINKU 0x3C457F42,
+            // TIME_$GET_ADJUST 0x3C418B20 and 0x3C418B2A, AREA_$CREATE_FROM
+            // 0x3C40905C, PCHIST_$CNTL 0x3C463E9A.
+            (
+                Insn::Move {
+                    size: Size::L,
+                    src: Ea::Idx2(0x3c, 5, 1, false, 4),
+                    dst: Ea::Reg(Reg::D(0)),
+                },
+                "move.l\t(0x3c,%a5,%d1.w*4),%d0",
+            ),
+            (
+                Insn::Move {
+                    size: Size::W,
+                    src: Ea::Idx2(0xc42, 5, 2, false, 2),
+                    dst: Ea::Ind(0),
+                },
+                "move.w\t(0xc42,%a5,%d2.w*2),(%a0)",
+            ),
+            (Insn::Pea(Ea::Idx2(0x12fc, 5, 0, false, 1)), "pea\t(0x12fc,%a5,%d0.w)"),
+            (
+                Insn::Lea {
+                    src: Ea::Idx2(-0x4da0, 4, 4, true, 8),
+                    dst: 0,
+                },
+                "lea\t(-0x4da0,%a4,%d4.l*8),%a0",
+            ),
+            (
+                Insn::Bfins {
+                    src: 0,
+                    dst: Ea::Disp(4, 0),
+                    offset: 12,
+                    width: 20,
+                },
+                "bfins\t%d0,(4,%a0){#12:#20}",
+            ),
+            (
+                Insn::Bfextu {
+                    src: Ea::Ind(0),
+                    offset: 5,
+                    width: 3,
+                    dst: 0,
+                },
+                "bfextu\t(%a0){#5:#3},%d0",
+            ),
+            (
+                Insn::Bftst {
+                    dst: Ea::Disp(8, 0),
+                    offset: 0,
+                    width: 1,
+                },
+                "bftst\t(8,%a0){#0:#1}",
+            ),
+            (
+                Insn::DivL {
+                    signed: true,
+                    src: Ea::Imm(250000),
+                    rem: None,
+                    dst: 1,
+                },
+                "divs.l\t#0x3d090,%d1",
+            ),
+            (
+                Insn::DivL {
+                    signed: true,
+                    src: Ea::Imm(250000),
+                    rem: Some(2),
+                    dst: 0,
+                },
+                "divsl.l\t#0x3d090,%d2:%d0",
+            ),
+            (
+                Insn::DivL {
+                    signed: false,
+                    src: Ea::Imm(11),
+                    rem: Some(4),
+                    dst: 5,
+                },
+                "divul.l\t#0xb,%d4:%d5",
+            ),
+            (
+                Insn::MulL {
+                    signed: false,
+                    src: Ea::Reg(Reg::D(3)),
+                    dst: 1,
+                },
+                "mulu.l\t%d3,%d1",
+            ),
+            (
+                Insn::MulL {
+                    signed: true,
+                    src: Ea::Disp(-528, 4),
+                    dst: 2,
+                },
+                "muls.l\t(-0x210,%a4),%d2",
+            ),
             (
                 Insn::Movea {
                     size: Size::L,

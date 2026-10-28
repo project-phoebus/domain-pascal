@@ -169,7 +169,7 @@ impl Access {
     fn ea_address(&mut self, ea: &Ea) {
         match ea {
             Ea::Ind(a) | Ea::Disp(_, a) => self.use_(Reg::A(*a)),
-            Ea::Idx(_, a, x, _) => {
+            Ea::Idx(_, a, x, _) | Ea::Idx2(_, a, x, ..) => {
                 self.use_(Reg::A(*a));
                 self.use_(Reg::D(*x));
             }
@@ -384,10 +384,33 @@ pub fn access(insn: &Insn) -> Access {
         // Two-address operations update their destination in place: the
         // same value before and after (the selector writes them on a
         // virtual register it may modify).
-        Insn::Alu { src, dst, .. } | Insn::Mul { src, dst, .. } | Insn::Div { src, dst, .. } => {
+        Insn::Alu { src, dst, .. }
+        | Insn::Mul { src, dst, .. }
+        | Insn::Div { src, dst, .. }
+        | Insn::MulL { src, dst, .. } => {
             a.src(src);
             a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
         }
+        Insn::DivL { src, rem, dst, .. } => {
+            a.src(src);
+            a.dst_rmw(&Ea::Reg(Reg::D(*dst)));
+            if let Some(r) = rem {
+                // The remainder is a new value; it must not share the
+                // dividend's register (`Dr = Dq` is the quotient-only
+                // form), which R2's rule keeps it off.
+                a.reg_operands.push(Reg::D(*dst));
+                a.def(Reg::D(*r));
+            }
+        }
+        Insn::Bfins { src, dst, .. } => {
+            a.use_(Reg::D(*src));
+            a.dst_rmw(dst);
+        }
+        Insn::Bfextu { src, dst, .. } => {
+            a.read(src);
+            a.def(Reg::D(*dst));
+        }
+        Insn::Bftst { dst, .. } => a.read(dst),
         Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BitImm { dst, .. } => {
             a.dst_rmw(dst)
         }
@@ -430,7 +453,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
     let fe = |ea: &mut Ea| match ea {
         Ea::Reg(r) => *r = f(*r),
         Ea::Ind(a) | Ea::Disp(_, a) | Ea::PreDec(a) | Ea::PostInc(a) => fa(a),
-        Ea::Idx(_, a, x, _) => {
+        Ea::Idx(_, a, x, _) | Ea::Idx2(_, a, x, ..) => {
             fa(a);
             fd(x);
         }
@@ -488,10 +511,27 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         Insn::Cmp { src, dst, .. }
         | Insn::Alu { src, dst, .. }
         | Insn::Mul { src, dst, .. }
-        | Insn::Div { src, dst, .. } => {
+        | Insn::Div { src, dst, .. }
+        | Insn::MulL { src, dst, .. } => {
             fe(src);
             fd(dst);
         }
+        Insn::DivL { src, rem, dst, .. } => {
+            fe(src);
+            if let Some(r) = rem {
+                fd(r);
+            }
+            fd(dst);
+        }
+        Insn::Bfins { src, dst, .. } => {
+            fd(src);
+            fe(dst);
+        }
+        Insn::Bfextu { src, dst, .. } => {
+            fe(src);
+            fd(dst);
+        }
+        Insn::Bftst { dst, .. } => fe(dst),
         Insn::AluImm { dst, .. }
         | Insn::Unary { dst, .. }
         | Insn::BtstImm { dst, .. }

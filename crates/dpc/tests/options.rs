@@ -413,13 +413,15 @@ fn accepted_noted_and_refused() {
             "-warn",
             "-xrs",
             "-cpu",
-            "mathlib_sr10",
+            "any",
         ],
     );
     assert_eq!(r.code, Some(0), "{}", r.stderr);
     assert_eq!(r.stderr, "");
     assert_eq!(r.asm.unwrap(), base);
-    // Accepted with a note each: same output.
+    // Accepted with a note each: same output (`-cpu mathchip` selects
+    // MC68020 code, which this program has no use for: only the `.arch`
+    // line differs).
     let r = run(
         "noted",
         src,
@@ -434,7 +436,9 @@ fn accepted_noted_and_refused() {
         "{}",
         r.stderr
     );
-    assert_eq!(r.asm.unwrap(), base);
+    let asm = r.asm.unwrap();
+    assert!(asm.contains("\t.arch\t68020\n"), "{asm}");
+    assert_eq!(asm.replace("\t.arch\t68020\n", ""), base);
     // Refused: a usage error, nothing written.
     for args in [
         &["-subchk"][..],

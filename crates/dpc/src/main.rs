@@ -612,6 +612,7 @@ fn compile(
         schedule: args.schedule,
         data_bases: args.data_bases.clone(),
         merge_constant_stores: args.merge_constant_stores,
+        cpu: args.refs.cpu,
     };
     let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
     // -nb (ref 6.4.3, p. 6-9): compiled, but no output file.

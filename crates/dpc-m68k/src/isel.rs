@@ -34,6 +34,7 @@ use crate::frame::{frame_for, FP, SP};
 use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate_apart, call_results_first, RegClass, VRegs, DATA_BASE};
 use crate::sched::Schedule;
+use crate::Cpu;
 
 mod merge;
 
@@ -120,7 +121,7 @@ const KEPT_BASE_LEA: &str = "an element of another unit's array that an earlier 
 fn is_memory_ea(ea: &Ea) -> bool {
     matches!(
         ea,
-        Ea::Ind(_) | Ea::Disp(..) | Ea::Idx(..) | Ea::AbsL(..) | Ea::AbsW(_)
+        Ea::Ind(_) | Ea::Disp(..) | Ea::Idx(..) | Ea::Idx2(..) | Ea::AbsL(..) | Ea::AbsW(_)
     )
 }
 
@@ -319,6 +320,7 @@ fn displace(ea: &Ea, k: i32) -> Option<Ea> {
         Ea::Ind(a) => Ea::Disp(k, *a),
         Ea::Disp(d, a) if i16::try_from(d + k).is_ok() => Ea::Disp(d + k, *a),
         Ea::Idx(d, a, x, l) if i8::try_from(d + k).is_ok() => Ea::Idx(d + k, *a, *x, *l),
+        Ea::Idx2(d, a, x, l, s) if i16::try_from(d + k).is_ok() => Ea::Idx2(d + k, *a, *x, *l, *s),
         Ea::AbsL(s, o) => Ea::AbsL(s.clone(), o + k),
         Ea::AbsW(v) if i16::try_from(v + k).is_ok() => Ea::AbsW(v + k),
         _ => return None,
@@ -372,7 +374,7 @@ pub fn select(f: &Function) -> Result<Vec<Insn>, Diagnostic> {
 /// [`select`] with the body scheduled under `sched` (`sched.rs`); no
 /// overlay sections, as [`select`].
 pub fn select_with(f: &Function, sched: Schedule) -> Result<Vec<Insn>, Diagnostic> {
-    select_in_unit(f, sched, &[], false)
+    select_in_unit(f, sched, &[], false, Cpu::M68010)
 }
 
 /// The overlay sections of a unit (`dpc_ir::Module::overlays`): each
@@ -386,15 +388,21 @@ pub type Overlays = [(String, u32)];
 /// `merge`: the unit merges pairs of word constants stored to adjacent
 /// words (`dpc --merge-constant-stores`; [`merge`], codegen-patterns 13,
 /// "Store merging").
+///
+/// `cpu`: the processor (`-cpu`; [`Cpu`]): MC68020 code folds scaled
+/// indices into operands, reads and writes bit fields with `bfextu` and
+/// `bfins`, and multiplies and divides longwords inline (codegen-patterns
+/// 14).
 pub fn select_in_unit(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
     merge: bool,
+    cpu: Cpu,
 ) -> Result<Vec<Insn>, Diagnostic> {
     // For the driver's internal-error backstop (`diag::set_context`).
     let outer = dpc_syntax::diag::set_context(Some(f.span));
-    let insns = select_in_context(f, sched, overlays, merge);
+    let insns = select_in_context(f, sched, overlays, merge, cpu);
     dpc_syntax::diag::set_context(outer);
     insns
 }
@@ -404,6 +412,7 @@ fn select_in_context(
     sched: Schedule,
     overlays: &Overlays,
     merge: bool,
+    cpu: Cpu,
 ) -> Result<Vec<Insn>, Diagnostic> {
     let f = merge::adjacent_stores(f, merge)?;
     let f: &Function = &f;
@@ -427,7 +436,7 @@ fn select_in_context(
         }
         return Ok(vec![Insn::Rts]);
     }
-    let body = select_body_in_unit(f, sched, overlays)?;
+    let body = select_body_in_unit(f, sched, overlays, cpu)?;
     wrap(f, body)
 }
 
@@ -546,7 +555,7 @@ pub fn select_body(f: &Function) -> Result<Body, Diagnostic> {
 /// sections, as [`select`].
 pub fn select_body_scheduled(f: &Function, sched: Schedule) -> Result<Body, Diagnostic> {
     let f = merge::adjacent_stores(f, false)?;
-    select_body_in_unit(&f, sched, &[])
+    select_body_in_unit(&f, sched, &[], Cpu::M68010)
 }
 
 /// [`select_body_scheduled`] for a routine of a unit with overlay sections
@@ -555,6 +564,7 @@ fn select_body_in_unit(
     f: &Function,
     sched: Schedule,
     overlays: &Overlays,
+    cpu: Cpu,
 ) -> Result<Body, Diagnostic> {
     // A statement whose calls are refused as they are first selected (a
     // second call while a result is still needed) is selected again with
@@ -562,7 +572,7 @@ fn select_body_in_unit(
     // statements keep the form they had.
     let mut modes: Vec<(Span, CallMode)> = Vec::new();
     loop {
-        let err = match select_body_moded(f, sched, overlays, &modes) {
+        let err = match select_body_moded(f, sched, overlays, &modes, cpu) {
             Err(e) => e,
             ok => return ok,
         };
@@ -595,23 +605,24 @@ fn select_body_moded(
     sched: Schedule,
     overlays: &Overlays,
     modes: &[(Span, CallMode)],
+    cpu: Cpu,
 ) -> Result<Body, Diagnostic> {
     // A pointer result variable whose every assignment is last is kept
     // in its frame slot when one assignment reads memory, found for a
     // local only when selection sees it in the frame
     // ([`pointer_result_in_slot`]): the body is selected again so.
     let mut slot = SlotMode::Auto;
-    let mut first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes)?;
+    let mut first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes, cpu)?;
     while let Selected::Reslot(mode) = first {
         slot = mode;
-        first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes)?;
+        first = select_body_with(f, CsePlan::Probe, sched, &[], overlays, slot, modes, cpu)?;
     }
     // A pointer local that no call follows is found by allocation; the
     // body is selected again with it held in A0 ([`Selector::a0_locals`]).
     let (body, hits, in_a0) = match first {
         Selected::Body(b, h) => (b, h, Vec::new()),
         Selected::InA0(in_a0) => {
-            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, slot, modes)? {
+            match select_body_with(f, CsePlan::Probe, sched, &in_a0, overlays, slot, modes, cpu)? {
                 Selected::Body(b, h) => (b, h, in_a0),
                 _ => unreachable!("an A0-held local is not found again"),
             }
@@ -630,6 +641,7 @@ fn select_body_moded(
         overlays,
         slot,
         modes,
+        cpu,
     )?
     else {
         unreachable!("an A0-held local is not found again")
@@ -858,6 +870,7 @@ fn select_body_with(
     overlays: &Overlays,
     slot: SlotMode,
     modes: &[(Span, CallMode)],
+    cpu: Cpu,
 ) -> Result<Selected, Diagnostic> {
     let mut predef: Vec<i32> = Vec::new();
     loop {
@@ -870,6 +883,7 @@ fn select_body_with(
             slot,
             modes,
             &predef,
+            cpu,
         )?;
         match got {
             Selected::Predefine(o) if o.iter().any(|x| !predef.contains(x)) => predef.extend(o),
@@ -894,8 +908,10 @@ fn select_body_once(
     slot: SlotMode,
     modes: &[(Span, CallMode)],
     predef: &[i32],
+    cpu: Cpu,
 ) -> Result<Selected, Diagnostic> {
     let mut s = Selector::new(f.span);
+    s.cpu = cpu;
     s.call_modes = modes.to_vec();
     s.cse_plan = plan;
     s.overlays = overlays.to_vec();
@@ -4937,6 +4953,7 @@ fn ea_plus(ea: &Ea, n: i32) -> Option<Ea> {
         Ea::Ind(r) => Some(Ea::Disp(n, *r)),
         Ea::Disp(d, r) if fits(d + n) => Some(Ea::Disp(d + n, *r)),
         Ea::Idx(d, r, x, l) if (-0x80..0x80).contains(&(d + n)) => Some(Ea::Idx(d + n, *r, *x, *l)),
+        Ea::Idx2(d, r, x, l, s) if fits(d + n) => Some(Ea::Idx2(d + n, *r, *x, *l, *s)),
         Ea::AbsL(s, d) => Some(Ea::AbsL(s.clone(), d + n)),
         _ => None,
     }
@@ -8112,6 +8129,17 @@ pub struct Selector {
     /// (codegen-patterns 1.1): nothing after it in the statement may
     /// branch conditionally.
     unpopped: bool,
+    /// The processor the code is generated for ([`Cpu`]; `-cpu`, ref
+    /// 6.4.9): MC68020 instructions and operand forms are selected only
+    /// with [`Cpu::M68020`] (codegen-patterns 14).
+    cpu: Cpu,
+    /// With [`Cpu::M68020`]: index registers whose scaling was left to the
+    /// operand's scale field ([`Self::index_reg_with`]): the data register
+    /// holds the unscaled index, and the operand formed from it takes the
+    /// scale ([`Self::element_ea`]; `Ea::Idx2`).  An entry is consumed by
+    /// the operand; one left over at the end of selection is an internal
+    /// error ([`Self::take_folded_scale`]).
+    folded_scale: Vec<(u8, u8)>,
     /// The routine addresses the unit's data from its absolute address
     /// ([`Function::data_absolute`]; [`Self::static_base`]).
     data_absolute: bool,
@@ -8500,6 +8528,8 @@ impl Selector {
             marith_depth: 0,
             marith_reg: 0,
             unpopped: false,
+            cpu: Cpu::M68010,
+            folded_scale: Vec::new(),
             data_absolute: false,
             abs_base: None,
             abs_elem_update: false,
@@ -14037,7 +14067,22 @@ impl Selector {
                 dst: d,
             };
             match ea {
-                Ea::Idx(..) => {
+                // MC68020, a displacement beyond a byte: where the MC68010
+                // code has `lea (0,An,Dx),Am` and `(d,Am)` (the arm below),
+                // the slot's load comes first (SAU9 NAME_$GET_WDIR_UID
+                // 0x3C45FD1C `move.w PROC1_$AS_ID,D0; movea.l (8,A6),A1;
+                // lea (0x950,A5,D0.w*8),A0; move.l (A0)+,(A1)`).
+                Ea::Idx2(disp, ..) if !(-128..128).contains(&disp) => {
+                    // The `lea` first (its register coloured first, A0),
+                    // the slot's load after it (A1), moved up into the
+                    // index load's stall by R11.
+                    let s = self.element_lea(ea)?;
+                    let d = self.alloc_a()?;
+                    self.fresh.push((Reg::A(d), self.stmt_start, self.span));
+                    self.out.push(load_d(d));
+                    (s, if k == 0 { Ea::Ind(d) } else { Ea::Disp(k, d) }, false)
+                }
+                Ea::Idx(..) | Ea::Idx2(..) => {
                     // An index formed in this statement (an empty one, a
                     // scaled index of an earlier statement: no site).
                     if !(1..=2).contains(&index.len()) || !index.iter().all(index_reads_registers) {
@@ -14658,7 +14703,10 @@ impl Selector {
     /// moveq #1,D0; lea (2384,A0),A0`; FM_$WRITE 0xE3A55E..0xE3A564).
     fn element_lea(&mut self, ea: Ea) -> Res<u8> {
         match ea {
-            Ea::Idx(..) => {
+            // MC68020: one `lea` with the scale and displacement (SAU9
+            // NAME_$GET_NDIR_UID 0x3C45FD4E `lea (0x3e0,A5,D0.w*8),A0;
+            // move.l (A0)+,(A1); move.l (A0)+,(4,A1)`).
+            Ea::Idx(..) | Ea::Idx2(..) => {
                 let a = self.alloc_a()?;
                 self.out.push(Insn::Lea { src: ea, dst: a });
                 Ok(a)
@@ -15783,6 +15831,8 @@ impl Selector {
             marith_reg: _,
             unpopped: _,
             data_absolute: _,
+            cpu: _,
+            folded_scale: _,
             abs_base: _,
             abs_elem_update: _,
             other_bases: _,
@@ -16944,6 +16994,16 @@ impl Selector {
                         let e = self.alloc_a()?;
                         self.out.push(Insn::Lea {
                             src: Ea::Idx(0, ar, xr, long),
+                            dst: e,
+                        });
+                        (e, d)
+                    }
+                    // MC68020: the scale in the `lea` (best effort, not
+                    // byte-identical: no such call surveyed in SAU9).
+                    Ea::Idx2(d, ar, xr, long, s) => {
+                        let e = self.alloc_a()?;
+                        self.out.push(Insn::Lea {
+                            src: Ea::Idx2(0, ar, xr, long, s),
                             dst: e,
                         });
                         (e, d)
@@ -19919,6 +19979,9 @@ impl Selector {
                 });
                 return Ok(d);
             }
+            if self.cpu.is_68020() {
+                return self.mul_long(ty, x, &b);
+            }
             self.marith_op("MI", ty, x, &b)?;
             return Ok(self.marith_reg);
         }
@@ -19929,14 +19992,110 @@ impl Selector {
             (Some(l), Some(r)) => self.mul_words(&l, &r, signed),
             (Some(_), None) => {
                 // The word is argument 2 of `M$MI*$LLW`.
+                if self.cpu.is_68020() {
+                    return self.mul_long(ty, rhs, lhs);
+                }
                 self.marith_op("MI", ty, rhs, lhs)?;
                 Ok(self.marith_reg)
             }
             _ => {
+                if self.cpu.is_68020() {
+                    return self.mul_long(ty, lhs, rhs);
+                }
                 self.marith_op("MI", ty, lhs, rhs)?;
                 Ok(self.marith_reg)
             }
         }
+    }
+
+    /// `a * b` for a longword on the MC68020 (codegen-patterns 14), where
+    /// the MC68010 code calls `M$MI<s>$LL<W|L>(a, b)` ([`Self::marith_op`]):
+    /// `mul<s>.l src,Dn`.  A word operand `b` (`M$MI*$LLW`'s argument 2)
+    /// is extended into the register first, `a` is the source (SAU9
+    /// BAT_$ALLOCATE 0x3C443092 `move.w D1,D2; ext.l D2; muls.l
+    /// (-528,A4),D2`; PCHIST_$CNTL 0x3C463E9A `clr.l D1; move.w D2,D1;
+    /// mulu.l D3,D1`); a constant is the immediate source
+    /// (`muls.l #c,Dn`: a longword constant, not seen; best effort); two
+    /// longwords: `a` in the register, `b` the source.
+    fn mul_long(&mut self, ty: Scalar, a: &Expr, b: &Expr) -> Res<u8> {
+        let signed = ty.is_signed();
+        if let Expr::Const { value, .. } = b {
+            let d = self.eval_d(a)?;
+            self.out.push(Insn::MulL {
+                signed,
+                src: Ea::Imm(*value),
+                dst: d,
+            });
+            return Ok(d);
+        }
+        let (d, src) = match Self::word_part(b, ty.sign) {
+            Some(bw) => {
+                let d = self.extend_word(&bw, signed)?;
+                let v = self.eval(a)?;
+                (d, Self::ea_val(&v))
+            }
+            None => {
+                let d = self.eval_d(a)?;
+                let v = self.eval(b)?;
+                (d, Self::ea_val(&v))
+            }
+        };
+        self.out.push(Insn::MulL { signed, src, dst: d });
+        Ok(d)
+    }
+
+    /// A word value extended to a longword in a new data register:
+    /// `ext.l` for a signed one, `clr.l; move.w` (or `andi.l #0xffff` of
+    /// a computed one, [`Self::zero_extend`]) for an unsigned one.
+    fn extend_word(&mut self, w: &Expr, signed: bool) -> Res<u8> {
+        if signed {
+            let d = self.eval_d(w)?;
+            self.out.push(Insn::Ext {
+                size: Size::L,
+                dst: d,
+            });
+            Ok(d)
+        } else {
+            self.zero_extend(w)
+        }
+    }
+
+    /// `lhs div rhs` (`rem` None) or `lhs mod rhs` (`rem` Some) for a
+    /// longword on the MC68020 (codegen-patterns 14), where the MC68010
+    /// code calls M$ARITH: `div<s>.l src,Dq` leaves the quotient in the
+    /// dividend's register (SAU9 TIME_$GET_ADJUST 0x3C418B1E `move.l D0,D1;
+    /// divs.l #250000,D1`, the dividend copied as it is read again;
+    /// BAT_$ALLOCATE 0x3C443082 `sub.l D0,D1; divsl.l (-528,A4),D1:D1`);
+    /// `div<s>l.l src,Dr:Dq` puts the remainder in a new register Dr
+    /// (0x3C418B2A `divsl.l #250000,D2:D0`; AREA_$CREATE_FROM 0x3C40905A
+    /// `move.l D2,D5; divul.l #11,D4:D5`, the remainder's low word the
+    /// `M$OIU$WLW` result).  A word divisor is extended first (not seen;
+    /// best effort).
+    fn div_long(&mut self, signed: bool, lhs: &Expr, rhs: &Expr, rem: bool) -> Res<Val> {
+        let d = self.eval_d(lhs)?;
+        let src = match rhs {
+            Expr::Const { value, .. } => Ea::Imm(*value),
+            _ if rhs.ty().width == Width::Long => {
+                let v = self.eval(rhs)?;
+                Self::ea_val(&v)
+            }
+            _ => {
+                best_effort(
+                    self.span,
+                    "a longword `div`/`mod` by a word variable on the MC68020 (its extension \
+                     is not catalogued) is",
+                )?;
+                Ea::Reg(Reg::D(self.extend_word(rhs, signed)?))
+            }
+        };
+        let r = if rem { Some(self.alloc_d()?) } else { None };
+        self.out.push(Insn::DivL {
+            signed,
+            src,
+            rem: r,
+            dst: d,
+        });
+        Ok(Val::Tmp(r.unwrap_or(d)))
     }
 
     /// A product of a plain variable ([`Self::cse_leaf`]) and a constant
@@ -20168,8 +20327,17 @@ impl Selector {
                         });
                         return Ok(Val::Tmp(d));
                     }
+                    if self.cpu.is_68020() {
+                        return self.div_long(signed, lhs, rhs, false);
+                    }
                     self.marith_op("DI", ty, lhs, rhs)?;
                     return Ok(Val::Tmp(self.marith_reg));
+                }
+                if self.cpu.is_68020() {
+                    // The remainder is a longword whatever the divisor's
+                    // width: used as a word (AREA_$CREATE_FROM 0x3C409066
+                    // `move.w D4,D5`) or as it is.
+                    return self.div_long(signed, lhs, rhs, true);
                 }
                 if let Some(b) = bw {
                     let name = self.marith_name("OI", signed, "WLW")?;
@@ -21950,6 +22118,21 @@ impl Selector {
                     dst: b,
                 });
                 let disp = o + offset;
+                let folded = self.take_folded_scale(x);
+                if self.cpu.is_68020()
+                    && (folded != 1 || !(-128..128).contains(&disp))
+                    && (-0x8000..0x8000).contains(&disp)
+                {
+                    // MC68020: one `lea` with the scale and a word
+                    // displacement (codegen-patterns 14; NAME_$GET_NDIR_UID
+                    // 0x3C45FD4E `lea (0x3e0,A5,D0.w*8),A0` off the data
+                    // base).
+                    self.out.push(Insn::Lea {
+                        src: Ea::Idx2(disp, b, x, long, folded),
+                        dst: r,
+                    });
+                    return Ok(());
+                }
                 if !(-128..128).contains(&disp) {
                     // Best effort (not byte-identical): `lea (0,An,Dx),Ar`,
                     // then the displacement added, `lea (d,Ar),Ar` (no site
@@ -23126,6 +23309,21 @@ impl Selector {
         if field.width == 8 * unit.bytes() {
             best_effort(self.span, Self::FILLS_UNIT)?;
         }
+        if self.cpu.is_68020() {
+            // MC68020 (codegen-patterns 14): `bfextu M{o:w},Dn`, the field
+            // zero-extended, `o` its offset from the unit's most significant
+            // bit (SAU9 DIR_$ADD_LINKU 0x3C457F42 `bfextu (A0){5:3},D0`, a
+            // 3-bit field in the low bits of a byte; AST_$FREE_PAGES
+            // 0x3C4053BC `bfextu (A2){0:22},D5`; 405 sites, every
+            // non-boolean field read of the SAU9 image).
+            self.out.push(Insn::Bfextu {
+                src: ea,
+                offset: Self::bf_offset(field),
+                width: field.width as u8,
+                dst: d,
+            });
+            return Ok(d);
+        }
         let top = field.shift + field.width == 8 * unit.bytes();
         if top && ty.width == unit {
             self.out.push(Insn::Move {
@@ -23200,6 +23398,15 @@ impl Selector {
     ///   D0,(4,A2)`), and so is any computed value, at its own width or
     ///   wider (0xE106A0..0xE106B6: a longword value merged into a byte,
     ///   `andi.b #15,(-223,A6); lsl.b #4,D0; or.b D0,(-223,A6)`).
+    /// A bit field's offset for the MC68020 bit-field instructions: from
+    /// the most significant bit of its unit's first byte (the unit is
+    /// big-endian; `field.shift` counts from its least significant bit).
+    /// UID_$INIT's 20-bit field at shift 0 of a longword is `{12:20}`
+    /// (SAU9 0x3C4369A6); MAC_$OPEN's one bit at shift 0 of a byte `{7:1}`.
+    fn bf_offset(field: BitField) -> u8 {
+        (8 * field.unit.bytes() - field.shift - field.width) as u8
+    }
+
     fn store_bits(&mut self, addr: &Addr, field: BitField, value: &Expr, mask: bool) -> Res<()> {
         if matches!(addr, Addr::Frame(o) | Addr::Enclosing(o) if *o > 0) {
             return Err(unsupported(self.span, "assigning to a parameter is"));
@@ -23417,6 +23624,28 @@ impl Selector {
                     imm: 0x80,
                     dst: Ea::Reg(Reg::D(d)),
                 });
+            } else if self.cpu.is_68020() {
+                // MC68020 (codegen-patterns 14): the value made 0 or 1,
+                // then `bfins Dn,M{o:1}` (SAU9 MAC_$OPEN 0x3C40D958 `move.b
+                // (84,A2),D1; lsr.b #7,D1; bfins D1,(1970,A0){7:1}`;
+                // AST_$LOAD_AOTE 0x3C403974 `smi D0; lsr.b #7,D0; bfins
+                // D0,(26,A2){4:1}`); bit 7 keeps the MC68010 form above
+                // (0x3C401C90 `andi.b #127,(39,A2); andi.b #-128,D0`).
+                d = self.eval_d(value)?;
+                self.out.push(Insn::Shift {
+                    op: ShiftOp::Lsr,
+                    size: Size::B,
+                    count: ShiftCount::Imm(7),
+                    dst: d,
+                });
+                dst = self.ea_of(addr)?;
+                self.out.push(Insn::Bfins {
+                    src: d,
+                    dst,
+                    offset: Self::bf_offset(field),
+                    width: 1,
+                });
+                return Ok(());
             } else {
                 d = self.eval_d(value)?;
                 self.out.push(Insn::Shift {
@@ -23430,6 +23659,13 @@ impl Selector {
                 self.shift_up(d, field.shift, Width::Byte);
             }
         } else {
+            // MC68020 (codegen-patterns 14): the value read and widened as
+            // below, then `bfins Dn,M{o:w}`, no clearing, shift or mask
+            // (SAU9 UID_$INIT 0x3C43699E `move.l NODE_$ME,D0; bfins
+            // D0,(4,A0){12:20}`; 0x3C401C64 `move.b (21,A4),D0; andi.l
+            // #255,D0; bfins D0,(38,A2){9:8}`; 0x3C401D80 `clr.w D0; move.b
+            // (12,A1),D0; bfins D0,(40,A2){1:8}`; 341 sites).
+            let bf = self.cpu.is_68020();
             // A variable is read only as wide as the field needs: a byte
             // for up to 8 bits, a word up to 16, at the variable's low end
             // (big-endian: its last bytes).  0xE18192 `clr.w D1; move.b
@@ -23461,7 +23697,9 @@ impl Selector {
                     };
                     if k == unit {
                         dst = self.ea_of(addr)?;
-                        and_mem(self, &dst, !m);
+                        if !bf {
+                            and_mem(self, &dst, !m);
+                        }
                         let ea = read(self)?;
                         d = self.alloc_d()?;
                         self.out.push(Insn::Move {
@@ -23505,7 +23743,9 @@ impl Selector {
                             }
                         }
                         dst = self.ea_of(addr)?;
-                        and_mem(self, &dst, !m);
+                        if !bf {
+                            and_mem(self, &dst, !m);
+                        }
                     }
                 }
                 Some(_) => unreachable!("taken as a computed value above"),
@@ -23535,8 +23775,19 @@ impl Selector {
                     }
                     d = self.eval_d(value)?;
                     dst = self.ea_of(addr)?;
-                    and_mem(self, &dst, !m);
+                    if !bf {
+                        and_mem(self, &dst, !m);
+                    }
                 }
+            }
+            if bf {
+                self.out.push(Insn::Bfins {
+                    src: d,
+                    dst,
+                    offset: Self::bf_offset(field),
+                    width: field.width as u8,
+                });
+                return Ok(());
             }
             self.shift_up(d, field.shift, unit);
             if mask {
@@ -25351,6 +25602,9 @@ impl Selector {
             Ea::Disp(d, a) if (-0x8000..0x8000).contains(&(d + off)) => Ea::Disp(d + off, a),
             Ea::AbsL(s, o) => Ea::AbsL(s, o + off),
             Ea::Idx(d, a, x, l) if (-0x80..0x80).contains(&(d + off)) => Ea::Idx(d + off, a, x, l),
+            Ea::Idx2(d, a, x, l, s) if (-0x8000..0x8000).contains(&(d + off)) => {
+                Ea::Idx2(d + off, a, x, l, s)
+            }
             _ => {
                 return Err(unsupported(
                     self.span,
@@ -25531,7 +25785,7 @@ impl Selector {
                 match self.ea_of(base)? {
                     Ea::Ind(a) => (a, 0),
                     Ea::Disp(d, a) => (a, d),
-                    ea @ (Ea::Idx(..) | Ea::AbsL(..)) => {
+                    ea @ (Ea::Idx(..) | Ea::Idx2(..) | Ea::AbsL(..)) => {
                         let a = self.alloc_a()?;
                         self.out.push(Insn::Lea { src: ea, dst: a });
                         (a, 0)
@@ -25603,12 +25857,29 @@ impl Selector {
     /// -128..127, otherwise `lea (0,An,Dx),Am` and `(d,Am)`.
     fn element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
         let long = index.ty().width == Width::Long;
+        let scale = self.take_folded_scale(x);
+        if self.cpu.is_68020() && (scale != 1 || !(-128..128).contains(&disp)) {
+            // MC68020 (codegen-patterns 14): the scale in the operand, and
+            // a displacement beyond a byte as the full format's word base
+            // displacement instead of `lea (0,An,Dx),Am; (d,Am)` (SAU9
+            // PROC1_$GET_TYPE 0x3C4175D4 `move.w (0xc42,A5,D2.w*2),(A0)`;
+            // BAT_$ALLOCATE 0x3C442FD4 `tst.b (0xd47,A5,D0.w)`; ACL_$UP
+            // 0x3C44E770 `addq.w #1,(-15706,A0,D0.w*2)`).  Beyond 16 bits:
+            // not seen; the `lea` and `adda.l` below.
+            if (-0x8000..0x8000).contains(&disp) {
+                return Ok(Ea::Idx2(disp, areg, x, long, scale));
+            }
+        }
         if (-128..128).contains(&disp) {
             return Ok(Ea::Idx(disp, areg, x, long));
         }
         let a = self.alloc_a()?;
         self.out.push(Insn::Lea {
-            src: Ea::Idx(0, areg, x, long),
+            src: if scale == 1 {
+                Ea::Idx(0, areg, x, long)
+            } else {
+                Ea::Idx2(0, areg, x, long, scale)
+            },
             dst: a,
         });
         if !(-0x8000..0x8000).contains(&disp) {
@@ -25682,6 +25953,19 @@ impl Selector {
     ) -> Res<u8> {
         let w = index.ty().width;
         let mut called = false;
+        // MC68020: a scale of 2, 4 or 8 goes to the operand's scale field
+        // ([`Self::element_ea`], `Ea::Idx2`; codegen-patterns 14) unless
+        // the scaled index is a computation held for reuse, or a reuse of
+        // one, which keeps the shifted value in its register as the
+        // MC68010 code does (SAU9 AREA_$FREE_ASID 0x3C4094BE `move.w
+        // D2,D3; lsl.w #2,D3; movea.l (0x4d8,A5,D3.w),A2`, D3 read again
+        // at the end; FIM_$GET_FIM_ADDR 0x3C40C390 `move.w
+        // PROC1_$AS_ID,D1; move.l (0x3c,A5,D1.w*4),D0`, read once).  A
+        // scale of 2 is always folded in the image (284 of 284 sites);
+        // 4 and 8 in about half of theirs (262 of 495, 209 of 240), by a
+        // rule not found (bead domain-pascal-9jvz): this one holds for
+        // the oracle routines.
+        let fold = self.cpu.is_68020() && matches!(scale, 2 | 4 | 8);
         let x = {
             let mut once = |s: &mut Self| -> Res<()> {
                 called = true;
@@ -25701,10 +25985,25 @@ impl Selector {
                 // 0xE0A972..0xE0A97E, indexes FIM_$QUIT_EC at 0xE0A994 and
                 // FIM_$DELIV_EC at 0xE0A9B0).
                 let key = CseKey::Scaled(index.clone(), scale as i64);
-                match self.cse_value(key, leaf, |s| s.scaled_index(index, scale, &mut once))? {
-                    Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
-                    _ => unreachable!("a scaled index is in a data register"),
+                if fold && !self.cse_next_held() {
+                    // Recorded as a computation all the same, so the probe
+                    // finds its reuses and the hold selection shifts it.
+                    let d = match self.cse_value(key, leaf, |s| s.unscaled_index(index, &mut once))? {
+                        Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+                        _ => unreachable!("an index is in a data register"),
+                    };
+                    self.folded_scale.push((d, scale as u8));
+                    d
+                } else {
+                    match self.cse_value(key, leaf, |s| s.scaled_index(index, scale, &mut once))? {
+                        Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+                        _ => unreachable!("a scaled index is in a data register"),
+                    }
                 }
+            } else if fold {
+                let d = self.unscaled_index(index, &mut once)?;
+                self.folded_scale.push((d, scale as u8));
+                d
             } else {
                 self.scaled_index(index, scale, &mut once)?
             }
@@ -25716,6 +26015,52 @@ impl Selector {
     }
 
     /// The scaling of [`Self::index_reg`], `between` called before it.
+    /// Whether the next reusable computation ([`Self::cse_value`]) is
+    /// held for a later reuse, or reuses an earlier one, under the hold
+    /// plan: then its register carries the computed (shifted) value, and
+    /// a scaled index is not folded ([`Self::index_reg_with`]).
+    fn cse_next_held(&self) -> bool {
+        match &self.cse_plan {
+            CsePlan::Probe => false,
+            CsePlan::Hold(hits) => hits
+                .iter()
+                .any(|h| h.0 == self.cse_next || h.1 == self.cse_next),
+        }
+    }
+
+    /// The index's value in a data register, unscaled, for an operand
+    /// that scales it itself (MC68020, [`Self::index_reg_with`]): a held
+    /// register as it is (SAU9 PROC1_$GET_TYPE 0x3C4175D4 `move.w
+    /// (0xc42,A5,D2.w*2),(A0)`, D2 the parameter's register; MMAP_$GET_WS_INDEX
+    /// 0x3C40E9CA), a variable loaded (FIM_$GET_FIM_ADDR 0x3C40C390), a
+    /// longword index's word part extended (AST_$FREE_PAGES 0x3C40540C
+    /// `clr.l D1; move.w D2,D1; move.l D5,(-0x84,A6,D1.l*4)`; AST_$UPDATE
+    /// 0x3C4030C4 `move.w D4,D2; ext.l D2; move.l (-0x38,A6,D2.l*8),-(SP)`).
+    /// `between` runs after the value, where the scaling would have been.
+    fn unscaled_index(
+        &mut self,
+        index: &Expr,
+        between: &mut dyn FnMut(&mut Self) -> Res<()>,
+    ) -> Res<u8> {
+        let w = index.ty().width;
+        let v = self.eval(index)?;
+        let d = match v {
+            Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+            v => self.in_tmp(v, w)?,
+        };
+        between(self)?;
+        Ok(d)
+    }
+
+    /// The scale left to the operand formed from index register `x`
+    /// ([`Self::index_reg_with`]; 1 when none), consumed.
+    fn take_folded_scale(&mut self, x: u8) -> u8 {
+        match self.folded_scale.iter().position(|&(r, _)| r == x) {
+            Some(i) => self.folded_scale.remove(i).1,
+            None => 1,
+        }
+    }
+
     fn scaled_index(
         &mut self,
         index: &Expr,
@@ -26256,7 +26601,7 @@ impl Selector {
         // (an `adda.l` may follow it).
         let at = self.out.len();
         let ea = self.element_ea(areg, x, index, disp)?;
-        if !(-128..128).contains(&disp) {
+        if !(-128..128).contains(&disp) && matches!(self.out.get(at), Some(Insn::Lea { .. })) {
             self.elem_leas.push((at, self.span));
         }
         Ok(ea)
@@ -27622,7 +27967,7 @@ mod tests {
             ],
         );
         assert!(select(&f).is_ok(), "{:?}", select(&f));
-        assert!(select_in_unit(&f, Schedule::default(), &[], true).is_ok());
+        assert!(select_in_unit(&f, Schedule::default(), &[], true, Cpu::M68010).is_ok());
         // A word and a longword of constants, the word lower
         // (FIM_$BUILD_DF 0xE0A896, merged and split again; apart at
         // 0xE1465E, 0xE0C958 in units without a merge): two stores
@@ -27673,7 +28018,7 @@ mod tests {
     #[test]
     fn merging_constant_stores() {
         let merged = |f: &Function| -> Result<Vec<String>, String> {
-            select_in_unit(f, Schedule::default(), &[], true)
+            select_in_unit(f, Schedule::default(), &[], true, Cpu::M68010)
                 .map(|i| i.iter().map(|i| i.to_string()).collect())
                 .map_err(|e| e.message)
         };

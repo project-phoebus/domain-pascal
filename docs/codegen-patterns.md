@@ -16007,10 +16007,150 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
   only when the last routines align; otherwise the end is `0x0000`
   (section 7).  Loop labels are
   gas numeric local labels (`1:`, `dbf %d0,1b`).
-- **68010 only.** No 68020-only instruction (bit-field ops, `extb.l`,
-  32-bit `mul`/`div`, scaled index, `bra.l`) has been found in compiled
-  code.  The linear-sweep hits are all inside data.  The kernel runs on
+- **68010 only (SAU2..SAU5).** No 68020-only instruction (bit-field
+  ops, `extb.l`, 32-bit `mul`/`div`, scaled index, `bra.l`) has been
+  found in the SAU2 image's compiled code; the SAU6..SAU9 kernels are
+  MC68020 code (section 14).  The linear-sweep hits are all inside data.  The kernel runs on
   68010 machines (DN300/DN320), so this is required, not a style.  68881
   code appears only in hand-written FP save/restore (`fim/sau2`), not in
   compiled output.  **Uncertain:** confirm with a per-routine scan once the
   harness exists.
+
+## 14. MC68020 code: the SAU6..SAU9 kernels (Verified at the sites given; implemented with `-cpu`; bead domain-pascal-vzzh)
+
+The SR10.2 kernels come in two families.  SAU2..SAU5 are MC68010 code
+(section 13).  SAU6..SAU9 (DN3000/DN4000/DN2500 class, MC68020/68030)
+are the same sources compiled for the MC68020: measured over the
+images with `../source/domain_os/tools/sau_catalog.py`, 495 SAU9
+routines that look like the same source as SAU2's use 68020 idioms,
+567 are the same code.  The reference's `-cpu` option (6.4.9, Table 6-3,
+p. 6-16) selects this: dpc's `-cpu mathchip` (or any of Table 6-3's
+MC68020-class arguments, `docs/compiler-options.md`) generates the forms
+below; the default stays MC68010.  MC68020 output starts with `.arch
+68020`, so `m68k-elf-as -m68010` still accepts it.  Addresses below are
+SAU9 (`~/src/domainos-archeology/sr10.2-install/install/
+ri.apollo.os.v.10.2/sau9/domain_os` and `.map`; measured with
+`../source/domain_os/tools/routine_compare.py --sau 9`).
+
+**Whether the SAU6..SAU9 compiler is the same release as SAU2's** is not
+known: its register choices differ from the MC68010 code's in places
+(below, "Register choices"), which the instruction forms alone do not
+explain.
+
+### Scaled and base-displacement index operands (Verified; the fold rule Uncertain)
+
+- A scale of 2, 4 or 8 goes into the operand instead of an `add.w
+  Dn,Dn` / `lsl #k`: FIM_$GET_FIM_ADDR 0x3C40C390 `move.w
+  PROC1_$AS_ID,D1; move.l (0x3c,A5,D1.w*4),D0` (SAU2 0xE0AA10 `lsl.w
+  #2,D0; move.l (0x3c,A5,D0.w),D0`); PROC1_$GET_TYPE 0x3C4175D4 `move.w
+  (0xc42,A5,D2.w*2),(A0)`; ACL_$ADD_PROJ `move.l (A3)+,(-0x4da0,A4,D4.l*8)`.
+  A word or a longword index, the latter after its extension
+  (AST_$UPDATE 0x3C4030C4 `move.w D4,D2; ext.l D2; move.l
+  (-0x38,A6,D2.l*8),-(SP)`; AST_$FREE_PAGES 0x3C40540C `clr.l D1; move.w
+  D2,D1; move.l D5,(-0x84,A6,D1.l*4)`).
+- A displacement beyond a byte is the full extension word's word base
+  displacement, where the MC68010 code has `lea (0,An,Dx),Am` and
+  `(d,Am)`: BAT_$ALLOCATE 0x3C442FD4 `tst.b (0xd47,A5,D0.w)`; ACL_$UP
+  0x3C44E770 `addq.w #1,(-15706,A0,D0.w*2)`; TIME_$VT_INT 0x3C418496 `pea
+  (0x12fc,A5,D0.w)`; a `lea` of the element's address
+  NAME_$GET_NDIR_UID 0x3C45FD4E `lea (0x3e0,A5,D0.w*8),A0`.  Encodings:
+  the brief format with scale bits when the displacement fits a byte
+  (`2035 143c`), the full format with a word displacement otherwise
+  (`30b5 2320 0c42`, `4875 0120 12fc`).
+- **The fold rule (Uncertain; bead domain-pascal-9jvz).**  Over the
+  SAU9 image (scratch survey of every `Dn.s*k` operand and every
+  `lsl`/`add Dn,Dn` feeding an unscaled index): a scale of 2 is folded
+  at 284 of 284 `lsl`-free sites, but AUDIT_$IS_PROCESS_AUDITED
+  0x3C4787B2 keeps `add.w D0,D0; tst.w (-2,A5,D0.w)`; 4 at 262 of 495; 8
+  at 209 of 240.  The unfolded sites include every scaled index that is
+  reused (AREA_$FREE_ASID 0x3C4094BE `move.w D2,D3; lsl.w #2,D3;
+  movea.l (0x4d8,A5,D3.w),A2`, D3 read again at the end; AREA_$CREATE_FROM
+  0x3C409064) and `for` loops whose control variable is in memory
+  (PCHIST_$CNTL 0x3C463E38 `clr.l D1; move.w (-24,A6),D1; lsl.l #2,D1;
+  clr.l (0x216,A2,D1.l)`; MST_$INIT 0x3C436D04), but also single-use
+  indices (AREA_$CREATE_FROM 0x3C409214 `move.w (38,A2),D0; lsl.w #2,D0;
+  move.l (A2),(0x4d8,A5,D0.w)`), and folded sites include frame
+  variables (AREA_$TRANSFER 0x3C409FC8).  No surface feature of the
+  instruction stream separates the two classes.  **dpc folds unless the
+  scaled index is a computation held for reuse or a reuse of one
+  (section 12.4 R7, `isel.rs` `index_reg_with`)**, which gives every
+  oracle routine's form; over the whole SAU9 tree the option turns 9
+  routines identical and 2 the other way (AUDIT_$IS_PROCESS_AUDITED
+  above; DISK_$GET_ERROR_INFO 0x3C472CB6, whose loop alignment moved
+  with the sizes of the routines before it).
+- The split element forms of section 5.2 (`lea (0,An,Dx),Am`, the
+  8-byte copies' slot loads) keep their instruction order; with no
+  `lea` the slot's load is still scheduled into the index load's stall
+  (NAME_$GET_WDIR_UID 0x3C45FD1C `move.w PROC1_$AS_ID,D0; movea.l
+  (8,A6),A1; lea (0x950,A5,D0.w*8),A0`).
+
+### Bit fields (Verified)
+
+- A packed field is read with `bfextu M{o:w},Dn`, `o` from the unit's
+  most significant bit, zero-extended: DIR_$ADD_LINKU 0x3C457F42
+  `bfextu (A0){5:3},D0`; AST_$FREE_PAGES 0x3C4053BC `bfextu
+  (A2){0:22},D5`; 405 sites, widths 1..31.  Booleans keep `btst`/`tst`
+  and `s<cc>` (section 5.3).
+- A value is stored with `bfins Dn,M{o:w}`, no clearing, shift or mask;
+  the value read and widened as in section 5.3: UID_$INIT 0x3C43699E
+  `move.l NODE_$ME,D0; bfins D0,(4,A0){12:20}` (SAU2 0xE30958 `andi.l
+  #-0x100000,(4,A0); or.l D0,(4,A0)`); RIP_$UPDATE 0x3C46FE02; 0x3C401C64
+  `move.b (21,A4),D0; andi.l #255,D0; bfins D0,(38,A2){9:8}`; 0x3C401D80
+  `clr.w D0; move.b (12,A1),D0; bfins D0,(40,A2){1:8}`; 341 sites.
+- A boolean value into a bit other than 7: made 0 or 1 by `lsr.b #7`,
+  then `bfins` of width 1: MAC_$OPEN 0x3C40D94E `move.b (84,A2),D1;
+  lsr.b #7,D1; bfins D1,(1970,A0){7:1}`; AST_$LOAD_AOTE 0x3C403974 `smi
+  D0; lsr.b #7,D0; bfins D0,(26,A2){4:1}`.  Bit 7 keeps the MC68010 form
+  (0x3C401C90 `andi.b #127,(39,A2); andi.b #-128,D0; or.b D0,(39,A2)`).
+- Constants keep `andi`/`ori` (AST_$LOAD_AOTE 0x3C403AE2 `andi.w
+  #-1024,(2,A0)`; AST_$PMAP_ASSOC 0x3C40572A `ori.w #264,(-126,A3)`; 376
+  `andi`/`ori` on memory), except some through a register (0x3C401CC0
+  `moveq #2,D1; bfins D1,(40,A2){1:8}`; bead domain-pascal-jahh, not
+  implemented: dpc keeps `andi`/`ori`).
+- `bftst M{Dn:1}` tests a set's member with a run-time element, `Dn` =
+  `not k` (43 sites: MST_$ALLOC_ASID 0x3C44A0F0 `clr.l D1; move.w D2,D1;
+  not.l D1; bftst (8,A0){D1:1}`; PCHIST_$COUNT 0x3C41CD06 with `k - 1`
+  instead).  Not implemented (bead domain-pascal-bkjm): dpc keeps the
+  `btst` form of section 5.1.
+
+### Longword multiply and divide (Verified)
+
+In place of the M$ARITH calls of section 8:
+
+- `mul<s>.l src,Dn`; a word operand (`M$MI*$LLW`'s argument 2) extended
+  into the register, the longword the source: BAT_$ALLOCATE 0x3C443092
+  `move.w D1,D2; ext.l D2; muls.l (-528,A4),D2`; PCHIST_$CNTL 0x3C463E9A
+  `clr.l D1; move.w D2,D1; mulu.l D3,D1` (37 sites).
+- `div<s>.l src,Dq`, the quotient in the dividend's register, which is
+  copied when it is read again: TIME_$GET_ADJUST 0x3C418B1E `move.l
+  D0,D1; divs.l #250000,D1` (encoded as `divsl.l` with `Dr = Dq`, `4c7c
+  1801`); BAT_$ALLOCATE 0x3C443082 `sub.l D0,D1; divsl.l (-528,A4),D1:D1`.
+- `div<s>l.l src,Dr:Dq` for `mod`, the remainder in a new register:
+  0x3C418B2A `divsl.l #250000,D2:D0`; AREA_$CREATE_FROM 0x3C40905A
+  `move.l D2,D5; divul.l #11,D4:D5`, the low word of D4 the `M$OIU$WLW`
+  result (77 sites).  `M$ARITH` is not called at all in the SAU9 image's
+  compiled code.
+
+### Register saves (Verified)
+
+As section 2: one register `move.l Dn,-(SP)` / `pea (An)`
+(TIME_$GET_ADJUST 0x3C418B0A `move.l D2,-(SP)`, restored from `(-8,A6)`),
+two or more `movem.l`.  The MC68020 forms need fewer temporaries, so
+routines drop from a `movem` to one register (MMAP_$GET_WS_INDEX 0xE0CA3A
+`movem.l A2/A5,-(SP)` against 0x3C40E9A2 `pea (A5)`).
+
+### Register choices (Uncertain; bead domain-pascal-tbiu)
+
+Where the forms are right, the registers differ from section 12.4's
+model in a few places: FIM_$GET_FIM_ADDR 0x3C40C390 loads the index into
+D1 and the result into D0 (SAU2 0xE0AA0A reuses D0; dpc gives D0);
+TIME_$GET_ADJUST 0x3C418B2A divides the local in place, its last use,
+where dpc copies it (`move.l D0,D1`), and takes D2 for the remainder
+where D1 is free (dpc gives D1).  Of the 12 oracle routines of
+`../source/tmp/sau9/oracles.txt`, 9 are byte-identical with `-cpu
+mathchip` (LOG_$SHUTDN, LOG_$UPDATE, NAME_$GET_NDIR_UID, NAME_$GET_WDIR_UID,
+PROC1_$GET_TYPE, PROC1_$SET_TYPE, RIP_$UPDATE, TIME_$VT_INT, UID_$INIT);
+the two above differ in registers; SMD_$SET_CURSOR_POS differs by a
+data offset of the SMD_ unit's translation (`pea (7576,A5)` against
+`(7584,A5)`), not in code.  Goldens `m68020/scaled_index`,
+`m68020/bit_fields`, `m68020/long_arith`.
