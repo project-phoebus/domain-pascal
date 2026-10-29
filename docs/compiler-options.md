@@ -111,7 +111,7 @@ the option.
 | `-nsubchk` | 6.4.28, p. 6-35 | yes | no subscript checks | accepted |
 | `-version` | 6.4.29, p. 6-35 | | print the compiler's version; no file name may be given | implemented: `dpc -version` alone prints `dpc 0.1.0`; with anything else it is a usage error |
 | `-warn` | 6.4.30, p. 6-35 | yes | report warnings | accepted |
-| `-nwarn` | 6.4.30, pp. 6-35..6-36 | | suppress warnings, "though it does report on the total number of warnings that would have been issued" | implemented: no warning is printed (`%warning`, `-comchk`, best-effort warnings); `-msgs` still counts them |
+| `-nwarn` | 6.4.30, pp. 6-35..6-36 | | suppress warnings, "though it does report on the total number of warnings that would have been issued" | implemented: no warning is printed (`%warning`, `-comchk`, best-effort warnings, the with-hiding warning below, and the notes that follow a warning); `-msgs` still counts the warnings |
 | `-xrs` | 6.4.31, p. 6-36 | yes | registers are assumed saved across calls to external routines and through routine pointers | accepted (dpc's calls assume this) |
 | `-nxrs` | 6.4.31, p. 6-36 | | registers are not assumed saved | refused |
 
@@ -122,6 +122,33 @@ object `source.bin`, replacing a `.pas` suffix and otherwise appending
 `.bin` (6.3.1, p. 6-4; Table 6-1, p. 6-5: `test.first` gives
 `test.first.bin`).  dpc's default output is the input with its extension
 replaced by `.s` (`test.first` gives `test.s`), as before this bead.
+
+## dpc's own warnings
+
+Besides the reference's messages (`%warning`, `-comchk`, the `univ`
+conversion message 246) dpc warns of one thing the original compiler
+is silent about:
+
+- **A with field hiding an enclosing name the body uses** (bead
+  domain-pascal-ohla; requested by ../source 2026-10-29).  Inside
+  `with r do`, a field of `r` that has the same name as a parameter,
+  local or unit variable, constant, routine, or a field or alias of an
+  enclosing `with` hides it, and an unqualified use in the body means
+  the field (ref p. 4-211; standard scoping).  That is legal, and
+  Appendix B has no message for it, but a translation can mean the
+  outer name: ../source's ethernet/find_adjacent.pas compared a
+  parameter `chan` where a with field `chan` was in scope, and the
+  image compares the parameter (sau9 0x3C48197A `move.w (0x10,A6),D0`,
+  0x3C4819AA `cmp.w (0x110e,A1),D0`).  dpc warns once per `with` and
+  name at the first use, ``warning: `chan` is a field of the with here
+  and hides the parameter `chan` (legal, ref p. 4-211; check which one
+  is meant)``, with a note at the with's record expression and, for a
+  variable or an enclosing with, one at the hidden declaration.  A
+  hidden type, builtin, label, routine-option or attribute name gives
+  no warning (it cannot be used as a value).  A qualified use is
+  silent, so renaming or qualifying settles a site.  The sau9 tree at
+  ../source 363b1885 has 64 such sites (37 of them a field of an
+  enclosing with).
 
 ## -config
 

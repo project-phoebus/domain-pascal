@@ -74,15 +74,18 @@ enum Sym {
     /// attributes it stands for, already resolved ("the compiler evaluates
     /// attributes when they are declared").
     Attributes(Attrs),
-    /// A field visible through `with` (ref p. 4-211).
+    /// A field visible through `with` (ref p. 4-211).  `span`: the
+    /// with's record expression ([`Checker::with_hiding_warning`]).
     WithField {
         with: WithId,
         rec_ty: TypeId,
+        span: Span,
     },
     /// `with r : alias` (ref p. 4-212).
     WithAlias {
         with: WithId,
         rec_ty: TypeId,
+        span: Span,
     },
     /// A label (ref 2.2.2.1, p. 2-11), with the routine that declares it
     /// (`None`: the main program).
@@ -193,6 +196,9 @@ pub(crate) struct Checker<'t> {
     /// The `with` records ([`WithId`]) that are, or are part of, an `in`
     /// parameter ([`Checker::in_param_part`]).
     in_withs: HashSet<u32>,
+    /// The (with, name) pairs already warned about by
+    /// [`Checker::with_hiding_warning`]: one warning per with and name.
+    with_hiding_warned: HashSet<(u32, String)>,
     loop_depth: u32,
     /// `%natural_alignment` in effect (ref 4.7 p. 4-57); push stack.
     natural: bool,
@@ -252,6 +258,7 @@ impl<'t> Checker<'t> {
             overlay_allocs: Vec::new(),
             next_with: 0,
             in_withs: HashSet::new(),
+            with_hiding_warned: HashSet::new(),
             loop_depth: 0,
             natural: false,
             align_stack: Vec::new(),
@@ -3358,6 +3365,7 @@ impl<'t> Checker<'t> {
                         Sym::WithAlias {
                             with: wid,
                             rec_ty: r.ty,
+                            span: it.record.span,
                         },
                     );
                 }
@@ -3368,6 +3376,7 @@ impl<'t> Checker<'t> {
                             Sym::WithField {
                                 with: wid,
                                 rec_ty: r.ty,
+                                span: it.record.span,
                             },
                         );
                     }
@@ -3586,7 +3595,12 @@ impl<'t> Checker<'t> {
         match sym {
             Sym::Const { value, ty } => self.konst(value, ty, span),
             Sym::Var(v) => self.var_ref(v, span),
-            Sym::WithField { with, rec_ty } => {
+            Sym::WithField {
+                with,
+                rec_ty,
+                span: with_span,
+            } => {
+                self.with_hiding_warning(id, with, with_span, span);
                 let base = Expr {
                     kind: ExprKind::WithRecord(with),
                     ty: rec_ty,
@@ -3595,12 +3609,19 @@ impl<'t> Checker<'t> {
                 };
                 self.field(base, id, span)
             }
-            Sym::WithAlias { with, rec_ty } => Expr {
-                kind: ExprKind::WithRecord(with),
-                ty: rec_ty,
-                value: None,
-                span,
-            },
+            Sym::WithAlias {
+                with,
+                rec_ty,
+                span: with_span,
+            } => {
+                self.with_hiding_warning(id, with, with_span, span);
+                Expr {
+                    kind: ExprKind::WithRecord(with),
+                    ty: rec_ty,
+                    value: None,
+                    span,
+                }
+            }
             Sym::Routine(r) => {
                 // A parameterless function call (standard Pascal).
                 if self.routines[r.0 as usize].kind == RoutineKind::Procedure {
@@ -4534,6 +4555,88 @@ impl<'t> Checker<'t> {
                 self.types.display(ty)
             ),
         ));
+    }
+
+    /// A name the body of a `with` uses that is one of the with's fields
+    /// (or its alias) and also an identifier of an enclosing scope.  The
+    /// field wins (ref p. 4-211: within the with "you can simply specify
+    /// X to refer to the contents of the field"; standard Pascal scoping),
+    /// which is legal and silent in the original compiler (Appendix B has
+    /// no such message).  dpc warns once per with and name, with a note
+    /// at the with and one at the hidden declaration where it has one,
+    /// because a translation can mean the outer name: ../source's
+    /// ethernet/find_adjacent.pas compared a parameter `chan` that a with
+    /// field `chan` hid, where the image compares the parameter (sau9
+    /// 0x3C48197A `move.w (0x10,A6),D0`; 0x3C4819AA `cmp.w
+    /// (0x110e,A1),D0`).  Bead domain-pascal-ohla.  A hidden type,
+    /// builtin, label, routine-option or attribute name cannot be used
+    /// as a value and gives no warning; a hidden enumeration constant
+    /// and routine do.
+    fn with_hiding_warning(&mut self, id: &ast::Ident, with: WithId, with_span: Span, span: Span) {
+        // The scopes below the with's.
+        let mut below = self.scopes.iter().rev().skip_while(|s| {
+            !matches!(
+                s.names.get(&id.name),
+                Some(Sym::WithField { with: w, .. } | Sym::WithAlias { with: w, .. }) if *w == with
+            )
+        });
+        below.next();
+        let hidden = below.find_map(|s| s.names.get(&id.name)).cloned();
+        let name = &id.name;
+        let (what, decl) = match hidden {
+            Some(Sym::Var(v)) => {
+                let var = &self.vars[v.0 as usize];
+                let what = match var.storage {
+                    Storage::Param { .. } => "parameter",
+                    Storage::Frame { .. } | Storage::HiddenResult { .. } => "local variable",
+                    Storage::Static { .. } | Storage::Extern { .. } => "variable",
+                };
+                (
+                    format!("the {what} `{name}`"),
+                    Some((var.span, format!("the hidden {what} is declared here"))),
+                )
+            }
+            Some(Sym::Const { .. }) => (format!("the constant `{name}`"), None),
+            Some(Sym::Routine(_)) => (format!("the routine `{name}`"), None),
+            Some(Sym::WithField { span, .. }) => (
+                format!("the field `{name}` of an enclosing with"),
+                Some((span, "the enclosing with over this record".to_string())),
+            ),
+            Some(Sym::WithAlias { span, .. }) => (
+                format!("the alias `{name}` of an enclosing with"),
+                Some((span, "the enclosing with over this record".to_string())),
+            ),
+            Some(
+                Sym::Type(_)
+                | Sym::Builtin(_)
+                | Sym::Options(_)
+                | Sym::Attributes(_)
+                | Sym::Label(_),
+            )
+            | None => return,
+        };
+        if !self.with_hiding_warned.insert((with.0, name.clone())) {
+            return;
+        }
+        self.warnings.push(Diagnostic::warning(
+            span,
+            format!(
+                "`{name}` is a field of the with here and hides {what} \
+                 (legal, ref p. 4-211; check which one is meant)"
+            ),
+        ));
+        self.warnings.push(Diagnostic {
+            severity: dpc_syntax::diag::Severity::Note,
+            span: Some(with_span),
+            message: "the with over this record".to_string(),
+        });
+        if let Some((decl_span, msg)) = decl {
+            self.warnings.push(Diagnostic {
+                severity: dpc_syntax::diag::Severity::Note,
+                span: Some(decl_span),
+                message: msg,
+            });
+        }
     }
 
     /// `T(x)` (ref "Type Transfer Functions", p. 4-197): "the size of the

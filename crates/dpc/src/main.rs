@@ -913,8 +913,13 @@ fn run(args: &Args) -> ExitCode {
     let mut report = |d: &Diagnostic| {
         if d.is_error() {
             counts.errors += 1;
-        } else if d.severity == dpc_syntax::diag::Severity::Warning {
-            counts.warnings += 1;
+        } else {
+            // A note follows a warning (e.g. the with-hiding warning's
+            // notes at the two declarations): suppressed with it, not
+            // counted.
+            if d.severity == dpc_syntax::diag::Severity::Warning {
+                counts.warnings += 1;
+            }
             if !args.refs.warn {
                 return;
             }

@@ -1116,6 +1116,66 @@ fn var_parameter_needs_variable_of_same_type() {
 /// to the formal's size, with "Expression passed to UNIV formal NAME was
 /// converted to NEWTYPE."  Variables, equal sizes and non-`univ` formals
 /// give no warning.
+/// A with's field that hides an enclosing name the body uses warns once
+/// per with and name, naming the hidden declaration's kind, with a note
+/// at the with and one at the hidden declaration (bead
+/// domain-pascal-ohla; ../source's ethernet/find_adjacent.pas `chan`).
+/// A field that hides nothing the body uses, a hidden type and a
+/// qualified use are silent.
+#[test]
+fn with_field_hiding_an_enclosing_name_warns() {
+    let p = module(
+        "type r = record chan, lo, n: integer; t: integer; end;
+         type t = integer;
+         const n = 2;
+         var g: integer; o: record chan: integer; end;
+         procedure find(chan: integer; in u: r);
+         var i: integer; v: r;
+         begin
+           with v do
+             if (u.chan = chan) and (lo < 1) and (n = chan) then
+               i := t;
+           with o do
+             with v do
+               chan := 1;
+           with v do
+             chan := g;
+         end;",
+    );
+    let w: Vec<(&str, &str)> = p
+        .warnings
+        .iter()
+        .map(|d| {
+            (
+                if d.is_error() {
+                    "error"
+                } else if d.severity == dpc_syntax::diag::Severity::Note {
+                    "note"
+                } else {
+                    "warning"
+                },
+                d.message.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        w,
+        [
+            ("warning", "`chan` is a field of the with here and hides the parameter `chan` (legal, ref p. 4-211; check which one is meant)"),
+            ("note", "the with over this record"),
+            ("note", "the hidden parameter is declared here"),
+            ("warning", "`n` is a field of the with here and hides the constant `n` (legal, ref p. 4-211; check which one is meant)"),
+            ("note", "the with over this record"),
+            ("warning", "`chan` is a field of the with here and hides the field `chan` of an enclosing with (legal, ref p. 4-211; check which one is meant)"),
+            ("note", "the with over this record"),
+            ("note", "the enclosing with over this record"),
+            ("warning", "`chan` is a field of the with here and hides the parameter `chan` (legal, ref p. 4-211; check which one is meant)"),
+            ("note", "the with over this record"),
+            ("note", "the hidden parameter is declared here"),
+        ]
+    );
+}
+
 #[test]
 fn univ_expression_conversion_warns() {
     let p = module(
