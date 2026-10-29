@@ -15544,6 +15544,17 @@ impl Selector {
             }
             Expr::Const { value: 0, .. } => Src::Zero,
             Expr::Const { value: -1, ty } if *ty == Scalar::BOOLEAN => Src::True,
+            // MC68020: a byte constant 255 of any type is `st` too (SAU9
+            // WIN_SCSI_$DINIT 0x3C41BE5A, 0x3C41BF2E `st (-12,A6)` for
+            // `chr(255)`, ../source finding 306; the image has 60 `st` on
+            // memory and no `move.b #-1`, where the SAU2 image has three
+            // `move.b #-1`: DMA_$CHECK 0xE0A3C6, 0xE0A432, RING_$INT
+            // 0xE75840; codegen-patterns 14).  A device object keeps
+            // `move.b #-1` (above).
+            Expr::Const {
+                value: -1 | 255,
+                ty,
+            } if self.cpu.is_68020() && ty.width == Width::Byte && !device => Src::True,
             // A longword in `moveq`'s range: from a data register
             // ([`ConstForm`]; DISK_$PV_MOUNT 0xE6C9F4 `moveq #18,D0;
             // move.l D0,(-20,A6)`; LOG_$INIT 0xE3017C, two words merged).
@@ -20336,6 +20347,33 @@ impl Selector {
                         // reconstruction, Uncertain).
                         let d = self.eval_d(lhs)?;
                         self.shift_by(ShiftOp::Lsr, d, c.trailing_zeros(), Width::Word);
+                        return Ok(Val::Tmp(d));
+                    }
+                    if !signed && op == BinOp::Mod && self.cpu.is_68020() {
+                        // MC68020: the mask, `moveq #2^k-1,Dn; and.w src,Dn`
+                        // (SAU9 WIN_SCSI_$DINIT 0x3C41BAB2 `moveq #7,D0;
+                        // and.w D4,D0` on a held `0..65535`; WIN_SCSI_$CINIT
+                        // 0x3C4361E8 `moveq #7,D4; and.w (6,A3),D4` from
+                        // memory; ../source finding 305).  Neither image
+                        // divides by a power of two (`divu.w #` immediates:
+                        // 5, 10, 17, 20, 48, 50, 54, 101, 111), so the
+                        // MC68010 form stays the best-effort division
+                        // below, with no site either way.  A mask beyond
+                        // `moveq` (`mod 256` and above): no site,
+                        // `load_const`.
+                        let src = match self.eval(lhs)? {
+                            Val::Mem(ea) => ea,
+                            Val::Reg(r) => Ea::Reg(r),
+                            Val::Tmp(t) => Ea::Reg(Reg::D(t)),
+                            v => Ea::Reg(Reg::D(self.in_tmp(v, Width::Word)?)),
+                        };
+                        let d = self.load_const(c - 1, Width::Word)?;
+                        self.out.push(Insn::Alu {
+                            op: AluOp::And,
+                            size: Size::W,
+                            src,
+                            dst: d,
+                        });
                         return Ok(Val::Tmp(d));
                     }
                     if !signed {

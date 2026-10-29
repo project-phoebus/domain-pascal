@@ -11243,7 +11243,8 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     against 234 `lsr.w #k,Dn`; LOG_$READ's worker 0xE177D2..0xE177D8
     `move.w (A0),D0; lsr.w #1,D0` halves a `0..65535` word, C `>> 1`, our
     reconstruction `div 2`); implemented (bead domain-pascal-5aw.17).
-    Refused: unsigned `mod` by 2^k (no site: mask or division?).
+    Refused: unsigned `mod` by 2^k (no site: mask or division?); MC68020:
+    the mask (section 14, "Unsigned arithmetic and byte constants").
   - **A longword `div` whose quotient is used as a word, by a word (or a
     constant that fits one): `div<s>.w` in place on the longword, no
     call** (about 30 sites: of the 70 inline `div<s>.w`, 23 `divs.w` and
@@ -16298,6 +16299,36 @@ As section 2: one register `move.l Dn,-(SP)` / `pea (An)`
 two or more `movem.l`.  The MC68020 forms need fewer temporaries, so
 routines drop from a `movem` to one register (MMAP_$GET_WS_INDEX 0xE0CA3A
 `movem.l A2/A5,-(SP)` against 0x3C40E9A2 `pea (A5)`).
+
+### Unsigned arithmetic and byte constants (Verified at the sites given; implemented, bead domain-pascal-p1pd)
+
+- **Unsigned `mod` by a power of two is the mask** (../source finding
+  305): WIN_SCSI_$DINIT 0x3C41BAB2 `moveq #7,D0; and.w D4,D0` on a held
+  `0..65535`, WIN_SCSI_$CINIT 0x3C4361E8 `moveq #7,D4; and.w (6,A3),D4`
+  from memory.  Neither image divides by a power of two: the `divu.w #`
+  immediates are 5, 17, 20, 48, 50, 54, 101, 111 in the SAU2 image and
+  those plus 10 in the SAU9's.  `dpc` under `-cpu mathchip`: `load_const`
+  of the mask (`moveq` to 127; a wider mask has no site), `and.w` of the
+  operand; the MC68010 build keeps its best-effort `divu.w` (section 8,
+  no site either way).  Unsigned `div` and `*` by a power of two are the
+  shifts of both images (0x3C41BE18 `lsr.l #8; lsr.l #2`, 0x3C41C0EE
+  `lsl.l #8; lsl.l #2` for 1024; section 8).
+- **A byte constant 255 is stored with `st`** (finding 306): WIN_SCSI_
+  $DINIT 0x3C41BE5A and 0x3C41BF2E `st (-12,A6)` for `chr(255)`.  The
+  SAU9 image has 60 `st` on memory and no `move.b #-1` on memory; the
+  SAU2 image has three `move.b #-1` (DMA_$CHECK 0xE0A3C6 and 0xE0A432,
+  RING_$INT 0xE75840, bytes through pointers) beside 175 `st`.  `dpc`
+  under `-cpu mathchip`: a byte constant 255 of any type is `st`, as
+  `true` (`store`, `Src::True`); a device object keeps `move.b #-1`
+  (section 13: `Scc` reads its operand); a register-held local stays
+  refused as before (`moveq` range).
+- **The constant pool is shared across a module's routines in both
+  images** (finding 307, already dpc's model, `emit.rs` `Pool`): of the
+  PC-relative cell references in map-named routines, 707 point into the
+  routine's own extent, 254 into an earlier routine's and 76 into a gap
+  between routines in the SAU9 image (`poolshare2.py`, scratch), 662,
+  232 and 61 in the SAU2 image (AST_$ALLOCATE_ASTE +0x144 `pea` to a
+  cell after AST_$UPDATE in both).
 
 ### Arrays of char (Verified at the sites given; implemented, bead domain-pascal-0p9w)
 
