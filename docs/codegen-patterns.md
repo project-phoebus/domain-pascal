@@ -16164,11 +16164,22 @@ explain.
   lsr.b #7,D1; bfins D1,(1970,A0){7:1}`; AST_$LOAD_AOTE 0x3C403974 `smi
   D0; lsr.b #7,D0; bfins D0,(26,A2){4:1}`.  Bit 7 keeps the MC68010 form
   (0x3C401C90 `andi.b #127,(39,A2); andi.b #-128,D0; or.b D0,(39,A2)`).
-- Constants keep `andi`/`ori` (AST_$LOAD_AOTE 0x3C403AE2 `andi.w
-  #-1024,(2,A0)`; AST_$PMAP_ASSOC 0x3C40572A `ori.w #264,(-126,A3)`; 376
-  `andi`/`ori` on memory), except some through a register (0x3C401CC0
-  `moveq #2,D1; bfins D1,(40,A2){1:8}`; bead domain-pascal-jahh, not
-  implemented: dpc keeps `andi`/`ori`).
+- **A constant into a packed field (Verified at the sites given;
+  implemented, bead domain-pascal-jahh; golden `m68020/bit_fields`).**
+  By the bits the constant gives the field: all 0 keeps `andi` alone
+  (AST_$LOAD_AOTE 0x3C403AE2 `andi.w #-1024,(2,A0)`, a 10-bit field; `andi.w
+  #-4` 7 sites, `andi.w #-1009`, `andi.l #-4194304`, `andi.b #127` 14
+  sites for a boolean in bit 7), all 1 keeps `ori` alone (AST_$PMAP_ASSOC
+  0x3C405940 `ori.w #192,(-28568,A3)`; 0x3C40572A `ori.w #264,(-126,A3)`
+  and 0x3C4085A6 `ori.w #321`, booleans merged, section 13; `ori.b #-4`
+  4 sites), and a mixed constant goes through a register, `moveq #c,Dn;
+  bfins Dn,M{o:w}`: 0x3C401CBE `moveq #2,D1; bfins D1,(40,A2){1:8}` (3
+  sites), `moveq #2` into a 2-bit field 0x3C40ABD8 (2), `moveq #31` into a
+  15-bit field (2), `moveq #1` into 21 and 28 bits; the 9 constant
+  `bfins` of the image, every one mixed, and no `andi; ori` pair on a
+  field.  The MC68010 clears and sets (`andi; ori`, section 5.3).  A
+  mixed constant outside `moveq`'s range: no site; dpc loads it with
+  `move.l #c,Dn`.
 - **`in` with a run-time element on a set of more than a longword
   (Verified at the sites given; implemented, bead domain-pascal-bkjm;
   golden `m68020/set_member`).**  One `bftst M{Dn:1}` of the member's

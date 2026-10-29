@@ -12,8 +12,13 @@
   - a 3-bit field read: `bfextu (A0),D0' at offset 5, width 3 (SAU9 DIR_$ADD_LINKU
     0x3C457F42);
   - a boolean in bit 7 keeps the MC68010 form, `andi.b #127,M; andi.b
-    #-128,Dn; or.b Dn,M' (SAU9 0x3C401C90), and a constant its `andi' /
-    `ori' (SAU9 AST_$LOAD_AOTE 0x3C403AE2 `andi.w #-1024,(2,A0)'). }
+    #-128,Dn; or.b Dn,M' (SAU9 0x3C401C90);
+  - a constant (bead domain-pascal-jahh): all the field's bits 0 keeps
+    `andi' (SAU9 AST_$LOAD_AOTE 0x3C403AE2 `andi.w #-1024,(2,A0)'), all 1
+    keeps `ori' (AST_$PMAP_ASSOC 0x3C405940 `ori.w #192,(-28568,A3)'), a
+    mixed one goes through a register, `moveq #2,D1; bfins D1,(40,A2)' at
+    offset 1, width 8 (SAU9 0x3C401CBE; `moveq #2' into a 2-bit field
+    0x3C40ABD8): dir_$set_kind (3 into 5 bits), set_vals. }
 module bit_fields;
 type
   uid_$t = packed record
@@ -29,6 +34,12 @@ type
   entry_t = packed record
     kind: 0..31;        { bits 7..3 of the byte }
     typ: 0..7;          { bits 2..0 }
+  end;
+  vals_t = packed record
+    pad: array[1..20] of integer;
+    b: boolean;         { byte 40, bit 7 }
+    v8: 0..255;         { byte 40 bit 6 .. byte 41 bit 7: offset 1, width 8 }
+    v2: 0..3;           { byte 41 bits 6..5 }
   end;
 var
   uid_$nil: uid_$t;
@@ -54,4 +65,11 @@ end;
 procedure dir_$set_kind(var e: entry_t);
 begin
   e.kind := 3;
+end;
+procedure set_vals(var r: vals_t; var e: entry_t);
+begin
+  r.v8 := 2;
+  r.v2 := 2;
+  e.typ := 0;
+  e.kind := 31;
 end;

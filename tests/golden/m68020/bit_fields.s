@@ -44,8 +44,21 @@ rts
 DIR_$SET_KIND:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-andi.b #7,(%a0)
-ori.b #0x18,(%a0)
+moveq #3,%d0
+bfins %d0,(%a0){#0:#5}
+unlk %fp
+rts
+.globl SET_VALS
+SET_VALS:
+link.w %fp,#0
+movea.l (8,%fp),%a0
+movea.l (0xc,%fp),%a1
+moveq #2,%d0
+bfins %d0,(0x28,%a0){#1:#8}
+moveq #2,%d0
+bfins %d0,(0x29,%a0){#1:#2}
+andi.b #0xf8,(%a1)
+ori.b #0xf8,(%a1)
 unlk %fp
 rts
 .balignw 4,0x2048

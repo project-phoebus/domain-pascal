@@ -23600,6 +23600,25 @@ impl Selector {
                 )?;
             }
             let v = (c << field.shift) & m;
+            // MC68020 (bead domain-pascal-jahh; codegen-patterns 14, "Bit
+            // fields"): a constant whose field bits are neither all 0
+            // (`andi` alone) nor all 1 (`ori` alone) goes through a
+            // register, `moveq #c,Dn; bfins Dn,M{o:w}` (0x3C401CBE `moveq
+            // #2,D1; bfins D1,(40,A2){1:8}`, 3 sites; `moveq #31` into a
+            // 15-bit field, 2; `moveq #2` into a 2-bit field, 2; `moveq #1`
+            // into 21 and 28 bits), where the MC68010 clears and sets
+            // (`andi; ori`).  A constant outside `moveq`'s range: no site,
+            // `move.l #c,Dn` (`load_const`).
+            if self.cpu.is_68020() && field.width > 1 && v != 0 && v != m {
+                let d = self.load_const(*c, Width::Long)?;
+                self.out.push(Insn::Bfins {
+                    src: d,
+                    dst,
+                    offset: Self::bf_offset(field),
+                    width: field.width as u8,
+                });
+                return Ok(());
+            }
             if v != m {
                 and_mem(self, &dst, !m);
             }
