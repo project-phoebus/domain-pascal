@@ -23738,8 +23738,17 @@ impl Selector {
                         d = self.alloc_d()?;
                         let r = Ea::Reg(Reg::D(d));
                         match (k, unit) {
-                            // 0xE0086E `move.b (21,A4),D0; andi.l #255,D0`.
-                            (Width::Byte, Width::Long) => {
+                            // A byte that fills the field's need, into a
+                            // longword unit: 0xE0086E `move.b (21,A4),D0;
+                            // andi.l #255,D0` (an 8-bit field).  A byte
+                            // narrower than the field needs is widened
+                            // like a conversion, `clr.l; move.b` (below):
+                            // MST_$LOOKUP_OBJECT 0xE43D52 `clr.l D1; move.b
+                            // (-12,A6),D1; andi.l #0x80000000,(A3); or.l
+                            // D1,(A3)`, a `[byte] 0..255` into a 31-bit
+                            // field (../source mst/lookup_object.pas; one
+                            // site).
+                            (Width::Byte, Width::Long) if k == need => {
                                 self.out.push(Insn::Move {
                                     size: Size::B,
                                     src: ea,

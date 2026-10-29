@@ -6724,8 +6724,12 @@ same `bset #c mod 8` on the member's byte).
   copied, PACCT 0xE5AA00..0xE5AA16 `andi.b #31,(-8,A6); move.b D1,D3;
   lsl.b #5,D3; or.b D3,(-8,A6); andi.w #-8192,(-8,A6); move.w D0,D3; or.w
   D3,(-8,A6)`); narrower, it is zero-extended before (byte to word `clr.w;
-  move.b`, 0xE00994, 0xE0F216; byte to longword `move.b; andi.l #255`,
-  0xE0086E; word to longword `clr.l; move.w`, 0xE0E346).  A computed value
+  move.b`, 0xE00994, 0xE0F216; byte to longword `move.b; andi.l #255`
+  where the byte fills the field's need, 0xE0086E, an 8-bit field, and
+  `clr.l; move.b` where the field needs more, MST_$LOOKUP_OBJECT 0xE43D52
+  `clr.l D1; move.b (-12,A6),D1; andi.l #0x80000000,(A3); or.l D1,(A3)`,
+  a `[byte] 0..255` into a 31-bit field, one site; word to longword
+  `clr.l; move.w`, 0xE0E346).  A computed value
   is used at its own width or wider (0xE106A0: a longword merged into a
   byte); narrower ones: **best effort** (below).  **Masking (Uncertain):** the shifted
   value is and-ed with the field mask when its type admits negative
@@ -11319,8 +11323,11 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   register (0xE11818); a `char` widened to a word with `clr.w Dn; move.b
   x,Dn` (0xE0E316..0xE0E318).  A byte widened to a longword occurs as
   `move.b; andi.l #0xff` (0xE00864..0xE00868) and as `clr.l Dn; move.b
-  x,Dn` (MST_$LOOKUP_OBJECT 0xE43D52..0xE43D54), both from memory, no
-  rule found: **best effort (bead domain-pascal-sq4a)**, `clr.l; move.b`
+  x,Dn` (MST_$LOOKUP_OBJECT 0xE43D52..0xE43D54), both from memory and
+  both stores into packed fields, where the field's width decides
+  (section 5.3, "Wider field, value": the first an 8-bit field, the
+  second a 31-bit one); for a plain conversion no site, no rule found:
+  **best effort (bead domain-pascal-sq4a)**, `clr.l; move.b`
   from memory or a register, `andi.l #0xff` on a byte computed in a new
   register (exec test `be_sq4a`); a signed byte, `ext.w; ext.l`, no
   site.
