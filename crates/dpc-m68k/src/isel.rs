@@ -17249,8 +17249,13 @@ impl Selector {
                     // `addr(x)` by value of an object of this unit's data or
                     // frame: `pea`, the push of the same address by address
                     // (codegen-patterns 1.5: `pea (d,A6)`, PROC1_$BIND 0xE14DF4;
-                    // `pea (d,A5)`, 0xE02884; `pea (d,An)`, 0xE32B86).
-                    Expr::AddrOf(a @ (Addr::Frame(_) | Addr::Static(_))) => {
+                    // `pea (d,A5)`, 0xE02884; `pea (d,An)`, 0xE32B86); of
+                    // the enclosing routine's frame from a nested routine,
+                    // off the static link's register (SAU9 ETHERNET_$SVC_IOCTL's
+                    // nested routine 0x3C483490 `pea (-0x40,A3)` to a
+                    // module-local function; ../source gap 357, bead
+                    // domain-pascal-fq1y; no SAU2 site catalogued).
+                    Expr::AddrOf(a @ (Addr::Frame(_) | Addr::Static(_) | Addr::Enclosing(_))) => {
                         let ea = self.ea_of(a)?;
                         self.out.push(Insn::Pea(ea));
                     }

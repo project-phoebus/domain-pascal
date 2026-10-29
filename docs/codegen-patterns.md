@@ -688,7 +688,12 @@ non-`_ASM` `I` segment split at map symbols and `link` words, as
   or pointer value parameter, `val_param`): `pea (d,A6)` / `pea (d,A5)`,
   the same push as the object by address (no compiled site can be told
   from that one; implemented, bead domain-pascal-5aw.19; `addr` stored
-  as a value: section 5.2).
+  as a value: section 5.2).  Of the enclosing routine's frame from a
+  nested routine: `pea (d,An)` off the static link's register (SAU9
+  ETHERNET_$SVC_IOCTL's nested routine 0x3C483490 `pea (-0x40,A3)` to a
+  module-local function, ../source gap 357; no SAU2 site catalogued;
+  implemented, bead domain-pascal-fq1y; golden
+  `nested/addr_enclosing_by_value`).
 - **`addr(x)` by value of other objects: the push of x by address too**
   (Verified at the sites given, callees taking a pointer by value;
   implemented, bead domain-pascal-hs92):
