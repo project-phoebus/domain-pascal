@@ -4147,7 +4147,9 @@ model run against the bit model of Figure 3-6).
   (`btst #k mod 8`, `tst.b` for bit 7: the rule of the constant member of
   a set in memory below; best effort).  A computed element: no site;
   evaluated first, then the constant (the order of a computed member of
-  `[k]`; best effort).
+  `[k]`; best effort).  MC68020 (`-cpu mathchip`): one `bftst` with
+  `not k` as the offset from the set's end, the constant set guarded
+  with `cmpi.l`/`bcs` for any element size (section 14, "Bit fields").
 - **Sets of more than a longword as operands (Reported; implemented best
   effort, bead domain-pascal-g6l7):** the image builds and combines them
   in frame temporaries: `[k]` as `lea (-20,A6),A0; clr.l (A0)+; clr.l
@@ -6391,7 +6393,10 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       result: ACL_$USED_SUSER 0xE492DA..0xE492FE, `btst D2,(-15568,A1);
       sne D0`.  With other bases: ACL_$SET_ACL_CHECK 0xE47384, ACL_$ALLOC_ASID
       0xE73C9A, the module-local 0xE464B8 at 0xE4655C (whose bit number is
-      `andi.b #7,D0; ...; moveq #7,D1; sub.b D0,D1`).
+      `andi.b #7,D0; ...; moveq #7,D1; sub.b D0,D1`).  MC68020 (`-cpu
+      mathchip`): one `bftst` with the element's position from the
+      array's first bit in the offset register, PCHIST_$COUNT 0x3C41CD06
+      (section 14, "Bit fields"); the stores keep the forms below.
     - *Set and clear* (`or.b`/`and.b` of a mask): on the index's **word**,
       9 sites, PCHIST_$UNIX_PROFIL_FORK 0xE5CCDC..0xE5CCF4: `move.w
       (A2),D0; moveq #7,D1; subq.w #1,D0; move.l #0x80,D2; and.w D0,D1;
@@ -16164,11 +16169,68 @@ explain.
   `andi`/`ori` on memory), except some through a register (0x3C401CC0
   `moveq #2,D1; bfins D1,(40,A2){1:8}`; bead domain-pascal-jahh, not
   implemented: dpc keeps `andi`/`ori`).
-- `bftst M{Dn:1}` tests a set's member with a run-time element, `Dn` =
-  `not k` (43 sites: MST_$ALLOC_ASID 0x3C44A0F0 `clr.l D1; move.w D2,D1;
-  not.l D1; bftst (8,A0){D1:1}`; PCHIST_$COUNT 0x3C41CD06 with `k - 1`
-  instead).  Not implemented (bead domain-pascal-bkjm): dpc keeps the
-  `btst` form of section 5.1.
+- **`in` with a run-time element on a set of more than a longword
+  (Verified at the sites given; implemented, bead domain-pascal-bkjm;
+  golden `m68020/set_member`).**  One `bftst M{Dn:1}` of the member's
+  bit, `Dn` = `not k` = -(k+1): with member k bit k of the set read as a
+  big-endian integer (ref 3.9.3), its bit-field offset counted back from
+  the byte after the set is -(k+1), so the operand is the set's end
+  (its displacement plus the set's size).  All 43 `bftst` sites of the
+  image are this form or the packed-boolean one below; none keeps the
+  MC68010 byte arithmetic of section 5.1.  The element's register is
+  cleared, the element moved in at its own size, then complemented:
+  MST_$ALLOC_ASID 0x3C44A0EC..0x3C44A0F6 `lea (A1),A0; ...; clr.l D1;
+  move.w D2,D1; not.l D1; bftst (8,A0){D1:1}` (an 8-byte set, a word
+  element held in D2; the `lea` of a plain `(An)` set operand, there
+  before the loop); a char element TTY_$I_OUTPUT_BUFFER_DRAINED
+  0x3C41E2B8 `clr.l D1; move.b (0x2d1,A2,D0.w),D1; not.l D1; bftst
+  (0x32,A5){D1:1}`; a word from memory MSG_$SET_HPIPC 0x3C46050E `clr.l
+  D1; lsl.w #3,D0; move.w abs.l,D1; not.l D1; bftst
+  (0x1e0,A5,D0.w){D1:1}`; a longword moved whole, no `clr.l`,
+  MST_$MAP_AREA_AT 0x3C44B4A6 `move.l D2,D0; not.l D0; bftst
+  (20,A0,D7.w){D0:1}`: 19 sites on set variables, unguarded.  A constant
+  set in the code is guarded on the complemented element, any element
+  size: `cmpi.l #-bits,Dn; bcs` to where "not a member" goes (`not k`
+  below -bits unsigned is k at or above the bits, or negative), then the
+  `bftst` on the cell's end `(L+size,PC)` and `beq`/`bne`: NAME_$INIT
+  0x3C437920..0x3C437936 `clr.l D4; move.b (-1,A5,D0.w),D4; not.l D4;
+  cmpi.l #-96,D4; bcs.s L; bftst (0x3C4379C4,PC){D4:1}; beq.s L` (the
+  12-byte cell ends at 0x3C4379C4); UNMAP_CASE 0x3C45B67C `cmpi.l
+  #-128`, 0x3C45B7B6 `cmpi.l #-64`; DIR_$DO_OP 0x3C4542FA; 14 sites (the
+  MC68010 form's `ble` on N limited it to a byte element, section 5.1;
+  dpc keeps that limit in the MC68010 selector only).  `dpc`
+  (`set_member_bf`, `set_member_bf_jump`, `set_end_ea` in
+  `dpc-m68k/isel.rs`): measured on the SAU9 routines MSG_$SET_HPIPC
+  0.70 to 0.92 (8 bytes left: the ×8 fold, bead domain-pascal-9jvz, and
+  a held element), ACL_$USED_SUSER 0.39 to 0.58, PCHIST_$COUNT 0.29 to
+  0.53, PCHIST_$UNIX_PROFIL_FORK 0.62 to 0.69, TTY_$I_OUTPUT_BUFFER_
+  DRAINED 0.81 to 0.82, the rest unchanged or slightly up.  Not
+  reproduced: the `clr.l` scheduled before the set operand's index
+  arithmetic (MSG_$SET_HPIPC above, MST_$MAP_INITIAL_AREA 0x3C44A286;
+  dpc keeps it with the element), the `lea` hoisted before the loop
+  (MST_$ALLOC_ASID), and `not k` formed once before a loop (MSG_$FORK
+  0x3C47B8D6, MSG_$FREE_ASID 0x3C47C9EA `bftst (480,A0){D1:1}` with D1
+  from before the loop).  `in` on a large set as a value: no site; dpc
+  puts `sne` into the offset's register after the `bftst` (best effort,
+  not byte-identical); a constant set as a value keeps the MC68010 form.
+- **An element of a packed array of booleans (Verified at the sites
+  given; implemented, bead domain-pascal-bkjm; golden
+  `m68020/set_member`).**  `bftst` with the element's position from the
+  array's first bit (a positive offset: bit 0 is the first element's,
+  the layout of section 5.2): PCHIST_$COUNT 0x3C41CCFE..0x3C41CD06
+  `move.w D2,D0; clr.l D1; subq.w #1,D0; move.w D0,D1; bftst
+  (0x18,A5){D1:1}` (the index copied, the position from 0 in word
+  arithmetic, not the MC68010 byte form of section 5.2);
+  PCHIST_$UNIX_PROFIL_CNTL 0x3C463B7A and 0x3C463BCE, PCHIST_$UNIX_
+  PROFIL_FORK 0x3C463C54, ACL_$ALLOC_ASID 0x3C47B650, and as a function
+  result ACL_$USED_SUSER 0x3C450994..0x3C4509A2 `clr.l D1; subq.w #1,D0;
+  move.w D0,D1; bftst abs.l{D1:1}; sne D0`: 10 sites.  (The earlier note
+  here read PCHIST_$COUNT's `k - 1` as a set member: it is the 1-based
+  boolean array `pchist_$proc_bitmap`.)  Not reproduced: ACL_$SET_ACL_
+  CHECK 0x3C44EA88 subtracts in place before the `clr.l` (`subq.w
+  #1,D5; clr.l D6; move.w D5,D6`), PCHIST_$UNIX_PROFIL_FORK 0x3C463C9E
+  copies the index twice.  Stores keep the MC68010 `bset`/`bclr` forms
+  (no `bfset`/`bfclr`/`bfchg` in the image).
 
 ### Longword multiply and divide (Verified)
 

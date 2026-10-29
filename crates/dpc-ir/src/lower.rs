@@ -7856,17 +7856,13 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
         // on an [`Addr::Const`]): UNMAP_CASE 0xE54164..0xE54178 `clr.w D2;
         // moveq #95,D3; move.b D0,D2; sub.w D2,D3; bcs.s; lsr.w #3,D3; lea
         // (0xe543e0,PC),A3; btst D2,(0,A3,D3.w); ble.s` (a char in a
-        // 96-bit constant), NAME_$INIT 0xE31836..0xE3184A.  Only a
-        // one-byte element (all the sites: chars): the `ble`/`bgt` after
-        // the borrow reads N, which is the borrow only while the
-        // subtraction cannot overflow (codegen-patterns 5.1).
-        if p.types.size(lhs.ty) != 1 {
-            return Err(unsupported(
-                e.span,
-                "`in` on a constant set of more than a longword with an element of more than a \
-                 byte (the guarded test's `ble` reads N: no site, codegen-patterns 5.1) is",
-            ));
-        }
+        // 96-bit constant), NAME_$INIT 0xE31836..0xE3184A.  The element's
+        // size is the backend's concern: the MC68010 form takes only a
+        // one-byte element (all the sites: chars), as the `ble`/`bgt`
+        // after the borrow reads N, which is the borrow only while the
+        // subtraction cannot overflow (codegen-patterns 5.1; `dpc-m68k`
+        // `set_member_at`); the MC68020 form guards with `cmpi.l`/`bcs`
+        // on the complemented element, any size (bead domain-pascal-bkjm).
         let Some(&hi) = members.iter().max() else {
             return Err(unsupported(e.span, "`in` on the constant `[]` is"));
         };

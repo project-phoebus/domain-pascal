@@ -411,6 +411,10 @@ pub fn access(insn: &Insn) -> Access {
             a.def(Reg::D(*dst));
         }
         Insn::Bftst { dst, .. } => a.read(dst),
+        Insn::BftstReg { dst, offset, .. } => {
+            a.use_(Reg::D(*offset));
+            a.read(dst);
+        }
         Insn::AluImm { dst, .. } | Insn::Unary { dst, .. } | Insn::BitImm { dst, .. } => {
             a.dst_rmw(dst)
         }
@@ -532,6 +536,10 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
             fd(dst);
         }
         Insn::Bftst { dst, .. } => fe(dst),
+        Insn::BftstReg { dst, offset, .. } => {
+            fd(offset);
+            fe(dst);
+        }
         Insn::AluImm { dst, .. }
         | Insn::Unary { dst, .. }
         | Insn::BtstImm { dst, .. }

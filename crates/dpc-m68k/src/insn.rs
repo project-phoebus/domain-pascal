@@ -207,6 +207,14 @@ pub enum Ea {
     /// relative with a 16-bit displacement (`487a dddd` for `pea`,
     /// TERM_$SEND_KBD_STRING 0xE1AB0C; codegen-patterns 1.5).
     PoolLabel(u32),
+    /// The byte after a pooled constant's cell, `(d,PC)`: the end of a
+    /// constant set, which the MC68020 membership test addresses with a
+    /// negative bit offset (SAU9 NAME_$INIT 0x3C437930 `bftst
+    /// (0x3C4379C4,PC){D4:1}`, the 12-byte set ending there; codegen-
+    /// patterns 5.1).  The emitter resolves it to [`Ea::PoolLabelOff`].
+    PoolEnd(dpc_ir::PoolConst),
+    /// `(L+n,PC)`: a placed cell's label plus `n` bytes.
+    PoolLabelOff(u32, i32),
     /// `#n`: an immediate.  The selector gives the number as the
     /// instruction size reads it: a byte immediate is 0..=255, so that gas
     /// writes the extension word the way the original did (`move.b
@@ -225,7 +233,13 @@ impl Ea {
             // The selector writes `Ea::Ind` for offset 0 anyway; this keeps
             // `Insn::len_at` equal to what gas emits if one slips through.
             Ea::Disp(0, _) => 0,
-            Ea::Disp(..) | Ea::AbsW(_) | Ea::Idx(..) | Ea::Pool(_) | Ea::PoolLabel(_) => 2,
+            Ea::Disp(..)
+            | Ea::AbsW(_)
+            | Ea::Idx(..)
+            | Ea::Pool(_)
+            | Ea::PoolLabel(_)
+            | Ea::PoolEnd(_)
+            | Ea::PoolLabelOff(..) => 2,
             // The brief format with scale bits, or the full format with a
             // word base displacement (gas picks the brief one whenever the
             // displacement fits a byte, as the image's encodings have it:
@@ -290,6 +304,13 @@ impl fmt::Display for Ea {
             Ea::Imm(n) => write!(f, "#{}", num(*n)),
             Ea::Pool(c) => write!(f, "(<unplaced constant {:02x?}>,%pc)", c.bytes),
             Ea::PoolLabel(n) => write!(f, "({},%pc)", pool_label(*n)),
+            Ea::PoolEnd(c) => write!(
+                f,
+                "(<unplaced constant {:02x?}>+{},%pc)",
+                c.bytes,
+                c.bytes.len()
+            ),
+            Ea::PoolLabelOff(n, off) => write!(f, "({}+{off},%pc)", pool_label(*n)),
         }
     }
 }
@@ -612,6 +633,16 @@ pub enum Insn {
         offset: u8,
         width: u8,
     },
+    /// `bftst dst{%dn:#width}`: the field's offset in data register
+    /// `offset`, a signed 32-bit bit count from the most significant bit
+    /// of the byte at `dst` (MC68020): set membership, SAU9
+    /// MST_$ALLOC_ASID 0x3C44A0F6 `bftst (8,A0){D1:1}` with D1 = `not k`
+    /// (codegen-patterns 5.1, "MC68020").
+    BftstReg {
+        dst: Ea,
+        offset: u8,
+        width: u8,
+    },
     /// `swap %dn`.
     Swap(u8),
     /// `btst #bit,dst` (immediate bit number; mod 8 on memory, mod 32 on a
@@ -769,7 +800,9 @@ impl Insn {
             | Insn::MulL { src, .. }
             | Insn::DivL { src, .. }
             | Insn::Bfextu { src, .. } => vec![src],
-            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } => vec![dst],
+            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } | Insn::BftstReg { dst, .. } => {
+                vec![dst]
+            }
             Insn::Addq { dst, .. }
             | Insn::Subq { dst, .. }
             | Insn::Clr { dst, .. }
@@ -1066,6 +1099,9 @@ impl fmt::Display for Insn {
                 dst,
             } => write!(f, "bfextu\t{src}{{#{offset}:#{width}}},{}", Reg::D(*dst)),
             Insn::Bftst { dst, offset, width } => write!(f, "bftst\t{dst}{{#{offset}:#{width}}}"),
+            Insn::BftstReg { dst, offset, width } => {
+                write!(f, "bftst\t{dst}{{{}:#{width}}}", Reg::D(*offset))
+            }
             Insn::Swap(d) => write!(f, "swap\t{}", Reg::D(*d)),
             Insn::SrImm { op, imm } => write!(f, "{}i.w\t#{},%sr", op.name(), num(*imm)),
             Insn::MoveFromSr { dst } => write!(f, "move.w\t%sr,{}", Reg::D(*dst)),
@@ -1163,7 +1199,9 @@ impl Insn {
             // Two opcode words (`4c3c`/`4c7c` + the register word, `efe8`
             // + the offset/width word), then the operand's extension.
             Insn::MulL { src, .. } | Insn::DivL { src, .. } => 4 + src.ext_len(Size::L),
-            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } => 4 + dst.ext_len(Size::L),
+            Insn::Bfins { dst, .. } | Insn::Bftst { dst, .. } | Insn::BftstReg { dst, .. } => {
+                4 + dst.ext_len(Size::L)
+            }
             Insn::Bfextu { src, .. } => 4 + src.ext_len(Size::L),
             Insn::BtstImm { dst, .. } | Insn::BitImm { dst, .. } => 4 + dst.ext_len(Size::B),
             Insn::AluToMem { size, dst, .. } => 2 + dst.ext_len(*size),
@@ -1310,6 +1348,14 @@ mod tests {
                     width: 1,
                 },
                 "bftst\t(8,%a0){#0:#1}",
+            ),
+            (
+                Insn::BftstReg {
+                    dst: Ea::Disp(8, 0),
+                    offset: 1,
+                    width: 1,
+                },
+                "bftst\t(8,%a0){%d1:#1}",
             ),
             (
                 Insn::DivL {

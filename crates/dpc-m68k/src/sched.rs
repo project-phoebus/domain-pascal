@@ -144,7 +144,7 @@ fn loc(ea: &Ea, size: Size) -> Option<Loc> {
         }
         Ea::AbsL(s, o) => Loc::Abs(s.clone(), *o, *o + n),
         Ea::AbsW(v) => Loc::Abs(String::new(), *v, *v + n),
-        Ea::Pool(_) | Ea::PoolLabel(_) => Loc::Const,
+        Ea::Pool(_) | Ea::PoolLabel(_) | Ea::PoolEnd(_) | Ea::PoolLabelOff(..) => Loc::Const,
     })
 }
 
@@ -387,6 +387,11 @@ fn fx(insn: &Insn) -> Fx {
             f.cc_set = true;
         }
         Insn::Bftst { dst, .. } => {
+            f.src(dst, Size::L);
+            f.cc_set = true;
+        }
+        Insn::BftstReg { dst, offset, .. } => {
+            f.use_(Reg::D(*offset));
             f.src(dst, Size::L);
             f.cc_set = true;
         }
@@ -1251,7 +1256,7 @@ mod tests {
                 }
                 Ea::AbsL(_, o) => 0x3000 + *o as u32,
                 Ea::AbsW(v) => *v as u32,
-                Ea::Pool(_) | Ea::PoolLabel(_) => 0x5000,
+                Ea::Pool(_) | Ea::PoolLabel(_) | Ea::PoolEnd(_) | Ea::PoolLabelOff(..) => 0x5000,
                 _ => unreachable!("not memory: {ea:?}"),
             }
         }

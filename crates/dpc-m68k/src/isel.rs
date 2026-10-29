@@ -11945,6 +11945,24 @@ impl Selector {
                         self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
                         return Ok(());
                     }
+                    // MC68020: one `bftst` of the member's bit, the branch
+                    // on Z ([`Self::set_member_bf_jump`]).
+                    Expr::SetMemberAt { elem, set, bytes } if self.cpu.is_68020() => {
+                        self.set_member_bf_jump(elem, set, *bytes, when, l)?;
+                        return Ok(());
+                    }
+                    // MC68020: `bftst` of the element's bit, the branch on
+                    // Z ([`Self::bit_elem_test_bf`]).
+                    Expr::BitElem {
+                        array,
+                        bytes,
+                        index,
+                        lo,
+                    } if self.cpu.is_68020() => {
+                        self.bit_elem_test_bf(array, *bytes, index, *lo)?;
+                        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+                        return Ok(());
+                    }
                     // A set larger than a longword: `btst` on the byte
                     // ([`Self::set_member_at`]; 0xE1B750 `btst D1,(0,A0,D2.w);
                     // beq.b`).
@@ -17919,7 +17937,13 @@ impl Selector {
             lo,
         } = e
         {
-            self.bit_elem_test(array, *bytes, index, *lo)?;
+            if self.cpu.is_68020() {
+                // SAU9 ACL_$USED_SUSER 0x3C450994..0x3C4509A2 `clr.l D1;
+                // subq.w #1,D0; move.w D0,D1; bftst abs.l{D1:1}; sne D0`.
+                self.bit_elem_test_bf(array, *bytes, index, *lo)?;
+            } else {
+                self.bit_elem_test(array, *bytes, index, *lo)?;
+            }
             let d = self.alloc_d()?;
             self.out.push(Insn::Scc {
                 cond: Cond::Ne,
@@ -18667,6 +18691,26 @@ impl Selector {
             // site of `in` on a large set as a value; PROC1_$TST_LOCK
             // 0xE148DE materialises a register set's test in the set's
             // register, codegen-patterns 5.1).
+            Expr::SetMemberAt { elem, set, bytes }
+                if self.cpu.is_68020() && !matches!(set, Addr::Const(_)) =>
+            {
+                best_effort(
+                    self.span,
+                    "`in` on a set of more than a longword as a value (`sne` after the MC68020 \
+                     `bftst`, into the offset's register: no site, codegen-patterns 5.1) is",
+                )?;
+                let (n, end) = self.set_member_bf(elem, set, *bytes)?;
+                self.out.push(Insn::BftstReg {
+                    dst: end,
+                    offset: n,
+                    width: 1,
+                });
+                self.out.push(Insn::Scc {
+                    cond: Cond::Ne,
+                    dst: Ea::Reg(Reg::D(n)),
+                });
+                Ok(Val::Tmp(n))
+            }
             Expr::SetMemberAt { elem, set, bytes } => {
                 best_effort(
                     self.span,
@@ -24544,6 +24588,24 @@ impl Selector {
     /// 0xE59432 and MSG_$FORK 0xE73F38 (`lea (472,A0),A1`).
     fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<u8> {
         let top = bytes as i64 * 8 - 1;
+        if let Addr::Const(_) = set {
+            // Only a one-byte element (all the sites: chars): the
+            // `ble`/`bgt` after the borrow reads N, which is the borrow
+            // only while the subtraction cannot overflow.
+            let byte = matches!(
+                elem,
+                Expr::Convert { value, ty, .. }
+                    if *ty == Scalar::unsigned(Width::Word)
+                        && matches!(**value, Expr::Load { ty: Scalar { width: Width::Byte, .. }, .. })
+            );
+            if !byte {
+                return Err(unsupported(
+                    self.span,
+                    "`in` on a constant set of more than a longword with an element of more than \
+                     a byte (the guarded test's `ble` reads N: no site, codegen-patterns 5.1) is",
+                ));
+            }
+        }
         let (k, c) = self.large_set_elem(elem, top)?;
         if let Addr::Const(_) = set {
             // A constant set in the code: guarded, `bcs` past the `btst`
@@ -24595,6 +24657,213 @@ impl Selector {
             dst: Ea::Idx(0, a, c, false),
         });
         Ok(c)
+    }
+
+    /// MC68020 (`-cpu mathchip`): `elem in s` for a set of more than a
+    /// longword in memory at `set`, `bytes` bytes (bead domain-pascal-bkjm;
+    /// codegen-patterns 5.1, "MC68020").  The SAU9 compiler tests the
+    /// member's bit with one `bftst` whose offset register holds `not k`
+    /// = -(k+1), counted back from the byte after the set: with member k
+    /// bit k of the set read as one big-endian integer (ref 3.9.3), its
+    /// bit-field offset from the set's end is -(k+1).  The 43 `bftst`
+    /// sites of the SAU9 image are all this form (19 on a variable set,
+    /// 14 on a constant set, 10 on a packed array of booleans,
+    /// [`Self::bit_elem_test_bf`]); none uses the MC68010 byte
+    /// arithmetic ([`Self::set_member_at`]).  The element's register is
+    /// cleared first, the element moved in at its own size, then
+    /// complemented:
+    ///
+    /// ```text
+    /// clr.l   D1
+    /// move.w  D2,D1           ; a word element (MST_$ALLOC_ASID 0x3C44A0F0..)
+    /// not.l   D1
+    /// bftst   (8,A0){D1:1}    ; the 8-byte set at (0,A0)
+    /// ```
+    ///
+    /// (a byte element `clr.l D1; move.b (0x2d1,A2,D0.w),D1; not.l D1;
+    /// bftst (0x32,A5){D1:1}` TTY_$I_OUTPUT_BUFFER_DRAINED 0x3C41E2B8; a
+    /// word from memory MSG_$SET_HPIPC 0x3C46050E `clr.l D1; lsl.w #3,D0;
+    /// move.w abs.l,D1; not.l D1; bftst (0x1e0,A5,D0.w){D1:1}`, the set
+    /// an element of an array of records; a longword element moved whole,
+    /// no `clr.l`, MST_$MAP_AREA_AT 0x3C44B4A6 `move.l D2,D0; not.l D0;
+    /// bftst (20,A0,D7.w){D0:1}`).  The set's operand takes its size as
+    /// the displacement; a plain `(An)` is first taken with `lea` (0x3C44A0EC
+    /// `lea (A1),A0`, there before the loop: not reproduced, dpc's `lea`
+    /// stays in the loop).  Returns the offset register and the set's end
+    /// operand, the `bftst` left to the caller (a constant set is guarded
+    /// first, [`Self::set_member_bf_jump`]).  Not reproduced: the `clr.l`
+    /// scheduled before the set's index arithmetic (MSG_$SET_HPIPC above,
+    /// MST_$MAP_INITIAL_AREA 0x3C44A286), and MSG_$FORK 0x3C47B8D6 /
+    /// MSG_$FREE_ASID 0x3C47C9EA, where `not k` is formed once before a
+    /// loop.
+    fn set_member_bf(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<(u8, Ea)> {
+        let end = self.set_end_ea(set, bytes)?;
+        let n = self.bf_member_offset(elem)?;
+        Ok((n, end))
+    }
+
+    /// [`Self::set_member_bf`] as a condition: a branch to `l` when the
+    /// element is a member (`when`) or is not.  A constant set in the
+    /// code is guarded first: `cmpi.l #-bits,Dn; bcs` past the test when
+    /// `not k` is below -bits unsigned, i.e. k is at or above the set's
+    /// size or negative (NAME_$INIT 0x3C437926..0x3C437936 `not.l D4;
+    /// cmpi.l #-96,D4; bcs.s L; bftst (0x3C4379C4,PC){D4:1}; beq.s L` for
+    /// a 12-byte set; UNMAP_CASE 0x3C45B67C `cmpi.l #-128`, 0x3C45B7B6
+    /// `cmpi.l #-64`; 14 sites), the branch out going where "not a
+    /// member" goes.  A variable set is not guarded (the element's type
+    /// lies within it, `dpc-ir`).
+    fn set_member_bf_jump(
+        &mut self,
+        elem: &Expr,
+        set: &Addr,
+        bytes: u32,
+        when: bool,
+        l: u32,
+    ) -> Res<()> {
+        let (n, end) = self.set_member_bf(elem, set, bytes)?;
+        let mut skip = None;
+        if let Addr::Const(_) = set {
+            self.out.push(Insn::Cmpi {
+                size: Size::L,
+                imm: -(bytes as i64 * 8),
+                dst: Ea::Reg(Reg::D(n)),
+            });
+            if when {
+                let s = self.new_label();
+                self.jump(Cond::Cs, s);
+                skip = Some(s);
+            } else {
+                self.jump(Cond::Cs, l);
+            }
+        }
+        self.out.push(Insn::BftstReg {
+            dst: end,
+            offset: n,
+            width: 1,
+        });
+        self.jump(if when { Cond::Ne } else { Cond::Eq }, l);
+        if let Some(s) = skip {
+            self.place(s);
+        }
+        Ok(())
+    }
+
+    /// `not k` for [`Self::set_member_bf`] in a new data register: the
+    /// register cleared, the element moved in at its own size (a byte
+    /// or word element; a longword cut to a word is moved whole with no
+    /// `clr.l`), then `not.l`.  A computed element is evaluated after the
+    /// `clr.l` (MST_$MAP_INITIAL_AREA 0x3C44A286..0x3C44A292 `clr.l D1;
+    /// ...; move.w D2,D1; not.l D1`, D2 computed between).
+    fn bf_member_offset(&mut self, elem: &Expr) -> Res<u8> {
+        let n = self.alloc_d()?;
+        let dn = Ea::Reg(Reg::D(n));
+        let clr = Insn::Clr {
+            size: Size::L,
+            dst: dn.clone(),
+        };
+        match elem {
+            Expr::Convert { value, ty, .. }
+                if *ty == Scalar::unsigned(Width::Word)
+                    && matches!(
+                        **value,
+                        Expr::Load {
+                            ty: Scalar {
+                                width: Width::Byte | Width::Long,
+                                ..
+                            },
+                            ..
+                        }
+                    ) =>
+            {
+                let Expr::Load { ty: from, .. } = &**value else {
+                    unreachable!()
+                };
+                let size = if from.width == Width::Byte {
+                    self.out.push(clr);
+                    Size::B
+                } else {
+                    Size::L
+                };
+                let src =
+                    match self.eval(value)? {
+                        Val::Mem(ea) => ea,
+                        Val::Reg(r @ Reg::D(_)) => Ea::Reg(r),
+                        _ => return Err(unsupported(
+                            self.span,
+                            "a set element loaded into this kind of operand (MC68020 `bftst`) is",
+                        )),
+                    };
+                self.out.push(Insn::Move {
+                    size,
+                    src,
+                    dst: dn.clone(),
+                });
+            }
+            Expr::Load {
+                addr: Addr::Frame(o),
+                ..
+            } if matches!(self.pinned(*o), Some(Reg::D(_))) => {
+                let Some(Reg::D(k)) = self.pinned(*o) else {
+                    unreachable!()
+                };
+                self.out.push(clr);
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(Reg::D(k)),
+                    dst: dn.clone(),
+                });
+            }
+            Expr::Load { addr, .. } => {
+                self.out.push(clr);
+                let src = self.ea_of(addr)?;
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src,
+                    dst: dn.clone(),
+                });
+            }
+            _ => {
+                self.out.push(clr);
+                let k = self.computed_elem(elem)?;
+                self.out.push(Insn::Move {
+                    size: Size::W,
+                    src: Ea::Reg(Reg::D(k)),
+                    dst: dn.clone(),
+                });
+            }
+        }
+        self.out.push(Insn::Unary {
+            op: UnaryOp::Not,
+            size: Size::L,
+            dst: dn,
+        });
+        Ok(n)
+    }
+
+    /// The operand of the byte after a set of `bytes` bytes at `set`, the
+    /// base of the MC68020 membership test ([`Self::set_member_bf`]): a
+    /// constant set's cell end `(L+bytes,PC)` ([`Ea::PoolEnd`]), a plain
+    /// `(An)` taken with `lea` first and then `(bytes,An)` (MST_$ALLOC_ASID
+    /// 0x3C44A0EC, 0x3C44A0F6), else the set's operand displaced by
+    /// `bytes` (TTY_$I_OUTPUT_BUFFER_DRAINED 0x3C41E2C2 `(0x32,A5)`;
+    /// MSG_$SET_HPIPC 0x3C46051A `(0x1e0,A5,D0.w)`).
+    fn set_end_ea(&mut self, set: &Addr, bytes: u32) -> Res<Ea> {
+        if let Addr::Const(c) = set {
+            return Ok(Ea::PoolEnd(c.clone()));
+        }
+        let ea = self.large_set_ea(set)?;
+        if let Ea::Ind(_) = ea {
+            let a = self.alloc_a()?;
+            self.out.push(Insn::Lea { src: ea, dst: a });
+            return Ok(Ea::Disp(bytes as i32, a));
+        }
+        ea_plus(&ea, bytes as i32).ok_or_else(|| {
+            unsupported(
+                self.span,
+                "the end of a set of more than a longword at this kind of operand (MC68020 \
+                 `bftst`) is",
+            )
+        })
     }
 
     /// The operand of a set of more than a longword in memory at `set`, one
@@ -25126,6 +25395,63 @@ impl Selector {
             dst: dn,
         });
         self.out.push(Insn::Btst { bit: dn, dst: ea });
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// MC68020 (`-cpu mathchip`): element `index` of the packed array of
+    /// booleans at `array` ([`Expr::BitElem`]) tested with `bftst`, the
+    /// element's position from the array's first bit in the offset
+    /// register (bead domain-pascal-bkjm; codegen-patterns 5.2, "MC68020").
+    /// The SAU9 form (PCHIST_$COUNT 0x3C41CCFE..0x3C41CD06, PCHIST_$UNIX_
+    /// PROFIL_CNTL 0x3C463B7A and 0x3C463BCE, PCHIST_$UNIX_PROFIL_FORK
+    /// 0x3C463C54, ACL_$ALLOC_ASID 0x3C47B650, ACL_$USED_SUSER 0x3C450994
+    /// on an absolute address):
+    ///
+    /// ```text
+    /// move.w  D2,D0           ; the index (a held local copied)
+    /// clr.l   D1
+    /// subq.w  #1,D0           ; the position from 0
+    /// move.w  D0,D1
+    /// bftst   (0x18,A5){D1:1}
+    /// ```
+    ///
+    /// One scheduling unit, like the MC68010 form.  Not reproduced:
+    /// ACL_$SET_ACL_CHECK 0x3C44EA88 subtracts in place before the
+    /// `clr.l` (`subq.w #1,D5; clr.l D6; move.w D5,D6`), and PCHIST_$UNIX_
+    /// PROFIL_FORK 0x3C463C9E copies the index twice (`clr.l D1; move.w
+    /// D0,D2; move.w D2,D1`).  Any array size (the offset is 32 bits).
+    fn bit_elem_test_bf(&mut self, array: &Addr, _bytes: u32, index: &Expr, lo: i64) -> Res<()> {
+        self.bit_elem_bound(lo)?;
+        let src = self.bit_elem_index(index, false)?;
+        let start = self.out.len();
+        let dp = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        let dof = self.alloc_d()?;
+        self.out.push(Insn::Clr {
+            size: Size::L,
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        self.out.push(Insn::Subq {
+            size: Size::W,
+            value: lo as u8,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        let ea = self.large_set_ea(array)?;
+        self.out.push(Insn::BftstReg {
+            dst: ea,
+            offset: dof,
+            width: 1,
+        });
         self.units.push((start, self.out.len()));
         Ok(())
     }

@@ -745,10 +745,13 @@ impl Pool {
             let ea = match i {
                 Insn::Pea(ea) | Insn::Lea { src: ea, .. } => ea,
                 Insn::Move { src, .. } | Insn::Movea { src, .. } => src,
+                Insn::BftstReg { dst, .. } => dst,
                 _ => continue,
             };
-            let crate::insn::Ea::Pool(c) = ea else {
-                continue;
+            let (c, end) = match ea {
+                crate::insn::Ea::Pool(c) => (c, false),
+                crate::insn::Ea::PoolEnd(c) => (c, true),
+                _ => continue,
             };
             let n = match self.cells.get(c) {
                 Some(&n) => n,
@@ -760,7 +763,11 @@ impl Pool {
                     n
                 }
             };
-            *ea = crate::insn::Ea::PoolLabel(n);
+            *ea = if end {
+                crate::insn::Ea::PoolLabelOff(n, c.bytes.len() as i32)
+            } else {
+                crate::insn::Ea::PoolLabel(n)
+            };
         }
         let (two, four): (Vec<_>, Vec<_>) =
             new.into_iter().partition(|(c, _)| c.bytes.len() % 4 != 0);
@@ -1219,6 +1226,10 @@ fn pool_ref(i: &Insn) -> Option<u32> {
         | Insn::Movea {
             src: crate::insn::Ea::PoolLabel(n),
             ..
+        }
+        | Insn::BftstReg {
+            dst: crate::insn::Ea::PoolLabelOff(n, _),
+            ..
         } => Some(*n),
         _ => None,
     }
@@ -1231,6 +1242,15 @@ fn set_pool_ref(i: &mut Insn, m: u32) {
         | Insn::Lea { src: ea, .. }
         | Insn::Move { src: ea, .. }
         | Insn::Movea { src: ea, .. } => *ea = crate::insn::Ea::PoolLabel(m),
+        Insn::BftstReg {
+            dst: ea @ crate::insn::Ea::PoolLabelOff(..),
+            ..
+        } => {
+            let crate::insn::Ea::PoolLabelOff(_, off) = *ea else {
+                unreachable!()
+            };
+            *ea = crate::insn::Ea::PoolLabelOff(m, off);
+        }
         _ => unreachable!("a constant cell's reference"),
     }
 }
