@@ -1797,7 +1797,26 @@ v,D0` (best effort; the image forms a boolean, 7.1).
 
       Each is refuted by routines whose frame has no room for it (e.g.
       PROC2_$GET_TTY_DATA, two `lea (0,A0,D0.w)` and `link #0`), and
-      none predicts the stand-ins' bytes in more than 31 of 106.  A slot
+      none predicts the stand-ins' bytes in more than 31 of 106.
+      *A lead from the owner (2026-10-28, reported by ../source, bead
+      source-7s5n there; not checked here):* some of these bytes are
+      declared locals that only another SAU's conditional arm touches,
+      every declared local getting its slot whether or not this SAU's
+      arm uses it.  ../source's comparison of SR10.2 images with the
+      same `link`: MST_$MAP_CANNED_AT, `link #-24` on sau2 and sau4,
+      sau4's copy touches -6 and -16, the bytes of ../source's stand-ins
+      `unused_6` and `unused_18` (mst/map_canned_at.pas); TERM_$INIT,
+      `link #-56`, sau2 leaves -48..-33 untouched (the 16 bytes behind
+      its `unused_30` stand-in) where sau4 touches -46 and -44, building
+      one more line record; FLP_$SHUTDOWN, probably, `link #-12`, sau2
+      touching nothing and sau4 -4.  Not a blanket rule: routines with
+      stand-ins differ within sau2..5 no more often than others (23%
+      against 22%), and sau9's ETHERNET stand-ins (arp_input, rtn_bufs,
+      read_stats) are untouched by the sau7 and sau8 copies too, so the
+      rest may be arms for configurations outside SR10.2, debug arms, or
+      dead locals.  Before fitting compiler-object rules to the
+      remainder, exclude the routines whose other-SAU copies explain the
+      bytes.  A slot
       per stepped pointer, tried in `dpc` like the `with` slots, fits
       0xE00EB0 (`link #-12`: reserved slot, index, the `clr.l (A0)+`
       pointer) and VOLX_$SHUTDOWN, but HINT_$LOOKUP_CACHE 0xE49D06 and
