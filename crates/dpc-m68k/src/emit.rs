@@ -1092,30 +1092,29 @@ fn size_branches(
                     "a constant cell beyond the reach of a 16-bit displacement (copied after \
                      the routine: not seen) is not supported yet",
                 ))?;
-                let m = match copies.get(&(ri, orig)) {
-                    Some(&m) if m == n => {
-                        return Err(Diagnostic::error(
+                let m =
+                    match copies.get(&(ri, orig)) {
+                        Some(&m) if m == n => return Err(Diagnostic::error(
                             routines[ri].0.span,
                             "a constant cell that no copy after its routine reaches (a routine \
                              of more than 32K) is not supported yet",
-                        ))
-                    }
-                    Some(&m) => m,
-                    None => {
-                        let Some(w @ (Insn::Words(_) | Insn::AddrCell { .. })) =
-                            routines[ci].1.get(cii + 1).cloned()
-                        else {
-                            unreachable!("a constant cell's words follow its label")
-                        };
-                        let m = *next_cell;
-                        *next_cell += 1;
-                        routines[ri].1.push(Insn::PoolLabel(m));
-                        routines[ri].1.push(w);
-                        copies.insert((ri, orig), m);
-                        origin.insert(m, orig);
-                        m
-                    }
-                };
+                        )),
+                        Some(&m) => m,
+                        None => {
+                            let Some(w @ (Insn::Words(_) | Insn::AddrCell { .. })) =
+                                routines[ci].1.get(cii + 1).cloned()
+                            else {
+                                unreachable!("a constant cell's words follow its label")
+                            };
+                            let m = *next_cell;
+                            *next_cell += 1;
+                            routines[ri].1.push(Insn::PoolLabel(m));
+                            routines[ri].1.push(w);
+                            copies.insert((ri, orig), m);
+                            origin.insert(m, orig);
+                            m
+                        }
+                    };
                 set_pool_ref(&mut routines[ri].1[ii], m);
                 continue 'layout;
             }

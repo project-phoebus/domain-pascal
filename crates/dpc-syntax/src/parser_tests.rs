@@ -1751,7 +1751,10 @@ fn semi_after_conditional_directive_where_a_statement_begins() {
         ] {
             let s = stmts(&format!("{pre}{shape}"));
             assert_eq!(s.len(), 3, "{shape}: {s:#?}");
-            assert!(matches!(s[1].kind, StmtKind::Assign { .. }), "{shape}: {s:#?}");
+            assert!(
+                matches!(s[1].kind, StmtKind::Assign { .. }),
+                "{shape}: {s:#?}"
+            );
             let b = body(&s[0]);
             if on {
                 assert!(matches!(b, StmtKind::Assign { .. }), "{shape}: {s:#?}");

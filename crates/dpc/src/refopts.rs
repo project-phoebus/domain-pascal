@@ -124,7 +124,17 @@ const CPU_68010: [&str; 6] = ["any", "m68k", "160", "460", "660", "peb"];
 /// (`dpc_m68k::Cpu`, codegen-patterns 14).  Noted, since the floating-point
 /// side of each argument has nothing to select in dpc (no reals).
 const CPU_68020: [&str; 11] = [
-    "mathlib_sr10", "mathlib", "mathchip", "3000", "580", "570", "560", "330", "90", "fpa1", "fpx",
+    "mathlib_sr10",
+    "mathlib",
+    "mathchip",
+    "3000",
+    "580",
+    "570",
+    "560",
+    "330",
+    "90",
+    "fpa1",
+    "fpx",
 ];
 
 /// The names of every reference option: Table 6-2 (pp. 6-6..6-8), plus

@@ -2733,9 +2733,7 @@ fn check_for_indices_once(body: &[Stmt]) -> Result<(), (Diagnostic, Option<i32>)
                 Expr::Load {
                     addr: Addr::Frame(o),
                     ty,
-                } if self.whole(*o, ty) => {
-                    self.read(*o)
-                }
+                } if self.whole(*o, ty) => self.read(*o),
                 Expr::Load { addr, ty } => self.addr(addr, ty.bytes()),
                 Expr::Bits { addr, field, .. } => self.addr(addr, field.unit.bytes()),
                 Expr::AddrOf(a) => self.addr(a, 1),
@@ -3494,7 +3492,8 @@ fn entry_unset(stmts: &[SStmt], p: &Part, label: &str) -> Option<&'static str> {
                 then_branch,
                 else_branch,
                 ..
-            } => find_one(then_branch, id).or_else(|| else_branch.as_ref().and_then(|e| find_one(e, id))),
+            } => find_one(then_branch, id)
+                .or_else(|| else_branch.as_ref().and_then(|e| find_one(e, id))),
             SStmtKind::Case {
                 arms, otherwise, ..
             } => arms
@@ -3530,7 +3529,11 @@ fn entry_unset(stmts: &[SStmt], p: &Part, label: &str) -> Option<&'static str> {
         for t in &tail.seen {
             gotos_in(t, &mut gotos);
         }
-        todo.extend(gotos.into_iter().filter(|g| inner.contains(g) && !done.contains(g)));
+        todo.extend(
+            gotos
+                .into_iter()
+                .filter(|g| inner.contains(g) && !done.contains(g)),
+        );
     }
     match &s.kind {
         SStmtKind::For { .. } => (end || tail.next).then_some(
@@ -4272,7 +4275,9 @@ impl Cx<'_> {
                         let total = i64::from(d) + i64::from(offset);
                         let fits = i16::try_from(total).is_ok()
                             && i16::try_from(total + rec_bytes).is_ok();
-                        let fold = d != 0 && !at_for_index && !(matches!(b, Addr::Symbol { .. }) && biased());
+                        let fold = d != 0
+                            && !at_for_index
+                            && !(matches!(b, Addr::Symbol { .. }) && biased());
                         if fold && !fits {
                             // Best effort (not byte-identical): no image site
                             // of a `with` element whose folded displacements
@@ -4285,8 +4290,11 @@ impl Cx<'_> {
                                  codegen-patterns 5.2, \"`with`\") is",
                             )?;
                         }
-                        let (base, offset) =
-                            if fold && fits { (b, total as i32) } else { (b.offset_by(d), offset) };
+                        let (base, offset) = if fold && fits {
+                            (b, total as i32)
+                        } else {
+                            (b.offset_by(d), offset)
+                        };
                         (
                             Expr::AddrOf(Addr::Index {
                                 base: Box::new(base),
@@ -4875,8 +4883,7 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
                             ty: Scalar::signed(Width::Long),
                         });
                     }
-                    if ty.width == Width::Long && (-(1i64 << 31)..(1i64 << 32)).contains(&value)
-                    {
+                    if ty.width == Width::Long && (-(1i64 << 31)..(1i64 << 32)).contains(&value) {
                         let bits = value & 0xffff_ffff;
                         let value = match ty.sign {
                             Sign::Unsigned => bits,
@@ -4943,7 +4950,13 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         while let Expr::Convert { value, .. } = x {
             x = value;
         }
-        matches!(x, Expr::Unary { op: IrUnOp::Abs, .. }) && x.ty().sign == Sign::Unsigned
+        matches!(
+            x,
+            Expr::Unary {
+                op: IrUnOp::Abs,
+                ..
+            }
+        ) && x.ty().sign == Sign::Unsigned
     };
     let zero = |x: &Expr| matches!(x, Expr::Const { value: 0, .. });
     let rel = match rel {
@@ -5184,7 +5197,10 @@ fn array_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> 
     let (var, lit) = if string(rhs) { (lhs, rhs) } else { (rhs, lhs) };
     let size = p.types.size(var.ty);
     let TypeKind::Array { elem, .. } = p.types.kind(var.ty) else {
-        return Err(unsupported(e.span, "comparing a string constant with a non-array is"));
+        return Err(unsupported(
+            e.span,
+            "comparing a string constant with a non-array is",
+        ));
     };
     if !p.types.is_char(*elem) || var.value.is_some() || p.types.size(lit.ty) != size {
         return Err(unsupported(
@@ -5196,7 +5212,12 @@ fn array_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> 
         return Err(unsupported(e.span, "ordering arrays is"));
     }
     check_even(p, var)?;
-    let cell = Addr::Const(pool_const(p, lit.value.as_ref().unwrap(), lit.ty, lit.span)?);
+    let cell = Addr::Const(pool_const(
+        p,
+        lit.value.as_ref().unwrap(),
+        lit.ty,
+        lit.span,
+    )?);
     let v = addr_of(p, var)?;
     let (lhs, rhs) = if string(rhs) { (v, cell) } else { (cell, v) };
     Ok(Cond::Block {
@@ -5377,7 +5398,11 @@ fn set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Re
 /// not.l D1; and.l (-100,A4),D1; beq.s`).  A one-byte set is widened to a
 /// word, as for `[]` (acl_$prim_create_internal 0xE45270).
 fn set_inclusion(p: &Program, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
-    let (sub, sup) = if rel == Rel::Le { (lhs, rhs) } else { (rhs, lhs) };
+    let (sub, sup) = if rel == Rel::Le {
+        (lhs, rhs)
+    } else {
+        (rhs, lhs)
+    };
     // The operation's type: a run-time operand's, the wider one's if both
     // are (constants take the operation's type, [`set_value`]).
     let base = if sub.value.is_some()
@@ -5407,7 +5432,9 @@ fn set_inclusion(p: &Program, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
 /// of words, ref 3.9.3) is handled in: its offset and width, longwords
 /// first, a last word for a size that is not a multiple of 4.
 fn large_set_units(bytes: u32) -> Vec<(i32, Width)> {
-    let mut units: Vec<(i32, Width)> = (0..bytes / 4).map(|i| (4 * i as i32, Width::Long)).collect();
+    let mut units: Vec<(i32, Width)> = (0..bytes / 4)
+        .map(|i| (4 * i as i32, Width::Long))
+        .collect();
     if bytes % 4 != 0 {
         units.push((4 * (bytes / 4) as i32, Width::Word));
     }
@@ -5638,7 +5665,11 @@ fn large_set_into(
             // (`bset`/`bclr #k mod 8` on its byte for a constant one, as on
             // a word set: TTY_$I_OUTPUT_BUFFER_DRAINED 0xE1B39E `bclr
             // #0,(9,A2)`; codegen-patterns 5.1).
-            let (rest, cons) = if cons_like(rhs) { (lhs, rhs) } else { (rhs, lhs) };
+            let (rest, cons) = if cons_like(rhs) {
+                (lhs, rhs)
+            } else {
+                (rhs, lhs)
+            };
             let (konst, run) = match (&cons.value, &cons.kind) {
                 (Some(ConstValue::Set(m)), _) => (m.clone(), Vec::new()),
                 (_, ExprKind::SetCons(items)) => large_set_cons_members(items, cons.span)?,
@@ -5711,7 +5742,10 @@ fn large_set_unit(p: &Program, e: &SExpr, bytes: u32, o: i32, w: Width) -> Res<E
     }
     if e.is_designator() {
         if !is_set(p, e.ty) || p.types.size(e.ty) != bytes {
-            return Err(unsupported(e.span, "a set operation on sets of other sizes is"));
+            return Err(unsupported(
+                e.span,
+                "a set operation on sets of other sizes is",
+            ));
         }
         if volatile_access(p, e).is_some() {
             return Err(unsupported(
@@ -5772,7 +5806,11 @@ fn large_set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr)
             "a subset or superset comparison of sets of more than a longword (no site; \
              codegen-patterns 5.1) is",
         )?;
-        let (sub, sup) = if rel == Rel::Le { (lhs, rhs) } else { (rhs, lhs) };
+        let (sub, sup) = if rel == Rel::Le {
+            (lhs, rhs)
+        } else {
+            (rhs, lhs)
+        };
         let bytes = p.types.size(lhs.ty).max(p.types.size(rhs.ty));
         let mut c: Option<Cond> = None;
         for (o, w) in large_set_units(bytes) {
@@ -5813,7 +5851,13 @@ fn large_set_compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr)
     check_even(p, lhs)?;
     let bytes = p.types.size(lhs.ty);
     let set = addr_of(p, lhs)?;
-    let wrap = |c: Cond| if rel == Rel::Ne { Cond::Not(Box::new(c)) } else { c };
+    let wrap = |c: Cond| {
+        if rel == Rel::Ne {
+            Cond::Not(Box::new(c))
+        } else {
+            c
+        }
+    };
     if matches!(&rhs.value, Some(ConstValue::Set(m)) if m.is_empty()) {
         return Ok(wrap(Cond::SetEmpty { set, size: bytes }));
     }
@@ -6400,13 +6444,16 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         // SMD_$BLT 0xE6EDA2: word `muls.w`/`sub.w` under a word `abs`).
         // Any other `abs` is computed at its width and its low bytes
         // used ([`assign_convert`]).
-        Expr::Convert {
-            value,
-            ty: t,
-            ..
-        } if value.ty() == *t
-            && ty.width == Width::Word
-            && matches!(&**value, Expr::Unary { op: IrUnOp::Abs, .. }) =>
+        Expr::Convert { value, ty: t, .. }
+            if value.ty() == *t
+                && ty.width == Width::Word
+                && matches!(
+                    &**value,
+                    Expr::Unary {
+                        op: IrUnOp::Abs,
+                        ..
+                    }
+                ) =>
         {
             let Expr::Unary { operand, .. } = &**value else {
                 unreachable!()
@@ -6792,8 +6839,7 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         refuse_unknown_result(p, c, value.span)?;
     }
     let bytes = p.types.size(target.ty);
-    if let (Some(ConstValue::Str(text)), ByteCopy::Chars) =
-        (&value.value, byte_copy(p, target.ty))
+    if let (Some(ConstValue::Str(text)), ByteCopy::Chars) = (&value.value, byte_copy(p, target.ty))
     {
         if text.len() as u32 <= bytes
             && volatile_access(p, target).is_none()
@@ -7141,8 +7187,7 @@ fn extern_address(p: &Program, e: &SExpr) -> bool {
         ExprKind::Builtin {
             builtin: Builtin::Addr,
             args,
-        } => root_var(&args[0])
-            .is_some_and(|v| matches!(p.var(v).storage, Storage::Extern { .. })),
+        } => root_var(&args[0]).is_some_and(|v| matches!(p.var(v).storage, Storage::Extern { .. })),
         _ => false,
     }
 }
@@ -7757,7 +7802,15 @@ fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
         // signed word, an `integer`'s form (its values 0..32767 are the
         // same); best effort, not checked against the image (no `abs` set
         // member seen).
-        Width::Word if matches!(v, Expr::Unary { op: IrUnOp::Abs, .. }) => {
+        Width::Word
+            if matches!(
+                v,
+                Expr::Unary {
+                    op: IrUnOp::Abs,
+                    ..
+                }
+            ) =>
+        {
             Ok(reinterpret(v, Scalar::signed(Width::Word)))
         }
         Width::Word => Ok(v),
@@ -9677,9 +9730,9 @@ fn byte_aligned(p: &Program, e: &SExpr) -> bool {
         return true;
     }
     match &e.kind {
-        ExprKind::Field { base, .. }
-        | ExprKind::Index { base, .. }
-        | ExprKind::Transfer(base) => byte_aligned(p, base),
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } | ExprKind::Transfer(base) => {
+            byte_aligned(p, base)
+        }
         ExprKind::WithRecord(w) => byte_aligned(p, &with_binding(*w).0),
         _ => false,
     }
@@ -9811,8 +9864,8 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
             let (index, k) = match index_constant_part(index) {
                 (x, k) if k != 0 => {
                     let d = -(lo - k) * *elem_size as i64;
-                    let near = i16::try_from(d).is_ok()
-                        && i16::try_from(d + *elem_size as i64).is_ok();
+                    let near =
+                        i16::try_from(d).is_ok() && i16::try_from(d + *elem_size as i64).is_ok();
                     let signed_byte =
                         p.types.size(x.ty) == 1 && sign_of(&p.types, x.ty) != Sign::Unsigned;
                     if near && !signed_byte {
@@ -9928,7 +9981,11 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                                  part\") is",
                             ))?;
                         }
-                        let sign = if unsigned { Sign::Unsigned } else { Sign::Signed };
+                        let sign = if unsigned {
+                            Sign::Unsigned
+                        } else {
+                            Sign::Signed
+                        };
                         ix = convert(ix, Scalar::integer(Width::Long, sign));
                     } else {
                         ix = wide_index(p, index, ix, fits(p.types.ordinal_range(index.ty)))?;
@@ -10729,15 +10786,17 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                         && p.types.size(prm_ty) > p.types.size(a.expr.ty))
                     .then(|| Width::of_size(p.types.size(a.expr.ty)))
                     .flatten();
-                    let width = own.or_else(|| Width::of_size(p.types.size(prm_ty))).ok_or_else(|| {
-                        unsupported(
-                            a.expr.span,
-                            format!(
-                                "a {}-byte expression passed by address is",
-                                p.types.size(prm_ty)
-                            ),
-                        )
-                    })?;
+                    let width = own
+                        .or_else(|| Width::of_size(p.types.size(prm_ty)))
+                        .ok_or_else(|| {
+                            unsupported(
+                                a.expr.span,
+                                format!(
+                                    "a {}-byte expression passed by address is",
+                                    p.types.size(prm_ty)
+                                ),
+                            )
+                        })?;
                     let mut value = value_of(p, &a.expr)?;
                     // A wider integer expression to an integer parameter
                     // is narrowed as an assignment narrows it (owner's

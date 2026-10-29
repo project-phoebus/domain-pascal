@@ -265,7 +265,10 @@ begin
 end;",
     );
     assert!(lines.contains(&"clr.l (8,%fp)".to_string()), "{lines:?}");
-    assert!(!lines.iter().any(|l| l.starts_with("movea.l (8,%fp),%a2")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("movea.l (8,%fp),%a2")),
+        "{lines:?}"
+    );
     let lines = routine(
         "procedure t(w: integer); options(val_param);
 begin

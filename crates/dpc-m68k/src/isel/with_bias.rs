@@ -58,9 +58,7 @@ pub(super) fn far_with_temps(f: &Function) -> Cow<'_, Function> {
     let fits = |d: i32| i16::try_from(d).is_ok();
     let biases: Vec<(i32, i32)> = ranges
         .iter()
-        .filter(|&&(t, lo, hi)| {
-            (!fits(lo) || !fits(hi)) && temp_store_symbol(&f.body, t)
-        })
+        .filter(|&&(t, lo, hi)| (!fits(lo) || !fits(hi)) && temp_store_symbol(&f.body, t))
         .filter_map(|&(t, lo, hi)| {
             let bias = (lo + OVERLAY_BIAS / 2).div_euclid(OVERLAY_BIAS) * OVERLAY_BIAS;
             (fits(lo - bias) && fits(hi - bias)).then_some((t, bias))

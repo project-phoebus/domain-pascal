@@ -695,10 +695,12 @@ fn overlay_section_layout() {
 fn overlay_members_in_declaration_order() {
     let msg = "out of its slot in declaration order";
     let e = errs("module m; var (s) a: extern integer; b: integer;");
-    assert!(e.len() == 1 && e[0].contains("member `a`") && e[0].contains(msg), "{e:?}");
-    let e = errs(
-        "module m; var (s) a: extern integer; c: extern integer; b: integer; define c, a;",
+    assert!(
+        e.len() == 1 && e[0].contains("member `a`") && e[0].contains(msg),
+        "{e:?}"
     );
+    let e =
+        errs("module m; var (s) a: extern integer; c: extern integer; b: integer; define c, a;");
     assert!(e.len() == 1 && e[0].contains("member `a`"), "{e:?}");
     let e = errs("module m; var (s) a: extern integer; c: extern integer; define c, a;");
     assert!(e.len() == 1 && e[0].contains("member `a`"), "{e:?}");

@@ -140,7 +140,10 @@ fn unsupported_expressions() {
         ("t := w * 13;", "odd parts of three bits"),
         ("t := w * 38;", "odd parts of three bits"),
         // The constant first with another unit's variable: no site.
-        ("t := w * 44;", "another unit's variable or an array element"),
+        (
+            "t := w * 44;",
+            "another unit's variable or an array element",
+        ),
         // M$ARITH with a word argument and a computed operand: the pad is
         // scheduled into the computation (CAL_$WEEKDAY 0xE686B0).
         (
@@ -493,16 +496,20 @@ fn other_units_array_elements() {
             "move.l\t%d0,(L).l",
         ]
     );
-    let held = body(
-        "procedure t; internal;\nbegin\n  if xs[w] = 0 then l := 0;\n  l := xs[u];\nend;\n",
+    let held =
+        body("procedure t; internal;\nbegin\n  if xs[w] = 0 then l := 0;\n  l := xs[u];\nend;\n");
+    assert_eq!(
+        held.iter()
+            .filter(|i| i.starts_with("movea.l\t#XS,"))
+            .count(),
+        1,
+        "{held:?}"
     );
-    assert_eq!(held.iter().filter(|i| i.starts_with("movea.l\t#XS,")).count(), 1, "{held:?}");
     // Refused: the earlier load not dominating (in a `then` part); the
     // earlier element through `lea (0,An,Dx),Am` (49 reloads against 75
     // bases kept); a `lea` from the kept base (8 sites, not settled).
-    let e = error(
-        "procedure t; internal;\nbegin\n  if w = 0 then l := xs[w];\n  l := xs[u];\nend;\n",
-    );
+    let e =
+        error("procedure t; internal;\nbegin\n  if w = 0 then l := xs[w];\n  l := xs[u];\nend;\n");
     assert!(e.contains("does not dominate"), "{e}");
     let e = error("procedure t; internal;\nbegin\n  l := xh[w];\n  l := xh[u];\nend;\n");
     assert!(e.contains("after the earlier element's `lea"), "{e}");
@@ -525,8 +532,13 @@ fn other_units_array_elements() {
         "procedure t; internal;\nbegin\n  l := xs[w];\n  while w > 0 do w := w - 1;\n  l := xs[u];\nend;\n",
     );
     assert!(e.contains("past a loop"), "{e}");
-    let e = error("procedure t; internal;\nbegin\n  l := xs[w];\n  w := ip^[2];\n  l := xs[u];\nend;\n");
-    assert!(e.contains("an address register given a value between"), "{e}");
+    let e = error(
+        "procedure t; internal;\nbegin\n  l := xs[w];\n  w := ip^[2];\n  l := xs[u];\nend;\n",
+    );
+    assert!(
+        e.contains("an address register given a value between"),
+        "{e}"
+    );
     // Refused, review of bead domain-pascal-rlnm: an index read from the
     // same variable (SIO_$INIT 0xE32CA2); a store whose value needs an
     // address register (TERM_$CONTROL 0xE66B4C); the first argument pushed
@@ -848,7 +860,11 @@ var bs: extern big; ws2: extern wide; xr: extern array[1..300] of r228;
         ));
         lines.map(|ls| {
             let start = ls.iter().position(|l| l == "T:").unwrap() + 2;
-            let end = start + ls[start..].iter().position(|l| l.starts_with("unlk")).unwrap();
+            let end = start
+                + ls[start..]
+                    .iter()
+                    .position(|l| l.starts_with("unlk"))
+                    .unwrap();
             ls[start..end].to_vec()
         })
     };
@@ -914,8 +930,14 @@ var bs: extern big; ws2: extern wide; xr: extern array[1..300] of r228;
     );
     for (stmt, msg) in [
         ("bs[w + 1] := 'a';", "a computed word index"),
-        ("bs[u] := 'a';", "a zero-extended `.l` index of another unit's array read from memory"),
-        ("bs[s] := 'a';", "whose type's range times the element size fits"),
+        (
+            "bs[u] := 'a';",
+            "a zero-extended `.l` index of another unit's array read from memory",
+        ),
+        (
+            "bs[s] := 'a';",
+            "whose type's range times the element size fits",
+        ),
         ("t := ws2[n];", "a non-negative `integer16` subrange"),
         ("t32 := cr[c].a;", "a byte index"),
         (

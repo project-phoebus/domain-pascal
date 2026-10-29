@@ -415,7 +415,10 @@ fn nil_passed_by_address_is_a_cell_nil_result_lowered() {
     assert_eq!(cells[0].0, [0, 0, 0, 0]);
     assert_eq!(cells[1], cells[0]);
     assert_eq!(cells[2], cells[0]);
-    let m = lower_src(&format!("{decls}function f: p;\nbegin\n  f := nil;\nend;\n")).unwrap();
+    let m = lower_src(&format!(
+        "{decls}function f: p;\nbegin\n  f := nil;\nend;\n"
+    ))
+    .unwrap();
     assert_eq!(
         m.functions[0].body[0].kind,
         StmtKind::SetResult(Expr::Const {
@@ -2496,7 +2499,8 @@ end;
     dpc_syntax::diag::set_strict(strict);
     let w = dpc_syntax::diag::take_best_effort();
     assert!(
-        w.iter().any(|d| d.message.contains("comparing arrays other than")),
+        w.iter()
+            .any(|d| d.message.contains("comparing arrays other than")),
         "{w:?}"
     );
     let StmtKind::If { cond, .. } = &m.unwrap().functions[0].body[0].kind else {
@@ -2859,10 +2863,7 @@ begin
 end;
 ",
     );
-    assert!(
-        e[0].contains("an array index of boolean type"),
-        "{e:?}"
-    );
+    assert!(e[0].contains("an array index of boolean type"), "{e:?}");
     // A `char` index is zero-extended to a word (codegen-patterns 5.2,
     // "Byte indices").
     let m = lower_src(
@@ -3971,7 +3972,10 @@ end;
 ",
     )
     .unwrap_err();
-    assert!(err.iter().any(|e| e.contains("real `univ` parameter")), "{err:?}");
+    assert!(
+        err.iter().any(|e| e.contains("real `univ` parameter")),
+        "{err:?}"
+    );
     assert!(lower_src(
         "module m;
 procedure q(in x: univ real); extern;
@@ -5296,14 +5300,18 @@ procedure x(var z: integer); extern;
         })
     );
     assert_eq!(
-        vol(&format!("{view} procedure p; begin rp(addr(dr))^.csr := 'a' end;")),
+        vol(&format!(
+            "{view} procedure p; begin rp(addr(dr))^.csr := 'a' end;"
+        )),
         Some(Access {
             device: true,
             atomic: false
         })
     );
     assert_eq!(
-        vol(&format!("{view} procedure p; begin ip(addr(q.key))^ := 0 end;")),
+        vol(&format!(
+            "{view} procedure p; begin ip(addr(q.key))^ := 0 end;"
+        )),
         Some(dflt)
     );
     assert_eq!(
@@ -5312,7 +5320,9 @@ procedure x(var z: integer); extern;
     );
     // Of a record with a volatile part: refused (the view's type does not
     // say which bytes are volatile).
-    let e = errs(&format!("{types}{view} procedure p; begin ip(addr(q))^ := 0 end;"));
+    let e = errs(&format!(
+        "{types}{view} procedure p; begin ip(addr(q))^ := 0 end;"
+    ));
     assert!(e[0].contains("volatile or device part"), "{e:?}");
     // A load as well.
     match only_stmt(&format!("{types}procedure p; begin i := q.key end;")) {
@@ -5378,7 +5388,10 @@ var
   r: extern pr;
 ";
     let e = errs(&format!("{wo_rec}procedure x; begin w.a := 1 end;"));
-    assert!(e[0].contains("packed field of a write-only device record"), "{e:?}");
+    assert!(
+        e[0].contains("packed field of a write-only device record"),
+        "{e:?}"
+    );
     let e = errs(&format!("{wo_rec}procedure x; begin r.a := 1 end;"));
     assert!(e[0].contains("writing a read-only device object"), "{e:?}");
     let m = lower_src(&format!("{types}procedure x; begin v1 := v2 end;")).unwrap();
@@ -5442,8 +5455,14 @@ var
         assert_eq!((dev(dst), dev(src)), (dst_dev, src_dev), "{stmt}");
     }
     for (stmt, what) in [
-        ("wp1 := wp2", "reading a record or array with a write-only device part"),
-        ("rp1 := rp2", "writing a record or array with a read-only device part"),
+        (
+            "wp1 := wp2",
+            "reading a record or array with a write-only device part",
+        ),
+        (
+            "rp1 := rp2",
+            "writing a record or array with a read-only device part",
+        ),
         ("mr := pl", "writing a read-only device object"),
         ("pl := mw", "reading a write-only device object"),
     ] {

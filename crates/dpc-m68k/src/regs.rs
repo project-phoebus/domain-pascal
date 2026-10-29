@@ -1186,14 +1186,25 @@ mod tests {
             defined_after(&insns, vd(0)),
             vec![false, false, false, false, true, true, true]
         );
-        let saves =
-            allocate_apart(&mut insns, &[d(0)], &[], &[], Some((vd(0), vec![])), &[], &[], &[])
-                .unwrap();
-        assert_eq!(text(&insns[4..5]), text(&[Insn::Move {
-            size: Size::B,
-            src: Ea::Reg(d(0)),
-            dst: Ea::Reg(d(0)),
-        }]));
+        let saves = allocate_apart(
+            &mut insns,
+            &[d(0)],
+            &[],
+            &[],
+            Some((vd(0), vec![])),
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            text(&insns[4..5]),
+            text(&[Insn::Move {
+                size: Size::B,
+                src: Ea::Reg(d(0)),
+                dst: Ea::Reg(d(0)),
+            }])
+        );
         assert!(saves.is_empty());
     }
 

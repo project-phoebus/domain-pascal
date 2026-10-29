@@ -107,7 +107,10 @@ pub fn allocate_spilling(
                     }
                 }
                 return Ok(Spilled {
-                    insns: own.into_iter().map(|i| i.expect("every instruction kept")).collect(),
+                    insns: own
+                        .into_iter()
+                        .map(|i| i.expect("every instruction kept"))
+                        .collect(),
                     before,
                     after,
                     saves,
@@ -718,11 +721,13 @@ mod tests {
         assert!(s.bytes >= 8 && s.bytes % 4 == 0);
         let t = spliced(&s);
         assert!(
-            t.iter().any(|l| l.starts_with("movea.l\t(-") && l.contains(",%fp),%a")),
+            t.iter()
+                .any(|l| l.starts_with("movea.l\t(-") && l.contains(",%fp),%a")),
             "{t:?}"
         );
         assert!(
-            t.iter().any(|l| l.starts_with("move.l\t%a") && l.ends_with(",%fp)")),
+            t.iter()
+                .any(|l| l.starts_with("move.l\t%a") && l.ends_with(",%fp)")),
             "{t:?}"
         );
         // The first slot is just below the 8 bytes given.
@@ -747,7 +752,8 @@ mod tests {
         assert_eq!(s.bytes, 0);
         let t = spliced(&s);
         assert!(
-            t.iter().any(|l| l.starts_with("move.l\t%a") && l.contains(",%d")),
+            t.iter()
+                .any(|l| l.starts_with("move.l\t%a") && l.contains(",%d")),
             "{t:?}"
         );
         assert!(t.iter().any(|l| l.starts_with("movea.l\t%d")), "{t:?}");

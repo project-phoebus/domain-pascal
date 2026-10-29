@@ -574,7 +574,11 @@ fn refusals() {
     // A set whose address contains a call is not updated in place: the
     // call runs once for the read and once for the write (bead
     // domain-pascal-61fd review); the value-then-store path refuses it.
-    for stmt in ["ga[nx] := ga[nx] + [0]", "np^.w := np^.w + [0]", "np^.w := np^.w - [3]"] {
+    for stmt in [
+        "ga[nx] := ga[nx] + [0]",
+        "np^.w := np^.w + [0]",
+        "np^.w := np^.w - [3]",
+    ] {
         let e = error(&format!(
             "var ga: array[1..4] of w16;
              function nx: integer; extern;

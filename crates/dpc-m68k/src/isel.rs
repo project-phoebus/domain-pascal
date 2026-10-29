@@ -70,7 +70,10 @@ fn best_effort(span: Span, what: impl std::fmt::Display) -> Res<()> {
 /// and read in it, holds it to its back branch; one in which it is read
 /// before its definition (round the loop) holds it from its head.
 fn live_range(out: &[Insn], v: Reg, k: usize, last: usize) -> (usize, usize) {
-    let at = |l: u32| out.iter().position(|i| matches!(i, Insn::Label(m) if *m == l));
+    let at = |l: u32| {
+        out.iter()
+            .position(|i| matches!(i, Insn::Label(m) if *m == l))
+    };
     let loops: Vec<(usize, usize)> = out
         .iter()
         .enumerate()
@@ -2778,9 +2781,9 @@ fn read_modify_write_operand(i: &Insn) -> Option<&Ea> {
 fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Vec<usize>> {
     let mut v = Vec::new();
     for (k, i) in out.iter().enumerate() {
-        if let Some(d) = read_modify_write_operand(i).filter(|_| {
-            matches!(i, Insn::Clr { .. } | Insn::Scc { .. })
-        }) {
+        if let Some(d) = read_modify_write_operand(i)
+            .filter(|_| matches!(i, Insn::Clr { .. } | Insn::Scc { .. }))
+        {
             if eas.iter().any(|(e, a)| a.device && e == d) {
                 return Err(unsupported(
                     span,
@@ -5462,8 +5465,7 @@ fn assigned_params(f: &Function) -> Vec<i32> {
     dpc_ir::visit_stmts(&f.body, &mut |st| {
         if let StmtKind::Store { addr, value } = &st.kind {
             if let Addr::Frame(o) = addr.unwrap_volatile().0 {
-                if f
-                    .value_params
+                if f.value_params
                     .iter()
                     .any(|p| p.offset == *o && p.ty.width == value.ty().width)
                     && !out.contains(o)
@@ -5912,10 +5914,11 @@ fn for_domain(index: Scalar, from: &Expr, to: &Expr) -> Scalar {
         .filter(|e| !matches!(e, Expr::Const { .. }))
         .map(|e| e.ty())
         .collect();
-    let width = bounds
-        .iter()
-        .map(|t| t.width)
-        .fold(index.width, |a, b| if b.bytes() > a.bytes() { b } else { a });
+    let width =
+        bounds.iter().map(|t| t.width).fold(
+            index.width,
+            |a, b| if b.bytes() > a.bytes() { b } else { a },
+        );
     let any_signed = index.is_signed() || bounds.iter().any(|t| t.is_signed());
     if width == index.width {
         let unsigned_bound = width == Width::Word
@@ -8891,7 +8894,10 @@ impl Selector {
             // constant the next statement loads with `moveq` is checked
             // below.
             let after_run = i > 0
-                && self.const_chain.iter().any(|&(_, r)| matches!(r, Reg::D(_)))
+                && self
+                    .const_chain
+                    .iter()
+                    .any(|&(_, r)| matches!(r, Reg::D(_)))
                 && !self.chain_member(st)
                 && !matches!(st.kind, StmtKind::For(_));
             if !(i > 0 && self.chain_member(st) && self.chain_member(&body[i - 1])) {
@@ -9660,7 +9666,10 @@ impl Selector {
             Insn::Addq { size, dst, .. } | Insn::Subq { size, dst, .. } => (*size, dst, false),
             _ => return None,
         };
-        if matches!(dst, Ea::Reg(_) | Ea::PreDec(_) | Ea::PostInc(_) | Ea::Imm(_)) {
+        if matches!(
+            dst,
+            Ea::Reg(_) | Ea::PreDec(_) | Ea::PostInc(_) | Ea::Imm(_)
+        ) {
             return None;
         }
         Some((dst.clone(), size, full))
@@ -9875,8 +9884,7 @@ impl Selector {
             return self.for_wide(f, l, after);
         }
         let span = self.span;
-        if l.down && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. }))
-        {
+        if l.down && !(matches!(l.from, Expr::Const { .. }) && matches!(l.to, Expr::Const { .. })) {
             // Best effort (not byte-identical; bead domain-pascal-trdz):
             // [`Self::for_wide`]'s loop, `from - to` guarded with `blt`,
             // the arrays indexed.  DIR_$NEXT_PAGE 0xE4D7C8..0xE4D7D8 `move.w
@@ -12070,7 +12078,9 @@ impl Selector {
             // loop of the largest unit that divides the size (longwords,
             // words, bytes), as the 6-byte and 32-byte forms are; the
             // count is `moveq`'s.
-            s if s >= 1 && (s % 4 == 0 && s / 4 <= 128 || s % 2 == 0 && s / 2 <= 128 || s <= 128) => {
+            s if s >= 1
+                && (s % 4 == 0 && s / 4 <= 128 || s % 2 == 0 && s / 2 <= 128 || s <= 128) =>
+            {
                 best_effort(
                     self.span,
                     format!(
@@ -12482,18 +12492,17 @@ impl Selector {
             // Only `=`/`<>` with `nil` are seen.  Another pointer
             // constant: `cmpa.l #n,A0`, as any pointer held in an address
             // register (below; no site, bead domain-pascal-gw19).
-            let n = match rhs {
-                Expr::Const { value, .. } if matches!(op, Rel::Eq | Rel::Ne) => {
-                    imm(*value, Width::Long)
-                }
-                _ => {
-                    return Err(unsupported(
+            let n =
+                match rhs {
+                    Expr::Const { value, .. } if matches!(op, Rel::Eq | Rel::Ne) => {
+                        imm(*value, Width::Long)
+                    }
+                    _ => return Err(unsupported(
                         self.span,
                         "comparing the value of a function whose result is in A0 other than `=` \
                          / `<>` with a constant is",
-                    ))
-                }
-            };
+                    )),
+                };
             if n != 0 {
                 best_effort(
                     self.span,
@@ -17005,41 +17014,44 @@ impl Selector {
                         return Ok(p);
                     }
                 }
-                let (elem, d) = match self.ea_of(a)? {
-                    Ea::Idx(d, ar, xr, long) => {
-                        let e = self.alloc_a()?;
-                        self.out.push(Insn::Lea {
-                            src: Ea::Idx(0, ar, xr, long),
-                            dst: e,
-                        });
-                        (e, d)
-                    }
-                    // MC68020: the scale in the `lea` (best effort, not
-                    // byte-identical: no such call surveyed in SAU9).
-                    Ea::Idx2(d, ar, xr, long, s) => {
-                        let e = self.alloc_a()?;
-                        self.out.push(Insn::Lea {
-                            src: Ea::Idx2(0, ar, xr, long, s),
-                            dst: e,
-                        });
-                        (e, d)
-                    }
-                    // Beyond a byte the `lea (0,A5,Dx),Am` is formed
-                    // already ([`Self::element_ea`]).
-                    Ea::Disp(d, e) => (e, d),
-                    Ea::Ind(e) => (e, 0),
-                    _ => {
-                        return Err(unsupported(
+                let (elem, d) =
+                    match self.ea_of(a)? {
+                        Ea::Idx(d, ar, xr, long) => {
+                            let e = self.alloc_a()?;
+                            self.out.push(Insn::Lea {
+                                src: Ea::Idx(0, ar, xr, long),
+                                dst: e,
+                            });
+                            (e, d)
+                        }
+                        // MC68020: the scale in the `lea` (best effort, not
+                        // byte-identical: no such call surveyed in SAU9).
+                        Ea::Idx2(d, ar, xr, long, s) => {
+                            let e = self.alloc_a()?;
+                            self.out.push(Insn::Lea {
+                                src: Ea::Idx2(0, ar, xr, long, s),
+                                dst: e,
+                            });
+                            (e, d)
+                        }
+                        // Beyond a byte the `lea (0,A5,Dx),Am` is formed
+                        // already ([`Self::element_ea`]).
+                        Ea::Disp(d, e) => (e, d),
+                        Ea::Ind(e) => (e, 0),
+                        _ => return Err(unsupported(
                             self.span,
                             "a call through a routine pointer in an array element at this kind \
                              of address is",
-                        ))
-                    }
-                };
+                        )),
+                    };
                 let p = self.alloc_a()?;
                 self.out.push(Insn::Movea {
                     size: Size::L,
-                    src: if d == 0 { Ea::Ind(elem) } else { Ea::Disp(d, elem) },
+                    src: if d == 0 {
+                        Ea::Ind(elem)
+                    } else {
+                        Ea::Disp(d, elem)
+                    },
                     dst: p,
                 });
                 // Never the element's register, though it dies there (all
@@ -18576,7 +18588,11 @@ impl Selector {
                     src: Ea::Reg(Reg::A(0)),
                     dst: Ea::Reg(Reg::D(d)),
                 });
-                Ok(if d == 0 { Val::Reg(Reg::D(0)) } else { Val::Tmp(d) })
+                Ok(if d == 0 {
+                    Val::Reg(Reg::D(0))
+                } else {
+                    Val::Tmp(d)
+                })
             }
             Expr::Call { call, .. } => self.expr_call(call),
             Expr::Test(c) => Ok(Val::Tmp(self.test_value(c)?)),
@@ -19649,13 +19665,7 @@ impl Selector {
     /// order, the address first ([`Self::value_addr_arith`]); the other
     /// shapes `Ok(None)`, for [`Self::binary`]'s generic forms, the
     /// address a value in a data register there ([`Self::eval`]).
-    fn addr_arith(
-        &mut self,
-        alu: AluOp,
-        lhs: &Expr,
-        rhs: &Expr,
-        ty: Scalar,
-    ) -> Res<Option<u8>> {
+    fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<Option<u8>> {
         let refuse = |s: &Self, what: &str| {
             best_effort(
                 s.span,
@@ -20066,7 +20076,11 @@ impl Selector {
                 (d, Self::ea_val(&v))
             }
         };
-        self.out.push(Insn::MulL { signed, src, dst: d });
+        self.out.push(Insn::MulL {
+            signed,
+            src,
+            dst: d,
+        });
         Ok(d)
     }
 
@@ -21647,7 +21661,9 @@ impl Selector {
             // Best effort (not byte-identical): memory takes the first, a
             // new register the mask (codegen-patterns 8, "Widening and
             // narrowing").
-            (Width::Word, Width::Long) | (Width::Byte, Width::Word) | (Width::Byte, Width::Long)
+            (Width::Word, Width::Long)
+            | (Width::Byte, Width::Word)
+            | (Width::Byte, Width::Long)
                 if unsigned =>
             {
                 if from.width == Width::Byte && ty.width == Width::Long {
@@ -22454,7 +22470,11 @@ impl Selector {
         };
         let cd = self.alloc_d()?;
         self.out.push(Insn::Move {
-            size: if matches!(src, Ea::Reg(Reg::A(_))) { Size::L } else { size },
+            size: if matches!(src, Ea::Reg(Reg::A(_))) {
+                Size::L
+            } else {
+                size
+            },
             src,
             dst: Ea::Reg(Reg::D(cd)),
         });
@@ -22562,10 +22582,7 @@ impl Selector {
             // member of a set larger than a longword, as values).
             IrCond::Test(e) => match self.eval(e)? {
                 Val::Tmp(d) => Ok(d),
-                _ => Err(unsupported(
-                    self.span,
-                    "this boolean value is",
-                )),
+                _ => Err(unsupported(self.span, "this boolean value is")),
             },
         }
     }
@@ -24148,7 +24165,11 @@ impl Selector {
             Some(n) => n,
             None => self.eval_d(elem)?,
         };
-        let early = if out.is_none() { Some(load_set(self)?) } else { None };
+        let early = if out.is_none() {
+            Some(load_set(self)?)
+        } else {
+            None
+        };
         let x = self.load_const(15, Width::Word)?;
         self.out.push(Insn::Cmp {
             size: size_of(elem.ty().width),
@@ -24765,7 +24786,11 @@ impl Selector {
             let v = bits[o as usize..(o + w.bytes() as i32) as usize]
                 .iter()
                 .fold(0i64, |v, &x| (v << 8) | x as i64);
-            let dst = if o == 0 { ea.clone() } else { ea_plus(&ea, o).expect("checked") };
+            let dst = if o == 0 {
+                ea.clone()
+            } else {
+                ea_plus(&ea, o).expect("checked")
+            };
             self.out.push(if v == 0 {
                 Insn::Clr { size, dst }
             } else {
@@ -24832,7 +24857,11 @@ impl Selector {
                 self.out.push(Insn::Lea { src: ea, dst: a });
                 ea = Ea::Ind(a);
             }
-            let dst = if byte == 0 { ea } else { ea_plus(&ea, byte).expect("checked") };
+            let dst = if byte == 0 {
+                ea
+            } else {
+                ea_plus(&ea, byte).expect("checked")
+            };
             self.out.push(Insn::BitImm {
                 op: if value { BitOp::Set } else { BitOp::Clr },
                 bit: (k % 8) as u8,
@@ -25336,7 +25365,11 @@ impl Selector {
                 let Expr::Const { value, ty: cty } = rhs else {
                     unreachable!("a run-time right operand is the second arm's")
                 };
-                let mask: i64 = if w == Width::Long { 0xffff_ffff } else { 0xffff };
+                let mask: i64 = if w == Width::Long {
+                    0xffff_ffff
+                } else {
+                    0xffff
+                };
                 let not_c = Expr::Const {
                     value: !value & mask,
                     ty: *cty,
@@ -26041,10 +26074,11 @@ impl Selector {
                 if fold && !self.cse_next_held() {
                     // Recorded as a computation all the same, so the probe
                     // finds its reuses and the hold selection shifts it.
-                    let d = match self.cse_value(key, leaf, |s| s.unscaled_index(index, &mut once))? {
-                        Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
-                        _ => unreachable!("an index is in a data register"),
-                    };
+                    let d =
+                        match self.cse_value(key, leaf, |s| s.unscaled_index(index, &mut once))? {
+                            Val::Tmp(d) | Val::Reg(Reg::D(d)) => d,
+                            _ => unreachable!("an index is in a data register"),
+                        };
                     self.folded_scale.push((d, scale as u8));
                     d
                 } else {
@@ -27108,7 +27142,9 @@ mod tests {
             size: Size::W,
             dst: ea.clone(),
         };
-        assert!(selector(true, vec![clr]).check_device_updates(&plain, 0).is_err());
+        assert!(selector(true, vec![clr])
+            .check_device_updates(&plain, 0)
+            .is_err());
         assert!(s.check_device_updates(&update, 0).is_ok());
         assert!(s.check_device_updates(&field, 0).is_ok());
         assert!(s.check_device_updates(&plain, 1).is_ok());
@@ -27121,7 +27157,9 @@ mod tests {
             src: Ea::Imm(1),
             dst: ea.clone(),
         };
-        assert!(selector(true, vec![mov]).check_device_updates(&plain, 0).is_ok());
+        assert!(selector(true, vec![mov])
+            .check_device_updates(&plain, 0)
+            .is_ok());
     }
 
     fn func(frame_size: u32, result: Option<ResultSpec>, body: Vec<StmtKind>) -> Function {
@@ -27344,11 +27382,18 @@ mod tests {
         ];
         let saves = crate::regs::allocate(&mut insns, &[], &[]).unwrap();
         insns.truncate(1);
-        let text: Vec<String> = wrap(&f, Body { insns, saves, spill: 0 })
-            .unwrap()
-            .iter()
-            .map(|i| i.to_string())
-            .collect();
+        let text: Vec<String> = wrap(
+            &f,
+            Body {
+                insns,
+                saves,
+                spill: 0,
+            },
+        )
+        .unwrap()
+        .iter()
+        .map(|i| i.to_string())
+        .collect();
         // 0xE17778..0xE17780, 0xE177F6..0xE177FE.
         assert_eq!(
             text,
@@ -28796,7 +28841,10 @@ mod tests {
             },
         ] {
             assert!(volatile_references(&[i.clone()], &eas(true), span()).is_err());
-            assert_eq!(volatile_references(&[i], &eas(false), span()).unwrap(), vec![0]);
+            assert_eq!(
+                volatile_references(&[i], &eas(false), span()).unwrap(),
+                vec![0]
+            );
         }
     }
 
@@ -29770,7 +29818,9 @@ mod tests {
                 vec![store(sym("W"), index())],
             )],
         );
-        assert!(body_text(&f).iter().any(|l| l.starts_with("move.w\t#0xc8,%d")));
+        assert!(body_text(&f)
+            .iter()
+            .any(|l| l.starts_with("move.w\t#0xc8,%d")));
         assert!(warned("initial value is outside -128..127"));
         dpc_syntax::diag::set_strict(before);
     }
@@ -30955,9 +31005,21 @@ mod tests {
         dpc_syntax::diag::set_strict(was);
         dpc_syntax::diag::take_best_effort();
         let out = out.unwrap();
-        assert!(out.iter().any(|i| matches!(i, Insn::Tst { size: Size::W, .. })), "{out:?}");
-        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Eq, .. })), "{out:?}");
-        assert!(!out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
+        assert!(
+            out.iter()
+                .any(|i| matches!(i, Insn::Tst { size: Size::W, .. })),
+            "{out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|i| matches!(i, Insn::Branch { cond: Cond::Eq, .. })),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })),
+            "{out:?}"
+        );
         assert!(out.iter().any(|i| matches!(i, Insn::Dbf { .. })), "{out:?}");
         // To `e - c` (`for_wide`, bead domain-pascal-1mtr): the count
         // guarded unsigned with `bcs`, refused under `--strict`.
@@ -30990,7 +31052,11 @@ mod tests {
         dpc_syntax::diag::set_strict(was);
         dpc_syntax::diag::take_best_effort();
         let out = out.unwrap();
-        assert!(out.iter().any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })), "{out:?}");
+        assert!(
+            out.iter()
+                .any(|i| matches!(i, Insn::Branch { cond: Cond::Cs, .. })),
+            "{out:?}"
+        );
         // An array of words indexed by the index: stepped pointers, only
         // through a pointer variable.
         let elem = |base: Addr, index: Expr| Addr::Index {

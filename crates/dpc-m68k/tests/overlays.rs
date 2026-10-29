@@ -178,6 +178,12 @@ fn with_elements_of_overlay_arrays() {
     // Below 0x7C00 of a small section: folded, the symbol itself and the
     // array's offset in the fields (0x100 - 4 for `x`).
     let lines = compile(&rec_unit(0x100, 0x100, body)).unwrap();
-    assert!(lines.contains(&"lea (0,%a1,%d0.w),%a1".to_string()), "{lines:?}");
-    assert!(lines.contains(&"move.w (%a0),(0xfc,%a1)".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"lea (0,%a1,%d0.w),%a1".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"move.w (%a0),(0xfc,%a1)".to_string()),
+        "{lines:?}"
+    );
 }

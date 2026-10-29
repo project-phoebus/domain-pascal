@@ -8,7 +8,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DPC_COMMIT");
     let dir = env!("CARGO_MANIFEST_DIR");
     let git = |args: &[&str]| -> Option<String> {
-        let out = Command::new("git").args(args).current_dir(dir).output().ok()?;
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
         if !out.status.success() {
             return None;
         }

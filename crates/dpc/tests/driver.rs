@@ -1569,7 +1569,10 @@ end;
     let (_, s, e) = compile_default("pointer_call_argument_be", src, &[]);
     assert!(e.contains("warning: best effort"), "{e}");
     let s = s.unwrap();
-    assert!(s.contains("jsr\t(SECOND).l\n\tmove.l\t%a0,%d0\n\tmove.l\t%d0,-(%sp)\n"), "{s}");
+    assert!(
+        s.contains("jsr\t(SECOND).l\n\tmove.l\t%a0,%d0\n\tmove.l\t%d0,-(%sp)\n"),
+        "{s}"
+    );
 }
 
 #[test]

@@ -1274,7 +1274,10 @@ mod tests {
                 },
                 "move.w\t(0xc42,%a5,%d2.w*2),(%a0)",
             ),
-            (Insn::Pea(Ea::Idx2(0x12fc, 5, 0, false, 1)), "pea\t(0x12fc,%a5,%d0.w)"),
+            (
+                Insn::Pea(Ea::Idx2(0x12fc, 5, 0, false, 1)),
+                "pea\t(0x12fc,%a5,%d0.w)",
+            ),
             (
                 Insn::Lea {
                     src: Ea::Idx2(-0x4da0, 4, 4, true, 8),
