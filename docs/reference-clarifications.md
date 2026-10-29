@@ -522,7 +522,12 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     address (or reached through a pointer, or another unit's object; bead
     domain-pascal-epjn), and the entry copy of a value parameter of such
     a record type, or of a 2-byte record that inherits a field's
-    `[aligned(0)]` (bead domain-pascal-cr4a).
+    `[aligned(0)]` (bead domain-pascal-cr4a).  *MC68020 (`-cpu mathchip`,
+    2026-10-29, bead domain-pascal-gkrx): none of these is refused; the
+    MC68020 reads and writes words and longwords at odd addresses, and
+    the SAU9 kernel does (codegen-patterns 14, "Odd addresses"; golden
+    `m68020/odd_access`).  What the original declared where its SAU9
+    code has longwords at odd offsets is item 51.*
 26. **3.15.3, p. 3-57 (device record assignment).**  Is assigning or
     pushing a whole 4-byte `[device]` record as one 32-bit reference
     allowed, or does "The device attribute prevents this optimization"
@@ -974,6 +979,26 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     *Before the ruling: refused ("only constants >= 0 are accepted");
     `p(integer32(-1))` was accepted and was 16#FFFFFFFF.  Now `p(-1)` is
     the same constant.*
+
+51. **3.10.5.5, p. 3-26; 3.15.6.3, p. 3-72 (byte-aligned longwords at
+    odd offsets in the MC68020 kernels).**  "A byte aligned field may not
+    cross two word boundaries": an `[aligned(0)] integer32` after three
+    chars goes to offset 4, and dpc places it there for both CPUs.  The
+    SAU9 image reads and writes longwords at odd offsets: SCSI_WAIT
+    0x3C4778F2 `move.l (35,A5),(-116,A6); sub.l (-116,A6),D5` (SCSI_$CB +
+    0x13, used as a number), win_scsi_request_sense 0x3C41B284 `move.l
+    (-53,A6),(0xcdb,A5,D0.l)` and 0x3C41B2A4 `move.l (-53,A6),(64,A2)`
+    (a REQUEST SENSE answer's bytes 3..6, stored at byte 5 of a 10-byte
+    log entry; ../source/docs/pascal-translation-notes.md gap 301).  The
+    image cannot show the declarations: a byte-aligned longword the
+    MC68020 compiler lays out without the crossing rule, a four-char
+    array copied as one longword, or a type transfer.  Did the rule
+    differ for the MC68020 compiler (`-cpu` of ref 6.4.9), or does another
+    declaration give these offsets?  *Current: the reference's rule for
+    both CPUs; ../source declares `[aligned(0)] integer32` in a variant
+    of its own and keeps a TODO(pascal) (win_scsi/request_sense.pas).
+    An odd-address reference itself is no longer refused under `-cpu
+    mathchip` (item 25).*
 
 ## Reference errata noticed (no ruling needed)
 

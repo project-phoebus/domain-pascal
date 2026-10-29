@@ -56,6 +56,22 @@ fn lower_src_with(src: &str, db: &DataBaseOptions) -> Result<Module, Vec<String>
     lower_with(&program, db).map_err(render)
 }
 
+/// [`lower_src`] for a target that reads and writes words and longwords at
+/// odd addresses (the MC68020, [`Program::unaligned_access`]).
+fn lower_src_unaligned(src: &str) -> Result<Module, Vec<String>> {
+    let mut sm = SourceMap::new();
+    let f = sm.add("t.pas", src.to_string());
+    let pp = preprocess(&mut sm, f, &Options::default());
+    assert!(!pp.has_errors(), "preprocessor errors");
+    let unit = dpc_syntax::parser::parse(&pp.tokens).expect("parses");
+    let render = |ds: Vec<dpc_syntax::Diagnostic>| -> Vec<String> {
+        ds.iter().map(|d| d.render(&sm, "dpc")).collect()
+    };
+    let mut program = dpc_sema::analyze(&unit, &M68kAbi).map_err(render)?;
+    program.unaligned_access = true;
+    lower_with(&program, &DataBaseOptions::default()).map_err(render)
+}
+
 fn errs(src: &str) -> Vec<String> {
     match lower_src(src) {
         Ok(m) => panic!("expected errors, got {m:#?}"),
@@ -5548,6 +5564,37 @@ var
 /// a record): refused when it is not known to be even, accepted when it
 /// is.  A static variable is always at an even offset (codegen-patterns
 /// 11, "Byte-sized module variables"), so `x` after a char is at 2.
+/// On a target that reads and writes at odd addresses (the MC68020,
+/// `Program::unaligned_access`; bead domain-pascal-gkrx) the references
+/// the test below refuses are lowered: through a pointer to a
+/// byte-aligned word, a `for` fill of another unit's byte-aligned array,
+/// and a byte-aligned word field at an odd offset.
+#[test]
+fn odd_address_references_are_lowered_for_an_unaligned_target() {
+    lower_src_unaligned(
+        "module m;
+type bw = [aligned(0)] integer16;
+var bp: extern ^bw; i: integer;
+procedure p; begin i := bp^ end;",
+    )
+    .unwrap();
+    lower_src_unaligned(
+        "module m;
+type oa = [aligned(0)] array[1..4] of integer16;
+var x: extern oa;
+procedure p; var k: integer; begin for k := 1 to 4 do x[k] := 0 end;",
+    )
+    .unwrap();
+    lower_src_unaligned(
+        "module m;
+type oa1 = [aligned(0)] array[1..1] of integer16;
+  r2 = record c: char; f1: oa1 end;
+var r2v: r2; i: integer;
+procedure p; begin i := r2v.f1[1] end;",
+    )
+    .unwrap();
+}
+
 #[test]
 fn elements_of_byte_aligned_arrays_at_odd_addresses_are_refused() {
     let types = "module m;

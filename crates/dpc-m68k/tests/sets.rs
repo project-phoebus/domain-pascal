@@ -22,7 +22,7 @@ fn front(src: &str) -> Result<dpc_ir::Module, Vec<String>> {
     let render = |ds: Vec<dpc_syntax::Diagnostic>| -> Vec<String> {
         ds.iter().map(|d| d.message.clone()).collect()
     };
-    let program = dpc_sema::analyze(&unit, &dpc_m68k::M68k).map_err(render)?;
+    let program = dpc_sema::analyze(&unit, &dpc_m68k::M68k::default()).map_err(render)?;
     dpc_ir::lower(&program).map_err(render)
 }
 

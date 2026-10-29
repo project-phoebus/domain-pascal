@@ -9749,8 +9749,14 @@ fn byte_aligned(p: &Program, e: &SExpr) -> bool {
 /// base type has an alignment attribute), as is every frame
 /// object (codegen-patterns 2) and every static one (codegen-patterns 11,
 /// "Byte-sized module variables").  An object inside a byte-aligned array
-/// or record counts too.
+/// or record counts too.  A target that reads and writes at odd addresses
+/// ([`Program::unaligned_access`]: the MC68020, whose SAU9 kernel does so,
+/// codegen-patterns 14, "Odd addresses"; bead domain-pascal-gkrx) needs no
+/// refusal.
 fn check_even(p: &Program, e: &SExpr) -> Res<()> {
+    if p.unaligned_access {
+        return Ok(());
+    }
     if p.types.get(e.ty).size > 1 && byte_aligned(p, e) && even(p, e) != Some(true) {
         return Err(unsupported(
             e.span,

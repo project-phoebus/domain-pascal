@@ -588,6 +588,7 @@ impl<'t> Checker<'t> {
         Ok(Program {
             name: unit.name.name.clone(),
             is_program: matches!(unit.kind, ast::UnitKind::Program { .. }),
+            unaligned_access: self.target.unaligned_access(),
             code_section: self.code_section,
             data_section: self.data_section,
             types,

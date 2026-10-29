@@ -43,6 +43,16 @@ pub trait Target {
     /// which refuses `%enable` and `-config` of them (p. 4-48).
     fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)];
 
+    /// Whether a word or longword may be referenced at an odd address.
+    /// The MC68010 traps on one, so a reference to a byte-aligned object
+    /// (`aligned(0)`, ref 3.15.6.3) of more than one byte at an address
+    /// not known to be even is refused (`dpc-ir` `check_even`); the
+    /// MC68020 allows it, and the SAU9 kernel has such references
+    /// (codegen-patterns 14, "Odd addresses"; bead domain-pascal-gkrx).
+    fn unaligned_access(&self) -> bool {
+        false
+    }
+
     /// The file name of the target's prebuilt run-time library, the
     /// object compiled code is linked with (like gcc's `libgcc.a`), or
     /// None when the target has none.  The driver looks for it in the

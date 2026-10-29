@@ -555,7 +555,7 @@ fn compile(
             args.input.display()
         ))]
     })?;
-    let target = dpc_m68k::M68k;
+    let target = dpc_m68k::M68k { cpu: args.refs.cpu };
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
         root: args.root.clone(),
@@ -781,7 +781,9 @@ fn print_runtime_target(opt: &str) -> Option<Result<&'static dyn Target, String>
         None => return None,
     };
     Some(match name {
-        "m68k" => Ok(&dpc_m68k::M68k),
+        "m68k" => Ok(&dpc_m68k::M68k {
+            cpu: dpc_m68k::Cpu::M68010,
+        }),
         _ => Err(format!("--print-runtime: unknown target `{name}`")),
     })
 }

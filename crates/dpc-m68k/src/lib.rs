@@ -56,9 +56,12 @@ impl Cpu {
 }
 
 /// The m68k target as used by the SR10.2 kernel (68010 instructions only,
-/// CLAUDE.md 3.16).
+/// CLAUDE.md 3.16), or with [`Cpu::M68020`] the SAU6..SAU9 kernels'
+/// (`-cpu`, codegen-patterns 14).
 #[derive(Debug, Default, Clone, Copy)]
-pub struct M68k;
+pub struct M68k {
+    pub cpu: Cpu,
+}
 
 impl M68k {
     /// The `link.w A6,#-n` size for a frame of `raw` bytes
@@ -83,6 +86,13 @@ impl M68k {
 impl Target for M68k {
     fn name(&self) -> &'static str {
         "m68k"
+    }
+
+    /// The MC68020 reads and writes words and longwords at odd addresses
+    /// (SAU9 SCSI_WAIT 0x3C4778F2 `move.l (35,A5),(-116,A6)`; codegen-
+    /// patterns 14, "Odd addresses").
+    fn unaligned_access(&self) -> bool {
+        self.cpu.is_68020()
     }
 
     fn pointer_size(&self) -> u32 {
@@ -155,7 +165,7 @@ mod tests {
 
     #[test]
     fn target_description() {
-        let t: &dyn Target = &M68k;
+        let t: &dyn Target = &M68k::default();
         assert_eq!(t.name(), "m68k");
         assert_eq!(t.pointer_size(), 4);
         assert_eq!(t.arg_slot_size(), 2);

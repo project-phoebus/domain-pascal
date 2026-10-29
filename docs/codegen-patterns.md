@@ -16286,6 +16286,44 @@ two or more `movem.l`.  The MC68020 forms need fewer temporaries, so
 routines drop from a `movem` to one register (MMAP_$GET_WS_INDEX 0xE0CA3A
 `movem.l A2/A5,-(SP)` against 0x3C40E9A2 `pea (A5)`).
 
+### Odd addresses (Verified at the sites given; implemented, bead domain-pascal-gkrx)
+
+The MC68020 reads and writes words and longwords at odd addresses, and
+the SAU9 kernel does.  A survey of the image's word and longword
+instructions with an odd displacement (`saudis.py survey` over
+`(move|tst|cmp|add|sub|and|or|clr|neg|not)[lw]` with an odd `(d,An)`;
+28 hits, 20 of them inside data or hand assembly: GET_BUILD_TIME, the
+SMD_ keyboard tables, OS_$INIT) leaves these compiled sites:
+
+- SCSI_WAIT 0x3C4778F2 `move.l (35,A5),(-116,A6); sub.l (-116,A6),D5`:
+  a longword at SCSI_$CB + 0x13, copied to a local and used as a number;
+- win_scsi_request_sense 0x3C41B284 `move.l (-53,A6),(0xcdb,A5,D0.l)`
+  and 0x3C41B2A4 `move.l (-53,A6),(64,A2)`: a REQUEST SENSE answer's
+  bytes 3..6 as one longword, stored at byte 5 of a 10-byte log entry
+  (../source gap 301);
+- ETHERNET_$SEND_OS 0x3C483F88 `move.w (3,A3),(3,A0); move.b
+  (5,A3),(5,A0)`: a copy of bytes 3..5;
+- AREA_$REMOVE_SEG 0x3C40B988 `clr.l (3,A2); clr.b (7,A2)` and
+  RING_8025_$INIT 0x3C487148 `clr.w (3,A2); move.w #-248,(5,A2); move.b
+  #18,(7,A2)`: constant stores merged across odd addresses through a
+  pointer (section 13 merges those at either alignment on the MC68010
+  too, the pointer's parity being unknown).
+
+`dpc` (`Target::unaligned_access`, true for `-cpu mathchip`;
+`Program::unaligned_access`; `dpc-ir` `check_even`): under `-cpu
+mathchip` a reference to a byte-aligned object (`aligned(0)`, ref
+3.15.6.3) of more than one byte at an address not known to be even is
+the plain reference, which the MC68010 build refuses (the 68010 traps;
+reference-clarifications item 25): through a pointer to a byte-aligned
+word, a byte-aligned word field at an odd offset, a `for` fill of
+another unit's byte-aligned array (golden `m68020/odd_access`).
+**Layout unchanged, Uncertain:** the reference's crossing rule (3.10.5.5)
+keeps a byte-aligned longword off offsets 3 and 5, where SCSI_WAIT's and
+the sense answer's longwords lie; what the original declared there is
+not visible (reference-clarifications item 51, for the owner).  Merging
+of constant stores across an odd address in the frame or the module's
+static data stays off (section 13): no site.
+
 ### Register choices (Uncertain; bead domain-pascal-tbiu)
 
 Where the forms are right, the registers differ from section 12.4's

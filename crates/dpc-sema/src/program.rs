@@ -57,6 +57,11 @@ pub struct Program {
     pub main: Option<Block>,
     /// Warnings (errors make [`crate::analyze`] fail instead).
     pub warnings: Vec<Diagnostic>,
+    /// The target reads and writes words and longwords at odd addresses
+    /// ([`dpc_target::Target::unaligned_access`]): a reference to a
+    /// byte-aligned object of more than one byte at an address not known
+    /// to be even needs no refusal (`dpc-ir` `check_even`).
+    pub unaligned_access: bool,
 }
 
 impl Program {
