@@ -16092,7 +16092,19 @@ routines that look like the same source as SAU2's use 68020 idioms,
 p. 6-16) selects this: dpc's `-cpu mathchip` (or any of Table 6-3's
 MC68020-class arguments, `docs/compiler-options.md`) generates the forms
 below; the default stays MC68010.  MC68020 output starts with `.arch
-68020`, so `m68k-elf-as -m68010` still accepts it.  Addresses below are
+68020`, so `m68k-elf-as -m68010` still accepts it.  **Measured
+(2026-10-29, `routine_compare.py --sau 9` over the 1229 map-named
+routines of ../source's sau9 build, dpc 24e7f02 against 2210df6, the
+MC68020 forms of beads bkjm, gkrx, jahh, 0p9w and p1pd):** 137 routines
+byte-identical before and after, the mean similarity of the rest 0.691
+to 0.692, 68 routines up (PCHIST_$COUNT 0.29 to 0.53, MSG_$SET_HPIPC
+0.70 to 0.92, MSG_$RCVI 0.85 to 0.95, ACL_$USED_SUSER 0.39 to 0.58) and
+20 down, the larger drops (ACL_$SET_ACL_CHECK 0.28 to 0.20, OS_$INIT
+0.31 to 0.25, CAL_$WRITE_TIMEZONE 0.78 to 0.73) where a shorter form
+earlier in the routine moves every later loop-alignment filler
+(section 7; OS_$INIT +0x14 `moveq #8,D0; movea.l A0,A0; move.l
+(A0)+,(A1)+` in the image, the filler two instructions later in ours),
+not where a form is wrong.  Addresses below are
 SAU9 (`~/src/domainos-archeology/sr10.2-install/install/
 ri.apollo.os.v.10.2/sau9/domain_os` and `.map`; measured with
 `../source/domain_os/tools/routine_compare.py --sau 9`).
