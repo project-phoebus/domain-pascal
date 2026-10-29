@@ -13624,19 +13624,45 @@ impl Selector {
 
     /// [`Self::copy`] of objects with no volatile part.
     fn copy_plain(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
-        if chars {
+        // MC68020 (`-cpu mathchip`; codegen-patterns 14, "Arrays of char"):
+        // an array of char is copied by longwords like a record, unrolled
+        // up to 18 bytes, with a byte for the odd remainder: SAU9
+        // AST_$GET_COMMON_ATTRIBUTES 0x3C405D1C `lea (-84,A6),A0; lea
+        // (8,A2),A1; move.l (A0)+,(A1)+` ×3 (12 bytes, a `dbf` byte loop
+        // in the SAU2 code 0xE04A3E); XNS_IDP_$OS_SEND 0x3C41A4E4 `lea
+        // (-108,A6),A4; lea (24,A1),A3; move.l (A3)+,(A4)+` ×3, `move.b
+        // (A3)+,(A4)+` (13 bytes); MAC_$SEND 0x3C40DAE4 `move.l
+        // (A0)+,(A1)+; dbf D2; move.b (A0)+,(A1)+` (a loop and the byte).
+        // The image has 4 `move.b (Am)+,(An)+` against 60 `move.l` and 60
+        // `move.w` runs or loops, two of the four run-time-length loops.
+        // A remainder of 2 (a `move.w`, as a record's) or 3 (no site) and
+        // fewer than 8 bytes are best effort.
+        let chars_as_longs = chars && self.cpu.is_68020() && bytes >= 4;
+        if chars && !chars_as_longs {
             return self.copy_chars(dst, src, bytes);
         }
-        match bytes {
-            6 => return self.copy6(dst, src),
-            8 => return self.copy8(dst, src),
-            _ => {}
-        }
-        if bytes % 2 != 0 || bytes < 10 {
-            return Err(unsupported(
+        if chars_as_longs && (bytes % 4 == 3 || bytes < 8) {
+            best_effort(
                 self.span,
-                format!("a {bytes}-byte record or array assignment is"),
-            ));
+                format!(
+                    "a copy of an array of {bytes} char by longwords (the MC68020 code shows 12 \
+                     and 13 bytes unrolled and a loop with a byte after it; a remainder of 3 \
+                     or fewer than 8 bytes: no site, codegen-patterns 14) is"
+                ),
+            )?;
+        }
+        if !chars {
+            match bytes {
+                6 => return self.copy6(dst, src),
+                8 => return self.copy8(dst, src),
+                _ => {}
+            }
+            if bytes % 2 != 0 || bytes < 10 {
+                return Err(unsupported(
+                    self.span,
+                    format!("a {bytes}-byte record or array assignment is"),
+                ));
+            }
         }
         let longs = bytes / 4;
         if longs - 1 > 0x7fff {
@@ -13684,8 +13710,11 @@ impl Selector {
                 until: None,
             });
         }
-        if bytes % 4 == 2 {
+        if bytes % 4 >= 2 {
             self.out.push(mv(Size::W));
+        }
+        if bytes % 2 == 1 {
+            self.out.push(mv(Size::B));
         }
         if bytes <= 18 {
             // An unrolled copy is never interleaved with other code

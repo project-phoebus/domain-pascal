@@ -4870,6 +4870,8 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     routines`, runs and `dbf` loops, with the count's load): 48 byte
     `dbf` loops and 2 unrolled runs of four `move.b`, against 237
     longword loops and 117 unrolled longword runs; no word loop.
+    MC68020 (`-cpu mathchip`): by longwords like a record, with a byte
+    for an odd remainder (section 14, "Arrays of char").
     - **The element type decides, not the size, the place or the
       alignment of the address.**  The only copies whose types Apollo
       declared (/sys/ins/cal.ins.pas of the SR10.2 install:
@@ -16296,6 +16298,30 @@ As section 2: one register `move.l Dn,-(SP)` / `pea (An)`
 two or more `movem.l`.  The MC68020 forms need fewer temporaries, so
 routines drop from a `movem` to one register (MMAP_$GET_WS_INDEX 0xE0CA3A
 `movem.l A2/A5,-(SP)` against 0x3C40E9A2 `pea (A5)`).
+
+### Arrays of char (Verified at the sites given; implemented, bead domain-pascal-0p9w)
+
+The MC68020 compiler copies an array of char by longwords, as a record
+(section 5.2, "Arrays of char": the MC68010 compiler copies it by
+bytes).  The image has 4 `move.b (Am)+,(An)+` against 60 `move.l` and
+60 `move.w` runs or loops; two of the four are run-time-length loops
+(DIR_$DROP_LINKU 0x3C45903C, OS_$DATA_COPY 0x3C41431E), the other two
+the byte after a longword copy:
+
+- AST_$GET_COMMON_ATTRIBUTES 0x3C405D1C `lea (-84,A6),A0; lea (8,A2),A1;
+  move.l (A0)+,(A1)+` ×3: 12 bytes unrolled (the SAU2 code 0xE04A3E
+  `moveq #11,D0` and a `dbf` byte loop; ../source finding 361);
+- XNS_IDP_$OS_SEND 0x3C41A4E4 `lea (-108,A6),A4; lea (24,A1),A3; move.l
+  (A3)+,(A4)+` ×3, `move.b (A3)+,(A4)+`: 13 bytes unrolled, the byte
+  after;
+- MAC_$SEND 0x3C40DAE0 `moveq #5,D2; move.l (A0)+,(A1)+; dbf D2; move.b
+  (A0)+,(A1)+`: 25 bytes, a loop and the byte.
+
+`dpc` (`copy_plain`, `chars_as_longs`): under `-cpu mathchip` the
+longword copy of a record (unrolled to 18 bytes, a `dbf` loop above,
+the addresses by `lea`), then `move.w` for a remainder of 2 (a
+record's; no char site) and `move.b` for 1; golden `m68020/char_copy`.
+Best effort, no site: a remainder of 3 and fewer than 8 bytes.
 
 ### Odd addresses (Verified at the sites given; implemented, bead domain-pascal-gkrx)
 
