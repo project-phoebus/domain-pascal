@@ -16174,7 +16174,14 @@ explain.
   #-4` 7 sites, `andi.w #-1009`, `andi.l #-4194304`, `andi.b #127` 14
   sites for a boolean in bit 7), all 1 keeps `ori` alone (AST_$PMAP_ASSOC
   0x3C405940 `ori.w #192,(-28568,A3)`; 0x3C40572A `ori.w #264,(-126,A3)`
-  and 0x3C4085A6 `ori.w #321`, booleans merged, section 13; `ori.b #-4`
+  and 0x3C4085A6 `ori.w #321`, several booleans set by one `ori`, which
+  dpc does not merge: ../source findings 304 and 364.  The merge has no
+  rule yet: both images also keep chains of `bset`/`bclr` on one byte
+  apart, SAU9 AST_$ALLOCATE_ASTE +0x252 `bset #7,(191,A3); bclr #6; bclr
+  #5; bclr #4`, AST_$LOAD_AOTE +0xCE, 83 such consecutive pairs in the
+  SAU9 image and 111 in the SAU2's (`bitpairs.py`, scratch), and the SAU2
+  image has the merged form too, AST_$ASSOC_AREA 0xE04652 `ori.w
+  #192,(-8184,A3)`, OS_$INIT 0xE34012; `ori.b #-4`
   4 sites), and a mixed constant goes through a register, `moveq #c,Dn;
   bfins Dn,M{o:w}`: 0x3C401CBE `moveq #2,D1; bfins D1,(40,A2){1:8}` (3
   sites), `moveq #2` into a 2-bit field 0x3C40ABD8 (2), `moveq #31` into a

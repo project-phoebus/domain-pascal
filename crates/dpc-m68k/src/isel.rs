@@ -13641,22 +13641,40 @@ impl Selector {
         if chars && !chars_as_longs {
             return self.copy_chars(dst, src, bytes);
         }
-        if chars_as_longs && (bytes % 4 == 3 || bytes < 8) {
+        if chars_as_longs && (bytes % 4 == 3 || bytes == 5 || bytes == 7) {
             best_effort(
                 self.span,
                 format!(
                     "a copy of an array of {bytes} char by longwords (the MC68020 code shows 12 \
                      and 13 bytes unrolled and a loop with a byte after it; a remainder of 3 \
-                     or fewer than 8 bytes: no site, codegen-patterns 14) is"
+                     or 5 and 7 bytes: no site, codegen-patterns 14) is"
                 ),
             )?;
         }
-        if !chars {
+        if chars_as_longs && bytes == 4 {
+            // One longword store by displacement, as a 4-byte record's:
+            // the SAU9 CAL_$WRITE_TIMEZONE 0x3C445B7C copies the 6 bytes
+            // of a word and `cal_$tz_name_t` (4 chars) as `move.l
+            // (A5),(224,A3); move.w (4,A5),(228,A3)`, where the SAU2 code
+            // 0xE3E68C copies the 4 chars alone with four `move.b`
+            // (section 5.2); the 4 chars alone have no MC68020 site
+            // (Uncertain).
+            return self.store(
+                dst,
+                &Expr::Load {
+                    addr: src.clone(),
+                    ty: Scalar::signed(Width::Long),
+                },
+            );
+        }
+        if !chars || chars_as_longs {
             match bytes {
                 6 => return self.copy6(dst, src),
                 8 => return self.copy8(dst, src),
                 _ => {}
             }
+        }
+        if !chars {
             if bytes % 2 != 0 || bytes < 10 {
                 return Err(unsupported(
                     self.span,
