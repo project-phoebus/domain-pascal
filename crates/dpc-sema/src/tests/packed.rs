@@ -129,7 +129,8 @@ fn apollo_status_t() {
 /// `low` word at 0x2C8.  Image: TTY_$I_WAIT 0xE1C2AA `clr.w (-0x60,A6)`,
 /// 0xE1C2C0 `move.l D0,(-0x5e,A6)`: `high16` a word at 0, `low32` a
 /// longword at 2.  `linteger` (0..2147483647) takes 32 bits (ref 3.4 p.
-/// 3-10), not 31.
+/// 3-10), not 31, where it starts on a word boundary (`low32` at bit 16
+/// is stored with `move.l`); see [`unsigned_31_bit_subrange_after_a_boolean`].
 #[test]
 fn apollo_uid_and_clock() {
     let p = module(
@@ -476,4 +477,42 @@ fn packed_sets_not_from_zero_are_refused() {
         "module m; type r = packed record s: set of 3..5 end;",
         "does not start at ordinal 0",
     );
+}
+
+/// A 31-bit unsigned subrange that does not start on a 16-bit boundary
+/// takes its 31 bits, not 32 (`TypeTable::layout_packed_fields`): the SAU9
+/// page-map entry of ../source ast/ast.ins.pas, `(unused_31: boolean;
+/// fm_daddr: 0..16#7FFFFFFF)` in a 4-byte packed record, read `bfextu
+/// (A0){1:31},D1` at ast_$load_aote 0x3C403ADA (../source gap 361; bead
+/// domain-pascal-nvqu).  On a boundary it takes 32 (ref 3.4 p. 3-10), and
+/// after a 2-bit field its 31 bits would cross two boundaries, so it moves
+/// to the next boundary and takes 32 there.
+#[test]
+fn unsigned_31_bit_subrange_after_a_boolean() {
+    let p = module(
+        "type
+           entry_t = PACKED RECORD CASE integer OF
+               1: (all: integer32);
+               2: (unused_31: boolean;
+                   fm_daddr: 0..16#7FFFFFFF);
+               END;
+           two_t = PACKED RECORD
+               k: 0..3;
+               v: 0..16#7FFFFFFF;
+               END;
+           word_t = PACKED RECORD
+               w: 0..65535;
+               v: 0..16#7FFFFFFF;
+               b: boolean;
+               END;",
+    );
+    assert_eq!(bits(&p, "entry_t", "unused_31"), (0, 1));
+    assert_eq!(bits(&p, "entry_t", "fm_daddr"), (1, 31));
+    assert_eq!(size(&p, "entry_t"), 4);
+    assert_eq!(bits(&p, "two_t", "k"), (0, 2));
+    assert_eq!(bits(&p, "two_t", "v"), (16, 32));
+    assert_eq!(size(&p, "two_t"), 6);
+    assert_eq!(bits(&p, "word_t", "v"), (16, 32));
+    assert_eq!(bits(&p, "word_t", "b"), (48, 1));
+    assert_eq!(size(&p, "word_t"), 8);
 }

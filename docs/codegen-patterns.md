@@ -6503,6 +6503,7 @@ from the SR10.2 customer inserts, section 0.1):
 | `smd_$font_table_t`, `smd_$v1_fdte_t` (smdu), `fontn_$desc` (fontn) | 13 words, `index_table` 0x1A, `desc_table` 0x9A; entries of 8 bytes, bytes 0..5, word at 6 | smd/smd_internal.h `smd_font_v1_t`, `smd_glyph_metrics_t` |
 | `smd_$display_modereg_t` (smdu) | masks 8000, 7E00, 100, 80, ..., 1 | the insert's own comments |
 | `stream_$IR_rec_t` (streams) | `hdr_lgth` at bit 112 | the insert's `unused6 : set of 0..21; { nxt field needs word alignment }` (needs 32-bit `linteger` and n+1 bits for `set of 0..n`) |
+| SAU9 page-map entry (../source ast/ast.ins.pas `ast_$pmap_entry_t`) | `unused_31: boolean` at bit 0, `fm_daddr: 0..16#7FFFFFFF` at bits 1..31, 4 bytes | ast_$load_aote 0x3C403ADA `bfextu (A0){1:31},D1; bfins D1,(A0){1:21}`, AST_$ALLOCATE_ASTE 0x3C40357C: a 31-bit unsigned subrange takes 32 bits only where it starts on a 16-bit boundary (ref 3.4 p. 3-10; TTY_$I_WAIT 0xE1C2C0 `move.l` for `low32` at bit 16), else its 31 (../source gap 361; bead domain-pascal-nvqu; a bit field after a 32-bit one at bit 32 or 31: not visible, Uncertain) |
 | `num_var_t` (prf) | `int16` at bit 16, `int8` at bit 24 (`pad_byte: 0..16777215` is 24 bits) | the insert's padding variants |
 | `Characteristics` (ref Figure 3-17) | Mass 0, Shape 32, B 35, Purpose 36, Low_temp 40, Class 48; 8 bytes | the figure |
 

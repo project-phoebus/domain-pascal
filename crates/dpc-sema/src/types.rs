@@ -1089,16 +1089,23 @@ impl TypeTable {
     ///
     /// - Subranges: a negative low bound needs a sign bit (`-100..40`
     ///   takes 8 bits, p. 3-37: "seven bits can represent only 128
-    ///   values").  An unsigned subrange that needs 31 bits takes 32 (ref
-    ///   3.4, p. 3-10: "When you have an unsigned subrange that is large
-    ///   enough to require 31 bits, the compiler allocates 32 bits"):
-    ///   Apollo's `linteger = 0..2147483647` is 32 bits in the packed
-    ///   records of the SR10.2 inserts (`fontn_$table_tver1`, whose
-    ///   lintegers sit at the longword offsets 0x28, 0x2C, 0x34, 0x38 that
-    ///   `../source`'s `smd_font_v3_t` asserts; `stream_$IR_rec_t`, whose
-    ///   `unused6 : set of 0..21; { nxt field needs word alignment }` is
-    ///   right only so).  A subrange of boolean takes 1 bit, of an
-    ///   enumeration the bits of its high bound.
+    ///   values").  An unsigned subrange that needs 31 bits takes 32
+    ///   where it starts on a 16-bit boundary (ref 3.4, p. 3-10: "When
+    ///   you have an unsigned subrange that is large enough to require 31
+    ///   bits, the compiler allocates 32 bits"): Apollo's `linteger =
+    ///   0..2147483647` is 32 bits in the packed records of the SR10.2
+    ///   inserts (`fontn_$table_tver1`, whose lintegers sit at the
+    ///   longword offsets 0x28, 0x2C, 0x34, 0x38 that `../source`'s
+    ///   `smd_font_v3_t` asserts; `stream_$IR_rec_t`, whose `unused6 :
+    ///   set of 0..21; { nxt field needs word alignment }` is right only
+    ///   so; TTY_$I_WAIT 0xE1C2C0 stores `time_$clock_t.low32`, at bit
+    ///   16, with `move.l`).  Where it does not, it takes its 31 bits:
+    ///   the SAU9 page-map entry (`unused_31: boolean; fm_daddr:
+    ///   0..16#7FFFFFFF`, 4 bytes) is read `bfextu (A0){1:31}` at
+    ///   ast_$load_aote 0x3C403ADA (../source gap 361; bead
+    ///   domain-pascal-nvqu; [`Self::layout_packed_fields`]).  A subrange
+    ///   of boolean takes 1 bit, of an enumeration the bits of its high
+    ///   bound.
     /// - Sets: "exactly one bit per element" for the ordinals 0..hi (a set
     ///   is a bit string indexed by ordinal, 3.9.3; `stream_$IR_rec_t`'s
     ///   `set of 0..21` must be 22 bits).  A set whose base type does not
@@ -1146,7 +1153,6 @@ impl TypeTable {
                 }
                 _ => {
                     let n = Self::subrange_bits(*lo, *hi);
-                    let n = if n == 31 && *lo >= 0 { 32 } else { n };
                     (n.min(32), PackAlign::Bit)
                 }
             },
@@ -1206,6 +1212,24 @@ impl TypeTable {
             if n > 0 && (pos + n - 1) / 16 - pos / 16 >= 2 {
                 pos = round_up(pos, 16);
             }
+            // An unsigned subrange of 31 bits takes 32 where it starts on a
+            // 16-bit boundary (ref 3.4 p. 3-10, "the compiler allocates 32
+            // bits": TTY_$I_WAIT 0xE1C2C0 stores time_$clock_t's `low32:
+            // linteger`, at bit 16, with `move.l`), its 31 where it does
+            // not (the SAU9 page-map entry's `fm_daddr: 0..16#7FFFFFFF`
+            // after a boolean, 4 bytes: ast_$load_aote 0x3C403ADA `bfextu
+            // (A0){1:31},D1`; AST_$ALLOCATE_ASTE 0x3C40357C; ../source gap
+            // 361, bead domain-pascal-nvqu).  Whether a bit-aligned field
+            // after a 32-bit one starts at bit 32 or 31 is not visible:
+            // Uncertain.
+            let n = if n == 31
+                && pos % 16 == 0
+                && matches!(self.kind(f.ty), TypeKind::Subrange { lo, .. } if *lo >= 0)
+            {
+                32
+            } else {
+                n
+            };
             f.offset = pos / 8;
             f.bits = Some(BitPos { bit: pos, width: n });
             at = pos.saturating_add(n);

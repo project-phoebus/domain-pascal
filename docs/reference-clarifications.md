@@ -291,7 +291,12 @@ Conservative choices are implemented and marked `TODO(ref-question)` in
     *Implemented: such a subrange has an integer32 host in the checker
     (its values do not fit integer16) and 2-byte storage
     (`crates/dpc-sema/src/types.rs`, `layout_of`; test
-    `unsigned_16_bit_subranges_are_words`).*
+    `unsigned_16_bit_subranges_are_words`).*  *Settled by the SAU9 image
+    (2026-10-28): in a packed record the 32 bits of 3.4 are allocated
+    where the field starts on a 16-bit boundary; after a boolean it takes
+    its 31 bits (ast_$load_aote 0x3C403ADA `bfextu (A0){1:31}`, a 4-byte
+    page-map entry; codegen-patterns 5, layout evidence; test
+    `unsigned_31_bit_subrange_after_a_boolean`).*
 12. **5.6.4, p. 5-22.** default_routine_options apply to "every subsequent
     routine in that module that does not specify a routine option".  Does a
     routine that specifies only `extern`, `forward` or `internal` (which
