@@ -1,0 +1,89 @@
+# Build and test dpc on Linux x86_64 and macOS, and attach a release build
+# of the compiler (with the m68k runtime beside it, the layout
+# `dpc --print-runtime' expects) as a workflow artifact.
+#
+# The m68k-elf binutils are installed so that `make build' assembles the
+# runtime and the Python tool tests that assemble (tools/dispcheck.py,
+# tools/linktest.py) run instead of skipping.  The parts of `make test'
+# that need the SR10.2 image, the install or Musashi skip with a notice,
+# as they do on any machine without them.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: macos-arm64
+            os: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Ubuntu packages the m68k binutils under the m68k-linux-gnu triple;
+      # the output format is the same elf32-m68k, so expose them under the
+      # m68k-elf names the Makefile and tools use.
+      - name: Install m68k binutils (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends binutils-m68k-linux-gnu
+          for t in as ld ar nm objdump objcopy readelf; do
+            sudo ln -sf "$(command -v m68k-linux-gnu-$t)" "/usr/local/bin/m68k-elf-$t"
+          done
+          m68k-elf-as --version | head -1
+
+      - name: Install m68k binutils (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install m68k-elf-binutils
+          m68k-elf-as --version | head -1
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
+
+      - name: Release build
+        env:
+          DPC_COMMIT: ${{ github.sha }}
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          out="dpc-${{ matrix.name }}"
+          mkdir -p "$out/bin" "$out/runtime/m68k"
+          cp target/release/dpc "$out/bin/dpc"
+          cp target/runtime/m68k/libm_arith.a "$out/runtime/m68k/"
+          echo "${{ github.sha }}" > "$out/COMMIT"
+          "$out/bin/dpc" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpc-${{ matrix.name }}
+          path: dpc-${{ matrix.name }}
+          if-no-files-found: error

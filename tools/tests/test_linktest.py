@@ -294,6 +294,9 @@ def git(repo, *args):
                    check=True, capture_output=True)
 
 
+# The assembler is faked (`true'), but dispcheck still runs objdump over
+# the (absent) object, so the m68k-elf objdump must be installed.
+@unittest.skipUnless(shutil.which(linktest.dispcheck.OBJDUMP), 'needs %s' % linktest.dispcheck.OBJDUMP)
 @unittest.skipUnless(shutil.which('git') and shutil.which('rsync'), 'needs git and rsync')
 class EndToEndTest(unittest.TestCase):
     def setUp(self):
@@ -707,6 +710,9 @@ class DeepPassTest(unittest.TestCase):
         self.assertIn('INCOMPLETE: check stage, stops at an error outside any routine', text)
 
 
+# The assembler is faked (`true'), but dispcheck still runs objdump over
+# the (absent) object, so the m68k-elf objdump must be installed.
+@unittest.skipUnless(shutil.which(linktest.dispcheck.OBJDUMP), 'needs %s' % linktest.dispcheck.OBJDUMP)
 @unittest.skipUnless(shutil.which('git') and shutil.which('rsync'), 'needs git and rsync')
 class DeepEndToEndTest(unittest.TestCase):
     def setUp(self):

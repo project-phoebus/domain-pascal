@@ -39,6 +39,10 @@ Dependencies run one way: syntax, then sema, then ir, then m68k (with
 target), then dpc.  Build with `make build` (or `cargo build`).  Run the
 tests with `make test`, which runs `cargo test` and, once it exists, the
 Python harness in `tools/tests`.
+`.github/workflows/ci.yml` does the same on GitHub for Linux x86_64 and
+macOS (arm64), with the m68k-elf binutils installed, and attaches a release
+build of dpc with the runtime beside it (`dpc-<platform>/bin/dpc`,
+`dpc-<platform>/runtime/m68k/libm_arith.a`) as a workflow artifact.
 
 To find your way around:
 
