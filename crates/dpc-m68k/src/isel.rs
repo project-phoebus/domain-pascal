@@ -27,6 +27,7 @@ use dpc_ir::{
     StmtKind, UnOp, Width,
 };
 use dpc_syntax::{Diagnostic, Span};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use crate::emit::DATA_BASE_LABEL;
@@ -37,6 +38,7 @@ use crate::sched::Schedule;
 use crate::Cpu;
 
 mod merge;
+mod with_bias;
 
 /// The register a nested routine's static link is passed in
 /// (codegen-patterns 6: 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
@@ -415,6 +417,16 @@ fn select_in_context(
     cpu: Cpu,
 ) -> Result<Vec<Insn>, Diagnostic> {
     let f = merge::adjacent_stores(f, merge)?;
+    // MC68020: `with` temporaries of elements far from their symbol
+    // (bead domain-pascal-2ys5; the module doc of `with_bias`).
+    let f = if cpu.is_68020() {
+        match with_bias::far_with_temps(&f) {
+            Cow::Borrowed(_) => f,
+            Cow::Owned(g) => Cow::Owned(g),
+        }
+    } else {
+        f
+    };
     let f: &Function = &f;
     if f.is_empty_procedure() {
         if let Some(pc) = f.param_copies.first() {
@@ -25733,8 +25745,9 @@ impl Selector {
                 // as for any other unit's array ([`once_elem_lea`]); within
                 // a byte, not seen.
                 let mut bias = self.symbol_bias(name, *o)?;
+                let overlay = bias != 0;
                 let mut disp = o + offset - bias;
-                if bias == 0 && self.cpu.is_68020() && !(-0x8000..0x8000).contains(&disp) {
+                if !overlay && self.cpu.is_68020() && !(-0x8000..0x8000).contains(&disp) {
                     // MC68020: a displacement beyond 16 bits (an array
                     // whose index starts far from 0) has the symbol biased
                     // by a multiple of 60000 so that the rest fits the
@@ -25751,7 +25764,7 @@ impl Selector {
                     bias = (disp + OVERLAY_BIAS / 2).div_euclid(OVERLAY_BIAS) * OVERLAY_BIAS;
                     disp -= bias;
                 }
-                if bias != 0 && (-128..128).contains(&disp) {
+                if overlay && (-128..128).contains(&disp) {
                     best_effort(
                         self.span,
                         "an element within a byte of the base of an overlay section of more \

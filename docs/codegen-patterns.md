@@ -16185,6 +16185,24 @@ move.b (-0x15a0,A0,D3.l),(-14,A6)` (scsi_wire_page 0x3C4A67DC: -0x10000
 (`isel.rs` `index_ea`, `Addr::Symbol`); the MC68010 form stays `lea
 (0,An,Dx),Am; adda.l #d,Am` (no symbol site in the SAU2 image).
 
+A `with` over such an element (the SAU9 MMAP, `array[16#10000..
+16#1FFFF]` of 16-byte entries, element offset -0x100000) splits the
+offset the same way: the multiple of 60000 in the symbol, the rest in
+every field's displacement off the held address.  AST_$PTOV 0x3C408712
+`movea.l #MMAP-1020000,A0; lsl.l #4,D1; lea (0,A0,D1.l),A4; tst.b
+(-28571,A4)`, then `(-28567,A4)`, `(-28574,A4)`, `(-28575,A4)`
+(-1020000 = -0x100000 + 28576; the fields at +5, +9, +2, +1);
+AST_$INVALIDATE_PAGE 0x3C402302 and MMAP_$FREE 0x3C40EA20 the same
+(../source gap 360).  dpc rewrites the function before selection
+(`isel/with_bias.rs`, bead domain-pascal-2ys5): the temporary's symbol
+biased by the multiple of 60000 nearest the lowest displacement
+referenced, that bias taken off every reference through the temporary.
+Which displacement the original rounds is not visible (every site's
+fields lie within one entry): Uncertain near a 30000 boundary.  The
+MC68010 code folds the whole offset into the displacements (MMAP_$AVAIL
+0xE0CC76, section 5.2) and refuses one beyond 16 bits.  Golden
+`m68020/far_with`.
+
 ### Register saves (Verified)
 
 As section 2: one register `move.l Dn,-(SP)` / `pea (An)`
