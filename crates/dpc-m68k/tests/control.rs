@@ -231,14 +231,6 @@ end;
 #[test]
 fn unsupported_control_flow() {
     let cases: &[(&str, &str)] = &[
-        // Two parts ending in calls of the same size, a pop needed.
-        (
-            "begin
-  if w = 0 then ext_$p(1) else ext_$p(2);
-  if w = 1 then r := 0;
-end;",
-            "shares the pop at the join",
-        ),
         (
             "begin
   r := 1;
@@ -1599,4 +1591,32 @@ end;
 ",
     );
     assert_eq!(b.last().map(String::as_str), Some("move.w\t#1,(R).l"));
+}
+
+/// Two parts ending in calls of the same argument bytes share the pop at
+/// the join (codegen-patterns 1.1: 0xE06156 `bsr.w; bra.s 0xE06194`, the
+/// `else` part's `addq.w #4,SP`), by the emitter's cross-jumping
+/// (`dpc_m68k::crossjump`, bead domain-pascal-k1da): the `then` part's
+/// call is followed by a `bra` into the other part, after its call.
+#[test]
+fn if_parts_share_the_pop() {
+    let b = body(
+        "procedure t; internal;
+begin
+  if w = 0 then ext_$p(1) else ext_$p(2);
+  if w = 1 then r := 0;
+end;",
+    );
+    // The calls are of one routine, so the `jsr` is shared as well
+    // (RIP_$SEND_UPDATES 0xE688B8 `st -(SP); bra.s 0xE688BE` into the
+    // other part's `jsr`): one `jsr`, one pop, a `bra` from the `then`
+    // part's pushes.
+    let pops = b.iter().filter(|l| l.as_str() == "addq.w\t#4,%sp").count();
+    assert_eq!(pops, 1, "{b:?}");
+    assert_eq!(
+        b.iter().filter(|l| l.starts_with("jsr")).count(),
+        1,
+        "{b:?}"
+    );
+    assert_eq!(b[4], "bra.s\t4f", "{b:?}");
 }

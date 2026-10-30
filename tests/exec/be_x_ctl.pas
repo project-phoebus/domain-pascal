@@ -30,7 +30,6 @@
   call: BX_CTL_$TWICE w:-1
   warns: best effort (not byte-identical): a statement after `return` (not reached)
   warns: best effort (not byte-identical): a statement after `exit` or `next` (not reached)
-  warns: best effort (not byte-identical): an `if` whose two parts end in calls with the same argument bytes
   warns: best effort (not byte-identical): an `if` comparing a variable with a computed value whose `then` part assigns
   warns: best effort (not byte-identical): an empty procedure with a value parameter passed by address
   warns: best effort (not byte-identical): an empty procedure with locals

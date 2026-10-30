@@ -4,7 +4,11 @@
   in_range(params.parity)'): 0..3 as one unsigned compare against 3 in
   memory, `cmpi.w #0x3,(0x14,A2); bhi' (0xE68252, 0xE682A6); 1..3 widened
   with zeros, the lower bound subtracted, `clr.l D1; move.w (0x12,A2),D1;
-  subq.l #0x1,D1; cmpi.l #0x2,D1; bhi' (0xE68278..0xE68286). }
+  subq.l #0x1,D1; cmpi.l #0x2,D1; bhi' (0xE68278..0xE68286).  The
+  checks' error stores are one copy, each check's `bhi.s 0xE682D4'
+  going straight to it (cross-jumping, codegen-patterns 7.1 "Identical
+  ends", bead domain-pascal-k1da): here the inner check's store is the
+  outer's, `bhi.s 4b'. }
 module in_range_subrange;
 type
   stop_bit_t = 1..3;

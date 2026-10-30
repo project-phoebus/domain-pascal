@@ -410,10 +410,6 @@ fn unsettled_cases_are_rejected() {
         "a jump table whose lowest label is below -8",
     );
     has(
-        "case w of 1: ext_$p(1); 2: ext_$p(2); end; ext_$p(0);",
-        "a `case` whose parts end in calls with the same argument bytes",
-    );
-    has(
         "case w of 1: ; 2: ; otherwise x := 1; end;",
         "a compare-chain `case` whose arms are all empty",
     );
@@ -464,5 +460,19 @@ end;
             "beq.s\t2f",
             "cmpi.w\t#1,%d1",
         ]
+    );
+}
+
+/// Arms ending in calls of the same argument bytes share the pop at the
+/// join (codegen-patterns 1.1, 56 sites, 0xE06156 `bsr.w; bra.s 0xE06194`
+/// to the other part's `addq.w #4,SP`): the emitter's cross-jumping
+/// (`dpc_m68k::crossjump`, bead domain-pascal-k1da) leaves one pop.
+#[test]
+fn case_arms_share_the_pop() {
+    let b = proc_body("case w of 1: ext_$p(1); 2: ext_$p(2); end; ext_$p(0);");
+    assert_eq!(
+        b.iter().filter(|l| l.as_str() == "addq.w\t#4,%sp").count(),
+        1,
+        "{b:?}"
     );
 }

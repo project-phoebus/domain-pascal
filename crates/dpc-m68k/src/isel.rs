@@ -7455,15 +7455,6 @@ fn cond_has_call(c: &IrCond) -> bool {
     }
 }
 
-/// The argument bytes the caller pops after `st`, when `st` is a call
-/// that pushes any.
-fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
-    match st.map(|s| &s.kind) {
-        Some(StmtKind::Call(c)) if c.bytes() > 0 => Some(c.bytes()),
-        _ => None,
-    }
-}
-
 /// The frame offset of the by-value pointer parameter (a parameter, `o >
 /// 0`, that is not one of the routine's by-address slots `address_slots`)
 /// that `addr` dereferences, when `addr` is a reference to a device object
@@ -9578,17 +9569,9 @@ impl Selector {
                 best_effort(self.span, REUSED_RIGHT_OPERAND)?;
             }
         }
-        if !else_.is_empty() && !next.clean {
-            if let (Some(a), Some(b)) = (call_bytes(then_.last()), call_bytes(else_.last())) {
-                if a == b {
-                    best_effort(
-                        self.span,
-                        "an `if` whose two parts end in calls with the same argument bytes \
-                         (the original shares the pop at the join, codegen-patterns 1.1) is",
-                    )?;
-                }
-            }
-        }
+        // Two parts ending in calls with the same argument bytes share
+        // the pop at the join (codegen-patterns 1.1): the emitter's
+        // cross-jumping merges the two pops (`crate::crossjump`).
         // `if c then return`: one branch to the epilogue on `c` itself, not
         // a branch past a `bra` (codegen-patterns 9).  TERM_$CONTROL
         // 0xE66B3A..0xE66B3C `tst.l (A3); bne.w 0xE66D78` (`if
@@ -11625,24 +11608,9 @@ impl Selector {
                 ),
             ));
         };
-        if !next.clean {
-            // The original shares a pop at the join when both parts of an
-            // `if` end in calls of the same argument bytes (codegen-patterns
-            // 1.1); arms are taken to behave alike.
-            let ends: Vec<u32> = nonempty
-                .iter()
-                .map(|&i| arms[i].body.as_slice())
-                .chain(otherwise)
-                .filter_map(|b| call_bytes(b.last()))
-                .collect();
-            if (1..ends.len()).any(|k| ends[..k].contains(&ends[k])) {
-                best_effort(
-                    span,
-                    "a `case` whose parts end in calls with the same argument bytes (the \
-                     original may share the pop at the join, codegen-patterns 1.1) is",
-                )?;
-            }
-        }
+        // Arms ending in calls of the same argument bytes share the pop
+        // at the join (codegen-patterns 1.1): the emitter's cross-jumping
+        // merges the pops (`crate::crossjump`).
         let w = selector.ty().width;
         let size = size_of(w);
         // A `char` selector widened with `clr.w Dn; move.b x,Dn`

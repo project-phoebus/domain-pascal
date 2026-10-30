@@ -9,6 +9,7 @@ movea.l (0xc,%fp),%a1
 clr.l (%a1)
 cmpi.w #3,(0x14,%a0)
 bls.s 1f
+4:
 move.l #0x360002,(%a1)
 bra.s 2f
 1:
@@ -16,9 +17,7 @@ clr.l %d0
 move.w (0x12,%a0),%d0
 subq.l #1,%d0
 cmpi.l #2,%d0
-bls.s 3f
-move.l #0x360002,(%a1)
-bra.s 2f
+bhi.s 4b
 3:
 move.w (0x14,%a0),(%a5)
 2:

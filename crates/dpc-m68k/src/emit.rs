@@ -451,6 +451,10 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                 opts.cpu,
             ) {
                 Ok(mut i) => {
+                    // Identical tails of the arms reaching a join merged
+                    // (cross-jumping, `crate::crossjump`), on the final
+                    // code and before the branches are sized.
+                    crate::crossjump::merge_tails(&mut i, opts.cpu);
                     for insn in i.iter_mut() {
                         if let Insn::Jsr(crate::insn::Ea::AbsL(sym, 0)) = insn {
                             // The IR's symbol (upper-cased), not the

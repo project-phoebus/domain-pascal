@@ -157,7 +157,8 @@ COMPUTER INC.").
     there is nothing to pop.)
   - **Implemented** (bead domain-pascal-bzl; `crates/dpc-m68k/src/isel.rs`,
     `Selector::call` with `Tail` / `seq_clean`): the no-pop rule.  The
-    shared pop is rejected ("not supported yet").  Goldens
+    shared pop is made by the emitter's cross-jumping (section 7.1,
+    "Identical ends"; `crossjump.rs`, bead domain-pascal-k1da).  Goldens
     `tests/golden/calls/pop_branches.pas`, `calls/calls.pas`.
 - **Implemented** (`crates/dpc-m68k/src/isel.rs`, `Selector::call`):
   pad, right-to-left pushes, `jsr`/`bsr`, `addq.w`/`lea` pop, the no-pop
@@ -8743,7 +8744,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
     0`) has the inner `else` part's `bne.s 0xE0B1AA` go to the outer
     `else` part's identical `clr.w D0` rather than a copy of it before
     the threaded `bra` ("Identical ends" below, bead
-    domain-pascal-sggk); dpc keeps both copies (srcsurvey MISMATCH).
+    domain-pascal-sggk); dpc merges them since bead domain-pascal-k1da
+    (`crossjump.rs`).
   - **Implemented** (`crates/dpc-m68k/src/isel.rs` `thread_branches`,
     after selection, before register allocation): every `Insn::Branch`
     to a label that a `bra` follows (other labels between) takes that
@@ -8781,8 +8783,10 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   operand of an `or else` on its own (`if a or else b then return`:
   `b<a> epi; b<b> epi`), and an `else` part follows the branch.  A `then
   return` that ends the routine stays refused (below).
-- **Identical ends of the two parts (Verified that it happens at the
-  sites; when is not settled; not modelled; bead domain-pascal-sggk):** the pop is shared at
+- **Identical ends of the two parts (cross-jumping; Verified at the
+  sites; which arm keeps the copy when none falls through to the join
+  Uncertain, one site per CPU; implemented, bead domain-pascal-k1da,
+  earlier beads domain-pascal-sggk, -myk):** the pop is shared at
   the join (section 1.1), and RIP_$SEND_UPDATES shares a `jsr`: one part
   is `subq.l #2,SP; st -(SP); bra.s 0xE688BE`, the other `subq.l #2,SP;
   clr.w -(SP)` falling into the `jsr RIP_$BROADCAST` at 0xE688BE.  A
@@ -8797,8 +8801,27 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   one `if`, not shared, and 0xE1A9F0/0xE1AA00 two identical `move.w
   0xE2E00E,D0` (of the 3324 forward `bra`s to a join reached by falling
   through, 4 have the same instruction before the `bra` and before the
-  join).  dpc never shares anything but rejects the shared-pop case
-  (bead domain-pascal-myk).
+  join).  **Implemented** (`crates/dpc-m68k/src/crossjump.rs`, on each
+  routine's final code before the branches are sized): the identical
+  straight-line suffixes of the arms reaching one join (the forward
+  `bra`s to its label and the arm falling through) are merged, every
+  arm but one ending in a `bra` into the kept copy.  The arm falling
+  through to the join keeps its copy (the sites above; NETWORK_$REPORT_
+  FAILURE 0xE10428 `moveq #1,D0; bra.s` to the other arm's `move.l
+  D0,(772,A5)`); with none, MC68010 code keeps the first arm's and the
+  later arm branches back (TERM_$CONTROL 0xE66C24 `moveq #2,D0; bra.s
+  0xE66C10`, one site), MC68020 code the last arm's (SAU9 SCSI_$C90_INT
+  0x3C4A5B36 `bra.s 0x3C4A5BA0`, six arms into the last's `move.l
+  D4,-(SP); pea (A3); pea (A2); bsr.w; lea (16,SP),SP`; section 14).  An
+  arm that is nothing but the tail goes: the branches to its label are
+  retargeted (PARITY_$CHK_IO's `bne.s 0xE0B1AA`) and the condition's
+  branch over it inverted (LOG_$ADD's `beq.s 0xE176D2`; SIO_$K_SET_PARAM
+  0xE68258 `cmpi.w #3,(20,A2); bhi.s 0xE682D4`, three `in_range` checks
+  sharing one status store, golden `control/in_range_subrange`).  The 4
+  unmerged sites above are not explained (Uncertain).  Goldens
+  `control/cross_jump`, `m68020/cross_jump`; tests
+  `if_parts_share_the_pop`, `case_arms_share_the_pop`; srcsurvey:
+  MST_$FIND and PMAP_$PURGE_WS became byte-identical with it.
 - **`and then` / `or else`** (ref pp. 4-18..4-19, 4-134): jumping code,
   each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
   bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
@@ -15637,7 +15660,8 @@ Counts below are from a sweep of the `.TEXT` range 0xE38000..0xE71D7C.
     are stored at a join of tail-merged arms (NETWORK_$REPORT_FAILURE
     0xE10428/0xE1042C `moveq #1,D0; bra; moveq #3,D0; move.l
     D0,(772,A5)`; TERM_$CONTROL 0xE66C24 `moveq #2,D0; bra.s` back to the
-    shared store), which dpc does not make.  dpc:
+    shared store), which dpc makes by cross-jumping (7.1, "Identical
+    ends").  dpc:
     - `move.l #n` when the next statement stores a zero word or longword
       to the bytes just above, off the same base (the two sites).  Why is
       Uncertain: a constant run stored as one block, as merging units
@@ -16541,6 +16565,22 @@ fields fit 8 bits is reference-clarifications 52.  `dpc` (`dpc-sema`
 one-byte, byte-aligned object; an assignment between it and the plain
 type copies one byte, `move.b`, for both CPUs (no MC68010 site).
 Golden `data/sized_packed_record`; sema test `byte_sized_packed_record`.
+
+### Cross-jumping without a falling-through arm (Uncertain, one site; bead domain-pascal-k1da)
+
+Where the arms sharing a tail all `bra` to the join, the SAU9 image
+keeps the last arm's copy and the earlier arms branch forward into it:
+SCSI_$C90_INT 0x3C4A5B36 `subq.l #2,SP; bfextu (-72,A6){5:3},D0; move.w
+D0,-(SP); bra.s 0x3C4A5BA0`, the `more` arm, into the `done` arm's
+`move.l D4,-(SP); pea (A3); pea (A2); bsr.w scsi_phase_dispatch; lea
+(16,SP),SP; bra.s` at 0x3C4A5BA0, with the `select`, `status`, `data`
+and `message` arms; and 0x3C4A57E6 `pea (cell,PC); bra.s 0x3C4A580C` into
+the last `crash_system` call's `jsr; addq.w #4,SP`, which falls through.
+The SAU2 image keeps the first arm's copy in the one such site
+(TERM_$CONTROL 0xE66C24, section 7.1), so `-cpu mathchip` keeps the
+last.  With the pass the SAU9 SCSI module's code is 11240 bytes (12844
+before the pointer-local and cross-jumping work; the image's 9792) and
+the sau9 tree's 482440.
 
 ### Register choices (Uncertain; bead domain-pascal-tbiu)
 

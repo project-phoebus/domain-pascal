@@ -209,7 +209,7 @@ MISMATCH	audit/audit.pas	audit_$server
 MISMATCH	audit/audit.pas	audit_$alloc
 STUB	audit/audit.pas	audit_$load_list
 MISMATCH	audit/audit.pas	audit_$administrator
-STUB	audit/audit.pas	audit_$control
+MISMATCH	audit/audit.pas	audit_$control
 MISMATCH	audit/audit.pas	audit_$inherit_audit
 MISMATCH	audit/audit.pas	audit_$open_log
 OK	audit/audit.pas	audit_$close_log
@@ -224,7 +224,7 @@ STUB	bat/bat.pas	bat_$n_free
 STUB	bat/bat.pas	bat_$reserve
 MISMATCH	bat/bat.pas	bat_$cancel
 OK	bat/bat.pas	bat_$get_bat_step
-STUB	cal/os_cal_unwired.pas	cal_$verify
+MISMATCH	cal/os_cal_unwired.pas	cal_$verify
 OK	cal/os_cal_unwired.pas	cal_$get_info
 OK	cal/os_cal_unwired.pas	cal_$set_drift
 STUB	cal/os_cal_unwired.pas	cal_$get_local_time
@@ -912,7 +912,7 @@ ABSENT	mst/mst_wired.pas	mst_$va_to_aste
 ABSENT	mst/mst_wired.pas	mst_$assoc
 ABSENT	mst/mst_wired.pas	mst_$install_ioppn
 ABSENT	mst/mst_wired.pas	mst_$remove_ioppn
-MISMATCH	mst/mst_wired.pas	mst_$find
+OK	mst/mst_wired.pas	mst_$find
 MISMATCH	mst/mst_wired.pas	mst_$wire
 ABSENT	mt/mt.pas	mt_$shutdown
 ABSENT	mt/mt.pas	mt_purge_ucb
@@ -1145,10 +1145,10 @@ OK	pmap/pmap.pas	pmap_$wake_purifier
 STUB	pmap/pmap.pas	pmap_$purifier_l
 STUB	pmap/pmap.pas	pmap_$purifier_r
 OK	pmap/pmap.pas	pmap_$update_callback
-STUB	pmap/pmap.pas	pmap_$t_purif_callback
+MISMATCH	pmap/pmap.pas	pmap_$t_purif_callback
 STUB	pmap/pmap.pas	pmap_$ws_scan_callback
 MISMATCH	pmap/pmap.pas	pmap_$init_ws_scan
-STUB	pmap/pmap.pas	pmap_$purge_ws
+OK	pmap/pmap.pas	pmap_$purge_ws
 STUB	pmap/pmap.pas	pmap_$init_timers
 OK	proc1/proc1.pas	proc1_$try_to_suspend
 MISMATCH	proc1/proc1.pas	proc1_$resume
@@ -1620,7 +1620,7 @@ MISMATCH	term/os_term.pas	sio_$i_get_desc
 STUB	term/os_term.pas	term_$read
 MISMATCH	term/os_term.pas	term_$read_cond
 MISMATCH	term/os_term.pas	term_$write
-STUB	term/os_term.pas	term_$control
+MISMATCH	term/os_term.pas	term_$control
 STUB	term/os_term.pas	term_$inquire
 STUB	term/os_term.pas	term_$get_ec
 OK	term/os_term.pas	term_$help_callback
