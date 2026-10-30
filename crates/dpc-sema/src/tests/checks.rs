@@ -2372,3 +2372,33 @@ fn constant_index_out_of_range_under_addr_only() {
         "index out of range",
     );
 }
+
+/// A varying string's `length` and `body` fields, "using the same syntax
+/// and semantics you would use for a normal record" (ref 3.11.2, p. 3-45;
+/// bead domain-pascal-cze5): `length` a word at offset 0, `body` a packed
+/// array[1..max] of char at 2, indexable.  Any other field name is an
+/// error, as is indexing the string itself.
+#[test]
+fn varying_string_fields() {
+    module(
+        "type vs = varying[20] of char;
+         var s, t: vs; n: integer; c: char;
+         procedure p;
+         begin
+           n := s.length;
+           s.length := 3;
+           c := s.body[s.length];
+           t.body := s.body;
+         end;",
+    );
+    assert_err(
+        "module m; type vs = varying[20] of char; var s: vs; n: integer;
+         procedure p; begin n := s.len; end;",
+        "no field `len` (a varying string has `length` and `body`",
+    );
+    assert_err(
+        "module m; type vs = varying[20] of char; var s: vs; c: char;
+         procedure p; begin c := s[1]; end;",
+        "indexing a varying string",
+    );
+}

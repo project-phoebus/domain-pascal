@@ -224,6 +224,9 @@ pub(crate) struct Checker<'t> {
     /// One-byte views of the types of packed fields that fill a byte
     /// ([`Checker::byte_field_type`]), by field type.
     byte_fields: HashMap<TypeId, TypeId>,
+    /// The `length` and `body` field types of each varying string type
+    /// ([`Checker::varying_fields`]).
+    varying_fields: HashMap<TypeId, (TypeId, TypeId)>,
     /// The operand of the `addr` being checked ([`Checker::builtin_fn`]),
     /// and whether the next [`Checker::index`] is its last index: a
     /// constant index out of range there is only a best-effort warning.
@@ -269,6 +272,7 @@ impl<'t> Checker<'t> {
             unsigned32: None,
             abs16: None,
             byte_fields: HashMap::new(),
+            varying_fields: HashMap::new(),
             addr_operand: None,
             lenient_index: false,
         };
@@ -3685,6 +3689,38 @@ impl<'t> Checker<'t> {
         let rec = match self.types.kind(base.ty) {
             TypeKind::Record(r) => r,
             TypeKind::Error => return self.error_expr(span),
+            // A varying string's `length` and `body` fields, "using the
+            // same syntax and semantics you would use for a normal
+            // record" (ref 3.11.2, p. 3-45; bead domain-pascal-cze5).
+            TypeKind::Varying { .. } => {
+                let (length, body) = self.varying_fields(base.ty);
+                let (ty, offset) = match field.name.as_str() {
+                    "length" => (length, 0),
+                    "body" => (body, 2),
+                    _ => {
+                        self.error(
+                            field.span,
+                            format!(
+                                "no field `{}` (a varying string has `length` and `body`, \
+                                 ref 3.11.2, p. 3-45)",
+                                field.name
+                            ),
+                        );
+                        return self.error_expr(span);
+                    }
+                };
+                return Expr {
+                    kind: ExprKind::Field {
+                        base: Box::new(base),
+                        name: field.name.clone(),
+                        offset,
+                        bits: None,
+                    },
+                    ty,
+                    value: None,
+                    span,
+                };
+            }
             _ => {
                 self.error(span, "only a record has fields");
                 return self.error_expr(span);
@@ -3714,6 +3750,37 @@ impl<'t> Checker<'t> {
                 self.error_expr(span)
             }
         }
+    }
+
+    /// The field types of the varying string type `ty` (ref 3.11.2,
+    /// p. 3-45, the declaration a `varying[max] of char` stands for):
+    /// `length : 0..65535` (a word, 5.3.4.1) and `body : packed
+    /// array[1..max] of char`.  One pair per varying type, so that two
+    /// references to the bodies of one type have the same type.
+    fn varying_fields(&mut self, ty: TypeId) -> (TypeId, TypeId) {
+        if let Some(&t) = self.varying_fields.get(&ty) {
+            return t;
+        }
+        let TypeKind::Varying { max, elem } = *self.types.kind(ty) else {
+            unreachable!("varying_fields of a non-varying type")
+        };
+        let length = self.new_type(TypeKind::Subrange {
+            base: self.types.builtins.integer32,
+            lo: 0,
+            hi: 65535,
+        });
+        let index = self.new_type(TypeKind::Subrange {
+            base: self.types.builtins.integer16,
+            lo: 1,
+            hi: max as i64,
+        });
+        let body = self.new_type(TypeKind::Array {
+            index,
+            elem,
+            packed: true,
+        });
+        self.varying_fields.insert(ty, (length, body));
+        (length, body)
     }
 
     /// The type of a packed record field of type `ty` that takes the 8
