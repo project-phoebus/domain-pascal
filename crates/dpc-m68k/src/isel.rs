@@ -22318,13 +22318,50 @@ impl Selector {
                     });
                     return Ok(());
                 }
+                if !(-0x8000..0x8000).contains(&disp) {
+                    // Beyond 16 bits (a `with` over an element of a pointer's
+                    // array indexed from far beyond 0, the SAU9 MMAP through
+                    // a pointer; `dpc-ir`'s `with_stmt`): the element's
+                    // address off the base into a scratch register, copied
+                    // to Ar, and the displacement added there (OS_$COLD_START
+                    // 0x40034B6 `lea (0,A0,D1.l),A1; movea.l A1,A3; adda.l
+                    // #-0x100000,A3; bset #6,(A3)`, the MC68020 image's one
+                    // site; bead domain-pascal-4bjx).  The MC68010 image
+                    // has no such site: the same form, best effort.
+                    if !self.cpu.is_68020() {
+                        best_effort(
+                            self.span,
+                            "the address of an element through a pointer at a displacement \
+                             beyond 16 bits (`lea (0,An,Dx),At; movea.l At,Ar; adda.l #d,Ar`: an \
+                             MC68020 site only, OS_$COLD_START 0x40034B6) is",
+                        )?;
+                    }
+                    let t = self.alloc_a()?;
+                    self.out.push(Insn::Lea {
+                        src: if folded == 1 {
+                            Ea::Idx(0, b, x, long)
+                        } else {
+                            Ea::Idx2(0, b, x, long, folded)
+                        },
+                        dst: t,
+                    });
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Reg(Reg::A(t)),
+                        dst: r,
+                    });
+                    self.out.push(Insn::AluImm {
+                        op: AluOp::Add,
+                        size: Size::L,
+                        imm: disp as i64,
+                        dst: Ea::Reg(Reg::A(r)),
+                    });
+                    return Ok(());
+                }
                 if !(-128..128).contains(&disp) {
                     // Best effort (not byte-identical): `lea (0,An,Dx),Ar`,
                     // then the displacement added, `lea (d,Ar),Ar` (no site
                     // catalogued; a 16-bit one only).
-                    if !(-0x8000..0x8000).contains(&disp) {
-                        return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
-                    }
                     best_effort(
                         self.span,
                         "the address of an element through a pointer at a displacement beyond \
@@ -22374,6 +22411,44 @@ impl Selector {
                     // Best effort (not byte-identical): the `lea` off the
                     // kept base into a register the allocator picks.
                     best_effort(self.span, KEPT_BASE_LEA)?;
+                }
+                if let (
+                    Ea::Ind(t),
+                    Some(Insn::AluImm {
+                        op: AluOp::Add,
+                        size: Size::L,
+                        imm,
+                        dst: Ea::Reg(Reg::A(u)),
+                    }),
+                ) = (&src, self.out.last())
+                {
+                    if *u == *t && !(-0x8000..0x8000).contains(&(*imm as i64)) {
+                        // An element beyond 16 bits ([`Self::element_ea`]'s
+                        // `lea (0,An,Dx),At; adda.l #d,At`) as an address:
+                        // the displacement added in Ar after the copy, not
+                        // in At (OS_$COLD_START 0x40034B6 `lea
+                        // (0,A0,D1.l),A1; movea.l A1,A3; adda.l
+                        // #-0x100000,A3`, a `with` over the SAU9 MMAP's
+                        // element through a pointer local; bead
+                        // domain-pascal-4bjx).  Which register the `lea`
+                        // takes from a base other than a local's is not
+                        // seen (Uncertain).
+                        let imm = *imm;
+                        let t = *t;
+                        self.out.pop();
+                        self.out.push(Insn::Movea {
+                            size: Size::L,
+                            src: Ea::Reg(Reg::A(t)),
+                            dst: r,
+                        });
+                        self.out.push(Insn::AluImm {
+                            op: AluOp::Add,
+                            size: Size::L,
+                            imm,
+                            dst: Ea::Reg(Reg::A(r)),
+                        });
+                        return Ok(());
+                    }
                 }
                 if split && !matches!(src, Ea::Idx(..)) {
                     // Beyond a byte the element's operand is `(d,Am)` after

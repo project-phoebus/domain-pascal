@@ -4278,7 +4278,19 @@ impl Cx<'_> {
                         let fold = d != 0
                             && !at_for_index
                             && !(matches!(b, Addr::Symbol { .. }) && biased());
-                        if fold && !fits {
+                        // An element of a pointer's array indexed from far
+                        // beyond 16 bits (the SAU9 MMAP through a pointer,
+                        // `array[16#10000..16#1FFFF]` of 16-byte entries):
+                        // the element's offset is part of the temporary's
+                        // value, not of the fields' displacements
+                        // (OS_$COLD_START 0x40034B6 `lea (0,A0,D1.l),A1;
+                        // movea.l A1,A3; adda.l #-0x100000,A3; bset
+                        // #6,(A3)`, the selector's `lea_into` form; bead
+                        // domain-pascal-4bjx).  A symbol's array is
+                        // biased instead (`dpc-m68k` `with_bias`).
+                        let far_pointer =
+                            matches!(b, Addr::Indirect { .. }) && i16::try_from(offset).is_err();
+                        if fold && !fits && !far_pointer {
                             // Best effort (not byte-identical): no image site
                             // of a `with` element whose folded displacements
                             // pass 16 bits; the offset kept in the base.
@@ -4290,17 +4302,19 @@ impl Cx<'_> {
                                  codegen-patterns 5.2, \"`with`\") is",
                             )?;
                         }
-                        let (base, offset) = if fold && fits {
-                            (b, total as i32)
+                        let (base, elem_offset, offset) = if far_pointer {
+                            (b.offset_by(d), offset, 0)
+                        } else if fold && fits {
+                            (b, 0, total as i32)
                         } else {
-                            (b.offset_by(d), offset)
+                            (b.offset_by(d), 0, offset)
                         };
                         (
                             Expr::AddrOf(Addr::Index {
                                 base: Box::new(base),
                                 index,
                                 scale,
-                                offset: 0,
+                                offset: elem_offset,
                             }),
                             offset,
                         )

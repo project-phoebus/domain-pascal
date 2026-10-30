@@ -1569,7 +1569,9 @@ v,D0` (best effort; the image forms a boolean, 7.1).
        5 is not visible: `dpc` puts it above; bead domain-pascal-s9g0);
        none for a pointer's temporary (`with p^`): the one site,
        HINT_$ADD_NET 0xE49C76, has `link #0` (Uncertain, one site; bead
-       domain-pascal-njy0);
+       domain-pascal-njy0; the SAU9 image repeats it at 0x3C4512F8 and
+       has one site the other way short of a slot, OS_$COLD_START's
+       nested routine 0x4003128, section 5.2 "`with`");
     5. the **temporaries** of expressions passed by address (section
        1.5: TONE_$ENABLE 0xE1ACE8, the temporary at -8 below the status
        at -4), shared by the calls of the routine (implemented, bead
@@ -6092,7 +6094,14 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     VTOC_$GET_UID 0xE39260 `lea (0,A5,D6.w),A1`, 0xE39282 `cmp.w
     (-60,A0),D2`, and through a pointer 0xE39368 `lea (0,A2,D1.l),A0; lea
     (8,A0),A1; ...; tst.w (6,A0)` (before: `lea (4,A0,D1.w),A0; lea
-    (4,A0),A1`, `(2,A0)`).  `dpc` keeps the offset in the
+    (4,A0),A1`, `(2,A0)`).  **An element of a pointer's array indexed
+    from far beyond 16 bits** (the SAU9 MMAP through a pointer,
+    `array[16#10000..16#1FFFF]` of 16-byte entries) keeps its whole
+    offset in the temporary instead, added after the element address is
+    copied into the record's register: OS_$COLD_START 0x40034B6 `lea
+    (0,A0,D1.l),A1; movea.l A1,A3; adda.l #-0x100000,A3; bset #6,(A3)`
+    (Verified, one MC68020 site; section 14, "Symbols far from an
+    array's first element"; bead domain-pascal-4bjx).  `dpc` keeps the offset in the
     base when the folded displacements would not fit 16 bits (best
     effort: no site seen), for an array of an overlay section whose
     base the selector biases or refuses at that offset (60000 bytes in,
@@ -6110,7 +6119,18 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   fitting site is an array element's temporary.  A pointer's (`with
   p^`) gets no slot: HINT_$ADD_NET 0xE49C76 `link #0` is against one if
   its source is a `with`, and no site fits one (Uncertain, one site;
-  bead domain-pascal-njy0).  Uncertain:
+  bead domain-pascal-njy0).  The SAU9 image (2026-10-29, ../source
+  `evidence/domain_os/os/cold_start.codegen.md`) does not settle it:
+  HINT_$ADD_NET 0x3C4512F8 is `link #0` again (the pointer into A0 at
+  0x3C451318 for two stores), while OS_$COLD_START's nested routine
+  0x4003128 has `link #-20`, the call temporary at -20 (`move.l
+  A1,(-20,A6); pea (-20,A6)`) and four slots nothing addresses for one
+  element temporary (the page map's element, 0x40032D2 `lea
+  (0,A0,D6.w),A0`) and two pointer temporaries (0x400325A, 0x4003376
+  `movea.l (d,A2),A0`): a slot per pointer temporary leaves one slot
+  unexplained, none leaves three.  Those three temporaries are held in
+  A0 (no call in their bodies); the parent's element temporary of the
+  memory loop in A3 (0x40034BA, below).  Uncertain:
   whether it copied a pointer already held in a register
   (dpc goes through the variable when it is stable, as above, and
   copies a register-held local's pointer with `movea.l Dn,An`
@@ -15072,7 +15092,9 @@ unit dividing the size; a word against a constant beyond its type
 compared as longwords (the reference folds it, p. 9-32 message 250);
 an ordered test right after an assignment on the move's flags or after a
 `tst`; the address of an element through a pointer beyond 8 bits, `lea
-(0,An,Dx),Ar; lea (d,Ar),Ar`; a computed word index into an array that
+(0,An,Dx),Ar; lea (d,Ar),Ar`, and beyond 16 bits in MC68010 code, `lea
+(0,An,Dx),At; movea.l At,Ar; adda.l #d,Ar` (an MC68020 site only,
+OS_$COLD_START 0x40034B6, section 14); a computed word index into an array that
 does not fit 16 bits widened by its sign; another unit's packed array of
 booleans through `movea.l #sym,An; lea (0,An,Do.w),Aa`, a computed value
 stored as `if v then bset else bclr`; a D0-held local first dereferenced
@@ -16324,6 +16346,25 @@ fields lie within one entry): Uncertain near a 30000 boundary.  The
 MC68010 code folds the whole offset into the displacements (MMAP_$AVAIL
 0xE0CC76, section 5.2) and refuses one beyond 16 bits.  Golden
 `m68020/far_with`.
+
+Through a **pointer** (no symbol to bias) the whole offset goes into the
+`with` temporary: the element's address off the pointer's register into
+a scratch register, copied to the record's register, and the offset
+added there.  OS_$COLD_START 0x40034B0..0x40034C2 `move.l (-4,A6),D1;
+lsl.l #4,D1; lea (0,A0,D1.l),A1; movea.l A1,A3; adda.l #-0x100000,A3;
+bset #6,(A3)` (`with os_cold_mmap_ptr_t(mmap_pa)^[ppn] do pageable :=
+true`, the memory loop; A0 holds `mmap_pa`, loaded before the loop; the
+frame's `link #-88` has the temporary's unaddressed slot at -84 above
+the call temporary at -88, section 2 item 4).  The element named
+directly, not under `with`, keeps section 5.2's `lea (0,An,Dx),Am;
+adda.l #d,Am` (SMD_$RESET_UNIT_DISPLAY 0xE6D7B4).  Verified, one site
+(2026-10-29, ../source `evidence/domain_os/os/cold_start.codegen.md`);
+implemented (`dpc-ir` `Cx::with_stmt`, `isel.rs` `lea_into`; bead
+domain-pascal-4bjx): `dpc` forms the `lea` into the base's register
+when it is free and the temporary in the lowest free address register,
+where the image's A1 and A3 are the allocator's choices with A0 live
+across the loop (bead domain-pascal-tbiu).  The MC68010 image has no
+such site: the same form, best effort.  Golden `m68020/far_ptr_with`.
 
 ### Register saves (Verified)
 
