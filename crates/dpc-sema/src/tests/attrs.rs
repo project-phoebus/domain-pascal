@@ -814,6 +814,34 @@ fn sizes_equal_to_the_storage_change_nothing() {
 }
 
 #[test]
+fn byte_sized_packed_record() {
+    // ref 3.15.5 p. 3-61 ("at least the number of bits required for the
+    // type") read as the fields' bits of a packed record, not 3.10.7's
+    // 16-bit minimum: owner question 52 (reference-clarifications), bead
+    // domain-pascal-7kpw.  SAU9 SCSI_$C90_INT 0x3C4A57A4 copies the
+    // 53C90's status register as one byte.
+    let p = module(
+        "type
+           st = packed record int: boolean; gross: boolean; phase: 0..7 end;
+           reg = record
+             case integer of
+               1: (status: [byte] st);
+               2: (dest: [byte] 0..255);
+           end;
+           regs = [device] record pad: array[1..16] of char; r10: reg; unused_12: integer end;
+         var
+           s: st;
+           b: [byte] st;
+           w: [word] st;",
+    );
+    assert_eq!(size(&p, "st"), 2);
+    assert_eq!(p.types.size(var(&p, "b").ty), 1);
+    assert_eq!(p.types.size(var(&p, "w").ty), 2);
+    assert_eq!(size(&p, "reg"), 2);
+    assert_eq!(offset(&p, "regs", "unused_12"), 18);
+}
+
+#[test]
 fn size_attribute_errors() {
     // ref p. 9-40, message 300: "Size of token1 bits is invalid for
     // specified type", `bad : [byte] number` with number = integer32;
@@ -885,6 +913,12 @@ fn unsettled_size_attributes_are_refused() {
     assert_err(
         "module m; type t = [word] record a: integer end;",
         "Table 3-7 (ref 3.15.5, p. 3-61) gives no minimum size",
+    );
+    // A packed record of more than 8 bits cannot be a byte (its fields'
+    // bits, ref 3.10.7 Table 3-3; bead domain-pascal-7kpw).
+    assert_err(
+        "module m; type t = [byte] packed record a: boolean; b: 0..255 end;",
+        "Size of 8 bits is invalid",
     );
     assert_err(
         "module m; type t = [byte] 'a'..'z';",

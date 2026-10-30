@@ -541,6 +541,15 @@ pub enum Insn {
         src: Ea,
         dst: u8,
     },
+    /// `cmpa.l src,%an`: a pointer held in an address register against a
+    /// variable (SAU9 PROC1_$SET_VT 0x3C416C7A `cmpa.l
+    /// PROC1_$CURRENT_PCB,A2`, `pcb = proc1_$current_pcb`; SAU2 0xE01A7E
+    /// `movea.l p,An; cmpa.l q,An`, 20 sites), or against another register
+    /// (not catalogued; bead domain-pascal-jqp0).
+    Cmpa {
+        src: Ea,
+        dst: u8,
+    },
     /// `<op>.<size> src,%dn` for add, sub, and, or (register destination).
     Alu {
         op: AluOp,
@@ -794,6 +803,7 @@ impl Insn {
             Insn::Movea { src, .. }
             | Insn::Lea { src, .. }
             | Insn::Cmp { src, .. }
+            | Insn::Cmpa { src, .. }
             | Insn::Alu { src, .. }
             | Insn::Mul { src, .. }
             | Insn::Div { src, .. }
@@ -981,6 +991,7 @@ impl fmt::Display for Insn {
             Insn::CmpaImm(n, a) => write!(f, "cmpa.l\t#{},{}", num(*n), Reg::A(*a)),
             Insn::SubaSelf(a) => write!(f, "suba.l\t{},{}", Reg::A(*a), Reg::A(*a)),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
+            Insn::Cmpa { src, dst } => write!(f, "cmpa.l\t{src},{}", Reg::A(*dst)),
             // A symbol's address added or subtracted: the immediate-EA
             // encodings `d0bc`/`90bc` (+ the register's number << 9),
             // which gas does not choose (it writes `addi`/`subi`):
@@ -1190,6 +1201,7 @@ impl Insn {
             Insn::CmpaImm(..) => 6,
             Insn::SubaSelf(_) => 2,
             Insn::Cmp { size, src, .. } | Insn::Alu { size, src, .. } => 2 + src.ext_len(*size),
+            Insn::Cmpa { src, .. } => 2 + src.ext_len(Size::L),
             Insn::AluImm { size, dst, .. } => 2 + Ea::Imm(0).ext_len(*size) + dst.ext_len(*size),
             Insn::Unary { size, dst, .. } => 2 + dst.ext_len(*size),
             Insn::Ext { .. } | Insn::Shift { .. } | Insn::Swap(_) | Insn::MoveFromSr { .. } => 2,

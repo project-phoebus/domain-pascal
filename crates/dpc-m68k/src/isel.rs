@@ -1141,6 +1141,23 @@ fn select_body_once(
             s.ptr_locals.push((o, None));
         }
     }
+    if s.cpu.is_68020() {
+        // MC68020 mode: every other dereferenced pointer local in an
+        // address register ([`free_pointer_locals`]).
+        taken.extend(call_ptrs.iter().copied());
+        let free = free_pointer_locals(f, &taken);
+        if !free.is_empty() {
+            best_effort(
+                f.span,
+                "a pointer local assigned other than from pointer functions, held in an address \
+                 register for the whole body under `-cpu mathchip` (the SAU9 image holds such \
+                 locals in a data or an address register by a rule not found: SCSI_$C90_INT \
+                 0x3C4A5826 A3 and 0x3C4A58D2 D4, SCSI_$RESET_DEVICE 0x3C4A650C D2 and \
+                 0x3C4A6518 A2; codegen-patterns 12.5; bead domain-pascal-jqp0) is",
+            )?;
+            s.ptr_locals.extend(free.into_iter().map(|o| (o, None)));
+        }
+    }
     s.entry_tail = s.out.len().checked_sub(1);
     let body = s.seq(f, &f.body, Tail::END);
     if let Some(mode) = s.slot_wanted {
@@ -2725,6 +2742,7 @@ fn memory_operands(i: &Insn) -> Vec<&Ea> {
         Insn::Move { src, dst, .. } => vec![src, dst],
         Insn::Movea { src, .. }
         | Insn::Cmp { src, .. }
+        | Insn::Cmpa { src, .. }
         | Insn::Alu { src, .. }
         | Insn::Mul { src, .. }
         | Insn::Div { src, .. } => vec![src],
@@ -3245,7 +3263,7 @@ fn autoinc_regs(insn: &Insn) -> Vec<u8> {
     let eas: Vec<&Ea> = match insn {
         Insn::Move { src, dst, .. } => vec![src, dst],
         Insn::Clr { dst, .. } | Insn::Tst { dst, .. } => vec![dst],
-        Insn::Cmp { src, .. } | Insn::Alu { src, .. } => vec![src],
+        Insn::Cmp { src, .. } | Insn::Cmpa { src, .. } | Insn::Alu { src, .. } => vec![src],
         // `cmpm.l (Ay)+,(Ax)+` uses both up (0xE5AFF4, 0xE5B0C2, 0xE60EE4:
         // A1 last written by a `cmpm`, the element's `lea` into A1).
         Insn::Cmpm { src, dst, .. } => return vec![*src, *dst],
@@ -6838,6 +6856,42 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
 /// frame as before (codegen-patterns 12.5: often in a register in the
 /// image, AST_$ADD_AOTES 0xE010C0; not settled).
 fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
+    held_pointer_locals(f, exclude, false)
+}
+
+/// MC68020 mode: the pointer locals of `f` held in an address register for
+/// the whole body whatever their assignments' values, as
+/// [`call_pointer_locals`] holds those assigned from calls: assigned
+/// first, dereferenced somewhere, otherwise read whole (a `nil` test, a
+/// push by value: `pea (An)`) or assigned (`lea` straight into the
+/// register, `movea.l`, `suba.l An,An` for `nil`, `movea.l A0,An` after a
+/// call), never addressed, read in part or reached by a nested routine.
+///
+/// The SAU9 image holds such locals in registers, in a data or an address
+/// register by a rule not found (../source's SCSI sidecars, 2026-10-29):
+/// SCSI_$C90_INT's target in A3 (0x3C4A5826 `lea (0x2c,A2,D0.w),A3`,
+/// 0x3C4A582C `suba.l A3,A3`, 0x3C4A58CC `cmpa.w #0,A3`, pushed `pea
+/// (A3)`) and its request in D4 (0x3C4A58D2 `move.l (A3),D4`, pushed
+/// `move.l D4,-(SP)`); SCSI_$RESET_DEVICE's control block in D2
+/// (0x3C4A650C `move.l A1,D2` after the element's `lea`, 0x3C4A6510
+/// `movea.l D2,A1` to dereference it), its target in A2 (0x3C4A6518 `lea
+/// (0x2c,A1,D1.w),A2`) and its request in A3 (0x3C4A6564 `movea.l A0,A3`);
+/// scsi_start_next's `found` in D3 (0x3C4A70BC `clr.l D3`, 0x3C4A70E2
+/// `move.l A3,D3`, 0x3C4A7118 `movea.l D3,A3`).  Both classes keep the
+/// local out of its frame slot, which the MC68010 rules
+/// ([`call_pointer_locals`], [`loop_pointer_locals`], codegen-patterns
+/// 12.5) leave it in for every other assignment (the SAU2 image also
+/// holds some, AST_$ADD_AOTES 0xE010C0, LOG_$READ's worker 0xE177CC D3:
+/// not settled there).  Best effort (not byte-identical): the address
+/// register for all of them (bead domain-pascal-jqp0; the class is bead
+/// domain-pascal-tbiu's).  `exclude`: locals the other rules hold.
+fn free_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
+    held_pointer_locals(f, exclude, true)
+}
+
+/// [`call_pointer_locals`] (`free == false`) and [`free_pointer_locals`]
+/// (`free == true`).
+fn held_pointer_locals(f: &Function, exclude: &[i32], free: bool) -> Vec<i32> {
     struct St {
         /// The local's type: a pointer, or a 4-byte integer
         /// ([`integer_call_local`]).
@@ -6846,6 +6900,11 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
         /// something else.
         first: Option<bool>,
         bad: bool,
+        /// Any assignment's value and a push by value are allowed
+        /// ([`free_pointer_locals`]).
+        free: bool,
+        /// Dereferenced somewhere.
+        deref: bool,
     }
     /// Whether `e` reads the local at `off` whole (not as a pointer it
     /// dereferences).
@@ -6867,6 +6926,8 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
     fn scan<'a>(off: i32, st: &mut St, go: impl FnOnce(&mut dyn FnMut(Node<'a>))) {
         let (mut loads, mut addrs) = (0, 0);
         let mut bad = false;
+        let mut deref = false;
+        let free = st.free;
         go(&mut |n| match n {
             Node::Expr(Expr::Load {
                 addr: Addr::Frame(o),
@@ -6876,7 +6937,11 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 bad |= *ty != Scalar::POINTER;
             }
             Node::Addr(Addr::Frame(o)) if off <= *o && *o < off + 4 => addrs += 1,
-            Node::Call(c) => {
+            Node::Addr(Addr::Indirect { base, .. }) if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. } if *o == off) =>
+            {
+                deref = true;
+            }
+            Node::Call(c) if !free => {
                 for a in &c.args {
                     if let Arg::Value { value, .. } | Arg::Temp { value, .. } = a {
                         bad |= whole_read(value, off);
@@ -6887,6 +6952,7 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
         });
         // Addressed, or read in part.
         st.bad |= bad || addrs != loads;
+        st.deref |= deref;
         if loads > 0 && st.first.is_none() {
             st.first = Some(false);
         }
@@ -6902,7 +6968,11 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     value,
                 } if *o == off => {
                     scan(off, st, |v| walk_expr(value, v));
-                    if value.ty() != st.ty || a0_call(value).is_none() {
+                    if st.free {
+                        if value.ty().bytes() != 4 {
+                            st.bad = true;
+                        }
+                    } else if value.ty() != st.ty || a0_call(value).is_none() {
                         st.bad = true;
                     }
                     if st.first.is_none() {
@@ -6955,7 +7025,8 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
     f.scalar_locals
         .iter()
         .filter(|l| {
-            (l.ty == Scalar::POINTER || is_long_integer(l.ty)) && !exclude.contains(&l.offset)
+            (l.ty == Scalar::POINTER || (!free && is_long_integer(l.ty)))
+                && !exclude.contains(&l.offset)
         })
         .filter(|l| {
             !f.uplevel_refs
@@ -6967,10 +7038,13 @@ fn call_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                 ty: l.ty,
                 first: None,
                 bad: false,
+                free,
+                deref: false,
             };
             stmts(&f.body, l.offset, &mut st);
             !st.bad
                 && st.first == Some(true)
+                && (!free || st.deref)
                 && (l.ty == Scalar::POINTER || integer_call_local(f, l.offset))
         })
         .map(|l| l.offset)
@@ -12745,12 +12819,24 @@ impl Selector {
                     _ => None,
                 };
                 let Some(Reg::D(d)) = held else {
-                    if held.is_some() {
-                        return Err(unsupported(
-                            self.span,
-                            "comparing two variables when the left one is held in an address \
-                             register is",
-                        ));
+                    if let Some(Reg::A(a)) = held {
+                        // The left one held in an address register: `cmpa.l
+                        // <right>,An` (SAU9 PROC1_$SET_VT 0x3C416C7A `cmpa.l
+                        // PROC1_$CURRENT_PCB,A2`, `pcb = proc1_$current_pcb`
+                        // with the local in A2; SAU2 0xE01A7E `movea.l p,An;
+                        // cmpa.l q,An`, 20 sites; bead domain-pascal-jqp0).
+                        // Against a value held in a register: not
+                        // catalogued, best effort.
+                        let src = self.operand(raddr)?;
+                        if matches!(src, Ea::Reg(_)) {
+                            best_effort(
+                                self.span,
+                                "comparing a pointer held in an address register with a value \
+                                 held in a register (`cmpa.l Rn,An`: not catalogued) is",
+                            )?;
+                        }
+                        self.out.push(Insn::Cmpa { src, dst: a });
+                        return Ok(rel_cond(op, signed));
                     }
                     let rheld = match raddr {
                         Addr::Frame(o) => self.pinned(*o),
@@ -12839,14 +12925,11 @@ impl Selector {
                     // was loaded cannot be seen; the left one is.
                     return self.compare_computed(op, lhs, rhs);
                 };
+                // The right one held in an address register: `cmp.l An,Dn`
+                // (SAU9 scsi_remove_done_req 0x3C4A4CC6 `cmp.l A0,D2`, `req =
+                // p`: the by-value parameter in D2, the local in A0; bead
+                // domain-pascal-jqp0).
                 let src = self.operand(raddr)?;
-                if let Ea::Reg(Reg::A(_)) = src {
-                    return Err(unsupported(
-                        self.span,
-                        "comparing a value held in a data register with one held in an address \
-                         register (not catalogued) is",
-                    ));
-                }
                 // Two values held in data registers: the left one's
                 // register is the destination, `cmp.<s> Dright,Dleft`, the
                 // relation as written, for `=`/`<>` too (codegen-patterns
@@ -13687,6 +13770,20 @@ impl Selector {
                 8 => return self.copy8(dst, src),
                 _ => {}
             }
+        }
+        if !chars && bytes == 1 {
+            // A one-byte record (a packed record under a `[byte]` size
+            // attribute, `dpc-sema` `sized`): one `move.b` (SAU9
+            // SCSI_$C90_INT 0x3C4A57A4 `move.b (16,A0),(-72,A6)`, the
+            // 53C90's status register into a 2-byte local; bead
+            // domain-pascal-7kpw).
+            return self.store(
+                dst,
+                &Expr::Load {
+                    addr: src.clone(),
+                    ty: Scalar::signed(Width::Byte),
+                },
+            );
         }
         if !chars {
             if bytes % 2 != 0 || bytes < 10 {

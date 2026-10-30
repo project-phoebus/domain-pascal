@@ -1389,6 +1389,19 @@ impl<'t> Checker<'t> {
                     .map_or(0, |(_, hi)| hi.max(0));
                 ((hi + 1).min(u32::MAX as i64) as u32, true)
             }
+            // A packed record: the bits its fields occupy (ref 3.10.7
+            // Table 3-3), so that one of at most 8 bits takes `[byte]` and
+            // is a one-byte object, although 3.10.7 (p. 3-35) gives a
+            // packed record a minimum size of 16 bits: the 53C90's
+            // one-byte registers in the SAU9 SCSI driver are copied as
+            // one byte into 2-byte locals (SCSI_$C90_INT 0x3C4A57A4
+            // `move.b (16,A0),(-72,A6)`, then 0x3C4A57B0 `move.w
+            // (-68,A6),D1; btst #8,D1` on the local).  Whether p. 3-61's
+            // "the number of bits required for the type" is the fields'
+            // bits or the 16-bit minimum is an owner question
+            // (reference-clarifications 52; Uncertain; bead
+            // domain-pascal-7kpw).
+            TypeKind::Record(rec) if rec.packed => (packed_record_bits(&rec).max(1), true),
             _ => {
                 self.unsupported(
                     span,
@@ -5500,4 +5513,26 @@ fn label_name(l: &ast::Label) -> String {
         ast::Label::Int(n, _) => n.to_string(),
         ast::Label::Ident(i) => i.name.clone(),
     }
+}
+
+/// The bits a packed record's fields occupy (ref 3.10.7): the end of its
+/// last field, over the variant part's arms ([`Checker::sized`]).
+fn packed_record_bits(rec: &crate::types::RecordType) -> u32 {
+    fn end(fields: &[crate::types::Field], v: Option<&crate::types::VariantPart>) -> u32 {
+        let mut e = fields
+            .iter()
+            .filter_map(|f| f.bits.map(|b| b.bit + b.width))
+            .max()
+            .unwrap_or(0);
+        if let Some(v) = v {
+            if let Some(b) = v.tag.as_ref().and_then(|t| t.bits) {
+                e = e.max(b.bit + b.width);
+            }
+            for a in &v.arms {
+                e = e.max(end(&a.fields, a.variant.as_deref()));
+            }
+        }
+        e
+    }
+    end(&rec.fields, rec.variant.as_deref())
 }

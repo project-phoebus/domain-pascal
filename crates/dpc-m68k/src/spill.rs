@@ -310,7 +310,11 @@ fn frame_touched(insns: &[Insn], d: i32) -> bool {
             // Every operand but a whole-register load's source may be
             // written (conservative: also those only read).
             let reads_only = match i {
-                Insn::Move { .. } | Insn::Movea { .. } | Insn::Cmp { .. } | Insn::Alu { .. } => 1,
+                Insn::Move { .. }
+                | Insn::Movea { .. }
+                | Insn::Cmp { .. }
+                | Insn::Cmpa { .. }
+                | Insn::Alu { .. } => 1,
                 _ => 0,
             };
             eas.iter().skip(reads_only).any(|ea| hits(ea, 4))

@@ -1005,6 +1005,32 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     An odd-address reference itself is no longer refused under `-cpu
     mathchip` (item 25).*
 
+52. **3.15.5, p. 3-61 (PDF checked: the text is as the OCR has it) with
+    3.10.7, p. 3-35 (a `[byte]` size attribute on a packed record).**
+    P. 3-61: "Every data type has a minimum size.  A size attribute must
+    specify at least the number of bits required for the type to which
+    it is applied", and Table 3-7 lists only simple types; 3.10.7: "The
+    minimum size of a packed record is 16 bits."  The SAU9 SCSI driver
+    reads the 53C90's one-byte registers (a status byte of five booleans
+    and a 3-bit phase, the interrupt byte of eight booleans) with
+    `move.b` into 2-byte locals it then tests as words: SCSI_$C90_INT
+    0x3C4A57A4 `move.b (16,A0),(-72,A6)`, 0x3C4A57AA `move.b
+    (20,A0),(-68,A6)`, then 0x3C4A57B0 `move.w (-68,A6),D1; btst #8,D1`
+    and 0x3C4A57F2 `tst.w (-68,A6); bpl.s`.  A packed record of 8 bits
+    is 2 bytes by 3.10.7, so the register fields must be one-byte objects
+    of the same packed type: `[byte] c90_status_t` on the field (p. 3-60
+    lists record fields among the objects a size attribute applies to),
+    the one byte copied into the plain local.  Is "the number of bits
+    required for the type" of a packed record the bits its fields occupy
+    (so that `[byte]` is legal when they fit 8), or 3.10.7's 16-bit
+    minimum (so that the original declared something else)?  *Current:
+    the fields' bits; `[byte]` on a packed record of at most 8 bits is a
+    one-byte object, byte aligned like `[byte] 0..255`, and the
+    assignment between it and the plain type copies the one byte
+    (`crates/dpc-sema/src/check.rs` `sized`, `crates/dpc-ir/src/lower.rs`
+    `copy`; test `byte_sized_packed_record`; bead domain-pascal-7kpw).
+    Uncertain.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

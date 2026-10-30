@@ -7943,10 +7943,20 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   **Implemented** (bead domain-pascal-aaj; `isel.rs`, `compare` and
   `compare_computed`): the left operand loaded into a new data register
   (Uncertain: the image cannot say which source operand that was), the
-  right one the `cmp` operand.  Refused: two pointer variables (20
-  `movea.l M1,An; cmpa.l M2,An` in compiled code, e.g. 0xE01A7E, against
-  `move.l; cmp.l` pairs that may be integers or pointers: not told
-  apart).  Conformance unit `acl_clear_super.pas` (byte-identical).
+  right one the `cmp` operand.  Best effort: two pointer variables in
+  memory (20 `movea.l M1,An; cmpa.l M2,An` in compiled code, e.g.
+  0xE01A7E, against `move.l; cmp.l` pairs that may be integers or
+  pointers: not told apart).  A pointer held in an address register
+  against a variable is `cmpa.l M,An` (SAU9 PROC1_$SET_VT 0x3C416C7A
+  `cmpa.l PROC1_$CURRENT_PCB,A2`, `pcb = proc1_$current_pcb` with the
+  local in A2; the same instruction as the 20 sites), and a value held
+  in a data register against a pointer held in an address register is
+  `cmp.l An,Dn` (SAU9 scsi_remove_done_req 0x3C4A4CC6 `cmp.l A0,D2`,
+  `req = p`, the by-value parameter in D2 and the local in A0; both
+  Verified at one site, implemented, bead domain-pascal-jqp0; `cmpa.l`
+  against a value held in a register is not catalogued, best effort).
+  Conformance unit `acl_clear_super.pas` (byte-identical); golden
+  `data/ptr_compare`.
 - **A variable in memory against a register-held one, and two held
   values (Verified at the sites; survey; implemented, bead
   domain-pascal-5xnz).**  A held value is a parameter loaded at entry or
@@ -15164,7 +15174,10 @@ against the C in `../source`:
   KBD_$PUT's descriptor in A2 from 0xE1CEC6); `dpc` holds those
   assigned from pointer functions in an address register (section 3,
   "Pointer locals"; bead domain-pascal-500) and those of loops (below);
-  any other pointer local that is dereferenced stays in the frame.
+  any other pointer local that is dereferenced stays in the frame in
+  MC68010 code, and is held in an address register under `-cpu mathchip`
+  (section 14, "Pointer locals in registers"; best effort, bead
+  domain-pascal-jqp0).
   That is a known divergence (bead domain-pascal-dgb review): an ad-hoc
   count over compiled code finds 186 `movea.l <memory>,An` (A2..A4, not
   a parameter slot, not a call's A0) whose register is dereferenced
@@ -15362,7 +15375,8 @@ whole assignments, the first of them an assignment of a non-constant
 value by a statement of the routine's own statement part, another
 assignment inside a loop, and the body makes no call (fitted to
 0xE3CCCE; **Uncertain**).  Every assignment writes that register, a load
-straight into it.  Other pointer locals stay in the frame.  Unit test
+straight into it.  Other pointer locals stay in the frame in MC68010
+code (section 14 for MC68020).  Unit test
 `loop_pointer_local_rule`; golden `tests/golden/loops/while` (`whl_$walk`);
 conformance `tests/conformance/disk_set_chain_status.pas`.
 
@@ -16465,6 +16479,68 @@ the sense answer's longwords lie; what the original declared there is
 not visible (reference-clarifications item 51, for the owner).  Merging
 of constant stores across an odd address in the frame or the module's
 static data stays off (section 13): no site.
+
+### Pointer locals in registers (Reported by ../source, checked at the sites given; implemented best effort, bead domain-pascal-jqp0)
+
+The SAU9 image holds a routine's pointer locals in registers whatever
+they are assigned from, where the MC68010 rules of section 12.5 keep
+every one not assigned from pointer functions or stepped by a loop in
+its frame slot.  ../source's SCSI sidecars (2026-10-29,
+`evidence/domain_os/scsi/*.codegen.md`) count 305 longword frame-slot
+reads in dpc's SCSI_WIRED_PROC against the image's 31, enough to push
+the driver past the 11 pages it wires for itself.  The sites:
+
+- SCSI_$C90_INT: the target in A3 (0x3C4A5826 `lea (0x2c,A2,D0.w),A3`
+  for `addr(cb^.target[cb^.cur_target])`, 0x3C4A582C `suba.l A3,A3` for
+  `nil`, 0x3C4A58CC `cmpa.w #0,A3`, `pea (A3)` when passed) and the
+  request in D4 (0x3C4A58D2 `move.l (A3),D4` for `tgt^.pend_head`,
+  pushed `move.l D4,-(SP)`);
+- SCSI_$RESET_DEVICE: the control block in D2 (0x3C4A650C `move.l
+  A1,D2` after the element's `lea` into A1, 0x3C4A6510 `movea.l D2,A1`
+  to reach its fields, 0x3C4A655C `move.l D2,-(SP)`), the target in A2
+  (0x3C4A6518 `lea (0x2c,A1,D1.w),A2`, `tst.b (64,A2)`), the request in
+  A3 (0x3C4A6564 `movea.l A0,A3`, section 3's rule);
+- scsi_start_next: `found` in D3 (0x3C4A70BC `clr.l D3`, 0x3C4A70E2
+  `move.l A3,D3` after `lea (0x2c,A2,D4.w),A3`, 0x3C4A7114 `tst.l D3`,
+  0x3C4A7118 `movea.l D3,A3; tst.b (65,A3)`).
+
+Which locals take a data register (the control block, the request,
+`found`: `lea` results moved, dereferences through a copy) and which an
+address register (the targets) is not settled: the data-register ones
+are all pushed by value and dereferenced once or twice, the
+address-register ones dereferenced many times, but three routines
+cannot fix a cost rule (Uncertain; the SAU2 image holds some such
+locals too, AST_$ADD_AOTES 0xE010C0, LOG_$READ's worker 0xE177CC D3,
+and keeps others in the frame, section 12.5).  **Implemented** (best
+effort, not byte-identical; `isel.rs` `free_pointer_locals`): under
+`-cpu mathchip` a pointer local assigned first, dereferenced somewhere,
+otherwise only read whole or assigned whole, never addressed, read in
+part or reached by a nested routine, is held in an address register for
+the whole body as section 3's call-assigned locals are: `lea` straight
+into it, `movea.l` for a load or a call's A0, `suba.l An,An` for `nil`,
+`cmpa.w #0,An` for a `nil` test, `pea (An)` when pushed, `cmpa.l M,An`
+and `cmp.l An,Dn` for compares (section 7.1).  Its frame slot stays
+allocated (12.5).  The SAU9 SCSI module's code goes from 12844 to 11732
+bytes with it (the image's is 9792), and the sau9 tree's from 504988 to
+488064, with no new refusal.  No golden (best effort); the forms are
+those of section 3's call-assigned locals (golden `results/pointer_locals`).
+
+### One-byte packed records: `[byte]` (Uncertain: owner question 52; implemented, bead domain-pascal-7kpw)
+
+SCSI_$C90_INT reads the 53C90's status and interrupt registers, packed
+records of 8 bits, as one byte each into 2-byte locals, which it then
+tests as words: 0x3C4A57A4 `move.b (16,A0),(-72,A6)`, 0x3C4A57AA
+`move.b (20,A0),(-68,A6)`, then 0x3C4A57B0 `move.w (-68,A6),D1; btst
+#8,D1` and 0x3C4A57F2 `tst.w (-68,A6); bpl.s`.  A packed record is at
+least 16 bits (ref 3.10.7, p. 3-35), so the register fields are read
+as one-byte objects of the same type, `[byte] c90_status_t` on the
+field (../source `scsi/scsi_c90.ins.pas`), and the assignment copies the
+one byte.  Whether p. 3-61 allows `[byte]` on a packed record whose
+fields fit 8 bits is reference-clarifications 52.  `dpc` (`dpc-sema`
+`sized`, `dpc-ir` `copy`, `isel.rs` `copy`): the attribute gives a
+one-byte, byte-aligned object; an assignment between it and the plain
+type copies one byte, `move.b`, for both CPUs (no MC68010 site).
+Golden `data/sized_packed_record`; sema test `byte_sized_packed_record`.
 
 ### Register choices (Uncertain; bead domain-pascal-tbiu)
 

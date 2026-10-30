@@ -3902,6 +3902,20 @@ impl Cx<'_> {
                 {
                     out.push(copy(p, s, target, value)?)
                 }
+                // The same packed record with and without a `[byte]` size
+                // attribute (the 1-byte side is a scalar's size, the
+                // 2-byte side a word's): the one byte copied as a block
+                // ([`copy`]; bead domain-pascal-7kpw).
+                SStmtKind::Assign { target, value }
+                    if p.types.canon(target.ty) == p.types.canon(value.ty)
+                        && p.types.size(target.ty) != p.types.size(value.ty)
+                        && matches!(
+                            p.types.kind(p.types.canon(target.ty)),
+                            TypeKind::Record(_)
+                        ) =>
+                {
+                    out.push(copy(p, s, target, value)?)
+                }
                 SStmtKind::Assign { target, value }
                     if is_set(p, target.ty) && p.types.size(target.ty) > 4 =>
                 {
@@ -6883,12 +6897,27 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             ));
         }
     }
-    if p.types.size(value.ty) != bytes {
+    let bytes = if p.types.size(value.ty) == bytes {
+        bytes
+    } else if p.types.canon(value.ty) == p.types.canon(target.ty)
+        && p.types.size(value.ty).min(bytes) == 1
+    {
+        // The same packed record with and without a `[byte]` size
+        // attribute (ref 3.15.5; `dpc-sema` `sized`, bead
+        // domain-pascal-7kpw): the one byte is copied, the 2-byte side's
+        // other byte left alone (SAU9 SCSI_$C90_INT 0x3C4A57A4 `move.b
+        // (16,A0),(-72,A6)` and 0x3C4A57AA `move.b (20,A0),(-68,A6)`, the
+        // 53C90's status and interrupt registers into locals the code
+        // then tests as words, 0x3C4A57B0 `move.w (-68,A6),D1; btst
+        // #8,D1`; Verified at those sites under ../source's reading of
+        // the declarations).
+        1
+    } else {
         return Err(unsupported(
             value.span,
             "assigning a record or array of another size is",
         ));
-    }
+    };
     // A side with volatile or device parts (ref 3.15.1-3.15.3) is copied
     // with the ordinary block copy's moves, its address wrapped in
     // [`Addr::Volatile`] so that the selector marks each move as a

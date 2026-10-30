@@ -353,6 +353,11 @@ fn fx(insn: &Insn) -> Fx {
             f.use_(Reg::D(*dst));
             f.cc_set = true;
         }
+        Insn::Cmpa { src, dst } => {
+            f.src(src, Size::L);
+            f.use_(Reg::A(*dst));
+            f.cc_set = true;
+        }
         Insn::Alu { size, src, dst, .. } => {
             f.src(src, *size);
             f.rmw(&Ea::Reg(Reg::D(*dst)), *size);
