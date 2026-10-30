@@ -989,7 +989,12 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     0x13, used as a number), win_scsi_request_sense 0x3C41B284 `move.l
     (-53,A6),(0xcdb,A5,D0.l)` and 0x3C41B2A4 `move.l (-53,A6),(64,A2)`
     (a REQUEST SENSE answer's bytes 3..6, stored at byte 5 of a 10-byte
-    log entry; ../source/docs/pascal-translation-notes.md gap 301).  The
+    log entry; ../source/docs/pascal-translation-notes.md gap 301), and
+    IO_$INIT's module-local helper 0x3C439010 (io_$match_device in
+    ../source) at 0x3C439032 `move.l (3,A1),D3; cmp.l (3,A0),D3`: bytes
+    3..6 of two 8-byte PROM device records, reached through its two
+    by-address parameters, whose word at offset 0 is tested for bit 8
+    and whose byte at offset 2 is compared elsewhere (gap 231).  The
     image cannot show the declarations: a byte-aligned longword the
     MC68020 compiler lays out without the crossing rule, a four-char
     array copied as one longword, or a type transfer.  Did the rule
