@@ -131,6 +131,43 @@ fn natural_alignment_environment() {
     }
 }
 
+/// Owner ruling (2026-10-30) on reference-clarifications item 51: for
+/// the MC68020 targets an explicit `aligned(0)` field may cross two word
+/// boundaries (SAU9 io_$match_device 0x3C439032 `move.l (3,A1),D3;
+/// cmp.l (3,A0),D3`: bytes 3..6 of an 8-byte PROM device record).  The
+/// MC68010 keeps the reference's rule (3.10.5.5 p. 3-26); so does a
+/// field without the attribute.  Bead domain-pascal-meel.
+#[test]
+fn byte_aligned_field_crossing_two_words() {
+    let src = "type
+           bl = [aligned(0)] integer32;
+           d_t = record f, u, c: char; id: [aligned(0)] integer32; z: char end;
+           n_t = record f, u, c: char; id: bl; z: char end;
+           w_t = record f, u, c: char; id: integer32; z: char end;
+           a_t = record c: char; w: [aligned(0)] integer16; l: [aligned(0)] integer32 end;";
+    let p = module(src);
+    for r in ["d_t", "n_t", "w_t"] {
+        assert_eq!(offset(&p, r, "id"), 4, "{r}");
+        assert_eq!(offset(&p, r, "z"), 8, "{r}");
+        assert_eq!(size(&p, r), 10, "{r}");
+    }
+    // The word at 1 crosses one boundary; the longword at 3 would cross
+    // two, so it goes to 4.
+    assert_eq!(offset(&p, "a_t", "w"), 1);
+    assert_eq!(offset(&p, "a_t", "l"), 4);
+    let p = module_68020(src);
+    for r in ["d_t", "n_t"] {
+        assert_eq!(offset(&p, r, "id"), 3, "{r}");
+        assert_eq!(offset(&p, r, "z"), 7, "{r}");
+        assert_eq!(size(&p, r), 8, "{r}");
+    }
+    assert_eq!(offset(&p, "w_t", "id"), 4);
+    assert_eq!(size(&p, "w_t"), 10);
+    assert_eq!(offset(&p, "a_t", "w"), 1);
+    assert_eq!(offset(&p, "a_t", "l"), 3);
+    assert_eq!(size(&p, "a_t"), 8);
+}
+
 #[test]
 fn same_layout_in_all_environments() {
     // ref 3.15.6.4 pp. 3-72..3-73, Figures 3-28, 3-29 (PDF): S2 is a 0, b

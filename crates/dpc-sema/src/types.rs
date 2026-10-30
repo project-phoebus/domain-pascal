@@ -184,13 +184,16 @@ impl BitPos {
     /// The field is a whole object of `size` bytes at an address an
     /// object of that size can be accessed at: a byte anywhere, anything
     /// longer at an even address (MC68000/68010: word and longword
-    /// accesses need an even address).  A packed record is word aligned
-    /// (ref 3.10.7: "always starts the first field of a packed record on a
-    /// word boundary"), so the parity of the field's byte offset is that
-    /// of its address.  Such a field is accessed like an unpacked one; any
-    /// other is a bit field.
-    pub fn is_whole_object(self, size: u32) -> bool {
-        self.whole_bytes() == Some(size) && (size == 1 || (self.bit / 8) % 2 == 0)
+    /// accesses need an even address) or, with `unaligned` (the MC68020
+    /// modes, [`TypeTable::unaligned_access`]), at any byte: SAU9
+    /// io_$match_device 0x3C439032 `move.l (3,A1),D3; cmp.l (3,A0),D3`
+    /// reads bytes 3..6 of an 8-byte record as one longword.  A packed
+    /// record is word aligned (ref 3.10.7: "always starts the first field
+    /// of a packed record on a word boundary"), so the parity of the
+    /// field's byte offset is that of its address.  Such a field is
+    /// accessed like an unpacked one; any other is a bit field.
+    pub fn is_whole_object(self, size: u32, unaligned: bool) -> bool {
+        self.whole_bytes() == Some(size) && (size == 1 || unaligned || (self.bit / 8) % 2 == 0)
     }
 }
 
@@ -369,6 +372,13 @@ pub struct TypeTable {
     types: Vec<TypeInfo>,
     /// Ids of the predeclared types (valid after [`TypeTable::new`]).
     pub builtins: Builtins,
+    /// The target reads words and longwords at odd addresses
+    /// ([`dpc_target::Target::unaligned_access`]; the MC68020 modes).
+    /// Then an explicit `aligned(0)` field may cross two word boundaries
+    /// ([`TypeTable::layout_fields`], [`TypeTable::layout_packed_fields`])
+    /// and a whole-byte packed field at an odd byte is a whole object
+    /// ([`BitPos::is_whole_object`]).
+    pub unaligned_access: bool,
 }
 
 /// Ids of the predeclared types.
@@ -409,6 +419,7 @@ impl TypeTable {
         let mut t = TypeTable {
             types: Vec::new(),
             builtins: Builtins::default(),
+            unaligned_access: false,
         };
         let b = Builtins {
             error: t.push_raw(TypeKind::Error, None, 0, 1, 1, 1),
@@ -1196,6 +1207,16 @@ impl TypeTable {
     /// boundary and does not cross it).  Byte- and word-aligned types
     /// start at the next byte or word.  Returns the end bit, or the index
     /// of a field whose type cannot be packed and why.
+    ///
+    /// Under [`TypeTable::unaligned_access`] (the MC68020 modes) a field
+    /// with an explicit `aligned(0)` starts at the next free byte and may
+    /// cross two 16-bit boundaries (owner ruling 2026-10-30 on
+    /// reference-clarifications item 51: the SAU9 image's byte-3
+    /// longwords, io_$match_device 0x3C439032, SCSI_WAIT 0x3C4778F2 at
+    /// SCSI_$CB + 0x13, win_scsi_request_sense 0x3C41B284; bead
+    /// domain-pascal-meel).  Elsewhere the attribute is accepted where it
+    /// agrees with Table 3-3 (`check.rs` `lay_out`) and the rule above
+    /// places the field.
     pub fn layout_packed_fields(
         &self,
         fields: &mut [Field],
@@ -1204,12 +1225,14 @@ impl TypeTable {
         let mut at = start;
         for (i, f) in fields.iter_mut().enumerate() {
             let (n, al) = self.packed_field_bits(f.ty).map_err(|e| (i, e))?;
+            let byte_free = self.unaligned_access && self.get(f.ty).attrs.align == Some(1);
             let mut pos = match al {
+                _ if byte_free => round_up(at, 8),
                 PackAlign::Bit => at,
                 PackAlign::Byte => round_up(at, 8),
                 PackAlign::Word => round_up(at, 16),
             };
-            if n > 0 && (pos + n - 1) / 16 - pos / 16 >= 2 {
+            if !byte_free && n > 0 && (pos + n - 1) / 16 - pos / 16 >= 2 {
                 pos = round_up(pos, 16);
             }
             // An unsigned subrange of 31 bits takes 32 where it starts on a
@@ -1257,7 +1280,14 @@ impl TypeTable {
     /// - "A byte aligned field may not cross two word boundaries" (p.
     ///   3-26): such a field goes to the next word (3.15.6.3 p. 3-72: a
     ///   byte-aligned integer32 after a char lands at 2, as a word-aligned
-    ///   one does).
+    ///   one does).  Not under [`TypeTable::unaligned_access`] (the
+    ///   MC68020 modes) for a field with an explicit `aligned(0)`: it
+    ///   stays at the next byte (owner ruling 2026-10-30 on
+    ///   reference-clarifications item 51; SAU9 io_$match_device
+    ///   0x3C439032 `move.l (3,A1),D3; cmp.l (3,A0),D3`, bytes 3..6 of an
+    ///   8-byte PROM device record; bead domain-pascal-meel).  The
+    ///   MC68010 keeps the rule: a longword at an odd address is an
+    ///   address error there.
     pub fn layout_fields(&self, fields: &mut [Field], start: u32, natural: bool) -> u32 {
         let mut off = start;
         for f in fields {
@@ -1268,7 +1298,8 @@ impl TypeTable {
                 None => fi.field_align,
             };
             off = round_up(off, align);
-            if align == 1 && fi.size > 1 {
+            let byte_free = self.unaligned_access && fi.attrs.align == Some(1);
+            if align == 1 && fi.size > 1 && !byte_free {
                 // Word boundaries strictly inside the field.
                 let crossed = (off.saturating_add(fi.size) - 1) / 2 - off / 2;
                 if crossed >= 2 {

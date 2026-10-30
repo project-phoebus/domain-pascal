@@ -94,6 +94,33 @@ fn boundary_crossing_rule() {
     assert_eq!(size(&p, "r"), 12);
 }
 
+/// Owner ruling (2026-10-30) on reference-clarifications item 51, in a
+/// packed record: for the MC68020 targets an explicit `aligned(0)` field
+/// starts at the next free byte and may cross two 16-bit boundaries
+/// (../source reproducer g231: `id: [aligned(0)] integer32` at byte 3 of
+/// the 8-byte PROM device record, io_$match_device 0x3C439032).  The
+/// MC68010 places it by Table 3-3 (word aligned).  Bead domain-pascal-meel.
+#[test]
+fn byte_aligned_field_crossing_two_words() {
+    let src = "type
+           d_t = packed record f: 0..255; u: 0..255; c: 0..255;
+                               id: [aligned(0)] integer32; z: char end;
+           b_t = packed record b: boolean; id: [aligned(0)] integer32 end;";
+    let p = module(src);
+    assert_eq!(bits(&p, "d_t", "id"), (32, 32));
+    assert_eq!(bits(&p, "d_t", "z"), (64, 8));
+    assert_eq!(size(&p, "d_t"), 10);
+    assert_eq!(bits(&p, "b_t", "id"), (16, 32));
+    assert_eq!(size(&p, "b_t"), 6);
+    let p = module_68020(src);
+    assert_eq!(bits(&p, "d_t", "id"), (24, 32));
+    assert_eq!(offset(&p, "d_t", "id"), 3);
+    assert_eq!(bits(&p, "d_t", "z"), (56, 8));
+    assert_eq!(size(&p, "d_t"), 8);
+    assert_eq!(bits(&p, "b_t", "id"), (8, 32));
+    assert_eq!(size(&p, "b_t"), 6);
+}
+
 /// `status_$t` (base.ins.pas).  Image: `fail` is bit 7 of the first byte
 /// (PROC2_$RESUME 0xE41444 `bset #7,(-0x4,A6)`), `code` the low word
 /// (0xE4142A `tst.w (-0x2,A6)`); `all` the whole longword (codegen-patterns

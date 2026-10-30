@@ -16497,12 +16497,30 @@ the plain reference, which the MC68010 build refuses (the 68010 traps;
 reference-clarifications item 25): through a pointer to a byte-aligned
 word, a byte-aligned word field at an odd offset, a `for` fill of
 another unit's byte-aligned array (golden `m68020/odd_access`).
-**Layout unchanged, Uncertain:** the reference's crossing rule (3.10.5.5)
-keeps a byte-aligned longword off offsets 3 and 5, where SCSI_WAIT's and
-the sense answer's longwords lie; what the original declared there is
-not visible (reference-clarifications item 51, for the owner).  Merging
-of constant stores across an odd address in the frame or the module's
-static data stays off (section 13): no site.
+**Layout (owner ruling 2026-10-30, reference-clarifications item 51;
+bead domain-pascal-meel):** under the MC68020 modes a field with an
+explicit `aligned(0)` may cross two word boundaries, which the
+reference's rule (3.10.5.5 p. 3-26; 3.15.6.3 p. 3-72) forbids; in a
+packed record it starts at the next free byte instead of the next
+16-bit boundary.  A field without the attribute, the default layout and
+every MC68010 target keep the rule (an odd longword there is an address
+error).  The sites, all longwords at byte 3 of a word-aligned record:
+io_$match_device (IO_$INIT's module-local helper 0x3C439010) at
+0x3C439032 `move.l (3,A1),D3; cmp.l (3,A0),D3`, bytes 3..6 of two 8-byte
+PROM device records reached through its two by-address parameters (the
+configuration record's devices lie 8 bytes apart; ../source gap 231);
+SCSI_WAIT's SCSI_$CB + 0x13; the sense answer's bytes 3..6 (gap 301).
+../source declares `id: [aligned(0)] integer32` after three byte fields
+of a packed record (its reproducer g231): 8 bytes, `r.id` read whole
+with `move.l (3,An)`.  What the original declared is still not visible;
+the ruling is "whatever is necessary to reproduce the image's layout".
+`TypeTable::unaligned_access` (set from the target) lifts the rule in
+`layout_fields` and `layout_packed_fields`, and `BitPos::is_whole_object`
+takes such a packed field as a whole object at its odd byte, so it is
+read and written like an unpacked field rather than as a bit field.
+Golden `m68020/crossing_field`.  Merging of constant stores across an
+odd address in the frame or the module's static data stays off (section
+13): no site.
 
 ### Pointer locals in registers (Reported by ../source, checked at the sites given; implemented best effort, bead domain-pascal-jqp0)
 

@@ -240,7 +240,8 @@ fn upper(name: &str) -> String {
 
 impl<'t> Checker<'t> {
     pub(crate) fn new(target: &'t dyn Target) -> Self {
-        let types = TypeTable::new(target.pointer_size());
+        let mut types = TypeTable::new(target.pointer_size());
+        types.unaligned_access = target.unaligned_access();
         let mut c = Checker {
             target,
             types,
@@ -1554,7 +1555,10 @@ impl<'t> Checker<'t> {
         // 3.10.7 p. 3-36): word for a word-aligned field
         // (`cal_$timezone_rec_t`'s `drift: [aligned(1)] time_$clock_t`,
         // cal.ins.pas), byte for a byte-aligned one.  What it does
-        // otherwise is not stated.
+        // otherwise is not stated.  `aligned(0)` on a word-aligned field
+        // is accepted too: under the MC68020 modes it puts the field at
+        // the next free byte (`layout_packed_fields`; bead
+        // domain-pascal-meel), elsewhere Table 3-3 places it.
         for (i, f) in fields.iter().enumerate() {
             let Some(a) = self.types.attrs(f.ty).align else {
                 continue;
@@ -3692,7 +3696,8 @@ impl<'t> Checker<'t> {
     pub(crate) fn is_bit_field(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Field { bits: Some(b), .. } => {
-                !self.types.is_error(e.ty) && !b.is_whole_object(self.types.size(e.ty))
+                !self.types.is_error(e.ty)
+                    && !b.is_whole_object(self.types.size(e.ty), self.types.unaligned_access)
             }
             _ => false,
         }

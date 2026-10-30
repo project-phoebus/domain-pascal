@@ -194,6 +194,13 @@ Question: the image compares an unsigned word (a 0..65535-style subrange, zero-e
 Owner's answer (2026-10-21): "Reproduce image".  An unsigned word compared with the constant 0 by `<=`, `>`, `<` or `>=` takes the signed branch (`ble`/`bgt`/`bmi`/`bpl`), so 16#8000..16#FFFF count as below 0, as in the original; comparisons with other constants and between unsigned values keep 4.3.3's unsigned forms.  A byte (0..255) against 0 is unchanged (no site).  This departs from the reference: a candidate entry for ../source/docs/original-quirks.md (not ours to edit; the owner was told).
 Consequence: implemented under bead domain-pascal-wkm5 (`dpc-ir` `compare`); codegen-patterns 7.1 "Signed or unsigned".
 
+
+## 3.10.5.5 p. 3-26; 3.15.6.3 p. 3-72: a byte-aligned field crossing two word boundaries (MC68020 targets)
+Asked: 2026-10-29, by the dpc session (open question 51; bead domain-pascal-gkrx, then domain-pascal-meel); relayed with the answer by the ../source session (2026-10-30).
+Passage: "A byte aligned field may not cross two word boundaries" (p. 3-26); p. 3-72's Figure 3-27 puts a byte-aligned integer32 after a char at offset 2.  The SAU9 (MC68020) image reads longwords at byte 3 of word-aligned records: io_$match_device 0x3C439032 `move.l (3,A1),D3; cmp.l (3,A0),D3` (bytes 3..6 of an 8-byte PROM device record, the configuration record's devices 8 bytes apart), SCSI_WAIT 0x3C4778F2 (SCSI_$CB + 0x13), win_scsi_request_sense 0x3C41B284.
+Question: did the MC68020 compiler lay a byte-aligned longword out without the crossing rule, or does another declaration give these offsets?
+Owner's answer (2026-10-30): "Whatever is necessary to reproduce the image's layout, go for it."
+Consequence: under the MC68020 cpu modes (`-cpu mathchip` and the other Table 6-3 MC68020 ids) an explicit `[aligned(0)]` on a field lifts the crossing rule; in a packed record the field starts at the next free byte instead of the next 16-bit boundary.  The reference's rule stays for a field without the attribute, for the default layout and for every MC68010 target, where an odd longword is an address error.  `crates/dpc-sema/src/types.rs` (`TypeTable::unaligned_access`, `layout_fields`, `layout_packed_fields`, `BitPos::is_whole_object`); tests `byte_aligned_field_crossing_two_words` (attrs.rs, packed.rs); golden `m68020/crossing_field`; codegen-patterns 14 "Odd addresses".  ../source writes `id: [aligned(0)] integer32` at byte 3 of its PROM device record (its reproducer g231: sizeof 8, `r.id` read with `move.l (3,An)`).  What the original source declared is not visible; the layout is the ruling's.
 ## Open questions (awaiting the owner; tracked in domain-pascal-vui)
 
 Conservative choices are implemented and marked `TODO(ref-question)` in
@@ -980,7 +987,7 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `p(integer32(-1))` was accepted and was 16#FFFFFFFF.  Now `p(-1)` is
     the same constant.*
 
-51. **3.10.5.5, p. 3-26; 3.15.6.3, p. 3-72 (byte-aligned longwords at
+51. **Answered 2026-10-30; see Clarifications, "3.10.5.5 p. 3-26; 3.15.6.3 p. 3-72: a byte-aligned field crossing two word boundaries".**  **3.10.5.5, p. 3-26; 3.15.6.3, p. 3-72 (byte-aligned longwords at
     odd offsets in the MC68020 kernels).**  "A byte aligned field may not
     cross two word boundaries": an `[aligned(0)] integer32` after three
     chars goes to offset 4, and dpc places it there for both CPUs.  The
@@ -1003,7 +1010,9 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     both CPUs; ../source declares `[aligned(0)] integer32` in a variant
     of its own and keeps a TODO(pascal) (win_scsi/request_sense.pas).
     An odd-address reference itself is no longer refused under `-cpu
-    mathchip` (item 25).*
+    mathchip` (item 25).  After the ruling: the MC68020 modes lay an
+    explicit `[aligned(0)]` field out across two word boundaries, at the
+    next free byte of a packed record (bead domain-pascal-meel).*
 
 52. **3.15.5, p. 3-61 (PDF checked: the text is as the OCR has it) with
     3.10.7, p. 3-35 (a `[byte]` size attribute on a packed record).**

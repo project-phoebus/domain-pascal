@@ -53,8 +53,47 @@ impl Target for M68kAbi {
     }
 }
 
+/// The m68k numbers for an MC68020 target (`-cpu mathchip`): the same,
+/// with words and longwords readable at odd addresses.
+pub(crate) struct M68020Abi;
+
+impl Target for M68020Abi {
+    fn name(&self) -> &'static str {
+        "m68k"
+    }
+    fn pointer_size(&self) -> u32 {
+        M68kAbi.pointer_size()
+    }
+    fn arg_slot_size(&self) -> u32 {
+        M68kAbi.arg_slot_size()
+    }
+    fn arg_area_align(&self) -> u32 {
+        M68kAbi.arg_area_align()
+    }
+    fn small_arg_offset_in_slot(&self, size: u32) -> u32 {
+        M68kAbi.small_arg_offset_in_slot(size)
+    }
+    fn first_arg_offset(&self) -> i32 {
+        M68kAbi.first_arg_offset()
+    }
+    fn val_param_max_size(&self) -> u32 {
+        M68kAbi.val_param_max_size()
+    }
+    fn predeclared_cond_vars(&self) -> &'static [(&'static str, bool)] {
+        M68kAbi.predeclared_cond_vars()
+    }
+    fn unaligned_access(&self) -> bool {
+        true
+    }
+}
+
 /// Analyse `src`; errors are rendered `t.pas:line:col: error: msg`.
 pub(crate) fn analyze_src(src: &str) -> Result<Program, Vec<String>> {
+    analyze_src_on(src, &M68kAbi)
+}
+
+/// [`analyze_src`] for `target`.
+pub(crate) fn analyze_src_on(src: &str, target: &dyn Target) -> Result<Program, Vec<String>> {
     let mut sm = SourceMap::new();
     let f = sm.add("t.pas", src.to_string());
     let pp = preprocess(&mut sm, f, &Options::default());
@@ -65,7 +104,7 @@ pub(crate) fn analyze_src(src: &str) -> Result<Program, Vec<String>> {
             ds.iter().map(|d| d.render(&sm, "dpc")).collect::<Vec<_>>()
         )
     });
-    crate::analyze(&unit, &M68kAbi).map_err(|ds| ds.iter().map(|d| d.render(&sm, "dpc")).collect())
+    crate::analyze(&unit, target).map_err(|ds| ds.iter().map(|d| d.render(&sm, "dpc")).collect())
 }
 
 /// Analyse `src`, which must be free of errors.
@@ -93,6 +132,12 @@ pub(crate) fn assert_err(src: &str, needle: &str) {
 /// `module m; <body>`, analysed.
 pub(crate) fn module(body: &str) -> Program {
     ok(&format!("module m;\n{body}"))
+}
+
+/// [`module`] for the MC68020 target.
+pub(crate) fn module_68020(body: &str) -> Program {
+    analyze_src_on(&format!("module m;\n{body}"), &M68020Abi)
+        .unwrap_or_else(|e| panic!("unexpected errors: {e:#?}"))
 }
 
 pub(crate) fn ty(p: &Program, name: &str) -> TypeId {

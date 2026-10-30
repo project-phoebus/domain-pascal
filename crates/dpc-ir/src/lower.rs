@@ -5285,7 +5285,7 @@ fn covers(p: &Program, ty: TypeId, size: u32) -> bool {
             for f in fs {
                 let n = p.types.size(f.ty);
                 let (bit, width) = match f.bits {
-                    Some(b) if !b.is_whole_object(n) => (b.bit, b.width),
+                    Some(b) if !b.is_whole_object(n, p.unaligned_access) => (b.bit, b.width),
                     Some(b) => (b.bit, n * 8),
                     None => (f.offset * 8, n * 8),
                 };
@@ -9136,7 +9136,7 @@ fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
     else {
         return Ok(None);
     };
-    if b.is_whole_object(p.types.size(e.ty)) {
+    if b.is_whole_object(p.types.size(e.ty), p.unaligned_access) {
         return Ok(None);
     }
     let (first, last) = (b.bit / 8, (b.bit + b.width - 1) / 8);
