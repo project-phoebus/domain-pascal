@@ -7083,20 +7083,30 @@ selector (`isel.rs`) and the scheduler (`sched.rs`) then:
   stores are not a merging candidate (the refusal of section 13, "Store
   merging", does not apply); a `for` fill of device elements falls back
   to the loop, storing `move.<s> #0` per element;
-- **device pointers in parameters (Verified at one site):** a by-value
-  pointer parameter or a by-address slot through which a device object
-  is referenced is read from its frame slot before each reference, into
-  the lowest free register, not loaded at entry: the module-local
-  0xE0A328 (DMA_; `dma/init_m68450_channel.c`) reloads `movea.l
-  (8,A6),A0` before each of its five stores to the MC68450 channel
-  registers, while loading its word parameter at entry (`move.w
-  (0xc,A6),D0`), against the rule of 12.2 for parameters used more than
-  once.  How its parameter was declared is not known; the device
-  reading explains both the reloads and the `move.b #n` stores.  The
-  conformance unit `tests/conformance/dma_init_m68450_channel.pas` is
-  byte-identical.  A pointer *local* keeps the normal rules: WIN_'s
-  0xE190BC keeps the register block's address in A0 across its four
-  device references (0xE190EC..0xE19112).  A parameter both used as a
+- **device pointers in parameters (Verified at four sites):** a
+  by-value pointer parameter through which a device object is referenced
+  is read from its frame slot before each reference, into the lowest
+  free register, not loaded at entry: the module-local 0xE0A328 (DMA_;
+  `dma/init_m68450_channel.pas`, `chan_virtual_address^.ccr := ...` in
+  an `internal` routine) reloads `movea.l (8,A6),A0` before each of its
+  five stores to the MC68450 channel registers, while loading its word
+  parameter at entry (`move.w (0xc,A6),D0`), against the rule of 12.2
+  for parameters used more than once.  The device reading explains both
+  the reloads and the `move.b #n` stores.  The conformance unit
+  `tests/conformance/dma_init_m68450_channel.pas` is byte-identical.  A
+  **by-address slot** (a `var` parameter of a `[device]` record) is not
+  reloaded: it follows the rules of 12.2 for every by-address slot, held
+  in an address register from entry for its arguments and its device
+  references alike (SAU9 RING, `-cpu mathchip`: ring_$set_timer
+  0x3C47D000 `movea.l (0xc,A6),A0` at entry, then `move.w
+  #0x3000,(0x1806,A0)` and eight more stores through A0 and nothing
+  else; ring_$setup_tx 0x3C47D7DE `movea.l (0x1c,A6),A2`, four `pea
+  (A2)` and the store `move.w D2,(0x1002,A2)` at 0x3C47D966;
+  ring_$set_rx_buffer 0x3C47D1AE `movea.l (0xa,A6),A2`; golden
+  `m68020/device_var_param`; bead domain-pascal-prgf).  A pointer
+  *local* keeps the normal rules too: WIN_'s 0xE190BC keeps the register
+  block's address in A0 across its four device references
+  (0xE190EC..0xE19112).  A by-value pointer parameter both used as a
   device base and otherwise is refused (not seen);
 - **atomic:** `x := x op c` (`+`, `-`, `&`, `!` with a constant) is the
   one-instruction in-place update (`addq`, `subi`, `andi`, `ori` to
@@ -12896,12 +12906,16 @@ kinds from the C in `../source/domain_os`.
     movea.l (0x10,A6),A0` (`actual_len`, nine uses); MMAP_$GET_WS_INDEX
     0xE0CA48..0xE0CA4C `move.w (8,A6),D0; movea.l (0xe,A6),A0` (two
     uses); NAME_CONVERT_ACL_STATUS 0xE58620 (six uses, a body of one
-    `if ... else if` chain); PEB_$TEST_PARITY_ERR 0xE12000.  The one
-    exception found, module-local 0xE0A328 (DMA_$INIT_M68450_CHANNEL in
-    `dma/init_m68450_channel.c`), reloads `movea.l (8,A6),A0` before each
-    of five stores, which are device-register stores (`device`, ref
-    3.15.3; implemented as the device rule of section 5.5, conformance
-    unit `dma_init_m68450_channel.pas`).
+    `if ... else if` chain); PEB_$TEST_PARITY_ERR 0xE12000; and, for a
+    `var` parameter of a `[device]` record whose uses are device
+    references, SAU9 ring_$set_timer 0x3C47D000 `movea.l (0xc,A6),A0`
+    (nine stores through A0; section 5.5, "device pointers in
+    parameters").  The one exception found, module-local 0xE0A328
+    (DMA_$INIT_M68450_CHANNEL in `dma/init_m68450_channel.pas`), reloads
+    `movea.l (8,A6),A0` before each of five stores, which are
+    device-register stores through a *by-value pointer* parameter
+    (`device`, ref 3.15.3; implemented as the device rule of section 5.5,
+    conformance unit `dma_init_m68450_channel.pas`).
   - **used once: loaded where needed**, into a register no earlier load
     of the body used: IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2 (the
     last one callee-saved, although A0 and A1 are free again);

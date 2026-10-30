@@ -7390,23 +7390,33 @@ fn call_bytes(st: Option<&Stmt>) -> Option<u32> {
     }
 }
 
-/// The frame offset of the parameter (a by-value pointer or a by-address
-/// slot, `o > 0`) that `addr` dereferences, when `addr` is a reference to
-/// a device object through it ([`Addr::Volatile`], [`Access::device`]).
+/// The frame offset of the by-value pointer parameter (a parameter, `o >
+/// 0`, that is not one of the routine's by-address slots `address_slots`)
+/// that `addr` dereferences, when `addr` is a reference to a device object
+/// through it ([`Addr::Volatile`], [`Access::device`]).
 ///
 /// Such a pointer is read from the frame for each reference, into the
 /// lowest free register, rather than loaded at entry and held: the
-/// module-local 0xE0A328 (DMA_; `dma/init_m68450_channel.c`) reloads
-/// `movea.l (8,A6),A0` before each of its five stores to the M68450
-/// channel's registers (0xE0A330..0xE0A35A), while it loads its other
-/// parameter, a word, at entry (`move.w (0xc,A6),D0`), and the image's
-/// other by-address slots used more than once are loaded at entry
-/// (codegen-patterns 12.2).  How its parameter was declared is not known;
-/// this is the device reading (ref 3.15.3: references to a device are
-/// made as written).  A pointer local is not affected: WIN_'s
-/// module-local 0xE190BC keeps the register block's address in A0 for all
-/// its references (0xE190EC..0xE19112).
-fn device_param_base(addr: &Addr) -> Option<i32> {
+/// module-local 0xE0A328 (DMA_; `dma/init_m68450_channel.pas`, a pointer
+/// parameter `chan_virtual_address^.ccr := ...` of an `internal` routine)
+/// reloads `movea.l (8,A6),A0` before each of its five stores to the
+/// M68450 channel's registers (0xE0A330..0xE0A35A), while it loads its
+/// other parameter, a word, at entry (`move.w (0xc,A6),D0`).  This is the
+/// device reading (ref 3.15.3: references to a device are made as
+/// written).  A pointer local is not affected: WIN_'s module-local
+/// 0xE190BC keeps the register block's address in A0 for all its
+/// references (0xE190EC..0xE19112).
+///
+/// A **by-address slot** (a `var` parameter of a `[device]` record) is
+/// not: it follows the rules of every by-address slot (loaded at entry
+/// when used twice or more, [`Selector::entry_loads`]; bead
+/// domain-pascal-prgf).  The SAU9 RING module: ring_$set_timer
+/// 0x3C47D000 `movea.l (0xc,A6),A0` at entry, then `move.w #0x3000,
+/// (0x1806,A0)` and eight more stores through A0; ring_$setup_tx
+/// 0x3C47D7DE `movea.l (0x1c,A6),A2` at entry, four `pea (A2)` and the
+/// store `move.w D2,(0x1002,A2)` at 0x3C47D966; ring_$set_rx_buffer
+/// 0x3C47D1AE `movea.l (0xa,A6),A2`, `pea (A2)` and stores through A2.
+fn device_param_base(address_slots: &[i32], addr: &Addr) -> Option<i32> {
     let Addr::Volatile { addr, access } = addr else {
         return None;
     };
@@ -7418,7 +7428,7 @@ fn device_param_base(addr: &Addr) -> Option<i32> {
             Expr::Load {
                 addr: Addr::Frame(o),
                 ..
-            } if *o > 0 => Some(*o),
+            } if *o > 0 && !address_slots.contains(o) => Some(*o),
             _ => None,
         },
         _ => None,
@@ -7718,11 +7728,13 @@ impl Uses<'_> {
                 self.address(base);
                 self.expr(index);
             }
-            // A parameter that is the pointer to a device object is read
+            // A by-value pointer parameter to a device object is read
             // from the frame at each reference, not loaded at entry
-            // ([`device_param_base`]; module-local 0xE0A328).
+            // ([`device_param_base`]; module-local 0xE0A328).  A by-address
+            // slot of a device record is a use like any other (SAU9
+            // ring_$set_timer 0x3C47D000, loaded at entry).
             a @ Addr::Volatile { addr, .. } => {
-                if device_param_base(a).is_none() {
+                if device_param_base(&self.f.address_params, a).is_none() {
                     self.address(addr)
                 }
             }
@@ -13137,9 +13149,11 @@ impl Selector {
     ///
     /// Not so DMA_$INIT_M68450_CHANNEL 0xE0A328, which reloads its
     /// pointer before each of five stores; they are device-register
-    /// stores (`dma/init_m68450_channel.c`), and a parameter that is the
-    /// base of device references is not loaded at entry
-    /// ([`device_param_base`]; codegen-patterns 5.5).  A slot used once is loaded where
+    /// stores (`dma/init_m68450_channel.pas`), and a by-value pointer
+    /// parameter that is the base of device references is not loaded at
+    /// entry ([`device_param_base`]; codegen-patterns 5.5).  A by-address
+    /// slot of a device record is (SAU9 ring_$set_timer 0x3C47D000,
+    /// ring_$setup_tx 0x3C47D7DE; bead domain-pascal-prgf).  A slot used once is loaded where
     /// it is needed, into a register no earlier statement left a value in
     /// (IIC_$RECEIVE 0xE70AC0..0xE70AD0 A0, A1, A2; PROC2_$ALIGN_CTL
     /// 0xE41D82; [`fresh_slot_loads`]); after a branch or a call, see
@@ -13562,10 +13576,10 @@ impl Selector {
     /// 0xE19B14..0xE19B20, 0xE19B50..0xE19B5C; codegen-patterns 5.5).
     /// Each move of the copy is marked as a volatile reference, so that the
     /// scheduler keeps it in order with the routine's other volatile
-    /// references.  A device side reached through a pointer parameter is
-    /// read from its slot (as a scalar reference is, [`device_param_base`]),
-    /// which the copy's address set-up does; a parameter also used
-    /// otherwise is refused, as there.
+    /// references.  A device side reached through a by-value pointer
+    /// parameter is read from its slot (as a scalar reference is,
+    /// [`device_param_base`]), which the copy's address set-up does; such a
+    /// parameter also used otherwise is refused, as there.
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
         let (d, dacc) = dst.unwrap_volatile();
         let (s, sacc) = src.unwrap_volatile();
@@ -13573,7 +13587,7 @@ impl Selector {
             return self.copy_plain(dst, src, bytes, chars);
         }
         for a in [dst, src] {
-            if let Some(o) = device_param_base(a) {
+            if let Some(o) = device_param_base(&self.address_slots, a) {
                 if self.pinned(o).is_some() {
                     return Err(unsupported(
                         self.span,
@@ -16507,7 +16521,7 @@ impl Selector {
                 Expr::Load { addr: Addr::Frame(o), .. } if self.pinned(*o).is_some()
             ),
             a @ Addr::Volatile { addr, .. } => {
-                device_param_base(a).is_some() || self.addr_needs_reg(addr)
+                device_param_base(&self.address_slots, a).is_some() || self.addr_needs_reg(addr)
             }
         }
     }
@@ -27346,7 +27360,7 @@ impl Selector {
             // for a device, not referenced by a read-modify-write
             // instruction ([`Self::check_device_references`]).
             a @ Addr::Volatile { addr, access } => {
-                let ea = match device_param_base(a) {
+                let ea = match device_param_base(&self.address_slots, a) {
                     Some(o) => {
                         if self.pinned(o).is_some() {
                             return Err(unsupported(
