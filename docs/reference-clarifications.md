@@ -1053,7 +1053,7 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     what a compiler gives for a routine's name taken as a variable (its
     code being its storage) passed by value to a 4-byte `univ` formal;
     likely an Apollo bug, but the code is what it is (../source finding
-    400; bead domain-pascal-tbb4).  Is a routine's name accepted as the
+    600; bead domain-pascal-tbb4).  Is a routine's name accepted as the
     argument of a `univ` value parameter, and does it pass the routine's
     first bytes, not its address?  *Current: refused ("procedure `hand`
     used as a value"); ../source writes `iic_code_ptr_t(addr(iic_$int))^`,
@@ -1073,7 +1073,7 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     element's alignment (4).  The same reading (an `aligned record`
     ml_$exclusion_t, 18 bytes rounded to 20) explains every exclusion
     lock of ../source's records starting at a multiple of 4 with the
-    next field at +0x14 (../source finding 402; bead
+    next field at +0x14 (../source finding 602; bead
     domain-pascal-yur2).  Is an array whose elements are aligned
     records aligned on the elements' alignment when it is a field?
     *Current: word aligned (+0x13A); ../source keeps a stand-in word.*

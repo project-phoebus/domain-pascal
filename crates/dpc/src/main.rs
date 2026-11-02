@@ -7,7 +7,7 @@
 //!            [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...]
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
-//!            [--merge-constant-stores] [--strict]
+//!            [--merge-constant-stores] [--substitute-constants] [--strict]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! The reference's compiler options (ref 6.4, Table 6-2, pp. 6-6..6-8:
@@ -130,6 +130,13 @@
 //! option to the ../source modules whose segments merge.  Shapes neither
 //! kind of unit settles are refused either way (`dpc-m68k`, `isel/merge.rs`).
 //!
+//! `--substitute-constants` (a per-unit build setting, as
+//! `--merge-constant-stores` is; bead domain-pascal-pvy8): constants are
+//! substituted for reaching definitions of the routines' scalar locals,
+//! the parts of an `if` a constant condition never runs are removed, and
+//! the stores no read is left of go (ref 6.4.24, pp. 6-27..6-28, `-opt`
+//! 1 to 3; SAU3 PBU_$SETUP 0xE594E0; `dpc_ir::constprop`).
+//!
 //! `--strict`: every refusal is an error.  Without it (the default, owner
 //! 2026-10-17, bead domain-pascal-5kgg) a refusal that only guards the
 //! image's exact form (a register choice, an instruction order, a hold or
@@ -163,7 +170,7 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-always-from=ROUTINE,...] [--a5-always=ROUTINE,...] \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
-                     [--merge-constant-stores] [--strict] \
+                     [--merge-constant-stores] [--substitute-constants] [--strict] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] \
                      [reference options: -config var..., -cond, -idir dir..., -nwarn, -msgs, \
                      -b [pathname], -nb, -natural, -comchk, ... (docs/compiler-options.md)] \
@@ -203,6 +210,8 @@ struct Args {
     schedule: Schedule,
     data_bases: Vec<(String, String)>,
     merge_constant_stores: bool,
+    /// `--substitute-constants`: `dpc_ir::constprop`.
+    substitute_constants: bool,
     /// `--strict`: every refusal is an error, also those with a
     /// best-effort path (`dpc_syntax::diag::best_effort`).
     strict: bool,
@@ -324,6 +333,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut schedule = None;
     let mut data_bases: Vec<(String, String)> = Vec::new();
     let mut merge_constant_stores = false;
+    let mut substitute_constants = false;
     let mut strict = false;
     while let Some(arg) = argv.next() {
         // The reference's options first, by their exact spellings
@@ -477,6 +487,12 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 merge_constant_stores = true;
             }
+            "--substitute-constants" => {
+                if substitute_constants {
+                    return Err("--substitute-constants given more than once".into());
+                }
+                substitute_constants = true;
+            }
             "--strict" => {
                 if strict {
                     return Err("--strict given more than once".into());
@@ -538,6 +554,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         schedule: schedule.unwrap_or_default(),
         data_bases,
         merge_constant_stores,
+        substitute_constants,
         strict,
     })
 }
@@ -604,7 +621,20 @@ fn compile(
         }
         return Ok(());
     }
-    let module = dpc_ir::lower_with(&program, &args.data_base)?;
+    let mut module = dpc_ir::lower_with(&program, &args.data_base)?;
+    if args.substitute_constants {
+        // ref 5.5.6, p. 5-19: careful around a call of an `abnormal`
+        // routine (FIM_$CLEANUP).
+        let abnormal = program
+            .routines
+            .iter()
+            .filter(|r| r.options.abnormal)
+            .map(|r| r.symbol.clone())
+            .collect();
+        for f in &mut module.functions {
+            dpc_ir::constprop::substitute_constants(f, &abnormal);
+        }
+    }
     let opts = dpc_m68k::emit::Options {
         fragment: args.fragment.clone(),
         loop_align: args.loop_align.clone(),
@@ -1427,6 +1457,17 @@ mod tests {
             c(3, 2),
             format!("3 errors, 2 warnings, no info msgs, dpc {v}")
         );
+    }
+
+    #[test]
+    fn parses_substitute_constants() {
+        assert!(!args(&["m.pas"]).unwrap().substitute_constants);
+        assert!(
+            args(&["--substitute-constants", "m.pas"])
+                .unwrap()
+                .substitute_constants
+        );
+        assert!(args(&["--substitute-constants", "--substitute-constants", "m.pas"]).is_err());
     }
 
     #[test]

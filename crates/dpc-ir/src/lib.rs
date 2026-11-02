@@ -31,6 +31,7 @@
 //! express yet are reported as "not supported yet" at their source
 //! position; nothing is silently dropped.
 
+pub mod constprop;
 mod lower;
 
 #[cfg(test)]

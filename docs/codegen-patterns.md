@@ -3379,6 +3379,12 @@ variables.  Each module's static data is a data segment, addressed off
       0xE5DD08 `s`, then FILE_$SET_PROT 0xE5DF3A .. FILE_$SET_DIRPTR
       0xE5E1B2 `n`).  So the mode can switch back; it is a property of
       runs of routines, not strictly once per segment.
+    - *Same source, another switch point (Reported by ../source,
+      finding 613, sidecar addresses not checked here):* SAU5 MT_$WAIT
+      loads A5 without using it (`s`), SAU3 MT_$WAIT, from the same
+      text, does not (`n`): the SAU3 segment switches one routine later,
+      at MT_$WIRE.  Where the switch lies is not a property of the
+      routine's text.
     - The OS_TERM .TEXT segment 0xE66738 (TTY_$I_GET_DESC ..
       TERM_$INQUIRE), right before TTY's 0xE671DC, is `nnnnnnn`: none
       of its 7 routines loads A5, although OS_TERM has a .DATA block
@@ -8822,6 +8828,72 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `control/cross_jump`, `m68020/cross_jump`; tests
   `if_parts_share_the_pop`, `case_arms_share_the_pop`; srcsurvey:
   MST_$FIND and PMAP_$PURGE_WS became byte-identical with it.
+- **Constants for reaching definitions (Verified at the SAU3 sites;
+  implemented as a per-unit option, bead domain-pascal-pvy8).**  Ref
+  6.4.24 (p. 6-28) lists for `-opt 2` "Substitutes constants for
+  reaching definitions" ("If the definition is an assignment of a
+  constant to the variable, then the compiler can replace uses of the
+  variable that the definition reaches with the constant"), for `-opt
+  3`, the default, "Redundant assignment statement elimination", and for
+  `-opt 1` (p. 6-27) "Eliminates dead code".  SAU3 PBU_$SETUP 0xE594E0
+  is the SAU5's text with its VME arm configured out, so `bus :=
+  io_$bus_mbus`, `first := 0` and `last := 7` are the only definitions
+  reaching the rest (../source pascal-translation-notes finding 607):
+  - `if bus = io_$bus_vme` and `if bus = io_$bus_mbus` are gone, the
+    Multibus checks run without a test (0xE595AA..0xE595D2), and so is
+    the VME block after the loop (0xE598C6 goes on to `pbu_$mcb.setups`
+    and `unit <> pbu_sm_unit`);
+  - `req.tag := 3; req.bus := bus` is one `move.l #0x30002,(-8,A6)`
+    (0xE596E4): the substituted constant merged with its neighbour
+    (section 13, a merging unit);
+  - `case bus of 1, 2, 3, 4:` selects on `moveq #2,D0; subq.w #1,D0;
+    cmpi.w #4,D0; bcc` (0xE596F0), its table kept;
+  - `for sub := first to last` counts from `move.w #7,(-0x6a,A6)` and
+    `clr.w D4` (0xE595D8, 0xE595E0); `first` and `last` are stored
+    nowhere;
+  - the packed field store `dcte^.unit_info.bus := bus` reads the slot
+    (`move.b (-0x55,A6),D1; or.b D1,(16,A2)`, 0xE597D4), so `bus := 2`
+    stays (`move.w #2,(-0x56,A6)`, 0xE5957C).
+  PBU_$SETDOWN likewise: `clr.w D3; moveq #7,D2` (0xE59382) where the
+  SAU5's computes `last - first`.  SAU2 SMD_$INIT dispatches on a
+  constant 0 over a kept four-entry table (`clr.w D0; cmpi.w #4,D0;
+  bcc`, 0xE34D50), and its frame has 20 bytes its declared locals do not
+  explain (../source smd/init.pas), which fits locals whose every use was
+  substituted.  No SAU2 site was found of a register or frame local
+  loaded with a constant and tested again before a join (a scan of the
+  image: the three hits are a loop head, DIR's `for attempt := 1 to 3`
+  at 0xE4B070, and SMD_$INIT above).
+  `dpc --substitute-constants` (`dpc_ir::constprop`), a unit's choice
+  like `--merge-constant-stores` (the image's units were not all
+  compiled alike, section 13): the routine's own scalar locals (not a
+  nested routine's, not pointers or `for` indices, never addressed or
+  read in part) whose every reaching definition stores one constant are
+  replaced by it, operators of constants folded (`div` and `mod` not), an
+  `if` whose condition becomes constant keeps the part it runs (unless a
+  label is in either part), a `while` false at entry goes, `case` keeps
+  its arms; then a local no read is left of loses its stores (those
+  whose value calls nothing).  A packed field store's value is not
+  substituted (PBU_$SETUP above; Uncertain, one site).  Not modelled (no
+  site): a store dead on some paths only; parameters and static
+  variables.  A routine calling an `abnormal` routine is left alone
+  (ref 5.5.6, p. 5-19: "careful about optimizing around any cleanup
+  handler"; SAU2 PKT_$COPY_TO_PA reads `buf_count` from its slot in the
+  handler after FIM_$CLEANUP's second return, 0xE1260C).  A constant
+  substituted on a compare's left goes to its right, the relation
+  mirrored; a `for` whose constant bounds never run it goes.
+  **Which units (Uncertain):** not the SAU2's in general.  SAU2
+  FILE_$SET_MGR_ATTR 0xE5E39A sets `attr_id := 14` (the other arm
+  returns) and pushes the slot (`move.w (-58,A6),-(SP)`, 0xE5E3DE);
+  ASKNODE_$PROPAGATE_WHO stores `template_len := 8` and pushes the slot
+  by value (0xE65EDC, 0xE65EFC), in a unit that merges stores; the
+  AUDIT module-local 0xE4BD48 keeps `clr.w D3; cmp.w D1,D3; bge` for
+  `len := 0; if len < name_len` (0xE4BD6A; or the text was `max`).
+  srcsurvey at the baseline's commit: the option on for every unit
+  turns FILE_$SET_MGR_ATTR from OK to MISMATCH and improves nothing; on
+  for the store-merging units only it changes no routine's status.  So
+  store merging (`-opt 1`) does not imply it; the SAU3's PBU does it.
+  The option is off by default.  Golden `control/const_subst`; tests
+  `crates/dpc-m68k/tests/constprop.rs`.
 - **Identical parts (one site; not a compiler rule, owner 2026-11-02,
   bead domain-pascal-xpdb).**  SAU3 SMD_$INQ_DISP_TYPE 0xE6E62E is
   `bsr.s 0xE6E624; clr.w D0; unlk; rts`: the call of
