@@ -1040,6 +1040,44 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `copy`; test `byte_sized_packed_record`; bead domain-pascal-7kpw).
     Uncertain.*
 
+53. **5.3.3, p. 5-10 (`univ`) with 5.4, p. 5-13 (a routine's name as
+    an argument).**  5.4: "You pass the name of a procedure or function
+    just as you would any other parameter", for a procedure or function
+    parameter; 5.3.3 lets `univ` suppress the type check of an argument
+    against an ordinary parameter, and says nothing of routine names.
+    SAU3 IIC_$EXISTS passes PBU_$ACQUIRE_INT's `handler: univ_ptr` (a
+    `val_param` routine, so the pointer by value) as `movea.l
+    #IIC_$INT,A3; move.l (A3),-(SP)` (0xE1C76C, 0xE1C78A): the first
+    longword of IIC_$INT's code, where iic_setup_pbu in the same unit
+    pushes the address (`move.l #IIC_$INT,-(SP)`, 0xE7136E).  That is
+    what a compiler gives for a routine's name taken as a variable (its
+    code being its storage) passed by value to a 4-byte `univ` formal;
+    likely an Apollo bug, but the code is what it is (../source finding
+    400; bead domain-pascal-tbb4).  Is a routine's name accepted as the
+    argument of a `univ` value parameter, and does it pass the routine's
+    first bytes, not its address?  *Current: refused ("procedure `hand`
+    used as a value"); ../source writes `iic_code_ptr_t(addr(iic_$int))^`,
+    which compiles to the image's two instructions.*
+
+54. **3.10.6, p. 3-33 (an array of `aligned record`s as a field of a
+    record laid out by the word rules).**  3.10.6 says an aligned
+    record is laid out naturally "even if [it is] in programs compiled
+    with a %word_alignment directive", and Table 3-2 (p. 3-24) aligns
+    "structured types, except for sets" on word boundaries; neither says
+    where an *array* of aligned records goes as a field.  The SAU3 IIC
+    line record (0x1B4 bytes) has its 10-entry packet-type table at
+    +0x13C, after a 16-byte table that ends at +0x13A, and every entry
+    is 12 bytes of which the last word is never addressed: an
+    `aligned record` entry (10 bytes, rounded to 12 by its natural
+    alignment) fits the stride, and the array's place fits the
+    element's alignment (4).  The same reading (an `aligned record`
+    ml_$exclusion_t, 18 bytes rounded to 20) explains every exclusion
+    lock of ../source's records starting at a multiple of 4 with the
+    next field at +0x14 (../source finding 402; bead
+    domain-pascal-yur2).  Is an array whose elements are aligned
+    records aligned on the elements' alignment when it is a field?
+    *Current: word aligned (+0x13A); ../source keeps a stand-in word.*
+
 ## Reference errata noticed (no ruling needed)
 
 - **2.1.2, p. 2-2**: the integer example uses C-style `/* ... */`

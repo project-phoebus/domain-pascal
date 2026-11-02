@@ -8822,6 +8822,22 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `control/cross_jump`, `m68020/cross_jump`; tests
   `if_parts_share_the_pop`, `case_arms_share_the_pop`; srcsurvey:
   MST_$FIND and PMAP_$PURGE_WS became byte-identical with it.
+- **Identical parts (one site; not a compiler rule, owner 2026-11-02,
+  bead domain-pascal-xpdb).**  SAU3 SMD_$INQ_DISP_TYPE 0xE6E62E is
+  `bsr.s 0xE6E624; clr.w D0; unlk; rts`: the call of
+  smd_$validate_unit, its result unread, then the result: no `tst.b
+  D0`, no branch, no pop before `unlk` (section 1.1).  The SAU2 text,
+  0xE6DE1C, is `if not smd_$validate_unit(unit) then r := smd_$none else
+  r := ...` with the display arm the SAU3 configures out, which leaves
+  two identical parts.  Cross-jumping (above; ref 6.4.24 p. 6-27, `-opt
+  0`) would merge them, but dropping the test that then branches to the
+  next instruction is an inference with no documented rule, so it is not
+  modelled.  The source carries it instead: `discard(...)` of the call
+  and the one assignment under `%if` (ref "Discard", p. 4-62), which
+  `dpc` compiles to the image's instructions.  An `if` with identical
+  parts keeps its test and branch in `dpc`.  A second unit showing
+  identical parts with the test dropped would reopen it (lead:
+  ../source pascal-translation-notes finding 606).
 - **`and then` / `or else`** (ref pp. 4-18..4-19, 4-134): jumping code,
   each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
   bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
