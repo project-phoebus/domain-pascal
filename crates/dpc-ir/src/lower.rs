@@ -6655,6 +6655,22 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
         {
             Some(convert((**value).clone(), ty))
         }
+        // A word variable widened to a longword, used as a byte: its low
+        // byte, read as [`store_narrow`] reads a narrowed variable
+        // (AST_$TOUCH_AREA SAU4 0xF803D74 `add.b D6,D0` for `seg_offset :=
+        // i + page - 1` of `integer`/`0..65535` words into a byte; ../source
+        // finding 760).
+        Expr::Convert { value, ty: t, .. }
+            if matches!(**value, Expr::Load { .. })
+                && value.ty().bytes() == 2 * ty.bytes()
+                && t.bytes() > value.ty().bytes() =>
+        {
+            Some(Expr::Convert {
+                value: value.clone(),
+                ty,
+                in_place: true,
+            })
+        }
         Expr::Binary {
             op: op @ (IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or),
             lhs,
@@ -10262,7 +10278,13 @@ fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
                 // form.
                 let sign = ix.ty().sign;
                 if ix.ty().width == Width::Long {
-                    ix = convert(ix, Scalar::integer(Width::Word, sign));
+                    // Computed at the word's width where that gives the
+                    // same low word ([`narrow`]): AST_$TOUCH_AREA SAU4
+                    // 0xF803D0C `add.w D6,D4` for `ast_pmaps[seg_index,
+                    // pages_done + page]` of an `integer` and a `0..65535`
+                    // word (../source finding 760; the SAU2's alike).
+                    let wty = Scalar::integer(Width::Word, sign);
+                    ix = narrow(&ix, wty).unwrap_or_else(|| convert(ix, wty));
                 }
             }
             // An array that is a part of its variable (a record's field, an

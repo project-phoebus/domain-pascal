@@ -74,7 +74,9 @@ end;
 /// `zext_bases`: a zero-extended `.l` index of another unit's array as
 /// the value of a rotated store.  The check after scheduling looked for
 /// three of the destination's instructions in a row and refused a body
-/// whose `clr.l; movea.l #CHARS; move.w` stayed together.
+/// whose `clr.l; movea.l #CHARS; move.w` stayed together.  (The
+/// destination's index is computed at the word's width, `lsl.w; add.w`,
+/// so the source's takes D0.)
 #[test]
 fn zero_extended_index_in_a_rotated_store() {
     let src = "module wi;
@@ -100,7 +102,7 @@ end;
         .unwrap_or_else(|| panic!("{lines:?}"));
     assert_eq!(
         lines[at - 1..at + 2],
-        ["clr.l %d2", "movea.l #CHARS,%a0", "move.w %d1,%d2"],
+        ["clr.l %d0", "movea.l #CHARS,%a0", "move.w %d1,%d0"],
         "{lines:?}"
     );
 }

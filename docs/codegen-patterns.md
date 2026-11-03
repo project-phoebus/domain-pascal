@@ -5423,7 +5423,15 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     a computed value stays bead domain-pascal-q322's refusal).  Not
     surveyed: a computed longword index scaled by shifts and adds (×12,
     ×20; `dpc` leaves it `.l`).  Golden `data/index_parts`, exec test
-    `index_parts`.
+    `index_parts`.  Where the expression can be computed at the word's
+    width with the same low word (`+`, `-`, `*`, `&`, `!` of words and
+    constants, section 8 "Narrowing and widening"), it is (implemented;
+    ../source finding 760): an `integer` plus a `0..65535` word,
+    AST_$TOUCH_AREA SAU4 0xF803D0C `add.w D6,D4`, MST_$FORK SAU2
+    0xE73A62 `move.w (-34,A6),D0; add.w D5,D0; add.w D0,D0`; stored into
+    a byte, `add.b` (0xF803D74 `add.b D6,D0`).  Over ../source's SAU2
+    Pascal this changes ast, old_dir, file, flp, mst_unwired, mst_wired,
+    smd, vfmt, mostly toward the image.  Golden `expr/word_sum_index`.
   - **Another unit's array (survey Verified; implemented in straight-line
     code, bead domain-pascal-rlnm).**  `tools/boolsurvey.py summary`
     (kind `ebase`: every indexed operand `(d,An,Dx)` through A0-A4 of
