@@ -691,9 +691,14 @@ pub enum Insn {
     /// `T` (a numbered local label placed right after the
     /// [`Insn::TableJump`] that follows) at the doubled index in Dn.
     /// Image: OSINFO_$GET_MMAP 0xE5C6CE `303b 0006` (codegen-patterns 7.3).
+    /// `scaled`: the MC68020's `move.w (T,%pc,%dn.w*2),%dn` on the index
+    /// itself, no `add.w` before it (SAU8 pbu_map_dma_error 0x3CA570A
+    /// `303b 0206`; every one of the 61 dispatches of the SAU8 and SAU9
+    /// images, against the SAU2's 50 `add.w; move.w (T,%pc,%dn.w)`).
     TableIndex {
         reg: u8,
         table: u32,
+        scaled: bool,
     },
     /// `jmp (T,%pc,%dn.w)`: jump to table `T` plus the offset in Dn.
     /// `targets` are the labels the table's entries name (the successors
@@ -1150,9 +1155,12 @@ impl fmt::Display for Insn {
             Insn::AluToMem { op, size, src, dst } => {
                 write!(f, "{}.{size}\t{},{dst}", op.name(), Reg::D(*src))
             }
-            Insn::TableIndex { reg, table } => {
-                write!(f, "move.w\t({table}f,%pc,{r}.w),{r}", r = Reg::D(*reg))
-            }
+            Insn::TableIndex { reg, table, scaled } => write!(
+                f,
+                "move.w\t({table}f,%pc,{r}.w{}),{r}",
+                if *scaled { "*2" } else { "" },
+                r = Reg::D(*reg)
+            ),
             Insn::TableJump { reg, table, .. } => {
                 write!(f, "jmp\t({table}f,%pc,{}.w)", Reg::D(*reg))
             }
@@ -1578,8 +1586,21 @@ mod tests {
             (Insn::Align4, ".balignw\t4,0x2048"),
             // A `case` dispatch (OSINFO_$GET_MMAP 0xE5C6CE..0xE5C6D8).
             (
-                Insn::TableIndex { reg: 0, table: 7 },
+                Insn::TableIndex {
+                    reg: 0,
+                    table: 7,
+                    scaled: false,
+                },
                 "move.w\t(7f,%pc,%d0.w),%d0",
+            ),
+            // The MC68020's (SAU8 0x3CA570A `303b 0206`).
+            (
+                Insn::TableIndex {
+                    reg: 0,
+                    table: 7,
+                    scaled: true,
+                },
+                "move.w\t(7f,%pc,%d0.w*2),%d0",
             ),
             (
                 Insn::TableJump {
@@ -1934,7 +1955,14 @@ mod len_tests {
                 },
                 4,
             ), // 0xE6A9B6 ba6e 0014
-            (Insn::TableIndex { reg: 0, table: 1 }, 4), // 0xE5C6CE 303b 0006
+            (
+                Insn::TableIndex {
+                    reg: 0,
+                    table: 1,
+                    scaled: false,
+                },
+                4,
+            ), // 0xE5C6CE 303b 0006
             (
                 Insn::TableJump {
                     reg: 0,

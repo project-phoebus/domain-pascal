@@ -1709,7 +1709,11 @@ mod tests {
                 label: 1,
                 until: None,
             },
-            Insn::TableIndex { reg: 3, table: 9 },
+            Insn::TableIndex {
+                reg: 3,
+                table: 9,
+                scaled: false,
+            },
             Insn::TableJump {
                 reg: 3,
                 table: 9,

@@ -8970,6 +8970,21 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   parts keeps its test and branch in `dpc`.  A second unit showing
   identical parts with the test dropped would reopen it (lead:
   ../source pascal-translation-notes finding 606).
+- **An empty `then` part (Verified at one SAU8 site; implemented, no
+  `else` only).**  `if c then ;` (ref "Statements", p. 4-188: the empty
+  statement "causes no action") has no test and no branch, but the
+  condition's operand is evaluated: SAU8 PBU2_$ASSOC 0x3C6169E `bfextu
+  (0x10,A2)` at offset 5, width 3, into D5, the unit's bus, never tested
+  (D5 is the next loop's index, `moveq #1,D5` at 0x3C616B0; the SAU6's
+  code tests it with `cmpi.w #1,D5` and runs the Multibus arm the SAU8
+  configures out; the SAU7 likewise; ../source pascal-translation-notes
+  findings 700, 702).  `dpc` (`dpc-ir` `empty_if_operands`): each
+  operand of the condition that is not a constant evaluated for
+  nothing (`StmtKind::Discard`): a variable in memory leaves no
+  instruction, a packed field its extraction, a call its call; a call on
+  the right of `and then`/`or else` is refused (it runs on one outcome
+  only).  Whether a plain variable is loaded too is not seen.  With an
+  `else` part: refused (no site).  Golden `m68020/empty_then`.
 - **`and then` / `or else`** (ref pp. 4-18..4-19, 4-134): jumping code,
   each operand with its own branch: 0xE031A2..0xE031B6 `cmp.w D4,D2;
   bcc.s <exit>; ...; btst #13,D5; bne.s <exit>; tst.w D5; bmi.s <exit>;
@@ -9309,6 +9324,21 @@ T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
 - **Gaps:** a value with no label goes to the `otherwise` part, or to the
   join without one, like the `bcc` (MAC_OS_$OPEN 0xE0B3AE: labels 1 and
   2 to 0xE0B3D0; KBD_$RCV 0xE1CCFE: 0, 7, 8, 9 to the join 0xE1CE1E).
+- **MC68020 (SAU6..9; Verified by survey; implemented):** the index is
+  doubled by the scaled index mode, `move.w (T,PC,D0.w*2),D0` (`303b
+  0206`), with no `add.w D0,D0`; the `jmp` is unchanged.  All 61
+  `move.w (d,PC,Dn); jmp (d,PC,Dn)` dispatches of the SAU8 image and all
+  61 of the SAU9's are scaled, none preceded by `add.w`; the SAU2's 50
+  all have `add.w` and an unscaled index (an ad-hoc byte scan of the
+  three images, 2026-11-03).  `dpc` (`isel.rs`, `Insn::TableIndex`
+  `scaled`) under `-cpu mathchip`; golden `m68020/case_table`.
+- **A longword selector with a lowest label other than 0 (Verified at
+  one SAU8 site; implemented):** `subi.l #lo,D0` before `cmpi.l #r,D0;
+  bcc` (SAU8 pbu_map_dma_error 0x3CA56FC `subi.l #0x2E0001,D0; cmpi.l
+  #5,D0; bcc`, the DMA manager's five statuses; ../source
+  pascal-translation-notes finding 701).  A lowest label of 1..8 or
+  below 0 on a longword: no site, `subi.l` best effort.  Golden
+  `m68020/case_table`.
 
 **Compare chain** (Verified, all 61):
 

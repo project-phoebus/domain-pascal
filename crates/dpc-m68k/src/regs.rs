@@ -1332,6 +1332,7 @@ mod tests {
             Insn::TableIndex {
                 reg: dn(vd(1)),
                 table: 9,
+                scaled: false,
             },
             Insn::TableJump {
                 reg: dn(vd(1)),

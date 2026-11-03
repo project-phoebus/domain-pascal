@@ -563,7 +563,7 @@ end;
 fn unsupported_constructs_have_positions() {
     // An ordinary statement.
     let e = errs(
-        "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  if x.a = 2 then ;\nend;\n",
+        "module m;\ntype r = record a: integer; end;\nprocedure p(var x: r);\nbegin\n  if x.a = 2 then else x.a := 1;\nend;\n",
     );
     assert_eq!(
         e,
@@ -2545,7 +2545,9 @@ fn unsupported_conditions_and_loops() {
     ));
     assert!(one("if u > -1 then w := 0;").contains("outside the other operand's type"));
     assert!(one("while w = 0 do ;").contains("a `while` loop with an empty body"));
-    assert!(one("if w = 0 then ;").contains("an `if` with an empty `then` part"));
+    // With an `else` part (without one the operands are evaluated for
+    // nothing, SAU8 PBU2_$ASSOC 0x3C6169E).
+    assert!(one("if w = 0 then else w := 1;").contains("an `if` with an empty `then` part"));
     assert!(one("if true then w := 0;").contains("an `if` with a constant condition"));
     assert!(one("if false then w := 0 else w := 1;").contains("an `if` with a constant condition"));
     assert!(one("while true do w := 0;").contains("a `while` loop with a constant condition"));

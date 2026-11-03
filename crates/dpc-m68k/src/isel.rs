@@ -11696,14 +11696,29 @@ impl Selector {
         let l_default = l_other.unwrap_or(l_join);
         let dreg = Ea::Reg(Reg::D(d));
         if table {
-            if w == Width::Long && lo != 0 {
-                return Err(unsupported(
-                    span,
-                    "a jump table on a longword selector whose labels do not start at 0 is",
-                ));
-            }
             match lo {
                 0 => {}
+                // A longword selector less its lowest label: `subi.l
+                // #lo,Dn` (SAU8 pbu_map_dma_error 0x3CA56FC `subi.l
+                // #0x2E0001,D0; cmpi.l #5,D0; bcc`; ../source
+                // pascal-translation-notes finding 701).  A lowest label
+                // in `subq`'s or `addq`'s reach, or below 0: no site, best
+                // effort (`subi.l`).
+                _ if w == Width::Long => {
+                    if lo < 9 {
+                        best_effort(
+                            span,
+                            "a jump table on a longword selector whose lowest label is below 9 \
+                             but not 0 (`subq.l`? no site; codegen-patterns 7.3) is",
+                        )?;
+                    }
+                    self.out.push(Insn::AluImm {
+                        op: AluOp::Sub,
+                        size: Size::L,
+                        imm: lo,
+                        dst: dreg.clone(),
+                    });
+                }
                 1..=8 => self.out.push(Insn::Subq {
                     size: Size::W,
                     value: lo as u8,
@@ -11733,12 +11748,18 @@ impl Selector {
                 dst: dreg.clone(),
             });
             self.jump(Cond::Cc, l_default);
-            self.out.push(Insn::Alu {
-                op: AluOp::Add,
-                size: Size::W,
-                src: dreg,
-                dst: d,
-            });
+            // The index doubled: `add.w Dn,Dn` on the MC68010 (the SAU2's
+            // 50 dispatches), the scaled index `(T,PC,Dn.w*2)` on the
+            // MC68020 (the SAU8's and SAU9's 61 each; [`Insn::TableIndex`]).
+            let scaled = self.cpu.is_68020();
+            if !scaled {
+                self.out.push(Insn::Alu {
+                    op: AluOp::Add,
+                    size: Size::W,
+                    src: dreg,
+                    dst: d,
+                });
+            }
             let tbl = self.new_label();
             let entries: Vec<u32> = (lo..=hi)
                 .map(|v| {
@@ -11754,7 +11775,11 @@ impl Selector {
                     targets.push(t);
                 }
             }
-            self.out.push(Insn::TableIndex { reg: d, table: tbl });
+            self.out.push(Insn::TableIndex {
+                reg: d,
+                table: tbl,
+                scaled,
+            });
             self.out.push(Insn::TableJump {
                 reg: d,
                 table: tbl,

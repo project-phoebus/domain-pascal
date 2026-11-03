@@ -403,7 +403,7 @@ fn unsettled_cases_are_rejected() {
     );
     has(
         "case l of 1, 2: x := 1; 3, 4: x := 2; end;",
-        "a jump table on a longword selector whose labels do not start at 0",
+        "a jump table on a longword selector whose lowest label is below 9 but not 0",
     );
     has(
         "case w of -12, -11: x := 1; -10, -9: x := 2; end;",

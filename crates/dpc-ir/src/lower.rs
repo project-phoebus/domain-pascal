@@ -3997,10 +3997,37 @@ impl Cx<'_> {
                     }
                     let then_ = self.seq(std::slice::from_ref(then_branch))?;
                     if then_.is_empty() {
-                        // What the original emitted for an empty `then`
-                        // part (a branch on the negated condition?) is not
-                        // known.
-                        return Err(unsupported(s.span, "an `if` with an empty `then` part is"));
+                        // An empty `then` and no `else` (ref "Statements", p. 4-188: the
+                        // empty statement is a statement): the test and
+                        // its branch dropped, the condition's operands
+                        // evaluated for nothing ([`empty_if_operands`]).
+                        // SAU8 PBU2_$ASSOC 0x3C6169E `bfextu
+                        // (0x10,A2){5:3},D5`, never tested, D5 the next
+                        // loop's index (`moveq #1,D5`, 0x3C616B0): `if
+                        // dcte^.unit_info.bus <> io_$bus_vme then ;`, its
+                        // Multibus arm configured out (../source
+                        // pascal-translation-notes findings 700, 702; the
+                        // SAU7 likewise).  An operand in memory leaves no
+                        // instruction ([`StmtKind::Discard`] of a load
+                        // reads nothing), a packed field its extraction, a
+                        // call its call.  With an `else` part, what the
+                        // original emitted (a branch on the negated
+                        // condition?) is not known.
+                        let ops = match else_branch {
+                            None => empty_if_operands(&cond_of(p, cond)?),
+                            Some(_) => None,
+                        };
+                        let Some(ops) = ops else {
+                            return Err(unsupported(
+                                s.span,
+                                "an `if` with an empty `then` part is",
+                            ));
+                        };
+                        out.extend(ops.into_iter().map(|e| Stmt {
+                            kind: StmtKind::Discard(e),
+                            span: s.span,
+                        }));
+                        continue;
                     }
                     let else_ = match else_branch {
                         Some(e) => self.seq(std::slice::from_ref(e))?,
@@ -5535,6 +5562,45 @@ fn large_set_unit_const(b: &[u8], o: i32, w: Width) -> Expr {
 /// constant members is folded into one).
 fn cons_like(x: &SExpr) -> bool {
     matches!(x.kind, ExprKind::SetCons(_)) || matches!(x.value, Some(ConstValue::Set(_)))
+}
+
+/// The operands of the condition of an `if` with an empty `then` part and
+/// no `else`, in evaluation order, each to be evaluated for nothing: those
+/// of a comparison or a test that are not constants, of both sides of a
+/// plain `and`/`or`, of the left of `and then`/`or else` (and of the
+/// right when it calls nothing: a call there runs only on one outcome).
+/// `None` for a condition whose effect would be lost (a call on the right
+/// of `and then`/`or else`) or with no operand form (a block or set
+/// comparison).
+fn empty_if_operands(c: &Cond) -> Option<Vec<Expr>> {
+    fn go(c: &Cond, out: &mut Vec<Expr>) -> bool {
+        match c {
+            Cond::Compare { lhs, rhs, .. } => {
+                for e in [lhs, rhs] {
+                    if !matches!(e, Expr::Const { .. }) {
+                        out.push(e.clone());
+                    }
+                }
+                true
+            }
+            Cond::Test(e) | Cond::Odd(e) => {
+                if !matches!(e, Expr::Const { .. }) {
+                    out.push(e.clone());
+                }
+                true
+            }
+            Cond::Not(c) => go(c, out),
+            Cond::And(a, b) | Cond::Or(a, b) => go(a, out) && go(b, out),
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) => {
+                let mut calls = Vec::new();
+                cond_calls(b, &mut calls);
+                calls.is_empty() && go(a, out) && go(b, out)
+            }
+            Cond::Block { .. } | Cond::SetEmpty { .. } => false,
+        }
+    }
+    let mut out = Vec::new();
+    go(c, &mut out).then_some(out)
 }
 
 /// A run-time element of a set constructor ([`large_set_cons_members`]):
