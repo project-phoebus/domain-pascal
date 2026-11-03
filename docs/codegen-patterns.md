@@ -5356,6 +5356,16 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       (PROC2_$SIGNAL 0xE3EFF8 `mulu.w #228`, `.w`: H1 needs a range of at
       most 143 values, ../source has `pinteger`); and for H1 against H2,
       as before, a narrow variable into an array that does not fit.
+      One more site H1 fits and the bounds rule does not (../source
+      finding 920): SAU6 SYSBUS_$DEFINE_INT 0x7800B548..0x7800B556
+      `move.w (0x1E0,A5),D1; ext.l D1; lsl.l #2,D1; move.l D1,D3; add.l
+      D3,D3; add.l D3,D1; move.l D2,(0,A5,D1.l)`, a signed word module
+      variable (../source `dup_next: integer`) ×12 into
+      `sysbus_$dup_vec[0..sysbus_$max_dup]`, which fits, while the same
+      routine's `level` (a `0..31` subrange) is `.w` (0x7800B51C); the
+      declaration is ../source's, so not deciding.  `dpc` keeps the
+      bounds rule (`.w`); within the array's bounds both forms address
+      the same element, and `v[integer32(n)]` gives the image's form.
   - **The index's constant part (survey Verified; implemented, bead
     domain-pascal-69fe).**  `a[x + k]`, `a[k + x]`, `a[x - k]` with `k`
     constant: `x` is the index register and `k` × size goes into the
@@ -8515,7 +8525,11 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   read the carry: compiler expansions, not a relation with 0.)  The rule:
   the original trusts the **N and Z** flags of an add, sub, and, or,
   shift, `not` and multiply, **not their V flag**, and no flags of a
-  divide (N and Z are undefined after an overflowing `divs`/`divu`):
+  divide (N and Z are undefined after an overflowing `divs`/`divu`).
+  A word sum or difference compared in a condition is now a longword
+  (section 8, "Widening and narrowing", reference-clarifications 31);
+  the word forms below are reached through register locals and
+  `INTEGER16(x - y) < 0` (golden `control/computed_zero`):
 
   - `=`, `<>`, `<`, `>=` (`beq`/`bne`/`bmi`/`bpl`) read the operation's
     flags: SOCK_$ALLOCATE 0xE15EFA `move.w D3,D0; or.w D4,D0; beq.s`
@@ -11628,10 +11642,26 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   ruling; "Shifts of a 16-bit operand", above).  A word product whose
   constant is not done with shifts, or of two words, is one
   `muls.w`/`mulu.w` instead (32-bit product, see the rule for `*`
-  below).  Compares are unchanged: a word sum is compared at the word's width (review survey:
-  `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41 against `move.w; ext.l;
-  add.l/sub.l; cmp.l/cmpi.l` ×7, e.g. 0xE0F9D0..0xE0F9D8; the rule
-  between them is not known; bead domain-pascal-9js).  TPAD_$DATA has
+  below).  **Compares (owner's ruling 2026-11-03, reference-
+  clarifications 31: follow the reference):** a word sum, difference,
+  product or negation compared is computed in 32 bits and the other
+  side widened (ref "Type Transfer Functions", p. 4-198: for `x + y > 5`
+  "the compiler expands operands x and y to 32-bit integers"), unless
+  written `INTEGER16(x + y)`, which keeps the word form (`dpc-ir`
+  `compare`; exec test `wide_compare`).  The image has both forms
+  (review survey: `move.w; add.w/sub.w; cmp.w/cmpi.w/tst.w` ×41, many
+  of them `case` and subrange range checks or register locals assigned
+  just before, against `move.w; ext.l; add.l/sub.l; cmp.l/cmpi.l` ×7,
+  e.g. 0xE0F9D0..0xE0F9D8; SAU6 dtty_$gpu_command 0x7801F6E4..
+  0x7801F6F2 `move.l D3,D0; move.w D1,D5; ext.l D5; sub.l D5,D0; move.w
+  D2,D5; ext.l D5; cmp.l D5,D0`, `count - i < n`, SAU5 0xE1DFF8 alike,
+  ../source finding 921; word forms at SHOW_CURSOR 0xE6E2A2 `add.w
+  (-12,A6),D2; cmp.w (80,A4),D2` and SMD_$INVERT_DISP 0xE70576, which a
+  translation writes with `integer16`; bead domain-pascal-9js).  The
+  widened operands' order and registers are the existing longword
+  compare's (best effort where they differ: TPAD_$DATA below loads,
+  extends and adds one operand before loading the other; `dpc`
+  schedules both loads first).  TPAD_$DATA has
   4 widened sites in one routine (0xE69448..0xE6945A `move.w
   (0x170,A5),D5; ext.l D5; addi.l #50,D5; move.w (-0x1e,A2),D2; ext.l
   D2; cmp.l D2,D5`; 0xE69474..0xE69482, 0xE694B8..0xE694C4,

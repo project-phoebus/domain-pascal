@@ -2,7 +2,7 @@
 .globl BE_CMP_$CONST
 BE_CMP_$CONST:
 link.w %fp,#0
-pea (%a5)
+movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w (0xa,%fp),%d1
@@ -10,8 +10,11 @@ move.w %d0,(%a5)
 move.w %d1,(4,%a5)
 moveq #2,%d0
 move.w (%a5),%d1
-add.w (4,%a5),%d1
-cmp.w %d1,%d0
+move.w (4,%a5),%d2
+ext.l %d1
+ext.l %d2
+add.l %d2,%d1
+cmp.l %d1,%d0
 bge.s 1f
 move.w #1,(2,%a5)
 bra.s 2f
@@ -20,7 +23,7 @@ clr.w (2,%a5)
 2:
 pea (2,%a5)
 jsr (EXEC_$LOG_W).l
-movea.l (-4,%fp),%a5
+movem.l (-8,%fp),%d2/%a5
 unlk %fp
 rts
 .globl BE_CMP_$CALL_RHS
@@ -102,10 +105,11 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,%d1
-move.w %d1,%d0
-add.w %d0,%d0
-add.w %d0,%d1
-tst.w %d1
+ext.l %d1
+move.l %d1,%d0
+add.l %d0,%d0
+add.l %d0,%d1
+tst.l %d1
 ble.s 1f
 move.w #1,(2,%a5)
 bra.s 2f

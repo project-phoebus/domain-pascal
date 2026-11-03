@@ -11,8 +11,9 @@
   bit (the mask on either side; bit 31 alone is refused, bead
   domain-pascal-3xwx), `tst' of a function's result
   (with junk above its word), of a quotient and of a byte widened to a
-  word, and a register-held local an assignment just formed.  Word sums stay clear of 16-bit overflow: their
-  width in a comparison is bead domain-pascal-9js (wide_compare.pas).
+  word, and a register-held local an assignment just formed.  Word sums
+  stay clear of 16-bit overflow: compared, they are longwords
+  (reference-clarifications 31; wide_compare.pas).
 
   call: COMPUTED_ZERO_$ADD_LT l:0x7fffffff l:1 -> b
   call: COMPUTED_ZERO_$ADD_LT l:1 l:-2 -> b

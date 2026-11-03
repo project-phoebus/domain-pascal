@@ -53,7 +53,7 @@ procedure be_cmp_$call_rhs(a, b: integer); options(val_param);
 begin
   g := a;
   h := b;
-  if g + 1 = exec_$id_w(h) then w := 1 else w := 0;
+  if integer16(g + 1) = exec_$id_w(h) then w := 1 else w := 0;
   exec_$log_w(w);
 end;
 
@@ -61,7 +61,7 @@ procedure be_cmp_$call_lhs(a, b: integer); options(val_param);
 begin
   g := a;
   h := b;
-  if exec_$id_w(g) = h + 1 then w := 1 else w := 0;
+  if exec_$id_w(g) = integer16(h + 1) then w := 1 else w := 0;
   exec_$log_w(w);
 end;
 

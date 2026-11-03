@@ -72,11 +72,12 @@ var
   gw: integer;
   gp: wp;
 
-{ `gw < b + 1': gw in memory, b + 1 computed }
+{ `gw < integer16(b + 1)': gw in memory, b + 1 computed (a word: without
+  the transfer both sides are longwords, reference-clarifications 31) }
 function bp_$cmpmem(a, b: integer): integer; options(val_param);
 begin
   gw := a;
-  if gw < b + 1 then bp_$cmpmem := 1 else bp_$cmpmem := 0;
+  if gw < integer16(b + 1) then bp_$cmpmem := 1 else bp_$cmpmem := 0;
 end;
 
 function bp_$nys(p: wp): integer; options(val_param);

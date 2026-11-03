@@ -613,9 +613,15 @@ marked `TODO(ref-question)` in `crates/dpc-sema/src/check.rs`
     word sums at word width at 41 sites against 7 that widen first (bead
     domain-pascal-9js; e.g. 0xE0F9D0..D8 widens).  The source types at the
     41 sites are not known.  Should dpc follow the reference (widen) or
-    the image's majority (16-bit, wrapping on overflow)?  *Current: 16-bit
-    compare; tests/exec/wide_compare.pas marks the reference's behaviour as
-    an expected failure (domain-pascal-f03).*
+    the image's majority (16-bit, wrapping on overflow)?  *Owner's answer
+    (2026-11-03, on ../source finding 921, SAU6 dtty_$gpu_command
+    0x7801F6E4 `count - i < n` compared in 32 bits, the SAU5's copy at
+    0xE1DFF8 alike): follow the reference.  A word sum, difference,
+    product or negation compared is computed in 32 bits, the other side
+    widened too; `INTEGER16(x + y)` keeps the 16-bit form, which a
+    translation writes at the image's word-width sites.  Implemented
+    (`dpc-ir` `compare`); tests/exec/wide_compare.pas passes, with an
+    `integer16` case; codegen-patterns 8, "Widening and narrowing".*
 
 32. *Settled by the reference (no owner ruling needed; bead
     domain-pascal-5j9).*  A non-negative subrange stored in 4 bytes

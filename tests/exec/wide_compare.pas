@@ -6,17 +6,20 @@
   performs 32-bit addition before making the comparison", and
   `INTEGER16(x + y) > 5' is the way to ask for the 16-bit one, which
   "ignores the possibility of integer overflow".  So 32767 + 1 > 5, and
-  -32768 - 1 < -32768.
-
-  xfail: dpc compares `w + b' in 16 bits (`add.w; cmpi.w'), wrapping
+  -32768 - 1 < -32768.  Owner's ruling 2026-11-03 (reference-
+  clarifications 31): follow the reference.  `integer16(w + b)' is the
+  16-bit sum, wrapping: 32767 + 1 < 0.
   call: WIDE_COMPARE_$MAIN w:32767 w:1
   call: WIDE_COMPARE_$MAIN w:-32768 w:0
   call: WIDE_COMPARE_$MAIN w:-32768 w:1
   expect:
     mark 1
+    mark 4
     mark 2
+    mark 4
     mark 3
     mark 2
+    mark 4
 }
 module wide_compare;
 %include 'exec.ins.pas';
@@ -30,4 +33,5 @@ begin
   if w + b > 5 then exec_$mark(1);
   if w - b < -32768 then exec_$mark(3);
   if w + b < 1 then exec_$mark(2);
+  if integer16(w + b) < 0 then exec_$mark(4);
 end;

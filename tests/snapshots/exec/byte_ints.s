@@ -415,8 +415,9 @@ addq.w #4,%sp
 4:
 clr.w %d0
 move.b %d2,%d0
-subi.w #0x80,%d0
-cmpi.w #1,%d0
+ext.l %d0
+subi.l #0x80,%d0
+cmpi.l #1,%d0
 bge.s 5f
 subq.l #2,%sp
 move.w #0xd,-(%sp)

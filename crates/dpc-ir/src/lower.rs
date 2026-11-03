@@ -5025,6 +5025,47 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         }
         _ => (operand(lhs, None)?, operand(rhs, None)?),
     };
+    // A word sum, difference, product or negation compared: both operands
+    // computed in 32 bits, the word operation's own operands widened first
+    // ([`convert`]), so that the comparison sees the value the operation
+    // has, not its low word.  Ref "Type Transfer Functions", p. 4-198: for
+    // `x + y > 5` on integer16 x, y "the compiler expands operands x and y
+    // to 32-bit integers and performs 32-bit addition before making the
+    // comparison", and `INTEGER16(x + y) > 5` (a transfer, not matched)
+    // is the 16-bit form; ref 4.3.1,
+    // p. 4-5.  Owner's ruling 2026-11-03 (reference-clarifications 31):
+    // follow the reference.  The image has both forms: widened at
+    // TPAD_$DATA 0xE69448..0xE6945A `move.w (0x170,A5),D5; ext.l D5;
+    // addi.l #50,D5; move.w (-0x1e,A2),D2; ext.l D2; cmp.l D2,D5`,
+    // NETWORK_$SET_SERVICE 0xE0F9D0..0xE0F9D8, SAU6 dtty_$gpu_command
+    // 0x7801F6E4..0x7801F6F2 (SAU5 0xE1DFF8; ../source finding 921); at
+    // the word's width at SHOW_CURSOR 0xE6E2A2 `add.w (-12,A6),D2; cmp.w
+    // (80,A4),D2`, SMD_$INVERT_DISP 0xE70576 and others (bead
+    // domain-pascal-9js), which a translation writes with the transfer.
+    let overflows = |x: &Expr, s: &SExpr| match x {
+        _ if matches!(s.kind, ExprKind::Transfer(_)) => false,
+        Expr::Binary {
+            op: IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul,
+            ty,
+            ..
+        }
+        | Expr::Unary {
+            op: IrUnOp::Neg,
+            ty,
+            ..
+        } => ty.width == Width::Word && !ty.pointer,
+        _ => false,
+    };
+    let word_integer = |x: &Expr| x.ty().width == Width::Word && !x.ty().pointer;
+    let (l, r) = if (overflows(&l, lhs) || overflows(&r, rhs)) && word_integer(&l) && word_integer(&r) {
+        let wide = |x: Expr| {
+            let t = Scalar::integer(Width::Long, x.ty().sign);
+            convert(x, t)
+        };
+        (wide(l), wide(r))
+    } else {
+        (l, r)
+    };
     let (l, r) = widen_operands(e, l, r)?;
     // `abs(x) > 0` (`<=`, and with the 0 on the left): unsigned, so the
     // same as `abs(x) <> 0` (`=`), which is how it is compared; best

@@ -1092,7 +1092,9 @@ function ext_$f(x: integer): integer; options(val_param, extern);
 ";
 
 /// `=`, `<>`, `<`, `>=` branch on the flags of the add, sub, and, or that
-/// formed the value (SOCK_$ALLOCATE 0xE15EFA `or.w D4,D0; beq.s`;
+/// formed the value (a word sum or difference kept a word by `integer16`,
+/// ref p. 4-198; without it both sides are longwords, reference-
+/// clarifications 31) (SOCK_$ALLOCATE 0xE15EFA `or.w D4,D0; beq.s`;
 /// tty_$i_put_chars 0xE1B046 `subq.w #1,D1; bpl.s`; SIO6509_$INQ_LINE
 /// 0xE7267C `andi.l #0x180,D1; beq.s`); `>`, `<=` test it first
 /// (SMD_$SIGNAL 0xE6F25C `sub.l D0,D1; tst.l D1; bgt.s`).
@@ -1102,8 +1104,8 @@ fn computed_value_against_zero_on_the_operation_flags() {
         "{ZERO_DECLS}procedure t; internal;
 begin
   if (w ! r) = 0 then r := 0;
-  if (w - r) < 0 then r := 1;
-  if (w - r) > 0 then r := 2;
+  if integer16(w - r) < 0 then r := 1;
+  if integer16(w - r) > 0 then r := 2;
   if (l & 16#180) <> 0 then r := 3;
 end;
 "
@@ -1447,11 +1449,11 @@ fn computed_value_against_zero_refusals() {
     let formed = "right after the operation that formed it";
     for (routine, why) in [
         ("if xor(w, r) = 0 then r := 0;", formed),
-        ("if -w = 0 then r := 0;", formed),
+        ("if integer16(-w) = 0 then r := 0;", formed),
         // A word product tested as a word: `muls.w` sets the flags from
         // 32 bits; `tst.w` first is not seen (0xE69626 reads the 32-bit
         // flags for `abs` of a word product).
-        ("if (w * r) < 0 then r := 0;", formed),
+        ("if integer16(w * r) < 0 then r := 0;", formed),
         ("if (w & r) > 0 then r := 0;", formed),
         ("if arshft(w, 2) <= 0 then r := 0;", formed),
         (

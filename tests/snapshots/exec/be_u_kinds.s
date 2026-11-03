@@ -444,10 +444,13 @@ move.w %d2,-(%sp)
 bsr.w CK
 addq.w #4,%sp
 move.w %d0,%d1
-move.w %d2,%d0
-add.w %d0,%d0
-subq.w #1,%d0
-cmp.w %d0,%d1
+ext.l %d1
+move.l %d1,%d0
+move.w %d2,%d1
+ext.l %d1
+add.l %d1,%d1
+subq.l #1,%d1
+cmp.l %d1,%d0
 seq %d4
 tst.b %d4
 bpl.s 7f

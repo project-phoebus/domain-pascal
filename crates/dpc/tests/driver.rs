@@ -3463,7 +3463,7 @@ procedure p;
 var c: boolean; i: integer;
 begin
   i := 0;
-  repeat c := i + 1 = 3; if c then g := 1; if not c then g := 2; i := i + 1 until i > 5;
+  repeat c := integer16(i + 1) = 3; if c then g := 1; if not c then g := 2; i := i + 1 until i > 5;
   if b and ((g = 1) and then (g = 2)) then g := 1;
 end;
 ";
@@ -3872,12 +3872,12 @@ end;
         // AST_$INVALIDATE 0xE066D0 against BAT_$ALLOCATE 0xE3B13A.
         (
             "cc_memory",
-            "if u > k + 1 then u := 0;",
+            "if u > integer16(k + 1) then u := 0;",
             "comparing a variable in memory with a computed value",
         ),
         (
             "cc_call",
-            "if k + 1 > n + 1 then u := 0;",
+            "if integer16(k + 1) > integer16(n + 1) then u := 0;",
             "with one whose evaluation calls",
         ),
         (

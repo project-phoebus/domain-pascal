@@ -15,7 +15,11 @@
     word: `tst' (SOCK_$PUT_INT 0xE161EA `tst.w D0; seq D0'; 0xE11BF4
     `divs.w #60,D1; tst.w D1'; SOCK_$CLOSE 0xE15FBE);
   - one bit of a register-held value: `btst' (pacct_$compress 0xE5A9DE
-    `btst #2,D0; sne D2'). }
+    `btst #2,D0; sne D2').
+
+  A word difference is kept a word by `integer16' (ref "Type Transfer
+  Functions", p. 4-198; without it both sides are compared as longwords,
+  reference-clarifications 31). }
 module czero;
 type
   byte_t = [byte] 0..255;
@@ -30,8 +34,8 @@ function getw(k: integer): integer; val_param; extern;
 procedure flags;
 begin
   if (w ! r) = 0 then r := 0;
-  if (w - r) < 0 then r := 1;
-  if (w - r) > 0 then r := 2;
+  if integer16(w - r) < 0 then r := 1;
+  if integer16(w - r) > 0 then r := 2;
   if (l & 16#180) <> 0 then r := 3;
 end;
 
