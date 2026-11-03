@@ -368,6 +368,11 @@ impl Walk<'_> {
                     self.expr(value);
                 }
                 StmtKind::StoreSetConst { set, .. } => self.other(set),
+                StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                    self.other(set);
+                    self.expr(hi);
+                    self.expr(lo);
+                }
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => self.expr(e),
                 StmtKind::Copy { dst, src, .. } => {
                     self.other(src);

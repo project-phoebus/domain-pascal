@@ -8,8 +8,10 @@
 //!   only routines the shipped module defines.
 //! - PAS_$SET_BUILD, the set builder (codegen-patterns 5.1),
 //!   `runtime/m68k/pas_set_build.s`.  dpc never calls it ([`UNCALLED`]): a
-//!   set constructor with a run-time range is refused (dpc-ir `set_value`).
-//!   It is shipped for links of the kernel (bead domain-pascal-jzm5).
+//!   set constructor with a run-time range is built inline, as the SAU8's
+//!   MST_$INIT builds it (codegen-patterns 5.1, "Run-time ranges in a
+//!   constructor"), or refused for a set of a longword or less.  It is
+//!   shipped for links of the kernel (bead domain-pascal-jzm5).
 
 /// The map module: `I E0ABD4 M$ARITH size = 1DC` (SAU2 map).
 pub const MODULE: &str = "M$ARITH";

@@ -5012,6 +5012,11 @@ fn walk<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 walk_expr(value, v);
             }
             StmtKind::StoreSetConst { set, .. } => walk_addr(set, v),
+            StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                walk_addr(set, v);
+                walk_expr(hi, v);
+                walk_expr(lo, v);
+            }
             StmtKind::Copy { dst, src, .. } => {
                 walk_addr(dst, v);
                 walk_addr(src, v);
@@ -5786,6 +5791,13 @@ fn walk_eval<'a>(body: &'a [Stmt], v: &mut dyn FnMut(Node<'a>)) {
                 walk_addr(array, v);
             }
             StmtKind::StoreSetConst { set, .. } => walk_addr(set, v),
+            // The top first, the set's address (cleared), then the bottom
+            // ([`Selector::store_set_range`]).
+            StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                walk_expr(hi, v);
+                walk_addr(set, v);
+                walk_expr(lo, v);
+            }
             StmtKind::Copy { dst, src, .. } => {
                 walk_addr(src, v);
                 walk_addr(dst, v);
@@ -6285,6 +6297,7 @@ fn loop_invariant_pointer(p: &Expr, body: &[Stmt], uplevel: &[(i32, u32)]) -> bo
         }
         | StmtKind::StoreSetMember { set: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::StoreSetConst { set: a, bits } => ok &= !hits(a, Some(bits.len() as i32)),
+        StmtKind::StoreSetRange { set: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Copy { dst: a, bytes, .. } => ok &= !hits(a, Some(*bytes as i32)),
         StmtKind::Fill {
             start: a,
@@ -6318,6 +6331,11 @@ fn addrs_mut(body: &mut [Stmt], f: &mut dyn FnMut(&mut Addr)) {
                 expr_addrs_mut(value, f);
             }
             StmtKind::StoreSetConst { set, .. } => addr_mut(set, f),
+            StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                addr_mut(set, f);
+                expr_addrs_mut(hi, f);
+                expr_addrs_mut(lo, f);
+            }
             StmtKind::Copy { dst, src, .. } => {
                 addr_mut(dst, f);
                 addr_mut(src, f);
@@ -6745,6 +6763,11 @@ fn loop_pointer_locals(f: &Function, exclude: &[i32]) -> Vec<i32> {
                     exprs(value, off, st);
                 }
                 StmtKind::StoreSetConst { set, .. } => addr(set, off, st),
+                StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                    addr(set, off, st);
+                    exprs(hi, off, st);
+                    exprs(lo, off, st);
+                }
                 StmtKind::SetResult(e) | StmtKind::Discard(e) => exprs(e, off, st),
                 StmtKind::Copy { dst, src, .. } => {
                     addr(src, off, st);
@@ -7233,11 +7256,15 @@ fn seq_clean(stmts: &[Stmt], tail_clean: bool, labels: &[bool]) -> bool {
             {
                 return false
             }
+            StmtKind::StoreSetRange { lo, hi, .. } if expr_has_call(lo) || expr_has_call(hi) => {
+                return false
+            }
             StmtKind::SetResult(_)
             | StmtKind::Store { .. }
             | StmtKind::StoreBits { .. }
             | StmtKind::StoreBitElem { .. }
             | StmtKind::StoreSetMember { .. }
+            | StmtKind::StoreSetRange { .. }
             | StmtKind::StoreSetConst { .. } => {}
             StmtKind::Discard(e) if expr_has_call(e) => return false,
             StmtKind::Discard(_) | StmtKind::Disable | StmtKind::Enable => {}
@@ -8008,6 +8035,11 @@ impl Uses<'_> {
                     self.address(array);
                 }
                 StmtKind::StoreSetConst { set, .. } => self.address(set),
+                StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                    self.expr(hi);
+                    self.address(set);
+                    self.expr(lo);
+                }
                 StmtKind::Copy { dst, src, .. } => {
                     self.address(src);
                     self.address(dst);
@@ -8939,6 +8971,7 @@ impl Selector {
             StmtKind::Store { addr, value } => expr_reads_addr(value, addr),
             StmtKind::StoreBits { .. } | StmtKind::StoreBitElem { .. } => true,
             StmtKind::StoreSetMember { only, .. } => !only,
+            StmtKind::StoreSetRange { clear, .. } => !clear,
             _ => false,
         };
         if reads {
@@ -9051,6 +9084,17 @@ impl Selector {
                     only,
                 } => {
                     self.store_set_member(set, *bytes, elem, *value, *only)?;
+                    self.wrote(set, *bytes);
+                }
+                StmtKind::StoreSetRange {
+                    set,
+                    bytes,
+                    lo,
+                    hi,
+                    value,
+                    clear,
+                } => {
+                    self.store_set_range(set, *bytes, lo, hi, *value, *clear)?;
                     self.wrote(set, *bytes);
                 }
                 StmtKind::StoreSetConst { set, bits } => {
@@ -25427,6 +25471,197 @@ impl Selector {
             bit: k,
             dst: Ea::Idx(0, a, c, false),
         });
+        Ok(())
+    }
+
+    /// `s := [lo .. hi]` (`clear`), `s := s + [lo .. hi]` (`value`), `s
+    /// := s - [lo .. hi]` (not `value`) for a set of `bytes` bytes in
+    /// memory at `set`, `lo` and `hi` run-time members
+    /// ([`StmtKind::StoreSetRange`]; ref 3.9.3; "Set Operations", p.
+    /// 4-173).  The image's form of each range of the constructor of
+    /// SAU8 MST_$INIT 0x3C33F0E..0x3C33F8C (in a 16-byte frame temporary)
+    /// and MST_$FREE_ASID 0x3C7F5E0..0x3C7F664 (32 bytes):
+    ///
+    /// ```text
+    /// move.w  lo,D3; add.w size,D3; subq.w #1,D3   the top
+    /// lea     (-48,A6),A1; moveq #3,D4             (`clear` only:
+    /// L0: clr.l (A1)+; dbf D4,L0                    the set cleared)
+    /// move.w  D3,D4                                the count
+    /// cmpi.w  #127,D3; bls.s J                     the top no higher than
+    /// moveq   #127,D3; move.w D3,D4                the set's last member
+    /// J: lea  (-48,A6),A1                          (`move.w #255` beyond
+    /// sub.w   lo,D4; bcs.s E                       `moveq`'s reach)
+    /// L: move.w D3,D5; lsr.w #3,D5; neg.w D5
+    /// bset    D3,(15,A1,D5.w)                      byte bytes-1 - (k >> 3)
+    /// subq.w  #1,D3; dbf D4,L
+    /// E:
+    /// ```
+    ///
+    /// (MST_$ALLOC_ASID 0x3C4AE96..0x3C4AEDC, the member counting down in
+    /// the top's register.)
+    ///
+    /// The top is evaluated first, then the bottom, read again for the
+    /// count (`sub.w`); an empty range (the top below the bottom,
+    /// unsigned) sets nothing.  The clearing loop's count register and the
+    /// set's `lea` before the clearing come before or among the top's
+    /// instructions in the image (MST_$ALLOC_ASID 0x3C4AE96 likewise);
+    /// here after them.  Best effort (not byte-identical) as
+    /// [`Self::store_set_member`]: the image forms the set in a frame
+    /// temporary and copies it (MST_$INIT 0x3C33F8C..0x3C33F9C) or `or`s
+    /// it in (MST_$ALLOC_ASID 0x3C4AF14..0x3C4AF2C), or `and`s its
+    /// complement in (MST_$FREE_ASID 0x3C7F68A..0x3C7F6A0); `dpc` works on
+    /// the set itself, `bclr` for `-`.  The image's three routines differ:
+    /// MST_$INIT and MST_$FREE_ASID copy the top to the count and the
+    /// count to a third register for the member (0x3C33F2A `move.w
+    /// D5,D6; move.w D6,D7`), MST_$ALLOC_ASID counts the member down in
+    /// the top's register (taken here: `dpc`'s allocator would give the
+    /// third register the top's, a copy into itself); the 0x2048 filler
+    /// of the loop is before `J` in MST_$ALLOC_ASID (0x3C4AEBE), before
+    /// `L` in MST_$FREE_ASID (0x3C7F616; taken here).  **Uncertain.**
+    fn store_set_range(
+        &mut self,
+        set: &Addr,
+        bytes: u32,
+        lo: &Expr,
+        hi: &Expr,
+        value: bool,
+        clear: bool,
+    ) -> Res<()> {
+        let top = bytes as i64 * 8 - 1;
+        let hv = self.eval(hi)?;
+        let h = self.in_tmp(hv, Width::Word)?;
+        if clear {
+            if bytes % 4 != 0 {
+                best_effort(
+                    self.span,
+                    "clearing a set of a size that is not a multiple of 4 for a run-time                      range (no site; codegen-patterns 5.1) is",
+                )?;
+                self.clear_large_set(set, bytes)?;
+            } else {
+                let src = self.large_set_ea(set)?;
+                let a = self.alloc_a()?;
+                self.out.push(Insn::Lea { src, dst: a });
+                let n = self.alloc_d()?;
+                self.out.push(Insn::Moveq {
+                    value: (bytes / 4 - 1) as i8,
+                    dst: n,
+                });
+                let head = self.new_label();
+                self.out.push(Insn::Align4);
+                self.place(head);
+                self.out.push(Insn::Clr {
+                    size: Size::L,
+                    dst: Ea::PostInc(a),
+                });
+                self.out.push(Insn::Dbf {
+                    reg: n,
+                    label: head,
+                    until: None,
+                });
+            }
+        }
+        let c = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(h)),
+            dst: Ea::Reg(Reg::D(c)),
+        });
+        // The member counts down in the top's own register (MST_$ALLOC_ASID
+        // 0x3C4AEB2 `move.w D3,D4; cmpi.w #127,D3`).
+        let m = h;
+        self.out.push(Insn::Cmpi {
+            size: Size::W,
+            imm: top,
+            dst: Ea::Reg(Reg::D(m)),
+        });
+        let join = self.new_label();
+        self.jump(Cond::Ls, join);
+        self.out.push(if top <= 127 {
+            Insn::Moveq {
+                value: top as i8,
+                dst: m,
+            }
+        } else {
+            Insn::Move {
+                size: Size::W,
+                src: Ea::Imm(imm(top, Width::Word)),
+                dst: Ea::Reg(Reg::D(m)),
+            }
+        });
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(m)),
+            dst: Ea::Reg(Reg::D(c)),
+        });
+        self.place(join);
+        let src = self.large_set_ea(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        match self.eval(lo)? {
+            Val::Imm(k) if (1..=8).contains(&k) => self.out.push(Insn::Subq {
+                size: Size::W,
+                value: k as u8,
+                dst: Ea::Reg(Reg::D(c)),
+            }),
+            Val::Imm(k) => self.out.push(Insn::AluImm {
+                op: AluOp::Sub,
+                size: Size::W,
+                imm: imm(k, Width::Word),
+                dst: Ea::Reg(Reg::D(c)),
+            }),
+            v => {
+                let src = match v {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r) => Ea::Reg(r),
+                    Val::Tmp(d) => Ea::Reg(Reg::D(d)),
+                    Val::Imm(_) => unreachable!("matched above"),
+                };
+                self.out.push(Insn::Alu {
+                    op: AluOp::Sub,
+                    size: Size::W,
+                    src,
+                    dst: c,
+                });
+            }
+        }
+        let end = self.new_label();
+        self.jump(Cond::Cs, end);
+        let head = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        let x = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(m)),
+            dst: Ea::Reg(Reg::D(x)),
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: x,
+        });
+        self.out.push(Insn::Unary {
+            op: UnaryOp::Neg,
+            size: Size::W,
+            dst: Ea::Reg(Reg::D(x)),
+        });
+        self.out.push(Insn::Bit {
+            op: if value { BitOp::Set } else { BitOp::Clr },
+            bit: m,
+            dst: Ea::Idx(bytes as i32 - 1, a, x, false),
+        });
+        self.out.push(Insn::Subq {
+            size: Size::W,
+            value: 1,
+            dst: Ea::Reg(Reg::D(m)),
+        });
+        self.out.push(Insn::Dbf {
+            reg: c,
+            label: head,
+            until: None,
+        });
+        self.place(end);
         Ok(())
     }
 

@@ -174,6 +174,11 @@ fn stmt_addrs_mut(st: &mut Stmt, v: &mut dyn FnMut(&mut Addr)) {
             expr_mut(value, v);
         }
         StmtKind::StoreSetConst { set, .. } => addr_mut(set, v),
+        StmtKind::StoreSetRange { set, lo, hi, .. } => {
+            addr_mut(set, v);
+            expr_mut(hi, v);
+            expr_mut(lo, v);
+        }
         StmtKind::Copy { dst, src, .. } => {
             addr_mut(dst, v);
             addr_mut(src, v);

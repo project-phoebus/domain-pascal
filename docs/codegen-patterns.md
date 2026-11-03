@@ -4207,11 +4207,60 @@ model run against the bit model of Figure 3-6).
   - Sizes other than 8 bytes (6, 16, 32: the TTY `set of char`) have no
     site for these forms: a 6-byte set's last word by `clr.w`/`tst.w`/
     `move.w`.
-  PAS_$SET_BUILD 0xE11FA8 (hand assembly: copy a set, then
-  `bset` each member of a range clamped to it) has no compiled caller: a
-  run-time range `[a..b]` is refused.  dpc ships the routine in its
-  runtime for kernel links (`runtime/m68k/pas_set_build.s`, transcribed
-  from the image; bead domain-pascal-jzm5) but never calls it.
+- **Run-time ranges in a constructor (Verified at three SAU8 sites;
+  implemented best effort, bead domain-pascal-zif8).**  A range with a
+  run-time bound is built inline, no call: SAU8 MST_$INIT
+  0x3C33F0E..0x3C33F8C, MST_$ALLOC_ASID 0x3C4AE96..0x3C4AF14 (`[b .. b
+  + bs - 1, a .. a + as - 1]` of `pinteger`s into a 16-byte temporary)
+  and MST_$FREE_ASID 0x3C7F5E0..0x3C7F664 (the same into 32 bytes;
+  ../source pascal-translation-notes finding 641).  The top first, at
+  the word's width (`move.w b; add.w bs; subq.w #1`, the `pinteger` sum
+  narrowed, ref 4.3.1 p. 4-5), around the temporary's clearing (`lea
+  (-48,A6),A1; moveq #3,D4; clr.l (A1)+; dbf`); then per range `move.w
+  D3,D4` (the count), `cmpi.w #127,D3; bls.s J; moveq #127,D3; move.w
+  D3,D4` (the top no higher than the set's last member; `move.w #255`
+  for 32 bytes, 0x3C7F604), `J: lea (temp),A1; sub.w b,D4; bcs.s E`
+  (an empty range, unsigned, sets nothing), and the members downward,
+  `L: move.w D3,D5; lsr.w #3,D5; neg.w D5; bset D3,(15,A1,D5.w); subq.w
+  #1,D3; dbf D4,L` (byte `bytes-1 - (k >> 3)`, bit `k mod 8`).  The
+  ranges in the constructor's order.  A top below 0 is clamped too (it
+  is above 127 unsigned): `[0 .. -1]` sets every member, as the image's
+  code would.  The temporary is then copied into the destination
+  (MST_$INIT 0x3C33F8C, `move.l (A3)+,(A4)+` x4), `or`ed into it
+  (MST_$ALLOC_ASID 0x3C4AF14..0x3C4AF2C, `s + [...]`), or its complement
+  `and`ed with the left operand (MST_$FREE_ASID 0x3C7F68A..0x3C7F6A0, `t
+  - [...]`, below).  **Uncertain:** the registers (MST_$INIT and
+  MST_$FREE_ASID copy the top to the count and the count to a third
+  register for the member, 0x3C33F2A `move.w D5,D6; move.w D6,D7`;
+  MST_$ALLOC_ASID counts down in the top's register) and the place of
+  the 0x2048 filler (before `J` at 0x3C4AEBE, before `L` at 0x3C7F616).
+  `dpc` (lowering `large_set_cons_members`, `StmtKind::StoreSetRange`;
+  selection `store_set_range`): MST_$ALLOC_ASID's registers, the filler
+  before `L`, and, as for `[k]` above, in the destination itself (best
+  effort, not byte-identical): cleared by the counted loop for `[r,
+  ...]`, `bclr` for `s - [r]`.  Tests `sets.rs` `run_time_ranges`; exec
+  test `tests/exec/set_ranges.pas`.  A run-time range in a set of a
+  longword or less is refused (no site).  PAS_$SET_BUILD 0xE11FA8 (hand
+  assembly: copy a set, then `bset` each member of a range clamped to
+  it) has no compiled caller; dpc ships the routine in its runtime for
+  kernel links (`runtime/m68k/pas_set_build.s`, transcribed from the
+  image; bead domain-pascal-jzm5) but never calls it.
+- **A set widened (Verified at one SAU8 site; implemented best effort,
+  bead domain-pascal-35ph).**  A set of fewer bytes as a larger set's
+  value: its bytes are the larger's last ones (member k is bit k of the
+  big-endian integer, ref 3.9.3), the leading ones 0.  MST_$FREE_ASID
+  0x3C7F664..0x3C7F688, `private := mst_$regions_active[asid] - [...]`
+  (16 bytes into `set of 0..255`): `lea (-72,A6),A0; clr.l (A0)+` x4,
+  then `lea (-56,A6),A3; move.l (A1)+,(A3)+` x4, the widened copy in a
+  second temporary, `and`ed with the complement of the constructor's
+  (`moveq #7; move.l (A3)+,D5; not.l D5; and.l (A1)+,D5; move.l
+  D5,(A4)+; dbf`) into `private` (-40), then `private <> []` as `moveq
+  #7; tst.l (A1)+; dbne` (0x3C7F6A4; dpc unrolls it, bead
+  domain-pascal-xvxu) (../source finding 646).  `dpc` (`large_set_into`,
+  `large_set_unit`): `s := t` widens into `s` itself, the leading bytes
+  as a constant store, then the block copy (best effort, not
+  byte-identical); as an operand of `+`, `*`, `-` its leading units are
+  0.  A narrowing (a larger set into a smaller) is refused (no site).
 - **`in` on sets in memory, constant member (survey Verified; reading
   of the exceptions Uncertain; implemented, bead domain-pascal-578).**
   Survey: `tools/setsurvey.py summary`, kind `ctest` (every `btst #k`

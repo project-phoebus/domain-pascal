@@ -579,6 +579,25 @@ pub enum StmtKind {
         value: bool,
         only: bool,
     },
+    /// Members `lo..hi` (words, run-time) of the set of `bytes` bytes (more
+    /// than 4) in memory at `set` set (`value` true) or cleared (false),
+    /// `hi` taken no higher than the set's last member and nothing done
+    /// when the range is empty (unsigned: `lo` above `hi`); with `clear`,
+    /// the whole set is cleared first: a range `lo .. hi` of a set
+    /// constructor (ref 3.9.3; "Set Operations", p. 4-173), `s := [lo ..
+    /// hi]`, `s := s + [lo .. hi]`, `s := s - [lo .. hi]`.  `hi` is
+    /// evaluated before `lo`, `lo` once (SAU8 MST_$INIT 0x3C33F0E..
+    /// 0x3C33F8C: the top clamped with `cmpi.w #127; bls`, the count
+    /// `sub.w lo`, `bcs` past the loop, the members set downward by
+    /// `bset`).
+    StoreSetRange {
+        set: Addr,
+        bytes: u32,
+        lo: Expr,
+        hi: Expr,
+        value: bool,
+        clear: bool,
+    },
     /// The constant `bits` (the set's bytes, big-endian, ref 3.9.3 Figure
     /// 3-6) stored into the set of `bits.len()` bytes (more than 4: not
     /// register-sized) at `set`: `s := c`.  Kept apart from scalar

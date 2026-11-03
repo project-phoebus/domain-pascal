@@ -336,6 +336,11 @@ impl Scan<'_> {
                 self.expr(elem);
             }
             StmtKind::StoreSetConst { set, .. } => self.mark(set),
+            StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                self.mark(set);
+                self.expr(hi);
+                self.expr(lo);
+            }
             StmtKind::Copy { dst, src, .. } => {
                 self.mark(dst);
                 self.mark(src);
@@ -668,6 +673,11 @@ fn subst_simple(k: &mut StmtKind, st: &State, l: &HashMap<i32, u32>) {
             subst_expr(elem, st, l);
         }
         StmtKind::StoreSetConst { set, .. } => subst_addr(set, st, l),
+        StmtKind::StoreSetRange { set, lo, hi, .. } => {
+            subst_addr(set, st, l);
+            subst_expr(hi, st, l);
+            subst_expr(lo, st, l);
+        }
         StmtKind::Copy { dst, src, .. } => {
             subst_addr(dst, st, l);
             subst_addr(src, st, l);
@@ -1105,6 +1115,11 @@ impl Reads<'_> {
                     self.expr(elem);
                 }
                 StmtKind::StoreSetConst { set, .. } => self.addr(set),
+                StmtKind::StoreSetRange { set, lo, hi, .. } => {
+                    self.addr(set);
+                    self.expr(hi);
+                    self.expr(lo);
+                }
                 StmtKind::Copy { dst, src, .. } => {
                     self.addr(dst);
                     self.addr(src);

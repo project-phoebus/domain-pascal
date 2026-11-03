@@ -1591,3 +1591,85 @@ fn constant_sets_take_the_element_mod_32() {
         );
     }
 }
+
+/// A constructor's range with run-time bounds (beads domain-pascal-zif8):
+/// the top, the set cleared by a counted loop, the count, the top no
+/// higher than the set's last member, `sub.w` of the bottom and `bcs`
+/// past the loop, the members set downward (SAU8 MST_$ALLOC_ASID
+/// 0x3C4AE96..0x3C4AEDC; in the image into a frame temporary).
+#[test]
+fn run_time_ranges() {
+    // Best effort: in place, where the image uses a frame temporary.
+    let was = dpc_syntax::diag::set_strict(false);
+    let decls = "var g128: extern set of 0..127; g256: extern set of 0..255;
+  lo, n: extern integer;
+";
+    assert_eq!(
+        body(&format!(
+            "{decls}procedure t; begin g128 := [lo .. lo + n - 1] end;"
+        )),
+        [
+            "move.l\t%d2,-(%sp)",
+            "move.w\t(LO).l,%d0",
+            "lea\t(G128).l,%a0",
+            "add.w\t(N).l,%d0",
+            "moveq\t#3,%d1",
+            "subq.w\t#1,%d0",
+            ".balignw\t4,0x2048",
+            "1:",
+            "clr.l\t(%a0)+",
+            "dbf\t%d1,1b",
+            "move.w\t%d0,%d1",
+            "cmpi.w\t#0x7f,%d0",
+            "bls.s\t2f",
+            "moveq\t#0x7f,%d0",
+            "move.w\t%d0,%d1",
+            "2:",
+            "lea\t(G128).l,%a0",
+            "sub.w\t(LO).l,%d1",
+            "bcs.s\t3f",
+            ".balignw\t4,0x2048",
+            "4:",
+            "move.w\t%d0,%d2",
+            "lsr.w\t#3,%d2",
+            "neg.w\t%d2",
+            "bset\t%d0,(0xf,%a0,%d2.w)",
+            "subq.w\t#1,%d0",
+            "dbf\t%d1,4b",
+            "3:",
+            "move.l\t(-4,%fp),%d2"
+        ]
+    );
+    // A 32-byte set: the top no higher than 255 with `move.w #255`
+    // (MST_$FREE_ASID 0x3C7F5FE..0x3C7F604); `s - [r]`: `bclr`, no
+    // clearing.
+    let b = body(&format!(
+        "{decls}procedure t; begin g256 := g256 - [lo .. n] end;"
+    ));
+    assert!(b.contains(&"move.w\t#0xff,%d0".to_string()), "{b:#?}");
+    assert!(
+        b.iter().any(|l| l.starts_with("bclr\t%d0,(0x1f,")),
+        "{b:#?}"
+    );
+    assert!(!b.iter().any(|l| l.starts_with("clr.l")), "{b:#?}");
+    // A 16-byte set widened into a 32-byte one: its leading 16 bytes
+    // cleared, the set copied after them (bead domain-pascal-35ph; MST_$FREE_ASID
+    // 0x3C7F664..0x3C7F688).
+    let b = body(&format!("{decls}procedure t; begin g256 := g128 end;"));
+    assert_eq!(
+        b,
+        [
+            "clr.l\t(G256).l",
+            "clr.l\t(G256+4).l",
+            "clr.l\t(G256+8).l",
+            "clr.l\t(G256+0xc).l",
+            "movea.l\t#G128,%a0",
+            "lea\t(G256+0x10).l,%a1",
+            "move.l\t(%a0)+,(%a1)+",
+            "move.l\t(%a0)+,(%a1)+",
+            "move.l\t(%a0)+,(%a1)+",
+            "move.l\t(%a0)+,(%a1)+"
+        ]
+    );
+    dpc_syntax::diag::set_strict(was);
+}

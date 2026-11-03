@@ -976,6 +976,17 @@ fn stmt_enclosing(s: &Stmt, out: &mut Vec<(i32, u32)>) {
             expr(index, out);
         }
         StmtKind::StoreSetConst { set: a, bits } => addr(a, bits.len() as u32, out),
+        StmtKind::StoreSetRange {
+            set: a,
+            bytes,
+            lo,
+            hi,
+            ..
+        } => {
+            addr(a, *bytes, out);
+            expr(hi, out);
+            expr(lo, out);
+        }
         StmtKind::Copy {
             dst, src, bytes, ..
         } => {
@@ -1150,6 +1161,11 @@ fn stmt_calls_mut(s: &mut Stmt, f: &mut dyn FnMut(&mut Call)) {
             expr(value, f);
         }
         StmtKind::StoreSetConst { set: a, .. } => addr(a, f),
+        StmtKind::StoreSetRange { set: a, lo, hi, .. } => {
+            addr(a, f);
+            expr(hi, f);
+            expr(lo, f);
+        }
         StmtKind::Copy { dst, src, .. } => {
             addr(dst, f);
             addr(src, f);
@@ -1972,6 +1988,11 @@ pub(crate) fn stmt_calls<'a>(s: &'a Stmt, out: &mut Vec<&'a Call>) {
             e(value, out);
         }
         StmtKind::StoreSetConst { set, .. } => addr_calls(set, out),
+        StmtKind::StoreSetRange { set, lo, hi, .. } => {
+            addr_calls(set, out);
+            e(hi, out);
+            e(lo, out);
+        }
         StmtKind::Copy { dst, src, .. } => {
             addr_calls(dst, out);
             addr_calls(src, out);
@@ -2140,6 +2161,9 @@ fn stmt_uses_static(s: &Stmt) -> bool {
             ..
         } => addr_uses_static(addr) || expr_uses_static(value),
         StmtKind::StoreSetConst { set, .. } => addr_uses_static(set),
+        StmtKind::StoreSetRange { set, lo, hi, .. } => {
+            addr_uses_static(set) || expr_uses_static(hi) || expr_uses_static(lo)
+        }
         StmtKind::Copy { dst, src, .. } => addr_uses_static(dst) || addr_uses_static(src),
         StmtKind::Call(c) => call_uses_static(c),
         StmtKind::Fill { start, value, .. } => addr_uses_static(start) || expr_uses_static(value),
@@ -2844,6 +2868,13 @@ fn check_for_indices_once(body: &[Stmt]) -> Result<(), (Diagnostic, Option<i32>)
                         self.expr(index)?;
                     }
                     StmtKind::StoreSetConst { set, bits } => self.addr(set, bits.len() as u32)?,
+                    StmtKind::StoreSetRange {
+                        set, bytes, lo, hi, ..
+                    } => {
+                        self.addr(set, *bytes)?;
+                        self.expr(hi)?;
+                        self.expr(lo)?;
+                    }
                     StmtKind::Copy {
                         dst, src, bytes, ..
                     } => {
@@ -5506,14 +5537,20 @@ fn cons_like(x: &SExpr) -> bool {
     matches!(x.kind, ExprKind::SetCons(_)) || matches!(x.value, Some(ConstValue::Set(_)))
 }
 
+/// A run-time element of a set constructor ([`large_set_cons_members`]):
+/// a member, or a range with a run-time bound.
+enum RunElem<'a> {
+    One(&'a SExpr),
+    Range(&'a SExpr, &'a SExpr),
+}
+
 /// The members of a set constructor (ref "Set Operations", p. 4-173): the
 /// constant ones (single members and ranges with constant bounds) and the
-/// run-time single members.  A run-time range is refused (PAS_$SET_BUILD
-/// 0xE11FA8, never called from compiled code, codegen-patterns 5.1).
-fn large_set_cons_members<'a>(
-    items: &'a [(SExpr, Option<SExpr>)],
-    span: Span,
-) -> Res<(Vec<i64>, Vec<&'a SExpr>)> {
+/// run-time elements in their order, single members and ranges with a
+/// run-time bound (built inline, [`StmtKind::StoreSetRange`]: SAU8
+/// MST_$INIT 0x3C33F0E; PAS_$SET_BUILD 0xE11FA8 is never called from
+/// compiled code, codegen-patterns 5.1).
+fn large_set_cons_members(items: &[(SExpr, Option<SExpr>)]) -> (Vec<i64>, Vec<RunElem<'_>>) {
     let mut konst = Vec::new();
     let mut run = Vec::new();
     for (x, hi) in items {
@@ -5521,21 +5558,45 @@ fn large_set_cons_members<'a>(
         match hi {
             None => match lo {
                 Some(k) => konst.push(k),
-                None => run.push(x),
+                None => run.push(RunElem::One(x)),
             },
             Some(h) => match (lo, h.value.as_ref().and_then(|v| v.ordinal())) {
                 (Some(a), Some(b)) => konst.extend(a..=b),
-                _ => {
-                    return Err(unsupported(
-                        span,
-                        "a set constructor with a run-time range (codegen-patterns 5.1: \
-                         PAS_$SET_BUILD 0xE11FA8 is never called from compiled code) is",
-                    ))
-                }
+                _ => run.push(RunElem::Range(x, h)),
             },
         }
     }
-    Ok((konst, run))
+    (konst, run)
+}
+
+/// The statement that sets (`value`) or clears the run-time element `x`
+/// of a constructor in the set of `bytes` bytes at `dst`; with `only`,
+/// every other member cleared first ([`large_set_into`]).
+fn run_elem_stmt(
+    p: &Program,
+    dst: &Addr,
+    bytes: u32,
+    x: &RunElem,
+    value: bool,
+    only: bool,
+) -> Res<StmtKind> {
+    Ok(match x {
+        RunElem::One(e) => StmtKind::StoreSetMember {
+            set: dst.clone(),
+            bytes,
+            elem: set_element(p, e)?,
+            value,
+            only,
+        },
+        RunElem::Range(lo, hi) => StmtKind::StoreSetRange {
+            set: dst.clone(),
+            bytes,
+            lo: set_element(p, lo)?,
+            hi: set_element(p, hi)?,
+            value,
+            clear: only,
+        },
+    })
 }
 
 /// `d := e` for a set `d` of more than a longword (ref "Assignment", p.
@@ -5612,7 +5673,8 @@ fn large_set_into(
         return Ok(());
     }
     if value.is_designator() {
-        if !is_set(p, value.ty) || p.types.size(value.ty) != bytes {
+        let n = p.types.size(value.ty);
+        if !is_set(p, value.ty) || n > bytes {
             return Err(unsupported(
                 value.span,
                 "assigning a set of another size is",
@@ -5626,6 +5688,34 @@ fn large_set_into(
         }
         check_even(p, value)?;
         let src = addr_of(p, value)?;
+        if n < bytes {
+            // A smaller set widened (ref 3.9.3: member k is bit k of the
+            // set's big-endian integer, so the smaller set's bytes are the
+            // larger's last ones): its leading bytes cleared, then the
+            // smaller set copied after them.  SAU8 MST_$FREE_ASID
+            // 0x3C7F664..0x3C7F688 widens a 16-byte set into a 32-byte
+            // frame temporary, `lea (-72,A6),A0; clr.l (A0)+` x4, then
+            // `move.l (A1)+,(A3)+` x4 to -56 (`private :=
+            // mst_$regions_active[asid] - [...]`).  Best effort (not
+            // byte-identical): `dpc` widens into the set itself, its
+            // leading bytes as a constant store ([`StmtKind::StoreSetConst`]).
+            best_effort(
+                value.span,
+                "a set widened into a larger set (MST_$FREE_ASID 0x3C7F664 widens into a frame \
+                 temporary; codegen-patterns 5.1) is",
+            )?;
+            out.push(stmt(StmtKind::StoreSetConst {
+                set: dst.clone(),
+                bits: vec![0; (bytes - n) as usize],
+            }));
+            out.push(stmt(StmtKind::Copy {
+                dst: dst.clone().offset_by((bytes - n) as i32),
+                src,
+                bytes: n,
+                chars: false,
+            }));
+            return Ok(());
+        }
         if src != *dst {
             out.push(stmt(StmtKind::Copy {
                 dst: dst.clone(),
@@ -5638,7 +5728,7 @@ fn large_set_into(
     }
     match &value.kind {
         ExprKind::SetCons(items) => {
-            let (konst, run) = large_set_cons_members(items, value.span)?;
+            let (konst, run) = large_set_cons_members(items);
             if !run.is_empty() {
                 best_effort(
                     value.span,
@@ -5650,13 +5740,7 @@ fn large_set_into(
             let mut run = run.into_iter();
             if konst.is_empty() {
                 let first = run.next().expect("a constructor that is not constant");
-                out.push(stmt(StmtKind::StoreSetMember {
-                    set: dst.clone(),
-                    bytes,
-                    elem: set_element(p, first)?,
-                    value: true,
-                    only: true,
-                }));
+                out.push(stmt(run_elem_stmt(p, dst, bytes, &first, true, true)?));
             } else {
                 out.push(stmt(StmtKind::StoreSetConst {
                     set: dst.clone(),
@@ -5664,13 +5748,7 @@ fn large_set_into(
                 }));
             }
             for x in run {
-                out.push(stmt(StmtKind::StoreSetMember {
-                    set: dst.clone(),
-                    bytes,
-                    elem: set_element(p, x)?,
-                    value: true,
-                    only: false,
-                }));
+                out.push(stmt(run_elem_stmt(p, dst, bytes, &x, true, false)?));
             }
             Ok(())
         }
@@ -5700,7 +5778,7 @@ fn large_set_into(
             };
             let (konst, run) = match (&cons.value, &cons.kind) {
                 (Some(ConstValue::Set(m)), _) => (m.clone(), Vec::new()),
-                (_, ExprKind::SetCons(items)) => large_set_cons_members(items, cons.span)?,
+                (_, ExprKind::SetCons(items)) => large_set_cons_members(items),
                 _ => unreachable!("a constructor or a set constant"),
             };
             large_set_bytes(&konst, bytes, cons.span)?;
@@ -5719,13 +5797,7 @@ fn large_set_into(
                 }));
             }
             for x in run {
-                out.push(stmt(StmtKind::StoreSetMember {
-                    set: dst.clone(),
-                    bytes,
-                    elem: set_element(p, x)?,
-                    value: add,
-                    only: false,
-                }));
+                out.push(stmt(run_elem_stmt(p, dst, bytes, &x, add, false)?));
             }
             Ok(())
         }
@@ -5769,11 +5841,19 @@ fn large_set_unit(p: &Program, e: &SExpr, bytes: u32, o: i32, w: Width) -> Res<E
         return Ok(large_set_unit_const(&b, o, w));
     }
     if e.is_designator() {
-        if !is_set(p, e.ty) || p.types.size(e.ty) != bytes {
+        let n = p.types.size(e.ty);
+        // A smaller set's units are the larger's last ones, its leading
+        // ones 0 (ref 3.9.3; widened as [`large_set_into`] widens it); a
+        // unit across the boundary is refused.
+        let pad = bytes as i32 - n as i32;
+        if !is_set(p, e.ty) || pad < 0 || (o < pad && o + w.bytes() as i32 > pad) {
             return Err(unsupported(
                 e.span,
                 "a set operation on sets of other sizes is",
             ));
+        }
+        if o < pad {
+            return Ok(Expr::Const { value: 0, ty });
         }
         if volatile_access(p, e).is_some() {
             return Err(unsupported(
@@ -5783,7 +5863,7 @@ fn large_set_unit(p: &Program, e: &SExpr, bytes: u32, o: i32, w: Width) -> Res<E
         }
         check_even(p, e)?;
         return Ok(Expr::Load {
-            addr: addr_of(p, e)?.offset_by(o),
+            addr: addr_of(p, e)?.offset_by(o - pad),
             ty,
         });
     }
@@ -7858,6 +7938,15 @@ fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
         }
         Width::Word => Ok(v),
         Width::Byte => Ok(convert(v, Scalar::unsigned(Width::Word))),
+        // A longword expression whose low word [`narrow`] computes at the
+        // word's width (ref 4.3.1, p. 4-5), the ordinal of a member
+        // 0..1023: the bounds of SAU8 MST_$INIT's ranges, `pinteger`
+        // sums, `move.w; add.w; subq.w #1` (0x3C33F0E..0x3C33F20,
+        // 0x3C33F54..0x3C33F60; `region_$global_b + region_$global_b_size
+        // - 1`, ../source mst/init.pas).
+        Width::Long if narrow(&v, Scalar::signed(Width::Word)).is_some() => {
+            Ok(narrow(&v, Scalar::signed(Width::Word)).expect("checked"))
+        }
         // Best effort: the low word, the ordinal of a member 0..1023 (bead
         // domain-pascal-5kgg).
         Width::Long => best_effort(
