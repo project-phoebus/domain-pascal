@@ -4084,9 +4084,11 @@ end;
             "g := integer32(addr(l)) & g;",
             "an operation other than a longword `+` or `-`",
         ),
+        // Another unit's address on the left (on the right it compiles,
+        // `cmp.l #sym,Dn`, FIM_$BUILD_DF 0xE0A58A, bead domain-pascal-awzk).
         (
             "if integer32(addr(l)) > g then g := 0;",
-            "an address (`addr`) in a comparison",
+            "an address (`addr`) on the left of a comparison",
         ),
         (
             "if addr(loc) = p then g := 0;",

@@ -6280,16 +6280,27 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     `lea (0x80,A5),A0; move.l A0,D1; andi.l #0x3ff,D1`, its one site);
     `!` and `xor` with a constant the same form, **best effort** (no
     site; exec test `be_sq4a`).
-  - **Comparisons** with an address: not implemented (refused; bead
-    domain-pascal-awzk).  The image compares a symbol's address as an
-    immediate operand, `cmp.l
-    #sym,Dn` after the variable is loaded (FIM_$BUILD_DF 0xE0A58A `move.l
-    (-6,A6),D2; cmp.l #GLOBAL_B,D2; bhi`), a pointer with `cmpa.l
-    #sym,An` after loading it (0xE0A54C `movea.l (0x8).l,A3; cmpa.l
-    #FIM_$COLD_BUS_ERR,A3; beq`), and two symbols `move.l #sym,D0; cmp.l
-    #sym,D0` (OS_$INIT 0xE3397C).  The ../source reconstructions of
-    these are not compiled yet, and the forms of an address that needs a
-    `lea` are not seen.
+  - **Comparisons** with another unit's address (Verified; implemented
+    for a symbol's address, bead domain-pascal-awzk; ../source
+    pascal-translation-notes finding 665).  The image compares a
+    symbol's address as an immediate operand, `cmp.l #sym,Dn` (the
+    immediate-EA encoding `b0bc` + the register's number << 9, which gas
+    does not choose) after the variable is loaded into a data register
+    (FIM_$BUILD_DF 0xE0A58A `move.l (-6,A6),D2; cmp.l #GLOBAL_B,D2; bhi`;
+    SAU5 0xE0A482, SAU8 0x3C0B228 and 0x3C0B286 `b6bc`/`b4bc`, SAU9
+    0x3C40BF66; OS_$INIT 0xE34452 `cmp.l #sym,D2; bcc` on a value held in
+    D2), a pointer with `cmpa.l #sym,An` after loading it (0xE0A54C
+    `movea.l (0x8).l,A3; cmpa.l #FIM_$COLD_BUS_ERR,A3; beq`), and two
+    symbols `move.l #sym,D0; cmp.l #sym,D0` (OS_$INIT 0xE3397C).  Every
+    site's branch is unsigned (`bhi`, `bls`, `bcc`, `beq`): the operands
+    are of an unsigned type (an ordering of pointers is not Pascal).
+    `dpc` (`isel.rs` `compare_with_address`; golden
+    `expr/addr_compare`): `addr(x)` of another unit's object (through
+    type transfers to another 4-byte type, `uaddr(addr(x))`) on the right
+    of a comparison takes these forms, the relation's signedness the
+    operands' type's; on the left, the relation swapped (best effort, no
+    site).  Not implemented: an address that needs a `lea` (an object of
+    this unit, a frame object) compared, no site.
 
   Refused besides: an address inside another unit's object or a constant
   stored (pushed by value it is `pea abs.l`, as by address: DMA_$INIT

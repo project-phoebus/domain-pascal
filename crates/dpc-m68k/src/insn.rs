@@ -990,6 +990,21 @@ impl fmt::Display for Insn {
             Insn::CmpaZero(a) => write!(f, "cmpa.w\t#0,{}", Reg::A(*a)),
             Insn::CmpaImm(n, a) => write!(f, "cmpa.l\t#{},{}", num(*n), Reg::A(*a)),
             Insn::SubaSelf(a) => write!(f, "suba.l\t{},{}", Reg::A(*a), Reg::A(*a)),
+            // A symbol's address compared: the immediate-EA encoding
+            // `b0bc` (+ the register's number << 9), which gas does not
+            // choose (it writes `cmpi.l`): FIM_$BUILD_DF 0xE0A58E `b4bc
+            // 00d0 0000` `cmp.l #GLOBAL_B,D2` (codegen-patterns 5.2,
+            // "Comparisons").
+            Insn::Cmp {
+                size: Size::L,
+                src: Ea::ImmSym(s),
+                dst,
+            } => write!(
+                f,
+                ".short\t0x{:04x}\t| cmp.l #{s},{}\n\t.long\t{s}",
+                0xb0bc | (u16::from(*dst) << 9),
+                Reg::D(*dst)
+            ),
             Insn::Cmp { size, src, dst } => write!(f, "cmp.{size}\t{src},{}", Reg::D(*dst)),
             Insn::Cmpa { src, dst } => write!(f, "cmpa.l\t{src},{}", Reg::A(*dst)),
             // A symbol's address added or subtracted: the immediate-EA

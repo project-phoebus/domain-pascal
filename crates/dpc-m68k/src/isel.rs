@@ -170,6 +170,21 @@ struct CallMode {
 
 /// A constant as the immediate of a `w`-sized instruction: a byte as
 /// 0..=255 (see [`Ea::Imm`]), a word or longword as the signed number.
+/// The symbol whose address `e` is, `addr(x)` of another unit's object
+/// `x` (an [`Addr::Symbol`] at offset 0), through type transfers to
+/// another 4-byte type (`linteger(addr(x))`); `None` otherwise.
+fn symbol_address(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::AddrOf(Addr::Symbol { name, offset: 0 }) => Some(name),
+        Expr::Convert { value, ty, .. }
+            if ty.width == Width::Long && value.ty().width == Width::Long =>
+        {
+            symbol_address(value)
+        }
+        _ => None,
+    }
+}
+
 fn imm(value: i64, w: Width) -> i64 {
     match w {
         Width::Byte => value & 0xff,
@@ -12559,6 +12574,78 @@ impl Selector {
         Ok(true)
     }
 
+    /// `lhs op addr(sym)`, the address of another unit's object `sym` as
+    /// the compare's immediate (codegen-patterns 5.2, "Comparisons"; bead
+    /// domain-pascal-awzk): `lhs` in a data register, then `cmp.l #sym,Dn`
+    /// (`b0bc` + n << 9, which gas does not choose: it writes `cmpi.l`),
+    /// FIM_$BUILD_DF 0xE0A58A `move.l (-6,A6),D2; cmp.l #GLOBAL_B,D2;
+    /// bhi` (SAU5 0xE0A482, SAU8 0x3C0B228 and 0x3C0B286 likewise, SAU9
+    /// 0x3C40BF66 with its value; ../source pascal-translation-notes
+    /// finding 665), OS_$INIT 0xE34452 `cmp.l #sym,D2; bcc` (a value held
+    /// in D2); another symbol's address, `move.l #sym,D0; cmp.l #sym,D0`
+    /// (OS_$INIT 0xE3397C); a pointer in an address register, `movea.l`
+    /// then `cmpa.l #sym,An` (FIM_$BUILD_DF 0xE0A54C `movea.l (0x8).l,A3;
+    /// cmpa.l #FIM_$COLD_BUS_ERR,A3; beq`).  Every site's branch is
+    /// unsigned (`bhi`, `bls`, `bcc`, `beq`); the relation's signedness is
+    /// the operands' type's.
+    fn compare_with_address(&mut self, op: Rel, lhs: &Expr, sym: &str, signed: bool) -> Res<Cond> {
+        let src = Ea::ImmSym(sym.to_string());
+        if let Expr::AddrOf(a) = lhs {
+            // An address formed here (a `lea`) against the symbol's: its
+            // address register compared, best effort (no site).
+            best_effort(
+                self.span,
+                "an address formed with `lea` compared with another unit's address (no site; \
+                 codegen-patterns 5.2, \"Comparisons\") is",
+            )?;
+            let a = self.addr_into_a(a)?;
+            self.out.push(Insn::Cmpa { src, dst: a });
+            return Ok(rel_cond(op, signed));
+        }
+        if lhs.ty().pointer {
+            let a = match self.eval(lhs)? {
+                Val::Reg(Reg::A(a)) => a,
+                v => {
+                    let from = match v {
+                        Val::Mem(ea) => ea,
+                        Val::Reg(r) => Ea::Reg(r),
+                        Val::Tmp(d) => Ea::Reg(Reg::D(d)),
+                        Val::Imm(n) => Ea::Imm(n),
+                    };
+                    let a = self.alloc_a()?;
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: from,
+                        dst: a,
+                    });
+                    a
+                }
+            };
+            self.out.push(Insn::Cmpa { src, dst: a });
+            return Ok(rel_cond(op, signed));
+        }
+        let d = if let Some(other) = symbol_address(lhs) {
+            let d = self.alloc_d()?;
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::ImmSym(other.to_string()),
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            d
+        } else {
+            match self.eval(lhs)? {
+                Val::Reg(Reg::D(d)) => d,
+                v => self.in_tmp(v, Width::Long)?,
+            }
+        };
+        self.out.push(Insn::Cmp {
+            size: Size::L,
+            src,
+            dst: d,
+        });
+        Ok(rel_cond(op, signed))
+    }
+
     fn assigned_ordered(span: Span) -> Diagnostic {
         unsupported(
             span,
@@ -12666,6 +12753,19 @@ impl Selector {
             } else {
                 self.compare_computed(swap_rel(op), rhs, lhs)
             };
+        }
+        if let Some(sym) = symbol_address(rhs) {
+            return self.compare_with_address(op, lhs, sym, signed);
+        }
+        if let Some(sym) = symbol_address(lhs) {
+            // Best effort (not byte-identical): the address on the left,
+            // no site; the relation swapped, the other operand loaded.
+            best_effort(
+                self.span,
+                "an address (`addr`) on the left of a comparison (no site; codegen-patterns \
+                 5.2, \"Comparisons\") is",
+            )?;
+            return self.compare_with_address(swap_rel(op), rhs, sym, signed);
         }
         let Expr::Load { addr, .. } = lhs else {
             return self.compare_computed(op, lhs, rhs);
@@ -18923,10 +19023,11 @@ impl Selector {
             }
             // Elsewhere (a store, an argument, `+`/`-`: [`Self::store`],
             // [`Self::push`], [`Self::addr_arith`]) the address has the
-            // forms of codegen-patterns 5.2, "`addr(x)` as a value"; in
-            // other expressions (a comparison, `*`, a shift, `&`, ...) no
-            // form is catalogued (`cmp.l #sym,Dn` and `cmpa.l #sym,An`
-            // are seen for comparisons, codegen-patterns 5.2; bead
+            // forms of codegen-patterns 5.2, "`addr(x)` as a value"; a
+            // comparison with another unit's address is
+            // [`Self::compare_with_address`]; in other expressions (a
+            // comparison with an address that needs a `lea`, `*`, a
+            // shift, `&`, ...) no form is catalogued (bead
             // domain-pascal-awzk).
             // Best effort (not byte-identical; bead domain-pascal-uaq7):
             // the address into a data register, `move.l #sym,Dn` for

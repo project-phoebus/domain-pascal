@@ -52,9 +52,9 @@ rts
 TAKE_INT:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-move.l #USA_$CTL,%d1
 move.l (%a0),%d0
-cmp.l %d1,%d0
+.short 0xb0bc
+.long USA_$CTL
 bne.s 1f
 subq.l #2,%sp
 move.w #1,-(%sp)
@@ -71,9 +71,9 @@ rts
 TAKE_ROUTINE:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-move.l #USA_$CB,%d1
 move.l (%a0),%d0
-cmp.l %d1,%d0
+.short 0xb0bc
+.long USA_$CB
 bne.s 1f
 subq.l #2,%sp
 move.w #1,-(%sp)
