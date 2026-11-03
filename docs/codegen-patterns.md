@@ -9395,7 +9395,9 @@ T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
   subtract a lower bound whose label goes to the default).
 - **n >= 4:** tables have r/n <= 2.71 (module-local 0xE63376 19/7,
   module-local 0xE6A766 59/22, 0xE1077A 15/6; most are near 1); chains
-  have r/n >= 4.17 (SAU9 SCSI_$C90_INT 0x3C4A59CE 25/6, `cmpi.w #2 ..
+  have r/n >= 3.4 (SAU7 WIN7_$ERROR_QUE 0x3C41C30C 17/5, labels 2, 3,
+  17, 18, 16 in that order, `cmpi.w #2,(-52,A6)` ... on a frame copy of
+  the selector; ../source finding 950; SAU9 SCSI_$C90_INT 0x3C4A59CE 25/6, `cmpi.w #2 ..
   #24` on a frame copy of the selector; in the SAU2 image >= 4.33:
   TTY_$I_SIGNAL 26/6, REM_FILE_$SERVER 0xE6429A 139/29,
   0xE63A02 139/26, module-local 0xE1CC70 48/8, ASKNODE_$INTERNET_INFO
@@ -9405,7 +9407,7 @@ T:      .short  ARM0-T, ARM1-T, ...     ; 0xE5C6D6: 000a 0026 0032 00a4 006c
   DIR_$DO_OP, 26 over 51, are tables).  Not explained: the size of the
   table (180 bytes) does not separate it from ASKNODE_$SERVER's (184);
   the selector is in D2 there (`move.w (A2),D2`, 0xE6463C), not D0.
-  **Uncertain:** the threshold between 2.71 and 4.33; no site lies there.
+  **Uncertain:** the threshold between 2.71 and 3.4; no site lies there.
 
 **Arms and the join (Verified).**
 

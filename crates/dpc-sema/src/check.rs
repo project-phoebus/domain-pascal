@@ -589,6 +589,34 @@ impl<'t> Checker<'t> {
         if !self.errors.is_empty() {
             return Err(self.errors);
         }
+        // Nested routines are local symbols (ref 5.5.4, p. 5-17), so two of
+        // one name nested in different routines (legal: each is declared
+        // in its parent's scope, ref 2.4) would be one label: the second
+        // and later take `NAME.2`, `NAME.3`, ... (the image's copies of
+        // such a routine are not map-named: SAU7 WIN7_'s `free_buffer` and
+        // `move_iopb`, ../source finding 951).  Top-level routines keep
+        // their names.
+        let mut taken: std::collections::HashSet<String> = self
+            .routines
+            .iter()
+            .filter(|r| r.parent.is_none())
+            .map(|r| r.symbol.clone())
+            .collect();
+        for r in self.routines.iter_mut().filter(|r| r.parent.is_some()) {
+            if taken.insert(r.symbol.clone()) {
+                continue;
+            }
+            let base = r.symbol.clone();
+            let mut k = 2;
+            loop {
+                let s = format!("{base}.{k}");
+                if taken.insert(s.clone()) {
+                    r.symbol = s;
+                    break;
+                }
+                k += 1;
+            }
+        }
         let types = std::mem::take(&mut self.types);
         Ok(Program {
             name: unit.name.name.clone(),

@@ -311,7 +311,7 @@ end;",
 
 /// The choice (codegen-patterns 7.3): up to 3 labels a chain
 /// however dense; from 4, a table when `7r <= 19n` (r/n <= 2.71), a chain
-/// when `3r >= 13n` (r/n >= 4.33), refused between.
+/// when `5r >= 17n` (r/n >= 3.4), refused between.
 #[test]
 fn table_or_chain() {
     let is_table = |labels: &str| {
@@ -327,18 +327,18 @@ fn table_or_chain() {
     // 4 labels over 18 (4.5): a chain.
     assert!(!is_table("83, 84, 85"));
     // The boundaries: 7 labels over 19 (module-local 0xE63376, the
-    // sparsest table) and 6 over 25 (SAU9 SCSI_$C90_INT 0x3C4A59CE, the
-    // densest chain; TTY_$I_SIGNAL 0xE1B832 has 6 over 26); one more or
-    // one less in range is in the refused band.
+    // sparsest table) and 5 over 17 (SAU7 WIN7_$ERROR_QUE 0x3C41C30C, the
+    // densest chain); one more or one less in range is in the refused
+    // band.
     let case_of = |labels: &str| format!("case w of {labels}: x := 2; end;");
     assert!(proc_body(&case_of("1, 2, 3, 4, 5, 6: x := 1; 19"))
         .iter()
         .any(|l| l.starts_with("jmp")));
     assert!(error(&case_of("1, 2, 3, 4, 5, 6: x := 1; 20")).contains("7 labels over a range of 20"));
-    assert!(!proc_body(&case_of("2, 1, 3, 4, 5: x := 1; 25"))
+    assert!(!proc_body(&case_of("2, 3: x := 1; 17, 18, 16"))
         .iter()
         .any(|l| l.starts_with("jmp")));
-    assert!(error(&case_of("2, 1, 3, 4, 5: x := 1; 24")).contains("6 labels over a range of 24"));
+    assert!(error(&case_of("2, 3: x := 1; 16, 17, 15")).contains("5 labels over a range of 16"));
     let e = error("case w of 89, 90, 91: x := 1; 100: x := 2; end;");
     assert!(
         e.contains("a `case` of 4 labels over a range of 12 (between the sparsest jump table"),

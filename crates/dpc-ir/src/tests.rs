@@ -3536,8 +3536,10 @@ end;
         e[0].contains("a nested routine declared `forward`"),
         "{e:?}"
     );
-    // Two nested routines of one name: the local symbols collide.
-    let e = errs(
+    // Two nested routines of one name (each in its parent's scope, ref
+    // 2.4): local symbols `H` and `H.2`, each parent calling its own
+    // (../source finding 951).
+    let m = lower_src(
         "module m;
 procedure p;
   procedure h;
@@ -3554,8 +3556,22 @@ begin
   h;
 end;
 ",
+    )
+    .unwrap();
+    let syms: Vec<&str> = m.functions.iter().map(|f| f.symbol.as_str()).collect();
+    assert_eq!(syms, ["H", "P", "H.2", "Q"]);
+    let body = |f: &str| {
+        format!(
+            "{:?}",
+            m.functions.iter().find(|g| g.symbol == f).unwrap().body
+        )
+    };
+    assert!(
+        body("P").contains("\"H\"") && !body("P").contains("H.2"),
+        "{}",
+        body("P")
     );
-    assert!(e[0].contains("two routines named `H` in one unit"), "{e:?}");
+    assert!(body("Q").contains("\"H.2\""), "{}", body("Q"));
     // A `for` index a nested routine reaches, and a nested routine's loop
     // over the enclosing routine's variable: kept in memory, in the frame
     // (RINGLOG_$CNTL 0xE72296) and through the static link (0xE721F0);

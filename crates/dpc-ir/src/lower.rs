@@ -716,9 +716,9 @@ fn outer(a: Addr, levels: u32, var_bytes: u32) -> Addr {
 /// (0xE13928 `movea.l A6,A1`) and a sibling, or the routine itself, its
 /// own link (0xE13718 `movea.l A4,A1`; 0xE397D0 recursive).
 ///
-/// Nested routines are local symbols (ref 5.5.4 p. 5-17), so two routines
-/// of one name in a unit (nested in different routines) would collide:
-/// refused.
+/// Nested routines are local symbols (ref 5.5.4 p. 5-17); `dpc-sema`
+/// gives two of one name distinct symbols (`NAME.2`), so a collision left
+/// here is an internal error.
 fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
     let mut errors = Vec::new();
     for (j, f) in fs.iter().enumerate() {

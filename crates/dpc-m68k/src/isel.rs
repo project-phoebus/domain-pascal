@@ -11647,7 +11647,8 @@ impl Selector {
     ///   (`subq.w #3`); ACL_$SERVER 0xE495CE (`subi.w #100`);
     ///   MST_$PRIV_SET_TOUCH_AHEAD_CNT 0xE44534 (`addq.w #4`).
     ///
-    /// Between the two (2.71 < r/n < 4.33 with `n >= 4`) nothing decides;
+    /// Between the two (2.71 < r/n < 3.4 with `n >= 4`; chains are seen
+    /// down to 3.4, SAU7 WIN7_$ERROR_QUE 0x3C41C30C) nothing decides;
     /// refused.  The one exception, the 41-label chain of
     /// ASKNODE_$INTERNET_INFO 0xE6463E (r/n 2.20, where a table is
     /// predicted), is not explained (`tools/casesurvey.py`).  The arms follow in source order; each but the last ends
@@ -11709,9 +11710,11 @@ impl Selector {
             false
         } else if 7 * range <= 19 * n {
             true
-        } else if 6 * range >= 25 * n {
-            // The densest compare chain: SAU9 SCSI_$C90_INT 0x3C4A59CE, 6
-            // labels over 0..24 (`cmpi.w #2 .. #24`, codegen-patterns 7.3).
+        } else if 5 * range >= 17 * n {
+            // The densest compare chain: SAU7 WIN7_$ERROR_QUE 0x3C41C30C,
+            // labels 2, 3, 17, 18, 16 (r/n 3.4; ../source finding 950);
+            // before it SAU9 SCSI_$C90_INT 0x3C4A59CE, 6 labels over
+            // 0..24 (codegen-patterns 7.3).
             false
         } else {
             return Err(unsupported(
