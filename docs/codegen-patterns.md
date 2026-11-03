@@ -14187,6 +14187,18 @@ of the remaining misses).**  The corpus misses fall into these groups:
   - Survey: 433 values of this kind (callee-saved register, no call
     crossed, a call later in the block of the last use).  Against: 1365
     values in scratch registers whose block also continues to a call.
+  - **An M$ARITH call in an expression holds its arguments too**
+    (Uncertain, one site; bead domain-pascal-mhzy): SAU4 TIME_$GET_ADJUST
+    0xF817472 keeps `current_delta`, defined before the call's operands
+    and last read by the push for `M$OIS$LLL` at 0xF81748C, in D1, its
+    copy for the DN460 divide in D0 (section 14.1).  No SAU2 site
+    against: of the 21 `M$ARITH` calls with D0 pushed, D0 is in every
+    one computed within the call's own operands (0xE0874A, 0xE14C02,
+    0xE6EA00, ...), which the rule does not hold.  `dpc` holds a value
+    the call's pushes read, in a body without branches, for a call whose
+    operands make no call (`held_through_marith`); not one read in the
+    operands' computation (no site either way).  Over ../source's SAU2
+    Pascal this changes no object.
   - **Hypothesis tested (review of bead domain-pascal-g5q.5, 2026-10-12):
     a value defined before a call statement whose last use is in that
     call's arguments is live through the call.**  `tools/regalloc.py
@@ -16534,6 +16546,21 @@ In place of the M$ARITH calls of section 8:
   `move.l D2,D5; divul.l #11,D4:D5`, the low word of D4 the `M$OIU$WLW`
   result (77 sites).  `M$ARITH` is not called at all in the SAU9 image's
   compiled code.
+- A constant factor in a word's range (what `M$MI*$LLW` would take as
+  its word) is loaded into the product's register, the other factor the
+  source, as a word variable is: SAU6 MT_$WAIT 0x7807D67A `move.l
+  #1000,D1; muls.l D3,D1` (SAU3's 0xE70E64 calls `M$MIS$LLW` with `move.w
+  #1000,-(SP)`); SAU9 SCSI_$C90_INT 0x3C4A5CC8 `moveq #100,D1; ...;
+  mulu.l D0,D1`.  A longword constant is the immediate: 0x3C416EC0
+  `muls.l #60296,D1`, TIME_$ADJUST_TIME_OF_DAY 0x3C418992 `muls.l
+  #250000,D2`, 0x3C426DE4 `mulu.l #243712,D7` (every `mul<s>.l #`
+  immediate of the SAU6 and SAU9 images is beyond a word; implemented,
+  bead domain-pascal-mhzy).
+- A variable squared is loaded once, its register both operands: SAU9
+  OS_$SHUTDOWN 0x3C47422C `move.l (-596,A6),D1; muls.l D1,D1` (SAU2
+  0xE6D600 pushes it twice, `move.l (SP),-(SP)`; implemented).
+- A word divisor is extended into a register: TIME_$ADJUST_TIME_OF_DAY
+  0x3C4189D2..0x3C4189DC `move.w D3,D1; ext.l D1; divs.l D1,D2`.
 
 ### Symbols far from an array's first element (Verified at the SCSI_ sites)
 
@@ -16793,3 +16820,72 @@ the two above differ in registers; SMD_$SET_CURSOR_POS differs by a
 data offset of the SMD_ unit's translation (`pea (7576,A5)` against
 `(7584,A5)`), not in code.  Goldens `m68020/scaled_index`,
 `m68020/bit_fields`, `m68020/long_arith`.
+
+## 14.1 The DSP160, DN460 and DN660: the SAU4 kernel (Verified at the sites given; implemented with `-cpu 460`; bead domain-pascal-mhzy)
+
+The reference's Table 6-3 (p. 6-16) has `-cpu 160`, `460` and `660`,
+"Generates code for a DSP160, DN460, or DN660 workstation.  These three
+arguments generate identical code"; Table 6-4 marks that code as running
+on those machines only.  They are bit-slice MC68010 emulators, and the
+SR10.2 SAU4 kernel's per-SAU modules were compiled for them (found by
+../source's SAU4 translation, `../source/tmp/sau4/cpu460.md`; the
+modules all 68010 SAUs share, BAT_, VTOC_, DIR, CAL_, PACCT, still call
+M$ARITH).  The code is the MC68010 code with one difference: a longword
+`*` and `div` are the emulators' extended instructions where the
+MC68010 code calls `M$MI*`/`M$DI*`, in the places the MC68020 code has
+`mul<s>.l`/`div<s>.l` (section 14, "Longword multiply and divide"):
+the product or quotient in the first operand's register, a word operand
+extended, a factor in a word's range in the product's register, a
+variable squared loaded once.  `mod` still calls `M$OI*`
+(TIME_$GET_ADJUST 0xF817486 `M$OIS$LLL`; NETWORK_ 0xF810916
+`M$OIS$WLW`).  Image: `sau4/domain_os`, VA = file offset + 0xF800000.
+
+The encodings (inferred from the sites; gas knows none of them, so dpc
+emits `.short`, and `.long` for an immediate):
+
+- signed, line 7 with bit 8 set, `0111 nnn1 0d eeeeee`, Dn := Dn op ea,
+  d = 0 multiply, 1 divide; ea a data register or `#imm` (`eeeeee` =
+  `111100`, a longword): TIME_$ADJUST_TIME_OF_DAY 0xF8172EE `753c
+  0003d090` `muls.l #250000,D2`; 0xF81733A `7544` `divs.l D4,D2`, `7102`
+  `muls.l D2,D0`; TIME_$GET_ADJUST 0xF81747E `717c 0003d090` `divs.l
+  #250000,D0`; NETWORK_$REPORT_FAILURE 0xF81140E `7943` `divs.l D3,D4`;
+  OS_$SHUTDOWN 0xF877148 `7301` `muls.l D1,D1`; MT_$WAIT 0xF87DBE2
+  `7303`; PBU_$WAIT 0xF897ED0 `757c 000000fa` `divs.l #250,D2`;
+  TPAD_$DATA 0xF872D86 `7900`, 0xF873028 `7501`;
+- unsigned, the MC68000's address-register forms of `divu.w`/`mulu.w`,
+  `1000 nnn0 1100 1mmm` (divide) and `1100 nnn0 1100 1mmm` (multiply),
+  Dn := Dn op Dm: NETWORK_$READ_AHEAD 0xF8106D8 `82ca` `divu.l D2,D1`;
+  AST_$GET_SEG_MAP 0xF8071A8 `8ac9`, 0xF8071C2 `80cd`; PMAP_$PURIFIER_L
+  0xF81491E `84cb`, `8ccc`, `80cf`; PMAP_$PURIFIER_R 0xF814A9E `82ca`;
+  PCHIST_$CNTL 0xF8669CE `c2cb` `mulu.l D3,D1`;
+  PCHIST_$UNIX_PROFIL_ADDUPC 0xF866B12 `c4c8`, `c4c9`; DISK_INIT
+  0xF81A6B2 `c2c8`; MST_$INIT 0xF834280 `80c9`.
+
+The operands are data registers (and a signed immediate), so where the
+MC68020 code takes a memory operand or an unsigned immediate the DN460
+code loads it into a new data register:
+
+- a divisor: AST_$GET_SEG_MAP 0xF8071A2 `move.l (-64,A6),D1; move.l
+  D4,D5; divu.l D1,D5` (SAU9 0x3C408086 `divu.l (-64,A6),D0`);
+  PMAP_$PURIFIER_R 0xF814A9A `moveq #6,D2; addq.l #5,D1; divu.l D2,D1`
+  (SAU9 0x3C416506 `divu.l #6,D2`); MST_$INIT 0xF83427E `moveq
+  #100,D1; divu.l D1,D0`;
+- a factor: loaded into the product's register, the other factor the
+  source, as a word is (PCHIST_$UNIX_PROFIL_ADDUPC 0xF866AF6 `move.l
+  (-8,A0),D2` ... `c4c8` `mulu.l D0,D2`, 0xF866B16 `move.l (-8,A0),D2;
+  c4c9` `mulu.l D1,D2`, where SAU9 0x3C463FDA is `mulu.l (-8,A0),D0`).
+
+A constant dividend is loaded (NETWORK_ 0xF8113F4 `clr.l D0; 80cc`, the
+SAU2's `M$DIU$LLW` of 0; reported by ../source, finding 820).  The
+extended instructions are not calls for register allocation: OS_$SHUTDOWN
+keeps its `dbf` count in D0 across `7301` (0xF87713E..0xF87714E), where
+the SAU2 keeps it in D1 across `M$MIS$LLL`.
+
+**Not settled:** an unsigned longword product with a constant beyond a
+word (no site; dpc loads it into the product's register, best effort);
+a memory operand of a signed instruction (none seen; dpc loads it as
+for an unsigned one).  Registers around the sites follow section 12.4;
+they differ from the image in places (TIME_$ADJUST_TIME_OF_DAY 0xF81732E
+takes D4 for the word divisor, the SAU9's 0x3C4189D2 D1; not
+explained), as in section 14, "Register choices".  Golden `dn460/long_arith` (TIME_$GET_ADJUST byte
+for byte).

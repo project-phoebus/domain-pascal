@@ -77,7 +77,7 @@ the option.
 | `-cond` | 6.4.7, p. 6-12 | | compile the lines marked `%debug` | implemented (`preprocess::Options::cond`, already in the preprocessor) |
 | `-ncond` | 6.4.7, p. 6-12 | yes | `%debug` lines are comments | accepted |
 | `-config var1 [... varN]` | 6.4.8, pp. 6-12..6-14; 4.7, pp. 4-45..4-52 | (not given) | set conditional variables to true | implemented; see "-config" below |
-| `-cpu id` | 6.4.9, pp. 6-14..6-17; Table 6-3, p. 6-16 | `mathlib_sr10` | target workstation (processor, floating-point unit) | implemented for the processor: `any`, `m68k`, `160`, `460`, `660`, `peb`: MC68010 code (dpc's default, the SAU2..SAU5 kernels'); `mathlib_sr10`, `mathlib`, `mathchip`, `3000`, `580`, `570`, `560`, `330`, `90`, `fpa1`, `fpx`: MC68020 code (the SAU6..SAU9 kernels'; codegen-patterns 14), noted since there is no floating-point code to select; `a88k`: refused; others: error.  dpc's default is not the reference's `mathlib_sr10`: the SAU2 build must not change under an unstated option (`dpc_m68k::Cpu`) |
+| `-cpu id` | 6.4.9, pp. 6-14..6-17; Table 6-3, p. 6-16 | `mathlib_sr10` | target workstation (processor, floating-point unit) | implemented for the processor: `any`, `m68k`, `peb`: MC68010 code (dpc's default, the SAU2, SAU3 and SAU5 kernels'); `160`, `460`, `660`: MC68010 code with the DSP160/DN460/DN660 longword multiply and divide instructions in place of the M$ARITH calls for `*` and `div` (the SAU4 kernel's per-SAU modules; codegen-patterns 14.1); `mathlib_sr10`, `mathlib`, `mathchip`, `3000`, `580`, `570`, `560`, `330`, `90`, `fpa1`, `fpx`: MC68020 code (the SAU6..SAU9 kernels'; codegen-patterns 14), noted since there is no floating-point code to select; `a88k`: refused; others: error.  dpc's default is not the reference's `mathlib_sr10`: the SAU2 build must not change under an unstated option (`dpc_m68k::Cpu`) |
 | `-db` | 6.4.10, p. 6-18 | yes | minimal debugging information | noted (dpc emits none) when given; nothing when defaulted |
 | `-ndb` | 6.4.10, p. 6-18 | | no debugging information | accepted |
 | `-dbs` | 6.4.10, p. 6-18 | | full debugging information; sets `-opt` (3) | noted (no debugging information; `-opt 3` is dpc's level) |
@@ -233,7 +233,9 @@ Errata noticed here (p. 4-52's unclosed `%warning` string; `-std`'s
 warnings versus errors) are in the reference-clarifications errata list.
 
 Not reference questions, but open: which `-cpu` each kernel was compiled
-with (SAU2..SAU5 are MC68010 code with M$ARITH calls, SAU6..SAU9
+with (SAU2, SAU3 and SAU5 are MC68010 code with M$ARITH calls, SAU4's
+per-SAU modules `-cpu 160`/`460`/`660` code (codegen-patterns 14.1),
+SAU6..SAU9
 MC68020 code: one of the `mathchip` group or `mathlib_sr10`, which
 generate the same integer code as far as dpc is concerned; codegen-
 patterns 14), and whether it was `-opt 3` or `-opt 4`

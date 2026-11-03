@@ -8,6 +8,10 @@
   - an M$ARITH result as argument 1 of another call (0xE1695C..0xE16970);
   - a value held in D1, a pointer in A1, across M$ARITH calls (12.4 R3;
     TIME_$GET_ADJUST keeps its pointer in A1);
+  - a value an M$ARITH call's argument reads last held through the call
+    (12.4 R4(c), bead domain-pascal-mhzy): in `held', x in D1, so y, live
+    across the call, takes D2 (SAU4 TIME_$GET_ADJUST 0xF817472
+    `current_delta' in D1; Uncertain, one site);
   - words multiplied for a longword with `muls.w'/`mulu.w'
     (PROC1_$LOADAV_CALLBACK 0xE14C14; SIO_$K_TIMED_BREAK 0xE67F2A);
   - a longword quotient used as a word with `divs.w' (0xE10CAE), a

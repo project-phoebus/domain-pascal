@@ -1491,6 +1491,7 @@ fn select_body_once(
             locals: &local_regs,
         },
     )?;
+    holds.extend(held_through_marith(&s.out, &s.marith_calls, exit));
     // A parked local's data register stays the local's until its last
     // dereference, though only the address register is read there: the
     // image leaves D0 alone over that range (TTY_$K_SET_INPUT_FLAG
@@ -2832,6 +2833,55 @@ fn volatile_references(out: &[Insn], eas: &[(Ea, Access)], span: Span) -> Res<Ve
         }
     }
     Ok(v)
+}
+
+/// The values an M$ARITH call in an expression holds through it
+/// (codegen-patterns 12.4 R4(c), 14.1; bead domain-pascal-mhzy): one
+/// defined before the call's operands that its pushes read last, kept out
+/// of D0 as across the call (SAU4 TIME_$GET_ADJUST 0xF817472 keeps
+/// `current_delta`, pushed for `M$OIS$LLL` at 0xF81748C, in D1, and its
+/// copy for the DN460 divide takes D0).  Uncertain, one site; not a value
+/// read in the operands' computation (no site), nor in a body with
+/// branches or a call whose operands call (neither surveyed).  Against
+/// it, none: in the 21 SAU2 calls with D0 pushed, D0 is computed in the
+/// call's operands (0xE0874A, 0xE14C02, 0xE6EA00, ...).
+fn held_through_marith(
+    out: &[Insn],
+    calls: &[(usize, usize, usize)],
+    exit: &[Reg],
+) -> Vec<(usize, Reg)> {
+    if out
+        .iter()
+        .any(|i| matches!(i, Insn::Branch { .. } | Insn::Dbf { .. }))
+    {
+        return Vec::new();
+    }
+    let live_out = crate::regs::liveness(out, exit, &[]);
+    let mut holds = Vec::new();
+    for &(start, pushes, call) in calls {
+        if out[start..call]
+            .iter()
+            .any(|i| matches!(i, Insn::Jsr(_) | Insn::Bsr { .. }))
+        {
+            continue;
+        }
+        let defined_before: Vec<Reg> = out[..start]
+            .iter()
+            .flat_map(|i| crate::regs::access(i).defs)
+            .filter(|&r| crate::regs::is_virtual(r))
+            .collect();
+        for i in &out[pushes..call] {
+            for r in crate::regs::access(i).uses {
+                if defined_before.contains(&r)
+                    && !live_out[call].contains(&crate::regs::RegKey(r))
+                    && !holds.contains(&(call, r))
+                {
+                    holds.push((call, r));
+                }
+            }
+        }
+    }
+    holds
 }
 
 /// The values to hold live through a call (codegen-patterns 12.4 R4(c)),
@@ -8134,6 +8184,10 @@ pub struct Selector {
     /// Call statements: the index in `out` of their first instruction and
     /// of the `jsr`/`bsr`, and the statement ([`held_through_calls`]).
     call_stmts: Vec<(usize, usize, Span)>,
+    /// M$ARITH calls in expressions ([`Self::marith`]): the index in `out`
+    /// of the first instruction of their operands, of their first push and
+    /// of the `jsr` ([`held_through_marith`]).
+    marith_calls: Vec<(usize, usize, usize)>,
     /// The statement being selected, for diagnostics.
     span: Span,
     /// The index in `out` of the first instruction of the statement being
@@ -8631,6 +8685,7 @@ impl Selector {
             colour_coalesce: Vec::new(),
             count_copies: Vec::new(),
             call_stmts: Vec::new(),
+            marith_calls: Vec::new(),
             span,
             stmt_start: 0,
             other_elem: None,
@@ -16104,6 +16159,7 @@ impl Selector {
             elem_counts,
             count_copies,
             call_stmts,
+            marith_calls,
             other_held,
             ptr_copies,
             copy_blocks,
@@ -16274,6 +16330,11 @@ impl Selector {
         });
         call_stmts.iter_mut().for_each(|(s, c, _)| {
             at(s);
+            at(c);
+        });
+        marith_calls.iter_mut().for_each(|(s, p, c)| {
+            at(s);
+            at(p);
             at(c);
         });
         other_held.iter_mut().for_each(|(_, _, _, p)| at(p));
@@ -20366,7 +20427,7 @@ impl Selector {
                 });
                 return Ok(d);
             }
-            if self.cpu.is_68020() {
+            if self.cpu.long_mul_div() {
                 return self.mul_long(ty, x, &b);
             }
             self.marith_op("MI", ty, x, &b)?;
@@ -20379,14 +20440,14 @@ impl Selector {
             (Some(l), Some(r)) => self.mul_words(&l, &r, signed),
             (Some(_), None) => {
                 // The word is argument 2 of `M$MI*$LLW`.
-                if self.cpu.is_68020() {
+                if self.cpu.long_mul_div() {
                     return self.mul_long(ty, rhs, lhs);
                 }
                 self.marith_op("MI", ty, rhs, lhs)?;
                 Ok(self.marith_reg)
             }
             _ => {
-                if self.cpu.is_68020() {
+                if self.cpu.long_mul_div() {
                     return self.mul_long(ty, lhs, rhs);
                 }
                 self.marith_op("MI", ty, lhs, rhs)?;
@@ -20401,38 +20462,127 @@ impl Selector {
     /// is extended into the register first, `a` is the source (SAU9
     /// BAT_$ALLOCATE 0x3C443092 `move.w D1,D2; ext.l D2; muls.l
     /// (-528,A4),D2`; PCHIST_$CNTL 0x3C463E9A `clr.l D1; move.w D2,D1;
-    /// mulu.l D3,D1`); a constant is the immediate source
-    /// (`muls.l #c,Dn`: a longword constant, not seen; best effort); two
-    /// longwords: `a` in the register, `b` the source.
+    /// mulu.l D3,D1`), and so is a constant in a word's range; a longword
+    /// constant is the immediate source (`muls.l #c,Dn`); two longwords:
+    /// `a` in the register, `b` the source.  With [`Cpu::Dn460`], the
+    /// DSP160/DN460/DN660 instructions in the same places (codegen-
+    /// patterns 14.1), their operands in data registers
+    /// ([`Self::long_operand`]).
     fn mul_long(&mut self, ty: Scalar, a: &Expr, b: &Expr) -> Res<u8> {
         let signed = ty.is_signed();
+        let dn460 = self.cpu == Cpu::Dn460;
         if let Expr::Const { value, .. } = b {
+            let word = if signed {
+                (-0x8000..0x8000).contains(value)
+            } else {
+                (0..0x10000).contains(value)
+            };
+            if word || (dn460 && !signed) {
+                // A constant `M$MI*$LLW` takes as its word: in the
+                // product's register, `a` the source, as a word variable
+                // (SAU6 MT_$WAIT 0x7807D67A `move.l #1000,D1; muls.l
+                // D3,D1`; SAU4 0xF87DBDC `move.l #1000,D1; 7303`, `muls.l
+                // D3,D1`).  An unsigned one beyond a word on the DN460,
+                // whose `mulu.l` takes only a data register: the same,
+                // best effort (no such product is catalogued).
+                if !word {
+                    best_effort(
+                        self.span,
+                        "an unsigned longword product with a constant beyond a word on the DN460 \
+                         (`mulu.l` takes only a data register; not catalogued, codegen-patterns \
+                         14.1) is",
+                    )?;
+                }
+                let d = self.load_const(*value, Width::Long)?;
+                let v = self.eval(a)?;
+                let src = self.long_operand(v, signed)?;
+                self.out.push(Insn::MulL {
+                    signed,
+                    src,
+                    dst: d,
+                    dn460,
+                });
+                return Ok(d);
+            }
+            // A longword constant: the immediate (SAU9 TIME_$ADJUST_TIME_
+            // OF_DAY 0x3C418992 `muls.l #250000,D2`, 0x3C416EC0 `muls.l
+            // #60296,D1`; SAU4 0xF8172EE `753c`).
             let d = self.eval_d(a)?;
             self.out.push(Insn::MulL {
                 signed,
                 src: Ea::Imm(*value),
                 dst: d,
+                dn460,
             });
             return Ok(d);
         }
-        let (d, src) = match Self::word_part(b, ty.sign) {
+        if a == b && self.cse_leaf(a).is_some() {
+            // A variable squared: loaded once, its register both operands
+            // (SAU9 OS_$SHUTDOWN 0x3C47422C `move.l (-596,A6),D1; muls.l
+            // D1,D1`; SAU4 0xF877144 `7301`, `muls.l D1,D1`; the SAU2's
+            // 0xE6D600 pushes it twice, `move.l (SP),-(SP)`).
+            let d = self.eval_d(a)?;
+            self.out.push(Insn::MulL {
+                signed,
+                src: Ea::Reg(Reg::D(d)),
+                dst: d,
+                dn460,
+            });
+            return Ok(d);
+        }
+        let (d, v) = match Self::word_part(b, ty.sign) {
             Some(bw) => {
                 let d = self.extend_word(&bw, signed)?;
-                let v = self.eval(a)?;
-                (d, Self::ea_val(&v))
+                (d, self.eval(a)?)
+            }
+            None if dn460 && matches!(b, Expr::Load { .. }) => {
+                // The DN460: a longword `b` in memory is loaded into the
+                // product's register, `a` the source register, as a word
+                // `b` is extended into it (PCHIST_$UNIX_PROFIL_ADDUPC
+                // 0xF866AF6/0xF866B16 `move.l (-8,A0),D2`, then `c4c8`
+                // `mulu.l D0,D2` and 0xF866B1A `c4c9` `mulu.l D1,D2`,
+                // where the SAU9's 0x3C463FDA is `mulu.l (-8,A0),D0`).
+                let vb = self.eval(b)?;
+                if matches!(vb, Val::Mem(_)) {
+                    let d = self.in_tmp(vb, Width::Long)?;
+                    (d, self.eval(a)?)
+                } else {
+                    (self.eval_d(a)?, vb)
+                }
             }
             None => {
                 let d = self.eval_d(a)?;
-                let v = self.eval(b)?;
-                (d, Self::ea_val(&v))
+                (d, self.eval(b)?)
             }
         };
+        let src = self.long_operand(v, signed)?;
         self.out.push(Insn::MulL {
             signed,
             src,
             dst: d,
+            dn460,
         });
         Ok(d)
+    }
+
+    /// The source operand `v` of a longword multiply or divide
+    /// ([`Self::mul_long`], [`Self::div_long`]).  The MC68020 takes any
+    /// operand.  The DN460's instructions ([`Cpu::Dn460`]) take a data
+    /// register, or for a signed one an immediate (codegen-patterns
+    /// 14.1): another operand is loaded into a new data register, as SAU4
+    /// AST_$GET_SEG_MAP 0xF8071A2 `move.l (-64,A6),D1` before `divu.l
+    /// D1,D5` where the SAU9's 0x3C408086 is `divu.l (-64,A6),D0`, and
+    /// PMAP_$PURIFIER_R 0xF814A9A `moveq #6,D2` before `divu.l D2,D1`
+    /// where the SAU9's 0x3C416506 is `divu.l #6,D2`.
+    fn long_operand(&mut self, v: Val, signed: bool) -> Res<Ea> {
+        if self.cpu != Cpu::Dn460 {
+            return Ok(Self::ea_val(&v));
+        }
+        Ok(match v {
+            Val::Imm(c) if signed => Ea::Imm(c),
+            Val::Reg(Reg::D(r)) => Ea::Reg(Reg::D(r)),
+            v => Ea::Reg(Reg::D(self.in_tmp(v, Width::Long)?)),
+        })
     }
 
     /// A word value extended to a longword in a new data register:
@@ -20460,24 +20610,24 @@ impl Selector {
     /// `div<s>l.l src,Dr:Dq` puts the remainder in a new register Dr
     /// (0x3C418B2A `divsl.l #250000,D2:D0`; AREA_$CREATE_FROM 0x3C40905A
     /// `move.l D2,D5; divul.l #11,D4:D5`, the remainder's low word the
-    /// `M$OIU$WLW` result).  A word divisor is extended first (not seen;
-    /// best effort).
+    /// `M$OIU$WLW` result).  A word divisor is extended first.  With
+    /// [`Cpu::Dn460`] (no `rem`: `mod` calls M$ARITH), the DSP160/DN460/
+    /// DN660 divide, its divisor in a data register or, signed, an
+    /// immediate (codegen-patterns 14.1, [`Self::long_operand`]).
     fn div_long(&mut self, signed: bool, lhs: &Expr, rhs: &Expr, rem: bool) -> Res<Val> {
         let d = self.eval_d(lhs)?;
         let src = match rhs {
-            Expr::Const { value, .. } => Ea::Imm(*value),
+            Expr::Const { value, .. } => self.long_operand(Val::Imm(*value), signed)?,
             _ if rhs.ty().width == Width::Long => {
                 let v = self.eval(rhs)?;
-                Self::ea_val(&v)
+                self.long_operand(v, signed)?
             }
-            _ => {
-                best_effort(
-                    self.span,
-                    "a longword `div`/`mod` by a word variable on the MC68020 (its extension \
-                     is not catalogued) is",
-                )?;
-                Ea::Reg(Reg::D(self.extend_word(rhs, signed)?))
-            }
+            // A word divisor, extended into a register (SAU9 TIME_$ADJUST_
+            // TIME_OF_DAY 0x3C4189D2..0x3C4189DC `move.w D3,D1; ext.l D1;
+            // divs.l D1,D2`; SAU4 0xF81732E..0xF81733A `move.w D3,D4; ext.l
+            // D4; 7544`, `divs.l D4,D2`; NETWORK_$REPORT_FAILURE 0xF8113EE
+            // `clr.l D4; move.w (-882,A2),D4`, then `80cc`, `divu.l D4,D0`).
+            _ => Ea::Reg(Reg::D(self.extend_word(rhs, signed)?)),
         };
         let r = if rem { Some(self.alloc_d()?) } else { None };
         self.out.push(Insn::DivL {
@@ -20485,6 +20635,7 @@ impl Selector {
             src,
             rem: r,
             dst: d,
+            dn460: self.cpu == Cpu::Dn460,
         });
         Ok(Val::Tmp(r.unwrap_or(d)))
     }
@@ -20745,7 +20896,7 @@ impl Selector {
                         });
                         return Ok(Val::Tmp(d));
                     }
-                    if self.cpu.is_68020() {
+                    if self.cpu.long_mul_div() {
                         return self.div_long(signed, lhs, rhs, false);
                     }
                     self.marith_op("DI", ty, lhs, rhs)?;
@@ -21348,6 +21499,7 @@ impl Selector {
         if (pre_called || self.called) && !is_d0(&av) && !is_d0(&bv) && !self.call_mode().save {
             return Err(unsupported(self.span, TWO_CALLS));
         }
+        let pushes = self.out.len();
         if pad {
             self.out.push(Insn::Subq {
                 size: Size::L,
@@ -21370,6 +21522,7 @@ impl Selector {
             self.push_val(av, Width::Long)?;
         }
         self.out.push(Insn::Jsr(Ea::AbsL(name.to_string(), 0)));
+        self.marith_calls.push((start, pushes, self.out.len() - 1));
         self.other_bases.clear();
         self.other_syms.clear();
         self.other_held.clear();

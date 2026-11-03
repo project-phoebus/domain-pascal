@@ -17,19 +17,21 @@ unlk %fp
 rts
 HELD:
 link.w %fp,#-4
-move.l (8,%fp),%d0
-move.w (0xc,%fp),%d1
+move.l %d2,-(%sp)
+move.l (8,%fp),%d1
+move.w (0xc,%fp),%d2
 subq.l #2,%sp
-move.w %d1,-(%sp)
-move.l %d0,-(%sp)
+move.w %d2,-(%sp)
+move.l %d1,-(%sp)
 jsr (M$DIS$LLW).l
 addq.w #8,%sp
 subq.l #2,%sp
-move.w %d1,-(%sp)
+move.w %d2,-(%sp)
 move.l %d0,-(%sp)
 jsr (M$MIS$LLW).l
 move.l %d0,(L).l
-move.w %d1,(W).l
+move.w %d2,(W).l
+move.l (-8,%fp),%d2
 unlk %fp
 rts
 LOAD_TERM:

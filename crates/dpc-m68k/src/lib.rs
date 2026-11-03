@@ -47,12 +47,27 @@ pub enum Cpu {
     /// operands, bit-field instructions, 32-bit multiply and divide:
     /// SAU6..SAU9 (codegen-patterns 14).
     M68020,
+    /// The DSP160, DN460 and DN660 (`-cpu 160`/`460`/`660`, "These three
+    /// arguments generate identical code", Table 6-3, p. 6-16): the
+    /// MC68010 code, but for a longword `*` and `div` the extended
+    /// multiply and divide instructions of those machines' bit-slice
+    /// MC68010 emulators, in place of the M$ARITH calls: the per-SAU
+    /// modules of the SAU4 kernel (codegen-patterns 14.1).
+    Dn460,
 }
 
 impl Cpu {
     /// Whether MC68020 instructions may be generated.
     pub fn is_68020(self) -> bool {
         self == Cpu::M68020
+    }
+
+    /// Whether a longword `*` and `div` are instructions (MC68020
+    /// `mul<s>.l`/`div<s>.l`, or the DN460's extended ones) rather than
+    /// M$ARITH calls.  `mod` is an instruction only on the MC68020: the
+    /// SAU4 kernel still calls `M$OI*` (TIME_$GET_ADJUST 0xF817486).
+    pub fn long_mul_div(self) -> bool {
+        matches!(self, Cpu::M68020 | Cpu::Dn460)
     }
 }
 

@@ -75,9 +75,9 @@ link.w %fp,#-4
 movem.l %d2-%d4/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.l (8,%fp),%d2
-move.l (0xc,%fp),%d0
+move.l (0xc,%fp),%d1
 move.l (0x10,%fp),%d3
-move.l %d0,-(%sp)
+move.l %d1,-(%sp)
 move.l %d2,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp

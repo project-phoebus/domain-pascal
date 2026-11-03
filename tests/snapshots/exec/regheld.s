@@ -85,10 +85,10 @@ rts
 REGHELD_$MARITH:
 link.w %fp,#-0xc
 movem.l %d2-%d3,-(%sp)
-move.l (8,%fp),%d0
-move.l (0xc,%fp),%d1
+move.l (8,%fp),%d1
+move.l (0xc,%fp),%d2
+move.l %d2,-(%sp)
 move.l %d1,-(%sp)
-move.l %d0,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,%d2

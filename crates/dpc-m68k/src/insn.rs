@@ -600,10 +600,19 @@ pub enum Insn {
     /// `muls.l src,%dn` / `mulu.l src,%dn` (32 x 32 -> 32; MC68020,
     /// codegen-patterns 14): SAU9 BAT_$ALLOCATE `muls.l (-528,A4),D2`,
     /// PCHIST_$CNTL `mulu.l D3,D1`.
+    ///
+    /// With `dn460`, the DSP160/DN460/DN660 form (`-cpu 460`,
+    /// [`crate::Cpu::Dn460`]; codegen-patterns 14.1), which gas does not
+    /// know: signed `0111 nnn1 00 eeeeee` with Dm or `#imm` (SAU4
+    /// TIME_$ADJUST_TIME_OF_DAY 0xF8172EE `753c 0003d090` `muls.l
+    /// #250000,D2`; TPAD_$DATA 0xF872D86 `7900` `muls.l D0,D4`), unsigned
+    /// `1100 nnn0 1100 1mmm` with Dm (PCHIST_$CNTL 0xF8669CE `c2cb`
+    /// `mulu.l D3,D1`).
     MulL {
         signed: bool,
         src: Ea,
         dst: u8,
+        dn460: bool,
     },
     /// `divs.l src,%dq` / `divu.l src,%dq` (32 / 32 -> 32 quotient in Dq,
     /// no remainder) when `rem` is `None`; `divsl.l src,%dr:%dq` /
@@ -612,11 +621,18 @@ pub enum Insn {
     /// TIME_$GET_ADJUST 0x3C418B20 `divs.l #250000,D1` (`4c7c 1801 ...`,
     /// Dr = Dq) and 0x3C418B2A `divsl.l #250000,D2:D0`; AREA_$CREATE_FROM
     /// 0x3C40905C `divul.l #11,D4:D5`.
+    ///
+    /// With `dn460` (and no `rem`), the DSP160/DN460/DN660 form, as for
+    /// [`Insn::MulL`]: signed `0111 nnn1 01 eeeeee` (SAU4 TIME_$GET_ADJUST
+    /// 0xF81747E `717c 0003d090` `divs.l #250000,D0`; NETWORK_$REPORT_
+    /// FAILURE 0xF81140E `7943` `divs.l D3,D4`), unsigned `1000 nnn0 1100
+    /// 1mmm` (NETWORK_$READ_AHEAD 0xF8106D8 `82ca` `divu.l D2,D1`).
     DivL {
         signed: bool,
         src: Ea,
         rem: Option<u8>,
         dst: u8,
+        dn460: bool,
     },
     /// `bfins %dn,dst{#offset:#width}`: the low `width` bits of Dn into
     /// the field `offset` bits from the most significant bit of the byte
@@ -891,6 +907,48 @@ pub enum ShiftCount {
     Reg(u8),
 }
 
+/// The DSP160/DN460/DN660 longword multiply or divide ([`Insn::MulL`],
+/// [`Insn::DivL`] with `dn460`) as `.short` (and the immediate as
+/// `.long`), the mnemonic in a comment: signed `0111 nnn1 0d eeeeee` (d
+/// set for a divide; ea Dm or `#imm`), unsigned the MC68000's
+/// address-register forms of `divu.w`/`mulu.w`, `1000`/`1100 nnn0 1100
+/// 1mmm` with Dm.  isel gives no other operand.
+fn write_dn460(
+    f: &mut fmt::Formatter<'_>,
+    div: bool,
+    signed: bool,
+    src: &Ea,
+    dst: u8,
+) -> fmt::Result {
+    let n = u16::from(dst) << 9;
+    let (word, imm) = match (signed, src) {
+        (true, Ea::Reg(Reg::D(m))) => (0x7100 | n | u16::from(div) << 6 | u16::from(*m), None),
+        (true, Ea::Imm(v)) => (0x713c | n | u16::from(div) << 6, Some(*v)),
+        (false, Ea::Reg(Reg::D(m))) => {
+            (if div { 0x80c8 } else { 0xc0c8 } | n | u16::from(*m), None)
+        }
+        _ => panic!(
+            "DN460 {} operand {src}",
+            if div { "divide" } else { "multiply" }
+        ),
+    };
+    let op = match (div, signed) {
+        (false, true) => "muls",
+        (false, false) => "mulu",
+        (true, true) => "divs",
+        (true, false) => "divu",
+    };
+    write!(
+        f,
+        ".short\t0x{word:04x}\t| {op}.l {src},{} (DN460)",
+        Reg::D(dst)
+    )?;
+    match imm {
+        Some(v) => write!(f, "\n\t.long\t{}", num(v)),
+        None => Ok(()),
+    }
+}
+
 impl fmt::Display for Insn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1088,7 +1146,22 @@ impl fmt::Display for Insn {
                 if *signed { "divs" } else { "divu" },
                 Reg::D(*dst)
             ),
-            Insn::MulL { signed, src, dst } => write!(
+            Insn::MulL {
+                signed,
+                src,
+                dst,
+                dn460: true,
+            } => write_dn460(f, false, *signed, src, *dst),
+            Insn::DivL {
+                signed,
+                src,
+                rem: None,
+                dst,
+                dn460: true,
+            } => write_dn460(f, true, *signed, src, *dst),
+            Insn::MulL {
+                signed, src, dst, ..
+            } => write!(
                 f,
                 "{}.l\t{src},{}",
                 if *signed { "muls" } else { "mulu" },
@@ -1099,6 +1172,7 @@ impl fmt::Display for Insn {
                 src,
                 rem: None,
                 dst,
+                ..
             } => write!(
                 f,
                 "{}.l\t{src},{}",
@@ -1110,6 +1184,7 @@ impl fmt::Display for Insn {
                 src,
                 rem: Some(r),
                 dst,
+                ..
             } => write!(
                 f,
                 "{}l.l\t{src},{}:{}",
@@ -1231,6 +1306,13 @@ impl Insn {
             Insn::SrImm { .. } => 4,
             Insn::MoveToSr { src } => 2 + src.ext_len(Size::W),
             Insn::Mul { src, .. } | Insn::Div { src, .. } => 2 + src.ext_len(Size::W),
+            // One opcode word for the DN460's forms, then the immediate.
+            Insn::MulL {
+                src, dn460: true, ..
+            }
+            | Insn::DivL {
+                src, dn460: true, ..
+            } => 2 + src.ext_len(Size::L),
             // Two opcode words (`4c3c`/`4c7c` + the register word, `efe8`
             // + the offset/width word), then the operand's extension.
             Insn::MulL { src, .. } | Insn::DivL { src, .. } => 4 + src.ext_len(Size::L),
@@ -1300,6 +1382,7 @@ mod tests {
                 src: Ea::Imm(250000),
                 rem: None,
                 dst: 1,
+                dn460: false,
             }),
             8
         );
@@ -1308,6 +1391,7 @@ mod tests {
                 signed: true,
                 src: Ea::Disp(-528, 4),
                 dst: 2,
+                dn460: false,
             }),
             6
         );
@@ -1316,8 +1400,29 @@ mod tests {
                 signed: false,
                 src: Ea::Reg(Reg::D(3)),
                 dst: 1,
+                dn460: false,
             }),
             4
+        );
+        // The DN460's forms: one opcode word, then the immediate.
+        assert_eq!(
+            at(&Insn::DivL {
+                signed: true,
+                src: Ea::Imm(250000),
+                rem: None,
+                dst: 0,
+                dn460: true,
+            }),
+            6
+        );
+        assert_eq!(
+            at(&Insn::MulL {
+                signed: false,
+                src: Ea::Reg(Reg::D(3)),
+                dst: 1,
+                dn460: true,
+            }),
+            2
         );
     }
 
@@ -1398,6 +1503,7 @@ mod tests {
                     src: Ea::Imm(250000),
                     rem: None,
                     dst: 1,
+                    dn460: false,
                 },
                 "divs.l\t#0x3d090,%d1",
             ),
@@ -1407,6 +1513,7 @@ mod tests {
                     src: Ea::Imm(250000),
                     rem: Some(2),
                     dst: 0,
+                    dn460: false,
                 },
                 "divsl.l\t#0x3d090,%d2:%d0",
             ),
@@ -1416,6 +1523,7 @@ mod tests {
                     src: Ea::Imm(11),
                     rem: Some(4),
                     dst: 5,
+                    dn460: false,
                 },
                 "divul.l\t#0xb,%d4:%d5",
             ),
@@ -1424,6 +1532,7 @@ mod tests {
                     signed: false,
                     src: Ea::Reg(Reg::D(3)),
                     dst: 1,
+                    dn460: false,
                 },
                 "mulu.l\t%d3,%d1",
             ),
@@ -1432,8 +1541,47 @@ mod tests {
                     signed: true,
                     src: Ea::Disp(-528, 4),
                     dst: 2,
+                    dn460: false,
                 },
                 "muls.l\t(-0x210,%a4),%d2",
+            ),
+            (
+                Insn::MulL {
+                    signed: true,
+                    src: Ea::Imm(250000),
+                    dst: 2,
+                    dn460: true,
+                },
+                ".short\t0x753c\t| muls.l #0x3d090,%d2 (DN460)\n\t.long\t0x3d090",
+            ),
+            (
+                Insn::DivL {
+                    signed: true,
+                    src: Ea::Reg(Reg::D(4)),
+                    rem: None,
+                    dst: 2,
+                    dn460: true,
+                },
+                ".short\t0x7544\t| divs.l %d4,%d2 (DN460)",
+            ),
+            (
+                Insn::DivL {
+                    signed: false,
+                    src: Ea::Reg(Reg::D(2)),
+                    rem: None,
+                    dst: 1,
+                    dn460: true,
+                },
+                ".short\t0x82ca\t| divu.l %d2,%d1 (DN460)",
+            ),
+            (
+                Insn::MulL {
+                    signed: false,
+                    src: Ea::Reg(Reg::D(3)),
+                    dst: 1,
+                    dn460: true,
+                },
+                ".short\t0xc2cb\t| mulu.l %d3,%d1 (DN460)",
             ),
             (
                 Insn::Movea {

@@ -111,10 +111,15 @@ impl Default for RefOptions {
 const MAX_IDIRS: usize = 63;
 
 /// The `-cpu` arguments (ref 6.4.9, Table 6-3, p. 6-16) that ask for
-/// generic MC680x0 code, or for the MC68010-class workstations (DSP160,
-/// DN460, DN660; the PEB machines DN100..DN600): dpc's MC68010 code, the
-/// SAU2..SAU5 kernels' (CLAUDE.md 3.16).
-const CPU_68010: [&str; 6] = ["any", "m68k", "160", "460", "660", "peb"];
+/// generic MC680x0 code, or for the PEB machines (DN100..DN600): dpc's
+/// MC68010 code, the SAU2, SAU3 and SAU5 kernels' (CLAUDE.md 3.16).
+const CPU_68010: [&str; 3] = ["any", "m68k", "peb"];
+
+/// The `-cpu` arguments of Table 6-3 for the DSP160, DN460 and DN660
+/// ("These three arguments generate identical code"): the MC68010 code
+/// with those machines' longword multiply and divide instructions, the
+/// SAU4 kernel's (`dpc_m68k::Cpu::Dn460`, codegen-patterns 14.1).
+const CPU_460: [&str; 3] = ["160", "460", "660"];
 
 /// The `-cpu` arguments of Table 6-3 that ask for code for an MC68020 or
 /// later (the `mathchip` group, "MC68020 or MC68030 microprocessor and an
@@ -365,6 +370,9 @@ fn parse_known<I: Iterator<Item = String>>(
             let lower = id.to_ascii_lowercase();
             if CPU_68010.contains(&lower.as_str()) {
                 o.cpu = Cpu::M68010;
+                Ok(())
+            } else if CPU_460.contains(&lower.as_str()) {
+                o.cpu = Cpu::Dn460;
                 Ok(())
             } else if CPU_68020.contains(&lower.as_str()) {
                 o.cpu = Cpu::M68020;
@@ -734,6 +742,11 @@ mod tests {
             let (o, _) = parse_all(&["-cpu", id]).unwrap();
             assert!(o.notes.is_empty(), "{id}");
             assert_eq!(o.cpu, Cpu::M68010, "{id}");
+        }
+        for id in CPU_460 {
+            let (o, _) = parse_all(&["-cpu", id]).unwrap();
+            assert!(o.notes.is_empty(), "{id}");
+            assert_eq!(o.cpu, Cpu::Dn460, "{id}");
         }
         for id in CPU_68020 {
             let (o, _) = parse_all(&["-cpu", id]).unwrap();

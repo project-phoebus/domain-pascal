@@ -1056,20 +1056,44 @@ fn marith_calls() {
 /// A1).
 #[test]
 fn values_live_in_d1_across_marith() {
+    let b =
+        body("procedure t(y: integer); internal;\nbegin\n  l := l div 1000;\n  w := y;\nend;\n");
+    assert_eq!(
+        b,
+        [
+            "move.w\t(8,%fp),%d1",
+            "subq.l\t#2,%sp",
+            "move.w\t#0x3e8,-(%sp)",
+            "move.l\t(L).l,-(%sp)",
+            "jsr\t(M$DIS$LLW).l",
+            "move.l\t%d0,(L).l",
+            "move.w\t%d1,(W).l",
+        ]
+    );
+}
+
+/// codegen-patterns 12.4 R4(c): a value defined before an M$ARITH call's
+/// operands and last read by its argument push is held through the call,
+/// out of D0 (SAU4 TIME_$GET_ADJUST 0xF817472 `current_delta` in D1;
+/// Uncertain, one site): `x` takes D1, so `y`, live across the call, D2.
+#[test]
+fn values_held_through_marith() {
     let b = body(
         "procedure t(x: integer32; y: integer); internal;\nbegin\n  l := x div 1000;\n  w := y;\nend;\n",
     );
     assert_eq!(
         b,
         [
-            "move.l\t(8,%fp),%d0",
-            "move.w\t(0xc,%fp),%d1",
+            "move.l\t%d2,-(%sp)",
+            "move.l\t(8,%fp),%d1",
             "subq.l\t#2,%sp",
+            "move.w\t(0xc,%fp),%d2",
             "move.w\t#0x3e8,-(%sp)",
-            "move.l\t%d0,-(%sp)",
+            "move.l\t%d1,-(%sp)",
             "jsr\t(M$DIS$LLW).l",
             "move.l\t%d0,(L).l",
-            "move.w\t%d1,(W).l",
+            "move.w\t%d2,(W).l",
+            "move.l\t(-8,%fp),%d2",
         ]
     );
 }
