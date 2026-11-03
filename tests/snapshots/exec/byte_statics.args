@@ -1,0 +1,1 @@
+tests/exec/byte_statics.pas -I tests/exec

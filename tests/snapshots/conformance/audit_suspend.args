@@ -1,0 +1,1 @@
+tests/conformance/audit_suspend.pas --strict --fragment-origin 0xE70DB6 --a5-absolute=AUDIT_$SUSPEND,AUDIT_$RESUME

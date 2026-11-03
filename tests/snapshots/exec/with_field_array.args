@@ -1,0 +1,1 @@
+tests/exec/with_field_array.pas -I tests/exec

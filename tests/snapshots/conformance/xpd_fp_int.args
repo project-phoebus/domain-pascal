@@ -1,0 +1,1 @@
+tests/conformance/xpd_fp_int.pas --strict --fragment-origin 0xE5C55A --fragment-ends-module

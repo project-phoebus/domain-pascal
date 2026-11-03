@@ -1,0 +1,1 @@
+tests/exec/with_field_array_ext.mod.pas -I tests/exec

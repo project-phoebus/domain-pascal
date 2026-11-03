@@ -1,0 +1,1 @@
+tests/conformance/mmap_avail.pas --strict --fragment-origin 0xE0CC64 --a5-always=MMAP_$AVAIL --module-routine=MMAP_$ADD_TO_WSL=0xE0C514

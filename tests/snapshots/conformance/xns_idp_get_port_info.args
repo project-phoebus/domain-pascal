@@ -1,0 +1,1 @@
+tests/conformance/xns_idp_get_port_info.pas --strict --fragment-origin 0xE18FB8 --a5-always=XNS_IDP_$GET_PORT_INFO

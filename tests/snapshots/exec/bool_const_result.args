@@ -1,0 +1,1 @@
+tests/exec/bool_const_result.pas -I tests/exec

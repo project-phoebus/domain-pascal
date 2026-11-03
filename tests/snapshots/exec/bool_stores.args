@@ -1,0 +1,1 @@
+tests/exec/bool_stores.pas -I tests/exec

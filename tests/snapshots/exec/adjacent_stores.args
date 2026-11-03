@@ -1,0 +1,1 @@
+tests/exec/adjacent_stores.pas -I tests/exec

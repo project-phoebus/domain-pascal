@@ -1,0 +1,1 @@
+tests/exec/late_slot_pass.pas -I tests/exec

@@ -1,0 +1,1 @@
+tests/conformance/xpd_reset_ptrace_opts.pas --strict --fragment-origin 0xE5B156

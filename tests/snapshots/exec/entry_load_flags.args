@@ -1,0 +1,1 @@
+tests/exec/entry_load_flags.pas -I tests/exec

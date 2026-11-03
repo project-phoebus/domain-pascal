@@ -1,0 +1,1 @@
+tests/exec/nil_stores.pas -I tests/exec

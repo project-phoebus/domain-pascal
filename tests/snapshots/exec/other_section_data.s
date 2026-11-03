@@ -1,0 +1,61 @@
+.section ".text.OSD.INIT_PROC","ax",@progbits
+.globl OSD_$INIT
+OSD_$INIT:
+link.w %fp,#0
+movea.l #.Ldata.WIRED_DATA,%a0
+move.w #0x12c,(4,%a0)
+moveq #7,%d0
+move.l %d0,(%a0)
+moveq #-2,%d1
+move.l %d1,(6,%a0)
+move.l #.Ldata.WIRED_DATA,-(%sp)
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+movea.l #.Ldata.WIRED_DATA,%a0
+pea (4,%a0)
+jsr (EXEC_$LOG_W).l
+addq.w #4,%sp
+movea.l #.Ldata.WIRED_DATA,%a0
+pea (6,%a0)
+jsr (EXEC_$LOG_L).l
+movea.l #.Ldata.WIRED_DATA,%a0
+move.w #1,(0xa,%a0)
+lea (4,%a0),%a1
+move.l %a1,(0xc,%a0)
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".text.OSD.WIRED_PROC","ax",@progbits
+.globl OSD_$SHOW
+OSD_$SHOW:
+link.w %fp,#-4
+pea (%a5)
+lea (.Ldata.WIRED_DATA).l,%a5
+subq.l #2,%sp
+movea.l (0xc,%a5),%a0
+move.w (%a0),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.l (%a5),-(%sp)
+jsr (EXEC_$LOGV_L).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (4,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.l (6,%a5),-(%sp)
+jsr (EXEC_$LOGV_L).l
+addq.w #4,%sp
+cmpi.w #1,(0xa,%a5)
+seq %d0
+move.b %d0,(-2,%fp)
+pea (-2,%fp)
+jsr (EXEC_$LOG_BOOL).l
+movea.l (-8,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".bss.moddata.OSD.WIRED_DATA","aw",@nobits
+.balign 4
+.Ldata.WIRED_DATA:
+.space 16

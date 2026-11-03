@@ -1,0 +1,1 @@
+tests/conformance/mmap_alloc_contig.pas --strict --fragment-origin 0xE0D8F0 --a5-always=MMAP_$ALLOC_CONTIG

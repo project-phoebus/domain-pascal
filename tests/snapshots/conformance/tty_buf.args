@@ -1,0 +1,1 @@
+tests/conformance/tty_buf.pas --strict --fragment-origin 0xE1AF0A

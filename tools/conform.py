@@ -1088,6 +1088,85 @@ def check_local_sym(n, addr, routines, linkmap, what):
     return check_in_module(n, addr, routines, linkmap, what)
 
 
+class Unit:
+    """A manifest line: the unit's file (`file' as written, `src' its
+    path), its routine specs, placed sections, local symbols, enclosing
+    routine and required globals, and for a .pas unit the dpc options it
+    is compiled with besides `--strict' (`dpc_opts'; None for an
+    assembly or object unit)."""
+
+    def __init__(self, file):
+        self.file = file
+        self.src = os.path.join(REPO, file)
+        self.specs, self.sect, self.globs = [], {}, []
+        self.dpc_opts, self.local, self.enclosing = None, {}, None
+
+
+def manifest_lines(path):
+    """The non-comment lines of manifest `path': [(line number, tokens)]."""
+    with open(path) as f:
+        lines = [(i, l.split('#', 1)[0].split()) for i, l in enumerate(f, 1)]
+    return [(i, toks) for i, toks in lines if toks]
+
+
+def manifest_unit(toks, linkmap):
+    """The Unit of a manifest line's tokens (run_manifest; SetupError for
+    a bad line)."""
+    u = Unit(toks[0])
+    sect, align, a5, mods, encl, merge = {}, [], [], [], [], []
+    rest = iter(toks[1:])
+    for t in rest:
+        if t == '--section-addr':
+            k, v = parse_section_addr(next(rest, ''))
+            sect[k] = v
+        elif t.startswith(LOOP_ALIGN_TOKENS):
+            align.append(t)
+        elif t.startswith(A5_TOKENS):
+            a5.append(t)
+        elif t == MERGE_TOKEN:
+            merge.append(t)
+        elif t.startswith(MODULE_ROUTINES_TOKEN):
+            mods.append(t)
+        elif t.startswith(ENCLOSING_TOKEN):
+            encl.append(t[len(ENCLOSING_TOKEN):])
+        elif t.startswith(GLOBAL_TOKEN):
+            u.globs += t[len(GLOBAL_TOKEN):].split(',')
+        else:
+            u.specs.append(t)
+    u.sect = sect
+    pas = u.src.endswith('.pas')
+    opts = loop_align_args(align)
+    if opts and not pas:
+        raise SetupError('%s: loop-align options apply to .pas units only' % u.file)
+    a5opts = a5_args(a5)
+    if a5opts and not pas:
+        raise SetupError('%s: a5 options apply to .pas units only' % u.file)
+    opts += a5opts
+    if len(merge) > 1:
+        raise SetupError('%s: %s given more than once' % (u.file, MERGE_TOKEN))
+    if merge and not pas:
+        raise SetupError('%s: %s applies to .pas units only' % (u.file, MERGE_TOKEN))
+    opts += ['--' + MERGE_TOKEN] if merge else []
+    if mods and not pas:
+        raise SetupError('%s: module-routines applies to .pas units only' % u.file)
+    if len(encl) > 1 or encl and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', encl[0]):
+        raise SetupError('%s: want one enclosing=NAME' % u.file)
+    if encl and not pas:
+        raise SetupError('%s: enclosing applies to .pas units only' % u.file)
+    # dpc's symbols are upper-cased (CLAUDE.md 3.15)
+    u.enclosing = encl[0].upper() if encl else None
+    if pas:
+        routines = unit_routines(u.specs, linkmap)
+        frag = fragment_args(routines, linkmap)
+        mopts, u.local = module_routine_args(mods, routines, linkmap)
+        if mopts and not frag:
+            raise SetupError('%s: module-routines applies to fragments only' % u.file)
+        if u.enclosing and not frag:
+            raise SetupError('%s: enclosing applies to fragments only' % u.file)
+        u.dpc_opts = frag + opts + mopts
+    return u
+
+
 def run_manifest(path, linkmap, dpc):
     """Each non-comment line: FILE SPEC... [--section-addr SEC=0xADDR]...
     [loop-align=on|off | loop-align-off-from=NAME] [a5-...=NAME,...]...
@@ -1097,69 +1176,15 @@ def run_manifest(path, linkmap, dpc):
     forwarded as dpc options.  Returns (failing
     entries, entries with setup errors)."""
     failures = errors = 0
-    with open(path) as f:
-        lines = [(i, l.split('#', 1)[0].split()) for i, l in enumerate(f, 1)]
-    for lineno, toks in lines:
-        if not toks:
-            continue
-        src = os.path.join(REPO, toks[0])
-        specs, sect, align, a5, mods, encl, globs = [], {}, [], [], [], [], []
-        merge = []
-        rest = iter(toks[1:])
-        for t in rest:
-            if t == '--section-addr':
-                k, v = parse_section_addr(next(rest, ''))
-                sect[k] = v
-            elif t.startswith(LOOP_ALIGN_TOKENS):
-                align.append(t)
-            elif t.startswith(A5_TOKENS):
-                a5.append(t)
-            elif t == MERGE_TOKEN:
-                merge.append(t)
-            elif t.startswith(MODULE_ROUTINES_TOKEN):
-                mods.append(t)
-            elif t.startswith(ENCLOSING_TOKEN):
-                encl.append(t[len(ENCLOSING_TOKEN):])
-            elif t.startswith(GLOBAL_TOKEN):
-                globs += t[len(GLOBAL_TOKEN):].split(',')
-            else:
-                specs.append(t)
+    for lineno, toks in manifest_lines(path):
         try:
-            work = scratch_dir(src)
-            asm = src
-            opts = loop_align_args(align)
-            if opts and not src.endswith('.pas'):
-                raise SetupError('%s: loop-align options apply to .pas units only' % toks[0])
-            a5opts = a5_args(a5)
-            if a5opts and not src.endswith('.pas'):
-                raise SetupError('%s: a5 options apply to .pas units only' % toks[0])
-            opts += a5opts
-            if len(merge) > 1:
-                raise SetupError('%s: %s given more than once' % (toks[0], MERGE_TOKEN))
-            if merge and not src.endswith('.pas'):
-                raise SetupError('%s: %s applies to .pas units only' % (toks[0], MERGE_TOKEN))
-            opts += ['--' + MERGE_TOKEN] if merge else []
-            if mods and not src.endswith('.pas'):
-                raise SetupError('%s: module-routines applies to .pas units only' % toks[0])
-            if len(encl) > 1 or encl and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', encl[0]):
-                raise SetupError('%s: want one enclosing=NAME' % toks[0])
-            if encl and not src.endswith('.pas'):
-                raise SetupError('%s: enclosing applies to .pas units only' % toks[0])
-            # dpc's symbols are upper-cased (CLAUDE.md 3.15)
-            enclosing = encl[0].upper() if encl else None
-            if src.endswith('.pas'):
-                routines = unit_routines(specs, linkmap)
-                frag = fragment_args(routines, linkmap)
-                mopts, local = module_routine_args(mods, routines, linkmap)
-                if mopts and not frag:
-                    raise SetupError('%s: module-routines applies to fragments only' % toks[0])
-                if enclosing and not frag:
-                    raise SetupError('%s: enclosing applies to fragments only' % toks[0])
-                asm = compile_pas(src, dpc, work, frag + opts + mopts)
-            else:
-                local = {}
-            ok = check(asm, specs, linkmap, sect, work=work, name=toks[0], local_syms=local,
-                       enclosing=enclosing, required_globals=globs)
+            u = manifest_unit(toks, linkmap)
+            work = scratch_dir(u.src)
+            asm = u.src
+            if u.dpc_opts is not None:
+                asm = compile_pas(u.src, dpc, work, u.dpc_opts)
+            ok = check(asm, u.specs, linkmap, u.sect, work=work, name=u.file,
+                       local_syms=u.local, enclosing=u.enclosing, required_globals=u.globs)
         except SetupError as e:
             print('ERROR %s:%d: %s' % (path, lineno, e))
             errors += 1

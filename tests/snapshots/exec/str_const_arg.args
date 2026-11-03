@@ -1,0 +1,1 @@
+tests/exec/str_const_arg.pas -I tests/exec

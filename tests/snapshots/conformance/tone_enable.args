@@ -1,0 +1,1 @@
+tests/conformance/tone_enable.pas --strict --fragment-origin 0xE1ACE8 --fragment-ends-module

@@ -1,0 +1,1 @@
+tests/exec/gotos.pas -I tests/exec

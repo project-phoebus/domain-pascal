@@ -1,0 +1,1 @@
+tests/conformance/proc2_get_boot_flags.pas --strict --fragment-origin 0xE41B56

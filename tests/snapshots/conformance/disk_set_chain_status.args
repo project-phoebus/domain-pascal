@@ -1,0 +1,1 @@
+tests/conformance/disk_set_chain_status.pas --strict --fragment-origin 0xE3CCCE --loop-align=off

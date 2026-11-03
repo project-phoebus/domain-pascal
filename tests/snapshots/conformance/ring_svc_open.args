@@ -1,0 +1,1 @@
+tests/conformance/ring_svc_open.pas --strict --fragment-origin 0xE76DF2 --a5-always=RING_$SVC_OPEN --module-routine=RING_$OPEN_INTERNAL=0xE76B7C

@@ -1,0 +1,1 @@
+tests/conformance/time_get_itimer.pas --strict --fragment-origin 0xE58F06 --module-routine=TIME_$GET_ITIMER_INTERNAL=0xE58C74 --module-routine=TIME_$CLOCK_TO_ITIMER=0xE58C02

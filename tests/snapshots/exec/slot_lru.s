@@ -1,0 +1,87 @@
+.text
+.globl SLRU_$TAKE
+SLRU_$TAKE:
+link.w %fp,#0
+subq.l #2,%sp
+move.w (8,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0xa,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0xc,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0xe,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0x10,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0x12,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0x14,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+unlk %fp
+rts
+.globl SLRU_$COPIES
+SLRU_$COPIES:
+link.w %fp,#-0x10
+movem.l %a2-%a4,-(%sp)
+movea.l (8,%fp),%a0
+move.w (%a0),(-0xe,%fp)
+movea.l (0xc,%fp),%a1
+move.w (%a1),(-0xc,%fp)
+movea.l (0x10,%fp),%a2
+move.w (%a2),(-0xa,%fp)
+movea.l (0x14,%fp),%a3
+move.w (%a3),(-8,%fp)
+movea.l (0x18,%fp),%a4
+move.w (%a4),(-6,%fp)
+movea.l (0x1c,%fp),%a0
+move.w (%a0),(-4,%fp)
+movea.l (0x20,%fp),%a1
+move.w (%a1),(-2,%fp)
+subq.l #2,%sp
+move.w (-2,%fp),-(%sp)
+move.w (-4,%fp),-(%sp)
+move.w (-6,%fp),-(%sp)
+move.w (-8,%fp),-(%sp)
+move.w (-0xa,%fp),-(%sp)
+move.w (-0xc,%fp),-(%sp)
+move.w (-0xe,%fp),-(%sp)
+bsr.w SLRU_$TAKE
+movem.l (-0x1c,%fp),%a2-%a4
+unlk %fp
+rts
+.globl SLRU_$ARGS
+SLRU_$ARGS:
+link.w %fp,#0
+movem.l %a2-%a4,-(%sp)
+subq.l #2,%sp
+movea.l (0x20,%fp),%a0
+move.w (%a0),-(%sp)
+movea.l (0x1c,%fp),%a1
+move.w (%a1),-(%sp)
+movea.l (0x18,%fp),%a2
+move.w (%a2),-(%sp)
+movea.l (0x14,%fp),%a3
+move.w (%a3),-(%sp)
+movea.l (0x10,%fp),%a4
+move.w (%a4),-(%sp)
+movea.l (0xc,%fp),%a0
+move.w (%a0),-(%sp)
+movea.l (8,%fp),%a1
+move.w (%a1),-(%sp)
+bsr.w SLRU_$TAKE
+movem.l (-0xc,%fp),%a2-%a4
+unlk %fp
+rts
+.balignw 4,0x2048

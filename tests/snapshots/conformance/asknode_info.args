@@ -1,0 +1,1 @@
+tests/conformance/asknode_info.pas --strict --fragment-origin 0xE64598 --module-routine=ASKNODE_$INTERNET_INFO=0xE645EA

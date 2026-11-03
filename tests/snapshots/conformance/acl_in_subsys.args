@@ -1,0 +1,1 @@
+tests/conformance/acl_in_subsys.pas --strict --fragment-origin 0xE47098 --a5-always-from=ACL_$IN_SUBSYS

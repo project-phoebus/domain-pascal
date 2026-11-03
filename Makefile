@@ -4,7 +4,7 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build runtime stable test exectest corpus conform linktest srcsurvey clean
+.PHONY: all build runtime stable test exectest corpus conform snapshot snapshot-update linktest srcsurvey clean
 
 all: build
 
@@ -70,6 +70,7 @@ test:
 	@if [ -d tools/tests ]; then $(PYTHON) -m unittest discover -s tools/tests; fi
 	$(MAKE) exectest
 	$(MAKE) corpus
+	$(MAKE) snapshot
 
 # Execution tests (tests/exec/README.md): dpc output run on the Musashi
 # 68010 emulator, built from MUSASHI_DIR (default
@@ -93,6 +94,21 @@ corpus: build
 # manifest is linked at its image address and compared with the image.
 conform: build
 	$(PYTHON) tools/conform.py manifest tests/conformance/manifest.txt
+
+# Snapshots (tools/snapshot.py; tests/snapshots/README.md; bead
+# domain-pascal-rz9q): dpc's assembly for every .pas conformance unit and
+# every exec program, with its full command line, kept in the repository
+# so that a machine without the image, the map or Musashi (CI) still
+# checks the compiler side of `conform' and `exectest'.  `make snapshot'
+# needs dpc only (part of `make test'; ten seconds or so).  `make
+# snapshot-update' rewrites them, and only for a suite that passes
+# (`conform', `exectest'); a snapshot change needs a reason in the
+# commit message.
+snapshot: build
+	$(PYTHON) tools/snapshot.py check
+
+snapshot-update: build
+	$(PYTHON) tools/snapshot.py update
 
 # Link test (CLAUDE.md section 6.4; tests/link/README.md): ../source's
 # kernel is built from its Domain Pascal tree with dpc, so a module dpc

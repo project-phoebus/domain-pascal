@@ -1,0 +1,1 @@
+tests/conformance/sysbus_define_int.pas --strict --fragment-origin 0xE0ABBC --fragment-ends-module

@@ -1,0 +1,84 @@
+.text
+.globl ADDRI_$SET
+ADDRI_$SET:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+movea.l (8,%fp),%a0
+move.l (%a0),%d0
+addi.l #0x3e8,%d0
+move.l %d0,(%a5)
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.globl ADDRI_$RUN
+ADDRI_$RUN:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+pea (.Lc0,%pc)
+movea.l (0x10,%a5),%a0
+jsr (%a0)
+addq.w #4,%sp
+pea (%a5)
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+moveq #-5,%d0
+movea.l (0x18,%a5),%a0
+move.l %d0,(%a0)
+pea (%a5)
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w #3,-(%sp)
+movea.l (0x14,%a5),%a0
+jsr (%a0)
+addq.w #4,%sp
+movea.l (0x34,%a5),%a0
+move.l (%a0),-(%sp)
+jsr (EXEC_$LOGV_L).l
+addq.w #4,%sp
+pea (0x30,%a5)
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+moveq #0x14,%d0
+movea.l (0x20,%a5),%a0
+move.l %d0,(%a0)
+move.l (FILL_$LA+4).l,-(%sp)
+jsr (EXEC_$LOGV_L).l
+addq.w #4,%sp
+movea.l (0x1c,%a5),%a0
+move.l (%a0),-(%sp)
+jsr (EXEC_$LOGV_L).l
+addq.w #4,%sp
+moveq #0xb,%d0
+movea.l (0x1c,%a5),%a0
+move.l %d0,(%a0)
+pea (0xc,%a5)
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+moveq #0x4d,%d0
+movea.l (0x2c,%a5),%a0
+move.l %d0,(%a0)
+pea (0x26,%a5)
+jsr (EXEC_$LOG_L).l
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.Lc0:
+.short 0x0000,0x0007
+.balignw 4,0x2048
+.section ".moddata.ADDRI","aw",@progbits
+.balign 4
+.Ldata:
+.byte 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x09
+.long ADDRI_$SET
+.long EXEC_$MARK
+.long .Ldata
+.long .Ldata+12
+.long FILL_$LA+4
+.space 8
+.long .Ldata+38
+.byte 0x00,0x00,0x00,0x2a
+.long .Ldata+48

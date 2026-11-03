@@ -1,0 +1,1 @@
+tests/conformance/pchist_interrupt.pas --strict --fragment-origin 0xE1A1F6 --fragment-ends-module --module-routine=PCHIST_$COUNT=0xE1A134

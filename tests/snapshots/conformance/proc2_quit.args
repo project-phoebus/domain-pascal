@@ -1,0 +1,1 @@
+tests/conformance/proc2_quit.pas --strict --fragment-origin 0xE3F130 --a5-always=PROC2_$QUIT --module-routine=PROC2_$SIGNAL=0xE3EFA0

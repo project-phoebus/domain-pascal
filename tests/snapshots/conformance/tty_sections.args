@@ -1,0 +1,1 @@
+tests/conformance/tty_sections.pas --strict --fragment-origin=WIRED_PROC=0xE1B3B4 --fragment-origin=.TEXT=0xE67986 --a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID --module-routine=WIRED_PROC:TTY_$I_PUT_CHARS=0xE1B00A

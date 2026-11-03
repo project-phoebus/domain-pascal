@@ -1,0 +1,1 @@
+tests/exec/packed_bool_unreduced_data.mod.pas -I tests/exec

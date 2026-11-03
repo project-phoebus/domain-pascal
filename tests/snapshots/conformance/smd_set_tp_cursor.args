@@ -1,0 +1,1 @@
+tests/conformance/smd_set_tp_cursor.pas --strict --fragment-origin 0xE6E964 --a5-always=SMD_$SET_TP_CURSOR --module-routine=SMD_$LOC_EVENT=0xE6E9A0

@@ -1,0 +1,1 @@
+tests/exec/pointer_slot_paths2.pas -I tests/exec

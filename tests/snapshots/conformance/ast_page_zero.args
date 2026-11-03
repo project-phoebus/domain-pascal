@@ -1,0 +1,1 @@
+tests/conformance/ast_page_zero.pas --strict --fragment-origin 0xE00EB0

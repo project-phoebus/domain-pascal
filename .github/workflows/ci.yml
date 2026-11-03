@@ -6,7 +6,10 @@
 # runtime and the Python tool tests that assemble (tools/dispcheck.py,
 # tools/linktest.py) run instead of skipping.  The parts of `make test'
 # that need the SR10.2 image, the install or Musashi skip with a notice,
-# as they do on any machine without them.
+# as they do on any machine without them; `make snapshot' (in `make
+# test') still checks dpc's output for those suites' programs against
+# tests/snapshots/ (tests/snapshots/README.md), with nothing from outside
+# this repository.
 name: CI
 
 on:

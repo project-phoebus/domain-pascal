@@ -1,0 +1,1 @@
+tests/conformance/tty_k_flush_int.pas --strict --fragment-origin 0xE1C084 --a5-always=TTY_$K_FLUSH_INPUT,TTY_$K_FLUSH_OUTPUT --module-routine=TTY_$I_FLUSH_INPUT=0xE1B7B0 --module-routine=TTY_$I_FLUSH_OUTPUT=0xE1B806

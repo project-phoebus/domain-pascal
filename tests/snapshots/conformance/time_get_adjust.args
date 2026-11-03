@@ -1,0 +1,1 @@
+tests/conformance/time_get_adjust.pas --strict --fragment-origin 0xE16AA8 --fragment-ends-module

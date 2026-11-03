@@ -1,0 +1,1 @@
+tests/conformance/bat_get_bat_step.pas --strict --fragment-origin 0xE3BB58 --fragment-ends-module

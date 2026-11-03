@@ -1,0 +1,1 @@
+tests/conformance/proc1_set_asid.pas --strict --fragment-origin 0xE148F8

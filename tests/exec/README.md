@@ -31,6 +31,12 @@ They take under a second.
 If any of these is missing, the driver prints `exectest: skipped: ...`
 and exits 0.
 
+On a machine without Musashi (CI), `make snapshot` (part of `make test`)
+still checks dpc's output for every program and `link:` module against
+`tests/snapshots/exec/` (`tests/snapshots/README.md`).  After adding a test,
+or a change that alters a test's output, run `make snapshot-update`; it
+writes the snapshots only when the execution tests pass.
+
 ## How a test runs
 
 1. `target/debug/dpc -I tests/exec` compiles `NAME.pas`, and any `link:`

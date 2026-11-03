@@ -1,0 +1,1 @@
+tests/conformance/tty_k_flags_int.pas --strict --fragment-origin 0xE67618 --a5-always=TTY_$K_INQ_FUNC_ENABLED,TTY_$K_SET_INPUT_FLAG,TTY_$K_INQ_INPUT_FLAGS,TTY_$K_SET_OUTPUT_FLAG,TTY_$K_INQ_OUTPUT_FLAGS,TTY_$K_SET_ECHO_FLAG,TTY_$K_INQ_ECHO_FLAGS

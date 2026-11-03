@@ -1,0 +1,1 @@
+tests/exec/threading_paths.pas -I tests/exec

@@ -1,0 +1,116 @@
+.text
+PUT:
+link.w %fp,#-4
+movem.l %d2-%d3,-(%sp)
+move.b (8,%fp),%d0
+move.b (0xa,%fp),%d2
+move.b (0xc,%fp),%d3
+clr.w %d1
+move.b %d0,%d1
+move.w %d1,(%a5)
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+clr.w %d0
+move.b %d2,%d0
+move.w %d0,(%a5)
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.b %d3,%d0
+ext.w %d0
+move.w %d0,(%a5)
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+movem.l (-0xc,%fp),%d2-%d3
+unlk %fp
+rts
+ESC:
+link.w %fp,#-4
+move.b (8,%fp),%d0
+clr.w %d1
+move.b %d0,%d1
+move.w %d1,(%a5)
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+pea (0xa,%fp)
+jsr (EXEC_$LOG_BOOL).l
+unlk %fp
+rts
+ESC2:
+link.w %fp,#-4
+move.b (0xa,%fp),%d0
+clr.w %d1
+move.b %d0,%d1
+move.w %d1,(%a5)
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+pea (8,%fp)
+jsr (EXEC_$LOG_BOOL).l
+unlk %fp
+rts
+.globl BYTE_CONSTS_$MAIN
+BYTE_CONSTS_$MAIN:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+subq.l #2,%sp
+move.w #-0x200,-(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w #0x4100,-(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w -(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w #0x1300,-(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+move.b #0xc8,(2,%a5)
+subq.l #2,%sp
+move.w #-0x200,-(%sp)
+move.b (2,%a5),-(%sp)
+move.w #0x4100,-(%sp)
+bsr.w PUT
+addq.w #8,%sp
+st -(%sp)
+move.w #0x1b00,-(%sp)
+bsr.w ESC
+addq.w #4,%sp
+move.w #0x5a00,-(%sp)
+st -(%sp)
+bsr.w ESC2
+addq.w #4,%sp
+subq.l #2,%sp
+move.w #0xa00,-(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w #0x7800,-(%sp)
+jsr (EXEC_$LOGV_C).l
+addq.w #4,%sp
+clr.b (2,%a5)
+subq.l #2,%sp
+move.w #-0x8000,-(%sp)
+move.b (2,%a5),-(%sp)
+move.w #-0x8000,-(%sp)
+bsr.w PUT
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".bss.moddata.BYTE_CONSTS","aw",@nobits
+.balign 4
+.Ldata:
+.space 4

@@ -1,0 +1,1 @@
+tests/exec/packed_bools_all.pas -I tests/exec

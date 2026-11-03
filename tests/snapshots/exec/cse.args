@@ -1,0 +1,1 @@
+tests/exec/cse.pas -I tests/exec

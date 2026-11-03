@@ -1,0 +1,1 @@
+tests/conformance/io_enable_device.pas --strict --fragment-origin 0xE1A7E8 --module-routine=IO_$CHECK_UNIT=0xE1A4A4

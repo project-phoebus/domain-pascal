@@ -1,0 +1,1 @@
+tests/conformance/proc2_pguid_to_upgid.pas --strict --fragment-origin 0xE41072 --a5-always=PROC2_$PGUID_TO_UPGID --module-routine=PROC2_$UID_TO_UPGID_INTERNAL=0xE422CC

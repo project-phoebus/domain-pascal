@@ -1,0 +1,1 @@
+tests/conformance/disk_get_error_info.pas --strict --fragment-origin 0xE6C08C

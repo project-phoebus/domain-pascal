@@ -1,0 +1,121 @@
+.text
+AS_INT:
+link.w %fp,#-8
+move.w (8,%fp),%d0
+unlk %fp
+rts
+HELD_OPS:
+link.w %fp,#-8
+clr.w %d0
+clr.w %d1
+move.b (3,%a5),%d0
+move.b (1,%a5),%d1
+not.w %d1
+and.w %d1,%d0
+clr.w %d1
+move.b (2,%a5),%d1
+or.w %d1,%d0
+move.w %d0,(4,%a5)
+unlk %fp
+rts
+.globl BYTE_SETS_$RUN
+BYTE_SETS_$RUN:
+link.w %fp,#-4
+pea (%a5)
+lea (.Ldata).l,%a5
+move.w (8,%fp),%d0
+move.w %d0,(4,%a5)
+move.b (5,%a5),(1,%a5)
+pea (0xa,%fp)
+jsr (EXEC_$ID_W).l
+addq.w #4,%sp
+move.b %d0,(2,%a5)
+clr.b (3,%a5)
+btst #0,(1,%a5)
+sne %d0
+move.b %d0,(-4,%fp)
+pea (-4,%fp)
+jsr (EXEC_$LOG_BOOL).l
+addq.w #4,%sp
+btst #3,(1,%a5)
+sne %d0
+move.b %d0,(-4,%fp)
+pea (-4,%fp)
+jsr (EXEC_$LOG_BOOL).l
+addq.w #4,%sp
+tst.b (1,%a5)
+smi %d0
+move.b %d0,(-4,%fp)
+pea (-4,%fp)
+jsr (EXEC_$LOG_BOOL).l
+addq.w #4,%sp
+tst.b (2,%a5)
+bpl.s 1f
+subq.l #2,%sp
+move.w #1,-(%sp)
+jsr (EXEC_$MARK).l
+addq.w #4,%sp
+1:
+bset #6,(1,%a5)
+bclr #0,(2,%a5)
+move.b #0xe,(3,%a5)
+subq.l #2,%sp
+clr.w %d0
+move.b (1,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (2,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (3,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+bsr.w HELD_OPS
+subq.l #2,%sp
+move.w (4,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+clr.w %d0
+move.b (2,%a5),%d0
+tst.w %d0
+beq.s 2f
+subq.l #2,%sp
+move.w #2,-(%sp)
+jsr (EXEC_$MARK).l
+addq.w #4,%sp
+2:
+clr.b (3,%a5)
+clr.w %d0
+move.b (3,%a5),%d0
+tst.w %d0
+bne.s 3f
+subq.l #2,%sp
+move.w #3,-(%sp)
+jsr (EXEC_$MARK).l
+addq.w #4,%sp
+3:
+subq.l #2,%sp
+clr.w %d0
+move.b (1,%a5),%d0
+move.w %d0,-(%sp)
+bsr.w AS_INT
+addq.w #4,%sp
+move.w %d0,(-2,%fp)
+subq.l #2,%sp
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+movea.l (-8,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".bss.moddata.BYTE_SETS","aw",@nobits
+.balign 4
+.Ldata:
+.space 8

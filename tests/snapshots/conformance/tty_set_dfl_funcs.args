@@ -1,0 +1,1 @@
+tests/conformance/tty_set_dfl_funcs.pas --strict --fragment-origin 0xE6726E --a5-always=TTY_$I_SET_DFL_FUNCS --module-routine=TTY_$I_SET_FUNCS=0xE6720E

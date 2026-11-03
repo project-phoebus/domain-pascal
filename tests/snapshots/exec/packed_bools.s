@@ -1,0 +1,315 @@
+.text
+.globl PACKED_BOOLS_$FILL
+PACKED_BOOLS_$FILL:
+link.w %fp,#-4
+movem.l %d2-%d4/%a5,-(%sp)
+lea (.Ldata).l,%a5
+move.w (8,%fp),%d0
+bne.s 1f
+moveq #0x3f,%d0
+moveq #1,%d1
+.balignw 4,0x2048
+3:
+move.w %d1,%d2
+moveq #7,%d3
+subq.w #1,%d2
+move.l #-0x81,%d4
+and.w %d2,%d3
+lsr.l %d3,%d4
+move.w %d2,%d3
+lsr.w #3,%d3
+lea (0,%a5,%d3.w),%a0
+and.b %d4,(%a0)
+addq.w #1,%d1
+dbf %d0,3b
+bra.s 5f
+1:
+moveq #0x3f,%d0
+moveq #1,%d1
+.balignw 4,0x2048
+7:
+move.w %d1,%d2
+moveq #7,%d3
+subq.w #1,%d2
+move.l #0x80,%d4
+and.w %d2,%d3
+lsr.l %d3,%d4
+move.w %d2,%d3
+lsr.w #3,%d3
+lea (0,%a5,%d3.w),%a0
+or.b %d4,(%a0)
+addq.w #1,%d1
+dbf %d0,7b
+5:
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+movem.l (-0x14,%fp),%d2-%d4/%a5
+unlk %fp
+rts
+.Lc0:
+.short 0x0008
+.globl PACKED_BOOLS_$ONE
+PACKED_BOOLS_$ONE:
+link.w %fp,#-4
+movem.l %d2-%d5/%a5,-(%sp)
+lea (.Ldata).l,%a5
+move.w (8,%fp),%d0
+moveq #0x3f,%d1
+moveq #1,%d2
+.balignw 4,0x2048
+2:
+move.w %d2,%d3
+moveq #7,%d4
+subq.w #1,%d3
+move.l #-0x81,%d5
+and.w %d3,%d4
+lsr.l %d4,%d5
+move.w %d3,%d4
+lsr.w #3,%d4
+lea (0,%a5,%d4.w),%a0
+and.b %d5,(%a0)
+addq.w #1,%d2
+dbf %d1,2b
+move.w %d0,%d1
+moveq #7,%d0
+subq.w #1,%d1
+move.l #0x80,%d2
+and.w %d1,%d0
+lsr.l %d0,%d2
+move.w %d1,%d0
+lsr.w #3,%d0
+lea (0,%a5,%d0.w),%a0
+or.b %d2,(%a0)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+clr.w (0xc,%a5)
+moveq #0x3f,%d0
+moveq #1,%d1
+.balignw 4,0x2048
+5:
+move.b %d1,%d2
+clr.w %d3
+subq.b #1,%d2
+move.b %d2,%d3
+lsr.w #3,%d3
+lea (0,%a5,%d3.w),%a0
+moveq #7,%d3
+moveq #7,%d4
+and.b %d2,%d3
+sub.b %d3,%d4
+btst %d4,(%a0)
+beq.s 7f
+move.w (0xc,%a5),%d2
+add.w %d1,%d2
+move.w %d2,(0xc,%a5)
+7:
+addq.w #1,%d1
+dbf %d0,5b
+pea (0xc,%a5)
+jsr (EXEC_$LOG_W).l
+movem.l (-0x18,%fp),%d2-%d5/%a5
+unlk %fp
+rts
+.globl PACKED_BOOLS_$ZERO
+PACKED_BOOLS_$ZERO:
+link.w %fp,#-4
+movem.l %d2-%d5/%a5,-(%sp)
+lea (.Ldata).l,%a5
+move.w (8,%fp),%d0
+moveq #0x3f,%d1
+moveq #1,%d2
+.balignw 4,0x2048
+2:
+move.w %d2,%d3
+moveq #7,%d4
+subq.w #1,%d3
+move.l #0x80,%d5
+and.w %d3,%d4
+lsr.l %d4,%d5
+move.w %d3,%d4
+lsr.w #3,%d4
+lea (0,%a5,%d4.w),%a0
+or.b %d5,(%a0)
+addq.w #1,%d2
+dbf %d1,2b
+move.w %d0,%d1
+moveq #7,%d0
+subq.w #1,%d1
+move.l #-0x81,%d2
+and.w %d1,%d0
+lsr.l %d0,%d2
+move.w %d1,%d0
+lsr.w #3,%d0
+lea (0,%a5,%d0.w),%a0
+and.b %d2,(%a0)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+clr.w (0xc,%a5)
+moveq #0x3f,%d0
+moveq #1,%d1
+.balignw 4,0x2048
+5:
+move.b %d1,%d2
+clr.w %d3
+subq.b #1,%d2
+move.b %d2,%d3
+lsr.w #3,%d3
+lea (0,%a5,%d3.w),%a0
+moveq #7,%d3
+moveq #7,%d4
+and.b %d2,%d3
+sub.b %d3,%d4
+btst %d4,(%a0)
+bne.s 7f
+move.w (0xc,%a5),%d2
+add.w %d1,%d2
+move.w %d2,(0xc,%a5)
+7:
+addq.w #1,%d1
+dbf %d0,5b
+pea (0xc,%a5)
+jsr (EXEC_$LOG_W).l
+movem.l (-0x18,%fp),%d2-%d5/%a5
+unlk %fp
+rts
+.globl PACKED_BOOLS_$SETK
+PACKED_BOOLS_$SETK:
+link.w %fp,#0
+movem.l %d2/%a5,-(%sp)
+lea (.Ldata).l,%a5
+movea.l (8,%fp),%a0
+moveq #7,%d1
+move.w (%a0),%d0
+move.l #0x80,%d2
+subq.w #1,%d0
+and.w %d0,%d1
+lsr.l %d1,%d2
+move.w %d0,%d1
+lsr.w #3,%d1
+lea (0,%a5,%d1.w),%a0
+or.b %d2,(%a0)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+movem.l (-8,%fp),%d2/%a5
+unlk %fp
+rts
+.globl PACKED_BOOLS_$GET
+PACKED_BOOLS_$GET:
+link.w %fp,#-4
+movem.l %d2/%a5,-(%sp)
+lea (.Ldata).l,%a5
+movea.l (8,%fp),%a0
+move.b (1,%a0),%d0
+clr.w %d1
+subq.b #1,%d0
+move.b %d0,%d1
+lsr.w #3,%d1
+lea (0,%a5,%d1.w),%a0
+moveq #7,%d1
+moveq #7,%d2
+and.b %d0,%d1
+sub.b %d1,%d2
+btst %d2,(%a0)
+sne %d0
+movem.l (-0xc,%fp),%d2/%a5
+unlk %fp
+rts
+.globl PACKED_BOOLS_$LO2
+PACKED_BOOLS_$LO2:
+link.w %fp,#-4
+movem.l %d2/%a2/%a5,-(%sp)
+lea (.Ldata).l,%a5
+movea.l (8,%fp),%a2
+pea (.Lc1,%pc)
+pea (8,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.w (%a2),%d2
+jsr (EXEC_$CLOBBER).l
+move.w %d2,%d0
+moveq #7,%d1
+subq.w #2,%d0
+move.l #0x80,%d2
+and.w %d0,%d1
+lsr.l %d1,%d2
+move.w %d0,%d1
+lsr.w #3,%d1
+lea (0,%a5,%d1.w),%a0
+or.b %d2,(8,%a0)
+pea (.Lc1,%pc)
+pea (8,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.w (%a2),(0xa,%a5)
+move.b (0xb,%a5),%d0
+clr.w %d1
+subq.b #2,%d0
+move.b %d0,%d1
+lsr.w #3,%d1
+lea (0,%a5,%d1.w),%a0
+moveq #7,%d1
+moveq #7,%d2
+and.b %d0,%d1
+sub.b %d1,%d2
+btst %d2,(8,%a0)
+beq.s 1f
+subq.l #2,%sp
+move.w #1,-(%sp)
+jsr (EXEC_$MARK).l
+addq.w #4,%sp
+1:
+move.b (0xb,%a5),%d0
+clr.w %d1
+subq.b #2,%d0
+move.b %d0,%d1
+lsr.w #3,%d1
+lea (0,%a5,%d1.w),%a0
+moveq #7,%d1
+moveq #7,%d2
+and.b %d0,%d1
+sub.b %d1,%d2
+btst %d2,(8,%a0)
+bne.s 2f
+subq.l #2,%sp
+clr.w -(%sp)
+jsr (EXEC_$MARK).l
+2:
+movem.l (-0x10,%fp),%d2/%a2/%a5
+unlk %fp
+rts
+.Lc1:
+.short 0x0002
+.globl PACKED_BOOLS_$CLR2
+PACKED_BOOLS_$CLR2:
+link.w %fp,#0
+movem.l %d2/%a5,-(%sp)
+lea (.Ldata).l,%a5
+move.w (8,%fp),%d0
+move.w %d0,%d1
+moveq #7,%d0
+subq.w #2,%d1
+move.l #-0x81,%d2
+and.w %d1,%d0
+lsr.l %d0,%d2
+move.w %d1,%d0
+lsr.w #3,%d0
+lea (0,%a5,%d0.w),%a0
+and.b %d2,(8,%a0)
+pea (.Lc1,%pc)
+pea (8,%a5)
+jsr (EXEC_$LOG_MEM).l
+movem.l (-8,%fp),%d2/%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".moddata.PACKED_BOOLS","aw",@progbits
+.balign 4
+.Ldata:
+.byte 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80
+.space 7

@@ -1,0 +1,1 @@
+tests/exec/arith.pas -I tests/exec

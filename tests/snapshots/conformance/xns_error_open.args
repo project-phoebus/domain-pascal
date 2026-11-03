@@ -1,0 +1,1 @@
+tests/conformance/xns_error_open.pas --strict --fragment-origin 0xE178AA --merge-constant-stores

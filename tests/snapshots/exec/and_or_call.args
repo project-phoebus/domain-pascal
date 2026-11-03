@@ -1,0 +1,1 @@
+tests/exec/and_or_call.pas -I tests/exec

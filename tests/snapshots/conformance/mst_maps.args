@@ -1,0 +1,1 @@
+tests/conformance/mst_maps.pas --strict --fragment-origin 0xE4386C --a5-always=MST_$MAP,MST_$MAP_TOP,MST_$MAP_GLOBAL,MST_$MAPS,MST_$REMAP --module-routine=ALLOC_SEGS=0xE43182 --module-routine=MST_$REMAP_PRIVI=0xE43A0C

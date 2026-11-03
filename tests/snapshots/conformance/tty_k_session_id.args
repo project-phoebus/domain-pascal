@@ -1,0 +1,1 @@
+tests/conformance/tty_k_session_id.pas --strict --fragment-origin 0xE67986 --a5-always=TTY_$K_SET_SESSION_ID,TTY_$K_INQ_SESSION_ID

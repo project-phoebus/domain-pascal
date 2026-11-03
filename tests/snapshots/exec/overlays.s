@@ -1,0 +1,44 @@
+.text
+.globl OVERLAYS_$RUN
+OVERLAYS_$RUN:
+link.w %fp,#0
+move.l %d2,-(%sp)
+move.w (8,%fp),%d2
+move.l #OVL_$INIT,-(%sp)
+jsr (EXEC_$LOG_W).l
+addq.w #4,%sp
+pea (OVL_$INIT+4).l
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+pea (OVL_$INIT+8).l
+jsr (EXEC_$LOG_C).l
+addq.w #4,%sp
+move.l #OVL_$ZERO,-(%sp)
+jsr (EXEC_$LOG_W).l
+addq.w #4,%sp
+move.w #0x2a,(OVL_$ZERO).l
+move.w %d2,%d0
+movea.l #OVL_$ZERO,%a0
+lsl.w #2,%d0
+move.l #-0x3e8,(0,%a0,%d0.w)
+move.l #0x3e8,(OVL_$INIT+4).l
+jsr (OVP_$SHOW).l
+jsr (OVP_$SET).l
+move.l #OVL_$INIT,-(%sp)
+jsr (EXEC_$LOG_W).l
+addq.w #4,%sp
+pea (OVL_$ZERO+0xc).l
+jsr (EXEC_$LOG_L).l
+addq.w #4,%sp
+move.w %d2,%d0
+movea.l #OVL_$ZERO,%a0
+lsl.w #2,%d0
+move.l #0x309,(4,%a0,%d0.w)
+pea (OVL_$ZERO+0xc).l
+jsr (EXEC_$LOG_L).l
+move.l (-4,%fp),%d2
+unlk %fp
+rts
+.balignw 4,0x2048
+.comm OVL_$INIT,12,4
+.comm OVL_$ZERO,16,4

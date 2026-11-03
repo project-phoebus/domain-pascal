@@ -1,0 +1,1 @@
+tests/exec/be_merge_knob.pas -I tests/exec --merge-constant-stores

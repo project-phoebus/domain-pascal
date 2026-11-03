@@ -1,0 +1,1 @@
+tests/conformance/cal_shutdown.pas --strict --fragment-origin 0xE3E6E4 --fragment-ends-module

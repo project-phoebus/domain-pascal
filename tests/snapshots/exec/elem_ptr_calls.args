@@ -1,0 +1,1 @@
+tests/exec/elem_ptr_calls.pas -I tests/exec

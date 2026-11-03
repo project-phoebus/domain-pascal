@@ -11,6 +11,13 @@ Relocations are matched symbolically, as `../source`'s `asm_compare.py`
 does.  The harness keeps a table of external symbols and their image
 addresses, taken from the SAU2 link map.
 
+The image and the map are not in this repository, so a machine without
+them (CI) cannot run these tests.  It checks dpc's output for every `.pas`
+unit against `tests/snapshots/conformance/` instead (`make snapshot`, part
+of `make test`; `tests/snapshots/README.md`).  After adding a unit, or a
+change that alters a unit's output, run `make snapshot-update`; it writes
+the snapshots only when every unit matches the image.
+
 The first candidates are listed in CLAUDE.md section 6 (PROC1_$TST_LOCK,
 TIME_$Q_INIT_QUEUE, PROC1_$GET_LOADAV, AST_$PAGE_ZERO, LOG_$READ).
 Compiled so far: `proc1_tst_lock.pas` (PROC1_$TST_LOCK and

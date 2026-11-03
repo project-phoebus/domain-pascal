@@ -1,0 +1,1 @@
+tests/conformance/acl_pci_copy_entry.pas --strict --fragment-origin 0xE45122

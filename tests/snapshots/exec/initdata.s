@@ -1,0 +1,62 @@
+.text
+.globl INITDATA_$SHOW
+INITDATA_$SHOW:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+pea (.Lc0,%pc)
+pea (8,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+pea (.Lc0,%pc)
+pea (0x10,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+pea (0x18,%a5)
+jsr (EXEC_$LOG_BOOL).l
+addq.w #4,%sp
+move.w (0x1a,%a5),(0x24,%a5)
+subq.l #2,%sp
+move.w (0x24,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+tst.l (0x1c,%a5)
+bne.s 1f
+clr.w (0x24,%a5)
+bra.s 2f
+1:
+move.w #1,(0x24,%a5)
+2:
+subq.l #2,%sp
+move.w (0x24,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+pea (0x20,%a5)
+jsr (EXEC_$LOG_L).l
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.Lc0:
+.short 0x0008
+.globl INITDATA_$COUNT
+INITDATA_$COUNT:
+link.w %fp,#-4
+pea (%a5)
+lea (.Ldata).l,%a5
+addq.w #1,(0x2c,%a5)
+move.w (0x2c,%a5),%d0
+movea.l (-8,%fp),%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".moddata.INITDATA","aw",@progbits
+.balign 4
+.Ldata:
+.byte 0x00,0x07,0x00,0x09,0x00,0x08,0x00,0x08,0x00,0x12,0x00,0x10,0x00,0x0b,0x00,0x0e
+.byte 0x74,0x74,0x79,0x00,0x00,0x00,0x00,0x00,0xff,0x00,0x00,0x02,0x00,0x00,0x00,0x00
+.byte 0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x64
+.space 2

@@ -1,0 +1,96 @@
+.text
+.globl DEVICE_SET_MEMBERS_$RUN
+DEVICE_SET_MEMBERS_$RUN:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+move.w #0x5a5a,(%a5)
+move.w #-0x5a5b,(4,%a5)
+move.w #-1,(2,%a5)
+andi.w #-0x81,(2,%a5)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+ori.w #0x80,(2,%a5)
+andi.w #-0x101,(2,%a5)
+andi.w #-2,(2,%a5)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.w #0,(2,%a5)
+ori.w #-0x8000,(2,%a5)
+ori.w #1,(2,%a5)
+andi.w #0x7fff,(2,%a5)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+ori.w #0x100,(2,%a5)
+ori.w #0x80,(2,%a5)
+pea (.Lc0,%pc)
+pea (%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.b #0xa5,(6,%a5)
+move.w #0x5a5a,(8,%a5)
+move.b #0xff,(7,%a5)
+andi.b #0xf7,(7,%a5)
+pea (.Lc1,%pc)
+pea (6,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.b #0,(7,%a5)
+ori.b #8,(7,%a5)
+ori.b #1,(7,%a5)
+pea (.Lc1,%pc)
+pea (6,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.w #0x3cef,(0xa,%a5)
+move.w #-0x3c3d,(0x10,%a5)
+move.l #-1,(0xc,%a5)
+andi.l #0x7fffffff,(0xc,%a5)
+andi.l #-2,(0xc,%a5)
+ori.l #1,(0xc,%a5)
+andi.l #-0x10000001,(0xc,%a5)
+andi.l #0x7fffffff,(0xc,%a5)
+ori.l #-0x80000000,(0xc,%a5)
+andi.l #-2,(0xc,%a5)
+pea (.Lc2,%pc)
+pea (0xa,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+move.l #0,(0xc,%a5)
+ori.l #1,(0xc,%a5)
+ori.l #-0x80000000,(0xc,%a5)
+andi.l #0x7fffffff,(0xc,%a5)
+ori.l #0x10000,(0xc,%a5)
+ori.l #0x8000,(0xc,%a5)
+pea (.Lc2,%pc)
+pea (0xa,%a5)
+jsr (EXEC_$LOG_MEM).l
+addq.w #8,%sp
+clr.w (0x12,%a5)
+bset #7,(0x12,%a5)
+bset #0,(0x13,%a5)
+pea (.Lc3,%pc)
+pea (0x12,%a5)
+jsr (EXEC_$LOG_MEM).l
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.Lc0:
+.short 0x0006
+.Lc3:
+.short 0x0002
+.Lc2:
+.short 0x0008
+.Lc1:
+.short 0x0004
+.balignw 4,0x2048
+.section ".bss.moddata.DEVICE_SET_MEMBERS","aw",@nobits
+.balign 4
+.Ldata:
+.space 20

@@ -1,0 +1,1 @@
+tests/conformance/atbus_ring_interrupt.pas --strict --fragment-origin 0xE0AB0C

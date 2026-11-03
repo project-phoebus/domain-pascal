@@ -1,0 +1,1 @@
+tests/conformance/rem_name_register_server.pas --strict --fragment-origin 0xE4A4AE --a5-absolute=REM_NAME_$REGISTER_SERVER

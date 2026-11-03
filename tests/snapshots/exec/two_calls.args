@@ -1,0 +1,1 @@
+tests/exec/two_calls.pas -I tests/exec

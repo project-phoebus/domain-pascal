@@ -1,0 +1,1 @@
+tests/conformance/smd_busy_wait.pas --strict --fragment-origin 0xE1D89C --fragment-ends-module --a5-always-from=SMD_$BUSY_WAIT

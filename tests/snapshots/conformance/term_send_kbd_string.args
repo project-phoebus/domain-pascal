@@ -1,0 +1,1 @@
+tests/conformance/term_send_kbd_string.pas --strict --fragment-origin 0xE1AAFC --fragment-ends-module --module-routine=STATUS_CONVERT=0xE1AAA8

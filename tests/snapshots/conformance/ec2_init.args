@@ -1,0 +1,1 @@
+tests/conformance/ec2_init.pas --strict --fragment-origin 0xE42C60

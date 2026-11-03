@@ -1,0 +1,1 @@
+tests/exec/ptr_dregs_flow.pas -I tests/exec

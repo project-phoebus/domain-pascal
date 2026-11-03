@@ -1,0 +1,1 @@
+tests/conformance/tty_k_inq_pgroup.pas --strict --fragment-origin 0xE67942 --a5-always=TTY_$K_INQ_PGROUP

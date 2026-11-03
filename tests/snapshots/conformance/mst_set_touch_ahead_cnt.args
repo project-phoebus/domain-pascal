@@ -1,0 +1,1 @@
+tests/conformance/mst_set_touch_ahead_cnt.pas --strict --fragment-origin 0xE446FC --a5-always=MST_$SET_TOUCH_AHEAD_CNT --module-routine=MST_$PRIV_SET_TOUCH_AHEAD_CNT=0xE44514

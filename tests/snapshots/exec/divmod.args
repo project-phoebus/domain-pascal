@@ -1,0 +1,1 @@
+tests/exec/divmod.pas -I tests/exec

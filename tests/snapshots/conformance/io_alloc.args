@@ -1,0 +1,1 @@
+tests/conformance/io_alloc.pas --strict --fragment-origin 0xE1A9C2 --fragment-ends-module

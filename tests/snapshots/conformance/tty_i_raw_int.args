@@ -1,0 +1,1 @@
+tests/conformance/tty_i_raw_int.pas --strict --fragment-origin 0xE673AA --a5-always=TTY_$I_SET_RAW,TTY_$I_INQ_RAW --module-routine=WIRED_PROC:TTY_$I_SET_RAW_MODE=0xE1BF70

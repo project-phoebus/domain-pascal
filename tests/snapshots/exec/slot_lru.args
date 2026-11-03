@@ -1,0 +1,1 @@
+tests/exec/slot_lru.pas -I tests/exec

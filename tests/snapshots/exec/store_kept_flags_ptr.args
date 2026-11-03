@@ -1,0 +1,1 @@
+tests/exec/store_kept_flags_ptr.pas -I tests/exec
