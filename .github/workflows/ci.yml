@@ -26,6 +26,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The m68k-elf binutils built on Linux (below); macOS takes Homebrew's.
+  BINUTILS_VERSION: 2.45.1
+  BINUTILS_SHA256: 5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5
 
 jobs:
   build:
@@ -46,18 +49,42 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Ubuntu packages the m68k binutils under the m68k-linux-gnu triple;
-      # the output format is the same elf32-m68k, so expose them under the
-      # m68k-elf names the Makefile and tools use.
+      # Ubuntu packages the m68k binutils only for the m68k-linux-gnu
+      # target.  Its assembler leaves a branch to a global symbol to the
+      # linker (a Linux symbol may be preempted) and cannot fit that in a
+      # bsr.s: `bsr.s M$DIU$LLL' in runtime/m68k/m_arith.s fails, and so
+      # would dpc's own bsr.s calls of a module's exported routines.  The
+      # bare-metal m68k-elf assembler, which ../source and dpc's tools use,
+      # resolves them.  So Linux builds m68k-elf binutils from GNU's
+      # release (checksum pinned above), cached across runs.
+      - name: Cache m68k-elf binutils (Linux)
+        if: runner.os == 'Linux'
+        id: binutils-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/m68k-elf
+          key: m68k-elf-binutils-${{ env.BINUTILS_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build m68k-elf binutils (Linux)
+        if: runner.os == 'Linux' && steps.binutils-cache.outputs.cache-hit != 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o binutils.tar.xz \
+            "https://ftpmirror.gnu.org/binutils/binutils-$BINUTILS_VERSION.tar.xz"
+          echo "$BINUTILS_SHA256  binutils.tar.xz" | sha256sum -c -
+          tar -xf binutils.tar.xz
+          mkdir build && cd build
+          "../binutils-$BINUTILS_VERSION/configure" --target=m68k-elf \
+            --prefix="$HOME/m68k-elf" --disable-nls --disable-werror \
+            --disable-gprofng MAKEINFO=true
+          make -j"$(nproc)" MAKEINFO=true
+          make install MAKEINFO=true
+
       - name: Install m68k binutils (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends binutils-m68k-linux-gnu
-          for t in as ld ar nm objdump objcopy readelf; do
-            sudo ln -sf "$(command -v m68k-linux-gnu-$t)" "/usr/local/bin/m68k-elf-$t"
-          done
-          m68k-elf-as --version | head -1
+          echo "$HOME/m68k-elf/bin" >> "$GITHUB_PATH"
+          "$HOME/m68k-elf/bin/m68k-elf-as" --version | head -1
 
       - name: Install m68k binutils (macOS)
         if: runner.os == 'macOS'
