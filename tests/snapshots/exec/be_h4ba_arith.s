@@ -140,7 +140,7 @@ move.w %d3,%d1
 addq.l #1,%d1
 move.l %d1,-(%sp)
 move.l %d0,-(%sp)
-jsr (M$DIS$LLL).l
+jsr (M$DIU$LLL).l
 addq.w #8,%sp
 move.w %d0,(-2,%fp)
 clr.l %d0

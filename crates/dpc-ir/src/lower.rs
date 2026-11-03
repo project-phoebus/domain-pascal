@@ -8641,14 +8641,14 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
     // `dpc-sema`'s `shift_result`): module-local 0xE09412..0xE0942A `clr.l
     // D2; clr.l D1; move.w D0w,D2w; move.w (A2),D1w; lsl.l #5,D1; add.l
     // D1,D2; ...; cmp.l D1,D2; bls` (`page + lshft(bste, 5)`).
-    let unsigned_operand = |x: &SExpr| match &x.value {
+    let unsigned_leaf = |x: &SExpr| match &x.value {
         Some(v) => v.ordinal().is_some_and(|n| n >= 0),
         None => sign_of(&p.types, x.ty) == Sign::Unsigned,
     };
     if matches!(op, IrBinOp::Add | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or)
         && (lhs.value.is_none() || rhs.value.is_none())
-        && unsigned_operand(lhs)
-        && unsigned_operand(rhs)
+        && unsigned_leaf(lhs)
+        && unsigned_leaf(rhs)
     {
         ty.sign = Sign::Unsigned;
     }
@@ -8658,8 +8658,30 @@ fn binary(p: &Program, e: &SExpr, op: BinOp, lhs: &SExpr, rhs: &SExpr) -> Res<Ex
         // is a constant in 0..2147483647; signed otherwise (image:
         // `divu.w` and M$DIU/M$OIU on `0..65535` words, codegen-patterns
         // 8).
-        let runtime_unsigned =
-            |x: &SExpr| x.value.is_none() && sign_of(&p.types, x.ty) == Sign::Unsigned;
+        // A `div` of an unsigned sum or product ([`unsigned_operand`]) is
+        // unsigned (Uncertain; ../source finding 787): PMAP_$PURIFIER_L
+        // 0xE1404E..0xE1405E `moveq #11,D4; add.l (MMAP_$WSL+0x70).l,D4`
+        // then `M$DIU$LLW` by 12; PMAP_$PURIFIER_R 0xE1420A..0xE1421A
+        // `(... + 5)`, `M$DIU$LLW` by 6; MST_$INIT 0xE30C9E..0xE30CAC a
+        // product by 10, `M$DIU$LLW` by 100 (`0..2147483647` longwords);
+        // DXM_$ADD_CALLBACK `clr.l D5; move.w D4,D5; addq.l #3,D5; lsr.l
+        // #2,D5`; AST_$TOUCH_AREA `addi.l #256,D4; lsr.l #8,D4`;
+        // RINGLOG_$LOGIT `addi.l #30,D2; lsr.l #1,D2`; FLP_$REVALIDATE
+        // `lsl.l #2,D1; lsr.l #1,D1`; TTY_$I_CALC_COLUMN 0xE1B4DE.
+        // Against, signed: NET_IO_$COPY_PACKET 0xE0E540 `clr.l D2; move.w
+        // D1,D2; addi.l #1023,D2; bpl` (a `for` bound) and MST_$GROW_AREA
+        // 0xE436AE (`+ 16#7FFF`, `asr.l`), which ../source's types may
+        // explain.  A `mod` keeps its operands' own types: SMD_$LOC_EVENT
+        // 0xE6E9EC..0xE6E9FE zero-extends a word, adds 255 and calls
+        // `M$OIS$WLW`.
+        let runtime_unsigned = |x: &SExpr| {
+            x.value.is_none()
+                && if op == IrBinOp::Div {
+                    unsigned_operand(p, x)
+                } else {
+                    sign_of(&p.types, x.ty) == Sign::Unsigned
+                }
+        };
         let non_negative = |x: &SExpr| {
             x.value
                 .as_ref()
@@ -9203,6 +9225,30 @@ fn scalar_of(p: &Program, e: &SExpr) -> Res<Scalar> {
     let width = Width::of_size(size)
         .ok_or_else(|| unsupported(e.span, format!("a {size}-byte value is")))?;
     Ok(scalar_of_type(&p.types, e.ty, width))
+}
+
+/// Whether `x`, an operand of `div`, counts as unsigned (codegen-patterns
+/// 8, "The sign"): a constant that is non-negative, or a run-time value of
+/// an unsigned type ([`sign_of`]) or the `+`, `*`, `&` or `!` of such
+/// operands, one of them a run-time value (PMAP_$PURIFIER_L 0xE1404E, an
+/// unsigned sum divided with `M$DIU$LLW`).  Only for `div`: the operands
+/// of `+` itself are checked one level deep ([`binary`]), and `mod` takes
+/// its operands' own types.
+fn unsigned_operand(p: &Program, x: &SExpr) -> bool {
+    if let Some(v) = &x.value {
+        return v.ordinal().is_some_and(|n| n >= 0);
+    }
+    if sign_of(&p.types, x.ty) == Sign::Unsigned {
+        return true;
+    }
+    match &x.kind {
+        ExprKind::Binary {
+            op: BinOp::Add | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr,
+            lhs,
+            rhs,
+        } if p.types.is_integer(x.ty) => unsigned_operand(p, lhs) && unsigned_operand(p, rhs),
+        _ => false,
+    }
 }
 
 /// Whether values of type `ty` are read as signed or unsigned numbers.

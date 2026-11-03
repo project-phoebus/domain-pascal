@@ -11535,6 +11535,25 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
     (golden `tests/golden/expr/ulong`, exec test `ulong`); ref 4.3.3's
     type transfers pick the sign (`u_type(s32) DIV u32` unsigned, `s32
     DIV integer32(u32)` signed).
+  - **A `div` of an unsigned sum or product is unsigned** (Uncertain,
+    implemented; ../source finding 787): the `+`, `*`, `&` or `!` of
+    unsigned values and non-negative constants, though Pascal types it
+    as a signed integer.  For it: PMAP_$PURIFIER_L 0xE1404E..0xE1405E
+    `moveq #11,D4; add.l (MMAP_$WSL+0x70).l,D4`, `M$DIU$LLW` by 12;
+    PMAP_$PURIFIER_R 0xE1420A..0xE1421A (`+ 5`, by 6); MST_$INIT
+    0xE30C9E..0xE30CAC (a product by 10, `M$DIU$LLW` by 100);
+    DXM_$ADD_CALLBACK `clr.l D5; move.w D4,D5; addq.l #3,D5; lsr.l #2,D5`;
+    AST_$TOUCH_AREA `addi.l #256,D4; lsr.l #8,D4`; RINGLOG_$LOGIT
+    `addi.l #30,D2; lsr.l #1,D2`; FLP_$REVALIDATE `lsl.l #2,D1; lsr.l
+    #1,D1`; TTY_$I_CALC_COLUMN 0xE1B4DE `addq.l #7,D2; lsr.l #3,D2`.
+    Against, signed: NET_IO_$COPY_PACKET 0xE0E540..0xE0E546 `clr.l D2;
+    move.w D1,D2; addi.l #1023,D2; bpl` (a `for` bound) and
+    MST_$GROW_AREA 0xE436AE (`+ 16#7FFF` of what ../source types
+    `0..2147483647`, `bpl; addi; asr.l`).  A `mod` keeps its operands'
+    own types: SMD_$LOC_EVENT 0xE6E9EC..0xE6E9FE zero-extends a word,
+    adds 255 and calls `M$OIS$WLW`.  The sum itself stays one level deep
+    (section 5, "Signedness of results").  Golden
+    `expr/unsigned_sum_div`.
   - **A word sum, difference or product as the dividend is divided in 32
     bits** (ref 4.3.1, p. 4-5): CAL_$WEEKDAY 0xE686AE..0xE686C0 `move.w
     (A1),D0; ext.l D0; addi.l #9,D0` then `M$OIS$WLW` for `(month + 9) mod
