@@ -20356,7 +20356,26 @@ impl Selector {
         let w = ty.width;
         let signed = ty.is_signed();
         if w == Width::Byte {
-            return Err(unsupported(self.span, "a byte multiplication is"));
+            // By a power of two: shifted at the byte's width (SAU4 FLP_
+            // 0xF845D02..0xF845D0A `move.b (33,A1),D0; lsl.b #2,D0; subq.b
+            // #1,D0; move.b D0,(129,A0)`, `dma_count := vol.sec_per_track
+            // * 4 - 1` into a byte; ../source).  Another byte product: no
+            // byte multiply on the 68000; `dpc-ir`'s `narrow` computes it
+            // at the word's width.
+            let pow2 = |e: &Expr| match e {
+                Expr::Const { value, .. } if *value > 0 && (*value as u64).is_power_of_two() => {
+                    Some(value.trailing_zeros())
+                }
+                _ => None,
+            };
+            let (x, k) = match (pow2(rhs), pow2(lhs)) {
+                (Some(k), _) => (lhs, k),
+                (None, Some(k)) => (rhs, k),
+                _ => return Err(unsupported(self.span, "a byte multiplication is")),
+            };
+            let d = self.eval_d(x)?;
+            self.shift_by(ShiftOp::Lsl, d, k, Width::Byte);
+            return Ok(d);
         }
         let konst = |e: &Expr| match e {
             Expr::Const { value, .. } => Some(*value),

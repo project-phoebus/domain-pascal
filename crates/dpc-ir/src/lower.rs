@@ -6671,6 +6671,34 @@ fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
                 in_place: true,
             })
         }
+        // A product used as a byte: by a power of two it is shifted at the
+        // byte's width (the selector's `lsl.b`; SAU4 FLP_ 0xF845D06 for
+        // `vol.sec_per_track * 4 - 1` into a byte); otherwise, as the
+        // 68000 multiplies words only, computed at the word's width and
+        // its low byte taken, the same low byte (no site).
+        Expr::Binary {
+            op: IrBinOp::Mul,
+            lhs,
+            rhs,
+            ..
+        } if ty.width == Width::Byte
+            && ![lhs, rhs].iter().any(|x| {
+                matches!(***x, Expr::Const { value, .. }
+                    if value > 0 && (value as u64).is_power_of_two())
+            }) =>
+        {
+            Some(Expr::Convert {
+                value: Box::new(narrow(
+                    e,
+                    Scalar {
+                        width: Width::Word,
+                        ..ty
+                    },
+                )?),
+                ty,
+                in_place: false,
+            })
+        }
         Expr::Binary {
             op: op @ (IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or),
             lhs,

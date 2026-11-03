@@ -6,16 +6,24 @@
     `.w' index (AST_$TOUCH_AREA SAU4 0xF803D0C `add.w D6,D4'; MST_$FORK
     SAU2 0xE73A62 `add.w D5,D0; add.w D0,D0');
   - stored into a byte: `add.b' (AST_$TOUCH_AREA SAU4 0xF803D74 `add.b
-    D6,D0'). }
+    D6,D0'); a product by a power of two stored into a byte: the word's
+    low byte shifted, `move.b; lsl.b #2; subq.b #1' (SAU4 FLP_ 0xF845D02..
+    0xF845D0A, `dma_count := vol.sec_per_track * 4 - 1'). }
 module word_sum_index;
 type
   pinteger = 0..65535;
+  vol_t = record pad: integer; sec_per_track: pinteger; end;
 var
   b: extern [byte] 0..255;
+  vol: extern vol_t;
 procedure p(page: pinteger; n: integer);
   options(val_param);
 var a: array[0..31] of integer32;
 begin
   a[n + page] := 0;
   b := n + page - 1;
+end;
+procedure fmt;
+begin
+  b := vol.sec_per_track * 4 - 1;
 end;

@@ -16,4 +16,13 @@ move.b %d2,(B).l
 move.l (-0x84,%fp),%d2
 unlk %fp
 rts
+.globl FMT
+FMT:
+link.w %fp,#0
+move.b (VOL+3).l,%d0
+lsl.b #2,%d0
+subq.b #1,%d0
+move.b %d0,(B).l
+unlk %fp
+rts
 .balignw 4,0x2048
