@@ -10645,7 +10645,13 @@ D1`, MMAP_$INIT 0xE319BE..0xE319C8 `move.w #3583,D5; ...; move.l
 #512,D2`, `addq.l #1,D2` before `dbf D5` at 0xE31AF2; a run-time count a
 longword, `dbf` extended by `clr.w Dc; subq.l #1,Dc; bcc` (MST_$WIRE_AREA
 0xE44C24, MMAP_$TRIM_WSL 0xE0C87C..0xE0C884); a constant count above
-65536 passes is a longword too (`move.l #n-1`; not seen).  **Best effort
+65536 passes is a longword too (`move.l #n-1`; not seen).  Under the
+MC68020 (`-cpu mathchip`) a longword count has no `dbf`: `subq.l #1,Dc;
+bcc` back to the head, the count's start the same (SAU6 PBU2_$WIRE
+0x78061C3E and 0x78061C2C, PBU2_$UNWIRE 0x780618BA, PBU2_$WIRE_MAP
+0x78061C58, PBU_$WIRE_SPECIAL 0x78061E2E, where the SAU5's same source
+has the `dbf` form; SAU9 ring_8025_probe 0x3C484FA2, an empty body;
+../source findings 935, 440; golden `m68020/long_for`).  **Best effort
 (not byte-identical)**:
 - the run-time guard is `to - from` (`from - to` for `downto`) into the
   count, then `blt` (`bcs` for an unsigned index; `tst; bmi` from a signed

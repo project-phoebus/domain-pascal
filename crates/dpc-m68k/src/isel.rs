@@ -11070,6 +11070,23 @@ impl Selector {
                 self.for_regs.retain(|&(o, _)| o != off);
             }
         }
+        if long && self.cpu.is_68020() {
+            // A longword count on the MC68020: counted down as a longword,
+            // no `dbf` (SAU6 PBU2_$WIRE 0x78061C3E `subq.l #1,D3; bcc.s`
+            // and 0x78061C2C, PBU2_$UNWIRE 0x780618BA, PBU2_$WIRE_MAP
+            // 0x78061C58, where the SAU5's same source has the `dbf` form
+            // below; SAU9 ring_8025_probe 0x3C484FA2, an empty body;
+            // ../source findings 935, 440).  The count's start is the
+            // `dbf` form's: the loop ends when it passes 0.
+            self.out.push(Insn::Subq {
+                size: Size::L,
+                value: 1,
+                dst: Ea::Reg(Reg::D(count)),
+            });
+            self.jump(Cond::Cc, head);
+            self.place(exit);
+            return Ok(());
+        }
         self.out.push(Insn::Dbf {
             reg: count,
             label: head,
