@@ -497,6 +497,85 @@ the effect rather than explaining it.
 The lesson for later rules here: a ratio for a condition means little until
 the same ratio is counted without the condition.
 
+### Step 4: colouring order, and recency (2026-11-05)
+
+**No colouring order explains the image's data registers.**
+`tools/coloursurvey.py` builds webs from real reaching definitions and
+liveness, colours them lowest-first in each order, and scores them against
+the registers used.  dpc is the control: it allocates lowest-free in
+first-definition order, and the tool has to show that.  Over the routines
+both have on SAU2 (no jump tables):
+
+| Order | Image, 11645 webs | dpc, 13638 webs |
+|---|---|---|
+| first definition | 0.479 | 0.843 |
+| value crossing a call first | 0.480 | 0.843 |
+| most definitions first | 0.478 | 0.781 |
+| longest first | 0.462 | 0.790 |
+| most uses first | 0.453 | 0.741 |
+| random | 0.401 | 0.588 |
+| simplify (Chaitin) | 0.381 | 0.531 |
+| latest first | 0.378 | 0.526 |
+
+The control holds, and it needed a fix to hold: the first version counted a
+value dying where another is defined as overlapping, and scored dpc 0.54.
+SAU9's image agrees (first definition 0.483).
+
+Decision by decision, in first-definition order and given the registers
+earlier webs really used, the lowest free register is the image's choice
+6628 times of 11645 (dpc 12360 of 13638).  Of the image's 5017 misses, a later
+overlapping value holds that register in 933, which an order could explain;
+in the other 4084 it is free over the value's whole range, which **no order
+can explain under lowest-first**.  Over all the misses, most pass over D0
+(for D1 1728, D2 766, D3 454), and a higher choice can cost a save.
+
+Ranges wider than liveness do not help.  First definition scores 0.480 with
+each web widened to its first-to-last interval, 0.380 through any loop it
+touches, 0.296 on to the next store, branch or call (as a stand-in for a
+statement's end).  These widen webs only; a variable whose register is held
+between two webs would need the original's variables, which the image does
+not show.
+
+**Recency predicts better than lowest free, but building it did not help.**
+`tools/getregsurvey.py` now scores the free register written most recently,
+with a call counting as a write of D1 and then D0:
+
+| | Lowest free | Newest write | Newest write, with calls |
+|---|---|---|---|
+| Image SAU2 | 0.555 | 0.633 | 0.656 |
+| Image SAU9 | 0.558 | 0.631 | 0.656 |
+| dpc SAU2 | 0.841 | 0.772 | 0.813 |
+
+Where lowest free and newest write with calls differ, the image's register
+is the newest write 1020 times, the lowest 427, neither 365 (SAU9 1130, 488,
+373; dpc 445, 637, 102).  This is the first policy to beat lowest free, and
+the direction is the opposite of R4's "least recently written" for address
+slot loads, which is a narrower case.  APP_$RECEIVE 0xE008B0..0xE008E6 shows
+it: D1 written last, the next block's two temporaries in D1, D0 free.
+
+Built into the allocator it is not an improvement, on SAU2 from 0.78368 with
+238 identical:
+
+| Variant | Mean | Identical | Up / down |
+|---|---|---|---|
+| data registers | 0.78264 | 237 | 107 / 170 |
+| and calls, and a value bound for a free physical register takes it | 0.78283 | 238 | 107 / 167 |
+| and D0 or D1 first when one is free | 0.78348 | 238 | 100 / 127 |
+| address registers, the same | 0.78097 | 231 | 94 / 252 |
+| both | 0.78009 | 231 | 150 / 313 |
+
+Some losses are clearly wrong for this policy: DMA_$CHECK 0xE0A3A6 reloads D0
+and then D1 in that order, where recency swaps them.  So recency is at best
+part of the mechanism, and the survey cannot tell it from the stack-like
+order nested expressions give anyway.  Marked Uncertain; nothing kept.
+
+So the state of the allocator question: dpc's rule is too rigid by a
+measured amount (84% against 55%), the image's choice is not a function of
+any order or simple recency, and a real share of it stays unexplained (365
+of 1812 differences take neither).  Variables held between webs are the
+hypothesis left to test, and ../source's translated Pascal gives candidate
+variables to test it on, with the caveat that those are reconstructions.
+
 ### Open questions
 
 - The colouring order (12.4 R1a) and the spill cost under pressure:
@@ -505,8 +584,9 @@ the same ratio is counted without the condition.
 - The remaining saved registers: A registers from `lea` and constants,
   D registers from copies, which look like values held longer (12.4 R4).
 - Why lowest free names only 55.5% of the image's data registers (dpc:
-  84.1%), and the order in which a colouring would visit values to give
-  that ("Step 4: the register a new value takes").
+  84.1%).  Not a colouring order, nor ranges widened as tried; recency
+  predicts better but does not pay when built ("Step 4: colouring order,
+  and recency").  Whether variables hold registers between webs is untested.
 - Whether A's cache and B's candidates are one structure.  Code
   generators of the period commonly kept a register descriptor (A) and
   added global allocation (B) on top; that is background, not evidence,

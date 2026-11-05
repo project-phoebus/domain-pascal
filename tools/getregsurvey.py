@@ -14,7 +14,7 @@ have had reasons the linear range does not show.
 
 Table 1: did the value take the lowest such register, by what that register
 last held.  Table 2: how often each selection policy names the register the
-value took.
+value took, and which of the two best took it where they differ.
 
 The ranges are linear, so a variable whose register is written again later
 on another path can look dead when it is not.  The counts bound the effect;
@@ -86,6 +86,7 @@ def is_call(m):
 
 def survey(rs, keep):
     held_tab = collections.Counter()
+    apart = collections.Counter()
     hits, total = collections.Counter(), 0
     for n, ins0 in rs.items():
         if keep is not None and n not in keep:
@@ -114,6 +115,7 @@ def survey(rs, keep):
             return False
 
         ent, held, lastdef, lastrd = {}, {}, {}, {}
+        lastcall = {}
         for k, (a, m, o) in enumerate(ins):
             if a in targets:
                 for r in list(ent):
@@ -123,6 +125,7 @@ def survey(rs, keep):
                 ent.clear()
                 for r in SCRATCH:
                     held[r] = 'call'
+                    lastcall[r] = k
                 continue
             rd, dst = rw[k]
             ops = cs.split_ops(o) if o else []
@@ -160,6 +163,14 @@ def survey(rs, keep):
                             'oldest use, ties lowest': min(dead, key=lambda x: (used(x), x)),
                             'never written, then lowest': min(dead, key=lambda x: (wrote(x) >= 0, x)),
                         }
+                        preds['newest write, ties lowest'] = max(dead, key=lambda x: (wrote(x), -int(x[2])))
+                        with_calls = lambda x: max(wrote(x), lastcall.get(x, -1))
+                        recent = max(dead, key=lambda x: (with_calls(x), -int(x[2])))
+                        preds['newest write, a call writes D0 last'] = recent
+                        if low != recent:
+                            apart['lowest'] += r == low
+                            apart['newest write'] += r == recent
+                            apart['neither'] += r not in (low, recent)
                         last = max(DREGS, key=wrote)
                         i = DREGS.index(last)
                         preds['next after the last written'] = next(
@@ -198,18 +209,19 @@ def survey(rs, keep):
                     ent[ops[1]] = ('load', k, ops[0])
                 elif is_reg(ops[0]) and cs.cacheable(ops[1]):
                     ent[ops[0]] = ('store', k, ops[1])
-    return held_tab, hits, total
+    return held_tab, hits, total, apart
 
 
 def main():
     rs = cs.parse(sys.argv[1])
     keep = set(open(sys.argv[2]).read().split()) if len(sys.argv) > 2 else None
-    held_tab, hits, total = survey(rs, keep)
+    held_tab, hits, total, apart = survey(rs, keep)
     for what in sorted({w for w, _ in held_tab}):
         print('%-28s lowest %5d  another %5d' % (what, held_tab[what, True], held_tab[what, False]))
     print()
     for p, h in hits.items():
-        print('%-30s %5d / %5d  %.3f' % (p, h, total, h / total))
+        print('%-38s %5d / %5d  %.3f' % (p, h, total, h / total))
+    print('where lowest free and newest write differ:', dict(apart))
 
 
 if __name__ == '__main__':
