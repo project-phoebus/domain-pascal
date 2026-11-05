@@ -409,8 +409,6 @@ movea.l (0x1e8,%a5),%a0
 lsl.w #3,%d4
 lea (0,%a0,%d4.w),%a0
 lea (0x18c,%a0),%a0
-move.l %a0,(-4,%fp)
-movea.l (-4,%fp),%a0
 move.l %d3,(%a0)
 lea (0,%a5,%d4.w),%a0
 move.l (0x1c4,%a0),-(%sp)
@@ -421,7 +419,7 @@ rts
 .globl BH_M_$FAR
 BH_M_$FAR:
 link.w %fp,#-4
-movem.l %d2-%d4/%a5,-(%sp)
+movem.l %d2-%d4/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d2
 move.w (0xa,%fp),%d3
@@ -432,19 +430,17 @@ move.w #7,(0x1ec,%a0)
 lea (0x1ec,%a5),%a0
 move.l %a0,%d0
 subi.l #0x1ff80,%d0
-move.l %d0,(-4,%fp)
-movea.l (-4,%fp),%a0
-lea (0,%a0,%d4.w),%a1
-adda.l #0x1ff80,%a1
+movea.l %d0,%a2
+lea (0,%a2,%d4.w),%a0
+adda.l #0x1ff80,%a0
 clr.l %d0
-move.w (%a1),%d0
+move.w (%a0),%d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.w %d2,%d4
-movea.l (-4,%fp),%a0
 add.w %d4,%d4
-lea (0,%a0,%d4.w),%a0
+lea (0,%a2,%d4.w),%a0
 adda.l #0x1ff80,%a0
 move.w %d3,(%a0)
 lea (0,%a5,%d4.w),%a0
@@ -452,13 +448,13 @@ clr.l %d0
 move.w (0x1ec,%a0),%d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
-movem.l (-0x14,%fp),%d2-%d4/%a5
+movem.l (-0x18,%fp),%d2-%d4/%a2/%a5
 unlk %fp
 rts
 .globl BH_M_$ADDC
 BH_M_$ADDC:
 link.w %fp,#-4
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.l (8,%fp),%d0
 move.l %d0,(0x40,%a5)
@@ -468,27 +464,24 @@ move.l %d1,(0x48,%a5)
 lea (0x38,%a5),%a0
 move.l %a0,%d0
 addi.l #8,%d0
-move.l %d0,(-4,%fp)
-movea.l (-4,%fp),%a0
-move.l (%a0),-(%sp)
+movea.l %d0,%a2
+move.l (%a2),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 lea (0x38,%a5),%a0
 move.l %a0,%d0
 addi.l #0x10,%d0
-move.l %d0,(-4,%fp)
-movea.l (-4,%fp),%a0
-move.l (%a0),-(%sp)
+movea.l %d0,%a2
+move.l (%a2),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 lea (0x50,%a5),%a0
 move.l %a0,%d0
 subi.l #0x10,%d0
-move.l %d0,(-4,%fp)
-movea.l (-4,%fp),%a0
-move.l (%a0),-(%sp)
+movea.l %d0,%a2
+move.l (%a2),-(%sp)
 jsr (EXEC_$LOGV_L).l
-movea.l (-8,%fp),%a5
+movem.l (-0xc,%fp),%a2/%a5
 unlk %fp
 rts
 .globl BH_M_$WIDE

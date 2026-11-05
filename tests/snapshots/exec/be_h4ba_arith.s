@@ -168,32 +168,29 @@ rts
 .globl BH_A_$DIVP
 BH_A_$DIVP:
 link.w %fp,#-8
-movem.l %d2-%d3/%a5,-(%sp)
+movem.l %d2-%d3/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d2
 move.w (0xa,%fp),%d0
 move.w %d0,(0x1504,%a5)
-lea (0x1504,%a5),%a0
-move.l %a0,(-4,%fp)
+lea (0x1504,%a5),%a2
 move.w %d2,%d3
-movea.l (-4,%fp),%a0
 ext.l %d3
-divs.w (%a0),%d3
+divs.w (%a2),%d3
 move.w %d3,(-6,%fp)
 subq.l #2,%sp
 move.w %d3,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 move.w %d2,%d3
-movea.l (-4,%fp),%a0
 ext.l %d3
-divs.w (%a0),%d3
+divs.w (%a2),%d3
 swap %d3
 move.w %d3,(-6,%fp)
 subq.l #2,%sp
 move.w %d3,-(%sp)
 jsr (EXEC_$LOGV_W).l
-movem.l (-0x14,%fp),%d2-%d3/%a5
+movem.l (-0x18,%fp),%d2-%d3/%a2/%a5
 unlk %fp
 rts
 .globl BH_A_$UMAX

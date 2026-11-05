@@ -119,20 +119,19 @@ rts
 .globl BX_PUSH_$ADDRSYM
 BX_PUSH_$ADDRSYM:
 link.w %fp,#-4
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 pea (.Lc0,%pc)
 bsr.s KEEPIN
 addq.w #4,%sp
-move.l (0x10,%a5),(-4,%fp)
-move.l (-4,%fp),-(%sp)
+movea.l (0x10,%a5),%a2
+pea (%a2)
 jsr (EXEC_$LOG_W).l
 addq.w #4,%sp
-movea.l (-4,%fp),%a0
-move.w #0x2c,(%a0)
+move.w #0x2c,(%a2)
 move.l #EB_$K,-(%sp)
 jsr (EXEC_$LOG_W).l
-movea.l (-8,%fp),%a5
+movem.l (-0xc,%fp),%a2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048

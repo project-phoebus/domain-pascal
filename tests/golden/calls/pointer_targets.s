@@ -53,6 +53,13 @@ bsr.s PUT_TWO
 1:
 unlk %fp
 rts
+FORGET:
+link.w %fp,#-4
+movea.l (%fp),%a0
+clr.l (-4,%a0)
+clr.l (-8,%a0)
+unlk %fp
+rts
 .globl PTARGETS_$LOCAL
 PTARGETS_$LOCAL:
 link.w %fp,#-8

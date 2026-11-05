@@ -8,14 +8,11 @@ move.w (8,%fp),%d0
 move.l (0xa,%fp),%d1
 move.l %d1,(8,%a5)
 lea (8,%a5),%a0
-move.l %a0,(-8,%fp)
 move.w %d0,%d1
-movea.l (-8,%fp),%a0
 move.w %d1,%d0
 ext.l %d0
 cmp.l (%a0),%d0
 bge.s 1f
-movea.l (-8,%fp),%a0
 move.w (2,%a0),%d1
 1:
 move.w %d1,%d0

@@ -110,17 +110,16 @@ rts
 .globl PTARGETS_$LOCAL
 PTARGETS_$LOCAL:
 link.w %fp,#-8
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.l (0xc,%a5),(-4,%fp)
-move.l (-4,%fp),-(%sp)
+movea.l (0xc,%a5),%a2
+pea (%a2)
 bsr.w BUMP
 addq.w #4,%sp
-move.l (0x18,%a5),(-8,%fp)
-movea.l (-8,%fp),%a0
-pea (6,%a0)
+movea.l (0x18,%a5),%a2
+pea (6,%a2)
 bsr.w BUMP
-movea.l (-0xc,%fp),%a5
+movem.l (-0x10,%fp),%a2/%a5
 unlk %fp
 rts
 .globl PTARGETS_$STATIC

@@ -74,6 +74,12 @@ move.w %d1,(0xc,%a2)
 movea.l (-8,%fp),%a2
 unlk %fp
 rts
+FORGET:
+link.w %fp,#-4
+movea.l (%fp),%a0
+clr.l (-4,%a0)
+unlk %fp
+rts
 .globl ADDRARGS_$WAIT_LOCAL
 ADDRARGS_$WAIT_LOCAL:
 link.w %fp,#-8

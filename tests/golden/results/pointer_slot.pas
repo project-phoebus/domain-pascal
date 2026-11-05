@@ -17,8 +17,8 @@
   - out_local: a local in its frame slot (its address passed to a call),
     copied into the result slot and reloaded (MST_$MAP_AREA 0xE43BF0
     `move.l (-0x14,A6),(-0x20,A6)', 0xE43BF6);
-  - framed: `nil' on two paths and a local that dpc keeps in its frame
-    slot (tested and dereferenced) on the third: found in the frame when
+  - framed: `nil' on two paths and a local in its frame slot (a nested
+    routine reaches it; tested and dereferenced) on the third: found in the frame when
     the local's assignment is selected, the body selected again with the
     result slot, `clr.l' and `move.l (-4,A6),(-8,A6)' (the shape of
     NET_$FIND_HANDLER 0xE5A178 and MST_$MAP_AREA 0xE43BF0; whether the
@@ -91,6 +91,7 @@ end;
 function framed(k: integer; var status: status_$t): rec_ptr; val_param;
 var
   p: rec_ptr;
+  procedure forget; begin p := nil; end;
 begin
   p := tab[k];
   if p = nil then begin

@@ -15466,11 +15466,10 @@ against the C in `../source`:
   KBD_$PUT's descriptor in A2 from 0xE1CEC6); `dpc` holds those
   assigned from pointer functions in an address register (section 3,
   "Pointer locals"; bead domain-pascal-500) and those of loops (below);
-  any other pointer local that is dereferenced stays in the frame in
-  MC68010 code, and is held in an address register under `-cpu mathchip`
-  (section 14, "Pointer locals in registers"; best effort, bead
-  domain-pascal-jqp0).
-  That is a known divergence (bead domain-pascal-dgb review): an ad-hoc
+  the others by "Pointer locals, both CPUs" (below; the earlier MC68010
+  rule, that any other dereferenced pointer local stays in the frame, is
+  refuted by ../source's survey of 2026-11-04).
+  The earlier count (bead domain-pascal-dgb review): an ad-hoc
   count over compiled code finds 186 `movea.l <memory>,An` (A2..A4, not
   a parameter slot, not a call's A0) whose register is dereferenced
   after a later call, against 26 longwords stored from memory into a
@@ -15667,8 +15666,8 @@ whole assignments, the first of them an assignment of a non-constant
 value by a statement of the routine's own statement part, another
 assignment inside a loop, and the body makes no call (fitted to
 0xE3CCCE; **Uncertain**).  Every assignment writes that register, a load
-straight into it.  Other pointer locals stay in the frame in MC68010
-code (section 14 for MC68020).  Unit test
+straight into it.  Other pointer locals: "Pointer locals, both CPUs"
+(below).  Unit test
 `loop_pointer_local_rule`; golden `tests/golden/loops/while` (`whl_$walk`);
 conformance `tests/conformance/disk_set_chain_status.pas`.
 
@@ -15703,6 +15702,58 @@ or taken (`escaped_frame_objects`).  Driver test
 `stored_local_not_forwarded_past_a_possible_overwrite`; conformance
 `tests/conformance/pkt_next_id.pas`.  Other reads of a stored local load
 it from its slot, as before.
+
+**Pointer locals, both CPUs (Verified by survey, 2026-11-04; implemented,
+`isel.rs` `free_pointer_locals`).**  ../source's survey of the SAU2 and
+SAU9 images against its translation (`../source/docs/register-allocation-
+survey.md`; per-local corpus in ../source `tmp/regalloc/corpus.json`):
+the image holds a pointer local in a register for the whole body, its
+slot still allocated, under the same rule as a data local and on both
+CPUs: 227 of 252 SAU2 pointer locals (90.1%), 216 of 236 SAU9 (91.5%),
+against 25.8% for `dpc`'s earlier SAU2 rule.  Held: a 4-byte pointer
+local never addressed, read in part or reached by a nested routine,
+first referenced by an assignment, whatever it is assigned and however
+it is read (dereferenced or not, compared, copied, pushed, read as
+`integer32(p)`).  In the frame:
+
+- (a) every read a call's argument pushed, the value or `p^` by address
+  (LOG_$SHUTDN 0xE175AE `move.l (20,A5),(-4,A6)`, a call, `move.l
+  (-4,A6),-(SP)`; TERM_$INIT 0xE32EBA `dtte_p`, 11 reads all `dtte_p^`;
+  SAU9 MONO9_$BLINK_CURSOR, pushed by value by the next statement;
+  PKT_$COPY_TO_PA 0xE12538 and MAC_OS_$PUT_INFO 0xE0C322, assigned from a
+  slot, `move.l (8,A6),(d,A6)`), except one assigned once, not from a
+  slot, and read once as `p^` by address by the next statement, which
+  the image keeps in its register (TIME_$ADVANCE_CALLBACK 0xE16440
+  `movea.l (8,A1),A2; pea (A2); jsr`, TIME_$CANCEL 0xE164E0;
+  `forwarded_push`, **Uncertain**, two sites each way);
+- (b) a routine pointer called through (NET_$OPEN 0xE5A1A4 `handler`
+  and its four siblings, `movea.l A0,(-4,A6)` then `jsr (A0)`; 5 of 6,
+  DXM_$SCAN_QUEUE 0xE17168 holds its `callback` in D2).  `dpc` types a
+  routine pointer as a data scalar, which the data rule above already
+  gives the image's form at all six (NET_'s in the frame, DXM's in D2;
+  keeping DXM's in the frame too measured worse); the check in
+  `free_pointer_locals` covers a pointer-typed local called through.
+
+Held through a call whose arguments read it last, in a body with
+branches too, as pointer locals assigned from calls are (12.4 R4(c);
+TIME_$CANCEL 0xE164E0 `pea (A2)` in an `if` part; **Uncertain**).  Where
+the body does not colour (the image keeps some such locals in their
+slots under pressure: MAC_OS_$OPEN 0xE0B246, LOG_$ADD 0xE1763E `buf`,
+AST_$RESERVE 0xE0677E `aote`), the one with the fewest reads goes back
+to its slot, then the next, as long as that lets the body colour, else
+none and the values are spilled as before (**best effort**: on SAU2 a
+spilled pointer has fewer references than a kept one 33 times against
+13; the image's choice is not found).  An address register for all of
+them (**best effort**: 11% of SAU2's held pointer locals are in data
+registers, AREA_$FREE_ASID 0xE07E80 `next` in D2; the register numbers
+are 12.4's).  Not modelled: a local first referenced other than by an
+assignment (TTY_$K_GET `buf_ptr`, A0 on SAU9); the frame-cached form (a
+slot a callee wrote, loaded once and kept, MSG_$SARI 0xE59DD4 `sock_num`
+in D4).  Measured over ../source (096ca5c7) with `routine_compare.py`
+(1216 SAU2 routines, 1304 SAU9): mean similarity 0.7684 -> 0.7804 on
+SAU2 (254 routines up, 30 down, most of the downs relocation and filler
+artefacts), 0.7696 -> 0.7704 on SAU9; `movea.l (-n,A6),An` reloads in
+the SAU2 objects 3952 -> about 900 (the image: 959).
 
 **Address-taken locals (audit, bead domain-pascal-pe9).**  Neither rule
 holds a local whose address the body passes or takes: an argument passed
@@ -16850,6 +16901,10 @@ allocated (12.5).  The SAU9 SCSI module's code goes from 12844 to 11732
 bytes with it (the image's is 9792), and the sau9 tree's from 504988 to
 488064, with no new refusal.  No golden (best effort); the forms are
 those of section 3's call-assigned locals (golden `results/pointer_locals`).
+**Superseded (2026-11-04):** the rule now applies on both CPUs, widened
+by ../source's survey (section 12.5, "Pointer locals, both CPUs"): no
+dereference needed, any whole read allowed, with the two frame
+exceptions there.
 
 ### One-byte packed records: `[byte]` (Uncertain: owner question 52; implemented, bead domain-pascal-7kpw)
 

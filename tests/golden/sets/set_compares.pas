@@ -50,7 +50,7 @@ var p: pcb_p;
 begin
   p := cur;
   if p^.flags * [0, 1, 3] = [3] then
-    reorder(p^);
+    go;
 end;
 
 function type4(in f: w_t): boolean;

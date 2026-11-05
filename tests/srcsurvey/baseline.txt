@@ -62,7 +62,7 @@ OK	acl/acl.pas	acl_$get_local_locksmith
 STUB	acl/acl.pas	acl_$override_local_locksmith
 STUB	acl/acl.pas	acl_$used_suser
 STUB	acl/acl.pas	acl_$copy
-MISMATCH	acl/acl.pas	acl_$server
+STUB	acl/acl.pas	acl_$server
 STUB	acl/acl.pas	acl_$alloc_asid
 STUB	acl/acl.pas	acl_$get_sid
 STUB	acl/acl.pas	acl_$free_asid
@@ -234,7 +234,7 @@ STUB	cal/os_cal_unwired.pas	cal_$weekday
 STUB	cal/os_cal_unwired.pas	cal_$decode_time
 MISMATCH	cal/os_cal_wired.pas	cal_$read_timezone
 STUB	cal/os_cal_wired.pas	cal_$write_timezone
-MISMATCH	cal/os_cal_wired.pas	cal_$shutdown
+OK	cal/os_cal_wired.pas	cal_$shutdown
 ABSENT	color/color.pas	color_$video_ctl
 ABSENT	color/color.pas	color_$cold_init
 ABSENT	color/color.pas	color_$int_init
@@ -284,8 +284,8 @@ ABSENT	ct/ct.pas	reset_drive
 ABSENT	ct/ct.pas	do_ctl_cmd
 ABSENT	ct/ct.pas	ct_transfer
 ABSENT	ct/ct.pas	ct_$int
-STUB	dbuf/dbuf.pas	dbuf_$get_block
-STUB	dbuf/dbuf.pas	dbuf_$set_buff
+MISMATCH	dbuf/dbuf.pas	dbuf_$get_block
+MISMATCH	dbuf/dbuf.pas	dbuf_$set_buff
 MISMATCH	dbuf/dbuf.pas	dbuf_$invalidate
 MISMATCH	dbuf/dbuf.pas	dbuf_$update_vol
 STUB	dbuf/dbuf.pas	dbuf_$init
@@ -426,7 +426,7 @@ STUB	dir/old_dir.pas	dir_$old_add_baku
 OK	dir/old_dir.pas	dir_$old_delete_fileu
 STUB	dir/old_dir.pas	dir_$old_create_diru
 STUB	dir/old_dir.pas	dir_$old_drop_diru
-MISMATCH	dir/old_dir.pas	dir_$old_cnameu
+STUB	dir/old_dir.pas	dir_$old_cnameu
 MISMATCH	dir/old_dir.pas	dir_$old_add_linku
 STUB	dir/old_dir.pas	dir_$old_read_linku
 OK	dir/old_dir.pas	dir_$old_drop_linku
@@ -512,7 +512,7 @@ OK	dxm/dxm.pas	dxm_$helper_wired
 OK	dxm/dxm.pas	dxm_$helper_unwired
 OK	dxm/dxm.pas	dxm_$add_signal
 OK	dxm/dxm.pas	dxm_$init
-STUB	dxm/dxm.pas	dxm_$add_signal_callback
+MISMATCH	dxm/dxm.pas	dxm_$add_signal_callback
 STUB	ec/ec2.pas	ec2_$wait
 STUB	ec/ec2.pas	ec2_$wakeup
 STUB	ec/ec2.pas	ec2_$register_ec1
@@ -976,7 +976,7 @@ OK	net_io/net_io.pas	net_io_$put_in_sock_int
 STUB	net_io/net_io.pas	net_io_$copy_packet
 STUB	net_io/net_io.pas	net_io_$send
 STUB	net_io/net_io_unwired.pas	net_io_$boot_device
-MISMATCH	net_io/net_io_unwired.pas	net_io_$init
+OK	net_io/net_io_unwired.pas	net_io_$init
 STUB	net_io/net_io_unwired.pas	net_io_$device_stat
 STUB	net_io/net_io_unwired.pas	net_io_$device_stat2
 STUB	net_io/net_io_unwired.pas	net_io_$create_port
@@ -988,7 +988,7 @@ STUB	netbuf/netbuf.pas	netbuf_$add_pages
 STUB	netbuf/netbuf.pas	netbuf_$del_pages
 STUB	netbuf/netbuf.pas	netbuf_$getva
 OK	netbuf/netbuf.pas	netbuf_$rtnva
-STUB	netbuf/netbuf.pas	netbuf_$get_hdr_cond
+MISMATCH	netbuf/netbuf.pas	netbuf_$get_hdr_cond
 STUB	netbuf/netbuf.pas	netbuf_$get_hdr
 MISMATCH	netbuf/netbuf.pas	netbuf_$rtn_hdr
 STUB	netbuf/netbuf.pas	netbuf_$get_dat_cond
@@ -1052,7 +1052,7 @@ STUB	pacct/pacct.pas	pacct_$clock_to_comp
 STUB	pacct/pacct.pas	pacct_$log
 STUB	parity/parity.pas	parity_$chk
 MISMATCH	parity/parity.pas	parity_$chk_io
-STUB	pbu/ec2_pbu.pas	pbu_$advance_ec_int
+SETUP	pbu/ec2_pbu.pas	pbu_$advance_ec_int
 ABSENT	pbu/pbu.pas	pbu_check_unit
 ABSENT	pbu/pbu.pas	pbu_$acquire_int
 ABSENT	pbu/pbu.pas	pbu_$alloc
@@ -1115,10 +1115,10 @@ MISMATCH	peb/peb_unwired.pas	peb_$assoc
 MISMATCH	peb/peb_unwired.pas	peb_$dissoc
 MISMATCH	peb/peb_unwired.pas	peb_$get_status
 MISMATCH	peb/peb_unwired.pas	peb_$load_regs
-STUB	peb/peb_unwired.pas	peb_$unload_regs
+MISMATCH	peb/peb_unwired.pas	peb_$unload_regs
 OK	peb/peb_unwired.pas	peb_$get_fp
 OK	peb/peb_unwired.pas	peb_$put_fp
-STUB	peb/peb_wired.pas	peb_$touch
+MISMATCH	peb/peb_wired.pas	peb_$touch
 STUB	peb/peb_wired.pas	peb_$cleanup_internal
 MISMATCH	peb/peb_wired.pas	peb_$proc_cleanup
 OK	peb/peb_wired.pas	peb_$get_info
@@ -1151,14 +1151,14 @@ MISMATCH	pmap/pmap.pas	pmap_$init_ws_scan
 OK	pmap/pmap.pas	pmap_$purge_ws
 STUB	pmap/pmap.pas	pmap_$init_timers
 OK	proc1/proc1.pas	proc1_$try_to_suspend
-MISMATCH	proc1/proc1.pas	proc1_$resume
+OK	proc1/proc1.pas	proc1_$resume
 MISMATCH	proc1/proc1.pas	proc1_$suspend
 MISMATCH	proc1/proc1.pas	proc1_$suspendp
 OK	proc1/proc1.pas	proc1_$tst_lock
 OK	proc1/proc1.pas	proc1_$get_locks
 OK	proc1/proc1.pas	proc1_$set_asid
-MISMATCH	proc1/proc1.pas	proc1_$vt_int
-STUB	proc1/proc1.pas	proc1_$set_vt
+OK	proc1/proc1.pas	proc1_$vt_int
+MISMATCH	proc1/proc1.pas	proc1_$set_vt
 MISMATCH	proc1/proc1.pas	proc1_$set_ts
 MISMATCH	proc1/proc1.pas	proc1_$ts_end_callback
 MISMATCH	proc1/proc1.pas	proc1_$init_ts_timer
@@ -1166,7 +1166,7 @@ OK	proc1/proc1.pas	proc1_$get_loadav
 STUB	proc1/proc1.pas	proc1_$loadav_callback
 STUB	proc1/proc1.pas	proc1_$init_loadav
 STUB	proc1/proc1.pas	proc1_$bind
-STUB	proc1/proc1.pas	proc1_$unbind
+MISMATCH	proc1/proc1.pas	proc1_$unbind
 STUB	proc1/proc1.pas	proc1_$get_info
 STUB	proc1/proc1.pas	proc1_$alloc_stack
 MISMATCH	proc1/proc1.pas	proc1_$free_stack
@@ -1174,7 +1174,7 @@ STUB	proc1/proc1.pas	proc1_$create_p
 OK	proc1/proc1.pas	ec_$init
 OK	proc1/proc1.pas	ec_$read
 STUB	proc1/proc1.pas	proc1_$clamp_priority
-STUB	proc1/proc1.pas	proc1_$set_priority
+MISMATCH	proc1/proc1.pas	proc1_$set_priority
 MISMATCH	proc1/proc1.pas	proc1_$set_type
 MISMATCH	proc1/proc1.pas	proc1_$get_type
 STUB	proc1/proc1.pas	proc1_$get_list
@@ -1513,7 +1513,7 @@ MISMATCH	smd/smd.pas	smd_$reset_display_globals
 MISMATCH	smd/smd.pas	smd_$assoc
 STUB	smd/smd.pas	smd_$alloc_hdm
 STUB	smd/smd.pas	smd_$free_hdm
-STUB	smd/smd.pas	smd_$load_font
+MISMATCH	smd/smd.pas	smd_$load_font
 STUB	smd/smd.pas	smd_$unload_font
 STUB	smd/smd.pas	smd_$invert_s
 MISMATCH	smd/smd.pas	smd_$inq_disp_type
@@ -1539,7 +1539,7 @@ OK	smd/smd.pas	smd_$set_cursor_pos
 MISMATCH	smd/smd.pas	smd_$set_unit_cursor_pos
 OK	smd/smd.pas	smd_$move_kbd_cursor
 MISMATCH	smd/smd.pas	smd_$clear_kbd_cursor
-STUB	smd/smd.pas	smd_$poll_keyboard
+MISMATCH	smd/smd.pas	smd_$poll_keyboard
 MISMATCH	smd/smd.pas	smd_$enqueue_event
 OK	smd/smd.pas	smd_$set_tp_cursor
 STUB	smd/smd.pas	smd_$loc_event
@@ -1589,13 +1589,13 @@ STUB	smd/smd.pas	smd_$inq_disp_info
 STUB	smd/smd.pas	smd_$display_logo
 STUB	smd/smd.pas	smd_$reschedule_blink_timer
 STUB	smd/smd.pas	smd_$free_asid
-MISMATCH	sock/sock.pas	sock_$open
+STUB	sock/sock.pas	sock_$open
 MISMATCH	sock/sock.pas	sock_$allocate
 MISMATCH	sock/sock.pas	sock_$allocate_user
 MISMATCH	sock/sock.pas	sock_$close
 STUB	sock/sock.pas	sock_$get
 MISMATCH	sock/sock.pas	sock_$put
-STUB	sock/sock.pas	sock_$put_int
+MISMATCH	sock/sock.pas	sock_$put_int
 STUB	sock/sock.pas	sock_$put_int_int
 STUB	sock/sock.pas	sock_$init
 STUB	suma/suma.pas	suma_$rcv
@@ -1607,7 +1607,7 @@ ABSENT	sysbus/atbus_.pas	sysbus_$enable_device
 ABSENT	sysbus/atbus_.pas	sysbus_$disable_device
 ABSENT	sysbus/atbus_.pas	sysbus_$device_interrupting
 ABSENT	sysbus/atbus_.pas	sysbus_$clear_pending
-MISMATCH	sysbus/atbus_.pas	sysbus_$init
+OK	sysbus/atbus_.pas	sysbus_$init
 MISMATCH	sysbus/atbus_.pas	disk_interrupt
 MISMATCH	sysbus/atbus_.pas	ring_interrupt
 OK	tape/tape.pas	tape_$boot
@@ -1652,7 +1652,7 @@ MISMATCH	time/time.pas	time_$set_time_of_day
 STUB	time/time.pas	time_$adjust_time_of_day
 OK	time/time.pas	time_$get_adjust
 STUB	time/time.pas	time_$init
-MISMATCH	time/time_q_.pas	time_$q_insert_sorted
+STUB	time/time_q_.pas	time_$q_insert_sorted
 STUB	time/time_q_.pas	time_$q_remove_internal
 STUB	time/time_q_.pas	time_$q_setup_timer
 OK	time/time_q_.pas	time_$q_init
@@ -1719,7 +1719,7 @@ STUB	tty/tty.pas	tty_$k_simulate_terminal_input
 STUB	tty/tty.pas	tty_$i_wait
 STUB	tty/tty.pas	tty_$k_get
 STUB	tty/tty.pas	tty_$i_init
-STUB	tty/tty.pas	tty_$i_dxm_signal
+MISMATCH	tty/tty.pas	tty_$i_dxm_signal
 STUB	tty/tty.pas	tty_$i_set_funcs
 OK	tty/tty.pas	tty_$i_set_dfl_funcs
 MISMATCH	tty/tty.pas	tty_$i_enable_crash_func
@@ -1784,11 +1784,11 @@ STUB	vtoc/vtoc.pas	vtoc_$get_uid
 STUB	vtoc/vtoc.pas	vtoc_$get_name_dirs
 MISMATCH	vtoc/vtoc.pas	vtoc_$set_name_dirs
 STUB	vtoc/vtoc.pas	vtoce_$read
-STUB	vtoc/vtoc.pas	vtoce_$write
+MISMATCH	vtoc/vtoc.pas	vtoce_$write
 STUB	vtoc/vtoc.pas	vtoce_$lookup_fm
 STUB	vtoc/vtoc.pas	vtoce_$truncate
 STUB	vtoc/vtoc.pas	fm_$read
-STUB	vtoc/vtoc.pas	fm_$write
+MISMATCH	vtoc/vtoc.pas	fm_$write
 STUB	win/win.pas	win_$check_disk_status
 ABSENT	win/win.pas	win_$ecc_correct
 ABSENT	win/win.pas	win_$command
@@ -1840,7 +1840,7 @@ STUB	xns/xns_idp.pas	xns_idp_$os_send
 STUB	xns/xns_idp.pas	xns_idp_$os_demux
 OK	xns/xns_idp.pas	xns_idp_$os_add_port
 OK	xns/xns_idp.pas	xns_idp_$os_delete_port
-STUB	xns/xns_idp.pas	xns_idp_$open
+MISMATCH	xns/xns_idp.pas	xns_idp_$open
 STUB	xns/xns_idp.pas	xns_idp_$close
 STUB	xns/xns_idp.pas	xns_idp_$send
 STUB	xns/xns_idp.pas	xns_idp_$demux

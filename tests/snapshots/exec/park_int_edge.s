@@ -103,6 +103,7 @@ rts
 .globl PARK_INT_EDGE_$VIAD0
 PARK_INT_EDGE_$VIAD0:
 link.w %fp,#-8
+pea (%a2)
 move.l (0xc,%fp),-(%sp)
 pea (8,%fp)
 jsr (PARK_INT_$GETD).l
@@ -112,11 +113,11 @@ jsr (EXEC_$CLOBBER).l
 pea (-4,%fp)
 jsr (EXEC_$ID_L).l
 addq.w #4,%sp
-move.l %d0,(-8,%fp)
+movea.l %d0,%a2
 jsr (EXEC_$CLOBBER).l
-movea.l (-8,%fp),%a0
-move.l (%a0),-(%sp)
+move.l (%a2),-(%sp)
 jsr (EXEC_$LOGV_L).l
+movea.l (-0xc,%fp),%a2
 unlk %fp
 rts
 .globl PARK_INT_EDGE_$A0LOOP

@@ -12,11 +12,8 @@ movea.l #BU_$BLKS,%a0
 add.w %d0,%d1
 lea (0,%a0,%d1.w),%a1
 lea (-0xf8,%a1),%a0
-move.l %a0,(-4,%fp)
-movea.l (-4,%fp),%a0
-movea.l (-4,%fp),%a1
 move.l (%a0),%d0
-add.l (0xf4,%a1),%d0
+add.l (0xf4,%a0),%d0
 unlk %fp
 rts
 .globl BU_$ADDR_THRU
@@ -32,9 +29,7 @@ movea.l (BU_$BP).l,%a0
 add.w %d0,%d1
 lea (0,%a0,%d1.w),%a0
 lea (-0xf8,%a0),%a1
-move.l %a1,(-4,%fp)
-movea.l (-4,%fp),%a0
-move.l (0xf4,%a0),%d0
+move.l (0xf4,%a1),%d0
 unlk %fp
 rts
 .globl BU_$ADDR_STORE
@@ -321,13 +316,13 @@ rts
 .globl BU_$PRESULT
 BU_$PRESULT:
 link.w %fp,#-0x14
-movem.l %d2/%a5,-(%sp)
+movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 clr.l %d2
 bsr.w OWN_STATIC
-move.l %a0,(-8,%fp)
-move.l (-8,%fp),%d0
+movea.l %a0,%a2
 lea (%a5),%a0
+move.l %a2,%d0
 move.l %a0,%d1
 cmp.l %d1,%d0
 bne.s 1f
@@ -337,26 +332,26 @@ subq.l #2,%sp
 move.w (8,%fp),-(%sp)
 bsr.w ELEM_OF
 addq.w #4,%sp
-move.l %a0,(-4,%fp)
-add.l (0xf4,%a0),%d2
-move.l (-4,%fp),-(%sp)
+movea.l %a0,%a2
+add.l (0xf4,%a2),%d2
+pea (%a2)
 bsr.s SAME_PTR
 addq.w #4,%sp
-move.l %a0,(-8,%fp)
-add.l (%a0),%d2
-move.l (-8,%fp),-(%sp)
+movea.l %a0,%a2
+add.l (%a2),%d2
+pea (%a2)
 bsr.s NEXT_BLK
 addq.w #4,%sp
-move.l %a0,(-4,%fp)
-add.l (%a0),%d2
+movea.l %a0,%a2
 lea (0x1c,%a5),%a0
+add.l (%a2),%d2
 move.l %a0,(0xc,%a5)
 move.l #0x3e8,(0x20,%a5)
 pea (0xc,%a5)
 bsr.s FIELD_OF
 add.l (4,%a0),%d2
 move.l %d2,%d0
-movem.l (-0x1c,%fp),%d2/%a5
+movem.l (-0x20,%fp),%d2/%a2/%a5
 unlk %fp
 rts
 .globl CK
@@ -382,7 +377,7 @@ rts
 .globl BU_$CALLCMP
 BU_$CALLCMP:
 link.w %fp,#-0x10
-movem.l %d2-%d4/%a5,-(%sp)
+movem.l %d2-%d4/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d2
 move.l (0xa,%fp),%d0
@@ -402,8 +397,7 @@ move.l %a0,(0x3c,%a5)
 lea (0xc,%a5),%a0
 move.l %a0,(0x40,%a5)
 move.w %d0,(-2,%fp)
-lea (-2,%fp),%a0
-move.l %a0,(-8,%fp)
+lea (-2,%fp),%a2
 clr.w %d3
 tst.w %d2
 ble.s 4f
@@ -412,11 +406,10 @@ move.w %d2,-(%sp)
 bsr.w CK
 addq.w #4,%sp
 move.w %d0,%d1
-movea.l (-8,%fp),%a0
 ext.l %d1
 move.l %d1,%d0
 clr.l %d1
-move.w (%a0),%d1
+move.w (%a2),%d1
 cmp.l %d1,%d0
 sne %d4
 tst.b %d4
@@ -463,11 +456,10 @@ move.w %d2,-(%sp)
 bsr.w CK
 addq.w #4,%sp
 move.w %d0,%d1
-movea.l (-8,%fp),%a0
 ext.l %d1
 move.l %d1,%d0
 clr.l %d1
-move.w (%a0),%d1
+move.w (%a2),%d1
 cmp.l %d1,%d0
 sne %d2
 tst.b %d2
@@ -475,7 +467,7 @@ bpl.s 8f
 addi.w #0x3e8,%d3
 8:
 move.w %d3,%d0
-movem.l (-0x20,%fp),%d2-%d4/%a5
+movem.l (-0x24,%fp),%d2-%d4/%a2/%a5
 unlk %fp
 rts
 .globl BU_$INSET
@@ -487,7 +479,6 @@ move.w (8,%fp),%d0
 move.w #-0x7ff6,%d1
 move.w #0x81,(0x48,%a5)
 lea (0x48,%a5),%a0
-move.l %a0,(-8,%fp)
 clr.w %d2
 moveq #0xf,%d3
 cmp.w %d0,%d3
@@ -516,7 +507,6 @@ addi.w #0x64,%d2
 moveq #0xf,%d1
 cmp.w %d0,%d1
 bcs.s 6f
-movea.l (-8,%fp),%a0
 move.w (%a0),%d1
 btst %d0,%d1
 bls.s 6f

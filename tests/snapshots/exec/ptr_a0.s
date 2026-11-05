@@ -220,8 +220,6 @@ move.l (0xc,%fp),-(%sp)
 pea (8,%fp)
 jsr (PARK_INT_$GETD).l
 lea (4,%a5),%a1
-move.l %a1,(-8,%fp)
-movea.l (-8,%fp),%a1
 move.l (%a0),(%a1)
 movea.l (-0xc,%fp),%a5
 unlk %fp
@@ -482,10 +480,8 @@ lea (.Ldata).l,%a5
 move.l (0xc,%fp),-(%sp)
 pea (8,%fp)
 jsr (PARK_INT_$GETD).l
-move.l (0xc,%a5),(-8,%fp)
-movea.l (-8,%fp),%a1
+movea.l (0xc,%a5),%a1
 move.l (4,%a0),(%a1)
-movea.l (-8,%fp),%a1
 move.l (4,%a1),(%a0)
 movea.l (-0xc,%fp),%a5
 unlk %fp

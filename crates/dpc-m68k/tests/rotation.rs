@@ -133,10 +133,17 @@ begin
 end;
 ";
     let lines = compile(src).unwrap_or_else(|e| panic!("{e}"));
-    let bases = lines.iter().filter(|l| *l == "movea.l #CHARS,%a1").count();
+    // `l` is held in an address register (pointer locals, codegen-patterns
+    // 12.5), so the base's register is the allocator's.
+    let bases = lines
+        .iter()
+        .filter(|l| l.starts_with("movea.l #CHARS,%a"))
+        .count();
     assert_eq!(bases, 1, "{lines:?}");
     assert!(
-        lines.contains(&"move.b (0,%a1,%d1.w),(1,%a0)".to_string()),
+        lines
+            .iter()
+            .any(|l| l.starts_with("move.b (0,%a") && l.contains(",%d1.w),(1,%a")),
         "{lines:?}"
     );
 }

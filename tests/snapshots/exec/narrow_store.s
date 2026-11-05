@@ -28,8 +28,6 @@ addq.w #4,%sp
 move.w %d3,%d0
 lsl.w #2,%d0
 lea (-0x14,%fp,%d0.w),%a0
-move.l %a0,(-0x14,%fp)
-movea.l (-0x14,%fp),%a0
 move.w (2,%a0),(-0x16,%fp)
 pea (-0x16,%fp)
 jsr (EXEC_$LOG_W).l

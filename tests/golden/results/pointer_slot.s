@@ -72,6 +72,12 @@ movea.l (-4,%fp),%a0
 movea.l (-8,%fp),%a5
 unlk %fp
 rts
+FORGET:
+link.w %fp,#-4
+movea.l (%fp),%a0
+clr.l (-4,%a0)
+unlk %fp
+rts
 .globl FRAMED
 FRAMED:
 link.w %fp,#-8

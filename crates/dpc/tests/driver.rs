@@ -2087,26 +2087,42 @@ end;
     assert!(s.contains("\tmove.w\t(%a2),(%a5)\n\tpea\t(%a2)\n"), "{s}");
     assert!(!s.contains("(-4,%fp)"), "{s}");
 
-    // Pushed by value: in the frame (AST_$RESERVE 0xE067BA); `= nil` right
-    // after the store branches on the store's flags; A0 is the base while
-    // it holds the local; the push reads the slot.
+    // Dereferenced and pushed by value: held too (../source's
+    // register-allocation survey of the SAU2 and SAU9 images, 2026-11-04:
+    // pointer locals are held whatever their reads, but for exceptions
+    // (a) and (b) of `free_pointer_locals`).
     let src = format!(
         "{head}procedure user;
 var p: recp;
 begin
   p := get(1);
-  if p = nil then return;
+  poke;
   seen := p^.f;
   take(p);
 end;
 "
     );
     let s = compile_with("ptr_local_pushed", &src, &[]).unwrap();
-    assert!(s.contains("\tmove.l\t%a0,(-4,%fp)\n\tbeq."), "{s}");
-    assert!(
-        s.contains("\tmove.w\t(2,%a0),(%a5)\n\tmove.l\t(-4,%fp),-(%sp)\n"),
-        "{s}"
+    assert!(s.contains("\tmovea.l\t%a0,%a2\n"), "{s}");
+    assert!(s.contains("\tmove.w\t(2,%a2),(%a5)\n"), "{s}");
+    assert!(!s.contains("(-4,%fp)"), "{s}");
+
+    // Exception (a): every read a push, across a call: in the frame
+    // (LOG_$SHUTDN 0xE175AE `move.l (20,A5),(-4,A6)`, a call, `move.l
+    // (-4,A6),-(SP)`).
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := get(1);
+  poke;
+  take(p);
+end;
+"
     );
+    let s = compile_with("ptr_local_push_only", &src, &[]).unwrap();
+    assert!(s.contains("\tmove.l\t%a0,(-4,%fp)\n"), "{s}");
+    assert!(s.contains("\tmove.l\t(-4,%fp),-(%sp)\n"), "{s}");
 
     // Its address passed (bead domain-pascal-pe9): in the frame, and
     // reloaded after the call that may change it.
@@ -2151,11 +2167,12 @@ end;
         "{s}"
     );
 
-    // A call between the store and a dereference of a frame-held local:
-    // reloaded, not read from A0.
+    // A call between the store and a dereference of a frame-held local (a
+    // nested routine reaches it): reloaded, not read from A0.
     let src = format!(
         "{head}procedure user;
 var p: recp;
+  procedure q; begin seen := p^.n; end;
 begin
   p := get(1);
   poke;
@@ -2190,6 +2207,7 @@ end;
     let src = format!(
         "{head}procedure user;
 var p: recp;
+  procedure q; begin seen := p^.n; end;
 begin
   p := get(1);
   seen := p^.n;
@@ -2216,6 +2234,7 @@ function other(k: integer): integer; val_param; extern;
 procedure take(p: recp); val_param; extern;
 ";
     let reload = "\tmovea.l\t(-4,%fp),%a0\n";
+    const NEST: &str = "  procedure q; begin seen := p^.n; end;\n";
     for (name, body) in [
         ("a0_call", "p := get(1);\n  seen := other(1);\n  seen := p^.n;"),
         ("a0_arith", "p := get(1);\n  big := big * big;\n  seen := p^.n;"),
@@ -2225,7 +2244,8 @@ procedure take(p: recp); val_param; extern;
             "p := get(1);\n  seen := other(1);\n  case seen of\n  1: seen := p^.n;\n  2: seen := p^.f;\n  3: seen := 9;\n  4: seen := 7;\n  end;",
         ),
     ] {
-        let src = format!("{head}procedure user;\nvar p: recp;\nbegin\n  {body}\n  take(p);\nend;\n");
+        // A nested routine reaches `p`: its frame slot holds it.
+        let src = format!("{head}procedure user;\nvar p: recp;\n{NEST}begin\n  {body}\n  take(p);\nend;\n");
         let s = compile_with(name, &src, &[]).unwrap();
         let after = &s[s.find("\tmove.l\t%a0,(-4,%fp)\n").expect(&s)..];
         let deref = after.find("(%a0),(%a5)").or(after.find("(2,%a0),(%a5)"));
@@ -2234,7 +2254,7 @@ procedure take(p: recp); val_param; extern;
     }
     // M$ARITH among the operands: the base is loaded after the call.
     let src = format!(
-        "{head}procedure user;\nvar p: recp;\nbegin\n  p := get(1);\n  big := p^.l div big + p^.l;\n  take(p);\nend;\n"
+        "{head}procedure user;\nvar p: recp;\n{NEST}begin\n  p := get(1);\n  big := p^.l div big + p^.l;\n  take(p);\nend;\n"
     );
     let s = compile_with("a0_arith_operands", &src, &[]).unwrap();
     assert!(
@@ -4658,4 +4678,34 @@ end;
         err.contains("error: options(abnormal) is not supported yet"),
         "{err}"
     );
+}
+
+/// Pointer locals on both CPUs (codegen-patterns 12.5, "Pointer locals,
+/// both CPUs"; ../source's register-allocation survey, 2026-11-04): held
+/// in an address register whatever they are assigned and however read.
+#[test]
+fn pointer_locals_held_on_both_cpus() {
+    let head = "module m;
+type rec = record n: integer; next: ^rec; end; recp = ^rec;
+  hook = ^procedure;
+var g: recp; seen: integer; h: hook;
+procedure poke; extern;
+procedure take(p: recp); val_param; extern;
+";
+    // Assigned from memory, never dereferenced, compared and copied:
+    // held (AREA_$FREE_ASID 0xE07E80 `next`).
+    let src = format!(
+        "{head}procedure user;
+var p: recp;
+begin
+  p := g;
+  poke;
+  if p <> nil then g := p;
+end;
+"
+    );
+    for cpu in [&[][..], &["-cpu", "mathchip"][..]] {
+        let s = compile_with("ptr_free_held", &src, cpu).unwrap();
+        assert!(!s.contains("(-4,%fp)"), "{cpu:?}: {s}");
+    }
 }

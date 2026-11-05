@@ -80,29 +80,26 @@ rts
 .globl POINTERS_$WALK
 POINTERS_$WALK:
 link.w %fp,#-8
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 clr.w (0x20,%a5)
-move.l (0x1c,%a5),(-4,%fp)
+movea.l (0x1c,%a5),%a2
 bra.s 2f
 .balignw 4,0x2048
 1:
 subq.l #2,%sp
-movea.l (-4,%fp),%a0
-move.w (%a0),-(%sp)
+move.w (%a2),-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
-movea.l (-4,%fp),%a0
 move.w (0x20,%a5),%d0
-add.w (%a0),%d0
+add.w (%a2),%d0
 move.w %d0,(0x20,%a5)
-movea.l (-4,%fp),%a0
-move.l (2,%a0),(-4,%fp)
+movea.l (2,%a2),%a2
 2:
-tst.l (-4,%fp)
+cmpa.w #0,%a2
 bne.s 1b
 move.w (0x20,%a5),%d0
-movea.l (-0xc,%fp),%a5
+movem.l (-0x10,%fp),%a2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048

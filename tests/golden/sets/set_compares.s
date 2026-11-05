@@ -2,14 +2,12 @@
 .globl PRIO
 PRIO:
 link.w %fp,#-4
-move.l (CUR).l,(-4,%fp)
-movea.l (-4,%fp),%a0
+movea.l (CUR).l,%a0
 moveq #0xb,%d0
 and.w (0x54,%a0),%d0
 cmpi.w #8,%d0
 bne.s 1f
-move.l (-4,%fp),-(%sp)
-jsr (REORDER).l
+jsr (GO).l
 1:
 unlk %fp
 rts

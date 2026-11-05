@@ -16,11 +16,13 @@ rts
 .globl PUT
 PUT:
 link.w %fp,#-4
+pea (%a2)
 jsr (EXEC_$CLOBBER).l
-move.l (8,%fp),(-4,%fp)
-movea.l (-4,%fp),%a0
-pea (4,%a0)
+movea.l (8,%fp),%a0
+lea (%a0),%a2
+pea (4,%a2)
 jsr (EXEC_$LOG_L).l
+movea.l (-8,%fp),%a2
 unlk %fp
 rts
 .globl ADDRIN_$PUT
@@ -66,14 +68,15 @@ rts
 .globl SHOW
 SHOW:
 link.w %fp,#-4
+pea (%a2)
 move.l (8,%fp),%d0
-move.l %d0,(-4,%fp)
-movea.l (-4,%fp),%a0
-pea (4,%a0)
+movea.l %d0,%a2
+pea (4,%a2)
 jsr (EXEC_$LOG_L).l
 addq.w #4,%sp
-move.l (-4,%fp),-(%sp)
+pea (%a2)
 jsr (EXEC_$LOG_L).l
+movea.l (-8,%fp),%a2
 unlk %fp
 rts
 .globl PASS
@@ -87,8 +90,8 @@ bsr.s SHOW
 addq.w #4,%sp
 lea (4,%a2),%a0
 move.l %a0,(0x14,%a5)
-move.l (0x14,%a5),(-4,%fp)
-move.l (-4,%fp),-(%sp)
+movea.l (0x14,%a5),%a2
+pea (%a2)
 jsr (EXEC_$LOG_L).l
 movem.l (-0xc,%fp),%a2/%a5
 unlk %fp
@@ -106,13 +109,13 @@ rts
 .globl VAL
 VAL:
 link.w %fp,#-8
-movem.l %d2/%a5,-(%sp)
+movem.l %d2/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.l (0xc,%fp),%d2
 lea (8,%fp),%a0
 move.l %a0,(0x14,%a5)
-move.l (0x14,%a5),(-4,%fp)
-move.l (-4,%fp),-(%sp)
+movea.l (0x14,%a5),%a2
+pea (%a2)
 jsr (EXEC_$LOG_L).l
 addq.w #4,%sp
 move.l %d2,%d0
@@ -120,7 +123,7 @@ addq.l #1,%d0
 move.l %d0,(-8,%fp)
 pea (-8,%fp)
 jsr (EXEC_$LOG_L).l
-movem.l (-0x10,%fp),%d2/%a5
+movem.l (-0x14,%fp),%d2/%a2/%a5
 unlk %fp
 rts
 .globl ADDRIN_$VAL

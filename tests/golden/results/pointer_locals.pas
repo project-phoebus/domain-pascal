@@ -9,12 +9,10 @@
     join and passed by address last (`pea (A2)', 0xE72550), held through
     that call in a body with branches (12.4 R4(c): 13 such sites, all
     callee-saved);
-  - framed: pushed by value later, so kept in its frame slot (AST_$RESERVE
-    0xE0677E: `aote' is passed to ast_$lookup_aste); `= nil' right after
-    the store branches on the store's flags (0xE067BA `move.l
-    A0,(-28,A6); bne.s'), dereferenced through A0 on the branch's path
-    (0xE067E2 `bset #6,(191,A0)') and after the join where both paths
-    left it in A0 (0xE067E8 `tst.b (185,A0)');
+  - (a pointer local pushed by value is held too: ../source's
+    register-allocation survey, 2026-11-04, reads AST_$RESERVE 0xE0677E's
+    framed `aote' as a spill under pressure; such a local held through a
+    call in a body with branches is 12.4 R4(c)'s open question;)
   - uplevel: reached by a nested routine, so in the frame; `= nil' right
     after the store tests A0 again (AST_$INVALIDATE 0xE0666A `move.l
     A0,(-20,A6); cmpa.w #0,A0'), A0 is the base on the branch's path
@@ -49,20 +47,6 @@ begin
   if p = nil then p := force(key, gstatus);
   seen := p^.count;
   use_rec(p^);
-end;
-
-procedure framed(key: integer); val_param;
-var
-  p: rec_ptr;
-begin
-  p := lookup(key, gstatus);
-  if p = nil then begin
-    p := force(key, gstatus);
-    if p = nil then return;
-  end else
-    p^.flags := 1;
-  seen := p^.count;
-  use_ptr(p);
 end;
 
 procedure uplevel(key: integer); val_param;

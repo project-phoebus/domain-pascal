@@ -259,11 +259,9 @@ bgt.s 1f
 move.w %d0,%d2
 lsl.w #2,%d2
 lea (8,%a5,%d2.w),%a0
-move.l %a0,(-4,%fp)
-movea.l (-4,%fp),%a0
 cmp.l (%a0),%d1
 bne.s 2f
-movea.l (-4,%fp),%a1
+movea.l %a0,%a1
 bra.s 3f
 2:
 1:
@@ -294,7 +292,7 @@ move.w %d2,%d0
 ext.l %d0
 move.l %d0,-(%sp)
 move.w (8,%fp),-(%sp)
-bsr.w PF
+bsr.s PF
 addq.w #8,%sp
 move.l %a0,(0x28,%a5)
 tst.l (0x28,%a5)

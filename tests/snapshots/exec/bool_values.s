@@ -70,10 +70,8 @@ move.b %d0,(2,%a5)
 pea (2,%a5)
 jsr (EXEC_$LOG_BOOL).l
 addq.w #4,%sp
-move.l (0xc,%a5),(-8,%fp)
-movea.l (-8,%fp),%a0
+movea.l (0xc,%a5),%a0
 move.b (2,%a0),%d0
-movea.l (-8,%fp),%a0
 not.b %d0
 move.b %d0,(2,%a0)
 pea (8,%a5)

@@ -200,15 +200,14 @@ rts
 .globl FORUI_$B
 FORUI_$B:
 link.w %fp,#-0xc
-movem.l %d2/%a2/%a5,-(%sp)
+movem.l %d2/%a2-%a3/%a5,-(%sp)
 lea (.Ldata).l,%a5
 movea.l (8,%fp),%a2
-move.l %a2,(-8,%fp)
+lea (%a2),%a3
 clr.l (%a5)
-movea.l (-8,%fp),%a0
-tst.w (%a0)
+tst.w (%a3)
 beq.s 1f
-move.w (%a0),%d0
+move.w (%a3),%d0
 subq.w #1,%d0
 move.w %d0,%d0
 .balignw 4,0x2048
@@ -220,10 +219,9 @@ move.l (%a5),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 clr.l (%a5)
-movea.l (-8,%fp),%a0
-tst.w (%a0)
+tst.w (%a3)
 beq.s 4f
-move.w (%a0),%d0
+move.w (%a3),%d0
 subq.w #1,%d0
 move.w %d0,%d2
 .balignw 4,0x2048
@@ -236,10 +234,9 @@ move.l (%a5),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 clr.l (%a5)
-movea.l (-8,%fp),%a0
-tst.w (%a0)
+tst.w (%a3)
 beq.s 7f
-move.w (%a0),%d0
+move.w (%a3),%d0
 subq.w #1,%d0
 move.w %d0,%d0
 .balignw 4,0x2048
@@ -253,7 +250,7 @@ addq.w #4,%sp
 move.w (%a2),(-0xa,%fp)
 pea (-0xa,%fp)
 bsr.w FORUI_VAR
-movem.l (-0x18,%fp),%d2/%a2/%a5
+movem.l (-0x1c,%fp),%d2/%a2-%a3/%a5
 unlk %fp
 rts
 FORUI_UP:
@@ -528,15 +525,13 @@ addq.l #2,%a0
 dbf %d1,3b
 2:
 lea (-0x18,%fp),%a0
-move.l %a0,(-0x1c,%fp)
 clr.l (%a5)
 tst.w %d0
 beq.s 5f
 move.w %d0,%d1
 subq.w #1,%d1
-movea.l (-0x1c,%fp),%a0
-move.w %d1,%d0
 lea (2,%a0),%a1
+move.w %d1,%d0
 .balignw 4,0x2048
 6:
 move.w (-2,%a1),%d1

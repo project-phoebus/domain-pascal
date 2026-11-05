@@ -17,8 +17,11 @@
     form of the element pushed by address, golden `expr/index');
   - `addr(p^.f)' by value, p a parameter held in an address register:
     `pea (d,An)' (SMD 0xE6EBD4 `pea (4,A3)');
-  - `addr(p^.f)' by value, p a pointer local: `movea.l (d,A6),A0; pea
-    (k,A0)', as by address (the DISK module-local 0xE3C9FE (disk/wait_io.pas) at 0xE3CA4E). }
+  - `addr(p^.f)' by value, p a pointer local in its frame slot (here a
+    nested routine reaches it; a pointer local is otherwise held in a
+    register, codegen-patterns 12.5): `movea.l (d,A6),A0; pea (k,A0)', as
+    by address (the DISK module-local 0xE3C9FE (disk/wait_io.pas) at
+    0xE3CA4E). }
 module addrargs;
 type
   ec_t = record
@@ -89,6 +92,7 @@ procedure addrargs_$wait_local;
 var
   p: rec_p;
   x: integer;
+  procedure forget; begin p := nil; end;
 begin
   p := othr;
   x := ec_$wait(addr(p^.ec2), ec_p(addr(clockh)), 1);

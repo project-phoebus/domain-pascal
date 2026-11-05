@@ -275,15 +275,14 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,%d1
 lsl.w #2,%d1
-move.l (0x1c,%a5,%d1.w),(-4,%fp)
-tst.l (-4,%fp)
+movea.l (0x1c,%a5,%d1.w),%a0
+cmpa.w #0,%a0
 bne.s 1f
 moveq #1,%d0
 move.l %d0,(0x60,%a5)
 clr.l (-8,%fp)
 bra.s 2f
 1:
-movea.l (-4,%fp),%a0
 tst.l (4,%a0)
 bne.s 3f
 moveq #2,%d0
@@ -291,7 +290,6 @@ move.l %d0,(0x60,%a5)
 clr.l (-8,%fp)
 bra.s 4f
 3:
-movea.l (-4,%fp),%a0
 move.l (4,%a0),(-8,%fp)
 4:
 2:

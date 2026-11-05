@@ -105,10 +105,9 @@ rts
 .globl HIDDEN_RESULTS_$PICK
 HIDDEN_RESULTS_$PICK:
 link.w %fp,#-0xc
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-lea (8,%a5),%a0
-move.l %a0,(-4,%fp)
+lea (8,%a5),%a2
 pea (8,%fp)
 pea (-0xc,%fp)
 bsr.w CHOOSE
@@ -124,12 +123,11 @@ pea (-0xc,%fp)
 bsr.w CHOOSE
 addq.w #8,%sp
 lea (-0xc,%fp),%a0
-movea.l (-4,%fp),%a1
-move.l (%a0)+,(4,%a1)
-move.l (%a0)+,(8,%a1)
+move.l (%a0)+,(4,%a2)
+move.l (%a0)+,(8,%a2)
 pea (0xc,%a5)
 bsr.w LOG_PAIR
-movea.l (-0x10,%fp),%a5
+movem.l (-0x14,%fp),%a2/%a5
 unlk %fp
 rts
 .Lc0:

@@ -230,14 +230,12 @@ rts
 .globl FORTL_$PTR
 FORTL_$PTR:
 link.w %fp,#-0xc
-movem.l %d2-%d4/%a5,-(%sp)
+movem.l %d2-%d4/%a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d2
 move.w %d2,(0x32,%a5)
-lea (0x30,%a5),%a0
-move.l %a0,(-8,%fp)
-movea.l (-8,%fp),%a0
-move.w (2,%a0),%d0
+lea (0x30,%a5),%a2
+move.w (2,%a2),%d0
 tst.w %d0
 bmi.s 1f
 move.w %d0,%d3
@@ -262,14 +260,11 @@ lea (0x34,%a5),%a0
 clr.w (%a0)+
 dbf %d0,4b
 lea (0x34,%a5),%a0
-move.l %a0,(-0xc,%fp)
-movea.l (-8,%fp),%a0
-move.w (2,%a0),%d0
+move.w (2,%a2),%d0
 tst.w %d0
 bmi.s 5f
 move.w %d0,%d0
 clr.w %d1
-movea.l (-0xc,%fp),%a0
 lea (%a0),%a1
 .balignw 4,0x2048
 6:
@@ -286,7 +281,7 @@ pea (.Lc1,%pc)
 pea (0x34,%a5)
 jsr (EXEC_$LOG_MEM).l
 8:
-movem.l (-0x1c,%fp),%d2-%d4/%a5
+movem.l (-0x20,%fp),%d2-%d4/%a2/%a5
 unlk %fp
 rts
 .globl FORTL_$PTRBIG
@@ -297,10 +292,8 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(0x32,%a5)
 lea (0x30,%a5),%a0
-move.l %a0,(-8,%fp)
 clr.l %d2
 clr.l %d3
-movea.l (-8,%fp),%a0
 move.w (2,%a0),%d0
 tst.w %d0
 bmi.s 1f

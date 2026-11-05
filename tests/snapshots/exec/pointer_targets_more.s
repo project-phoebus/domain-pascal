@@ -86,20 +86,19 @@ rts
 .globl PADV_$TWO_LOCALS
 PADV_$TWO_LOCALS:
 link.w %fp,#-0xc
-movem.l %a2/%a5,-(%sp)
+movem.l %a2-%a3/%a5,-(%sp)
 lea (.Ldata).l,%a5
-move.l (0x28,%a5),(-4,%fp)
+movea.l (0x28,%a5),%a2
 lea (0x10,%a5),%a0
 move.l %a0,(-0xc,%fp)
 pea (-0xc,%fp)
 jsr (EXEC_$ID_P).l
 addq.w #4,%sp
-movea.l %a0,%a2
+movea.l %a0,%a3
+pea (6,%a3)
 pea (6,%a2)
-movea.l (-4,%fp),%a0
-pea (6,%a0)
 bsr.w PAIR
-movem.l (-0x14,%fp),%a2/%a5
+movem.l (-0x18,%fp),%a2-%a3/%a5
 unlk %fp
 rts
 .globl SLOTS

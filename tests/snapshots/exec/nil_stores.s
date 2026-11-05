@@ -75,15 +75,14 @@ link.w %fp,#-4
 pea (%a5)
 lea (.Ldata).l,%a5
 clr.w (0x20,%a5)
-move.l (0x14,%a5),(-4,%fp)
+movea.l (0x14,%a5),%a0
 bra.s 2f
 .balignw 4,0x2048
 1:
 addq.w #1,(0x20,%a5)
-movea.l (-4,%fp),%a0
-move.l (2,%a0),(-4,%fp)
+movea.l (2,%a0),%a0
 2:
-tst.l (-4,%fp)
+cmpa.w #0,%a0
 bne.s 1b
 subq.l #2,%sp
 move.w (0x20,%a5),-(%sp)
@@ -129,36 +128,33 @@ rts
 .globl NILS_$FIND
 NILS_$FIND:
 link.w %fp,#-8
-pea (%a5)
+movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
-clr.l (-4,%fp)
-move.l (0x14,%a5),(-8,%fp)
+suba.l %a2,%a2
+movea.l (0x14,%a5),%a0
 bra.s 2f
 .balignw 4,0x2048
 1:
-movea.l (-8,%fp),%a0
 cmpi.w #0x14,(%a0)
 bne.s 4f
-move.l (-8,%fp),(-4,%fp)
+movea.l %a0,%a2
 4:
-movea.l (-8,%fp),%a0
-move.l (2,%a0),(-8,%fp)
+movea.l (2,%a0),%a0
 2:
-tst.l (-8,%fp)
+cmpa.w #0,%a0
 bne.s 1b
-tst.l (-4,%fp)
+cmpa.w #0,%a2
 bne.s 5f
 subq.l #2,%sp
 clr.w -(%sp)
 bra.s 7f
 5:
 subq.l #2,%sp
-movea.l (-4,%fp),%a0
-move.w (%a0),-(%sp)
+move.w (%a2),-(%sp)
 7:
 jsr (EXEC_$MARK).l
 6:
-movea.l (-0xc,%fp),%a5
+movem.l (-0x10,%fp),%a2/%a5
 unlk %fp
 rts
 .globl SET_PTR

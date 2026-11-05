@@ -136,6 +136,38 @@ fn is_memory_ea(ea: &Ea) -> bool {
 /// [`CallMode::save`].
 const TWO_CALLS: &str = "two function calls in one statement are";
 
+/// The internal refusal that asks [`select_body_in_unit`] to select the
+/// body again with one more free pointer local in its frame slot
+/// ([`DROPPED_PTRS`]).
+const DROP_PTR: &str = "internal: a free pointer local given back to its frame slot";
+
+thread_local! {
+    /// The free pointer locals ([`free_pointer_locals`]) of the routine
+    /// being selected that stay in their frame slots because the body did
+    /// not colour with them held.
+    static DROPPED_PTRS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Dropping every free pointer local did not let the body colour:
+    /// none is dropped ([`DROPPED_PTRS`]).
+    static NO_DROP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The reads of the frame slot at `off` in `body`.
+fn frame_refs(body: &[Stmt], off: i32) -> usize {
+    let mut n = 0;
+    walk(body, &mut |node| {
+        if let Node::Expr(Expr::Load {
+            addr: Addr::Frame(o),
+            ..
+        }) = node
+        {
+            if *o == off {
+                n += 1;
+            }
+        }
+    });
+    n
+}
+
 /// The best-effort form of [`CallMode::save`] ([`Selector::save_result`]).
 const SAVED_RESULT: &str = "a call whose result is still needed at a later call of its statement \
      (the result copied out of D0 or A0 into a register of its own; PACCT_$CLOCK_TO_COMP \
@@ -601,8 +633,23 @@ fn select_body_in_unit(
     // its calls popped and their results saved ([`CallMode`]); the other
     // statements keep the form they had.
     let mut modes: Vec<(Span, CallMode)> = Vec::new();
+    DROPPED_PTRS.with(|d| d.borrow_mut().clear());
+    NO_DROP.with(|n| n.set(false));
     loop {
         let err = match select_body_moded(f, sched, overlays, &modes, cpu) {
+            Err(e) if e.message == format!("{DROP_PTR} not supported yet") => {
+                if NO_DROP.with(|n| n.get()) {
+                    continue;
+                }
+                // Best effort: the spill choice is not the image's.
+                best_effort(
+                    f.span,
+                    "a free pointer local kept in its frame slot where the registers run out (the \
+                     image's choice of which is not found; ../source register-allocation survey, \
+                     \"Spills under pressure\") is",
+                )?;
+                continue;
+            }
             Err(e) => e,
             ok => return ok,
         };
@@ -1156,22 +1203,14 @@ fn select_body_once(
             s.ptr_locals.push((o, None));
         }
     }
-    if s.cpu.is_68020() {
-        // MC68020 mode: every other dereferenced pointer local in an
-        // address register ([`free_pointer_locals`]).
+    {
+        // Every other pointer local in an address register, on both CPUs
+        // ([`free_pointer_locals`]).
         taken.extend(call_ptrs.iter().copied());
+        taken.extend(DROPPED_PTRS.with(|d| d.borrow().clone()));
         let free = free_pointer_locals(f, &taken);
-        if !free.is_empty() {
-            best_effort(
-                f.span,
-                "a pointer local assigned other than from pointer functions, held in an address \
-                 register for the whole body under `-cpu mathchip` (the SAU9 image holds such \
-                 locals in a data or an address register by a rule not found: SCSI_$C90_INT \
-                 0x3C4A5826 A3 and 0x3C4A58D2 D4, SCSI_$RESET_DEVICE 0x3C4A650C D2 and \
-                 0x3C4A6518 A2; codegen-patterns 12.5; bead domain-pascal-jqp0) is",
-            )?;
-            s.ptr_locals.extend(free.into_iter().map(|o| (o, None)));
-        }
+        s.free_ptrs = free.clone();
+        s.ptr_locals.extend(free.into_iter().map(|o| (o, None)));
     }
     s.entry_tail = s.out.len().checked_sub(1);
     let body = s.seq(f, &f.body, Tail::END);
@@ -1398,11 +1437,14 @@ fn select_body_once(
     };
     // The registers of the pointer locals assigned from calls: held
     // through a call whose arguments use them last, in a body with
-    // branches too ([`call_pointer_locals`]).
+    // branches too ([`call_pointer_locals`]); the other pointer locals
+    // held for the body ([`free_pointer_locals`]) alike (TIME_$CANCEL
+    // 0xE164E0 keeps `ec` in A2 to `pea (A2)` for EC_$WAIT in an `if` part;
+    // **Uncertain** beyond that site and the analogy).
     let held_ptrs: Vec<Reg> = s
         .ptr_locals
         .iter()
-        .filter(|(o, _)| call_ptrs.contains(o))
+        .filter(|(o, _)| call_ptrs.contains(o) || s.free_ptrs.contains(o))
         .filter_map(|&(_, a)| a.map(Reg::A))
         .chain(
             s.parked
@@ -1725,6 +1767,37 @@ fn select_body_once(
                 // domain-pascal-qea9); the original has no such spills
                 // (bead domain-pascal-ei42).
                 Err(_) => {
+                    // A body that does not colour with its free pointer locals held: the
+                    // image keeps some such locals in their frame slots where the
+                    // registers run out, a spilled pointer having fewer references than
+                    // a kept one 33 times against 13 in the SAU2 image (../source's
+                    // register-allocation survey, 2026-11-04, "Spills under pressure":
+                    // MAC_OS_$OPEN 0xE0B246, LOG_$ADD 0xE1763E `buf`): the one with the
+                    // fewest references goes back to its slot and the body is selected
+                    // again ([`select_body_in_unit`]).  Best effort (not byte-identical):
+                    // the image's spill choice is not found.
+                    let held: Vec<i32> = s
+                        .free_ptrs
+                        .iter()
+                        .copied()
+                        .filter(|o| s.ptr_locals.iter().any(|&(p, r)| p == *o && r.is_some()))
+                        .collect();
+                    // Dropping them all does not help either: none dropped,
+                    // the values spilled as before.
+                    let no_drop = NO_DROP.with(|n| n.get());
+                    if !no_drop {
+                        if let Some(&o) =
+                            held.iter().min_by_key(|&&o| (frame_refs(&f.body, o), -o))
+                        {
+                            DROPPED_PTRS.with(|d| d.borrow_mut().push(o));
+                            return Err(unsupported(f.span, DROP_PTR));
+                        }
+                        if DROPPED_PTRS.with(|d| !d.borrow().is_empty()) {
+                            NO_DROP.with(|n| n.set(true));
+                            DROPPED_PTRS.with(|d| d.borrow_mut().clear());
+                            return Err(unsupported(f.span, DROP_PTR));
+                        }
+                    }
                     let Ok(sp) = crate::spill::allocate_spilling(
                         &pre,
                         exit,
@@ -4552,7 +4625,11 @@ fn register_locals(f: &Function) -> Vec<(i32, bool)> {
         .filter(|l| {
             // Every read pushes it as an argument (and there is one).
             let only_pushed = l.loads.iter().all(|r| r.whole) && !l.loads.is_empty();
-            !l.other && !l.deref && !l.for_index && !l.stores.is_empty() && !only_pushed
+            !l.other
+                && !l.deref
+                && !l.for_index
+                && !l.stores.is_empty()
+                && !only_pushed
         })
         .map(|l| {
             let narrow = matches!(l.stores[..], [s] if !s.at.nested && !s.konst
@@ -6993,6 +7070,13 @@ fn held_pointer_locals(f: &Function, exclude: &[i32], free: bool) -> Vec<i32> {
         free: bool,
         /// Dereferenced somewhere.
         deref: bool,
+        /// Reads of the local (whole, or as a dereference's base).
+        reads: usize,
+        /// Of those, the ones that are a call's argument pushed: the
+        /// value itself, or `p^` passed by address.
+        pushes: usize,
+        /// Called through: a routine pointer.
+        called: bool,
     }
     /// Whether `e` reads the local at `off` whole (not as a pointer it
     /// dereferences).
@@ -7016,13 +7100,32 @@ fn held_pointer_locals(f: &Function, exclude: &[i32], free: bool) -> Vec<i32> {
         let mut bad = false;
         let mut deref = false;
         let free = st.free;
+        let (mut pushes, mut called) = (0, false);
+        let is_p = |e: &Expr| matches!(e, Expr::Load { addr: Addr::Frame(o), .. } if *o == off);
         go(&mut |n| match n {
             Node::Expr(Expr::Load {
                 addr: Addr::Frame(o),
                 ty,
             }) if *o == off => {
                 loads += 1;
-                bad |= *ty != Scalar::POINTER;
+                // A 4-byte integer view of a free pointer local (`integer32(p)`
+                // arithmetic) reads its register as well.
+                bad |= *ty != Scalar::POINTER && !(free && ty.bytes() == 4);
+            }
+            Node::Call(c) if free => {
+                for a in &c.args {
+                    match a {
+                        Arg::Value { value, .. } if is_p(value) => pushes += 1,
+                        Arg::Address {
+                            addr: Addr::Indirect { base, offset: 0 },
+                            ..
+                        } if is_p(base) => pushes += 1,
+                        _ => {}
+                    }
+                }
+                if matches!(&c.callee, Callee::Pointer(x) if is_p(x)) {
+                    called = true;
+                }
             }
             Node::Addr(Addr::Frame(o)) if off <= *o && *o < off + 4 => addrs += 1,
             Node::Addr(Addr::Indirect { base, .. }) if matches!(&**base, Expr::Load { addr: Addr::Frame(o), .. } if *o == off) =>
@@ -7041,6 +7144,9 @@ fn held_pointer_locals(f: &Function, exclude: &[i32], free: bool) -> Vec<i32> {
         // Addressed, or read in part.
         st.bad |= bad || addrs != loads;
         st.deref |= deref;
+        st.reads += loads;
+        st.pushes += pushes;
+        st.called |= called;
         if loads > 0 && st.first.is_none() {
             st.first = Some(false);
         }
@@ -7128,15 +7234,110 @@ fn held_pointer_locals(f: &Function, exclude: &[i32], free: bool) -> Vec<i32> {
                 bad: false,
                 free,
                 deref: false,
+                reads: 0,
+                pushes: 0,
+                called: false,
             };
             stmts(&f.body, l.offset, &mut st);
+            // ../source's survey of the SAU2 and SAU9 images
+            // (docs/register-allocation-survey.md, 2026-11-04): a pointer
+            // local is held whether or not it is dereferenced, except (a)
+            // one whose every read is a call's argument pushed (the value,
+            // or `p^` by address: LOG_$SHUTDN 0xE1758C `saved_ptr`, TERM_$INIT
+            // 0xE32EBA `dtte_p`) and (b) a routine pointer called through
+            // (NET_$OPEN 0xE5A1A4 `handler`, `movea.l A0,(-4,A6)` then `jsr
+            // (A0)`; 5 of 6, DXM_$SCAN_QUEUE 0xE17168 holds its `callback`).
+            let frame =
+                free
+                && (st.called
+                    || (st.reads == st.pushes
+                        && !(st.reads == 1 && forwarded_push(&f.body, l.offset))));
             !st.bad
+                && !frame
                 && st.first == Some(true)
-                && (!free || st.deref)
                 && (l.ty == Scalar::POINTER || integer_call_local(f, l.offset))
         })
         .map(|l| l.offset)
         .collect()
+}
+
+/// Whether the pointer local at `off` is assigned once and read once, by
+/// a call statement right after the assignment that passes `p^` by
+/// address: the image keeps it in the register (TIME_$ADVANCE_CALLBACK
+/// 0xE16440 `movea.l (8,A1),A2; pea (A2); jsr`, TIME_$CANCEL 0xE164E0
+/// `movea.l (8,A2),A2; ...; pea (A2)`), where a push-only local whose
+/// value lives across a call stays in its frame slot (LOG_$SHUTDN
+/// 0xE175AE `move.l (20,A5),(-4,A6)`, a call, then `move.l
+/// (-4,A6),-(SP)`; TERM_$INIT 0xE32EBA `dtte_p`), and so does one pushed
+/// by value by the next statement (SAU9 MONO9_$BLINK_CURSOR `move.l
+/// (48,A0),(-4,A6)`, then `move.l (-4,A6),-(SP)` among the call's
+/// arguments).
+fn forwarded_push(body: &[Stmt], off: i32) -> bool {
+    let is_p = |e: &Expr| matches!(e, Expr::Load { addr: Addr::Frame(o), .. } if *o == off);
+    let mut stores = 0;
+    let mut found = false;
+    fn lists<'a>(body: &'a [Stmt], out: &mut Vec<&'a [Stmt]>) {
+        out.push(body);
+        for s in body {
+            match &s.kind {
+                StmtKind::If { then_, else_, .. } => {
+                    lists(then_, out);
+                    lists(else_, out);
+                }
+                StmtKind::Repeat { body, .. } | StmtKind::While { body, .. } => lists(body, out),
+                StmtKind::For(l) => lists(&l.body, out),
+                StmtKind::Case {
+                    arms, otherwise, ..
+                } => {
+                    for a in arms {
+                        lists(&a.body, out);
+                    }
+                    if let Some(o) = otherwise {
+                        lists(o, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut all = Vec::new();
+    lists(body, &mut all);
+    for list in all {
+        for (k, s) in list.iter().enumerate() {
+            let StmtKind::Store {
+                addr: Addr::Frame(o),
+                value,
+            } = &s.kind
+            else {
+                continue;
+            };
+            if *o != off {
+                continue;
+            }
+            stores += 1;
+            // A value read from a slot of the frame is stored there
+            // memory to memory and pushed from the slot (PKT_$COPY_TO_PA
+            // 0xE12538, MAC_OS_$PUT_INFO 0xE0C322 `move.l (8,A6),(d,A6)`,
+            // `addr` of a parameter passed by address).
+            let slot = |e: &Expr| matches!(e, Expr::Load { addr: Addr::Frame(_), .. });
+            let from_slot = slot(value)
+                || matches!(value, Expr::AddrOf(Addr::Indirect { base, offset: 0 }) if slot(base));
+            if let (false, Some(Stmt {
+                kind: StmtKind::Call(c),
+                ..
+            })) = (from_slot, list.get(k + 1))
+            {
+                found |= c.args.iter().any(|a| match a {
+                    Arg::Address {
+                        addr: Addr::Indirect { base, offset: 0 },
+                        ..
+                    } => is_p(base),
+                    _ => false,
+                });
+            }
+        }
+    }
+    stores == 1 && found
 }
 
 /// A 4-byte integer type (not a pointer).
@@ -8376,6 +8577,11 @@ pub struct Selector {
     /// ([`loop_pointer_locals`]): frame offset, and the virtual register
     /// once the first assignment has defined it.
     ptr_locals: Vec<(i32, Option<u8>)>,
+    /// The pointer locals of [`free_pointer_locals`] among
+    /// [`Self::ptr_locals`]: the ones given back to the frame, fewest
+    /// references first, when the body does not colour
+    /// ([`DROPPED_PTRS`]).
+    free_ptrs: Vec<i32>,
     /// The assignments to those locals: frame offset, index in `out` of
     /// the `movea.l` and its statement's span.
     ptr_defs: Vec<(i32, usize, Span)>,
@@ -8736,6 +8942,7 @@ impl Selector {
             stepped: Vec::new(),
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
+            free_ptrs: Vec::new(),
             ptr_defs: Vec::new(),
             elem_ptrs: Vec::new(),
             elem_leas: Vec::new(),
@@ -13208,6 +13415,19 @@ impl Selector {
                         }
                         self.compare_two_computed(op, d, rhs, size, signed)
                     }
+                    // A pointer local held in an address register read as
+                    // an integer (`integer32(p) > e`): copied into a data
+                    // register and compared as one held there.  Best effort
+                    // (not byte-identical): no site looked at.
+                    Some(Reg::A(a)) if size == Size::L && !expr_has_call(rhs) => {
+                        best_effort(
+                            self.span,
+                            "comparing a variable held in an address register with a computed \
+                             value (copied into a data register; not catalogued) is",
+                        )?;
+                        let d = self.in_tmp(Val::Reg(Reg::A(a)), Width::Long)?;
+                        self.compare_two_computed(op, d, rhs, size, signed)
+                    }
                     Some(Reg::A(_)) => Err(unsupported(
                         self.span,
                         "comparing a variable held in an address register with a computed value \
@@ -16268,6 +16488,7 @@ impl Selector {
             loops: _,
             stepped: _,
             ptr_locals: _,
+            free_ptrs: _,
             elem_ptrs: _,
             elem_by_value: _,
             a0_locals: _,
@@ -19919,10 +20140,15 @@ impl Selector {
                     // survey: 24 such copies and `andi` with a constant
                     // outside -128..127, no `move #c,Dn; and Dm,Dn` with
                     // one; 32 `moveq #c,Dn; and Dm,Dn`, codegen-patterns 8).
+                    // A pointer local held in an address register and
+                    // read as an integer (`integer32(p) & c`): `and` takes
+                    // no address register, so copied the same way (best
+                    // effort, no site looked at).
                     let xv = match xv {
                         Val::Reg(Reg::D(_)) if !(-128..128).contains(&c) => {
                             Val::Tmp(self.in_tmp(xv, w)?)
                         }
+                        Val::Reg(Reg::A(_)) => Val::Tmp(self.in_tmp(xv, w)?),
                         v => v,
                     };
                     if let Val::Tmp(d) = xv {

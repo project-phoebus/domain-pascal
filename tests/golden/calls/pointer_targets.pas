@@ -14,7 +14,9 @@
     nested routine: the slot reloaded through the static link for each
     call, `movea.l (8,A2),A0; pea (d,A0)' (0xE1AFB8, 0xE1AFCC in the
     nested routine at 0xE1AFA2 of TTY_$I_PUT_CHARS);
-  - through a pointer local in the frame: `movea.l (d,A6),A0; pea
+  - through a pointer local in the frame (here a nested routine reaches
+    it; a pointer local is otherwise held in a register, codegen-patterns
+    12.5): `movea.l (d,A6),A0; pea
     (d,A0)' (AST_$PURIFY 0xE0599E); its own target `q^' is the pointer
     pushed, `move.l (d,A6),-(SP)' (module-local 0xE53A18's 0xE53DB0
     to FILE_$FW_FILE);
@@ -80,6 +82,7 @@ procedure ptargets_$local(var n: node_t);
 var
   p: desc_p;
   q: ec_p;
+  procedure forget; begin p := nil; q := nil; end;
 begin
   p := n.next;
   ec_$advance_without_dispatch(p^.ec);
