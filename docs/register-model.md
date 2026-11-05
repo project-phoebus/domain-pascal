@@ -1,6 +1,6 @@
 # A model of the original compiler's register use (design note)
 
-Status: **hypothesis**, 2026-11-04.  Nothing here is implemented as
+Status: **hypothesis, partly tested** (step 2, 2026-11-04).  Nothing here is implemented as
 described.  It is the plan for replacing a growing set of narrow
 register rules with two general mechanisms.  Every claim about the
 image cites `docs/codegen-patterns.md`, which holds the evidence; this
@@ -112,6 +112,104 @@ An entry is **killed** by:
   in D2-D7/A2-A4 and every recomputation was in D0/D1/A0/A1.  If so,
   "calls kill scratch entries" is the whole rule.
 
+### Step 2 results (2026-11-04)
+
+**Method.** `tools/cachesurvey.py` walks each compiled routine
+(first instruction `link`, no `jmp` table).  It tracks entries "register
+R holds memory operand M" created by loads and stores, and kills them at
+writes of R, at writes of M or of memory that may alias it, and at writes
+of a register M's address uses.  It does *not* kill at joins or calls; it
+flags them instead, so the counts show what the original did there.  A
+join flags an entry only when some branch into it comes from before the
+entry was created, or from after the join (R7's rule).  Calls kill the
+scratch registers.  At each later use it records a *reuse* (the register
+is read for M again) or a *reread* (M is read from memory while a
+register still holds it), by the kind of use and by the entry's origin.
+
+It runs over the image (`tools/alldis.py 2 68000`; `9 68020`) and over
+dpc's objects for the same routines (`tools/objdis.py`, ../source
+096ca5c7 built with dpc e71f68b): 1164 routines on SAU2, the same count
+on SAU9.  The image counts alone mix the cache with mechanism B: a local
+held in a register looks like a cached slot.  The dpc counts are the
+control.  dpc already models B to 96.8% (`tools/regalloc_check.py`), so
+what differs between the two is mostly the cache.
+
+**Straight-line code** (no killing join, no call between), the image
+against dpc, reuse / reread.  Frame slots, parameter slots and objects
+through a pointer; unit and absolute variables show the same shape on
+smaller counts:
+
+| entry from | use | SAU2 image | SAU2 dpc | SAU9 image | SAU9 dpc |
+|---|---|---|---|---|---|
+| a store | push | 83 / 4 | 23 / 25 | 83 / 7 | 23 / 25 |
+| a store | operand of an operation | 43 / 0 | 5 / 0 | 63 / 0 | 10 / 1 |
+| a store | stored elsewhere (`move Rn,<mem>`) | 67 / 3 | 22 / 3 | 53 / 3 | 24 / 4 |
+| a store | compare / test | 44 / 11 | 31 / 18 | 65 / 8 | 43 / 24 |
+| a store | into another register, changed in place | 20 / 8 | 5 / 45 | 20 / 9 | 5 / 55 |
+| a store | into another register | 40 / 16 | 13 / 58 | 30 / 15 | 6 / 63 |
+| a load | compare / test | 295 / 4 | 165 / 6 | 305 / 3 | 177 / 11 |
+| a load | bit test | 62 / 1 | 12 / 3 | 104 / 10 | 42 / 9 |
+| a load | operand of an operation | 39 / 0 | 6 / 5 | 65 / 1 | 8 / 6 |
+| a load | into another register | 45 / 89 | 18 / 313 | 44 / 111 | 14 / 384 |
+| either | read-modify-write of the memory itself | 3 / 43 | 1 / 23 | 12 / 30 | 1 / 15 |
+
+What the rows say:
+
+- **F1. A stored value stays in its register and serves later reads**
+  (P3 confirmed).  After an assignment stores register R into M, the
+  image reads R for M at 88% of later uses (305 / 42 on SAU2), of every kind: pushes,
+  operands, copies to other memory, tests, and copies into another
+  register.  dpc does this only for a push or a compare right after the
+  store (12.5, 7.1): its pushes are 23 / 25, and its copies 5 / 45 and
+  13 / 58.  This is the largest gap.
+- **F2. A loaded value serves the uses of its own expression, but a
+  later load rereads memory** (P2 replaced).  A load-created entry is
+  reused by compares, bit tests and operands (295 / 4, 62 / 1, 39 / 0).
+  But where the value is wanted in a register again, the image mostly
+  loads it from memory (45 / 89).  That is R8, "plain variable reads are
+  not kept across statements" (AST_$INVALIDATE 0xE066BC `movea.l
+  (-20,A6),A0` again with A0 unchanged since 0xE066AE).  It holds even
+  between the arguments of one call (AST_$UPDATE 0xE0191C, 0xE01924,
+  0xE01930 load `(8,A2)` three times).  So a plain load's entry lives for
+  its expression.  The kind of memory does not matter: frame slots 4 /
+  34.  The P2 split (frame slots cached, other memory not) is
+  **refuted**.  The frame-cached locals (bead domain-pascal-g67r) need
+  another explanation, probably B (a local becoming a candidate once its
+  address no longer escapes).
+- **F3. Destructive uses copy** (P4 refuted as stated).  A cached value
+  needed in another register to be changed in place is copied far more
+  often than reloaded (20 / 8 from stores, 26 / 3 from loads on SAU2).
+  0xE085E8 and its like are the exceptions, not the rule.
+- **F4. Joins** (P1 consistent).  Across a join that some path enters
+  without the entry, the image's reuse rates match dpc's (frame stores
+  81 / 82 against 25 / 44; pointer loads 69 / 36 against 46 / 25).  The
+  reuses there are mechanism B's held variables, which dpc reproduces;
+  nothing shows a cache entry surviving such a join.  AST_$PURIFY
+  0xE05B1E is the direct case.
+- **F5. Calls** (P5 not settled).  Entries in callee-saved registers
+  mostly survive a call: SAU2 frame stores 31 / 9, pointer loads 24 / 2,
+  frame loads 17 / 3.  Those counts mix in B's held locals, so "calls
+  kill only the scratch registers' entries" is not yet separated from
+  B.
+- Read-modify-write instructions work on the memory (`addq.l #1,(d,A6)`,
+  `bset #n,(An)`) even while a register holds the value (memory 43
+  times, the register 3 on SAU2).  That is a form choice, not a cache
+  miss.
+
+**The revised model of A.**
+
+- Entries created by **stores** (assignments) live until killed: a
+  write of the register, an aliasing store, a join entered from before,
+  or a call for a scratch register.  This is the reference's "permits
+  values to remain in registers across statements".
+- Entries created by **loads** live for the expression that loaded
+  them (F2), as do common subexpressions within it (ref p. 6-27,
+  `-dba`).
+- **Computed values** (R7) live across statements, under R7's kill
+  rules.
+- A use that changes the value in place copies the cached register
+  (F3).  Read-modify-write instructions use memory.
+
 ## B. Global allocation of locals
 
 ### The model
@@ -161,11 +259,13 @@ An entry is **killed** by:
 ## Plan
 
 1. **This note** (done).
-2. **Test P1-P5 against the image** with ad-hoc scans over the scratch
-   disassemblies.  Write each result into codegen-patterns with its
-   counts.  Revise the model where it fails.
+2. **Test P1-P5 against the image** (done 2026-11-04: "Step 2
+   results" above; `tools/cachesurvey.py`).  P1 consistent, P2 replaced
+   by F2, P3 confirmed (F1), P4 refuted (F3), P5 open (F5).
 3. **Build A as one pass** in the selector: a register descriptor
-   updated per instruction, with the kill rules above.  Then retire the
+   updated per instruction, with the revised model's lifetimes and kill
+   rules.  F1 is the largest gap (store-created entries serve every kind
+   of read), so it comes first.  Then retire the
    special cases of A's table one at a time.  Each retirement must keep
    the 149 conformance routines byte-identical, the goldens unchanged
    (or changed with a reason) and `tools/regalloc_check.py` no worse.

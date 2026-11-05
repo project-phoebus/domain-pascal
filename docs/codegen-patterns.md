@@ -14959,7 +14959,11 @@ refuses (5.2, "Another unit's array": the order of their bases is not
 modelled); the LOG_$READ worker the rest of 12.3.
 
 **R8. Plain variable reads are not kept across statements (Verified at
-the sites).**
+the sites; survey 2026-11-04 in `docs/register-model.md`, "Step 2
+results", F2: a load's register serves the compares, bit tests and
+operands of its own expression, 396 / 5 on SAU2, but a later load into a
+register reads memory again 89 times against 45, frame slots included;
+a value an assignment stored is kept instead, F1).**
 - PROC1_$AS_ID is re-read for each use: FIM_$ACKNOWLEDGE 0xE0A972,
   0xE0A980, 0xE0A99A; FIM_$INSTALL 0xE0A9D0, 0xE0A9EA (the C comments
   this).
