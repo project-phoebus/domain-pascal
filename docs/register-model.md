@@ -419,6 +419,84 @@ often (`lea` 369 / 216, constants 111 / 33).  Most of those cross no call
 (`lea` 163 / 86, constants 66 / 21): A0 and A1 are busy with other values
 (RINGLOG_$LOGIT 0xE1A2F2), so this is the colouring order again.
 
+### Step 4: the register a new value takes (2026-11-05): a refuted rule
+
+**Refuted: "a new value avoids a register that still holds a valid memory
+value".**  It looked right.  When the lowest dead register holds such a
+value and another is free, the image takes the other (stored in a data
+register 212 / 78, loaded 254 / 152, stored in an address register 27 / 16)
+where dpc mostly evicts (97 / 399, 104 / 473, 13 / 79).  START_MEM_LITES
+0xE0C462 is the clean example: `move.w D0,(6,A5)`, then the next statement
+in D1.  It would have tied the cache to the allocator and might have
+covered R4 and R6.
+
+Two things refute it.
+
+Implemented as a preference (a new value takes such a register only when
+none other is free), it does not pay, on SAU2 from a mean of 0.78368 with
+238 identical:
+
+| Variant | Mean | Identical | Up / down |
+|---|---|---|---|
+| all entries, both directions | 0.78283 | 235 | 105 / 149 |
+| new value only | 0.78317 | 236 | 106 / 142 |
+| and not a value copied to a physical register | 0.78338 | 237 | 106 / 139 |
+| and not a register read by a compare since written | 0.78371 | 240 | 92 / 105 |
+| and not a parameter slot's load | 0.78379 | 241 | 85 / 95 |
+| and only values with one definition | 0.78388 | 239 | 35 / 31 |
+| stored entries only | 0.78373 | 239 | 71 / 67 |
+
+Each exclusion came from reading the image's evictions: a value bound for
+the result register (BAT_$GET_BAT_STEP 0xE3BB58 `move.w (-544,A0),D0`), a
+value last compared (HINT_$GET_NET 0xE49CC0 `move.w (10,A1),D0` over `(8,A1)`,
+which was also in D0), a parameter held in a register (FLP_$SHUTDOWN
+0xE3E228 `clr.w D0`, DMA_$CHECK 0xE0A3A6).  The gain shrinks to noise as the
+rule shrinks.  Nothing was kept.
+
+And the control, which should have come first.  `tools/getregsurvey.py`
+counts a new value whose lowest candidate register is free over the value's
+whole range (no call, no loop), by what that register last held:
+
+| Lowest register last held | SAU2 image: lowest / another | SAU9 image | dpc, SAU2 |
+|---|---|---|---|
+| nothing since entry | 469 / 89 | 527 / 96 | 441 / 64 |
+| a constant | 474 / 178 | 533 / 181 | 790 / 194 |
+| a call's clobber or result | 1192 / 971 | 1301 / 1060 | 1708 / 229 |
+| a computed value | 682 / 542 | 707 / 644 | 1613 / 150 |
+| a load, memory value still valid | 132 / 215 | 179 / 251 | 409 / 50 |
+| a load, entry gone | 170 / 287 | 205 / 301 | 336 / 122 |
+| a store, memory value still valid | 64 / 180 | 80 / 169 | 357 / 37 |
+| a copy of a register | 66 / 115 | 81 / 131 | 135 / 206 |
+| an `scc` | 17 / 40 | 21 / 51 | 51 / 51 |
+
+A load is passed over just as often when its entry is gone (63% on SAU2)
+as when it is valid (62%), so memory validity is not what the image is
+responding to.  The earlier ratio was real but belongs to loads and copies
+in general.
+
+The larger result is the one the rule hid.  **Lowest free names the image's
+register 55.5% of the time on SAU2 and 55.8% on SAU9; it names dpc's 84.1%.**
+That gap is a measure of what the allocator does not model.  No simple
+selection policy closes it, on SAU2 (SAU9 agrees within about 0.02):
+
+| Policy | Image | dpc |
+|---|---|---|
+| lowest free | 0.555 | 0.841 |
+| never written, then lowest | 0.452 | 0.565 |
+| next after the last written, cyclic | 0.302 | 0.277 |
+| oldest use, ties lowest | 0.268 | 0.176 |
+| oldest write, ties lowest | 0.265 | 0.192 |
+
+So the image is not a per-instruction "take a free register" with any of
+these orders.  A choice made over whole ranges (B's colouring) fits this
+better than one made at each write, since a later value can claim the lower
+register first.  That is a reading, not a result.  The survey's ranges are
+linear, so a variable live on another path can look dead, and this bounds
+the effect rather than explaining it.
+
+The lesson for later rules here: a ratio for a condition means little until
+the same ratio is counted without the condition.
+
 ### Open questions
 
 - The colouring order (12.4 R1a) and the spill cost under pressure:
@@ -426,6 +504,9 @@ often (`lea` 369 / 216, constants 111 / 33).  Most of those cross no call
   there.
 - The remaining saved registers: A registers from `lea` and constants,
   D registers from copies, which look like values held longer (12.4 R4).
+- Why lowest free names only 55.5% of the image's data registers (dpc:
+  84.1%), and the order in which a colouring would visit values to give
+  that ("Step 4: the register a new value takes").
 - Whether A's cache and B's candidates are one structure.  Code
   generators of the period commonly kept a register descriptor (A) and
   added global allocation (B) on top; that is background, not evidence,
