@@ -16,12 +16,14 @@
 //!   only part of the register, a `move.w` or `move.b` into a data
 //!   register, also preceded by a reload where an earlier write may have
 //!   stored the rest; an `s<cc>`, which reads the flags, has its
-//!   destination spilled only where no earlier write reaches it).  Where it goes ([`Form`]): an address loaded once from
-//!   a by-address parameter's slot is loaded from that slot again (no
-//!   store); another address value is parked in a new data value (`move.l
-//!   At,Dw` / `movea.l Dw,At`) where data registers look free over its
-//!   range (the image keeps address values in data registers,
-//!   codegen-patterns 12.2, "Pointers in data registers"); any other value
+//!   destination spilled only where no earlier write reaches it).  Where it goes ([`Form`]): an address value is
+//!   parked in a new data value (`move.l At,Dw` / `movea.l Dw,At`; a load
+//!   from a frame slot straight into Dw) where data registers look free
+//!   over its range (the image keeps address values in data registers
+//!   when A2-A4 are all in use, `docs/register-model.md`, "Step 4 begun";
+//!   codegen-patterns 12.2, "Pointers in data registers"); else an address
+//!   loaded once from a by-address parameter's slot is loaded from that
+//!   slot again (no store); any other value
 //!   goes to a 4-byte frame slot of its own below the locals (`move.l
 //!   Rt,(d,A6)`, `move.l (d,A6),Dt` / `movea.l (d,A6),At`);
 //! - the condition codes are kept: a reload into a data register, which
@@ -413,6 +415,14 @@ fn spill_form_dbf(
         };
         if let Some(d) = load {
             if remat.contains(&d) && !frame_touched(insns, d) {
+                // Parked in a data register where one looks free, the
+                // image's more common choice when A2-A4 are all in use (of
+                // the longword slots of such routines, 212 are held in
+                // D2-D7, 156 loaded again; docs/register-model.md, step
+                // 4): loaded again otherwise.
+                if matches!(v, Reg::A(_)) && !cc_out[j] && data_free(insns, v, live_out) {
+                    return Some(Form::Cross);
+                }
                 return Some(Form::Remat(insns[j].clone()));
             }
         }
@@ -571,6 +581,32 @@ fn spill(
                         label: *label,
                         short: true,
                         back: true,
+                    },
+                ));
+                continue;
+            }
+        }
+        // A parked value's load goes straight into its data register:
+        // `move.l (d,A6),Dw` (MAC_OS_$OPEN 0xE0B24A, its parameters in
+        // D6/D7).
+        if let (
+            Form::Cross,
+            Insn::Movea {
+                size: Size::L,
+                src,
+                dst,
+            },
+            false,
+            false,
+        ) = (form, insn, u, cc_out[j])
+        {
+            if Reg::A(*dst) == v && matches!(src, Ea::Disp(_, crate::frame::FP)) {
+                out.push((
+                    *tag,
+                    Insn::Move {
+                        size: Size::L,
+                        src: src.clone(),
+                        dst: Ea::Reg(park.expect("a parked value")),
                     },
                 ));
                 continue;
@@ -763,10 +799,12 @@ mod tests {
         assert!(t.iter().any(|l| l.starts_with("movea.l\t%d")), "{t:?}");
     }
 
-    /// Address parameters live across a call: loaded again from their
-    /// slots, no spill slot; not where the body writes the slot.
+    /// Address parameters live across a call: parked in data registers,
+    /// each load straight into its register, no spill slot; loaded again
+    /// from their slots where no data register looks free; to a parked
+    /// value too where the body writes the slot.
     #[test]
-    fn address_parameters_loaded_again() {
+    fn address_parameters_parked_or_loaded_again() {
         let mut body = Vec::new();
         for k in 0..4u8 {
             body.push(Insn::Movea {
@@ -783,11 +821,12 @@ mod tests {
         assert!(physical(&s));
         assert_eq!(s.bytes, 0);
         let t = spliced(&s);
-        let reloads = t
-            .iter()
-            .filter(|l| l.starts_with("movea.l\t(") && l.contains(",%fp),"))
-            .count();
-        assert!(reloads >= 5, "{t:?}");
+        assert!(
+            t.iter()
+                .any(|l| l.starts_with("move.l\t(") && l.contains(",%fp),%d")),
+            "{t:?}"
+        );
+        assert!(t.iter().any(|l| l.starts_with("movea.l\t%d")), "{t:?}");
         let mut body2 = body.clone();
         body2.push(Insn::Clr {
             size: Size::L,
@@ -801,6 +840,30 @@ mod tests {
         );
         assert_eq!(
             spill_form(&body2, va(1), &ci, &co, &live, &[12]),
+            Some(Form::Cross)
+        );
+        // All eight data registers taken over its range: loaded again.
+        let mut full = vec![body[1].clone()];
+        for k in 0..8u8 {
+            full.push(Insn::Moveq {
+                value: 0,
+                dst: match vd(k) {
+                    Reg::D(n) => n,
+                    Reg::A(_) => unreachable!(),
+                },
+            });
+        }
+        full.push(clr_through(va(1)));
+        for k in 0..8u8 {
+            full.push(Insn::Tst {
+                size: Size::L,
+                dst: Ea::Reg(vd(k)),
+            });
+        }
+        let live = liveness(&full, &[], &[]);
+        let (ci, co) = cc_live(&full);
+        assert_eq!(
+            spill_form(&full, va(1), &ci, &co, &live, &[12]),
             Some(Form::Remat(body[1].clone()))
         );
     }

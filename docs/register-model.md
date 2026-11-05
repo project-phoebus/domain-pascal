@@ -357,14 +357,60 @@ allocator placed differently (NET_IO_$CLEANUP_NIL).
 | Holds through calls | 12.4 R4 | live ranges longer than liveness: allocation granularity |
 | Value-parameter copies held | 1.2 | candidates |
 
+### Step 4 begun (2026-11-05): what the image's extra registers hold
+
+Over the 791 SAU2 routines where the image and dpc have one `link` size
+and lengths within 15% (image / dpc at 4cc92e8):
+
+| | image | dpc |
+|---|---|---|
+| registers saved at entry | 2230 | 1743 |
+| parameter slots loaded into an address register | 1596 | 1801 |
+| parameter slots loaded into a data register | 378 | 269 |
+| frame slots loaded into an address register | 252 | 311 |
+| frame slots loaded into a data register | 236 | 182 |
+
+(The earlier "232 against 84" for pointer reloads overstated this: it
+counted only reloads while a register still held the value, over map
+symbols that can span several routines.)
+
+Saved registers by what first writes them: D registers from a parameter
+slot 269 / 158, A registers from a `lea` 167 / 114, D registers from a
+register copy 115 / 65, A registers from a constant 58 / 25.  The D
+registers from a parameter slot split into words and bytes, which agree
+(115 / 116), and longwords dereferenced through a copy `movea.l Dn,Am`,
+104 / 4: **parameter addresses in data registers** are the largest single
+difference.
+
+**It is register pressure, not a class rule by use.**  Of the 202
+parameter addresses held in D2-D7 and dereferenced, 169 are in routines
+that use all of A2-A4.  In such routines, of the longword slots, 578 are
+held in A2-A4, 212 in D2-D7, 156 loaded again.  So an address value
+overflows into a data register when the address registers run out.  This
+replaces the note's earlier guess of a class choice by use counts.
+
+**Implemented** (`spill.rs`): `dpc` spilled such a value by loading it
+again from its slot.  Where a data register looks free it now parks it,
+`move.l (d,A6),Dw` with `movea.l Dw,At` before each read (MAC_OS_$OPEN
+0xE0B24A D6, D7), and loads it again otherwise.  Best effort: `spill.rs`
+still chooses which value overflows, and the image's choice is not
+known.  FILE_$UNLOCK_PROC keeps `(8,A6)` in D3 and the others in A2-A4,
+where dpc parks others.  From 4cc92e8, over ../source 096ca5c7:
+
+- SAU2: mean 0.78299 -> 0.78368, identical 239 -> 238 (FILE_$OLD_AP, 2
+  bytes of filler), 81 routines up, 49 down;
+- SAU9: 0.77288 -> 0.77345, identical 242 -> 241, 78 up, 54 down.
+- The table above, dpc after: saved 1822 of the image's 2239, address
+  register loads of parameter slots 1541 of 1621, data register loads
+  357 of 378 (792 routines, as the set shifts slightly).
+
 ### Open questions
 
-- The colouring order (12.4 R1a) and the spill cost under pressure.
-- **Register class.** 11% of SAU2's held pointer locals are in data
-  registers, and some parameter addresses are kept in D registers and
-  copied to A registers at each dereference (MAC_OS_$OPEN 0xE0B246
-  D6/D7).  This looks like a class choice by use counts: copies and
-  pushes against dereferences.
+- The colouring order (12.4 R1a) and the spill cost under pressure:
+  which value overflows, and why the image still loads 156 slots again
+  there.
+- The remaining saved registers: A registers from `lea` and constants,
+  D registers from copies, which look like values held longer (12.4 R4).
 - Whether A's cache and B's candidates are one structure.  Code
   generators of the period commonly kept a register descriptor (A) and
   added global allocation (B) on top; that is background, not evidence,
