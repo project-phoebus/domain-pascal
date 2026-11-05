@@ -902,7 +902,15 @@ Raised by the overlay-section work (bead domain-pascal-raxl):
     `addr` taken?  Nothing in ../source needs it yet (bead
     domain-pascal-w0rj).  *Current: reading `T(v).f` is the bytes of v
     at f's offset, read in place (PROC1_$CREATE_P 0xE15156); the three
-    uses above are refused ("not supported yet").*
+    uses above are refused ("not supported yet").*  *Owner's answer
+    (2026-11-04, on ../source finding 1053, SAU6 ETHERNET_$SVC_WRITE
+    0x780898B8..0x780898C0 `pea` of two integer32 locals for a `var
+    hdr_src: pkt_$hdr_ptr_t` and an `in src_pages` formal): keep
+    refusing.  A transfer is an expression (p. 4-197); the image cannot
+    tell a transfer from a `univ` formal (ref 5.3.3) or a local of the
+    formal's type, and ../source declares such formals `univ`, which
+    gives the image's code.  A transfer to a type of another size stays
+    refused by p. 4-197's size rule.*
 
 47. **"For", pp. 4-89..4-90 (PDF pp. 222-223, checked).**
     "start_exp: An expression matching the type of the index_variable";
