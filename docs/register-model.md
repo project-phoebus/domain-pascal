@@ -163,7 +163,8 @@ What the rows say:
   store (12.5, 7.1): its pushes are 23 / 25, and its copies 5 / 45 and
   13 / 58.  This is the largest gap.
 - **F2. A loaded value serves the uses of its own expression, but a
-  later load rereads memory** (P2 replaced).  A load-created entry is
+  later load rereads memory** (P2 replaced; **corrected** in "Step 3,
+  F2": what decides is the register's class, not the expression).  A load-created entry is
   reused by compares, bit tests and operands (295 / 4, 62 / 1, 39 / 0).
   But where the value is wanted in a register again, the image mostly
   loads it from memory (45 / 89).  That is R8, "plain variable reads are
@@ -202,9 +203,9 @@ What the rows say:
   write of the register, an aliasing store, a join entered from before,
   or a call for a scratch register.  This is the reference's "permits
   values to remain in registers across statements".
-- Entries created by **loads** live for the expression that loaded
-  them (F2), as do common subexpressions within it (ref p. 6-27,
-  `-dba`).
+- Entries created by **loads** into a data register live as stored
+  ones do; a load into an address register makes no entry ("Step 3,
+  F2", which corrects F2 as first written).
 - **Computed values** (R7) live across statements, under R7's kill
   rules.
 - A use that changes the value in place copies the cached register
@@ -269,6 +270,60 @@ The proportions now match.  The smaller counts in pushes and stores
 elsewhere come from dpc's code offering fewer such store-then-read
 pairs, not from the cache.
 
+### Step 3, F2 (2026-11-05): load entries
+
+F2 as first written, "a load lives for its expression", is **wrong**:
+NETBUF_$ADD_PAGES 0xE0EB06 and XNS_IDP_$REGISTER_ADDR 0xE192AA load for
+a condition and reuse the value in the `then` part.  What decides is the
+class of the register holding it (`tools/cachesurvey.py`, "by holder";
+SAU2, straight-line code, register read / memory read again):
+
+| value loaded into | wanted as | image | dpc before |
+|---|---|---|---|
+| a data register | a compare / test | 304 / 4 | 164 / 6 |
+| a data register | a bit test | 73 / 1 | 22 / 3 |
+| a data register | an operand of an operation | 48 / 0 | 4 / 4 |
+| a data register | stored elsewhere | 45 / 3 | 4 / 14 |
+| a data register | another data register | 35 / 5 | 14 / 67 |
+| a data register | a push | 21 / 2 | 4 / 1 |
+| an address register | another address register | 6 / 84 | 3 / 243 |
+| an address register | a push | 0 / 9 | 0 / 15 |
+
+So:
+
+- **A value loaded into a data register is cached like a stored one**,
+  across statements, including into the `then` part of the condition
+  that loaded it.  `crate::cache` makes these entries too.
+- **A pointer loaded into an address register is loaded again**: this
+  is what R8 was seeing (AST_$INVALIDATE 0xE066BC, AST_$UPDATE 0xE01930).
+  No entry is made for one.  So R8's title is too broad: FIM_$ACKNOWLEDGE
+  re-reads PROC1_$AS_ID because its register was changed in place.
+
+Exceptions left unmodelled, the image loading again:
+
+- after a forward join, 5 against 37 (tty_$i_put_chars 0xE1B0F6);
+- across a call's pad, 4 against 118 (MMAP_$INSTALL_PAGES 0xE0CE38,
+  MMAP_$INSTALL_LIST 0xE0CDD2, MMAP_$RECLAIM 0xE0D9C8, PROC2_$WAIT
+  0xE3FE5E).
+
+**The compare chains** (`chain_variable`, codegen-patterns 7.1) are the
+part a post-allocation pass cannot do, since the first compare must
+become a load.  They now take ordered relations too.  Two compares of
+one operand with constants, a conditional branch between, none at a
+join: 108 loaded (19 ordered: AST_$LOAD_AOTE 0xE0285A), 4 in memory, two
+of those hand assembly.  At a join the second compare is on memory
+(AST_$PURIFY 0xE05B1E, PROC2_$GET_INFO 0xE408B2): P1 again.
+
+Measured over ../source 096ca5c7, `routine_compare.py`, from 34ffe6e:
+
+- SAU2: mean 0.78203 -> 0.78299, identical 238 -> 239, 115 routines up,
+  20 down;
+- SAU9: 0.77204 -> 0.77288, identical 242 -> 242, 122 up, 35 down.
+
+The ordered chains alone were 43 up and 1 down on SAU2.  The downs
+checked are positional (a filler, a pool offset) or a register the
+allocator placed differently (NET_IO_$CLEANUP_NIL).
+
 ## B. Global allocation of locals
 
 ### The model
@@ -324,10 +379,11 @@ pairs, not from the cache.
 3. **Build A as one pass** in the selector: a register descriptor
    updated per instruction, with the revised model's lifetimes and kill
    rules.  F1 is the largest gap (store-created entries serve every kind
-   of read), so it comes first.  F1 is done ("Step 3, F1" above).  It
-   could not retire `Selector::forwarded` (pushes), and the compare
-   right after a store is still formed at selection; the load entries
-   of F2 and the `and then` chains are next.  Then retire the
+   of read), so it comes first.  F1 and F2 are done ("Step 3, F1" and
+   "Step 3, F2" above).  `Selector::forwarded` (pushes) could not be
+   retired, and the compare right after a store is still formed at
+   selection.  Still open: retiring what the pass now covers, and the
+   frame-cached locals (bead domain-pascal-g67r).  Then retire the
    special cases of A's table one at a time.  Each retirement must keep
    the 149 conformance routines byte-identical, the goldens unchanged
    (or changed with a reason) and `tools/regalloc_check.py` no worse.

@@ -45,9 +45,8 @@ move.w (8,%fp),%d0
 move.w %d0,%d1
 lsl.w #2,%d1
 lea (0,%a5,%d1.w),%a0
-move.l (0x2d8,%a0),-(%sp)
-move.w (8,%fp),%d0
 move.w %d0,%d1
+move.l (0x2d8,%a0),-(%sp)
 mulu.w #0xb0,%d1
 lea (0,%a5,%d1.w),%a1
 movea.l (0x18,%a1),%a2

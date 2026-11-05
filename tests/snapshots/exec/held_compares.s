@@ -21,7 +21,6 @@ cmp.w %d0,%d2
 bge.s 3f
 addq.w #4,(4,%a5)
 3:
-move.w (%a5),%d2
 cmp.w %d0,%d2
 blt.s 4f
 addq.w #8,(4,%a5)
@@ -38,7 +37,7 @@ cmp.w %d1,%d0
 bne.s 7f
 addi.w #0x40,(4,%a5)
 7:
-cmp.w (%a5),%d0
+cmp.w %d2,%d0
 bge.s 8f
 addi.w #0x80,(4,%a5)
 8:
@@ -73,7 +72,6 @@ cmp.w %d0,%d2
 bcc.s 3f
 addq.w #4,(4,%a5)
 3:
-move.w (2,%a5),%d2
 cmp.w %d0,%d2
 bcs.s 4f
 addq.w #8,(4,%a5)
@@ -90,7 +88,7 @@ cmp.w %d1,%d0
 bne.s 7f
 addi.w #0x40,(4,%a5)
 7:
-cmp.w (2,%a5),%d0
+cmp.w %d2,%d0
 bcc.s 8f
 addi.w #0x80,(4,%a5)
 8:

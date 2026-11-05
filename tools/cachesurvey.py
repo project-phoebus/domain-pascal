@@ -155,6 +155,7 @@ def scan(routines, listkey=None):
                 # from before the entry was created, or from after the
                 # label (a back edge): R7's rule.
                 for e in ent.values():
+                    e['join'] = True
                     if any(src < e['at'] or src >= addr for src in targets[addr]):
                         e['label'] = True
             prev_uncond = m in ('bras', 'braw', 'bral', 'rts', 'jmp', 'rte')
@@ -215,6 +216,9 @@ def scan(routines, listkey=None):
                         e = ent[r]
                         if not e['label']:
                             ev(('rr-class', uc + '/' + e['origin'], kind(x), e['call']), name, addr)
+                            if not e['call']:
+                                ev(('holder', 'reread', e['origin'], r[0], o[-1][1] if uc == 'load' else '-', uc), name, addr)
+                                ev(('forward', 'reread', e['origin'], r[0], e['join'], uc), name, addr)
                         ev(('reread', kind(x), e['origin'], e['label'], e['call']), name, addr)
             # Reuses of a held register.
             for r in reg_reads:
@@ -225,6 +229,9 @@ def scan(routines, listkey=None):
                 if e['origin'] == 'store' or e['reads'] > 1:
                     if not e['label']:
                         ev(('re-class', use_class() + '/' + e['origin'], kind(e['op']), e['call']), name, addr)
+                        if not e['call']:
+                            ev(('holder', 'reuse', e['origin'], r[0], o[-1][1] if use_class() == 'load' else '-', use_class()), name, addr)
+                            ev(('forward', 'reuse', e['origin'], r[0], e['join'], use_class()), name, addr)
                     ev(('reuse', kind(e['op']), e['origin'], e['label'], e['call']), name, addr)
             # Destructive: an in-place op on a register just loaded /
             # copied while another register holds the operand.
@@ -253,7 +260,7 @@ def scan(routines, listkey=None):
                     if r in regs_in(ent[r2]['op']):
                         del ent[r2]
                 if base in ('move', 'movea') and len(o) == 2 and cacheable(o[0]):
-                    ent[r] = dict(op=o[0], size=sz, origin='load', label=False, call=False, reads=0, at=addr)
+                    ent[r] = dict(op=o[0], size=sz, origin='load', label=False, call=False, reads=0, at=addr, join=False)
                 if d.endswith('@+') or d.endswith('@-'):
                     pass
             else:
@@ -273,7 +280,7 @@ def scan(routines, listkey=None):
                         del ent[r2]
                 if base in ('move', 'movea') and len(o) == 2 and is_reg(o[0]) and cacheable(d):
                     r = norm(o[0][1:])
-                    ent[r] = dict(op=d, size=sz, origin='store', label=False, call=False, reads=0, at=addr)
+                    ent[r] = dict(op=d, size=sz, origin='store', label=False, call=False, reads=0, at=addr, join=False)
     return tally, examples
 
 
@@ -287,7 +294,7 @@ def main():
     listkey = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != '-' else None
     rows = collections.defaultdict(lambda: collections.Counter())
     for key, n in tally.items():
-        if key[0] in ('destructive', 'rr-class', 're-class'):
+        if key[0] in ('destructive', 'rr-class', 're-class', 'holder', 'forward'):
             continue
         what, k, origin, label, call = key
         rows[(k, origin, label, call)][what] += n
@@ -302,6 +309,20 @@ def main():
     print('by use, no killing label, no call (use, kind: reuse / reread):')
     for (u, k) in sorted({(a, b) for a, b, _ in cls}):
         print('  %-9s %-8s %5d / %5d' % (u, k, cls[(u, k, 're-class')], cls[(u, k, 'rr-class')]))
+    hold = collections.Counter()
+    for key, n in tally.items():
+        if key[0] == 'holder':
+            hold[key[1:]] += n
+    print('by holder (origin, holder a/d, wanted a/d, use: reuse / reread):')
+    for k in sorted({x[1:] for x in hold}):
+        print('  %-6s %s %s %-10s %5d / %5d' % (k + (hold[('reuse',) + k], hold[('reread',) + k])))
+    fw = collections.Counter()
+    for key, n in tally.items():
+        if key[0] == 'forward':
+            fw[key[1:]] += n
+    print('after a forward join (origin, holder, crossed, use: reuse / reread):')
+    for k in sorted({x[1:] for x in fw}, key=str):
+        print('  %-6s %s %-5s %-10s %5d / %5d' % (k + (fw[('reuse',) + k], fw[('reread',) + k])))
     print('destructive:')
     for key, n in sorted(tally.items()):
         if key[0] == 'destructive':

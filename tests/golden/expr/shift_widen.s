@@ -20,7 +20,6 @@ move.w (4,%a5),%d0
 lsl.l %d1,%d0
 move.l %d0,(0x20,%a5)
 clr.l %d0
-move.w (0x18,%a5),%d1
 move.w (6,%a5),%d0
 lsr.l %d1,%d0
 move.l %d0,(0x20,%a5)

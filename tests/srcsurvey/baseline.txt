@@ -224,7 +224,7 @@ STUB	bat/bat.pas	bat_$n_free
 STUB	bat/bat.pas	bat_$reserve
 MISMATCH	bat/bat.pas	bat_$cancel
 OK	bat/bat.pas	bat_$get_bat_step
-MISMATCH	cal/os_cal_unwired.pas	cal_$verify
+OK	cal/os_cal_unwired.pas	cal_$verify
 OK	cal/os_cal_unwired.pas	cal_$get_info
 OK	cal/os_cal_unwired.pas	cal_$set_drift
 STUB	cal/os_cal_unwired.pas	cal_$get_local_time
@@ -956,7 +956,7 @@ STUB	name/name.pas	name_$free_asid
 MISMATCH	name/nameu.pas	name_$split_path
 STUB	name/nameu.pas	nameq
 MISMATCH	name/nameu.pas	name_$validate
-MISMATCH	name/nameu.pas	name_$parse_component
+OK	name/nameu.pas	name_$parse_component
 STUB	name/nameu.pas	name_$resolve_internal
 MISMATCH	name/nameu.pas	name_$resolve_dir_and_leaf
 MISMATCH	name/nameu.pas	name_$resolve

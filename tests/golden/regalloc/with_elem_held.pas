@@ -10,7 +10,9 @@
     0xE88440, `pea (A2)' at 0xE8844E).
   - feed: a field read for a value pushed: A2 (MMAP_$INSTALL_PAGES
     0xE0CE28, `sub.l (60,A2),D0' at 0xE0CE3C; MMAP_$INSTALL_LIST
-    0xE0CDC2).
+    0xE0CDC2; the image loads the compared field again at 0xE0CE38, one of
+    4 such rereads against 118 reads of the register across a pad
+    (docs/register-model.md, F2): `dpc' reads the register).
   - target: a routine pointer field called: A2 (IO_$DISABLE_DEVICE
     0xE1A820, `movea.l (116,A2),A0; jsr (A0)' at 0xE1A82E; IO_$RELEASE
     0xE1A706).

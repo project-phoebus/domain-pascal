@@ -7,7 +7,9 @@
     #3,D1; beq.s'; the module-local at 0xE1BCFC, ../source
     tty_$i_store_parity, at 0xE1BD0A `move.l (20,A0),D0; btst #12,D0');
   - `odd' of one: `lsr.b #1' and the carry (tty_$i_put_chars 0xE1B0F6
-    `move.l (12,A0),D1; lsr.b #1,D1; bcc.s');
+    `move.l (12,A0),D1; lsr.b #1,D1; bcc.s'; the image loads again there,
+    one of 5 rereads after a forward join against 37 reads of the register
+    (docs/register-model.md, F2): `dpc' reads the register);
   - a register-held value: `btst #k' on its register (pacct_$compress
     0xE5A9DE); a computed one: on the register that holds it
     (DIR_$SET_PROTECTION 0xE522D4 `lsr.w #4,D1; btst #4,D1; bne').

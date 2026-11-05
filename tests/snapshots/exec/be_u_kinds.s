@@ -64,9 +64,8 @@ rts
 LOG_Z:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-movea.l (8,%fp),%a1
 move.l (0xf4,%a0),%d0
-add.l (0xf4,%a1),%d0
+add.l %d0,%d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 unlk %fp

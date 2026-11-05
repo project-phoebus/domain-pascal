@@ -30,7 +30,7 @@ CLK:
 link.w %fp,#-0xc
 movea.l (0xc,%fp),%a0
 move.l (%a0),%d0
-add.l (%a0),%d0
+add.l %d0,%d0
 move.l %d0,(-0xc,%fp)
 move.w (4,%a0),(-8,%fp)
 movea.l (8,%fp),%a1

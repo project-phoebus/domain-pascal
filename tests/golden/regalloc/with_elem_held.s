@@ -37,7 +37,6 @@ lea (0,%a5,%d1.w),%a2
 move.l (-0xc,%a2),%d0
 cmp.l (-8,%a2),%d0
 ble.s 1f
-move.l (-0xc,%a2),%d0
 sub.l (-8,%a2),%d0
 move.l %d0,-(%sp)
 jsr (TRIM).l

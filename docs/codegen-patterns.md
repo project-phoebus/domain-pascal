@@ -8515,7 +8515,8 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
 - **A chain of comparisons of one variable (Verified by survey;
   implemented, `isel.rs` `chain_variable`):** an `or else` (or `and
   then`) chain whose every term compares one variable in memory with a
-  constant (`=`, `<>`) loads the variable once into a data register and
+  constant, by any relation (19 of 108 sites ordered, AST_$LOAD_AOTE
+  0xE0285A), loads the variable once into a data register and
   compares that: DIR_$SET_ACL 0xE52CE0 `move.l (-20,A6),D0; cmpi.l
   #0xf0003,D0; beq.s; cmpi.l #0xe000d,D0; bne.s` (../source
   `(response.status.all = ...) or else (response.status.all = ...)`).
@@ -14959,11 +14960,11 @@ refuses (5.2, "Another unit's array": the order of their bases is not
 modelled); the LOG_$READ worker the rest of 12.3.
 
 **R8. Plain variable reads are not kept across statements (Verified at
-the sites; survey 2026-11-04 in `docs/register-model.md`, "Step 2
-results", F2: a load's register serves the compares, bit tests and
-operands of its own expression, 396 / 5 on SAU2, but a later load into a
-register reads memory again 89 times against 45, frame slots included;
-a value an assignment stored is kept instead, F1).**
+the sites; **narrowed** 2026-11-05, `docs/register-model.md`, "Step 3,
+F2": this holds for a pointer loaded into an address register, 84 loads
+against 6 reads of it, on SAU2; a value loaded into a data register is
+read from it, as an operand 48 / 0, into another data register 35 / 5,
+`crate::cache`).**
 - PROC1_$AS_ID is re-read for each use: FIM_$ACKNOWLEDGE 0xE0A972,
   0xE0A980, 0xE0A99A; FIM_$INSTALL 0xE0A9D0, 0xE0A9EA (the C comments
   this).

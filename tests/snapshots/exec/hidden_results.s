@@ -153,10 +153,10 @@ DBL:
 link.w %fp,#-8
 movea.l (0xc,%fp),%a0
 move.l (%a0),%d0
-add.l (%a0),%d0
+add.l %d0,%d0
 move.l %d0,(-8,%fp)
 move.w (4,%a0),%d0
-add.w (4,%a0),%d0
+add.w %d0,%d0
 move.w %d0,(-4,%fp)
 cmpi.w #-0x8000,(4,%a0)
 bcs.s 1f

@@ -152,7 +152,7 @@ thread_local! {
 }
 
 /// The variable every term of the `or else` / `and then` chain `c`
-/// compares with a constant (`=` or `<>`), with its type, when there are
+/// compares with a constant, with its type, when there are
 /// two terms or more of one kind of chain and the variable is in memory:
 /// the unit's data, the frame or through a pointer, not volatile.
 fn chain_variable(c: &IrCond) -> Option<(Addr, Scalar)> {
@@ -175,9 +175,9 @@ fn chain_variable(c: &IrCond) -> Option<(Addr, Scalar)> {
     let mut var: Option<(Addr, Scalar)> = None;
     for l in &ls {
         let IrCond::Compare {
-            op: Rel::Eq | Rel::Ne,
             lhs: Expr::Load { addr, ty },
             rhs: Expr::Const { .. },
+            ..
         } = l
         else {
             return None;
@@ -12346,10 +12346,12 @@ impl Selector {
             // cmpi.l #0xf0003,D0; beq.s; cmpi.l #0xe000d,D0; bne.s`, ../source
             // `(response.status.all = ...) or else (response.status.all =
             // ...)`; over SAU2's compiled code, two compares of one operand
-            // with constants, `beq` between: 88 with the operand loaded by
-            // the instruction before, 4 in memory, AST_$PURIFY 0xE05B14 a
-            // nested chain; ../source's register-allocation survey counts
-            // such operands among locals held in registers).
+            // with constants, a conditional branch between, none of them a
+            // join: 108 with the operand loaded by the instruction before,
+            // of them 19 ordered (AST_$LOAD_AOTE 0xE0285A `move.w (2,A2),D3;
+            // cmpi.w #512,D3; bcs.s; cmpi.w #4095,D3; bhi.s`), 4 in memory,
+            // two of those hand assembly; at a join always in memory,
+            // AST_$PURIFY 0xE05B14, PROC2_$GET_INFO 0xE408B2).
             IrCond::AndThen(..) | IrCond::OrElse(..)
                 if self.chain_var.is_none()
                     && chain_variable(c).is_some_and(

@@ -437,7 +437,7 @@ addq.w #4,%sp
 move.l (%a2),%d0
 cmp.l (%a4),%d0
 ble.s 3f
-move.l (%a2),-(%sp)
+move.l %d0,-(%sp)
 bra.s 6f
 3:
 move.l (%a4),-(%sp)
@@ -508,7 +508,7 @@ and.b %d0,%d1
 move.l (-0x10,%fp),%d0
 cmp.l %d6,%d0
 slt %d0
-move.l (-0x14,%fp),%d2
+move.l %d7,%d2
 and.b %d0,%d1
 move.l (-0xc,%fp),%d0
 cmp.l %d2,%d0

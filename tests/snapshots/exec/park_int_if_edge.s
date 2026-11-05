@@ -72,7 +72,7 @@ and.b %d2,%d1
 bpl.s 1f
 movea.l %d0,%a0
 move.l (4,%a0),%d3
-add.l (4,%a0),%d3
+add.l %d3,%d3
 1:
 move.l %d3,%d0
 movem.l (-0x18,%fp),%d2-%d3/%a2

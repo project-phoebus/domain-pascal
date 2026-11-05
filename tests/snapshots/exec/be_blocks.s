@@ -269,10 +269,9 @@ rts
 BB_$COMPUTED:
 link.w %fp,#0
 movea.l (8,%fp),%a0
-movea.l (8,%fp),%a1
 move.w (%a0),%d0
 movea.l #BB_$OARR12,%a0
-add.w (%a1),%d0
+add.w %d0,%d0
 lsl.w #2,%d0
 move.w %d0,%d1
 add.w %d1,%d1

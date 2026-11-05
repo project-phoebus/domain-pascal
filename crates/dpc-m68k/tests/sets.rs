@@ -179,7 +179,7 @@ fn set_variables_and_values() {
             "move.l\t(0x30,%a0),%d0",
             "or.l\t%d0,(2,%a0)",
             "clr.w\t(%a0)",
-            "move.l\t(0x30,%a0),%d0",
+            // Still in D0 (the register-contents cache, `crate::cache`).
             "not.l\t%d0",
             "and.l\t%d0,(2,%a0)",
             "clr.w\t(0x2e,%a0)",

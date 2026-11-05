@@ -869,7 +869,6 @@ fn two_variables_in_memory() {
         "procedure t; internal;
 begin
   if w <> r then r := 0;
-  if w < u then r := 1;
 end;
 ",
     );
@@ -881,14 +880,26 @@ end;
             "beq.s\t1f",
             "clr.w\t(R).l",
             "1:",
+        ]
+    );
+    let b = body(
+        "procedure t; internal;
+begin
+  if w < u then r := 1;
+end;
+",
+    );
+    assert_eq!(
+        b,
+        [
             "move.w\t(W).l,%d0",
             "clr.l\t%d1",
             "ext.l\t%d0",
             "move.w\t(U).l,%d1",
             "cmp.l\t%d1,%d0",
-            "bge.s\t2f",
+            "bge.s\t1f",
             "move.w\t#1,(R).l",
-            "2:",
+            "1:",
         ]
     );
 }
@@ -908,8 +919,8 @@ fn variable_against_a_held_one() {
 begin
   r := y;
   if w = x then r := 0;
-  if w < x then r := 1;
   if x < w then r := 2;
+  if w < x then r := 1;
   if y > x then r := 3;
 end;
 ",
@@ -925,14 +936,14 @@ end;
             "bne.s\t1f",
             "clr.w\t(R).l",
             "1:",
+            "cmp.w\t(W).l,%d0",
+            "bge.s\t2f",
+            "move.w\t#2,(R).l",
+            "2:",
             "move.w\t(W).l,%d2",
             "cmp.w\t%d0,%d2",
-            "bge.s\t2f",
-            "move.w\t#1,(R).l",
-            "2:",
-            "cmp.w\t(W).l,%d0",
             "bge.s\t3f",
-            "move.w\t#2,(R).l",
+            "move.w\t#1,(R).l",
             "3:",
             "cmp.w\t%d0,%d1",
             "ble.s\t4f",

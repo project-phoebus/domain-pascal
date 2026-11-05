@@ -14,7 +14,6 @@ beq.s 4f
 tst.w (%a5)
 beq.s 3f
 4:
-move.l (0xc,%a0),%d0
 lsr.b #1,%d0
 bcc.s 5f
 move.w #1,(%a5)

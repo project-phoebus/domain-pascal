@@ -14,7 +14,7 @@ move.w (%a5),%d0
 cmp.w (2,%a5),%d0
 bgt.s 2f
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
 bra.s 1b
@@ -93,7 +93,6 @@ move.w (%a5),%d0
 cmp.w (2,%a5),%d0
 blt.s 1b
 subq.l #2,%sp
-move.w (%a5),%d0
 add.w %d0,%d0
 move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
@@ -209,7 +208,6 @@ move.w (4,%a5),%d0
 cmp.w (%a5),%d0
 blt.s 2b
 subq.l #2,%sp
-move.w (4,%a5),%d0
 add.w %d0,%d0
 move.w %d0,%d1
 lsl.w #2,%d1

@@ -1,4 +1,4 @@
-//! The register-contents cache, store entries (register model F1,
+//! The register-contents cache (register model F1, F2,
 //! `docs/register-model.md`; epic domain-pascal-suii).
 //!
 //! After an assignment stores a register into a variable, the image reads
@@ -12,7 +12,12 @@
 //! registers, in the instructions' order:
 //!
 //! - an entry "register R holds the `size` bytes at location L" is made by
-//!   `move.<size> R,M` (not into a volatile object).  L is M, or, for M
+//!   `move.<size> R,M` (not into a volatile object), or by a load into a
+//!   data register, `move.<size> M,Dn`: a loaded value is read from its
+//!   data register as a stored one is (SAU2: as an operand 48 / 0, stored
+//!   elsewhere 45 / 3, into another data register 35 / 5), while a pointer
+//!   loaded into an address register is loaded again (6 / 84; 12.4 R8).
+//!   L is M, or, for M
 //!   through an address register that a `movea.l` loaded from a variable
 //!   V and that has not changed since, "V's pointer + d", so that the
 //!   entry outlives the base register (`p^.f := x; ...; y := p^.f` with
@@ -187,6 +192,8 @@ struct Entry {
     size: Size,
     reg: Reg,
     at: usize,
+    /// Made by a store, not by a load.
+    stored: bool,
 }
 
 /// The cache's state over the instructions walked so far.
@@ -219,7 +226,8 @@ impl State {
 /// only loads of address registers between.
 fn right_after_store(out: &[Insn], st: &State, k: usize) -> bool {
     st.entries.iter().any(|e| {
-        e.at < k
+        e.stored
+            && e.at < k
             && out[e.at + 1..k]
                 .iter()
                 .all(|i| matches!(i, Insn::Movea { src, .. } if root(src).is_some()))
@@ -495,7 +503,28 @@ pub fn store_cache(
                         size: *size,
                         reg: *r,
                         at: k,
+                        stored: true,
                     });
+                }
+            }
+            // A load into a data register (into an address register it is
+            // no entry: the image loads a pointer again, 84 against 6).
+            if let Insn::Move {
+                size,
+                src,
+                dst: Ea::Reg(r @ Reg::D(_)),
+            } = &out[k]
+            {
+                if root(src).is_some() {
+                    if let Some(l) = st.loc(src) {
+                        st.entries.push(Entry {
+                            loc: l,
+                            size: *size,
+                            reg: *r,
+                            at: k,
+                            stored: false,
+                        });
+                    }
                 }
             }
         }

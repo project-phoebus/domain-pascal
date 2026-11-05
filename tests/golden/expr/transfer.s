@@ -26,9 +26,9 @@ move.l (8,%a5),(%a5)
 clr.l %d0
 move.w (0xe,%a5),%d0
 move.l %d0,(8,%a5)
-move.w (0xe,%a5),(0xc,%a5)
-move.w (0xc,%a5),(0x10,%a5)
-move.w (0x10,%a5),(0xc,%a5)
+move.w %d0,(0xc,%a5)
+move.w %d0,(0x10,%a5)
+move.w %d0,(0xc,%a5)
 movea.l (-4,%fp),%a5
 unlk %fp
 rts

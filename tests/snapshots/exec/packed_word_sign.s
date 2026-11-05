@@ -85,7 +85,7 @@ btst #14,%d0
 bne.s 6f
 move.w #1,(0xe,%a5)
 6:
-tst.w (EXT_MCB).l
+tst.w %d0
 smi %d0
 move.w (EXT_MCB).l,%d1
 btst #14,%d1

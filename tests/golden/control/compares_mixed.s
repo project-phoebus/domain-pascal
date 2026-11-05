@@ -6,13 +6,12 @@ cmp.w (2,%a5),%d0
 beq.s 1f
 move.w #1,(0xe,%a5)
 1:
-move.w (%a5),%d0
 cmp.w (2,%a5),%d0
 bge.s 2f
 move.w #2,(0xe,%a5)
 2:
 move.l (4,%a5),%d0
-cmp.l (4,%a5),%d0
+cmp.l %d0,%d0
 blt.s 3f
 move.w #3,(0xe,%a5)
 3:
