@@ -9,15 +9,14 @@ move.w (0xa,%fp),%d1
 move.w (0xc,%fp),%d2
 move.w %d2,(%a5)
 clr.w (4,%a5)
-cmp.w (%a5),%d0
+cmp.w %d2,%d0
 bne.s 1f
 addq.w #1,(4,%a5)
 1:
-cmp.w (%a5),%d0
+cmp.w %d2,%d0
 beq.s 2f
 addq.w #2,(4,%a5)
 2:
-move.w (%a5),%d2
 cmp.w %d0,%d2
 bge.s 3f
 addq.w #4,(4,%a5)
@@ -62,15 +61,14 @@ move.w (0xa,%fp),%d1
 move.w (0xc,%fp),%d2
 move.w %d2,(2,%a5)
 clr.w (4,%a5)
-cmp.w (2,%a5),%d0
+cmp.w %d2,%d0
 bne.s 1f
 addq.w #1,(4,%a5)
 1:
-cmp.w (2,%a5),%d0
+cmp.w %d2,%d0
 beq.s 2f
 addq.w #2,(4,%a5)
 2:
-move.w (2,%a5),%d2
 cmp.w %d0,%d2
 bcc.s 3f
 addq.w #4,(4,%a5)

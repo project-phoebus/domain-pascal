@@ -9,7 +9,6 @@ move.w (0xa,%fp),%d3
 move.w %d2,%d0
 and.w %d3,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -18,7 +17,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 or.w %d3,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -27,7 +25,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 not.w %d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -36,7 +33,6 @@ addq.w #4,%sp
 moveq #-8,%d0
 and.w %d2,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -45,7 +41,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 lsl.w #3,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -54,7 +49,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 asr.w #3,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -63,7 +57,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 eor.w %d3,%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)

@@ -207,7 +207,7 @@ move.l %d0,%d1
 sub.w %d1,%d2
 move.w %d2,(6,%a5)
 subq.l #2,%sp
-move.w (6,%a5),-(%sp)
+move.w %d2,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp

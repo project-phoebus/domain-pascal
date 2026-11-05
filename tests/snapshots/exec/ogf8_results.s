@@ -193,7 +193,8 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 bpl.s 1f
 move.l #0x4000e,(-4,%fp)
-bra.s 3f
+move.l (-4,%fp),%d0
+bra.s 2f
 1:
 move.w %d0,%d1
 ext.l %d1
@@ -201,8 +202,6 @@ move.l %d1,(0x18,%a5)
 pea (0x18,%a5)
 jsr (EXEC_$ID_L).l
 move.l %d0,(-4,%fp)
-3:
-move.l (-4,%fp),%d0
 2:
 movea.l (-8,%fp),%a5
 unlk %fp
@@ -214,7 +213,6 @@ subq.l #2,%sp
 move.w (8,%fp),-(%sp)
 bsr.s RF
 move.l %d0,(-4,%fp)
-move.l (-4,%fp),%d0
 unlk %fp
 rts
 .globl OGF8_RESULTS_$RECS
@@ -297,7 +295,7 @@ addq.w #8,%sp
 move.l %a0,(0x28,%a5)
 tst.l (0x28,%a5)
 beq.s 1f
-move.l (0x28,%a5),-(%sp)
+pea (%a0)
 jsr (EXEC_$LOG_L).l
 addq.w #4,%sp
 movea.l (0x28,%a5),%a0

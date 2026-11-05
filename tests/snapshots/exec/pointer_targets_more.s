@@ -214,7 +214,7 @@ bsr.w BUMP
 addq.w #4,%sp
 lea (0x16,%a5),%a0
 move.l %a0,(-4,%fp)
-move.l (-4,%fp),-(%sp)
+pea (%a0)
 bsr.w BUMP
 movea.l (-8,%fp),%a5
 unlk %fp

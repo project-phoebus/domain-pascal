@@ -10,8 +10,6 @@ move.w (0xc,%fp),%d2
 move.w %d0,(%a5)
 move.w %d2,(8,%a5)
 move.w %d1,(4,%a5)
-move.w (%a5),%d0
-move.w (4,%a5),%d1
 ext.l %d0
 ext.l %d1
 add.l %d1,%d0
@@ -46,7 +44,6 @@ lea (.Ldata).l,%a5
 move.l (8,%fp),%d0
 lea (ADDRV_$DRV+0xa).l,%a0
 move.l %a0,(0x10,%a5)
-movea.l (0x10,%a5),%a0
 move.l %d0,(%a0)
 pea (ADDRV_$DRV+0xa).l
 jsr (EXEC_$LOG_L).l
@@ -60,7 +57,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(2,%a5)
-move.w (2,%a5),%d0
 btst #0,%d0
 sne %d0
 move.b %d0,(0x14,%a5)

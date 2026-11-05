@@ -15,7 +15,7 @@ bpl.s 1f
 neg.l %d2
 1:
 move.w %d2,(2,%a5)
-move.w (2,%a5),%d0
+move.w %d2,%d0
 movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
 rts
@@ -35,7 +35,7 @@ bpl.s 1f
 neg.l %d2
 1:
 move.w %d2,(%a5)
-move.w (%a5),%d0
+move.w %d2,%d0
 movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
 rts
@@ -51,7 +51,7 @@ bpl.s 1f
 neg.w %d1
 1:
 move.w %d1,(2,%a5)
-move.w (2,%a5),%d0
+move.w %d1,%d0
 movea.l (-8,%fp),%a5
 unlk %fp
 rts
@@ -68,7 +68,7 @@ neg.w %d1
 1:
 subi.w #0x7d0,%d1
 move.w %d1,(%a5)
-move.w (%a5),%d0
+move.w %d1,%d0
 movea.l (-8,%fp),%a5
 unlk %fp
 rts

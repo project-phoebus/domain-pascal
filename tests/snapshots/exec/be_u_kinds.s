@@ -134,7 +134,7 @@ move.w %d2,%d0
 lsl.w #3,%d0
 lea (4,%a5,%d0.w),%a0
 move.l %a0,(-0x18,%fp)
-move.l (-0x18,%fp),%d0
+move.l %a0,%d0
 lea (0x14,%a5),%a0
 move.l %a0,%d2
 cmp.l %d2,%d0

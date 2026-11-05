@@ -290,7 +290,7 @@ movem.l %d2-%d3/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d2
+move.w %d0,%d2
 pea (.Lc0,%pc)
 jsr (EXEC_$ID_W).l
 addq.w #4,%sp

@@ -42,7 +42,6 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 lea (%a5),%a0
 move.l %a0,(4,%a5)
-movea.l (4,%a5),%a0
 move.w %d0,(%a0)
 move.w %d0,%d1
 addq.w #1,%d1

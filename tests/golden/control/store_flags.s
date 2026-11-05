@@ -8,7 +8,7 @@ jsr (GETL).l
 addq.w #4,%sp
 move.l %d0,(-4,%fp)
 beq.s 1f
-move.l (-4,%fp),-(%sp)
+move.l %d0,-(%sp)
 jsr (USEL).l
 addq.w #4,%sp
 pea (-4,%fp)
@@ -30,7 +30,7 @@ bpl.s 1f
 move.w #1,(%a5)
 1:
 subq.l #2,%sp
-move.b (-2,%fp),-(%sp)
+move.b %d0,-(%sp)
 jsr (USB).l
 addq.w #4,%sp
 pea (-2,%fp)
@@ -52,7 +52,7 @@ bpl.s 1f
 clr.w (%a5)
 1:
 subq.l #2,%sp
-move.w (-2,%fp),-(%sp)
+move.w %d0,-(%sp)
 jsr (USE).l
 addq.w #4,%sp
 pea (-2,%fp)
@@ -102,7 +102,7 @@ bne.s 1f
 move.w #3,(%a5)
 1:
 subq.l #2,%sp
-move.w (2,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (USE).l
 movea.l (-4,%fp),%a5
 unlk %fp

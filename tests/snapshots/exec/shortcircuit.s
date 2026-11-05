@@ -22,7 +22,7 @@ move.w %d0,(%a5)
 tst.w (%a5)
 beq.s 1f
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 bsr.s PROBE
 addq.w #4,%sp
 tst.b %d0

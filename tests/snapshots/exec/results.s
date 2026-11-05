@@ -9,7 +9,7 @@ jsr (EXEC_$ID_W).l
 addq.w #4,%sp
 move.w %d0,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 move.l #0x11170,(4,%a5)
@@ -21,7 +21,7 @@ move.w (%a5),%d0
 ext.l %d0
 add.l (4,%a5),%d0
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 pea (8,%fp)
@@ -57,7 +57,6 @@ pea (-4,%fp)
 jsr (EXEC_$ID_P).l
 addq.w #4,%sp
 move.l %a0,(0xc,%a5)
-movea.l (0xc,%a5),%a0
 move.w (%a0),(%a5)
 subq.l #2,%sp
 move.w (%a5),-(%sp)

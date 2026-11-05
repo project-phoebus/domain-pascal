@@ -46,7 +46,7 @@ movea.l (0x16,%fp),%a2
 move.w %d0,(-2,%fp)
 clr.l (%a2)
 move.w %d1,%d2
-tst.w (-2,%fp)
+tst.w %d0
 ble.s 1f
 bsr.s BATCH
 1:

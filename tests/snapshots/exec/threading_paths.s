@@ -672,7 +672,7 @@ bsr.w BACK_GOTO
 bsr.w FRES
 move.w %d0,(0xa,%a5)
 subq.l #2,%sp
-move.w (0xa,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
 subq.l #2,%sp

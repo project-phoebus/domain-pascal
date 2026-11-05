@@ -112,7 +112,6 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 clr.w %d2
 move.w %d0,(%a5)
-move.w (%a5),%d0
 subq.w #1,%d0
 bmi.s 1f
 move.w %d0,%d0

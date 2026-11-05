@@ -6,7 +6,6 @@ move.w (8,%fp),%d0
 move.l (0xa,%fp),%d1
 move.w %d0,(-2,%fp)
 move.l %d1,(-8,%fp)
-move.w (-2,%fp),%d0
 ext.l %d0
 move.l %d0,(-0xc,%fp)
 pea (-0xc,%fp)

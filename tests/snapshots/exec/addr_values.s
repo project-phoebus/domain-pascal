@@ -59,7 +59,6 @@ andi.l #0x3ff,%d0
 .short 0xd0bc
 .long ADDRV_$LONG
 move.l %d0,(-0x28,%fp)
-move.l (-0x28,%fp),%d0
 .short 0x90bc
 .long ADDRV_$LONG
 move.l %d0,(-0x28,%fp)
@@ -69,11 +68,9 @@ addq.w #4,%sp
 clr.l %d0
 sub.l %d2,%d0
 move.l %d0,(-0x28,%fp)
-move.l (-0x28,%fp),%d0
 .short 0xd0bc
 .long ADDRV_$LONG
 move.l %d0,(-0x28,%fp)
-move.l (-0x28,%fp),%d0
 .short 0x90bc
 .long ADDRV_$LONG
 move.l %d0,(-0x28,%fp)
@@ -83,7 +80,6 @@ addq.w #4,%sp
 move.l #0x4d2,(%a5)
 lea (%a5),%a0
 move.l %a0,(4,%a5)
-movea.l (4,%a5),%a0
 move.l (%a0),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
@@ -97,7 +93,6 @@ moveq #0x63,%d0
 move.l %d0,(-0x18,%fp)
 lea (-0x18,%fp),%a0
 move.l %a0,(4,%a5)
-movea.l (4,%a5),%a0
 move.l (%a0),-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp

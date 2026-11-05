@@ -19,7 +19,7 @@ addq.w #4,%sp
 move.l (4,%a2),%d0
 add.l %d2,%d0
 move.l %d0,(4,%a2)
-move.l (4,%a2),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 1:
 movem.l (-0xc,%fp),%d2/%a2
@@ -43,7 +43,7 @@ movea.l %d0,%a0
 move.l (4,%a0),%d1
 add.l %d2,%d1
 move.l %d1,(4,%a0)
-move.l (4,%a0),(%a5)
+move.l %d1,(%a5)
 1:
 movem.l (-0x10,%fp),%d2/%a2/%a5
 unlk %fp

@@ -8,8 +8,8 @@ move.w (8,%fp),%d0
 move.b (0xa,%fp),%d1
 move.w %d0,(4,%a5)
 move.b %d1,(2,%a5)
-move.w (4,%a5),%d2
-tst.b (2,%a5)
+move.w %d0,%d2
+tst.b %d1
 bpl.s 1f
 move.w %d2,%d0
 addq.w #1,%d0
@@ -32,7 +32,6 @@ move.l %a1,(0x10,%a5)
 tst.w (%a0)
 ble.s 1f
 move.w (%a0),%d0
-movea.l (0x10,%a5),%a1
 ext.l %d0
 move.l %d0,(%a1)
 bra.s 2f

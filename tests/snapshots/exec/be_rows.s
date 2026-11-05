@@ -200,7 +200,6 @@ move.l %a0,(0x90,%a5)
 move.w %d0,%d2
 lsl.w #2,%d2
 move.w %d2,%d3
-movea.l (0x90,%a5),%a0
 add.w %d3,%d3
 add.w %d3,%d2
 move.w %d1,%d3

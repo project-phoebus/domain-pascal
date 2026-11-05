@@ -514,7 +514,8 @@ fn values_and_inclusion() {
     );
     // Best effort (no site): `s := s * c` not in place but as a value
     // stored; `x + y` and `c - x` as values; subset `<=` as `x - y = []`,
-    // superset `>=` as `y - x = []`; a constant left operand swapped.
+    // superset `>=` as `y - x = []`; a constant left operand swapped.  A
+    // value just stored is read from its register (`crate::cache`).
     assert_eq!(
         body(
             "procedure t(p: rp); options(val_param);
@@ -532,14 +533,12 @@ fn values_and_inclusion() {
             "moveq\t#6,%d0",
             "and.w\t(%a0),%d0",
             "move.w\t%d0,(%a0)",
-            "move.w\t(%a0),%d0",
             "or.w\t(0x2e,%a0),%d0",
             "move.w\t%d0,(0x2e,%a0)",
             "move.w\t(%a0),%d0",
             "not.w\t%d0",
             "andi.w\t#0x21,%d0",
             "move.w\t%d0,(0x2e,%a0)",
-            "move.w\t(0x2e,%a0),%d0",
             "not.w\t%d0",
             "and.w\t(%a0),%d0",
             "bne.s\t1f",

@@ -7,7 +7,6 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d1
 move.w (0xa,%fp),%d0
 move.w %d1,(%a5)
-move.w (%a5),%d1
 move.w %d0,%d2
 addq.w #1,%d2
 cmp.w %d2,%d1

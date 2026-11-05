@@ -138,7 +138,7 @@ move.w (0x202,%a5),%d0
 add.w %d2,%d0
 move.w %d0,(0x202,%a5)
 subq.l #2,%sp
-move.w (0x202,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 2:
@@ -159,7 +159,7 @@ move.w (0x202,%a5),%d0
 sub.w %d2,%d0
 move.w %d0,(0x202,%a5)
 subq.l #2,%sp
-move.w (0x202,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 tst.w (0x202,%a5)

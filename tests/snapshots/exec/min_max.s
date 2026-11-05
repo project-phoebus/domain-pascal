@@ -126,7 +126,7 @@ move.w %d1,%d2
 1:
 move.w %d2,(4,%a5)
 subq.l #2,%sp
-move.w (4,%a5),-(%sp)
+move.w %d2,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
@@ -138,7 +138,7 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-cmpi.w #3,(%a5)
+cmpi.w #3,%d0
 bhi.s 1f
 subq.l #2,%sp
 move.w #1,-(%sp)

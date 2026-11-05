@@ -17,7 +17,6 @@ link.w %fp,#-8
 move.l %d2,-(%sp)
 move.w (8,%fp),%d0
 move.w %d0,(-2,%fp)
-move.w (-2,%fp),%d0
 move.w %d0,%d1
 add.w %d1,%d1
 add.w %d1,%d0

@@ -13,6 +13,7 @@
 //! - [`emit`]: a whole module as an assembly file;
 //! - [`runtime`]: the run-time library M$ARITH and its entry names.
 
+pub mod cache;
 pub mod crossjump;
 pub mod emit;
 pub mod frame;

@@ -32,7 +32,6 @@ lea (4,%a5),%a0
 move.l %a0,(0x18,%a5)
 move.w (2,%a5),%d0
 addq.w #1,%d0
-movea.l (0x18,%a5),%a0
 btst #0,%d0
 sne %d0
 move.b %d0,(0x10,%a0)
@@ -73,7 +72,7 @@ move.b %d0,(-6,%fp)
 bpl.s 2f
 addq.w #1,%d3
 2:
-tst.b (-6,%fp)
+tst.b %d0
 bmi.s 3f
 addq.w #2,%d3
 3:

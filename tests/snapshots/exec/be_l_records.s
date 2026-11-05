@@ -37,7 +37,6 @@ SAME:
 link.w %fp,#-4
 move.l (8,%fp),%d0
 move.l %d0,(-4,%fp)
-move.l (-4,%fp),%d0
 unlk %fp
 rts
 .globl BE_L_RECORDS_$MAIN

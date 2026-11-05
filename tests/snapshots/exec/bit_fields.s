@@ -110,7 +110,7 @@ jsr (EXEC_$LOG_BOOL).l
 addq.w #4,%sp
 move.w %d3,(0xa,%a5)
 clr.w %d0
-move.w (0xa,%a5),%d1
+move.w %d3,%d1
 move.b (1,%a5),%d0
 btst %d1,%d0
 sne %d0

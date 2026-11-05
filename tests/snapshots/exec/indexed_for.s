@@ -150,7 +150,6 @@ lea (8,%a5),%a0
 move.w %d2,%d3
 add.w %d0,%d3
 move.w %d3,(0x3a,%a0)
-move.w (0x3a,%a0),%d3
 add.w %d3,%d3
 move.w %d3,(0x40,%a0)
 addq.w #1,%d2
@@ -503,7 +502,6 @@ ext.l %d2
 move.l %d2,%d3
 neg.l %d2
 lsl.l #3,%d3
-movea.l (0x90,%a5),%a1
 add.l %d3,%d2
 move.l %d2,(%a1)
 addq.w #1,%d1

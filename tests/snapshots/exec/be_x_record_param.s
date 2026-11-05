@@ -27,11 +27,10 @@ move.l (8,%fp),%d0
 move.l (0xc,%fp),%d1
 move.w (0x10,%fp),%d2
 move.l %d0,(-4,%fp)
-move.l (-4,%fp),%d0
 tst.w %d2
 ble.s 1f
 move.l %d1,(-4,%fp)
-move.l (-4,%fp),%d0
+move.l %d1,%d0
 1:
 move.l (-8,%fp),%d2
 unlk %fp

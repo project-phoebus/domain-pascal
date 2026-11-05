@@ -130,7 +130,7 @@ moveq #1,%d1
 move.w (%a5),%d2
 add.w %d1,%d2
 move.w %d2,(%a5)
-cmpi.w #0x64,(%a5)
+cmpi.w #0x64,%d2
 bgt.w 3f
 3:
 addq.w #1,%d1

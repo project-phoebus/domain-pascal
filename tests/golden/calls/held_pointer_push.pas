@@ -6,7 +6,10 @@
   A2, passed on to SIO_$I_TSTART at 0xE1C6C4 `pea (A2)'.  A pointer in
   memory is pushed with `move.l': a frame slot, `move.l (-8,A6),-(SP)'
   (DBUF_$SET_BUFF's callers 0xE38A0A, 0xE3916A, 0xE39E08), the unit's
-  data, `move.l (3384,A5),-(SP)' (0xE3B2B8, 0xE3B608). }
+  data, `move.l (3384,A5),-(SP)' (0xE3B2B8, 0xE3B608).  A pointer local
+  just stored from A0 and pushed by the next statement is pushed from
+  A0, `pea (A0)', by the register-contents cache (docs/register-model.md,
+  F1; `crate::cache'; no site of this exact shape). }
 module sio;
 type
   desc_t = record

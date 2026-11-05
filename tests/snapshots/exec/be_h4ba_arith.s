@@ -204,7 +204,7 @@ move.w %d0,%d1
 1:
 move.w %d1,(-2,%fp)
 clr.l %d0
-move.w (-2,%fp),%d0
+move.w %d1,%d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 unlk %fp
@@ -222,7 +222,7 @@ move.w %d0,%d1
 1:
 move.w %d1,(-2,%fp)
 clr.l %d0
-move.w (-2,%fp),%d0
+move.w %d1,%d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
@@ -243,7 +243,7 @@ lea (.Ldata).l,%a5
 move.l (8,%fp),%d0
 move.w (0xc,%fp),%d2
 move.l %d0,(0x1500,%a5)
-move.l (0x1500,%a5),%d3
+move.l %d0,%d3
 ori.l #0x12000000,%d3
 move.l %d3,(-4,%fp)
 move.l %d3,-(%sp)

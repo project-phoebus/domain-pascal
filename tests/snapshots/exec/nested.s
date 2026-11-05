@@ -26,7 +26,7 @@ bsr.s SUM
 addq.w #4,%sp
 move.w %d0,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 bsr.s PUT
@@ -55,7 +55,7 @@ move.w (-2,%a2),%d0
 add.w %d2,%d0
 move.w %d0,(-2,%a2)
 subq.l #2,%sp
-move.w (-2,%a2),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
 subq.l #2,%sp

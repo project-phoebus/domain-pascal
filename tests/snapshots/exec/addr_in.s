@@ -90,7 +90,7 @@ bsr.s SHOW
 addq.w #4,%sp
 lea (4,%a2),%a0
 move.l %a0,(0x14,%a5)
-movea.l (0x14,%a5),%a2
+movea.l %a0,%a2
 pea (%a2)
 jsr (EXEC_$LOG_L).l
 movem.l (-0xc,%fp),%a2/%a5
@@ -114,7 +114,7 @@ lea (.Ldata).l,%a5
 move.l (0xc,%fp),%d2
 lea (8,%fp),%a0
 move.l %a0,(0x14,%a5)
-movea.l (0x14,%a5),%a2
+movea.l %a0,%a2
 pea (%a2)
 jsr (EXEC_$LOG_L).l
 addq.w #4,%sp

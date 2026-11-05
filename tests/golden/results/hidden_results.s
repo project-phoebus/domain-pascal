@@ -34,7 +34,7 @@ add.l (%a0),%d0
 move.l %d0,(-0xc,%fp)
 move.w (4,%a0),(-8,%fp)
 movea.l (8,%fp),%a1
-move.l (-0xc,%fp),(%a1)
+move.l %d0,(%a1)
 move.w (-8,%fp),(4,%a1)
 unlk %fp
 rts

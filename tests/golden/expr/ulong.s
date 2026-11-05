@@ -33,12 +33,12 @@ move.l (V).l,-(%sp)
 jsr (M$DIU$LLW).l
 addq.w #8,%sp
 move.l %d0,(U).l
-move.l (U).l,-(%sp)
+move.l %d0,-(%sp)
 move.l (V).l,-(%sp)
 jsr (M$DIU$LLL).l
 addq.w #8,%sp
 move.l %d0,(U).l
-move.l (U).l,-(%sp)
+move.l %d0,-(%sp)
 move.l (V).l,-(%sp)
 jsr (M$OIU$LLL).l
 addq.w #8,%sp
@@ -47,7 +47,7 @@ move.l (V).l,%d0
 lsr.l #8,%d0
 lsr.l #2,%d0
 move.l %d0,(U).l
-move.l (U).l,-(%sp)
+move.l %d0,-(%sp)
 move.l (V).l,-(%sp)
 jsr (M$MIU$LLL).l
 addq.w #8,%sp

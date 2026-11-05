@@ -45,7 +45,6 @@ move.b (0xa,%fp),%d3
 cmpi.w #1,%d2
 seq %d0
 move.b %d0,(%a5)
-move.b (%a5),%d0
 not.b %d0
 move.b %d0,(2,%a5)
 pea (2,%a5)
@@ -63,7 +62,6 @@ addq.w #4,%sp
 move.b %d3,(8,%a5)
 lea (6,%a5),%a0
 move.l %a0,(0xc,%a5)
-movea.l (0xc,%a5),%a0
 move.b (2,%a0),%d0
 not.b %d0
 move.b %d0,(2,%a5)
@@ -159,7 +157,7 @@ move.w (0xa,%fp),%d3
 move.w %d3,(4,%a5)
 tst.w %d2
 bne.s 1f
-cmpi.w #4,(4,%a5)
+cmpi.w #4,%d3
 bne.s 1f
 st %d0
 bra.s 2f

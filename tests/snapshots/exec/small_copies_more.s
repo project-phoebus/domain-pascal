@@ -227,9 +227,9 @@ addq.w #8,%sp
 move.w #0xa,(-0x14,%fp)
 moveq #9,%d0
 move.l %d0,(-0x18,%fp)
-move.l (-0x18,%fp),(0x28,%a5)
+move.l %d0,(0x28,%a5)
 move.w (-0x14,%fp),(0x2c,%a5)
-move.l (0x28,%a5),(0x2e,%a5)
+move.l %d0,(0x2e,%a5)
 move.w (0x2c,%a5),(0x32,%a5)
 pea (.Lc2,%pc)
 pea (0x28,%a5)

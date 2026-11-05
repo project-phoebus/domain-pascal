@@ -63,7 +63,6 @@ move.w #7,(0x16,%a5)
 move.w #8,(0x18,%a5)
 move.w #5,(0x1a,%a5)
 moveq #2,%d0
-movea.l (0x1c,%a5),%a0
 movea.l (0x1c,%a5),%a1
 lea (2,%a0),%a2
 lea (2,%a1),%a0

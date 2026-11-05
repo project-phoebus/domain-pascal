@@ -7,17 +7,17 @@ lea (.Ldata).l,%a5
 move.b (8,%fp),%d2
 move.b %d2,(6,%a5)
 clr.l %d0
-move.b (6,%a5),%d0
+move.b %d2,%d0
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.b %d2,(5,%a5)
 clr.l %d0
-move.b (5,%a5),%d0
+move.b %d2,%d0
 add.l (%a5),%d0
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 clr.l %d0
@@ -25,14 +25,14 @@ move.b %d2,%d0
 lsr.l #2,%d0
 andi.l #0x3f,%d0
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.w #0xf0,%d0
 and.b (6,%a5),%d0
 andi.l #0xffff,%d0
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp
@@ -52,7 +52,7 @@ addq.w #8,%sp
 move.w %d0,%d1
 ext.l %d1
 move.l %d1,(%a5)
-move.l (%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 subq.l #2,%sp
@@ -64,7 +64,7 @@ move.w %d0,%d1
 ext.l %d1
 addi.l #0x186a0,%d1
 move.l %d1,(%a5)
-move.l (%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-0xc,%fp),%d2-%d3/%a5
 unlk %fp
@@ -88,7 +88,7 @@ move.l %d0,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.l %d2,%d4
@@ -104,7 +104,7 @@ move.l %d4,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 pea (8,%fp)
@@ -117,7 +117,7 @@ move.l %d0,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-0x14,%fp),%d2-%d4/%a5
 unlk %fp
@@ -159,7 +159,7 @@ move.w %d2,%d0
 addq.w #1,%d0
 move.w %d0,(0xa,%a5)
 subq.l #2,%sp
-move.w (0xa,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
 move.w %d2,(0xc,%a5)
@@ -314,7 +314,6 @@ move.l %d0,%d2
 move.l %a0,%d0
 andi.l #0x3ff,%d0
 move.l %d0,(%a5)
-move.l (%a5),%d0
 move.l %d2,%d1
 andi.l #0x3ff,%d1
 cmp.l %d1,%d0
@@ -327,7 +326,6 @@ lea (0xe,%a5),%a0
 move.l %a0,%d0
 ori.l #3,%d0
 move.l %d0,(%a5)
-move.l (%a5),%d0
 moveq #3,%d1
 move.l %d2,%d3
 and.l %d2,%d1
@@ -343,7 +341,6 @@ lea (0xe,%a5),%a0
 move.l %a0,%d0
 eori.l #0x55,%d0
 move.l %d0,(%a5)
-move.l (%a5),%d0
 moveq #0x55,%d1
 moveq #0x55,%d3
 add.l %d2,%d1
@@ -367,7 +364,6 @@ move.l %d0,%d2
 move.l %a0,%d0
 andi.l #0xffff,%d0
 move.l %d0,(%a5)
-move.l (%a5),%d0
 move.l %d2,%d1
 addq.l #4,%d1
 andi.l #0xffff,%d1

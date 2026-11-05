@@ -7,9 +7,8 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w (0xa,%fp),%d2
 move.w %d0,(%a5)
-move.w (%a5),%d0
-move.w %d2,%d1
 ext.l %d0
+move.w %d2,%d1
 ext.l %d1
 add.l %d1,%d0
 cmpi.l #5,%d0

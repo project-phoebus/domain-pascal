@@ -34,7 +34,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 lsr.w %d3,%d0
 move.w %d0,(2,%a5)
-move.w (2,%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)
@@ -43,7 +42,6 @@ addq.w #4,%sp
 move.w %d2,%d0
 lsl.w %d3,%d0
 move.w %d0,(2,%a5)
-move.w (2,%a5),%d0
 ext.l %d0
 move.l %d0,(4,%a5)
 pea (4,%a5)

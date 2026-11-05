@@ -28,7 +28,7 @@ moveq #0x7f,%d0
 and.b (%a5),%d0
 move.w %d0,(8,%a5)
 subq.l #2,%sp
-move.w (8,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 tst.w (%a5)
@@ -69,7 +69,7 @@ and.w (4,%a5),%d0
 lsr.w #7,%d0
 move.w %d0,(8,%a5)
 subq.l #2,%sp
-move.w (8,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 tst.w (4,%a5)
@@ -83,7 +83,7 @@ and.l (4,%a5),%d0
 lsr.l #8,%d0
 move.w %d0,(8,%a5)
 subq.l #2,%sp
-move.w (8,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 clr.l (4,%a5)

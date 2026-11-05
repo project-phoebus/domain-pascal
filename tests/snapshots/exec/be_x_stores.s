@@ -111,7 +111,6 @@ cmp.w %d1,%d2
 bge.s 1f
 move.w %d1,%d2
 1:
-movea.l (0xc,%a5),%a0
 move.w %d2,(2,%a0)
 movea.l (0xc,%a5),%a0
 pea (2,%a0)
@@ -212,7 +211,7 @@ lea (4,%a5),%a0
 move.l %a0,(0xc,%a5)
 cmpi.w #1,%d0
 bne.s 1f
-move.l (0xc,%a5),-(%sp)
+pea (%a0)
 bra.s 3f
 1:
 clr.l -(%sp)

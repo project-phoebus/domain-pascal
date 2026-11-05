@@ -650,8 +650,10 @@ fn element_addresses_as_values() {
         body("procedure t; internal;\nbegin\n  with xrs[w] do b := 0;\nend;\n")[6..],
         ["lea\t(0,%a0,%d0.w),%a1", "clr.l\t(-8,%a1)"]
     );
+    // (`w` read from D0, which its store left holding it: the register
+    // model's store cache, `crate::cache`.)
     assert_eq!(
-        body("procedure t; internal;\nbegin\n  w := f(w);\n  pp := addr(xrs[w]);\nend;\n")[10..],
+        body("procedure t; internal;\nbegin\n  w := f(w);\n  pp := addr(xrs[w]);\nend;\n")[9..],
         ["lea\t(-0xc,%a0,%d0.w),%a1", "move.l\t%a1,(PP).l"]
     );
     // A1 dirty on every path (the first statement's address): A0 itself

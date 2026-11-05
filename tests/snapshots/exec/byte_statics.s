@@ -33,7 +33,7 @@ addq.w #8,%sp
 bsr.s COUNT
 move.w %d0,(6,%a5)
 subq.l #2,%sp
-move.w (6,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 subq.l #2,%sp

@@ -79,7 +79,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 moveq #9,%d0
 move.l %d0,(8,%a5)
-move.l (8,%a5),%d0
 clr.w %d1
 move.b %d0,%d1
 move.w %d1,(-4,%fp)

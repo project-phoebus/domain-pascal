@@ -14,7 +14,7 @@ add.l %d1,%d2
 move.l %d2,(4,%a5)
 addq.l #1,%d1
 dbf %d0,2b
-move.l (4,%a5),-(%sp)
+move.l %d2,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 moveq #5,%d2
@@ -287,7 +287,6 @@ lea (.Ldata).l,%a5
 moveq #3,%d0
 move.l %d0,(0x10,%a5)
 clr.l (%a5)
-move.l (0x10,%a5),%d0
 subq.l #1,%d0
 blt.s 1f
 .balignw 4,0x2048
@@ -370,7 +369,7 @@ add.l (%a5),%d2
 move.l %d2,(%a5)
 addq.b #1,%d1
 dbf %d0,11b
-move.l (%a5),-(%sp)
+move.l %d2,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-0x10,%fp),%d2/%a5
 unlk %fp
@@ -502,7 +501,7 @@ addq.l #1,%d1
 dbf %d0,2b
 1:
 move.l %d1,(0xc,%a5)
-move.l (0xc,%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 moveq #1,%d2
@@ -528,7 +527,7 @@ clr.w %d0
 move.b %d1,%d0
 ext.l %d0
 move.l %d0,(0xc,%a5)
-move.l (0xc,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-0x14,%fp),%d2-%d3/%a5
 unlk %fp

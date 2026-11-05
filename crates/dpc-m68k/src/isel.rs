@@ -2372,6 +2372,37 @@ fn select_body_once(
             }
         }
     }
+    // The register-contents cache's store entries (register model F1,
+    // [`crate::cache`]), on the allocated body with its spills, before
+    // scheduling: reads rewritten, the loads that left dead removed.
+    let dead = crate::cache::store_cache(&mut out, exit, &volatile_insns, &[]);
+    let units: Vec<crate::sched::Unit> = if dead.is_empty() {
+        units
+    } else {
+        let shift = |i: usize| i - dead.iter().filter(|&&d| d < i).count();
+        for k in volatile_insns.iter_mut() {
+            *k = shift(*k);
+        }
+        let mut k = 0;
+        out.retain(|_| {
+            k += 1;
+            !dead.contains(&(k - 1))
+        });
+        // A register only a removed load took is not saved.
+        let mut used = RegSet::of(&[Reg::A(5)]);
+        for i in &out {
+            let a = crate::regs::access(i);
+            for r in a.uses.iter().chain(a.defs.iter()) {
+                used.insert(*r);
+            }
+        }
+        saves = saves.intersection(used);
+        units
+            .iter()
+            .map(|&(a, b)| (shift(a), shift(b)))
+            .filter(|(a, b)| b - a > 1)
+            .collect()
+    };
     // The instructions that reference volatile objects, for
     // [`thread_past_tests`] after scheduling (by value: equal instructions
     // count as volatile too).

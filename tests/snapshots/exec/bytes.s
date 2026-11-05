@@ -34,7 +34,7 @@ clr.w %d0
 move.b %d2,%d0
 move.w %d0,(0x204,%a5)
 subq.l #2,%sp
-move.w (0x204,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 cmpi.w #0x7f,(0x204,%a5)

@@ -32,7 +32,7 @@ move.w (0xa,%fp),%d1
 move.w %d0,(4,%a5)
 move.w %d1,(%a5)
 clr.w (2,%a5)
-tst.w (4,%a5)
+tst.w %d0
 ble.s 1f
 pea (4,%a5)
 jsr (EXEC_$ID_W).l

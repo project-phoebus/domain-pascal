@@ -6,7 +6,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 cmpi.w #6,%d0
 bcc.s 7f
 add.w %d0,%d0
@@ -55,7 +54,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 subq.w #3,%d0
 cmpi.w #8,%d0
 bcc.s 5f
@@ -99,7 +97,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 addq.w #4,%d0
 cmpi.w #4,%d0
 bcc.s 6f

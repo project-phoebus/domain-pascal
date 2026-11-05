@@ -99,7 +99,7 @@ dbf %d2,2b
 1:
 move.w %d1,(0x48,%a5)
 subq.l #2,%sp
-move.w (0x48,%a5),-(%sp)
+move.w %d1,-(%sp)
 jsr (EXEC_$MARK).l
 movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
@@ -131,7 +131,7 @@ dbf %d1,5b
 4:
 move.w %d0,(0x48,%a5)
 subq.l #2,%sp
-move.w (0x48,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 movea.l (-8,%fp),%a5
 unlk %fp

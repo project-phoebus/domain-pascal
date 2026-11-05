@@ -47,7 +47,7 @@ add.w %d0,%d0
 add.w %d0,%d1
 lea (-0xc,%a0,%d1.w),%a1
 move.l %a1,(%a5)
-movea.l (%a5),%a0
+movea.l %a1,%a0
 move.l (4,%a0),%d0
 movea.l (-8,%fp),%a5
 unlk %fp
@@ -75,7 +75,7 @@ add.w %d0,%d0
 add.w %d0,%d1
 lea (-0xc,%a0,%d1.w),%a0
 move.l %a0,(4,%a5)
-movea.l (%a5),%a0
+movea.l %a1,%a0
 movea.l (4,%a5),%a1
 move.l (%a0),%d0
 add.l (8,%a1),%d0
@@ -97,7 +97,7 @@ add.w %d1,%d1
 add.w %d1,%d0
 lea (-0xc,%a0,%d0.w),%a1
 move.l %a1,(%a5)
-movea.l (%a5),%a0
+movea.l %a1,%a0
 move.l (8,%a0),%d0
 movem.l (-0xc,%fp),%d2/%a5
 unlk %fp

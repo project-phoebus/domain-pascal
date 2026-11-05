@@ -27,7 +27,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(4,%a5)
-move.w (4,%a5),%d0
 btst #7,%d0
 beq.s 1f
 move.w #1,(8,%a5)
@@ -90,7 +89,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(4,%a5)
-move.w (4,%a5),%d0
 btst #2,%d0
 sne %d0
 move.b %d0,(6,%a5)

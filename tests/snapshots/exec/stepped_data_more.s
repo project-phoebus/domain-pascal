@@ -175,7 +175,7 @@ lea (6,%a5),%a0
 movea.l %a0,%a1
 move.w %d1,(0x58,%a1)
 move.w (0x56,%a1),%d2
-add.w (0x58,%a1),%d2
+add.w %d1,%d2
 move.w %d2,(0x5a,%a1)
 addq.w #1,%d1
 addq.l #6,%a0
@@ -274,7 +274,7 @@ add.w (0x1c,%a1),%d1
 move.w %d1,(0x58,%a0)
 addq.l #6,%a1
 dbf %d0,5b
-move.w (0x58,%a0),(0x56,%a0)
+move.w %d1,(0x56,%a0)
 jsr (EXEC_$CLOBBER).l
 addq.l #6,%a2
 dbf %d2,2b

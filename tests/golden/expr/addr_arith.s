@@ -28,7 +28,7 @@ andi.l #0x3ff,%d1
 .short 0xd2bc
 .long BUFPOOL
 move.l %d1,(%a5)
-move.l (%a5),%d0
+move.l %d1,%d0
 .short 0x90bc
 .long BUFPOOL
 move.l %d0,(%a5)

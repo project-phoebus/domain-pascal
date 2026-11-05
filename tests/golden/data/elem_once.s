@@ -48,7 +48,6 @@ subq.l #2,%sp
 move.w (AS_ID).l,-(%sp)
 jsr (F).l
 move.w %d0,(AS_ID).l
-move.w (AS_ID).l,%d0
 movea.l #ECS,%a0
 lsl.w #2,%d0
 move.w %d0,%d1

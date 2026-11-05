@@ -165,7 +165,6 @@ move.w (8,%fp),%d2
 lea (4,%a5),%a0
 move.l %a0,(0x14,%a5)
 move.w %d2,%d3
-movea.l (0x14,%a5),%a0
 add.w %d3,%d3
 move.w #7,(-2,%a0,%d3.w)
 movea.l (0x14,%a5),%a0

@@ -657,7 +657,7 @@ MISMATCH	fim/fim.pas	fim_$install
 OK	fim/fim.pas	fim_$get_fim_addr
 STUB	fim/fim.pas	fim_$init_asid
 MISMATCH	fim/fim.pas	fim_$free_asid
-MISMATCH	fim/fim.pas	fim_$get_user_pc
+OK	fim/fim.pas	fim_$get_user_pc
 STUB	flop/flop.pas	flop_$boot
 STUB	flp/flp.pas	flp_$int
 MISMATCH	flp/flp.pas	flp_$revalidate

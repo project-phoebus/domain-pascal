@@ -60,7 +60,7 @@ movem.l %a2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 lea (8,%a5),%a0
 move.l %a0,(0x10,%a5)
-movea.l (0x10,%a5),%a2
+movea.l %a0,%a2
 movea.l (8,%fp),%a1
 move.w (%a1),(4,%a2)
 subq.w #1,(4,%a2)

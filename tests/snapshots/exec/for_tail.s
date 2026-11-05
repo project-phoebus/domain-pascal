@@ -639,7 +639,6 @@ addq.l #2,%a0
 dbf %d2,2b
 move.w %d0,(0x48,%a5)
 clr.w %d2
-move.w (0x48,%a5),%d0
 tst.w %d0
 bmi.s 4f
 move.w %d0,%d0

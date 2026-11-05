@@ -4,8 +4,7 @@ RECORD_RESULTS_$MAKE:
 link.w %fp,#-8
 move.l (8,%fp),%d0
 move.l %d0,(-4,%fp)
-move.l (-4,%fp),(-8,%fp)
-move.l (-8,%fp),%d0
+move.l %d0,(-8,%fp)
 unlk %fp
 rts
 .globl PASS_ON
@@ -88,7 +87,7 @@ bsr.w PASS_ON
 move.l %d0,(%a5)
 addq.l #1,(4,%a5)
 movea.l (0xc,%fp),%a0
-move.l (%a5),(%a0)
+move.l %d0,(%a0)
 movea.l (-0xc,%fp),%a5
 unlk %fp
 rts

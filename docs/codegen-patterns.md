@@ -15696,7 +15696,9 @@ straight into it.  Other pointer locals: "Pointer locals, both CPUs"
 conformance `tests/conformance/disk_set_chain_status.pas`.
 
 **Stored locals pushed from the register (Verified by survey;
-implemented narrowly; bead domain-pascal-5aw.11).**  A local stored from
+implemented narrowly; bead domain-pascal-5aw.11; every other read of a
+stored value: the register-contents cache, `crate::cache`,
+`docs/register-model.md` "Step 3, F1").**  A local stored from
 a data register and later pushed by value as an argument is pushed from
 that register when no call came between (`tools/resultsurvey.py
 pushes`; the tool gives up at a write of the register or the slot, the

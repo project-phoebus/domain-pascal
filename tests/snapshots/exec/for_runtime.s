@@ -6,7 +6,6 @@ movem.l %d2-%d3/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(0x10,%a5)
-move.w (0x10,%a5),%d0
 tst.w %d0
 bmi.s 1f
 move.w %d0,%d2
@@ -35,7 +34,6 @@ move.w (8,%fp),%d0
 move.w %d0,(0x10,%a5)
 clr.w (%a5)
 move.w #-1,(8,%a5)
-move.w (0x10,%a5),%d0
 tst.w %d0
 bmi.s 1f
 move.w %d0,%d0

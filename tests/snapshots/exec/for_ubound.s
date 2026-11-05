@@ -51,9 +51,8 @@ lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(8,%a5)
 clr.l (4,%a5)
-tst.w (8,%a5)
+tst.w %d0
 beq.s 1f
-move.w (8,%a5),%d0
 subq.w #1,%d0
 move.w %d0,%d0
 .balignw 4,0x2048

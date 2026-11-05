@@ -47,7 +47,7 @@ move.w (0xa,%fp),%d0
 move.w %d1,%d2
 clr.w %d3
 move.w %d0,(%a5)
-cmp.w (%a5),%d1
+cmp.w %d0,%d1
 ble.s 1f
 move.w %d1,%d3
 sub.w %d0,%d3

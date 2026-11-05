@@ -34,7 +34,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 cmpi.w #1,%d0
 beq.s 1f
 cmpi.w #5,%d0
@@ -59,7 +58,6 @@ pea (%a5)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d0
 move.w %d0,(%a5)
-move.w (%a5),%d0
 cmpi.w #1,%d0
 beq.s 2f
 cmpi.w #9,%d0

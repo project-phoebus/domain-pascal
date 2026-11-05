@@ -12,7 +12,7 @@ muls.w %d1,%d3
 sub.w %d3,%d2
 move.w %d2,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d2,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-0xc,%fp),%d2-%d3/%a5
 unlk %fp
@@ -31,7 +31,7 @@ muls.w %d1,%d2
 sub.w %d2,%d0
 move.w %d0,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp
@@ -48,7 +48,7 @@ divu.w #0x10,%d1
 swap %d1
 move.w %d1,(2,%a5)
 subq.l #2,%sp
-move.w (2,%a5),-(%sp)
+move.w %d1,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movea.l (-4,%fp),%a5
 unlk %fp
@@ -68,7 +68,7 @@ addq.w #8,%sp
 clr.l %d1
 move.w %d0,%d1
 move.l %d1,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movea.l (-8,%fp),%a5
 unlk %fp
@@ -83,14 +83,14 @@ moveq #0x14,%d0
 add.w %d2,%d0
 move.w %d0,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 moveq #0x1e,%d0
 add.w %d2,%d0
 move.w %d0,(%a5)
 subq.l #2,%sp
-move.w (%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp
@@ -111,7 +111,7 @@ move.l %d2,-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp
@@ -130,7 +130,7 @@ move.l %d2,-(%sp)
 jsr (M$OIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-8,%fp),%d2/%a5
 unlk %fp
@@ -168,7 +168,7 @@ move.l %d0,(0xc,%a5)
 move.l (8,%a5),%d0
 addq.l #5,%d0
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.l (0xc,%a5),-(%sp)

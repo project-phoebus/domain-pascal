@@ -35,7 +35,7 @@ move.w (8,%fp),%d0
 move.w (0xa,%fp),%d1
 move.w %d0,(%a5)
 move.w %d1,(4,%a5)
-move.w (%a5),%d2
+move.w %d0,%d2
 pea (4,%a5)
 addq.w #1,%d2
 jsr (EXEC_$ID_W).l

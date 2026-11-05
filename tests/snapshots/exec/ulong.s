@@ -53,7 +53,7 @@ addq.w #8,%sp
 clr.l %d1
 move.w %d0,%d1
 move.l %d1,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.l (%a5),-(%sp)
@@ -65,7 +65,7 @@ pea (4,%a5)
 jsr (EXEC_$LOG_X).l
 addq.w #4,%sp
 move.l %d3,(8,%a5)
-move.l (8,%a5),%d0
+move.l %d3,%d0
 cmp.l (%a5),%d0
 bge.s 4f
 subq.l #2,%sp
@@ -74,7 +74,7 @@ jsr (EXEC_$MARK).l
 addq.w #4,%sp
 4:
 move.w %d4,(0xc,%a5)
-move.w (0xc,%a5),%d0
+move.w %d4,%d0
 ext.l %d0
 cmp.l (%a5),%d0
 bge.s 5f

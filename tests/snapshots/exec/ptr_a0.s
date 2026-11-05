@@ -110,10 +110,8 @@ pea (8,%fp)
 jsr (PARK_INT_$GETD).l
 moveq #1,%d0
 move.l %d0,(%a2)
-move.l (%a2),%d0
 add.l (%a0),%d0
 move.l %d0,(%a2)
-move.l (%a2),%d0
 add.l (4,%a0),%d0
 move.l %d0,(%a0)
 movea.l (-8,%fp),%a2
@@ -147,7 +145,7 @@ jsr (PARK_INT_$GETD).l
 move.l (4,%a0),%d0
 addq.l #3,%d0
 move.l %d0,(%a0)
-move.l (%a0),(4,%a0)
+move.l %d0,(4,%a0)
 unlk %fp
 rts
 .globl PTR_A0_$ARRINDEX
@@ -182,7 +180,7 @@ jsr (PARK_INT_$GETD).l
 move.l (4,%a0),%d0
 addq.l #1,%d0
 move.l %d0,(%a2)
-move.l (%a2),(4,%a0)
+move.l %d0,(4,%a0)
 movem.l (-0x10,%fp),%a2-%a3
 unlk %fp
 rts

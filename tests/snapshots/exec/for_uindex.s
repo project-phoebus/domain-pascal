@@ -21,9 +21,9 @@ jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.w %d2,(4,%a5)
 clr.l (%a5)
-tst.w (4,%a5)
+tst.w %d2
 beq.s 4f
-move.w (4,%a5),%d0
+move.w %d2,%d0
 subq.w #1,%d0
 move.w %d0,%d3
 .balignw 4,0x2048
@@ -306,9 +306,9 @@ jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.w %d2,(0xa,%a5)
 clr.l (%a5)
-tst.w (0xa,%a5)
+tst.w %d2
 beq.s 4f
-move.w (0xa,%a5),%d0
+move.w %d2,%d0
 subq.w #1,%d0
 move.w %d0,%d0
 .balignw 4,0x2048
@@ -555,7 +555,7 @@ add.l (%a5),%d1
 move.l %d1,(%a5)
 addq.l #2,%a0
 dbf %d0,9b
-move.l (%a5),-(%sp)
+move.l %d1,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movem.l (-0x2c,%fp),%d2-%d4/%a5
 unlk %fp

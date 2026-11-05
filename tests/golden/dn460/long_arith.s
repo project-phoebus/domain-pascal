@@ -53,7 +53,7 @@ link.w %fp,#-8
 move.l (-4,%fp),%d0
 .short 0x7100
 move.l %d0,(-4,%fp)
-move.l (-4,%fp),(PMAP_$Q).l
+move.l %d0,(PMAP_$Q).l
 unlk %fp
 rts
 .globl PMAP_$PURIFY

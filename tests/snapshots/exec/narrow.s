@@ -115,7 +115,7 @@ move.b (%a1),%d3
 move.b %d2,(-2,%fp)
 subq.l #2,%sp
 clr.w %d0
-move.b (-2,%fp),%d0
+move.b %d2,%d0
 move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
@@ -144,7 +144,6 @@ addq.w #4,%sp
 clr.w %d0
 move.b %d3,%d0
 move.w %d0,(-6,%fp)
-move.w (-6,%fp),%d0
 ext.l %d0
 move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l

@@ -14,7 +14,7 @@ move.l (-4,%fp),%d0
 muls.l %d0,%d0
 move.l %d0,(-4,%fp)
 movea.l (8,%fp),%a0
-move.l (-4,%fp),(%a0)
+move.l %d0,(%a0)
 unlk %fp
 rts
 .balignw 4,0x2048

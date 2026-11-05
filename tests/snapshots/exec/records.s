@@ -89,7 +89,7 @@ lsl.w #2,%d1
 add.w %d1,%d0
 move.w %d0,(0x10,%a5)
 subq.l #2,%sp
-move.w (0x10,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$MARK).l
 addq.w #4,%sp
 move.w (0x10,%a5),%d0

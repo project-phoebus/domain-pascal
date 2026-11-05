@@ -35,7 +35,6 @@ jsr (EXEC_$LOG_C).l
 addq.w #4,%sp
 lea (8,%a5),%a0
 move.l %a0,(0x18,%a5)
-movea.l (0x18,%a5),%a0
 move.w #1,(%a0)
 lea (0x10,%a5),%a1
 move.l %a1,(0x18,%a5)
@@ -71,7 +70,6 @@ lea (0x1c,%a5),%a0
 move.l %a0,(0x3c,%a5)
 move.w #4,(0x4a,%a5)
 move.w (0x4a,%a5),%d0
-movea.l (0x3c,%a5),%a0
 lsl.w #3,%d0
 lea (0,%a0,%d0.w),%a2
 move.w #9,(-8,%a2)

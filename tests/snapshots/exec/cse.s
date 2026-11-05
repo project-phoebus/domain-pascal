@@ -58,14 +58,14 @@ move.w %d4,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 move.w %d2,(0x12,%a5)
-move.w (0x12,%a5),%d0
+move.w %d2,%d0
 add.w %d0,%d0
 move.w %d0,(-2,%fp)
 move.w %d3,(0x12,%a5)
-move.w (0x12,%a5),%d4
+move.w %d3,%d4
 subq.l #2,%sp
 add.w %d4,%d4
-move.w (-2,%fp),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 subq.l #2,%sp

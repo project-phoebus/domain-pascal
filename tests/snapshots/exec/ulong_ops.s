@@ -80,7 +80,7 @@ move.l (4,%a5),-(%sp)
 jsr (M$DIU$LLW).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),(-4,%fp)
+move.l %d0,(-4,%fp)
 pea (-4,%fp)
 jsr (EXEC_$LOG_X).l
 addq.w #4,%sp
@@ -93,7 +93,7 @@ move.l (%sp),-(%sp)
 jsr (M$MIU$LLL).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),(-4,%fp)
+move.l %d0,(-4,%fp)
 pea (-4,%fp)
 jsr (EXEC_$LOG_X).l
 addq.w #4,%sp
@@ -103,7 +103,7 @@ move.l (%a5),-(%sp)
 jsr (M$MIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),(-4,%fp)
+move.l %d0,(-4,%fp)
 pea (-4,%fp)
 jsr (EXEC_$LOG_X).l
 addq.w #4,%sp

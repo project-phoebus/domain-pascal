@@ -210,6 +210,65 @@ What the rows say:
 - A use that changes the value in place copies the cached register
   (F3).  Read-modify-write instructions use memory.
 
+### Step 3, F1 (2026-11-04): store entries implemented
+
+`crates/dpc-m68k/src/cache.rs`, run on the allocated body (with its
+spills) just before scheduling:
+
+- An entry "register R holds location L at size S" is made by `move.S
+  R,M`.  L is M, or "the pointer variable V holds + d" when M goes
+  through an address register a `movea.l` loaded from V.  So the entry
+  outlives reloads of the base, as when `p^.f := x; ...; y := p^.f`
+  reloads `p`.
+- Entries end at: a write of R; a memory write that may overlap L or
+  V; a join entered from before the entry (F4); the instruction after
+  an unconditional transfer; a call (12.5: a stored local is pushed
+  from its slot after a call 38 times, from a callee-saved register
+  10).
+- While an entry lives, whole reads of L read R:
+  - moves and pushes (a push from an address register is `pea (An)`,
+    codegen-patterns 1.5);
+  - `cmp`, `cmpa`, `cmpi`, `tst` and `add`/`sub` take any register;
+    the logical operations take a data register only;
+  - a `tst` right after the store stays on memory (0xE0280A; SAU9
+    CT_$CONTROL 0x3C478198, with a reload of the pointer between).
+- A load into the register that already holds the value is dropped.
+  So are base loads the rewrite left dead.
+
+It works on physical registers because the image's cache is
+opportunistic for most uses.  Reusing at selection time instead extends
+the register's life and changes the allocation: PROC1_$CREATE_P
+0xE151A0 reuses D0 for a `case` selector and then pushes from the slot.
+The one exception is a push of a local stored by an earlier statement.
+dpc keeps its selection-time rule for that (`Selector::forwarded`,
+12.5).  Removing it lost three byte-identical routines (SIO6509_$XMIT,
+...): there the original keeps the register for the push.
+
+Measured over ../source 096ca5c7, `routine_compare.py`:
+
+- SAU2: mean 0.78165 -> 0.78203, byte-identical routines 237 -> 238
+  (FIM_$GET_USER_PC and RIP_$ANNOUNCE_NS gained, MST_$FIND lost to a
+  constant-pool offset), 72 routines up, 39 down.
+- SAU9: 0.77162 -> 0.77204, identical 241 -> 242, 90 up, 37 down.
+
+The downs checked are positional (pool offsets, `bsr` distances) or
+stem from other forms.  LOG_$ADD, for example, adds to memory in place
+(`add.w D1,(A0)`) where dpc loads, adds and stores.  The survey's rows
+after a store, SAU2, image / dpc before / dpc now:
+
+| use | image | dpc before | dpc now |
+|---|---|---|---|
+| push | 83 / 4 | 23 / 25 | 37 / 4 |
+| operand of an operation | 43 / 0 | 5 / 0 | 40 / 0 |
+| stored elsewhere | 67 / 3 | 22 / 3 | 24 / 1 |
+| compare / test | 44 / 11 | 31 / 18 | 44 / 9 |
+| into another register, changed in place | 20 / 8 | 5 / 45 | 25 / 0 |
+| into another register | 40 / 16 | 13 / 58 | 39 / 11 |
+
+The proportions now match.  The smaller counts in pushes and stores
+elsewhere come from dpc's code offering fewer such store-then-read
+pairs, not from the cache.
+
 ## B. Global allocation of locals
 
 ### The model
@@ -265,7 +324,10 @@ What the rows say:
 3. **Build A as one pass** in the selector: a register descriptor
    updated per instruction, with the revised model's lifetimes and kill
    rules.  F1 is the largest gap (store-created entries serve every kind
-   of read), so it comes first.  Then retire the
+   of read), so it comes first.  F1 is done ("Step 3, F1" above).  It
+   could not retire `Selector::forwarded` (pushes), and the compare
+   right after a store is still formed at selection; the load entries
+   of F2 and the `and then` chains are next.  Then retire the
    special cases of A's table one at a time.  Each retirement must keep
    the 149 conformance routines byte-identical, the goldens unchanged
    (or changed with a reason) and `tools/regalloc_check.py` no worse.

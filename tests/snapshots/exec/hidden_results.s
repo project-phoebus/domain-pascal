@@ -164,7 +164,7 @@ addq.l #1,(-8,%fp)
 1:
 movea.l (8,%fp),%a1
 move.l (-8,%fp),(%a1)
-move.w (-4,%fp),(4,%a1)
+move.w %d0,(4,%a1)
 unlk %fp
 rts
 .globl HIDDEN_RESULTS_$CLOCK

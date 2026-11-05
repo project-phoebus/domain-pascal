@@ -37,7 +37,7 @@ move.l %d1,-(%sp)
 jsr (M$DIS$LLW).l
 addq.w #8,%sp
 move.l %d0,(%a5)
-move.l (%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 movea.l (-4,%fp),%a5
 unlk %fp

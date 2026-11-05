@@ -27,7 +27,7 @@ SIO_$START_NEXT:
 link.w %fp,#-4
 jsr (SIO_$I_NEXT).l
 move.l %a0,(-4,%fp)
-move.l (-4,%fp),-(%sp)
+pea (%a0)
 jsr (SIO_$I_TSTART).l
 addq.w #4,%sp
 move.l (-4,%fp),-(%sp)

@@ -36,7 +36,7 @@ pea (.Lc5,%pc)
 jsr (EXEC_$LOG_MEM).l
 addq.w #8,%sp
 move.l %d2,(0xc,%a5)
-move.l (0xc,%a5),%d0
+move.l %d2,%d0
 lsl.l #8,%d0
 lsl.l #2,%d0
 move.l %d0,(-4,%fp)

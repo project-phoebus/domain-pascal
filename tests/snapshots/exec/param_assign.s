@@ -14,7 +14,7 @@ move.l %d2,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.l %d2,(0xc,%fp)
-move.l (0xc,%fp),-(%sp)
+move.l %d2,-(%sp)
 jsr (EXEC_$LOGV_L).l
 move.l (-4,%fp),%d2
 unlk %fp

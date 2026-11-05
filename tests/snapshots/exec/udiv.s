@@ -19,7 +19,7 @@ divu.w #7,%d0
 swap %d0
 move.w %d0,(8,%a5)
 subq.l #2,%sp
-move.w (8,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 subq.l #2,%sp
@@ -28,7 +28,7 @@ move.l %d3,-(%sp)
 jsr (M$DIS$LLW).l
 addq.w #8,%sp
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.l #0x3d090,-(%sp)
@@ -36,7 +36,7 @@ move.l %d3,-(%sp)
 jsr (M$OIS$LLL).l
 addq.w #8,%sp
 move.l %d0,(4,%a5)
-move.l (4,%a5),-(%sp)
+move.l %d0,-(%sp)
 jsr (EXEC_$LOGV_L).l
 addq.w #4,%sp
 move.w %d2,%d0
@@ -51,7 +51,7 @@ divu.w #0xa,%d0
 swap %d0
 move.w %d0,(8,%a5)
 subq.l #2,%sp
-move.w (8,%a5),-(%sp)
+move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 movem.l (-0xc,%fp),%d2-%d3/%a5
 unlk %fp

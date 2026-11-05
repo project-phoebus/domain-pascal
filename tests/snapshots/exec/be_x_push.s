@@ -71,7 +71,7 @@ lea (.Ldata).l,%a5
 lea (%a5),%a0
 move.l %a0,(8,%a5)
 clr.l (0x10,%a5)
-move.l (8,%a5),-(%sp)
+pea (%a0)
 bsr.s KEEP
 addq.w #4,%sp
 move.l (0x10,%a5),%d0
@@ -99,7 +99,6 @@ lea (%a5),%a0
 move.l %a0,(8,%a5)
 lea (8,%a5),%a0
 move.l %a0,(0xc,%a5)
-movea.l (0xc,%a5),%a0
 movea.l (%a0),%a1
 pea (2,%a1)
 jsr (EXEC_$LOG_W).l
