@@ -8512,6 +8512,26 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   result stored into an `out` parameter is refused anyway).  Golden `tests/golden/results/
   record_results`; driver test
   `compare_right_after_a_store_reads_the_register`.
+- **A chain of comparisons of one variable (Verified by survey;
+  implemented, `isel.rs` `chain_variable`):** an `or else` (or `and
+  then`) chain whose every term compares one variable in memory with a
+  constant (`=`, `<>`) loads the variable once into a data register and
+  compares that: DIR_$SET_ACL 0xE52CE0 `move.l (-20,A6),D0; cmpi.l
+  #0xf0003,D0; beq.s; cmpi.l #0xe000d,D0; bne.s` (../source
+  `(response.status.all = ...) or else (response.status.all = ...)`).
+  Ad-hoc scan of compiled code, two compares of one operand with
+  constants with a `beq` between and a `beq`/`bne` after: SAU2 88 with
+  the operand loaded by the instruction before, 4 in memory (DUMP and
+  FIM_$UII, hand assembly by section 0's signs; AST_$PURIFY 0xE05B14, a
+  chain nested in `and then`, which the rule leaves alone too;
+  ASKNODE_$WHO_REMOTE 0xE6668E, not explained); SAU9 88 against 13 (8
+  in DUMP and COLD).  A first term against 0 branches on the load's
+  flags (SMD_$COND_INPUT_U 0xE6FA5C `move.b (-5,A6),D0; beq.s; cmpi.b
+  #15,D0; bne.s`).  A variable already held in a register (a parameter
+  loaded at entry) is compared there.  Measured over
+  ../source with `routine_compare.py`: SAU2 67 routines up and 4 down
+  (filler artefacts and ASKNODE_$WHO_REMOTE), SAU9 75 up and 2 down.
+  Golden `control/or_chain_var`.
 - **A computed value against 0 (Verified by survey; implemented; bead
   domain-pascal-qlzu):** `tools/cmpsurvey.py opflags` takes every
   conditional branch and `s<cc>` in compiled code (SMD_UTILS

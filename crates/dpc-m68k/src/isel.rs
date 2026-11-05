@@ -151,6 +151,50 @@ thread_local! {
     static NO_DROP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The variable every term of the `or else` / `and then` chain `c`
+/// compares with a constant (`=` or `<>`), with its type, when there are
+/// two terms or more of one kind of chain and the variable is in memory:
+/// the unit's data, the frame or through a pointer, not volatile.
+fn chain_variable(c: &IrCond) -> Option<(Addr, Scalar)> {
+    fn leaves<'a>(c: &'a IrCond, or: bool, out: &mut Vec<&'a IrCond>) {
+        match c {
+            IrCond::OrElse(a, b) if or => {
+                leaves(a, or, out);
+                leaves(b, or, out);
+            }
+            IrCond::AndThen(a, b) if !or => {
+                leaves(a, or, out);
+                leaves(b, or, out);
+            }
+            x => out.push(x),
+        }
+    }
+    let or = matches!(c, IrCond::OrElse(..));
+    let mut ls = Vec::new();
+    leaves(c, or, &mut ls);
+    let mut var: Option<(Addr, Scalar)> = None;
+    for l in &ls {
+        let IrCond::Compare {
+            op: Rel::Eq | Rel::Ne,
+            lhs: Expr::Load { addr, ty },
+            rhs: Expr::Const { .. },
+        } = l
+        else {
+            return None;
+        };
+        if ty.pointer || matches!(addr, Addr::Volatile { .. }) {
+            return None;
+        }
+        match &var {
+            None => var = Some((addr.clone(), *ty)),
+            Some((a, t)) if a == addr && t == ty => {}
+            _ => return None,
+        }
+    }
+    ls.len().ge(&2).then_some(())?;
+    var
+}
+
 /// The reads of the frame slot at `off` in `body`.
 fn frame_refs(body: &[Stmt], off: i32) -> usize {
     let mut n = 0;
@@ -8588,6 +8632,12 @@ pub struct Selector {
     /// references first, when the body does not colour
     /// ([`DROPPED_PTRS`]).
     free_ptrs: Vec<i32>,
+    /// The variable an `or else` / `and then` chain of comparisons with
+    /// constants compares, loaded once for the chain, and its data
+    /// register ([`Self::branch`]).
+    chain_var: Option<(Addr, u8)>,
+    /// The index in `out` of the load of [`Self::chain_var`].
+    chain_load: Option<usize>,
     /// The assignments to those locals: frame offset, index in `out` of
     /// the `movea.l` and its statement's span.
     ptr_defs: Vec<(i32, usize, Span)>,
@@ -8949,6 +8999,8 @@ impl Selector {
             loop_jumps: Vec::new(),
             ptr_locals: Vec::new(),
             free_ptrs: Vec::new(),
+            chain_var: None,
+            chain_load: None,
             ptr_defs: Vec::new(),
             elem_ptrs: Vec::new(),
             elem_leas: Vec::new(),
@@ -12256,6 +12308,39 @@ impl Selector {
                 self.jump(if when { cc } else { cc.negate() }, l);
                 Ok(())
             }
+            // A chain of `or else` (or `and then`) whose every term
+            // compares one variable in memory with a constant: the
+            // variable loaded once into a data register, each term
+            // comparing it (DIR_$SET_ACL 0xE52CE0 `move.l (-20,A6),D0;
+            // cmpi.l #0xf0003,D0; beq.s; cmpi.l #0xe000d,D0; bne.s`, ../source
+            // `(response.status.all = ...) or else (response.status.all =
+            // ...)`; over SAU2's compiled code, two compares of one operand
+            // with constants, `beq` between: 88 with the operand loaded by
+            // the instruction before, 4 in memory, AST_$PURIFY 0xE05B14 a
+            // nested chain; ../source's register-allocation survey counts
+            // such operands among locals held in registers).
+            IrCond::AndThen(..) | IrCond::OrElse(..)
+                if self.chain_var.is_none()
+                    && chain_variable(c).is_some_and(
+                        |(a, _)| !matches!(a, Addr::Frame(o) if self.pinned(o).is_some()),
+                    ) =>
+            {
+                let (addr, ty) = chain_variable(c).unwrap();
+                let w = ty.width;
+                let src = self.ea_of(&addr)?;
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Move {
+                    size: size_of(w),
+                    src,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                self.chain_var = Some((addr, d));
+                self.chain_load = Some(self.out.len() - 1);
+                let r = self.branch(c, when, l);
+                self.chain_var = None;
+                self.chain_load = None;
+                r
+            }
             IrCond::AndThen(a, b) | IrCond::OrElse(a, b) => {
                 // `and then` short-circuits on false, `or else` on true.
                 let short = matches!(c, IrCond::OrElse(..));
@@ -12587,6 +12672,9 @@ impl Selector {
     /// loading the value: the register a by-value parameter was loaded
     /// into at entry, else the memory operand.
     fn operand(&mut self, addr: &Addr) -> Res<Ea> {
+        if let Some(&(_, d)) = self.chain_var.iter().find(|(a, _)| a == addr) {
+            return Ok(Ea::Reg(Reg::D(d)));
+        }
         if let Addr::Frame(o) = addr {
             if let Some(r) = self.pinned(*o) {
                 return Ok(Ea::Reg(r));
@@ -12802,6 +12890,17 @@ impl Selector {
             }),
         ) = (&ea, self.out.last())
         {
+            // The load of a chain of comparisons of one variable
+            // ([`chain_variable`]) tested against 0 by its first term: the
+            // load's flags (SMD_$COND_INPUT_U 0xE6FA5C `move.b (-5,A6),D0;
+            // beq.s; cmpi.b #15,D0; bne.s`).
+            if d == r
+                && *s == size
+                && self.chain_var.as_ref().is_some_and(|(_, c)| Reg::D(*c) == *r)
+                && self.chain_load == Some(self.out.len() - 1)
+            {
+                return Ok(());
+            }
             if d == r && *s == size && self.assigned_move == Some(self.out.len() - 1) {
                 if self.assigned_flags(src.clone(), cc)? {
                     return Ok(());
@@ -16495,6 +16594,8 @@ impl Selector {
             stepped: _,
             ptr_locals: _,
             free_ptrs: _,
+            chain_var: _,
+            chain_load: _,
             elem_ptrs: _,
             elem_by_value: _,
             a0_locals: _,
