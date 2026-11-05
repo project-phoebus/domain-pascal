@@ -178,7 +178,7 @@ ABSENT	ast/ast.pas	ast_$alloc_contig
 ABSENT	ast/ast.pas	ast_$remove_page
 ABSENT	ast/ast.pas	ast_$assoc_ioppn
 ABSENT	ast/ast.pas	ast_$remove_ioppn
-MISMATCH	ast/ast.pas	ast_$set_trouble
+OK	ast/ast.pas	ast_$set_trouble
 SETUP	ast/ast.pas	ast_$save_clobbered_uid
 ABSENT	ast/ast.pas	ast_$ptov
 STUB	ast/ast.pas	ast_$remove_corrupted_page

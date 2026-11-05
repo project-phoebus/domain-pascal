@@ -15722,17 +15722,19 @@ it is read (dereferenced or not, compared, copied, pushed, read as
   SAU9 MONO9_$BLINK_CURSOR, pushed by value by the next statement;
   PKT_$COPY_TO_PA 0xE12538 and MAC_OS_$PUT_INFO 0xE0C322, assigned from a
   slot, `move.l (8,A6),(d,A6)`), except one assigned once, not from a
-  slot, and read once as `p^` by address by the next statement, which
-  the image keeps in its register (TIME_$ADVANCE_CALLBACK 0xE16440
-  `movea.l (8,A1),A2; pea (A2); jsr`, TIME_$CANCEL 0xE164E0;
-  `forwarded_push`, **Uncertain**, two sites each way);
+  slot, and read once as `p^` by address by the first statement after
+  the assignment that calls, which the image keeps in its register
+  (TIME_$ADVANCE_CALLBACK 0xE16440 `movea.l (8,A1),A2; pea (A2); jsr`,
+  TIME_$CANCEL 0xE164E0, AST_$SET_TROUBLE 0xE07380 with a store
+  between; `forwarded_push`, **Uncertain**);
 - (b) a routine pointer called through (NET_$OPEN 0xE5A1A4 `handler`
   and its four siblings, `movea.l A0,(-4,A6)` then `jsr (A0)`; 5 of 6,
   DXM_$SCAN_QUEUE 0xE17168 holds its `callback` in D2).  `dpc` types a
-  routine pointer as a data scalar, which the data rule above already
-  gives the image's form at all six (NET_'s in the frame, DXM's in D2;
-  keeping DXM's in the frame too measured worse); the check in
-  `free_pointer_locals` covers a pointer-typed local called through.
+  routine pointer as a data scalar, and the data rule above holds all
+  six in a data register: right for DXM's, not for NET_'s
+  (stored from A0 and called through A0, which `dpc` does not form for
+  a data local; keeping all six in the frame measured worse); the check
+  in `free_pointer_locals` covers a pointer-typed local called through.
 
 Held through a call whose arguments read it last, in a body with
 branches too, as pointer locals assigned from calls are (12.4 R4(c);
@@ -15753,7 +15755,18 @@ in D4).  Measured over ../source (096ca5c7) with `routine_compare.py`
 (1216 SAU2 routines, 1304 SAU9): mean similarity 0.7684 -> 0.7804 on
 SAU2 (254 routines up, 30 down, most of the downs relocation and filler
 artefacts), 0.7696 -> 0.7704 on SAU9; `movea.l (-n,A6),An` reloads in
-the SAU2 objects 3952 -> about 900 (the image: 959).
+the SAU2 objects 3952 -> about 900 (the image: 959).  **Regression
+check:** `tools/regalloc_check.py tests/regalloc/sau2_high.tsv
+<objects>` scores dpc's frame-or-register choice against ../source's
+high-confidence table of locals (routines whose frames agree with
+dpc's; ../source 096ca5c7, `make TARGET_SAU=sau2 pascal` in a worktree):
+2838 of 2932 agree on SAU2 (96.8%), 2802 of 2905 on SAU9 (96.5%).  The
+misses are the survey's unexplained ones (pressure: AST_$RESERVE,
+LOG_$ADD `buf`, MSG_$SARI `sock_ec`; integer locals used as addresses),
+the frame-cached anonymous objects (bead domain-pascal-g67r) and the
+NET_ routine-pointer `handler`s, which dpc holds in D2 where the image
+stores A0 to the slot and calls through A0 (exception (b); bead
+domain-pascal-w4dm).
 
 **Address-taken locals (audit, bead domain-pascal-pe9).**  Neither rule
 holds a local whose address the body passes or takes: an argument passed

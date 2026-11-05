@@ -7322,10 +7322,16 @@ fn forwarded_push(body: &[Stmt], off: i32) -> bool {
             let slot = |e: &Expr| matches!(e, Expr::Load { addr: Addr::Frame(_), .. });
             let from_slot = slot(value)
                 || matches!(value, Expr::AddrOf(Addr::Indirect { base, offset: 0 }) if slot(base));
+            // The push: the first statement after the assignment with a
+            // call, the ones between calling nothing (AST_$SET_TROUBLE
+            // 0xE07380 `movea.l (A0),A2; st (-56,A6); ...; pea (A2); bsr.w`).
+            let next = list[k + 1..]
+                .iter()
+                .find(|t| stmts_call(std::slice::from_ref(*t)));
             if let (false, Some(Stmt {
                 kind: StmtKind::Call(c),
                 ..
-            })) = (from_slot, list.get(k + 1))
+            })) = (from_slot, next)
             {
                 found |= c.args.iter().any(|a| match a {
                     Arg::Address {
