@@ -552,6 +552,7 @@ fn check_section_name(name: &str, span: Span) -> Res<()> {
 /// refused: whether it is emitted at its heading or at its body is not
 /// seen.
 fn lower_family(p: &Program, id: RoutineId, out: &mut Vec<Function>, errors: &mut Vec<Diagnostic>) {
+    NEEDS_LINK.with(|n| n.borrow_mut().clear());
     lower_tree(p, id, out, errors);
 }
 
@@ -627,6 +628,25 @@ fn lower_tree(
                 for st in &f.body {
                     stmt_enclosing(st, &mut own);
                 }
+                // A call of a sibling of an enclosing routine `k` levels
+                // out that takes its link ([`LinkArg::Outer`]): the link
+                // slots of the routines between are read.
+                let far = far_calls(p, id, &f);
+                for &(_, k) in &far {
+                    up.extend((1..k).map(|l| (l, LINK_SLOT, 4)));
+                }
+                let mut calls = Vec::new();
+                for st in &f.body {
+                    stmt_calls(st, &mut calls);
+                }
+                let sibling_needs = calls.iter().any(|c| {
+                    matches!(&c.callee, Callee::Local(sym)
+                        if NEEDS_LINK.with(|n| n.borrow().contains(sym))
+                            && routine_parent(p, sym) == r.parent)
+                });
+                if !own.is_empty() || !far.is_empty() || sibling_needs {
+                    NEEDS_LINK.with(|n| n.borrow_mut().insert(f.symbol.clone()));
+                }
                 up.extend(own.into_iter().map(|(o, b)| (1, o, b)));
                 up.extend(OUTER_REFS.with(|o| o.borrow_mut().split_off(0)));
             }
@@ -635,6 +655,64 @@ fn lower_tree(
         Err(d) => errors.extend(d),
     }
     up
+}
+
+thread_local! {
+    /// The nested routines lowered so far that need their static link
+    /// (they reach an enclosing frame or call a routine that takes its
+    /// link from them): [`set_static_links`]'s `needs`, known for a
+    /// routine before any routine that can call it from further in is
+    /// lowered (declaration order, ref 2.4).
+    static NEEDS_LINK: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// The parent of the unit's routine named `sym`, if it is nested.
+fn routine_parent(p: &Program, sym: &str) -> Option<RoutineId> {
+    p.routines
+        .iter()
+        .find(|r| r.symbol == sym && r.body.is_some() && !r.external)
+        .and_then(|r| r.parent)
+}
+
+/// How many levels out from routine `id` its ancestor `a` is (1 for its
+/// parent), if it is one.
+fn levels_out(p: &Program, id: RoutineId, a: RoutineId) -> Option<u32> {
+    let mut k = 1;
+    let mut cur = p.routine(id).parent;
+    while let Some(c) = cur {
+        if c == a {
+            return Some(k);
+        }
+        k += 1;
+        cur = p.routine(c).parent;
+    }
+    None
+}
+
+/// The calls in `f` (routine `id`) of nested routines that need their
+/// link and are nested in a routine 2 or more levels out: (symbol,
+/// levels).
+fn far_calls(p: &Program, id: RoutineId, f: &Function) -> Vec<(String, u32)> {
+    let mut calls = Vec::new();
+    for st in &f.body {
+        stmt_calls(st, &mut calls);
+    }
+    let mut out = Vec::new();
+    for c in calls {
+        let Callee::Local(sym) = &c.callee else {
+            continue;
+        };
+        if !NEEDS_LINK.with(|n| n.borrow().contains(sym)) {
+            continue;
+        }
+        if let Some(k) = routine_parent(p, sym).and_then(|a| levels_out(p, id, a)) {
+            if k >= 2 && !out.iter().any(|(s, _)| s == sym) {
+                out.push((sym.clone(), k));
+            }
+        }
+    }
+    out
 }
 
 /// The slot of a nested routine's frame that holds its static link when
@@ -737,6 +815,20 @@ fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
     }
     let index = |sym: &str| fs.iter().position(|g| g.symbol == sym);
     let parent_of = |j: usize| fs[j].nesting.as_ref().map(|n| n.parent.as_str());
+    // How many levels out from routine i the routine named `a` is (1 for
+    // its parent), if it encloses i.
+    let levels_up = |i: usize, a: &str| -> Option<u32> {
+        let mut k = 1;
+        let mut cur = parent_of(i);
+        while let Some(c) = cur {
+            if c == a {
+                return Some(k);
+            }
+            k += 1;
+            cur = index(c).and_then(parent_of);
+        }
+        None
+    };
     // other_caller[j]: some call of nested routine j comes from a routine
     // other than its enclosing one; callees[i]: the unit's routines that
     // routine i calls.
@@ -788,16 +880,62 @@ fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
             if needs[i] || parent_of(i).is_none() {
                 continue;
             }
-            if callees[i]
-                .iter()
-                .any(|&j| passed[j] && parent_of(j) == parent_of(i))
-            {
+            // A sibling that takes its link from this routine's, or a
+            // sibling of an enclosing routine reached through it
+            // ([`LinkArg::Outer`]).
+            if callees[i].iter().any(|&j| {
+                passed[j]
+                    && (parent_of(j) == parent_of(i)
+                        || parent_of(j).is_some_and(|a| levels_up(i, a).is_some_and(|k| k >= 2)))
+            }) {
                 needs[i] = true;
                 changed = true;
             }
         }
         if !changed {
             break;
+        }
+    }
+    // levels[i][sym]: for each call of routine i of a nested routine
+    // whose link is passed, how many levels out its parent is.
+    let far: Vec<Vec<(String, u32)>> = (0..fs.len())
+        .map(|i| {
+            let mut v = Vec::new();
+            for &j in &callees[i] {
+                if !passed[j] {
+                    continue;
+                }
+                if let Some(k) = parent_of(j).and_then(|a| levels_up(i, a)).filter(|&k| k >= 2) {
+                    v.push((fs[j].symbol.clone(), k));
+                }
+            }
+            v
+        })
+        .collect();
+    // The routines between such a caller and the callee's parent store
+    // their links in their link slots, as [`lower_tree`] arranged; a
+    // mismatch is an internal error, refused rather than miscompiled.
+    let stores_link = |sym: &str| {
+        index(sym).is_some_and(|g| {
+            matches!(fs[g].body.first(), Some(Stmt { kind: StmtKind::Store {
+                addr: Addr::Frame(LINK_SLOT),
+                value: Expr::AddrOf(Addr::Enclosing(0)),
+            }, .. }))
+        })
+    };
+    for (i, calls) in far.iter().enumerate() {
+        for (_, k) in calls {
+            let mut cur = parent_of(i);
+            for _ in 1..*k {
+                if !cur.is_some_and(stores_link) {
+                    errors.push(unsupported(
+                        fs[i].span,
+                        "a call of a sibling of an enclosing routine whose link slots are not                          stored (internal) is",
+                    ));
+                    break;
+                }
+                cur = cur.and_then(index).and_then(parent_of);
+            }
         }
     }
     // (symbol, parent, link passed) of the nested routines.
@@ -811,6 +949,7 @@ fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
         })
         .collect();
     for (j, f) in fs.iter_mut().enumerate() {
+        let far = &far[j];
         if let Some(n) = &mut f.nesting {
             n.link = if passed[j] {
                 StaticLink::Passed
@@ -834,6 +973,8 @@ fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
                     Some(LinkArg::OwnFrame)
                 } else if my_parent.as_ref() == Some(parent) {
                     Some(LinkArg::OwnLink)
+                } else if let Some((_, k)) = far.iter().find(|(s, _)| s == sym) {
+                    Some(LinkArg::Outer(*k))
                 } else {
                     bad = true;
                     None
@@ -1549,9 +1690,6 @@ fn lower_routine_in_context(
     // the function is a procedure whose first argument slot holds the
     // result's address (listed in [`Function::address_params`]).
     let hidden = is_hidden_result(r);
-    if hidden && r.parent.is_some() {
-        errors.push(unsupported(r.span, HIDDEN_NESTED));
-    }
     let result = match &r.result {
         None => None,
         Some(_) if hidden => None,
@@ -1583,6 +1721,22 @@ fn lower_routine_in_context(
         &result_temps,
     );
     set_call_sections(p, &r.code_section, &mut body);
+    if hidden && r.parent.is_some() {
+        let mut up = Vec::new();
+        let mut calls = Vec::new();
+        for st in &body {
+            stmt_enclosing(st, &mut up);
+            stmt_calls(st, &mut calls);
+        }
+        let nested_call = calls.iter().any(|c| {
+            matches!(&c.callee, Callee::Local(sym) if routine_parent(p, sym).is_some())
+        });
+        if !up.is_empty() || nested_call {
+            if let Err(d) = best_effort(r.span, HIDDEN_NESTED) {
+                errors.push(d);
+            }
+        }
+    }
     let param_copies = param_copies(p, r).unwrap_or_else(|d| {
         errors.push(d);
         Vec::new()
@@ -6250,12 +6404,18 @@ const HIDDEN_CALL_USE: &str = "a call of a function whose record result goes thr
      address, other than assigned to a variable or passed by address (codegen-patterns 3, \
      \"Record results over 4 bytes\"), is";
 
-/// The refusal of a nested function whose result goes through a hidden
-/// address, its definition and its calls: no nested routine of the image
-/// returns one, so where the address goes beside the static link in A1
-/// (codegen-patterns 6) is not seen.
+/// The best-effort note of a nested function whose result goes through a
+/// hidden address and that may take its static link.  The one such
+/// routine seen takes none: SAU7 FIM_FP's quiet_nan 0x3C46D3AA (`link
+/// #-16`), called `move.b D5,-(SP); pea (-16,A2); pea (-20,A6); bsr.w`,
+/// the result temporary's address pushed last and read at (8,A6), the
+/// parameters at 0xC and 0x10, as for a routine of the unit's top level
+/// (../source finding 1033).  With a link (in A1 or the caller's frame,
+/// codegen-patterns 6) no site is seen; `dpc` keeps the address at
+/// (8,A6), the link on no slot.
 const HIDDEN_NESTED: &str = "a nested function whose record result goes through a hidden \
-     address (where the address goes beside the static link is not seen, codegen-patterns 3, \
+     address and that reaches an enclosing frame or calls a nested routine (the address \
+     beside a static link not seen; SAU7 quiet_nan 0x3C46D3AA takes none; codegen-patterns 3, \
      \"Record results over 4 bytes\") is";
 
 /// The pseudo frame offset of the `n`th result temporary of a routine
@@ -11218,9 +11378,6 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
     // its parameters' (`dpc-sema` adds it).
     if let SCallee::Routine(id) = &c.callee {
         let r = p.routine(*id);
-        if is_hidden_result(r) && r.parent.is_some() {
-            return Err(unsupported(span, HIDDEN_NESTED));
-        }
         if let Some(res) = r.result.as_ref().filter(|res| res.reg == ResultReg::Hidden) {
             let slot = r.arg_bytes - r.params.iter().map(|q| q.conv.slot_size).sum::<u32>();
             args.insert(

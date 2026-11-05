@@ -903,6 +903,15 @@ pub enum LinkArg {
     /// 0xE1359C` in 0xE1360C, A4 from `(A6)`), or is the caller itself
     /// (0xE397D0, recursive).
     OwnLink,
+    /// The frame of the routine `n` (2 or more) levels out from the
+    /// caller, in which the callee is nested: the caller's own link, then
+    /// each enclosing routine's link slot `(-4,An)` (the callee is a
+    /// sibling of one of the caller's enclosing routines: SAU7
+    /// FIM_FP's sp_tiny_result 0x3C46DDCC, nested in rex_sp_diadic, calls
+    /// rex_sp_diadic's sibling underflow_result 0x3C46D99A with `movea.l
+    /// (A6),A0; movea.l (-4,A0),A2` at entry, then `movea.l A2,A1; bsr.w`;
+    /// ../source finding 1034).
+    Outer(u32),
 }
 
 impl Call {

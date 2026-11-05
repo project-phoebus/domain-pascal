@@ -8877,7 +8877,9 @@ impl Selector {
         let mut needed = false;
         walk(&f.body, &mut |node| match node {
             Node::Addr(Addr::Enclosing(_)) => needed = true,
-            Node::Call(c) if c.link == Some(LinkArg::OwnLink) => needed = true,
+            Node::Call(c) if matches!(c.link, Some(LinkArg::OwnLink | LinkArg::Outer(_))) => {
+                needed = true
+            }
             _ => {}
         });
         if !needed {
@@ -17209,6 +17211,32 @@ impl Selector {
                     src: Ea::Reg(Reg::A(l)),
                     dst: STATIC_LINK_A,
                 });
+            }
+            // The frame `k` levels out: the own link, then the link slots
+            // of the routines between.  Best effort (not byte-identical):
+            // the image loads the frame at entry into a register of its
+            // own and copies it (SAU7 sp_tiny_result 0x3C46DDCC `movea.l
+            // (A6),A0; movea.l (-4,A0),A2`, then `movea.l A2,A1; bsr.w`;
+            // ../source finding 1034), as for the deeper routines' frame
+            // references `dpc` walks the chain at the use ([`load_link`]).
+            Some(LinkArg::Outer(k)) => {
+                best_effort(
+                    self.span,
+                    "a call of a sibling of an enclosing routine (its link walked from the own \
+                     link at the call; the image loads it at entry, SAU7 0x3C46DDCC) is",
+                )?;
+                let l = self
+                    .link
+                    .expect("the static link is loaded for a call passing it");
+                let mut src = l;
+                for _ in 1..k {
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Disp(-4, src),
+                        dst: STATIC_LINK_A,
+                    });
+                    src = STATIC_LINK_A;
+                }
             }
         }
         let insn = match &c.callee {

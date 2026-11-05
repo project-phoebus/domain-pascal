@@ -3103,11 +3103,17 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     #-0xc`, the reserved slot and its 6-byte local only).  The
     reference says nothing of it (5.5.10/5.5.11 p. 5-20 speak of results
     "that should go into a register").
+  - A nested function that takes no static link, as at the top level:
+    SAU7 FIM_FP's quiet_nan 0x3C46D3AA (`link #-16`), called `move.b
+    D5,-(SP); pea (-16,A2); pea (-20,A6); bsr.w`, the temporary's
+    address at (8,A6), the parameters at 0xC and 0x10, the 8 bytes
+    stored through `movea.l (8,A6),A2` (../source finding 1033; golden
+    `nested/hidden_result`).
   - Not seen: a record of other sizes (`dpc` takes every record over 4
     bytes, Uncertain); under `a0_return`, `d0_return` or `c_param`;
-    through a routine pointer; a nested function (where the address
-    goes beside the static link in A1, section 6, is not seen: its
-    definition and its calls are refused); in the caller,
+    through a routine pointer; a nested function that takes its
+    static link (where the address goes beside the link, section 6:
+    `dpc` keeps it at (8,A6), **best effort**); in the caller,
     `discard`, a comparison, a field of the result, a destination whose
     address needs a call; in the callee, `f := g(x)`.
   **Implemented** (`dpc-sema` `conv::result_reg`, `ResultReg::Hidden`,
@@ -7454,9 +7460,17 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   0xE4F3BA; `dpc` forms it `lea (0,An),Ax; move.l Ax,(-4,A6)`), and a
   reference k levels out walks the chain at each use (`movea.l (-4,An),Am`
   per level) where 0xE4DFFE keeps a display in its own frame; the outer
-  routines keep the objects reached in memory (`uplevel_refs`).  A call
-  of a nested routine from outside its parent's family stays refused.
-  `tests/exec/ogf8_nested.pas`.
+  routines keep the objects reached in memory (`uplevel_refs`).  A
+  routine calling a sibling of one of its enclosing routines, k levels
+  out, that takes its link (`LinkArg::Outer`) passes that routine's
+  frame: SAU7 FIM_FP's sp_tiny_result 0x3C46DDCC (nested in
+  rex_sp_diadic, which stores its link at `(-4,A6)`) calls
+  underflow_result 0x3C46D99A, `movea.l (A6),A0; movea.l (-4,A0),A2` at
+  entry, then `movea.l A2,A1; bsr.w` (../source finding 1034).  **Best
+  effort:** `dpc` walks the chain at the call (`movea.l (-4,An),A1` per
+  level from the own link); the routines between store their links
+  (`lower_tree`, `far_calls`).  `tests/exec/ogf8_nested.pas`,
+  `tests/exec/outer_sibling.pas`.
 - **Conformance: one nested routine alone; no whole family** (beads
   domain-pascal-5aw.3, -5aw.18).  A family (its nested routines, then the
   parent, contiguous) is the natural unit, and every family in the image

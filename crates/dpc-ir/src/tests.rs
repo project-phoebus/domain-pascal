@@ -944,26 +944,31 @@ procedure p(f: fp); begin q(f^); end;",
             "functions returning uid_$t are not supported yet",
         ),
     ];
-    // A nested one: the definition and the calls refused, assigned or
-    // passed on (the routine's first error is reported).
+    // A nested one that takes no static link: as at the top level, the
+    // address first (SAU7 quiet_nan 0x3C46D3AA; ../source finding 1033),
+    // assigned or passed on.  One that reaches the enclosing frame: best
+    // effort (the address beside a link not seen), so refused here.
     for call in ["g := f", "q(f)"] {
-        let e = errs(&format!(
-            "{UID}procedure q(in u: uid_$t); extern;
+        let src = |body: &str| {
+            format!(
+                "{UID}procedure q(in u: uid_$t); extern;
 procedure p;
-var g: uid_$t;
+var g, h: uid_$t;
   function f: uid_$t;
   begin
-    f := root;
+    {body};
   end;
 begin
   {call};
 end;
 "
-        ));
-        assert_eq!(e.len(), 2, "{e:?}");
+            )
+        };
+        assert!(lower_src(&src("f := root")).is_ok(), "{call}");
+        let e = errs(&src("f := h"));
+        assert_eq!(e.len(), 1, "{e:?}");
         assert!(
-            e.iter().all(|m| m
-                .contains("a nested function whose record result goes through a hidden address")),
+            e[0].contains("a nested function whose record result goes through a hidden address"),
             "{e:?}"
         );
     }
