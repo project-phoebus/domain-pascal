@@ -404,6 +404,21 @@ where dpc parks others.  From 4cc92e8, over ../source 096ca5c7:
   register loads of parameter slots 1541 of 1621, data register loads
   357 of 378 (792 routines, as the set shifts slightly).
 
+Which value overflows: over the 72 routines holding entry-loaded slots
+in both classes, a slot in a data register, against one in an address
+register, has fewer uses 126 / 61 and its first use later 176 / 62.  As
+a choice these do **not** beat `spill.rs`'s score (live instructions per
+naming instruction) on SAU2, whose mean is 0.78368: fewest uses over all
+values 0.78118 (it picks short temporaries), fewest uses among
+parameters 0.78351, latest first use among parameters 0.78287.  None was
+kept.
+
+Address constants and `lea` results: the image has about as many as dpc
+(`lea` 1292 / 1305, `movea.l #sym` 620 / 681) but in A2-A4 about twice as
+often (`lea` 369 / 216, constants 111 / 33).  Most of those cross no call
+(`lea` 163 / 86, constants 66 / 21): A0 and A1 are busy with other values
+(RINGLOG_$LOGIT 0xE1A2F2), so this is the colouring order again.
+
 ### Open questions
 
 - The colouring order (12.4 R1a) and the spill cost under pressure:
