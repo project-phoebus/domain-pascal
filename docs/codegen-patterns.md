@@ -12227,8 +12227,8 @@ stored.
   needs after it are read again from their slots (MAC_$SEND reads `(0x14)`
   at 0xE0BB26 for the statements before the call, then at 0xE0BBB2,
   0xE0BC2A, 0xE0BC3E), a `with` element address is stored to a frame
-  slot (0xE0BB44, read at 0xE0BB9E).  `dpc` models the parameters, not the (bead domain-pascal-muf4)
-  `with` address.  The reference (5.5.6, 5.5.9) only says that
+  slot (0xE0BB44, read at 0xE0BB9E).  `dpc` models the parameters, not the
+  `with` address (bead domain-pascal-muf4).  The reference (5.5.6, 5.5.9) only says that
   optimisation is suppressed and that the return sequence after a
   `noreturn` call is dropped (compare CRASH_SYSTEM call sites; the
   AREA_$DEACTIVATE_ASTE quirk in `../source/docs/original-quirks.md`).
