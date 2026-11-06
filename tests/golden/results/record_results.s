@@ -2,7 +2,7 @@
 .globl CLEANUP
 CLEANUP:
 link.w %fp,#-0x1c
-pea (%a5)
+movem.l %d2-%d7/%a2-%a5,-(%sp)
 lea (.Ldata).l,%a5
 pea (-0x18,%fp)
 jsr (FIM_$CLEANUP).l
@@ -17,7 +17,7 @@ addq.w #4,%sp
 1:
 pea (-0x1c,%fp)
 jsr (REPORT).l
-movea.l (-0x20,%fp),%a5
+movem.l (-0x44,%fp),%d2-%d7/%a2-%a5
 unlk %fp
 rts
 .globl FIELD

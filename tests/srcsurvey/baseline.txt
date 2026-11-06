@@ -1126,7 +1126,7 @@ STUB	pkt/pkt.pas	pkt_$bld_internet_hdr
 STUB	pkt/pkt.pas	pkt_$brk_internet_hdr
 OK	pkt/pkt.pas	pkt_$next_id
 OK	pkt/pkt.pas	pkt_$next_long_id
-MISMATCH	pkt/pkt.pas	pkt_$copy_to_pa
+STUB	pkt/pkt.pas	pkt_$copy_to_pa
 STUB	pkt/pkt.pas	pkt_$send_internet
 MISMATCH	pkt/pkt.pas	pkt_$dump_data
 MISMATCH	pkt/pkt.pas	pkt_$dat_copy

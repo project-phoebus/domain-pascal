@@ -228,6 +228,10 @@ pub struct Function {
     /// need it.  The rule is in `lower.rs` (`set_loads_data_base`), with
     /// [`DataBaseOptions`].
     pub loads_data_base: bool,
+    /// The routine calls one declared `abnormal` (ref 5.5.6, p. 5-19): the
+    /// selector saves every callee-saved register for it.  Set by
+    /// `lower.rs` once every routine is lowered.
+    pub calls_abnormal: bool,
     /// The unit's data area of [`Self::data_section`] is addressable in
     /// the routine for its whole body: it loads the base
     /// ([`Self::loads_data_base`]), or inherits it and uses the data

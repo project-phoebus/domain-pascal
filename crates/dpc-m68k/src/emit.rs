@@ -1617,6 +1617,7 @@ mod tests {
             frame_size: 0,
             result: None,
             loads_data_base: false,
+            calls_abnormal: false,
             has_data_base: false,
             data_absolute: false,
             value_params: Vec::new(),

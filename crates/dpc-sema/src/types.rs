@@ -746,6 +746,23 @@ impl TypeTable {
         }
     }
 
+    /// Whether a record has a scalar field of 4 bytes at a multiple of 4
+    /// from its start, in any variant.
+    pub fn has_long_field(&self, id: TypeId) -> bool {
+        match &self.get(id).kind {
+            TypeKind::Record(r) => r.all_fields().iter().any(|f| {
+                f.offset % 4 == 0
+                    && (self.has_long_field(f.ty)
+                        || (self.size(f.ty) == 4
+                            && !matches!(
+                                self.get(f.ty).kind,
+                                TypeKind::Array { .. } | TypeKind::Record(_)
+                            )))
+            }),
+            _ => false,
+        }
+    }
+
     /// The end of a record's last byte used by a field (bytes from its
     /// start; a packed record's in whole 16-bit words, ref 3.10.7).
     fn record_end(&self, r: &RecordType) -> u32 {

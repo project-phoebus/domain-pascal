@@ -88,7 +88,7 @@ pub fn substitute_constants(f: &mut Function, abnormal: &HashSet<String>) {
 }
 
 /// Whether `body` calls one of `names`.
-fn calls_any(body: &[Stmt], names: &HashSet<String>) -> bool {
+pub(crate) fn calls_any(body: &[Stmt], names: &HashSet<String>) -> bool {
     fn callee(c: &Call, names: &HashSet<String>) -> bool {
         matches!(&c.callee, Callee::External(n) | Callee::Local(n) | Callee::Section(n)
             if names.contains(n))

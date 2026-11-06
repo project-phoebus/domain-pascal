@@ -1918,6 +1918,18 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     0xE43590 and 0xE443E8 a `bne` on the flags of the store follows (the
     value tested as well as stored), elsewhere the reason is not seen
     (ad-hoc survey, not kept).  The ACL_ ones need bit-array stores.
+  - **Records under 8 bytes with a longword (Verified at the sites;
+    implemented, `check.rs` `alloc_frame`).**  A record of 5 to 7 bytes with
+    a scalar longword field at a multiple of 4 lies at a multiple of 4, also
+    when `[aligned(1)]` makes the type word aligned: the kernel's 18 clock
+    locals at TIME_$CLOCK, CAL_$SEC_TO_CLOCK and CAL_$DECODE_TIME calls, all
+    0 mod 4 (dpc's unattributed `time_$clock_t` already was, so SAU2 does
+    not move); Apollo's `[aligned(1)] packed` one in /com/calendar, clk at
+    -0x8D4, -0x8DC, -0x8E8.  Not every object of that size, measured:
+    4-aligning all of them takes 10 SAU2 routines down and none up
+    (START_MEM_LITES 0.967 to 0.783; WIN_$CINIT 0xE30350 `pea (-0xA,A6)`).
+    A word then a longword, the longword at 2, is not seen (Uncertain;
+    word aligned).
   - **Objects of 8 bytes or more at multiples of 8 (Verified by survey;
     implemented; lead: ../source pascal-translation-notes findings 6,
     101, 123, 129; bead domain-pascal-1edl).**  A frame object of 8 bytes
@@ -5101,8 +5113,15 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
     - A one-character constant assigns like a string of one, though it is
       a `char` (`move.b #'.'` /com/lst 0x9094): the reference's p. 4-26
       names strings only, and the image settles it.
-    - **Not modelled:** /com/rwmt 0x9F36's `move.l #0x20202020,(346,A5);
-      move.w #0x2020,(350,A5)`, a 6-byte array stored by displacement.
+    - *A whole array of 2, 4 or 6 bytes in the frame or the data, at an
+      even offset,* is stored by displacement, the text padded with
+      blanks: `move.w #'  ',(-50,A6)` /com/lusr 0x8D48; `move.l
+      #'    ',(-2190,A6)` /com/calendar 0x883C, `move.l #'1200',(8840,A5)`
+      /com/tctl 0x9E9E; `move.l #'Seve',(8840,A5); move.w #'n ',(8844,A5)`
+      /com/tctl 0xA108, /com/rwmt 0x9F28, /com/wbak 0x91A4 (implemented).
+      8 bytes by displacement occur only in `/com/db`, one of the binaries
+      with no `.aptv`.  **Uncertain, best effort:** a 2- or 4-byte array
+      anywhere else (through a pointer: no site); it takes the byte form.
       `MC68020` follows the longword form (Uncertain; /com is `68010`).
     **Implemented** (`dpc-ir` `lower.rs` `byte_copy`, `copy`;
     `StmtKind::Copy::chars`; `isel.rs` `copy_chars`): an assignment of an
@@ -11847,6 +11866,15 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
   value (ref 5.2, Table 5-1) or returned as a function result of another
   size.  (An expression of another size passed by address, in a frame
   temporary, stays refused: its conversion is not catalogued.)
+  **Not settled (not implemented):** /com/calendar, compiled 1989, keeps
+  32-bit forms where dpc narrows: 0x9604 `jsr M$MIU$LLW; move.w D0,(A2)` for
+  `(blk mod blks_per_cyl) * sects_per_blk`; 0x9648, 0x9656 `lsl.l`, `lsr.l`
+  on zero-extended words, stored as words.  The kernel has `lsl.w D6,D1`
+  (DISK_$WAIT_QUE 0xE3CBA2, 0xE3CBEA), and taking variable-count shifts to
+  32 bits lowers SAU2 (2 routines down, 0 up), so they stay words.  Taking
+  products with a longword operand to 32 bits moves SAU2 by one routine,
+  +0.001, and meets two refusals that are not settled (an `M$ARITH` call
+  with both operands computed; a signed `mod` by a word used as a longword).
   *Reference:* no section states the rule for integers of different
   sizes; 4.3.1 (p. 4-5) expands operands, messages 79 and 83 (pp. 9-15,
   9-16) require compatible types, 5.1 (p. 5-3) says "if the second
@@ -12175,8 +12203,20 @@ stored.
   not symbols: the `status_$...` symbols are `../source`'s.
 - **`abnormal`, `noreturn`, cleanup handlers:** the kernel has cleanup
   handlers (`../source/domain_os/proc2/cleanup_handlers_internal.c`,
-  FIM_$CLEANUP).  How the compiler treats `options(abnormal)` around them
-  is **Uncertain**, but for one point (Verified; bead
+  FIM_$CLEANUP).  **A routine calling an `abnormal` routine saves every
+  callee-saved register (Verified; implemented, `isel.rs` `wrap`,
+  `Function::calls_abnormal`):** all 24 compiled callers of FIM_$CLEANUP
+  have `movem.l D2-D7/A2-A5` (19; those that load A5) or `D2-D7/A2-A4`
+  (5, the module-locals 0xE45A60, 0xE4F3BA, 0xE5B704, 0xE60FD8, 0xE743CE),
+  whichever they use; /com/calendar's body 0x81F8 likewise around
+  pfm_$cleanup.  **It loads no parameter at entry (implemented, `isel.rs`
+  `entry_loads`; bead domain-pascal-uoa1):** they are read from their
+  slots, XNS_IDP_$SEND 0xE18A66 `(0x10)` at 0xE18A70, `(0x14)` at 0xE18A76
+  and again after the call at 0xE18AEA.  SAU2: the saves alone 15 routines
+  up, none down; with the slots 20 more up, 3 down (PCHIST_$UNIX_PROFIL_CNTL
+  0.754 to 0.722, MAC_$RECEIVE 0.767 to 0.751, MAC_$DEMUX 0.602 to 0.599);
+  MAC_$SEND 0.627 to 0.773.  Its other effects on the compiler are
+  **Uncertain**, but for one point (Verified; bead
   domain-pascal-ei42, ad-hoc script on `tools/regalloc.py`'s model, not
   kept): across a call of FIM_$CLEANUP no register holds a value but its
   D0 result, in all 23 compiled routines that call it (MAC_OS_$SEND
@@ -12187,8 +12227,8 @@ stored.
   needs after it are read again from their slots (MAC_$SEND reads `(0x14)`
   at 0xE0BB26 for the statements before the call, then at 0xE0BBB2,
   0xE0BC2A, 0xE0BC3E), a `with` element address is stored to a frame
-  slot (0xE0BB44, read at 0xE0BB9E).  `dpc` does not model it: MAC_$SEND
-  is refused for its registers (bead domain-pascal-uoa1).  The reference (5.5.6, 5.5.9) only says that
+  slot (0xE0BB44, read at 0xE0BB9E).  `dpc` models the parameters, not the (bead domain-pascal-muf4)
+  `with` address.  The reference (5.5.6, 5.5.9) only says that
   optimisation is suppressed and that the return sequence after a
   `noreturn` call is dropped (compare CRASH_SYSTEM call sites; the
   AREA_$DEACTIVATE_ASTE quirk in `../source/docs/original-quirks.md`).

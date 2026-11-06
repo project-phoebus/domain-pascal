@@ -438,6 +438,14 @@ impl<'t> Checker<'t> {
         };
         let align = if size >= FRAME_BIG_SIZE {
             align.max(FRAME_BIG_ALIGN)
+        } else if size > 4 && self.types.has_long_field(ty) {
+            // A record with a longword at a multiple of 4, even word aligned
+            // by `[aligned(1)]`
+            // (Apollo's time_$clock_t, /com/calendar's clk at -0x8D4, -0x8DC,
+            // -0x8E8; the kernel's 18 clock locals, TIME_$CLOCK's callers).
+            // Not other objects under 8 bytes: WIN_$CINIT 0xE30350 `pea
+            // (-0xA,A6)`.
+            align.max(4)
         } else {
             align
         };

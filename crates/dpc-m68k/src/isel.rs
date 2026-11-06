@@ -565,7 +565,26 @@ pub fn wrap(f: &Function, body: Body) -> Result<Vec<Insn>, Diagnostic> {
     } else {
         f.frame_size
     };
-    let frame = frame_for(raw, body.saves, f.span)?;
+    // A routine calling an `abnormal` one (ref 5.5.6, p. 5-19) saves
+    // D2-D7/A2-A4, whichever it uses, and A5 if it loads it (`movem.l
+    // D2-D7/A2-A5` MAC_$SEND 0xE0BB16, `movem.l D2-D7/A2-A4` the module-local
+    // 0xE45A60: all 24 compiled callers of FIM_$CLEANUP, codegen-patterns 9).
+    let saves = if f.calls_abnormal {
+        body.saves.union(RegSet::of(&[
+            Reg::D(2),
+            Reg::D(3),
+            Reg::D(4),
+            Reg::D(5),
+            Reg::D(6),
+            Reg::D(7),
+            Reg::A(2),
+            Reg::A(3),
+            Reg::A(4),
+        ]))
+    } else {
+        body.saves
+    };
+    let frame = frame_for(raw, saves, f.span)?;
     let mut out = frame.prologue();
     let reached = end_reached(&body.insns);
     out.extend(body.insns);
@@ -13835,6 +13854,13 @@ impl Selector {
     /// 0xE41D82; [`fresh_slot_loads`]); after a branch or a call, see
     /// [`check_late_slot_loads`].
     fn entry_loads(&mut self, f: &Function) -> Res<()> {
+        // No register holds a value across a call of an `abnormal` routine
+        // (ref 5.5.6, p. 5-19; bead domain-pascal-uoa1): the parameters are
+        // read from their slots (XNS_IDP_$SEND 0xE18A66: `(0x10)` at
+        // 0xE18A70, `(0x14)` at 0xE18A76 and after the call at 0xE18AEA).
+        if f.calls_abnormal {
+            return Ok(());
+        }
         let uses = param_uses(f);
         // (offset, IR type when by value), in parameter order.
         let mut params: Vec<(i32, Option<Scalar>)> = f
@@ -14501,10 +14527,40 @@ impl Selector {
     /// - A text of one repeated character, 3 or longer, is a fill from a
     ///   longword of it, loaded first (acl 0x8292; all blanks, /com/lopstr
     ///   0x8368): that form in longwords for other than blanks is not seen.
+    /// - An array of 2, 4 or 6 bytes in the frame or the data takes none of
+    ///   this: it is stored by displacement (below).
     fn string_store(&mut self, dst: &Addr, src: &Addr, cell: &dpc_ir::PoolConst, bytes: u32) -> Res<()> {
         let mut text = cell.bytes.as_slice();
         if let [rest @ .., 0] = text {
             text = rest;
+        }
+        // A whole array of 2, 4 or 6 bytes in the frame or the data, by
+        // displacement, the padded text as immediates: `move.w` /com/lusr
+        // 0x8D48, `move.l` /com/calendar 0x883C, /com/tctl 0x9E9E, `move.l`
+        // and `move.w` /com/tctl 0xA108 ('Seven'), /com/rwmt 0x9F28.
+        if matches!(dst, Addr::Frame(o) | Addr::Static(o) if o % 2 == 0)
+            && matches!(bytes, 2 | 4 | 6)
+        {
+            let at = |k: i32| match dst {
+                Addr::Frame(o) => Addr::Frame(o + k),
+                Addr::Static(o) => Addr::Static(o + k),
+                _ => unreachable!("matched above"),
+            };
+            let word = |k: usize| i64::from(*text.get(k).unwrap_or(&b' '));
+            let mut k = 0;
+            while k < bytes as usize {
+                let size = if bytes as usize - k >= 4 { Size::L } else { Size::W };
+                let n = if size == Size::L { 4 } else { 2 };
+                let value = (k..k + n).fold(0i64, |a, i| (a << 8) | word(i));
+                let ea = self.operand(&at(k as i32))?;
+                self.out.push(Insn::Move {
+                    size,
+                    src: Ea::Imm(value),
+                    dst: ea,
+                });
+                k += n;
+            }
+            return Ok(());
         }
         let long = self.cpu.is_68020() || even_known(dst);
         let n = text.len() as u32;
@@ -28950,6 +29006,7 @@ mod tests {
             frame_size,
             result,
             loads_data_base: false,
+            calls_abnormal: false,
             has_data_base: false,
             data_absolute: false,
             value_params: Vec::new(),

@@ -99,6 +99,15 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
             init: Vec::new(),
         });
     }
+    let abnormal: std::collections::HashSet<String> = program
+        .routines
+        .iter()
+        .filter(|r| r.options.abnormal)
+        .map(|r| r.symbol.clone())
+        .collect();
+    for f in &mut functions {
+        f.calls_abnormal = crate::constprop::calls_any(&f.body, &abnormal);
+    }
     if errors.is_empty() {
         if let Err(d) = set_static_links(&mut functions) {
             errors.extend(d);
@@ -1763,6 +1772,7 @@ fn lower_routine_in_context(
         }),
         // Decided once every routine is lowered (`set_loads_data_base`).
         loads_data_base: false,
+        calls_abnormal: false,
         has_data_base: false,
         data_absolute: false,
         value_params: value_params(p, r),
@@ -4093,7 +4103,9 @@ impl Cx<'_> {
                     out.extend(self.hidden_call_assignment(s, target, value)?)
                 }
                 SStmtKind::Assign { target, value }
-                    if is_block(p, target) || byte_array_copy(p, target, value) =>
+                    if is_block(p, target)
+                        || byte_array_copy(p, target, value)
+                        || string_to_chars(p, target, value) =>
                 {
                     out.push(copy(p, s, target, value)?)
                 }
@@ -7257,6 +7269,16 @@ fn byte_array_copy(p: &Program, target: &SExpr, value: &SExpr) -> bool {
     byte_copy(p, target.ty) != ByteCopy::No && value.is_designator() && value.value.is_none()
 }
 
+/// Whether `d := s` assigns a string constant to an array of `char` that
+/// [`is_block`] takes for a scalar (2 or 4 bytes; ref p. 4-204): a string
+/// assignment, not a store of one number ([`string_assign`]).  An array of
+/// 1 byte is its `char`'s `move.b`.
+fn string_to_chars(p: &Program, target: &SExpr, value: &SExpr) -> bool {
+    matches!(value.value, Some(ConstValue::Str(_) | ConstValue::Char(_)))
+        && byte_copy(p, target.ty) == ByteCopy::Chars
+        && p.types.size(target.ty) > 1
+}
+
 /// `d := s` for a record or array `d` that is not scalar-sized (ref
 /// "Assignment", p. 4-25): a block copy of the type's size.  The value
 /// must be a designator; how the original assigned a constant or a
@@ -7401,9 +7423,18 @@ fn string_assign(p: &Program, s: &SStmt, target: &SExpr, text: &[u8], bytes: u32
     if cell.len() % 2 == 1 {
         cell.push(0);
     }
+    let dst = addr_of(p, target)?;
+    if bytes <= 4 && !matches!(dst, Addr::Frame(o) | Addr::Static(o) if o % 2 == 0) {
+        // Seen in the frame and the data only (`string_store`).
+        best_effort(
+            s.span,
+            "a string constant assigned to an array of 2 or 4 bytes not known even, or not in \
+             this routine's frame or the data, is",
+        )?;
+    }
     Ok(Stmt {
         kind: StmtKind::Copy {
-            dst: addr_of(p, target)?,
+            dst,
             src: Addr::Const(PoolConst {
                 bytes: cell,
                 key: target.ty.0,
