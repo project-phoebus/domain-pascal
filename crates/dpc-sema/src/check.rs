@@ -5541,6 +5541,10 @@ impl<'t> Checker<'t> {
             match self.types.kind(src) {
                 // ref p. 4-26: a string no longer than the array.
                 TypeKind::StringLit { len } => *len <= n,
+                // A one-character constant is a char (ref 2.1.5) but assigns
+                // like a string of one: /com/lst 0x9094 `moveb #46,(A0)+`, then
+                // the blanks; /com/edacl 0x9A7A `#37`, /com/cmf 0xA7A4 `#45`.
+                _ if matches!(x.value, Some(ConstValue::Char(_))) => n >= 1,
                 // ... and a char array of the same size.
                 _ => self.types.char_array_len(src) == Some(n),
             }

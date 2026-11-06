@@ -5162,6 +5162,24 @@ fn walk_cond<'a>(c: &'a IrCond, v: &mut dyn FnMut(Node<'a>)) {
 /// Visit every expression, address and call of `body`, nested statements
 /// included.
 /// How an 8-byte copy's source register is loaded ([`Selector::copy8`]).
+/// Whether `a` is known to be at an even address: a variable or a field at an
+/// even offset, or an element of an even step, not an object through a pointer
+/// ([`Selector::string_store`]; another unit's is /com/cmf 0x821C `movea.l
+/// #sym,A1; move.b (A0)+,(A1)+`).
+fn even_known(a: &Addr) -> bool {
+    match a {
+        Addr::Frame(o) | Addr::Enclosing(o) | Addr::Static(o) => o % 2 == 0,
+        Addr::OtherStatic { offset, .. } => offset % 2 == 0,
+        Addr::Index {
+            base,
+            scale,
+            offset,
+            ..
+        } => scale % 2 == 0 && offset % 2 == 0 && even_known(base),
+        _ => false,
+    }
+}
+
 enum Src8 {
     /// `lea <ea>,An`.
     Lea(Ea),
@@ -14239,6 +14257,9 @@ impl Selector {
     /// [`device_param_base`]), which the copy's address set-up does; such a
     /// parameter also used otherwise is refused, as there.
     fn copy(&mut self, dst: &Addr, src: &Addr, bytes: u32, chars: bool) -> Res<()> {
+        if let (true, Addr::Const(cell)) = (chars, src) {
+            return self.string_store(dst, src, cell, bytes);
+        }
         let (d, dacc) = dst.unwrap_volatile();
         let (s, sacc) = src.unwrap_volatile();
         if dacc.is_none() && sacc.is_none() {
@@ -14458,6 +14479,193 @@ impl Selector {
     /// than 48 (none seen; a size threshold for another form cannot be
     /// ruled out: NAME_$INIT 0xE3173A..0xE3174A fills a 256-byte array of
     /// char by longwords from a string constant).
+    /// `d := 'text'` for an array of char of `bytes` bytes (ref "Variable-Length
+    /// String Operations", p. 4-204: "unassigned chars are padded with
+    /// spaces"), `cell` holding the text as a string's own cell.  The text,
+    /// then the blanks, through one post-incremented register
+    /// (codegen-patterns 5.2, "String constants"; `tools/strsurvey.py`, 101
+    /// sites in /com and NAME_$INIT 0xE31738).
+    ///
+    /// By longwords where `d` is known to be even, by bytes otherwise (through
+    /// a pointer, or at an odd offset: /com/acl 0x82C4, /com/rwmt 0x9F36):
+    ///
+    /// - Longwords: up to 6 characters as immediates (`move.l #..,(A0)+`
+    ///   NAME_$INIT 0xE3173A; `move.w`, `move.b` /com/prf 0xD4DC), more from
+    ///   the cell, longwords then a word and a byte (/com/acl 0x82FE, 0x832E),
+    ///   then the blanks in a register: `move.b` to the next even address,
+    ///   longwords, a word and a byte (acl 0x8310, 0x833C, /com/ld 0x9F5E).
+    /// - Bytes: 1 or 2 characters as immediates (/com/wbak 0xA49C), more from
+    ///   the cell, then `moveq #32,Dn` and a `move.b` loop (acl 0x82C4).
+    /// - Runs of up to 4 longwords (/com/rwmt 0x90B0, /com/cmf 0xA4E6) or 4
+    ///   bytes are unrolled; longer ones are a `dbf` loop (acl 0x82FE).
+    /// - A text of one repeated character, 3 or longer, is a fill from a
+    ///   longword of it, loaded first (acl 0x8292; all blanks, /com/lopstr
+    ///   0x8368): that form in longwords for other than blanks is not seen.
+    fn string_store(&mut self, dst: &Addr, src: &Addr, cell: &dpc_ir::PoolConst, bytes: u32) -> Res<()> {
+        let mut text = cell.bytes.as_slice();
+        if let [rest @ .., 0] = text {
+            text = rest;
+        }
+        let long = self.cpu.is_68020() || even_known(dst);
+        let n = text.len() as u32;
+        let repeated = n != 1 && n != 2 && text.windows(2).all(|w| w[0] == w[1]);
+        let blanks = repeated && text.first().is_none_or(|&c| c == b' ');
+        let imm4 = |c: u8| i64::from(u32::from_be_bytes([c; 4]));
+        let d = if repeated {
+            let c = if blanks { b' ' } else { text[0] };
+            let v = self.alloc_d()?;
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Imm(imm4(c)),
+                dst: Ea::Reg(Reg::D(v)),
+            });
+            let (d, _) = self.block_address(dst)?;
+            let run = if blanks { bytes } else { n };
+            if long {
+                self.string_run(Ea::Reg(Reg::D(v)), d, run)?;
+            } else {
+                self.string_bytes(Ea::Reg(Reg::D(v)), d, run)?;
+            }
+            d
+        } else if long && n <= 6 || !long && n <= 2 {
+            let (d, _) = self.block_address(dst)?;
+            let mut rest = text;
+            while !rest.is_empty() {
+                let (size, k) = match rest.len() {
+                    k if k >= 4 && long => (Size::L, 4),
+                    k if k >= 2 && long => (Size::W, 2),
+                    _ => (Size::B, 1),
+                };
+                let value = rest[..k]
+                    .iter()
+                    .fold(0i64, |a, &b| (a << 8) | i64::from(b));
+                self.out.push(Insn::Move {
+                    size,
+                    src: Ea::Imm(value),
+                    dst: Ea::PostInc(d),
+                });
+                rest = &rest[k..];
+            }
+            d
+        } else {
+            let (s, d) = self.block_addresses(src, dst, BlockUse::Chars)?;
+            if long {
+                self.string_run(Ea::PostInc(s), d, n)?;
+            } else {
+                self.string_bytes(Ea::PostInc(s), d, n)?;
+            }
+            d
+        };
+        let done = if blanks { bytes } else { n };
+        let rem = bytes - done;
+        if rem == 0 {
+            return Ok(());
+        }
+        let v = self.alloc_d()?;
+        if long {
+            self.out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Imm(imm4(b' ')),
+                dst: Ea::Reg(Reg::D(v)),
+            });
+            let head = done % 2;
+            if head == 1 {
+                self.out.push(Insn::Move {
+                    size: Size::B,
+                    src: Ea::Reg(Reg::D(v)),
+                    dst: Ea::PostInc(d),
+                });
+            }
+            self.string_run(Ea::Reg(Reg::D(v)), d, rem - head)
+        } else {
+            self.out.push(Insn::Moveq {
+                value: 32,
+                dst: v,
+            });
+            self.string_count_loop(Ea::Reg(Reg::D(v)), d, Size::B, rem)
+        }
+    }
+
+    /// `bytes` bytes from `from` to `(d)+`: longwords, then a word and a byte
+    /// ([`Self::string_store`]).
+    fn string_run(&mut self, from: Ea, d: u8, bytes: u32) -> Res<()> {
+        let longs = bytes / 4;
+        if longs > 4 {
+            self.string_count_loop(from.clone(), d, Size::L, longs)?;
+        }
+        let start = self.out.len();
+        if longs <= 4 {
+            for _ in 0..longs {
+                self.out.push(Insn::Move {
+                    size: Size::L,
+                    src: from.clone(),
+                    dst: Ea::PostInc(d),
+                });
+            }
+        }
+        for (size, bit) in [(Size::W, 2), (Size::B, 1)] {
+            if bytes & bit != 0 {
+                self.out.push(Insn::Move {
+                    size,
+                    src: from.clone(),
+                    dst: Ea::PostInc(d),
+                });
+            }
+        }
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// `n` bytes from `from` to `(d)+` by `move.b` ([`Self::string_store`]).
+    fn string_bytes(&mut self, from: Ea, d: u8, n: u32) -> Res<()> {
+        if n > 4 || matches!(from, Ea::Reg(_)) {
+            return self.string_count_loop(from, d, Size::B, n);
+        }
+        let start = self.out.len();
+        for _ in 0..n {
+            self.out.push(Insn::Move {
+                size: Size::B,
+                src: from.clone(),
+                dst: Ea::PostInc(d),
+            });
+        }
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// A `dbf` loop of `n` moves from `from` to `(d)+`; the count is `moveq`
+    /// or `move.w` as it fits (/com/acl 0x82CA, /com/ld 0x9F5E `move.w #252`).
+    fn string_count_loop(&mut self, from: Ea, d: u8, size: Size, n: u32) -> Res<()> {
+        let count = self.alloc_d()?;
+        let k = n - 1;
+        self.out.push(if k <= 127 {
+            Insn::Moveq {
+                value: k as i8,
+                dst: count,
+            }
+        } else {
+            Insn::Move {
+                size: Size::W,
+                src: Ea::Imm(k as i64),
+                dst: Ea::Reg(Reg::D(count)),
+            }
+        });
+        let head = self.new_label();
+        self.out.push(Insn::Align4);
+        self.place(head);
+        self.out.push(Insn::Move {
+            size,
+            src: from,
+            dst: Ea::PostInc(d),
+        });
+        self.out.push(Insn::Dbf {
+            reg: count,
+            label: head,
+            until: None,
+        });
+        Ok(())
+    }
+
     fn copy_chars(&mut self, dst: &Addr, src: &Addr, bytes: u32) -> Res<()> {
         if bytes != 4 && !((8..=48).contains(&bytes) && bytes % 2 == 0) {
             let refusal = unsupported(

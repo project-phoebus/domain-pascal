@@ -854,3 +854,6 @@ Tests:
   arguments" (bead domain-pascal-vq0h): /com/acl 0x8218.
 - `nested/program_levels` - codegen-patterns 6, "Frame: a 4-byte static-link
   slot" (bead domain-pascal-vq0h): /com/acl's nested frames, 0x8620, 0x83F0.
+- `stores/string_constants` - codegen-patterns 5.2, "String constants" (bead
+  domain-pascal-vq0h): /com/acl 0x8292, 0x82C4, 0x82FE, 0x832E, NAME_$INIT
+  0xE31738.

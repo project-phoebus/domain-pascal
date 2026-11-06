@@ -5054,10 +5054,42 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       another form above 48 cannot be ruled out: the fill of NAME_$INIT
       below, 256 bytes, is by longwords); the callee's copy of an array of char passed by value (no
       byte loop of compiled code is an entry copy).  A string constant
-      assigned to an array of char is a fill by longwords, `move.l
-      #'/com',(A0)+` then spaces in a longword `dbf` loop (NAME_$INIT
-      0xE3173A..0xE3174A), not a copy (not implemented).  Bead
-      domain-pascal-4lf1.
+      assigned to an array of char is not a copy: below, "String
+      constants".  Bead domain-pascal-4lf1.
+    **String constants** (Verified at the sites; implemented, bead
+    domain-pascal-vq0h; `isel.rs` `string_store`).  `d := 'text'` for an
+    array of char (ref p. 4-204: "unassigned chars are padded with
+    spaces") is the text, then the blanks, through one post-incremented
+    register.  101 sites in SR10.2's /com (`tools/strsurvey.py`) and
+    NAME_$INIT 0xE31738, the one in the kernel:
+    - *By longwords where `d` is known even:* a variable or field at an
+      even offset, in the frame, the data or an enclosing frame.  Up to 6
+      characters are immediates (`move.l #'/com',(A0)+` 0xE3173A; `move.b
+      #'-'` /com/cmf 0xA7A4; `move.w`, `move.b` /com/prf 0xD4DC; `move.l`,
+      `move.w` /com/prf 0xC774); more come from the text's own cell,
+      `lea (d,PC),As; lea d,Ad`, longwords, then a word, then a byte
+      (/com/acl 0x82FE, 22 characters; 0x832E, 9).  Then `move.l
+      #0x20202020,Dv`, `move.b Dv,(Ad)+` if at an odd count, longwords,
+      a word and a byte (/com/ld 0x9F5E has both tails).  Up to 4 longwords
+      are unrolled (/com/cmf 0xA4E6, /com/rwmt 0x90B0), more are a `dbf`
+      loop, its count `moveq` or `move.w` as it fits (/com/acl 0x82CA,
+      /com/ld).
+    - *By bytes otherwise:* through a pointer (acl 0x82C4), at an odd offset
+      (/com/rwmt 0x9F36), another unit's (/com/cmf 0x821C).  1 or 2
+      characters are `move.b #c,(Ad)+` (/com/wbak 0xA49C), 3 are unrolled
+      from the cell (/com/cmf 0x821C), 5 and up are a loop (/com/obty
+      0x8462); 4 is not seen.  Then `moveq #32,Dv`, and a `move.b` loop.
+    - *One repeated character, 3 or longer,* is a fill from a longword of
+      it, loaded before the address (acl 0x8292 `move.l #'----',D3; lea
+      (A1),A3`, stored by bytes; all blanks, by longwords, /com/lopstr
+      0x8368, by bytes /com/ld 0x93A2).  **Uncertain:** other than blanks by
+      longwords; dpc takes the same form.
+    - A one-character constant assigns like a string of one, though it is
+      a `char` (`move.b #'.'` /com/lst 0x9094): the reference's p. 4-26
+      names strings only, and the image settles it.
+    - **Not modelled:** /com/rwmt 0x9F36's `move.l #0x20202020,(346,A5);
+      move.w #0x2020,(350,A5)`, a 6-byte array stored by displacement.
+      `MC68020` follows the longword form (Uncertain; /com is `68010`).
     **Implemented** (`dpc-ir` `lower.rs` `byte_copy`, `copy`;
     `StmtKind::Copy::chars`; `isel.rs` `copy_chars`): an assignment of an
     unpacked one-dimensional array of `char` from a variable, at every
@@ -15929,11 +15961,9 @@ followed; execution test `be_u_kinds`.
   carry.
 - **A record or array selected from a type transfer of a variable,
   assigned** (5.2): copied as a block from the variable's bytes, in place
-  (ref p. 4-197).  **A string constant assigned to a longer array of
-  char**: a byte copy from a code-section cell of the text padded with
-  blanks (ref p. 4-204); NAME_$INIT 0xE31738..0xE3174A stores the text
-  with `move.l #...,(A0)+` and fills the blanks by longwords in a `dbf`
-  loop.
+  (ref p. 4-197).  A string constant ending in a NUL assigned to a longer
+  array of char: a byte copy from a cell padded with blanks (no site; the
+  others are 5.2, "String constants").
 - **Comparing booleans** (7.1): as bytes (SMD_$SHOW_CURSOR 0xE6E32E
   `cmp.b (0x38,A4),D1`, SIO2681_$SET_LINE 0xE1D30C `cmp.b D5,D1; seq`);
   `true` is 0xFF, and an ordering (`false < true`) is the reversed

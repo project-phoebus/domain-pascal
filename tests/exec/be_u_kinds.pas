@@ -68,7 +68,6 @@
   warns: best effort (not byte-identical): a longword `div`/`mod` used as a byte
   warns: best effort (not byte-identical): a `for` loop with a run-time lower bound
   warns: best effort (not byte-identical): a `for` loop counting down (`downto`) with a run-time bound
-  warns: best effort (not byte-identical): assigning a string constant to an array of char
   warns: best effort (not byte-identical): assigning a record or array that is not a variable
   warns: best effort (not byte-identical): an unsigned ordering comparison with 0
   warns: best effort (not byte-identical): `in` on a one-word set variable

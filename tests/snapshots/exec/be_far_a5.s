@@ -14,25 +14,19 @@ tst.w (%a5)
 bne.s 1f
 lea (.Lc2,%pc),%a0
 lea (2,%a5),%a1
-moveq #7,%d0
-.balignw 4,0x2048
-2:
-move.b (%a0)+,(%a1)+
-dbf %d0,2b
+move.l (%a0)+,(%a1)+
+move.l (%a0)+,(%a1)+
 1:
 cmpi.w #0x63,(%a5)
-bne.s 3f
+bne.s 2f
 lea (.Lc3,%pc),%a0
 lea (2,%a5),%a1
-moveq #7,%d0
-.balignw 4,0x2048
-4:
-move.b (%a0)+,(%a1)+
-dbf %d0,4b
+move.l (%a0)+,(%a1)+
+move.l (%a0)+,(%a1)+
 pea (.Lc4,%pc)
 jsr (EXEC_$LOG_L).l
 addq.w #4,%sp
-3:
+2:
 pea (.Lc5,%pc)
 pea (2,%a5)
 jsr (EXEC_$LOG_MEM).l
@@ -4551,11 +4545,8 @@ jsr (EXEC_$LOG_L).l
 addq.w #4,%sp
 movea.l (-0xc,%a5),%a0
 lea (2,%a5),%a1
-moveq #7,%d0
-.balignw 4,0x2048
-1:
-move.b (%a0)+,(%a1)+
-dbf %d0,1b
+move.l (%a0)+,(%a1)+
+move.l (%a0)+,(%a1)+
 move.l (-4,%a5),-(%sp)
 pea (2,%a5)
 jsr (EXEC_$LOG_MEM).l

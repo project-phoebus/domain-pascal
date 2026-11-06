@@ -7268,13 +7268,17 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         refuse_unknown_result(p, c, value.span)?;
     }
     let bytes = p.types.size(target.ty);
-    if let (Some(ConstValue::Str(text)), ByteCopy::Chars) = (&value.value, byte_copy(p, target.ty))
-    {
+    let text = match &value.value {
+        Some(ConstValue::Str(text)) => Some(text.clone()),
+        Some(ConstValue::Char(c)) => Some(vec![*c]),
+        _ => None,
+    };
+    if let (Some(text), ByteCopy::Chars) = (text, byte_copy(p, target.ty)) {
         if text.len() as u32 <= bytes
             && volatile_access(p, target).is_none()
             && !p.types.has_volatile_part(target.ty)
         {
-            return string_assign(p, s, target, text, bytes);
+            return string_assign(p, s, target, &text, bytes);
         }
     }
     if !value.is_designator() || value.value.is_some() {
@@ -7383,22 +7387,17 @@ fn copy_side(p: &Program, e: &SExpr) -> Res<Addr> {
 /// `d := 'text'` for an unpacked array of char `d` of `bytes` bytes that
 /// is not scalar-sized ([`copy`]): the characters, then blanks to the
 /// array's end (ref "Variable-Length String Operations", p. 4-204: for
-/// arrays of char "unassigned chars are padded with spaces").  The
-/// image stores the text and fills the rest with longwords of blanks,
-/// NAME_$INIT 0xE31738..0xE3174A `lea (A5),A0; move.l #0x2f636f6d,(A0)+;
-/// move.l #0x20202020,D1; moveq #0x3e,D0; move.l D1,(A0)+; dbf D0`
-/// (`path_buf := '/com'`, 256 bytes).  Best effort (not byte-identical;
-/// bead domain-pascal-uaq7): a byte copy from a code-section cell of the
-/// padded text ([`StmtKind::Copy`] from [`Addr::Const`]).
+/// arrays of char "unassigned chars are padded with spaces").  A
+/// [`StmtKind::Copy`] of `chars` from a code-section cell of the text alone,
+/// as a string's own cell; the target forms the store (codegen-patterns 5.2,
+/// "String constants").  A text ending in a NUL, whose cell cannot say so, is
+/// copied padded, best effort.
 fn string_assign(p: &Program, s: &SStmt, target: &SExpr, text: &[u8], bytes: u32) -> Res<Stmt> {
-    best_effort(
-        s.span,
-        "assigning a string constant to an array of char longer than a longword (NAME_$INIT \
-         0xE31738 stores the text and fills the blanks by longwords; not modelled, \
-         codegen-patterns 5.2) is",
-    )?;
     let mut cell = text.to_vec();
-    cell.resize(bytes as usize, b' ');
+    if text.last() == Some(&0) {
+        best_effort(s.span, "assigning a string constant ending in a NUL to an array of char is")?;
+        cell.resize(bytes as usize, b' ');
+    }
     if cell.len() % 2 == 1 {
         cell.push(0);
     }
