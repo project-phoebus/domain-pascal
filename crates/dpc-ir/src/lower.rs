@@ -11068,9 +11068,9 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
 ///   codegen-patterns 1.5 (TERM_$SEND_KBD_STRING 0xE1AB0C, TONE_$ENABLE
 ///   0xE1ACFC).  A variable of another size than its value or `in`
 ///   parameter (a converted copy) is not supported yet.
-/// - The pad: the callee's `arg_pad` (codegen-patterns 1.4).  A
-///   `variable` routine called with fewer arguments (ref 5.5.5) is not
-///   supported yet: its pad and slots are not catalogued.
+/// - The pad: the callee's `arg_pad` (codegen-patterns 1.4), or for a
+///   `variable` routine called with fewer arguments (ref 5.5.5) that of
+///   the slots pushed (below).
 fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
     refuse_unknown_result(p, c, span)?;
     // The parameters as (mode, univ, type), and the pad.
@@ -11097,12 +11097,24 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
             )
         }
     };
-    if c.args.len() != params.len() {
-        return Err(unsupported(
-            span,
-            "a call with fewer arguments than parameters (ref 5.5.5) is",
-        ));
-    }
+    // ref 5.5.5, p. 5-17: `options(variable)` lets a call stop short (the
+    // checker holds other routines to the full list).  The arguments given
+    // are pushed as usual: /com/acl 0x8218 `error_$print_format` with six of
+    // its sixteen, `lea (24,SP),SP` after.  Those are all by address, so
+    // there is no pad; with word slots the pad of what is pushed is taken
+    // (codegen-patterns 1.4), which no site shows.
+    let pad = if c.args.len() < params.len() {
+        let pushed: u32 = c.args.iter().map(|a| a.conv.slot_size).sum();
+        if pushed % 4 != 0 || c.args.iter().any(|a| a.conv.passing == Passing::ByValue) {
+            best_effort(
+                span,
+                "a call with fewer arguments than parameters and a value in a slot (ref 5.5.5;                  its pad is not catalogued) is",
+            )?;
+        }
+        (4 - pushed % 4) % 4
+    } else {
+        pad
+    };
     let mut args = Vec::new();
     for (i, (a, &(mode, univ, prm_ty))) in c.args.iter().zip(&params).enumerate() {
         let slot = a.conv.slot_size;

@@ -463,6 +463,13 @@ When the argument bytes do not add up to a multiple of 4, the caller first
 does `subq.l #2,SP`, then the pushes.  The pad therefore lies **above** the
 last parameter, and the caller's pop includes it.
 
+*A call with fewer arguments* (`options(variable)`, ref 5.5.5, p. 5-17; bead
+domain-pascal-vq0h): the arguments given are pushed as usual and popped by
+their total.  /com/acl 0x8218..0x8236 `error_$print_format`, six of its
+sixteen parameters, all by address, `lea (24,SP),SP`.  **Verified** for
+arguments by address, where there is no pad.  With a value in a word slot
+dpc pads what is pushed and warns: no site shows it.
+
 - word + long + long = 10 bytes, then pad.  MAC_OS_$OPEN 0xE0B3DC
   `subq.l #2,SP; move.l (0x10,A6),-(SP); move.l D7,-(SP); move.w (0x30,A3),-(SP); ...; jsr (A1)`.
 - One word.  AST_$PAGE_ZERO 0xE00EF0..0xE00EFC
@@ -3380,6 +3387,8 @@ variables.  Each module's static data is a data segment, addressed off
       form of it: acl's `.data` has no bytes in the file.
     - *Best effort:* an 8-byte copy into such a variable (no image site
       read yet).
+    - *Comparison:* `../source`'s `domain_os/tools/coff_compare.py` compares
+      a translated program with its COFF binary, by routine from `.blocks`.
     - External names in these files are lower case (`pgm_$exit`); dpc
       upper-cases them as for the kernel (CLAUDE.md 3.15), so a comparison
       against a COFF binary folds case.
@@ -7487,6 +7496,18 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   `link #-4` and no locals.  So a nested frame starts with a slot for the
   link, locals below it.  **Implemented** (`dpc-sema` `routine_body`:
   a nested routine's frame allocation starts at 4).
+  One slot per enclosing routine, past the first (bead
+  domain-pascal-vq0h): /com/acl's chain acl > list_it > lacl > {list_req,
+  dolist_subs} has 12 bytes above the locals of the innermost two (`link
+  #-0x12C` 0x8620, `#-0x118` 0x83F0), and with this dpc has the image's
+  `link` for list_it, lacl and both.  **Verified** there; a program's
+  routines count the program as an enclosing routine.  In the kernel
+  only DIR has such routines: `calc_entry_size` becomes the image's
+  `link #-16` (0xE4EF42, pairing them by their order in the code), and the
+  other five come 4 nearer (0xE4EECA, 0xE4EF7C, 0xE4F034, 0xE4F100,
+  0xE4F2DA), still 4 or 8 short.  What the extra slots hold is **Uncertain**:
+  acl's list_req reaches its enclosing frame with `movea.l (A6),A2` and
+  stores nothing there.
   The same holds for the unnamed (internal) routines that are not
   nested: of 355, one has `link #0` (0xE6B074, a VFMT segment start) and
   one addresses `(-4..-1,A6)` (0xE70396), against 190 `link #0` and 320

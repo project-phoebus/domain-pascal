@@ -850,3 +850,7 @@ Tests:
 - `program/main`, `program/extern_cells`, `program/no_data` - codegen-patterns
   4, "Main programs" (bead domain-pascal-vq0h): /com/acl's body at 0x8ED8, its
   procedures, and external variables through cells below the data base.
+- `params/variable_short` - codegen-patterns 1.4, "A call with fewer
+  arguments" (bead domain-pascal-vq0h): /com/acl 0x8218.
+- `nested/program_levels` - codegen-patterns 6, "Frame: a 4-byte static-link
+  slot" (bead domain-pascal-vq0h): /com/acl's nested frames, 0x8620, 0x83F0.

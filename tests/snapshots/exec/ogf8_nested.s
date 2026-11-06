@@ -1,6 +1,6 @@
 .text
 INNER:
-link.w %fp,#-8
+link.w %fp,#-0xc
 pea (%a2)
 movea.l %a1,%a0
 movea.l (-4,%a0),%a1
@@ -14,11 +14,11 @@ add.l %d1,%d0
 move.w (8,%fp),%d1
 ext.l %d1
 add.l %d1,%d0
-movea.l (-0xc,%fp),%a2
+movea.l (-0x10,%fp),%a2
 unlk %fp
 rts
 COUNT:
-link.w %fp,#-4
+link.w %fp,#-8
 movem.l %d2/%a2,-(%sp)
 move.w (8,%fp),%d2
 movea.l %a1,%a2
@@ -38,11 +38,11 @@ move.w %d0,-(%sp)
 movea.l %a2,%a1
 bsr.s COUNT
 1:
-movem.l (-0xc,%fp),%d2/%a2
+movem.l (-0x10,%fp),%d2/%a2
 unlk %fp
 rts
 BOTH:
-link.w %fp,#-4
+link.w %fp,#-8
 pea (%a2)
 subq.l #2,%sp
 movea.l (%fp),%a2
@@ -61,7 +61,7 @@ add.l (%a0),%d1
 movea.l (-4,%a2),%a0
 movea.l (0xa,%a0),%a0
 move.l %d1,(%a0)
-movea.l (-8,%fp),%a2
+movea.l (-0xc,%fp),%a2
 unlk %fp
 rts
 MID:
@@ -127,7 +127,7 @@ movem.l (-0x1c,%fp),%d2/%a2
 unlk %fp
 rts
 L3:
-link.w %fp,#-4
+link.w %fp,#-0xc
 movem.l %d2/%a2,-(%sp)
 movea.l (%fp),%a0
 moveq #0x64,%d0
@@ -145,24 +145,24 @@ move.l %d1,%d2
 lsl.l #2,%d2
 add.l %d2,%d1
 add.l %d1,%d0
-move.w (-6,%a0),%d1
+move.w (-0xa,%a0),%d1
 movea.l (-4,%a0),%a0
 ext.l %d1
 movea.l (-4,%a0),%a0
 add.l %d1,%d0
 move.l %d0,(-4,%a0)
-movem.l (-0xc,%fp),%d2/%a2
+movem.l (-0x14,%fp),%d2/%a2
 unlk %fp
 rts
 L2:
-link.w %fp,#-8
+link.w %fp,#-0xc
 movea.l (%fp),%a0
 lea (0,%a0),%a1
 move.l %a1,(-4,%fp)
 movea.l (-4,%a0),%a0
 move.w (8,%a0),%d0
 subq.w #2,%d0
-move.w %d0,(-6,%fp)
+move.w %d0,(-0xa,%fp)
 bsr.s L3
 unlk %fp
 rts

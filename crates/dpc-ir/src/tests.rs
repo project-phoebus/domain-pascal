@@ -2269,16 +2269,6 @@ end;
         e[0].ends_with("passing a 4-byte value to a 2-byte parameter is not supported yet"),
         "{e:?}"
     );
-    let e = errs(
-        "module m;
-procedure q(a, b: integer); options(val_param, variable, extern);
-procedure p;
-begin
-  q(1);
-end;
-",
-    );
-    assert!(e[0].contains("fewer arguments than parameters"), "{e:?}");
 }
 
 // ---- control flow (codegen-patterns 7) -------------------------------

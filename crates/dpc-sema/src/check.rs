@@ -2932,10 +2932,19 @@ impl<'t> Checker<'t> {
         // leave `(-4..-1,A6)` alone (exceptions 0xE6B074 `link #0`,
         // 0xE70396), against 190 `link #0` and 320 that address it among
         // the 1194 map-named routines.
+        //
+        // One such slot per enclosing routine, past the first: /com/acl's
+        // list_req and dolist_subs, nested three levels in the program's
+        // routines (acl > list_it > lacl > them), have 12 bytes above their
+        // locals (`link #-0x12C` where the locals take 0x120).  DIR's 0xE4EF42,
+        // at level 2, has `link #-16` with this, and its neighbours move
+        // nearer the image.  What the slots below the first hold is not
+        // settled: the first is the link's (above).
         let frame = if self.routines[id.0 as usize].global {
             0
         } else {
-            self.target.pointer_size()
+            let enclosing = level + u32::from(!self.is_module);
+            self.target.pointer_size() * enclosing.max(1)
         };
         self.ctx.push(RoutineCtx {
             id,

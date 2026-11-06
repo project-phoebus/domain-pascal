@@ -8,7 +8,7 @@ move.w %d0,(-2,%a0)
 unlk %fp
 rts
 INNER:
-link.w %fp,#-4
+link.w %fp,#-8
 pea (%a2)
 subq.l #2,%sp
 movea.l (%fp),%a2
@@ -24,7 +24,7 @@ subq.l #2,%sp
 move.w (-6,%a2),-(%sp)
 movea.l (-4,%a2),%a1
 bsr.s BUMP
-movea.l (-8,%fp),%a2
+movea.l (-0xc,%fp),%a2
 unlk %fp
 rts
 MID:
