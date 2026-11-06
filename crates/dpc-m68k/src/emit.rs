@@ -506,6 +506,13 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
                 &mut pool_labels,
                 &mut a5_cells,
                 &a5_ok,
+                &|sect: &str| {
+                    if sect == module.extern_cells_section {
+                        module.extern_cells.len() as i32
+                    } else {
+                        0
+                    }
+                },
             ) {
                 errors.push(d);
             } else {
@@ -547,7 +554,17 @@ pub fn emit(module: &Module, source_name: &str, opts: &Options) -> Result<String
             .iter()
             .any(|(s, _)| s.eq_ignore_ascii_case(&data.section))
         {
-            out.push_str(&data_area(&module.name, data, a5_cells.of(&data.section)));
+            let externs: &[String] = if data.section == module.extern_cells_section {
+                &module.extern_cells
+            } else {
+                &[]
+            };
+            out.push_str(&data_area(
+                &module.name,
+                data,
+                a5_cells.of(&data.section),
+                externs,
+            ));
         }
     }
     for (sect, sym) in &opts.data_bases {
@@ -828,6 +845,7 @@ fn size_branches(
     next_cell: &mut u32,
     a5_cells: &mut A5Cells,
     a5_ok: &dyn Fn(&dpc_ir::Function) -> bool,
+    extern_cells: &dyn Fn(&str) -> i32,
 ) -> Result<(), Diagnostic> {
     use std::collections::HashMap;
     enum Target {
@@ -1164,7 +1182,7 @@ fn size_branches(
                     | Insn::Movea {
                         src: crate::insn::Ea::Disp(d, DATA_BASE_REG),
                         ..
-                    } => *d = -4 * (k as i32 + 1),
+                    } => *d = -4 * (k as i32 + 1 + extern_cells(sect)),
                     _ => unreachable!("a header cell's reference"),
                 }
             }
@@ -1324,8 +1342,12 @@ pub fn data_base_label(sect: &str) -> String {
 /// at `-4(k+1)` from it: DIR's block 0xE7DBF8 starts `00e4 b33c 00e4
 /// b230` and its A5 is 0xE7DC00 (codegen-patterns 4).  A block with a
 /// header has contents (the addresses are relocated).
-fn data_area(unit: &str, data: &dpc_ir::DataArea, header: &[u32]) -> String {
-    let initialised = !data.init.is_empty() || !header.is_empty();
+///
+/// `externs`: the external variables a main program reaches through cells
+/// ([`dpc_ir::Module::extern_cells`]), the first at `(-4,A5)`, the constant
+/// cells below them.
+fn data_area(unit: &str, data: &dpc_ir::DataArea, header: &[u32], externs: &[String]) -> String {
+    let initialised = !data.init.is_empty() || !header.is_empty() || !externs.is_empty();
     let mut out = format!(
         "\n\t.section\t\"{}\",\"aw\",{}\n\t.balign\t4\n",
         data_section_name(unit, &data.section, initialised),
@@ -1336,6 +1358,9 @@ fn data_area(unit: &str, data: &dpc_ir::DataArea, header: &[u32]) -> String {
             "\t.long\t{}\t| header cell: a far constant's address\n",
             crate::insn::pool_label(n)
         ));
+    }
+    for sym in externs.iter().rev() {
+        out.push_str(&format!("\t.long\t{sym}\t| header cell: an external variable's address\n"));
     }
     out.push_str(&format!("{}:\n", data_base_label(&data.section)));
     let size = data.size.div_ceil(4) * 4;
@@ -1820,7 +1845,7 @@ mod tests {
             init: vec![],
         };
         assert_eq!(
-            data_area("dir", &data, &[7, 3]),
+            data_area("dir", &data, &[7, 3], &[]),
             "\n\t.section\t\".moddata.DIR\",\"aw\",@progbits\n\t.balign\t4\n\
              \t.long\t.Lc3\t| header cell: a far constant's address\n\
              \t.long\t.Lc7\t| header cell: a far constant's address\n\

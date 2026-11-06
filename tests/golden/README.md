@@ -847,3 +847,6 @@ Tests:
   `sne` (ACL_$USED_SUSER 0xE492FA), a register-held `for` index (ACL_$INIT
   0xE310E4); FIM_'s frame size table as an initialised `packed array of
   0..255`.
+- `program/main`, `program/extern_cells`, `program/no_data` - codegen-patterns
+  4, "Main programs" (bead domain-pascal-vq0h): /com/acl's body at 0x8ED8, its
+  procedures, and external variables through cells below the data base.

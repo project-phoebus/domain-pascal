@@ -53,8 +53,9 @@ pub struct Program {
     /// Bytes allocated in each data section by this unit, in order of
     /// first use: (section, size).
     pub data_sections: Vec<(String, u32)>,
-    /// The main program's action part (`program` only).
-    pub main: Option<Block>,
+    /// The routine of the main program's action part (`program` only), the
+    /// last of [`Self::top_routines`].
+    pub main: Option<RoutineId>,
     /// Warnings (errors make [`crate::analyze`] fail instead).
     pub warnings: Vec<Diagnostic>,
     /// The target reads and writes words and longwords at odd addresses
@@ -199,8 +200,8 @@ pub struct Routine {
     pub symbol: String,
     pub kind: RoutineKind,
     /// Exported (global symbol) or local to the unit.  Top-level routines
-    /// are global unless `internal` (ref 5.5.4, p. 5-17); nested routines
-    /// are local.
+    /// of a module are global unless `internal` (ref 5.5.4, p. 5-17); nested
+    /// routines, and those a main program defines, are local.
     pub global: bool,
     /// Declared `extern` and never given a body here: calls go to the
     /// symbol.

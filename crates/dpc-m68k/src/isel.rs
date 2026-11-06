@@ -5167,6 +5167,9 @@ enum Src8 {
     Lea(Ea),
     /// `movea.l (o,A6),An`: the pointer in a frame slot.
     Slot(i32),
+    /// `movea.l (o,A5),An`: an external variable's cell below the data base
+    /// (`dpc_ir::Module::extern_cells`; /com/acl 0x89D8).
+    Cell(i32),
     /// `movea.l #sym,An`: another unit's object.
     Sym(String),
 }
@@ -14973,6 +14976,18 @@ impl Selector {
             Addr::Static(_) | Addr::Frame(_) => Src8::Lea(self.ea_of(src)?),
             Addr::Symbol { name, offset: 0 } => Src8::Sym(name.clone()),
             Addr::Indirect { base, offset: 0 }
+                if matches!(&**base, Expr::Load { addr: Addr::Static(o), .. } if *o < 0) =>
+            {
+                let Expr::Load {
+                    addr: Addr::Static(o),
+                    ..
+                } = &**base
+                else {
+                    unreachable!()
+                };
+                Src8::Cell(*o)
+            }
+            Addr::Indirect { base, offset: 0 }
                 if matches!(&**base, Expr::Load {
                     addr: Addr::Frame(o),
                     ty: Scalar { width: Width::Long, .. },
@@ -15084,6 +15099,11 @@ impl Selector {
                 src: Ea::Disp(o, FP),
                 dst: a,
             },
+            Src8::Cell(o) => Insn::Movea {
+                size: Size::L,
+                src: Ea::Disp(o, DATA_BASE_A),
+                dst: a,
+            },
             Src8::Sym(name) => Insn::Movea {
                 size: Size::L,
                 src: Ea::ImmSym(name),
@@ -15162,6 +15182,23 @@ impl Selector {
                                      0xE2FC1E: the section's base, the other operand, then the \
                                      block's `lea`; one site; bead domain-pascal-dsr5) is";
         if let Addr::Indirect { base, offset: 0 } = addr {
+            // An external variable's cell below the data base, as a kernel
+            // block's `movea.l #sym,An` (`dpc_ir::Module::extern_cells`).
+            if let Expr::Load {
+                addr: Addr::Static(o),
+                ..
+            } = &**base
+            {
+                if *o < 0 {
+                    let a = self.alloc_a()?;
+                    self.out.push(Insn::Movea {
+                        size: Size::L,
+                        src: Ea::Disp(*o, DATA_BASE_A),
+                        dst: a,
+                    });
+                    return Ok((a, BlockForm::New));
+                }
+            }
             if let Expr::Load {
                 addr: Addr::Frame(o),
                 ty: Scalar {
@@ -28404,7 +28441,8 @@ impl Selector {
             // `move.l (4,A5),(4,A0)`), `(A5)` for offset 0 (0xE18FE6
             // `move.l (A5),(A0)`).
             Addr::Static(o) => {
-                if !(0..0x8000).contains(o) {
+                // Below 0: a cell under the base (`dpc_ir::Module::extern_cells`).
+                if !(-0x8000..0x8000).contains(o) {
                     return Err(unsupported(
                         self.span,
                         "a static variable beyond 32K into the data area is",

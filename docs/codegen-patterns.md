@@ -3335,6 +3335,54 @@ variables.  Each module's static data is a data segment, addressed off
       offsets; whether the 4-byte blocks are an empty such header is a
       lead only.  Three segments have such a block and never load A5
       (TAPE_BOOT 0xE32734, DMA_ 0xE0A328, PEB_UNWIRED 0xE5AD38).
+  - **Main programs** (bead domain-pascal-vq0h; not kernel code, from
+    SR10.2's /com, a survey of the binaries' `.text` and section
+    headers).  A program is an exported routine whose procedures
+    are nested in it.  Verified on /com/acl (Apollo COFF, `.text` 0x81F8,
+    `.data` 0x100D4), whose `.blocks` give its procedures level 2; the
+    survey covers the rest of /com as stated.
+    - *The body* is the COFF entry and comes last: 0x8ED8 `link.w
+      A6,#-4; movem.l D2-D7/A5,-(SP); lea (0x100E0).l,A5`, ending 0x9B1A
+      `movem.l`, `unlk`, `rts`, with no implied exit.  No `link` follows
+      the entry in 48 of 77 programs; in the others, and where there are
+      several A5 loads (32), other modules are linked in.  `link #0` in
+      39, `#-4` in 26: what the 26 keep there is not settled, so dpc's
+      body has the frame its temporaries need and `#0` otherwise.
+    - *A5.*  All 76 programs with a `link` entry and a `.data` section
+      load it; /com/chhdir, with an empty `.data`, has no such load, so
+      a program with no data loads nothing.  The symbol of the body is
+      the program's name upper-cased; the binder keeps no defined symbol
+      in these files, so this is dpc's choice.
+    - *Procedures* are called with `bsr` (0x8DCA), have no A5 load
+      (0x89B4, 0x8C2C read `(3332,A5)`, `(3370,A5)`), take a small value
+      parameter by value as nested routines do (0x8DBE `move.w
+      (-6,A6),-(SP)`, read at 0x89D0 `cmpi.w #3,(16,A6)`) and a large one
+      by address with a local copy (0x89BE..0x89C6).  Local symbols:
+      the reference says top-level routines become global symbols "in a
+      module" (5.5.4, p. 5-17).  dpc keeps them at level 0: a program's
+      variables are static, so there is no frame to link to.  One
+      declared `extern` is another unit's and keeps the default
+      convention.
+    - *External variables* go through cells below A5, one per variable,
+      the first named at `-4`: acl's A5 is `.data` + 0xC, with
+      `movea.l (-4,A5),A0` 0x89D8, `movea.l (-8,A5),A0` 0x89DE, `move.l
+      (-12,A5),-(SP)` 0x8DC6, and it has three undefined data symbols.
+      The numbering fits first use in code order (the COFF symbol table,
+      reversed, lists `acl_$file_acl`, `acl_$dir_acl`, `uid_$nil` in that
+      order).  Across /com, code reads every cell below A5 in 72 of 76
+      programs with a `lea` at the entry.  That they are all external
+      variables is **Uncertain** (the larger headers, `pst` 0x3BC and
+      `uctnode` 0xFC, may hold far constants as DIR's does, and they are
+      among the 4 with a cell not seen read).  The kernel's modules use
+      absolute addresses instead, so whether a separately compiled
+      /com module uses cells is not known; dpc does this for a `program`
+      only.  `.data` has the cells' addresses, and `.long SYM` is dpc's
+      form of it: acl's `.data` has no bytes in the file.
+    - *Best effort:* an 8-byte copy into such a variable (no image site
+      read yet).
+    - External names in these files are lower case (`pgm_$exit`); dpc
+      upper-cases them as for the kernel (CLAUDE.md 3.15), so a comparison
+      against a COFF binary folds case.
   - **No block, no A5.**  No segment loads A5 without a `D` block of its
     name.  Of the 85 compiled segments with no such block in their
     paired data section, 81 never load A5; the other 4 load their

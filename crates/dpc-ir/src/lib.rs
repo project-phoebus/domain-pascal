@@ -93,6 +93,11 @@ pub struct Module {
     /// the unit (defining one is refused, `lower.rs`), so each is called
     /// as [`Callee::External`].
     pub nosave_callees: Vec<String>,
+    /// The external variables a main program reaches through cells below
+    /// its data base (`lower.rs`, `extern_cell`): cell `k` is at `-4(k+1)`
+    /// from the base of data section [`Self::extern_cells_section`].
+    pub extern_cells: Vec<String>,
+    pub extern_cells_section: String,
 }
 
 /// A unit's static data area in one data section: one block, reached as

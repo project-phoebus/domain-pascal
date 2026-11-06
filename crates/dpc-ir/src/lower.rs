@@ -74,16 +74,8 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
 /// which routines load the data base (codegen-patterns 4).
 pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    if program.is_program {
-        let d = match program.main.as_ref().and_then(|b| b.stmts.first()) {
-            Some(s) => unsupported(s.span, "code generation for a main program is"),
-            None => {
-                Diagnostic::error_nopos("code generation for a main program is not supported yet")
-            }
-        };
-        errors.push(d);
-    }
-    let (data, overlays) = match data_area(program) {
+    EXTERN_CELLS.with(|c| c.borrow_mut().clear());
+    let (mut data, overlays) = match data_area(program) {
         Ok(d) => d,
         Err(d) => {
             errors.extend(d);
@@ -98,13 +90,23 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
         }
         lower_family(program, id, &mut functions, &mut errors);
     }
+    let extern_cells = EXTERN_CELLS.with(|c| c.take());
+    if !extern_cells.is_empty() && !data.iter().any(|a| a.section == program.data_section) {
+        data.push(DataArea {
+            section: program.data_section.clone(),
+            size: 0,
+            globals: Vec::new(),
+            init: Vec::new(),
+        });
+    }
     if errors.is_empty() {
         if let Err(d) = set_static_links(&mut functions) {
             errors.extend(d);
         }
     }
     if errors.is_empty() {
-        if let Err(d) = set_loads_data_base(&mut functions, &data, db) {
+        let main = program.main.map(|m| program.routine(m).symbol.as_str());
+        if let Err(d) = set_loads_data_base(&mut functions, &data, db, main) {
             errors.extend(d);
         }
     }
@@ -124,6 +126,8 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
             overlays,
             outside_internal_calls,
             nosave_callees,
+            extern_cells,
+            extern_cells_section: program.data_section.clone(),
         })
     } else {
         Err(errors)
@@ -1838,6 +1842,7 @@ fn set_call_sections(p: &Program, caller_section: &str, body: &mut [Stmt]) {
 ///   over stretches of a segment and is not recorded in the source, so
 ///   it is an option ([`DataBaseOptions`]): used mode by default.
 /// - A bare-`rts` routine never loads A5 (SMD_$PUTC 0xE1D89C).
+/// - `main`, the routine of a main program's action part: below.
 ///
 /// Errors: a name that is not a routine of the unit; always mode in a
 /// unit without static data (A5 would point at a 4-byte block with A5 at
@@ -1850,6 +1855,7 @@ fn set_loads_data_base(
     fs: &mut [Function],
     data: &[DataArea],
     db: &DataBaseOptions,
+    main: Option<&str>,
 ) -> Result<(), Vec<Diagnostic>> {
     let fsr: &[Function] = fs;
     let mut errors = Vec::new();
@@ -2049,6 +2055,10 @@ fn set_loads_data_base(
             true
         } else if !f.global && !entry[i] {
             false
+        } else if main == Some(f.symbol.as_str()) {
+            // A main program with data loads its base: all 76 /com programs
+            // with a `link` entry and a .data section do (/com/acl 0x8EE0).
+            has[i]
         } else {
             uses[i] || (always_mode[i] && has[i])
         };
@@ -10899,13 +10909,60 @@ fn enclosing(a: Addr) -> Addr {
     }
 }
 
+thread_local! {
+    /// The external variables a main program has named so far
+    /// ([`extern_cell`], [`Module::extern_cells`]).
+    static EXTERN_CELLS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A main program reaches another unit's variable through a cell below its
+/// data base holding the variable's address, one cell per variable, the
+/// first named at `(-4,A5)`: /com/acl's A5 is .data + 0xC, and it has three
+/// external variables (`movea.l (-4,A5),A0` 0x89D8, `(-8,A5)` 0x89DE,
+/// `move.l (-12,A5),-(SP)` 0x8DC6).  Across /com, code reads every cell
+/// below A5 in 72 of the 76 programs with a `lea` entry; that those cells are
+/// external variables' is Verified only for acl (the kernel's far constants
+/// use such cells too, codegen-patterns 4).  The kernel's modules reach an
+/// external variable by its absolute address, so this is the program's form;
+/// modules linked into such binaries are not surveyed.
+fn extern_cell(symbol: &str) -> Addr {
+    let k = EXTERN_CELLS.with(|c| {
+        let mut c = c.borrow_mut();
+        match c.iter().position(|s| s == symbol) {
+            Some(k) => k,
+            None => {
+                c.push(symbol.to_string());
+                c.len() - 1
+            }
+        }
+    });
+    Addr::Indirect {
+        base: Box::new(Expr::Load {
+            addr: Addr::Static(-4 * (k as i32 + 1)),
+            ty: Scalar {
+                pointer: true,
+                ..Scalar::unsigned(Width::Long)
+            },
+        }),
+        offset: 0,
+    }
+}
+
 fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
     let v = p.var(id);
     match &v.storage {
-        Storage::Extern { symbol } => Ok(Addr::Symbol {
-            name: symbol.clone(),
-            offset: 0,
-        }),
+        Storage::Extern { symbol } => {
+            // Only a routine with the unit's data base has the cells.
+            let own = DATA_SECTION.with(|d| d.borrow().as_deref() == Some(&p.data_section));
+            if p.is_program && own {
+                return Ok(extern_cell(symbol));
+            }
+            Ok(Addr::Symbol {
+                name: symbol.clone(),
+                offset: 0,
+            })
+        }
         Storage::Frame { offset } => Ok(Addr::Frame(*offset)),
         // The result's place, through the hidden address in the first
         // argument slot, as an `out` parameter's object (ACL_$DEFAULT_ACL

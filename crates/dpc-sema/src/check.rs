@@ -542,8 +542,12 @@ impl<'t> Checker<'t> {
         }
         self.is_module = matches!(unit.kind, ast::UnitKind::Module);
         let mut unit_vars = Vec::new();
-        let top = self.decls(&unit.decls, None, &mut unit_vars);
-        let main = unit.body.as_ref().map(|b| self.block(b));
+        let mut top = self.decls(&unit.decls, None, &mut unit_vars);
+        let main = unit.body.as_ref().map(|b| {
+            let body = self.block(b);
+            self.main_routine(unit, body)
+        });
+        top.extend(main);
         for p in &unit.trailing_pragmas {
             self.pragma(p);
         }
@@ -633,6 +637,38 @@ impl<'t> Checker<'t> {
             main,
             warnings: self.warnings,
         })
+    }
+
+    /// The routine of a main program's action part: exported under the
+    /// program's name, emitted after every routine the program defines
+    /// (the entry of /com/acl, 0x8ED8, follows them; none follows it in 48
+    /// of the 77 /com programs with such an entry, and the rest link other
+    /// modules).
+    fn main_routine(&mut self, unit: &ast::CompilationUnit, body: Block) -> RoutineId {
+        let id = RoutineId(self.routines.len() as u32);
+        self.routines.push(Routine {
+            name: unit.name.name.clone(),
+            symbol: upper(&unit.name.name),
+            kind: ast::RoutineKind::Procedure,
+            global: true,
+            external: false,
+            parent: None,
+            level: 0,
+            options: RoutineOptions::default(),
+            params: Vec::new(),
+            arg_bytes: 0,
+            arg_pad: 0,
+            result: None,
+            code_section: self.code_section.clone(),
+            data_section: self.data_section.clone(),
+            frame_vars: Vec::new(),
+            frame_size: 0,
+            nested: Vec::new(),
+            static_refs: Vec::new(),
+            body: Some(body),
+            span: unit.name.span,
+        });
+        id
     }
 
     /// The alignment environment at the start of the unit: natural with
@@ -2702,7 +2738,13 @@ impl<'t> Checker<'t> {
             }
         }
         let level = parent.map_or(0, |p| self.routines[p.0 as usize].level + 1);
-        let nested = parent.is_some();
+        // A routine a main program defines is nested in the program: /com's
+        // .blocks give acl's procedures level 2, its list_req at 0x825C is
+        // called with `bsr.w`, it inherits A5, and 0x8DBE pushes a word by
+        // value (`move.w (-6,A6),-(SP)`, read as `(16,A6)` at 0x89D0).  One
+        // declared `extern` is another unit's.  It stays at level 0 here: a
+        // program's variables are static, so there is no frame to link to.
+        let nested = parent.is_some() || (!self.is_module && !opts.extern_);
         // Nested routines take small value parameters by value, like
         // `internal` routines: PMAP_$FLUSH calls its nested routine at
         // 0xE1359C with `move.w D6,-(SP); move.l D5,-(SP); pea (A2)`
