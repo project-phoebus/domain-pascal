@@ -4940,13 +4940,13 @@ impl<'t> Checker<'t> {
             // "Addr", p. 4-13: "x Can be a variable declared as any data
             // type ... x can also be a string constant but it cannot be a
             // constant of any type other than string."  "The addr function
-            // returns an univ_ptr value."  Of a string constant (p. 4-13)
-            // and of a routine (C.3.5, above): not supported yet.
+            // returns an univ_ptr value."  Of a routine (C.3.5, above): not
+            // supported yet.  Of a string constant, or a character one (/com/args
+            // `addr(nl)`, `nl = chr(10)`), its cell in the code section.
+            Builtin::Addr if matches!(xs[0].value, Some(ConstValue::Str(_) | ConstValue::Char(_))) => {
+                bi.univ_ptr
+            }
             Builtin::Addr => {
-                if matches!(xs[0].value, Some(ConstValue::Str(_) | ConstValue::Char(_))) {
-                    self.unsupported(span, "`addr` of a string constant (ref p. 4-13)");
-                    return self.error_expr(span);
-                }
                 if !xs[0].is_designator() && xs[0].transfers_variable() {
                     // Open question 46 ([`Self::assign_target`]).
                     self.unsupported(

@@ -3387,6 +3387,20 @@ variables.  Each module's static data is a data segment, addressed off
       form of it: acl's `.data` has no bytes in the file.
     - *Best effort:* an 8-byte copy into such a variable (no image site
       read yet).
+    - *`addr` of a string or character constant* (ref p. 4-13; `addr(nl)`
+      with `nl = chr(10)`): the constant's cell, `lea (d,PC),An`, /com/args
+      0x8260, into a temporary passed by address as any `addr` of an `in`
+      parameter's argument.  args forms both temporaries before its loop
+      (0x8258..0x8264) where dpc forms each at its call: not modelled, as
+      other hoisting.
+    - *Not a rule:* args has `arg`, 1024 bytes, at `(16,A5)` after a 12-byte
+      `sk` at `(A5)`.  Aligning static objects of 8 bytes or more to 8, as
+      frames do, breaks the kernel (SAU2 mean 0.78383 to 0.77587, 235
+      routines down and none up), and the 4 bytes could as well be a
+      variable no code names, so dpc keeps the declared order and types'
+      alignment.  Older /com binaries (aqdev, no `.aptv`: `.rwdi` builds
+      `.data`, each external through `movea.l (-n,A5),A0; jsr (A0)`) are not
+      modelled.
     - *Comparison:* `../source`'s `domain_os/tools/coff_compare.py` compares
       a translated program with its COFF binary, by routine from `.blocks`.
     - External names in these files are lower case (`pgm_$exit`); dpc

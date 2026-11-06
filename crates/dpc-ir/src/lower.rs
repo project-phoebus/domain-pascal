@@ -10268,6 +10268,11 @@ fn check_even(p: &Program, e: &SExpr) -> Res<()> {
 
 /// The address of designator `e`.
 fn addr_of(p: &Program, e: &SExpr) -> Res<Addr> {
+    // `addr` of a string or character constant (ref p. 4-13): its cell in the
+    // code section, /com/args 0x8260 `lea (0x82de,PC),A2` for `addr(nl)`.
+    if let Some(v @ (ConstValue::Str(_) | ConstValue::Char(_))) = &e.value {
+        return Ok(Addr::Const(pool_const(p, v, e.ty, e.span)?));
+    }
     if bit_field(p, e)?.is_some() {
         // The checker refuses such a field where an address is needed
         // (ref 3.10.3); any other use that would need one is refused here.

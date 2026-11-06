@@ -857,3 +857,5 @@ Tests:
 - `stores/string_constants` - codegen-patterns 5.2, "String constants" (bead
   domain-pascal-vq0h): /com/acl 0x8292, 0x82C4, 0x82FE, 0x832E, NAME_$INIT
   0xE31738.
+- `program/addr_const` - codegen-patterns 4, "Main programs" (bead
+  domain-pascal-vq0h): `addr` of a constant, /com/args 0x8260.

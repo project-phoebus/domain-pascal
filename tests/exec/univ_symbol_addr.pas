@@ -14,7 +14,7 @@
 
   link: univ_symbol_addr_data.mod.pas
   call: USA_$RUN
-  warns: best effort (not byte-identical): `addr` of another unit's or a constant's object passed by address
+  warns: best effort (not byte-identical): `addr` of another unit's object passed by address
   expect:
     6
     4660

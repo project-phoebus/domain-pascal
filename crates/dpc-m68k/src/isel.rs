@@ -18741,7 +18741,9 @@ impl Selector {
                 let peeled = self.addr_peeled(value);
                 let value: &Expr = &peeled;
                 match value {
-                    Expr::AddrOf(a) if !matches!(a, Addr::Symbol { .. } | Addr::Const(_)) => {
+                    // A constant's cell: /com/args 0x8260 `lea (0x82de,PC),A2; move.l
+                    // A2,(-8,A6)`.
+                    Expr::AddrOf(a) if !matches!(a, Addr::Symbol { .. }) => {
                         let src = self.ea_of(a)?;
                         let r = self.alloc_a()?;
                         self.out.push(Insn::Lea { src, dst: r });
@@ -18754,11 +18756,11 @@ impl Selector {
                     // Best effort (bead domain-pascal-5kgg): `lea` of it as
                     // above.  For a parameter of 4 bytes or more a symbol's
                     // address is a cell (`dpc-ir`, bead domain-pascal-68tc);
-                    // this is a smaller `univ` one or a constant's object.
+                    // this is a smaller `univ` one.
                     Expr::AddrOf(a) => {
                         best_effort(
                             self.span,
-                            "`addr` of another unit's or a constant's object passed by address is",
+                            "`addr` of another unit's object passed by address is",
                         )?;
                         let src = self.ea_of(a)?;
                         let r = self.alloc_a()?;

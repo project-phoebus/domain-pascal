@@ -86,5 +86,5 @@ diag	sys/source/emt/send_pas_model.pas	expected `_`, found `_`
 diag	sys/source/emt/siorf.pas	expected `_`, found `_`
 diag	sys/source/emt/siotf.pas	expected `_`, found `_`
 diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
-diag	usr/X11/examples/dmwin/dmwin.pas	`_` of a string constant (ref p. N-N) is not supported yet
+diag	usr/X11/examples/dmwin/dmwin.pas	undefined identifier `_`
 diag	usr/X11/examples/pascal/xhw1.pas	an open array bound `_` is not supported yet

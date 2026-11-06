@@ -1761,11 +1761,6 @@ fn addr_builtin() {
         "module m; var u: univ_ptr; i: integer; procedure p; begin u := addr(i, i) end;",
         "takes 1 argument",
     );
-    // Legal (p. 4-13; C.3.5, p. C-7) but not handled yet.
-    assert_err(
-        "module m; var u: univ_ptr; procedure p; begin u := addr('abc') end;",
-        "`addr` of a string constant (ref p. 4-13) is not supported yet",
-    );
 }
 
 #[test]
