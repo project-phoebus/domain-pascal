@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """sau2map.py - read the SR10.2 SAU2 kernel link map.
 
-The map (~/src/domainos-archeology/sau2-maps/domain_os.10.2.map) is the
+The map (~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sau2/domain_os.map) is the
 authoritative source of names and addresses (CLAUDE.md section 7).  Its
 lines are, after a one-line build header:
 
@@ -33,7 +33,7 @@ import sys
 
 DEFAULT_MAP = os.environ.get(
     'SAU2_MAP',
-    os.path.expanduser('~/src/domainos-archeology/sau2-maps/domain_os.10.2.map'))
+    os.path.expanduser('~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sau2/domain_os.map'))
 
 _SEG_RE = re.compile(
     r'^(?P<kind>[ID])\s*(?P<num>\d+)?\s+(?P<addr>[0-9A-F]+)\s+(?P<name>\S+)\s+'

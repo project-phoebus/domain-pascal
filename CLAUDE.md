@@ -305,7 +305,7 @@ verify, not as truth.  Known example: the "result slot" wording.
   (`~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sau2/domain_os`;
   file offset = VA − 0xDFFC00, valid for 0xE00800..0xE88834).
 - Find routine boundaries in the link map
-  `~/src/domainos-archeology/sau2-maps/domain_os.10.2.map`.  Its names are
+  `~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sau2/domain_os.map`.  Its names are
   authoritative.
 - `gsk analyze <addr>` (Ghidra) may be used **read-only** if it is
   reachable.  Never rename anything, never switch the Ghidra program, never

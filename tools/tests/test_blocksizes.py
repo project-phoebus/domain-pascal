@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 import blocksizes  # noqa: E402
 
-# Map lines of the SAU2 map's shape (domain_os.10.2.map 833, 1082, 2223,
+# Map lines of the SAU2 map's shape (domain_os.map 833, 1082, 2223,
 # 2248, 2284): sections with a number, segments without; DISK_ as three
 # units of one section.
 MAP = """\

@@ -21,7 +21,7 @@ Every entry carries a **status**:
   golden tests, the conformance runs and `tools/srcsurvey.py` are strict.
 
 Addresses are SR10.2 SAU2 virtual addresses.  Names come from
-`~/src/domainos-archeology/sau2-maps/domain_os.10.2.map`.  A routine the map
+`~/src/domainos-archeology/sr10.2-install/install/ri.apollo.os.v.10.2/sau2/domain_os.map`.  A routine the map
 does not name is called "module-local, unnamed".  The descriptive names that
 `../source/domain_os` uses for those are given only as file pointers.
 
