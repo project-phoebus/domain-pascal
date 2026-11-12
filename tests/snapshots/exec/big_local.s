@@ -22,6 +22,65 @@ move.l %d0,(%a0)
 movem.l (-0x14,%fp),%d2-%d4
 unlk %fp
 rts
+.globl SCAN
+SCAN:
+link.w %fp,#-4
+move.l %d2,-(%sp)
+movea.l (8,%fp),%a0
+move.w #-1,(-4,%fp)
+moveq #0xf,%d0
+moveq #0xf,%d1
+.balignw 4,0x2048
+2:
+move.w %d1,%d2
+add.w %d2,%d2
+lea (0,%a0,%d2.w),%a1
+adda.l #0x9c42,%a1
+cmpi.w #-1,(%a1)
+beq.s 4f
+move.w %d1,(-4,%fp)
+4:
+subq.w #1,%d1
+dbf %d0,2b
+subq.l #2,%sp
+move.w (-4,%fp),-(%sp)
+jsr (EXEC_$LOGV_W).l
+move.l (-8,%fp),%d2
+unlk %fp
+rts
+.globl BIG_LOCAL_$FAR
+BIG_LOCAL_$FAR:
+link.w %fp,#-8
+suba.l #0x9c64,%sp
+movem.l %d2-%d3,-(%sp)
+lea (8,%sp),%a0
+move.l %a0,(-4,%fp)
+move.w (8,%fp),%d0
+moveq #0xf,%d1
+clr.w %d2
+.balignw 4,0x2048
+2:
+move.w %d2,%d3
+movea.l (-4,%fp),%a0
+add.w %d3,%d3
+lea (0,%a0,%d3.w),%a0
+adda.l #0x9c42,%a0
+move.w #-1,(%a0)
+addq.w #1,%d2
+dbf %d1,2b
+move.w %d0,%d1
+movea.l (-4,%fp),%a0
+add.w %d1,%d1
+lea (0,%a0,%d1.w),%a0
+adda.l #0x9c42,%a0
+clr.w (%a0)
+move.l (-4,%fp),-(%sp)
+bsr.w SCAN
+movea.l %fp,%a1
+adda.l #-0x9c74,%a1
+movem.l (%a1),%d2-%d3
+unlk %fp
+rts
 POKE:
 link.w %fp,#-4
 movea.l (%fp),%a0
@@ -42,7 +101,7 @@ move.l %a0,(-4,%fp)
 move.w (8,%fp),%d2
 pea (.Lc0,%pc)
 move.l (-4,%fp),-(%sp)
-bsr.s FILL
+bsr.w FILL
 addq.w #8,%sp
 movea.l (-4,%fp),%a0
 move.l (%a0),-(%sp)

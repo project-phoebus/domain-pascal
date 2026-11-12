@@ -6395,6 +6395,18 @@ fn stepped_arrays(
         return Ok(Err(why));
     }
     for a in &out {
+        // An array at an offset beyond 16 bits from its pointer: the
+        // stepped pointer's elements would be reached by a displacement
+        // that cannot hold it.  Best effort (not byte-identical; bead
+        // domain-pascal-338r, domain-c's gap 5, c_macro_utl's
+        // `b^.used_words[w]`; no site): the loop's elements indexed.
+        if matches!(&a.base, Addr::Indirect { offset, .. } if !(-0x8000..0x8000).contains(offset))
+        {
+            return Ok(Err(
+                "an array at an offset beyond 16 bits from its pointer in a `for` loop (its \
+                 elements indexed; no site, codegen-patterns 7.4) is",
+            ));
+        }
         let Addr::Indirect { base: p, .. } = &a.base else {
             match a.base {
                 // A constant address: the unit's data area, the frame,
