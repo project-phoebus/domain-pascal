@@ -3902,7 +3902,8 @@ this pair.
   longword in memory as `move.<s>; lsr.b #1; bcs`/`bcc` in a condition;
   as a value refused (`scs` into another register at both sites, the
   load in D3 at 0xE70E98: bead domain-pascal-uwfe); `odd` of a byte is
-  refused by `dpc-ir`.  Golden `control/one_bit`; exec test `onebit`.
+  widened to a word first, best effort (no site; bead
+  domain-pascal-338r; refused under `--strict`).  Golden `control/one_bit`; exec test `onebit`.
   (The earlier lead: ../source pascal-translation-notes finding 2; bead
   domain-pascal-ogzd.)
 - **Set constants** sit in data, for example the two 32-byte `set of char`
@@ -4407,8 +4408,13 @@ model run against the bit model of Figure 3-6).
   before `L`, and, as for `[k]` above, in the destination itself (best
   effort, not byte-identical): cleared by the counted loop for `[r,
   ...]`, `bclr` for `s - [r]`.  Tests `sets.rs` `run_time_ranges`; exec
-  test `tests/exec/set_ranges.pas`.  A run-time range in a set of a
-  longword or less is refused (no site).  PAS_$SET_BUILD 0xE11FA8 (hand
+  test `tests/exec/set_ranges.pas`.  A run-time range, or several
+  run-time members, in a set of a longword or less (no site): **best
+  effort** (bead domain-pascal-338r; refused under `--strict`), each
+  range's mask `(~0 << lo) & ~(~0 << (hi + 1))` (empty when `lo > hi`;
+  a 68000 shift by the width or more gives 0), each run-time member's
+  bit, each constant member's bit, `or`ed (exec test
+  `set_range_odd_byte`).  PAS_$SET_BUILD 0xE11FA8 (hand
   assembly: copy a set, then `bset` each member of a range clamped to
   it) has no compiled caller; dpc ships the routine in its runtime for
   kernel links (`runtime/m68k/pas_set_build.s`, transcribed from the

@@ -8184,11 +8184,92 @@ fn set_value(p: &Program, e: &SExpr, ty: Scalar) -> Res<Expr> {
                 elem: Box::new(set_element(p, x)?),
                 ty,
             }),
-            _ => Err(unsupported(
-                e.span,
-                "a set constructor with a run-time range or several run-time members (codegen-\
-                 patterns 5.1: PAS_$SET_BUILD 0xE11FA8 is never called from compiled code) is",
-            )),
+            // Several members or a run-time range, in a register: each
+            // member's bit (`[x]`) or range's mask `(~0 << lo) & ~(~0 <<
+            // (hi + 1))` (an empty mask when `lo > hi`; a shift by the
+            // set's width or more gives 0 on the 68000, so `hi` at the
+            // top bit gives every bit from `lo`), `or`ed.  Best effort
+            // (not byte-identical; bead domain-pascal-338r, domain-c's gap
+            // 38; no site: the image's PAS_$SET_BUILD 0xE11FA8 is never
+            // called from compiled code, codegen-patterns 5.1).
+            items => {
+                best_effort(
+                    e.span,
+                    "a set constructor with a run-time range or several run-time members (a mask \
+                     formed by shifts; codegen-patterns 5.1: PAS_$SET_BUILD 0xE11FA8 is never \
+                     called from compiled code) is",
+                )?;
+                let ones = Expr::Const {
+                    value: imm_value(u64::MAX, ty),
+                    ty,
+                };
+                let count = |x: &SExpr| -> Res<Expr> {
+                    Ok(convert(set_element(p, x)?, Scalar::unsigned(ty.width)))
+                };
+                let mut acc: Option<Expr> = None;
+                for (x, hi) in items {
+                    let bits = (ty.bytes() * 8) as i64;
+                    let part = match hi {
+                        // A constant member: its bit.
+                        None => match x.value.as_ref().and_then(|v| v.ordinal()) {
+                            Some(k) if (0..bits).contains(&k) => Expr::Const {
+                                value: imm_value(1u64 << k, ty),
+                                ty,
+                            },
+                            Some(_) => {
+                                return Err(unsupported(
+                                    x.span,
+                                    "a constant member outside the set's bits is",
+                                ))
+                            }
+                            None => Expr::SetOf {
+                                elem: Box::new(set_element(p, x)?),
+                                ty,
+                            },
+                        },
+                        Some(h) => {
+                            let lo_mask = Expr::Binary {
+                                op: IrBinOp::Shl,
+                                lhs: Box::new(ones.clone()),
+                                rhs: Box::new(count(x)?),
+                                ty,
+                            };
+                            let above = Expr::Binary {
+                                op: IrBinOp::Add,
+                                lhs: Box::new(count(h)?),
+                                rhs: Box::new(Expr::Const { value: 1, ty: Scalar::unsigned(ty.width) }),
+                                ty: Scalar::unsigned(ty.width),
+                            };
+                            let hi_mask = Expr::Unary {
+                                op: IrUnOp::Not,
+                                operand: Box::new(Expr::Binary {
+                                    op: IrBinOp::Shl,
+                                    lhs: Box::new(ones.clone()),
+                                    rhs: Box::new(above),
+                                    ty,
+                                }),
+                                ty,
+                            };
+                            Expr::Binary {
+                                op: IrBinOp::And,
+                                lhs: Box::new(lo_mask),
+                                rhs: Box::new(hi_mask),
+                                ty,
+                            }
+                        }
+                    };
+                    acc = Some(match acc {
+                        None => part,
+                        Some(a) => Expr::Binary {
+                            op: IrBinOp::Or,
+                            lhs: Box::new(a),
+                            rhs: Box::new(part),
+                            ty,
+                        },
+                    });
+                }
+                acc.ok_or_else(|| unsupported(e.span, "an empty set constructor here is"))
+            }
         },
         ExprKind::Binary {
             op: op @ (BinOp::Add | BinOp::Mul | BinOp::Sub),
@@ -9592,9 +9673,13 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
         // "Odd", p. 4-128: "true if i is an odd integer": bit 0 of the
         // integer (codegen-patterns 8, "odd").
         Builtin::Odd => {
-            let x = value_of(p, &args[0])?;
+            let mut x = value_of(p, &args[0])?;
             if x.ty().width == Width::Byte {
-                return Err(unsupported(e.span, "`odd` of a byte value is"));
+                // Widened to a word first: best effort (not byte-
+                // identical; bead domain-pascal-338r, domain-c's gap 39; no
+                // site).
+                best_effort(e.span, "`odd` of a byte value (widened to a word; no site) is")?;
+                x = convert(x, Scalar::unsigned(Width::Word));
             }
             Ok(Expr::Test(Box::new(Cond::Odd(x))))
         }
