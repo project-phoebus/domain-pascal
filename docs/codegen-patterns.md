@@ -7759,7 +7759,11 @@ routines (`summary`): 11 take the link in A1, 75 read `(A6)`.
   0xE1359C).  Children of a level-1 routine come before it too (DIR
   0xE4F034 before its parent 0xE4F100, both before 0xE4F3BA).
   **Implemented** (`dpc-ir` `lower_family`); a nested routine declared
-  `forward` is refused (heading or body order not seen).
+  `forward` (heading or body order not seen in the kernel) is **best
+  effort**, emitted where its body is (bead domain-pascal-338r; refused
+  under `--strict`; the DOMAIN C compiler's
+  il_utils_$search_tree_for_node, reported: search_point 0x07E206, then
+  the forward search_walk 0x07E252; exec test `nested_forward`).
   The same holds for module-local workers placed before their first
   user: 0xE17778 comes before LOG_$READ, and 0xE00EB0 before
   AST_$PAGE_ZERO.  Given body order (next item), this is source order:

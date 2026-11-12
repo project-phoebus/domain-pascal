@@ -562,8 +562,8 @@ fn check_section_name(name: &str, span: Span) -> Res<()> {
 /// routine's own frame (0xE4DFFE `move.l (A6),(-0x1a4,A6); movea.l
 /// (-0x1a4,A6),A0; move.l (A0),(-4,A6)`, a display) `dpc` walks the chain
 /// at each reference ([`outer`]).  A nested routine declared `forward` is
-/// refused: whether it is emitted at its heading or at its body is not
-/// seen.
+/// emitted at its body, best effort: the kernel does not show whether at
+/// its heading or at its body.
 fn lower_family(p: &Program, id: RoutineId, out: &mut Vec<Function>, errors: &mut Vec<Diagnostic>) {
     NEEDS_LINK.with(|n| n.borrow_mut().clear());
     lower_tree(p, id, out, errors);
@@ -582,19 +582,36 @@ fn lower_tree(
     let r = p.routine(id);
     let mut uplevel: Vec<(i32, u32)> = Vec::new();
     let mut up: Vec<(u32, i32, u32)> = Vec::new();
-    for &n in &r.nested {
+    // A nested routine declared `forward` is emitted where its body is:
+    // best effort (not byte-identical; bead domain-pascal-338r,
+    // domain-c's gap 9; no kernel site).  Reported, not checked here: the
+    // DOMAIN C compiler's il_utils_$search_tree_for_node emits
+    // search_point (0x07E206) before search_walk (0x07E252), which is
+    // declared `forward` and called by search_point.
+    let at = |n: RoutineId| {
+        let nr = p.routine(n);
+        match (&nr.body, nr.options.forward) {
+            (Some(b), true) => b.stmts.first().map_or(nr.span.lo, |s| s.span.lo),
+            _ => nr.span.lo,
+        }
+    };
+    let mut nested = r.nested.clone();
+    nested.sort_by_key(|&n| at(n));
+    for &n in &nested {
         let nr = p.routine(n);
         if nr.body.is_none() {
             errors.push(unsupported(nr.span, "a nested routine without a body is"));
             continue;
         }
         if nr.options.forward {
-            errors.push(unsupported(
+            if let Err(d) = best_effort(
                 nr.span,
-                "a nested routine declared `forward` (emitted at its heading or its body: not \
-                 seen) is",
-            ));
-            continue;
+                "a nested routine declared `forward` (emitted at its body; at its heading or its \
+                 body: not seen in the kernel) is",
+            ) {
+                errors.push(d);
+                continue;
+            }
         }
         for (l, o, b) in lower_tree(p, n, out, errors) {
             if l == 1 {
