@@ -2372,9 +2372,13 @@ module supplies the two run-time routines).
   only assignment as the last statement of a body of several
   statements; `clr.l` of the result slot where every assignment is
   last and another reads memory ("Every assignment last" below,
-  NET_$FIND_HANDLER).  Refused: `nil` where every assignment is last on
-  several paths and none reads memory (no site), a body of the one
-  statement `f := nil` (no site), `nil` as the only assignment other than last
+  NET_$FIND_HANDLER).  **Best effort** (bead domain-pascal-338r;
+  refused under `--strict`; exec test `nil_results`): `nil` where every
+  assignment is last on several paths and none reads memory (no site),
+  `suba.l An,An` into the result's register (the DOMAIN C compiler's
+  arg_option_parameter, reported: cc.m68k 0x0B27F2 `suba.l A0,A0`); a
+  body of the one statement `f := nil` (no site), `movea.l #0,A0` (its
+  make_temp, reported: 0x09F9BC).  Refused: `nil` as the only assignment other than last
   (`f := nil; if k > 0 then count := 3`: no site, each `suba.l`
   function has another assignment), a `suba.l` the next assignment
   overwrites before any branch or use (`f := nil; f := x`: no site), a
@@ -4173,6 +4177,15 @@ model run against the bit model of Figure 3-6).
     set variables, above): an element of 32 and more is tested modulo 32
     (../source's note on DISK_$FORMAT_WHOLE: `vol_idx` 33..42 pass
     0xE3D2B8), and of 16..31 against the constant's zero bits.
+  - a char or `[byte]` element, or a 4-byte one, on a one-word constant
+    (no kernel site): **best effort** (bead domain-pascal-338r; refused
+    under `--strict`), the constant a longword, `move.l #c,Dn; btst
+    Dk,Dn`, as the DOMAIN C compiler's alias_ptr_node (Pascal Rev 8.89;
+    reported by domain-c, not checked here: cc.m68k 0x073BC8 `clr.w D0;
+    move.l #0xC000,D1; move.b (18,A3),D0; btst D0,D1`); an element of 32
+    and more tested modulo 32, as above (exec test
+    `in_word_const_byte`).  A boolean element stays refused (true is
+    0xFF, which `btst` takes as bit 31).
   - the element: as it is, ×41 (`move.w` ×38, held, computed: MAC_$OPEN
     0xE0B8FE `move.w (0x2c,A3,D1.w),D2` for `route_$port[port].active
     in [0, 1]`, an `integer` in ../source's reading), or zero-extended to

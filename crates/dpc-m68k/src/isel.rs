@@ -19199,12 +19199,22 @@ impl Selector {
             // last-statement `nil`s, TIME_$RTE_INT 0xE163D6 `movea.l
             // #0,A0` and TIME_$VT_INT 0xE16426, follow other statements;
             // codegen-patterns 3, "`nil` results").
-            return Err(unsupported(
+            // Best effort (not byte-identical; bead domain-pascal-338r,
+            // domain-c's gap 11): `movea.l #0,A0`, the slot not used, as
+            // the DOMAIN C compiler's make_temp (reported: cc.m68k
+            // 0x09F9BC, between the A5 load and its restore).
+            best_effort(
                 self.span,
                 "a pointer function body of the one statement `f := nil` (no site; `movea.l \
                  #0,A0` where it follows other statements, TIME_$RTE_INT 0xE163D6; \
                  codegen-patterns 3, \"`nil` results\") is",
-            ));
+            )?;
+            self.out.push(Insn::Movea {
+                size: Size::L,
+                src: Ea::Imm(0),
+                dst: 0,
+            });
+            return Ok(());
         }
         if let Expr::AddrOf(a) = e {
             // An address: formed straight into A0, the slot not used
@@ -19438,12 +19448,17 @@ impl Selector {
                 // `movea.l (-0x10,A6),A0`; its memory assignment too goes
                 // through the slot, 0xE5A180, as at KBD_$GET_DESC 0xE1AA92,
                 // TTY_$I_GET_DESC 0xE667B0, SIO_$I_GET_DESC 0xE66808).
-                return Err(unsupported(
+                // Best effort (not byte-identical; bead domain-pascal-338r,
+                // domain-c's gap 11): `suba.l An,An` into the result's
+                // register, as where an assignment is not last (below),
+                // and as the DOMAIN C compiler's arg_option_parameter
+                // (reported: cc.m68k 0x0B27F2 `suba.l A0,A0`).
+                best_effort(
                     self.span,
                     "`nil` as a pointer result where every assignment of the result is the \
                      last statement of a path (the result slot cleared and reloaded, \
                      NET_$FIND_HANDLER 0xE5A178; codegen-patterns 3, \"`nil` results\") is",
-                ));
+                )?;
             }
         }
         let web = match self.web_a {

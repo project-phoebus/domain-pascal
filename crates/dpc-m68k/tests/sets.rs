@@ -1486,7 +1486,7 @@ fn constant_set_refusals() {
     // A boolean element: true is 0xFF, `btst` would take bit 31.
     refused(
         "function t(b: boolean): boolean; options(val_param); begin t := b in [true] end;",
-        "one-byte element",
+        "with a boolean element",
     );
     // A one-word constant `moveq` cannot load, with an `integer` element
     // (`move.w #0xfff` at FILE_$PRIV_LOCK 0xE5F114, `move.l #0x7fe` with
@@ -1510,7 +1510,9 @@ fn constant_set_refusals() {
          function t(k: pinteger): boolean; options(val_param); begin t := k in w16c([1..10]) end;",
         "of a declared type with a `0..65535` element",
     );
-    // A 4-byte element on a one-word constant set (no site).
+    // A 4-byte element on a one-word constant set (no site): best effort
+    // without `--strict` (bead domain-pascal-338r; exec test
+    // in_word_const_byte).
     refused(
         "function t(k: integer32): boolean; options(val_param); begin t := k in [1..3] end;",
         "4-byte element",

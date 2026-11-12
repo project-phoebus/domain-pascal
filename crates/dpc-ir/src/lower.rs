@@ -8146,19 +8146,36 @@ fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Ex
         && long_host_word(&p.types, lhs.ty);
     if set_width == Width::Word && runtime {
         match elem.ty().width {
-            Width::Byte => {
+            Width::Byte if p.types.is_boolean(lhs.ty) => {
                 return Err(unsupported(
                     lhs.span,
-                    "`in` on a one-word constant set with a one-byte element (boolean, char, \
-                     `[byte]`: no site, codegen-patterns 5.1; a boolean's true is 0xFF) is",
+                    "`in` on a one-word constant set with a boolean element (no site, \
+                     codegen-patterns 5.1; a boolean's true is 0xFF) is",
                 ))
             }
-            Width::Long => {
-                return Err(unsupported(
+            // A char or `[byte]` element zero-extended, a 4-byte one as it
+            // is, the constant a longword, `btst Dk,Dn`: best effort (not
+            // byte-identical; bead domain-pascal-338r, domain-c's gap 23;
+            // no kernel site).  Reported, not checked here: the DOMAIN C
+            // compiler's alias_ptr_node (cc.m68k 0x073BC8) `clr.w D0;
+            // move.l #0xC000,D1; move.b (18,A3),D0; btst D0,D1`.
+            w @ (Width::Byte | Width::Long) => {
+                best_effort(
                     lhs.span,
-                    "`in` on a one-word constant set with a 4-byte element (no site, \
-                     codegen-patterns 5.1) is",
-                ))
+                    "`in` on a one-word constant set with a one-byte or 4-byte element (the \
+                     constant a longword; no site, codegen-patterns 5.1) is",
+                )?;
+                if w == Width::Byte {
+                    elem = convert(elem, Scalar::unsigned(Width::Long));
+                }
+                return Ok(Expr::SetMember {
+                    elem: Box::new(elem),
+                    set: Box::new(Expr::Const {
+                        value,
+                        ty: Scalar::unsigned(Width::Long),
+                    }),
+                    set_width: Width::Long,
+                });
             }
             Width::Word => {}
         }
