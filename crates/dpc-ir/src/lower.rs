@@ -9758,6 +9758,55 @@ pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
 /// (38,A2)`, an 8-bit field in bytes 39..40; 0xE0E346 `andi.l
 /// #-0xffff01,(4,A2)`, a 16-bit one in bytes 5..6).
 fn bit_field(p: &Program, e: &SExpr) -> Res<Option<(Addr, BitField)>> {
+    // An element of a packed array of booleans with a constant index: the
+    // bit `7 - (k - lo) mod 8` of the byte `(k - lo) div 8`, as the
+    // variable index's `btst` reaches it ([`bit_element`]), read and
+    // written as a one-bit field of that byte.  Best effort (not
+    // byte-identical; bead domain-pascal-338r, domain-c's gap 13; no
+    // site).  Reported, not checked here: the DOMAIN C compiler's
+    // put_procedure_start (cc.a88k 0x223C1C) `tst.b (A0); bpl` for
+    // element 0 of a `packed array [0..65535] of boolean`.
+    if let ExprKind::Index {
+        base,
+        index,
+        lo,
+        elem_bits: Some(1),
+        ..
+    } = &e.kind
+    {
+        if let (Some(k), TypeKind::Boolean) =
+            (index.value.as_ref().and_then(|v| v.ordinal()), p.types.kind(e.ty))
+        {
+            if volatile_access(p, e).is_some() {
+                return Err(unsupported(
+                    e.span,
+                    "an element of a volatile packed array of booleans is",
+                ));
+            }
+            let pos = k - lo;
+            let size = p.types.size(base.ty) as i64;
+            if pos < 0 || pos / 8 >= size {
+                return Err(unsupported(
+                    index.span,
+                    "a constant index outside the packed array of booleans is",
+                ));
+            }
+            best_effort(
+                e.span,
+                "an element of a packed array of booleans with a constant index (a one-bit \
+                 field; no site in the image, codegen-patterns 5.2) is",
+            )?;
+            return Ok(Some((
+                addr_of(p, base)?.offset_by((pos / 8) as i32),
+                BitField {
+                    unit: Width::Byte,
+                    shift: 7 - (pos % 8) as u32,
+                    width: 1,
+                },
+            )));
+        }
+        return Ok(None);
+    }
     let ExprKind::Field {
         base,
         bits: Some(b),
@@ -9900,11 +9949,8 @@ fn bit_element(p: &Program, e: &SExpr) -> Res<Option<(Addr, u32, Expr, i64)>> {
         ));
     }
     if index.value.is_some() {
-        return Err(unsupported(
-            index.span,
-            "an element of a packed array of booleans with a constant index (no site in the \
-             image, codegen-patterns 5.2) is",
-        ));
+        // A constant index: a one-bit field ([`bit_field`]).
+        return Ok(None);
     }
     let ix = value_of(p, index)?;
     if ix.ty().width != Width::Word {

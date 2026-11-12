@@ -6724,12 +6724,20 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       bases (ACL's `movea.l #ACL_$DATA+0xEA60,An`, then the `lea` into An at
       ACL_$ALLOC_ASID 0xE73CAE but into another register at ACL_$USED_SUSER
       0xE492EE); ACL_$FREE_ASID's reuse across two statements.
+      **Best effort** (bead domain-pascal-338r, domain-c's gap 13;
+      refused under `--strict`; exec test `packed_bool_wide`): a test on
+      more than 256 elements (up to 65536, lower bound 0..8), the
+      position computed on the index's word and `lsr.w #3` for its byte
+      (the DOMAIN C compiler's pds_$end_scope, reported: cc.m68k
+      0x06D7C6); a constant index, read and written as a one-bit field of
+      its byte (`btst #k`/`bset #k`, `tst.b` for bit 7; put_procedure_start,
+      reported: cc.a88k 0x223C1C `tst.b (A0); bpl`); an element as a
+      value other than a condition, the test then `sne`.
       **Refused**: a computed value stored (bead domain-pascal-ysp5), and
-      the forms no site shows (bead domain-pascal-pubp): a constant index,
-      another lower bound, a test on more than 256 elements (the byte
-      arithmetic), a computed or non-word index, an element as another
-      value or passed by address, arrays in the frame, through a pointer or
-      of another unit, 2- and 4-bit elements.  Tests: golden
+      the forms no site shows (bead domain-pascal-pubp): another lower
+      bound, a computed or non-word index, an element passed by address,
+      arrays in the frame, through a pointer or of another unit (except as
+      the best-effort forms reach them), 2- and 4-bit elements.  Tests: golden
       `packed/bool_arrays`, `crates/dpc-m68k/tests/packed_arrays.rs`,
       `crates/dpc-sema/src/tests/packed_arrays.rs`, `crates/dpc-ir`
       `packed_boolean_elements`, exec tests `packed_bools` and

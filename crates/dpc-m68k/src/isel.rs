@@ -19897,12 +19897,34 @@ impl Selector {
                 });
                 Ok(Val::Tmp(r))
             }
-            // As a function result: [`Self::set_result`].
-            Expr::BitElem { .. } => Err(unsupported(
-                self.span,
-                "an element of a packed array of booleans as a value other than a condition or \
-                 the function result of a one-statement body (not seen, codegen-patterns 5.2) is",
-            )),
+            // As a function result: [`Self::set_result`].  Any other value:
+            // best effort (not byte-identical; bead domain-pascal-338r,
+            // domain-c's gap 13; not seen), the test then `sne`, as the
+            // one-statement function result (ACL_$USED_SUSER 0xE492FA).
+            Expr::BitElem {
+                array,
+                bytes,
+                index,
+                lo,
+            } => {
+                best_effort(
+                    self.span,
+                    "an element of a packed array of booleans as a value other than a condition \
+                     or the function result of a one-statement body (not seen, codegen-patterns \
+                     5.2) is",
+                )?;
+                if self.cpu.is_68020() {
+                    self.bit_elem_test_bf(array, *bytes, index, *lo)?;
+                } else {
+                    self.bit_elem_test(array, *bytes, index, *lo)?;
+                }
+                let d = self.alloc_d()?;
+                self.out.push(Insn::Scc {
+                    cond: Cond::Ne,
+                    dst: Ea::Reg(Reg::D(d)),
+                });
+                Ok(Val::Tmp(d))
+            }
             Expr::SetOf { elem, ty } => Ok(Val::Tmp(self.set_of(elem, ty.width)?)),
             Expr::SetOp { op, lhs, rhs, ty } => {
                 Ok(Val::Tmp(self.set_op_value(*op, lhs, rhs, *ty)?))
@@ -27034,14 +27056,10 @@ impl Selector {
     /// way round (D1, D0), and the module-local 0xE464B8 (0xE4655C) forms
     /// the bit number as `andi.b #7,Dp; ...; moveq #7,Dm; sub.b Dp,Dm`.
     fn bit_elem_test(&mut self, array: &Addr, bytes: u32, index: &Expr, lo: i64) -> Res<()> {
-        self.bit_elem_bound(lo)?;
         if bytes > 32 {
-            return Err(unsupported(
-                self.span,
-                "testing an element of a packed array of more than 256 booleans (the byte \
-                 arithmetic of the 64-element sites would not reach it, codegen-patterns 5.2) is",
-            ));
+            return self.bit_elem_test_wide(array, bytes, index, lo);
         }
+        self.bit_elem_bound(lo)?;
         let src = self.bit_elem_index(index, true)?;
         let start = self.out.len();
         let dp = self.alloc_d()?;
@@ -27062,6 +27080,76 @@ impl Selector {
         });
         self.out.push(Insn::Move {
             size: Size::B,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: Ea::Reg(Reg::D(dof)),
+        });
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: dof,
+        });
+        let ea = self.bit_elem_byte(array, dof)?;
+        let dm = self.alloc_d()?;
+        let dn = self.alloc_d()?;
+        self.out.push(Insn::Moveq { value: 7, dst: dm });
+        self.out.push(Insn::Moveq { value: 7, dst: dn });
+        self.out.push(Insn::Alu {
+            op: AluOp::And,
+            size: Size::B,
+            src: Ea::Reg(Reg::D(dp)),
+            dst: dm,
+        });
+        self.out.push(Insn::Alu {
+            op: AluOp::Sub,
+            size: Size::B,
+            src: Ea::Reg(Reg::D(dm)),
+            dst: dn,
+        });
+        self.out.push(Insn::Btst { bit: dn, dst: ea });
+        self.units.push((start, self.out.len()));
+        Ok(())
+    }
+
+    /// [`Self::bit_elem_test`] on an array of more than 256 booleans (up to
+    /// 65536): best effort (not byte-identical; bead domain-pascal-338r,
+    /// domain-c's gap 13; no kernel site), the position computed on the
+    /// index's word, `lsr.w #3` for its byte (at most 8191), the bit `7 -
+    /// position mod 8` as in the byte form.  Reported, not checked here:
+    /// the DOMAIN C compiler's pds_$end_scope (cc.m68k 0x06D7C6) `subq.w
+    /// #1; lsr.l #3; andi.b #7; moveq #7; sub.b; btst Dn,(0,A1,D2.l)`.
+    /// A lower bound of 0 takes no `subq`.
+    fn bit_elem_test_wide(&mut self, array: &Addr, bytes: u32, index: &Expr, lo: i64) -> Res<()> {
+        if bytes > 8192 || !(0..=8).contains(&lo) {
+            return Err(unsupported(
+                self.span,
+                "testing an element of a packed array of more than 65536 booleans, or of more \
+                 than 256 with a lower bound other than 0..8 (codegen-patterns 5.2) is",
+            ));
+        }
+        best_effort(
+            self.span,
+            "testing an element of a packed array of more than 256 booleans (the position on \
+             the index's word; no site, codegen-patterns 5.2) is",
+        )?;
+        let src = self.bit_elem_index(index, false)?;
+        let start = self.out.len();
+        let dp = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src,
+            dst: Ea::Reg(Reg::D(dp)),
+        });
+        if lo > 0 {
+            self.out.push(Insn::Subq {
+                size: Size::W,
+                value: lo as u8,
+                dst: Ea::Reg(Reg::D(dp)),
+            });
+        }
+        let dof = self.alloc_d()?;
+        self.out.push(Insn::Move {
+            size: Size::W,
             src: Ea::Reg(Reg::D(dp)),
             dst: Ea::Reg(Reg::D(dof)),
         });
