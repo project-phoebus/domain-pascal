@@ -5081,6 +5081,48 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
                         Cond::Or(a, b)
                     });
                 }
+                // `k in a + b` of a set larger than a longword, the set an
+                // expression: `(k in a) or (k in b)`; `*` `and`, `-` `and
+                // not` (ref "Set Operations", p. 4-176), when evaluating
+                // `k` twice changes nothing.  Best effort (not
+                // byte-identical; bead domain-pascal-338r, domain-c's
+                // gap 8; no kernel site): the original forms the set in a
+                // frame temporary, as for `s * c = []` (domain-c's gap 31,
+                // reported: cc.m68k 0x10FDF0).
+                BinOp::In
+                    if p.types.size(rhs.ty) > 4 && rhs.value.is_none() && plain_element(lhs) =>
+                {
+                    if let ExprKind::Binary {
+                        op: sop @ (BinOp::Add | BinOp::Mul | BinOp::Sub),
+                        lhs: a,
+                        rhs: b,
+                    } = &rhs.kind
+                    {
+                        best_effort(
+                            e.span,
+                            "`in` on a set expression larger than a longword, as tests of its \
+                             operands (no site, codegen-patterns 5.1) is",
+                        )?;
+                        let member = |s: &SExpr| SExpr {
+                            kind: ExprKind::Binary {
+                                op: BinOp::In,
+                                lhs: lhs.clone(),
+                                rhs: Box::new(s.clone()),
+                            },
+                            ty: e.ty,
+                            value: None,
+                            span: e.span,
+                        };
+                        let ca = Box::new(cond_of(p, &member(a))?);
+                        let cb = Box::new(cond_of(p, &member(b))?);
+                        return Ok(match sop {
+                            BinOp::Add => Cond::Or(ca, cb),
+                            BinOp::Mul => Cond::And(ca, cb),
+                            _ => Cond::And(ca, Box::new(Cond::Not(cb))),
+                        });
+                    }
+                    return Ok(Cond::Test(bool_value(p, e)?));
+                }
                 BinOp::Eq => Rel::Eq,
                 BinOp::Ne => Rel::Ne,
                 BinOp::Lt => Rel::Lt,
@@ -5096,6 +5138,23 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
             Expr::Test(c) => Ok(*c),
             v => Ok(Cond::Test(v)),
         },
+    }
+}
+
+/// Whether evaluating `e` twice is the same as once: a variable, a
+/// constant, or fields, elements and dereferences of them, with no call
+/// (an element tested against each operand of a set expression,
+/// [`cond_of`]).
+fn plain_element(e: &SExpr) -> bool {
+    match &e.kind {
+        ExprKind::Const | ExprKind::Var { .. } => true,
+        ExprKind::Field { base, .. } | ExprKind::Deref(base) | ExprKind::Transfer(base) => {
+            plain_element(base)
+        }
+        ExprKind::Index { base, index, .. } => plain_element(base) && plain_element(index),
+        ExprKind::Unary { operand, .. } => plain_element(operand),
+        ExprKind::Binary { lhs, rhs, .. } => plain_element(lhs) && plain_element(rhs),
+        _ => false,
     }
 }
 

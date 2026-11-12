@@ -13198,6 +13198,30 @@ impl Selector {
                 Some(c) if !expr_has_call(rhs) => Some((c, rhs)),
                 _ => None,
             };
+            if let (Some(c1), Some(c2)) = (a0_call(lhs), a0_call(rhs)) {
+                // Both operands pointer functions: the first result kept
+                // in an address register of its own across the second
+                // call, then `cmpa.l An,A0` (best effort; no site; the
+                // DOMAIN C compiler's final.pas `br_target(x) =
+                // nxtlcc(xa)`, opt_assign.pas, reported).
+                best_effort(
+                    self.span,
+                    "comparing two pointer functions' results (no site, codegen-patterns 3) is",
+                )?;
+                let a = self.call_a0(c1)?;
+                let t = self.alloc_a()?;
+                self.out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(a)),
+                    dst: t,
+                });
+                let b = self.call_a0(c2)?;
+                self.out.push(Insn::Cmpa {
+                    src: Ea::Reg(Reg::A(t)),
+                    dst: b,
+                });
+                return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+            }
             if let Some((c, other)) = pair {
                 best_effort(
                     self.span,
@@ -23758,11 +23782,24 @@ impl Selector {
                 }
                 _ => {}
             }
-            return Err(unsupported(
+            // Any other operand that calls (a nested `and`/`or`, `odd` of
+            // a quotient M$ARITH computes): best effort (not
+            // byte-identical; bead domain-pascal-338r, domain-c's gap 24;
+            // no site), formed as a boolean value ([`Self::bool_into_reg`]),
+            // `tst.b`, the branch on the sign.
+            best_effort(
                 self.span,
-                "a right operand of a plain `and`/`or` with a call other than a comparison of \
-                 the function's result or the boolean result itself is",
-            ));
+                "a right operand of a plain `and`/`or` that calls, other than a comparison of a \
+                 function's result or a boolean result itself, formed as a value (no site, \
+                 codegen-patterns 7.1) is",
+            )?;
+            let d = self.bool_into_reg(c)?;
+            self.out.push(Insn::Tst {
+                size: Size::B,
+                dst: Ea::Reg(Reg::D(d)),
+            });
+            self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+            return Ok(());
         };
         let (op, call, other) = if d0_call(lhs) {
             (*op, lhs, rhs)

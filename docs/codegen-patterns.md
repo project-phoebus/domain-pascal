@@ -2524,7 +2524,11 @@ module supplies the two run-time routines).
   <other>,A0`, the other operand evaluated after the call, as the
   DOMAIN C compiler's append_root_rec_to_bucket (Pascal Rev 8.89;
   reported by domain-c, not checked here: cc.m68k 0x06CF9C `bsr.w
-  get_bucket; cmpa.l A3,A0; bne`; exec test `ptr_call_compare`).
+  get_bucket; cmpa.l A3,A0; bne`; exec test `ptr_call_compare`).  Two
+  pointer functions' results compared (final.pas `br_target(x) =
+  nxtlcc(xa)`, reported): **best effort**, the first result moved into
+  an address register of its own, kept across the second call, then
+  `cmpa.l An,A0` (exec test `and_or_nested_call`).
   Other uses (an argument, an operand of an expression, an ordering
   comparison) are refused (`dpc-m68k`
   `Selector::eval`; driver test `value_of_a_pointer_function_is_read_from_a0`).
@@ -4258,7 +4262,12 @@ model run against the bit model of Figure 3-6).
   the element to a longword (`moveq #0,Dz; move.w Dk,Dz`), widens the
   constant with `ext.l` and subtracts longwords; an element above the
   set's bits leaves a negative longword and `bgt` reads false (exec test
-  `in_wide_const_set`; bead domain-pascal-g6l7).  An `integer` element of a set
+  `in_wide_const_set`; bead domain-pascal-g6l7).  `in` on a set
+  *expression* of more than a longword (`k in s + [..]`, the DOMAIN C
+  compiler's c_syntax.pas, reported) with an element that can be read
+  twice: **best effort** (bead domain-pascal-338r; no site), tested as
+  `(k in a) or (k in b)`, `*` `and`, `-` `and not`, where the original
+  forms the set in a frame temporary (exec test `in_set_expr`).  An `integer` element of a set
   *variable* is tested unguarded (MSG_$FORK 0xE73F2E..0xE73F40 `movea.l
   D4,A2; moveq #63,D1; move.w (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea
   (0x1d8,A0),A3; btst D5,(0,A3,D1.w)`, its `in parent_asid: integer`;
@@ -9355,7 +9364,10 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   `bmi`/`bpl`, as the DOMAIN C compiler's get_alias_desc (Pascal Rev
   8.89; reported by domain-c, not checked here: cc.m68k 0x0740CA
   `bsr.w is_display_ptr; tst.b D0; bpl`); exec test
-  `and_or_bool_call`.  Before this, dpc compiled `if f() < v`
+  `and_or_bool_call`.  Any other right operand that calls (a nested
+  plain `or` with a compare of a call, `odd` of an M$ARITH quotient):
+  **best effort**, formed as a boolean value, `tst.b`, `bmi`/`bpl`
+  (exec test `and_or_nested_call`).  Before this, dpc compiled `if f() < v`
   with the variable loaded before the call and `cmp.w Dn,D0; b<cc>`,
   a form no site has.  Golden
   `control/and_or_call`; exec test `and_or_call`; driver test
