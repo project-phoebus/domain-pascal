@@ -1,0 +1,81 @@
+.text
+.globl INIT_PAD_NEGLOOP_$RUN
+INIT_PAD_NEGLOOP_$RUN:
+link.w %fp,#-4
+movem.l %d2/%a5,-(%sp)
+lea (.Ldata).l,%a5
+subq.l #2,%sp
+move.w (%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (2,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (9,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x13,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x14,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x17,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+moveq #0x21,%d0
+moveq #-1,%d1
+lea (-2,%a5),%a0
+.balignw 4,0x2048
+2:
+move.w %d1,(0x1a,%a0)
+addq.w #1,%d1
+addq.l #2,%a0
+dbf %d0,2b
+subq.l #2,%sp
+move.w (0x18,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+move.w (0x5a,%a5),-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+clr.w %d2
+moveq #0x21,%d0
+lea (-2,%a5),%a0
+.balignw 4,0x2048
+5:
+cmpi.w #-1,(0x1a,%a0)
+blt.s 7f
+addq.w #1,%d2
+7:
+addq.l #2,%a0
+dbf %d0,5b
+subq.l #2,%sp
+move.w %d2,-(%sp)
+jsr (EXEC_$LOGV_W).l
+movem.l (-0xc,%fp),%d2/%a5
+unlk %fp
+rts
+.balignw 4,0x2048
+.section ".moddata.INIT_PAD_NEGLOOP","aw",@progbits
+.balign 4
+.Ldata:
+.byte 0x00,0x05,0x61,0x73,0x73,0x5f,0x24,0x20,0x20,0x20,0x00,0x00,0x00,0x00,0x61,0x62
+.byte 0x20,0x20,0x20,0x20,0x0a,0x20,0x20,0x20
+.space 68

@@ -5075,7 +5075,8 @@ end;
             int(28, 2, 7),
             int(30, 2, 7),
             // the first three elements only, not blank-padded
-            bytes(32, b"abc"),
+            // Blank-padded to the array's size (bead domain-pascal-338r).
+            bytes(32, b"abc   "),
             int(40, 2, 5),
             int(38, 1, 0x7A),
             // variant fields by name
@@ -5088,7 +5089,8 @@ end;
 #[test]
 fn one_character_initialises_a_char_array() {
     // ref 3.11.1.1 p. 3-39: `blank_line : STRING := chr(10)' initialises
-    // element 1 only; a char literal likewise.
+    // element 1, the rest blank-padded (the DOMAIN C compiler's data, bead
+    // domain-pascal-338r); a char literal likewise.
     use crate::{DataInit, InitValue};
     let m = lower_src(
         "module m;
@@ -5106,11 +5108,15 @@ end;
         vec![
             DataInit {
                 offset: 0,
-                value: InitValue::Bytes(vec![10]),
+                value: InitValue::Bytes({
+                    let mut v = vec![10];
+                    v.resize(80, b' ');
+                    v
+                }),
             },
             DataInit {
                 offset: 80,
-                value: InitValue::Bytes(vec![b'x']),
+                value: InitValue::Bytes(b"x  ".to_vec()),
             },
         ]
     );

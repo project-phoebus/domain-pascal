@@ -13277,10 +13277,16 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
   - *Rules taken from the reference, not seen in the image:* components
     with no initialisation data are "not initialized" (ref 3.11.1 p.
     3-38) and are zero here, as the rest of a NOBITS block is; a string
-    shorter than its `array of char` fills only its first elements (ref
-    3.11.1.1: "elements 1 through 21"), not blank-padded as an
-    assignment would be (p. 4-204), and one character fills element 1
-    (ref 3.11.1.1 p. 3-39, `blank_line : STRING := chr(10)`); a later value for the same field
+    shorter than its `array of char`, or one character, is blank-padded
+    to the array's size, as an assignment is (p. 4-204), and as the
+    DOMAIN C compiler's data has it (Pascal Rev 8.89; reported by
+    domain-c's data check: cargs' opt_names, prfpkg's phase names; bead
+    domain-pascal-338r, gap 44); before, dpc filled only the first
+    elements (ref 3.11.1.1: "elements 1 through 21", which does not say
+    what the rest holds; the kernel's string initialisers in ../source
+    fill their arrays exactly).  A varying string's initial value is its
+    length word, the text and blanks (ass.pas's `program_name`,
+    list_tree's `line`, reported; gap 43); a later value for the same field
     overwrites an earlier one (ref 3.10.4, "field c gets reinitialized");
     a variant's field is initialised by name (ref 3.10.4, `lb := 'a'`;
     status_$t's `all`, TTY_$I_INIT's statics in `../source`).

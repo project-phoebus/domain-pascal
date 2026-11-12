@@ -475,8 +475,20 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
     };
     match (types.kind(ty), value) {
         (TypeKind::Real { .. }, _) => Err("initialising a real variable is".into()),
+        // A varying string: the length word, the text, the rest of the
+        // body blanks (the DOMAIN C compiler's data, reported by domain-c:
+        // ass.pas's `program_name := 'ass_$'` holds the length 5 and the
+        // text; list_tree's `line` the length 0 and 256 blanks), no
+        // trailing null (bead domain-pascal-338r, gap 43; no kernel site).
+        (TypeKind::Varying { max, .. }, ConstValue::Str(chars)) if chars.len() <= *max as usize => {
+            let n = chars.len();
+            let mut bytes = vec![(n >> 8) as u8, n as u8];
+            bytes.extend_from_slice(chars);
+            bytes.resize(2 + *max as usize, b' ');
+            Ok(InitValue::Bytes(bytes))
+        }
         (TypeKind::Varying { .. }, _) => {
-            Err("initialising a varying string (length word, trailing null) is".into())
+            Err("this initial value of a varying string is".into())
         }
         (TypeKind::Set { .. }, ConstValue::Set(members)) => {
             let mut bytes = vec![0u8; size as usize];
@@ -486,10 +498,26 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
             }
             Ok(InitValue::Bytes(bytes))
         }
+        // A string shorter than its array of char: blank-padded to the
+        // array's size, as an assignment is (p. 4-204) and as the DOMAIN C
+        // compiler's data has it (reported by domain-c: cargs' opt_names,
+        // prfpkg's phase names; bead domain-pascal-338r, gap 44); the
+        // reference's "elements 1 through 21" (3.11.1.1, p. 3-39) does not
+        // say what the rest holds, and the kernel shows no case.
         (TypeKind::Array { .. }, ConstValue::Str(chars)) if chars.len() <= size as usize => {
-            Ok(InitValue::Bytes(chars.clone()))
+            let mut bytes = chars.clone();
+            if types.char_array_len(ty).is_some() {
+                bytes.resize(size as usize, b' ');
+            }
+            Ok(InitValue::Bytes(bytes))
         }
-        (TypeKind::Array { .. }, ConstValue::Char(c)) => Ok(InitValue::Bytes(vec![*c])),
+        (TypeKind::Array { .. }, ConstValue::Char(c)) => {
+            let mut bytes = vec![*c];
+            if types.char_array_len(ty).is_some() {
+                bytes.resize(size as usize, b' ');
+            }
+            Ok(InitValue::Bytes(bytes))
+        }
         (TypeKind::Array { .. } | TypeKind::Record(_) | TypeKind::Set { .. }, _) => {
             Err(format!("this initial value of a {} is", types.display(ty)))
         }

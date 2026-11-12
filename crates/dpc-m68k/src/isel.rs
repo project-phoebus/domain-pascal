@@ -11726,11 +11726,16 @@ impl Selector {
                 )?;
             }
             if form == StepForm::InPlace && start < 0 {
-                return Err(unsupported(
+                // Formed as for a positive start, the adjustment `subq.l`
+                // or `lea` with a negative displacement
+                // ([`Self::step_in_place`]).  Best effort (not
+                // byte-identical; bead domain-pascal-338r, domain-c's gap
+                // 45; no site).
+                best_effort(
                     span,
                     "a `for` loop stepping a pointer formed in place from a negative start (not \
                      seen, codegen-patterns 7.4) is",
-                ));
+                )?;
             }
             arrays[k].form = form;
         }
@@ -11934,7 +11939,7 @@ impl Selector {
             _ => unreachable!("step_plan forms only constant addresses in place"),
         };
         let k = from * a.scale as i64;
-        if !(0..0x8000).contains(&k) {
+        if !(-0x8000..0x8000).contains(&k) {
             return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
         }
         let r = self.alloc_a()?;
@@ -11947,10 +11952,17 @@ impl Selector {
         if k == 0 {
             return Ok(r);
         }
-        self.out.push(if k <= 8 {
+        self.out.push(if (1..=8).contains(&k) {
             Insn::Addq {
                 size: Size::L,
                 value: k as u8,
+                dst: Ea::Reg(Reg::A(r)),
+            }
+        } else if (-8..0).contains(&k) {
+            // A negative start (best effort, [`Self::step_plan`]).
+            Insn::Subq {
+                size: Size::L,
+                value: (-k) as u8,
                 dst: Ea::Reg(Reg::A(r)),
             }
         } else {

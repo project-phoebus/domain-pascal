@@ -1,0 +1,1 @@
+tests/exec/init_pad_negloop.pas -I tests/exec
