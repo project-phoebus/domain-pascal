@@ -475,17 +475,15 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
     };
     match (types.kind(ty), value) {
         (TypeKind::Real { .. }, _) => Err("initialising a real variable is".into()),
-        // A varying string: the length word, the text, the rest of the
-        // body blanks (the DOMAIN C compiler's data, reported by domain-c:
-        // ass.pas's `program_name := 'ass_$'` holds the length 5 and the
-        // text; list_tree's `line` the length 0 and 256 blanks), no
-        // trailing null (bead domain-pascal-338r, gap 43; no kernel site).
+        // A varying string: its value as an assignment gives it
+        // ([`varying_image`]: the length word, the text, a trailing null
+        // when the body has room), the rest of the body unset (the DOMAIN
+        // C compiler's data, reported by domain-c: ass.pas's
+        // `program_name := 'ass_$'` at cc.m68k 0x14AFA4 is `00 05 61 73 73
+        // 5f 24 00` and nothing more; bead domain-pascal-338r, gap 43; no
+        // kernel site).
         (TypeKind::Varying { max, .. }, ConstValue::Str(chars)) if chars.len() <= *max as usize => {
-            let n = chars.len();
-            let mut bytes = vec![(n >> 8) as u8, n as u8];
-            bytes.extend_from_slice(chars);
-            bytes.resize(2 + *max as usize, b' ');
-            Ok(InitValue::Bytes(bytes))
+            Ok(InitValue::Bytes(varying_image(chars, *max)))
         }
         (TypeKind::Varying { .. }, _) => {
             Err("this initial value of a varying string is".into())

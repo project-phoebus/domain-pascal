@@ -1,6 +1,6 @@
 { Execution test (bead domain-pascal-338r, domain-c's gaps 43, 44 and
-  45): a varying string's initial value (the length word, the text,
-  blanks); a short string and a character initialising arrays of char,
+  45): a varying string's initial value (the length word, the text, a
+  null, the rest unset); a short string and a character initialising arrays of char,
   blank-padded (as the DOMAIN C compiler's data has them, reported); and
   a `for' loop over an array whose index starts below zero, stepping a
   pointer formed in place (best effort, no site).
@@ -9,7 +9,8 @@
   expect:
     5
     97
-    32
+    0
+    0
     32
     10
     32
@@ -33,6 +34,7 @@ var
 begin
   exec_$logv_w(name.length);
   exec_$logv_w(ord(name.body[1]));
+  exec_$logv_w(ord(name.body[6]));
   exec_$logv_w(ord(name.body[8]));
   exec_$logv_w(ord(s[6]));
   exec_$logv_w(ord(c[1]));

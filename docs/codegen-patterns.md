@@ -13285,8 +13285,9 @@ occurs in compiled code; those are hand assembly (ML_$SPIN_UNLOCK
     elements (ref 3.11.1.1: "elements 1 through 21", which does not say
     what the rest holds; the kernel's string initialisers in ../source
     fill their arrays exactly).  A varying string's initial value is its
-    length word, the text and blanks (ass.pas's `program_name`,
-    list_tree's `line`, reported; gap 43); a later value for the same field
+    value as an assignment gives it, the length word, the text and a
+    trailing null, the rest unset (ass.pas's `program_name` at cc.m68k
+    0x14AFA4, `00 05 61 73 73 5f 24 00`, reported; gap 43); a later value for the same field
     overwrites an earlier one (ref 3.10.4, "field c gets reinitialized");
     a variant's field is initialised by name (ref 3.10.4, `lb := 'a'`;
     status_$t's `all`, TTY_$I_INIT's statics in `../source`).
