@@ -4122,7 +4122,9 @@ impl Cx<'_> {
                 SStmtKind::Assign { target, value }
                     if is_block(p, target)
                         || byte_array_copy(p, target, value)
-                        || string_to_chars(p, target, value) =>
+                        || string_to_chars(p, target, value)
+                        || (matches!(p.types.kind(target.ty), TypeKind::Varying { .. })
+                            && matches!(value.value, Some(ConstValue::Str(_) | ConstValue::Char(_)))) =>
                 {
                     out.push(copy(p, s, target, value)?)
                 }
@@ -7422,6 +7424,54 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
         Some(ConstValue::Char(c)) => Some(vec![*c]),
         _ => None,
     };
+    if let (Some(text), TypeKind::Varying { max, .. }) = (&text, p.types.kind(target.ty)) {
+        // A string or character constant assigned to a varying string
+        // ("Variable-Length String Operations", pp. 4-204..4-205): the
+        // length word, the characters and a trailing null, the rest of
+        // the body left as it was.  Best effort (not byte-identical; bead
+        // domain-pascal-338r, domain-c's gap 17; no kernel site): copied
+        // from a cell laid out so ([`varying_image`]), its size rounded up
+        // to a word.  Reported, not checked here: the DOMAIN C compiler's
+        // preprocess (cc.m68k 0x05AB2A) `lea (lit,PC),A0; move.l
+        // (A0)+,(A1)+ ...`.
+        if text.len() as u32 <= *max && volatile_access(p, target).is_none() {
+            best_effort(
+                s.span,
+                "a string constant assigned to a varying string (its length word, characters \
+                 and trailing null copied from a cell; no site) is",
+            )?;
+            let cell = varying_image(text, *max);
+            let n = cell.len() as u32;
+            if n <= 4 {
+                // A cell of a word or a longword: stored as a constant.
+                let value = cell.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let width = if n == 4 { Width::Long } else { Width::Word };
+                return Ok(Stmt {
+                    kind: StmtKind::Store {
+                        addr: addr_of(p, target)?,
+                        value: Expr::Const {
+                            value,
+                            ty: Scalar::unsigned(width),
+                        },
+                    },
+                    span: s.span,
+                });
+            }
+            return Ok(Stmt {
+                kind: StmtKind::Copy {
+                    dst: addr_of(p, target)?,
+                    src: Addr::Const(PoolConst {
+                        bytes: cell,
+                        key: target.ty.0,
+                        symbol: None,
+                    }),
+                    bytes: n,
+                    chars: false,
+                },
+                span: s.span,
+            });
+        }
+    }
     if let (Some(text), ByteCopy::Chars) = (text, byte_copy(p, target.ty)) {
         if text.len() as u32 <= bytes
             && volatile_access(p, target).is_none()
@@ -7629,7 +7679,45 @@ fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
 /// its size (below).  Sets other than of a word or a longword, records,
 /// strings as another type are not supported yet.  `nil` is a longword 0
 /// cell keyed as an integer32 0 (below).
+/// A varying string's value of `text` (ref pp. 4-204..4-205): the length
+/// word, the characters, and a trailing null when the body has room for
+/// it, rounded up to an even size.
+fn varying_image(text: &[u8], max: u32) -> Vec<u8> {
+    let n = text.len();
+    let mut cell = vec![(n >> 8) as u8, n as u8];
+    cell.extend_from_slice(text);
+    if (n as u32) < max {
+        cell.push(0);
+    }
+    if cell.len() % 2 == 1 {
+        cell.push(0);
+    }
+    cell
+}
+
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
+    if let (ConstValue::Str(s), TypeKind::Varying { max, .. }) = (v, p.types.kind(ty)) {
+        // A string constant passed by address to a varying parameter:
+        // its value as a varying string (ref "Passing Variable-Length
+        // Parameters", p. 4-207: "the same as if the argument were being
+        // assigned to a variable of the parameter's type"), the cell only
+        // as long as that value.  Best effort (bead domain-pascal-338r,
+        // domain-c's gap 18; no kernel site).  Reported, not checked here:
+        // the DOMAIN C compiler's commit_top_node (cc.m68k 0x0760B8)
+        // passes the word 43, then the text (0x07613A).
+        if s.len() as u32 <= *max {
+            best_effort(
+                span,
+                "a string constant passed by address to a varying parameter (a cell of its \
+                 length word, characters and trailing null; no site) is",
+            )?;
+            return Ok(PoolConst {
+                bytes: varying_image(s, *max),
+                key: ty.0,
+                symbol: None,
+            });
+        }
+    }
     if let (ConstValue::Str(s), TypeKind::StringLit { .. }) = (v, p.types.kind(ty)) {
         let mut bytes = s.clone();
         if bytes.len() % 2 == 1 {
@@ -9330,6 +9418,23 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
         // zero-extended, an enumeration word or an integer kept; a boolean's
         // ordinal (1 for its 0xFF byte) is not a plain conversion.
         Builtin::Ord if !p.types.is_boolean(args[0].ty) => Ok(convert(value_of(p, &args[0])?, ty)),
+        // A boolean's ordinal: its byte (0xFF or 0) widened, `and` 1 (best
+        // effort, not byte-identical; bead domain-pascal-338r, domain-c's
+        // gap 22; no kernel site).  Reported, not checked here: the DOMAIN
+        // C compiler's attr_curr_align_env (cc.m68k 0x0A63F6) `moveq #1,D0;
+        // and.b <byte>,D0`.
+        Builtin::Ord => {
+            best_effort(
+                e.span,
+                "`ord` of a boolean (its byte `and` 1; no site) is",
+            )?;
+            Ok(Expr::Binary {
+                op: IrBinOp::And,
+                lhs: Box::new(convert(value_of(p, &args[0])?, ty)),
+                rhs: Box::new(Expr::Const { value: 1, ty }),
+                ty,
+            })
+        }
         // `chr(n)` (p. 4-39): "number & 16#FF", the low byte.
         Builtin::Chr => Ok(convert(value_of(p, &args[0])?, ty)),
         // Appendix E, p. E-5: the new status word, a word.

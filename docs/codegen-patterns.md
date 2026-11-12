@@ -6761,6 +6761,19 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       a conformance unit yet: PCHIST's routines also need overlay sections
       (bead domain-pascal-raxl) and other forms; ACL's bitmaps have the
       refused base.
+- **Varying strings: string constants (best effort; no kernel site;
+  bead domain-pascal-338r):** a string or character constant assigned to
+  a varying string, or passed by address to a varying parameter, is its
+  value as a varying string ("Variable-Length String Operations", pp.
+  4-204..4-205): the length word, the characters and a trailing null
+  when the body has room, the rest of the body left as it was.  An
+  assignment copies that from a cell in the code, rounded up to a word
+  (so one byte past the null may be written; the DOMAIN C compiler's
+  preprocess, reported: cc.m68k 0x05AB2A `lea (lit,PC),A0; move.l
+  (A0)+,(A1)+ ...`), a cell of 4 bytes or less stored as a constant; an
+  argument is that cell (commit_top_node, reported: cc.m68k 0x0760B8,
+  the word 43, then the text).  Refused under `--strict`.  Exec test
+  `varying_const`.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)

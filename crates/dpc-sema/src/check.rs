@@ -5707,6 +5707,22 @@ impl<'t> Checker<'t> {
         if self.types.is_error(dst) || self.types.is_error(src) || self.same_type(dst, src) {
             return true;
         }
+        // A string or character constant to a varying string of room
+        // enough ("Variable-Length String Operations", p. 4-204: "You may
+        // assign a character constant, string constant, or character array
+        // to a variable-length string").
+        if let TypeKind::Varying { max, .. } = self.types.kind(dst) {
+            let len = match (&x.value, self.types.kind(src)) {
+                (Some(ConstValue::Str(t)), _) => Some(t.len() as u32),
+                (Some(ConstValue::Char(_)), _) => Some(1),
+                _ => None,
+            };
+            if let Some(len) = len {
+                if len <= *max {
+                    return true;
+                }
+            }
+        }
         let ok = if self.types.is_ordinal(dst) && self.types.is_ordinal(src) {
             if !self.ordinal_compatible(dst, src) {
                 false
