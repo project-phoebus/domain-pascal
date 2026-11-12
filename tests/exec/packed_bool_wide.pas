@@ -5,7 +5,7 @@
   compiler's pds_$end_scope, reported: cc.m68k 0x06D7C6), as an operand
   of a plain `and' and as a value; constant indexes as one-bit fields
   (put_procedure_start's `tst.b (A0)' for element 0, reported), read
-  and written.
+  and written; an integer32 variable as the index (its low word).
 
   call: PACKED_BOOL_WIDE_$RUN w:1 w:9 w:2000 w:2048
   expect:
@@ -22,6 +22,8 @@
     1
     1
     0
+    1
+    0
 }
 module packed_bool_wide;
 %include 'exec.ins.pas';
@@ -34,6 +36,7 @@ var
   z: zbits_t;
   b: ^bits_t;
   f: boolean;
+  l: integer32;
 
 procedure one(i: integer); options(val_param);
 begin
@@ -62,4 +65,8 @@ begin
   z[9] := true;
   if z[9] and not z[10] then exec_$logv_w(1) else exec_$logv_w(0);
   if big[2047] then exec_$logv_w(1) else exec_$logv_w(0);
+  l := 2048;
+  if b^[l] then exec_$logv_w(1) else exec_$logv_w(0);
+  l := 2046;
+  if b^[l] then exec_$logv_w(1) else exec_$logv_w(0);
 end;

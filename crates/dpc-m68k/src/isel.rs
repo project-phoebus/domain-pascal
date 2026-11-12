@@ -27015,10 +27015,18 @@ impl Selector {
         if !matches!(index, Expr::Load { .. }) {
             return Err(bad(self));
         }
+        // A longword index (best effort, `dpc-ir` `bit_element`): its low
+        // word at +2, its low byte at +3; in a register, the register.
+        let long = index.ty().width == Width::Long;
         match self.eval(index)? {
             Val::Reg(r @ Reg::D(_)) => Ok(Ea::Reg(r)),
-            Val::Mem(ea) if !byte => Ok(ea),
-            Val::Mem(ea) => ea_plus(&ea, 1).ok_or_else(|| bad(self)),
+            Val::Mem(ea) if !byte && !long => Ok(ea),
+            Val::Mem(ea) => ea_plus(&ea, match (byte, long) {
+                (true, true) => 3,
+                (false, true) => 2,
+                _ => 1,
+            })
+            .ok_or_else(|| bad(self)),
             _ => Err(bad(self)),
         }
     }

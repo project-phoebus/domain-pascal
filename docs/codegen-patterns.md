@@ -6744,7 +6744,9 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
       0x06D7C6); a constant index, read and written as a one-bit field of
       its byte (`btst #k`/`bset #k`, `tst.b` for bit 7; put_procedure_start,
       reported: cc.a88k 0x223C1C `tst.b (A0); bpl`); an element as a
-      value other than a condition, the test then `sne`.
+      value other than a condition, the test then `sne`; an integer32
+      variable as the index, its low word (byte) read (bin.pas,
+      reported).
       **Refused**: a computed value stored (bead domain-pascal-ysp5), and
       the forms no site shows (bead domain-pascal-pubp): another lower
       bound, a computed or non-word index, an element passed by address,

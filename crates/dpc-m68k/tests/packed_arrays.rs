@@ -168,8 +168,9 @@ fn refusals() {
             "computed index",
         ),
         (
+            // Best effort without `--strict` (bead domain-pascal-338r).
             "procedure t; var l: integer32; begin l := 5; if bitmap[l] then gw := 1; end;",
-            "4-byte index",
+            "4-byte variable as the index",
         ),
         (
             "var z: packed array[0..63] of boolean;\n\

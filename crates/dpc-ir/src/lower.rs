@@ -9953,6 +9953,19 @@ fn bit_element(p: &Program, e: &SExpr) -> Res<Option<(Addr, u32, Expr, i64)>> {
         return Ok(None);
     }
     let ix = value_of(p, index)?;
+    if ix.ty().width == Width::Long && matches!(ix, Expr::Load { .. }) {
+        // A longword variable as the index: its low word (or byte) read,
+        // the index lying in the array's bounds.  Best effort (not
+        // byte-identical; bead domain-pascal-338r, domain-c's gap 13; no
+        // site): the DOMAIN C compiler's bin.pas indexes a `packed array
+        // [0..65535] of boolean` with an integer32 (reported).
+        best_effort(
+            index.span,
+            "a 4-byte variable as the index into a packed array of booleans (its low word; \
+             no site, codegen-patterns 5.2) is",
+        )?;
+        return Ok(Some((addr_of(p, base)?, p.types.size(base.ty), ix, *lo)));
+    }
     if ix.ty().width != Width::Word {
         return Err(unsupported(
             index.span,

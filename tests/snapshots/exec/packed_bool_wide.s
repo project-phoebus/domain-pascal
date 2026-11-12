@@ -62,8 +62,9 @@ rts
 .globl PACKED_BOOL_WIDE_$RUN
 PACKED_BOOL_WIDE_$RUN:
 link.w %fp,#0
-pea (%a5)
+movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
+move.w (0xe,%fp),%d2
 lea (%a5),%a0
 move.l %a0,(0x180,%a5)
 bset #7,(%a5)
@@ -82,7 +83,7 @@ move.w (0xc,%fp),-(%sp)
 bsr.w ONE
 addq.w #4,%sp
 subq.l #2,%sp
-move.w (0xe,%fp),-(%sp)
+move.w %d2,-(%sp)
 bsr.w ONE
 addq.w #4,%sp
 bset #7,(0x100,%a5)
@@ -91,11 +92,11 @@ tst.b (0x100,%a5)
 bpl.s 1f
 subq.l #2,%sp
 move.w #1,-(%sp)
-bra.s 11f
+bra.s 15f
 1:
 subq.l #2,%sp
 clr.w -(%sp)
-11:
+15:
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 2:
@@ -103,11 +104,11 @@ btst #6,(0x101,%a5)
 beq.s 3f
 subq.l #2,%sp
 move.w #1,-(%sp)
-bra.s 12f
+bra.s 16f
 3:
 subq.l #2,%sp
 clr.w -(%sp)
-12:
+16:
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 4:
@@ -118,11 +119,11 @@ tst.b (0x184,%a5)
 bpl.s 5f
 subq.l #2,%sp
 move.w #1,-(%sp)
-bra.s 13f
+bra.s 17f
 5:
 subq.l #2,%sp
 clr.w -(%sp)
-13:
+17:
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 6:
@@ -135,11 +136,11 @@ and.b %d1,%d0
 bpl.s 7f
 subq.l #2,%sp
 move.w #1,-(%sp)
-bra.s 14f
+bra.s 18f
 7:
 subq.l #2,%sp
 clr.w -(%sp)
-14:
+18:
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
 8:
@@ -147,18 +148,66 @@ btst #1,(0xff,%a5)
 beq.s 9f
 subq.l #2,%sp
 move.w #1,-(%sp)
-bra.s 15f
+bra.s 19f
 9:
 subq.l #2,%sp
 clr.w -(%sp)
-15:
+19:
 jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
 10:
-movea.l (-4,%fp),%a5
+move.w #0x800,%d2
+move.w %d2,%d0
+subq.w #1,%d0
+move.w %d0,%d1
+lsr.w #3,%d1
+movea.l (0x180,%a5),%a0
+lea (%a0),%a1
+lea (0,%a1,%d1.w),%a0
+moveq #7,%d1
+moveq #7,%d2
+and.b %d0,%d1
+sub.b %d1,%d2
+btst %d2,(%a0)
+beq.s 11f
+subq.l #2,%sp
+move.w #1,-(%sp)
+bra.s 20f
+11:
+subq.l #2,%sp
+clr.w -(%sp)
+20:
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+12:
+move.w #0x7fe,%d2
+move.w %d2,%d0
+subq.w #1,%d0
+move.w %d0,%d1
+lsr.w #3,%d1
+movea.l (0x180,%a5),%a0
+lea (%a0),%a1
+lea (0,%a1,%d1.w),%a0
+moveq #7,%d1
+moveq #7,%d2
+and.b %d0,%d1
+sub.b %d1,%d2
+btst %d2,(%a0)
+beq.s 13f
+subq.l #2,%sp
+move.w #1,-(%sp)
+bra.s 21f
+13:
+subq.l #2,%sp
+clr.w -(%sp)
+21:
+jsr (EXEC_$LOGV_W).l
+14:
+movem.l (-8,%fp),%d2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048
 .section ".bss.moddata.PACKED_BOOL_WIDE","aw",@nobits
 .balign 4
 .Ldata:
-.space 392
+.space 396
