@@ -1299,3 +1299,31 @@ fn element_updates() {
         assert!(e.contains(want), "{stmt}: {e}");
     }
 }
+
+/// domain-c's gap 35, a panic: another unit's array base held from an
+/// earlier statement, then a second unit array indexed by an expression
+/// with a call (`tab[f(i)^.opc]`): the call clears the held bases, and
+/// the new base is recorded at the list's end (the insert at the length
+/// counted before the index panicked).  The base is loaded after the call.
+#[test]
+fn other_unit_index_with_a_call_after_a_held_base() {
+    let lines = compile(
+        "module m;
+type r_t = record opc: integer; end;
+  rp = ^r_t;
+  attr_t = record class: integer; x: integer; end;
+var tab, tab2: extern array [0..99] of attr_t;
+  n, y: integer;
+function f(k: integer): rp; options(val_param); extern;
+procedure p(i: integer); options(val_param);
+begin
+  y := tab2[i].x;
+  if tab[f(i)^.opc].class = 3 then n := 1;
+end;
+",
+    )
+    .unwrap();
+    let call = lines.iter().position(|l| l == "jsr\t(F).l").unwrap();
+    let base = lines.iter().position(|l| l == "movea.l\t#TAB,%a0").unwrap();
+    assert!(call < base, "{lines:?}");
+}

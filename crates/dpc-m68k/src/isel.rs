@@ -28614,6 +28614,9 @@ impl Selector {
             }
         }
         let a = base.expect("the base is loaded");
+        // A call in the index (`tab[f(x)^.k]`) clears the bases held so
+        // far, `held_at` with them (domain-c's gap 35, a panic).
+        let held_at = held_at.min(self.other_held.len());
         self.other_held
             .insert(held_at, (sym.to_string(), imm.to_string(), a, base_at));
         Ok((x, a))
