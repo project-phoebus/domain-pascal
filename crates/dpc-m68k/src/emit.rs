@@ -1615,6 +1615,8 @@ mod tests {
             code_section: section.into(),
             data_section: ".data".into(),
             frame_size: 0,
+            big_locals: Vec::new(),
+            big_bytes: 0,
             result: None,
             loads_data_base: false,
             calls_abnormal: false,

@@ -214,6 +214,11 @@ pub struct Function {
     /// temporaries ([`Self::with_temps`]) and of the temporaries passed
     /// by address ([`Arg::Temp`]).
     pub frame_size: u32,
+    /// Locals beyond `link.w` (`dpc_sema::Storage::OutOfFrame`): each one's
+    /// pointer slot and offset in the area the prologue reserves below the
+    /// register saves, and the area's bytes (0: none).
+    pub big_locals: Vec<(i32, u32)>,
+    pub big_bytes: u32,
     /// The function result, if this is a function.
     pub result: Option<ResultSpec>,
     /// The frame offset of the function's result variable

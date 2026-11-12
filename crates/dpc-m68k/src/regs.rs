@@ -292,6 +292,7 @@ pub fn access(insn: &Insn) -> Access {
         | Insn::Rts
         | Insn::MovemSave { .. }
         | Insn::MovemRestore { .. }
+        | Insn::MovemRestoreInd { .. }
         | Insn::Label(_)
         | Insn::Align4
         | Insn::PoolLabel(_)
@@ -473,6 +474,7 @@ pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
         | Insn::Rts
         | Insn::MovemSave { .. }
         | Insn::MovemRestore { .. }
+        | Insn::MovemRestoreInd { .. }
         | Insn::Label(_)
         | Insn::Align4
         | Insn::PoolLabel(_)

@@ -143,6 +143,10 @@ struct RoutineCtx {
     /// function result variable) that are not placed yet, in the order
     /// they are taken up ([`Checker::alloc_local`]).
     pending: Vec<(PendingObject, TypeId)>,
+    /// The locals too large for the frame: pointer slot and area offset,
+    /// and the area's bytes so far ([`Storage::OutOfFrame`]).
+    big: Vec<(i32, u32)>,
+    big_bytes: u32,
 }
 
 /// A frame object the compiler makes rather than the declarations.
@@ -682,6 +686,8 @@ impl<'t> Checker<'t> {
             data_section: self.data_section.clone(),
             frame_vars: Vec::new(),
             frame_size: 0,
+            big_locals: Vec::new(),
+            big_bytes: 0,
             nested: Vec::new(),
             static_refs: Vec::new(),
             body: Some(body),
@@ -2021,6 +2027,29 @@ impl<'t> Checker<'t> {
                             global: false,
                             section,
                         }
+                    } else if self.types.size(ty) >= 0x8000 {
+                        // A local beyond `link.w`'s reach: out of the frame,
+                        // reached through a pointer slot of its own (the
+                        // DOMAIN C compiler's ra_$collapse_conflict_graph,
+                        // reported: cc.a88k 0x26AE56 `link.w A6,#-120;
+                        // suba.l #0x40000,SP; movem.l ...; lea (32,SP),A0;
+                        // move.l A0,(-106,A6)`).  Best effort (not
+                        // byte-identical; bead domain-pascal-338r, domain-c's
+                        // gap 40; no kernel site).
+                        if let Err(d) = dpc_syntax::diag::best_effort(Diagnostic::error(
+                            name.span,
+                            "a local of 32 KB or more (out of the frame, through a pointer slot; \
+                             no kernel site) is not supported yet",
+                        )) {
+                            self.errors.push(d);
+                        }
+                        let slot = self.alloc_local(self.types.builtins.univ_ptr);
+                        let size = self.types.size(ty);
+                        let ctx = self.ctx.last_mut().expect("a local outside a routine");
+                        let at = ctx.big_bytes;
+                        ctx.big.push((slot, at));
+                        ctx.big_bytes = round_up(at.saturating_add(size), 4);
+                        Storage::OutOfFrame { slot }
                     } else {
                         Storage::Frame {
                             offset: self.alloc_local(ty),
@@ -2028,7 +2057,7 @@ impl<'t> Checker<'t> {
                     }
                 }
             };
-            let frame_var = matches!(storage, Storage::Frame { .. });
+            let frame_var = matches!(storage, Storage::Frame { .. } | Storage::OutOfFrame { .. });
             let id = self.add_var(Var {
                 name: name.name.clone(),
                 ty,
@@ -2301,7 +2330,10 @@ impl<'t> Checker<'t> {
                     base: StaticBase::Var(*var),
                     offset: 0,
                 }),
-                Storage::Frame { .. } | Storage::Param { .. } | Storage::HiddenResult { .. } => {
+                Storage::Frame { .. }
+                | Storage::Param { .. }
+                | Storage::HiddenResult { .. }
+                | Storage::OutOfFrame { .. } => {
                     Err(format!(
                         "`addr` of `{}` is not a valid initial value: a routine's variable or \
                          parameter has no static address (ref 3.13.4, p. 3-51)",
@@ -2848,6 +2880,8 @@ impl<'t> Checker<'t> {
             data_section,
             frame_vars: Vec::new(),
             frame_size: 0,
+            big_locals: Vec::new(),
+            big_bytes: 0,
             nested: Vec::new(),
             static_refs: Vec::new(),
             body: None,
@@ -3035,6 +3069,8 @@ impl<'t> Checker<'t> {
             level,
             frame,
             pending: Vec::new(),
+            big: Vec::new(),
+            big_bytes: 0,
         });
         self.scopes.push(Scope::default());
 
@@ -3123,12 +3159,14 @@ impl<'t> Checker<'t> {
 
         self.scopes.pop();
         let ctx = self.ctx.pop().unwrap();
-        if ctx.frame > MAX_OBJECT_SIZE {
+        if ctx.frame > MAX_OBJECT_SIZE || ctx.big_bytes > MAX_OBJECT_SIZE {
             let span = self.routines[id.0 as usize].span;
             self.error(span, "the routine's local variables are too large");
         }
         let rt = &mut self.routines[id.0 as usize];
         rt.frame_size = ctx.frame;
+        rt.big_locals = ctx.big;
+        rt.big_bytes = ctx.big_bytes;
         rt.body = Some(block);
     }
 
@@ -4952,7 +4990,9 @@ impl<'t> Checker<'t> {
                 let var = &self.vars[v.0 as usize];
                 let what = match var.storage {
                     Storage::Param { .. } => "parameter",
-                    Storage::Frame { .. } | Storage::HiddenResult { .. } => "local variable",
+                    Storage::Frame { .. }
+                    | Storage::HiddenResult { .. }
+                    | Storage::OutOfFrame { .. } => "local variable",
                     Storage::Static { .. } | Storage::Extern { .. } => "variable",
                 };
                 (

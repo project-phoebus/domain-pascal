@@ -276,6 +276,7 @@ fn fx(insn: &Insn) -> Fx {
         | Insn::Unlk
         | Insn::MovemSave { .. }
         | Insn::MovemRestore { .. }
+        | Insn::MovemRestoreInd { .. }
         | Insn::Jsr(_)
         | Insn::Bsr { .. }
         | Insn::SrImm { .. }

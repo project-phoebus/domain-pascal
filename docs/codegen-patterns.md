@@ -1559,6 +1559,26 @@ module supplies the two run-time routines).
 
 ## 2. Frame, prologue and epilogue (Verified)
 
+- **Locals beyond `link.w` (best effort; no kernel site; bead
+  domain-pascal-338r, domain-c's gap 40).**  A local of 32 KB or more
+  is kept out of the `link.w` frame (the 68010 has no `link.l`): the
+  DOMAIN C compiler's ra_$collapse_conflict_graph (Pascal Rev 8.89;
+  reported by domain-c, not checked here: cc.a88k 0x26AE56 `link.w
+  A6,#-120; suba.l #0x40000,SP; movem.l D2-D7/A2-A3,-(SP); lea
+  (32,SP),A0; move.l A0,(-106,A6)`) reserves it with `suba.l` below the
+  `link` area, saves the registers below it, and keeps its address in an
+  ordinary frame slot, through which every access goes (0x26B03A
+  `movea.l (-106,A6),A2`); the epilogue forms the save area's address in
+  A1 (0x26B5A4 `movea.l A6,A1; adda.l #-0x40098,A1; movem.l
+  (A1),D2-D7/A2-A3`).  `dpc` does the same (`dpc-sema`
+  `Storage::OutOfFrame`, the pointer slot allocated as a declared local;
+  `frame.rs` `prologue_with`, `epilogue`); a nested routine reaches the
+  object through its parent's slot.  Refused under `--strict`.  Exec
+  test `big_local`.  An offset into such an object (or any through a
+  pointer) beyond 16 bits is `move.l #d,Dn; (0,An,Dn.l)`, as the C
+  compiler's mu_$alloc_tle (reported: cc.m68k 0x05983A `move.l
+  #134148,D0; tst.b (0,A0,D0.l)`; domain-c's gap 5, best effort).
+
 - **Prologue:** `link A6,#-locals`.
   - `link.w` is always used.  No `link.l` appears in the kernel image.
   - The size is sometimes larger than the locals that are used.  IO_$ALLOC

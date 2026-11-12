@@ -133,6 +133,12 @@ pub enum Storage {
     /// the address in the argument slot at frame offset `slot` (the first
     /// argument's, below the parameters).
     HiddenResult { slot: i32 },
+    /// A local too large for the `link.w` frame (32 KB or more): the
+    /// object at the address in frame slot `slot`, which the prologue sets
+    /// to its place in the area below the register saves
+    /// ([`Routine::big_locals`]; codegen-patterns 2, "Locals beyond
+    /// `link.w`").
+    OutOfFrame { slot: i32 },
 }
 
 /// One store of an initialiser: `value` at byte `offset` of the variable,
@@ -233,6 +239,11 @@ pub struct Routine {
     /// `link #-4` where this is 1).  TODO(codegen): whether that is a
     /// rounding of the total or 4-byte slots per object is not settled.
     pub frame_size: u32,
+    /// The locals too large for the frame ([`Storage::OutOfFrame`]): each
+    /// one's pointer slot and its offset in the area below the register
+    /// saves, and the area's size (a multiple of 4).
+    pub big_locals: Vec<(i32, u32)>,
+    pub big_bytes: u32,
     /// Nested routines in source order.
     pub nested: Vec<RoutineId>,
     /// The unit-level and `static` variables (no owner routine) that the

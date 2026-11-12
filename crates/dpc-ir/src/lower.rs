@@ -436,7 +436,10 @@ fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, Strin
                 section: section.clone(),
                 offset: *o as i32 + offset,
             },
-            Storage::Frame { .. } | Storage::Param { .. } | Storage::HiddenResult { .. } => {
+            Storage::Frame { .. }
+            | Storage::Param { .. }
+            | Storage::HiddenResult { .. }
+            | Storage::OutOfFrame { .. } => {
                 return Err("an address of a routine's variable as an initial value is".into())
             }
         },
@@ -1780,6 +1783,8 @@ fn lower_routine_in_context(
         code_section: r.code_section.clone(),
         data_section,
         frame_size,
+        big_locals: r.big_locals.clone(),
+        big_bytes: r.big_bytes,
         result,
         result_slot: r.result.as_ref().and_then(|res| res.var).and_then(|v| {
             match p.var(v).storage {
@@ -10720,6 +10725,8 @@ fn even(p: &Program, e: &SExpr) -> Option<bool> {
             // Another unit's object, or the caller's place for a hidden
             // result: aligned as its type says.
             Storage::Extern { .. } | Storage::HiddenResult { .. } => typed(e),
+            // Placed at a multiple of 4 in its area.
+            Storage::OutOfFrame { .. } => Some(true),
         },
         _ => None,
     }
@@ -11491,7 +11498,11 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
         // The result's place, through the hidden address in the first
         // argument slot, as an `out` parameter's object (ACL_$DEFAULT_ACL
         // 0xE478C8 `movea.l (0x8,A6),A2; move.l (A1)+,(A2)`).
-        Storage::HiddenResult { slot } => Ok(Addr::Indirect {
+        // A local beyond `link.w` (bead domain-pascal-338r): through the
+        // pointer slot the prologue sets (the DOMAIN C compiler's
+        // ra_$collapse_conflict_graph, reported: cc.a88k 0x26B03A
+        // `movea.l (-106,A6),A2`).
+        Storage::HiddenResult { slot } | Storage::OutOfFrame { slot } => Ok(Addr::Indirect {
             base: Box::new(Expr::Load {
                 addr: Addr::Frame(*slot),
                 ty: Scalar {

@@ -584,8 +584,9 @@ pub fn wrap(f: &Function, body: Body) -> Result<Vec<Insn>, Diagnostic> {
     } else {
         body.saves
     };
-    let frame = frame_for(raw, saves, f.span)?;
-    let mut out = frame.prologue();
+    let mut frame = frame_for(raw, saves, f.span)?;
+    frame.big = f.big_bytes;
+    let mut out = frame.prologue_with(&f.big_locals);
     let reached = end_reached(&body.insns);
     out.extend(body.insns);
     if reached {
@@ -29112,7 +29113,25 @@ impl Selector {
             // (LOG_$READ 0xE17814 `move.w (A0),-(SP)`).
             Addr::Indirect { base, offset } => {
                 if !(-0x8000..0x8000).contains(offset) {
-                    return Err(unsupported(self.span, "a displacement beyond 16 bits is"));
+                    // Beyond 16 bits: the displacement in a data register,
+                    // `(0,An,Dn.l)`, as the DOMAIN C compiler's
+                    // mu_$alloc_tle (reported: cc.m68k 0x05983A `move.l
+                    // #134148,D0; tst.b (0,A0,D0.l)`).  Best effort (not
+                    // byte-identical; bead domain-pascal-338r, domain-c's
+                    // gap 5; no kernel site).
+                    best_effort(
+                        self.span,
+                        "a displacement beyond 16 bits (in a data register, `(0,An,Dn.l)`; no \
+                         kernel site) is",
+                    )?;
+                    let a = self.eval_a(base)?;
+                    let d = self.alloc_d()?;
+                    self.out.push(Insn::Move {
+                        size: Size::L,
+                        src: Ea::Imm(*offset as i64),
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    return Ok(Ea::Idx(0, a, d, true));
                 }
                 let a = self.eval_a(base)?;
                 Ok(if *offset == 0 {
@@ -29319,6 +29338,8 @@ mod tests {
             code_section: ".text".into(),
             data_section: ".data".into(),
             frame_size,
+            big_locals: Vec::new(),
+            big_bytes: 0,
             result,
             loads_data_base: false,
             calls_abnormal: false,

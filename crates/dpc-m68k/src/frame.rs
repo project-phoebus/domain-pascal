@@ -51,6 +51,10 @@ pub struct Frame {
     pub link: u32,
     /// Callee-saved registers written by the body.
     pub saves: RegSet,
+    /// Bytes of the area for locals beyond `link.w`'s reach, reserved by
+    /// `suba.l #big,SP` between the `link` and the register save (0: none;
+    /// `dpc_ir::Function::big_bytes`).
+    pub big: u32,
 }
 
 impl Frame {
@@ -64,7 +68,20 @@ impl Frame {
         if total > 0x8000 {
             return Err(format!("a {total}-byte frame (beyond `link.w`) is"));
         }
-        Ok(Frame { link, saves })
+        Ok(Frame {
+            link,
+            saves,
+            big: 0,
+        })
+    }
+
+    /// [`Frame::new`] with an area of `big` bytes below the `link` area for
+    /// locals beyond `link.w`'s reach (codegen-patterns 2, "Locals beyond
+    /// `link.w`"; best effort, bead domain-pascal-338r).
+    pub fn with_big(raw: u32, saves: RegSet, big: u32) -> Result<Frame, String> {
+        let mut f = Frame::new(raw, saves)?;
+        f.big = big;
+        Ok(f)
     }
 
     /// The A6 offset of the save area's lowest byte, where the epilogue
@@ -75,9 +92,28 @@ impl Frame {
 
     /// `link.w`, then the register save.
     pub fn prologue(&self) -> Vec<Insn> {
+        self.prologue_with(&[])
+    }
+
+    /// [`Frame::prologue`], with the area for locals beyond `link.w`: the
+    /// DOMAIN C compiler's ra_$collapse_conflict_graph (reported: cc.a88k
+    /// 0x26AE56) `link.w A6,#-120; suba.l #0x40000,SP; movem.l
+    /// D2-D7/A2-A3,-(SP); lea (32,SP),A0; move.l A0,(-106,A6)`: the area
+    /// reserved below the `link`, the registers saved below it, and each
+    /// local's address (SP plus the save area plus its offset) stored in
+    /// its pointer slot `(slot,A6)`.
+    pub fn prologue_with(&self, big_locals: &[(i32, u32)]) -> Vec<Insn> {
         let mut out = vec![Insn::Link {
             disp: -(self.link as i32),
         }];
+        if self.big > 0 {
+            out.push(Insn::AluImm {
+                op: crate::insn::AluOp::Sub,
+                size: Size::L,
+                imm: self.big as i64,
+                dst: Ea::Reg(Reg::A(SP)),
+            });
+        }
         match self.single() {
             None if self.saves.is_empty() => {}
             None => out.push(Insn::MovemSave { regs: self.saves }),
@@ -88,11 +124,77 @@ impl Frame {
             }),
             Some(Reg::A(a)) => out.push(Insn::Pea(Ea::Ind(a))),
         }
+        let saved = 4 * self.saves.len();
+        for &(slot, at) in big_locals {
+            let off = saved + at;
+            if off <= 0x7fff {
+                out.push(Insn::Lea {
+                    src: Ea::Disp(off as i32, SP),
+                    dst: 0,
+                });
+            } else {
+                out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(SP)),
+                    dst: 0,
+                });
+                out.push(Insn::AluImm {
+                    op: crate::insn::AluOp::Add,
+                    size: Size::L,
+                    imm: off as i64,
+                    dst: Ea::Reg(Reg::A(0)),
+                });
+            }
+            out.push(Insn::Move {
+                size: Size::L,
+                src: Ea::Reg(Reg::A(0)),
+                dst: Ea::Disp(slot, FP),
+            });
+        }
         out
     }
 
-    /// The restore from the frame, then `unlk A6; rts`.
+    /// The restore from the frame, then `unlk A6; rts`.  With an area for
+    /// locals beyond `link.w`, the save area lies below it, out of a
+    /// displacement's reach: its address formed in A1 and the registers
+    /// restored from `(A1)` (ra_$collapse_conflict_graph, reported:
+    /// 0x26B5A4 `movea.l A6,A1; adda.l #-0x40098,A1; movem.l
+    /// (A1),D2-D7/A2-A3`).
     pub fn epilogue(&self) -> Vec<Insn> {
+        if self.big > 0 && !self.saves.is_empty() {
+            let mut out = vec![
+                Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Reg(Reg::A(FP)),
+                    dst: 1,
+                },
+                Insn::AluImm {
+                    op: crate::insn::AluOp::Add,
+                    size: Size::L,
+                    imm: -((self.link + self.big + 4 * self.saves.len()) as i64),
+                    dst: Ea::Reg(Reg::A(1)),
+                },
+            ];
+            match self.single() {
+                None => out.push(Insn::MovemRestoreInd {
+                    regs: self.saves,
+                    base: 1,
+                }),
+                Some(Reg::D(d)) => out.push(Insn::Move {
+                    size: Size::L,
+                    src: Ea::Ind(1),
+                    dst: Ea::Reg(Reg::D(d)),
+                }),
+                Some(Reg::A(a)) => out.push(Insn::Movea {
+                    size: Size::L,
+                    src: Ea::Ind(1),
+                    dst: a,
+                }),
+            }
+            out.push(Insn::Unlk);
+            out.push(Insn::Rts);
+            return out;
+        }
         let disp = self.save_area_offset();
         let mut out = Vec::new();
         match self.single() {

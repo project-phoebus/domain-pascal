@@ -399,6 +399,13 @@ pub enum Insn {
         regs: RegSet,
         disp: i32,
     },
+    /// `movem.l (%an),<regs>`: the epilogue's restore through an address
+    /// register, where the save area is beyond a displacement's reach
+    /// (`crate::frame::Frame::epilogue`).
+    MovemRestoreInd {
+        regs: RegSet,
+        base: u8,
+    },
     /// `pea <ea>`.
     Pea(Ea),
     /// `move.<size> src,dst`.
@@ -794,6 +801,7 @@ impl Insn {
             | Insn::Rts
             | Insn::MovemSave { .. }
             | Insn::MovemRestore { .. }
+            | Insn::MovemRestoreInd { .. }
             | Insn::Moveq { .. }
             | Insn::Dbf { .. }
             | Insn::DbfFwd { .. }
@@ -958,6 +966,9 @@ impl fmt::Display for Insn {
             Insn::MovemSave { regs } => write!(f, "movem.l\t{regs},-(%sp)"),
             Insn::MovemRestore { regs, disp } => {
                 write!(f, "movem.l\t({},%fp),{regs}", num(*disp as i64))
+            }
+            Insn::MovemRestoreInd { regs, base } => {
+                write!(f, "movem.l\t({}),{regs}", Reg::A(*base))
             }
             Insn::Pea(ea) => write!(f, "pea\t{ea}"),
             Insn::Move { size, src, dst } => write!(f, "move.{size}\t{src},{dst}"),
@@ -1268,6 +1279,7 @@ impl Insn {
                 4
             }
             Insn::MovemRestore { .. } => 6,
+            Insn::MovemRestoreInd { .. } => 4,
             Insn::Bsr { short, .. } => {
                 if *short {
                     2
