@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 
 use crate::emit::DATA_BASE_LABEL;
 use crate::frame::{frame_for, FP, SP};
-use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
+use crate::insn::{AluOp, BitOp, Cond, Ea, Insn, Reg, RegNo, RegSet, ShiftCount, ShiftOp, Size, UnaryOp};
 use crate::regs::{allocate_apart, call_results_first, RegClass, VRegs, DATA_BASE};
 use crate::sched::Schedule;
 use crate::Cpu;
@@ -42,10 +42,10 @@ mod with_bias;
 
 /// The register a nested routine's static link is passed in
 /// (codegen-patterns 6: 0xE13928 `movea.l A6,A1; bsr.w 0xE1359C`).
-const STATIC_LINK_A: u8 = 1;
+const STATIC_LINK_A: RegNo = 1;
 
 /// A5, the data base register, as an address register number.
-const DATA_BASE_A: u8 = 5;
+const DATA_BASE_A: RegNo = 5;
 
 type Res<T> = Result<T, Diagnostic>;
 
@@ -3432,7 +3432,7 @@ fn fresh_slot_loads(
         })
         .unwrap_or(out.len());
     // Registers used up by `(An)+` / `-(An)`.
-    let consumed: Vec<u8> = out.iter().flat_map(autoinc_regs).collect();
+    let consumed: Vec<RegNo> = out.iter().flat_map(autoinc_regs).collect();
     let mut apart = Vec::new();
     let mut late = Vec::new();
     let mut prefix = Vec::new();
@@ -3492,7 +3492,7 @@ fn fresh_slot_loads(
 
 /// The address registers an instruction steps with `(An)+` / `-(An)`
 /// (the stack pointer excepted).
-fn autoinc_regs(insn: &Insn) -> Vec<u8> {
+fn autoinc_regs(insn: &Insn) -> Vec<RegNo> {
     let eas: Vec<&Ea> = match insn {
         Insn::Move { src, dst, .. } => vec![src, dst],
         Insn::Clr { dst, .. } | Insn::Tst { dst, .. } => vec![dst],
@@ -3627,7 +3627,7 @@ const ONCE_LEA_NOT_A1: &str = "an element address of another unit's array or thr
 /// 0xE42044 `subq.w`), `Some(false)` for any other operation that reads
 /// and writes it (`bset`, `bclr`, `or.b Dn,(d,An)`, ...: none with the
 /// base in A0), `None` when it does not write it back.
-fn writes_back_through(insn: &Insn, n: u8) -> Option<bool> {
+fn writes_back_through(insn: &Insn, n: RegNo) -> Option<bool> {
     let through = |ea: &Ea| {
         matches!(ea, Ea::Ind(a) | Ea::Disp(_, a) | Ea::Idx(_, a, _, _)
             | Ea::PostInc(a) | Ea::PreDec(a) if *a == n)
@@ -4047,7 +4047,7 @@ fn once_elem_shape(pre: &[Insn], k: usize) -> Result<(), &'static str> {
 }
 
 /// The `REACH_*` kinds of the definitions `defs` of An ([`reaching_aregs`]).
-fn reach_kinds(out: &[Insn], n: u8, defs: &BTreeSet<usize>) -> u8 {
+fn reach_kinds(out: &[Insn], n: RegNo, defs: &BTreeSet<usize>) -> u8 {
     defs.iter().fold(0, |m, &j| {
         m | match out.get(j) {
             None => REACH_ENTRY,
@@ -4276,7 +4276,7 @@ fn check_late_slot_loads(
         while live_out.get(end).is_some_and(|l| l.contains(&mine)) {
             end += 1;
         }
-        let free_below: Vec<u8> = (0..*dst)
+        let free_below: Vec<RegNo> = (0..*dst)
             .filter(|&n| {
                 !live_out[k..end]
                     .iter()
@@ -4352,7 +4352,7 @@ fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
         return Vec::new();
     }
     // Per address register A0..A4, the data register it holds a copy of.
-    type Holds = [Option<u8>; 5];
+    type Holds = [Option<RegNo>; 5];
     let mut dropped: Vec<usize> = Vec::new();
     loop {
         let succ = crate::regs::successors(out);
@@ -4430,7 +4430,7 @@ fn reuse_pointer_copies(out: &mut [Insn], copies: &[usize]) -> Vec<usize> {
             // The copy's own register first: it needs no renaming.
             let Some(j) = (a < 5 && st[a as usize] == Some(d))
                 .then_some(a)
-                .or_else(|| (0..5u8).find(|&j| st[j as usize] == Some(d)))
+                .or_else(|| (0..5 as RegNo).find(|&j| st[j as usize] == Some(d)))
             else {
                 continue;
             };
@@ -8482,7 +8482,7 @@ pub struct Selector {
     colour_after: Vec<(Reg, Reg)>,
     /// Data values coloured as if live across a call: kept apart from D0
     /// and D1 ([`Selector::call_compare_test`]).
-    callee_only: Vec<u8>,
+    callee_only: Vec<RegNo>,
     /// Further pairs of values kept in different registers
     /// ([`allocate_apart`]'s `apart`).
     colour_apart: Vec<(Reg, Reg)>,
@@ -8504,7 +8504,7 @@ pub struct Selector {
     /// the call as a `with` record's element address is
     /// ([`held_through_calls`]'s `with_elems`; 12.4 R4(c) counts
     /// IO_$DISABLE_DEVICE 0xE1A820 among those).
-    held_elem_regs: Vec<u8>,
+    held_elem_regs: Vec<RegNo>,
     /// Such `lea`s and their counts, checked after scheduling.
     elem_counts: Vec<(usize, usize, Span)>,
     /// Copies `(dst, src)` exempt from R2: `dst` may take `src`'s register
@@ -8538,7 +8538,7 @@ pub struct Selector {
     /// or the last call, for a later statement to read again
     /// ([`Self::held_other_base`]): the array's symbol, the base's
     /// immediate, its register and the index in `out` of its load.
-    other_held: Vec<(String, String, u8, usize)>,
+    other_held: Vec<(String, String, RegNo, usize)>,
     /// Whether the last [`Self::other_unit_index`] read a base an earlier
     /// statement loaded ([`Self::held_other_base`]).
     base_reused: bool,
@@ -8568,11 +8568,11 @@ pub struct Selector {
     /// offset and the one (virtual) data register that stands for the
     /// variable in the whole body; every assignment writes it
     /// ([`Selector::store_web`]).
-    webs: Vec<(i32, u8)>,
+    webs: Vec<(i32, RegNo)>,
     /// The `for` indices held in a register ([`Self::for_`]): frame
     /// offset and the (virtual) data register, while the register holds
     /// the variable (its loop, and after it when read there).
-    for_regs: Vec<(i32, u8)>,
+    for_regs: Vec<(i32, RegNo)>,
     /// The size of each byte or longword `for` index ([`Self::for_wide`]),
     /// by frame offset; a `for` index not listed is a word.
     for_sizes: Vec<(i32, Size)>,
@@ -8585,7 +8585,7 @@ pub struct Selector {
     /// parameters"): frame offset and the register of the entry load,
     /// which every assignment writes as [`Self::store_web`] writes a
     /// web's.  Also in `pinned`, as any parameter loaded at entry.
-    param_webs: Vec<(i32, u8)>,
+    param_webs: Vec<(i32, RegNo)>,
     /// The by-value parameters the body assigns as a whole
     /// ([`assigned_params`]).
     assigned_params: Vec<i32>,
@@ -8599,7 +8599,7 @@ pub struct Selector {
     /// `out` where the computation starts; a computation whose first
     /// instruction would copy it starts in it instead
     /// ([`Self::take_consumed`]).
-    consume: Option<(u8, usize)>,
+    consume: Option<(RegNo, usize)>,
     /// The statement being selected is in a body of several statements
     /// and does not directly follow a call there: a slot it uses once is
     /// loaded into a fresh register ([`Self::eval_a`],
@@ -8654,7 +8654,7 @@ pub struct Selector {
     marith_depth: u32,
     /// The register of the last M$ARITH call's result ([`Self::marith`]):
     /// D0, or its copy in [`CallMode::save`].
-    marith_reg: u8,
+    marith_reg: RegNo,
     /// A call of the statement being selected skipped its pop
     /// (codegen-patterns 1.1): nothing after it in the statement may
     /// branch conditionally.
@@ -8669,13 +8669,13 @@ pub struct Selector {
     /// scale ([`Self::element_ea`]; `Ea::Idx2`).  An entry is consumed by
     /// the operand; one left over at the end of selection is an internal
     /// error ([`Self::take_folded_scale`]).
-    folded_scale: Vec<(u8, u8)>,
+    folded_scale: Vec<(RegNo, u8)>,
     /// The routine addresses the unit's data from its absolute address
     /// ([`Function::data_absolute`]; [`Self::static_base`]).
     data_absolute: bool,
     /// With `data_absolute`: the address register the area's address was
     /// loaded into, once the first static operand needed it.
-    abs_base: Option<u8>,
+    abs_base: Option<RegNo>,
     /// With `data_absolute`: an element's operand is being formed for
     /// [`Self::element_load_modify_store`], the only element form seen
     /// there ([`Self::index_ea`]).
@@ -8684,7 +8684,7 @@ pub struct Selector {
     /// holds: the Pascal data section and the (virtual) address register
     /// loaded with `movea.l #block,An` ([`Self::other_base`]).  A call
     /// ends them.
-    other_bases: Vec<(String, u8)>,
+    other_bases: Vec<(String, RegNo)>,
     /// The row of the last 8-byte copy from an array element
     /// ([`Selector::copy8_element`]): its base (offset dropped), index and
     /// scale, and where in `out` the copy ended.
@@ -8703,14 +8703,14 @@ pub struct Selector {
     /// The pointers of the `for` loops being selected, stepped through
     /// arrays by the element size ([`Self::for_`]): the index's frame
     /// offset, the array, and the (virtual) address register.
-    stepped: Vec<(i32, SteppedArray, u8)>,
+    stepped: Vec<(i32, SteppedArray, RegNo)>,
     /// The indices in `out` of the branches `exit` and `next` emitted
     /// ([`select_body`] refuses one to the very next instruction).
     loop_jumps: Vec<(usize, Span)>,
     /// Pointer locals held in an address register for the whole body
     /// ([`loop_pointer_locals`]): frame offset, and the virtual register
     /// once the first assignment has defined it.
-    ptr_locals: Vec<(i32, Option<u8>)>,
+    ptr_locals: Vec<(i32, Option<RegNo>)>,
     /// The pointer locals of [`free_pointer_locals`] among
     /// [`Self::ptr_locals`]: the ones given back to the frame, fewest
     /// references first, when the body does not colour
@@ -8719,7 +8719,7 @@ pub struct Selector {
     /// The variable an `or else` / `and then` chain of comparisons with
     /// constants compares, loaded once for the chain, and its data
     /// register ([`Self::branch`]).
-    chain_var: Option<(Addr, u8)>,
+    chain_var: Option<(Addr, RegNo)>,
     /// The index in `out` of the load of [`Self::chain_var`].
     chain_load: Option<usize>,
     /// The assignments to those locals: frame offset, index in `out` of
@@ -8767,15 +8767,15 @@ pub struct Selector {
     park_parts: Vec<(i32, *const Stmt, usize)>,
     /// The register holding the static link of a nested routine, loaded
     /// at entry when the body needs it ([`Selector::load_link`]).
-    link: Option<u8>,
+    link: Option<RegNo>,
     /// The function's result variable is held in a register
     /// ([`Self::set_result_web`]): a function body of several statements.
     result_web: bool,
     /// That register, once the first assignment to the result defined it.
-    web: Option<u8>,
+    web: Option<RegNo>,
     /// The same for a pointer result, in an address register
     /// ([`Self::set_pointer_result_web`]).
-    web_a: Option<u8>,
+    web_a: Option<RegNo>,
     /// Where the body assigns its result ([`result_positions`]).
     result_positions: ResultPositions,
     /// A pointer result variable kept in its frame slot, this offset, in
@@ -8870,7 +8870,7 @@ pub struct Selector {
     /// Reuses found: (the reusing computation, the computation reused).
     cse_hits: Vec<(u32, u32)>,
     /// The (virtual) data registers of held computed values.
-    cse_regs: Vec<u8>,
+    cse_regs: Vec<RegNo>,
     /// The statements' memory writes: the range of `out` they emitted,
     /// the object written and its size in bytes ([`Self::cse_valid`]).
     writes: Vec<(usize, usize, Addr, u32)>,
@@ -8924,9 +8924,9 @@ struct Park {
     /// The local's frame offset.
     off: i32,
     /// The data register of `move.l A0,Dn` and its index in `out`.
-    d: Option<(u8, usize)>,
+    d: Option<(RegNo, usize)>,
     /// The address register of `movea.l Dn,An` and its index in `out`.
-    home: Option<(u8, usize)>,
+    home: Option<(RegNo, usize)>,
 }
 
 /// Which computed values a selection holds for reuse (codegen-patterns
@@ -8964,7 +8964,7 @@ struct Cse {
     /// Its number ([`Selector::cse_next`]).
     id: u32,
     /// The data register holding the value.
-    reg: u8,
+    reg: RegNo,
     /// The index in `out` after the computation.
     at: usize,
 }
@@ -8988,7 +8988,7 @@ struct ElemHold {
 struct HeldElem {
     elem: ElemHold,
     /// The address register.
-    reg: u8,
+    reg: RegNo,
     /// The index of the `lea` in `out`.
     at: usize,
 }
@@ -8997,7 +8997,7 @@ struct HeldElem {
 #[derive(Clone, Debug)]
 enum Val {
     /// A new virtual data register that the selector may modify in place.
-    Tmp(u8),
+    Tmp(RegNo),
     /// A register that holds a value the selector must not modify: a
     /// parameter loaded at entry, a function result in D0.
     Reg(Reg),
@@ -9257,7 +9257,7 @@ impl Selector {
     /// AUDIT_$SUSPEND 0xE70DC0, after the index load, once for the read
     /// and the write of one element).  The register is a virtual one, so
     /// the allocator gives it the lowest free (A0 at both sites).
-    fn static_base(&mut self) -> Res<u8> {
+    fn static_base(&mut self) -> Res<RegNo> {
         if !self.data_absolute {
             return Ok(DATA_BASE_A);
         }
@@ -9284,7 +9284,7 @@ impl Selector {
     /// The register is a virtual one, so the allocator gives it the lowest
     /// free (A0 at those sites).  Where a branch target would leave it is
     /// not settled ([`select_body_with`] refuses branches).
-    fn other_base(&mut self, section: &str) -> Res<u8> {
+    fn other_base(&mut self, section: &str) -> Res<RegNo> {
         if let Some(&(_, a)) = self.other_bases.iter().find(|(s, _)| s == section) {
             return Ok(a);
         }
@@ -10970,7 +10970,7 @@ impl Selector {
         off: i32,
         init: i64,
         setup: &mut Vec<usize>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let d = self.alloc_d()?;
         setup.push(self.out.len());
         self.out.push(match init {
@@ -11157,7 +11157,7 @@ impl Selector {
         let exit = self.new_label();
         // `to - from` (or `from - to`) in `c`, less the constant `k` when
         // given, and the branch to `exit` when the range is empty.
-        let guard = |s: &mut Self, c: u8, k: Option<i64>| {
+        let guard = |s: &mut Self, c: RegNo, k: Option<i64>| {
             let dst = Ea::Reg(Reg::D(c));
             match k {
                 Some(0) if !dsigned => return,
@@ -11507,7 +11507,7 @@ impl Selector {
         exit: u32,
         setup: &mut Vec<usize>,
         signed: bool,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         if !signed {
             best_effort(
                 self.span,
@@ -11855,7 +11855,7 @@ impl Selector {
         arrays: &[SteppedArray],
         from: i64,
         setup: &[usize],
-    ) -> Res<Vec<u8>> {
+    ) -> Res<Vec<RegNo>> {
         if let [a] = arrays {
             if a.form == StepForm::InPlace {
                 return Ok(vec![self.step_in_place(a, from, setup)?]);
@@ -11863,7 +11863,7 @@ impl Selector {
         }
         // Several pointers, some formed in place (best effort, their order
         // not settled, [`Self::step_plan`]): those first, each as alone.
-        let mut ptrs: Vec<Option<u8>> = Vec::new();
+        let mut ptrs: Vec<Option<RegNo>> = Vec::new();
         for a in arrays {
             ptrs.push(if a.form == StepForm::InPlace {
                 Some(self.step_in_place(a, from, setup)?)
@@ -11930,7 +11930,7 @@ impl Selector {
     /// A6,A1; addq.l #2,A1`).  Which model this is (a scheduler filling
     /// the `movea`'s stall from above?) is not known; dpc's top-down R11
     /// cannot, so the selector places it.
-    fn step_in_place(&mut self, a: &SteppedArray, from: i64, setup: &[usize]) -> Res<u8> {
+    fn step_in_place(&mut self, a: &SteppedArray, from: i64, setup: &[usize]) -> Res<RegNo> {
         let src = match &a.base {
             Addr::Static(_) => Ea::Reg(Reg::A(self.static_base()?)),
             Addr::Frame(_) => Ea::Reg(Reg::A(FP)),
@@ -12699,7 +12699,7 @@ impl Selector {
     /// last `cmpm` (or its `dbne`): Z set when the blocks are equal.  In
     /// the unrolled form the first `bne` goes to `differ`; gives the count
     /// register and whether the form is unrolled.
-    fn block_flags(&mut self, lhs: &Addr, rhs: &Addr, size: u32, differ: u32) -> Res<(u8, bool)> {
+    fn block_flags(&mut self, lhs: &Addr, rhs: &Addr, size: u32, differ: u32) -> Res<(RegNo, bool)> {
         let string = matches!(lhs, Addr::Const(_)) || matches!(rhs, Addr::Const(_));
         let (unit, n) = match size {
             // An array of `char` against a string constant's cell (the
@@ -13739,14 +13739,14 @@ impl Selector {
             .ok_or_else(|| unsupported(self.span, "a routine needing this many registers is"))
     }
 
-    fn alloc_d(&mut self) -> Res<u8> {
+    fn alloc_d(&mut self) -> Res<RegNo> {
         match self.alloc(RegClass::Data)? {
             Reg::D(n) => Ok(n),
             Reg::A(_) => unreachable!(),
         }
     }
 
-    fn alloc_a(&mut self) -> Res<u8> {
+    fn alloc_a(&mut self) -> Res<RegNo> {
         match self.alloc(RegClass::Addr)? {
             Reg::A(n) => Ok(n),
             Reg::D(_) => unreachable!(),
@@ -13763,7 +13763,7 @@ impl Selector {
     /// after the copy in A0 of the statement before); after allocation a
     /// copy whose value an address register still holds is dropped and
     /// that register read instead ([`reuse_pointer_copies`]).
-    fn copy_to_a(&mut self, d: u8) -> Res<u8> {
+    fn copy_to_a(&mut self, d: RegNo) -> Res<RegNo> {
         let a = self.alloc_a()?;
         self.ptr_copies.push(self.out.len());
         self.out.push(Insn::Movea {
@@ -13859,7 +13859,7 @@ impl Selector {
 
     /// The register of the `for` index at frame offset `o`, while one
     /// holds it ([`Self::for_regs`]).
-    fn for_reg(&self, o: i32) -> Option<u8> {
+    fn for_reg(&self, o: i32) -> Option<RegNo> {
         self.for_regs
             .iter()
             .rev()
@@ -14734,7 +14734,7 @@ impl Selector {
 
     /// `bytes` bytes from `from` to `(d)+`: longwords, then a word and a byte
     /// ([`Self::string_store`]).
-    fn string_run(&mut self, from: Ea, d: u8, bytes: u32) -> Res<()> {
+    fn string_run(&mut self, from: Ea, d: RegNo, bytes: u32) -> Res<()> {
         let longs = bytes / 4;
         if longs > 4 {
             self.string_count_loop(from.clone(), d, Size::L, longs)?;
@@ -14763,7 +14763,7 @@ impl Selector {
     }
 
     /// `n` bytes from `from` to `(d)+` by `move.b` ([`Self::string_store`]).
-    fn string_bytes(&mut self, from: Ea, d: u8, n: u32) -> Res<()> {
+    fn string_bytes(&mut self, from: Ea, d: RegNo, n: u32) -> Res<()> {
         if n > 4 || matches!(from, Ea::Reg(_)) {
             return self.string_count_loop(from, d, Size::B, n);
         }
@@ -14781,7 +14781,7 @@ impl Selector {
 
     /// A `dbf` loop of `n` moves from `from` to `(d)+`; the count is `moveq`
     /// or `move.w` as it fits (/com/acl 0x82CA, /com/ld 0x9F5E `move.w #252`).
-    fn string_count_loop(&mut self, from: Ea, d: u8, size: Size, n: u32) -> Res<()> {
+    fn string_count_loop(&mut self, from: Ea, d: RegNo, size: Size, n: u32) -> Res<()> {
         let count = self.alloc_d()?;
         let k = n - 1;
         self.out.push(if k <= 127 {
@@ -15445,7 +15445,7 @@ impl Selector {
     /// Load an 8-byte copy's source register `a`: `lea <ea>,An` (`lea
     /// (A5),An` for offset 0 of the data area, 0xE58A10), `movea.l
     /// (d,A6),An` for a pointer slot, `movea.l #sym,An`.
-    fn copy8_load(&mut self, from: Src8, a: u8) {
+    fn copy8_load(&mut self, from: Src8, a: RegNo) {
         self.out.push(match from {
             Src8::Lea(src) => Insn::Lea { src, dst: a },
             Src8::Slot(o) => Insn::Movea {
@@ -15524,7 +15524,7 @@ impl Selector {
     /// unit's object at an offset (0xE5CF3A `lea (0xe85c24).l,A0`, in an
     /// overlay section, the one such routine); another data section's
     /// block of the unit (RIP_$INIT 0xE2FC1E, one site).
-    fn block_address(&mut self, addr: &Addr) -> Res<(u8, BlockForm)> {
+    fn block_address(&mut self, addr: &Addr) -> Res<(RegNo, BlockForm)> {
         const OFFSET: &str = "a block at an offset into another unit's object (0xE5CF3A `lea \
                               (0xe85c24).l,A0`, one routine's overlay object; bead domain-pascal-dsr5) is";
         const POINTER: &str = "a block through a pointer that is not held in a register \
@@ -15707,7 +15707,7 @@ impl Selector {
     /// The index must be a variable (every site's is), not a zero-extended
     /// byte; an array of char copied into or from an element is refused
     /// (no site).
-    fn block_addresses(&mut self, first: &Addr, second: &Addr, use_: BlockUse) -> Res<(u8, u8)> {
+    fn block_addresses(&mut self, first: &Addr, second: &Addr, use_: BlockUse) -> Res<(RegNo, RegNo)> {
         self.elem_second_lea = None;
         let (mut e1, mut e2) = (self.element_block(first), self.element_block(second));
         // Best effort (bead domain-pascal-5kgg): two elements, or one whose
@@ -15865,7 +15865,7 @@ impl Selector {
     /// `lea (0,An,Dx),Am` already formed and `lea (d,Am),Am` into the same
     /// register (NAME_$SET_WDIRUS 0xE58690..0xE58696 `lea (0,A5,D0.w),A0;
     /// moveq #1,D0; lea (2384,A0),A0`; FM_$WRITE 0xE3A55E..0xE3A564).
-    fn element_lea(&mut self, ea: Ea) -> Res<u8> {
+    fn element_lea(&mut self, ea: Ea) -> Res<RegNo> {
         match ea {
             // MC68020: one `lea` with the scale and displacement (SAU9
             // NAME_$GET_NDIR_UID 0x3C45FD4E `lea (0x3e0,A5,D0.w*8),A0;
@@ -15937,7 +15937,7 @@ impl Selector {
     ///   it and `true` with `st` (TTY_$I_NEWLINE 0xE1B45E `st D0`).  When
     ///   the computation reads the local itself after it starts writing
     ///   its result, the result is computed apart and moved (not seen).
-    fn store_web(&mut self, o: i32, web: u8, value: &Expr) -> Res<()> {
+    fn store_web(&mut self, o: i32, web: RegNo, value: &Expr) -> Res<()> {
         let me = Addr::Frame(o);
         // A parameter's `x := chr(ord(x) & c)` (an operation at a wider
         // width, narrowed back): the operation at the parameter's own
@@ -17403,7 +17403,7 @@ impl Selector {
         &mut self,
         key: CseKey,
         leaf: (Addr, u32),
-        compute: impl FnOnce(&mut Self) -> Res<u8>,
+        compute: impl FnOnce(&mut Self) -> Res<RegNo>,
     ) -> Res<Val> {
         let id = self.cse_next;
         self.cse_next += 1;
@@ -18072,7 +18072,7 @@ impl Selector {
     /// 0xE1BE14..0xE1BE1A `movea.l (8,A6),A0; move.l (A0),-(SP); movea.l
     /// (0x2c0,A0),A1`; also 0xE1B368, SIO_$I_TSTART 0xE1C932), which
     /// `dpc` does not do.
-    fn call_target(&mut self, c: &Call, x: &Expr) -> Res<u8> {
+    fn call_target(&mut self, c: &Call, x: &Expr) -> Res<RegNo> {
         if let Expr::Load {
             addr: Addr::Indirect { base, .. },
             ..
@@ -19709,7 +19709,7 @@ impl Selector {
     }
 
     /// Evaluate `e` into a new data register the caller may modify.
-    fn eval_d(&mut self, e: &Expr) -> Res<u8> {
+    fn eval_d(&mut self, e: &Expr) -> Res<RegNo> {
         let v = self.eval(e)?;
         self.in_tmp(v, e.ty().width)
     }
@@ -20046,7 +20046,7 @@ impl Selector {
     /// address register, is refused (whether it is formed before or after
     /// the `move.w SR` is not seen); one in memory that needs none is
     /// read in place (reference only, no image site).
-    fn set_sr(&mut self, x: &Expr) -> Res<u8> {
+    fn set_sr(&mut self, x: &Expr) -> Res<RegNo> {
         let src =
             match x {
                 Expr::Const { value, .. } => Ea::Imm(imm(*value, Width::Word)),
@@ -20082,7 +20082,7 @@ impl Selector {
     ///   0xE3BB68; 0xE01BA4 `move.w D0,D1` for a function result);
     /// - memory: `move.<w> ea,Dn` (0xE148D4);
     /// - a constant: [`Self::load_const`].
-    fn in_tmp(&mut self, v: Val, w: Width) -> Res<u8> {
+    fn in_tmp(&mut self, v: Val, w: Width) -> Res<RegNo> {
         if let Some(r) = self.take_consumed(&v) {
             return Ok(r);
         }
@@ -20108,7 +20108,7 @@ impl Selector {
     /// 0xE077FE `addi.l #0x7fff,D2; andi.l #-0x8000,D2`; tty_$i_calc_column
     /// 0xE1B4DE `andi.l #0xffff,D2; addq.l #7,D2; lsr.l #3,D2; lsl.l
     /// #3,D2`).
-    fn take_consumed(&mut self, v: &Val) -> Option<u8> {
+    fn take_consumed(&mut self, v: &Val) -> Option<RegNo> {
         match (self.consume, v) {
             (Some((r, at)), Val::Reg(Reg::D(d))) if r == *d && at == self.out.len() => {
                 self.consume = None;
@@ -20314,14 +20314,14 @@ impl Selector {
     ///   result; 0xE0B23A `moveq #-1,D0`; 0xE02D44 `moveq #15,D1` for a
     ///   byte operation; 0xE177A0 `moveq #-2,D2` for a word one);
     /// - others: `move.<w> #c` (0xE00A14 `move.l #0xffffff,D0`).
-    fn load_const(&mut self, c: i64, w: Width) -> Res<u8> {
+    fn load_const(&mut self, c: i64, w: Width) -> Res<RegNo> {
         let d = self.alloc_d()?;
         self.const_into(c, w, d);
         Ok(d)
     }
 
     /// Constant `c` into data register `d` ([`Self::load_const`]).
-    fn const_into(&mut self, c: i64, w: Width, d: u8) {
+    fn const_into(&mut self, c: i64, w: Width, d: RegNo) {
         let signed = match w {
             Width::Byte => c as i8 as i64,
             Width::Word => c as i16 as i64,
@@ -20594,7 +20594,7 @@ impl Selector {
     }
 
     /// `lhs op rhs` into a new data register (codegen-patterns 8).
-    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<RegNo> {
         let w = ty.width;
         let size = size_of(w);
         let konst = |e: &Expr| match e {
@@ -20965,7 +20965,7 @@ impl Selector {
     /// order, the address first ([`Self::value_addr_arith`]); the other
     /// shapes `Ok(None)`, for [`Self::binary`]'s generic forms, the
     /// address a value in a data register there ([`Self::eval`]).
-    fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<Option<u8>> {
+    fn addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<Option<RegNo>> {
         let refuse = |s: &Self, what: &str| {
             best_effort(
                 s.span,
@@ -21106,7 +21106,7 @@ impl Selector {
     /// `(ppn_shifted & 16#3FF) + addr(...)`): the address formed first,
     /// then the value into a data register of its own, `add.l An,Dn` /
     /// `sub.l An,Dn`.  One site; the address on the left is best effort.
-    fn value_addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr) -> Res<u8> {
+    fn value_addr_arith(&mut self, alu: AluOp, lhs: &Expr, rhs: &Expr) -> Res<RegNo> {
         let (a, v) = match (addr_value(lhs), addr_value(rhs)) {
             (None, Some(a)) => (a, lhs),
             (Some(a), None) if alu == AluOp::Add => (a, rhs),
@@ -21130,7 +21130,7 @@ impl Selector {
     /// (not byte-identical): no form catalogued (OS_$START_PROC2
     /// 0xE6D25C's `integer32(addr(os_init_end)) + 16#7FFF` in ../source's
     /// Pascal).
-    fn addr_plus_const(&mut self, alu: AluOp, a: &Addr, c: i64) -> Res<u8> {
+    fn addr_plus_const(&mut self, alu: AluOp, a: &Addr, c: i64) -> Res<RegNo> {
         best_effort(
             self.span,
             "an address and a constant in a sum or difference (codegen-patterns 5.2, \"`addr(x)` \
@@ -21161,7 +21161,7 @@ impl Selector {
     /// (A0 and D0 at NET's five sites; D1 at ASKNODE_$SERVER 0xE65DA8 and
     /// at FLP_$DINIT 0xE3E17E, where D0 looks free: Uncertain, bead
     /// domain-pascal-i2na).
-    fn addr_into_d(&mut self, a: &Addr) -> Res<u8> {
+    fn addr_into_d(&mut self, a: &Addr) -> Res<RegNo> {
         let src = match a {
             Addr::Symbol { name, offset: 0 } => Ea::ImmSym(name.clone()),
             Addr::Symbol { name, offset } => {
@@ -21240,7 +21240,7 @@ impl Selector {
     /// `+`: the left one, or the computed one); which operand of `M$MI*$LLL`
     /// is argument 1 (the left one; 0xE3B220..0xE3B226 pushes a quotient
     /// as argument 1 for `(x div y) * y`).
-    fn mul(&mut self, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+    fn mul(&mut self, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<RegNo> {
         let w = ty.width;
         let signed = ty.is_signed();
         if w == Width::Byte {
@@ -21375,7 +21375,7 @@ impl Selector {
     /// DSP160/DN460/DN660 instructions in the same places (codegen-
     /// patterns 14.1), their operands in data registers
     /// ([`Self::long_operand`]).
-    fn mul_long(&mut self, ty: Scalar, a: &Expr, b: &Expr) -> Res<u8> {
+    fn mul_long(&mut self, ty: Scalar, a: &Expr, b: &Expr) -> Res<RegNo> {
         let signed = ty.is_signed();
         let dn460 = self.cpu == Cpu::Dn460;
         if let Expr::Const { value, .. } = b {
@@ -21495,7 +21495,7 @@ impl Selector {
     /// A word value extended to a longword in a new data register:
     /// `ext.l` for a signed one, `clr.l; move.w` (or `andi.l #0xffff` of
     /// a computed one, [`Self::zero_extend`]) for an unsigned one.
-    fn extend_word(&mut self, w: &Expr, signed: bool) -> Res<u8> {
+    fn extend_word(&mut self, w: &Expr, signed: bool) -> Res<RegNo> {
         if signed {
             let d = self.eval_d(w)?;
             self.out.push(Insn::Ext {
@@ -21571,7 +21571,7 @@ impl Selector {
     /// Two word values multiplied with `muls.w`/`mulu.w`: the left one (or
     /// the computed one) in a register, the other the source operand
     /// (0xE10A7E `move.w D2,D4; muls.w (-866,A2),D4`, a held value copied).
-    fn mul_words(&mut self, lhs: &Expr, rhs: &Expr, signed: bool) -> Res<u8> {
+    fn mul_words(&mut self, lhs: &Expr, rhs: &Expr, signed: bool) -> Res<RegNo> {
         let lv = self.eval(lhs)?;
         let rv = self.eval(rhs)?;
         let (d, src) = match (&lv, &rv) {
@@ -21900,7 +21900,7 @@ impl Selector {
     /// The unsigned word `e` zero-extended in a new data register:
     /// `clr.l Dn; move.w x,Dn` (0xE4CE1A..0xE4CE1C), `andi.l #0xffff` on a
     /// computed value (0xE11818).
-    fn zero_extend(&mut self, e: &Expr) -> Res<u8> {
+    fn zero_extend(&mut self, e: &Expr) -> Res<RegNo> {
         let v = self.eval(e)?;
         if let Val::Tmp(d) = v {
             self.out.push(Insn::AluImm {
@@ -21970,7 +21970,7 @@ impl Selector {
     /// disk/pv_mount_internal.c, against
     /// `bcc` once, 0xE5C7C6: not settled, bead domain-pascal-ckzr),
     /// `min(x, 0)` (not seen), `b` in an address register.
-    fn min_max(&mut self, op: BinOp, a: &Expr, b: &Expr, ty: Scalar, into: Option<u8>) -> Res<u8> {
+    fn min_max(&mut self, op: BinOp, a: &Expr, b: &Expr, ty: Scalar, into: Option<RegNo>) -> Res<RegNo> {
         let w = ty.width;
         let size = size_of(w);
         let is_abs = |e: &Expr| matches!(e, Expr::Unary { op: UnOp::Abs, .. });
@@ -22092,7 +22092,7 @@ impl Selector {
     /// (0xE6966E: the quotient's flags are not its sign).  Every branch is
     /// `bpl.b` (no `bge`); the join is not aligned (a forward target,
     /// codegen-patterns 7), as [`Self::div_pow2`]'s.
-    fn abs(&mut self, x: &Expr, w: Width) -> Res<u8> {
+    fn abs(&mut self, x: &Expr, w: Width) -> Res<RegNo> {
         let size = size_of(w);
         // A word product by a constant: `muls.w #c` (best effort, not
         // checked against the image: no `abs` of a product by a constant
@@ -22213,7 +22213,7 @@ impl Selector {
     /// Whether the instruction just selected wrote data register `d` at
     /// width `w` and set N from that value (a `move`, an extension, an
     /// arithmetic or logical operation, a shift into `d`).
-    fn sets_flags(&self, d: u8, w: Width) -> bool {
+    fn sets_flags(&self, d: RegNo, w: Width) -> bool {
         let size = size_of(w);
         let reg = Ea::Reg(Reg::D(d));
         match self.out.last() {
@@ -22232,7 +22232,7 @@ impl Selector {
     }
 
     /// `op` by `n` bits on Dd, at most 8 at a time (0xE02AA6).
-    fn shift_by(&mut self, op: ShiftOp, d: u8, n: u32, w: Width) {
+    fn shift_by(&mut self, op: ShiftOp, d: RegNo, n: u32, w: Width) {
         let mut n = n;
         while n > 0 {
             let k = n.min(8);
@@ -22477,7 +22477,7 @@ impl Selector {
     /// is split into shifts of 8 and the rest (0xE02AA6 `lsl.l #8,D0; lsl.l
     /// #2,D0`; 0xE00876 `lsl.l #8; lsl.l #7`); a count in a register shifts
     /// by it (0xE02D52 `lsl.w D1,D3`).
-    fn shift(&mut self, op: BinOp, x: &Expr, count: &Expr, ty: Scalar) -> Res<u8> {
+    fn shift(&mut self, op: BinOp, x: &Expr, count: &Expr, ty: Scalar) -> Res<RegNo> {
         let size = size_of(ty.width);
         let sop = match op {
             BinOp::Shl => ShiftOp::Lsl,
@@ -22571,7 +22571,7 @@ impl Selector {
     ///
     /// The partial product takes a new register (R8: D1 at 0xE68870, D3 at
     /// 0xE0CAAE).
-    fn mul_const(&mut self, d: u8, c: i64, w: Width) -> Res<()> {
+    fn mul_const(&mut self, d: RegNo, c: i64, w: Width) -> Res<()> {
         let size = size_of(w);
         let reg = Ea::Reg(Reg::D(d));
         if !(0..=0xffff).contains(&c) {
@@ -22657,7 +22657,7 @@ impl Selector {
     /// add.w D0,D1; add.w D0,D0; add.w D0,D1`; for m = 2^k + 1 this is
     /// [`Self::mul_const`]'s form).  The low `w` bits of the product are
     /// right for either sign.
-    fn mul_bits(&mut self, d: u8, s: u32, m: u32, w: Width) -> Res<()> {
+    fn mul_bits(&mut self, d: RegNo, s: u32, m: u32, w: Width) -> Res<()> {
         let size = size_of(w);
         self.shift_left(d, s, w);
         let u = self.alloc_d()?;
@@ -22716,7 +22716,7 @@ impl Selector {
         c: i64,
         signed: bool,
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let held = match x {
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -22809,7 +22809,7 @@ impl Selector {
 
     /// `d <<= n`: `add.<w> Dd,Dd` for 1, `lsl.<w>` by at most 8 at a time
     /// otherwise (see [`Self::mul_const`]).
-    fn shift_left(&mut self, d: u8, n: u32, w: Width) {
+    fn shift_left(&mut self, d: RegNo, n: u32, w: Width) {
         let size = size_of(w);
         if n == 1 {
             self.out.push(Insn::Alu {
@@ -23195,7 +23195,7 @@ impl Selector {
     /// pop) of a statement in [`CallMode::save`], `move.l D0,Dn`: a later
     /// call of the statement writes D0 again.  The whole register, so
     /// that a byte or word result reads the same from the copy.
-    fn save_result(&mut self) -> Res<u8> {
+    fn save_result(&mut self) -> Res<RegNo> {
         best_effort(self.span, SAVED_RESULT)?;
         let d = self.alloc_d()?;
         self.out.push(Insn::Move {
@@ -23222,7 +23222,7 @@ impl Selector {
     /// `move.l A0,Dn` or `movea.l A0,An` into a register-held local (48
     /// and 108), A0 as a base (8), `cmpa.w #0,A0` (12); never pushed as an
     /// argument.
-    fn call_a0(&mut self, c: &Call) -> Res<u8> {
+    fn call_a0(&mut self, c: &Call) -> Res<RegNo> {
         self.call_value(c)?;
         if self.call_mode().save {
             // As [`Self::save_result`]: `movea.l A0,An`.
@@ -23281,7 +23281,7 @@ impl Selector {
     /// `btst D0,D1; sne D1`, the set's register).  **Uncertain:** the rule
     /// is read off these four sites.  Other conditions: [`Self::not_value`],
     /// [`Self::short_circuit_value`], [`Self::bool_into_reg`].
-    fn test_value(&mut self, c: &IrCond) -> Res<u8> {
+    fn test_value(&mut self, c: &IrCond) -> Res<RegNo> {
         if let IrCond::Block { op, lhs, rhs, size } = c {
             // `sne`/`seq` into the count register, the first `bne` of the
             // unrolled form going to it (PACCT_$ON 0xE5A9B8..0xE5A9C0
@@ -23376,7 +23376,7 @@ impl Selector {
             .iter()
             .flat_map(|i| crate::regs::access(i).defs)
             .collect();
-        let mut used: Vec<u8> = self.out[start..]
+        let mut used: Vec<RegNo> = self.out[start..]
             .iter()
             .flat_map(|i| crate::regs::access(i).uses)
             .filter_map(|r| match r {
@@ -23388,7 +23388,7 @@ impl Selector {
         // A register held for the whole body (a parameter loaded at
         // entry, a register-held local, a value held for reuse) is not
         // overwritten.
-        let held: Vec<u8> = self
+        let held: Vec<RegNo> = self
             .pinned
             .iter()
             .filter_map(|&(_, r)| match r {
@@ -23428,7 +23428,7 @@ impl Selector {
     ///   D0`, a parameter; 0xE12A26 `bsr; not.b D0`, a function's result;
     ///   0xE0AED6 `or.b D1,D0; not.b D0`, a plain `or`).
     /// - `not not x`: `x`.  Best effort: not seen.
-    fn not_value(&mut self, x: &IrCond) -> Res<u8> {
+    fn not_value(&mut self, x: &IrCond) -> Res<RegNo> {
         if let IrCond::Not(y) = x {
             return self.test_value(y);
         }
@@ -23463,7 +23463,7 @@ impl Selector {
     /// pkt/likely_to_answer.pas), has this shape with `move.b D2,D0` for
     /// the true, D2 holding a `true` stored before.  Best effort (not
     /// byte-identical): `st` for the true, the register the allocator's.
-    fn short_circuit_value(&mut self, c: &IrCond) -> Res<u8> {
+    fn short_circuit_value(&mut self, c: &IrCond) -> Res<RegNo> {
         let f = self.new_label();
         let j = self.new_label();
         self.branch(c, false, f)?;
@@ -23489,7 +23489,7 @@ impl Selector {
     /// element `(d,An,Dx)` 122, 0xE03576 `lea (-48,A1,D0.l),A2; move.l
     /// A2,(-76,A6)`, the lower bound folded in), or `movea.l #sym,An` for
     /// another unit's object (0xE00ECC).
-    fn addr_into_a(&mut self, a: &Addr) -> Res<u8> {
+    fn addr_into_a(&mut self, a: &Addr) -> Res<RegNo> {
         let r = self.alloc_a()?;
         self.lea_into(a, r)?;
         Ok(r)
@@ -23501,7 +23501,7 @@ impl Selector {
     /// first, then the pointer, then the `lea` (NETLOG_$LOG_IT
     /// 0xE71BB6..0xE71BCA: the index times 26 into D1, `movea.l
     /// (116,A5),A0; lea (0,A0,D1.w),A0`).
-    fn lea_into(&mut self, a: &Addr, r: u8) -> Res<()> {
+    fn lea_into(&mut self, a: &Addr, r: RegNo) -> Res<()> {
         if let Addr::Index {
             base,
             index,
@@ -23782,7 +23782,7 @@ impl Selector {
     /// #..,(8,A6); seq D0; cmpi.l #..,(8,A6); seq D1; or.b D1,D0; cmpi.l;
     /// seq D1; or.b D1,D0` (`a or b or c`, left to right); TTY_$I_ERR
     /// 0xE1BE48..0xE1BE5E `seq D1b; ...; sne D3b; and.b D3b,D1b`.
-    fn logic_value(&mut self, c: &IrCond) -> Res<u8> {
+    fn logic_value(&mut self, c: &IrCond) -> Res<RegNo> {
         let (op, a, b) = match c {
             IrCond::And(a, b) => (AluOp::And, a, b),
             IrCond::Or(a, b) => (AluOp::Or, a, b),
@@ -24077,7 +24077,7 @@ impl Selector {
     /// - a function's boolean result: its D0 (0xE072AA `or.b (-18,A6),D0`
     ///   right after the call);
     /// - a nested plain `and`/`or`: its register (0xE4BC4A, a chain).
-    fn bool_into_reg(&mut self, c: &IrCond) -> Res<u8> {
+    fn bool_into_reg(&mut self, c: &IrCond) -> Res<RegNo> {
         match c {
             IrCond::And(..) | IrCond::Or(..) => self.logic_value(c),
             IrCond::Not(x) if matches!(&**x, IrCond::Test(Expr::Load { .. })) => {
@@ -24187,7 +24187,7 @@ impl Selector {
     /// load); a variable in memory as a value (`scs` into a new register
     /// at both sites, 0xE052FE and 0xE70E9C, the latter with the load in
     /// D3: not modelled; bead domain-pascal-uwfe); a constant.
-    fn odd_test(&mut self, x: &Expr, value: bool) -> Res<(u8, bool, Cond)> {
+    fn odd_test(&mut self, x: &Expr, value: bool) -> Res<(RegNo, bool, Cond)> {
         let (d, held) = match self.eval(x)? {
             Val::Reg(Reg::D(r)) => (r, true),
             Val::Tmp(r) => (r, false),
@@ -24414,7 +24414,7 @@ impl Selector {
     fn compare_two_computed(
         &mut self,
         op: Rel,
-        dl: u8,
+        dl: RegNo,
         rhs: &Expr,
         size: Size,
         signed: bool,
@@ -24720,7 +24720,7 @@ impl Selector {
     /// an eor, a `neg`, an `ext` or a `swap` tested
     /// as a longword (no branch or `tst` follows one in compiled code;
     /// bead domain-pascal-bkoz).
-    fn flags_test(&self, d: u8, size: Size, cc: Cond) -> Res<bool> {
+    fn flags_test(&self, d: RegNo, size: Size, cc: Cond) -> Res<bool> {
         #[derive(PartialEq)]
         enum Op {
             /// Add or subtract: N and Z trusted, V not.
@@ -24853,7 +24853,7 @@ impl Selector {
     /// A field narrower than its value's width leaves the rest of the
     /// register zero: the value is zero-extended (an unsigned field; a
     /// field of negative values is refused when the IR is built).
-    fn bits_value(&mut self, addr: &Addr, field: BitField, ty: Scalar) -> Res<u8> {
+    fn bits_value(&mut self, addr: &Addr, field: BitField, ty: Scalar) -> Res<RegNo> {
         let ea = self.ea_of(addr)?;
         let d = self.alloc_d()?;
         if ty == Scalar::BOOLEAN && field.width == 1 {
@@ -25444,7 +25444,7 @@ impl Selector {
     /// Dd shifted left by `n` for a bit field: `add.<w> Dd,Dd` for 1
     /// (0xE1D4B2 `add.b D1,D1`; 0xE5BD6E), else `lsl` split at 8
     /// (0xE0086E `lsl.l #8,D0; lsl.l #7,D0`).
-    fn shift_up(&mut self, d: u8, n: u32, w: Width) {
+    fn shift_up(&mut self, d: RegNo, n: u32, w: Width) {
         if n == 1 {
             self.out.push(Insn::Alu {
                 op: AluOp::Add,
@@ -25502,7 +25502,7 @@ impl Selector {
         set: &Expr,
         w: Width,
         value: bool,
-    ) -> Res<(Option<u8>, Cond)> {
+    ) -> Res<(Option<RegNo>, Cond)> {
         let Expr::Const { value: k, .. } = elem else {
             unreachable!()
         };
@@ -25711,7 +25711,7 @@ impl Selector {
     /// (0xE5EABE `move.w (A4),D0; move.w (712,A5),D1; btst D0,D1`), and
     /// which elements are guarded is not settled.  Returns the register
     /// the `btst` read the set in.
-    fn word_set_var(&mut self, elem: &Expr, set: &Expr, out: Option<u32>) -> Res<u8> {
+    fn word_set_var(&mut self, elem: &Expr, set: &Expr, out: Option<u32>) -> Res<RegNo> {
         best_effort(
             self.span,
             "`in` on a one-word set variable with an element that is not constant \
@@ -25728,7 +25728,7 @@ impl Selector {
             },
             _ => None,
         };
-        let load_set = |s: &mut Self| -> Res<u8> {
+        let load_set = |s: &mut Self| -> Res<RegNo> {
             match held(s, set) {
                 Some(n) => Ok(n),
                 None => s.eval_d(set),
@@ -25858,8 +25858,8 @@ impl Selector {
     ///   0xE3D3B8 the routine's entry loads are interleaved, as 12.4 R11 "Not
     ///   explained"); with a constant `moveq` loads, an array element or a
     ///   computed element it is refused (no site).
-    fn set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
-        let bit_of = |s: &mut Self, e: &Expr| -> Res<u8> {
+    fn set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<RegNo> {
+        let bit_of = |s: &mut Self, e: &Expr| -> Res<RegNo> {
             match e {
                 // Not copied: `btst` only reads it.
                 Expr::Load {
@@ -26002,7 +26002,7 @@ impl Selector {
     /// element 16..31 reads whatever the high word holds.  Such elements
     /// are outside the set's type `0..7`; ref 3.9.3 gives false for them,
     /// which is not guaranteed here (as at the site).
-    fn byte_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
+    fn byte_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<RegNo> {
         let r = self.alloc_d()?;
         self.out.push(Insn::Clr {
             size: Size::W,
@@ -26035,7 +26035,7 @@ impl Selector {
     /// The register holding a run-time `in` element for a register `btst`:
     /// a held one where it is (`btst` only reads it), any other loaded or
     /// computed into a new one.
-    fn member_bit(&mut self, elem: &Expr) -> Res<u8> {
+    fn member_bit(&mut self, elem: &Expr) -> Res<RegNo> {
         match elem {
             Expr::Load {
                 addr: Addr::Frame(o),
@@ -26059,7 +26059,7 @@ impl Selector {
     /// `clr.l` before the value is formed in it, so an element outside the
     /// field (up to 31) tests 0; 32 and above wrap, as at every register
     /// `btst` (TTY_$K_SET_DELAY 0xE67A1C).
-    fn bits_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<u8> {
+    fn bits_set_member_reg(&mut self, elem: &Expr, set: &Expr) -> Res<RegNo> {
         let Expr::Bits { addr, field, ty } = set else {
             unreachable!("a bit field set")
         };
@@ -26115,7 +26115,7 @@ impl Selector {
     /// element in memory).  **Uncertain:** the `lea` of a set in a record
     /// reached through a register comes after the `lsr` at MSG_$CLOSEI
     /// 0xE59432 and MSG_$FORK 0xE73F38 (`lea (472,A0),A1`).
-    fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<u8> {
+    fn set_member_at(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<RegNo> {
         let top = bytes as i64 * 8 - 1;
         if let Addr::Const(_) = set {
             // Only a one-byte element (all the sites: chars): the
@@ -26196,7 +26196,7 @@ impl Selector {
     /// longword, N set and V clear, and [`Self::set_member_cc`]'s `bgt`
     /// reads false; within the bits, `lsr.w` clears N and V and the
     /// `btst` sets Z.
-    fn wide_const_set_member(&mut self, elem: &Expr, set: &Addr, top: i64) -> Res<u8> {
+    fn wide_const_set_member(&mut self, elem: &Expr, set: &Addr, top: i64) -> Res<RegNo> {
         best_effort(
             self.span,
             "`in` on a constant set of more than a longword with an element of more than a \
@@ -26276,7 +26276,7 @@ impl Selector {
     /// MST_$MAP_INITIAL_AREA 0x3C44A286), and MSG_$FORK 0x3C47B8D6 /
     /// MSG_$FREE_ASID 0x3C47C9EA, where `not k` is formed once before a
     /// loop.
-    fn set_member_bf(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<(u8, Ea)> {
+    fn set_member_bf(&mut self, elem: &Expr, set: &Addr, bytes: u32) -> Res<(RegNo, Ea)> {
         let end = self.set_end_ea(set, bytes)?;
         let n = self.bf_member_offset(elem)?;
         Ok((n, end))
@@ -26334,7 +26334,7 @@ impl Selector {
     /// `clr.l`), then `not.l`.  A computed element is evaluated after the
     /// `clr.l` (MST_$MAP_INITIAL_AREA 0x3C44A286..0x3C44A292 `clr.l D1;
     /// ...; move.w D2,D1; not.l D1`, D2 computed between).
-    fn bf_member_offset(&mut self, elem: &Expr) -> Res<u8> {
+    fn bf_member_offset(&mut self, elem: &Expr) -> Res<RegNo> {
         let n = self.alloc_d()?;
         let dn = Ea::Reg(Reg::D(n));
         let clr = Insn::Clr {
@@ -26480,7 +26480,7 @@ impl Selector {
     /// constant: the order of a computed member of `[k]` (DBUF_$GET_BLOCK
     /// 0xE3A726, [`Self::set_of`]).  Best effort (not byte-identical): the
     /// computed element's order is not seen on a large set.
-    fn large_set_elem(&mut self, elem: &Expr, top: i64) -> Res<(u8, u8)> {
+    fn large_set_elem(&mut self, elem: &Expr, top: i64) -> Res<(RegNo, RegNo)> {
         Ok(match elem {
             // A byte element zero-extended around the constant's load.
             Expr::Convert { value, ty, .. }
@@ -26575,7 +26575,7 @@ impl Selector {
 
     /// A computed set element (a word) in a data register: its own
     /// register when the value is in one, else a copy.
-    fn computed_elem(&mut self, elem: &Expr) -> Res<u8> {
+    fn computed_elem(&mut self, elem: &Expr) -> Res<RegNo> {
         match self.eval(elem)? {
             Val::Reg(Reg::D(r)) | Val::Tmp(r) => Ok(r),
             Val::Imm(_) => Err(unsupported(
@@ -26992,7 +26992,7 @@ impl Selector {
     /// The test of [`Self::set_empty_branch`] up to the flags of its last
     /// `tst` (Z set when the set is empty), each `tst` but the last
     /// followed by `bne` to `nonempty`; gives the count's register.
-    fn set_empty_flags(&mut self, set: &Addr, size: u32, nonempty: u32) -> Res<u8> {
+    fn set_empty_flags(&mut self, set: &Addr, size: u32, nonempty: u32) -> Res<RegNo> {
         if size != 8 {
             best_effort(
                 self.span,
@@ -27039,7 +27039,7 @@ impl Selector {
     /// the base's register or another (ACL_$ALLOC_ASID 0xE73CAE A3 to A3,
     /// ACL_$USED_SUSER 0xE492EE A0 to A1: which one is not settled), and a
     /// frame or pointer base is not seen.
-    fn bit_elem_byte(&mut self, array: &Addr, offset: u8) -> Res<Ea> {
+    fn bit_elem_byte(&mut self, array: &Addr, offset: RegNo) -> Res<Ea> {
         let o = match array {
             Addr::Static(o) if !self.data_absolute && (0..0x8000).contains(o) => *o,
             _ => {
@@ -27433,7 +27433,7 @@ impl Selector {
     /// `clr.l D1; bset D2,D1`).  `bset` on a register takes the element
     /// mod 32 (no range check; on a word set a member above 15 is lost
     /// when the word is used, one of 32 and above wraps).
-    fn set_of(&mut self, elem: &Expr, w: Width) -> Res<u8> {
+    fn set_of(&mut self, elem: &Expr, w: Width) -> Res<RegNo> {
         if w == Width::Byte {
             best_effort(
                 self.span,
@@ -27498,7 +27498,7 @@ impl Selector {
     /// complemented, then `andi #c`), and `x * y` / `x - y` with `x`
     /// computed (the right operand first as above, then `and` of the
     /// left one's register).
-    fn set_op_value(&mut self, op: SetOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<u8> {
+    fn set_op_value(&mut self, op: SetOp, lhs: &Expr, rhs: &Expr, ty: Scalar) -> Res<RegNo> {
         let w = ty.width;
         if w == Width::Byte {
             // A one-byte set is widened to a word when combined with one
@@ -28113,7 +28113,7 @@ impl Selector {
                 // for an element: A2, the `with`'s A3 (IO_$ENABLE_DEVICE
                 // 0xE1A866/0xE1A876, IO_$DISABLE_DEVICE 0xE1A810/0xE1A820,
                 // IO_$RELEASE 0xE1A6F6/0xE1A706).
-                let withs: Vec<u8> = self
+                let withs: Vec<RegNo> = self
                     .ptr_locals
                     .iter()
                     .filter(|(o, _)| self.elem_ptrs.contains(o))
@@ -28135,7 +28135,7 @@ impl Selector {
     /// The operand of an element at `disp` off base register `areg` with
     /// the scaled index in `x` ([`Self::index_ea`]): `(d,An,Dx)` within
     /// -128..127, otherwise `lea (0,An,Dx),Am` and `(d,Am)`.
-    fn element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
+    fn element_ea(&mut self, areg: RegNo, x: RegNo, index: &Expr, disp: i32) -> Res<Ea> {
         let long = index.ty().width == Width::Long;
         let scale = self.take_folded_scale(x);
         if self.cpu.is_68020() && (scale != 1 || !(-128..128).contains(&disp)) {
@@ -28185,14 +28185,14 @@ impl Selector {
 
     /// The pointer a `for` loop steps through the array at `base` for
     /// elements of `scale` bytes, when `index` is that loop's index.
-    fn stepped_pointer(&self, base: &Addr, index: &Expr, scale: u32) -> Option<u8> {
+    fn stepped_pointer(&self, base: &Addr, index: &Expr, scale: u32) -> Option<RegNo> {
         self.stepped_array(base, index, scale).map(|(r, _)| r)
     }
 
     /// The pointer a `for` loop steps through the array at `base`
     /// ([`Self::stepped_pointer`]) and the array's own offset from it
     /// ([`SteppedArray::base_offset`]).
-    fn stepped_array(&self, base: &Addr, index: &Expr, scale: u32) -> Option<(u8, i32)> {
+    fn stepped_array(&self, base: &Addr, index: &Expr, scale: u32) -> Option<(RegNo, i32)> {
         self.stepped
             .iter()
             .rev()
@@ -28217,7 +28217,7 @@ impl Selector {
     ///   the size first, `moveq #size,Dn; mulu.w x,Dn`
     ///   ([`Self::mul_const_first`]; TPAD_$SET_UNIT_MODE 0xE69824..0xE69828
     ///   `moveq #44,D2; mulu.w (A4),D2; lea (0,A5,D2.w),A1`).
-    fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<u8> {
+    fn index_reg(&mut self, index: &Expr, scale: u32) -> Res<RegNo> {
         self.index_reg_with(index, scale, &mut |_| Ok(()))
     }
 
@@ -28230,7 +28230,7 @@ impl Selector {
         index: &Expr,
         scale: u32,
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let w = index.ty().width;
         let mut called = false;
         // MC68020: a scale of 2, 4 or 8 goes to the operand's scale field
@@ -28322,7 +28322,7 @@ impl Selector {
         &mut self,
         index: &Expr,
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let w = index.ty().width;
         let v = self.eval(index)?;
         let d = match v {
@@ -28335,7 +28335,7 @@ impl Selector {
 
     /// The scale left to the operand formed from index register `x`
     /// ([`Self::index_reg_with`]; 1 when none), consumed.
-    fn take_folded_scale(&mut self, x: u8) -> u8 {
+    fn take_folded_scale(&mut self, x: RegNo) -> u8 {
         match self.folded_scale.iter().position(|&(r, _)| r == x) {
             Some(i) => self.folded_scale.remove(i).1,
             None => 1,
@@ -28347,7 +28347,7 @@ impl Selector {
         index: &Expr,
         scale: u32,
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let w = index.ty().width;
         if w == Width::Word && scale < 128 && by_mul_insn(scale as i64) && const_first(index) {
             // `.w` indices: `mulu.w` (21 of 21 such scalings by a constant
@@ -28410,7 +28410,7 @@ impl Selector {
         x: &Expr,
         c: i64,
         between: &mut dyn FnMut(&mut Self) -> Res<()>,
-    ) -> Res<u8> {
+    ) -> Res<RegNo> {
         let signed = x.ty().is_signed();
         if c < 128 && const_first(x) {
             if !signed {
@@ -28536,7 +28536,7 @@ impl Selector {
         imm: &str,
         index: &Expr,
         scale: u32,
-    ) -> Res<(u8, u8)> {
+    ) -> Res<(RegNo, RegNo)> {
         self.base_reused = false;
         if self.in_loop() {
             // Best effort (bead domain-pascal-5kgg): the base loaded for the
@@ -28706,7 +28706,7 @@ impl Selector {
     /// ([`Self::index_ea`], [`Self::lea_into`]: the register of a `lea`
     /// from a kept base is not surveyed; [`once_elem_lea`]'s rule is for
     /// a base loaded for the `lea` alone).
-    fn held_other_base(&mut self, sym: &str, imm: &str, index: &Expr) -> Res<u8> {
+    fn held_other_base(&mut self, sym: &str, imm: &str, index: &Expr) -> Res<RegNo> {
         let refuse = |s: &Self, why: &str| {
             unsupported(
                 s.span,
@@ -28856,7 +28856,7 @@ impl Selector {
     /// read through the same pointer, loaded once for both (0xE1B2E0
     /// `movea.l (8,A6),A0; move.w (980,A0),D1; lea (0,A0,D1.w),A1`;
     /// 0xE4DE58), is refused.
-    fn pointer_index(&mut self, p: &Expr, index: &Expr, scale: u32) -> Res<(u8, u8)> {
+    fn pointer_index(&mut self, p: &Expr, index: &Expr, scale: u32) -> Res<(RegNo, RegNo)> {
         if shares_pointer(index, p) {
             best_effort(
                 self.span,
@@ -28880,7 +28880,7 @@ impl Selector {
     /// 0xE1C204 at 0xE1C242, ACL_$IN_SUBSYS 0xE470B2; A0 itself when A1 is live or
     /// dirty, MMAP_ 0xE0D2E8; codegen-patterns 5.2, bead
     /// domain-pascal-1ibr).
-    fn split_element_ea(&mut self, areg: u8, x: u8, index: &Expr, disp: i32) -> Res<Ea> {
+    fn split_element_ea(&mut self, areg: RegNo, x: RegNo, index: &Expr, disp: i32) -> Res<Ea> {
         // The `lea` is the first instruction [`Self::element_ea`] emits
         // (an `adda.l` may follow it).
         let at = self.out.len();
@@ -28917,7 +28917,7 @@ impl Selector {
 
     /// Evaluate a pointer into a new address register, or give the
     /// register a by-value parameter was loaded into at entry.
-    fn eval_a(&mut self, e: &Expr) -> Res<u8> {
+    fn eval_a(&mut self, e: &Expr) -> Res<RegNo> {
         if let Expr::Load {
             addr: Addr::Frame(o),
             ..
@@ -30596,12 +30596,12 @@ mod tests {
     /// 0xE5C864; reads of the copy at 0xE5C8C8 past an `if`).
     #[test]
     fn pointer_copies_are_reused_while_held() {
-        let copy = |a: u8| Insn::Movea {
+        let copy = |a: RegNo| Insn::Movea {
             size: Size::L,
             src: Ea::Reg(Reg::D(0)),
             dst: a,
         };
-        let clr = |size: Size, d: i32, a: u8| Insn::Clr {
+        let clr = |size: Size, d: i32, a: RegNo| Insn::Clr {
             size,
             dst: if d == 0 { Ea::Ind(a) } else { Ea::Disp(d, a) },
         };

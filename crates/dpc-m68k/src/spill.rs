@@ -169,7 +169,7 @@ impl Fresh {
             Reg::D(_) => &mut self.next_d,
             Reg::A(_) => &mut self.next_a,
         };
-        let r = u8::try_from(*n).ok()?;
+        let r = *n;
         *n += 1;
         Some(match like {
             Reg::D(_) => Reg::D(r),
@@ -669,16 +669,17 @@ fn spill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::insn::RegNo;
     use crate::insn::Cond;
     use crate::regs::VBASE;
 
-    fn vd(k: u8) -> Reg {
+    fn vd(k: RegNo) -> Reg {
         Reg::D(VBASE + k)
     }
-    fn va(k: u8) -> Reg {
+    fn va(k: RegNo) -> Reg {
         Reg::A(VBASE + k)
     }
-    fn an(r: Reg) -> u8 {
+    fn an(r: Reg) -> RegNo {
         match r {
             Reg::A(n) => n,
             Reg::D(_) => unreachable!(),
@@ -806,7 +807,7 @@ mod tests {
     #[test]
     fn address_parameters_parked_or_loaded_again() {
         let mut body = Vec::new();
-        for k in 0..4u8 {
+        for k in 0..4 as RegNo {
             body.push(Insn::Movea {
                 size: Size::L,
                 src: Ea::Disp(8 + 4 * k as i32, 6),
@@ -844,7 +845,7 @@ mod tests {
         );
         // All eight data registers taken over its range: loaded again.
         let mut full = vec![body[1].clone()];
-        for k in 0..8u8 {
+        for k in 0..8 as RegNo {
             full.push(Insn::Moveq {
                 value: 0,
                 dst: match vd(k) {
@@ -854,7 +855,7 @@ mod tests {
             });
         }
         full.push(clr_through(va(1)));
-        for k in 0..8u8 {
+        for k in 0..8 as RegNo {
             full.push(Insn::Tst {
                 size: Size::L,
                 dst: Ea::Reg(vd(k)),

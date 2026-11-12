@@ -6,7 +6,7 @@
 //!
 //! **Virtual registers** are spelled with the instruction types' own
 //! register numbers: `Reg::D(n)` / `Reg::A(n)` with `n >= VBASE`, and the
-//! same numbers in the `u8` fields of [`Ea`] and [`Insn`] (`Ea::Ind(n)`,
+//! same numbers in the [`RegNo`] fields of [`Ea`] and [`Insn`] (`Ea::Ind(n)`,
 //! `Insn::Movea { dst: n, .. }`, ...).  Numbers below `VBASE` are physical
 //! registers: A5 (the module data base, codegen-patterns 4), A6 and A7,
 //! which are never allocated, and D0 as the function result register
@@ -66,7 +66,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::insn::{Ea, Insn, Reg, RegSet, Size};
+use crate::insn::{Ea, Insn, Reg, RegNo, RegSet, Size};
 
 /// Data or address register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,13 +76,13 @@ pub enum RegClass {
 }
 
 /// The first virtual register number of each class.
-pub const VBASE: u8 = 16;
+pub const VBASE: RegNo = 16;
 
 /// Allocatable registers in allocation order (R1): D0..D7, A0..A4.  A5 is
 /// the module data base and A6 the frame pointer; they are callee-saved but
 /// not allocatable.
-pub const ALLOC_D: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
-pub const ALLOC_A: [u8; 5] = [0, 1, 2, 3, 4];
+pub const ALLOC_D: [RegNo; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+pub const ALLOC_A: [RegNo; 5] = [0, 1, 2, 3, 4];
 
 /// The data base register (codegen-patterns 4).
 pub const DATA_BASE: Reg = Reg::A(5);
@@ -111,8 +111,8 @@ pub fn is_virtual(r: Reg) -> bool {
 /// Hands out virtual registers, numbered per class in creation order.
 #[derive(Clone, Debug, Default)]
 pub struct VRegs {
-    next_d: u8,
-    next_a: u8,
+    next_d: RegNo,
+    next_a: RegNo,
 }
 
 impl VRegs {
@@ -449,12 +449,12 @@ pub fn access(insn: &Insn) -> Access {
 
 /// Apply `f` to every register `insn` names.
 pub fn rename(insn: &mut Insn, f: &dyn Fn(Reg) -> Reg) {
-    let fa = |n: &mut u8| {
+    let fa = |n: &mut RegNo| {
         if let Reg::A(m) = f(Reg::A(*n)) {
             *n = m;
         }
     };
-    let fd = |n: &mut u8| {
+    let fd = |n: &mut RegNo| {
         if let Reg::D(m) = f(Reg::D(*n)) {
             *n = m;
         }
@@ -757,7 +757,7 @@ pub fn call_results_first(
 pub struct RegKey(pub Reg);
 
 impl RegKey {
-    fn key(self) -> (u8, u8) {
+    fn key(self) -> (u8, RegNo) {
         match self.0 {
             Reg::D(n) => (0, n),
             Reg::A(n) => (1, n),
@@ -1109,28 +1109,28 @@ mod tests {
     use super::*;
     use crate::insn::Cond;
 
-    const FP: u8 = 6;
-    const SP: u8 = 7;
+    const FP: RegNo = 6;
+    const SP: RegNo = 7;
 
-    fn d(n: u8) -> Reg {
+    fn d(n: RegNo) -> Reg {
         Reg::D(n)
     }
-    fn a(n: u8) -> Reg {
+    fn a(n: RegNo) -> Reg {
         Reg::A(n)
     }
-    fn vd(k: u8) -> Reg {
+    fn vd(k: RegNo) -> Reg {
         Reg::D(VBASE + k)
     }
-    fn va(k: u8) -> Reg {
+    fn va(k: RegNo) -> Reg {
         Reg::A(VBASE + k)
     }
-    fn an(r: Reg) -> u8 {
+    fn an(r: Reg) -> RegNo {
         match r {
             Reg::A(n) => n,
             Reg::D(_) => unreachable!(),
         }
     }
-    fn dn(r: Reg) -> u8 {
+    fn dn(r: Reg) -> RegNo {
         match r {
             Reg::D(n) => n,
             Reg::A(_) => unreachable!(),

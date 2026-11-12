@@ -36,12 +36,12 @@
 
 use dpc_syntax::Diagnostic;
 
-use crate::insn::{Ea, Insn, Reg, RegSet, Size};
+use crate::insn::{Ea, Insn, Reg, RegNo, RegSet, Size};
 use crate::M68k;
 
 /// The frame pointer and stack pointer numbers.
-pub const FP: u8 = 6;
-pub const SP: u8 = 7;
+pub const FP: RegNo = 6;
+pub const SP: RegNo = 7;
 
 /// A routine's frame: the `link` displacement and the registers saved
 /// below it.
@@ -246,10 +246,10 @@ mod tests {
         insns.iter().map(|i| i.to_string()).collect()
     }
 
-    fn d(n: u8) -> Reg {
+    fn d(n: crate::insn::RegNo) -> Reg {
         Reg::D(n)
     }
-    fn a(n: u8) -> Reg {
+    fn a(n: crate::insn::RegNo) -> Reg {
         Reg::A(n)
     }
 

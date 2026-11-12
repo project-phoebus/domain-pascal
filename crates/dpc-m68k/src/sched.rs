@@ -53,7 +53,7 @@
 //!
 //! **Policy** (R11, Uncertain): see [`Schedule`].
 
-use crate::insn::{Cond, Ea, Insn, Reg, RegSet, Size};
+use crate::insn::{Cond, Ea, Insn, Reg, RegNo, RegSet, Size};
 
 /// Which scheduling policy to apply.  The default is R11 with a window
 /// of 3 (codegen-patterns 12.4 R11).
@@ -96,7 +96,7 @@ enum Loc {
     Stack,
     /// Through address register `An` (A0-A4), bytes `lo..hi` from it
     /// (`None`: indexed or stepped).
-    Ptr(u8, Option<(i32, i32)>),
+    Ptr(RegNo, Option<(i32, i32)>),
     /// A constant in the code section: never stored to.
     Const,
 }
@@ -116,7 +116,7 @@ fn bytes(size: Size) -> i32 {
     }
 }
 
-const SP: u8 = 7;
+const SP: RegNo = 7;
 
 /// The location `ea` names when it addresses memory with an access of
 /// `size`, or `None` for a register or an immediate.
@@ -251,7 +251,7 @@ impl Fx {
     }
 }
 
-fn is_reg_a(ea: &Ea, n: u8) -> bool {
+fn is_reg_a(ea: &Ea, n: RegNo) -> bool {
     matches!(ea, Ea::Reg(Reg::A(a)) if *a == n)
 }
 
@@ -771,13 +771,13 @@ mod tests {
     const R11: Schedule = Schedule::R11 { window: 0 };
     const R11W3: Schedule = Schedule::R11 { window: 3 };
 
-    fn dr(n: u8) -> Ea {
+    fn dr(n: RegNo) -> Ea {
         Ea::Reg(Reg::D(n))
     }
     fn mv(size: Size, src: Ea, dst: Ea) -> Insn {
         Insn::Move { size, src, dst }
     }
-    fn movea(src: Ea, dst: u8) -> Insn {
+    fn movea(src: Ea, dst: RegNo) -> Insn {
         Insn::Movea {
             size: Size::L,
             src,
@@ -787,10 +787,10 @@ mod tests {
     fn clr(size: Size, dst: Ea) -> Insn {
         Insn::Clr { size, dst }
     }
-    fn alu(op: AluOp, size: Size, src: Ea, dst: u8) -> Insn {
+    fn alu(op: AluOp, size: Size, src: Ea, dst: RegNo) -> Insn {
         Insn::Alu { op, size, src, dst }
     }
-    fn shift(op: ShiftOp, size: Size, n: u8, dst: u8) -> Insn {
+    fn shift(op: ShiftOp, size: Size, n: u8, dst: RegNo) -> Insn {
         Insn::Shift {
             op,
             size,
@@ -1231,7 +1231,7 @@ mod tests {
         }
         /// The address of a memory operand, stepping `-(An)`/`(An)+`.
         fn addr(&mut self, ea: &Ea, size: Size) -> u32 {
-            let step = |a: u8| {
+            let step = |a: RegNo| {
                 if a == 7 && size == Size::B {
                     2
                 } else {
@@ -1487,32 +1487,32 @@ mod tests {
 
     fn random_insn(r: &mut Rng) -> Insn {
         let sizes = [Size::B, Size::W, Size::L];
-        let dn = |r: &mut Rng| r.pick(4) as u8;
-        let an = |r: &mut Rng| r.pick(3) as u8;
+        let dn = |r: &mut Rng| r.pick(4) as RegNo;
+        let an = |r: &mut Rng| r.pick(3) as RegNo;
         let mem = |r: &mut Rng| -> Ea {
             match r.pick(9) {
                 0 => Ea::Disp([-8, -6, -4, -2, 8, 12][r.pick(6)], 6),
                 1 => Ea::Disp([0, 2, 4, 6][r.pick(4)], 5),
-                2 => Ea::Disp([0, 2, 4][r.pick(3)], r.pick(3) as u8),
-                3 => Ea::Ind(r.pick(3) as u8),
-                4 => Ea::PostInc(r.pick(3) as u8),
-                5 => Ea::PreDec(r.pick(3) as u8),
-                6 => Ea::Idx(0, r.pick(3) as u8, r.pick(4) as u8, false),
+                2 => Ea::Disp([0, 2, 4][r.pick(3)], r.pick(3) as RegNo),
+                3 => Ea::Ind(r.pick(3) as RegNo),
+                4 => Ea::PostInc(r.pick(3) as RegNo),
+                5 => Ea::PreDec(r.pick(3) as RegNo),
+                6 => Ea::Idx(0, r.pick(3) as RegNo, r.pick(4) as RegNo, false),
                 7 => Ea::AbsL("X".into(), [0, 2, 4][r.pick(3)]),
                 _ => Ea::Ind(7),
             }
         };
         let src = |r: &mut Rng, size: Size| -> Ea {
             match r.pick(4) {
-                0 => Ea::Reg(Reg::D(r.pick(4) as u8)),
-                1 if size != Size::B => Ea::Reg(Reg::A(r.pick(3) as u8)),
+                0 => Ea::Reg(Reg::D(r.pick(4) as RegNo)),
+                1 if size != Size::B => Ea::Reg(Reg::A(r.pick(3) as RegNo)),
                 1 => Ea::Imm(r.pick(256) as i64),
                 _ => mem(r),
             }
         };
         let dst = |r: &mut Rng| -> Ea {
             match r.pick(4) {
-                0 | 1 => Ea::Reg(Reg::D(r.pick(4) as u8)),
+                0 | 1 => Ea::Reg(Reg::D(r.pick(4) as RegNo)),
                 2 => Ea::PreDec(7),
                 _ => mem(r),
             }

@@ -9,11 +9,17 @@
 
 use std::fmt;
 
+/// A register's number: 0..7 for the machine's registers, from
+/// `crate::regs::VBASE` up for the selector's virtual registers (a `u16`
+/// so that a large routine does not run out of them; bead
+/// domain-pascal-338r, domain-c's gaps 25 and 28).
+pub type RegNo = u16;
+
 /// A register.  `A(6)` is the frame pointer, `A(7)` the stack pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Reg {
-    D(u8),
-    A(u8),
+    D(RegNo),
+    A(RegNo),
 }
 
 impl fmt::Display for Reg {
@@ -91,7 +97,7 @@ impl RegSet {
 
     /// The registers in mask order: D0..D7, then A0..A7.
     pub fn iter(self) -> impl Iterator<Item = Reg> {
-        (0..16u8).filter(move |b| self.0 & (1 << b) != 0).map(|b| {
+        (0..16u16).filter(move |b| self.0 & (1 << b) != 0).map(|b| {
             if b < 8 {
                 Reg::D(b)
             } else {
@@ -117,8 +123,8 @@ impl fmt::Display for RegSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
         for kind in 0..2u8 {
-            let reg = |n: u8| if kind == 0 { Reg::D(n) } else { Reg::A(n) };
-            let mut n = 0u8;
+            let reg = |n: RegNo| if kind == 0 { Reg::D(n) } else { Reg::A(n) };
+            let mut n: RegNo = 0;
             while n < 8 {
                 if !self.contains(reg(n)) {
                     n += 1;
@@ -168,14 +174,14 @@ pub enum Ea {
     /// Data or address register direct.
     Reg(Reg),
     /// `(An)`.
-    Ind(u8),
+    Ind(RegNo),
     /// `(d,An)`, d16.
-    Disp(i32, u8),
+    Disp(i32, RegNo),
     /// `(d,An,Dn.w)` / `(d,An,Dn.l)`: address register indirect with
     /// index and an 8-bit displacement (brief extension word, no scale:
     /// 68010; codegen-patterns 5.2, 13).  Fields: displacement, address
     /// register, index data register, index is a longword.
-    Idx(i32, u8, u8, bool),
+    Idx(i32, RegNo, RegNo, bool),
     /// `(d,An,Dn.w*s)` / `(d,An,Dn.l*s)`: address register indirect with
     /// index, a scale and a displacement of up to 16 bits (MC68020: the
     /// brief extension word's scale bits when `d` fits 8 bits, else the
@@ -186,7 +192,7 @@ pub enum Ea {
     /// PROC1_$GET_TYPE 0x3C4175D4 `move.w (0xc42,A5,D2.w*2),(A0)` (`30b5
     /// 2320 0c42`); TIME_$VT_INT 0x3C418496 `pea (0x12fc,A5,D0.w)` (`4875
     /// 0120 12fc`, scale 1 with a word displacement).
-    Idx2(i32, u8, u8, bool, u8),
+    Idx2(i32, RegNo, RegNo, bool, u8),
     /// `(sym+off).l`: absolute long.
     AbsL(String, i32),
     /// `(n).w`: absolute short, a 16-bit address the CPU sign-extends.
@@ -197,9 +203,9 @@ pub enum Ea {
     /// `move.l #AST_$ZERO_BUFF,-(SP)`, `2f3c 00ff 8c00`).
     ImmSym(String),
     /// `-(An)`.
-    PreDec(u8),
+    PreDec(RegNo),
     /// `(An)+`.
-    PostInc(u8),
+    PostInc(RegNo),
     /// `(c,%pc)`: a constant's cell in the code section, before the
     /// emitter has placed it (`emit.rs`, `Pool::place`); never printed.
     Pool(dpc_ir::PoolConst),
@@ -404,7 +410,7 @@ pub enum Insn {
     /// (`crate::frame::Frame::epilogue`).
     MovemRestoreInd {
         regs: RegSet,
-        base: u8,
+        base: RegNo,
     },
     /// `pea <ea>`.
     Pea(Ea),
@@ -418,24 +424,24 @@ pub enum Insn {
     Movea {
         size: Size,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `lea <src>,%an`.
     Lea {
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `moveq #value,%dn` (-128..=127).
     Moveq {
         value: i8,
-        dst: u8,
+        dst: RegNo,
     },
     /// `dbf %dn,<label>b`: decrement the word in Dn, branch back to the
     /// numbered local label while it is not -1.  With `until`, `db<cc>`:
     /// leave the loop when the condition holds first (`dbne`, the record
     /// compare loop, codegen-patterns 7.1).
     Dbf {
-        reg: u8,
+        reg: RegNo,
         label: u32,
         until: Option<Cond>,
     },
@@ -444,7 +450,7 @@ pub enum Insn {
     /// `jmp` right after it (`emit.rs`, `size_branches`; bead
     /// domain-pascal-pxov).  Formed only after allocation.
     DbfFwd {
-        reg: u8,
+        reg: RegNo,
         label: u32,
         until: Option<Cond>,
     },
@@ -452,8 +458,8 @@ pub enum Insn {
     /// with the source's (`(Ax) - (Ay)`), both registers advanced.
     Cmpm {
         size: Size,
-        src: u8,
-        dst: u8,
+        src: RegNo,
+        dst: RegNo,
     },
     /// A numbered local label (`N:`, gas local label; branches name it
     /// `Nb`).  The emitter writes it at the start of the line.
@@ -493,7 +499,7 @@ pub enum Insn {
     },
     /// `btst %dn,<dst>` (register form: long, bit mod 32).
     Btst {
-        bit: u8,
+        bit: RegNo,
         dst: Ea,
     },
     /// `s<cc> <dst>`.
@@ -529,24 +535,24 @@ pub enum Insn {
     /// `nil` (the 68010 has no `tst An`; codegen-patterns 7.1, 13: 151
     /// sites, `b6fc 0000` at 0xE38EC0 for A3; 0xE3CCE4 `b2fc 0000` for A1,
     /// a `while p <> nil` test).
-    CmpaZero(u8),
+    CmpaZero(RegNo),
     /// `cmpa.l #imm,%an`: a pointer held in an address register against a
     /// pointer constant other than `nil` (`b1fc` + n << 9; codegen-patterns
     /// 13, "Pointer constants": FIM_$BUILD_DF 0xE0A552 `cmpa.l #sym,A3`
     /// is the compiled form with an address; no compiled site with a
     /// literal, bead domain-pascal-gw19).
-    CmpaImm(i64, u8),
+    CmpaImm(i64, RegNo),
     /// `suba.l %an,%an` (`91c8` + n << 9): `nil` into an address
     /// register (codegen-patterns 3, "`nil` results"; 24 sites,
     /// `tools/nilsurvey.py areg`: ROUTE_$FIND_PORTP 0xE15B84 `91c8`,
     /// EC2_$REGISTER_EC1 0xE4299C `95ca`).  It writes An only: the old
     /// value is not read, and the condition codes are left alone.
-    SubaSelf(u8),
+    SubaSelf(RegNo),
     /// `cmp.<size> src,%dn`.
     Cmp {
         size: Size,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `cmpa.l src,%an`: a pointer held in an address register against a
     /// variable (SAU9 PROC1_$SET_VT 0x3C416C7A `cmpa.l
@@ -555,14 +561,14 @@ pub enum Insn {
     /// (not catalogued; bead domain-pascal-jqp0).
     Cmpa {
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `<op>.<size> src,%dn` for add, sub, and, or (register destination).
     Alu {
         op: AluOp,
         size: Size,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `<op>i.<size> #imm,dst` for addi, subi, andi, ori, eori (the
     /// immediate as [`Ea::Imm`] gives it).
@@ -582,27 +588,27 @@ pub enum Insn {
     /// `ext.l` the low word to a longword.
     Ext {
         size: Size,
-        dst: u8,
+        dst: RegNo,
     },
     /// `<op>.<size> #n,%dn` (n = 1..8) or `<op>.<size> %dm,%dn`.
     Shift {
         op: ShiftOp,
         size: Size,
         count: ShiftCount,
-        dst: u8,
+        dst: RegNo,
     },
     /// `mulu.w src,%dn` / `muls.w src,%dn` (16 x 16 -> 32).
     Mul {
         signed: bool,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `divu.w src,%dn` / `divs.w src,%dn` (32 / 16 -> 16 quotient in the
     /// low word, remainder in the high word).
     Div {
         signed: bool,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
     },
     /// `muls.l src,%dn` / `mulu.l src,%dn` (32 x 32 -> 32; MC68020,
     /// codegen-patterns 14): SAU9 BAT_$ALLOCATE `muls.l (-528,A4),D2`,
@@ -618,7 +624,7 @@ pub enum Insn {
     MulL {
         signed: bool,
         src: Ea,
-        dst: u8,
+        dst: RegNo,
         dn460: bool,
     },
     /// `divs.l src,%dq` / `divu.l src,%dq` (32 / 32 -> 32 quotient in Dq,
@@ -637,8 +643,8 @@ pub enum Insn {
     DivL {
         signed: bool,
         src: Ea,
-        rem: Option<u8>,
-        dst: u8,
+        rem: Option<RegNo>,
+        dst: RegNo,
         dn460: bool,
     },
     /// `bfins %dn,dst{#offset:#width}`: the low `width` bits of Dn into
@@ -646,7 +652,7 @@ pub enum Insn {
     /// at `dst` (MC68020, codegen-patterns 14): SAU9 UID_$INIT 0x3C4369A6
     /// `bfins D0,(4,A0){12:20}`, MAC_$OPEN `bfins D1,(1970,A0){7:1}`.
     Bfins {
-        src: u8,
+        src: RegNo,
         dst: Ea,
         offset: u8,
         width: u8,
@@ -657,7 +663,7 @@ pub enum Insn {
         src: Ea,
         offset: u8,
         width: u8,
-        dst: u8,
+        dst: RegNo,
     },
     /// `bftst dst{#offset:#width}`: Z set when the field is 0 (MC68020).
     Bftst {
@@ -672,11 +678,11 @@ pub enum Insn {
     /// (codegen-patterns 5.1, "MC68020").
     BftstReg {
         dst: Ea,
-        offset: u8,
+        offset: RegNo,
         width: u8,
     },
     /// `swap %dn`.
-    Swap(u8),
+    Swap(RegNo),
     /// `btst #bit,dst` (immediate bit number; mod 8 on memory, mod 32 on a
     /// data register).
     BtstImm {
@@ -698,7 +704,7 @@ pub enum Insn {
     /// D2,D1`; MSG_$OPENI 0xE59260 `bset D1,(0,A0,D0.w)`).
     Bit {
         op: BitOp,
-        bit: u8,
+        bit: RegNo,
         dst: Ea,
     },
     /// `<op>.<size> Dn,<dst>`, an operation into memory: a bit field
@@ -707,7 +713,7 @@ pub enum Insn {
     AluToMem {
         op: AluOp,
         size: Size,
-        src: u8,
+        src: RegNo,
         dst: Ea,
     },
     /// `move.w (T,%pc,%dn.w),%dn`: load the word of `case` jump table
@@ -719,7 +725,7 @@ pub enum Insn {
     /// `303b 0206`; every one of the 61 dispatches of the SAU8 and SAU9
     /// images, against the SAU2's 50 `add.w; move.w (T,%pc,%dn.w)`).
     TableIndex {
-        reg: u8,
+        reg: RegNo,
         table: u32,
         scaled: bool,
     },
@@ -728,7 +734,7 @@ pub enum Insn {
     /// of the jump; [`crate::regs::successors`]).  Image: 0xE5C6D2
     /// `4efb 0002`.
     TableJump {
-        reg: u8,
+        reg: RegNo,
         table: u32,
         targets: Vec<u32>,
     },
@@ -750,7 +756,7 @@ pub enum Insn {
     /// `move.w %sr,%dn` (`40c0+n`): `set_sr` reads the old status word
     /// (PROC1_$SET_VT 0xE149B6 `40c3`).
     MoveFromSr {
-        dst: u8,
+        dst: RegNo,
     },
     /// `move.w src,%sr` (`46c0+ea`): `set_sr` installs the new one
     /// (0xE149B8 `46fc 2700`, 0xE149F4 `46c3`).
@@ -912,7 +918,7 @@ pub enum ShiftOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShiftCount {
     Imm(u8),
-    Reg(u8),
+    Reg(RegNo),
 }
 
 /// The DSP160/DN460/DN660 longword multiply or divide ([`Insn::MulL`],
@@ -926,7 +932,7 @@ fn write_dn460(
     div: bool,
     signed: bool,
     src: &Ea,
-    dst: u8,
+    dst: RegNo,
 ) -> fmt::Result {
     let n = u16::from(dst) << 9;
     let (word, imm) = match (signed, src) {
@@ -1345,7 +1351,7 @@ impl Insn {
 mod tests {
     use super::*;
 
-    const FP_FOR_TEST: u8 = 6;
+    const FP_FOR_TEST: RegNo = 6;
 
     /// The MC68020 lengths against the SAU9 image's encodings: `2035
     /// 143c` (brief format with scale), `30b5 2320 0c42` (full format, a
@@ -2206,10 +2212,10 @@ mod cond_tests {
 mod regset_tests {
     use super::*;
 
-    fn d(n: u8) -> Reg {
+    fn d(n: RegNo) -> Reg {
         Reg::D(n)
     }
-    fn a(n: u8) -> Reg {
+    fn a(n: RegNo) -> Reg {
         Reg::A(n)
     }
 

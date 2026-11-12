@@ -1192,7 +1192,7 @@ fn size_branches(
 }
 
 /// The address register of the data base (codegen-patterns 4).
-const DATA_BASE_REG: u8 = 5;
+const DATA_BASE_REG: crate::insn::RegNo = 5;
 
 /// The header cells of the unit's data blocks ([`size_branches`]): per
 /// Pascal data section, the constant cells whose addresses the header

@@ -51,12 +51,12 @@
 
 use std::collections::HashMap;
 
-use crate::insn::{AluOp, Cond, Ea, Insn, Reg, Size};
+use crate::insn::{AluOp, Cond, Ea, Insn, Reg, RegNo, Size};
 use crate::regs::{access, liveness, RegKey};
 
-const FP: u8 = 6;
-const A5: u8 = 5;
-const SP: u8 = 7;
+const FP: RegNo = 6;
+const A5: RegNo = 5;
+const SP: RegNo = 7;
 
 /// What a plain memory operand is rooted at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,7 +64,7 @@ enum Root {
     Frame,
     Unit,
     Abs,
-    Ptr(u8),
+    Ptr(RegNo),
 }
 
 /// A plain memory operand at an exact offset.
@@ -116,7 +116,7 @@ fn mem_write(i: &Insn) -> Option<(&Ea, Size)> {
 }
 
 /// The registers an operand's address uses (`8 + n` for Dn).
-fn addr_regs(ea: &Ea) -> Vec<u8> {
+fn addr_regs(ea: &Ea) -> Vec<RegNo> {
     match ea {
         Ea::Ind(a) | Ea::Disp(_, a) | Ea::PostInc(a) | Ea::PreDec(a) => vec![*a],
         Ea::Idx(_, a, x, _) | Ea::Idx2(_, a, x, _, _) => vec![*a, 8 + *x],
@@ -124,7 +124,7 @@ fn addr_regs(ea: &Ea) -> Vec<u8> {
     }
 }
 
-fn reg_code(r: Reg) -> u8 {
+fn reg_code(r: Reg) -> RegNo {
     match r {
         Reg::A(a) => a,
         Reg::D(d) => 8 + d,
@@ -201,7 +201,7 @@ struct State {
     entries: Vec<Entry>,
     /// The variable each address register was last loaded from with
     /// `movea.l`, while neither changed.
-    base: HashMap<u8, Ea>,
+    base: HashMap<RegNo, Ea>,
 }
 
 impl State {
@@ -426,7 +426,7 @@ pub fn store_cache(
         // Writes of registers.
         let acc = access(&out[k]);
         if !acc.defs.is_empty() {
-            let defs: Vec<u8> = acc.defs.iter().map(|&r| reg_code(r)).collect();
+            let defs: Vec<RegNo> = acc.defs.iter().map(|&r| reg_code(r)).collect();
             st.entries.retain(|e| {
                 !defs.contains(&reg_code(e.reg))
                     && match &e.loc {
