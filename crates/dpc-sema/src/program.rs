@@ -567,6 +567,12 @@ pub enum Builtin {
     /// `discard(exp)` ("Discard", p. 4-62): evaluate `exp`, drop its value.
     /// A procedure.
     Discard,
+    /// `new(p)` ("New", p. 4-117): allocate `p^`, the run time's
+    /// `pas_$new(p, size)`.  A procedure.
+    New,
+    /// `dispose(p)` ("Dispose", p. 4-64): free `p^` and set `p` to nil,
+    /// the run time's `pas_$dispose(p, size)`.  A procedure.
+    Dispose,
     /// `succ(x)` ("Succ", p. 4-191).
     Succ,
     /// `pred(x)` ("Pred", p. 4-147).

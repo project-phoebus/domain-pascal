@@ -19480,6 +19480,20 @@ impl Selector {
                 let v = self.eval(e)?;
                 Self::ea_val(&v)
             }
+            // A parameter: best effort (not byte-identical; bead
+            // domain-pascal-338r, domain-c's gap 15; no kernel site), the
+            // parameter's register or frame slot moved into the result's
+            // register.  Reported, not checked here: the DOMAIN C
+            // compiler's clex_$catstring (cc.m68k 0x055FE4) `movea.l
+            // A2,A0` / `movea.l A3,A0` and a branch to the epilogue.
+            Expr::Load { addr, .. } => {
+                best_effort(
+                    self.span,
+                    "a pointer result in a body of several statements assigned a parameter \
+                     (no kernel site; codegen-patterns 3) is",
+                )?;
+                self.operand(addr)?
+            }
             _ => {
                 return Err(unsupported(
                     self.span,

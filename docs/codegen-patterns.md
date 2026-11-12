@@ -1526,6 +1526,20 @@ v,D0` (best effort; the image forms a boolean, 7.1).
 - All kernel addresses are absolute.  This kernel image has no
   PC-relative inter-module calls.
 
+### 1.7 `new` and `dispose` (best effort; no kernel site)
+
+`new(p)` and `dispose(p)` ("New", p. 4-117; "Dispose", p. 4-64, which
+"sets p to nil") are calls of the Pascal run time's `pas_$new(out p:
+univ_ptr; size: linteger); options(val_param)` and `pas_$dispose(in out
+p: univ_ptr; size: linteger)` (the headings of the SR10.2 ftnlib
+routines, ../source `lib/ftnlib/new_dispose.pas`): `pea (size).w` (the
+size of `p^`), `pea p`, `jsr PAS_$NEW` / `PAS_$DISPOSE`.  The kernel has
+no such call; the DOMAIN C compiler's mu_$enter_name calls PAS_$NEW
+with 0x100E (Pascal Rev 8.89; reported by domain-c, not checked here:
+cc.m68k 0x058FDC).  Best effort (bead domain-pascal-338r); the long
+forms with tag constants are refused.  Exec test `new_dispose` (its
+module supplies the two run-time routines).
+
 ---
 
 ## 2. Frame, prologue and epilogue (Verified)
@@ -2276,7 +2290,13 @@ v,D0` (best effort; the image forms a boolean, 7.1).
   movea.l Dn,A0` (the shape of 0xE4D5A6, a last statement), in a body of
   several statements moved into the variable's register, `movea.l
   Dn,An`; the register is the allocator's, and the image's form for
-  these sites is not surveyed.  Refused: `d0_return`/`c_param` pointer
+  these sites is not surveyed.  A parameter assigned in a body of
+  several statements (`f := q`): **best effort** (bead
+  domain-pascal-338r; no kernel site), the parameter's register or slot
+  moved into the variable's register, as the DOMAIN C compiler's
+  clex_$catstring (Pascal Rev 8.89; reported by domain-c, not checked
+  here: cc.m68k 0x055FE4 `movea.l A2,A0`; exec test
+  `ptr_result_param`).  Refused: `d0_return`/`c_param` pointer
   results, and
   `a0_return` on a non-pointer result (no site in the image's terms;
   `../source` reads TTY_$I_GET_DESC and SIO_$I_GET_DESC so, bead

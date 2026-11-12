@@ -362,6 +362,8 @@ impl<'t> Checker<'t> {
             // Appendix E, Table E-1 (p. E-1); Table 4-7 (p. 4-10).
             ("set_sr", Builtin::SetSr),
             ("discard", Builtin::Discard),
+            ("new", Builtin::New),
+            ("dispose", Builtin::Dispose),
             ("succ", Builtin::Succ),
             ("pred", Builtin::Pred),
             ("max", Builtin::Max),
@@ -3346,6 +3348,46 @@ impl<'t> Checker<'t> {
                         args: vec![x],
                     };
                 }
+                // "New", p. 4-117, and "Dispose", p. 4-64: the short form,
+                // `new(p)` / `dispose(p)`, `p` a pointer variable.  The
+                // long form's tag constants (a variant record's size) are
+                // not supported yet.
+                Some(Sym::Builtin(b @ (Builtin::New | Builtin::Dispose))) => {
+                    if args.len() != 1 {
+                        if args.len() > 1 {
+                            self.error(
+                                e.span,
+                                format!(
+                                    "`{}` with tag constants (ref p. 4-117) is not supported yet",
+                                    id.name
+                                ),
+                            );
+                        } else {
+                            self.error(e.span, format!("`{}` takes a pointer variable", id.name));
+                        }
+                        return StmtKind::Empty;
+                    }
+                    let x = self.expr(&args[0]);
+                    if self.types.is_error(x.ty) {
+                        return StmtKind::Empty;
+                    }
+                    if !matches!(self.types.kind(x.ty), TypeKind::Pointer { .. }) || !x.is_designator()
+                    {
+                        self.error(
+                            args[0].span,
+                            format!("`{}` takes a pointer variable", id.name),
+                        );
+                        return StmtKind::Empty;
+                    }
+                    if self.in_param_part(&x) {
+                        self.error(args[0].span, "Assignment to IN argument");
+                        return StmtKind::Empty;
+                    }
+                    return StmtKind::Builtin {
+                        builtin: b,
+                        args: vec![x],
+                    };
+                }
                 Some(Sym::Routine(r)) => {
                     if self.routines[r.0 as usize].kind == RoutineKind::Function {
                         self.error(
@@ -4910,7 +4952,11 @@ impl<'t> Checker<'t> {
     fn builtin_fn(&mut self, b: Builtin, name: &str, args: &[ast::Expr], span: Span) -> Expr {
         let bi = self.types.builtins;
         let want = match b {
-            Builtin::Disable | Builtin::Enable | Builtin::Discard => {
+            Builtin::Disable
+            | Builtin::Enable
+            | Builtin::Discard
+            | Builtin::New
+            | Builtin::Dispose => {
                 self.error(span, format!("`{name}` is a procedure"));
                 return self.error_expr(span);
             }
@@ -5190,6 +5236,8 @@ impl<'t> Checker<'t> {
             Builtin::Disable
             | Builtin::Enable
             | Builtin::Discard
+            | Builtin::New
+            | Builtin::Dispose
             | Builtin::Sizeof
             | Builtin::Firstof
             | Builtin::Lastof => unreachable!(),

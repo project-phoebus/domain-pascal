@@ -1759,7 +1759,9 @@ end;
 ",
         "every assignment of the result is the last statement of a path",
     );
-    // A parameter and memory, every assignment last: refused, as before.
+    // A parameter and memory, every assignment last: best effort without
+    // `--strict` (bead domain-pascal-338r, domain-c's gap 15; exec test
+    // ptr_result_param), refused with it, as this harness compiles.
     refused(
         "slot_parameter",
         "function f(q: recp; k: integer; var s: status_$t): recp; val_param;
@@ -1769,7 +1771,7 @@ begin
   else f := tab[k];
 end;
 ",
-        "assigned other than a pointer function's result, a variable or `nil`",
+        "a pointer result in a body of several statements assigned a parameter",
     );
 }
 

@@ -4311,6 +4311,57 @@ impl Cx<'_> {
                     builtin: Builtin::Discard,
                     args,
                 } => out.push(self.discard(s, &args[0])?),
+                // "New", p. 4-117; "Dispose", p. 4-64 (it "sets p to nil"):
+                // a call of the Pascal run time's `pas_$new(out p:
+                // univ_ptr; size: linteger); options(val_param)` or
+                // `pas_$dispose(in out p: univ_ptr; size: linteger)`, the
+                // size of `p^` (the headings: ../source
+                // lib/ftnlib/new_dispose.pas, the SR10.2 ftnlib's).  Best
+                // effort (bead domain-pascal-338r, domain-c's gap 3): no
+                // kernel site; the DOMAIN C compiler's mu_$enter_name
+                // calls PAS_$NEW with 0x100E (reported: cc.m68k 0x058FDC).
+                SStmtKind::Builtin {
+                    builtin: b @ (Builtin::New | Builtin::Dispose),
+                    args,
+                } => {
+                    best_effort(
+                        s.span,
+                        "`new` and `dispose` (a call of the run time's PAS_$NEW / PAS_$DISPOSE \
+                         with the size; no kernel site) are",
+                    )?;
+                    let p = self.p;
+                    let TypeKind::Pointer { target } = p.types.kind(args[0].ty) else {
+                        unreachable!("new/dispose of a pointer (dpc-sema)")
+                    };
+                    let size = p.types.size(*target) as i64;
+                    let sym = if *b == Builtin::New {
+                        "PAS_$NEW"
+                    } else {
+                        "PAS_$DISPOSE"
+                    };
+                    out.push(Stmt {
+                        kind: StmtKind::Call(Call {
+                            callee: Callee::External(sym.to_string()),
+                            args: vec![
+                                Arg::Address {
+                                    addr: addr_of(p, &args[0])?,
+                                    slot: 4,
+                                    writable: true,
+                                },
+                                Arg::Value {
+                                    value: Expr::Const {
+                                        value: size,
+                                        ty: Scalar::signed(Width::Long),
+                                    },
+                                    slot: 4,
+                                },
+                            ],
+                            pad: 0,
+                            link: None,
+                        }),
+                        span: s.span,
+                    });
+                }
                 // `L: s` is the label's point, then `s` (ref "Goto",
                 // p. 4-95: control goes "to the statement immediately
                 // following lbl").

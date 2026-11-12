@@ -2174,6 +2174,24 @@ fn builtin_misuse() {
         "module m; var w: integer; procedure p; begin w := discard(w) end;",
         "`discard` is a procedure",
     );
+    // "New", p. 4-117; "Dispose", p. 4-64: the short form only.
+    assert_err(
+        "module m; var w: integer; procedure p; begin new(w) end;",
+        "`new` takes a pointer variable",
+    );
+    assert_err(
+        "module m; type r = record a: integer; end; var q: ^r; procedure p; begin new(q, 1) end;",
+        "`new` with tag constants",
+    );
+    assert_err(
+        "module m; type r = record a: integer; end; rp = ^r; procedure p(in q: rp); begin dispose(q) end;",
+        "Assignment to IN argument",
+    );
+    assert_err(
+        "module m; type r = record a: integer; end; var q: ^r; w: integer;
+         procedure p; begin w := new(q) end;",
+        "`new` is a procedure",
+    );
     assert_err(
         "module m; var w: integer; procedure p; begin set_sr(w) end;",
         "`set_sr` is a function",
