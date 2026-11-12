@@ -1935,11 +1935,20 @@ fn addr_of_nosave_routines() {
         assert!(e.iter().any(|m| m.contains(NS)), "{init}: {e:#?}");
     }
     // A routine parameter (5.4, p. 5-13), the other way to pass a
-    // routine, is refused for every routine.
+    // routine: refused under `--strict`; otherwise best effort, a nosave
+    // routine passed to one still refused (its address).
     assert_err(
         &format!("module m; {decls} procedure caller(procedure callee); extern;"),
-        "a routine parameter (ref 5.4) is not supported yet",
+        "a routine parameter (ref 5.4",
     );
+    let was = dpc_syntax::diag::set_strict(false);
+    let e = errs(&format!(
+        "module m; {decls} procedure caller(procedure callee); extern;
+         procedure t; begin caller(ns) end;"
+    ));
+    dpc_syntax::diag::take_best_effort();
+    dpc_syntax::diag::set_strict(was);
+    assert!(e.iter().any(|m| m.contains(NS)), "{e:#?}");
     // Direct calls and the address of a routine without nosave stay
     // accepted.
     module(&format!(

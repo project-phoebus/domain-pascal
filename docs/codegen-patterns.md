@@ -1520,8 +1520,20 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     element (`get^(...)`), a pointer held in an address register (the
     NET_ sites' A0: not modelled), a pointer reached through a parameter
     slot the arguments also read (TTY_$I_ERR loads the slot once for
-    both; `dpc` would load it twice), pointer results, routine parameters
-    (5.4).  Conformance: `tests/conformance/atbus_ring_interrupt.pas`
+    both; `dpc` would load it twice), pointer results.  **Routine
+    parameters** (5.4, p. 5-13; no kernel site): **best effort** (bead
+    domain-pascal-338r; refused under `--strict`), a routine pointer of
+    the parameter's signature by value in a pointer's slot; the routine
+    passed is its address (`move.l #sym,-(SP)`, as the DOMAIN C
+    compiler's callers of cc_walk_it, reported), a routine parameter
+    passed on its slot's value; called by its name through `jsr (An)`, a
+    parameterless one also without parentheses (5.4's `A;` and `a * a *
+    a`).  A routine matches when every parameter's convention does
+    (5.4 gives a routine parameter's parameters no options; whether a
+    `val_param` routine may be passed to one is an open question).
+    Refused: nested and `internal` routines (their address; the C
+    compiler passes a trampoline built in the parent's frame, not
+    modelled).  Exec test `routine_params`.  Conformance: `tests/conformance/atbus_ring_interrupt.pas`
     (RING_INTERRUPT 0xE0AB0C); golden `tests/golden/calls/routine_pointers`.
 - All kernel addresses are absolute.  This kernel image has no
   PC-relative inter-module calls.
@@ -16155,8 +16167,8 @@ followed; execution test `be_u_kinds`.
   `addr` of a `nosave` routine as not supported yet (bead
   domain-pascal-n18d), whatever it is assigned, passed, converted
   (`univ_ptr`, a type transfer) or used as an initial value: `addr` is
-  the only way to a routine's address, routine parameters (5.4) being
-  refused.  Execution test `nosave` (its stubs clobber D0-D7/A0-A4).
+  the only way to a routine's address (a routine parameter, 5.4, takes
+  it the same way and is refused for a `nosave` routine likewise).  Execution test `nosave` (its stubs clobber D0-D7/A0-A4).
 
 ---
 

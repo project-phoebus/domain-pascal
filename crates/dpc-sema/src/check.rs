@@ -196,6 +196,13 @@ pub(crate) struct Checker<'t> {
     /// The `with` records ([`WithId`]) that are, or are part of, an `in`
     /// parameter ([`Checker::in_param_part`]).
     in_withs: HashSet<u32>,
+    /// Routine parameters (ref 5.4), held as routine pointers: called by
+    /// their name, without `^`.
+    routine_params: HashSet<VarId>,
+    /// The routine pointer types of routine parameters: a routine matches
+    /// one when every parameter's convention does, whatever its options
+    /// ([`Self::routine_matches`]).
+    routine_param_types: HashSet<TypeId>,
     /// The (with, name) pairs already warned about by
     /// [`Checker::with_hiding_warning`]: one warning per with and name.
     with_hiding_warned: HashSet<(u32, String)>,
@@ -262,6 +269,8 @@ impl<'t> Checker<'t> {
             overlay_allocs: Vec::new(),
             next_with: 0,
             in_withs: HashSet::new(),
+            routine_params: HashSet::new(),
+            routine_param_types: HashSet::new(),
             with_hiding_warned: HashSet::new(),
             loop_depth: 0,
             natural: false,
@@ -1756,6 +1765,37 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// A routine parameter (ref 5.4, p. 5-14): a routine pointer of the
+    /// parameter's signature, passed by value in a pointer's slot, the
+    /// routine's address.  Best effort (not byte-identical; bead
+    /// domain-pascal-338r, domain-c's gap 21; no kernel site).  Reported,
+    /// not checked here: the DOMAIN C compiler passes a top-level routine
+    /// with `move.l #routine,-(SP)` (c_syntax's cc_walk_it) and a nested
+    /// one with `pea` of a trampoline in its parent's frame
+    /// (debug_sym_dmp), which dpc refuses (the address of a nested routine).
+    fn routine_param(&mut self, sig: &ast::RoutineSig, span: Span) -> (TypeId, conv::ParamConv) {
+        if let Err(d) = dpc_syntax::diag::best_effort(Diagnostic::error(
+            span,
+            "a routine parameter (ref 5.4; a routine pointer by value, no site) is not supported \
+             yet",
+        )) {
+            self.errors.push(d);
+        }
+        let s = self.signature(sig);
+        let t = self.new_type(TypeKind::RoutinePointer(Box::new(s)));
+        self.routine_param_types.insert(t);
+        let c = conv::param_conv(
+            ParamMode::Value,
+            false,
+            t,
+            true,
+            false,
+            &self.types,
+            self.target,
+        );
+        (t, c)
+    }
+
     fn signature(&mut self, sig: &ast::RoutineSig) -> Signature {
         let options = self.signature_options(sig);
         let mut params = Vec::new();
@@ -1791,8 +1831,15 @@ impl<'t> Checker<'t> {
                         });
                     }
                 }
-                ast::Param::Routine { span, .. } => {
-                    self.unsupported(*span, "a routine parameter (ref 5.4)");
+                ast::Param::Routine { sig: rs, span } => {
+                    let (t, conv) = self.routine_param(rs, *span);
+                    arg_bytes = arg_bytes.saturating_add(conv.slot_size);
+                    params.push(SigParam {
+                        mode: ParamMode::Value,
+                        univ: false,
+                        ty: t,
+                        conv,
+                    });
                 }
             }
         }
@@ -2860,8 +2907,35 @@ impl<'t> Checker<'t> {
                         offset = offset.saturating_add(c.slot_size.min(MAX_OBJECT_SIZE) as i32);
                     }
                 }
-                ast::Param::Routine { span, .. } => {
-                    self.unsupported(*span, "a routine parameter (ref 5.4)");
+                ast::Param::Routine { sig: rs, span } => {
+                    let (t, c) = self.routine_param(rs, *span);
+                    let Some(n) = rs.name.clone() else {
+                        self.error(*span, "a routine parameter needs a name (ref 5.4)");
+                        continue;
+                    };
+                    let var = self.add_var(Var {
+                        name: n.name.clone(),
+                        ty: t,
+                        storage: Storage::Param {
+                            index: params.len(),
+                        },
+                        owner: Some(id),
+                        init: None,
+                        span: n.span,
+                    });
+                    self.routine_params.insert(var);
+                    params.push(Param {
+                        name: n.name.clone(),
+                        var,
+                        mode: ParamMode::Value,
+                        univ: false,
+                        ty: t,
+                        conv: c,
+                        slot_offset: offset,
+                        value_offset: offset,
+                        copy_offset: None,
+                    });
+                    offset = offset.saturating_add(c.slot_size as i32);
                 }
             }
         }
@@ -3403,6 +3477,20 @@ impl<'t> Checker<'t> {
                     );
                     return StmtKind::Call(call);
                 }
+                // A routine parameter called by its name (ref 5.4): a call
+                // through the routine pointer it holds.
+                Some(Sym::Var(v)) if self.routine_params.contains(&v) => {
+                    let p = self.var_ref(v, callee.span);
+                    if let TypeKind::RoutinePointer(sig) = self.types.kind(p.ty).clone() {
+                        if sig.result.is_some() {
+                            self.error(callee.span, "function parameter called as a procedure");
+                        }
+                        let params = self.sig_params(&sig);
+                        let call =
+                            self.call_args(Callee::Pointer(Box::new(p)), params, args, e.span);
+                        return StmtKind::Call(call);
+                    }
+                }
                 Some(Sym::Builtin(_)) => {
                     self.error(callee.span, format!("`{}` is a function", id.name));
                     return StmtKind::Empty;
@@ -3745,6 +3833,28 @@ impl<'t> Checker<'t> {
         };
         match sym {
             Sym::Const { value, ty } => self.konst(value, ty, span),
+            // A function parameter without parameters, named in an
+            // expression: a call of it (ref 5.4's example, `cube := a * a
+            // * a`).
+            Sym::Var(v) if self.routine_params.contains(&v) => {
+                let p = self.var_ref(v, span);
+                match self.types.kind(p.ty).clone() {
+                    TypeKind::RoutinePointer(sig) if sig.params.is_empty() => {
+                        let Some(res) = sig.result else {
+                            self.error(span, "procedure parameter used as a value");
+                            return self.error_expr(span);
+                        };
+                        let call = self.call_args(Callee::Pointer(Box::new(p)), Vec::new(), &[], span);
+                        Expr {
+                            kind: ExprKind::Call(call),
+                            ty: res,
+                            value: None,
+                            span,
+                        }
+                    }
+                    _ => p,
+                }
+            }
             Sym::Var(v) => self.var_ref(v, span),
             Sym::WithField {
                 with,
@@ -4441,6 +4551,24 @@ impl<'t> Checker<'t> {
                 }
                 Some(Sym::Type(t)) => return self.transfer(t, args, span),
                 Some(Sym::Builtin(b)) => return self.builtin_fn(b, &id.name, args, span),
+                // A function parameter called by its name (ref 5.4).
+                Some(Sym::Var(v)) if self.routine_params.contains(&v) => {
+                    let p = self.var_ref(v, callee.span);
+                    if let TypeKind::RoutinePointer(sig) = self.types.kind(p.ty).clone() {
+                        let Some(res) = sig.result else {
+                            self.error(span, "procedure parameter used as a value");
+                            return self.error_expr(span);
+                        };
+                        let params = self.sig_params(&sig);
+                        let call = self.call_args(Callee::Pointer(Box::new(p)), params, args, span);
+                        return Expr {
+                            kind: ExprKind::Call(call),
+                            ty: res,
+                            value: None,
+                            span,
+                        };
+                    }
+                }
                 None => {
                     self.error(callee.span, format!("undefined identifier `{}`", id.name));
                     return self.error_expr(span);
@@ -4550,7 +4678,11 @@ impl<'t> Checker<'t> {
     /// parameter types must be name compatible, `pinteger` is not
     /// `integer`; Appendix B messages 180 and 182: the parameter-passing
     /// conventions and `val_param` must agree).
-    fn routine_matches(&self, r: RoutineId, sig: &Signature) -> bool {
+    /// `lax`: a routine parameter's type (ref 5.4, which gives its
+    /// parameters no options): the options need not match where every
+    /// parameter's convention does (the conventions decide the code; open
+    /// question for the owner, bead domain-pascal-338r).
+    fn routine_matches(&self, r: RoutineId, sig: &Signature, lax: bool) -> bool {
         let rt = &self.routines[r.0 as usize];
         rt.params.len() == sig.params.len()
             && rt.params.iter().zip(&sig.params).all(|(a, b)| {
@@ -4565,7 +4697,7 @@ impl<'t> Checker<'t> {
                     && a.conv == b.conv
             })
             && rt.result.as_ref().map(|x| x.ty) == sig.result
-            && rt.options.small_by_value() == sig.options.small_by_value()
+            && (lax || rt.options.small_by_value() == sig.options.small_by_value())
     }
 
     fn call_expr_routine(&mut self, r: RoutineId, args: &[ast::Expr], span: Span) -> Expr {
@@ -4617,7 +4749,24 @@ impl<'t> Checker<'t> {
         }
         let mut out = Vec::new();
         for (i, (a, (mode, univ, ty, c))) in args.iter().zip(params).enumerate() {
-            let x = self.expr(a);
+            // A routine passed to a routine parameter (ref 5.4): its
+            // address, checked against the parameter's signature
+            // ([`Self::check_assignable`]).
+            let routine_arg = match (&a.kind, self.types.kind(ty)) {
+                (ast::ExprKind::Name(id), TypeKind::RoutinePointer(_)) => match self.lookup(&id.name)
+                {
+                    Some(Sym::Routine(r)) => Some(Ok(*r)),
+                    // A routine parameter passed on: the pointer it holds.
+                    Some(Sym::Var(v)) if self.routine_params.contains(v) => Some(Err(*v)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let x = match routine_arg {
+                Some(Ok(r)) => self.routine_addr(r, a.span),
+                Some(Err(v)) => self.var_ref(v, a.span),
+                None => self.expr(a),
+            };
             if univ {
                 self.univ_conversion_warning(&callee, i, &x, ty, a.span);
             }
@@ -5542,7 +5691,7 @@ impl<'t> Checker<'t> {
         {
             // ref p. 4-146: the extra check of a routine's address against
             // a routine pointer type.
-            if !self.routine_matches(*r, sig) {
+            if !self.routine_matches(*r, sig, self.routine_param_types.contains(&dst)) {
                 self.error(
                     span,
                     format!(
