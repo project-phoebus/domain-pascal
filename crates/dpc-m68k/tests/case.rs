@@ -311,7 +311,8 @@ end;",
 
 /// The choice (codegen-patterns 7.3): up to 3 labels a chain
 /// however dense; from 4, a table when `7r <= 19n` (r/n <= 2.71), a chain
-/// when `5r >= 17n` (r/n >= 3.4), refused between.
+/// when `5r >= 17n` (r/n >= 3.4), refused between under `--strict`, a
+/// table otherwise (best effort; bead domain-pascal-338r).
 #[test]
 fn table_or_chain() {
     let is_table = |labels: &str| {
@@ -344,6 +345,19 @@ fn table_or_chain() {
         e.contains("a `case` of 4 labels over a range of 12 (between the sparsest jump table"),
         "{e}"
     );
+    // Without `--strict`, the band between is a table (the DOMAIN C
+    // compiler's, reported: 12 labels over 35, 4 over 13, 46 over 136).
+    let was = dpc_syntax::diag::set_strict(false);
+    assert!(is_table("89, 90, 91"));
+    assert!(proc_body(&case_of("1, 2, 3, 4, 5, 6: x := 1; 20"))
+        .iter()
+        .any(|l| l.starts_with("jmp")));
+    let w = dpc_syntax::diag::take_best_effort();
+    assert!(
+        w.iter().any(|d| d.message.contains("4 labels over a range of 12")),
+        "{w:?}"
+    );
+    dpc_syntax::diag::set_strict(was);
 }
 
 /// codegen-patterns 1.1: a call at the end of an arm, whose `bra` goes to

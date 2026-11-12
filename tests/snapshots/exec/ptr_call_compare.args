@@ -1,0 +1,1 @@
+tests/exec/ptr_call_compare.pas -I tests/exec

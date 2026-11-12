@@ -12003,8 +12003,10 @@ impl Selector {
     ///   MST_$PRIV_SET_TOUCH_AHEAD_CNT 0xE44534 (`addq.w #4`).
     ///
     /// Between the two (2.71 < r/n < 3.4 with `n >= 4`; chains are seen
-    /// down to 3.4, SAU7 WIN7_$ERROR_QUE 0x3C41C30C) nothing decides;
-    /// refused.  The one exception, the 41-label chain of
+    /// down to 3.4, SAU7 WIN7_$ERROR_QUE 0x3C41C30C) nothing in the
+    /// kernels decides; a table, best effort (the DOMAIN C compiler's
+    /// tables, reported by domain-c: 12 labels over 35, 4 over 13, 46
+    /// over 136).  The one exception, the 41-label chain of
     /// ASKNODE_$INTERNET_INFO 0xE6463E (r/n 2.20, where a table is
     /// predicted), is not explained (`tools/casesurvey.py`).  The arms follow in source order; each but the last ends
     /// with a `bra` to the join, the last falls through to it when there is
@@ -12072,13 +12074,19 @@ impl Selector {
             // 0..24 (codegen-patterns 7.3).
             false
         } else {
-            return Err(unsupported(
+            // Between the two: a table, best effort (bead domain-pascal-338r,
+            // domain-c's gap 2).  Reported, not checked here: the DOMAIN C
+            // compiler (Pascal Rev 8.89) dispatches 12 labels over 35
+            // (cc.m68k 0x0498B0), 4 over 13 and 46 over 136 with tables.
+            best_effort(
                 span,
                 format!(
                     "a `case` of {n} labels over a range of {range} (between the sparsest jump \
-                     table and the densest compare chain seen, codegen-patterns 7.3) is"
+                     table and the densest compare chain seen, codegen-patterns 7.3), as a \
+                     table, is"
                 ),
-            ));
+            )?;
+            true
         };
         // Arms ending in calls of the same argument bytes share the pop
         // at the join (codegen-patterns 1.1): the emitter's cross-jumping
@@ -13174,6 +13182,39 @@ impl Selector {
         let ty = lhs.ty();
         let size = size_of(ty.width);
         let signed = ty.sign == Sign::Signed;
+        if matches!(op, Rel::Eq | Rel::Ne) && !matches!(rhs, Expr::Const { .. }) {
+            // A pointer function's result `=`/`<>` another pointer value
+            // on its right: best effort (not byte-identical; bead domain-pascal-338r,
+            // domain-c's gap 12; no kernel site), the call, then `cmpa.l
+            // <other>,A0`, the other operand evaluated after the call.
+            // Reported, not checked here: the DOMAIN C compiler's
+            // append_root_rec_to_bucket (cc.m68k 0x06CF9C) `bsr.w
+            // get_bucket; cmpa.l A3,A0; bne`, ppio_$get_line (0x0562AE)
+            // `cmpa.l (10972,A5),A0`.
+            // Only the call on the left: on the right, the variable is
+            // loaded before the call as for other operands (the existing
+            // path below, exec test elem_held_test).
+            let pair = match a0_call(lhs) {
+                Some(c) if !expr_has_call(rhs) => Some((c, rhs)),
+                _ => None,
+            };
+            if let Some((c, other)) = pair {
+                best_effort(
+                    self.span,
+                    "comparing a pointer function's result with a variable or another computed \
+                     pointer (no site, codegen-patterns 3) is",
+                )?;
+                let a = self.call_a0(c)?;
+                let src = match self.eval(other)? {
+                    Val::Mem(ea) => ea,
+                    Val::Reg(r) => Ea::Reg(r),
+                    Val::Tmp(r) => Ea::Reg(Reg::D(r)),
+                    Val::Imm(n) => Ea::Imm(n),
+                };
+                self.out.push(Insn::Cmpa { src, dst: a });
+                return Ok(if op == Rel::Eq { Cond::Eq } else { Cond::Ne });
+            }
+        }
         if let Some(c) = a0_call(lhs) {
             // A pointer function's result against `nil`: `cmpa.w #0,A0`
             // after the call and its pop (codegen-patterns 3, "Callers of
@@ -23675,10 +23716,38 @@ impl Selector {
              plain `and`/`or` other than with a constant or with a variable held in a register \
              or read through a held address (codegen-patterns 7.1) is";
         let IrCond::Compare { op, lhs, rhs } = c else {
+            match c {
+                // `not f(x)`: the test inverted.
+                IrCond::Not(x) => return self.call_compare_test(x, !when, l),
+                // A boolean function's result itself: best effort (not
+                // byte-identical; bead domain-pascal-338r, domain-c's gap
+                // 24; no kernel site), the call, `tst.b` of its D0, the
+                // branch on the sign (true is 0xFF, ref 3.5.3).  Reported,
+                // not checked here: the DOMAIN C compiler's get_alias_desc
+                // (cc.m68k 0x0740CA) `bsr.w is_display_ptr; tst.b D0; bpl`.
+                IrCond::Test(e) if d0_call(e) => {
+                    best_effort(
+                        self.span,
+                        "a boolean function's result as the right operand of a plain \
+                         `and`/`or` (no site, codegen-patterns 7.1) is",
+                    )?;
+                    let d = match self.eval(e)? {
+                        Val::Reg(Reg::D(r)) | Val::Tmp(r) => r,
+                        v => self.in_tmp(v, Width::Byte)?,
+                    };
+                    self.out.push(Insn::Tst {
+                        size: Size::B,
+                        dst: Ea::Reg(Reg::D(d)),
+                    });
+                    self.jump(if when { Cond::Mi } else { Cond::Pl }, l);
+                    return Ok(());
+                }
+                _ => {}
+            }
             return Err(unsupported(
                 self.span,
                 "a right operand of a plain `and`/`or` with a call other than a comparison of \
-                 the function's result is",
+                 the function's result or the boolean result itself is",
             ));
         };
         let (op, call, other) = if d0_call(lhs) {
@@ -25916,11 +25985,7 @@ impl Selector {
                         && matches!(**value, Expr::Load { ty: Scalar { width: Width::Byte, .. }, .. })
             );
             if !byte {
-                return Err(unsupported(
-                    self.span,
-                    "`in` on a constant set of more than a longword with an element of more than \
-                     a byte (the guarded test's `ble` reads N: no site, codegen-patterns 5.1) is",
-                ));
+                return self.wide_const_set_member(elem, set, top);
             }
         }
         let (k, c) = self.large_set_elem(elem, top)?;
@@ -25973,6 +26038,61 @@ impl Selector {
             bit: k,
             dst: Ea::Idx(0, a, c, false),
         });
+        Ok(c)
+    }
+
+    /// [`Self::set_member_at`] on a constant set with a word element:
+    /// best effort (not byte-identical; no site, codegen-patterns 5.1;
+    /// bead domain-pascal-338r, domain-c's gap 8).  The byte element's
+    /// guarded test reads `bgt` after the borrow, which is right only
+    /// while `top - k` cannot wrap to a positive word; a word element
+    /// (an `integer` below 0, a `0..65535` above 32767) can.  So the
+    /// element is zero-extended to a longword and the constant made one
+    /// (`ext.l`: bits-1 is at most 1023), and the subtraction is a
+    /// longword: an element above the set's bits then leaves a negative
+    /// longword, N set and V clear, and [`Self::set_member_cc`]'s `bgt`
+    /// reads false; within the bits, `lsr.w` clears N and V and the
+    /// `btst` sets Z.
+    fn wide_const_set_member(&mut self, elem: &Expr, set: &Addr, top: i64) -> Res<u8> {
+        best_effort(
+            self.span,
+            "`in` on a constant set of more than a longword with an element of more than a \
+             byte (no site, codegen-patterns 5.1) is",
+        )?;
+        let (k, c) = self.large_set_elem(elem, top)?;
+        let z = self.alloc_d()?;
+        self.out.push(Insn::Moveq { value: 0, dst: z });
+        self.out.push(Insn::Move {
+            size: Size::W,
+            src: Ea::Reg(Reg::D(k)),
+            dst: Ea::Reg(Reg::D(z)),
+        });
+        self.out.push(Insn::Ext {
+            size: Size::L,
+            dst: c,
+        });
+        self.out.push(Insn::Alu {
+            op: AluOp::Sub,
+            size: Size::L,
+            src: Ea::Reg(Reg::D(z)),
+            dst: c,
+        });
+        let skip = self.new_label();
+        self.jump(Cond::Cs, skip);
+        self.out.push(Insn::Shift {
+            op: ShiftOp::Lsr,
+            size: Size::W,
+            count: ShiftCount::Imm(3),
+            dst: c,
+        });
+        let src = self.large_set_ea(set)?;
+        let a = self.alloc_a()?;
+        self.out.push(Insn::Lea { src, dst: a });
+        self.out.push(Insn::Btst {
+            bit: z,
+            dst: Ea::Idx(0, a, c, false),
+        });
+        self.place(skip);
         Ok(c)
     }
 

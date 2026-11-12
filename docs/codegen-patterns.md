@@ -2498,8 +2498,15 @@ v,D0` (best effort; the image forms a boolean, 7.1).
   form above.  A store whose destination needs a register of its own is
   refused as for any call value (whether the original loads it before
   or after the call is not catalogued; MAC_$OPEN's A2 is held from
-  before).  Other uses (an argument, an operand of an expression,
-  a comparison other than with `nil`) are refused (`dpc-m68k`
+  before).  A comparison `=`/`<>` with a variable or another computed
+  pointer on the call's right is **best effort** (bead
+  domain-pascal-338r; no kernel site): the call, then `cmpa.l
+  <other>,A0`, the other operand evaluated after the call, as the
+  DOMAIN C compiler's append_root_rec_to_bucket (Pascal Rev 8.89;
+  reported by domain-c, not checked here: cc.m68k 0x06CF9C `bsr.w
+  get_bucket; cmpa.l A3,A0; bne`; exec test `ptr_call_compare`).
+  Other uses (an argument, an operand of an expression, an ordering
+  comparison) are refused (`dpc-m68k`
   `Selector::eval`; driver test `value_of_a_pointer_function_is_read_from_a0`).
   A0 is consumed in the statement; a value that must live across a later
   call is copied to a callee-saved register by the allocator (12.4 R3,
@@ -4223,9 +4230,15 @@ model run against the bit model of Figure 3-6).
   `dpc` reproduces it for a one-byte element (chars, the sites) of a
   constant set of more than a longword, the cell sized by the
   constructor's high end (ref 3.9.3), `bgt`/`ble` (or `sgt` as a value,
-  best effort) on the flags; a wider element stays refused, since the
-  `ble` reads N, the borrow only while the subtraction cannot overflow
-  (bead domain-pascal-g6l7).  An `integer` element of a set
+  best effort) on the flags.  A wider element (a word: no site) is
+  best effort (not byte-identical; bead domain-pascal-338r): the word
+  guard's `ble` reads N, the borrow only while the subtraction cannot
+  overflow, and an `integer` below 0 or a `0..65535` above 32767 would
+  wrap to a positive word and test as a member, so `dpc` zero-extends
+  the element to a longword (`moveq #0,Dz; move.w Dk,Dz`), widens the
+  constant with `ext.l` and subtracts longwords; an element above the
+  set's bits leaves a negative longword and `bgt` reads false (exec test
+  `in_wide_const_set`; bead domain-pascal-g6l7).  An `integer` element of a set
   *variable* is tested unguarded (MSG_$FORK 0xE73F2E..0xE73F40 `movea.l
   D4,A2; moveq #63,D1; move.w (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea
   (0x1d8,A0),A3; btst D5,(0,A3,D1.w)`, its `in parent_asid: integer`;
@@ -9316,7 +9329,13 @@ split as `tools/loopalign.py` does; ad-hoc scripts, not kept).
   included (no site branches on such a compare; the two that stand
   alone form the boolean, but in a `repeat` with the negated relation,
   and which relation an `if`/`while`/`until` forms is not settled;
-  bead domain-pascal-l78t).  Before this, dpc compiled `if f() < v`
+  bead domain-pascal-l78t).  A boolean function's result itself as the
+  right operand (`or f(y)`, `and not f(y)`): **best effort** (bead
+  domain-pascal-338r; no kernel site), the call, `tst.b D0`,
+  `bmi`/`bpl`, as the DOMAIN C compiler's get_alias_desc (Pascal Rev
+  8.89; reported by domain-c, not checked here: cc.m68k 0x0740CA
+  `bsr.w is_display_ptr; tst.b D0; bpl`); exec test
+  `and_or_bool_call`.  Before this, dpc compiled `if f() < v`
   with the variable loaded before the call and `cmp.w Dn,D0; b<cc>`,
   a form no site has.  Golden
   `control/and_or_call`; exec test `and_or_call`; driver test
@@ -9686,10 +9705,15 @@ does not have (7.1): not seen.
 `TableJump`, `TableEntry` in `insn.rs`, the table's targets as the
 dispatch's successors in `regs.rs`, entry reach checked in `emit.rs`
 `size_branches`): a table when n >= 4 and 7r <= 19n (r/n <= 2.71), a
-chain when n <= 3 or 3r >= 13n (r/n >= 4.33); the forms, bounds, label-0
-tests, arm order, fall-through and `otherwise` placement above; `char`
-selectors widened.  Refused ("not supported yet"): r/n between 2.71 and
-4.33 with n >= 4; one label; a chain whose last label's arm comes first;
+chain when n <= 3 or 5r >= 17n (r/n >= 3.4, SAU7 WIN7_$ERROR_QUE
+0x3C41C30C); the forms, bounds, label-0 tests, arm order, fall-through
+and `otherwise` placement above; `char` selectors widened.  Between
+the two (r/n between 2.71 and 3.4 with n >= 4) a table, **best effort**
+(bead domain-pascal-338r; refused under `--strict`): the kernels do not
+decide, and the DOMAIN C compiler (Pascal Rev 8.89; reported by
+domain-c, not checked here) uses tables for 12 labels over 35 (cc.m68k
+0x0498B0), 4 over 13 and 46 over 136 (exec test `case_band`).  Refused
+("not supported yet"): one label; a chain whose last label's arm comes first;
 a chain whose arms are all empty (its `bra` would go to the `otherwise`
 part right after it);
 label 0 tested first on a computed selector (other than a `char`
