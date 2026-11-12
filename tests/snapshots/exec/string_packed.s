@@ -1,0 +1,77 @@
+.text
+.globl STRING_PACKED_$RUN
+STRING_PACKED_$RUN:
+link.w %fp,#0
+pea (%a5)
+lea (.Ldata).l,%a5
+lea (.Lc0,%pc),%a0
+lea (%a5),%a1
+move.l (%a0)+,(%a1)+
+move.l (%a0)+,(%a1)+
+move.b (%a0)+,(%a1)+
+subq.l #2,%sp
+clr.w %d0
+move.b (%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (8,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+lea (.Lc1,%pc),%a0
+lea (0xa,%a5),%a1
+move.l (%a0)+,(%a1)+
+move.l (%a0)+,(%a1)+
+subq.l #2,%sp
+clr.w %d0
+move.b (0xa,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x11,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.l #0x4a425020,(0x12,%a5)
+subq.l #2,%sp
+clr.w %d0
+move.b (0x12,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x15,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.w #0x6f20,(0x16,%a5)
+subq.l #2,%sp
+clr.w %d0
+move.b (0x16,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (0x17,%a5),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+movea.l (-4,%fp),%a5
+unlk %fp
+rts
+.Lc0:
+.short 0x6578,0x7465,0x726e,0x6465,0x6600
+.balignw 4,0x2048
+.Lc1:
+.short 0x6162,0x6320,0x2020,0x2020
+.balignw 4,0x2048
+.section ".bss.moddata.STRING_PACKED","aw",@nobits
+.balign 4
+.Ldata:
+.space 24

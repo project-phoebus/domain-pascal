@@ -2633,7 +2633,10 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
         // A 4-byte record: in D0 as a longword (codegen-patterns 3,
         // "Record results"); the result variable stays in its frame slot
         // ([`record_result_assignment`]).
-        ResultReg::Record => ResultClass::Data,
+        ResultReg::Record => {
+            array_result(p, res.ty, r.span)?;
+            ResultClass::Data
+        }
         // Through a hidden address, no register (`lower_routine_in_context`
         // gives such a function no [`ResultSpec`]).
         ResultReg::Hidden => unreachable!("a hidden-address result has no result register"),
@@ -7404,7 +7407,10 @@ fn byte_array_copy(p: &Program, target: &SExpr, value: &SExpr) -> bool {
 /// 1 byte is its `char`'s `move.b`.
 fn string_to_chars(p: &Program, target: &SExpr, value: &SExpr) -> bool {
     matches!(value.value, Some(ConstValue::Str(_) | ConstValue::Char(_)))
-        && byte_copy(p, target.ty) == ByteCopy::Chars
+        && matches!(
+            byte_copy(p, target.ty),
+            ByteCopy::Chars | ByteCopy::Unsettled("a packed array of char")
+        )
         && p.types.size(target.ty) > 1
 }
 
@@ -7467,6 +7473,62 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
                     }),
                     bytes: n,
                     chars: false,
+                },
+                span: s.span,
+            });
+        }
+    }
+    if let (Some(text), ByteCopy::Unsettled("a packed array of char")) =
+        (&text, byte_copy(p, target.ty))
+    {
+        // A string constant assigned to a packed array of char: blank-
+        // padded to its size (ref p. 4-204), copied by longwords from a
+        // cell, a word or longword stored as a constant.  Best effort (not
+        // byte-identical; bead domain-pascal-338r, domain-c's gap 34; no
+        // kernel site).  Reported, not checked here: the DOMAIN C
+        // compiler's dmp.pas copies 9 characters `move.l (A1)+; move.w
+        // (A1)+; move.b (A1)+` and stores 'JBP ' as `move.l
+        // #0x4A425020,(-36,A6)`.
+        if text.len() as u32 <= bytes
+            && volatile_access(p, target).is_none()
+            && !p.types.has_volatile_part(target.ty)
+        {
+            best_effort(
+                s.span,
+                "a string constant assigned to a packed array of char (blank-padded, copied by \
+                 longwords; no kernel site) is",
+            )?;
+            let mut cell = text.clone();
+            cell.resize(bytes as usize, b' ');
+            if matches!(bytes, 2 | 4) {
+                let value = cell.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let width = if bytes == 4 { Width::Long } else { Width::Word };
+                return Ok(Stmt {
+                    kind: StmtKind::Store {
+                        addr: addr_of(p, target)?,
+                        value: Expr::Const {
+                            value,
+                            ty: Scalar::unsigned(width),
+                        },
+                    },
+                    span: s.span,
+                });
+            }
+            if cell.len() % 2 == 1 {
+                cell.push(0);
+            }
+            return Ok(Stmt {
+                kind: StmtKind::Copy {
+                    dst: addr_of(p, target)?,
+                    src: Addr::Const(PoolConst {
+                        bytes: cell,
+                        key: target.ty.0,
+                        symbol: None,
+                    }),
+                    bytes,
+                    // The copy of an array of char (longwords, then the
+                    // tail); the cell is already padded to the size.
+                    chars: true,
                 },
                 span: s.span,
             });
@@ -7665,20 +7727,6 @@ fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
     }
 }
 
-/// The code-section cell of constant `v` passed by address as type `ty`
-/// (codegen-patterns 1.5): the value big-endian in the type's size, a
-/// byte in the high byte of a word (`ff00` for `true`: 17 sites name an
-/// earlier `ff00` cell, e.g. PROC2_$COMPLETE_VFORK's 0xE735F0; ref 3.5.3
-/// p. 3-11).  Scalars of 1, 2 or 4 bytes, and a string constant as its
-/// own type (only for a `univ` parameter, [`univ_const_type`]): its
-/// characters, an odd count followed by one zero byte (codegen-patterns
-/// 1.5, "To a `univ` parameter": 43 of the 101 string cells
-/// `tools/pcsurvey.py` finds end in a single `00`, the other 58 in a
-/// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`); a
-/// string constant as an unpacked array of char, padded with blanks to
-/// its size (below).  Sets other than of a word or a longword, records,
-/// strings as another type are not supported yet.  `nil` is a longword 0
-/// cell keyed as an integer32 0 (below).
 /// A varying string's value of `text` (ref pp. 4-204..4-205): the length
 /// word, the characters, and a trailing null when the body has room for
 /// it, rounded up to an even size.
@@ -7695,6 +7743,20 @@ fn varying_image(text: &[u8], max: u32) -> Vec<u8> {
     cell
 }
 
+/// The code-section cell of constant `v` passed by address as type `ty`
+/// (codegen-patterns 1.5): the value big-endian in the type's size, a
+/// byte in the high byte of a word (`ff00` for `true`: 17 sites name an
+/// earlier `ff00` cell, e.g. PROC2_$COMPLETE_VFORK's 0xE735F0; ref 3.5.3
+/// p. 3-11).  Scalars of 1, 2 or 4 bytes, and a string constant as its
+/// own type (only for a `univ` parameter, [`univ_const_type`]): its
+/// characters, an odd count followed by one zero byte (codegen-patterns
+/// 1.5, "To a `univ` parameter": 43 of the 101 string cells
+/// `tools/pcsurvey.py` finds end in a single `00`, the other 58 in a
+/// character, none in `00 00`; 0xE2FFD4, 37 characters and `00`); a
+/// string constant as an unpacked array of char, padded with blanks to
+/// its size (below).  Sets other than of a word or a longword, records,
+/// strings as another type are not supported yet.  `nil` is a longword 0
+/// cell keyed as an integer32 0 (below).
 fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolConst> {
     if let (ConstValue::Str(s), TypeKind::Varying { max, .. }) = (v, p.types.kind(ty)) {
         // A string constant passed by address to a varying parameter:
@@ -8693,7 +8755,28 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
 /// template's result type decides, as `dpc_sema::conv::result_reg` does
 /// for a routine (pointers and ordinals are known; a 4-byte record, known
 /// for a routine, is refused through a pointer: no site).
+/// A 4-byte array result, in D0 as a 4-byte record (`dpc_sema::conv::
+/// result_reg`): best effort (not byte-identical; bead domain-pascal-338r,
+/// domain-c's gap 33; no kernel site), at its definition and its calls.
+fn array_result(p: &Program, ty: TypeId, span: Span) -> Res<()> {
+    if matches!(p.types.kind(ty), TypeKind::Array { .. }) {
+        best_effort(
+            span,
+            "a function returning a 4-byte array (in D0, as a 4-byte record; no kernel site, \
+             codegen-patterns 3) is",
+        )?;
+    }
+    Ok(())
+}
+
 fn refuse_unknown_result(p: &Program, c: &SCall, span: Span) -> Res<()> {
+    if let SCallee::Routine(id) = &c.callee {
+        if let Some(r) = &p.routine(*id).result {
+            if r.reg == ResultReg::Record {
+                array_result(p, r.ty, span)?;
+            }
+        }
+    }
     let unknown = match &c.callee {
         SCallee::Routine(id) => p
             .routine(*id)

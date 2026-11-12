@@ -3088,7 +3088,11 @@ module supplies the two run-time routines).
   `move.l #imm,(-0xc,A6)` (MST_$ALLOC_TABLE_PAGE 0xE43F72), and one
   assigned a function's result likewise (best effort); a pointer result
   variable that no call follows may be held in A1 (best effort).
-  `tests/exec/ogf8_results.pas`.
+  `tests/exec/ogf8_results.pas`.  A 4-byte array result (no kernel
+  site): **best effort** (bead domain-pascal-338r; refused under
+  `--strict`), in D0 as a 4-byte record is, as the DOMAIN C compiler's
+  dmp_$three_char_lr_name_from_lr (reported: cc.a88k 0x232010 `move.l
+  (-8,A6),D0`; exec test `array_result`).
 - **Record results over 4 bytes (Verified by survey: 7 callees, all 21
   compiled calls; implemented; bead domain-pascal-ytu3).**  The result
   goes through a **hidden first argument**: the address of a place for
@@ -6774,6 +6778,14 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   argument is that cell (commit_top_node, reported: cc.m68k 0x0760B8,
   the word 43, then the text).  Refused under `--strict`.  Exec test
   `varying_const`.
+- **Packed arrays of char: string constants (best effort; no kernel
+  site; bead domain-pascal-338r):** blank-padded to the array's size
+  (ref p. 4-204), copied from a cell by the copy of an array of char
+  (longwords, then the tail), a 2- or 4-byte array stored as a constant
+  (the DOMAIN C compiler's dmp.pas, reported: `move.l
+  #0x4A425020,(-36,A6)` for 'JBP '; 9 characters `move.l; move.w;
+  move.b` from the cell, where dpc's tail is bytes).  Exec test
+  `string_packed`.
 - **Packed records / bit fields:** see 5.3.
 
 ### 5.3 Packed records (ref 3.10.7; layout Verified by cross-check, codegen Verified at the sites given; implemented, bead domain-pascal-xlm)

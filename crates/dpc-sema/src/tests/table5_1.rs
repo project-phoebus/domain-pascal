@@ -661,10 +661,11 @@ fn result_registers() {
             "{opt}"
         );
     }
-    // A 4-byte array is no record.
+    // A 4-byte array: in D0 as a 4-byte record (bead domain-pascal-338r;
+    // `dpc-ir` warns best effort at its definition and calls).
     assert_eq!(
         result_reg("type a = array[1..2] of integer; function f: a; extern;"),
-        Unknown
+        Record
     );
 }
 

@@ -248,7 +248,12 @@ pub fn result_reg(
     // that should go into a register", 5.5.11 p. 5-20) on one: no site,
     // left unknown.  `d0_return` and `c_param` speak of pointer results
     // only (5.5.10, 5.5.12), so they change nothing here.
-    if matches!(types.kind(ty), TypeKind::Record(_))
+    // A 4-byte array, likewise (best effort, the checker warns; bead
+    // domain-pascal-338r, domain-c's gap 33; no kernel site).  Reported,
+    // not checked here: the DOMAIN C compiler's
+    // dmp_$three_char_lr_name_from_lr (cc.a88k 0x232010) returns a
+    // `packed array [1..4] of char` with `move.l (-8,A6),D0`.
+    if matches!(types.kind(ty), TypeKind::Record(_) | TypeKind::Array { .. })
         && types.size(ty) == target.val_param_max_size()
         && !opts.a0_return
     {
