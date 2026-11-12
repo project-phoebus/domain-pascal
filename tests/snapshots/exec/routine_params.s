@@ -104,9 +104,27 @@ addi.w #0x64,(%a5)
 movea.l (-4,%fp),%a5
 unlk %fp
 rts
+.globl WHERE
+WHERE:
+link.w %fp,#-4
+pea (%a5)
+lea (.Ldata).l,%a5
+lea (2,%a5),%a0
+movea.l (-8,%fp),%a5
+unlk %fp
+rts
+.globl THROUGH
+THROUGH:
+link.w %fp,#0
+movea.l (0xc,%fp),%a0
+jsr (%a0)
+movea.l (8,%fp),%a1
+move.l %a0,(%a1)
+unlk %fp
+rts
 .globl ROUTINE_PARAMS_$RUN
 ROUTINE_PARAMS_$RUN:
-link.w %fp,#0
+link.w %fp,#-4
 movem.l %d2/%a5,-(%sp)
 lea (.Ldata).l,%a5
 move.w (8,%fp),%d2
@@ -176,7 +194,17 @@ addq.w #4,%sp
 subq.l #2,%sp
 move.w (%a5),-(%sp)
 jsr (EXEC_$LOGV_W).l
-movem.l (-8,%fp),%d2/%a5
+addq.w #4,%sp
+move.w #0x4d,(2,%a5)
+move.l #WHERE,-(%sp)
+pea (-4,%fp)
+bsr.w THROUGH
+addq.w #8,%sp
+subq.l #2,%sp
+movea.l (-4,%fp),%a0
+move.w (%a0),-(%sp)
+jsr (EXEC_$LOGV_W).l
+movem.l (-0xc,%fp),%d2/%a5
 unlk %fp
 rts
 .balignw 4,0x2048

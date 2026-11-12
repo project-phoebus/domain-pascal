@@ -8930,14 +8930,27 @@ fn value_of(p: &Program, e: &SExpr) -> Res<Expr> {
                 // after `jsr (A1)`; IO_$MAP_CSR 0xE1A8CC `move.l D0,D4`).
                 // No compiled call through a pointer reads a pointer
                 // result, so A0 (ref 5.5.10) is not assumed.
-                SCallee::Pointer(_) => {
+                // A pointer result: in A0, the routine's own convention (ref
+                // 5.5.10), A0 and D0 under the pointer type's `d0_return`;
+                // best effort (not byte-identical; bead domain-pascal-338r,
+                // domain-c's gap 36; no site).
+                SCallee::Pointer(x) => {
                     if p.types.is_pointer(e.ty) {
-                        return Err(unsupported(
+                        best_effort(
                             e.span,
-                            "a pointer result of a call through a routine pointer is",
-                        ));
+                            "a pointer result of a call through a routine pointer (read from A0; \
+                             no site) is",
+                        )?;
+                        let d0 = matches!(p.types.kind(x.ty), TypeKind::RoutinePointer(sig)
+                            if sig.options.d0_return || sig.options.c_param);
+                        if d0 {
+                            ResultClass::AddressAndData
+                        } else {
+                            ResultClass::Address
+                        }
+                    } else {
+                        ResultClass::Data
                     }
-                    ResultClass::Data
                 }
             };
             let ty = scalar_of(p, e)?;

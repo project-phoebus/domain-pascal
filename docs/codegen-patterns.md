@@ -1530,7 +1530,10 @@ v,D0` (best effort; the image forms a boolean, 7.1).
     parameterless one also without parentheses (5.4's `A;` and `a * a *
     a`).  A routine matches when every parameter's convention does
     (5.4 gives a routine parameter's parameters no options; whether a
-    `val_param` routine may be passed to one is an open question).
+    `val_param` routine may be passed to one is an open question).  A
+    pointer result of a call through a routine pointer (or parameter) is
+    read from A0, A0 and D0 under the type's `d0_return` (ref 5.5.10;
+    best effort, no site; domain-c's gap 36).
     Refused: nested and `internal` routines (their address; the C
     compiler passes a trampoline built in the parent's frame, not
     modelled).  Exec test `routine_params`.  Conformance: `tests/conformance/atbus_ring_interrupt.pas`

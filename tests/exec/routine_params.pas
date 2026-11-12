@@ -2,7 +2,8 @@
   parameters (ref 5.4), procedures and functions, passed a top-level
   routine's address by value (the DOMAIN C compiler's `move.l
   #routine,-(SP)', reported) and passed on; called by their names
-  through the slot, a parameterless one also without parentheses (ref
+  through the slot, a pointer function's result read from A0 (gap 36), a parameterless one
+  also without parentheses (ref
   5.4's examples, `A;' and `a * a * a') (best effort, no kernel site).  The routines passed
   take their parameters by address, as the routine parameters' own
   parameters do (no options given, ref 5.4).
@@ -16,12 +17,16 @@
     16
     64
     114
+    77
 }
 module routine_params;
 %include 'exec.ins.pas';
 
+type
+  p_t = ^integer;
 var
   acc: integer;
+  cell: integer;
 
 procedure add(n: integer);
 begin
@@ -74,7 +79,19 @@ begin
   acc := acc + 100;
 end;
 
+function where: p_t;
+begin
+  where := addr(cell);
+end;
+
+procedure through(var r: p_t; function f: p_t); options(val_param);
+begin
+  r := f;
+end;
+
 procedure routine_params_$run(k: integer); options(val_param);
+var
+  q: p_t;
 begin
   acc := 0;
   apply(add, k);
@@ -87,4 +104,7 @@ begin
   exec_$logv_w(cube(four));
   proc_once(bump);
   exec_$logv_w(acc);
+  cell := 77;
+  through(q, where);
+  exec_$logv_w(q^);
 end;
