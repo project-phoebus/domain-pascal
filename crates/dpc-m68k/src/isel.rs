@@ -19841,6 +19841,36 @@ impl Selector {
                     ..
                 } = &**set
                 {
+                    if let Some(Reg::D(sr)) = self.pinned(*o) {
+                        // Best effort (not byte-identical; bead
+                        // domain-pascal-338r, domain-c's gap 30; no site):
+                        // the held set copied into a register of its own,
+                        // `btst Dk,Dn` there and `sne` into it, the held
+                        // register left alone.  The DOMAIN C compiler's
+                        // com.pas process_instruction keeps such a set in
+                        // D6 (reported).
+                        best_effort(
+                            self.span,
+                            "`in` on a set held in a register, as a value (the set copied, \
+                             `btst Dk,Dn`, `sne`; no site) is",
+                        )?;
+                        let k = self.computed_elem(elem)?;
+                        let d = self.alloc_d()?;
+                        self.out.push(Insn::Move {
+                            size: Size::L,
+                            src: Ea::Reg(Reg::D(sr)),
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        self.out.push(Insn::Btst {
+                            bit: k,
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        self.out.push(Insn::Scc {
+                            cond: Cond::Ne,
+                            dst: Ea::Reg(Reg::D(d)),
+                        });
+                        return Ok(Val::Tmp(d));
+                    }
                     if self.pinned(*o).is_some() {
                         return Err(unsupported(
                             self.span,

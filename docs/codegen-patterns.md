@@ -3855,7 +3855,12 @@ this pair.
   0xE031B2 `btst #14,D5; bne.s`; a held set as a value, the boolean in
   a new register, PROC1_$SUSPEND 0xE14842..0xE14846 `btst #1,D1; sne D0`
   (`proc1_flag_suspended in f`, `f` held in D1, ../source
-  proc1/suspend.pas; implemented, bead domain-pascal-61fd).  `dpc`
+  proc1/suspend.pas; implemented, bead domain-pascal-61fd).  A run-time
+  element of a held longword set as a value (no site): **best effort**
+  (bead domain-pascal-338r; refused under `--strict`), the set copied
+  into a register of its own, `btst Dk,Dn`, `sne` there, the held
+  register left alone (the DOMAIN C compiler's com.pas keeps such a set
+  in D6, reported; exec test `held_set_value`).  `dpc`
   (`isel.rs`, `set_bit_test`)
   rejects a non-constant element on a word set variable (above; a
   constant set: "`x in c`" below), and a constant element beyond
