@@ -260,7 +260,9 @@ end;
     // beyond its 128 bits.
     let e = errs(&src.replace("c in p^.s", "c in p^.t"));
     assert_eq!(e.len(), 1);
-    assert!(e[0].contains("guarded test"), "{e:?}");
+    // Best effort without `--strict` (bead domain-pascal-338r): a range
+    // test, then the test.
+    assert!(e[0].contains("a range test, then the test"), "{e:?}");
 }
 
 #[test]
@@ -585,7 +587,7 @@ end;
         e,
         vec![
             "t.pas:5:8: error: `in` on a 16-byte set with an element whose type reaches beyond \
-             the set's 128 bits (the guarded test, NAME_$INIT 0xE3183E, codegen-patterns 5.1) is \
+             the set's 128 bits (a range test, then the test; no site, codegen-patterns 5.1) is \
              not supported yet"
         ]
     );

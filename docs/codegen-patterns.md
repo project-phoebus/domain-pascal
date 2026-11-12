@@ -4325,7 +4325,15 @@ model run against the bit model of Figure 3-6).
   compiler's c_syntax.pas, reported) with an element that can be read
   twice: **best effort** (bead domain-pascal-338r; no site), tested as
   `(k in a) or (k in b)`, `*` `and`, `-` `and not`, where the original
-  forms the set in a frame temporary (exec test `in_set_expr`).  An `integer` element of a set
+  forms the set in a frame temporary (exec test `in_set_expr`).  An
+  element of a set *variable* whose type reaches beyond the set's bits
+  (a longword `k in s96`; no site for a variable: NAME_$INIT's guard is
+  on a constant set): **best effort** (bead domain-pascal-338r), a range
+  test first, `cmpi.l #bits-1` unsigned and `bhi` past the test (the
+  DOMAIN C compiler's sched.pas, reported: `cmpi #95` first), then the
+  unguarded byte test on the element's low word, as `and then`; a
+  computed element (`[m + 1]`, `k + 32`) formed in a register first
+  (exec test `set96`).  An `integer` element of a set
   *variable* is tested unguarded (MSG_$FORK 0xE73F2E..0xE73F40 `movea.l
   D4,A2; moveq #63,D1; move.w (A2),D5; sub.w D5,D1; lsr.w #3,D1; lea
   (0x1d8,A0),A3; btst D5,(0,A3,D1.w)`, its `in parent_asid: integer`;

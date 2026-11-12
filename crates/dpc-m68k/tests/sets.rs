@@ -604,7 +604,7 @@ fn refusals() {
          var s: cs;
          begin if c in s then gw := 1 end;"
     )
-    .contains("guarded test"));
+    .contains("a range test, then the test"));
 }
 
 #[test]

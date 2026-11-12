@@ -26471,6 +26471,32 @@ impl Selector {
     fn large_set_elem(&mut self, elem: &Expr, top: i64) -> Res<(u8, u8)> {
         Ok(match elem {
             // A byte element zero-extended around the constant's load.
+            Expr::Convert { value, ty, .. }
+                if *ty == Scalar::unsigned(Width::Word)
+                    && !matches!(
+                        &**value,
+                        Expr::Load {
+                            ty: Scalar {
+                                width: Width::Byte,
+                                ..
+                            },
+                            ..
+                        }
+                    ) =>
+            {
+                // A computed byte element, or a longword narrowed to its
+                // word (after a range test, `dpc-ir` `set_member_at`): its
+                // value in a register first.  Best effort (not
+                // byte-identical; bead domain-pascal-338r, domain-c's gaps
+                // 29 and 38; no site).
+                best_effort(
+                    self.span,
+                    "`in` on a large set with a computed element (its value first; no site, \
+                     codegen-patterns 5.1) is",
+                )?;
+                let k = self.computed_elem(elem)?;
+                (k, self.load_const(top, Width::Word)?)
+            }
             Expr::Convert { value, ty, .. } if *ty == Scalar::unsigned(Width::Word) => {
                 let Expr::Load {
                     ty:
@@ -26480,10 +26506,7 @@ impl Selector {
                     ..
                 } = &**value
                 else {
-                    return Err(unsupported(
-                        self.span,
-                        "`in` on a large set with a computed byte element is",
-                    ));
+                    unreachable!("a byte load (the arm above takes the others)")
                 };
                 // A parameter held since the entry is copied from its
                 // register (**Uncertain**: no site; codegen-patterns 8,

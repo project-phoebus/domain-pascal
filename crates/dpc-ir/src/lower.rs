@@ -5148,7 +5148,10 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
                             _ => Cond::And(ca, Box::new(Cond::Not(cb))),
                         });
                     }
-                    return Ok(Cond::Test(bool_value(p, e)?));
+                    return Ok(match bool_value(p, e)? {
+                        Expr::Test(c) => *c,
+                        v => Cond::Test(v),
+                    });
                 }
                 BinOp::Eq => Rel::Eq,
                 BinOp::Ne => Rel::Ne,
@@ -5156,7 +5159,13 @@ fn cond_of(p: &Program, e: &SExpr) -> Res<Cond> {
                 BinOp::Le => Rel::Le,
                 BinOp::Gt => Rel::Gt,
                 BinOp::Ge => Rel::Ge,
-                _ => return Ok(Cond::Test(bool_value(p, e)?)),
+                _ => {
+                    return Ok(match bool_value(p, e)? {
+                        // A condition the value is made of (a guarded `in`).
+                        Expr::Test(c) => *c,
+                        v => Cond::Test(v),
+                    })
+                }
             };
             compare(p, e, rel, lhs, rhs)
         }
@@ -8800,6 +8809,42 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
                  the set; codegen-patterns 5.1) is"
             ),
         )?,
+        // An element that can be read twice, not constant: guarded by a
+        // range test first, `k <= bits-1` unsigned (negative values above
+        // it), then the unguarded test on its low word, as `and then`.
+        // Best effort (not byte-identical; bead domain-pascal-338r,
+        // domain-c's gap 29; the image's guard on a set variable is not
+        // catalogued, NAME_$INIT 0xE3183E guards a constant set; the
+        // DOMAIN C compiler's sched.pas, reported: `cmpi #95` then the bit
+        // test).
+        _ if lhs.value.is_none() && plain_element(lhs) => {
+            best_effort(
+                e.span,
+                format!(
+                    "`in` on a {bytes}-byte set with an element whose type reaches beyond the \
+                     set's {bits} bits (a range test, then the test; no site, codegen-patterns \
+                     5.1) is"
+                ),
+            )?;
+            let v = value_of(p, lhs)?;
+            let range = Cond::Compare {
+                op: Rel::Le,
+                lhs: convert(v.clone(), Scalar::unsigned(Width::Long)),
+                rhs: Expr::Const {
+                    value: bits - 1,
+                    ty: Scalar::unsigned(Width::Long),
+                },
+            };
+            let member = Expr::SetMemberAt {
+                elem: Box::new(convert(v, Scalar::unsigned(Width::Word))),
+                set: addr_of(p, rhs)?,
+                bytes,
+            };
+            return Ok(Expr::Test(Box::new(Cond::AndThen(
+                Box::new(range),
+                Box::new(Cond::Test(member)),
+            ))));
+        }
         _ => {
             return Err(unsupported(
                 e.span,
