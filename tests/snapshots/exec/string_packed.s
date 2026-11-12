@@ -1,4 +1,26 @@
 .text
+.globl SHOW
+SHOW:
+link.w %fp,#0
+pea (%a2)
+movea.l (8,%fp),%a2
+subq.l #2,%sp
+clr.w %d0
+move.b (%a2),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+subq.l #2,%sp
+clr.w %d0
+move.b (3,%a2),%d0
+move.w %d0,-(%sp)
+jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+move.l (0xc,%fp),-(%sp)
+jsr (EXEC_$LOGV_L).l
+movea.l (-4,%fp),%a2
+unlk %fp
+rts
 .globl STRING_PACKED_$RUN
 STRING_PACKED_$RUN:
 link.w %fp,#0
@@ -62,6 +84,10 @@ clr.w %d0
 move.b (0x17,%a5),%d0
 move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
+addq.w #4,%sp
+pea (-1).w
+pea (.Lc2,%pc)
+bsr.w SHOW
 movea.l (-4,%fp),%a5
 unlk %fp
 rts
@@ -70,6 +96,8 @@ rts
 .balignw 4,0x2048
 .Lc1:
 .short 0x6162,0x6320,0x2020,0x2020
+.Lc2:
+.short 0x4150,0x2020
 .balignw 4,0x2048
 .section ".bss.moddata.STRING_PACKED","aw",@nobits
 .balign 4

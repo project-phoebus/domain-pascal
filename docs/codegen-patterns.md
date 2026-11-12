@@ -6818,7 +6818,9 @@ of unequal sizes, ref p. 4-197), so no conformance unit covers them.
   (longwords, then the tail), a 2- or 4-byte array stored as a constant
   (the DOMAIN C compiler's dmp.pas, reported: `move.l
   #0x4A425020,(-36,A6)` for 'JBP '; 9 characters `move.l; move.w;
-  move.b` from the cell, where dpc's tail is bytes).  Exec test
+  move.b` from the cell, where dpc's tail is bytes).  Passed by address
+  to a packed array of char: a cell of its characters and blanks, as for
+  an unpacked one (lir.pas's 'AP  ', reported; gap 41).  Exec test
   `string_packed`.
 - **Packed records / bit fields:** see 5.3.
 

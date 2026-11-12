@@ -7797,7 +7797,22 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         });
     }
     let size = p.types.size(ty);
-    if let (ConstValue::Str(s), ByteCopy::Chars) = (v, byte_copy(p, ty)) {
+    if let (ConstValue::Str(_), ByteCopy::Unsettled("a packed array of char")) =
+        (v, byte_copy(p, ty))
+    {
+        // A packed array of char takes the same cell (below), best effort
+        // (not byte-identical; bead domain-pascal-338r, domain-c's gap 41;
+        // no kernel site): the DOMAIN C compiler's lir.pas passes 'AP  '
+        // by address to an `in packed array [1..4] of char` (reported).
+        best_effort(
+            span,
+            "a string constant passed by address to a packed array of char (its characters \
+             and blanks in a cell; no kernel site) is",
+        )?;
+    }
+    if let (ConstValue::Str(s), ByteCopy::Chars | ByteCopy::Unsettled("a packed array of char")) =
+        (v, byte_copy(p, ty))
+    {
         // A string constant as an unpacked array of char that is not
         // `univ` (bead domain-pascal-jgtd): the value an assignment to a
         // variable of the parameter's type gives (ref "Passing
