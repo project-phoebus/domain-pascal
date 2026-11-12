@@ -49,7 +49,10 @@ compiler's output patterns**, not to produce good code.
   also let the test suite run compiled programs natively (section 4.5).
 - LLVM or any other large optimising backend.  These are **forbidden**.
 - Pascal I/O runtime (`writeln` etc.), reals and floating point, unless a
-  kernel routine needs them.
+  kernel routine needs them.  Exception (owner, 2026-11-12): the real
+  arithmetic and `write`/`writeln` that Apollo's DOMAIN C compiler source
+  needs (domain-c's gaps 7 and 4, bead domain-pascal-338r), as best
+  effort that leaves the kernel's output unchanged.
 
 ## 2. The language
 
