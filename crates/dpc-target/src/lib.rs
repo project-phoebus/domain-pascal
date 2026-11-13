@@ -53,6 +53,24 @@ pub trait Target {
         false
     }
 
+    /// Whether the target stores multi-byte integers most significant byte
+    /// first.  The m68k is big-endian; aarch64 is little-endian (owner,
+    /// 2026-11-12; docs/aarch64.md).  The language fixes some byte images
+    /// whatever the target (a set larger than 4 bytes, ref 3.9.3 Figure
+    /// 3-6; packed record fields, ref 3.10.7; strings); integers, pointers
+    /// and register-sized sets follow this.  Default: big-endian.
+    fn big_endian(&self) -> bool {
+        true
+    }
+
+    /// Whether a main program reaches other units' variables through
+    /// address cells below its data base, as Apollo's compiler does
+    /// (codegen-patterns 4, "Main programs"; `dpc-ir` `extern_cell`),
+    /// rather than by their symbols.  Default: true (m68k).
+    fn program_extern_cells(&self) -> bool {
+        true
+    }
+
     /// The file name of the target's prebuilt run-time library, the
     /// object compiled code is linked with (like gcc's `libgcc.a`), or
     /// None when the target has none.  The driver looks for it in the
@@ -104,5 +122,6 @@ mod tests {
         assert_eq!(t.first_arg_offset(), 16);
         assert_eq!(t.predeclared_cond_vars(), [("_dummy", true)]);
         assert_eq!(t.runtime_library(), None);
+        assert!(t.big_endian());
     }
 }

@@ -6,6 +6,7 @@ members = [
     "crates/dpc-ir",
     "crates/dpc-target",
     "crates/dpc-m68k",
+    "crates/dpc-aarch64",
     "crates/dpc",
 ]
 

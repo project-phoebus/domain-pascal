@@ -76,6 +76,8 @@ pub fn lower(program: &Program) -> Result<Module, Vec<Diagnostic>> {
 /// reported; the module is returned only when there is none.  `db` says
 /// which routines load the data base (codegen-patterns 4).
 pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec<Diagnostic>> {
+    crate::set_pointer_type(ptr_scalar(program));
+    BIG_ENDIAN.with(|c| c.set(program.big_endian));
     let mut errors = Vec::new();
     EXTERN_CELLS.with(|c| c.borrow_mut().clear());
     let (mut data, overlays) = match data_area(program) {
@@ -152,6 +154,8 @@ pub fn lower_with(program: &Program, db: &DataBaseOptions) -> Result<Module, Vec
 /// codegen-patterns 12.5): static links and the data-base choice are not
 /// decided, so the functions are not fit for code generation.
 pub fn lower_each(program: &Program) -> (Vec<Function>, Vec<Diagnostic>) {
+    crate::set_pointer_type(ptr_scalar(program));
+    BIG_ENDIAN.with(|c| c.set(program.big_endian));
     let mut functions = Vec::new();
     let mut errors = Vec::new();
     for &id in &program.top_routines {
@@ -387,15 +391,16 @@ fn check_overlay(p: &Program, section: &str, symbols: &[&str], span: Span) -> Re
 }
 
 /// Whether a value of `inits` (one variable's, in order) overwrites
-/// part, not all, of an earlier address (4 bytes, [`init_addr`]).
+/// part, not all, of an earlier address (a pointer's size, [`init_addr`]).
 fn address_partly_overwritten(inits: &[&DataInit]) -> bool {
-    let size = |d: &DataInit| d.value.size();
+    let n = link_bytes();
+    let size = |d: &DataInit| d.value.size(n);
     inits.iter().enumerate().any(|(i, a)| {
         matches!(a.value, InitValue::Address(_))
             && inits[i + 1..].iter().any(|b| {
                 let (lo, hi) = (b.offset, b.offset + size(b));
-                let overlaps = lo < a.offset + 4 && hi > a.offset;
-                overlaps && !(lo <= a.offset && hi >= a.offset + 4)
+                let overlaps = lo < a.offset + n && hi > a.offset;
+                overlaps && !(lo <= a.offset && hi >= a.offset + n)
             })
     })
 }
@@ -408,7 +413,7 @@ fn address_partly_overwritten(inits: &[&DataInit]) -> bool {
 /// FLP_$DO_IO at +0x08..+0x10; WIN_ D 0xE2B89C: WIN_$SPIN_DOWN 0xE19BC0 at
 /// +0x10).  Whether those came from Pascal initialisers is not known.
 fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, String> {
-    if p.types.size(ty) != 4 {
+    if p.types.size(ty) != p.pointer_size {
         return Err(format!(
             "an address as the initial value of a {} is",
             p.types.display(ty)
@@ -470,7 +475,7 @@ fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, Strin
 fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitValue, String> {
     let size = types.size(ty);
     let int = |v: i64| -> Result<InitValue, String> {
-        if matches!(size, 1 | 2 | 4) {
+        if matches!(size, 1 | 2 | 4) || (size == 8 && types.is_pointer(ty)) {
             Ok(InitValue::Int { size, value: v })
         } else {
             Err(format!("an initial value of a {size}-byte scalar is"))
@@ -481,10 +486,18 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
         // double (the image's singles: domain-c's ra_utils `move.l
         // #0x3F800000` for 1.0, reported; bead domain-pascal-338r, gap 7).
         (TypeKind::Real { size: 4 }, v) if v.number().is_some() => Ok(InitValue::Bytes(
-            (v.number().unwrap() as f32).to_bits().to_be_bytes().to_vec(),
+            if big_endian() {
+                (v.number().unwrap() as f32).to_bits().to_be_bytes().to_vec()
+            } else {
+                (v.number().unwrap() as f32).to_bits().to_le_bytes().to_vec()
+            },
         )),
         (TypeKind::Real { .. }, v) if v.number().is_some() => Ok(InitValue::Bytes(
-            v.number().unwrap().to_bits().to_be_bytes().to_vec(),
+            if big_endian() {
+                v.number().unwrap().to_bits().to_be_bytes().to_vec()
+            } else {
+                v.number().unwrap().to_bits().to_le_bytes().to_vec()
+            },
         )),
         (TypeKind::Real { .. }, _) => Err("this initial value of a real variable is".into()),
         (_, ConstValue::Real(_)) => Err(format!("a real initial value of a {} is", types.display(ty))),
@@ -506,6 +519,13 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
             for &k in members {
                 let (b, bit) = types.set_bit_location(ty, k as u32);
                 bytes[b as usize] |= 1 << bit;
+            }
+            // A register-sized set is an integer whose bit k is member k
+            // ([`Expr::SetMember`]), so on a little-endian target its bytes
+            // are reversed; a larger one keeps the language's byte image
+            // (ref 3.9.3 Figure 3-6; docs/aarch64.md).
+            if size <= 4 && !big_endian() {
+                bytes.reverse();
             }
             Ok(InitValue::Bytes(bytes))
         }
@@ -665,7 +685,7 @@ fn lower_tree(
     }
     // A nested routine whose link slot a deeper routine reads ([`outer`])
     // stores its static link there first.
-    let store_link = r.parent.is_some() && uplevel.iter().any(|&(o, _)| o == LINK_SLOT);
+    let store_link = r.parent.is_some() && uplevel.iter().any(|&(o, _)| o == link_slot());
     if store_link {
         best_effort(
             r.span,
@@ -688,7 +708,7 @@ fn lower_tree(
                     0,
                     Stmt {
                         kind: StmtKind::Store {
-                            addr: Addr::Frame(LINK_SLOT),
+                            addr: Addr::Frame(link_slot()),
                             value: Expr::AddrOf(Addr::Enclosing(0)),
                         },
                         span: f.span,
@@ -705,7 +725,7 @@ fn lower_tree(
                 // slots of the routines between are read.
                 let far = far_calls(p, id, &f);
                 for &(_, k) in &far {
-                    up.extend((1..k).map(|l| (l, LINK_SLOT, 4)));
+                    up.extend((1..k).map(|l| (l, link_slot(), link_bytes())));
                 }
                 let mut calls = Vec::new();
                 for st in &f.body {
@@ -789,10 +809,54 @@ fn far_calls(p: &Program, id: RoutineId, f: &Function) -> Vec<(String, u32)> {
 
 /// The slot of a nested routine's frame that holds its static link when
 /// a deeper routine needs it (codegen-patterns 6, "Frame: a 4-byte
-/// static-link slot": 0xE4F3BA `move.l A1,(-4,A6)`).
-const LINK_SLOT: i32 = -4;
+/// static-link slot": 0xE4F3BA `move.l A1,(-4,A6)`): the pointer-sized
+/// slot right below the frame pointer (`dpc-sema` reserves it).
+fn link_slot() -> i32 {
+    -(link_bytes() as i32)
+}
+
+/// The size of a static link: a pointer's ([`Program::pointer_size`]).
+fn link_bytes() -> u32 {
+    ptr_ty().bytes()
+}
+
+/// Whether the target being lowered for is big-endian
+/// ([`Program::big_endian`]), for the code that has no [`Program`] at hand.
+fn big_endian() -> bool {
+    BIG_ENDIAN.with(|c| c.get())
+}
+
+/// The integer whose bytes in memory, in the target's byte order, are
+/// `bytes` (at most 8): how a store of that integer lays down a byte image
+/// the language fixes (a string's characters, a varying string's cell, a
+/// large set's units).
+fn image_value(bytes: &[u8]) -> u64 {
+    if big_endian() {
+        bytes.iter().fold(0u64, |v, &b| (v << 8) | b as u64)
+    } else {
+        bytes.iter().rev().fold(0u64, |v, &b| (v << 8) | b as u64)
+    }
+}
+
+/// A word in the target's byte order.
+fn word_bytes(n: u16) -> [u8; 2] {
+    if big_endian() {
+        n.to_be_bytes()
+    } else {
+        n.to_le_bytes()
+    }
+}
+
+/// A pointer value on the target being lowered for ([`ptr_scalar`]), for
+/// the code that has no [`Program`] at hand.
+fn ptr_ty() -> Scalar {
+    crate::pointer_type()
+}
 
 thread_local! {
+    /// The target's byte order ([`Program::big_endian`]), set when
+    /// lowering starts.
+    static BIG_ENDIAN: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// The frame objects of routines two or more levels out that the
     /// routine being lowered reaches ([`outer`]): (levels out, frame
     /// offset, bytes), the link slots of the routines between included.
@@ -807,17 +871,17 @@ thread_local! {
 /// Records what it reaches in [`OUTER_REFS`].
 fn outer(a: Addr, levels: u32, var_bytes: u32) -> Addr {
     let mut chain = Expr::Load {
-        addr: Addr::Enclosing(LINK_SLOT),
-        ty: Scalar::POINTER,
+        addr: Addr::Enclosing(link_slot()),
+        ty: ptr_ty(),
     };
     for l in 2..levels {
-        OUTER_REFS.with(|o| o.borrow_mut().push((l, LINK_SLOT, 4)));
+        OUTER_REFS.with(|o| o.borrow_mut().push((l, link_slot(), link_bytes())));
         chain = Expr::Load {
             addr: Addr::Indirect {
                 base: Box::new(chain),
-                offset: LINK_SLOT,
+                offset: link_slot(),
             },
-            ty: Scalar::POINTER,
+            ty: ptr_ty(),
         };
     }
     let at = |o: i32| Addr::Indirect {
@@ -990,9 +1054,9 @@ fn set_static_links(fs: &mut [Function]) -> Result<(), Vec<Diagnostic>> {
     let stores_link = |sym: &str| {
         index(sym).is_some_and(|g| {
             matches!(fs[g].body.first(), Some(Stmt { kind: StmtKind::Store {
-                addr: Addr::Frame(LINK_SLOT),
+                addr: Addr::Frame(o),
                 value: Expr::AddrOf(Addr::Enclosing(0)),
-            }, .. }))
+            }, .. }) if *o == link_slot())
         })
     };
     for (i, calls) in far.iter().enumerate() {
@@ -2540,7 +2604,7 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
             let dpc_sema::Storage::Frame { offset } = var.storage else {
                 return None;
             };
-            let width = Width::of_size(p.types.size(var.ty))?;
+            let width = width_of_type(&p.types, var.ty)?;
             let mut t = var.ty;
             while let dpc_sema::types::TypeKind::Subrange { base, .. } = p.types.kind(t) {
                 t = *base;
@@ -2655,7 +2719,7 @@ fn value_params(p: &Program, r: &Routine) -> Vec<ValueParam> {
         .iter()
         .filter(|prm| prm.passing() == Passing::ByValue && !prm.conv.local_copy)
         .filter_map(|prm| {
-            Width::of_size(p.types.size(prm.ty)).map(|width| ValueParam {
+            width_of_type(&p.types, prm.ty).map(|width| ValueParam {
                 offset: prm.value_offset,
                 ty: scalar_of_type(&p.types, prm.ty, width),
             })
@@ -2708,7 +2772,7 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
         ));
     }
     let size = p.types.size(res.ty);
-    let width = Width::of_size(size)
+    let width = width_of_type(&p.types, res.ty)
         .ok_or_else(|| unsupported(r.span, format!("a {size}-byte function result is")))?;
     let mut ty = scalar_of_type(&p.types, res.ty, width);
     // A 4-byte integer result in A0 (`a0_return`, ref 5.5.11 p. 5-20:
@@ -2718,8 +2782,8 @@ fn result_spec(p: &Program, r: &Routine, res: &dpc_sema::FnResult) -> Res<Result
     // as integer32 `a0_return` functions by ../source, after their callers'
     // `move.l A0,D0` parking) end with the pointer-result form
     // (codegen-patterns 3, "Pointer results").
-    if class == ResultClass::Address && !ty.pointer && width == Width::Long {
-        ty = Scalar::POINTER;
+    if class == ResultClass::Address && !ty.pointer && width == ptr_ty().width {
+        ty = ptr_ty();
     }
     Ok(ResultSpec { class, ty })
 }
@@ -4730,7 +4794,7 @@ impl Cx<'_> {
                 Addr::Indirect {
                     base: Box::new(Expr::Load {
                         addr: Addr::Frame(tmp),
-                        ty: Scalar::POINTER,
+                        ty: ptr_ty(),
                     }),
                     offset,
                 }
@@ -4856,7 +4920,7 @@ impl Cx<'_> {
         // (`integer32`, `linteger`) index: the target's own loop form
         // (bead domain-pascal-1mtr; codegen-patterns 7.4, "Byte and
         // longword indices").
-        let Some(width) = Width::of_size(p.types.size(vty)) else {
+        let Some(width) = width_of_type(&p.types, vty) else {
             return Err(unsupported(
                 var.span,
                 "a `for` index variable that is not a byte, a word or a longword is",
@@ -5326,7 +5390,7 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
         match (&x.value, other) {
             (Some(ConstValue::Nil), _) => Ok(Expr::Const {
                 value: 0,
-                ty: Scalar::POINTER,
+                ty: ptr_ty(),
             }),
             (Some(v), Some(ty)) => {
                 let c = const_of(v, ty, x.span)?;
@@ -5517,6 +5581,7 @@ fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Co
                 Width::Byte => 0x7f,
                 Width::Word => 0xffff,
                 Width::Long => 0x7fff_ffff,
+                Width::Quad => i64::MAX,
             };
             t.sign == Sign::Unsigned
                 && matches!(p.types.ordinal_range(s.ty), Some((lo, hi)) if lo >= 0 && hi <= max)
@@ -5985,9 +6050,7 @@ fn large_set_bytes(members: &[i64], bytes: u32, span: Span) -> Res<Vec<u8>> {
 /// as a constant of that unit.
 fn large_set_unit_const(b: &[u8], o: i32, w: Width) -> Expr {
     let ty = Scalar::unsigned(w);
-    let bits = b[o as usize..(o as u32 + w.bytes()) as usize]
-        .iter()
-        .fold(0u64, |v, &x| (v << 8) | x as u64);
+    let bits = image_value(&b[o as usize..(o as u32 + w.bytes()) as usize]);
     Expr::Const {
         value: imm_value(bits, ty),
         ty,
@@ -7475,7 +7538,7 @@ fn is_block(p: &Program, target: &SExpr) -> bool {
     matches!(
         p.types.kind(target.ty),
         TypeKind::Record(_) | TypeKind::Array { .. }
-    ) && Width::of_size(p.types.size(target.ty)).is_none()
+    ) && width_of_type(&p.types, target.ty).is_none()
 }
 
 /// Whether `d := s` copies an array of one-byte elements from a variable
@@ -7537,7 +7600,7 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             let n = cell.len() as u32;
             if n <= 4 {
                 // A cell of a word or a longword: stored as a constant.
-                let value = cell.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let value = image_value(&cell) as i64;
                 let width = if n == 4 { Width::Long } else { Width::Word };
                 return Ok(Stmt {
                     kind: StmtKind::Store {
@@ -7588,7 +7651,7 @@ fn copy(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
             let mut cell = text.clone();
             cell.resize(bytes as usize, b' ');
             if matches!(bytes, 2 | 4) {
-                let value = cell.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let value = image_value(&cell) as i64;
                 let width = if bytes == 4 { Width::Long } else { Width::Word };
                 return Ok(Stmt {
                     kind: StmtKind::Store {
@@ -7845,7 +7908,7 @@ fn varying_stores(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<
         cell.chunks(4)
             .enumerate()
             .map(|(k, chunk)| {
-                let value = chunk.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let value = image_value(chunk) as i64;
                 let width = if chunk.len() == 4 { Width::Long } else { Width::Word };
                 Stmt {
                     kind: StmtKind::Store {
@@ -7867,7 +7930,7 @@ fn varying_stores(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<
 /// it, rounded up to an even size.
 fn varying_image(text: &[u8], max: u32) -> Vec<u8> {
     let n = text.len();
-    let mut cell = vec![(n >> 8) as u8, n as u8];
+    let mut cell = word_bytes(n as u16).to_vec();
     cell.extend_from_slice(text);
     if (n as u32) < max {
         cell.push(0);
@@ -8000,13 +8063,17 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
         let Expr::Const { value, .. } = const_of(v, Scalar::unsigned(width), span)? else {
             unreachable!("const_of gives a constant")
         };
-        let be = (value as u32).to_be_bytes();
-        let bytes = match width {
-            Width::Word => be[2..].to_vec(),
-            _ => be.to_vec(),
-        };
         return Ok(PoolConst {
-            bytes,
+            bytes: int_cell(p, value, width),
+            key: ty.0,
+            symbol: None,
+        });
+    }
+    if *v == ConstValue::Nil && size == 8 && p.pointer_size == 8 {
+        // `nil` by address on a target with 8-byte pointers: a cell of 8
+        // zeros (docs/aarch64.md).
+        return Ok(PoolConst {
+            bytes: vec![0; 8],
             key: ty.0,
             symbol: None,
         });
@@ -8048,12 +8115,7 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
     let Expr::Const { value, .. } = const_of(v, Scalar::signed(width), span)? else {
         unreachable!("const_of gives a constant")
     };
-    let be = (value as i32).to_be_bytes();
-    let bytes = match width {
-        Width::Byte => vec![be[3], 0],
-        Width::Word => be[2..].to_vec(),
-        Width::Long => be.to_vec(),
-    };
+    let bytes = int_cell(p, value, width);
     // Every 4-byte integer cell is keyed as integer32, whatever the
     // integer type it is held as, so equal values share: the module-local
     // 0xE2FF7C's 0 for VFMT_$WRITE2's `a2`/`a1` (Apollo's
@@ -8293,10 +8355,28 @@ fn const_of(v: &ConstValue, ty: Scalar, span: Span) -> Res<Expr> {
     Ok(Expr::Const { value, ty })
 }
 
+/// The bytes of a constant cell holding integer `value` in `width`, in the
+/// target's byte order ([`Program::big_endian`]): a byte takes the first
+/// byte of a 2-byte cell (big-endian, the high byte of a word: `ff00` for
+/// `true`, codegen-patterns 1.5), so the cell's size stays even.
+fn int_cell(p: &Program, value: i64, width: Width) -> Vec<u8> {
+    let n = width.bytes() as usize;
+    let mut bytes = if p.big_endian {
+        value.to_be_bytes()[8 - n..].to_vec()
+    } else {
+        value.to_le_bytes()[..n].to_vec()
+    };
+    if width == Width::Byte {
+        bytes.push(0);
+    }
+    bytes
+}
+
 /// The number a bit pattern of `ty`'s width stands for under `ty`'s sign
 /// (an [`Expr::Const`] holds the value, not the bits).
 fn imm_value(bits: u64, ty: Scalar) -> i64 {
     match (ty.width, ty.sign) {
+        (Width::Quad, _) => bits as i64,
         (Width::Byte, Sign::Signed) => bits as u8 as i8 as i64,
         (Width::Word, Sign::Signed) => bits as u16 as i16 as i64,
         (Width::Long, Sign::Signed) => bits as u32 as i32 as i64,
@@ -8559,6 +8639,7 @@ fn set_member(p: &Program, lhs: &SExpr, rhs: &SExpr, set_width: Width) -> Res<Ex
                 });
             }
             Width::Word => {}
+            Width::Quad => return Err(unsupported(lhs.span, "a pointer as a set member is")),
         }
         if wide && !integer_constructor(p, rhs) {
             best_effort(
@@ -8834,6 +8915,7 @@ fn set_element(p: &Program, x: &SExpr) -> Res<Expr> {
             ty: Scalar::unsigned(Width::Word),
             in_place: false,
         }),
+        Width::Quad => Err(unsupported(x.span, "a pointer as a set member is")),
     }
 }
 
@@ -9740,6 +9822,7 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
                     rhs: Box::new(count),
                     ty: long,
                 },
+                Width::Quad => return Err(unsupported(args[0].span, "a shift of a pointer is")),
             };
             Ok(reinterpret(shifted, ty))
         }
@@ -10115,6 +10198,27 @@ fn min_max(p: &Program, e: &SExpr, b: Builtin, x: &SExpr, y: &SExpr) -> Res<Expr
     })
 }
 
+/// The width of a scalar value of type `ty`: [`Width::of_size`] of its
+/// size, and [`Width::Quad`] for a pointer type of 8 bytes (aarch64,
+/// docs/aarch64.md).  No integer is 8 bytes.
+pub(crate) fn width_of_type(types: &TypeTable, ty: TypeId) -> Option<Width> {
+    let size = types.size(ty);
+    Width::of_size(size).or_else(|| (size == 8 && types.is_pointer(ty)).then_some(Width::Quad))
+}
+
+/// A pointer value on the program's target: [`Scalar::POINTER`], whose
+/// width is the target's pointer size ([`Program::pointer_size`]).
+pub(crate) fn ptr_scalar(p: &Program) -> Scalar {
+    Scalar {
+        width: if p.pointer_size == 8 {
+            Width::Quad
+        } else {
+            Width::Long
+        },
+        ..Scalar::POINTER
+    }
+}
+
 /// The IR scalar type of a value of type `ty` stored in `width`: its
 /// sign ([`sign_of`]), and whether it is a pointer ([`Scalar::pointer`]).
 pub(crate) fn scalar_of_type(types: &TypeTable, ty: TypeId, width: Width) -> Scalar {
@@ -10128,7 +10232,7 @@ pub(crate) fn scalar_of_type(types: &TypeTable, ty: TypeId, width: Width) -> Sca
 /// The IR scalar type of `e`'s type.
 fn scalar_of(p: &Program, e: &SExpr) -> Res<Scalar> {
     let size = p.types.size(e.ty);
-    let width = Width::of_size(size)
+    let width = width_of_type(&p.types, e.ty)
         .ok_or_else(|| unsupported(e.span, format!("a {size}-byte value is")))?;
     Ok(scalar_of_type(&p.types, e.ty, width))
 }
@@ -11672,7 +11776,7 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
         Storage::Extern { symbol } => {
             // Only a routine with the unit's data base has the cells.
             let own = DATA_SECTION.with(|d| d.borrow().as_deref() == Some(&p.data_section));
-            if p.is_program && own {
+            if p.is_program && own && p.extern_cells {
                 return Ok(extern_cell(symbol));
             }
             Ok(Addr::Symbol {
@@ -11691,10 +11795,7 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
         Storage::HiddenResult { slot } | Storage::OutOfFrame { slot } => Ok(Addr::Indirect {
             base: Box::new(Expr::Load {
                 addr: Addr::Frame(*slot),
-                ty: Scalar {
-                    pointer: true,
-                    ..Scalar::unsigned(Width::Long)
-                },
+                ty: ptr_scalar(p),
             }),
             offset: 0,
         }),
@@ -11716,7 +11817,8 @@ fn var_addr(p: &Program, id: VarId, span: Span) -> Res<Addr> {
                 // By address: the slot holds a pointer (LOG_$READ 0xE17810
                 // `movea.l (0xc,A6),A0; move.w (A0),...`).
                 Passing::ByAddress => {
-                    let width = Width::of_size(prm.conv.slot_size)
+                    let width = (prm.conv.slot_size == p.pointer_size)
+                        .then(|| ptr_scalar(p).width)
                         .ok_or_else(|| unsupported(span, "an address slot of this size is"))?;
                     Ok(Addr::Indirect {
                         base: Box::new(Expr::Load {
@@ -11842,7 +11944,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
         args.push(match a.conv.passing {
             Passing::ByValue => {
                 let size = p.types.size(prm_ty);
-                let width = Width::of_size(size).ok_or_else(|| {
+                let width = width_of_type(&p.types, prm_ty).ok_or_else(|| {
                     unsupported(a.expr.span, format!("a {size}-byte value argument is"))
                 })?;
                 let ty = scalar_of_type(&p.types, prm_ty, width);
@@ -11936,7 +12038,7 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // the value converted as in an assignment into a frame
                     // temporary of the parameter's size, whose address is
                     // passed, as for an expression.
-                    let width = Width::of_size(p.types.size(prm_ty));
+                    let width = width_of_type(&p.types, prm_ty);
                     let (Some(width), true, true) = (
                         width,
                         p.types.is_integer(a.expr.ty),
@@ -12079,12 +12181,12 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                     // for NET_IO_$SEND's 16-byte `univ` data_pages).
                     let own = (univ
                         && p.types.is_integer(a.expr.ty)
-                        && Width::of_size(p.types.size(prm_ty)).is_none()
+                        && width_of_type(&p.types, prm_ty).is_none()
                         && p.types.size(prm_ty) > p.types.size(a.expr.ty))
-                    .then(|| Width::of_size(p.types.size(a.expr.ty)))
+                    .then(|| width_of_type(&p.types, a.expr.ty))
                     .flatten();
                     let width = own
-                        .or_else(|| Width::of_size(p.types.size(prm_ty)))
+                        .or_else(|| width_of_type(&p.types, prm_ty))
                         .ok_or_else(|| {
                             unsupported(
                                 a.expr.span,
@@ -12223,12 +12325,7 @@ fn routine_pointer(p: &Program, x: &SExpr) -> Res<Expr> {
         ));
     }
     match &v {
-        Expr::Load {
-            ty: Scalar {
-                width: Width::Long, ..
-            },
-            ..
-        } => Ok(v),
+        Expr::Load { ty, .. } if ty.width == ptr_ty().width => Ok(v),
         _ => Err(unsupported(
             x.span,
             "a call through a routine pointer that is not a variable, field or element is",

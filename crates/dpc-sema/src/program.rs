@@ -63,6 +63,12 @@ pub struct Program {
     /// byte-aligned object of more than one byte at an address not known
     /// to be even needs no refusal (`dpc-ir` `check_even`).
     pub unaligned_access: bool,
+    /// The target's pointer size in bytes ([`dpc_target::Target::pointer_size`]).
+    pub pointer_size: u32,
+    /// The target's byte order ([`dpc_target::Target::big_endian`]).
+    pub big_endian: bool,
+    /// [`dpc_target::Target::program_extern_cells`].
+    pub extern_cells: bool,
 }
 
 impl Program {

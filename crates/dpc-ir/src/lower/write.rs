@@ -72,7 +72,7 @@ fn word(p: &Program, e: Option<&SExpr>) -> Res<Arg> {
 /// strings in upper case (pasio.codegen.md; domain-c's rev889-patterns
 /// 65: the IL node kinds' names).
 fn names_table(consts: &[String]) -> Vec<u8> {
-    let mut b = (consts.len() as u16).to_be_bytes().to_vec();
+    let mut b = super::word_bytes(consts.len() as u16).to_vec();
     for c in consts {
         b.push(c.len() as u8);
         b.extend(c.to_ascii_uppercase().bytes());

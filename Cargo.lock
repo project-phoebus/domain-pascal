@@ -6,8 +6,19 @@ version = 4
 name = "dpc"
 version = "0.1.0"
 dependencies = [
+ "dpc-aarch64",
  "dpc-ir",
  "dpc-m68k",
+ "dpc-sema",
+ "dpc-syntax",
+ "dpc-target",
+]
+
+[[package]]
+name = "dpc-aarch64"
+version = "0.1.0"
+dependencies = [
+ "dpc-ir",
  "dpc-sema",
  "dpc-syntax",
  "dpc-target",

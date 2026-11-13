@@ -44,9 +44,10 @@ compiler's output patterns**, not to produce good code.
 
 **Out of scope for now:**
 
-- Building any backend other than m68k.  Other targets are a future goal
-  (retargeting Domain/OS, above); the first is likely aarch64, which would
-  also let the test suite run compiled programs natively (section 4.5).
+- Backends other than m68k and aarch64.  The owner started the aarch64
+  backend on 2026-11-12: Mach-O output that runs in user mode on macOS
+  (section 4.5).  Other targets remain a future goal (retargeting
+  Domain/OS, above).
 - LLVM or any other large optimising backend.  These are **forbidden**.
 - Pascal I/O runtime (`writeln` etc.), reals and floating point, unless a
   kernel routine needs them.  Exception (owner, 2026-11-12): the real
@@ -373,10 +374,19 @@ enough that a reviewer can line it up with the image's instruction order.
 - Layout and parameter-passing decisions that come from the *language*
   stay in the front end.  Decisions that come from the *ABI* (word slots,
   A5, result registers) live in the target description.
-- More targets later (section 1, "Future goal"): same front end and IR, a
-  second selector and emitter per target.  aarch64 is the likely first; it
-  also lets the test suite run natively.  A new target needs its own ABI,
-  not Apollo's m68k one.  Do not build one now.  Meanwhile:
+- More targets (section 1, "Future goal"): same front end and IR, a
+  second selector and emitter per target.  A new target needs its own
+  ABI, not Apollo's m68k one.
+- **aarch64 (Mach-O, macOS user mode; owner, 2026-11-12).**  Crate
+  `dpc-aarch64`; design and status in `docs/aarch64.md`.  The owner's
+  decisions:
+  - pointers are 8 bytes, native addresses;
+  - data is native little-endian;
+  - calls follow Apple's arm64 ABI (arguments in x0-x7, result in x0),
+    so Pascal and C call each other directly.
+  The aarch64 backend is not an archive of anything: it aims at correct
+  code, not Apollo's patterns.  The exec tests are its gate.
+- Meanwhile:
   - do not hard-code m68k register names or ABI facts in the front end or
     the IR;
   - put target-independent analyses (IR use analysis, liveness, the
@@ -446,7 +456,8 @@ typing and the golden tests.
    kernel routine, swap it for the C object in a `../source` build in a
    scratch copy, and run `../source`'s `make check` and host tests where
    they apply.  Never modify `../source`: work in `tmp/`.
-5. **Later: aarch64 execution tests.**  Compile Pascal test programs for the
+5. **aarch64 execution tests** (started 2026-11-12: `make exectest-a64`,
+   docs/aarch64.md).  Originally: compile Pascal test programs for the
    host and run them, checking semantics (sets, variant records, nested
    routines, `div`/`mod` signs against the M$ARITH models in
    `../source/domain_os/math/{mult,div,mod}.c`).

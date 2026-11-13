@@ -170,12 +170,13 @@ pub enum InitValue {
 }
 
 impl InitValue {
-    /// The bytes the value occupies, from its [`DataInit::offset`].
-    pub fn size(&self) -> u32 {
+    /// The bytes the value occupies, from its [`DataInit::offset`], on a
+    /// target whose pointers are `pointer_size` bytes.
+    pub fn size(&self, pointer_size: u32) -> u32 {
         match self {
             InitValue::Int { size, .. } => *size,
             InitValue::Bytes(b) => b.len() as u32,
-            InitValue::Address(_) => 4,
+            InitValue::Address(_) => pointer_size,
             InitValue::Bits { bit, width, .. } => (bit + width).div_ceil(8),
         }
     }
@@ -441,6 +442,10 @@ pub enum Width {
     Word,
     /// 4 bytes.
     Long,
+    /// 8 bytes: a pointer on a target whose pointers are 8 bytes (aarch64,
+    /// docs/aarch64.md), never an integer.  [`Width::of_size`] does not
+    /// give it; lowering gives it to pointer types only (`width_of_type`).
+    Quad,
 }
 
 impl Width {
@@ -459,6 +464,7 @@ impl Width {
             Width::Byte => 1,
             Width::Word => 2,
             Width::Long => 4,
+            Width::Quad => 8,
         }
     }
 }
@@ -1293,9 +1299,27 @@ impl Expr {
             | Expr::BitElem { .. }
             | Expr::Test(_) => Scalar::BOOLEAN,
             Expr::SetSr(_) => Scalar::signed(Width::Word),
-            Expr::AddrOf(_) => Scalar::POINTER,
+            Expr::AddrOf(_) => pointer_type(),
         }
     }
+}
+
+thread_local! {
+    static POINTER_TYPE: std::cell::Cell<Scalar> = const { std::cell::Cell::new(Scalar::POINTER) };
+}
+
+/// The type of a pointer value on the target being compiled for: the type
+/// of an [`Expr::AddrOf`].  [`Scalar::POINTER`] (4 bytes, m68k) unless
+/// lowering set another for this thread ([`set_pointer_type`]; aarch64's
+/// pointers are 8 bytes, docs/aarch64.md).
+pub fn pointer_type() -> Scalar {
+    POINTER_TYPE.with(|c| c.get())
+}
+
+/// Set [`pointer_type`] for this thread (`lower` does, from the program's
+/// target).
+pub fn set_pointer_type(t: Scalar) {
+    POINTER_TYPE.with(|c| c.set(t));
 }
 
 /// An address.

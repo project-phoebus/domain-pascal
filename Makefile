@@ -4,7 +4,8 @@
 CARGO   ?= cargo
 PYTHON  ?= python3
 
-.PHONY: all build runtime stable test exectest corpus conform snapshot snapshot-update linktest srcsurvey clean
+PHONY_A64 := exectest-a64
+.PHONY: all build runtime stable test exectest $(PHONY_A64) corpus conform snapshot snapshot-update linktest srcsurvey clean
 
 all: build
 
@@ -32,6 +33,30 @@ runtime:
 	@if command -v $(M68K_AS) >/dev/null 2>&1 && command -v $(M68K_AR) >/dev/null 2>&1; then \
 	  $(MAKE) -s --no-print-directory $(RUNTIME_LIB); \
 	else echo "runtime: $(M68K_AS) or $(M68K_AR) not found; m68k runtime not built (skipped)"; fi
+	@if [ "$$(uname -s)/$$(uname -m)" = Darwin/arm64 ]; then \
+	  $(MAKE) -s --no-print-directory $(A64_RUNTIME_LIB); \
+	else echo "runtime: not an arm64 macOS host; aarch64 runtime not built (skipped)"; fi
+
+# The aarch64 run-time library (runtime/README.md, docs/aarch64.md): C
+# under Apple's arm64 calling convention, runtime/aarch64/<name>.c into
+# target/runtime/aarch64/libdpcrt.a (`dpc
+# --print-runtime=aarch64-apple-darwin' names it).  Built on an arm64 macOS
+# host only for now.
+A64_CC ?= clang
+A64_AR ?= ar
+A64_RUNTIME_SRCS := runtime/aarch64/dpcrt.c
+A64_RUNTIME_OUT := target/runtime/aarch64
+A64_RUNTIME_OBJS := $(patsubst runtime/aarch64/%.c,$(A64_RUNTIME_OUT)/%.o,$(A64_RUNTIME_SRCS))
+A64_RUNTIME_LIB := $(A64_RUNTIME_OUT)/libdpcrt.a
+
+$(A64_RUNTIME_OUT)/%.o: runtime/aarch64/%.c
+	@mkdir -p $(@D)
+	$(A64_CC) -arch arm64 -O2 -Wall -Wno-dollar-in-identifier-extension -c -o $@ $<
+
+$(A64_RUNTIME_LIB): $(A64_RUNTIME_OBJS)
+	@rm -f $@
+	$(A64_AR) rcs $@ $^
+	@echo "runtime: built $@"
 
 $(RUNTIME_OUT)/%.o: runtime/m68k/%.s
 	@mkdir -p $(@D)
@@ -69,6 +94,7 @@ test:
 	$(CARGO) test
 	@if [ -d tools/tests ]; then $(PYTHON) -m unittest discover -s tools/tests; fi
 	$(MAKE) exectest
+	$(MAKE) exectest-a64
 	$(MAKE) corpus
 	$(MAKE) snapshot
 
@@ -80,6 +106,13 @@ test:
 # Under a second.
 exectest: build
 	$(PYTHON) tools/exectest.py
+
+# The execution tests on aarch64 (docs/aarch64.md, "Tests"): the same
+# tests compiled with `dpc --target=aarch64-apple-darwin' and run natively,
+# with the exceptions of tests/exec/aarch64.txt.  Skipped with a notice off
+# an arm64 macOS host.  About 40 seconds.
+exectest-a64: build
+	$(PYTHON) tools/exectest_a64.py
 
 # Front-end corpus test (bead domain-pascal-qia): dpc --check-only over
 # Apollo's SR10.2 inserts (sys/ins/*.ins.pas) and Pascal programs, from

@@ -370,10 +370,17 @@ pub(super) fn assign(p: &Program, st: &SStmt, target: &SExpr, value: &SExpr) -> 
         let stmts = match q {
             Prec::S => vec![(dst, (v as f32).to_bits() as i64)],
             Prec::D => {
+                // The high longword first in memory on a big-endian
+                // target, the low one on a little-endian one.
                 let b = v.to_bits();
+                let (first, second) = if p.big_endian {
+                    (b >> 32, b)
+                } else {
+                    (b, b >> 32)
+                };
                 vec![
-                    (dst.clone(), (b >> 32) as u32 as i64),
-                    (dst.offset_by(4), b as u32 as i64),
+                    (dst.clone(), first as u32 as i64),
+                    (dst.offset_by(4), second as u32 as i64),
                 ]
             }
         };

@@ -1,0 +1,73 @@
+# tests/exec/aarch64.txt - the execution tests on aarch64
+# (tools/exectest_a64.py; docs/aarch64.md, "Tests").
+#
+#   NAME skip REASON     the test does not apply on aarch64
+#   NAME xfail REASON    a known failure on aarch64 (must fail)
+#   NAME expect REASON   the aarch64 output differs by design; it is
+#                        tests/exec/aarch64/NAME.expect
+#
+# `expect' files whose only change is the order of bytes in `exec_$log_mem'
+# dumps of words, longwords and register-sized sets (little-endian; owner
+# 2026-11-12) were checked to hold the same bytes as the m68k expectation
+# on each line, every other line unchanged.
+
+byte_statics expect little-endian memory dumps
+const_fill expect little-endian memory dumps
+device_copies expect little-endian memory dumps
+device_set_members expect little-endian memory dumps (register-sized sets)
+device_updates expect little-endian memory dumps
+for_tail expect little-endian memory dumps
+frame_layout expect little-endian memory dumps
+indexed_for expect little-endian memory dumps
+initdata expect little-endian memory dumps
+ogf8_results expect little-endian memory dumps
+records expect little-endian memory dumps
+set_byte_updates expect little-endian memory dumps (register-sized sets)
+set_compares expect little-endian memory dumps (register-sized sets)
+sets expect little-endian memory dumps (register-sized sets)
+small_copies expect little-endian memory dumps
+
+be_l_stmts skip exec_$counter is the m68k runner's device register
+be_l_args expect a type transfer of a longword to a record of two words: little-endian fields
+be_x_param_part expect a record argument given as one longword: little-endian fields
+narrow expect its last two lines read exec_$counter, the m68k runner's device register (a plain variable here)
+small_copies_more expect little-endian memory dumps
+record_results expect status_$t's fields over its `all': little-endian integers under the reference's packed layout
+packed_fields expect packed records shown as longwords: bit fields keep the reference's byte image, integers are little-endian
+packed_word_sign expect a word stored over a packed record's bit fields: little-endian integer, reference byte image
+transfer_fields expect type transfers between records and integers: little-endian
+univ_small_const expect an integer cell read as a record of two words: little-endian
+
+# The m68k runner's device register: each read of exec_$counter counts there.
+param_attrs skip exec_$counter is the m68k runner's device register
+volatile skip exec_$counter is the m68k runner's device register
+
+# Supervisor instructions (ref Appendix E) have no user-mode meaning.
+ptr_a0 skip disable/enable (ref Appendix E)
+
+# Real arithmetic: bead domain-pascal-s6tc.
+reals xfail real arithmetic on aarch64 (bead domain-pascal-s6tc)
+
+# A type transfer between a pointer (8 bytes on aarch64) and integer32 (4)
+# is refused: ref "Type Transfer Functions", p. 4-197, wants equal sizes.
+addr_values skip a type transfer between a pointer and integer32
+be_h4ba_flow skip a type transfer between a pointer and integer32
+be_h4ba_mem skip a type transfer between a pointer and integer32
+be_h4ba_misc skip a type transfer between a pointer and integer32
+be_ptr_views skip a type transfer between a pointer and integer32
+be_sq4a skip a type transfer between a pointer and integer32
+be_u_kinds skip a type transfer between a pointer and integer32
+index_parts skip a type transfer between a pointer and integer32
+late_slot_pass skip a type transfer between a pointer and integer32
+ogf8_args skip a type transfer between a pointer and integer32
+park_int skip a type transfer between a pointer and integer32
+park_int_calls skip a type transfer between a pointer and integer32
+park_int_edge skip a type transfer between a pointer and integer32
+park_int_if skip a type transfer between a pointer and integer32
+park_int_if_edge skip a type transfer between a pointer and integer32
+pointer_consts skip a type transfer between a pointer and integer32
+ptr_dregs skip a type transfer between a pointer and integer32
+ptr_dregs_flow skip a type transfer between a pointer and integer32
+store_order skip a type transfer between a pointer and integer32
+univ_symbol_addr skip a type transfer between a pointer and integer32
+wide_index skip a type transfer between a pointer and integer32

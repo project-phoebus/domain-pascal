@@ -13,6 +13,14 @@ segments of the image, the Domain Pascal compiler's run-time support:
   shipped so that a kernel linked with dpc's runtime (`../source`) gets
   the image's bytes for that segment from it too.
 
+For aarch64 (docs/aarch64.md) the library is C, `runtime/aarch64/dpcrt.c`,
+built on an arm64 macOS host into `target/runtime/aarch64/libdpcrt.a`
+(`dpc --print-runtime=aarch64-apple-darwin`): the Pascal run time's
+`PAS_$WRITE`, `PAS_$WRITELN` and `PAS_$OUTPUT` (`write`/`writeln` to the
+standard output), and `PAS_$NEW`/`PAS_$DISPOSE`, under Apple's arm64
+calling convention.  aarch64 needs no M$ARITH: it multiplies and divides
+in hardware.
+
 ## Layout
 
 | Path | What |
@@ -23,6 +31,8 @@ segments of the image, the Domain Pascal compiler's run-time support:
 | `target/runtime/<target>/` | the built library (`make build` / `make runtime`) |
 | `target/runtime/m68k/m_arith.o`, `pas_set_build.o` | the assembled segments |
 | `target/runtime/m68k/libm_arith.a` | the archive to link with (members `m_arith.o`, `pas_set_build.o`) |
+| `runtime/aarch64/dpcrt.c` | the aarch64 run time, in C |
+| `target/runtime/aarch64/libdpcrt.a` | the aarch64 archive (member `dpcrt.o`) |
 
 The archive keeps the name `libm_arith.a` from when M$ARITH was its only
 member: `dpc --print-runtime` prints it, `../source` extracts

@@ -1,0 +1,22 @@
+mem 0a 02
+mem 02 02
+mem 02 00
+mem 00 00
+true
+false
+true
+mem 02 02
+mem 02 00
+mem 02 00
+mem 00 00
+false
+false
+true
+mem 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00 21
+true
+false
+false
+mem 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00 21
+true
+true
+false

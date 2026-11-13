@@ -1,0 +1,31 @@
+true
+true
+false
+false
+true
+true
+false
+true
+false
+true
+false
+true
+true
+true
+true
+true
+false
+true
+false
+false
+false
+false
+true
+true
+mem 01 00
+mem 00 00
+mem 08 00
+mem 01 00 00 00
+mem 00 00 00 80
+mem 10 00 00 00
+mem 01 00

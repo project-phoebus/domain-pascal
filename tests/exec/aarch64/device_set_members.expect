@@ -1,0 +1,9 @@
+mem 5a 5a 7f ff a5 a5
+mem 5a 5a fe fe a5 a5
+mem 5a 5a 01 00 a5 a5
+mem 5a 5a 81 01 a5 a5
+mem a5 f7 5a 5a
+mem a5 09 5a 5a
+mem ef 3c fe ff ff ef c3 c3
+mem ef 3c 01 80 01 00 c3 c3
+mem 01 80

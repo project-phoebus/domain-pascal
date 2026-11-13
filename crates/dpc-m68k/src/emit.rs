@@ -1506,7 +1506,7 @@ fn data_bytes(data: &dpc_ir::DataArea, size: u32) -> (Vec<u8>, Vec<(u32, &dpc_ir
     let mut addrs: Vec<(u32, &dpc_ir::InitAddr)> = Vec::new();
     for init in &data.init {
         let at = init.offset as usize;
-        let n = init.value.size();
+        let n = init.value.size(4);
         addrs.retain(|&(o, _)| o + 4 <= init.offset || o >= init.offset + n);
         match &init.value {
             dpc_ir::InitValue::Int { size, value } => {

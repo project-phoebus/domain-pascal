@@ -11,6 +11,12 @@ Run them with `make exectest`, which `make test` also runs, or with
 `python3 tools/exectest.py [-v] [--trace] [tests/exec/NAME.pas ...]`.
 They take under a second.
 
+The same tests also run natively on aarch64 (`make exectest-a64`,
+`tools/exectest_a64.py`; docs/aarch64.md, "Tests"), compiled with `dpc
+--target=aarch64-apple-darwin`.  `tests/exec/aarch64.txt` lists the tests
+that do not apply there and those whose output differs there by design
+(little-endian memory), with that output in `tests/exec/aarch64/`.
+
 ## Prerequisites
 
 - **Musashi** (Karl Stenerud's 68000-family emulator, version 3.3).  It is

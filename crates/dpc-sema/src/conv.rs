@@ -127,7 +127,16 @@ pub fn param_conv(
     // by value under val_param; whether that includes small records and
     // non-char arrays, or whether only c_param passes records by value
     // (5.5.12), is not stated.  The literal reading of 5.5.7 is used.
-    let small_enough = size <= target.val_param_max_size() && !char_array;
+    // A pointer goes by value whatever the target's pointer size: on the
+    // 680x0 a pointer is four bytes, and so within ref 5.5.7's limit; an
+    // 8-byte pointer (aarch64, docs/aarch64.md) keeps that convention.
+    let pointer = matches!(
+        types.kind(ty),
+        TypeKind::Pointer { .. } | TypeKind::UnivPtr | TypeKind::RoutinePointer(_)
+    );
+    let small_enough =
+        (size <= target.val_param_max_size() || (pointer && size == target.pointer_size()))
+            && !char_array;
     // UNIV "Cancels the effect of val_param and internal" (Table 5-1).
     let by_value = !univ && ((small_by_value && small_enough) || (c_param && is_record));
     if by_value {

@@ -263,6 +263,7 @@ fn symbol_address(e: &Expr) -> Option<&str> {
 
 fn imm(value: i64, w: Width) -> i64 {
     match w {
+        Width::Quad => unreachable!("m68k pointers are 4 bytes"),
         Width::Byte => value & 0xff,
         Width::Word => value as i16 as i64,
         Width::Long => value as i32 as i64,
@@ -401,6 +402,7 @@ fn three_bit_odd_part(span: Span, c: i64) -> Diagnostic {
 
 fn size_of(w: Width) -> Size {
     match w {
+        Width::Quad => unreachable!("m68k pointers are 4 bytes"),
         Width::Byte => Size::B,
         Width::Word => Size::W,
         Width::Long => Size::L,
@@ -18415,6 +18417,7 @@ impl Selector {
                 let value: &Expr = &peeled;
                 match value {
                     Expr::Const { value: v, ty } => match ty.width {
+                        Width::Quad => unreachable!("m68k pointers are 4 bytes"),
                         Width::Long => self.push_long_const(*v),
                         Width::Word if *v == 0 => self.out.push(Insn::Clr { size: Size::W, dst }),
                         Width::Word => self.out.push(Insn::Move {
@@ -20363,6 +20366,7 @@ impl Selector {
     /// Constant `c` into data register `d` ([`Self::load_const`]).
     fn const_into(&mut self, c: i64, w: Width, d: RegNo) {
         let signed = match w {
+            Width::Quad => unreachable!("m68k pointers are 4 bytes"),
             Width::Byte => c as i8 as i64,
             Width::Word => c as i16 as i64,
             Width::Long => c as i32 as i64,
@@ -21685,6 +21689,7 @@ impl Selector {
         }
         let pow2 = c.filter(|&c| c > 1 && c & (c - 1) == 0);
         match ty.width {
+            Width::Quad => unreachable!("m68k pointers are 4 bytes"),
             Width::Byte => Err(unsupported(self.span, "a byte `div`/`mod` is")),
             Width::Word => {
                 if [lhs, rhs].iter().any(|e| {
@@ -24577,6 +24582,7 @@ impl Selector {
             };
             if let Expr::Const { value, .. } = **m {
                 let mask = match ty.width {
+                    Width::Quad => unreachable!("m68k pointers are 4 bytes"),
                     Width::Byte => value & 0xff,
                     Width::Word => value & 0xffff,
                     Width::Long => value & 0xffff_ffff,
@@ -25174,6 +25180,7 @@ impl Selector {
             }
             if v != 0 {
                 let (size, imm_v, dst) = match unit {
+                    Width::Quad => unreachable!("m68k pointers are 4 bytes"),
                     Width::Byte => (Size::B, imm(v, Width::Byte), dst),
                     Width::Word if v & 0xff == 0 => (Size::B, v >> 8, dst),
                     Width::Word => (Size::W, imm(v, Width::Word), dst),
@@ -27714,6 +27721,7 @@ impl Selector {
         let w = ty.width;
         let size = size_of(w);
         let all: u64 = match w {
+            Width::Quad => unreachable!("m68k pointers are 4 bytes"),
             Width::Long => 0xffff_ffff,
             Width::Word => 0xffff,
             // A one-byte set (codegen-patterns 5.1, "One-byte sets"):

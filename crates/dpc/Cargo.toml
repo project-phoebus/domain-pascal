@@ -13,4 +13,5 @@ dpc-syntax = { path = "../dpc-syntax" }
 dpc-sema = { path = "../dpc-sema" }
 dpc-ir = { path = "../dpc-ir" }
 dpc-m68k = { path = "../dpc-m68k" }
+dpc-aarch64 = { path = "../dpc-aarch64" }
 dpc-target = { path = "../dpc-target" }

@@ -8,6 +8,7 @@
 //!            [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]...
 //!            [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]...
 //!            [--merge-constant-stores] [--substitute-constants] [--strict]
+//!            [--target=TRIPLE]
 //!            [--parse-only | --dump-ast | --check-only | --dump-locals] file.pas
 //!
 //! The reference's compiler options (ref 6.4, Table 6-2, pp. 6-6..6-8:
@@ -171,6 +172,7 @@ const USAGE: &str = "usage: dpc --print-runtime[=TARGET]\n       \
                      [--a5-absolute=ROUTINE,...] [--module-routine=[SECTION:]ROUTINE=0xADDR]... \
                      [--schedule=off|r11|r11:N] [--data-base=SECTION=SYMBOL]... \
                      [--merge-constant-stores] [--substitute-constants] [--strict] \
+                     [--target=TRIPLE] \
                      [--parse-only | --dump-ast | --check-only | --dump-locals] \
                      [reference options: -config var..., -cond, -idir dir..., -nwarn, -msgs, \
                      -b [pathname], -nb, -natural, -comchk, ... (docs/compiler-options.md)] \
@@ -215,6 +217,49 @@ struct Args {
     /// `--strict`: every refusal is an error, also those with a
     /// best-effort path (`dpc_syntax::diag::best_effort`).
     strict: bool,
+    /// `--target=TRIPLE`: the machine the output is for.
+    target: TargetName,
+}
+
+/// The targets `--target=` names, as LLVM-style triples
+/// `ARCH-VENDOR-OS[-ENV]` (CLAUDE.md 4.5; docs/aarch64.md).  Only the
+/// triples [`TargetName::TRIPLES`] lists are supported for now; others
+/// (`aarch64-unknown-linux-gnu`, ...) are refused until their backends
+/// exist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TargetName {
+    /// Apollo's MC680x0 (the default): gas syntax for `m68k-elf-as`.
+    #[default]
+    M68k,
+    /// aarch64, Mach-O for macOS user mode (Apple `as`).
+    Aarch64Darwin,
+}
+
+impl TargetName {
+    /// The supported triples, canonical spelling first for each target.
+    const TRIPLES: &'static [(&'static str, TargetName)] = &[
+        ("m68k-apollo-domainos", TargetName::M68k),
+        ("aarch64-apple-darwin", TargetName::Aarch64Darwin),
+        ("arm64-apple-darwin", TargetName::Aarch64Darwin),
+        ("aarch64-apple-macos", TargetName::Aarch64Darwin),
+        ("arm64-apple-macos", TargetName::Aarch64Darwin),
+    ];
+
+    /// The target of `triple`.  An OS version suffix is accepted, as LLVM
+    /// spells it (`arm64-apple-macos14.0`, `aarch64-apple-darwin23.1.0`).
+    fn parse(triple: &str) -> Option<TargetName> {
+        let t = triple.to_ascii_lowercase();
+        let base = t.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        Self::TRIPLES.iter().find(|(n, _)| *n == base).map(|&(_, k)| k)
+    }
+
+    fn supported() -> String {
+        Self::TRIPLES
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The routine names of `--a5-always=`, `--a5-absolute=`,
@@ -335,6 +380,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut merge_constant_stores = false;
     let mut substitute_constants = false;
     let mut strict = false;
+    let mut target: Option<TargetName> = None;
     while let Some(arg) = argv.next() {
         // The reference's options first, by their exact spellings
         // (`refopts`; none is spelt like one of dpc's own).
@@ -493,6 +539,18 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
                 substitute_constants = true;
             }
+            s if s.starts_with("--target=") => {
+                if target.is_some() {
+                    return Err("--target given more than once".into());
+                }
+                let v = &s["--target=".len()..];
+                target = Some(TargetName::parse(v).ok_or_else(|| {
+                    format!(
+                        "--target: unsupported target `{v}` (supported: {})",
+                        TargetName::supported()
+                    )
+                })?);
+            }
             "--strict" => {
                 if strict {
                     return Err("--strict given more than once".into());
@@ -556,6 +614,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         merge_constant_stores,
         substitute_constants,
         strict,
+        target: target.unwrap_or_default(),
     })
 }
 
@@ -572,7 +631,11 @@ fn compile(
             args.input.display()
         ))]
     })?;
-    let target = dpc_m68k::M68k { cpu: args.refs.cpu };
+    let m68k = dpc_m68k::M68k { cpu: args.refs.cpu };
+    let target: &dyn Target = match args.target {
+        TargetName::M68k => &m68k,
+        TargetName::Aarch64Darwin => &dpc_aarch64::Aarch64,
+    };
     let opts = preprocess::Options {
         include_dirs: args.include_dirs.clone(),
         root: args.root.clone(),
@@ -603,7 +666,7 @@ fn compile(
     let sema = dpc_sema::Options {
         natural: args.refs.natural,
     };
-    let program = dpc_sema::analyze_with(&unit, &target, &sema)?;
+    let program = dpc_sema::analyze_with(&unit, target, &sema)?;
     warnings.extend(program.warnings.iter().cloned());
     if args.stop == Stop::AfterCheck {
         return Ok(());
@@ -635,6 +698,12 @@ fn compile(
             dpc_ir::constprop::substitute_constants(f, &abnormal);
         }
     }
+    let asm = if args.target == TargetName::Aarch64Darwin {
+        let opts = dpc_aarch64::emit::Options {
+            main: program.main.map(|m| program.routine(m).symbol.clone()),
+        };
+        dpc_aarch64::emit::emit(&module, &args.input.display().to_string(), &opts)?
+    } else {
     let opts = dpc_m68k::emit::Options {
         fragment: args.fragment.clone(),
         loop_align: args.loop_align.clone(),
@@ -644,7 +713,8 @@ fn compile(
         merge_constant_stores: args.merge_constant_stores,
         cpu: args.refs.cpu,
     };
-    let asm = dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?;
+    dpc_m68k::emit::emit(&module, &args.input.display().to_string(), &opts)?
+    };
     // -nb (ref 6.4.3, p. 6-9): compiled, but no output file.
     if args.refs.binary == Binary::Suppress {
         return Ok(());
@@ -810,10 +880,16 @@ fn print_runtime_target(opt: &str) -> Option<Result<&'static dyn Target, String>
         Some(v) => v.strip_prefix('=')?,
         None => return None,
     };
-    Some(match name {
-        "m68k" => Ok(&dpc_m68k::M68k {
+    // A triple (`--target`'s), or a target's short name (`m68k`).
+    let kind = match name {
+        "m68k" => Some(TargetName::M68k),
+        n => TargetName::parse(n),
+    };
+    Some(match kind {
+        Some(TargetName::M68k) => Ok(&dpc_m68k::M68k {
             cpu: dpc_m68k::Cpu::M68010,
         }),
+        Some(TargetName::Aarch64Darwin) => Ok(&dpc_aarch64::Aarch64),
         _ => Err(format!("--print-runtime: unknown target `{name}`")),
     })
 }
@@ -941,7 +1017,12 @@ fn run(args: &Args) -> ExitCode {
     });
     // The refusals taken on a best-effort path (not `--strict`), as
     // warnings: the output is correct but not checked against the image.
-    warnings.extend(dpc_syntax::diag::take_best_effort());
+    // They speak of Apollo's m68k code, so another target drops them
+    // (docs/aarch64.md); `--strict` still refuses those paths.
+    let best_effort = dpc_syntax::diag::take_best_effort();
+    if args.target == TargetName::M68k {
+        warnings.extend(best_effort);
+    }
     let mut counts = Counts::default();
     // -nwarn (ref 6.4.30, p. 6-35) suppresses warning messages, "though
     // it does report on the total number of warnings that would have been
@@ -1153,6 +1234,29 @@ mod tests {
             PathBuf::from("/x/target/runtime")
         );
         assert_eq!(runtime_dir(Some("/rt".into()), exe), PathBuf::from("/rt"));
+    }
+
+    #[test]
+    fn target_triples() {
+        assert_eq!(args(&["m.pas"]).unwrap().target, TargetName::M68k);
+        for (t, k) in [
+            ("m68k-apollo-domainos", TargetName::M68k),
+            ("aarch64-apple-darwin", TargetName::Aarch64Darwin),
+            ("arm64-apple-darwin", TargetName::Aarch64Darwin),
+            ("arm64-apple-macos14.0", TargetName::Aarch64Darwin),
+            ("aarch64-apple-darwin23.1.0", TargetName::Aarch64Darwin),
+        ] {
+            let a = args(&[&format!("--target={t}"), "m.pas"]).unwrap();
+            assert_eq!(a.target, k, "{t}");
+        }
+        for t in ["aarch64", "m68k", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin"] {
+            let e = args(&[&format!("--target={t}"), "m.pas"]).err().unwrap();
+            assert!(e.contains("unsupported target"), "{t}: {e}");
+        }
+        assert!(args(&["--target=m68k-apollo-domainos", "--target=m68k-apollo-domainos", "m.pas"]).is_err());
+        assert!(print_runtime_target("--print-runtime=aarch64-apple-darwin")
+            .unwrap()
+            .is_ok_and(|t| t.name() == "aarch64"));
     }
 
     #[test]

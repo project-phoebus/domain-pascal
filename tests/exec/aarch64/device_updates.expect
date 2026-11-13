@@ -1,0 +1,13 @@
+mem 34 12 21 00 78 56
+mem 34 12 01 00 78 56
+mem 34 12 01 80 78 56
+mem 34 12 00 80 78 56
+mem ff bf 40 00
+mem 01 00 fd ff
+mem f7 ff 18 00
+mem ff ff 00 00
+mem a5 fe 7f ff
+mem a5 fd 80 00
+mem 5a 01 7f fe
+mem 5a 03 7f fe
+mem 00 fc 00 00
