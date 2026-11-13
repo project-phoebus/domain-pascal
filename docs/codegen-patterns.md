@@ -3467,9 +3467,13 @@ variables.  Each module's static data is a data segment, addressed off
       variables is **Uncertain** (the larger headers, `pst` 0x3BC and
       `uctnode` 0xFC, may hold far constants as DIR's does, and they are
       among the 4 with a cell not seen read).  The kernel's modules use
-      absolute addresses instead, so whether a separately compiled
-      /com module uses cells is not known; dpc does this for a `program`
-      only.  `.data` has the cells' addresses, and `.long SYM` is dpc's
+      absolute addresses instead.  A separately compiled Rev 8.89
+      `module` does use them (reported by domain-c: cc.a88k
+      isc_pass_1_04_integer_arithmetic, A5 = 0x45898C, 0x10A0C2 and
+      0x10A0D4 `move.l (-4,A5),-(SP)` push PAS_$OUTPUT from the cell at
+      A5-4, a `.rwdi` longword relocated against it); dpc does this for
+      a `program` only, and a module pushes the absolute address (part
+      of the Rev 8.89 layout, held by the owner 2026-11-12).  `.data` has the cells' addresses, and `.long SYM` is dpc's
       form of it: acl's `.data` has no bytes in the file.
     - *Best effort:* an 8-byte copy into such a variable (no image site
       read yet).
@@ -12272,7 +12276,12 @@ temporary for an expression (a real one through the floating point
 interpreter, 8.9); a character array's `width` is its length and its
 field width goes in `digits`; an enumeration passes its name table, a
 word count and counted upper-case names, from the code (rev889-patterns
-65).  Refused under `--strict`.  Exec test `writes` (the runner's
+65).  Rev 8.89 passes fewer arguments for a string constant without a
+field width: cc.a88k 0x10A0BA..0x10A0D0 (reported by domain-c) pushes
+`move.w #34` (width), `pea` (the string), the file, `move.w #51` (fmt)
+and pops 12, with no digits, names or pad, where dpc pushes all 18
+bytes and the pad (a form difference; which items take the short form is
+not known, bead domain-pascal-j714).  Refused under `--strict`.  Exec test `writes` (the runner's
 `run_pas_write` prints them).
 
 ## 9. Status returns and error exits (Verified at the sites given; implemented in part)
