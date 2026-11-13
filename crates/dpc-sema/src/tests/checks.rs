@@ -142,46 +142,43 @@ fn integer_literal_range() {
     assert_eq!(v("v5"), ConstValue::Int(-(i32::MAX as i64)));
     assert_eq!(v("v6"), ConstValue::Int(1));
     assert_eq!(v("v7"), ConstValue::Int(i32::MIN as i64));
-    // Decimal literals above 2147483647 are refused, not wrapped.
-    for c in [
-        "4294967295",
-        "2147483648",
-        "2147483649",
-        "-2147483649",
-        "+2147483648",
+    // Literals and constant expressions beyond 32 bits are dpc's
+    // integer64 (not in the reference: ref 3.2.3 p. 3-5 and 3.4 p. 3-10
+    // make them invalid; owner, 2026-11-12, docs/aarch64.md), never
+    // wrapped; stored into a 32-bit integer they are out of its range.
+    for (c, want) in [
+        ("4294967295", 4294967295i64),
+        ("2147483648", 2147483648),
+        ("-2147483649", -2147483649),
+        ("+2147483648", 2147483648),
+        ("9223372036854775807", i64::MAX),
+        ("-9223372036854775808", i64::MIN),
+        ("16#100000000", 1 << 32),
+        ("16#FFFFFFFFFFFFFFFF", -1),
+        ("2147483647 + 1", 2147483648),
+        ("-2147483647 - 2", -2147483649),
+        ("16#7FFFFFFF * 2", 4294967294),
+        ("-(-2147483647 - 1)", 2147483648),
+        ("-16#80000000", 2147483648),
+        ("65536 * 65536", 1 << 32),
     ] {
-        let e = errs(&format!("module m; const c = {c};"));
-        assert_eq!(e.len(), 1, "{c}: {e:?}");
-        assert!(
-            e[0].contains("constants larger than 2147483647 are not valid"),
-            "{c}: {e:?}"
-        );
+        let q = module(&format!("const c = {c}; var v: integer64 := c;"));
+        assert_eq!(var(&q, "v").init.clone().unwrap()[0].value, ConstValue::Int(want), "{c}");
     }
-    assert_err(
-        "module m; var v: integer32; procedure p; begin v := 4294967295 end;",
-        "not valid",
-    );
-    assert_err(
-        "module m; procedure q(x: integer32); val_param; extern;
-         procedure p; begin q(4294967295) end;",
-        "not valid",
-    );
-    // A based literal wider than 32 bits is refused too.
-    assert_err("module m; const c = 16#100000000;", "wider than 32 bits");
-    assert_err(
-        "module m; const c = 2#111111111111111111111111111111111;",
-        "wider than 32 bits",
-    );
-    // Constant expressions out of the 32-bit range are refused, not wrapped.
-    for c in [
-        "2147483647 + 1",
-        "-2147483647 - 2",
-        "16#7FFFFFFF * 2",
-        "-(-2147483647 - 1)",
-        "-16#80000000",
-        "65536 * 65536",
+    // A 32-bit pattern stays one (ref 3.4 NOTE p. 3-10).
+    assert_eq!(v("v3"), ConstValue::Int(-1));
+    for (src, what) in [
+        ("module m; var v: integer32; procedure p; begin v := 4294967295 end;", "out of range for integer32"),
+        (
+            "module m; procedure q(x: integer32); options(val_param); extern;
+             procedure p; begin q(4294967295) end;",
+            "out of range for integer32",
+        ),
+        ("module m; const c = 9223372036854775808;", "larger than an integer64"),
+        ("module m; const c = 9223372036854775807 + 1;", "more than 64 bits"),
+        ("module m; const c = -(-9223372036854775807 - 1);", "more than 64 bits"),
     ] {
-        assert_err(&format!("module m; const c = {c};"), "out of range");
+        assert_err(src, what);
     }
 }
 
@@ -1701,8 +1698,8 @@ fn predefined_functions_in_constants() {
         "module m; const c = rshft(-9, 3);",
         "constant expression expected",
     );
-    // sqr out of the constants' range (ref 3.2.3).
-    assert_err("module m; const c = sqr(70000);", "out of range");
+    // sqr out of the constants' range (64 bits with dpc's integer64).
+    assert_err("module m; const c = sqr(4000000000);", "out of range");
     // A folded result is typed as any integer constant (ref 3.2.3): one
     // outside -32768..32767 is not an integer16 value, as the literal is
     // not; `xor` is not a boolean operator ("Xor", p. 4-221).

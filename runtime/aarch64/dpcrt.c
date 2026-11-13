@@ -15,7 +15,8 @@
      headings of ../source lib/ftnlib/pasio.pas (`pas_$write(fmt; var f;
      in v; width; digits; in names); options(val_param)`), and the format
      word of dpc-ir's lower/write.rs: high byte the default width, bits
-     7..6 the width's form, 5..4 the size, 3..0 the kind.
+     7..6 the width's form, 5..4 the size, 3..0 the kind (kind 11, a
+     64-bit integer, is dpc's own).
    - PAS_$NEW / PAS_$DISPOSE: `new` and `dispose` (pp. 4-117, 4-64), the
      headings of ../source lib/ftnlib/new_dispose.pas: `pas_$new(out p:
      univ_ptr; size: linteger); options(val_param)`, `pas_$dispose(in out
@@ -49,9 +50,10 @@ void PAS_$WRITE(int16_t fmt16, void *f, const void *v, int16_t width,
     char buf[128];
     (void)f;
     switch (kind) {
-    case 0: case 1: case 8: case 9: {
+    case 0: case 1: case 8: case 9: case 11: {
         long x;
-        if (kind == 1) x = rd32(b);
+        if (kind == 11) memcpy(&x, b, 8);   /* dpc's integer64 */
+        else if (kind == 1) x = rd32(b);
         else if (kind == 9) x = (uint32_t)rd32(b);
         else if (size == 1) x = kind == 0 ? (long)(int8_t)b[0] : (long)b[0];
         else x = kind == 0 ? (long)rd16(b) : (long)(uint16_t)rd16(b);

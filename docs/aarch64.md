@@ -72,6 +72,36 @@ m68k.  `status_$t`'s `all` against `fail`/`subsys`/`modc`/`code` is the
 important case: on aarch64 `code` is the high half of `all`, not the low
 one.  tests/exec/record_results.pas shows it.
 
+## integer64 and PointerInt
+
+Owner, 2026-11-12: a portable way to keep an address in an integer.
+
+- **`integer64`** is a predeclared type of dpc's, not in the reference: a
+  64-bit signed integer, 8 bytes, word aligned as a field (as `double`).
+  It is checked on every target; the m68k backend refuses code that
+  computes with one (`dpc_m68k::emit`, "not supported on m68k"), though a
+  variable of it and its initial value are laid out.
+  - An integer constant beyond 32 bits is an `integer64` (the reference's
+    3.2.3 and 3.4 make it invalid); a based constant of up to 32 bits keeps
+    the reference's reading as a 32-bit pattern (`16#FFFFFFFF` is -1), a
+    wider one is a 64-bit pattern.  Constant folding beyond 64 bits is an
+    error.
+  - An operation with an `integer64` operand is 64-bit (as ref 4.3.1
+    widens 16-bit operands to 32); `lshft`, `rshft`, `arshft`, `xor`,
+    `&`, `!` and `~` work on all 64 bits; `firstof`/`lastof` are -2**63
+    and 2**63 - 1.
+  - It goes by value under `val_param` where pointers are 8 bytes, and a
+    function returns it in x0.
+  - `write` prints it (format kind 11, dpc's own, read by the aarch64 run
+    time only).
+- **`PointerInt`** is declared in dpc's include file
+  `include/pointerint.ins.pas`: `integer32` under `%if _ISP__M68K`,
+  `integer64` otherwise.  A type transfer between it and a pointer is
+  always of equal sizes.  Use it with `-I include` and `%include
+  'pointerint.ins.pas'`.
+
+Test: `tests/exec-a64/integer64.pas` (aarch64 only).
+
 ## Code generation (`crates/dpc-aarch64/src/emit.rs`)
 
 A tree-walking code generator over the IR, with no optimisation:
@@ -149,6 +179,10 @@ the C stubs `tools/exectest/a64_stubs.c`, and the run time.
   line, only reordered, or (type transfers, overlays) against the layout
   above by hand.
 
+`tests/exec-a64/` holds tests of aarch64 only, in the same form
+(`integer64`, which the m68k refuses), with dpc's `include/` on their
+include path.
+
 `warns:` lines are not checked: they name the m68k backend's best-effort
 paths.
 
@@ -156,8 +190,7 @@ paths.
 
 - **Pointers and `integer32`.**  Kernel and Apollo code moves addresses
   through `integer32` (`integer32(p)`, `ptr_t(i)`); the type transfer
-  needs equal sizes (ref p. 4-197), so dpc refuses it on aarch64.  An
-  integer type the size of a pointer would give such code a portable
-  spelling (owner's suggestion, 2026-11-12; not decided).
+  needs equal sizes (ref p. 4-197), so dpc refuses it on aarch64.  Such
+  code needs `PointerInt` instead (above).
 - `read`/`readln` (bead domain-pascal-54tf).
 - Reals (bead domain-pascal-s6tc).

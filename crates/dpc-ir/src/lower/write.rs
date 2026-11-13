@@ -18,7 +18,8 @@
 //! a width, 2 a width and digits), 5..4 the size (1 byte, 2 word, 3
 //! long), 3..0 the kind (0 integer, 1 integer32, 2 char, 3 character
 //! array, 4 boolean, 5 enumeration, 6 real, 7 double, 8 unsigned, 9
-//! unsigned32, 10 varying string).  The default widths are the DOMAIN C
+//! unsigned32, 10 varying string; 11 integer64, dpc's own, which only
+//! its aarch64 run time reads: Apollo's has no 64-bit integers).  The default widths are the DOMAIN C
 //! compiler's words where seen (domain-c's rev889-patterns 170: integers
 //! 10, booleans and enumerations 15, doubles 24, chars 1, character
 //! arrays 0), the reference's 13 for a single (p. 4-218; Uncertain).
@@ -38,6 +39,8 @@ const KIND_REAL: u16 = 6;
 const KIND_DOUBLE: u16 = 7;
 const KIND_UNSIGNED: u16 = 8;
 const KIND_UNSIGNED32: u16 = 9;
+/// dpc's: a 64-bit integer (`integer64`, an 8-byte pointer).
+const KIND_INTEGER64: u16 = 11;
 const KIND_VARYING: u16 = 10;
 
 fn output() -> Addr {
@@ -170,11 +173,14 @@ pub(super) fn write(p: &Program, st: &SStmt, newline: bool, args: &[SExpr]) -> R
                     }
                     (15, KIND_ENUM)
                 }
-                // A pointer: as an integer32 (reported: 0x0A31).
+                // A pointer: as an integer32 (reported: 0x0A31); one of 8
+                // bytes as an integer64.
+                _ if p.types.is_pointer(ty) && size == 8 => (10, KIND_INTEGER64),
                 _ if p.types.is_pointer(ty) => (10, KIND_INTEGER32),
                 _ if p.types.is_integer(ty) => {
                     let unsigned = sign_of(&p.types, ty) == Sign::Unsigned;
                     let kind = match (size, unsigned) {
+                        (8, _) => KIND_INTEGER64,
                         (4, false) => KIND_INTEGER32,
                         (4, true) => KIND_UNSIGNED32,
                         (_, false) => KIND_INTEGER,

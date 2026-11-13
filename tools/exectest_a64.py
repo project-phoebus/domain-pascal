@@ -17,6 +17,9 @@ output differs there by design (`expect REASON': little-endian byte
 order, 8-byte pointers), with the aarch64 output in
 tests/exec/aarch64/NAME.expect.
 
+tests/exec-a64/ holds tests of aarch64 only (dpc's integer64, which the
+m68k refuses), in the same form; dpc's include/ is on their include path.
+
 Needs an arm64 macOS host (`uname -m' arm64, `uname -s' Darwin); elsewhere
 the tests are skipped with a notice.  Work files go to
 tmp/exectest_a64/<name>/.
@@ -34,6 +37,10 @@ import exectest  # noqa: E402
 
 ROOT = exectest.ROOT
 TESTDIR = exectest.TESTDIR
+# Tests of aarch64 only (dpc's integer64, which the m68k refuses).
+A64DIR = os.path.join(ROOT, 'tests', 'exec-a64')
+# dpc's own include files (include/pointerint.ins.pas).
+INCDIR = os.path.join(ROOT, 'include')
 WORK = os.path.join(ROOT, 'tmp', 'exectest_a64')
 DPC = exectest.DPC
 TRIPLE = 'aarch64-apple-darwin'
@@ -131,7 +138,7 @@ def run_test(spec, runtime):
         stem = os.path.basename(src)[:-len('.pas')]
         asm = os.path.join(work, stem + '.s')
         obj = os.path.join(work, stem + '.o')
-        p = exectest.run([DPC, '--target=' + TRIPLE, '-I', TESTDIR] + spec.dpc_opts +
+        p = exectest.run([DPC, '--target=' + TRIPLE, '-I', TESTDIR, '-I', INCDIR] + spec.dpc_opts +
                          ['-o', asm, src])
         if p.returncode:
             return exectest.Result(False, [], 'dpc failed:\n' + p.stderr)
@@ -188,7 +195,7 @@ def main(argv=None):
         return 0
     listed = read_list()
     paths = a.tests or sorted(
-        os.path.join(TESTDIR, f) for f in os.listdir(TESTDIR)
+        os.path.join(d, f) for d in (TESTDIR, A64DIR) for f in os.listdir(d)
         if f.endswith('.pas') and not f.endswith(('.mod.pas', '.ins.pas')))
     counts = {'pass': 0, 'fail': 0, 'xfail': 0, 'skip': 0}
     for path in paths:

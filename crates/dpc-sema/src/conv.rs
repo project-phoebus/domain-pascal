@@ -129,14 +129,10 @@ pub fn param_conv(
     // (5.5.12), is not stated.  The literal reading of 5.5.7 is used.
     // A pointer goes by value whatever the target's pointer size: on the
     // 680x0 a pointer is four bytes, and so within ref 5.5.7's limit; an
-    // 8-byte pointer (aarch64, docs/aarch64.md) keeps that convention.
-    let pointer = matches!(
-        types.kind(ty),
-        TypeKind::Pointer { .. } | TypeKind::UnivPtr | TypeKind::RoutinePointer(_)
-    );
-    let small_enough =
-        (size <= target.val_param_max_size() || (pointer && size == target.pointer_size()))
-            && !char_array;
+    // 8-byte pointer (aarch64, docs/aarch64.md) keeps that convention, and
+    // so does an integer of a pointer's size (dpc's integer64 there).
+    let pointer_sized = (types.is_pointer(ty) || types.is_integer(ty)) && size == target.pointer_size();
+    let small_enough = (size <= target.val_param_max_size() || pointer_sized) && !char_array;
     // UNIV "Cancels the effect of val_param and internal" (Table 5-1).
     let by_value = !univ && ((small_by_value && small_enough) || (c_param && is_record));
     if by_value {
@@ -227,7 +223,11 @@ pub fn result_reg(
         return Ok(ResultReg::Address);
     }
     if types.is_ordinal(ty) || types.is_error(ty) {
-        if types.size(ty) > target.val_param_max_size() {
+        // dpc's integer64 comes back in the data register, as a pointer
+        // comes back in one (a target without 64-bit registers refuses it
+        // when it emits code).
+        let integer64 = types.ordinal_base(ty) == Some(types.builtins.integer64);
+        if types.size(ty) > target.val_param_max_size() && !integer64 {
             return Err("result too large for a register".into());
         }
         // 5.5.11: a0_return "Puts into A0 any values returned from that

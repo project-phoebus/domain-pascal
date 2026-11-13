@@ -45,6 +45,10 @@ pub enum TypeKind {
     Integer16,
     /// `integer32`: 32-bit signed (ref 3.2.1, p. 3-4).
     Integer32,
+    /// `integer64`: 64-bit signed.  Not in the reference: dpc's extension
+    /// for targets with 64-bit pointers (owner, 2026-11-12; docs/aarch64.md,
+    /// "integer64").  The m68k backend refuses it when it emits code.
+    Integer64,
     /// 1 byte, 0xFF true, 0 false (ref 3.5.3, p. 3-11).
     Boolean,
     /// 1 byte, ISO Latin-1 (ref 3.6.4, p. 3-13).
@@ -387,6 +391,7 @@ pub struct Builtins {
     pub error: TypeId,
     pub integer16: TypeId,
     pub integer32: TypeId,
+    pub integer64: TypeId,
     pub boolean: TypeId,
     pub char: TypeId,
     pub real: TypeId,
@@ -428,6 +433,8 @@ impl TypeTable {
             // p. 3-24: both word aligned as record fields.
             integer16: t.push_raw(TypeKind::Integer16, Some("integer16"), 2, 2, 2, 2),
             integer32: t.push_raw(TypeKind::Integer32, Some("integer32"), 4, 4, 2, 4),
+            // Aligned as `double` is (8 bytes, word aligned as a field).
+            integer64: t.push_raw(TypeKind::Integer64, Some("integer64"), 8, 8, 2, 8),
             // ref 3.5.3 p. 3-11, 3.6.4 p. 3-13: byte aligned.
             boolean: t.push_raw(TypeKind::Boolean, Some("boolean"), 1, 1, 1, 1),
             char: t.push_raw(TypeKind::Char, Some("char"), 1, 1, 1, 1),
@@ -782,6 +789,7 @@ impl TypeTable {
             TypeKind::Error => (0, 1, 1, 1),
             TypeKind::Integer16 => (2, 2, 2, 2),
             TypeKind::Integer32 => (4, 4, 2, 4),
+            TypeKind::Integer64 => (8, 8, 2, 8),
             TypeKind::Boolean | TypeKind::Char => (1, 1, 1, 1),
             TypeKind::Real { size } => (*size, *size, 2, *size),
             // ref 3.7.1 p. 3-13: one 16-bit word.
@@ -1167,6 +1175,7 @@ impl TypeTable {
             TypeKind::Error | TypeKind::Forward { .. } => (8 * info.size, PackAlign::Word),
             TypeKind::Integer16 => (16, PackAlign::Word),
             TypeKind::Integer32 => (32, PackAlign::Word),
+            TypeKind::Integer64 => (64, PackAlign::Word),
             TypeKind::Real { size } => (8 * size, PackAlign::Word),
             TypeKind::Boolean => (1, PackAlign::Bit),
             TypeKind::Char => (8, PackAlign::Byte),
@@ -1335,6 +1344,7 @@ impl TypeTable {
         match self.kind(id) {
             TypeKind::Integer16
             | TypeKind::Integer32
+            | TypeKind::Integer64
             | TypeKind::Boolean
             | TypeKind::Char
             | TypeKind::Enum { .. } => Some(self.canon(id)),
@@ -1348,6 +1358,7 @@ impl TypeTable {
         match self.kind(id) {
             TypeKind::Integer16 => Some((-32768, 32767)),
             TypeKind::Integer32 => Some((i32::MIN as i64, i32::MAX as i64)),
+            TypeKind::Integer64 => Some((i64::MIN, i64::MAX)),
             TypeKind::Boolean => Some((0, 1)),
             TypeKind::Char => Some((0, 255)),
             TypeKind::Enum { consts } => Some((0, consts.len() as i64 - 1)),
@@ -1360,11 +1371,11 @@ impl TypeTable {
         self.ordinal_base(id).is_some()
     }
 
-    /// Integer16, integer32 or a subrange of them.
+    /// Integer16, integer32, integer64 or a subrange of them.
     pub fn is_integer(&self, id: TypeId) -> bool {
         matches!(
             self.ordinal_base(id).map(|b| self.kind(b)),
-            Some(TypeKind::Integer16 | TypeKind::Integer32)
+            Some(TypeKind::Integer16 | TypeKind::Integer32 | TypeKind::Integer64)
         )
     }
 
@@ -1462,6 +1473,7 @@ impl TypeTable {
             TypeKind::Error => "<error>".into(),
             TypeKind::Integer16 => "integer16".into(),
             TypeKind::Integer32 => "integer32".into(),
+            TypeKind::Integer64 => "integer64".into(),
             TypeKind::Boolean => "boolean".into(),
             TypeKind::Char => "char".into(),
             TypeKind::Real { size } => format!("real{}", size * 8),

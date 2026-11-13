@@ -121,6 +121,10 @@ code or data.
 
 - `integer` = `integer16` (16-bit, signed); `integer32` (32-bit) (3.2.1).
   **`integer` is 16 bits.**
+- dpc's extension, not in the reference (owner, 2026-11-12): `integer64`,
+  built in, refused by the m68k backend; `PointerInt` in
+  `include/pointerint.ins.pas` (docs/aarch64.md).  Do not add other
+  extensions without the owner.
 - No unsigned types.  Unsigned values are written as subranges such as
   `0..65535` (3.4).
 - `boolean` is 1 byte: 0xFF is true, 0 is false (3.5.3) **(kernel)**.

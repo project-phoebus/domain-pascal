@@ -304,6 +304,8 @@ impl<'t> Checker<'t> {
         put(self, "integer", Sym::Type(b.integer16));
         put(self, "integer16", Sym::Type(b.integer16));
         put(self, "integer32", Sym::Type(b.integer32));
+        // dpc's extension (owner, 2026-11-12; docs/aarch64.md).
+        put(self, "integer64", Sym::Type(b.integer64));
         put(self, "boolean", Sym::Type(b.boolean));
         put(self, "char", Sym::Type(b.char));
         // ref 3.3.1 p. 3-6: real = single.
@@ -1456,6 +1458,7 @@ impl<'t> Checker<'t> {
         let (min, may_grow) = match self.types.kind(base).clone() {
             TypeKind::Integer16 => (16, true),
             TypeKind::Integer32 => (32, true),
+            TypeKind::Integer64 => (64, false),
             TypeKind::Real { size } => (8 * size, false),
             TypeKind::Boolean => (8, true),
             TypeKind::Char => (8, false),
@@ -1586,8 +1589,11 @@ impl<'t> Checker<'t> {
             // 16 bits (5.3.4.1 p. 5-13; see `TypeTable::layout_of`).
             if lo_o >= -32768 && hi_o <= 32767 {
                 self.types.builtins.integer16
-            } else {
+            } else if lo_o >= i32::MIN as i64 && hi_o <= u32::MAX as i64 {
                 self.types.builtins.integer32
+            } else {
+                // dpc's integer64 (not in the reference).
+                self.types.builtins.integer64
             }
         } else {
             lb
@@ -3772,7 +3778,8 @@ impl<'t> Checker<'t> {
 
     /// The type of an integer constant: integer16 if it fits, else
     /// integer32 (ref 3.2.3 p. 3-5: constants are held as 32 bits; their
-    /// range is -2147483648..+2147483647).
+    /// range is -2147483648..+2147483647), else dpc's integer64
+    /// ([`TypeKind::Integer64`], not in the reference).
     fn int_const(&mut self, v: i64, span: Span) -> Expr {
         let b = self.types.builtins;
         let ty = if (-32768..=32767).contains(&v) {
@@ -3780,10 +3787,20 @@ impl<'t> Checker<'t> {
         } else if (i32::MIN as i64..=i32::MAX as i64).contains(&v) {
             b.integer32
         } else {
-            self.error(span, "integer constant out of range (ref 3.2.3)");
-            b.error
+            b.integer64
         };
         self.konst(ConstValue::Int(v), ty, span)
+    }
+
+    /// An integer constant `v`, or an error when it overflowed 64 bits.
+    fn int_const_checked(&mut self, v: Option<i64>, span: Span) -> Expr {
+        match v {
+            Some(v) => self.int_const(v, span),
+            None => {
+                self.error(span, "integer constant out of range (more than 64 bits)");
+                self.error_expr(span)
+            }
+        }
     }
 
     fn string_type(&mut self, len: u32) -> TypeId {
@@ -3803,12 +3820,15 @@ impl<'t> Checker<'t> {
                 // ref 3.2.3 p. 3-5: "You can specify an integer constant
                 // anywhere in the range -2147483648 to +2147483647"; ref
                 // 3.4 NOTE p. 3-10: "constants larger than 2147483647 are
-                // not valid".  `-2147483648` is [`Checker::unary`]'s.
-                if *v > i32::MAX as u64 {
+                // not valid".  dpc's integer64 extends the range to 64
+                // bits (owner, 2026-11-12; such a constant is an
+                // integer64).  `-2147483648` and `-9223372036854775808` are
+                // [`Checker::unary`]'s.
+                if *v > i64::MAX as u64 {
                     self.error(
                         span,
-                        "integer constant out of range: constants larger than \
-                         2147483647 are not valid (ref 3.2.3 p. 3-5; 3.4 p. 3-10)",
+                        "integer constant out of range: larger than an integer64 \
+                         (9223372036854775807)",
                     );
                     return self.error_expr(span);
                 }
@@ -3818,16 +3838,11 @@ impl<'t> Checker<'t> {
                 // ref 3.4 NOTE p. 3-10: "constants with an explicit base
                 // with the signed bit set ... the compiler treats them as
                 // negative numbers (for example, 16#FFFFFFFF)": the
-                // literal is a 32-bit pattern.  One wider than 32 bits has
-                // no such reading and is larger than 2147483647, which
-                // the same NOTE says is not valid.
+                // literal is a 32-bit pattern.  One wider than 32 bits is
+                // dpc's integer64 (not in the reference), a 64-bit
+                // pattern, negative when bit 63 is set.
                 if *v > u32::MAX as u64 {
-                    self.error(
-                        span,
-                        "integer constant out of range: a based constant wider than \
-                         32 bits (ref 3.2.3 p. 3-5; 3.4 p. 3-10)",
-                    );
-                    return self.error_expr(span);
+                    return self.int_const(*v as i64, span);
                 }
                 self.int_const(*v as u32 as i32 as i64, span)
             }
@@ -4346,6 +4361,9 @@ impl<'t> Checker<'t> {
             if *v == 1 << 31 {
                 return self.int_const(i32::MIN as i64, span);
             }
+            if *v == 1 << 63 {
+                return self.int_const(i64::MIN, span);
+            }
         }
         let x = self.expr(operand);
         if self.types.is_error(x.ty) {
@@ -4378,16 +4396,17 @@ impl<'t> Checker<'t> {
                 let base = self.types.ordinal_base(x.ty).unwrap();
                 match &x.value {
                     Some(ConstValue::Int(v)) => {
+                        let wide = base == self.types.builtins.integer64;
                         let r = match op {
-                            UnOp::BitNot => {
-                                // ~ on a constant: complement within its
-                                // 32-bit representation (ref 3.2.3).
-                                !(*v as i32) as i64
-                            }
-                            UnOp::Neg => -v,
-                            _ => *v,
+                            // ~ on a constant: complement within its 32-bit
+                            // representation (ref 3.2.3), or 64 bits for
+                            // an integer64.
+                            UnOp::BitNot if wide => Some(!v),
+                            UnOp::BitNot => Some(!(*v as i32) as i64),
+                            UnOp::Neg => v.checked_neg(),
+                            _ => Some(*v),
                         };
-                        return self.int_const(r, span);
+                        return self.int_const_checked(r, span);
                     }
                     _ => (base, None),
                 }
@@ -4418,6 +4437,10 @@ impl<'t> Checker<'t> {
     /// expansion gives the same value as the 16-bit shift widened.
     fn shift_result(&mut self, x: &Expr) -> TypeId {
         let bi = self.types.builtins;
+        // dpc's integer64: shifted at 64 bits.
+        if self.types.ordinal_base(x.ty) == Some(bi.integer64) {
+            return bi.integer64;
+        }
         if x.value.is_some() || !self.types.unsigned_integer(x.ty) {
             return bi.integer32;
         }
@@ -4457,6 +4480,11 @@ impl<'t> Checker<'t> {
     /// compare with a signed word is `dpc-ir`'s (`widen_operands`).
     fn abs_result(&mut self, x: TypeId) -> TypeId {
         let bi = self.types.builtins;
+        // dpc's integer64: an integer64 (-2**63 has no positive
+        // counterpart, as -2147483648 has none in 32 bits, p. 4-12).
+        if self.int_result(x, bi.integer16) == bi.integer64 {
+            return bi.integer64;
+        }
         if self.int_result(x, bi.integer16) == bi.integer32 {
             return self.shift_result_unsigned();
         }
@@ -4475,16 +4503,20 @@ impl<'t> Checker<'t> {
     }
 
     /// The wider of two integer types (ref 4.3.1 p. 4-5: 16-bit operands
-    /// are expanded to 32 bits when necessary).
+    /// are expanded to 32 bits when necessary; an integer64 operand makes
+    /// the operation 64-bit).
     fn int_result(&self, a: TypeId, b: TypeId) -> TypeId {
         let bi = self.types.builtins;
-        let wide = |t: TypeId| {
-            matches!(
-                self.types.ordinal_base(t).map(|x| self.types.kind(x)),
-                Some(TypeKind::Integer32)
-            )
-        };
-        if wide(a) || wide(b) {
+        let kind = |t: TypeId| self.types.ordinal_base(t).map(|x| self.types.kind(x));
+        if [a, b]
+            .iter()
+            .any(|&t| matches!(kind(t), Some(TypeKind::Integer64)))
+        {
+            bi.integer64
+        } else if [a, b]
+            .iter()
+            .any(|&t| matches!(kind(t), Some(TypeKind::Integer32)))
+        {
             bi.integer32
         } else {
             bi.integer16
@@ -4631,10 +4663,19 @@ impl<'t> Checker<'t> {
                     return self.error_expr(span);
                 }
                 if let (Some(a), Some(b)) = (li, ri) {
+                    let wide = self.int_result(l.ty, r.ty) == bi.integer64;
                     let v = match op {
-                        BinOp::Add => Some(a + b),
-                        BinOp::Sub => Some(a - b),
-                        BinOp::Mul => Some(a * b),
+                        BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                            let v = match op {
+                                BinOp::Add => a.checked_add(b),
+                                BinOp::Sub => a.checked_sub(b),
+                                _ => a.checked_mul(b),
+                            };
+                            if v.is_none() {
+                                return self.int_const_checked(None, span);
+                            }
+                            v
+                        }
                         // Constant folding of div/mod with negative
                         // operands is left to run time until the M$ARITH
                         // sign rules are modelled (CLAUDE.md 6.5).
@@ -4644,6 +4685,10 @@ impl<'t> Checker<'t> {
                             self.error(span, "division by zero");
                             None
                         }
+                        // Within the constants' 32-bit representation (ref
+                        // 3.2.3), or 64 bits for an integer64.
+                        BinOp::BitAnd if wide => Some(a & b),
+                        BinOp::BitOr if wide => Some(a | b),
                         BinOp::BitAnd => Some(((a as i32) & (b as i32)) as i64),
                         BinOp::BitOr => Some(((a as i32) | (b as i32)) as i64),
                         _ => None,
@@ -5517,7 +5562,7 @@ impl<'t> Checker<'t> {
                     return self.error_expr(span);
                 }
                 if let Some(ConstValue::Int(v)) = &xs[0].value {
-                    return self.int_const(v.abs(), span);
+                    return self.int_const_checked(v.checked_abs(), span);
                 }
                 self.abs_result(xs[0].ty)
             }
@@ -5535,7 +5580,7 @@ impl<'t> Checker<'t> {
                     return self.error_expr(span);
                 }
                 if let Some(ConstValue::Int(v)) = &xs[0].value {
-                    return self.int_const(v * v, span);
+                    return self.int_const_checked(v.checked_mul(*v), span);
                 }
                 self.int_result(xs[0].ty, bi.integer16)
             }
@@ -5555,7 +5600,8 @@ impl<'t> Checker<'t> {
                 if let (Some(ConstValue::Int(a)), Some(ConstValue::Int(n))) =
                     (&xs[0].value, &xs[1].value)
                 {
-                    if let Some(v) = self.fold_bits(b, *a, *n) {
+                    let wide = self.int_result(xs[0].ty, xs[1].ty) == bi.integer64;
+                    if let Some(v) = self.fold_bits(b, *a, *n, wide) {
                         return self.int_const(v, span);
                     }
                 }
@@ -5704,7 +5750,19 @@ impl<'t> Checker<'t> {
     ///   of an rshft is always positive") and, for a 16-bit num stored in
     ///   16 bits, the narrowed one (`rshft(-9, 3)` is -2); which one a
     ///   negative *constant* gets is not stated.
-    fn fold_bits(&self, b: Builtin, a: i64, n: i64) -> Option<i64> {
+    ///
+    /// `wide`: an integer64 operand (dpc's extension): the same in 64 bits.
+    fn fold_bits(&self, b: Builtin, a: i64, n: i64, wide: bool) -> Option<i64> {
+        if wide {
+            return match b {
+                Builtin::Xor => Some(a ^ n),
+                _ if !(0..=63).contains(&n) => None,
+                Builtin::Lshft => Some(((a as u64) << n) as i64),
+                Builtin::Rshft if a >= 0 => Some(((a as u64) >> n) as i64),
+                Builtin::Arshft => Some(a >> n),
+                _ => None,
+            };
+        }
         let a32 = a as i32;
         match b {
             // "Xor", p. 4-221: the bitwise exclusive or.
@@ -5808,6 +5866,8 @@ impl<'t> Checker<'t> {
             }
             TypeKind::Integer16 => (ConstValue::Int(32767), ty),
             TypeKind::Integer32 => (ConstValue::Int(2147483647), ty),
+            // dpc's integer64: its range, -2**63 .. 2**63 - 1.
+            TypeKind::Integer64 => (ConstValue::Int(if first { i64::MIN } else { i64::MAX }), ty),
             TypeKind::Char => (ConstValue::Char(if first { 0 } else { 255 }), ty),
             TypeKind::Boolean => (ConstValue::Bool(!first), ty),
             TypeKind::Enum { consts } => (
@@ -5863,9 +5923,10 @@ impl<'t> Checker<'t> {
             }
         };
         if let ConstValue::Int(k) = v {
-            if self.types.kind(vty) == &TypeKind::Integer16
-                || self.types.kind(vty) == &TypeKind::Integer32
-            {
+            if matches!(
+                self.types.kind(vty),
+                TypeKind::Integer16 | TypeKind::Integer32 | TypeKind::Integer64
+            ) {
                 return self.int_const(k, span);
             }
         }

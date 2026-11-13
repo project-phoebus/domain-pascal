@@ -756,6 +756,139 @@ pub fn visit_stmts<'a>(body: &'a [Stmt], f: &mut dyn FnMut(&'a Stmt)) {
     }
 }
 
+/// Visit every expression of statement `s`, outermost first: those of
+/// its conditions, addresses and calls, but not those of the statements
+/// nested in it ([`StmtKind::bodies`]).
+pub fn stmt_exprs<'a>(s: &'a Stmt, f: &mut dyn FnMut(&'a Expr)) {
+    fn addr<'a>(a: &'a Addr, f: &mut dyn FnMut(&'a Expr)) {
+        match a {
+            Addr::Indirect { base, .. } => expr(base, f),
+            Addr::Index { base, index, .. } => {
+                addr(base, f);
+                expr(index, f);
+            }
+            Addr::Volatile { addr: a, .. } => addr(a, f),
+            Addr::Frame(_)
+            | Addr::Enclosing(_)
+            | Addr::Symbol { .. }
+            | Addr::Const(_)
+            | Addr::Static(_)
+            | Addr::OtherStatic { .. } => {}
+        }
+    }
+    fn call<'a>(c: &'a Call, f: &mut dyn FnMut(&'a Expr)) {
+        for a in &c.args {
+            match a {
+                Arg::Value { value, .. } | Arg::Temp { value, .. } => expr(value, f),
+                Arg::Address { addr: a, .. } => addr(a, f),
+                Arg::Call { call: c, .. } => call(c, f),
+            }
+        }
+        if let Callee::Pointer(e) = &c.callee {
+            expr(e, f);
+        }
+    }
+    fn cond<'a>(c: &'a Cond, f: &mut dyn FnMut(&'a Expr)) {
+        match c {
+            Cond::Compare { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Cond::Test(e) | Cond::Odd(e) => expr(e, f),
+            Cond::Not(c) => cond(c, f),
+            Cond::AndThen(a, b) | Cond::OrElse(a, b) | Cond::And(a, b) | Cond::Or(a, b) => {
+                cond(a, f);
+                cond(b, f);
+            }
+            Cond::Block { lhs, rhs, .. } => {
+                addr(lhs, f);
+                addr(rhs, f);
+            }
+            Cond::SetEmpty { set, .. } => addr(set, f),
+        }
+    }
+    fn expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+        f(e);
+        match e {
+            Expr::Const { .. } => {}
+            Expr::Load { addr: a, .. } | Expr::Bits { addr: a, .. } | Expr::AddrOf(a) => addr(a, f),
+            Expr::BitElem { array, index, .. } => {
+                addr(array, f);
+                expr(index, f);
+            }
+            Expr::SetMember { elem, set, .. } => {
+                expr(elem, f);
+                expr(set, f);
+            }
+            Expr::SetMemberAt { elem, set, .. } => {
+                expr(elem, f);
+                addr(set, f);
+            }
+            Expr::SetOp { lhs, rhs, .. } | Expr::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Expr::SetOf { elem: x, .. }
+            | Expr::Unary { operand: x, .. }
+            | Expr::Convert { value: x, .. }
+            | Expr::SetSr(x) => expr(x, f),
+            Expr::Call { call: c, .. } => call(c, f),
+            Expr::Test(c) => cond(c, f),
+        }
+    }
+    match &s.kind {
+        StmtKind::SetResult(e) | StmtKind::Discard(e) => expr(e, f),
+        StmtKind::Store { addr: a, value } | StmtKind::StoreBits { addr: a, value, .. } => {
+            addr(a, f);
+            expr(value, f);
+        }
+        StmtKind::StoreBitElem { array, index, .. } => {
+            addr(array, f);
+            expr(index, f);
+        }
+        StmtKind::StoreSetMember { set, elem, .. } => {
+            addr(set, f);
+            expr(elem, f);
+        }
+        StmtKind::StoreSetRange { set, lo, hi, .. } => {
+            addr(set, f);
+            expr(lo, f);
+            expr(hi, f);
+        }
+        StmtKind::StoreSetConst { set, .. } => addr(set, f),
+        StmtKind::Copy { dst, src, .. } => {
+            addr(dst, f);
+            addr(src, f);
+        }
+        StmtKind::Call(c) => call(c, f),
+        StmtKind::Fill { start, value, .. } => {
+            addr(start, f);
+            expr(value, f);
+        }
+        StmtKind::If { cond: c, .. } | StmtKind::While { cond: c, .. } => cond(c, f),
+        StmtKind::Repeat { until, .. } => {
+            if let Some(c) = until {
+                cond(c, f);
+            }
+        }
+        StmtKind::For(l) => {
+            if let Some(h) = &l.home {
+                addr(h, f);
+            }
+            expr(&l.from, f);
+            expr(&l.to, f);
+        }
+        StmtKind::Case { selector, .. } => expr(selector, f),
+        StmtKind::Exit
+        | StmtKind::Next
+        | StmtKind::Return
+        | StmtKind::Disable
+        | StmtKind::Enable
+        | StmtKind::Label(_)
+        | StmtKind::Goto(_) => {}
+    }
+}
+
 /// `for index := from to|downto to do body` (ref "For", pp. 4-88..4-90).
 ///
 /// The index variable is a local of the routine (a byte, word or longword

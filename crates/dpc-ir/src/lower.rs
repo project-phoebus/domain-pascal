@@ -475,7 +475,7 @@ fn init_addr(p: &Program, ty: TypeId, a: &StaticAddr) -> Result<InitValue, Strin
 fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitValue, String> {
     let size = types.size(ty);
     let int = |v: i64| -> Result<InitValue, String> {
-        if matches!(size, 1 | 2 | 4) || (size == 8 && types.is_pointer(ty)) {
+        if matches!(size, 1 | 2 | 4) || (size == 8 && (types.is_pointer(ty) || types.is_integer(ty))) {
             Ok(InitValue::Int { size, value: v })
         } else {
             Err(format!("an initial value of a {size}-byte scalar is"))
@@ -2614,6 +2614,7 @@ fn scalar_locals(p: &Program, r: &Routine, uplevel: &[(i32, u32)]) -> Vec<ValueP
                 p.types.kind(t),
                 K::Integer16
                     | K::Integer32
+                    | K::Integer64
                     | K::Boolean
                     | K::Char
                     | K::Enum { .. }
@@ -6589,6 +6590,9 @@ fn sign_name(t: Scalar) -> &'static str {
 /// Whether `v` is a value of IR type `ty`.
 fn fits(v: i64, ty: Scalar) -> bool {
     let bits = ty.bytes() * 8;
+    if bits >= 64 {
+        return ty.sign == Sign::Signed || v >= 0;
+    }
     match ty.sign {
         Sign::Signed => (-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&v),
         Sign::Unsigned => (0..(1i64 << bits)).contains(&v),
@@ -7105,6 +7109,7 @@ fn store(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Stmt> {
 /// shift, a call).
 fn narrow(e: &Expr, ty: Scalar) -> Option<Expr> {
     match e {
+        Expr::Const { value, .. } if ty.bytes() >= 8 => Some(Expr::Const { value: *value, ty }),
         Expr::Const { value, .. } => {
             let bits = ty.bytes() * 8;
             let mask = (1i64 << bits) - 1;
@@ -8095,7 +8100,7 @@ fn pool_const(p: &Program, v: &ConstValue, ty: TypeId, span: Span) -> Res<PoolCo
             symbol: None,
         });
     }
-    let width = match Width::of_size(size) {
+    let width = match width_of_type(&p.types, ty).filter(|_| !p.types.is_pointer(ty) || size <= 4) {
         Some(w) if v.ordinal().is_some() => w,
         _ => {
             return Err(unsupported(
@@ -9751,7 +9756,7 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
             // (with products by powers of two, which look the same).
             let x = value_of(p, &args[0])?;
             let xt = x.ty();
-            if xt.pointer || ty.pointer || ty.width != Width::Long {
+            if xt.pointer || ty.pointer || !matches!(ty.width, Width::Long | Width::Quad) {
                 return Err(unsupported(
                     e.span,
                     "this shift (internal: not a longword) is",
@@ -9822,7 +9827,13 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
                     rhs: Box::new(count),
                     ty: long,
                 },
-                Width::Quad => return Err(unsupported(args[0].span, "a shift of a pointer is")),
+                // dpc's integer64: at its own width, as a longword.
+                Width::Quad => Expr::Binary {
+                    op,
+                    lhs: Box::new(x),
+                    rhs: Box::new(count),
+                    ty: xt,
+                },
             };
             Ok(reinterpret(shifted, ty))
         }
@@ -10200,10 +10211,12 @@ fn min_max(p: &Program, e: &SExpr, b: Builtin, x: &SExpr, y: &SExpr) -> Res<Expr
 
 /// The width of a scalar value of type `ty`: [`Width::of_size`] of its
 /// size, and [`Width::Quad`] for a pointer type of 8 bytes (aarch64,
-/// docs/aarch64.md).  No integer is 8 bytes.
+/// docs/aarch64.md) and dpc's `integer64`.
 pub(crate) fn width_of_type(types: &TypeTable, ty: TypeId) -> Option<Width> {
     let size = types.size(ty);
-    Width::of_size(size).or_else(|| (size == 8 && types.is_pointer(ty)).then_some(Width::Quad))
+    Width::of_size(size).or_else(|| {
+        (size == 8 && (types.is_pointer(ty) || types.is_integer(ty))).then_some(Width::Quad)
+    })
 }
 
 /// A pointer value on the program's target: [`Scalar::POINTER`], whose
@@ -10299,7 +10312,7 @@ fn unsigned_operand(p: &Program, x: &SExpr) -> bool {
 /// - Pointers, sets and everything else (bit patterns): unsigned.
 pub(crate) fn sign_of(types: &TypeTable, ty: TypeId) -> Sign {
     match types.kind(ty) {
-        TypeKind::Integer16 | TypeKind::Integer32 => Sign::Signed,
+        TypeKind::Integer16 | TypeKind::Integer32 | TypeKind::Integer64 => Sign::Signed,
         TypeKind::Boolean => Scalar::BOOLEAN.sign,
         // A one-byte integer subrange (a size attribute, `[byte] 0..255`,
         // ref 3.15.5 p. 3-62: "corresponds to the unsigned char data type
@@ -11490,7 +11503,9 @@ fn unsigned_word_arith(v: &Expr) -> bool {
             Expr::Const { value, .. } => Some((*value, *value)),
             Expr::Load { ty, .. } | Expr::Call { ty, .. } | Expr::Bits { ty, .. } => {
                 let bits = ty.bytes() as u32 * 8;
-                Some(if ty.is_signed() {
+                Some(if bits >= 64 {
+                    (i64::MIN, i64::MAX)
+                } else if ty.is_signed() {
                     (-(1i64 << (bits - 1)), (1i64 << (bits - 1)) - 1)
                 } else {
                     (0, (1i64 << bits) - 1)
