@@ -8963,11 +8963,49 @@ fn set_member_at(p: &Program, e: &SExpr, lhs: &SExpr, rhs: &SExpr, bytes: u32) -
         };
         let size = 2 * ((hi as u32 + 1).div_ceil(16));
         if size <= 4 {
-            return Err(unsupported(
+            // Members 0..31 only, of a set type larger than a longword:
+            // the element checked against 31, then tested in the members'
+            // longword mask.  Best effort (bead domain-pascal-338r,
+            // domain-c's gap 48; no kernel site).  Reported, not checked
+            // here: the DOMAIN C compiler's print_top_node (cc.m68k
+            // 0x083462), a range check against 31, then `move.l
+            // #0x05F84006,D1; btst`.
+            best_effort(
                 e.span,
-                "`in` on a constant set of a word or a longword with a byte element (no site, \
+                "`in` on a constant set of members 0..31 of a set type larger than a longword \
+                 (the element checked against 31, then a longword mask: no kernel site; \
                  codegen-patterns 5.1) is",
-            ));
+            )?;
+            let elem = set_element(p, lhs)?;
+            let mut calls = Vec::new();
+            expr_calls(&elem, &mut calls);
+            if !calls.is_empty() {
+                return Err(unsupported(
+                    e.span,
+                    "`in` on a constant set of members 0..31 of a larger set type, with a call \
+                     in the element (it is tested twice) is",
+                ));
+            }
+            let word = Scalar::unsigned(Width::Word);
+            let long = Scalar::unsigned(Width::Long);
+            let mask = members.iter().fold(0i64, |m, &k| m | (1i64 << k));
+            let guard = Cond::Compare {
+                op: Rel::Le,
+                lhs: reinterpret(elem.clone(), word),
+                rhs: Expr::Const { value: 31, ty: word },
+            };
+            let member = Expr::SetMember {
+                elem: Box::new(convert(reinterpret(elem, word), long)),
+                set: Box::new(Expr::Const {
+                    value: imm_value(mask as u64, long),
+                    ty: long,
+                }),
+                set_width: Width::Long,
+            };
+            return Ok(Expr::Test(Box::new(Cond::AndThen(
+                Box::new(guard),
+                Box::new(Cond::Test(member)),
+            ))));
         }
         return Ok(Expr::SetMemberAt {
             elem: Box::new(set_element(p, lhs)?),

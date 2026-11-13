@@ -4324,8 +4324,15 @@ model run against the bit model of Figure 3-6).
   the element to a longword (`moveq #0,Dz; move.w Dk,Dz`), widens the
   constant with `ext.l` and subtracts longwords; an element above the
   set's bits leaves a negative longword and `bgt` reads false (exec test
-  `in_wide_const_set`; bead domain-pascal-g6l7).  `in` on a set
-  *expression* of more than a longword (`k in s + [..]`, the DOMAIN C
+  `in_wide_const_set`; bead domain-pascal-g6l7).  A constant set of
+  a set type larger than a longword whose members all lie in 0..31 (an
+  enumeration of 38 values against `[e1..e2, e14, ...]`): **best
+  effort** (bead domain-pascal-338r, domain-c's gap 48; no kernel site),
+  the element checked against 31 (`cmpi.w #0x1f; bhi`), then `move.l
+  #mask,Dn; btst Dk,Dn`.  Reported, not checked here: the DOMAIN C
+  compiler's print_top_node (cc.m68k 0x083462), a range check against 31,
+  then `move.l #0x05F84006,D1; btst` (exec test `in_long_const_enum`).
+  `in` on a set *expression* of more than a longword (`k in s + [..]`, the DOMAIN C
   compiler's c_syntax.pas, reported) with an element that can be read
   twice: **best effort** (bead domain-pascal-338r; no site), tested as
   `(k in a) or (k in b)`, `*` `and`, `-` `and not`, where the original

@@ -1,0 +1,1 @@
+tests/exec/in_long_const_enum.pas -I tests/exec
