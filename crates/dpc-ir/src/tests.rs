@@ -672,7 +672,9 @@ end;
     // if such results need caller-provided storage.
     for (decl, call) in [
         ("function f: s; extern;", "f"),
-        ("function f: real; extern;", "f"),
+        // A single real comes back in D0 (bead domain-pascal-338r); a
+        // double's convention is not known.
+        ("function f: double; extern;", "f"),
         ("var q: ^function: s;", "q^"),
     ] {
         let e = errs(&format!(

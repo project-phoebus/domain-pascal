@@ -22,9 +22,21 @@ pub enum ConstValue {
     Nil,
     /// A set constant: its members' ordinals, sorted, without duplicates.
     Set(Vec<i64>),
+    /// A real constant: the bits of its value as a double (ref 3.3, p.
+    /// 3-6; kept as bits so that the type stays `Eq`).
+    Real(u64),
 }
 
 impl ConstValue {
+    /// The value of a numeric constant as a double: an integer or a real.
+    pub fn number(&self) -> Option<f64> {
+        match self {
+            ConstValue::Int(v) => Some(*v as f64),
+            ConstValue::Real(b) => Some(f64::from_bits(*b)),
+            _ => None,
+        }
+    }
+
     /// The ordinal of an ordinal constant (ref "Ord", p. 4-137).
     pub fn ordinal(&self) -> Option<i64> {
         match self {

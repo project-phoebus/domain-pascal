@@ -584,6 +584,21 @@ pub enum Builtin {
     /// `dispose(p)` ("Dispose", p. 4-64): free `p^` and set `p` to nil,
     /// the run time's `pas_$dispose(p, size)`.  A procedure.
     Dispose,
+    /// `trunc(x)` ("Trunc", p. 4-195): a real truncated toward zero, an
+    /// integer (an integer32 here, as the DOMAIN C compiler's `sfix32`).
+    Trunc,
+    /// `round(x)` ("Round", p. 4-170): a real rounded to the closest
+    /// integer, halves away from zero (`sanint`, then `sfix32`).
+    Round,
+    /// The real functions `sqrt`, `sin`, `cos`, `exp`, `ln`, `arctan`
+    /// ("Sqrt" p. 4-186, "Sin" p. 4-179, "Cos" p. 4-59, "Exp" p. 4-79,
+    /// "Ln" p. 4-107, "Arctan" p. 4-23): each "returns a real value".
+    Sqrt,
+    Sin,
+    Cos,
+    Exp,
+    Ln,
+    Arctan,
     /// `succ(x)` ("Succ", p. 4-191).
     Succ,
     /// `pred(x)` ("Pred", p. 4-147).

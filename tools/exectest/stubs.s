@@ -11,6 +11,11 @@ EXEC_$\n:
 	illegal
 	.endr
 
+| The floating point interpreter (runner.c, run_fpp).
+	.globl	FPP_$
+FPP_$:
+	illegal
+
 | A "device register" (runner.c): each word read returns the next value.
 	.section	".data.exec_stubs","aw",@progbits
 	.balign	2

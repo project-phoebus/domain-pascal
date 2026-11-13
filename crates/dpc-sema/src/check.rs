@@ -377,6 +377,14 @@ impl<'t> Checker<'t> {
             ("discard", Builtin::Discard),
             ("new", Builtin::New),
             ("dispose", Builtin::Dispose),
+            ("sqrt", Builtin::Sqrt),
+            ("sin", Builtin::Sin),
+            ("cos", Builtin::Cos),
+            ("exp", Builtin::Exp),
+            ("ln", Builtin::Ln),
+            ("arctan", Builtin::Arctan),
+            ("trunc", Builtin::Trunc),
+            ("round", Builtin::Round),
             ("succ", Builtin::Succ),
             ("pred", Builtin::Pred),
             ("max", Builtin::Max),
@@ -3754,10 +3762,17 @@ impl<'t> Checker<'t> {
                 }
                 self.int_const(*v as u32 as i32 as i64, span)
             }
-            E::Real(_) => {
-                self.unsupported(span, "a real constant");
-                self.error_expr(span)
-            }
+            // A real constant (ref 2.1.2, p. 2-3): a double, as the
+            // DOMAIN C compiler's 8-byte inline constants are (reported by
+            // domain-c: `round(n * 0.9)`'s `dmul_i`); a single where one
+            // is stored (bead domain-pascal-338r, gap 7).
+            E::Real(text) => match text.to_ascii_lowercase().parse::<f64>() {
+                Ok(v) => self.real_const(v, self.types.builtins.double, span),
+                Err(_) => {
+                    self.error(span, format!("malformed real constant `{text}`"));
+                    self.error_expr(span)
+                }
+            },
             E::Str(parts) => self.string(parts, span),
             E::Name(_) => self.name_expr(e),
             E::Set(elems) => self.set_cons(elems, span),
@@ -4272,6 +4287,13 @@ impl<'t> Checker<'t> {
                 };
                 (self.types.builtins.boolean, v)
             }
+            UnOp::Neg | UnOp::Plus if self.is_real(x.ty) => {
+                if let Some(v) = x.value.as_ref().and_then(|v| v.number()) {
+                    let v = if op == UnOp::Neg { -v } else { v };
+                    return self.real_const(v, x.ty, span);
+                }
+                (x.ty, None)
+            }
             UnOp::BitNot | UnOp::Neg | UnOp::Plus => {
                 if !self.types.is_integer(x.ty) {
                     self.error(span, "operator needs an integer operand");
@@ -4393,6 +4415,42 @@ impl<'t> Checker<'t> {
         }
     }
 
+    /// Whether `t` is `real` or `double` (ref 3.3).
+    fn is_real(&self, t: TypeId) -> bool {
+        matches!(self.types.kind(self.types.canon(t)), TypeKind::Real { .. })
+    }
+
+    /// An integer or a real.
+    fn is_numeric(&self, t: TypeId) -> bool {
+        self.is_real(t) || self.types.is_integer(t)
+    }
+
+    /// The type of real arithmetic on `a` and `b`: a single when one is a
+    /// single and the other a single or an integer, else a double.
+    fn real_result(&self, a: TypeId, b: TypeId) -> TypeId {
+        let single = |t: TypeId| {
+            matches!(self.types.kind(self.types.canon(t)), TypeKind::Real { size: 4 })
+        };
+        let bi = self.types.builtins;
+        if (single(a) && (single(b) || self.types.is_integer(b)))
+            || (single(b) && self.types.is_integer(a))
+        {
+            bi.real
+        } else {
+            bi.double
+        }
+    }
+
+    /// A real constant of type `ty`.
+    fn real_const(&mut self, v: f64, ty: TypeId, span: Span) -> Expr {
+        Expr {
+            kind: ExprKind::Const,
+            ty,
+            value: Some(ConstValue::Real(v.to_bits())),
+            span,
+        }
+    }
+
     fn binary(&mut self, op: BinOp, lhs: &ast::Expr, rhs: &ast::Expr, span: Span) -> Expr {
         let l = self.expr(lhs);
         let r = self.expr(rhs);
@@ -4441,6 +4499,34 @@ impl<'t> Checker<'t> {
                     r.ty
                 };
                 (ty, v)
+            }
+            // Real arithmetic (ref 4.3, "Expressions": an integer operand
+            // converted; the result a double where either operand is one
+            // or both are integers, else a single).  Best effort in the
+            // code (bead domain-pascal-338r, gap 7).
+            // `**` (ref 4.3, Table 4-2, p. 4-4) with a real operand, as the
+            // others (the DOMAIN C compiler's ra.pas, `2.0 ** (depth *
+            // 4.0)`, reported); of two integers it stays unsupported.
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::RealDiv | BinOp::Pow
+                if (self.is_real(l.ty) || self.is_real(r.ty) || op == BinOp::RealDiv)
+                    && self.is_numeric(l.ty)
+                    && self.is_numeric(r.ty) =>
+            {
+                let ty = self.real_result(l.ty, r.ty);
+                if let (Some(a), Some(b)) = (
+                    l.value.as_ref().and_then(|v| v.number()),
+                    r.value.as_ref().and_then(|v| v.number()),
+                ) {
+                    let v = match op {
+                        BinOp::Add => a + b,
+                        BinOp::Sub => a - b,
+                        BinOp::Mul => a * b,
+                        BinOp::Pow => a.powf(b),
+                        _ => a / b,
+                    };
+                    return self.real_const(v, ty, span);
+                }
+                (ty, None)
             }
             BinOp::Add
             | BinOp::Sub
@@ -4501,6 +4587,26 @@ impl<'t> Checker<'t> {
                 let ordered = !matches!(op, BinOp::Eq | BinOp::Ne);
                 let ok = if self.types.is_ordinal(l.ty) && self.types.is_ordinal(r.ty) {
                     self.ordinal_compatible(l.ty, r.ty)
+                } else if (self.is_real(l.ty) || self.is_real(r.ty))
+                    && self.is_numeric(l.ty)
+                    && self.is_numeric(r.ty)
+                {
+                    // Reals with reals or integers (ref Table 4-1).
+                    if let (Some(a), Some(b)) = (
+                        l.value.as_ref().and_then(|v| v.number()),
+                        r.value.as_ref().and_then(|v| v.number()),
+                    ) {
+                        let v = match op {
+                            BinOp::Eq => a == b,
+                            BinOp::Ne => a != b,
+                            BinOp::Lt => a < b,
+                            BinOp::Le => a <= b,
+                            BinOp::Gt => a > b,
+                            _ => a >= b,
+                        };
+                        return self.konst(ConstValue::Bool(v), bi.boolean, span);
+                    }
+                    true
                 } else if lset && rset {
                     // Sets: =, <>, <= (subset), >= (superset) (Table 4-1).
                     self.sets_compatible(l.ty, r.ty) && !matches!(op, BinOp::Lt | BinOp::Gt)
@@ -5260,8 +5366,55 @@ impl<'t> Checker<'t> {
                 }
                 bi.boolean
             }
-            // "Abs", p. 4-12: "an integer value if number is an integer";
-            // reals are out of scope (CLAUDE.md 1).
+            // "Trunc", p. 4-195; "Round", p. 4-170: "returns an integer";
+            // an integer32 here (the DOMAIN C compiler's `sfix32`/`dfix32`
+            // into D0, reported by domain-c; bead domain-pascal-338r).
+            Builtin::Trunc | Builtin::Round => {
+                if !self.is_numeric(xs[0].ty) {
+                    self.error(span, format!("`{name}` needs a real argument"));
+                    return self.error_expr(span);
+                }
+                if let Some(v) = xs[0].value.as_ref().and_then(|v| v.number()) {
+                    let r = if b == Builtin::Trunc { v.trunc() } else { v.round() };
+                    if r.abs() < 2147483648.0 {
+                        return self.int_const(r as i64, span);
+                    }
+                }
+                bi.integer32
+            }
+            // The real functions: "a real value" (the pages above), a
+            // double for a double argument, else a single (Uncertain: the
+            // reference does not say which real type; bead
+            // domain-pascal-338r).
+            Builtin::Sqrt
+            | Builtin::Sin
+            | Builtin::Cos
+            | Builtin::Exp
+            | Builtin::Ln
+            | Builtin::Arctan => {
+                if !self.is_numeric(xs[0].ty) {
+                    self.error(span, format!("`{name}` needs a real or integer argument"));
+                    return self.error_expr(span);
+                }
+                if matches!(
+                    self.types.kind(self.types.canon(xs[0].ty)),
+                    TypeKind::Real { size: 8 }
+                ) {
+                    bi.double
+                } else {
+                    bi.real
+                }
+            }
+            // "Abs", p. 4-12; "Sqr", p. 4-184: of a real, a real of its
+            // type (bead domain-pascal-338r).
+            Builtin::Abs | Builtin::Sqr if self.is_real(xs[0].ty) => {
+                if let Some(v) = xs[0].value.as_ref().and_then(|v| v.number()) {
+                    let r = if b == Builtin::Abs { v.abs() } else { v * v };
+                    return self.real_const(r, xs[0].ty, span);
+                }
+                xs[0].ty
+            }
+            // "Abs", p. 4-12: "an integer value if number is an integer".
             Builtin::Abs => {
                 if !self.types.is_integer(xs[0].ty) {
                     self.error(
@@ -5745,6 +5898,13 @@ impl<'t> Checker<'t> {
             return true;
         }
         if self.types.is_error(dst) || self.types.is_error(src) || self.same_type(dst, src) {
+            return true;
+        }
+        // A real from a real of the other precision or an integer
+        // (ref 4.3, "Assignment": an integer is converted; single and
+        // double mix, the DOMAIN C compiler's `real := double` through
+        // `jsr fpp_$`, reported).
+        if self.is_real(dst) && self.is_numeric(src) {
             return true;
         }
         // A string or character constant to a varying string of room

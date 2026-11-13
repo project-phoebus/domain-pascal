@@ -209,7 +209,7 @@ def build_runner():
     objs.append(obj)
     exe = os.path.join(BUILD, 'runner')
     if newer(exe, objs):
-        p = run([CC, '-o', exe] + objs)
+        p = run([CC, '-o', exe] + objs + ['-lm'])
         if p.returncode:
             raise SpecError('linking runner:\n%s' % p.stderr)
     src = os.path.join(TOOLDIR, 'stubs.s')
@@ -304,7 +304,7 @@ def run_test(spec, runner, trace=False):
     if trace:
         cmd.append('--trace')
     for name, addr in sorted(syms.items()):
-        if name.startswith('EXEC_$'):
+        if name.startswith('EXEC_$') or name == 'FPP_$':
             cmd += ['--stub', '%s=%s' % (name, hex(addr))]
     for name, args, kind in spec.calls:
         if name not in syms:

@@ -12204,6 +12204,53 @@ isel.rs` (`eval`, `binary`, `mul_const`, `shift`, `convert`,
 
 ---
 
+### 8.9 Real arithmetic (best effort; no kernel site; bead domain-pascal-338r)
+
+The kernel has no real arithmetic; the DOMAIN C compiler (Pascal Rev
+8.89) compiles it, with the default `-cpu`, as calls of the Pascal run
+time's software floating point interpreter, syslib's fpp.asm (decoded by
+../source: evidence/lib/syslib/fpp.codegen.md and fpp_ops.tsv, the
+operation words).  dpc does the same (`dpc-ir` `lower/real.rs`;
+`Callee::Fpp`):
+
+- the operands pushed last-used first (addresses for `_a` words, an
+  integer32 value for `<s|d>flt32_v`, a single function's D0 for
+  `sload_v`), `jsr FPP_$`, the operation words and inline constants
+  after it; the interpreter pops the operands, so the caller pops
+  nothing;
+- an expression loaded into SA (a single) or DA (a double), each binary
+  operation's right operand a variable of that precision (`<op>_a`) or a
+  constant (`<op>_i`), anything else computed first into a frame
+  temporary (`<s|d>store_a`); constants are doubles (`dload_i`), a
+  single where one is stored (`dtos`), as the DOMAIN C compiler's 8-byte
+  inline constants (reported: `round(n * 0.9)`, `0x00C4 0x00A0
+  <double> 0x0154 0x0068`); a double's negation is `drsub_i 0.0`, its
+  `abs` `max(-x, x)` (the table has neither);
+- ends: a store (`<s|d>store_a_ret`), an integer in D0 (`<s|d>fix32`,
+  `trunc`; `<s|d>anint` first for `round`), or a compare's sign in D0
+  (`<s|d>cmp_<a|i>`, then `tst.l D0` and the branch); a constant is
+  stored as its bits (`move.l #0x3F800000` for a single 1.0, as ra_utils,
+  reported);
+- the interpreter writes D0-D5, A0, A1: the caller saves D2-D5 around
+  the call, before the pushes (`movem.l D2-D5,-(SP)`; after the words
+  `movem.l (SP),D2-D5; lea (16,SP),SP`), as "compiled code saves D2-D5
+  around its FPP calls" (fpp.codegen.md); the form of that save in the
+  image is not surveyed;
+- a single function's result is its bits in D0 (dbl_to_real, reported:
+  cc.m68k 0x0ACDC2); a double's is refused; a real passed by address to
+  a real parameter that is not a variable of its precision (an
+  expression, an integer, the other precision) goes through a frame
+  temporary (token.pas, reported: `FPP_$ESLV` into a temporary for an
+  `in double`);
+- `**` (spow/dpow), `sqrt`, `sin`, `cos`, `exp`, `ln`, `arctan`, real
+  `abs`/`sqr`; integer `**` integer is refused.  The real functions'
+  result is a double for a double argument, else a single (Uncertain:
+  the reference says "a real value").
+
+Every form is refused under `--strict`.  The execution test `reals`
+runs the words on an interpreter of the runner's own
+(`tools/exectest/runner.c`, `run_fpp`, the host's IEEE arithmetic).
+
 ## 9. Status returns and error exits (Verified at the sites given; implemented in part)
 
 Bead domain-pascal-5aw.2.  Counts come from surveys of the routines

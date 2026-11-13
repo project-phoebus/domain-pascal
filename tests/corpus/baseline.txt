@@ -15,7 +15,7 @@ ok	sys/ins/fpp.ins.pas
 ok	sys/ins/fpp1.ins.pas
 ok	sys/ins/gmf.ins.pas
 ok	sys/ins/gpr.ins.pas
-diag	sys/ins/gsr_types.ins.pas	a real constant is not supported yet
+diag	sys/ins/gsr_types.ins.pas	a size attribute larger than the type's own storage (ref N.N.N: the compiler "uses all of the bits in the larger object to represent the value") is not supported yet
 ok	sys/ins/io_traits.ins.pas
 ok	sys/ins/ios.ins.pas
 ok	sys/ins/ios_dir.ins.pas

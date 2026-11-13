@@ -229,6 +229,13 @@ pub fn result_reg(
             ResultReg::Data
         });
     }
+    // A single real: in D0, its bits (the DOMAIN C compiler's dbl_to_real,
+    // reported by domain-c: cc.m68k 0x0ACDC2 returns it in D0, its caller
+    // `move.l D0,(-32,A6)`; bead domain-pascal-338r, gap 19).  A double:
+    // not known.
+    if matches!(types.kind(types.canon(ty)), TypeKind::Real { size: 4 }) && !opts.a0_return {
+        return Ok(ResultReg::Data);
+    }
     // A set of one word or one longword: in D0, sized to the type, like
     // an ordinal (codegen-patterns 3, "Set results"): ACL_$MIN_RIGHTS's
     // `set of 0..15` `moveq #0xf,D0; and.w D2w,D0w` (0xE469F2), read by

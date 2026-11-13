@@ -606,7 +606,9 @@ fn result_registers() {
         result_reg("type s = set of 0..63; function f: s; extern;"),
         Unknown
     );
-    assert_eq!(result_reg("function f: real; extern;"), Unknown);
+    // A single real: in D0 (bead domain-pascal-338r); a double: unknown.
+    assert_eq!(result_reg("function f: real; extern;"), Data);
+    assert_eq!(result_reg("function f: double; extern;"), Unknown);
     // A 4-byte record, base.ins.pas's `status_$t` (codegen-patterns 3,
     // "Record results"): in D0.  `d0_return`/`c_param` (pointers only,
     // 5.5.10, 5.5.12) change nothing.

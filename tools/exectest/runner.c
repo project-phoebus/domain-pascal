@@ -69,6 +69,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include "m68k.h"
@@ -224,6 +225,7 @@ static struct stub stubs[] = {
     { "EXEC_$NOSAVE" },   /* no arguments */
     { "EXEC_$NOSAVE_W" }, /* (v: integer); val_param: prints the value */
     { "EXEC_$NOSAVE_ID_L" }, /* (in v: integer32): integer32 */
+    { "FPP_$" },          /* the floating point interpreter (below) */
     { "EXEC_$COUNTER" },  /* data, not a routine: a word "device register";
                              each read.w returns the next value, a write.w
                              sets it */
@@ -237,9 +239,124 @@ static void print_bool(uint32_t b)
     else printf("bool?0x%02x\n", b);
 }
 
+/* FPP_$: the Pascal run time's software floating point interpreter
+   (syslib's fpp.asm, SR10.2), as far as dpc's real arithmetic uses it
+   (bead domain-pascal-338r): the operation words after the call (from
+   ../source evidence/lib/syslib/fpp_ops.tsv), the operands popped from the
+   stack in use order, SA a single and DA a double, done in the host's
+   IEEE arithmetic.  A `ret' word ends the sequence; the call returns past
+   the words with the operands popped. */
+static float bits_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
+static uint32_t f_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+static double bits_d(uint64_t b) { double d; memcpy(&d, &b, 8); return d; }
+static uint64_t d_bits(double d) { uint64_t b; memcpy(&b, &d, 8); return b; }
+static double rd_d(uint32_t a) { return bits_d(((uint64_t)rd32(a) << 32) | rd32(a + 4)); }
+static void wr_d(uint32_t a, double d) { uint64_t b = d_bits(d); wr32(a, b >> 32); wr32(a + 4, (uint32_t)b); }
+static int32_t fix32(double v)
+{
+    double t = trunc(v);
+    return (t >= 2147483648.0 || t < -2147483648.0) ? 0 : (int32_t)t;
+}
+static int32_t sign_of(double a, double b) { return a < b ? -1 : a > b ? 1 : 0; }
+
+static void run_fpp(void)
+{
+    uint32_t sp = reg(M68K_REG_A7);
+    uint32_t pc = rd32(sp), osp = sp + 4;
+    float sa = 0;
+    double da = 0;
+    uint32_t d0 = garbage();
+#define POP() (osp += 4, rd32(osp - 4))
+#define INL4() (pc += 4, rd32(pc - 4))
+#define INL8() (pc += 8, rd_d(pc - 8))
+    for (;;) {
+        uint32_t w = rd16(pc);
+        pc += 2;
+        switch (w) {
+        case 0xFF8A: sa = bits_f(rd32(POP())); continue;           /* sload_a */
+        case 0xFF6A: sa = bits_f(POP()); continue;                 /* sload_v */
+        case 0xFFD0: wr32(POP(), f_bits(sa)); continue;            /* sstore_a */
+        case 0xFF3E: wr32(POP(), f_bits(sa)); break;               /* sstore_a_ret */
+        case 0x005C: sa = (float)(int32_t)POP(); continue;         /* sflt32_v */
+        case 0x0068: d0 = (uint32_t)fix32(sa); break;              /* sfix32 */
+        case 0x006C: sa = sa == 0 ? 0 : -sa; continue;             /* sneg */
+        case 0x0070: sa = fabsf(sa); continue;                     /* sabs */
+        case 0x0154: sa = roundf(sa); continue;                    /* sanint */
+        case 0x0004: sa = sa + bits_f(rd32(POP())); continue;      /* sadd_a */
+        case 0x0008: sa = sa + bits_f(INL4()); continue;           /* sadd_i */
+        case 0x0010: sa = sa - bits_f(rd32(POP())); continue;      /* ssub_a */
+        case 0x0014: sa = sa - bits_f(INL4()); continue;           /* ssub_i */
+        case 0x0028: sa = sa * bits_f(rd32(POP())); continue;      /* smul_a */
+        case 0x002C: sa = sa * bits_f(INL4()); continue;           /* smul_i */
+        case 0x0034: sa = sa / bits_f(rd32(POP())); continue;      /* sdiv_a */
+        case 0x0038: sa = sa / bits_f(INL4()); continue;           /* sdiv_i */
+        case 0x004C: d0 = (uint32_t)sign_of(sa, bits_f(rd32(POP()))); break; /* scmp_a */
+        case 0x0050: d0 = (uint32_t)sign_of(sa, bits_f(INL4())); break;      /* scmp_i */
+        case 0x0074: da = rd_d(POP()); continue;                   /* dload_a */
+        case 0x0078: da = INL8(); continue;                        /* dload_i */
+        case 0x007C: wr_d(POP(), da); continue;                    /* dstore_a */
+        case 0x0080: wr_d(POP(), da); break;                       /* dstore_a_ret */
+        case 0x0084: da = da + rd_d(POP()); continue;              /* dadd_a */
+        case 0x0088: da = da + INL8(); continue;                   /* dadd_i */
+        case 0x008C: da = da - rd_d(POP()); continue;              /* dsub_a */
+        case 0x0090: da = da - INL8(); continue;                   /* dsub_i */
+        case 0x0098: da = INL8() - da; continue;                   /* drsub_i */
+        case 0x009C: da = da * rd_d(POP()); continue;              /* dmul_a */
+        case 0x00A0: da = da * INL8(); continue;                   /* dmul_i */
+        case 0x00A4: da = da / rd_d(POP()); continue;              /* ddiv_a */
+        case 0x00A8: da = da / INL8(); continue;                   /* ddiv_i */
+        case 0x00B4: d0 = (uint32_t)sign_of(da, rd_d(POP())); break; /* dcmp_a */
+        case 0x00B8: d0 = (uint32_t)sign_of(da, INL8()); break;      /* dcmp_i */
+        case 0x00C4: da = (double)(int32_t)POP(); continue;        /* dflt32_v */
+        case 0x00D0: d0 = (uint32_t)fix32(da); break;              /* dfix32 */
+        case 0x00D4: sa = (float)da; continue;                     /* dtos */
+        case 0x00D8: da = (double)sa; continue;                    /* stod */
+        case 0x015C: da = round(da); continue;                     /* danint */
+        case 0x0180: { double x = rd_d(POP()); da = da > x ? da : x; continue; } /* dmax_a */
+        case 0x012C: sa = powf(sa, bits_f(rd32(POP()))); continue; /* spow_a */
+        case 0x0134: sa = powf(sa, bits_f(INL4())); continue;      /* spow_i */
+        case 0x0148: da = pow(da, rd_d(POP())); continue;          /* dpow_a */
+        case 0x014C: da = pow(da, INL8()); continue;               /* dpow_i */
+        case 0x00DC: sa = sqrtf(sa); continue;                     /* ssqrt */
+        case 0x00E0: da = sqrt(da); continue;                      /* dsqrt */
+        case 0x00E4: sa = expf(sa); continue;                      /* sexp */
+        case 0x00E8: da = exp(da); continue;                       /* dexp */
+        case 0x00EC: sa = logf(sa); continue;                      /* slog */
+        case 0x00F0: da = log(da); continue;                       /* dlog */
+        case 0x00F4: sa = sinf(sa); continue;                      /* ssin */
+        case 0x00F8: da = sin(da); continue;                       /* dsin */
+        case 0x00FC: sa = cosf(sa); continue;                      /* scos */
+        case 0x0100: da = cos(da); continue;                       /* dcos */
+        case 0x010C: sa = atanf(sa); continue;                     /* satan */
+        case 0x0110: da = atan(da); continue;                      /* datan */
+        default: fail("FPP_$: unknown operation word 0x%04x at 0x%06x", w, pc - 2);
+        }
+        break;
+    }
+#undef POP
+#undef INL4
+#undef INL8
+    /* What the interpreter writes: D0-D5, A0, A1 (D6, D7 and A2 only for
+       complex operands, which dpc does not use). */
+    static const m68k_register_t junk[] = {
+        M68K_REG_D1, M68K_REG_D2, M68K_REG_D3, M68K_REG_D4, M68K_REG_D5,
+        M68K_REG_A0, M68K_REG_A1,
+    };
+    for (unsigned i = 0; i < sizeof junk / sizeof junk[0]; i++)
+        setreg(junk[i], garbage());
+    setreg(M68K_REG_D0, d0);
+    setreg(M68K_REG_SR, (reg(M68K_REG_SR) & 0xff00u) | (garbage() & 0x1f));
+    setreg(M68K_REG_PC, pc);
+    setreg(M68K_REG_A7, osp);
+}
+
 /* Run stub `s' with SP pointing at the return address; then return. */
 static void run_stub(struct stub *s)
 {
+    if (!strcmp(s->name, "FPP_$")) {
+        run_fpp();
+        return;
+    }
     uint32_t sp = reg(M68K_REG_A7);
     uint32_t a1 = rd32(sp + 4);       /* first slot as a longword */
     uint32_t w1 = rd16(sp + 4);       /* first slot as a word */

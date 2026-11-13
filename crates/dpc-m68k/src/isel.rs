@@ -17693,6 +17693,16 @@ impl Selector {
         // the allocator (codegen-patterns 12.4 R3), and so may a value the
         // arguments read ([`held_through_calls`]).
         let start = self.out.len();
+        // The floating point interpreter writes D2-D5: the caller saves
+        // them around the call, before the operands' pushes (Apollo's
+        // compiled code "saves D2-D5 around its FPP calls", ../source
+        // evidence/lib/syslib/fpp.codegen.md, "The interpreter"; its form
+        // not surveyed: best effort, bead domain-pascal-338r).
+        if matches!(c.callee, Callee::Fpp { .. }) {
+            self.out.push(Insn::MovemSave {
+                regs: crate::regs::fpp_clobbers(),
+            });
+        }
         // A `for` index passed by address (to a value or `in` parameter,
         // [`Arg::Address::writable`] false): its register stored to the
         // variable's frame slot before the call's pushes, the slot's
@@ -18001,13 +18011,18 @@ impl Selector {
                 short: true,
             },
             Callee::Pointer(x) => Insn::Jsr(Ea::Ind(self.call_target(c, x)?)),
+            // The floating point interpreter: `jsr`, its words after
+            // (below), D0-D5, A0, A1 written (`regs::is_fpp_call`; bead
+            // domain-pascal-338r).
+            Callee::Fpp { entry, .. } => Insn::Jsr(Ea::AbsL(entry.clone(), 0)),
         };
+        let fpp = matches!(&c.callee, Callee::Fpp { .. });
         // ref 5.5.8, p. 5-19: an `options(nosave)` callee does not
         // preserve D2-D7/A2-A4 (the call writes them, `regs::access`), so
         // this routine saves them for its own caller.  Best effort (not
         // byte-identical): no call of a `nosave` routine is identified in
         // the image (bead domain-pascal-7c4j).
-        if matches!(&insn, Insn::Jsr(ea) if crate::regs::is_nosave_call(ea)) {
+        if !fpp && matches!(&insn, Insn::Jsr(ea) if crate::regs::is_nosave_call(ea)) {
             best_effort(
                 self.span,
                 "a call of an options(nosave) routine (D2-D7/A2-A4 saved at entry, no value \
@@ -18016,6 +18031,24 @@ impl Selector {
             self.clobbered = self.clobbered.union(crate::regs::nosave_clobbers());
         }
         self.out.push(insn);
+        if let Callee::Fpp { words, .. } = &c.callee {
+            self.out.push(Insn::Words(
+                words
+                    .chunks(2)
+                    .map(|w| u16::from_be_bytes([w[0], *w.get(1).unwrap_or(&0)]))
+                    .collect(),
+            ));
+            // D2-D5 back, then the save popped (neither touches the
+            // condition codes or D0).
+            self.out.push(Insn::MovemRestoreInd {
+                regs: crate::regs::fpp_clobbers(),
+                base: SP,
+            });
+            self.out.push(Insn::Lea {
+                src: Ea::Disp(16, SP),
+                dst: SP,
+            });
+        }
         self.call_stmts.push((start, self.out.len() - 1, self.span));
         // The block of another data section is loaded again after a call
         // (DXM_$INIT 0xE2FF66, KBD_$INIT 0xE3339E; [`Self::other_base`]),
@@ -18026,7 +18059,7 @@ impl Selector {
         self.other_syms.clear();
         self.other_held.clear();
         let n = c.bytes();
-        if !no_pop && n > 0 {
+        if !no_pop && !fpp && n > 0 {
             self.out.push(if n <= 8 {
                 Insn::Addq {
                     size: Size::W,
@@ -18945,10 +18978,17 @@ impl Selector {
             // 0xE546A0..0xE546AC, the outer call's last argument pushed
             // before it).
             Arg::Call { call, slot: 4 } => {
+                // A floating point sequence stores its value last (bead
+                // domain-pascal-338r): the temporary is its last operand.
+                let target = if matches!(call.callee, Callee::Fpp { .. }) {
+                    call.args.last()
+                } else {
+                    call.args.first()
+                };
                 let Some(Arg::Address {
                     addr: Addr::Frame(o),
                     ..
-                }) = call.args.first()
+                }) = target
                 else {
                     unreachable!("a hidden-address call passes its temporary first")
                 };

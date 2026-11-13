@@ -27,6 +27,8 @@ use crate::{
 
 type Res<T> = Result<T, Diagnostic>;
 
+mod real;
+
 fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
 }
@@ -474,7 +476,17 @@ fn init_value(types: &TypeTable, ty: TypeId, value: &ConstValue) -> Result<InitV
         }
     };
     match (types.kind(ty), value) {
-        (TypeKind::Real { .. }, _) => Err("initialising a real variable is".into()),
+        // A real's initial value: its IEEE bytes, big-endian, single or
+        // double (the image's singles: domain-c's ra_utils `move.l
+        // #0x3F800000` for 1.0, reported; bead domain-pascal-338r, gap 7).
+        (TypeKind::Real { size: 4 }, v) if v.number().is_some() => Ok(InitValue::Bytes(
+            (v.number().unwrap() as f32).to_bits().to_be_bytes().to_vec(),
+        )),
+        (TypeKind::Real { .. }, v) if v.number().is_some() => Ok(InitValue::Bytes(
+            v.number().unwrap().to_bits().to_be_bytes().to_vec(),
+        )),
+        (TypeKind::Real { .. }, _) => Err("this initial value of a real variable is".into()),
+        (_, ConstValue::Real(_)) => Err(format!("a real initial value of a {} is", types.display(ty))),
         // A varying string: its value as an assignment gives it
         // ([`varying_image`]: the length word, the text, a trailing null
         // when the body has room), the rest of the body unset (the DOMAIN
@@ -1654,6 +1666,12 @@ fn assign_temps(body: &mut [Stmt], frame: u32, results: &[u32]) -> u32 {
                     src: Addr::Frame(o),
                     ..
                 } => place(o, placed),
+                // A single function's result read from the temporary a
+                // floating point sequence stored it in (`real::result`).
+                StmtKind::SetResult(Expr::Load {
+                    addr: Addr::Frame(o),
+                    ..
+                }) => place(o, placed),
                 StmtKind::If { then_, else_, .. } => {
                     copies(then_, placed);
                     copies(else_, placed);
@@ -4133,7 +4151,9 @@ impl Cx<'_> {
         for s in &flat {
             match &s.kind {
                 SStmtKind::Assign { target, value } if matches!(target.kind, ExprKind::Result { routine, uplevel: 0 } if routine == self.id) => {
-                    if is_hidden_result(self.r) {
+                    if real::prec_of(p, target.ty) == Some(real::Prec::S) {
+                        out.extend(real::result(p, s, value)?);
+                    } else if is_hidden_result(self.r) {
                         out.push(hidden_result_assignment(p, self.r, s, value)?);
                         self.hidden_assigned.set(true);
                     } else if is_record_result(self.r) {
@@ -4149,6 +4169,14 @@ impl Cx<'_> {
                         target.span,
                         "assignment to an enclosing function's result is",
                     ));
+                }
+                // A real target (bead domain-pascal-338r): the floating
+                // point interpreter ([`real::assign`]).
+                SStmtKind::Assign { target, value }
+                    if real::prec_of(p, target.ty).is_some()
+                        && !matches!(target.kind, ExprKind::Result { .. }) =>
+                {
+                    out.extend(real::assign(p, s, target, value)?)
                 }
                 SStmtKind::Assign { target, value } if hidden_call(p, value).is_some() => {
                     out.extend(self.hidden_call_assignment(s, target, value)?)
@@ -5230,6 +5258,9 @@ fn bool_value(p: &Program, e: &SExpr) -> Res<Expr> {
 
 /// `lhs rel rhs` (see [`cond_of`]).
 fn compare(p: &Program, e: &SExpr, rel: Rel, lhs: &SExpr, rhs: &SExpr) -> Res<Cond> {
+    if real::prec_of(p, lhs.ty).is_some() || real::prec_of(p, rhs.ty).is_some() {
+        return real::compare(p, e, rel, lhs, rhs);
+    }
     if is_set(p, lhs.ty) && is_set(p, rhs.ty) {
         return set_compare(p, e, rel, lhs, rhs);
     }
@@ -9685,6 +9716,11 @@ fn builtin_value(p: &Program, e: &SExpr, b: Builtin, args: &[SExpr]) -> Res<Expr
         // `ord(x)` (p. 4-137): the ordinal as an integer.  A char is
         // zero-extended, an enumeration word or an integer kept; a boolean's
         // ordinal (1 for its 0xFF byte) is not a plain conversion.
+        // "Trunc", p. 4-195; "Round", p. 4-170 (bead domain-pascal-338r).
+        Builtin::Trunc | Builtin::Round => Ok(convert(
+            real::fix(p, e, &args[0], b == Builtin::Round)?,
+            ty,
+        )),
         Builtin::Ord if !p.types.is_boolean(args[0].ty) => Ok(convert(value_of(p, &args[0])?, ty)),
         // A boolean's ordinal: its byte (0xFF or 0) widened, `and` 1 (best
         // effort, not byte-identical; bead domain-pascal-338r, domain-c's
@@ -11814,6 +11850,16 @@ fn call(p: &Program, c: &SCall, span: Span) -> Res<Call> {
                 Arg::Value { value, slot }
             }
             Passing::ByAddress => {
+                // A real parameter given anything but a variable of its
+                // precision: computed into a temporary ([`real::arg`]).
+                if let Some(q) = real::prec_of(p, prm_ty) {
+                    if !univ {
+                        if let Some(arg) = real::arg(p, &a.expr, q)? {
+                            args.push(arg);
+                            continue;
+                        }
+                    }
+                }
                 // A bit field of a packed record has no address (ref
                 // 3.10.3): passed as an expression, its value in a frame
                 // temporary (below).  Best effort (not byte-identical; bead

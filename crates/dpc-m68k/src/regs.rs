@@ -276,6 +276,15 @@ pub fn is_nosave_call(ea: &Ea) -> bool {
 
 /// The callee-saved registers a call of an `options(nosave)` routine
 /// writes (ref 5.5.8, p. 5-19): D2-D7 and A2-A4.
+/// The callee-saved registers the floating point interpreter writes
+/// (`dpc_ir::Callee::Fpp`; ../source evidence/lib/syslib/fpp.codegen.md,
+/// "The interpreter": SA and DA in D3-D5, D0-D2 scratch): D2-D5, which
+/// the caller saves around the call (`isel.rs`, `call`; bead
+/// domain-pascal-338r), so that the call writes only D0, D1, A0 and A1.
+pub fn fpp_clobbers() -> RegSet {
+    RegSet::of(&[Reg::D(2), Reg::D(3), Reg::D(4), Reg::D(5)])
+}
+
 pub fn nosave_clobbers() -> RegSet {
     let mut s = callee_saved();
     s.remove(DATA_BASE);

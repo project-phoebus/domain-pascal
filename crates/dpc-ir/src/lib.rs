@@ -977,6 +977,15 @@ pub enum Callee {
     /// sets up its own data base: the call is not a use of the caller's
     /// (codegen-patterns 4).
     Pointer(Box<Expr>),
+    /// The Pascal run time's software floating point interpreter (syslib's
+    /// fpp.asm, SR10.2): `jsr` to `entry` (`FPP_$`), then `words`, the
+    /// operation words and inline constants it reads after the call; it
+    /// pops its operands itself (the arguments, in use order, so pushed
+    /// last-used first), so the caller pops nothing.  A `ret` operation
+    /// leaves an integer or a comparison's sign in D0.  It writes D0-D5,
+    /// A0 and A1 (../source evidence/lib/syslib/fpp.codegen.md, "The
+    /// interpreter").  Bead domain-pascal-338r, domain-c's gap 7.
+    Fpp { entry: String, words: Vec<u8> },
 }
 
 /// One argument as the caller pushes it.  `slot` is the bytes it
