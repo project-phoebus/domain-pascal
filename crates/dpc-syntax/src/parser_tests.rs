@@ -139,6 +139,14 @@ fn sx(e: &Expr) -> String {
             format!("({} {} {})", binop(*op), sx(lhs), sx(rhs))
         }
         ExprKind::Call { callee, args } => format!("(call {} {})", sx(callee), list(args)),
+        ExprKind::FieldWidth {
+            value,
+            width,
+            digits,
+        } => match digits {
+            Some(d) => format!("(: {} {} {})", sx(value), sx(width), sx(d)),
+            None => format!("(: {} {})", sx(value), sx(width)),
+        },
         ExprKind::Index { base, indices } => format!("(idx {} {})", sx(base), list(indices)),
         ExprKind::Field { base, field } => format!("(. {} {})", sx(base), field.name),
         ExprKind::Deref(b) => format!("(^ {})", sx(b)),

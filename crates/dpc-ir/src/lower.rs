@@ -28,6 +28,7 @@ use crate::{
 type Res<T> = Result<T, Diagnostic>;
 
 mod real;
+mod write;
 
 fn unsupported(span: Span, what: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::error(span, format!("{what} not supported yet"))
@@ -4181,12 +4182,22 @@ impl Cx<'_> {
                 SStmtKind::Assign { target, value } if hidden_call(p, value).is_some() => {
                     out.extend(self.hidden_call_assignment(s, target, value)?)
                 }
+                // A string or character constant to a varying string: a
+                // short value stored as longwords ([`varying_stores`]),
+                // a longer one copied from a cell ([`copy`]).
+                SStmtKind::Assign { target, value }
+                    if matches!(p.types.kind(target.ty), TypeKind::Varying { .. })
+                        && matches!(value.value, Some(ConstValue::Str(_) | ConstValue::Char(_))) =>
+                {
+                    match varying_stores(p, s, target, value)? {
+                        Some(v) => out.extend(v),
+                        None => out.push(copy(p, s, target, value)?),
+                    }
+                }
                 SStmtKind::Assign { target, value }
                     if is_block(p, target)
                         || byte_array_copy(p, target, value)
-                        || string_to_chars(p, target, value)
-                        || (matches!(p.types.kind(target.ty), TypeKind::Varying { .. })
-                            && matches!(value.value, Some(ConstValue::Str(_) | ConstValue::Char(_)))) =>
+                        || string_to_chars(p, target, value) =>
                 {
                     out.push(copy(p, s, target, value)?)
                 }
@@ -4392,6 +4403,11 @@ impl Cx<'_> {
                     builtin: Builtin::Discard,
                     args,
                 } => out.push(self.discard(s, &args[0])?),
+                // "Write, Writeln", p. 4-215 ([`write::write`]).
+                SStmtKind::Builtin {
+                    builtin: b @ (Builtin::Write | Builtin::Writeln),
+                    args,
+                } => out.extend(write::write(p, s, *b == Builtin::Writeln, args)?),
                 // "New", p. 4-117; "Dispose", p. 4-64 (it "sets p to nil"):
                 // a call of the Pascal run time's `pas_$new(out p:
                 // univ_ptr; size: linteger); options(val_param)` or
@@ -7796,6 +7812,54 @@ fn byte_copy(p: &Program, ty: TypeId) -> ByteCopy {
         ),
         _ => ByteCopy::No,
     }
+}
+
+/// A string or character constant assigned to a varying string whose
+/// value ([`varying_image`]) is 5..32 bytes: its longwords (and a last
+/// word) stored as constants (best effort, bead domain-pascal-338r; the
+/// block copy from a cell takes the longer ones, [`copy`], a word or a
+/// longword one store there too).  `None` otherwise.
+fn varying_stores(p: &Program, s: &SStmt, target: &SExpr, value: &SExpr) -> Res<Option<Vec<Stmt>>> {
+    let TypeKind::Varying { max, .. } = p.types.kind(target.ty) else {
+        return Ok(None);
+    };
+    let text = match &value.value {
+        Some(ConstValue::Str(t)) => t.clone(),
+        Some(ConstValue::Char(c)) => vec![*c],
+        _ => return Ok(None),
+    };
+    if text.len() as u32 > *max || volatile_access(p, target).is_some() {
+        return Ok(None);
+    }
+    let cell = varying_image(&text, *max);
+    if cell.len() <= 4 || cell.len() > 32 {
+        return Ok(None);
+    }
+    best_effort(
+        s.span,
+        "a string constant assigned to a varying string (its length word, characters and \
+         trailing null stored; no site) is",
+    )?;
+    let dst = addr_of(p, target)?;
+    Ok(Some(
+        cell.chunks(4)
+            .enumerate()
+            .map(|(k, chunk)| {
+                let value = chunk.iter().fold(0i64, |v, &b| (v << 8) | b as i64);
+                let width = if chunk.len() == 4 { Width::Long } else { Width::Word };
+                Stmt {
+                    kind: StmtKind::Store {
+                        addr: dst.clone().offset_by(4 * k as i32),
+                        value: Expr::Const {
+                            value,
+                            ty: Scalar::unsigned(width),
+                        },
+                    },
+                    span: s.span,
+                }
+            })
+            .collect(),
+    ))
 }
 
 /// A varying string's value of `text` (ref pp. 4-204..4-205): the length

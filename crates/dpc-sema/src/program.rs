@@ -544,6 +544,9 @@ impl Expr {
     }
 }
 
+/// The width or digits of a `write` item that has none ([`Builtin::Write`]).
+pub const NO_FIELD: i64 = i64::MIN;
+
 /// Predeclared routines implemented so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
@@ -578,6 +581,11 @@ pub enum Builtin {
     /// `discard(exp)` ("Discard", p. 4-62): evaluate `exp`, drop its value.
     /// A procedure.
     Discard,
+    /// `write(...)` / `writeln(...)` ("Write, Writeln", p. 4-215) to the
+    /// standard output: the items as triples (value, width, digits), an
+    /// absent width or digits the constant [`NO_FIELD`].  A procedure.
+    Write,
+    Writeln,
     /// `new(p)` ("New", p. 4-117): allocate `p^`, the run time's
     /// `pas_$new(p, size)`.  A procedure.
     New,

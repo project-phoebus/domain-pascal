@@ -56,12 +56,12 @@ ok	sys/ins/tty.ins.pas
 ok	sys/ins/type_uids.ins.pas
 ok	sys/ins/vec.ins.pas
 ok	sys/ins/vfmt.ins.pas
-diag	domain_examples/dde/average.pas	undefined identifier `_`
+ok	domain_examples/dde/average.pas
 ok	domain_examples/fix_font/fix_font.pas
 diag	domain_examples/gpr_examples/ctm_mark1.pas	include file `_` not found
 diag	domain_examples/gpr_examples/ctm_mark2.pas	include file `_` not found
-diag	domain_examples/gpr_examples/gpr_dial.pas	undefined identifier `_`
-diag	domain_examples/gpr_examples/gpr_pfk.pas	undefined identifier `_`
+ok	domain_examples/gpr_examples/gpr_dial.pas
+ok	domain_examples/gpr_examples/gpr_pfk.pas
 diag	domain_examples/gpr_examples/gpr_pixel_formats.pas	undefined identifier `_`
 diag	domain_examples/gpr_examples/intersecting_lines.pas	include file `_` not found
 diag	domain_examples/gpr_examples/my_include_file.pas	include file `_` not found
@@ -81,10 +81,10 @@ diag	domain_examples/streams/scramble/enscramble.pas	undefined identifier `_`
 diag	domain_examples/streams/scramble/scramble.pas	`_` does not match the routine pointer type routine pointer (ref p. N-N)
 ok	sys/source/bp1/sbp1_example.pas
 diag	sys/source/emt/emt.pas	type transfer needs equal sizes: ...
-diag	sys/source/emt/rcv_pas_model.pas	expected `_`, found `_`
-diag	sys/source/emt/send_pas_model.pas	expected `_`, found `_`
-diag	sys/source/emt/siorf.pas	expected `_`, found `_`
-diag	sys/source/emt/siotf.pas	expected `_`, found `_`
+diag	sys/source/emt/rcv_pas_model.pas	undefined type `_`
+diag	sys/source/emt/send_pas_model.pas	undefined type `_`
+diag	sys/source/emt/siorf.pas	undefined type `_`
+diag	sys/source/emt/siotf.pas	undefined type `_`
 diag	systest/ssr_util/debug_gmr.pas	include file `_` not found
 ok	usr/X11/examples/dmwin/dmwin.pas
 diag	usr/X11/examples/pascal/xhw1.pas	an open array bound `_` is not supported yet

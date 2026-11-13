@@ -16,9 +16,21 @@ EXEC_$\n:
 FPP_$:
 	illegal
 
+| The Pascal run time's WRITE and WRITELN (runner.c, run_pas_write).
+	.globl	PAS_$WRITE
+PAS_$WRITE:
+	illegal
+	.globl	PAS_$WRITELN
+PAS_$WRITELN:
+	illegal
+
 | A "device register" (runner.c): each word read returns the next value.
 	.section	".data.exec_stubs","aw",@progbits
 	.balign	2
+| The standard output file variable (its address passed; not read).
+	.globl	PAS_$OUTPUT
+PAS_$OUTPUT:
+	.short	0
 	.globl	EXEC_$COUNTER
 EXEC_$COUNTER:
 	.short	0

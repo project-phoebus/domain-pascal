@@ -304,7 +304,7 @@ def run_test(spec, runner, trace=False):
     if trace:
         cmd.append('--trace')
     for name, addr in sorted(syms.items()):
-        if name.startswith('EXEC_$') or name == 'FPP_$':
+        if name.startswith('EXEC_$') or name in ('FPP_$', 'PAS_$WRITE', 'PAS_$WRITELN'):
             cmd += ['--stub', '%s=%s' % (name, hex(addr))]
     for name, args, kind in spec.calls:
         if name not in syms:

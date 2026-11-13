@@ -29,12 +29,10 @@ link.w %fp,#0
 pea (%a5)
 lea (.Ldata).l,%a5
 move.b #0x78,(0xf,%a5)
-lea (.Lc0,%pc),%a0
-lea (%a5),%a1
-move.l (%a0)+,(%a1)+
-move.l (%a0)+,(%a1)+
-move.l (%a0)+,(%a1)+
-move.w (%a0)+,(%a1)+
+move.l #0xa2d44,(%a5)
+move.l #0x5f5f6170,(4,%a5)
+move.l #0x6f6c6c6f,(8,%a5)
+clr.w (0xc,%a5)
 subq.l #2,%sp
 move.w (%a5),-(%sp)
 jsr (EXEC_$LOGV_W).l
@@ -80,15 +78,13 @@ move.b (0x409,%a5),%d0
 move.w %d0,-(%sp)
 jsr (EXEC_$LOGV_W).l
 addq.w #4,%sp
-pea (.Lc1,%pc)
+pea (.Lc0,%pc)
 bsr.w SHOW
 movea.l (-4,%fp),%a5
 unlk %fp
 rts
-.Lc0:
-.short 0x000a,0x2d44,0x5f5f,0x6170,0x6f6c,0x6c6f,0x0000
 .balignw 4,0x2048
-.Lc1:
+.Lc0:
 .short 0x0005,0x4865,0x6c6c,0x6f00
 .balignw 4,0x2048
 .section ".bss.moddata.VARYING_CONST","aw",@nobits

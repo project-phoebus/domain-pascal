@@ -375,6 +375,8 @@ impl<'t> Checker<'t> {
             // Appendix E, Table E-1 (p. E-1); Table 4-7 (p. 4-10).
             ("set_sr", Builtin::SetSr),
             ("discard", Builtin::Discard),
+            ("write", Builtin::Write),
+            ("writeln", Builtin::Writeln),
             ("new", Builtin::New),
             ("dispose", Builtin::Dispose),
             ("sqrt", Builtin::Sqrt),
@@ -3468,6 +3470,70 @@ impl<'t> Checker<'t> {
                         args: vec![x],
                     };
                 }
+                // "Write, Writeln", pp. 4-215..4-220: to the standard
+                // output (a first argument `output` is that file; another
+                // file is not supported yet), each item with an optional
+                // field width and digits.  Best effort in the code (bead
+                // domain-pascal-338r, domain-c's gap 4).
+                Some(Sym::Builtin(b @ (Builtin::Write | Builtin::Writeln))) => {
+                    let mut items = args;
+                    if let Some(ast::Expr {
+                        kind: ast::ExprKind::Name(f),
+                        ..
+                    }) = items.first()
+                    {
+                        if f.name == "output" && self.lookup("output").is_none() {
+                            items = &items[1..];
+                        }
+                    }
+                    if b == Builtin::Write && items.is_empty() {
+                        self.error(e.span, "`write` needs an item to write");
+                        return StmtKind::Empty;
+                    }
+                    let no_field = |s: &mut Self, span: Span| Expr {
+                        kind: ExprKind::Const,
+                        ty: s.types.builtins.integer32,
+                        value: Some(ConstValue::Int(NO_FIELD)),
+                        span,
+                    };
+                    let mut out = Vec::new();
+                    for it in items {
+                        let (v, w, d) = match &it.kind {
+                            ast::ExprKind::FieldWidth {
+                                value,
+                                width,
+                                digits,
+                            } => (&**value, Some(&**width), digits.as_deref()),
+                            _ => (it, None, None),
+                        };
+                        let x = self.expr(v);
+                        if !self.types.is_error(x.ty) && !self.writable_item(x.ty) {
+                            self.error(
+                                v.span,
+                                "a `write` item must be an integer, real, char, boolean, \
+                                 enumeration, array of char, varying string or string (ref \
+                                 p. 4-215)",
+                            );
+                        }
+                        out.push(x);
+                        for f in [w, d] {
+                            match f {
+                                Some(f) => {
+                                    let fx = self.expr(f);
+                                    if !self.types.is_error(fx.ty) && !self.types.is_integer(fx.ty) {
+                                        self.error(f.span, "a field width must be an integer");
+                                    }
+                                    out.push(fx);
+                                }
+                                None => out.push(no_field(self, it.span)),
+                            }
+                        }
+                    }
+                    return StmtKind::Builtin {
+                        builtin: b,
+                        args: out,
+                    };
+                }
                 // "New", p. 4-117, and "Dispose", p. 4-64: the short form,
                 // `new(p)` / `dispose(p)`, `p` a pointer variable.  The
                 // long form's tag constants (a variant record's size) are
@@ -3773,6 +3839,13 @@ impl<'t> Checker<'t> {
                     self.error_expr(span)
                 }
             },
+            E::FieldWidth { .. } => {
+                self.error(
+                    span,
+                    "a field width (`:`) is allowed only in `write` and `writeln` (ref p. 4-215)",
+                );
+                self.error_expr(span)
+            }
             E::Str(parts) => self.string(parts, span),
             E::Name(_) => self.name_expr(e),
             E::Set(elems) => self.set_cons(elems, span),
@@ -4413,6 +4486,21 @@ impl<'t> Checker<'t> {
         } else {
             bi.integer16
         }
+    }
+
+    /// Whether a value of type `t` can be a `write` item (ref p. 4-215).
+    fn writable_item(&self, t: TypeId) -> bool {
+        self.types.is_ordinal(t)
+            || self.is_real(t)
+            // A pointer, written as an integer32 (the DOMAIN C compiler's
+            // format 0x0A31 for pointers, reported by domain-c; the
+            // reference does not list pointers).
+            || self.types.is_pointer(t)
+            || self.types.char_array_len(t).is_some()
+            || matches!(
+                self.types.kind(self.types.canon(t)),
+                TypeKind::Varying { .. } | TypeKind::StringLit { .. }
+            )
     }
 
     /// Whether `t` is `real` or `double` (ref 3.3).
@@ -5251,7 +5339,9 @@ impl<'t> Checker<'t> {
             | Builtin::Enable
             | Builtin::Discard
             | Builtin::New
-            | Builtin::Dispose => {
+            | Builtin::Dispose
+            | Builtin::Write
+            | Builtin::Writeln => {
                 self.error(span, format!("`{name}` is a procedure"));
                 return self.error_expr(span);
             }
@@ -5580,6 +5670,8 @@ impl<'t> Checker<'t> {
             | Builtin::Discard
             | Builtin::New
             | Builtin::Dispose
+            | Builtin::Write
+            | Builtin::Writeln
             | Builtin::Sizeof
             | Builtin::Firstof
             | Builtin::Lastof => unreachable!(),

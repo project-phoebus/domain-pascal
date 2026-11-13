@@ -1959,6 +1959,39 @@ impl<'a> Parser<'a> {
     //   or else                  lowest
     // -----------------------------------------------------------------
 
+    /// A call's arguments: expressions, each with an optional field width
+    /// and digits (`x:8:2`), as `write` takes them.
+    fn arg_list(&mut self) -> PResult<Vec<Expr>> {
+        let mut v = Vec::new();
+        loop {
+            let start = self.span();
+            let e = self.expr()?;
+            let e = if self.eat(&T::Colon) {
+                let width = self.expr()?;
+                let digits = if self.eat(&T::Colon) {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                Expr {
+                    kind: ExprKind::FieldWidth {
+                        value: Box::new(e),
+                        width: Box::new(width),
+                        digits,
+                    },
+                    span: self.since(start),
+                }
+            } else {
+                e
+            };
+            v.push(e);
+            if !self.eat(&T::Comma) {
+                break;
+            }
+        }
+        Ok(v)
+    }
+
     fn expr_list(&mut self) -> PResult<Vec<Expr>> {
         let mut v = vec![self.expr()?];
         while self.eat(&T::Comma) {
@@ -2194,7 +2227,7 @@ impl<'a> Parser<'a> {
                     let args = if self.at(&T::RParen) {
                         Vec::new()
                     } else {
-                        self.expr_list()?
+                        self.arg_list()?
                     };
                     self.expect(&T::RParen)?;
                     ExprKind::Call {

@@ -709,6 +709,14 @@ pub enum ExprKind {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    /// `value : width [: digits]`, an argument of `write`/`writeln` with
+    /// a field width (ref 8, "Write"; parsed in any argument list, the
+    /// checker accepts it only there).
+    FieldWidth {
+        value: Box<Expr>,
+        width: Box<Expr>,
+        digits: Option<Box<Expr>>,
+    },
     /// `base[i, j]`
     Index {
         base: Box<Expr>,

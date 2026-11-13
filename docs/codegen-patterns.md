@@ -12251,6 +12251,30 @@ Every form is refused under `--strict`.  The execution test `reals`
 runs the words on an interpreter of the runner's own
 (`tools/exectest/runner.c`, `run_fpp`, the host's IEEE arithmetic).
 
+### 8.10 `write` and `writeln` (best effort; no kernel site; bead domain-pascal-338r)
+
+To the standard output only ("Write, Writeln", pp. 4-215..4-220; a first
+argument `output` is that file, another file is refused): one call of
+the Pascal run time's PAS_$WRITE per item and PAS_$WRITELN for the line,
+as the DOMAIN C compiler (Pascal Rev 8.89) compiles them (reported by
+domain-c: c_macro_utl, objio's check_init).  The headings are ../source's
+lib/ftnlib/pasio.pas: `pas_$write(fmt: fmt_t; var f: univ char; in v:
+univ value_t; width: integer; digits: integer; in names: univ names_t);
+options(val_param)` (a pad word, 18 bytes) and `pas_$writeln(var f: univ
+char)`; the file is PAS_$OUTPUT.  The format word (evidence/lib/ftnlib/
+pasio.codegen.md): the high byte the default width, bits 7..6 the width's
+form, 5..4 the size, 3..0 the kind; the defaults are the DOMAIN C
+compiler's words where domain-c saw them (rev889-patterns 170: integers
+10, booleans and enumerations 15, doubles 24, chars 1, character arrays
+0), the reference's 13 for a single (p. 4-218; Uncertain).  The item is
+passed by address: a variable's, a string constant's cell, a frame
+temporary for an expression (a real one through the floating point
+interpreter, 8.9); a character array's `width` is its length and its
+field width goes in `digits`; an enumeration passes its name table, a
+word count and counted upper-case names, from the code (rev889-patterns
+65).  Refused under `--strict`.  Exec test `writes` (the runner's
+`run_pas_write` prints them).
+
 ## 9. Status returns and error exits (Verified at the sites given; implemented in part)
 
 Bead domain-pascal-5aw.2.  Counts come from surveys of the routines

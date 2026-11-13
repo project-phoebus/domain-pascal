@@ -226,6 +226,8 @@ static struct stub stubs[] = {
     { "EXEC_$NOSAVE_W" }, /* (v: integer); val_param: prints the value */
     { "EXEC_$NOSAVE_ID_L" }, /* (in v: integer32): integer32 */
     { "FPP_$" },          /* the floating point interpreter (below) */
+    { "PAS_$WRITE" },     /* the Pascal run time's WRITE (below) */
+    { "PAS_$WRITELN" },   /* its WRITELN */
     { "EXEC_$COUNTER" },  /* data, not a routine: a word "device register";
                              each read.w returns the next value, a write.w
                              sets it */
@@ -350,11 +352,91 @@ static void run_fpp(void)
     setreg(M68K_REG_A7, osp);
 }
 
+/* PAS_$WRITE and PAS_$WRITELN: the Pascal run time's text output to the
+   standard output, as far as dpc's write and writeln use it (bead
+   domain-pascal-338r; the headings and the format word from ../source
+   lib/ftnlib/pasio.pas and evidence/lib/ftnlib/pasio.codegen.md):
+   pas_$write(fmt: word; var f; in v; width, digits: word; in names),
+   val_param.  Printed to stdout; WRITELN ends the line.  Reals only with
+   digits (form 2). */
+static void pad_out(int n) { while (n-- > 0) putchar(' '); }
+
+static void run_pas_write(void)
+{
+    uint32_t sp = reg(M68K_REG_A7);
+    uint32_t fmt = rd16(sp + 4), v = rd32(sp + 10);
+    int width = (int16_t)rd16(sp + 14), digits = (int16_t)rd16(sp + 16);
+    uint32_t names = rd32(sp + 18);
+    int form = (fmt >> 6) & 3, size = (fmt >> 4) & 3, kind = fmt & 15;
+    int w = form > 0 ? width : (int)(fmt >> 8);
+    char buf[128];
+    switch (kind) {
+    case 0: case 1: case 8: case 9: {
+        long x;
+        if (kind == 1 || kind == 9) x = kind == 1 ? (long)(int32_t)rd32(v) : (long)rd32(v);
+        else if (size == 1) x = kind == 0 ? (long)(int8_t)rd8(v) : (long)rd8(v);
+        else x = kind == 0 ? (long)(int16_t)rd16(v) : (long)rd16(v);
+        int n = snprintf(buf, sizeof buf, "%ld", x);
+        pad_out(w - n);
+        fputs(buf, stdout);
+        break;
+    }
+    case 2: pad_out(w - 1); putchar(rd8(v)); break;
+    case 3: case 10: {
+        int n = kind == 3 ? width : (int)rd16(v);
+        uint32_t c = kind == 3 ? v : v + 2;
+        int field = kind == 3 ? digits : width;
+        if (form > 0) {
+            if (field < 0) { while (n > 0 && rd8(c + n - 1) == ' ') n--; }
+            else if (field > n) pad_out(field - n);
+            else n = field;
+        }
+        for (int i = 0; i < n; i++) putchar(rd8(c + i));
+        break;
+    }
+    case 4: {
+        const char *t = (int8_t)rd8(v) ? "TRUE" : "FALSE";
+        pad_out(w - (int)strlen(t));
+        fputs(t, stdout);
+        break;
+    }
+    case 5: {
+        uint32_t u = size == 3 ? rd32(v) : size == 1 ? rd8(v) : rd16(v);
+        uint32_t p = names + 2;
+        for (uint32_t i = 0; i < u; i++) p += rd8(p) + 1;
+        int n = rd8(p);
+        pad_out(w - n);
+        for (int i = 0; i < n; i++) putchar(rd8(p + 1 + i));
+        break;
+    }
+    case 6: case 7: {
+        double d = kind == 6 ? bits_f(rd32(v)) : rd_d(v);
+        if (form != 2) fail("PAS_$WRITE: a real without digits is not modelled");
+        printf("%*.*f", width, digits, d);
+        break;
+    }
+    default: fail("PAS_$WRITE: kind %d", kind);
+    }
+    (void)names;
+}
+
 /* Run stub `s' with SP pointing at the return address; then return. */
 static void run_stub(struct stub *s)
 {
     if (!strcmp(s->name, "FPP_$")) {
         run_fpp();
+        return;
+    }
+    if (!strcmp(s->name, "PAS_$WRITE") || !strcmp(s->name, "PAS_$WRITELN")) {
+        uint32_t sp = reg(M68K_REG_A7);
+        if (!strcmp(s->name, "PAS_$WRITE")) run_pas_write();
+        else putchar('\n');
+        setreg(M68K_REG_D0, garbage());
+        setreg(M68K_REG_D1, garbage());
+        setreg(M68K_REG_A0, garbage());
+        setreg(M68K_REG_A1, garbage());
+        setreg(M68K_REG_PC, rd32(sp));
+        setreg(M68K_REG_A7, sp + 4);
         return;
     }
     uint32_t sp = reg(M68K_REG_A7);
