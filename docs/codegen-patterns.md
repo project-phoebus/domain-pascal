@@ -12280,8 +12280,19 @@ word count and counted upper-case names, from the code (rev889-patterns
 field width: cc.a88k 0x10A0BA..0x10A0D0 (reported by domain-c) pushes
 `move.w #34` (width), `pea` (the string), the file, `move.w #51` (fmt)
 and pops 12, with no digits, names or pad, where dpc pushes all 18
-bytes and the pad (a form difference; which items take the short form is
-not known, bead domain-pascal-j714).  Refused under `--strict`.  Exec test `writes` (the runner's
+bytes and the pad (a form difference, bead domain-pascal-j714).
+domain-c's scan of all 3,816 PAS_$WRITE calls in cc.a88k (Reported, not
+yet checked here) gives the rule: the arguments are pushed only up to
+the last field the kind uses, and a lower field the item does not set is
+reserved (`subq.l #2,SP`, or a word the previous call's `lea (10,SP)`
+left) but never stored.  A string pushes its length word (`move.w
+#len`), and its width word above that when `:w` is given (0x597A2); an
+integer or boolean with `:w` pushes the width word only (0xBE8D2,
+0xBE9AE); a char pushes nothing above the value (0x59892,
+0x98906..0x9891C); only an enumeration pushes the names and a
+width/digits longword (0xBDDAE..0xBDDC8, 0x20B5B0..0x20B5C8).  No
+integer without `:w` was seen.  Not modelled: Rev 8.89 form work is on
+hold (owner, 2026-11-12).  Refused under `--strict`.  Exec test `writes` (the runner's
 `run_pas_write` prints them).
 
 ## 9. Status returns and error exits (Verified at the sites given; implemented in part)
